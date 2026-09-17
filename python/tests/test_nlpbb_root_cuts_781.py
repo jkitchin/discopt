@@ -859,3 +859,69 @@ def test_separate_gmi_refuses_a_basis_from_a_different_row_system():
 
     # ...and the matched system is still accepted (the guard is not a blanket no).
     rc.separate_gmi(root, h, x, root.A_le, root.b_le)
+
+
+# ── #1305: senses must be indexed per evaluator row, not per Constraint object ──
+
+
+def test_rootlp_senses_indexed_per_row_not_per_object():
+    """An array-valued constraint body is ONE ``Constraint`` object but MANY
+    evaluator rows. Building ``_RootLP.senses`` by zipping ``model._constraints``
+    (2 objects) against Jacobian rows (4 rows) used to raise ``IndexError`` here
+    -- this is the exact reproduction from the issue."""
+    import discopt.solvers._root_cuts as rc
+    from discopt._relax.nlp_evaluator import NLPEvaluator
+
+    m = Model("rootlp_vector")
+    x = m.continuous("x", shape=(3,), lb=0.0, ub=1.0)
+    y = m.continuous("y", lb=0.0, ub=1.0)
+    m.subject_to(x <= 0.5)  # ONE Constraint, THREE evaluator rows, sense "<="
+    m.subject_to(y == 0.2)  # ONE Constraint, ONE evaluator row, sense "=="
+    m.minimize(x.sum() + y)
+
+    ev = NLPEvaluator(m)
+    assert ev.n_constraints == 4
+    assert len(m._constraints) == 2  # the pre-fix (per-object) count
+
+    root = rc._RootLP(m, ev, np.zeros(4), np.ones(4), np.zeros(4, bool), np.zeros(4, bool), False)
+    assert root.senses == ["<=", "<=", "<=", "=="]
+
+
+def _build_convex_minlp_array_constraint(sense: str) -> Model:
+    """Same class as ``_build_convex_minlp`` but the fixed-charge coupling is
+    written as ONE array-valued constraint over a shape-(2,) block instead of
+    two scalar rows -- the #1305 reproduction shape (one ``Constraint`` object,
+    many evaluator rows) carried into a real NLP-BB solve (integer vars, convex
+    quadratic row). Distinct from ``_build_convex_minlp_vector`` above, which
+    uses vector *variable* blocks but keeps every constraint body scalar (one
+    object per row) -- that is the #-unravel-columns class, not this one."""
+    m = Model(f"rc_arraycon_{sense}")
+    f = m.continuous("f", shape=(2,), lb=0.0, ub=10.0)
+    y = m.binary("y", shape=(2,))
+    m.subject_to(f <= 8.0 * y)  # ONE Constraint, TWO evaluator rows
+    m.subject_to(f.sum() >= 3.0)
+    m.subject_to((f * f).sum() <= 16.0)  # convex quadratic
+    if sense == "max":
+        m.maximize(f.sum() - 2.5 * y.sum())
+    else:
+        m.minimize(f[0] + 2.0 * f[1] + 2.5 * y[0] + 2.5 * y[1])
+    return m
+
+
+@pytest.mark.parametrize("sense", ["max", "min"])
+def test_root_cuts_not_skipped_on_array_valued_constraint_model(monkeypatch, caplog, sense):
+    """End-to-end: the root-cut stage must actually RUN (not silently degrade
+    to no-op) on a model with an array-valued constraint. Checking only the
+    objective would pass against the bug (the stage is optional and both forms
+    reach the same certified optimum) -- the regression is that the stage never
+    executes, which only the log assertion catches (#1305)."""
+    _flag(monkeypatch, True)
+    scalar = _build_convex_minlp(sense).solve(time_limit=30, nlp_bb=True)
+    assert scalar.objective is not None
+
+    with caplog.at_level("DEBUG", logger="discopt.solver"):
+        r = _build_convex_minlp_array_constraint(sense).solve(time_limit=30, nlp_bb=True)
+    assert r.objective is not None
+    assert r.objective == pytest.approx(scalar.objective, abs=1e-4, rel=1e-4)
+    skipped = [rec.message for rec in caplog.records if "root cuts skipped" in rec.message]
+    assert not skipped, f"root-cut stage silently skipped: {skipped}"

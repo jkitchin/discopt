@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use crate::bnb::branching::{
     create_children, create_children_spatial, create_children_spatial_int, is_integer_feasible,
     select_branch_variable, select_branch_variable_pseudocost, select_spatial_branch_variable,
-    select_spatial_integer_branch_variable, BranchDecision, Pseudocosts, VarBranchInfo,
+    select_spatial_integer_branch_variable, spatial_box_is_tight, BranchDecision, Pseudocosts,
+    VarBranchInfo,
 };
 use crate::bnb::node::{Node, NodeId, NodeStatus};
 use crate::bnb::pool::{NodePool, SelectionStrategy};
@@ -841,23 +842,41 @@ impl TreeManager {
                         self.record_branch_var(dep_decision.var_index);
                     } else {
                         // No branching direction remains. Whether this fathom is
-                        // sound depends on the node's dual bound:
-                        //   * finite `local_lower_bound`: a valid relaxation bound
+                        // sound depends on BOTH the node's dual bound and whether
+                        // its box is actually tight:
+                        //   * finite `local_lower_bound` AND every spatially-relevant
+                        //     dimension has finite width: a valid relaxation bound
                         //     WAS established and every domain is tight, so the node
                         //     is genuinely resolved — fathom as before (this is the
                         //     honest root-close case, e.g. `chance`/`st_miqp3`).
-                        //   * non-finite (`-inf`/sentinel): no relaxation ever proved
-                        //     a lower bound AND there is no finite dimension to branch
-                        //     on (an unbounded-below, spatially-unbranchable root).
-                        //     The subtree is UNRESOLVED; fathoming it and letting the
-                        //     global bound collapse to the incumbent would falsely
-                        //     certify a local/near-feasible point as the global
-                        //     optimum (issue #467). Mark the tree bound unresolved so
-                        //     `update_global_lower_bound` pins `global_lower_bound` at
-                        //     -inf (gap = ∞ → feasible/unknown, never optimal). Still
-                        //     fathom the node so the driver cannot infinite-loop on a
-                        //     node it can neither branch nor bound.
-                        if !self.pool.get(result.node_id).local_lower_bound.is_finite() {
+                        //   * non-finite bound (`-inf`/sentinel) OR an unbounded
+                        //     dimension remains: either no relaxation ever proved a
+                        //     lower bound, or a dimension was skipped by
+                        //     `select_spatial_branch_variable`/
+                        //     `select_spatial_integer_branch_variable` for being
+                        //     UNBOUNDED rather than tight (issue #1301: those
+                        //     selectors skip a dimension whose relative width is
+                        //     non-finite, which also happens for an open, unbounded
+                        //     domain — a finite relaxation bound there does not mean
+                        //     the box is resolved). Either way the subtree is
+                        //     UNRESOLVED; fathoming it and letting the global bound
+                        //     collapse to the incumbent would falsely certify a
+                        //     local/near-feasible point as the global optimum (issue
+                        //     #467, and #1301 for the unbounded-box variant). Mark the
+                        //     tree bound unresolved so `update_global_lower_bound`
+                        //     pins `global_lower_bound` at -inf (gap = ∞ →
+                        //     feasible/unknown, never optimal). Still fathom the node
+                        //     so the driver cannot infinite-loop on a node it can
+                        //     neither branch nor bound.
+                        let bound_established =
+                            self.pool.get(result.node_id).local_lower_bound.is_finite();
+                        let box_tight = spatial_box_is_tight(
+                            &nlb,
+                            &nub,
+                            &self.integer_vars,
+                            &self.spatial_integer_cols,
+                        );
+                        if !bound_established || !box_tight {
                             self.bound_unresolved = true;
                         }
                         self.pool.get_mut(result.node_id).status = NodeStatus::Fathomed;

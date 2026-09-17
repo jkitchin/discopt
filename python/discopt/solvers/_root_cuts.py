@@ -210,6 +210,35 @@ class RootCutResult:
     stop_reason: str = ""
 
 
+def _row_senses(evaluator) -> list[str]:
+    """Per evaluator-row sense (``"<="``/``">="``/``"=="``), one entry per row of
+    ``evaluator.evaluate_jacobian``/``evaluate_constraints``.
+
+    A source :class:`Constraint` with an array-valued body is ONE object but
+    MANY evaluator rows (#1305): zipping ``model._constraints`` (per object)
+    against Jacobian rows (per row) desynchronises on the first vector
+    constraint, and every row after it reads the wrong sense — or, once the
+    per-object list runs out, raises ``IndexError``. ``constraint_row_map()``
+    (#908) is the authoritative row->``Constraint`` map built from the same
+    ``_source_constraints``/``_constraint_flat_sizes`` the row stream itself
+    comes from, so expanding through it cannot drift (same fix shape as
+    #1297).
+    """
+    n_rows = evaluator.n_constraints
+    senses: list[str | None] = [None] * n_rows
+    for start, stop, con in evaluator.constraint_row_map():
+        sense = con.sense if isinstance(con.sense, str) else con.sense.value
+        for r in range(start, stop):
+            senses[r] = sense
+    unmapped = [r for r, s in enumerate(senses) if s is None]
+    if unmapped:
+        raise ValueError(
+            f"constraint_row_map does not cover all evaluator rows: "
+            f"{len(unmapped)} of {n_rows} rows unmapped (first: {unmapped[0]})"
+        )
+    return senses  # type: ignore[return-value]
+
+
 # ── linearised root view ─────────────────────────────────────────────────────
 
 
@@ -224,9 +253,7 @@ class _RootLP:
         self.is_bin = is_bin
         self.ev = evaluator
         self.sense_max = sense_max
-        self.senses = [
-            c.sense if isinstance(c.sense, str) else c.sense.value for c in model._constraints
-        ]
+        self.senses = _row_senses(evaluator)
 
         # Objective must be LINEAR for the LP objective to represent it.
         rng = np.random.default_rng(0)
