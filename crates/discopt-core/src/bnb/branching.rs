@@ -558,6 +558,59 @@ pub fn select_spatial_integer_branch_variable(
     })
 }
 
+/// Whether every spatially-relevant dimension of this node's box has finite
+/// width (issue #1301).
+///
+/// [`select_spatial_branch_variable`] and [`select_spatial_integer_branch_variable`]
+/// both deliberately skip a dimension whose width is infinite (or whose global
+/// range is infinite, making the relative width non-finite) rather than treat
+/// it as a branch candidate — an infinite interval cannot be shrunk by
+/// bisection. That skip is correct for branching, but a caller that sees "no
+/// branch direction found" cannot conclude the box is *tight*: an unbounded
+/// dimension is skipped for the opposite reason a tight one is. Conflating the
+/// two let a node with a genuinely open, unbounded dimension be fathomed as
+/// resolved whenever its relaxation happened to report a finite bound —
+/// `steenbrf` (468 unbounded variables) certified `optimal` at 398.36 against
+/// a true optimum of 282.68 this way. This function is the discriminator: it
+/// returns `false` (not tight) the moment any dimension select_spatial_*
+/// would have skipped is unbounded, so the caller can tell "unbranchable
+/// because unbounded" apart from "unbranchable because tight".
+///
+/// Covers exactly the dimensions the two selectors consider: continuous
+/// (non-integer) variables, independent or dependent, plus any integer column
+/// marked in `spatial_int_cols`. An ordinary integer variable outside
+/// `spatial_int_cols` is excluded — its box width does not bear on whether the
+/// *relaxation* over this box is exact, only its own (separately handled)
+/// fractional branching does.
+pub fn spatial_box_is_tight(
+    node_lb: &[f64],
+    node_ub: &[f64],
+    integer_vars: &[VarBranchInfo],
+    spatial_int_cols: &[bool],
+) -> bool {
+    let n = node_lb.len();
+    let mut is_int = vec![false; n];
+    for var in integer_vars {
+        for i in 0..var.size {
+            let idx = var.offset + i;
+            if idx < n {
+                is_int[idx] = true;
+            }
+        }
+    }
+    for idx in 0..n {
+        let spatial_int_col = idx < spatial_int_cols.len() && spatial_int_cols[idx];
+        if is_int[idx] && !spatial_int_col {
+            continue; // Ordinary integer variable: handled by fractional branching.
+        }
+        let width = node_ub[idx] - node_lb[idx];
+        if !width.is_finite() {
+            return false;
+        }
+    }
+    true
+}
+
 /// Create two children partitioning an integer variable's domain disjointly:
 /// left `x_idx <= bp`, right `x_idx >= bp + 1`. Unlike
 /// [`create_children_spatial`] (shared branch point, valid for continuous

@@ -377,3 +377,92 @@ def test_467sub3_ex7_3_6_not_false_optimal():
     )
     if r.status == "infeasible":
         assert r.objective is None, f"ex7_3_6 reported infeasible with an objective {r.objective}"
+
+
+# ---------------------------------------------------------------------------
+# #1301: an unbranchable node with an UNBOUNDED (not tight) box was fathomed as
+# resolved whenever its relaxation happened to report a finite bound.
+# `select_spatial_branch_variable`/`select_spatial_integer_branch_variable`
+# skip a dimension for two opposite reasons -- already tight, or unbounded and
+# therefore unshrinkable -- and the tree_manager fathom conflated them: "no
+# branch direction + finite bound" was read as "every domain is tight" even
+# when a dimension was actually wide open. On `steenbrf` (468 unbounded vars)
+# this certified 398.36 as optimal against a true optimum of 282.68.
+# ---------------------------------------------------------------------------
+
+
+def _double_exp_well_model(ub: float, name: str):
+    """The issue's 2-variable repro: two separated Gaussian wells per
+    coordinate (shallow at 1, deep at 40) coupled by ``x0*x1 >= 0.01``. The
+    true global minimum is -4 (both coordinates near 40). Over an unbounded
+    box neither coordinate is spatially branchable (infinite width), so the
+    root must not be fathomed as resolved just because interval/McCormick
+    bounding happened to produce a finite number there."""
+    import discopt.modeling as dm
+
+    m = dm.Model(name)
+    xs = [m.continuous(f"x{i}", lb=0.0, ub=ub) for i in range(2)]
+    obj = 0
+    for x in xs:
+        obj = obj - dm.exp(-((x - 1) ** 2)) - 2 * dm.exp(-((x - 40) ** 2))
+    m.minimize(obj)
+    m.subject_to(xs[0] * xs[1] >= 0.01)
+    return m
+
+
+@pytest.mark.smoke
+def test_1301_unbounded_box_not_falsely_optimal():
+    """The repro from the issue: both variables unbounded above. Before the
+    fix this certified ``optimal`` at -2.0 (a false, too-high dual bound; the
+    true optimum is -4.0). It must not certify at a value above the true
+    optimum, and a reported bound must stay a sound (<=) lower bound."""
+    import numpy as np
+
+    r = _double_exp_well_model(float("inf"), "c1301_unbounded").solve(
+        time_limit=30.0, gap_tolerance=1e-4, threads=1
+    )
+    assert not (r.status == "optimal" and r.objective is not None and r.objective > -4.0 + 1e-3), (
+        f"unbounded root falsely certified a suboptimal point: status={r.status} "
+        f"obj={r.objective} bound={r.bound}"
+    )
+    if r.bound is not None and np.isfinite(r.bound):
+        assert r.bound <= -4.0 + 1e-4, f"unsound dual bound {r.bound} crosses the true optimum -4.0"
+    if r.status == "optimal":
+        assert getattr(r, "gap_certified", False)
+        assert r.objective <= -4.0 + 1e-3, f"optimal but missed the true optimum: {r.objective}"
+    else:
+        assert not getattr(r, "gap_certified", False), (
+            f"non-optimal status {r.status} must not report gap_certified"
+        )
+
+
+@pytest.mark.smoke
+def test_1301_finite_box_control_still_certifies_optimal():
+    """Control: the SAME model over a finite box ``[0, 100]`` must still reach
+    and certify the true optimum -4.0, exactly as before the fix (guards
+    against the tightness check over-firing on a genuinely branchable box)."""
+    r = _double_exp_well_model(100.0, "c1301_finite").solve(
+        time_limit=30.0, gap_tolerance=1e-4, threads=1
+    )
+    assert r.status == "optimal", f"finite-box control lost certification: status={r.status}"
+    assert r.objective == pytest.approx(-4.0, abs=1e-3)
+    assert getattr(r, "gap_certified", False), "finite-box control lost gap_certified"
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("name", ["chance", "st_miqp3"])
+def test_1301_genuinely_tight_root_close_still_certifies(name):
+    """Control named in the issue: a genuinely tight root close (every
+    branchable dimension resolved, not merely unbranchable-because-unbounded)
+    must still fathom as resolved and certify optimal. Guards against the
+    #1301 fix downgrading the honest case it explicitly carves out."""
+    from discopt.modeling.core import from_nl
+
+    nl = os.path.join(os.path.dirname(__file__), "data", "minlplib_nl", f"{name}.nl")
+    r = from_nl(nl).solve(time_limit=30.0)
+    assert r.status == "optimal", f"{name} lost its root-close certification: status={r.status}"
+    assert getattr(r, "gap_certified", False), f"{name} lost gap_certified"
+    assert r.bound is not None and r.objective is not None
+    assert r.bound <= r.objective + 1e-4, (
+        f"{name}: unsound bound {r.bound} exceeds incumbent {r.objective}"
+    )
