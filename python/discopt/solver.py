@@ -16707,6 +16707,28 @@ def solve_model(
         search_closed = not _rr_reserve_yield and (
             _gap_converged(tree, gap_tolerance, abs_gap_tol) or _tree_exhausted_with_proof(tree)
         )
+        # #1285: the tree closed against ITS incumbent -- every prune compared a
+        # node bound with that value. When the terminal polish swapped in a worse
+        # point (the tree's incumbent may beat the true optimum by using up a
+        # heuristic's feasibility tolerance), neither the tree's gap nor its
+        # exhaustion speaks for the reported objective. Certify only if the
+        # reported pair itself closes the gap against the tree's global bound.
+        _tree_inc = stats.get("incumbent_value")
+        _obj_internal = -obj_val if model._objective.sense == ObjectiveSense.MAXIMIZE else obj_val
+        if (
+            search_closed
+            and _tree_inc is not None
+            and np.isfinite(_tree_inc)
+            and _obj_internal > float(_tree_inc) + 1e-12 * (1.0 + abs(float(_tree_inc)))
+        ):
+            _glb_final = stats.get("global_lower_bound")
+            search_closed = (
+                _glb_final is not None
+                and np.isfinite(_glb_final)
+                and _gap_values_converged(
+                    float(_obj_internal), float(_glb_final), gap_tolerance, abs_gap_tol
+                )
+            )
         if search_closed and _gap_certified:
             status = "optimal"
         else:
