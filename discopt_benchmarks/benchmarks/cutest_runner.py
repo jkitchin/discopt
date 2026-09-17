@@ -49,6 +49,24 @@ class CUTEstSuiteConfig:
     problem_names: list[str] | None = None
 
 
+def _degrees_of_freedom_deficit(prob) -> str | None:
+    """Why ``prob`` is not a well-posed NLP, or None.
+
+    CUTEst ships nonlinear-equation and data-fitting problems (``*NE``, NIST
+    sets such as BOXBOD) as over-determined equality systems. An interior-point
+    solver rejects those before its first iteration (Ipopt:
+    ``Not_Enough_Degrees_Of_Freedom``), so every arm records ``error`` in about a
+    millisecond and the row says nothing about solver quality.
+    """
+    if prob.m == 0:
+        return None
+    n_eq = int(np.count_nonzero(prob.is_eq_cons))
+    n_free = int(prob.n - np.count_nonzero(prob.bl == prob.bu))
+    if n_eq > n_free:
+        return f"{n_eq} equality constraints > {n_free} free variables"
+    return None
+
+
 class CUTEstBenchmarkRunner:
     """
     Benchmark runner for CUTEst NLP problems.
@@ -70,6 +88,8 @@ class CUTEstBenchmarkRunner:
         self._problems: list[str] = []
         # (solver, problem) -> "ExcType: message" for arms that raised.
         self.errors: dict[tuple[str, str], str] = {}
+        # problem -> reason, for problems dropped as not being a well-posed NLP.
+        self.excluded: dict[str, str] = {}
 
     def discover_problems(self) -> list[str]:
         """Find CUTEst problems matching suite filters."""
@@ -105,7 +125,12 @@ class CUTEstBenchmarkRunner:
         """Load metadata for all discovered problems into results."""
         from discopt.interfaces.cutest import load_cutest_problem
 
-        for name in self._problems:
+        # First use compiles each problem's Fortran (seconds apiece), so report
+        # progress: a silent multi-minute load reads as a hang.
+        total = len(self._problems)
+        for i, name in enumerate(self._problems, 1):
+            if i == 1 or i % 25 == 0 or i == total:
+                print(f"  [load {i}/{total}] {name}", flush=True)
             try:
                 prob = load_cutest_problem(name, sif_params=self.config.sif_params)
                 info = InstanceInfo(
@@ -120,10 +145,21 @@ class CUTEstBenchmarkRunner:
                     source="cutest",
                 )
                 self.results.instance_info[name] = info
+                reason = _degrees_of_freedom_deficit(prob)
+                if reason is not None:
+                    self.excluded[name] = reason
                 prob.close()
             except Exception as e:
                 print(f"  Warning: Could not load {name}: {type(e).__name__}: {e}",
                       file=sys.stderr, flush=True)
+
+        if self.excluded:
+            self._problems = [p for p in self._problems if p not in self.excluded]
+            for name in self.excluded:
+                self.results.instance_info.pop(name, None)
+            print(f"  excluded {len(self.excluded)} problem(s) with more equality "
+                  f"constraints than free variables; {len(self._problems)} remain",
+                  flush=True)
 
     def run_all(
         self,

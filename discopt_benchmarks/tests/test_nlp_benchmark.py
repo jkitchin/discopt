@@ -16,6 +16,7 @@ from __future__ import annotations
 import sys
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -174,6 +175,37 @@ def test_every_cutest_suite_builds_and_unknown_keys_are_refused():
     bad = {"suites": {"x": {"max_varaibles": 3}}}
     with pytest.raises(SystemExit):
         rcb.suite_config(bad, "x")
+
+
+@pytest.mark.smoke
+def test_overdetermined_equality_systems_are_flagged():
+    """BOXBOD-shaped problems (2 vars, 6 equalities) error in every arm in ~1 ms."""
+    import numpy as np
+
+    from benchmarks.cutest_runner import _degrees_of_freedom_deficit
+
+    def prob(n, eq, ineq=0, fixed=0):
+        bl = np.zeros(n)
+        bu = np.ones(n)
+        bu[:fixed] = 0.0
+        return SimpleNamespace(
+            n=n, m=eq + ineq, is_eq_cons=np.array([True] * eq + [False] * ineq), bl=bl, bu=bu
+        )
+
+    assert _degrees_of_freedom_deficit(prob(2, 6)) is not None  # BOXBOD
+    assert _degrees_of_freedom_deficit(prob(3, 3)) is None  # square system
+    assert _degrees_of_freedom_deficit(prob(6, 0, ineq=100)) is None  # CRESC50: inequalities
+    assert _degrees_of_freedom_deficit(prob(3, 2, fixed=2)) is not None  # 2 eq > 1 free
+    assert _degrees_of_freedom_deficit(SimpleNamespace(n=4, m=0)) is None
+
+
+@pytest.mark.smoke
+def test_report_lists_excluded_problems():
+    res = _results([("ipopt_standalone", "A", SolveStatus.OPTIMAL, 1.0)])
+    meta = {"timestamp": "t", "time_limit": 1, "excluded": {"BOXBOD": "6 > 2"}}
+    md = rcb.render_markdown("s", rcb.summarize(res, {}), {}, meta)
+    assert "over-determined (more equalities than free variables): 1" in md
+    assert "- `BOXBOD`: 6 > 2" in md
 
 
 def _cutest_usable() -> bool:

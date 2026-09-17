@@ -143,8 +143,10 @@ def render_markdown(suite_name: str, summary: dict, errors: dict, meta: dict) ->
         f"- problems: {summary['problems']}, time limit {meta['time_limit']} s",
         f"- reference: `{REFERENCE_SOLVER}`; agreement tol {REL_TOL:g} (rel, floor 1)",
         f"- executed comparisons: {summary['comparisons']}",
+        f"- excluded as over-determined (more equalities than free variables): "
+        f"{len(meta.get('excluded', {}))}",
         "",
-        "| solver | converged | limit | error | other | wrong | differs | lost "
+        "| solver | converged | limit (time/iter/stall) | error | other | wrong | differs | lost "
         f"| SGM conv (shift {SGM_SHIFT:g}s) | median conv | total wall |",
         "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
@@ -164,6 +166,9 @@ def render_markdown(suite_name: str, summary: dict, errors: dict, meta: dict) ->
             if s[key]:
                 lines += ["", f"### {solver}: {title}", ""]
                 lines += [f"- `{row[0]}`: {row[1]!r}, {row[2]!r}" for row in s[key]]
+    if meta.get("excluded"):
+        lines += ["", "### Excluded problems", ""]
+        lines += [f"- `{name}`: {why}" for name, why in sorted(meta["excluded"].items())]
     if errors:
         lines += ["", "### Errors", ""]
         lines += [f"- `{solver}` `{prob}`: {msg}" for (solver, prob), msg in sorted(errors.items())]
@@ -246,7 +251,11 @@ def main(argv: list[str] | None = None) -> int:
 
     known = {k: float(v) for k, v in config.get("known_optima", {}).items()}
     summary = summarize(results, known)
-    meta = {"timestamp": results.timestamp, "time_limit": cfg.time_limit_seconds}
+    meta = {
+        "timestamp": results.timestamp,
+        "time_limit": cfg.time_limit_seconds,
+        "excluded": runner.excluded,
+    }
     report = render_markdown(cfg.name, summary, runner.errors, meta)
     print("\n" + report, flush=True)
 
