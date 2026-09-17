@@ -28,6 +28,7 @@ build/
 # Environments
 .env
 .venv/
+.venv*/
 
 # Coverage artifacts
 .coverage
