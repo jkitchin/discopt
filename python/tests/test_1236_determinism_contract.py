@@ -74,22 +74,43 @@ def test_the_suite_does_not_claim_determinism_for_a_budgeted_exit():
     """`tls2` at a short budget: whatever it returns, it is not a fixed number.
 
     This does not assert that the node count *varies* -- that would be a flaky
-    test asserting flakiness. It asserts the two properties that must hold
-    regardless: the exit is budgeted (so #1236's determinism claim does not
-    apply to it), and the result is still SOUND on every run.
+    test asserting flakiness. It asserts that the contract for whichever regime
+    the solve lands in actually holds, and that the result is SOUND either way.
+
+    It deliberately does NOT assert ``status != "optimal"`` (review finding 10).
+    That shipped here and is a test that breaks the moment the solver gets FAST
+    ENOUGH to certify `tls2` in 5 s -- a self-inflicted future break in the
+    per-PR smoke gate, punishing exactly the improvement this repository is for.
+    Nor does it skip when that happens: a skip is the §6 no-op that reads as a
+    pass. It asserts the OTHER regime's contract instead, and counts which arm
+    ran so neither can pass vacuously.
     """
     runs = [_solve("tls2", time_limit=5.0) for _ in range(2)]
-    checked = 0
+    budgeted = 0
+    certified = 0
     for r in runs:
-        assert r.status != "optimal", (
-            "tls2 certified at a 5 s budget -- pick a shorter budget or a "
-            "different instance, or this test proves nothing about budgeted exits"
-        )
-        assert r.gap_certified is False
+        # Sound on every run, in every regime -- minimize model, so the dual
+        # bound is a LOWER bound and may never sit above the incumbent.
         if r.objective is not None and r.bound is not None:
-            # Minimize model: the dual bound is a LOWER bound.
             assert r.bound <= r.objective + 1e-6 * max(1.0, abs(r.objective)), (
-                f"budgeted exit reports bound {r.bound!r} above incumbent {r.objective!r}"
+                f"{r.status} exit reports bound {r.bound!r} above incumbent {r.objective!r}"
             )
-        checked += 1
-    assert checked == 2, "both repetitions must be inspected"
+        if r.status == "optimal":
+            # The solver got fast enough. #1236's determinism claim now APPLIES
+            # to this instance, so hold it to that instead of to the budgeted
+            # contract -- and a certified exit must actually be certified.
+            assert r.gap_certified is True, (
+                "an `optimal` exit that is not gap_certified is the #1262 defect"
+            )
+            certified += 1
+        else:
+            # Budgeted exit: #1236's determinism claim does not extend to it.
+            assert r.gap_certified is False, f"a {r.status!r} exit claims gap_certified"
+            budgeted += 1
+    assert budgeted + certified == 2, "both repetitions must be inspected"
+    if certified == 2:
+        # Both runs certified: the determinism contract is in force, so pin it.
+        assert runs[0].node_count == runs[1].node_count, (
+            f"tls2 now certifies at 5 s but explored {runs[0].node_count} then "
+            f"{runs[1].node_count} nodes -- a certifying solve must be deterministic"
+        )

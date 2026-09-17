@@ -555,6 +555,14 @@ counters!(
     SepGomorySingular,
     SepGomoryFtranFail,
     SepGomoryBtranFail,
+    // #1236 (review finding 4): the density of what the separator actually emits.
+    // Keeping a tiny coefficient whose range is unbounded -- which soundness
+    // requires, since it cannot be charged to the rhs -- makes a cut denser than
+    // the old (unsound) skip did. `SepGomoryCutNnz / SepGomoryCutsEmitted` is the
+    // mean nonzeros per emitted cut, so that cost is a measurement rather than an
+    // argument. Both are needed: the ratio is meaningless without its denominator.
+    SepGomoryCutsEmitted,
+    SepGomoryCutNnz,
 );
 
 /// Add `n` to a counter (for accumulated quantities such as nonzero counts,

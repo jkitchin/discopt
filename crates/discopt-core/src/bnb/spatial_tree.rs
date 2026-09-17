@@ -295,6 +295,15 @@ pub struct SpatialTreeResult {
     /// #1236: seconds elapsed when `root_bound` was established (0.0 when it never
     /// was). The kernel's analogue of the `root_time` every Python driver reports.
     pub root_time_s: f64,
+    /// #1236 (review finding 8): WHICH arm node 1 left by, because `root_bound`
+    /// alone cannot say. Three distinct outcomes carry a non-finite bound —
+    /// `"infeasible"` (the root region was certified empty, `+inf`), `"undecided"`
+    /// (the root LP decided nothing, so the region closes with the parent's `-inf`)
+    /// and `"not_reached"` (the search exited before node 1 finished) — and the
+    /// Python mapping turns every non-finite value into `root_bound=None`. Without
+    /// this they are the same observation from Python, which is the §6 conflation
+    /// this instrumentation exists to remove, reproduced inside it.
+    pub root_status: &'static str,
 }
 
 /// True value of a lifted term at the point `x` (structural columns), for the
@@ -424,6 +433,9 @@ pub fn solve_spatial_tree(
     // search never branches on either, which is what keeps this bound-neutral.
     let mut root_bound = f64::NEG_INFINITY;
     let mut root_time_s = 0.0f64;
+    // Stays "not_reached" unless node 1 actually finishes; each arm below names
+    // itself, so a non-finite `root_bound` is never ambiguous downstream.
+    let mut root_status: &'static str = "not_reached";
     let t_tree_start = Instant::now();
 
     // Global lower bound = min, over every region that leaves the tree WITHOUT being
@@ -501,6 +513,7 @@ pub fn solve_spatial_tree(
                 bound_extension_s,
                 root_bound,
                 root_time_s,
+                root_status,
             };
         }
         // Fathom by the parent bound if the incumbent already dominates it. The
@@ -530,6 +543,7 @@ pub fn solve_spatial_tree(
                 bound_extension_s,
                 root_bound,
                 root_time_s,
+                root_status,
             };
         }
         node_count += 1;
@@ -556,6 +570,7 @@ pub fn solve_spatial_tree(
             if node_count == 1 {
                 root_bound = contrib;
                 root_time_s = t_tree_start.elapsed().as_secs_f64();
+                root_status = "propagation_fathom";
             }
             continue;
         }
@@ -578,6 +593,7 @@ pub fn solve_spatial_tree(
                 if node_count == 1 {
                     root_bound = f64::INFINITY;
                     root_time_s = t_tree_start.elapsed().as_secs_f64();
+                    root_status = "infeasible";
                 }
                 continue;
             }
@@ -603,6 +619,7 @@ pub fn solve_spatial_tree(
             if node_count == 1 {
                 root_bound = parent_bound;
                 root_time_s = t_tree_start.elapsed().as_secs_f64();
+                root_status = "undecided";
             }
             let split = widest_original_col(spec, &lo, &hi, &root_w, config.min_box_width);
             match split {
@@ -639,6 +656,7 @@ pub fn solve_spatial_tree(
         if node_count == 1 {
             root_bound = bound;
             root_time_s = t_tree_start.elapsed().as_secs_f64();
+            root_status = "bounded";
         }
         // Fathom by bound vs incumbent. The region's valid lower bound is `bound`.
         if let Some(inc) = incumbent {
@@ -792,6 +810,7 @@ pub fn solve_spatial_tree(
                 bound_extension_s,
                 root_bound,
                 root_time_s,
+                root_status,
             }
         }
         None => SpatialTreeResult {
@@ -807,6 +826,7 @@ pub fn solve_spatial_tree(
             bound_extension_s,
             root_bound,
             root_time_s,
+            root_status,
         },
     }
 }
@@ -963,6 +983,57 @@ mod tests {
         let x = &res.incumbent_x;
         assert!((x[0] * x[1] - x[2]).abs() < 1e-4, "w != x*y at incumbent");
         assert!(x[0] + x[1] >= 3.0 - 1e-4, "x+y>=3 violated");
+    }
+
+    /// #1236 review finding 8: a non-finite `root_bound` must still say WHICH
+    /// outcome it was.
+    ///
+    /// `root_bound` is `+inf` when the root region was certified empty, the
+    /// parent's `-inf` when the root LP decided nothing, and the initial `-inf`
+    /// when the search never finished node 1. The Python mapping turns every
+    /// non-finite value into `root_bound=None`, so all three read as "the root
+    /// never produced a bound" — the §6 conflation this instrumentation exists to
+    /// remove, reproduced inside it. `root_status` names the arm.
+    #[test]
+    fn a_non_finite_root_bound_still_names_its_outcome() {
+        let spec = xy_min_spec();
+
+        // Arm 1: a normal solve leaves by the bounded arm and says so.
+        let cfg = SpatialTreeConfig {
+            max_nodes: 5000,
+            gap_tol: 1e-5,
+            ..SpatialTreeConfig::default()
+        };
+        let res = solve_spatial_tree(&spec, &cfg, &SimplexOptions::default());
+        assert_eq!(
+            res.root_status, "bounded",
+            "a solve whose root produced a finite bound must say `bounded`"
+        );
+        assert!(res.root_bound.is_finite());
+
+        // Arm 2: stopped before node 1 can finish. `root_bound` is non-finite and
+        // MUST be distinguishable from the two arms that also leave it non-finite.
+        let cfg0 = SpatialTreeConfig {
+            max_nodes: 0,
+            gap_tol: 1e-5,
+            ..SpatialTreeConfig::default()
+        };
+        let res0 = solve_spatial_tree(&spec, &cfg0, &SimplexOptions::default());
+        assert_eq!(res0.node_count, 0, "node 1 must not have run");
+        assert!(
+            !res0.root_bound.is_finite(),
+            "expected a non-finite root bound, got {}",
+            res0.root_bound
+        );
+        assert_eq!(
+            res0.root_status, "not_reached",
+            "a search that never reached node 1 must say so, not share \
+             `root_bound = None` with a root that was certified empty"
+        );
+
+        // The point of the whole thing: the two runs are distinguishable even
+        // though a Python caller sees `root_bound=None` for one of them.
+        assert_ne!(res.root_status, res0.root_status);
     }
 
     /// #1236: the root region's bound is recorded, is a VALID lower bound on the

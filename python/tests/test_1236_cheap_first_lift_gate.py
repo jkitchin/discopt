@@ -116,3 +116,104 @@ def test_gate_is_on_by_default_with_an_opt_out(monkeypatch):
         assert solver_mod._ipx_cheap_first_enabled() is False, off
     monkeypatch.setenv("DISCOPT_IPX_CHEAP_FIRST", "1")
     assert solver_mod._ipx_cheap_first_enabled() is True
+
+
+# --- Review finding 1: the probe must solve the CALLER's problem ---------------
+#
+# `_ipx_unlifted_probe` forwards `**solve_kwargs` straight into a nested
+# `solve_model`, and its result is RETURNED AS THE FINAL ANSWER when it certifies.
+# It first shipped forwarding only `gap_tolerance` and `max_nodes`, so every other
+# caller option vanished: with `lazy_constraints` set the probe solved a
+# RELAXATION of the user's problem and would return that as a certified optimum; a
+# tightened `abs_gap_tolerance` silently reverted to the route default.
+#
+# A list of forwarded names is only as good as its last edit, so this asserts the
+# property against `solve_model`'s live signature instead: every parameter is
+# forwarded, deliberately blocked, or explicitly exempt WITH a reason.
+
+#: Parameters the probe cannot honour, so their presence declines the probe
+#: outright (pre-#1236 behaviour: adopt the lift). Mirrors `_sub_blocked`.
+_EXPECTED_BLOCKED = {
+    "lazy_constraints",
+    "incumbent_callback",
+    "node_callback",
+    "cut_callback",
+    "initial_point",
+    "warm_start",
+    "decomposition_structure",
+}
+
+#: Parameters that must NOT be forwarded, each with the reason it is exempt.
+_EXEMPT = {
+    "model": "the probe's own positional argument",
+    "time_limit": "replaced by the probe's own bounded budget",
+    "kwargs": "the **kwargs catch-all, splatted through separately",
+    "incumbent_time_extension": (
+        "an extra wall-clock slice granted on holding an incumbent; forwarding it "
+        "would let the probe overrun the budget that bounds it"
+    ),
+}
+
+
+def test_the_probe_forwards_every_option_that_changes_the_answer():
+    import inspect
+
+    from discopt import solver as S
+
+    params = set(inspect.signature(S.solve_model).parameters)
+    src = inspect.getsource(S.solve_model)
+    # The single call site, so an unrelated `name=name` elsewhere cannot count.
+    call = src.split("_ipx_unlifted_probe(", 1)
+    assert len(call) == 2, "the probe call site moved; this test must follow it"
+    call = call[1].split("\n                    )", 1)[0]
+
+    forwarded = {p for p in params if f"{p}={p}," in call}
+    blocked = set(S._IPX_PROBE_BLOCKING_OPTIONS)
+
+    assert blocked == _EXPECTED_BLOCKED, (
+        "the blocking set changed; a parameter added to or removed from it must be "
+        f"re-justified. got {sorted(blocked)}"
+    )
+    # Blocked options are ALSO forwarded: the probe needs to see them to refuse.
+    assert blocked <= forwarded, (
+        f"blocked options must still be passed so the probe can decline on them: "
+        f"{sorted(blocked - forwarded)}"
+    )
+
+    unaccounted = params - forwarded - set(_EXEMPT)
+    assert not unaccounted, (
+        f"{sorted(unaccounted)} reach `solve_model` but not its cheap-first probe. "
+        "The probe's result is returned as the final answer, so a dropped option "
+        "means certifying a different problem than the caller asked about. Forward "
+        "it, add it to _IPX_PROBE_BLOCKING_OPTIONS, or add it to _EXEMPT with a "
+        "reason."
+    )
+    # §6: the check must not pass by looking at nothing.
+    assert len(forwarded) >= 40, f"only {len(forwarded)} parameters examined"
+
+
+def test_a_blocking_option_declines_the_probe_instead_of_dropping_it():
+    """With `lazy_constraints` set the probe must not run at all.
+
+    Running it with the option dropped is the defect: the probe would solve a
+    relaxation of the caller's problem and, on certifying, return that.
+    """
+    from discopt import solver as S
+
+    calls = []
+    real = S.solve_model
+
+    def _spy(model, **kw):
+        calls.append(kw)
+        return real(model, **kw)
+
+    probe, nodes = S._ipx_unlifted_probe(
+        object(),
+        60.0,
+        0.0,
+        gap_tolerance=1e-4,
+        lazy_constraints=lambda *a, **k: [],
+    )
+    assert probe is None, "a blocked option must decline the probe"
+    assert nodes == 0, "a declined probe spends nothing"
+    assert not calls, "the nested solve must never have been entered"

@@ -39,6 +39,25 @@ NL = os.path.join(DATA, "minlplib_nl", "fac2.nl")
 #: MINLPLib reference optimum for fac2.
 FAC2_REFERENCE = 331837498.2
 
+#: Absolute slack for "not above the witness", in objective units.
+#:
+#: ABSOLUTE, never scale-relative -- the fixture README says so, and this test was
+#: shipped violating it (review finding 9). ``1e-6 * |attained|`` reads as tight
+#: and is **331.8** on a 3.3e8 objective: it catches the original 7839 defect with
+#: only a 24x margin and would miss any regression an order of magnitude smaller.
+#: A scale-relative gate is exactly how this defect was missed once already.
+#:
+#: The numbers are measured on this fixture, not chosen. Against the witness at
+#: 331837498.17693394 the four backends land at ``auto`` -1.67e-4, ``simplex``
+#: -1.67e-4, ``highs`` -1.64e-4 (all BELOW it, i.e. no excess at all) and
+#: ``pounce`` +0.32 -- a 1e-9 relative excess, tolerance noise at this scale.
+#:
+#: So: 1.0 for the in-house driver, whose measured margin is 1.7e-4, and 10.0 for
+#: the cross-backend comparison, which must clear POUNCE's +0.32 with headroom.
+#: Both catch the 7839 defect with a margin of ~800x or better, against 24x before.
+ABS_SLACK_DRIVER = 1.0
+ABS_SLACK_BACKENDS = 10.0
+
 
 def _load_master():
     d = np.load(MASTER)
@@ -79,7 +98,7 @@ def test_captured_master_is_not_certified_above_a_feasible_point():
     # is what hid this defect during the investigation: |z*|max is 3.3e8 here, so
     # a 1e-9-relative threshold is 0.86 -- larger than the 0.017 cut violation and
     # far larger than any honest rounding allowance on a 3.3e8 objective.
-    slack = 1e-6 * abs(attained)
+    slack = ABS_SLACK_DRIVER
     assert res.objective is not None
     assert res.objective <= attained + slack, (
         f"driver reports objective {res.objective!r}, above a point of "
@@ -100,7 +119,7 @@ def test_all_milp_backends_agree_on_the_captured_master():
     made the defect attributable at all.
     """
     problem, _z, attained = _load_master()
-    slack = 1e-6 * abs(attained)
+    slack = ABS_SLACK_BACKENDS
     checked = 0
     for backend in ("auto", "simplex", "pounce", "highs"):
         solve = get_milp_solver(backend=backend)
@@ -124,6 +143,11 @@ def test_fac2_end_to_end_matches_the_reference_optimum():
         f"reference {FAC2_REFERENCE} by {rel:.3e}"
     )
     assert result.bound is not None
-    assert result.bound <= result.objective + 1e-6 * abs(result.objective), (
+    # Absolute, for the same reason as above: 1e-6 * |objective| is 331.8 here, so
+    # the certificate invariant `bound <= incumbent` would be checked with 331.8 of
+    # slack. Measured margin on this instance is -1.12e-4 (the bound sits BELOW the
+    # incumbent, as it must), so 1.0 is ~9000x the observed noise and still catches
+    # a violation four orders of magnitude smaller than the one this test exists for.
+    assert result.bound <= result.objective + ABS_SLACK_DRIVER, (
         f"bound {result.bound!r} above incumbent {result.objective!r}"
     )

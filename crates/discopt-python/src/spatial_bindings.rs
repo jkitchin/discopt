@@ -362,5 +362,9 @@ pub fn solve_spatial_tree_py<'py>(
     // like every other driver instead of three `None`s.
     out.set_item("root_bound", res.root_bound)?;
     out.set_item("root_time_s", res.root_time_s)?;
+    // #1236 review finding 8: which arm node 1 left by. Three outcomes carry a
+    // non-finite bound -- root region certified empty, root LP undecided, and the
+    // search never reaching node 1 -- and all three map to `root_bound=None`.
+    out.set_item("root_status", res.root_status)?;
     Ok(out)
 }

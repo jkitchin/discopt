@@ -9438,3 +9438,149 @@ RLT, or the pinned-bound work of #196/#208 — which is a different subsystem an
 outside what #1236 set out to diagnose. Recorded here with its instrumentation
 shipped (§68.4: root gap 111 %, 0 uncertified, 0 undecided nodes) so the next
 attempt starts from measurement rather than from the lift.
+
+## 71. #1236 review round: two more term-deletions of the same shape, and a probe that solved a different problem (2026-09-17)
+
+The #1280 review found ten items. Four were defects of consequence, and two of
+those are the *same* class §69 was opened for — a guard that stopped seeing
+something — reproduced inside the fix for it. Recorded here because the pattern
+is now three-for-three: every time this separator was made safer, the safety was
+taken out of a gate somewhere else without anyone noticing.
+
+### 71.1 The all-tiny cut: fixing the deletion removed the refusal that covered it
+
+`separate_gomory_cols` refuses a cut when `max_c == 0.0`. Before §69 that arm did
+double duty: every tiny coefficient was *skipped*, so a cut whose coefficients
+were all ~1e-12 left `max_c` at 0.0 and was refused. §69 made those terms be kept
+(soundness requires it — dropping them is a strengthening) and excluded them from
+`min_c` so the dynamism gate would not refuse most cuts on a big-M master. That
+left `min_c = INFINITY`, and `max_c / INFINITY == 0` passes the dynamism gate
+while `max_c = 1e-12 != 0` passes the emptiness gate. **The refusal became
+unreachable.**
+
+It is not a weak-cut problem, it is a false-prune problem:
+`sum 1e-12 xtilde >= 1` reads as `0 >= 1` at a 1e-9 LP feasibility tolerance, so
+the node is fathomed as infeasible although it contains feasible points — and
+that feeds a certified bound. The driver path is shielded by
+`substitute_slacks_to_structural`; the convex kernel's `substitute_slacks`
+(`convex_kernel.rs:777`) drops only exact zeros, applies no dynamism check, and
+would have handed it straight to the node LP.
+
+Fixed by refusing when `!min_c.is_finite()` — exactly "no kept coefficient was
+above tolerance", which is what the `max_c == 0.0` arm used to mean. Pinned by
+`a_cut_whose_every_coefficient_is_tiny_is_refused`, which asserts the *spec*
+(whatever is emitted must be enforceable at LP tolerance) rather than a count.
+
+### 71.2 `snap_eligible` was read on the branch it does not describe
+
+`tiny = psi.abs() <= tol || (integrality[j] && snap_eligible)`. The second clause
+is meant to name "this integer column's `abar` sits on an integer, so under the
+integer formula its psi is ulp noise". But when an integer column is pinned at a
+**fractional** bound the code deliberately falls back to the *continuous* formula
+(the premise for the integer strengthening fails), and there an integral `abar`
+gives `psi = |alpha| / f0 >= 1` — which can be in the thousands. Calling that
+"tiny" excluded it from `min_c`, so the dynamism gate stopped seeing the smallest
+coefficient in the cut.
+
+Measured on the three-column LP in
+`an_integer_column_pinned_at_a_fractional_bound_is_not_tiny`: the true spread is
+`2e6 / 2 = 1e6`, the gate saw `1.0`, and a `max_dynamism = 1e3` waved the cut
+through. Gating on `use_integer` instead of `integrality[j]` is the one-token fix.
+
+Note the interaction with §71.1: once the all-tiny refusal exists, this bug would
+*also* have started refusing perfectly good cuts whose only coefficient came from
+such a column. Two gates, one mislabel, opposite failures.
+
+### 71.3 The cheap-first probe forwarded 2 of 47 caller options
+
+§70.1's probe solves the un-lifted model through `solve_model` and, when it
+certifies, **its result is returned as the final answer**. It shipped forwarding
+only `gap_tolerance` and `max_nodes`. Everything else — `lazy_constraints`,
+`abs_gap_tolerance`, both callbacks, `deterministic`, `presolve`, `cuts`, `rlt`,
+`nlp_solver`, `solver` — silently vanished into `**solve_kwargs`.
+
+With `lazy_constraints` set the probe solves a **relaxation of the user's
+problem**, and on certifying returns that as a certified optimum. This is the
+same failure as a false bound and arrives by a different door.
+
+Fixed two ways, because a list of forwarded names is only as good as its last
+edit:
+
+1. Options the probe cannot honour faithfully — both callbacks, `cut_callback`,
+   `lazy_constraints`, `initial_point`, `warm_start`, `decomposition_structure` —
+   **decline the probe outright**, which is the pre-#1236 behaviour (adopt the
+   lift) and never a wrong answer. This mirrors `_sub_blocked`.
+2. Everything else is forwarded explicitly, and
+   `test_the_probe_forwards_every_option_that_changes_the_answer` enumerates
+   `solve_model`'s **live signature**, failing on any parameter that is not
+   forwarded, blocked, or exempt *with a stated reason*. Verified non-vacuous by
+   deleting one forwarded option and watching it name it.
+
+### 71.4 `max_nodes` was spent twice, and the probe's nodes were invisible
+
+The caller's full `max_nodes` went to the probe and then, unreduced, to the lifted
+solve — so a caller using it as a work budget could get up to 2x the nodes it
+asked for. The probe's nodes are now charged against it (floored at 1).
+
+Separately `SolveResult.node_count` covers only the winning arm, so on the two
+instances where the lift is *kept* the probe's search was reported as never having
+happened. That is how a node-count panel credits a gate with a saving it did not
+make. The losing probe's node count is now surfaced as
+`solver_stats["cheap_first/probe_nodes"]`, stamped in `_stamp_layer_timing` — the
+one funnel every one of `solve_model`'s 334 return sites passes through.
+
+### 71.5 Conflations and self-inflicted breaks in the instrumentation itself
+
+- **`root_bound=None` meant three different things** (§68's own instrument): root
+  region certified empty (`+inf`), root LP decided nothing (the parent's `-inf`),
+  and the search never finishing node 1 (`-inf`) all map to `None` in Python. The
+  kernel now reports `root_status` naming the arm, surfaced as
+  `solver_stats["root/status"]`.
+- **A test that breaks when the solver gets faster.**
+  `test_the_suite_does_not_claim_determinism_for_a_budgeted_exit` asserted
+  `status != "optimal"` for `tls2` at 5 s. It now asserts the contract for
+  whichever regime the solve lands in, and counts which arm ran — a skip would be
+  the §6 no-op that reads as a pass.
+- **A scale-relative tolerance on the 3.3e8 fixture**, which the fixture's own
+  README forbids for exactly this reason. `1e-6 * |attained|` is **331.8**: it
+  catches the original 7839 defect with a 24x margin and misses anything an order
+  of magnitude smaller. Replaced with measured absolute slacks — 1.0 for the
+  in-house driver (observed margin 1.7e-4) and 10.0 for the cross-backend
+  comparison (POUNCE's +0.32 is the worst legitimate excess). Detection margin
+  goes from 24x to ~800x.
+
+### 71.6 The cut-density concern, measured and falsified
+
+The review's remaining substantive claim (finding 4) was that keeping a tiny
+coefficient whose range is unbounded — which §69's soundness fix requires, since
+such a term cannot be charged to the rhs — makes GMI cuts **"fully dense" on
+exactly the models this PR targets**, with the convex kernel's `substitute_slacks`
+then expanding each tiny slack coefficient into its row's full support. The
+differential panel measured node counts, not cut nnz, so it could not have seen it.
+
+That is a plausible mechanism and it is wrong on the instance in question. Two
+counters were added (`SepGomoryCutsEmitted`, `SepGomoryCutNnz` — both, because the
+ratio is meaningless without its denominator) and both arms measured on the `fac2`
+master, 485 standard-form columns. **Arm identity was asserted behaviourally**
+rather than by a version string: the pre-§69 separator returns the known false
+optimal 331845337.44 and the fixed one returns 331837498.18, so an arm that loaded
+the wrong `.so` fails before it measures anything.
+
+| arm | objective (identity) | cuts | mean nnz/cut | % of 485 cols |
+|---|---|---|---|---|
+| pre-§69 (unsound skip) | 331845337.44 | 3 | **35.3** | 7.3 % |
+| fixed | 331837498.18 | 2 | **34.5** | 7.1 % |
+
+Cuts got marginally *sparser*, not denser, and neither arm is within two orders of
+magnitude of dense. The mechanism does not fire here for two reasons the claim
+missed: on a big-M master most tiny-psi columns are **bounded binaries**, which are
+still charged to the rhs and dropped; and the driver's
+`substitute_slacks_to_structural` refuses a cut whose pin is unbounded
+(`SubstDropUnbounded = 1` on this run), so the density-inducing cut never reaches
+an LP at all.
+
+Scope of the claim, stated rather than implied: this measures the **driver** path
+on the instance the PR targets, not the convex-kernel path, where
+`substitute_slacks` really does apply no cleanup. That path's exposure is now
+bounded at the separator instead — §71.1 refuses an all-tiny cut before either
+substitution runs, which is the case that could actually have hurt the kernel.

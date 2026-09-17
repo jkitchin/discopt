@@ -9,6 +9,7 @@ Connects:
 
 from __future__ import annotations
 
+import contextvars
 import dataclasses
 import functools
 import logging
@@ -1921,6 +1922,12 @@ def _try_native_spatial_kernel(
     # than to a number no search established. ``root_gap`` uses the same
     # ``|obj - bound| / max(1, |obj|)`` form as every other driver in this file so
     # the panels compare like with like.
+    # #1236 review finding 8: `root_bound=None` is three different facts -- root
+    # region certified empty, root LP decided nothing, search never reached node 1.
+    # The kernel now names the arm; carry it so the caller can tell them apart.
+    _root_status = res.get("root_status")
+    if _root_status is not None:
+        _native_stats["root/status"] = str(_root_status)
     _root_internal = res.get("root_bound")
     root_bound_val: Optional[float] = None
     root_gap_val: Optional[float] = None
@@ -6553,7 +6560,53 @@ def _cmir_aggregation_enabled() -> bool:
 
 #: Re-entrancy guard for the #1236 cheap-first probe: the probe solves the
 #: UN-LIFTED model through ``solve_model`` itself, and must not probe again.
-_IPX_CHEAP_FIRST_IN_PROBE = False
+#:
+#: A ``ContextVar``, not a module global (review finding 7). A global is shared by
+#: every thread in the process, so with two concurrent ``solve_model`` calls thread
+#: A setting the guard for its probe made thread B -- reaching this block with no
+#: probe of its own -- take the "we ARE the probe" branch and solve the un-lifted
+#: model without ever probing it. The FORMULATION CHOICE would then depend on an
+#: unrelated concurrent solve. Each thread starts from a fresh context, so a
+#: ``ContextVar`` is per-thread by construction while still spanning the whole
+#: nested call the suppression has to cover.
+_IPX_CHEAP_FIRST_IN_PROBE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_IPX_CHEAP_FIRST_IN_PROBE", default=False
+)
+
+#: Nodes spent by a #1236 cheap-first probe that did NOT win, per ``solve_model``
+#: call (review finding 6). Surfaced on ``SolveResult.solver_stats`` as
+#: ``cheap_first/probe_nodes`` by ``_stamp_layer_timing``.
+#:
+#: Without it the returned ``node_count`` covers only the WINNING arm, so on every
+#: instance where the lift is kept the probe's search is invisible and total work
+#: is under-reported -- which is exactly how a node-count panel can credit a gate
+#: with a saving it did not make.
+_IPX_PROBE_NODES: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "_IPX_PROBE_NODES", default=0
+)
+
+#: Caller-supplied options the #1236 cheap-first probe cannot honour faithfully.
+#:
+#: The probe's result is RETURNED AS THE FINAL ANSWER when it certifies, so it must
+#: solve the caller's actual problem -- every option that changes what "optimal"
+#: means has to reach it. Most do, forwarded explicitly at the call site. These
+#: cannot: a callback would fire for a search that is thrown away when the probe
+#: loses, and ``lazy_constraints`` would make the probe certify a RELAXATION of the
+#: user's problem and return that as a certified optimum.
+#:
+#: So the probe is DECLINED outright when any of them is present, which is the
+#: pre-#1236 behaviour (adopt the lift) -- conservative, and never a wrong answer.
+#: This mirrors ``_sub_blocked`` in the substitution presolve, which refuses for the
+#: same reason.
+_IPX_PROBE_BLOCKING_OPTIONS = (
+    "lazy_constraints",
+    "incumbent_callback",
+    "node_callback",
+    "cut_callback",
+    "initial_point",
+    "warm_start",
+    "decomposition_structure",
+)
 
 #: Absolute ceiling on the #1236 cheap-first probe, in seconds.
 #:
@@ -6593,13 +6646,20 @@ _IPX_PROBE_BUDGET_CAP_S = 30.0
 _IPX_PROBE_BUDGET_FRACTION = 0.40
 
 
-def _ipx_unlifted_probe(model, time_limit, elapsed, **solve_kwargs) -> Optional["SolveResult"]:
+def _ipx_unlifted_probe(
+    model, time_limit, elapsed, **solve_kwargs
+) -> tuple[Optional["SolveResult"], int]:
     """#1236: solve the UN-LIFTED model under a bounded probe; return it iff certified.
 
-    Returns a :class:`SolveResult` only when the probe closed the gap on the
-    original model -- in which case it IS the answer, and the caller returns it
-    unchanged. Any other outcome (uncertified, error, no budget) returns ``None``
-    and the caller proceeds to adopt the lift, having spent the probe's wall.
+    Returns ``(result, nodes_spent)``. ``result`` is a :class:`SolveResult` only
+    when the probe closed the gap on the original model -- in which case it IS the
+    answer, and the caller returns it unchanged. Any other outcome (uncertified,
+    error, declined, no budget) returns ``None`` and the caller proceeds to adopt
+    the lift, having spent the probe's wall.
+
+    ``nodes_spent`` is the probe's node count, reported whether it won or lost, so
+    the caller can charge it against ``max_nodes`` (the two arms together must
+    honour ONE caller budget, not take it twice) and surface it as total work.
 
     An uncertified probe is discarded WHOLE: its bound and incumbent are not
     carried into the lifted solve. That is deliberate rather than thrifty --
@@ -6612,27 +6672,38 @@ def _ipx_unlifted_probe(model, time_limit, elapsed, **solve_kwargs) -> Optional[
     is module-global rather than a parameter because the suppression has to hold
     across the whole nested call, including the reformulation block it re-enters.
     """
-    global _IPX_CHEAP_FIRST_IN_PROBE
-    if _IPX_CHEAP_FIRST_IN_PROBE:
-        return None
+    if _IPX_CHEAP_FIRST_IN_PROBE.get():
+        return None, 0
+    # An option the probe cannot honour means NO probe at all (review finding 1).
+    # Silently dropping one is how a probe ends up certifying a different problem
+    # from the one the caller asked about -- and then returning that certificate.
+    for _blocked in _IPX_PROBE_BLOCKING_OPTIONS:
+        if solve_kwargs.get(_blocked) is not None:
+            logger.info(
+                "#1236 cheap-first probe declined: %s is set and the probe cannot "
+                "honour it; adopting the integer-bilinear lift",
+                _blocked,
+            )
+            return None, 0
     # Carved as a fraction of the caller's limit but CAPPED absolutely, so the
     # grant saturates instead of tracking `time_limit` upward forever (#1153).
     carve = min(_IPX_PROBE_BUDGET_FRACTION * float(time_limit), _IPX_PROBE_BUDGET_CAP_S)
     budget = carve - float(elapsed)
     if not np.isfinite(budget) or budget <= 0.0:
-        return None
+        return None, 0
 
-    _IPX_CHEAP_FIRST_IN_PROBE = True
+    _guard = _IPX_CHEAP_FIRST_IN_PROBE.set(True)
     try:
         probe = solve_model(model, time_limit=budget, **solve_kwargs)
     except Exception as exc:  # pragma: no cover - defensive
         # Reported, never swallowed: a probe that raises is a fact about the
         # un-lifted path, and the caller still has the lift to fall back on.
         logger.info("#1236 cheap-first probe raised %s: %s", type(exc).__name__, exc)
-        return None
+        return None, 0
     finally:
-        _IPX_CHEAP_FIRST_IN_PROBE = False
+        _IPX_CHEAP_FIRST_IN_PROBE.reset(_guard)
 
+    _spent = int(getattr(probe, "node_count", 0) or 0) if probe is not None else 0
     if probe is None or probe.status != "optimal" or not probe.gap_certified:
         logger.debug(
             "#1236 cheap-first probe did not certify in %.2fs (status=%s); "
@@ -6640,14 +6711,14 @@ def _ipx_unlifted_probe(model, time_limit, elapsed, **solve_kwargs) -> Optional[
             budget,
             getattr(probe, "status", None),
         )
-        return None
+        return None, _spent
     logger.info(
         "#1236 cheap-first: the un-lifted model certified in %.2fs (%d nodes); "
         "declining the integer-bilinear lift",
         budget,
         probe.node_count,
     )
-    return probe
+    return probe, _spent
 
 
 def _ipx_cheap_first_enabled() -> bool:
@@ -7738,6 +7809,11 @@ def _stamp_layer_timing(fn: _F) -> _F:
     def wrapper(*args, **kwargs):
         before = _timing.snapshot()
         started = time.perf_counter()
+        # #1236 review finding 6: scope the probe-node tally to THIS call. The
+        # token reset means a nested solve (the probe's own) restores the outer
+        # value on exit rather than clobbering it, so the probe helper's post-call
+        # `set` lands in the outer solve's slot -- which is the one that reports.
+        _probe_nodes_tok = _IPX_PROBE_NODES.set(0)
         _route_depth = len(_ROUTE_FALLBACK_NOTE)
         _state_depth = len(_ROUTE_FALLBACK_STATE)
         _gap_depth = len(_GAP_TOLERANCES)
@@ -7758,6 +7834,8 @@ def _stamp_layer_timing(fn: _F) -> _F:
             del _ROUTE_FALLBACK_STATE[_state_depth:]
             _gap_tols = _GAP_TOLERANCES[_gap_depth] if len(_GAP_TOLERANCES) > _gap_depth else None
             del _GAP_TOLERANCES[_gap_depth:]
+            _probe_nodes = _IPX_PROBE_NODES.get()
+            _IPX_PROBE_NODES.reset(_probe_nodes_tok)
         elapsed = time.perf_counter() - started
         # #1059: a solve that fell back off the auto-route must say so, otherwise
         # it is indistinguishable from one that was never routed -- the exact
@@ -7827,6 +7905,15 @@ def _stamp_layer_timing(fn: _F) -> _F:
                     stats = {}
                     result.solver_stats = stats
                 stats["gap_criterion"] = _crit
+        # #1236 review finding 6: `node_count` is the WINNING arm's tree. When a
+        # cheap-first probe ran and lost, its nodes are real work this call did and
+        # are reported here rather than vanishing.
+        if _probe_nodes > 0 and isinstance(result, SolveResult):
+            stats = result.solver_stats
+            if stats is None:
+                stats = {}
+                result.solver_stats = stats
+            stats["cheap_first/probe_nodes"] = float(_probe_nodes)
         return result
 
     return cast(_F, wrapper)
@@ -10220,7 +10307,7 @@ def solve_model(
             # result IS the answer and the lift is declined. See
             # ``_ipx_cheap_first_enabled`` for the measurement behind it.
             if _ipx_adopt and _ipx_cheap_first_enabled():
-                if _IPX_CHEAP_FIRST_IN_PROBE:
+                if _IPX_CHEAP_FIRST_IN_PROBE.get():
                     # We ARE the probe: the probe's whole job is to be the
                     # un-lifted arm, so it must never adopt the lift itself.
                     # Without this the nested solve re-adopted it and the probe
@@ -10231,15 +10318,85 @@ def solve_model(
                     # Named `_ipx_probe`, not `_probe`: `solve_model` already binds
                     # `_probe` to a `MccormickLPResult` in the node loop, and mypy
                     # unifies the two in one function scope.
-                    _ipx_probe = _ipx_unlifted_probe(
+                    #
+                    # EVERY option that changes what "optimal" means is forwarded
+                    # (review finding 1). The probe's result is returned as the
+                    # FINAL ANSWER when it certifies, so an option dropped here is
+                    # an answer certified for a different problem than the caller
+                    # asked about. `test_1236_cheap_first_lift_gate` enumerates
+                    # `solve_model`'s signature and fails on any parameter that is
+                    # neither forwarded, blocked, nor explicitly exempt, so a
+                    # parameter added later cannot silently go missing again.
+                    _ipx_probe, _ipx_probe_nodes = _ipx_unlifted_probe(
                         model,
                         time_limit,
                         time.perf_counter() - _solve_t0,
                         gap_tolerance=gap_tolerance,
+                        abs_gap_tolerance=abs_gap_tolerance,
+                        threads=threads,
+                        deterministic=deterministic,
+                        batch_size=batch_size,
+                        strategy=strategy,
                         max_nodes=max_nodes,
+                        ipopt_options=ipopt_options,
+                        nlp_solver=nlp_solver,
+                        sparse=sparse,
+                        cutting_planes=cutting_planes,
+                        psd_cuts=psd_cuts,
+                        rlt_cuts=rlt_cuts,
+                        rlt=rlt,
+                        cuts=cuts,
+                        partitions=partitions,
+                        use_learned_relaxations=use_learned_relaxations,
+                        mccormick_bounds=mccormick_bounds,
+                        gdp_method=gdp_method,
+                        decomposition=decomposition,
+                        decomposition_structure=decomposition_structure,
+                        record_decomposition=record_decomposition,
+                        lagrangian_bound=lagrangian_bound,
+                        lagrangian_frequency=lagrangian_frequency,
+                        lagrangian_method=lagrangian_method,
+                        initial_point=initial_point,
+                        warm_start=warm_start,
+                        skip_convex_check=skip_convex_check,
+                        nlp_bb=nlp_bb,
+                        lazy_constraints=lazy_constraints,
+                        incumbent_callback=incumbent_callback,
+                        node_callback=node_callback,
+                        cut_callback=cut_callback,
+                        solver=solver,
+                        presolve=presolve,
+                        presolve_polynomial=presolve_polynomial,
+                        presolve_reverse_ad=presolve_reverse_ad,
+                        in_tree_presolve_stride=in_tree_presolve_stride,
+                        eigenvalue_root_bound=eigenvalue_root_bound,
+                        relaxation_arithmetic=relaxation_arithmetic,
+                        subnlp_enabled=subnlp_enabled,
+                        subnlp_backend=subnlp_backend,
+                        subnlp_frequency=subnlp_frequency,
+                        subnlp_max_calls=subnlp_max_calls,
+                        subnlp_options=subnlp_options,
+                        structure_cuts=structure_cuts,
+                        root_cut_rounds=root_cut_rounds,
+                        root_cut_max=root_cut_max,
+                        _lns_enabled=_lns_enabled,
+                        rens=rens,
+                        **kwargs,
                     )
                     if _ipx_probe is not None:
                         return _ipx_probe
+                    if _ipx_probe_nodes > 0:
+                        # The probe lost. Charge its nodes against the caller's
+                        # budget: `max_nodes` is ONE work budget for this call, and
+                        # handing the full amount to each arm in turn lets a caller
+                        # using it as a bound get up to 2x the nodes it asked for
+                        # (review finding 6). Floored at 1 so the lifted arm still
+                        # runs -- a probe cannot silently consume the whole search.
+                        max_nodes = max(1, max_nodes - _ipx_probe_nodes)
+                        # Surfaced as `cheap_first/probe_nodes`, because the
+                        # `node_count` of the answer below covers only the winning
+                        # arm and would otherwise hide this search entirely.
+                        _IPX_PROBE_NODES.set(_IPX_PROBE_NODES.get() + _ipx_probe_nodes)
             if _ipx_adopt:
                 model = _ipx
                 model._convexity_classification_cache = None

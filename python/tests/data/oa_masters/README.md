@@ -45,3 +45,16 @@ fixture.
 Tolerances against this fixture must be **absolute**. `|z_star|max` is 3.3e8, so
 a scale-relative gate at 1e-9 is a slack of 0.86 — larger than the 0.017 cut
 violation that caused the defect, which is exactly how it was missed once.
+
+The rule was then broken by the very tests that cite it (#1280 review, finding
+9): `1e-6 * abs(attained)` reads as tight and is **331.8** here, catching the
+7839 objective defect with only a 24x margin. The slacks now used are measured on
+this fixture, not chosen — against `z_star_objective = 331837498.17693394` the
+backends land at `auto` −1.67e-4, `simplex` −1.67e-4, `highs` −1.64e-4 (all
+*below* it, i.e. no excess at all) and `pounce` +0.32, the worst legitimate
+excess. Hence **1.0** for the in-house driver and **10.0** for the cross-backend
+comparison, a detection margin of ~800x rather than 24x.
+
+If you add a check here, state the number in objective units and say what
+measurement it came from. "1e-6" of anything is not a tolerance on a 3.3e8
+objective, it is a scale factor wearing one.
