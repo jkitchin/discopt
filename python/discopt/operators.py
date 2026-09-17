@@ -79,8 +79,9 @@ from __future__ import annotations
 import logging
 import math
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Callable, Iterator, Optional
 
 import numpy as np
 
@@ -408,6 +409,34 @@ def clear_registered(name: Optional[str] = None) -> None:
             _REGISTRY.clear()
         else:
             _REGISTRY.pop(name, None)
+
+
+@contextmanager
+def registry_snapshot() -> "Iterator[None]":
+    """Restore the registry on exit — isolation for a test that registers or clears.
+
+    ``clear_registered()`` is process-global, so a test that calls it for a clean
+    slate also drops registrations *other* modules made at import time. Nothing
+    raises when that happens: ``atom_of`` returns None for the dropped tag and the
+    model relaxes term-by-term, which is sound, so the only symptom is an envelope
+    silently going unused. #1293's module-level atom was unregistered exactly this
+    way by an unrelated test sharing its xdist worker, and the failure surfaced
+    only as ``use_count == 0`` in CI's parallel lane.
+
+    Wrap the clear instead of leaving the registry wiped::
+
+        with registry_snapshot():
+            clear_registered()
+            ...
+    """
+    with _LOCK:
+        saved = dict(_REGISTRY)
+    try:
+        yield
+    finally:
+        with _LOCK:
+            _REGISTRY.clear()
+            _REGISTRY.update(saved)
 
 
 def atom_of(expr: object) -> Optional[tuple]:
