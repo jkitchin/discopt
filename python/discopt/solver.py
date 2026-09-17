@@ -6555,6 +6555,26 @@ def _cmir_aggregation_enabled() -> bool:
 #: UN-LIFTED model through ``solve_model`` itself, and must not probe again.
 _IPX_CHEAP_FIRST_IN_PROBE = False
 
+#: Absolute ceiling on the #1236 cheap-first probe, in seconds.
+#:
+#: The fraction below must NOT be the only bound: a carve taken purely as a share
+#: of ``time_limit`` grows without limit, so at the default 3600 s limit the probe
+#: would be granted 1440 s of preprocessing before the search starts. That is the
+#: #1153 pathology exactly -- a bigger budget buying more preprocessing instead of
+#: more search, measured there as ``nvs19`` returning a WORSE answer at 60 s than
+#: at 30 s -- and ``test_1153_budget_monotonicity`` refuses an uncapped carve.
+#:
+#: The ceiling is absolute because the probe's requirement is absolute, not
+#: proportional: what it has to clear is the slowest un-lifted certify time on the
+#: adopted population, 20.41 s (``ex1263``), with every other must-keep instance an
+#: order of magnitude below it (next-slowest 4.26 s). 30 s clears that with margin
+#: and bounds the waste at any caller budget.
+#:
+#: Below a ~51 s limit the fraction binds instead and the probe gets less than
+#: ``ex1263`` needs; it then fails to certify and the lift is adopted, which is the
+#: pre-#1236 behaviour -- the conservative direction, and never a wrong answer.
+_IPX_PROBE_BUDGET_CAP_S = 30.0
+
 #: Fraction of the caller's limit the #1236 cheap-first probe may spend.
 #:
 #: 0.40 is measured, not chosen. On the adopted population of both in-repo corpora
@@ -6595,7 +6615,10 @@ def _ipx_unlifted_probe(model, time_limit, elapsed, **solve_kwargs) -> Optional[
     global _IPX_CHEAP_FIRST_IN_PROBE
     if _IPX_CHEAP_FIRST_IN_PROBE:
         return None
-    budget = _IPX_PROBE_BUDGET_FRACTION * float(time_limit) - float(elapsed)
+    # Carved as a fraction of the caller's limit but CAPPED absolutely, so the
+    # grant saturates instead of tracking `time_limit` upward forever (#1153).
+    carve = min(_IPX_PROBE_BUDGET_FRACTION * float(time_limit), _IPX_PROBE_BUDGET_CAP_S)
+    budget = carve - float(elapsed)
     if not np.isfinite(budget) or budget <= 0.0:
         return None
 
