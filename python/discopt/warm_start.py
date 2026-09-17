@@ -469,7 +469,13 @@ def _repair_discrete(model: Model, x: np.ndarray, cols: list[int], evaluator):
 # --------------------------------------------------------------------------- #
 # Primal-dual warm start (#1247)
 # --------------------------------------------------------------------------- #
-def primal_point_from_result(model: Model, result) -> np.ndarray:
+def primal_point_from_result(
+    model: Model,
+    result,
+    *,
+    tol_bounds: float = 1e-6,
+    clamp: bool = True,
+) -> np.ndarray:
     """Flatten a :class:`~discopt.modeling.core.SolveResult`'s ``x`` for ``model``.
 
     Uses the same ordering contract as :func:`validate_initial_solution` and
@@ -481,6 +487,16 @@ def primal_point_from_result(model: Model, result) -> np.ndarray:
     name or a wrong shape). It refuses rather than filling a default: a warm
     start silently completed from a different model is a warm start that quietly
     does nothing, which is the failure this function exists to make impossible.
+
+    #1316: values outside the model's **current** bounds are clamped and warned
+    about, exactly as :func:`validate_initial_solution` already did for
+    ``initial_solution``. A warm start comes from an *earlier* solve, so a bound
+    that moved in between (the per-condition bounds of a phase-diagram trace, say)
+    leaves the previous point outside the box — and this vector is not only a
+    starting point, it is offered to the B&B tree as an incumbent. An unclamped
+    one was accepted as a certified optimum whose value is unreachable inside the
+    real feasible region. ``clamp=False`` returns the raw point for a caller that
+    means to inspect it rather than solve from it.
     """
     if getattr(result, "x", None) is None:
         raise ValueError(
@@ -489,6 +505,8 @@ def primal_point_from_result(model: Model, result) -> np.ndarray:
         )
     x_by_name = result.x
     chunks: list[np.ndarray] = []
+    n_clamped = 0
+    clamped_names: list[str] = []
     for v in model._variables:
         if v.name not in x_by_name:
             raise ValueError(
@@ -501,7 +519,25 @@ def primal_point_from_result(model: Model, result) -> np.ndarray:
                 f"warm start: variable {v.name!r} has {v.size} scalar entries in this model "
                 f"but {arr.size} in the previous result."
             )
+        if clamp:
+            lb_flat = np.asarray(v.lb, dtype=np.float64).ravel()
+            ub_flat = np.asarray(v.ub, dtype=np.float64).ravel()
+            outside = int(
+                np.count_nonzero((arr < lb_flat - tol_bounds) | (arr > ub_flat + tol_bounds))
+            )
+            if outside:
+                n_clamped += outside
+                clamped_names.append(v.name)
+                arr = np.clip(arr, lb_flat, ub_flat)
         chunks.append(arr)
+    if n_clamped:
+        warnings.warn(
+            f"warm start: {n_clamped} value(s) from the previous solve lie outside this "
+            f"model's current bounds ({', '.join(clamped_names)}); clamping to [lb, ub]. "
+            "A bound changed between the two solves, so the previous point is no longer "
+            "feasible here.",
+            stacklevel=3,
+        )
     if not chunks:
         return np.zeros(0, dtype=np.float64)
     return np.concatenate(chunks)

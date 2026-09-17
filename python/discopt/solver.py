@@ -3000,6 +3000,40 @@ def _extract_variable_info(model: Model):
 _FEAS_SMALL_ROW_ABS_FLOOR = _validation_small_row_abs_floor
 
 
+def _point_within_variable_box(evaluator, x, tol: float = 1e-6) -> bool:
+    """Whether ``x`` lies inside the evaluator's own variable box.
+
+    #1316: the incumbent-acceptance guards checked integrality and the general
+    constraint rows but never the variable bounds, and neither does Rust's
+    ``TreeManager::inject_incumbent`` (it accepts any ``(solution, obj)`` pair
+    that improves). A stale warm start — a point from an earlier solve taken
+    before a bound moved — was therefore injected as an incumbent and reported as
+    a CERTIFIED optimum whose value is unreachable inside the model's actual
+    feasible region. That is a false ``optimal``, the worst class of error
+    (CLAUDE.md §1).
+
+    The box is the evaluator's, so it is the box of the model the solver actually
+    built (reformulation-added columns included) and matches ``x``'s layout by
+    construction. ``tol`` is the same 1e-6 bound tolerance
+    :func:`~discopt.warm_start.validate_initial_solution` clamps at, so a point
+    that merely sits on a bound within solver tolerance still passes.
+
+    Raises ``AttributeError`` if the evaluator exposes no ``variable_bounds``
+    rather than waving the point through: a guard that cannot see the box must
+    not answer "feasible" (CLAUDE.md §7).
+    """
+    lb, ub = evaluator.variable_bounds
+    lb = np.asarray(lb, dtype=np.float64).ravel()
+    ub = np.asarray(ub, dtype=np.float64).ravel()
+    xv = np.asarray(x, dtype=np.float64).ravel()
+    if xv.size != lb.size:
+        raise ValueError(
+            f"_point_within_variable_box: point has {xv.size} entries but the "
+            f"evaluator's box has {lb.size}."
+        )
+    return bool(np.all(xv >= lb - tol) and np.all(xv <= ub + tol))
+
+
 def _check_constraint_feasibility(evaluator, x, cl_list, cu_list, tol=1e-4):
     """Return True if x satisfies all constraints within tolerance.
 
@@ -11880,6 +11914,20 @@ def solve_model(
     # ``_gap_certified`` at call time so the surfaced ``best_bound`` honors the
     # A1 taint gate exactly like the batch path.
     def _inject_incumbent(x_cand, obj_cand):
+        # #1316: box feasibility, before anything else. Every non-batch injection
+        # on this path funnels through here, so one check covers the warm start,
+        # every primal heuristic and every completeness guard — and the Rust tree
+        # performs none of its own. A point outside the model's variable box is
+        # not a feasible point of the model, so accepting it as an incumbent can
+        # only produce a false optimum or a false upper bound.
+        if not _point_within_variable_box(evaluator, x_cand):
+            logger.warning(
+                "Rejected an incumbent candidate that violates the model's variable "
+                "bounds (obj=%.6g). A warm start taken before a bound moved is the "
+                "usual cause; the search continues without it.",
+                obj_cand,
+            )
+            return False
         if (lazy_constraints is not None or incumbent_callback is not None) and (
             not _screen_heuristic_incumbent(
                 model=model,
@@ -12822,8 +12870,16 @@ def solve_model(
                 evaluator, initial_point, cl_list, cu_list
             )
             if ws_con_feas:
-                _inject_incumbent(initial_point, ws_obj)
-                logger.info("Warm-start incumbent injected: obj=%.6g", ws_obj)
+                # #1316: the log line used to fire unconditionally, whatever the
+                # injection returned — so a rejected point read as an accepted one.
+                if _inject_incumbent(initial_point, ws_obj):
+                    logger.info("Warm-start incumbent injected: obj=%.6g", ws_obj)
+                else:
+                    logger.info(
+                        "Warm-start point was not accepted as an incumbent (obj=%.6g); "
+                        "using it as an NLP starting point only",
+                        ws_obj,
+                    )
             else:
                 logger.info(
                     "Warm-start point is integer-feasible but violates "
@@ -18082,9 +18138,18 @@ def _solve_nlp_bb(
             ws_con_feas = not cl_list or _check_constraint_feasibility(
                 evaluator, initial_point, cl_list, cu_list
             )
-            if ws_con_feas:
+            if ws_con_feas and _point_within_variable_box(evaluator, initial_point):
                 tree.inject_incumbent(initial_point, ws_obj)
                 logger.info("NLP-BB warm-start incumbent: obj=%.6g", ws_obj)
+            elif ws_con_feas:
+                # #1316: same guard as the spatial path's ``_inject_incumbent``.
+                # Rust's ``inject_incumbent`` validates nothing, so an
+                # out-of-bounds point would become a certified optimum here too.
+                logger.warning(
+                    "NLP-BB warm-start point violates the model's variable bounds "
+                    "(obj=%.6g); not injecting it as an incumbent.",
+                    ws_obj,
+                )
 
     # --- Feasibility pump flag ---
     _fp_ran = False

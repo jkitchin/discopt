@@ -47,8 +47,15 @@ __all__ = ["solve_batch"]
 #: Solve keyword arguments that cannot cross a process boundary. Callbacks close
 #: over the caller's objects, so a worker could not run them even if the pickle
 #: succeeded; refusing names the fix instead of failing inside the pool.
+#:
+#: ``warm_start`` is here for the reason this module's docstring gives for a
+#: solved ``Model``: a ``SolveResult`` returned by ``Model.solve()`` carries a
+#: live back-reference to that model (``result._model``), whose solve left a Rust
+#: ``PyModelRepr`` behind, so pickling it raises ``TypeError: cannot pickle
+#: 'module' object`` from inside ``concurrent.futures`` — aborting the WHOLE batch
+#: with no mention of ``warm_start`` and no guidance (#1316).
 _UNSENDABLE_KWARGS = frozenset(
-    {"lazy_constraints", "incumbent_callback", "node_callback", "debug", "tuning"}
+    {"lazy_constraints", "incumbent_callback", "node_callback", "debug", "tuning", "warm_start"}
 )
 
 #: Result fields that may hold backend objects with no pickle support. Dropped
@@ -228,12 +235,20 @@ def solve_batch(
     if workers == 1 or len(model_list) <= 1:
         return [_solve_locally(m, solve_kwargs) for m in model_list]
 
-    unsendable = sorted(_UNSENDABLE_KWARGS.intersection(solve_kwargs))
+    unsendable = sorted(
+        k for k in _UNSENDABLE_KWARGS.intersection(solve_kwargs) if solve_kwargs[k] is not None
+    )
     if unsendable:
+        detail = (
+            " A warm_start SolveResult holds a live reference to the model it came from, "
+            "whose solve left a Rust handle behind, so it cannot be pickled."
+            if "warm_start" in unsendable
+            else ""
+        )
         raise ValueError(
             f"solve_batch(workers={workers}) cannot forward {unsendable} to a worker process: "
-            "callbacks and debug handles close over objects that only exist in this process. "
-            "Drop them, or use workers=1."
+            "callbacks and debug handles close over objects that only exist in this process."
+            f"{detail} Drop them, or use workers=1."
         )
 
     import discopt.modeling as dm
