@@ -3052,7 +3052,7 @@ def _check_constraint_feasibility(evaluator, x, cl_list, cu_list, tol=1e-4):
         from discopt._relax.primal_heuristics import _scale_from_jacobian
 
         jac = np.asarray(evaluator.evaluate_jacobian(x), dtype=np.float64)
-        grad = _feas_row_gradient_norms(jac)[:n_check]
+        grad = _feas_improving_row_norms(evaluator, jac, x, cons, cl, cu, n_check)
         scale = np.asarray(_scale_from_jacobian(jac, x), dtype=np.float64)[:n_check]
     except Exception as exc:  # noqa: BLE001 - reported, never silently accepted
         # No gradient means no distance estimate, hence no cap; the absolute test
@@ -3062,6 +3062,24 @@ def _check_constraint_feasibility(evaluator, x, cl_list, cu_list, tol=1e-4):
     if grad.size != n_check or scale.size != n_check:
         return True
     return bool(np.all(viol <= _feas_distance_cap(grad, scale)))
+
+
+def _feas_improving_row_norms(evaluator, jac, x, cons, cl, cu, n_check):
+    """Row gradient norms over improving in-box, continuous moves (#1284).
+
+    A column pinned at the bound that blocks its improving direction, or an
+    integer column, cannot move a point toward the row, so it must not set the
+    distance cap. Evaluators with no variable box keep the plain sup-norm.
+    """
+    from discopt.validation.feasibility import evaluator_box, improving_gradient_norms
+
+    box = evaluator_box(evaluator)
+    if box is None or box[0].size != jac.shape[1]:
+        return _feas_row_gradient_norms(jac)[:n_check]
+    c = np.asarray(cons, dtype=np.float64)[:n_check]
+    direction = np.where(c > cu[:n_check], 1.0, np.where(c < cl[:n_check], -1.0, 0.0))
+    lb, ub, int_mask = box
+    return improving_gradient_norms(jac[:n_check], x, lb, ub, direction, int_mask)
 
 
 # Tolerance shared by the two conditions of :func:`_weakly_active_crossover` —
