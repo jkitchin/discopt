@@ -198,7 +198,11 @@ def _dec_array(obj: Any, shape: tuple[int, ...]) -> np.ndarray:
 
 
 def _enc_index(index: Any) -> Any:
-    """Encode an ``IndexExpression`` index (int, tuple, slice, or a mix)."""
+    """Encode an ``IndexExpression`` index (int, bool, tuple, slice, or a mix)."""
+    # before the int test: ``bool`` subclasses ``int``, and numpy reads ``x[True]``
+    # as a new axis, not ``x[1]`` (#1290)
+    if isinstance(index, (bool, np.bool_)):
+        return {"k": "bool", "v": bool(index)}
     if isinstance(index, (int, np.integer)):
         return {"k": "int", "v": int(index)}
     if isinstance(index, slice):
@@ -220,11 +224,41 @@ def _dec_index(obj: Any) -> Any:
     kind = obj["k"]
     if kind == "int":
         return int(obj["v"])
+    if kind == "bool":
+        if not isinstance(obj["v"], bool):
+            raise SerializationError(f"bool index holds {obj['v']!r}")
+        return obj["v"]
     if kind == "slice":
         return slice(obj["start"], obj["stop"], obj["step"])
     if kind == "tuple":
         return tuple(_dec_index(i) for i in obj["v"])
     raise SerializationError(f"unknown index kind {kind!r}")
+
+
+def _enc_axis(axis: Any) -> Any:
+    """Encode a ``SumExpression`` axis: ``None``, an int, or a tuple of ints (#1290)."""
+    if axis is None:
+        return None
+    if isinstance(axis, (int, np.integer)) and not isinstance(axis, (bool, np.bool_)):
+        return int(axis)
+    if isinstance(axis, tuple) and all(
+        isinstance(a, (int, np.integer)) and not isinstance(a, (bool, np.bool_)) for a in axis
+    ):
+        return [int(a) for a in axis]
+    raise SerializationError(
+        f"cannot serialize sum axis {axis!r} of type {type(axis).__name__}; "
+        "only None, an integer, or a tuple of integers is supported."
+    )
+
+
+def _dec_axis(obj: Any) -> Any:
+    if obj is None:
+        return None
+    if isinstance(obj, int) and not isinstance(obj, bool):
+        return obj
+    if isinstance(obj, list) and all(isinstance(a, int) and not isinstance(a, bool) for a in obj):
+        return tuple(obj)
+    raise SerializationError(f"invalid sum axis {obj!r}")
 
 
 # ── expression DAG ─────────────────────────────────────────────────────────
@@ -326,7 +360,7 @@ class _NodeTable:
             return {
                 "op": "sum",
                 "a": self._ref(node.operand),
-                "axis": None if node.axis is None else int(node.axis),
+                "axis": _enc_axis(node.axis),
             }
         if t is SumOverExpression:
             return {"op": "sum_over", "args": [self._ref(a) for a in node.terms]}
@@ -454,7 +488,7 @@ def _decode_nodes(table: list[dict], variables: list[Variable], params: list[Par
         elif op == "matmul":
             built.append(MatMulExpression(built[nd["a"]], built[nd["b"]]))
         elif op == "sum":
-            built.append(SumExpression(built[nd["a"]], nd["axis"]))
+            built.append(SumExpression(built[nd["a"]], _dec_axis(nd["axis"])))
         elif op == "sum_over":
             built.append(SumOverExpression([built[a] for a in nd["args"]]))
     return built
