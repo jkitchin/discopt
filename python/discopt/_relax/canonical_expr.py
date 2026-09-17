@@ -175,13 +175,14 @@ class _Canonicalizer:
         self.model = model
         self.n_vars = sum(v.size for v in model._variables)
         self._intern: dict[tuple, CNode] = {}
-        # id(expr) -> CNode. NOTE: this is the id()-fragility class the module
-        # replaces, now confined to the memo layer: the dict holds int keys and
-        # never pins the source Expression, so it is valid ONLY while the source
-        # trees are live (a GC'd expr whose id is later reused by a different expr
-        # would return a stale CNode). Within one build the model pins every
-        # subtree, so it is safe; do not retain a memo/DAG past its model's life.
-        self._memo: dict[int, CNode] = {}
+        # id(expr) -> (expr, CNode). Each entry PINS its source Expression, so an
+        # id() in the memo can never be recycled by a different expression while
+        # the entry exists. Pinning by the model alone is not enough: the sum
+        # branch canonicalizes temporary element expressions from
+        # ``scalar_elements``, which are freed on return, and a later temporary
+        # reusing the address got the stale CNode of a different term — a false
+        # certified bound (#1283).
+        self._memo: dict[int, tuple[Expression, CNode]] = {}
         self._opaque_counter = itertools.count()
 
     # -- interning ---------------------------------------------------------- #
@@ -395,12 +396,13 @@ class _Canonicalizer:
     def canon(self, expr: Expression) -> CNode:
         cached = self._memo.get(id(expr))
         if cached is not None:
-            return cached
+            assert cached[0] is expr, "canonical memo id() collision (#1283)"
+            return cached[1]
         try:
             node = self._canon_dispatch(expr)
         except UnsupportedCanonicalization:
             node = self._opaque(expr)
-        self._memo[id(expr)] = node
+        self._memo[id(expr)] = (expr, node)
         return node
 
     def _canon_dispatch(self, expr: Expression) -> CNode:
@@ -559,12 +561,11 @@ class CanonicalDAG:
     #: ``Constraint`` that row ``r`` came from. Rows of one array-valued
     #: constraint are contiguous and in row-major (``np.ravel``) order.
     constraint_index: tuple[int, ...]
-    #: The scalar body expression behind each row. Held for two reasons: it pins
-    #: the freshly built element expressions so their ``id()`` cannot be recycled
-    #: under ``_memo`` (the stale-``id()`` hazard :meth:`cnode_of` documents), and
-    #: it lets callers recover the row's expression without re-scalarizing.
+    #: The scalar body expression behind each row, so callers can recover the
+    #: row's expression without re-scalarizing.
     constraint_exprs: tuple[Expression, ...]
-    _memo: dict[int, CNode]
+    #: ``id(expr) -> (expr, CNode)``; every entry pins its key expression (#1283).
+    _memo: dict[int, tuple[Expression, CNode]]
     _intern: dict[tuple, CNode]
 
     def cnode_of(self, expr: Expression) -> CNode:
@@ -576,7 +577,7 @@ class CanonicalDAG:
         """
         cached = self._memo.get(id(expr))
         if cached is not None:
-            return cached
+            return cached[1]
         # A node not seen during the original walk (e.g. a freshly distributed
         # tree): canonicalize it now against the same intern table so identical
         # structure still maps to the same CNode.
