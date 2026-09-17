@@ -95,6 +95,12 @@ pub struct TreeStats {
     /// tell "tree drained rigorously" (may certify `Infeasible` on an empty
     /// tree) from "tree drained with unproven removals" (may not).
     pub unresolved_floor: f64,
+    /// True when an integral node's own relaxation value came in BELOW the
+    /// bound it inherited from its ancestors (#1296). The node's box is a subset
+    /// of every ancestor's, so a feasible point there proves some ancestor bound
+    /// was not a valid lower bound — the tree's dual bound cannot be trusted,
+    /// and a driver must not certify from it.
+    pub bound_contradicted: bool,
 }
 
 /// Internal buffer for results waiting to be processed.
@@ -117,6 +123,11 @@ struct PendingResult {
     /// Carried through from [`NodeResult::certified_infeasible`] — the node's
     /// region was PROVEN empty, so it prunes regardless of the incumbent (#956 T3').
     certified_infeasible: bool,
+    /// The RAW imported `NodeResult::lower_bound`, before the parent floor. For a
+    /// trusted integral node this is the relaxation's value AT the returned
+    /// point, which is what the incumbent must record (#1296): the floored value
+    /// is a bound on the box, not the objective of the point.
+    raw_lower_bound: f64,
 }
 
 /// Record of a branching decision at a node, used for retroactive
@@ -215,6 +226,8 @@ pub struct TreeManager {
     /// search only certify) if every such removed subtree is provably within
     /// tolerance of the incumbent — which is exactly the rigorous criterion.
     unresolved_floor: f64,
+    /// See [`TreeStats::bound_contradicted`] (#1296). Never cleared within a solve.
+    bound_contradicted: bool,
     /// R3a measurement counter (temporary, behavior-neutral): per-variable
     /// branch frequency. Incremented once per branching event (integer or
     /// spatial) with the branched flat column index. Length `n_vars`. Read by
@@ -281,6 +294,7 @@ impl TreeManager {
             obj_lattice: None,
             bound_unresolved: false,
             unresolved_floor: f64::INFINITY,
+            bound_contradicted: false,
             branch_var_counts: vec![0; n_vars],
             sos1_selector_cols: Vec::new(),
             root_seed: f64::NEG_INFINITY,
@@ -502,6 +516,7 @@ impl TreeManager {
                 // promoted to the incumbent, so it is untrusted here too.
                 bound_trusted: r.lower_bound.is_finite() && r.lower_bound < SENTINEL_THRESHOLD,
                 certified_infeasible: r.certified_infeasible,
+                raw_lower_bound: r.lower_bound,
             }));
     }
 
@@ -610,8 +625,18 @@ impl TreeManager {
                     self.pool.get_mut(result.node_id).status = NodeStatus::Fathomed;
                     stats.fathomed += 1;
 
-                    if node_lb < self.incumbent_value {
-                        self.incumbent_value = node_lb;
+                    // #1296: record the point's own value, not `node_lb`. The two
+                    // differ only when an ancestor's bound exceeds a value this
+                    // box actually attains — i.e. that bound was invalid. The
+                    // floored value then paired a point with an objective it does
+                    // not have (reported objective != c·x), and the tree's dual
+                    // bound is no longer a certificate.
+                    let value = result.raw_lower_bound;
+                    if node_lb > value + 1e-6 * (1.0 + value.abs()) {
+                        self.bound_contradicted = true;
+                    }
+                    if value < self.incumbent_value {
+                        self.incumbent_value = value;
                         self.incumbent_solution = Some(result.solution.clone());
                         stats.incumbent_updates += 1;
                     }
@@ -1014,6 +1039,7 @@ impl TreeManager {
             gap: self.gap(),
             bound_unresolved: self.bound_unresolved,
             unresolved_floor: self.unresolved_floor,
+            bound_contradicted: self.bound_contradicted,
         }
     }
 
@@ -2483,5 +2509,74 @@ mod tests {
         // The seed can never lift the reported bound above the incumbent.
         tm.seed_root_bound(0.9);
         assert_eq!(tm.global_lower_bound, 0.3);
+    }
+
+    /// Root at bound `root_lb` branched on a fractional point; returns the manager
+    /// and the id of one child, whose inherited bound is `root_lb`.
+    fn branched_child(root_lb: f64) -> (TreeManager, NodeId) {
+        let mut tm = TreeManager::new(
+            1,
+            vec![0.0],
+            vec![10.0],
+            vec![VarBranchInfo {
+                offset: 0,
+                size: 1,
+                is_integer: true,
+            }],
+            SelectionStrategy::BestFirst,
+        );
+        tm.initialize();
+        let batch = tm.export_batch(1);
+        tm.import_results(&[NodeResult {
+            node_id: batch.node_ids[0],
+            lower_bound: root_lb,
+            solution: vec![3.5],
+            is_feasible: false,
+            certified_infeasible: false,
+        }]);
+        assert_eq!(tm.process_evaluated().branched, 1);
+        let batch = tm.export_batch(1);
+        assert_eq!(batch.node_ids.len(), 1);
+        (tm, batch.node_ids[0])
+    }
+
+    /// #1296: an integral node whose relaxation value is BELOW its inherited bound
+    /// proves that bound invalid. The incumbent must record the point's own value
+    /// (before the fix it recorded the floored 3.0, so objective != c·x), and the
+    /// tree must flag that its dual bound is no certificate.
+    #[test]
+    fn integral_node_below_inherited_bound_flags_contradiction() {
+        let (mut tm, child) = branched_child(3.0);
+        assert!(!tm.stats().bound_contradicted);
+        tm.import_results(&[NodeResult {
+            node_id: child,
+            lower_bound: 1.0,
+            solution: vec![3.0],
+            is_feasible: true,
+            certified_infeasible: false,
+        }]);
+        let stats = tm.process_evaluated();
+        assert_eq!(stats.incumbent_updates, 1);
+        assert_eq!(tm.incumbent().unwrap().1, 1.0);
+        assert!(tm.stats().bound_contradicted);
+    }
+
+    /// The consistent case keeps the certificate: a value at or above the inherited
+    /// bound (within tolerance) is what every valid tree produces.
+    #[test]
+    fn integral_node_at_or_above_inherited_bound_keeps_certificate() {
+        for raw in [4.0, 3.0, 3.0 - 1e-7] {
+            let (mut tm, child) = branched_child(3.0);
+            tm.import_results(&[NodeResult {
+                node_id: child,
+                lower_bound: raw,
+                solution: vec![3.0],
+                is_feasible: true,
+                certified_infeasible: false,
+            }]);
+            tm.process_evaluated();
+            assert_eq!(tm.incumbent().unwrap().1, raw);
+            assert!(!tm.stats().bound_contradicted, "raw {raw} flagged");
+        }
     }
 }
