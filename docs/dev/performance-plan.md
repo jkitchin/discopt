@@ -9584,3 +9584,72 @@ on the instance the PR targets, not the convex-kernel path, where
 `substitute_slacks` really does apply no cleanup. That path's exposure is now
 bounded at the separator instead — §71.1 refuses an all-tiny cut before either
 substitution runs, which is the case that could actually have hurt the kernel.
+
+## 72. #1236 item B falsified by its own review: node count was the wrong metric (2026-09-17)
+
+`DISCOPT_IPX_CHEAP_FIRST` shipped **default-ON** in §70 on a graduation panel
+reporting "total 4208 -> 3636 nodes (-13.6 %), 4 fewer, 0 more, no instance
+regresses". The #1280 review's finding 6 pointed out that `SolveResult.node_count`
+covers only the WINNING arm, so a probe that loses is invisible. Chasing that
+produced two corrections, the second of which kills the flag.
+
+### 72.1 Retraction 1 — the −13.6 % omitted the probe's own nodes
+
+Measured with the new `solver_stats["cheap_first/probe_nodes"]`: on the two
+instances where the gate KEEPS the lift, the losing probe spent **2627 nodes
+(`ex1264`)** and **938 (`ex1265`)**. The saving it was credited with was 572
+nodes. So the published figure inverts: **4208 -> 7219, +71.6 %**, not −13.6 %.
+
+This is CLAUDE.md §6 exactly, and it is the fourth instrument in this issue to
+measure nothing and be believed. The tell was available and ignored: a panel
+whose denominator is "nodes of the arm that won" cannot score a mechanism whose
+cost is "the arm that lost".
+
+### 72.2 Retraction 2 — the whole premise, measured in wall clock
+
+Item B exists because the lift "is harmful more often than not over the adopted
+population". Every number behind that sentence (§68.1, §70.1) is a **node count**.
+Re-measured in wall clock on the same 12 instances — the complete population the
+gate can change — interleaved ON/OFF, 2 reps, 60 s, pooled sd ≤ 0.26 s:
+
+| | gate ON | gate OFF (lift adopted) |
+|---|---|---|
+| total wall | **81.6 s** | **7.4 s** |
+| total nodes | 11474 | 12328 |
+| certifications lost / gained | 0 / 0 | 0 / 0 |
+| instances where this arm is faster | 1 | **11** |
+
+An **11.1x slowdown for a 6.9 % node saving**. Per instance the lift wins by
+30.3x (`ex1264`), 33.0x (`prob03`), 24.2x (`prob02`), 16.5x (`ex1263`), 10.9x
+(`ex1265`); the only rows it loses are `nvs02` (3.4x) and `nvs14` (3.7x) — the
+very rows in #1236's table that motivated the whole item.
+
+**Why the metric inverted the answer.** The lifted model is a pure MILP on the
+in-house Rust simplex; the un-lifted model goes through spatial B&B with an NLP
+relaxation per node. The lift trades many cheap nodes for few expensive ones.
+`nvs02` is the lesson in one row:
+
+    lifted     297 nodes   0.31 s
+    un-lifted    3 nodes   1.06 s
+
+A node-count panel reads that as a **99 % improvement**. It is a 3.4x regression.
+
+### 72.3 Disposition
+
+Flag **defaulted OFF**, `=1` opts in. Kept rather than deleted, per the
+`DISCOPT_CUT_INHERIT` precedent CLAUDE.md §5 cites for this exact situation: the
+mechanism is sound (an ordinary complete solve of the original model, cert-clean
+on every panel run), it is tested, and the measurement is recorded. A wider corpus
+may hold a lift pathological enough to be worth a bounded premium — the MINLPLib
+snapshot was not reachable from this environment. **Re-graduating it requires a
+wall-clock panel**, not a node panel.
+
+The standing lesson, which is not specific to this flag: on this solver a node
+count is not a cost. Two formulations of the same model can differ by 100x in
+cost per node, so any comparison BETWEEN formulations (lift vs no lift, MILP route
+vs spatial route) must be made in wall clock. Node counts remain the right
+instrument WITHIN one formulation, which is what CLAUDE.md §5's bound-neutral
+regime uses them for.
+
+Note this does not touch #1236's correctness content. The two separator fixes
+(§69, §71.1–71.2) are independent of the flag and ship regardless.

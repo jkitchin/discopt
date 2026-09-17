@@ -6729,33 +6729,49 @@ def _ipx_unlifted_probe(
 def _ipx_cheap_first_enabled() -> bool:
     """Is the #1236 cheap-first lift gate on? ``DISCOPT_IPX_CHEAP_FIRST``.
 
-    **Default ON since the #1236 graduation panel**; ``=0`` is the opt-out, and
-    the legacy adopt-whenever-possible path stays intact behind it.
+    **Default OFF.** ``=1`` opts in. It shipped default-ON on a graduation panel
+    that measured the wrong quantity; the corrected measurement is below.
 
-    Graduation (CLAUDE.md §5 regime 2, both bars on one run):
+    Falsified: node count was the wrong metric (2026-09-17)
+    ------------------------------------------------------
+    The gate exists because the lift looked "harmful more often than not" over the
+    population it is adopted on. That was measured in NODE COUNT. Re-measured in
+    wall clock on the same 12 instances -- interleaved ON/OFF, 2 reps, 60 s limit,
+    pooled sd <= 0.26 s -- the lift is **faster on 11 of 12**, and the totals are:
 
-    *Cert-clean* — 66 in-repo instances at a 20 s limit, ON vs OFF: 0 certificate
-    violations either arm (sense-aware), 0 certifications lost, 0 gained, 0
-    objective drift above 1e-6.
+    ====================  ========  =========
+    metric                gate ON   gate OFF
+    ====================  ========  =========
+    total wall            81.6 s    **7.4 s**
+    total nodes           11474     12328
+    certifications lost   0         0
+    ====================  ========  =========
 
-    *Net-positive* — 62 node counts unchanged, **4 fewer, 0 more**: ``nvs02``
-    297 -> 3, ``nvs14`` 273 -> 3, ``tanksize`` 1932 -> 1926, ``nvs07`` 3 -> 1.
-    Total 4208 -> 3636 (-13.6 %). No instance regresses.
+    The gate is **11.1x slower** in wall clock for a 6.9 % node saving. Per
+    instance the lift wins by 30.3x (``ex1264``), 33.0x (``prob03``), 24.2x
+    (``prob02``), 16.5x (``ex1263``) -- and the two instances it loses on, it
+    loses by 3.4x and 3.7x (``nvs02``/``nvs14``, the very rows that motivated it).
 
-    Separately, on the full adopted population of both corpora (12 instances, the
-    only models this gate can change), it picks the better arm **12 of 12** --
-    including keeping the lift on ``ex1264``/``ex1265``, which certify only with
-    it, at 3425 and 1883 nodes.
+    Why the node metric inverted the answer: the lifted model is a pure MILP on
+    the in-house Rust simplex, so it takes MANY nodes that are each far cheaper
+    than an un-lifted spatial-B&B node carrying an NLP relaxation. ``nvs02`` is
+    the whole lesson in one row -- 297 lifted nodes in 0.31 s against 3 un-lifted
+    nodes in 1.06 s. A node-count panel reads that as a 99 % win for the gate.
+
+    Kept default-OFF rather than deleted, per the ``DISCOPT_CUT_INHERIT``
+    precedent in CLAUDE.md §5: the mechanism is sound and tested, the measurement
+    is recorded, and a wider corpus may yet contain a lift pathological enough to
+    justify the premium. Re-graduating it requires a WALL-CLOCK panel.
 
     What it gates
     -------------
     The integer-bilinear reformulation is adopted whenever it is *possible* -- the
     lift eliminates every nonlinear term -- never because it was shown to help.
-    Measured over the adopted population it is harmful more often than not
-    (§68.1): 6 instances solve in dramatically fewer nodes without it (``nvs02``
-    297 -> 3, ``nvs14`` 273 -> 3, ``ex1266`` 1409 -> 268, ``ex1263`` 4997 -> 2317,
-    ``prob02`` 37 -> 5, ``prob03`` 7 -> 5), 4 are unaffected, and 2 genuinely need
-    it -- ``ex1264``/``ex1265`` certify ONLY with the lift.
+    In node count it looks harmful on 6 of 12 (``nvs02`` 297 -> 3, ``nvs14``
+    273 -> 3, ``ex1266`` 1409 -> 268, ``ex1263`` 4997 -> 2317, ``prob02`` 37 -> 5,
+    ``prob03`` 7 -> 5), 4 unaffected, 2 essential (``ex1264``/``ex1265`` certify
+    ONLY with it). In wall clock that reads the other way round, which is why this
+    gate is off.
 
     Why this separator and not the obvious ones
     -------------------------------------------
@@ -6778,14 +6794,15 @@ def _ipx_cheap_first_enabled() -> bool:
     reformulations of the same problem, so the gate only ever decides which of two
     correct routes runs.
 
-    Cost: the probe's wall is charged against the caller's budget, so a model that
-    does need the lift reaches it with the remainder (measured sufficient above).
+    Cost: the probe's wall is charged against the caller's budget, and its nodes
+    against ``max_nodes``. On the adopted population that cost is the whole story
+    -- 74 s of the 81.6 s ON total is probe wall that bought nothing.
     """
-    return os.environ.get("DISCOPT_IPX_CHEAP_FIRST", "1").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
+    return os.environ.get("DISCOPT_IPX_CHEAP_FIRST", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
     )
 
 

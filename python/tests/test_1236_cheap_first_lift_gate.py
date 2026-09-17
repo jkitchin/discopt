@@ -1,23 +1,29 @@
-"""#1236 item B: the integer-bilinear lift must earn its adoption.
+"""#1236 item B: the integer-bilinear lift must earn its adoption -- DEFAULT OFF.
 
-The reformulation is adopted whenever it is *possible* -- the lift eliminates
-every nonlinear term -- never because it was shown to help. Measured over the
-population it is actually adopted on (12 instances across both in-repo corpora),
-it is harmful more often than not: `nvs02` 297 -> 3 nodes without it, `nvs14`
-273 -> 3, `ex1266` 1409 -> 268, `ex1263` 4997 -> 2317, `prob02` 37 -> 5,
-`prob03` 7 -> 5. Four instances are unaffected. Two genuinely need it --
-`ex1264` and `ex1265` certify ONLY with the lift.
+The gate was built because the lift, adopted whenever it is *possible* rather than
+because it helps, looked harmful over the 12 instances it applies to: `nvs02`
+297 -> 3 nodes without it, `nvs14` 273 -> 3, `ex1266` 1409 -> 268, `ex1263`
+4997 -> 2317, `prob02` 37 -> 5, `prob03` 7 -> 5, with `ex1264`/`ex1265` certifying
+ONLY with it.
 
-Two obvious separators are measured dead (performance-plan §68.3): root-bound
-tightness is *anti*-correlated with the outcome (the lift's root bound on nvs02
-equals the optimum to 12 digits and its tree still takes 297 nodes), and bit
-width cannot separate `ex1263`/`ex1266` from `ex1264`/`ex1265` because they are
-the same family at the same widths.
+**Every one of those numbers is a node count, and node count is the wrong metric
+here.** Re-measured in wall clock on the same 12 instances (interleaved ON/OFF,
+2 reps, 60 s, pooled sd <= 0.26 s) the lift is FASTER on 11 of 12: total 7.4 s
+with the lift against 81.6 s with the gate, an 11.1x slowdown for a 6.9 % node
+saving. `nvs02` is the lesson in one row -- 297 lifted nodes in 0.31 s against 3
+un-lifted nodes in 1.06 s -- because the lifted model is a pure MILP on the Rust
+simplex, so its many nodes are each far cheaper than a spatial-B&B node carrying
+an NLP relaxation.
 
-What does separate them is whether the un-lifted model closes at all, so
-``DISCOPT_IPX_CHEAP_FIRST`` measures that instead of predicting it. These tests
-pin the two ends of that behaviour and, above all, that the flag never costs a
-certificate.
+So the flag is **default-OFF**, kept (not deleted) per the `DISCOPT_CUT_INHERIT`
+precedent in CLAUDE.md §5: sound, tested, measured, re-graduatable on a
+wall-clock panel. These tests pin the mechanism -- it still picks the right ARM
+when enabled, and never costs a certificate -- and pin the default.
+
+The two obvious alternative separators remain measured dead (performance-plan
+§68.3): root-bound tightness is *anti*-correlated with the outcome, and bit width
+cannot separate `ex1263`/`ex1266` from `ex1264`/`ex1265`, which are the same
+family at the same widths.
 """
 
 from __future__ import annotations
@@ -101,21 +107,32 @@ def test_gate_keeps_a_lift_the_unlifted_path_cannot_close(name, reference, monke
 
 
 @pytest.mark.smoke
-def test_gate_is_on_by_default_with_an_opt_out(monkeypatch):
-    """Default ON since the §5 graduation panel, with the `=0` opt-out intact.
+def test_gate_is_off_by_default_with_an_opt_in(monkeypatch):
+    """Default OFF: the graduation panel measured node count, the wrong metric.
 
-    The opt-out is what keeps the legacy adopt-whenever-possible path reachable
-    and testable, which CLAUDE.md §5 requires of a graduated flag.
+    It shipped default-ON on "total 4208 -> 3636 (-13.6 %) nodes". Re-measured in
+    WALL CLOCK over the 12 instances the gate can change (interleaved, 2 reps,
+    60 s, pooled sd <= 0.26 s) the lift is faster on 11 of 12 and the totals are
+    81.6 s ON against 7.4 s OFF -- an 11.1x slowdown for a 6.9 % node saving.
+
+    The lifted model is a pure MILP on the Rust simplex: many nodes, each far
+    cheaper than an un-lifted spatial-B&B node carrying an NLP relaxation. So a
+    node-count panel reads `nvs02` 297 -> 3 as a 99 % win when the wall went
+    0.31 s -> 1.06 s.
+
+    Kept (default-OFF, `=1` opts in) per the `DISCOPT_CUT_INHERIT` precedent:
+    sound, tested, measured, and re-graduatable on a WALL-CLOCK panel.
     """
     import discopt.solver as solver_mod
 
     monkeypatch.delenv("DISCOPT_IPX_CHEAP_FIRST", raising=False)
-    assert solver_mod._ipx_cheap_first_enabled() is True
-    for off in ("0", "false", "no", "off"):
+    assert solver_mod._ipx_cheap_first_enabled() is False
+    for on in ("1", "true", "yes", "on"):
+        monkeypatch.setenv("DISCOPT_IPX_CHEAP_FIRST", on)
+        assert solver_mod._ipx_cheap_first_enabled() is True, on
+    for off in ("0", "false", "no", "off", ""):
         monkeypatch.setenv("DISCOPT_IPX_CHEAP_FIRST", off)
         assert solver_mod._ipx_cheap_first_enabled() is False, off
-    monkeypatch.setenv("DISCOPT_IPX_CHEAP_FIRST", "1")
-    assert solver_mod._ipx_cheap_first_enabled() is True
 
 
 # --- Review finding 1: the probe must solve the CALLER's problem ---------------
