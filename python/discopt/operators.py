@@ -37,7 +37,10 @@ relaxer needs is DERIVED from it:
   so the envelope is built from the function the solver actually evaluates;
 * the per-box curvature verdict comes from **interval arithmetic on ``f''``** —
   ``f'' >= 0`` on the box proves convex, ``f'' <= 0`` proves concave, anything
-  else abstains and the engine falls back to its interval floor.
+  else abstains and the engine falls back to its interval floor. ``diff`` takes
+  subgradients at kinks, so that ``f''`` is the true one only where no kink
+  (``abs``/``sign`` argument, pole, non-integer power's base at 0) can lie in
+  the box; a box that may contain one abstains too (#1293).
 
 So a registered operator cannot carry an unsound envelope: there is no
 user-supplied envelope to be unsound. #1248's acceptance asks that a deliberately
@@ -175,6 +178,7 @@ class RegisteredFunction:
         d1 = diff(body, t)
         d2 = diff(d1, t)
 
+        kinks = _kink_sites(body)
         value_ev = make_evaluator(probe)
 
         def f(x: float) -> float:
@@ -194,17 +198,23 @@ class RegisteredFunction:
             from discopt._relax.convexity.interval import Interval
             from discopt._relax.convexity.interval_eval import evaluate_interval
 
-            try:
-                enc = evaluate_interval(
-                    d2,
-                    probe,
-                    {
-                        t: Interval(
-                            np.asarray(float(lo), dtype=np.float64),
-                            np.asarray(float(hi), dtype=np.float64),
-                        )
-                    },
+            box = {
+                t: Interval(
+                    np.asarray(float(lo), dtype=np.float64),
+                    np.asarray(float(hi), dtype=np.float64),
                 )
+            }
+            try:
+                # ``diff`` takes subgradients at kinks (abs' = sign, sign' = 0), so
+                # f'' is blind to the kink's Dirac mass: -|t| read "convex" (#1293).
+                # The symbolic f'' is the true one only where every kink argument
+                # stays strictly on one side of its kink over the whole box.
+                for arg, positive_only in kinks:
+                    a = evaluate_interval(arg, probe, box)
+                    a_lo, a_hi = float(np.asarray(a.lo)), float(np.asarray(a.hi))
+                    if not (a_lo > 0.0 or (a_hi < 0.0 and not positive_only)):
+                        return None
+                enc = evaluate_interval(d2, probe, box)
             except Exception as exc:  # noqa: BLE001 - abstaining is always sound
                 logger.debug("curvature of atom %r abstained: %s", self.name, exc)
                 return None
@@ -240,6 +250,76 @@ class RegisteredFunction:
     def interval_expr(self, arg: "Expression") -> "Expression":
         """The lowering on ``arg`` — what an interval enclosure of the atom means."""
         return self.lower(arg)
+
+
+def _kink_sites(body: "Expression") -> list[tuple["Expression", bool]]:
+    """Arguments at which *body* is not twice differentiable, as ``(arg, positive_only)``.
+
+    The curvature verdict is a proof only where each ``arg`` excludes its kink on
+    the box: ``arg > 0``, or ``arg < 0`` too unless ``positive_only``. Covers
+    ``abs``/``sign`` (kink at 0), division and a negative integer power (pole at
+    0), and a non-integer or variable exponent (defined, and smooth, for a
+    positive base only). A node type this walk does not know raises, so the
+    verdict abstains rather than assuming it smooth.
+    """
+    from discopt.modeling.core import (
+        BinaryOp,
+        Constant,
+        FunctionCall,
+        IndexExpression,
+        MatMulExpression,
+        Parameter,
+        SumExpression,
+        SumOverExpression,
+        UnaryOp,
+        Variable,
+    )
+
+    sites: list[tuple["Expression", bool]] = []
+    seen: set[int] = set()
+    stack = [body]
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, (Constant, Parameter, Variable)):
+            continue
+        if isinstance(node, UnaryOp):
+            if node.op == "abs":
+                sites.append((node.operand, False))
+            stack.append(node.operand)
+        elif isinstance(node, FunctionCall):
+            if node.func_name in ("abs", "sign"):
+                sites.append((node.args[0], False))
+            stack.extend(node.args)
+        elif isinstance(node, BinaryOp):
+            if node.op == "/":
+                sites.append((node.right, False))
+            elif node.op == "**":
+                exp = node.right
+                if isinstance(exp, Constant) and exp.value.size == 1:
+                    c = float(exp.value.reshape(()))
+                    if c != math.floor(c):
+                        sites.append((node.left, True))
+                    elif c < 0:
+                        sites.append((node.left, False))
+                else:
+                    sites.append((node.left, True))
+            stack.extend((node.left, node.right))
+        elif isinstance(node, MatMulExpression):
+            stack.extend((node.left, node.right))
+        elif isinstance(node, SumExpression):
+            stack.append(node.operand)
+        elif isinstance(node, SumOverExpression):
+            stack.extend(node.terms)
+        elif isinstance(node, IndexExpression):
+            stack.append(node.base)
+        else:
+            raise NotImplementedError(
+                f"curvature: no kink rule for node type {type(node).__name__}"
+            )
+    return sites
 
 
 def register_function(
