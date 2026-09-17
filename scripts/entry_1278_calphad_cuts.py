@@ -37,8 +37,14 @@ envelopes discopt already builds on each NODE box. The tangent-plane cut that
 would actually help a CALPHAD pricing solve is the node-local one, and node-local
 cuts are exactly what the mechanism cannot hold.
 
-So the useful next step for this class is subtree-scoped cuts, not more cut
-GENERATION machinery. Recorded in docs/dev/performance-plan.md §68.
+Subtree-scoped cuts would NOT fix this, and an earlier draft wrongly said they
+would. The cut a plugin would actually write is a tangent plane of the Gibbs
+energy, valid only where Psi is CONVEX. On the real CU2MG phase, Psi is never
+certifiably convex on any sub-box down to a 1000x subdivision of the root box
+(0/12 at each of seven widths, against a convex control at 12/12 throughout) --
+structural, from the bilinear cross terms. So the cut is unsound at every node at
+every depth, regardless of scoping. No follow-up work is implied. Recorded in
+docs/dev/performance-plan.md §68.
 
 A note on the gate, which earned its keep here. The first version of the
 underestimator took its intercept from the worst residual on a 701x701 grid; the

@@ -9021,10 +9021,34 @@ McCormick/entropy envelopes discopt already builds on each node box*. The
 tangent-plane cut that would help a pricing solve is the node-local one, and
 node-local cuts are exactly what the mechanism cannot hold.
 
-**So the next useful thing for this class is subtree-scoped cuts, not more cut
-generation.** D's machinery is sound and complete for what it is; its acceptance
-criterion was written against a capability (local cuts) that the design then
-deliberately refused, for the false-certificate reason.
+### Subtree-scoped cuts would NOT fix this — withdrawn on measurement
+
+An earlier draft of this section, and a comment on #1248, concluded "the next
+useful thing for this class is subtree-scoped cuts". **That was inference, not
+evidence** — "the global cut is too weak, so a local one would help" does not
+establish that a local one would help, and it is exactly the speculative
+hand-off §4 forbids. Measured instead.
+
+The cut a CALPHAD plugin would actually write is a *tangent plane of the Gibbs
+energy*, which underestimates Ψ on a box only if Ψ is **convex** on that box. Over
+random sub-boxes of the real CU2MG phase, using the engine's own verdict
+(`_try_convex_lift`), with a convex control so the zeros mean something:
+
+| | w=1 | w=0.5 | w=0.25 | w=0.1 | w=0.02 | w=0.005 | w=0.001 |
+|---|---|---|---|---|---|---|---|
+| CU2MG Ψ | 0/12 | 0/12 | 0/12 | 0/12 | 0/12 | 0/12 | 0/12 |
+| **CONTROL convex** | **12/12** | **12/12** | **12/12** | **12/12** | **12/12** | **12/12** | **12/12** |
+
+Ψ is never certifiably convex on any sub-box down to a **1000× subdivision** of the
+root box — structural, from the bilinear cross terms, whose Hessian `[[0,c],[c,0]]`
+has eigenvalues ±|c| on every box. So a tangent-plane cut is unsound at every node
+at every depth, and **subtree scoping would not let the plugin write it**. The
+sound alternative, an αBB-corrected tangent, is machinery discopt already runs in
+its own relaxation.
+
+**Conclusion: no follow-up work is implied.** D's machinery is sound and complete
+for what it is; its acceptance criterion was written against a cut family that is
+unsound for this problem class regardless of how it is scoped.
 
 ### Two things measured along the way
 
