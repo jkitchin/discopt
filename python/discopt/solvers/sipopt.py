@@ -159,6 +159,7 @@ def pounce_sensitivity(
     eps: float = 1e-6,
     order: int = 1,
     method: str = "exact",
+    x0: Optional[np.ndarray] = None,
 ) -> SensitivityResult:
     """Solve an NLP with POUNCE and compute parametric sensitivity (sIPOPT).
 
@@ -195,6 +196,11 @@ def pounce_sensitivity(
         the right-hand side carries no truncation error and no step-size choice.
         ``"fd"`` re-forms it by central differences on the parameter values --
         kept as an independent cross-check of the exact path.
+    x0 : ndarray, optional
+        Starting point for the forward POUNCE solve, flat and in model variable
+        order.  On a nonconvex model this decides *which* KKT point the whole
+        sensitivity describes; without it the solve starts from the midpoint of
+        the clipped variable box (issue #1313).
 
     Returns
     -------
@@ -245,6 +251,7 @@ def pounce_sensitivity(
         verify_minimizer=False,  # a sensitivity is defined at any KKT point
         require_min=False,  # ... of whichever sense the model states
         full=True,
+        x0=x0,
     )
     n = phi.n_variables
     m_cons = phi.n_constraints

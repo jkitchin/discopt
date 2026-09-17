@@ -1048,6 +1048,27 @@ impl TreeManager {
         raw.max(0.0)
     }
 
+    /// Current **absolute** optimality gap, `incumbent - global_lb`.
+    ///
+    /// Infinite while either side is missing. Clamped at zero for the same
+    /// reason as [`TreeManager::gap`]: a bound above the incumbent is numerical
+    /// noise, not a closed search.
+    ///
+    /// Separate from [`TreeManager::gap`] because that one floors its
+    /// denominator at 1.0, which makes it *not* an absolute gap for
+    /// `|incumbent| > 1` and *not* a relative one for `|incumbent| < 1`. #1315:
+    /// `abs_gap_tolerance` was a no-op on this engine precisely because there
+    /// was no absolute quantity to compare it against.
+    pub fn absolute_gap(&self) -> f64 {
+        if self.incumbent_value >= f64::INFINITY {
+            return f64::INFINITY;
+        }
+        if self.global_lower_bound <= f64::NEG_INFINITY {
+            return f64::INFINITY;
+        }
+        (self.incumbent_value - self.global_lower_bound).max(0.0)
+    }
+
     /// Get aggregate tree statistics.
     pub fn stats(&self) -> TreeStats {
         TreeStats {
@@ -1825,6 +1846,37 @@ mod tests {
         tm.incumbent_value = 10.0;
         tm.global_lower_bound = 5.0;
         assert!((tm.gap() - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_absolute_gap_is_not_the_relative_one(/* #1315 */) {
+        let mut tm = TreeManager::new(
+            1,
+            vec![0.0],
+            vec![1.0],
+            vec![VarBranchInfo {
+                offset: 0,
+                size: 1,
+                is_integer: true,
+            }],
+            SelectionStrategy::BestFirst,
+        );
+        assert_eq!(tm.absolute_gap(), f64::INFINITY);
+
+        // Large objective: the relative gap is tiny where the absolute one is not.
+        tm.incumbent_value = 40_177.0;
+        tm.global_lower_bound = 36_103.0;
+        assert!((tm.absolute_gap() - 4074.0).abs() < 1e-9);
+        assert!(tm.gap() < 0.11);
+
+        // A bound above the incumbent is numerical noise, not a closed search:
+        // clamped to zero exactly as `gap()` does, never reported negative.
+        tm.global_lower_bound = 40_178.0;
+        assert_eq!(tm.absolute_gap(), 0.0);
+
+        // No incumbent, no gap.
+        tm.incumbent_value = f64::INFINITY;
+        assert_eq!(tm.absolute_gap(), f64::INFINITY);
     }
 
     #[test]

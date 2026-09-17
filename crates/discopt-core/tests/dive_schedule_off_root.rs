@@ -53,6 +53,7 @@ fn options() -> MilpOptions {
         max_nodes: 4_000,
         time_limit_s: Some(60.0),
         gap_tol: 1e-9,
+        abs_gap_tol: None,
         root_cuts: 0,
         cut_rounds: 0,
         gmi_cuts: false,

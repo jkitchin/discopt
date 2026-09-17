@@ -110,6 +110,7 @@ fn opts(inst: &Instance) -> MilpOptions {
         max_nodes: 2_000_000,
         time_limit_s: None,
         gap_tol: 1e-6,
+        abs_gap_tol: None,
         root_cuts: 16,
         cut_rounds: 2,
         gmi_cuts: true,
