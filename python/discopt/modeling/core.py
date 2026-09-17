@@ -7744,18 +7744,30 @@ class Model:
         """
         Return a human-readable model summary.
 
+        A model with no objective yet is summarized as ``<none set>`` rather
+        than raising: ``__repr__`` delegates here, so an unguarded attribute
+        access turned merely echoing a half-built model -- the normal thing to
+        do in a notebook or a debugger -- into an ``AttributeError``. Building
+        the rows first and choosing the objective afterwards is a supported
+        order (``validate()`` is what refuses a model that is still missing one
+        at solve time), so this state is legitimate, not an error to report.
+
         Returns
         -------
         str
             Multi-line string with variable counts, constraint count,
             objective sense, and parameter count.
         """
+        if self._objective is None:
+            objective = "<none set>"
+        else:
+            objective = f"{self._objective.sense.value} {self._objective.expression}"
         lines = [
             f"Model: {self.name}",
             f"  Variables: {self.num_variables} "
             f"({self.num_continuous} continuous, {self.num_integer} integer/binary)",
             f"  Constraints: {self.num_constraints}",
-            f"  Objective: {self._objective.sense.value} {self._objective.expression}",
+            f"  Objective: {objective}",
             f"  Parameters: {len(self._parameters)}",
         ]
         return "\n".join(lines)
