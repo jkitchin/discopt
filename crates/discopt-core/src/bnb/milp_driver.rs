@@ -361,6 +361,15 @@ fn dive_batch_eligible(
         && batch_index % stride == 0
 }
 
+/// Whether the tree's gap meets EITHER configured tolerance (#1315).
+///
+/// One predicate, used both to stop the search and to decide the reported
+/// status, so the two can never disagree about whether the gap closed -- the
+/// same discipline `solver._gap_values_converged` enforces on the Python tree.
+fn gap_closed(tm: &TreeManager, opts: &MilpOptions) -> bool {
+    tm.gap() <= opts.gap_tol || opts.abs_gap_tol.is_some_and(|t| tm.absolute_gap() <= t)
+}
+
 /// Options for the MILP driver.
 #[derive(Clone)]
 pub struct MilpOptions {
@@ -378,6 +387,22 @@ pub struct MilpOptions {
     pub time_limit_s: Option<f64>,
     /// Relative gap tolerance for proving optimality.
     pub gap_tol: f64,
+    /// Absolute gap tolerance. When `Some(t)`, the search stops as soon as
+    /// EITHER `gap_tol` or `UB - LB <= t` is met -- the disjunctive contract
+    /// `Model.solve`'s `abs_gap_tolerance` documents, and the one the Python
+    /// MILP tree has always applied (`solver._gap_values_converged`).
+    ///
+    /// #1315: this engine used to stop on `TreeManager::gap()` alone, so
+    /// `abs_gap_tolerance` was silently inert for every MILP routed here -- a
+    /// documented, publicly exposed control that did nothing.
+    ///
+    /// `None` means *no absolute criterion*, which is this engine's historical
+    /// behaviour and what `Model.solve(abs_gap_tolerance=None)` promises ("keeps
+    /// each route's established default, so an omitted argument changes
+    /// nothing"). Encoding the absent case as `None` rather than as a tiny
+    /// default keeps a default solve bound-neutral by construction, instead of
+    /// by an argument about which arm fires first.
+    pub abs_gap_tol: Option<f64>,
     /// Max Gomory mixed-integer cuts to add at the root (0 disables), summed
     /// over rounds. Derived from the root's *native* simplex basis — no
     /// crossover needed.
@@ -2159,7 +2184,7 @@ fn solve_milp_node_search(
             gap_certified = false;
             break;
         }
-        if tm.is_finished() || tm.gap() <= opts.gap_tol {
+        if tm.is_finished() || gap_closed(&tm, opts) {
             break;
         }
         if tm.stats().total_nodes >= opts.max_nodes {
@@ -2794,7 +2819,7 @@ fn solve_milp_node_search(
         // an empty tree is then not an emptiness proof. The Optimal arm needs
         // no such flag — the floor already participates in `tm.gap()`.
         stats.bound_unresolved || stats.unresolved_floor.is_finite(),
-        tm.gap() <= opts.gap_tol,
+        gap_closed(&tm, opts),
         gap_certified,
         stats.total_nodes >= opts.max_nodes,
     );
@@ -5337,6 +5362,7 @@ mod tests {
             max_nodes: 100_000,
             time_limit_s: None,
             gap_tol: 1e-9,
+            abs_gap_tol: None,
             root_cuts: 0,
             cut_rounds: 1,
             gmi_cuts: false,
@@ -5866,6 +5892,7 @@ mod tests {
             max_nodes: 100_000,
             time_limit_s: None,
             gap_tol: 1e-9,
+            abs_gap_tol: None,
             root_cuts: 16,
             cut_rounds: 3,
             gmi_cuts: true,
@@ -6535,6 +6562,7 @@ mod tests {
             max_nodes: 5_000,
             time_limit_s: None,
             gap_tol: 1e-9,
+            abs_gap_tol: None,
             root_cuts: 0,
             cut_rounds: 1,
             gmi_cuts: false,
@@ -6667,6 +6695,7 @@ mod sparse_milp_diff {
                 max_nodes: 100_000,
                 time_limit_s: None,
                 gap_tol: 1e-9,
+                abs_gap_tol: None,
                 root_cuts: 16,
                 cut_rounds: 3,
                 gmi_cuts: true,
@@ -6964,6 +6993,7 @@ mod sparse_milp_diff {
             max_nodes: 100_000,
             time_limit_s: None,
             gap_tol: 1e-9,
+            abs_gap_tol: None,
             root_cuts: 0,
             cut_rounds: 3,
             gmi_cuts: false,
@@ -7256,6 +7286,7 @@ mod lazy_separation {
                 max_nodes: 100_000,
                 time_limit_s: None,
                 gap_tol: 1e-9,
+                abs_gap_tol: None,
                 root_cuts: 16,
                 cut_rounds: 3,
                 gmi_cuts: true,
@@ -7551,6 +7582,7 @@ mod node_separation {
                 max_nodes: 100_000,
                 time_limit_s: None,
                 gap_tol: 1e-9,
+                abs_gap_tol: None,
                 root_cuts: 0,
                 cut_rounds: 0,
                 gmi_cuts: false,
@@ -7829,6 +7861,7 @@ mod lazy_infeasible_node {
             max_nodes: 100_000,
             time_limit_s: None,
             gap_tol: 1e-9,
+            abs_gap_tol: None,
             root_cuts: 0,
             cut_rounds: 0,
             gmi_cuts: false,
@@ -7963,6 +7996,7 @@ mod root_cut_budget_tests {
             max_nodes: 200_000,
             time_limit_s: None,
             gap_tol: 1e-9,
+            abs_gap_tol: None,
             root_cuts: 200,
             cut_rounds: 30,
             gmi_cuts: true,
@@ -8632,6 +8666,7 @@ mod tiny_entry_tests {
             max_nodes: 10_000,
             time_limit_s: None,
             gap_tol: 1e-9,
+            abs_gap_tol: None,
             root_cuts: 0,
             cut_rounds: 1,
             gmi_cuts: false,

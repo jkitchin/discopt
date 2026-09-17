@@ -11037,15 +11037,22 @@ def solve_model(
                 _want_engine = nlp_solver == "simplex" or (
                     _milp_engine_default_on() and not lagrangian_bound
                 )
-                # #1243: the monolithic engine stops on ``TreeManager::gap()``,
-                # whose denominator is FLOORED AT 1.0. Its effective absolute
-                # threshold is therefore ``gap_tolerance * max(|incumbent|, 1)``,
-                # never tighter than ``gap_tolerance`` — so a caller asking for a
-                # tighter absolute gap cannot be served here. Route to the Python
-                # MILP tree, which applies the criterion exactly, rather than
-                # return a result that claims a tolerance it did not meet. This
-                # is the same "stay on the Python path rather than mis-serve an
-                # explicit request" choice ``lagrangian_bound`` makes above.
+                # #1243: the monolithic engine's RELATIVE arm is
+                # ``TreeManager::gap()``, whose denominator is FLOORED AT 1.0, so
+                # near a zero optimum it converges on a gap the Python tree's
+                # unfloored relative test would still call open (the gear
+                # pathology). A caller asking for an absolute tolerance TIGHTER
+                # than the relative one is asking for exactly that regime, so the
+                # solve still routes to the Python MILP tree rather than return a
+                # result that claims a tolerance it did not meet. This is the same
+                # "stay on the Python path rather than mis-serve an explicit
+                # request" choice ``lagrangian_bound`` makes above.
+                #
+                # #1315: the LOOSER case — which is every realistic use of the
+                # option — is now served in the engine itself: ``abs_gap_tol`` is
+                # passed through to ``MilpOptions`` and the driver stops on either
+                # criterion. It used to be dropped here entirely, making the
+                # documented parameter a no-op on this whole route.
                 if abs_gap_tolerance is not None and abs_gap_tol < gap_tolerance:
                     if nlp_solver == "simplex":
                         logger.info(
@@ -11073,6 +11080,10 @@ def solve_model(
                         initial_point=initial_point,
                         deferred=_deferred,
                         prefer_pounce=nlp_solver == "pounce",
+                        # The caller's raw value, not the resolved one: ``None``
+                        # means "this route's established default", which for
+                        # this engine is no absolute criterion at all (#1315).
+                        abs_gap_tolerance=abs_gap_tolerance,
                     )
                     if _simplex_res is not None:
                         return _simplex_res
@@ -17784,10 +17795,30 @@ def _solve_continuous(
             if status == "optimal":
                 status = "unknown"
 
+    # #1315: name the provenance of the bound this path reports. Under
+    # ``certify_convex`` a local minimum of a PROVED-convex model is the global
+    # minimum, so the incumbent doubles as a valid lower bound -- the same premise
+    # that licenses returning after one solve, and the same one ``_solve_lp_matrix``
+    # / ``_solve_qp_matrix`` already record. This path (every non-LP/QP convex NLP)
+    # was the site the #1244 audit missed: ``bound_valid`` came out True only via
+    # ``__post_init__``'s generic ``gap_certified`` rule and ``bound_source`` had no
+    # such derivation, so it stayed ``None`` and contradicted the documented
+    # contract. Computed after the false-primal screen above, which can withdraw
+    # both the bound and the ``optimal`` status.
+    # ``False`` (the field's declared default), never ``None``: ``bound_valid`` is
+    # a bool, and ``__post_init__`` still raises it from a surviving certified gap.
+    _c_bound_valid: bool = False
+    _c_bound_source: Optional[str] = None
+    if certify_convex and status == "optimal" and _c_bound is not None:
+        _c_bound_valid = True
+        _c_bound_source = "convex_proof"
+
     return SolveResult(
         status=status,
         objective=obj_val,
         bound=_c_bound,
+        bound_valid=_c_bound_valid,
+        bound_source=_c_bound_source,
         gap=_c_gap,
         x=x_dict,
         constraint_duals=constraint_duals,
@@ -24048,6 +24079,7 @@ def _solve_milp_simplex(
     initial_point: Optional[np.ndarray] = None,
     deferred: Optional[dict] = None,
     prefer_pounce: bool = False,
+    abs_gap_tolerance: Optional[float] = None,
 ) -> Optional[SolveResult]:
     """Solve a pure MILP with the Rust-internal warm-started-simplex B&B
     (``nlp_solver="simplex"`` and the POUNCE-only default MILP path).
@@ -24062,6 +24094,14 @@ def _solve_milp_simplex(
     When *deferred* is a dict and this function returns ``None`` after the engine
     actually ran, its valid dual bound is stored under ``"bound"`` so the caller
     can fold it into the fallback's result instead of discarding proven work.
+
+    ``abs_gap_tolerance`` is forwarded to the Rust driver, which stops on EITHER
+    criterion (``MilpOptions::abs_gap_tol``). #1315: it used to take no absolute
+    tolerance at all, so ``Model.solve(abs_gap_tolerance=...)`` was a documented
+    control that did nothing whenever a MILP reached this engine -- which the
+    default route does, and the public ``nlp_solver="simplex"`` option always does.
+    ``None`` is passed through as ``None`` (no absolute criterion), which is this
+    engine's established default and keeps an omitted argument bound-neutral.
     """
     from discopt._relax.problem_classifier import extract_lp_data
     from discopt.modeling.core import ObjectiveSense
@@ -24155,6 +24195,7 @@ def _solve_milp_simplex(
         float(lp_data.obj_const),
         int(max_nodes),
         float(gap_tolerance),
+        abs_gap_tol=(None if abs_gap_tolerance is None else float(abs_gap_tolerance)),
         initial_incumbent=_seed,
         time_limit_s=float(_milp_budget),
         debug_hook=_debug.rust_hook(),

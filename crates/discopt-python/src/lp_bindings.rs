@@ -1107,7 +1107,7 @@ impl MilpNodeHook for PyMilpNodeHook {
                     sb_max_cands=6, sb_node_budget=48,
                     initial_incumbent=None, time_limit_s=None, root_cut_time_s=None,
                     root_cut_prune=true,
-                    debug_hook=None))]
+                    debug_hook=None, abs_gap_tol=None))]
 pub fn solve_milp_py<'py>(
     py: Python<'py>,
     c: PyReadonlyArray1<'py, f64>,
@@ -1139,6 +1139,7 @@ pub fn solve_milp_py<'py>(
     root_cut_time_s: Option<f64>,
     root_cut_prune: bool,
     debug_hook: Option<Py<PyAny>>,
+    abs_gap_tol: Option<f64>,
 ) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
     let dims = a.shape();
     check_box_not_nan(lb.as_slice()?, ub.as_slice()?)?;
@@ -1217,6 +1218,7 @@ pub fn solve_milp_py<'py>(
         None,
         0,
         0,
+        abs_gap_tol,
     )?;
     Ok((status, x, obj, bound, nodes, lp_iters))
 }
@@ -1297,7 +1299,7 @@ pub fn ns_safe_bound_csc_py(
                     sb_max_cands=6, sb_node_budget=48,
                     initial_incumbent=None, time_limit_s=None, root_cut_time_s=None,
                     root_cut_prune=true,
-                    debug_hook=None))]
+                    debug_hook=None, abs_gap_tol=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_milp_csc_py<'py>(
     py: Python<'py>,
@@ -1334,6 +1336,7 @@ pub fn solve_milp_csc_py<'py>(
     root_cut_time_s: Option<f64>,
     root_cut_prune: bool,
     debug_hook: Option<Py<PyAny>>,
+    abs_gap_tol: Option<f64>,
 ) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
     let col_ptr_v: Vec<usize> = col_ptr.as_slice()?.iter().map(|&x| x as usize).collect();
     check_box_not_nan(lb.as_slice()?, ub.as_slice()?)?;
@@ -1401,6 +1404,7 @@ pub fn solve_milp_csc_py<'py>(
         None,
         0,
         0,
+        abs_gap_tol,
     )?;
     Ok((status, x, obj, bound, nodes, lp_iters))
 }
@@ -1457,7 +1461,8 @@ pub fn solve_milp_csc_py<'py>(
                     initial_incumbent=None, time_limit_s=None, root_cut_time_s=None,
                     root_cut_prune=true,
                     debug_hook=None,
-                    node_callback=None, node_hook_rounds=0, node_hook_cut_cap=0))]
+                    node_callback=None, node_hook_rounds=0, node_hook_cut_cap=0,
+                    abs_gap_tol=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_milp_lazy_csc_py<'py>(
     py: Python<'py>,
@@ -1498,6 +1503,7 @@ pub fn solve_milp_lazy_csc_py<'py>(
     node_callback: Option<Py<PyAny>>,
     node_hook_rounds: usize,
     node_hook_cut_cap: usize,
+    abs_gap_tol: Option<f64>,
 ) -> PyResult<(
     String,
     Bound<'py, PyArray1<f64>>,
@@ -1583,6 +1589,7 @@ pub fn solve_milp_lazy_csc_py<'py>(
         node_callback,
         node_hook_rounds,
         node_hook_cut_cap,
+        abs_gap_tol,
     )
 }
 
@@ -1628,6 +1635,7 @@ fn run_milp_hooked<'py>(
     node_callback: Option<Py<PyAny>>,
     node_hook_rounds: usize,
     node_hook_cut_cap: usize,
+    abs_gap_tol: Option<f64>,
 ) -> PyResult<(
     String,
     Bound<'py, PyArray1<f64>>,
@@ -1646,6 +1654,9 @@ fn run_milp_hooked<'py>(
         max_nodes,
         time_limit_s: parse_budget_secs(time_limit_s)?,
         gap_tol,
+        // #1315: `None` -- what a caller who named no absolute tolerance sends --
+        // keeps the engine's historical behaviour exactly: no absolute arm.
+        abs_gap_tol,
         root_cuts,
         cut_rounds,
         gmi_cuts,

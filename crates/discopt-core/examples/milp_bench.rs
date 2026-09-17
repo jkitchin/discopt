@@ -146,6 +146,7 @@ fn opts(n_struct: usize, integer_cols: Vec<usize>, tl: f64) -> MilpOptions {
         max_nodes: 5_000_000,
         time_limit_s: Some(tl),
         gap_tol: 1e-6,
+        abs_gap_tol: None,
         root_cuts: 16,
         cut_rounds: 1,
         gmi_cuts: true,
