@@ -5485,12 +5485,23 @@ def _model_contains_nonsmooth_node(model: Model) -> bool:
     to the spatial McCormick B&B, whose exact piecewise relaxation certifies
     them. ``abs`` is either ``UnaryOp("abs")`` or ``FunctionCall("abs")``;
     ``min``/``max`` are ``FunctionCall("min"|"max")``.
+
+    The same holds for the gradient-based convex MINLP algorithms (#1297): an OA
+    tangent or an NLP-BB node solve at the kink carries one subgradient, so OA
+    re-proposes the same assignment forever and NLP-BB nodes stall. Both the
+    #1059 auto-route and the NLP-BB auto-select decline on this predicate.
     """
     from discopt.modeling.core import FunctionCall, UnaryOp
 
     _nonsmooth_funcs = {"abs", "min", "max"}
+    # Expressions are DAGs; without this a shared subexpression is walked once
+    # per path, which is exponential in the sharing depth.
+    seen: set[int] = set()
 
     def _walk(expr) -> bool:
+        if id(expr) in seen:
+            return False
+        seen.add(id(expr))
         if isinstance(expr, UnaryOp) and expr.op == "abs":
             return True
         if isinstance(expr, FunctionCall) and expr.func_name in _nonsmooth_funcs:
@@ -5819,6 +5830,14 @@ def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str, dict[str
         # dm.custom is an opaque AD-only callable; the MILP master cannot
         # linearize what it cannot read.
         return None, "not routed: model contains an opaque dm.custom body", {}
+
+    if _model_contains_nonsmooth_node(model):
+        # #1297: OA's convergence proof needs differentiable rows. At an abs/min/
+        # max kink the tangent is one subgradient, the master re-proposes the same
+        # assignment, and the route never certifies (measured: 40+ iterations at a
+        # fixed UB on a 3-row max model). The spatial B&B relaxes these nodes
+        # exactly and certifies the same models in ~1.5 s.
+        return None, "not routed: model contains a nonsmooth abs/min/max node", {}
 
     try:
         from discopt._relax.problem_classifier import ProblemClass, classify_problem
@@ -11302,6 +11321,27 @@ def solve_model(
             "Local NLP on convexity-unknown continuous model returned error; "
             "falling back to spatial Branch-and-Bound (issue #266)"
         )
+
+    # --- #1297: a nonsmooth convex MINLP is not NLP-trustworthy ---
+    # NLP-BB node solves and the spatial loop's convex mode both trust a smooth
+    # NLP at every node, and at an abs/min/max kink that NLP stalls: the node
+    # falls back to its inherited bound, no incumbent is found and the solve ends
+    # ``unknown`` (all four spellings of the #1297 max row, n = 2..4). Demote the
+    # verdict exactly as the continuous path above does, so the spatial loop runs
+    # root OBBT and relaxes these nodes with their exact piecewise envelopes. It
+    # only drops a shortcut, so every bound it produces is the nonconvex path's.
+    # An explicit ``nlp_bb=True`` is the caller's choice and is left alone.
+    if nlp_bb is not True and _model_contains_nonsmooth_node(model):
+        if not _root_convexity_known:
+            _root_convexity_known, _root_is_convex, _root_constraint_mask = (
+                _classify_model_convexity(model, failure_label="Convex MINLP detection failed")
+            )
+        if _root_convexity_known and _root_is_convex:
+            logger.info(
+                "Convex MINLP has a nonsmooth abs/min/max node; "
+                "solving with the spatial B&B's exact envelopes, not convex NLP mode"
+            )
+            _root_is_convex = False
 
     # --- NLP-BB auto-select for convex MINLPs (nlp_bb=None) ---
     # Placed after problem classifier so MILP/MIQP use their specialized
