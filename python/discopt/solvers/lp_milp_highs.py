@@ -436,9 +436,18 @@ def farkas_verified(y: np.ndarray, sf: StdForm) -> bool:
     return _farkas_exact(y, sf)
 
 
-def primal_ray_verified(d: np.ndarray, sf: StdForm) -> bool:
-    """True iff ``d`` is a descent direction of the recession cone:
-    ``A d = 0``, ``cᵀd < 0``, and ``d`` only moves along open bound sides."""
+def primal_ray_verified(d: np.ndarray, sf: StdForm, *, deadline: Optional[float] = None) -> bool:
+    """True iff ``d`` proves a descent direction of the recession cone exists:
+    ``A d' = 0``, ``cᵀd' < 0``, and ``d'`` only moves along open bound sides, for an
+    exact rational ``d'`` on the support of ``d`` (:func:`_exact_ray`).
+
+    The floating-point screen below is only a filter. Its relative residual test
+    ``|A d| <= RAY_REL |A||d|`` cannot see a row whose one coupling to the ray is
+    tiny: ``x1 + x2 = 0``, ``x1 + x2 + 1e-12 x3 = 0`` and ``max x3`` accepted
+    ``d = (1, -1, 1)`` with residual 1e-12 on the second row and certified
+    ``unbounded`` on an LP whose optimum is 0 (#1286). Any nonzero exact residual,
+    however small, grows without bound along the ray, so acceptance is decided
+    exactly."""
     d = np.asarray(d, dtype=np.float64)
     if d.shape != (sf.n,) or not np.all(np.isfinite(d)) or not np.any(d):
         return False
@@ -451,7 +460,92 @@ def primal_ray_verified(d: np.ndarray, sf: StdForm) -> bool:
         if np.any(res > RAY_REL * (abs(sf.A) @ np.abs(d)) + RAY_CLEAN):
             return False
     cd = float(sf.c @ d)
-    return cd < -RAY_REL * max(1.0, float(np.abs(sf.c) @ np.abs(d)))
+    if not cd < -RAY_REL * max(1.0, float(np.abs(sf.c) @ np.abs(d))):
+        return False
+    return _exact_ray(d, sf, deadline)
+
+
+def _exact_ray(d: np.ndarray, sf: StdForm, deadline: Optional[float]) -> bool:
+    """Whether an exact recession ray with ``cᵀd' < 0`` lives on the support of ``d``.
+
+    Restricted to the support ``S``, ``A_S d'_S = 0`` is solved over the rationals by
+    Gauss-Jordan elimination. Each row pivots on its column of largest ``|d_j|``, the
+    remaining (free) columns keep their values from ``d``, and the pivot columns are
+    solved for. A good float ray changes by its residual only, so its sign pattern
+    survives. ``d'`` is accepted only if every nonzero moves along an open side and
+    ``cᵀd' < 0`` holds exactly; columns outside ``S`` stay at 0, so rows outside the
+    support are satisfied. Refuses (``False``) past ``EXACT_MAX_COLUMNS`` support
+    columns, ``EXACT_MAX_WORK`` bit operations or ``deadline``: an undecided ray is
+    never a certificate.
+    """
+    from fractions import Fraction
+
+    support = np.flatnonzero(d)
+    if support.size == 0 or support.size > EXACT_MAX_COLUMNS:
+        return False
+    sub = sf.A[:, support].tocsr()
+    sub.eliminate_zeros()
+    mag = np.abs(d[support])
+
+    def size(q: Fraction) -> int:
+        return int(q.numerator.bit_length() + q.denominator.bit_length())
+
+    pivots: list[tuple[dict, int]] = []
+    work = 0
+    for i in range(sub.shape[0]):
+        lo, hi = sub.indptr[i], sub.indptr[i + 1]
+        if lo == hi:
+            continue
+        if deadline is not None and time.perf_counter() > deadline:
+            return False
+        row = {int(sub.indices[p]): Fraction(float(sub.data[p])) for p in range(lo, hi)}
+        for pv, pc in pivots:
+            f = row.get(pc)
+            if not f:
+                continue
+            for k, v in pv.items():
+                work += size(f) + size(v)
+                nv = row.get(k, Fraction(0)) - f * v
+                if nv:
+                    row[k] = nv
+                else:
+                    row.pop(k, None)
+            if work > EXACT_MAX_WORK:
+                return False
+        if not row:
+            continue
+        pc = max(row, key=lambda k: (mag[k], -k))
+        inv = 1 / row[pc]
+        row = {k: v * inv for k, v in row.items()}
+        for pv, _ in pivots:
+            f = pv.get(pc)
+            if not f:
+                continue
+            for k, v in row.items():
+                work += size(f) + size(v)
+                nv = pv.get(k, Fraction(0)) - f * v
+                if nv:
+                    pv[k] = nv
+                else:
+                    pv.pop(k, None)
+            if work > EXACT_MAX_WORK:
+                return False
+        pivots.append((row, pc))
+    pivot_cols = {pc for _, pc in pivots}
+    dx = [Fraction(float(v)) for v in d[support]]
+    for pv, pc in pivots:
+        dx[pc] = -sum(
+            (v * dx[k] for k, v in pv.items() if k != pc and k not in pivot_cols),
+            Fraction(0),
+        )
+    cd = Fraction(0)
+    for k, j in enumerate(support):
+        v = dx[k]
+        if (v > 0 and sf.xu[j] < INF) or (v < 0 and sf.xl[j] > -INF):
+            return False
+        if v:
+            cd += Fraction(float(sf.c[j])) * v
+    return cd < 0
 
 
 # ─────────────────────────────────────────────────────────────

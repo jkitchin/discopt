@@ -49,6 +49,7 @@ representation for the second, and deleting the probe outright for the first.
 from __future__ import annotations
 
 import os
+import statistics
 import time
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -58,6 +59,10 @@ import discopt.modeling as dm  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from discopt._relax.problem_classifier import extract_qp_data  # noqa: E402
+
+#: Interleaved repetitions of the scaling A/B. Odd, so the median is a measured
+#: sample rather than an average of two.
+_REPS = 7
 
 
 def _wide_model_narrow_objective(n: int, support: int = 5):
@@ -93,19 +98,37 @@ def test_cost_does_not_scale_quadratically_with_unrelated_variables():
 
     The assertion is a ratio rather than an absolute time so it does not encode this
     machine's speed; a quadratic sweep cannot come near it even on a slow runner.
+
+    One A/B pair is not a measurement (CLAUDE.md §9). The pair runs ``_REPS`` times,
+    interleaved so both arms see the same load, and the **median** ratio is asserted
+    — a single sample makes this a load detector rather than a scaling one, and on a
+    contended CI runner it read 63.6x against a true ~4.5x. The models are built
+    outside the timed region for the same reason: construction is O(n) work this
+    test does not measure, and it is where the runner's allocation spikes land.
     """
-    t0 = time.perf_counter()
-    extract_qp_data(_wide_model_narrow_objective(400))
-    t_small = time.perf_counter() - t0
+    ratios = []
+    for _ in range(_REPS):
+        small = _wide_model_narrow_objective(400)
+        large = _wide_model_narrow_objective(1600)
 
-    t0 = time.perf_counter()
-    extract_qp_data(_wide_model_narrow_objective(1600))
-    t_large = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        extract_qp_data(small)
+        t_small = time.perf_counter() - t0
 
-    # 4x the variables. Quadratic would be ~16x; measured post-fix is ~10x on the
-    # O(n) diagonal scan, and was ~29x pre-fix. 14x separates them with margin.
-    ratio = t_large / max(t_small, 1e-6)
+        t0 = time.perf_counter()
+        extract_qp_data(large)
+        t_large = time.perf_counter() - t0
+
+        ratios.append(t_large / max(t_small, 1e-6))
+
+    assert len(ratios) == _REPS, "the scaling probe did not run"
+    # 4x the variables. Quadratic would be ~16x; measured post-fix is ~4.5x on the
+    # O(n) diagonal scan (sd 1.2 over 7 reps), and was ~29x pre-fix. 14x separates
+    # them with margin, and a quadratic sweep is quadratic in every repetition, so
+    # the median cannot hide one.
+    ratio = statistics.median(ratios)
     assert ratio < 14.0, (
-        f"extraction cost grew {ratio:.1f}x for 4x the variables — the pair sweep "
-        "looks quadratic again (pre-fix this was ~29x)"
+        f"extraction cost grew {ratio:.1f}x (median of {_REPS}) for 4x the variables "
+        f"— the pair sweep looks quadratic again (pre-fix this was ~29x). "
+        f"per-rep ratios: {[round(r, 1) for r in ratios]}"
     )

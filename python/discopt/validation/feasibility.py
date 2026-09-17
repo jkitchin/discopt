@@ -169,6 +169,133 @@ def jacobian_row_gradient_norms(J) -> np.ndarray:
     return out
 
 
+_EPS = float(np.finfo(np.float64).eps)
+
+
+def improving_gradient_norms(J, x, lb, ub, direction, integer_mask=None) -> np.ndarray:
+    """Per-row gradient norm restricted to moves that can REDUCE the violation (#1284).
+
+    :func:`jacobian_row_gradient_norms` takes ``max_j |J_ij|`` over every column,
+    so one column that cannot help — a variable sitting on the bound that blocks
+    its improving direction, or an integer variable — sets the cap on its own.
+    Measured (#1284): adding ``+ s`` with ``s in [0, 1]`` at ``s = 0`` to the #1254
+    row gave ``||grad||_inf = 1``, the cap became 1e-4, and the point 0.87 away in
+    ``y`` was certified again at ``z = -20`` (true optimum -6.699).
+
+    Column ``j`` of row ``i`` counts for what a move of at most
+    ``FEASIBLE_DISTANCE_TOL`` in ``x_j``, inside ``[lb_j, ub_j]``, can remove from
+    the violation: ``|J_ij| * min(1, room_ij / FEASIBLE_DISTANCE_TOL)``, where
+    ``room_ij`` is the distance from ``x_j`` to the bound in the direction that
+    reduces the violation. An integer column can move only to an integer, and the
+    one integer within that distance is ``round(x_j)``: its room is
+    ``|round(x_j) - x_j|`` when that lies in the improving direction, else 0.
+    The columns move together (a box of half-width ``FEASIBLE_DISTANCE_TOL``), so
+    their contributions add, and ``FEASIBLE_DISTANCE_TOL * result`` is the
+    first-order reduction the best such move achieves: the statement
+    :func:`feasible_distance_cap` makes, now true of the point's box.
+
+    Summed, not maxed (measured on clay0303hfsg): a big-M row
+    ``x - 52.5 y <= 0`` at ``x = 1.0e-8`` (bound 0) and ``y = -1.8e-10`` (binary)
+    is violated by 1.9e-8, exactly what rounding ``y`` and moving ``x`` onto its
+    bound together remove. A per-column max (or zero weight for ``y``) put the cap
+    at 1e-8, rejected that point and every node solution like it, and the solve
+    certified 28862 against the recorded optimum 26669.
+
+    ``direction[i]`` is ``+1`` when row ``i``'s body must DECREASE, ``-1`` when it
+    must increase, ``0`` when the row is not violated (plain sup-norm; the cap is
+    irrelevant there). Clipped to :func:`jacobian_row_gradient_norms`, so it can
+    only tighten a gate. Non-finite rows return ``inf`` as there.
+    """
+    J = np.asarray(J, dtype=np.float64)
+    if J.ndim != 2:
+        raise ValueError(f"expected a 2-D Jacobian, got shape {J.shape}")
+    plain = jacobian_row_gradient_norms(J)
+    if J.shape[0] == 0:
+        return plain
+    x = np.asarray(x, dtype=np.float64).ravel()
+    lb = np.asarray(lb, dtype=np.float64).ravel()
+    ub = np.asarray(ub, dtype=np.float64).ravel()
+    n = J.shape[1]
+    if not (x.size == lb.size == ub.size == n):
+        raise ValueError(
+            f"box of sizes x={x.size}, lb={lb.size}, ub={ub.size} does not match "
+            f"{n} Jacobian columns"
+        )
+    d = np.sign(np.asarray(direction, dtype=np.float64).ravel())
+    if d.size != J.shape[0]:
+        raise ValueError(f"direction has {d.size} entries for {J.shape[0]} rows")
+    with np.errstate(invalid="ignore"):
+        step = -d[:, None] * np.sign(J)  # sign of the improving move in x_j
+        # Each room carries its own round-off allowance. A violation caused only
+        # by ``x_j`` sitting ``room`` inside its bound is repaired by that one move
+        # exactly, so ``viol == |J_ij| * room`` up to the round-off of two
+        # different products; without the allowance the gate decides that tie by
+        # one ulp (portfol_roundlot: ``x11 - 78000 x2 >= 0`` at ``x2 = 7.2e-11``,
+        # ``x11 = 0`` integer, rejected 5.63185816304395e-06 against a cap of
+        # 5.631858163043949e-06).
+        slack = 16.0 * _EPS
+        up = np.maximum(ub - x, 0.0) + slack * (np.abs(ub) + np.abs(x))
+        down = np.maximum(x - lb, 0.0) + slack * (np.abs(lb) + np.abs(x))
+        up = up[None, :]
+        down = down[None, :]
+        room = np.where(step > 0, up, np.where(step < 0, down, 0.0))
+        if integer_mask is not None:
+            mask = np.asarray(integer_mask, dtype=bool).ravel()
+            if mask.size != n:
+                raise ValueError(f"integer_mask has {mask.size} entries for {n} columns")
+            r = np.clip(np.round(x), np.ceil(lb), np.floor(ub))
+            gap = r - x
+            to_int = np.abs(gap) + slack * (np.abs(r) + np.abs(x))
+            int_room = np.where(step * np.sign(gap)[None, :] > 0, to_int[None, :], 0.0)
+            int_room = np.where((gap == 0.0)[None, :] & (step != 0), to_int[None, :], int_room)
+            room = np.where(mask[None, :], int_room, room)
+        frac = np.minimum(1.0, room / FEASIBLE_DISTANCE_TOL)
+        contrib = np.abs(J) * frac
+    finite = np.isfinite(contrib)
+    out = np.minimum(np.where(finite, contrib, 0.0).sum(axis=1), plain)
+    out = np.where(d == 0.0, plain, out)
+    out[~np.isfinite(plain)] = np.inf
+    return np.asarray(out, dtype=np.float64)
+
+
+def model_integer_mask(model) -> np.ndarray:
+    """Flat mask of the model's INTEGER/BINARY columns."""
+    from discopt.modeling.core import VarType
+
+    parts = [
+        np.full(int(v.size), v.var_type in (VarType.BINARY, VarType.INTEGER), dtype=bool)
+        for v in model._variables
+    ]
+    return np.concatenate(parts) if parts else np.zeros(0, dtype=bool)
+
+
+def evaluator_box(evaluator):
+    """``(lb, ub, integer_mask)`` for an evaluator, or ``None`` if it exposes no box.
+
+    Unwraps the cut-augmenting (``_ev``) and bound-override (``_evaluator``) wrappers
+    to reach the owning model for integrality. A ``None`` result makes the callers
+    fall back to the plain sup-norm, which is exactly the pre-#1284 behaviour.
+    """
+    try:
+        lb, ub = evaluator.variable_bounds
+    except AttributeError:
+        return None
+    inner = evaluator
+    model = None
+    for _ in range(4):
+        model = getattr(inner, "_model", None)
+        if model is not None:
+            break
+        inner = getattr(inner, "_ev", None) or getattr(inner, "_evaluator", None)
+        if inner is None:
+            break
+    mask = None if model is None else model_integer_mask(model)
+    lb = np.asarray(lb, dtype=np.float64).ravel()
+    if mask is not None and mask.size != lb.size:
+        mask = None
+    return lb, np.asarray(ub, dtype=np.float64).ravel(), mask
+
+
 def feasible_distance_cap(grad_norms, term_scale=None) -> np.ndarray:
     """Cap on a row's absolute violation: ``FEASIBLE_DISTANCE_TOL * ||grad g_i||_inf``.
 
@@ -358,7 +485,7 @@ def _jacobian_row_scales_checked(J: np.ndarray, x_flat: np.ndarray) -> tuple[np.
     return np.asarray(terms.max(axis=1), dtype=np.float64), True
 
 
-def _row_scales_and_gradients(evaluator, x_flat: np.ndarray, rows: np.ndarray):
+def _row_scales_and_gradients(evaluator, x_flat: np.ndarray, rows: np.ndarray, box=None):
     """``(max_j |J_ij| * |x_j|, max_j |J_ij|)`` for the given rows, or ``(None, None)``.
 
     Both halves of the tolerance from ONE Jacobian evaluation: the term magnitude
@@ -392,7 +519,10 @@ def _row_scales_and_gradients(evaluator, x_flat: np.ndarray, rows: np.ndarray):
     if not all_finite:
         logger.debug("feasibility: non-finite Jacobian entry; stricter bound")
         return None, None
-    return sub, jacobian_row_gradient_norms(J[rows, :])
+    if box is None:
+        return sub, jacobian_row_gradient_norms(J[rows, :])
+    lb, ub, int_mask, direction = box
+    return sub, improving_gradient_norms(J[rows, :], x_flat, lb, ub, direction, int_mask)
 
 
 def check_constraints(model, x_flat: np.ndarray, evaluator=None) -> VerifyResult:
@@ -422,6 +552,7 @@ def check_constraints(model, x_flat: np.ndarray, evaluator=None) -> VerifyResult
     # clear this also clear the scale-aware bound, which is never smaller, so the
     # Jacobian is computed only when some row is actually near or over the line.
     viol = np.zeros(n_rows, dtype=np.float64)
+    direction = np.zeros(n_rows, dtype=np.float64)
     anchor = np.ones(n_rows, dtype=np.float64)
     for start, stop, con in row_map:
         sense = _sense_str(con)
@@ -436,6 +567,8 @@ def check_constraints(model, x_flat: np.ndarray, evaluator=None) -> VerifyResult
             if not math.isfinite(val):
                 return VerifyResult(False, None, f"non-finite residual in row {i}")
             viol[i] = _row_violation(val, sense)
+            if viol[i] > 0.0:
+                direction[i] = -1.0 if sense == ">=" else float(np.sign(val))
             anchor[i] = max(1.0, abs(rhs))
 
     # Pass 1 selects the rows that could fail EITHER bound. The absolute bound is
@@ -450,7 +583,13 @@ def check_constraints(model, x_flat: np.ndarray, evaluator=None) -> VerifyResult
         return VerifyResult(True)
 
     # Pass 2 — only the suspect rows get the full scale-keyed bound.
-    scales, grad_norms = _row_scales_and_gradients(evaluator, x_flat, suspect)
+    from discopt._relax.model_utils import flat_variable_bounds
+
+    lb, ub = flat_variable_bounds(model)
+    box = None
+    if lb.size == np.asarray(x_flat).size:
+        box = (lb, ub, model_integer_mask(model), direction[suspect])
+    scales, grad_norms = _row_scales_and_gradients(evaluator, x_flat, suspect, box)
     if scales is None:
         # No Jacobian: no scale estimate, so no cap either (it would be a cap
         # built on nothing). The rows that fail the plain absolute bound are the

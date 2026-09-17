@@ -67,6 +67,17 @@ _BOUND_SNAP_TOL = 1e-7
 # certifying is the safe direction: the caller then degrades to the exact simplex.
 _RAY_COST_TOL = 1e-7
 
+# An entry of the ray LP's direction this small, relative to the direction's
+# max-norm, is indistinguishable from zero for the solve that produced it: the ray
+# LP runs at ``constr_viol_tol = 1e-8`` (``pounce_option_defaults``), so a column
+# the recession cone pins to 0 comes back at ~1e-8 rather than at 0. Measured on
+# the ray LPs of the #940 QP family: 5.0e-9 on a free column, and a 1.0e-8
+# excursion *outside* the direction box on a half-open one (Ipopt's default
+# ``bound_relax_factor``; ``pounce_incumbent_options`` deliberately does not reach
+# this call site). A decade of headroom over that 1e-8; genuine ray components in
+# the same population sit at 5e-1 of the max-norm, five orders above the floor.
+_RAY_DIRT_TOL = 1e-7
+
 
 def _certify_unbounded_ray(
     c: np.ndarray,
@@ -165,7 +176,66 @@ def _certify_unbounded_ray(
     if res.status != SolveStatus.OPTIMAL or res.objective is None:
         return False
     threshold = -_RAY_COST_TOL * max(1.0, float(np.max(np.abs(c))) if n else 1.0)
-    return bool(res.objective < threshold)
+    if not res.objective < threshold or res.x is None:
+        return False
+    d = np.asarray(res.x, dtype=np.float64)[:n]
+    return _ray_verified_exactly(d, c, A_ray, cl_ray, cu_ray, d_lo, d_hi)
+
+
+def _ray_verified_exactly(d, c, A_ray, cl_ray, cu_ray, d_lo, d_hi) -> bool:
+    """Decide the ray LP's ``d`` exactly (#1286).
+
+    The ray LP meets its rows only to the interior-point tolerance, so a row whose
+    one coupling to ``d`` is 1e-12 is invisible to it: ``x1 + x2 = 0``,
+    ``x1 + x2 + 1e-12 x3 = 0``, ``max x3`` was certified unbounded (optimum 0).
+    The recession system is put in standard form with one slack per row,
+    ``A d - s = 0``, with ``s`` pinned, half-open or free by the row's finite sides.
+    :func:`~discopt.solvers.lp_milp_highs.primal_ray_verified` then accepts only
+    if an exact ray exists on ``d``'s support.
+
+    ``d`` itself is an interior-point iterate, so it is put back inside the cone's
+    own box first — see :data:`_RAY_DIRT_TOL`. Both cleanings only choose which
+    candidate is proposed: ``primal_ray_verified`` decides whatever vector it is
+    handed in exact rationals, so neither can make the verdict looser than the
+    arithmetic, and a cleaning that overshoots costs a certificate, never
+    soundness. Without them a column the cone pins to 0 keeps a ~1e-8 nonzero and
+    is refused for round-off: the convex QP ``min ½x0² - x1`` on ``x >= 0`` (ray
+    ``(0, 1)``, ``Qd = 0``) came back ``d = (-1.0e-8, 1.0)`` and lost its
+    ``UNBOUNDED`` verdict to ``ERROR``.
+    """
+    import scipy.sparse as sp
+
+    from discopt.solvers.lp_milp_highs import INF, RAY_REL, StdForm, primal_ray_verified
+
+    n = len(c)
+    m = A_ray.shape[0]
+    # Restore the declared direction box (Ipopt relaxes every bound by
+    # ``bound_relax_factor``), then drop what is left below the solve's own
+    # tolerance.
+    d = np.clip(np.asarray(d, dtype=np.float64), d_lo, d_hi)
+    d_scale = float(np.max(np.abs(d))) if d.size else 0.0
+    if d_scale > 0.0:
+        d = np.where(np.abs(d) <= _RAY_DIRT_TOL * d_scale, 0.0, d)
+    xl = np.where(d_lo < 0.0, -INF, 0.0)
+    xu = np.where(d_hi > 0.0, INF, 0.0)
+    s = np.asarray(A_ray @ d, dtype=np.float64) if m else np.zeros(0)
+    # A row the ray LP holds at 0 comes back with interior-point round-off of either
+    # sign; left in place, a +1e-9 on a ``<= 0`` row fails the sign screen before the
+    # exact step runs. Zeroing it drops the slack from the support, so the exact
+    # step then demands ``(A d')_i = 0`` exactly — stricter, never looser.
+    if m:
+        s = np.where(np.abs(s) <= RAY_REL * (np.abs(A_ray) @ np.abs(d)), 0.0, s)
+    s_lo = np.where(cl_ray > -_INF, 0.0, -INF)
+    s_hi = np.where(cu_ray < _INF, 0.0, INF)
+    A_std = sp.hstack([sp.csc_matrix(A_ray.reshape(m, n)), -sp.identity(m, format="csc")])
+    sf = StdForm.from_arrays(
+        np.concatenate([np.asarray(c, dtype=np.float64), np.zeros(m)]),
+        A_std,
+        np.zeros(m),
+        np.concatenate([xl, s_lo]),
+        np.concatenate([xu, s_hi]),
+    )
+    return primal_ray_verified(np.concatenate([d, s]), sf)
 
 
 def _settle_ambiguous_unbounded(

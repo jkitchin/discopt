@@ -37,7 +37,9 @@ from discopt.qubo_primal import is_qubo, qubo_local_search  # noqa: F401
 from discopt.solvers import NLPResult, SolveStatus, pounce_incumbent_options
 from discopt.validation.feasibility import (
     SMALL_ROW_ABS_FLOOR,
+    evaluator_box,
     feasible_distance_cap,
+    improving_gradient_norms,
     jacobian_row_gradient_norms,
 )
 
@@ -567,7 +569,7 @@ def _check_constraint_feasibility(
     try:
         jac = np.asarray(evaluator.evaluate_jacobian(x), dtype=np.float64)
         scale = _scale_from_jacobian(jac, x)
-        grad = jacobian_row_gradient_norms(jac)
+        grad = _row_gradient_norms(evaluator, jac, x, cl, cu)
     except Exception:
         # No Jacobian, so neither half of the scaled test can be formed. Fall back
         # to the plain absolute verdict, which is exactly what this function
@@ -605,6 +607,36 @@ def row_violations(
         return np.zeros(0, dtype=np.float64)
     g, cl, cu = g[:n], cl[:n], cu[:n]
     return np.maximum(np.maximum(cl - g, 0.0), np.maximum(g - cu, 0.0))
+
+
+def _row_gradient_norms(
+    evaluator: NLPEvaluator,
+    jac: np.ndarray,
+    x: np.ndarray,
+    cl: Optional[np.ndarray],
+    cu: Optional[np.ndarray],
+) -> np.ndarray:
+    """Row gradient norms for the distance cap, restricted to improving in-box moves.
+
+    See :func:`~discopt.validation.feasibility.improving_gradient_norms` (#1284).
+    An evaluator with no variable box keeps the plain sup-norm.
+    """
+    box = evaluator_box(evaluator)
+    if box is None or box[0].size != jac.shape[1]:
+        return jacobian_row_gradient_norms(jac)
+    g = np.asarray(evaluator.evaluate_constraints(x), dtype=np.float64)
+    if cl is None or cu is None:
+        from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
+
+        cl, cu = _infer_constraint_bounds(evaluator)
+    cl = np.asarray(cl, dtype=np.float64)
+    cu = np.asarray(cu, dtype=np.float64)
+    m = jac.shape[0]
+    direction = np.zeros(m, dtype=np.float64)
+    k = min(m, g.size, cl.size, cu.size)
+    direction[:k] = np.where(g[:k] > cu[:k], 1.0, np.where(g[:k] < cl[:k], -1.0, 0.0))
+    lb, ub, int_mask = box
+    return improving_gradient_norms(jac, x, lb, ub, direction, int_mask)
 
 
 def row_term_scale(evaluator: NLPEvaluator, x: np.ndarray) -> np.ndarray:
@@ -676,7 +708,7 @@ def scaled_violation_ratio(
         return 0.0
     jac = np.asarray(evaluator.evaluate_jacobian(x), dtype=np.float64)
     scale = _scale_from_jacobian(jac, x)
-    grad = jacobian_row_gradient_norms(jac)
+    grad = _row_gradient_norms(evaluator, jac, x, cl, cu)
     n = viol.size
     return float(np.max(viol / combined_tolerance(scale[:n], tol, rtol, grad[:n])))
 
