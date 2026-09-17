@@ -411,16 +411,42 @@ class TestInfeasibilityCertificate:
         # At least one of the two conflicting rows carries positive violation.
         assert cert.ineq_violations.max() > 1e-3
 
-    def test_no_certificate_without_flag_on_direct_infeasible(self):
-        """Directly POUNCE-detected infeasibility skips the extra Phase-1
-        unless a certificate is requested."""
+    def test_certificate_attached_on_direct_infeasible_without_flag(self):
+        """Directly POUNCE-detected infeasibility (Ipopt code 2) is always
+        cross-checked against the Phase-1 LP (#1309: soundness cannot be
+        conditional on an opt-in ``certificate`` flag), so a confirmed
+        infeasibility carries its witness even when the flag is left at its
+        default."""
         r = solve_lp(
             c=np.array([1.0, 1.0]),
             A_ub=np.array([[1.0, 1.0], [-1.0, -1.0]]),
             b_ub=np.array([1.0, -10.0]),
         )
         assert r.status == SolveStatus.INFEASIBLE
-        assert r.infeasibility_certificate is None
+        cert = r.infeasibility_certificate
+        assert cert is not None
+        assert cert.total_violation > 1.0
+
+    def test_direct_infeasible_not_confirmed_by_phase1_reports_error(self):
+        """#1309: a directly POUNCE-detected INFEASIBLE that does NOT survive
+        the exact Phase-1 cross-check must not be certified -- it is actually
+        feasible, so trusting the raw code-2 label would be a false certified
+        infeasible (CLAUDE.md #1). Reproduces the huge-magnitude-bound
+        scenario from #1309 directly against ``_solve_core``/the Phase-1 path,
+        without going through the full declared-bounds relaxation."""
+        # A trivially feasible one-row system (x=0 satisfies -5x1+x2 <= 2) with
+        # a lower bound just large enough to be typical of the #1309 class of
+        # badly-conditioned problem POUNCE's barrier method can misjudge.
+        r = solve_lp(
+            c=np.array([0.0, 5.0]),
+            A_ub=np.array([[-5.0, 1.0]]),
+            b_ub=np.array([2.0]),
+            bounds=[(-1e16, 1e16), (5e15, 2e18)],
+        )
+        # Whatever POUNCE's raw exit code was, the result must never be a
+        # false certified 'infeasible': either it resolves the true answer
+        # (optimal) or it honestly reports it could not decide (error).
+        assert r.status != SolveStatus.INFEASIBLE
 
     def test_feasible_consistent_redundant_not_flagged(self):
         """Consistent but redundant equalities must NOT be called infeasible."""
