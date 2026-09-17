@@ -24,6 +24,57 @@ if TYPE_CHECKING:
 import numpy as np
 
 
+def _gams_round(x: float, ndigits: int = 0) -> float:
+    """GAMS ``round(x, n)``: half away from zero (#1288).
+
+    Python's :func:`round` rounds half to even, so ``round(2.5)`` is 2 where GAMS
+    gives 3 — a folded bound that differs from the model that was written.
+    """
+    scale = 10.0**ndigits
+    return float(math.copysign(math.floor(abs(x) * scale + 0.5), x) / scale)
+
+
+def _gams_errorf(x: float) -> float:
+    """GAMS ``errorf(x)``: the standard normal CDF, ``(1 + erf(x/√2))/2`` (#1288)."""
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _fold_constant(expr) -> float | None:
+    """Value of a scalar expression built only from constants and arithmetic.
+
+    ``None`` whenever anything else appears (a variable, a function call, an array
+    constant), so a caller folds only what is certainly a number: ``floor(-2.5)``
+    reaches :meth:`GamsParser._map_func` as ``neg(2.5)``, not as a ``Constant``.
+    """
+    from discopt.modeling import core as dm
+
+    if isinstance(expr, dm.Constant):
+        value = np.asarray(expr.value)
+        return float(value) if value.shape == () else None
+    if isinstance(expr, dm.UnaryOp) and expr.op == "neg":
+        v = _fold_constant(expr.operand)
+        return None if v is None else -v
+    if isinstance(expr, dm.BinaryOp) and expr.op in ("+", "-", "*", "/", "**"):
+        lv = _fold_constant(expr.left)
+        rv = _fold_constant(expr.right)
+        if lv is None or rv is None:
+            return None
+        if expr.op == "+":
+            return lv + rv
+        if expr.op == "-":
+            return lv - rv
+        if expr.op == "*":
+            return lv * rv
+        if expr.op == "/":
+            return lv / rv if rv != 0.0 else None
+        try:
+            result = lv**rv
+        except (OverflowError, ZeroDivisionError):
+            return None
+        return float(result) if isinstance(result, float) else None
+    return None
+
+
 # ── Token types ────────────────────────────────────────────────
 class _Tok:
     IDENT = "IDENT"
@@ -1530,7 +1581,9 @@ class _ModelBuilder:
                 return float(math.floor(fargs[0]))
             if fn == "round":
                 ndigits = int(fargs[1]) if len(fargs) > 1 else 0
-                return float(round(fargs[0], ndigits))
+                return _gams_round(fargs[0], ndigits)
+            if fn == "errorf":
+                return _gams_errorf(fargs[0])
             if fn == "mod":
                 # GAMS mod(a, b) = a - b*trunc(a/b), which is fmod semantics
                 return float(math.fmod(fargs[0], fargs[1])) if fargs[1] != 0 else None
@@ -1541,9 +1594,8 @@ class _ModelBuilder:
                 return float(math.copysign(abs(a) ** p, a)) if a != 0 else 0.0
             if fn == "sigmoid":
                 return float(1.0 / (1.0 + math.exp(-fargs[0])))
-            # uniform/normal are nondeterministic and errorf's build-path
-            # mapping is unsettled — leave them unevaluable (None) so
-            # assignment sites refuse loudly instead of folding silently.
+            # uniform/normal are nondeterministic — leave them unevaluable
+            # (None) so assignment sites refuse loudly instead of folding silently.
             return None
         if isinstance(expr, (ExprSum, ExprProd)):
             is_sum = isinstance(expr, ExprSum)
@@ -2288,7 +2340,8 @@ class _ModelBuilder:
         if fn == "max":
             return dm.maximum(args[0], args[1])
         if fn == "errorf":
-            return dm.erf(args[0])
+            # GAMS errorf is the standard normal CDF, not erf (#1288).
+            return 0.5 * (1.0 + dm.erf(args[0] / math.sqrt(2.0)))
         # Every remaining name in `_GAMS_FUNCS` -- ceil, floor, round, mod,
         # uniform, normal -- has NO sound mapping into the IR. Building
         # `FunctionCall(fn, *args)` for them used to let `from_gams` return a
@@ -2306,15 +2359,16 @@ class _ModelBuilder:
         # data/assignment sites but does not run on equation bodies, which reach
         # `_map_func` with their literal arguments already wrapped as Constants.
         # (Measured: without this fold, `c1.. x + ceil(2.3) =L= 2;` refused.)
-        if args and all(isinstance(a, dm.Constant) for a in args):
-            cargs: list[float] = [float(a.value) for a in args]
+        folded = [_fold_constant(a) for a in args]
+        if args and all(v is not None for v in folded):
+            cargs: list[float] = [float(v) for v in folded if v is not None]
             if fn == "ceil":
                 return dm.Constant(float(math.ceil(cargs[0])))
             if fn == "floor":
                 return dm.Constant(float(math.floor(cargs[0])))
             if fn == "round":
                 nd = int(cargs[1]) if len(cargs) > 1 else 0
-                return dm.Constant(float(round(cargs[0], nd)))
+                return dm.Constant(_gams_round(cargs[0], nd))
             # GAMS mod(a, b) = a - b*trunc(a/b), i.e. fmod semantics. A zero
             # divisor is a GAMS execution error, so refuse rather than fold.
             if fn == "mod" and len(cargs) > 1 and cargs[1] != 0.0:

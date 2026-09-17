@@ -134,11 +134,8 @@ def test_remaining_intrinsic_mappings():
         + math.erf(xv / math.sqrt(2.0)) * 0.5
         + 0.5
     )
-    # errorf in GAMS is the standard normal CDF; accept either the CDF or the
-    # raw erf convention by checking against both forms.
-    got = _obj(m, [xv, 0.0])
-    alt = math.asin(xv) + math.acos(xv) + 1.0 / (1.0 + math.exp(-xv)) + math.erf(xv)
-    assert got == pytest.approx(expected, rel=1e-9) or got == pytest.approx(alt, rel=1e-9)
+    # errorf in GAMS is the standard normal CDF (#1288), not erf.
+    assert _obj(m, [xv, 0.0]) == pytest.approx(expected, rel=1e-9)
 
 
 def test_sign_function_maps():
