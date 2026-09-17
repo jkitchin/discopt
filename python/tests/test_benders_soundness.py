@@ -204,12 +204,21 @@ def test_c3_unbounded_recourse_reported():
     """A recourse LP that is unbounded below at a feasible master point means the
     full problem is unbounded — report it, do not stall (C3).
 
-    ``min y - w`` with binary ``y`` first-stage and continuous ``w >= 0`` with no
-    upper bound and no cost floor: the recourse ``min -w`` is unbounded below.
+    ``min y - w`` with binary ``y`` first-stage and continuous ``w >= 0`` whose
+    upper bound is at the ``1e20`` INF sentinel, and no cost floor: the recourse
+    ``min -w`` is unbounded below.
+
+    The bound used to be written ``ub=None``, which passed for the wrong reason:
+    ``np.asarray(None, dtype=float)`` is NaN, the NaN reached the recourse LP, and
+    it was the NaN — not unboundedness — that tripped the unbounded path. #1294
+    made ``None`` mean the documented default (``±9.999e19``), which sits just
+    BELOW the sentinel and so is a *finite* box: the recourse is then bounded and
+    the model is not unbounded. Express the intent the way the DC-S1 sibling below
+    does, with a bound at or above the sentinel.
     """
     m = dm.Model("unb")
     y = m.binary("y")
-    w = m.continuous("w", lb=0.0, ub=None)
+    w = m.continuous("w", lb=0.0, ub=1e30)
     m.first_stage(y)
     m.minimize(y - w)
     m.subject_to(w >= y)
