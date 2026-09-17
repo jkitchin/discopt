@@ -927,6 +927,18 @@ _STATE_IN_OWN_SECTION = frozenset(
 #: them would be writing a derived value that could disagree with its source.
 _STATE_DERIVED = frozenset({"_names", "_builder", "_flat_var_offsets_cache"})
 
+#: Attributes deliberately NOT carried: session-local state that a reloaded model
+#: must start without, rather than inherit from whoever saved the file.
+#:
+#: ``_last_solve_result`` (#1313) is the point this model object was last solved
+#: to, kept so ``sensitivity()`` can start there and cross-check against it. It is
+#: a cache of something that happened in *this* process, and the document already
+#: has an explicit, opt-in way to travel with a result -- ``Model.save(...,
+#: result=...)`` -> ``saved_result``, which is in ``_STATE_IN_OWN_SECTION`` above.
+#: Writing this one too would make a reloaded model silently claim a solve nobody
+#: in the new process ran, and ``sensitivity()`` would cross-check against it.
+_STATE_NOT_CARRIED = frozenset({"_last_solve_result"})
+
 #: Attributes carried verbatim in the "state" section (plain JSON-safe values).
 _STATE_PLAIN = ("_aux_counter", "_decomp_stages", "_decomp_blocks")
 
@@ -939,6 +951,7 @@ _STATE_BESPOKE = ("_coupling_keys", "_sets", "_simplex_lowerings")
 _MODEL_STATE = (
     _STATE_IN_OWN_SECTION
     | _STATE_DERIVED
+    | _STATE_NOT_CARRIED
     | frozenset(_STATE_PLAIN)
     | frozenset(_STATE_AS_SORTED_LIST)
     | frozenset(_STATE_BESPOKE)

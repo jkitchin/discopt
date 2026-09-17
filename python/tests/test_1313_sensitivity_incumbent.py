@@ -105,6 +105,32 @@ def test_stale_reference_warns_and_flags_the_mismatch():
     assert float(np.asarray(s.x).ravel()[0]) == pytest.approx(0.5, abs=1e-4)
 
 
+def test_the_recorded_result_does_not_travel_through_serialization():
+    """A reloaded model must not claim a solve nobody in the new process ran.
+
+    ``_last_solve_result`` is a cache of something that happened in *this*
+    process. The document already has an explicit, opt-in way to carry a result
+    (``Model.save(..., result=...)`` -> ``saved_result``); if this one rode along
+    too, ``sensitivity()`` on a freshly loaded model would silently cross-check
+    against a stranger's solve. ``discopt.serialize`` classifies it as
+    not-carried, and ``test_every_model_attribute_is_accounted_for`` is what
+    forced the decision.
+    """
+    import discopt.modeling as _dm
+
+    m, _p, _x = _double_well()
+    m.solve()
+    assert m._last_solve_result is not None
+
+    reloaded = _dm.loads(_dm.dumps(m))
+    assert reloaded._last_solve_result is None
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        s = reloaded.sensitivity()
+    assert s.matches_reference is None
+
+
 # ── part 2: the multiplier sign convention ──────────────────────────────
 
 
