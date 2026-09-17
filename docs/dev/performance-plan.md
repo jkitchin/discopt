@@ -9353,3 +9353,88 @@ price of not emitting invalid cover cuts — it ships on §1, not on this column
 occur. `mir.rs` has exactly two tolerance guards — this one and
 `if viol <= tol { return None }`, which refuses an under-violated cut and is
 sound by construction. Recorded so the audit is not repeated.
+
+## 70. #1236 the integer-bilinear lift now has to earn its adoption (2026-09-17)
+
+§68.1 measured that the lift is harmful more often than it helps, and §68.3
+retracted the obvious gate (root-bound tightness, **anti**-correlated). This is
+the gate that works, and the two items §68 left open.
+
+### 70.1 Item B — cheap-first: measure whether the lift is needed, don't predict it
+
+Neither candidate separator survives: root-bound tightness is anti-correlated
+(§68.3) and bit width cannot split `ex1263`/`ex1266` (harmful) from
+`ex1264`/`ex1265` (essential) because they are the same trim-loss family at the
+same widths. What *does* separate them is simply **whether the un-lifted model
+closes**, so the gate measures that.
+
+`DISCOPT_IPX_CHEAP_FIRST` gives the un-lifted model a bounded probe before the
+lift is adopted. A certified probe IS the answer and is returned; an uncertified
+one is discarded whole and the lift is adopted with the remaining budget.
+
+Entry experiment — un-lifted time-to-certify over the adopted population, 60 s:
+
+| group | instances | un-lifted result |
+|---|---|---|
+| lift harmful | nvs02, nvs14, ex1263, ex1266, prob02, prob03 | certifies in 1.28, 1.00, **20.41**, 4.26, 1.98, 0.36 s |
+| lift neutral | nvs10, nvs11, nvs12, nvs15 | certifies in ≤ 0.13 s |
+| **lift essential** | ex1264, ex1265 | **never certifies** (full 60 s, uncertified) |
+
+Slowest must-keep 20.41 s = 34 % of budget; next-slowest 4.26 s. `0.40` clears
+the first with the rest an order of magnitude below it.
+
+The cap is affordable because of the other half of the measurement, which
+**falsified a prediction made before running it**: the expectation was that
+spending 40 % of the budget would cost `ex1264`/`ex1265` their certificates.
+Lifted, they certify in **1.2 s** (3425 nodes) and **2.3 s** (1883 nodes) — about
+25x headroom, and unchanged at a 50 % remainder.
+
+Result on the adopted population (the only models this gate can change): it picks
+the better arm **12 of 12**, declining the lift on all six it harms and keeping it
+on both that need it.
+
+**Graduation panel (§5 regime 2, both bars on one run)** — 66 in-repo instances,
+20 s, ON vs OFF:
+
+| bar | result |
+|---|---|
+| certificate violations (sense-aware) | **0 / 0** |
+| certification lost / gained | **0 / 0** |
+| objective drift > 1e-6 | **0** |
+| node counts | 62 unchanged, **4 fewer, 0 more** |
+| total nodes | 4208 -> **3636 (-13.6 %)** |
+
+`nvs02` 297 -> 3, `nvs14` 273 -> 3, `tanksize` 1932 -> 1926, `nvs07` 3 -> 1. No
+instance regresses, so the flag ships **default-ON** with the `=0` opt-out and the
+legacy path intact.
+
+**One implementation trap, recorded because it produced a plausible-looking
+pass.** The probe re-enters `solve_model`, and the first version guarded only
+against probing recursively — not against the probe *adopting the lift itself*.
+The nested solve therefore re-adopted it and the probe "certified" in 23.94 s with
+the lift's own 297 nodes on `nvs02`, i.e. the gate fired, reported success, and
+changed nothing. The guard now suppresses adoption inside the probe, and that
+measurement is in the code comment so a regression cannot look like a pass.
+
+### 70.2 Item C — nvs13: the candidate lever is argued dead by §68's own evidence
+
+`nvs13`'s lift is not discarded, it is **never built**: alongside its ten integer
+bilinears it carries `monomial` terms (x² on all five variables) and
+`reformulate_integer_bilinear` declines the model whole. The candidate fix was
+therefore extending the reform to integer *squares* — `x² = x·x` expands through
+the same binary machinery.
+
+Not implemented, and the reason is §68.3's measurement rather than an estimate.
+The lift's value is an exact relaxation, and nvs13's problem is a 111 % root gap
+(§68.4), so the lift looks like the obvious answer. But on `nvs02` the lift
+already produces a root bound **equal to the optimum to 12 digits** and its tree
+still takes 297 nodes, because the lifted feasible set is combinatorially hard,
+not loosely bounded — which is precisely why item B's gate *declines* the lift
+there. Extending the same mechanism to nvs13 buys the same exact-root /
+hard-tree trade, and would then be declined by the gate built in §70.1.
+
+So nvs13 needs root-bound strength **without** a lift — OBBT on the aux columns,
+RLT, or the pinned-bound work of #196/#208 — which is a different subsystem and
+outside what #1236 set out to diagnose. Recorded here with its instrumentation
+shipped (§68.4: root gap 111 %, 0 uncertified, 0 undecided nodes) so the next
+attempt starts from measurement rather than from the lift.

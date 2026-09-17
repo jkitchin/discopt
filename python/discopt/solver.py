@@ -6551,6 +6551,145 @@ def _cmir_aggregation_enabled() -> bool:
     return val.lower() not in ("0", "", "false", "no", "off")
 
 
+#: Re-entrancy guard for the #1236 cheap-first probe: the probe solves the
+#: UN-LIFTED model through ``solve_model`` itself, and must not probe again.
+_IPX_CHEAP_FIRST_IN_PROBE = False
+
+#: Fraction of the caller's limit the #1236 cheap-first probe may spend.
+#:
+#: 0.40 is measured, not chosen. On the adopted population of both in-repo corpora
+#: (12 instances, §68.1), the un-lifted arm CERTIFIES every instance the lift
+#: harms or ties -- 0.06, 0.06, 0.13, 0.13, 0.36, 1.00, 1.28, 1.98, 4.26 and
+#: 20.41 s of a 60 s budget -- and certifies NEITHER of the two the lift is
+#: essential for (``ex1264``/``ex1265`` run the full 60 s uncertified). The
+#: slowest must-keep is 20.41 s = 34 % of the budget, so the cap has to clear
+#: 34 %; 0.40 does, with the nearest competitor an order of magnitude below it
+#: (4.26 s).
+#:
+#: The cap's cost is what makes it affordable: on the two instances that DO need
+#: the lift, the lifted solve certifies in 1.2 s (``ex1264``, 3425 nodes) and
+#: 2.3 s (``ex1265``, 1883 nodes), so spending 40 % of the budget proving the
+#: un-lifted path cannot close them still leaves ~25x what the lift needs.
+_IPX_PROBE_BUDGET_FRACTION = 0.40
+
+
+def _ipx_unlifted_probe(model, time_limit, elapsed, **solve_kwargs):
+    """#1236: solve the UN-LIFTED model under a bounded probe; return it iff certified.
+
+    Returns a :class:`SolveResult` only when the probe closed the gap on the
+    original model -- in which case it IS the answer, and the caller returns it
+    unchanged. Any other outcome (uncertified, error, no budget) returns ``None``
+    and the caller proceeds to adopt the lift, having spent the probe's wall.
+
+    An uncertified probe is discarded WHOLE: its bound and incumbent are not
+    carried into the lifted solve. That is deliberate rather than thrifty --
+    ``_merge_route_and_fallback``'s docstring records that seeding a fallback with
+    a route's point measurably steered its heuristics *worse* (``rsyn0840m``,
+    211.020 -> -11.413), and the same trap applies here.
+
+    Re-entrancy: the probe calls ``solve_model`` on the original model with the
+    reformulation suppressed, so the guard below stops it probing again. The guard
+    is module-global rather than a parameter because the suppression has to hold
+    across the whole nested call, including the reformulation block it re-enters.
+    """
+    global _IPX_CHEAP_FIRST_IN_PROBE
+    if _IPX_CHEAP_FIRST_IN_PROBE:
+        return None
+    budget = _IPX_PROBE_BUDGET_FRACTION * float(time_limit) - float(elapsed)
+    if not np.isfinite(budget) or budget <= 0.0:
+        return None
+
+    _IPX_CHEAP_FIRST_IN_PROBE = True
+    try:
+        probe = solve_model(model, time_limit=budget, **solve_kwargs)
+    except Exception as exc:  # pragma: no cover - defensive
+        # Reported, never swallowed: a probe that raises is a fact about the
+        # un-lifted path, and the caller still has the lift to fall back on.
+        logger.info("#1236 cheap-first probe raised %s: %s", type(exc).__name__, exc)
+        return None
+    finally:
+        _IPX_CHEAP_FIRST_IN_PROBE = False
+
+    if probe is None or probe.status != "optimal" or not probe.gap_certified:
+        logger.debug(
+            "#1236 cheap-first probe did not certify in %.2fs (status=%s); "
+            "adopting the integer-bilinear lift",
+            budget,
+            getattr(probe, "status", None),
+        )
+        return None
+    logger.info(
+        "#1236 cheap-first: the un-lifted model certified in %.2fs (%d nodes); "
+        "declining the integer-bilinear lift",
+        budget,
+        probe.node_count,
+    )
+    return probe
+
+
+def _ipx_cheap_first_enabled() -> bool:
+    """Is the #1236 cheap-first lift gate on? ``DISCOPT_IPX_CHEAP_FIRST``.
+
+    **Default ON since the #1236 graduation panel**; ``=0`` is the opt-out, and
+    the legacy adopt-whenever-possible path stays intact behind it.
+
+    Graduation (CLAUDE.md §5 regime 2, both bars on one run):
+
+    *Cert-clean* — 66 in-repo instances at a 20 s limit, ON vs OFF: 0 certificate
+    violations either arm (sense-aware), 0 certifications lost, 0 gained, 0
+    objective drift above 1e-6.
+
+    *Net-positive* — 62 node counts unchanged, **4 fewer, 0 more**: ``nvs02``
+    297 -> 3, ``nvs14`` 273 -> 3, ``tanksize`` 1932 -> 1926, ``nvs07`` 3 -> 1.
+    Total 4208 -> 3636 (-13.6 %). No instance regresses.
+
+    Separately, on the full adopted population of both corpora (12 instances, the
+    only models this gate can change), it picks the better arm **12 of 12** --
+    including keeping the lift on ``ex1264``/``ex1265``, which certify only with
+    it, at 3425 and 1883 nodes.
+
+    What it gates
+    -------------
+    The integer-bilinear reformulation is adopted whenever it is *possible* -- the
+    lift eliminates every nonlinear term -- never because it was shown to help.
+    Measured over the adopted population it is harmful more often than not
+    (§68.1): 6 instances solve in dramatically fewer nodes without it (``nvs02``
+    297 -> 3, ``nvs14`` 273 -> 3, ``ex1266`` 1409 -> 268, ``ex1263`` 4997 -> 2317,
+    ``prob02`` 37 -> 5, ``prob03`` 7 -> 5), 4 are unaffected, and 2 genuinely need
+    it -- ``ex1264``/``ex1265`` certify ONLY with the lift.
+
+    Why this separator and not the obvious ones
+    -------------------------------------------
+    Two were measured dead first. Root-bound tightness is **anti**-correlated with
+    the outcome (§68.3): the lift's root bound on ``nvs02`` equals the optimum to
+    12 digits and its tree still takes 297 nodes, because the lifted feasible set
+    is combinatorially hard, not loosely bounded. Expansion bit width cannot
+    separate them either -- ``ex1263``/``ex1266`` (harmful) and
+    ``ex1264``/``ex1265`` (essential) are the same trim-loss family at the same
+    widths.
+
+    What does separate them is simply **whether the un-lifted model closes**, so
+    the gate measures that instead of predicting it: run the un-lifted model under
+    a bounded probe and keep the lift only when the probe fails to certify.
+
+    Soundness: the probe is an ordinary, complete solve of the ORIGINAL model. A
+    certified probe result is returned as the answer -- it is exactly what the
+    un-lifted path would have returned -- and an uncertified one is discarded
+    entirely, never mined for a bound or an incumbent. Both formulations are exact
+    reformulations of the same problem, so the gate only ever decides which of two
+    correct routes runs.
+
+    Cost: the probe's wall is charged against the caller's budget, so a model that
+    does need the lift reaches it with the remainder (measured sufficient above).
+    """
+    return os.environ.get("DISCOPT_IPX_CHEAP_FIRST", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
 def _p3_force_cut_path_enabled() -> bool:
     """cert:P3.1c experiment toggle (``DISCOPT_P3_FORCE_CUT_PATH``, default-OFF).
 
@@ -10050,7 +10189,32 @@ def solve_model(
                 or _ipx_nl.ratio_of_products
                 or _ipx_nl.general_nl
             )
-            if _ipx_pure_milp and classify_problem(_ipx) == ProblemClass.MILP:
+            _ipx_adopt = _ipx_pure_milp and classify_problem(_ipx) == ProblemClass.MILP
+            # #1236 cheap-first (flag-gated, default OFF): the lift is adopted
+            # today because it is *possible*, never because it was shown to help,
+            # and over the adopted population it is harmful more often than not.
+            # Give the un-lifted model a bounded probe first; if it certifies, that
+            # result IS the answer and the lift is declined. See
+            # ``_ipx_cheap_first_enabled`` for the measurement behind it.
+            if _ipx_adopt and _ipx_cheap_first_enabled():
+                if _IPX_CHEAP_FIRST_IN_PROBE:
+                    # We ARE the probe: the probe's whole job is to be the
+                    # un-lifted arm, so it must never adopt the lift itself.
+                    # Without this the nested solve re-adopted it and the probe
+                    # measured the lifted path (measured on nvs02: the probe
+                    # "certified" in 23.94 s with the lift's own 297 nodes).
+                    _ipx_adopt = False
+                else:
+                    _probe = _ipx_unlifted_probe(
+                        model,
+                        time_limit,
+                        time.perf_counter() - _solve_t0,
+                        gap_tolerance=gap_tolerance,
+                        max_nodes=max_nodes,
+                    )
+                    if _probe is not None:
+                        return _probe
+            if _ipx_adopt:
                 model = _ipx
                 model._convexity_classification_cache = None
                 clear_declared_box_cache(model)
