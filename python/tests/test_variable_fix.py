@@ -456,6 +456,24 @@ def test_model_fixed_scopes_closed_out_of_order_raise_immediately():
 
 
 @pytest.mark.smoke
+def test_model_fixed_failing_fix_unwinds_earlier_fixes_and_surfaces_its_error():
+    """A fix() that raises part-way through Model.fixed() must surface its own
+    ValueError and unwind the fixes applied before it -- not report a spurious
+    out-of-order error for the variable that never got fixed and leave the
+    earlier ones fixed."""
+    m = dm.Model("m")
+    x = m.continuous("x", lb=0.0, ub=1.0)
+    y = m.continuous("y", lb=0.0, ub=1.0)
+
+    with pytest.raises(ValueError, match="outside its declared bounds"):
+        with m.fixed({x: 0.5, y: 5.0}):
+            pass
+    assert (float(x.lb), float(x.ub)) == (0.0, 1.0)
+    assert x.fix_depth == 0 and x._fix_scope_tokens == []
+    assert y.fix_depth == 0 and y._fix_scope_tokens == []
+
+
+@pytest.mark.smoke
 def test_properly_nested_fixed_scopes_are_unaffected():
     """The ordinary, correctly-nested case (a single ``with`` block, or
     sequential non-overlapping scopes) must be completely unaffected by the

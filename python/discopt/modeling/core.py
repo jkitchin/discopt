@@ -5191,11 +5191,16 @@ class Model:
 
         depths = [(var, len(var._bound_stack)) for var, _ in targets]
         token = object()
+        # Only variables whose fix() succeeded carry this scope's token: if a later
+        # fix() raises, the ones before it must still unwind cleanly below, and the
+        # original error must surface rather than a spurious out-of-order one.
+        tokened: list[Variable] = []
         completed = False
         try:
             for var, value in targets:
                 var.fix(value)
                 var._fix_scope_tokens.append(token)
+                tokened.append(var)
             yield self
             completed = True
         finally:
@@ -5205,7 +5210,7 @@ class Model:
             # not be silently popped past.
             out_of_order = [
                 var.name
-                for var, _ in targets
+                for var in tokened
                 if not var._fix_scope_tokens or var._fix_scope_tokens[-1] is not token
             ]
             if out_of_order:
@@ -5215,7 +5220,7 @@ class Model:
                     "these variables is still open. Close nested scopes in the "
                     "reverse order they were entered."
                 )
-            for var, _ in targets:
+            for var in tokened:
                 var._fix_scope_tokens.pop()
             unbalanced = []
             for var, depth_before in reversed(depths):
