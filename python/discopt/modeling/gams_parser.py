@@ -2350,9 +2350,16 @@ class _ModelBuilder:
                 return base * dm.abs_(base) ** (pval - 1.0)
             return base * dm.abs_(base) ** (pexp - 1)
         if fn == "min":
-            return dm.minimum(args[0], args[1])
+            # GAMS min/max take two or more arguments (#1312: this hard-coded
+            # 2-arg form silently dropped args[2:], producing a WRONG certified
+            # optimum -- not a loose bound -- for any 3+-ary call in an
+            # equation body. dm.minimum/dm.maximum have been n-ary since #1250;
+            # the constant-folding arm of this same module already used
+            # min(fargs)/max(fargs) correctly, so this made the two arms
+            # silently disagree on the endogenous case).
+            return dm.minimum(*args)
         if fn == "max":
-            return dm.maximum(args[0], args[1])
+            return dm.maximum(*args)
         if fn == "errorf":
             # GAMS errorf is the standard normal CDF, not erf (#1288).
             return 0.5 * (1.0 + dm.erf(args[0] / math.sqrt(2.0)))

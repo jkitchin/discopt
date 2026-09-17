@@ -365,3 +365,131 @@ def test_fit_then_design_reuses_one_model_across_tasks():
 
     assert len({round(f[0], 9) for f in fits}) == 1, f"fit drifted across cycles: {fits}"
     assert len({round(d, 9) for d in designs}) == 1, f"design drifted: {designs}"
+
+
+# ── #1311: fix()/unfix() must not leave the box writable ─────────────────
+
+
+@pytest.mark.smoke
+def test_fix_unfix_cycle_leaves_bounds_read_only():
+    """A single fix()/unfix() cycle must restore the SAME read-only invariant
+    the original declared bounds carry. Before the fix, ``unfix()`` restored a
+    plain writable copy, so an in-place bound write (``v.lb[...] = ...``)
+    would silently succeed after even one fix/unfix cycle -- exactly the
+    aliasing hole ``Model.saved_bounds(copy=False)`` documents itself as safe
+    from (its docstring claims a naive in-place write always raises)."""
+    m = dm.Model("m")
+    x = m.continuous("x", lb=0.0, ub=10.0)
+    assert not x.lb.flags.writeable
+    x.fix(3.0)
+    x.unfix()
+    assert not x.lb.flags.writeable
+    assert not x.ub.flags.writeable
+    with pytest.raises(ValueError, match="read-only"):
+        x.lb[()] = 99.0
+
+
+@pytest.mark.smoke
+def test_saved_bounds_restore_survives_a_prior_fix_unfix_cycle():
+    """#1311: saved_bounds(copy=False)'s by-reference snapshot must still be
+    protected by read-only arrays after the variable has been through a
+    fix()/unfix() cycle -- reproducing the exact aliasing corruption a
+    prior fix/unfix could otherwise reopen on the hot B&B path."""
+    m = dm.Model("m")
+    x = m.continuous("x", lb=0.0, ub=10.0)
+    x.fix(3.0)
+    x.unfix()
+    with pytest.raises(ValueError, match="read-only"):
+        with m.saved_bounds(copy=False):
+            x.lb[()] = 7.5
+    # The snapshot itself (and the live box) must be untouched by the refused write.
+    assert (float(x.lb), float(x.ub)) == (0.0, 10.0)
+
+
+# ── #1311: fixed() scopes closed out of LIFO order must not corrupt state ──
+
+
+@pytest.mark.smoke
+def test_variable_fixed_scopes_closed_out_of_order_raise_immediately():
+    """Two fixed() scopes on the same variable, held open across a boundary
+    (not nested via a single ``with`` block) and closed in the wrong order,
+    must be refused AT THE POINT OF DIVERGENCE -- not silently unwind the
+    still-open inner scope and let a solve run against the wrong box before
+    anyone notices."""
+    m = dm.Model("m")
+    x = m.continuous("x", lb=0.0, ub=10.0)
+
+    cm1 = x.fixed(1.0)
+    cm1.__enter__()
+    cm2 = x.fixed(2.0)
+    cm2.__enter__()
+    assert (float(x.lb), float(x.ub)) == (2.0, 2.0)
+
+    with pytest.raises(RuntimeError, match="closed out of order"):
+        cm1.__exit__(None, None, None)
+    # The out-of-order exit must not have touched the box: cm2's fix survives.
+    assert (float(x.lb), float(x.ub)) == (2.0, 2.0)
+    assert x.fix_depth == 2
+
+    # Closing in the correct (LIFO) order from here recovers cleanly.
+    cm2.__exit__(None, None, None)
+    assert (float(x.lb), float(x.ub)) == (1.0, 1.0)
+
+
+@pytest.mark.smoke
+def test_model_fixed_scopes_closed_out_of_order_raise_immediately():
+    """Same hazard as the Variable.fixed() case, for Model.fixed()."""
+    m = dm.Model("m")
+    x = m.continuous("x", lb=0.0, ub=10.0)
+
+    cm1 = m.fixed(x=1.0)
+    cm1.__enter__()
+    cm2 = m.fixed(x=2.0)
+    cm2.__enter__()
+
+    with pytest.raises(RuntimeError, match="closed out of order"):
+        cm1.__exit__(None, None, None)
+    assert (float(x.lb), float(x.ub)) == (2.0, 2.0)
+
+    cm2.__exit__(None, None, None)
+    assert (float(x.lb), float(x.ub)) == (1.0, 1.0)
+
+
+@pytest.mark.smoke
+def test_model_fixed_failing_fix_unwinds_earlier_fixes_and_surfaces_its_error():
+    """A fix() that raises part-way through Model.fixed() must surface its own
+    ValueError and unwind the fixes applied before it -- not report a spurious
+    out-of-order error for the variable that never got fixed and leave the
+    earlier ones fixed."""
+    m = dm.Model("m")
+    x = m.continuous("x", lb=0.0, ub=1.0)
+    y = m.continuous("y", lb=0.0, ub=1.0)
+
+    with pytest.raises(ValueError, match="outside its declared bounds"):
+        with m.fixed({x: 0.5, y: 5.0}):
+            pass
+    assert (float(x.lb), float(x.ub)) == (0.0, 1.0)
+    assert x.fix_depth == 0 and x._fix_scope_tokens == []
+    assert y.fix_depth == 0 and y._fix_scope_tokens == []
+
+
+@pytest.mark.smoke
+def test_properly_nested_fixed_scopes_are_unaffected():
+    """The ordinary, correctly-nested case (a single ``with`` block, or
+    sequential non-overlapping scopes) must be completely unaffected by the
+    #1311 out-of-order detection."""
+    m = dm.Model("m")
+    x = m.continuous("x", lb=0.0, ub=10.0)
+
+    with x.fixed(1.0):
+        with x.fixed(2.0):
+            assert (float(x.lb), float(x.ub)) == (2.0, 2.0)
+        assert (float(x.lb), float(x.ub)) == (1.0, 1.0)
+    assert (float(x.lb), float(x.ub)) == (0.0, 10.0)
+    assert x.fix_depth == 0
+
+    with x.fixed(3.0):
+        pass
+    with x.fixed(4.0):
+        pass
+    assert x.fix_depth == 0

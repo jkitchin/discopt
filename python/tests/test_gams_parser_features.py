@@ -123,6 +123,49 @@ MINMAX_GMS = textwrap.dedent("""\
 """)
 
 
+class TestEquationBodyMinMax:
+    """#1312: the equation-body (endogenous, non-constant) arm of min()/max()
+    hard-coded exactly 2 arguments and silently dropped args[2:] -- a WRONG
+    certified optimum, not a loose bound, for any 3+-ary call. The
+    constant-folding arm (``TestScalarConstantFolding`` above) already handled
+    n-ary min/max correctly; this class pins the endogenous arm to the same
+    standard now that ``dm.minimum``/``dm.maximum`` are n-ary (#1250)."""
+
+    def test_three_arg_min_in_equation_body_does_not_drop_the_third(self):
+        src = textwrap.dedent("""\
+            Variables z ;
+            Variable x1, x2, x3 ;
+            x1.fx = 5 ;
+            x2.fx = 8 ;
+            x3.fx = 1 ;
+            Equations obj ;
+            obj.. z =e= min(x1, x2, x3) ;
+            Model m1312min / all / ;
+            Solve m1312min using dnlp minimizing z ;
+        """)
+        r = parse_gams(src).solve()
+        assert r.status == "optimal"
+        assert r.objective == pytest.approx(1.0)  # true min(5, 8, 1); a 2-arg
+        # fold of just (x1, x2) would silently give 5.0 instead.
+
+    def test_three_arg_max_in_equation_body_does_not_drop_the_third(self):
+        src = textwrap.dedent("""\
+            Variables z ;
+            Variable x1, x2, x3 ;
+            x1.fx = 5 ;
+            x2.fx = 1 ;
+            x3.fx = 9 ;
+            Equations obj ;
+            obj.. z =e= max(x1, x2, x3) ;
+            Model m1312max / all / ;
+            Solve m1312max using dnlp minimizing z ;
+        """)
+        r = parse_gams(src).solve()
+        assert r.status == "optimal"
+        assert r.objective == pytest.approx(9.0)  # true max(5, 1, 9); a 2-arg
+        # fold of just (x1, x2) would silently give 5.0 instead.
+
+
 class TestIndexedParamAssignment:
     def test_loop_assignment_builds_parameter(self):
         """loop(i, p(i) = ord(i)*10) must yield coefficients 10, 20, 30."""

@@ -1304,6 +1304,13 @@ class Variable(Expression):
         # node loop is already overriding boxes), and a single slot would
         # restore the wrong box on the inner unfix.
         self._bound_stack: list[tuple[np.ndarray, np.ndarray]] = []
+        # One opaque token per currently-open `fixed()` scope on this variable
+        # (pushed by `Variable.fixed`/`Model.fixed`, never by a raw `fix()`).
+        # Detects two such scopes closing out of LIFO order (#1311) -- e.g. one
+        # held open across a callback boundary while another opens and closes
+        # inside it -- which `_bound_stack`'s depth alone cannot distinguish
+        # from an ordinary leaked inner `fix()`.
+        self._fix_scope_tokens: list[object] = []
 
     @property
     def size(self) -> int:
@@ -1427,6 +1434,18 @@ class Variable(Expression):
         """
         prev_lb = np.array(self.lb, dtype=np.float64, copy=True)
         prev_ub = np.array(self.ub, dtype=np.float64, copy=True)
+        # Read-only, to match the invariant the ORIGINAL declared bounds carry
+        # (a `broadcast_to` view). `unfix()` restores exactly these arrays, so
+        # without this a single fix()/unfix() cycle would silently turn a
+        # read-only declared-bounds array into a plain writable one -- which
+        # breaks `Model.saved_bounds(copy=False)`'s documented aliasing
+        # invariant that an in-place bound write raises rather than silently
+        # corrupting its by-reference snapshot (#1311). A box being pushed
+        # here is, by construction, no longer the live/mutable one -- ``fix()``
+        # is about to replace it with ``new_lb``/``new_ub`` below -- so nothing
+        # should ever write into it in place.
+        prev_lb.flags.writeable = False
+        prev_ub.flags.writeable = False
         target = np.broadcast_to(np.asarray(value, dtype=np.float64), self.shape)
 
         if where is None:
@@ -1505,11 +1524,32 @@ class Variable(Expression):
         """
         depth_before = len(self._bound_stack)
         self.fix(value, where=where)
+        token = object()
+        self._fix_scope_tokens.append(token)
         completed = False
         try:
             yield self
             completed = True
         finally:
+            # #1311: two `fixed()` scopes on the same variable, held open
+            # across a callback/generator boundary rather than nested in a
+            # single ``with`` block, can close out of LIFO order. Popping
+            # blindly to ``depth_before`` in that case would silently discard
+            # the OTHER scope's still-open fix and restore the wrong box, with
+            # no error until that other scope's own (now out-of-sync) exit --
+            # by which point a solve run in between may already have seen the
+            # wrong box. Detect the divergence right here, before unwinding
+            # anything.
+            if not self._fix_scope_tokens or self._fix_scope_tokens[-1] is not token:
+                raise RuntimeError(
+                    f"Variable {self.name!r}: fixed() scopes were closed out of "
+                    "order -- another fixed() (or Model.fixed()) scope on this "
+                    "variable is still open. Close nested scopes in the reverse "
+                    "order they were entered (a plain ``with`` block already "
+                    "guarantees this; only overlapping/stored context managers "
+                    "can violate it)."
+                )
+            self._fix_scope_tokens.pop()
             while len(self._bound_stack) > depth_before:
                 self.unfix()
             if completed and len(self._bound_stack) != depth_before:
@@ -5156,13 +5196,38 @@ class Model:
             )
 
         depths = [(var, len(var._bound_stack)) for var, _ in targets]
+        token = object()
+        # Only variables whose fix() succeeded carry this scope's token: if a later
+        # fix() raises, the ones before it must still unwind cleanly below, and the
+        # original error must surface rather than a spurious out-of-order one.
+        tokened: list[Variable] = []
         completed = False
         try:
             for var, value in targets:
                 var.fix(value)
+                var._fix_scope_tokens.append(token)
+                tokened.append(var)
             yield self
             completed = True
         finally:
+            # #1311: same out-of-order hazard as ``Variable.fixed()``, checked
+            # per variable before any unwinding -- an overlapping (not
+            # properly nested) scope on ANY one of this scope's variables must
+            # not be silently popped past.
+            out_of_order = [
+                var.name
+                for var in tokened
+                if not var._fix_scope_tokens or var._fix_scope_tokens[-1] is not token
+            ]
+            if out_of_order:
+                raise RuntimeError(
+                    f"Model.fixed(): scopes were closed out of order on "
+                    f"{out_of_order}; another fixed() scope on at least one of "
+                    "these variables is still open. Close nested scopes in the "
+                    "reverse order they were entered."
+                )
+            for var in tokened:
+                var._fix_scope_tokens.pop()
             unbalanced = []
             for var, depth_before in reversed(depths):
                 while len(var._bound_stack) > depth_before:

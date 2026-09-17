@@ -346,6 +346,45 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **Four defects found by adversarially testing last week's feature PRs**
+  (#1309, #1310, #1311, #1312).
+
+  - **#1309 (LP/MILP correctness).** `DISCOPT_LP_MILP_BACKEND=rust` fell
+    through to POUNCE (the interior-point engine), not the Rust simplex, and
+    on a trivially feasible LP with declared bounds in `[5e15, 2e18]` POUNCE's
+    barrier method reported a false certified `infeasible` — Ipopt code 2
+    ("Infeasible_Problem_Detected") is not always a sound global certificate
+    for a badly-conditioned LP. It is now cross-checked against the same
+    elastic Phase-1 LP already used to disambiguate an ambiguous
+    `ITERATION_LIMIT`/`ERROR`/`UNBOUNDED` exit; when the check does not
+    confirm the infeasibility, the result honestly downgrades to `error`
+    rather than certifying a false `infeasible`. Separately, the HiGHS MILP
+    route's NS-safe root cross-check (the #1295 backstop) could be silently
+    skipped by an ordinary time-budget race, with `gap_certified=True`
+    reported anyway; a skipped check now downgrades the result to an
+    uncertified `feasible` (keeping the incumbent) or `error`.
+  - **#1310 (serialize).** `discopt.load()` never validated name uniqueness,
+    so a corrupted document with two variables sharing a name, or a
+    variable/parameter name collision, loaded silently into an internally
+    inconsistent `Model` — the break surfaced only later, at `solve()` or
+    `to_nl()`, or (for the variable/parameter case) never. Both are now
+    refused loudly at `loads()` time.
+  - **#1311 (scoped variable fixing).** A single `Variable.fix()`/`unfix()`
+    cycle silently turned the read-only declared-bounds array into a plain
+    writable one, breaking `Model.saved_bounds(copy=False)`'s documented
+    aliasing invariant (a naive in-place bound write is supposed to always
+    raise). Restoring `unfix()` now keeps the array read-only. Separately, two
+    `fixed()` scopes on the same variable held open across a callback
+    boundary and closed out of LIFO order would let the outer scope silently
+    discard the inner scope's still-active fix with no error until the inner
+    scope's own (now stale) exit; this is now refused immediately at the
+    point of divergence.
+  - **#1312 (GAMS reader).** The equation-body (non-constant) arm of GAMS
+    `min`/`max` was hard-coded to exactly 2 arguments, silently dropping the
+    3rd+ operand — a wrong certified optimum, not a loose bound, for any
+    3+-ary call. `dm.minimum`/`dm.maximum` have been n-ary since #1250; the
+    reader now uses `*args` to match.
+
 - **Five defects found reviewing the #1288-#1292 batch itself.** The one that
   mattered: `_sum_along` compiled `sum(x, axis=())` — a reduction over no axes,
   which numpy defines as the identity — into a single full-reduction tape node,

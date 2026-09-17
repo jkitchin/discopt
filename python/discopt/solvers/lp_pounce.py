@@ -408,12 +408,17 @@ def solve_lp(
     ``warm_basis`` is accepted for signature compatibility but ignored: an IPM
     does not warm-start from a simplex basis. ``LPResult.basis`` is ``None``.
 
-    When the result is ``INFEASIBLE``, an
-    :class:`~discopt.solvers.InfeasibilityCertificate` is attached if one was
-    computed: always for infeasibility found via the Phase-1 disambiguation
-    path (free — Phase-1 already ran), and on demand for a directly
-    POUNCE-detected infeasibility when ``certificate=True`` (one extra Phase-1
-    solve).
+    A directly POUNCE-detected ``INFEASIBLE`` (Ipopt code 2) is not trusted as
+    a certificate on its own: it is always cross-checked against the same
+    elastic Phase-1 LP used to disambiguate ``ITERATION_LIMIT``/``ERROR``/
+    ``UNBOUNDED`` exits, because that code can also fire from barrier-method
+    numerical failure on badly-conditioned (huge-magnitude-bound) problems
+    with no real infeasibility behind it (#1309). When the result is
+    ``INFEASIBLE`` after that check, an
+    :class:`~discopt.solvers.InfeasibilityCertificate` is always attached
+    (the Phase-1 solve already ran to confirm it). ``certificate`` is
+    retained for call-site compatibility; it no longer changes whether the
+    check runs, since soundness cannot be conditional on an opt-in flag.
 
     Raises:
         ImportError: If POUNCE is not installed.
@@ -489,16 +494,24 @@ def solve_lp(
     # An IPM does not always certify infeasibility: an inconsistent system can
     # exit at the iteration limit, as a generic error, or — because diverging
     # iterates / a too-small search direction (Ipopt codes 4/3) look the same on
-    # an infeasible LP as on an unbounded one — as a spurious UNBOUNDED.
-    # Disambiguate with an elastic Phase-1 LP that minimizes total constraint
-    # violation. For an LP this is exact (by LP duality a positive minimal
-    # violation is a Farkas certificate): >0 proves infeasibility; ~0 proves the
-    # original was feasible, so the prior status (numerical failure, or a genuine
-    # UNBOUNDED once feasibility is established) is reported honestly.
+    # an infeasible LP as on an unbounded one — as a spurious UNBOUNDED. A direct
+    # Ipopt code 2 ("Infeasible_Problem_Detected") is included here too: the
+    # comment this code used to carry ("for a convex LP, local infeasibility is
+    # global, so code 2 is a sound INFEASIBLE") is not true in practice on
+    # badly-conditioned huge-magnitude-bound problems, where the barrier method
+    # can raise code 2 from numerical failure with no real infeasibility behind
+    # it (issue #1309: reproduced with declared bounds in [5e15, 2e18] on an
+    # otherwise trivially feasible one-row LP). Disambiguate ALL of these with an
+    # elastic Phase-1 LP that minimizes total constraint violation. For an LP
+    # this is exact (by LP duality a positive minimal violation is a Farkas
+    # certificate): >0 proves infeasibility; ~0 proves the original was
+    # feasible, so the prior status (numerical failure, or a genuine UNBOUNDED
+    # once feasibility is established) is reported honestly.
     if m > 0 and result.status in (
         SolveStatus.ITERATION_LIMIT,
         SolveStatus.ERROR,
         SolveStatus.UNBOUNDED,
+        SolveStatus.INFEASIBLE,
     ):
         slacks = _phase1_min_violation(A, cl, cu, lb, ub, opts)
         if slacks is not None and _is_infeasible_violation(slacks, cl, cu):
@@ -508,12 +521,25 @@ def solve_lp(
                 wall_time=result.wall_time,
                 infeasibility_certificate=_build_certificate(slacks, n_ineq),
             )
-    elif certificate and result.status == SolveStatus.INFEASIBLE and m > 0:
-        # POUNCE detected infeasibility directly; spend one Phase-1 solve to
-        # build the requested witness.
-        slacks = _phase1_min_violation(A, cl, cu, lb, ub, opts)
-        if slacks is not None and _is_infeasible_violation(slacks, cl, cu):
-            result.infeasibility_certificate = _build_certificate(slacks, n_ineq)
+        if result.status == SolveStatus.INFEASIBLE:
+            # POUNCE's own code-2 verdict did NOT survive the exact Phase-1
+            # check (~0 violation: the problem is actually feasible). Trusting
+            # the raw label here would certify a false 'infeasible' (CLAUDE.md
+            # §1); report ERROR instead so the caller (``_solve_lp``) degrades
+            # to the exact simplex, mirroring the UNBOUNDED-without-ray case
+            # just below.
+            logger.debug(
+                "POUNCE reported INFEASIBLE (Ipopt code 2) but the elastic "
+                "Phase-1 LP found ~0 constraint violation, so the problem is "
+                "actually feasible; reporting ERROR so the caller degrades to "
+                "the exact simplex rather than certifying a false 'infeasible' "
+                "(#1309)."
+            )
+            return LPResult(
+                status=SolveStatus.ERROR,
+                iterations=result.iterations,
+                wall_time=result.wall_time,
+            )
 
     # Phase-1 above settles the "was it really infeasible?" reading of an ambiguous
     # code-3/4 exit. This settles the other one: UNBOUNDED survives only if a ray

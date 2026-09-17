@@ -1437,6 +1437,20 @@ def solve_milp_std(
         stats["milp/root_check_skipped"] = 1.0
         if name in ("kUnbounded", "kUnboundedOrInfeasible"):
             out.status, out.message = "error", f"{name} and no budget left to decide it"
+        elif out.gap_certified:
+            # The NS-safe root cross-check exists to catch a tree bound (or an
+            # infeasibility claim) that is already wrong at the root (#1295);
+            # skipping it while leaving ``gap_certified=True`` claims a safety
+            # net that never ran (#1309). Degrade to an honest, uncertified
+            # outcome instead: keep the incumbent as 'feasible' when there is
+            # one (kOptimal), otherwise 'error' (kInfeasible has no incumbent
+            # to fall back to).
+            out.message = (
+                f"HiGHS MILP {name}: no time budget left to run the NS-safe "
+                "root cross-check, so this result cannot be certified"
+            )
+            out.gap_certified = False
+            out.status = "feasible" if out.x is not None else "error"
         return done(out)
     t_root = time.perf_counter()
     lp = solve_lp_std(sf, time_limit=rem)
