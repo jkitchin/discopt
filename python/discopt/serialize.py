@@ -104,11 +104,28 @@ from discopt.provenance import skew_warning
 #: the provenance block was added: additive, so a 1.0 reader still reads a 1.1
 #: document (it ignores the extra key) and this reader still reads a 1.0 one
 #: (it records no provenance).
-SCHEMA = "discopt.model/1.1"
+#:
+#: 1.2 is NOT additive, and is the first minor that this reader acts on. Two
+#: things changed at once: an index gained its own ``{"k": "bool"}`` kind (#1290)
+#: and a sum axis gained a list spelling, neither of which a 1.1 reader
+#: understands; and the solution subtree stopped going through a blanket
+#: ``_enc_tree`` (#1292), which a 1.1 reader would leave tagged. The minor is
+#: what tells the two solution encodings apart on read -- see :func:`loads`.
+#:
+#: A 1.1 reader loading a 1.2 document still passes the major check and then
+#: fails on the first bool index or list axis with "unknown index kind" /
+#: "invalid sum axis". That is a clean refusal rather than a mis-build, and it is
+#: the best that can be done for readers already shipped: they never looked at
+#: the minor. Forward compatibility is not claimed.
+SCHEMA = "discopt.model/1.2"
 
 #: Major version this reader accepts. A document whose major differs is refused
 #: rather than best-effort parsed.
 SCHEMA_MAJOR = 1
+
+#: Minor at which the blanket ``_enc_tree`` over the solution subtree was dropped
+#: (#1292). Documents below it need that encoding undone on read.
+_SCHEMA_MINOR_UNTAGGED_SOLUTION = 2
 
 _GZIP_MAGIC = b"\x1f\x8b"
 
@@ -1252,7 +1269,9 @@ def dumps(
 
         # Already JSON-safe, and each field is tagged by its own rule. A blanket
         # re-encode/decode here is what turned a string field reading "nan" into
-        # a float on reload (#1292).
+        # a float on reload (#1292). Dropping it changes the format, which is why
+        # the schema minor goes to 1.2 -- `loads` needs to know which of the two
+        # encodings it is holding.
         doc["solution"] = serialize_result(result)
 
     # `allow_nan=False`: bare NaN/Infinity is not valid JSON, and every float has
@@ -1282,14 +1301,29 @@ def loads(text: Union[str, bytes]) -> Model:
     schema = doc.get("schema")
     if not isinstance(schema, str) or not schema.startswith("discopt.model/"):
         raise SerializationError(f"not a discopt model document (schema={schema!r}).")
-    # Split on "." so a future "discopt.model/1.1" is read as major 1 (a minor bump
-    # is additive by construction) rather than refused as a major called "1.1".
+    # Split on "." so "discopt.model/1.2" is read as major 1 rather than refused as
+    # a major called "1.2".
     version = schema.split("/", 1)[1]
-    major = version.split(".", 1)[0]
+    major, _, minor_text = version.partition(".")
     if major != str(SCHEMA_MAJOR):
         raise SerializationError(
             f"document schema {schema!r} is major version {major}, but this discopt "
             f"reads major version {SCHEMA_MAJOR}. Refusing rather than guessing."
+        )
+    # The minor decides how the solution subtree is decoded below, so it has to be
+    # a number. A bare major ("discopt.model/1") is minor 0. Anything after the
+    # minor is ignored rather than refused -- this reader must not be the thing
+    # that stops a later "1.3.1" from loading -- but a minor that is not a number
+    # is a malformed identifier, and guessing one would pick a decoder at random.
+    minor_field = minor_text.partition(".")[0]
+    if minor_field == "":
+        minor = 0
+    elif minor_field.isdigit():
+        minor = int(minor_field)
+    else:
+        raise SerializationError(
+            f"document schema {schema!r} has a non-numeric minor version "
+            f"{minor_field!r}; refusing rather than guessing which format it is."
         )
 
     model = Model(doc["name"])
@@ -1342,7 +1376,25 @@ def loads(text: Union[str, bytes]) -> Model:
     if doc.get("solution") is not None:
         from discopt.result_io import deserialize_result
 
-        model.saved_result = deserialize_result(doc["solution"])
+        solution = doc["solution"]
+        if minor < _SCHEMA_MINOR_UNTAGGED_SOLUTION:
+            # Through 1.1 this subtree was written as `_enc_tree(serialize_result(r))`
+            # -- a blanket tag over everything `serialize_result` had already encoded
+            # by field. The blanket pass is what made a non-finite float legal under
+            # `allow_nan=False` in the fields `serialize_result` left raw, above all
+            # `mip_nlp_trace`: a `nan` in a 1.1 document is on disk as the STRING
+            # "nan". `deserialize_result` decodes its own tags and has no legacy path
+            # for that field, so without this the trace reloads holding the string --
+            # and a re-save at 1.2 makes it permanent.
+            #
+            # This restores 1.1's decoder for 1.1 documents, which also restores its
+            # #1292 flaw: a string field whose value really is "nan" comes back as a
+            # float. That ambiguity is baked into the format those documents were
+            # written in and cannot be resolved from the document alone -- both
+            # readings are one string. 1.2 documents have no blanket pass and so no
+            # ambiguity; this branch exists only for what is already on disk.
+            solution = _dec_tree(solution)
+        model.saved_result = deserialize_result(solution)
     else:
         model.saved_result = None
 

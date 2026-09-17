@@ -96,7 +96,18 @@ def test_the_legacy_discopt_version_field_is_still_written():
 
 @pytest.mark.smoke
 def test_schema_minor_was_bumped_for_the_added_block():
-    assert _doc()["schema"] == "discopt.model/1.1"
+    """Provenance arrived at minor 1, so a document must carry at least that.
+
+    Not pinned to an exact minor: the minor has moved since (1.2 dropped the
+    blanket tag over the solution subtree) and will move again. The tripwire for
+    the current value lives with the change that sets it, in
+    ``test_1302_review_followups.py``; what this test defends is that the block's
+    arrival was versioned at all.
+    """
+    schema = _doc()["schema"]
+    major, _, minor = schema.split("/", 1)[1].partition(".")
+    assert major == "1"
+    assert minor.isdigit() and int(minor) >= 1, schema
 
 
 # ── it comes back on the model ─────────────────────────────────────────────

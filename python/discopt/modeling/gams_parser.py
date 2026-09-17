@@ -29,9 +29,23 @@ def _gams_round(x: float, ndigits: int = 0) -> float:
 
     Python's :func:`round` rounds half to even, so ``round(2.5)`` is 2 where GAMS
     gives 3 — a folded bound that differs from the model that was written.
+
+    Non-finite input passes through, as :func:`round` did: a GAMS source may hold
+    ``INF``/``NA``, and :func:`math.floor` raises on both (``OverflowError`` for
+    an infinity, ``ValueError`` for a NaN) rather than returning them. Folding
+    ``round(INF)`` must not be how ``from_gams`` reports a crash.
     """
+    if not math.isfinite(x):
+        return x
     scale = 10.0**ndigits
-    return float(math.copysign(math.floor(abs(x) * scale + 0.5), x) / scale)
+    scaled = abs(x) * scale
+    if not math.isfinite(scaled):
+        # ``ndigits`` large enough to overflow the scaling: ``x`` already carries
+        # no fractional part that many digits in, so it is its own rounding.
+        # Reached through the scaling, never through ``x`` itself, which is finite
+        # by the guard above.
+        return x
+    return float(math.copysign(math.floor(scaled + 0.5), x) / scale)
 
 
 def _gams_errorf(x: float) -> float:
