@@ -559,6 +559,18 @@ def _enc_variable(v: Variable) -> dict:
 
 
 def _dec_variable(d: dict, model: Model) -> Variable:
+    name = d["name"]
+    # #1310: a corrupted document (or a future writer bug) can carry two
+    # variables sharing a name. `_register_variable` below only ever ADDS to
+    # `model._names` -- it never checks it -- so without this, `load()` hands
+    # back a `Model` whose `_variables` and `_names` have silently fallen out
+    # of sync, with no error until some *later* call (`solve()`, `to_nl()`)
+    # happens to hit the mismatch. Checked against `model._names` directly
+    # (not the fuller `Model._check_name`, which also refuses the
+    # GDP-auxiliary namespace -- a legitimately lowered model's aux variables
+    # already carry that prefix and must still round-trip).
+    if name in model._names:
+        raise SerializationError(f"duplicate variable/parameter name {name!r}")
     shape = tuple(d["shape"])
     lb = _dec_array(d["lb"], shape)
     ub = _dec_array(d["ub"], shape)
@@ -566,7 +578,7 @@ def _dec_variable(d: dict, model: Model) -> Variable:
     # integer/...`: those apply defaulting rules (and, for INTEGER, a UserWarning
     # plus a [0, 1e6] fallback for an unspecified bound). Reloading a saved model
     # must reproduce the bounds that were saved, exactly, with no re-defaulting.
-    var = Variable(d["name"], VarType(d["type"]), shape, lb, ub, model)
+    var = Variable(name, VarType(d["type"]), shape, lb, ub, model)
     # Restore the fix stack, so `fix_depth`, `unfix()` and the declared-domain check
     # in `fix()` all see what the saved model saw.
     var._bound_stack = [
@@ -581,8 +593,15 @@ def _enc_parameter(p: Parameter) -> dict:
 
 
 def _dec_parameter(d: dict, model: Model) -> Parameter:
+    name = d["name"]
+    # #1310: same name-uniqueness gap as `_dec_variable`, and reachable across
+    # the variable/parameter boundary too -- `Model.validate()` only checks
+    # uniqueness within `_variables`, so a variable/parameter name collision
+    # introduced here is not caught at load, solve, or export time either.
+    if name in model._names:
+        raise SerializationError(f"duplicate variable/parameter name {name!r}")
     value = _dec_array(d["value"], tuple(d["shape"]))
-    param = Parameter(d["name"], value, model)
+    param = Parameter(name, value, model)
     model._parameters.append(param)
     model._names.add(param.name)
     return param

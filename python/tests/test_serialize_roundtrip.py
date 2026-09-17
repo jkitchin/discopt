@@ -401,6 +401,41 @@ def test_foreign_document_is_refused():
         loads(json.dumps({"schema": "something/else"}))
 
 
+@pytest.mark.smoke
+def test_duplicate_variable_name_is_refused_on_read():
+    """#1310: a hand-corrupted document with two variables sharing a name must
+    not load silently. Before the fix, ``load()`` returned successfully with
+    ``len(_variables) == 2`` but ``len(_names) == 1`` -- an internally
+    inconsistent ``Model`` that only broke later, at ``solve()``/``to_nl()``."""
+    m = dm.Model("dup")
+    x = m.continuous("x", lb=0.0, ub=10.0)
+    y = m.continuous("y", lb=-5.0, ub=5.0)
+    m.subject_to(x + y <= 8)
+    m.minimize(x + 2 * y)
+    doc = json.loads(dumps(m))
+    doc["variables"][1]["name"] = doc["variables"][0]["name"]
+    with pytest.raises(SerializationError, match="duplicate variable/parameter name"):
+        loads(json.dumps(doc))
+
+
+@pytest.mark.smoke
+def test_variable_parameter_name_collision_is_refused_on_read():
+    """#1310: a parameter name colliding with a variable name must not load
+    silently either -- before the fix, this loaded AND solved with no error
+    anywhere, since ``Model.validate()`` only checks uniqueness within
+    ``_variables``, never against ``_parameters``."""
+    m = dm.Model("collide")
+    x = m.continuous("x", lb=0.0, ub=10.0)
+    y = m.continuous("y", lb=-5.0, ub=5.0)
+    p = m.parameter("p", 2.0)
+    m.subject_to(x + y <= 8)
+    m.minimize(x + p * y)
+    doc = json.loads(dumps(m))
+    doc["parameters"][0]["name"] = "y"
+    with pytest.raises(SerializationError, match="duplicate variable/parameter name"):
+        loads(json.dumps(doc))
+
+
 # ── complementarity relations ──────────────────────────────────────────────
 #
 # A relation lives outside `_constraints`, and whether THIS model already carries
