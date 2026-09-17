@@ -1297,6 +1297,25 @@ pub fn solve_milp_node_hooked(
     let mut is_int_full = vec![false; n];
     is_int_full[..ns].copy_from_slice(&is_int);
 
+    // #1287: integer columns take integer bounds before anything reads them.
+    let mut l_round = l.to_vec();
+    let mut u_round = u.to_vec();
+    if !round_integer_bounds(&mut l_round[..ns], &mut u_round[..ns], &is_int) {
+        return MilpResult {
+            status: MilpStatus::Infeasible,
+            x: vec![0.0; ns],
+            obj: f64::INFINITY,
+            bound: f64::INFINITY,
+            nodes: 0,
+            lp_iters: 0,
+            lazy_calls: 0,
+            lazy_requeues: 0,
+            node_calls: 0,
+            node_cuts_added: 0,
+        };
+    }
+    let (l, u) = (l_round.as_slice(), u_round.as_slice());
+
     // --- presolve: sound, dimension-preserving root bound tightening ---
     // Only narrows bounds (interval/FBBT contraction), so it never cuts a
     // feasible solution and needs no postsolve; the tightened bounds seed both
@@ -3042,6 +3061,20 @@ fn solve_node(
                 .iter()
                 .enumerate()
                 .all(|(j, &it)| !it || frac(xs[j]) <= INT_TOL);
+            // #1287: an integral vertex is promoted to the incumbent by the tree, so
+            // its original rows must hold verifiably. One that fails is handled like
+            // a failed LP: its bound and point are both untrusted.
+            if feasible && !rows_verified(ctx.csc_rc, ctx.n_w, ctx.n_orig_rows, ctx.b_w, &sol.x) {
+                out.basis = None;
+                out.result = NodeResult {
+                    node_id: id,
+                    lower_bound: f64::NEG_INFINITY,
+                    solution: midpoint(lb_k, ub_k),
+                    is_feasible: false,
+                    certified_infeasible: false,
+                };
+                return out;
+            }
             // Past the deadline, skip every optional per-node effort below. The
             // LP bound (above) is already computed and valid; the heuristic,
             // cover separation, and strong branching only sharpen branching /
@@ -4763,6 +4796,78 @@ fn solution_is_integral(solution: &[f64], is_int: &[bool]) -> bool {
     true
 }
 
+/// Round the finite bounds of integer columns inward (#1287): `ceil` the lower,
+/// `floor` the upper, each within `INT_TOL` of an integer so a bound of
+/// `2 - 1e-9` still reads as `2`. Returns `false` when a column's rounded box is
+/// empty, i.e. no integer lies between its declared bounds.
+///
+/// Without this a fractional bound was a legal LP vertex value: `x ∈ [0, 1.5]`
+/// integer came back as `x = 1.5`, and the dive clamped a rounded value to the
+/// unrounded box, so a lazy master returned `x = 4` against `ub = 3.5`. The
+/// rounding is a valid tightening, since no integer point lies in the part it
+/// removes.
+fn round_integer_bounds(l: &mut [f64], u: &mut [f64], is_int: &[bool]) -> bool {
+    for (j, &it) in is_int.iter().enumerate() {
+        if !it {
+            continue;
+        }
+        if l[j] > -INF {
+            l[j] = (l[j] - INT_TOL).ceil();
+        }
+        if u[j] < INF {
+            u[j] = (u[j] + INT_TOL).floor();
+        }
+        if l[j] > u[j] {
+            return false;
+        }
+    }
+    true
+}
+
+/// Row residual tolerance for accepting an LP vertex as an integer-feasible
+/// point, relative to `1 + |b_i|`.
+const ROW_VERIFY_TOL: f64 = 1e-6;
+/// Largest floating-point error bound on a row activity, relative to
+/// `1 + |b_i|`, at which the row's residual still says anything.
+const ROW_ROUNDOFF_CAP: f64 = 1e-3;
+
+/// Whether `z` satisfies the first `n_rows` rows of `A z = b` **verifiably** in
+/// floating point (#1287).
+///
+/// The activity of row `i` is summed with its magnitude `Σ|a_ij z_j|`; the
+/// round-off in that sum is bounded by `16·ε·(Σ|a_ij z_j| + |b_i|)`. A row whose
+/// bound exceeds `ROW_ROUNDOFF_CAP·(1 + |b_i|)` cannot be verified at all: the
+/// computed residual is noise. That is the default-box case, where
+/// `y = 9.999e19, w = -9.999e19` makes `y + w` cancel to `0` and an infeasible
+/// point reads as satisfying its rows. Otherwise the residual must be within
+/// `ROW_VERIFY_TOL·(1 + |b_i|)` plus the round-off bound.
+fn rows_verified(csc: &SparseCols, n_cols: usize, n_rows: usize, b: &[f64], z: &[f64]) -> bool {
+    let (col_ptr, row_idx, vals) = csc.raw();
+    let mut act = vec![0.0f64; n_rows];
+    let mut mag = vec![0.0f64; n_rows];
+    for j in 0..n_cols.min(z.len()) {
+        let zj = z[j];
+        if zj == 0.0 {
+            continue;
+        }
+        for p in col_ptr[j]..col_ptr[j + 1] {
+            let i = row_idx[p];
+            if i < n_rows {
+                let t = vals[p] * zj;
+                act[i] += t;
+                mag[i] += t.abs();
+            }
+        }
+    }
+    (0..n_rows).all(|i| {
+        let scale = 1.0 + b[i].abs();
+        let roundoff = 16.0 * f64::EPSILON * (mag[i] + b[i].abs());
+        roundoff.is_finite()
+            && roundoff <= ROW_ROUNDOFF_CAP * scale
+            && (act[i] - b[i]).abs() <= ROW_VERIFY_TOL * scale + roundoff
+    })
+}
+
 fn midpoint(lb: &[f64], ub: &[f64]) -> Vec<f64> {
     lb.iter()
         .zip(ub)
@@ -5825,6 +5930,52 @@ mod tests {
         let r = solve_milp(&lp, &[3.0], 0.0, &opts(2, vec![0, 1]));
         assert_eq!(r.status, MilpStatus::Optimal);
         assert!((r.obj - (-3.0)).abs() < 1e-6, "obj {}", r.obj);
+    }
+
+    #[test]
+    fn issue_1287_fractional_integer_bounds_are_rounded() {
+        // min -x0 s.t. 0 <= x0 <= 1.5, x0 integer; the bound 1.5 is not integral.
+        // The optimum is x0 = 1 (objective -1); x0 = 1.5 is not integer.
+        // Once with no rows, once with a slack row that never binds.
+        for m in [0usize, 1] {
+            let a: Vec<f64> = if m == 0 { vec![] } else { vec![1.0, 1.0] };
+            let n = 1 + m;
+            let c: Vec<f64> = (0..n).map(|j| if j == 0 { -1.0 } else { 0.0 }).collect();
+            let l = vec![0.0; n];
+            let u: Vec<f64> = (0..n).map(|j| if j == 0 { 1.5 } else { INF }).collect();
+            let lp = LpView {
+                a: &a,
+                m,
+                n,
+                c: &c,
+                l: &l,
+                u: &u,
+            };
+            let b: Vec<f64> = vec![5.0; m];
+            let r = solve_milp(&lp, &b, 0.0, &opts(1, vec![0]));
+            assert_eq!(r.status, MilpStatus::Optimal, "m={m}");
+            assert!((r.x[0] - 1.0).abs() < 1e-9, "m={m}: x0 = {}", r.x[0]);
+            assert!((r.obj + 1.0).abs() < 1e-9, "m={m}: obj = {}", r.obj);
+        }
+    }
+
+    #[test]
+    fn issue_1287_integer_bounds_without_an_integer_are_infeasible() {
+        // x0 integer in [0.2, 0.8]: no integer lies in the box.
+        let a = [1.0, 1.0];
+        let c = [1.0, 0.0];
+        let l = [0.2, 0.0];
+        let u = [0.8, INF];
+        let lp = LpView {
+            a: &a,
+            m: 1,
+            n: 2,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let r = solve_milp(&lp, &[5.0], 0.0, &opts(1, vec![0]));
+        assert_eq!(r.status, MilpStatus::Infeasible, "x = {:?}", r.x);
     }
 
     #[test]
