@@ -3384,6 +3384,21 @@ class Objective:
     sense: ObjectiveSense
 
 
+def objective_sense_sign(model: Model) -> float:
+    """``-1.0`` if ``model`` maximizes, ``+1.0`` otherwise (or with no objective).
+
+    Every evaluator and kernel in discopt minimizes, so a MAXIMIZE model is handed
+    ``-f`` internally and its objective value, multipliers and parameter
+    derivatives all come back in that flipped sense.  Anything reporting one of
+    those to the user has to undo the flip; #1299 is what happens when each site
+    is left to remember on its own (three wrong signs, in two modules).  Multiply
+    the internal quantity by this.
+    """
+    if model._objective is None:
+        return 1.0
+    return -1.0 if model._objective.sense == ObjectiveSense.MAXIMIZE else 1.0
+
+
 # ─────────────────────────────────────────────────────────────
 # Parameter (for parametric optimization / sensitivity)
 # ─────────────────────────────────────────────────────────────

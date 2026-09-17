@@ -43,6 +43,7 @@ from discopt.modeling.core import (
     SumOverExpression,
     UnaryOp,
     Variable,
+    objective_sense_sign,
 )
 
 logger = logging.getLogger(__name__)
@@ -468,7 +469,12 @@ def differentiable_solve(
             return obj_fn(x_star_jax, p_flat_arg)
 
     grad_lagrangian_p = jax.grad(lagrangian_p)
-    sensitivity = np.asarray(grad_lagrangian_p(p_flat))
+    # ``obj_fn`` is the internal minimization form, so the envelope gradient is
+    # d(-f*)/dp for a MAXIMIZE model; the reported gradient is d(obj*)/dp in the
+    # sense the user wrote (#1299). Same for ``nlp_result.objective``, which the
+    # evaluator negated on the way in.
+    sense_sign = objective_sense_sign(model)
+    sensitivity = sense_sign * np.asarray(grad_lagrangian_p(p_flat))
 
     # Unpack solution
     x_dict = {}
@@ -479,9 +485,10 @@ def differentiable_solve(
         x_dict[v.name] = val.reshape(v.shape) if v.shape != () else val
         offset += size
 
+    objective = nlp_result.objective
     return DiffSolveResult(
         status="optimal",
-        objective=nlp_result.objective,
+        objective=None if objective is None else sense_sign * float(objective),
         x=x_dict,
         _model=model,
         _sensitivity=sensitivity,
@@ -648,7 +655,10 @@ def _compute_sensitivity_at_solution(
             return obj_fn(x_star_jax, p_flat_arg)
 
     grad_lagrangian_p = jax.grad(lagrangian_p)
-    return np.asarray(grad_lagrangian_p(p_flat))
+    # ``obj_fn`` minimizes, so a MAXIMIZE model's envelope gradient is d(-f*)/dp;
+    # the caller (``SolveResult.gradient``, and the fix-and-differentiate integer
+    # path) wants d(obj*)/dp in the user's sense (#1299).
+    return objective_sense_sign(model) * np.asarray(grad_lagrangian_p(p_flat))
 
 
 class DiffSolveResult:
@@ -1227,7 +1237,10 @@ class DiffSolveResultL3(DiffSolveResult):
         # Total derivative: dobj/dp = dobj/dx @ dx/dp + dobj/dp_direct
         dx_dp_param = self._dx_dp[:, start:end]  # (n_vars, param_size)
         total_grad = jnp.dot(dobj_dx, dx_dp_param) + dobj_dp_direct[start:end]
-        total_grad = np.asarray(total_grad)
+        # ``_obj_fn_parametric`` is the internal minimization form, so a MAXIMIZE
+        # model's total derivative comes out negated (#1299); ``gradient()`` above
+        # is already corrected, and these two must agree.
+        total_grad = objective_sense_sign(self._model) * np.asarray(total_grad)
 
         if param.shape == () or (end - start) == 1:
             return float(total_grad[0])
@@ -1489,12 +1502,17 @@ def differentiable_solve_l3(
         x_dict[v.name] = val.reshape(v.shape) if v.shape != () else val
         offset += size
 
+    # As on the L1 path (#1299): ``nlp_result.objective`` and every gradient above
+    # are in the internal minimization sense, including the ``_perturbation_gradient``
+    # fallback (it differences that same internal value). Report the user's sense.
+    sense_sign = objective_sense_sign(model)
+    l3_objective = nlp_result.objective
     return DiffSolveResultL3(
         status="optimal",
-        objective=nlp_result.objective,
+        objective=None if l3_objective is None else sense_sign * float(l3_objective),
         x=x_dict,
         _model=model,
-        _sensitivity=l1_sensitivity,
+        _sensitivity=sense_sign * np.asarray(l1_sensitivity),
         _dx_dp=np.asarray(dx_dp) if dx_dp is not None else None,
         _obj_fn_parametric=obj_fn,
         _x_star=x_star,

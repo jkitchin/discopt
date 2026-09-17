@@ -386,6 +386,30 @@ def _solve_lp(root: _RootLP, cuts_a, cuts_b, time_limit: float | None = None):
 # ── GMI separator (validated: exact enumeration, 0 unsound) ──────────────────
 
 
+def _basis_accessors_are_safe(h) -> bool:
+    """Whether HiGHS basis accessors may be called on ``h`` (#1298).
+
+    ``getBasicVariables`` **segfaults** — SIGSEGV, killing the user's process,
+    not an exception any ``except`` could catch — when the model has rows but
+    the constraint matrix has no entries at all. HiGHS reports ``kOptimal``
+    after zero simplex iterations and never factorizes a basis, then the
+    accessor reads a basis of ``num_row`` entries that was never built.
+
+    Measured against highspy directly: ``nnz = 0`` with ``num_row`` of 1, 2 and
+    3 all crash; ``num_row = 0`` returns an empty array, and one empty row
+    beside one ordinary row is fine. So the safe condition is exactly "no rows,
+    or at least one matrix entry".
+
+    A root LP reaches that shape whenever every row it kept is constant over
+    the sampled points -- ``_RootLP`` classifies such a constraint as linear
+    with an all-zero coefficient row. ``max(v, c) - v <= 0`` is one way in
+    (#1298's instance); any redundant or variable-free row is another.
+    """
+    if int(h.getNumRow()) == 0:
+        return True
+    return int(np.asarray(h.getLp().a_matrix_.start_)[-1]) > 0
+
+
 def separate_gmi(root: _RootLP, h, x, a_all, b_all, max_cuts=MAX_CUTS_PER_FAMILY):
     """Gomory mixed-integer cuts for fractional basic integer structurals.
 
@@ -413,6 +437,14 @@ def separate_gmi(root: _RootLP, h, x, a_all, b_all, max_cuts=MAX_CUTS_PER_FAMILY
             f"basis was factorized from {n_le_basis}; refusing to separate from a "
             "mismatched basis"
         )
+
+    if not _basis_accessors_are_safe(h):
+        logger.debug(
+            "root-cuts: GMI declined; the LP has %d rows but no matrix entries, "
+            "so HiGHS has no factorized basis to read",
+            int(h.getNumRow()),
+        )
+        return []
 
     st, basic = h.getBasicVariables()
     if st != highspy.HighsStatus.kOk:

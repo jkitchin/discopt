@@ -646,6 +646,7 @@ def sensitivity(
     """
     params = _resolve_parameters(model, wrt)
 
+    from discopt.modeling.core import objective_sense_sign
     from discopt.solvers.sipopt import pounce_sensitivity
 
     saved = [np.array(p.value, copy=True) for p in params]
@@ -667,7 +668,11 @@ def sensitivity(
         parameters=params,
         x=x,
         x_dict=_unflatten(model, x),
-        objective=float(raw.objective),
+        # ``raw.objective`` is POUNCE's value for the internal minimization form
+        # (#1299): a MAXIMIZE model was solved as ``-f``, so undo the flip before
+        # reporting it. ``dobj_dp`` below needs no such correction -- it
+        # differentiates the model's own objective expression.
+        objective=objective_sense_sign(model) * float(raw.objective),
         status=str(raw.status),
         multipliers=np.asarray(raw.lambda_star, dtype=np.float64),
         dx_dp=np.asarray(raw.dx_dp, dtype=np.float64),
