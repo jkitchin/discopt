@@ -41,10 +41,20 @@ cuts the optimum is worse than no relaxation at all.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt.operators import clear_registered, get_registered, registered_names
+from discopt.operators import (
+    clear_registered,
+    get_registered,
+    registered_names,
+    registry_snapshot,
+)
 
 pytestmark = [pytest.mark.smoke]
 
@@ -54,10 +64,15 @@ _GRID = np.linspace(1e-9, 1 - 1e-9, 200_001)
 
 @pytest.fixture(autouse=True)
 def _clean_registry():
-    """The registry is process-global; never leak a registration into the suite."""
-    clear_registered()
-    yield
-    clear_registered()
+    """The registry is process-global; never leak a registration into the suite.
+
+    Snapshot-and-restore rather than a bare ``clear_registered()`` on the way out:
+    a wholesale clear also drops atoms other test modules register at import time,
+    and those modules then relax term-by-term with nothing raising (#1293).
+    """
+    with registry_snapshot():
+        clear_registered()
+        yield
 
 
 def _rk_body(x, L0, L1, rt):
@@ -296,3 +311,66 @@ def test_a_replaced_registration_never_envelopes_a_model_built_before_it():
     y = m_new.continuous("y", lb=0.5, ub=2.0)
     m_new.minimize(new(y))
     assert _kinds(m_new) == ["univariate_call"]
+
+
+# --------------------------------------------------------------------------- #
+# Registry isolation (#1293 — the cross-module leak)
+# --------------------------------------------------------------------------- #
+def test_registry_snapshot_restores_what_clear_registered_dropped():
+    """A test wanting a clean registry must not drop another module's atom.
+
+    ``clear_registered()`` takes the whole process-global registry, so before
+    ``registry_snapshot`` this module's autouse fixture silently unregistered
+    atoms that other test modules register at import time.
+    """
+    foreign = dm.register_function("t1248_foreign_atom", lambda t: t * t)
+    with registry_snapshot():
+        clear_registered()
+        assert get_registered("t1248_foreign_atom") is None, "the clear must still work"
+    assert get_registered("t1248_foreign_atom") is foreign, (
+        "registry_snapshot must put the foreign registration back"
+    )
+
+
+#: Set in the child below. Without it this test re-enters itself and forks without
+#: bound — measured: 50 live pytest processes before the run was killed. A
+#: ``--deselect`` of its own node id did NOT hold (the nested run collected it
+#: anyway), so the guard is a skip inside the child, not an argument to it.
+_NESTED = "DISCOPT_TEST_1248_NESTED"
+
+
+@pytest.mark.skipif(
+    os.environ.get(_NESTED) == "1",
+    reason="nested pytest child of this very test — must not recurse",
+)
+def test_clearing_this_module_does_not_unregister_another_modules_atom():
+    """The end-to-end shape of #1293: two modules, one pytest process.
+
+    ``test_1293_registered_kinked_curvature`` registers its atom at import time and
+    asserts the relaxer takes its envelope. Running this module first used to leave
+    that atom unregistered, and the #1293 assertion then failed with
+    ``use_count == 0`` — which is how it showed up in CI's xdist lane and nowhere
+    else. Locks the ordering directly rather than trusting worker assignment.
+    """
+    root = Path(__file__).parent
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "--tb=line",
+            str(root / "test_1248_register_function.py"),
+            str(root / "test_1293_registered_kinked_curvature.py"),
+        ],
+        cwd=root.parent.parent,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        env={**os.environ, "PYTHONPATH": str(root.parent), _NESTED: "1"},
+    )
+    assert proc.returncode == 0, (
+        f"the two modules must pass in one process\n{proc.stdout[-4000:]}\n{proc.stderr[-2000:]}"
+    )

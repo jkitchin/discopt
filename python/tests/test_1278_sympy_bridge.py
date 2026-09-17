@@ -202,10 +202,10 @@ def test_a_vector_variables_elements_get_distinct_symbols():
 def test_a_registered_atom_survives_the_round_trip_as_an_atom():
     """Flattening a registered atom into its lowering would silently undo #1248 A:
     the model would still be correct and the relaxer would lose the envelope."""
-    from discopt.operators import atom_of, clear_registered
+    from discopt.operators import atom_of, clear_registered, registry_snapshot
 
-    clear_registered()
-    try:
+    with registry_snapshot():
+        clear_registered()
         rk = dm.register_function("rk_bridge", lambda t: t * (1 - t) * (3.0 + 1.5 * (2 * t - 1)))
         m = dm.Model("atom")
         x = m.continuous("x", lb=0.0, ub=1.0)
@@ -215,25 +215,24 @@ def test_a_registered_atom_survives_the_round_trip_as_an_atom():
         back = from_sympy(s, syms)
         tag = atom_of(back)
         assert tag is not None and tag[0] == "rk_bridge", tag
-    finally:
-        clear_registered()
 
 
 def test_an_unregistered_name_is_refused_rather_than_lowered():
-    from discopt.operators import clear_registered
+    from discopt.operators import clear_registered, registry_snapshot
 
-    clear_registered()
-    with pytest.raises(SymbolicTranslationError, match="no registered atom"):
-        sympy_function_for("never_registered")
+    with registry_snapshot():
+        clear_registered()
+        with pytest.raises(SymbolicTranslationError, match="no registered atom"):
+            sympy_function_for("never_registered")
 
 
 def test_a_dropped_registration_is_refused_on_the_way_back():
     """The binding is by name and resolved at translation time, so a registration
     dropped in between must raise rather than quietly produce something else."""
-    from discopt.operators import clear_registered
+    from discopt.operators import clear_registered, registry_snapshot
 
-    clear_registered()
-    try:
+    with registry_snapshot():
+        clear_registered()
         fn = dm.register_function("transient", lambda t: t * t)
         m = dm.Model("atom")
         x = m.continuous("x", lb=0.0, ub=1.0)
@@ -241,8 +240,6 @@ def test_a_dropped_registration_is_refused_on_the_way_back():
         clear_registered()
         with pytest.raises(SymbolicTranslationError, match="no longer registered"):
             from_sympy(s, syms)
-    finally:
-        clear_registered()
 
 
 # --------------------------------------------------------------------------- #

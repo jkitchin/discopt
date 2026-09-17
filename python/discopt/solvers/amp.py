@@ -2448,12 +2448,24 @@ def _solve_amp_impl(
         constraint_ub,
     )
     oa_convexity = classify_oa_cut_convexity(model, use_certificate=True)
-    direct_oa_skip_reasons = _direct_oa_skip_reasons(
-        model,
-        oa_convexity.constraint_mask,
-        flat_lb,
-        flat_ub,
-    )
+    # #1297: cut generation indexes the mask, senses and skip reasons per
+    # evaluator row, and an array-valued Constraint is several rows. Indexed per
+    # object, every direct OA call on such a model raised IndexError below.
+    from discopt.solvers.oa import _oa_rows
+
+    oa_rows = _oa_rows(evaluator, model, oa_convexity.constraint_mask)
+    _reason_by_con = {
+        id(c): reason
+        for c, reason in zip(
+            model._constraints,
+            _direct_oa_skip_reasons(model, oa_convexity.constraint_mask, flat_lb, flat_ub),
+        )
+    }
+    direct_oa_skip_reasons = [
+        _reason_by_con.get(id(c)) if not is_cvx else None
+        for (start, stop, c) in evaluator.constraint_row_map()
+        for is_cvx in oa_rows.convex_mask[start:stop]
+    ]
     direct_oa_skipped_rows = [
         (idx, reason) for idx, reason in enumerate(direct_oa_skip_reasons) if reason is not None
     ]
@@ -2461,13 +2473,13 @@ def _solve_amp_impl(
         logger.warning(
             "AMP: direct OA skips %d of %d constraint rows not certified convex: rows=%s",
             len(direct_oa_skipped_rows),
-            len(oa_convexity.constraint_mask),
+            len(oa_rows.convex_mask),
             direct_oa_skipped_rows,
         )
         logger.info(
             "AMP: direct OA enabled for %d of %d constraint rows certified convex",
-            sum(1 for is_convex in oa_convexity.constraint_mask if is_convex),
-            len(oa_convexity.constraint_mask),
+            sum(1 for is_convex in oa_rows.convex_mask if is_convex),
+            len(oa_rows.convex_mask),
         )
 
     # ── Classify nonlinear terms ─────────────────────────────────────────────
@@ -2723,12 +2735,12 @@ def _solve_amp_impl(
             )
 
             _x_orig = x_incumbent[:n_orig]
-            _senses = [c.sense for c in model._constraints if isinstance(c, Constraint)]
+            _senses = oa_rows.senses
             direct_report = generate_oa_cuts_from_evaluator_report(
                 evaluator,
                 _x_orig,
                 constraint_senses=_senses,
-                convex_mask=oa_convexity.constraint_mask,
+                convex_mask=oa_rows.convex_mask,
                 skip_reasons=direct_oa_skip_reasons,
             )
             if direct_report.skipped:
@@ -2848,7 +2860,7 @@ def _solve_amp_impl(
                     state.flat_lb,
                     state.flat_ub,
                     constraint_senses=_senses,
-                    convex_mask=oa_convexity.constraint_mask,
+                    convex_mask=oa_rows.convex_mask,
                 )
                 appended += _append_linearized_cuts(alphabb_cuts)
             except Exception as _alphabb_oa_err:

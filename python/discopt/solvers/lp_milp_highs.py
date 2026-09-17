@@ -900,6 +900,36 @@ def _huge_box(sf: StdForm) -> tuple[np.ndarray, np.ndarray]:
     return np.asarray(lo, dtype=bool), np.asarray(hi, dtype=bool)
 
 
+#: #1295: an entry on a column with an open (or sentinel-magnitude) side that is smaller
+#: than this fraction of its row's largest entry puts the model outside the class whose
+#: HiGHS MIP certificate this route accepts. The value is HiGHS's default column-scale
+#: cap, ``2**-kDefaultAllowedMatrixPow2Scale`` (``HConst.h``), beyond which scaling cannot
+#: equilibrate the entry. Measured on 280 generated badly scaled MILPs: all 97 false
+#: certificates sit at ratio <= 5.3e-7 (below the cap); the 26 real MILPs in
+#: ``ref/HiGHS/check`` plus i1183 all sit at >= 3.4e-5 (above it).
+UNSCALABLE_OPEN_RATIO = 2.0**-20
+
+
+def open_column_coefficient_ratio(sf: StdForm) -> float:
+    """Smallest ``|a_ij| / max_k |a_ik|`` over entries on a column with an open side.
+
+    A column is open when either side is infinite or at least ``READBACK_LIMIT``, the
+    bounds this route hands HiGHS as infinite. ``1.0`` when no entry qualifies.
+    """
+    A = sp.csr_matrix(sf.A)  # noqa: N806
+    A.eliminate_zeros()
+    if A.nnz == 0:
+        return 1.0
+    absA = abs(A).tocoo()  # noqa: N806
+    open_col = (np.abs(sf.xl) >= READBACK_LIMIT) | (np.abs(sf.xu) >= READBACK_LIMIT)
+    on_open = open_col[absA.col]
+    if not on_open.any():
+        return 1.0
+    row_max = np.zeros(A.shape[0])
+    np.maximum.at(row_max, absA.row, absA.data)
+    return float((absA.data[on_open] / row_max[absA.row[on_open]]).min())
+
+
 def _relax_huge_box(sf: StdForm, huge_lo: np.ndarray, huge_hi: np.ndarray) -> StdForm:
     """``sf`` with the huge finite bounds opened to infinity, one side at a time: a
     relaxation of ``sf`` that keeps every ordinary declared bound."""
@@ -1237,8 +1267,42 @@ def solve_milp_std(
     def remaining() -> Optional[float]:
         return None if time_limit is None else float(time_limit) - (time.perf_counter() - t0)
 
+    # #1295: HiGHS's tree bound and infeasible label are floating-point results with
+    # nothing re-derived from them. On a column its scaling cannot equilibrate they were
+    # measured wrong (false optimum by up to 20 units), so for that class they are not
+    # reported as a certificate: only the NS-safe root bound and a Farkas proof stand.
+    open_ratio = open_column_coefficient_ratio(sf)
+    stats["milp/open_column_coef_ratio"] = open_ratio
+    unscalable = open_ratio < UNSCALABLE_OPEN_RATIO
+
+    def decertify(out: HighsOutcome) -> None:
+        stats["milp/decertified_unscalable"] = 1.0
+        labels["milp/bound_provenance"] = "root-ns" if out.root_bound is not None else "none"
+        why = (
+            f"an entry on an unbounded column is {open_ratio:.3g} of its row's largest "
+            f"(below {UNSCALABLE_OPEN_RATIO:.3g}); HiGHS's MIP certificate is not "
+            "trusted on such models (#1295)"
+        )
+        if out.status == "infeasible":
+            if labels.get("milp/infeasible_provenance") == "farkas-root-lp":
+                return
+            out.status, out.gap_certified, out.bound = "error", False, None
+            out.message = f"HiGHS reported infeasible, unverified: {why}"
+            return
+        if out.status not in ("optimal", "feasible", "time_limit", "node_limit"):
+            return
+        if out.status == "optimal":
+            out.status = "feasible"
+        out.gap_certified = False
+        out.bound = out.root_bound
+        if out.bound is not None and out.objective is not None:
+            out.bound = min(out.bound, out.objective)
+        out.message = f"gap left uncertified: {why}"
+
     def done(out: HighsOutcome) -> HighsOutcome:
         out.wall_time = time.perf_counter() - t0
+        if unscalable:
+            decertify(out)
         out.stats = {**stats, **out.stats}
         out.labels = {**labels, **out.labels}
         return out

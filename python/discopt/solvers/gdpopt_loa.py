@@ -72,7 +72,11 @@ def solve_gdpopt_loa(
     from discopt._tape_nlp_evaluator import make_evaluator
 
     evaluator = make_evaluator(reformulated)  # #1063: canonical funnel, not the JAX ctor
+    from discopt.solvers.oa import _oa_rows
+
     oa_convexity = classify_oa_cut_convexity(reformulated)
+    # #1297: cut generation indexes the mask per evaluator row, not per Constraint.
+    oa_rows = _oa_rows(evaluator, reformulated, oa_convexity.constraint_mask)
     n_vars = evaluator.n_variables
     n_cons = evaluator.n_constraints
     lb, ub = evaluator.variable_bounds
@@ -133,11 +137,11 @@ def solve_gdpopt_loa(
     obj_is_linear = obj_coeffs is not None
     master_bound_valid = obj_is_linear or oa_convexity.objective_is_convex
 
-    if n_cons > 0 and not all(oa_convexity.constraint_mask):
+    if n_cons > 0 and not all(oa_rows.convex_mask):
         logger.warning(
-            "LOA: generating OA cuts only for %d of %d constraints classified convex",
-            sum(1 for is_convex in oa_convexity.constraint_mask if is_convex),
-            len(oa_convexity.constraint_mask),
+            "LOA: generating OA cuts only for %d of %d constraint rows classified convex",
+            sum(1 for is_convex in oa_rows.convex_mask if is_convex),
+            len(oa_rows.convex_mask),
         )
     if not obj_is_linear and not oa_convexity.objective_is_convex:
         logger.warning(
@@ -161,7 +165,7 @@ def solve_gdpopt_loa(
             oa_A_rows,
             oa_b_rows,
             obj_is_linear,
-            oa_convexity.constraint_mask,
+            oa_rows,
             oa_convexity.objective_is_convex,
         )
 
@@ -271,7 +275,7 @@ def solve_gdpopt_loa(
                 oa_A_rows,
                 oa_b_rows,
                 obj_is_linear,
-                oa_convexity.constraint_mask,
+                oa_rows,
                 oa_convexity.objective_is_convex,
             )
         else:
@@ -293,7 +297,7 @@ def solve_gdpopt_loa(
                 oa_A_rows,
                 oa_b_rows,
                 obj_is_linear,
-                oa_convexity.constraint_mask,
+                oa_rows,
                 oa_convexity.objective_is_convex,
             )
 
@@ -603,7 +607,7 @@ def _add_oa_cuts(
     oa_A_rows,
     oa_b_rows,
     obj_is_linear,
-    constraint_convex_mask,
+    oa_rows,
     objective_is_convex,
 ):
     """Generate OA cuts at x_star and append to cut lists."""
@@ -617,7 +621,8 @@ def _add_oa_cuts(
         cuts = generate_oa_cuts_from_evaluator(
             evaluator,
             x_star,
-            convex_mask=constraint_convex_mask,
+            constraint_senses=oa_rows.senses,
+            convex_mask=oa_rows.convex_mask,
         )
         for cut in cuts:
             if cut.sense == "<=":

@@ -1277,8 +1277,19 @@ class Variable(Expression):
         self.name = name
         self.var_type = var_type
         self.shape = shape
-        self.lb = np.broadcast_to(np.asarray(lb, dtype=np.float64), shape)
-        self.ub = np.broadcast_to(np.asarray(ub, dtype=np.float64), shape)
+        lb_arr = np.asarray(lb, dtype=np.float64)
+        ub_arr = np.asarray(ub, dtype=np.float64)
+        # `np.asarray(None, dtype=float)` is NaN, and a NaN bound compares False
+        # against everything, so downstream it read as an empty box and a
+        # feasible model was certified infeasible (#1294). Refuse it here.
+        for side, arr in (("lb", lb_arr), ("ub", ub_arr)):
+            if np.isnan(arr).any():
+                raise ValueError(
+                    f"variable '{name}': {side} contains NaN (a None entry in an "
+                    f"array bound converts to NaN); use the default for no bound"
+                )
+        self.lb = np.broadcast_to(lb_arr, shape)
+        self.ub = np.broadcast_to(ub_arr, shape)
         self.model = model
         self._index = len(model._variables)  # Position in flat variable vector
         # ``size`` is a hot property on the convexity / AD walkers (called
@@ -4662,8 +4673,8 @@ class Model:
         self,
         name: str,
         shape: Union[int, tuple[int, ...]] = ...,
-        lb: Union[float, np.ndarray] = ...,
-        ub: Union[float, np.ndarray] = ...,
+        lb: Optional[Union[float, np.ndarray]] = ...,
+        ub: Optional[Union[float, np.ndarray]] = ...,
         over: None = ...,
     ) -> Variable: ...
 
@@ -4672,8 +4683,8 @@ class Model:
         self,
         name: str,
         shape: Union[int, tuple[int, ...]] = ...,
-        lb: Union[float, np.ndarray] = ...,
-        ub: Union[float, np.ndarray] = ...,
+        lb: Optional[Union[float, np.ndarray]] = ...,
+        ub: Optional[Union[float, np.ndarray]] = ...,
         *,
         over: "_SetBase",
     ) -> "IndexedVar": ...
@@ -4682,8 +4693,8 @@ class Model:
         self,
         name: str,
         shape: Union[int, tuple[int, ...]] = (),
-        lb: Union[float, np.ndarray] = -9.999e19,
-        ub: Union[float, np.ndarray] = 9.999e19,
+        lb: Optional[Union[float, np.ndarray]] = -9.999e19,
+        ub: Optional[Union[float, np.ndarray]] = 9.999e19,
         over=None,
     ) -> Union[Variable, "IndexedVar"]:
         """
@@ -4697,8 +4708,10 @@ class Model:
             Scalar ``()`` or tuple for array variables.
         lb : float or numpy.ndarray, default -9.999e19
             Lower bound (scalar broadcast to *shape*, or array matching *shape*).
+            ``None`` means the default. A NaN entry raises ``ValueError``.
         ub : float or numpy.ndarray, default 9.999e19
             Upper bound (scalar broadcast to *shape*, or array matching *shape*).
+            ``None`` means the default. A NaN entry raises ``ValueError``.
 
         Returns
         -------
@@ -4730,6 +4743,11 @@ class Model:
         indexes by set member, and ``lb``/``ub`` may be a scalar, a ``dict``
         keyed by member, or a callable ``fn(member)``.
         """
+        # None is the natural spelling of "no bound" (#1294), as in `integer`.
+        if lb is None:
+            lb = -9.999e19
+        if ub is None:
+            ub = 9.999e19
         if over is not None:
             _require_no_shape(shape, "continuous")
             return self._make_indexed_var(

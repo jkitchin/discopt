@@ -23,6 +23,7 @@ use crate::lp::crossover::LpView;
 use crate::lp::cut_select::select_cuts;
 use crate::lp::gomory::{separate_gomory_cols, GomoryCut};
 use crate::lp::simplex::linsolve::{FeralLU, LinearSolver};
+use crate::lp::simplex::scaling::MAX_LINE_RANGE;
 use crate::lp::simplex::sparse::SparseCols;
 use crate::lp::simplex::{
     solve_lp, solve_lp_cols, solve_lp_cols_scaled, solve_lp_warm, solve_lp_warm_scaled_csc,
@@ -1246,6 +1247,100 @@ pub fn solve_milp_lazy_hooked(
 /// [`solve_milp_lazy_hooked`].
 #[allow(clippy::too_many_arguments)]
 pub fn solve_milp_node_hooked(
+    csc_w: SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    obj_const: f64,
+    opts: &MilpOptions,
+    hook: Option<&dyn MilpDebugHook>,
+    lazy: Option<&dyn MilpLazyHook>,
+    node: Option<&dyn MilpNodeHook>,
+) -> MilpResult {
+    // #1296: decided on the caller's data, before presolve or any cut changes it.
+    let unscalable = has_unscalable_tiny_entry(&csc_w, m, n, l, u, b);
+    let mut res =
+        solve_milp_node_search(csc_w, m, n, c, l, u, b, obj_const, opts, hook, lazy, node);
+    if unscalable {
+        crate::profile::incr(crate::profile::Ctr::MilpTinyEntryDecert);
+        withdraw_certificate(&mut res);
+    }
+    res
+}
+
+/// Whether the constraint matrix holds an entry the LP layer cannot represent
+/// faithfully (#1296).
+///
+/// Equilibration ignores an entry below [`MAX_LINE_RANGE`] times its row's or
+/// column's largest magnitude, so such an entry is never scaled up and sits under
+/// the simplex's zero tolerances: the node LPs behave as if it were absent. That
+/// is harmless when the term `a_ij x_j` cannot move its row past the feasibility
+/// tolerance over the column's box. It is not harmless when the column is open or
+/// wide: on `W x - 1e-11 y <= cap`, `y - 1e11 t <= 0`, the dropped term is worth
+/// O(1), and the driver certified an optimum 0.36 above a point it had itself
+/// found. Any such entry withdraws the certificate; the incumbent is untouched.
+///
+/// Open bounds are tested on the bound against the `1e20` sentinel, never on the
+/// product (see `presolve::contrib`).
+fn has_unscalable_tiny_entry(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+) -> bool {
+    let (col_ptr, row_idx, vals) = csc.raw();
+    let mut row_max = vec![0.0f64; m];
+    let mut col_max = vec![0.0f64; n];
+    for j in 0..n {
+        for idx in col_ptr[j]..col_ptr[j + 1] {
+            let a = vals[idx].abs();
+            row_max[row_idx[idx]] = row_max[row_idx[idx]].max(a);
+            col_max[j] = col_max[j].max(a);
+        }
+    }
+    for j in 0..n {
+        let open = l[j] <= -INF || u[j] >= INF;
+        let reach = l[j].abs().max(u[j].abs());
+        for idx in col_ptr[j]..col_ptr[j + 1] {
+            let a = vals[idx].abs();
+            let i = row_idx[idx];
+            if a == 0.0 || (a >= MAX_LINE_RANGE * row_max[i] && a >= MAX_LINE_RANGE * col_max[j]) {
+                continue;
+            }
+            if open || a * reach > TINY_ENTRY_ROW_TOL * b[i].abs().max(1.0) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Row movement a noise-floor entry may cause before it withdraws a certificate:
+/// the node LP's own primal feasibility scale.
+const TINY_ENTRY_ROW_TOL: f64 = 1e-9;
+
+/// Downgrade a result whose search ran on an LP that could not be trusted
+/// (#1296). The incumbent, if any, was re-verified on the original rows and is
+/// kept; every proof is dropped: `Optimal` becomes `Feasible`, `Infeasible` and
+/// `Unbounded` become `NodeLimit` (no claim either way), and the bound becomes
+/// `-inf`.
+fn withdraw_certificate(res: &mut MilpResult) {
+    res.status = match res.status {
+        MilpStatus::Optimal | MilpStatus::Feasible => MilpStatus::Feasible,
+        MilpStatus::Infeasible | MilpStatus::Unbounded | MilpStatus::NodeLimit => {
+            MilpStatus::NodeLimit
+        }
+    };
+    res.bound = f64::NEG_INFINITY;
+}
+
+#[allow(clippy::too_many_arguments)]
+fn solve_milp_node_search(
     mut csc_w: SparseCols,
     m: usize,
     n: usize,
@@ -2680,6 +2775,16 @@ pub fn solve_milp_node_hooked(
         Some((xi, oi)) if oi < INFEAS_SENTINEL - 1.0 => (xi.to_vec(), oi, true),
         _ => (vec![0.0; ns], f64::INFINITY, false),
     };
+    // #1296: report the value of the point returned, recomputed. The tree's
+    // incumbent value is the node LP's objective, which agrees with `cᵀx` up to
+    // the LP tolerance; it is never allowed to stand in for it. Slack columns
+    // are not in `x`, so this is only possible when they carry no cost (every
+    // entry point builds them that way).
+    let obj = if has_inc && c[ns..].iter().all(|&v| v == 0.0) {
+        x.iter().zip(&c[..ns]).map(|(xj, cj)| xj * cj).sum::<f64>() + obj_const
+    } else {
+        obj
+    };
     let status = decide_status(
         unbounded,
         has_inc,
@@ -2694,7 +2799,7 @@ pub fn solve_milp_node_hooked(
         stats.total_nodes >= opts.max_nodes,
     );
 
-    MilpResult {
+    let mut res = MilpResult {
         status,
         x,
         obj,
@@ -2705,7 +2810,14 @@ pub fn solve_milp_node_hooked(
         lazy_requeues: lazy_requeue_events,
         node_calls,
         node_cuts_added,
+    };
+    // #1296: a feasible point below an ancestor's bound means that bound was
+    // wrong, so nothing derived from the tree's bound is a certificate.
+    if stats.bound_contradicted {
+        crate::profile::incr(crate::profile::Ctr::MilpBoundContradictedDecert);
+        withdraw_certificate(&mut res);
     }
+    res
 }
 
 /// Immutable per-batch context shared by every node evaluation. Holds the
@@ -8419,5 +8531,175 @@ mod root_cut_budget_tests {
             cut.bound,
             cut.obj
         );
+    }
+}
+
+#[cfg(test)]
+mod tiny_entry_tests {
+    //! #1296: a matrix entry under the equilibration noise floor withdraws the
+    //! certificate when it can move its row.
+    use super::*;
+
+    fn gate(dense: &[f64], m: usize, l: &[f64], u: &[f64], b: &[f64]) -> bool {
+        let n = l.len();
+        has_unscalable_tiny_entry(&SparseCols::from_dense(dense, m, n), m, n, l, u, b)
+    }
+
+    #[test]
+    fn gate_flags_only_significant_noise_floor_entries() {
+        let b = [1.0, 0.0];
+        // Well scaled: nothing below 1e-10 of its line.
+        assert!(!gate(
+            &[1.0, 2.0, 0.0, 3.0],
+            2,
+            &[0.0, 0.0],
+            &[1.0, INF],
+            &b
+        ));
+        // 1e-11 against a row max of 1 on an open column: flagged.
+        assert!(gate(
+            &[1.0, -1e-11, 0.0, 1.0],
+            2,
+            &[0.0, 0.0],
+            &[1.0, INF],
+            &b
+        ));
+        // Same entry on a free-below column: flagged (bound tested, not product).
+        assert!(gate(
+            &[1.0, -1e-11, 0.0, 1.0],
+            2,
+            &[0.0, -INF],
+            &[1.0, 5.0],
+            &b
+        ));
+        // Same entry on a column of reach 10: moves the row by 1e-10 < 1e-9. Kept.
+        assert!(!gate(
+            &[1.0, -1e-11, 0.0, 1.0],
+            2,
+            &[0.0, 0.0],
+            &[1.0, 10.0],
+            &b
+        ));
+        // Reach 1e11 (finite but wide): moves the row by O(1). Flagged.
+        assert!(gate(
+            &[1.0, -1e-11, 0.0, 1.0],
+            2,
+            &[0.0, 0.0],
+            &[1.0, 1e11],
+            &b
+        ));
+        // A small entry that is its row's and column's largest is not noise.
+        assert!(!gate(
+            &[1e-11, 0.0, 0.0, 1.0],
+            2,
+            &[0.0, 0.0],
+            &[INF, INF],
+            &b
+        ));
+        // Noise relative to its column only (row max is itself): flagged.
+        assert!(gate(
+            &[1e-11, 0.0, 1.0, 1.0],
+            2,
+            &[0.0, 0.0],
+            &[INF, 1.0],
+            &b
+        ));
+    }
+
+    #[test]
+    fn withdraw_keeps_the_point_and_drops_every_proof() {
+        for (from, to) in [
+            (MilpStatus::Optimal, MilpStatus::Feasible),
+            (MilpStatus::Feasible, MilpStatus::Feasible),
+            (MilpStatus::Infeasible, MilpStatus::NodeLimit),
+            (MilpStatus::Unbounded, MilpStatus::NodeLimit),
+            (MilpStatus::NodeLimit, MilpStatus::NodeLimit),
+        ] {
+            let mut r = big_m(0.1);
+            let (x, obj, nodes) = (r.x.clone(), r.obj, r.nodes);
+            r.status = from;
+            withdraw_certificate(&mut r);
+            assert_eq!(r.status, to);
+            assert_eq!(r.bound, f64::NEG_INFINITY);
+            assert_eq!((r.x.clone(), r.obj, r.nodes), (x, obj, nodes));
+        }
+    }
+
+    fn opts(ns: usize, int_cols: Vec<usize>) -> MilpOptions {
+        MilpOptions {
+            n_struct: ns,
+            integer_cols: int_cols,
+            max_nodes: 10_000,
+            time_limit_s: None,
+            gap_tol: 1e-9,
+            root_cuts: 0,
+            cut_rounds: 1,
+            gmi_cuts: false,
+            cut_select: false,
+            node_cuts: false,
+            max_pool_cuts: 0,
+            heuristics: true,
+            presolve: true,
+            strong_branch: true,
+            node_propagation: true,
+            reduced_cost_fixing: true,
+            sb_max_cands: 8,
+            sb_node_budget: 1000,
+            initial_incumbent: None,
+            node_hook_rounds: 0,
+            node_hook_cut_cap: 0,
+            root_cut_time_s: None,
+            root_cut_prune: true,
+            simplex: SimplexOptions::default(),
+        }
+    }
+
+    /// `min -x + 0.1 t` s.t. `x - eps*y <= 0.5`, `y - (1/eps)*t <= 0`, x in {0,1},
+    /// t in [0,1], y >= 0 open. With `eps = 1e-11` the coupling entry is noise to
+    /// the LP; with `eps = 0.1` it is ordinary. Optimum `-0.95` either way.
+    fn big_m(eps: f64) -> MilpResult {
+        // Columns: x, y, t, s0, s1.
+        let (m, n, ns) = (2, 5, 3);
+        #[rustfmt::skip]
+        let dense = vec![
+            1.0, -eps, 0.0,       1.0, 0.0,
+            0.0, 1.0,  -1.0 / eps, 0.0, 1.0,
+        ];
+        let c = [-1.0, 0.0, 0.1, 0.0, 0.0];
+        let l = [0.0; 5];
+        let u = [1.0, INF, 1.0, INF, INF];
+        let b = [0.5, 0.0];
+        solve_milp_hooked(
+            SparseCols::from_dense(&dense, m, n),
+            m,
+            n,
+            &c,
+            &l,
+            &u,
+            &b,
+            0.0,
+            &opts(ns, vec![0]),
+            None,
+        )
+    }
+
+    #[test]
+    fn noise_floor_big_m_is_never_certified() {
+        let r = big_m(1e-11);
+        assert_ne!(r.status, MilpStatus::Optimal, "{r:?}");
+        assert_ne!(r.status, MilpStatus::Infeasible, "{r:?}");
+        assert_eq!(r.bound, f64::NEG_INFINITY);
+        if r.status == MilpStatus::Feasible {
+            let cx = -r.x[0] + 0.1 * r.x[2];
+            assert!((r.obj - cx).abs() < 1e-9, "obj {} != c.x {cx}", r.obj);
+        }
+    }
+
+    #[test]
+    fn well_scaled_big_m_keeps_its_certificate() {
+        let r = big_m(0.1);
+        assert_eq!(r.status, MilpStatus::Optimal, "{r:?}");
+        assert!((r.obj + 0.95).abs() < 1e-7, "{r:?}");
+        assert!(r.bound <= r.obj + 1e-9 && r.bound >= r.obj - 1e-6, "{r:?}");
     }
 }

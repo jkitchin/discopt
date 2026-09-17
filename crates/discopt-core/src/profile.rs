@@ -473,6 +473,12 @@ counters!(
     // difference between "the change is neutral" and "the experiment measured
     // nothing" (CLAUDE.md §6).
     TreeCertInfeasPrunes,
+    // #1296: MILP solves whose certificate was withdrawn because an entry sits
+    // below the equilibration noise floor of its line while still able to move
+    // its row past the feasibility tolerance, or because an integral node
+    // contradicted an ancestor's bound.
+    MilpTinyEntryDecert,
+    MilpBoundContradictedDecert,
     Phase1ViolLe1Expand,
     Phase1ViolLe100Expand,
     Phase1ViolGt100Expand,

@@ -56,7 +56,7 @@ const MAX_PASSES: usize = 4;
 /// so a spurious ~1e-16 coefficient cannot collapse the geometric mean and
 /// over-scale the line. 1e-10 spans ten orders of magnitude — far wider than any
 /// genuine per-line coefficient range, well above float noise.
-const MAX_LINE_RANGE: f64 = 1e-10;
+pub(crate) const MAX_LINE_RANGE: f64 = 1e-10;
 
 /// Round `v > 0` to the nearest power of two (an exact float scale factor).
 #[inline]

@@ -1278,6 +1278,64 @@ class _DecomposedProblem:
     oa_constraint_mask: Optional[list[bool]] = None
     master_bound_valid: bool = True
     model: Optional[Model] = None
+    # A ``model._constraints`` entry that is not a :class:`Constraint` has no
+    # evaluator row, so it cannot appear in the per-row mask; it still blocks the
+    # convexity certificate (#1297).
+    oa_has_unclassified_constraints: bool = False
+
+
+@dataclass(frozen=True)
+class _OARows:
+    """Per-evaluator-row OA inputs; see :func:`_oa_rows`."""
+
+    senses: list[str]
+    convex_mask: list[bool]
+    has_unclassified: bool
+
+
+def _oa_rows(evaluator, model: Model, constraint_mask: list[bool]) -> _OARows:
+    """Expand a per-``model._constraints`` convexity mask to evaluator rows (#1297).
+
+    OA cut generation indexes senses and the convexity mask by evaluator row, and
+    an array-valued ``Constraint`` is one object but several rows. Indexing them
+    per object desynchronised every row after the first vector constraint and ran
+    ``convex_mask[k]`` past its end (IndexError), so no OA decomposition ran on
+    such a model. The evaluator's own row map (#908) is the correspondence; it
+    also covers the #840 builder rows ``model._constraints`` does not hold, which
+    are classified here. ``has_unclassified`` records a ``model._constraints``
+    entry that is not a :class:`Constraint`: it has no row, but ``constraint_mask``
+    marked it nonconvex and a convexity certificate must still refuse.
+    """
+    from discopt._relax.convexity import classify_constraint
+
+    if len(constraint_mask) != len(model._constraints):
+        raise ValueError(
+            f"constraint_mask has {len(constraint_mask)} entries for "
+            f"{len(model._constraints)} model constraints"
+        )
+    mask_by_con = {
+        id(c): bool(is_cvx)
+        for c, is_cvx in zip(model._constraints, constraint_mask)
+        if isinstance(c, Constraint)
+    }
+    senses: list[str] = []
+    convex_mask: list[bool] = []
+    for start, stop, c in evaluator.constraint_row_map():
+        is_cvx = mask_by_con.get(id(c))
+        if is_cvx is None:
+            is_cvx = bool(classify_constraint(c, model))
+        senses.extend([c.sense] * (stop - start))
+        convex_mask.extend([is_cvx] * (stop - start))
+    if len(convex_mask) != evaluator.n_constraints:
+        raise RuntimeError(
+            f"OA row map covers {len(convex_mask)} rows; "
+            f"the evaluator has {evaluator.n_constraints}"
+        )
+    return _OARows(
+        senses=senses,
+        convex_mask=convex_mask,
+        has_unclassified=any(not isinstance(c, Constraint) for c in model._constraints),
+    )
 
 
 def _decompose_model(model: Model) -> _DecomposedProblem:
@@ -1336,29 +1394,32 @@ def _decompose_model(model: Model) -> _DecomposedProblem:
     linear_A_rows = []
     linear_b_rows = []
     linear_senses = []
-    nonlinear_indices = []
+    nonlinear_indices: list[int] = []
 
-    # Track senses for ALL constraints in evaluator order (nonlinear only)
-    all_constraint_senses = []
-    eval_idx = 0  # tracks position in evaluator's stacked constraints
-
-    for c in model._constraints:
-        if not isinstance(c, Constraint):
-            continue
+    # #1297: the senses, the nonlinear row list and the OA convexity mask are all
+    # consumed per *evaluator row*, and an array-valued ``Constraint`` is one
+    # object but several rows. Indexing them per object desynchronised every row
+    # after the first vector constraint and ran ``convex_mask[k]`` past its end
+    # (IndexError), so the convex OA route was never taken on such models. Expand
+    # them over the evaluator's own row map (#908), which also covers the #840
+    # builder rows ``model._constraints`` does not hold.
+    rows = _oa_rows(evaluator, model, oa_convexity.constraint_mask)
+    for start, stop, c in evaluator.constraint_row_map():
+        n_rows = stop - start
         # #1039: single-gate on the extractor, which answers with the row
         # itself. See the companion comment in ``gdpopt_loa`` — the previous
         # ``_is_linear`` pre-gate under-reported on ``SumOverExpression`` and
-        # pushed a genuinely linear row into the nonlinear set.
-        coeffs = _extract_body_coeffs(c.body, model, n_vars)
+        # pushed a genuinely linear row into the nonlinear set. The extractor
+        # returns one row, so an array-valued body is kept nonlinear: its OA
+        # cuts are exact for the linear rows among it.
+        coeffs = _extract_body_coeffs(c.body, model, n_vars) if n_rows == 1 else None
         if coeffs is not None:
             c_vec, off = coeffs
             linear_A_rows.append(c_vec)
             linear_b_rows.append(-off)
             linear_senses.append(c.sense)
         else:
-            nonlinear_indices.append(eval_idx)
-        all_constraint_senses.append(c.sense)
-        eval_idx += 1
+            nonlinear_indices.extend(range(start, stop))
 
     # Check if objective is linear
     raw_obj = model._objective
@@ -1390,13 +1451,14 @@ def _decompose_model(model: Model) -> _DecomposedProblem:
         linear_b_rows=linear_b_rows,
         linear_senses=linear_senses,
         nonlinear_indices=nonlinear_indices,
-        constraint_senses=all_constraint_senses,
+        constraint_senses=rows.senses,
         obj_coeffs=obj_coeffs,
         obj_is_linear=obj_is_linear,
         oa_objective_is_convex=oa_convexity.objective_is_convex,
-        oa_constraint_mask=oa_convexity.constraint_mask,
+        oa_constraint_mask=rows.convex_mask,
         master_bound_valid=(obj_is_linear or oa_convexity.objective_is_convex),
         model=model,
+        oa_has_unclassified_constraints=rows.has_unclassified,
     )
 
 
@@ -4815,6 +4877,8 @@ def _continuous_model_is_certified_convex(decomp: "_DecomposedProblem") -> bool:
     if not (decomp.obj_is_linear or decomp.oa_objective_is_convex):
         return False
     mask = decomp.oa_constraint_mask
+    if decomp.oa_has_unclassified_constraints:
+        return False
     if decomp.n_cons == 0:
         return True
     if not mask:

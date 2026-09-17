@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 
-from discopt.modeling.core import Constraint, Model
+from discopt.modeling.core import Model
 from discopt.solvers import NLPResult, SolveStatus
 
 logger = logging.getLogger(__name__)
@@ -236,29 +236,34 @@ def _infer_constraint_bounds(source) -> tuple[np.ndarray, np.ndarray]:
       - For ``==`` constraints: ``body - rhs == 0``, so ``cl=0, cu=0``.
       - For ``>=`` constraints: ``body - rhs >= 0``, so ``cl=0, cu=inf``.
 
-    When an NLPEvaluator is supplied, each source Constraint's bounds are
-    repeated to match the evaluator's ``_constraint_flat_sizes`` (needed
-    for vector-valued bodies such as DAEBuilder's vectorized collocation
-    residual). When a Model is supplied directly, each source Constraint
-    contributes exactly one row (legacy scalar behavior).
+    Each source Constraint's bounds are repeated to match the evaluator's
+    ``_constraint_flat_sizes`` (needed for vector-valued bodies such as
+    DAEBuilder's vectorized collocation residual). A Model is resolved to its
+    canonical cached evaluator first: counting one row per ``Constraint`` object
+    returned too few bounds for an array-valued row and none for the #840
+    builder rows, so a feasibility check against ``evaluate_constraints`` raised
+    a broadcast error and rejected every point (#1297).
     """
     if isinstance(source, Model):
-        constraints = [c for c in source._constraints if isinstance(c, Constraint)]
-        sizes = np.ones(len(constraints), dtype=np.intp)
-    else:
-        constraints = source._source_constraints
-        sizes = source._constraint_flat_sizes
-        # An NLPEvaluator compiles its constraint list once in ``__init__`` and
-        # never mutates it, but the bounds were rebuilt on every call: the OA
-        # feasibility phase calls this 45k times per solve through
-        # ``_constraint_violation_data``, and each call allocates ``2 * n_cons``
-        # ``np.full`` arrays plus two concatenates. Measured on
-        # ``portfol_classical050_1`` (103 constraints): 111.4 us/call, ~5.1 s of
-        # a 32.8 s solve. A ``Model`` can gain constraints between calls, so
-        # only the evaluator branch is cached.
-        cached = _cached_constraint_bounds(source, constraints, sizes)
-        if cached is not None:
-            return cached[0].copy(), cached[1].copy()
+        from discopt._tape_nlp_evaluator import make_evaluator
+
+        # The evaluator branch returns fresh copies, so a later ``subject_to``
+        # still sees new rows: the evaluator cache is keyed on the model's
+        # structure.
+        return _infer_constraint_bounds(make_evaluator(source))
+
+    constraints = source._source_constraints
+    sizes = source._constraint_flat_sizes
+    # An NLPEvaluator compiles its constraint list once in ``__init__`` and
+    # never mutates it, but the bounds were rebuilt on every call: the OA
+    # feasibility phase calls this 45k times per solve through
+    # ``_constraint_violation_data``, and each call allocates ``2 * n_cons``
+    # ``np.full`` arrays plus two concatenates. Measured on
+    # ``portfol_classical050_1`` (103 constraints): 111.4 us/call, ~5.1 s of
+    # a 32.8 s solve.
+    cached = _cached_constraint_bounds(source, constraints, sizes)
+    if cached is not None:
+        return cached[0].copy(), cached[1].copy()
 
     cl_parts: list[np.ndarray] = []
     cu_parts: list[np.ndarray] = []
@@ -281,10 +286,6 @@ def _infer_constraint_bounds(source) -> tuple[np.ndarray, np.ndarray]:
     else:
         cl = np.concatenate(cl_parts)
         cu = np.concatenate(cu_parts)
-
-    if isinstance(source, Model):
-        # Never cached, so these arrays are already the caller's alone.
-        return cl, cu
 
     _store_constraint_bounds(source, constraints, sizes, cl, cu)
     # Callers receive their own arrays, exactly as before this was cached, so a

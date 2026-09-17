@@ -310,6 +310,7 @@ class TestGDPoptLOAHelpers:
     def test_add_oa_cuts_flips_ge_cuts(self, monkeypatch):
         """A '>=' OA cut must be negated into the '<=' master form."""
         from discopt._relax import cutting_planes
+        from discopt.solvers.oa import _OARows
 
         fake_cuts = [
             types.SimpleNamespace(sense="<=", coeffs=np.array([1.0, 2.0]), rhs=3.0),
@@ -328,7 +329,7 @@ class TestGDPoptLOAHelpers:
             oa_A_rows=A_rows,
             oa_b_rows=b_rows,
             obj_is_linear=True,
-            constraint_convex_mask=[True],
+            oa_rows=_OARows(senses=["<="], convex_mask=[True], has_unclassified=False),
             objective_is_convex=False,
         )
         assert len(A_rows) == 2
