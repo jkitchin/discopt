@@ -605,7 +605,6 @@ class _GamsWriter:
         "tanh": "tanh",
         "abs": "abs",
         "sign": "sign",
-        "erf": "errorf",
         "min": "min",
         "max": "max",
         "sigmoid": "sigmoid",
@@ -698,6 +697,11 @@ class _GamsWriter:
             if fn == "log2":
                 inner = self._expr_to_gams(expr.args[0])
                 return f"(log({inner}) / log(2))"
+            if fn == "erf":
+                # GAMS has no erf: its errorf is the standard normal CDF Φ, and
+                # erf(a) = 2·Φ(a·√2) − 1 (#1288).
+                inner = self._expr_to_gams(expr.args[0])
+                return f"(2 * errorf(({inner}) * sqrt(2)) - 1)"
             # No blanket passthrough of an unmapped name. Emitting
             # `expr.func_name` verbatim wrote whatever the node happened to carry
             # into the .gms file: a name GAMS does not have (`entropy(x)`), or one

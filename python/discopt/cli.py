@@ -456,7 +456,9 @@ def _cmd_solve(args):
 
     if args.format == "json":
         # Scripts redirect this into a file, so it is an archival path too (#1266).
-        print(json.dumps(serialize_result(result, provenance=True, options=payload), indent=2))
+        # `allow_nan=False`, as in `write_json`: never print a bare `NaN` token.
+        doc = serialize_result(result, provenance=True, options=payload)
+        print(json.dumps(doc, indent=2, allow_nan=False))
     elif not args.quiet:
         print(summary_text(result))
     for w in wrote:

@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import discopt.modeling as dm
+import discopt.result_io as rio
 import pytest
 from discopt.cli import _cmd_solve
 
@@ -81,7 +82,7 @@ def test_solve_format_json_to_stdout(tmp_path, capsys):
     import json
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["schema_version"] == 2 and payload["status"] == "optimal"
+    assert payload["schema_version"] == rio.SCHEMA_VERSION and payload["status"] == "optimal"
 
 
 def test_solve_unknown_profile_errors(tmp_path):

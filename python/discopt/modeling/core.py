@@ -30,6 +30,7 @@ import builtins as _builtins
 import contextlib as _contextlib
 import gc
 import math
+import re
 import time as _time
 import warnings
 import warnings as _warnings
@@ -2171,8 +2172,19 @@ def _object_array_binop(op: str, left, right) -> np.ndarray:
         arr, scalar, arr_on_left = left, right, True
     else:
         arr, scalar, arr_on_left = right, left, False
-    scalar_shape = _known_shape(scalar) if isinstance(scalar, Expression) else ()
-    if scalar_shape is not None and scalar_shape != ():
+    scalar_shape = _object_operand_shape(scalar) if isinstance(scalar, Expression) else ()
+    if scalar_shape is None:
+        raise TypeError(
+            f"cannot combine an object-dtype array of shape {arr.shape} with a "
+            f"{type(scalar).__name__} whose shape cannot be determined before the "
+            f"solve: if it is array-valued, `{op}` would broadcast each element "
+            f"against the whole operand rather than pair them, and nothing would "
+            f"say so. Index it to scalars and put them in an object array of the "
+            f"same shape for elementwise pairing, or use shaped variables directly "
+            f"(`m.continuous(..., shape=...)`), which support `{op}` without an "
+            f"object array."
+        )
+    if scalar_shape != ():
         raise TypeError(
             f"cannot combine an object-dtype array of shape {arr.shape} with a "
             f"{type(scalar).__name__} of shape {scalar_shape} elementwise: it is "
@@ -2189,6 +2201,42 @@ def _object_array_binop(op: str, left, right) -> np.ndarray:
     for idx in np.ndindex(arr.shape):
         out[idx] = fn(arr[idx], scalar) if arr_on_left else fn(scalar, arr[idx])
     return out
+
+
+_SCALAR_REDUCTION_RE = re.compile(r"norm(inf|[0-9.]+)")
+
+
+def _object_operand_shape(expr: "Expression") -> Optional[tuple[int, ...]]:
+    """Static shape of the expression operand of :func:`_object_array_binop`.
+
+    ``None`` means "cannot tell", and the caller refuses on it (#1289): the
+    construction-time :func:`_known_shape` is ``None`` for every matmul and
+    reduction, so ``arr * (np.eye(3) @ xs)`` -- a 3-vector -- used to slip past the
+    ambiguity refusal and broadcast into nine rows. This adds the shapes
+    :func:`discopt._relax.scalarize.static_shape` resolves (matmul, axis sums,
+    compositions over them) and the full reductions ``prod`` and ``norm*``, which
+    are scalar whatever their operand.
+    """
+    shape = _known_shape(expr)
+    if shape is not None:
+        return shape
+    if isinstance(expr, FunctionCall) and len(expr.args) == 1:
+        if expr.func_name == "prod" or _SCALAR_REDUCTION_RE.fullmatch(expr.func_name):
+            return ()
+    if isinstance(expr, UnaryOp):
+        return _object_operand_shape(expr.operand)
+    if isinstance(expr, BinaryOp) and expr.op in ("+", "-", "*", "/", "**"):
+        ls = _object_operand_shape(expr.left)
+        rs = _object_operand_shape(expr.right)
+        if ls is None or rs is None:
+            return None
+        try:
+            return tuple(int(d) for d in np.broadcast_shapes(ls, rs))
+        except ValueError:
+            return None
+    from discopt._relax.scalarize import static_shape
+
+    return static_shape(expr)
 
 
 def _is_term_iterable(x) -> bool:

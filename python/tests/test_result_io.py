@@ -36,7 +36,7 @@ def _optimal_result() -> SolveResult:
 def test_serialize_round_trip_optimal():
     r = _optimal_result()
     d = serialize_result(r)
-    assert d["schema_version"] == 2  # bumped by #1266 (provenance / options / report)
+    assert d["schema_version"] == 3  # 2: #1266 (provenance / options / report); 3: #1292
     assert d["status"] == "optimal" and d["objective"] == pytest.approx(4.5796)
     # ndarray -> list/number
     assert d["x"]["x"] == pytest.approx(1.5)
@@ -184,7 +184,7 @@ def _report():
 
 @pytest.mark.smoke
 def test_schema_version_was_bumped_for_the_added_sections():
-    assert serialize_result(_optimal_result())["schema_version"] == 2
+    assert serialize_result(_optimal_result())["schema_version"] == 3
 
 
 @pytest.mark.smoke
@@ -373,7 +373,8 @@ def test_non_finite_floats_in_the_new_sections_stay_standard_json():
 
     json.dumps(d["validation_report"], allow_nan=False)
     json.dumps(d["solve_options"], allow_nan=False)
-    assert d["solve_options"]["time_limit"] == "inf"
+    # free-form tree: the unambiguous tag, not the bare token (#1292)
+    assert d["solve_options"]["time_limit"] == {"__float__": "inf"}
 
     back = deserialize_result(d)
     assert back.validation_report.merit != back.validation_report.merit  # NaN

@@ -678,7 +678,7 @@ def _matmul(left: np.ndarray, right: np.ndarray, E: Any, budget: _Budget) -> np.
     return out
 
 
-def _sum_along(arr: np.ndarray, axis: int | None, E: Any) -> np.ndarray:
+def _sum_along(arr: np.ndarray, axis: int | tuple[int, ...] | None, E: Any) -> np.ndarray:
     """``jnp.sum(arr, axis=axis)`` as ONE n-ary tape node per output element.
 
     Not ``np.sum``, which reduces object arrays with ``add.reduce`` — a
@@ -695,10 +695,16 @@ def _sum_along(arr: np.ndarray, axis: int | None, E: Any) -> np.ndarray:
     """
     if axis is None:
         return _wrap_scalar(E.sum(arr.reshape(-1).tolist()))
-    moved = np.moveaxis(arr, axis, -1)
-    out = np.empty(moved.shape[:-1], dtype=object)
+    # A tuple axis (``X.mean(axis=(0, 1))``, #1289) reduces several axes at once:
+    # move them all to the end and flatten them into one.
+    axes = tuple(axis) if isinstance(axis, (tuple, list)) else (axis,)
+    k = len(axes)
+    moved = np.moveaxis(arr, axes, tuple(range(-k, 0)))
+    if moved.ndim == k:
+        return _wrap_scalar(E.sum(moved.reshape(-1).tolist()))
+    out = np.empty(moved.shape[:-k], dtype=object)
     flat_out = out.reshape(-1)
-    flat_in = moved.reshape(-1, moved.shape[-1])
+    flat_in = moved.reshape(flat_out.size, int(np.prod(moved.shape[-k:])))
     for k in range(flat_out.size):
         flat_out[k] = E.sum(flat_in[k].tolist())
     return out

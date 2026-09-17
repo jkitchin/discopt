@@ -198,7 +198,11 @@ def _dec_array(obj: Any, shape: tuple[int, ...]) -> np.ndarray:
 
 
 def _enc_index(index: Any) -> Any:
-    """Encode an ``IndexExpression`` index (int, tuple, slice, or a mix)."""
+    """Encode an ``IndexExpression`` index (int, bool, tuple, slice, or a mix)."""
+    # before the int test: ``bool`` subclasses ``int``, and numpy reads ``x[True]``
+    # as a new axis, not ``x[1]`` (#1290)
+    if isinstance(index, (bool, np.bool_)):
+        return {"k": "bool", "v": bool(index)}
     if isinstance(index, (int, np.integer)):
         return {"k": "int", "v": int(index)}
     if isinstance(index, slice):
@@ -220,11 +224,41 @@ def _dec_index(obj: Any) -> Any:
     kind = obj["k"]
     if kind == "int":
         return int(obj["v"])
+    if kind == "bool":
+        if not isinstance(obj["v"], bool):
+            raise SerializationError(f"bool index holds {obj['v']!r}")
+        return obj["v"]
     if kind == "slice":
         return slice(obj["start"], obj["stop"], obj["step"])
     if kind == "tuple":
         return tuple(_dec_index(i) for i in obj["v"])
     raise SerializationError(f"unknown index kind {kind!r}")
+
+
+def _enc_axis(axis: Any) -> Any:
+    """Encode a ``SumExpression`` axis: ``None``, an int, or a tuple of ints (#1290)."""
+    if axis is None:
+        return None
+    if isinstance(axis, (int, np.integer)) and not isinstance(axis, (bool, np.bool_)):
+        return int(axis)
+    if isinstance(axis, tuple) and all(
+        isinstance(a, (int, np.integer)) and not isinstance(a, (bool, np.bool_)) for a in axis
+    ):
+        return [int(a) for a in axis]
+    raise SerializationError(
+        f"cannot serialize sum axis {axis!r} of type {type(axis).__name__}; "
+        "only None, an integer, or a tuple of integers is supported."
+    )
+
+
+def _dec_axis(obj: Any) -> Any:
+    if obj is None:
+        return None
+    if isinstance(obj, int) and not isinstance(obj, bool):
+        return obj
+    if isinstance(obj, list) and all(isinstance(a, int) and not isinstance(a, bool) for a in obj):
+        return tuple(obj)
+    raise SerializationError(f"invalid sum axis {obj!r}")
 
 
 # ── expression DAG ─────────────────────────────────────────────────────────
@@ -326,7 +360,7 @@ class _NodeTable:
             return {
                 "op": "sum",
                 "a": self._ref(node.operand),
-                "axis": None if node.axis is None else int(node.axis),
+                "axis": _enc_axis(node.axis),
             }
         if t is SumOverExpression:
             return {"op": "sum_over", "args": [self._ref(a) for a in node.terms]}
@@ -454,7 +488,7 @@ def _decode_nodes(table: list[dict], variables: list[Variable], params: list[Par
         elif op == "matmul":
             built.append(MatMulExpression(built[nd["a"]], built[nd["b"]]))
         elif op == "sum":
-            built.append(SumExpression(built[nd["a"]], nd["axis"]))
+            built.append(SumExpression(built[nd["a"]], _dec_axis(nd["axis"])))
         elif op == "sum_over":
             built.append(SumOverExpression([built[a] for a in nd["args"]]))
     return built
@@ -1042,12 +1076,65 @@ _FLOAT_TOKENS = {"nan", "inf", "-inf"}
 
 
 def _dec_tree(obj: Any) -> Any:
+    """Inverse of :func:`_enc_tree` -- ONLY for trees whose leaves are numbers.
+
+    The bare ``"nan"``/``"inf"`` token is indistinguishable from a string of the
+    same text, so every such string is read as a float. Use it where the position
+    is known to be numeric (solution arrays), and :func:`_dec_json_tree` for a
+    tree that can hold arbitrary strings (#1292).
+    """
     if isinstance(obj, str) and obj in _FLOAT_TOKENS:
         return _dec_float(obj)
     if isinstance(obj, dict):
         return {k: _dec_tree(v) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_dec_tree(v) for v in obj]
+    return obj
+
+
+#: Unambiguous tagging for free-form trees (#1292): a non-finite float is written
+#: as ``{"__float__": "nan"}``, which no string can be mistaken for. A genuine dict
+#: whose only key is one of the two tags is wrapped as ``{"__dict__": {...}}`` so
+#: it cannot be mistaken for a tag either.
+_FLOAT_TAG = "__float__"
+_DICT_TAG = "__dict__"
+
+
+def _enc_json_tree(obj: Any) -> Any:
+    """Encode a free-form JSON tree (strings, numbers, bools, None, lists, dicts)."""
+    if isinstance(obj, float):
+        v = _enc_float(obj)
+        return {_FLOAT_TAG: v} if isinstance(v, str) else v
+    if isinstance(obj, (np.floating, np.integer, np.bool_)):
+        return _enc_json_tree(obj.item())
+    if isinstance(obj, np.ndarray):
+        return _enc_json_tree(obj.tolist())
+    if isinstance(obj, dict):
+        enc = {k: _enc_json_tree(v) for k, v in obj.items()}
+        if len(obj) == 1 and next(iter(obj)) in (_FLOAT_TAG, _DICT_TAG):
+            return {_DICT_TAG: enc}
+        return enc
+    if isinstance(obj, (list, tuple)):
+        return [_enc_json_tree(v) for v in obj]
+    return obj
+
+
+def _dec_json_tree(obj: Any) -> Any:
+    """Inverse of :func:`_enc_json_tree`. Strings are never reinterpreted."""
+    if isinstance(obj, dict):
+        if len(obj) == 1 and _FLOAT_TAG in obj:
+            token = obj[_FLOAT_TAG]
+            if not isinstance(token, str) or token not in _FLOAT_TOKENS:
+                raise SerializationError(f"invalid float tag {obj!r}")
+            return _dec_float(token)
+        if len(obj) == 1 and _DICT_TAG in obj:
+            inner = obj[_DICT_TAG]
+            if not isinstance(inner, dict):
+                raise SerializationError(f"invalid dict tag {obj!r}")
+            return {k: _dec_json_tree(v) for k, v in inner.items()}
+        return {k: _dec_json_tree(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_dec_json_tree(v) for v in obj]
     return obj
 
 
@@ -1163,12 +1250,22 @@ def dumps(
     if result is not None:
         from discopt.result_io import serialize_result
 
-        doc["solution"] = _enc_tree(serialize_result(result))
+        # Already JSON-safe, and each field is tagged by its own rule. A blanket
+        # re-encode/decode here is what turned a string field reading "nan" into
+        # a float on reload (#1292).
+        doc["solution"] = serialize_result(result)
 
     # `allow_nan=False`: bare NaN/Infinity is not valid JSON, and every float has
     # already been routed through `_enc_float`, so this asserts that nothing
     # slipped past the encoders rather than silently writing a non-standard token.
     return json.dumps(doc, allow_nan=False, indent=indent)
+
+
+def _refuse_json_constant(token: str) -> Any:
+    raise SerializationError(
+        f"the document contains a bare {token} token, which is not valid JSON; "
+        "discopt writes non-finite numbers as the strings 'nan', 'inf' and '-inf'."
+    )
 
 
 def loads(text: Union[str, bytes]) -> Model:
@@ -1177,7 +1274,10 @@ def loads(text: Union[str, bytes]) -> Model:
     The reloaded model carries the embedded solve result (if one was saved) on its
     ``saved_result`` attribute.
     """
-    doc = json.loads(text)
+    # `dumps` never writes bare NaN/Infinity (non-finite floats are tagged strings),
+    # so one here is not a discopt document; refuse it on read rather than accept
+    # it and fail the next save (#1291).
+    doc = json.loads(text, parse_constant=_refuse_json_constant)
 
     schema = doc.get("schema")
     if not isinstance(schema, str) or not schema.startswith("discopt.model/"):
@@ -1242,7 +1342,7 @@ def loads(text: Union[str, bytes]) -> Model:
     if doc.get("solution") is not None:
         from discopt.result_io import deserialize_result
 
-        model.saved_result = deserialize_result(_dec_tree(doc["solution"]))
+        model.saved_result = deserialize_result(doc["solution"])
     else:
         model.saved_result = None
 
