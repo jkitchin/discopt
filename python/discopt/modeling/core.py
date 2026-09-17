@@ -4522,6 +4522,12 @@ class Model:
         # solve path reads it; it is there so a model and the fit it belongs to
         # travel together instead of desynchronising across two files.
         self.saved_result: Optional["SolveResult"] = None
+        # The most recent successful :meth:`solve` result, recorded so
+        # :meth:`sensitivity` can start its local NLP from the point this model
+        # was actually solved to and cross-check against it (#1313). ``None``
+        # until a solve returns a solution vector; nothing on the solve path
+        # reads it.
+        self._last_solve_result: Optional["SolveResult"] = None
         #: Provenance of a model read back by :func:`discopt.load` -- what wrote
         #: the document and when (see :mod:`discopt.provenance`). ``None`` on a
         #: model built in memory: nothing has been written yet, so there is no
@@ -7427,6 +7433,16 @@ class Model:
                 result.status,
             )
 
+        # --- #1313: remember the point this model was solved to ---------------- #
+        # ``Model.sensitivity()`` runs its own local NLP, whose starting point
+        # decides which local solution the derivatives describe on a nonconvex
+        # model. Without this the two calls answered about different basins and
+        # both said ``status="optimal"``. Kept as the last *successful* solve only
+        # (a failed/infeasible solve carries no point to start from) and read
+        # nowhere on the solve path itself.
+        if isinstance(result, SolveResult) and result.x is not None:
+            self._last_solve_result = result
+
         return result
 
     def sensitivity(
@@ -7436,6 +7452,7 @@ class Model:
         order: int = 1,
         method: str = "exact",
         options: Optional[dict] = None,
+        at=None,
     ):
         """Solve and return every derivative of the solution -- the unified entry point.
 
@@ -7465,6 +7482,13 @@ class Model:
             central-differences the right-hand side as a cross-check.
         options : dict, optional
             POUNCE options for the solve.
+        at : SolveResult, dict, or array, optional
+            The solution to differentiate at. Defaults to this model's last
+            successful :meth:`solve` result, so ``m.solve(); m.sensitivity()``
+            describes the solution ``solve`` returned rather than whichever local
+            one a fixed start point reaches (#1313). The returned object's
+            ``matches_reference`` says whether the two agree, and a mismatch also
+            raises a ``RuntimeWarning``.
 
         Returns
         -------
@@ -7484,7 +7508,7 @@ class Model:
         """
         from discopt.sensitivity import sensitivity as _sensitivity
 
-        return _sensitivity(self, wrt, order=order, method=method, options=options)
+        return _sensitivity(self, wrt, order=order, method=method, options=options, at=at)
 
     def _solve_streaming(self, **kwargs) -> Iterator["SolveUpdate"]:
         """Streaming solve that yields updates during B&B.

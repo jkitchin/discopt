@@ -260,6 +260,7 @@ def _build_layer(
     verify_minimizer: bool = True,
     require_min: bool = True,
     full: bool = False,
+    x0: Optional[np.ndarray] = None,
 ) -> "_ArgminLayer":
     """Build ``phi(p)``: the inner solution as a differentiable JAX function.
 
@@ -289,6 +290,14 @@ def _build_layer(
         one and differentiates the stationary point of the sense as stated.
     full : bool
         Return ``(x*, λ*)`` concatenated instead of ``x*``.
+    x0 : ndarray, optional
+        Starting point for every inner POUNCE solve, flat and in inner variable
+        order.  Clipped into the inner model's box before use.  Without it the
+        inner solve starts from the midpoint of the (clipped) box, which on a
+        nonconvex model decides *which* local solution the whole layer describes
+        — see :func:`discopt.sensitivity.sensitivity`, which passes the model's
+        own solved incumbent here so the derivatives belong to the point the
+        model was solved to (issue #1313).
 
     Returns
     -------
@@ -358,6 +367,21 @@ def _build_layer(
     opts = dict(options or {})
     opts.setdefault("print_level", 0)
 
+    # A caller-supplied start point is validated once, here, rather than on every
+    # inner solve: a wrong-length vector is a caller bug, and silently ignoring it
+    # would leave the layer describing a different local solution than the caller
+    # asked for while reporting success (issue #1313).
+    start_point: Optional[np.ndarray] = None
+    if x0 is not None:
+        start_point = np.asarray(x0, dtype=np.float64).reshape(-1)
+        if start_point.size != n:
+            raise ValueError(
+                f"argmin(): x0 has {start_point.size} entries but the inner model has "
+                f"{n} scalar variables."
+            )
+        if not np.all(np.isfinite(start_point)):
+            raise ValueError("argmin(): x0 contains non-finite entries.")
+
     # The multipliers and the active-set masks are indexed by the *evaluator's*
     # row order, so a disagreement between its layout and the one compiled here
     # would silently pair every multiplier with the wrong constraint.  Check it
@@ -407,8 +431,15 @@ def _build_layer(
             prm.value = np.asarray(p_np[k], dtype=np.float64)
         ev = make_evaluator(inner)
         l_, u_ = ev.variable_bounds
-        x0 = 0.5 * (np.clip(l_, -1e2, 1e2) + np.clip(u_, -1e2, 1e2))
-        res = solve_nlp(ev, x0, options=opts)
+        if start_point is None:
+            start = 0.5 * (np.clip(l_, -1e2, 1e2) + np.clip(u_, -1e2, 1e2))
+        else:
+            # Clip rather than refuse: the point may come from a solve taken
+            # before a bound moved, and a start point is a hint, never a claim of
+            # feasibility. The box is the solver's, so starting outside it is
+            # meaningless.
+            start = np.clip(start_point, l_, u_)
+        res = solve_nlp(ev, start, options=opts)
         state["solves"] += 1
         state["last"] = {
             "status": getattr(res.status, "value", str(res.status)),

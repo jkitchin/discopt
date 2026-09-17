@@ -57,6 +57,7 @@ branch boundary the one-sided derivatives differ.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional, Sequence
 
@@ -198,13 +199,28 @@ class Sensitivity:
     objective : float
         Objective value at ``x``.
     status : str
-        POUNCE termination status.
+        POUNCE termination status of the **local** NLP this sensitivity was taken
+        at -- ``"optimal"`` here means that local solve converged to a KKT point,
+        NOT that the point is a certified global optimum the way
+        :attr:`SolveResult.status <discopt.modeling.core.SolveResult.status>`
+        does.  On a nonconvex model use :attr:`matches_reference` to tell whether
+        the point agrees with what :meth:`Model.solve` certified (#1313).
     multipliers : ndarray, shape (m,)
-        Constraint multipliers at ``x``.
+        Constraint multipliers at ``x``, **in the internal-minimization sign
+        convention**: a MAXIMIZE model is solved as ``-f``, so these multipliers
+        (and the stationarity rows they satisfy) belong to ``-f``, and the same
+        number comes back for ``min f`` and ``max -f``.  This is the convention
+        :attr:`SolveResult.constraint_duals
+        <discopt.modeling.core.SolveResult.constraint_duals>` documents and uses;
+        multiply by ``-1`` for a MAXIMIZE model to read them against the
+        objective as written.  :attr:`objective` and :attr:`dobj_dp` are *not*
+        affected -- both are reported in the model's own sense (#1313).
     dx_dp : ndarray, shape (n, n_params)
         ``dx*/dp``. Column ``k`` is the derivative w.r.t. ``parameters[k]``.
     dlambda_dp : ndarray, shape (m, n_params)
         ``dλ*/dp``, from the same system rather than a separately assembled one.
+        Carries the same internal-minimization sign convention as
+        :attr:`multipliers` -- see there.
     d2x_dp2 : ndarray, shape (n, n_params, n_params), or None
         ``∂²x*/∂p_j∂p_k``; ``None`` unless ``order=2`` was requested.
     active : ndarray of bool, shape (m,)
@@ -225,6 +241,17 @@ class Sensitivity:
         parameters not differentiated with respect to.  :meth:`d` evaluates an
         expression's partials against this rather than against live values, for
         the same reason: the partials and ``dx_dp`` have to belong to one point.
+    reference_objective : float or None
+        Objective of the reference solution this was cross-checked against -- the
+        model's last :meth:`Model.solve` result, or whatever ``at=`` named -- in
+        the model's own sense.  ``None`` when the model has never been solved and
+        no reference was supplied, i.e. when there is nothing to check against.
+    matches_reference : bool or None
+        Whether :attr:`objective` agrees with :attr:`reference_objective` to
+        within tolerance.  ``None`` when there is no reference.  ``False`` means
+        the derivatives describe a *different* stationary point than the one the
+        model was solved to -- on a nonconvex model, a different basin -- and a
+        ``RuntimeWarning`` was raised when the object was built (#1313).
     """
 
     model: "Model"
@@ -243,6 +270,8 @@ class Sensitivity:
     order: int
     p0: np.ndarray
     p_all: np.ndarray
+    reference_objective: Optional[float] = None
+    matches_reference: Optional[bool] = None
     _cache: dict[str, np.ndarray] = field(default_factory=dict, repr=False, compare=False)
 
     # ── basic descriptors ────────────────────────────────────
@@ -258,10 +287,11 @@ class Sensitivity:
         return len(self.parameters)
 
     def __repr__(self) -> str:  # pragma: no cover - display only
+        flag = "" if self.matches_reference is not False else ", matches_reference=False"
         return (
             f"Sensitivity(status={self.status!r}, objective={self.objective:.6g}, "
             f"dx_dp{self.dx_dp.shape}, wrt={self.param_names}, "
-            f"method={self.method!r}, order={self.order})"
+            f"method={self.method!r}, order={self.order}{flag})"
         )
 
     # ── derivatives ──────────────────────────────────────────
@@ -580,6 +610,63 @@ class Sensitivity:
 # ─────────────────────────────────────────────────────────────
 
 
+def _reference_point(model: "Model", at):
+    """Resolve the reference solution ``sensitivity()`` starts from and checks against.
+
+    Returns ``(x0_flat, reference_objective)``, either half possibly ``None``.
+
+    ``at`` may be a :class:`~discopt.modeling.core.SolveResult`, a ``{name: value}``
+    / ``{Variable: value}`` mapping, or a flat array.  ``None`` falls back to the
+    model's own last successful :meth:`Model.solve` result (#1313) -- the point of
+    the fix: ``m.solve(); m.sensitivity()`` must describe the solution ``solve``
+    just certified, not whatever basin a fixed midpoint start happens to reach.
+    """
+    from discopt.modeling.core import SolveResult
+
+    if at is None:
+        at = getattr(model, "_last_solve_result", None)
+        if at is None:
+            return None, None
+
+    if isinstance(at, SolveResult):
+        from discopt.warm_start import primal_point_from_result
+
+        x0 = primal_point_from_result(model, at)
+        ref = None if at.objective is None else float(at.objective)
+        return x0, ref
+
+    if isinstance(at, dict):
+        from discopt.modeling.core import Variable
+        from discopt.warm_start import validate_initial_solution
+
+        by_var = {}
+        by_name = {v.name: v for v in model._variables}
+        for key, value in at.items():
+            if isinstance(key, Variable):
+                by_var[key] = value
+            elif isinstance(key, str):
+                if key not in by_name:
+                    raise ValueError(
+                        f"sensitivity(): at= names variable {key!r}, which this model "
+                        "does not declare."
+                    )
+                by_var[by_name[key]] = value
+            else:
+                raise TypeError(
+                    "sensitivity(): at= keys must be Variable objects or variable "
+                    f"names, got {type(key).__name__}"
+                )
+        return validate_initial_solution(model, by_var), None
+
+    x0 = np.asarray(at, dtype=np.float64).reshape(-1)
+    n = int(sum(int(v.size) for v in model._variables))
+    if x0.size != n:
+        raise ValueError(
+            f"sensitivity(): at= has {x0.size} entries but the model has {n} scalar variables."
+        )
+    return x0, None
+
+
 def sensitivity(
     model: "Model",
     wrt=None,
@@ -587,6 +674,7 @@ def sensitivity(
     order: int = 1,
     method: str = "exact",
     options: Optional[dict] = None,
+    at=None,
 ) -> Sensitivity:
     """Solve ``model`` and return every derivative of that solution.
 
@@ -614,6 +702,16 @@ def sensitivity(
         path; it cannot produce second order.
     options : dict, optional
         POUNCE options for the solve (e.g. ``{"tol": 1e-10}``).
+    at : SolveResult, dict, or array, optional
+        The solution the derivatives are taken at: the inner NLP starts there and
+        the KKT point it returns is cross-checked against it.  Defaults to the
+        model's own last successful :meth:`Model.solve` result, so
+        ``m.solve(); m.sensitivity()`` describes *that* solution rather than
+        whichever local one a fixed start point reaches (#1313).  Pass an explicit
+        value to differentiate at a different stationary point.  A model that has
+        never been solved has no reference: the inner solve then starts from the
+        midpoint of the clipped box as before, and
+        :attr:`Sensitivity.matches_reference` is ``None``.
 
     Returns
     -------
@@ -627,11 +725,25 @@ def sensitivity(
     RuntimeError
         If the solve fails or its KKT point does not check out.
 
+    Warns
+    -----
+    RuntimeWarning
+        When the KKT point the derivatives belong to has a different objective
+        than the reference solution -- on a nonconvex model, a different basin.
+        :attr:`Sensitivity.status` stays POUNCE's ``"optimal"`` in that case,
+        because the local solve did converge; ``matches_reference=False`` is what
+        says the point is not the one the model was solved to.
+
     Notes
     -----
     Parameter values are snapshotted and restored, so the call leaves the model
     exactly as it found it -- a sensitivity that silently moved ``p.value`` would
     make every subsequent solve in the session answer a different question.
+
+    ``status`` is the local NLP's termination status, not a global-optimality
+    certificate: unlike :attr:`SolveResult.status
+    <discopt.modeling.core.SolveResult.status>`, ``"optimal"`` here means only
+    that the inner solve converged to a KKT point.
 
     Examples
     --------
@@ -646,15 +758,17 @@ def sensitivity(
     """
     params = _resolve_parameters(model, wrt)
 
-    from discopt.modeling.core import objective_sense_sign
+    from discopt.modeling.core import ObjectiveSense, objective_sense_sign
     from discopt.solvers.sipopt import pounce_sensitivity
+
+    x0, reference_objective = _reference_point(model, at)
 
     saved = [np.array(p.value, copy=True) for p in params]
     from discopt.parametric import flatten_params
 
     p_all0 = np.asarray(flatten_params(model), dtype=np.float64)
     try:
-        raw = pounce_sensitivity(model, params, options=options, order=order, method=method)
+        raw = pounce_sensitivity(model, params, options=options, order=order, method=method, x0=x0)
     finally:
         # The forward solve writes trial values into `p.value` on every call; a
         # failure partway through must not leave the model describing a problem
@@ -663,6 +777,38 @@ def sensitivity(
             p.value = value
 
     x = np.asarray(raw.x_star, dtype=np.float64)
+    obj = objective_sense_sign(model) * float(raw.objective)
+
+    # --- #1313: the point the derivatives belong to, checked against the one the
+    # model was solved to. A nonconvex model has many KKT points and POUNCE
+    # reports ``status="optimal"`` at any of them; without this check a caller
+    # doing ``m.solve(); m.sensitivity()`` could be handed derivatives from an
+    # entirely different basin under the same word ``optimal`` that
+    # ``SolveResult.status`` uses for a certified global optimum.
+    matches_reference: Optional[bool] = None
+    if reference_objective is not None and np.isfinite(obj):
+        tol = 1e-6 + 1e-6 * abs(reference_objective)
+        matches_reference = bool(abs(obj - reference_objective) <= tol)
+        if not matches_reference:
+            sense = model._objective.sense if model._objective is not None else None
+            worse = (
+                obj > reference_objective
+                if sense != ObjectiveSense.MAXIMIZE
+                else obj < reference_objective
+            )
+            warnings.warn(
+                "sensitivity(): the KKT point the derivatives were taken at has "
+                f"objective {obj:.6g}, but the solution this was checked against has "
+                f"{reference_objective:.6g}"
+                + (" (a strictly worse point)" if worse else "")
+                + ". The derivatives describe that other stationary point, not the "
+                "reference solution -- on a nonconvex model, a different basin. "
+                "status='optimal' below is the local NLP's, not a global certificate. "
+                "Pass at= to pin the point explicitly.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
     return Sensitivity(
         model=model,
         parameters=params,
@@ -672,7 +818,7 @@ def sensitivity(
         # (#1299): a MAXIMIZE model was solved as ``-f``, so undo the flip before
         # reporting it. ``dobj_dp`` below needs no such correction -- it
         # differentiates the model's own objective expression.
-        objective=objective_sense_sign(model) * float(raw.objective),
+        objective=obj,
         status=str(raw.status),
         multipliers=np.asarray(raw.lambda_star, dtype=np.float64),
         dx_dp=np.asarray(raw.dx_dp, dtype=np.float64),
@@ -684,4 +830,6 @@ def sensitivity(
         order=int(order),
         p0=np.array([float(np.asarray(v)) for v in saved], dtype=np.float64),
         p_all=p_all0,
+        reference_objective=reference_objective,
+        matches_reference=matches_reference,
     )
