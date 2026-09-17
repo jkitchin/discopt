@@ -1887,7 +1887,12 @@ def _try_native_spatial_kernel(
     # (nvs17 39.4 s -> 49.9 s, bound -1140.85 -> -1100.40). A probe that cannot see
     # its own mechanism fire cannot score it (CLAUDE.md §6).
     _ext_s = float(res.get("incumbent_extension_s") or 0.0)
-    _native_stats = {"budget/incumbent_extension_s": _ext_s} if _ext_s > 0.0 else None
+    # `float | str` because `SolveResult.solver_stats` is declared that way and
+    # `root/status` below is a string; inferring `dict[str, float]` from this first
+    # numeric entry is what made that assignment a typecheck error.
+    _native_stats: Optional[dict[str, Union[float, str]]] = (
+        {"budget/incumbent_extension_s": _ext_s} if _ext_s > 0.0 else None
+    )
     # #933: same §6 observability for the bound-conditional reserve reclaim.
     _bext_s = float(res.get("bound_extension_s") or 0.0)
     if _bext_s > 0.0:
