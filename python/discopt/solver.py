@@ -6573,7 +6573,7 @@ _IPX_CHEAP_FIRST_IN_PROBE = False
 _IPX_PROBE_BUDGET_FRACTION = 0.40
 
 
-def _ipx_unlifted_probe(model, time_limit, elapsed, **solve_kwargs):
+def _ipx_unlifted_probe(model, time_limit, elapsed, **solve_kwargs) -> Optional["SolveResult"]:
     """#1236: solve the UN-LIFTED model under a bounded probe; return it iff certified.
 
     Returns a :class:`SolveResult` only when the probe closed the gap on the
@@ -10205,15 +10205,18 @@ def solve_model(
                     # "certified" in 23.94 s with the lift's own 297 nodes).
                     _ipx_adopt = False
                 else:
-                    _probe = _ipx_unlifted_probe(
+                    # Named `_ipx_probe`, not `_probe`: `solve_model` already binds
+                    # `_probe` to a `MccormickLPResult` in the node loop, and mypy
+                    # unifies the two in one function scope.
+                    _ipx_probe = _ipx_unlifted_probe(
                         model,
                         time_limit,
                         time.perf_counter() - _solve_t0,
                         gap_tolerance=gap_tolerance,
                         max_nodes=max_nodes,
                     )
-                    if _probe is not None:
-                        return _probe
+                    if _ipx_probe is not None:
+                        return _ipx_probe
             if _ipx_adopt:
                 model = _ipx
                 model._convexity_classification_cache = None
