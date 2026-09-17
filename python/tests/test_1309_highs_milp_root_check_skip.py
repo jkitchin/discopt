@@ -6,15 +6,28 @@ root LP). Before the fix, ``solve_milp_std`` still returned
 even though the check meant to catch a wrong tree bound at the root (#1295)
 never ran -- a certificate claimed but not verified (CLAUDE.md #1).
 
-A ``time_limit`` far smaller than the time this call itself takes (imports,
-matrix marshaling, HiGHS setup) reliably reproduces the race deterministically:
-HiGHS solves the trivial MILP well inside that "budget" in wall-clock terms,
-but by the time ``remaining()`` is checked after the solve, the elapsed time
-already exceeds the requested limit.
+The race is reproduced deterministically (not via a wall-clock guess that a
+faster/slower CI runner could dodge either way) by patching ``time.perf_counter``
+to a fixed sequence: a normal small elapsed time at the pre-solve budget gate
+(so HiGHS actually runs and returns kOptimal with a real time budget), then a
+huge jump for every call from the post-solve gate this issue is about onward
+(including ``done()``'s own trailing call for ``wall_time``, on whichever
+return path is taken).
 """
+
+import itertools
+from unittest.mock import patch
 
 import numpy as np
 from discopt.solvers.lp_milp_highs import StdForm, solve_milp_std
+
+
+def _fake_clock():
+    """t0=0.0, pre-solve gate elapsed=1e-6 (budget intact), everything from the
+    post-solve gate onward elapsed=1e6 (budget long gone) -- including the
+    ``done()`` wrapper's own trailing ``time.perf_counter()`` call for
+    ``wall_time``, whichever return path is taken."""
+    return itertools.chain([0.0, 1e-6], itertools.repeat(1e6))
 
 
 def _knapsack_sf() -> StdForm:
@@ -36,7 +49,8 @@ def test_root_check_skip_downgrades_optimal_to_uncertified_feasible():
     while keeping the found incumbent (the point/objective are still usable,
     just not proven optimal)."""
     sf = _knapsack_sf()
-    out = solve_milp_std(sf, time_limit=0.001, gap_tolerance=1e-4, max_nodes=1000)
+    with patch("time.perf_counter", side_effect=_fake_clock()):
+        out = solve_milp_std(sf, time_limit=10.0, gap_tolerance=1e-4, max_nodes=1000)
     assert out.stats.get("milp/root_check_skipped") == 1.0
     assert not out.gap_certified
     assert out.status != "optimal"
