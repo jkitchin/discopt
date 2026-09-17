@@ -1205,13 +1205,23 @@ def dumps(
     return json.dumps(doc, allow_nan=False, indent=indent)
 
 
+def _refuse_json_constant(token: str) -> Any:
+    raise SerializationError(
+        f"the document contains a bare {token} token, which is not valid JSON; "
+        "discopt writes non-finite numbers as the strings 'nan', 'inf' and '-inf'."
+    )
+
+
 def loads(text: Union[str, bytes]) -> Model:
     """Rebuild a :class:`Model` from a JSON string produced by :func:`dumps`.
 
     The reloaded model carries the embedded solve result (if one was saved) on its
     ``saved_result`` attribute.
     """
-    doc = json.loads(text)
+    # `dumps` never writes bare NaN/Infinity (non-finite floats are tagged strings),
+    # so one here is not a discopt document; refuse it on read rather than accept
+    # it and fail the next save (#1291).
+    doc = json.loads(text, parse_constant=_refuse_json_constant)
 
     schema = doc.get("schema")
     if not isinstance(schema, str) or not schema.startswith("discopt.model/"):

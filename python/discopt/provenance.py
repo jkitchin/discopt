@@ -100,44 +100,81 @@ def _git_head(root: Path) -> Optional[str]:
     not be.
     """
     for parent in [root, *root.parents]:
-        git = parent / ".git"
-        if not git.exists():
+        dot_git = parent / ".git"
+        if not dot_git.exists():
             continue
-        # A worktree or submodule has `.git` as a file pointing at the real dir.
-        if git.is_file():
+        git = dot_git
+        # A worktree or submodule has `.git` as a file pointing at the real dir. A
+        # relative path is relative to the directory holding that file, not to the
+        # process's working directory (gitrepository-layout(5); #1291).
+        if dot_git.is_file():
             try:
-                line = git.read_text(encoding="utf-8").strip()
+                line = dot_git.read_text(encoding="utf-8").strip()
             except OSError:
                 return None
             if not line.startswith("gitdir:"):
                 return None
-            git = Path(line.split(":", 1)[1].strip())
+            git = dot_git.parent / line.split(":", 1)[1].strip()
             if not git.is_dir():
                 return None
+        # A linked worktree keeps only its per-worktree refs; branches live in the
+        # main repository named by `commondir` (relative to the worktree's gitdir).
+        common = git
+        try:
+            common = git / (git / "commondir").read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
         try:
             head = (git / "HEAD").read_text(encoding="utf-8").strip()
         except OSError:
             return None
-        if not head.startswith("ref:"):
-            # Detached HEAD: the file holds the commit itself.
-            return head or None
-        ref = head.split(":", 1)[1].strip()
-        try:
-            return (git / ref).read_text(encoding="utf-8").strip() or None
-        except OSError:
-            pass
-        # A packed ref (`git gc` moves loose refs into `packed-refs`).
-        try:
-            packed = (git / "packed-refs").read_text(encoding="utf-8")
-        except OSError:
-            return None
-        for entry in packed.splitlines():
-            if entry.startswith(("#", "^")):
-                continue
-            parts = entry.split(None, 1)
-            if len(parts) == 2 and parts[1].strip() == ref:
-                return parts[0]
+        return _resolve_ref(head, git, common)
+    return None
+
+
+_HEX = frozenset("0123456789abcdef")
+_PER_WORKTREE_REFS = ("refs/bisect/", "refs/worktree/", "refs/rewritten/")
+
+
+def _object_id(text: str) -> Optional[str]:
+    """*text* if it is a full SHA-1 or SHA-256 object id, else ``None``."""
+    return text if len(text) in (40, 64) and set(text) <= _HEX else None
+
+
+def _resolve_ref(value: str, git: Path, common: Path, depth: int = 0) -> Optional[str]:
+    """Follow a ``HEAD``/ref file's content to the commit id it names.
+
+    ``None`` when the chain cannot be resolved from loose or packed refs -- a
+    reftable repository, a dangling symref, or anything that is not an object id.
+    Recording nothing is honest; recording a wrong commit is not.
+    """
+    if not value.startswith("ref:"):
+        # Detached HEAD: the file holds the commit itself.
+        return _object_id(value)
+    if depth >= 5:
         return None
+    ref = value.split(":", 1)[1].strip()
+    if ref == "HEAD" or ref.startswith(_PER_WORKTREE_REFS):
+        base = git
+    else:
+        base = common
+    try:
+        loose = (base / ref).read_text(encoding="utf-8").strip()
+    except OSError:
+        loose = None
+    if loose:
+        return _resolve_ref(loose, git, common, depth + 1)
+    # A packed ref (`git gc` moves loose refs into `packed-refs`).
+    try:
+        packed = (base / "packed-refs").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for entry in packed.splitlines():
+        if entry.startswith(("#", "^")):
+            continue
+        parts = entry.split(None, 1)
+        if len(parts) == 2 and parts[1].strip() == ref:
+            return _object_id(parts[0])
     return None
 
 
