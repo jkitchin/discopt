@@ -67,6 +67,17 @@ _BOUND_SNAP_TOL = 1e-7
 # certifying is the safe direction: the caller then degrades to the exact simplex.
 _RAY_COST_TOL = 1e-7
 
+# An entry of the ray LP's direction this small, relative to the direction's
+# max-norm, is indistinguishable from zero for the solve that produced it: the ray
+# LP runs at ``constr_viol_tol = 1e-8`` (``pounce_option_defaults``), so a column
+# the recession cone pins to 0 comes back at ~1e-8 rather than at 0. Measured on
+# the ray LPs of the #940 QP family: 5.0e-9 on a free column, and a 1.0e-8
+# excursion *outside* the direction box on a half-open one (Ipopt's default
+# ``bound_relax_factor``; ``pounce_incumbent_options`` deliberately does not reach
+# this call site). A decade of headroom over that 1e-8; genuine ray components in
+# the same population sit at 5e-1 of the max-norm, five orders above the floor.
+_RAY_DIRT_TOL = 1e-7
+
 
 def _certify_unbounded_ray(
     c: np.ndarray,
@@ -181,6 +192,16 @@ def _ray_verified_exactly(d, c, A_ray, cl_ray, cu_ray, d_lo, d_hi) -> bool:
     ``A d - s = 0``, with ``s`` pinned, half-open or free by the row's finite sides.
     :func:`~discopt.solvers.lp_milp_highs.primal_ray_verified` then accepts only
     if an exact ray exists on ``d``'s support.
+
+    ``d`` itself is an interior-point iterate, so it is put back inside the cone's
+    own box first — see :data:`_RAY_DIRT_TOL`. Both cleanings only choose which
+    candidate is proposed: ``primal_ray_verified`` decides whatever vector it is
+    handed in exact rationals, so neither can make the verdict looser than the
+    arithmetic, and a cleaning that overshoots costs a certificate, never
+    soundness. Without them a column the cone pins to 0 keeps a ~1e-8 nonzero and
+    is refused for round-off: the convex QP ``min ½x0² - x1`` on ``x >= 0`` (ray
+    ``(0, 1)``, ``Qd = 0``) came back ``d = (-1.0e-8, 1.0)`` and lost its
+    ``UNBOUNDED`` verdict to ``ERROR``.
     """
     import scipy.sparse as sp
 
@@ -188,6 +209,13 @@ def _ray_verified_exactly(d, c, A_ray, cl_ray, cu_ray, d_lo, d_hi) -> bool:
 
     n = len(c)
     m = A_ray.shape[0]
+    # Restore the declared direction box (Ipopt relaxes every bound by
+    # ``bound_relax_factor``), then drop what is left below the solve's own
+    # tolerance.
+    d = np.clip(np.asarray(d, dtype=np.float64), d_lo, d_hi)
+    d_scale = float(np.max(np.abs(d))) if d.size else 0.0
+    if d_scale > 0.0:
+        d = np.where(np.abs(d) <= _RAY_DIRT_TOL * d_scale, 0.0, d)
     xl = np.where(d_lo < 0.0, -INF, 0.0)
     xu = np.where(d_hi > 0.0, INF, 0.0)
     s = np.asarray(A_ray @ d, dtype=np.float64) if m else np.zeros(0)
