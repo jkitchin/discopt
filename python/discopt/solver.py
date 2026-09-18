@@ -20906,21 +20906,53 @@ def _solve_lp(
     falling to the IPM — which returned NaN via Newton blow-up on declared bounds
     exceeding ~1e15, i.e. was never a sound last resort.
     """
+    from discopt.solvers.lp_pounce import declared_box_honored
+
     engines = [_solve_lp_simplex, _solve_lp_pounce]
     if prefer_pounce:
         engines.reverse()
-    deferred: _DeferredUnbounded | None = None
-    for engine in engines:
-        result = engine(model, t_start, time_limit)
-        if isinstance(result, _DeferredUnbounded):
-            # An UNBOUNDED the #850 guard declined to certify because this engine
-            # relaxed a declared bound in [1e15, 1e20) to its own infinity. Keep
-            # looking for an engine that honors the declared box, but hold on to
-            # the verdict (see below).
-            deferred = deferred or result
-            continue
-        if result is not None:
-            return result
+
+    def _attempt() -> "SolveResult | _DeferredUnbounded | None":
+        """First real answer from the engine order, else any held deferral."""
+        held: _DeferredUnbounded | None = None
+        for engine in engines:
+            result = engine(model, t_start, time_limit)
+            if isinstance(result, _DeferredUnbounded):
+                # An UNBOUNDED the #850 guard declined to certify because this
+                # engine relaxed a declared bound in [1e15, 1e20) to its own
+                # infinity. Keep looking for an engine that honors the declared
+                # box, but hold on to the verdict (see below).
+                held = held or result
+                continue
+            if result is not None:
+                return result
+        return held
+
+    outcome = _attempt()
+    if isinstance(outcome, SolveResult):
+        return outcome
+    deferred: _DeferredUnbounded | None = outcome
+
+    # #1319 retry. Every engine declined to answer, and one common reason is that
+    # the declared box was discarded before the engine ever saw it -- the 1e15
+    # legacy threshold throws away bounds POUNCE handles correctly all the way to
+    # its own 1e19 infinity. Re-attempt once over the box the caller actually
+    # declared. This can only add an answer: it runs ONLY where the route was
+    # about to report `error`, so no solve that succeeds today changes at all,
+    # which is why it needs no §5 graduation (unlike flipping
+    # DISCOPT_POUNCE_DECLARED_BOX, which moves the box for every solve in the
+    # window). The cross-checks are unconditional and apply to the retry too, so
+    # it cannot certify anything the first attempt could not.
+    if _declared_box_retry_applies(model):
+        with declared_box_honored():
+            retried = _attempt()
+        if isinstance(retried, SolveResult):
+            logger.info(
+                "LP re-solved over the declared box (bounds in [1e15, 1e19) that "
+                "the legacy threshold discarded): %s (#1319).",
+                retried.status,
+            )
+            return retried
 
     if deferred is not None:
         # No engine produced a certificate against the declared box, so the
@@ -21095,7 +21127,7 @@ def _solve_lp_matrix(
     declared finite bound in ``[1e15, 1e20)`` as finite — it relaxes it to its own
     infinity — so an ``UNBOUNDED`` verdict from it on such a box may be an artifact
     of the relaxation rather than a property of the problem as posed. Only the
-    interior-point engine does this (``lp_pounce._FINITE_BOUND_THRESHOLD = 1e15``);
+    interior-point engine does this (``lp_pounce.finite_bound_threshold()``);
     see the ``SolveStatus.UNBOUNDED`` branch below. Leave it ``False`` for a
     backend that honors the declared box (the exact simplex, whose infinity
     threshold is ``1e20``; Gurobi, whose infinity is ``1e30``) — discarding *its*
@@ -21207,7 +21239,7 @@ def _solve_lp_matrix(
         # #850 Obs 1: an interior-point engine (POUNCE) treats a declared finite
         # bound whose magnitude is in [1e15, 1e20) as ±infinity — its barrier
         # cannot condition so huge a finite bound, so it relaxes it to the IPM
-        # sentinel (lp_pounce._FINITE_BOUND_THRESHOLD). The box the IPM actually
+        # sentinel (lp_pounce.finite_bound_threshold()). The box the IPM actually
         # solves over is then LARGER than the declared box, and an UNBOUNDED
         # verdict can be an artifact of that relaxation rather than a property of
         # the problem AS POSED. The exact simplex, whose infinity threshold is
@@ -21249,21 +21281,63 @@ def _solve_lp_matrix(
     return None
 
 
+def _declared_box_retry_applies(model: Model) -> bool:
+    """Whether a failed POUNCE-route solve is worth re-attempting over the
+    declared box (#1319).
+
+    True only when BOTH hold:
+
+    * the legacy 1e15 threshold is in force, so a retry would actually differ
+      (inside ``declared_box_honored``, or with ``DISCOPT_POUNCE_DECLARED_BOX=1``
+      already set, the first attempt used the declared box and re-running it
+      would just burn the same time to the same answer), and
+    * the model declares at least one bound in ``[1e15, 1e19)`` -- the window the
+      threshold discards and POUNCE can in fact handle. Outside it the two arms
+      build a bit-identical box, so the retry is a provable no-op.
+    """
+    from discopt.solvers.lp_pounce import (
+        _LEGACY_BOUND_THRESHOLD,
+        _POUNCE_BOUND_INF,
+        finite_bound_threshold,
+    )
+
+    if finite_bound_threshold() != _LEGACY_BOUND_THRESHOLD:
+        return False
+    for v in model._variables:
+        for side in (v.lb, v.ub):
+            mag = np.abs(np.asarray(side, dtype=np.float64)).ravel()
+            mag = mag[np.isfinite(mag)]
+            if mag.size and bool(
+                np.any((mag >= _LEGACY_BOUND_THRESHOLD) & (mag < _POUNCE_BOUND_INF))
+            ):
+                return True
+    return False
+
+
 def _declared_box_relaxed_to_ipm_inf(bounds) -> bool:
-    """True if any declared bound magnitude is in ``[1e15, 1e20)``.
+    """True if any declared bound magnitude falls in the IPM's relaxation window.
 
     Such a bound is finite to the exact simplex (whose infinity threshold is
-    ``1e20``) but is relaxed to ``±infinity`` by the interior-point LP engine
-    (``lp_pounce._FINITE_BOUND_THRESHOLD = 1e15``). It is exactly this window
-    that makes the two engines disagree on whether the problem is bounded
-    (issue #850 Obs 1). A bound at or beyond ``1e20`` (or ``±inf``) is genuinely
-    infinite for both engines and is not counted; a bound below ``1e15`` is
-    finite for both.
+    ``1e20``) but is relaxed to ``±infinity`` by the interior-point engine. It is
+    exactly this window that makes the two engines disagree on whether the problem
+    is bounded (issue #850 Obs 1). A bound at or beyond ``1e20`` (or ``±inf``) is
+    genuinely infinite for both engines and is not counted.
+
+    The window's lower edge is the IPM's live threshold, not a literal: with
+    ``DISCOPT_POUNCE_DECLARED_BOX`` on (opt-in; the default remains OFF pending
+    the §5 graduation gate) the IPM honors a declared bound up to POUNCE's own
+    ``1e19`` infinity, so the window narrows to ``[1e19, 1e20)`` and the guard
+    stops firing on the four orders of magnitude the engine was always able to
+    handle. Unset or ``=0`` keeps the legacy ``[1e15, 1e20)``.
+    Reading it live keeps the guard and the marshaling from drifting apart — a
+    hardcoded ``1e15`` here would defer verdicts the IPM no longer relaxes.
     """
     if not bounds:
         return False
+    from discopt.solvers.lp_pounce import finite_bound_threshold
+
     arr = np.abs(np.asarray([(lo, hi) for lo, hi in bounds], dtype=np.float64))
-    return bool(np.any((arr >= 1e15) & (arr < 1e20)))
+    return bool(np.any((arr >= finite_bound_threshold()) & (arr < 1e20)))
 
 
 def _solve_qp(model: Model, t_start: float, prefer_pounce: bool = False) -> SolveResult:
@@ -21302,8 +21376,31 @@ def _solve_qp(model: Model, t_start: float, prefer_pounce: bool = False) -> Solv
     ``qp-pounce-no-result`` (issue #359) — now as the error explanation rather than
     as fallback telemetry.
     """
+    from discopt.solvers.lp_pounce import declared_box_honored
+
     del prefer_pounce  # no HiGHS fallback to order against; kept for signature compat
     result = _solve_qp_pounce(model, t_start)
+    if result is not None and result.status != "error":
+        return result
+
+    # #1319 retry, exactly as on the LP route: the QP had no answer, and one
+    # common reason is the legacy 1e15 threshold discarding a declared bound the
+    # engine handles fine up to 1e19 -- which is how a QP bounded below by -1e15
+    # came back `unbounded`, and a feasible one `infeasible`. Re-attempt over the
+    # declared box. Runs ONLY where the route was about to report `error`, so
+    # nothing that solves today is touched; the feasibility and KKT-stationarity
+    # guards are unconditional and still gate whatever the retry returns.
+    if _declared_box_retry_applies(model):
+        with declared_box_honored():
+            retried = _solve_qp_pounce(model, t_start)
+        if retried is not None and retried.status != "error":
+            logger.info(
+                "QP re-solved over the declared box (bounds in [1e15, 1e19) that "
+                "the legacy threshold discarded): %s (#1319).",
+                retried.status,
+            )
+            return retried
+
     if result is not None:
         return result
     logger.error(
@@ -21343,7 +21440,11 @@ def _solve_qp_pounce(
         certificate=True,
         options={"bound_relax_factor": POUNCE_BOUND_RELAX_FACTOR},
     )
-    return _solve_qp_matrix(model, t_start, time_limit, solve_fn, "POUNCE")
+    # The IPM is the one QP backend that relaxes a declared [1e15, 1e20) bound to
+    # its own infinity, so its UNBOUNDED needs the #850/#1319 guard.
+    return _solve_qp_matrix(
+        model, t_start, time_limit, solve_fn, "POUNCE", relaxes_huge_bounds=True
+    )
 
 
 def _solve_qp_gurobi(
@@ -21670,12 +21771,22 @@ def _solve_qp_matrix(
     engine: str,
     gap_tolerance: float = 1e-4,
     strict: bool = False,
+    relaxes_huge_bounds: bool = False,
 ) -> SolveResult | None:
     """Solve a QP/MIQP through a matrix-form ``solve_qp`` backend.
 
     ``solve_qp_fn`` must follow the shared QP contract (qp_pounce, or the
     optional Gurobi wrapper): same signature, same ``QPResult`` with
     HiGHS-convention duals.
+
+    ``relaxes_huge_bounds`` has exactly the meaning it has in
+    :func:`_solve_lp_matrix`: the backend does not honor a declared finite bound in
+    ``[1e15, 1e20)`` as finite but relaxes it to its own infinity, so an
+    ``UNBOUNDED`` verdict from it over such a box may be an artifact of the
+    relaxation rather than a property of the problem as posed. Only the
+    interior-point engine does this (``qp_pounce`` shares
+    ``lp_pounce.finite_bound_threshold()``); leave it ``False`` for a backend that
+    honors the declared box (Gurobi, whose infinity is 1e30).
     """
     from discopt._relax.problem_classifier import extract_qp_data
     from discopt.modeling.core import ObjectiveSense
@@ -21841,6 +21952,38 @@ def _solve_qp_matrix(
             infeasibility_certificate=getattr(result, "infeasibility_certificate", None),
         )
     elif result.status == SolveStatus.UNBOUNDED:
+        # #1319 part 3: the same #850 hazard the LP route guards against, which
+        # this one never got. An interior-point engine relaxes a declared finite
+        # bound in [1e15, 1e20) to its own infinity, so its UNBOUNDED describes a
+        # LARGER box than the one declared and can be false over the box as posed
+        # -- ``min (w-0.5)^2 + y`` with ``y in [-1e15, 0]`` is optimal at -1e15,
+        # and this route reported ``unbounded`` (it is correct for |bound| <= 9e14,
+        # exactly the window's edge). Unlike ``_solve_lp``, there is no second QP
+        # engine to defer to (``_solve_qp`` is POUNCE-only by design, #359), so the
+        # deferral has nowhere to go and the honest outcome is ``error``: not a
+        # certificate, but "no engine honoring the declared box could decide this".
+        # CLAUDE.md §1 admits no trade of a possibly-false certificate for a
+        # better-looking status. The warning names the cause and the remedy so the
+        # failure is diagnosable rather than a bare ``error`` (the #937 lesson).
+        if relaxes_huge_bounds and _declared_box_relaxed_to_ipm_inf(bounds):
+            from discopt.solvers.lp_pounce import finite_bound_threshold as _live_thr
+
+            _thr = _live_thr()
+            msg = (
+                f"{engine} reported UNBOUNDED for this QP, but it relaxed a declared "
+                f"finite bound in [{_thr:g}, 1e20) to its own infinity, so that "
+                f"verdict describes a larger box than the one declared and is not "
+                f"certified -- over a finite box the true answer may well be "
+                f"'optimal' at the corner. The route re-solves over the declared box "
+                f"where it can (#1319); if that also fails the result is an honest "
+                f"'error'. Tighten the bounds below {_thr:g} to avoid the relaxation "
+                f"entirely."
+            )
+            import warnings
+
+            logger.warning(msg)
+            warnings.warn(msg, RuntimeWarning, stacklevel=2)
+            return SolveResult(status="error", wall_time=wall_time, node_count=result.node_count)
         return SolveResult(status="unbounded", wall_time=wall_time, node_count=result.node_count)
     elif result.status == SolveStatus.TIME_LIMIT:
         # NOTE (#1262): this exit and the ITERATION_LIMIT one below leave
@@ -23841,8 +23984,18 @@ def _highs_decomposed_duals(model: Model, n_orig: int, sf, row_dual, col_dual):
 
 
 def _highs_route_label(kind: str, out) -> str:
+    """Describe the route that produced ``out``.
+
+    #1320 part 2: the route's own wording is the last field that still reads
+    "certified" once ``gap``/``bound``/``bound_valid`` have been made honest on a
+    decertified result, so a result whose certificate this route DECLINED (the
+    #1295 unscalable-column case, or a #1309/#1320 root cross-check that did not
+    settle) is labeled *unverified*. "Verified" describes a result the route
+    actually stood behind, not merely the code path it took.
+    """
     labels = "; ".join(f"{k}={v}" for k, v in sorted(out.labels.items()))
-    base = f"highs-{kind}: verified HiGHS route (HiGHS {out.highs_status or 'not run'})"
+    verdict = "unverified" if out.labels.get("milp/certificate") == "declined" else "verified"
+    base = f"highs-{kind}: {verdict} HiGHS route (HiGHS {out.highs_status or 'not run'})"
     return f"{base}; {labels}" if labels else base
 
 

@@ -15,9 +15,15 @@ below expose exactly that to POUNCE.
 
 from __future__ import annotations
 
+import contextlib as _contextlib
 import logging
+import os
+import threading
 import time
-from typing import Any, List, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Any, List, NamedTuple, Optional, Tuple, Union, cast
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 import numpy as np
 import scipy.sparse as sp
@@ -43,10 +49,115 @@ except ImportError:
 # also emits ~1e20 for unbounded variables, so anything past the "very large"
 # threshold is mapped to a single sentinel infinity here.
 _INF = 1e20
-_FINITE_BOUND_THRESHOLD = 1e15
+
+# |bound| at or beyond which a declared finite bound is handed to POUNCE as the
+# infinity sentinel instead of as itself.
+#
+# ``_POUNCE_BOUND_INF`` is POUNCE's OWN threshold: Ipopt's ``nlp_lower_bound_inf``
+# / ``nlp_upper_bound_inf`` default to ∓1e19, and a bound at or beyond that is
+# what the engine itself calls infinite. Measured (#1319): on
+# ``min (w-0.5)² + y`` over ``y ∈ [-L, 0]`` POUNCE returns the exact analytic
+# optimum ``-L`` for every L up to 9.9e18 and flips to UNBOUNDED at exactly 1e19.
+#
+# ``_LEGACY_BOUND_THRESHOLD`` is the pre-#1319 value, four orders of magnitude
+# more conservative than the engine requires. Every false status in #1319 lives in
+# the [1e15, 1e19) window it needlessly discarded: because the bound never reached
+# POUNCE, the box it solved was strictly LARGER than the declared one, so a
+# bounded QP came back ``unbounded`` and a feasible LP came back ``infeasible``.
+# This also falsifies the premise recorded at #850 Obs 1 — that the barrier
+# "cannot condition so huge a finite bound" — for the whole [1e15, 1e19) range;
+# the relaxation was never a conditioning requirement there, it was a guess.
+#
+# Honoring the declared box is the sound direction (a bound is a constraint;
+# discarding it enlarges the feasible set), but it is bound-CHANGING under
+# CLAUDE.md §5 — every node relaxation over a variable in this window now solves a
+# tighter box — so it ships behind this flag with the legacy path intact.
+_POUNCE_BOUND_INF = 1e19
+_LEGACY_BOUND_THRESHOLD = 1e15
+
+
+#: Per-thread override of :func:`finite_bound_threshold`, set only by
+#: :func:`declared_box_honored`. Thread-local because the solve orchestrator may
+#: run engine calls from more than one thread, and a module-global would leak one
+#: thread's retry into another thread's ordinary solve.
+_BOX_OVERRIDE = threading.local()
+
+
+@_contextlib.contextmanager
+def declared_box_honored() -> "Iterator[None]":
+    """Honor the declared box up to POUNCE's own 1e19 infinity inside this block.
+
+    The retry half of #1319. The legacy 1e15 threshold discards declared bounds
+    the engine could in fact have handled, which is what made a feasible LP look
+    infeasible and a bounded QP look unbounded. Those now end in an honest
+    ``error`` rather than a false certificate — and an ``error`` is exactly the
+    state in which re-solving over the box the caller actually declared can only
+    help: there is no answer to lose.
+
+    Scoped rather than a default flip: entering this block changes what a solve
+    that has ALREADY failed does, and nothing about a solve that succeeded. That
+    is why it needs no §5 graduation, unlike ``DISCOPT_POUNCE_DECLARED_BOX``,
+    which moves the box for every solve in the window.
+    """
+    prev = getattr(_BOX_OVERRIDE, "value", None)
+    _BOX_OVERRIDE.value = _POUNCE_BOUND_INF
+    try:
+        yield
+    finally:
+        _BOX_OVERRIDE.value = prev
+
+
+def finite_bound_threshold() -> float:
+    """``|bound|`` at or beyond which POUNCE is handed its infinity sentinel.
+
+    ``DISCOPT_POUNCE_DECLARED_BOX=1`` honors the declared box up to POUNCE's own
+    1e19 infinity; unset/``0`` keeps the legacy 1e15 (#1319). Inside a
+    :func:`declared_box_honored` block the override wins over both.
+
+    **Default-OFF pending the §5 graduation gate.** The flag is bound-changing, so
+    it stays off until the corpus-wide differential panel
+    (``scripts/pounce_declared_box_panel.py``) comes back BOTH cert-clean and
+    net-positive; graduating it means flipping this default while keeping the
+    ``=0`` opt-out and the legacy path intact. Correctness does not wait on that
+    vote: the #1319 cross-checks (Phase-1 row activity, the QP code-2 check, the
+    #850 unbounded guard) hold on BOTH settings, so the flag decides whether the
+    right answer is recovered, never whether a wrong one can be certified.
+    """
+    override = getattr(_BOX_OVERRIDE, "value", None)
+    if override is not None:
+        return float(override)
+    if os.environ.get("DISCOPT_POUNCE_DECLARED_BOX", "0").strip().lower() in ("1", "true", "on"):
+        return _POUNCE_BOUND_INF
+    return _LEGACY_BOUND_THRESHOLD
+
+
 # Above this total constraint violation, the elastic Phase-1 LP certifies the
 # original LP infeasible (roadmap P0.2).
 _FEAS_TOL = 1e-6
+# Phase-1 slack below this fraction of the row activity |A|·|x| is roundoff, not a
+# violation (#1319). The Phase-1 LP is itself solved by the IPM, so each row's
+# residual is bounded by the floating-point resolution of evaluating that row --
+# O(eps·|A||x|), NOT O(eps·|rhs|). On a box whose bounds reach ~1e15 the two differ
+# by twenty orders of magnitude, and the rhs-only threshold read pure cancellation
+# noise as a Farkas certificate: on the #1319 repro (x1 - x2 == 1 with x ~ 1.6e15)
+# Phase-1 reported a total slack of 0.207 against a threshold of 4e-6 and certified
+# a false `infeasible` on a problem whose optimum is 5.4e15.
+#
+# Measured (scratch sweep, 24 systems spanning L = 1e3..1e17, feasible thin-sliver
+# and wide boxes vs. genuinely infeasible conflicts with gaps of L and 1e-3·L):
+# slack/activity ratios were <= 4.6e-11 on every FEASIBLE system (<= 6.6e-17 for
+# every L >= 1e9) and >= 1.9 on every INFEASIBLE one -- a separation of ~4e10.
+# 1e-12 sits ~4500x above machine epsilon (so genuine cancellation noise clears it)
+# and ~1e12 below the smallest measured genuine violation.
+#
+# Applied PER ROW, never to a sum over rows. That sweep only ever varied ONE
+# magnitude at a time, so it could not see the failure the round-4 review of #1319
+# found: summed, a single large but perfectly satisfiable row raises the floor for
+# every other row, and an O(1) contradiction sitting beside a row of activity 1e12
+# was read as feasible -- after which the ray certifier called an INFEASIBLE
+# problem ``unbounded``. A row's residual can only be excused by its own
+# arithmetic. See :func:`_phase1_verdict`.
+_ROW_ACTIVITY_REL_TOL = 1e-12
 # Tiny floating-point bound inversions (lb just above ub, e.g. ~1e-11 out of
 # relaxation/bound-tightening) are snapped to a single fixed value before they
 # reach POUNCE. POUNCE's IPM strictly validates bounds and rejects ``lb > ub``
@@ -298,12 +409,13 @@ class PounceKKTError(RuntimeError):
 # from numerical failure on badly-conditioned huge-magnitude-bound problems with
 # no infeasibility behind it (reproduced with declared bounds in [5e15, 2e18] on
 # an otherwise trivially feasible one-row LP). Every INFEASIBLE, 3 and 4 here is
-# cross-checked against the elastic Phase-1 LP in ``_solve_core`` before it
-# reaches a caller; see the note there.
+# cross-checked before it reaches a caller: INFEASIBLE against the elastic
+# Phase-1 LP in ``_solve_core``, and 3/4 against Phase-1 and then an exhibited
+# recession ray (#940). See the note there.
 _LP_STATUS_MAP = {
     0: SolveStatus.OPTIMAL,  # Solve_Succeeded
     1: SolveStatus.OPTIMAL,  # Solved_To_Acceptable_Level
-    2: SolveStatus.INFEASIBLE,  # Infeasible_Problem_Detected (global for LP)
+    2: SolveStatus.INFEASIBLE,  # Infeasible_Problem_Detected (raw label; cross-checked)
     3: SolveStatus.UNBOUNDED,  # Search_Direction_Becomes_Too_Small
     4: SolveStatus.UNBOUNDED,  # Diverging_Iterates
     -1: SolveStatus.ITERATION_LIMIT,  # Maximum_Iterations_Exceeded
@@ -472,8 +584,9 @@ def solve_lp(
     else:
         lb = np.zeros(n, dtype=np.float64)
         ub = np.full(n, _INF, dtype=np.float64)
-    lb = np.where(lb <= -_FINITE_BOUND_THRESHOLD, -_INF, lb)
-    ub = np.where(ub >= _FINITE_BOUND_THRESHOLD, _INF, ub)
+    _bound_inf = finite_bound_threshold()
+    lb = np.where(lb <= -_bound_inf, -_INF, lb)
+    ub = np.where(ub >= _bound_inf, _INF, ub)
     lb, ub = _snap_inverted_bounds(lb, ub)
 
     # ---- stacked linear constraints -----------------------------------------
@@ -510,24 +623,54 @@ def solve_lp(
     # can raise code 2 from numerical failure with no real infeasibility behind
     # it (issue #1309: reproduced with declared bounds in [5e15, 2e18] on an
     # otherwise trivially feasible one-row LP). Disambiguate ALL of these with an
-    # elastic Phase-1 LP that minimizes total constraint violation. For an LP
-    # this is exact (by LP duality a positive minimal violation is a Farkas
-    # certificate): >0 proves infeasibility; ~0 proves the original was
-    # feasible, so the prior status (numerical failure, or a genuine UNBOUNDED
-    # once feasibility is established) is reported honestly.
+    # elastic Phase-1 LP that minimizes total constraint violation. By LP duality
+    # a positive minimal violation is a Farkas certificate — but only when Phase-1
+    # is solved exactly, and here it is solved by the same IPM on the same relaxed
+    # box. So "positive" is read against BOTH the right-hand-side scale and the
+    # row-activity roundoff floor (see ``_is_infeasible_violation``); below that
+    # floor the slack is cancellation noise, not a violation (#1319). Above it,
+    # infeasibility is proved; at or below it the original is taken as feasible,
+    # so the prior status (numerical failure, or a genuine UNBOUNDED once
+    # feasibility is established) is reported honestly.
     if m > 0 and result.status in (
         SolveStatus.ITERATION_LIMIT,
         SolveStatus.ERROR,
         SolveStatus.UNBOUNDED,
         SolveStatus.INFEASIBLE,
     ):
-        slacks = _phase1_min_violation(A, cl, cu, lb, ub, opts)
-        if slacks is not None and _is_infeasible_violation(slacks, cl, cu):
+        phase1 = _phase1_min_violation(A, cl, cu, lb, ub, opts)
+        verdict = (
+            _phase1_verdict(phase1.slacks, cl, cu, phase1.row_activity)
+            if phase1 is not None
+            else None
+        )
+        if verdict == PHASE1_INFEASIBLE:
+            assert phase1 is not None
             return LPResult(
                 status=SolveStatus.INFEASIBLE,
                 iterations=result.iterations,
                 wall_time=result.wall_time,
-                infeasibility_certificate=_build_certificate(slacks, n_ineq),
+                infeasibility_certificate=_build_certificate(phase1.slacks, n_ineq),
+            )
+        if verdict == PHASE1_UNDECIDED:
+            # Phase-1 could not tell a genuine small violation at a huge-magnitude
+            # point from cancellation noise. Falling through would hand this to
+            # ``_settle_ambiguous_unbounded``, which certifies UNBOUNDED on an
+            # exhibited ray -- and on an INFEASIBLE problem that is a false
+            # certificate (the regression #1319's own fix introduced: violation 9
+            # under a 4000 roundoff floor). Undecided is not feasible; report
+            # ERROR so the caller degrades to the exact simplex, which honors the
+            # declared box and decides exactly.
+            logger.debug(
+                "POUNCE Phase-1 was undecided (violation above the rhs floor but "
+                "under the row-activity roundoff floor); reporting ERROR rather "
+                "than letting an unverified UNBOUNDED or a feasibility assumption "
+                "stand."
+            )
+            return LPResult(
+                status=SolveStatus.ERROR,
+                iterations=result.iterations,
+                wall_time=result.wall_time,
             )
         if result.status == SolveStatus.INFEASIBLE:
             # POUNCE's own code-2 verdict did NOT survive the exact Phase-1
@@ -590,8 +733,9 @@ def solve_lp_kkt(
 
     lb = np.asarray(x_l, dtype=np.float64).ravel().copy()
     ub = np.asarray(x_u, dtype=np.float64).ravel().copy()
-    lb = np.where(lb <= -_FINITE_BOUND_THRESHOLD, -_INF, lb)
-    ub = np.where(ub >= _FINITE_BOUND_THRESHOLD, _INF, ub)
+    _bound_inf = finite_bound_threshold()
+    lb = np.where(lb <= -_bound_inf, -_INF, lb)
+    ub = np.where(ub >= _bound_inf, _INF, ub)
     lb, ub = _snap_inverted_bounds(lb, ub)
 
     cl = b_arr.copy()
@@ -642,32 +786,131 @@ def solve_lp_kkt(
     return obj, x_arr, y, z_l, z_u
 
 
-def _is_infeasible_violation(slacks: Optional[np.ndarray], cl: np.ndarray, cu: np.ndarray) -> bool:
+#: Phase-1 proved infeasibility: the minimal violation clears both noise floors.
+PHASE1_INFEASIBLE = "infeasible"
+#: Phase-1 proved feasibility: the minimal violation is within even the rhs floor.
+PHASE1_FEASIBLE = "feasible"
+#: Phase-1 decided NOTHING: the violation is above the rhs floor but under the
+#: row-activity roundoff floor, so it is either a genuine small violation at a
+#: huge-magnitude point or cancellation noise, and this test cannot tell which.
+PHASE1_UNDECIDED = "undecided"
+
+
+def _phase1_verdict(
+    slacks: Optional[np.ndarray],
+    cl: np.ndarray,
+    cu: np.ndarray,
+    row_activity: Optional[np.ndarray],
+) -> str:
+    """Read the Phase-1 optimum as one of three verdicts, never two, per row.
+
+    Two independent defects in #1319's first fix meet here.
+
+    **Collapsing the answer to a bool.** "Not above the roundoff floor" is not
+    proof of feasibility: a genuine conflict whose minimal violation is small in
+    absolute terms sits under that floor whenever the Phase-1 point is large.
+    Read as "feasible", the raw Ipopt code-3/4 ``UNBOUNDED`` then survived
+    :func:`_settle_ambiguous_unbounded` and an **infeasible** LP was certified
+    ``unbounded``. Hence the third verdict: undecided is undecided, and the
+    caller must certify nothing from it — on the LP route it degrades to the
+    exact simplex, which honors the declared box and decides exactly.
+
+    **Summing the floor over rows.** The floor was ``1e-12 * Σ|A||x|``, so one
+    large but perfectly satisfiable row lifted the bar for every other row. An
+    O(1) contradiction (``a - b <= 0`` with ``a - b >= 1`` over ``[0, 10]``)
+    beside an unrelated row of activity ~1e12 was read as feasible and certified
+    ``unbounded`` — at a magnitude four orders below the declared-box window, so
+    no flag was involved (round-4 review of #1319). Each row is now judged
+    against its own rhs and its own activity, which also restores the correct
+    ``infeasible`` certificates that the bool-with-summed-floor lost relative to
+    ``main``.
+    """
+    if slacks is None:
+        return PHASE1_UNDECIDED
+    arr = np.abs(np.asarray(slacks, dtype=np.float64).ravel())
+    if row_activity is None:
+        # No Phase-1 point at all: there is nothing to measure the violation
+        # against, so nothing can be certified from it in EITHER direction.
+        # (Reading it against the rhs alone would restore exactly the #1319
+        # false-``infeasible``; reading it as feasible would restore the false
+        # ``unbounded``.)
+        return PHASE1_UNDECIDED
+
+    _sentinel = _POUNCE_BOUND_INF
+    cl_a = np.asarray(cl, dtype=np.float64).ravel()
+    cu_a = np.asarray(cu, dtype=np.float64).ravel()
+    act = np.abs(np.asarray(row_activity, dtype=np.float64).ravel())
+
+    # PER ROW, never summed. A summed floor lets one large but perfectly
+    # satisfiable row raise the bar for a completely separate, well-scaled block
+    # -- an O(1) contradiction beside a row of activity 1e12 was read as feasible,
+    # and the ray certifier then called an INFEASIBLE problem ``unbounded``
+    # (round-4 review of #1319). A row's residual can only be excused by ITS OWN
+    # arithmetic, so each row is judged against its own rhs and its own activity.
+    n = arr.size
+    rhs_mag = np.zeros(n, dtype=np.float64)
+    for i in range(n):
+        vals = [
+            abs(v)
+            for v in (
+                cl_a[i] if i < cl_a.size else np.nan,
+                cu_a[i] if i < cu_a.size else np.nan,
+            )
+            if np.isfinite(v) and abs(v) < _sentinel
+        ]
+        rhs_mag[i] = max(vals) if vals else 0.0
+    act_i = act[:n] if act.size >= n else np.zeros(n, dtype=np.float64)
+
+    rhs_floor = _FEAS_TOL * (1.0 + rhs_mag)
+    full_floor = rhs_floor + _ROW_ACTIVITY_REL_TOL * act_i
+
+    if np.any(arr > full_floor):
+        # At least one row is violated beyond anything its own arithmetic can
+        # explain: a Farkas certificate this test is entitled to report.
+        return PHASE1_INFEASIBLE
+    if np.all(arr <= rhs_floor):
+        return PHASE1_FEASIBLE
+    # Some row sits between its rhs floor and its activity floor: a genuine small
+    # violation at a huge-magnitude point and cancellation noise look identical
+    # here, so decide nothing.
+    return PHASE1_UNDECIDED
+
+
+def _is_infeasible_violation(
+    slacks: Optional[np.ndarray],
+    cl: np.ndarray,
+    cu: np.ndarray,
+    row_activity: Optional[np.ndarray],
+) -> bool:
     """Whether the Phase-1 minimal total violation certifies infeasibility.
 
     The decision uses a scale-aware threshold rather than the bare absolute
     ``_FEAS_TOL``: the interior-point Phase-1 leaves a small residual per row, so
     a constant tolerance summed over all ``m`` rows raises false ``INFEASIBLE``
-    verdicts on large or large-magnitude systems. Scale by the row count and the
-    right-hand-side magnitude so only a genuine (data-significant) violation
-    trips. Erring toward *not* certifying infeasibility is the safe direction —
-    the caller then reports the prior status (e.g. iteration limit) rather than a
-    wrong ``INFEASIBLE``.
+    verdicts on large or large-magnitude systems. Two scales matter, and both
+    terms are needed:
+
+    * the **right-hand-side** magnitude, for an ordinary system whose rows are
+      small but numerous, and
+    * the **row activity** ``|A|·|x|`` at the Phase-1 point (``row_activity``),
+      for a system solved over huge bounds. A row's residual cannot be resolved
+      below the floating-point precision of evaluating that row, so a slack under
+      ``_ROW_ACTIVITY_REL_TOL`` of the activity is cancellation noise rather than
+      a violation. Omitting this term is #1309's remaining gap (#1319): the
+      Phase-1 LP is solved by the same IPM on the same relaxed box, so "a positive
+      minimal violation is a Farkas certificate" holds only down to that floor.
+
+    Erring toward *not* certifying infeasibility is the safe direction — the
+    caller then reports the prior status (e.g. iteration limit) or degrades to the
+    exact simplex, rather than returning a wrong ``INFEASIBLE``.
+
+    Only :data:`PHASE1_INFEASIBLE` is a proof. A ``False`` here therefore covers
+    BOTH "proved feasible" and "could not tell" — callers that go on to certify
+    some other status must consult :func:`_phase1_verdict` directly and refuse to
+    certify on :data:`PHASE1_UNDECIDED`, or they will do what #1319's fix did and
+    turn a missed infeasibility into a false ``unbounded``.
     """
-    if slacks is None:
-        return False
-    arr = np.asarray(slacks, dtype=np.float64)
-    total = float(arr.sum())
-    m = int(arr.size)
-    # Use only genuinely finite RHS entries for the scale — the ±_INF sentinel
-    # (1e20) is "finite" to np.isfinite and would blow the scale up.
-    cl = np.asarray(cl, dtype=np.float64).ravel()
-    cu = np.asarray(cu, dtype=np.float64).ravel()
-    finite = np.concatenate(
-        [cl[np.abs(cl) < _FINITE_BOUND_THRESHOLD], cu[np.abs(cu) < _FINITE_BOUND_THRESHOLD]]
-    )
-    rhs_scale = 1.0 + (float(np.max(np.abs(finite))) if finite.size else 0.0)
-    return total > _FEAS_TOL * max(1.0, float(m)) * rhs_scale
+    return _phase1_verdict(slacks, cl, cu, row_activity) == PHASE1_INFEASIBLE
 
 
 def _build_certificate(slacks: np.ndarray, n_ineq: int) -> InfeasibilityCertificate:
@@ -754,6 +997,19 @@ def _interior_start(lb: np.ndarray, ub: np.ndarray) -> np.ndarray:
     return np.clip(0.5 * (lo + hi), -1e3, 1e3)
 
 
+class Phase1Solution(NamedTuple):
+    """The elastic Phase-1 LP's optimum, as :func:`_is_infeasible_violation` reads it.
+
+    ``slacks`` is the per-row minimal violation; ``row_activity`` is ``|A|·|x|``
+    per row at the same point — the floating-point scale each row's residual was
+    computed at, which is what bounds the precision of ``slacks`` (#1319). The two
+    travel together so a caller cannot weigh the violation without its noise floor.
+    """
+
+    slacks: np.ndarray
+    row_activity: np.ndarray
+
+
 def _phase1_min_violation(
     A: np.ndarray,
     cl: np.ndarray,
@@ -761,7 +1017,7 @@ def _phase1_min_violation(
     lb: np.ndarray,
     ub: np.ndarray,
     opts: dict,
-) -> Optional[np.ndarray]:
+) -> Optional[Phase1Solution]:
     """Per-row minimal constraint violation of ``cl <= A x <= cu`` over the box.
 
     Builds and solves the elastic LP
@@ -772,8 +1028,8 @@ def _phase1_min_violation(
     in the variables ``[x, s]`` (one slack per row). The elastic LP is always
     feasible and bounded below by 0; at the optimum each ``s_i`` is the minimal
     violation row ``i`` must incur. Returns that length-``m`` slack vector
-    (its sum is the total minimal violation), or ``None`` if even the
-    (well-posed) Phase-1 solve did not reach optimality.
+    alongside the row activity it was computed at (see :class:`Phase1Solution`),
+    or ``None`` if even the (well-posed) Phase-1 solve did not reach optimality.
     """
     m, n = A.shape
     eye = np.eye(m, dtype=np.float64)
@@ -790,5 +1046,10 @@ def _phase1_min_violation(
     if res.status == SolveStatus.OPTIMAL and res.x is not None:
         # The slacks are the trailing m entries; clip tiny negatives from the
         # interior-point tolerance.
-        return np.clip(np.asarray(res.x[n:], dtype=np.float64), 0.0, None)
+        sol = np.asarray(res.x, dtype=np.float64)
+        slacks = np.clip(sol[n:], 0.0, None)
+        # |A|·|x| over the ORIGINAL rows at the Phase-1 point: the magnitude of the
+        # arithmetic whose rounding error the slacks are measured against (#1319).
+        row_activity = np.abs(A) @ np.abs(sol[:n])
+        return Phase1Solution(slacks=slacks, row_activity=row_activity)
     return None

@@ -1277,6 +1277,7 @@ def solve_milp_std(
 
     def decertify(out: HighsOutcome) -> None:
         stats["milp/decertified_unscalable"] = 1.0
+        labels["milp/certificate"] = "declined"
         labels["milp/bound_provenance"] = "root-ns" if out.root_bound is not None else "none"
         why = (
             f"an entry on an unbounded column is {open_ratio:.3g} of its row's largest "
@@ -1426,6 +1427,33 @@ def solve_milp_std(
         bound = min(bound, obj)
     out.bound = bound if out.status in ("optimal", "feasible", "time_limit", "node_limit") else None
 
+    def decertify_root_check(why: str) -> None:
+        """Strip the certificate from a result whose NS-safe root check did not
+        settle — whether it was skipped for want of budget (#1309) or ran and came
+        back inconclusive (#1320). Both are the same fact: the safety net that
+        exists to catch a tree bound (or an infeasibility claim) already wrong at
+        the root (#1295) produced no verdict, so nothing here is certified.
+
+        Every field that reads as a certificate is made consistent (#1320 part 2),
+        mirroring the #1295 ``decertify``: kOptimal keeps its incumbent as an
+        honest uncertified ``feasible``; kInfeasible has no incumbent to fall back
+        on and becomes ``error``; and the unchecked tree bound gives way to the
+        NS-safe root bound — ``None`` here, since the check is exactly what did not
+        produce one, which in turn leaves ``gap``/``bound_valid`` empty rather than
+        a proven-looking zero gap. The label demotes the route's own wording from
+        "verified" to "unverified".
+        """
+        if not out.gap_certified:
+            return
+        out.message = f"HiGHS MILP {name}: {why}, so this result cannot be certified"
+        out.gap_certified = False
+        out.status = "feasible" if out.x is not None else "error"
+        out.bound = out.root_bound
+        if out.bound is not None and out.objective is not None:
+            out.bound = min(out.bound, out.objective)
+        labels["milp/certificate"] = "declined"
+        labels["milp/bound_provenance"] = "root-ns" if out.bound is not None else "none"
+
     # Root LP relaxation, NS-safe: supplies root_bound, decides an unbounded-or-
     # infeasible label, upgrades an infeasible claim to a Farkas proof, and catches a
     # tree bound that is already wrong at the root (§3.2.5).
@@ -1437,20 +1465,8 @@ def solve_milp_std(
         stats["milp/root_check_skipped"] = 1.0
         if name in ("kUnbounded", "kUnboundedOrInfeasible"):
             out.status, out.message = "error", f"{name} and no budget left to decide it"
-        elif out.gap_certified:
-            # The NS-safe root cross-check exists to catch a tree bound (or an
-            # infeasibility claim) that is already wrong at the root (#1295);
-            # skipping it while leaving ``gap_certified=True`` claims a safety
-            # net that never ran (#1309). Degrade to an honest, uncertified
-            # outcome instead: keep the incumbent as 'feasible' when there is
-            # one (kOptimal), otherwise 'error' (kInfeasible has no incumbent
-            # to fall back to).
-            out.message = (
-                f"HiGHS MILP {name}: no time budget left to run the NS-safe "
-                "root cross-check, so this result cannot be certified"
-            )
-            out.gap_certified = False
-            out.status = "feasible" if out.x is not None else "error"
+        else:
+            decertify_root_check("no time budget left to run the NS-safe root cross-check")
         return done(out)
     t_root = time.perf_counter()
     lp = solve_lp_std(sf, time_limit=rem)
@@ -1498,7 +1514,15 @@ def solve_milp_std(
             out.bound = lp.bound if obj is None else min(lp.bound, obj)
             stats["milp/bound_from_root_ns"] = 1.0
     else:
+        # The check RAN but settled nothing (``solve_lp_std`` hit its own time
+        # limit, or errored — a kUnknown / sentinel-magnitude readback refusal).
+        # #1309 applied "a certificate whose safety net never ran is not a
+        # certificate" only to the skip branch; an inconclusive run is the same
+        # fact and gets the same downgrade (#1320 part 1).
         stats["milp/root_check_inconclusive"] = 1.0
+        decertify_root_check(
+            f"the NS-safe root cross-check was inconclusive (root LP {lp.status}: {lp.message})"
+        )
     return done(out)
 
 

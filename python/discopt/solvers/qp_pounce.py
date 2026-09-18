@@ -27,6 +27,7 @@ objective-independent and applies to QPs unchanged.
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, List, Optional, Tuple, Union
 
@@ -36,18 +37,22 @@ import scipy.sparse as sp
 from discopt import _timing
 from discopt.solvers import QPResult, SolveStatus, pounce_option_defaults
 from discopt.solvers.lp_pounce import (
-    _FINITE_BOUND_THRESHOLD,
     _INF,
     _LP_STATUS_MAP,
+    PHASE1_INFEASIBLE,
+    PHASE1_UNDECIDED,
     POUNCE_AVAILABLE,
     PounceKKTError,
     _build_certificate,
     _certify_unbounded_ray,
     _interior_start,
-    _is_infeasible_violation,
     _phase1_min_violation,
+    _phase1_verdict,
     _stack_constraints,
+    finite_bound_threshold,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class _QPCallbacks:
@@ -111,6 +116,10 @@ def solve_qp(
     Follows the shared QP contract for the pure-continuous case; ``bounds``
     default to ``(-inf, +inf)`` per variable.
 
+    ``certificate`` is retained for contract compatibility but no longer gates
+    anything: since #1319 the elastic Phase-1 cross-check is **mandatory** before
+    any ``INFEASIBLE`` is returned, so every infeasible exit carries its witness.
+
     Raises:
         ImportError: If POUNCE is not installed.
         ValueError: On inconsistent dimensions, or any integer-marked variable (no MIQP support).
@@ -140,8 +149,9 @@ def solve_qp(
     else:
         lb = np.full(n, -_INF, dtype=np.float64)
         ub = np.full(n, _INF, dtype=np.float64)
-    lb = np.where(lb <= -_FINITE_BOUND_THRESHOLD, -_INF, lb)
-    ub = np.where(ub >= _FINITE_BOUND_THRESHOLD, _INF, ub)
+    _bound_inf = finite_bound_threshold()
+    lb = np.where(lb <= -_bound_inf, -_INF, lb)
+    ub = np.where(ub >= _bound_inf, _INF, ub)
 
     # ---- stacked linear constraints ------------------------------------------
     A, cl, cu = _stack_constraints(A_ub, b_ub, A_eq, b_eq, n)
@@ -166,27 +176,69 @@ def solve_qp(
     result = _solve_qp_core(Q_arr, c_arr, A, cl, cu, lb, ub, x0, opts)
 
     # ---- infeasibility certificate (roadmap P0.2; same logic as lp_pounce) ---
-    # Constraints are linear, so the elastic Phase-1 LP is an exact Farkas
-    # disambiguation regardless of the quadratic objective. UNBOUNDED is included
-    # because Ipopt codes 3/4 (too-small direction / diverging iterates) cannot
-    # distinguish an unbounded QP from an infeasible one — Phase-1 settles it.
+    # Constraints are linear, so the elastic Phase-1 LP is a Farkas disambiguation
+    # regardless of the quadratic objective. UNBOUNDED is included because Ipopt
+    # codes 3/4 (too-small direction / diverging iterates) cannot distinguish an
+    # unbounded QP from an infeasible one — Phase-1 settles it.
+    #
+    # INFEASIBLE (raw Ipopt code 2) is included for the same reason ``lp_pounce``
+    # includes it: on badly-conditioned huge-magnitude-bound problems the barrier
+    # method raises code 2 from numerical failure with no real infeasibility
+    # behind it (#1309). This branch was left unconverted when the LP one was
+    # fixed, so the DEFAULT QP route still certified a false 'infeasible' on a
+    # trivially feasible model (#1319 part 2).
     if m > 0 and result.status in (
         SolveStatus.ITERATION_LIMIT,
         SolveStatus.ERROR,
         SolveStatus.UNBOUNDED,
+        SolveStatus.INFEASIBLE,
     ):
-        slacks = _phase1_min_violation(A, cl, cu, lb, ub, opts)
-        if slacks is not None and _is_infeasible_violation(slacks, cl, cu):
+        phase1 = _phase1_min_violation(A, cl, cu, lb, ub, opts)
+        verdict = (
+            _phase1_verdict(phase1.slacks, cl, cu, phase1.row_activity)
+            if phase1 is not None
+            else None
+        )
+        if verdict == PHASE1_INFEASIBLE:
+            assert phase1 is not None
             return QPResult(
                 status=SolveStatus.INFEASIBLE,
                 iterations=result.iterations,
                 wall_time=result.wall_time,
-                infeasibility_certificate=_build_certificate(slacks, n_ineq),
+                infeasibility_certificate=_build_certificate(phase1.slacks, n_ineq),
             )
-    elif certificate and result.status == SolveStatus.INFEASIBLE and m > 0:
-        slacks = _phase1_min_violation(A, cl, cu, lb, ub, opts)
-        if slacks is not None and _is_infeasible_violation(slacks, cl, cu):
-            result.infeasibility_certificate = _build_certificate(slacks, n_ineq)
+        if verdict == PHASE1_UNDECIDED:
+            # Undecided is not feasible. Falling through would let the ray check
+            # certify UNBOUNDED for what may be an INFEASIBLE QP -- the same false
+            # certificate the LP path guards against here. No second QP engine
+            # exists (#359), so ERROR is the honest outcome.
+            logger.debug(
+                "POUNCE QP Phase-1 was undecided (violation above the rhs floor "
+                "but under the row-activity roundoff floor); reporting ERROR "
+                "rather than certifying anything from it."
+            )
+            return QPResult(
+                status=SolveStatus.ERROR,
+                iterations=result.iterations,
+                wall_time=result.wall_time,
+            )
+        if result.status == SolveStatus.INFEASIBLE:
+            # POUNCE's own code-2 verdict did NOT survive the Phase-1 check, so the
+            # linear system is actually feasible and the label is a numerical
+            # failure. There is no second QP engine to degrade to, so report ERROR:
+            # ``solver._solve_qp`` turns that into an honest ``error`` rather than
+            # a certified false 'infeasible' (CLAUDE.md §1).
+            logger.debug(
+                "POUNCE QP reported INFEASIBLE (Ipopt code 2) but the elastic "
+                "Phase-1 LP found no data-significant constraint violation, so the "
+                "feasible region is nonempty; reporting ERROR rather than "
+                "certifying a false 'infeasible' (#1319)."
+            )
+            return QPResult(
+                status=SolveStatus.ERROR,
+                iterations=result.iterations,
+                wall_time=result.wall_time,
+            )
 
     # Same reasoning as the LP path (see lp_pounce._certify_unbounded_ray): Ipopt
     # codes 3/4 report a stalled or diverging iteration, not a ray, so UNBOUNDED
@@ -242,8 +294,9 @@ def solve_qp_kkt(
 
     lb = np.asarray(x_l, dtype=np.float64).ravel().copy()
     ub = np.asarray(x_u, dtype=np.float64).ravel().copy()
-    lb = np.where(lb <= -_FINITE_BOUND_THRESHOLD, -_INF, lb)
-    ub = np.where(ub >= _FINITE_BOUND_THRESHOLD, _INF, ub)
+    _bound_inf = finite_bound_threshold()
+    lb = np.where(lb <= -_bound_inf, -_INF, lb)
+    ub = np.where(ub >= _bound_inf, _INF, ub)
 
     cl = b_arr.copy()
     cu = b_arr.copy()
