@@ -33,6 +33,7 @@ from discopt._relax.problem_classifier import dense_A as _dense_A
 from discopt._relax.problem_classifier import dense_Q as _dense_Q
 
 if TYPE_CHECKING:
+    from discopt._evaluator_cache import Fingerprint as _EvaluatorFingerprint
     from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt._rust import PyTreeManager
 from discopt.constants import INFEASIBILITY_SENTINEL as _INFEASIBILITY_SENTINEL
@@ -2511,11 +2512,16 @@ class _BoundOverrideEvaluator:
         return self._lb, self._ub
 
 
-def _evaluator_fingerprint(model: Model) -> tuple:
+def _evaluator_fingerprint(model: Model) -> "_EvaluatorFingerprint":
     """Structural fingerprint of a model for evaluator-cache validity.
 
     Thin alias for the canonical :func:`nlp_evaluator.evaluator_fingerprint`; kept
     here for the existing importers (e.g. ``solvers.nlp_native``).
+
+    Returns a :class:`discopt._evaluator_cache.Fingerprint`, not the bare tuple
+    it used to be: the tuple's ``id()``s were recyclable, and a fingerprint now
+    pins the objects it identifies (#1329). It still compares and hashes as the
+    tuple did, so callers holding one in a cache key need no change.
     """
     from discopt._evaluator_cache import evaluator_fingerprint
 

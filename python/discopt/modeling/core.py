@@ -1321,7 +1321,9 @@ def _readonly_bound(
         # one the box came from.
         if var_type is VarType.BINARY:
             _refuse_bound_outside_unit_box(value, what, name, side)
-        return value
+        # `_bound_is_owned_frozen` has just established the ndarray-ness that
+        # `value: Any` cannot carry through.
+        return cast(np.ndarray, value)
 
     if value is None:
         raise ValueError(
@@ -1369,7 +1371,8 @@ def _readonly_bound(
     if var_type is not None:
         base = _validated_discrete_bound(base, var_type, _bound_context(what, name, side))
     base.flags.writeable = False
-    return np.broadcast_to(base, base.shape)
+    frozen: np.ndarray = np.broadcast_to(base, base.shape)
+    return frozen
 
 
 #: How far outside its declared domain a discrete bound may land before it is a
