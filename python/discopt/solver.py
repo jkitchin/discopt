@@ -1666,6 +1666,11 @@ def _try_native_spatial_kernel(
             if abs_gap_tolerance is None
             else min(float(gap_tolerance), float(abs_gap_tolerance))
         )
+        # ...and SAY so when the ``min`` discarded it. Declining to loosen is the
+        # safe direction, but a caller who asked for 1e6 and got 1e-4 explored
+        # the same 45 nodes as with no tolerance at all and was told nothing
+        # (#1330). #1323's rule is honoured-or-declared; this is the declaration.
+        _warn_abs_gap_not_loosened(abs_gap_tolerance, gap_tolerance)
         solve_kwargs = dict(
             max_nodes=int(max_nodes),
             gap_tol=_kernel_abs_tol,
@@ -5263,6 +5268,29 @@ def _warn_abs_gap_ignored(route: str, abs_gap_tolerance: Optional[float]) -> Non
         "may report 'feasible' for a run whose absolute gap already satisfied the "
         "request. Use gap_tolerance here, or the default branch-and-bound engine, "
         "which honours both.",
+        stacklevel=2,
+    )
+
+
+def _warn_abs_gap_not_loosened(abs_gap_tolerance: Optional[float], gap_tolerance: float) -> None:
+    """Say so when the native spatial kernel declines to LOOSEN its fathoming.
+
+    That route's ``gap_tol`` is applied absolutely, so its established absolute
+    tolerance already *is* ``gap_tolerance``; it takes ``min`` of the two, which
+    honours a tightening and drops a loosening. Dropping is the sound direction
+    -- the certificate only gets stronger -- but it is still an option that did
+    nothing, and #1323's rule admits no silent third option (#1330).
+    """
+    if abs_gap_tolerance is None or float(abs_gap_tolerance) <= float(gap_tolerance):
+        return
+    import warnings
+
+    warnings.warn(
+        f"The native spatial kernel ignores abs_gap_tolerance={abs_gap_tolerance!r} "
+        f"because it is LOOSER than gap_tolerance={gap_tolerance!r}, which this route "
+        "already applies absolutely. It converges at the tighter of the two, so the "
+        "solve explores at least as many nodes as it would with no absolute tolerance "
+        "at all. Raise gap_tolerance to loosen this route.",
         stacklevel=2,
     )
 
@@ -9304,6 +9332,10 @@ def solve_model(
                 ("max_nodes", max_nodes != 100_000),
                 ("strategy", strategy != "best_first"),
                 ("gap_tolerance", gap_tolerance != 1e-4),
+                # #1330: a route with no dual bound cannot honour EITHER gap
+                # criterion, and #1323's promise ("honoured or declared, never
+                # silently inert") covers the absolute one too.
+                ("abs_gap_tolerance", abs_gap_tolerance is not None),
             )
             if differs
         ]
@@ -9375,6 +9407,10 @@ def solve_model(
                 ("max_nodes", max_nodes != 100_000),
                 ("strategy", strategy != "best_first"),
                 ("gap_tolerance", gap_tolerance != 1e-4),
+                # #1330: a route with no dual bound cannot honour EITHER gap
+                # criterion, and #1323's promise ("honoured or declared, never
+                # silently inert") covers the absolute one too.
+                ("abs_gap_tolerance", abs_gap_tolerance is not None),
             )
             if differs
         ]
@@ -9828,6 +9864,12 @@ def solve_model(
         ):
             if key in kwargs:
                 mip_nlp_kwargs[key] = kwargs.pop(key)
+
+        # #1330: this deprecated route reaches ``solve_mip_nlp`` directly, which
+        # takes ``gap_tolerance`` and nothing else -- exactly the GDPopt-LOA
+        # route's situation below, and it was the one route in the family with
+        # no declaration.
+        _warn_abs_gap_ignored("gdp_method='oa' (MINLP outer approximation)", abs_gap_tolerance)
 
         model = reformulate_gdp(model, method="big-m")
 

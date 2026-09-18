@@ -114,7 +114,12 @@ from typing import Callable, Optional
 import numpy as np
 
 from discopt.modeling.core import Model, SolveResult
-from discopt.solvers._dfo_common import build_oracle, glce_merit, glce_merit_scalar
+from discopt.solvers._dfo_common import (
+    build_oracle,
+    glce_merit,
+    glce_merit_scalar,
+    reported_objective,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1147,7 +1152,9 @@ def solve_direct(
     assert best_value is not None  # the no-incumbent case returned above
     return SolveResult(
         status=status,
-        objective=float(best_value),
+        # The search minimises the oracle, which is ``-f`` for a maximize model;
+        # the reported objective is the USER's objective at ``x`` (#1330).
+        objective=reported_objective(model, best_value),
         bound=None,
         gap=None,
         x=_unpack_solution(model, np.asarray(search.best_feasible_point, dtype=np.float64)),

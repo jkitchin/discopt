@@ -365,6 +365,24 @@ The release procedure that produces these entries is documented in
   hashing, so `x.lb = -0.0` after a solve at `0.0` no longer makes
   `sensitivity()` report a DIFFERENT problem and drop a live reference.
 
+- **#1330 (correctness): `solver='direct'` and `solver='surrogate'` reported the
+  wrong objective sign on a `maximize` model, and four routes still dropped
+  `abs_gap_tolerance` in silence.** Every evaluator in discopt minimizes, so a
+  `maximize` model is handed `-f` internally; both derivative-free backends
+  returned that internal value verbatim, reporting `objective = -5.0` at the
+  point where the user's objective is `+5.0`. Both now map the value back
+  through `objective_sense_sign` (the one definition of the flip, per #1299) in
+  a helper that sits next to the oracle that applies it. Separately, #1323's
+  rule — `abs_gap_tolerance` is honoured or declared, never silently inert — now
+  covers the last four routes: `solver='direct'` and `solver='surrogate'` list
+  it alongside the `gap_tolerance` they already declared (neither has a dual
+  bound, so neither criterion can be met); the deprecated `gdp_method='oa'`
+  route warns like its `gdp_method='loa'` neighbour; and the native Rust spatial
+  kernel, which takes `min(gap_tolerance, abs_gap_tolerance)` and so declines to
+  LOOSEN, now says so when the `min` discarded the caller's value. The kernel's
+  refusal to loosen is unchanged — it is the sound direction — and a *tighter*
+  absolute tolerance is still honoured silently.
+
 - **Four defects found by adversarially testing last week's feature PRs**
   (#1309, #1310, #1311, #1312).
 
