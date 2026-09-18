@@ -202,3 +202,36 @@ def test_no_time_limit_never_downgrades(sf_fn):
     assert out.stats.get("milp/root_check_skipped") is None
     assert out.stats.get("milp/root_check_inconclusive") is None
     assert out.gap_certified
+
+
+# ── accepted cost of the decertify rule ───────────────────────────────────
+
+
+def test_integral_infeasibility_under_an_unbounded_root_lp_is_not_certified():
+    """Round-4 review, finding 3. Pinned as an accepted trade, not an oversight.
+
+    ``2x == 1`` with ``x`` integer has no solution, but the infeasibility is
+    purely INTEGRAL: the root LP relaxation is perfectly happy at ``x = 0.5``,
+    and here it is even unbounded (``min -y`` with ``y in [0, 1e20]``). So the
+    NS-safe root cross-check comes back ``unbounded`` -- it settles nothing about
+    the MILP's infeasibility -- and the decertify rule refuses to pass HiGHS's
+    raw ``kInfeasible`` through as a certificate.
+
+    ``main`` reports ``infeasible`` here, and is right. It gets there by trusting
+    the tree label unchecked, which is what #1295/#1320 exist to stop; this route
+    reports ``error`` instead. The gap is real and worth closing -- an unbounded
+    root LP plus ``kInfeasible`` says the conflict must be integral, which could
+    be decided directly -- but doing it by trusting the label is not the way.
+    """
+    m = dm.Model("integral_infeasible_unbounded_root")
+    x = m.integer("x", lb=0, ub=5)
+    m.subject_to(2 * x == 1)
+    y = m.continuous("y", lb=0, ub=1e20)
+    m.minimize(-y)
+    r = m.solve(time_limit=60)
+    # The §1 line: never a WRONG certified status.
+    assert r.status != "optimal"
+    assert r.status != "unbounded"
+    assert r.status in ("infeasible", "error")
+    if r.status == "error":
+        assert not r.gap_certified
