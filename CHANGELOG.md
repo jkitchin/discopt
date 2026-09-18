@@ -383,6 +383,21 @@ The release procedure that produces these entries is documented in
   refusal to loosen is unchanged — it is the sound direction — and a *tighter*
   absolute tolerance is still honoured silently.
 
+- **#1331 (correctness): a MILP/MIQP exit certified an objective its own `x`
+  does not achieve.** `_solve_milp_bb` stored the objective its *node
+  relaxation* reported, then integer-snapped the returned point (the C-3 snap)
+  and reported the stale value. The snap moves the objective by
+  `sum_j |c_j| |dx_j|`, so a 14-variable integer knapsack came back `optimal`
+  with `objective = bound = 180.0000462` and `gap_certified=True` at a point
+  achieving exactly 180 — an incumbent value no point attains, and one *better*
+  than the true optimum, overstated by about 4.6e4 times the requested absolute
+  tolerance. Reproduced on 4 of 5 random instances in this family. Both exits
+  now recompute the objective from the snapped, feasibility-verified point they
+  return; when that recomputation makes the value worse, the convergence test is
+  re-run against the honest (incumbent, bound) pair before `optimal` is granted,
+  because the tree had fathomed against a cutoff nothing attains. `_solve_miqp_bb`
+  had the identical exit and gets the identical fix.
+
 - **Four defects found by adversarially testing last week's feature PRs**
   (#1309, #1310, #1311, #1312).
 
