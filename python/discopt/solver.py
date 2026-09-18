@@ -21066,9 +21066,10 @@ def _solve_lp_gurobi(
         solve_fn,
         "Gurobi",
         strict=True,
-        # Gurobi's infinity is 1e30, so it honors a declared [1e15, 1e20) bound as
-        # finite — the #850 deferral never applies and no _DeferredUnbounded can
-        # come back here.
+        # The Gurobi wrapper maps only discopt's |b| >= 1e20 sentinel to
+        # GRB.INFINITY (1e100) and hands Gurobi a declared [1e15, 1e20) bound as
+        # finite (#1328, verified against gurobipy 13.0.0), so the #850 deferral
+        # never applies and no _DeferredUnbounded can come back here.
         relaxes_huge_bounds=False,
     )
     if result is None:  # pragma: no cover - strict mode raises before this
@@ -21098,7 +21099,8 @@ def _solve_lp_matrix(
     interior-point engine does this (``lp_pounce._FINITE_BOUND_THRESHOLD = 1e15``);
     see the ``SolveStatus.UNBOUNDED`` branch below. Leave it ``False`` for a
     backend that honors the declared box (the exact simplex, whose infinity
-    threshold is ``1e20``; Gurobi, whose infinity is ``1e30``) — discarding *its*
+    threshold is ``1e20``; Gurobi, whose wrapper passes such a bound through as
+    finite — #1328) — discarding *its*
     verdict would throw away a certificate about the box actually declared.
     """
     from discopt._relax.problem_classifier import extract_lp_data
