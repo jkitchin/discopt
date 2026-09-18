@@ -21771,7 +21771,8 @@ def _matrix_row_threshold(A, row_scale, tol: float, rtol: float) -> np.ndarray:
     an allowance. Passing it would restore the 2e6 this function exists to remove.
     """
     grad_inf = np.abs(np.asarray(A, dtype=np.float64)).max(axis=1)
-    return np.minimum(tol + rtol * row_scale, _feas_distance_cap(grad_inf))
+    capped = np.minimum(tol + rtol * row_scale, _feas_distance_cap(grad_inf))
+    return np.asarray(capped, dtype=np.float64)
 
 
 def _any_row_truly_violated(A, x, b, rows, thresh, *, signed: bool) -> bool:
