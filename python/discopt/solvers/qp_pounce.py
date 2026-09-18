@@ -37,7 +37,6 @@ import scipy.sparse as sp
 from discopt import _timing
 from discopt.solvers import QPResult, SolveStatus, pounce_option_defaults
 from discopt.solvers.lp_pounce import (
-    _FINITE_BOUND_THRESHOLD,
     _INF,
     _LP_STATUS_MAP,
     POUNCE_AVAILABLE,
@@ -48,6 +47,7 @@ from discopt.solvers.lp_pounce import (
     _is_infeasible_violation,
     _phase1_min_violation,
     _stack_constraints,
+    finite_bound_threshold,
 )
 
 logger = logging.getLogger(__name__)
@@ -147,8 +147,9 @@ def solve_qp(
     else:
         lb = np.full(n, -_INF, dtype=np.float64)
         ub = np.full(n, _INF, dtype=np.float64)
-    lb = np.where(lb <= -_FINITE_BOUND_THRESHOLD, -_INF, lb)
-    ub = np.where(ub >= _FINITE_BOUND_THRESHOLD, _INF, ub)
+    _bound_inf = finite_bound_threshold()
+    lb = np.where(lb <= -_bound_inf, -_INF, lb)
+    ub = np.where(ub >= _bound_inf, _INF, ub)
 
     # ---- stacked linear constraints ------------------------------------------
     A, cl, cu = _stack_constraints(A_ub, b_ub, A_eq, b_eq, n)
@@ -272,8 +273,9 @@ def solve_qp_kkt(
 
     lb = np.asarray(x_l, dtype=np.float64).ravel().copy()
     ub = np.asarray(x_u, dtype=np.float64).ravel().copy()
-    lb = np.where(lb <= -_FINITE_BOUND_THRESHOLD, -_INF, lb)
-    ub = np.where(ub >= _FINITE_BOUND_THRESHOLD, _INF, ub)
+    _bound_inf = finite_bound_threshold()
+    lb = np.where(lb <= -_bound_inf, -_INF, lb)
+    ub = np.where(ub >= _bound_inf, _INF, ub)
 
     cl = b_arr.copy()
     cu = b_arr.copy()

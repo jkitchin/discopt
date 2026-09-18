@@ -16,6 +16,7 @@ below expose exactly that to POUNCE.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Any, List, NamedTuple, Optional, Tuple, Union, cast
 
@@ -43,7 +44,53 @@ except ImportError:
 # also emits ~1e20 for unbounded variables, so anything past the "very large"
 # threshold is mapped to a single sentinel infinity here.
 _INF = 1e20
-_FINITE_BOUND_THRESHOLD = 1e15
+
+# |bound| at or beyond which a declared finite bound is handed to POUNCE as the
+# infinity sentinel instead of as itself.
+#
+# ``_POUNCE_BOUND_INF`` is POUNCE's OWN threshold: Ipopt's ``nlp_lower_bound_inf``
+# / ``nlp_upper_bound_inf`` default to ∓1e19, and a bound at or beyond that is
+# what the engine itself calls infinite. Measured (#1319): on
+# ``min (w-0.5)² + y`` over ``y ∈ [-L, 0]`` POUNCE returns the exact analytic
+# optimum ``-L`` for every L up to 9.9e18 and flips to UNBOUNDED at exactly 1e19.
+#
+# ``_LEGACY_BOUND_THRESHOLD`` is the pre-#1319 value, four orders of magnitude
+# more conservative than the engine requires. Every false status in #1319 lives in
+# the [1e15, 1e19) window it needlessly discarded: because the bound never reached
+# POUNCE, the box it solved was strictly LARGER than the declared one, so a
+# bounded QP came back ``unbounded`` and a feasible LP came back ``infeasible``.
+# This also falsifies the premise recorded at #850 Obs 1 — that the barrier
+# "cannot condition so huge a finite bound" — for the whole [1e15, 1e19) range;
+# the relaxation was never a conditioning requirement there, it was a guess.
+#
+# Honoring the declared box is the sound direction (a bound is a constraint;
+# discarding it enlarges the feasible set), but it is bound-CHANGING under
+# CLAUDE.md §5 — every node relaxation over a variable in this window now solves a
+# tighter box — so it ships behind this flag with the legacy path intact.
+_POUNCE_BOUND_INF = 1e19
+_LEGACY_BOUND_THRESHOLD = 1e15
+
+
+def finite_bound_threshold() -> float:
+    """``|bound|`` at or beyond which POUNCE is handed its infinity sentinel.
+
+    ``DISCOPT_POUNCE_DECLARED_BOX=1`` honors the declared box up to POUNCE's own
+    1e19 infinity; unset/``0`` keeps the legacy 1e15 (#1319).
+
+    **Default-OFF pending the §5 graduation gate.** The flag is bound-changing, so
+    it stays off until the corpus-wide differential panel
+    (``scripts/pounce_declared_box_panel.py``) comes back BOTH cert-clean and
+    net-positive; graduating it means flipping this default while keeping the
+    ``=0`` opt-out and the legacy path intact. Correctness does not wait on that
+    vote: the #1319 cross-checks (Phase-1 row activity, the QP code-2 check, the
+    #850 unbounded guard) hold on BOTH settings, so the flag decides whether the
+    right answer is recovered, never whether a wrong one can be certified.
+    """
+    if os.environ.get("DISCOPT_POUNCE_DECLARED_BOX", "0").strip().lower() in ("1", "true", "on"):
+        return _POUNCE_BOUND_INF
+    return _LEGACY_BOUND_THRESHOLD
+
+
 # Above this total constraint violation, the elastic Phase-1 LP certifies the
 # original LP infeasible (roadmap P0.2).
 _FEAS_TOL = 1e-6
@@ -485,8 +532,9 @@ def solve_lp(
     else:
         lb = np.zeros(n, dtype=np.float64)
         ub = np.full(n, _INF, dtype=np.float64)
-    lb = np.where(lb <= -_FINITE_BOUND_THRESHOLD, -_INF, lb)
-    ub = np.where(ub >= _FINITE_BOUND_THRESHOLD, _INF, ub)
+    _bound_inf = finite_bound_threshold()
+    lb = np.where(lb <= -_bound_inf, -_INF, lb)
+    ub = np.where(ub >= _bound_inf, _INF, ub)
     lb, ub = _snap_inverted_bounds(lb, ub)
 
     # ---- stacked linear constraints -----------------------------------------
@@ -609,8 +657,9 @@ def solve_lp_kkt(
 
     lb = np.asarray(x_l, dtype=np.float64).ravel().copy()
     ub = np.asarray(x_u, dtype=np.float64).ravel().copy()
-    lb = np.where(lb <= -_FINITE_BOUND_THRESHOLD, -_INF, lb)
-    ub = np.where(ub >= _FINITE_BOUND_THRESHOLD, _INF, ub)
+    _bound_inf = finite_bound_threshold()
+    lb = np.where(lb <= -_bound_inf, -_INF, lb)
+    ub = np.where(ub >= _bound_inf, _INF, ub)
     lb, ub = _snap_inverted_bounds(lb, ub)
 
     cl = b_arr.copy()
@@ -698,12 +747,14 @@ def _is_infeasible_violation(
     total = float(arr.sum())
     m = int(arr.size)
     # Use only genuinely finite RHS entries for the scale — the ±_INF sentinel
-    # (1e20) is "finite" to np.isfinite and would blow the scale up.
+    # (1e20) is "finite" to np.isfinite and would blow the scale up. The cutoff is
+    # POUNCE's own infinity (1e19), not the flag-dependent box threshold: this asks
+    # "is this entry the sentinel?", which does not move with
+    # ``DISCOPT_POUNCE_DECLARED_BOX``.
+    _sentinel = _POUNCE_BOUND_INF
     cl = np.asarray(cl, dtype=np.float64).ravel()
     cu = np.asarray(cu, dtype=np.float64).ravel()
-    finite = np.concatenate(
-        [cl[np.abs(cl) < _FINITE_BOUND_THRESHOLD], cu[np.abs(cu) < _FINITE_BOUND_THRESHOLD]]
-    )
+    finite = np.concatenate([cl[np.abs(cl) < _sentinel], cu[np.abs(cu) < _sentinel]])
     rhs_scale = 1.0 + (float(np.max(np.abs(finite))) if finite.size else 0.0)
     rhs_term = _FEAS_TOL * max(1.0, float(m)) * rhs_scale
     # ``total`` is a sum over rows, so the noise floor is summed over rows too.

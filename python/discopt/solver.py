@@ -21175,20 +21175,28 @@ def _solve_lp_matrix(
 
 
 def _declared_box_relaxed_to_ipm_inf(bounds) -> bool:
-    """True if any declared bound magnitude is in ``[1e15, 1e20)``.
+    """True if any declared bound magnitude falls in the IPM's relaxation window.
 
     Such a bound is finite to the exact simplex (whose infinity threshold is
-    ``1e20``) but is relaxed to ``±infinity`` by the interior-point LP engine
-    (``lp_pounce._FINITE_BOUND_THRESHOLD = 1e15``). It is exactly this window
-    that makes the two engines disagree on whether the problem is bounded
-    (issue #850 Obs 1). A bound at or beyond ``1e20`` (or ``±inf``) is genuinely
-    infinite for both engines and is not counted; a bound below ``1e15`` is
-    finite for both.
+    ``1e20``) but is relaxed to ``±infinity`` by the interior-point engine. It is
+    exactly this window that makes the two engines disagree on whether the problem
+    is bounded (issue #850 Obs 1). A bound at or beyond ``1e20`` (or ``±inf``) is
+    genuinely infinite for both engines and is not counted.
+
+    The window's lower edge is the IPM's live threshold, not a literal: with
+    ``DISCOPT_POUNCE_DECLARED_BOX`` on (the default since #1319) the IPM honors a
+    declared bound up to POUNCE's own ``1e19`` infinity, so the window narrows to
+    ``[1e19, 1e20)`` and the guard stops firing on the four orders of magnitude
+    the engine was always able to handle. ``=0`` restores ``[1e15, 1e20)``.
+    Reading it live keeps the guard and the marshaling from drifting apart — a
+    hardcoded ``1e15`` here would defer verdicts the IPM no longer relaxes.
     """
     if not bounds:
         return False
+    from discopt.solvers.lp_pounce import finite_bound_threshold
+
     arr = np.abs(np.asarray([(lo, hi) for lo, hi in bounds], dtype=np.float64))
-    return bool(np.any((arr >= 1e15) & (arr < 1e20)))
+    return bool(np.any((arr >= finite_bound_threshold()) & (arr < 1e20)))
 
 
 def _solve_qp(model: Model, t_start: float, prefer_pounce: bool = False) -> SolveResult:

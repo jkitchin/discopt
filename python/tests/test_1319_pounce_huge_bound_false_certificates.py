@@ -62,20 +62,69 @@ def _pinch_model(L: float) -> dm.Model:
     return m
 
 
+@pytest.mark.parametrize("declared_box", ["1", "0"])
 @pytest.mark.parametrize("L", [9e14, 2e15, 5e15])
-def test_huge_bound_lp_is_not_certified_infeasible(monkeypatch, L):
+def test_huge_bound_lp_is_not_certified_infeasible(monkeypatch, L, declared_box):
     """The repro: a feasible LP over ~1e15 bounds came back certified infeasible.
 
-    ``(L + 1, L)`` is exactly feasible, so ``infeasible`` is simply wrong. The
-    Phase-1 threshold now accounts for the row activity, POUNCE's unconfirmed
-    code 2 degrades to ``error``, and the exact simplex -- which honors the
-    declared box -- supplies the certificate.
+    ``(L + 1, L)`` is exactly feasible, so ``infeasible`` is simply wrong. Run on
+    BOTH box thresholds: the Phase-1 row-activity fix is what holds this line, and
+    it must hold whether or not ``DISCOPT_POUNCE_DECLARED_BOX`` is engaged -- the
+    §1 guarantee cannot be contingent on a performance flag.
     """
     monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
+    monkeypatch.setenv("DISCOPT_POUNCE_DECLARED_BOX", declared_box)
     r = _pinch_model(L).solve()
     assert r.status != "infeasible", "certified a false 'infeasible' on a feasible LP"
     assert r.status == "optimal"
     assert r.objective == pytest.approx(6 * L - 1, rel=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# 1b. The declared-box threshold itself
+# ---------------------------------------------------------------------------
+
+
+def test_declared_box_threshold_matches_pounce_own_infinity(monkeypatch):
+    """The threshold is POUNCE's documented limit, not a discopt guess.
+
+    Ipopt's ``nlp_{lower,upper}_bound_inf`` default to ∓1e19, and #1319 measured
+    POUNCE returning the exact optimum up to 9.9e18 and flipping to UNBOUNDED at
+    exactly 1e19. ``=0`` restores the legacy 1e15.
+    """
+    from discopt.solvers.lp_pounce import (
+        _LEGACY_BOUND_THRESHOLD,
+        _POUNCE_BOUND_INF,
+        finite_bound_threshold,
+    )
+
+    assert _POUNCE_BOUND_INF == 1e19
+    assert _LEGACY_BOUND_THRESHOLD == 1e15
+
+    # Default-OFF pending the §5 graduation gate; flip this assertion together
+    # with the default when the differential panel graduates the flag.
+    monkeypatch.delenv("DISCOPT_POUNCE_DECLARED_BOX", raising=False)
+    assert finite_bound_threshold() == _LEGACY_BOUND_THRESHOLD, (
+        "default must be OFF until the §5 panel graduates the flag"
+    )
+    monkeypatch.setenv("DISCOPT_POUNCE_DECLARED_BOX", "0")
+    assert finite_bound_threshold() == _LEGACY_BOUND_THRESHOLD, "=0 must opt out"
+    monkeypatch.setenv("DISCOPT_POUNCE_DECLARED_BOX", "1")
+    assert finite_bound_threshold() == _POUNCE_BOUND_INF
+
+
+def test_declared_box_window_tracks_the_live_threshold(monkeypatch):
+    """The #850 deferral window and the box marshaling must not drift apart: a
+    hardcoded 1e15 in the guard would defer verdicts the IPM no longer relaxes."""
+    from discopt.solver import _declared_box_relaxed_to_ipm_inf
+
+    box = [(0.0, 1.0), (-1e16, 0.0)]  # 1e16 is inside the legacy window only
+    monkeypatch.setenv("DISCOPT_POUNCE_DECLARED_BOX", "0")
+    assert _declared_box_relaxed_to_ipm_inf(box) is True
+    monkeypatch.setenv("DISCOPT_POUNCE_DECLARED_BOX", "1")
+    assert _declared_box_relaxed_to_ipm_inf(box) is False
+    # A bound at/above POUNCE's own infinity is relaxed under either setting.
+    assert _declared_box_relaxed_to_ipm_inf([(0.0, 1.0), (-5e19, 0.0)]) is True
 
 
 def test_phase1_roundoff_is_not_read_as_a_violation():
@@ -134,10 +183,9 @@ def test_no_phase1_point_means_no_certificate():
 # ---------------------------------------------------------------------------
 
 
-def test_huge_bound_qp_is_not_certified_infeasible():
-    """The default (no env var) QP route certified ``infeasible`` on a model with
-    an exact feasible witness: v0=-0.375, v1=5e15, v3=-5e15, w=0.5 gives a row
-    value of exactly -2.0 >= -2."""
+def _witness_qp_model() -> dm.Model:
+    """The #1319 part-2 model. Exact feasible witness: v0=-0.375, v1=5e15,
+    v3=-5e15, w=0.5 gives a row value of exactly -2.0 >= -2, objective 1.5e16."""
     m = dm.Model("q")
     m.continuous("v0", lb=-1e16, ub=1e16)
     m.continuous("v1", lb=5e15, ub=2e18)
@@ -146,17 +194,41 @@ def test_huge_bound_qp_is_not_certified_infeasible():
     v0, v1, v3, w = m._variables
     m.subject_to(5 * v0 - v1 - v3 >= -2)
     m.minimize(5 * v1 + 2 * v3 + (w - 0.5) ** 2)
-
-    r = m.solve()
-    assert r.status != "infeasible", "certified a false 'infeasible' on a feasible QP"
-    assert not (r.status == "infeasible" and r.gap_certified)
+    return m
 
 
-def test_solve_qp_code2_not_confirmed_by_phase1_reports_error():
-    """Unit-level counterpart: called directly, the same system must not come back
-    ``INFEASIBLE``. There is no second QP engine to degrade to (#359), so the
-    honest status is ``ERROR`` -- CLAUDE.md §1 takes that over a false certificate.
+def test_huge_bound_qp_is_not_certified_infeasible(monkeypatch):
+    """The QP route certified ``infeasible`` on this feasible model.
+
+    With the declared box honored it is solved outright to the witness objective
+    5*5e15 + 2*(-5e15) + 0 = 1.5e16.
     """
+    monkeypatch.setenv("DISCOPT_POUNCE_DECLARED_BOX", "1")
+    r = _witness_qp_model().solve()
+    assert r.status != "infeasible", "certified a false 'infeasible' on a feasible QP"
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(1.5e16, rel=1e-9)
+
+
+def test_huge_bound_qp_never_certifies_infeasible_with_the_legacy_box(monkeypatch):
+    """Opt-out arm: with ``DISCOPT_POUNCE_DECLARED_BOX=0`` the IPM goes back to
+    discarding the bound, so POUNCE still raises its numerical code 2 -- but the
+    code-2 cross-check must keep that from becoming a certificate. The honest
+    outcome is ``error`` (there is no second QP engine to degrade to, #359).
+
+    This is the guard that holds the §1 line independently of the flag.
+    """
+    monkeypatch.setenv("DISCOPT_POUNCE_DECLARED_BOX", "0")
+    r = _witness_qp_model().solve()
+    assert r.status != "infeasible", "certified a false 'infeasible' on a feasible QP"
+    assert not r.gap_certified
+
+
+def test_solve_qp_code2_not_confirmed_by_phase1_reports_error(monkeypatch):
+    """Unit-level counterpart on the legacy box: called directly, the same system
+    must not come back ``INFEASIBLE`` -- CLAUDE.md §1 takes ``ERROR`` over a false
+    certificate."""
+    monkeypatch.setenv("DISCOPT_POUNCE_DECLARED_BOX", "0")
     n = 4
     Q = np.zeros((n, n))
     Q[3, 3] = 2.0
@@ -203,24 +275,48 @@ def _bounded_qp_model(L: float) -> dm.Model:
     return m
 
 
-def test_bounded_qp_over_huge_bounds_is_not_reported_unbounded():
-    """A QP bounded below by its declared box must never come back ``unbounded``.
+@pytest.mark.parametrize("L", [1e15, 1e16, 1e18])
+def test_bounded_qp_over_huge_bounds_solves_to_its_analytic_optimum(monkeypatch, L):
+    """A QP bounded below by its declared box came back ``unbounded``.
 
-    The IPM relaxed ``y >= -1e15`` to its own infinity, so its verdict describes a
-    larger box than the declared one. With no second QP engine to defer to, the
-    guard reports ``error`` -- honest, and not a certificate about a box nobody
-    posed.
+    POUNCE honors a finite bound up to its own 1e19 infinity, so the declared box
+    reaches it and the analytic optimum ``-L`` is recovered across the whole window
+    the legacy 1e15 threshold used to discard.
     """
-    with pytest.warns(RuntimeWarning, match=r"\[1e15, 1e20\)"):
+    monkeypatch.setenv("DISCOPT_POUNCE_DECLARED_BOX", "1")
+    r = _bounded_qp_model(L).solve()
+    assert r.status != "unbounded", f"reported 'unbounded' for a QP bounded below by -{L:g}"
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(-L, rel=1e-9)
+
+
+def test_bounded_qp_is_never_reported_unbounded_with_the_legacy_box(monkeypatch):
+    """Opt-out arm: on the legacy 1e15 box the IPM still discards ``y >= -1e15``,
+    so its verdict describes a larger box than the declared one. The #850/#1319
+    guard must refuse to certify it -- ``error``, not ``unbounded``."""
+    monkeypatch.setenv("DISCOPT_POUNCE_DECLARED_BOX", "0")
+    with pytest.warns(RuntimeWarning, match=r"relaxed a declared"):
         r = _bounded_qp_model(1e15).solve()
     assert r.status != "unbounded", "reported 'unbounded' for a QP bounded below by -1e15"
     assert r.status == "error"
 
 
 def test_qp_below_the_relaxation_window_is_unaffected():
-    """Regression fence: the guard keys on the ``[1e15, 1e20)`` window only, so the
-    same QP one order smaller still solves to its analytic optimum."""
+    """Regression fence: a box well below either threshold is untouched by both."""
     L = 9e14
     r = _bounded_qp_model(L).solve()
     assert r.status == "optimal"
     assert r.objective == pytest.approx(-L, rel=1e-9)
+
+
+def test_bound_beyond_pounce_infinity_is_still_relaxed(monkeypatch):
+    """The upper fence: at/above POUNCE's own 1e19 infinity the bound genuinely is
+    infinite to the engine, so the guard must still decline to certify rather than
+    trusting a verdict about a box POUNCE could not see."""
+    from discopt.solvers.lp_pounce import _POUNCE_BOUND_INF, finite_bound_threshold
+
+    monkeypatch.setenv("DISCOPT_POUNCE_DECLARED_BOX", "1")
+    assert finite_bound_threshold() == _POUNCE_BOUND_INF == 1e19
+    with pytest.warns(RuntimeWarning, match=r"relaxed a declared"):
+        r = _bounded_qp_model(5e19).solve()
+    assert r.status != "unbounded"
