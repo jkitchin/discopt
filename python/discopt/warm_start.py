@@ -385,6 +385,85 @@ def complete_initial_point(model: Model, x_head, *, evaluator=None):
     return repaired
 
 
+def prepare_warm_start(model: Model, x0, *, route: str, evaluator=None):
+    """Make a warm start usable by *model*, or drop it. Never raises.
+
+    #1324 set the contract that a warm start is a HINT: it may fail to help, it
+    may be ignored, but it must never be able to fail a solve that succeeds
+    without it. #1334 found two routes that still broke it, and they break it in
+    two different ways, so this is the one place that answers both:
+
+    * **Width.** Solve-time reformulations APPEND columns (the GDP pass lowers a
+      disjunction into selector binaries; the factorable lift adds monomial
+      auxiliaries), and the point was flattened against the variables the *user*
+      declared. Three routes already completed it inline and three did not --
+      ``solver="amp"`` raised ``AMP initial_point has length 1; expected 3`` and
+      ``solver="mip-nlp"`` raised ``NLP initial point has shape (1,); expected
+      (3,)`` on a GDP model that solves fine with no warm start at all.
+    * **Finiteness.** A NaN reaches here from ``primal_point_from_result``
+      whenever the previous solve left one in a column (``np.clip`` passes NaN
+      through), and the NLP-BB injection block rounds before it checks anything:
+      ``round(nan)`` raises ``ValueError: cannot convert float NaN to integer``
+      out of the middle of the solve. Filter first, round later.
+
+    Returns a finite ``float64`` vector of exactly ``model``'s column count, or
+    ``None`` when the point cannot describe this model -- in which case the
+    caller simply solves without it. Purely primal and never trusted either way:
+    every injection site re-checks the point against the model's own feasibility
+    gate before it may seed anything.
+
+    Parameters
+    ----------
+    model : Model
+        The model as the route will actually solve it, i.e. AFTER any
+        reformulation pass that may have appended columns.
+    x0 : array-like or None
+        The candidate warm start. ``None`` passes straight through.
+    route : str
+        Human-readable route name for the log line, so a dropped warm start says
+        which path dropped it (``"AMP"``, ``"MIP-NLP"``, ``"NLP-BB"``, ...).
+    evaluator : optional
+        Constraint evaluator, used to repair reform-added discrete columns.
+    """
+    if x0 is None:
+        return None
+
+    x = np.asarray(x0, dtype=np.float64).ravel()
+
+    if not np.all(np.isfinite(x)):
+        logger.warning(
+            "%s warm start dropped: the initial point has %d non-finite value(s). "
+            "The solve continues without it.",
+            route,
+            int(np.count_nonzero(~np.isfinite(x))),
+        )
+        return None
+
+    n_cols = _flat_size(model)
+    if x.size == n_cols:
+        return x
+
+    completed = complete_initial_point(model, x, evaluator=evaluator)
+    if completed is None:
+        logger.warning(
+            "%s warm start dropped: the initial solution covers %d columns and the "
+            "model the solver built has %d (a reformulation added variables). "
+            "The solve continues without it.",
+            route,
+            int(x.size),
+            n_cols,
+        )
+        return None
+
+    logger.info(
+        "%s warm start extended from %d to %d columns across a solve-time reformulation",
+        route,
+        int(x.size),
+        n_cols,
+    )
+    return completed
+
+
 def _repair_discrete(model: Model, x: np.ndarray, cols: list[int], evaluator):
     """Best-neighbour search on total constraint violation over *cols*.
 
@@ -497,6 +576,12 @@ def primal_point_from_result(
     one was accepted as a certified optimum whose value is unreachable inside the
     real feasible region. ``clamp=False`` returns the raw point for a caller that
     means to inspect it rather than solve from it.
+
+    #1334: NaN gets the same treatment, one step earlier. ``np.clip`` passes NaN
+    through -- every comparison against it is False -- so a NaN column survived
+    the #1316 clamp untouched and crashed the NLP-BB injection block on
+    ``round()``. A NaN says the previous solve did not determine that variable,
+    so it starts from the default a variable nobody supplied gets.
     """
     if getattr(result, "x", None) is None:
         raise ValueError(
@@ -507,6 +592,8 @@ def primal_point_from_result(
     chunks: list[np.ndarray] = []
     n_clamped = 0
     clamped_names: list[str] = []
+    n_nan = 0
+    nan_names: list[str] = []
     for v in model._variables:
         if v.name not in x_by_name:
             raise ValueError(
@@ -522,6 +609,23 @@ def primal_point_from_result(
         if clamp:
             lb_flat = np.asarray(v.lb, dtype=np.float64).ravel()
             ub_flat = np.asarray(v.ub, dtype=np.float64).ravel()
+            # #1334: NaN must be handled BEFORE the clamp, because ``np.clip``
+            # passes it through -- every comparison against NaN is False, so it
+            # survives both the out-of-bounds test and the clip and reaches the
+            # injection sites, where NLP-BB's ``round(x[j])`` raised ``ValueError:
+            # cannot convert float NaN to integer`` out of the middle of a solve.
+            # (``±inf`` needs nothing extra: it IS outside the bounds, so the
+            # clamp below already lands it on the bound.) A NaN column carries no
+            # information about where to start, which is exactly the state of a
+            # variable the caller never supplied, so it gets the same value
+            # ``validate_initial_solution`` gives that variable -- and the point
+            # is a hint either way, re-checked against the model's feasibility
+            # gate before it may seed anything.
+            nan_mask = np.isnan(arr)
+            if np.any(nan_mask):
+                n_nan += int(np.count_nonzero(nan_mask))
+                nan_names.append(v.name)
+                arr = np.where(nan_mask, _tail_default(v), arr)
             outside = int(
                 np.count_nonzero((arr < lb_flat - tol_bounds) | (arr > ub_flat + tol_bounds))
             )
@@ -536,6 +640,14 @@ def primal_point_from_result(
             f"model's current bounds ({', '.join(clamped_names)}); clamping to [lb, ub]. "
             "A bound changed between the two solves, so the previous point is no longer "
             "feasible here.",
+            stacklevel=3,
+        )
+    if n_nan:
+        warnings.warn(
+            f"warm start: {n_nan} value(s) from the previous solve are NaN "
+            f"({', '.join(nan_names)}); starting those variables from the default "
+            "the solver uses for a variable nobody supplied. The previous result "
+            "did not determine them.",
             stacklevel=3,
         )
     if not chunks:

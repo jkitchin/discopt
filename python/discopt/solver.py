@@ -9070,6 +9070,19 @@ def solve_model(
         _pre_route_model = model
         model = reformulate_gdp(model, method=resolved_gdp_method)
 
+        # #1334: the lowering appends a selector binary per disjunct, and the warm
+        # start was flattened against the variables the USER declared -- so
+        # ``solve_mip_nlp`` got a short vector and raised ``NLP initial point has
+        # shape (1,); expected (3,)`` out of a GDP model that solves fine with no
+        # warm start at all. Complete it against the model this route will solve.
+        # Into a LOCAL name, never over ``initial_point``: when the auto-route does
+        # not certify, line ~9213 restores ``_pre_route_model`` and hands the rest
+        # of the budget to the default path, which must see the caller's own point
+        # and complete it against its own reformulation.
+        from discopt.warm_start import prepare_warm_start as _prepare_warm_start
+
+        _mip_nlp_x0 = _prepare_warm_start(model, initial_point, route="MIP-NLP")
+
         # An EXPLICIT solver="mip-nlp" gets the whole budget: the caller chose the
         # algorithm and there is no fallback to reserve for. Only the auto-route
         # is budgeted.
@@ -9105,7 +9118,7 @@ def solve_model(
                 gap_tolerance=gap_tolerance,
                 max_iterations=max_nodes,
                 nlp_solver=nlp_solver,
-                initial_point=initial_point,
+                initial_point=_mip_nlp_x0,
                 **mip_nlp_kwargs,
             )
         except Exception as _route_exc:  # noqa: BLE001 - see below
@@ -9436,9 +9449,6 @@ def solve_model(
         for key in amp_option_keys:
             if key in kwargs:
                 amp_kwargs[key] = kwargs.pop(key)
-        if initial_point is not None:
-            amp_kwargs["initial_point"] = initial_point
-
         ignored_amp_options = []
 
         def _note_ignored(name: str, should_warn: bool) -> None:
@@ -9489,6 +9499,16 @@ def solve_model(
             method=amp_gdp_method,
             respect_disjunction_methods=False,
         )
+
+        # #1334: AFTER the lowering, never before. ``_normalize_initial_point``
+        # raises ``AMP initial_point has length 1; expected 3`` on the short vector
+        # the caller's own variables flatten to, so every warm start crashed
+        # ``solver="amp"`` on a GDP model -- a model AMP solves fine without one.
+        from discopt.warm_start import prepare_warm_start as _prepare_warm_start
+
+        _amp_x0 = _prepare_warm_start(model, initial_point, route="AMP")
+        if _amp_x0 is not None:
+            amp_kwargs["initial_point"] = _amp_x0
 
         return solve_amp(
             model,
@@ -9880,27 +9900,9 @@ def solve_model(
     # integer-product reforms extend it. Dropping is the fallback, never an error:
     # a hint must not be able to fail a solve.
     if initial_point is not None:
-        initial_point = np.asarray(initial_point, dtype=np.float64).ravel()
-        _n_gdp_cols = int(sum(int(v.size) for v in model._variables))
-        if initial_point.size != _n_gdp_cols:
-            from discopt.warm_start import complete_initial_point
+        from discopt.warm_start import prepare_warm_start
 
-            _gdp_x0 = complete_initial_point(model, initial_point)
-            if _gdp_x0 is None:
-                logger.warning(
-                    "Warm start dropped: the initial solution covers %d columns and "
-                    "the GDP-lowered model has %d. The solve continues without it.",
-                    int(initial_point.size),
-                    _n_gdp_cols,
-                )
-                initial_point = None
-            else:
-                logger.info(
-                    "Warm start extended from %d to %d columns across the GDP lowering",
-                    int(initial_point.size),
-                    _n_gdp_cols,
-                )
-                initial_point = _gdp_x0
+        initial_point = prepare_warm_start(model, initial_point, route="GDP lowering")
 
     # --- Entropy-family canonicalization: recover the ``entropy(x) = x*log(x)``
     # and ``centropy(x, y) = x*log(x/y)`` intrinsics from the raw products that
@@ -12878,27 +12880,11 @@ def solve_model(
         # columns are repaired to the values the given point implies — and when it
         # cannot be completed, DROP it with a message. A warm start is a hint; it
         # must never be able to fail a solve.
-        _n_cols = int(sum(int(v.size) for v in model._variables))
-        if initial_point.size != _n_cols:
-            from discopt.warm_start import complete_initial_point
+        from discopt.warm_start import prepare_warm_start
 
-            _completed = complete_initial_point(model, initial_point, evaluator=evaluator)
-            if _completed is None:
-                logger.warning(
-                    "Warm start dropped: the initial solution covers %d columns and "
-                    "the model the solver built has %d (a reformulation added "
-                    "variables). The solve continues without it.",
-                    int(initial_point.size),
-                    _n_cols,
-                )
-                initial_point = None
-            else:
-                logger.info(
-                    "Warm start extended from %d to %d columns across a solve-time reformulation",
-                    int(initial_point.size),
-                    _n_cols,
-                )
-                initial_point = _completed
+        initial_point = prepare_warm_start(
+            model, initial_point, route="Spatial B&B", evaluator=evaluator
+        )
     if initial_point is not None:
         ws_obj = float(evaluator.evaluate_objective(initial_point))
         # Check integer feasibility of the warm-start point
@@ -18177,28 +18163,17 @@ def _solve_nlp_bb(
         # plain ``Model.solve(nlp_bb=True, warm_start=r)`` that succeeds without
         # the warm start. Same completion the spatial path has run since #1255 --
         # a warm start is a hint and must never be able to fail a solve.
-        _nb_cols = int(sum(int(v.size) for v in model._variables))
-        if int(np.asarray(initial_point).size) != _nb_cols:
-            from discopt.warm_start import complete_initial_point
+        #
+        # #1334: and it must be FILTERED before it is rounded. The integrality
+        # test below calls ``round()`` on every discrete column, and ``round(nan)``
+        # raises ``ValueError: cannot convert float NaN to integer`` -- so a
+        # non-finite point crashed the solve three lines before the
+        # ``np.isfinite(ws_obj)`` guard that was meant to catch it.
+        from discopt.warm_start import prepare_warm_start
 
-            _nb_completed = complete_initial_point(model, initial_point, evaluator=evaluator)
-            if _nb_completed is None:
-                logger.warning(
-                    "NLP-BB warm start dropped: the initial solution covers %d columns "
-                    "and the model the solver built has %d (a reformulation added "
-                    "variables). The solve continues without it.",
-                    int(np.asarray(initial_point).size),
-                    _nb_cols,
-                )
-                initial_point = None
-            else:
-                logger.info(
-                    "NLP-BB warm start extended from %d to %d columns across a "
-                    "solve-time reformulation",
-                    int(np.asarray(initial_point).size),
-                    _nb_cols,
-                )
-                initial_point = _nb_completed
+        initial_point = prepare_warm_start(
+            model, initial_point, route="NLP-BB", evaluator=evaluator
+        )
     if initial_point is not None:
         ws_obj = float(evaluator.evaluate_objective(initial_point))
         ws_int_feas = True
