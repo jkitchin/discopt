@@ -31,9 +31,7 @@ def _double_well(name="i1322_dw"):
     p = m.parameter("p", value=0.0)
     x = m.continuous("x", lb=-1.0, ub=5.0)
     m.minimize(
-        -5 * dm.exp(-((x + 0.5) ** 2) / 0.18)
-        - (2 + p) * dm.exp(-((x - 3) ** 2) / 0.18)
-        + 0.01 * x
+        -5 * dm.exp(-((x + 0.5) ** 2) / 0.18) - (2 + p) * dm.exp(-((x - 3) ** 2) / 0.18) + 0.01 * x
     )
     return m, p, x
 

@@ -5238,6 +5238,35 @@ def _gap_criterion(ub: float, lb: float, gap_tolerance: float, abs_gap_tol: floa
     return None
 
 
+def _warn_abs_gap_ignored(route: str, abs_gap_tolerance: Optional[float]) -> None:
+    """Say so when *route* cannot honour an ``abs_gap_tolerance`` the caller set.
+
+    #1323: several routes take ``gap_tolerance`` and nothing else, so an
+    absolute criterion passed to :func:`solve_model` reached them and vanished.
+    The result stays VALID -- the bound is sound either way -- but the solve
+    runs past the stopping point the caller asked for and reports ``feasible``
+    where it should have reported optimal within the tolerance, with nothing
+    anywhere saying the option was dropped. An inert option that says nothing is
+    worse than one that refuses (CLAUDE.md §3), so every such route either
+    honours it or says this.
+
+    Silent when the caller set nothing: ``None`` means "use the default", not a
+    request, and warning on it would fire on every solve.
+    """
+    if abs_gap_tolerance is None:
+        return
+    import warnings
+
+    warnings.warn(
+        f"{route} ignores abs_gap_tolerance={abs_gap_tolerance!r}: it converges on the "
+        "relative gap only. The solve will not stop when the absolute gap is met, and "
+        "may report 'feasible' for a run whose absolute gap already satisfied the "
+        "request. Use gap_tolerance here, or the default branch-and-bound engine, "
+        "which honours both.",
+        stacklevel=2,
+    )
+
+
 def _resolve_abs_gap_tolerance(abs_gap_tolerance: Optional[float]) -> float:
     """The absolute gap tolerance a solve runs at, validated.
 
@@ -5697,6 +5726,14 @@ _MIP_NLP_IGNORED_OPTIONS: tuple[tuple[str, Callable[[Any], bool]], ...] = (
     ("subnlp_options", lambda v: v is not None),
     ("root_cut_rounds", lambda v: v is not None),
     ("root_cut_max", lambda v: v is not None),
+    # #1323: every method in this family converges on the RELATIVE gap alone.
+    # The option was neither honoured nor refused nor warned about, so a convex
+    # MINLP auto-routed to OA ran the baseline trace and stalled at an absolute
+    # gap of 186 under `abs_gap_tolerance=1e4`. Listed here, the auto-route
+    # declines and the spatial B&B path -- which does honour it -- takes the
+    # model (3 nodes against the route's 241 on the issue's repro); an explicit
+    # solver="mip-nlp" warns and proceeds, as with every other entry.
+    ("abs_gap_tolerance", lambda v: v is not None),
 )
 
 
@@ -8685,6 +8722,7 @@ def solve_model(
     # and ``lp_spatial=True`` is a documented public kwarg. The capability is kept and
     # is opt-in; what is not shipped by default is a measured loss.
     if kwargs.get("lp_spatial", False):
+        _warn_abs_gap_ignored("The lp_spatial engine", abs_gap_tolerance)
         try:
             from discopt._relax.lp_spatial_bb import solve_lp_spatial_bb
             from discopt.modeling.core import _lp_spatial_mixed_fallback_enabled
@@ -8808,6 +8846,7 @@ def solve_model(
         "subnlp_options": subnlp_options,
         "root_cut_rounds": root_cut_rounds,
         "root_cut_max": root_cut_max,
+        "abs_gap_tolerance": abs_gap_tolerance,
     }
 
     # --- Solver-family dispatch ---
@@ -9494,6 +9533,7 @@ def solve_model(
         _note_ignored_gp("lazy_constraints", lazy_constraints is not None)
         _note_ignored_gp("incumbent_callback", incumbent_callback is not None)
         _note_ignored_gp("node_callback", node_callback is not None)
+        _note_ignored_gp("abs_gap_tolerance", abs_gap_tolerance is not None)
         if kwargs:
             ignored_gp_options.extend(sorted(kwargs))
         if ignored_gp_options:
@@ -9551,6 +9591,7 @@ def solve_model(
         _note_ignored_gp_minlp("lazy_constraints", lazy_constraints is not None)
         _note_ignored_gp_minlp("incumbent_callback", incumbent_callback is not None)
         _note_ignored_gp_minlp("node_callback", node_callback is not None)
+        _note_ignored_gp_minlp("abs_gap_tolerance", abs_gap_tolerance is not None)
         if kwargs:
             ignored_gp_minlp_options.extend(sorted(kwargs))
         if ignored_gp_minlp_options:
@@ -9666,6 +9707,7 @@ def solve_model(
         )
 
         if classify_signomial_global(model) is not None:
+            _warn_abs_gap_ignored("The signomial global engine", abs_gap_tolerance)
             sgo_result = solve_signomial_global(
                 model,
                 time_limit=time_limit,
@@ -9677,6 +9719,7 @@ def solve_model(
 
     # --- Benders / Lagrangian decomposition: opt-in, structure-exploiting ---
     if decomposition is not None:
+        _warn_abs_gap_ignored(f"decomposition={decomposition!r}", abs_gap_tolerance)
         if decomposition == "benders":
             from discopt.decomposition.benders import solve_benders
 
@@ -9801,6 +9844,8 @@ def solve_model(
     # --- LOA decomposition: intercept before GDP reformulation ---
     if gdp_method == "loa":
         from discopt.solvers.gdpopt_loa import solve_gdpopt_loa
+
+        _warn_abs_gap_ignored("The GDPopt-LOA decomposition", abs_gap_tolerance)
 
         loa_kwargs = {}
         if "milp_solver" in kwargs:
@@ -24386,6 +24431,11 @@ def _solve_milp_simplex(
                 float(lp_data.obj_const),
                 int(max_nodes),
                 float(gap_tolerance),
+                # #1323: run 1 passes this; run 2 used not to, so a re-entry
+                # spent its whole budget on a tree the caller's absolute
+                # criterion had already closed, and returned `feasible` with
+                # |obj-bound| inside the requested tolerance.
+                abs_gap_tol=(None if abs_gap_tolerance is None else float(abs_gap_tolerance)),
                 initial_incumbent=_seed2,
                 time_limit_s=float(_reentry_remaining),
                 debug_hook=_debug.rust_hook(),
