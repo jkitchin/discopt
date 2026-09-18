@@ -129,12 +129,19 @@ impl Dd {
 /// near-total cancellation (products of magnitude `M` summing to `≪ M`) is
 /// resolved instead of lost to float64 rounding. `v` and `w` must be equal length.
 pub fn dot_dd(v: &[f64], w: &[f64]) -> f64 {
+    dot_dd_acc(v, w).to_f64()
+}
+
+/// [`dot_dd`] without the final rounding, so a caller that keeps accumulating does
+/// not throw away the low word between terms.
+#[inline]
+fn dot_dd_acc(v: &[f64], w: &[f64]) -> Dd {
     debug_assert_eq!(v.len(), w.len());
     let mut acc = Dd::zero();
     for (&a, &b) in v.iter().zip(w.iter()) {
         acc = acc.add_prod(a, b);
     }
-    acc.to_f64()
+    acc
 }
 
 /// The correctly-rounded residual `rhs − Σ_k row[k]·x[k]`, accumulated at
@@ -197,6 +204,130 @@ pub fn residual_matvec_dd(cols: &[Vec<f64>], x: &[f64], rhs: &[f64], transpose: 
 /// an open side.
 pub const REFINE_INF: f64 = 1e20;
 
+/// Relative margin subtracted from the Neumaier–Shcherbina evaluation before it is
+/// reported as a bound, against the base `S = 1 + |bᵀy| + Σ_j |contrib_j|`.
+///
+/// It is not decoration. Measured 2026-09-18 (issue #1230 step 1,
+/// `scratchpad/ns_safe_bound_margin.py`), the margin-free evaluation returned a
+/// bound **above the true optimum** on 206 of 980 exactly-verified LPs — the
+/// hypothesis #1230 asked to test, confirmed. Worst measured excess over an exactly
+/// verified `p*` was `4.4e-16·S`, and over the exact evaluation of the same formula
+/// `6.2e-16·S`.
+///
+/// **Why `1e-12` and not the `1e-9` of `milp_simplex._safe_lp_lower_bound_std`.**
+/// That twin evaluates in plain `f64` throughout, so its margin must also cover the
+/// `O(n·ulp·Σ|terms|)` summation error; this function now accumulates end-to-end in
+/// double-double, which removes that term (#1230's kill criterion asks for the pair,
+/// margin *and* DD accumulation, and this is the DD half paying for the smaller
+/// constant). `1e-9·S` measurably costs the whole quality budget the node kernels
+/// reserve: on `spatial_kernel::corner_pinned_cubic_node_lp_is_solvable` it took the
+/// bound 124.2 below a `1.24e11` optimum, exactly the `1e-9` relative that test
+/// allows and the same order as `CERT_REL`. `1e-12·S` clears the measured worst case
+/// by >1600x while costing three orders less than `CERT_REL`, so it cannot by itself
+/// flip a node from certified to uncertified.
+///
+/// **This is a measured guard, not a proof.** A flat relative margin cannot be one:
+/// the error/`S` ratio is bounded by `ulp·|(Aᵀy)_j| / |rc_j|`, which is unbounded when
+/// the reduced cost cancels. The rigorous model is the provable forward error
+/// `milp_simplex._safe_lp_lower_bound_sharp` computes, and unifying the two is what
+/// #1230 step 2 is for — it needs `|(Aᵀy)_j|` accumulated per column and changes the
+/// abstention structure (a free column whose computed `rc` is `0` can no longer be
+/// certified at all), so it is a separate, panel-gated step. CLAUDE.md §1 orders the
+/// trade in the meantime: a measured guard beats no guard.
+pub const NS_MARGIN_REL: f64 = 1e-12;
+
+/// Whether the safe bounds subtract [`NS_MARGIN_REL`]. Default **ON** — it is a
+/// soundness guard, and §1 forbids shipping the unsound arm as the default.
+/// `DISCOPT_NS_MARGIN=0` restores the pre-#1230 margin-free evaluation *exactly*
+/// (bit-identical, via [`NsEval::legacy`]) so the A/B panel is runnable. Read once.
+fn ns_margin_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("DISCOPT_NS_MARGIN")
+            .ok()
+            .map(|v| !matches!(v.trim(), "0" | "false" | "False"))
+            .unwrap_or(true)
+    })
+}
+
+/// One Neumaier–Shcherbina evaluation, carrying both arms so the opt-out is
+/// bit-identical to the pre-#1230 code rather than a re-derivation of it.
+#[derive(Clone, Copy, Debug)]
+struct NsEval {
+    /// The pre-#1230 value: `bᵀy` rounded to `f64`, then the box terms summed in
+    /// plain `f64`. Kept so `DISCOPT_NS_MARGIN=0` reproduces it exactly.
+    legacy: f64,
+    /// The same sum accumulated end-to-end in double-double, each box term added as
+    /// an *exact* product rather than a pre-rounded one.
+    dd: f64,
+    /// `S = 1 + |bᵀy| + Σ_j |contrib_j|`, the margin base. A sum of non-negative
+    /// terms, so its own `f64` rounding cannot make it a material under-estimate.
+    s: f64,
+}
+
+impl NsEval {
+    /// The reported bound, or `None` when it is not finite.
+    #[inline]
+    fn finish(self) -> Option<f64> {
+        let g = if ns_margin_enabled() {
+            self.dd - NS_MARGIN_REL * self.s
+        } else {
+            self.legacy
+        };
+        if g.is_finite() {
+            Some(g)
+        } else {
+            None
+        }
+    }
+}
+
+/// The shared body of [`ns_safe_bound`] and [`ns_safe_bound_csc`]: everything except
+/// how `(Aᵀy)_j` is formed. `aty(j)` supplies that column inner product, already
+/// rounded to `f64` exactly as both callers have always done. Returns `None` on the
+/// open-box-side abstention (a nonzero reduced cost riding an infinite bound).
+#[inline]
+fn ns_accumulate<F: FnMut(usize) -> f64>(
+    y: &[f64],
+    c: &[f64],
+    n: usize,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+    mut aty: F,
+) -> Option<NsEval> {
+    let acc = dot_dd_acc(b, y);
+    let mut legacy = acc.to_f64();
+    let mut dd = acc;
+    let mut s = 1.0 + legacy.abs();
+    for j in 0..n {
+        let rc = c[j] - aty(j);
+        let bound = if rc > 0.0 {
+            if l[j] <= -REFINE_INF {
+                return None;
+            }
+            l[j]
+        } else if rc < 0.0 {
+            if u[j] >= REFINE_INF {
+                return None;
+            }
+            u[j]
+        } else {
+            continue;
+        };
+        let term = rc * bound;
+        legacy += term;
+        dd = dd.add_prod(rc, bound);
+        s += term.abs();
+    }
+    Some(NsEval {
+        legacy,
+        dd: dd.to_f64(),
+        s,
+    })
+}
+
 /// Neumaier–Shcherbina safe lower bound on `min cᵀx s.t. A x = b, l ≤ x ≤ u` from
 /// **free-sign** equality multipliers `y` (length `m`). Weak duality gives, for
 /// *any* `y`,
@@ -210,9 +341,16 @@ pub const REFINE_INF: f64 = 1e20;
 /// `None` when the bound is `−∞` (a reduced cost with the wrong-signed open box
 /// side). `a` is row-major `m × n`.
 ///
+/// That is the *exact-arithmetic* statement. In floating point the evaluation can
+/// land above `p*`, which is what [`NS_MARGIN_REL`] is for: the returned value is
+/// `g(y) − 1e-9·S`, accumulated end-to-end in double-double. Before #1230 it was
+/// neither — `bᵀy` was rounded to `f64` and the box terms summed in plain `f64`
+/// with no margin — and it exceeded the true optimum on 206 of 980 exactly
+/// verified LPs. `DISCOPT_NS_MARGIN=0` restores that older evaluation bit-exactly.
+///
 /// This is the exact formula the MILP boundary applies to candidate A's drifted
-/// dual (`milp_simplex._safe_lp_lower_bound_std`) and that `primal::safe_bound`
-/// uses in its tests; refinement changes only the *quality* of `y` fed into it.
+/// dual (`milp_simplex._safe_lp_lower_bound_std`, which has always subtracted the
+/// same margin); refinement changes only the *quality* of `y` fed into it.
 #[allow(clippy::too_many_arguments)]
 pub fn ns_safe_bound(
     y: &[f64],
@@ -227,43 +365,32 @@ pub fn ns_safe_bound(
     if y.len() != m || !y.iter().all(|v| v.is_finite()) {
         return None;
     }
-    // bᵀy at double-double precision (b and y can both be wide-ranged on these LPs).
-    let mut g = dot_dd(b, y);
-    for j in 0..n {
+    ns_accumulate(y, c, n, b, l, u, |j| {
         // Reduced cost (c − Aᵀy)_j, high-precision so a tiny true rc is not lost.
         let mut aty = Dd::zero();
         for i in 0..m {
             aty = aty.add_prod(a[i * n + j], y[i]);
         }
-        let rc = c[j] - aty.to_f64();
-        if rc > 0.0 {
-            if l[j] <= -REFINE_INF {
-                return None;
-            }
-            g += rc * l[j];
-        } else if rc < 0.0 {
-            if u[j] >= REFINE_INF {
-                return None;
-            }
-            g += rc * u[j];
-        }
-    }
-    if g.is_finite() {
-        Some(g)
-    } else {
-        None
-    }
+        aty.to_f64()
+    })?
+    .finish()
 }
 
 /// CSC twin of [`ns_safe_bound`]: the Neumaier–Shcherbina safe lower bound for
 /// `min cᵀx s.t. A x = b, l ≤ x ≤ u` where `A` is given column-major as the raw
 /// CSC arrays (`col_ptr` length `n+1`, `row_idx`/`vals` the nonzeros). Identical
-/// arithmetic and rigor to the dense version — `bᵀy` and each column's `(Aᵀy)_j`
-/// at double-double precision, then the reduced-cost box term — so the result is a
-/// rigorous lower bound (`≤` the true optimum) at any conditioning. Returns `None`
-/// when a nonzero reduced cost meets an infinite bound (no finite certificate) or a
-/// dual is non-finite. Used by the native spatial node kernel, whose node LPs are
-/// CSC, so no dense `m×n` matrix is ever materialized to certify the bound.
+/// arithmetic and rigor to the dense version — `bᵀy`, each column's `(Aᵀy)_j` and
+/// the running sum of the reduced-cost box terms all at double-double precision,
+/// then [`NS_MARGIN_REL`] subtracted — so the result is a rigorous lower bound
+/// (`≤` the true optimum) at any conditioning. Returns `None` when a nonzero
+/// reduced cost meets an infinite bound (no finite certificate) or a dual is
+/// non-finite. Used by the native spatial node kernel, whose node LPs are CSC, so
+/// no dense `m×n` matrix is ever materialized to certify the bound.
+///
+/// The rigor claim in the previous paragraph was **false before #1230** and is why
+/// the margin exists: the box terms were summed in plain `f64` and nothing was
+/// subtracted, so the value could land a few ulps of `S` above `p*`. See
+/// [`NS_MARGIN_REL`].
 #[allow(clippy::too_many_arguments)]
 pub fn ns_safe_bound_csc(
     y: &[f64],
@@ -281,31 +408,15 @@ pub fn ns_safe_bound_csc(
         return None;
     }
     debug_assert_eq!(col_ptr.len(), n + 1);
-    let mut g = dot_dd(b, y);
-    for j in 0..n {
+    ns_accumulate(y, c, n, b, l, u, |j| {
         // (Aᵀy)_j = sum over column j's nonzeros of vals[p]*y[row_idx[p]], in DD.
         let mut aty = Dd::zero();
         for p in col_ptr[j]..col_ptr[j + 1] {
             aty = aty.add_prod(vals[p], y[row_idx[p]]);
         }
-        let rc = c[j] - aty.to_f64();
-        if rc > 0.0 {
-            if l[j] <= -REFINE_INF {
-                return None;
-            }
-            g += rc * l[j];
-        } else if rc < 0.0 {
-            if u[j] >= REFINE_INF {
-                return None;
-            }
-            g += rc * u[j];
-        }
-    }
-    if g.is_finite() {
-        Some(g)
-    } else {
-        None
-    }
+        aty.to_f64()
+    })?
+    .finish()
 }
 
 /// The primal-dual solution of a correction subproblem: `x` (length `n`) and the
@@ -746,7 +857,13 @@ mod tests {
         assert!(res.converged, "exact inner solver converges: {res:?}");
         assert!(res.primal_res <= 1e-12 && res.dual_res <= 1e-12);
         let g = ns_safe_bound(&res.y, &c, &a, m, n, &b, &l, &u).expect("finite bound");
-        assert!((g - (-8.0)).abs() < 1e-9, "safe bound {g} should be −8");
+        // At or below the optimum with NO granted slack (#1230), and within the
+        // margin of it: S ≈ 9 here, so the bound sits ~9e-9 under −8.
+        assert!(g <= -8.0, "safe bound {g} above optimum −8 (unsound)");
+        assert!(
+            g >= -8.0 - 10.0 * NS_MARGIN_REL * 9.0,
+            "safe bound {g} is further below −8 than the margin explains"
+        );
     }
 
     #[test]
@@ -774,10 +891,9 @@ mod tests {
         // The refined dual yields a bound far tighter than the grid error, and
         // never above the true optimum (soundness).
         let g = ns_safe_bound(&res.y, &c, &a, m, n, &b, &l, &u).expect("finite bound");
-        assert!(
-            g <= -8.0 + 1e-9,
-            "safe bound {g} above optimum −8 (unsound)"
-        );
+        // No granted slack: the `+1e-9` this used to allow was the very margin the
+        // function was missing (#1230).
+        assert!(g <= -8.0, "safe bound {g} above optimum −8 (unsound)");
         assert!(
             (g - (-8.0)).abs() < 1e-6,
             "safe bound {g} not tightened to −8 (grid was 1e-4)"
@@ -843,12 +959,166 @@ mod tests {
     #[test]
     fn ns_safe_bound_is_never_above_optimum_for_arbitrary_dual() {
         // g(y) ≤ opt for ANY y — the soundness property candidate A relies on.
+        // No tolerance: this test used to allow `+1e-9`, i.e. it granted exactly the
+        // margin the function was missing, so it could not have caught #1230.
         let (a, m, n, c, b, l, u) = small_lp();
+        let mut checked = 0usize;
         for &y0 in &[-3.7, -1.0, 0.0, 0.5, 2.3, 10.0] {
             if let Some(g) = ns_safe_bound(&[y0], &c, &a, m, n, &b, &l, &u) {
-                assert!(g <= -8.0 + 1e-9, "g({y0}) = {g} exceeds optimum −8");
+                assert!(g <= -8.0, "g({y0}) = {g} exceeds optimum −8");
+                checked += 1;
             }
         }
+        assert!(
+            checked > 0,
+            "no dual produced a finite bound — the test measured nothing"
+        );
+    }
+
+    /// The `m=4, n=6` LP from issue #1230's step-1 experiment
+    /// (`scratchpad/ns_safe_bound_margin.py`) on which the pre-#1230 evaluation
+    /// returned a bound **above** the true optimum.
+    ///
+    /// `P_STAR` is not a solver's answer: the certifying point was rebuilt over the
+    /// rationals from HiGHS's optimal basis, checked to satisfy all four rows
+    /// *exactly* and to lie in the box *exactly*, and its `cᵀx` rounded **up**. So
+    /// `P_STAR >= p*` rigorously, and any `g > P_STAR` is unsound beyond argument.
+    /// The margin-free evaluation returns −0.18495093964848763, which is 13042 ulp
+    /// above it.
+    #[allow(clippy::type_complexity)]
+    fn issue_1230_violator() -> (
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+        usize,
+        usize,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+    ) {
+        let y = vec![
+            0.06989471698387341,
+            0.006361153811200572,
+            -1.7243770567161898,
+            0.2606276336654449,
+        ];
+        let c = vec![
+            -5.353293216640445,
+            0.20617899781232157,
+            -1.2328800557307225,
+            2.145883491350228,
+            0.5722333119416425,
+            1.2868813860462676,
+        ];
+        let a = vec![
+            -0.43380007896333744,
+            1.7840189339049422,
+            -1.4087196089500127,
+            0.0,
+            0.059990290399046416,
+            3.3723798353481578,
+            43.98676708984297,
+            -0.2013242034249084,
+            -9.25072957527505,
+            0.0,
+            89.29831355000859,
+            -9.17843384442963,
+            3.2555200005351654,
+            0.0,
+            -9.967630367743432,
+            0.6251591107181199,
+            0.0,
+            -1.4056139397219884,
+            0.04206968554963261,
+            0.3175647662262486,
+            2.647399050106419,
+            12.369730229020943,
+            0.0,
+            2.985435987614364,
+        ];
+        let b = vec![
+            -61.81027684222802,
+            -1395.7897538919822,
+            -1120.5897001915187,
+            -54.096524739668176,
+        ];
+        let l = vec![
+            -65.55010680415802,
+            -70.05155575358589,
+            -7.3292205623746165,
+            -47.44750931832471,
+            -6.029803960416979,
+            -0.5839316622544222,
+        ];
+        let u = vec![
+            40.01589393093027,
+            56.357692793905514,
+            98.28844922141533,
+            15.536662598968787,
+            94.4803442713072,
+            20.214115334960823,
+        ];
+        (y, c, a, 4, 6, b, l, u)
+    }
+
+    /// An exactly-verified upper bound on the violator LP's optimum.
+    const ISSUE_1230_P_STAR: f64 = -0.1849509396488496;
+
+    #[test]
+    fn issue_1230_dense_bound_does_not_exceed_the_optimum() {
+        let (y, c, a, m, n, b, l, u) = issue_1230_violator();
+        let g = ns_safe_bound(&y, &c, &a, m, n, &b, &l, &u).expect("finite bound");
+        assert!(
+            g <= ISSUE_1230_P_STAR,
+            "UNSOUND: g = {g} exceeds the verified optimum {ISSUE_1230_P_STAR}"
+        );
+        // Still useful: the margin costs ~1e-9·S, not the bound.
+        assert!(
+            g >= ISSUE_1230_P_STAR - 1e-4,
+            "bound {g} is uselessly loose"
+        );
+    }
+
+    #[test]
+    fn issue_1230_csc_bound_does_not_exceed_the_optimum() {
+        let (y, c, a, m, n, b, l, u) = issue_1230_violator();
+        let (cp, ri, v) = dense_to_csc(&a, m, n);
+        let g = ns_safe_bound_csc(&y, &c, &cp, &ri, &v, m, n, &b, &l, &u).expect("finite bound");
+        assert!(
+            g <= ISSUE_1230_P_STAR,
+            "UNSOUND: g = {g} exceeds the verified optimum {ISSUE_1230_P_STAR}"
+        );
+    }
+
+    #[test]
+    fn issue_1230_legacy_arm_is_preserved_and_is_the_unsound_one() {
+        // `DISCOPT_NS_MARGIN=0` must reproduce the pre-#1230 number *exactly*, so the
+        // A/B panel compares against the real old path and not a re-derivation of it.
+        // Asserted on `NsEval` rather than through the env var, because the flag is
+        // read once per process and both arms have to be exercised in one test run.
+        let (y, c, a, m, n, b, l, u) = issue_1230_violator();
+        let ev = ns_accumulate(&y, &c, n, &b, &l, &u, |j| {
+            let mut aty = Dd::zero();
+            for i in 0..m {
+                aty = aty.add_prod(a[i * n + j], y[i]);
+            }
+            aty.to_f64()
+        })
+        .expect("finite evaluation");
+        assert_eq!(
+            ev.legacy, -0.18495093964848763,
+            "legacy arm drifted from pre-#1230"
+        );
+        assert!(
+            ev.legacy > ISSUE_1230_P_STAR,
+            "the legacy arm is the unsound one"
+        );
+        assert!(ev.dd - NS_MARGIN_REL * ev.s <= ISSUE_1230_P_STAR);
+        // The margin is what closes it: DD accumulation alone does not.
+        assert!(
+            ev.dd > ISSUE_1230_P_STAR,
+            "DD accumulation alone already fixed this — the fixture no longer pins the margin"
+        );
     }
 
     // Dense a (row-major m×n) -> CSC arrays (col_ptr, row_idx, vals).

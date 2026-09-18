@@ -3624,6 +3624,16 @@ mod tests {
 
     /// Safe lower bound `g(y) = bᵀy + Σ_k min_{z_k∈[l,u]} (c−Aᵀy)_k z_k` from
     /// free-sign multipliers `y`. `<= true optimum` for any `y` (weak duality).
+    ///
+    /// This is a thin adapter over the **production** evaluation
+    /// ([`super::super::refine::ns_safe_bound`]), not a re-derivation of the formula.
+    /// It used to be a private `#[cfg(test)]` copy in plain `f64`, which meant these
+    /// certificate tests validated code the crate does not ship — a defect #1230
+    /// called out and the #1230 margin bug demonstrated, since the copy had neither
+    /// the double-double accumulation nor the margin. The only translation left is
+    /// the return convention: the tests below read `−∞` where the production function
+    /// abstains with `None`.
+    #[allow(clippy::too_many_arguments)]
     fn safe_bound(
         y: &[f64],
         c: &[f64],
@@ -3634,25 +3644,9 @@ mod tests {
         l: &[f64],
         u: &[f64],
     ) -> f64 {
-        let mut g = b.iter().zip(y).map(|(bi, yi)| bi * yi).sum::<f64>();
-        for j in 0..n {
-            let aty: f64 = (0..m).map(|i| a[i * n + j] * y[i]).sum();
-            let rc = c[j] - aty;
-            if rc > 0.0 {
-                g += if l[j] <= -CERT_INF {
-                    f64::NEG_INFINITY
-                } else {
-                    rc * l[j]
-                };
-            } else if rc < 0.0 {
-                g += if u[j] >= CERT_INF {
-                    f64::NEG_INFINITY
-                } else {
-                    rc * u[j]
-                };
-            }
-        }
-        g
+        debug_assert_eq!(CERT_INF, crate::lp::simplex::refine::REFINE_INF);
+        crate::lp::simplex::refine::ns_safe_bound(y, c, a, m, n, b, l, u)
+            .unwrap_or(f64::NEG_INFINITY)
     }
 
     #[test]
