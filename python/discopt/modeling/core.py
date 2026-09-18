@@ -1254,13 +1254,27 @@ def _bound_is_owned_frozen(arr) -> bool:
     ``v.lb, v.ub = v._bound_stack.pop()`` and ``saved_bounds`` restores free of
     a per-node allocation.
     """
-    return (
-        type(arr) is np.ndarray
-        and arr.dtype == _FLOAT64
-        and not arr.flags.writeable
-        and arr.base is not None
-        and not arr.base.flags.writeable
-    )
+    if type(arr) is not np.ndarray or arr.dtype != _FLOAT64:
+        return False
+    base = arr.base
+    # The base check alone settles it: numpy will not let a view over a
+    # read-only base be writable, so ``base is frozen`` implies ``arr is
+    # frozen``. Checking ``arr.flags`` as well would double the cost of the
+    # hot path -- `.flags` builds a new flagsobj on every access -- for an
+    # answer already implied.
+    return base is not None and not base.flags.writeable
+
+
+def _bound_context(what: Optional[str], name: Optional[str], side: str) -> str:
+    """The "who is complaining" prefix of a bound error, built ONLY on failure.
+
+    ``lb``/``ub`` are assigned once per variable per branch-and-bound node, so
+    formatting this eagerly cost more than the whole fast path it guards
+    (measured: 0.75 us per reinstall against 0.15 us with it deferred).
+    """
+    if what is not None:
+        return what
+    return f"variable {name!r}: {side}" if name is not None else side
 
 
 def _readonly_bound(
@@ -1268,7 +1282,9 @@ def _readonly_bound(
     shape: Optional[tuple[int, ...]] = None,
     *,
     var_type: "Optional[VarType]" = None,
-    what: str = "bound",
+    what: Optional[str] = None,
+    name: Optional[str] = None,
+    side: str = "bound",
 ) -> np.ndarray:
     """*value*, validated, copied and frozen into a box array of *shape*.
 
@@ -1296,32 +1312,43 @@ def _readonly_bound(
     anything not broadcastable is refused here rather than at solve time, where
     it surfaced as an unrelated ``IndexError`` (#1332 item 5).
     """
+    # The fast path FIRST: an array this module already built and froze is
+    # neither None nor complex, so the validation below has nothing to say
+    # about it, and this is the branch every node-loop restore takes.
+    if _bound_is_owned_frozen(value) and (shape is None or value.shape == shape):
+        # Already validated and clipped by the setter that built it -- except
+        # for the domain, which belongs to the variable being assigned, not the
+        # one the box came from.
+        if var_type is VarType.BINARY:
+            _refuse_bound_outside_unit_box(value, what, name, side)
+        return value
+
     if value is None:
-        raise ValueError(f"{what}: None is not a bound; use the default (or +/- an explicit value)")
+        raise ValueError(
+            f"{_bound_context(what, name, side)}: None is not a bound; use the "
+            "default (or +/- an explicit value)"
+        )
     if np.iscomplexobj(value):
         # np.asarray(..., dtype=float64) drops the imaginary part with only a
         # ComplexWarning, so a complex bound became a silently different box.
-        raise TypeError(f"{what}: complex values are not valid bounds, got {value!r}")
-
-    if _bound_is_owned_frozen(value) and (shape is None or value.shape == shape):
-        # Already one of ours, so already validated and clipped by the setter
-        # that built it -- except for the domain, which belongs to the variable
-        # being assigned, not the one the box came from.
-        if var_type is VarType.BINARY:
-            _refuse_bound_outside_unit_box(value, what)
-        return value
+        raise TypeError(
+            f"{_bound_context(what, name, side)}: complex values are not valid "
+            f"bounds, got {value!r}"
+        )
 
     try:
         base = np.array(value, dtype=np.float64)
     except (TypeError, ValueError) as exc:
-        raise TypeError(f"{what}: cannot be read as a float array ({exc})") from exc
+        raise TypeError(
+            f"{_bound_context(what, name, side)}: cannot be read as a float array ({exc})"
+        ) from exc
     if np.isnan(base).any():
         # `np.asarray(None, dtype=float)` is NaN, and a NaN bound compares False
         # against everything, so downstream it read as an empty box and a
         # feasible model was certified infeasible (#1294).
         raise ValueError(
-            f"{what}: contains NaN (a None entry in an array bound converts to "
-            f"NaN); use the default for no bound"
+            f"{_bound_context(what, name, side)}: contains NaN (a None entry in an "
+            "array bound converts to NaN); use the default for no bound"
         )
     if shape is not None and base.shape != shape:
         expected = int(np.prod(shape)) if shape else 1
@@ -1335,12 +1362,12 @@ def _readonly_bound(
             # failed later with an unrelated IndexError (#1332 item 5).
             if base.size != expected:
                 raise ValueError(
-                    f"{what}: shape {base.shape} does not broadcast to the variable's "
-                    f"shape {shape} ({exc})"
+                    f"{_bound_context(what, name, side)}: shape {base.shape} does not "
+                    f"broadcast to the variable's shape {shape} ({exc})"
                 ) from exc
             base = np.array(base.reshape(shape), dtype=np.float64)
     if var_type is not None:
-        base = _validated_discrete_bound(base, var_type, what)
+        base = _validated_discrete_bound(base, var_type, _bound_context(what, name, side))
     base.flags.writeable = False
     return np.broadcast_to(base, base.shape)
 
@@ -1373,11 +1400,21 @@ def _validated_discrete_bound(base: np.ndarray, var_type: "VarType", what: str) 
     return base
 
 
-def _refuse_bound_outside_unit_box(base: np.ndarray, what: str) -> None:
-    """Raise when a BINARY box leaves [0, 1] by more than a rounding artifact."""
+def _refuse_bound_outside_unit_box(
+    base: np.ndarray,
+    what: Optional[str] = None,
+    name: Optional[str] = None,
+    side: str = "bound",
+) -> None:
+    """Raise when a BINARY box leaves [0, 1] by more than a rounding artifact.
+
+    The message is built only on failure, for the reason :func:`_bound_context`
+    gives: this runs on every binary box a node installs.
+    """
     if np.any(base < -_DISCRETE_BOUND_SLACK) or np.any(base > 1.0 + _DISCRETE_BOUND_SLACK):
         raise ValueError(
-            f"{what}: a binary variable's box must lie within [0, 1], got "
+            f"{_bound_context(what, name, side)}: a binary variable's box must "
+            "lie within [0, 1], got "
             f"{float(np.min(base))!r}..{float(np.max(base))!r}. Declare it as "
             "m.integer(name, lb=..., ub=...) if that is the domain you want."
         )
@@ -1535,10 +1572,7 @@ class Variable(Expression):
     @lb.setter
     def lb(self, value) -> None:
         self._lb = _readonly_bound(
-            value,
-            self.shape,
-            var_type=self.var_type,
-            what=f"variable {self.name!r}: lb",
+            value, self.shape, var_type=self.var_type, name=self.name, side="lb"
         )
 
     @property
@@ -1549,10 +1583,7 @@ class Variable(Expression):
     @ub.setter
     def ub(self, value) -> None:
         self._ub = _readonly_bound(
-            value,
-            self.shape,
-            var_type=self.var_type,
-            what=f"variable {self.name!r}: ub",
+            value, self.shape, var_type=self.var_type, name=self.name, side="ub"
         )
 
     # ── Copying: a copy's boxes must be as read-only as the original's ──
