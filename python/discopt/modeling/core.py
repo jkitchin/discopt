@@ -3869,6 +3869,15 @@ class SolveResult:
         Relative optimality gap ``(objective - bound) / |objective|``.
     x : dict of str to numpy.ndarray, or None
         Variable values keyed by name. None if no feasible solution found.
+
+        Keyed by the columns the SOLVER solved, which on a model that needed a
+        solve-time reformulation is a superset of the variables the caller
+        declared: the GDP lowering appends a selector binary per disjunct
+        (``_gdp_aux_*``) and the factorable lift a monomial auxiliary per lifted
+        product (``_fr_aux_*``). They are reported rather than hidden because a
+        disjunctive model's selector is the only record of which disjunct the
+        solver chose. Use :meth:`declared_x` for the caller's variables alone
+        (#1334).
     wall_time : float
         Total wall-clock solve time in seconds.
     node_count : int
@@ -4182,6 +4191,43 @@ class SolveResult:
     # there the writer IS the solving process and captures its own.
     _provenance: Optional[dict] = None
     _solve_options: Optional[dict] = None
+
+    def declared_x(self, model: "Model") -> dict[str, np.ndarray]:
+        """``x`` restricted to the variables *model* declares.
+
+        #1334: ``x`` is keyed by the columns the SOLVER solved, and a solve-time
+        reformulation appends its own — the GDP lowering adds a selector binary
+        per disjunct, the factorable lift a monomial auxiliary per lifted product
+        — so a plain ``print(result.x)`` on a disjunctive or factorable model
+        shows names like ``_gdp_aux_disj_anon_1_1`` and ``_fr_aux_0`` that the
+        caller never wrote. This returns just the caller's own.
+
+        The split is taken from *model*'s variable list, not from a name pattern:
+        every pass that generates columns would have to be enumerated for a
+        prefix rule to be right, and a rule that falls behind a new pass drops a
+        real variable from a user's results.
+
+        The generated entries are kept in ``x`` rather than dropped there,
+        because for a disjunctive model the selector IS the answer to "which
+        disjunct did it pick?" and ``x`` is the only place it is reported.
+
+        Parameters
+        ----------
+        model : Model
+            The model as the caller declared it — the one passed to
+            :meth:`Model.solve` / :func:`discopt.solve_model`, not a
+            reformulation of it.
+
+        Returns
+        -------
+        dict of str to numpy.ndarray
+            ``{}`` when the solve returned no point. A variable the solve does
+            not report is simply absent, so this never raises on a partial
+            result.
+        """
+        if not self.x:
+            return {}
+        return {v.name: self.x[v.name] for v in model._variables if v.name in self.x}
 
     def __post_init__(self) -> None:
         # A2 (correctness/API): the failure/no-relaxation sentinel must never

@@ -421,57 +421,95 @@ fn audit_feasibility(
     // `m·n` matvec — the lifted relaxations are ~0.3% dense, so this is the
     // difference between milliseconds and seconds on the per-solve audit.
     //
-    // `term_scale[i] = Σ_j |A_ij x_j|` and `terms[i]` (the number of nonzero
-    // products summed) are accumulated in the same pass — they bound the row
-    // residual's own round-off, see below.
+    // Summed with Neumaier compensation, so the accumulated value carries ~`ε|Ax|`
+    // of error rather than the naive running sum's `k·ε·Σ|A_ij x_j|`. That is what
+    // lets [`row_residual_floor`] forgive only what is UNREPRESENTABLE instead of
+    // also having to forgive the summation — see #1335 there.
+    //
+    // `grain[i]` is the finest step available to row `i`: the smallest
+    // `|A_ij| · ulp(x_j)` over its columns, accumulated in the same pass. A column
+    // sitting at `0` is NOT skipped here (it was, for the old floor) — its ulp is
+    // what says the row can be nudged arbitrarily finely, and skipping it is what
+    // let a row full of 1e15 columns forgive a violation of 4.5.
     let mut ax = vec![0.0f64; m];
-    let mut term_scale = vec![0.0f64; m];
-    let mut terms = vec![0u32; m];
+    let mut comp = vec![0.0f64; m];
+    let mut grain = vec![f64::INFINITY; m];
     for j in 0..n {
         let xj = x[j];
-        if xj != 0.0 {
-            let (rows, vals) = cols.col(j);
-            for (k, &i) in rows.iter().enumerate() {
-                let t = vals[k] * xj;
-                ax[i] += t;
-                term_scale[i] += t.abs();
-                terms[i] += 1;
+        let gj = 2.0 * f64::EPSILON * xj.abs();
+        let (rows, vals) = cols.col(j);
+        for (k, &i) in rows.iter().enumerate() {
+            let aij = vals[k];
+            let g = aij.abs() * gj;
+            if g < grain[i] {
+                grain[i] = g;
             }
+            if xj == 0.0 {
+                continue;
+            }
+            // Neumaier: the lost low-order bits of each addition are kept in
+            // `comp[i]` and folded back once, after the loop.
+            let t = aij * xj;
+            let sum = ax[i] + t;
+            comp[i] += if ax[i].abs() >= t.abs() {
+                (ax[i] - sum) + t
+            } else {
+                (t - sum) + ax[i]
+            };
+            ax[i] = sum;
         }
     }
     for i in 0..m {
-        if (ax[i] - b[i]).abs() > FEAS * (1.0 + b[i].abs()) + row_roundoff(terms[i], term_scale[i])
-        {
+        let activity = ax[i] + comp[i];
+        if (activity - b[i]).abs() > FEAS * (1.0 + b[i].abs()) + row_residual_floor(grain[i]) {
             return Feasibility::Rows;
         }
     }
     Feasibility::Ok
 }
 
-/// Floating-point round-off floor for a row residual: the largest `|Ax − b|` a
-/// row of `k` nonzero products totalling `term_scale = Σ|A_ij x_j|` can show
-/// **when `x` is exact**.
+/// Floor on a row residual that no representable `x` can beat: the finest step
+/// the row's own columns can take, `grain = min_j |A_ij| · ulp(x_j)`.
 ///
-/// `fl(Σ_{1..k} t_j)` differs from the exact sum by at most `k·ε·Σ|t_j|` (the
-/// standard running-sum bound, `(k−1)·ε/(1−(k−1)ε)`, plus one `ε` for the
-/// rounding of each product `A_ij·x_j`); the `8` is headroom over that bound. So
-/// a residual below this is not evidence of anything — it is the arithmetic, and
-/// no `x` representable in `f64` can do better.
+/// **What it forgives.** `Ax = b` is asked of `f64` columns, so the row activity
+/// does not live on the reals — it lives on a grid. Moving column `j` by its last
+/// bit changes the activity by `|A_ij| · ulp(x_j)`, so the finest adjustment the
+/// row admits at all is the smallest of those. A residual below it is not evidence
+/// of anything: no representable `x` can do better. #937 is exactly that case —
+/// the vertex of `−z₀ − z₁ + s = −1` at `z = (u, u)` needs `s = 2u − 1`, which for
+/// `2u > 2⁵³` is simply not an `f64` and rounds to `2u`, leaving residual `1`
+/// against a grain of `ulp(2u) ≥ 4`. A sound optimum came back `Numerical` on every
+/// box in `[1e16, 1e20)` until this floor existed.
 ///
-/// This matters once `term_scale` dwarfs `|b_i|`: the vertex of `−z₀ − z₁ + s =
-/// −1` at `z = (u, u)` needs `s = 2u − 1`, which for `2u > 2⁵³` rounds to `2u`
-/// and leaves residual `1` — 5e-17 *relative* to the terms summed, yet ~5e5×
-/// over the `FEAS·(1+|b|)` threshold, so a perfectly sound optimum came back
-/// `Numerical` on every box in `[1e16, 1e20)` (issue #937).
+/// **What it must NOT forgive, and why the shape changed (#1335).** The floor used
+/// to be `8·k·ε·Σ_j|A_ij x_j|` — a bound on the round-off of *summing* the row,
+/// scaled by the row's total magnitude. Two columns at `1e15` bought it `≈ 7.1`
+/// of slack, so `x − y ≤ 1` ∧ `x − y ≥ 10` over `x, y ∈ [1e15, 3e15]` — infeasible
+/// by inspection, minimum total violation `9` — passed the audit at `x − y = 5.5`,
+/// violating BOTH rows by `4.5`, and the LP certified `optimal` with
+/// `gap_certified = true`. Summing `Σ|A_ij x_j|` is wrong twice over: a row can be
+/// large-activity and still perfectly able to resolve a small residual (here the
+/// slack sits at `0`, whose ulp is nothing), and the summation error it was
+/// bounding is now removed at the source by compensated accumulation rather than
+/// forgiven. Taking the MINIMUM asks the question that actually decides the case —
+/// *can any column absorb this?* — instead of the question that does not.
 ///
-/// It is a floor, never a widening of the ordinary regime: for a well-scaled row
-/// it is ~1e-14·term_scale, i.e. below the `1e-6` absolute term until the row
-/// activity reaches ~1e8, and it stays ~10 orders of magnitude tighter than the
-/// drift the audit exists to catch (a `Forrest–Tomlin` update error or an
-/// ill-conditioned basis moves `x` by *relative* amounts far above `ε`).
+/// The `2.0` is one ulp of headroom over `grain` itself, so a residual exactly at
+/// the grid spacing is forgiven rather than sitting on the boundary.
+///
+/// It is a floor, never a widening of the ordinary regime: a well-scaled row has
+/// `grain ~ 1e-16`, far below the `1e-6` absolute term, and any row holding a
+/// column at `0` has `grain = 0` and keeps the plain absolute test. It stays
+/// orders of magnitude tighter than the drift the audit exists to catch (a
+/// Forrest–Tomlin update error or an ill-conditioned basis moves `x` by *relative*
+/// amounts far above `ε`).
 #[inline]
-fn row_roundoff(terms: u32, term_scale: f64) -> f64 {
-    8.0 * (terms as f64) * f64::EPSILON * term_scale
+fn row_residual_floor(grain: f64) -> f64 {
+    if grain.is_finite() {
+        2.0 * grain
+    } else {
+        0.0
+    }
 }
 
 /// Relative slack allowed when certifying a primal unbounded ray (`ray_certifies_unbounded`).
@@ -3892,22 +3930,167 @@ mod tests {
         assert_eq!(checked, 11, "band probe must have run every point");
     }
 
+    /// #1335: an INFEASIBLE LP whose rows carry ~1e15 activity must never certify
+    /// `Optimal`, and the point it returns must never violate its own row.
+    ///
+    /// `x − y ≤ 1` ∧ `x − y ≥ 10` over `x, y ∈ [1e15, 3e15]` is infeasible by
+    /// inspection — no `x − y` is both — and the minimum total violation is 9,
+    /// which is not a tolerance judgement at any scale. The engine returned
+    /// `Optimal` with `x − y = 5.5`, i.e. a point violating BOTH rows by 4.5,
+    /// carrying `gap_certified = true` all the way out to the user.
+    ///
+    /// The audit is the guard that exists for exactly this ("so incremental `x_B`
+    /// drift cannot return a wrong optimum") and it passed the point, because the
+    /// #937 floor `8·k·ε·Σ|A_ij x_j|` is `8·2·ε·2e15 ≈ 7.1` — larger than the real
+    /// violation of 4.5. The floor was derived as a bound on the round-off of
+    /// *summing* the row, with a magic `8·k` on top; at 1e15 activity that swamps a
+    /// genuine contradiction. FAILS pre-fix (`Optimal`); passes after.
+    #[test]
+    fn infeasible_rows_at_1e15_activity_never_certify_optimal_1335() {
+        // Standard form, m=2, n=4:  x − y + s₁ = 1 ;  x − y − s₂ = 10.
+        #[rustfmt::skip]
+        let a = [
+            1.0, -1.0, 1.0,  0.0,
+            1.0, -1.0, 0.0, -1.0,
+        ];
+        let b = [1.0, 10.0];
+        let c = [1.0, 1.0, 0.0, 0.0];
+        let mut checked = 0usize;
+        for big in [1.0e14, 1.0e15, 1.0e16, 1.0e17] {
+            let l = [big, big, 0.0, 0.0];
+            let u = [3.0 * big, 3.0 * big, INF, INF];
+            let r = solve(&a, 2, 4, &b, &c, &l, &u);
+            assert_ne!(
+                r.status,
+                LpStatus::Optimal,
+                "big={big:e}: an infeasible LP must never certify Optimal"
+            );
+            // Whatever it returns, a reported point may not violate its own rows.
+            if r.status == LpStatus::Optimal {
+                let d = r.x[0] - r.x[1];
+                assert!(d <= 1.0 + 1e-6 && d >= 10.0 - 1e-6, "big={big:e}: x−y={d}");
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, 4, "band probe must have run every point");
+    }
+
+    /// The companion direction for #1335, and the honest statement of what the
+    /// tighter floor costs. Same rows made satisfiable (`x − y ≤ 10` ∧
+    /// `x − y ≥ 1`), same boxes.
+    ///
+    /// The §1 line, at every magnitude: an `Optimal` point must satisfy its own
+    /// rows. That is the property the old floor broke in BOTH directions — at 1e16
+    /// it returned `Optimal` at `x = y`, i.e. `x − y = 0` against a row demanding
+    /// `≥ 1`, and called it certified.
+    ///
+    /// The cost, pinned deliberately rather than left to drift: certification is
+    /// unchanged through 1e15 and degrades to `Numerical` from 1e16 up. The reason
+    /// is representability, not the floor — the optimal vertex is `x − y = 1`, and
+    /// `ulp(1e16) = 2`, so for `x, y ≥ 1e16` no pair of `f64`s differs by 1 at all.
+    /// A feasible representable point does exist two ulps away (`x − y = 2`, the
+    /// objective 5e-17 relatively worse) and the engine does not find it: the
+    /// simplex sets the basic `x = fl(y + 1)`, which rounds back to `y`. Recovering
+    /// that point is a separate piece of work; returning `Numerical` in the
+    /// meantime is sound, and strictly better than the certified-infeasible point
+    /// it replaces.
+    #[test]
+    fn feasible_rows_at_1e15_activity_never_certify_a_violating_point_1335() {
+        #[rustfmt::skip]
+        let a = [
+            1.0, -1.0, 1.0,  0.0,
+            1.0, -1.0, 0.0, -1.0,
+        ];
+        let b = [10.0, 1.0];
+        let c = [1.0, 1.0, 0.0, 0.0];
+        let mut checked = 0usize;
+        for big in [1.0e14, 1.0e15, 1.0e16, 1.0e17] {
+            let l = [big, big, 0.0, 0.0];
+            let u = [3.0 * big, 3.0 * big, INF, INF];
+            let r = solve(&a, 2, 4, &b, &c, &l, &u);
+            // §1 at every magnitude: certified means the point holds.
+            if r.status == LpStatus::Optimal {
+                let d = r.x[0] - r.x[1];
+                assert!(
+                    d >= 1.0 - 1e-6 && d <= 10.0 + 1e-6,
+                    "big={big:e}: certified Optimal at a point violating its own row, x−y={d}"
+                );
+            }
+            // Below the representability wall nothing changed: it still certifies.
+            if big <= 1.0e15 {
+                assert_eq!(
+                    r.status,
+                    LpStatus::Optimal,
+                    "big={big:e}: this band certified before the #1335 floor and must still"
+                );
+            }
+            // And a feasible LP is never called infeasible, at any magnitude.
+            assert_ne!(
+                r.status,
+                LpStatus::Infeasible,
+                "big={big:e}: this LP is feasible (x−y ∈ [1, 10])"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 4, "band probe must have run every point");
+    }
+
     /// The `Rows` audit floor is a *floor*, not a widening: it may never let a
     /// genuinely wrong point certify. A row whose activity is ordinary-scaled keeps
     /// its `1e-6` absolute threshold, and a residual well above round-off is still
     /// rejected at any scale.
+    ///
+    /// Carries #937's three properties verbatim, restated on the grain the floor now
+    /// takes, plus the #1335 property that broke when the floor was a SUM over the
+    /// row instead of the minimum over it.
     #[test]
-    fn row_roundoff_floor_stays_below_real_drift_937() {
-        // Ordinary scale: the floor is far under the absolute FEAS term, so the
-        // effective threshold is unchanged.
-        assert!(row_roundoff(200, 1.0e6) < 1e-6);
-        // Even at the 1e16 activity of the #937 band, the floor is ~1e-16 relative:
-        // a residual that is 1e-6 RELATIVE to the row (1e10 absolute) still fails.
+    fn row_residual_floor_stays_below_real_drift_937_1335() {
+        /// The grain of a column at `v`: `|A_ij| = 1`, so `ulp(v)`.
+        fn grain(v: f64) -> f64 {
+            2.0 * f64::EPSILON * v.abs()
+        }
+        let mut checked = 0usize;
+
+        // (#937 i) Ordinary scale: the floor is far under the absolute FEAS term,
+        // so the effective threshold is unchanged.
+        assert!(row_residual_floor(grain(1.0e6)) < 1e-6);
+        checked += 1;
+
+        // (#937 ii) Even at the 1e16 activity of the #937 band, the floor is ~1e-16
+        // relative: a residual that is 1e-6 RELATIVE to the row (1e10 absolute)
+        // still fails.
         let scale = 4.0e16;
-        assert!(row_roundoff(3, scale) < 1e-6 * scale);
+        assert!(row_residual_floor(grain(1.0e16)) < 1e-6 * scale);
+        checked += 1;
+
+        // (#937 iii) ...while still forgiving the exact-vertex ulp: `s = 2u − 1` is
+        // not an f64 for `2u > 2⁵³`, leaving residual 1 that no `x` can improve.
         assert!(
-            row_roundoff(3, scale) > 1.0,
+            row_residual_floor(grain(1.0e16)) > 1.0,
             "must forgive the exact-vertex ulp"
         );
+        checked += 1;
+
+        // (#1335) A row holding a column at 0 can be nudged arbitrarily finely, so
+        // it gets NO floor -- however large its other columns are. This is the case
+        // the old `Σ_j|A_ij x_j|` floor got wrong: two columns at 1e15 bought it 7.1
+        // of slack and a violation of 4.5 went unnoticed.
+        assert_eq!(row_residual_floor(grain(0.0)), 0.0);
+        checked += 1;
+        assert!(
+            row_residual_floor(grain(0.0)) < 4.5,
+            "a 4.5 violation must never be forgiven as arithmetic"
+        );
+        checked += 1;
+
+        // (#1335) And the floor tracks the MINIMUM column, not the row total: the
+        // 1e15 columns do not raise it once a fine column is present.
+        assert_eq!(
+            row_residual_floor(grain(0.0).min(grain(1.0e15))),
+            row_residual_floor(grain(0.0))
+        );
+        checked += 1;
+
+        assert_eq!(checked, 6, "floor probe must have run every property");
     }
 }

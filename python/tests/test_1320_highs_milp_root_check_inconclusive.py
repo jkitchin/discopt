@@ -207,21 +207,26 @@ def test_no_time_limit_never_downgrades(sf_fn):
 # ── accepted cost of the decertify rule ───────────────────────────────────
 
 
-def test_integral_infeasibility_under_an_unbounded_root_lp_is_not_certified():
-    """Round-4 review, finding 3. Pinned as an accepted trade, not an oversight.
+def test_integral_infeasibility_under_an_unbounded_root_lp_is_certified():
+    """Round-4 review, finding 3. The trade this pinned is no longer taken (#1337).
 
     ``2x == 1`` with ``x`` integer has no solution, but the infeasibility is
     purely INTEGRAL: the root LP relaxation is perfectly happy at ``x = 0.5``,
     and here it is even unbounded (``min -y`` with ``y in [0, 1e20]``). So the
-    NS-safe root cross-check comes back ``unbounded`` -- it settles nothing about
-    the MILP's infeasibility -- and the decertify rule refuses to pass HiGHS's
-    raw ``kInfeasible`` through as a certificate.
+    NS-safe root cross-check came back ``unbounded`` -- which settles nothing --
+    and the decertify rule refused to pass HiGHS's raw ``kInfeasible`` through.
 
-    ``main`` reports ``infeasible`` here, and is right. It gets there by trusting
-    the tree label unchecked, which is what #1295/#1320 exist to stop; this route
-    reports ``error`` instead. The gap is real and worth closing -- an unbounded
-    root LP plus ``kInfeasible`` says the conflict must be integral, which could
-    be decided directly -- but doing it by trusting the label is not the way.
+    The gap this docstring called "real and worth closing" is closed the way it
+    named: not by trusting the label, but by asking the root LP the question the
+    branch actually cares about. What defeated the check was the OBJECTIVE, so the
+    re-check drops it -- same LP, same box, zero objective -- and the relaxation
+    answers ``feasible``, leaving the ``kInfeasible`` claim standing on exactly the
+    footing the ordinary ``lp.status in ("optimal", "feasible")`` path already
+    gives it.
+
+    The assertion is TIGHTENED rather than relaxed: ``error`` was acceptable while
+    the check could not be run, and is not acceptable now that it can. The §1 line
+    is kept alongside it.
     """
     m = dm.Model("integral_infeasible_unbounded_root")
     x = m.integer("x", lb=0, ub=5)
@@ -232,6 +237,6 @@ def test_integral_infeasibility_under_an_unbounded_root_lp_is_not_certified():
     # The §1 line: never a WRONG certified status.
     assert r.status != "optimal"
     assert r.status != "unbounded"
-    assert r.status in ("infeasible", "error")
-    if r.status == "error":
-        assert not r.gap_certified
+    assert r.status == "infeasible", (
+        f"the feasibility-only root re-check (#1337) must decide this, got {r.status!r}"
+    )

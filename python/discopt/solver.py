@@ -9132,6 +9132,19 @@ def solve_model(
         _pre_route_model = model
         model = reformulate_gdp(model, method=resolved_gdp_method)
 
+        # #1334: the lowering appends a selector binary per disjunct, and the warm
+        # start was flattened against the variables the USER declared -- so
+        # ``solve_mip_nlp`` got a short vector and raised ``NLP initial point has
+        # shape (1,); expected (3,)`` out of a GDP model that solves fine with no
+        # warm start at all. Complete it against the model this route will solve.
+        # Into a LOCAL name, never over ``initial_point``: when the auto-route does
+        # not certify, line ~9213 restores ``_pre_route_model`` and hands the rest
+        # of the budget to the default path, which must see the caller's own point
+        # and complete it against its own reformulation.
+        from discopt.warm_start import prepare_warm_start as _prepare_warm_start
+
+        _mip_nlp_x0 = _prepare_warm_start(model, initial_point, route="MIP-NLP")
+
         # An EXPLICIT solver="mip-nlp" gets the whole budget: the caller chose the
         # algorithm and there is no fallback to reserve for. Only the auto-route
         # is budgeted.
@@ -9167,7 +9180,7 @@ def solve_model(
                 gap_tolerance=gap_tolerance,
                 max_iterations=max_nodes,
                 nlp_solver=nlp_solver,
-                initial_point=initial_point,
+                initial_point=_mip_nlp_x0,
                 **mip_nlp_kwargs,
             )
         except Exception as _route_exc:  # noqa: BLE001 - see below
@@ -9506,9 +9519,6 @@ def solve_model(
         for key in amp_option_keys:
             if key in kwargs:
                 amp_kwargs[key] = kwargs.pop(key)
-        if initial_point is not None:
-            amp_kwargs["initial_point"] = initial_point
-
         ignored_amp_options = []
 
         def _note_ignored(name: str, should_warn: bool) -> None:
@@ -9559,6 +9569,16 @@ def solve_model(
             method=amp_gdp_method,
             respect_disjunction_methods=False,
         )
+
+        # #1334: AFTER the lowering, never before. ``_normalize_initial_point``
+        # raises ``AMP initial_point has length 1; expected 3`` on the short vector
+        # the caller's own variables flatten to, so every warm start crashed
+        # ``solver="amp"`` on a GDP model -- a model AMP solves fine without one.
+        from discopt.warm_start import prepare_warm_start as _prepare_warm_start
+
+        _amp_x0 = _prepare_warm_start(model, initial_point, route="AMP")
+        if _amp_x0 is not None:
+            amp_kwargs["initial_point"] = _amp_x0
 
         return solve_amp(
             model,
@@ -9956,27 +9976,9 @@ def solve_model(
     # integer-product reforms extend it. Dropping is the fallback, never an error:
     # a hint must not be able to fail a solve.
     if initial_point is not None:
-        initial_point = np.asarray(initial_point, dtype=np.float64).ravel()
-        _n_gdp_cols = int(sum(int(v.size) for v in model._variables))
-        if initial_point.size != _n_gdp_cols:
-            from discopt.warm_start import complete_initial_point
+        from discopt.warm_start import prepare_warm_start
 
-            _gdp_x0 = complete_initial_point(model, initial_point)
-            if _gdp_x0 is None:
-                logger.warning(
-                    "Warm start dropped: the initial solution covers %d columns and "
-                    "the GDP-lowered model has %d. The solve continues without it.",
-                    int(initial_point.size),
-                    _n_gdp_cols,
-                )
-                initial_point = None
-            else:
-                logger.info(
-                    "Warm start extended from %d to %d columns across the GDP lowering",
-                    int(initial_point.size),
-                    _n_gdp_cols,
-                )
-                initial_point = _gdp_x0
+        initial_point = prepare_warm_start(model, initial_point, route="GDP lowering")
 
     # --- Entropy-family canonicalization: recover the ``entropy(x) = x*log(x)``
     # and ``centropy(x, y) = x*log(x/y)`` intrinsics from the raw products that
@@ -12954,27 +12956,11 @@ def solve_model(
         # columns are repaired to the values the given point implies — and when it
         # cannot be completed, DROP it with a message. A warm start is a hint; it
         # must never be able to fail a solve.
-        _n_cols = int(sum(int(v.size) for v in model._variables))
-        if initial_point.size != _n_cols:
-            from discopt.warm_start import complete_initial_point
+        from discopt.warm_start import prepare_warm_start
 
-            _completed = complete_initial_point(model, initial_point, evaluator=evaluator)
-            if _completed is None:
-                logger.warning(
-                    "Warm start dropped: the initial solution covers %d columns and "
-                    "the model the solver built has %d (a reformulation added "
-                    "variables). The solve continues without it.",
-                    int(initial_point.size),
-                    _n_cols,
-                )
-                initial_point = None
-            else:
-                logger.info(
-                    "Warm start extended from %d to %d columns across a solve-time reformulation",
-                    int(initial_point.size),
-                    _n_cols,
-                )
-                initial_point = _completed
+        initial_point = prepare_warm_start(
+            model, initial_point, route="Spatial B&B", evaluator=evaluator
+        )
     if initial_point is not None:
         ws_obj = float(evaluator.evaluate_objective(initial_point))
         # Check integer feasibility of the warm-start point
@@ -18253,28 +18239,17 @@ def _solve_nlp_bb(
         # plain ``Model.solve(nlp_bb=True, warm_start=r)`` that succeeds without
         # the warm start. Same completion the spatial path has run since #1255 --
         # a warm start is a hint and must never be able to fail a solve.
-        _nb_cols = int(sum(int(v.size) for v in model._variables))
-        if int(np.asarray(initial_point).size) != _nb_cols:
-            from discopt.warm_start import complete_initial_point
+        #
+        # #1334: and it must be FILTERED before it is rounded. The integrality
+        # test below calls ``round()`` on every discrete column, and ``round(nan)``
+        # raises ``ValueError: cannot convert float NaN to integer`` -- so a
+        # non-finite point crashed the solve three lines before the
+        # ``np.isfinite(ws_obj)`` guard that was meant to catch it.
+        from discopt.warm_start import prepare_warm_start
 
-            _nb_completed = complete_initial_point(model, initial_point, evaluator=evaluator)
-            if _nb_completed is None:
-                logger.warning(
-                    "NLP-BB warm start dropped: the initial solution covers %d columns "
-                    "and the model the solver built has %d (a reformulation added "
-                    "variables). The solve continues without it.",
-                    int(np.asarray(initial_point).size),
-                    _nb_cols,
-                )
-                initial_point = None
-            else:
-                logger.info(
-                    "NLP-BB warm start extended from %d to %d columns across a "
-                    "solve-time reformulation",
-                    int(np.asarray(initial_point).size),
-                    _nb_cols,
-                )
-                initial_point = _nb_completed
+        initial_point = prepare_warm_start(
+            model, initial_point, route="NLP-BB", evaluator=evaluator
+        )
     if initial_point is not None:
         ws_obj = float(evaluator.evaluate_objective(initial_point))
         ws_int_feas = True
@@ -21775,13 +21750,17 @@ def _matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, bounds, tol=1e-6, rtol=
         A_ub = np.asarray(A_ub, dtype=np.float64)
         viol = A_ub @ x - np.asarray(b_ub, dtype=np.float64)
         row_scale = np.abs(A_ub) @ absx
-        if np.any(viol > tol + rtol * row_scale):
+        thresh = _matrix_row_threshold(A_ub, row_scale, tol, rtol)
+        bad = np.nonzero(viol > thresh)[0]
+        if bad.size and _any_row_truly_violated(A_ub, x, b_ub, bad, thresh, signed=True):
             return False
     if A_eq is not None and b_eq is not None and len(b_eq):
         A_eq = np.asarray(A_eq, dtype=np.float64)
         viol = np.abs(A_eq @ x - np.asarray(b_eq, dtype=np.float64))
         row_scale = np.abs(A_eq) @ absx
-        if np.any(viol > tol + rtol * row_scale):
+        thresh = _matrix_row_threshold(A_eq, row_scale, tol, rtol)
+        bad = np.nonzero(viol > thresh)[0]
+        if bad.size and _any_row_truly_violated(A_eq, x, b_eq, bad, thresh, signed=False):
             return False
     if bounds is not None:
         # Vectorised form of the original per-element loop (#952): identical
@@ -21792,10 +21771,114 @@ def _matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, bounds, tol=1e-6, rtol=
         box = np.asarray(bounds, dtype=np.float64)
         if box.size:
             k = min(x.shape[0], box.shape[0])
-            row_tol = tol + rtol * absx[:k]
+            # #1335: same three-part threshold as a row. A bound row is
+            # ``±x_i ≤ ±bound``, so its gradient norm is exactly 1 and the distance
+            # cap is the flat ``FEASIBLE_DISTANCE_TOL``; its term scale is |x_i|.
+            row_tol = np.maximum(
+                _FEAS_SUM_FLOOR * absx[:k],
+                np.minimum(tol + rtol * absx[:k], _feas_distance_cap(np.ones(k))),
+            )
             if np.any(x[:k] < box[:k, 0] - row_tol) or np.any(x[:k] > box[:k, 1] + row_tol):
                 return False
     return True
+
+
+#: Coefficient of the representability floor (#1335). Perturbing column ``j`` by
+#: its last bit moves the row activity by ``|A_ij|·ulp(x_j) ≤ 2ε·|A_ij x_j|``, so
+#: this times the SMALLEST such term is the finest step the row admits at all.
+_FEAS_SUM_FLOOR = 2.0 * float(np.finfo(np.float64).eps)
+
+
+def _row_representability_floor(a_row, x) -> float:
+    """The finest step row ``a_row`` can take: ``min_j |A_ij| · ulp(x_j)``.
+
+    A residual below this is not evidence of anything — no representable ``x``
+    can do better, which is the #937 case (a vertex needing ``s = 2u − 1``, which
+    for ``2u > 2⁵³`` is not an ``f64`` at all).
+
+    The MINIMUM, not the sum. The sum is what the row's *total* magnitude can
+    express, which is a different and far larger quantity, and using it is how a
+    row of two ``1e15`` columns came to forgive a violation of 4.5 (#1335): the
+    question that decides the case is whether ANY column can absorb the residual,
+    and that is answered by the finest one. A row with a column at ``0`` can be
+    nudged arbitrarily finely and so gets no floor at all.
+    """
+    a = np.abs(np.asarray(a_row, dtype=np.float64))
+    nz = a != 0.0
+    if not np.any(nz):
+        # An all-zero row has constant activity: nothing can move it, and a
+        # residual on it is a real infeasibility rather than a resolution limit.
+        return 0.0
+    grains = a[nz] * (_FEAS_SUM_FLOOR * np.abs(np.asarray(x, dtype=np.float64))[nz])
+    return float(np.min(grains))
+
+
+def _matrix_row_threshold(A, row_scale, tol: float, rtol: float) -> np.ndarray:
+    """Per-row violation a matrix-form solution may carry and still be feasible.
+
+    Three parts, in the order they bind (#1335):
+
+    ``min(tol + rtol·row_scale, FEASIBLE_DISTANCE_TOL·‖A_i‖_∞)``
+        The residual test, capped by POSITION. ``tol + rtol·row_scale`` alone is
+        the whole of what this gate used to ask, and it is scale-blind in the
+        wrongly-accept direction: ``rtol = 1e-9`` against a row whose terms total
+        ``2e15`` licenses a violation of **two million**. On ``x − y ≤ 1`` ∧
+        ``x − y ≥ 10`` over ``x, y ∈ [1e15, 3e15]`` — infeasible by inspection —
+        the engine returned ``x − y = 5.5``, violating both rows by 4.5, and this
+        gate passed it; the LP came back ``optimal`` with ``gap_certified=True``.
+        The cap is #1254's rule, which the NLP-side verifier has had since then and
+        this one never received: a residual is only forgivable if a small move in
+        VARIABLE space fixes it, and the first-order distance to a linear row's
+        surface is ``violation / ‖A_i‖_∞``. At 4.5 in a unit-coefficient row the
+        point is 4.5 away from feasible — no tolerance makes that near-feasible.
+
+    What arithmetic cannot deliver is the other half of the story (#937) — a row
+    whose columns sit at ``1e16`` cannot resolve its activity more finely than an
+    ulp, so demanding ``1e-4`` of it would reject points for the representation
+    rather than for their position. That floor is NOT applied here: it is applied
+    per row, only to rows this threshold rejects, by
+    :func:`_row_representability_floor`, because it needs the row's own columns
+    rather than their total. Keeping it off the hot path also keeps this function
+    one vectorised pass.
+
+    Note the cap is taken WITHOUT ``feasible_distance_cap``'s optional
+    cancellation-noise arm: that arm exists for a caller whose own tolerance has
+    no allowance for rounding, while ``tol + rtol·row_scale`` here is exactly such
+    an allowance. Passing it would restore the 2e6 this function exists to remove.
+    """
+    grad_inf = np.abs(np.asarray(A, dtype=np.float64)).max(axis=1)
+    capped = np.minimum(tol + rtol * row_scale, _feas_distance_cap(grad_inf))
+    return np.asarray(capped, dtype=np.float64)
+
+
+def _any_row_truly_violated(A, x, b, rows, thresh, *, signed: bool) -> bool:
+    """Re-test *rows* with an EXACTLY summed residual before rejecting on them.
+
+    ``A @ x`` is a BLAS dot product, so its own error is ``~k·ε·Σ|A_ij x_j|`` —
+    which at the ``1e15`` row scales this function now judges is larger than the
+    ``2ε·row_scale`` floor those rows are held to. Rejecting on the naive residual
+    alone would therefore turn summation order into a verdict. ``math.fsum`` sums
+    the (correctly rounded) products exactly, leaving only the products' own
+    rounding, which the floor does cover.
+
+    Run only on rows the cheap pass already flagged, and short-circuits on the
+    first row that survives re-testing — so a feasible point pays nothing and a
+    genuinely infeasible one pays one exact row (#1335).
+    """
+    import math
+
+    A = np.asarray(A, dtype=np.float64)
+    x = np.asarray(x, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    for i in rows:
+        resid = math.fsum(A[i] * x) - b[i]
+        if not signed:
+            resid = abs(resid)
+        # The representability floor is charged HERE, so it costs nothing on a
+        # feasible point and is computed from the row's own columns (#1335).
+        if resid > max(float(thresh[i]), _row_representability_floor(A[i], x)):
+            return True
+    return False
 
 
 def _matrix_solution_violations(x, A_ub, b_ub, A_eq, b_eq, bounds) -> str:

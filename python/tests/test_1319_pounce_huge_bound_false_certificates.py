@@ -520,21 +520,26 @@ def test_per_row_floor_restores_the_infeasible_certificate(quadratic):
 
 @pytest.mark.parametrize("quadratic", [False, True])
 def test_unverifiable_infeasible_is_an_error_not_an_unchecked_certificate(quadratic):
-    """Accepted trade, pinned so it stays deliberate.
+    """The trade this test pinned is no longer taken -- #1336 closed it.
 
     At this magnitude ``_phase1_min_violation`` returns no point, so POUNCE's raw
-    Ipopt code 2 cannot be cross-checked. ``main`` reports ``infeasible`` here --
-    correct in fact, but only by trusting exactly the unverified code 2 that
-    #1319 part 2 exists to stop trusting. This route reports ``error`` instead:
-    weaker, and honest. Deciding it properly needs a feasibility oracle that does
-    not depend on the IPM (the constraint system is linear, so the exact simplex
-    could answer it); tracked separately.
+    Ipopt code 2 cannot be cross-checked, and this route reported ``error``:
+    weaker than ``main``'s ``infeasible``, but honest, where ``main``'s is reached
+    only by trusting exactly the unverified code 2 that #1319 part 2 exists to
+    stop trusting. The way out this docstring named -- "a feasibility oracle that
+    does not depend on the IPM (the constraint system is linear, so the exact
+    simplex could answer it)" -- is now ``_simplex_feasibility_verdict``, so the
+    answer is ``infeasible`` **with** a verified Farkas ray behind it: better than
+    the ``error`` this asserted and better than ``main``'s unchecked label.
+
+    The assertion is TIGHTENED rather than relaxed: ``error`` was acceptable while
+    nothing could decide the model, and is not acceptable now that something can.
     """
     r = _decoupled_infeasible_model(1e14, quadratic).solve(time_limit=60)
     assert r.status != "unbounded"
-    assert r.status in ("infeasible", "error")
-    if r.status == "error":
-        assert not r.gap_certified
+    assert r.status == "infeasible", (
+        f"the simplex feasibility oracle (#1336) must decide this model, got {r.status!r}"
+    )
 
 
 def test_phase1_floor_is_per_row_not_summed():

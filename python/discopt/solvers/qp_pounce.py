@@ -48,6 +48,7 @@ from discopt.solvers.lp_pounce import (
     _interior_start,
     _phase1_min_violation,
     _phase1_verdict,
+    _simplex_feasibility_verdict,
     _stack_constraints,
     finite_bound_threshold,
 )
@@ -197,15 +198,24 @@ def solve_qp(
         verdict = (
             _phase1_verdict(phase1.slacks, cl, cu, phase1.row_activity)
             if phase1 is not None
-            else None
+            else PHASE1_UNDECIDED
         )
+        if verdict == PHASE1_UNDECIDED:
+            # #1336: and this route is where giving up cost the most. A QP has no
+            # second engine to degrade to, so an unanswerable Phase-1 became a bare
+            # ``error`` -- on a model ``main`` calls ``infeasible``, correctly,
+            # by trusting exactly the raw code 2 that #1309/#1319 exist to stop
+            # trusting. The constraint system is LINEAR even here, so the exact
+            # simplex settles it and the answer comes back with a proof instead.
+            verdict = _simplex_feasibility_verdict(A, cl, cu, lb, ub)
         if verdict == PHASE1_INFEASIBLE:
-            assert phase1 is not None
             return QPResult(
                 status=SolveStatus.INFEASIBLE,
                 iterations=result.iterations,
                 wall_time=result.wall_time,
-                infeasibility_certificate=_build_certificate(phase1.slacks, n_ineq),
+                infeasibility_certificate=(
+                    _build_certificate(phase1.slacks, n_ineq) if phase1 is not None else None
+                ),
             )
         if verdict == PHASE1_UNDECIDED:
             # Undecided is not feasible. Falling through would let the ray check

@@ -1519,10 +1519,44 @@ def solve_milp_std(
         # #1309 applied "a certificate whose safety net never ran is not a
         # certificate" only to the skip branch; an inconclusive run is the same
         # fact and gets the same downgrade (#1320 part 1).
-        stats["milp/root_check_inconclusive"] = 1.0
-        decertify_root_check(
-            f"the NS-safe root cross-check was inconclusive (root LP {lp.status}: {lp.message})"
-        )
+        #
+        # #1337: unless what defeated the check was the OBJECTIVE rather than
+        # anything about feasibility. On a purely INTEGRAL infeasibility the
+        # relaxation is perfectly happy — ``2x == 1`` relaxes to ``x = 0.5`` — and
+        # if the objective is also unbounded there (``min −y`` over
+        # ``y ∈ [0, 1e20]``) the root LP comes back ``unbounded``, which lands here
+        # and decertifies a correct ``infeasible`` into ``error``. But the question
+        # this branch asks of a kInfeasible claim is only ever "is the relaxation
+        # feasible?", and an unbounded objective says nothing about that. So ask it
+        # without one: same LP, same box, zero objective.
+        #
+        # The verdict is held to exactly the standard the ordinary path already
+        # uses, not a weaker one — a Farkas-infeasible relaxation proves the MILP
+        # empty, and a feasible relaxation leaves the kInfeasible claim standing
+        # precisely as the ``lp.status in ("optimal", "feasible")`` branch above
+        # already does. Anything else still decertifies.
+        _settled = False
+        if out.status == "infeasible" and out.gap_certified:
+            _rem2 = remaining()
+            if _rem2 is None or _rem2 > 0.0:
+                stats["milp/root_check_feasibility_only"] = 1.0
+                feas = solve_lp_std(
+                    dataclasses.replace(sf, c=np.zeros(sf.n, dtype=np.float64), obj_const=0.0),
+                    time_limit=_rem2,
+                )
+                if feas.status == "infeasible":
+                    # Stronger than needed: the relaxation itself is empty.
+                    labels["milp/infeasible_provenance"] = "farkas-root-lp"
+                    stats["milp/infeasible_provenance_farkas"] = 1.0
+                    _settled = True
+                elif feas.status in ("optimal", "feasible"):
+                    labels["milp/infeasible_provenance"] = "highs-root-feasible"
+                    _settled = True
+        if not _settled:
+            stats["milp/root_check_inconclusive"] = 1.0
+            decertify_root_check(
+                f"the NS-safe root cross-check was inconclusive (root LP {lp.status}: {lp.message})"
+            )
     return done(out)
 
 
