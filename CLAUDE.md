@@ -332,7 +332,41 @@ Optional LLM-powered features using litellm as a universal adapter (100+ provide
 
 **Safety invariant**: LLM outputs never affect solver math. Formulations pass `validate()`. Explanations are sanitized. Graceful degradation when litellm is unavailable.
 
-**Claude Code skill files** in `.claude/commands/`: `/formulate`, `/diagnose`, `/reformulate`, `/explain-model`, `/convert`, `/benchmark-report`.
+## Claude Code skills (`python/discopt/skills/`)
+
+The shareable slash commands and agent personas live **inside the Python
+package**, so they ship with the wheel. They are not in `.claude/` in this repo —
+that directory is a *destination*, written by the installer, not a source:
+
+```bash
+discopt install-skills                  # into ~/.claude/ (every project)
+discopt install-skills --project-scope  # into ./.claude/
+discopt install-skills --dev            # symlink, for `pip install -e`
+discopt install-skills --force          # overwrite
+```
+
+- **`skills/commands/`** (8) — `/formulate`, `/debug`, `/diagnose`, `/reformulate`,
+  `/explain-model`, `/convert`, `/estimate`, `/benchmark-report`
+- **`skills/agents/`** (17) — `minlp-solver-expert`, `presolve-expert`,
+  `convex-relaxation-expert`, `convexity-detection-expert`, `differentiability-expert`,
+  `ipopt-expert`, `highs-expert`, `scip-expert`, `amp-expert`, `modeling-expert`,
+  `heuristics-expert`, `estimation-expert`, `ml-embedding-expert`,
+  `multiobjective-expert`, `robust-opt-expert`, `benchmarking-expert`,
+  `llm-feature-expert`
+- **`skills/__init__.py`** — `commands_dir()`, `agents_dir()`, `iter_commands()`,
+  `iter_agents()` for programmatic discovery.
+
+Editing a command or agent means editing the file under `python/discopt/skills/`;
+editing a copy under `.claude/` changes only that one machine's install and is
+lost on the next `install-skills` (use `--dev` to symlink instead).
+
+Not in the bundle, and not slash commands: `discopt-dev` ships an **`adversary`
+CLI verb** (`discopt-dev adversary` — the agent that files the adversarial issues),
+alongside `search-arxiv`, `search-openalex`, `lit-scan` and `write-report`.
+`claude-skills/README.md` also mentions a `/discoptbot` command and a
+`/discopt-doe` skill from the external
+[discopt-doe](https://github.com/jkitchin/discopt-doe) plugin; neither is present
+in this repo, so treat that README's framing of them as unverified here.
 
 ## Key Constraints
 
