@@ -1242,6 +1242,31 @@ class Constant(Expression):
         return f"Constant({self.value.shape})"
 
 
+_FLOAT64 = np.dtype(np.float64)
+
+
+def _readonly_bound(value) -> np.ndarray:
+    """*value* as a float64 array that cannot be written through.
+
+    The single choke point for :attr:`Variable.lb` / :attr:`Variable.ub`; see
+    the note on those properties for why the invariant lives here and not at
+    each writer.
+
+    Never copies the data. An array that is already read-only (a
+    ``broadcast_to`` view, or a box that came back out of another variable) is
+    installed as is; a writable one is installed as a read-only *view* of the
+    same buffer, so the caller's own array object keeps whatever permissions it
+    had and no allocation of the data is added to the node loop.
+    """
+    arr = value if type(value) is np.ndarray and value.dtype == _FLOAT64 else None
+    if arr is None:
+        arr = np.asarray(value, dtype=np.float64)
+    if arr.flags.writeable:
+        arr = arr.view()
+        arr.flags.writeable = False
+    return arr
+
+
 class Variable(Expression):
     """
     A decision variable in the optimization problem.
@@ -1304,13 +1329,16 @@ class Variable(Expression):
         # node loop is already overriding boxes), and a single slot would
         # restore the wrong box on the inner unfix.
         self._bound_stack: list[tuple[np.ndarray, np.ndarray]] = []
-        # One opaque token per currently-open `fixed()` scope on this variable
-        # (pushed by `Variable.fixed`/`Model.fixed`, never by a raw `fix()`).
-        # Detects two such scopes closing out of LIFO order (#1311) -- e.g. one
-        # held open across a callback boundary while another opens and closes
-        # inside it -- which `_bound_stack`'s depth alone cannot distinguish
-        # from an ordinary leaked inner `fix()`.
-        self._fix_scope_tokens: list[object] = []
+        # One `(token, depth)` pair per currently-open `fixed()` scope on this
+        # variable (pushed by `Variable.fixed`/`Model.fixed`, never by a raw
+        # `fix()`). The token detects two such scopes closing out of LIFO order
+        # (#1311) -- e.g. one held open across a callback boundary while another
+        # opens and closes inside it -- which `_bound_stack`'s depth alone
+        # cannot distinguish from an ordinary leaked inner `fix()`. The depth is
+        # the `_bound_stack` length the scope was entered at, which is what lets
+        # `Model.saved_bounds` see that its restore would pop a scope that is
+        # still open (#1321).
+        self._fix_scope_tokens: list[tuple[object, int]] = []
 
     @property
     def size(self) -> int:
@@ -1371,6 +1399,43 @@ class Variable(Expression):
             self._elem_cache[idx] = node
             return node
         return Expression.__getitem__(self, idx)
+
+    # ── Bound storage: every box this variable ever holds is read-only ──
+    #
+    # `Model.saved_bounds(copy=False)` snapshots boxes BY REFERENCE, once per
+    # branch-and-bound node. That is only sound while no one writes into a box
+    # array in place: an in-place write would reach through the snapshot and
+    # silently redefine the problem the restore puts back, and a fixed column
+    # is just `lb == ub`, so a corrupted box returns `status="optimal"` for a
+    # different model with no other symptom.
+    #
+    # The invariant used to be maintained per call site -- declaration got a
+    # read-only `broadcast_to` view, `fix()` froze the box it pushed (#1311) --
+    # and it leaked on every site that was missed: `loads()` rebuilt the fix
+    # stack writable, `fix()` handed back writable `new_lb`/`new_ub` for the
+    # live box, and the GAMS reader stored plain writable arrays (#1321). Each
+    # leak turned a would-be `ValueError` into a wrong answer.
+    #
+    # So it is enforced HERE, at the one place every box passes through, rather
+    # than at each writer. A writer that needs to edit a box builds its own
+    # writable array and assigns it; it cannot mutate one already installed.
+    @property
+    def lb(self) -> np.ndarray:
+        """Lower bound array (read-only; rebind to change it)."""
+        return self._lb
+
+    @lb.setter
+    def lb(self, value) -> None:
+        self._lb = _readonly_bound(value)
+
+    @property
+    def ub(self) -> np.ndarray:
+        """Upper bound array (read-only; rebind to change it)."""
+        return self._ub
+
+    @ub.setter
+    def ub(self, value) -> None:
+        self._ub = _readonly_bound(value)
 
     # ── Fixing: bounds are the fixing route ──────────────────────────
     #
@@ -1525,7 +1590,7 @@ class Variable(Expression):
         depth_before = len(self._bound_stack)
         self.fix(value, where=where)
         token = object()
-        self._fix_scope_tokens.append(token)
+        self._fix_scope_tokens.append((token, depth_before))
         completed = False
         try:
             yield self
@@ -1540,7 +1605,7 @@ class Variable(Expression):
             # by which point a solve run in between may already have seen the
             # wrong box. Detect the divergence right here, before unwinding
             # anything.
-            if not self._fix_scope_tokens or self._fix_scope_tokens[-1] is not token:
+            if not self._fix_scope_tokens or self._fix_scope_tokens[-1][0] is not token:
                 raise RuntimeError(
                     f"Variable {self.name!r}: fixed() scopes were closed out of "
                     "order -- another fixed() (or Model.fixed()) scope on this "
@@ -5143,13 +5208,37 @@ class Model:
             ]
         else:
             saved = [(v.lb, v.ub, len(v._bound_stack)) for v in vars_]
+        completed = False
         try:
             yield self
+            completed = True
         finally:
+            # A `fixed()` scope entered INSIDE this one and still open when it
+            # exits is the mirror image of the #1311 hazard: truncating the fix
+            # stack here would pop that scope's frame, leaving a context manager
+            # whose `__exit__` has nothing left to restore and no error until it
+            # runs -- if it ever does. Detected before unwinding, reported after
+            # the boxes are back (the restore is this scope's contract, and a
+            # half-restored model is worse than a loud one) (#1321).
+            orphaned: list[str] = []
             for v, (lb, ub, depth) in zip(vars_, saved):
                 v.lb = lb
                 v.ub = ub
                 del v._bound_stack[depth:]
+                # Cheap in the node loop, where no variable carries a scope
+                # token at all: the scan only runs for variables that do.
+                toks = v._fix_scope_tokens
+                if toks and any(d >= depth for _tok, d in toks):
+                    orphaned.append(v.name)
+                    v._fix_scope_tokens = [t for t in toks if t[1] < depth]
+            if completed and orphaned:
+                raise RuntimeError(
+                    f"Model.saved_bounds(): a fixed() scope opened inside this "
+                    f"block is still open on {orphaned}; restoring the saved "
+                    "boxes would discard the fix frames it is holding. Close "
+                    "every fixed() scope before the saved_bounds() block it was "
+                    "opened in exits."
+                )
 
     @_contextlib.contextmanager
     def fixed(self, *mappings, **by_name) -> "Iterator[Model]":
@@ -5204,8 +5293,9 @@ class Model:
         completed = False
         try:
             for var, value in targets:
+                depth_at_entry = len(var._bound_stack)
                 var.fix(value)
-                var._fix_scope_tokens.append(token)
+                var._fix_scope_tokens.append((token, depth_at_entry))
                 tokened.append(var)
             yield self
             completed = True
@@ -5217,7 +5307,7 @@ class Model:
             out_of_order = [
                 var.name
                 for var in tokened
-                if not var._fix_scope_tokens or var._fix_scope_tokens[-1] is not token
+                if not var._fix_scope_tokens or var._fix_scope_tokens[-1][0] is not token
             ]
             if out_of_order:
                 raise RuntimeError(
@@ -7506,6 +7596,25 @@ class Model:
         # (a failed/infeasible solve carries no point to start from) and read
         # nowhere on the solve path itself.
         if isinstance(result, SolveResult) and result.x is not None:
+            # --- #1322: stamp WHICH problem this point solves ----------------
+            # Nothing invalidated the recorded result when the model changed,
+            # and the cross-check compared objective VALUES only, so a
+            # parameter change that moved the global optimum to another basin
+            # left `sensitivity()` warm-starting into the old well and
+            # reporting `matches_reference=True` -- the #1313 failure again,
+            # now with a stamp saying it had been checked. The fingerprint is
+            # process-local (it holds object identities) and is attached to the
+            # result rather than declared on it, so it cannot ride along into a
+            # serialized document; `result_io` writes an explicit field list.
+            # Deliberately not guarded: `solution_state_fingerprint` is a total
+            # function over model state that has already been validated and
+            # solved, so a raise here is a real defect, and a swallowed one
+            # would put the reference back to being unverifiable while still
+            # reporting `matches_reference=True` -- the exact failure being
+            # fixed.
+            from discopt._evaluator_cache import solution_state_fingerprint
+
+            setattr(result, "_problem_fingerprint", solution_state_fingerprint(self))
             self._last_solve_result = result
 
         return result

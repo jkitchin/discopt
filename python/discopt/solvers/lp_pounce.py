@@ -289,9 +289,17 @@ class PounceKKTError(RuntimeError):
     returning silently-wrong sensitivities to a differentiable layer."""
 
 
-# Ipopt return codes (POUNCE is shape-compatible). For a *convex* LP, local
-# infeasibility is global, so code 2 is a sound INFEASIBLE; diverging iterates
-# (4) and a too-small search direction (3) on an LP signal unboundedness.
+# Ipopt return codes (POUNCE is shape-compatible). Diverging iterates (4) and a
+# too-small search direction (3) on an LP signal unboundedness.
+#
+# This table is the RAW reading of the code, not a verdict. #1309 falsified the
+# claim this comment used to make -- that "for a convex LP local infeasibility
+# is global, so code 2 is a sound INFEASIBLE": the barrier method raises code 2
+# from numerical failure on badly-conditioned huge-magnitude-bound problems with
+# no infeasibility behind it (reproduced with declared bounds in [5e15, 2e18] on
+# an otherwise trivially feasible one-row LP). Every INFEASIBLE, 3 and 4 here is
+# cross-checked against the elastic Phase-1 LP in ``_solve_core`` before it
+# reaches a caller; see the note there.
 _LP_STATUS_MAP = {
     0: SolveStatus.OPTIMAL,  # Solve_Succeeded
     1: SolveStatus.OPTIMAL,  # Solved_To_Acceptable_Level

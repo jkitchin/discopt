@@ -15,6 +15,8 @@ from __future__ import annotations
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Any, Callable
 
+import numpy as np
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from discopt.modeling.core import Model
 
@@ -49,6 +51,40 @@ def evaluator_fingerprint(model: "Model") -> tuple:
         tuple(id(v) for v in model._variables),
         tuple(id(p) for p in model._parameters),
         bool(getattr(model, "_gauss_newton_hessian", False)),
+    )
+
+
+def solution_state_fingerprint(model: "Model") -> tuple:
+    """Everything that decides WHICH point a solve of *model* returns.
+
+    :func:`evaluator_fingerprint` plus the two things it deliberately leaves
+    out -- variable bounds and ``Parameter.value`` -- because for an evaluator
+    they are inputs, while for a *solution* they are part of the problem. A
+    recorded result is about this fingerprint's problem and no other.
+
+    Used by ``Model.sensitivity()`` to tell a live reference solution from a
+    stale one (#1322): the reference is what decides which basin the derivatives
+    describe, and a parameter change alone can move the global optimum to
+    another well while the old point remains a perfectly good KKT point with a
+    perfectly matching objective value.
+
+    Values, not identities, for bounds and parameters: a bound is rebound with a
+    fresh array on every B&B node and a parameter is written through in place,
+    so identity would report change where there is none and miss change where
+    there is. `tobytes()` gives exact equality -- the right test here, since the
+    question is "is this the same problem", not "is it close".
+    """
+    return (
+        evaluator_fingerprint(model),
+        tuple(
+            (
+                np.asarray(v.lb, dtype=np.float64).tobytes(),
+                np.asarray(v.ub, dtype=np.float64).tobytes(),
+            )
+            for v in model._variables
+        ),
+        tuple(np.asarray(p.value, dtype=np.float64).tobytes() for p in model._parameters),
+        None if model._objective is None else str(model._objective.sense),
     )
 
 

@@ -5238,6 +5238,35 @@ def _gap_criterion(ub: float, lb: float, gap_tolerance: float, abs_gap_tol: floa
     return None
 
 
+def _warn_abs_gap_ignored(route: str, abs_gap_tolerance: Optional[float]) -> None:
+    """Say so when *route* cannot honour an ``abs_gap_tolerance`` the caller set.
+
+    #1323: several routes take ``gap_tolerance`` and nothing else, so an
+    absolute criterion passed to :func:`solve_model` reached them and vanished.
+    The result stays VALID -- the bound is sound either way -- but the solve
+    runs past the stopping point the caller asked for and reports ``feasible``
+    where it should have reported optimal within the tolerance, with nothing
+    anywhere saying the option was dropped. An inert option that says nothing is
+    worse than one that refuses (CLAUDE.md §3), so every such route either
+    honours it or says this.
+
+    Silent when the caller set nothing: ``None`` means "use the default", not a
+    request, and warning on it would fire on every solve.
+    """
+    if abs_gap_tolerance is None:
+        return
+    import warnings
+
+    warnings.warn(
+        f"{route} ignores abs_gap_tolerance={abs_gap_tolerance!r}: it converges on the "
+        "relative gap only. The solve will not stop when the absolute gap is met, and "
+        "may report 'feasible' for a run whose absolute gap already satisfied the "
+        "request. Use gap_tolerance here, or the default branch-and-bound engine, "
+        "which honours both.",
+        stacklevel=2,
+    )
+
+
 def _resolve_abs_gap_tolerance(abs_gap_tolerance: Optional[float]) -> float:
     """The absolute gap tolerance a solve runs at, validated.
 
@@ -5697,6 +5726,14 @@ _MIP_NLP_IGNORED_OPTIONS: tuple[tuple[str, Callable[[Any], bool]], ...] = (
     ("subnlp_options", lambda v: v is not None),
     ("root_cut_rounds", lambda v: v is not None),
     ("root_cut_max", lambda v: v is not None),
+    # #1323: every method in this family converges on the RELATIVE gap alone.
+    # The option was neither honoured nor refused nor warned about, so a convex
+    # MINLP auto-routed to OA ran the baseline trace and stalled at an absolute
+    # gap of 186 under `abs_gap_tolerance=1e4`. Listed here, the auto-route
+    # declines and the spatial B&B path -- which does honour it -- takes the
+    # model (3 nodes against the route's 241 on the issue's repro); an explicit
+    # solver="mip-nlp" warns and proceeds, as with every other entry.
+    ("abs_gap_tolerance", lambda v: v is not None),
 )
 
 
@@ -8685,6 +8722,7 @@ def solve_model(
     # and ``lp_spatial=True`` is a documented public kwarg. The capability is kept and
     # is opt-in; what is not shipped by default is a measured loss.
     if kwargs.get("lp_spatial", False):
+        _warn_abs_gap_ignored("The lp_spatial engine", abs_gap_tolerance)
         try:
             from discopt._relax.lp_spatial_bb import solve_lp_spatial_bb
             from discopt.modeling.core import _lp_spatial_mixed_fallback_enabled
@@ -8808,6 +8846,7 @@ def solve_model(
         "subnlp_options": subnlp_options,
         "root_cut_rounds": root_cut_rounds,
         "root_cut_max": root_cut_max,
+        "abs_gap_tolerance": abs_gap_tolerance,
     }
 
     # --- Solver-family dispatch ---
@@ -9494,6 +9533,7 @@ def solve_model(
         _note_ignored_gp("lazy_constraints", lazy_constraints is not None)
         _note_ignored_gp("incumbent_callback", incumbent_callback is not None)
         _note_ignored_gp("node_callback", node_callback is not None)
+        _note_ignored_gp("abs_gap_tolerance", abs_gap_tolerance is not None)
         if kwargs:
             ignored_gp_options.extend(sorted(kwargs))
         if ignored_gp_options:
@@ -9551,6 +9591,7 @@ def solve_model(
         _note_ignored_gp_minlp("lazy_constraints", lazy_constraints is not None)
         _note_ignored_gp_minlp("incumbent_callback", incumbent_callback is not None)
         _note_ignored_gp_minlp("node_callback", node_callback is not None)
+        _note_ignored_gp_minlp("abs_gap_tolerance", abs_gap_tolerance is not None)
         if kwargs:
             ignored_gp_minlp_options.extend(sorted(kwargs))
         if ignored_gp_minlp_options:
@@ -9666,6 +9707,7 @@ def solve_model(
         )
 
         if classify_signomial_global(model) is not None:
+            _warn_abs_gap_ignored("The signomial global engine", abs_gap_tolerance)
             sgo_result = solve_signomial_global(
                 model,
                 time_limit=time_limit,
@@ -9677,6 +9719,7 @@ def solve_model(
 
     # --- Benders / Lagrangian decomposition: opt-in, structure-exploiting ---
     if decomposition is not None:
+        _warn_abs_gap_ignored(f"decomposition={decomposition!r}", abs_gap_tolerance)
         if decomposition == "benders":
             from discopt.decomposition.benders import solve_benders
 
@@ -9801,6 +9844,8 @@ def solve_model(
     # --- LOA decomposition: intercept before GDP reformulation ---
     if gdp_method == "loa":
         from discopt.solvers.gdpopt_loa import solve_gdpopt_loa
+
+        _warn_abs_gap_ignored("The GDPopt-LOA decomposition", abs_gap_tolerance)
 
         loa_kwargs = {}
         if "milp_solver" in kwargs:
@@ -18125,6 +18170,36 @@ def _solve_nlp_bb(
 
     # --- Warm-start: inject user-provided initial solution as incumbent ---
     if initial_point is not None:
+        # #1324: the point was flattened against the variables the USER declared,
+        # and the factorable lift appends a column per monomial auxiliary, so by
+        # here it can be shorter than this model's vector. Evaluating it anyway
+        # raised ``ValueError: objective: x: expected length 3, got 2`` out of a
+        # plain ``Model.solve(nlp_bb=True, warm_start=r)`` that succeeds without
+        # the warm start. Same completion the spatial path has run since #1255 --
+        # a warm start is a hint and must never be able to fail a solve.
+        _nb_cols = int(sum(int(v.size) for v in model._variables))
+        if int(np.asarray(initial_point).size) != _nb_cols:
+            from discopt.warm_start import complete_initial_point
+
+            _nb_completed = complete_initial_point(model, initial_point, evaluator=evaluator)
+            if _nb_completed is None:
+                logger.warning(
+                    "NLP-BB warm start dropped: the initial solution covers %d columns "
+                    "and the model the solver built has %d (a reformulation added "
+                    "variables). The solve continues without it.",
+                    int(np.asarray(initial_point).size),
+                    _nb_cols,
+                )
+                initial_point = None
+            else:
+                logger.info(
+                    "NLP-BB warm start extended from %d to %d columns across a "
+                    "solve-time reformulation",
+                    int(np.asarray(initial_point).size),
+                    _nb_cols,
+                )
+                initial_point = _nb_completed
+    if initial_point is not None:
         ws_obj = float(evaluator.evaluate_objective(initial_point))
         ws_int_feas = True
         for off, sz in zip(int_offsets, int_sizes):
@@ -24386,6 +24461,11 @@ def _solve_milp_simplex(
                 float(lp_data.obj_const),
                 int(max_nodes),
                 float(gap_tolerance),
+                # #1323: run 1 passes this; run 2 used not to, so a re-entry
+                # spent its whole budget on a tree the caller's absolute
+                # criterion had already closed, and returned `feasible` with
+                # |obj-bound| inside the requested tolerance.
+                abs_gap_tol=(None if abs_gap_tolerance is None else float(abs_gap_tolerance)),
                 initial_incumbent=_seed2,
                 time_limit_s=float(_reentry_remaining),
                 debug_hook=_debug.rust_hook(),
@@ -24792,7 +24872,20 @@ def _solve_milp_bb(
             )
             if _ip_x.shape[0] >= n_vars and _ip_int_ok and np.all(np.isfinite(_ip_x)):
                 _ip_ev = cached_evaluator(model)
-                if _ip_cc(_ip_ev, _ip_x[:n_vars], tol=1e-6):
+                # #1324: the rows and integrality were checked, the BOX was not --
+                # the one injection site #1316 did not cover. Rust's
+                # ``inject_incumbent`` validates nothing, so a row-feasible point
+                # outside the declared box became the tree's incumbent and the exit
+                # guard then had to raise ``MILP-BB returned an infeasible point
+                # labeled feasible/optimal`` on an otherwise solvable model. Drop
+                # the seed instead: a warm start is a hint, and the solve that
+                # ignores it returns the right answer.
+                if not _point_within_variable_box(_ip_ev, _ip_x[:n_vars]):
+                    logger.warning(
+                        "MILP warm-start point violates the model's variable bounds; "
+                        "not injecting it as an incumbent."
+                    )
+                elif _ip_cc(_ip_ev, _ip_x[:n_vars], tol=1e-6):
                     _ip_obj = float(_ip_ev.evaluate_objective(_ip_x[:n_vars]))
                     if np.isfinite(_ip_obj):
                         tree.inject_incumbent(_ip_x[:n_vars].copy(), _ip_obj)
