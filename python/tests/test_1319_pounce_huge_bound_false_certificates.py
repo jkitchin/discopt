@@ -211,17 +211,24 @@ def test_huge_bound_qp_is_not_certified_infeasible(monkeypatch):
 
 
 def test_huge_bound_qp_never_certifies_infeasible_with_the_legacy_box(monkeypatch):
-    """Opt-out arm: with ``DISCOPT_POUNCE_DECLARED_BOX=0`` the IPM goes back to
-    discarding the bound, so POUNCE still raises its numerical code 2 -- but the
-    code-2 cross-check must keep that from becoming a certificate. The honest
-    outcome is ``error`` (there is no second QP engine to degrade to, #359).
+    """Opt-out arm: with ``DISCOPT_POUNCE_DECLARED_BOX=0`` the first attempt goes
+    back to discarding the bound, so POUNCE still raises its numerical code 2 --
+    and the code-2 cross-check must keep that from becoming a certificate.
 
-    This is the guard that holds the §1 line independently of the flag.
+    That guard holds the §1 line independently of the flag, and is the assertion
+    below that must never be relaxed. What follows it is the retry (#1319): once
+    the attempt has failed there is no answer left to lose, so the route re-solves
+    over the box the caller declared and recovers the true optimum. Before the
+    retry existed this returned an honest but useless ``error``.
     """
     monkeypatch.setenv("DISCOPT_POUNCE_DECLARED_BOX", "0")
     r = _witness_qp_model().solve()
     assert r.status != "infeasible", "certified a false 'infeasible' on a feasible QP"
-    assert not r.gap_certified
+    # The retry recovers the witness the issue itself gives: v1=5e15, v3=-5e15,
+    # w=0.5 -> 1.5e16. Anything certified here must BE that value.
+    if r.gap_certified:
+        assert r.status == "optimal"
+        assert r.objective == pytest.approx(1.5e16, rel=1e-9)
 
 
 def test_solve_qp_code2_not_confirmed_by_phase1_reports_error(monkeypatch):
@@ -291,14 +298,21 @@ def test_bounded_qp_over_huge_bounds_solves_to_its_analytic_optimum(monkeypatch,
 
 
 def test_bounded_qp_is_never_reported_unbounded_with_the_legacy_box(monkeypatch):
-    """Opt-out arm: on the legacy 1e15 box the IPM still discards ``y >= -1e15``,
-    so its verdict describes a larger box than the declared one. The #850/#1319
-    guard must refuse to certify it -- ``error``, not ``unbounded``."""
+    """Opt-out arm: on the legacy 1e15 box the first attempt still discards
+    ``y >= -1e15``, so its verdict describes a larger box than the declared one
+    and the #850/#1319 guard refuses to certify it.
+
+    ``unbounded`` is the status that must never appear -- that is the §1 line and
+    the assertion below is not to be relaxed. The retry (#1319) then re-solves
+    over the declared box, where the QP is bounded, and returns its analytic
+    optimum ``-L`` instead of the bare ``error`` this used to end at."""
     monkeypatch.setenv("DISCOPT_POUNCE_DECLARED_BOX", "0")
     with pytest.warns(RuntimeWarning, match=r"relaxed a declared"):
         r = _bounded_qp_model(1e15).solve()
     assert r.status != "unbounded", "reported 'unbounded' for a QP bounded below by -1e15"
-    assert r.status == "error"
+    if r.gap_certified:
+        assert r.status == "optimal"
+        assert r.objective == pytest.approx(-1e15, rel=1e-9)
 
 
 def test_qp_below_the_relaxation_window_is_unaffected():
@@ -385,3 +399,63 @@ def test_infeasible_lp_at_huge_magnitude_is_never_certified_unbounded():
     m.minimize(x + y)
     r = m.solve(time_limit=60)
     assert r.status != "unbounded", f"infeasible LP certified {r.status!r}"
+
+
+# ── the retry: recover the declared-box answer where the route dead-ends ──
+#
+# The three defects above are fixed on both flag settings, but on the default
+# (legacy 1e15) box two of the #1319 repros ended at an honest `error`: correct,
+# and useless. The retry re-solves over the declared box, but ONLY from a state
+# that was about to report `error` -- so no solve that succeeds today can change,
+# which is exactly why it needs no §5 graduation the way flipping
+# DISCOPT_POUNCE_DECLARED_BOX would.
+
+
+def test_retry_gate_is_off_below_the_relaxation_window():
+    """The no-op half of the claim: a model declaring no bound in [1e15, 1e19)
+    builds a bit-identical box either way, so the retry must not even be
+    considered for it."""
+    from discopt.solver import _declared_box_retry_applies
+
+    assert not _declared_box_retry_applies(_bounded_qp_model(9e14))
+
+
+def test_retry_gate_is_on_inside_the_window():
+    from discopt.solver import _declared_box_retry_applies
+
+    assert _declared_box_retry_applies(_bounded_qp_model(1e15))
+    assert _declared_box_retry_applies(_witness_qp_model())
+
+
+def test_retry_gate_is_off_when_the_declared_box_is_already_honored(monkeypatch):
+    """With the flag already on, the first attempt used the declared box, so a
+    retry would re-run the identical solve to the identical answer."""
+    from discopt.solver import _declared_box_retry_applies
+
+    monkeypatch.setenv("DISCOPT_POUNCE_DECLARED_BOX", "1")
+    assert not _declared_box_retry_applies(_bounded_qp_model(1e15))
+
+
+def test_declared_box_override_is_scoped_and_restores():
+    """The retry must not leak its box into any later solve."""
+    from discopt.solvers.lp_pounce import (
+        _LEGACY_BOUND_THRESHOLD,
+        _POUNCE_BOUND_INF,
+        declared_box_honored,
+        finite_bound_threshold,
+    )
+
+    assert finite_bound_threshold() == _LEGACY_BOUND_THRESHOLD
+    with declared_box_honored():
+        assert finite_bound_threshold() == _POUNCE_BOUND_INF
+    assert finite_bound_threshold() == _LEGACY_BOUND_THRESHOLD
+
+
+@pytest.mark.parametrize("L", [1e15, 1e16, 1e18])
+def test_retry_recovers_the_bounded_qp_optimum_on_the_default_box(L):
+    """End to end with NO env var set at all: the analytic optimum -L comes back
+    certified, where before the retry this ended at `error`."""
+    r = _bounded_qp_model(L).solve()
+    assert r.status != "unbounded"
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(-L, rel=1e-9)

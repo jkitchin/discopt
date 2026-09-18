@@ -20906,21 +20906,53 @@ def _solve_lp(
     falling to the IPM — which returned NaN via Newton blow-up on declared bounds
     exceeding ~1e15, i.e. was never a sound last resort.
     """
+    from discopt.solvers.lp_pounce import declared_box_honored
+
     engines = [_solve_lp_simplex, _solve_lp_pounce]
     if prefer_pounce:
         engines.reverse()
-    deferred: _DeferredUnbounded | None = None
-    for engine in engines:
-        result = engine(model, t_start, time_limit)
-        if isinstance(result, _DeferredUnbounded):
-            # An UNBOUNDED the #850 guard declined to certify because this engine
-            # relaxed a declared bound in [1e15, 1e20) to its own infinity. Keep
-            # looking for an engine that honors the declared box, but hold on to
-            # the verdict (see below).
-            deferred = deferred or result
-            continue
-        if result is not None:
-            return result
+
+    def _attempt() -> "SolveResult | _DeferredUnbounded | None":
+        """First real answer from the engine order, else any held deferral."""
+        held: _DeferredUnbounded | None = None
+        for engine in engines:
+            result = engine(model, t_start, time_limit)
+            if isinstance(result, _DeferredUnbounded):
+                # An UNBOUNDED the #850 guard declined to certify because this
+                # engine relaxed a declared bound in [1e15, 1e20) to its own
+                # infinity. Keep looking for an engine that honors the declared
+                # box, but hold on to the verdict (see below).
+                held = held or result
+                continue
+            if result is not None:
+                return result
+        return held
+
+    outcome = _attempt()
+    if isinstance(outcome, SolveResult):
+        return outcome
+    deferred: _DeferredUnbounded | None = outcome
+
+    # #1319 retry. Every engine declined to answer, and one common reason is that
+    # the declared box was discarded before the engine ever saw it -- the 1e15
+    # legacy threshold throws away bounds POUNCE handles correctly all the way to
+    # its own 1e19 infinity. Re-attempt once over the box the caller actually
+    # declared. This can only add an answer: it runs ONLY where the route was
+    # about to report `error`, so no solve that succeeds today changes at all,
+    # which is why it needs no §5 graduation (unlike flipping
+    # DISCOPT_POUNCE_DECLARED_BOX, which moves the box for every solve in the
+    # window). The cross-checks are unconditional and apply to the retry too, so
+    # it cannot certify anything the first attempt could not.
+    if _declared_box_retry_applies(model):
+        with declared_box_honored():
+            retried = _attempt()
+        if isinstance(retried, SolveResult):
+            logger.info(
+                "LP re-solved over the declared box (bounds in [1e15, 1e19) that "
+                "the legacy threshold discarded): %s (#1319).",
+                retried.status,
+            )
+            return retried
 
     if deferred is not None:
         # No engine produced a certificate against the declared box, so the
@@ -21249,6 +21281,39 @@ def _solve_lp_matrix(
     return None
 
 
+def _declared_box_retry_applies(model: Model) -> bool:
+    """Whether a failed POUNCE-route solve is worth re-attempting over the
+    declared box (#1319).
+
+    True only when BOTH hold:
+
+    * the legacy 1e15 threshold is in force, so a retry would actually differ
+      (inside ``declared_box_honored``, or with ``DISCOPT_POUNCE_DECLARED_BOX=1``
+      already set, the first attempt used the declared box and re-running it
+      would just burn the same time to the same answer), and
+    * the model declares at least one bound in ``[1e15, 1e19)`` -- the window the
+      threshold discards and POUNCE can in fact handle. Outside it the two arms
+      build a bit-identical box, so the retry is a provable no-op.
+    """
+    from discopt.solvers.lp_pounce import (
+        _LEGACY_BOUND_THRESHOLD,
+        _POUNCE_BOUND_INF,
+        finite_bound_threshold,
+    )
+
+    if finite_bound_threshold() != _LEGACY_BOUND_THRESHOLD:
+        return False
+    for v in model._variables:
+        for side in (v.lb, v.ub):
+            mag = np.abs(np.asarray(side, dtype=np.float64)).ravel()
+            mag = mag[np.isfinite(mag)]
+            if mag.size and bool(
+                np.any((mag >= _LEGACY_BOUND_THRESHOLD) & (mag < _POUNCE_BOUND_INF))
+            ):
+                return True
+    return False
+
+
 def _declared_box_relaxed_to_ipm_inf(bounds) -> bool:
     """True if any declared bound magnitude falls in the IPM's relaxation window.
 
@@ -21310,8 +21375,31 @@ def _solve_qp(model: Model, t_start: float, prefer_pounce: bool = False) -> Solv
     ``qp-pounce-no-result`` (issue #359) — now as the error explanation rather than
     as fallback telemetry.
     """
+    from discopt.solvers.lp_pounce import declared_box_honored
+
     del prefer_pounce  # no HiGHS fallback to order against; kept for signature compat
     result = _solve_qp_pounce(model, t_start)
+    if result is not None and result.status != "error":
+        return result
+
+    # #1319 retry, exactly as on the LP route: the QP had no answer, and one
+    # common reason is the legacy 1e15 threshold discarding a declared bound the
+    # engine handles fine up to 1e19 -- which is how a QP bounded below by -1e15
+    # came back `unbounded`, and a feasible one `infeasible`. Re-attempt over the
+    # declared box. Runs ONLY where the route was about to report `error`, so
+    # nothing that solves today is touched; the feasibility and KKT-stationarity
+    # guards are unconditional and still gate whatever the retry returns.
+    if _declared_box_retry_applies(model):
+        with declared_box_honored():
+            retried = _solve_qp_pounce(model, t_start)
+        if retried is not None and retried.status != "error":
+            logger.info(
+                "QP re-solved over the declared box (bounds in [1e15, 1e19) that "
+                "the legacy threshold discarded): %s (#1319).",
+                retried.status,
+            )
+            return retried
+
     if result is not None:
         return result
     logger.error(
@@ -21879,12 +21967,12 @@ def _solve_qp_matrix(
         if relaxes_huge_bounds and _declared_box_relaxed_to_ipm_inf(bounds):
             msg = (
                 f"{engine} reported UNBOUNDED for this QP, but it relaxed a declared "
-                f"finite bound in [1e15, 1e20) to its own infinity, so that verdict may "
-                f"describe a larger box than the one declared; no engine honoring the "
-                f"declared box could certify the QP. Reporting 'error' rather than an "
-                f"unverified 'unbounded' -- over a finite box the true answer may well "
-                f"be 'optimal' at the corner. Tighten the bounds below 1e15 to get a "
-                f"decisive certificate."
+                f"finite bound in [1e15, 1e20) to its own infinity, so that verdict "
+                f"describes a larger box than the one declared and is not certified "
+                f"-- over a finite box the true answer may well be 'optimal' at the "
+                f"corner. The route re-solves over the declared box where it can "
+                f"(#1319); if that also fails the result is an honest 'error'. "
+                f"Tighten the bounds below 1e15 to avoid the relaxation entirely."
             )
             import warnings
 

@@ -15,10 +15,15 @@ below expose exactly that to POUNCE.
 
 from __future__ import annotations
 
+import contextlib as _contextlib
 import logging
 import os
+import threading
 import time
-from typing import Any, List, NamedTuple, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Any, List, NamedTuple, Optional, Tuple, Union, cast
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 import numpy as np
 import scipy.sparse as sp
@@ -71,11 +76,43 @@ _POUNCE_BOUND_INF = 1e19
 _LEGACY_BOUND_THRESHOLD = 1e15
 
 
+#: Per-thread override of :func:`finite_bound_threshold`, set only by
+#: :func:`declared_box_honored`. Thread-local because the solve orchestrator may
+#: run engine calls from more than one thread, and a module-global would leak one
+#: thread's retry into another thread's ordinary solve.
+_BOX_OVERRIDE = threading.local()
+
+
+@_contextlib.contextmanager
+def declared_box_honored() -> "Iterator[None]":
+    """Honor the declared box up to POUNCE's own 1e19 infinity inside this block.
+
+    The retry half of #1319. The legacy 1e15 threshold discards declared bounds
+    the engine could in fact have handled, which is what made a feasible LP look
+    infeasible and a bounded QP look unbounded. Those now end in an honest
+    ``error`` rather than a false certificate — and an ``error`` is exactly the
+    state in which re-solving over the box the caller actually declared can only
+    help: there is no answer to lose.
+
+    Scoped rather than a default flip: entering this block changes what a solve
+    that has ALREADY failed does, and nothing about a solve that succeeded. That
+    is why it needs no §5 graduation, unlike ``DISCOPT_POUNCE_DECLARED_BOX``,
+    which moves the box for every solve in the window.
+    """
+    prev = getattr(_BOX_OVERRIDE, "value", None)
+    _BOX_OVERRIDE.value = _POUNCE_BOUND_INF
+    try:
+        yield
+    finally:
+        _BOX_OVERRIDE.value = prev
+
+
 def finite_bound_threshold() -> float:
     """``|bound|`` at or beyond which POUNCE is handed its infinity sentinel.
 
     ``DISCOPT_POUNCE_DECLARED_BOX=1`` honors the declared box up to POUNCE's own
-    1e19 infinity; unset/``0`` keeps the legacy 1e15 (#1319).
+    1e19 infinity; unset/``0`` keeps the legacy 1e15 (#1319). Inside a
+    :func:`declared_box_honored` block the override wins over both.
 
     **Default-OFF pending the §5 graduation gate.** The flag is bound-changing, so
     it stays off until the corpus-wide differential panel
@@ -86,6 +123,9 @@ def finite_bound_threshold() -> float:
     #850 unbounded guard) hold on BOTH settings, so the flag decides whether the
     right answer is recovered, never whether a wrong one can be certified.
     """
+    override = getattr(_BOX_OVERRIDE, "value", None)
+    if override is not None:
+        return float(override)
     if os.environ.get("DISCOPT_POUNCE_DECLARED_BOX", "0").strip().lower() in ("1", "true", "on"):
         return _POUNCE_BOUND_INF
     return _LEGACY_BOUND_THRESHOLD
