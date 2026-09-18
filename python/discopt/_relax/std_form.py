@@ -76,6 +76,13 @@ INF = 1e20
 #: Coefficient of row ``r``'s logical column, by row sense.
 LOGICAL_COEF = {"le": 1.0, "ge": -1.0, "eq": 1.0}
 
+#: Orientation of row ``r`` for the inverse projection to ``A_ub x <= b_ub`` /
+#: ``A_eq x = b_eq``, by row sense: ``le`` is already oriented, ``ge`` negates,
+#: ``eq`` is not an inequality at all. This is NOT :data:`LOGICAL_COEF` -- an
+#: equality's logical coefficient is ``+1`` but its projection sense is ``0`` --
+#: so the two must stay separate tables.
+ROW_SENSE = {"le": 1.0, "ge": -1.0, "eq": 0.0}
+
 SENSES = ("le", "ge", "eq")
 
 
@@ -98,6 +105,13 @@ class LogicalBlock:
     eq_logicals:
         Which layout this block is -- carried so a caller can record it rather
         than re-derive it.
+    row_sense:
+        ``(m,)`` orientation of each row for the inverse projection back to
+        inequality/equality form: ``+1.0`` for ``le``, ``-1.0`` for ``ge``,
+        ``0.0`` for ``eq``. Same idea as ``eq_logicals`` -- the producer knows
+        the constraint sense exactly, so a consumer should read it rather than
+        re-derive it from the marshaled matrix. See
+        :func:`logical_is_fixed` for what re-deriving costs (issue #1230 V3).
     """
 
     n_logical: int
@@ -106,6 +120,7 @@ class LogicalBlock:
     lb: np.ndarray
     ub: np.ndarray
     eq_logicals: bool
+    row_sense: np.ndarray
 
     def entries(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """COO ``(rows, cols, vals)`` of the logical block, ready to concatenate
@@ -165,6 +180,7 @@ def logical_block(
 
     m = len(senses)
     col_of_row = np.full(m, -1, dtype=np.int64)
+    row_sense = np.zeros(m, dtype=np.float64)
     coef: list[float] = []
     lb: list[float] = []
     ub: list[float] = []
@@ -174,6 +190,9 @@ def logical_block(
             raise ValueError(
                 f"row {r}: unknown constraint sense {sense!r}; expected one of {SENSES}"
             )
+        # Recorded for every row, including an equality that gets no logical under
+        # the legacy layout: this is the row's sense, not its column's.
+        row_sense[r] = ROW_SENSE[sense]
         if sense == "eq" and not eq_logicals:
             continue
         col_of_row[r] = n_struct + len(coef)
@@ -188,6 +207,7 @@ def logical_block(
         lb=np.asarray(lb, dtype=np.float64),
         ub=np.asarray(ub, dtype=np.float64),
         eq_logicals=bool(eq_logicals),
+        row_sense=row_sense,
     )
 
 

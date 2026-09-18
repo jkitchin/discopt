@@ -20781,11 +20781,34 @@ def _fixed_col_mask(col_ub: Optional[np.ndarray], n_cols: int) -> Optional[np.nd
     return mask
 
 
+def _declared_row_senses(data: Any, A: Any) -> Optional[np.ndarray]:
+    """``data.row_sense`` when it still describes ``A``'s rows, else ``None``.
+
+    The producer records the declared constraint sense of every row it marshaled
+    (``LPData.row_sense``); handing it to :func:`_decompose_eq_slack_form` is what
+    stops that function re-deriving the senses from slack coefficients and a
+    ``1e-15`` threshold (issue #1230 V3).
+
+    The shape check is the whole guard. A caller that appended or dropped rows after
+    extraction holds a matrix the declared senses no longer describe, and there the
+    inference *is* the right answer -- so this returns ``None`` and the old path runs,
+    rather than raising on a call site that was working. A wrong-length vector
+    therefore never reaches the projection. Passing one directly still raises, which
+    is the loud path for a programmer error rather than a data-shape difference.
+    """
+    rs = getattr(data, "row_sense", None)
+    if rs is None:
+        return None
+    rs = np.asarray(rs, dtype=np.float64)
+    return rs if rs.shape == (A.shape[0],) else None
+
+
 def _slack_row_orientation(
     A: Any,
     n_orig: int,
     n_slack: int,
     col_ub: Optional[np.ndarray] = None,
+    row_sense: Optional[np.ndarray] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Per row of a CSR equality-plus-slack form: ``(is_ub, sign)``.
 
@@ -20793,8 +20816,29 @@ def _slack_row_orientation(
     :func:`_decompose_eq_slack_form_sparse` (whose docstring lists the rule and
     its equivalence to the dense path). Shared so a consumer mapping duals onto the
     projection -- the HiGHS route -- orients rows exactly as the projection does.
+
+    ``row_sense`` is the producer's own answer (``LPData.row_sense``: ``+1`` for a
+    ``<=`` row, ``-1`` for ``>=``, ``0`` for an equality), straight from the
+    :mod:`discopt._relax.std_form` block that chose the slack layout. When it is
+    given nothing is inferred. Without it the senses are recovered from the
+    marshaled matrix by testing a slack coefficient against ``1e-15`` and reading
+    its sign -- a structural fact the producer knew exactly and discarded, which is
+    issue #1230's V3. A length mismatch is an error, not a silent fallback: it means
+    the caller changed the rows after extraction, and quietly inferring instead
+    would hide exactly the drift this parameter exists to remove.
     """
     m = A.shape[0]
+    if row_sense is not None:
+        rs = np.asarray(row_sense, dtype=np.float64)
+        if rs.shape != (m,):
+            raise ValueError(
+                f"row_sense has shape {rs.shape}, but the form has {m} rows; "
+                "the rows changed after extraction, so the declared senses no longer "
+                "describe them"
+            )
+        is_ub = rs != 0.0
+        # An equality keeps sign 1.0, matching the inference path's initial value.
+        return is_ub, np.where(is_ub, rs, 1.0)
     indptr, indices, data = A.indptr, A.indices, A.data
     is_ub = np.zeros(m, dtype=bool)
     sign = np.ones(m, dtype=np.float64)
@@ -20825,6 +20869,7 @@ def _decompose_eq_slack_form_sparse(
     n_orig: int,
     n_slack: int,
     col_ub: Optional[np.ndarray] = None,
+    row_sense: Optional[np.ndarray] = None,
 ) -> tuple[Any, Optional[np.ndarray], Any, Optional[np.ndarray]]:
     """Sparse counterpart of :func:`_decompose_eq_slack_form`; same semantics.
 
@@ -20847,7 +20892,7 @@ def _decompose_eq_slack_form_sparse(
 
     A = A_eq_full.tocsr()
     b = np.asarray(b_eq_full, dtype=np.float64)
-    is_ub, sign = _slack_row_orientation(A, n_orig, n_slack, col_ub)
+    is_ub, sign = _slack_row_orientation(A, n_orig, n_slack, col_ub, row_sense)
 
     orig = A[:, :n_orig]
     ub_idx = np.flatnonzero(is_ub)
@@ -20869,6 +20914,7 @@ def _decompose_eq_slack_form(
     n_orig: int,
     n_slack: int,
     col_ub: Optional[np.ndarray] = None,
+    row_sense: Optional[np.ndarray] = None,
 ) -> tuple[Any, Optional[np.ndarray], Any, Optional[np.ndarray]]:
     """Reconstruct (A_ub, b_ub, A_eq, b_eq) from an equality-plus-slack form.
 
@@ -20899,7 +20945,9 @@ def _decompose_eq_slack_form(
     except ImportError:  # pragma: no cover - scipy is a hard dependency
         _is_sparse = False
     if _is_sparse:
-        return _decompose_eq_slack_form_sparse(A_eq_full, b_eq_full, n_orig, n_slack, col_ub)
+        return _decompose_eq_slack_form_sparse(
+            A_eq_full, b_eq_full, n_orig, n_slack, col_ub, row_sense
+        )
 
     eq_rows: list[np.ndarray] = []
     eq_rhs: list[float] = []
@@ -20910,7 +20958,34 @@ def _decompose_eq_slack_form(
     _fixed_all = _fixed_col_mask(col_ub, A_eq_full.shape[1])
     _fixed_slack = None if _fixed_all is None else _fixed_all[n_orig:]
 
+    # The producer's own senses, when it carried them (#1230 V3). `None` keeps the
+    # per-row inference below exactly as it was, so every caller that does not pass
+    # them is bit-identical.
+    _declared = None
+    if row_sense is not None:
+        _rs = np.asarray(row_sense, dtype=np.float64)
+        if _rs.shape != (A_eq_full.shape[0],):
+            raise ValueError(
+                f"row_sense has shape {_rs.shape}, but the form has "
+                f"{A_eq_full.shape[0]} rows; the rows changed after extraction"
+            )
+        _declared = _rs
+
     for i in range(A_eq_full.shape[0]):
+        if _declared is not None:
+            if _declared[i] != 0.0:
+                orig_row = A_eq_full[i, :n_orig]
+                rhs = b_eq_full[i]
+                if _declared[i] > 0:
+                    ub_rows.append(orig_row)
+                    ub_rhs.append(rhs)
+                else:
+                    ub_rows.append(-orig_row)
+                    ub_rhs.append(-rhs)
+            else:
+                eq_rows.append(A_eq_full[i, :n_orig])
+                eq_rhs.append(b_eq_full[i])
+            continue
         slack_part = np.asarray(A_eq_full[i, n_orig:], dtype=np.float64)
         if _fixed_slack is not None and slack_part.size:
             # A logical fixed at [0, 0] gives its row no freedom, so it must not
@@ -21205,7 +21280,12 @@ def _solve_lp_matrix(
     n_slack = n_total - n_orig
     b_eq_full = np.asarray(lp_data.b_eq)
     A_ub, b_ub, A_eq, b_eq = _decompose_eq_slack_form(
-        A_eq_full, b_eq_full, n_orig, n_slack, np.asarray(lp_data.x_u, dtype=np.float64)
+        A_eq_full,
+        b_eq_full,
+        n_orig,
+        n_slack,
+        np.asarray(lp_data.x_u, dtype=np.float64),
+        row_sense=_declared_row_senses(lp_data, A_eq_full),
     )
 
     try:
@@ -21969,7 +22049,12 @@ def _solve_qp_matrix(
     n_slack = n_total - n_orig
     b_eq_full = np.asarray(qp_data.b_eq)
     A_ub, b_ub, A_eq, b_eq = _decompose_eq_slack_form(
-        A_eq_full, b_eq_full, n_orig, n_slack, np.asarray(qp_data.x_u, dtype=np.float64)
+        A_eq_full,
+        b_eq_full,
+        n_orig,
+        n_slack,
+        np.asarray(qp_data.x_u, dtype=np.float64),
+        row_sense=_declared_row_senses(qp_data, A_eq_full),
     )
 
     # Build integrality array for MIQP
@@ -22207,7 +22292,12 @@ def _solve_milp_gurobi(
     n_slack = n_total - n_orig
     b_eq_full = np.asarray(lp_data.b_eq)
     A_ub, b_ub, A_eq, b_eq = _decompose_eq_slack_form(
-        A_eq_full, b_eq_full, n_orig, n_slack, np.asarray(lp_data.x_u, dtype=np.float64)
+        A_eq_full,
+        b_eq_full,
+        n_orig,
+        n_slack,
+        np.asarray(lp_data.x_u, dtype=np.float64),
+        row_sense=_declared_row_senses(lp_data, A_eq_full),
     )
 
     int_arr = np.zeros(n_orig, dtype=np.int32)
@@ -22539,7 +22629,12 @@ def _pounce_qp_relaxation_nodes(qp_data, batch_lb, batch_ub, n_orig, t_start, ti
             # equalities or no inequalities), which POUNCE's ``solve_qp``
             # accepts directly.
             A_ub_m, b_ub_m, A_eq_m, b_eq_m = _decompose_eq_slack_form(
-                A_eq, b_eq, n_orig, n_slack, np.asarray(qp_data.x_u, dtype=np.float64)
+                A_eq,
+                b_eq,
+                n_orig,
+                n_slack,
+                np.asarray(qp_data.x_u, dtype=np.float64),
+                row_sense=_declared_row_senses(qp_data, A_eq),
             )
             P_s = Q[:n_orig, :n_orig]
             c_s = c[:n_orig]
@@ -22678,6 +22773,7 @@ def _solve_node_lp_pounce(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, ti
             n_orig,
             n_slack,
             np.asarray(lp_data.x_u, dtype=np.float64),
+            row_sense=_declared_row_senses(lp_data, _A_eq_dense),
         )
         lb_n = np.asarray(node_lb, dtype=np.float64)
         ub_n = np.asarray(node_ub, dtype=np.float64)
@@ -22761,6 +22857,7 @@ def _solve_node_lp_simplex(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, t
             n_orig,
             n_slack,
             np.asarray(lp_data.x_u, dtype=np.float64),
+            row_sense=_declared_row_senses(lp_data, _A_eq_dense),
         )
         lb_n = np.asarray(node_lb, dtype=np.float64)
         ub_n = np.asarray(node_ub, dtype=np.float64)
@@ -23232,6 +23329,7 @@ def _root_reduced_cost_fixing(lp_data, n_orig, lb, ub, int_offsets, int_sizes, t
         n_orig,
         n_total - n_orig,
         np.asarray(lp_data.x_u, dtype=np.float64),
+        row_sense=_declared_row_senses(lp_data, _A_eq_dense),
     )
     c_m = np.asarray(lp_data.c[:n_orig])
     obj_const = float(lp_data.obj_const)
@@ -24295,6 +24393,8 @@ def _solve_milp_highs(
             n_orig,
             sf.n - n_orig,
             np.asarray(lp_data.x_u, dtype=np.float64),
+            # Same row count either way: the else-branch is an empty (0, n) matrix.
+            row_sense=_declared_row_senses(lp_data, lp_data.A_eq),
         )
         cd, bdl, bdu = _mip_recover_relaxation_duals(
             model,
@@ -24680,6 +24780,7 @@ def _solve_milp_simplex(
         n_orig,
         _A_n - n_orig,
         np.asarray(lp_data.x_u, dtype=np.float64),
+        row_sense=_declared_row_senses(lp_data, _A_gate),
     )
     _xl_gate = np.asarray(lp_data.x_l[:n_orig], dtype=np.float64)
     _xu_gate = np.asarray(lp_data.x_u[:n_orig], dtype=np.float64)
@@ -25097,6 +25198,7 @@ def _solve_milp_bb(
         n_orig,
         _n_total0 - n_orig,
         np.asarray(lp_data.x_u, dtype=np.float64),
+        row_sense=_declared_row_senses(lp_data, _A_eq_dense),
     )
     _cut_by_source = {"cover_clique": 0, "gomory": 0, "mir": 0, "aggregation": 0}
     try:
@@ -25946,6 +26048,7 @@ def _solve_miqp_bb(
         n_orig,
         _n_total0 - n_orig,
         np.asarray(qp_data.x_u, dtype=np.float64),
+        row_sense=_declared_row_senses(qp_data, _A_eq_dense),
     )
     _c_m = np.asarray(qp_data.c[:n_orig])
     _Q_m = _dense_Q(qp_data.Q)[:n_orig, :n_orig]
@@ -26422,6 +26525,7 @@ def _solve_miqp_bb(
                 n_orig,
                 n_slack_local,
                 np.asarray(qp_data.x_u, dtype=np.float64),
+                row_sense=_declared_row_senses(qp_data, A_eq_full),
             )
             Q_orig = _dense_Q(qp_data.Q)[:n_orig, :n_orig]
             constraint_duals, bound_duals_lower, bound_duals_upper = _mip_recover_relaxation_duals(
