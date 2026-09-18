@@ -336,6 +336,26 @@ class ExprProd:
 
 
 @dataclass
+class ExprSMinMax:
+    """``smin(i, expr)`` / ``smax(i, expr)`` -- a min/max over set elements.
+
+    #1333: this used to parse into ``ExprFunc(op, [body])``, which DISCARDED
+    the index names and the ``$`` condition. With them gone the constant
+    evaluator could not fold it, returned None, and the ``$``-condition sites
+    read None as "include the row" -- so ``c1$(smin(i, d(i)) > 10)..`` with
+    ``smin = 1`` generated a row GAMS does not, and the solve returned 3.0 for
+    a model whose optimum is -5. Keeping the index set makes it foldable over
+    constant data; over an ENDOGENOUS body it is still refused by name in the
+    equation-body builder (#1325), which is a different, sound refusal.
+    """
+
+    op: str  # "smin" | "smax"
+    index_names: list[str]
+    dollar_cond: object  # optional
+    body: object
+
+
+@dataclass
 class ExprCard:
     set_name: str
 
@@ -821,18 +841,41 @@ class _Parser:
         self._skip_semi()
 
     def _parse_param_data(self) -> dict:
+        """``label[.label] value`` records between the slashes of a Parameter.
+
+        #1333: the label/value split used to be a one-token lookahead --
+        "this NUMBER is a label if an IDENT or NUMBER follows it". A SIGNED
+        value breaks that, because the tokenizer emits ``-`` as its own SYMBOL:
+        in ``/1 2, 2 -1, 3 4/`` the record ``2 -1`` failed the test, so ``2``
+        was read as a VALUE under the empty key and ``-1`` overwrote it. The
+        model silently lost ``a('2') = -1`` (and kept a phantom empty-key entry)
+        -- ``sum(a)`` came back 6 where GAMS gives 5. Alphabetic labels were
+        unaffected, which is why it went unseen. Five of the issue's six data
+        forms were wrong, including the newline-separated one.
+
+        A record is one label (dotted for a multi-dimensional key) followed by
+        its value, so that is what this reads. The one ambiguity a label chain
+        cannot settle by itself is a bare number with nothing after it --
+        ``Parameter p /3.5/`` -- which is a VALUE with no label; it is decided
+        by looking for the value that a label must be followed by.
+        """
         data: dict = {}
         while not self._at_end() and not self._match_sym("/"):
+            start = self.pos
             keys: list[str] = []
-            # read keys (ident or number tokens before the numeric value)
-            while self._cur().kind == _Tok.IDENT or (
-                self._cur().kind == _Tok.NUMBER
-                and self._peek(1).kind in (_Tok.IDENT, _Tok.NUMBER)
-                and not self._peek(1).value.startswith("-")
-            ):
+            while self._cur().kind in (_Tok.IDENT, _Tok.NUMBER):
                 keys.append(self._advance().value)
                 if self._match_sym("."):
                     self._advance()  # multi-dim key separator
+                    continue
+                break
+            if keys and not self._value_follows():
+                # No value after the chain. An IDENT label keeps GAMS's
+                # value-less form (``/a, b, c/`` -> 0.0); a lone NUMBER was the
+                # value itself, under the empty key.
+                if len(keys) == 1 and self.tokens[start].kind == _Tok.NUMBER:
+                    self.pos = start
+                    keys = []
             # read value
             neg = False
             if self._match_sym("-"):
@@ -851,6 +894,12 @@ class _Parser:
             if self._match_sym(","):
                 self._advance()
         return data
+
+    def _value_follows(self) -> bool:
+        """Is the parser sitting on a numeric value (with an optional sign)?"""
+        if self._match_sym("-") or self._match_sym("+"):
+            return self._peek(1).kind == _Tok.NUMBER
+        return self._cur().kind == _Tok.NUMBER
 
     # ── Tables ──
 
@@ -1228,8 +1277,10 @@ class _Parser:
         elif op_name == "prod":
             return ExprProd(index_names, dollar_cond, body)
         else:
-            # smin/smax: treat as func for now
-            return ExprFunc(op_name, [body])
+            # #1333: keep the index names and the condition. They used to be
+            # dropped here (``ExprFunc(op_name, [body])``), which is what made
+            # the construct unfoldable and let it fail open in a condition.
+            return ExprSMinMax(op_name, index_names, dollar_cond, body)
 
     def _parse_index_list(self) -> list[str]:
         names: list[str] = []
@@ -1653,6 +1704,35 @@ class _ModelBuilder:
                     return None
                 acc = acc + v if is_sum else acc * v
             return acc
+        if isinstance(expr, ExprSMinMax):
+            index_sets = []
+            for iname in expr.index_names:
+                elems = self._lookup_set_elements(iname)
+                if elems is None:
+                    return None
+                index_sets.append(elems)
+            values: list[float] = []
+            for combo in itertools.product(*index_sets):
+                local_env = dict(env)
+                for iname, elem in zip(expr.index_names, combo):
+                    local_env[iname] = elem
+                if expr.dollar_cond is not None:
+                    cond = self._eval_dollar_cond(expr.dollar_cond, local_env)
+                    if cond is None:
+                        return None
+                    if cond == 0.0:
+                        continue
+                v = self._eval_const_expr_with_env(expr.body, local_env)
+                if v is None:
+                    return None
+                values.append(v)
+            if not values:
+                # GAMS gives +INF for an empty smin and -INF for an empty smax.
+                # Reporting that as a foldable number would let it flow into
+                # arithmetic; leave it unevaluable so the caller refuses.
+                return None
+            return float(min(values)) if expr.op == "smin" else float(max(values))
+
         if isinstance(expr, ExprOrd):
             sname = expr.set_name
             if sname in env:
@@ -1673,6 +1753,34 @@ class _ModelBuilder:
     def _eval_const_expr(self, expr) -> float | None:
         """Evaluate a constant expression (no variables, no loop indices)."""
         return self._eval_const_expr_with_env(expr, {})
+
+    def _row_is_excluded(self, cond, env: dict, eq_name: str | None) -> bool:
+        """Does *cond* switch this equation row OFF? Refuses when it cannot tell.
+
+        #1333: this was ``cond_val is not None and cond_val == 0.0``, so an
+        UNEVALUABLE condition fell through to "generate the row". That fails
+        open, in the direction that adds constraints GAMS does not generate:
+        ``c1$(smin(i, d(i)) > 10).. x1 =g= 3`` with ``smin = 1`` produced a row
+        GAMS omits, and the solve returned 3.0 for a model whose optimum is -5
+        -- a wrong answer, reported as ``optimal``, from a valid GAMS file.
+
+        A condition decides whether a constraint EXISTS, so "I could not tell"
+        has no safe default: including the row cuts off feasible points and
+        omitting it drops a restriction. Refuse (CLAUDE.md §3).
+        """
+        cond_val = self._eval_const_expr(cond)
+        if cond_val is None:
+            cond_val = self._eval_dollar_cond(cond, env)
+        if cond_val is None:
+            where = f"equation {eq_name!r}" if eq_name else "an equation"
+            raise GamsParseError(
+                f"the $-condition on {where} could not be evaluated, so whether "
+                "the row exists is undetermined. Generating it anyway would add a "
+                "constraint GAMS may not generate (and omitting it would drop one "
+                "GAMS does), so neither default is sound. Rewrite the condition "
+                "over constant data, or state the restriction directly."
+            )
+        return cond_val == 0.0
 
     def _eval_dollar_cond(self, expr, env: dict) -> float | None:
         """Evaluate a dollar condition with loop index substitution.
@@ -1846,12 +1954,10 @@ class _ModelBuilder:
                     for dn, val in zip(domain, combo):
                         env[dn] = val
                     # Evaluate dollar condition on equation definition
-                    if eqdef.dollar_cond is not None:
-                        cond_val = self._eval_const_expr(eqdef.dollar_cond)
-                        if cond_val is None:
-                            cond_val = self._eval_dollar_cond(eqdef.dollar_cond, env)
-                        if cond_val is not None and cond_val == 0.0:
-                            continue
+                    if eqdef.dollar_cond is not None and self._row_is_excluded(
+                        eqdef.dollar_cond, env, eqdef.name
+                    ):
+                        continue
                     lhs_expr = self._build_expr(eqdef.lhs, env)
                     rhs_expr = self._build_expr(eqdef.rhs, env)
                     # A GAMS indexed equation ``eq(i)`` expands to one *distinct*
@@ -1866,10 +1972,10 @@ class _ModelBuilder:
                     self._add_constraint(m, lhs_expr, eqdef.sense, rhs_expr, row_name)
             else:
                 # Scalar equation — dollar condition on scalar is unusual but handle it
-                if eqdef.dollar_cond is not None:
-                    cond_val = self._eval_const_expr(eqdef.dollar_cond)
-                    if cond_val is not None and cond_val == 0.0:
-                        continue
+                if eqdef.dollar_cond is not None and self._row_is_excluded(
+                    eqdef.dollar_cond, {}, eqdef.name
+                ):
+                    continue
                 lhs_expr = self._build_expr(eqdef.lhs, {})
                 rhs_expr = self._build_expr(eqdef.rhs, {})
                 # Check if this equation defines the objective
@@ -2033,26 +2139,30 @@ class _ModelBuilder:
             operand = self._ensure_expr(operand)
             return -operand
 
+        if isinstance(ast_node, ExprSMinMax):
+            # #1325: ``smin(i, expr)`` / ``smax(i, expr)`` over an index set has
+            # no sound algebraic form in the solver's expression IR, and the
+            # body still references the index ``i`` -- the failure surfaced as
+            # "Unresolved reference: 'i'", naming the index rather than the
+            # unsupported construct. Refused here, BEFORE the body is built, so
+            # the message says what is actually wrong. Equation bodies only: a
+            # CONSTANT one folds through ``_eval_const_expr_with_env`` and is
+            # a perfectly good number (#1333).
+            _fn = ast_node.op.lower()
+            _folded = self._eval_const_expr(ast_node)
+            if _folded is not None:
+                return _folded
+            raise GamsParseError(
+                f"{_fn}(...) over an index set is not supported in an equation "
+                "body: it is a minimum/maximum over set elements, which has no "
+                "sound algebraic form in the solver's expression IR. Model it "
+                "explicitly -- introduce a variable z with one inequality per "
+                f"element ({'z =L= x(i)' if _fn == 'smin' else 'z =G= x(i)'} "
+                "for all i) -- or use the n-ary min/max over a fixed argument "
+                "list."
+            )
+
         if isinstance(ast_node, ExprFunc):
-            # #1325: ``smin(i, expr)`` / ``smax(i, expr)`` parse into an
-            # ExprFunc whose body still references the index ``i``, which this
-            # builder cannot bind -- the failure surfaced as "Unresolved
-            # reference: 'i'", naming the index rather than the unsupported
-            # construct. Refused here, BEFORE the body is built, so the message
-            # says what is actually wrong. Checked in the equation-body builder
-            # only: a constant context evaluates through a different path and is
-            # left exactly as it was.
-            _fn = ast_node.func.lower()
-            if _fn in ("smin", "smax"):
-                raise GamsParseError(
-                    f"{_fn}(...) over an index set is not supported in an equation "
-                    "body: it is a minimum/maximum over set elements, which has no "
-                    "sound algebraic form in the solver's expression IR. Model it "
-                    "explicitly -- introduce a variable z with one inequality per "
-                    f"element ({'z =L= x(i)' if _fn == 'smin' else 'z =G= x(i)'} "
-                    "for all i) -- or use the n-ary min/max over a fixed argument "
-                    "list."
-                )
             args = [self._build_expr(a, env) for a in ast_node.args]
             args = [self._ensure_expr(a) for a in args]
             return self._map_func(ast_node.func, args)

@@ -429,6 +429,23 @@ The release procedure that produces these entries is documented in
   Verified bound-neutral: `node_count` and certified `objective` are exactly
   unchanged on a five-instance panel (spatial, MILP, MIQP, binary, mixed).
 
+- **#1333 (correctness, GAMS reader): `smin`/`smax` in a `$`-condition failed
+  open, and parameter data under numeric labels misread signed values.**
+  `smin(i, d(i))` parsed into an `ExprFunc` that discarded the index set, so
+  the constant evaluator returned `None` — and `None` was read as "generate the
+  row". `c1$(smin(i, d(i)) > 10).. x1 =g= 3` with `smin = 1` produced a
+  constraint GAMS does not generate, and the solve returned 3.0 for a model
+  whose optimum is -5. The construct now keeps its index set and folds over
+  constant data (it is still refused, by name, over an endogenous body, per
+  #1325), and a `$`-condition that cannot be evaluated raises `GamsParseError`
+  instead of defaulting to "include the row" — a condition decides whether a
+  constraint *exists*, so neither default is sound. Separately, the label/value
+  split in parameter data was a one-token lookahead that a `-` (its own token)
+  breaks: in `/1 2, 2 -1, 3 4/` the record `2 -1` lost its label, `a('2')` was
+  never set, and `sum(a)` came back 6 where GAMS gives 5. Five of the issue's
+  six data forms were wrong; alphabetic labels were unaffected, which is why it
+  went unseen. Records are now read as `label[.label] value`.
+
 - **Four defects found by adversarially testing last week's feature PRs**
   (#1309, #1310, #1311, #1312).
 
