@@ -364,8 +364,8 @@ class TestInfeasibilityCertificate:
         else:
             lb = np.array([b[0] for b in bounds], dtype=float)
             ub = np.array([b[1] for b in bounds], dtype=float)
-        slacks = _phase1_min_violation(A, cl, cu, lb, ub, self._OPTS)
-        return None if slacks is None else float(slacks.sum())
+        phase1 = _phase1_min_violation(A, cl, cu, lb, ub, self._OPTS)
+        return None if phase1 is None else float(phase1.slacks.sum())
 
     def test_violation_positive_when_infeasible(self):
         # x1+x2 = 1 and = 5  =>  minimal total violation is 4.

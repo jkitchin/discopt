@@ -21268,7 +21268,11 @@ def _solve_qp_pounce(
         certificate=True,
         options={"bound_relax_factor": POUNCE_BOUND_RELAX_FACTOR},
     )
-    return _solve_qp_matrix(model, t_start, time_limit, solve_fn, "POUNCE")
+    # The IPM is the one QP backend that relaxes a declared [1e15, 1e20) bound to
+    # its own infinity, so its UNBOUNDED needs the #850/#1319 guard.
+    return _solve_qp_matrix(
+        model, t_start, time_limit, solve_fn, "POUNCE", relaxes_huge_bounds=True
+    )
 
 
 def _solve_qp_gurobi(
@@ -21595,12 +21599,22 @@ def _solve_qp_matrix(
     engine: str,
     gap_tolerance: float = 1e-4,
     strict: bool = False,
+    relaxes_huge_bounds: bool = False,
 ) -> SolveResult | None:
     """Solve a QP/MIQP through a matrix-form ``solve_qp`` backend.
 
     ``solve_qp_fn`` must follow the shared QP contract (qp_pounce, or the
     optional Gurobi wrapper): same signature, same ``QPResult`` with
     HiGHS-convention duals.
+
+    ``relaxes_huge_bounds`` has exactly the meaning it has in
+    :func:`_solve_lp_matrix`: the backend does not honor a declared finite bound in
+    ``[1e15, 1e20)`` as finite but relaxes it to its own infinity, so an
+    ``UNBOUNDED`` verdict from it over such a box may be an artifact of the
+    relaxation rather than a property of the problem as posed. Only the
+    interior-point engine does this (``qp_pounce`` shares
+    ``lp_pounce._FINITE_BOUND_THRESHOLD``); leave it ``False`` for a backend that
+    honors the declared box (Gurobi, whose infinity is 1e30).
     """
     from discopt._relax.problem_classifier import extract_qp_data
     from discopt.modeling.core import ObjectiveSense
@@ -21766,6 +21780,34 @@ def _solve_qp_matrix(
             infeasibility_certificate=getattr(result, "infeasibility_certificate", None),
         )
     elif result.status == SolveStatus.UNBOUNDED:
+        # #1319 part 3: the same #850 hazard the LP route guards against, which
+        # this one never got. An interior-point engine relaxes a declared finite
+        # bound in [1e15, 1e20) to its own infinity, so its UNBOUNDED describes a
+        # LARGER box than the one declared and can be false over the box as posed
+        # -- ``min (w-0.5)^2 + y`` with ``y in [-1e15, 0]`` is optimal at -1e15,
+        # and this route reported ``unbounded`` (it is correct for |bound| <= 9e14,
+        # exactly the window's edge). Unlike ``_solve_lp``, there is no second QP
+        # engine to defer to (``_solve_qp`` is POUNCE-only by design, #359), so the
+        # deferral has nowhere to go and the honest outcome is ``error``: not a
+        # certificate, but "no engine honoring the declared box could decide this".
+        # CLAUDE.md §1 admits no trade of a possibly-false certificate for a
+        # better-looking status. The warning names the cause and the remedy so the
+        # failure is diagnosable rather than a bare ``error`` (the #937 lesson).
+        if relaxes_huge_bounds and _declared_box_relaxed_to_ipm_inf(bounds):
+            msg = (
+                f"{engine} reported UNBOUNDED for this QP, but it relaxed a declared "
+                f"finite bound in [1e15, 1e20) to its own infinity, so that verdict may "
+                f"describe a larger box than the one declared; no engine honoring the "
+                f"declared box could certify the QP. Reporting 'error' rather than an "
+                f"unverified 'unbounded' -- over a finite box the true answer may well "
+                f"be 'optimal' at the corner. Tighten the bounds below 1e15 to get a "
+                f"decisive certificate."
+            )
+            import warnings
+
+            logger.warning(msg)
+            warnings.warn(msg, RuntimeWarning, stacklevel=2)
+            return SolveResult(status="error", wall_time=wall_time, node_count=result.node_count)
         return SolveResult(status="unbounded", wall_time=wall_time, node_count=result.node_count)
     elif result.status == SolveStatus.TIME_LIMIT:
         # NOTE (#1262): this exit and the ITERATION_LIMIT one below leave
@@ -23766,8 +23808,18 @@ def _highs_decomposed_duals(model: Model, n_orig: int, sf, row_dual, col_dual):
 
 
 def _highs_route_label(kind: str, out) -> str:
+    """Describe the route that produced ``out``.
+
+    #1320 part 2: the route's own wording is the last field that still reads
+    "certified" once ``gap``/``bound``/``bound_valid`` have been made honest on a
+    decertified result, so a result whose certificate this route DECLINED (the
+    #1295 unscalable-column case, or a #1309/#1320 root cross-check that did not
+    settle) is labeled *unverified*. "Verified" describes a result the route
+    actually stood behind, not merely the code path it took.
+    """
     labels = "; ".join(f"{k}={v}" for k, v in sorted(out.labels.items()))
-    base = f"highs-{kind}: verified HiGHS route (HiGHS {out.highs_status or 'not run'})"
+    verdict = "unverified" if out.labels.get("milp/certificate") == "declined" else "verified"
+    base = f"highs-{kind}: {verdict} HiGHS route (HiGHS {out.highs_status or 'not run'})"
     return f"{base}; {labels}" if labels else base
 
 
