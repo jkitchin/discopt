@@ -346,6 +346,25 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **#1329 (correctness, P0): a recycled `id()` served a stale evaluator, and
+  with it a false certified optimum.** `evaluator_fingerprint` was built from
+  `id(model._objective)` plus the ids of every constraint, variable and
+  parameter, and kept no reference to any of them. `id()` is unique only among
+  *live* objects, so once an `Objective` was freed a replacement could land on
+  its address and inherit the whole fingerprint — the cache then served the
+  **old** objective's evaluator for the new one. `m.minimize(f); m.solve();
+  m.minimize(f + 20); m.minimize(f + 20); m.solve()` returned the first
+  objective's optimum as `optimal`, with a matching bound, in 6 of 6 processes;
+  an ordinary weighted-sum sweep hit it on 6-10 of 400 iterations. `#1322`'s
+  stale-reference guard is layered on the same fingerprint and shared the hole.
+  The fingerprint is now a `Fingerprint` object that holds a strong reference to
+  every object whose id it carries, so nothing in it can be freed — and equal
+  keys therefore prove the same objects — while equality and hashing stay the
+  key's, so it drops in wherever the bare tuple went. Separately, the
+  bound/parameter half of the fingerprint now folds `-0.0` onto `+0.0` before
+  hashing, so `x.lb = -0.0` after a solve at `0.0` no longer makes
+  `sensitivity()` report a DIFFERENT problem and drop a live reference.
+
 - **Four defects found by adversarially testing last week's feature PRs**
   (#1309, #1310, #1311, #1312).
 
