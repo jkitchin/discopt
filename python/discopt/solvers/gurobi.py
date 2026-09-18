@@ -19,7 +19,13 @@ import scipy.sparse as sp
 
 from discopt.solvers import LPResult, MILPResult, QPResult, SolveStatus
 
-_FINITE_BOUND_THRESHOLD = 1e15
+# discopt's effective-infinity sentinel: a bound with |b| >= 1e20 means "no bound"
+# (lp_simplex._LP_INF, milp_simplex._INF). Only those are mapped to GRB.INFINITY.
+# A declared bound with |b| in [1e15, 1e20) is finite as posed and Gurobi (whose
+# GRB.INFINITY is 1e100) honors it as finite, so it is passed through unchanged —
+# relaxing it here would let a Gurobi UNBOUNDED describe a larger box than the one
+# declared, which the #850 guard is told cannot happen on this route (#1328).
+_INFINITY_SENTINEL = 1e20
 
 
 def _load_gurobi():
@@ -191,8 +197,8 @@ def _normalise_bounds(
         lb = np.array([lo for lo, _ in bounds], dtype=np.float64)
         ub = np.array([hi for _, hi in bounds], dtype=np.float64)
 
-    lb = np.where(lb <= -_FINITE_BOUND_THRESHOLD, -inf, lb)
-    ub = np.where(ub >= _FINITE_BOUND_THRESHOLD, inf, ub)
+    lb = np.where(lb <= -_INFINITY_SENTINEL, -inf, lb)
+    ub = np.where(ub >= _INFINITY_SENTINEL, inf, ub)
     return lb, ub
 
 

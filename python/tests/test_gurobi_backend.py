@@ -1318,3 +1318,50 @@ def test_amp_gurobi_certifies_convex_minlp_if_available():
     assert result.bound is not None
     assert result.gap is not None
     assert result.gap <= 1e-6
+
+
+# #1328: a declared bound with magnitude in [1e15, 1e20) is finite to discopt (its
+# infinity sentinel is 1e20) and to Gurobi (GRB.INFINITY is 1e100). The wrapper used
+# to overwrite it with infinity before Gurobi saw it, while the orchestrator told the
+# #850 guard the box was honored — so a Gurobi UNBOUNDED over a finite box was
+# certified. The wrapper must hand Gurobi the declared box.
+
+
+@pytest.mark.parametrize("lb", [-1e15, -1e16, -1e19, -9.999e19])
+def test_gurobi_wrapper_honors_huge_finite_bounds(lb):
+    _require_gurobi()
+
+    lp = gurobi_backend.solve_lp(c=np.array([1.0]), bounds=[(lb, 0.0)])
+    assert lp.status == SolveStatus.OPTIMAL
+    assert lp.objective == pytest.approx(lb, rel=1e-12)
+
+    qp = gurobi_backend.solve_qp(Q=np.array([[0.0]]), c=np.array([1.0]), bounds=[(lb, 0.0)])
+    assert qp.status == SolveStatus.OPTIMAL
+    assert qp.objective == pytest.approx(lb, rel=1e-12)
+
+
+@pytest.mark.parametrize("sentinel", [1e20, 1e30, np.inf])
+def test_gurobi_wrapper_still_maps_infinity_sentinel(sentinel):
+    _require_gurobi()
+
+    lp = gurobi_backend.solve_lp(c=np.array([1.0]), bounds=[(-sentinel, 0.0)])
+    assert lp.status == SolveStatus.UNBOUNDED
+
+
+@pytest.mark.parametrize("sense", ["lp", "qp"])
+def test_model_solve_gurobi_huge_finite_bound_is_optimal_not_unbounded(sense):
+    _require_gurobi()
+
+    m = dm.Model(f"gurobi_huge_bound_{sense}")
+    x = m.continuous("x", lb=-1e16, ub=0.0)
+    y = m.continuous("y", lb=0.0, ub=1.0)
+    m.subject_to(x + y <= 0.5)
+    if sense == "lp":
+        m.minimize(x + y)
+    else:
+        m.minimize(x + (y - 0.25) ** 2)
+
+    result = m.solve(solver="gurobi", time_limit=30.0)
+
+    assert result.status == "optimal"
+    assert result.x["x"] == pytest.approx(-1e16, rel=1e-12)
