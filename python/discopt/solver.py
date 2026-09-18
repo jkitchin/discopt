@@ -21674,13 +21674,17 @@ def _matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, bounds, tol=1e-6, rtol=
         A_ub = np.asarray(A_ub, dtype=np.float64)
         viol = A_ub @ x - np.asarray(b_ub, dtype=np.float64)
         row_scale = np.abs(A_ub) @ absx
-        if np.any(viol > tol + rtol * row_scale):
+        thresh = _matrix_row_threshold(A_ub, row_scale, tol, rtol)
+        bad = np.nonzero(viol > thresh)[0]
+        if bad.size and _any_row_truly_violated(A_ub, x, b_ub, bad, thresh, signed=True):
             return False
     if A_eq is not None and b_eq is not None and len(b_eq):
         A_eq = np.asarray(A_eq, dtype=np.float64)
         viol = np.abs(A_eq @ x - np.asarray(b_eq, dtype=np.float64))
         row_scale = np.abs(A_eq) @ absx
-        if np.any(viol > tol + rtol * row_scale):
+        thresh = _matrix_row_threshold(A_eq, row_scale, tol, rtol)
+        bad = np.nonzero(viol > thresh)[0]
+        if bad.size and _any_row_truly_violated(A_eq, x, b_eq, bad, thresh, signed=False):
             return False
     if bounds is not None:
         # Vectorised form of the original per-element loop (#952): identical
@@ -21691,10 +21695,113 @@ def _matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, bounds, tol=1e-6, rtol=
         box = np.asarray(bounds, dtype=np.float64)
         if box.size:
             k = min(x.shape[0], box.shape[0])
-            row_tol = tol + rtol * absx[:k]
+            # #1335: same three-part threshold as a row. A bound row is
+            # ``±x_i ≤ ±bound``, so its gradient norm is exactly 1 and the distance
+            # cap is the flat ``FEASIBLE_DISTANCE_TOL``; its term scale is |x_i|.
+            row_tol = np.maximum(
+                _FEAS_SUM_FLOOR * absx[:k],
+                np.minimum(tol + rtol * absx[:k], _feas_distance_cap(np.ones(k))),
+            )
             if np.any(x[:k] < box[:k, 0] - row_tol) or np.any(x[:k] > box[:k, 1] + row_tol):
                 return False
     return True
+
+
+#: Coefficient of the representability floor (#1335). Perturbing column ``j`` by
+#: its last bit moves the row activity by ``|A_ij|·ulp(x_j) ≤ 2ε·|A_ij x_j|``, so
+#: this times the SMALLEST such term is the finest step the row admits at all.
+_FEAS_SUM_FLOOR = 2.0 * float(np.finfo(np.float64).eps)
+
+
+def _row_representability_floor(a_row, x) -> float:
+    """The finest step row ``a_row`` can take: ``min_j |A_ij| · ulp(x_j)``.
+
+    A residual below this is not evidence of anything — no representable ``x``
+    can do better, which is the #937 case (a vertex needing ``s = 2u − 1``, which
+    for ``2u > 2⁵³`` is not an ``f64`` at all).
+
+    The MINIMUM, not the sum. The sum is what the row's *total* magnitude can
+    express, which is a different and far larger quantity, and using it is how a
+    row of two ``1e15`` columns came to forgive a violation of 4.5 (#1335): the
+    question that decides the case is whether ANY column can absorb the residual,
+    and that is answered by the finest one. A row with a column at ``0`` can be
+    nudged arbitrarily finely and so gets no floor at all.
+    """
+    a = np.abs(np.asarray(a_row, dtype=np.float64))
+    nz = a != 0.0
+    if not np.any(nz):
+        # An all-zero row has constant activity: nothing can move it, and a
+        # residual on it is a real infeasibility rather than a resolution limit.
+        return 0.0
+    grains = a[nz] * (_FEAS_SUM_FLOOR * np.abs(np.asarray(x, dtype=np.float64))[nz])
+    return float(np.min(grains))
+
+
+def _matrix_row_threshold(A, row_scale, tol: float, rtol: float) -> np.ndarray:
+    """Per-row violation a matrix-form solution may carry and still be feasible.
+
+    Three parts, in the order they bind (#1335):
+
+    ``min(tol + rtol·row_scale, FEASIBLE_DISTANCE_TOL·‖A_i‖_∞)``
+        The residual test, capped by POSITION. ``tol + rtol·row_scale`` alone is
+        the whole of what this gate used to ask, and it is scale-blind in the
+        wrongly-accept direction: ``rtol = 1e-9`` against a row whose terms total
+        ``2e15`` licenses a violation of **two million**. On ``x − y ≤ 1`` ∧
+        ``x − y ≥ 10`` over ``x, y ∈ [1e15, 3e15]`` — infeasible by inspection —
+        the engine returned ``x − y = 5.5``, violating both rows by 4.5, and this
+        gate passed it; the LP came back ``optimal`` with ``gap_certified=True``.
+        The cap is #1254's rule, which the NLP-side verifier has had since then and
+        this one never received: a residual is only forgivable if a small move in
+        VARIABLE space fixes it, and the first-order distance to a linear row's
+        surface is ``violation / ‖A_i‖_∞``. At 4.5 in a unit-coefficient row the
+        point is 4.5 away from feasible — no tolerance makes that near-feasible.
+
+    What arithmetic cannot deliver is the other half of the story (#937) — a row
+    whose columns sit at ``1e16`` cannot resolve its activity more finely than an
+    ulp, so demanding ``1e-4`` of it would reject points for the representation
+    rather than for their position. That floor is NOT applied here: it is applied
+    per row, only to rows this threshold rejects, by
+    :func:`_row_representability_floor`, because it needs the row's own columns
+    rather than their total. Keeping it off the hot path also keeps this function
+    one vectorised pass.
+
+    Note the cap is taken WITHOUT ``feasible_distance_cap``'s optional
+    cancellation-noise arm: that arm exists for a caller whose own tolerance has
+    no allowance for rounding, while ``tol + rtol·row_scale`` here is exactly such
+    an allowance. Passing it would restore the 2e6 this function exists to remove.
+    """
+    grad_inf = np.abs(np.asarray(A, dtype=np.float64)).max(axis=1)
+    return np.minimum(tol + rtol * row_scale, _feas_distance_cap(grad_inf))
+
+
+def _any_row_truly_violated(A, x, b, rows, thresh, *, signed: bool) -> bool:
+    """Re-test *rows* with an EXACTLY summed residual before rejecting on them.
+
+    ``A @ x`` is a BLAS dot product, so its own error is ``~k·ε·Σ|A_ij x_j|`` —
+    which at the ``1e15`` row scales this function now judges is larger than the
+    ``2ε·row_scale`` floor those rows are held to. Rejecting on the naive residual
+    alone would therefore turn summation order into a verdict. ``math.fsum`` sums
+    the (correctly rounded) products exactly, leaving only the products' own
+    rounding, which the floor does cover.
+
+    Run only on rows the cheap pass already flagged, and short-circuits on the
+    first row that survives re-testing — so a feasible point pays nothing and a
+    genuinely infeasible one pays one exact row (#1335).
+    """
+    import math
+
+    A = np.asarray(A, dtype=np.float64)
+    x = np.asarray(x, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    for i in rows:
+        resid = math.fsum(A[i] * x) - b[i]
+        if not signed:
+            resid = abs(resid)
+        # The representability floor is charged HERE, so it costs nothing on a
+        # feasible point and is computed from the row's own columns (#1335).
+        if resid > max(float(thresh[i]), _row_representability_floor(A[i], x)):
+            return True
+    return False
 
 
 def _matrix_solution_violations(x, A_ub, b_ub, A_eq, b_eq, bounds) -> str:
