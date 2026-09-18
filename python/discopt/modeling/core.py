@@ -1324,13 +1324,21 @@ def _readonly_bound(
             f"NaN); use the default for no bound"
         )
     if shape is not None and base.shape != shape:
+        expected = int(np.prod(shape)) if shape else 1
         try:
             base = np.array(np.broadcast_to(base, shape), dtype=np.float64)
         except ValueError as exc:
-            raise ValueError(
-                f"{what}: shape {base.shape} does not broadcast to the variable's "
-                f"shape {shape} ({exc})"
-            ) from exc
+            # A size-matching array that does not *broadcast* is still the box
+            # the caller means -- `x.lb = np.array([0.5])` on a scalar `x`, and
+            # a flat vector for a 2-D variable. Reshape those; refuse only when
+            # the element counts genuinely disagree, which is the case that
+            # failed later with an unrelated IndexError (#1332 item 5).
+            if base.size != expected:
+                raise ValueError(
+                    f"{what}: shape {base.shape} does not broadcast to the variable's "
+                    f"shape {shape} ({exc})"
+                ) from exc
+            base = np.array(base.reshape(shape), dtype=np.float64)
     if var_type is not None:
         base = _validated_discrete_bound(base, var_type, what)
     base.flags.writeable = False

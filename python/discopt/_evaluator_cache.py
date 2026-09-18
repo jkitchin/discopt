@@ -52,8 +52,32 @@ class Fingerprint:
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, Fingerprint):
+            # A DEAD fingerprint (one that came back from pickle) identifies
+            # nothing and must not match anything, including another dead one.
+            if self.key is None or other.key is None:
+                return False
             return self.key == other.key
         return NotImplemented
+
+    # ── Pickling: a fingerprint does not survive a process boundary ──
+    #
+    # It identifies LIVE objects by address in THIS process, and the pins are
+    # what make those addresses trustworthy. Carrying the pins through pickle
+    # would drag the whole object graph -- objective, constraints, variables and
+    # so the Model -- into every pickled ``SolveResult``, which is exactly the
+    # ``TypeError: cannot pickle 'module' object`` that #1316 documents for a
+    # solved model (the Rust ``PyModelRepr`` it leaves behind). Carrying the
+    # KEY without them would be worse: bare ids from a dead process, which is
+    # #1329 itself.
+    #
+    # So it comes back DEAD -- equal to nothing. A restored ``SolveResult``
+    # then reports its reference as stale, which is the honest answer: the
+    # objects it described do not exist here.
+    def __getstate__(self) -> tuple:
+        return (None, ())
+
+    def __setstate__(self, state: tuple) -> None:
+        self.key, self._pins = state
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"Fingerprint({self.key!r})"

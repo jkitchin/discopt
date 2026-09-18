@@ -224,3 +224,63 @@ def test_value_bytes_leaves_everything_but_signed_zero_alone():
     assert _value_bytes(1.0) != _value_bytes(-1.0)
     assert _value_bytes([1.0, -0.0]) == _value_bytes([1.0, 0.0])
     assert _value_bytes([1.0, 2.0]) != _value_bytes([2.0, 1.0])
+
+
+# ── the pins must not follow a result across a process boundary ─────────────
+
+
+@pytest.mark.unit
+def test_a_fingerprint_does_not_survive_pickling():
+    """It identifies live addresses in THIS process; elsewhere it means nothing."""
+    import pickle
+
+    m, x, f = _double_well("i1329_pickle")
+    m.minimize(f)
+    fp = evaluator_fingerprint(m)
+
+    revived = pickle.loads(pickle.dumps(fp))
+    assert revived != fp, "a fingerprint from another process must not match a live one"
+    assert revived != pickle.loads(pickle.dumps(fp)), "two dead fingerprints are not each other"
+    assert hash(revived) == hash(revived)
+
+
+@pytest.mark.unit
+def test_a_solve_result_still_pickles():
+    """The pins must not drag the Model into every pickled result.
+
+    ``SolveResult`` carries ``solution_state_fingerprint`` for #1322's
+    staleness guard. Pinning the objects it names -- which is #1329's fix --
+    would reach the ``Model`` and, after a solve, the Rust ``PyModelRepr``
+    behind it: ``TypeError: cannot pickle 'module' object``, which is what
+    broke ``solve_batch(workers=2)``.
+    """
+    import pickle
+
+    m, x, f = _double_well("i1329_respickle")
+    m.minimize(f)
+    r = m.solve()
+    assert getattr(r, "_problem_fingerprint", None) is not None, (
+        "this test is only meaningful while the result carries a fingerprint"
+    )
+    # ``_model`` is the caller's live model and never crosses a process
+    # boundary -- the worker detaches it and the parent re-attaches its own.
+    # Everything else, the fingerprint included, must pickle.
+    r._model = None
+    pickle.loads(pickle.dumps(r))  # must not raise
+
+
+@pytest.mark.correctness
+def test_solve_batch_with_workers_still_returns_results():
+    """The end-to-end form: a pool worker pickles its result back."""
+
+    def build(name):
+        m = dm.Model(name)
+        a = m.continuous("a", lb=0.0, ub=1.0)
+        b = m.continuous("b", lb=0.0, ub=1.0)
+        m.minimize((a - 0.9) ** 2 + a * b - b)
+        m.subject_to(a + b <= 1.5)
+        return m
+
+    results = dm.solve_batch([build("i1329_b1"), build("i1329_b2")], workers=2, time_limit=30)
+    assert len(results) == 2
+    assert all(r.status == "optimal" for r in results), [r.status for r in results]

@@ -221,6 +221,28 @@ def test_setter_refuses_a_box_it_cannot_honour(value, exc):
 
 
 @pytest.mark.unit
+def test_setter_reshapes_a_size_matching_box():
+    """A size-matching array that does not *broadcast* is still the caller's box.
+
+    ``u.lb = np.array([0.5])`` on a SCALAR variable is ordinary usage (the
+    relaxation layer's own unit tests do it), and ``np.broadcast_to((1,), ())``
+    raises. Only a genuine element-count mismatch is refused.
+    """
+    m = dm.Model("i1332_reshape")
+    u = m.continuous("u", lb=0.0, ub=1.0)
+    u.lb = np.array([0.5])
+    assert u.lb.shape == () and float(u.lb) == 0.5
+
+    g = m.continuous("g", shape=(2, 3), lb=0.0, ub=1.0)
+    g.lb = np.arange(6, dtype=float) / 10.0
+    assert g.lb.shape == (2, 3)
+    assert np.allclose(g.lb, np.arange(6).reshape(2, 3) / 10.0)
+
+    with pytest.raises(ValueError):
+        g.lb = np.zeros(5)
+
+
+@pytest.mark.unit
 def test_setter_broadcasts_a_scalar_to_the_variable_shape():
     m = dm.Model("i1332_broadcast")
     x = m.continuous("x", shape=(3,), lb=0.0, ub=10.0)
