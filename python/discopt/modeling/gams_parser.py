@@ -2525,27 +2525,24 @@ class _ModelBuilder:
                     for dim, elem in enumerate(combo):
                         idx.append(self._element_index(b.var_name, elem, dim))
                     flat_idx = tuple(idx) if len(idx) > 1 else idx[0]
+                    # Edit a private writable copy and rebind, never
+                    # `var.lb[i] = ...`: an installed box is read-only, since
+                    # `saved_bounds(copy=False)` aliases it (#1321).
                     if b.suffix == "lo":
-                        var.lb = np.array(var.lb, dtype=np.float64)
-                        if isinstance(flat_idx, int):
-                            var.lb[flat_idx] = val
-                        else:
-                            var.lb[flat_idx] = val
+                        new_lb = np.array(var.lb, dtype=np.float64)
+                        new_lb[flat_idx] = val
+                        var.lb = new_lb
                     elif b.suffix == "up":
-                        var.ub = np.array(var.ub, dtype=np.float64)
-                        if isinstance(flat_idx, int):
-                            var.ub[flat_idx] = val
-                        else:
-                            var.ub[flat_idx] = val
+                        new_ub = np.array(var.ub, dtype=np.float64)
+                        new_ub[flat_idx] = val
+                        var.ub = new_ub
                     elif b.suffix == "fx":
-                        var.lb = np.array(var.lb, dtype=np.float64)
-                        var.ub = np.array(var.ub, dtype=np.float64)
-                        if isinstance(flat_idx, int):
-                            var.lb[flat_idx] = val
-                            var.ub[flat_idx] = val
-                        else:
-                            var.lb[flat_idx] = val
-                            var.ub[flat_idx] = val
+                        new_lb = np.array(var.lb, dtype=np.float64)
+                        new_ub = np.array(var.ub, dtype=np.float64)
+                        new_lb[flat_idx] = val
+                        new_ub[flat_idx] = val
+                        var.lb = new_lb
+                        var.ub = new_ub
             else:
                 # scalar bound
                 if b.suffix == "lo":
