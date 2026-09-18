@@ -21392,7 +21392,7 @@ def _declared_box_relaxed_to_ipm_inf(bounds) -> bool:
 
 
 def _solve_qp(model: Model, t_start: float, prefer_pounce: bool = False) -> SolveResult:
-    """Solve a QP with POUNCE, degrading to the HiGHS vertex solver, or report an error.
+    """Solve a QP with POUNCE, or report an error. There is no second engine.
 
     HiGHS-free by design (issue #359 / pure-Rust goal): a continuous QP is solved
     by POUNCE (the pure-Rust Ipopt port), never by HiGHS. The POUNCE engine
@@ -21429,7 +21429,7 @@ def _solve_qp(model: Model, t_start: float, prefer_pounce: bool = False) -> Solv
     """
     from discopt.solvers.lp_pounce import declared_box_honored
 
-    del prefer_pounce  # POUNCE is always first; HiGHS is a fallback, not an ordering
+    del prefer_pounce  # no HiGHS fallback to order against; kept for signature compat
     result = _solve_qp_pounce(model, t_start)
     if result is not None and result.status != "error":
         return result
@@ -21452,27 +21452,14 @@ def _solve_qp(model: Model, t_start: float, prefer_pounce: bool = False) -> Solv
             )
             return retried
 
-    # Last resort: the vertex solver. POUNCE is an interior-point method, so the
-    # answer it just failed to deliver is often one it converged NEAR and could not
-    # certify -- a non-stationary KKT residual on an ill-scaled model, which is
-    # exactly what ``kkt_error`` exists to catch and what a vertex solver does not
-    # suffer from. Runs ONLY where the route was about to report ``error``, so no
-    # solve that succeeds today is affected, and it goes through the same
-    # ``_solve_qp_matrix`` guards rather than around them (#359, #1339 follow-up).
-    highs_result = _solve_qp_highs(model, t_start)
-    if highs_result is not None and highs_result.status != "error":
-        logger.info("QP degraded from POUNCE to the HiGHS vertex solver: %s.", highs_result.status)
-        return highs_result
-
     if result is not None:
         return result
     logger.error(
-        "QP [qp-no-usable-result]: neither POUNCE nor the HiGHS vertex solver "
-        "returned a usable result (solve failure, a backend that declined the "
-        "model, or the feasibility/KKT-stationarity guard rejected the point). "
-        "Reporting an error rather than an unverified answer: the removed JAX QP "
-        "IPM rescue issued status='optimal' with a bound and a zero gap without "
-        "checking either condition (issue #359)."
+        "HiGHS-free QP [qp-pounce-no-result]: POUNCE returned no usable result "
+        "(solve failure, or the feasibility/KKT-stationarity guard rejected its "
+        "point). Reporting an error rather than an unverified answer: the removed "
+        "JAX QP IPM rescue issued status='optimal' with a bound and a zero gap "
+        "without checking either condition (issue #359)."
     )
     return SolveResult(
         status="error",
@@ -21508,42 +21495,6 @@ def _solve_qp_pounce(
     # its own infinity, so its UNBOUNDED needs the #850/#1319 guard.
     return _solve_qp_matrix(
         model, t_start, time_limit, solve_fn, "POUNCE", relaxes_huge_bounds=True
-    )
-
-
-def _solve_qp_highs(
-    model: Model,
-    t_start: float,
-    time_limit: float | None = None,
-) -> SolveResult | None:
-    """Solve a pure-continuous CONVEX QP with HiGHS. ``None`` when it declines.
-
-    The vertex solver ``QPResult.kkt_error`` has always named as the degradation
-    target for an interior-point "optimal" that fails stationarity: POUNCE reports
-    a residual, HiGHS reports none because it reaches the optimum rather than
-    converging to it. Before this there was nothing to degrade TO, so a bounded,
-    feasible, convex QP whose POUNCE point the guard rejected came back ``error``.
-
-    Routed through ``_solve_qp_matrix`` exactly like every other backend, so the
-    same primal-feasibility gate that rejected POUNCE's point judges this one.
-    That is the difference from the JAX QP IPM rescue #359 removed from this
-    position, which issued its own certificate from its own convergence flag and
-    so "degraded past the guard".
-
-    ``relaxes_huge_bounds=False``: HiGHS's infinity is ``kHighsInf`` and a declared
-    bound in ``[1e15, 1e20)`` is passed through as the finite number it is, so its
-    verdicts are statements about the box as declared and the #850 deferral does
-    not apply.
-    """
-    from discopt.solvers.qp_highs import HIGHS_QP_AVAILABLE
-    from discopt.solvers.qp_highs import solve_qp as _highs_solve_qp
-
-    if not HIGHS_QP_AVAILABLE:
-        return None
-    if any(v.var_type in (VarType.BINARY, VarType.INTEGER) for v in model._variables):
-        return None
-    return _solve_qp_matrix(
-        model, t_start, time_limit, _highs_solve_qp, "HiGHS", relaxes_huge_bounds=False
     )
 
 
