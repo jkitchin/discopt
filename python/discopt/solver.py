@@ -18170,6 +18170,36 @@ def _solve_nlp_bb(
 
     # --- Warm-start: inject user-provided initial solution as incumbent ---
     if initial_point is not None:
+        # #1324: the point was flattened against the variables the USER declared,
+        # and the factorable lift appends a column per monomial auxiliary, so by
+        # here it can be shorter than this model's vector. Evaluating it anyway
+        # raised ``ValueError: objective: x: expected length 3, got 2`` out of a
+        # plain ``Model.solve(nlp_bb=True, warm_start=r)`` that succeeds without
+        # the warm start. Same completion the spatial path has run since #1255 --
+        # a warm start is a hint and must never be able to fail a solve.
+        _nb_cols = int(sum(int(v.size) for v in model._variables))
+        if int(np.asarray(initial_point).size) != _nb_cols:
+            from discopt.warm_start import complete_initial_point
+
+            _nb_completed = complete_initial_point(model, initial_point, evaluator=evaluator)
+            if _nb_completed is None:
+                logger.warning(
+                    "NLP-BB warm start dropped: the initial solution covers %d columns "
+                    "and the model the solver built has %d (a reformulation added "
+                    "variables). The solve continues without it.",
+                    int(np.asarray(initial_point).size),
+                    _nb_cols,
+                )
+                initial_point = None
+            else:
+                logger.info(
+                    "NLP-BB warm start extended from %d to %d columns across a "
+                    "solve-time reformulation",
+                    int(np.asarray(initial_point).size),
+                    _nb_cols,
+                )
+                initial_point = _nb_completed
+    if initial_point is not None:
         ws_obj = float(evaluator.evaluate_objective(initial_point))
         ws_int_feas = True
         for off, sz in zip(int_offsets, int_sizes):
@@ -24842,7 +24872,20 @@ def _solve_milp_bb(
             )
             if _ip_x.shape[0] >= n_vars and _ip_int_ok and np.all(np.isfinite(_ip_x)):
                 _ip_ev = cached_evaluator(model)
-                if _ip_cc(_ip_ev, _ip_x[:n_vars], tol=1e-6):
+                # #1324: the rows and integrality were checked, the BOX was not --
+                # the one injection site #1316 did not cover. Rust's
+                # ``inject_incumbent`` validates nothing, so a row-feasible point
+                # outside the declared box became the tree's incumbent and the exit
+                # guard then had to raise ``MILP-BB returned an infeasible point
+                # labeled feasible/optimal`` on an otherwise solvable model. Drop
+                # the seed instead: a warm start is a hint, and the solve that
+                # ignores it returns the right answer.
+                if not _point_within_variable_box(_ip_ev, _ip_x[:n_vars]):
+                    logger.warning(
+                        "MILP warm-start point violates the model's variable bounds; "
+                        "not injecting it as an incumbent."
+                    )
+                elif _ip_cc(_ip_ev, _ip_x[:n_vars], tol=1e-6):
                     _ip_obj = float(_ip_ev.evaluate_objective(_ip_x[:n_vars]))
                     if np.isfinite(_ip_obj):
                         tree.inject_incumbent(_ip_x[:n_vars].copy(), _ip_obj)
