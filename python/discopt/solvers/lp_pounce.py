@@ -642,15 +642,26 @@ def solve_lp(
         verdict = (
             _phase1_verdict(phase1.slacks, cl, cu, phase1.row_activity)
             if phase1 is not None
-            else None
+            else PHASE1_UNDECIDED
         )
+        if verdict == PHASE1_UNDECIDED:
+            # #1336: Phase-1 could not answer -- it returned no point, or its two
+            # noise floors straddle the violation. The constraint system is linear,
+            # so this is an LP question and the exact simplex decides it over the
+            # box as declared. Only a proof is taken: a verified Farkas ray, or an
+            # exhibited point that is re-checked here.
+            verdict = _simplex_feasibility_verdict(A, cl, cu, lb, ub)
         if verdict == PHASE1_INFEASIBLE:
-            assert phase1 is not None
             return LPResult(
                 status=SolveStatus.INFEASIBLE,
                 iterations=result.iterations,
                 wall_time=result.wall_time,
-                infeasibility_certificate=_build_certificate(phase1.slacks, n_ineq),
+                # The witness comes from Phase-1 when it produced one; the oracle
+                # proves emptiness without per-row violations, and a certificate is
+                # a witness, never a requirement for the verdict.
+                infeasibility_certificate=(
+                    _build_certificate(phase1.slacks, n_ineq) if phase1 is not None else None
+                ),
             )
         if verdict == PHASE1_UNDECIDED:
             # Phase-1 could not tell a genuine small violation at a huge-magnitude
@@ -911,6 +922,130 @@ def _is_infeasible_violation(
     turn a missed infeasibility into a false ``unbounded``.
     """
     return _phase1_verdict(slacks, cl, cu, row_activity) == PHASE1_INFEASIBLE
+
+
+#: Pivot cap on the feasibility oracle below. Soundness-neutral: hitting it exits
+#: ``ITERATION_LIMIT``, which the oracle reads as "undecided", never as a verdict.
+_FEASIBILITY_ORACLE_MAX_ITER = 100_000
+
+
+def _simplex_feasibility_verdict(
+    A: np.ndarray,
+    cl: np.ndarray,
+    cu: np.ndarray,
+    lb: np.ndarray,
+    ub: np.ndarray,
+) -> str:
+    """Decide ``{x : cl <= A x <= cu, lb <= x <= ub}`` exactly, with the Rust simplex.
+
+    #1336. When the elastic Phase-1 LP cannot answer -- it returned no point at
+    all, or :func:`_phase1_verdict` came back ``undecided`` -- both POUNCE routes
+    used to give up and report ``error``. That is sound but needlessly weak, and
+    on the QP route it is a real loss against ``main``: the constraint system is
+    **linear even there**, so feasibility is an LP question, and discopt ships an
+    engine that answers it exactly over the box as declared.
+
+    Asking it is strictly better than either alternative. ``main`` reports
+    ``infeasible`` here by trusting the raw Ipopt code 2 that #1309/#1319 exist to
+    stop trusting; the current tree reports ``error``. This returns ``infeasible``
+    **with a proof** -- the simplex only exits ``Infeasible`` on a *verified*
+    Farkas ray -- or ``feasible`` with an exhibited point, which is the positive
+    feasibility proof the #1327 round-4 review asked for so that
+    :func:`_settle_ambiguous_unbounded` stands on something rather than on
+    "Phase-1 did not prove infeasible".
+
+    Never guesses: anything other than a proof on either side is
+    ``PHASE1_UNDECIDED``, and the caller reports ``error`` exactly as before. The
+    feasible verdict is not taken on the engine's word either -- the point it
+    returns is re-checked against the rows and the box here, so an engine that
+    mislabels a violating point cannot manufacture a feasibility proof.
+    """
+    try:
+        from discopt.solvers.lp_simplex import SIMPLEX_AVAILABLE
+        from discopt.solvers.lp_simplex import solve_lp as _simplex_solve_lp
+    except Exception as exc:  # noqa: BLE001 - absence is "undecided", not an error
+        logger.debug("feasibility oracle unavailable: %s", exc)
+        return PHASE1_UNDECIDED
+    if not SIMPLEX_AVAILABLE:
+        return PHASE1_UNDECIDED
+
+    A = np.asarray(A, dtype=np.float64)
+    cl = np.asarray(cl, dtype=np.float64).ravel()
+    cu = np.asarray(cu, dtype=np.float64).ravel()
+    lb = np.asarray(lb, dtype=np.float64).ravel()
+    ub = np.asarray(ub, dtype=np.float64).ravel()
+    m, n = A.shape
+
+    # Split the two-sided rows into the engine's one-sided form. An equality row
+    # goes to A_eq rather than as two inequalities: same feasible set, half the
+    # rows, and a better-conditioned basis.
+    eq_rows, eq_rhs, ub_rows, ub_rhs = [], [], [], []
+    for i in range(m):
+        lo, hi = cl[i], cu[i]
+        if lo == hi and abs(lo) < _INF:
+            eq_rows.append(A[i])
+            eq_rhs.append(lo)
+            continue
+        if hi < _INF:
+            ub_rows.append(A[i])
+            ub_rhs.append(hi)
+        if lo > -_INF:
+            ub_rows.append(-A[i])
+            ub_rhs.append(-lo)
+
+    try:
+        res = _simplex_solve_lp(
+            np.zeros(n, dtype=np.float64),
+            np.asarray(ub_rows, dtype=np.float64).reshape(len(ub_rows), n) if ub_rows else None,
+            np.asarray(ub_rhs, dtype=np.float64) if ub_rows else None,
+            np.asarray(eq_rows, dtype=np.float64).reshape(len(eq_rows), n) if eq_rows else None,
+            np.asarray(eq_rhs, dtype=np.float64) if eq_rows else None,
+            list(zip(lb.tolist(), ub.tolist())),
+            max_iter=_FEASIBILITY_ORACLE_MAX_ITER,
+        )
+    except Exception as exc:  # noqa: BLE001 - the oracle may decline; it may not fail a solve
+        logger.debug("feasibility oracle raised %s: %s", type(exc).__name__, exc)
+        return PHASE1_UNDECIDED
+
+    if res.status == SolveStatus.INFEASIBLE:
+        # The engine exits Infeasible only on a Farkas ray it has verified
+        # (``farkas_ray_certifies``), so this is a proof, not a label.
+        return PHASE1_INFEASIBLE
+    if res.status == SolveStatus.OPTIMAL and res.x is not None:
+        x = np.asarray(res.x, dtype=np.float64).ravel()[:n]
+        if x.size == n and _point_satisfies(A, cl, cu, lb, ub, x):
+            return PHASE1_FEASIBLE
+    return PHASE1_UNDECIDED
+
+
+def _point_satisfies(
+    A: np.ndarray,
+    cl: np.ndarray,
+    cu: np.ndarray,
+    lb: np.ndarray,
+    ub: np.ndarray,
+    x: np.ndarray,
+    tol: float = 1e-6,
+) -> bool:
+    """Whether ``x`` really satisfies ``cl <= A x <= cu`` and its box.
+
+    The oracle's positive half is only a proof if the point is checked, so it is
+    checked here rather than taken from the engine's status (#1336). The per-row
+    allowance is the same combined absolute/relative form the rest of the solver
+    uses, keyed on the row's own term magnitude so a large-activity row is not
+    judged by an absolute tolerance it cannot meet.
+    """
+    if not np.all(np.isfinite(x)):
+        return False
+    row = A @ x
+    scale = np.abs(A) @ np.abs(x)
+    allow = tol + 1e-9 * scale
+    if np.any(row > np.where(cu < _INF, cu, np.inf) + allow):
+        return False
+    if np.any(row < np.where(cl > -_INF, cl, -np.inf) - allow):
+        return False
+    box = tol + 1e-9 * np.abs(x)
+    return not (np.any(x < lb - box) or np.any(x > ub + box))
 
 
 def _build_certificate(slacks: np.ndarray, n_ineq: int) -> InfeasibilityCertificate:
