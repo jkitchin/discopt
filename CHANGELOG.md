@@ -398,6 +398,37 @@ The release procedure that produces these entries is documented in
   because the tree had fathomed against a cutoff nothing attains. `_solve_miqp_bb`
   had the identical exit and gets the identical fix.
 
+- **#1332 (correctness): a variable's box is now owned and validated, not
+  borrowed and trusted.** #1321 froze every installed box but installed a
+  read-only *view over the caller's buffer*, so `lo = np.zeros(2);
+  x = m.continuous('x', lb=lo); lo[:] = 5` silently moved `x`'s declared lower
+  bound and the solve answered 20.0 where 12.0 is correct. Six holes, closed in
+  one place — the `lb`/`ub` setter, which every declaration, reader and node
+  now passes through:
+  (1) the box is **copied**, so nothing the caller keeps can reach into the
+  model (the copy is skipped for a box already frozen by this same path, which
+  is every hot restore);
+  (2) `copy.deepcopy` and `pickle` rebuilt `__dict__` directly and handed back
+  writable boxes — and a writable `_bound_stack`, which holds the declared
+  domain `fix()` validates against and `unfix()` restores — so
+  `Variable.__setstate__` re-freezes both;
+  (3) a BINARY with `ub > 1` was accepted by `loads()` and by the setter and
+  solved to `b = 5.0`, `optimal`, `gap_certified=True`; it is now refused
+  (ulp-scale excursions are snapped, as the `.nl` reader already did);
+  (4) `loads()` never validated a `bound_stack` frame — an inverted domain, a
+  triple, a single, a wrong shape all loaded silently or raised a bare numpy
+  error; every frame is now checked and a bad one raises `SerializationError`;
+  (5) the setter validated no shape and no dtype — `x.lb = 5.0` on a shape-(3,)
+  variable stored a 0-d array that failed much later with an unrelated
+  `IndexError`, `x.lb = None` and `x.lb = nan` were accepted, and a complex
+  bound was truncated to its real part with only a `ComplexWarning`; a scalar
+  now broadcasts to the variable's shape and the rest are refused at the write;
+  (6) the installed box is a view over a **read-only** base, so
+  `x.lb.flags.writeable = True` and writing through `x.lb.base` both raise; and
+  `m.fixed({x: 1.0}, x=2.0)` no longer silently keeps one of the two values.
+  Verified bound-neutral: `node_count` and certified `objective` are exactly
+  unchanged on a five-instance panel (spatial, MILP, MIQP, binary, mixed).
+
 - **Four defects found by adversarially testing last week's feature PRs**
   (#1309, #1310, #1311, #1312).
 

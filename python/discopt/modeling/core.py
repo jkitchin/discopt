@@ -1245,26 +1245,134 @@ class Constant(Expression):
 _FLOAT64 = np.dtype(np.float64)
 
 
-def _readonly_bound(value) -> np.ndarray:
-    """*value* as a float64 array that cannot be written through.
+def _bound_is_owned_frozen(arr) -> bool:
+    """Is *arr* a box this module already built and froze?
+
+    True exactly for the shape :func:`_readonly_bound` returns: a read-only
+    view over a read-only base. Nothing writable aliases such an array, so it
+    can be installed again with no copy -- which is what keeps the node loop's
+    ``v.lb, v.ub = v._bound_stack.pop()`` and ``saved_bounds`` restores free of
+    a per-node allocation.
+    """
+    return (
+        type(arr) is np.ndarray
+        and arr.dtype == _FLOAT64
+        and not arr.flags.writeable
+        and arr.base is not None
+        and not arr.base.flags.writeable
+    )
+
+
+def _readonly_bound(
+    value,
+    shape: Optional[tuple[int, ...]] = None,
+    *,
+    var_type: "Optional[VarType]" = None,
+    what: str = "bound",
+) -> np.ndarray:
+    """*value*, validated, copied and frozen into a box array of *shape*.
 
     The single choke point for :attr:`Variable.lb` / :attr:`Variable.ub`; see
     the note on those properties for why the invariant lives here and not at
     each writer.
 
-    Never copies the data. An array that is already read-only (a
-    ``broadcast_to`` view, or a box that came back out of another variable) is
-    installed as is; a writable one is installed as a read-only *view* of the
-    same buffer, so the caller's own array object keeps whatever permissions it
-    had and no allocation of the data is added to the node loop.
+    **It copies.** #1321 froze what was installed but installed a read-only
+    *view over the caller's buffer*, so the caller's own array stayed writable
+    and aliased the model: ``lo = np.zeros(2); x = m.continuous('x', lb=lo);
+    lo[:] = 5`` silently moved ``x``'s declared lower bound and the solve
+    answered 20.0 where 12.0 is correct, with no warning (#1332). A box is part
+    of the problem statement, so it is owned, not borrowed. The copy is skipped
+    for an array that is already one of ours (:func:`_bound_is_owned_frozen`),
+    which is the case on every hot restore path.
+
+    What is returned is a read-only VIEW over a read-only base. Both halves
+    matter: a read-only array that owns its data can have ``writeable`` set
+    back to True (numpy allows it for an owner), so an owner alone would leave
+    ``x.lb.flags.writeable = True`` working. Re-enabling the flag on the base
+    is still possible -- numpy offers no permanently-immutable array -- but
+    that is two deliberate steps past the API.
+
+    *shape*, when given, is the variable's shape: a scalar broadcasts to it and
+    anything not broadcastable is refused here rather than at solve time, where
+    it surfaced as an unrelated ``IndexError`` (#1332 item 5).
     """
-    arr = value if type(value) is np.ndarray and value.dtype == _FLOAT64 else None
-    if arr is None:
-        arr = np.asarray(value, dtype=np.float64)
-    if arr.flags.writeable:
-        arr = arr.view()
-        arr.flags.writeable = False
-    return arr
+    if value is None:
+        raise ValueError(f"{what}: None is not a bound; use the default (or +/- an explicit value)")
+    if np.iscomplexobj(value):
+        # np.asarray(..., dtype=float64) drops the imaginary part with only a
+        # ComplexWarning, so a complex bound became a silently different box.
+        raise TypeError(f"{what}: complex values are not valid bounds, got {value!r}")
+
+    if _bound_is_owned_frozen(value) and (shape is None or value.shape == shape):
+        # Already one of ours, so already validated and clipped by the setter
+        # that built it -- except for the domain, which belongs to the variable
+        # being assigned, not the one the box came from.
+        if var_type is VarType.BINARY:
+            _refuse_bound_outside_unit_box(value, what)
+        return value
+
+    try:
+        base = np.array(value, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(f"{what}: cannot be read as a float array ({exc})") from exc
+    if np.isnan(base).any():
+        # `np.asarray(None, dtype=float)` is NaN, and a NaN bound compares False
+        # against everything, so downstream it read as an empty box and a
+        # feasible model was certified infeasible (#1294).
+        raise ValueError(
+            f"{what}: contains NaN (a None entry in an array bound converts to "
+            f"NaN); use the default for no bound"
+        )
+    if shape is not None and base.shape != shape:
+        try:
+            base = np.array(np.broadcast_to(base, shape), dtype=np.float64)
+        except ValueError as exc:
+            raise ValueError(
+                f"{what}: shape {base.shape} does not broadcast to the variable's "
+                f"shape {shape} ({exc})"
+            ) from exc
+    if var_type is not None:
+        base = _validated_discrete_bound(base, var_type, what)
+    base.flags.writeable = False
+    return np.broadcast_to(base, base.shape)
+
+
+#: How far outside its declared domain a discrete bound may land before it is a
+#: refusal rather than a rounding artifact. FBBT and the LP engines return
+#: bounds that can sit an ulp or two outside [0, 1]; snapping those back is
+#: exact for an integral variable, while a bound genuinely outside the domain
+#: (``b.ub = 5`` on a binary) is a different problem and is refused.
+_DISCRETE_BOUND_SLACK = 1e-9
+
+
+def _validated_discrete_bound(base: np.ndarray, var_type: "VarType", what: str) -> np.ndarray:
+    """Refuse a box that puts a discrete variable outside its declared domain.
+
+    #1332 item 3: ``loads()`` and ``x.ub = ...`` accepted ``ub = 5.0`` on a
+    BINARY, and the solve returned ``b = 5.0`` as ``optimal`` with
+    ``gap_certified=True`` -- a certificate for a model the user never wrote.
+    The ``.nl`` reader already clipped binaries to [0, 1]; these two doors did
+    not.
+    """
+    if var_type is not VarType.BINARY:
+        return base
+    _refuse_bound_outside_unit_box(base, what)
+    # Snap the ulp-scale excursions the refusal above tolerates. Exact for an
+    # integral variable, and `out=base` keeps this a 0-d ARRAY rather than the
+    # numpy scalar `np.clip` would otherwise return for a scalar bound (whose
+    # flags cannot be set).
+    np.clip(base, 0.0, 1.0, out=base)
+    return base
+
+
+def _refuse_bound_outside_unit_box(base: np.ndarray, what: str) -> None:
+    """Raise when a BINARY box leaves [0, 1] by more than a rounding artifact."""
+    if np.any(base < -_DISCRETE_BOUND_SLACK) or np.any(base > 1.0 + _DISCRETE_BOUND_SLACK):
+        raise ValueError(
+            f"{what}: a binary variable's box must lie within [0, 1], got "
+            f"{float(np.min(base))!r}..{float(np.max(base))!r}. Declare it as "
+            "m.integer(name, lb=..., ub=...) if that is the domain you want."
+        )
 
 
 class Variable(Expression):
@@ -1302,19 +1410,11 @@ class Variable(Expression):
         self.name = name
         self.var_type = var_type
         self.shape = shape
-        lb_arr = np.asarray(lb, dtype=np.float64)
-        ub_arr = np.asarray(ub, dtype=np.float64)
-        # `np.asarray(None, dtype=float)` is NaN, and a NaN bound compares False
-        # against everything, so downstream it read as an empty box and a
-        # feasible model was certified infeasible (#1294). Refuse it here.
-        for side, arr in (("lb", lb_arr), ("ub", ub_arr)):
-            if np.isnan(arr).any():
-                raise ValueError(
-                    f"variable '{name}': {side} contains NaN (a None entry in an "
-                    f"array bound converts to NaN); use the default for no bound"
-                )
-        self.lb = np.broadcast_to(lb_arr, shape)
-        self.ub = np.broadcast_to(ub_arr, shape)
+        # Validation, the copy and the freeze all happen in the `lb`/`ub`
+        # setters -- the one choke point -- so declaration and a later
+        # `x.lb = ...` cannot drift apart (#1332).
+        self.lb = lb
+        self.ub = ub
         self.model = model
         self._index = len(model._variables)  # Position in flat variable vector
         # ``size`` is a hot property on the convexity / AD walkers (called
@@ -1426,7 +1526,12 @@ class Variable(Expression):
 
     @lb.setter
     def lb(self, value) -> None:
-        self._lb = _readonly_bound(value)
+        self._lb = _readonly_bound(
+            value,
+            self.shape,
+            var_type=self.var_type,
+            what=f"variable {self.name!r}: lb",
+        )
 
     @property
     def ub(self) -> np.ndarray:
@@ -1435,7 +1540,33 @@ class Variable(Expression):
 
     @ub.setter
     def ub(self, value) -> None:
-        self._ub = _readonly_bound(value)
+        self._ub = _readonly_bound(
+            value,
+            self.shape,
+            var_type=self.var_type,
+            what=f"variable {self.name!r}: ub",
+        )
+
+    # ── Copying: a copy's boxes must be as read-only as the original's ──
+    #
+    # #1332 item 2: `copy.deepcopy` and `pickle` rebuild `__dict__` directly,
+    # so `_lb`, `_ub` and every `_bound_stack` entry came back WRITABLE. An
+    # in-place write on the copy then persisted into a solve (objective -6
+    # reported "optimal" against the correct -4), and a corrupted
+    # `_bound_stack[0]` is the declared domain `fix()` validates against and
+    # `unfix()` restores. `__setstate__` is the one hook both paths take.
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        for side in ("_lb", "_ub"):
+            arr = self.__dict__.get(side)
+            if arr is not None:
+                self.__dict__[side] = _readonly_bound(arr)
+        stack = self.__dict__.get("_bound_stack")
+        if stack:
+            self.__dict__["_bound_stack"] = [
+                (_readonly_bound(entry_lb), _readonly_bound(entry_ub))
+                for entry_lb, entry_ub in stack
+            ]
 
     # ── Fixing: bounds are the fixing route ──────────────────────────
     #
@@ -5282,6 +5413,23 @@ class Model:
             raise ValueError(
                 "Model.fixed() needs at least one variable to fix; an empty scope "
                 "would silently do nothing while reading as if it fixed something."
+            )
+        # #1332 item 6: `m.fixed({x: 1.0}, x=2.0)` named `x` twice and the last
+        # value silently won, leaving fix_depth 2 for one variable -- two frames
+        # of the same scope, with one of the two values the caller asked for
+        # simply discarded. Nothing about the call says which. Refuse it: the
+        # caller either meant one of the two, or meant two different variables.
+        _seen: dict[int, Variable] = {}
+        _repeated = []
+        for var, _value in targets:
+            if id(var) in _seen:
+                _repeated.append(var.name)
+            _seen[id(var)] = var
+        if _repeated:
+            raise ValueError(
+                f"Model.fixed() names {sorted(set(_repeated))} more than once. "
+                "Only one value would take effect and the others would be "
+                "discarded silently; pass each variable once."
             )
 
         depths = [(var, len(var._bound_stack)) for var, _ in targets]

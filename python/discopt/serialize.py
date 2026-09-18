@@ -608,13 +608,57 @@ def _dec_variable(d: dict, model: Model) -> Variable:
     # first `unfix()` -- an in-place write there silently corrupted the
     # snapshot and changed the solve's answer (#1321).
     var._bound_stack = [
-        (
-            _readonly_bound(_dec_array(entry[0], shape)),
-            _readonly_bound(_dec_array(entry[1], shape)),
-        )
-        for entry in d.get("bound_stack", [])
+        _dec_bound_stack_entry(entry, i, shape, name, var.var_type)
+        for i, entry in enumerate(d.get("bound_stack", []))
     ]
     return model._register_variable(var)
+
+
+def _dec_bound_stack_entry(entry, index: int, shape, name: str, var_type: VarType):
+    """One ``(lb, ub)`` frame of a saved fix stack, refused unless it is one.
+
+    #1332 item 4: this was ``entry[0]``/``entry[1]`` with no checks, so a
+    corrupt document loaded a stack frame that is not a box and said nothing.
+    ``[10, 0]`` installed an INVERTED declared domain -- and
+    ``_bound_stack[0]`` is exactly what ``fix()`` validates against and
+    ``unfix()`` restores, so an inverted or NaN frame silently widens or empties
+    the model's declared domain. A malformed frame raised a bare ``IndexError``
+    or a reshape ``ValueError`` from deep inside numpy, neither of which says
+    the document is at fault.
+
+    Frozen on the way in, exactly as ``Variable.fix`` freezes what it pushes:
+    ``unfix()`` reinstalls these arrays as the live box, which
+    ``Model.saved_bounds(copy=False)`` then aliases, so a writable one silently
+    corrupted the snapshot and changed the solve's answer (#1321).
+    """
+    where = f"variable {name!r} bound_stack[{index}]"
+    if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+        raise SerializationError(
+            f"{where} must be a [lb, ub] pair, got "
+            f"{type(entry).__name__} of length {len(entry) if hasattr(entry, '__len__') else '?'}"
+        )
+    boxes = []
+    for side, raw in (("lb", entry[0]), ("ub", entry[1])):
+        try:
+            boxes.append(
+                _readonly_bound(
+                    _dec_array(raw, shape),
+                    shape,
+                    var_type=var_type,
+                    what=f"{where} {side}",
+                )
+            )
+        except SerializationError:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise SerializationError(f"{where} {side} is not a valid bound: {exc}") from exc
+    lo, hi = boxes
+    if np.any(np.asarray(lo) > np.asarray(hi)):
+        raise SerializationError(
+            f"{where} is inverted (lb > ub): {np.asarray(lo)!r} > {np.asarray(hi)!r}. "
+            "bound_stack[0] is the declared domain that fix() validates against."
+        )
+    return (lo, hi)
 
 
 def _enc_parameter(p: Parameter) -> dict:
