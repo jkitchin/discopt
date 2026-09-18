@@ -148,8 +148,15 @@ _FEAS_TOL = 1e-6
 # slack/activity ratios were <= 4.6e-11 on every FEASIBLE system (<= 6.6e-17 for
 # every L >= 1e9) and >= 1.9 on every INFEASIBLE one -- a separation of ~4e10.
 # 1e-12 sits ~4500x above machine epsilon (so genuine cancellation noise clears it)
-# and ~1e12 below the smallest measured genuine violation. Erring large is the safe
-# direction: the caller then degrades to the exact simplex instead of certifying.
+# and ~1e12 below the smallest measured genuine violation.
+#
+# Applied PER ROW, never to a sum over rows. That sweep only ever varied ONE
+# magnitude at a time, so it could not see the failure the round-4 review of #1319
+# found: summed, a single large but perfectly satisfiable row raises the floor for
+# every other row, and an O(1) contradiction sitting beside a row of activity 1e12
+# was read as feasible -- after which the ray certifier called an INFEASIBLE
+# problem ``unbounded``. A row's residual can only be excused by its own
+# arithmetic. See :func:`_phase1_verdict`.
 _ROW_ACTIVITY_REL_TOL = 1e-12
 # Tiny floating-point bound inversions (lb just above ub, e.g. ~1e-11 out of
 # relaxation/bound-tightening) are snapped to a single fixed value before they
@@ -795,34 +802,32 @@ def _phase1_verdict(
     cu: np.ndarray,
     row_activity: Optional[np.ndarray],
 ) -> str:
-    """Read the Phase-1 optimum as one of three verdicts, never two.
+    """Read the Phase-1 optimum as one of three verdicts, never two, per row.
 
-    Collapsing this to a bool is what made #1319's fix trade one false
-    certificate for another. "Not above the roundoff floor" is **not** proof of
-    feasibility: a genuine conflict whose minimal violation is small in absolute
-    terms sits under that floor whenever the Phase-1 point is large. Measured on
-    the regression that prompted this (``x - y <= 1`` with ``x - y >= 10`` over
-    ``x, y in [1e15, 3e15]``): true minimal violation 9, row activity 4e15, so
-    the floor is ``1e-12 * 4e15 = 4000`` and the violation vanishes under it.
-    Reported as "feasible", the raw Ipopt code-3/4 ``UNBOUNDED`` then survived
+    Two independent defects in #1319's first fix meet here.
+
+    **Collapsing the answer to a bool.** "Not above the roundoff floor" is not
+    proof of feasibility: a genuine conflict whose minimal violation is small in
+    absolute terms sits under that floor whenever the Phase-1 point is large.
+    Read as "feasible", the raw Ipopt code-3/4 ``UNBOUNDED`` then survived
     :func:`_settle_ambiguous_unbounded` and an **infeasible** LP was certified
-    ``unbounded``.
+    ``unbounded``. Hence the third verdict: undecided is undecided, and the
+    caller must certify nothing from it — on the LP route it degrades to the
+    exact simplex, which honors the declared box and decides exactly.
 
-    The third verdict is the fix: undecided is undecided. The caller must not
-    certify anything from it — on the LP route it degrades to the exact simplex,
-    which honors the declared box and decides exactly.
+    **Summing the floor over rows.** The floor was ``1e-12 * Σ|A||x|``, so one
+    large but perfectly satisfiable row lifted the bar for every other row. An
+    O(1) contradiction (``a - b <= 0`` with ``a - b >= 1`` over ``[0, 10]``)
+    beside an unrelated row of activity ~1e12 was read as feasible and certified
+    ``unbounded`` — at a magnitude four orders below the declared-box window, so
+    no flag was involved (round-4 review of #1319). Each row is now judged
+    against its own rhs and its own activity, which also restores the correct
+    ``infeasible`` certificates that the bool-with-summed-floor lost relative to
+    ``main``.
     """
     if slacks is None:
         return PHASE1_UNDECIDED
-    arr = np.asarray(slacks, dtype=np.float64)
-    total = float(arr.sum())
-    m = int(arr.size)
-    _sentinel = _POUNCE_BOUND_INF
-    cl_a = np.asarray(cl, dtype=np.float64).ravel()
-    cu_a = np.asarray(cu, dtype=np.float64).ravel()
-    finite = np.concatenate([cl_a[np.abs(cl_a) < _sentinel], cu_a[np.abs(cu_a) < _sentinel]])
-    rhs_scale = 1.0 + (float(np.max(np.abs(finite))) if finite.size else 0.0)
-    rhs_term = _FEAS_TOL * max(1.0, float(m)) * rhs_scale
+    arr = np.abs(np.asarray(slacks, dtype=np.float64).ravel())
     if row_activity is None:
         # No Phase-1 point at all: there is nothing to measure the violation
         # against, so nothing can be certified from it in EITHER direction.
@@ -830,13 +835,44 @@ def _phase1_verdict(
         # false-``infeasible``; reading it as feasible would restore the false
         # ``unbounded``.)
         return PHASE1_UNDECIDED
-    act = np.asarray(row_activity, dtype=np.float64).ravel()
-    act = act[np.isfinite(act)]
-    roundoff_term = _ROW_ACTIVITY_REL_TOL * float(np.sum(np.abs(act))) if act.size else 0.0
-    if total > rhs_term + roundoff_term:
+
+    _sentinel = _POUNCE_BOUND_INF
+    cl_a = np.asarray(cl, dtype=np.float64).ravel()
+    cu_a = np.asarray(cu, dtype=np.float64).ravel()
+    act = np.abs(np.asarray(row_activity, dtype=np.float64).ravel())
+
+    # PER ROW, never summed. A summed floor lets one large but perfectly
+    # satisfiable row raise the bar for a completely separate, well-scaled block
+    # -- an O(1) contradiction beside a row of activity 1e12 was read as feasible,
+    # and the ray certifier then called an INFEASIBLE problem ``unbounded``
+    # (round-4 review of #1319). A row's residual can only be excused by ITS OWN
+    # arithmetic, so each row is judged against its own rhs and its own activity.
+    n = arr.size
+    rhs_mag = np.zeros(n, dtype=np.float64)
+    for i in range(n):
+        vals = [
+            abs(v)
+            for v in (
+                cl_a[i] if i < cl_a.size else np.nan,
+                cu_a[i] if i < cu_a.size else np.nan,
+            )
+            if np.isfinite(v) and abs(v) < _sentinel
+        ]
+        rhs_mag[i] = max(vals) if vals else 0.0
+    act_i = act[:n] if act.size >= n else np.zeros(n, dtype=np.float64)
+
+    rhs_floor = _FEAS_TOL * (1.0 + rhs_mag)
+    full_floor = rhs_floor + _ROW_ACTIVITY_REL_TOL * act_i
+
+    if np.any(arr > full_floor):
+        # At least one row is violated beyond anything its own arithmetic can
+        # explain: a Farkas certificate this test is entitled to report.
         return PHASE1_INFEASIBLE
-    if total <= rhs_term:
+    if np.all(arr <= rhs_floor):
         return PHASE1_FEASIBLE
+    # Some row sits between its rhs floor and its activity floor: a genuine small
+    # violation at a huge-magnitude point and cancellation noise look identical
+    # here, so decide nothing.
     return PHASE1_UNDECIDED
 
 

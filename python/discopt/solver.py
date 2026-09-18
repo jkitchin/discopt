@@ -21324,10 +21324,11 @@ def _declared_box_relaxed_to_ipm_inf(bounds) -> bool:
     genuinely infinite for both engines and is not counted.
 
     The window's lower edge is the IPM's live threshold, not a literal: with
-    ``DISCOPT_POUNCE_DECLARED_BOX`` on (the default since #1319) the IPM honors a
-    declared bound up to POUNCE's own ``1e19`` infinity, so the window narrows to
-    ``[1e19, 1e20)`` and the guard stops firing on the four orders of magnitude
-    the engine was always able to handle. ``=0`` restores ``[1e15, 1e20)``.
+    ``DISCOPT_POUNCE_DECLARED_BOX`` on (opt-in; the default remains OFF pending
+    the §5 graduation gate) the IPM honors a declared bound up to POUNCE's own
+    ``1e19`` infinity, so the window narrows to ``[1e19, 1e20)`` and the guard
+    stops firing on the four orders of magnitude the engine was always able to
+    handle. Unset or ``=0`` keeps the legacy ``[1e15, 1e20)``.
     Reading it live keeps the guard and the marshaling from drifting apart — a
     hardcoded ``1e15`` here would defer verdicts the IPM no longer relaxes.
     """
@@ -21965,14 +21966,18 @@ def _solve_qp_matrix(
         # better-looking status. The warning names the cause and the remedy so the
         # failure is diagnosable rather than a bare ``error`` (the #937 lesson).
         if relaxes_huge_bounds and _declared_box_relaxed_to_ipm_inf(bounds):
+            from discopt.solvers.lp_pounce import finite_bound_threshold as _live_thr
+
+            _thr = _live_thr()
             msg = (
                 f"{engine} reported UNBOUNDED for this QP, but it relaxed a declared "
-                f"finite bound in [1e15, 1e20) to its own infinity, so that verdict "
-                f"describes a larger box than the one declared and is not certified "
-                f"-- over a finite box the true answer may well be 'optimal' at the "
-                f"corner. The route re-solves over the declared box where it can "
-                f"(#1319); if that also fails the result is an honest 'error'. "
-                f"Tighten the bounds below 1e15 to avoid the relaxation entirely."
+                f"finite bound in [{_thr:g}, 1e20) to its own infinity, so that "
+                f"verdict describes a larger box than the one declared and is not "
+                f"certified -- over a finite box the true answer may well be "
+                f"'optimal' at the corner. The route re-solves over the declared box "
+                f"where it can (#1319); if that also fails the result is an honest "
+                f"'error'. Tighten the bounds below {_thr:g} to avoid the relaxation "
+                f"entirely."
             )
             import warnings
 

@@ -459,3 +459,102 @@ def test_retry_recovers_the_bounded_qp_optimum_on_the_default_box(L):
     assert r.status != "unbounded"
     assert r.status == "optimal"
     assert r.objective == pytest.approx(-L, rel=1e-9)
+
+
+# ── round-4 review: the noise floor must be PER ROW ───────────────────────
+#
+# The first version of the #1319 fix applied `1e-12 * SUM_i (|A||x|)_i`. Summed,
+# one large but perfectly satisfiable row raises the floor for every other row:
+# an O(1) contradiction beside a row of activity ~1e12 was read as feasible, and
+# `_certify_unbounded_ray` then certified an INFEASIBLE problem `unbounded`. That
+# is four orders of magnitude BELOW the declared-box window, so no flag is
+# involved. Judging each row against its own rhs and its own activity fixes both
+# the false `unbounded` and the correct `infeasible` certificates it had lost.
+
+
+def _decoupled_infeasible_model(L: float, quadratic: bool) -> dm.Model:
+    """An O(1) contradiction, an unrelated LARGE satisfiable row, and a free
+    variable the objective drives. Infeasible; ``unbounded`` is simply wrong."""
+    m = dm.Model("decoupled")
+    a = m.continuous("a", lb=0, ub=10)
+    b = m.continuous("b", lb=0, ub=10)
+    m.subject_to(a - b <= 0)
+    m.subject_to(a - b >= 1)  # contradicts the row above
+    z = m.continuous("z", lb=L, ub=2 * L)
+    v = m.continuous("v", lb=0, ub=2 * L)
+    m.subject_to(z - v <= 0)  # satisfiable, but activity ~L
+    y = m.continuous("y", lb=-1e20, ub=1e20)
+    if quadratic:
+        w = m.continuous("w", lb=-1, ub=1)
+        m.minimize((w - 0.5) ** 2 - y)
+    else:
+        m.minimize(-y)
+    return m
+
+
+@pytest.mark.parametrize("quadratic", [False, True])
+@pytest.mark.parametrize("L", [1e12, 1e14])
+def test_large_unrelated_row_is_never_certified_unbounded(L, quadratic):
+    """The §1 line for the round-4 repro, on every route and magnitude: an
+    infeasible problem must never come back ``unbounded``."""
+    r = _decoupled_infeasible_model(L, quadratic).solve(time_limit=60)
+    assert r.status != "unbounded", "certified 'unbounded' on an infeasible problem"
+    assert r.status in ("infeasible", "error")
+
+
+@pytest.mark.parametrize("quadratic", [False, True])
+def test_per_row_floor_restores_the_infeasible_certificate(quadratic):
+    """The per-row floor's payoff: with the violated row judged against its own
+    activity instead of the whole system's, the correct ``infeasible``
+    certificate survives the large unrelated row.
+
+    Only asserted where Phase-1 itself solves. At larger magnitudes the elastic
+    Phase-1 LP returns no point at all, and with nothing to verify against the
+    route reports an honest ``error`` -- see
+    ``test_unverifiable_infeasible_is_an_error_not_an_unchecked_certificate``.
+    """
+    r = _decoupled_infeasible_model(1e12, quadratic).solve(time_limit=60)
+    assert r.status == "infeasible"
+    assert r.gap_certified
+
+
+@pytest.mark.parametrize("quadratic", [False, True])
+def test_unverifiable_infeasible_is_an_error_not_an_unchecked_certificate(quadratic):
+    """Accepted trade, pinned so it stays deliberate.
+
+    At this magnitude ``_phase1_min_violation`` returns no point, so POUNCE's raw
+    Ipopt code 2 cannot be cross-checked. ``main`` reports ``infeasible`` here --
+    correct in fact, but only by trusting exactly the unverified code 2 that
+    #1319 part 2 exists to stop trusting. This route reports ``error`` instead:
+    weaker, and honest. Deciding it properly needs a feasibility oracle that does
+    not depend on the IPM (the constraint system is linear, so the exact simplex
+    could answer it); tracked separately.
+    """
+    r = _decoupled_infeasible_model(1e14, quadratic).solve(time_limit=60)
+    assert r.status != "unbounded"
+    assert r.status in ("infeasible", "error")
+    if r.status == "error":
+        assert not r.gap_certified
+
+
+def test_phase1_floor_is_per_row_not_summed():
+    """Unit-level: an O(1) violation on a small row is a certificate even when a
+    different row carries 1e12 of activity."""
+    from discopt.solvers.lp_pounce import PHASE1_INFEASIBLE, _phase1_verdict
+
+    cl = np.array([-1e20, 1.0, -1e20])
+    cu = np.array([0.0, 1e20, 0.0])
+    activity = np.array([10.0, 10.0, 2e12])  # the third row is the large one
+    slacks = np.array([0.0, 1.0, 0.0])  # the violation is on the SMALL row
+    assert _phase1_verdict(slacks, cl, cu, activity) == PHASE1_INFEASIBLE
+
+
+def test_per_row_floor_still_excuses_that_rows_own_roundoff():
+    """The guard it must not lose: a residual under the violated row's OWN
+    activity floor is still roundoff, not a certificate."""
+    from discopt.solvers.lp_pounce import PHASE1_INFEASIBLE, _phase1_verdict
+
+    cl = np.array([-1e20, 1.0])
+    cu = np.array([1.0, 1e20])
+    activity = np.array([2e15, 2e15])
+    assert _phase1_verdict(np.array([0.0, 0.207]), cl, cu, activity) != PHASE1_INFEASIBLE
