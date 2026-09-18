@@ -39,13 +39,15 @@ from discopt.solvers import QPResult, SolveStatus, pounce_option_defaults
 from discopt.solvers.lp_pounce import (
     _INF,
     _LP_STATUS_MAP,
+    PHASE1_INFEASIBLE,
+    PHASE1_UNDECIDED,
     POUNCE_AVAILABLE,
     PounceKKTError,
     _build_certificate,
     _certify_unbounded_ray,
     _interior_start,
-    _is_infeasible_violation,
     _phase1_min_violation,
+    _phase1_verdict,
     _stack_constraints,
     finite_bound_threshold,
 )
@@ -192,14 +194,33 @@ def solve_qp(
         SolveStatus.INFEASIBLE,
     ):
         phase1 = _phase1_min_violation(A, cl, cu, lb, ub, opts)
-        if phase1 is not None and _is_infeasible_violation(
-            phase1.slacks, cl, cu, phase1.row_activity
-        ):
+        verdict = (
+            _phase1_verdict(phase1.slacks, cl, cu, phase1.row_activity)
+            if phase1 is not None
+            else None
+        )
+        if verdict == PHASE1_INFEASIBLE:
+            assert phase1 is not None
             return QPResult(
                 status=SolveStatus.INFEASIBLE,
                 iterations=result.iterations,
                 wall_time=result.wall_time,
                 infeasibility_certificate=_build_certificate(phase1.slacks, n_ineq),
+            )
+        if verdict == PHASE1_UNDECIDED:
+            # Undecided is not feasible. Falling through would let the ray check
+            # certify UNBOUNDED for what may be an INFEASIBLE QP -- the same false
+            # certificate the LP path guards against here. No second QP engine
+            # exists (#359), so ERROR is the honest outcome.
+            logger.debug(
+                "POUNCE QP Phase-1 was undecided (violation above the rhs floor "
+                "but under the row-activity roundoff floor); reporting ERROR "
+                "rather than certifying anything from it."
+            )
+            return QPResult(
+                status=SolveStatus.ERROR,
+                iterations=result.iterations,
+                wall_time=result.wall_time,
             )
         if result.status == SolveStatus.INFEASIBLE:
             # POUNCE's own code-2 verdict did NOT survive the Phase-1 check, so the

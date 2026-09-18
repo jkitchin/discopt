@@ -320,3 +320,68 @@ def test_bound_beyond_pounce_infinity_is_still_relaxed(monkeypatch):
     with pytest.warns(RuntimeWarning, match=r"relaxed a declared"):
         r = _bounded_qp_model(5e19).solve()
     assert r.status != "unbounded"
+
+
+# ── the regression the #1319 fix itself introduced ────────────────────────
+#
+# Defect 1 above raised the infeasibility bar by a row-activity roundoff floor.
+# The bar moved, but the READING of "under the bar" did not: the code took it as
+# proof of FEASIBILITY. It is not. A genuine conflict whose minimal violation is
+# small in absolute terms sits under that floor whenever the Phase-1 point is
+# large, and calling it feasible let the raw Ipopt code-3/4 ``UNBOUNDED`` survive
+# the ray check -- certifying an INFEASIBLE problem as ``unbounded``, trading
+# #1319's false `infeasible` for a false `unbounded`.
+#
+# The measured case: ``x - y <= 1`` with ``x - y >= 10`` over ``x, y in
+# [1e15, 3e15]``. True minimal total violation 9; row activity 4e15; floor
+# 1e-12 * 4e15 = 4000. main certified `infeasible` here; the first #1319 fix did
+# not. The answer is a third verdict -- undecided is not feasible.
+
+
+def test_small_genuine_violation_at_huge_activity_is_not_read_as_feasible():
+    """The exact numbers from the regression: a real violation of 9 under a
+    4000 roundoff floor must come back UNDECIDED, never FEASIBLE."""
+    from discopt.solvers.lp_pounce import PHASE1_UNDECIDED, _phase1_verdict
+
+    slacks = np.array([0.0, 9.0])
+    cl = np.array([-1e20, 10.0])
+    cu = np.array([1.0, 1e20])
+    activity = np.array([2e15, 2e15])
+    assert _phase1_verdict(slacks, cl, cu, activity) == PHASE1_UNDECIDED
+
+
+def test_phase1_verdict_separates_all_three_cases():
+    """Feasible / undecided / infeasible are three distinct answers, and the
+    clean-zero and clearly-violated ends must keep their old verdicts."""
+    from discopt.solvers.lp_pounce import (
+        PHASE1_FEASIBLE,
+        PHASE1_INFEASIBLE,
+        PHASE1_UNDECIDED,
+        _phase1_verdict,
+    )
+
+    cl = np.array([-1e20, 10.0])
+    cu = np.array([1.0, 1e20])
+    activity = np.array([2e15, 2e15])
+    assert _phase1_verdict(np.array([0.0, 0.0]), cl, cu, activity) == PHASE1_FEASIBLE
+    assert _phase1_verdict(np.array([0.0, 9.0]), cl, cu, activity) == PHASE1_UNDECIDED
+    assert _phase1_verdict(np.array([0.0, 1e14]), cl, cu, activity) == PHASE1_INFEASIBLE
+    # No Phase-1 point certifies nothing in EITHER direction (guard kept from the
+    # original fix -- reading it against the rhs alone restores the false
+    # `infeasible`, reading it as feasible restores the false `unbounded`).
+    assert _phase1_verdict(np.array([1e9, 1e9]), cl, cu, None) == PHASE1_UNDECIDED
+
+
+def test_infeasible_lp_at_huge_magnitude_is_never_certified_unbounded():
+    """End to end: the conflicting system above must not come back ``unbounded``
+    on any route. ``infeasible`` (the exact simplex decides it) or ``error`` (no
+    engine could) are both acceptable; a certified ``unbounded`` is not."""
+    L = 1e15
+    m = dm.Model("infeas_at_scale")
+    x = m.continuous("x", lb=L, ub=3 * L)
+    y = m.continuous("y", lb=L, ub=3 * L)
+    m.subject_to(x - y <= 1.0)
+    m.subject_to(x - y >= 10.0)
+    m.minimize(x + y)
+    r = m.solve(time_limit=60)
+    assert r.status != "unbounded", f"infeasible LP certified {r.status!r}"

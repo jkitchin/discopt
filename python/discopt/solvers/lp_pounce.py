@@ -592,14 +592,38 @@ def solve_lp(
         SolveStatus.INFEASIBLE,
     ):
         phase1 = _phase1_min_violation(A, cl, cu, lb, ub, opts)
-        if phase1 is not None and _is_infeasible_violation(
-            phase1.slacks, cl, cu, phase1.row_activity
-        ):
+        verdict = (
+            _phase1_verdict(phase1.slacks, cl, cu, phase1.row_activity)
+            if phase1 is not None
+            else None
+        )
+        if verdict == PHASE1_INFEASIBLE:
+            assert phase1 is not None
             return LPResult(
                 status=SolveStatus.INFEASIBLE,
                 iterations=result.iterations,
                 wall_time=result.wall_time,
                 infeasibility_certificate=_build_certificate(phase1.slacks, n_ineq),
+            )
+        if verdict == PHASE1_UNDECIDED:
+            # Phase-1 could not tell a genuine small violation at a huge-magnitude
+            # point from cancellation noise. Falling through would hand this to
+            # ``_settle_ambiguous_unbounded``, which certifies UNBOUNDED on an
+            # exhibited ray -- and on an INFEASIBLE problem that is a false
+            # certificate (the regression #1319's own fix introduced: violation 9
+            # under a 4000 roundoff floor). Undecided is not feasible; report
+            # ERROR so the caller degrades to the exact simplex, which honors the
+            # declared box and decides exactly.
+            logger.debug(
+                "POUNCE Phase-1 was undecided (violation above the rhs floor but "
+                "under the row-activity roundoff floor); reporting ERROR rather "
+                "than letting an unverified UNBOUNDED or a feasibility assumption "
+                "stand."
+            )
+            return LPResult(
+                status=SolveStatus.ERROR,
+                iterations=result.iterations,
+                wall_time=result.wall_time,
             )
         if result.status == SolveStatus.INFEASIBLE:
             # POUNCE's own code-2 verdict did NOT survive the exact Phase-1
@@ -715,6 +739,67 @@ def solve_lp_kkt(
     return obj, x_arr, y, z_l, z_u
 
 
+#: Phase-1 proved infeasibility: the minimal violation clears both noise floors.
+PHASE1_INFEASIBLE = "infeasible"
+#: Phase-1 proved feasibility: the minimal violation is within even the rhs floor.
+PHASE1_FEASIBLE = "feasible"
+#: Phase-1 decided NOTHING: the violation is above the rhs floor but under the
+#: row-activity roundoff floor, so it is either a genuine small violation at a
+#: huge-magnitude point or cancellation noise, and this test cannot tell which.
+PHASE1_UNDECIDED = "undecided"
+
+
+def _phase1_verdict(
+    slacks: Optional[np.ndarray],
+    cl: np.ndarray,
+    cu: np.ndarray,
+    row_activity: Optional[np.ndarray],
+) -> str:
+    """Read the Phase-1 optimum as one of three verdicts, never two.
+
+    Collapsing this to a bool is what made #1319's fix trade one false
+    certificate for another. "Not above the roundoff floor" is **not** proof of
+    feasibility: a genuine conflict whose minimal violation is small in absolute
+    terms sits under that floor whenever the Phase-1 point is large. Measured on
+    the regression that prompted this (``x - y <= 1`` with ``x - y >= 10`` over
+    ``x, y in [1e15, 3e15]``): true minimal violation 9, row activity 4e15, so
+    the floor is ``1e-12 * 4e15 = 4000`` and the violation vanishes under it.
+    Reported as "feasible", the raw Ipopt code-3/4 ``UNBOUNDED`` then survived
+    :func:`_settle_ambiguous_unbounded` and an **infeasible** LP was certified
+    ``unbounded``.
+
+    The third verdict is the fix: undecided is undecided. The caller must not
+    certify anything from it — on the LP route it degrades to the exact simplex,
+    which honors the declared box and decides exactly.
+    """
+    if slacks is None:
+        return PHASE1_UNDECIDED
+    arr = np.asarray(slacks, dtype=np.float64)
+    total = float(arr.sum())
+    m = int(arr.size)
+    _sentinel = _POUNCE_BOUND_INF
+    cl_a = np.asarray(cl, dtype=np.float64).ravel()
+    cu_a = np.asarray(cu, dtype=np.float64).ravel()
+    finite = np.concatenate([cl_a[np.abs(cl_a) < _sentinel], cu_a[np.abs(cu_a) < _sentinel]])
+    rhs_scale = 1.0 + (float(np.max(np.abs(finite))) if finite.size else 0.0)
+    rhs_term = _FEAS_TOL * max(1.0, float(m)) * rhs_scale
+    if row_activity is None:
+        # No Phase-1 point at all: there is nothing to measure the violation
+        # against, so nothing can be certified from it in EITHER direction.
+        # (Reading it against the rhs alone would restore exactly the #1319
+        # false-``infeasible``; reading it as feasible would restore the false
+        # ``unbounded``.)
+        return PHASE1_UNDECIDED
+    act = np.asarray(row_activity, dtype=np.float64).ravel()
+    act = act[np.isfinite(act)]
+    roundoff_term = _ROW_ACTIVITY_REL_TOL * float(np.sum(np.abs(act))) if act.size else 0.0
+    if total > rhs_term + roundoff_term:
+        return PHASE1_INFEASIBLE
+    if total <= rhs_term:
+        return PHASE1_FEASIBLE
+    return PHASE1_UNDECIDED
+
+
 def _is_infeasible_violation(
     slacks: Optional[np.ndarray],
     cl: np.ndarray,
@@ -743,30 +828,13 @@ def _is_infeasible_violation(
     caller then reports the prior status (e.g. iteration limit) or degrades to the
     exact simplex, rather than returning a wrong ``INFEASIBLE``.
 
-    ``row_activity`` is ``None`` only when no Phase-1 point is available, in which
-    case there is nothing to certify against and the answer is ``False``.
+    Only :data:`PHASE1_INFEASIBLE` is a proof. A ``False`` here therefore covers
+    BOTH "proved feasible" and "could not tell" — callers that go on to certify
+    some other status must consult :func:`_phase1_verdict` directly and refuse to
+    certify on :data:`PHASE1_UNDECIDED`, or they will do what #1319's fix did and
+    turn a missed infeasibility into a false ``unbounded``.
     """
-    if slacks is None or row_activity is None:
-        return False
-    arr = np.asarray(slacks, dtype=np.float64)
-    total = float(arr.sum())
-    m = int(arr.size)
-    # Use only genuinely finite RHS entries for the scale — the ±_INF sentinel
-    # (1e20) is "finite" to np.isfinite and would blow the scale up. The cutoff is
-    # POUNCE's own infinity (1e19), not the flag-dependent box threshold: this asks
-    # "is this entry the sentinel?", which does not move with
-    # ``DISCOPT_POUNCE_DECLARED_BOX``.
-    _sentinel = _POUNCE_BOUND_INF
-    cl = np.asarray(cl, dtype=np.float64).ravel()
-    cu = np.asarray(cu, dtype=np.float64).ravel()
-    finite = np.concatenate([cl[np.abs(cl) < _sentinel], cu[np.abs(cu) < _sentinel]])
-    rhs_scale = 1.0 + (float(np.max(np.abs(finite))) if finite.size else 0.0)
-    rhs_term = _FEAS_TOL * max(1.0, float(m)) * rhs_scale
-    # ``total`` is a sum over rows, so the noise floor is summed over rows too.
-    act = np.asarray(row_activity, dtype=np.float64).ravel()
-    act = act[np.isfinite(act)]
-    roundoff_term = _ROW_ACTIVITY_REL_TOL * float(np.sum(np.abs(act))) if act.size else 0.0
-    return total > rhs_term + roundoff_term
+    return _phase1_verdict(slacks, cl, cu, row_activity) == PHASE1_INFEASIBLE
 
 
 def _build_certificate(slacks: np.ndarray, n_ineq: int) -> InfeasibilityCertificate:
