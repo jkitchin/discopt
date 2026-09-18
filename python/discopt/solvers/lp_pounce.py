@@ -353,17 +353,22 @@ class PounceKKTError(RuntimeError):
     returning silently-wrong sensitivities to a differentiable layer."""
 
 
-# Ipopt return codes (POUNCE is shape-compatible). Code 2 maps to INFEASIBLE only
-# as a RAW label: it is cross-checked against the elastic Phase-1 LP before it is
-# ever certified (see ``solve_lp``), because the barrier method raises code 2 from
-# numerical failure on badly-conditioned huge-magnitude-bound problems with no real
-# infeasibility behind it (#1309). Diverging iterates (4) and a too-small search
-# direction (3) on an LP signal unboundedness, and are likewise cross-checked
-# (Phase-1, then an exhibited ray — #940).
+# Ipopt return codes (POUNCE is shape-compatible). Diverging iterates (4) and a
+# too-small search direction (3) on an LP signal unboundedness.
+#
+# This table is the RAW reading of the code, not a verdict. #1309 falsified the
+# claim this comment used to make -- that "for a convex LP local infeasibility
+# is global, so code 2 is a sound INFEASIBLE": the barrier method raises code 2
+# from numerical failure on badly-conditioned huge-magnitude-bound problems with
+# no infeasibility behind it (reproduced with declared bounds in [5e15, 2e18] on
+# an otherwise trivially feasible one-row LP). Every INFEASIBLE, 3 and 4 here is
+# cross-checked before it reaches a caller: INFEASIBLE against the elastic
+# Phase-1 LP in ``_solve_core``, and 3/4 against Phase-1 and then an exhibited
+# recession ray (#940). See the note there.
 _LP_STATUS_MAP = {
     0: SolveStatus.OPTIMAL,  # Solve_Succeeded
     1: SolveStatus.OPTIMAL,  # Solved_To_Acceptable_Level
-    2: SolveStatus.INFEASIBLE,  # Infeasible_Problem_Detected (global for LP)
+    2: SolveStatus.INFEASIBLE,  # Infeasible_Problem_Detected (raw label; cross-checked)
     3: SolveStatus.UNBOUNDED,  # Search_Direction_Becomes_Too_Small
     4: SolveStatus.UNBOUNDED,  # Diverging_Iterates
     -1: SolveStatus.ITERATION_LIMIT,  # Maximum_Iterations_Exceeded

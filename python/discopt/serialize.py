@@ -95,6 +95,7 @@ from discopt.modeling.core import (
     VarType,
     _DisjunctiveConstraint,
     _IndicatorConstraint,
+    _readonly_bound,
     _SOSConstraint,
 )
 from discopt.provenance import capture as _capture_provenance
@@ -558,8 +559,25 @@ def _enc_variable(v: Variable) -> dict:
     }
 
 
+def _dec_name(name, kind: str) -> str:
+    """The declared name of a *kind* object, refusing anything the API would.
+
+    `Model.continuous(...)` only ever produces `str` names, so a document
+    carrying `1`, `None` or a list is corrupt. Without this the non-string ones
+    flowed straight into the model: `1` and `None` loaded silently and reappeared
+    in every downstream name lookup and export, while a list or dict failed much
+    later with a bare `TypeError: unhashable type` from `model._names.add` --
+    neither of which says the document is at fault (#1321).
+    """
+    if not isinstance(name, str):
+        raise SerializationError(
+            f"{kind} name must be a string, got {type(name).__name__} ({name!r})"
+        )
+    return name
+
+
 def _dec_variable(d: dict, model: Model) -> Variable:
-    name = d["name"]
+    name = _dec_name(d.get("name"), "variable")
     # #1310: a corrupted document (or a future writer bug) can carry two
     # variables sharing a name. `_register_variable` below only ever ADDS to
     # `model._names` -- it never checks it -- so without this, `load()` hands
@@ -581,8 +599,19 @@ def _dec_variable(d: dict, model: Model) -> Variable:
     var = Variable(name, VarType(d["type"]), shape, lb, ub, model)
     # Restore the fix stack, so `fix_depth`, `unfix()` and the declared-domain check
     # in `fix()` all see what the saved model saw.
+    #
+    # Frozen on the way in, exactly as `Variable.fix` freezes what it pushes:
+    # `_bound_stack[0]` IS the declared domain `fix()` validates against, and
+    # `unfix()` reinstalls these arrays as the live box, which
+    # `Model.saved_bounds(copy=False)` then aliases. `_dec_array` hands back a
+    # writable array, so a loaded model used to give back a writable box on the
+    # first `unfix()` -- an in-place write there silently corrupted the
+    # snapshot and changed the solve's answer (#1321).
     var._bound_stack = [
-        (_dec_array(entry[0], shape), _dec_array(entry[1], shape))
+        (
+            _readonly_bound(_dec_array(entry[0], shape)),
+            _readonly_bound(_dec_array(entry[1], shape)),
+        )
         for entry in d.get("bound_stack", [])
     ]
     return model._register_variable(var)
@@ -593,7 +622,7 @@ def _enc_parameter(p: Parameter) -> dict:
 
 
 def _dec_parameter(d: dict, model: Model) -> Parameter:
-    name = d["name"]
+    name = _dec_name(d.get("name"), "parameter")
     # #1310: same name-uniqueness gap as `_dec_variable`, and reachable across
     # the variable/parameter boundary too -- `Model.validate()` only checks
     # uniqueness within `_variables`, so a variable/parameter name collision
@@ -989,14 +1018,25 @@ def _enc_sets(model: Model) -> list[dict]:
 def _dec_sets(docs: list[dict]) -> list:
     from discopt.modeling.sets import Set
 
-    return [
-        Set(
-            d["name"],
-            [tuple(mem) if isinstance(mem, list) else mem for mem in d["members"]],
-            dimen=d["dimen"],
+    # `Model.set()` refuses a name already in use; nothing re-checked it here,
+    # so a document with two sets of one name reloaded into a model where every
+    # `sum_over` on that name silently resolves to whichever copy is found
+    # first (#1321).
+    seen: set[str] = set()
+    out = []
+    for d in docs:
+        name = _dec_name(d.get("name"), "set")
+        if name in seen:
+            raise SerializationError(f"duplicate set name {name!r}")
+        seen.add(name)
+        out.append(
+            Set(
+                name,
+                [tuple(mem) if isinstance(mem, list) else mem for mem in d["members"]],
+                dimen=d["dimen"],
+            )
         )
-        for d in docs
-    ]
+    return out
 
 
 def _enc_coupling_keys(model: Model, rows: list) -> dict:
@@ -1401,9 +1441,25 @@ def loads(text: Union[str, bytes]) -> Model:
     _dec_complementarities(doc.get("complementarities"), model, nodes)
     _dec_state(doc.get("state"), model, list(model._constraints))
 
-    model._initial_point = {
-        (name, int(elem)): _dec_float(val) for name, elem, val in doc.get("initial_point", [])
-    }
+    # An entry naming a variable this document does not declare is dead weight
+    # at best: `solve()` looks the point up by name, so the value is dropped
+    # without a word, and the user's warm start is quietly gone (#1321).
+    declared = {v.name: v.size for v in model._variables}
+    initial_point = {}
+    for name, elem, val in doc.get("initial_point", []):
+        name = _dec_name(name, "initial_point")
+        if name not in declared:
+            raise SerializationError(
+                f"initial_point names variable {name!r}, which this document does not declare"
+            )
+        idx = int(elem)
+        if not 0 <= idx < declared[name]:
+            raise SerializationError(
+                f"initial_point entry {name!r}[{idx}] is out of range for a variable "
+                f"of size {declared[name]}"
+            )
+        initial_point[(name, idx)] = _dec_float(val)
+    model._initial_point = initial_point
 
     if doc.get("solution") is not None:
         from discopt.result_io import deserialize_result

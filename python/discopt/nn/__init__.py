@@ -19,6 +19,13 @@ from __future__ import annotations
 import importlib
 import importlib.abc
 import importlib.machinery
+
+# #1325: ``find_spec`` below is ``importlib.util.find_spec``. It worked only
+# because something else in the process had already imported ``importlib.util``
+# -- ``import importlib`` does not bring the submodule in -- so the guard's
+# ``except (ImportError, AttributeError, ValueError)`` would have turned "the
+# submodule is missing" into "the alias does not exist", silently.
+import importlib.util
 import logging
 import sys
 import warnings
@@ -90,6 +97,8 @@ class _AliasFinder(importlib.abc.MetaPathFinder):
     """
 
     _PREFIX = f"{__name__}."
+    #: See ``_ALIAS_FINDER_MARK``: identity across a reload of this module.
+    _discopt_nn_alias_finder = True
 
     def find_spec(self, fullname: str, path=None, target=None):
         if not fullname.startswith(self._PREFIX):
@@ -115,13 +124,22 @@ class _AliasFinder(importlib.abc.MetaPathFinder):
         return spec
 
 
+#: Attribute marking an installed alias finder, checked instead of
+#: ``isinstance``. #1325: re-executing this module (``importlib.reload``, or a
+#: ``sys.modules`` purge and re-import) creates a NEW ``_AliasFinder`` class, so
+#: the instance already on ``sys.meta_path`` is not an instance of it and the
+#: guard installed a second finder -- then a third. A name, unlike a class
+#: object, survives the module being rebuilt.
+_ALIAS_FINDER_MARK = "_discopt_nn_alias_finder"
+
+
 def _install_alias_finder() -> None:
     """Put the alias finder ahead of the normal path finders, exactly once.
 
     First in ``sys.meta_path`` because the standard finders would otherwise look
     for ``discopt/nn/network.py``, a file that no longer exists.
     """
-    if not any(isinstance(f, _AliasFinder) for f in sys.meta_path):
+    if not any(getattr(f, _ALIAS_FINDER_MARK, False) for f in sys.meta_path):
         sys.meta_path.insert(0, _AliasFinder())
 
 
