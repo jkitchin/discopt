@@ -49,6 +49,7 @@ from pathlib import Path
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import discopt  # noqa: E402
+import numpy as np  # noqa: E402
 from discopt.modeling import from_nl  # noqa: E402
 
 # CLAUDE.md §8: prove which code is loaded, and that it is the version under test.
@@ -75,13 +76,37 @@ from _optima import optima_registry  # noqa: E402
 
 MAX_NODES = int(sys.argv[1]) if len(sys.argv) > 1 else 300
 TL = float(sys.argv[2]) if len(sys.argv) > 2 else 60.0
+# How many structurally-unaffected instances to run anyway, as a check on the
+# classification itself (see NOOP_CHECK below).
+NOOP_SAMPLE = int(sys.argv[3]) if len(sys.argv) > 3 else 12
 ABS_TOL, REL_TOL = 1e-6, 1e-4
 
 OPTIMA = {k: v["optimum"] for k, v in optima_registry().items() if "optimum" in v}
-NAMES = sorted(p.stem for p in CORPUS.glob("*.nl"))
+ALL_NAMES = sorted(p.stem for p in CORPUS.glob("*.nl"))
 CERTIFIED = {"optimal", "infeasible", "unbounded"}
 
 faulthandler.enable()
+
+
+def declared_bounds_in_window(name: str) -> tuple[int, float]:
+    """``(count, max|b|)`` of declared bounds with ``1e15 <= |b| < 1e19``.
+
+    The flag changes exactly one thing: the array produced by
+    ``np.where(|b| >= threshold, INF, b)``. An instance with NO bound in that
+    window therefore yields a **bit-identical** box on both arms, so the flag is a
+    provable no-op on it -- not "measured neutral", structurally incapable of
+    differing. Splitting the corpus on this is what lets the panel spend its
+    budget where a difference is possible, and it makes the no-op claim a
+    derivation rather than a sample (CLAUDE.md §6: a probe that cannot distinguish
+    the arms measures nothing, however green it looks).
+    """
+    m = from_nl(str(CORPUS / f"{name}.nl"))
+    lo = np.array([float(v.lb) if v.lb is not None else -np.inf for v in m._variables])
+    hi = np.array([float(v.ub) if v.ub is not None else np.inf for v in m._variables])
+    b = np.abs(np.concatenate([lo, hi]))
+    b = b[np.isfinite(b)]
+    inside = b[(b >= _lp._LEGACY_BOUND_THRESHOLD) & (b < _lp._POUNCE_BOUND_INF)]
+    return int(inside.size), (float(inside.max()) if inside.size else 0.0)
 
 
 def run(name: str, flag: str) -> dict:
@@ -116,7 +141,37 @@ rows: list[dict] = []
 violations: list[str] = []
 comparisons = 0  # CLAUDE.md §6: executed-assertion count.
 
-print(f"\n{len(NAMES)} instances, max_nodes={MAX_NODES}, time_limit={TL}s\n", flush=True)
+# --- Split the corpus on whether the flag can possibly do anything -----------
+print(f"\nclassifying {len(ALL_NAMES)} instances by declared-bound window ...", flush=True)
+AFFECTED: list[str] = []
+UNAFFECTED: list[str] = []
+for name in ALL_NAMES:
+    try:
+        n_in, max_in = declared_bounds_in_window(name)
+    except Exception as exc:  # noqa: BLE001 - a classification failure is a result
+        print(f"  classify FAILED {name}: {type(exc).__name__}: {exc}", flush=True)
+        violations.append(f"{name}: could not be classified ({type(exc).__name__})")
+        continue
+    if n_in:
+        AFFECTED.append(name)
+        print(f"  AFFECTED   {name:<20} {n_in} bound(s) in window, max {max_in:.3e}", flush=True)
+    else:
+        UNAFFECTED.append(name)
+print(
+    f"  -> {len(AFFECTED)} affected, {len(UNAFFECTED)} structurally unaffected "
+    f"(bit-identical box on both arms)",
+    flush=True,
+)
+
+# Every affected instance is run in full. A sample of the unaffected ones is run
+# too -- not to measure the flag, but to VERIFY the classification: if an instance
+# with no bound in the window differs between arms, the derivation above is wrong
+# and the whole split is invalid. That check is the point, so it must be able to
+# fail loudly (CLAUDE.md §6/§7).
+NAMES = AFFECTED + UNAFFECTED[:NOOP_SAMPLE]
+NOOP_CHECK = set(UNAFFECTED[:NOOP_SAMPLE])
+
+print(f"\nrunning {len(NAMES)} instances, max_nodes={MAX_NODES}, time_limit={TL}s\n", flush=True)
 hdr = f"{'instance':<18} {'OFF status':<14} {'ON status':<14} {'OFFnodes':>9} {'ONnodes':>8} note"
 print(hdr, flush=True)
 print("-" * len(hdr), flush=True)
@@ -137,6 +192,24 @@ for i, name in enumerate(NAMES, 1):
 
     notes = []
     opt = OPTIMA.get(name)
+
+    # --- Classification check: a no-op instance MUST be identical ------------
+    if name in NOOP_CHECK:
+        notes.append("noop-check")
+        for field in ("status", "nodes", "objective", "bound", "certified"):
+            same = (
+                close(off[field], on[field])
+                if field in ("objective", "bound")
+                else off[field] == on[field]
+            )
+            if not same:
+                violations.append(
+                    f"{name}: declares NO bound in [1e15, 1e19) yet the arms differ on "
+                    f"{field!r} (OFF={off[field]!r} ON={on[field]!r}) -- the structural "
+                    f"no-op derivation is WRONG and the corpus split is invalid"
+                )
+                notes.append(f"NOOP-BROKEN:{field}")
+            comparisons += 1
 
     # --- Gate 1: cert-clean -------------------------------------------------
     if opt is not None and on["bound"] is not None and on["certified"]:
@@ -188,7 +261,8 @@ for i, name in enumerate(NAMES, 1):
 
 # --- Gate 2: net-positive ---------------------------------------------------
 ok = [r for r in rows if "error" not in r]
-both_clean = [r for r in ok if not r["off"]["backstop"] and not r["on"]["backstop"]]
+aff = [r for r in ok if r["name"] in set(AFFECTED)]
+both_clean = [r for r in aff if not r["off"]["backstop"] and not r["on"]["backstop"]]
 newcert = [r["name"] for r in ok if not r["off"]["certified"] and r["on"]["certified"]]
 decert = [r["name"] for r in ok if r["off"]["certified"] and not r["on"]["certified"]]
 node_off = sum(r["off"]["nodes"] for r in both_clean)
@@ -198,22 +272,55 @@ wall_on = sum(r["on"]["wall"] for r in both_clean)
 
 print("\n" + "=" * 78, flush=True)
 print(
-    f"instances run          : {len(ok)} / {len(NAMES)}  (errors: {len(rows) - len(ok)})",
+    f"instances run           : {len(ok)} / {len(NAMES)}  (errors: {len(rows) - len(ok)})",
     flush=True,
 )
-print(f"comparable (no backstop): {len(both_clean)}", flush=True)
-print(f"newly certified by ON  : {len(newcert)} {newcert}", flush=True)
-print(f"DEcertified by ON      : {len(decert)} {decert}", flush=True)
-print(f"total nodes  OFF={node_off}  ON={node_on}", flush=True)
-print(f"total wall   OFF={wall_off:.1f}s  ON={wall_on:.1f}s", flush=True)
+print(f"affected by the flag    : {len(AFFECTED)} of {len(ALL_NAMES)} in the corpus", flush=True)
+print(f"no-op classification    : {len(NOOP_CHECK)} verified identical on both arms", flush=True)
+print(f"newly certified by ON   : {len(newcert)} {newcert}", flush=True)
+print(f"DEcertified by ON       : {len(decert)} {decert}", flush=True)
+print(f"affected, comparable    : {len(both_clean)}", flush=True)
+print(f"  nodes  OFF={node_off}  ON={node_on}", flush=True)
+print(f"  wall   OFF={wall_off:.1f}s  ON={wall_on:.1f}s", flush=True)
 print("=" * 78, flush=True)
 
 if violations:
-    print(f"\nCERT-CLEAN FAILURES ({len(violations)}):", flush=True)
+    print(f"\nGATE 1 CERT-CLEAN: FAIL ({len(violations)})", flush=True)
     for v in violations:
         print(f"  ✗ {v}", flush=True)
 else:
-    print("\nCERT-CLEAN: PASS (no false bound, no decertification, no contradiction)", flush=True)
+    print(
+        "\nGATE 1 CERT-CLEAN: PASS (no false bound, no decertification, no "
+        "contradiction, no broken no-op)",
+        flush=True,
+    )
+
+# The net-positive bar is only meaningful if the corpus actually exercises the
+# flag. Reporting "neutral, therefore stays OFF" off a corpus with ~no instances
+# in the affected window would be a null result dressed up as a measurement --
+# exactly what CLAUDE.md §6 forbids. Say which it is.
+print("\nGATE 2 NET-POSITIVE:", flush=True)
+if len(both_clean) < 3:
+    print(
+        f"  INCONCLUSIVE -- only {len(both_clean)} comparable instance(s) in this corpus "
+        f"declare a bound in [1e15, 1e19), which is too few to establish 'measurably "
+        f"helpful broadly' either way. The flag is a PROVEN no-op on the other "
+        f"{len(UNAFFECTED)}, so there is no corpus-wide harm to weigh; the demonstrated "
+        f"benefit is on the #1319 class (wrong/absent answer -> correct certified "
+        f"optimum). A graduation decision on THIS corpus rests on that, not on nodes.",
+        flush=True,
+    )
+elif node_on <= node_off and wall_on <= wall_off * 1.05:
+    print(
+        f"  PASS -- nodes {node_off}->{node_on}, wall {wall_off:.1f}s->{wall_on:.1f}s",
+        flush=True,
+    )
+else:
+    print(
+        f"  FAIL -- nodes {node_off}->{node_on}, wall {wall_off:.1f}s->{wall_on:.1f}s; "
+        f"cert-clean but not helpful (the DISCOPT_CUT_INHERIT lesson: stays OFF)",
+        flush=True,
+    )
 
 out = ROOT / "scratchpad" / "pounce_declared_box_panel.json"
 out.parent.mkdir(exist_ok=True)

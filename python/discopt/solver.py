@@ -21020,7 +21020,7 @@ def _solve_lp_matrix(
     declared finite bound in ``[1e15, 1e20)`` as finite — it relaxes it to its own
     infinity — so an ``UNBOUNDED`` verdict from it on such a box may be an artifact
     of the relaxation rather than a property of the problem as posed. Only the
-    interior-point engine does this (``lp_pounce._FINITE_BOUND_THRESHOLD = 1e15``);
+    interior-point engine does this (``lp_pounce.finite_bound_threshold()``);
     see the ``SolveStatus.UNBOUNDED`` branch below. Leave it ``False`` for a
     backend that honors the declared box (the exact simplex, whose infinity
     threshold is ``1e20``; Gurobi, whose infinity is ``1e30``) — discarding *its*
@@ -21132,7 +21132,7 @@ def _solve_lp_matrix(
         # #850 Obs 1: an interior-point engine (POUNCE) treats a declared finite
         # bound whose magnitude is in [1e15, 1e20) as ±infinity — its barrier
         # cannot condition so huge a finite bound, so it relaxes it to the IPM
-        # sentinel (lp_pounce._FINITE_BOUND_THRESHOLD). The box the IPM actually
+        # sentinel (lp_pounce.finite_bound_threshold()). The box the IPM actually
         # solves over is then LARGER than the declared box, and an UNBOUNDED
         # verdict can be an artifact of that relaxation rather than a property of
         # the problem AS POSED. The exact simplex, whose infinity threshold is
@@ -21621,7 +21621,7 @@ def _solve_qp_matrix(
     ``UNBOUNDED`` verdict from it over such a box may be an artifact of the
     relaxation rather than a property of the problem as posed. Only the
     interior-point engine does this (``qp_pounce`` shares
-    ``lp_pounce._FINITE_BOUND_THRESHOLD``); leave it ``False`` for a backend that
+    ``lp_pounce.finite_bound_threshold()``); leave it ``False`` for a backend that
     honors the declared box (Gurobi, whose infinity is 1e30).
     """
     from discopt._relax.problem_classifier import extract_qp_data
