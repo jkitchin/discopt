@@ -346,6 +346,106 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **#1329 (correctness, P0): a recycled `id()` served a stale evaluator, and
+  with it a false certified optimum.** `evaluator_fingerprint` was built from
+  `id(model._objective)` plus the ids of every constraint, variable and
+  parameter, and kept no reference to any of them. `id()` is unique only among
+  *live* objects, so once an `Objective` was freed a replacement could land on
+  its address and inherit the whole fingerprint — the cache then served the
+  **old** objective's evaluator for the new one. `m.minimize(f); m.solve();
+  m.minimize(f + 20); m.minimize(f + 20); m.solve()` returned the first
+  objective's optimum as `optimal`, with a matching bound, in 6 of 6 processes;
+  an ordinary weighted-sum sweep hit it on 6-10 of 400 iterations. `#1322`'s
+  stale-reference guard is layered on the same fingerprint and shared the hole.
+  The fingerprint is now a `Fingerprint` object that holds a strong reference to
+  every object whose id it carries, so nothing in it can be freed — and equal
+  keys therefore prove the same objects — while equality and hashing stay the
+  key's, so it drops in wherever the bare tuple went. Separately, the
+  bound/parameter half of the fingerprint now folds `-0.0` onto `+0.0` before
+  hashing, so `x.lb = -0.0` after a solve at `0.0` no longer makes
+  `sensitivity()` report a DIFFERENT problem and drop a live reference.
+
+- **#1330 (correctness): `solver='direct'` and `solver='surrogate'` reported the
+  wrong objective sign on a `maximize` model, and four routes still dropped
+  `abs_gap_tolerance` in silence.** Every evaluator in discopt minimizes, so a
+  `maximize` model is handed `-f` internally; both derivative-free backends
+  returned that internal value verbatim, reporting `objective = -5.0` at the
+  point where the user's objective is `+5.0`. Both now map the value back
+  through `objective_sense_sign` (the one definition of the flip, per #1299) in
+  a helper that sits next to the oracle that applies it. Separately, #1323's
+  rule — `abs_gap_tolerance` is honoured or declared, never silently inert — now
+  covers the last four routes: `solver='direct'` and `solver='surrogate'` list
+  it alongside the `gap_tolerance` they already declared (neither has a dual
+  bound, so neither criterion can be met); the deprecated `gdp_method='oa'`
+  route warns like its `gdp_method='loa'` neighbour; and the native Rust spatial
+  kernel, which takes `min(gap_tolerance, abs_gap_tolerance)` and so declines to
+  LOOSEN, now says so when the `min` discarded the caller's value. The kernel's
+  refusal to loosen is unchanged — it is the sound direction — and a *tighter*
+  absolute tolerance is still honoured silently.
+
+- **#1331 (correctness): a MILP/MIQP exit certified an objective its own `x`
+  does not achieve.** `_solve_milp_bb` stored the objective its *node
+  relaxation* reported, then integer-snapped the returned point (the C-3 snap)
+  and reported the stale value. The snap moves the objective by
+  `sum_j |c_j| |dx_j|`, so a 14-variable integer knapsack came back `optimal`
+  with `objective = bound = 180.0000462` and `gap_certified=True` at a point
+  achieving exactly 180 — an incumbent value no point attains, and one *better*
+  than the true optimum, overstated by about 4.6e4 times the requested absolute
+  tolerance. Reproduced on 4 of 5 random instances in this family. Both exits
+  now recompute the objective from the snapped, feasibility-verified point they
+  return; when that recomputation makes the value worse, the convergence test is
+  re-run against the honest (incumbent, bound) pair before `optimal` is granted,
+  because the tree had fathomed against a cutoff nothing attains. `_solve_miqp_bb`
+  had the identical exit and gets the identical fix.
+
+- **#1332 (correctness): a variable's box is now owned and validated, not
+  borrowed and trusted.** #1321 froze every installed box but installed a
+  read-only *view over the caller's buffer*, so `lo = np.zeros(2);
+  x = m.continuous('x', lb=lo); lo[:] = 5` silently moved `x`'s declared lower
+  bound and the solve answered 20.0 where 12.0 is correct. Six holes, closed in
+  one place — the `lb`/`ub` setter, which every declaration, reader and node
+  now passes through:
+  (1) the box is **copied**, so nothing the caller keeps can reach into the
+  model (the copy is skipped for a box already frozen by this same path, which
+  is every hot restore);
+  (2) `copy.deepcopy` and `pickle` rebuilt `__dict__` directly and handed back
+  writable boxes — and a writable `_bound_stack`, which holds the declared
+  domain `fix()` validates against and `unfix()` restores — so
+  `Variable.__setstate__` re-freezes both;
+  (3) a BINARY with `ub > 1` was accepted by `loads()` and by the setter and
+  solved to `b = 5.0`, `optimal`, `gap_certified=True`; it is now refused
+  (ulp-scale excursions are snapped, as the `.nl` reader already did);
+  (4) `loads()` never validated a `bound_stack` frame — an inverted domain, a
+  triple, a single, a wrong shape all loaded silently or raised a bare numpy
+  error; every frame is now checked and a bad one raises `SerializationError`;
+  (5) the setter validated no shape and no dtype — `x.lb = 5.0` on a shape-(3,)
+  variable stored a 0-d array that failed much later with an unrelated
+  `IndexError`, `x.lb = None` and `x.lb = nan` were accepted, and a complex
+  bound was truncated to its real part with only a `ComplexWarning`; a scalar
+  now broadcasts to the variable's shape and the rest are refused at the write;
+  (6) the installed box is a view over a **read-only** base, so
+  `x.lb.flags.writeable = True` and writing through `x.lb.base` both raise; and
+  `m.fixed({x: 1.0}, x=2.0)` no longer silently keeps one of the two values.
+  Verified bound-neutral: `node_count` and certified `objective` are exactly
+  unchanged on a five-instance panel (spatial, MILP, MIQP, binary, mixed).
+
+- **#1333 (correctness, GAMS reader): `smin`/`smax` in a `$`-condition failed
+  open, and parameter data under numeric labels misread signed values.**
+  `smin(i, d(i))` parsed into an `ExprFunc` that discarded the index set, so
+  the constant evaluator returned `None` — and `None` was read as "generate the
+  row". `c1$(smin(i, d(i)) > 10).. x1 =g= 3` with `smin = 1` produced a
+  constraint GAMS does not generate, and the solve returned 3.0 for a model
+  whose optimum is -5. The construct now keeps its index set and folds over
+  constant data (it is still refused, by name, over an endogenous body, per
+  #1325), and a `$`-condition that cannot be evaluated raises `GamsParseError`
+  instead of defaulting to "include the row" — a condition decides whether a
+  constraint *exists*, so neither default is sound. Separately, the label/value
+  split in parameter data was a one-token lookahead that a `-` (its own token)
+  breaks: in `/1 2, 2 -1, 3 4/` the record `2 -1` lost its label, `a('2')` was
+  never set, and `sum(a)` came back 6 where GAMS gives 5. Five of the issue's
+  six data forms were wrong; alphabetic labels were unaffected, which is why it
+  went unseen. Records are now read as `label[.label] value`.
+
 - **Four defects found by adversarially testing last week's feature PRs**
   (#1309, #1310, #1311, #1312).
 

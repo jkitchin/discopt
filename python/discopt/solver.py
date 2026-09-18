@@ -33,6 +33,7 @@ from discopt._relax.problem_classifier import dense_A as _dense_A
 from discopt._relax.problem_classifier import dense_Q as _dense_Q
 
 if TYPE_CHECKING:
+    from discopt._evaluator_cache import Fingerprint as _EvaluatorFingerprint
     from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt._rust import PyTreeManager
 from discopt.constants import INFEASIBILITY_SENTINEL as _INFEASIBILITY_SENTINEL
@@ -1666,6 +1667,11 @@ def _try_native_spatial_kernel(
             if abs_gap_tolerance is None
             else min(float(gap_tolerance), float(abs_gap_tolerance))
         )
+        # ...and SAY so when the ``min`` discarded it. Declining to loosen is the
+        # safe direction, but a caller who asked for 1e6 and got 1e-4 explored
+        # the same 45 nodes as with no tolerance at all and was told nothing
+        # (#1330). #1323's rule is honoured-or-declared; this is the declaration.
+        _warn_abs_gap_not_loosened(abs_gap_tolerance, gap_tolerance)
         solve_kwargs = dict(
             max_nodes=int(max_nodes),
             gap_tol=_kernel_abs_tol,
@@ -2506,11 +2512,16 @@ class _BoundOverrideEvaluator:
         return self._lb, self._ub
 
 
-def _evaluator_fingerprint(model: Model) -> tuple:
+def _evaluator_fingerprint(model: Model) -> "_EvaluatorFingerprint":
     """Structural fingerprint of a model for evaluator-cache validity.
 
     Thin alias for the canonical :func:`nlp_evaluator.evaluator_fingerprint`; kept
     here for the existing importers (e.g. ``solvers.nlp_native``).
+
+    Returns a :class:`discopt._evaluator_cache.Fingerprint`, not the bare tuple
+    it used to be: the tuple's ``id()``s were recyclable, and a fingerprint now
+    pins the objects it identifies (#1329). It still compares and hashes as the
+    tuple did, so callers holding one in a cache key need no change.
     """
     from discopt._evaluator_cache import evaluator_fingerprint
 
@@ -5186,6 +5197,34 @@ def _gap_values_converged(
     return abs_gap / denom <= gap_tolerance
 
 
+def _objective_at_reported_point(
+    x: np.ndarray,
+    c: np.ndarray,
+    obj_const: float,
+    Q: Optional[np.ndarray] = None,
+) -> float:
+    """The internal (minimisation) objective OF THE POINT a MI(L|Q)P exit returns.
+
+    #1331: the tree stores the objective its *node relaxation* reported, and the
+    exit then integer-snaps the point (C-3) before returning it. The snap moves
+    the objective by ``sum_j |c_j| |dx_j|`` and nothing recomputed it, so a
+    14-variable integer knapsack came back ``optimal`` with
+    ``objective = bound = 180.0000462`` at a point achieving exactly 180 -- an
+    incumbent value that no point attains, and one BETTER than the true optimum.
+    ``result.objective`` is a claim that the returned ``x`` achieves it, so it
+    has to be computed from that ``x``.
+
+    Both call sites run this AFTER their #952 feasibility gate, because the
+    value is a primal claim and only means anything for a feasible point.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    value = float(np.asarray(c, dtype=np.float64) @ x) + float(obj_const)
+    if Q is not None:
+        Q_arr = np.asarray(Q, dtype=np.float64)
+        value += 0.5 * float(x @ Q_arr @ x)
+    return value
+
+
 def _recertify_gap_closed(
     obj_val: float,
     bound_val: float,
@@ -5263,6 +5302,29 @@ def _warn_abs_gap_ignored(route: str, abs_gap_tolerance: Optional[float]) -> Non
         "may report 'feasible' for a run whose absolute gap already satisfied the "
         "request. Use gap_tolerance here, or the default branch-and-bound engine, "
         "which honours both.",
+        stacklevel=2,
+    )
+
+
+def _warn_abs_gap_not_loosened(abs_gap_tolerance: Optional[float], gap_tolerance: float) -> None:
+    """Say so when the native spatial kernel declines to LOOSEN its fathoming.
+
+    That route's ``gap_tol`` is applied absolutely, so its established absolute
+    tolerance already *is* ``gap_tolerance``; it takes ``min`` of the two, which
+    honours a tightening and drops a loosening. Dropping is the sound direction
+    -- the certificate only gets stronger -- but it is still an option that did
+    nothing, and #1323's rule admits no silent third option (#1330).
+    """
+    if abs_gap_tolerance is None or float(abs_gap_tolerance) <= float(gap_tolerance):
+        return
+    import warnings
+
+    warnings.warn(
+        f"The native spatial kernel ignores abs_gap_tolerance={abs_gap_tolerance!r} "
+        f"because it is LOOSER than gap_tolerance={gap_tolerance!r}, which this route "
+        "already applies absolutely. It converges at the tighter of the two, so the "
+        "solve explores at least as many nodes as it would with no absolute tolerance "
+        "at all. Raise gap_tolerance to loosen this route.",
         stacklevel=2,
     )
 
@@ -9304,6 +9366,10 @@ def solve_model(
                 ("max_nodes", max_nodes != 100_000),
                 ("strategy", strategy != "best_first"),
                 ("gap_tolerance", gap_tolerance != 1e-4),
+                # #1330: a route with no dual bound cannot honour EITHER gap
+                # criterion, and #1323's promise ("honoured or declared, never
+                # silently inert") covers the absolute one too.
+                ("abs_gap_tolerance", abs_gap_tolerance is not None),
             )
             if differs
         ]
@@ -9375,6 +9441,10 @@ def solve_model(
                 ("max_nodes", max_nodes != 100_000),
                 ("strategy", strategy != "best_first"),
                 ("gap_tolerance", gap_tolerance != 1e-4),
+                # #1330: a route with no dual bound cannot honour EITHER gap
+                # criterion, and #1323's promise ("honoured or declared, never
+                # silently inert") covers the absolute one too.
+                ("abs_gap_tolerance", abs_gap_tolerance is not None),
             )
             if differs
         ]
@@ -9828,6 +9898,12 @@ def solve_model(
         ):
             if key in kwargs:
                 mip_nlp_kwargs[key] = kwargs.pop(key)
+
+        # #1330: this deprecated route reaches ``solve_mip_nlp`` directly, which
+        # takes ``gap_tolerance`` and nothing else -- exactly the GDPopt-LOA
+        # route's situation below, and it was the one route in the family with
+        # no declaration.
+        _warn_abs_gap_ignored("gdp_method='oa' (MINLP outer approximation)", abs_gap_tolerance)
 
         model = reformulate_gdp(model, method="big-m")
 
@@ -25507,19 +25583,49 @@ def _solve_milp_bb(
         except Exception as _exc:
             logger.debug("MILP-BB dual recovery failed: %s", _exc)
 
+        # #1331: ``obj_val`` is the objective the NODE relaxation reported; the
+        # snap above has since moved the point. Recompute from the point that is
+        # actually returned -- ``objective`` claims that ``x`` achieves it.
+        _obj_at_point = _objective_at_reported_point(_x_check, _c_m, float(lp_data_orig.obj_const))
+        # Worse (higher, in the internal minimisation sense) means the tree
+        # fathomed and converged against a value no point attains, so its own
+        # stopping test cannot be taken at face value; it is re-run below
+        # against what we report. An unchanged or improved value leaves the
+        # established test exactly as it was.
+        _obj_drifted = _obj_at_point > float(obj_val)
+        if _obj_drifted:
+            logger.debug(
+                "MILP-BB: integer snap moved the incumbent objective %.17g -> %.17g; "
+                "reporting the value achieved at the returned point",
+                float(obj_val),
+                _obj_at_point,
+            )
+        obj_val = _obj_at_point
+
         # Negate objective back for maximization (B&B tree tracks minimization)
         from discopt.modeling.core import ObjectiveSense
 
         assert model._objective is not None
+        _obj_internal = float(obj_val)
         if model._objective.sense == ObjectiveSense.MAXIMIZE:
             obj_val = -obj_val
 
         # "optimal" needs a closed search AND a certified gap: a stalled
         # (non-KKT) node bound leaves optimality unproven even when the tree
         # appears finished.
-        if (
-            _gap_converged(tree, gap_tolerance, abs_gap_tol) or _tree_exhausted_with_proof(tree)
-        ) and _gap_certified:
+        _search_closed = _gap_converged(tree, gap_tolerance, abs_gap_tol) or (
+            _tree_exhausted_with_proof(tree)
+        )
+        if _obj_drifted:
+            # #1331. An exhausted tree proves "nothing better than the CUTOFF
+            # exists", and the cutoff was the optimistic value; between it
+            # and the value actually attainable there is a real gap, which
+            # has to close on the honest pair or the exit is ``feasible``.
+            _glb_internal = stats["global_lower_bound"]
+            _search_closed = _glb_internal is not None and _gap_values_converged(
+                _obj_internal, float(_glb_internal), gap_tolerance, abs_gap_tol
+            )
+        if _search_closed and _gap_certified:
             status = "optimal"
         else:
             status = "feasible"
@@ -26249,19 +26355,49 @@ def _solve_miqp_bb(
         except Exception as _exc:
             logger.debug("MIQP-BB dual recovery failed: %s", _exc)
 
+        # #1331: ``obj_val`` is the objective the NODE relaxation reported; the
+        # snap above has since moved the point. Recompute from the point that is
+        # actually returned -- ``objective`` claims that ``x`` achieves it.
+        _obj_at_point = _objective_at_reported_point(
+            _x_check, _c_m, float(qp_data.obj_const), Q=_Q_m
+        )
+        # Worse (higher, in the internal minimisation sense) means the tree
+        # fathomed and converged against a value no point attains, so its own
+        # stopping test cannot be taken at face value; it is re-run below
+        # against what we report. An unchanged or improved value leaves the
+        # established test exactly as it was.
+        _obj_drifted = _obj_at_point > float(obj_val)
+        if _obj_drifted:
+            logger.debug(
+                "MIQP-BB: integer snap moved the incumbent objective %.17g -> %.17g; "
+                "reporting the value achieved at the returned point",
+                float(obj_val),
+                _obj_at_point,
+            )
+        obj_val = _obj_at_point
+
         # Negate objective back for maximization (B&B tree tracks minimization)
         from discopt.modeling.core import ObjectiveSense
 
         assert model._objective is not None
+        _obj_internal = float(obj_val)
         if model._objective.sense == ObjectiveSense.MAXIMIZE:
             obj_val = -obj_val
 
         # "optimal" needs a closed search AND a certified gap: a stalled
         # (non-KKT) node bound leaves optimality unproven even when the tree
         # appears finished.
-        if (
-            _gap_converged(tree, gap_tolerance, abs_gap_tol) or _tree_exhausted_with_proof(tree)
-        ) and _gap_certified:
+        _search_closed = _gap_converged(tree, gap_tolerance, abs_gap_tol) or (
+            _tree_exhausted_with_proof(tree)
+        )
+        if _obj_drifted:
+            # #1331, as on the MILP path: certify the pair we report, not
+            # the optimistic one the tree fathomed with.
+            _glb_internal = stats["global_lower_bound"]
+            _search_closed = _glb_internal is not None and _gap_values_converged(
+                _obj_internal, float(_glb_internal), gap_tolerance, abs_gap_tol
+            )
+        if _search_closed and _gap_certified:
             status = "optimal"
         else:
             status = "feasible"

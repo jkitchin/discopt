@@ -34,6 +34,28 @@ logger = logging.getLogger(__name__)
 Oracle = Callable[[np.ndarray], tuple[float, float]]
 
 
+def reported_objective(model: Model, internal_value: float) -> float:
+    """Map an internal (minimisation) objective value back to the user's sense.
+
+    The evaluator behind :func:`build_oracle` hands back ``-f(x)`` for a
+    ``maximize`` model so that a minimiser maximises ``f``. That negation is
+    internal: ``SolveResult.objective`` is the user's objective at the returned
+    point and nothing else. Both DFO backends returned the un-negated internal
+    value, so a ``maximize`` solve reported ``-5.0`` at the point where
+    ``f = +5.0`` (#1330).
+
+    It lives here, next to the oracle that applies the negation, because the
+    two are one contract: whoever changes the sign convention in one must see
+    the other. The sign itself comes from ``objective_sense_sign``, the one
+    definition of it (#1299 is what happened when each site remembered on its
+    own). Every route's ``objective`` must equal the user objective evaluated
+    at the route's ``x``.
+    """
+    from discopt.modeling.core import objective_sense_sign
+
+    return objective_sense_sign(model) * float(internal_value)
+
+
 def build_oracle(model: Model, *, log_prefix: str) -> tuple[Oracle, int, np.ndarray]:
     """``(evaluate, n_vars, integer_mask)`` for ``model``.
 
