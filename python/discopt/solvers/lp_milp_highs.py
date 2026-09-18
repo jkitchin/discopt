@@ -1232,6 +1232,80 @@ def complete_seed(sf: StdForm, x_struct: np.ndarray, n_struct: int) -> Optional[
     return full
 
 
+#: Node cap on the integer-feasibility probe. Soundness-neutral: a probe that hits
+#: it returns no point, and the caller then reports ``error`` exactly as before.
+_UNBOUNDED_PROBE_MAX_NODES = 10_000
+
+
+def _integer_feasible_point(sf: "StdForm", budget, stats: dict):
+    """An integer-feasible point of ``sf``, or ``None``. Never raises.
+
+    The witness Meyer's theorem needs to turn "the relaxation has an improving
+    recession ray" into "the MILP is unbounded". HiGHS supplies one whenever it
+    finds an incumbent, but on a ``kUnbounded`` exit it returns none -- it stopped
+    because the objective ran away, not because the system is empty -- so the
+    point has to be asked for separately.
+
+    Asking is the same move #1337 makes for ``kInfeasible``: drop the objective,
+    keep the rows, the box and the integrality, and solve for feasibility alone.
+    The result is a verified incumbent of the same standard form, so it is the
+    same kind of evidence an ordinary incumbent would have been.
+
+    The probe keeps its own ``root_check``: without it a ``kInfeasible`` exit would
+    come back ``gap_certified`` with no cross-check at all, which is exactly the
+    unchecked label #1295/#1320 exist to refuse -- and this function would then
+    hand it on as a proof of emptiness.
+
+    Sets ``milp/unbounded_feasibility_probe_infeasible`` when the probe proves the
+    integer system EMPTY, which resolves ``kUnboundedOrInfeasible`` the other way.
+    A probe that merely runs out of budget or settles nothing sets nothing, and
+    the caller reports ``error`` exactly as before.
+    """
+    if budget is not None and budget <= 0.0:
+        return None
+    stats["milp/unbounded_feasibility_probe"] = 1.0
+    try:
+        probe = solve_milp_std(
+            dataclasses.replace(sf, c=np.zeros(sf.n, dtype=np.float64), obj_const=0.0),
+            time_limit=budget,
+            gap_tolerance=1e-4,
+            max_nodes=_UNBOUNDED_PROBE_MAX_NODES,
+            root_check=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - the probe may decline; it may not fail a solve
+        logger.debug("integer-feasibility probe raised %s: %s", type(exc).__name__, exc)
+        return None
+    if probe.status == "infeasible" and probe.gap_certified:
+        stats["milp/unbounded_feasibility_probe_infeasible"] = 1.0
+        return None
+    if probe.status in ("optimal", "feasible") and probe.x is not None:
+        pt = np.asarray(probe.x, dtype=np.float64)
+        # Verified here, not taken on the probe's word: the witness is the whole
+        # evidence for an ``unbounded`` certificate, so it is checked against the
+        # rows, the box and the integrality of the form actually being decided.
+        if _point_is_integer_feasible(sf, pt):
+            return pt
+        logger.debug("integer-feasibility probe returned a point that fails re-checking")
+    return None
+
+
+def _point_is_integer_feasible(sf: "StdForm", x: np.ndarray, tol: float = 1e-6) -> bool:
+    """Whether ``x`` satisfies ``A x = b``, the box, and ``sf``'s integrality."""
+    if x.shape != (sf.n,) or not np.all(np.isfinite(x)):
+        return False
+    resid = np.abs(sf.A @ x - sf.b)
+    scale = np.abs(sf.A) @ np.abs(x)
+    if np.any(resid > tol * (1.0 + np.abs(sf.b)) + 1e-9 * scale):
+        return False
+    if np.any(x < sf.xl - tol) or np.any(x > sf.xu + tol):
+        return False
+    if sf.int_idx.size:
+        xi = x[sf.int_idx]
+        if np.any(np.abs(xi - np.round(xi)) > INT_TOL):
+            return False
+    return True
+
+
 def solve_milp_std(
     sf: StdForm,
     *,
@@ -1479,13 +1553,37 @@ def solve_milp_std(
             out.status, out.gap_certified, out.bound = "infeasible", True, None
             labels["milp/infeasible_provenance"] = "farkas-root-lp"
             stats["milp/infeasible_provenance_farkas"] = 1.0
-        elif lp.status == "unbounded" and x is not None:
+            return done(out)
+        if lp.status == "unbounded":
             # A verified integer-feasible point plus a verified recession direction
             # of the relaxation (rational data: Meyer) -> the MILP is unbounded.
-            out.status = "unbounded"
-        else:
-            out.status = "error"
-            out.message = f"HiGHS MILP {name}; root LP relaxation {lp.status}: {lp.message}"
+            #
+            # #1339 follow-up: HiGHS reports ``kUnbounded`` / ``kUnboundedOrInfeasible``
+            # with NO incumbent, so the point Meyer's theorem needs was simply
+            # missing and a genuinely unbounded MILP came back ``error``. It is not
+            # missing because it is hard to get -- it is missing because nobody asked
+            # for it. Asking is the same move #1337 makes one branch below: the
+            # question here is only "is the INTEGER system nonempty?", and the
+            # objective is exactly what stops HiGHS answering it, so drop the
+            # objective and re-solve. Meyer then applies in full:
+            # ``rec(conv(S)) = rec(P)`` for rational data with ``S`` nonempty, so an
+            # improving recession direction of the relaxation is one of the integer
+            # hull too.
+            if x is None:
+                x = _integer_feasible_point(sf, remaining(), stats)
+            if x is not None:
+                out.x = x
+                out.status = "unbounded"
+                labels["milp/unbounded_provenance"] = "meyer-ray-plus-integer-point"
+                return done(out)
+            if stats.get("milp/unbounded_feasibility_probe_infeasible"):
+                # The probe did not merely fail to find a point -- it PROVED there is
+                # none, which decides the ``OrInfeasible`` half outright.
+                out.status, out.gap_certified, out.bound = "infeasible", True, None
+                labels["milp/infeasible_provenance"] = "integer-feasibility-probe"
+                return done(out)
+        out.status = "error"
+        out.message = f"HiGHS MILP {name}; root LP relaxation {lp.status}: {lp.message}"
         return done(out)
 
     if lp.status == "infeasible":
