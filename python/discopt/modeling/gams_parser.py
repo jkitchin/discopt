@@ -350,6 +350,20 @@ class GamsParseError(Exception):
     pass
 
 
+def _check_min_max_arity(fn: str, nargs: int) -> None:
+    """Refuse a GAMS ``min``/``max`` call with fewer than two arguments.
+
+    #1325: both evaluation arms reach this, so the one-argument form can no
+    longer mean one thing when its argument folds to a constant and crash with a
+    numpy ``TypeError`` when it does not.
+    """
+    if nargs < 2:
+        raise GamsParseError(
+            f"GAMS {fn}() takes two or more arguments, got {nargs}. "
+            f"The {fn} of a single value is that value; write it directly."
+        )
+
+
 class _Parser:
     """Recursive-descent parser for GAMS .gms files."""
 
@@ -1584,11 +1598,15 @@ class _ModelBuilder:
                 return math.cosh(fargs[0])
             if fn == "tanh":
                 return math.tanh(fargs[0])
-            # GAMS min/max take two or more arguments
-            if fn == "min":
-                return float(min(fargs))
-            if fn == "max":
-                return float(max(fargs))
+            # GAMS min/max take two or more arguments. Checked in BOTH arms
+            # (#1325): this one used to accept ``min(4)`` and return 4 while the
+            # endogenous arm crashed on the same text with a bare numpy
+            # ``TypeError`` about ``np.minimum``, so one spelling of one
+            # construct gave two unrelated answers depending on whether its
+            # argument happened to be constant.
+            if fn in ("min", "max"):
+                _check_min_max_arity(fn, len(fargs))
+                return float(min(fargs)) if fn == "min" else float(max(fargs))
             if fn == "ceil":
                 return float(math.ceil(fargs[0]))
             if fn == "floor":
@@ -2016,6 +2034,25 @@ class _ModelBuilder:
             return -operand
 
         if isinstance(ast_node, ExprFunc):
+            # #1325: ``smin(i, expr)`` / ``smax(i, expr)`` parse into an
+            # ExprFunc whose body still references the index ``i``, which this
+            # builder cannot bind -- the failure surfaced as "Unresolved
+            # reference: 'i'", naming the index rather than the unsupported
+            # construct. Refused here, BEFORE the body is built, so the message
+            # says what is actually wrong. Checked in the equation-body builder
+            # only: a constant context evaluates through a different path and is
+            # left exactly as it was.
+            _fn = ast_node.func.lower()
+            if _fn in ("smin", "smax"):
+                raise GamsParseError(
+                    f"{_fn}(...) over an index set is not supported in an equation "
+                    "body: it is a minimum/maximum over set elements, which has no "
+                    "sound algebraic form in the solver's expression IR. Model it "
+                    "explicitly -- introduce a variable z with one inequality per "
+                    f"element ({'z =L= x(i)' if _fn == 'smin' else 'z =G= x(i)'} "
+                    "for all i) -- or use the n-ary min/max over a fixed argument "
+                    "list."
+                )
             args = [self._build_expr(a, env) for a in ast_node.args]
             args = [self._ensure_expr(a) for a in args]
             return self._map_func(ast_node.func, args)
@@ -2349,6 +2386,8 @@ class _ModelBuilder:
                     return base
                 return base * dm.abs_(base) ** (pval - 1.0)
             return base * dm.abs_(base) ** (pexp - 1)
+        if fn in ("min", "max"):
+            _check_min_max_arity(fn, len(args))
         if fn == "min":
             # GAMS min/max take two or more arguments (#1312: this hard-coded
             # 2-arg form silently dropped args[2:], producing a WRONG certified
