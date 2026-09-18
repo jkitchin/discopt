@@ -7596,6 +7596,25 @@ class Model:
         # (a failed/infeasible solve carries no point to start from) and read
         # nowhere on the solve path itself.
         if isinstance(result, SolveResult) and result.x is not None:
+            # --- #1322: stamp WHICH problem this point solves ----------------
+            # Nothing invalidated the recorded result when the model changed,
+            # and the cross-check compared objective VALUES only, so a
+            # parameter change that moved the global optimum to another basin
+            # left `sensitivity()` warm-starting into the old well and
+            # reporting `matches_reference=True` -- the #1313 failure again,
+            # now with a stamp saying it had been checked. The fingerprint is
+            # process-local (it holds object identities) and is attached to the
+            # result rather than declared on it, so it cannot ride along into a
+            # serialized document; `result_io` writes an explicit field list.
+            # Deliberately not guarded: `solution_state_fingerprint` is a total
+            # function over model state that has already been validated and
+            # solved, so a raise here is a real defect, and a swallowed one
+            # would put the reference back to being unverifiable while still
+            # reporting `matches_reference=True` -- the exact failure being
+            # fixed.
+            from discopt._evaluator_cache import solution_state_fingerprint
+
+            setattr(result, "_problem_fingerprint", solution_state_fingerprint(self))
             self._last_solve_result = result
 
         return result

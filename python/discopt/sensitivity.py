@@ -247,11 +247,20 @@ class Sensitivity:
         the model's own sense.  ``None`` when the model has never been solved and
         no reference was supplied, i.e. when there is nothing to check against.
     matches_reference : bool or None
-        Whether :attr:`objective` agrees with :attr:`reference_objective` to
-        within tolerance.  ``None`` when there is no reference.  ``False`` means
-        the derivatives describe a *different* stationary point than the one the
+        Whether the KKT point these derivatives were taken at IS the reference
+        solution.  ``None`` when there is no reference.  ``False`` means the
+        derivatives describe a *different* stationary point than the one the
         model was solved to -- on a nonconvex model, a different basin -- and a
         ``RuntimeWarning`` was raised when the object was built (#1313).
+
+        ``True`` requires all three of: the objectives agree to tolerance, the
+        points agree (two stationary points can share one objective exactly, so
+        the value alone does not identify a point), and the reference belongs to
+        *this* problem.  A reference produced before a parameter value, a bound,
+        a constraint or the objective changed -- or one passed to ``at=`` from
+        another model -- is stale, and a stale reference is always ``False``,
+        never ``True``: the two objectives agreeing across a change of problem
+        says nothing at all (#1322).
     """
 
     model: "Model"
@@ -613,27 +622,49 @@ class Sensitivity:
 def _reference_point(model: "Model", at):
     """Resolve the reference solution ``sensitivity()`` starts from and checks against.
 
-    Returns ``(x0_flat, reference_objective)``, either half possibly ``None``.
+    Returns ``(x0_flat, reference_objective, stale)``; the first two may be
+    ``None``.
 
     ``at`` may be a :class:`~discopt.modeling.core.SolveResult`, a ``{name: value}``
     / ``{Variable: value}`` mapping, or a flat array.  ``None`` falls back to the
     model's own last successful :meth:`Model.solve` result (#1313) -- the point of
     the fix: ``m.solve(); m.sensitivity()`` must describe the solution ``solve``
     just certified, not whatever basin a fixed midpoint start happens to reach.
+
+    ``stale`` says the reference was produced for a DIFFERENT problem: a
+    parameter value, a bound, a constraint or the objective has moved since, or
+    the result came from another model entirely.  Nothing invalidated the
+    recorded result when the model changed, and the cross-check below compares
+    objective values, so after ``p.value = 10`` moved the global optimum to
+    another well the old point was still a KKT point with a matching objective
+    and the call reported ``matches_reference=True`` (#1322).
+
+    A stale *recorded* result is not used as the starting point either: warm
+    starting there is what lands the inner solve back in the old basin.  An
+    explicit ``at=`` is still honoured as a start point -- pinning the point is
+    what it is for -- but it can never report a match.
     """
+    from discopt._evaluator_cache import solution_state_fingerprint
     from discopt.modeling.core import SolveResult
 
+    explicit = at is not None
     if at is None:
         at = getattr(model, "_last_solve_result", None)
         if at is None:
-            return None, None
+            return None, None, False
 
     if isinstance(at, SolveResult):
         from discopt.warm_start import primal_point_from_result
 
-        x0 = primal_point_from_result(model, at)
+        recorded = getattr(at, "_problem_fingerprint", None)
+        # A result that carries no fingerprint was not produced by `Model.solve`
+        # in this process (a hand-built or deserialized one), so there is nothing
+        # to compare and no basis for claiming it describes this problem.
+        stale = recorded is None or recorded != solution_state_fingerprint(model)
         ref = None if at.objective is None else float(at.objective)
-        return x0, ref
+        if stale and not explicit:
+            return None, ref, True
+        return primal_point_from_result(model, at), ref, stale
 
     if isinstance(at, dict):
         from discopt.modeling.core import Variable
@@ -656,7 +687,7 @@ def _reference_point(model: "Model", at):
                     "sensitivity(): at= keys must be Variable objects or variable "
                     f"names, got {type(key).__name__}"
                 )
-        return validate_initial_solution(model, by_var), None
+        return validate_initial_solution(model, by_var), None, False
 
     x0 = np.asarray(at, dtype=np.float64).reshape(-1)
     n = int(sum(int(v.size) for v in model._variables))
@@ -664,7 +695,7 @@ def _reference_point(model: "Model", at):
         raise ValueError(
             f"sensitivity(): at= has {x0.size} entries but the model has {n} scalar variables."
         )
-    return x0, None
+    return x0, None, False
 
 
 def sensitivity(
@@ -713,6 +744,15 @@ def sensitivity(
         midpoint of the clipped box as before, and
         :attr:`Sensitivity.matches_reference` is ``None``.
 
+        The recorded result is only used when it still describes *this* problem.
+        If a parameter value, a bound, a constraint or the objective has changed
+        since that solve, it is stale: the inner solve does not start there
+        (warm starting into the old basin is how the stale answer was reached),
+        :attr:`Sensitivity.matches_reference` cannot be ``True``, and a
+        ``RuntimeWarning`` says so (#1322).  An explicit ``at=`` is still used as
+        the start point -- pinning the point is what it is for -- but a stale or
+        foreign one still cannot report a match.
+
     Returns
     -------
     Sensitivity
@@ -728,9 +768,10 @@ def sensitivity(
     Warns
     -----
     RuntimeWarning
-        When the KKT point the derivatives belong to has a different objective
-        than the reference solution -- on a nonconvex model, a different basin.
-        :attr:`Sensitivity.status` stays POUNCE's ``"optimal"`` in that case,
+        When the KKT point the derivatives belong to is not the reference
+        solution: a different objective, the same objective at a different
+        point, or a reference that belongs to a different problem (#1322).
+        :attr:`Sensitivity.status` stays POUNCE's ``"optimal"`` in every case,
         because the local solve did converge; ``matches_reference=False`` is what
         says the point is not the one the model was solved to.
 
@@ -761,7 +802,7 @@ def sensitivity(
     from discopt.modeling.core import ObjectiveSense, objective_sense_sign
     from discopt.solvers.sipopt import pounce_sensitivity
 
-    x0, reference_objective = _reference_point(model, at)
+    x0, reference_objective, reference_is_stale = _reference_point(model, at)
 
     saved = [np.array(p.value, copy=True) for p in params]
     from discopt.parametric import flatten_params
@@ -788,8 +829,35 @@ def sensitivity(
     matches_reference: Optional[bool] = None
     if reference_objective is not None and np.isfinite(obj):
         tol = 1e-6 + 1e-6 * abs(reference_objective)
-        matches_reference = bool(abs(obj - reference_objective) <= tol)
-        if not matches_reference:
+        objective_agrees = bool(abs(obj - reference_objective) <= tol)
+        # #1322: the objective value alone does not identify a point. Two distinct
+        # stationary points can share one objective exactly (a symmetric model has
+        # them by construction), and the derivatives belong to whichever one the
+        # inner solve returned. Compared only when the two vectors are comparable:
+        # a reformulated model's KKT point carries auxiliary columns the reference
+        # point does not have (#1324), and a length mismatch is not a disagreement.
+        point_agrees = True
+        if x0 is not None and np.asarray(x0).shape == x.shape:
+            ref_x = np.asarray(x0, dtype=np.float64)
+            scale = 1.0 + float(np.max(np.abs(ref_x))) if ref_x.size else 1.0
+            point_agrees = bool(np.max(np.abs(x - ref_x)) <= 1e-6 + 1e-4 * scale)
+        matches_reference = bool(objective_agrees and point_agrees and not reference_is_stale)
+        if reference_is_stale:
+            warnings.warn(
+                "sensitivity(): the reference solution it was checked against was "
+                "produced for a DIFFERENT problem -- a parameter value, a bound, a "
+                "constraint or the objective has changed since that solve, or the "
+                "result passed to at= came from another model. The KKT point the "
+                f"derivatives were taken at (objective {obj:.6g}) belongs to the "
+                "model as it is NOW; the reference's objective "
+                f"{reference_objective:.6g} describes the older problem, so the two "
+                "numbers agreeing would not mean the points agree. "
+                "matches_reference is False for that reason alone. Re-solve the "
+                "model, or pass at= to pin the point explicitly.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        elif not objective_agrees:
             sense = model._objective.sense if model._objective is not None else None
             worse = (
                 obj > reference_objective
@@ -805,6 +873,16 @@ def sensitivity(
                 "reference solution -- on a nonconvex model, a different basin. "
                 "status='optimal' below is the local NLP's, not a global certificate. "
                 "Pass at= to pin the point explicitly.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        elif not point_agrees:
+            warnings.warn(
+                "sensitivity(): the KKT point the derivatives were taken at has the "
+                f"same objective as the reference solution ({obj:.6g}) but is a "
+                "DIFFERENT point. The derivatives describe that other stationary "
+                "point; on a symmetric or degenerate model several share one "
+                "objective value. Pass at= to pin the point explicitly.",
                 RuntimeWarning,
                 stacklevel=2,
             )
