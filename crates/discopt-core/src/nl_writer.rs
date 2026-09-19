@@ -512,7 +512,7 @@ pub fn write_nl(
     // a one-to-one zip -- `rows_per_constraint` carries the fan-out.
     let mut row_source: Vec<usize> = Vec::with_capacity(rows.len());
     for (ci, n) in prog.rows_per_constraint.iter().enumerate() {
-        row_source.extend(std::iter::repeat(ci).take(*n));
+        row_source.extend(std::iter::repeat_n(ci, *n));
     }
     if row_source.len() != rows.len() {
         return Err(ExpandError(format!(

@@ -841,6 +841,22 @@ class _Builder:
         # AMP ``disc_state`` recovery) can add per-interval secant/tangent envelopes
         # when ``x_i`` is partitioned. Entries: ``(fname, w, var_idx, coeff, const)``.
         self.univariate_atom_specs: list[tuple[str, int, int, float, float]] = []
+        # Integer powers whose BASE is affine in ONE original variable
+        # (``w = (coeff*x_i + const)**p``, p >= 2) — issue #1351. These cannot go in
+        # ``monomial_map``, whose key ``(i, p)`` *means* the bare ``x_i**p`` (see
+        # ``single_orig_col``: registering ``(2 x_i)**2`` there would claim
+        # ``x_i**2`` and be unsound). Without a channel of their own the AMP
+        # partition on ``x_i`` had nothing to attach to, so refinement was inert and
+        # the bound stayed pinned at the root secant. Entries:
+        # ``(w, var_idx, coeff, const, p)``. GRADUATED default-ON (#1351);
+        # ``DISCOPT_AFFINE_POWER_PARTITION=0`` restores the legacy unrefined path.
+        self.affine_power_atom_specs: list[tuple[int, int, float, float, int]] = []
+        # #1351 defect 2: how many atoms the LAST partition-refinement pass found
+        # attached to a PARTITIONED variable. ``0`` means that pass was structurally
+        # inert -- refining the partition further cannot change a single row, so the
+        # AMP loop can stop instead of re-solving an identical relaxation. ``None``
+        # means "not applicable" (no partitions supplied).
+        self.partition_refinable_atoms: Optional[int] = None
         # Affine-form product envelopes emitted by ``_emit_mccormick`` — each entry
         # ``(w, dict(A.coeffs), A.const, dict(B.coeffs), B.const)`` records the
         # box-INDEPENDENT structure of a product ``w = A*B`` of two affine forms (a
@@ -904,6 +920,20 @@ class _Builder:
         if 0 <= j < self.n_orig:
             return (j, c)
         return None
+
+    def affine_single_original(self, lt: LinForm) -> Optional[tuple[int, float, float]]:
+        """Return ``(i, coeff, const)`` iff ``lt`` is ``coeff*x_i + const`` over ONE
+        original column, with ``coeff != 0``. Unlike :meth:`single_orig_col` this
+        ADMITS a scale and a shift, because the caller records the affine data
+        alongside the atom instead of claiming the bare ``x_i**p`` key (#1351).
+        """
+        items = [(j, c) for j, c in lt.coeffs.items() if c != 0.0]
+        if len(items) != 1:
+            return None
+        j, c = items[0]
+        if not (0 <= j < self.n_orig):
+            return None
+        return (j, float(c), float(lt.const))
 
     def register_power(self, i: int, p: int, col: int) -> None:
         """Register an aux holding ``x_i**p`` (``p`` integer >= 2) as a monomial."""
@@ -2457,6 +2487,25 @@ def _build_power(ctx: _Builder, node: CNode, w: int) -> Envelope:
         items = [(j, c) for j, c in lt.coeffs.items() if c != 0.0]
         if len(items) == 1 and 0 <= items[0][0] < ctx.n_orig:
             ctx.affine_square_map[items[0][0], w] = (float(items[0][1]), float(lt.const))
+    # #1351: an integer power over a base that is affine in ONE original but NOT the
+    # bare ``x_i`` (``(x_i - c)**p``) gets no ``monomial_map`` entry -- that key
+    # *means* ``x_i**p`` and ``single_orig_col`` rightly refuses a shifted/scaled
+    # base. ``_emit_1d`` above already gave ``w`` a sound envelope over the base's
+    # enclosure; recording the affine data gives ``_apply_partition_refinement`` a
+    # handle to REFINE it from the partition of ``x_i``, which it otherwise cannot
+    # reach -- leaving the AMP bound pinned at the root secant forever. No claim is
+    # made on ``monomial_map``, so the soundness gate is untouched.
+    if (
+        i is None
+        and float(p).is_integer()
+        and int(p) >= 2
+        and os.environ.get("DISCOPT_AFFINE_POWER_PARTITION", "1").strip().lower()
+        not in ("0", "false", "no", "off")
+    ):
+        aff = ctx.affine_single_original(lt)
+        if aff is not None:
+            _v, _coeff, _const = aff
+            ctx.affine_power_atom_specs.append((w, _v, _coeff, _const, int(p)))
     return Envelope(rows=[], tight=tight)
 
 
@@ -3735,7 +3784,30 @@ def _apply_partition_refinement(ctx: "_Builder", disc_state: object) -> None:
     """
     parts = getattr(disc_state, "partitions", None)
     if not parts:
+        ctx.partition_refinable_atoms = None
         return
+
+    # #1351 defect 2. Count the atoms the three refinement loops below can actually
+    # act on, i.e. those attached to a partitioned variable. A pass that finds ZERO
+    # emits no piecewise rows, so the relaxation is bit-identical no matter how fine
+    # the partition gets -- and the AMP loop iterating on it is provably wasted work.
+    # This is a structural fact, not a heuristic: it cannot cost bound quality,
+    # unlike a "stopped improving" rule (measured: nvs11's bound sat flat for SEVEN
+    # rounds and then gained 43.3, so any stop-after-k with k<=7 loses real bound).
+    _refinable = 0
+    for _a, _b in ctx.bilinear_map:
+        if _a in parts or _b in parts:
+            _refinable += 1
+    for _spec in ctx.univariate_atom_specs:
+        if _spec[2] in parts and _spec[0] in _PIECEWISE_UNIVARIATE_FN:
+            _refinable += 1
+    for _i, _p in ctx.monomial_map:
+        if _i in parts and isinstance(_p, int) and _p >= 2:
+            _refinable += 1
+    for _pspec in ctx.affine_power_atom_specs:
+        if _pspec[1] in parts and _pspec[4] >= 2 and _pspec[2] != 0.0:
+            _refinable += 1
+    ctx.partition_refinable_atoms = _refinable
 
     def _clamped(v: int, extra: Optional[list[float]] = None) -> Optional[list[float]]:
         raw = parts.get(v)
@@ -3804,6 +3876,36 @@ def _apply_partition_refinement(ctx: "_Builder", disc_state: object) -> None:
         if pts is None:
             continue
         _add_piecewise_univariate(ctx, w, i, 1.0, 0.0, _fpow, _fppow, curv_pow, pts)
+
+    # Integer powers of an AFFINE base, ``w == (coeff*x_v + const)**p`` (#1351).
+    # Same piecewise machinery as the bare-monomial loop above; the only difference
+    # is that the argument is ``coeff*x_v + const`` rather than ``x_v``, which
+    # ``_add_piecewise_univariate`` already supports (it is how the univariate
+    # intrinsic atoms above are refined). Breakpoints live in x-space, so the odd-p
+    # inflection at ``t = 0`` is mapped back as ``x = -const/coeff``.
+    for w, v, coeff, const, p in list(ctx.affine_power_atom_specs):
+        if v not in parts or not isinstance(p, int) or p < 2 or coeff == 0.0:
+            continue
+        pw = p
+
+        def _fpow_a(t: float, _pw: int = pw) -> float:
+            return float(t**_pw)
+
+        def _fppow_a(t: float, _pw: int = pw) -> float:
+            return float(_pw * t ** (_pw - 1))
+
+        # ``t**p`` is convex for even ``p`` (all t); for odd ``p`` its curvature has
+        # the sign of ``t``, with the inflection at ``t == 0``.
+        curv_a = _curv_const("convex") if pw % 2 == 0 else _curv_by_sign(True)
+        infl_a: list[float] = []
+        if pw % 2 == 1:
+            x_infl = -const / coeff
+            if float(ctx.col_lb[v]) < x_infl < float(ctx.col_ub[v]):
+                infl_a.append(x_infl)
+        pts = _clamped(v, infl_a)
+        if pts is None:
+            continue
+        _add_piecewise_univariate(ctx, w, v, coeff, const, _fpow_a, _fppow_a, curv_a, pts)
 
 
 def build_uniform_relaxation(
@@ -4092,6 +4194,8 @@ def build_uniform_relaxation(
     # Issue #694 anytime-build provenance (informational; the LP is sound either
     # way). ``_build_truncated`` is True when the constraint loop stopped early on
     # the ``build_deadline``; the two counters record coverage for diagnostics/tests.
+    # #1351 defect 2: hand the AMP loop the structural fact it needs to stop.
+    milp._partition_refinable_atoms = ctx.partition_refinable_atoms
     milp._build_truncated = build_truncated
     milp._build_constraints_done = constraints_done
     milp._build_constraints_total = n_constraints

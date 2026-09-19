@@ -1004,6 +1004,11 @@ def _solve_milp_with_oa_recovery(
             **_backend_kw,
         )
         mip_solve_count += 1
+        # #1351 defect 2: carry out whether the partition-refinement pass that built
+        # this relaxation had anything to act on.
+        milp_result.partition_refinable_atoms = getattr(
+            milp_model, "_partition_refinable_atoms", None
+        )
         if milp_result.status != "infeasible" or not active_oa_cuts:
             return milp_result, varmap, active_oa_cuts, mip_solve_count
 
@@ -3227,6 +3232,34 @@ def _solve_amp_impl(
             # No partition variables → single iteration
             if UB < np.inf:
                 gap_certified = False  # no lower bound from partitioning
+            break
+
+        # #1351 defect 2: stop when refinement is STRUCTURALLY inert. The pass that
+        # built this relaxation found zero atoms attached to any partitioned
+        # variable, so it emitted no piecewise rows -- a finer partition produces a
+        # bit-identical MILP and therefore the identical bound. Continuing is
+        # provably wasted work, and stopping provably costs no bound quality (unlike
+        # a "LB stopped improving" rule: measured on the in-repo corpus, nvs11's
+        # bound sat flat for SEVEN consecutive rounds and then gained 43.3, so any
+        # stop-after-k with k<=7 discards a real 9% bound improvement).
+        #
+        # Measured coverage, 66-instance corpus: of the 10 instances whose LB never
+        # moves, 7 are caught here (alan 21 iters, cvxnonsep_nsig30 10,
+        # cvxnonsep_psig30 33, ex1221 40, flay02m 13, flay03m 13, nvs04 40 -- 170
+        # wasted iterations). It never fired on any of the 8 instances whose bound
+        # does move. The other 3 stalled instances (nvs03, nvs13, st_e36) DO have
+        # refinable atoms -- refinement is possible there, just not effective -- and
+        # are deliberately left alone, since proving ineffectiveness needs the
+        # unsafe heuristic above.
+        if milp_result.partition_refinable_atoms == 0:
+            logger.info(
+                "AMP: partition refinement is structurally inert at iteration %d "
+                "(0 refinable atoms on %d partitioned variable(s)); a finer partition "
+                "cannot change the relaxation, so stopping with the current bound",
+                iteration,
+                len(part_vars),
+            )
+            termination_reason = "refinement_inert"
             break
 
         if (

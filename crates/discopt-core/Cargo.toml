@@ -228,8 +228,10 @@ description = "Core MINLP solver: B&B engine, expression IR, presolve"
 # stated above is what that measurement owes when it is taken.
 feral = "0.18.0"
 # rayon: data-parallel iterators. Used (behind the `parallel` feature) to solve
-# the independent per-node LP relaxations of a B&B batch concurrently. Pinned to
-# 1.10 to keep the crate's MSRV (1.75); 1.12+ requires rustc 1.80.
+# the independent per-node LP relaxations of a B&B batch concurrently. The `1.10`
+# requirement is a caret range, so the lockfile resolves 1.12 and the old
+# "pinned to keep MSRV 1.75" rationale no longer holds -- the workspace floor is
+# 1.84 (see the note on `rust-version` in the root Cargo.toml).
 rayon = { version = "1.10", optional = true }
 # libm: portable libm implementation. Provides erf() (and other special
 # functions) absent from Rust's std f64, used to evaluate the Gauss error
