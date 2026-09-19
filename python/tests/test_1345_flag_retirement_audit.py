@@ -67,8 +67,11 @@ def test_every_solver_math_gate_has_an_audit_verdict():
         "adds its row in the same PR that introduces the flag — graduate, retire, or "
         "keep as a documented opt-out."
     )
-    # the audit must not have drifted the other way either
-    assert len(gates) >= 14, f"expected >=14 solver-math gates, found {len(gates)}"
+    # Sanity floor against the classification silently collapsing. Deliberately well
+    # below the current count: RETIREMENT legitimately shrinks this population, and a
+    # floor pinned to "today's number" would fail every time the rule works (#1357 took
+    # it from 14 to 13 and tripped exactly that).
+    assert len(gates) >= 8, f"classification collapsed: only {len(gates)} solver-math gates"
 
 
 @pytest.mark.parametrize("excluded", sorted(KNOBS | NON_SOLVER))

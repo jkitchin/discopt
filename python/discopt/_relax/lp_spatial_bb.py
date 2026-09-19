@@ -157,8 +157,41 @@ def _is_in_scope(model: Model, *, mixed: bool = False) -> bool:
     """Model this engine can serve: an objective, at least one integer variable, and
     only ordinary algebraic rows. Either objective sense; any continuous mix.
 
-    ``mixed=False`` restores the pre-#860 gate (pure-integer, MINIMIZE only) for
-    callers rolling the widening out behind a flag.
+    ``mixed=False`` is the pre-#860 gate (pure-integer, MINIMIZE only) and is what
+    **both production entry points use**. ``mixed=True`` is a capability an explicit
+    caller may request; it has no default-path consumer, by decision.
+
+    **Why (#1357).** #860 widened this gate to mixed/MAXIMIZE behind
+    ``DISCOPT_LP_SPATIAL_MIXED``. That flag ran its CLAUDE.md §5 graduation panel and
+    failed bar (2) — sound, but not net-positive — and #1357 retired it under §5's
+    retirement rule rather than leaving it default-OFF forever. The widening itself is
+    kept because it is sound and separately tested; what was retired is shipping it.
+
+    The measurement that retired it, so the next person weighing this does not have to
+    re-derive it. Graduation panel, 20 s budget, 70 newly in-scope in-repo instances,
+    off vs on. *Cert-clean*: 0 certification regressions, 0
+    ``incumbent_verification_failed``, 0 unsound bounds. *Net-positive*: **failed**,
+    ``gains=1 improved=1 lost_incumbents=2 cert_regressions=0 unsound=0``::
+
+        instance    off                          on
+        tspn12      no incumbent (30.6 s)        feasible 262.647 (9.3 s)
+        ex1252a     feasible 183660.35 (24.5 s)  feasible 149530.99 (14.9 s)
+        tls2        feasible 11.30 (20.1 s)      NO INCUMBENT (13.6 s)
+        st_e31      feasible -2.00 (22.2 s)      NO INCUMBENT (14.8 s)
+
+    And on the explicit ``solve(lp_spatial=True)`` path, ``gear4`` at 25 s — mixed, so
+    admitted only under the widening — went from ``optimal`` 1.6434284641 certified in
+    3 nodes to ``time_limit`` 17.514 uncertified in 2673 nodes.
+
+    Do not read the 0.747 total wall ratio as a win: the on-runs are faster largely
+    because they gave up earlier, on exactly the two instances that lost their answer.
+
+    **What would change the verdict**: making the #844 reserve conditional on the engine
+    actually being able to build (probe buildability, or relax ``require_incremental``
+    for the mixed class now that cold node builds are deadline-bounded), so a model the
+    fallback will decline never pays for it. That is a *different mechanism* — a new
+    change with its own panel, not a re-run of this one. Evidence:
+    ``docs/dev/issue-860-lp-spatial-mixed-scope.md`` §4, ``scratchpad/panel860_flag.json``.
     """
     if model._objective is None:
         return False
@@ -419,11 +452,11 @@ def solve_lp_spatial_bb(
     ``mixed`` (#860) admits mixed-integer and MAXIMIZE models; ``False`` is the
     pre-#860 pure-integer/MINIMIZE gate. **Default False**: the widening is a real
     capability but it is not net-positive on the default path (CLAUDE.md §5 bar 2 —
-    see ``_lp_spatial_mixed_fallback_enabled``), so both production call sites pass
-    ``mixed=_lp_spatial_mixed_fallback_enabled()`` rather than relying on this
-    default. Defaulting to ``False`` means a *new* call site inherits the
-    conservative gate instead of silently shipping the widening, which is the same
-    reason ``row_scan_is_anytime`` defaults to ``False`` in the tightening rules."""
+    the measurement is on :func:`_is_in_scope`), and #1357 retired the flag that used
+    to enable it, so both production call sites now take this default. Defaulting to
+    ``False`` also means a *new* call site inherits the conservative gate instead of
+    silently shipping the widening, which is the same reason ``row_scan_is_anytime``
+    defaults to ``False`` in the tightening rules."""
     if not _is_in_scope(model, mixed=mixed):
         return None
 

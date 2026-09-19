@@ -8887,31 +8887,31 @@ def solve_model(
     # branches on integers/products and runs a feasibility-pump primal, closing
     # nvs17 to proven optimality. Opt-in via ``solve(lp_spatial=True)``; returns
     # ``None`` (falls through to the default path, no behavior change) for any model
-    # out of its scope or on any error. #860 widens that scope to "at least one integer
-    # variable, either objective sense, any continuous mix" — mixed-integer and
-    # maximize models served in minimize-equivalent space, with a partially infinite
-    # root box accepted — but the widening is BEHIND ``DISCOPT_LP_SPATIAL_MIXED``
-    # here too, not just on the #844 fallback's reserve.
+    # out of its scope or on any error.
     #
-    # Why the gate is flagged and not only the reserve (#860 review): the widened gate
-    # is not net-positive on the default path, which is CLAUDE.md §5 bar (2). Measured
-    # on ``gear4`` at a 25 s budget — a MIXED model (4 integer, 2 continuous with
-    # infinite upper bounds), so it is admitted only under the widening:
+    # #860 widened that scope to mixed-integer and MAXIMIZE models behind
+    # ``DISCOPT_LP_SPATIAL_MIXED``. That flag was RETIRED in #1357 under CLAUDE.md §5's
+    # retirement rule: its graduation panel ran and failed bar (2), and a flag that has
+    # been measured harmful has an exit rather than a permanent OFF. This call site
+    # therefore uses the engine's pre-#860 gate (pure-integer, MINIMIZE), which is
+    # ``solve_lp_spatial_bb``'s default.
+    #
+    # The measurement that retired it, on ``gear4`` at a 25 s budget — MIXED (4 integer,
+    # 2 continuous with infinite upper bounds), so admitted only under the widening:
     #
     #   pre-#860 gate : optimal, objective = 1.6434284641, certified,      3 nodes
     #   widened gate  : time_limit, objective = 17.514, UNcertified,    2673 nodes
     #
-    # i.e. the engine accepts a model the default path already certified in 3 nodes,
-    # then spends the whole budget to return an incumbent ~10.7x worse with no
-    # certificate. Sound (the bound never crosses the oracle; the earlier false
-    # certificate there was the LP-presolve bug fixed in #877) but a clear regression,
-    # and ``lp_spatial=True`` is a documented public kwarg. The capability is kept and
-    # is opt-in; what is not shipped by default is a measured loss.
+    # The engine accepts a model the default path already certified in 3 nodes, then
+    # spends the whole budget to return an incumbent ~10.7x worse with no certificate.
+    # Sound (the bound never crosses the oracle; the earlier false certificate there was
+    # the LP-presolve bug fixed in #877) but a clear regression on a documented public
+    # kwarg. The ``mixed=`` capability itself is kept and remains callable explicitly —
+    # see ``lp_spatial_bb._is_in_scope``.
     if kwargs.get("lp_spatial", False):
         _warn_abs_gap_ignored("The lp_spatial engine", abs_gap_tolerance)
         try:
             from discopt._relax.lp_spatial_bb import solve_lp_spatial_bb
-            from discopt.modeling.core import _lp_spatial_mixed_fallback_enabled
 
             _lps = solve_lp_spatial_bb(
                 model,
@@ -8919,7 +8919,6 @@ def solve_model(
                 gap_tolerance=gap_tolerance,
                 max_nodes=max_nodes,
                 root_cut_rounds=int(kwargs.get("lp_spatial_cut_rounds", 0)),
-                mixed=_lp_spatial_mixed_fallback_enabled(),
             )
         except Exception as _lps_exc:  # pragma: no cover - defensive
             logger.debug("lp_spatial engine failed, falling back: %s", _lps_exc)
@@ -21157,7 +21156,7 @@ def _solve_lp(
     # declared. This can only add an answer: it runs ONLY where the route was
     # about to report `error`, so no solve that succeeds today changes at all,
     # which is why it needs no §5 graduation (unlike flipping
-    # DISCOPT_POUNCE_DECLARED_BOX, which moves the box for every solve in the
+    # the process-wide flag retired in #1358, which moved the box for every solve in the
     # window). The cross-checks are unconditional and apply to the retry too, so
     # it cannot certify anything the first attempt could not.
     if _declared_box_retry_applies(model):
@@ -21511,10 +21510,12 @@ def _declared_box_retry_applies(model: Model) -> bool:
 
     True only when BOTH hold:
 
-    * the legacy 1e15 threshold is in force, so a retry would actually differ
-      (inside ``declared_box_honored``, or with ``DISCOPT_POUNCE_DECLARED_BOX=1``
-      already set, the first attempt used the declared box and re-running it
-      would just burn the same time to the same answer), and
+    * the legacy 1e15 threshold is in force, so a retry would actually differ.
+      This is what stops the retry recursing: inside ``declared_box_honored`` the
+      first attempt already used the declared box, so re-running would burn the
+      same time to the same answer. (It also used to mean "the process-wide flag
+      is off"; that flag was retired in #1358 and the recursion guard is now the
+      condition's whole job.) And
     * the model declares at least one bound in ``[1e15, 1e19)`` -- the window the
       threshold discards and POUNCE can in fact handle. Outside it the two arms
       build a bit-identical box, so the retry is a provable no-op.
@@ -21547,12 +21548,13 @@ def _declared_box_relaxed_to_ipm_inf(bounds) -> bool:
     is bounded (issue #850 Obs 1). A bound at or beyond ``1e20`` (or ``±inf``) is
     genuinely infinite for both engines and is not counted.
 
-    The window's lower edge is the IPM's live threshold, not a literal: with
-    ``DISCOPT_POUNCE_DECLARED_BOX`` on (opt-in; the default remains OFF pending
-    the §5 graduation gate) the IPM honors a declared bound up to POUNCE's own
-    ``1e19`` infinity, so the window narrows to ``[1e19, 1e20)`` and the guard
+    The window's lower edge is the IPM's live threshold, not a literal: inside a
+    ``declared_box_honored`` block the IPM honors a declared bound up to POUNCE's
+    own ``1e19`` infinity, so the window narrows to ``[1e19, 1e20)`` and the guard
     stops firing on the four orders of magnitude the engine was always able to
-    handle. Unset or ``=0`` keeps the legacy ``[1e15, 1e20)``.
+    handle. Outside one it is the legacy ``[1e15, 1e20)``. (The process-wide flag
+    that used to widen it everywhere was retired in #1358; reading the threshold
+    live rather than hardcoding it is what makes this correct either way.)
     Reading it live keeps the guard and the marshaling from drifting apart — a
     hardcoded ``1e15`` here would defer verdicts the IPM no longer relaxes.
     """
