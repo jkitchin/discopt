@@ -93,6 +93,7 @@ def graph() -> dict:
     packages = {m for m, p in modules.items() if p.name == "__init__.py"}
 
     importers: dict[str, set[str]] = collections.defaultdict(set)
+    imports: dict[str, set[str]] = collections.defaultdict(set)
     edges = 0
     relative = 0
     for module, path in modules.items():
@@ -103,6 +104,7 @@ def graph() -> dict:
             resolved = target if target in modules else target.rsplit(".", 1)[0]
             if resolved in modules and resolved != module:
                 importers[resolved].add(module)
+                imports[module].add(resolved)
 
     test_importers: dict[str, set[str]] = collections.defaultdict(set)
     test_edges = 0
@@ -118,6 +120,7 @@ def graph() -> dict:
         "modules": modules,
         "packages": packages,
         "importers": importers,
+        "imports": imports,
         "test_importers": test_importers,
         "edges": edges,
         "relative": relative,
@@ -236,4 +239,49 @@ def test_public_and_incubating_modules_are_tested(name, graph):
     assert importers, (
         f"{name} is declared {MODULE_STATUS[name].status} but no test imports it; "
         "test it, re-declare it as tooling, or retire it (#1347)"
+    )
+
+
+def test_no_unreachable_module_cluster(graph):
+    """No ``_relax`` module survives only by being imported by another dead one.
+
+    ``_production_imported`` asks "does anything point at this?", which a cluster
+    of mutually-importing dead modules answers yes to while being collectively
+    unreachable. This asks the stronger question: is the module reachable from a
+    real entry point? Roots are the package ``__init__`` files outside ``_relax``
+    (the public surface) plus the declared modules, since a declared module's
+    private helpers are legitimately reachable only through it.
+
+    Reachability follows import edges plus one structural rule, in the one
+    direction Python actually has: importing ``pkg.sub`` executes
+    ``pkg/__init__`` first, so reaching a module reaches its *ancestor*
+    packages -- and therefore whatever those ``__init__`` files import. It must
+    not flow the other way. Expanding a package to its descendants makes the
+    root ``discopt`` reach every module in the tree, which silently turns this
+    into a no-op: the first draft did that and passed a synthetic two-module
+    dead cycle. Dropping the ancestor rule is wrong too -- it reports
+    ``_relax/presolve/``'s passes as dead when ``presolve/__init__`` really does
+    import them on the way to ``presolve.orchestrator``.
+    """
+    roots = {m for m in graph["packages"] if not m.startswith(RELAX + ".")}
+    roots |= {f"{RELAX}.{name}" for name in MODULE_STATUS}
+    roots |= SELF_EXEMPT
+
+    seen: set[str] = set()
+    stack = list(roots)
+    while stack:
+        module = stack.pop()
+        if module in seen or module not in graph["modules"]:
+            continue
+        seen.add(module)
+        stack.extend(graph["imports"].get(module, ()))
+        parent = module.rsplit(".", 1)[0] if "." in module else ""
+        if parent in graph["packages"]:
+            stack.append(parent)
+
+    assert len(seen) > 200, f"traversal reached only {len(seen)} modules"
+    unreachable = sorted(m for m in graph["modules"] if m.startswith(RELAX + ".") and m not in seen)
+    assert not unreachable, (
+        "these _relax modules are reachable only from other unreachable modules "
+        f"-- a dead cluster; retire it or declare its entry point (#1347): {unreachable}"
     )
