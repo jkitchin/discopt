@@ -16283,8 +16283,8 @@ def solve_model(
                 requeue_mask=_requeue_mask,
             )
             if _requeue_mask.any():
-                for _k in np.flatnonzero(_requeue_mask):
-                    _nid = int(result_ids[_k])
+                for _rq_idx in np.flatnonzero(_requeue_mask):
+                    _nid = int(result_ids[_rq_idx])
                     _lazy_requeues[_nid] = _lazy_requeues.get(_nid, 0) + 1
                     if _lazy_requeues[_nid] > _LAZY_REQUEUE_CAP:
                         logger.warning(
@@ -16295,8 +16295,8 @@ def solve_model(
                             _nid,
                             _LAZY_REQUEUE_CAP,
                         )
-                        _requeue_mask[_k] = False
-                        result_lbs[_k] = _INFEASIBILITY_SENTINEL
+                        _requeue_mask[_rq_idx] = False
+                        result_lbs[_rq_idx] = _INFEASIBILITY_SENTINEL
                         _n_cb_rejected += 1
             # #748: a callback rejection sentinels a FEASIBLE node without proving
             # its region empty of acceptable points — a non-rigorous fathom. It is
