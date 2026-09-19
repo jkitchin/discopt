@@ -13,7 +13,7 @@ legacy rules.
 **(b) Convexity classification.** ``classify_oa_cut_convexity`` used only the
 syntactic rules, so a PSD objective written with ``dm.sum`` over array variables
 read as non-convex and OA dropped its objective cuts. Behind
-``DISCOPT_OA_CONVEXITY_CERTIFICATE`` (default OFF) it now also consults the sound
+``DISCOPT_OA_CONVEXITY_CERTIFICATE`` (default ON, opt-out ``=0``) it now also consults the sound
 interval-Hessian certificate and the exact-QP Hessian route (#936) — the same
 routes the convex-MINLP router already trusts.
 """
@@ -126,12 +126,20 @@ def test_oa_master_no_longer_stalls_below_unit_scale(monkeypatch):
     assert r.mip_count < 40
 
 
-# ── (b) convexity classification behind the flag ────────────────────────────
+# ── (b) convexity classification (flag default ON) ──────────────────────────
 
 
 @pytest.mark.smoke
-def test_flag_off_keeps_legacy_verdict(monkeypatch):
+def test_flag_default_on_certifies_dm_sum_objective(monkeypatch):
     monkeypatch.delenv("DISCOPT_OA_CONVEXITY_CERTIFICATE", raising=False)
+    model = _portfolio(3, "dm.sum")
+    assert classify_oa_cut_convexity(model).objective_is_convex is True
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("value", ["0", "false", "no", "off"])
+def test_flag_opt_out_keeps_legacy_verdict(monkeypatch, value):
+    monkeypatch.setenv("DISCOPT_OA_CONVEXITY_CERTIFICATE", value)
     model = _portfolio(3, "dm.sum")
     assert classify_oa_cut_convexity(model).objective_is_convex is False
 
@@ -166,13 +174,128 @@ def test_flag_on_refuses_indefinite_objective(monkeypatch):
     assert classify_oa_cut_convexity(_qp_model(Q)).objective_is_convex is False
 
 
-def test_flag_on_oa_certifies_issue_model_within_contract(monkeypatch):
-    """The issue's Finding 2 case. The 4.1e-7 miss is inside discopt's absolute
-    contract (the fixed NLP stops short of an active bound); the bound is valid."""
-    monkeypatch.setenv("DISCOPT_OA_CONVEXITY_CERTIFICATE", "1")
+def test_explicit_oa_certifies_issue_model_within_contract(monkeypatch):
+    """The issue's Finding 2 case, through explicit OA. The 4.1e-7 miss is inside
+    discopt's absolute contract (the fixed NLP stops short of an active bound); the
+    bound is valid. With the certificate opted out OA cannot certify at all."""
+    from discopt.solvers.oa import solve_oa
+
+    monkeypatch.delenv("DISCOPT_OA_CONVEXITY_CERTIFICATE", raising=False)
+    r = solve_oa(_portfolio(3, "dm.sum"), time_limit=60)
+    assert r.status == "optimal"
+    assert r.bound <= TRUE_OPT_K3 + 1e-9
+    assert abs(r.objective - TRUE_OPT_K3) <= GAP_ABS_TOL + 1e-4 * TRUE_OPT_K3
+
+    monkeypatch.setenv("DISCOPT_OA_CONVEXITY_CERTIFICATE", "0")
+    legacy = solve_oa(_portfolio(3, "dm.sum"), time_limit=60)
+    assert legacy.status != "optimal"
+    assert legacy.bound is None or legacy.bound <= TRUE_OPT_K3 + 1e-9
+
+
+def test_router_sends_certificate_only_objective_to_bnb(monkeypatch):
+    """The router gate: a model whose objective is convex only by the numerical
+    certificate goes straight to B&B, not through an OA attempt that falls back.
+    The opt-out restores the OA route, which then certifies at the root."""
+    from discopt.solver import _convex_minlp_auto_route
+
+    monkeypatch.delenv("DISCOPT_OA_CONVEXITY_CERTIFICATE", raising=False)
+    monkeypatch.delenv("DISCOPT_CONVEX_ROUTE_SYNTACTIC_OBJECTIVE", raising=False)
+    monkeypatch.delenv("DISCOPT_CONVEX_MINLP_ROUTE", raising=False)
+    model = _portfolio(3, "dm.sum")
+    route, reason, _ = _convex_minlp_auto_route(model)
+    assert route is None
+    assert "numerical certificate" in reason
+    # A syntactically convex objective of the same model class is still routed.
+    assert _convex_minlp_auto_route(_portfolio(3, "sumsq"))[0] is not None
+
+    r = model.solve(time_limit=60)
+    assert r.status == "optimal"
+    assert "oa" not in (r.algorithm_route or "").lower()
+    assert r.bound <= TRUE_OPT_K3 + 1e-9
+    assert abs(r.objective - TRUE_OPT_K3) <= GAP_ABS_TOL + 1e-4 * TRUE_OPT_K3
+
+    monkeypatch.setenv("DISCOPT_CONVEX_ROUTE_SYNTACTIC_OBJECTIVE", "0")
+    assert _convex_minlp_auto_route(_portfolio(3, "dm.sum"))[0] is not None
     r = _portfolio(3, "dm.sum").solve(time_limit=60)
     assert r.status == "optimal"
     assert r.node_count == 0
     assert "fell back" not in (r.algorithm_route or "")
     assert r.bound <= TRUE_OPT_K3 + 1e-9
-    assert abs(r.objective - TRUE_OPT_K3) <= GAP_ABS_TOL + 1e-4 * TRUE_OPT_K3
+
+
+# ── (c) fixed-NLP scale-aware tolerance ──────────────────────────────────────────
+
+
+def _markowitz(n: int, K: int, seed: int) -> tuple[dm.Model, np.ndarray]:
+    """Seeded cardinality Markowitz model written with ``dm.sum`` (not diag-dominant)."""
+    rng = np.random.default_rng(seed)
+    F = rng.normal(size=(n, 3)) * 0.1
+    sigma = F @ F.T + np.diag(rng.uniform(0.001, 0.02, n))
+    mu = rng.uniform(0.02, 0.15, n)
+    rmin = float(np.quantile(mu, 0.6))
+    m = dm.Model(f"markowitz-{n}-{K}-{seed}")
+    z = m.binary("z", shape=(n,))
+    w = m.continuous("w", shape=(n,), lb=0.0, ub=0.5)
+    m.minimize(
+        dm.sum(lambda i: dm.sum(lambda j: sigma[i, j] * w[i] * w[j], over=range(n)), over=range(n))
+    )
+    m.subject_to(dm.sum(lambda i: w[i], over=range(n)) == 1.0)
+    m.subject_to(dm.sum(lambda i: mu[i] * w[i], over=range(n)) >= rmin)
+    m.subject_to(dm.sum(z) <= K)
+    for i in range(n):
+        m.subject_to(w[i] >= 0.02 * z[i])
+        m.subject_to(w[i] <= 0.5 * z[i])
+    return m, sigma
+
+
+# Exact optimum of the (10, 3, 3) model: its optimal support {1, 5, 6} solved as a
+# convex QP by HiGHS at 1e-10 tolerances. POUNCE at default tolerances returned
+# 2.9469633e-3 (status 0) for the same fixed assignment.
+MARKOWITZ_10_3_3_OPT = 0.0029462641054
+
+
+class _Obj:
+    def __init__(self, value):
+        self.value = value
+
+    def evaluate_objective(self, x):
+        return self.value
+
+
+@pytest.mark.smoke
+def test_nlp_scaled_tol_rule(monkeypatch):
+    from discopt.solvers.oa import _nlp_scaled_tol
+
+    monkeypatch.delenv("DISCOPT_OA_NLP_SCALED_TOL", raising=False)
+    x0 = np.zeros(2)
+    # Unit scale and above: solver default (every such solve is unchanged).
+    for f in (1.0, -1.0, 3.7, -250.0, 1e8, float("inf"), float("nan")):
+        assert _nlp_scaled_tol(_Obj(f), x0) is None
+    assert _nlp_scaled_tol(_Obj(0.5), x0) == pytest.approx(5e-9)
+    assert _nlp_scaled_tol(_Obj(-0.05), x0) == pytest.approx(5e-10)
+    # Never tighter than 1e-10, however small the objective.
+    for f in (2.9e-3, 1e-9, 0.0):
+        assert _nlp_scaled_tol(_Obj(f), x0) == pytest.approx(1e-10)
+    monkeypatch.setenv("DISCOPT_OA_NLP_SCALED_TOL", "0")
+    assert _nlp_scaled_tol(_Obj(2.9e-3), x0) is None
+
+
+def test_oa_closes_when_fixed_nlp_is_scale_aware(monkeypatch):
+    """Without the scaled tolerance OA re-proposes a visited assignment 50 times, its master
+    1.04e-6 below an NLP incumbent 7e-7 above the true optimum, and ends
+    ``stalling`` (61 MILPs). With it: ``optimal`` at the exact optimum in 11."""
+    from discopt.solvers.oa import solve_oa
+
+    monkeypatch.setenv("DISCOPT_OA_CONVEXITY_CERTIFICATE", "1")
+    monkeypatch.delenv("DISCOPT_OA_NLP_SCALED_TOL", raising=False)
+    model, _ = _markowitz(10, 3, 3)
+    r = solve_oa(model, time_limit=60)
+    assert r.status == "optimal"
+    assert r.mip_count < 30
+    assert r.bound <= MARKOWITZ_10_3_3_OPT + 1e-9
+    assert abs(r.objective - MARKOWITZ_10_3_3_OPT) <= 1e-8
+
+    monkeypatch.setenv("DISCOPT_OA_NLP_SCALED_TOL", "0")
+    legacy = solve_oa(_markowitz(10, 3, 3)[0], time_limit=60)
+    assert legacy.status == "feasible"  # the stall this fixes; the opt-out keeps it
+    assert legacy.bound <= MARKOWITZ_10_3_3_OPT + 1e-9

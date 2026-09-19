@@ -108,26 +108,29 @@ def _oa_convexity_certificate_enabled() -> bool:
     master lower-bound updates and objective cuts on it, fails to certify, and
     falls back to the spatial path.
 
-    Only the *objective* verdict changes; the per-row cut mask is untouched.
+    It governs the per-row cut mask as well: a constraint the certificate proves
+    convex gets OA cuts (``classify_constraint(..., use_certificate=...)``).
 
-    **Default OFF** (bound-changing -- CLAUDE.md §5): proving an objective convex
-    turns on OA's objective cuts and master lower-bound updates. Enable with
-    ``DISCOPT_OA_CONVEXITY_CERTIFICATE=1`` (also ``true``/``yes``/``on``).
+    **Default ON** (graduated in #1360 under CLAUDE.md §5); opt out with
+    ``DISCOPT_OA_CONVEXITY_CERTIFICATE=0`` (also ``false``/``no``/``off``), which
+    restores the legacy syntactic verdict. Proving an objective convex turns on
+    OA's objective cuts and master lower-bound updates, so this is
+    bound-changing; without it OA cannot certify an objective the syntactic rules miss.
 
-    Panel verdict (#1352): cert-clean but NOT net-positive, so it stays OFF. On
-    24 ``dm.sum``-written cardinality Markowitz models, flag ON certified 13 at
-    0 nodes (mean wall change +0.13 s -- no faster than the B&B fallback it
-    replaced) and on the other 11 ran out OA's 5 s route budget and fell back
-    (+4.3 s each); total wall 16.5 s OFF vs 65.5 s ON. The loss is the in-house master MILP
-    exiting non-final on OA masters HiGHS closes in ~26 nodes (#1355); with the
-    HiGHS master the same OA certifies ``port-12-3-2`` in 0.99 s. Re-run the
-    panel once #1355 is fixed.
+    Retraction: an earlier version of this docstring recorded the flag as "not
+    net-positive, re-run once #1355 is fixed". That panel ran before OA's master
+    gap window and fixed-NLP tolerance were made scale-aware (#1352); the stall
+    it measured was those two defects, not the certificate. The graduation panel
+    and the explicit-OA measurement are recorded in docs/dev/performance-plan.md
+    §73; the default solve does not route a certificate-only objective to OA
+    (``solver._objective_syntactically_convex``), so this changes the callers above
+    when invoked explicitly, not the default solve's routing.
     """
-    return os.environ.get("DISCOPT_OA_CONVEXITY_CERTIFICATE", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    return os.environ.get("DISCOPT_OA_CONVEXITY_CERTIFICATE", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 

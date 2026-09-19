@@ -1516,6 +1516,54 @@ def _is_primal_feasible(evaluator, x, tol: float = 1e-4) -> bool:
 _NLP_WALL_FLOOR_S = 0.1
 
 
+#: POUNCE's (and Ipopt's) default convergence tolerance ``tol``.
+_NLP_DEFAULT_TOL = 1e-8
+
+#: Smallest objective magnitude :func:`_nlp_scaled_tol` scales ``tol`` by, so the
+#: tightest tolerance it asks for is ``1e-10``. Measured: ``tol=1e-10`` certified
+#: both probe models cleanly; a blanket ``1e-12`` returned one
+#: ``Search_Direction_Becomes_Too_Small`` (raw status 3) on the first.
+_NLP_TOL_SCALE_FLOOR = 1e-2
+
+
+def _nlp_scaled_tol(evaluator, x0) -> Optional[float]:
+    """Convergence ``tol`` for a fixed-integer NLP whose point becomes OA's
+    incumbent, or ``None`` to keep the solver default.
+
+    POUNCE's (and Ipopt's) convergence tests are absolute, so below unit
+    objective scale a ``Solve_Succeeded`` point can sit far from the optimum in
+    OA's units. Measured on a seeded ``dm.sum`` Markowitz model (``n=10, K=3,
+    seed=3``, optimum 2.9462641e-3): the fixed NLP returned status 0 at
+    2.9469633e-3, 7e-7 above the exact QP optimum (HiGHS) -- 70% of OA's
+    ``1e-6`` closing window -- and the cuts taken at that point held the master
+    1.04e-6 below it. The master then re-proposed the visited assignment 50
+    times and OA ended ``stalling`` (61 MILPs). With ``tol`` scaled to the
+    objective: ``optimal`` at the exact optimum in 11 MILPs. This is the units
+    defect :func:`~discopt.solvers._gap.master_gap_tolerance` fixes for the
+    master (#1352), on the NLP side.
+
+    ``tol = 1e-8 * max(|f(x0)|, 1e-2)`` for ``|f(x0)| < 1``: never looser than the
+    default and never tighter than ``1e-10``, and every unit-scale solve is
+    exactly unchanged. (POUNCE 0.12's ``obj_scaling_factor`` is not used: on the
+    #1352 issue model's fixed-assignment NLP it returned status 0 at 2.0860e-3
+    against an optimum of 2.0154e-3, above its own start point. That did not
+    reproduce on a free 3-variable QP.) Soundness does not depend on this: OA's
+    cuts are valid at any point and its bound comes from the master.
+    ``DISCOPT_OA_NLP_SCALED_TOL=0`` is the opt-out.
+    """
+    if os.environ.get("DISCOPT_OA_NLP_SCALED_TOL", "1").strip().lower() in (
+        "0",
+        "false",
+        "no",
+        "off",
+    ):
+        return None
+    f0 = abs(float(evaluator.evaluate_objective(x0)))
+    if not np.isfinite(f0) or f0 >= 1.0:
+        return None
+    return _NLP_DEFAULT_TOL * max(f0, _NLP_TOL_SCALE_FLOOR)
+
+
 def _time_left(t_start: float, time_limit: float) -> float:
     """Unfloored seconds left before ``t_start + time_limit`` (negative once past)."""
     return float(time_limit) - (time.perf_counter() - float(t_start))
@@ -1543,8 +1591,12 @@ def _solve_nlp_attempt(
     max_iter: int = 200,
     x0=None,
     max_wall_time: Optional[float] = None,
+    scale_tol: bool = False,
 ) -> _NLPAttempt:
     """Solve an NLP with given bounds, retaining solver multipliers.
+
+    ``scale_tol`` applies :func:`_nlp_scaled_tol`; the fixed-integer
+    subproblem (whose point is OA's incumbent) passes it.
 
     ``max_wall_time`` is the subsolve's share of the caller's deadline, in
     seconds. Measured on POUNCE 0.10 (``scratchpad/issue1105/probe_maxwall.py``,
@@ -1575,6 +1627,10 @@ def _solve_nlp_attempt(
         opts = pounce_option_defaults()
         opts.update(pounce_incumbent_options())
         opts.update({"max_iter": max_iter})
+        if scale_tol:
+            tol = _nlp_scaled_tol(evaluator, x0)
+            if tol is not None:
+                opts["tol"] = tol
         if max_wall_time is not None:
             opts["max_wall_time"] = max(float(max_wall_time), _NLP_WALL_FLOOR_S)
         result = solve_nlp(evaluator, x0, options=opts)
@@ -1731,7 +1787,13 @@ def _solve_nlp_subproblem(
 
     proxy = _BoundsProxy(evaluator, sub_lb, sub_ub)
     attempt = _solve_nlp_attempt(
-        proxy, sub_lb, sub_ub, nlp_solver, x0=initial_point, max_wall_time=max_wall_time
+        proxy,
+        sub_lb,
+        sub_ub,
+        nlp_solver,
+        x0=initial_point,
+        max_wall_time=max_wall_time,
+        scale_tol=True,
     )
     return _maybe_return_nlp_attempt(attempt, return_attempt)
 

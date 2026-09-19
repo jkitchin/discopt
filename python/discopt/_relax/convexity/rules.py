@@ -1606,13 +1606,13 @@ def classify_oa_cut_convexity(
     objective prevents full convex classification.
 
     ``use_certificate=None`` (what the OA-family callers pass) follows
-    ``DISCOPT_OA_CONVEXITY_CERTIFICATE``; an explicit bool is honoured as
-    given. With the flag on, the certificate path is the one
+    ``DISCOPT_OA_CONVEXITY_CERTIFICATE`` (default ON); an explicit bool is
+    honoured as given. With the flag on, the certificate path is the one
     :func:`classify_model` runs for solver dispatch -- interval-Hessian
     certificate plus the #936 exact-QP objective route -- so OA no longer
     disables its objective cuts on a model the dispatch routed to it *because*
-    that certificate proved it convex (#1352). With the flag off the verdict is
-    exactly the pre-#1352 one, including for an explicit ``True``.
+    that certificate proved it convex (#1352). With the flag opted out (``=0``) the verdict
+    is exactly the pre-#1352 one, including for an explicit ``True``.
     """
     from .certificate import _oa_convexity_certificate_enabled
 
