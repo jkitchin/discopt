@@ -102,7 +102,7 @@ def _improver_within_contingent(
     *,
     budget_on: bool,
     tree,
-    heur_state: dict,
+    heur_state: dict[str, float],
     success_gain: float,
     offset: float,
     quot: float,
@@ -132,7 +132,7 @@ def _improver_within_contingent(
     return (heur_state["cost"] + cost) <= _contingent
 
 
-def _record_improver_run(heur_state: dict, cost: float, improved: bool) -> None:
+def _record_improver_run(heur_state: dict[str, float], cost: float, improved: bool) -> None:
     """Charge an improver-role run against the contingent and note success.
 
     One definition (#1344): duplicated verbatim in :func:`solve_model` and
