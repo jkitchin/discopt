@@ -20434,9 +20434,12 @@ def _solve_node_nlp_ipopt(
         cu=cu,
     )
 
-    # cyipopt requires native Python types (rejects numpy scalars).
-    # Some options (e.g. max_wall_time) may not exist in older Ipopt versions.
-    for key, value in options.items():
+    # cyipopt requires native Python types (rejects numpy scalars). Options this
+    # Ipopt is too old to know are translated first (#1362): dropping one means a
+    # caller's limit stops being applied, which is not a DEBUG-level event.
+    from discopt.solvers.nlp_ipopt import _ipopt_version, _translate_options
+
+    for key, value in _translate_options(options).items():
         try:
             if isinstance(value, (np.floating, float)):
                 problem.add_option(key, float(value))
@@ -20445,7 +20448,11 @@ def _solve_node_nlp_ipopt(
             else:
                 problem.add_option(key, value)
         except TypeError:
-            logger.debug("Ipopt option '%s' not accepted, skipping", key)
+            logger.warning(
+                "Ipopt %s rejected option %r; it was NOT applied to this node solve.",
+                ".".join(str(v) for v in _ipopt_version()) or "(unknown version)",
+                key,
+            )
 
     from discopt.solvers import NLPResult
 
