@@ -31,15 +31,28 @@ for c in nb["cells"]:
     if c["cell_type"] != "code":
         continue
     src = "".join(c["source"])
-    if not re.search(r'os\.environ\[\s*["\']JAX_', src):
+    # Both spellings: `os.environ["JAX_X"] = v` and `os.environ.setdefault("JAX_X", v)`.
+    # Only the first was matched until a sweep found the setdefault form still in
+    # benchmark_dashboard and infeasibility_iis.
+    if not re.search(r'os\.environ(?:\.setdefault\(|\[)\s*["\']JAX_', src):
         continue
     orig = src
     # drop the JAX_* env assignments
     jax_env = r'^\s*os\.environ\[\s*["\']JAX_[A-Z0-9_]+["\']\s*\]\s*=\s*.*\n?'
+    jax_setdefault = r'^\s*os\.environ\.setdefault\(\s*["\']JAX_[A-Z0-9_]+["\']\s*,[^)]*\)\s*\n?'
     src = re.sub(jax_env, "", src, flags=re.M)
-    # drop `import os` if os is no longer referenced anywhere in this cell
+    src = re.sub(jax_setdefault, "", src, flags=re.M)
+    # drop `import os` only when `os.` is unused in the WHOLE notebook. Checking
+    # this cell alone broke docs/notebooks/bound_tightening.ipynb: its setup cell
+    # lost `import os` while cell 10 still toggled DISCOPT_LIFTED_FBBT through
+    # os.environ, so the notebook died on `NameError: name 'os' is not defined`.
     body = re.sub(r"^\s*import os\s*$", "", src, flags=re.M)
-    if not re.search(r"\bos\.", body):
+    rest = "".join(
+        "".join(other["source"])
+        for other in nb["cells"]
+        if other is not c and other["cell_type"] == "code"
+    )
+    if not re.search(r"\bos\.", body) and not re.search(r"\bos\.", rest):
         src = body
     # collapse >2 blank lines and trim
     src = re.sub(r"\n{3,}", "\n\n", src).strip("\n")

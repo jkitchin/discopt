@@ -145,17 +145,20 @@ def _analyze_structure(model: Model) -> dict:
     n_int = model.num_integer
     n_cons = model.num_constraints
 
-    # Detect bilinear terms (heuristic: look for product expressions)
-    has_bilinear = False
+    # Bilinear terms come from the structural classifier the relaxation layer
+    # itself uses -- NOT from `" * " in str(constraint)`, which fired on any
+    # `constant * variable`, i.e. on every linearly-scaled term. Measured on
+    # docs/notebooks/llm_integration.ipynb's facility-location model: a pure MILP
+    # with zero bilinear terms was reported as "bilinear terms in 3 constraints"
+    # and advised `partitions=4`, a recommendation that can only cost the user
+    # relaxation size (#1362).
+    has_bilinear = model_has_bilinear(model)
     has_big_m = False
 
     for c in model._constraints:
         if not isinstance(c, Constraint):
             continue
         c_str = str(c)
-        # Heuristic: multiplication of two non-constant terms
-        if " * " in c_str:
-            has_bilinear = True
         # Heuristic: large constants (> 1000) with binary vars
         for token in c_str.split():
             try:
@@ -203,17 +206,43 @@ def _analyze_structure(model: Model) -> dict:
     }
 
 
+def model_has_bilinear(model: Model) -> bool:
+    """Whether ``model`` genuinely contains a product of two decision variables.
+
+    Delegates to :func:`discopt._relax.term_classifier.classify_nonlinear_terms`
+    -- the same structural pass the relaxation layer uses -- so an advisory
+    suggestion cannot disagree with what the solver will actually see. Returns
+    ``False`` when classification is unavailable: advising a reformulation the
+    model may not need is worse than advising nothing.
+    """
+    try:
+        from discopt._relax.term_classifier import classify_nonlinear_terms
+
+        terms = classify_nonlinear_terms(model)
+    except Exception as exc:  # noqa: BLE001 - advisory path, degrade quietly
+        logger.debug("term classification unavailable: %s: %s", type(exc).__name__, exc)
+        return False
+    return bool(getattr(terms, "bilinear", None)) or bool(getattr(terms, "bilinear_with_fp", None))
+
+
 def _rule_based_params(analysis: dict) -> dict:
     """Generate solver parameters from rule-based heuristics."""
     params: dict = {"reasoning": []}
 
-    # NLP solver selection
+    # NLP solver selection. Both arms named "ipm" and called it a "pure-JAX IPM"
+    # -- an engine that no longer exists: `"ipm"` is a back-compat alias that
+    # resolves to POUNCE silently, so the advice was a true no-op described
+    # wrongly. Recommend the real default, and name cyipopt where it earns its
+    # place (large and sparse, where MA27/MA57/MUMPS beat a dense factorization).
     if analysis["n_variables"] > 100:
-        params["nlp_solver"] = "ipm"
-        params["reasoning"].append("Using pure-JAX IPM for batch solving (>100 variables)")
+        params["nlp_solver"] = "pounce"
+        params["reasoning"].append(
+            "Using POUNCE, the default Rust interior-point engine; for a large and "
+            'very sparse NLP, nlp_solver="ipopt" may factor the KKT system faster'
+        )
     else:
-        params["nlp_solver"] = "ipm"
-        params["reasoning"].append("Using pure-JAX IPM (default)")
+        params["nlp_solver"] = "pounce"
+        params["reasoning"].append("Using POUNCE, the default Rust interior-point engine")
 
     # Partitioning for bilinear terms
     if analysis["has_bilinear"] and not analysis["is_pure_continuous"]:

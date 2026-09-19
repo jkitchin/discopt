@@ -59,7 +59,11 @@ def test_rule_based_params_bilinear_minlp():
     a = _analyze_structure(_bilinear_minlp())
     p = _rule_based_params(a)
     assert p["partitions"] == 4  # bilinear + integer -> partitioned McCormick
-    assert p["nlp_solver"] == "ipm"
+    # #1362: the advisor used to recommend "ipm" and call it a "pure-JAX IPM".
+    # That engine is retired; "ipm" is a silent alias for POUNCE, so the advice
+    # was a no-op described wrongly. It now names the engine that exists.
+    assert p["nlp_solver"] == "pounce"
+    assert "jax" not in p["reasoning"].lower()
     assert p["batch_size"] == 16  # small model
     assert p["gap_tolerance"] == 1e-4
     assert "reasoning" in p and isinstance(p["reasoning"], str)
