@@ -91,8 +91,14 @@ def test_affine_power_partition_bound_stays_sound():
         )
 
 
-def test_affine_power_partition_defaults_off():
-    """The flag is default-OFF until it graduates (CLAUDE.md §5)."""
+def test_affine_power_partition_defaults_on():
+    """GRADUATED default-ON (#1351): refinement reaches the affine base by default.
+
+    Graduated on real-instance evidence under ``solver="amp"``: ``nvs03`` gains a
+    certificate (bound 15 -> 16, ``feasible`` -> ``optimal``, oracle optimum 16.0)
+    and ``nvs04`` tightens 0 -> 0.16 (oracle 0.72). No bound exceeded its reference
+    optimum on any carrier.
+    """
     env = dict(os.environ)
     env.pop("DISCOPT_AFFINE_POWER_PARTITION", None)
     out = subprocess.run(
@@ -103,10 +109,18 @@ def test_affine_power_partition_defaults_off():
         timeout=600,
     )
     assert out.returncode == 0, out.stderr[-2000:]
-    assert "RESULT feasible" in out.stdout, (
-        "with no env var set the legacy (unrefined) path must still be taken; "
+    assert "RESULT optimal" in out.stdout, (
+        "with no env var set the refined path must now be taken (default-ON); "
         f"got: {out.stdout[-500:]}"
     )
+
+
+def test_affine_power_partition_opt_out_restores_legacy():
+    """``=0`` keeps the legacy unrefined path intact, as §5 graduation requires."""
+    status, obj, bound = _run(_SHIFTED_SQUARES, "0")
+    assert status == "feasible"
+    assert bound == pytest.approx(-26.5, abs=1e-4)
+    assert obj == pytest.approx(_TRUE_OPT, abs=1e-4)
 
 
 def test_bare_monomial_path_is_unchanged_by_the_flag():

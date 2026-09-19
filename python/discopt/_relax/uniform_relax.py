@@ -848,7 +848,8 @@ class _Builder:
         # ``x_i**2`` and be unsound). Without a channel of their own the AMP
         # partition on ``x_i`` had nothing to attach to, so refinement was inert and
         # the bound stayed pinned at the root secant. Entries:
-        # ``(w, var_idx, coeff, const, p)``. Gated by ``DISCOPT_AFFINE_POWER_PARTITION``.
+        # ``(w, var_idx, coeff, const, p)``. GRADUATED default-ON (#1351);
+        # ``DISCOPT_AFFINE_POWER_PARTITION=0`` restores the legacy unrefined path.
         self.affine_power_atom_specs: list[tuple[int, int, float, float, int]] = []
         # #1351 defect 2: how many atoms the LAST partition-refinement pass found
         # attached to a PARTITIONED variable. ``0`` means that pass was structurally
@@ -2498,7 +2499,7 @@ def _build_power(ctx: _Builder, node: CNode, w: int) -> Envelope:
         i is None
         and float(p).is_integer()
         and int(p) >= 2
-        and os.environ.get("DISCOPT_AFFINE_POWER_PARTITION", "0").strip().lower()
+        and os.environ.get("DISCOPT_AFFINE_POWER_PARTITION", "1").strip().lower()
         not in ("0", "false", "no", "off")
     ):
         aff = ctx.affine_single_original(lt)
