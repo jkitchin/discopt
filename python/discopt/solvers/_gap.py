@@ -40,6 +40,10 @@ now reported as *not closed* rather than as a certificate.
 
 from __future__ import annotations
 
+import math
+import os
+from typing import Optional
+
 # discopt's absolute optimality tolerance. Same value as
 # ``validation.feasibility.ABS_TOL`` and ``amp.solve``'s ``abs_tol`` default.
 GAP_ABS_TOL = 1e-6
@@ -99,3 +103,46 @@ def optimality_gap(
     if abs_gap <= abs_tol:
         return 0.0
     return abs_gap / max(abs(ub), abs(lb), denom_floor)
+
+
+def master_gap_tolerance(
+    gap_tolerance: float,
+    incumbent: Optional[float],
+    *,
+    abs_tol: float = GAP_ABS_TOL,
+) -> float:
+    """The ``gap_tolerance`` to hand a decomposition master MILP (#1352).
+
+    The decomposition loop converges when ``ub - lb <= max(abs_tol,
+    gap_tolerance * |ub|)`` (:func:`optimality_gap` with the ``1e-10`` floor). The
+    in-house MILP engine's gap is normalised by ``max(|incumbent|, 1.0)``
+    (``TreeManager::gap``), so passing the loop's *relative* ``gap_tolerance``
+    through unchanged lets the master stop ``gap_tolerance`` ABSOLUTE short of
+    its optimum below unit objective scale. Its dual bound is still valid, but
+    the loop's lower bound can then never close the gap: measured on the #1352
+    Markowitz model (optimum 2.0e-3), the master exited ``optimal`` at a 5.7%
+    relative gap, re-proposed an already-visited assignment 37 times, and OA
+    stalled until its iteration cap and fell back to B&B. The true master
+    optimum sat at a different assignment, reached at the same 47 nodes with
+    a ``1e-6`` tolerance.
+
+    This converts the loop's closing window into the engine's units:
+    ``max(abs_tol, gap_tolerance * s) / max(s, 1)`` with ``s = |incumbent|``.
+    For ``s >= 1`` that is exactly ``gap_tolerance`` (so every unit-scale solve
+    is unchanged); below unit scale it is the loop's own absolute window. With
+    no incumbent yet the scale is unknown and ``gap_tolerance`` is returned.
+
+    ``DISCOPT_OA_MASTER_GAP_SCALED=0`` restores the legacy pass-through (the
+    opt-out kept for the A/B panel; see the #1352 PR).
+    """
+    if os.environ.get("DISCOPT_OA_MASTER_GAP_SCALED", "1").strip().lower() in (
+        "0",
+        "false",
+        "no",
+        "off",
+    ):
+        return gap_tolerance
+    if incumbent is None or not math.isfinite(incumbent) or abs(incumbent) >= BOUND_INF:
+        return gap_tolerance
+    scale = abs(float(incumbent))
+    return min(gap_tolerance, max(abs_tol, gap_tolerance * scale) / max(scale, 1.0))

@@ -19,7 +19,7 @@ from discopt.modeling.core import (
     VarType,
 )
 from discopt.solvers import pounce_incumbent_options, pounce_option_defaults
-from discopt.solvers._gap import optimality_gap
+from discopt.solvers._gap import master_gap_tolerance, optimality_gap
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     # #1063: type-only. ``_relax/nlp_evaluator`` imports jax at module scope, so a
@@ -219,7 +219,7 @@ def solve_gdpopt_loa(
             obj_is_linear,
             master_bound_valid,
             time_limit=time_limit - elapsed,
-            gap_tolerance=gap_tolerance,
+            gap_tolerance=master_gap_tolerance(gap_tolerance, UB),
             milp_solver=milp_solver,
             no_good_configs=no_good_configs,
             int_indices=int_indices,

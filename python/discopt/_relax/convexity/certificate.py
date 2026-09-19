@@ -95,6 +95,45 @@ def _qp_exact_convexity_enabled() -> bool:
     )
 
 
+def _oa_convexity_certificate_enabled() -> bool:
+    """Whether OA's cut classifier consults the convexity certificates (#1352).
+
+    Governs :func:`~.rules.classify_oa_cut_convexity` for the callers that take
+    its default (OA, LP/NLP-BB/GOA, GDPopt-LOA, GBD, the decomposition advisor
+    and IR reformulation). When on, those callers get the same certificate path
+    the solver's dispatch classifier (``classify_model(use_certificate=True)``)
+    runs: the interval-Hessian certificate plus the exact QP/MIQP
+    objective-Hessian route. Without it, a convex quadratic written with
+    ``dm.sum(...)`` is routed to OA as certified convex and OA then disables its
+    master lower-bound updates and objective cuts on it, fails to certify, and
+    falls back to the spatial path.
+
+    It governs the per-row cut mask as well: a constraint the certificate proves
+    convex gets OA cuts (``classify_constraint(..., use_certificate=...)``).
+
+    **Default ON** (graduated in #1360 under CLAUDE.md §5); opt out with
+    ``DISCOPT_OA_CONVEXITY_CERTIFICATE=0`` (also ``false``/``no``/``off``), which
+    restores the legacy syntactic verdict. Proving an objective convex turns on
+    OA's objective cuts and master lower-bound updates, so this is
+    bound-changing; without it OA cannot certify an objective the syntactic rules miss.
+
+    Retraction: an earlier version of this docstring recorded the flag as "not
+    net-positive, re-run once #1355 is fixed". That panel ran before OA's master
+    gap window and fixed-NLP tolerance were made scale-aware (#1352); the stall
+    it measured was those two defects, not the certificate. The graduation panel
+    and the explicit-OA measurement are recorded in docs/dev/performance-plan.md
+    §73; the default solve does not route a certificate-only objective to OA
+    (``solver._objective_syntactically_convex``), so this changes the callers above
+    when invoked explicitly, not the default solve's routing.
+    """
+    return os.environ.get("DISCOPT_OA_CONVEXITY_CERTIFICATE", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
 # Size cap for the exact QP convexity route. ``numpy.linalg.eigvalsh`` on a dense
 # symmetric matrix measured (this container, load average 0.25, min of 3):
 # n=1000 -> 0.052 s, n=2000 -> 0.331 s (sd 0.008), n=4000 -> 2.47 s. Classification

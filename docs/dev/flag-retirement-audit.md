@@ -58,6 +58,13 @@ steady state.
 | `DISCOPT_DIRECT_HEURISTIC` | substantial measurement, incl. `docs/dev/direct-entry-2026-08-12.md`; explicitly *heuristic-policy, not bound-changing* | measured, regime stated | **Read the recorded panel and decide.** The evidence exists; the verdict was never written down. |
 | `DISCOPT_IPX_CHEAP_FIRST` | *"the gate only ever decides which of two correct routes runs"*; measurement language present | measured, soundness-neutral | **Read the recorded panel and decide.** |
 
+## Gates added after the first audit
+
+| flag | what its own text records | state | verdict |
+|---|---|---|---|
+| `DISCOPT_OA_CONVEXITY_CERTIFICATE` | #1352: OA consults the interval-Hessian certificate and the exact-QP route for objective (and per-row) convexity, so a PSD objective written with `dm.sum` gets objective cuts. The first panel's "not net-positive" was OA's master-gap window and fixed-NLP tolerance, both fixed in #1360 — retracted in the flag's docstring | panel ran (performance-plan §73) | **Graduated in #1360** — default ON, opt-out `=0`. The default solve does not route a certificate-only objective to OA (`DISCOPT_CONVEX_ROUTE_SYNTACTIC_OBJECTIVE`, default ON, opt-out `=0`), so the graduation changes explicit OA-family callers only. |
+| `DISCOPT_FARKAS_RAY_CLEANUP` (Rust, `lp/simplex/primal.rs`) | #1355: re-verify a rejected infeasibility ray with its rounding-noise entries (`\|y_i\| ≤ 1e-12·‖y‖∞`) zeroed; soundness rests on the unchanged rigorous verifier. Captured OA master: 278-node `ITERATION_LIMIT` → 149-node `OPTIMAL` | panel + graduation gate running (PR #1360) | **Pending in PR #1360** — graduated or retired before that PR merges, per §5. |
+
 ## What this audit does not do
 
 It does **not** delete anything. Per #1345 the deletions are follow-on PRs; this lands the
