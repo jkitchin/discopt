@@ -39,8 +39,8 @@ steady state.
 
 | flag | what its own text records | state | verdict |
 |---|---|---|---|
-| `DISCOPT_LP_SPATIAL_MIXED` | *"it ran its graduation panel and did NOT graduate, on **both**"*; *"Sound but harmful stays OFF, with the measurement recorded"* | panel ran, failed | **Retire.** The measurement exists and is negative. This is the exact dead end §5 had no exit for. |
-| `DISCOPT_POUNCE_DECLARED_BOX` | *"Default-OFF pending the §5 graduation gate"*; #1327's panel: gate 1 cert-clean **PASS**, gate 2 net-positive **INCONCLUSIVE** (only 2 of 66 instances are in the affected window) | panel ran, inconclusive by construction | **Retire.** #1327's retry recovered the affected class without moving the default box, so nothing depends on this vote; gate 2 is unanswerable on this corpus by construction, not by accident. |
+| `DISCOPT_LP_SPATIAL_MIXED` | *"it ran its graduation panel and did NOT graduate, on **both**"*; *"Sound but harmful stays OFF, with the measurement recorded"* | panel ran, failed | **Retire → #1357.** The measurement exists and is negative. This is the exact dead end §5 had no exit for. |
+| `DISCOPT_POUNCE_DECLARED_BOX` | *"Default-OFF pending the §5 graduation gate"*; #1327's panel: gate 1 cert-clean **PASS**, gate 2 net-positive **INCONCLUSIVE** (only 2 of 66 instances are in the affected window) | panel ran, inconclusive by construction | **Retire → #1358.** #1327's retry recovered the affected class without moving the default box, so nothing depends on this vote; gate 2 is unanswerable on this corpus by construction, not by accident. |
 | `DISCOPT_CONVEX_KERNEL` | default-OFF, never default-ON; 3,105 lines of Rust behind it | panel owed | **Decide via #1346** (already split out): graduate or delete. |
 | `DISCOPT_NLP_NATIVE` | *"Default stays OFF on the remaining grounds — the speedup …"* | measured, reasoned | **Keep as documented opt-out** — it already states why it is not the default. Confirm the docstring also says what would change that. |
 | `DISCOPT_CMIR_AGGREGATION` | *"ships dark behind this flag until proven on nightlies"* | panel owed, never run | **Run the panel or retire.** |
@@ -57,9 +57,10 @@ steady state.
 ## What this audit does not do
 
 It does **not** delete anything. Per #1345 the deletions are follow-on PRs; this lands the
-rule and the verdicts. Two rows (`DISCOPT_LP_SPATIAL_MIXED`, `DISCOPT_POUNCE_DECLARED_BOX`)
-have verdicts strong enough to act on immediately and should get retirement PRs; one
-(`DISCOPT_CONVEX_KERNEL`) already has its own issue.
+rule and the verdicts. Two rows have verdicts strong enough to act on immediately and now carry retirement
+issues — `DISCOPT_LP_SPATIAL_MIXED` → #1357, `DISCOPT_POUNCE_DECLARED_BOX` → #1358 — and
+`DISCOPT_CONVEX_KERNEL` already had its own, #1346. No verdict above is left as "recorded
+and forgotten", which is the state #1345 exists to end.
 
 It also does not re-run any panel. Every verdict above rests on what the tree already
 records — which is the point: the evidence was never the missing part.
