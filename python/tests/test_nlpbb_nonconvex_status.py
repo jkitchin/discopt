@@ -27,6 +27,7 @@ import pytest
 from discopt import solver as S
 from discopt.modeling.core import from_nl
 from discopt.solvers import NLPResult, SolveStatus
+from discopt.solvers._convex_kernel import last_attempt_seconds
 
 DATA = os.path.join(os.path.dirname(__file__), "data", "minlplib")
 
@@ -153,4 +154,18 @@ def test_fallback_keeps_its_reserve_after_a_primary_that_spent_its_budget(monkey
     monkeypatch.setattr(S, "solve_model", spent_primary)
     m = from_nl(os.path.join(DATA, "nvs17.nl"))
     m.solve(time_limit=6.0)
-    assert budgets == [pytest.approx(0.35 * 6.0)], budgets
+
+    # #1346: the reserve is 35% of what the DEFAULT PATH received, which is the
+    # caller's limit MINUS the convex-kernel attempt (#911 deducts it, deliberately
+    # — the spec build is the convexity classification and on the instances that
+    # hazard bites it is ~1 s of wall). nvs17 is not kernel-eligible, so the attempt
+    # only classifies and declines; it is charged all the same.
+    #
+    # This asserted a flat ``0.35 * 6.0`` while DISCOPT_CONVEX_KERNEL was opt-in, when
+    # nothing ran ahead of the reserve. Reading the deduction rather than widening the
+    # tolerance keeps the #917 proportion pinned EXACTLY; the separate bound below is
+    # what would still fail if a declined attempt ever became expensive, so relaxing
+    # the arithmetic does not cost the signal.
+    spent = last_attempt_seconds()
+    assert spent < 0.10 * 6.0, f"a DECLINED kernel attempt cost {spent:.3f}s of a 6 s budget"
+    assert budgets == [pytest.approx(0.35 * (6.0 - spent), rel=1e-6)], (budgets, spent)
