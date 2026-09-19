@@ -850,6 +850,12 @@ class _Builder:
         # the bound stayed pinned at the root secant. Entries:
         # ``(w, var_idx, coeff, const, p)``. Gated by ``DISCOPT_AFFINE_POWER_PARTITION``.
         self.affine_power_atom_specs: list[tuple[int, int, float, float, int]] = []
+        # #1351 defect 2: how many atoms the LAST partition-refinement pass found
+        # attached to a PARTITIONED variable. ``0`` means that pass was structurally
+        # inert -- refining the partition further cannot change a single row, so the
+        # AMP loop can stop instead of re-solving an identical relaxation. ``None``
+        # means "not applicable" (no partitions supplied).
+        self.partition_refinable_atoms: Optional[int] = None
         # Affine-form product envelopes emitted by ``_emit_mccormick`` — each entry
         # ``(w, dict(A.coeffs), A.const, dict(B.coeffs), B.const)`` records the
         # box-INDEPENDENT structure of a product ``w = A*B`` of two affine forms (a
@@ -3777,7 +3783,30 @@ def _apply_partition_refinement(ctx: "_Builder", disc_state: object) -> None:
     """
     parts = getattr(disc_state, "partitions", None)
     if not parts:
+        ctx.partition_refinable_atoms = None
         return
+
+    # #1351 defect 2. Count the atoms the three refinement loops below can actually
+    # act on, i.e. those attached to a partitioned variable. A pass that finds ZERO
+    # emits no piecewise rows, so the relaxation is bit-identical no matter how fine
+    # the partition gets -- and the AMP loop iterating on it is provably wasted work.
+    # This is a structural fact, not a heuristic: it cannot cost bound quality,
+    # unlike a "stopped improving" rule (measured: nvs11's bound sat flat for SEVEN
+    # rounds and then gained 43.3, so any stop-after-k with k<=7 loses real bound).
+    _refinable = 0
+    for _a, _b in ctx.bilinear_map:
+        if _a in parts or _b in parts:
+            _refinable += 1
+    for _spec in ctx.univariate_atom_specs:
+        if _spec[2] in parts and _spec[0] in _PIECEWISE_UNIVARIATE_FN:
+            _refinable += 1
+    for _i, _p in ctx.monomial_map:
+        if _i in parts and isinstance(_p, int) and _p >= 2:
+            _refinable += 1
+    for _spec in ctx.affine_power_atom_specs:
+        if _spec[1] in parts and _spec[4] >= 2 and _spec[2] != 0.0:
+            _refinable += 1
+    ctx.partition_refinable_atoms = _refinable
 
     def _clamped(v: int, extra: Optional[list[float]] = None) -> Optional[list[float]]:
         raw = parts.get(v)
@@ -4164,6 +4193,8 @@ def build_uniform_relaxation(
     # Issue #694 anytime-build provenance (informational; the LP is sound either
     # way). ``_build_truncated`` is True when the constraint loop stopped early on
     # the ``build_deadline``; the two counters record coverage for diagnostics/tests.
+    # #1351 defect 2: hand the AMP loop the structural fact it needs to stop.
+    milp._partition_refinable_atoms = ctx.partition_refinable_atoms
     milp._build_truncated = build_truncated
     milp._build_constraints_done = constraints_done
     milp._build_constraints_total = n_constraints
