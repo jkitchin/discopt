@@ -182,6 +182,18 @@ ARMS: dict[str, dict] = {
         "struct_attr": None,
         "regime": "bound_changing",
     },
+    # #1351 affine-base power partition: AMP's partition refinement could not reach
+    # a power whose base is affine in one original (``(x-c)**2``), so the dual bound
+    # stayed pinned at the root secant no matter how fine the partition got. The flag
+    # records the affine base so the existing piecewise machinery can refine it.
+    # ``bound_changing`` by construction (it tightens a relaxation); no cheap static
+    # struct proxy -- "has a power over an affine base" is a property of the lowered
+    # DAG, not of the .nl header.
+    "affine_power_partition": {
+        "env": {"DISCOPT_AFFINE_POWER_PARTITION": "1"},
+        "struct_attr": None,
+        "regime": "bound_changing",
+    },
     "all": {"env": dict(FLAGS_ON), "struct_attr": None, "regime": "bound_changing"},
 }
 
@@ -200,6 +212,8 @@ GRADUATION_ARMS = (
     "node_numerical_dual_bound",
     # #832/#814 base root-build deadline, wired 2026-07-21
     "root_build_deadline",
+    # #1351 affine-base power partition, wired 2026-09-19
+    "affine_power_partition",
 )
 
 # correctness tolerance (matches conftest abs=1e-6, rel=1e-4)
