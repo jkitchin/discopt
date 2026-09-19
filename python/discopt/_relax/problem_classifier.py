@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 from enum import Enum
-from typing import TYPE_CHECKING, NamedTuple, cast
+from typing import TYPE_CHECKING, NamedTuple, Optional, cast
 
 import numpy as np
 
@@ -161,6 +161,19 @@ def _sp_issparse(x) -> bool:
     return bool(_sp.issparse(x))
 
 
+#: What ``row_sense`` on :class:`LPData`/:class:`QPData` means, once, for both.
+_ROW_SENSE_DOC = """``(m,)`` declared sense of each row of ``A_eq``: ``+1.0`` for a
+    ``<=`` row, ``-1.0`` for a ``>=`` row, ``0.0`` for a true equality. Straight from
+    :func:`discopt._relax.std_form.logical_block`, which is the code that chose the
+    slack layout in the first place.
+
+    ``None`` means "not carried" -- a consumer then falls back to inferring the
+    senses from the marshaled matrix (``solver._decompose_eq_slack_form``), which is
+    what every consumer used to do. That inference tests a slack coefficient against
+    ``1e-15`` and reads its sign, i.e. it re-derives a structural fact the producer
+    knew exactly and discarded (issue #1230 V3)."""
+
+
 class LPData(NamedTuple):
     """Standard-form LP data: min c'x + d s.t. A_eq x = b_eq, x_l <= x <= x_u."""
 
@@ -170,6 +183,7 @@ class LPData(NamedTuple):
     x_l: jnp.ndarray  # (n,) lower bounds
     x_u: jnp.ndarray  # (n,) upper bounds
     obj_const: float = 0.0  # constant term in objective
+    row_sense: Optional[np.ndarray] = None  # (m,) see _ROW_SENSE_DOC
 
 
 class QPData(NamedTuple):
@@ -182,6 +196,11 @@ class QPData(NamedTuple):
     x_l: jnp.ndarray  # (n,) lower bounds
     x_u: jnp.ndarray  # (n,) upper bounds
     obj_const: float = 0.0  # constant term in objective
+    row_sense: Optional[np.ndarray] = None  # (m,) see _ROW_SENSE_DOC
+
+
+LPData.row_sense.__doc__ = _ROW_SENSE_DOC
+QPData.row_sense.__doc__ = _ROW_SENSE_DOC
 
 
 def dense_Q(Q) -> np.ndarray:
@@ -964,7 +983,8 @@ def _eval_const(expr) -> float:  # type: ignore[return-value]
 def _extract_constraints_algebraic(model: Model, n_orig: int, *, for_qp: bool = False):
     """Extract linear constraint data algebraically (shared by LP and QP paths).
 
-    Returns (A_eq, b_eq, x_l, x_u, n_slack) where logical (slack) columns are
+    Returns (A_eq, b_eq, x_l, x_u, n_slack, row_sense) where logical (slack)
+    columns are
     appended per :mod:`discopt._relax.std_form` — one per inequality row, plus
     one fixed at zero per equality row under the row-logical layout. ``A_eq`` is
     dense while it fits ``_DENSE_A_MAX_BYTES`` and scipy CSR beyond it (#863) —
@@ -1050,7 +1070,7 @@ def _extract_constraints_algebraic(model: Model, n_orig: int, *, for_qp: bool = 
     x_l = np.concatenate([x_l_orig, block.lb])
     x_u = np.concatenate([x_u_orig, block.ub])
 
-    return A_eq, b_eq, x_l, x_u, n_slack
+    return A_eq, b_eq, x_l, x_u, n_slack, block.row_sense
 
 
 def _quadratic_row_has_terms(Q: np.ndarray, tol: float = 1e-12) -> bool:
@@ -1221,7 +1241,9 @@ def extract_lp_data_algebraic(model: Model, *, for_qp: bool = False) -> LPData:
 
     c, obj_const = _extract_linear_coefficients(obj_expr, model, n_orig)
 
-    A_eq, b_eq, x_l, x_u, n_slack = _extract_constraints_algebraic(model, n_orig, for_qp=for_qp)
+    A_eq, b_eq, x_l, x_u, n_slack, row_sense = _extract_constraints_algebraic(
+        model, n_orig, for_qp=for_qp
+    )
     c_full = np.concatenate([c, np.zeros(n_slack, dtype=np.float64)])
 
     # Handle objective sense: negate for maximization
@@ -1236,6 +1258,7 @@ def extract_lp_data_algebraic(model: Model, *, for_qp: bool = False) -> LPData:
         x_l=x_l,
         x_u=x_u,
         obj_const=obj_const,
+        row_sense=row_sense,
     )
 
 
@@ -1256,7 +1279,9 @@ def extract_qp_data_algebraic(model: Model) -> QPData:
 
     Q, c_vec, obj_const = _extract_quadratic_coefficients(obj_expr, model, n_orig)
 
-    A_eq, b_eq, x_l, x_u, n_slack = _extract_constraints_algebraic(model, n_orig, for_qp=True)
+    A_eq, b_eq, x_l, x_u, n_slack, row_sense = _extract_constraints_algebraic(
+        model, n_orig, for_qp=True
+    )
 
     if n_slack > 0:
         n_total = n_orig + n_slack
@@ -1290,6 +1315,7 @@ def extract_qp_data_algebraic(model: Model) -> QPData:
         x_l=x_l,
         x_u=x_u,
         obj_const=obj_const,
+        row_sense=row_sense,
     )
 
 
@@ -1382,6 +1408,8 @@ class _LPRows(NamedTuple):
     x_l: np.ndarray
     x_u: np.ndarray
     n_slack: int
+    #: ``(m,)`` declared row senses; see ``LPData.row_sense``.
+    row_sense: np.ndarray
 
 
 def _lp_rows_from_repr(model: Model, repr_, *, for_qp: bool = False) -> _LPRows:
@@ -1487,7 +1515,9 @@ def _lp_rows_from_repr(model: Model, repr_, *, for_qp: bool = False) -> _LPRows:
                 "has vector-valued constraints that are not scalar-representable"
             )
 
-    return _LPRows(A_eq=A_eq, b_eq=b_eq, x_l=x_l, x_u=x_u, n_slack=n_slack)
+    return _LPRows(
+        A_eq=A_eq, b_eq=b_eq, x_l=x_l, x_u=x_u, n_slack=n_slack, row_sense=block.row_sense
+    )
 
 
 def _extract_lp_data_from_repr(model: Model, *, for_qp: bool = False) -> LPData:
@@ -1505,7 +1535,7 @@ def _extract_lp_data_from_repr(model: Model, *, for_qp: bool = False) -> LPData:
     n_orig = repr_.n_vars
 
     rows = _lp_rows_from_repr(model, repr_, for_qp=for_qp)
-    A_eq, b_eq, x_l, x_u, n_slack = rows
+    A_eq, b_eq, x_l, x_u, n_slack = rows.A_eq, rows.b_eq, rows.x_l, rows.x_u, rows.n_slack
 
     obj_terms, obj_at_zero = _linear_terms_from_repr(repr_, n_orig, None)
     c_full = np.zeros(n_orig + n_slack, dtype=np.float64)
@@ -1532,6 +1562,7 @@ def _extract_lp_data_from_repr(model: Model, *, for_qp: bool = False) -> LPData:
         x_l=np.asarray(x_l),  # type: ignore[arg-type]
         x_u=np.asarray(x_u),  # type: ignore[arg-type]
         obj_const=obj_at_zero,
+        row_sense=rows.row_sense,
     )
 
 
@@ -1803,6 +1834,7 @@ def _assemble_qp_from_repr(model, repr_, n_orig: int, Q, c_vec, d: float) -> QPD
         x_l=rows.x_l,  # type: ignore[arg-type]
         x_u=rows.x_u,  # type: ignore[arg-type]
         obj_const=d,
+        row_sense=rows.row_sense,
     )
 
 
@@ -2134,6 +2166,7 @@ def _extract_lp_data_tape(model: Model, *, for_qp: bool = False) -> LPData | Non
         x_l=x_l,  # type: ignore[arg-type]
         x_u=x_u,  # type: ignore[arg-type]
         obj_const=obj_const,
+        row_sense=block.row_sense,
     )
 
 
@@ -2257,6 +2290,7 @@ def _extract_lp_data_autodiff(model: Model, *, for_qp: bool = False) -> LPData:
         x_l=x_l,
         x_u=x_u,
         obj_const=obj_const,
+        row_sense=block.row_sense,
     )
 
 
@@ -2444,4 +2478,5 @@ def _extract_qp_data_autodiff(model: Model) -> QPData:
         x_l=lp_data.x_l,
         x_u=lp_data.x_u,
         obj_const=obj_const,
+        row_sense=lp_data.row_sense,
     )

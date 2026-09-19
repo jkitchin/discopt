@@ -157,14 +157,26 @@ def test_huge_box_masks_each_side_separately_and_keeps_declared_bounds():
 
 def test_ns_bound_is_valid_from_an_arbitrary_dual():
     # min x0 + 2 x1, x0 + x1 = 3, 0 <= x <= 10: optimum 3. Any y gives a lower bound.
+    #
+    # The bound carries `refine.rs::NS_MARGIN_REL * S` of slack, `S = 1 + |bᵀy| +
+    # Σ|contrib|` (#1230: without it the evaluation lands *above* the optimum on
+    # ~21% of LPs). So the soundness assertions below take NO tolerance, and the
+    # sharpness assertions allow exactly the margin.
+    from discopt._rust import NS_MARGIN_REL
+
     sf = H.StdForm.from_arrays([1.0, 2.0], [[1.0, 1.0]], [3.0], [0, 0], [10, 10])
-    assert H.ns_bound(np.array([1.0]), sf) == pytest.approx(3.0, abs=1e-12)
+    # y=1: bᵀy = 3, rc = (0, 1) -> contrib 1*0 = 0, so S = 4.
+    assert H.ns_bound(np.array([1.0]), sf) == pytest.approx(3.0, abs=4.0 * NS_MARGIN_REL)
     for y in (-5.0, 0.0, 0.3, 4.0):
         g = H.ns_bound(np.array([y]), sf)
-        assert g is not None and g <= 3.0 + 1e-12
+        assert g is not None and g <= 3.0
     open_sf = H.StdForm.from_arrays([1.0, 2.0], [[1.0, 1.0]], [3.0], [-INF, 0], [10, 10])
     # y=4: rc = (-3, -2) < 0 puts x0 on its finite upper side, so the bound is finite.
-    assert H.ns_bound(np.array([4.0]), open_sf) == pytest.approx(12.0 - 30.0 - 20.0, abs=1e-12)
+    # bᵀy = 12, contribs -30 and -20, so S = 63.
+    assert H.ns_bound(np.array([4.0]), open_sf) == pytest.approx(
+        12.0 - 30.0 - 20.0, abs=63.0 * NS_MARGIN_REL
+    )
+    assert H.ns_bound(np.array([4.0]), open_sf) <= 12.0 - 30.0 - 20.0  # sound, no slack
     assert H.ns_bound(np.array([0.0]), open_sf) is None  # rc0 = 1 > 0 on an open lower side
 
 
