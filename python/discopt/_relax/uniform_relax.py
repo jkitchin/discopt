@@ -3804,8 +3804,8 @@ def _apply_partition_refinement(ctx: "_Builder", disc_state: object) -> None:
     for _i, _p in ctx.monomial_map:
         if _i in parts and isinstance(_p, int) and _p >= 2:
             _refinable += 1
-    for _spec in ctx.affine_power_atom_specs:
-        if _spec[1] in parts and _spec[4] >= 2 and _spec[2] != 0.0:
+    for _pspec in ctx.affine_power_atom_specs:
+        if _pspec[1] in parts and _pspec[4] >= 2 and _pspec[2] != 0.0:
             _refinable += 1
     ctx.partition_refinable_atoms = _refinable
 
