@@ -182,6 +182,20 @@ ARMS: dict[str, dict] = {
         "struct_attr": None,
         "regime": "bound_changing",
     },
+    # #1351 affine-base power partition: AMP's partition refinement could not reach
+    # a power whose base is affine in one original (``(x-c)**2``), so the dual bound
+    # stayed pinned at the root secant no matter how fine the partition got. The flag
+    # records the affine base so the existing piecewise machinery can refine it.
+    # ``bound_changing`` by construction (it tightens a relaxation); no cheap static
+    # struct proxy -- "has a power over an affine base" is a property of the lowered
+    # DAG, not of the .nl header.
+    # GRADUATED default-ON (#1351, 2026-09-19). Kept as an arm so the legacy path
+    # stays measurable: the env value is the OPT-OUT, not the enable.
+    "affine_power_partition_off": {
+        "env": {"DISCOPT_AFFINE_POWER_PARTITION": "0"},
+        "struct_attr": None,
+        "regime": "bound_changing",
+    },
     "all": {"env": dict(FLAGS_ON), "struct_attr": None, "regime": "bound_changing"},
 }
 
@@ -200,6 +214,10 @@ GRADUATION_ARMS = (
     "node_numerical_dual_bound",
     # #832/#814 base root-build deadline, wired 2026-07-21
     "root_build_deadline",
+    # #1351 affine_power_partition GRADUATED default-ON 2026-09-19 -- dropped from
+    # the graduation bundle because the "off" control now runs the same code, so an
+    # ON-vs-control arm would compare a config against itself. Its ARMS entry stays
+    # so the opt-out (`=0`) remains addressable.
 )
 
 # correctness tolerance (matches conftest abs=1e-6, rel=1e-4)

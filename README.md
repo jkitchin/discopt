@@ -21,13 +21,13 @@ Jacobian, and Hessian evaluation.
 - **Algebraic modeling API** -- continuous, binary, and integer variables with operator overloading
 - **Spatial Branch and Bound** -- Rust-powered node pool, branching, and pruning; the native Rust spatial B&B kernel is the default engine (`DISCOPT_NATIVE_SPATIAL_KERNEL=0` opts back to the Python tree)
 - **Rust AD tape for NLP evaluation** -- objective, gradient, constraint Jacobian, and Lagrangian Hessian (dense and sparse) come from a POUNCE-backed tape with no JAX on the path; `DISCOPT_NLP_EVAL=jax` restores the legacy JAX evaluator
-- **In-house LP/MILP engine** -- pure-Rust primal/dual simplex with warm starts and a sparse LU basis (`feral`); HiGHS is no longer on the LP/MILP path
+- **In-house LP/MILP engine** -- pure-Rust primal/dual simplex with warm starts and a sparse LU basis (`feral`); it drives every MINLP node LP. Models classified as *pure* LP/MILP at entry are routed to HiGHS instead, with discopt-verified certificates (`DISCOPT_LP_MILP_BACKEND=rust` opts back to the Rust simplex)
 - **NLP backends** -- POUNCE (pure-Rust Ipopt port, the universal default) and cyipopt (Ipopt); `nlp_solver="simplex"` selects the pure-Rust warm-started-simplex MILP B&B. The pure-JAX IPM has been retired -- `"ipm"`/`"sparse_ipm"` remain as back-compat aliases
-- **Convex relaxations** -- McCormick envelopes over 28 primitive operations (bilinear, powers, `exp`/`log` family, trig and inverse-trig, hyperbolics, `sigmoid`/`softplus`/`tanh`, `abs`/`min`/`max`/`sign`/`entropy`) plus a 19-intrinsic univariate envelope table in the uniform factorable engine (adding `erf`, `log1p`, and the inverse hyperbolics); piecewise McCormick, alphaBB underestimators, and G-convexity / convex-transformable relaxations
+- **Convex relaxations** -- McCormick envelopes over 28 primitive operations (bilinear, powers, `exp`/`log` family, trig and inverse-trig, hyperbolics, `sigmoid`/`softplus`/`tanh`, `abs`/`min`/`max`/`sign`/`entropy`) plus a 22-intrinsic univariate envelope table in the uniform factorable engine (adding `erf`, `log1p`, and the inverse hyperbolics); piecewise McCormick, alphaBB underestimators, and G-convexity / convex-transformable relaxations
 - **Certified global MINLP** -- Adaptive Multivariate Partitioning (`solver="amp"`) for nonconvex bilinear/trilinear/signomial/trig models, and a signomial global optimizer (`DISCOPT_SGO`) for mixed-sign signomial and integer-signomial problems
 - **Decomposition solvers** -- MIP-NLP family (`solver="mip-nlp"`: OA, ECP, FP, GOA, LP/NLP-BB), Benders and Generalized Benders (GBD), Lagrangian decomposition, and an automatic structure/decomposition advisor
 - **Derivative-free optimization** -- `solver="direct"` (sampling search over black-box `dm.custom` bodies) and `solver="surrogate"` (surrogate-model search); both are explicitly non-certifying, and a governed variant runs as a root heuristic
-- **Neural network & tree embedding** -- embed trained feedforward networks (ReLU, sigmoid, tanh, softplus) as MINLP constraints via big-M, full-space, and reduced-space formulations; decision trees and gradient-boosted ensembles via per-leaf MILP encoding; interval-arithmetic bound propagation; ONNX / scikit-learn / PyTorch readers. Trainable surrogates (`nn.trainable`, `nn.surrogate`) emit symbolic weights so a surrogate can be fit *simultaneously* with a physics model
+- **Neural network & tree embedding** -- embed trained feedforward networks (ReLU, sigmoid, tanh, softplus) as MINLP constraints via big-M, full-space, and reduced-space formulations; decision trees and gradient-boosted ensembles via per-leaf MILP encoding; interval-arithmetic bound propagation; ONNX / scikit-learn / PyTorch readers. Trainable surrogates (`ml.trainable`, `ml.surrogate`) emit symbolic weights so a surrogate can be fit *simultaneously* with a physics model
 - **Generalized disjunctive programming** -- `BooleanVar`, propositional logic operators (`land`, `lor`, `lnot`, `atleast`, `atmost`, `exactly`), `either_or()`, `if_then()`; reformulated via big-M, multiple big-M (LP-tightened), hull, or Logic-based Outer Approximation (`gdp_method="loa"`), with a disjunct-selection primal constructor on by default
 - **Complementarity / MPEC** -- `Model.complementarity(x, y)` (elementwise over vectors/arrays) reformulated via GDP disjunction (default), Scholtes regularization, or SOS1
 - **Bilevel programming** -- KKT and strong-duality reformulations of the follower problem, including certified/convex-NLP followers
@@ -41,13 +41,18 @@ Jacobian, and Hessian evaluation.
 - **Infeasibility diagnosis** -- irreducible infeasible subsystem (`compute_iis`) and conflict analysis / no-good cuts
 - **Differentiable optimization** -- parameter sensitivity via envelope theorem and KKT implicit differentiation, including differentiable MILP/MIQP (fix-and-differentiate)
 - **Model import & export** -- read AMPL `.nl` (Rust parser), GAMS `.gms`, and QPLIB native format; write `.nl`, `.lp`, `.mps`, and GAMS
+- **Named composites** -- `dm.register_function(name, lower)` names a composite the relaxer envelopes as ONE atom instead of term by term, so cancellations between terms survive into the bound; the model still carries the primitive lowering, so evaluation, `.nl` export and presolve are untouched
+- **Batch solving** -- `dm.solve_batch(models, workers=N)` runs many small independent global solves, optionally in parallel
+- **Embedded inner problems** -- `dm.argmin` places an inner NLP as a block of an outer model, with `dm.argmin_kkt` as its lowered (stationarity-constraint) arm
+- **Vector reductions** -- `xs.max()` / `xs.min()` reduce a shaped operand, alongside the element-wise `dm.maximum` / `dm.minimum`
+- **Model persistence with provenance** -- `Model.save("m.dopt")` / `discopt.load(...)` round-trip a model with a recorded schema id and FAIR provenance
 - **Pyomo solver plugin** -- use discopt from existing Pyomo models via `SolverFactory("discopt")` (`pip install discopt[pyomo]`); see [docs/pyomo_solver.md](docs/pyomo_solver.md)
 - **GAMS solver link** -- run discopt *as* a GAMS solver through the GMO/GEV API (`discopt gams-register`, `discopt gams-daemon`); see [docs/gams_solver_link.md](docs/gams_solver_link.md)
 - **Warm solve daemon** -- `discopt solve model.nl` routes through a persistent daemon that keeps the process warm across solves
 - **Dynamic optimization** -- DAE collocation (Radau/Legendre), finite differences, and method-of-lines for optimal control, parameter estimation, and PDE-constrained optimization, with multi-experiment trajectory fitting
 - **Benchmark interfaces** -- CUTEst (NLP test set), MINLPLib `.nl`, and QPLIB (453 quadratic instances, 390 nonconvex, with reference solution vectors)
 - **LLM integration** (optional) -- conversational model building, diagnostics, and reformulation suggestions
-- **Extensive test suite** -- 619 Rust + 7,100+ Python test functions
+- **Extensive test suite** -- 777 Rust + 9,100+ Python test functions
 
 ## Quick Start
 
@@ -66,7 +71,7 @@ m.subject_to(x**2 + y <= 3)
 result = m.solve()
 print(result.status)     # "optimal"
 print(result.objective)  # 0.5
-print(result.x)          # {"x": 0.5, "y": 0.5, "z": 0.0}
+print(result.x)          # {"x": array(0.5), "y": array(0.5), "z": array(0.)}
 ```
 
 ## Architecture
@@ -110,7 +115,8 @@ subsystems, which are off the default path.
 **Solver wrappers** (`python/discopt/solvers`): POUNCE (pure-Rust Ipopt port) for
 LP/QP/NLP, the in-house simplex LP/MILP backends, cyipopt for Ipopt, AMP, the MIP-NLP
 decomposition family, GDPopt-LOA, the DFO backends (`direct`, `surrogate`), and an
-optional Gurobi backend. highspy is used only on the OA/GDP paths.
+optional Gurobi backend. highspy is a core dependency: it backs the pure LP/MILP
+entry route (`lp_milp_highs.py`) and the OA/GDP paths.
 
 **Interfaces** (`python/discopt/interfaces`): PyCUTEst-based evaluator for NLP
 benchmarking against the CUTEst test set, and a native QPLIB reader.
@@ -125,7 +131,7 @@ infeasible nodes, fathom integer-feasible solutions, branch on the selected vari
 |--------------------------------|---------------------------------------|---------------------------------------------|
 | `pounce` (default)             | Pure-Rust Ipopt port                  | Universal default: LP/QP/MILP/MIQP/NLP/MINLP |
 | `ipopt` / `cyipopt`            | Ipopt via cyipopt                     | NLP node and continuous solves; most robust |
-| `simplex`                      | Pure-Rust warm-started simplex B&B    | MILP; the fully JAX-free MILP path          |
+| `simplex`                      | Pure-Rust warm-started simplex B&B    | MILP via the in-house Rust B&B              |
 | `ipm` / `sparse_ipm`           | Back-compat aliases                   | Simplex-first LP/MILP routing; resolve to POUNCE for NLP/MINLP |
 
 The pure-JAX interior-point method has been retired. `nlp_solver="ipm"` is kept as an
@@ -142,19 +148,21 @@ result = model.solve(nlp_solver="simplex")   # pure-Rust simplex MILP B&B
 ## Benchmarks
 
 The numbers below are the committed outputs of
-[`docs/notebooks/benchmarks_by_class.ipynb`](docs/notebooks/benchmarks_by_class.ipynb),
-re-executed on the current Rust AD tape backend (Python 3.12, CPU, median of 3 runs
-including setup). Absolute times are machine-dependent -- the notebook is the
-reproducible source. All solvers agree on the objective value.
+[`docs/notebooks/benchmarks_by_class.ipynb`](docs/notebooks/benchmarks_by_class.ipynb)
+(Python 3.12, CPU, median of 3 runs including setup). Absolute times are
+machine-dependent -- the notebook is the reproducible source, and these rows are
+copied from it rather than re-timed here. All solvers agree on the objective
+value. The NLP row's discopt arm is the notebook's `IPM` column, which is the
+default backend the alias now resolves to (POUNCE).
 
 | Problem Class | discopt | Comparison | Notes |
 |---------------|---------|------------|-------|
-| **LP** (n=100) | 0.234s | HiGHS 0.0015s, scipy 0.0019s | Algebraic extraction, no autodiff |
-| **QP** (n=100) | 0.417s | scipy SLSQP 0.023s | -- |
-| **MILP** (n=25, 8 int) | 0.019s | HiGHS MIP 0.0017s | B&B + LP relaxation, correct objectives |
-| **MIQP** (n=10) | 0.018s | forced NLP path 0.707s | QP-specialized path: ~40x speedup |
-| **NLP** (n=20, Rosenbrock) | POUNCE 0.120s | cyipopt 0.126s | Two implementations of the same IPM |
-| **MINLP** (n=10) | 0.026s (batch=1) | 0.026s (batch=16) | These trees close in 1-5 nodes, so batching has nothing to fill |
+| **LP** (n=100) | 0.2521s | HiGHS 0.0016s, scipy 0.0021s | Algebraic extraction, no autodiff |
+| **QP** (n=100) | 0.4434s | scipy SLSQP 0.0238s | -- |
+| **MILP** (n=25, 8 int) | 0.0208s | HiGHS MIP 0.0018s | B&B + LP relaxation, correct objectives |
+| **MIQP** (n=10) | 0.019s | forced NLP path 0.800s | QP-specialized path: 41.2x speedup |
+| **NLP** (n=20, Rosenbrock) | 0.1328s | cyipopt 0.1378s | Two implementations of the same IPM |
+| **MINLP** (n=10) | 0.027s (batch=1) | 0.029s (batch=16) | These trees close in 1-5 nodes, so batching has nothing to fill |
 
 HiGHS (C++ simplex) and scipy remain faster on the LP/MILP classes, as expected for
 mature production codes; discopt's value on these classes is that they are reachable
@@ -166,9 +174,12 @@ See the benchmark notebooks for full scaling plots and details:
 
 ## Installation
 
-Requires Rust 1.84+ and Python 3.10+. POUNCE -- the default numerical engine -- is a
-pure-Rust Ipopt port installed as a core dependency, with no system libraries needed.
-cyipopt is an optional fallback that needs the Ipopt C library.
+Requires Python 3.12+; building from source additionally needs Rust 1.84+.
+POUNCE -- the default numerical engine -- is a pure-Rust Ipopt port installed as a
+core dependency, with no system libraries needed. `highspy` (the pure LP/MILP entry
+route) and `jax`/`jaxlib` are also core dependencies; JAX is installed but is *not*
+imported by a default solve (see the NLP-evaluation note above). cyipopt is an
+optional fallback that needs the Ipopt C library.
 
 ```bash
 pip install discopt
@@ -194,6 +205,8 @@ remain available through the explicit Make targets.
 
 Optional extras: `ipopt`, `cutest`, `gams`, `llm`, `sdp`, `nn` (ONNX), `pyomo`,
 `ml` (scikit-learn), `xgboost`, `lightgbm`, `gnn`, `learned`, `sympy`, `dev`, `all`.
+`pounce` and `highs` also exist as no-op back-compat aliases -- both packages are
+core dependencies now, so neither extra installs anything extra.
 
 ### Solving nonconvex MINLPs with AMP
 
@@ -205,16 +218,22 @@ gives discopt a **certified-global** path for these problems:
 ```python
 import discopt.modeling as dm
 
-m = dm.Model("concave_qp")
-c = [-1.0, 0.5, 1.5]
-xs = [m.continuous(f"x{i}", lb=-2.0, ub=2.0) for i in range(3)]
-m.subject_to(sum(xs) >= -1.0)
-m.subject_to(sum(xs) <= 3.0)
-m.minimize(sum(-((xs[i] - c[i]) ** 2) for i in range(3)))  # concave
+m = dm.Model("bilinear")
+x = m.continuous("x", lb=1.0, ub=5.0)
+y = m.continuous("y", lb=1.0, ub=5.0)
+m.minimize(x * y - 2 * x - 3 * y)  # nonconvex: the bilinear term is indefinite
+m.subject_to(x + y <= 7.0)
+m.subject_to(x - y >= -3.0)
 
 result = m.solve(solver="amp", rel_gap=1e-4)
 print(result.status, result.objective, result.gap)
+# optimal -10.0 5.03e-05   (global minimum -10 at x=1, y=4)
 ```
+
+`status="optimal"` is the certificate: AMP closed the gap below `rel_gap`, so
+`-10.0` is proven global, not merely the best point found. When AMP cannot close
+the gap within `max_iter` it returns `status="feasible"` and a `result.gap` you
+can read -- an honest refusal to certify, never a false `optimal`.
 
 AMP iterates a piecewise-McCormick / convex-hull MILP relaxation against an
 NLP subproblem and refines the partition where the relaxation gap is
@@ -376,9 +395,11 @@ discopt-dev search-openalex "McCormick relaxation" --from-date 2026-01-01 --to-d
 echo "report content" | discopt-dev write-report reports/output.md
 ```
 
-All `discopt-dev` search subcommands output structured JSON. The `/discoptbot`
-literature-scanner slash command uses them to automatically find and summarize
-relevant new papers from arXiv and OpenAlex.
+All `discopt-dev` search subcommands output structured JSON. `discopt-dev
+lit-scan` drives them through a `/discoptbot` Claude Code slash command to find
+and summarize relevant new papers; that command and `/adversary` are dev-only and
+are deliberately never shipped by `discopt install-skills`, so `lit-scan` works
+only where a `.claude/commands/discoptbot.md` is present in the source tree.
 
 ## Documentation
 
@@ -396,17 +417,17 @@ Full documentation is built with Jupyter Book: `jupyter-book build docs/`
 
 ## Project Statistics
 
-*Last updated: 2026-08-14*
+*Last updated: 2026-09-19*
 
 | Category | Count |
 |----------|-------|
-| **Python source** (`python/discopt/`) | 333 files, ~170,200 lines |
-| **Rust source** (`crates/`) | 77 files, ~58,800 lines |
-| **Test code** (`python/tests/`) | 566 files, ~161,000 lines |
-| **Total source + tests** | ~976 files, ~390,000 lines |
-| **Python tests** | 7,100+ |
-| **Rust tests** | 619 |
-| **Tutorial notebooks** (`docs/notebooks/`) | 63 |
+| **Python source** (`python/discopt/`) | 350 files, ~204,000 lines |
+| **Rust source** (`crates/`) | 93 files, ~74,600 lines |
+| **Test code** (`python/tests/`) | 753 files, ~210,800 lines |
+| **Total source + tests** | ~1,196 files, ~489,400 lines |
+| **Python tests** | 9,100+ |
+| **Rust tests** | 777 |
+| **Tutorial notebooks** (`docs/notebooks/`) | 66 |
 
 ## Development History
 

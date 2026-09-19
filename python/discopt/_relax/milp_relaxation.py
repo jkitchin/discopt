@@ -290,6 +290,11 @@ class MilpRelaxationResult:
     # (equilibrated/generic/MILP-B&B), where DBBT simply no-ops (still sound).
     row_dual: Optional[np.ndarray] = None
     reduced_costs: Optional[np.ndarray] = None
+    # #1351 defect 2: atoms the partition-refinement pass that built this
+    # relaxation could act on. ``0`` means that pass was structurally inert, so a
+    # finer partition yields a bit-identical relaxation; ``None`` means no
+    # partitions were supplied (criterion not applicable).
+    partition_refinable_atoms: Optional[int] = None
 
 
 def _lp_warm_deadline_enabled() -> bool:
@@ -607,6 +612,9 @@ class MilpRelaxationModel:
         # Rigorous box-interval objective floor (#640 Bucket 2, nvs22); set by
         # ``build_uniform_relaxation``. ``None`` unless a finite floor was computed.
         self._objective_floor: Optional[float] = None
+        # #1351 defect 2: atoms the last partition-refinement pass could act on.
+        # ``0`` => that pass was structurally inert. ``None`` => no partitions.
+        self._partition_refinable_atoms: Optional[int] = None
         # Issue #694 anytime-build provenance, set by ``build_uniform_relaxation``.
         # ``_build_truncated`` is True when the constraint-row loop stopped early on
         # a ``build_deadline`` (the relaxation is still a valid, weaker outer

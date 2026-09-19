@@ -4,9 +4,12 @@ resolver = "2"
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.75"
+# Measured floor, not aspirational: 1.75 and 1.80 fail on `rayon 1.12` (needs 1.80)
+# and on `&raw` (stabilized 1.82); 1.82/1.83 fail inside `pulp`. 1.84 is the first
+# toolchain that builds `cargo check --workspace` clean, and matches the README.
+rust-version = "1.84"
 license = "EPL-2.0"
-repository = "https://github.com/discopt-org/discopt"
+repository = "https://github.com/jkitchin/discopt"
 
 [workspace.dependencies]
 # abi3-py312 builds against CPython's stable ABI, so ONE wheel per platform
