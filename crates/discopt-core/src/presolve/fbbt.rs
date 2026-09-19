@@ -577,7 +577,7 @@ fn sum_reduce_counts(arena: &ExprArena) -> Vec<Option<usize>> {
     // not need it.
     let shapes = crate::expand::shapes_of(arena).ok();
 
-    for i in 0..n {
+    for (i, slot) in out.iter_mut().enumerate() {
         let ExprNode::Sum { operand, axis } = arena.get(ExprId(i)) else {
             continue;
         };
@@ -594,7 +594,7 @@ fn sum_reduce_counts(arena: &ExprArena) -> Vec<Option<usize>> {
                 Some(ax) => shape.get(*ax).copied(),
             }
         });
-        out[i] = from_shapes.or_else(|| single_element_fold(arena, *operand));
+        *slot = from_shapes.or_else(|| single_element_fold(arena, *operand));
     }
     out
 }
