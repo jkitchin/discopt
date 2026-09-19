@@ -395,6 +395,11 @@ counters!(
     // one is a certificate #1017 removed — the whole cost side of that change, and the
     // only way to see it in a corpus run without an A/B rebuild.
     FarkasRejectCancellation,
+    // #1355: a ray `farkas_ray_certifies_cols` rejected as computed, then certified
+    // after its rounding-noise entries (`|y_i| ≤ 1e-12·‖y‖∞`) were zeroed and it was
+    // re-verified (`DISCOPT_FARKAS_RAY_CLEANUP`). Each one is a node the flag fathoms
+    // that the raw ray could not.
+    FarkasCleanupRescue,
     // #1008: the same treatment for the PRIMAL unbounded ray, which had none. An
     // `Infeasible` verdict must clear `farkas_ray_certifies_cols`; an `Unbounded`
     // verdict was taken on faith from "the ratio test found no blocking row",
