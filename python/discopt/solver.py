@@ -13097,6 +13097,22 @@ def solve_model(
             _mc_obj_eval = None
             _mc_obj_relax_fn = None
 
+    # `partitions=k` is only read by the alphaBB/NLP relaxation compiler above
+    # (`_mc_mode == "nlp"`). On the default LP route -- which is where any model
+    # with a relaxable nonlinearity goes -- and on the no-relaxation route it is
+    # not consulted at all, so the caller's request has no effect on the bound.
+    # Say so (#1362): a documented option that silently does nothing is how
+    # docs/notebooks/advanced_features.ipynb came to compare `partitions=0`
+    # against `partitions=4` and report the same 5 nodes under prose promising
+    # "fewer Branch & Bound nodes".
+    if partitions and _mc_mode != "nlp":
+        warnings.warn(
+            f"partitions={partitions} was ignored: piecewise McCormick is applied by the "
+            f"alphaBB/NLP relaxation compiler, and this model took the "
+            f"{_mc_mode!r} relaxation route. The bound is the standard McCormick one.",
+            stacklevel=2,
+        )
+
     # --- Warm-start: inject user-provided initial solution as incumbent ---
     if initial_point is not None:
         # #1255: the point was flattened against the variables the USER declared;
