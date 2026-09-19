@@ -1,8 +1,14 @@
 # Convex LP-OA Branch-and-Cut Kernel — implementation plan (issue #798)
 
-**Status:** K1 in progress. This doc is the durable, loop-executable spec for the
-SCIP/BARON-parity convex kernel. It survives context loss — each work iteration
-reads this, advances the current phase, and records results here.
+**Status: GRADUATED (2026-09-19, #1346).** `DISCOPT_CONVEX_KERNEL` is **default-ON**
+with the `=0` opt-out kept per CLAUDE.md §5; T7's Regime-2 panel passed both bars. #807
+(native-warm-LP / SCIP wall parity) is **no longer a graduation gate** — it remains open
+as a performance issue. The "K1 in progress" that stood here was stale by two months.
+
+This doc is the durable, loop-executable spec for the SCIP/BARON-parity convex kernel. It
+survives context loss — each work iteration reads this, advances the current phase, and
+records results here. **Read the 2026-09-19 work-log entry before re-opening any task
+below**: two of its findings are about the panel method rather than about this kernel.
 
 Standing calibration (issue #798): *if SCIP/BARON solve an instance in seconds,
 discopt must too; when in doubt, do what SCIP/BARON do.* The architecture mirrors
@@ -360,6 +366,11 @@ net-positive). No task may weaken a validation, fallback, or soundness guard to 
   cert-clean) AND config-A panel wall ≤ ~2× SCIP; numbers recorded.
 
 ### T7 — Graduation: Regime-2 corpus panel → `DISCOPT_CONVEX_KERNEL` default-ON.
+**DONE — GRADUATED 2026-09-19 (#1346).** Both §5 bars passed; the flag is default-ON
+with the `=0` opt-out kept. `#807` is no longer a graduation gate — it stays open as a
+performance issue. Numbers and the two findings are in the work-log entry below; read
+that entry before re-opening this task, because one of them is about the panel method
+rather than about this kernel.
 - **Goal.** Graduate the flag toward default-ON via the CLAUDE.md §5 Regime-2 gate
   (flag ON vs OFF over the in-repo corpus): cert-clean AND net-positive.
 - **Hypothesis + evidence.** #798 proved net-positive on the smaller family (kernel
@@ -381,6 +392,67 @@ net-positive). No task may weaken a validation, fallback, or soundness guard to 
   the flag stays OFF with the measurement recorded and #800 closes on the scoped win.
 
 ## Work log (append newest first)
+
+- **2026-09-19 (#1346): GRADUATED default-ON — and two findings that outlive it.**
+  - **Verdict.** §5 Regime-2 panel
+    (`discopt_benchmarks/scripts/issue1346_convex_kernel_graduation_panel.py`), in-repo
+    66-instance corpus, `time_limit=60`, `deterministic=True`, arms interleaved *within*
+    each instance with the order alternated by index, idle machine (load 1.2), 132 solves.
+    **Gate 1 cert-clean PASS** — 0 unsound bounds on either arm, 0 certification
+    regressions, 0 objective drift over the 48 instances where both arms certified, 0
+    errors. **Gate 2 net-positive PASS**::
+
+        clay0303hfsg   off  feasible/UNCERTIFIED 29911.20 (12.2% above opt)  3 nodes  90.2 s
+                       on   optimal/CERTIFIED    26669.1096  bound 26669.036 149 nodes 21.2 s
+        syn05hfsg      off  optimal  277 nodes  23.8 s  ->  on  optimal  2 nodes  0.01 s
+        cvxnonsep_psig40r  off  optimal 8.17 s  ->  on  optimal 8.12 s  (unchanged)
+
+    Node counts carry this, not wall: 277 → 2 is structural, and both outcomes reproduced
+    across four independent runs. **Honest scope**: only **3 of 66** in-repo instances are
+    kernel-eligible, so corpus wall barely moves (2778.6 s → 2675.0 s) and "broadly
+    helpful" means *on the routed class, inert elsewhere* — 62 of the 63 ineligible
+    instances are identical down to the node count, and the 63rd (`tanksize`) differs by
+    0.3% between two `time_limit` runs, which is wall jitter, not the flag. The
+    out-of-repo `rsyn*`/`syn*` family (136 candidates) is where the case is larger and is
+    exactly what could not be run here.
+  - **Why it was parked for two months, since the history misleads.** Not a failed panel.
+    #798 proved both bars and the Regime-2 panel came back cert-clean; #800's close-out
+    deferred graduation to #807 (native-warm-LP **SCIP wall parity**, ~2 s vs 7–80 s) — a
+    bar strictly above what §5 asks, since §5 scores ON against OFF, not against SCIP.
+    That is the "indefinitely parked" state #1345's retirement clause exists to end.
+  - **FINDING 1 — a passing corpus panel bounds what was looked at, not what was
+    affected.** A pure LP or MILP satisfies every clause of the convexity gate trivially
+    (linear objective, zero nonlinear rows), so the gate claimed all of them. Invisible
+    while the flag was opt-in; a routing hijack the moment it graduated, because
+    `Model.solve()` consults the kernel *before* the HiGHS LP/MILP route
+    (`lp-milp-highs-routing-plan.md`) and the Rust MILP engine. **17 smoke tests failed,
+    nearly all MILP or HiGHS-route tests** — and the §5 panel had passed both bars on the
+    same build. It could not have caught it: all 66 in-repo instances are MINLP `.nl`
+    files, so the corpus contains no pure LP or MILP. Fixed by refusing a model with no
+    nonlinear row; a post-fix eligibility sweep confirms 3/66 eligible (unchanged) and
+    **zero** instances refused for that reason, which is the same fact from the other
+    side. Treat this as binding on future graduations: name the affected class and check
+    it, separately from the corpus.
+  - **FINDING 2 — FALSIFIED: the `watercontamination0202` counter-case does not reach
+    this kernel.** `sota-parity-analysis-2026-07-27.md` G-C records it classifying convex
+    and then running 2001 s with no bound, and a two-stage root-bound probe guard was
+    built and shipped in the first #1346 commit on that basis. Run against the real
+    106,711-variable instance (supplied by the owner), it is refused in **3.8 s** by this
+    gate's *pre-existing* `nonlinear objective` clause — its `.nl` declares `0 1` for
+    (nonlinear constraints, nonlinear objectives). G-C's "convex/MIQP route" is the
+    **problem classifier's** route, not this kernel; the two were conflated. The guard was
+    therefore defending against a threat it cannot reach: measured, it cost **+2.6 s** on
+    `clay0303hfsg` (21.2 → 23.8 s) and bought nothing anywhere — the one real instance
+    whose probe returned no bound (`cvxnonsep_psig40r`, probe bound `-inf`) was already
+    bailing fast without it, 8.12 s vs 8.13 s. Sound-but-unhelpful is the
+    `DISCOPT_CUT_INHERIT` outcome, so the guard and its switch were **deleted rather than
+    kept as insurance** (§4: no fix ships on a hypothesis).
+    `test_the_water_counter_case_is_refused_by_the_objective_clause` pins it so the guard
+    is not rebuilt on the same misreading.
+  - **Pinned script + artifacts.** Panel script above; results
+    `panelA_guardoff.json` (the gate), `panelC_shipping.json` (re-run against exactly the
+    shipping build — a panel that scored a different build is not evidence for this one,
+    §8).
 
 - **2026-07-20 (#800 CLOSE-OUT, owner-approved): scoped win; SCIP-parity re-scoped
   to #807.** After three entry-experiment kills (T1/T2/T3 below), the owner elected

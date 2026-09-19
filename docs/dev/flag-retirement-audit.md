@@ -45,7 +45,7 @@ steady state.
 |---|---|---|---|
 | ~~`DISCOPT_LP_SPATIAL_MIXED`~~ | *"it ran its graduation panel and did NOT graduate, on **both**"*; *"Sound but harmful stays OFF, with the measurement recorded"* | panel ran, failed | **RETIRED (#1357).** Flag and both production call sites removed; the `mixed=` capability and its tests kept, with the killing measurement moved onto `_is_in_scope` so it survives the flag. |
 | ~~`DISCOPT_POUNCE_DECLARED_BOX`~~ | *"Default-OFF pending the §5 graduation gate"*; #1327's panel: gate 1 cert-clean **PASS**, gate 2 net-positive **INCONCLUSIVE** (only 2 of 66 instances are in the affected window) | panel ran, inconclusive by construction | **RETIRED (#1358).** Flag removed; the **scoped** `declared_box_honored()` override kept — it is what #1327's retry uses, and moving the threshold for one call is a different mechanism from moving it for the process. Panel result preserved on `finite_bound_threshold`. |
-| `DISCOPT_CONVEX_KERNEL` | default-OFF, never default-ON; 3,105 lines of Rust behind it | panel owed | **Decide via #1346** (already split out): graduate or delete. |
+| ~~`DISCOPT_CONVEX_KERNEL`~~ | default-OFF, never default-ON; 3,105 lines of Rust behind it | panel run, **passed both bars** | **GRADUATED (#1346).** Default-ON, `=0` opt-out kept per §5. The park was never a failed panel: #798 proved both bars and #800 deferred graduation to #807's *SCIP wall parity*, a bar above what §5 asks. Graduation also had to fix a latent routing defect — the gate claimed every pure LP/MILP — which the corpus panel could not see. |
 | `DISCOPT_NLP_NATIVE` | *"Default stays OFF on the remaining grounds — the speedup …"* | measured, reasoned | **Keep as documented opt-out** — it already states why it is not the default. Confirm the docstring also says what would change that. |
 | `DISCOPT_CMIR_AGGREGATION` | *"ships dark behind this flag until proven on nightlies"* | panel owed, never run | **Run the panel or retire.** |
 | `DISCOPT_COEF_TIGHTEN` | *"default-OFF until a corpus-wide differential panel graduates it"* (#282) | panel owed, never run | **Run the panel or retire.** |
@@ -63,8 +63,23 @@ steady state.
 It does **not** delete anything. Per #1345 the deletions are follow-on PRs; this lands the
 rule and the verdicts. `DISCOPT_LP_SPATIAL_MIXED` (#1357) and `DISCOPT_POUNCE_DECLARED_BOX` (#1358) have since
 been **retired** — the rule's first two applications, and the proof it terminates.
-`DISCOPT_CONVEX_KERNEL` → #1346 remains. No verdict above is left as "recorded and
-forgotten", which is the state #1345 exists to end.
+`DISCOPT_CONVEX_KERNEL` has since **graduated** (#1346) — the rule's first
+graduation, after two retirements, and the evidence that it is a real three-outcome rule
+rather than a deletion pipeline. No verdict above is left as "recorded and forgotten",
+which is the state #1345 exists to end.
+
+**What #1346 adds to the rule, and it is not about this flag.** Its §5 panel passed both
+bars over the full in-repo corpus *while the change it was scoring hijacked the entire
+LP/MILP route* — a pure LP or MILP satisfies every clause of the convexity gate trivially,
+and `Model.solve()` consults the kernel before the HiGHS route. The corpus could not show
+it: all 66 in-repo instances are MINLP `.nl` files, so not one is a pure LP or MILP. The
+smoke suite caught it, 17 failures. A second finding the same day: the counter-case that
+motivated a guard shipped alongside the graduation (`watercontamination0202`, recorded in
+the parity analysis at 2001 s with no bound) turned out, when run, to be refused by the
+gate's own pre-existing `nonlinear objective` clause — the guard was defending against a
+route it could not reach, so it was deleted rather than shipped. **A passing corpus panel
+bounds what was looked at, not what was affected**; a graduation owes the affected-class
+question separately, and the flag's own docstring owes the counter-case an actual run.
 
 **What retirement kept, and why it is not deletion-by-name.** #1357 removed the env flag
 and both production call sites, so the default path uses the pre-#860 gate. It did *not*
