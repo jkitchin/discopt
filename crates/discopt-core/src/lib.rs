@@ -5,7 +5,6 @@
 
 #![deny(missing_docs)]
 
-pub mod amp;
 pub mod bnb;
 pub mod decomp;
 pub mod expand;
@@ -15,6 +14,7 @@ pub mod nl_parser;
 pub mod nl_writer;
 pub mod presolve;
 pub mod profile;
+pub mod term_classifier;
 
 /// Returns the version string.
 pub fn version() -> &'static str {
