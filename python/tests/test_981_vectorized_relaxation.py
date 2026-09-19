@@ -26,6 +26,7 @@ from discopt._relax.canonical_expr import canonicalize
 from discopt._relax.dag_compiler import compile_expression
 from discopt._relax.scalarize import scalar_elements, static_shape
 from discopt._relax.term_classifier import classify_nonlinear_terms
+from discopt.modeling.core import CustomCall
 
 
 def _dae_parameter_estimation(nfe: int = 5, ncp: int = 3, ub: float = 0.6) -> tuple[Model, object]:
@@ -122,10 +123,22 @@ def test_unscalarizable_expression_reports_unknown_not_empty():
     axis_reduction = dm.sum(X, axis=0)
     assert static_shape(axis_reduction) == (3,)
 
-    # The contract this test exists for is unchanged: the rewrite still cannot
-    # EXPAND an axis reduction (``_elem`` has no ``SumExpression`` case), so
-    # callers keep their previous behaviour rather than losing rows.
-    assert scalar_elements(axis_reduction) is None
+    # Since #1364 the rewrite CAN expand an axis reduction, and does so per
+    # surviving element -- three column sums of two terms each here, never one
+    # sum of six (that collapse is #1160). Leaving it unexpanded cost the whole
+    # LP relaxation of every `discopt.ml` layer, so this is the wanted answer.
+    expanded = scalar_elements(axis_reduction)
+    assert expanded is not None and len(expanded) == 3, expanded
+    assert all(len(e.terms) == 2 for e in expanded), expanded
+
+    # The contract this test exists for is unchanged, and still needs a node the
+    # rewrite genuinely cannot expand. A `CustomCall` is the documented opaque
+    # one: it must report `None` ("caller keeps its previous behaviour"), never
+    # `[]` ("this constraint has no rows"), which would drop rows from the
+    # relaxation with no record.
+    opaque = CustomCall(lambda a: a * 2, X, name="opaque")
+    assert static_shape(opaque) is None
+    assert scalar_elements(opaque) is None
 
 
 # --------------------------------------------------------------------------- #

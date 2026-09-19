@@ -552,25 +552,6 @@ pub fn forward_propagate(arena: &ExprArena, id: ExprId, var_bounds: &[Interval])
     scratch.bounds
 }
 
-/// Whether `id` provably stands for exactly one scalar element.
-///
-/// Conservative by construction: anything not obviously scalar answers `false`.
-/// Used only to decide whether a reduction may pass a tightening down to its
-/// operand (#1364), where a wrong `false` costs a tightening and a wrong `true`
-/// would be unsound. Full shape inference lives in `expand::shapes_of`; this is
-/// not a second copy of it, only the one-element question.
-fn is_single_element(arena: &ExprArena, id: ExprId) -> bool {
-    match arena.get(id) {
-        ExprNode::Constant(_) => true,
-        ExprNode::ConstantArray(data, _) => data.len() == 1,
-        ExprNode::Variable { size, .. } => *size == 1,
-        ExprNode::Parameter { shape, .. } => shape.iter().product::<usize>() == 1,
-        // A full reduction is scalar whatever it reduced.
-        ExprNode::Sum { axis: None, .. } => true,
-        ExprNode::SumOver { .. } => true,
-        _ => false,
-    }
-}
 /// How many elements each `Sum` node folds, or `None` where it cannot be said.
 ///
 /// `eval_node_interval` carries ONE scalar `Interval` per node, holding the hull
@@ -584,22 +565,95 @@ fn is_single_element(arena: &ExprArena, id: ExprId) -> bool {
 fn sum_reduce_counts(arena: &ExprArena) -> Vec<Option<usize>> {
     let n = arena.len();
     let mut out = vec![None; n];
-    let shapes = match crate::expand::shapes_of(arena) {
-        Ok(s) => s,
-        Err(_) => return out,
-    };
+
+    // `shapes_of` is all-or-nothing: one node it cannot shape fails the whole
+    // arena. That happens on ordinary models -- the PyO3 converter collapses a
+    // 1x1 constant array to a scalar `Constant`, so `sum(C * x, axis=1)` reaches
+    // here with an operand of rank 1 and the axis out of range -- and letting it
+    // disable the rule for every reduction in the arena cost the `discopt.ml`
+    // full-space models their certificate (measured: a pinned 1-1-1 sigmoid net
+    // went from `optimal` to `feasible`, 55 nodes). So the shape table is an
+    // optimization, and `single_element_fold` below is the fallback that does
+    // not need it.
+    let shapes = crate::expand::shapes_of(arena).ok();
+
     for i in 0..n {
-        if let ExprNode::Sum { operand, axis } = arena.get(ExprId(i)) {
-            let shape = &shapes[operand.0];
-            out[i] = match axis {
+        let ExprNode::Sum { operand, axis } = arena.get(ExprId(i)) else {
+            continue;
+        };
+        let from_shapes = shapes.as_ref().and_then(|sh| {
+            let shape = &sh[operand.0];
+            match axis {
                 // Full reduction: every element folds into one scalar.
                 None => Some(shape.iter().product::<usize>().max(1)),
                 // Axis reduction: each output element folds that axis's length.
+                // An out-of-range axis means this arena lost a length-1
+                // dimension; `single_element_fold` answers that case exactly, and
+                // guessing a count here would not be sound (over-counting
+                // RAISES the lower bound of `[n*lo, n*hi]` when `lo > 0`).
                 Some(ax) => shape.get(*ax).copied(),
-            };
-        }
+            }
+        });
+        out[i] = from_shapes.or_else(|| single_element_fold(arena, *operand));
     }
     out
+}
+
+/// `Some(1)` when `id` provably stands for exactly one scalar element.
+///
+/// A structural walk that needs no shape table: a constant, a size-1 variable or
+/// parameter, a full reduction, and any element-wise combination of those are
+/// single elements, because broadcasting single elements yields a single element.
+/// Anything else answers `None` -- the caller then abstains, which is sound.
+/// A wrong `Some(1)` would not be, so every arm here is a case where the node
+/// cannot stand for more than one value.
+fn single_element_fold(arena: &ExprArena, id: ExprId) -> Option<usize> {
+    let single = match arena.get(id) {
+        ExprNode::Constant(_) => true,
+        ExprNode::ConstantArray(data, _) => data.len() == 1,
+        ExprNode::Variable { size, .. } => *size == 1,
+        ExprNode::Parameter { shape, .. } => shape.iter().product::<usize>() == 1,
+        // A full reduction is one scalar whatever it reduced.
+        ExprNode::Sum { axis: None, .. } => true,
+        ExprNode::SumOver { terms } => terms
+            .iter()
+            .all(|t| single_element_fold(arena, *t).is_some()),
+        ExprNode::BinaryOp { left, right, .. } => {
+            single_element_fold(arena, *left).is_some()
+                && single_element_fold(arena, *right).is_some()
+        }
+        ExprNode::UnaryOp { operand, .. } => single_element_fold(arena, *operand).is_some(),
+        ExprNode::FunctionCall { args, .. } => args
+            .iter()
+            .all(|a| single_element_fold(arena, *a).is_some()),
+        _ => false,
+    };
+    single.then_some(1)
+}
+
+/// Sound preimage for one element of a reduction whose sum lies in `sum_bound`.
+///
+/// Every element of the operand lies in its hull `[lo, hi]`, so
+/// `e_i = S - sum_{j != i} e_j` lies in `[L - (n-1)*hi, U - (n-1)*lo]`. `None`
+/// means "cannot say" -- an unknown fold count, or an arithmetic that went
+/// non-finite -- and the caller then declines to tighten, which is always sound.
+fn sum_backward_preimage(
+    sum_bound: Interval,
+    hull: Interval,
+    n: Option<usize>,
+) -> Option<Interval> {
+    let k = n?;
+    if k <= 1 {
+        // A one-element fold IS the element: the sum's interval transfers exactly.
+        return Some(sum_bound);
+    }
+    let km1 = (k - 1) as f64;
+    let lo = sum_bound.lo - km1 * hull.hi;
+    let hi = sum_bound.hi - km1 * hull.lo;
+    if lo.is_nan() || hi.is_nan() || lo > hi {
+        return None;
+    }
+    Some(Interval::new(lo, hi))
 }
 
 /// Sound enclosure of a reduction that folds `n` elements, each enclosed by `a`.
@@ -884,6 +938,25 @@ pub fn backward_propagate(
     node_bounds: &[Interval],
     var_bounds: &mut [Interval],
 ) {
+    // The `Sum` inversion needs each reduction's fold count (#1364). Compute the
+    // table ONCE per walk here rather than inside the recursion, and only when the
+    // arena actually contains a reduction -- most constraint bodies do not.
+    let counts = if (0..arena.len()).any(|i| matches!(arena.get(ExprId(i)), ExprNode::Sum { .. })) {
+        sum_reduce_counts(arena)
+    } else {
+        Vec::new()
+    };
+    backward_propagate_with(arena, id, output_bound, node_bounds, var_bounds, &counts);
+}
+
+fn backward_propagate_with(
+    arena: &ExprArena,
+    id: ExprId,
+    output_bound: Interval,
+    node_bounds: &[Interval],
+    var_bounds: &mut [Interval],
+    reduce_counts: &[Option<usize>],
+) {
     // Intersect the output bound with the forward-propagated bound.
     //
     // Formal inversion is the right test here (#907): bailing out declines to
@@ -912,8 +985,22 @@ pub fn backward_propagate(
                     // b in [lo - a_hi, hi - a_lo]
                     let new_l = Interval::new(tightened.lo - r.hi, tightened.hi - r.lo);
                     let new_r = Interval::new(tightened.lo - l.hi, tightened.hi - l.lo);
-                    backward_propagate(arena, *left, new_l, node_bounds, var_bounds);
-                    backward_propagate(arena, *right, new_r, node_bounds, var_bounds);
+                    backward_propagate_with(
+                        arena,
+                        *left,
+                        new_l,
+                        node_bounds,
+                        var_bounds,
+                        reduce_counts,
+                    );
+                    backward_propagate_with(
+                        arena,
+                        *right,
+                        new_r,
+                        node_bounds,
+                        var_bounds,
+                        reduce_counts,
+                    );
                 }
                 BinOp::Sub => {
                     // a - b in [lo, hi]
@@ -921,30 +1008,72 @@ pub fn backward_propagate(
                     // b in [a_lo - hi, a_hi - lo]
                     let new_l = Interval::new(tightened.lo + r.lo, tightened.hi + r.hi);
                     let new_r = Interval::new(l.lo - tightened.hi, l.hi - tightened.lo);
-                    backward_propagate(arena, *left, new_l, node_bounds, var_bounds);
-                    backward_propagate(arena, *right, new_r, node_bounds, var_bounds);
+                    backward_propagate_with(
+                        arena,
+                        *left,
+                        new_l,
+                        node_bounds,
+                        var_bounds,
+                        reduce_counts,
+                    );
+                    backward_propagate_with(
+                        arena,
+                        *right,
+                        new_r,
+                        node_bounds,
+                        var_bounds,
+                        reduce_counts,
+                    );
                 }
                 BinOp::Mul => {
                     // a * b in [lo, hi]
                     // a in [lo, hi] / b (if b doesn't contain 0)
                     if r.lo > 0.0 || r.hi < 0.0 {
                         let new_l = interval_div(&tightened, &r);
-                        backward_propagate(arena, *left, new_l, node_bounds, var_bounds);
+                        backward_propagate_with(
+                            arena,
+                            *left,
+                            new_l,
+                            node_bounds,
+                            var_bounds,
+                            reduce_counts,
+                        );
                     }
                     if l.lo > 0.0 || l.hi < 0.0 {
                         let new_r = interval_div(&tightened, &l);
-                        backward_propagate(arena, *right, new_r, node_bounds, var_bounds);
+                        backward_propagate_with(
+                            arena,
+                            *right,
+                            new_r,
+                            node_bounds,
+                            var_bounds,
+                            reduce_counts,
+                        );
                     }
                 }
                 BinOp::Div => {
                     // a / b in [lo, hi]
                     // a in [lo, hi] * b
                     let new_l = interval_mul(&tightened, &r);
-                    backward_propagate(arena, *left, new_l, node_bounds, var_bounds);
+                    backward_propagate_with(
+                        arena,
+                        *left,
+                        new_l,
+                        node_bounds,
+                        var_bounds,
+                        reduce_counts,
+                    );
                     // b in a / [lo, hi] (if [lo,hi] doesn't contain 0)
                     if tightened.lo > 0.0 || tightened.hi < 0.0 {
                         let new_r = interval_div(&l, &tightened);
-                        backward_propagate(arena, *right, new_r, node_bounds, var_bounds);
+                        backward_propagate_with(
+                            arena,
+                            *right,
+                            new_r,
+                            node_bounds,
+                            var_bounds,
+                            reduce_counts,
+                        );
                     }
                 }
                 BinOp::Pow => {
@@ -967,7 +1096,14 @@ pub fn backward_propagate(
                                     -((-tightened.hi).powf(inv))
                                 };
                                 let new_base = Interval::new(new_lo, new_hi);
-                                backward_propagate(arena, *left, new_base, node_bounds, var_bounds);
+                                backward_propagate_with(
+                                    arena,
+                                    *left,
+                                    new_base,
+                                    node_bounds,
+                                    var_bounds,
+                                    reduce_counts,
+                                );
                             } else {
                                 // Even power: u^n in [lo, hi] with u^n >= 0 always.
                                 // |u| in [root_lo, root_hi] where
@@ -998,7 +1134,14 @@ pub fn backward_propagate(
                                     // soundly relax to the hull [-root_hi, root_hi].
                                     Interval::new(-root_hi, root_hi)
                                 };
-                                backward_propagate(arena, *left, new_base, node_bounds, var_bounds);
+                                backward_propagate_with(
+                                    arena,
+                                    *left,
+                                    new_base,
+                                    node_bounds,
+                                    var_bounds,
+                                    reduce_counts,
+                                );
                             }
                         }
                     }
@@ -1010,13 +1153,27 @@ pub fn backward_propagate(
                 UnOp::Neg => {
                     // -a in [lo, hi] => a in [-hi, -lo]
                     let new = interval_neg(&tightened);
-                    backward_propagate(arena, *operand, new, node_bounds, var_bounds);
+                    backward_propagate_with(
+                        arena,
+                        *operand,
+                        new,
+                        node_bounds,
+                        var_bounds,
+                        reduce_counts,
+                    );
                 }
                 UnOp::Abs => {
                     // |a| in [lo, hi] => a in [-hi, -lo] union [lo, hi]
                     // Conservative: a in [-hi, hi]
                     let new = Interval::new(-tightened.hi, tightened.hi);
-                    backward_propagate(arena, *operand, new, node_bounds, var_bounds);
+                    backward_propagate_with(
+                        arena,
+                        *operand,
+                        new,
+                        node_bounds,
+                        var_bounds,
+                        reduce_counts,
+                    );
                 }
             }
         }
@@ -1038,43 +1195,99 @@ pub fn backward_propagate(
                         f64::NEG_INFINITY
                     };
                     let new = Interval::new(new_lo, new_hi);
-                    backward_propagate(arena, args[0], new, node_bounds, var_bounds);
+                    backward_propagate_with(
+                        arena,
+                        args[0],
+                        new,
+                        node_bounds,
+                        var_bounds,
+                        reduce_counts,
+                    );
                 }
                 MathFunc::Log => {
                     // log(a) in [lo, hi] => a in [exp(lo), exp(hi)]
                     let new = Interval::new(tightened.lo.exp(), tightened.hi.exp());
-                    backward_propagate(arena, args[0], new, node_bounds, var_bounds);
+                    backward_propagate_with(
+                        arena,
+                        args[0],
+                        new,
+                        node_bounds,
+                        var_bounds,
+                        reduce_counts,
+                    );
                 }
                 MathFunc::Sqrt => {
                     // sqrt(a) in [lo, hi] => a in [lo^2, hi^2] (lo >= 0)
                     let lo = tightened.lo.max(0.0);
                     let new = Interval::new(lo * lo, tightened.hi * tightened.hi);
-                    backward_propagate(arena, args[0], new, node_bounds, var_bounds);
+                    backward_propagate_with(
+                        arena,
+                        args[0],
+                        new,
+                        node_bounds,
+                        var_bounds,
+                        reduce_counts,
+                    );
                 }
                 MathFunc::Log2 => {
                     // log2(a) in [lo, hi] => a in [2^lo, 2^hi]
                     let new = Interval::new(tightened.lo.exp2(), tightened.hi.exp2());
-                    backward_propagate(arena, args[0], new, node_bounds, var_bounds);
+                    backward_propagate_with(
+                        arena,
+                        args[0],
+                        new,
+                        node_bounds,
+                        var_bounds,
+                        reduce_counts,
+                    );
                 }
                 MathFunc::Log10 => {
                     // log10(a) in [lo, hi] => a in [10^lo, 10^hi]
                     let new = Interval::new(10f64.powf(tightened.lo), 10f64.powf(tightened.hi));
-                    backward_propagate(arena, args[0], new, node_bounds, var_bounds);
+                    backward_propagate_with(
+                        arena,
+                        args[0],
+                        new,
+                        node_bounds,
+                        var_bounds,
+                        reduce_counts,
+                    );
                 }
                 MathFunc::Log1p => {
                     // log1p(a)=ln(1+a) in [lo, hi] => a in [e^lo - 1, e^hi - 1]
                     let new = Interval::new(tightened.lo.exp_m1(), tightened.hi.exp_m1());
-                    backward_propagate(arena, args[0], new, node_bounds, var_bounds);
+                    backward_propagate_with(
+                        arena,
+                        args[0],
+                        new,
+                        node_bounds,
+                        var_bounds,
+                        reduce_counts,
+                    );
                 }
                 MathFunc::Sinh => {
                     // sinh increasing, inverse asinh.
                     let new = Interval::new(tightened.lo.asinh(), tightened.hi.asinh());
-                    backward_propagate(arena, args[0], new, node_bounds, var_bounds);
+                    backward_propagate_with(
+                        arena,
+                        args[0],
+                        new,
+                        node_bounds,
+                        var_bounds,
+                        reduce_counts,
+                    );
                 }
                 MathFunc::Asinh => {
                     // asinh increasing, inverse sinh.
                     let new = Interval::new(tightened.lo.sinh(), tightened.hi.sinh());
-                    backward_propagate(arena, args[0], new, node_bounds, var_bounds);
+                    backward_propagate_with(
+                        arena,
+                        args[0],
+                        new,
+                        node_bounds,
+                        var_bounds,
+                        reduce_counts,
+                    );
                 }
                 MathFunc::Tanh => {
                     // tanh increasing onto (-1, 1), inverse atanh. Clamp inside domain.
@@ -1092,7 +1305,14 @@ pub fn backward_propagate(
                 MathFunc::Atanh => {
                     // atanh increasing on (-1, 1), inverse tanh.
                     let new = Interval::new(tightened.lo.tanh(), tightened.hi.tanh());
-                    backward_propagate(arena, args[0], new, node_bounds, var_bounds);
+                    backward_propagate_with(
+                        arena,
+                        args[0],
+                        new,
+                        node_bounds,
+                        var_bounds,
+                        reduce_counts,
+                    );
                 }
                 MathFunc::Tan => {
                     // tan is monotone within a single branch. If the forward
@@ -1219,7 +1439,14 @@ pub fn backward_propagate(
                     // rather than pretend.
                     let inp = node_bounds[args[0].0];
                     if let Some(pre) = entropy_preimage(&inp, &tightened) {
-                        backward_propagate(arena, args[0], pre, node_bounds, var_bounds);
+                        backward_propagate_with(
+                            arena,
+                            args[0],
+                            pre,
+                            node_bounds,
+                            var_bounds,
+                            reduce_counts,
+                        );
                     }
                 }
                 MathFunc::Erf => {
@@ -1324,25 +1551,44 @@ pub fn backward_propagate(
                     }
                 }
                 let new = Interval::new(tightened.lo - others_hi, tightened.hi - others_lo);
-                backward_propagate(arena, *t, new, node_bounds, var_bounds);
+                backward_propagate_with(arena, *t, new, node_bounds, var_bounds, reduce_counts);
             }
         }
         ExprNode::Index { base, .. } => {
-            backward_propagate(arena, *base, tightened, node_bounds, var_bounds);
+            backward_propagate_with(
+                arena,
+                *base,
+                tightened,
+                node_bounds,
+                var_bounds,
+                reduce_counts,
+            );
         }
         ExprNode::Sum { operand, .. } => {
-            // Handing `tightened` to the operand asserts that EVERY element lies in
-            // the sum's interval, which is only true when the reduction folds a
-            // single element. For a wider fold it is an invalid tightening of the
-            // same family as the forward one (#1364) -- `sum(x) <= 10` does not
-            // imply `x_i <= 10` unless every other term is known non-negative.
+            // Handing `tightened` straight to the operand asserts that EVERY element
+            // lies in the SUM's interval -- `sum(x) <= 10` implies `x_i <= 10` -- which
+            // is false unless every other term is known non-negative. That was the
+            // backward half of #1364.
             //
-            // `is_single_element` is deliberately a cheap, structurally-conservative
-            // predicate rather than a shape pass: a wrong `false` only forgoes a
-            // tightening, while a wrong `true` would be unsound, and the backward
-            // walk runs per row per sweep.
-            if is_single_element(arena, *operand) {
-                backward_propagate(arena, *operand, tightened, node_bounds, var_bounds);
+            // The sound inversion uses the operand's own hull. With every element in
+            // `[lo, hi]` and the sum in `[L, U]`,
+            //     e_i = S - sum_{j != i} e_j  in  [L - (n-1)*hi, U - (n-1)*lo],
+            // which collapses to `[L, U]` at `n == 1` (the old rule, where it was
+            // right) and stays valid for any wider fold. An unknown `n`, or an
+            // arithmetic that goes non-finite, declines to tighten -- the
+            // conservative direction.
+            let hull = node_bounds[operand.0];
+            let preimage =
+                sum_backward_preimage(tightened, hull, reduce_counts.get(id.0).copied().flatten());
+            if let Some(pre) = preimage {
+                backward_propagate_with(
+                    arena,
+                    *operand,
+                    pre,
+                    node_bounds,
+                    var_bounds,
+                    reduce_counts,
+                );
             }
         }
         ExprNode::Constant(_)
