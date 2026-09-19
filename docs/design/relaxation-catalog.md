@@ -368,3 +368,56 @@ should know exists; it is not part of the mechanisms above:
 
 These give discopt two convexity-detection lattices (x-space and log-space) and two relaxation
 regimes; only the x-space side is cataloged here.
+
+---
+
+## 10. Module status rule — production, public, tooling, incubating (#1347)
+
+`_relax/` holds modules that nothing in the package imports. Some are optional user-facing
+features, some are design-time tooling, and some are finished capabilities not yet wired to a
+call site. Until #1347 that status was implicit, which made *"does this module have a
+consumer?"* unanswerable: the import graph said no, the test suite said yes, and the docs said
+it was a feature.
+
+**The rule.** A `_relax/` module may exist with no production importer **only if it is
+declared**. Every module under `discopt._relax` must satisfy exactly one of:
+
+1. it is imported (directly or transitively) by another package module, or
+2. it has an entry in `python/discopt/_relax/module_status.py`
+   (`MODULE_STATUS`) giving its status and a one-line reason.
+
+`python/tests/test_relax_module_status.py` enforces both directions from the AST import graph —
+it fails on an undeclared module *and* on an entry for a module production has since started
+importing — so a module's status never has to be re-derived from a `grep`.
+
+| status | meaning | requires |
+|---|---|---|
+| `public` | optional user-facing entry point; the user imports it, the solver never does | a documented entry point + ≥1 test importer |
+| `tooling` | design-time / offline / CI instrumentation, deliberately off the solve path | a reason naming its consumer, or stating it has no automated one |
+| `incubating` | implemented and tested, no production call site yet | a reason naming what would wire it in, + ≥1 test importer |
+
+### Declared `public` entry points
+
+These are optional, user-facing features rather than internal machinery — the user imports
+them, the solver never does. Both are JAX-optional and outside the default solve path, which
+imports zero `jax` modules.
+
+| entry point | what it is |
+|---|---|
+| `discopt._relax.differentiable_solve.differentiable_solve` | unified differentiable LP/QP/MILP/MIQP solve, dispatching by problem class. Not to be confused with the *function* of the same name in the production `_relax/differentiable.py` — #1231 conflated the two. |
+| `discopt._relax.pounce_layer.make_nlp_layer` | a POUNCE solve as a differentiable JAX layer, composable inside `jax.grad`/`jit`/`vmap` (`docs/notebooks/differentiable_pounce_layer.ipynb`). |
+
+`incubating` is a declaration, not a parking space: it asserts the module is finished enough to
+be wired in. When that stops being true the module is retired — deleted with its tests and doc
+references — rather than left declared.
+
+**Why an AST graph and not a search.** Issue #1231 inventoried this by `grep` and got it wrong
+in both directions: it called `chebyshev_model.py`, `taylor_model.py` and `ellipsoidal_arith.py`
+dead when all three are reachable from `polyhedral_oa.py` (1,239 of 2,199 lines were live), and
+it credited `differentiable_solve.py` with 8 documentation references and `embedding.py` with
+17 — those belong to a same-named *function* in the production `_relax/differentiable.py` and
+to the unrelated `discopt.ml` embedding docs. Re-measured over the AST graph, the module
+`differentiable_solve.py` has one doc reference and `embedding.py` has none. Resolving relative
+imports per PEP 328 matters for the same reason: mis-anchoring `from .foo import bar` turns it
+into a self-edge and makes dead modules look live, which is how `monotonicity.py` was missed by
+both passes.
