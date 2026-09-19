@@ -321,15 +321,31 @@ def test_the_derived_shape_matches_what_the_evaluator_actually_produces():
     assert checked == 5
 
 
-def test_scalar_elements_still_declines_an_axis_reduced_body():
-    """`static_shape` got sharper; `scalar_elements` must not silently change.
+def test_scalar_elements_expands_an_axis_reduced_body_PER_ROW():
+    """The expansion must fan out, never collapse — this issue's whole point.
 
-    ``_elem`` has no ``SumExpression`` case, so an axis-reduced body is still
-    "not statically scalarizable" — callers keep their previous path.
+    Until #1364 ``_elem`` had no ``SumExpression`` case, so an axis-reduced body
+    was "not statically scalarizable" and every caller kept a conservative path;
+    this test asserted that ``None``. It now expands, and what matters is *how*:
+    ``dm.sum(A, axis=1)`` on a ``(2, 3)`` variable must give **two** elements of
+    **three** terms each, drawn from their own row — not one element of six,
+    which is exactly the collapse this issue was filed about.
+
+    The certificate tests above are the real guard; this one pins the shape of
+    the expansion so a future refactor cannot reintroduce the collapse quietly.
     """
     _m, A, _x = _model_with_shapes()
-    assert scalar_elements(dm.sum(A, axis=1)) is None
-    assert scalar_elements(dm.sum(A, axis=1) - 2) is None
+
+    elements = scalar_elements(dm.sum(A, axis=1))
+    assert elements is not None and len(elements) == 2, elements
+    for row, element in enumerate(elements):
+        terms = [str(t) for t in element.terms]
+        assert len(terms) == 3, terms
+        # Every term of row `row` must be indexed at that row and nowhere else.
+        assert all(f"({row}, " in t for t in terms), (row, terms)
+
+    shifted = scalar_elements(dm.sum(A, axis=1) - 2)
+    assert shifted is not None and len(shifted) == 2, shifted
 
 
 def test_linear_extractor_refuses_an_axis_reduced_body():

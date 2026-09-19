@@ -252,7 +252,11 @@ fn index_axes(
 }
 
 /// Static shape of every arena node, computed in one forward pass.
-fn shapes_of(arena: &ExprArena) -> Result<Vec<Vec<usize>>, ExpandError> {
+///
+/// `pub(crate)` for `presolve::fbbt`, whose `Sum` interval rule needs the number
+/// of elements a reduction folds (#1364). Re-deriving shapes there would be the
+/// duplicated-inference drift this single definition exists to prevent.
+pub(crate) fn shapes_of(arena: &ExprArena) -> Result<Vec<Vec<usize>>, ExpandError> {
     let n = arena.len();
     let mut shapes: Vec<Vec<usize>> = vec![Vec::new(); n];
     for i in 0..n {

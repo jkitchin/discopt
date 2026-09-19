@@ -100,6 +100,21 @@ class FeasibilityPhaseEvaluator:
         self._const_arr = np.asarray(self._const, dtype=np.float64)
 
     # ── scalars / bounds the backend reads directly ──────────────
+
+    @property
+    def timing_bucket(self):
+        """Forward the wrapped evaluator's layer (issue #74).
+
+        This class implements the backend callback surface explicitly rather than
+        delegating via ``__getattr__``, so without this property the phase-1 solve
+        falls to ``_IpoptCallbacks``'s "undeclared" arm: its derivative callbacks
+        are charged to nothing, the enclosing solver region absorbs them, and the
+        run emits a `timing-bucket-unknown` warning into whatever is reading its
+        output (measured in docs/notebooks/tutorial_benders.ipynb and
+        tutorial_gbd.ipynb, #1362).
+        """
+        return self._base.timing_bucket
+
     @property
     def n_variables(self) -> int:
         return self._n + 1

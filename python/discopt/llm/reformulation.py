@@ -60,7 +60,7 @@ def analyze_reformulations(
     list of ReformulationSuggestion
         Ordered by expected impact (highest first).
     """
-    suggestions = []
+    suggestions: list[ReformulationSuggestion] = []
 
     # Deterministic analyses (always run)
     suggestions.extend(_detect_big_m(model))
@@ -174,7 +174,7 @@ def _detect_big_m(model: Model) -> list[ReformulationSuggestion]:
 
 def _detect_weak_bounds(model: Model) -> list[ReformulationSuggestion]:
     """Detect variables with unnecessarily weak bounds."""
-    suggestions = []
+    suggestions: list[ReformulationSuggestion] = []
 
     for var in model._variables:
         lb = np.asarray(var.lb).ravel()
@@ -250,19 +250,82 @@ def _detect_symmetry(model: Model) -> list[ReformulationSuggestion]:
     return suggestions
 
 
+def _body_has_variable_product(con) -> bool:
+    """Whether this constraint's body multiplies two non-constant subexpressions.
+
+    A structural walk, not a string match: ``3 * x`` is linear and must not count,
+    while ``x * y`` and ``x * exp(y)`` must. Only reached once
+    :func:`~discopt.llm.advisor.model_has_bilinear` has already said the model has
+    a product somewhere, so a conservative ``False`` here can only shorten the
+    reported list, never invent an entry.
+    """
+    from discopt.modeling.core import BinaryOp, Constant, Expression
+
+    def is_constant(node) -> bool:
+        if isinstance(node, Constant):
+            return True
+        if isinstance(node, BinaryOp):
+            return is_constant(node.left) and is_constant(node.right)
+        return not isinstance(node, Expression)
+
+    def walk(node) -> bool:
+        if isinstance(node, BinaryOp):
+            if node.op in ("*", "/") and not is_constant(node.left) and not is_constant(node.right):
+                return True
+            return walk(node.left) or walk(node.right)
+        for child in getattr(node, "__dict__", {}).values():
+            if isinstance(child, Expression) and walk(child):
+                return True
+            if isinstance(child, (list, tuple)):
+                for item in child:
+                    if isinstance(item, Expression) and walk(item):
+                        return True
+        return False
+
+    body = getattr(con, "body", None)
+    return bool(body is not None and walk(body))
+
+
 def _detect_bilinear(model: Model) -> list[ReformulationSuggestion]:
     """Detect bilinear terms that could benefit from reformulation."""
     from discopt.modeling.core import Constraint
 
-    suggestions = []
-    bilinear_constraints = []
+    suggestions: list[ReformulationSuggestion] = []
 
-    for con in model._constraints:
-        if not isinstance(con, Constraint):
-            continue
-        con_str = str(con)
-        if " * " in con_str:
-            bilinear_constraints.append(con.name or "unnamed")
+    # `" * " in str(constraint)` matched every `constant * variable`, so a pure
+    # MILP came back "bilinear terms in 3 constraints" with a piecewise-McCormick
+    # recommendation it cannot use (#1362, measured on
+    # docs/notebooks/llm_integration.ipynb). Ask the structural classifier the
+    # relaxation layer itself uses, then report the constraints whose body really
+    # carries one of the products it found.
+    from discopt.llm.advisor import model_has_bilinear
+
+    if not model_has_bilinear(model):
+        return suggestions
+
+    bilinear_constraints = [
+        con.name or "unnamed"
+        for con in model._constraints
+        if isinstance(con, Constraint) and _body_has_variable_product(con)
+    ]
+    if not bilinear_constraints:
+        # The product is real but lives in the objective, not in any constraint
+        # body. Say so rather than printing "bilinear terms in 0 constraints".
+        return [
+            ReformulationSuggestion(
+                category="mccormick_partitioning",
+                description=(
+                    "Found bilinear terms in the objective \u2014 use partitions=4 or "
+                    "partitions=8 for tighter McCormick relaxations"
+                ),
+                impact=(
+                    "Piecewise McCormick can significantly tighten "
+                    "relaxations for bilinear/pooling problems"
+                ),
+                auto_applicable=True,
+                details={"constraints": []},
+            )
+        ]
 
     if bilinear_constraints:
         suggestions.append(

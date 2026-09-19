@@ -129,88 +129,6 @@ def _lp_spatial_fallback_enabled() -> bool:
     )
 
 
-def _lp_spatial_mixed_fallback_enabled() -> bool:
-    """#860: extend the LP-per-node engine's *scope gate* to mixed-integer and MAXIMIZE
-    models.
-
-    Governs **both** production entry points, so the widening is entirely opt-in:
-
-    * ``solve(lp_spatial=True)`` (``solver.py``) — whether the engine accepts a mixed
-      or maximize model at all; and
-    * the #844 no-incumbent fallback (below) — whether the DEFAULT path reserves 35% of
-      its budget for the fallback on such a model.
-
-    The engine's ``mixed`` parameter and ``_is_in_scope``'s keyword both default to
-    ``False`` as well, so a *new* call site inherits the pre-#860 gate rather than
-    silently shipping the widening.
-
-    **Default OFF** — it ran its graduation panel and did NOT graduate, on *both*
-    counts. Opt in with ``DISCOPT_LP_SPATIAL_MIXED=1``.
-
-    On the public ``lp_spatial=True`` path the loss is direct. ``gear4`` is mixed (4
-    integer, 2 continuous with infinite upper bounds), so it is admitted only under the
-    widening; at a 25 s budget:
-
-    ==============  ============================================
-    gate            result
-    ==============  ============================================
-    pre-#860        ``optimal``, 1.6434284641, certified, 3 nodes
-    widened         ``time_limit``, 17.514, uncertified, 2673 nodes
-    ==============  ============================================
-
-    The engine accepts a model the default path already certified in 3 nodes, then
-    spends the entire budget to return an incumbent ~10.7x worse with no certificate.
-    It is *sound* — the bound never crosses the oracle, and the false certificate seen
-    there earlier was the LP-presolve sentinel bug fixed in #877, not this widening —
-    but shipping it by default would be trading a certificate for a worse incumbent.
-
-    **Graduation panel** (20 s budget, 70 newly in-scope in-repo instances, off vs on;
-    the other 49 take a bit-identical path since this gate is the flag's only
-    consumer). *Cert-clean*: 0 certification regressions, 0
-    ``incumbent_verification_failed``, 0 unsound bounds. *Net-positive*: **failed**.
-
-    ==========  ==============================  ==============================
-    instance    off                             on
-    ==========  ==============================  ==============================
-    tspn12      no incumbent (30.6 s)           feasible 262.647 (9.3 s)
-    ex1252a     feasible 183660.35 (24.5 s)     feasible 149530.99 (14.9 s)
-    tls2        feasible 11.30 (20.1 s)         NO INCUMBENT (13.6 s)
-    st_e31      feasible -2.00 (22.2 s)         NO INCUMBENT (14.8 s)
-    ==========  ==============================  ==============================
-
-    ``gains=1  improved=1  lost_incumbents=2  cert_regressions=0  unsound=0``.
-
-    The widening is sound (see ``lp_spatial_bb`` and the #860 Panel A: 33 newly
-    reachable instances get a verified incumbent, 0 unsound results); what it cannot do
-    is pay for itself *here*. The reserve hands 35% of the budget to the fallback before
-    knowing whether the engine can serve the model: on tls2 and st_e31 the primary then
-    runs out of time at 65% and returns nothing, while the fallback declines anyway
-    (``require_incremental=True`` + an infinite root box, which declines the incremental
-    structure). Budget taken from a path that was going to succeed, given to a path that
-    never runs. Sound but harmful stays OFF, with the measurement recorded — the
-    ``DISCOPT_CUT_INHERIT`` rule (CLAUDE.md §5).
-
-    Do not read the 0.747 total wall ratio as a win: the on-runs are faster largely
-    because they gave up earlier, on exactly the two instances that lost their answer.
-
-    **What would change the verdict**: making the reserve conditional on the engine
-    actually being able to build (probe buildability, or relax ``require_incremental``
-    for the mixed class now that cold node builds are deadline-bounded), so a model the
-    fallback will decline never pays for it. Separate change, separate panel. Evidence:
-    ``docs/dev/issue-860-lp-spatial-mixed-scope.md`` §4,
-    ``scratchpad/panel860_flag.json``.
-    """
-    import os as _os
-
-    return _os.environ.get("DISCOPT_LP_SPATIAL_MIXED", "0") not in (
-        "0",
-        "",
-        "false",
-        "False",
-        "off",
-    )
-
-
 def _lp_spatial_reserve_extension_enabled() -> bool:
     """#917: let the primary reclaim the #844 reserve once it holds an incumbent.
 
@@ -7386,11 +7304,19 @@ class Model:
             try:
                 from discopt._relax.lp_spatial_bb import _is_in_scope
 
-                # #860: the engine now also serves mixed-integer and MAXIMIZE models,
-                # but whether the DEFAULT path should hand them 35% of its budget is a
-                # separate, panel-gated decision — hence the flag rather than the
-                # engine's own (already widened) gate.
-                if _is_in_scope(self, mixed=_lp_spatial_mixed_fallback_enabled()):
+                # #860 widened the engine to mixed-integer and MAXIMIZE models behind
+                # ``DISCOPT_LP_SPATIAL_MIXED``; #1357 RETIRED that flag under CLAUDE.md
+                # §5's retirement rule after its panel failed bar (2) — the reserve was
+                # where the loss came from. Two of the four decisive instances lost
+                # their incumbent entirely (``tls2``, ``st_e31``): the reserve handed
+                # 35% of the budget to a fallback that then DECLINED the model anyway
+                # (``require_incremental=True`` + an infinite root box), so the primary
+                # ran out of time at 65% and returned nothing. Budget taken from a path
+                # that was going to succeed, given to one that never ran.
+                #
+                # The default path therefore uses the pre-#860 gate. The widening is
+                # still callable explicitly via ``_is_in_scope(..., mixed=True)``.
+                if _is_in_scope(self):
                     _fb_reserve = 0.35 * _remaining_tl
                     # NOTE: scope is checked here, but whether the engine can actually
                     # build its incremental structure is only known once it runs (see
