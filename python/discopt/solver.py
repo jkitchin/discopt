@@ -11769,7 +11769,7 @@ def solve_model(
     # root-relaxation fallback, which decides whether it is admissible.
     _root_probe_bound: "Optional[tuple[float, np.ndarray, np.ndarray]]" = None
 
-    # --- #764: native Rust spatial-B&B kernel (default OFF, DISCOPT_NATIVE_SPATIAL_KERNEL) ---
+    # --- #764: native Rust spatial-B&B kernel (default ON; =0 opts out) ---
     # Hand off here — after root FBBT + non-cutoff root OBBT have finished, so [lb, ub]
     # is the finite root box the McCormick relaxation needs (tanksize's raw box is
     # unbounded; this is the first point it is fully bounded). When the flag is OFF this
