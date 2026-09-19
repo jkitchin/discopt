@@ -131,32 +131,26 @@ def test_mixed_model_result_is_unchanged_by_the_860_flag(fb, monkeypatch, flag, 
         assert r.bound <= r.objective + 1e-6, "UNSOUND: bound above incumbent"
 
 
-def test_860_mixed_flag_defaults_to_off_and_gates_the_reserve(monkeypatch):
+def test_the_mixed_widening_is_declined_by_default_and_available_on_request():
     """The #860 widening reaches the default path only through this flag, which is off
     until its graduation panel.
 
-    Updated with the flag's scope, not loosened. This test previously asserted
-    ``_is_in_scope(m) is True`` with the comment "engine: widened unconditionally",
-    because the flag then governed only the fallback's 35% budget reserve while the
-    engine gate was always widened. The #860 review moved the engine gate behind the
-    same flag — the widening is sound but not net-positive on the default path (see
-    ``_lp_spatial_mixed_fallback_enabled``, and ``test_860_mixed_gate_is_opt_in``) —
-    so the *default* is now the conservative gate at both entry points. The
-    substantive assertion, that ``mixed=False`` declines a mixed model, is unchanged
-    and is now also what the default does.
+    Narrowed with the flag's retirement, not loosened. The history: this originally
+    asserted ``_is_in_scope(m) is True`` ("engine: widened unconditionally"), because
+    #860's flag then governed only the fallback's 35% reserve while the engine gate was
+    always widened. The #860 review moved the engine gate behind the same flag, and
+    #1357 then **retired the flag** — its §5 panel failed bar (2). The substantive
+    assertions, that ``mixed=False`` declines a mixed model and ``mixed=True`` admits
+    it, are unchanged; what is gone is the env var that used to choose between them.
+
+    Flag-default coverage now lives in ``test_1357_lp_spatial_mixed_retired``.
     """
     from discopt._relax.lp_spatial_bb import _is_in_scope
-    from discopt.modeling.core import _lp_spatial_mixed_fallback_enabled
-
-    monkeypatch.delenv("DISCOPT_LP_SPATIAL_MIXED", raising=False)
-    assert _lp_spatial_mixed_fallback_enabled() is False
-    monkeypatch.setenv("DISCOPT_LP_SPATIAL_MIXED", "1")
-    assert _lp_spatial_mixed_fallback_enabled() is True
 
     m = _mixed()
     assert _is_in_scope(m, mixed=True) is True  # capability, on request
     assert _is_in_scope(m, mixed=False) is False  # pre-#860 gate
-    assert _is_in_scope(m) is False  # default is now the conservative gate
+    assert _is_in_scope(m) is False  # the default, and now the only production gate
 
 
 def test_fallback_never_breaks_a_solve(fb):
