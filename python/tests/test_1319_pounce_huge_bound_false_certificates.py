@@ -62,19 +62,28 @@ def _pinch_model(L: float) -> dm.Model:
     return m
 
 
-@pytest.mark.parametrize("declared_box", ["1", "0"])
+@pytest.mark.parametrize("widened", [True, False])
 @pytest.mark.parametrize("L", [9e14, 2e15, 5e15])
-def test_huge_bound_lp_is_not_certified_infeasible(monkeypatch, L, declared_box):
+def test_huge_bound_lp_is_not_certified_infeasible(monkeypatch, L, widened):
     """The repro: a feasible LP over ~1e15 bounds came back certified infeasible.
 
     ``(L + 1, L)`` is exactly feasible, so ``infeasible`` is simply wrong. Run on
     BOTH box thresholds: the Phase-1 row-activity fix is what holds this line, and
-    it must hold whether or not ``DISCOPT_POUNCE_DECLARED_BOX`` is engaged -- the
-    §1 guarantee cannot be contingent on a performance flag.
+    it must hold whichever box the IPM is handed -- the §1 guarantee cannot be
+    contingent on how wide the box is.
+
+    The widened arm goes through ``declared_box_honored`` rather than the
+    process-wide flag, which #1358 retired. Same two thresholds, same guarantee;
+    the scoped override is simply the mechanism that survives.
     """
+    from discopt.solvers.lp_pounce import declared_box_honored
+
     monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
-    monkeypatch.setenv("DISCOPT_POUNCE_DECLARED_BOX", declared_box)
-    r = _pinch_model(L).solve()
+    if widened:
+        with declared_box_honored():
+            r = _pinch_model(L).solve()
+    else:
+        r = _pinch_model(L).solve()
     assert r.status != "infeasible", "certified a false 'infeasible' on a feasible LP"
     assert r.status == "optimal"
     assert r.objective == pytest.approx(6 * L - 1, rel=1e-9)
@@ -90,39 +99,40 @@ def test_declared_box_threshold_matches_pounce_own_infinity(monkeypatch):
 
     Ipopt's ``nlp_{lower,upper}_bound_inf`` default to ∓1e19, and #1319 measured
     POUNCE returning the exact optimum up to 9.9e18 and flipping to UNBOUNDED at
-    exactly 1e19. ``=0`` restores the legacy 1e15.
+    exactly 1e19. Outside a ``declared_box_honored`` block the legacy 1e15 stands.
     """
     from discopt.solvers.lp_pounce import (
         _LEGACY_BOUND_THRESHOLD,
         _POUNCE_BOUND_INF,
+        declared_box_honored,
         finite_bound_threshold,
     )
 
     assert _POUNCE_BOUND_INF == 1e19
     assert _LEGACY_BOUND_THRESHOLD == 1e15
 
-    # Default-OFF pending the §5 graduation gate; flip this assertion together
-    # with the default when the differential panel graduates the flag.
-    monkeypatch.delenv("DISCOPT_POUNCE_DECLARED_BOX", raising=False)
-    assert finite_bound_threshold() == _LEGACY_BOUND_THRESHOLD, (
-        "default must be OFF until the §5 panel graduates the flag"
-    )
-    monkeypatch.setenv("DISCOPT_POUNCE_DECLARED_BOX", "0")
-    assert finite_bound_threshold() == _LEGACY_BOUND_THRESHOLD, "=0 must opt out"
+    assert finite_bound_threshold() == _LEGACY_BOUND_THRESHOLD
+    with declared_box_honored():
+        assert finite_bound_threshold() == _POUNCE_BOUND_INF
+    assert finite_bound_threshold() == _LEGACY_BOUND_THRESHOLD, "override must restore"
+
+    # #1358 retired the process-wide flag: setting it must now do NOTHING.
     monkeypatch.setenv("DISCOPT_POUNCE_DECLARED_BOX", "1")
-    assert finite_bound_threshold() == _POUNCE_BOUND_INF
+    assert finite_bound_threshold() == _LEGACY_BOUND_THRESHOLD, (
+        "the retired flag still moves the threshold"
+    )
 
 
 def test_declared_box_window_tracks_the_live_threshold(monkeypatch):
     """The #850 deferral window and the box marshaling must not drift apart: a
     hardcoded 1e15 in the guard would defer verdicts the IPM no longer relaxes."""
     from discopt.solver import _declared_box_relaxed_to_ipm_inf
+    from discopt.solvers.lp_pounce import declared_box_honored
 
     box = [(0.0, 1.0), (-1e16, 0.0)]  # 1e16 is inside the legacy window only
-    monkeypatch.setenv("DISCOPT_POUNCE_DECLARED_BOX", "0")
     assert _declared_box_relaxed_to_ipm_inf(box) is True
-    monkeypatch.setenv("DISCOPT_POUNCE_DECLARED_BOX", "1")
-    assert _declared_box_relaxed_to_ipm_inf(box) is False
+    with declared_box_honored():
+        assert _declared_box_relaxed_to_ipm_inf(box) is False
     # A bound at/above POUNCE's own infinity is relaxed under either setting.
     assert _declared_box_relaxed_to_ipm_inf([(0.0, 1.0), (-5e19, 0.0)]) is True
 
@@ -203,25 +213,26 @@ def test_huge_bound_qp_is_not_certified_infeasible(monkeypatch):
     With the declared box honored it is solved outright to the witness objective
     5*5e15 + 2*(-5e15) + 0 = 1.5e16.
     """
-    monkeypatch.setenv("DISCOPT_POUNCE_DECLARED_BOX", "1")
-    r = _witness_qp_model().solve()
+    from discopt.solvers.lp_pounce import declared_box_honored
+
+    with declared_box_honored():
+        r = _witness_qp_model().solve()
     assert r.status != "infeasible", "certified a false 'infeasible' on a feasible QP"
     assert r.status == "optimal"
     assert r.objective == pytest.approx(1.5e16, rel=1e-9)
 
 
 def test_huge_bound_qp_never_certifies_infeasible_with_the_legacy_box(monkeypatch):
-    """Opt-out arm: with ``DISCOPT_POUNCE_DECLARED_BOX=0`` the first attempt goes
-    back to discarding the bound, so POUNCE still raises its numerical code 2 --
-    and the code-2 cross-check must keep that from becoming a certificate.
+    """Legacy-box arm (the default): the first attempt discards the bound, so
+    POUNCE still raises its numerical code 2 -- and the code-2 cross-check must
+    keep that from becoming a certificate.
 
-    That guard holds the §1 line independently of the flag, and is the assertion
+    That guard holds the §1 line independently of the box, and is the assertion
     below that must never be relaxed. What follows it is the retry (#1319): once
     the attempt has failed there is no answer left to lose, so the route re-solves
     over the box the caller declared and recovers the true optimum. Before the
     retry existed this returned an honest but useless ``error``.
     """
-    monkeypatch.setenv("DISCOPT_POUNCE_DECLARED_BOX", "0")
     r = _witness_qp_model().solve()
     assert r.status != "infeasible", "certified a false 'infeasible' on a feasible QP"
     # The retry recovers the witness the issue itself gives: v1=5e15, v3=-5e15,
@@ -235,7 +246,6 @@ def test_solve_qp_code2_not_confirmed_by_phase1_reports_error(monkeypatch):
     """Unit-level counterpart on the legacy box: called directly, the same system
     must not come back ``INFEASIBLE`` -- CLAUDE.md §1 takes ``ERROR`` over a false
     certificate."""
-    monkeypatch.setenv("DISCOPT_POUNCE_DECLARED_BOX", "0")
     n = 4
     Q = np.zeros((n, n))
     Q[3, 3] = 2.0
@@ -290,15 +300,17 @@ def test_bounded_qp_over_huge_bounds_solves_to_its_analytic_optimum(monkeypatch,
     reaches it and the analytic optimum ``-L`` is recovered across the whole window
     the legacy 1e15 threshold used to discard.
     """
-    monkeypatch.setenv("DISCOPT_POUNCE_DECLARED_BOX", "1")
-    r = _bounded_qp_model(L).solve()
+    from discopt.solvers.lp_pounce import declared_box_honored
+
+    with declared_box_honored():
+        r = _bounded_qp_model(L).solve()
     assert r.status != "unbounded", f"reported 'unbounded' for a QP bounded below by -{L:g}"
     assert r.status == "optimal"
     assert r.objective == pytest.approx(-L, rel=1e-9)
 
 
 def test_bounded_qp_is_never_reported_unbounded_with_the_legacy_box(monkeypatch):
-    """Opt-out arm: on the legacy 1e15 box the first attempt still discards
+    """Legacy-box arm (the default): the first attempt still discards
     ``y >= -1e15``, so its verdict describes a larger box than the declared one
     and the #850/#1319 guard refuses to certify it.
 
@@ -306,7 +318,6 @@ def test_bounded_qp_is_never_reported_unbounded_with_the_legacy_box(monkeypatch)
     the assertion below is not to be relaxed. The retry (#1319) then re-solves
     over the declared box, where the QP is bounded, and returns its analytic
     optimum ``-L`` instead of the bare ``error`` this used to end at."""
-    monkeypatch.setenv("DISCOPT_POUNCE_DECLARED_BOX", "0")
     with pytest.warns(RuntimeWarning, match=r"relaxed a declared"):
         r = _bounded_qp_model(1e15).solve()
     assert r.status != "unbounded", "reported 'unbounded' for a QP bounded below by -1e15"
@@ -323,16 +334,24 @@ def test_qp_below_the_relaxation_window_is_unaffected():
     assert r.objective == pytest.approx(-L, rel=1e-9)
 
 
-def test_bound_beyond_pounce_infinity_is_still_relaxed(monkeypatch):
+def test_bound_beyond_pounce_infinity_is_still_relaxed():
     """The upper fence: at/above POUNCE's own 1e19 infinity the bound genuinely is
     infinite to the engine, so the guard must still decline to certify rather than
-    trusting a verdict about a box POUNCE could not see."""
-    from discopt.solvers.lp_pounce import _POUNCE_BOUND_INF, finite_bound_threshold
+    trusting a verdict about a box POUNCE could not see.
 
-    monkeypatch.setenv("DISCOPT_POUNCE_DECLARED_BOX", "1")
-    assert finite_bound_threshold() == _POUNCE_BOUND_INF == 1e19
-    with pytest.warns(RuntimeWarning, match=r"relaxed a declared"):
-        r = _bounded_qp_model(5e19).solve()
+    Run with the widest box the tree can produce -- inside ``declared_box_honored``
+    -- so the fence is tested where it actually has to hold.
+    """
+    from discopt.solvers.lp_pounce import (
+        _POUNCE_BOUND_INF,
+        declared_box_honored,
+        finite_bound_threshold,
+    )
+
+    with declared_box_honored():
+        assert finite_bound_threshold() == _POUNCE_BOUND_INF == 1e19
+        with pytest.warns(RuntimeWarning, match=r"relaxed a declared"):
+            r = _bounded_qp_model(5e19).solve()
     assert r.status != "unbounded"
 
 
@@ -403,12 +422,12 @@ def test_infeasible_lp_at_huge_magnitude_is_never_certified_unbounded():
 
 # ── the retry: recover the declared-box answer where the route dead-ends ──
 #
-# The three defects above are fixed on both flag settings, but on the default
-# (legacy 1e15) box two of the #1319 repros ended at an honest `error`: correct,
-# and useless. The retry re-solves over the declared box, but ONLY from a state
-# that was about to report `error` -- so no solve that succeeds today can change,
-# which is exactly why it needs no §5 graduation the way flipping
-# DISCOPT_POUNCE_DECLARED_BOX would.
+# The three defects above are fixed on both box thresholds, but on the legacy
+# 1e15 box two of the #1319 repros ended at an honest `error`: correct, and
+# useless. The retry re-solves over the declared box, but ONLY from a state that
+# was about to report `error` -- so no solve that succeeds today can change, which
+# is exactly why it needs no §5 graduation the way the process-wide flag retired
+# in #1358 would have.
 
 
 def test_retry_gate_is_off_below_the_relaxation_window():
@@ -427,13 +446,21 @@ def test_retry_gate_is_on_inside_the_window():
     assert _declared_box_retry_applies(_witness_qp_model())
 
 
-def test_retry_gate_is_off_when_the_declared_box_is_already_honored(monkeypatch):
-    """With the flag already on, the first attempt used the declared box, so a
-    retry would re-run the identical solve to the identical answer."""
-    from discopt.solver import _declared_box_retry_applies
+def test_retry_gate_is_off_when_the_declared_box_is_already_honored():
+    """Inside an override block the first attempt already used the declared box, so
+    a retry would re-run the identical solve to the identical answer.
 
-    monkeypatch.setenv("DISCOPT_POUNCE_DECLARED_BOX", "1")
-    assert not _declared_box_retry_applies(_bounded_qp_model(1e15))
+    This is the retry's recursion guard. #1358 retired the process-wide flag that
+    also used to trip this condition, which makes the guard the condition's whole
+    remaining job -- and therefore worth its own test.
+    """
+    from discopt.solver import _declared_box_retry_applies
+    from discopt.solvers.lp_pounce import declared_box_honored
+
+    with declared_box_honored():
+        assert not _declared_box_retry_applies(_bounded_qp_model(1e15))
+    # ... and it is armed again once the block exits.
+    assert _declared_box_retry_applies(_bounded_qp_model(1e15))
 
 
 def test_declared_box_override_is_scoped_and_restores():

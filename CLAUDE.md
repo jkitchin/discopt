@@ -56,6 +56,42 @@ discopt is a hybrid Mixed-Integer Nonlinear Programming (MINLP) solver combining
      One passing graduation-gate run meeting both bars suffices — consecutive
      nightly runs are no longer required.)
 
+   **A graduation attempt has three outcomes, not two (added 2026-09-19, #1345).**
+   "A cert-clean but neutral-or-harmful flag stays OFF, with the measurement
+   recorded" is where flags accumulate: it records an answer and gives it nowhere
+   to go. Measured on `0ae8cad`: 86 `DISCOPT_*` flags are read, 19 default to a
+   literal `"0"`, and **14 of those gate solver math** — nearly every one already
+   carrying its measurement in a docstring. What §5 lacked was an exit. Every
+   default-OFF gate over solver math is therefore in exactly one of three states,
+   and a gate in none of them is a defect:
+   - **Graduated** — the panel passed both bars. Flip the default, keep the `=0`
+     opt-out and the legacy path intact.
+   - **Retired** — the panel ran and did not pass, or nobody is willing to run it.
+     Delete the flag **and the implementation behind it**, in one PR, recording the
+     measurement that killed it (or that none was ever taken). Keep reusable
+     pieces, regression fixtures and benchmark cases; the entry point goes.
+     Retiring is not a failure — it is the measurement being acted on, which is the
+     point of taking it.
+   - **Kept as a documented opt-out** — the flag guards a route deliberately not
+     the default (an alternative backend, an escape hatch, a debugging lever). Its
+     docstring must say *why it is not the default and what would change that*, so
+     the next reader cannot mistake it for a stalled graduation.
+
+   A gate whose docstring promises a panel, with no panel and no owner, is the
+   defect this clause names. The standing audit is
+   `docs/dev/flag-retirement-audit.md`; a new default-OFF gate over solver math
+   adds a row to it in the same PR that introduces the flag.
+
+   **Out of scope** — these are not graduation candidates and the rule does not
+   apply to them: a numeric tuning knob whose `0` is a *value* rather than an
+   off-switch (`DISCOPT_HEUR_OFFSET`, `DISCOPT_ROOT_CUT_ROUNDS`); an opt-*out* for
+   a shipped default (`DISCOPT_NATIVE_SPATIAL_KERNEL=0`,
+   `DISCOPT_LP_MILP_BACKEND=rust`, `DISCOPT_NS_MARGIN=0`), which exists so a
+   default can be A/B'd and is exactly right; and a switch over non-solver
+   behaviour (`DISCOPT_EAGER_IMPORTS`, `DISCOPT_DISABLE_JAX_CACHE`,
+   `DISCOPT_GAMS_NO_DAEMON`). Classify by how the flag is *consumed* and what it
+   gates, not by its default being `"0"`.
+
 ## Measurement & instrumentation discipline
 
 §4 says no fix ships on a hypothesis. In practice the failure is rarely a *wrong*

@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import contextlib as _contextlib
 import logging
-import os
 import threading
 import time
 from typing import TYPE_CHECKING, Any, List, NamedTuple, Optional, Tuple, Union, cast
@@ -96,7 +95,7 @@ def declared_box_honored() -> "Iterator[None]":
 
     Scoped rather than a default flip: entering this block changes what a solve
     that has ALREADY failed does, and nothing about a solve that succeeded. That
-    is why it needs no §5 graduation, unlike ``DISCOPT_POUNCE_DECLARED_BOX``,
+    is why it needs no §5 graduation, unlike the process-wide flag retired in #1358,
     which moves the box for every solve in the window.
     """
     prev = getattr(_BOX_OVERRIDE, "value", None)
@@ -110,24 +109,41 @@ def declared_box_honored() -> "Iterator[None]":
 def finite_bound_threshold() -> float:
     """``|bound|`` at or beyond which POUNCE is handed its infinity sentinel.
 
-    ``DISCOPT_POUNCE_DECLARED_BOX=1`` honors the declared box up to POUNCE's own
-    1e19 infinity; unset/``0`` keeps the legacy 1e15 (#1319). Inside a
-    :func:`declared_box_honored` block the override wins over both.
+    The legacy 1e15 (#1319), except inside a :func:`declared_box_honored` block,
+    where the declared box is honored up to POUNCE's own 1e19 infinity.
 
-    **Default-OFF pending the §5 graduation gate.** The flag is bound-changing, so
-    it stays off until the corpus-wide differential panel
-    (``scripts/pounce_declared_box_panel.py``) comes back BOTH cert-clean and
-    net-positive; graduating it means flipping this default while keeping the
-    ``=0`` opt-out and the legacy path intact. Correctness does not wait on that
-    vote: the #1319 cross-checks (Phase-1 row activity, the QP code-2 check, the
-    #850 unbounded guard) hold on BOTH settings, so the flag decides whether the
-    right answer is recovered, never whether a wrong one can be certified.
+    **``DISCOPT_POUNCE_DECLARED_BOX`` was retired in #1358.** It moved this
+    threshold for *every* solve, and its §5 panel
+    (``scripts/pounce_declared_box_panel.py``, in-repo MINLPLib corpus, arms
+    interleaved) came back cert-clean but **net-positive INCONCLUSIVE**::
+
+        GATE 1 CERT-CLEAN : PASS
+        GATE 2 NET-POSITIVE: INCONCLUSIVE
+        affected by the flag : 2 of 66  (st_miqp3, st_miqp4, both at exactly 1e15)
+        newly certified by ON: 0
+        DEcertified by ON    : 0
+
+    Inconclusive **by construction**: only 2 of 66 instances declare a bound in
+    ``[1e15, 1e19)`` -- the rest are small-bounded or default-boxed at 1e20, above
+    POUNCE's own infinity. Re-running cannot change that; it needs a corpus nobody
+    has proposed acquiring. And #1327's retry removed anything that depended on the
+    vote: the route re-solves over the declared box at the two entry points where a
+    POUNCE answer was about to be abandoned, so all three of #1319's repros return
+    the correct certified optimum with no flag set. Under §5's retirement rule a
+    flag whose panel cannot terminate is deleted rather than held OFF forever.
+
+    What is kept is the **scoped** override, which moves the threshold for one
+    call rather than for the process -- that is the mechanism #1327's retry uses,
+    and it is why the retry needs no §5 graduation.
+
+    Correctness never depended on the flag either way: the #1319 cross-checks
+    (Phase-1 row activity, the QP code-2 check, the #850 unbounded guard) hold on
+    BOTH thresholds, so the box decides whether the right answer is *recovered*,
+    never whether a wrong one can be certified.
     """
     override = getattr(_BOX_OVERRIDE, "value", None)
     if override is not None:
         return float(override)
-    if os.environ.get("DISCOPT_POUNCE_DECLARED_BOX", "0").strip().lower() in ("1", "true", "on"):
-        return _POUNCE_BOUND_INF
     return _LEGACY_BOUND_THRESHOLD
 
 

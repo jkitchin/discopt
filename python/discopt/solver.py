@@ -97,6 +97,200 @@ def _get_heuristic_governor():
     return governor()
 
 
+def _verify_and_inject_candidate(
+    tree,
+    x_inc,
+    obj: float,
+    *,
+    n_orig: int,
+    node_lb_i,
+    node_ub_i,
+    A_ub,
+    b_ub,
+    A_eq,
+    b_eq,
+    log_prefix: str,
+    how: str,
+) -> bool:
+    """#952: verify an injected candidate against the rows and the NODE box, then inject.
+
+    ``inject_incumbent`` trusts its caller, so a candidate that reaches it is
+    taken as a candidate answer with nothing downstream re-examining it. The snap
+    (and, on the MIQP path, round) re-solve fixes the integers and asks POUNCE for
+    the continuous completion; POUNCE honours the slack bounds standing in for
+    inequality rows only to its own ~1e-8 *relative* tolerance, which on a big-M
+    row like ``eta <= 1e6*y`` is a 1e-2 absolute excursion. The point comes back
+    exactly integral, so the tree took it as the incumbent and reported
+    ``optimal`` — the false certificate #952 was opened for.
+
+    Checking the **node** box rather than the declared one is deliberate: an
+    off-box point can be integral (a binary at -1) and still pass every row,
+    seeding a spurious incumbent.
+
+    Declining is free: injection is a heuristic accelerator, the subtree stays
+    open, and the tree re-finds the point from a node relaxation if it is
+    genuinely feasible. A candidate that fails here is one the exit gate would
+    otherwise refuse the whole solve over.
+
+    One definition (#1344). The MILP and MIQP funnels ran this guard separately —
+    the MILP copy inline, the MIQP copy behind a local ``_node_point_feasible`` —
+    with the same rows and the same node box. Returns whether the point was
+    injected.
+    """
+    box = np.stack(
+        [
+            np.asarray(node_lb_i, dtype=np.float64)[:n_orig],
+            np.asarray(node_ub_i, dtype=np.float64)[:n_orig],
+        ],
+        axis=1,
+    )
+    if not _matrix_solution_feasible(
+        np.asarray(x_inc, dtype=np.float64)[:n_orig], A_ub, b_ub, A_eq, b_eq, box
+    ):
+        logger.debug(
+            "%s: rejected a %s incumbent outside its rows/box (%s)",
+            log_prefix,
+            how,
+            _matrix_solution_violations(
+                np.asarray(x_inc, dtype=np.float64)[:n_orig], A_ub, b_ub, A_eq, b_eq, box
+            ),
+        )
+        return False
+    tree.inject_incumbent(x_inc, float(obj))
+    return True
+
+
+def _improver_within_contingent(
+    cost: float,
+    *,
+    budget_on: bool,
+    tree,
+    heur_state: dict[str, float],
+    success_gain: float,
+    offset: float,
+    quot: float,
+) -> bool:
+    """Whether an improver-role heuristic costing ``cost`` fits the contingent.
+
+    The finder role is never gated: with no incumbent yet, securing the first one
+    (for pruning) takes priority. Once an incumbent exists the call is an improver
+    and must fit the success-weighted, node-proportional contingent (SCIP
+    ``heur_subnlp`` shape), so improvers that stop paying off shut themselves off.
+
+    Soundness is untouched either way: B&B stays exhaustive, so a skipped improver
+    can only cost nodes, never a wrong optimum.
+
+    One definition (#1344). The two copies this replaces differed **only** in
+    docstring wording — their executable bodies were identical under an AST compare
+    with docstrings stripped, which is why the raw text similarity read 0.87 and
+    looked like behavioural drift. The knobs stay parameters because each call site
+    still reads them from the environment itself; that duplication is noted in the
+    PR and left alone here.
+    """
+    if not budget_on or tree.incumbent() is None:
+        return True
+    _nodes = float(tree.stats().get("total_nodes", 0))
+    _weight = success_gain * (heur_state["found"] + 1) / (heur_state["calls"] + 1)
+    _contingent = offset + quot * _nodes * _weight
+    return (heur_state["cost"] + cost) <= _contingent
+
+
+def _record_improver_run(heur_state: dict[str, float], cost: float, improved: bool) -> None:
+    """Charge an improver-role run against the contingent and note success.
+
+    One definition (#1344): duplicated verbatim in :func:`solve_model` and
+    :func:`_solve_nlp_bb`, whose own comment says the governor there is
+    "mirrored from solve_model". ``heur_state`` is mutated in place, exactly as
+    the closed-over dict was.
+    """
+    heur_state["calls"] += 1
+    heur_state["cost"] += cost
+    if improved:
+        heur_state["found"] += 1
+
+
+def _validate_injected_candidate(x, evaluator, cl, cu, int_offsets, int_sizes):
+    """Validate a debugger-injected candidate against the ORIGINAL problem.
+
+    ``inject_incumbent`` trusts its caller (no feasibility re-check), so the
+    debugger's ``inject`` steer must verify integrality + constraint feasibility
+    here and hand the tree the point's true evaluated objective — never a
+    relaxation bound (CLAUDE.md §1). Returns ``(feasible, x_validated, obj)``;
+    pure reads only.
+
+    One definition (#1344): duplicated verbatim in :func:`solve_model` and
+    :func:`_solve_nlp_bb`. Each call site keeps a one-line binder so the
+    ``validator=`` callback stays a single-argument callable and the problem data
+    is still snapshotted at definition time.
+    """
+    xv = np.asarray(x, dtype=np.float64).copy()
+    if int_offsets and not _is_integer_feasible_solution(xv, int_offsets, int_sizes):
+        return False, xv, float("nan")
+    for _o, _s in zip(int_offsets, int_sizes):
+        xv[_o : _o + _s] = np.round(xv[_o : _o + _s])
+    if cl and not _check_constraint_feasibility(evaluator, xv, cl, cu):
+        return False, xv, float("nan")
+    _obj = float(evaluator.evaluate_objective(xv))
+    if not np.isfinite(_obj) or _obj >= _SENTINEL_THRESHOLD:
+        return False, xv, float("nan")
+    return True, xv, _obj
+
+
+def _affine_reduce(expr: Any, model: Model, s: float = 1.0):
+    """Reduce ``expr`` to ``({flat_index: coeff}, const)``, or ``None`` if not affine.
+
+    ``s`` is the sign/scale accumulated on the way down, so callers start at
+    ``1.0``. Used to spot two-variable equality linkages and affine selection rows.
+
+    One definition (#1344): this was duplicated **verbatim** inside
+    :func:`_branch_priority_integer_vars` and :func:`_sos1_selector_vars`. Both
+    copies closed over ``model`` alone and neither enclosing function rebinds it,
+    so threading it as a parameter is behaviour-preserving.
+
+    The modeling-core classes are imported here rather than at module scope to
+    keep ``solver.py``'s import-time coupling as it was, and the recursion lives
+    in a nested walk so that import happens once per top-level call instead of
+    once per expression node.
+    """
+    from discopt._relax.term_classifier import _get_flat_index
+    from discopt.modeling.core import (
+        BinaryOp,
+        Constant,
+        IndexExpression,
+        UnaryOp,
+        Variable,
+    )
+
+    def _walk(e: Any, sign: float):
+        if isinstance(e, Constant):
+            return ({}, sign * float(e.value))
+        if isinstance(e, (Variable, IndexExpression)):
+            flat = _get_flat_index(e, model)
+            if flat is None:
+                return None
+            return ({int(flat): sign}, 0.0)
+        if isinstance(e, UnaryOp) and e.op == "neg":
+            return _walk(e.operand, -sign)
+        if isinstance(e, BinaryOp):
+            if e.op in ("+", "-"):
+                left = _walk(e.left, sign)
+                right = _walk(e.right, sign if e.op == "+" else -sign)
+                if left is None or right is None:
+                    return None
+                d = dict(left[0])
+                for k, val in right[0].items():
+                    d[k] = d.get(k, 0.0) + val
+                return (d, left[1] + right[1])
+            if e.op == "*":
+                if isinstance(e.left, Constant):
+                    return _walk(e.right, sign * float(e.left.value))
+                if isinstance(e.right, Constant):
+                    return _walk(e.left, sign * float(e.right.value))
+        return None
+
+    return _walk(expr, s)
+
+
 def _branch_priority_integer_vars(model: Model) -> frozenset[int]:
     """Integer/binary flat indices that *gate* the model's nonlinear terms.
 
@@ -116,14 +310,7 @@ def _branch_priority_integer_vars(model: Model) -> frozenset[int]:
     branching-order metadata only — it never enters a bound or feasibility test,
     so it cannot affect soundness.
     """
-    from discopt._relax.term_classifier import _get_flat_index, classify_nonlinear_terms
-    from discopt.modeling.core import (
-        BinaryOp,
-        Constant,
-        IndexExpression,
-        UnaryOp,
-        Variable,
-    )
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     n = sum(v.size for v in model._variables)
     is_int = [False] * n
@@ -146,39 +333,10 @@ def _branch_priority_integer_vars(model: Model) -> frozenset[int]:
 
     priority: set[int] = {j for j in nl if 0 <= j < n and is_int[j]}
 
-    # Affine reduction of an expression to ``{idx: coeff}, const`` (None if the
-    # expression is not affine). Used to spot two-variable equality linkages.
-    def _affine(expr: Any, s: float = 1.0):
-        if isinstance(expr, Constant):
-            return ({}, s * float(expr.value))
-        if isinstance(expr, (Variable, IndexExpression)):
-            flat = _get_flat_index(expr, model)
-            if flat is None:
-                return None
-            return ({int(flat): s}, 0.0)
-        if isinstance(expr, UnaryOp) and expr.op == "neg":
-            return _affine(expr.operand, -s)
-        if isinstance(expr, BinaryOp):
-            if expr.op in ("+", "-"):
-                left = _affine(expr.left, s)
-                right = _affine(expr.right, s if expr.op == "+" else -s)
-                if left is None or right is None:
-                    return None
-                d = dict(left[0])
-                for k, val in right[0].items():
-                    d[k] = d.get(k, 0.0) + val
-                return (d, left[1] + right[1])
-            if expr.op == "*":
-                if isinstance(expr.left, Constant):
-                    return _affine(expr.right, s * float(expr.left.value))
-                if isinstance(expr.right, Constant):
-                    return _affine(expr.left, s * float(expr.right.value))
-        return None
-
     for c in model._constraints:
         if getattr(c, "sense", None) != "==":
             continue
-        reduced = _affine(c.body)
+        reduced = _affine_reduce(c.body, model)
         if reduced is None:
             continue
         nz = [(k, v) for k, v in reduced[0].items() if abs(v) > 1e-12]
@@ -215,14 +373,7 @@ def _sos1_selector_vars(model: Model) -> frozenset[int]:
     only** — it never enters a bound or feasibility test, so it cannot affect
     soundness. Returns an empty set when the structure is absent.
     """
-    from discopt._relax.term_classifier import _get_flat_index, classify_nonlinear_terms
-    from discopt.modeling.core import (
-        BinaryOp,
-        Constant,
-        IndexExpression,
-        UnaryOp,
-        Variable,
-    )
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     n = sum(v.size for v in model._variables)
     is_int = [False] * n
@@ -254,40 +405,13 @@ def _sos1_selector_vars(model: Model) -> frozenset[int]:
         # ``[0, 1]`` (ex1252's ``x18`` is continuous but ``= x36`` binary).
         return is_int[j] or (0.0 <= lb[j] and ub[j] <= 1.0 + 1e-9)
 
-    def _affine(expr: Any, s: float = 1.0):
-        if isinstance(expr, Constant):
-            return ({}, s * float(expr.value))
-        if isinstance(expr, (Variable, IndexExpression)):
-            flat = _get_flat_index(expr, model)
-            if flat is None:
-                return None
-            return ({int(flat): s}, 0.0)
-        if isinstance(expr, UnaryOp) and expr.op == "neg":
-            return _affine(expr.operand, -s)
-        if isinstance(expr, BinaryOp):
-            if expr.op in ("+", "-"):
-                left = _affine(expr.left, s)
-                right = _affine(expr.right, s if expr.op == "+" else -s)
-                if left is None or right is None:
-                    return None
-                d = dict(left[0])
-                for k, val in right[0].items():
-                    d[k] = d.get(k, 0.0) + val
-                return (d, left[1] + right[1])
-            if expr.op == "*":
-                if isinstance(expr.left, Constant):
-                    return _affine(expr.right, s * float(expr.left.value))
-                if isinstance(expr.right, Constant):
-                    return _affine(expr.left, s * float(expr.right.value))
-        return None
-
     # Pass 1: collect candidate selectors from every affine selection row
     # ``Σ s_i = k`` (k != 0, >= 2 continuous members).
     candidates: set[int] = set()
     for c in model._constraints:
         if getattr(c, "sense", None) != "==":
             continue
-        reduced = _affine(c.body)
+        reduced = _affine_reduce(c.body, model)
         if reduced is None:
             continue
         coeffs, const = reduced
@@ -312,7 +436,7 @@ def _sos1_selector_vars(model: Model) -> frozenset[int]:
     for c in model._constraints:
         if getattr(c, "sense", None) not in ("<=", ">="):
             continue
-        reduced = _affine(c.body)
+        reduced = _affine_reduce(c.body, model)
         if reduced is None:
             continue
         coeffs, const = reduced
@@ -8763,31 +8887,31 @@ def solve_model(
     # branches on integers/products and runs a feasibility-pump primal, closing
     # nvs17 to proven optimality. Opt-in via ``solve(lp_spatial=True)``; returns
     # ``None`` (falls through to the default path, no behavior change) for any model
-    # out of its scope or on any error. #860 widens that scope to "at least one integer
-    # variable, either objective sense, any continuous mix" — mixed-integer and
-    # maximize models served in minimize-equivalent space, with a partially infinite
-    # root box accepted — but the widening is BEHIND ``DISCOPT_LP_SPATIAL_MIXED``
-    # here too, not just on the #844 fallback's reserve.
+    # out of its scope or on any error.
     #
-    # Why the gate is flagged and not only the reserve (#860 review): the widened gate
-    # is not net-positive on the default path, which is CLAUDE.md §5 bar (2). Measured
-    # on ``gear4`` at a 25 s budget — a MIXED model (4 integer, 2 continuous with
-    # infinite upper bounds), so it is admitted only under the widening:
+    # #860 widened that scope to mixed-integer and MAXIMIZE models behind
+    # ``DISCOPT_LP_SPATIAL_MIXED``. That flag was RETIRED in #1357 under CLAUDE.md §5's
+    # retirement rule: its graduation panel ran and failed bar (2), and a flag that has
+    # been measured harmful has an exit rather than a permanent OFF. This call site
+    # therefore uses the engine's pre-#860 gate (pure-integer, MINIMIZE), which is
+    # ``solve_lp_spatial_bb``'s default.
+    #
+    # The measurement that retired it, on ``gear4`` at a 25 s budget — MIXED (4 integer,
+    # 2 continuous with infinite upper bounds), so admitted only under the widening:
     #
     #   pre-#860 gate : optimal, objective = 1.6434284641, certified,      3 nodes
     #   widened gate  : time_limit, objective = 17.514, UNcertified,    2673 nodes
     #
-    # i.e. the engine accepts a model the default path already certified in 3 nodes,
-    # then spends the whole budget to return an incumbent ~10.7x worse with no
-    # certificate. Sound (the bound never crosses the oracle; the earlier false
-    # certificate there was the LP-presolve bug fixed in #877) but a clear regression,
-    # and ``lp_spatial=True`` is a documented public kwarg. The capability is kept and
-    # is opt-in; what is not shipped by default is a measured loss.
+    # The engine accepts a model the default path already certified in 3 nodes, then
+    # spends the whole budget to return an incumbent ~10.7x worse with no certificate.
+    # Sound (the bound never crosses the oracle; the earlier false certificate there was
+    # the LP-presolve bug fixed in #877) but a clear regression on a documented public
+    # kwarg. The ``mixed=`` capability itself is kept and remains callable explicitly —
+    # see ``lp_spatial_bb._is_in_scope``.
     if kwargs.get("lp_spatial", False):
         _warn_abs_gap_ignored("The lp_spatial engine", abs_gap_tolerance)
         try:
             from discopt._relax.lp_spatial_bb import solve_lp_spatial_bb
-            from discopt.modeling.core import _lp_spatial_mixed_fallback_enabled
 
             _lps = solve_lp_spatial_bb(
                 model,
@@ -8795,7 +8919,6 @@ def solve_model(
                 gap_tolerance=gap_tolerance,
                 max_nodes=max_nodes,
                 root_cut_rounds=int(kwargs.get("lp_spatial_cut_rounds", 0)),
-                mixed=_lp_spatial_mixed_fallback_enabled(),
             )
         except Exception as _lps_exc:  # pragma: no cover - defensive
             logger.debug("lp_spatial engine failed, falling back: %s", _lps_exc)
@@ -13133,25 +13256,20 @@ def solve_model(
     _heuristic_governor = _get_heuristic_governor()
 
     def _improver_allowed(cost: float) -> bool:
-        """Whether an *improver*-role heuristic costing ``cost`` may run now.
-
-        The finder role is never gated: when there is no incumbent yet, securing
-        the first one (for pruning) takes priority. Once an incumbent exists the
-        call is an improver and must fit the success-weighted, node-proportional
-        contingent (SCIP ``heur_subnlp`` shape)."""
-        if not _heur_budget_on or tree.incumbent() is None:
-            return True
-        _nodes = float(tree.stats().get("total_nodes", 0))
-        _weight = _HEUR_SUCCESS_GAIN * (_heur_state["found"] + 1) / (_heur_state["calls"] + 1)
-        _contingent = _HEUR_BUDGET_OFFSET + _HEUR_BUDGET_QUOT * _nodes * _weight
-        return (_heur_state["cost"] + cost) <= _contingent
+        """Bind this solve's governor knobs to the shared contingent test (#1344)."""
+        return _improver_within_contingent(
+            cost,
+            budget_on=_heur_budget_on,
+            tree=tree,
+            heur_state=_heur_state,
+            success_gain=_HEUR_SUCCESS_GAIN,
+            offset=_HEUR_BUDGET_OFFSET,
+            quot=_HEUR_BUDGET_QUOT,
+        )
 
     def _record_improver(cost: float, improved: bool) -> None:
-        """Charge an improver-role run against the contingent and note success."""
-        _heur_state["calls"] += 1
-        _heur_state["cost"] += cost
-        if improved:
-            _heur_state["found"] += 1
+        """Bind this solve's heuristic state to the shared recorder (#1344)."""
+        _record_improver_run(_heur_state, cost, improved)
 
     if subnlp_enabled:
         try:
@@ -13666,25 +13784,13 @@ def solve_model(
         _ioff=int_offsets,
         _isz=int_sizes,
     ):
-        """Validate a debugger-injected candidate against the ORIGINAL problem.
+        """Bind this solve's problem data to the shared validator (#1344).
 
-        ``inject_incumbent`` trusts its caller (no feasibility re-check), so
-        the debugger's ``inject`` steer must verify integrality + constraint
-        feasibility here and hand the tree the point's true evaluated
-        objective — never a relaxation bound (CLAUDE.md §1). Returns
-        ``(feasible, x_validated, obj)``; pure reads only.
+        The default arguments snapshot the data at definition time, exactly as
+        the inlined copy did, and keep this a one-argument ``validator=``
+        callback.
         """
-        xv = np.asarray(x, dtype=np.float64).copy()
-        if _ioff and not _is_integer_feasible_solution(xv, _ioff, _isz):
-            return False, xv, float("nan")
-        for _o, _s in zip(_ioff, _isz):
-            xv[_o : _o + _s] = np.round(xv[_o : _o + _s])
-        if _cl and not _check_constraint_feasibility(_ev, xv, _cl, _cu):
-            return False, xv, float("nan")
-        _obj = float(_ev.evaluate_objective(xv))
-        if not np.isfinite(_obj) or _obj >= _SENTINEL_THRESHOLD:
-            return False, xv, float("nan")
-        return True, xv, _obj
+        return _validate_injected_candidate(x, _ev, _cl, _cu, _ioff, _isz)
 
     # Lazy re-separation governor state (C-42 Part 2; see the module-level
     # ``_LAZY_RESEP_*`` constants). Touched only under active pool inheritance.
@@ -18361,24 +18467,20 @@ def _solve_nlp_bb(
     _heuristic_governor = _get_heuristic_governor()
 
     def _improver_allowed(cost: float) -> bool:
-        """Whether an improver-role LNS heuristic costing ``cost`` may run now.
-
-        Never gated before the first incumbent (securing one for pruning wins).
-        Once an incumbent exists the call must fit the success-weighted,
-        node-proportional contingent (SCIP ``heur_subnlp`` shape)."""
-        if not _heur_budget_on or tree.incumbent() is None:
-            return True
-        _nodes = float(tree.stats().get("total_nodes", 0))
-        _weight = _HEUR_SUCCESS_GAIN * (_heur_state["found"] + 1) / (_heur_state["calls"] + 1)
-        _contingent = _HEUR_BUDGET_OFFSET + _HEUR_BUDGET_QUOT * _nodes * _weight
-        return (_heur_state["cost"] + cost) <= _contingent
+        """Bind this solve's governor knobs to the shared contingent test (#1344)."""
+        return _improver_within_contingent(
+            cost,
+            budget_on=_heur_budget_on,
+            tree=tree,
+            heur_state=_heur_state,
+            success_gain=_HEUR_SUCCESS_GAIN,
+            offset=_HEUR_BUDGET_OFFSET,
+            quot=_HEUR_BUDGET_QUOT,
+        )
 
     def _record_improver(cost: float, improved: bool) -> None:
-        """Charge an improver-role run against the contingent and note success."""
-        _heur_state["calls"] += 1
-        _heur_state["cost"] += cost
-        if improved:
-            _heur_state["found"] += 1
+        """Bind this solve's heuristic state to the shared recorder (#1344)."""
+        _record_improver_run(_heur_state, cost, improved)
 
     from discopt import debug as _debug
 
@@ -18390,25 +18492,13 @@ def _solve_nlp_bb(
         _ioff=int_offsets,
         _isz=int_sizes,
     ):
-        """Validate a debugger-injected candidate against the ORIGINAL problem.
+        """Bind this solve's problem data to the shared validator (#1344).
 
-        ``inject_incumbent`` trusts its caller (no feasibility re-check), so
-        the debugger's ``inject`` steer must verify integrality + constraint
-        feasibility here and hand the tree the point's true evaluated
-        objective — never a relaxation bound (CLAUDE.md §1). Returns
-        ``(feasible, x_validated, obj)``; pure reads only.
+        The default arguments snapshot the data at definition time, exactly as
+        the inlined copy did, and keep this a one-argument ``validator=``
+        callback.
         """
-        xv = np.asarray(x, dtype=np.float64).copy()
-        if _ioff and not _is_integer_feasible_solution(xv, _ioff, _isz):
-            return False, xv, float("nan")
-        for _o, _s in zip(_ioff, _isz):
-            xv[_o : _o + _s] = np.round(xv[_o : _o + _s])
-        if _cl and not _check_constraint_feasibility(_ev, xv, _cl, _cu):
-            return False, xv, float("nan")
-        _obj = float(_ev.evaluate_objective(xv))
-        if not np.isfinite(_obj) or _obj >= _SENTINEL_THRESHOLD:
-            return False, xv, float("nan")
-        return True, xv, _obj
+        return _validate_injected_candidate(x, _ev, _cl, _cu, _ioff, _isz)
 
     # Set when the interactive debugger's `quit` breaks the search loop: a
     # user-interrupted exit proves nothing, so the status decision below must
@@ -21066,7 +21156,7 @@ def _solve_lp(
     # declared. This can only add an answer: it runs ONLY where the route was
     # about to report `error`, so no solve that succeeds today changes at all,
     # which is why it needs no §5 graduation (unlike flipping
-    # DISCOPT_POUNCE_DECLARED_BOX, which moves the box for every solve in the
+    # the process-wide flag retired in #1358, which moved the box for every solve in the
     # window). The cross-checks are unconditional and apply to the retry too, so
     # it cannot certify anything the first attempt could not.
     if _declared_box_retry_applies(model):
@@ -21420,10 +21510,12 @@ def _declared_box_retry_applies(model: Model) -> bool:
 
     True only when BOTH hold:
 
-    * the legacy 1e15 threshold is in force, so a retry would actually differ
-      (inside ``declared_box_honored``, or with ``DISCOPT_POUNCE_DECLARED_BOX=1``
-      already set, the first attempt used the declared box and re-running it
-      would just burn the same time to the same answer), and
+    * the legacy 1e15 threshold is in force, so a retry would actually differ.
+      This is what stops the retry recursing: inside ``declared_box_honored`` the
+      first attempt already used the declared box, so re-running would burn the
+      same time to the same answer. (It also used to mean "the process-wide flag
+      is off"; that flag was retired in #1358 and the recursion guard is now the
+      condition's whole job.) And
     * the model declares at least one bound in ``[1e15, 1e19)`` -- the window the
       threshold discards and POUNCE can in fact handle. Outside it the two arms
       build a bit-identical box, so the retry is a provable no-op.
@@ -21456,12 +21548,13 @@ def _declared_box_relaxed_to_ipm_inf(bounds) -> bool:
     is bounded (issue #850 Obs 1). A bound at or beyond ``1e20`` (or ``±inf``) is
     genuinely infinite for both engines and is not counted.
 
-    The window's lower edge is the IPM's live threshold, not a literal: with
-    ``DISCOPT_POUNCE_DECLARED_BOX`` on (opt-in; the default remains OFF pending
-    the §5 graduation gate) the IPM honors a declared bound up to POUNCE's own
-    ``1e19`` infinity, so the window narrows to ``[1e19, 1e20)`` and the guard
+    The window's lower edge is the IPM's live threshold, not a literal: inside a
+    ``declared_box_honored`` block the IPM honors a declared bound up to POUNCE's
+    own ``1e19`` infinity, so the window narrows to ``[1e19, 1e20)`` and the guard
     stops firing on the four orders of magnitude the engine was always able to
-    handle. Unset or ``=0`` keeps the legacy ``[1e15, 1e20)``.
+    handle. Outside one it is the legacy ``[1e15, 1e20)``. (The process-wide flag
+    that used to widen it everywhere was retired in #1358; reading the threshold
+    live rather than hardcoding it is what makes this correct either way.)
     Reading it live keeps the guard and the marshaling from drifting apart — a
     hardcoded ``1e15`` here would defer verdicts the IPM no longer relaxes.
     """
@@ -25392,8 +25485,14 @@ def _solve_milp_bb(
             lbs[i] = _INFEASIBILITY_SENTINEL
 
     def _maybe_inject_snapped(x_row, node_lb_i, node_ub_i):
-        # Purification (increment 3): near-integral interior points become
-        # exact incumbents via snap-fix-resolve.
+        """Snap-fix-resolve only: near-integral interior points become incumbents.
+
+        Deliberately does NOT carry the MIQP funnel's #1064 round-fix-resolve
+        fallback — see :func:`_maybe_inject_snapped_or_rounded`. Adding it here
+        would introduce incumbents this path does not find today, which is a
+        bound-changing behaviour change needing its own CLAUDE.md §5 evidence,
+        not a de-duplication (#1344).
+        """
         inc = _pounce_snap_incumbent(
             x_row,
             int_offsets,
@@ -25411,44 +25510,20 @@ def _solve_milp_bb(
         )
         if inc is None:
             return
-        x_inc = np.asarray(inc[1][:n_vars], dtype=np.float64).copy()
-        # #952: this is the channel the exit gate caught, and the MIQP twin of
-        # this funnel already guards it (``_node_point_feasible`` below). The
-        # snap re-solve fixes the integers and asks POUNCE for the continuous
-        # completion; POUNCE honours the slack bounds standing in for inequality
-        # rows only to its own ~1e-8 *relative* tolerance, which on a big-M row
-        # like ``eta <= 1e6*y`` is a 1e-2 absolute excursion. The point comes
-        # back exactly integral, so nothing downstream re-examines it: the tree
-        # took it as the incumbent and reported it ``optimal``.
-        #
-        # Measured on ``test_bound_active_recourse_is_sound``: all 4 node
-        # relaxation points were inside the rows, and the offending
-        # ``[y=1.0, eta=-1.00000001e+06]`` arrived here — this funnel, not a node
-        # LP. So verify the candidate against the same rows and box the node
-        # solves are held to, at the repo's declared ``abs=1e-6``.
-        #
-        # Declining is free: injection is a heuristic accelerator, the subtree
-        # stays open, and the tree re-finds the point from a node relaxation if
-        # it is genuinely feasible. A candidate that fails here is one the exit
-        # gate would otherwise refuse the whole solve over.
-        _box_inc = np.stack(
-            [
-                np.asarray(node_lb_i, dtype=np.float64)[:n_orig],
-                np.asarray(node_ub_i, dtype=np.float64)[:n_orig],
-            ],
-            axis=1,
+        _verify_and_inject_candidate(
+            tree,
+            np.asarray(inc[1][:n_vars], dtype=np.float64).copy(),
+            inc[0],
+            n_orig=n_orig,
+            node_lb_i=node_lb_i,
+            node_ub_i=node_ub_i,
+            A_ub=_A_ub_m,
+            b_ub=_b_ub_m,
+            A_eq=_A_eq_m,
+            b_eq=_b_eq_m,
+            log_prefix="MILP-BB",
+            how="snapped",
         )
-        if not _matrix_solution_feasible(
-            x_inc[:n_orig], _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, _box_inc
-        ):
-            logger.debug(
-                "MILP-BB: rejected a snapped incumbent outside its rows/box (%s)",
-                _matrix_solution_violations(
-                    x_inc[:n_orig], _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, _box_inc
-                ),
-            )
-            return
-        tree.inject_incumbent(x_inc, float(inc[0]))
 
     # Path B: in POUNCE-only mode the structured engine solves node relaxations
     # directly (no JAX recompile on cut-augmented shapes): the exact-vertex
@@ -26101,9 +26176,16 @@ def _solve_miqp_bb(
     # wall-clock-bounded search to this gate.
     _round = _RoundBudget(time_limit)
 
-    def _maybe_inject_snapped(x_row, node_lb_i, node_ub_i):
-        # Purification (increment 3): near-integral interior points become
-        # exact incumbents via snap-fix-resolve.
+    def _maybe_inject_snapped_or_rounded(x_row, node_lb_i, node_ub_i):
+        """Snap-fix-resolve, then #1064 round-fix-resolve if the snap declines.
+
+        Named apart from the MILP funnel's :func:`_maybe_inject_snapped` (#1344)
+        because the two genuinely differ: this path carries the round-fix-resolve
+        fallback and the quadratic term, that one does not. The #952 verification
+        both funnels owe their candidates is shared — see
+        :func:`_verify_and_inject_candidate` — so the guard cannot drift between
+        them even though the funnels do.
+        """
         inc = _pounce_snap_incumbent(
             x_row,
             int_offsets,
@@ -26145,23 +26227,22 @@ def _solve_miqp_bb(
             )
             if inc is not None:
                 how = "rounded"
-        if inc is not None:
-            x_inc = np.asarray(inc[1][:n_vars], dtype=np.float64).copy()
-            # #952: an injected incumbent goes straight into the tree as a
-            # candidate answer, so it is verified here rather than only at the
-            # exit gate. The snap re-solve fixes the integers and asks POUNCE for
-            # the continuous completion; an "optimal" verdict there is still a
-            # POUNCE iterate, not a proof that the point sits inside the rows.
-            if _node_point_feasible(x_inc, node_lb_i, node_ub_i):
-                tree.inject_incumbent(x_inc, float(inc[0]))
-            else:
-                logger.debug(
-                    "MIQP-BB: rejected a %s incumbent outside its rows/box (%s)",
-                    how,
-                    _matrix_solution_violations(
-                        x_inc[:n_orig], _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, None
-                    ),
-                )
+        if inc is None:
+            return
+        _verify_and_inject_candidate(
+            tree,
+            np.asarray(inc[1][:n_vars], dtype=np.float64).copy(),
+            inc[0],
+            n_orig=n_orig,
+            node_lb_i=node_lb_i,
+            node_ub_i=node_ub_i,
+            A_ub=_A_ub_m,
+            b_ub=_b_ub_m,
+            A_eq=_A_eq_m,
+            b_eq=_b_eq_m,
+            log_prefix="MIQP-BB",
+            how=how,
+        )
 
     def _handle_nonclean(i, lbs, sols, x_full, obj_val, node_lb_i, node_ub_i):
         # A node whose QP relaxation did not cleanly converge (non-KKT, solver
@@ -26210,7 +26291,7 @@ def _solve_miqp_bb(
                 lbs[i] = float(obj_val)
                 _gap_certified = False
             if lbs[i] < _SENTINEL_THRESHOLD:
-                _maybe_inject_snapped(sols[i], node_lb_i, node_ub_i)
+                _maybe_inject_snapped_or_rounded(sols[i], node_lb_i, node_ub_i)
             return
         lb_c = np.clip(node_lb_i, -_SPC, _SPC)
         ub_c = np.clip(node_ub_i, -_SPC, _SPC)
@@ -26232,7 +26313,7 @@ def _solve_miqp_bb(
             lbs[i] = rec[1]
             sols[i] = np.asarray(rec[2][:n_vars], dtype=np.float64)
             if lbs[i] < _SENTINEL_THRESHOLD:
-                _maybe_inject_snapped(sols[i], node_lb_i, node_ub_i)
+                _maybe_inject_snapped_or_rounded(sols[i], node_lb_i, node_ub_i)
         elif rec is not None:  # Phase-1-certified infeasible: rigorous prune.
             lbs[i] = _INFEASIBILITY_SENTINEL
         else:  # inconclusive — keep the node open, never a false-infeasible.
@@ -26334,7 +26415,7 @@ def _solve_miqp_bb(
                 result_lbs[i] = obj_vals[i] + float(qp_data.obj_const)
                 result_sols[i] = x_vals[i, :n_vars]
                 if result_lbs[i] < _SENTINEL_THRESHOLD:
-                    _maybe_inject_snapped(result_sols[i], node_lb, node_ub)
+                    _maybe_inject_snapped_or_rounded(result_sols[i], node_lb, node_ub)
             else:
                 # OPTIMAL-but-inconsistent or non-clean (iteration limit / crash):
                 # an untrusted bound. Keep the node open (POUNCE recovery), never a
