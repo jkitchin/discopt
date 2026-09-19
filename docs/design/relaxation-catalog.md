@@ -396,6 +396,17 @@ importing — so a module's status never has to be re-derived from a `grep`.
 | `tooling` | design-time / offline / CI instrumentation, deliberately off the solve path | a reason naming its consumer, or stating it has no automated one |
 | `incubating` | implemented and tested, no production call site yet | a reason naming what would wire it in, + ≥1 test importer |
 
+### Declared `public` entry points
+
+These are optional, user-facing features rather than internal machinery — the user imports
+them, the solver never does. Both are JAX-optional and outside the default solve path, which
+imports zero `jax` modules.
+
+| entry point | what it is |
+|---|---|
+| `discopt._relax.differentiable_solve.differentiable_solve` | unified differentiable LP/QP/MILP/MIQP solve, dispatching by problem class. Not to be confused with the *function* of the same name in the production `_relax/differentiable.py` — #1231 conflated the two. |
+| `discopt._relax.pounce_layer.make_nlp_layer` | a POUNCE solve as a differentiable JAX layer, composable inside `jax.grad`/`jit`/`vmap` (`docs/notebooks/differentiable_pounce_layer.ipynb`). |
+
 `incubating` is a declaration, not a parking space: it asserts the module is finished enough to
 be wired in. When that stops being true the module is retired — deleted with its tests and doc
 references — rather than left declared.

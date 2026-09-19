@@ -39,6 +39,7 @@ from discopt._relax.module_status import MODULE_STATUS, ModuleStatus
 PKG_ROOT = pathlib.Path(__file__).resolve().parents[1] / "discopt"
 SRC_ROOT = PKG_ROOT.parent
 TESTS_ROOT = pathlib.Path(__file__).resolve().parent
+CATALOG = pathlib.Path(__file__).resolve().parents[2] / "docs/design/relaxation-catalog.md"
 RELAX = "discopt._relax"
 
 # The manifest is the declaration mechanism, so it cannot declare itself without
@@ -284,4 +285,23 @@ def test_no_unreachable_module_cluster(graph):
     assert not unreachable, (
         "these _relax modules are reachable only from other unreachable modules "
         f"-- a dead cluster; retire it or declare its entry point (#1347): {unreachable}"
+    )
+
+
+@pytest.mark.parametrize(
+    "name", sorted(n for n, e in MODULE_STATUS.items() if e.status == "public")
+)
+def test_public_modules_are_documented(name):
+    """#1347 requires a ``public`` module to say in the docs that it is one.
+
+    Without this the ``public`` status is a private note: the whole point is that
+    a reader can tell an optional user-facing feature from internal machinery
+    without re-deriving it.
+    """
+    assert CATALOG.exists(), f"missing {CATALOG}"
+    text = CATALOG.read_text(encoding="utf-8")
+    entry_point = MODULE_STATUS[name].entry_point
+    assert entry_point in text, (
+        f"{name} is declared public but its entry point {entry_point!r} is not "
+        f"named in {CATALOG.name}; document it or re-declare the module (#1347)"
     )
