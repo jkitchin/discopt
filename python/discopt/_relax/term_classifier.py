@@ -1,5 +1,5 @@
 """
-Nonlinear Term Classifier for AMP (Adaptive Multivariate Partitioning).
+Nonlinear term classifier.
 
 Walks the expression DAG of a Model and catalogs nonlinear term structure:
   - bilinear terms:   x_i * x_j  (two distinct continuous variables)
@@ -13,6 +13,13 @@ This catalog drives:
   2. MILP relaxation construction (which terms get McCormick / lambda constraints)
   3. Interaction graph for min-vertex-cover variable selection
 
+It originated as AMP infrastructure and is named for that in the theory references
+below, but it is **general**: every nonlinear route consults
+:func:`classify_nonlinear_terms`, which prefers the Rust arena classifier
+(``discopt-core::term_classifier``, called ``amp.rs`` until #1343) and falls back to
+the Python walk here. Which of the two ran, and why, is recorded — see
+:func:`classifier_route_counts`.
+
 Theory references:
   - Nagarajan et al., CP 2016: http://harshangrjn.github.io/pdf/CP_2016.pdf
   - Nagarajan et al., JOGO 2018: http://harshangrjn.github.io/pdf/JOGO_2018.pdf
@@ -21,6 +28,8 @@ Theory references:
 
 from __future__ import annotations
 
+import logging
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -39,6 +48,108 @@ from discopt.modeling.core import (
     UnaryOp,
     Variable,
 )
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Which classifier ran, and why (issue #1343)
+# ---------------------------------------------------------------------------
+#
+# :func:`classify_nonlinear_terms` prefers the Rust arena classifier and falls
+# back to the Python walk. Until #1343 that fallback was silent — three bare
+# ``except Exception: return None`` arms plus three structural declines, all
+# indistinguishable from a Rust success, so "the Rust path is in use" was an
+# assumption rather than a measured fact (CLAUDE.md §7 applied to production
+# code). Every route is now named, counted and logged.
+#
+# The counters are a lock-guarded module global rather than a ``ContextVar`` on
+# purpose. ``_run_with_deep_recursion`` runs the classification on a worker
+# thread inside a *copy* of the caller's context, and its own docstring states
+# that "writes made by ``fn`` still cannot leak back here" — so a ContextVar
+# written during classification would record nothing on exactly the deep models
+# the fallback matters most for, while working fine on small ones. That is an
+# instrument that silently measures nothing (CLAUDE.md §6). Recording happens on
+# the caller's thread instead, after the runner returns.
+
+#: The Rust arena classifier produced the catalog.
+ROUTE_RUST = "rust"
+#: Model has an expandable square; the Rust path is skipped before it is tried.
+ROUTE_PY_EXPANDABLE_SQUARE = "python:expandable_square"
+#: ``discopt._rust`` could not be imported (extension not built).
+ROUTE_PY_IMPORT_FAILED = "python:rust_import_failed"
+#: ``model_to_repr``/``classify_nonlinear_terms`` raised.
+ROUTE_PY_CLASSIFY_RAISED = "python:rust_classify_raised"
+#: Payload reports ``general_nl`` terms, whose public API needs Python objects.
+ROUTE_PY_GENERAL_NL_OBJECTS = "python:general_nl_expression_objects_needed"
+#: The degree cross-check (``is_objective_linear``/``is_constraint_linear``) raised.
+ROUTE_PY_DEGREE_CHECK_RAISED = "python:degree_check_raised"
+#: Model is provably nonlinear but the payload catalogued nothing.
+ROUTE_PY_CATALOG_INCOMPLETE = "python:rust_catalog_incomplete"
+
+_ROUTE_LOCK = threading.Lock()
+_ROUTE_COUNTS: dict[str, int] = {}
+_ROUTE_LAST_DETAIL: dict[str, str] = {}
+
+
+@dataclass(frozen=True)
+class _RustAttempt:
+    """Outcome of the Rust fast path: the catalog, or the route that declined it."""
+
+    terms: "NonlinearTerms | None"
+    route: str
+    detail: str | None = None
+
+
+def classifier_route_counts() -> dict[str, int]:
+    """Return ``{route: times taken}`` since the last reset, as a copy.
+
+    Keys are the ``ROUTE_*`` constants in this module. ``ROUTE_RUST`` counts the
+    solves where the Rust classifier produced the catalog; every other key is a
+    fallback to the Python walk and names its reason.
+    """
+    with _ROUTE_LOCK:
+        return dict(_ROUTE_COUNTS)
+
+
+def classifier_route_details() -> dict[str, str]:
+    """Return ``{route: last detail}`` — the most recent exception repr per route.
+
+    Populated only for the routes that decline because something raised; the
+    structural declines carry no detail.
+    """
+    with _ROUTE_LOCK:
+        return dict(_ROUTE_LAST_DETAIL)
+
+
+def reset_classifier_route_counts() -> None:
+    """Clear the route counters and details. Intended for tests and probes."""
+    with _ROUTE_LOCK:
+        _ROUTE_COUNTS.clear()
+        _ROUTE_LAST_DETAIL.clear()
+
+
+def _record_route(attempt: _RustAttempt) -> None:
+    """Count ``attempt``'s route and log it. Called on the CALLER's thread."""
+    with _ROUTE_LOCK:
+        _ROUTE_COUNTS[attempt.route] = _ROUTE_COUNTS.get(attempt.route, 0) + 1
+        if attempt.detail is not None:
+            _ROUTE_LAST_DETAIL[attempt.route] = attempt.detail
+
+    if attempt.route == ROUTE_RUST:
+        logger.debug("term classifier: Rust arena classifier produced the catalog")
+        return
+    if attempt.detail is not None and attempt.route != ROUTE_PY_IMPORT_FAILED:
+        # Something raised inside the Rust path. That is a defect in it, not a
+        # routine decline, so it is not whispered.
+        logger.warning(
+            "term classifier fell back to the Python walk: %s (%s)",
+            attempt.route,
+            attempt.detail,
+        )
+        return
+    logger.debug("term classifier fell back to the Python walk: %s", attempt.route)
+
 
 # ---------------------------------------------------------------------------
 # Data structure
@@ -666,6 +777,11 @@ def classify_nonlinear_terms(model: Model) -> NonlinearTerms:
     available, falling back to the Python implementation for unsupported models
     and for cases that need concrete ``general_nl`` expression objects.
 
+    Which route ran is counted and logged (#1343): read it with
+    :func:`classifier_route_counts`, and :func:`classifier_route_details` for the
+    exception that caused a raising route. Every fallback is a named ``ROUTE_*``
+    reason rather than a silent ``None``.
+
     The Python fallback (``distribute_products`` → ``_classify_node``) recurses
     per expression node, so a deep body blew the default 1000-frame limit and
     raised ``RecursionError``.  Callers treat that as "no reformulation
@@ -675,35 +791,53 @@ def classify_nonlinear_terms(model: Model) -> NonlinearTerms:
     factorable walks (issues #266/#271).
     """
 
-    def _classify() -> NonlinearTerms:
-        if not _contains_expandable_square(model):
-            rust_terms = _classify_nonlinear_terms_rust(model)
-            if rust_terms is not None:
-                return rust_terms
-        return _classify_nonlinear_terms_python(model)
+    def _classify() -> tuple[NonlinearTerms, _RustAttempt]:
+        if _contains_expandable_square(model):
+            attempt = _RustAttempt(None, ROUTE_PY_EXPANDABLE_SQUARE)
+        else:
+            attempt = _classify_nonlinear_terms_rust(model)
+            if attempt.terms is not None:
+                return attempt.terms, attempt
+        return _classify_nonlinear_terms_python(model), attempt
 
     from .convexity.rules import _run_with_deep_recursion
 
-    return _run_with_deep_recursion(_classify, depth_need=_classify_recursion_headroom(model))
+    # The route is returned rather than published from inside ``_classify``: on
+    # the deep path that closure runs on a worker thread whose context copy is
+    # discarded, so recording there would lose exactly the deep models (#1343).
+    terms, attempt = _run_with_deep_recursion(
+        _classify, depth_need=_classify_recursion_headroom(model)
+    )
+    _record_route(attempt)
+    return terms
 
 
-def _classify_nonlinear_terms_rust(model: Model) -> NonlinearTerms | None:
-    """Return Rust-classified terms when the fast path can preserve the API."""
+def _classify_nonlinear_terms_rust(model: Model) -> _RustAttempt:
+    """Attempt the Rust fast path; on decline, name the route that declined it.
+
+    Returns an :class:`_RustAttempt` whose ``terms`` is ``None`` for every
+    decline. The exception arms record ``repr(exc)`` as ``detail`` instead of
+    discarding it — a Rust failure and a Rust success must not look alike
+    (#1343).
+    """
     try:
         from discopt._rust import model_to_repr
-    except Exception:
-        return None
+    except Exception as exc:
+        return _RustAttempt(None, ROUTE_PY_IMPORT_FAILED, repr(exc))
 
+    # Named ``model_repr``, not ``repr``: assigning the builtin's name makes it a
+    # local for the WHOLE function, so the ``repr(exc)`` calls in these arms would
+    # raise UnboundLocalError or call the ModelRepr object instead (#1343).
     try:
-        repr = model_to_repr(model)
-        payload = repr.classify_nonlinear_terms()
-    except Exception:
-        return None
+        model_repr = model_to_repr(model)
+        payload = model_repr.classify_nonlinear_terms()
+    except Exception as exc:
+        return _RustAttempt(None, ROUTE_PY_CLASSIFY_RAISED, repr(exc))
 
     # The public API exposes the actual Python expression objects for general_nl.
     # The Rust arena sees only node ids, so keep those models on the Python path.
     if int(payload.get("general_nl_count", 0)) != 0:
-        return None
+        return _RustAttempt(None, ROUTE_PY_GENERAL_NL_OBJECTS)
 
     terms = _terms_from_rust_payload(payload)
 
@@ -716,16 +850,17 @@ def _classify_nonlinear_terms_rust(model: Model) -> NonlinearTerms | None:
     # Python walk, which records the term in ``general_nl`` so the relaxation
     # builder and the simplex engine guard both see it.
     if not _terms_are_empty(terms):
-        return terms
+        return _RustAttempt(terms, ROUTE_RUST)
     try:
-        fully_linear = repr.is_objective_linear() and all(
-            repr.is_constraint_linear(i) for i in range(repr.n_constraints)
+        fully_linear = model_repr.is_objective_linear() and all(
+            model_repr.is_constraint_linear(i) for i in range(model_repr.n_constraints)
         )
-    except Exception:
-        return None
+    except Exception as exc:
+        return _RustAttempt(None, ROUTE_PY_DEGREE_CHECK_RAISED, repr(exc))
     if not fully_linear:
-        return None  # nonlinear but nothing catalogued → Python path
-    return terms
+        # Nonlinear but nothing catalogued → the Python walk records it.
+        return _RustAttempt(None, ROUTE_PY_CATALOG_INCOMPLETE)
+    return _RustAttempt(terms, ROUTE_RUST)
 
 
 def _terms_are_empty(terms: NonlinearTerms) -> bool:

@@ -468,7 +468,7 @@ def test_negated_constant_product_classifies_as_bilinear_both_paths():
     # Default dispatch (Rust fast path for this product-only model).
     assert (0, 1) in classify_nonlinear_terms(m).bilinear
     # Both backends must agree.
-    rust_terms = _classify_nonlinear_terms_rust(m)
+    rust_terms = _classify_nonlinear_terms_rust(m).terms
     assert rust_terms is not None
     assert (0, 1) in rust_terms.bilinear
     assert (0, 1) in _classify_nonlinear_terms_python(m).bilinear
