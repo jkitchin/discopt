@@ -514,9 +514,27 @@ pub fn forward_propagate_into<'a>(
     }
     scratch.order.sort_unstable();
 
+    // `Sum` needs to know how many elements it folds; nothing else does, so the
+    // shape pass is paid only by arenas that contain a reduction (#1364).
+    let reduce_counts = if scratch
+        .order
+        .iter()
+        .any(|i| matches!(arena.get(ExprId(*i)), ExprNode::Sum { .. }))
+    {
+        sum_reduce_counts(arena)
+    } else {
+        Vec::new()
+    };
+    let empty: [Option<usize>; 0] = [];
+    let counts: &[Option<usize>] = if reduce_counts.is_empty() {
+        &empty
+    } else {
+        &reduce_counts
+    };
+
     for k in 0..scratch.order.len() {
         let i = scratch.order[k];
-        let v = eval_node_interval(arena, ExprId(i), var_bounds, &scratch.bounds);
+        let v = eval_node_interval(arena, ExprId(i), var_bounds, &scratch.bounds, counts);
         scratch.bounds[i] = v;
     }
     &scratch.bounds
@@ -534,12 +552,93 @@ pub fn forward_propagate(arena: &ExprArena, id: ExprId, var_bounds: &[Interval])
     scratch.bounds
 }
 
+/// Whether `id` provably stands for exactly one scalar element.
+///
+/// Conservative by construction: anything not obviously scalar answers `false`.
+/// Used only to decide whether a reduction may pass a tightening down to its
+/// operand (#1364), where a wrong `false` costs a tightening and a wrong `true`
+/// would be unsound. Full shape inference lives in `expand::shapes_of`; this is
+/// not a second copy of it, only the one-element question.
+fn is_single_element(arena: &ExprArena, id: ExprId) -> bool {
+    match arena.get(id) {
+        ExprNode::Constant(_) => true,
+        ExprNode::ConstantArray(data, _) => data.len() == 1,
+        ExprNode::Variable { size, .. } => *size == 1,
+        ExprNode::Parameter { shape, .. } => shape.iter().product::<usize>() == 1,
+        // A full reduction is scalar whatever it reduced.
+        ExprNode::Sum { axis: None, .. } => true,
+        ExprNode::SumOver { .. } => true,
+        _ => false,
+    }
+}
+/// How many elements each `Sum` node folds, or `None` where it cannot be said.
+///
+/// `eval_node_interval` carries ONE scalar `Interval` per node, holding the hull
+/// over an array node's elements. The enclosure of a reduction is therefore
+/// `[n*lo, n*hi]`, and `n` is the only missing piece -- hence this table. Shapes
+/// come from `expand::shapes_of`, the single definition of shape inference for
+/// this arena; a shape error (a model this arena cannot shape) leaves every entry
+/// `None`, which the `Sum` rule reads as "abstain".
+///
+/// Indexed by node id; non-`Sum` nodes are `None` and never read.
+fn sum_reduce_counts(arena: &ExprArena) -> Vec<Option<usize>> {
+    let n = arena.len();
+    let mut out = vec![None; n];
+    let shapes = match crate::expand::shapes_of(arena) {
+        Ok(s) => s,
+        Err(_) => return out,
+    };
+    for i in 0..n {
+        if let ExprNode::Sum { operand, axis } = arena.get(ExprId(i)) {
+            let shape = &shapes[operand.0];
+            out[i] = match axis {
+                // Full reduction: every element folds into one scalar.
+                None => Some(shape.iter().product::<usize>().max(1)),
+                // Axis reduction: each output element folds that axis's length.
+                Some(ax) => shape.get(*ax).copied(),
+            };
+        }
+    }
+    out
+}
+
+/// Sound enclosure of a reduction that folds `n` elements, each enclosed by `a`.
+///
+/// Every element lies in `[a.lo, a.hi]`, so their sum lies in `[n*a.lo, n*a.hi]`.
+/// Returning `a` itself -- which this code did until #1364 -- is NOT conservative:
+/// it is narrow, an enclosure that does not contain the value. On
+/// `out == sum(C * z, axis=1)` with `C = [[-1, -1]]` and `z in [0, 4]^2` it gave
+/// `out >= -4` where the true floor is `-8`, an invalid FBBT tightening that cut
+/// the optimum out of the box and let the tree certify a false optimum. The
+/// Python-side evaluator had the same defect and fixed it in #1158; this is the
+/// Rust half.
+fn interval_sum_of(a: Interval, n: Option<usize>) -> Interval {
+    match n {
+        Some(0) => Interval::point(0.0),
+        Some(1) => a,
+        // `n` unknown: the hull says nothing about how many terms are folded, so
+        // abstain rather than guess. Loose is sound; narrow is not.
+        None => Interval::entire(),
+        Some(k) => {
+            let k = k as f64;
+            let lo = a.lo * k;
+            let hi = a.hi * k;
+            if lo.is_nan() || hi.is_nan() {
+                Interval::entire()
+            } else {
+                Interval::new(lo, hi)
+            }
+        }
+    }
+}
+
 /// Compute the interval for a single node given its children's intervals.
 fn eval_node_interval(
     arena: &ExprArena,
     id: ExprId,
     var_bounds: &[Interval],
     node_bounds: &[Interval],
+    reduce_counts: &[Option<usize>],
 ) -> Interval {
     match arena.get(id) {
         ExprNode::Constant(v) => Interval::point(*v),
@@ -725,8 +824,13 @@ fn eval_node_interval(
             Interval::entire()
         }
         ExprNode::Sum { operand, .. } => {
-            // Sum of an array — conservative. For scalar, same as operand.
-            node_bounds[operand.0]
+            // A reduction folds `n` elements, each enclosed by the operand's hull,
+            // so the sum lies in `[n*lo, n*hi]`. Passing the hull straight through
+            // (what this did until #1364) is narrow, not conservative.
+            interval_sum_of(
+                node_bounds[operand.0],
+                reduce_counts.get(id.0).copied().flatten(),
+            )
         }
         ExprNode::SumOver { terms } => {
             let mut result = Interval::point(0.0);
@@ -1227,7 +1331,19 @@ pub fn backward_propagate(
             backward_propagate(arena, *base, tightened, node_bounds, var_bounds);
         }
         ExprNode::Sum { operand, .. } => {
-            backward_propagate(arena, *operand, tightened, node_bounds, var_bounds);
+            // Handing `tightened` to the operand asserts that EVERY element lies in
+            // the sum's interval, which is only true when the reduction folds a
+            // single element. For a wider fold it is an invalid tightening of the
+            // same family as the forward one (#1364) -- `sum(x) <= 10` does not
+            // imply `x_i <= 10` unless every other term is known non-negative.
+            //
+            // `is_single_element` is deliberately a cheap, structurally-conservative
+            // predicate rather than a shape pass: a wrong `false` only forgoes a
+            // tightening, while a wrong `true` would be unsound, and the backward
+            // walk runs per row per sweep.
+            if is_single_element(arena, *operand) {
+                backward_propagate(arena, *operand, tightened, node_bounds, var_bounds);
+            }
         }
         ExprNode::Constant(_)
         | ExprNode::ConstantArray(_, _)
@@ -2070,8 +2186,9 @@ mod tests {
     fn forward_propagate_whole_arena(arena: &ExprArena, var_bounds: &[Interval]) -> Vec<Interval> {
         let n = arena.len();
         let mut bounds = vec![Interval::entire(); n];
+        let counts = sum_reduce_counts(arena);
         for i in 0..n {
-            bounds[i] = eval_node_interval(arena, ExprId(i), var_bounds, &bounds);
+            bounds[i] = eval_node_interval(arena, ExprId(i), var_bounds, &bounds, &counts);
         }
         bounds
     }

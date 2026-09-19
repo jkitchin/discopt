@@ -4245,6 +4245,18 @@ def _solve_root_node_multistart(
     return last_result
 
 
+#: How many times one node may be returned to the frontier by `lazy_constraints`
+#: before it is excluded instead (#1365).
+#:
+#: A lazy cut is only progress when it separates the relaxation point it was
+#: returned for: the re-solve then cannot produce that point again. A separator
+#: that returns a cut the point already satisfies changes nothing, and the node
+#: would be requeued forever. The cap turns that into a WARNING plus the
+#: pre-#1365 exclusion, which terminates. Generous enough that a real separation
+#: loop (one cut per violated subtour, say) never reaches it.
+_LAZY_REQUEUE_CAP = 100
+
+
 def _nonrigorous_sentinel_fathom(node_lower_bound: float, node_infeasible: bool) -> bool:
     """Whether a nonconvex node is being fathomed *non-rigorously* (issue #27a).
 
@@ -4485,15 +4497,25 @@ def _invoke_pre_import_callbacks(
     incumbent_callback,
     _cut_pool,
     tree_bound_valid=True,
+    requeue_mask=None,
 ):
     """Check lazy constraints and incumbent callbacks before importing results.
 
     For each integer-feasible solution in the batch:
     1. Call ``lazy_constraints`` callback. If it returns cuts, add them to the
-       cut pool and mark the node as infeasible (preventing it from becoming
-       an incumbent). The cuts will tighten subsequent relaxations.
+       cut pool and flag the node in ``requeue_mask`` so the caller returns it
+       to the open frontier instead of importing a result for it (#1365). The
+       node is then re-solved against the cut-augmented relaxation, which is
+       what a lazy cut means: the veto says "this *point* is not acceptable",
+       never "this *box* is empty". Sentinelling it instead removed the region
+       that contains the corrected answer -- a subtour-elimination loop lost the
+       tour and the solve returned ``status="unknown"`` with no solution.
+       Without a ``requeue_mask`` (a caller that cannot requeue) the old
+       sentinel is kept, so the point still never becomes the incumbent.
     2. Call ``incumbent_callback``. If it returns False, mark the node as
-       infeasible.
+       infeasible. A bare veto -- unlike a cut -- does not change the
+       relaxation, so re-solving would return the same point forever; that one
+       stays a non-rigorous fathom.
 
     Returns the number of nodes rejected (by a lazy cut or an incumbent-callback
     ``False``). A rejection sentinels a node whose relaxation is genuinely
@@ -4577,11 +4599,17 @@ def _invoke_pre_import_callbacks(
                 logger.warning("Lazy constraint callback raised an exception: %s", e)
                 cuts = None
             if cuts:
-                # Reject the node FIRST: even if cut insertion below were to
+                # Reject the point FIRST: even if cut insertion below were to
                 # fail, the point the cuts exclude must never be accepted as an
                 # incumbent. This assignment precedes any fallible cut math.
-                result_lbs[i] = _INFEASIBILITY_SENTINEL
-                n_rejected += 1
+                # With a requeue channel the node goes back to the frontier
+                # (#1365) and no result is imported for it; without one, the
+                # sentinel keeps the pre-#1365 exclusion.
+                if requeue_mask is not None:
+                    requeue_mask[i] = True
+                else:
+                    result_lbs[i] = _INFEASIBILITY_SENTINEL
+                    n_rejected += 1
                 for cut in cuts:
                     coeffs, rhs, sense = cut_result_to_dense(cut, model)
                     _cut_pool.add(LinearCut(coeffs=coeffs, rhs=rhs, sense=sense))
@@ -12237,6 +12265,8 @@ def solve_model(
     # single authoritative per-batch sweep below (any sentinel-without-proof node)
     # and consumed in the finalize else-branch.
     _nonrigorous_fathom = False
+    #: node id -> how many times `lazy_constraints` requeued it (#1365 cap).
+    _lazy_requeues: dict[int, int] = {}
     # #467 sub-bug #3: set True when the ROOT batch (iteration 0 — the whole
     # feasible region) is rigorously proven infeasible (every root node carries a
     # ``node_infeasible_mask`` empty-box / empty-relaxation certificate — the same
@@ -16210,7 +16240,14 @@ def solve_model(
             )
 
         # --- User callbacks: lazy constraints and incumbent filtering ---
+        _requeue_mask = None
         if lazy_constraints is not None or incumbent_callback is not None:
+            # #1365: a node whose integer point a lazy cut vetoed is returned to
+            # the frontier and re-solved against the cut, not fathomed. The cap
+            # is the loop guard: a separator that keeps returning a cut the point
+            # already satisfies would otherwise requeue the same node forever, so
+            # past it the node falls back to the pre-#1365 sentinel.
+            _requeue_mask = np.zeros(n_batch, dtype=bool)
             _n_cb_rejected = _invoke_pre_import_callbacks(
                 model=model,
                 tree=tree,
@@ -16227,7 +16264,24 @@ def solve_model(
                 incumbent_callback=incumbent_callback,
                 _cut_pool=_cut_pool,
                 tree_bound_valid=_gap_certified,
+                requeue_mask=_requeue_mask,
             )
+            if _requeue_mask.any():
+                for _k in np.flatnonzero(_requeue_mask):
+                    _nid = int(result_ids[_k])
+                    _lazy_requeues[_nid] = _lazy_requeues.get(_nid, 0) + 1
+                    if _lazy_requeues[_nid] > _LAZY_REQUEUE_CAP:
+                        logger.warning(
+                            "Node %d was requeued %d times by lazy_constraints without "
+                            "the cuts separating its relaxation point; excluding it "
+                            "instead. A cut that does not cut off the point it was "
+                            "returned for cannot make progress.",
+                            _nid,
+                            _LAZY_REQUEUE_CAP,
+                        )
+                        _requeue_mask[_k] = False
+                        result_lbs[_k] = _INFEASIBILITY_SENTINEL
+                        _n_cb_rejected += 1
             # #748: a callback rejection sentinels a FEASIBLE node without proving
             # its region empty of acceptable points — a non-rigorous fathom. It is
             # applied here, AFTER the batch's own non-rigorous-sentinel sweep
@@ -16343,7 +16397,23 @@ def solve_model(
         # only from a rigorous certificate; the same sentinel also encodes soft
         # failures, and fathoming those would be #927's false-certificate mode.
         t_rust_start = time.perf_counter()
-        tree.import_results(result_ids, result_lbs, result_sols, result_feas, node_infeasible_mask)
+        if _requeue_mask is not None and _requeue_mask.any():
+            # A requeued node is OPEN again, so no result may be imported for it
+            # (`import_results` asserts Evaluated status). Import the rest, then
+            # hand the requeued ids back to the frontier (#1365).
+            _keep = ~_requeue_mask
+            tree.import_results(
+                result_ids[_keep],
+                result_lbs[_keep],
+                result_sols[_keep],
+                result_feas[_keep],
+                node_infeasible_mask[_keep],
+            )
+            tree.requeue_nodes(np.ascontiguousarray(result_ids[_requeue_mask]))
+        else:
+            tree.import_results(
+                result_ids, result_lbs, result_sols, result_feas, node_infeasible_mask
+            )
         tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
 
