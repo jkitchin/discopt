@@ -53,6 +53,7 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
     internal (minimize-convention) objective/bound back to model units:
     ``model_value = sign * (internal + offset)``. Callers pass the non-``meta_`` keys
     to the kernel; :func:`solve_with_native_kernel` strips them automatically."""
+    from discopt._relax.incremental_mccormick import row_support_within
     from discopt._relax.uniform_relax import build_uniform_relaxation
     from discopt.modeling.core import VarType
     from discopt.solver_tuning import current as _tuning
@@ -163,8 +164,7 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
     csc = A.tocsc()
     indptr, indices, data = A.indptr, A.indices, A.data
 
-    def support(r: int) -> set:
-        return {int(indices[t]) for t in range(indptr[r], indptr[r + 1]) if abs(data[t]) > _TOL}
+    _support_within = row_support_within(A, _TOL)
 
     def rows_with_col(cc: int):
         return csc.indices[csc.indptr[cc] : csc.indptr[cc + 1]]
@@ -183,7 +183,7 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
         """Rows owned by this term = rows touching ``aux`` whose support ⊆ operands∪aux.
         Returns the row list, or None if ``want`` is set and the count differs."""
         allowed = set(operands) | {aux}
-        rows = [int(r) for r in rows_with_col(aux) if support(r) <= allowed]
+        rows = [int(r) for r in rows_with_col(aux) if _support_within(int(r), allowed)]
         if want is not None and len(rows) != want:
             return None
         return rows
@@ -224,7 +224,9 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
         a_cols_t = [k for k, _ in a_items]
         b_cols_t = [k for k, _ in b_items]
         allowed = set(a_cols_t) | set(b_cols_t) | {int(w)}
-        rows: Optional[list[int]] = [int(r) for r in rows_with_col(int(w)) if support(r) <= allowed]
+        rows: Optional[list[int]] = [
+            int(r) for r in rows_with_col(int(w)) if _support_within(int(r), allowed)
+        ]
         # EXACTLY the 4 McCormick rows the kernel regenerates for this BlfTerm —
         # support containment alone does not identify them (#861). A lifted MODEL
         # CONSTRAINT over the same variables has the same support (``x0*x1 >= 60``
