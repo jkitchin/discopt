@@ -293,6 +293,56 @@ def _infer_constraint_bounds(source) -> tuple[np.ndarray, np.ndarray]:
     return cl.copy(), cu.copy()
 
 
+def _ipopt_version() -> tuple[int, ...]:
+    """The linked Ipopt library's version, or ``()`` when cyipopt does not say.
+
+    cyipopt exposes it as ``IPOPT_VERSION`` (a tuple of ints). Older bindings
+    may not, in which case callers must treat the version as unknown rather
+    than assume a floor.
+    """
+    try:
+        import cyipopt
+    except ImportError:  # pragma: no cover - guarded by callers
+        return ()
+    version = getattr(cyipopt, "IPOPT_VERSION", None)
+    if not isinstance(version, tuple):
+        return ()
+    try:
+        return tuple(int(part) for part in version)
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return ()
+
+
+def _translate_options(opts: dict) -> dict:
+    """Rewrite options the linked Ipopt is too old to know into equivalents.
+
+    ``max_wall_time`` is Ipopt >= 3.14 only. On an older library cyipopt raises
+    ``TypeError`` *after* Ipopt has already printed "Tried to set Option:
+    max_wall_time. It is not a valid option." on stdout -- so the caller's time
+    limit was dropped, and the only trace of it was a line of noise in the
+    output. Ipopt 3.11/3.12/3.13 spell the same cap ``max_cpu_time``, so
+    translate rather than drop: a requested limit stays a limit. An explicit
+    ``max_cpu_time`` from the caller always wins.
+
+    The version is checked *before* the call because the message is emitted by
+    the C library; catching the exception afterwards cannot unprint it.
+    """
+    version = _ipopt_version()
+    if not version or version >= (3, 14):
+        return opts
+    if "max_wall_time" not in opts:
+        return opts
+    translated = dict(opts)
+    wall = translated.pop("max_wall_time")
+    translated.setdefault("max_cpu_time", wall)
+    logger.debug(
+        "Ipopt %s predates max_wall_time; applying it as max_cpu_time=%s",
+        ".".join(str(v) for v in version),
+        wall,
+    )
+    return translated
+
+
 def solve_nlp(
     evaluator: NLPEvaluator,
     x0: np.ndarray,
@@ -350,22 +400,23 @@ def solve_nlp(
     )
 
     # cyipopt requires native Python types (rejects numpy scalars).
-    # Some options (e.g. max_wall_time) may not exist in older Ipopt versions.
-    import logging as _logging
-
-    import numpy as _np
-
-    _logger = _logging.getLogger(__name__)
-    for key, value in opts.items():
+    for key, value in _translate_options(opts).items():
         try:
-            if isinstance(value, (_np.floating, float)):
+            if isinstance(value, (np.floating, float)):
                 problem.add_option(key, float(value))
-            elif isinstance(value, (_np.integer, int)):
+            elif isinstance(value, (np.integer, int)):
                 problem.add_option(key, int(value))
             else:
                 problem.add_option(key, value)
         except TypeError:
-            _logger.debug("Ipopt option '%s' not accepted, skipping", key)
+            # The option name is not one this Ipopt build knows. Dropping it
+            # silently is how a caller-requested limit stops being applied with
+            # nothing to show for it, so say so at WARNING, not DEBUG.
+            logger.warning(
+                "Ipopt %s rejected option %r; it was NOT applied to this solve.",
+                ".".join(str(v) for v in _ipopt_version()) or "(unknown version)",
+                key,
+            )
 
     t0 = time.perf_counter()
     x, info = problem.solve(x0.astype(np.float64))

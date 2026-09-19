@@ -213,6 +213,31 @@ impl PyTreeManager {
         Ok(())
     }
 
+    /// Return exported nodes to the open frontier without importing a result.
+    ///
+    /// The lazy-constraint path (#1365) calls this for every node whose integer
+    /// point a user separator vetoed *with a cut*: the veto says "this point is
+    /// not acceptable", never "this box is empty", so the box must be re-solved
+    /// against the cut-augmented relaxation rather than fathomed. Sentinelling
+    /// it instead is the documented non-rigorous fathom of #748 -- it removes a
+    /// region that was never proven free of acceptable points, which is how a
+    /// subtour-elimination loop lost the corrected tour and returned
+    /// `status="unknown"` with no solution at all.
+    ///
+    /// The caller MUST NOT also import a `NodeResult` for a requeued node:
+    /// `import_results` asserts `Evaluated` status and would queue a pending
+    /// result for a node that is open again.
+    fn requeue_nodes(&mut self, node_ids: PyReadonlyArray1<i64>) -> PyResult<()> {
+        let ids = node_ids.as_array();
+        for &i in ids.iter() {
+            if i < 0 {
+                return Err(PyValueError::new_err(format!("negative node id {i}")));
+            }
+            self.inner.requeue_node(NodeId(i as usize));
+        }
+        Ok(())
+    }
+
     /// Pop-time `local_lower_bound` for each of `node_ids` (task #89 / B2-FIX).
     ///
     /// Read-only. Called between `export_batch` and `import_results`, each

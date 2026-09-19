@@ -371,7 +371,87 @@ def _elem(expr: Expression, idx: tuple[int, ...]) -> Expression:
     if isinstance(expr, MatMulExpression):
         return _elem_matmul(expr, idx)
 
+    if isinstance(expr, SumExpression):
+        return _elem_sum(expr, idx)
+
     raise _Unscalarizable(f"cannot scalarize {type(expr).__name__}")
+
+
+def _reduced_axes(expr: SumExpression, nd: int) -> Optional[tuple[int, ...]]:
+    """Which operand axes a ``SumExpression`` folds, normalized and sorted.
+
+    ``None`` on anything :func:`sum_result_shape` also refuses (a non-integer, an
+    out-of-range or a repeated axis), so the two agree on what a node means --
+    the disagreement :func:`sum_is_full_reduction` exists to prevent.
+    """
+    if expr.axis is None:
+        return tuple(range(nd))
+    axes = expr.axis if isinstance(expr.axis, tuple) else (expr.axis,)
+    out: set[int] = set()
+    for a in axes:
+        if not isinstance(a, (int, np.integer)):
+            return None
+        a = int(a)
+        if not -nd <= a < nd:
+            return None
+        if a % nd in out:
+            return None
+        out.add(a % nd)
+    return tuple(sorted(out))
+
+
+def _elem_sum(expr: SumExpression, idx: tuple[int, ...]) -> Expression:
+    """Scalar element ``idx`` of a reduction: the sum over the folded axes.
+
+    ``idx`` indexes the *result*, so it names one value per surviving axis. The
+    element is the sum of the operand over every position that agrees with ``idx``
+    on those axes -- i.e. re-insert each reduced axis and range over it.
+
+    Without this, ``dm.sum(W.T * prev, axis=1)`` -- the affine row every
+    :mod:`discopt.ml` layer emits, and the natural numpy spelling generally --
+    reached the relaxation compiler as one **opaque array-valued atom**. Its
+    interval enclosure was array-shaped, so the McCormick LP build raised
+    ``TypeError: only 0-dimensional arrays can be converted to Python scalars``,
+    the node returned ``status="error"``, and the model got no LP relaxation at
+    all (#1364). Expanding it into genuine scalar affine terms is what the rest
+    of this module already does for products and matmuls.
+    """
+    operand_shape = static_shape(expr.operand)
+    if operand_shape is None:
+        raise _Unscalarizable("sum operand has no static shape")
+    nd = len(operand_shape)
+    if nd == 0:
+        # A reduction over a scalar is that scalar.
+        return _elem_broadcast(expr.operand, idx)
+    reduced = _reduced_axes(expr, nd)
+    if reduced is None:
+        raise _Unscalarizable(f"unresolvable sum axis {expr.axis!r}")
+    if not reduced:
+        # ``axis=()`` folds nothing: element-wise identity, as numpy has it.
+        return _elem_broadcast(expr.operand, idx)
+
+    surviving = [i for i in range(nd) if i not in reduced]
+    if len(idx) != len(surviving):
+        raise _Unscalarizable(
+            f"index {idx!r} does not match the {len(surviving)} surviving axis/axes"
+        )
+
+    lengths = [operand_shape[a] for a in reduced]
+    n_terms = int(np.prod(lengths)) if lengths else 1
+    if n_terms > MAX_SCALAR_ELEMENTS:
+        raise _Unscalarizable(f"reduction over {n_terms} elements exceeds the expansion cap")
+
+    terms: list[Expression] = []
+    for combo in np.ndindex(*lengths):
+        full = [0] * nd
+        for axis, value in zip(reduced, combo):
+            full[axis] = int(value)
+        for axis, value in zip(surviving, idx):
+            full[axis] = int(value)
+        terms.append(_elem(expr.operand, tuple(full)))
+    if len(terms) == 1:
+        return terms[0]
+    return SumOverExpression(terms)
 
 
 def _elem_broadcast(operand: Expression, idx: tuple[int, ...]) -> Expression:

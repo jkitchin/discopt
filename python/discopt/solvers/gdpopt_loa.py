@@ -561,6 +561,20 @@ class _BoundsProxy:
         return self._lb, self._ub
 
     @property
+    def timing_bucket(self):
+        """Forward the wrapped evaluator's layer (issue #74).
+
+        This class enumerates its members explicitly rather than delegating via
+        ``__getattr__`` (unlike ``oa._BoundsProxy``), so without this property a
+        GDP-LOA sub-NLP falls to ``_IpoptCallbacks``'s "undeclared" arm: its
+        derivative callbacks are charged to nothing, the enclosing solver region
+        absorbs them, and the run emits a `timing-bucket-unknown` warning into
+        whatever is reading its output (measured in
+        docs/notebooks/tutorial_gdp.ipynb, #1362).
+        """
+        return self._eval.timing_bucket
+
+    @property
     def _model(self):
         return self._eval._model
 
