@@ -455,8 +455,9 @@ Python/JAX prototype this was lifted from,
 `_relax/scaling.py`, was retired by #1347: it had no importer anywhere in the
 package or the test suite, and still imported `jax.numpy` after the JAX removal.
 
-**Where.** `crates/discopt-core/src/presolve/scaling.rs`, with Python
-mirror in `_relax/presolve/`.
+**Where.** `crates/discopt-core/src/presolve/scaling.rs`, adapted as the
+`"scaling"` pass in `presolve/passes.rs`. No Python mirror was needed: the pass
+reports through `_relax/presolve_pipeline.py` like every other Rust pass.
 
 **References.**
 - Curtis & Reid (1972), *On the automatic scaling of matrices for Gaussian elimination*.
