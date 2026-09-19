@@ -899,6 +899,21 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
+- **Dependency floors raised: `feral` 0.16.0 -> 0.18.0 (Rust), `pounce-solver`
+  >=0.10 -> >=0.12 (Python).** A requirement bump only -- no discopt call site,
+  default or flag changed with it, and neither dependency's API surface that
+  discopt consumes moved. `feral` is source-compatible (`cargo check -p
+  discopt-core` clean, `cargo test -p discopt-core` green); the lockfile also
+  carries `feral-{kahip,metis,scotch}` 0.2.1 -> 0.3.0, which sit on the
+  multifrontal side discopt does not call. `pounce-solver` 0.12.0 is the current
+  PyPI release.
+
+  NOT MEASURED: neither CLAUDE.md §5 regime has been run against these floors --
+  no certifying panel, no captured-LP fill/nnz comparison -- so nothing here
+  claims bound-neutrality or net-positivity for the LU kernel under feral 0.18.0.
+  The acceptance split that measurement owes is stated in the pin comment in
+  `crates/discopt-core/Cargo.toml`.
+
 - **`discopt.nn` is renamed `discopt.ml`** (#1219). The package was named for one
   of the four things it does: decision trees and tree ensembles (`tree.py`,
   `formulations/tree_ensemble.py`, the sklearn readers) are first-class in it,
