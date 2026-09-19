@@ -18,12 +18,12 @@ distinct DISCOPT_* flags read      : 86
   default is a literal "0"         : 19
     numeric knobs ("0" is a value) :  2   out of scope
     gates over non-solver behaviour:  3   out of scope
-    gates over solver math         : 14   ← this audit (13 live after #1357)
+    gates over solver math         : 14   ← this audit (12 live after #1357, #1358)
 ```
 
-**Retired since the first pass.** `DISCOPT_LP_SPATIAL_MIXED` — retired in #1357, the
-rule's first application. Its row is kept below with the outcome recorded, because an
-audit that deletes its own history cannot show the rule working.
+**Retired since the first pass.** `DISCOPT_LP_SPATIAL_MIXED` (#1357) and
+`DISCOPT_POUNCE_DECLARED_BOX` (#1358). Their rows are kept below with the outcome
+recorded, because an audit that deletes its own history cannot show the rule working.
 
 **Out of scope, and why.** `DISCOPT_HEUR_OFFSET` and `DISCOPT_ROOT_CUT_ROUNDS` are
 numeric knobs — `float(os.environ.get(...))` / `int(...)`, where `0` is a value (zero
@@ -44,7 +44,7 @@ steady state.
 | flag | what its own text records | state | verdict |
 |---|---|---|---|
 | ~~`DISCOPT_LP_SPATIAL_MIXED`~~ | *"it ran its graduation panel and did NOT graduate, on **both**"*; *"Sound but harmful stays OFF, with the measurement recorded"* | panel ran, failed | **RETIRED (#1357).** Flag and both production call sites removed; the `mixed=` capability and its tests kept, with the killing measurement moved onto `_is_in_scope` so it survives the flag. |
-| `DISCOPT_POUNCE_DECLARED_BOX` | *"Default-OFF pending the §5 graduation gate"*; #1327's panel: gate 1 cert-clean **PASS**, gate 2 net-positive **INCONCLUSIVE** (only 2 of 66 instances are in the affected window) | panel ran, inconclusive by construction | **Retire → #1358.** #1327's retry recovered the affected class without moving the default box, so nothing depends on this vote; gate 2 is unanswerable on this corpus by construction, not by accident. |
+| ~~`DISCOPT_POUNCE_DECLARED_BOX`~~ | *"Default-OFF pending the §5 graduation gate"*; #1327's panel: gate 1 cert-clean **PASS**, gate 2 net-positive **INCONCLUSIVE** (only 2 of 66 instances are in the affected window) | panel ran, inconclusive by construction | **RETIRED (#1358).** Flag removed; the **scoped** `declared_box_honored()` override kept — it is what #1327's retry uses, and moving the threshold for one call is a different mechanism from moving it for the process. Panel result preserved on `finite_bound_threshold`. |
 | `DISCOPT_CONVEX_KERNEL` | default-OFF, never default-ON; 3,105 lines of Rust behind it | panel owed | **Decide via #1346** (already split out): graduate or delete. |
 | `DISCOPT_NLP_NATIVE` | *"Default stays OFF on the remaining grounds — the speedup …"* | measured, reasoned | **Keep as documented opt-out** — it already states why it is not the default. Confirm the docstring also says what would change that. |
 | `DISCOPT_CMIR_AGGREGATION` | *"ships dark behind this flag until proven on nightlies"* | panel owed, never run | **Run the panel or retire.** |
@@ -61,9 +61,9 @@ steady state.
 ## What this audit does not do
 
 It does **not** delete anything. Per #1345 the deletions are follow-on PRs; this lands the
-rule and the verdicts. `DISCOPT_LP_SPATIAL_MIXED` has since been **retired** (#1357) — the rule's first
-application, and the proof it terminates. `DISCOPT_POUNCE_DECLARED_BOX` → #1358 and
-`DISCOPT_CONVEX_KERNEL` → #1346 remain. No verdict above is left as "recorded and
+rule and the verdicts. `DISCOPT_LP_SPATIAL_MIXED` (#1357) and `DISCOPT_POUNCE_DECLARED_BOX` (#1358) have since
+been **retired** — the rule's first two applications, and the proof it terminates.
+`DISCOPT_CONVEX_KERNEL` → #1346 remains. No verdict above is left as "recorded and
 forgotten", which is the state #1345 exists to end.
 
 **What retirement kept, and why it is not deletion-by-name.** #1357 removed the env flag

@@ -21156,7 +21156,7 @@ def _solve_lp(
     # declared. This can only add an answer: it runs ONLY where the route was
     # about to report `error`, so no solve that succeeds today changes at all,
     # which is why it needs no §5 graduation (unlike flipping
-    # DISCOPT_POUNCE_DECLARED_BOX, which moves the box for every solve in the
+    # the process-wide flag retired in #1358, which moved the box for every solve in the
     # window). The cross-checks are unconditional and apply to the retry too, so
     # it cannot certify anything the first attempt could not.
     if _declared_box_retry_applies(model):
@@ -21510,10 +21510,12 @@ def _declared_box_retry_applies(model: Model) -> bool:
 
     True only when BOTH hold:
 
-    * the legacy 1e15 threshold is in force, so a retry would actually differ
-      (inside ``declared_box_honored``, or with ``DISCOPT_POUNCE_DECLARED_BOX=1``
-      already set, the first attempt used the declared box and re-running it
-      would just burn the same time to the same answer), and
+    * the legacy 1e15 threshold is in force, so a retry would actually differ.
+      This is what stops the retry recursing: inside ``declared_box_honored`` the
+      first attempt already used the declared box, so re-running would burn the
+      same time to the same answer. (It also used to mean "the process-wide flag
+      is off"; that flag was retired in #1358 and the recursion guard is now the
+      condition's whole job.) And
     * the model declares at least one bound in ``[1e15, 1e19)`` -- the window the
       threshold discards and POUNCE can in fact handle. Outside it the two arms
       build a bit-identical box, so the retry is a provable no-op.
@@ -21546,12 +21548,13 @@ def _declared_box_relaxed_to_ipm_inf(bounds) -> bool:
     is bounded (issue #850 Obs 1). A bound at or beyond ``1e20`` (or ``±inf``) is
     genuinely infinite for both engines and is not counted.
 
-    The window's lower edge is the IPM's live threshold, not a literal: with
-    ``DISCOPT_POUNCE_DECLARED_BOX`` on (opt-in; the default remains OFF pending
-    the §5 graduation gate) the IPM honors a declared bound up to POUNCE's own
-    ``1e19`` infinity, so the window narrows to ``[1e19, 1e20)`` and the guard
+    The window's lower edge is the IPM's live threshold, not a literal: inside a
+    ``declared_box_honored`` block the IPM honors a declared bound up to POUNCE's
+    own ``1e19`` infinity, so the window narrows to ``[1e19, 1e20)`` and the guard
     stops firing on the four orders of magnitude the engine was always able to
-    handle. Unset or ``=0`` keeps the legacy ``[1e15, 1e20)``.
+    handle. Outside one it is the legacy ``[1e15, 1e20)``. (The process-wide flag
+    that used to widen it everywhere was retired in #1358; reading the threshold
+    live rather than hardcoding it is what makes this correct either way.)
     Reading it live keeps the guard and the marshaling from drifting apart — a
     hardcoded ``1e15`` here would defer verdicts the IPM no longer relaxes.
     """
