@@ -338,7 +338,7 @@ pub fn assemble_node_lp(spec: &SpatialKernelSpec, lo: &[f64], hi: &[f64]) -> Ass
     // slack range keeps the NS term bounded and the certificate finite.
     let mut lfull = l;
     let mut ufull = u;
-    lfull.extend(std::iter::repeat(0.0).take(m));
+    lfull.extend(std::iter::repeat_n(0.0, m));
     for (r, (rc, rcoef, rhs)) in rows.iter().enumerate() {
         let mut min_act = 0.0f64;
         let mut act_mag = 0.0f64;

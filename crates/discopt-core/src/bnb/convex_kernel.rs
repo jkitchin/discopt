@@ -384,7 +384,7 @@ fn assemble(
 
     let mut l = lo.to_vec();
     let mut u = hi.to_vec();
-    l.extend(std::iter::repeat(0.0).take(m));
+    l.extend(std::iter::repeat_n(0.0, m));
     for row in rows.iter() {
         if row.is_eq {
             u.push(0.0); // slack fixed at 0 → equality
@@ -1806,7 +1806,7 @@ impl W0WarmLp {
         let m = self.rows.len();
         let mut l = lo.to_vec();
         let mut u = hi.to_vec();
-        l.extend(std::iter::repeat(0.0).take(m));
+        l.extend(std::iter::repeat_n(0.0, m));
         for row in &self.rows {
             u.push(self.cap_for(row, lo, hi));
         }
