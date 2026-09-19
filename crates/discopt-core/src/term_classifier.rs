@@ -1,7 +1,16 @@
-//! AMP helpers backed by the Rust expression representation.
+//! Nonlinear term classification over the Rust expression representation.
 //!
-//! These routines keep the high-level AMP algorithm in Python while moving
-//! repeated expression-tree walks into Rust.
+//! Walks a [`ModelRepr`]'s expression arena once and catalogs nonlinear term
+//! structure — bilinear, trilinear, multilinear, monomial — for the Python
+//! `discopt._relax.term_classifier` catalog it backs.
+//!
+//! This walk began as an AMP helper (issue #44/#86: "keep the high-level AMP
+//! algorithm in Python while moving repeated expression-tree walks into Rust")
+//! and lived in `amp.rs` until issue #1343. It is **not** AMP-specific: it is
+//! reached through `term_classifier.py::classify_nonlinear_terms`, which every
+//! nonlinear route consults, so the file name matched neither its callers nor
+//! its Python counterpart. The name is the contract — nobody auditing the
+//! relaxation layer would look for it under `amp`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -9,7 +18,7 @@ use crate::expr::{index_spec_collect_flat, BinOp, ExprId, ExprNode, ModelRepr, U
 
 /// Classified nonlinear terms used by AMP partition selection and relaxation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct AmpNonlinearTerms {
+pub struct NonlinearTerms {
     /// Distinct bilinear terms as sorted pairs of flat variable indices.
     pub bilinear: Vec<(usize, usize)>,
     /// Distinct trilinear terms as sorted triples of flat variable indices.
@@ -30,7 +39,7 @@ pub struct AmpNonlinearTerms {
 }
 
 /// Classify nonlinear terms in a model using the Rust expression arena.
-pub fn classify_nonlinear_terms(model: &ModelRepr) -> AmpNonlinearTerms {
+pub fn classify_nonlinear_terms(model: &ModelRepr) -> NonlinearTerms {
     let mut classifier = TermClassifier::new(model);
     classifier.classify_node(model.objective);
     for constraint in &model.constraints {
@@ -41,7 +50,7 @@ pub fn classify_nonlinear_terms(model: &ModelRepr) -> AmpNonlinearTerms {
 
 struct TermClassifier<'a> {
     model: &'a ModelRepr,
-    result: AmpNonlinearTerms,
+    result: NonlinearTerms,
     seen_bilinear: BTreeSet<(usize, usize)>,
     seen_trilinear: BTreeSet<(usize, usize, usize)>,
     seen_multilinear: BTreeSet<Vec<usize>>,
@@ -52,7 +61,7 @@ impl<'a> TermClassifier<'a> {
     fn new(model: &'a ModelRepr) -> Self {
         Self {
             model,
-            result: AmpNonlinearTerms::default(),
+            result: NonlinearTerms::default(),
             seen_bilinear: BTreeSet::new(),
             seen_trilinear: BTreeSet::new(),
             seen_multilinear: BTreeSet::new(),
@@ -60,7 +69,7 @@ impl<'a> TermClassifier<'a> {
         }
     }
 
-    fn finish(mut self) -> AmpNonlinearTerms {
+    fn finish(mut self) -> NonlinearTerms {
         let mut candidates = BTreeSet::new();
         for (i, j) in &self.result.bilinear {
             candidates.insert(*i);

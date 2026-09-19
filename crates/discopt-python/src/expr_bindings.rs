@@ -863,7 +863,7 @@ impl PyModelRepr {
 
     /// Classify AMP nonlinear product terms using the Rust expression arena.
     fn classify_nonlinear_terms(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let terms = discopt_core::amp::classify_nonlinear_terms(&self.inner);
+        let terms = discopt_core::term_classifier::classify_nonlinear_terms(&self.inner);
         let dict = PyDict::new(py);
 
         dict.set_item("bilinear", terms.bilinear)?;

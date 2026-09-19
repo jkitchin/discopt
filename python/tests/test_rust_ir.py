@@ -242,7 +242,7 @@ class TestAmpTermClassification:
         m.minimize(x[0] * x[1] + (x[0] * x[1] * x[2]) + x[3] ** 3)
         m.subject_to(x[0] * x[1] * x[2] * x[3] <= 100)
 
-        rust_terms = _classify_nonlinear_terms_rust(m)
+        rust_terms = _classify_nonlinear_terms_rust(m).terms
         python_terms = _classify_nonlinear_terms_python(m)
 
         assert rust_terms is not None
@@ -263,7 +263,7 @@ class TestAmpTermClassification:
         m.minimize(x[1, 2] * x[1, 3])
         m.subject_to(x[0, 0] * x[0, 1] <= 1)
 
-        rust_terms = _classify_nonlinear_terms_rust(m)
+        rust_terms = _classify_nonlinear_terms_rust(m).terms
         python_terms = _classify_nonlinear_terms_python(m)
 
         assert rust_terms is not None
@@ -276,6 +276,7 @@ class TestAmpTermClassification:
 
     def test_python_fallback_flattens_multidimensional_indices(self):
         from discopt._relax.term_classifier import (
+            ROUTE_PY_GENERAL_NL_OBJECTS,
             _classify_nonlinear_terms_rust,
             classify_nonlinear_terms,
         )
@@ -284,7 +285,9 @@ class TestAmpTermClassification:
         x = m.continuous("x", shape=(2, 4), lb=0.1, ub=10)
         m.minimize(dm.sin(x[0, 0]) + x[1, 2] * x[1, 3])
 
-        assert _classify_nonlinear_terms_rust(m) is None
+        attempt = _classify_nonlinear_terms_rust(m)
+        assert attempt.terms is None
+        assert attempt.route == ROUTE_PY_GENERAL_NL_OBJECTS
 
         terms = classify_nonlinear_terms(m)
         assert terms.bilinear == [(6, 7)]
@@ -306,6 +309,7 @@ class TestAmpTermClassification:
 
     def test_public_classifier_falls_back_for_general_nonlinear_objects(self):
         from discopt._relax.term_classifier import (
+            ROUTE_PY_GENERAL_NL_OBJECTS,
             _classify_nonlinear_terms_python,
             _classify_nonlinear_terms_rust,
             classify_nonlinear_terms,
@@ -316,7 +320,9 @@ class TestAmpTermClassification:
         y = m.continuous("y", lb=0.1, ub=2.0)
         m.minimize(dm.sin(x) + x * y)
 
-        assert _classify_nonlinear_terms_rust(m) is None
+        attempt = _classify_nonlinear_terms_rust(m)
+        assert attempt.terms is None
+        assert attempt.route == ROUTE_PY_GENERAL_NL_OBJECTS
 
         terms = classify_nonlinear_terms(m)
         python_terms = _classify_nonlinear_terms_python(m)
