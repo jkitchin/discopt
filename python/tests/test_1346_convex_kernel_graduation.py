@@ -137,6 +137,41 @@ def test_the_refusal_names_its_reason():
         ck._build(_pure_milp(), None)
 
 
+def _continuous_convex_nlp() -> dm.Model:
+    """``minimize -x s.t. x^2 + y^2 <= r^2`` — the #1037 circle model. Linear
+    objective, one convex nonlinear row, **zero integer variables**."""
+    m = dm.Model("circle")
+    x = m.continuous("x", lb=-2.0, ub=2.0)
+    y = m.continuous("y", lb=-2.0, ub=2.0)
+    m.minimize(-x)
+    m.subject_to(x**2 + y**2 <= 1.0, name="ball")
+    return m
+
+
+def test_a_continuous_convex_nlp_is_refused():
+    """The second half of the same defect, caught by CI rather than by the panel.
+
+    The kernel's ``SolveResult`` carries no duals, so routing a continuous convex
+    NLP silently drops ``constraint_duals``/``bound_duals_upper`` from a result that
+    used to carry them — the regression #1037 exists to prevent. 8 tests in
+    ``test_solver_duals.py`` failed on exactly this model before the refusal.
+    """
+    with pytest.raises(ck.NotConvexKernel, match="no integer variable"):
+        ck._build(_continuous_convex_nlp(), None)
+    assert ck.build_convex_spec(_continuous_convex_nlp()) is None
+
+
+def test_the_continuous_convex_nlp_still_reports_duals(flag):
+    """The property the refusal protects, asserted end to end rather than inferred
+    from the refusal. With the kernel default-ON this model must still come back
+    with real multipliers."""
+    flag("DISCOPT_CONVEX_KERNEL", None)  # the graduated default
+    res = _continuous_convex_nlp().solve()
+    assert res.status == "optimal"
+    assert res.constraint_duals is not None, "duals were withheld, not refitted"
+    assert res.bound_duals_upper is not None
+
+
 def test_a_convex_minlp_is_still_claimed():
     """The refusal must be keyed on 'no nonlinear row', not on integrality or size —
     otherwise it would take the graduation's own two wins with it."""

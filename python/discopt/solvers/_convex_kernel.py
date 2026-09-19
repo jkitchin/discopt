@@ -562,6 +562,25 @@ def _build(model, bounds) -> dict:
         # panel can pass while the change breaks a route the corpus never exercises.
         # The corpus bounds what a panel can see; it is not a proof of safety.
         raise NotConvexKernel("no nonlinear row: an LP/MILP belongs to the LP/MILP route")
+    if not is_int.any():
+        # #1346, the same defect from the other side: a model with no integer
+        # variable is a continuous convex NLP, not a MINLP. A branch-and-cut tree
+        # has nothing to branch on, and -- the part that bites -- the kernel's
+        # ``SolveResult`` carries **no duals**, while the NLP path returns them.
+        #
+        # Routing one therefore silently drops `constraint_duals` and
+        # `bound_duals_upper` from a result that used to carry them, which is
+        # exactly the regression #1037 was opened to fix. Caught by the HiGHS-route
+        # CI lane: 8 failures in `test_solver_duals.py`, all "duals were withheld",
+        # on the ``minimize -x s.t. x^2 + y^2 <= r^2`` model -- linear objective, one
+        # convex row, zero integers, claimed by every other clause of the gate.
+        #
+        # NOT fixable by handing back the tree's LP duals: those are multipliers of
+        # the OUTER APPROXIMATION, not of the model's own nonlinear row. Reporting
+        # them would be "duals of a different problem" -- the precise thing #1037's
+        # withholding message exists to prevent -- so the sound fix is to leave the
+        # model on the path that can produce real ones.
+        raise NotConvexKernel("no integer variable: a continuous convex NLP keeps the NLP path")
     return _marshal(n, c, sense_max, is_int, lb, ub, le_rows, eq_rows, nl_specs)
 
 
