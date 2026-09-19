@@ -545,6 +545,23 @@ def _build(model, bounds) -> dict:
             continue
         nl_specs.append(d)
 
+    if not nl_specs:
+        # #1346: a model with NO nonlinear row is an LP or a MILP, and it belongs to
+        # the routes built for it -- `lp_milp_highs.py` (HiGHS with discopt-verified
+        # certificates, `docs/dev/lp-milp-highs-routing-plan.md`) and the Rust MILP
+        # engine -- not to an outer-approximation tree that has nothing to
+        # outer-approximate. It would "qualify" trivially: a linear objective and
+        # zero nonlinear rows pass every clause of the convexity gate, so before this
+        # refusal the gate claimed every pure LP and MILP in the library.
+        #
+        # This was invisible while the flag was opt-in and became a routing hijack
+        # the moment it graduated: 17 smoke tests failed, almost all of them MILP or
+        # HiGHS-route tests, because `Model.solve()` consulted the kernel first. The
+        # §5 panel did NOT catch it -- the in-repo `.nl` corpus classified only 3
+        # instances eligible and contains no pure LP/MILP member, so a corpus-wide
+        # panel can pass while the change breaks a route the corpus never exercises.
+        # The corpus bounds what a panel can see; it is not a proof of safety.
+        raise NotConvexKernel("no nonlinear row: an LP/MILP belongs to the LP/MILP route")
     return _marshal(n, c, sense_max, is_int, lb, ub, le_rows, eq_rows, nl_specs)
 
 
@@ -655,9 +672,29 @@ def convex_kernel_enabled() -> bool:
     Graduated under the CLAUDE.md §5 Regime-2 gate by
     ``discopt_benchmarks/scripts/issue1346_convex_kernel_graduation_panel.py`` over
     the 66-instance in-repo corpus, arms interleaved within each instance and the
-    arm order alternated by index, ``deterministic=True``. See
-    :func:`_root_bound_guard_declines` for the counter-case guard that ships with
-    the default, and ``docs/dev/convex-kernel-plan.md`` for the panel numbers.
+    arm order alternated by index, ``deterministic=True``. Gate 1 cert-clean PASS
+    (0 unsound bounds, 0 certification regressions, 0 objective drift, 0 errors);
+    gate 2 net-positive PASS on the routed class::
+
+        clay0303hfsg   off  feasible/UNCERTIFIED 29911.20 (12.2% above opt)  90.2 s
+                       on   optimal/CERTIFIED    26669.1096   149 nodes      21.2 s
+        syn05hfsg      off  optimal  277 nodes  23.8 s -> on  optimal  2 nodes  0.01 s
+
+    Node counts, not wall, carry that result: 277 -> 2 is structural, and both
+    outcomes reproduced across four independent runs. Full numbers, and the
+    concentration caveat (only 3 of 66 in-repo instances are eligible at all), in
+    ``docs/dev/convex-kernel-plan.md``.
+
+    **No counter-case guard ships with this, and that is a measured decision.** A
+    two-stage probe guard was built for the ``watercontamination0202`` case that
+    ``sota-parity-analysis-2026-07-27.md`` G-C records at 2001 s with no bound. Run
+    against the actual instance it turns out to be refused by this gate's *existing*
+    ``nonlinear objective`` clause, in 3.8 s, with or without the guard -- G-C's
+    "convex/MIQP route" is the problem classifier's route, not this kernel. The
+    guard was defending against a threat that cannot reach here, cost +2.6 s on
+    ``clay0303hfsg``, and bought nothing measurable anywhere, so it was deleted
+    rather than shipped (§4: no fix ships on a hypothesis; the
+    ``DISCOPT_CUT_INHERIT`` lesson: sound is not the same as helpful).
 
     **Why this was default-OFF for so long, since the history misleads.** It was not
     a failed panel. ``#798`` proved both §5 bars on the convex family and the
@@ -670,22 +707,6 @@ def convex_kernel_enabled() -> bool:
     performance issue; it is no longer a graduation gate.
     """
     return os.environ.get("DISCOPT_CONVEX_KERNEL", "1") not in ("0", "", "false", "False")
-
-
-def convex_kernel_guard_enabled() -> bool:
-    """`DISCOPT_CONVEX_KERNEL_GUARD` opt-out (default-ON, #1346).
-
-    Exists so the guard itself can be A/B'd against the graduation panel -- the
-    §5 out-of-scope rule for "an opt-out for a shipped default, which exists so a
-    default can be A/B'd". Turning it off restores the pre-#1346 single-shot
-    attempt; it does not turn the kernel off.
-    """
-    return os.environ.get("DISCOPT_CONVEX_KERNEL_GUARD", "1") not in (
-        "0",
-        "",
-        "false",
-        "False",
-    )
 
 
 def dominated_cols_enabled() -> bool:
@@ -800,7 +821,6 @@ def try_convex_solve(
     The fraction was dropped rather than shipped as a dead knob.
     """
     _ATTEMPT.seconds = 0.0
-    _GUARD.decision = ("not_run", None, None)
     if not convex_kernel_enabled():
         return None
     # Clock starts HERE, after the flag check, so a flag-off solve reads exactly 0.0
@@ -826,15 +846,17 @@ def _attempt_convex_solve(
 
     spec = build_convex_spec(model)
     if spec is None:
-        _GUARD.decision = ("not_eligible", None, None)
         return None
 
     budget = min(time_limit, float(os.environ.get("DISCOPT_CONVEX_KERNEL_BUDGET", "120")))
     t0 = time.perf_counter()
-    r = _run_guarded_tree(spec, budget=budget, gap_tolerance=gap_tolerance)
+    r = solve_convex_tree(
+        spec,
+        time_limit_s=budget,
+        gap_tol=gap_tolerance,
+        initial_incumbent=None,
+    )
     wall = time.perf_counter() - t0
-    if r is None:  # the guard declined; the default path keeps the rest of the budget
-        return None
 
     incumbent = r["incumbent"]
     inc_x = np.asarray(r["incumbent_x"], float)
@@ -869,150 +891,6 @@ def _attempt_convex_solve(
         node_count=int(r["node_count"]),
         gap_certified=(status == "optimal"),
         nlp_bb=False,
-    )
-
-
-# --------------------------------------------------------------------------- #
-# #1346 root-bound guard
-# --------------------------------------------------------------------------- #
-#
-# The attempt is budget-capped and its wall is deducted from the default path
-# (#911), but a cap alone is not enough to make the kernel safe as a DEFAULT. The
-# recorded counter-case (``docs/dev/sota-parity-analysis-2026-07-27.md`` G-C) is a
-# model that classifies convex and then spends the whole attempt **without
-# producing a bound** -- measured at 2001 s with no bound, against 49 s on the
-# spatial path. Under a plain cap at ``time_limit=60`` that model burns all 60 s,
-# the deduction leaves the default path ~0 s, and a solve that used to answer
-# returns nothing. That is a real regression and it is why graduation ships with
-# this guard rather than on the panel alone.
-#
-# **Why a fractional cap cannot be the guard** (do not re-litigate; it was
-# falsified before #911 shipped, see ``try_convex_solve``): the kernel needs the
-# large majority of a tight budget on exactly the instances where it wins, so any
-# cap below ~0.8 of the budget gives those wins back -- and a 0.8 cap still hands
-# the counter-case 48 s of a 60 s budget, which does not fix it either. The two
-# ideas are complementary, not alternatives: a cap bounds the loss, a probe
-# *detects* the losing class early.
-#
-# The guard is therefore a two-stage attempt keyed on the counter-case's own
-# measured signature -- **no finite dual bound**:
-#
-#   stage 1  run the tree for a short probe slice of the budget
-#            -> certified already? adopt it, at zero extra cost (the common fast win)
-#            -> no finite bound?    DECLINE NOW, having spent only the probe
-#            -> finite bound?       stage 2 with the remaining budget
-#
-# The restart in stage 2 repeats the probe's work, which is why the probe is a
-# small slice: the waste is bounded by ``_GUARD_PROBE_FRACTION`` of the budget and
-# is only ever paid on instances that produced a bound -- the class the kernel
-# wins on by margins (measured this panel) far larger than the overhead.
-#
-# **Hypothesis, and the measurement that would kill it (CLAUDE.md §4).** The
-# hypothesis is that "spends the attempt without producing a bound" is the
-# distinguishing signature of the counter-case class, so a probe that reads the
-# bound separates it from the winners. The winner half is measured: see the panel.
-# The counter-case half is **NOT verified against a counter-case instance** --
-# ``watercontamination0202`` and its class are not in the in-repo corpus and the
-# MINLPLib snapshot is not available where this ran. KILL CRITERION: a
-# counter-case instance that shows a *finite* bound from the probe and still fails
-# to close means the bound is the wrong signal, and the guard must be replaced by
-# a progress-based one (bound movement per node), not merely retuned. Until that
-# is run, the guard is a bound on the damage, not a proof of its absence.
-
-_GUARD_PROBE_FRACTION = 0.05
-_GUARD_PROBE_FLOOR_S = 2.0
-# CLAUDE.md: INF in the LP layer is the sentinel 1e20, not f64::INFINITY. A bound
-# at or past the sentinel is "no bound", not a very large one.
-_GUARD_INF = 1e20
-
-
-class _GuardClock(threading.local):
-    def __init__(self) -> None:
-        self.decision: tuple = ("not_run", None, None)
-
-
-_GUARD = _GuardClock()
-
-
-def last_guard_decision() -> tuple:
-    """``(reason, probe_bound, probe_nodes)`` for the last attempt on this thread.
-
-    Published so a test or a panel can assert the guard actually **fired** rather
-    than infer it from a wall-clock reading (CLAUDE.md §6: a guard nobody can see
-    fire is indistinguishable from a guard that never runs). Reasons:
-    ``not_run``, ``not_eligible``, ``disabled``, ``single_shot``,
-    ``probe_certified``, ``probe_infeasible``, ``declined_no_finite_bound``,
-    ``declined_probe_exhausted_budget``, ``continued``.
-    """
-    return _GUARD.decision
-
-
-def _bound_is_finite(bound) -> bool:
-    """True iff `bound` is a usable finite dual bound (sentinel-aware)."""
-    if bound is None:
-        return False
-    try:
-        b = float(bound)
-    except (TypeError, ValueError):
-        return False
-    return b == b and abs(b) < _GUARD_INF  # b == b rejects NaN
-
-
-def _run_guarded_tree(spec: dict, *, budget: float, gap_tolerance: float):
-    """Run the kernel under the #1346 root-bound guard. ``None`` ⇒ declined."""
-    probe = min(budget, max(_GUARD_PROBE_FLOOR_S, _GUARD_PROBE_FRACTION * budget))
-
-    def _single_shot(reason: str):
-        r = solve_convex_tree(
-            spec, time_limit_s=budget, gap_tol=gap_tolerance, initial_incumbent=None
-        )
-        _GUARD.decision = (reason, r.get("bound"), r.get("node_count"))
-        return r
-
-    if not convex_kernel_guard_enabled():
-        return _single_shot("disabled")
-    if probe >= budget:
-        # The budget is already no bigger than a probe; splitting it would only
-        # pay the restart twice for no extra information.
-        return _single_shot("single_shot")
-
-    t_probe = time.perf_counter()
-    r = solve_convex_tree(spec, time_limit_s=probe, gap_tol=gap_tolerance, initial_incumbent=None)
-    probe_elapsed = time.perf_counter() - t_probe
-    bound, nodes = r.get("bound"), r.get("node_count")
-
-    if r["status"] in ("optimal", "infeasible"):
-        # Already settled inside the probe -- the common fast win, at no extra cost.
-        _GUARD.decision = (
-            "probe_certified" if r["status"] == "optimal" else "probe_infeasible",
-            bound,
-            nodes,
-        )
-        return r
-
-    if not _bound_is_finite(bound):
-        # The counter-case signature. Decline now, with the large majority of the
-        # caller's budget still unspent for the always-correct default path.
-        _GUARD.decision = ("declined_no_finite_bound", bound, nodes)
-        return None
-
-    remaining = budget - probe_elapsed
-    if remaining <= 0:
-        # The bound WAS finite here -- the probe simply overran. Labelling this
-        # `declined_no_finite_bound` would put it in the counter-case bucket of the
-        # panel histogram and misreport how often the guard's actual rule fired.
-        _GUARD.decision = ("declined_probe_exhausted_budget", bound, nodes)
-        return None
-    _GUARD.decision = ("continued", bound, nodes)
-    # `initial_incumbent=None` deliberately: the probe may have found an incumbent,
-    # and seeding stage 2 with it would make the restart cheaper, but the kernel's
-    # incumbents are tolerance-feasible OA vertices and a cutoff derived from one is
-    # a pruning bound whose sign semantics have to be right in both senses or it cuts
-    # the optimum out. §1 -- the restart costs at most the probe slice; an unsound
-    # cutoff costs a certificate. If this is ever revisited it is a bound-changing
-    # change and needs its own §5 evidence, not a performance argument.
-    return solve_convex_tree(
-        spec, time_limit_s=remaining, gap_tol=gap_tolerance, initial_incumbent=None
     )
 
 

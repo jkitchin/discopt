@@ -28,11 +28,15 @@ instrument — a raise is recorded as an ``ERROR`` cell and counted, never hidde
 66 in-repo instances carry a reference optimum in ``known_optima.toml``; the
 ``.solu`` oracle lives in the out-of-repo MINLPLib snapshot. For the other 50 the
 cert-clean bar is enforced through the sense-correct bound/incumbent invariant
-and the certification-regression check, which do not need an oracle. The in-repo
-corpus also contains no member of the ``watercontamination`` counter-case class
-(a model that classifies convex and then spends the attempt without producing a
-bound), so **this panel cannot exercise that risk** — it is the reason
-graduation ships with the root-bound guard rather than on the panel alone.
+and the certification-regression check, which do not need an oracle.
+
+The sharper limit is what the corpus does **not** contain. All 66 instances are
+MINLP ``.nl`` files, so not one of them is a pure LP or MILP -- and before #1346
+the convexity gate claimed every pure LP and MILP outright (a linear objective and
+zero nonlinear rows satisfy every clause of it). This panel passed both §5 bars
+while the change it was scoring hijacked the whole LP/MILP route; the smoke suite
+caught it, 17 failures, not the panel. **A corpus-wide panel bounds what was
+looked at, it does not bound what was affected.**
 
 Usage::
 
@@ -82,10 +86,21 @@ def _sense_is_min(model) -> bool:
     return "MINIMIZE" in str(obj.sense).upper()
 
 
+def dm_probe_model():
+    """A pure MILP -- the shape the pre-#1346 gate wrongly claimed (see the marker)."""
+    import discopt.modeling as dm
+
+    m = dm.Model("marker_probe")
+    x = m.integer("x", lb=0, ub=10)
+    y = m.continuous("y", lb=0, ub=10)
+    m.minimize(3 * x + 2 * y)
+    m.subject_to(x + y >= 4)
+    return m
+
+
 def _solve_arm(path: pathlib.Path, flag: str, time_limit: float) -> dict:
     """One arm. An exception is recorded, not swallowed (§7)."""
     from discopt.modeling.core import from_nl
-    from discopt.solvers._convex_kernel import last_guard_decision
 
     os.environ["DISCOPT_CONVEX_KERNEL"] = flag
     model = from_nl(str(path))
@@ -111,9 +126,6 @@ def _solve_arm(path: pathlib.Path, flag: str, time_limit: float) -> dict:
         }
     cell["wall"] = time.perf_counter() - t0
     cell["is_min"] = is_min
-    # §6: read the guard's own verdict rather than inferring it from a wall reading.
-    reason, probe_bound, probe_nodes = last_guard_decision()
-    cell["guard"] = {"reason": reason, "probe_bound": probe_bound, "probe_nodes": probe_nodes}
     return cell
 
 
@@ -141,16 +153,6 @@ def main() -> int:
     ap.add_argument("--time-limit", type=float, default=60.0)
     ap.add_argument("--out", type=str, default="")
     ap.add_argument("--only", type=str, default="")
-    ap.add_argument(
-        "--guard",
-        choices=("on", "off"),
-        default="on",
-        help=(
-            "state of the #1346 root-bound guard during the ON arm. 'off' reproduces "
-            "the pre-#1346 single-shot attempt, which is the arm the §5 graduation "
-            "gate scores; 'on' confirms the shipped default costs nothing."
-        ),
-    )
     args = ap.parse_args()
 
     # §8 -- name the code under test, not just the path. Both runs use ONE build and
@@ -162,21 +164,17 @@ def main() -> int:
     )
 
     from discopt.modeling.core import from_nl
-    from discopt.solvers._convex_kernel import (  # noqa: PLC0415
-        build_convex_spec,
-        convex_kernel_guard_enabled,
-    )
+    from discopt.solvers._convex_kernel import build_convex_spec  # noqa: PLC0415
 
-    os.environ["DISCOPT_CONVEX_KERNEL_GUARD"] = "1" if args.guard == "on" else "0"
-    assert convex_kernel_guard_enabled() is (args.guard == "on"), (
-        "marker mismatch: the loaded _convex_kernel does not honour "
-        "DISCOPT_CONVEX_KERNEL_GUARD -- this is a pre-#1346 module"
+    # §8 -- a marker unique to the version under test. Pre-#1346 the gate claimed
+    # every pure LP/MILP (a linear objective and zero nonlinear rows pass every
+    # clause), so a build without the refusal is a DIFFERENT experiment.
+    _probe = dm_probe_model()
+    assert build_convex_spec(_probe) is None, (
+        "marker mismatch: this _convex_kernel still claims a pure MILP -- it is a "
+        "pre-#1346 module and the panel would measure the wrong routing"
     )
-    print(
-        f"marker: #1346 guard present, requested={args.guard}, "
-        f"effective={convex_kernel_guard_enabled()}",
-        flush=True,
-    )
+    print("marker: #1346 LP/MILP refusal present", flush=True)
 
     oracle = _load_oracle()
     names = sorted(p.stem for p in CORPUS.glob("*.nl"))
@@ -304,18 +302,6 @@ def main() -> int:
     net_positive = len(gains) > 0 and not regressions
     print(f"  --> {'PASS' if net_positive else 'INCONCLUSIVE/FAIL'}", flush=True)
 
-    # §6: the guard must be observed firing, not assumed. A run whose ON arm never
-    # records a guard decision measured an unguarded kernel and says nothing about
-    # the guard, whatever the wall clock did.
-    hist: dict[str, int] = {}
-    for r in rows:
-        hist[r["on"]["guard"]["reason"]] = hist.get(r["on"]["guard"]["reason"], 0) + 1
-    print(f"\n=== GUARD (requested {args.guard}) ===", flush=True)
-    for reason, n in sorted(hist.items(), key=lambda kv: -kv[1]):
-        print(f"  {reason:28} {n}", flush=True)
-    observed = sum(n for k, n in hist.items() if k not in ("not_run", "not_eligible"))
-    print(f"  guard decisions observed on eligible instances: {observed}", flush=True)
-
     print(
         f"\nVERDICT: gate1={'PASS' if clean else 'FAIL'} "
         f"gate2={'PASS' if net_positive else 'INCONCLUSIVE/FAIL'}",
@@ -328,8 +314,6 @@ def main() -> int:
                 {
                     "time_limit": args.time_limit,
                     "discopt_file": discopt.__file__,
-                    "guard": args.guard,
-                    "guard_histogram": hist,
                     "comparisons": comparisons,
                     "gate1_cert_clean": clean,
                     "gate2_net_positive": net_positive,
