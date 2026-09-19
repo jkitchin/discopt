@@ -4,6 +4,7 @@
 Every mutator asserts the anchor it expects, so an edit against a notebook whose
 shape has changed fails loudly instead of silently landing in the wrong cell.
 """
+
 import json
 
 

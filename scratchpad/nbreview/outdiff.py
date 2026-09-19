@@ -1,7 +1,13 @@
 """Which notebooks changed OUTPUT text (not just execution timestamps)?"""
-import difflib, json, re, subprocess, sys
+
+import difflib
+import json
+import re
+import subprocess
+import sys
 
 NUM = re.compile(r"\d+\.\d+")
+
 
 def texts(nb):
     out = []
@@ -16,16 +22,22 @@ def texts(nb):
             out.append(t)
     return "\n".join(out).split("\n")
 
+
 changed = []
 for f in sys.argv[1:]:
-    old = json.loads(subprocess.run(["git","show",f"HEAD:{f}"],capture_output=True,text=True).stdout)
+    old = json.loads(
+        subprocess.run(["git", "show", f"HEAD:{f}"], capture_output=True, text=True).stdout
+    )
     o, n = texts(old), texts(json.load(open(f)))
-    d = [l for l in difflib.unified_diff(o, n, lineterm="", n=0)
-         if l[:1] in "+-" and not l.startswith(("---","+++"))]
+    d = [
+        line
+        for line in difflib.unified_diff(o, n, lineterm="", n=0)
+        if line[:1] in "+-" and not line.startswith(("---", "+++"))
+    ]
     name = f.split("/")[-1][:-6]
     if d:
         changed.append(name)
         print(f"##### {name}  ({len(d)} output lines)")
-        for l in d[:14]:
-            print("   ", l[:150])
-print("\nOUTPUT-TEXT CHANGED:", len(changed), "of", len(sys.argv)-1)
+        for line in d[:14]:
+            print("   ", line[:150])
+print("\nOUTPUT-TEXT CHANGED:", len(changed), "of", len(sys.argv) - 1)

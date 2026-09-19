@@ -5,6 +5,7 @@ appears when the obvious fix (use_certificate=True) is applied.
 Run:  python scratchpad/nbreview/repro_oa_convexity_cert.py
 Exits non-zero if either finding fails to reproduce (so it cannot silently no-op).
 """
+
 import discopt._relax.convexity as convpkg
 import discopt.modeling as dm
 import numpy as np
@@ -29,8 +30,9 @@ def build():
     m = dm.Model("portfolio")
     z = m.binary("z", shape=(n,))
     w = m.continuous("w", shape=(n,), lb=0.0, ub=0.4)
-    m.minimize(dm.sum(lambda i: dm.sum(lambda j: Sigma[i, j] * w[i] * w[j],
-                                       over=range(n)), over=range(n)))
+    m.minimize(
+        dm.sum(lambda i: dm.sum(lambda j: Sigma[i, j] * w[i] * w[j], over=range(n)), over=range(n))
+    )
     m.subject_to(dm.sum(lambda i: w[i], over=range(n)) == 1.0)
     m.subject_to(dm.sum(lambda i: mu[i] * w[i], over=range(n)) >= 0.09)
     m.subject_to(dm.sum(z) <= K)
@@ -72,8 +74,10 @@ bad = results["forced  (cert=True)"]
 rel = (bad.objective - TRUE_OPT) / TRUE_OPT
 assert rel > 1e-4, f"Finding 2 did not reproduce (rel={rel:.3e})"
 assert bad.bound < bad.objective - 1e-9, "expected bound below incumbent"
-print(f"\nFinding 2 reproduced: incumbent {rel:.3e} above the true optimum "
-      f"(> 1e-4 rel tol), reported status=optimal with gap=0 and gap_certified=True,\n"
-      f"while its own bound ({bad.bound:.10f}) sits BELOW its incumbent "
-      f"({bad.objective:.10f}).")
+print(
+    f"\nFinding 2 reproduced: incumbent {rel:.3e} above the true optimum "
+    f"(> 1e-4 rel tol), reported status=optimal with gap=0 and gap_certified=True,\n"
+    f"while its own bound ({bad.bound:.10f}) sits BELOW its incumbent "
+    f"({bad.objective:.10f})."
+)
 print("\nBoth findings reproduced.")
