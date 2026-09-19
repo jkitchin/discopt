@@ -377,7 +377,7 @@ def test_per_thread_fallback_is_exercised_and_agrees(monkeypatch):
 def test_solve_degrades_to_jax_when_pounce_is_missing():
     """A missing or too-old POUNCE must fall back, not crash.
 
-    ``pyproject`` requires ``pounce-solver>=0.10``, but a minimal install need not
+    ``pyproject`` requires ``pounce-solver>=0.12``, but a minimal install need not
     have it — CI's AMP-coverage lane installed jax/numpy/scipy/highspy and
     nothing else. That was invisible while the tape backend was opt-in and became
     a hard ``ModuleNotFoundError`` on every solve the moment it graduated to

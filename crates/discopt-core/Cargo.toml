@@ -109,7 +109,8 @@ description = "Core MINLP solver: B&B engine, expression IR, presolve"
 # (18 violations on an UNMODIFIED tree on a POUNCE-equipped machine), which is
 # why the arms are diffed against each other instead.
 #
-# 0.16.0 is the current pin (#1008). It is a BREAKING release whose one breaking
+# 0.16.0 was the pin taken by #1008 (superseded by the 0.18.0 bump recorded at the
+# end of this block). It is a BREAKING release whose one breaking
 # item is the default this bump is taken for: `SparseLu::factor` now pivots with
 # threshold Markowitz (feral #171/#172) instead of AMD-on-AtA plus Gilbert-Peierls.
 # Markowitz chooses its column order DURING factorization, so it ignores the
@@ -210,7 +211,22 @@ description = "Core MINLP solver: B&B engine, expression IR, presolve"
 # threshold, Markowitz above) is the general fix and the numbers above are its
 # entry measurement. Not taken here -- it is a bound-changing default and owes the
 # CLAUDE.md §5 graduation pair on a machine that can run it.
-feral = "0.16.0"
+#
+# 0.18.0 is the current pin, a requirement bump only: no discopt call site or
+# default changed with it. Source-compatible -- `cargo check -p discopt-core` is
+# clean and `cargo test -p discopt-core` green (15/15 binaries), and the LU
+# surface discopt consumes is unchanged -- the whole of it is the `use feral::`
+# list in linsolve.rs (`should_use_dense_lu`/`DenseLu`/`GeneralMatrix`/
+# `LuParams`/`LuSingularAction`/`RefactorCause`/`SparseColMatrix`/`SparseLu`/
+# `SparseLuSymbolic`) plus regularized_lu.rs's subset of it, `FeralError`, and
+# `RefactorCause::*` in primal.rs; still none of the multifrontal or profiler
+# surface. `feral-{kahip,metis,scotch}` move 0.2.1 -> 0.3.0 in the lockfile and
+# sit on that multifrontal side discopt does not call. NOT YET
+# MEASURED: neither CLAUDE.md §5 regime has been run against this pin -- no
+# cert panel, no captured-LP fill/nnz comparison -- so nothing here claims
+# bound-neutrality or net-positivity for 0.16.0 -> 0.18.0. The (a)/(b) split
+# stated above is what that measurement owes when it is taken.
+feral = "0.18.0"
 # rayon: data-parallel iterators. Used (behind the `parallel` feature) to solve
 # the independent per-node LP relaxations of a B&B batch concurrently. Pinned to
 # 1.10 to keep the crate's MSRV (1.75); 1.12+ requires rustc 1.80.

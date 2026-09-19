@@ -34,7 +34,7 @@ dependencies = [
     "jaxlib>=0.4",
     "numpy>=1.24",
     "scipy>=1.10",
-    "pounce-solver>=0.10",
+    "pounce-solver>=0.12",
     # Pure LP/MILP is routed to HiGHS (issue #1229, docs/dev/lp-milp-highs-routing-plan.md).
     # >=1.10: the route verifies Farkas and primal rays via Highs.getDualRay/getPrimalRay,
     # which highspy 1.9.0 does not bind (AttributeError; measured, plan §12).
@@ -50,7 +50,7 @@ Issues = "https://github.com/jkitchin/discopt/issues"
 [project.optional-dependencies]
 # POUNCE is now a core dependency (the default NLP/IPM engine); this extra is
 # kept as a no-op alias for back-compat with `pip install discopt[pounce]`.
-pounce = ["pounce-solver>=0.10"]
+pounce = ["pounce-solver>=0.12"]
 ipopt = ["cyipopt>=1.4"]
 # highspy is now a core dependency (the pure LP/MILP route, issue #1229); this
 # extra is kept as a no-op alias for back-compat with `pip install discopt[highs]`.
