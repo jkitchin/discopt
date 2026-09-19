@@ -9,12 +9,16 @@ recorded in the PR; the tests here pin the properties a future edit could break.
 
 from __future__ import annotations
 
+import logging
+
 import discopt.modeling as dm
+import numpy as np
 from discopt.modeling.core import Constant
 from discopt.solver import (
     _affine_reduce,
     _improver_within_contingent,
     _record_improver_run,
+    _verify_and_inject_candidate,
 )
 
 # ---------------------------------------------------------------------------
@@ -204,3 +208,96 @@ def test_a_zero_node_tree_allows_only_the_offset():
     assert _improver_within_contingent(
         0.1, budget_on=True, tree=tree, heur_state=state, success_gain=3.0, offset=1.0, quot=0.5
     )
+
+
+# ---------------------------------------------------------------------------
+# _verify_and_inject_candidate  (the #952 guard, shared by both funnels)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingTree:
+    """Captures what the funnel tried to inject, without a real B&B tree."""
+
+    def __init__(self):
+        self.injected = []
+
+    def inject_incumbent(self, x, obj):
+        self.injected.append((np.asarray(x, dtype=float).copy(), obj))
+
+
+def _one_row_problem():
+    """`x0 + x1 <= 1`, no equalities, node box [0,1]^2."""
+    A_ub = np.array([[1.0, 1.0]])
+    b_ub = np.array([1.0])
+    A_eq = np.zeros((0, 2))
+    b_eq = np.zeros(0)
+    return A_ub, b_ub, A_eq, b_eq, np.zeros(2), np.ones(2)
+
+
+def _inject(tree, x, obj, lb, ub, A_ub, b_ub, A_eq, b_eq, how="snapped"):
+    return _verify_and_inject_candidate(
+        tree,
+        np.asarray(x, dtype=float),
+        obj,
+        n_orig=2,
+        node_lb_i=lb,
+        node_ub_i=ub,
+        A_ub=A_ub,
+        b_ub=b_ub,
+        A_eq=A_eq,
+        b_eq=b_eq,
+        log_prefix="TEST-BB",
+        how=how,
+    )
+
+
+def test_a_feasible_candidate_is_injected_with_its_objective():
+    A_ub, b_ub, A_eq, b_eq, lb, ub = _one_row_problem()
+    tree = _RecordingTree()
+
+    assert _inject(tree, [1.0, 0.0], -7.5, lb, ub, A_ub, b_ub, A_eq, b_eq) is True
+    assert len(tree.injected) == 1
+    assert tree.injected[0][1] == -7.5
+
+
+def test_a_candidate_violating_a_row_is_refused():
+    """The #952 shape: exactly integral, but outside a declared inequality row."""
+    A_ub, b_ub, A_eq, b_eq, lb, ub = _one_row_problem()
+    tree = _RecordingTree()
+
+    assert _inject(tree, [1.0, 1.0], -99.0, lb, ub, A_ub, b_ub, A_eq, b_eq) is False
+    assert tree.injected == []
+
+
+def test_a_candidate_outside_the_node_box_is_refused():
+    """An off-box point can be integral and still pass every row (a binary at -1)."""
+    A_ub, b_ub, A_eq, b_eq, lb, ub = _one_row_problem()
+    tree = _RecordingTree()
+
+    # satisfies x0 + x1 <= 1, but x0 = -1 is outside the node box
+    assert _inject(tree, [-1.0, 0.0], -99.0, lb, ub, A_ub, b_ub, A_eq, b_eq) is False
+    assert tree.injected == []
+
+
+def test_the_node_box_is_what_is_checked_not_the_declared_one():
+    """Same point, two node boxes: accepted under the wider one, refused under the tighter."""
+    A_ub, b_ub, A_eq, b_eq, _lb, _ub = _one_row_problem()
+    x = [1.0, 0.0]
+
+    wide = _RecordingTree()
+    assert _inject(wide, x, 1.0, np.zeros(2), np.ones(2), A_ub, b_ub, A_eq, b_eq) is True
+
+    # node has since branched x0 down to 0
+    tight = _RecordingTree()
+    assert (
+        _inject(tight, x, 1.0, np.zeros(2), np.array([0.0, 1.0]), A_ub, b_ub, A_eq, b_eq) is False
+    )
+    assert tight.injected == []
+
+
+def test_the_how_label_reaches_the_rejection_log(caplog):
+    """MILP passes 'snapped'; MIQP passes 'snapped' or 'rounded' (#1064)."""
+    A_ub, b_ub, A_eq, b_eq, lb, ub = _one_row_problem()
+    with caplog.at_level(logging.DEBUG, logger="discopt.solver"):
+        _inject(_RecordingTree(), [1.0, 1.0], 0.0, lb, ub, A_ub, b_ub, A_eq, b_eq, how="rounded")
+    assert any("rounded" in r.getMessage() for r in caplog.records)

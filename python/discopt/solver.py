@@ -97,6 +97,69 @@ def _get_heuristic_governor():
     return governor()
 
 
+def _verify_and_inject_candidate(
+    tree,
+    x_inc,
+    obj: float,
+    *,
+    n_orig: int,
+    node_lb_i,
+    node_ub_i,
+    A_ub,
+    b_ub,
+    A_eq,
+    b_eq,
+    log_prefix: str,
+    how: str,
+) -> bool:
+    """#952: verify an injected candidate against the rows and the NODE box, then inject.
+
+    ``inject_incumbent`` trusts its caller, so a candidate that reaches it is
+    taken as a candidate answer with nothing downstream re-examining it. The snap
+    (and, on the MIQP path, round) re-solve fixes the integers and asks POUNCE for
+    the continuous completion; POUNCE honours the slack bounds standing in for
+    inequality rows only to its own ~1e-8 *relative* tolerance, which on a big-M
+    row like ``eta <= 1e6*y`` is a 1e-2 absolute excursion. The point comes back
+    exactly integral, so the tree took it as the incumbent and reported
+    ``optimal`` — the false certificate #952 was opened for.
+
+    Checking the **node** box rather than the declared one is deliberate: an
+    off-box point can be integral (a binary at -1) and still pass every row,
+    seeding a spurious incumbent.
+
+    Declining is free: injection is a heuristic accelerator, the subtree stays
+    open, and the tree re-finds the point from a node relaxation if it is
+    genuinely feasible. A candidate that fails here is one the exit gate would
+    otherwise refuse the whole solve over.
+
+    One definition (#1344). The MILP and MIQP funnels ran this guard separately —
+    the MILP copy inline, the MIQP copy behind a local ``_node_point_feasible`` —
+    with the same rows and the same node box. Returns whether the point was
+    injected.
+    """
+    box = np.stack(
+        [
+            np.asarray(node_lb_i, dtype=np.float64)[:n_orig],
+            np.asarray(node_ub_i, dtype=np.float64)[:n_orig],
+        ],
+        axis=1,
+    )
+    if not _matrix_solution_feasible(
+        np.asarray(x_inc, dtype=np.float64)[:n_orig], A_ub, b_ub, A_eq, b_eq, box
+    ):
+        logger.debug(
+            "%s: rejected a %s incumbent outside its rows/box (%s)",
+            log_prefix,
+            how,
+            _matrix_solution_violations(
+                np.asarray(x_inc, dtype=np.float64)[:n_orig], A_ub, b_ub, A_eq, b_eq, box
+            ),
+        )
+        return False
+    tree.inject_incumbent(x_inc, float(obj))
+    return True
+
+
 def _improver_within_contingent(
     cost: float,
     *,
@@ -25420,8 +25483,14 @@ def _solve_milp_bb(
             lbs[i] = _INFEASIBILITY_SENTINEL
 
     def _maybe_inject_snapped(x_row, node_lb_i, node_ub_i):
-        # Purification (increment 3): near-integral interior points become
-        # exact incumbents via snap-fix-resolve.
+        """Snap-fix-resolve only: near-integral interior points become incumbents.
+
+        Deliberately does NOT carry the MIQP funnel's #1064 round-fix-resolve
+        fallback — see :func:`_maybe_inject_snapped_or_rounded`. Adding it here
+        would introduce incumbents this path does not find today, which is a
+        bound-changing behaviour change needing its own CLAUDE.md §5 evidence,
+        not a de-duplication (#1344).
+        """
         inc = _pounce_snap_incumbent(
             x_row,
             int_offsets,
@@ -25439,44 +25508,20 @@ def _solve_milp_bb(
         )
         if inc is None:
             return
-        x_inc = np.asarray(inc[1][:n_vars], dtype=np.float64).copy()
-        # #952: this is the channel the exit gate caught, and the MIQP twin of
-        # this funnel already guards it (``_node_point_feasible`` below). The
-        # snap re-solve fixes the integers and asks POUNCE for the continuous
-        # completion; POUNCE honours the slack bounds standing in for inequality
-        # rows only to its own ~1e-8 *relative* tolerance, which on a big-M row
-        # like ``eta <= 1e6*y`` is a 1e-2 absolute excursion. The point comes
-        # back exactly integral, so nothing downstream re-examines it: the tree
-        # took it as the incumbent and reported it ``optimal``.
-        #
-        # Measured on ``test_bound_active_recourse_is_sound``: all 4 node
-        # relaxation points were inside the rows, and the offending
-        # ``[y=1.0, eta=-1.00000001e+06]`` arrived here — this funnel, not a node
-        # LP. So verify the candidate against the same rows and box the node
-        # solves are held to, at the repo's declared ``abs=1e-6``.
-        #
-        # Declining is free: injection is a heuristic accelerator, the subtree
-        # stays open, and the tree re-finds the point from a node relaxation if
-        # it is genuinely feasible. A candidate that fails here is one the exit
-        # gate would otherwise refuse the whole solve over.
-        _box_inc = np.stack(
-            [
-                np.asarray(node_lb_i, dtype=np.float64)[:n_orig],
-                np.asarray(node_ub_i, dtype=np.float64)[:n_orig],
-            ],
-            axis=1,
+        _verify_and_inject_candidate(
+            tree,
+            np.asarray(inc[1][:n_vars], dtype=np.float64).copy(),
+            inc[0],
+            n_orig=n_orig,
+            node_lb_i=node_lb_i,
+            node_ub_i=node_ub_i,
+            A_ub=_A_ub_m,
+            b_ub=_b_ub_m,
+            A_eq=_A_eq_m,
+            b_eq=_b_eq_m,
+            log_prefix="MILP-BB",
+            how="snapped",
         )
-        if not _matrix_solution_feasible(
-            x_inc[:n_orig], _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, _box_inc
-        ):
-            logger.debug(
-                "MILP-BB: rejected a snapped incumbent outside its rows/box (%s)",
-                _matrix_solution_violations(
-                    x_inc[:n_orig], _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, _box_inc
-                ),
-            )
-            return
-        tree.inject_incumbent(x_inc, float(inc[0]))
 
     # Path B: in POUNCE-only mode the structured engine solves node relaxations
     # directly (no JAX recompile on cut-augmented shapes): the exact-vertex
@@ -26129,9 +26174,16 @@ def _solve_miqp_bb(
     # wall-clock-bounded search to this gate.
     _round = _RoundBudget(time_limit)
 
-    def _maybe_inject_snapped(x_row, node_lb_i, node_ub_i):
-        # Purification (increment 3): near-integral interior points become
-        # exact incumbents via snap-fix-resolve.
+    def _maybe_inject_snapped_or_rounded(x_row, node_lb_i, node_ub_i):
+        """Snap-fix-resolve, then #1064 round-fix-resolve if the snap declines.
+
+        Named apart from the MILP funnel's :func:`_maybe_inject_snapped` (#1344)
+        because the two genuinely differ: this path carries the round-fix-resolve
+        fallback and the quadratic term, that one does not. The #952 verification
+        both funnels owe their candidates is shared — see
+        :func:`_verify_and_inject_candidate` — so the guard cannot drift between
+        them even though the funnels do.
+        """
         inc = _pounce_snap_incumbent(
             x_row,
             int_offsets,
@@ -26173,23 +26225,22 @@ def _solve_miqp_bb(
             )
             if inc is not None:
                 how = "rounded"
-        if inc is not None:
-            x_inc = np.asarray(inc[1][:n_vars], dtype=np.float64).copy()
-            # #952: an injected incumbent goes straight into the tree as a
-            # candidate answer, so it is verified here rather than only at the
-            # exit gate. The snap re-solve fixes the integers and asks POUNCE for
-            # the continuous completion; an "optimal" verdict there is still a
-            # POUNCE iterate, not a proof that the point sits inside the rows.
-            if _node_point_feasible(x_inc, node_lb_i, node_ub_i):
-                tree.inject_incumbent(x_inc, float(inc[0]))
-            else:
-                logger.debug(
-                    "MIQP-BB: rejected a %s incumbent outside its rows/box (%s)",
-                    how,
-                    _matrix_solution_violations(
-                        x_inc[:n_orig], _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, None
-                    ),
-                )
+        if inc is None:
+            return
+        _verify_and_inject_candidate(
+            tree,
+            np.asarray(inc[1][:n_vars], dtype=np.float64).copy(),
+            inc[0],
+            n_orig=n_orig,
+            node_lb_i=node_lb_i,
+            node_ub_i=node_ub_i,
+            A_ub=_A_ub_m,
+            b_ub=_b_ub_m,
+            A_eq=_A_eq_m,
+            b_eq=_b_eq_m,
+            log_prefix="MIQP-BB",
+            how=how,
+        )
 
     def _handle_nonclean(i, lbs, sols, x_full, obj_val, node_lb_i, node_ub_i):
         # A node whose QP relaxation did not cleanly converge (non-KKT, solver
@@ -26238,7 +26289,7 @@ def _solve_miqp_bb(
                 lbs[i] = float(obj_val)
                 _gap_certified = False
             if lbs[i] < _SENTINEL_THRESHOLD:
-                _maybe_inject_snapped(sols[i], node_lb_i, node_ub_i)
+                _maybe_inject_snapped_or_rounded(sols[i], node_lb_i, node_ub_i)
             return
         lb_c = np.clip(node_lb_i, -_SPC, _SPC)
         ub_c = np.clip(node_ub_i, -_SPC, _SPC)
@@ -26260,7 +26311,7 @@ def _solve_miqp_bb(
             lbs[i] = rec[1]
             sols[i] = np.asarray(rec[2][:n_vars], dtype=np.float64)
             if lbs[i] < _SENTINEL_THRESHOLD:
-                _maybe_inject_snapped(sols[i], node_lb_i, node_ub_i)
+                _maybe_inject_snapped_or_rounded(sols[i], node_lb_i, node_ub_i)
         elif rec is not None:  # Phase-1-certified infeasible: rigorous prune.
             lbs[i] = _INFEASIBILITY_SENTINEL
         else:  # inconclusive — keep the node open, never a false-infeasible.
@@ -26362,7 +26413,7 @@ def _solve_miqp_bb(
                 result_lbs[i] = obj_vals[i] + float(qp_data.obj_const)
                 result_sols[i] = x_vals[i, :n_vars]
                 if result_lbs[i] < _SENTINEL_THRESHOLD:
-                    _maybe_inject_snapped(result_sols[i], node_lb, node_ub)
+                    _maybe_inject_snapped_or_rounded(result_sols[i], node_lb, node_ub)
             else:
                 # OPTIMAL-but-inconsistent or non-clean (iteration limit / crash):
                 # an untrusted bound. Keep the node open (POUNCE recovery), never a
