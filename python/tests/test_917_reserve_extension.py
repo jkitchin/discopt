@@ -252,27 +252,27 @@ def captured(monkeypatch):
     return seen
 
 
-def test_in_scope_solve_hands_the_reserve_back_when_enabled(ext, captured):
+def test_in_scope_solve_hands_the_reserve_back_when_enabled(ext, captured, forwarded_budget):
     ext("1")
     _pure_integer_min().solve(time_limit=40)
-    assert captured["time_limit"] == pytest.approx(26.0)  # 65% -- unchanged
-    assert captured["incumbent_time_extension"] == pytest.approx(14.0)  # the 35% reserve
+    assert captured["time_limit"] == forwarded_budget(40.0, 0.65)  # 65% -- unchanged
+    assert captured["incumbent_time_extension"] == forwarded_budget(40.0, 0.35)  # the reserve
 
 
-def test_in_scope_solve_forfeits_the_reserve_when_disabled(ext, captured):
+def test_in_scope_solve_forfeits_the_reserve_when_disabled(ext, captured, forwarded_budget):
     """Flag OFF must reproduce the pre-#917 call exactly: 65% primary, no extension."""
     ext("0")
     _pure_integer_min().solve(time_limit=40)
-    assert captured["time_limit"] == pytest.approx(26.0)
+    assert captured["time_limit"] == forwarded_budget(40.0, 0.65)
     assert captured["incumbent_time_extension"] == 0.0
 
 
 @pytest.mark.parametrize("flag", ["0", "1"])
-def test_out_of_scope_solve_never_gets_an_extension(ext, captured, flag):
+def test_out_of_scope_solve_never_gets_an_extension(ext, captured, flag, forwarded_budget):
     """No reserve was taken, so there is nothing to hand back — under either flag."""
     ext(flag)
     _pure_continuous().solve(time_limit=40)
-    assert captured["time_limit"] == pytest.approx(40.0)
+    assert captured["time_limit"] == forwarded_budget(40.0)
     assert captured["incumbent_time_extension"] == 0.0
 
 

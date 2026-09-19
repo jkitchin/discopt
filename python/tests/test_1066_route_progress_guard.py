@@ -287,24 +287,26 @@ class TestRouteBudgetWiring:
         monkeypatch.setattr(mn, "solve_mip_nlp", spy)
         return seen
 
-    def test_the_guarded_route_gets_the_whole_limit_and_the_hook(self, monkeypatch):
+    def test_the_guarded_route_gets_the_whole_limit_and_the_hook(
+        self, monkeypatch, forwarded_budget
+    ):
         """This is the #1066 change: no wall, a guard instead."""
         monkeypatch.setenv(ROUTE_ENV, "1")
         monkeypatch.setenv(GUARD_ENV, "1")
         seen = self._capture(monkeypatch)
         _load("gbd").solve(time_limit=20.0)
         assert seen, "solve_mip_nlp was never called -- the router did not fire"
-        assert seen["time_limit"] == pytest.approx(20.0)
+        assert seen["time_limit"] == forwarded_budget(20.0)
         hook = seen["options"]["termination_hook"]
         assert isinstance(hook, _RouteProgressGuard)
-        assert hook.checkpoint == pytest.approx(20.0 * _CONVEX_ROUTE_BUDGET_FRACTION)
+        assert hook.checkpoint == forwarded_budget(20.0, _CONVEX_ROUTE_BUDGET_FRACTION)
 
-    def test_the_flag_off_reproduces_the_1059_split_exactly(self, monkeypatch):
+    def test_the_flag_off_reproduces_the_1059_split_exactly(self, monkeypatch, forwarded_budget):
         monkeypatch.setenv(ROUTE_ENV, "1")
         monkeypatch.setenv(GUARD_ENV, "0")
         seen = self._capture(monkeypatch)
         _load("gbd").solve(time_limit=20.0)
-        assert seen["time_limit"] == pytest.approx(20.0 * _CONVEX_ROUTE_BUDGET_FRACTION)
+        assert seen["time_limit"] == forwarded_budget(20.0, _CONVEX_ROUTE_BUDGET_FRACTION)
         assert seen["options"] is None
 
     def test_an_explicit_choice_is_never_guarded(self, monkeypatch):
