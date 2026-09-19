@@ -1480,6 +1480,73 @@ def classify_model(
     )
 
 
+def _objective_is_convex(
+    model: Model,
+    cache: dict,
+    *,
+    use_certificate: bool,
+    exact_qp: bool,
+    deadline: float | None = None,
+) -> bool:
+    """Whether the objective is convex in the optimization sense.
+
+    ``max f`` counts as convex when ``f`` is concave or affine. The single
+    definition behind both :func:`classify_model` and
+    :func:`classify_oa_cut_convexity`: they used to carry separate copies, the
+    #936 exact-QP route was added to only one of them, and a model the solver
+    dispatch proved convex then reached OA with its objective cuts disabled
+    (#1352).
+
+    Args:
+        use_certificate: Consult the sound interval-Hessian certificate when
+            the syntactic walker leaves the objective unproven.
+        exact_qp: Also consult the exact QP/MIQP objective-Hessian route.
+        deadline: Forwarded to the exact-QP route, which abstains past it.
+    """
+    if model._objective is None:
+        return True
+
+    from discopt.modeling.core import ObjectiveSense
+
+    obj_curv = classify_expr(model._objective.expression, model, cache)
+    if model._objective.sense == ObjectiveSense.MINIMIZE:
+        obj_convex = obj_curv in (Curvature.CONVEX, Curvature.AFFINE)
+        need_curv_for_obj = Curvature.CONVEX
+    else:
+        obj_convex = obj_curv in (Curvature.CONCAVE, Curvature.AFFINE)
+        need_curv_for_obj = Curvature.CONCAVE
+
+    if not obj_convex and use_certificate:
+        try:
+            from .certificate import certify_convex
+
+            cert = certify_convex(model._objective.expression, model)
+        except Exception:
+            cert = None
+        if cert == need_curv_for_obj:
+            obj_convex = True
+
+    if not obj_convex and exact_qp:
+        # Exact QP/MIQP objective-Hessian route (#936). The syntactic walker
+        # and the scalar interval-Hessian certificate above both work on
+        # *scalar* expression DAGs; neither can parse the vectorized /
+        # indexed-summation modeling API, so a convex QP written with
+        # ``dm.sum(...)`` over array variables was certified convex by no
+        # route at all and fell through to spatial McCormick B&B, where it
+        # does not converge. When the problem classifier proves the model is
+        # a QP/MIQP — an exactly-quadratic objective over a polyhedron — the
+        # objective's Hessian is a constant matrix and an exact eigenvalue
+        # test on it is a rigorous, box-independent global convexity proof.
+        # Consulted last: it only ever upgrades an objective the cheaper
+        # routes left unproven, so it can never loosen a verdict.
+        from .certificate import certify_quadratic_objective_convex
+
+        if certify_quadratic_objective_convex(model, deadline=deadline):
+            obj_convex = True
+
+    return obj_convex
+
+
 def _classify_model_inner(
     model: Model, *, use_certificate: bool = False, deadline: float | None = None
 ) -> tuple[bool, list[bool]]:
@@ -1496,45 +1563,9 @@ def _classify_model_inner(
         cache[_DEADLINE_KEY] = deadline
         cache[_VISIT_COUNT_KEY] = [0]
 
-    obj_convex = True
-    if model._objective is not None:
-        from discopt.modeling.core import ObjectiveSense
-
-        obj_curv = classify_expr(model._objective.expression, model, cache)
-        if model._objective.sense == ObjectiveSense.MINIMIZE:
-            obj_convex = obj_curv in (Curvature.CONVEX, Curvature.AFFINE)
-            need_curv_for_obj = Curvature.CONVEX
-        else:
-            obj_convex = obj_curv in (Curvature.CONCAVE, Curvature.AFFINE)
-            need_curv_for_obj = Curvature.CONCAVE
-
-        if not obj_convex and use_certificate:
-            try:
-                from .certificate import certify_convex
-
-                cert = certify_convex(model._objective.expression, model)
-            except Exception:
-                cert = None
-            if cert == need_curv_for_obj:
-                obj_convex = True
-
-        if not obj_convex and use_certificate:
-            # Exact QP/MIQP objective-Hessian route (#936). The syntactic walker
-            # and the scalar interval-Hessian certificate above both work on
-            # *scalar* expression DAGs; neither can parse the vectorized /
-            # indexed-summation modeling API, so a convex QP written with
-            # ``dm.sum(...)`` over array variables was certified convex by no
-            # route at all and fell through to spatial McCormick B&B, where it
-            # does not converge. When the problem classifier proves the model is
-            # a QP/MIQP — an exactly-quadratic objective over a polyhedron — the
-            # objective's Hessian is a constant matrix and an exact eigenvalue
-            # test on it is a rigorous, box-independent global convexity proof.
-            # Consulted last: it only ever upgrades an objective the cheaper
-            # routes left unproven, so it can never loosen a verdict.
-            from .certificate import certify_quadratic_objective_convex
-
-            if certify_quadratic_objective_convex(model, deadline=deadline):
-                obj_convex = True
+    obj_convex = _objective_is_convex(
+        model, cache, use_certificate=use_certificate, exact_qp=use_certificate, deadline=deadline
+    )
 
     constraint_mask: list[bool] = []
     all_convex = obj_convex
@@ -1564,40 +1595,42 @@ class OACutConvexity:
     constraint_mask: list[bool]
 
 
-def classify_oa_cut_convexity(model: Model, *, use_certificate: bool = False) -> OACutConvexity:
+def classify_oa_cut_convexity(
+    model: Model, *, use_certificate: Optional[bool] = None
+) -> OACutConvexity:
     """Return the convexity information needed to generate sound OA cuts.
 
     Unlike :func:`classify_model`, the per-constraint mask is retained
     even when the objective is non-convex, so evaluator-based OA cuts
     can still be generated on the convex constraints of a model whose
     objective prevents full convex classification.
+
+    ``use_certificate=None`` (what the OA-family callers pass) follows
+    ``DISCOPT_OA_CONVEXITY_CERTIFICATE``; an explicit bool is honoured as
+    given. With the flag on, the certificate path is the one
+    :func:`classify_model` runs for solver dispatch -- interval-Hessian
+    certificate plus the #936 exact-QP objective route -- so OA no longer
+    disables its objective cuts on a model the dispatch routed to it *because*
+    that certificate proved it convex (#1352). With the flag off the verdict is
+    exactly the pre-#1352 one, including for an explicit ``True``.
     """
+    from .certificate import _oa_convexity_certificate_enabled
+
+    certificate_route = _oa_convexity_certificate_enabled()
+    if use_certificate is None:
+        use_certificate = certificate_route
+
     cache: dict = {}
     ctx = build_linear_context(model)
     if ctx is not None:
         cache[_LINEAR_CONTEXT_KEY] = ctx
 
-    obj_convex = True
-    if model._objective is not None:
-        from discopt.modeling.core import ObjectiveSense
-
-        obj_curv = classify_expr(model._objective.expression, model, cache)
-        if model._objective.sense == ObjectiveSense.MINIMIZE:
-            obj_convex = obj_curv in (Curvature.CONVEX, Curvature.AFFINE)
-            need_curv_for_obj = Curvature.CONVEX
-        else:
-            obj_convex = obj_curv in (Curvature.CONCAVE, Curvature.AFFINE)
-            need_curv_for_obj = Curvature.CONCAVE
-
-        if not obj_convex and use_certificate:
-            try:
-                from .certificate import certify_convex
-
-                cert = certify_convex(model._objective.expression, model)
-            except Exception:
-                cert = None
-            if cert == need_curv_for_obj:
-                obj_convex = True
+    obj_convex = _objective_is_convex(
+        model,
+        cache,
+        use_certificate=use_certificate,
+        exact_qp=use_certificate and certificate_route,
+    )
 
     constraint_mask: list[bool] = []
     for c in model._constraints:

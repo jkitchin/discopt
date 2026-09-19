@@ -3866,7 +3866,14 @@ class SolveResult:
     bound : float or None
         Best dual (lower) bound.
     gap : float or None
-        Relative optimality gap ``(objective - bound) / |objective|``.
+        Relative optimality gap ``(objective - bound) / |objective|`` while the
+        search is open. The convergence test is a disjunction -- absolute gap
+        ``<= 1e-6`` OR relative gap ``<= gap_tolerance`` -- and a closed gap is
+        reported as ``0.0`` whichever arm closed it, so below unit objective
+        scale ``gap == 0.0`` can stand for a relative gap far above
+        ``gap_tolerance`` (e.g. ``5.5e-7`` absolute on a ``2e-3`` objective,
+        #1352). ``solver_stats["gap_criterion"]`` names the arm when the
+        branch-and-bound path recorded it.
     x : dict of str to numpy.ndarray, or None
         Variable values keyed by name. None if no feasible solution found.
 

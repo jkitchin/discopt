@@ -35,7 +35,11 @@ import numpy as np
 
 from discopt.modeling.core import Constraint, Model, ObjectiveSense, SolveResult, VarType
 from discopt.solvers import pounce_incumbent_options, pounce_option_defaults
-from discopt.solvers._gap import bound_inversion_tolerance, optimality_gap
+from discopt.solvers._gap import (
+    bound_inversion_tolerance,
+    master_gap_tolerance,
+    optimality_gap,
+)
 from discopt.solvers.mip_nlp_candidates import FixedNLPCandidate, FixedNLPCandidateManager
 from discopt.solvers.mip_nlp_options import (
     FP_OPTION_KEYS,
@@ -7204,7 +7208,7 @@ def solve_oa(
                 decomp.obj_is_linear,
                 decomp.master_bound_valid,
                 time_limit=remaining,
-                gap_tolerance=gap_tolerance,
+                gap_tolerance=master_gap_tolerance(gap_tolerance, UB),
                 add_slack=False,
                 max_slack=max_slack,
                 oa_penalty_factor=oa_penalty_factor,
@@ -7388,7 +7392,7 @@ def solve_oa(
                 decomp.obj_is_linear,
                 master_bound_valid,
                 time_limit=max(time_limit - elapsed, 0.0),
-                gap_tolerance=gap_tolerance,
+                gap_tolerance=master_gap_tolerance(gap_tolerance, UB),
                 add_slack=True,
                 max_slack=max_slack,
                 oa_penalty_factor=oa_penalty_factor,
@@ -8082,7 +8086,7 @@ def solve_oa(
                     None if master_checkin_deadline is None else master_checkin_deadline - elapsed
                 ),
             ),
-            gap_tolerance=gap_tolerance,
+            gap_tolerance=master_gap_tolerance(gap_tolerance, UB),
             add_slack=add_slack,
             max_slack=max_slack,
             oa_penalty_factor=oa_penalty_factor,

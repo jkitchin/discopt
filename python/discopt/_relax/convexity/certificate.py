@@ -95,6 +95,42 @@ def _qp_exact_convexity_enabled() -> bool:
     )
 
 
+def _oa_convexity_certificate_enabled() -> bool:
+    """Whether OA's cut classifier consults the convexity certificates (#1352).
+
+    Governs :func:`~.rules.classify_oa_cut_convexity` for the callers that take
+    its default (OA, LP/NLP-BB/GOA, GDPopt-LOA, GBD, the decomposition advisor
+    and IR reformulation). When on, those callers get the same certificate path
+    the solver's dispatch classifier (``classify_model(use_certificate=True)``)
+    runs: the interval-Hessian certificate plus the exact QP/MIQP
+    objective-Hessian route. Without it, a convex quadratic written with
+    ``dm.sum(...)`` is routed to OA as certified convex and OA then disables its
+    master lower-bound updates and objective cuts on it, fails to certify, and
+    falls back to the spatial path.
+
+    Only the *objective* verdict changes; the per-row cut mask is untouched.
+
+    **Default OFF** (bound-changing -- CLAUDE.md §5): proving an objective convex
+    turns on OA's objective cuts and master lower-bound updates. Enable with
+    ``DISCOPT_OA_CONVEXITY_CERTIFICATE=1`` (also ``true``/``yes``/``on``).
+
+    Panel verdict (#1352): cert-clean but NOT net-positive, so it stays OFF. On
+    24 ``dm.sum``-written cardinality Markowitz models, flag ON certified 13 at
+    0 nodes (mean wall change +0.13 s -- no faster than the B&B fallback it
+    replaced) and on the other 11 ran out OA's 5 s route budget and fell back
+    (+4.3 s each); total wall 16.5 s OFF vs 65.5 s ON. The loss is the in-house master MILP
+    exiting non-final on OA masters HiGHS closes in ~26 nodes (#1355); with the
+    HiGHS master the same OA certifies ``port-12-3-2`` in 0.99 s. Re-run the
+    panel once #1355 is fixed.
+    """
+    return os.environ.get("DISCOPT_OA_CONVEXITY_CERTIFICATE", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 # Size cap for the exact QP convexity route. ``numpy.linalg.eigvalsh`` on a dense
 # symmetric matrix measured (this container, load average 0.25, min of 3):
 # n=1000 -> 0.052 s, n=2000 -> 0.331 s (sd 0.008), n=4000 -> 2.47 s. Classification
