@@ -8,7 +8,10 @@ drops a now-unused `import os`. Refuses (exit 3) if the notebook uses jax, unles
 
 Usage: strip_jax_env.py <notebook.ipynb> [--force]
 """
-import json, re, sys
+
+import json
+import re
+import sys
 
 path = sys.argv[1]
 force = "--force" in sys.argv
@@ -16,7 +19,8 @@ nb = json.load(open(path))
 
 uses_jax = any(
     re.search(r"\bimport jax\b|\bjax\.|from jax\b|\bjnp\b|equinox|optax", "".join(c["source"]))
-    for c in nb["cells"] if c["cell_type"] == "code"
+    for c in nb["cells"]
+    if c["cell_type"] == "code"
 )
 if uses_jax and not force:
     print(f"REFUSING: {path} uses jax; strip by hand or pass --force")
@@ -31,7 +35,8 @@ for c in nb["cells"]:
         continue
     orig = src
     # drop the JAX_* env assignments
-    src = re.sub(r'^\s*os\.environ\[\s*["\']JAX_[A-Z0-9_]+["\']\s*\]\s*=\s*.*\n?', "", src, flags=re.M)
+    jax_env = r'^\s*os\.environ\[\s*["\']JAX_[A-Z0-9_]+["\']\s*\]\s*=\s*.*\n?'
+    src = re.sub(jax_env, "", src, flags=re.M)
     # drop `import os` if os is no longer referenced anywhere in this cell
     body = re.sub(r"^\s*import os\s*$", "", src, flags=re.M)
     if not re.search(r"\bos\.", body):
@@ -39,7 +44,7 @@ for c in nb["cells"]:
     # collapse >2 blank lines and trim
     src = re.sub(r"\n{3,}", "\n\n", src).strip("\n")
     if src != orig:
-        c["source"] = [l + "\n" for l in src.split("\n")]
+        c["source"] = [line + "\n" for line in src.split("\n")]
         c["source"][-1] = c["source"][-1].rstrip("\n")
         changed += 1
 
