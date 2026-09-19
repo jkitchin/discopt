@@ -97,6 +97,137 @@ def _get_heuristic_governor():
     return governor()
 
 
+def _improver_within_contingent(
+    cost: float,
+    *,
+    budget_on: bool,
+    tree,
+    heur_state: dict[str, float],
+    success_gain: float,
+    offset: float,
+    quot: float,
+) -> bool:
+    """Whether an improver-role heuristic costing ``cost`` fits the contingent.
+
+    The finder role is never gated: with no incumbent yet, securing the first one
+    (for pruning) takes priority. Once an incumbent exists the call is an improver
+    and must fit the success-weighted, node-proportional contingent (SCIP
+    ``heur_subnlp`` shape), so improvers that stop paying off shut themselves off.
+
+    Soundness is untouched either way: B&B stays exhaustive, so a skipped improver
+    can only cost nodes, never a wrong optimum.
+
+    One definition (#1344). The two copies this replaces differed **only** in
+    docstring wording — their executable bodies were identical under an AST compare
+    with docstrings stripped, which is why the raw text similarity read 0.87 and
+    looked like behavioural drift. The knobs stay parameters because each call site
+    still reads them from the environment itself; that duplication is noted in the
+    PR and left alone here.
+    """
+    if not budget_on or tree.incumbent() is None:
+        return True
+    _nodes = float(tree.stats().get("total_nodes", 0))
+    _weight = success_gain * (heur_state["found"] + 1) / (heur_state["calls"] + 1)
+    _contingent = offset + quot * _nodes * _weight
+    return (heur_state["cost"] + cost) <= _contingent
+
+
+def _record_improver_run(heur_state: dict[str, float], cost: float, improved: bool) -> None:
+    """Charge an improver-role run against the contingent and note success.
+
+    One definition (#1344): duplicated verbatim in :func:`solve_model` and
+    :func:`_solve_nlp_bb`, whose own comment says the governor there is
+    "mirrored from solve_model". ``heur_state`` is mutated in place, exactly as
+    the closed-over dict was.
+    """
+    heur_state["calls"] += 1
+    heur_state["cost"] += cost
+    if improved:
+        heur_state["found"] += 1
+
+
+def _validate_injected_candidate(x, evaluator, cl, cu, int_offsets, int_sizes):
+    """Validate a debugger-injected candidate against the ORIGINAL problem.
+
+    ``inject_incumbent`` trusts its caller (no feasibility re-check), so the
+    debugger's ``inject`` steer must verify integrality + constraint feasibility
+    here and hand the tree the point's true evaluated objective — never a
+    relaxation bound (CLAUDE.md §1). Returns ``(feasible, x_validated, obj)``;
+    pure reads only.
+
+    One definition (#1344): duplicated verbatim in :func:`solve_model` and
+    :func:`_solve_nlp_bb`. Each call site keeps a one-line binder so the
+    ``validator=`` callback stays a single-argument callable and the problem data
+    is still snapshotted at definition time.
+    """
+    xv = np.asarray(x, dtype=np.float64).copy()
+    if int_offsets and not _is_integer_feasible_solution(xv, int_offsets, int_sizes):
+        return False, xv, float("nan")
+    for _o, _s in zip(int_offsets, int_sizes):
+        xv[_o : _o + _s] = np.round(xv[_o : _o + _s])
+    if cl and not _check_constraint_feasibility(evaluator, xv, cl, cu):
+        return False, xv, float("nan")
+    _obj = float(evaluator.evaluate_objective(xv))
+    if not np.isfinite(_obj) or _obj >= _SENTINEL_THRESHOLD:
+        return False, xv, float("nan")
+    return True, xv, _obj
+
+
+def _affine_reduce(expr: Any, model: Model, s: float = 1.0):
+    """Reduce ``expr`` to ``({flat_index: coeff}, const)``, or ``None`` if not affine.
+
+    ``s`` is the sign/scale accumulated on the way down, so callers start at
+    ``1.0``. Used to spot two-variable equality linkages and affine selection rows.
+
+    One definition (#1344): this was duplicated **verbatim** inside
+    :func:`_branch_priority_integer_vars` and :func:`_sos1_selector_vars`. Both
+    copies closed over ``model`` alone and neither enclosing function rebinds it,
+    so threading it as a parameter is behaviour-preserving.
+
+    The modeling-core classes are imported here rather than at module scope to
+    keep ``solver.py``'s import-time coupling as it was, and the recursion lives
+    in a nested walk so that import happens once per top-level call instead of
+    once per expression node.
+    """
+    from discopt._relax.term_classifier import _get_flat_index
+    from discopt.modeling.core import (
+        BinaryOp,
+        Constant,
+        IndexExpression,
+        UnaryOp,
+        Variable,
+    )
+
+    def _walk(e: Any, sign: float):
+        if isinstance(e, Constant):
+            return ({}, sign * float(e.value))
+        if isinstance(e, (Variable, IndexExpression)):
+            flat = _get_flat_index(e, model)
+            if flat is None:
+                return None
+            return ({int(flat): sign}, 0.0)
+        if isinstance(e, UnaryOp) and e.op == "neg":
+            return _walk(e.operand, -sign)
+        if isinstance(e, BinaryOp):
+            if e.op in ("+", "-"):
+                left = _walk(e.left, sign)
+                right = _walk(e.right, sign if e.op == "+" else -sign)
+                if left is None or right is None:
+                    return None
+                d = dict(left[0])
+                for k, val in right[0].items():
+                    d[k] = d.get(k, 0.0) + val
+                return (d, left[1] + right[1])
+            if e.op == "*":
+                if isinstance(e.left, Constant):
+                    return _walk(e.right, sign * float(e.left.value))
+                if isinstance(e.right, Constant):
+                    return _walk(e.left, sign * float(e.right.value))
+        return None
+
+    return _walk(expr, s)
+
+
 def _branch_priority_integer_vars(model: Model) -> frozenset[int]:
     """Integer/binary flat indices that *gate* the model's nonlinear terms.
 
@@ -116,14 +247,7 @@ def _branch_priority_integer_vars(model: Model) -> frozenset[int]:
     branching-order metadata only — it never enters a bound or feasibility test,
     so it cannot affect soundness.
     """
-    from discopt._relax.term_classifier import _get_flat_index, classify_nonlinear_terms
-    from discopt.modeling.core import (
-        BinaryOp,
-        Constant,
-        IndexExpression,
-        UnaryOp,
-        Variable,
-    )
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     n = sum(v.size for v in model._variables)
     is_int = [False] * n
@@ -146,39 +270,10 @@ def _branch_priority_integer_vars(model: Model) -> frozenset[int]:
 
     priority: set[int] = {j for j in nl if 0 <= j < n and is_int[j]}
 
-    # Affine reduction of an expression to ``{idx: coeff}, const`` (None if the
-    # expression is not affine). Used to spot two-variable equality linkages.
-    def _affine(expr: Any, s: float = 1.0):
-        if isinstance(expr, Constant):
-            return ({}, s * float(expr.value))
-        if isinstance(expr, (Variable, IndexExpression)):
-            flat = _get_flat_index(expr, model)
-            if flat is None:
-                return None
-            return ({int(flat): s}, 0.0)
-        if isinstance(expr, UnaryOp) and expr.op == "neg":
-            return _affine(expr.operand, -s)
-        if isinstance(expr, BinaryOp):
-            if expr.op in ("+", "-"):
-                left = _affine(expr.left, s)
-                right = _affine(expr.right, s if expr.op == "+" else -s)
-                if left is None or right is None:
-                    return None
-                d = dict(left[0])
-                for k, val in right[0].items():
-                    d[k] = d.get(k, 0.0) + val
-                return (d, left[1] + right[1])
-            if expr.op == "*":
-                if isinstance(expr.left, Constant):
-                    return _affine(expr.right, s * float(expr.left.value))
-                if isinstance(expr.right, Constant):
-                    return _affine(expr.left, s * float(expr.right.value))
-        return None
-
     for c in model._constraints:
         if getattr(c, "sense", None) != "==":
             continue
-        reduced = _affine(c.body)
+        reduced = _affine_reduce(c.body, model)
         if reduced is None:
             continue
         nz = [(k, v) for k, v in reduced[0].items() if abs(v) > 1e-12]
@@ -215,14 +310,7 @@ def _sos1_selector_vars(model: Model) -> frozenset[int]:
     only** — it never enters a bound or feasibility test, so it cannot affect
     soundness. Returns an empty set when the structure is absent.
     """
-    from discopt._relax.term_classifier import _get_flat_index, classify_nonlinear_terms
-    from discopt.modeling.core import (
-        BinaryOp,
-        Constant,
-        IndexExpression,
-        UnaryOp,
-        Variable,
-    )
+    from discopt._relax.term_classifier import classify_nonlinear_terms
 
     n = sum(v.size for v in model._variables)
     is_int = [False] * n
@@ -254,40 +342,13 @@ def _sos1_selector_vars(model: Model) -> frozenset[int]:
         # ``[0, 1]`` (ex1252's ``x18`` is continuous but ``= x36`` binary).
         return is_int[j] or (0.0 <= lb[j] and ub[j] <= 1.0 + 1e-9)
 
-    def _affine(expr: Any, s: float = 1.0):
-        if isinstance(expr, Constant):
-            return ({}, s * float(expr.value))
-        if isinstance(expr, (Variable, IndexExpression)):
-            flat = _get_flat_index(expr, model)
-            if flat is None:
-                return None
-            return ({int(flat): s}, 0.0)
-        if isinstance(expr, UnaryOp) and expr.op == "neg":
-            return _affine(expr.operand, -s)
-        if isinstance(expr, BinaryOp):
-            if expr.op in ("+", "-"):
-                left = _affine(expr.left, s)
-                right = _affine(expr.right, s if expr.op == "+" else -s)
-                if left is None or right is None:
-                    return None
-                d = dict(left[0])
-                for k, val in right[0].items():
-                    d[k] = d.get(k, 0.0) + val
-                return (d, left[1] + right[1])
-            if expr.op == "*":
-                if isinstance(expr.left, Constant):
-                    return _affine(expr.right, s * float(expr.left.value))
-                if isinstance(expr.right, Constant):
-                    return _affine(expr.left, s * float(expr.right.value))
-        return None
-
     # Pass 1: collect candidate selectors from every affine selection row
     # ``Σ s_i = k`` (k != 0, >= 2 continuous members).
     candidates: set[int] = set()
     for c in model._constraints:
         if getattr(c, "sense", None) != "==":
             continue
-        reduced = _affine(c.body)
+        reduced = _affine_reduce(c.body, model)
         if reduced is None:
             continue
         coeffs, const = reduced
@@ -312,7 +373,7 @@ def _sos1_selector_vars(model: Model) -> frozenset[int]:
     for c in model._constraints:
         if getattr(c, "sense", None) not in ("<=", ">="):
             continue
-        reduced = _affine(c.body)
+        reduced = _affine_reduce(c.body, model)
         if reduced is None:
             continue
         coeffs, const = reduced
@@ -13133,25 +13194,20 @@ def solve_model(
     _heuristic_governor = _get_heuristic_governor()
 
     def _improver_allowed(cost: float) -> bool:
-        """Whether an *improver*-role heuristic costing ``cost`` may run now.
-
-        The finder role is never gated: when there is no incumbent yet, securing
-        the first one (for pruning) takes priority. Once an incumbent exists the
-        call is an improver and must fit the success-weighted, node-proportional
-        contingent (SCIP ``heur_subnlp`` shape)."""
-        if not _heur_budget_on or tree.incumbent() is None:
-            return True
-        _nodes = float(tree.stats().get("total_nodes", 0))
-        _weight = _HEUR_SUCCESS_GAIN * (_heur_state["found"] + 1) / (_heur_state["calls"] + 1)
-        _contingent = _HEUR_BUDGET_OFFSET + _HEUR_BUDGET_QUOT * _nodes * _weight
-        return (_heur_state["cost"] + cost) <= _contingent
+        """Bind this solve's governor knobs to the shared contingent test (#1344)."""
+        return _improver_within_contingent(
+            cost,
+            budget_on=_heur_budget_on,
+            tree=tree,
+            heur_state=_heur_state,
+            success_gain=_HEUR_SUCCESS_GAIN,
+            offset=_HEUR_BUDGET_OFFSET,
+            quot=_HEUR_BUDGET_QUOT,
+        )
 
     def _record_improver(cost: float, improved: bool) -> None:
-        """Charge an improver-role run against the contingent and note success."""
-        _heur_state["calls"] += 1
-        _heur_state["cost"] += cost
-        if improved:
-            _heur_state["found"] += 1
+        """Bind this solve's heuristic state to the shared recorder (#1344)."""
+        _record_improver_run(_heur_state, cost, improved)
 
     if subnlp_enabled:
         try:
@@ -13666,25 +13722,13 @@ def solve_model(
         _ioff=int_offsets,
         _isz=int_sizes,
     ):
-        """Validate a debugger-injected candidate against the ORIGINAL problem.
+        """Bind this solve's problem data to the shared validator (#1344).
 
-        ``inject_incumbent`` trusts its caller (no feasibility re-check), so
-        the debugger's ``inject`` steer must verify integrality + constraint
-        feasibility here and hand the tree the point's true evaluated
-        objective — never a relaxation bound (CLAUDE.md §1). Returns
-        ``(feasible, x_validated, obj)``; pure reads only.
+        The default arguments snapshot the data at definition time, exactly as
+        the inlined copy did, and keep this a one-argument ``validator=``
+        callback.
         """
-        xv = np.asarray(x, dtype=np.float64).copy()
-        if _ioff and not _is_integer_feasible_solution(xv, _ioff, _isz):
-            return False, xv, float("nan")
-        for _o, _s in zip(_ioff, _isz):
-            xv[_o : _o + _s] = np.round(xv[_o : _o + _s])
-        if _cl and not _check_constraint_feasibility(_ev, xv, _cl, _cu):
-            return False, xv, float("nan")
-        _obj = float(_ev.evaluate_objective(xv))
-        if not np.isfinite(_obj) or _obj >= _SENTINEL_THRESHOLD:
-            return False, xv, float("nan")
-        return True, xv, _obj
+        return _validate_injected_candidate(x, _ev, _cl, _cu, _ioff, _isz)
 
     # Lazy re-separation governor state (C-42 Part 2; see the module-level
     # ``_LAZY_RESEP_*`` constants). Touched only under active pool inheritance.
@@ -18361,24 +18405,20 @@ def _solve_nlp_bb(
     _heuristic_governor = _get_heuristic_governor()
 
     def _improver_allowed(cost: float) -> bool:
-        """Whether an improver-role LNS heuristic costing ``cost`` may run now.
-
-        Never gated before the first incumbent (securing one for pruning wins).
-        Once an incumbent exists the call must fit the success-weighted,
-        node-proportional contingent (SCIP ``heur_subnlp`` shape)."""
-        if not _heur_budget_on or tree.incumbent() is None:
-            return True
-        _nodes = float(tree.stats().get("total_nodes", 0))
-        _weight = _HEUR_SUCCESS_GAIN * (_heur_state["found"] + 1) / (_heur_state["calls"] + 1)
-        _contingent = _HEUR_BUDGET_OFFSET + _HEUR_BUDGET_QUOT * _nodes * _weight
-        return (_heur_state["cost"] + cost) <= _contingent
+        """Bind this solve's governor knobs to the shared contingent test (#1344)."""
+        return _improver_within_contingent(
+            cost,
+            budget_on=_heur_budget_on,
+            tree=tree,
+            heur_state=_heur_state,
+            success_gain=_HEUR_SUCCESS_GAIN,
+            offset=_HEUR_BUDGET_OFFSET,
+            quot=_HEUR_BUDGET_QUOT,
+        )
 
     def _record_improver(cost: float, improved: bool) -> None:
-        """Charge an improver-role run against the contingent and note success."""
-        _heur_state["calls"] += 1
-        _heur_state["cost"] += cost
-        if improved:
-            _heur_state["found"] += 1
+        """Bind this solve's heuristic state to the shared recorder (#1344)."""
+        _record_improver_run(_heur_state, cost, improved)
 
     from discopt import debug as _debug
 
@@ -18390,25 +18430,13 @@ def _solve_nlp_bb(
         _ioff=int_offsets,
         _isz=int_sizes,
     ):
-        """Validate a debugger-injected candidate against the ORIGINAL problem.
+        """Bind this solve's problem data to the shared validator (#1344).
 
-        ``inject_incumbent`` trusts its caller (no feasibility re-check), so
-        the debugger's ``inject`` steer must verify integrality + constraint
-        feasibility here and hand the tree the point's true evaluated
-        objective — never a relaxation bound (CLAUDE.md §1). Returns
-        ``(feasible, x_validated, obj)``; pure reads only.
+        The default arguments snapshot the data at definition time, exactly as
+        the inlined copy did, and keep this a one-argument ``validator=``
+        callback.
         """
-        xv = np.asarray(x, dtype=np.float64).copy()
-        if _ioff and not _is_integer_feasible_solution(xv, _ioff, _isz):
-            return False, xv, float("nan")
-        for _o, _s in zip(_ioff, _isz):
-            xv[_o : _o + _s] = np.round(xv[_o : _o + _s])
-        if _cl and not _check_constraint_feasibility(_ev, xv, _cl, _cu):
-            return False, xv, float("nan")
-        _obj = float(_ev.evaluate_objective(xv))
-        if not np.isfinite(_obj) or _obj >= _SENTINEL_THRESHOLD:
-            return False, xv, float("nan")
-        return True, xv, _obj
+        return _validate_injected_candidate(x, _ev, _cl, _cu, _ioff, _isz)
 
     # Set when the interactive debugger's `quit` breaks the search loop: a
     # user-interrupted exit proves nothing, so the status decision below must
