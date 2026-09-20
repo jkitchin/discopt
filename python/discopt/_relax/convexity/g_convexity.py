@@ -110,6 +110,23 @@ from .lattice import Curvature
 # The matrix tested is ``aug = H ± ρ·Outer``, not ``H``: ``ρ`` ranges over a
 # geometric grid up to ``_MAX_RHO``, so ``aug`` can carry a magnitude many orders
 # above the raw Hessian's and the slack must be taken from ``aug`` itself.
+#
+# REACH (verified 2026-09-20; recorded because #1397's first pass got it wrong and
+# called this a default-path site). No default solve reaches this function:
+#
+#   * :meth:`mccormick_lp.MccormickLPRelaxer._separate_g_convex` — the only live
+#     caller — runs at ``mccormick_lp.py:1792`` under
+#     ``out_cuts is None and self._g_convex_enabled()``, i.e. the default-OFF
+#     ``DISCOPT_G_CONVEX_CUTS`` flag;
+#   * :mod:`g_convex_inject` is documented default-OFF on that same flag;
+#   * :mod:`g_convex_cut` and :mod:`g_products_ratios` have no callers at all
+#     outside the ``convexity/__init__`` re-export.
+#
+# So the scale-incoherence here was never able to corrupt a shipped certificate.
+# What the fix buys is that switching the flag on is no longer unsound:
+# ``g_convex_inject``'s own docstring records the flag as "cert-clean but inert",
+# which is the stalled graduation CLAUDE.md §5 names as a defect, and a
+# graduation attempt on an unsound gate could not have been honest.
 
 # Default fixed-``ρ`` search grid for the sound certificate. The interval
 # Gershgorin bound of the augmented matrix is *not* monotone in ``ρ`` (the
