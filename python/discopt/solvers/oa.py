@@ -1846,8 +1846,25 @@ def _infeasible_nogood_enabled() -> bool:
     *proved* infeasible, even when ``add_no_good_cuts`` is off.
 
     Default-OFF. It adds rows to the master, so it changes the master's dual bound
-    (CLAUDE.md §5 regime 2) and ships behind a flag until a corpus panel clears
-    both bars. ``=1`` turns it on.
+    (CLAUDE.md §5 regime 2). ``=1`` turns it on.
+
+    **§5 state: kept as a documented opt-out — already REJECTED as a default,
+    deliberately.** ``docs/dev/performance-plan.md`` §25.7 is titled "REJECTED as a
+    default: ``DISCOPT_OA_INFEASIBLE_NOGOOD``", and §25's verdict table records
+    **"stays OFF"**. This docstring previously said only "until a corpus panel
+    clears both bars", which read as a stalled graduation and put the flag on
+    #1388's retirement list; the decision had in fact been taken and written down.
+
+    *Why it is not the default.* An OA cut excludes the *point* it is taken at, not
+    the *assignment* — with a linear objective and no epigraph nothing stops the
+    master returning the same integers at a different continuous point (§25 measured
+    7 of 172 assignments re-proposed, one six times). The exclusion mechanism is a
+    no-good cut, and it is sound **exactly when** the assignment is *proven*
+    infeasible — which is why the naive form (mapping an Ipopt code-2 return to
+    ``INFEASIBLE``) was rejected: a local NLP failure is not a proof.
+
+    *What would change it:* a route that establishes proven infeasibility of the
+    assignment, not of the point. See §25.7 before re-opening this.
     """
     return os.environ.get("DISCOPT_OA_INFEASIBLE_NOGOOD", "0") not in (
         "0",

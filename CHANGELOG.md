@@ -718,6 +718,43 @@ The release procedure that produces these entries is documented in
 
 ### Removed
 
+- **Six default-OFF `DISCOPT_*` gates retired** (#1388, CLAUDE.md §5). Each was in
+  none of §5's three states — a defect the rule names explicitly. After this the
+  number of solver-math gates in that condition is **zero**; the five that remain
+  each carry a recorded status.
+  - `DISCOPT_GP_MINLP` — **no capability lost.** It gated *auto-routing* from a
+    plain `solve()`, never the engine; `solver="gp-minlp"` is unchanged.
+  - `DISCOPT_SGO` — **flag only; the 1,532-line signomial global engine was kept**
+    and given the entry point it never had, `solver="sgo"`. Its three integration
+    tests moved from `DISCOPT_SGO=1` + `solve()` to `solve(solver="sgo")` with
+    every assertion unchanged — same certified objective, bound and
+    `gap_certified`.
+  - `DISCOPT_CMIR_AGGREGATION` — measured **inert**
+    (`docs/dev/cut-engine-entry-2026-07-06.md`: flag-ON root bound on
+    `nvs17`/`nvs19` bit-identical to cuts-off; the separator "correctly
+    self-disables"). Removed end to end, through the `aggregation_mir_cuts_py`
+    binding to `crates/discopt-core/src/lp/aggregation.rs`.
+  - `DISCOPT_PSD_QFORM` — **superseded.** #936's `DISCOPT_QP_EXACT_CONVEXITY` is
+    default-ON on a full panel and makes the identical exact-eigenvalue argument
+    from an extractor that also handles the vectorized API. What goes is the
+    exact-PSD verdict on *constraint* bodies and on objectives not classified
+    QP/MIQP; those fall back to the interval-Hessian + Gershgorin path, which
+    abstains rather than mis-certifies.
+  - `DISCOPT_PRESOLVE_SUBSTITUTE` — **its §5 panel ran and failed bar 2**: 0
+    incumbents and 0 certifications gained over 66 vendored instances, plus an
+    open bound regression (`hda` OFF −64,473 → ON −1.56e8). Only the solve-path
+    entry is deleted; the Rust `presolve/substitute.rs` pass, `ModelRepr.substitute`
+    and `propagate_bounds_to_model`'s use of its tightened bounds all stay.
+  - `DISCOPT_DIRECT_HEURISTIC` — the root DIRECT primal heuristic. No benefit
+    measurement existed (its own tests scope themselves to "the soundness
+    envelope, not the search quality"). **`solver="direct"`, the derivative-free
+    backend, is untouched** — a different component, and the one the entry
+    experiment in `docs/dev/direct-entry-2026-08-12.md` actually measured.
+
+  Only `GP_MINLP` and `SGO` change anything a caller can address, and both keep an
+  explicit `solver=` route. Anyone setting one of the other four now gets a
+  silently ignored variable and the default path — which is what they already had.
+
 - **`DISCOPT_LP_SPATIAL_MIXED` retired** (#1357). #860 widened the LP-spatial gate to
   mixed/MAXIMIZE behind this flag; the flag ran its CLAUDE.md §5 graduation panel and
   **failed bar (2)** — sound, but not net-positive — so §5's retirement rule applies
