@@ -38,13 +38,22 @@ from discopt.export import to_nl
 pytestmark = pytest.mark.smoke
 
 
+# These tests compare two objectives; neither needs a *certificate*, so the
+# budget only has to be long enough to reach the incumbent. Measured on the
+# slowest case in this file (`prod`, 3 variables): the incumbent is
+# -5.499999973 at 2s, 5s, 15s and 60s alike, so the 60s the helpers used to
+# allow was 58s of pure waste per call. 6s keeps 3x margin over the 2s at which
+# the answer is already final, on a solve that never terminates on its own.
+_BUDGET = 6
+
+
 def _roundtrip_objective(model) -> float:
     text = to_nl(model)
     with tempfile.NamedTemporaryFile("w", suffix=".nl", delete=False) as fh:
         fh.write(text)
         path = fh.name
     try:
-        res = dm.from_nl(path).solve(time_limit=60)
+        res = dm.from_nl(path).solve(time_limit=_BUDGET)
     finally:
         os.unlink(path)
     assert res.status in ("optimal", "feasible"), f"re-read model: {res.status}"
@@ -52,7 +61,7 @@ def _roundtrip_objective(model) -> float:
 
 
 def _direct_objective(model) -> float:
-    res = model.solve(time_limit=60)
+    res = model.solve(time_limit=_BUDGET)
     assert res.status in ("optimal", "feasible"), f"direct solve: {res.status}"
     return float(res.objective)
 
@@ -166,6 +175,24 @@ def test_norm2_expansion_is_exact():
 
 
 def test_prod_expands_to_a_product_chain():
+    # This is the slowest case in the file, and the reason is a SOLVER defect,
+    # not the export under test. Measured on this 3-variable model: the direct
+    # solve's dual bound sits at exactly -6.0 (= -3*ub, the trivial box bound)
+    # and does not move between 313 and 697 nodes, so it never certifies and
+    # burns the whole budget; the byte-identical model read back from `.nl`
+    # certifies `optimal` at bound -5.5 in 3 nodes and 0.02 s.
+    #
+    # Isolated to the ARRAY argument, not to `prod`: `dm.prod(<list>)` and an
+    # explicit `x[0]*x[1]*x[2]` both certify in 0.02 s, because `prod()` folds a
+    # list into a product CHAIN the McCormick path relaxes, while an array
+    # argument stays a `FunctionCall("prod", x)` that the canonical layer sees as
+    # an opaque call — so the row contributes no relaxation at all. Sound (-6.0
+    # is a valid underestimator of -5.5), just vacuous.
+    #
+    # Not fixed here: routing the array form to the chain changes bounds and node
+    # counts, so it is a CLAUDE.md §5 bound-changing change needing its own
+    # differential panel, not a rider on a test-pruning PR. The assertion below is
+    # unaffected either way — it compares incumbents, which agree at every budget.
     m = dm.Model("prod")
     x = m.continuous("x", shape=(3,), lb=1.0, ub=2.0)
     m.subject_to(dm.prod(x) <= 6.0, name="p")

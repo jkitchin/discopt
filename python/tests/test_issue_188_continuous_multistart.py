@@ -143,7 +143,12 @@ def test_solve_reaches_c51_global_on_default_path():
     valid underestimator and the incumbent never materially beats the analytic
     optimum.
     """
-    r = _build_c51().solve(time_limit=30, gap_tolerance=1e-4)
+    # Budget measured: the incumbent is the global 1.073009274 at 5s, 10s and
+    # 30s alike, and the solve never terminates (the dual bound creeps -2.93 ->
+    # -2.38 -> -1.38 and is nowhere near closing). The assertions below are
+    # about the incumbent reaching the global basin, which 5s already achieves,
+    # so 30s was 24s of waste per run. 6s keeps margin on a slower runner.
+    r = _build_c51().solve(time_limit=6, gap_tolerance=1e-4)
 
     assert r.objective is not None, "expected a feasible incumbent"
     assert r.objective <= _C51_GLOBAL + 1e-3, (

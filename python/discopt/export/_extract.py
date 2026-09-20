@@ -55,10 +55,43 @@ def flatten_variables(
     return flat
 
 
+class _VarOffsets:
+    """O(1) ``Variable`` -> flat-column-offset lookup, built once per export.
+
+    ``_var_index`` used to rescan ``model_vars`` from the start for *every*
+    variable occurrence, recomputing the running offset as it went — O(terms x
+    vars) for the whole walk. On a model whose body is one long sum that is
+    quadratic in the model size, and it dominated everything else: measured on
+    an ``n``-term mixed-sign sum, ``to_mps`` took 0.069 / 0.264 / 1.120 /
+    4.329 s at n = 1000 / 2000 / 4000 / 8000 — a clean x4-per-doubling — with
+    ``Variable.shape`` accessed 3.6e7 times for n=6000 (79% of total runtime by
+    ``cProfile``, against 1 constraint row, so the cost was entirely this scan).
+    Building the offset map once makes the same walk linear.
+
+    First occurrence wins, exactly as the old ``v is expr`` loop returned on its
+    first match; identity (``id``) is the key because that loop compared with
+    ``is``, and the source list is held so the ids stay live.
+    """
+
+    __slots__ = ("_offsets", "_vars")
+
+    def __init__(self, model_vars: list[Variable]) -> None:
+        offsets: dict[int, int] = {}
+        offset = 0
+        for v in model_vars:
+            offsets.setdefault(id(v), offset)
+            offset += max(v.size, 1) if v.shape != () else 1
+        self._offsets = offsets
+        self._vars = model_vars
+
+    def get(self, var: Variable) -> int | None:
+        return self._offsets.get(id(var))
+
+
 def _var_index(
     expr: Expression,
     flat_vars: list[tuple[str, VarType, tuple[int, ...], float, float]],
-    model_vars: list[Variable],
+    model_vars: _VarOffsets,
 ) -> int:
     """Resolve an expression to a flat variable index.
 
@@ -70,49 +103,44 @@ def _var_index(
         If the expression is not a simple variable reference.
     """
     if isinstance(expr, Variable):
-        # Find offset of this variable in flat list
-        offset = 0
-        for v in model_vars:
-            if v is expr:
-                if expr.shape == () or expr.shape == (1,):
-                    return offset
-                raise ValueError(
-                    f"Array variable '{expr.name}' used without indexing. "
-                    "Only scalar variables or indexed elements can appear "
-                    "in linear/quadratic expressions for export."
-                )
-            offset += max(v.size, 1) if v.shape != () else 1
+        offset = model_vars.get(expr)
+        if offset is not None:
+            if expr.shape == () or expr.shape == (1,):
+                return offset
+            raise ValueError(
+                f"Array variable '{expr.name}' used without indexing. "
+                "Only scalar variables or indexed elements can appear "
+                "in linear/quadratic expressions for export."
+            )
         raise ValueError(f"Variable '{expr.name}' not found in model")
 
     if isinstance(expr, IndexExpression):
         base = expr.base
         if not isinstance(base, Variable):
             raise ValueError("Nonlinear expression: nested indexing is not supported for export.")
-        offset = 0
-        for v in model_vars:
-            if v is base:
-                idx = expr.index
-                if isinstance(idx, (int, np.integer)):
-                    return offset + int(idx)
-                if isinstance(idx, tuple):
-                    # A sliced/partial subscript (e.g. the DAE transcriber's
-                    # ``var[:, 1:]``) addresses many scalars, so no single flat
-                    # index exists. Refuse loudly rather than let
-                    # np.ravel_multi_index raise a bare "only int indices
-                    # permitted" TypeError.
-                    if len(idx) != len(base.shape) or not all(
-                        isinstance(i, (int, np.integer)) for i in idx
-                    ):
-                        raise ValueError(
-                            f"Non-scalar subscript {idx!r} on variable "
-                            f"'{base.name}' (shape {base.shape}) cannot be exported "
-                            "as a single variable reference; only fully scalar "
-                            "indices are supported here."
-                        )
-                    flat_idx = int(np.ravel_multi_index(idx, base.shape))
-                    return offset + flat_idx
-                raise ValueError(f"Unsupported index type {type(idx)} for variable '{base.name}'")
-            offset += max(v.size, 1) if v.shape != () else 1
+        offset = model_vars.get(base)
+        if offset is not None:
+            idx = expr.index
+            if isinstance(idx, (int, np.integer)):
+                return offset + int(idx)
+            if isinstance(idx, tuple):
+                # A sliced/partial subscript (e.g. the DAE transcriber's
+                # ``var[:, 1:]``) addresses many scalars, so no single flat
+                # index exists. Refuse loudly rather than let
+                # np.ravel_multi_index raise a bare "only int indices
+                # permitted" TypeError.
+                if len(idx) != len(base.shape) or not all(
+                    isinstance(i, (int, np.integer)) for i in idx
+                ):
+                    raise ValueError(
+                        f"Non-scalar subscript {idx!r} on variable "
+                        f"'{base.name}' (shape {base.shape}) cannot be exported "
+                        "as a single variable reference; only fully scalar "
+                        "indices are supported here."
+                    )
+                flat_idx = int(np.ravel_multi_index(idx, base.shape))
+                return offset + flat_idx
+            raise ValueError(f"Unsupported index type {type(idx)} for variable '{base.name}'")
         raise ValueError(f"Variable '{base.name}' not found in model")
 
     raise ValueError("Expression is not a variable reference.")
@@ -151,7 +179,7 @@ def extract_linear_terms(
         raise ValueError("model_vars must be provided")
 
     coeffs: dict[int, float] = {}
-    const = _extract_linear_recursive(expr, coeffs, 1.0, flat_vars, model_vars)
+    const = _extract_linear_recursive(expr, coeffs, 1.0, flat_vars, _VarOffsets(model_vars))
     return coeffs, const
 
 
@@ -255,7 +283,7 @@ def _extract_linear_recursive(
     coeffs: dict[int, float],
     multiplier: float,
     flat_vars: list,
-    model_vars: list[Variable],
+    model_vars: _VarOffsets,
 ) -> float:
     """Extract linear terms. Returns the constant contribution.
 
@@ -393,7 +421,7 @@ def extract_quadratic_terms(
 
     quad: dict[tuple[int, int], float] = {}
     linear: dict[int, float] = {}
-    const = _extract_quad_recursive(expr, quad, linear, 1.0, flat_vars, model_vars)
+    const = _extract_quad_recursive(expr, quad, linear, 1.0, flat_vars, _VarOffsets(model_vars))
     return quad, linear, const
 
 
@@ -403,7 +431,7 @@ def _extract_quad_recursive(
     linear: dict[int, float],
     multiplier: float,
     flat_vars: list,
-    model_vars: list[Variable],
+    model_vars: _VarOffsets,
 ) -> float:
     """Extract quadratic and linear terms. Returns the constant contribution.
 
@@ -578,7 +606,7 @@ def _extract_linear_from_quad(
     coeffs: dict[int, float],
     multiplier: float,
     flat_vars: list,
-    model_vars: list[Variable],
+    model_vars: _VarOffsets,
 ) -> float:
     """Extract only linear terms for use inside quadratic product expansion.
 

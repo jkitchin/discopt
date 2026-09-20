@@ -86,12 +86,25 @@ def test_kkt_bigm_refuses_unbounded_multipliers(mpec_method):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.timeout(120)
+@pytest.mark.timeout(30)
 def test_strong_duality_solves_linear_bilevel_to_true_optimum():
+    # Budget measured, not guessed. This solve NEVER terminates early: the
+    # strong-duality reduction leaves the follower multipliers at ub=1e20, so
+    # the gap never closes and the search runs to whatever budget it is given,
+    # returning `feasible`. The incumbent is identical at every budget tried —
+    # obj -7.000000000, x=1.0000, y=2.0000 at 3s (x3), 5s (x3), 12s (x3) and
+    # -6.999999999999685 at 90s — so the old 90s budget bought nothing but 87
+    # wasted seconds on every CI run. 5s keeps ~2x margin over the 3s at which
+    # every assertion below already holds.
+    #
+    # The test does not assert a certificate, and could not: certifying this
+    # form needs a multiplier bound, which is what
+    # `test_user_multiplier_ub_gives_certified_solve` covers (and why that one
+    # finishes in 0.01s).
     pytest.importorskip("discopt._rust")
     m, x, y, bl = _bard_lp()
     bl.formulate(method="strong_duality")
-    r = m.solve(time_limit=90)
+    r = m.solve(time_limit=5)
     assert r.status in ("optimal", "feasible"), f"unexpected status {r.status}"
     assert r.objective is not None, "no incumbent returned"
     xv, yv = float(r.value(x)), float(r.value(y))

@@ -138,6 +138,23 @@ def to_mps(model: Model, path: str | Path | None = None) -> str | None:
     # Constraint coefficients (`con_data`) were assembled above from both
     # expression-path and builder-resident rows.
 
+    # MPS COLUMNS is column-major: every entry for a variable must be
+    # contiguous. The row data above is row-major, so invert it ONCE here.
+    # This loop used to be a membership test over *every* (variable, row) pair
+    # — `for j in flat_vars: for i in con_data: if j in lin` — which is
+    # O(n_vars x n_rows) regardless of sparsity. An array body like
+    # `x + 2*y <= 5` over shape (n,) scalarizes to n rows over 2n columns, so
+    # the scan is 2n^2: measured 8.0e8 iterations and 18.8 s for n=20000
+    # (`test_1215_deep_sum_export`), against ~6e4 actual nonzeros. Walking the
+    # nonzeros instead is O(nnz). Emission order is unchanged — rows are
+    # appended in ascending `i`, exactly the order the old membership scan
+    # visited them — so the bytes are identical.
+    col_entries: dict[int, list[tuple[int, float]]] = {}
+    for i, (lin, _rhs) in enumerate(con_data):
+        for j, coeff in lin.items():
+            if coeff != 0.0:
+                col_entries.setdefault(j, []).append((i, coeff))
+
     # Track which variables are integer/binary for MARKER sections
     int_marker_open = False
 
@@ -157,9 +174,8 @@ def to_mps(model: Model, path: str | Path | None = None) -> str | None:
             lines.append(f"    {vname}  {obj_row_name}  {_fmt(obj_linear[j])}")
 
         # Constraint coefficients
-        for i, (lin, _rhs) in enumerate(con_data):
-            if j in lin and lin[j] != 0.0:
-                lines.append(f"    {vname}  {constraint_row_names[i]}  {_fmt(lin[j])}")
+        for i, coeff in col_entries.get(j, ()):
+            lines.append(f"    {vname}  {constraint_row_names[i]}  {_fmt(coeff)}")
 
     # Close integer marker if still open
     if int_marker_open:

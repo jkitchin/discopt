@@ -30,6 +30,7 @@ import textwrap
 _SCRIPT = textwrap.dedent(
     """
     import json
+    import os
     import numpy as np
     import discopt.modeling as dm
     from discopt.solvers.oa import solve_oa
@@ -55,7 +56,7 @@ _SCRIPT = textwrap.dedent(
     for i in range(n):
         m.subject_to(w[i] >= 0.02 * z[i])
         m.subject_to(w[i] <= ub * z[i])
-    r = solve_oa(m, time_limit=20)
+    r = solve_oa(m, time_limit=float(os.environ["DISCOPT_TEST_OA_TIME_LIMIT"]))
     print(json.dumps(dict(status=str(r.status), objective=r.objective, bound=r.bound,
                           mip_count=r.mip_count)))
     """
@@ -66,15 +67,23 @@ _SCRIPT = textwrap.dedent(
 REFERENCE_OPT = 0.0031843318237648
 
 
-def _run(flag: str | None) -> dict:
+def _run(flag: str | None, time_limit: float = 20.0) -> dict:
     """Run the captured model with the cleanup flag set to ``flag``.
 
     ``flag=None`` leaves ``DISCOPT_FARKAS_RAY_CLEANUP`` *unset*, which is what
     exercises the shipped default rather than an explicit opt-in — the only way
     to test a graduation (#1360). The variable is popped rather than skipped:
     the test process may itself have been launched with it set.
+
+    ``time_limit`` is per-arm because the arms need opposite things from it. The
+    two certifying arms must FATHOM, so their budget has to comfortably exceed
+    the ~1.4 s they take; the ``=0`` legacy arm is the slow path by construction
+    and asserts only soundness, so for it the budget is a stopping rule, not a
+    threshold to clear (measured: it burned all 20 s, 20.18 s of this file's
+    23.22 s, to reach an assertion that holds at any budget).
     """
     env = dict(os.environ)
+    env["DISCOPT_TEST_OA_TIME_LIMIT"] = str(time_limit)
     if flag is None:
         env.pop("DISCOPT_FARKAS_RAY_CLEANUP", None)
     else:
@@ -123,6 +132,9 @@ def test_zero_still_opts_out_and_stays_sound():
     opt-out intact). It is *slower* — that is the bug #1355 describes — so this
     asserts only that it still runs and that whatever it reports is sound, not
     that it certifies."""
-    r = _run("0")
+    # Soundness holds at any budget (see ``_run``); 3 s is enough for the legacy
+    # path to produce a reported bound/incumbent to check, without paying for a
+    # gap it is not expected to close.
+    r = _run("0", time_limit=3.0)
     assert r["status"] in {"optimal", "feasible"}, r
     _assert_sound(r)

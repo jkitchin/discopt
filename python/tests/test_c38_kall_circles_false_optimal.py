@@ -51,7 +51,14 @@ _KALL_C8A_BESTDUAL = 2.5409129340  # =bestdual=
 def test_kall_circles_c8a_dual_bound_is_valid():
     """The DEFAULT-path dual bound must not exceed the true optimum (no false
     underestimator), and no false ``optimal`` certificate may be issued."""
-    r = from_nl(str(_DATA / "kall_circles_c8a.nl")).solve(time_limit=25, gap_tolerance=1e-4)
+    # The budget is measured against what this test actually asserts. The dual
+    # bound is 0.0 at EVERY budget tried — 2s (31 nodes), 5s (63), 25s (375),
+    # and even max_nodes=1000 (51s) — so the bound assertion's content does not
+    # depend on the budget at all. The budget only has to be long enough to
+    # reach the optimal incumbent, which is the state in which a false
+    # `optimal` certificate could be issued: measured at 5.2s (obj 2.5409194,
+    # against 4.3157 at 2s). 8s keeps margin over that on a slower runner.
+    r = from_nl(str(_DATA / "kall_circles_c8a.nl")).solve(time_limit=8, gap_tolerance=1e-4)
 
     # Headline soundness invariant: for a minimize problem the certified dual
     # (lower) bound is a valid underestimator, so it can never exceed a feasible
