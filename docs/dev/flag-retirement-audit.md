@@ -21,8 +21,10 @@ distinct DISCOPT_* flags read      : 89   (was 86)
 
 The 86 -> 89 growth is **not** new default-OFF gates — the literal-`"0"` set is fully
 accounted for, so no new row is owed. The 19 -> 16 drop is #1346 (graduated), #1357 and
-#1358 (retired). Of the 11 live gates, two are resolved below and **nine are in none of
-§5's three states**, tracked in #1388.
+#1358 (retired). Of the 11 live gates, **three are resolved below** — `IPX_CHEAP_FIRST`
+and `NLP_NATIVE` already carried their verdicts, and `G_CONVEX_CUTS` turned out to have a
+panel this audit's first pass missed — leaving **eight** in none of §5's three states,
+tracked in #1388.
 
 **Why no panel was ever run, which the first pass did not identify.** The infrastructure is
 generic and healthy: `discopt_benchmarks/scripts/graduation_gate.py` drives arms from
@@ -80,7 +82,7 @@ steady state.
 | `DISCOPT_OA_INFEASIBLE_NOGOOD` | *"changes the master's dual bound (CLAUDE.md §5 regime 2) and ships behind a flag until a corpus panel clears"* | panel owed, never run | **Run the panel or retire.** |
 | `DISCOPT_PRESOLVE_SUBSTITUTE` | *"bound-changing work ships behind a flag until a differential panel passes"* | panel owed, never run | **Run the panel or retire.** |
 | `DISCOPT_PSD_QFORM` | *"can prove more constraints/objectives convex, which changes node relaxations and counts — hence it ships behind a flag"* | panel owed, never run | **Run the panel or retire.** |
-| `DISCOPT_G_CONVEX_CUTS` | gate function is one line; rationale is thin | **status unrecorded** | **Record a status first.** A gate whose docstring does not say what it is waiting for cannot be triaged; that absence is the defect. |
+| `DISCOPT_G_CONVEX_CUTS` | gate function was one line; rationale looked thin — **but a panel exists**, `docs/dev/g-convexity-cut-panel-2026-07-17.md` | panel ran TWICE: root arm cert-clean but inert (0 cuts over 46 instances); per-node arm 0 soundness/neutrality violations over 18 instances and **53 → 39 nodes (-26 %)** at the same certified optimum | **RESOLVED — keep as a documented opt-out.** Corrected 2026-09-20: the 2026-09-19 pass read the thin gate docstring and recorded "status unrecorded", which led the v0.9.0 audit to list this among the *panel owed, never run* set. It was not — only the ~4,800-instance corpus benefit arm is missing, for want of the MINLPLib snapshot. The status now sits on the gate function. **Not a retirement candidate.** |
 | `DISCOPT_DIRECT_HEURISTIC` | substantial measurement, incl. `docs/dev/direct-entry-2026-08-12.md`; explicitly *heuristic-policy, not bound-changing* | measured, regime stated | **Read the recorded panel and decide.** The evidence exists; the verdict was never written down. |
 | `DISCOPT_IPX_CHEAP_FIRST` | the falsification *and* the verdict are both in `_ipx_cheap_first_enabled`: node count was the wrong metric; re-measured in wall clock the gate is **11.1x slower** for a 6.9 % node saving (12 instances, interleaved, 2 reps, pooled sd <= 0.26 s) | measured, verdict recorded | **RESOLVED — keep as a documented opt-out.** The 2026-09-19 pass read this as "verdict never written down"; that was wrong. The docstring says *"Kept default-OFF rather than deleted, per the `DISCOPT_CUT_INHERIT` precedent... Re-graduating it requires a WALL-CLOCK panel"* — §5 state 3, complete. Corrected 2026-09-20. |
 
