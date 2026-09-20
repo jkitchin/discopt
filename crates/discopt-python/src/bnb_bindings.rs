@@ -150,7 +150,14 @@ impl PyTreeManager {
     ///     lower_bounds: [N] array of relaxation lower bounds.
     ///     solutions: [N, n_vars] array of relaxation solutions.
     ///     feasible: [N] boolean array (is solution integer-feasible?).
-    #[pyo3(signature = (node_ids, lower_bounds, solutions, feasible, certified_infeasible=None))]
+    ///     sentinel_is_exclusion: [N] optional boolean array. True where the
+    ///         node carries the 1e30 sentinel as a JUSTIFIED exclusion of its
+    ///         region (a user-callback veto, #1038/#748), False where it carries
+    ///         it because the relaxation FAILED and nothing about the region was
+    ///         proved. Omitted means "none are justified" — the conservative arm,
+    ///         which treats a sentinel as unbounded rather than as grounds to
+    ///         prune.
+    #[pyo3(signature = (node_ids, lower_bounds, solutions, feasible, certified_infeasible=None, sentinel_is_exclusion=None))]
     fn import_results(
         &mut self,
         node_ids: PyReadonlyArray1<i64>,
@@ -161,6 +168,12 @@ impl PyTreeManager {
         // infeasible relaxation / empty box). Optional so existing callers are
         // unchanged; omitted means "no certificate", the pre-fix behaviour.
         certified_infeasible: Option<PyReadonlyArray1<bool>>,
+        // Which of the sentinelled nodes had their region JUSTIFIABLY excluded
+        // (a callback veto, #1038/#748) rather than merely failing to bound.
+        // Optional for the same reason; omitted means "none were", which is the
+        // arm that treats a sentinel as unbounded rather than as grounds to
+        // prune.
+        sentinel_is_exclusion: Option<PyReadonlyArray1<bool>>,
     ) -> PyResult<()> {
         let ids = node_ids.as_array();
         let lbs = lower_bounds.as_array();
@@ -196,6 +209,14 @@ impl PyTreeManager {
                 ));
             }
         }
+        let excl = sentinel_is_exclusion.as_ref().map(|a| a.as_array());
+        if let Some(ex) = excl.as_ref() {
+            if ex.len() != n {
+                return Err(PyValueError::new_err(
+                    "sentinel_is_exclusion must have the same length as node_ids",
+                ));
+            }
+        }
         let results: Vec<NodeResult> = (0..n)
             .map(|i| {
                 let nid = discopt_core::bnb::NodeId(ids[i] as usize);
@@ -205,6 +226,7 @@ impl PyTreeManager {
                     solution: sols.row(i).to_vec(),
                     is_feasible: feas[i],
                     certified_infeasible: cinf.as_ref().map(|c| c[i]).unwrap_or(false),
+                    sentinel_is_exclusion: excl.as_ref().map(|e| e[i]).unwrap_or(false),
                 }
             })
             .collect();

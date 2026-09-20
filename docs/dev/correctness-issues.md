@@ -3225,3 +3225,123 @@ corpus instance uses `tan`, so the 1610-instance sweep structurally could not se
 it. The Rust writer now rewrites too. Native `o38` is arguably better output, but
 changing what discopt writes for `tan` is a user-visible change that needs its
 own justification — it is not a side effect of a port.
+
+## C-47 (P1, FIXED, 2026-09-20) — a *failure* sentinel installed as a node's lower bound lets the tree certify a subtree it never bounded
+
+**Status: FIXED, default ON (`DISCOPT_TREE_SENTINEL_PRUNE_GUARD=0` is the
+opt-out). Regression tests:
+`tree_manager.rs::a_failed_relaxation_does_not_certify_its_subtree` (fails
+without the fix — `glb=5`, the incumbent falsely certified — and passes with it)
+and `::a_declared_exclusion_still_prunes`; `test_c47_sentinel_meaning.py` pins
+the producer side.**
+
+**Graduation panel (2026-09-20, 63 instances × 20 s, interleaved, 340 executed
+checks): cert-clean, 0 violations, certified 49/63 in *both* arms,
+`CERT_GAINED=[] CERT_LOST=[]`. Cost +570 nodes (11284 → 11854) for +0.6 s wall;
+four of the five differing instances are at the time limit — two of them with a
+*better* dual bound — and among the instances that terminate exactly one moved
+(`ex14_1_9`, 5 → 11 nodes, same objective, same certificate). Audit row in
+`docs/dev/flag-retirement-audit.md`.**
+
+Found while investigating #1352. **Latent, not live**: four separate Python
+callers each compensate, so no end-to-end false certificate reproduces on the
+current tree. That is precisely the problem this entry records — the Rust tree's
+`global_lower_bound` is not a sound dual bound in isolation, and every caller has
+to remember to distrust it.
+
+### Mechanism
+
+`1e30` is overloaded. It means **both**
+
+- *"this region is excluded"* — a `lazy_constraints`/`incumbent_callback` veto
+  (#1038/#748), an FBBT-proven-empty box, a Farkas-verified infeasible LP; and
+- *"this node could not be bounded"* — a diverged NLP, a failed relaxation, a
+  constraint-violating local solution,
+
+and the two are indistinguishable from the value alone. `import_results` took
+
+```rust
+node.local_lower_bound = result.lower_bound.max(node.local_lower_bound);
+```
+
+unconditionally. The `max()` is sound only because *both operands are valid
+bounds* — "the tighter one wins" is a statement about bounds, and the failure
+sentinel is not one. Taking it installs a non-bound **as** the node's bound;
+step 1 of `process_evaluated` then prunes the node as "dominated" (`1e30 >=`
+anything), and with nothing left open `update_global_lower_bound` collapses the
+tree bound onto the incumbent. A subtree that was never bounded comes back
+certified.
+
+One line below, `bound_trusted` already refuses to trust this same value for
+promotion to the incumbent. It must not be trusted as a bound either.
+
+### Why nothing was observably wrong
+
+| path | compensation |
+|---|---|
+| main MINLP sweep (`solver.py`) | `_nonrigorous_fathom` + `_taint_floor_internal`; reported bound = `min(frontier, taint_floor)` |
+| `_solve_nlp_bb` | `_unconverged_fathom` + `_gap_certified = False` |
+| `_solve_milp_bb` | `_gap_certified = False` |
+| `_solve_miqp_bb` | `_gap_certified = False` |
+
+Four duplicated guards, each of which a future caller could forget.
+
+### Fix
+
+Carry the meaning rather than infer it — exactly as `certified_infeasible`
+already does for the rigorous-emptiness case. `NodeResult` gains
+`sentinel_is_exclusion`, set by the in-tree drivers for their own emptiness
+proofs and passed from Python for the #1038/#748 callback vetoes and for
+`node_infeasible_mask`. When the guard is on and a sentinel arrives *without*
+that flag, `import_results` treats it as `-inf` — "no bound proved" — which is a
+path the tree already handles soundly: floored at the parent's bound, untrusted,
+branched. `false` is the conservative default, so a caller that does not set the
+flag gets the safe arm.
+
+Bound-changing per CLAUDE.md §5 (a node that used to prune now branches), hence
+the flag and the corpus differential panel.
+
+### The dual hazard: demoting a *rigorous* sentinel
+
+`false` is the conservative default for soundness, and it is **not** free. Every
+place that encodes a genuine emptiness proof as the same `1e30` loses a real
+fathom if it is left unwired — the node stops pruning, the search grows, and a
+certificate that used to close can be lost. Two such sites were found, one by
+reading and one by measurement:
+
+- `milp_driver.rs` — both of its `INFEAS_SENTINEL` writes are proofs (an
+  FBBT-proven-empty box, and an LP infeasibility that passed
+  `verify_farkas_infeasible_csc`); the arm where Farkas verification *fails*
+  correctly emits `-inf` instead. Found by reading.
+- `_solve_miqp_bb` — `result_lbs` is *initialized* to the sentinel, so the
+  POUNCE Phase-1-certified-infeasible arm leaves it in place rather than
+  assigning it, and an all-`false` default silently demoted it. Found by
+  measurement: `alan` went from `optimal ... cert=True nodes=13` (guard OFF) to
+  `feasible bound=2.899 cert=False nodes=15` (guard ON). After wiring, both arms
+  agree exactly at `optimal obj=2.9249999999513205 bound=2.9249999999509586
+  cert=True nodes=13`.
+
+So the flag is wired at **all four** `import_results` call sites plus
+`_solve_batch_pounce`, and in each case using the rigor test that path *already*
+applies rather than a new one:
+
+| path | rigorous (flag `True`) | not rigorous (flag `False`) |
+|---|---|---|
+| main sweep | callback veto (#1038/#748), `node_infeasible_mask` | failed NLP, constraint violation, requeue-cap fallback |
+| `_solve_nlp_bb` | clean `SolveStatus.INFEASIBLE` on a convex node, `node_infeasible_mask` — i.e. the complement of `_unconverged_fathom` | stall, NaN guard, feasibility post-check |
+| `_solve_milp_bb` | POUNCE-certified infeasible; `_recover_or_decertify`'s Phase-1 arm | `rec is None` (recovery unavailable) |
+| `_solve_miqp_bb` | `infeasible[i]`; `_handle_nonclean`'s Phase-1 arm | inconclusive arm (keeps the node open) |
+| `_solve_batch_pounce` | a *convex* node whose starts all returned `INFEASIBLE` | restoration failure, error, iteration limit, the #966 decline |
+
+The batch path needed a new `excl_out` out-parameter because its rigorous
+verdicts otherwise reach the caller as a bare sentinel indistinguishable from a
+restoration failure. The general lesson: **an overloaded sentinel cannot be
+disambiguated downstream, so every producer must be audited, not just the
+consumer.**
+
+### Note on the `#[cfg(test)]` override
+
+`sentinel_prune_guard()` latches its env read in a `OnceLock`, so one test
+process could otherwise only ever observe one arm — and the regression *is* the
+difference between the arms. A test-only thread-local override, compiled out of
+release builds, lets both run in the same binary.
