@@ -3291,6 +3291,44 @@ flag gets the safe arm.
 Bound-changing per CLAUDE.md §5 (a node that used to prune now branches), hence
 the flag and the corpus differential panel.
 
+### The dual hazard: demoting a *rigorous* sentinel
+
+`false` is the conservative default for soundness, and it is **not** free. Every
+place that encodes a genuine emptiness proof as the same `1e30` loses a real
+fathom if it is left unwired — the node stops pruning, the search grows, and a
+certificate that used to close can be lost. Two such sites were found, one by
+reading and one by measurement:
+
+- `milp_driver.rs` — both of its `INFEAS_SENTINEL` writes are proofs (an
+  FBBT-proven-empty box, and an LP infeasibility that passed
+  `verify_farkas_infeasible_csc`); the arm where Farkas verification *fails*
+  correctly emits `-inf` instead. Found by reading.
+- `_solve_miqp_bb` — `result_lbs` is *initialized* to the sentinel, so the
+  POUNCE Phase-1-certified-infeasible arm leaves it in place rather than
+  assigning it, and an all-`false` default silently demoted it. Found by
+  measurement: `alan` went from `optimal ... cert=True nodes=13` (guard OFF) to
+  `feasible bound=2.899 cert=False nodes=15` (guard ON). After wiring, both arms
+  agree exactly at `optimal obj=2.9249999999513205 bound=2.9249999999509586
+  cert=True nodes=13`.
+
+So the flag is wired at **all four** `import_results` call sites plus
+`_solve_batch_pounce`, and in each case using the rigor test that path *already*
+applies rather than a new one:
+
+| path | rigorous (flag `True`) | not rigorous (flag `False`) |
+|---|---|---|
+| main sweep | callback veto (#1038/#748), `node_infeasible_mask` | failed NLP, constraint violation, requeue-cap fallback |
+| `_solve_nlp_bb` | clean `SolveStatus.INFEASIBLE` on a convex node, `node_infeasible_mask` — i.e. the complement of `_unconverged_fathom` | stall, NaN guard, feasibility post-check |
+| `_solve_milp_bb` | POUNCE-certified infeasible; `_recover_or_decertify`'s Phase-1 arm | `rec is None` (recovery unavailable) |
+| `_solve_miqp_bb` | `infeasible[i]`; `_handle_nonclean`'s Phase-1 arm | inconclusive arm (keeps the node open) |
+| `_solve_batch_pounce` | a *convex* node whose starts all returned `INFEASIBLE` | restoration failure, error, iteration limit, the #966 decline |
+
+The batch path needed a new `excl_out` out-parameter because its rigorous
+verdicts otherwise reach the caller as a bare sentinel indistinguishable from a
+restoration failure. The general lesson: **an overloaded sentinel cannot be
+disambiguated downstream, so every producer must be audited, not just the
+consumer.**
+
 ### Note on the `#[cfg(test)]` override
 
 `sentinel_prune_guard()` latches its env read in a `OnceLock`, so one test
