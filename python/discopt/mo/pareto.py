@@ -265,7 +265,14 @@ class ParetoFront:
         ``k == 3`` a 3-D scatter. Higher dimensions raise ``ValueError``.
         Extra ``**kwargs`` are forwarded to ``ax.scatter``.
         """
-        import matplotlib.pyplot as plt
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError as exc:
+            raise ImportError(
+                "ParetoFront.plot() requires matplotlib, which discopt does not "
+                'install. Install it with `pip install "discopt[plot]"` (or '
+                "`pip install matplotlib`)."
+            ) from exc
 
         objs = self.objectives()
         if self.k == 2:

@@ -43,7 +43,14 @@ def load_torch_sequential(
     -------
     NetworkDefinition
     """
-    import torch.nn as nn
+    try:
+        import torch.nn as nn
+    except ImportError as exc:
+        raise ImportError(
+            "load_torch_sequential requires PyTorch, which discopt does not install. "
+            'Install it with `pip install "discopt[torch]"` (or `pip install torch`). '
+            "The `nn` extra is the ONNX toolchain only and does not include torch."
+        ) from exc
 
     _TORCH_ACT_MAP = {
         nn.ReLU: Activation.RELU,

@@ -1,6 +1,6 @@
 """Deprecated alias for :mod:`discopt.ml`.
 
-The package was renamed in 0.8.1: it embeds *machine-learning* predictors —
+The package was renamed in 0.9.0: it embeds *machine-learning* predictors —
 decision trees and tree ensembles as much as neural networks, plus anything
 satisfying the :class:`~discopt.ml.surrogate.Surrogate` protocol — so the old
 ``nn`` name described one of the families it supports (issue #1219).

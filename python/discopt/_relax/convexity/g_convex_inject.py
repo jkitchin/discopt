@@ -64,7 +64,32 @@ _DEFAULT_POINTS = 3
 
 
 def g_convex_cuts_enabled() -> bool:
-    """Whether ``DISCOPT_G_CONVEX_CUTS`` enables the injector (default OFF)."""
+    """Whether ``DISCOPT_G_CONVEX_CUTS`` enables the injector (default OFF).
+
+    **CLAUDE.md §5 state: kept as a documented opt-out.** Recorded here, not only
+    in the module docstring, because this one-line gate is where a reader triaging
+    the flag actually lands; the #1345 audit classified it "status unrecorded" for
+    exactly that reason.
+
+    *Why it is not the default.* The panel ran — twice —
+    ``docs/dev/g-convexity-cut-panel-2026-07-17.md``. The **root-presolve** arm was
+    cert-clean but **inert**: ``certify_g_convex``'s constant-ρ interval-Gershgorin
+    detector abstains on wide declared root boxes, so 0 cuts fired across 46 of the
+    49 cert-baseline instances. Moving injection **per node**
+    (``MccormickLPRelaxer._separate_g_convex``, box-local, only when
+    ``out_cuts is None`` so it can never enter the inheritable root pool — the
+    C-43 / nvs22 hazard) landed the benefit: an 18-instance OFF/ON neutrality panel
+    at 25 s found **0 soundness or neutrality violations**, and on a branching
+    G-convex model node count fell **53 → 39 (-26 %)** at the same certified
+    optimum (4.14739).
+
+    *What would change it.* Only the full corpus benefit arm is missing — the
+    ~4,800-instance MINLPLib differential panel, which could not run in the
+    container that produced the rest (no
+    ``~/Dropbox/projects/discopt-minlp-benchmark``). Run that arm and this
+    graduates; it is not waiting on soundness, and it is **not** a stalled
+    graduation with no measurement behind it.
+    """
     return os.environ.get("DISCOPT_G_CONVEX_CUTS", "0").strip().lower() in (
         "1",
         "true",

@@ -203,8 +203,34 @@ class CUTEstProblem:
         return NLPEvaluatorFromCUTEst(self)
 
     def to_instance_info(self):
-        """Convert to benchmark InstanceInfo for integration with benchmark runner."""
-        from benchmarks.metrics import InstanceInfo
+        """Convert to benchmark ``InstanceInfo`` for the benchmark runner.
+
+        ``InstanceInfo`` lives in the **benchmark harness**, not in the installed
+        package: it is defined in ``discopt_benchmarks/benchmarks/metrics.py``, and
+        ``maturin``'s ``python-source = "python"`` means only ``python/discopt/**``
+        enters the wheel. So the top-level ``benchmarks`` module this needs is
+        importable from a repo checkout that has installed ``discopt_benchmarks``,
+        and from nowhere else.
+
+        Before this guard the bare ``from benchmarks.metrics import ...`` raised a
+        naked ``ModuleNotFoundError: No module named 'benchmarks'`` for every
+        pip-installed user, which reads as a broken package rather than as a method
+        that belongs to the harness (audit 2026-09-20, v0.9.0 release prep). Note
+        the near-miss: ``discopt.benchmarks.metrics`` *does* ship, and does **not**
+        define ``InstanceInfo`` -- so the import is not a missing ``discopt.``
+        prefix, and adding one would fail differently.
+        """
+        try:
+            from benchmarks.metrics import InstanceInfo
+        except ImportError as exc:  # pragma: no cover - exercised by the guard test
+            raise ImportError(
+                "CUTEstProblem.to_instance_info() requires the discopt benchmark "
+                "harness, which is not part of the installed discopt package. "
+                "Install it from a repo checkout: "
+                "`cd discopt_benchmarks && pip install -e '.[dev]'`. "
+                "(discopt.benchmarks.metrics is a different module and does not "
+                "define InstanceInfo.)"
+            ) from exc
 
         info = self.info
         n_lin = int(np.sum(self.is_linear_cons)) if self.is_linear_cons is not None else 0
