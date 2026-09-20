@@ -140,7 +140,6 @@ another, and do not have a unified budget.
 | `_relax/term_classifier.py`             | Term-level structure detection                    |
 | `_relax/problem_classifier.py`          | Top-level problem classification                  |
 | `_relax/sparsity.py`, `sparse_*`        | Sparsity exploitation                             |
-| `_relax/scaling.py`                     | Numerical scaling                                 |
 | `_relax/gdp_reformulate.py`             | GDP big-M / hull reformulation                    |
 | `_relax/obbt.py`                        | Python-side OBBT (LP-driven via JAX relaxations)  |
 
@@ -447,12 +446,18 @@ package (A3).
 
 #### E1. Presolve-time row/column equilibration (S)
 
-Lift `_relax/scaling.py` into a presolve pass that produces a single scaling
-applied consistently to LP, NLP, and IPM relaxations. Currently each solver
-does its own scaling; that's wasted work and a source of inconsistency.
+Produce a single scaling in presolve, applied consistently to LP, NLP, and IPM
+relaxations, instead of each solver doing its own — that's wasted work and a
+source of inconsistency. **Done in Rust**: `presolve/scaling.rs` implements
+Curtis-Reid `compute_equilibration`, registered as the `"scaling"` pass in
+`presolve/passes.rs` and reported through `_relax/presolve_pipeline.py`. The
+Python/JAX prototype this was lifted from,
+`_relax/scaling.py`, was retired by #1347: it had no importer anywhere in the
+package or the test suite, and still imported `jax.numpy` after the JAX removal.
 
-**Where.** `crates/discopt-core/src/presolve/scaling.rs` (new), with Python
-mirror in `_relax/presolve/`.
+**Where.** `crates/discopt-core/src/presolve/scaling.rs`, adapted as the
+`"scaling"` pass in `presolve/passes.rs`. No Python mirror was needed: the pass
+reports through `_relax/presolve_pipeline.py` like every other Rust pass.
 
 **References.**
 - Curtis & Reid (1972), *On the automatic scaling of matrices for Gaussian elimination*.
