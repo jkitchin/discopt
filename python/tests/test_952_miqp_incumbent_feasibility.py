@@ -376,8 +376,8 @@ def test_milp_baseline_solve_is_unaffected():
     assert r.objective == pytest.approx(6.0, abs=1e-6)
 
 
-def test_integer_snap_is_declined_when_it_would_leave_the_rows(monkeypatch):
-    """The C-3 integer snap is adopted only if it keeps the point inside the rows.
+def test_integer_snap_that_would_leave_the_rows_is_re_derived(monkeypatch):
+    """A snap that would leave the rows yields a RE-DERIVED point, not a raw one.
 
     The exit gate found this: on `test_nn_equivalence::test_tree_ensemble_fixed_input`
     the incumbent satisfies its equalities to 4.4e-16 and the *snapped* point misses
@@ -389,8 +389,21 @@ def test_integer_snap_is_declined_when_it_would_leave_the_rows(monkeypatch):
     rounding breaks feasibility, but only when handed a checker — and this call site
     passes none, so the flag was unconditionally True. Reproduced here in the small:
     five integers each 3e-7 under an integer, on a row with coefficient 2, moves the
-    equality by 3e-6. The unrounded point satisfies *both* declared tolerances (rows
-    exactly, integrality 3e-7 against 1e-5), so it is the one reported.
+    equality by 3e-6.
+
+    **Contract change, #1380.** This test used to assert that the *unrounded* point
+    is the one reported, on the grounds that it satisfies both declared tolerances
+    (rows exactly, integrality 3e-7 against 1e-5). That is what #1380 is about: a
+    point whose integer columns are not integers is not an answer to the declared
+    model, and on a big-M row the same fallback reported an objective 3 units below
+    the true optimum. Neither horn was necessary. The snap site now establishes that
+    the snap IS what leaves the rows and then re-derives the claim — the discrete
+    columns fixed at their integral realisation, the continuous ones re-solved over
+    the declared rows and box — so what comes back here is ``z = 1`` exactly with
+    ``x`` moved to satisfy the equality exactly, at the same objective.
+
+    Strictly better on every axis the old assertion cared about: exactly integral
+    AND exactly on the row, where the old answer was neither-quite-either.
     """
     eps = 3e-7
     m = dm.Model("snap952")
@@ -436,9 +449,33 @@ def test_integer_snap_is_declined_when_it_would_leave_the_rows(monkeypatch):
     assert r.x is not None
 
     got = np.asarray(r.x["z"], dtype=np.float64).flatten()
-    assert np.allclose(got, z_near, atol=0, rtol=0), (
-        f"expected the unrounded incumbent {z_near} to be reported, got {got}"
+    got_x = float(np.asarray(r.x["x"], dtype=np.float64).reshape(-1)[0])
+
+    # 1. The reported discrete columns are integral — the #1380 point. The bar is
+    #    the re-solve's own precision, not bit-exactness: the LP is handed the
+    #    integers as fixed bounds and returns them to ~1e-12, four orders inside
+    #    ``integrality_tol`` and four orders tighter than the 3e-7 this test feeds
+    #    in, so it still fails for the unrounded point it used to accept.
+    assert np.allclose(got, np.round(got), atol=1e-9, rtol=0), (
+        f"the reported integers are not integral: {got!r}"
     )
+    # 2. ...and they are the integers the incumbent was claiming.
+    assert np.allclose(got, np.round(z_near), atol=1e-9, rtol=0), (
+        f"expected the integral realisation {np.round(z_near)} of {z_near}, got {got!r}"
+    )
+    # 3. The old answer is now specifically excluded: 3e-7 off an integer would
+    #    have passed the pre-#1380 contract and must not pass this one.
+    assert not np.allclose(got, z_near, atol=1e-9, rtol=0), (
+        f"the unrounded incumbent {z_near} was reported after all"
+    )
+    # 4. The re-derived point satisfies the equality EXACTLY, which is what the
+    #    raw snap could not do and what the re-solve of ``x`` buys.
+    residual = abs(2 * float(np.sum(got)) + got_x - 10.0)
+    assert residual <= DECLARED_ABS_TOL, (
+        f"the re-derived point misses the equality by {residual:.3e}"
+    )
+    # 5. Nothing was paid for it: the objective is the same to tolerance.
+    assert r.objective == pytest.approx(float(np.sum(z_near)) + x_val, abs=1e-5)
 
 
 def test_bounds_check_vectorisation_matches_the_original_loop():
