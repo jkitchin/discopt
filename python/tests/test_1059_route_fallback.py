@@ -270,7 +270,7 @@ class TestRouteBudget:
         monkeypatch.setattr(mn, "solve_mip_nlp", spy)
         return seen
 
-    def test_auto_route_gets_a_fraction_of_the_limit(self, monkeypatch):
+    def test_auto_route_gets_a_fraction_of_the_limit(self, monkeypatch, forwarded_budget):
         """The fixed split, pinned with ``DISCOPT_CONVEX_ROUTE_GUARD=0``.
 
         #1066 replaced the fixed wall with a progress guard that hands the route
@@ -285,7 +285,7 @@ class TestRouteBudget:
         seen = self._capture(monkeypatch)
         _load("gbd").solve(time_limit=20.0)
         assert seen, "solve_mip_nlp was never called -- the router did not fire"
-        assert seen["time_limit"] == pytest.approx(20.0 * _CONVEX_ROUTE_BUDGET_FRACTION)
+        assert seen["time_limit"] == forwarded_budget(20.0, _CONVEX_ROUTE_BUDGET_FRACTION)
 
     def test_explicit_mip_nlp_keeps_the_whole_limit(self, monkeypatch):
         """The caller chose the algorithm; there is no fallback to reserve for."""

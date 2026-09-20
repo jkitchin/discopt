@@ -7150,7 +7150,20 @@ class Model:
         # off (it is reset on entry and the clock starts after the flag check), so the
         # default path subtracts a literal zero and every deadline below is unchanged.
         _ck_elapsed = 0.0
-        if not skip_convex_check:
+        # #1346: an EXPLICIT ``solver=`` is a decision, not a hint. Consulting the
+        # convex kernel for a route the caller has already ruled out costs them a
+        # convexity classification they can never benefit from -- and #911 charges
+        # that wall to their budget, so ``solve(solver="gurobi", time_limit=12)``
+        # handed Gurobi 11.99996 s instead of 12. Harmless while the kernel was
+        # opt-in; visible the moment it became the default, as 7 CI failures across
+        # the Gurobi dispatch tests and the two "the caller chose the algorithm"
+        # route tests.
+        #
+        # The classification is only worth paying for when the router is actually
+        # free to choose. It is NOT free here, so it does not run -- which is also
+        # why ``test_explicit_mip_nlp_keeps_the_whole_limit`` means what its name says
+        # again.
+        if not skip_convex_check and solver is None:
             _ck_res = None
             try:
                 from discopt.solvers._convex_kernel import (
