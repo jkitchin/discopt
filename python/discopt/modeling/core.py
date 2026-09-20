@@ -3900,8 +3900,23 @@ class SolveResult:
     bound : float or None
         Best dual (lower) bound.
     gap : float or None
-        Relative optimality gap ``(objective - bound) / |objective|`` while the
-        search is open. The convergence test is a disjunction -- absolute gap
+        Relative optimality gap
+        ``|objective - bound| / max(|objective|, |bound|, 1e-10)``, computed
+        from the returned ``(objective, bound)`` pair with the SAME arithmetic
+        the convergence test uses, so the two can never disagree (#1386). It
+        follows that a solve reporting ``status="optimal"`` always satisfies
+        ``gap <= gap_tolerance`` OR ``objective - bound <= abs_gap_tolerance``.
+
+        The denominator is ``max(|objective|, |bound|, 1e-10)``, NOT
+        ``|objective|`` as this said before #1386 and NOT the B&B tree's
+        internal hybrid gap, whose denominator is floored at 1.0. The routes
+        that forwarded the tree's number reported a gap up to 258x away from
+        the one their own termination test had just evaluated (measured on the
+        six-hump camel at ``gap_tolerance=1.0``: 258.36 reported against 1.0
+        tested), and below unit objective scale the disagreement ran the other
+        way and understated it.
+
+        The convergence test is a disjunction -- absolute gap
         ``<= 1e-6`` OR relative gap ``<= gap_tolerance`` -- and a closed gap is
         reported as ``0.0`` whichever arm closed it, so below unit objective
         scale ``gap == 0.0`` can stand for a relative gap far above
@@ -7281,6 +7296,20 @@ class Model:
                     f"ignored (a swallowed option would leave the solver at its "
                     f"default while you believe it was set)."
                 )
+
+        # #1386: the sibling of the rejection above, one level down. An unknown
+        # option NAME is refused because "a swallowed option would leave the
+        # solver at its default while you believe it was set" — and the same
+        # failure was reachable through a KNOWN name carrying a value that
+        # cannot be satisfied. ``gap_tolerance=nan`` makes every
+        # ``rel_gap <= tol`` comparison False, silently switching off the
+        # relative arm of the convergence test. Checked here, before this method
+        # derives the budgets it forwards (``max(0.0, time_limit - spent)``
+        # quietly turns a NaN limit into 0.0), and again in ``solve_model`` for
+        # callers that reach the solver without going through this method.
+        from discopt.solver import _validate_solve_budgets
+
+        _validate_solve_budgets(gap_tolerance, time_limit)
 
         # A declared complementarity relation that no lowering emitted rows for
         # would be solved as if the condition were absent — and certified

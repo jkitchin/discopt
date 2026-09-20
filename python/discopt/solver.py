@@ -36,11 +36,14 @@ if TYPE_CHECKING:
     from discopt._evaluator_cache import Fingerprint as _EvaluatorFingerprint
     from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt._rust import PyTreeManager
+from discopt.constants import CONSTRAINT_INF as _CONSTRAINT_INF
+from discopt.constants import DEFAULT_VARIABLE_BOUND
 from discopt.constants import INFEASIBILITY_SENTINEL as _INFEASIBILITY_SENTINEL
 from discopt.constants import SENTINEL_THRESHOLD as _SENTINEL_THRESHOLD
 from discopt.constants import STARTING_POINT_CLIP as _SPC
 from discopt.debug import outermost_solve as _debug_outermost_solve
 from discopt.modeling.core import (
+    Constant,
     Constraint,
     CustomCall,
     Model,
@@ -5484,6 +5487,114 @@ def _resolve_abs_gap_tolerance(abs_gap_tolerance: Optional[float]) -> float:
     return val
 
 
+def _stamp_converged_gap(result, objective: float, bound: float, criterion: str) -> None:
+    """Report a CONVERGED solve's gap on the convergence test's own arithmetic.
+
+    #1243 already derives ``solver_stats["gap_criterion"]`` from the returned
+    ``(objective, bound)`` pair "with the SAME arithmetic the convergence test
+    uses, so the two can never disagree". That reasoning applies to the NUMBER
+    as much as to the arm's name, and it was not being applied: the B&B routes
+    forwarded the tree's hybrid gap, whose denominator is floored at 1.0, while
+    the convergence test divides by ``max(|ub|, |lb|, 1e-10)``.
+
+    Measured on the six-hump camel (#1386), every row of which converged exactly
+    as documented:
+
+    ===============  ============  ===============  ==========
+    gap_tolerance    reported gap  criterion's gap  converged?
+    ===============  ============  ===============  ==========
+    0.9                    8.5706           0.8955  yes
+    0.99                  56.0947           0.9825  yes
+    1.0                  258.3641           1.0000  yes
+    ===============  ============  ===============  ==========
+
+    So a caller doing the natural ``assert r.gap <= gap_tolerance`` saw it
+    violated on a correctly converged solve, by up to 258x. Below unit objective
+    scale the disagreement runs the other way and the forwarded gap UNDERSTATES
+    the criterion's, which is the worse direction.
+
+    Three deliberate limits on the scope, each of them a measurement:
+
+    * Only where a criterion actually fired. An exit that stopped on a budget or
+      an exhausted tree claims nothing about a tolerance, so there is nothing for
+      its gap to be consistent WITH; those keep the floored
+      ``|obj - bound| / max(1, |obj|)`` that #933 defines and tests.
+    * A gap closed by the ABSOLUTE arm reports ``0.0``. That arm exists precisely
+      because the relative gap degenerates near a zero optimum: ``min x`` over
+      ``(x<=3) or (x>=7)`` on ``[0,10]`` converges at objective 2.46e-09 against
+      a bound of 0.0 -- an absolute gap of 2.46e-09 and a relative gap of exactly
+      1.0. Reporting 1.0 for a solve 2.5e-09 from the true optimum would be
+      arithmetically honest and practically useless. Only the relative arm yields
+      a relative number.
+    * A route that reported ``gap=None`` keeps ``None``. This RECONCILES a gap a
+      route computed; it does not manufacture one where the route declined. AMP
+      deliberately withholds the relative gap when the incumbent objective is
+      near zero (``min x**2`` over ``[-1,1]`` -> ``objective=0.0``, ``gap=None``),
+      and ``None`` is the stronger statement: "a relative gap is not defined for
+      this pair", not "it is zero". Overwriting it with a number the route never
+      reported is the same failure ``_kkt_from_info`` avoids by omitting a
+      missing residual rather than filling in a sentinel. Caught by
+      test_amp_integration.py::test_zero_upper_bound_reports_no_relative_gap,
+      which an earlier version of this function regressed.
+    """
+    if result.gap is None:
+        return
+    if criterion == "absolute":
+        result.gap = 0.0
+        return
+    relative = _relative_gap_from_objective_bound(objective, bound)
+    if relative is not None:
+        result.gap = relative
+
+
+def _validate_solve_budgets(gap_tolerance: float, time_limit: float) -> None:
+    """Reject option *values* that silently disable the thing they configure (#1386).
+
+    ``Model.solve`` already rejects an unknown option NAME, and says why::
+
+        Unknown solver options are rejected rather than silently ignored (a
+        swallowed option would leave the solver at its default while you
+        believe it was set).
+
+    The same failure was reachable one level down, through a known name with a
+    value that cannot be satisfied. ``gap_tolerance=float("nan")`` makes every
+    ``rel_gap <= tol`` comparison False, so the relative arm of the convergence
+    disjunction is silently switched off and the solve rides entirely on the
+    absolute arm -- the caller believes they set a tolerance and set nothing. A
+    negative tolerance is unsatisfiable the same way. ``time_limit=nan`` is
+    worse: every ``elapsed > time_limit`` deadline check is False, so the budget
+    never binds at all.
+
+    What is deliberately NOT rejected, because a measurement says it works:
+
+    * ``gap_tolerance = 0``. Legitimate -- it asks for the absolute arm alone.
+    * ``gap_tolerance >= 1``. Measured on the six-hump camel at 0.9, 0.99 and
+      1.0, the search stops exactly when the relative gap reaches the requested
+      value (0.8955, 0.9825, 1.0) and reports ``gap_criterion="relative"``. A
+      loose tolerance is a coarse answer, which is what it asks for; refusing it
+      would be a policy the evidence does not support.
+    * ``time_limit <= 0``. A caller computing ``deadline - now`` can legitimately
+      arrive at a non-positive budget, and the honest answer -- an immediate
+      ``status="time_limit"`` -- is what they already get. Raising would turn a
+      correct early exit into an error.
+    """
+    gap = float(gap_tolerance)
+    if not np.isfinite(gap) or gap < 0.0:
+        raise ValueError(
+            f"gap_tolerance must be a finite non-negative number, got {gap_tolerance!r}. "
+            "A NaN or negative relative tolerance can never be met, so it would "
+            "silently disable the relative arm of the convergence test and leave "
+            "the solve running on the absolute arm alone -- the swallowed-option "
+            "failure that rejecting unknown option names already guards against."
+        )
+    if math.isnan(float(time_limit)):
+        raise ValueError(
+            "time_limit must not be NaN: every deadline check is a comparison "
+            "against it, and every comparison with NaN is False, so the budget "
+            "would never bind and the solve would not stop."
+        )
+
+
 #: Effective ``(gap_tolerance, abs_gap_tolerance)`` of the solve currently
 #: running, pushed by ``solve_model`` and popped by ``_stamp_layer_timing``.
 #:
@@ -5500,7 +5611,21 @@ def _format_bad_bound_entries(
     flat_lb: np.ndarray,
     flat_ub: np.ndarray,
 ) -> list[str]:
-    """Return human-readable entries for scalar variables with problematic bounds."""
+    """Return human-readable entries for scalar variables with problematic bounds.
+
+    Formatted at ``%.6g``, not ``%.2g`` (#1387). Two significant figures render
+    the default box ``-9.999e19`` as ``-1e+20`` -- the CONSTRAINT_INF sentinel --
+    and those two values are exactly what a reader of this warning needs told
+    apart: a bound below 1e20 is honoured as finite and yields a certified
+    ``optimal`` at the corner, one at or beyond it is a true infinity and yields
+    ``unbounded`` (#850). A caller who writes ``min x`` over an unbounded-looking
+    column gets back ``optimal`` at ``-9.999e+19`` and reads this warning to find
+    out why; being told the bound is ``-1e+20`` sends them looking for a bug in
+    the certificate instead of for the default box that produced it.
+
+    A bound sitting on that default is labelled as such, because "you declared no
+    bound and a finite default applies" is the actionable fact, not the magnitude.
+    """
     bad_vars: list[str] = []
     offset = 0
     for v in model._variables:
@@ -5515,7 +5640,9 @@ def _format_bad_bound_entries(
                 or abs(hi) > _BOUND_WARN_THRESHOLD
             ):
                 name = v.name if v.size == 1 else f"{v.name}[{j}]"
-                bad_vars.append(f"{name} (lb={lo:.2g}, ub={hi:.2g})")
+                lo_txt = f"{lo:.6g}" + (" [default]" if lo == -DEFAULT_VARIABLE_BOUND else "")
+                hi_txt = f"{hi:.6g}" + (" [default]" if hi == DEFAULT_VARIABLE_BOUND else "")
+                bad_vars.append(f"{name} (lb={lo_txt}, ub={hi_txt})")
         offset += v.size
     return bad_vars
 
@@ -5564,6 +5691,63 @@ def _declared_box_tightening(model: Model, deadline: Optional[float] = None):
         return None
 
 
+def _constant_objective_result(model: Model, t_start: float) -> Optional[SolveResult]:
+    """Decide a model with **no columns** here; return ``None`` for anything else.
+
+    A model that declares no variables has one feasible point -- the empty
+    assignment -- and an objective that is a constant, so its optimum is that
+    constant and the certificate is exact. Before #1385 the model instead
+    classified as a pure LP and went to HiGHS, which answered ``kModelEmpty``;
+    that name is not in ``_solve_lp``'s status dispatch, so it fell into the
+    catch-all and came back ``status="error"`` with ``objective=None`` -- the
+    constant discarded, and the outer layer then blaming "a nonlinear term with
+    no envelope". Nobody writes this model by hand, but a generator whose loop
+    body emitted no columns for a degenerate configuration does.
+
+    Deliberately narrow, and fails closed on every doubt:
+
+    * only a model with zero declared variables is decided here; anything with a
+      column takes its usual route, so no established path changes;
+    * the objective must be a :class:`Constant` node. A zero-variable model
+      cannot build anything else today, but if one ever arrives this returns
+      ``None`` rather than guessing a value -- the §3 ordering, a fall-through
+      to the honest failure beats a fabricated certificate;
+    * a 0-d constant only. A vector objective on a variable-free model has no
+      defined scalar optimum, so it is not this function's to answer;
+    * any declared constraint hands the model back. With no columns a constraint
+      is a constant relation, and deciding whether it holds (and reporting
+      ``infeasible`` when it does not) is a separate question from this one.
+
+    ``maximize`` needs no sign handling: the sole feasible point attains the
+    constant in either sense.
+    """
+    if model._variables:
+        return None
+    objective = model._objective
+    if objective is None or model._constraints:
+        return None
+    expr = objective.expression
+    if not isinstance(expr, Constant) or np.ndim(expr.value) != 0:
+        return None
+    value = float(expr.value)
+    if not math.isfinite(value):
+        return None
+    logger.debug(
+        "model declares no variables; its constant objective %r is the optimum (#1385)", value
+    )
+    return SolveResult(
+        status="optimal",
+        objective=value,
+        bound=value,
+        gap=0.0,
+        x={},
+        wall_time=time.perf_counter() - t_start,
+        node_count=0,
+        gap_certified=True,
+        bound_valid=True,
+    )
+
+
 def _check_finite_bounds(model: Model, tightening=None) -> None:
     """Warn if any variable has very large or infinite declared bounds.
 
@@ -5605,15 +5789,23 @@ def _check_finite_bounds(model: Model, tightening=None) -> None:
     if bad_vars:
         import warnings
 
-        warnings.warn(
-            f"Variables with very large or infinite declared bounds: "
-            f"{', '.join(bad_vars[:5])}. "
-            f"{tightening_note} "
-            f"NLP solvers may fail (NaN, iteration_limit) when bounds "
-            f"exceed ~1e15. Add tighter explicit bounds, e.g. "
-            f"m.continuous('x', lb=0, ub=1000).",
-            stacklevel=3,
-        )
+        default_note = ""
+        if any("[default]" in entry for entry in bad_vars):
+            default_note = (
+                f"A bound marked [default] is the box applied to a column you declared "
+                f"with no bounds: {DEFAULT_VARIABLE_BOUND:.6g}, which is FINITE (it sits "
+                f"just below the {_CONSTRAINT_INF:.6g} infinity sentinel), so the solve "
+                f"can return a certified 'optimal' sitting on that corner rather than "
+                f"'unbounded'."
+            )
+        parts = [
+            f"Variables with very large or infinite declared bounds: {', '.join(bad_vars[:5])}.",
+            tightening_note.strip(),
+            default_note,
+            "NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. "
+            "Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).",
+        ]
+        warnings.warn(" ".join(p for p in parts if p), stacklevel=3)
 
 
 def _detect_nonlinear_bound_infeasibility(model: Model, tightening=None) -> Optional[str]:
@@ -8386,6 +8578,7 @@ def _stamp_layer_timing(fn: _F) -> _F:
                     stats = {}
                     result.solver_stats = stats
                 stats["gap_criterion"] = _crit
+                _stamp_converged_gap(result, _o, _b, _crit)
         # #1236 review finding 6: `node_count` is the WINNING arm's tree. When a
         # cheap-first probe ran and lost, its nodes are real work this call did and
         # are reported here rather than vanishing.
@@ -8795,6 +8988,7 @@ def solve_model(
     # point (`_stamp_layer_timing`) can report which criterion stopped the solve
     # without threading a field through ~18 SolveResult construction sites.
     abs_gap_tol = _resolve_abs_gap_tolerance(abs_gap_tolerance)
+    _validate_solve_budgets(gap_tolerance, time_limit)
     _GAP_TOLERANCES.append((float(gap_tolerance), abs_gap_tol))
 
     # --- Enforce float64 precision ---
@@ -8900,6 +9094,11 @@ def solve_model(
         box or fewer cuts — never makes it unsound.
         """
         return _remaining_budget() <= floor
+
+    # --- #1385: a model with no columns is decided here, not by a backend ---
+    trivial = _constant_objective_result(model, _solve_t0)
+    if trivial is not None:
+        return trivial
 
     # Slice held back from the search for the root-relaxation fallback so that
     # bound recovery happens INSIDE ``time_limit`` (see ``_ROOT_FALLBACK_RESERVE_S``).
@@ -21952,8 +22151,6 @@ def _solve_qp(model: Model, t_start: float, prefer_pounce: bool = False) -> Solv
             )
             return retried
 
-    if result is not None:
-        return result
     detail = (" Guard: " + " ".join(reject_reason)) if reject_reason else ""
     message = (
         "HiGHS-free QP [qp-pounce-no-result]: POUNCE returned no usable result "
@@ -21962,6 +22159,16 @@ def _solve_qp(model: Model, t_start: float, prefer_pounce: bool = False) -> Solv
         "JAX QP IPM rescue issued status='optimal' with a bound and a zero gap "
         "without checking either condition (issue #359)." + detail
     )
+    if result is not None:
+        # The other arm: POUNCE returned an ``error`` SolveResult of its own,
+        # which was passed straight through and so reached the caller with
+        # ``error=None`` -- no reason to branch on or surface. Fill in the same
+        # message the terminal arm below uses, including any guard detail
+        # ``reject_reason`` collected, but never overwrite a more specific reason
+        # the engine did supply.
+        if result.status == "error" and not result.error:
+            result.error = message
+        return result
     logger.error("%s", message)
     return SolveResult(
         status="error",

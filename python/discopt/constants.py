@@ -27,6 +27,19 @@ SENTINEL_THRESHOLD: float = 1e29
 CONSTRAINT_INF: float = 1e20
 
 # ---------------------------------------------------------------------------
+# Default box for a variable declared with no bounds.
+#
+# Deliberately just BELOW ``CONSTRAINT_INF`` (#850): the exact simplex, whose
+# infinity threshold is 1e20, honours a bound of this magnitude as FINITE and
+# certifies ``optimal`` at the corner, where a bound at or beyond 1e20 is read
+# as a true infinity and yields ``unbounded``. The two values therefore sit on
+# opposite sides of the single threshold that decides which certificate a
+# caller gets, and must never be conflated when reporting a bound back to them
+# (#1387).
+# ---------------------------------------------------------------------------
+DEFAULT_VARIABLE_BOUND: float = 9.999e19
+
+# ---------------------------------------------------------------------------
 # Starting-point generation
 # ---------------------------------------------------------------------------
 # When variable bounds are infinite, clip to this range for midpoint /
