@@ -477,14 +477,38 @@ def test_the_single_tree_stops_when_its_own_bound_certifies_the_incumbent():
     # master: naming an opt-in backend made the default algorithm depend on
     # whether highspy happened to be installed. The whole module already
     # ``importorskip``s highspy, so pinning it here changes no coverage.
+    #
+    # The budget is 300 s, not the 60 s this was written with, and the extra 240 s
+    # buy nothing on an idle machine: the solve takes 3.6 s and the run is
+    # bit-identical at 60 s and at 300 s (73 restarts, ``gap_tolerance``, measured
+    # #1360). The budget is loose because the early exit only fires at restart 73
+    # of the ~75 the separator needs, so the run has to finish essentially in full
+    # -- and a *guillotined* run reports exactly this test's failure signature:
+    # ``dual_bound_observations > 0`` (so the first assert passes) with
+    # ``converged_early`` False. At 60 s that made the test a contention lottery on
+    # a shared runner rather than a check on the early exit: it went red on CI the
+    # hour main added ~86 tests including a 60 s one, which slowed the job 830 s ->
+    # 1237 s (1.49x) with no code change on either side. Raising the wall removes
+    # the lottery and weakens no assertion below -- every one of them still has to
+    # hold, on the same 73-restart trajectory.
     res = _separator_outlives_the_certificate().solve(
-        time_limit=60, mip_nlp_method="lp_nlp_bb", milp_solver="highs"
+        time_limit=300, mip_nlp_method="lp_nlp_bb", milp_solver="highs"
     )
     stats = res.mip_nlp_trace["summary"]["callback_stats"]
 
     assert stats["dual_bound_observations"] > 0, (
         "no check-in carried a dual bound, so the early exit was never asked "
         "anything -- this test would pass on a driver that cannot certify at all"
+    )
+    # Separate "the early exit was asked and declined" from "the run was cut short
+    # before it could be asked" (CLAUDE.md §6). Without this, contention reads as a
+    # defect in the early exit and costs a bisect; with it, the failure names its
+    # own cause.
+    assert res.mip_nlp_trace["termination_reason"] not in ("termination_hook", "time_limit"), (
+        "the solve was cut short at its wall before the separator ran dry "
+        f"(reason={res.mip_nlp_trace['termination_reason']!r}, "
+        f"restarts={stats['restarts']}) -- this is a starved runner, not a "
+        "regression in the early exit; raise the budget rather than the tolerance"
     )
     assert stats["converged_early"] is True
     assert stats["restarts"] > 1, "the separator ran dry on its own; nothing was cut short"
