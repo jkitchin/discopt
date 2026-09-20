@@ -1039,6 +1039,7 @@ _STATE_AS_SORTED_LIST = ("_zero_spanning_factor_auxes",)
 
 #: Attributes carried in "state" by a bespoke encoder.
 _STATE_BESPOKE = (
+    "_atan2_preconditions",
     "_coupling_keys",
     "_sets",
     "_simplex_lowerings",
@@ -1245,10 +1246,34 @@ def _dec_simplex_lowerings(docs: list[dict]) -> list:
     ]
 
 
-def _enc_state(model: Model, rows: list) -> dict:
+def _enc_atan2_preconditions(model: Model, table) -> list[dict]:
+    """The sign assumptions this model's rewritten ``atan2`` calls were built on.
+
+    These must travel with the document. ``dm.atan2`` rewrites into ``atan`` of a
+    sign-definite ratio using the bounds in force at build time, and the guard
+    that catches a *later* widening of that bound lives here. Dropping it on load
+    would leave a reloaded model rewritten but unguarded — and a widening applied
+    after loading then differs from ``atan2`` by pi with no error, which is a
+    false model, not a loose one. The denominator is written through the shared
+    node table, so it aliases the same subexpression the rewrite already carries
+    rather than duplicating it.
+    """
+    return [
+        {"denominator": table.add(denominator), "sign": sign, "label": label}
+        for denominator, sign, label in getattr(model, "_atan2_preconditions", []) or []
+    ]
+
+
+def _dec_atan2_preconditions(docs: Optional[list], nodes: list) -> list:
+    """Rebuild the guard list. A document predating it simply has none."""
+    return [(nodes[d["denominator"]], d["sign"], d["label"]) for d in docs or []]
+
+
+def _enc_state(model: Model, rows: list, table) -> dict:
     state: dict[str, Any] = {name: getattr(model, name) for name in _STATE_PLAIN}
     for name in _STATE_AS_SORTED_LIST:
         state[name] = sorted(getattr(model, name, set()) or set())
+    state["_atan2_preconditions"] = _enc_atan2_preconditions(model, table)
     state["_coupling_keys"] = _enc_coupling_keys(model, rows)
     state["_sets"] = _enc_sets(model)
     state["_simplex_lowerings"] = _enc_simplex_lowerings(model)
@@ -1257,7 +1282,7 @@ def _enc_state(model: Model, rows: list) -> dict:
     return state
 
 
-def _dec_state(state: Optional[dict], model: Model, rows: list) -> None:
+def _dec_state(state: Optional[dict], model: Model, rows: list, nodes: list) -> None:
     if not state:
         return
     for name in _STATE_PLAIN:
@@ -1266,6 +1291,7 @@ def _dec_state(state: Optional[dict], model: Model, rows: list) -> None:
     for name in _STATE_AS_SORTED_LIST:
         if name in state:
             setattr(model, name, set(state[name]))
+    model._atan2_preconditions = _dec_atan2_preconditions(state.get("_atan2_preconditions"), nodes)
     model._coupling_keys = _dec_coupling_keys(state.get("_coupling_keys"), rows)
     model._block_labels_var = _dec_block_labels_var(state.get("_block_labels_var"))
     model._block_labels_con = _dec_block_labels_con(state.get("_block_labels_con"), rows)
@@ -1450,7 +1476,7 @@ def dumps(
         "rows": rows,
         "builder_blocks": _enc_builder_blocks(model, var_ids),
         "complementarities": _enc_complementarities(model, table),
-        "state": _enc_state(model, list(model._constraints)),
+        "state": _enc_state(model, list(model._constraints), table),
         "initial_point": [
             [name, int(elem), _enc_float(val)]
             for (name, elem), val in sorted(getattr(model, "_initial_point", {}).items())
@@ -1567,7 +1593,7 @@ def loads(text: Union[str, bytes]) -> Model:
             setattr(model._objective, "_is_placeholder", True)
 
     _dec_complementarities(doc.get("complementarities"), model, nodes)
-    _dec_state(doc.get("state"), model, list(model._constraints))
+    _dec_state(doc.get("state"), model, list(model._constraints), nodes)
 
     # An entry naming a variable this document does not declare is dead weight
     # at best: `solve()` looks the point up by name, so the value is dropped

@@ -1983,6 +1983,7 @@ _ELEMENTWISE_FUNCS: frozenset = frozenset(
         "cos",
         "tan",
         "atan",
+        "atan2",
         "asin",
         "acos",
         "sinh",
@@ -2038,6 +2039,22 @@ class DiscontinuousIntrinsicError(NotImplementedError):
     "``sign`` was implemented and these were not".
 
     See https://github.com/jkitchin/discopt/issues/1237.
+    """
+
+
+class Atan2BranchCutError(ValueError):
+    """Raised when ``dm.atan2``'s box may touch the branch cut ``{y = 0, x <= 0}``.
+
+    Distinct from :class:`DiscontinuousIntrinsicError`, and deliberately not a
+    subclass of it: that error says *the operator* is unimplemented, whereas
+    ``atan2`` is fully implemented — just not on this **box**. Bound either
+    argument away from zero and the same model builds, relaxes and certifies.
+    It is a ``ValueError`` because the defect is in the bounds the caller
+    supplied, not in discopt's coverage.
+
+    See :mod:`discopt.modeling._atan2` for why the cut is a hard obstacle rather
+    than a missing envelope: the jump across it does not shrink under branching,
+    so a relaxation over a cut-straddling box can never close a gap.
     """
 
 
@@ -2617,6 +2634,73 @@ def tan(x: Union[Expression, float]) -> Expression:
 def atan(x: Union[Expression, float]) -> Expression:
     """Inverse tangent (arctan); image in (-π/2, π/2)."""
     return FunctionCall("atan", _wrap(x))
+
+
+def atan2(y: Union[Expression, float], x: Union[Expression, float]) -> Expression:
+    """Two-argument arctangent: the angle of the point ``(x, y)``, in ``(-π, π]``.
+
+    Argument order follows :func:`math.atan2` / :func:`numpy.arctan2` / GAMS
+    ``arctan2`` — the **ordinate first**.
+
+    ``atan2`` is not an atom in discopt, and this builder does not create one.
+    It is discontinuous across the branch cut ``{y = 0, x <= 0}``, and that jump
+    does not shrink under branching (refining a box onto the cut drives the
+    range of ``atan2`` toward ``2π``), so no rigorous relaxation over a
+    cut-straddling box can ever certify a bound. Instead this rewrites ``atan2``
+    **exactly**, using the declared bounds of *x* and *y*, into ``atan`` over a
+    sign-definite ratio::
+
+        x > 0:   atan(y / x)
+        y > 0:   π/2 - atan(x / y)
+        y < 0:   -π/2 - atan(x / y)
+
+    The result is an ordinary smooth expression over atoms discopt already
+    relaxes rigorously, so it propagates, relaxes and certifies like any other
+    model — no new IR node, no new envelope. The last two identities cover the
+    left half-plane as well, so the only refused region is the cut itself.
+
+    Parameters
+    ----------
+    y : Expression or float
+        Ordinate.
+    x : Expression or float
+        Abscissa.
+
+    Returns
+    -------
+    Expression
+        The rewritten expression — never a ``FunctionCall("atan2", ...)``.
+
+    Raises
+    ------
+    Atan2BranchCutError
+        When the declared bounds do not place the whole box strictly inside one
+        of the three half-planes. The message names the enclosures it read and
+        the bound to add.
+
+    Examples
+    --------
+    >>> import discopt.modeling as dm
+    >>> m = dm.Model()
+    >>> x = m.continuous("x", lb=0.5, ub=2.0)
+    >>> y = m.continuous("y", lb=0.5, ub=2.0)
+    >>> m.minimize(dm.atan2(y, x))
+    """
+    from discopt.modeling._atan2 import (
+        branch_cut_message,
+        build_rewrite,
+        classify_atan2,
+    )
+
+    yw, xw = _wrap(y), _wrap(x)
+    cls = classify_atan2(yw, xw)
+    rewritten = build_rewrite(cls, yw, xw)
+    if rewritten is None:
+        raise Atan2BranchCutError(branch_cut_message(cls))
+    # `build_rewrite` has recorded the sign this identity assumed, so
+    # `validate()` can refuse a model whose bounds were widened out from under
+    # it before the solve certifies the wrong function.
+    return rewritten
 
 
 def asin(x: Union[Expression, float]) -> Expression:
@@ -4803,6 +4887,14 @@ class Model:
         # ``_flat_var_offset``. ``None`` until first requested / after growth.
         self._flat_var_offsets_cache: Optional[list[int]] = None
         self._parameters: list[Parameter] = []
+        # Sign assumptions the `atan2` rewrites in this model were built on, as
+        # ``(denominator_expr, "positive"|"negative", label)``. `dm.atan2` reads
+        # bounds at construction, but bounds are mutable afterwards, so
+        # `validate()` re-checks these before every solve -- see
+        # `discopt.modeling._atan2.check_preconditions` for the measured failure
+        # this prevents. Empty for the overwhelming majority of models, and the
+        # check costs one interval walk per entry, not a walk of the model.
+        self._atan2_preconditions: list[tuple[Expression, str, str]] = []
         # Persistent set of declared variable/parameter names for O(1)
         # uniqueness checks (M7). Rebuilding ``{v.name ...} | {p.name ...}`` on
         # every declaration made model construction O(n²); this set is updated
@@ -8251,6 +8343,14 @@ class Model:
         """
         if self._objective is None:
             raise ValueError("No objective set. Call m.minimize() or m.maximize().")
+
+        # An atan2 rewrite whose sign assumption has since been widened away is
+        # a model that differs from the one the user wrote by pi over part of
+        # its box. Catch it here rather than certifying it. (After the objective
+        # check: a model with no objective has a more basic problem to report.)
+        from discopt.modeling._atan2 import check_preconditions
+
+        check_preconditions(self)
 
         names = set()
         for var in self._variables:

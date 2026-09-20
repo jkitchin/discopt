@@ -24,6 +24,7 @@ from discopt.modeling.argmin import (
     argmin_layer,
 )
 from discopt.modeling.core import (
+    Atan2BranchCutError,
     BooleanVar,
     BooleanVarArray,
     Constraint,
@@ -52,6 +53,7 @@ from discopt.modeling.core import (
     asin,
     asinh,
     atan,
+    atan2,
     atanh,
     # Logical functions
     atleast,
@@ -135,6 +137,7 @@ __all__ = [
     "cos",
     "tan",
     "atan",
+    "atan2",
     "asin",
     "acos",
     "sinh",
@@ -155,6 +158,7 @@ __all__ = [
     "ceil",
     "round_",
     "trunc",
+    "Atan2BranchCutError",
     "DiscontinuousIntrinsicError",
     "minimum",
     "maximum",
