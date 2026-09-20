@@ -3238,10 +3238,29 @@ def _solve_amp_impl(
         # built this relaxation found zero atoms attached to any partitioned
         # variable, so it emitted no piecewise rows -- a finer partition produces a
         # bit-identical MILP and therefore the identical bound. Continuing is
-        # provably wasted work, and stopping provably costs no bound quality (unlike
-        # a "LB stopped improving" rule: measured on the in-repo corpus, nvs11's
-        # bound sat flat for SEVEN consecutive rounds and then gained 43.3, so any
-        # stop-after-k with k<=7 discards a real 9% bound improvement).
+        # provably wasted work, and stopping provably costs no bound quality --
+        # unlike a "LB stopped improving" rule, which is unsound for every k,
+        # because a flat bound is not evidence that a finer partition cannot move
+        # it. Only the emptiness of the refinement pass proves that.
+        #
+        # This comment used to rest that on a witness: "nvs11's bound sat flat for
+        # SEVEN consecutive rounds and then gained 43.3". The witness holds, but it
+        # is NOT a property of the instance -- it is a property of the instance AND
+        # the time limit, which makes it useless as a justification. Rescan of all
+        # 66 in-repo instances, AMP/rel_gap=1e-4/max_iter=40, deterministic to the
+        # digit over two reps:
+        #
+        #   nvs11  tl=20 -> 14 iters, flat run 7, LB -474.975 -> -431.042, 14.7 s
+        #   nvs11  tl=60 ->  4 iters, flat run 0, LB -474.975 -> -431.041,  6.3 s
+        #   nvs15  tl=20 -> 16 iters, flat run 8, LB   -0.250 ->   0.99990, 14.3 s
+        #   nvs15  tl=60 ->  5 iters, flat run 0, LB   -0.250 ->   0.99993,  4.6 s
+        #
+        # Same optimum, same `optimal` status; only the path differs. A larger
+        # budget gives each MILP subsolve more room, so the relaxation is stronger
+        # and the loop needs far fewer rounds -- note the SMALLER limit costs more
+        # than twice the wall clock. So "is there a k-round plateau" has no
+        # instance-level answer to appeal to, and the structural argument above is
+        # load-bearing on its own: it needs no witness, which is why it is kept.
         #
         # Measured coverage, 66-instance corpus: of the 10 instances whose LB never
         # moves, 7 are caught here (alan 21 iters, cvxnonsep_nsig30 10,
