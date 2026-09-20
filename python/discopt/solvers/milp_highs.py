@@ -434,8 +434,19 @@ def solve_milp_with_lazy_cuts(
     that certifies 2 s later. But HiGHS fires that callback about **3000 times a
     second** (measured), which is neither affordable to answer in Python nor a
     sensible sampling rate for a trend, so it is answered at most once every
-    ``terminate_poll_s`` seconds. That interval is the hook's real resolution and
-    a caller budgeting by it should size its window accordingly.
+    ``terminate_poll_s`` seconds. ``last_poll`` is reset by a restart too, since
+    a restart *is* a consultation -- so the two arms compose into one guarantee:
+    the hook is consulted about every ``terminate_poll_s``, whatever the restart
+    cadence. (Frequent restarts therefore mean the interrupt arm rarely fires,
+    which is the hook being consulted MORE often than promised, not a dead clock.
+    Measured in ``scripts/entry_poll_clock_cadence.py``.)
+
+    Size a budget window for **~2x ``terminate_poll_s``, not 1x**: HiGHS offers
+    the interrupt when it reaches one, not on a timer, so a gap is the interval
+    plus the time to the next callback. Measured worst case over five arms at
+    ``terminate_poll_s=1.0`` was 1.76 s -- a caller that read the interval as a
+    bound and sized a 2 s window would get two samples where it planned for
+    four.
 
     The hook can only ever give budget *back*: ``time_limit`` is still enforced
     through the HiGHS option on every run, so nothing here can overrun it.
