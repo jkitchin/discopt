@@ -20765,9 +20765,70 @@ def _solve_node_nlp_kkt(
 # Reject an interior-point QP "optimal" whose reported final KKT residual exceeds
 # this (issue #145 drift guard for the POUNCE-first default). Loose enough to pass
 # a normally-converged IPM solve (observed ~1e-9, even on a 1e6-conditioned Q),
-# tight enough to catch a stalled one; the caller then degrades to the next
-# engine. A backend that reports no residual skips the check.
+# tight enough to catch a stalled one; a point failing it is refused rather than
+# reported. A backend that reports no residual skips the check.
+#
+# The tolerance is RELATIVE to the stationarity scale of the instance
+# (:func:`_qp_stationarity_scale`), not absolute (#1384). ``kkt_error`` is POUNCE's
+# residual in the model's own units, and the stationarity residual
+# ``Qx + c + A'y - z`` scales linearly with the objective: writing the same QP in
+# joules instead of kilojoules multiplies it by 1e3 without moving the point. Read
+# as an absolute number it made every convex QP with an objective scale above
+# ~1e4 fail the guard and come back ``status="error"`` — measured on
+# ``min 1e4*(x-3)^2`` over ``[0,10]``, where POUNCE returns x=3 exactly with an
+# unscaled residual of 1.0e-6. At the O(1) scale the #145 guard was built on, the
+# yardstick is 1.0 and this is exactly the old test.
 _QP_KKT_RESIDUAL_TOL = 1e-6
+
+
+def _qp_stationarity_scale(
+    Q: np.ndarray,
+    c: np.ndarray,
+    x: np.ndarray,
+    row_duals: Optional[np.ndarray] = None,
+    col_duals: Optional[np.ndarray] = None,
+) -> float:
+    """Return the yardstick a QP's KKT residual must be measured against.
+
+    The stationarity residual of ``min 0.5 x'Qx + c'x`` is
+    ``Qx + c + A'y - z``; every term carries the units of the objective
+    gradient, so the residual of a *fixed* point scales linearly when the
+    objective is rescaled. This returns the magnitude of the largest term that
+    enters it, which is what Ipopt's ``s_d`` does (Wächter & Biegler 2006, eq.
+    5): a residual divided by this is scale-free, so the same problem written at
+    any scale gets the same verdict.
+
+    ``max(1.0, ...)`` floors it, so an O(1) instance is tested exactly as an
+    absolute residual — the regime issue #145's guard was calibrated on. Only
+    problems whose own gradient terms are *larger* than one get a
+    correspondingly larger allowance.
+
+    Note that ``Qx`` and ``c`` are contributed separately rather than as the
+    gradient ``Qx + c``: at an interior optimum the gradient itself is ~0 (that
+    is what being optimal means), so ``||Qx + c||`` is not a measure of the
+    problem's scale and would collapse the yardstick back to 1.0 on exactly the
+    instances this exists for.
+    """
+    scale = 1.0
+    x = np.asarray(x, dtype=np.float64).reshape(-1)
+    c = np.asarray(c, dtype=np.float64).reshape(-1)
+    if Q.size and x.size:
+        Qx = np.asarray(Q, dtype=np.float64) @ x
+        if Qx.size:
+            scale = max(scale, float(np.max(np.abs(Qx))))
+    if c.size:
+        scale = max(scale, float(np.max(np.abs(c))))
+    for duals in (row_duals, col_duals):
+        if duals is None:
+            continue
+        arr = np.asarray(duals, dtype=np.float64).reshape(-1)
+        if arr.size:
+            scale = max(scale, float(np.max(np.abs(arr))))
+    if not np.isfinite(scale):
+        # A non-finite scale would make the guard vacuous (everything passes).
+        # Refuse the allowance instead: fall back to the absolute test.
+        return 1.0
+    return scale
 
 
 def _scalar_constraint_layout(
@@ -21866,7 +21927,10 @@ def _solve_qp(model: Model, t_start: float, prefer_pounce: bool = False) -> Solv
     from discopt.solvers.lp_pounce import declared_box_honored
 
     del prefer_pounce  # no HiGHS fallback to order against; kept for signature compat
-    result = _solve_qp_pounce(model, t_start)
+    # Collects why a guard refused a returned point, so the terminal `error` can
+    # carry the reason programmatically instead of only in the log (#1384).
+    reject_reason: list[str] = []
+    result = _solve_qp_pounce(model, t_start, reject_reason=reject_reason)
     if result is not None and result.status != "error":
         return result
 
@@ -21879,7 +21943,7 @@ def _solve_qp(model: Model, t_start: float, prefer_pounce: bool = False) -> Solv
     # guards are unconditional and still gate whatever the retry returns.
     if _declared_box_retry_applies(model):
         with declared_box_honored():
-            retried = _solve_qp_pounce(model, t_start)
+            retried = _solve_qp_pounce(model, t_start, reject_reason=reject_reason)
         if retried is not None and retried.status != "error":
             logger.info(
                 "QP re-solved over the declared box (bounds in [1e15, 1e19) that "
@@ -21890,17 +21954,20 @@ def _solve_qp(model: Model, t_start: float, prefer_pounce: bool = False) -> Solv
 
     if result is not None:
         return result
-    logger.error(
+    detail = (" Guard: " + " ".join(reject_reason)) if reject_reason else ""
+    message = (
         "HiGHS-free QP [qp-pounce-no-result]: POUNCE returned no usable result "
         "(solve failure, or the feasibility/KKT-stationarity guard rejected its "
         "point). Reporting an error rather than an unverified answer: the removed "
         "JAX QP IPM rescue issued status='optimal' with a bound and a zero gap "
-        "without checking either condition (issue #359)."
+        "without checking either condition (issue #359)." + detail
     )
+    logger.error("%s", message)
     return SolveResult(
         status="error",
         wall_time=time.perf_counter() - t_start,
         node_count=0,
+        error=message,
     )
 
 
@@ -21908,10 +21975,14 @@ def _solve_qp_pounce(
     model: Model,
     t_start: float,
     time_limit: float | None = None,
+    reject_reason: list[str] | None = None,
 ) -> SolveResult | None:
     """Solve a pure-continuous QP using POUNCE. Returns None when POUNCE is
     unavailable, the model has integer variables (no MIQP in an IPM), or the
-    solve fails — so the caller can fall back to another engine."""
+    solve fails — so the caller can fall back to another engine.
+
+    ``reject_reason`` is forwarded to :func:`_solve_qp_matrix`; see its docstring.
+    """
     import functools
 
     from discopt.solvers.qp_pounce import POUNCE_AVAILABLE
@@ -21930,7 +22001,13 @@ def _solve_qp_pounce(
     # The IPM is the one QP backend that relaxes a declared [1e15, 1e20) bound to
     # its own infinity, so its UNBOUNDED needs the #850/#1319 guard.
     return _solve_qp_matrix(
-        model, t_start, time_limit, solve_fn, "POUNCE", relaxes_huge_bounds=True
+        model,
+        t_start,
+        time_limit,
+        solve_fn,
+        "POUNCE",
+        relaxes_huge_bounds=True,
+        reject_reason=reject_reason,
     )
 
 
@@ -22367,6 +22444,7 @@ def _solve_qp_matrix(
     gap_tolerance: float = 1e-4,
     strict: bool = False,
     relaxes_huge_bounds: bool = False,
+    reject_reason: list[str] | None = None,
 ) -> SolveResult | None:
     """Solve a QP/MIQP through a matrix-form ``solve_qp`` backend.
 
@@ -22382,6 +22460,11 @@ def _solve_qp_matrix(
     interior-point engine does this (``qp_pounce`` shares
     ``lp_pounce.finite_bound_threshold()``); leave it ``False`` for a backend that
     honors the declared box (Gurobi, whose infinity is 1e30).
+
+    ``reject_reason``, when a list is passed, collects the human-readable reason a
+    returned point was refused by the feasibility or stationarity guard. The
+    caller uses it to populate ``SolveResult.error`` on the terminal path, so the
+    only record of *why* a QP came back ``error`` is not a log line (#1384).
     """
     from discopt._relax.problem_classifier import extract_qp_data
     from discopt.modeling.core import ObjectiveSense
@@ -22468,25 +22551,37 @@ def _solve_qp_matrix(
     if result.status == SolveStatus.OPTIMAL:
         assert result.x is not None and result.objective is not None
         if not _matrix_solution_feasible(result.x[:n_orig], A_ub, b_ub, A_eq, b_eq, bounds):
-            logger.warning(
-                "%s QP returned an infeasible point labeled optimal; "
-                "falling back to the next engine.",
-                engine,
+            reason = (
+                f"{engine} QP returned an infeasible point labeled optimal; the point was refused."
             )
+            logger.warning("%s", reason)
+            if reject_reason is not None:
+                reject_reason.append(reason)
             return None
         # Convergence guard for the POUNCE-first default: an interior-point
         # backend can label a stalled, drifted point "optimal" (issue #145). When
-        # it reports a final KKT residual, reject a non-stationary "optimal" and
-        # degrade to the next engine (the JAX QP IPM) rather than trust a drifted
-        # objective. ``None`` (a backend that reports no residual) skips the check.
-        if result.kkt_error is not None and result.kkt_error > _QP_KKT_RESIDUAL_TOL:
-            logger.warning(
-                "%s QP reported a non-stationary 'optimal' (KKT residual %.2e > %.0e); "
-                "falling back to the next engine.",
-                engine,
-                result.kkt_error,
-                _QP_KKT_RESIDUAL_TOL,
+        # it reports a final KKT residual, refuse a non-stationary "optimal"
+        # rather than trust a drifted objective. ``None`` (a backend that reports
+        # no residual) skips the check.
+        #
+        # The residual is compared against the tolerance scaled by the instance's
+        # own stationarity scale (#1384): the residual carries the units of the
+        # objective gradient, so an absolute threshold rejects correct answers to
+        # QPs that merely have large coefficients. There is no next engine on the
+        # POUNCE route (the JAX QP IPM rescue was removed in #359), so a refusal
+        # here is terminal and surfaces as ``status="error"``.
+        kkt_scale = _qp_stationarity_scale(
+            Q_orig, c_orig, result.x[:n_orig], result.dual_values, result.reduced_costs
+        )
+        if result.kkt_error is not None and result.kkt_error > _QP_KKT_RESIDUAL_TOL * kkt_scale:
+            reason = (
+                f"{engine} QP reported a non-stationary 'optimal' (KKT residual "
+                f"{result.kkt_error:.2e} > {_QP_KKT_RESIDUAL_TOL:.0e} x stationarity "
+                f"scale {kkt_scale:.3g}); the point was refused rather than reported."
             )
+            logger.warning("%s", reason)
+            if reject_reason is not None:
+                reject_reason.append(reason)
             return None
         x_flat = result.x[:n_orig]
         assert objective is not None
