@@ -9695,14 +9695,42 @@ Three properties place it out of scope for this PR:
   and *clean* (63 nodes, bound 562.699). It needs a loaded machine to appear, which
   is why it shows up in a panel and not in a single run.
 
-The failing mechanism is the tree's own `global_lower_bound` collapsing onto the
-incumbent, so `_gap_converged(tree, ...)` closes the search. The prime suspect is
-`process_evaluated` step 1 in `crates/discopt-core/src/bnb/tree_manager.rs`, which
-prunes a node whose `local_lower_bound >= cutoff_value()` *before* any
-`bound_trusted` check, so a sentinelled (1e30) node can be pruned as "dominated";
-`update_global_lower_bound` then sees `min_lb == INFINITY` and sets
-`global_lower_bound = incumbent_value`. That is a hypothesis, not a finding — it has
-not been confirmed and no fix is proposed here.
+### 73.2.1 The mechanism, confirmed — a failed relaxation is pruned as "dominated"
+
+`process_evaluated` step 1 in `crates/discopt-core/src/bnb/tree_manager.rs` prunes
+any node with `local_lower_bound >= cutoff_value()` **before** any `bound_trusted`
+check. A node the orchestrator sentinelled (1e30) because its relaxation *failed*
+therefore prunes as soon as an incumbent exists — `1e30 >= incumbent` is true — and
+nothing records that its subtree was never bounded. `update_global_lower_bound` then
+finds no Pending/Evaluated node left, takes the `min_lb == INFINITY` branch, and sets
+`global_lower_bound = incumbent_value`. The search reads as closed and the incumbent
+is certified.
+
+This is no longer a hypothesis. A four-node probe on `TreeManager` reproduces it with
+no model, no load and no flags — root branches, one child returns a trusted
+integer-feasible point (incumbent 5.0), the sibling returns the 1e30 sentinel:
+
+    PROBE pruned=1 fathomed=1 incumbent=5 glb=5 unresolved_floor=inf bound_unresolved=false
+
+`pruned=1` is the sentinelled node going out as "dominated"; `unresolved_floor=inf`
+and `bound_unresolved=false` say nothing was recorded about the unexplored subtree;
+`glb=5` is the collapse. The tree certifies 5.0 while a subtree that was never bounded
+could hold anything. `gams01` is load-dependent only because *relaxation failures* are
+— the defect itself is deterministic.
+
+**Why the obvious fix is wrong.** The same 1e30 sentinel carries a second, unrelated
+meaning: a `lazy_constraints` cut or an `incumbent_callback` veto rejecting an integer
+point (#1038). For that case pruning is correct — the point really is excluded. The
+Rust layer cannot tell the two apart, and the in-tree comment records that widening
+`trusted` to cover it cost `m3` its certificate for no soundness gain. So the fix has
+to separate the two meanings at the PyO3 boundary (a distinct "excluded by callback"
+signal on `NodeResult`) rather than reinterpret the sentinel — a change to the
+orchestrator interface plus its own §5 panel.
+
+**Disposition: not fixed in this PR.** It is a pre-existing P0-class correctness
+defect, independent of #1352/#1355/#1356, and the fix touches the Rust/Python node
+interface. Folding it in would mix it with three unrelated fixes against the "keep PRs
+scoped" rule. It is recorded here with a reproduction so it can be picked up directly.
 
 ### 73.3 Falsified — the convex-quadratic objective bound is not live on `gams01`
 
