@@ -313,32 +313,42 @@ def is_purely_quadratic(expr: Expression, n: int, model: Model) -> bool:
     return extract_quadratic(expr, n, model) is not None
 
 
-def quadratic_is_psd(Q: np.ndarray, tol: float = 1e-10) -> Optional[bool]:
+def quadratic_is_psd(Q: np.ndarray) -> Optional[bool]:
     """Exact PSD test on a symmetric ``Q``: ``True`` PSD, ``False`` not, ``None`` unusable.
 
     Uses the symmetric eigenvalue decomposition (``numpy.linalg.eigvalsh``)
     on ``½·(Q + Qᵀ)`` (the symmetric part; ``Q`` is already symmetric by
     construction from :func:`extract_quadratic`, but symmetrizing is
     defensive and free). A matrix is accepted as PSD when its minimum
-    eigenvalue is ``>= -tol``.
+    eigenvalue clears ``-psd_decision_slack(‖Q‖_F)``.
 
-    The ``tol`` slack absorbs floating-point round-off in the eigenvalue
-    routine only; it is a soundness *margin* the caller must reconcile
-    with its own certificate tolerance. Returns ``None`` if ``Q`` is not
-    finite (the eigen-decomposition would be meaningless), so the caller
-    can abstain to its existing rigorous path.
+    The slack is the eigensolver's own error at this matrix's magnitude and
+    nothing else (#1397). It used to be an absolute ``tol=1e-10``, which is
+    dimensionally incoherent — an eigenvalue carries the units of ``Q`` — and
+    was measurably wrong in *both* directions: it refused genuinely PSD
+    matrices carrying an exact zero eigenvalue once ``‖Q‖_F ≳ 1e7``, and it
+    certified indefinite matrices as convex with a relative nonconvexity up to
+    8900·u. See :func:`~discopt._relax.convexity.eigenvalue.psd_decision_slack`
+    for the measurement. The ``tol`` parameter is gone rather than defaulted,
+    because a caller passing an absolute one would reintroduce exactly the
+    defect.
+
+    Returns ``None`` if ``Q`` is not finite (the eigen-decomposition would be
+    meaningless), so the caller can abstain to its existing rigorous path.
 
     Args:
         Q: A square, (approximately) symmetric matrix.
-        tol: Non-negative slack for accepting ``λ_min >= 0`` despite
-            round-off. Must match or be tighter than the caller's
-            certificate tolerance.
 
     Returns:
-        ``True`` if ``Q`` is (numerically) PSD, ``False`` if it is
-        provably indefinite/negative, ``None`` if ``Q`` is not usable
-        (non-finite entries).
+        ``True`` if ``Q`` is PSD to within the arithmetic's resolution,
+        ``False`` if it is measurably indefinite/negative, ``None`` if ``Q``
+        is not usable (non-finite entries, non-square).
     """
+    # Local import: ``convexity`` pulls in the interval machinery, and this
+    # module is imported from inside that package's functions — keep the
+    # dependency one-directional at module-import time.
+    from discopt._relax.convexity.eigenvalue import psd_decision_slack
+
     Qa = np.asarray(Q, dtype=np.float64)
     if Qa.ndim != 2 or Qa.shape[0] != Qa.shape[1]:
         return None
@@ -350,22 +360,23 @@ def quadratic_is_psd(Q: np.ndarray, tol: float = 1e-10) -> Optional[bool]:
         return True
     sym = 0.5 * (Qa + Qa.T)
     lam_min = float(np.linalg.eigvalsh(sym)[0])
-    return lam_min >= -tol
+    return lam_min >= -psd_decision_slack(float(np.linalg.norm(sym, "fro")))
 
 
-def quadratic_is_nsd(Q: np.ndarray, tol: float = 1e-10) -> Optional[bool]:
+def quadratic_is_nsd(Q: np.ndarray) -> Optional[bool]:
     """Exact NSD (negative semidefinite) test — ``quadratic_is_psd(-Q)``.
 
     ``True`` if ``Q`` is negative semidefinite (the form is concave),
     ``False`` if not, ``None`` if unusable. Companion to
-    :func:`quadratic_is_psd` for certifying concavity.
+    :func:`quadratic_is_psd` for certifying concavity; negation leaves
+    ``‖Q‖_F`` unchanged, so it inherits the same scale-aware slack.
     """
     Qa = np.asarray(Q, dtype=np.float64)
     if Qa.ndim != 2 or Qa.shape[0] != Qa.shape[1]:
         return None
     if not np.all(np.isfinite(Qa)):
         return None
-    return quadratic_is_psd(-Qa, tol=tol)
+    return quadratic_is_psd(-Qa)
 
 
 __all__ = [
