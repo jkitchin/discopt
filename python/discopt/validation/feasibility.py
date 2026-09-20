@@ -269,6 +269,65 @@ def model_integer_mask(model) -> np.ndarray:
     return np.concatenate(parts) if parts else np.zeros(0, dtype=bool)
 
 
+def snap_integer_columns(x_flat, integer_mask, *, int_tol: float = INT_TOL) -> np.ndarray:
+    """``x_flat`` with every near-integral INTEGER/BINARY column snapped exactly.
+
+    **The integral realisation is the point a solver actually claims** (#1380).
+    Every feasibility arbiter in this repository used to test the rows at the
+    point *as computed* and integrality *beside it*, as two independent tests. A
+    column sitting ``int_tol`` away from an integer then buys its row up to
+    ``|a_ij| * int_tol`` of slack that the integral point does not have, and on a
+    big-M row that slack is unbounded in ``M``:
+
+    .. code-block:: text
+
+        min -x + 3z   s.t.  x <= 1e7 z,  0 <= x <= 10,  z binary
+
+    has true optimum ``-7`` (``z=1``). At ``x=10, z=1e-6`` the integrality test
+    passes (``1e-6 < 1e-5``) and the row holds *exactly* (``10 <= 10``), so three
+    of the four solve routes certified ``optimal`` at ``-9.999997`` — below the
+    model's true optimum, at a point whose binary is not a binary. At ``z=0``,
+    the point being *claimed*, the row is violated by 10.0.
+
+    Snapping first closes the class rather than the instance. It is sound by
+    construction in both directions:
+
+    * it is a **bit-for-bit no-op** on a genuinely integral point, so no point
+      any arbiter accepted on its own integral merits is newly rejected;
+    * it moves a column no further than ``int_tol`` — a distance the *caller's
+      own integrality test* has already declared immaterial — so the only points
+      it rejects are those whose feasibility rests on fractionality the solver
+      has already certified absent.
+
+    A column further than ``int_tol`` from every integer is left untouched:
+    snapping a genuinely fractional value would fabricate a point the search
+    never proved feasible, and it is the integrality test's business to reject
+    it. Callers therefore run that test first and snap only once it passes.
+
+    ``integer_mask`` is a boolean mask over the flat point (see
+    :func:`model_integer_mask`). A mask of the wrong length raises rather than
+    silently checking a prefix — a misaligned mask would leave exactly the
+    columns this exists for unsnapped.
+    """
+    x = np.asarray(x_flat, dtype=np.float64)
+    mask = np.asarray(integer_mask, dtype=bool)
+    if mask.shape != x.shape:
+        raise ValueError(f"integer mask has shape {mask.shape}, point has {x.shape}")
+    if not mask.any():
+        return x.copy()
+    out = x.copy()
+    seg = out[mask]
+    near = np.isfinite(seg) & (np.abs(seg - np.round(seg)) <= int_tol)
+    seg[near] = np.round(seg[near])
+    out[mask] = seg
+    return out
+
+
+def snap_integers(model, x_flat, *, int_tol: float = INT_TOL) -> np.ndarray:
+    """:func:`snap_integer_columns` keyed on ``model``'s own integer mask."""
+    return snap_integer_columns(x_flat, model_integer_mask(model), int_tol=int_tol)
+
+
 def evaluator_box(evaluator):
     """``(lb, ub, integer_mask)`` for an evaluator, or ``None`` if it exposes no box.
 
@@ -389,6 +448,14 @@ def check_variable_bounds(model, x_flat: np.ndarray) -> VerifyResult:
     ULPs off its bound, and on a large-magnitude bound (``tanksize`` x41 lb=536) a
     4e-6 absolute slack is 8e-9 relative, inside the regime the whole solver
     operates in.
+
+    Order matters on a discrete column (#1380): integrality is tested on the
+    value **as given** — that test is what licenses the snap — and the bound is
+    then tested on the **integral realisation**, the point actually being
+    claimed. The two orderings differ only for a column whose declared bound
+    excludes the integer it rounds to, i.e. a model with no integer-feasible
+    point on that column at all, which is a rejection this verifier owes its
+    callers rather than a false one.
     """
     from discopt.modeling.core import VarType
 
@@ -398,15 +465,16 @@ def check_variable_bounds(model, x_flat: np.ndarray) -> VerifyResult:
         vals = x_flat[off : off + size]
         if vals.shape[0] != size:
             return VerifyResult(False, None, f"length mismatch at variable {v.name!r}")
+        if v.var_type in (VarType.INTEGER, VarType.BINARY):
+            if np.any(np.abs(vals - np.round(vals)) > INT_TOL):
+                return VerifyResult(False, None, f"variable {v.name!r} not integral")
+            vals = np.round(vals)
         lb_flat = np.asarray(v.lb, dtype=np.float64).flatten()
         ub_flat = np.asarray(v.ub, dtype=np.float64).flatten()
         lb_tol = ABS_TOL + BOUND_REL_TOL * np.abs(lb_flat)
         ub_tol = ABS_TOL + BOUND_REL_TOL * np.abs(ub_flat)
         if np.any(vals < lb_flat - lb_tol) or np.any(vals > ub_flat + ub_tol):
             return VerifyResult(False, None, f"variable {v.name!r} out of bounds")
-        if v.var_type in (VarType.INTEGER, VarType.BINARY):
-            if np.any(np.abs(vals - np.round(vals)) > INT_TOL):
-                return VerifyResult(False, None, f"variable {v.name!r} not integral")
         off += size
     return VerifyResult(True)
 
@@ -627,6 +695,17 @@ def verify_point(
     evaluated every constraint row and every residual, bound and integrality
     condition is within tolerance. Any evaluator failure, shape mismatch or
     non-finite value yields ``ok=False`` — never an optimistic pass.
+
+    #1380: rows and the objective are evaluated at the **integral realisation**
+    (:func:`snap_integer_columns`), not at the point as computed. The integrality
+    test above has already proved every discrete column is within ``INT_TOL`` of
+    an integer, so the snap moves nothing further than a distance this verifier
+    has itself declared immaterial — but the point a solver *claims* is the
+    integral one, and testing rows beside integrality rather than after it let a
+    column ``INT_TOL`` off an integer buy its row ``|a_ij| * INT_TOL`` of slack.
+    On ``x <= 1e7 z`` that is 100 units of free violation; the reported objective
+    is likewise the one the claimed point attains, not the one the fractional
+    point does.
     """
     from discopt.modeling.core import ObjectiveSense
 
@@ -637,6 +716,13 @@ def verify_point(
     res = check_variable_bounds(model, x_flat)
     if not res.ok:
         return res
+    # Sound because ``check_variable_bounds`` passed: every discrete column is
+    # within ``INT_TOL`` of an integer, so this is a bit-for-bit no-op on a
+    # genuinely integral point and a move of at most ``INT_TOL`` otherwise.
+    try:
+        x_flat = snap_integers(model, x_flat)
+    except ValueError as exc:  # mask/point length disagree — refuse, never guess
+        return VerifyResult(False, None, f"integer mask misaligned: {exc}")
 
     try:
         # #75: via the dispatcher, so the selected backend is honoured and the

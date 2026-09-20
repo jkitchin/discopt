@@ -376,21 +376,35 @@ def test_milp_baseline_solve_is_unaffected():
     assert r.objective == pytest.approx(6.0, abs=1e-6)
 
 
-def test_integer_snap_is_declined_when_it_would_leave_the_rows(monkeypatch):
-    """The C-3 integer snap is adopted only if it keeps the point inside the rows.
+def test_integer_snap_that_leaves_the_rows_is_re_derived_not_reported_unrounded(monkeypatch):
+    """A snap that leaves the rows is answered by RE-DERIVING the continuous columns.
 
-    The exit gate found this: on `test_nn_equivalence::test_tree_ensemble_fixed_input`
-    the incumbent satisfies its equalities to 4.4e-16 and the *snapped* point misses
-    one by 1.55e-6, from per-coordinate snaps of at most 3.9e-7 over a 5-term row.
-    The MILP call site's comment claimed the snap "cannot move a linear row by more
-    than the integrality tol"; a row takes one snap per term, so it can.
+    History. #952 found that a row takes one snap per term, so the C-3 integer snap
+    *can* move a linear row by more than the integrality tolerance — on
+    ``test_nn_equivalence::test_tree_ensemble_fixed_input`` the incumbent satisfied
+    its equalities to 4.4e-16 and the snapped point missed one by 1.55e-6. The
+    answer then was to decline the snap and report the unrounded point, and this
+    test pinned that.
 
-    ``_round_incumbent_integers`` is documented to report ``feasible=False`` when
-    rounding breaks feasibility, but only when handed a checker — and this call site
-    passes none, so the flag was unconditionally True. Reproduced here in the small:
-    five integers each 3e-7 under an integer, on a row with coefficient 2, moves the
-    equality by 3e-6. The unrounded point satisfies *both* declared tolerances (rows
-    exactly, integrality 3e-7 against 1e-5), so it is the one reported.
+    **#1380 falsified that contract.** The unrounded point is not an answer to the
+    declared model — its integer columns are not integers — so its objective is not
+    a value any feasible point attains, and reporting it is how three of four routes
+    came to certify ``optimal`` below the true optimum on a big-M model. "The
+    unrounded point satisfies both declared tolerances" was true and beside the
+    point: the tolerances were being applied to a point nobody was claiming.
+
+    The current contract, pinned here. The snap is adopted unconditionally; if the
+    integral point leaves the declared rows *and* the unrounded one did not — i.e.
+    the snap is what broke it — the continuous columns are re-derived with the
+    discrete ones fixed at their integral realisation, and the exit gate judges the
+    result. So the reported point is exactly integral AND inside the rows, which is
+    strictly stronger than what this test used to assert. A genuinely off-row
+    incumbent is untouched by this and is still refused by the gate
+    (``test_milp_exit_gate_refuses_an_off_row_incumbent``, which perturbs a
+    CONTINUOUS coordinate and so is not snap-caused).
+
+    Reproduced in the small: five integers each 3e-7 under an integer, on a row with
+    coefficient 2, moves the equality by 3e-6 — past the declared abs=1e-6.
     """
     eps = 3e-7
     m = dm.Model("snap952")
@@ -431,13 +445,19 @@ def test_integer_snap_is_declined_when_it_would_leave_the_rows(monkeypatch):
     monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
     monkeypatch.setattr(S, "PyTreeManager", _NearIntegralTree)
 
-    r = m.solve(time_limit=60)  # must NOT raise: the unrounded point is feasible
+    r = m.solve(time_limit=60)  # must NOT raise: the model has an integral solution
     assert state["applied"], "the incumbent was never replaced; the test proved nothing"
     assert r.x is not None
 
     got = np.asarray(r.x["z"], dtype=np.float64).flatten()
-    assert np.allclose(got, z_near, atol=0, rtol=0), (
-        f"expected the unrounded incumbent {z_near} to be reported, got {got}"
+    # Exactly integral, bit for bit -- not "within integrality_tol of" an integer.
+    np.testing.assert_array_equal(got, np.round(z_near))
+    # ...and the re-derived continuous column puts the point back on the row, at
+    # the DECLARED abs tolerance rather than the one the snap broke.
+    got_x = float(np.asarray(r.x["x"], dtype=np.float64).flatten()[0])
+    assert abs(2 * float(np.sum(got)) + got_x - 10.0) <= DECLARED_ABS_TOL, (
+        f"reported z={got}, x={got_x}: the equality is off by "
+        f"{abs(2 * np.sum(got) + got_x - 10.0):.3e}"
     )
 
 

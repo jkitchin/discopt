@@ -211,6 +211,25 @@ def readback_problem(x: np.ndarray, sf: StdForm, **duals: Optional[np.ndarray]) 
     return None
 
 
+def snap_integral(x: np.ndarray, sf: StdForm) -> np.ndarray:
+    """``x`` with every integer column rounded to its nearest integer (#1380).
+
+    The counterpart of the snap inside :func:`feasibility_problem`: once that
+    arbiter has vouched for the integral realisation, the integral realisation is
+    what the route must REPORT and score. Returning the read-back vector instead
+    would publish a binary of ``1e-6`` and an objective no integral point attains,
+    which is the same false claim one step downstream of the arbiter. Call only
+    after :func:`feasibility_problem` passed with ``check_integrality=True`` —
+    that is what bounds the move by ``INT_TOL``.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    if not sf.int_idx.size:
+        return x
+    out = x.copy()
+    out[sf.int_idx] = np.round(out[sf.int_idx])
+    return out
+
+
 def feasibility_problem(x: np.ndarray, sf: StdForm, check_integrality: bool) -> Optional[str]:
     """Why ``x`` is not a feasible point of ``sf``, or ``None``. Call only after
     :func:`readback_problem` passed.
@@ -223,8 +242,24 @@ def feasibility_problem(x: np.ndarray, sf: StdForm, check_integrality: bool) -> 
     certified the infeasible ``x + y >= 2, x + y <= 1`` over free columns as optimal.
     Such a row is checked by :func:`_exact_rows_problem` instead, with the huge values
     left out of its tolerance scale.
+
+    #1380: on a MILP (``check_integrality``) the rows and bounds are tested at the
+    **integral realisation** of ``x``, and integrality is tested first because that
+    test is what licenses the snap. Testing the rows at the point as read back,
+    with integrality merely beside them, gave an integer column sitting ``INT_TOL``
+    off an integer up to ``|a_ij| * INT_TOL`` of free row slack — 100 units on a
+    ``x <= 1e7 z`` big-M row, against a ``FEAS_TOL`` of 1e-6. The snap is a
+    bit-for-bit no-op on a genuinely integral read-back.
     """
     x = np.asarray(x, dtype=np.float64)
+    if check_integrality and sf.int_idx.size:
+        seg = x[sf.int_idx]
+        frac = np.abs(seg - np.round(seg))
+        k = int(np.argmax(frac))
+        if frac[k] > INT_TOL:
+            return f"integer column {int(sf.int_idx[k])} = {seg[k]:.9g} is fractional"
+        x = x.copy()
+        x[sf.int_idx] = np.round(seg)
     ax = np.abs(x)
     huge = ax >= READBACK_LIMIT
     if sf.m:
@@ -252,12 +287,6 @@ def feasibility_problem(x: np.ndarray, sf: StdForm, check_integrality: bool) -> 
     if hi.size:
         j = int(hi[0])
         return f"x[{j}] = {x[j]:.6g} above its upper bound {sf.xu[j]:.6g}"
-    if check_integrality and sf.int_idx.size:
-        seg = x[sf.int_idx]
-        frac = np.abs(seg - np.round(seg))
-        k = int(np.argmax(frac))
-        if frac[k] > INT_TOL:
-            return f"integer column {int(sf.int_idx[k])} = {seg[k]:.9g} is fractional"
     return None
 
 
@@ -1464,14 +1493,23 @@ def solve_milp_std(
                     highs_status=name, node_count=nodes,
                 )
             )  # fmt: skip
-        obj = float(sf.c @ x) + sf.obj_const
+        # #1380: the verified point is the integral realisation, so that is the
+        # vector this route reports and the one whose objective it publishes.
+        # The mismatch check asks "does HiGHS's arithmetic agree with ours on the
+        # vector HiGHS returned", so it is taken on the READ-BACK point, before
+        # the snap -- otherwise the snap's own (bounded, intended) objective move
+        # would read as a solver disagreement.
         h_obj = float(info.objective_function_value) + sf.obj_const
-        mismatch = abs(obj - h_obj)
+        mismatch = abs(float(sf.c @ x) + sf.obj_const - h_obj)
         stats["milp/objective_mismatch"] = mismatch
-        if mismatch > 1e-6 * (1.0 + abs(obj)):
+        if mismatch > 1e-6 * (1.0 + abs(h_obj)):
             logger.warning(
-                "HiGHS MILP objective %.12g differs from the recomputed %.12g", h_obj, obj
+                "HiGHS MILP objective %.12g differs from the recomputed %.12g",
+                h_obj,
+                float(sf.c @ x) + sf.obj_const,
             )
+        x = snap_integral(x, sf)
+        obj = float(sf.c @ x) + sf.obj_const
 
     raw = float(info.mip_dual_bound)
     bound = raw + sf.obj_const if np.isfinite(raw) else None

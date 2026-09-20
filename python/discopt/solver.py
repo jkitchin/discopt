@@ -17055,12 +17055,36 @@ def solve_model(
         # below rounds+re-solves it, but is best-effort — if it raises or is not
         # adopted the raw fractional value would be certified. Round up front so
         # the reported point is exactly integral regardless of the polish
-        # outcome, only when the rounded point stays feasible.
+        # outcome.
+        #
+        # #1380: the snap is UNCONDITIONAL and a snap the rows reject is a
+        # refusal, where it used to fall back to "report the unrounded point".
+        # That fallback is the false-certificate hole: the point this path claims
+        # is the integral one, and an integer column sitting inside
+        # integrality_tol buys its row up to ``|a_ij| * integrality_tol`` of
+        # slack the integral point does not have — unbounded in ``M`` on a big-M
+        # row. Measured on ``min -x + 3z  s.t.  x <= 1e7 z, 0<=x<=10, z binary``
+        # (true optimum -7): at ``x=10, z=1e-6`` the row holds EXACTLY, the snap
+        # to ``z=0`` misses it by 10.0, and this path returned ``optimal`` at
+        # ``-9.999997``. The arbiter and its tolerance are unchanged, so the only
+        # solves whose outcome moves are exactly those that were taking the
+        # fallback — a point no integral realisation supports.
         _rounded_inc, _rounded_feas = _round_incumbent_integers(
             sol_flat, int_offsets, int_sizes, evaluator, cl_list, cu_list
         )
-        if _rounded_feas:
-            sol_flat = _rounded_inc
+        _snap_moved = not np.array_equal(_rounded_inc, sol_flat)
+        sol_flat = _rounded_inc
+        if _snap_moved and not _rounded_feas:
+            raise RuntimeError(
+                "Spatial B&B: the incumbent's INTEGRAL realisation is infeasible. "
+                "The point the tree accepted satisfies the declared rows only while "
+                "its discrete columns are fractional (within integrality_tol=1e-5), "
+                "so its objective is not attainable by any integer point and cannot "
+                "be reported. A row coefficient large relative to "
+                "abs_tol/integrality_tol -- a big-M -- is the usual cause; tighten "
+                "the big-M, or scale the row, so the model is solvable at the "
+                "declared tolerances."
+            )
         x_dict = _unpack_solution(model, sol_flat)
 
         # Refine the incumbent's continuous variables with a KKT-accurate
@@ -19756,41 +19780,26 @@ def _solve_nlp_bb(
         # reporting; the dual-recovery re-solve below is best-effort and does
         # not guarantee the reported primal is rounded (see helper docstring).
         #
-        # #954 item 3 — the helper's ``feas_tol`` at this call site. It used to run
-        # at the helper default ``1e-4``, 100x the declared ``abs=1e-6``, which is
-        # not a tolerance this path can justify now that the exit below refuses at
-        # 1e-6: a rounding accepted at 1e-4 and rejected by the exit would turn a
-        # solve that had a perfectly good unrounded point into a crash. So the
-        # acceptance decision is taken with the SAME arbiter the exit uses — one
-        # test, so the guard cannot admit what the gate refuses — and the helper is
-        # called in snap-only mode. Its own ``feasible`` flag is deliberately not
-        # consulted here (it would be a second, looser opinion of the same
-        # question); it stays for the call sites that have no exit arbiter.
-        _rounded_inc, _ = _round_incumbent_integers(sol_flat, int_offsets, int_sizes)
-        if np.array_equal(_rounded_inc, sol_flat):
-            # Nothing was snapped: there is no acceptance decision to take, and
-            # re-judging the unchanged point here would only pre-empt the exit
-            # gate below with a confusing "snap rejected" message.
-            sol_flat = _rounded_inc
-        else:
-            _round_excess, _, _round_cmp = _nonlinear_point_excess(
-                evaluator,
-                _rounded_inc,
-                cl_list,
-                cu_list,
-                n_rows=_declared_rows,
-                box=_declared_box,
-            )
-            if _round_excess <= _NLPBB_EXIT_ABS_TOL:
-                sol_flat = _rounded_inc
-            else:
-                logger.debug(
-                    "NLP-BB: integer snap rejected (excess %.3e > %.0e over %d comparisons); "
-                    "reporting the unrounded incumbent (C-3).",
-                    _round_excess,
-                    _NLPBB_EXIT_ABS_TOL,
-                    _round_cmp,
-                )
+        # #954 item 3 — the helper is called in SNAP-ONLY mode. Its own
+        # ``feasible`` flag runs at the helper default ``1e-4``, 100x the declared
+        # ``abs=1e-6`` the exit below refuses at, so consulting it here would be a
+        # second, looser opinion of a question this path's exit gate already
+        # answers. One test, so a guard cannot admit what the gate refuses; the
+        # flag stays for the call sites that have no exit arbiter.
+        #
+        # #1380: the snap is UNCONDITIONAL, and the exit gate below — this path's
+        # one arbiter — judges what it produces. The rejected-snap fallback that
+        # stood here ("report the unrounded incumbent") is the false-certificate
+        # hole: the point this path claims is the integral one, and a discrete
+        # column inside integrality_tol buys its row up to
+        # ``|dg_i/dx_j| * integrality_tol`` of slack the integral point does not
+        # have, unbounded in ``M`` on a big-M row. Measured on
+        # ``min -x + 3z  s.t.  x <= 1e7 z, 0<=x<=10, z binary`` (true optimum -7):
+        # ``x=10, z=1e-6`` satisfies the row EXACTLY, the snap to ``z=0`` misses
+        # it by 10.0, and the fallback reported ``optimal`` at ``-9.999997``.
+        # Nothing about the arbiter or its tolerance changes; the exit gate simply
+        # stops being handed a point chosen to evade it.
+        sol_flat, _ = _round_incumbent_integers(sol_flat, int_offsets, int_sizes)
         x_dict = _unpack_solution(model, sol_flat)
 
         # Refine the incumbent's continuous variables, then recover relaxation
@@ -21094,6 +21103,102 @@ def _recover_nlp_duals_at_incumbent(
         for nm in int_names & set(d):
             d[nm] = np.zeros_like(np.asarray(d[nm], dtype=float))
     return cd, bdl, bdu
+
+
+def _repair_integral_point(
+    model: Model,
+    *,
+    lp_data,
+    x_flat: np.ndarray,
+    n_orig: int,
+    A_ub,
+    b_ub,
+    A_eq,
+    b_eq,
+    time_limit: Optional[float] = None,
+    prefer_pounce: bool = False,
+) -> Optional[np.ndarray]:
+    """Re-derive the CONTINUOUS columns with the integer columns fixed at their
+    integral realisation (#1380). ``None`` when no such point could be produced.
+
+    Why this exists, and why it is a re-derivation rather than a repair. Deciding
+    feasibility at the integral realisation (#1380) makes a whole class of
+    incumbent unreportable that the fractional test used to wave through, and that
+    class is *not* only the big-M pathology the issue was opened on. The
+    integrality tolerance is ``1e-5`` while the feasibility tolerance is ``1e-6``,
+    so a snap can move a row by ten times ``abs_tol`` **at unit coefficients** —
+    no ill-conditioning required. Measured on the OA convex-MINLP master of
+    ``test_lp_backend_select::test_oa_master_is_highs_free``
+    (``min (x-1.5)^2 + y`` s.t. ``x + y >= 2``, every coefficient ``1.0``): the
+    POUNCE B&B returns ``x`` about ``5e-6`` off integral and the snap misses a
+    3-nonzero, max-coefficient-``1.0`` row by ``5.042764e-06``. Refusing there
+    would fail an ordinary, well-scaled model.
+
+    The honest response is not to report the fractional point (its objective is
+    unattainable — that is #1380) and not to refuse (the model plainly has an
+    integral solution here). It is to *compute the point being claimed*: fix the
+    discrete columns at the integers the solver says they are, and solve the
+    remaining continuous problem over the DECLARED rows and bounds. What comes
+    back is a genuine point of the declared model, not an adjustment of a bad one,
+    and the caller's exit gate still judges it — this can only hand the gate a
+    candidate, never excuse one.
+
+    The objective is deliberately not returned: ``_objective_at_reported_point``
+    (#1331) recomputes it from whatever point is finally reported, so a repair
+    that lands on a worse objective is surfaced by the tree's own drift test
+    rather than hidden.
+    """
+    try:
+        from discopt.solvers import SolveStatus
+
+        if prefer_pounce:
+            from discopt.solvers.lp_pounce import solve_lp as _repair_lp
+        else:
+            from discopt.solvers.lp_simplex import (  # type: ignore[assignment]
+                solve_lp as _repair_lp,
+            )
+    except ImportError:
+        return None
+
+    bounds_fixed: list[tuple[float, float]] = []
+    offset = 0
+    for v in model._variables:
+        sz = int(v.size)
+        is_int = v.var_type in (VarType.BINARY, VarType.INTEGER)
+        for k in range(sz):
+            if offset + k >= n_orig:
+                break
+            if is_int:
+                val = float(round(float(x_flat[offset + k])))
+                bounds_fixed.append((val, val))
+            else:
+                bounds_fixed.append(
+                    (
+                        float(np.asarray(lp_data.x_l[offset + k])),
+                        float(np.asarray(lp_data.x_u[offset + k])),
+                    )
+                )
+        offset += sz
+    if len(bounds_fixed) != n_orig:
+        return None
+
+    try:
+        res = _repair_lp(
+            c=np.asarray(lp_data.c[:n_orig]),
+            A_ub=A_ub,
+            b_ub=b_ub,
+            A_eq=A_eq,
+            b_eq=b_eq,
+            bounds=bounds_fixed,
+            time_limit=time_limit,
+        )
+    except Exception as exc:  # noqa: BLE001 - a failed re-derivation is a None
+        logger.debug("#1380 integral re-derivation failed: %s", exc)
+        return None
+    if res.status != SolveStatus.OPTIMAL or res.x is None:
+        return None
+    out = np.asarray(res.x, dtype=np.float64).ravel()
+    return out if out.shape[0] == n_orig else None
 
 
 def _mip_recover_relaxation_duals(
@@ -25273,9 +25378,33 @@ def _solve_milp_simplex(
     _xu_gate = np.asarray(lp_data.x_u[:n_orig], dtype=np.float64)
     _gate_tol = 1e-5
 
+    def _snap_integral(xo: np.ndarray) -> np.ndarray:
+        """``xo`` with every discrete column rounded to its nearest integer."""
+        out = np.asarray(xo, dtype=np.float64).copy()
+        for _off, _sz in zip(int_offsets, int_sizes):
+            _hi = _off + int(_sz)
+            if _hi <= out.shape[0]:
+                out[_off:_hi] = np.round(out[_off:_hi])
+        return out
+
     def _point_feasible(xo: np.ndarray) -> bool:
         """Never take the engine's ``optimal``/``feasible`` on faith: verify the
-        returned point against the model's own rows, bounds, and integrality."""
+        returned point against the model's own rows, bounds, and integrality.
+
+        #1380: integrality is tested first, and the rows and bounds are then
+        tested at the **integral realisation** — the point the engine is actually
+        claiming. Tested side by side instead, a discrete column sitting inside
+        the integrality tolerance bought its row up to ``|a_ij|`` times that
+        tolerance of slack, which on a big-M row is unbounded in ``M``: this gate
+        passed ``x=10, z=1e-6`` on ``x <= 1e7 z`` (the row holds exactly) and the
+        route certified ``optimal`` at an objective no integral point attains. The
+        snap is a bit-for-bit no-op on a genuinely integral point.
+        """
+        for _off, _sz in zip(int_offsets, int_sizes):
+            seg = xo[_off : _off + int(_sz)]
+            if np.any(np.abs(seg - np.round(seg)) > 1e-4):
+                return False
+        xo = _snap_integral(xo)
         if _A_ub_m is not None and _b_ub_m is not None and _A_ub_m.shape[0]:
             if not bool(np.all(_A_ub_m @ xo <= _b_ub_m + _gate_tol * (1.0 + np.abs(_b_ub_m)))):
                 return False
@@ -25288,10 +25417,6 @@ def _solve_milp_simplex(
             return False
         if not bool(np.all(xo <= _xu_gate + _gate_tol)):
             return False
-        for _off, _sz in zip(int_offsets, int_sizes):
-            seg = xo[_off : _off + int(_sz)]
-            if np.any(np.abs(seg - np.round(seg)) > 1e-4):
-                return False
         return True
 
     # Re-entry on an uncertified ``feasible`` (issue #698). The first slice
@@ -25434,6 +25559,16 @@ def _solve_milp_simplex(
                 status,
             )
             return _debug_stopped_result()
+        # #1380: the gate vouched for the INTEGRAL realisation, so that is the
+        # point this route reports, and its objective is the one it publishes.
+        # Only discrete columns move and they all lie in the structural block, so
+        # the correction is exactly ``c[int] . delta`` — the slack columns are
+        # untouched and their cost, whatever it is, cannot enter.
+        _x_snapped = _snap_integral(x_arr)
+        if not np.array_equal(_x_snapped, x_arr):
+            _c_struct = np.asarray(lp_data.c, dtype=np.float64)[:n_orig]
+            obj += float(_c_struct @ (_x_snapped[:n_orig] - x_arr[:n_orig]))
+            x_arr = _x_snapped
         x_dict = _unpack_solution(model, x_arr)
         obj_val = -obj if maximize else obj
         bound_val = None
@@ -26168,39 +26303,26 @@ def _solve_milp_bb(
         # satisfies its equalities to 4.4e-16 and the snapped point violates one by
         # 1.55e-6, from per-coordinate snaps of at most 3.9e-7 over a 5-term row.
         #
-        # ``_round_incumbent_integers`` is documented to return ``feasible=False``
-        # when rounding breaks feasibility, and "the caller must not certify a
-        # rounded point that reports False" — but it can only do that when handed a
-        # checker, and this call site passes none, so the flag was unconditionally
-        # True and validated nothing. The matrix arbiter is the checker here: adopt
-        # the snap only when it keeps the point inside the declared rows, otherwise
-        # report the unrounded point. That is not a tolerance concession — the
-        # unrounded point satisfies BOTH declared tolerances (rows at 4.4e-16,
-        # integrality at 3.9e-7 against integrality_tol=1e-5), while the snapped one
-        # satisfies integrality exactly but misses abs=1e-6 on a row.
-        _rounded_inc, _rounded_feas = _round_incumbent_integers(sol_flat, int_offsets, int_sizes)
-        if _rounded_feas and _matrix_solution_feasible(
-            np.asarray(_rounded_inc[:n_orig], dtype=np.float64),
-            _A_ub_m,
-            _b_ub_m,
-            _A_eq_m,
-            _b_eq_m,
-            _declared_box,
-        ):
-            sol_flat = _rounded_inc
-        else:
-            logger.debug(
-                "MILP-BB: integer snap would leave the declared rows (%s); "
-                "reporting the unrounded incumbent",
-                _matrix_solution_violations(
-                    np.asarray(_rounded_inc[:n_orig], dtype=np.float64),
-                    _A_ub_m,
-                    _b_ub_m,
-                    _A_eq_m,
-                    _b_eq_m,
-                    _declared_box,
-                ),
-            )
+        # #952 answered that by adopting the snap only when the snapped point kept
+        # the declared rows, and otherwise "reporting the unrounded incumbent".
+        # #1380 is what that costs: it is the false-certificate hole, not a
+        # tolerance concession. The point a MILP *claims* is the integral one, so a
+        # snap the rows reject is the model saying the incumbent is not
+        # integer-feasible at the declared tolerances — and reporting the
+        # fractional point instead publishes an objective no integral point
+        # attains. Measured: on ``min -x + 3z  s.t.  x <= 1e7 z`` the unrounded
+        # ``x=10, z=1e-6`` satisfies the row EXACTLY while the snapped ``z=0``
+        # misses it by 10.0, and this branch certified ``optimal`` at ``-9.999997``
+        # where the true optimum is ``-7``. Generally a column ``INT_TOL`` off an
+        # integer buys its row ``|a_ij| * INT_TOL`` of slack, unbounded in ``M``.
+        #
+        # So the snap is unconditional and the exit gate below — the ONE arbiter on
+        # this path — decides. A point whose integral realisation leaves the
+        # declared rows is REFUSED loudly rather than laundered (CLAUDE.md §3); the
+        # #952 measurement is not forgotten, it is re-read, and it says that
+        # incumbent was never integer-feasible at ``abs=1e-6`` either.
+        _unrounded = sol_flat
+        sol_flat, _ = _round_incumbent_integers(sol_flat, int_offsets, int_sizes)
 
         # #952: exit gate, the same one ``_solve_miqp_bb`` grew — this path's
         # incumbent exit was structurally identical (round, unpack, return) with no
@@ -26218,11 +26340,82 @@ def _solve_milp_bb(
         if not _matrix_solution_feasible(
             _x_check, _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, _declared_box
         ):
-            raise RuntimeError(
-                "MILP-BB returned an infeasible point labeled feasible/optimal: "
-                + _matrix_solution_violations(
-                    _x_check, _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, _declared_box
+            # #1380: is this failure the SNAP's doing, or was the incumbent
+            # already off-row? Only the first is this issue's class, and the two
+            # want opposite responses — so separate them here rather than treat
+            # every rejected snap alike. An incumbent that was already outside the
+            # declared rows is the #952 defect and is refused below with #952's
+            # own message; the gate stays as live as it ever was.
+            _unrounded_ok = _matrix_solution_feasible(
+                np.asarray(_unrounded[:n_orig], dtype=np.float64),
+                _A_ub_m,
+                _b_ub_m,
+                _A_eq_m,
+                _b_eq_m,
+                _declared_box,
+            )
+            _snap_only = (
+                not np.array_equal(np.asarray(_unrounded[:n_orig], dtype=np.float64), _x_check)
+                and _unrounded_ok
+            )
+            # For the snap-caused case, COMPUTE the point being claimed — the
+            # continuous columns re-derived with the discrete ones fixed at their
+            # integral realisation — rather than refuse. A snap moves a row by up
+            # to ``sum_j |a_ij| * integrality_tol``, ten times ``abs_tol`` even at
+            # unit coefficients, so refusing every snap the rows reject would fail
+            # ordinary well-scaled models (the OA master measured in
+            # ``_repair_integral_point``), not just the big-M pathology. The
+            # re-derived point is judged by this same gate below: it can only
+            # supply a candidate, never excuse one.
+            if _snap_only:
+                _repaired = _repair_integral_point(
+                    model,
+                    lp_data=lp_data_orig,
+                    x_flat=sol_flat,
+                    n_orig=n_orig,
+                    A_ub=_A_ub_m,
+                    b_ub=_b_ub_m,
+                    A_eq=_A_eq_m,
+                    b_eq=_b_eq_m,
+                    time_limit=max(0.1, time_limit - (time.perf_counter() - t_start)),
+                    prefer_pounce=prefer_pounce,
                 )
+                if _repaired is not None and _matrix_solution_feasible(
+                    _repaired, _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, _declared_box
+                ):
+                    logger.debug(
+                        "MILP-BB: re-derived the incumbent's continuous columns at its "
+                        "integral realisation (#1380)"
+                    )
+                    sol_flat = np.asarray(sol_flat, dtype=np.float64).copy()
+                    sol_flat[:n_orig] = _repaired
+                    _x_check = np.asarray(sol_flat[:n_orig], dtype=np.float64)
+        if not _matrix_solution_feasible(
+            _x_check, _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, _declared_box
+        ):
+            # #1380: say WHICH of the two failures this is. When the unrounded
+            # incumbent cleared the same arbiter and the re-derivation above could
+            # not produce a feasible integral point either, the model has none
+            # here at the declared tolerances — a row coefficient large against
+            # ``feas_tol / integrality_tol`` (big-M) is what makes that possible.
+            # That is a statement about the MODEL the user can act on; an
+            # unqualified "infeasible point" is not.
+            _why = _matrix_solution_violations(
+                _x_check, _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, _declared_box
+            )
+            if _snap_only:
+                raise RuntimeError(
+                    "MILP-BB: the incumbent's INTEGRAL realisation is infeasible: "
+                    f"{_why}. The point the tree accepted clears the same rows only "
+                    "while its discrete columns are fractional (within "
+                    "integrality_tol=1e-5), so its objective is not attainable by any "
+                    "integer point and cannot be reported. A row coefficient large "
+                    "relative to abs_tol/integrality_tol -- a big-M -- is the usual "
+                    "cause; tighten the big-M, or scale the row, so the model is "
+                    "solvable at the declared tolerances."
+                )
+            raise RuntimeError(
+                "MILP-BB returned an infeasible point labeled feasible/optimal: " + _why
             )
 
         x_dict = _unpack_solution(model, sol_flat)
