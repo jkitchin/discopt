@@ -158,7 +158,15 @@ class CompressedBlockEvaluator:
     every individual number looks right.
     """
 
-    timing_bucket = "jax"
+    # NO class-level ``timing_bucket``: it is delegated through ``__getattr__``
+    # to the base evaluator, deliberately. ``_IpoptCallbacks`` charges every
+    # callback to that bucket, and most callbacks here (objective, gradient,
+    # constraints) really do run the base evaluator's tape — declaring "jax"
+    # would charge Rust time to JAX, the exact two-sided misattribution
+    # ``nlp_ipopt._charge_evaluator`` was written to end. The two callbacks that
+    # DO run in XLA open their own ``charge("jax")`` inside that frame; since
+    # ``charge`` records self time, the outer frame then keeps only the call
+    # overhead and the inner one carries the work.
 
     def __init__(self, base: Any, jac_values_fn, hess_values_fn, params_fn, n_colors: tuple):
         self._base = base

@@ -248,3 +248,31 @@ class TestSolveIsUnchanged:
         assert seen["model"] is model
         assert seen["n"] == TapeNLPEvaluator(model).n_variables
         assert result.status == "optimal"
+
+
+class TestTimingAttribution:
+    def test_the_compressed_work_is_charged_to_jax_and_the_rest_to_rust(self):
+        """An evaluator that lies about its layer breaks the profile that judges it.
+
+        ``_IpoptCallbacks`` charges every callback to the evaluator's
+        ``timing_bucket``. Most callbacks here still run the base evaluator's
+        Rust tape, so the bucket must stay the base's; only the two compressed
+        callbacks open a ``jax`` frame inside it.
+        """
+        from discopt import _timing
+        from discopt.solvers.nlp_pounce import solve_nlp
+
+        model = block_model(K=3, steps=5, dim=3)
+        base = TapeNLPEvaluator(model)
+        comp = build_compressed_evaluator(model, base)
+        assert comp.timing_bucket == base.timing_bucket == "rust"
+
+        x0 = np.full(base.n_variables, 0.1)
+        before = _timing.snapshot()
+        solve_nlp(comp, x0, options={"print_level": 0})
+        buckets = _timing.since(before)
+
+        # Both must be non-zero: all-rust would mean the compressed path never
+        # ran, all-jax would mean the delegated tape calls were misattributed.
+        assert buckets.get("jax", 0.0) > 0.0
+        assert buckets.get("rust", 0.0) > 0.0
