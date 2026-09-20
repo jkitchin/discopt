@@ -72,6 +72,17 @@ nn = ["onnx>=1.14", "onnxruntime>=1.16"]
 # that round-trips through a temporary AMPL .nl file. See docs/pyomo_solver.md.
 pyomo = ["pyomo>=6.7"]
 ml = ["scikit-learn>=1.0"]
+# `discopt.ml.readers.torch_reader` imports `torch.nn` to walk an
+# `nn.Sequential`. Kept out of `nn` (and out of `all`) deliberately: `nn` is
+# the small ONNX toolchain, and torch is a multi-hundred-MB wheel nobody who
+# only reads ONNX should pay for. Declared 2026-09-20 (v0.9.0 audit) so the
+# reader's ImportError can name a real extra.
+torch = ["torch>=2.0"]
+# `ParetoFront.plot()` is the only matplotlib consumer in the package.
+plot = ["matplotlib>=3.5"]
+# `solver="gurobi"` (discopt.solvers.gurobi). Needs a Gurobi license as well
+# as the wheel, so it stays out of `all`.
+gurobi = ["gurobipy>=10"]
 xgboost = ["xgboost>=1.7"]
 lightgbm = ["lightgbm>=4.0"]
 gnn = ["equinox>=0.13.8", "optax>=0.1"]
@@ -109,7 +120,7 @@ dev = [
     "onnx>=1.14",
     "onnxruntime>=1.16",
 ]
-all = ["discopt[pounce,ipopt,cutest,llm,gnn,nn,ml,sympy,pyomo]"]
+all = ["discopt[pounce,ipopt,cutest,llm,gnn,nn,ml,plot,sympy,pyomo]"]
 
 [project.scripts]
 discopt = "discopt.cli:main"
