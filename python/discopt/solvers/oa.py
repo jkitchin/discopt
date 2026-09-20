@@ -35,7 +35,11 @@ import numpy as np
 
 from discopt.modeling.core import Constraint, Model, ObjectiveSense, SolveResult, VarType
 from discopt.solvers import pounce_incumbent_options, pounce_option_defaults
-from discopt.solvers._gap import bound_inversion_tolerance, optimality_gap
+from discopt.solvers._gap import (
+    bound_inversion_tolerance,
+    master_gap_tolerance,
+    optimality_gap,
+)
 from discopt.solvers.mip_nlp_candidates import FixedNLPCandidate, FixedNLPCandidateManager
 from discopt.solvers.mip_nlp_options import (
     FP_OPTION_KEYS,
@@ -1512,6 +1516,54 @@ def _is_primal_feasible(evaluator, x, tol: float = 1e-4) -> bool:
 _NLP_WALL_FLOOR_S = 0.1
 
 
+#: POUNCE's (and Ipopt's) default convergence tolerance ``tol``.
+_NLP_DEFAULT_TOL = 1e-8
+
+#: Smallest objective magnitude :func:`_nlp_scaled_tol` scales ``tol`` by, so the
+#: tightest tolerance it asks for is ``1e-10``. Measured: ``tol=1e-10`` certified
+#: both probe models cleanly; a blanket ``1e-12`` returned one
+#: ``Search_Direction_Becomes_Too_Small`` (raw status 3) on the first.
+_NLP_TOL_SCALE_FLOOR = 1e-2
+
+
+def _nlp_scaled_tol(evaluator, x0) -> Optional[float]:
+    """Convergence ``tol`` for a fixed-integer NLP whose point becomes OA's
+    incumbent, or ``None`` to keep the solver default.
+
+    POUNCE's (and Ipopt's) convergence tests are absolute, so below unit
+    objective scale a ``Solve_Succeeded`` point can sit far from the optimum in
+    OA's units. Measured on a seeded ``dm.sum`` Markowitz model (``n=10, K=3,
+    seed=3``, optimum 2.9462641e-3): the fixed NLP returned status 0 at
+    2.9469633e-3, 7e-7 above the exact QP optimum (HiGHS) -- 70% of OA's
+    ``1e-6`` closing window -- and the cuts taken at that point held the master
+    1.04e-6 below it. The master then re-proposed the visited assignment 50
+    times and OA ended ``stalling`` (61 MILPs). With ``tol`` scaled to the
+    objective: ``optimal`` at the exact optimum in 11 MILPs. This is the units
+    defect :func:`~discopt.solvers._gap.master_gap_tolerance` fixes for the
+    master (#1352), on the NLP side.
+
+    ``tol = 1e-8 * max(|f(x0)|, 1e-2)`` for ``|f(x0)| < 1``: never looser than the
+    default and never tighter than ``1e-10``, and every unit-scale solve is
+    exactly unchanged. (POUNCE 0.12's ``obj_scaling_factor`` is not used: on the
+    #1352 issue model's fixed-assignment NLP it returned status 0 at 2.0860e-3
+    against an optimum of 2.0154e-3, above its own start point. That did not
+    reproduce on a free 3-variable QP.) Soundness does not depend on this: OA's
+    cuts are valid at any point and its bound comes from the master.
+    ``DISCOPT_OA_NLP_SCALED_TOL=0`` is the opt-out.
+    """
+    if os.environ.get("DISCOPT_OA_NLP_SCALED_TOL", "1").strip().lower() in (
+        "0",
+        "false",
+        "no",
+        "off",
+    ):
+        return None
+    f0 = abs(float(evaluator.evaluate_objective(x0)))
+    if not np.isfinite(f0) or f0 >= 1.0:
+        return None
+    return _NLP_DEFAULT_TOL * max(f0, _NLP_TOL_SCALE_FLOOR)
+
+
 def _time_left(t_start: float, time_limit: float) -> float:
     """Unfloored seconds left before ``t_start + time_limit`` (negative once past)."""
     return float(time_limit) - (time.perf_counter() - float(t_start))
@@ -1539,8 +1591,12 @@ def _solve_nlp_attempt(
     max_iter: int = 200,
     x0=None,
     max_wall_time: Optional[float] = None,
+    scale_tol: bool = False,
 ) -> _NLPAttempt:
     """Solve an NLP with given bounds, retaining solver multipliers.
+
+    ``scale_tol`` applies :func:`_nlp_scaled_tol`; the fixed-integer
+    subproblem (whose point is OA's incumbent) passes it.
 
     ``max_wall_time`` is the subsolve's share of the caller's deadline, in
     seconds. Measured on POUNCE 0.10 (``scratchpad/issue1105/probe_maxwall.py``,
@@ -1571,6 +1627,10 @@ def _solve_nlp_attempt(
         opts = pounce_option_defaults()
         opts.update(pounce_incumbent_options())
         opts.update({"max_iter": max_iter})
+        if scale_tol:
+            tol = _nlp_scaled_tol(evaluator, x0)
+            if tol is not None:
+                opts["tol"] = tol
         if max_wall_time is not None:
             opts["max_wall_time"] = max(float(max_wall_time), _NLP_WALL_FLOOR_S)
         result = solve_nlp(evaluator, x0, options=opts)
@@ -1727,7 +1787,13 @@ def _solve_nlp_subproblem(
 
     proxy = _BoundsProxy(evaluator, sub_lb, sub_ub)
     attempt = _solve_nlp_attempt(
-        proxy, sub_lb, sub_ub, nlp_solver, x0=initial_point, max_wall_time=max_wall_time
+        proxy,
+        sub_lb,
+        sub_ub,
+        nlp_solver,
+        x0=initial_point,
+        max_wall_time=max_wall_time,
+        scale_tol=True,
     )
     return _maybe_return_nlp_attempt(attempt, return_attempt)
 
@@ -5650,6 +5716,12 @@ def solve_lp_nlp_bb(
     #: never had anything to judge, which is NOT the same as "it judged and said
     #: keep going" (CLAUDE.md §6); it is exported in ``callback_stats``.
     bound_observations = [0]
+    #: The gap was *seen* to meet tolerance at some check-in. Strictly weaker than
+    #: ``converged_at``, which additionally means the observation stopped the
+    #: master. A master that converges inside its final tree is only ever the
+    #: former: by then the separator has fallen silent, so no restart remains to
+    #: carry a check-in and there is nothing left to cut short.
+    converged_observed = [False]
 
     def _master_bound_internal(raw) -> Optional[float]:
         """The master's dual bound in the internal minimization sense, or None."""
@@ -5661,7 +5733,13 @@ def solve_lp_nlp_bb(
         return value
 
     def callback_terminate(snapshot: dict[str, object]) -> bool:
-        if (time.perf_counter() - t_start) >= float(time_limit):
+        # The post-loop check-in: the master has already stopped on its own, so
+        # this one only *observes*. It must not claim the wall, must not stop
+        # anything, and must not consult the caller's hook -- asking a user hook
+        # whether to terminate a master that has already terminated would be a
+        # question with no meaning.
+        is_final = snapshot.get("context") == "final"
+        if not is_final and (time.perf_counter() - t_start) >= float(time_limit):
             return True
         lb = _master_bound_internal(snapshot.get("dual_bound"))
         ub = incumbent_obj
@@ -5681,9 +5759,15 @@ def solve_lp_nlp_bb(
                 # -- gap 6.3e-5, inside the 1e-4 default -- at 5.1 s of a 60 s
                 # limit, then rebuilt its tree five more times and was reported
                 # ``feasible`` at the wall (measured 2026-08-29).
+                converged_observed[0] = True
+                if is_final:
+                    # Seen, but nothing was cut short: the master had already
+                    # finished. Recording this as an early exit would be a false
+                    # claim about why the solve ended (CLAUDE.md §1).
+                    return False
                 converged_at[0] = lb if converged_at[0] is None else max(converged_at[0], lb)
                 return True
-        if hook is None:
+        if is_final or hook is None:
             return False
         context: dict[str, object] = {
             "event": "termination",
@@ -5816,6 +5900,13 @@ def solve_lp_nlp_bb(
     # on any other master this count is 0 and the exit is inert by construction.
     callback_stats["dual_bound_observations"] = int(bound_observations[0])
     callback_stats["converged_early"] = bool(converged_at[0] is not None)
+    # "Early" means the certificate STOPPED the master; "observed" means a
+    # check-in saw it at all, including the post-loop one. Which of the two a
+    # converging master reaches depends on whether its last accepted incumbent
+    # arrives with a restart left to carry the observation -- a scheduling
+    # detail, not a property of the solve. Assert on this one, not on
+    # ``converged_early``, when the question is "did the exit ever see the gap".
+    callback_stats["converged_observed"] = bool(converged_observed[0])
     callback_terminated = bool(callback_stats.get("terminated"))
     status, termination_reason = _lp_nlp_bb_exit_status(
         converged_early=converged_at[0] is not None,
@@ -7204,7 +7295,7 @@ def solve_oa(
                 decomp.obj_is_linear,
                 decomp.master_bound_valid,
                 time_limit=remaining,
-                gap_tolerance=gap_tolerance,
+                gap_tolerance=master_gap_tolerance(gap_tolerance, UB),
                 add_slack=False,
                 max_slack=max_slack,
                 oa_penalty_factor=oa_penalty_factor,
@@ -7388,7 +7479,7 @@ def solve_oa(
                 decomp.obj_is_linear,
                 master_bound_valid,
                 time_limit=max(time_limit - elapsed, 0.0),
-                gap_tolerance=gap_tolerance,
+                gap_tolerance=master_gap_tolerance(gap_tolerance, UB),
                 add_slack=True,
                 max_slack=max_slack,
                 oa_penalty_factor=oa_penalty_factor,
@@ -8082,7 +8173,7 @@ def solve_oa(
                     None if master_checkin_deadline is None else master_checkin_deadline - elapsed
                 ),
             ),
-            gap_tolerance=gap_tolerance,
+            gap_tolerance=master_gap_tolerance(gap_tolerance, UB),
             add_slack=add_slack,
             max_slack=max_slack,
             oa_penalty_factor=oa_penalty_factor,

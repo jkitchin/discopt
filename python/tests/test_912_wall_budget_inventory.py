@@ -629,7 +629,10 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "solvers/oa.py",
-        "if (time.perf_counter() - t_start) >= float(time_limit):",
+        # The single-tree master's check-in claims the wall -- except at the
+        # post-loop ``context="final"`` look, which only observes a certificate
+        # the master has already reached and must not claim anything.
+        "if not is_final and (time.perf_counter() - t_start) >= float(time_limit):",
         "contract",
     ),
     (

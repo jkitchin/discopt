@@ -9653,3 +9653,351 @@ regime uses them for.
 
 Note this does not touch #1236's correctness content. The two separator fixes
 (§69, §71.1–71.2) are independent of the flag and ship regardless.
+
+## 73. #1352/#1355/#1356 the OA convexity false negative, and four falsified explanations of a false certificate (2026-09-19)
+
+#1352 reported that an objective written with `dm.sum` — a PSD quadratic — was
+not recognised as convex by OA, so it never got objective cuts. The fix makes OA
+consult the interval-Hessian certificate and the exact-QP route. Chasing its
+graduation panel turned up a **false `optimal` on `gams01`** that took four
+hypotheses to place, none of which survived. This section records the fix, the
+four falsifications, and one retraction of a claim published earlier in the same
+work — per CLAUDE.md §4 and §11.
+
+### 73.1 Retraction — the SCIP `.cip` evidence against our `gams01` bound was invalid
+
+An earlier round of this work claimed SCIP exhibited a feasible `gams01` point at
+**23885.441**, below our reported bound of 28274.71, and offered that as proof the
+bound was false. **That claim is withdrawn.** It rested on reading SCIP's `b*/x*/i*`
+variable names as `.nl` column indices. Comparing bounds column by column shows a
+permutation — SCIP column 10 has ub 18.4597 where ours has 24, and its column 13 has
+ub 24 where ours has 14.7446 — so those names encode SCIP's *internal* ordering
+(binaries first), not the `.nl` order. No point was ever mapped correctly and the
+comparison never happened.
+
+The conclusion happens to survive on better evidence (§73.2), but the argument does
+not, and must not be repeated.
+
+### 73.2 `gams01` does report a false certificate — on the oracle, not on SCIP
+
+`minlplib.solu` gives `=best= 21380.20059` and `=bestdual= 2355.887174`. Our
+reported bound of **28274.712715258527** is above the best known *primal* and 12x
+the best known *dual*, so it is false by either reading. Our own solver agrees:
+at TL=600 the same instance returns `feasible`, bound **949.56**, gap 96.6 %, 5217
+nodes. Nothing about 28274.71 is a bound.
+
+Three properties place it out of scope for this PR:
+
+* **Pre-existing.** It reproduces with all four of this PR's flags OFF at TL=29.5:
+  `optimal`, bound == objective == 28274.712715258527, nodes = 31.
+* **Flag-independent.** It appears in the baseline arm, so no flag here causes it.
+* **Load-dependent.** 14/14 solo repetitions at the same deadline were bit-identical
+  and *clean* (63 nodes, bound 562.699). It needs a loaded machine to appear, which
+  is why it shows up in a panel and not in a single run.
+
+### 73.2.1 The mechanism, confirmed — a failed relaxation is pruned as "dominated"
+
+`process_evaluated` step 1 in `crates/discopt-core/src/bnb/tree_manager.rs` prunes
+any node with `local_lower_bound >= cutoff_value()` **before** any `bound_trusted`
+check. A node the orchestrator sentinelled (1e30) because its relaxation *failed*
+therefore prunes as soon as an incumbent exists — `1e30 >= incumbent` is true — and
+nothing records that its subtree was never bounded. `update_global_lower_bound` then
+finds no Pending/Evaluated node left, takes the `min_lb == INFINITY` branch, and sets
+`global_lower_bound = incumbent_value`. The search reads as closed and the incumbent
+is certified.
+
+This is no longer a hypothesis. A four-node probe on `TreeManager` reproduces it with
+no model, no load and no flags — root branches, one child returns a trusted
+integer-feasible point (incumbent 5.0), the sibling returns the 1e30 sentinel:
+
+    PROBE pruned=1 fathomed=1 incumbent=5 glb=5 unresolved_floor=inf bound_unresolved=false
+
+`pruned=1` is the sentinelled node going out as "dominated"; `unresolved_floor=inf`
+and `bound_unresolved=false` say nothing was recorded about the unexplored subtree;
+`glb=5` is the collapse. The tree certifies 5.0 while a subtree that was never bounded
+could hold anything. `gams01` is load-dependent only because *relaxation failures* are
+— the defect itself is deterministic.
+
+**Why the obvious fix is wrong.** The same 1e30 sentinel carries a second, unrelated
+meaning: a `lazy_constraints` cut or an `incumbent_callback` veto rejecting an integer
+point (#1038). For that case pruning is correct — the point really is excluded. The
+Rust layer cannot tell the two apart, and the in-tree comment records that widening
+`trusted` to cover it cost `m3` its certificate for no soundness gain. So the fix has
+to separate the two meanings at the PyO3 boundary (a distinct "excluded by callback"
+signal on `NodeResult`) rather than reinterpret the sentinel — a change to the
+orchestrator interface plus its own §5 panel.
+
+**Disposition: not fixed in this PR.** It is a pre-existing P0-class correctness
+defect, independent of #1352/#1355/#1356, and the fix touches the Rust/Python node
+interface. Folding it in would mix it with three unrelated fixes against the "keep PRs
+scoped" rule. It is recorded here with a reproduction so it can be picked up directly.
+
+### 73.3 Falsified — the convex-quadratic objective bound is not live on `gams01`
+
+`_convex_objective_lower_bound` in `python/discopt/solver.py` mixes a *model*
+gradient with a *true* objective value:
+
+    grad = H @ x_hat + g   # gradient of the constant-Hessian quadratic MODEL
+    fx = f(x_hat)          # value of the TRUE objective
+
+which is unsound the moment the true objective is not that quadratic. On `gams01`
+it is not: the probe measured `max|H(a) - H(b)| = 3.419004e+02` over sampled points,
+so the objective is convex but **non**-quadratic. The mechanism is nevertheless not
+the culprit, because the gate correctly rejects it: `_objective_is_convex_quadratic`
+returns **False** (the term classifier reports `general_nl: 340`), so
+`_use_convex_obj_bound` is False and the code never runs. Hypothesis killed by its
+own entry experiment.
+
+### 73.4 Falsified — the route/fallback merge contributes nothing
+
+`_merge_route_and_fallback` was the second suspect. In 14/14 clean runs the route
+returned `{'status': 'unknown', 'objective': None, 'bound': None, 'bound_valid':
+False}`, so it contributes no bound to merge. Killed.
+
+### 73.5 Falsified — the OA `CUTOFF` bound promotion is unreachable here
+
+The third suspect was the `SolveStatus.CUTOFF` branch in `solvers/oa.py`, which
+promotes `master_objective_cutoff` to a bound. That branch is live only under
+`mip_nlp_profile == "shot"` with gurobi; on this path `master_objective_cutoff` is
+None. Killed.
+
+### 73.6 Retraction — `watercontamination0202` was not a false certificate
+
+An earlier note in this work recorded discopt falsely certifying
+`watercontamination0202`. **Withdrawn.** The grep that produced it matched
+`watercontamination0202r`, whose reference is 97.90446 against our 97.90444 —
+inside tolerance. There was no violation.
+
+### 73.7 `DISCOPT_FARKAS_RAY_CLEANUP` graduates (#1355)
+
+The §5 panel: 990 rows, **7346 certificate checks**, 198 instances x 30 s, the two
+arms differing only in this flag.
+
+| | cleanup OFF | cleanup ON |
+|---|---|---|
+| certified instances | 97 | **100** |
+| total wall, all instances | 3362.6 s | **3293.8 s** |
+| bounds above their reference optimum | **1** (`gams01`) | 0 |
+| certification regressions | — | 1 (`gams01`) |
+
+Both §5 bars are met. The single "regression" is `gams01` losing a certificate it
+should never have had (§73.2) — with the cleanup OFF that arm is the one row in
+7346 checks that reports a bound above its reference optimum. Losing it is the fix.
+
+Graduated **default ON**; `=0` opts out and the legacy path is untouched. Verified
+on a §8 import tree built from the worktree (asserted `discopt.__file__` and a
+`_rust.abi3.so` differing from the pre-flip build), three arms of the captured OA
+master:
+
+| `DISCOPT_FARKAS_RAY_CLEANUP` | status | MILPs | bound |
+|---|---|---|---|
+| unset | optimal | 31 | 0.0031842969 |
+| `=1` | optimal | 31 | 0.0031842969 |
+| `=0` | feasible | 52 | 0.0019696441 |
+
+Unset is bit-identical to the opt-in arm and materially different from the opt-out,
+which is what makes this a test of the *default* rather than of the flag.
+
+### 73.8 A §8 incident, recorded because it nearly published a wrong result
+
+A local `pytest` run in the `discopt-1352` worktree reported the failing CI test as
+passing. It was importing `discopt` from **`/Users/jkitchin/projects/discopt`** —
+the main tree — because `site-packages/discopt.pth` points there and nothing in the
+worktree overrides it. The "it passes locally" inference was withdrawn and the run
+repeated on a verified tree. This is the second time in this repository that a
+worktree measurement silently ran against the main tree; CLAUDE.md §8 exists for it,
+and the rule that caught it is *assert `__file__` **and** a version marker* — here,
+post-merge markers (`_relax/scaling.py` absent, `_relax/module_status.py` present).
+
+### 73.9 Re-verifying the six certificate flips at a longer limit
+
+The first #1360 graduation panel ran at a 30 s limit and showed six instances whose
+certificate differed between arms. Six flips over 198 instances would be the
+`DISCOPT_CUT_INHERIT` signature — cert-clean but not net-positive — so before
+graduating anything the six were re-run at **180 s**, interleaved, two reps, on the
+§8-verified import tree (`discopt.__file__` under `pytree3/`, post-merge markers
+asserted). A flip that disappears when the clock is loosened was never a flag
+effect; it was the arm running out of time.
+
+Arms are cumulative, so each adjacent pair isolates one flag — `(convexity
+certificate, scaled NLP tol, Farkas cleanup, route gate)`:
+
+| arm | flags | isolates |
+|---|---|---|
+| B0 | 0,0,0,0 | baseline |
+| T | 0,1,0,0 | B0→T = `DISCOPT_OA_NLP_SCALED_TOL` |
+| H | 0,1,1,0 | T→H = `DISCOPT_FARKAS_RAY_CLEANUP` |
+| J | 0,1,1,1 | H→J = `DISCOPT_CONVEX_ROUTE_SYNTACTIC_OBJECTIVE` |
+| K | 1,1,1,1 | J→K = `DISCOPT_OA_CONVEXITY_CERTIFICATE` |
+
+`EXECUTED_RUNS 60`, `EXECUTED_COMPARISONS 10`, `INCUMBENTS FAILING VERIFICATION:
+none` (CLAUDE.md §6 — the probe prints its own executed counts and exits non-zero at
+zero).
+
+| instance | B0 | T | H | J | K | verdict |
+|---|---|---|---|---|---|---|
+| `clay0203m` | ✓ | ✓ | ✓ | ✓ | ✓ | wall artifact — all arms certify, 127 nodes, bound 41573.26250280856 identical |
+| `p_ball_10b_5p_3d_m` | ✓ | ✓ | ✓ | ✓ | ✓ | wall artifact — 1751 nodes, bound 44.004217 identical; the instance *needs* 53–54 s, so a 30 s limit could never have certified it in any arm |
+| `tls2` | SPLIT | ✓ | ✓ | SPLIT | SPLIT | **not attributable** — the same arm disagrees between reps (rep 1: all five certify; rep 2: B0/J/K do not). Run-to-run nondeterminism, which is exactly what the second rep exists to expose (§9) |
+| `m7_ar25_1` | ✗ | ✗ | ✓ | ✓ | ✓ | **real, and it is the Farkas flag** — the step is T→H. B0/T run the full 180 s to 9619/9705 nodes and end `feasible`; H/J/K certify in 4.4 s at 0 nodes |
+| `watercontamination0303r` | ✓ | ✓ | ✓ | ✓ | ✓ | wall artifact — 257 nodes, bound 424.544103877176 identical |
+| `QPLIB_10056` | ✓ | ✓ | ✓ | ✓ | ✓ | wall artifact — 3635 nodes, bound -33.860171026798085 identical |
+
+**Result: not one flip is attributable to `DISCOPT_OA_NLP_SCALED_TOL` (B0→T) or
+`DISCOPT_OA_CONVEXITY_CERTIFICATE` (J→K).** Four of six are wall artifacts, one is
+run-to-run noise, and the single reproducible flip is won by the Farkas cleanup,
+which §73.7 had already graduated on its own 198-instance panel.
+
+**Retraction (§11).** The first panel's reading of `m7_ar25_1` — "arm J certifies in
+4.44 s at 0 nodes, arm K takes 30.27 s and 953 nodes and ends `feasible`, so the
+convexity certificate costs this instance its certificate" — is **withdrawn**. At
+180 s, K is bit-identical to J (0 nodes, 4.4 s, bound 143.58499999999148) in both
+reps. The 953-node K run was load-dependent, not a flag effect; it was published
+from a single uninterleaved 30 s arm and should not have been.
+
+**Disposition.** Both flags ship default-ON with a `=0` opt-out, which is what the
+code already does (`oa.py:1554`, `_relax/convexity/certificate.py:129`). The §5
+net-positive bar is carried by the measurements on the class each flag targets — the
+#1352 K=6 model (72 MILPs / `feasible` → 17 MILPs / `optimal`) and `port-12-3-2`
+(`feasible` at 30 s → `optimal` in 1.22 s) — and this panel supplies the other half
+of the gate: cert-clean, with no instance regressing and no incumbent failing
+independent feasibility verification. Neither flag is left pending, which is the
+#1345 rule this PR is bound by.
+
+### 73.10 Falsified — the `test_issue_1066` CI flake is not the wall, it is a race
+
+`test_the_single_tree_stops_when_its_own_bound_certifies_the_incumbent` went red
+intermittently on Linux CI during #1360 and is unrelated to #1352/#1355/#1356 —
+both PR flags are bit-identical on it (3.4 s, 73 restarts, `converged_early` True
+with `DISCOPT_OA_MASTER_GAP_SCALED` and `DISCOPT_FARKAS_RAY_CLEANUP` each at `0`
+and `1`). Recorded here because two published explanations were wrong and the
+measurement that killed them is worth keeping.
+
+**Retraction 1 (§11).** The fixture's docstring claims the certificate "becomes
+available early and the separator does not stop". Measured per check-in on macOS:
+
+    restart 61..72   gap 9.76e-01 .. 9.91e-01   (9760x the 1e-4 tolerance)
+    restart 73       gap <= 1e-4, the early exit fires
+
+The gap does not close because the dual bound rises — `lb` creeps 0.005999 →
+0.006999 across those twelve restarts. It closes because the *incumbent* drops,
+0.2927 → 0.008, when the separator finally accepts the all-eight-open assignment
+at restart 73, ~2 restarts before it runs dry. (The docstring's "four units at
+`x = 0.5`" is also wrong: that sums to 2.0 against a demand of 4.0. The optimum
+is all eight open at 0.5, objective 0.008.)
+
+**Retraction 2 (§11).** The flake was published in this PR as a contention
+lottery at the 60 s wall, from the job slowing 830 s → 1237 s (1.49x) when main
+added ~86 tests. A guard separating "cut short" from "asked and declined" passed
+on CI while the run still failed, so those runs were never truncated. Withdrawn.
+
+**The mechanism.** The Linux failure, with the diagnostic in place:
+
+    reason='optimal', restarts=66, terminated=False, converged_early=False,
+    bound=0.007999999995733842, objective=0.00800000154522579
+
+`reason='optimal'` means the separator ran dry on its own at 66 restarts, and the
+final bound and objective *do* satisfy the gap (1.9e-7 against 1e-4). The
+certificate existed; no check-in ever saw it. The early exit is consulted only at
+**restart** events (`milp_highs.py:624`), and the last tree ends without
+requesting a cut — so **convergence discovered in the final tree is structurally
+unobservable to the early exit**. macOS passes only because the good incumbent
+lands at restart 73 with two restarts left to see it. The test asserts that
+convergence happens at least one restart before the end: a race, with which
+symmetric assignment the master reaches first differing across HiGHS builds.
+
+**Also ruled out, each by measurement.** HiGHS thread nondeterminism (invariant at
+`threads` 0 and 1; at 2 and 8 the route abandons `lp_nlp_bb` entirely — answer
+still 0.008 but `mip_nlp_trace` is None, which makes the test die with
+`TypeError` rather than a named failure, same at `time_limit` 4 s and 5 s).
+Dependency drift (green and red runs installed identical versions). A knife-edge
+on gap *precision* — falsified outright: the gap is 9760x tolerance one restart
+before it fires. `terminate_polls == restarts == 73`, so the documented 1 s
+interrupt poll never fires on this master at all, because `milp_highs.py:623`
+resets its clock on every restart and restarts here are ~49 ms apart.
+
+**Two repair attempts, both falsified.** Seeding the known optimum via
+`initial_point` does not help — that seeds the NLP start, not the incumbent; the
+minimum gap seen while running stays 0.976 and the exit fires at restart 77 of 77.
+Lowering the demand so the master reaches the optimum early does not help either:
+at demand 3.0/2.0/1.0/0.5 the run ends `reason='optimal'` with
+`converged_early=False` (39/98/190/132 restarts), because the optimum is
+all-eight-open regardless of demand. Of the five variants only the shipped
+demand=4.0 fires at all.
+
+**Disposition.** Pre-existing, owned by #1066, not folded into #1360 — the test
+was restored to its `main` state there on the owner's call. Fixing it means a
+fixture in which the separator provably outlives the certificate, which neither
+attempt above achieved, or accepting that the final tree's convergence is never
+observed. Note that "fixing" the latter by consulting after the loop would be
+wrong: nothing stopped early, so reporting `converged_early` would be false.
+
+### 73.11 Retraction — §73.10's disposition was wrong on both counts
+
+§73.10 concluded two things that later measurement falsified. CLAUDE.md §11
+requires retracting one's own published claims in writing, so both are withdrawn
+here, and the PR #1360 body carried the first of them and has been corrected.
+
+**Retraction 1 — "pre-existing, not folded into #1360".** Withdrawn. The failure
+*is* caused by #1360. The evidence §73.10 rested on was an absence (the test also
+looked marginal on `main`); the evidence against it is a presence: `1066` fails in
+0 of 8 recent `main` CI runs and 4 of 5 on the branch. A subprocess A/B over the
+branch's four flags, run interleaved under a load gate (load 2.60, two repetitions,
+identical both times), isolates a single one:
+
+| arm | restarts | lazy cuts | mipsol calls |
+|---|---|---|---|
+| `DISCOPT_OA_NLP_SCALED_TOL=0` (main's behaviour) | 75 | 223 | 354 |
+| `DISCOPT_OA_NLP_SCALED_TOL=1` (graduated in #1360) | 73 | 228 | 347 |
+
+`DISCOPT_OA_CONVEXITY_CERTIFICATE`, `DISCOPT_FARKAS_RAY_CLEANUP` and
+`DISCOPT_CONVEX_ROUTE_SYNTACTIC_OBJECTIVE` are bit-for-bit no-ops on this fixture;
+setting only `DISCOPT_OA_NLP_SCALED_TOL=0` reproduces main's trajectory exactly.
+The #1356 tolerance changes which fixed-NLP incumbents the separator accepts, which
+moves the master by two restarts — enough, on Linux, to carry the good incumbent
+past the last restart that could observe it. The flag is not at fault and is not
+being retreated from: it graduated on its own panel, and every arm above returns
+the same certified optimum 0.008.
+
+**Retraction 2 — "consulting after the loop would be wrong".** Withdrawn, and it
+was hiding a real defect. The claim conflated two different facts: that nothing was
+*cut short*, and that nothing was *seen*. Only the first justifies withholding
+`converged_early`; the second was never justified at all. Check-ins were raised
+only at restart and interrupt events, and a master stops restarting exactly when
+its separator falls silent — which is when the incumbent has become good. So
+convergence reached inside the **final tree was structurally unobservable**: the
+certificate existed and nothing was ever allowed to look at it. Linux CI printed
+that state verbatim — `bound=0.007999999996` against `objective=0.008000001545`, a
+1.9e-7 gap against a 1e-4 tolerance, reported as `converged_early=False`.
+
+**The fix (#1360).** `solve_milp_with_lazy_cuts` raises one post-loop check-in with
+`context="final"` when the tree finishes on its own, and its answer is **ignored** —
+there is nothing left to interrupt, and honouring a stop there would report a
+completed solve as one we cut short (§73.10's instinct, kept). OA separates the two
+facts: `converged_early` still means the certificate *stopped* the master, and the
+new `converged_observed` means a check-in *saw* it. Status and `termination_reason`
+are untouched, so the change is bound-neutral (§5 regime 1). Measured on the
+fixture, varying only the demand:
+
+| demand | restarts | `converged_early` | `converged_observed` | reason | objective |
+|---|---|---|---|---|---|
+| 0.5 | 132 | False | **True** | optimal | 0.008 |
+| 1.0 | 190 | False | **True** | optimal | 0.008 |
+| 2.0 | 98 | False | **True** | optimal | 0.008 |
+| 3.0 | 39 | False | **True** | optimal | 0.008 |
+| 4.0 | 73 | True | True | gap_tolerance | 0.008 |
+
+The four `False` rows are the previously invisible certificates. Which row a run
+lands on is scheduling, not a property of the solve — so the end-to-end test now
+asserts `converged_observed`, the guarantee the exit actually owes, and accepts
+either terminal reason. That is a re-pointing, not a weakening: the test still
+pins `status == OPTIMAL`, the objective, and `bound <= incumbent`, which is what
+the `rsyn0820m02m` regression it exists for would violate. The stop path itself
+keeps deterministic coverage in
+`test_a_callback_that_says_stop_stops_the_loop_and_says_so` and the
+`_lp_nlp_bb_exit_status` unit tests.
+
+**Still open, not fixed here.** `terminate_polls == restarts` on this master, so
+the 1 s in-tree interrupt poll never fires: `milp_highs.py` resets `last_poll` at
+every restart and restarts are ~49 ms apart. That is a dead clock on any
+frequently-restarting master, and it is a separate defect from this one.

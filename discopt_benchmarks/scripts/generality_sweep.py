@@ -182,6 +182,15 @@ ARMS: dict[str, dict] = {
         "struct_attr": None,
         "regime": "bound_changing",
     },
+    # #1355 Farkas-ray noise cleanup: re-verifies a rejected infeasibility ray with
+    # its ~1e-17 rounding entries zeroed, so node LPs that ended ``Numerical`` can
+    # fathom. The rigorous verifier is unchanged, but WHICH nodes fathom changes:
+    # ``bound_changing``. No static proxy (the noise is a runtime LP property).
+    "farkas_ray_cleanup": {
+        "env": {"DISCOPT_FARKAS_RAY_CLEANUP": "1"},
+        "struct_attr": None,
+        "regime": "bound_changing",
+    },
     # #1351 affine-base power partition: AMP's partition refinement could not reach
     # a power whose base is affine in one original (``(x-c)**2``), so the dual bound
     # stayed pinned at the root secant no matter how fine the partition got. The flag
@@ -214,6 +223,8 @@ GRADUATION_ARMS = (
     "node_numerical_dual_bound",
     # #832/#814 base root-build deadline, wired 2026-07-21
     "root_build_deadline",
+    # #1355 Farkas-ray noise cleanup, wired 2026-09-19
+    "farkas_ray_cleanup",
     # #1351 affine_power_partition GRADUATED default-ON 2026-09-19 -- dropped from
     # the graduation bundle because the "off" control now runs the same code, so an
     # ON-vs-control arm would compare a config against itself. Its ARMS entry stays

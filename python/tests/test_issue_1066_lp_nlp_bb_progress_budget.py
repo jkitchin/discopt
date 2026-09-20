@@ -76,12 +76,53 @@ def test_the_highs_master_consults_a_terminate_callback_at_every_restart():
     assert len(seen) == res.callback_stats["terminate_polls"], (seen, res.callback_stats)
     assert sum(1 for s in seen if s["context"] == "restart") == res.callback_stats["restarts"]
     for snap in seen:
-        assert snap["context"] in ("restart", "interrupt")
+        assert snap["context"] in ("restart", "interrupt", "final")
         assert snap["elapsed"] >= 0.0
         # The bound is the master's own, which is what a progress judgement reads.
         assert "dual_bound" in snap
     assert res.callback_stats["terminated"] is False
     assert res.callback_stats["terminate_context"] is None
+
+
+@pytest.mark.smoke
+def test_the_master_check_ins_once_more_after_its_final_tree():
+    """A master that finishes on its own used to end in silence.
+
+    Check-ins were raised only at restart and interrupt events, and a master
+    stops restarting exactly when its separator falls silent -- which is when
+    the incumbent has become good. So convergence reached inside the *final*
+    tree was structurally unobservable: the certificate existed and no check-in
+    was ever allowed to see it. Measured on Linux CI for the fixture below:
+    ``bound=0.007999999996`` against ``objective=0.008000001545`` -- a 1.9e-7
+    gap against a 1e-4 tolerance -- reported with ``converged_early=False``.
+
+    The post-loop check-in carries ``context="final"``. Its answer is ignored:
+    there is nothing left to interrupt, so it observes and never stops.
+    """
+    seen: list[dict] = []
+
+    res = solve_milp_with_lazy_cuts(
+        _C,
+        _A_UB,
+        _B_UB,
+        bounds=_BOUNDS,
+        integrality=_INTEGRALITY,
+        lazy_callback=_veto_until(1.0),
+        # Says stop at every look. The final check-in must ignore that, because
+        # the master has already stopped -- honouring it would report a solve
+        # that ran to completion as one we cut short.
+        terminate_callback=lambda snap: seen.append(dict(snap)) or (snap["context"] == "final"),
+    )
+    finals = [s for s in seen if s["context"] == "final"]
+    assert len(finals) == 1, seen
+    assert seen[-1]["context"] == "final", "the final look must come last"
+    assert finals[0]["elapsed"] >= 0.0
+    assert "dual_bound" in finals[0]
+    # The master ran its own course, so nothing was terminated -- a "stop" at the
+    # final look must not be laundered into a termination.
+    assert res.callback_stats["terminated"] is False
+    assert res.callback_stats["terminate_context"] is None
+    assert res.status == SolveStatus.OPTIMAL
 
 
 @pytest.mark.smoke
@@ -404,9 +445,11 @@ def test_the_in_tree_poll_fires_and_the_interval_is_what_bounds_it():
     throttled = solve_milp_with_lazy_cuts(
         **_tree_that_lasts(),
         terminate_callback=lambda _snap: False,
-        terminate_poll_s=3600.0,  # longer than this solve, so only restarts check in
+        terminate_poll_s=3600.0,  # longer than this solve, so no in-tree poll fires
     )
-    assert throttled.callback_stats["terminate_polls"] == throttled.callback_stats["restarts"]
+    # Throttled, the only check-ins are the restarts plus the single post-loop
+    # look every completed master ends with.
+    assert throttled.callback_stats["terminate_polls"] == throttled.callback_stats["restarts"] + 1
     assert (
         unthrottled.callback_stats["terminate_polls"] > throttled.callback_stats["terminate_polls"]
     ), "the interval did not bound anything -- the in-tree poll never fired"
@@ -486,9 +529,22 @@ def test_the_single_tree_stops_when_its_own_bound_certifies_the_incumbent():
         "no check-in carried a dual bound, so the early exit was never asked "
         "anything -- this test would pass on a driver that cannot certify at all"
     )
-    assert stats["converged_early"] is True
+    # ``converged_observed``, not ``converged_early``. Whether the certificate
+    # *stops* this master or merely *is seen* at its final look is a scheduling
+    # detail, not a property of the solve: it turns on whether the last accepted
+    # incumbent arrives with a restart left to carry the observation. Measured
+    # on this exact fixture by varying only the demand -- 0.5/1.0/2.0/3.0 end
+    # ``converged_early=False, reason="optimal"`` and 4.0 ends
+    # ``converged_early=True, reason="gap_tolerance"``, all five with the same
+    # objective 0.008 and the same certificate. Pinning ``converged_early`` here
+    # pinned that coin flip, and it landed differently on Linux and macOS.
+    # ``converged_observed`` is the guarantee the exit actually owes: the gap was
+    # looked at. The stop plumbing itself is pinned deterministically by
+    # ``test_a_callback_that_says_stop_stops_the_loop_and_says_so`` and by the
+    # ``_lp_nlp_bb_exit_status`` unit tests above.
+    assert stats["converged_observed"] is True
     assert stats["restarts"] > 1, "the separator ran dry on its own; nothing was cut short"
-    assert res.mip_nlp_trace["termination_reason"] == "gap_tolerance"
+    assert res.mip_nlp_trace["termination_reason"] in ("gap_tolerance", "optimal")
     assert str(res.status) in ("SolveStatus.OPTIMAL", "optimal")
     # The certificate has to hold on the reported numbers, not just internally.
     assert res.bound <= res.objective + 1e-6 + 1e-4 * abs(res.objective)
@@ -500,6 +556,6 @@ def test_the_early_exit_stays_out_of_the_way_when_the_separator_finishes_first()
     res = _toy_convex_minlp().solve(time_limit=30, mip_nlp_method="lp_nlp_bb", milp_solver="highs")
     stats = res.mip_nlp_trace["summary"]["callback_stats"]
     assert stats["dual_bound_observations"] > 0
-    assert stats["converged_early"] is False
+    assert stats["converged_early"] is False, "nothing should have been cut short"
     assert stats["terminated"] is False
     assert res.objective == pytest.approx(9.0, abs=1e-6)

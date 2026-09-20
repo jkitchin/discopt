@@ -6010,6 +6010,45 @@ def _convex_minlp_route_enabled() -> bool:
     return raw.strip() != "0"
 
 
+def _convex_route_requires_syntactic_objective() -> bool:
+    """``DISCOPT_CONVEX_ROUTE_SYNTACTIC_OBJECTIVE``: route to OA only when the
+    objective is convex by the syntactic rules (default ON, ``=0`` opts out).
+
+    See :func:`_objective_syntactically_convex` for the measurement.
+    """
+    return os.environ.get("DISCOPT_CONVEX_ROUTE_SYNTACTIC_OBJECTIVE", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _objective_syntactically_convex(model: Model) -> bool:
+    """Is the objective convex by the syntactic rules alone, without the
+    interval-Hessian certificate or the exact-QP route (#1352)?
+
+    The route's own convexity test (:func:`_classify_model_convexity`) accepts
+    the certificate, which is what proves a PSD quadratic written with
+    ``dm.sum`` convex. On that class OA is correct but slower than the default
+    path: on 24 seeded ``dm.sum`` cardinality-Markowitz models, routing them to
+    OA took 50.0 s total wall against 23.9 s on the default path (interleaved
+    panel, docs/dev/performance-plan.md §73). The route therefore also requires
+    a syntactically convex objective; opt out with
+    ``DISCOPT_CONVEX_ROUTE_SYNTACTIC_OBJECTIVE=0``. Explicit OA
+    (``solve_oa``/``mip_nlp_method``) is unaffected and certifies these models.
+
+    A classification failure refuses the route (the sound default path).
+    """
+    try:
+        from discopt._relax.convexity import classify_oa_cut_convexity
+
+        return bool(classify_oa_cut_convexity(model, use_certificate=False).objective_is_convex)
+    except Exception as exc:  # noqa: BLE001 - classification failure => stay put
+        logger.debug("convex-MINLP route: syntactic objective classification failed: %s", exc)
+        return False
+
+
 def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str, dict[str, Any]]:
     """Decide whether ``model`` should be solved by the MIP-NLP family (#1059).
 
@@ -6144,6 +6183,13 @@ def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str, dict[str
         return None, "not routed: model convexity is unproven", {}
     if not is_convex:
         return None, "not routed: model is not convex", {}
+
+    if _convex_route_requires_syntactic_objective() and not _objective_syntactically_convex(model):
+        return (
+            None,
+            "not routed: objective convexity is proven only by the numerical certificate (#1352)",
+            {},
+        )
 
     # The OA master is a MILP. Refuse to route when no MILP backend can be
     # loaded rather than routing into an import error (CLAUDE.md §3: a loud

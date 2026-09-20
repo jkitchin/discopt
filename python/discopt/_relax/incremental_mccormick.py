@@ -54,6 +54,32 @@ logger = logging.getLogger(__name__)
 
 _TOL = 1e-7
 
+
+def row_support_within(A: sp.csr_matrix, tol: float):
+    """Return ``within(r, allowed)``: is row ``r``'s support (entries with
+    ``|a| > tol``) a subset of the column set ``allowed``?
+
+    Callers ask this for every row touching a term's aux column, with ``allowed``
+    the term's handful of operand columns. A dense row -- a quadratic constraint
+    aggregating thousands of products, touched by every one of their aux columns --
+    used to rebuild a set of the whole row per (term, row) pair: quadratic in the
+    row length (#1356: QPLIB_10003, 51k product terms, spent >5 min there and
+    overran a 30 s time limit). A row with more above-``tol`` entries than
+    ``allowed`` has cannot be a subset of it, so that count -- computed once --
+    rejects dense rows in O(1). The answer is identical; only the cost changes.
+    """
+    indptr, indices, data = A.indptr, A.indices, A.data
+    row_nnz = np.diff(np.concatenate(([0], np.cumsum(np.abs(data) > tol)))[indptr])
+
+    def within(r: int, allowed) -> bool:
+        if int(row_nnz[r]) > len(allowed):
+            return False
+        lo, hi = indptr[r], indptr[r + 1]
+        return all(int(indices[t]) in allowed for t in range(lo, hi) if abs(data[t]) > tol)
+
+    return within
+
+
 # Nonzero-footprint budget for the incremental structure. The fast path now holds
 # ``base_A`` SPARSE (CSR) and ``_patch`` copies only its ``.data`` array (~nnz
 # floats) per node, so the footprint is ``O(nnz)``, not ``O(rows*cols)`` — the
@@ -588,9 +614,7 @@ class IncrementalMcCormickLP:
         def _rows_with_col(c):
             return col_rows[col_ptr[c] : col_ptr[c + 1]]
 
-        def _support(k):
-            lo, hi = indptr[k], indptr[k + 1]
-            return {int(indices[t]) for t in range(lo, hi) if abs(data[t]) > _TOL}
+        _within = row_support_within(A, _TOL)
 
         def _entries(k):
             lo, hi = indptr[k], indptr[k + 1]
@@ -664,7 +688,7 @@ class IncrementalMcCormickLP:
 
         self.bilin_rows = {}
         for (i, j), a in self.bilinear.items():
-            cand = [int(k) for k in _rows_with_col(a) if _support(k) <= {i, j, a}]
+            cand = [int(k) for k in _rows_with_col(a) if _within(k, {i, j, a})]
             expected = [
                 (_coeffs([(i, ci), (j, cj), (a, cw)]), rhs)
                 for ci, cj, cw, rhs in _bilinear_rows(i, j, a, lb_p[i], ub_p[i], lb_p[j], ub_p[j])
@@ -683,7 +707,7 @@ class IncrementalMcCormickLP:
                     "(the envelope switches between the 4-row secant/tangent hull and "
                     "the 2-facet S-hull, which the fixed row pattern cannot express)"
                 )
-            cand = [int(k) for k in _rows_with_col(a) if _support(k) <= {i, a}]
+            cand = [int(k) for k in _rows_with_col(a) if _within(k, {i, a})]
             expected = [
                 (_coeffs([(i, ci), (a, cs)]), rhs)
                 for ci, cs, rhs in _monomial_rows(lb_p[i], ub_p[i], p)
@@ -692,7 +716,7 @@ class IncrementalMcCormickLP:
         # affine square (c*x_j + d)**2 -> aux: 4 secant/tangent rows over {j, aux}.
         self.affsq_rows = {}
         for (j, a), (coeff, const) in self.affine_square.items():
-            cand = [int(k) for k in _rows_with_col(a) if _support(k) <= {j, a}]
+            cand = [int(k) for k in _rows_with_col(a) if _within(k, {j, a})]
             expected = [
                 (_coeffs([(j, cx), (a, cw)]), rhs)
                 for cx, cw, rhs in _affine_square_rows(coeff, const, lb_p[j], ub_p[j])

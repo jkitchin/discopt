@@ -738,7 +738,111 @@ fn slack_upper_bounds(
 /// cold/Python path rigorously fathoms). Sound: the slack bound is
 /// superset-preserving, so it can never make a *feasible* LP certify. A genuinely
 /// open *structural* side (none on these lifted relaxations) bails the sign.
+///
+/// #1355: when the ray as computed does not certify, and
+/// `DISCOPT_FARKAS_RAY_CLEANUP` is on, the verifier is re-run once on a copy of
+/// `y` with its rounding-noise entries zeroed ([`farkas_ray_certifies_cleaned`]).
 pub(super) fn farkas_ray_certifies_cols(
+    y: &[f64],
+    cols: &SparseCols,
+    n: usize,
+    m: usize,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+) -> bool {
+    if farkas_ray_certifies_raw(y, cols, n, m, b, l, u) {
+        return true;
+    }
+    farkas_ray_cleanup_enabled()
+        && farkas_ray_certifies_cleaned(y, cols, n, m, b, l, u, FARKAS_RAY_NOISE_REL)
+}
+
+/// Relative threshold below which a Farkas-ray entry counts as rounding noise
+/// (#1355): `|y_i| ≤ τ·‖y‖∞`. The captured OA master certified all 10 of its
+/// cleanups at every τ in `{1e-12, 1e-10, 1e-8}` (5–9 entries zeroed each time),
+/// so the smallest is used.
+const FARKAS_RAY_NOISE_REL: f64 = 1e-12;
+
+/// Whether the #1355 Farkas-ray noise cleanup is enabled
+/// (`DISCOPT_FARKAS_RAY_CLEANUP`, read once). **Default ON** since the #1360
+/// graduation panel; opt out with `=0`. It changes which nodes are fathomed.
+///
+/// Graduated on the CLAUDE.md §5 panel (990 rows, 7346 checks, 198 instances ×
+/// 30 s, the two arms differing only in this flag): *cert-clean* — no bound
+/// above its reference optimum, no certification regression — and
+/// *net-positive*, 97 → 100 certified instances with total wall 3362.6 s →
+/// 3293.8 s. The one instance whose certificate disappears with the cleanup on
+/// is `gams01`, which certifies *falsely* without it (bound 28274.71 against a
+/// reference optimum of 21380.20), so losing that one is the fix, not a
+/// regression.
+fn farkas_ray_cleanup_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("DISCOPT_FARKAS_RAY_CLEANUP")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| !matches!(v.trim(), "0" | "false" | "False"))
+            .unwrap_or(true)
+    })
+}
+
+/// #1355: re-verify a Farkas ray after zeroing its rounding-noise entries.
+///
+/// A ray computed as `B⁻ᵀe` carries entries of size ~1e-17 on rows the true
+/// certificate does not use. Such an entry is enough to break certification. It
+/// gives an unbounded column (an OA epigraph `η`, or a slack whose defining row
+/// contains `η`) an `aᵀy` whose rigorous interval `[aᵀy − e, aᵀy + e]` straddles
+/// zero. That interval selects the column's open side, and the ray is rejected
+/// (`FarkasRejectOpen`). The simplex then returns `Numerical` on an LP HiGHS
+/// proves infeasible, so the node is never fathomed. Measured on a captured
+/// 518×25 OA master: `ITERATION_LIMIT` at 278 nodes before, `OPTIMAL` at 149
+/// nodes after, matching HiGHS.
+///
+/// Sound for any `tau`: zeroing entries just proposes a different candidate `y`,
+/// and [`farkas_ray_certifies_raw`] rigorously verifies whatever it is given.
+/// Worst case, a rejected candidate costs one extra verification.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn farkas_ray_certifies_cleaned(
+    y: &[f64],
+    cols: &SparseCols,
+    n: usize,
+    m: usize,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+    tau: f64,
+) -> bool {
+    let ymax = y.iter().fold(0.0f64, |a, v| a.max(v.abs()));
+    if !(ymax > 0.0 && ymax.is_finite()) {
+        return false;
+    }
+    let cut = tau * ymax;
+    let mut zeroed = 0usize;
+    let yc: Vec<f64> = y
+        .iter()
+        .map(|&v| {
+            if v != 0.0 && v.abs() <= cut {
+                zeroed += 1;
+                0.0
+            } else {
+                v
+            }
+        })
+        .collect();
+    if zeroed == 0 {
+        return false; // identical candidate: already rejected
+    }
+    let ok = farkas_ray_certifies_raw(&yc, cols, n, m, b, l, u);
+    if ok {
+        crate::profile::incr(crate::profile::Ctr::FarkasCleanupRescue);
+    }
+    ok
+}
+
+/// The rigorous verifier behind [`farkas_ray_certifies_cols`] (no cleanup retry).
+fn farkas_ray_certifies_raw(
     y: &[f64],
     cols: &SparseCols,
     n: usize,
@@ -3306,6 +3410,59 @@ mod tests {
             "feasible cancellation LP must never be reported Infeasible, got {:?}",
             r.status
         );
+    }
+
+    /// #1355: a genuine Farkas ray carrying rounding noise (`1e-17`) on a row whose
+    /// columns are all open-above (an OA epigraph `η` minus an unbounded auxiliary,
+    /// so no slack bound is recoverable). The noise gives `η` an `aᵀy` interval
+    /// strictly above zero, which selects `u = ∞` and rejects the ray as OPEN.
+    /// That is how the OA masters in #1355 ended `Numerical` instead of fathomed.
+    /// The cleaned ray must certify, and cleanup must never certify a feasible
+    /// LP of the same shape. The raw assertion FAILS if the noise stops mattering
+    /// (then the test no longer exercises the defect); the cleaned assertion FAILS
+    /// pre-fix (no cleanup existed).
+    #[test]
+    fn farkas_ray_noise_cleanup_rescues_open_column_rejection_1355() {
+        let (m, n) = (2usize, 3usize);
+        // col0: row0 (+1), x0 ∈ [0,1];  col1 = η: row1 (+1), [0,∞);  col2: row1 (−1), [0,∞).
+        let sp = SparseCols::from_csc(vec![0, 1, 2, 3], vec![0, 1, 1], vec![1.0, 1.0, -1.0]);
+        let l = vec![0.0; n];
+        let u = vec![1.0, INF, INF];
+        let noisy = vec![1.0, 1e-17];
+        let mut checks = 0usize;
+
+        // Infeasible: x0 = 2 with x0 ≤ 1.
+        let b = vec![2.0, 0.0];
+        assert!(
+            farkas_ray_certifies_raw(&[1.0, 0.0], &sp, n, m, &b, &l, &u),
+            "premise: the exact ray certifies"
+        );
+        assert!(
+            !farkas_ray_certifies_raw(&noisy, &sp, n, m, &b, &l, &u),
+            "premise: 1e-17 of noise on the η row must defeat the raw verifier"
+        );
+        assert!(
+            farkas_ray_certifies_cleaned(&noisy, &sp, n, m, &b, &l, &u, FARKAS_RAY_NOISE_REL),
+            "the noise-cleaned ray must certify the infeasible LP"
+        );
+        checks += 3;
+
+        // Feasible twins (x0 = b0 ∈ [0,1]): no candidate may certify, cleaned or not,
+        // at any threshold — soundness rests on the re-verification alone.
+        for b0 in [0.0, 0.5, 1.0] {
+            let b = vec![b0, 0.0];
+            for tau in [1e-12, 1e-6, 0.5, 1.0] {
+                for sgn in [1.0, -1.0] {
+                    let ray: Vec<f64> = noisy.iter().map(|v| sgn * v).collect();
+                    assert!(
+                        !farkas_ray_certifies_cleaned(&ray, &sp, n, m, &b, &l, &u, tau),
+                        "false certificate on feasible LP b0={b0} tau={tau} sgn={sgn}"
+                    );
+                    checks += 1;
+                }
+            }
+        }
+        assert_eq!(checks, 27, "expected 27 executed checks");
     }
 
     /// #1017, the class rather than the instance: over a family of LPs that are
