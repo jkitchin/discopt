@@ -417,9 +417,13 @@ def solve_nlp_from_model(
     Returns:
         NLPResult with solution.
     """
+    from discopt._block_eval import maybe_wrap_evaluator
     from discopt._tape_nlp_evaluator import make_evaluator
 
     evaluator = make_evaluator(model)
+    # Block structure is resolved against the evaluator BEFORE the compressed
+    # wrapper goes on, and the wrapper delegates both structures anyway, so the
+    # two features see the same index space either way (#1370 A and B).
     labels: Optional[tuple[Sequence[int], Sequence[int]]] = None
     if isinstance(block_structure, str):
         if block_structure != "auto":
@@ -448,6 +452,8 @@ def solve_nlp_from_model(
         lb_clipped = np.clip(lb, -100.0, 100.0)
         ub_clipped = np.clip(ub, -100.0, 100.0)
         x0 = 0.5 * (lb_clipped + ub_clipped)
+
+    evaluator = maybe_wrap_evaluator(model, evaluator)
 
     return solve_nlp(
         evaluator,
