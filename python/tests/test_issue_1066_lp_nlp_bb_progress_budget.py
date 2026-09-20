@@ -510,7 +510,21 @@ def test_the_single_tree_stops_when_its_own_bound_certifies_the_incumbent():
         f"restarts={stats['restarts']}) -- this is a starved runner, not a "
         "regression in the early exit; raise the budget rather than the tolerance"
     )
-    assert stats["converged_early"] is True
+    # Carry the evidence in the message. A bare ``assert False is True`` says only
+    # that the early exit did not fire and nothing about why, which cost three CI
+    # rounds on this very line: the wall theory it suggested was wrong (the guard
+    # above passes, so the run was never cut short) and there was no way to tell
+    # from the log. CLAUDE.md §6 -- an instrument that cannot say what it saw is
+    # not an instrument.
+    assert stats["converged_early"] is True, (
+        "the master's dual bound never met the incumbent inside the gap tolerance "
+        "before the separator ran dry: "
+        f"reason={res.mip_nlp_trace['termination_reason']!r}, "
+        f"restarts={stats['restarts']}, "
+        f"dual_bound_observations={stats['dual_bound_observations']}, "
+        f"status={str(res.status)!r}, bound={res.bound!r}, objective={res.objective!r}, "
+        f"callback_stats={stats!r}"
+    )
     assert stats["restarts"] > 1, "the separator ran dry on its own; nothing was cut short"
     assert res.mip_nlp_trace["termination_reason"] == "gap_tolerance"
     assert str(res.status) in ("SolveStatus.OPTIMAL", "optimal")
