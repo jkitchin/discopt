@@ -17059,6 +17059,18 @@ def solve_model(
         #
         # #1380: the snap is UNCONDITIONAL and a snap the rows reject is a
         # refusal, where it used to fall back to "report the unrounded point".
+        #
+        # Why a plain refusal here, where ``_solve_milp_bb`` first re-derives the
+        # continuous columns. The two sites do not share a threshold: this one
+        # judges the snap with ``_round_incumbent_integers``'s own checker at
+        # ``feas_tol=1e-4``, a HUNDRED times the declared ``abs=1e-6`` the matrix
+        # gate uses. A snap moves a row by at most ``sum_j |dg_i/dx_j| *
+        # integrality_tol``, so reaching 1e-4 takes a row derivative of ~10 or
+        # more -- the pathological regime -- where the ordinary well-scaled case
+        # that forced the re-derivation on the MILP path (a unit-coefficient row
+        # missed by 5.0e-06; see ``_repair_integral_point``) sits two orders
+        # BELOW this threshold and never reaches it. Refusing here is therefore
+        # narrow by construction, and the message's big-M diagnosis is apt.
         # That fallback is the false-certificate hole: the point this path claims
         # is the integral one, and an integer column sitting inside
         # integrality_tol buys its row up to ``|a_ij| * integrality_tol`` of
