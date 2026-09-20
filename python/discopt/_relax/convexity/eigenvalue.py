@@ -144,19 +144,71 @@ def _row_offdiag_abs_sum_upper(abs_sup: np.ndarray) -> np.ndarray:
     return _round_up_exact0(raw / (1.0 - gamma))
 
 
+def gershgorin_row_lower_bounds(H: Interval) -> np.ndarray:
+    """Sound **per-row** Gershgorin lower bounds on ``λ_min`` over ``H``.
+
+    For a symmetric matrix ``A`` each eigenvalue satisfies
+    ``λ_k(A) ≥ A_ii − Σ_{j ≠ i} |A_ij|`` for some row ``i``. Widening to cover
+    every concrete ``A`` in the interval matrix gives, row by row,
+
+        b_i = inf(H_ii) − Σ_{j ≠ i} max(|H_ij|_lo, |H_ij|_hi),
+
+    and ``λ_min ≥ min_i b_i``. The summation is inflated by the Higham
+    recursive-summation factor and the subtraction is rounded toward ``−∞``, so
+    floating-point roundoff never breaks either inequality.
+
+    The per-row bounds are what αBB needs: ``α_i = max(0, −b_i/2)`` perturbs only
+    as much as each variable's own row requires, which is tighter than applying
+    the global minimum to every variable. Exposed (#1397) because
+    ``_alphabb_rigorous.rigorous_alpha`` had reimplemented this formula with a
+    plain round-to-nearest ``np.sum`` and no outward rounding — so its "rigorous"
+    bound could sit *above* the true one, leaving ``α`` below ``−λ_min/2``, the
+    αBB body nonconvex, and the resulting node bound above the true minimum: a
+    false dual bound. Measured by calling ``rigorous_alpha`` itself and grading
+    its output against this formula in exact rational arithmetic over the same
+    float entries: 513 of 1120 rows had ``α`` provably below ``−λ_min/2``, worst
+    shortfall 5.76e-4, at every scale from ``‖A‖_F = 1e0`` to 1e12 (the error is
+    O(u·‖A‖), so it also grows with the problem's scale without limit).
+
+    Returns
+    -------
+    numpy.ndarray
+        Shape ``(n,)`` lower bounds. A row with an unbounded entry yields
+        ``-inf``, which is the sound bound for it and makes the corresponding
+        ``α`` infinite.
+    """
+    lo = np.asarray(H.lo, dtype=np.float64)
+    hi = np.asarray(H.hi, dtype=np.float64)
+    if lo.ndim != 2 or lo.shape[0] != lo.shape[1]:
+        raise ValueError(f"Expected square Hessian; got shape {lo.shape}")
+
+    # |A_ij| supremum over the interval: max(|lo|, |hi|).
+    abs_sup = np.maximum(np.abs(lo), np.abs(hi))
+    # Remove diagonal contribution so row sums hold Σ_{j ≠ i} |A_ij|.
+    np.fill_diagonal(abs_sup, 0.0)
+
+    # Sound per-row upper bound on the off-diagonal sums (vectorised).
+    row_sum = _row_offdiag_abs_sum_upper(abs_sup)
+
+    diag_lo = np.diag(lo)
+    with np.errstate(invalid="ignore"):
+        raw = diag_lo - row_sum
+    # ``(+inf) − (+inf)`` is the only NaN this subtraction can produce; ``-inf``
+    # is the sound lower bound for such a row. Mapped before rounding so the
+    # outward round never sees a NaN.
+    raw = np.where(np.isnan(raw), -np.inf, raw)
+    # ``_exact0`` (#957): IEEE-754 subtraction of two doubles is zero only when
+    # the exact difference is zero, so a Gershgorin disc that lands exactly on
+    # the origin stays there instead of becoming ``-5e-324`` — the difference
+    # between certifying and declining a boundary-PSD Hessian.
+    return np.asarray(_round_down_exact0(raw), dtype=np.float64)
+
+
 def gershgorin_lambda_min(H: Interval) -> float:
     """Sound lower bound on ``λ_min`` over the interval Hessian ``H``.
 
-    For a symmetric matrix ``A`` each eigenvalue satisfies
-    ``λ_k(A) ≥ A_ii − Σ_{j ≠ i} |A_ij|`` for some row ``i``.
-    Widening to cover every concrete ``A`` in the interval matrix
-    gives
-
-        λ_min ≥ min_i ( inf(H_ii) − Σ_{j ≠ i} max(|H_ij|_lo, |H_ij|_hi) ).
-
-    The subtraction and summation are performed with outward rounding
-    (lower endpoint rounded toward ``−∞``) so floating-point roundoff
-    never breaks the inequality.
+    The minimum of :func:`gershgorin_row_lower_bounds`; see there for the
+    derivation and the rounding discipline.
 
     Returns
     -------
@@ -171,22 +223,7 @@ def gershgorin_lambda_min(H: Interval) -> float:
     if not (np.all(np.isfinite(lo)) and np.all(np.isfinite(hi))):
         return float(-np.inf)
 
-    # |A_ij| supremum over the interval: max(|lo|, |hi|).
-    abs_sup = np.maximum(np.abs(lo), np.abs(hi))
-    # Remove diagonal contribution so row sums hold Σ_{j ≠ i} |A_ij|.
-    np.fill_diagonal(abs_sup, 0.0)
-
-    # Sound per-row upper bound on the off-diagonal sums (vectorised).
-    row_sum = _row_offdiag_abs_sum_upper(abs_sup)
-
-    # Diagonal lower bound minus sum — round down.
-    diag_lo = np.diag(lo)
-    # ``_exact0`` (#957): IEEE-754 subtraction of two doubles is zero only when
-    # the exact difference is zero, so a Gershgorin disc that lands exactly on
-    # the origin stays there instead of becoming ``-5e-324`` — the difference
-    # between certifying and declining a boundary-PSD Hessian.
-    bounds = _round_down_exact0(diag_lo - row_sum)
-    return float(bounds.min())
+    return float(gershgorin_row_lower_bounds(H).min())
 
 
 def gershgorin_lambda_max(H: Interval) -> float:
@@ -253,6 +290,7 @@ def psd_2x2_sufficient(H: Interval) -> bool:
 __all__ = [
     "gershgorin_lambda_min",
     "gershgorin_lambda_max",
+    "gershgorin_row_lower_bounds",
     "psd_2x2_sufficient",
     "psd_decision_slack",
     "interval_magnitude",
