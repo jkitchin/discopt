@@ -336,3 +336,41 @@ _CUTOVER_DEFERRED_TESTS: dict[str, str] = {
     #   exactly one clean lifted column per product — which the cut pool's feasible-
     #   point samplers and column identities require.
 }
+
+
+@pytest.fixture
+def forwarded_budget():
+    """Expected ``time_limit`` reaching the default path, net of the #1346 convex check.
+
+    ``DISCOPT_CONVEX_KERNEL`` graduated default-ON, so ``Model.solve`` consults the
+    convex kernel before the default path on every **auto-routed** solve, and #911
+    deducts that attempt's wall from the budget it forwards -- deliberately: the spec
+    build *is* the convexity classification, and on the instances that hazard bites it
+    is ~1 s. Every downstream share is therefore a fraction of ``limit - spent``, not
+    of ``limit``.
+
+    A test that hardcodes ``fraction * limit`` is asserting "nothing runs ahead of the
+    default path", which stopped being true at graduation. Use this instead of widening
+    a tolerance: the proportion stays pinned exactly, and the deduction stays visible
+    rather than being absorbed into slack that would also hide a real regression.
+
+    (An **explicit** ``solver=`` skips the check entirely, so those tests keep asserting
+    the whole limit and must NOT use this.)
+
+    Call it after the solve::
+
+        m.solve(time_limit=40)
+        assert captured["time_limit"] == forwarded_budget(40.0, 0.65)
+    """
+
+    def _expected(limit: float, fraction: float = 1.0):
+        from discopt.solvers._convex_kernel import last_attempt_seconds
+
+        spent = last_attempt_seconds()
+        assert spent < 0.10 * limit, (
+            f"the convex-kernel check cost {spent:.3f}s of a {limit}s budget; it is a "
+            "classification on an auto-routed solve, not a solve"
+        )
+        return pytest.approx(fraction * (limit - spent), rel=1e-6)
+
+    return _expected

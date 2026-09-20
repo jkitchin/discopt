@@ -545,6 +545,42 @@ def _build(model, bounds) -> dict:
             continue
         nl_specs.append(d)
 
+    if not nl_specs:
+        # #1346: a model with NO nonlinear row is an LP or a MILP, and it belongs to
+        # the routes built for it -- `lp_milp_highs.py` (HiGHS with discopt-verified
+        # certificates, `docs/dev/lp-milp-highs-routing-plan.md`) and the Rust MILP
+        # engine -- not to an outer-approximation tree that has nothing to
+        # outer-approximate. It would "qualify" trivially: a linear objective and
+        # zero nonlinear rows pass every clause of the convexity gate, so before this
+        # refusal the gate claimed every pure LP and MILP in the library.
+        #
+        # This was invisible while the flag was opt-in and became a routing hijack
+        # the moment it graduated: 17 smoke tests failed, almost all of them MILP or
+        # HiGHS-route tests, because `Model.solve()` consulted the kernel first. The
+        # §5 panel did NOT catch it -- the in-repo `.nl` corpus classified only 3
+        # instances eligible and contains no pure LP/MILP member, so a corpus-wide
+        # panel can pass while the change breaks a route the corpus never exercises.
+        # The corpus bounds what a panel can see; it is not a proof of safety.
+        raise NotConvexKernel("no nonlinear row: an LP/MILP belongs to the LP/MILP route")
+    if not is_int.any():
+        # #1346, the same defect from the other side: a model with no integer
+        # variable is a continuous convex NLP, not a MINLP. A branch-and-cut tree
+        # has nothing to branch on, and -- the part that bites -- the kernel's
+        # ``SolveResult`` carries **no duals**, while the NLP path returns them.
+        #
+        # Routing one therefore silently drops `constraint_duals` and
+        # `bound_duals_upper` from a result that used to carry them, which is
+        # exactly the regression #1037 was opened to fix. Caught by the HiGHS-route
+        # CI lane: 8 failures in `test_solver_duals.py`, all "duals were withheld",
+        # on the ``minimize -x s.t. x^2 + y^2 <= r^2`` model -- linear objective, one
+        # convex row, zero integers, claimed by every other clause of the gate.
+        #
+        # NOT fixable by handing back the tree's LP duals: those are multipliers of
+        # the OUTER APPROXIMATION, not of the model's own nonlinear row. Reporting
+        # them would be "duals of a different problem" -- the precise thing #1037's
+        # withholding message exists to prevent -- so the sound fix is to leave the
+        # model on the path that can produce real ones.
+        raise NotConvexKernel("no integer variable: a continuous convex NLP keeps the NLP path")
     return _marshal(n, c, sense_max, is_int, lb, ub, le_rows, eq_rows, nl_specs)
 
 
@@ -650,8 +686,46 @@ def _marshal(n, c, sense_max, is_int, lb, ub, le_rows, eq_rows, nl_specs) -> dic
 
 
 def convex_kernel_enabled() -> bool:
-    """`DISCOPT_CONVEX_KERNEL` opt-in (default-OFF)."""
-    return os.environ.get("DISCOPT_CONVEX_KERNEL", "0") not in ("0", "", "false", "False")
+    """`DISCOPT_CONVEX_KERNEL` opt-out (default-ON since #1346).
+
+    Graduated under the CLAUDE.md §5 Regime-2 gate by
+    ``discopt_benchmarks/scripts/issue1346_convex_kernel_graduation_panel.py`` over
+    the 66-instance in-repo corpus, arms interleaved within each instance and the
+    arm order alternated by index, ``deterministic=True``. Gate 1 cert-clean PASS
+    (0 unsound bounds, 0 certification regressions, 0 objective drift, 0 errors);
+    gate 2 net-positive PASS on the routed class::
+
+        clay0303hfsg   off  feasible/UNCERTIFIED 29911.20 (12.2% above opt)  90.2 s
+                       on   optimal/CERTIFIED    26669.1096   149 nodes      21.2 s
+        syn05hfsg      off  optimal  277 nodes  23.8 s -> on  optimal  2 nodes  0.01 s
+
+    Node counts, not wall, carry that result: 277 -> 2 is structural, and both
+    outcomes reproduced across four independent runs. Full numbers, and the
+    concentration caveat (only 3 of 66 in-repo instances are eligible at all), in
+    ``docs/dev/convex-kernel-plan.md``.
+
+    **No counter-case guard ships with this, and that is a measured decision.** A
+    two-stage probe guard was built for the ``watercontamination0202`` case that
+    ``sota-parity-analysis-2026-07-27.md`` G-C records at 2001 s with no bound. Run
+    against the actual instance it turns out to be refused by this gate's *existing*
+    ``nonlinear objective`` clause, in 3.8 s, with or without the guard -- G-C's
+    "convex/MIQP route" is the problem classifier's route, not this kernel. The
+    guard was defending against a threat that cannot reach here, cost +2.6 s on
+    ``clay0303hfsg``, and bought nothing measurable anywhere, so it was deleted
+    rather than shipped (§4: no fix ships on a hypothesis; the
+    ``DISCOPT_CUT_INHERIT`` lesson: sound is not the same as helpful).
+
+    **Why this was default-OFF for so long, since the history misleads.** It was not
+    a failed panel. ``#798`` proved both §5 bars on the convex family and the
+    66-instance Regime-2 panel came back cert-clean; ``#800``'s close-out then
+    deferred graduation to ``#807`` (native-warm-LP *SCIP wall parity*, ~2 s vs the
+    kernel's 7-80 s). That is a **stretch goal strictly above** what §5 asks for --
+    §5 scores ON against OFF, not against SCIP -- so the flag sat in the
+    "indefinitely parked" state that the §5 retirement clause (#1345) exists to
+    stop. #1346 re-ran the gate and acted on it. ``#807`` remains open as a
+    performance issue; it is no longer a graduation gate.
+    """
+    return os.environ.get("DISCOPT_CONVEX_KERNEL", "1") not in ("0", "", "false", "False")
 
 
 def dominated_cols_enabled() -> bool:
