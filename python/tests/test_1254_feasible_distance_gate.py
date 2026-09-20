@@ -60,8 +60,10 @@ def test_cap_is_a_distance_not_a_magnitude():
     ok_grad, ok_viol = 1.0, 6.7e-09
     assert ok_viol <= feasible_distance_cap(ok_grad), "an ordinary gradient must not be capped"
     checked += 1
-    # Inert on every row whose gradient is of ordinary size.
-    assert feasible_distance_cap(1.0) == FEASIBLE_DISTANCE_TOL
+    # Inert on every row whose gradient is of ordinary size. The cap carries the
+    # 1e-12 noise floor additively since #1392, so it is the allowance to within
+    # eight orders rather than bit-for-bit.
+    assert feasible_distance_cap(1.0) == pytest.approx(FEASIBLE_DISTANCE_TOL, rel=1e-6)
     assert feasible_distance_cap(1e3) > 1e-4
     checked += 2
     # A non-finite gradient is unestimatable and must not manufacture a cap.
