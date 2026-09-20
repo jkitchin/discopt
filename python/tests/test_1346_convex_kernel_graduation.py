@@ -44,6 +44,7 @@ import os
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import discopt.modeling as dm  # noqa: E402
+import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from discopt.solvers import _convex_kernel as ck  # noqa: E402
 
@@ -237,3 +238,108 @@ def test_the_water_counter_case_is_refused_by_the_objective_clause():
     with pytest.raises(ck.NotConvexKernel, match="nonlinear objective"):
         ck._build(m, None)
     assert ck.build_convex_spec(m) is None
+
+
+# --------------------------------------------------------------------------- #
+# the objective's CONSTANT term
+# --------------------------------------------------------------------------- #
+#
+# ``_build`` took the LP objective from ``evaluate_gradient`` alone, so the
+# kernel optimised ``c @ x`` while the model's objective was ``c @ x + f(0)``.
+# The kernel's incumbent IS the reported ``objective``, so a model with a
+# constant came back with a CERTIFIED WRONG optimal value -- and a ``bound`` on
+# the same shifted scale, i.e. above the true optimum for a minimisation.
+#
+# Measured before the fix on the model below with ``K = -4321.5``: reported
+# objective -4.987196820759 at a point whose true objective is -4326.487196821
+# (delta exactly +4321.5), bound -4.987196820767, ``gap_certified=True``.
+#
+# Same defect as the one fixed in ``solvers/_root_cuts.py``; found by auditing
+# that fix's class rather than by a second failure.
+
+OBJ_CONST = -4321.5
+
+
+def _kernel_minlp_with_constant(const: float) -> dm.Model:
+    """A model the kernel ACCEPTS (exp row, affine objective), plus a constant."""
+    m = dm.Model("kconst")
+    x = m.continuous("x", lb=0.1, ub=5.0)
+    y = m.binary("y")
+    m.subject_to(dm.exp(x) - 20.0 * y <= 0.0)
+    m.subject_to(x >= 0.5)
+    m.minimize(-3.0 * x + 4.0 * y + const)
+    return m
+
+
+def test_the_kernel_claims_the_constant_model():
+    """Guard the guard: if the kernel stops claiming this model the tests below
+    would pass vacuously on the fallback route."""
+    assert ck.build_convex_spec(_kernel_minlp_with_constant(OBJ_CONST)) is not None
+
+
+def test_the_spec_carries_the_objective_constant():
+    spec = ck.build_convex_spec(_kernel_minlp_with_constant(OBJ_CONST))
+    assert spec is not None
+    assert "obj_const" in spec, "objective constant dropped from the spec"
+    assert spec["obj_const"] == pytest.approx(OBJ_CONST, abs=1e-9)
+    # ...and it is NOT a kernel input: the Rust entry point is called with
+    # ``**spec``, so an unknown key there would be a TypeError.
+    plain = ck.build_convex_spec(_kernel_minlp_with_constant(0.0))
+    assert plain is not None
+    assert plain["obj_const"] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_the_reported_objective_is_the_objective_at_the_reported_point(flag):
+    """The bar that matters: ``result.objective`` must be ``f(result.x)``."""
+    flag("DISCOPT_CONVEX_KERNEL", "1")
+    checked = 0
+    for const in (0.0, OBJ_CONST):
+        r = _kernel_minlp_with_constant(const).solve(time_limit=60)
+        assert r.objective is not None and r.x is not None
+        xv = float(np.atleast_1d(r.x["x"])[0])
+        yv = float(np.atleast_1d(r.x["y"])[0])
+        true_obj = -3.0 * xv + 4.0 * yv + const
+        assert r.objective == pytest.approx(true_obj, abs=1e-6, rel=1e-9), (
+            f"reported objective {r.objective} != f(x) = {true_obj} (const={const})"
+        )
+        assert r.bound is not None
+        assert r.bound <= r.objective + 1e-6, "UNSOUND: bound above incumbent (min)"
+        checked += 1
+    assert checked == 2, "probe made no comparisons"
+
+
+def test_the_constant_shifts_the_answer_by_exactly_the_constant(flag):
+    """Route-independent invariant: adding K to a linear objective adds K to the
+    optimum and to the bound, and moves nothing else."""
+    flag("DISCOPT_CONVEX_KERNEL", "1")
+    base = _kernel_minlp_with_constant(0.0).solve(time_limit=60)
+    shifted = _kernel_minlp_with_constant(OBJ_CONST).solve(time_limit=60)
+    assert base.objective is not None and shifted.objective is not None
+    assert shifted.objective == pytest.approx(base.objective + OBJ_CONST, abs=1e-6)
+    assert base.bound is not None and shifted.bound is not None
+    assert shifted.bound == pytest.approx(base.bound + OBJ_CONST, abs=1e-6)
+
+
+def test_solve_convex_tree_shifts_an_initial_incumbent_the_other_way():
+    """``initial_incumbent`` is given in the MODEL's objective values, so it has
+    to go in on the kernel's (pre-constant) scale or it would be a bogus cutoff
+    tighter than any real incumbent."""
+    spec = ck.build_convex_spec(_kernel_minlp_with_constant(OBJ_CONST))
+    assert spec is not None
+    seen = {}
+    import discopt._rust as _rust
+
+    real = _rust.solve_convex_tree_py
+
+    def spy(**kw):
+        seen["initial_incumbent"] = kw.get("initial_incumbent")
+        seen["has_obj_const"] = "obj_const" in kw
+        return real(**kw)
+
+    _rust.solve_convex_tree_py = spy
+    try:
+        ck.solve_convex_tree(spec, time_limit_s=30, initial_incumbent=-4300.0)
+    finally:
+        _rust.solve_convex_tree_py = real
+    assert seen["has_obj_const"] is False, "obj_const must not reach the Rust entry point"
+    assert seen["initial_incumbent"] == pytest.approx(-4300.0 - OBJ_CONST, abs=1e-9)

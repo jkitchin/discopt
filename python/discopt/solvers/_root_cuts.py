@@ -18,7 +18,13 @@ experiment validated (probe: ``discopt_benchmarks/scripts/issue781_cutmgmt_probe
 Soundness contract (CLAUDE.md §1):
   * Only runs when the model is CONVEX-certified (OA tangents of convex ≤ rows
     / concave ≥ rows are valid outer approximations) and the objective is
-    verified linear (the LP objective must represent the true objective).
+    verified AFFINE -- constant gradient at two sampled points AND the same
+    constant term at both, with a third check against the evaluator at the LP
+    optimum. "Linear" is not enough: ``c @ x`` omits ``f(0)``, and a dropped
+    negative constant on a MINIMIZE model reports a bound ABOVE the true
+    optimum. That was a live false bound (nvs14 after the integer-bilinear
+    lift: +314.237 published against a true optimum of -40358.155, the optimum
+    itself feasible for the LP); the constant is now carried in ``_RootLP.c0``.
   * Every cut is integrality-valid: satisfied by every point of the model's
     feasible set with integral integer variables. Adding them as constraints
     removes no integer-feasible point; node NLP relaxations only tighten.
@@ -271,6 +277,33 @@ class _RootLP:
         # model's sense (max → LP max c'x is a valid upper bound).
         negate = bool(getattr(evaluator, "_negate", sense_max))
         self.c = -ga if negate else ga
+        # ... and the objective's CONSTANT term. ``self.c`` is only the
+        # gradient, so ``c @ x`` is the objective only up to ``f(0)``, and the
+        # LP optimum returned below was reported as the dual bound WITHOUT it.
+        # A model whose linear objective carries a constant therefore published
+        # a bound offset by that constant, which for a negative constant on a
+        # MINIMIZE model is a bound ABOVE the true optimum -- a false dual bound,
+        # not merely a weak one. Measured on nvs14 after the exact integer-
+        # bilinear lift (the lift's binary expansion is what introduces the
+        # constant): f(0) = -40792.141, published bound +314.237 against a true
+        # optimum of -40358.155, with the true optimum feasible for this very LP
+        # (max row violation 5.7e-14). The constant is a property of the model,
+        # not of the instance -- any objective with a nonzero constant is hit.
+        _fa = float(evaluator.evaluate_objective(xa))
+        _fb = float(evaluator.evaluate_objective(xb))
+        _c0a = _fa - float(ga @ xa)
+        _c0b = _fb - float(gb @ xb)
+        # Equal constants at two points is the affine check the gradient
+        # comparison alone cannot make: two sampled gradients can coincide on a
+        # nonlinear objective, and then ``c @ x + c0`` would not be the
+        # objective at all. Refuse rather than publish a bound we cannot stand
+        # behind (CLAUDE.md #3); the caller degrades to the no-cuts path.
+        if not (np.isfinite(_c0a) and np.isfinite(_c0b)) or abs(_c0a - _c0b) > 1e-9 * max(
+            1.0, abs(_c0a), abs(_c0b)
+        ):
+            raise ValueError("objective is not affine - root-cut LP bound would be invalid")
+        self.c0 = -_c0a if negate else _c0a
+        self.c0_negate = negate
 
         ja = evaluator.evaluate_jacobian(xa)
         jb = evaluator.evaluate_jacobian(xb)
@@ -407,7 +440,39 @@ def _solve_lp(root: _RootLP, cuts_a, cuts_b, time_limit: float | None = None):
     sol = h.getSolution()
     x = np.array(sol.col_value, float)
     duals = np.abs(np.array(sol.row_dual, float))[:n_le]
-    return float(root.c @ x), x, duals, h
+    # ``root.c0`` is the objective's constant term (see ``_RootLP.__init__``).
+    # Omitting it here is what published a bound offset by that constant.
+    obj = float(root.c @ x) + root.c0
+    # Independent re-check at a THIRD point -- the LP optimum, which neither
+    # sample in ``__init__`` chose. ``c``/``c0`` are an affine model of the
+    # objective; the evaluator is the objective. If they disagree here, the
+    # affine model is wrong and its optimum is not a bound on anything, so
+    # decline the LP exactly as a non-optimal status is declined.
+    try:
+        _f = float(root.ev.evaluate_objective(x))
+    except Exception as exc:  # pragma: no cover - evaluator robustness
+        # NOT "assume it agreed": an objective that cannot be evaluated at the
+        # LP optimum is a reason to decline the LP, not to skip the check that
+        # would have caught the disagreement (CLAUDE.md #7).
+        logger.warning(
+            "root-cuts: the model objective could not be evaluated at the LP optimum "
+            "(%s); declining the root LP rather than reporting an unchecked bound",
+            exc,
+        )
+        return None, None, None, None
+    _f_declared = -_f if root.c0_negate else _f
+    if not np.isfinite(_f_declared) or abs(_f_declared - obj) > 1e-6 * max(
+        1.0, abs(_f_declared), abs(obj)
+    ):
+        logger.warning(
+            "root-cuts: LP objective %.10g disagrees with the model objective %.10g "
+            "at the LP optimum; declining the root LP rather than reporting a bound "
+            "no affine model backs",
+            obj,
+            _f_declared,
+        )
+        return None, None, None, None
+    return obj, x, duals, h
 
 
 # ── GMI separator (validated: exact enumeration, 0 unsound) ──────────────────

@@ -220,7 +220,7 @@ def _guard():
 
 def test_the_guard_withdraws_a_certificate_the_pair_does_not_support():
     """The exact numbers from the incident, fed to the guard on their own."""
-    status, gap, certified = _guard()(
+    status, gap, certified, _bound = _guard()(
         "optimal",
         -0.7432619320556588,
         -0.7433375500435884,
@@ -240,7 +240,7 @@ def test_the_guard_withdraws_a_certificate_the_pair_does_not_support():
 
 def test_the_guard_keeps_a_certificate_the_pair_does_support():
     """It must not cost a single legitimate certificate."""
-    status, gap, certified = _guard()(
+    status, gap, certified, _bound = _guard()(
         "optimal",
         -0.7433375500435884,
         -0.7433375500435884,
@@ -255,7 +255,7 @@ def test_the_guard_keeps_a_certificate_the_pair_does_support():
 
     # ...and a pair converged on the RELATIVE arm at a loose tolerance, which
     # reports gap=0.0 by design even though the spread is nonzero.
-    status, gap, certified = _guard()(
+    status, gap, certified, _bound = _guard()(
         "optimal",
         1.0,
         1.0 - 5e-5,
@@ -273,7 +273,7 @@ def test_the_guard_keeps_a_certificate_the_pair_does_support():
 def test_the_guard_is_downgrade_only():
     """It never manufactures a certificate, whatever it is handed."""
     for status in ("feasible", "time_limit", "node_limit"):
-        out_status, out_gap, out_cert = _guard()(
+        out_status, out_gap, out_cert, _b = _guard()(
             status,
             1.0,
             1.0,
@@ -299,7 +299,7 @@ def test_the_guard_is_downgrade_only():
 )
 def test_the_guard_passes_through_an_unusable_pair(obj, bound, is_max):
     """No pair to test means no judgement — never an invented withdrawal."""
-    status, gap, certified = _guard()(
+    status, gap, certified, _bound = _guard()(
         "optimal",
         obj,
         bound,
@@ -310,13 +310,15 @@ def test_the_guard_passes_through_an_unusable_pair(obj, bound, is_max):
         1e-10,
         "unit",
     )
+    # #1385 widened the return to carry the bound, which an unusable pair
+    # leaves untouched along with everything else.
     assert (status, gap, certified) == ("optimal", 0.0, True)
 
 
 def test_the_guard_handles_the_maximize_sense():
     """A MAXIMIZE bound is an UPPER bound; the sense must not invert the test."""
     # A genuine maximize certificate: bound just above the incumbent.
-    _s, _g, cert = _guard()(
+    _s, _g, cert, _b = _guard()(
         "optimal",
         10.0,
         10.0 + 1e-12,
@@ -329,7 +331,7 @@ def test_the_guard_handles_the_maximize_sense():
     )
     assert cert is True, "a valid maximize certificate was withdrawn"
     # A stale one: the bound is 1e-3 above the incumbent, far past 1e-9.
-    status, gap, cert = _guard()(
+    status, gap, cert, _b = _guard()(
         "optimal",
         10.0,
         10.001,
