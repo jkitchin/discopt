@@ -450,10 +450,17 @@ def _solve_lp(root: _RootLP, cuts_a, cuts_b, time_limit: float | None = None):
     # decline the LP exactly as a non-optimal status is declined.
     try:
         _f = float(root.ev.evaluate_objective(x))
-        _f_declared = -_f if root.c0_negate else _f
     except Exception as exc:  # pragma: no cover - evaluator robustness
-        logger.debug("root-cuts: objective re-check failed: %s", exc)
-        _f_declared = obj
+        # NOT "assume it agreed": an objective that cannot be evaluated at the
+        # LP optimum is a reason to decline the LP, not to skip the check that
+        # would have caught the disagreement (CLAUDE.md #7).
+        logger.warning(
+            "root-cuts: the model objective could not be evaluated at the LP optimum "
+            "(%s); declining the root LP rather than reporting an unchecked bound",
+            exc,
+        )
+        return None, None, None, None
+    _f_declared = -_f if root.c0_negate else _f
     if not np.isfinite(_f_declared) or abs(_f_declared - obj) > 1e-6 * max(
         1.0, abs(_f_declared), abs(obj)
     ):
