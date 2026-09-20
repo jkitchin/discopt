@@ -84,6 +84,7 @@ value in ``python/tests/data/known_optima.toml``.
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
@@ -117,6 +118,9 @@ _FUNC = {
 }
 # Rust term_func codes (must match ConvexFunc in convex_kernel.rs).
 _FUNC_CODE = {"log": 0, "exp": 1, "sqrt": 2, "log1p": 3, "sqr": 4}
+
+
+logger = logging.getLogger(__name__)
 
 
 class NotConvexKernel(Exception):
@@ -500,6 +504,27 @@ def _build(model, bounds) -> dict:
         raise NotConvexKernel("nonlinear objective")
     negate = bool(getattr(ev, "_negate", sense_max))
     c = (-ga if negate else ga).astype(float)
+    # ... and the objective's CONSTANT term. ``c`` is the gradient, so the
+    # kernel optimises ``c @ x`` while the model's objective is ``c @ x + f(0)``.
+    # Dropping it does not merely weaken a bound -- the kernel's incumbent IS
+    # the reported ``objective``, so a model with a constant came back with a
+    # CERTIFIED WRONG optimal value. Measured on ``min -3x + 4y + K`` s.t.
+    # ``exp(x) <= 20y`` with ``K = -4321.5``: reported objective
+    # -4.987196820759 at a point whose true objective is -4326.487196821, with
+    # ``bound`` -4.987196820767 (above the true optimum) and
+    # ``gap_certified=True``. Same defect as the one fixed in
+    # ``solvers/_root_cuts.py``; found by auditing that fix's class.
+    #
+    # Equal constants at BOTH sampled points is the affine check the gradient
+    # comparison alone cannot make: two gradients can coincide on a nonlinear
+    # objective, and then ``c @ x + c0`` is not the objective at all.
+    _c0a = float(ev.evaluate_objective(xa)) - float(ga @ xa)
+    _c0b = float(ev.evaluate_objective(xb)) - float(gb @ xb)
+    if not (np.isfinite(_c0a) and np.isfinite(_c0b)) or abs(_c0a - _c0b) > 1e-9 * max(
+        1.0, abs(_c0a), abs(_c0b)
+    ):
+        raise NotConvexKernel("objective is not affine")
+    obj_const = float(-_c0a if negate else _c0a)
 
     # Classify rows linear (constant Jacobian) vs nonlinear.
     ja = ev.evaluate_jacobian(xa)
@@ -581,7 +606,7 @@ def _build(model, bounds) -> dict:
         # withholding message exists to prevent -- so the sound fix is to leave the
         # model on the path that can produce real ones.
         raise NotConvexKernel("no integer variable: a continuous convex NLP keeps the NLP path")
-    return _marshal(n, c, sense_max, is_int, lb, ub, le_rows, eq_rows, nl_specs)
+    return _marshal(n, c, sense_max, is_int, lb, ub, le_rows, eq_rows, nl_specs, obj_const)
 
 
 def _constraint_expr(model, row_idx):
@@ -615,7 +640,7 @@ def _affine_csr(items):
     return np.asarray(cs, np.int64), np.asarray([items[c] for c in cs], float)
 
 
-def _marshal(n, c, sense_max, is_int, lb, ub, le_rows, eq_rows, nl_specs) -> dict:
+def _marshal(n, c, sense_max, is_int, lb, ub, le_rows, eq_rows, nl_specs, obj_const=0.0) -> dict:
     le_ptr, le_cols, le_coeffs, le_rhs = _csr_from_rows(le_rows, n)
     eq_ptr, eq_cols, eq_coeffs, eq_rhs = _csr_from_rows(eq_rows, n)
 
@@ -654,6 +679,9 @@ def _marshal(n, c, sense_max, is_int, lb, ub, le_rows, eq_rows, nl_specs) -> dic
     return dict(
         n=n,
         c=np.asarray(c, float),
+        # NOT a kernel input: ``solve_convex_tree`` pops it and adds it back to
+        # the kernel's incumbent/bound (see ``_build``).
+        obj_const=float(obj_const),
         integrality=np.asarray(is_int, np.int64),
         lo=np.asarray(lb, float),
         hi=np.asarray(ub, float),
@@ -744,8 +772,26 @@ def dominated_cols_enabled() -> bool:
 
 
 def solve_convex_tree(spec: dict, *, time_limit_s: Optional[float] = None, **cfg) -> dict:
-    """Run the native convex kernel on a marshaled `spec` (from build_convex_spec)."""
+    """Run the native convex kernel on a marshaled `spec` (from build_convex_spec).
+
+    The single chokepoint for the objective's constant term. ``spec["c"]`` is the
+    objective GRADIENT, so the kernel optimises ``c @ x`` while the model's
+    objective is ``c @ x + obj_const``; the constant is popped here (it is not a
+    kernel input) and added back to the incumbent and the bound on the way out.
+    Both must be corrected: the incumbent IS the reported ``objective``, and a
+    bound left on the shifted scale is a false dual bound. Doing it here rather
+    than at the call site means a new caller cannot forget it.
+
+    ``initial_incumbent`` is given in the MODEL's objective values, so it is
+    shifted the other way before it goes in.
+    """
     import discopt._rust as _rust
+
+    spec = dict(spec)
+    obj_const = float(spec.pop("obj_const", 0.0))
+    _init_inc = cfg.get("initial_incumbent", None)
+    if _init_inc is not None:
+        _init_inc = float(_init_inc) - obj_const
 
     params = dict(
         max_nodes=cfg.get("max_nodes", 100000),
@@ -756,10 +802,15 @@ def solve_convex_tree(spec: dict, *, time_limit_s: Optional[float] = None, **cfg
         max_sep_rounds=cfg.get("max_sep_rounds", 12),
         fbbt_rounds=cfg.get("fbbt_rounds", 20),
         dominated_cols=cfg.get("dominated_cols", dominated_cols_enabled()),
-        initial_incumbent=cfg.get("initial_incumbent", None),
+        initial_incumbent=_init_inc,
         time_limit_s=time_limit_s,
     )
     result: dict = dict(_rust.solve_convex_tree_py(**spec, **params))
+    if obj_const:
+        for _key in ("incumbent", "bound"):
+            _v = result.get(_key)
+            if _v is not None:
+                result[_key] = float(_v) + obj_const
     return result
 
 
@@ -900,6 +951,21 @@ def _attempt_convex_solve(
     gap = None
     if incumbent not in (None, 0.0):
         gap = abs(incumbent - r["bound"]) / max(1.0, abs(incumbent))
+    # The kernel's own termination test is relative, and it ran on the objective
+    # BEFORE the constant term was added back (see ``solve_convex_tree``). A
+    # shift leaves the absolute gap alone but changes the denominator, so a
+    # certificate earned on the shifted scale is not automatically one on the
+    # model's. Re-test it here on the values actually reported, and defer to the
+    # default path rather than certify a gap the caller did not ask for.
+    if gap is not None and gap > gap_tolerance:
+        logger.debug(
+            "convex kernel: relative gap %.3g on the model's objective scale exceeds "
+            "the requested %.3g (the kernel converged on the pre-constant scale); "
+            "deferring to the default path",
+            gap,
+            gap_tolerance,
+        )
+        return None
     return SolveResult(
         status=status,
         objective=float(incumbent),
