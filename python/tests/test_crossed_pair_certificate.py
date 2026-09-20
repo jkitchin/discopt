@@ -1,4 +1,4 @@
-"""#1385 — a bound past its own incumbent is not a certificate.
+"""A bound past its own incumbent is not a certificate.
 
 The hole this closes was in #1383's own guard, shipped hours earlier.
 ``_withhold_stale_certificate`` re-tests the final ``(objective, bound)`` pair
@@ -25,12 +25,16 @@ literal CLAUDE.md §1 invariant — published as a certificate. Two independent
 routes (the default path and NLP-BB itself) attain -40358.154769, so the
 incumbent is real and the bound is not.
 
-**Scope, stated honestly.** The crossing is produced further up: the NLP-BB root
-bound on this model is wrong, not merely loose (``root_bound`` is the same
-+314.237382). This file pins only what belongs at the assembly boundary —
-refusing to certify, and refusing to publish, a pair that contradicts itself,
-*whatever produced it*. The wrong root bound is not fixed here and is not
-covered by these tests.
+**Scope.** The crossing was produced further up, and that source is now fixed:
+``_root_cuts._RootLP`` built the root LP objective from ``evaluate_gradient``
+alone and dropped the objective's CONSTANT term, so on nvs14's exact
+integer-bilinear lift (``f(0) = -40792.141``) the published bound was offset by
+that constant. See ``test_nlpbb_root_cuts_781.py`` for that fix and its tests.
+
+This file pins what belongs at the assembly boundary — refusing to certify, and
+refusing to publish, a pair that contradicts itself, *whatever produced it*. It
+is the backstop, not the fix: it stays load-bearing precisely because the next
+wrong bound will come from somewhere this guard has never heard of.
 """
 
 from __future__ import annotations

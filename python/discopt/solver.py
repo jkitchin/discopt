@@ -5366,7 +5366,7 @@ def _withhold_stale_certificate(
     if not np.isfinite(obj_val) or not np.isfinite(bound_val):
         return status, gap_val, gap_certified, bound_val
 
-    # #1385: the CROSSED pair first, because the convergence test cannot see it.
+    # The CROSSED pair first, because the convergence test cannot see it.
     # ``_gap_values_converged`` computes ``max(0.0, ub - lb)``, so an INVERTED
     # pair clamps to gap 0 and reads as converged -- which is why
     # ``_recertify_gap_closed``'s own docstring says "the caller still owns the
@@ -5384,13 +5384,16 @@ def _withhold_stale_certificate(
     # published as a certificate, and this guard waved it through because
     # ``max(0.0, ...)`` had already turned the inversion into a zero gap.
     #
-    # The crossing itself is a defect further up (the NLP-BB root bound is wrong
-    # on this model, not merely loose); what belongs HERE is refusing to certify
-    # a pair that contradicts itself, whatever produced it.
+    # The crossing itself was a defect further up -- ``_root_cuts._RootLP`` built
+    # the root LP objective from the gradient alone and dropped the objective's
+    # CONSTANT term, so on nvs14's integer-bilinear lift (f(0) = -40792.141) the
+    # published bound was offset by that constant. That is fixed at the source;
+    # what belongs HERE is refusing to certify a pair that contradicts itself,
+    # whatever produced it, so this guard is kept as the backstop it is.
     if _bound_crosses_objective(float(bound_val), float(obj_val), is_maximize):
         crossed_gap = abs(float(obj_val) - float(bound_val)) / max(1.0, abs(float(obj_val)))
         logger.warning(
-            "%s: withdrawing the optimality certificate (#1385) - the reported dual "
+            "%s: withdrawing the optimality certificate - the reported dual "
             "bound %.12g CROSSES the incumbent %.12g it is reported against "
             "(%s sense); a bound past its own incumbent is not a certificate, "
             "whatever produced it.",
@@ -20467,7 +20470,7 @@ def _solve_node_nlp(
                 )
 
     if nlp_solver != "ipopt":
-        # #1384: everything that is not an EXPLICIT ``ipopt`` request solves with
+        # Everything that is not an EXPLICIT ``ipopt`` request solves with
         # POUNCE, the documented default and a CORE dependency.
         #
         # This used to be spelled as a whitelist -- ``in ("pounce", "ipm",
