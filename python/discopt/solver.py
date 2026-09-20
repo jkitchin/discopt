@@ -5514,6 +5514,102 @@ def _resolve_abs_gap_tolerance(abs_gap_tolerance: Optional[float]) -> float:
     return val
 
 
+def _stamp_converged_gap(result, objective: float, bound: float, criterion: str) -> None:
+    """Report a CONVERGED solve's gap on the convergence test's own arithmetic.
+
+    #1243 already derives ``solver_stats["gap_criterion"]`` from the returned
+    ``(objective, bound)`` pair "with the SAME arithmetic the convergence test
+    uses, so the two can never disagree". That reasoning applies to the NUMBER
+    as much as to the arm's name, and it was not being applied: the B&B routes
+    forwarded the tree's hybrid gap, whose denominator is floored at 1.0, while
+    the convergence test divides by ``max(|ub|, |lb|, 1e-10)``.
+
+    Measured on the six-hump camel (#1386), every row of which converged exactly
+    as documented:
+
+    ===============  ============  ===============  ==========
+    gap_tolerance    reported gap  criterion's gap  converged?
+    ===============  ============  ===============  ==========
+    0.9                    8.5706           0.8955  yes
+    0.99                  56.0947           0.9825  yes
+    1.0                  258.3641           1.0000  yes
+    ===============  ============  ===============  ==========
+
+    So a caller doing the natural ``assert r.gap <= gap_tolerance`` saw it
+    violated on a correctly converged solve, by up to 258x. Below unit objective
+    scale the disagreement runs the other way and the forwarded gap UNDERSTATES
+    the criterion's, which is the worse direction.
+
+    Two deliberate limits on the scope:
+
+    * Only where a criterion actually fired. An exit that stopped on a budget or
+      an exhausted tree claims nothing about a tolerance, so there is nothing for
+      its gap to be consistent WITH; those keep the floored
+      ``|obj - bound| / max(1, |obj|)`` that #933 defines and tests.
+    * A gap closed by the ABSOLUTE arm reports ``0.0``. That arm exists precisely
+      because the relative gap degenerates near a zero optimum: ``min x`` over
+      ``(x<=3) or (x>=7)`` on ``[0,10]`` converges at objective 2.46e-09 against
+      a bound of 0.0 -- an absolute gap of 2.46e-09 and a relative gap of exactly
+      1.0. Reporting 1.0 for a solve 2.5e-09 from the true optimum would be
+      arithmetically honest and practically useless. Only the relative arm yields
+      a relative number.
+    """
+    if criterion == "absolute":
+        result.gap = 0.0
+        return
+    relative = _relative_gap_from_objective_bound(objective, bound)
+    if relative is not None:
+        result.gap = relative
+
+
+def _validate_solve_budgets(gap_tolerance: float, time_limit: float) -> None:
+    """Reject option *values* that silently disable the thing they configure (#1386).
+
+    ``Model.solve`` already rejects an unknown option NAME, and says why::
+
+        Unknown solver options are rejected rather than silently ignored (a
+        swallowed option would leave the solver at its default while you
+        believe it was set).
+
+    The same failure was reachable one level down, through a known name with a
+    value that cannot be satisfied. ``gap_tolerance=float("nan")`` makes every
+    ``rel_gap <= tol`` comparison False, so the relative arm of the convergence
+    disjunction is silently switched off and the solve rides entirely on the
+    absolute arm -- the caller believes they set a tolerance and set nothing. A
+    negative tolerance is unsatisfiable the same way. ``time_limit=nan`` is
+    worse: every ``elapsed > time_limit`` deadline check is False, so the budget
+    never binds at all.
+
+    What is deliberately NOT rejected, because a measurement says it works:
+
+    * ``gap_tolerance = 0``. Legitimate -- it asks for the absolute arm alone.
+    * ``gap_tolerance >= 1``. Measured on the six-hump camel at 0.9, 0.99 and
+      1.0, the search stops exactly when the relative gap reaches the requested
+      value (0.8955, 0.9825, 1.0) and reports ``gap_criterion="relative"``. A
+      loose tolerance is a coarse answer, which is what it asks for; refusing it
+      would be a policy the evidence does not support.
+    * ``time_limit <= 0``. A caller computing ``deadline - now`` can legitimately
+      arrive at a non-positive budget, and the honest answer -- an immediate
+      ``status="time_limit"`` -- is what they already get. Raising would turn a
+      correct early exit into an error.
+    """
+    gap = float(gap_tolerance)
+    if not np.isfinite(gap) or gap < 0.0:
+        raise ValueError(
+            f"gap_tolerance must be a finite non-negative number, got {gap_tolerance!r}. "
+            "A NaN or negative relative tolerance can never be met, so it would "
+            "silently disable the relative arm of the convergence test and leave "
+            "the solve running on the absolute arm alone -- the swallowed-option "
+            "failure that rejecting unknown option names already guards against."
+        )
+    if math.isnan(float(time_limit)):
+        raise ValueError(
+            "time_limit must not be NaN: every deadline check is a comparison "
+            "against it, and every comparison with NaN is False, so the budget "
+            "would never bind and the solve would not stop."
+        )
+
+
 #: Effective ``(gap_tolerance, abs_gap_tolerance)`` of the solve currently
 #: running, pushed by ``solve_model`` and popped by ``_stamp_layer_timing``.
 #:
@@ -8479,6 +8575,7 @@ def _stamp_layer_timing(fn: _F) -> _F:
                     stats = {}
                     result.solver_stats = stats
                 stats["gap_criterion"] = _crit
+                _stamp_converged_gap(result, _o, _b, _crit)
         # #1236 review finding 6: `node_count` is the WINNING arm's tree. When a
         # cheap-first probe ran and lost, its nodes are real work this call did and
         # are reported here rather than vanishing.
@@ -8877,6 +8974,7 @@ def solve_model(
     # point (`_stamp_layer_timing`) can report which criterion stopped the solve
     # without threading a field through ~18 SolveResult construction sites.
     abs_gap_tol = _resolve_abs_gap_tolerance(abs_gap_tolerance)
+    _validate_solve_budgets(gap_tolerance, time_limit)
     _GAP_TOLERANCES.append((float(gap_tolerance), abs_gap_tol))
 
     # --- Enforce float64 precision ---
