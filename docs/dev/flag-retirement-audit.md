@@ -39,6 +39,14 @@ The five that remain: `COEF_TIGHTEN` (graduation candidate, benefit measured),
 `G_CONVEX_CUTS`, `OA_INFEASIBLE_NOGOOD`, `IPX_CHEAP_FIRST` and `NLP_NATIVE` (documented
 opt-outs).
 
+The marker below is the machine-readable count of *live* default-OFF gates over solver
+math. `test_1345_flag_retirement_audit.py` asserts the source scan agrees with it exactly,
+so this document and the tree cannot drift apart silently — and a retirement has to update
+it, which §5 requires anyway. Three prose blocks above quote historical counts (14, 11);
+this marker is the only current one.
+
+<!-- live-solver-math-gates: 5 -->
+
 **The finding that matters more than the count.** This audit's first pass triaged flags
 from their *gate docstrings*, and for **four of the nine** that was wrong — the evidence
 was in `docs/dev/` all along. `G_CONVEX_CUTS` had a panel showing −26 % nodes;
