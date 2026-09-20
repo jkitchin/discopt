@@ -5540,7 +5540,7 @@ def _stamp_converged_gap(result, objective: float, bound: float, criterion: str)
     scale the disagreement runs the other way and the forwarded gap UNDERSTATES
     the criterion's, which is the worse direction.
 
-    Two deliberate limits on the scope:
+    Three deliberate limits on the scope, each of them a measurement:
 
     * Only where a criterion actually fired. An exit that stopped on a budget or
       an exhausted tree claims nothing about a tolerance, so there is nothing for
@@ -5553,7 +5553,19 @@ def _stamp_converged_gap(result, objective: float, bound: float, criterion: str)
       1.0. Reporting 1.0 for a solve 2.5e-09 from the true optimum would be
       arithmetically honest and practically useless. Only the relative arm yields
       a relative number.
+    * A route that reported ``gap=None`` keeps ``None``. This RECONCILES a gap a
+      route computed; it does not manufacture one where the route declined. AMP
+      deliberately withholds the relative gap when the incumbent objective is
+      near zero (``min x**2`` over ``[-1,1]`` -> ``objective=0.0``, ``gap=None``),
+      and ``None`` is the stronger statement: "a relative gap is not defined for
+      this pair", not "it is zero". Overwriting it with a number the route never
+      reported is the same failure ``_kkt_from_info`` avoids by omitting a
+      missing residual rather than filling in a sentinel. Caught by
+      test_amp_integration.py::test_zero_upper_bound_reports_no_relative_gap,
+      which an earlier version of this function regressed.
     """
+    if result.gap is None:
+        return
     if criterion == "absolute":
         result.gap = 0.0
         return

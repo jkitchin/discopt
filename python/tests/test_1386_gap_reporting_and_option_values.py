@@ -180,3 +180,24 @@ def test_values_that_are_coarse_but_satisfiable_are_still_accepted(ok_kwargs):
     kwargs = {"time_limit": 30, **ok_kwargs}
     r = camel().solve(**kwargs)
     assert r.status in {"optimal", "feasible", "time_limit"}
+
+
+@pytest.mark.smoke
+def test_a_route_that_withholds_the_gap_keeps_none():
+    """This RECONCILES a gap a route computed; it must not manufacture one.
+
+    AMP deliberately withholds the relative gap when the incumbent objective is
+    near zero, and ``None`` is the stronger statement -- "a relative gap is not
+    defined for this pair", not "it is zero". An earlier version of the fix
+    overwrote it with ``0.0`` and regressed
+    ``test_amp_integration.py::test_zero_upper_bound_reports_no_relative_gap``;
+    this pins the contract from the #1386 side too.
+    """
+    m = Model("zero_gap")
+    x = m.continuous("x", lb=-1, ub=1)
+    m.minimize(x**2)
+    r = m.solve(solver="amp", rel_gap=1e-4, time_limit=30)
+
+    assert r.status == "optimal"
+    assert abs(r.objective) <= 1e-6
+    assert r.gap is None
