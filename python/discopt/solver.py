@@ -3372,6 +3372,10 @@ def _weakly_active_crossover(x, lb, ub, mult_lower, mult_upper, grad, tol=_CROSS
 # heuristic accepts an incumbent. Deliberately NOT the 1e-4 that this module's
 # local ``_check_constraint_feasibility`` defaults to; see the gate's call site.
 _NLPBB_EXIT_ABS_TOL = 1e-6
+#: #1383: relative slack allowed before a refined incumbent counts as *worse* than
+#: the one it would replace. Only float noise is forgiven -- a refinement that
+#: genuinely loses objective is refused whenever the incumbent is already feasible.
+_REFINE_DEGRADE_EPS = 1e-12
 # Term-magnitude forgiveness, identical to the two arbiters above: a row built
 # from terms of size ~1e5 carries ~1e-6 of pure cancellation noise, so an
 # absolute-only test at 1e-6 rejects genuinely optimal points (the prob07 lesson
@@ -3553,6 +3557,83 @@ def _is_integer_feasible_solution(x, int_offsets, int_sizes, tol=1e-5):
             if not np.isfinite(xj) or abs(xj - round(xj)) > tol:
                 return False
     return True
+
+
+def _integral_claim_recovery(
+    sol_flat,
+    rounded_inc,
+    *,
+    int_offsets,
+    int_sizes,
+    declared_box,
+    c,
+    obj_const,
+    A_ub,
+    b_ub,
+    A_eq,
+    b_eq,
+    t_start,
+    time_limit,
+    Q=None,
+    arbiter,
+):
+    """Decide what a snap that leaves the declared rows means, and recover from it.
+
+    Returns ``("ok", point, objective_or_None)`` when a usable point was found,
+    or ``("not_snap_caused", None, None)`` when the snap is not what broke
+    feasibility -- in which case the caller must leave its incumbent alone and let
+    the #952 exit gate judge it, with #952's own message.
+
+    Why the two arms (#1380 review). The first cut of this guard refused whenever
+    the snapped point missed the rows, on the theory that only a big-M row can
+    move a row that far. That is false, and measurably: a snap can move a row by
+    ``sum_j |a_ij| * integrality_tol``, and ``integrality_tol = 1e-5`` is already
+    TEN TIMES ``abs_tol = 1e-6``, so at *unit* coefficients a three-term row
+    exceeds the feasibility tolerance without any big-M at all. Measured on
+    ``test_oa_master_is_highs_free``'s ordinary convex MINLP
+    (``min (x-1.5)^2 + y`` s.t. ``x + y >= 2``): the refusal fired on a row with
+    ``max|a_ij| = 1.0`` and three nonzeros, at a violation of 5.0e-06.
+
+    Worse, refusing *here* pre-empted the #952 exit gate: that gate's own
+    regression tests inject an EXACTLY integral point perturbed on a continuous
+    slice, where the snap is a no-op, and the refusal relabelled their failure as
+    a big-M problem the model did not have.
+
+    So snap-causation is established rather than assumed -- the unrounded point
+    must clear the same arbiter the snapped one fails -- and where it IS the
+    cause, the answer is to *re-derive the claim* rather than refuse it: fix the
+    discrete columns at their integral realisation and re-solve the continuous
+    ones over the declared rows and box. That is not repair-instead-of-refusal
+    (CLAUDE.md §3): the point is a candidate, the exit gate still judges it, and
+    the objective returned is the objective OF the re-derived point, so nothing
+    is reported that was not computed at the point being reported.
+    """
+    if not arbiter(np.asarray(sol_flat, dtype=np.float64)):
+        # The incumbent was already off-row; the snap is not the cause and this
+        # is not this guard's business.
+        return "not_snap_caused", None, None
+
+    box = np.asarray(declared_box, dtype=np.float64)
+    recovered = _pounce_snap_incumbent(
+        np.asarray(rounded_inc, dtype=np.float64),
+        int_offsets,
+        int_sizes,
+        box[:, 0],
+        box[:, 1],
+        c,
+        float(obj_const),
+        A_ub,
+        b_ub,
+        A_eq,
+        b_eq,
+        t_start,
+        time_limit,
+        Q=Q,
+    )
+    if recovered is None:
+        return "no_completion", None, None
+    _obj, _x = recovered
+    return "ok", np.asarray(_x, dtype=np.float64), float(_obj)
 
 
 def _round_incumbent_integers(
@@ -5411,6 +5492,74 @@ def _recertify_gap_closed(
     return _gap_values_converged(float(ub), float(lb), gap_tolerance, abs_gap_tol)
 
 
+def _withhold_stale_certificate(
+    status: str,
+    obj_val: Optional[float],
+    bound_val: Optional[float],
+    gap_val: Optional[float],
+    gap_certified: bool,
+    is_maximize: bool,
+    gap_tolerance: float,
+    abs_gap_tol: float,
+    where: str,
+) -> tuple[str, Optional[float], bool]:
+    """Withdraw a certificate the FINAL ``(objective, bound)`` pair does not support.
+
+    A tree computes its gap against the incumbent it converged on, and the
+    assembly that follows may then change ``objective`` -- an incumbent
+    refinement, a repair, a cross-route merge. Nothing re-tested the certificate
+    afterwards, so a ``gap`` and a ``gap_certified`` describing the point that was
+    *replaced* were published beside the point that replaced it.
+
+    Measured on a 5-variable random MINLP (round7 seed 338, its equality split
+    into two inequalities), with the caller asking for ``gap_tolerance=1e-9`` and
+    ``abs_gap_tolerance=1e-10``: the NLP-BB path returned ``status="optimal"``,
+    ``gap=0.0``, ``gap_certified=True`` with ``objective=-0.7432619321`` against
+    its own ``bound=-0.7433375500`` -- a real gap of 1.0e-4, five orders past
+    either tolerance, and an objective 7.6e-5 worse than the optimum the tree had
+    actually proved. #1383 removes the cause (the refinement no longer trades a
+    proved objective for a worse one); this is the general guard, so that no
+    later stage can publish a certificate its own numbers contradict.
+
+    The test is :func:`_recertify_gap_closed` -- the same predicate that STOPS the
+    search and that the ``feasible -> optimal`` sites use to GRANT certification.
+    Granting and retaining a certificate therefore ask one question, and a pair
+    that passes the grant cannot fail the retain.
+
+    Downgrade-only by construction: it never raises ``gap_certified``, never
+    promotes a status, and never touches ``bound``. A withdrawal replaces the
+    stale ``gap`` with the honest one computed from the published pair.
+
+    Returns the possibly-corrected ``(status, gap, gap_certified)``.
+    """
+    if not gap_certified:
+        return status, gap_val, gap_certified
+    if obj_val is None or bound_val is None:
+        return status, gap_val, gap_certified
+    if not np.isfinite(obj_val) or not np.isfinite(bound_val):
+        return status, gap_val, gap_certified
+    if _recertify_gap_closed(
+        float(obj_val), float(bound_val), is_maximize, gap_tolerance, abs_gap_tol
+    ):
+        return status, gap_val, gap_certified
+
+    honest_gap = abs(float(obj_val) - float(bound_val)) / max(1.0, abs(float(obj_val)))
+    logger.warning(
+        "%s: withdrawing the optimality certificate (#1383) - the reported "
+        "incumbent %.12g and bound %.12g do not close the gap at the requested "
+        "tolerances (rel=%g, abs=%g); reporting gap=%.3e and status=%s instead of "
+        "a certificate the pair does not support.",
+        where,
+        float(obj_val),
+        float(bound_val),
+        gap_tolerance,
+        abs_gap_tol,
+        honest_gap,
+        "feasible" if status == "optimal" else status,
+    )
+    return ("feasible" if status == "optimal" else status), honest_gap, False
+
+
 def _gap_criterion(ub: float, lb: float, gap_tolerance: float, abs_gap_tol: float) -> Optional[str]:
     """Which of the two convergence criteria the final ``(ub, lb)`` pair meets.
 
@@ -6722,6 +6871,22 @@ def _gap_is_closed(result, tol: float = 1e-6) -> bool:
     return gap is not None and np.isfinite(gap) and float(gap) <= tol
 
 
+def _incumbent_is_unverified(result) -> bool:
+    """Whether ``result``'s incumbent failed its producer's own feasibility gate.
+
+    Distinct from "uncertified": a time-limited solve is uncertified and its
+    incumbent is a perfectly good feasible point. This is the narrower statement
+    that the producer *checked* the point and it did not verify -- set by the OA
+    exit gate's refusal branch (:func:`discopt.solvers.oa.solve_oa`), which then
+    reports the point anyway so a caller can inspect what was refused.
+    """
+    stats = getattr(result, "solver_stats", None) or {}
+    try:
+        return bool(float(stats.get("oa/unverified_incumbent", 0.0)))
+    except (TypeError, ValueError):
+        return False
+
+
 def _merge_route_and_fallback(route, fallback, is_maximize: bool):
     """Return the better of an auto-routed result and the fallback that followed.
 
@@ -6764,6 +6929,33 @@ def _merge_route_and_fallback(route, fallback, is_maximize: bool):
         return route
 
     route_wins = _route_is_better(route.objective, fallback.objective, is_maximize)
+    # #1380: an UNVERIFIED incumbent may never win on its number. The OA exit gate
+    # verifies the point it is about to return and, when that fails and the
+    # near-bound repair does not fix it, reports the point anyway with
+    # ``status="feasible"`` -- deliberately, so a caller can see what was refused.
+    # But ``objective`` is the field this merge ranks on, and an unverified point's
+    # objective is not a value any feasible point is known to attain, so ranking it
+    # here reads a diagnostic as a primal bound.
+    #
+    # Measured on ``min -x + 3z + 0.001x^2`` s.t. ``x <= 1e7 z``, ``x in [0,10]``,
+    # ``z`` binary (true optimum -6.9): the route's point failed verification at
+    # ``z = 1.0009e-06`` -- a binary that is not a binary -- and its -9.899997 beat
+    # the fallback's correctly re-derived -6.1e-09 for being smaller, so the solve
+    # returned a value three units below anything the model attains.
+    #
+    # Distinguishing this from an ordinary uncertified run matters: a time-limited
+    # fallback is uncertified too and its incumbent is perfectly good. The flag is
+    # set only by the refusal branch, so only a point that failed verification is
+    # held back, and only when there is something verified to prefer instead.
+    if route_wins and _incumbent_is_unverified(route) and fallback.objective is not None:
+        logger.warning(
+            "#1059 merge: the route's objective %.10g came from a point its own exit "
+            "gate could not verify, so it is not ranked against the fallback's "
+            "%.10g (#1380); the fallback's incumbent is reported.",
+            route.objective,
+            fallback.objective,
+        )
+        route_wins = False
     # A certificate outranks a better number. If the fallback closed the gap and
     # the route did not, no feasible point can legitimately beat it -- so a route
     # objective that appears to is evidence of an inconsistency somewhere, not a
@@ -17750,6 +17942,21 @@ def solve_model(
         if _prov_delta > 0:
             _solver_stats[f"bound_provenance/{_prov_tag}"] = float(_prov_delta)
 
+    # #1383: the certificate must survive the FINAL (objective, bound) pair.
+    # Everything above may still have moved `obj_val` after the tree computed
+    # its gap, and nothing re-asked whether the certificate still holds.
+    status, gap_val, _gap_certified = _withhold_stale_certificate(
+        status,
+        obj_val,
+        bound_val,
+        gap_val,
+        _gap_certified,
+        _is_max,
+        gap_tolerance,
+        abs_gap_tol,
+        "spatial B&B",
+    )
+
     return SolveResult(
         status=status,
         objective=obj_val,
@@ -19911,6 +20118,36 @@ def _solve_nlp_bb(
                 )
                 if abs(_ref_obj - obj_val) <= 1e-4 * (1.0 + abs(obj_val)):
                     _adopt = _ref_exc <= _NLPBB_EXIT_ABS_TOL or _ref_exc <= _inc_exc
+                    # #1383: "never-degrade" has to mean the OBJECTIVE too, not
+                    # only the constraint excess. This branch exists to repair
+                    # feasibility, and "the objectives match" is a 1e-4 RELATIVE
+                    # window -- wide enough to swallow a real loss. When the
+                    # incumbent already clears the exit gate there is nothing to
+                    # repair, so adopting a worse point buys nothing and costs the
+                    # optimum that was just proved.
+                    #
+                    # Measured on a 5-variable random MINLP (round7 seed 338, the
+                    # equality split into two inequalities): the tree closed its
+                    # gap at -0.7433375500 -- the true optimum to 7 digits, by an
+                    # independent scipy multistart -- and the refined point at
+                    # -0.7432619321 was adopted 7.56e-5 worse, inside the 1.74e-4
+                    # window. ``gap`` and ``bound`` were left describing the point
+                    # that was replaced, so the solve reported ``optimal`` at
+                    # -0.74326193 against its own ``bound`` of -0.74333755.
+                    if (
+                        _adopt
+                        and _inc_exc <= _NLPBB_EXIT_ABS_TOL
+                        and _ref_obj > obj_val + (_REFINE_DEGRADE_EPS * (1.0 + abs(obj_val)))
+                    ):
+                        _adopt = False
+                        logger.debug(
+                            "NLP-BB: rejecting the refined incumbent (#1383) - the "
+                            "incumbent already clears the exit gate (excess %.3e) and "
+                            "the refined objective %.12g is worse than %.12g.",
+                            _inc_exc,
+                            _ref_obj,
+                            obj_val,
+                        )
                     if not _adopt:
                         logger.debug(
                             "NLP-BB: rejecting the refined incumbent (#1199) — its "
@@ -20261,6 +20498,21 @@ def _solve_nlp_bb(
         {"budget/incumbent_extension_s": float(_incumbent_extension_taken)}
         if _incumbent_extension_taken > 0.0
         else None
+    )
+
+    # #1383: the certificate must survive the FINAL (objective, bound) pair.
+    # Everything above may still have moved `obj_val` after the tree computed
+    # its gap, and nothing re-asked whether the certificate still holds.
+    status, gap_val, _gap_certified = _withhold_stale_certificate(
+        status,
+        obj_val,
+        bound_val,
+        gap_val,
+        _gap_certified,
+        _nlpbb_is_max,
+        gap_tolerance,
+        abs_gap_tol,
+        "NLP-BB",
     )
 
     return SolveResult(
@@ -25275,7 +25527,24 @@ def _solve_milp_simplex(
 
     def _point_feasible(xo: np.ndarray) -> bool:
         """Never take the engine's ``optimal``/``feasible`` on faith: verify the
-        returned point against the model's own rows, bounds, and integrality."""
+        returned point against the model's own rows, bounds, and integrality.
+
+        #1380: integrality is tested FIRST and the rows are then tested at the
+        point being CLAIMED -- the integral one. Testing the rows at the raw
+        point and integrality beside it lets an integer column inside the
+        integrality tolerance buy ``M * tol`` of row slack; on ``x <= 1e7 z`` a
+        binary returned at 1e-6 passed both tests while carrying x to 10, and
+        this engine certified ``optimal`` at an objective below the model's true
+        optimum.
+        """
+        for _off, _sz in zip(int_offsets, int_sizes):
+            seg = xo[_off : _off + int(_sz)]
+            if np.any(np.abs(seg - np.round(seg)) > 1e-4):
+                return False
+        if int_idx:
+            from discopt.validation.feasibility import snap_integer_columns
+
+            xo = snap_integer_columns(xo, int_idx)
         if _A_ub_m is not None and _b_ub_m is not None and _A_ub_m.shape[0]:
             if not bool(np.all(_A_ub_m @ xo <= _b_ub_m + _gate_tol * (1.0 + np.abs(_b_ub_m)))):
                 return False
@@ -25288,10 +25557,6 @@ def _solve_milp_simplex(
             return False
         if not bool(np.all(xo <= _xu_gate + _gate_tol)):
             return False
-        for _off, _sz in zip(int_offsets, int_sizes):
-            seg = xo[_off : _off + int(_sz)]
-            if np.any(np.abs(seg - np.round(seg)) > 1e-4):
-                return False
         return True
 
     # Re-entry on an uncertified ``feasible`` (issue #698). The first slice
@@ -26189,18 +26454,80 @@ def _solve_milp_bb(
         ):
             sol_flat = _rounded_inc
         else:
-            logger.debug(
-                "MILP-BB: integer snap would leave the declared rows (%s); "
-                "reporting the unrounded incumbent",
-                _matrix_solution_violations(
+            # #1380: "report the unrounded incumbent" is what opened the big-M
+            # hole. The unrounded point is not an answer to the declared model —
+            # its integer columns are not integers — so its objective is not an
+            # achievable value. Measured on ``min -x + 3z`` s.t. ``x <= 1e7 z``,
+            # ``x in [0,10]``, ``z`` binary: the tree's incumbent sat at
+            # ``z = 1e-6`` (inside integrality_tol=1e-5, so every integrality
+            # test passed) carrying ``x = 10`` on a row the integral point
+            # violates by 10, and this path reported ``optimal -9.999997``
+            # against a true optimum of -7.0.
+            #
+            # But refusing on every snap that leaves the rows is far too broad —
+            # see :func:`_integral_claim_recovery` for the measurement (an
+            # ordinary convex MINLP, ``max|a_ij| = 1.0``, refused at 5.0e-06).
+            # Establish snap-causation, then re-derive the claim instead.
+            def _milp_arbiter(_p):
+                return _matrix_solution_feasible(
+                    np.asarray(_p[:n_orig], dtype=np.float64),
+                    _A_ub_m,
+                    _b_ub_m,
+                    _A_eq_m,
+                    _b_eq_m,
+                    _declared_box,
+                )
+
+            _verdict, _point, _pobj = _integral_claim_recovery(
+                sol_flat,
+                _rounded_inc,
+                int_offsets=int_offsets,
+                int_sizes=int_sizes,
+                declared_box=_declared_box,
+                c=_c_m,
+                obj_const=float(lp_data_orig.obj_const),
+                A_ub=_A_ub_m,
+                b_ub=_b_ub_m,
+                A_eq=_A_eq_m,
+                b_eq=_b_eq_m,
+                t_start=t_start,
+                time_limit=time_limit,
+                arbiter=_milp_arbiter,
+            )
+            if _verdict == "ok" and _milp_arbiter(_point):
+                # The point being CLAIMED, with the objective computed AT it.
+                logger.info(
+                    "MILP-BB: re-derived the incumbent at its integral realisation "
+                    "(#1380): objective %.12g -> %.12g.",
+                    obj_val,
+                    _pobj,
+                )
+                sol_flat = np.asarray(_point, dtype=np.float64)
+                obj_val = float(_pobj)
+            elif _verdict == "not_snap_caused":
+                # The incumbent was already off-row. Leave it exactly as it was so
+                # the #952 exit gate below judges it, and says so in its own words.
+                logger.debug(
+                    "MILP-BB: the integer snap is not what leaves the rows; "
+                    "deferring to the #952 exit gate."
+                )
+            else:
+                _snap_why = _matrix_solution_violations(
                     np.asarray(_rounded_inc[:n_orig], dtype=np.float64),
                     _A_ub_m,
                     _b_ub_m,
                     _A_eq_m,
                     _b_eq_m,
                     _declared_box,
-                ),
-            )
+                )
+                raise RuntimeError(
+                    "MILP-BB incumbent has no feasible integral realisation: snapping "
+                    f"its integer columns to integers leaves the declared rows "
+                    f"({_snap_why}), and re-solving the continuous columns with the "
+                    "integers fixed there found no feasible completion. The unrounded "
+                    "point is not a solution of the declared model, so it is not "
+                    "reported in its place."
+                )
 
         # #952: exit gate, the same one ``_solve_miqp_bb`` grew — this path's
         # incumbent exit was structurally identical (round, unpack, return) with no
@@ -26407,6 +26734,21 @@ def _solve_milp_bb(
     # than inferred from a wall-clock reading.
     if _incumbent_extension_taken > 0.0:
         _milp_solver_stats["budget/incumbent_extension_s"] = float(_incumbent_extension_taken)
+
+    # #1383: the certificate must survive the FINAL (objective, bound) pair.
+    # Everything above may still have moved `obj_val` after the tree computed
+    # its gap, and nothing re-asked whether the certificate still holds.
+    status, gap_val, _gap_certified = _withhold_stale_certificate(
+        status,
+        obj_val,
+        bound_val,
+        gap_val,
+        _gap_certified,
+        _maximize,
+        gap_tolerance,
+        abs_gap_tol,
+        "MILP-BB",
+    )
 
     return SolveResult(
         status=status,
@@ -26950,18 +27292,73 @@ def _solve_miqp_bb(
         ):
             sol_flat = _rounded_inc
         else:
-            logger.debug(
-                "MIQP-BB: integer snap would leave the declared rows (%s); "
-                "reporting the unrounded incumbent",
-                _matrix_solution_violations(
+            # #1380: the MILP path's sibling of this fallback is what let a binary
+            # at 1e-6 certify an objective the model cannot attain, and this path
+            # reaches it the same way. Measured on ``min -x + 3z + 0.001x^2`` s.t.
+            # ``x <= 1e7 z``, ``x in [0,10]``, ``z`` binary: MIQP-BB returned
+            # ``optimal -9.8999969`` at ``z = 1.0000009e-06`` against a true
+            # optimum of -6.9.
+            #
+            # Same shape as the MILP site, same two arms, and for the same reason
+            # — see :func:`_integral_claim_recovery`.
+            def _miqp_arbiter(_p):
+                return _matrix_solution_feasible(
+                    np.asarray(_p[:n_orig], dtype=np.float64),
+                    _A_ub_m,
+                    _b_ub_m,
+                    _A_eq_m,
+                    _b_eq_m,
+                    _declared_box,
+                )
+
+            _verdict, _point, _pobj = _integral_claim_recovery(
+                sol_flat,
+                _rounded_inc,
+                int_offsets=int_offsets,
+                int_sizes=int_sizes,
+                declared_box=_declared_box,
+                c=_c_m,
+                obj_const=float(qp_data.obj_const),
+                A_ub=_A_ub_m,
+                b_ub=_b_ub_m,
+                A_eq=_A_eq_m,
+                b_eq=_b_eq_m,
+                t_start=t_start,
+                time_limit=time_limit,
+                Q=_Q_m,
+                arbiter=_miqp_arbiter,
+            )
+            if _verdict == "ok" and _miqp_arbiter(_point):
+                logger.info(
+                    "MIQP-BB: re-derived the incumbent at its integral realisation "
+                    "(#1380): objective %.12g -> %.12g.",
+                    obj_val,
+                    _pobj,
+                )
+                sol_flat = np.asarray(_point, dtype=np.float64)
+                obj_val = float(_pobj)
+            elif _verdict == "not_snap_caused":
+                logger.debug(
+                    "MIQP-BB: the integer snap is not what leaves the rows; "
+                    "deferring to the #952 exit gate."
+                )
+            else:
+                _snap_why = _matrix_solution_violations(
                     np.asarray(_rounded_inc[:n_orig], dtype=np.float64),
                     _A_ub_m,
                     _b_ub_m,
                     _A_eq_m,
                     _b_eq_m,
                     _declared_box,
-                ),
-            )
+                )
+                raise RuntimeError(
+                    "MIQP-BB incumbent has no feasible integral realisation: snapping "
+                    f"its integer columns to integers leaves the declared rows "
+                    f"({_snap_why}), and re-solving the continuous columns with the "
+                    "integers fixed there found no feasible completion. The unrounded "
+                    "point is not a solution of the declared model, so it is not "
+                    "reported in its place."
+                )
 
         # #952: exit gate. Every incumbent this function returns is verified here,
         # against EVERY declared row (inequalities included) and every declared
@@ -27195,6 +27592,21 @@ def _solve_miqp_bb(
         {"budget/incumbent_extension_s": float(_incumbent_extension_taken)}
         if _incumbent_extension_taken > 0.0
         else None
+    )
+
+    # #1383: the certificate must survive the FINAL (objective, bound) pair.
+    # Everything above may still have moved `obj_val` after the tree computed
+    # its gap, and nothing re-asked whether the certificate still holds.
+    status, gap_val, _gap_certified = _withhold_stale_certificate(
+        status,
+        obj_val,
+        bound_val,
+        gap_val,
+        _gap_certified,
+        _bb_maximize,
+        gap_tolerance,
+        abs_gap_tol,
+        "MIQP-BB",
     )
 
     return SolveResult(

@@ -9216,6 +9216,7 @@ def solve_oa(
         status = "optimal" if _certified_gap_converged() and not has_unresolved else "feasible"
         if termination_reason in {"cycling", "stalling"}:
             status = "feasible"
+        _unverified_incumbent = False
         if _exit_refusal is not None:
             # An unverified incumbent's objective is not a proven upper bound, so
             # the gap it participates in is not a certificate and the run is not
@@ -9225,6 +9226,24 @@ def solve_oa(
             status = "feasible"
             reported_gap = None
             final_reason = "unverified_incumbent"
+            # #1380: the point and its objective still reach the caller -- a caller
+            # that wants to look at what the gate refused can -- but the fact that
+            # they are UNVERIFIED has to travel with them in a form a consumer can
+            # branch on. ``status`` and ``gap_certified`` do not distinguish this
+            # from an ordinary uncertified time-limited run that found a perfectly
+            # good incumbent, and that ambiguity is what let the number be consumed
+            # as a primal bound.
+            #
+            # Measured on ``min -x + 3z + 0.001x^2`` s.t. ``x <= 1e7 z``,
+            # ``x in [0,10]``, ``z`` binary (true optimum -6.9): the route's point
+            # failed verification at ``z = 1.0009e-06`` -- a binary that is not a
+            # binary -- and ``_merge_route_and_fallback`` then ranked its objective
+            # -9.899997 against the fallback's correctly re-derived -6.1e-09 and
+            # preferred it for being smaller. The whole solve returned a value three
+            # units below anything the model attains. The merge is where that
+            # decision is made and where it is now refused; this flag is what lets
+            # it tell the two cases apart.
+            _unverified_incumbent = True
         # ``gap_certified`` must agree with ``status``: it is the field a user
         # reads (and ``result_io.summary_text`` renders) to decide whether the
         # reported gap is a certificate. Deriving it from ``reported_gap is not
@@ -9242,6 +9261,7 @@ def solve_oa(
             bound=(_obj_sign * bound if bound is not None else None),
             gap=reported_gap,
             x=_build_x_dict(incumbent, model),
+            solver_stats=({"oa/unverified_incumbent": 1.0} if _unverified_incumbent else None),
             wall_time=wall_time,
             mip_count=mip_count,
             subnlp_calls=nlp_subproblem_count,
