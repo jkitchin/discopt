@@ -79,16 +79,37 @@ import numpy as np
 from discopt.modeling.core import Expression, Model
 
 from .certificate import certify_convex
-from .eigenvalue import gershgorin_lambda_max, gershgorin_lambda_min
+from .eigenvalue import (
+    gershgorin_lambda_max,
+    gershgorin_lambda_min,
+    interval_magnitude,
+    psd_decision_slack,
+)
 from .interval import Interval
 from .interval_ad import interval_hessian
 from .lattice import Curvature
 
-# Tolerance for accepting "λ ≥ 0" / "λ ≤ 0" despite floating-point slop,
-# matching the ordinary convexity certificate (:mod:`certificate`). The
-# interval Hessian already outward-rounds, so genuine zero eigenvalues may
-# surface as tiny negatives.
-_PSD_TOL = 1e-10
+# The slack for accepting "λ ≥ 0" / "λ ≤ 0" despite floating-point slop comes
+# from ``eigenvalue.psd_decision_slack`` and scales with the tested matrix's own
+# magnitude (#1397). It was an absolute ``_PSD_TOL = 1e-10`` here, whose comment
+# claimed it was "matching the ordinary convexity certificate" — it no longer
+# did once :mod:`certificate` was made scale-aware, and that stale claim is why
+# this sibling was nearly missed.
+#
+# The eigenvalue of an augmented Hessian carries that matrix's units, so an
+# absolute constant in this position fails in both directions at once: at
+# ``‖aug‖ ~ 1e-8`` a licence of 1e-10 is a *relative* nonconvexity of 1e-2,
+# and at ``‖aug‖ ~ 1e12`` it is far below the O(u·‖aug‖) outward-rounding
+# widening it exists to absorb, so genuine certificates are refused. Unlike
+# :func:`is_g_convex_pointwise` and :func:`least_convexifying_rho` below — which
+# are explicitly floating-point diagnostics and already scale by
+# ``max(1, max|H|)`` — :func:`certify_g_convex` is the *sound* certificate, so
+# this was the one comparison in the module where the incoherence could license
+# an invalid relaxation.
+#
+# The matrix tested is ``aug = H ± ρ·Outer``, not ``H``: ``ρ`` ranges over a
+# geometric grid up to ``_MAX_RHO``, so ``aug`` can carry a magnitude many orders
+# above the raw Hessian's and the slack must be taken from ``aug`` itself.
 
 # Default fixed-``ρ`` search grid for the sound certificate. The interval
 # Gershgorin bound of the augmented matrix is *not* monotone in ``ρ`` (the
@@ -319,6 +340,19 @@ def _rho_candidates(
 # ──────────────────────────────────────────────────────────────────────
 
 
+def _psd_slack(aug, tol: Optional[float]) -> float:
+    """Acceptance slack for a ``λ ≥ 0`` / ``λ ≤ 0`` test on ``aug`` (#1397).
+
+    Scaled by the *augmented* matrix's own magnitude, because that is the matrix
+    whose eigenvalue is being tested and an eigenvalue carries its matrix's
+    units. ``tol``, when supplied, is an absolute floor (see
+    :func:`certify_g_convex`); it is combined with ``max`` so that an explicit
+    tolerance stays exactly as permissive as it was.
+    """
+    slack = psd_decision_slack(interval_magnitude(aug))
+    return slack if tol is None else max(float(tol), slack)
+
+
 def certify_g_convex(
     expr: Expression,
     model: Model,
@@ -326,7 +360,7 @@ def certify_g_convex(
     *,
     rho_grid: Optional[tuple[float, ...]] = None,
     max_rho: float = _MAX_RHO,
-    tol: float = _PSD_TOL,
+    tol: Optional[float] = None,
 ) -> Optional[GConvexCertificate]:
     """Sound box-local G-convexity / G-concavity verdict, or ``None``.
 
@@ -337,8 +371,16 @@ def certify_g_convex(
             — the tightened node/FBBT box when available.
         rho_grid: Optional override of the fixed ``ρ`` probe grid.
         max_rho: Upper cap on any probed ``ρ``.
-        tol: PSD/NSD acceptance tolerance (matches the ordinary
-            convexity certificate).
+        tol: Optional **absolute floor** on the PSD/NSD acceptance slack.
+            ``None`` (the default) uses
+            :func:`~.eigenvalue.psd_decision_slack` of the tested augmented
+            matrix's own magnitude — the arithmetic's error at that magnitude
+            and nothing more (#1397). A supplied value is combined with
+            ``max``, so an explicit ``tol`` is never *stricter* than it was
+            before; both arms answer the same question ("how negative may
+            ``λ_min`` be and still count as zero"), which is what makes ``max``
+            the coherent combination here rather than the floor-erasing one
+            #1392 had to undo.
 
     Returns:
         * :class:`GConvexCertificate` with ``kind="g_convex"`` when some
@@ -396,7 +438,7 @@ def certify_g_convex(
     # G-convex: find ρ > 0 with H + ρ·Outer ⪰ 0 on the box.
     for rho in candidates:
         aug = H + outer * Interval.point(rho)
-        if gershgorin_lambda_min(aug) >= -tol:
+        if gershgorin_lambda_min(aug) >= -_psd_slack(aug, tol):
             return GConvexCertificate("g_convex", rho)
 
     # G-concave: -φ is G-convex ⟺ H - ρ·Outer ⪯ 0 on the box, i.e.
@@ -404,7 +446,7 @@ def certify_g_convex(
     # enclosure serves both directions.)
     for rho in candidates:
         aug = H - outer * Interval.point(rho)
-        if gershgorin_lambda_max(aug) <= tol:
+        if gershgorin_lambda_max(aug) <= _psd_slack(aug, tol):
             return GConvexCertificate("g_concave", rho)
 
     return None
