@@ -5814,8 +5814,7 @@ def _check_finite_bounds(model: Model, tightening=None) -> None:
                 f"'unbounded'."
             )
         parts = [
-            f"Variables with very large or infinite declared bounds: "
-            f"{', '.join(bad_vars[:5])}.",
+            f"Variables with very large or infinite declared bounds: {', '.join(bad_vars[:5])}.",
             tightening_note.strip(),
             default_note,
             "NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. "
@@ -21091,6 +21090,94 @@ def _solve_node_nlp_kkt(
 _QP_KKT_RESIDUAL_TOL = 1e-6
 
 
+#: Why the QP route came back ``error`` (#1384). Reported on
+#: ``SolveResult.error`` so a caller has something to branch on and surface;
+#: before, the only record was a log line and the field was ``None``.
+_QP_NO_RESULT_REASON = (
+    "the QP route produced no verified result: POUNCE either failed to solve, or "
+    "its point was rejected by the feasibility or KKT-stationarity guard. No "
+    "engine remains behind this one (the JAX QP IPM rescue was removed in #359 "
+    "for issuing an unchecked 'optimal'), so this is reported as an error rather "
+    "than an unverified answer."
+)
+
+
+def _qp_lagrangian_term_scale(
+    x: np.ndarray,
+    Q: Optional[np.ndarray],
+    c: np.ndarray,
+    A_ub: Optional[np.ndarray],
+    A_eq: Optional[np.ndarray],
+    row_dual: Optional[np.ndarray],
+    col_dual: Optional[np.ndarray],
+) -> float:
+    """Magnitude of the terms the QP's Lagrangian gradient is a difference of.
+
+    The yardstick :data:`_QP_KKT_RESIDUAL_TOL` is measured against (#1384). The
+    Lagrangian gradient is ``Qx + c + A^T mu - lambda``, and its residual is what
+    is left after those terms cancel; the precision they can cancel to is set by
+    their own magnitude, so that magnitude -- not a scale-free constant -- is
+    what a stationarity test has to be relative to. This is Ipopt's ``s_d``
+    idea, and POUNCE's own convergence test already does the same thing under
+    the name ``dual_scale``.
+
+    The terms are taken SEPARATELY rather than as their sum. Entry experiment for
+    #1384, on ``min s*(x-3)^2`` over ``[0,10]``: the sum is the gradient itself,
+    which is 0 at an interior optimum, so a ``max(1, ||Qx + c||)`` denominator
+    measured 1.0 at every scale and would have been no denominator at all.
+    Taking ``|Qx|`` and ``|c|`` apart gives ``6s``, and the ratio it produces is
+    flat where the raw residual is not::
+
+        scale   kkt_error   term scale   ratio        old verdict
+        1e0     2.506e-09   6.0e+00      4.18e-10     optimal
+        1e2     1.002e-08   6.0e+02      1.67e-11     optimal
+        1e3     1.002e-07   6.0e+03      1.67e-11     optimal
+        1e4     1.002e-06   6.0e+04      1.67e-11     error   <-- rejected
+        1e5     1.002e-05   6.0e+05      1.67e-11     error   <-- rejected
+        1e6     9.091e-06   6.0e+06      1.52e-12     error   <-- rejected
+        1e8     9.091e-06   6.0e+08      1.52e-14     error   <-- rejected
+
+    The residual grows exactly linearly with the objective scale while the
+    relative precision is constant at ~1.7e-11 -- five orders inside the
+    tolerance. Nothing about the returned point got worse; only the units did.
+
+    Floored at 1.0 so the test can never become *looser* than the absolute one it
+    replaces: a well-scaled problem keeps exactly the #145 behaviour.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    terms = [1.0]
+
+    c_arr = np.asarray(c, dtype=np.float64)
+    if c_arr.size:
+        terms.append(float(np.abs(c_arr).max()))
+    if Q is not None:
+        Q_arr = np.asarray(Q, dtype=np.float64)
+        if Q_arr.size:
+            terms.append(float(np.abs(Q_arr @ x).max()))
+
+    # ``A^T mu``, split per block because the two carry one stacked dual vector.
+    offset = 0
+    mu = None if row_dual is None else np.asarray(row_dual, dtype=np.float64).ravel()
+    for block in (A_eq, A_ub):
+        if block is None:
+            continue
+        M = np.asarray(block, dtype=np.float64)
+        if M.ndim != 2 or M.size == 0:
+            continue
+        rows = M.shape[0]
+        if mu is not None and mu.size >= offset + rows:
+            terms.append(float(np.abs(M.T @ mu[offset : offset + rows]).max()))
+        offset += rows
+
+    if col_dual is not None:
+        lam = np.asarray(col_dual, dtype=np.float64)
+        if lam.size:
+            terms.append(float(np.abs(lam).max()))
+
+    scale = max(t for t in terms if np.isfinite(t))
+    return float(scale)
+
+
 def _scalar_constraint_layout(
     model: Model,
 ) -> Optional[tuple[list[str], list[tuple[str, str]]]]:
@@ -22210,6 +22297,11 @@ def _solve_qp(model: Model, t_start: float, prefer_pounce: bool = False) -> Solv
             return retried
 
     if result is not None:
+        # #1384: an error result from the engine carried no explanation either.
+        # Fill one in rather than pass a bare ``error`` up, but never overwrite a
+        # more specific reason the engine did supply.
+        if result.status == "error" and not result.error:
+            result.error = _QP_NO_RESULT_REASON
         return result
     logger.error(
         "HiGHS-free QP [qp-pounce-no-result]: POUNCE returned no usable result "
@@ -22222,6 +22314,10 @@ def _solve_qp(model: Model, t_start: float, prefer_pounce: bool = False) -> Solv
         status="error",
         wall_time=time.perf_counter() - t_start,
         node_count=0,
+        # #1384: the only record of WHY used to be a log line -- ``error`` came
+        # back with ``error=None``, so a caller had nothing to branch on or
+        # report. This is the same text as the log above, on the result.
+        error=_QP_NO_RESULT_REASON,
     )
 
 
@@ -22797,18 +22893,38 @@ def _solve_qp_matrix(
             return None
         # Convergence guard for the POUNCE-first default: an interior-point
         # backend can label a stalled, drifted point "optimal" (issue #145). When
-        # it reports a final KKT residual, reject a non-stationary "optimal" and
-        # degrade to the next engine (the JAX QP IPM) rather than trust a drifted
-        # objective. ``None`` (a backend that reports no residual) skips the check.
-        if result.kkt_error is not None and result.kkt_error > _QP_KKT_RESIDUAL_TOL:
-            logger.warning(
-                "%s QP reported a non-stationary 'optimal' (KKT residual %.2e > %.0e); "
-                "falling back to the next engine.",
-                engine,
-                result.kkt_error,
-                _QP_KKT_RESIDUAL_TOL,
+        # it reports a final KKT residual, reject a non-stationary "optimal"
+        # rather than trust a drifted objective. ``None`` (a backend that reports
+        # no residual) skips the check.
+        #
+        # The threshold is scale-RELATIVE (#1384). ``result.kkt_error`` is
+        # POUNCE's ``final_unscaled_kkt_error`` -- the residual in the model's
+        # own units, deliberately preferred over the scaled one because a
+        # certificate stated in problem units has to be built from it. It
+        # therefore grows with the problem, and comparing it to a scale-free
+        # constant rejected correct answers: `min 1e4*(x-3)^2` over [0,10],
+        # a one-variable strictly convex box QP, came back ``status="error"``.
+        if result.kkt_error is not None:
+            kkt_tol = _QP_KKT_RESIDUAL_TOL * _qp_lagrangian_term_scale(
+                result.x[:n_orig],
+                Q_orig,
+                c_orig,
+                A_ub,
+                A_eq,
+                getattr(result, "dual_values", None),
+                getattr(result, "reduced_costs", None),
             )
-            return None
+            if result.kkt_error > kkt_tol:
+                logger.warning(
+                    "%s QP reported a non-stationary 'optimal' (KKT residual %.2e > "
+                    "%.2e = %.0e x the Lagrangian term scale); reporting no result "
+                    "rather than a drifted objective.",
+                    engine,
+                    result.kkt_error,
+                    kkt_tol,
+                    _QP_KKT_RESIDUAL_TOL,
+                )
+                return None
         x_flat = result.x[:n_orig]
         assert objective is not None
 

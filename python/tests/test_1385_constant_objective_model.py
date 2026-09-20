@@ -17,7 +17,6 @@ from __future__ import annotations
 import math
 
 import pytest
-
 from discopt import Model
 from discopt.modeling.core import Constant
 

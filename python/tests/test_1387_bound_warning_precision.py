@@ -19,7 +19,6 @@ from __future__ import annotations
 import warnings
 
 import pytest
-
 from discopt import Model
 from discopt.constants import CONSTRAINT_INF, DEFAULT_VARIABLE_BOUND
 
@@ -89,7 +88,7 @@ def test_three_different_magnitudes_give_three_different_messages():
 
 @pytest.mark.smoke
 def test_a_default_bound_is_labelled_as_such():
-    """"You declared no bound" is the actionable fact, not the magnitude."""
+    """ "You declared no bound" is the actionable fact, not the magnitude."""
     msg = _bound_warning(_default_box_model)
 
     assert "[default]" in msg, msg

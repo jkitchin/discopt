@@ -35,7 +35,6 @@ from __future__ import annotations
 import math
 
 import pytest
-
 from discopt import Model
 
 # Published global minimum of the six-hump camel.
@@ -134,9 +133,7 @@ def test_an_open_exit_keeps_the_933_floored_gap():
         pytest.skip("the budget was too short to produce a pair to check")
 
     assert (r.solver_stats or {}).get("gap_criterion") is None
-    assert r.gap == pytest.approx(
-        abs(r.objective - r.bound) / max(1.0, abs(r.objective)), rel=1e-9
-    )
+    assert r.gap == pytest.approx(abs(r.objective - r.bound) / max(1.0, abs(r.objective)), rel=1e-9)
 
 
 # --------------------------------------------------------------------------
