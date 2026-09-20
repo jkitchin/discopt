@@ -2151,10 +2151,32 @@ def _rlt_sparse_admit(model: "Model", n_vars: int) -> bool:
 # Convex-objective node bound (the supporting-hyperplane lower bound for a model
 # whose minimized objective is a convex quadratic). No size cap: the bound is a
 # deterministic projected-gradient solve on the constant Hessian and is valid at
-# any iterate (see ``_convex_objective_lower_bound``). Gated only on a PSD Hessian
-# with this margin, so the convexity verdict (hence bound soundness) is never
-# borderline.
+# any iterate (see ``_convex_objective_lower_bound``). Gated on a PSD Hessian with
+# a margin, so the convexity verdict (hence bound soundness) is never borderline.
+#
+# ``_CONVEX_OBJ_PSD_TOL`` is the ABSOLUTE floor, and it is not the whole yardstick.
+# It serves the near-zero-Hessian case: a pure-linear objective has a (near-)zero
+# Hessian whose box bound is already exact via interval arithmetic, so the gate
+# abstains rather than engage on numerical dust.
 _CONVEX_OBJ_PSD_TOL = 1e-6
+# ...and this is the SCALE-CARRYING half (#1397). ``eigvalsh``'s error on a
+# symmetric ``H`` is O(eps * ||H||_2) -- an absolute margin of 1e-6 is therefore
+# meaningless once ||H|| >~ 1e10, where the roundoff alone exceeds it. Measured
+# (1800 trials, n <= 32, ||H||_2 up to 1e16, one true negative eigenvalue): the
+# computed minimum eigenvalue overshoots the true one by at most 5.42 * eps*||H||,
+# and an indefinite Hessian with ||H||~1e12 and a true eigenvalue of -1e-4
+# computes as +3.780e-04 -- sailing through ``>= 1e-6`` and declaring a NONCONVEX
+# quadratic objective convex, which emits the supporting-hyperplane lower bound as
+# a valid dual bound on a problem that has no such bound. 42 of 480 constructed
+# indefinite Hessians were admitted that way.
+#
+# K = 32 puts the threshold 5.9x above the worst measured overshoot; at that value
+# the same sweep admits 0 of 2100 indefinite Hessians. This is a YARDSTICK change,
+# not a tolerance change (#1397's non-goal): for ||H||_2 <= 1 the roundoff term is
+# ~7e-15, the floor above dominates, and the verdict is byte-identical to the old
+# gate (measured: identical on 200/200 well-scaled convex Hessians). It is never
+# looser than the absolute gate, only stricter, and only where roundoff earns it.
+_CONVEX_OBJ_PSD_EIG_ROUNDOFF_K = 32.0
 # Lazy re-separation, global-bound-stall governor (C-42 Part 2, THRU-4
 # follow-on; the relaxer-side stride net is ``_LAZY_RESEP_STRIDE`` in
 # ``mccormick_lp.py``). Active only under pool inheritance
@@ -2684,6 +2706,40 @@ def _compute_alphabb_bound(evaluator, model, alphabb_expr, node_lb, node_ub):
     return float(tangent_min - 1e-9 * (1.0 + abs(L_hat) + abs(tangent_min)))
 
 
+def _hessian_is_psd_with_margin(H_sym) -> bool:
+    """Whether a symmetric ``H`` is positive definite *beyond the roundoff of the test*.
+
+    #1397. The verdict gates a dual bound, so a false positive is a false bound:
+    declaring an indefinite Hessian PSD licenses the convex-objective supporting
+    hyperplane on a nonconvex objective, which it does not underestimate.
+
+    The margin has two halves, and the scale-carrying one is the point:
+
+    * ``_CONVEX_OBJ_PSD_TOL`` -- an absolute floor, so a (near-)zero Hessian is
+      declined rather than decided on dust;
+    * ``_CONVEX_OBJ_PSD_EIG_ROUNDOFF_K * eps * ||H||_2`` -- the error of the
+      eigenvalue computation itself, which scales with ``||H||``. Below this the
+      computed ``eig_min`` carries no information about the sign of the true one.
+
+    Taking the max of the two is never looser than the bare absolute gate, and is
+    identical to it for ``||H||_2 <= 1``. ``||H||_2`` is bounded above by the
+    Frobenius norm, which is what is used here: cheap, needs no second
+    decomposition, and erring high only makes the gate stricter (sound).
+    """
+    H_sym = np.asarray(H_sym, dtype=np.float64)
+    if H_sym.ndim != 2 or H_sym.shape[0] != H_sym.shape[1] or not np.all(np.isfinite(H_sym)):
+        return False
+    norm = float(np.linalg.norm(H_sym, "fro"))
+    if not np.isfinite(norm):
+        return False
+    margin = max(
+        _CONVEX_OBJ_PSD_TOL,
+        _CONVEX_OBJ_PSD_EIG_ROUNDOFF_K * float(np.finfo(np.float64).eps) * norm,
+    )
+    eig_min = float(np.linalg.eigvalsh(H_sym).min())
+    return eig_min >= margin
+
+
 def _objective_is_convex_quadratic(
     model: Model, evaluator, n_vars: int, remaining_budget: float | None = None
 ) -> bool:
@@ -2778,10 +2834,9 @@ def _objective_is_convex_quadratic(
             return False
         # A pure-linear objective has a (near-)zero Hessian; its box bound is
         # already exact via interval arithmetic, so only engage on genuine
-        # curvature. The threshold is well above float noise for a well-scaled
-        # Hessian, keeping the PSD verdict (and thus the bound) sound.
-        eig_min = float(np.linalg.eigvalsh(0.5 * (H1 + H1.T)).min())
-        return eig_min >= _CONVEX_OBJ_PSD_TOL
+        # curvature. The margin is scale-aware (#1397): see
+        # ``_hessian_is_psd_with_margin``.
+        return _hessian_is_psd_with_margin(0.5 * (H1 + H1.T))
     except Exception:
         return False
 
@@ -5329,7 +5384,7 @@ def _withhold_stale_certificate(
     gap_tolerance: float,
     abs_gap_tol: float,
     where: str,
-) -> tuple[str, Optional[float], bool]:
+) -> tuple[str, Optional[float], bool, Optional[float]]:
     """Withdraw a certificate the FINAL ``(objective, bound)`` pair does not support.
 
     A tree computes its gap against the incumbent it converged on, and the
@@ -5357,18 +5412,67 @@ def _withhold_stale_certificate(
     promotes a status, and never touches ``bound``. A withdrawal replaces the
     stale ``gap`` with the honest one computed from the published pair.
 
-    Returns the possibly-corrected ``(status, gap, gap_certified)``.
+    Returns the possibly-corrected ``(status, gap, gap_certified, bound)``.
     """
     if not gap_certified:
-        return status, gap_val, gap_certified
+        return status, gap_val, gap_certified, bound_val
     if obj_val is None or bound_val is None:
-        return status, gap_val, gap_certified
+        return status, gap_val, gap_certified, bound_val
     if not np.isfinite(obj_val) or not np.isfinite(bound_val):
-        return status, gap_val, gap_certified
+        return status, gap_val, gap_certified, bound_val
+
+    # The CROSSED pair first, because the convergence test cannot see it.
+    # ``_gap_values_converged`` computes ``max(0.0, ub - lb)``, so an INVERTED
+    # pair clamps to gap 0 and reads as converged -- which is why
+    # ``_recertify_gap_closed``'s own docstring says "the caller still owns the
+    # on-correct-side guard". This guard did not own it, and the omission made it
+    # blind to the one case it exists to catch.
+    #
+    # Measured on the vendored ``nvs14`` with ``nlp_bb=True`` at a 60 s limit
+    # (minimise; two independent routes attain -40358.154769):
+    #
+    #     status="optimal"  objective=-40358.154769  bound=+314.237382
+    #     bound_valid=True  gap_certified=True  bound_source="bnb_tree"
+    #
+    # A lower bound 40672 ABOVE the incumbent it is reported against -- the
+    # literal CLAUDE.md §1 invariant (``bound <= incumbent`` for min sense) --
+    # published as a certificate, and this guard waved it through because
+    # ``max(0.0, ...)`` had already turned the inversion into a zero gap.
+    #
+    # The crossing itself was a defect further up -- ``_root_cuts._RootLP`` built
+    # the root LP objective from the gradient alone and dropped the objective's
+    # CONSTANT term, so on nvs14's integer-bilinear lift (f(0) = -40792.141) the
+    # published bound was offset by that constant. That is fixed at the source;
+    # what belongs HERE is refusing to certify a pair that contradicts itself,
+    # whatever produced it, so this guard is kept as the backstop it is.
+    if _bound_crosses_objective(float(bound_val), float(obj_val), is_maximize):
+        crossed_gap = abs(float(obj_val) - float(bound_val)) / max(1.0, abs(float(obj_val)))
+        logger.warning(
+            "%s: withdrawing the optimality certificate - the reported dual "
+            "bound %.12g CROSSES the incumbent %.12g it is reported against "
+            "(%s sense); a bound past its own incumbent is not a certificate, "
+            "whatever produced it.",
+            where,
+            float(bound_val),
+            float(obj_val),
+            "max" if is_maximize else "min",
+        )
+        # #1244's rule, applied here: clear the CLAIM with the number. We cannot
+        # tell which side is wrong, but the incumbent has been feasibility-verified
+        # by the exit gate and this bound has not, so the bound is the weaker
+        # claim. Leaving it standing with ``bound_valid`` would publish a dual
+        # bound this branch has just proved inconsistent with its own incumbent.
+        # ...and the gap goes with the bound. ``gap`` is defined as
+        # ``(objective - bound) / |objective|``; with no bound there is no gap, and
+        # publishing the crossed value beside ``bound=None`` would be a third
+        # number contradicting the other two.
+        del crossed_gap
+        return ("feasible" if status == "optimal" else status), None, False, None
+
     if _recertify_gap_closed(
         float(obj_val), float(bound_val), is_maximize, gap_tolerance, abs_gap_tol
     ):
-        return status, gap_val, gap_certified
+        return status, gap_val, gap_certified, bound_val
 
     honest_gap = abs(float(obj_val) - float(bound_val)) / max(1.0, abs(float(obj_val)))
     logger.warning(
@@ -5384,7 +5488,7 @@ def _withhold_stale_certificate(
         honest_gap,
         "feasible" if status == "optimal" else status,
     )
-    return ("feasible" if status == "optimal" else status), honest_gap, False
+    return ("feasible" if status == "optimal" else status), honest_gap, False, bound_val
 
 
 def _gap_criterion(ub: float, lb: float, gap_tolerance: float, abs_gap_tol: float) -> Optional[str]:
@@ -17759,7 +17863,7 @@ def solve_model(
     # #1383: the certificate must survive the FINAL (objective, bound) pair.
     # Everything above may still have moved `obj_val` after the tree computed
     # its gap, and nothing re-asked whether the certificate still holds.
-    status, gap_val, _gap_certified = _withhold_stale_certificate(
+    status, gap_val, _gap_certified, bound_val = _withhold_stale_certificate(
         status,
         obj_val,
         bound_val,
@@ -20317,7 +20421,7 @@ def _solve_nlp_bb(
     # #1383: the certificate must survive the FINAL (objective, bound) pair.
     # Everything above may still have moved `obj_val` after the tree computed
     # its gap, and nothing re-asked whether the certificate still holds.
-    status, gap_val, _gap_certified = _withhold_stale_certificate(
+    status, gap_val, _gap_certified, bound_val = _withhold_stale_certificate(
         status,
         obj_val,
         bound_val,
@@ -20420,7 +20524,36 @@ def _solve_node_nlp(
                     "fixed-box infeasibility probe skipped: %s: %s", type(exc).__name__, exc
                 )
 
-    if nlp_solver in ("pounce", "ipm", "sparse_ipm"):
+    if nlp_solver != "ipopt":
+        # Everything that is not an EXPLICIT ``ipopt`` request solves with
+        # POUNCE, the documented default and a CORE dependency.
+        #
+        # This used to be spelled as a whitelist -- ``in ("pounce", "ipm",
+        # "sparse_ipm")`` -- with an unconditional ``ipopt`` fallthrough for
+        # everything else. cyipopt is an OPTIONAL dependency
+        # (``pip install discopt[ipopt]``), so any value that missed the
+        # whitelist turned a working install into ``ImportError: cyipopt is
+        # required``.
+        #
+        # It is reached, and not by a typo: the big-M MILP reformulation
+        # deliberately reassigns ``nlp_solver = "simplex"`` to route the lifted
+        # model onto the monolithic Rust MILP engine, and that value then travels
+        # into the NLP-BB path as the NODE solver. Measured on the vendored
+        # ``nvs02``/``nvs07``/``nvs10``/``nvs11``/``nvs12``/``nvs14``/``nvs15``
+        # with ``nlp_bb=True``: the node received ``nlp_solver='simplex'`` and the
+        # solve raised ``ImportError`` -- including when the caller had explicitly
+        # asked for ``nlp_solver="pounce"``, so an explicit request for a core
+        # backend was answered by an optional one that was not installed.
+        #
+        # A selector that does not name this layer's backend must not be read as
+        # naming ONE -- least of all the only one that can be absent. Whitelisting
+        # the fallback rather than the default is the general form of that.
+        if nlp_solver not in ("pounce", "ipm", "sparse_ipm"):
+            logger.debug(
+                "node NLP: nlp_solver=%r does not name a node backend (it is a "
+                "selector for another layer); solving with POUNCE.",
+                nlp_solver,
+            )
         # "ipm"/"sparse_ipm" are deprecated aliases — the JAX IPM is retired as a
         # node NLP solver, so all route to POUNCE (the pure-Rust Ipopt port).
         # Native path (discopt#281): solve the .nl directly via POUNCE's own AD,
@@ -26586,7 +26719,7 @@ def _solve_milp_bb(
     # #1383: the certificate must survive the FINAL (objective, bound) pair.
     # Everything above may still have moved `obj_val` after the tree computed
     # its gap, and nothing re-asked whether the certificate still holds.
-    status, gap_val, _gap_certified = _withhold_stale_certificate(
+    status, gap_val, _gap_certified, bound_val = _withhold_stale_certificate(
         status,
         obj_val,
         bound_val,
@@ -27445,7 +27578,7 @@ def _solve_miqp_bb(
     # #1383: the certificate must survive the FINAL (objective, bound) pair.
     # Everything above may still have moved `obj_val` after the tree computed
     # its gap, and nothing re-asked whether the certificate still holds.
-    status, gap_val, _gap_certified = _withhold_stale_certificate(
+    status, gap_val, _gap_certified, bound_val = _withhold_stale_certificate(
         status,
         obj_val,
         bound_val,

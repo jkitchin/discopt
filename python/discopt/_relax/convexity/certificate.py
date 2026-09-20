@@ -38,17 +38,28 @@ import numpy as np
 
 from discopt.modeling.core import Constraint, Expression, Model
 
-from .eigenvalue import gershgorin_lambda_max, gershgorin_lambda_min, psd_2x2_sufficient
+from .eigenvalue import (
+    gershgorin_lambda_max,
+    gershgorin_lambda_min,
+    interval_magnitude,
+    psd_2x2_sufficient,
+    psd_decision_slack,
+)
 from .interval import Interval
 from .interval_ad import interval_hessian
 from .lattice import Curvature
 
 logger = logging.getLogger(__name__)
 
-# Tolerance for accepting "λ_min ≥ 0" despite floating-point slop. The
-# interval Hessian already outward-rounds, so genuine zero eigenvalues
-# may appear as small negatives; a very tight tolerance suffices.
-_PSD_TOL = 1e-10
+# The slack for accepting "λ_min ≥ 0" despite floating-point slop lives in
+# ``eigenvalue.psd_decision_slack`` and scales with the Hessian's magnitude
+# (#1397). It was an absolute ``_PSD_TOL = 1e-10`` here, on the reasoning that
+# "the interval Hessian already outward-rounds, so genuine zero eigenvalues may
+# appear as small negatives; a very tight tolerance suffices" — true, except that
+# "small" is relative to ‖H‖. The outward rounding widens by O(u·‖H‖), so at
+# ‖H‖ ~ 1e12 a genuine zero eigenvalue appears as ~-1e-4 and the certificate was
+# silently lost; and at ‖H‖ ~ 1e-2 an absolute 1e-10 admitted a relative
+# nonconvexity of 1e-8. Both directions are measured in ``psd_decision_slack``.
 
 
 def _qp_exact_convexity_enabled() -> bool:
@@ -215,7 +226,7 @@ def certify_quadratic_objective_convex(model: Model, *, deadline: Optional[float
 
     from discopt._relax.quadratic_form import quadratic_is_psd
 
-    return quadratic_is_psd(hessian, tol=_PSD_TOL) is True
+    return quadratic_is_psd(hessian) is True
 
 
 def certify_convex(
@@ -263,8 +274,16 @@ def certify_convex(
     # PSD on the entire box even when the entry-wise interval matrix
     # is too loose for Gershgorin to certify.
     rank1 = ad.rank1_factor
-    if rank1 is not None and np.all(np.isfinite(rank1.c.lo)) and np.all(rank1.c.lo >= -_PSD_TOL):
-        return Curvature.CONVEX
+    if rank1 is not None and np.all(np.isfinite(rank1.c.lo)):
+        # ``c >= 0`` decided against the arithmetic that produced ``c``, not
+        # against an absolute constant (#1397): the Hessian is ``c·v vᵀ``, so a
+        # coefficient of magnitude 1e12 carries ~1e-4 of rounding and one of
+        # magnitude 1e-12 carries ~1e-28.
+        c_slack = psd_decision_slack(
+            float(np.max(np.maximum(np.abs(rank1.c.lo), np.abs(rank1.c.hi))))
+        )
+        if np.all(rank1.c.lo >= -c_slack):
+            return Curvature.CONVEX
 
     # 2×2 sufficient PSD test (Sylvester) — useful when the interval
     # Hessian is tight enough that Gershgorin's row-sum loosening
@@ -272,12 +291,18 @@ def certify_convex(
     if hess.lo.shape == (2, 2) and psd_2x2_sufficient(hess):
         return Curvature.CONVEX
 
+    # Gershgorin's bounds are rigorous (outward-rounded), so the only slack the
+    # verdict needs is the widening that outward rounding itself introduced,
+    # which is O(u·‖H‖) — hence scaled by the interval's magnitude, not an
+    # absolute constant (#1397).
+    slack = psd_decision_slack(interval_magnitude(hess))
+
     lam_min = gershgorin_lambda_min(hess)
-    if lam_min >= -_PSD_TOL:
+    if lam_min >= -slack:
         return Curvature.CONVEX
 
     lam_max = gershgorin_lambda_max(hess)
-    if lam_max <= _PSD_TOL:
+    if lam_max <= slack:
         return Curvature.CONCAVE
 
     return None
