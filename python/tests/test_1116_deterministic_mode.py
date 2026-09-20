@@ -88,13 +88,32 @@ def test_the_parameter_is_no_longer_dead(monkeypatch, flag):
     Pre-fix this parameter was accepted, documented as a guarantee, and read
     nowhere. The assertion is that the role-2 helpers fire during a real solve and
     that the flag decides what they return — a dead parameter fires nothing.
+
+    The probe reads "did the flag change the answer?", not "is the answer ``None``"
+    (#1371). It used to be the latter, which was a proxy that stopped holding when
+    the helpers gained a **role-1 floor**: under ``deterministic`` they now return
+    the solve's own deadline rather than "no clock at all". ``None`` was never the
+    property under test — the docstring above says "the flag decides what they
+    return" — and it was the very thing that let this mode overrun ``time_limit``
+    by 10-12.5x, because a role-2 deadline of ``None`` silences role 1 as well.
+
+    That is not a loosening; it is this file's own
+    ``test_role1_phase_entry_gates_are_deliberately_left_live`` applied one level
+    further in. That test exists to fail "if someone later widens the flag to
+    swallow role 1", calling it "trading a reproducibility bug for a broken role-1
+    promise (CLAUDE.md §1)" — but it guards only the phase-*entry* gates, while the
+    deadline handed *into* a phase was swallowing role 1 exactly as it warns
+    against. The determinism guarantee itself is unaffected and is pinned
+    end-to-end by ``test_1371_...::test_determinism_survives_the_role1_floor``.
     """
     seen: list[bool] = []
     real = solver._role2_deadline
 
     def spy(deadline):
         out = real(deadline)
-        seen.append(out is None)
+        # "Suppressed" = the flag substituted something for the role-2 deadline,
+        # whether that is ``None`` (no role-1 wall in scope) or the role-1 deadline.
+        seen.append(out != deadline)
         return out
 
     monkeypatch.setattr(solver, "_role2_deadline", spy)

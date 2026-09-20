@@ -5285,6 +5285,10 @@ def _extend_budget_for_incumbent(
     # Left stale, both read as already expired for the whole extension — the exact
     # failure mode that made the #844 fallback silently degrade to its cold path.
     model._solve_deadline = float(t_start) + extended
+    # #1371: the extension moves the role-1 wall, so the role-2 fallback must move
+    # with it -- a stale value here reads as already expired, the exact failure that
+    # made the #844 fallback degrade to its cold path.
+    _ROLE1_DEADLINE.set(model._solve_deadline)
     from discopt._relax.deadline import get_deadline, set_deadline
 
     if get_deadline() is not None:
@@ -6952,6 +6956,37 @@ _IPX_CHEAP_FIRST_IN_PROBE: contextvars.ContextVar[bool] = contextvars.ContextVar
     "_IPX_CHEAP_FIRST_IN_PROBE", default=False
 )
 
+#: The ROLE-1 deadline (``perf_counter`` epoch) of the innermost live ``solve_model``,
+#: so the role-2 helpers below can fall back to it instead of to "no clock at all"
+#: (#1371).
+#:
+#: ``model._solve_deadline`` already holds this, but the role-2 helpers are
+#: module-level and never see a model. A ``ContextVar`` rather than a global for the
+#: reason given above: two concurrent ``solve_model`` calls must not read each
+#: other's wall. ``_run_with_deep_recursion`` runs the solve in a *copy* of the
+#: caller's context, so a value set inside the worker is visible to everything that
+#: worker calls and leaks nowhere else -- which is exactly the scope wanted here.
+#:
+#: ``perf_counter``, NOT ``monotonic``: ``_relax/deadline``'s process-global wall is
+#: a ``monotonic`` epoch and every deadline in this module is ``perf_counter``.
+#: Mixing the two compares timestamps from different clocks, which would be a
+#: second bug wearing the first one's clothes.
+_ROLE1_DEADLINE: contextvars.ContextVar[Optional[float]] = contextvars.ContextVar(
+    "_ROLE1_DEADLINE", default=None
+)
+
+
+def _role1_deadline() -> Optional[float]:
+    """The live role-1 deadline, or ``None`` when no ``solve_model`` set one."""
+    return _ROLE1_DEADLINE.get()
+
+
+def _role1_remaining() -> Optional[float]:
+    """Seconds left on the role-1 deadline (never negative), or ``None`` if unset."""
+    d = _ROLE1_DEADLINE.get()
+    return None if d is None else max(0.0, d - time.perf_counter())
+
+
 #: Nodes spent by a #1236 cheap-first probe that did NOT win, per ``solve_model``
 #: call (review finding 6). Surfaced on ``SolveResult.solver_stats`` as
 #: ``cheap_first/probe_nodes`` by ``_stamp_layer_timing``.
@@ -7720,9 +7755,24 @@ def _role2_budget(seconds):
     Under ``deterministic``, each stage is left to the deterministic caps it
     already carries (``max_rounds``, ``obbt_rounds``, ``fbbt_max_iter``, iteration
     caps, the node budget). The role-1 deadline is *not* routed through here and
-    still stops the search.
+    still stops the search -- an invariant that was FALSE until #1371, which is why
+    these helpers now fall back to the role-1 deadline instead of to "no clock at
+    all". Returning ``None`` removed both roles at once: root OBBT then ran to its
+    deterministic caps with nothing polling the wall, and
+    ``solve(time_limit=60, deterministic=True)`` took 600.04 s on ``casctanks``
+    (10.0x) and 376.28 s against 30 s on ``bchoco08`` (12.5x), while the same solves
+    at ``deterministic=False`` returned in 60.23 s and 30.11 s (1.00x). #1152 had
+    already settled that ``time_limit`` is "a hard wall with an anytime bound"; this
+    mode was quietly exempt from it.
+
+    Determinism is unharmed where this mode promises it: the role-1 floor bites only
+    when role-1 *binds*, and ``deterministic`` already documents that a solve
+    reproduces "when the role-1 budget never binds". Give it the budget the mode asks
+    for and nothing truncates; give it less and you now get a wall, not an overrun.
     """
-    return None if _tuning().deterministic else seconds
+    if not _tuning().deterministic:
+        return seconds
+    return _role1_remaining()
 
 
 def _finder_stage_deadline(outer_deadline: float) -> float:
@@ -7753,15 +7803,31 @@ def _finder_stage_deadline(outer_deadline: float) -> float:
 
 
 def _role2_deadline(deadline):
-    """The absolute-deadline form of :func:`_role2_budget` (``None`` = no clock)."""
-    return None if _tuning().deterministic else deadline
+    """The absolute-deadline form of :func:`_role2_budget` (``None`` = no clock).
+
+    Under ``deterministic`` this is the ROLE-1 deadline, not ``None`` (#1371). The
+    role-2 budget stays inert -- the stage is no longer cut short by a fraction of
+    ``time_limit`` -- but the solve's own wall still applies. This is the call site
+    behind the measured overrun: root OBBT's ``deadline=_role2_deadline(...)`` became
+    ``None``, so the phase polled nothing.
+    """
+    if not _tuning().deterministic:
+        return deadline
+    return _role1_deadline()
 
 
 def _role2_horizon(seconds):
     """:func:`_role2_budget` for a callee whose budget parameter is a plain
     ``float`` rather than ``Optional[float]`` — ``math.inf`` is the no-clock value
-    there, since every such callee compares elapsed time *against* it."""
-    return math.inf if _tuning().deterministic else seconds
+    there, since every such callee compares elapsed time *against* it.
+
+    Under ``deterministic`` this is the role-1 remainder rather than ``math.inf``
+    (#1371); ``math.inf`` survives only when no role-1 deadline is set at all.
+    """
+    if not _tuning().deterministic:
+        return seconds
+    remaining = _role1_remaining()
+    return math.inf if remaining is None else remaining
 
 
 def _role2_slice(seconds, *, whole):
@@ -7823,6 +7889,33 @@ def _scoped_determinism(fn: _F) -> _F:
             return fn(*args, **kwargs)
         finally:
             _reset_tuning(token)
+
+    return cast(_F, wrapper)
+
+
+def _scoped_role1_deadline(fn: _F) -> _F:
+    """Scope :data:`_ROLE1_DEADLINE` to one ``solve_model`` call (#1371).
+
+    ``solve_model`` publishes its own role-1 deadline part-way through its body, and
+    solves NEST -- ``_role2_slice`` hands a nested ``solve_model`` the caller's whole
+    ``time_limit`` as its own role-1 contract. Without a scope the inner solve's
+    (nearer) deadline would survive its return and the OUTER solve would spend the
+    rest of its run measuring itself against a wall that already passed, i.e. every
+    role-2 fallback would read as expired. That is the same stale-deadline shape the
+    #844 fallback hit, so it gets the same treatment ``_scoped_determinism`` uses: a
+    token, and a ``finally``.
+
+    The entry value is re-set rather than left alone so the token restores *this*
+    frame's view even when ``fn`` never sets one.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        token = _ROLE1_DEADLINE.set(_ROLE1_DEADLINE.get())
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _ROLE1_DEADLINE.reset(token)
 
     return cast(_F, wrapper)
 
@@ -8319,6 +8412,7 @@ def _stamp_layer_timing(fn: _F) -> _F:
 @_scoped_deep_recursion
 @_scoped_tuning
 @_scoped_determinism
+@_scoped_role1_deadline
 @_debug_outermost_solve
 def solve_model(
     model: Model,
@@ -8959,6 +9053,10 @@ def solve_model(
     # (sonet*, qap): the dominant #654 overrun — leaving ``ok=False`` so the engine
     # falls back to the sound per-node cold build. Never truncates an in-flight op.
     model._solve_deadline = _solve_t0 + float(time_limit)
+    # #1371: publish the same role-1 deadline where the module-level role-2 helpers
+    # can see it. They never receive a model, so without this they had nothing to
+    # fall back to and returned "no clock" under ``deterministic``.
+    _ROLE1_DEADLINE.set(model._solve_deadline)
 
     # Opt-in LP-node spatial branch-and-cut engine (discopt#280) for pure-integer
     # product MINLPs. The default NLP-per-node spatial path freezes its dual bound

@@ -22,6 +22,38 @@ abandoning the other; option 3 keeps both thresholds exactly as written:
 * `test_issue654_deadline_root_setup.py` — the deadline work must not cost the
   dual bound.
 
+### 1a. The mode that was exempt from it (#1371, 2026-09-20)
+
+The decision above says "the solve returns by the deadline". `deterministic=True`
+did not. `_role2_budget`/`_role2_deadline`/`_role2_horizon` returned
+`None`/`math.inf` under that mode, which removes the role-2 sub-budget **and the
+role-1 wall in the same expression** — so root OBBT ran to its deterministic caps
+with nothing polling the clock. `_role2_budget`'s own docstring had asserted the
+invariant that was being violated: *"The role-1 deadline is not routed through here
+and still stops the search."*
+
+Measured, idle machine, both modes back to back in one process:
+
+| instance | `time_limit` | `deterministic=False` | `deterministic=True` (before) | after |
+|---|---|---|---|---|
+| `casctanks` | 60 s | 60.23 s (1.00x) | **600.04 s (10.00x)** | 61.03 s (1.02x) |
+| `bchoco08` | 30 s | 30.11 s (1.00x) | **376.28 s (12.54x)** | 30.86 s (1.03x) |
+
+Fixed by giving those three helpers a **role-1 floor**: under `deterministic` they
+now return the solve deadline (or its remainder) rather than "no clock". The role-2
+budget stays inert, so the #1116 determinism result is untouched wherever the mode
+promises it — verified on #1187's own configuration (`clay0303hfsg`,
+`max_nodes=20`, `time_limit=120`): 3/3 bit-identical objective, dual bound and node
+count, with role-1 never binding (14.95 s of a 120 s budget).
+
+**Why option 3 did not already cover this.** §3's measurement was taken in the
+default mode, and the guard it produced — `test_875_root_setup_budget.py`'s
+`test_watercontamination0202_honours_its_time_limit` — is `@pytest.mark.slow` *and*
+`skipif` on a `~/Dropbox/...` path outside the repo, so it runs on neither CI nor a
+fresh checkout, and it exercises only the mode that passes. The replacement guard
+(`test_1371_deterministic_time_limit_wall.py`) uses **vendored** instances and runs
+**both** modes.
+
 ## 2. Why the two are not contradictory
 
 The issue read the pair as a fork: *stop overrunning* ⟹ decline the long
