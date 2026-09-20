@@ -4668,6 +4668,153 @@ def _build_x_dict(x_flat: np.ndarray, model: Model) -> dict:
     return result
 
 
+#: How close to a finite DECLARED bound a coordinate must sit for the exit gate
+#: to move it onto that bound.
+#:
+#: Sized from the mechanism, not from an instance. An NLP backend's convergence
+#: test is on its own scaled error, so a coordinate can be left this far off a
+#: bound while the solve reports success; a row whose coefficients reach ~1e5
+#: then carries ``1e-11 * 1e5 = 1e-6`` of residual — exactly the declared
+#: absolute tolerance. ``1e-8`` is two orders above the observed offset and four
+#: below the tolerance it repairs, so the move itself is far smaller than the
+#: noise any row-level test forgives. Nothing larger would be defensible: this
+#: relocates a coordinate, and only a relocation below every tolerance in play
+#: can be justified as round-off rather than as a change of answer.
+_OA_EXIT_SNAP_DIST = 1e-8
+
+
+def _exit_verified_incumbent(
+    model: Model,
+    x_flat: np.ndarray,
+    obj: float,
+    obj_sign: float,
+) -> tuple[np.ndarray, float, Optional[str]]:
+    """Verify the point OA is about to return; repair round-off or refuse to certify.
+
+    ``solve_oa`` built its ``SolveResult`` with **nothing** checking the vector it
+    returns — the same hole #952 closed on the matrix paths and #954 closed on
+    NLP-BB (``solver.py``'s "the last of the five solve exit paths with no
+    verification of the point it returns"; OA was a sixth). Measured on
+    ``portfol_roundlot``: OA returned ``status="optimal"``, ``gap_certified=True``
+    for a point that ``validation.feasibility.verify_point`` — this repository's
+    own shipped arbiter, confirmed to have RUN (no "guard is disabled" warning) —
+    rejects with ``row 5 violated by 5.632e-06 (allowed 1.000e-06)``. A solver
+    certifying a point its own verifier refuses is a soundness defect, whatever
+    the magnitude.
+
+    The arbiter here is ``verify_point`` itself rather than a second check of the
+    same thing. That is deliberate and is the #952 lesson: when the decision and
+    the reported magnitude come from different code they drift, and a route that
+    disagreed with the user-facing verifier would just move the contradiction one
+    level down.
+
+    Why the search's own gates do not already cover this: OA admits a fixed-NLP
+    point through ``_is_primal_feasible`` at ``1e-4``, 100x looser than the
+    declared ``abs=1e-6``, and the backend's convergence test is on *its* scaled
+    error, not on the model's rows. On ``portfol_roundlot`` POUNCE reported
+    ``nlp_err=7.22e-07`` while leaving four columns ``7.22e-11`` above ``lb=0``;
+    a row with a ``78000`` coefficient turns that into ``5.6e-06``.
+
+    Two outcomes, in this order:
+
+    * **Repair.** Coordinates within :data:`_OA_EXIT_SNAP_DIST` of a finite
+      declared bound are moved onto it and the point is re-verified. This is the
+      shape the defect actually takes — a variable the NLP left just off the
+      bound its own row forces it to — and it is adopted ONLY on a clean
+      ``verify_point``, so a repair that does not work is not a repair. The
+      objective is recomputed from the repaired point and returned, because that
+      is the point being published; measured on ``portfol_roundlot`` the move is
+      ``7.22e-11`` per column and the objective is bit-identical
+      (``delta=0.0``).
+    * **Refuse to certify.** A point that neither verifies nor repairs is
+      returned with its status downgraded and the reason attached, never as
+      ``optimal``/``gap_certified``. This is a *downgrade*, not the ``RuntimeError``
+      NLP-BB raises, and the difference is load-bearing: on that path the
+      incumbent's objective is also the reported dual bound, so there is no
+      honest weaker claim to fall back to. Here the bound comes from the master
+      relaxation and stays valid no matter what the incumbent does, so
+      ``feasible``-without-certification is an available and strictly more
+      informative answer than a crash.
+
+    ``obj``/the returned objective are in OA's INTERNAL minimize units;
+    ``verify_point`` reports in model units (it un-negates a MAXIMIZE model), so
+    ``obj_sign`` converts between them. Getting this backwards would flip the
+    sign of every maximize result, which is why the conversion is explicit rather
+    than implied.
+
+    Returns ``(x, objective, refusal_reason)``; ``refusal_reason`` is ``None``
+    when the returned point verifies.
+    """
+    from discopt.validation.feasibility import verify_point
+
+    x_flat = np.asarray(x_flat, dtype=np.float64).ravel()
+    n_model = sum(int(v.size) for v in model._variables)
+    # ``incumbent`` may carry columns past the user's variables (epigraph/slack
+    # additions). ``_build_x_dict`` reads only the first ``n_model``, so those are
+    # the only ones that reach the caller and the only ones to judge.
+    head = x_flat[:n_model]
+
+    verdict = verify_point(model, head, with_objective=True)
+    if verdict.ok:
+        return x_flat, obj, None
+
+    repaired = head.copy()
+    n_snapped = 0
+    for v, lo, hi in _declared_bound_spans(model):
+        for j in range(v[0], v[1]):
+            if j >= repaired.shape[0]:
+                break
+            for bnd in (lo[j - v[0]], hi[j - v[0]]):
+                if not np.isfinite(bnd) or abs(bnd) >= 1e15:
+                    continue
+                d = abs(repaired[j] - bnd)
+                if 0.0 < d <= _OA_EXIT_SNAP_DIST:
+                    repaired[j] = float(bnd)
+                    n_snapped += 1
+                    break
+
+    if n_snapped:
+        second = verify_point(model, repaired, with_objective=True)
+        if second.ok:
+            logger.debug(
+                "OA exit gate: repaired %d near-bound coordinate(s); %s -> verified",
+                n_snapped,
+                verdict.reason,
+            )
+            out = x_flat.copy()
+            out[:n_model] = repaired
+            repaired_obj = obj
+            if second.objective is not None:
+                repaired_obj = float(obj_sign * second.objective)
+            return out, repaired_obj, None
+
+    logger.warning(
+        "OA: the returned incumbent does not verify (%s) and %d near-bound "
+        "repair(s) did not fix it. Reporting the point WITHOUT certification: "
+        "its objective is not a proven upper bound. The master's dual bound is "
+        "unaffected and is still reported.",
+        verdict.reason,
+        n_snapped,
+    )
+    return x_flat, obj, str(verdict.reason or "point failed feasibility verification")
+
+
+def _declared_bound_spans(model: Model):
+    """Yield ``((start, stop), lb, ub)`` per variable over the DECLARED box.
+
+    Declared, never derived: FBBT and the OA master both tighten bounds during
+    the solve, and a gate that judged a point by a *derived* bound could
+    manufacture a refusal for a point the user's own model admits.
+    """
+    offset = 0
+    for v in model._variables:
+        n = int(v.size)
+        lb = np.broadcast_to(np.asarray(v.lb, dtype=np.float64).ravel(), (n,))
+        ub = np.broadcast_to(np.asarray(v.ub, dtype=np.float64).ravel(), (n,))
+        yield (offset, offset + n), lb, ub
+        offset += n
+
+
 #: Consecutive OA iterations with **no** movement in either bound after which the
 #: cut loop is abandoned as non-converging.
 #:
@@ -8972,9 +9119,45 @@ def solve_oa(
         bound = None
 
     if incumbent is not None and incumbent_obj is not None:
+        # --- exit gate: verify the point that actually LEAVES ---
+        # Placed here, after every acceptance gate and every terminal
+        # replacement, for the reason #954 gives on the NLP-BB path: the search's
+        # own gates judge points it may later replace, so only an exit check
+        # judges the vector the caller receives. See
+        # :func:`_exit_verified_incumbent` for the measurement that motivates it.
+        _obj_before_gate = float(incumbent_obj)
+        incumbent, incumbent_obj, _exit_refusal = _exit_verified_incumbent(
+            model, incumbent, incumbent_obj, _obj_sign
+        )
+        # ``certified_gap``/``reported_gap`` were computed from ``UB`` above. A
+        # repair that moved the objective makes both stale, and a stale gap is
+        # exactly the kind of number that gets read as a certificate. Measured on
+        # ``portfol_roundlot`` the move is bit-zero, so this costs nothing there;
+        # it exists so that an instance where it is NOT zero cannot publish a gap
+        # belonging to a point that no longer exists.
+        if _exit_refusal is None and incumbent_obj != _obj_before_gate:
+            logger.info(
+                "OA exit gate: repair moved the objective %r -> %r; the gap is "
+                "recomputed from the repaired point.",
+                _obj_before_gate,
+                incumbent_obj,
+            )
+            UB = float(incumbent_obj)
+            certified_gap = _certified_gap_value()
+            reported_gap = certified_gap if bound is not None and UB < 1e19 else None
+
         status = "optimal" if _certified_gap_converged() and not has_unresolved else "feasible"
         if termination_reason in {"cycling", "stalling"}:
             status = "feasible"
+        if _exit_refusal is not None:
+            # An unverified incumbent's objective is not a proven upper bound, so
+            # the gap it participates in is not a certificate and the run is not
+            # `optimal`. ``bound`` is deliberately LEFT ALONE: it comes from the
+            # master relaxation, which never saw this point, so suppressing it
+            # would discard a valid dual bound to report a primal defect.
+            status = "feasible"
+            reported_gap = None
+            final_reason = "unverified_incumbent"
         # ``gap_certified`` must agree with ``status``: it is the field a user
         # reads (and ``result_io.summary_text`` renders) to decide whether the
         # reported gap is a certificate. Deriving it from ``reported_gap is not
