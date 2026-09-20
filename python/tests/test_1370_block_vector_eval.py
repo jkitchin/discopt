@@ -276,3 +276,43 @@ class TestTimingAttribution:
         # ran, all-jax would mean the delegated tape calls were misattributed.
         assert buckets.get("jax", 0.0) > 0.0
         assert buckets.get("rust", 0.0) > 0.0
+
+
+class TestDefaultPathIsUntouched:
+    def test_a_default_solve_still_imports_no_jax(self):
+        """The gate's import sits on the solve path; it must not drag JAX in.
+
+        ``solve_nlp_from_model`` now imports ``discopt._block_eval`` on every
+        call. That module imports numpy and the standard library only, and
+        reaches its JAX-using builder solely behind the flag — so the standing
+        "an ordinary nonlinear solve imports zero jax modules" property holds.
+        Measured in a subprocess, because this test session has already imported
+        JAX for everything above.
+        """
+        import subprocess
+        import sys
+        import textwrap
+
+        script = textwrap.dedent(
+            """
+            import sys
+            import discopt.modeling as dm
+            from discopt import Model
+            from discopt.solvers.nlp_pounce import solve_nlp_from_model
+
+            m = Model("t")
+            x = m.continuous("x", shape=(3,), lb=-5, ub=5)
+            m.minimize(dm.sum(dm.exp(x)))
+            m.subject_to(dm.sum(x) >= 1)
+            before = sum(1 for k in sys.modules if k.split(".")[0] == "jax")
+            r = solve_nlp_from_model(m)
+            after = sum(1 for k in sys.modules if k.split(".")[0] == "jax")
+            print(f"{r.status.name} {before} {after}")
+            """
+        )
+        out = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, check=True
+        )
+        status, before, after = out.stdout.strip().split()[-3:]
+        assert status == "OPTIMAL"
+        assert int(before) == 0 and int(after) == 0, out.stdout
