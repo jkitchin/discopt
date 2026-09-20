@@ -25275,7 +25275,24 @@ def _solve_milp_simplex(
 
     def _point_feasible(xo: np.ndarray) -> bool:
         """Never take the engine's ``optimal``/``feasible`` on faith: verify the
-        returned point against the model's own rows, bounds, and integrality."""
+        returned point against the model's own rows, bounds, and integrality.
+
+        #1380: integrality is tested FIRST and the rows are then tested at the
+        point being CLAIMED -- the integral one. Testing the rows at the raw
+        point and integrality beside it lets an integer column inside the
+        integrality tolerance buy ``M * tol`` of row slack; on ``x <= 1e7 z`` a
+        binary returned at 1e-6 passed both tests while carrying x to 10, and
+        this engine certified ``optimal`` at an objective below the model's true
+        optimum.
+        """
+        for _off, _sz in zip(int_offsets, int_sizes):
+            seg = xo[_off : _off + int(_sz)]
+            if np.any(np.abs(seg - np.round(seg)) > 1e-4):
+                return False
+        if int_idx:
+            from discopt.validation.feasibility import snap_integer_columns
+
+            xo = snap_integer_columns(xo, int_idx)
         if _A_ub_m is not None and _b_ub_m is not None and _A_ub_m.shape[0]:
             if not bool(np.all(_A_ub_m @ xo <= _b_ub_m + _gate_tol * (1.0 + np.abs(_b_ub_m)))):
                 return False
@@ -25288,10 +25305,6 @@ def _solve_milp_simplex(
             return False
         if not bool(np.all(xo <= _xu_gate + _gate_tol)):
             return False
-        for _off, _sz in zip(int_offsets, int_sizes):
-            seg = xo[_off : _off + int(_sz)]
-            if np.any(np.abs(seg - np.round(seg)) > 1e-4):
-                return False
         return True
 
     # Re-entry on an uncertified ``feasible`` (issue #698). The first slice
@@ -26189,17 +26202,39 @@ def _solve_milp_bb(
         ):
             sol_flat = _rounded_inc
         else:
-            logger.debug(
-                "MILP-BB: integer snap would leave the declared rows (%s); "
-                "reporting the unrounded incumbent",
-                _matrix_solution_violations(
-                    np.asarray(_rounded_inc[:n_orig], dtype=np.float64),
-                    _A_ub_m,
-                    _b_ub_m,
-                    _A_eq_m,
-                    _b_eq_m,
-                    _declared_box,
-                ),
+            # #1380: "report the unrounded incumbent" is what opened the big-M
+            # hole. The unrounded point is not an answer to the declared model —
+            # its integer columns are not integers — so its objective is not an
+            # achievable value, and reporting it certifies an optimum the model
+            # does not have. Measured on ``min -x + 3z`` s.t. ``x <= 1e7 z``,
+            # ``x in [0,10]``, ``z`` binary: the tree's incumbent sat at
+            # ``z = 1e-6`` (inside integrality_tol=1e-5, so every integrality
+            # test passed) carrying ``x = 10`` on a row the integral point
+            # violates by 10, and this path reported ``optimal -9.999997``
+            # against a true optimum of -7.0.
+            #
+            # The snap moving a row is not by itself the defect — a multi-term
+            # row accumulates one snap per term and can miss abs=1e-6 by a hair
+            # (the tree-ensemble case above). What separates the two is whether
+            # the model HAS an integral point here at all, and the arbiter below
+            # is what answers that. Falling back to the fractional point answers
+            # it by assumption, in the wrongly-accept direction, so the incumbent
+            # is refused here instead and the exit guard reports why.
+            _snap_why = _matrix_solution_violations(
+                np.asarray(_rounded_inc[:n_orig], dtype=np.float64),
+                _A_ub_m,
+                _b_ub_m,
+                _A_eq_m,
+                _b_eq_m,
+                _declared_box,
+            )
+            raise RuntimeError(
+                "MILP-BB incumbent has no feasible integral realisation: snapping "
+                f"its integer columns to integers leaves the declared rows ({_snap_why}). "
+                "The unrounded point is not a solution of the declared model. This is "
+                "the big-M signature: a coefficient large enough that an integer "
+                "column inside integrality_tol still carries |a_ij| * tol of row "
+                "slack — reduce the big-M constant to what the model actually needs."
             )
 
         # #952: exit gate, the same one ``_solve_miqp_bb`` grew — this path's
@@ -26950,17 +26985,33 @@ def _solve_miqp_bb(
         ):
             sol_flat = _rounded_inc
         else:
-            logger.debug(
-                "MIQP-BB: integer snap would leave the declared rows (%s); "
-                "reporting the unrounded incumbent",
-                _matrix_solution_violations(
-                    np.asarray(_rounded_inc[:n_orig], dtype=np.float64),
-                    _A_ub_m,
-                    _b_ub_m,
-                    _A_eq_m,
-                    _b_eq_m,
-                    _declared_box,
-                ),
+            # #1380: the MILP path's sibling of this fallback is what let a binary
+            # at 1e-6 certify an objective the model cannot attain, and this path
+            # reaches it the same way. Measured on ``min -x + 3z + 0.001x^2`` s.t.
+            # ``x <= 1e7 z``, ``x in [0,10]``, ``z`` binary: MIQP-BB returned
+            # ``optimal -9.8999969`` at ``z = 1.0000009e-06`` against a true
+            # optimum of -6.9.
+            #
+            # An unrounded point is not an answer to the declared model — its
+            # integer columns are not integers — so its objective is not an
+            # attainable value and must not be reported, still less returned as the
+            # dual bound on an ``optimal`` exit. Refusal, not repair (CLAUDE.md §3),
+            # matching the exit gate immediately below.
+            _snap_why = _matrix_solution_violations(
+                np.asarray(_rounded_inc[:n_orig], dtype=np.float64),
+                _A_ub_m,
+                _b_ub_m,
+                _A_eq_m,
+                _b_eq_m,
+                _declared_box,
+            )
+            raise RuntimeError(
+                "MIQP-BB incumbent has no feasible integral realisation: snapping "
+                f"its integer columns to integers leaves the declared rows ({_snap_why}). "
+                "The unrounded point is not a solution of the declared model. This is "
+                "the big-M signature: a coefficient large enough that an integer "
+                "column inside integrality_tol still carries |a_ij| * tol of row "
+                "slack — reduce the big-M constant to what the model actually needs."
             )
 
         # #952: exit gate. Every incumbent this function returns is verified here,
