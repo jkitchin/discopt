@@ -45,6 +45,64 @@ from .interval import (
 # Unit roundoff for IEEE-754 binary64 round-to-nearest (2**-53).
 _UNIT_ROUNDOFF = 2.0**-53
 
+#: Multiplier on ``u·‖H‖`` for a semidefiniteness *decision slack* (#1397).
+#:
+#: Every semidefiniteness verdict in this package compares a computed eigenvalue
+#: (or a rigorous bound on one) against zero, and needs some slack: a genuinely
+#: singular PSD Hessian — a quadratic in a subset of the model's variables, which
+#: is the ordinary case — has an exact zero eigenvalue that arithmetic renders as
+#: a small negative. The slack cannot be an absolute constant, because the error
+#: it absorbs is O(u·‖H‖): 32 puts it just above the measured worst case for
+#: ``eigvalsh`` (5.42·u·‖H‖ over 1800 trials, see ``solver._hessian_is_psd_with_
+#: margin``) while staying far below any tolerance in the solver.
+_PSD_DECISION_K = 32.0
+
+
+def psd_decision_slack(magnitude: float) -> float:
+    """Slack for a ``λ ≥ 0`` test on a matrix of magnitude ``magnitude`` (#1397).
+
+    Returns ``_PSD_DECISION_K · u · magnitude``: the arithmetic's own error at
+    that magnitude, and nothing else. An absolute constant in this position is
+    dimensionally incoherent — an eigenvalue carries the units of the matrix — and
+    fails in both directions at once. Measured over a sweep in ``‖Q‖_F`` (2000
+    verdicts, ``n ≤ 32``) against the previous absolute ``1e-10``:
+
+    * 149 genuinely PSD matrices with an *exact* zero eigenvalue were refused
+      once ``‖Q‖_F ≳ 1e7`` (at ``‖Q‖_F = 9.3e11`` the zero computes as
+      ``-2.7e-05``), silently costing the convexity certificate;
+    * 240 *indefinite* matrices were certified convex, the worst admitting a
+      **relative** nonconvexity of ``1.97e-12`` — 8900·u — because an absolute
+      ``1e-10`` is enormous next to a small ``‖Q‖``. This slack caps that
+      admission at ``2·K·u ≈ 1.4e-14``.
+
+    ``magnitude`` is a Frobenius norm at every call site, which bounds the
+    spectral norm above: erring high only widens the slack for a matrix whose
+    entries are genuinely large, and the bound on admitted nonconvexity stays
+    relative.
+
+    A non-finite or negative ``magnitude`` yields ``0.0`` — no slack, so the
+    caller's test reduces to the exact ``λ ≥ 0`` comparison rather than being
+    handed an infinite licence.
+    """
+    mag = float(magnitude)
+    if not np.isfinite(mag) or mag <= 0.0:
+        return 0.0
+    return _PSD_DECISION_K * _UNIT_ROUNDOFF * mag
+
+
+def interval_magnitude(H: Interval) -> float:
+    """Frobenius norm of the entry-wise absolute supremum of an interval matrix.
+
+    The magnitude to hand :func:`psd_decision_slack` for a verdict taken on an
+    interval Hessian: ``max(|H_lo|, |H_hi|)`` dominates ``|A|`` entry-wise for
+    every concrete ``A ∈ H``, so this bounds ``‖A‖_2`` above for all of them.
+    Returns ``inf`` when any entry is unbounded, which yields no usable slack and
+    leaves the caller's own non-finite guard to abstain.
+    """
+    lo = np.asarray(H.lo, dtype=np.float64)
+    hi = np.asarray(H.hi, dtype=np.float64)
+    return float(np.linalg.norm(np.maximum(np.abs(lo), np.abs(hi)), "fro"))
+
 
 def _row_offdiag_abs_sum_upper(abs_sup: np.ndarray) -> np.ndarray:
     """Sound per-row upper bound on the off-diagonal absolute sums.
@@ -192,4 +250,10 @@ def psd_2x2_sufficient(H: Interval) -> bool:
     return bool(prod_lo >= sq_hi)
 
 
-__all__ = ["gershgorin_lambda_min", "gershgorin_lambda_max", "psd_2x2_sufficient"]
+__all__ = [
+    "gershgorin_lambda_min",
+    "gershgorin_lambda_max",
+    "psd_2x2_sufficient",
+    "psd_decision_slack",
+    "interval_magnitude",
+]
