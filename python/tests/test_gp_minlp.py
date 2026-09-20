@@ -10,7 +10,8 @@ Covers: classification (positive-lower-bound integers admitted, binaries /
 unbounded integers / non-GP relaxations refused), end-to-end solves against
 known optima, a differential panel against the independent classic spatial
 branch-and-bound, certified infeasibility, and the ``solver="gp-minlp"``
-dispatch + ``DISCOPT_GP_MINLP`` auto-route.
+dispatch. (A ``DISCOPT_GP_MINLP`` auto-route flag was retired in #1388; the
+explicit selector was always the real interface, so no coverage was lost.)
 """
 
 from __future__ import annotations
@@ -327,22 +328,19 @@ class TestSolverDispatch:
         with pytest.raises(ValueError, match="not a .*GP-structured MINLP"):
             m.solve(solver="gp-minlp")
 
-    def test_auto_route_off_by_default(self, monkeypatch):
-        # With the flag unset, a plain solve() must NOT take the GP-MINLP path;
-        # the classic B&B still solves it correctly (the two must agree).
-        monkeypatch.delenv("DISCOPT_GP_MINLP", raising=False)
+    def test_never_auto_routed(self):
+        """A plain ``solve()`` must NOT take the GP-MINLP path, and still be right.
+
+        This guards #1388's retirement. There used to be a ``DISCOPT_GP_MINLP``
+        env flag that auto-routed a plain ``solve()`` into this engine, plus a
+        companion ``test_auto_route_on_with_flag``. The flag promised a §5
+        graduation panel that was never run, so it was deleted; the engine is
+        unchanged and reachable by ``solver="gp-minlp"`` (covered above). What
+        remains to assert is the negative: the classic B&B owns a plain solve and
+        agrees on the answer.
+        """
         m = Model("gpint")
         n = m.integer("n", lb=1, ub=5)
         m.minimize(n + 2.25 / n)
         r = m.solve()
         assert r.objective == pytest.approx(3.125, abs=1e-4)
-
-    def test_auto_route_on_with_flag(self, monkeypatch):
-        monkeypatch.setenv("DISCOPT_GP_MINLP", "1")
-        m = Model("gpint")
-        n = m.integer("n", lb=1, ub=5)
-        m.minimize(n + 2.25 / n)
-        r = m.solve()
-        assert r.status == "optimal"
-        assert r.objective == pytest.approx(3.125, abs=1e-5)
-        assert r.gap_certified is True

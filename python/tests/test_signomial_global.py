@@ -94,11 +94,16 @@ def test_certifies_mixed_sign_box_program():
     assert res.bound == pytest.approx(true_min, abs=1e-3)
 
 
-def test_solver_integration_flag_gated(monkeypatch):
-    """`Model.solve()` routes to the SGO path only when DISCOPT_SGO is enabled."""
+def test_explicit_solver_route_certifies():
+    """``solve(solver="sgo")`` reaches the SGO path and certifies.
+
+    Was ``test_solver_integration_flag_gated``, driving a plain ``solve()`` with
+    ``DISCOPT_SGO=1``. #1388 retired that flag and gave the engine an explicit
+    selector instead; every assertion below is unchanged, which is the point --
+    the entry point moved, the certified result did not.
+    """
     m = _st_e36_like()
-    monkeypatch.setenv("DISCOPT_SGO", "1")
-    res = m.solve()
+    res = m.solve(solver="sgo")
     true_min = _grid_min_2d(m)
     assert res.status == "optimal"
     assert res.gap_certified is True
@@ -339,12 +344,14 @@ def test_constrained_incumbent_is_genuinely_feasible():
     assert res.bound <= true_min + 1e-3  # sound dual bound
 
 
-def test_constrained_solver_integration_flag_gated(monkeypatch):
-    """`Model.solve()` routes a *constrained* signomial program to the SGO path
-    when DISCOPT_SGO is enabled, and certifies a feasible global optimum."""
+def test_constrained_explicit_solver_route_certifies():
+    """``solve(solver="sgo")`` certifies a *constrained* signomial program.
+
+    Was flag-gated on ``DISCOPT_SGO`` before #1388 retired it; assertions
+    unchanged.
+    """
     m = _constrained_2d()
-    monkeypatch.setenv("DISCOPT_SGO", "1")
-    res = m.solve()
+    res = m.solve(solver="sgo")
     true_min = _constrained_grid_min(m)
     assert res.status == "optimal"
     assert res.gap_certified is True
@@ -730,12 +737,14 @@ def test_certified_infeasible_integer_program():
     assert res.objective is None
 
 
-def test_integer_solver_integration_flag_gated(monkeypatch):
-    """`Model.solve()` routes an integer signomial MINLP to the SGO path when
-    DISCOPT_SGO is enabled and certifies its integer optimum."""
+def test_integer_explicit_solver_route_certifies():
+    """``solve(solver="sgo")`` certifies an integer signomial MINLP.
+
+    Was flag-gated on ``DISCOPT_SGO`` before #1388 retired it; assertions
+    unchanged.
+    """
     m = _small_int_minlp()
-    monkeypatch.setenv("DISCOPT_SGO", "1")
-    res = m.solve()
+    res = m.solve(solver="sgo")
     best, _pt = _brute_int_min(
         lambda x, y: 2 * x + 3 * y - 5 * math.sqrt(x * y),
         [(1, 6), (1, 6)],

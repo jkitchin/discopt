@@ -19,6 +19,27 @@ def coef_tighten_enabled() -> bool:
     Bound-changing presolve (CLAUDE.md §5): the strengthened LP relaxation is
     only smaller than the original, never larger, so it is sound, but it stays
     default-OFF until a corpus-wide differential panel graduates it.
+
+    **§5 state: graduation candidate — the benefit IS measured, the panel is not.**
+    Recorded here because the #1345 audit read this docstring, saw only "until a
+    panel graduates it", and classified the flag *panel owed, never run* — which
+    put it on #1388's retirement list. Its own Stage-2 verdict
+    (``docs/dev/issue-282-stage2-verdict.md``) says the opposite:
+
+        Coefficient tightening is the load-bearing lever exactly as Stage 0
+        predicted: ``syn40m`` +2608 → +1145 %.
+
+    52-62 rows tightened on the ``rsyn*`` family, where it moves the root barely
+    at all — the `rsyn` gap is a different failure mode from `syn40m`'s big-M
+    charge. Note what that document *falsifies* is **Stage 2** (Marchand-Wolsey
+    VUB substitution plus a sustained aggregation loop), not Stage 1, which is
+    this flag. Do not read its FALSIFIED banner as a verdict on coefficient
+    tightening.
+
+    *What it needs:* the Regime-2 differential panel over the in-repo corpus, with
+    an ``ARMS`` entry in ``generality_sweep.GRADUATION_ARMS`` so
+    ``graduation_gate.py`` can run it — the missing wiring #1388 identified. Not a
+    retirement candidate.
     """
     val = os.environ.get("DISCOPT_COEF_TIGHTEN", "0").strip().lower()
     return val not in ("", "0", "false", "off", "no")

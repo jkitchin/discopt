@@ -193,6 +193,29 @@ If all five are "yes," `solve()` should return `status="optimal"` with
   largest and is often the better choice when the default spatial branch-and-bound
   stalls. Tighter cuts (`rlt_cuts=True`, PSD/SOC separators) can also close stubborn
   gaps — see {doc}`notebooks/solver_internals`.
+- **Register a composite the relaxer should treat as one atom.** Factorable
+  relaxation decomposes an expression term by term, which throws away cancellation
+  *between* terms. `dm.register_function(name, lower)` declares a named univariate
+  composite whose definition is built from `dm.*` primitives; the relaxation layer
+  then envelopes the composite as a single atom instead of relaxing its expansion:
+
+  ```python
+  import discopt.modeling as dm
+
+  rk = dm.register_function(
+      "redlich_kister",
+      lambda x: x * (1 - x) * (L0 + L1 * (2 * x - 1)),
+      description="binary excess Gibbs energy",
+  )
+  m.constraint(g == rk(x))          # relaxed as one atom, not four products
+  ```
+
+  The name must not collide with a built-in operator — `register_function` raises
+  rather than silently re-defining an operator's envelope process-wide. Re-binding
+  an existing name needs `replace=True`, and expressions already built keep the old
+  body and lose the atom envelope. `dm.registered_names()` lists what is registered.
+  This is the mechanism plugins use to hand the relaxer structure they know and
+  generic factorable reformulation cannot recover (#1248).
 - **Accept a local solution deliberately.** If global is genuinely out of reach,
   read `result.objective` as a high-quality heuristic value and report it as such
   — but check `gap_certified` so you *know* that is what you have.

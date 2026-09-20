@@ -67,11 +67,30 @@ def test_every_solver_math_gate_has_an_audit_verdict():
         "adds its row in the same PR that introduces the flag — graduate, retire, or "
         "keep as a documented opt-out."
     )
-    # Sanity floor against the classification silently collapsing. Deliberately well
-    # below the current count: RETIREMENT legitimately shrinks this population, and a
-    # floor pinned to "today's number" would fail every time the rule works (#1357 took
-    # it from 14 to 13 and tripped exactly that).
-    assert len(gates) >= 8, f"classification collapsed: only {len(gates)} solver-math gates"
+    # Anti-collapse guard. This was a constant floor (`>= 8`), "deliberately well below
+    # the current count" because retirement legitimately shrinks this population — the
+    # author had already seen #1357 trip a tighter one. #1388 retired six gates at once,
+    # taking the count 11 -> 5, and the floor fired anyway. A constant cannot be both
+    # loose enough to survive retirement and tight enough to catch a collapse.
+    #
+    # So cross-check the scan against the audit document instead of a magic number. The
+    # document is what this test exists to enforce, it must be updated by any retirement
+    # (CLAUDE.md §5 requires exactly that), and an exact match is strictly STRONGER than
+    # the lower bound it replaces: a regex that silently stops matching some gates now
+    # fails here, where `>= 8` would have passed it while the population was large.
+    m = re.search(r"<!--\s*live-solver-math-gates:\s*(\d+)\s*-->", audit)
+    assert m, (
+        "docs/dev/flag-retirement-audit.md has no `<!-- live-solver-math-gates: N -->` "
+        "marker. It is the machine-readable count this test cross-checks the source scan "
+        "against; restore it rather than removing the check."
+    )
+    declared = int(m.group(1))
+    assert len(gates) == declared, (
+        f"the source scan finds {len(gates)} default-OFF solver-math gates but "
+        f"docs/dev/flag-retirement-audit.md declares {declared}: {gates}. Either a gate "
+        "was added or retired without updating the audit's marker, or the scan has "
+        "stopped matching some flags."
+    )
 
 
 @pytest.mark.parametrize("excluded", sorted(KNOBS | NON_SOLVER))

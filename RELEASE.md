@@ -66,7 +66,14 @@ The next planned release is **`v0.9.0`** (minor bump on top of `v0.8.0`).
 - [ ] Phase gates relevant to this release. Each `--gate phaseN` check reads the matching suite's most recent results in `results/`, so run `--suite phaseN` first. These runs are expensive (each suite uses a 3600 s per-instance time limit) and are typically a CI-only step for patch releases:
   - [ ] `python discopt_benchmarks/run_benchmarks.py --suite phase1 && python discopt_benchmarks/run_benchmarks.py --gate phase1`
   - [ ] `python discopt_benchmarks/run_benchmarks.py --suite phase3 && python discopt_benchmarks/run_benchmarks.py --gate phase3`
-  - [ ] `phase4` currently has gate criteria but no registered suite in `discopt_benchmarks/config/benchmarks.toml`. Skip until a `[suites.phase4]` entry is added; if relevant to the release, fix the suite definition first.
+  - [ ] `phase4` is the release gate and needs **no** `[suites.phase4]` entry — every one of its seven criteria names `full` or `comparison` (see
+        `[gates.phase4.criteria]`). `--gate` defaults to looking for results from a suite of its own name, so point it at the corpus run explicitly:
+        ```bash
+        python discopt_benchmarks/run_benchmarks.py --suite full --output results/full.json
+        python discopt_benchmarks/run_benchmarks.py --gate phase4 --output results/full.json
+        ```
+        (Earlier revisions of this checklist said to skip phase4 "until a `[suites.phase4]` entry is added". That was a misreading of
+        `_run_gate_check`, which accepts `--output` in place of the same-named suite; corrected 2026-09-20 for v0.9.0.)
   - [ ] Review `reports/phase*_gate_report.md` -- no regressions vs. the previous release.
 
 ## 3. Lint, format, types
