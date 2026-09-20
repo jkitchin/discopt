@@ -18738,6 +18738,12 @@ def _solve_nlp_bb(
         # This resolves degenerate bounds (e.g., x <= M*y with y fixed at 0)
         # that cause IPM convergence failures.
         node_infeasible_mask = np.zeros(n_batch, dtype=bool)
+        # Read lazily, like every other nlp_ipopt import here: the module is an
+        # optional dependency's wrapper and must not load at solver import time.
+        from discopt.solvers.nlp_ipopt import (
+            IPOPT_LOCALLY_INFEASIBLE as _IPOPT_LOCALLY_INFEASIBLE,
+        )
+
         # Which of the sentinels written below are a PROVEN-empty region rather
         # than a failure to bound one (C-47). This path already draws exactly
         # that line for `_unconverged_fathom`; the flag carries it across the
@@ -19010,11 +19016,24 @@ def _solve_nlp_bb(
                         not _model_is_convex and not node_infeasible_mask[i]
                     ):
                         _unconverged_fathom = True
-                    else:
-                        # The complement: a clean INFEASIBLE on a convex node, or a
-                        # node already carrying a rigorous emptiness certificate.
-                        # That IS a proof the region is empty, so the sentinel prune
-                        # is justified and the guard must not demote it (C-47).
+                    # C-47: state whether THIS sentinel is a proof the box is
+                    # empty. Rigorous either because in-tree presolve already
+                    # proved it, or because the node is convex and the solver's
+                    # verdict is sound to read that way. The mapped
+                    # ``SolveStatus.INFEASIBLE`` is kept for backends that report
+                    # it, but POUNCE/Ipopt never do: code 2 is deliberately
+                    # collapsed onto ``ERROR`` for callers holding no convexity
+                    # certificate, and ``raw_status`` is where it may be read
+                    # soundly (see ``IPOPT_LOCALLY_INFEASIBLE``). Reading only the
+                    # mapped status here would be a dead branch on the default
+                    # node engine.
+                    if node_infeasible_mask[i] or (
+                        _model_is_convex
+                        and (
+                            nlp_result.status == SolveStatus.INFEASIBLE
+                            or nlp_result.raw_status == _IPOPT_LOCALLY_INFEASIBLE
+                        )
+                    ):
                         result_excl[i] = True
                     lb_c = np.clip(node_lb, -_SPC, _SPC)
                     ub_c = np.clip(node_ub, -_SPC, _SPC)
@@ -20332,11 +20351,18 @@ def _solve_batch_pounce(
 
     ``excl_out``, when given, is a length-``n_batch`` bool array the caller owns;
     entry ``i`` is set when node ``i``'s sentinel is a PROVEN-empty region rather
-    than a failure to bound one (C-47). Only a clean ``INFEASIBLE`` on a *convex*
-    node qualifies — the same rule the serial path applies — so a stall, an error
-    or a restoration failure leaves it False and the node stays open. Without this
-    the batch path's rigorous verdicts, which reach the caller as a bare sentinel
-    indistinguishable from a failure, would be demoted and lose real certificates.
+    than a failure to bound one (C-47). The qualifying verdict is
+    ``IPOPT_LOCALLY_INFEASIBLE`` (restoration converged to a local minimizer of
+    the constraint violation with the violation still positive) on a **convex**
+    node, where the violation measure is convex so a local minimizer of it is
+    global. That is the reading ``NLPResult.raw_status`` exists for; the mapped
+    ``SolveStatus`` deliberately collapses the code onto ``ERROR`` for callers
+    that hold no convexity certificate, so reading the mapped status here would
+    be dead code. A stall, a time limit or a genuine error leaves the entry False
+    and the node stays open. Without this the batch path's rigorous verdicts
+    reach the caller as a bare sentinel indistinguishable from a restoration
+    failure, and would be demoted — losing real certificates (#1141 measured 60
+    of 401 convex OA subproblems arriving as code 2).
 
     Starting points per node:
 
@@ -20354,6 +20380,7 @@ def _solve_batch_pounce(
 
     from discopt.solvers.nlp_ipopt import (
         _IPOPT_STATUS_MAP,
+        IPOPT_LOCALLY_INFEASIBLE,
         _infer_constraint_bounds,
         _IpoptCallbacks,
     )
@@ -20526,7 +20553,7 @@ def _solve_batch_pounce(
                 convex=convex,
             )
             result_sols[i] = np.asarray(res.x, dtype=np.float64)
-            if convex and res.status == SolveStatus.INFEASIBLE and excl_out is not None:
+            if convex and excl_out is not None and res.raw_status == IPOPT_LOCALLY_INFEASIBLE:
                 excl_out[i] = True
             if res.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
                 obj = float(res.objective)
@@ -20543,7 +20570,7 @@ def _solve_batch_pounce(
         best_obj = None
         best_x = None
         best_status = None
-        saw_infeasible = False
+        saw_locally_infeasible = False
         for s in range(n_starts):
             x, info = results[i * n_starts + s]
             # Native results come back in .nl column order; map to evaluator
@@ -20555,9 +20582,10 @@ def _solve_batch_pounce(
             )
             if best_x is None:
                 best_x = x_arr  # placeholder if no start is accepted
-            status = _IPOPT_STATUS_MAP.get(info.get("status", -100), SolveStatus.ERROR)
-            if status == SolveStatus.INFEASIBLE:
-                saw_infeasible = True
+            raw = info.get("status", -100)
+            status = _IPOPT_STATUS_MAP.get(raw, SolveStatus.ERROR)
+            if raw == IPOPT_LOCALLY_INFEASIBLE:
+                saw_locally_infeasible = True
             # Accept the same statuses as the serial pounce node path; anything
             # else (infeasible, restoration failure, errors) is not usable.
             if status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
@@ -20567,10 +20595,11 @@ def _solve_batch_pounce(
                     best_x = x_arr
                     best_status = status
         result_sols[i] = best_x
-        if best_obj is None and saw_infeasible and convex and excl_out is not None:
-            # No start produced a usable objective and POUNCE declared the node
-            # infeasible. On a convex node that IS a proof the box is empty (the
-            # serial path's rule), so the sentinel prune below is rigorous.
+        if best_obj is None and saw_locally_infeasible and convex and excl_out is not None:
+            # No start produced a usable objective, and restoration converged to
+            # a positive local minimum of the constraint violation. That measure
+            # is convex here, so its local minimizer is global: the box is empty
+            # and the sentinel prune below is rigorous (C-47).
             excl_out[i] = True
         if best_obj is not None:
             result_lbs[i] = best_obj
