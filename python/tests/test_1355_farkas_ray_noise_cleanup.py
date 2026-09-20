@@ -66,15 +66,34 @@ _SCRIPT = textwrap.dedent(
 REFERENCE_OPT = 0.0031843318237648
 
 
-def _run(flag: str) -> dict:
+def _run(flag: str | None) -> dict:
+    """Run the captured model with the cleanup flag set to ``flag``.
+
+    ``flag=None`` leaves ``DISCOPT_FARKAS_RAY_CLEANUP`` *unset*, which is what
+    exercises the shipped default rather than an explicit opt-in — the only way
+    to test a graduation (#1360). The variable is popped rather than skipped:
+    the test process may itself have been launched with it set.
+    """
     env = dict(os.environ)
-    env["DISCOPT_FARKAS_RAY_CLEANUP"] = flag
+    if flag is None:
+        env.pop("DISCOPT_FARKAS_RAY_CLEANUP", None)
+    else:
+        env["DISCOPT_FARKAS_RAY_CLEANUP"] = flag
     env["DISCOPT_OA_CONVEXITY_CERTIFICATE"] = "1"
     out = subprocess.run(
         [sys.executable, "-c", _SCRIPT], env=env, capture_output=True, text=True, timeout=240
     )
     assert out.returncode == 0, out.stderr
     return json.loads(out.stdout.strip().splitlines()[-1])
+
+
+def _assert_sound(r: dict) -> None:
+    """Certificate soundness, required of *every* arm: a reported bound never
+    crosses the reference optimum, and an incumbent matches it."""
+    if r["bound"] is not None:
+        assert r["bound"] <= REFERENCE_OPT + 1e-9, r
+    if r["objective"] is not None:
+        assert abs(r["objective"] - REFERENCE_OPT) <= max(1e-6, 1e-4 * REFERENCE_OPT), r
 
 
 def test_cleanup_lets_oa_master_fathom_and_certify():
@@ -84,6 +103,26 @@ def test_cleanup_lets_oa_master_fathom_and_certify():
     assert r["status"] == "optimal", r
     assert r["mip_count"] < 45, r
     assert r["bound"] <= r["objective"]
-    # Certificate soundness: the bound never crosses the reference optimum.
-    assert r["bound"] <= REFERENCE_OPT + 1e-9, r
-    assert abs(r["objective"] - REFERENCE_OPT) <= max(1e-6, 1e-4 * REFERENCE_OPT), r
+    _assert_sound(r)
+
+
+def test_cleanup_is_the_default_since_1360():
+    """Graduation (#1360): with the variable *unset*, the shipped default must
+    behave as the opt-in arm — ``optimal``, fathomed well inside the node
+    budget, and sound. A regression that flipped the default back to OFF would
+    leave this run ``feasible`` at the time limit."""
+    r = _run(None)
+    assert r["status"] == "optimal", r
+    assert r["mip_count"] < 45, r
+    assert r["bound"] <= r["objective"]
+    _assert_sound(r)
+
+
+def test_zero_still_opts_out_and_stays_sound():
+    """The legacy path stays reachable with ``=0`` (CLAUDE.md §5 keeps the
+    opt-out intact). It is *slower* — that is the bug #1355 describes — so this
+    asserts only that it still runs and that whatever it reports is sound, not
+    that it certifies."""
+    r = _run("0")
+    assert r["status"] in {"optimal", "feasible"}, r
+    _assert_sound(r)

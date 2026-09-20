@@ -765,16 +765,26 @@ pub(super) fn farkas_ray_certifies_cols(
 const FARKAS_RAY_NOISE_REL: f64 = 1e-12;
 
 /// Whether the #1355 Farkas-ray noise cleanup is enabled
-/// (`DISCOPT_FARKAS_RAY_CLEANUP`, read once). Default OFF until the CLAUDE.md §5
-/// panel. It changes which nodes are fathomed.
+/// (`DISCOPT_FARKAS_RAY_CLEANUP`, read once). **Default ON** since the #1360
+/// graduation panel; opt out with `=0`. It changes which nodes are fathomed.
+///
+/// Graduated on the CLAUDE.md §5 panel (990 rows, 7346 checks, 198 instances ×
+/// 30 s, the two arms differing only in this flag): *cert-clean* — no bound
+/// above its reference optimum, no certification regression — and
+/// *net-positive*, 97 → 100 certified instances with total wall 3362.6 s →
+/// 3293.8 s. The one instance whose certificate disappears with the cleanup on
+/// is `gams01`, which certifies *falsely* without it (bound 28274.71 against a
+/// reference optimum of 21380.20), so losing that one is the fix, not a
+/// regression.
 fn farkas_ray_cleanup_enabled() -> bool {
     use std::sync::OnceLock;
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
         std::env::var("DISCOPT_FARKAS_RAY_CLEANUP")
             .ok()
-            .map(|v| !matches!(v.trim(), "" | "0" | "false" | "False"))
-            .unwrap_or(false)
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| !matches!(v.trim(), "0" | "false" | "False"))
+            .unwrap_or(true)
     })
 }
 
