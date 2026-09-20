@@ -31,9 +31,10 @@ different incumbent and reported ``feasible``, and the equalities failed while
 the gate was working exactly as intended. A snapshot measures how far the search
 got, which is hardware-dependent and is not the property under test.
 
-The end-to-end cases share one module-scoped solve where they can, and assert
-against the MINLPLib oracle (``best=0.0282906349``) rather than against this
-machine, so they hold at any search depth.
+Every solve here is bounded by OA ITERATIONS (``max_nodes``), never by the wall
+clock, so the arms of a differential are stopped by the same deterministic rule
+and can be compared with ``==``. The end-to-end cases assert against the MINLPLib
+oracle (``best=0.0282906349``) rather than against this machine.
 """
 
 import numpy as np
@@ -60,6 +61,22 @@ _BESTDUAL = 0.0282902203
 _ATOL = 1e-6  # conftest's declared abs tolerance
 _RTOL = 1e-4  # conftest's declared rel tolerance
 
+# Every solve here is bounded by OA ITERATIONS, never by the wall clock, and
+# ``time_limit`` is set far above what the budget needs so it can never bind.
+#
+# This is not a style preference -- a wall-clock budget makes a differential
+# meaningless. The first attempt compared a gated and an ungated run at
+# ``time_limit=10``; on CI neither converged, both stopped at 10.0 s having done
+# DIFFERENT amounts of work, and the comparison failed (0.0284247108 vs
+# 0.0283830908) with the gate behaving correctly. Two arms are only comparable
+# if they are stopped by the same deterministic rule.
+#
+# Measured: identical results over 3 repeats per budget, 0.6 s at 6 iterations
+# and 1.7 s at 12 -- cheaper than the 10 s budgets they replace.
+_BUDGET = 12
+_CONTROL_BUDGETS = (6, 12)
+_TL = 300.0  # deliberately non-binding; see above
+
 
 def _flat(model, x_dict):
     return np.concatenate(
@@ -67,9 +84,9 @@ def _flat(model, x_dict):
     )
 
 
-def _solve(**kw):
+def _solve(max_nodes=_BUDGET):
     m = from_nl(_NL)
-    return m, m.solve(time_limit=10, solver="mip-nlp", mip_nlp_method="oa", **kw)
+    return m, m.solve(time_limit=_TL, max_nodes=max_nodes, solver="mip-nlp", mip_nlp_method="oa")
 
 
 @pytest.fixture(scope="module")
@@ -116,14 +133,20 @@ def test_the_certificate_survives_the_gate(oa_run):
         assert r.status == "optimal"
 
 
-def test_the_gate_is_bound_neutral(monkeypatch):
-    """Regime (a), as a DIFFERENTIAL rather than a snapshot.
+def test_the_gate_repairs_without_moving_the_answer(monkeypatch):
+    """Regime (a) as a DIFFERENTIAL, over deterministic iteration budgets.
 
     "The repair moves the point, never the answer" is a claim about the gate, so
-    it is tested by running the same instance with the gate replaced by a
-    pass-through and comparing the two runs in one process. That comparison is
-    machine-independent; the hardcoded float it replaces was not, and it is the
-    assertion that failed on CI while the gate was working correctly.
+    it is tested by solving the same instance with the gate and with a
+    pass-through stub and comparing -- not by pinning a float from one machine.
+
+    The two arms are stopped by an iteration count, so they do identical work on
+    any machine; that is the whole reason this can be asserted with ``==``.
+
+    The loop also carries its own positive control (CLAUDE.md §6). A gate that
+    never had anything to repair would pass every neutrality assertion here while
+    proving nothing, so the test additionally requires that at least one budget
+    produced a point the shipped verifier REJECTS before the gate ran.
     """
     import discopt.solvers.oa as oa
 
@@ -132,21 +155,41 @@ def test_the_gate_is_bound_neutral(monkeypatch):
     def _identity(model, x_flat, obj, obj_sign):
         return np.asarray(x_flat, dtype=np.float64), obj, None
 
-    monkeypatch.setattr(oa, "_exit_verified_incumbent", _identity)
-    _m0, ungated = _solve()
+    reproduced = []
+    for budget in _CONTROL_BUDGETS:
+        monkeypatch.setattr(oa, "_exit_verified_incumbent", _identity)
+        m_u, ungated = _solve(budget)
 
-    monkeypatch.setattr(oa, "_exit_verified_incumbent", real)
-    _m1, gated = _solve()
+        monkeypatch.setattr(oa, "_exit_verified_incumbent", real)
+        m_g, gated = _solve(budget)
 
-    assert ungated.objective is not None and gated.objective is not None
-    # EXACTLY unchanged -- any drift, in either direction, means the gate is
-    # doing something other than clearing round-off.
-    assert gated.objective == ungated.objective, (
-        f"gate moved the objective: {ungated.objective!r} -> {gated.objective!r}"
+        assert ungated.objective is not None and gated.objective is not None
+
+        before = verify_point(m_u, _flat(m_u, ungated.x))
+        after = verify_point(m_g, _flat(m_g, gated.x))
+        if not before.ok:
+            reproduced.append((budget, before.reason))
+            assert after.ok, (
+                f"max_nodes={budget}: the gate failed to repair a point the "
+                f"verifier rejects: {after.reason}"
+            )
+
+        # EXACTLY unchanged -- any drift, in either direction, means the gate is
+        # doing something other than clearing round-off.
+        assert gated.objective == ungated.objective, (
+            f"max_nodes={budget}: gate moved the objective: "
+            f"{ungated.objective!r} -> {gated.objective!r}"
+        )
+        assert gated.bound == ungated.bound
+        assert gated.status == ungated.status
+        assert gated.gap_certified == ungated.gap_certified
+
+    assert reproduced, (
+        "no budget in "
+        f"{_CONTROL_BUDGETS} produced a verifier-rejected point, so the "
+        "neutrality assertions above compared a gate that had nothing to do. "
+        "This is a probe failure, not a solver failure: re-pick the budgets."
     )
-    assert gated.bound == ungated.bound
-    assert gated.status == ungated.status
-    assert gated.gap_certified == ungated.gap_certified
 
 
 def _tiny_model():
@@ -236,7 +279,7 @@ def test_a_refusal_downgrades_the_solve_result(monkeypatch):
 
     monkeypatch.setattr(oa, "_exit_verified_incumbent", _always_refuse)
 
-    m, r = _solve()
+    m, r = _solve(6)
 
     assert seen, "the gate was never called -- this test measured nothing"
     assert r.x is not None, "the forced-refusal run lost its incumbent entirely"
