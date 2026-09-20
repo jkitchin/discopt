@@ -23,15 +23,17 @@ model's rows. POUNCE reported ``nlp_err=7.22e-07`` while leaving four columns
 ``7.22e-11`` above ``lb=0``; a row with a ``78000`` coefficient turns that into
 ``5.6e-06``.
 
-The fix is bound-neutral here (CLAUDE.md §5 regime (a)) and these tests pin that:
-after the gate the status, objective and bound are bit-identical and only the
-verification flips::
+The fix is bound-neutral (CLAUDE.md §5 regime (a)). That is asserted here as a
+DIFFERENTIAL -- the same instance solved with the gate and with a pass-through
+stub, in one process -- not as a pinned float. An earlier revision of this file
+did pin one machine's floats and asserted ``status == "optimal"``; CI reached a
+different incumbent and reported ``feasible``, and the equalities failed while
+the gate was working exactly as intended. A snapshot measures how far the search
+got, which is hardware-dependent and is not the property under test.
 
-    STATUS optimal  OBJECTIVE 0.028292461076062838  BOUND 0.028290211674170968
-    CERTIFIED True  VERIFY_POINT ok=True
-
-The end-to-end case runs in ~2.6 s and its answer is stable across
-``time_limit`` 5/10/20, so the budget below is not load-bearing.
+The end-to-end cases share one module-scoped solve where they can, and assert
+against the MINLPLib oracle (``best=0.0282906349``) rather than against this
+machine, so they hold at any search depth.
 """
 
 import numpy as np
@@ -44,9 +46,19 @@ pytestmark = pytest.mark.smoke
 
 _NL = "python/tests/data/minlplib/portfol_roundlot.nl"
 
-# Measured before AND after the gate -- identical, which is the point.
-_OPT = 0.028292461076062838
-_BOUND = 0.028290211674170968
+# MINLPLib reference (``minlplib.solu``) -- the ORACLE, not a snapshot of this
+# machine. An earlier revision of this file pinned the objective to the exact
+# float one laptop produced (0.028292461076062838) and asserted
+# ``status == "optimal"``. Both describe how far the search happened to get, not
+# whether the answer is sound: CI reached 0.0284247108 and reported "feasible",
+# and the equality failed while nothing was wrong. The invariants below hold on
+# any machine at any search depth, and they are STRICTLY STRONGER as correctness
+# statements -- a snapshot cannot catch a false primal, whereas
+# ``objective >= _BEST`` can.
+_BEST = 0.0282906349
+_BESTDUAL = 0.0282902203
+_ATOL = 1e-6  # conftest's declared abs tolerance
+_RTOL = 1e-4  # conftest's declared rel tolerance
 
 
 def _flat(model, x_dict):
@@ -55,10 +67,20 @@ def _flat(model, x_dict):
     )
 
 
-def test_oa_returned_incumbent_passes_the_shipped_verifier():
-    """The regression: OA certified a point ``verify_point`` rejects."""
+def _solve(**kw):
     m = from_nl(_NL)
-    r = m.solve(time_limit=10, solver="mip-nlp", mip_nlp_method="oa")
+    return m, m.solve(time_limit=10, solver="mip-nlp", mip_nlp_method="oa", **kw)
+
+
+@pytest.fixture(scope="module")
+def oa_run():
+    """One real OA solve, shared -- the end-to-end cases assert on the same run."""
+    return _solve()
+
+
+def test_oa_returned_incumbent_passes_the_shipped_verifier(oa_run):
+    """The regression: OA certified a point ``verify_point`` rejects."""
+    m, r = oa_run
 
     assert r.x is not None, "no incumbent -- the test measured nothing"
     verdict = verify_point(m, _flat(m, r.x))
@@ -68,22 +90,63 @@ def test_oa_returned_incumbent_passes_the_shipped_verifier():
     )
 
 
-def test_the_gate_is_bound_neutral_on_this_instance():
-    """Regime (a): the repair moves the point, never the answer.
+def test_the_certificate_survives_the_gate(oa_run):
+    """The soundness invariants CLAUDE.md §1 names, against the MINLPLib oracle.
 
-    The four snapped columns move ``7.22e-11`` each and the objective is
-    bit-identical, so a drift here -- in EITHER direction -- means the gate is
-    doing something other than clearing round-off.
+    These are what the gate must not break, and unlike a pinned float they say
+    something true on every machine: the dual bound never crosses the reference
+    optimum, the incumbent never sits below it (that would BE a false primal),
+    and the certificate is not inverted.
     """
-    m = from_nl(_NL)
-    r = m.solve(time_limit=10, solver="mip-nlp", mip_nlp_method="oa")
+    _m, r = oa_run
 
-    assert r.status == "optimal"
-    assert r.gap_certified is True
-    assert r.objective == pytest.approx(_OPT, rel=1e-9)
-    assert r.bound == pytest.approx(_BOUND, rel=1e-9)
+    assert r.objective is not None and r.bound is not None
+    # No false primal: a point claiming to beat the known optimum is unsound.
+    assert r.objective >= _BEST - max(_ATOL, _RTOL * abs(_BEST)), (
+        f"incumbent {r.objective!r} is below the reference optimum {_BEST!r}"
+    )
+    # The dual bound must never cross the oracle.
+    assert r.bound <= _BEST + max(_ATOL, _RTOL * abs(_BEST)), (
+        f"dual bound {r.bound!r} exceeds the reference optimum {_BEST!r}"
+    )
     # The certificate must not be inverted by the repair.
-    assert r.bound <= r.objective + 1e-9
+    assert r.bound <= r.objective + _ATOL
+    # A certified run must actually be within the gap it claims.
+    if r.gap_certified:
+        assert r.status == "optimal"
+
+
+def test_the_gate_is_bound_neutral(monkeypatch):
+    """Regime (a), as a DIFFERENTIAL rather than a snapshot.
+
+    "The repair moves the point, never the answer" is a claim about the gate, so
+    it is tested by running the same instance with the gate replaced by a
+    pass-through and comparing the two runs in one process. That comparison is
+    machine-independent; the hardcoded float it replaces was not, and it is the
+    assertion that failed on CI while the gate was working correctly.
+    """
+    import discopt.solvers.oa as oa
+
+    real = oa._exit_verified_incumbent
+
+    def _identity(model, x_flat, obj, obj_sign):
+        return np.asarray(x_flat, dtype=np.float64), obj, None
+
+    monkeypatch.setattr(oa, "_exit_verified_incumbent", _identity)
+    _m0, ungated = _solve()
+
+    monkeypatch.setattr(oa, "_exit_verified_incumbent", real)
+    _m1, gated = _solve()
+
+    assert ungated.objective is not None and gated.objective is not None
+    # EXACTLY unchanged -- any drift, in either direction, means the gate is
+    # doing something other than clearing round-off.
+    assert gated.objective == ungated.objective, (
+        f"gate moved the objective: {ungated.objective!r} -> {gated.objective!r}"
+    )
+    assert gated.bound == ungated.bound
+    assert gated.status == ungated.status
+    assert gated.gap_certified == ungated.gap_certified
 
 
 def _tiny_model():
@@ -162,23 +225,31 @@ def test_a_refusal_downgrades_the_solve_result(monkeypatch):
     """
     import discopt.solvers.oa as oa
 
+    seen: dict = {}
+
     def _always_refuse(model, x_flat, obj, obj_sign):
+        # Record what the gate was handed, so the assertions below compare the
+        # result against THIS run rather than against a float from one machine.
+        seen["obj"] = obj
+        seen["x"] = np.asarray(x_flat, dtype=np.float64).copy()
         return np.asarray(x_flat, dtype=np.float64), obj, "row 99 violated by 1.000e-03"
 
     monkeypatch.setattr(oa, "_exit_verified_incumbent", _always_refuse)
 
-    m = from_nl(_NL)
-    r = m.solve(time_limit=10, solver="mip-nlp", mip_nlp_method="oa")
+    m, r = _solve()
 
+    assert seen, "the gate was never called -- this test measured nothing"
     assert r.x is not None, "the forced-refusal run lost its incumbent entirely"
     # The point and its objective still reach the caller; the CERTIFICATE does not.
-    assert r.objective == pytest.approx(_OPT, rel=1e-9)
+    assert r.objective == seen["obj"]
+    np.testing.assert_array_equal(_flat(m, r.x)[: seen["x"].size], seen["x"])
     assert r.status == "feasible"
     assert r.gap_certified is False
     assert r.gap is None
     # The dual bound comes from the master relaxation, which never saw this
     # point, so a primal defect must not discard it.
-    assert r.bound == pytest.approx(_BOUND, rel=1e-9)
+    assert r.bound is not None, "a primal refusal discarded a valid dual bound"
+    assert r.bound <= r.objective + _ATOL
 
 
 def test_maximize_objective_units_survive_the_repair():
