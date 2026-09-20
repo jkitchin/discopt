@@ -10060,7 +10060,57 @@ keeps deterministic coverage in
 `test_a_callback_that_says_stop_stops_the_loop_and_says_so` and the
 `_lp_nlp_bb_exit_status` unit tests.
 
-**Still open, not fixed here.** `terminate_polls == restarts` on this master, so
+**Still open, not fixed here.** ~~`terminate_polls == restarts` on this master, so
 the 1 s in-tree interrupt poll never fires: `milp_highs.py` resets `last_poll` at
 every restart and restarts are ~49 ms apart. That is a dead clock on any
-frequently-restarting master, and it is a separate defect from this one.
+frequently-restarting master, and it is a separate defect from this one.~~
+
+**RETRACTED 2026-09-20 (CLAUDE.md §11) — the claimed defect is not real.** The
+observation (`terminate_polls == restarts`; `last_poll` is reset at every
+restart, `milp_highs.py:633`) is correct. The *inference* is not. The invariant
+the hook is owed is not "the interrupt arm fires" — it is **"the hook is
+consulted at least every `terminate_poll_s`"** — and the reset is what makes the
+two arms compose to deliver exactly that: a restart *is* a consultation, so
+restarting the interval from it is what a rate limiter should do. Not resetting
+would only add a redundant second consultation right after each restart. Frequent
+restarts therefore mean the hook is consulted *more* often than the contract
+promises, not less.
+
+Entry experiment: `scripts/entry_poll_clock_cadence.py`. A recording
+`terminate_callback` that never stops, `terminate_poll_s=1.0`; "gap" is the time
+between consecutive consultations of *any* context, including start→first and
+last→exit. 119 consultations over five arms:
+
+| arm | wall | restarts | `interrupt` polls | max gap |
+|---|---|---|---|---|
+| knapsack, cut every incumbent | 30.0 s | 67 | **1** | **1.001 s** |
+| market split 4x30, cut every incumbent | 25.0 s | 1 | 23 | 1.303 s |
+| market split 6x50, one long tree, no cuts | 25.0 s | 0 | **22** | **1.756 s** |
+| knapsack, no cuts | 0.08 s | 0 | 0 | 0.075 s |
+| knapsack, 3 cuts | 0.14 s | 1 | 0 | 0.071 s |
+
+The claim is about a *mechanism*, so the test is differential: if the restart
+reset starved the hook, restart-heavy arms would show the larger gaps. They show
+the **smaller** — 1.001 s at 67 restarts against 1.756 s at zero. That is the
+opposite of the predicted direction, and row 1 is the design working: 67 restarts
+carried the run at ~450 ms cadence and the single interrupt poll is the backstop
+covering the one stretch where restarts went quiet for a second. The two bottom
+rows poll zero times because the whole solve is shorter than one interval —
+nothing to report, not a starved hook. No code change.
+
+**A second, real finding, separate from the retracted one.** The probe's first
+kill criterion was a bare "max gap > 1.5x `poll_interval` on any arm", and it
+*tripped* — at 1.80 s, on the arm with zero restarts, where the claimed mechanism
+cannot be operating. The criterion was measuring the wrong thing (it has since
+been replaced by the differential test above), but the number it surfaced is
+real: **the hook's worst-case resolution is ~1.8x `terminate_poll_s`, not ~1x.**
+HiGHS offers `kCallbackMipInterrupt` when it reaches one, not on a timer, so
+every gap is `poll_interval` + time-to-next-callback. The docstring said "that
+interval is the hook's real resolution and a caller budgeting by it should size
+its window accordingly"; it now states the ~2x factor, because a caller that read
+"1 s" as a bound and sized a progress window at 2 s would have had two samples
+where it planned for four. That is a documentation fix, not a behaviour change.
+
+The original `rsyn0820m02m` motivation for the in-tree poll stands and is
+confirmed by row 3: with no restarts at all, the interrupt arm is the only thing
+speaking, and it fired 22 times.
