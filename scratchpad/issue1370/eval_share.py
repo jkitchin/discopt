@@ -26,7 +26,6 @@ import sys
 import time
 
 import numpy as np
-
 from discopt import _timing
 from discopt.solvers.nlp_pounce import solve_nlp
 
@@ -75,10 +74,13 @@ def measure(K: int, steps: int, dim: int, reps: int) -> dict:
 
     counts = {}
     info_evals = getattr(result, "raw_info", None)
-    print(f"  solve: {result.status.name} in {wall:.3f} s, {result.iterations} iterations",
-          flush=True)
-    print(f"  _timing buckets: {({k: round(v, 4) for k, v in buckets.items() if v > 0})}",
-          flush=True)
+    print(
+        f"  solve: {result.status.name} in {wall:.3f} s, {result.iterations} iterations", flush=True
+    )
+    print(
+        f"  _timing buckets: { ({k: round(v, 4) for k, v in buckets.items() if v > 0}) }",
+        flush=True,
+    )
 
     # Counter-based estimate. POUNCE reports n_obj/constr/grad/jac/hess evals;
     # solve_nlp does not surface the raw info dict, so re-derive from iterations
@@ -107,8 +109,7 @@ def measure(K: int, steps: int, dim: int, reps: int) -> dict:
             flush=True,
         )
     else:
-        print("  _timing 'rust' bucket is ZERO — that instrument measured nothing here",
-              flush=True)
+        print("  _timing 'rust' bucket is ZERO — that instrument measured nothing here", flush=True)
     return {
         "K": K,
         "n": int(n),
@@ -130,8 +131,9 @@ def main() -> int:
     ap.add_argument("--reps", type=int, default=9)
     args = ap.parse_args()
 
-    runs = [measure(K, args.steps, args.dim, args.reps) for K in
-            (int(t) for t in args.ks.split(","))]
+    runs = [
+        measure(K, args.steps, args.dim, args.reps) for K in (int(t) for t in args.ks.split(","))
+    ]
     if not runs:
         print("NO MEASUREMENTS TAKEN", flush=True)
         return 1

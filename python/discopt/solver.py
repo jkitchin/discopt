@@ -18181,6 +18181,16 @@ def _solve_continuous(
     opts["max_wall_time"] = max(remaining, 0.1)
 
     constraint_bounds = None
+
+    # Compressed derivatives over the declared blocks (#1370 Part B), default OFF
+    # behind DISCOPT_BLOCK_VECTOR_EVAL. Returns `evaluator` unchanged unless the
+    # flag is on, the model declares blocks, AND the compressed path's values
+    # were checked entrywise against this evaluator's. It has to happen BEFORE
+    # the bound override wraps it, or the wrapper would keep serving the base
+    # evaluator's derivatives and the flag would silently do nothing.
+    from discopt._block_eval import maybe_wrap_evaluator
+
+    evaluator = maybe_wrap_evaluator(model, evaluator)
     backend_evaluator = cast("NLPEvaluator", _BoundOverrideEvaluator(evaluator, lb, ub))
 
     # Declared block structure (#1370). `_BoundOverrideEvaluator` changes bounds

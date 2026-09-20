@@ -39,6 +39,12 @@ is fast because it computes something else is not a candidate.
 
 ## Result 1 — the mechanism holds
 
+> **Retracted in part.** The Lagrangian-Hessian column of both tables below is
+> too good and should not be quoted — the harness's Hessian coloring was not a
+> sound one and its model's Hessian is diagonal. See *Retraction* below, and
+> *Result 3* for the implementation's real numbers. The Jacobian column and the
+> PROCEED verdict stand.
+
 120 columns per block (steps=20, dim=6), 15 reps, 2 Jacobian / 1 Hessian colors:
 
 | K | n | Jacobian | Lagrangian Hessian | combined |
@@ -108,11 +114,80 @@ Recorded here rather than discovered later (CLAUDE.md §4, §11): the mechanism
 is confirmed, the premise about its share is corrected, and the scope decision
 for the Part B build should be taken against 1.3–1.45x, not against 48%.
 
-## What a Part B implementation would have to do
+## Retraction — the harness's Hessian numbers were too good, and why
 
-The harness hand-writes the block template as a JAX function. A shipping
-implementation has to *derive* it from the model and prove it derived the right
-one:
+Written after the implementation was built and measured. **The Hessian column of
+Result 1 above overstates the win and is retracted** (CLAUDE.md §11); the
+Jacobian column stands. Two defects in the harness, both found by building the
+real thing:
+
+1. **The harness's Hessian coloring was not sound.** It coloured the Hessian
+   graph at distance 1, which is not sufficient for direct (Curtis-Powell-Reid)
+   recovery: two columns of the same colour may still share a neighbouring row,
+   and their contributions then add into the same entry. A correct recovery
+   needs distance-2 / star colouring plus dense-column separation — which is
+   what `_relax/sparse_hessian.build_hessian_coloring` already does. Its honest
+   seed count on the K=8 model is **21, not the harness's 1**.
+2. **The harness's model has a diagonal Lagrangian Hessian.** Its `sin` is
+   elementwise, so the only second-derivative terms are diagonal — which
+   flatters any Hessian compression. The implementation is measured on a variant
+   coupled across time (`z[t] * z[t+1]`), which has genuine off-diagonal
+   structure, as a collocation or AC-power block does.
+
+The two together are why "30.19x" became 2.30x–2.50x. A measurement of a
+mechanism is not a measurement of an implementation, and the gap here was
+entirely in the harness's favour.
+
+## Result 3 — the implementation, measured end to end
+
+`discopt._block_eval.CompressedBlockEvaluator`, against the default tape
+evaluator. Same machine and protocol (load 0.05, interleaved, 7 reps, medians
+with spreads), values checked entrywise at the timing point before any speedup
+is reported (47,380–227,220 entries, max |diff| 4.4e-16):
+
+| model | K | n | Jacobian | Hessian | **solve** |
+|---|---|---|---|---|---|
+| elementwise (harness's) | 8 | 9,620 | 1.81x | 1.44x | 1.11x |
+| elementwise (harness's) | 32 | 38,420 | 3.16x | 2.30x | **1.29x** |
+| coupled (off-diagonal H) | 8 | 9,620 | 2.07x | 1.49x | 1.10x |
+| coupled (off-diagonal H) | 32 | 38,420 | 5.31x | 2.50x | **1.26x** |
+
+4 Jacobian colors and 21–25 Hessian seeds at every K, against 9,620 and 38,420
+columns: the pass count does not track the number of blocks, which is the
+structural claim the issue makes and the one that survives.
+
+Every solve returned `OPTIMAL` with an **objective spread of exactly 0.0**
+between the two arms, and the equivalence test pins identical iteration counts
+as well — a derivative engine that changed the answer would be a defect
+whatever it did to the wall.
+
+So the end-to-end result is **1.26–1.29x at K=32**, which lands almost exactly
+on the ~1.27x that Result 2's evaluation share predicted. The prediction and
+the measurement agreeing is the reason to trust both.
+
+## What the implementation actually did (and what the plan got wrong)
+
+The section below was written before the build, as the plan. Two of its five
+items were wrong, and are kept here rather than quietly edited, because what
+they were wrong about is the interesting part: **the mechanism was already in
+the tree**. `_relax/sparsity.compute_coloring`, `_relax/sparse_jacobian` and
+`_relax/sparse_hessian` already implement colored compression, and they take a
+pattern and a coloring as arguments.
+
+* Item 1 (template identity) and item 2 (the compact-domain problem) **do not
+  arise**: compressing the whole model's function with a coloring needs no
+  template and no sub-model extraction, so there is nothing to prove identical
+  and no O(K·n) scatter. Blocks are not needed for the mechanism to work — they
+  are what makes the chromatic number small and independent of K.
+* What did arise, and was not in the plan: the JAX evaluator's *detected*
+  sparsity is unusable here. On the K=8 model its Hessian pattern is **96.7%
+  dense — 44,750,500 entries against the tape's 19,060** — because a vectorised
+  array body defeats detection. The implementation takes both patterns from the
+  tape, which knows them exactly.
+* Item 3 (scatter maps), item 4 (the default-OFF gate and its audit row) and
+  item 5 (JAX on an opt-in path) stand as written.
+
+The original plan, for the record:
 
 1. **Template identity.** Blocks must be proven structurally identical, not
    assumed — a canonical fingerprint over each block's expression DAG with
