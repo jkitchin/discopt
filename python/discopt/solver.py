@@ -2151,10 +2151,32 @@ def _rlt_sparse_admit(model: "Model", n_vars: int) -> bool:
 # Convex-objective node bound (the supporting-hyperplane lower bound for a model
 # whose minimized objective is a convex quadratic). No size cap: the bound is a
 # deterministic projected-gradient solve on the constant Hessian and is valid at
-# any iterate (see ``_convex_objective_lower_bound``). Gated only on a PSD Hessian
-# with this margin, so the convexity verdict (hence bound soundness) is never
-# borderline.
+# any iterate (see ``_convex_objective_lower_bound``). Gated on a PSD Hessian with
+# a margin, so the convexity verdict (hence bound soundness) is never borderline.
+#
+# ``_CONVEX_OBJ_PSD_TOL`` is the ABSOLUTE floor, and it is not the whole yardstick.
+# It serves the near-zero-Hessian case: a pure-linear objective has a (near-)zero
+# Hessian whose box bound is already exact via interval arithmetic, so the gate
+# abstains rather than engage on numerical dust.
 _CONVEX_OBJ_PSD_TOL = 1e-6
+# ...and this is the SCALE-CARRYING half (#1397). ``eigvalsh``'s error on a
+# symmetric ``H`` is O(eps * ||H||_2) -- an absolute margin of 1e-6 is therefore
+# meaningless once ||H|| >~ 1e10, where the roundoff alone exceeds it. Measured
+# (1800 trials, n <= 32, ||H||_2 up to 1e16, one true negative eigenvalue): the
+# computed minimum eigenvalue overshoots the true one by at most 5.42 * eps*||H||,
+# and an indefinite Hessian with ||H||~1e12 and a true eigenvalue of -1e-4
+# computes as +3.780e-04 -- sailing through ``>= 1e-6`` and declaring a NONCONVEX
+# quadratic objective convex, which emits the supporting-hyperplane lower bound as
+# a valid dual bound on a problem that has no such bound. 42 of 480 constructed
+# indefinite Hessians were admitted that way.
+#
+# K = 32 puts the threshold 5.9x above the worst measured overshoot; at that value
+# the same sweep admits 0 of 2100 indefinite Hessians. This is a YARDSTICK change,
+# not a tolerance change (#1397's non-goal): for ||H||_2 <= 1 the roundoff term is
+# ~7e-15, the floor above dominates, and the verdict is byte-identical to the old
+# gate (measured: identical on 200/200 well-scaled convex Hessians). It is never
+# looser than the absolute gate, only stricter, and only where roundoff earns it.
+_CONVEX_OBJ_PSD_EIG_ROUNDOFF_K = 32.0
 # Lazy re-separation, global-bound-stall governor (C-42 Part 2, THRU-4
 # follow-on; the relaxer-side stride net is ``_LAZY_RESEP_STRIDE`` in
 # ``mccormick_lp.py``). Active only under pool inheritance
@@ -2684,6 +2706,40 @@ def _compute_alphabb_bound(evaluator, model, alphabb_expr, node_lb, node_ub):
     return float(tangent_min - 1e-9 * (1.0 + abs(L_hat) + abs(tangent_min)))
 
 
+def _hessian_is_psd_with_margin(H_sym) -> bool:
+    """Whether a symmetric ``H`` is positive definite *beyond the roundoff of the test*.
+
+    #1397. The verdict gates a dual bound, so a false positive is a false bound:
+    declaring an indefinite Hessian PSD licenses the convex-objective supporting
+    hyperplane on a nonconvex objective, which it does not underestimate.
+
+    The margin has two halves, and the scale-carrying one is the point:
+
+    * ``_CONVEX_OBJ_PSD_TOL`` -- an absolute floor, so a (near-)zero Hessian is
+      declined rather than decided on dust;
+    * ``_CONVEX_OBJ_PSD_EIG_ROUNDOFF_K * eps * ||H||_2`` -- the error of the
+      eigenvalue computation itself, which scales with ``||H||``. Below this the
+      computed ``eig_min`` carries no information about the sign of the true one.
+
+    Taking the max of the two is never looser than the bare absolute gate, and is
+    identical to it for ``||H||_2 <= 1``. ``||H||_2`` is bounded above by the
+    Frobenius norm, which is what is used here: cheap, needs no second
+    decomposition, and erring high only makes the gate stricter (sound).
+    """
+    H_sym = np.asarray(H_sym, dtype=np.float64)
+    if H_sym.ndim != 2 or H_sym.shape[0] != H_sym.shape[1] or not np.all(np.isfinite(H_sym)):
+        return False
+    norm = float(np.linalg.norm(H_sym, "fro"))
+    if not np.isfinite(norm):
+        return False
+    margin = max(
+        _CONVEX_OBJ_PSD_TOL,
+        _CONVEX_OBJ_PSD_EIG_ROUNDOFF_K * float(np.finfo(np.float64).eps) * norm,
+    )
+    eig_min = float(np.linalg.eigvalsh(H_sym).min())
+    return eig_min >= margin
+
+
 def _objective_is_convex_quadratic(
     model: Model, evaluator, n_vars: int, remaining_budget: float | None = None
 ) -> bool:
@@ -2778,10 +2834,9 @@ def _objective_is_convex_quadratic(
             return False
         # A pure-linear objective has a (near-)zero Hessian; its box bound is
         # already exact via interval arithmetic, so only engage on genuine
-        # curvature. The threshold is well above float noise for a well-scaled
-        # Hessian, keeping the PSD verdict (and thus the bound) sound.
-        eig_min = float(np.linalg.eigvalsh(0.5 * (H1 + H1.T)).min())
-        return eig_min >= _CONVEX_OBJ_PSD_TOL
+        # curvature. The margin is scale-aware (#1397): see
+        # ``_hessian_is_psd_with_margin``.
+        return _hessian_is_psd_with_margin(0.5 * (H1 + H1.T))
     except Exception:
         return False
 
