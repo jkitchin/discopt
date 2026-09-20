@@ -434,7 +434,14 @@ def solve_nlp_from_model(
     elif block_structure is not None:
         from discopt.block_structure import validate_block_labels
 
-        labels = validate_block_labels(block_structure, evaluator).as_pair()
+        if not isinstance(block_structure, tuple) or len(block_structure) != 2:
+            raise ValueError(
+                f"block_structure must be a (var_blocks, con_blocks) pair, 'auto', or None; "
+                f"got {type(block_structure).__name__}."
+            )
+        labels = validate_block_labels(
+            (block_structure[0], block_structure[1]), evaluator
+        ).as_pair()
 
     if x0 is None:
         lb, ub = evaluator.variable_bounds
