@@ -99,8 +99,12 @@ array transfer for the B&B tree manager, expression IR, batch dispatch, and .nl 
 objective, gradient, constraints, Jacobian, and Lagrangian Hessian (dense and sparse)
 from a POUNCE Rust AD tape. This is the default; expressions with no tape opcode (an
 opaque `dm.custom` body, a matrix norm) fall back to the JAX evaluator, and
-`DISCOPT_NLP_EVAL=jax` selects it wholesale. A default solve does not import JAX --
-not on the LP, QP, MIQP and simplex-MILP paths, and not on the nonlinear ones either.
+`DISCOPT_NLP_EVAL=jax` selects it wholesale. A tape-representable solve does not import
+JAX -- not on the LP, QP, MIQP and simplex-MILP paths, and not on the nonlinear ones
+either. **That fallback is the exception, and it is on the default path**: a plain
+`Model.solve()` of `dm.norm(X, 2)` with a 3x3 `X`, with no `import jax` on the caller's
+side, takes `sys.modules` from 0 to 219 `jax` entries. "A default solve does not import
+JAX" is true of the tape-representable majority, not of every model.
 
 **Relaxation layer** (`python/discopt/_relax`): DAG compiler, the uniform factorable
 relaxation engine, McCormick convex/concave envelopes, alphaBB, piecewise McCormick,

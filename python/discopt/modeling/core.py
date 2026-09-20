@@ -3345,8 +3345,34 @@ def norm(x: Expression, ord: Union[int, float, str] = 2) -> Expression:
     ord : int, float, or str, default 2
         Norm order. ``1`` (L1), ``2`` (L2/Euclidean), and ``inf`` (Chebyshev,
         passed as ``float("inf")`` or ``"inf"``) are supported on the global
-        certification path (Rust ``MathFunc``). Other integer orders are
-        evaluated and relaxed on the JAX path but are not in the core IR.
+        certification path (Rust ``MathFunc``). Other numeric orders ``p >= 1``
+        are evaluated and relaxed on the JAX path but are not in the core IR.
+
+        A **non-numeric** order such as ``"fro"`` or ``"nuc"`` is rejected here.
+        It used to be accepted silently — ``str(ord)`` made the node
+        ``"normfro"`` — and then failed far away in whichever consumer ran
+        first, with a message naming a node the caller never wrote:
+        ``ValueError: Unsupported norm order: 'normfro'`` from the DAG compiler,
+        or a bare ``could not convert string to float: 'fro'`` from the ``.nl``
+        exporter. Both are the same defect: this function is the only place that
+        knows what the caller actually passed, so it is the only place that can
+        say so (CLAUDE.md §3 — refuse loudly rather than fail cheaply later).
+
+    Raises
+    ------
+    ValueError
+        If `ord` is not a supported norm order.
+
+    Notes
+    -----
+    ``norm`` is a **vector** norm. Given a 2-D argument the JAX evaluation path
+    applies :func:`numpy.linalg.norm`'s *matrix* semantics — ``ord=2`` is then
+    the spectral norm, not ``‖vec(X)‖₂`` — while the relaxation layer bounds
+    ``norm*`` as a p-norm over the flattened components. The two agree on a
+    vector and diverge on a matrix; a matrix argument has no envelope of its own
+    and so cannot certify (it returns no dual bound rather than a wrong one).
+    Prefer building a matrix norm explicitly from ``dm.sum``/``**`` if you need
+    one on the global path.
 
     Returns
     -------
@@ -3355,6 +3381,21 @@ def norm(x: Expression, ord: Union[int, float, str] = 2) -> Expression:
     if ord in (float("inf"), "inf", "Inf"):
         suffix = "inf"
     else:
+        try:
+            order = float(ord)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"unsupported norm order {ord!r}: dm.norm is a vector norm and takes "
+                '1, 2, float("inf") / "inf", or another numeric p >= 1. Matrix norms '
+                '("fro", "nuc") are not supported — build one explicitly, e.g. '
+                "dm.sqrt(dm.sum(X * X)) for the Frobenius norm."
+            ) from None
+        if not order >= 1.0:  # rejects NaN as well as p < 1
+            raise ValueError(
+                f"unsupported norm order {ord!r}: a p-norm needs p >= 1 (the relaxation "
+                "layer's envelope is derived from the norm-equivalence bounds "
+                "||x||_inf <= ||x||_p <= ||x||_1, which hold only for p >= 1)"
+            )
         suffix = str(ord)
     return FunctionCall(f"norm{suffix}", _wrap(x))
 
