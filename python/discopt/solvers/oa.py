@@ -9149,6 +9149,7 @@ def solve_oa(
         status = "optimal" if _certified_gap_converged() and not has_unresolved else "feasible"
         if termination_reason in {"cycling", "stalling"}:
             status = "feasible"
+        _unverified_incumbent = False
         if _exit_refusal is not None:
             # An unverified incumbent's objective is not a proven upper bound, so
             # the gap it participates in is not a certificate and the run is not
@@ -9158,35 +9159,24 @@ def solve_oa(
             status = "feasible"
             reported_gap = None
             final_reason = "unverified_incumbent"
-            # #1380: and the OBJECTIVE goes with the certificate. Downgrading the
-            # status alone still published the number, and ``objective`` is read as
-            # "a feasible point attains this" by every consumer there is --
-            # including ``_merge_route_and_fallback``, which ranks this route
-            # against the fallback on exactly that field and will prefer it for
-            # being *smaller*.
+            # #1380: the point and its objective still reach the caller -- a caller
+            # that wants to look at what the gate refused can -- but the fact that
+            # they are UNVERIFIED has to travel with them in a form a consumer can
+            # branch on. ``status`` and ``gap_certified`` do not distinguish this
+            # from an ordinary uncertified time-limited run that found a perfectly
+            # good incumbent, and that ambiguity is what let the number be consumed
+            # as a primal bound.
             #
             # Measured on ``min -x + 3z + 0.001x^2`` s.t. ``x <= 1e7 z``,
             # ``x in [0,10]``, ``z`` binary (true optimum -6.9): the route's point
             # failed verification at ``z = 1.0009e-06`` -- a binary that is not a
-            # binary -- and its objective -9.899997 was published anyway, then won
-            # the merge against a fallback that had correctly re-derived -6.1e-09.
-            # So the whole solve returned an objective 3 units below anything the
-            # model can attain, on the strength of a point the gate had just
-            # refused.
-            #
-            # Withholding it is not a loss of information: ``bound`` still carries
-            # the master's valid dual bound, ``final_reason`` names the refusal,
-            # and the refusal was already logged with its reason. What goes is only
-            # the claim that some feasible point attains this value, which is the
-            # one thing the gate has just established we cannot make.
-            logger.warning(
-                "OA: withholding the unverified incumbent's objective %r (#1380); "
-                "it is not attainable and would otherwise be consumed as a primal "
-                "bound. The master's dual bound is still reported.",
-                _obj_sign * incumbent_obj,
-            )
-            incumbent_obj = None
-            incumbent = None
+            # binary -- and ``_merge_route_and_fallback`` then ranked its objective
+            # -9.899997 against the fallback's correctly re-derived -6.1e-09 and
+            # preferred it for being smaller. The whole solve returned a value three
+            # units below anything the model attains. The merge is where that
+            # decision is made and where it is now refused; this flag is what lets
+            # it tell the two cases apart.
+            _unverified_incumbent = True
         # ``gap_certified`` must agree with ``status``: it is the field a user
         # reads (and ``result_io.summary_text`` renders) to decide whether the
         # reported gap is a certificate. Deriving it from ``reported_gap is not
@@ -9200,10 +9190,11 @@ def solve_oa(
         # ``master_bound_valid`` / ``bound_validity``.
         return SolveResult(
             status=status,
-            objective=(None if incumbent_obj is None else _obj_sign * incumbent_obj),
+            objective=_obj_sign * incumbent_obj,
             bound=(_obj_sign * bound if bound is not None else None),
             gap=reported_gap,
-            x=(None if incumbent is None else _build_x_dict(incumbent, model)),
+            x=_build_x_dict(incumbent, model),
+            solver_stats=({"oa/unverified_incumbent": 1.0} if _unverified_incumbent else None),
             wall_time=wall_time,
             mip_count=mip_count,
             subnlp_calls=nlp_subproblem_count,

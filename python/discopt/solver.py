@@ -6871,6 +6871,22 @@ def _gap_is_closed(result, tol: float = 1e-6) -> bool:
     return gap is not None and np.isfinite(gap) and float(gap) <= tol
 
 
+def _incumbent_is_unverified(result) -> bool:
+    """Whether ``result``'s incumbent failed its producer's own feasibility gate.
+
+    Distinct from "uncertified": a time-limited solve is uncertified and its
+    incumbent is a perfectly good feasible point. This is the narrower statement
+    that the producer *checked* the point and it did not verify -- set by the OA
+    exit gate's refusal branch (:func:`discopt.solvers.oa.solve_oa`), which then
+    reports the point anyway so a caller can inspect what was refused.
+    """
+    stats = getattr(result, "solver_stats", None) or {}
+    try:
+        return bool(float(stats.get("oa/unverified_incumbent", 0.0)))
+    except (TypeError, ValueError):
+        return False
+
+
 def _merge_route_and_fallback(route, fallback, is_maximize: bool):
     """Return the better of an auto-routed result and the fallback that followed.
 
@@ -6913,6 +6929,33 @@ def _merge_route_and_fallback(route, fallback, is_maximize: bool):
         return route
 
     route_wins = _route_is_better(route.objective, fallback.objective, is_maximize)
+    # #1380: an UNVERIFIED incumbent may never win on its number. The OA exit gate
+    # verifies the point it is about to return and, when that fails and the
+    # near-bound repair does not fix it, reports the point anyway with
+    # ``status="feasible"`` -- deliberately, so a caller can see what was refused.
+    # But ``objective`` is the field this merge ranks on, and an unverified point's
+    # objective is not a value any feasible point is known to attain, so ranking it
+    # here reads a diagnostic as a primal bound.
+    #
+    # Measured on ``min -x + 3z + 0.001x^2`` s.t. ``x <= 1e7 z``, ``x in [0,10]``,
+    # ``z`` binary (true optimum -6.9): the route's point failed verification at
+    # ``z = 1.0009e-06`` -- a binary that is not a binary -- and its -9.899997 beat
+    # the fallback's correctly re-derived -6.1e-09 for being smaller, so the solve
+    # returned a value three units below anything the model attains.
+    #
+    # Distinguishing this from an ordinary uncertified run matters: a time-limited
+    # fallback is uncertified too and its incumbent is perfectly good. The flag is
+    # set only by the refusal branch, so only a point that failed verification is
+    # held back, and only when there is something verified to prefer instead.
+    if route_wins and _incumbent_is_unverified(route) and fallback.objective is not None:
+        logger.warning(
+            "#1059 merge: the route's objective %.10g came from a point its own exit "
+            "gate could not verify, so it is not ranked against the fallback's "
+            "%.10g (#1380); the fallback's incumbent is reported.",
+            route.objective,
+            fallback.objective,
+        )
+        route_wins = False
     # A certificate outranks a better number. If the fallback closed the gap and
     # the route did not, no feasible point can legitimately beat it -- so a route
     # objective that appears to is evidence of an inconsistency somewhere, not a
