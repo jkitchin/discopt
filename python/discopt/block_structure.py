@@ -318,6 +318,15 @@ def _build(
                 f"block {declared_ids[int(row_block[j])]}. A row's dual must be placed with "
                 "the variables it actually touches, or the eliminated block is singular."
             )
+        empty = stated & (row_max < 0)
+        if empty.any():
+            j = int(np.flatnonzero(empty)[0])
+            raise BlockStructureError(
+                f"NLP row {j} is declared in block {int(explicit[j])} but touches no column of "
+                "that block — only shared ones. Its dual would be eliminated with a block that "
+                "has no entry for it, leaving that block singular; such a row belongs on the "
+                "border (a negative id)."
+            )
         spanning = stated & row_spans
         if spanning.any():
             j = int(np.flatnonzero(spanning)[0])

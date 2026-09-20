@@ -428,3 +428,17 @@ class TestNlCompanionFile:
         m.subject_to(x >= 1)
         with pytest.raises(BlockStructureError):
             to_nl(m, tmp_path / "m.nl", block_structure_file=tmp_path / "m.blocks")
+
+
+class TestSharedOnlyRow:
+    def test_row_over_only_shared_columns_cannot_be_claimed_by_a_block(self):
+        """The dual has to go with the border, or the eliminated block is singular."""
+        m, _ = two_block_model()
+        # "border_0" touches only `s`, the shared variable.
+        m.set_constraint_block("border_0", 0)
+        with pytest.raises(BlockStructureError, match="touches no column of that block"):
+            resolve_block_structure(m, _evaluator(m))
+
+    def test_and_is_derived_onto_the_border_when_left_alone(self):
+        m, _ = two_block_model()
+        assert resolve_block_structure(m, _evaluator(m)).con_blocks.tolist()[-1] == -1
