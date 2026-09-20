@@ -36,6 +36,8 @@ if TYPE_CHECKING:
     from discopt._evaluator_cache import Fingerprint as _EvaluatorFingerprint
     from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt._rust import PyTreeManager
+from discopt.constants import CONSTRAINT_INF as _CONSTRAINT_INF
+from discopt.constants import DEFAULT_VARIABLE_BOUND
 from discopt.constants import INFEASIBILITY_SENTINEL as _INFEASIBILITY_SENTINEL
 from discopt.constants import SENTINEL_THRESHOLD as _SENTINEL_THRESHOLD
 from discopt.constants import STARTING_POINT_CLIP as _SPC
@@ -5528,7 +5530,21 @@ def _format_bad_bound_entries(
     flat_lb: np.ndarray,
     flat_ub: np.ndarray,
 ) -> list[str]:
-    """Return human-readable entries for scalar variables with problematic bounds."""
+    """Return human-readable entries for scalar variables with problematic bounds.
+
+    Formatted at ``%.6g``, not ``%.2g`` (#1387). Two significant figures render
+    the default box ``-9.999e19`` as ``-1e+20`` -- the CONSTRAINT_INF sentinel --
+    and those two values are exactly what a reader of this warning needs told
+    apart: a bound below 1e20 is honoured as finite and yields a certified
+    ``optimal`` at the corner, one at or beyond it is a true infinity and yields
+    ``unbounded`` (#850). A caller who writes ``min x`` over an unbounded-looking
+    column gets back ``optimal`` at ``-9.999e+19`` and reads this warning to find
+    out why; being told the bound is ``-1e+20`` sends them looking for a bug in
+    the certificate instead of for the default box that produced it.
+
+    A bound sitting on that default is labelled as such, because "you declared no
+    bound and a finite default applies" is the actionable fact, not the magnitude.
+    """
     bad_vars: list[str] = []
     offset = 0
     for v in model._variables:
@@ -5543,7 +5559,9 @@ def _format_bad_bound_entries(
                 or abs(hi) > _BOUND_WARN_THRESHOLD
             ):
                 name = v.name if v.size == 1 else f"{v.name}[{j}]"
-                bad_vars.append(f"{name} (lb={lo:.2g}, ub={hi:.2g})")
+                lo_txt = f"{lo:.6g}" + (" [default]" if lo == -DEFAULT_VARIABLE_BOUND else "")
+                hi_txt = f"{hi:.6g}" + (" [default]" if hi == DEFAULT_VARIABLE_BOUND else "")
+                bad_vars.append(f"{name} (lb={lo_txt}, ub={hi_txt})")
         offset += v.size
     return bad_vars
 
@@ -5690,15 +5708,24 @@ def _check_finite_bounds(model: Model, tightening=None) -> None:
     if bad_vars:
         import warnings
 
-        warnings.warn(
+        default_note = ""
+        if any("[default]" in entry for entry in bad_vars):
+            default_note = (
+                f"A bound marked [default] is the box applied to a column you declared "
+                f"with no bounds: {DEFAULT_VARIABLE_BOUND:.6g}, which is FINITE (it sits "
+                f"just below the {_CONSTRAINT_INF:.6g} infinity sentinel), so the solve "
+                f"can return a certified 'optimal' sitting on that corner rather than "
+                f"'unbounded'."
+            )
+        parts = [
             f"Variables with very large or infinite declared bounds: "
-            f"{', '.join(bad_vars[:5])}. "
-            f"{tightening_note} "
-            f"NLP solvers may fail (NaN, iteration_limit) when bounds "
-            f"exceed ~1e15. Add tighter explicit bounds, e.g. "
-            f"m.continuous('x', lb=0, ub=1000).",
-            stacklevel=3,
-        )
+            f"{', '.join(bad_vars[:5])}.",
+            tightening_note.strip(),
+            default_note,
+            "NLP solvers may fail (NaN, iteration_limit) when bounds exceed ~1e15. "
+            "Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).",
+        ]
+        warnings.warn(" ".join(p for p in parts if p), stacklevel=3)
 
 
 def _detect_nonlinear_bound_infeasibility(model: Model, tightening=None) -> Optional[str]:
