@@ -88,6 +88,122 @@ def template_callables(steps: int, dim: int):
     return residuals, lagrangian
 
 
+def _block_column_colors(ev, model, steps: int, dim: int, *, kind: str):
+    """Seed vectors for a compressed pass over ONE block, and how many there are.
+
+    The pattern is taken from the emitted NLP (``jacobian_structure`` /
+    ``hessian_structure``) and restricted to block 0's columns — not assumed from
+    the model source, which is the mistake that makes a "structure-aware"
+    measurement measure the wrong structure. Greedy distance-1 coloring: two
+    columns share a color when no row (or Hessian row) touches both. That is
+    exact for a Jacobian and conservative for a symmetric Hessian, where a star
+    coloring would need no more colors than this one.
+    """
+    from discopt.block_structure import resolve_block_structure
+
+    bs = resolve_block_structure(model, ev)
+    block0 = np.flatnonzero(bs.var_blocks == 0)
+    local_of = {int(c): i for i, c in enumerate(block0)}
+    nb = block0.size
+
+    if kind == "jacobian":
+        rows, cols = ev.jacobian_structure()
+    else:
+        rows, cols = ev.hessian_structure()
+    rows = np.asarray(rows)
+    cols = np.asarray(cols)
+
+    # Adjacency: columns sharing a row cannot share a color.
+    neighbours: list[set[int]] = [set() for _ in range(nb)]
+    by_row: dict[int, list[int]] = {}
+    for r, c in zip(rows.tolist(), cols.tolist()):
+        c_local = local_of.get(int(c))
+        if c_local is None:
+            continue
+        by_row.setdefault(int(r), []).append(c_local)
+    if kind == "hessian":
+        # A Hessian entry (i, j) is itself an adjacency between two columns.
+        for r, c in zip(rows.tolist(), cols.tolist()):
+            a, b = local_of.get(int(r)), local_of.get(int(c))
+            if a is not None and b is not None and a != b:
+                neighbours[a].add(b)
+                neighbours[b].add(a)
+    for members in by_row.values():
+        for a in members:
+            for b in members:
+                if a != b:
+                    neighbours[a].add(b)
+
+    color = [-1] * nb
+    for c in range(nb):
+        used = {color[nb_] for nb_ in neighbours[c] if color[nb_] >= 0}
+        k = 0
+        while k in used:
+            k += 1
+        color[c] = k
+    n_colors = max(color) + 1 if nb else 0
+
+    seeds = np.zeros((n_colors, nb))
+    for c, k in enumerate(color):
+        seeds[k, c] = 1.0
+    assert nb == steps * dim, f"block 0 has {nb} columns, expected {steps * dim}"
+    return seeds, n_colors
+
+
+def verify_template(ev, model, residuals, lagrangian, x, lam, steps, dim) -> tuple[int, float]:
+    """Prove the template computes what the model's block does, before timing it.
+
+    A candidate that is fast because it computes something else is not a
+    candidate. This reconstructs block 0's Jacobian and Lagrangian-Hessian
+    entries from the TAPE and compares them against the template's, returning
+    ``(entries_compared, max_abs_diff)`` — and the caller refuses to report a
+    speedup when the comparison count is zero (CLAUDE.md §6) or the difference is
+    real (§7: let it fail loudly rather than time a wrong function).
+    """
+    import jax
+    import jax.numpy as jnp
+    from discopt.block_structure import resolve_block_structure
+
+    bs = resolve_block_structure(model, ev)
+    cols0 = np.flatnonzero(bs.var_blocks == 0)
+    rows0 = np.flatnonzero(bs.con_blocks == 0)
+    col_of = {int(c): i for i, c in enumerate(cols0)}
+    row_of = {int(r): i for i, r in enumerate(rows0)}
+
+    zb = jnp.asarray(x[cols0].reshape(steps, dim))
+    w = jnp.asarray(x[:dim])
+    lam0 = jnp.asarray(lam[rows0])
+
+    # Jacobian.
+    jr, jc = ev.jacobian_structure()
+    jv = ev.evaluate_jacobian_values(x)
+    tape_J = np.zeros((rows0.size, cols0.size))
+    compared = 0
+    for r, c, v in zip(np.asarray(jr).tolist(), np.asarray(jc).tolist(), np.asarray(jv).tolist()):
+        i, j = row_of.get(int(r)), col_of.get(int(c))
+        if i is not None and j is not None:
+            tape_J[i, j] = v
+            compared += 1
+    tmpl_J = np.asarray(jax.jacfwd(residuals, argnums=0)(zb, w)).reshape(rows0.size, cols0.size)
+    diff = float(np.max(np.abs(tape_J - tmpl_J)))
+
+    # Lagrangian Hessian (block 0's own columns; lower triangle from the tape).
+    hr, hc = ev.hessian_structure()
+    hv = ev.evaluate_hessian_values(x, 1.0, lam)
+    tape_H = np.zeros((cols0.size, cols0.size))
+    for r, c, v in zip(np.asarray(hr).tolist(), np.asarray(hc).tolist(), np.asarray(hv).tolist()):
+        i, j = col_of.get(int(r)), col_of.get(int(c))
+        if i is not None and j is not None:
+            tape_H[i, j] = v
+            tape_H[j, i] = v
+            compared += 1
+    tmpl_H = np.asarray(jax.hessian(lagrangian, argnums=0)(zb, w, lam0)).reshape(
+        cols0.size, cols0.size
+    )
+    diff = max(diff, float(np.max(np.abs(tape_H - tmpl_H))))
+    return compared, diff
+
+
 def load_gate() -> float:
     """1-minute load average. A timing claim under load is not a measurement (§9)."""
     try:
@@ -98,7 +214,7 @@ def load_gate() -> float:
     return os.getloadavg()[0]
 
 
-def run_one(K: int, steps: int, dim: int, reps: int) -> dict:
+def run_one(K: int, steps: int, dim: int, reps: int, skip_dense: bool = False) -> dict:
     import jax
     import jax.numpy as jnp
     from discopt._tape_nlp_evaluator import make_evaluator
@@ -118,7 +234,7 @@ def run_one(K: int, steps: int, dim: int, reps: int) -> dict:
         return ev.evaluate_jacobian_values(x)
 
     def baseline_hess():
-        return ev.evaluate_hessian_values(x, lam, 1.0)
+        return ev.evaluate_hessian_values(x, 1.0, lam)
 
     residuals, lagrangian = template_callables(steps, dim)
     w = jnp.asarray(x[:dim])
@@ -146,11 +262,72 @@ def run_one(K: int, steps: int, dim: int, reps: int) -> dict:
     def candidate_hess():
         return jax.block_until_ready(hess_fn(Z, w, L))
 
-    results: dict = {"K": K, "n": int(n), "m": int(m_rows)}
+    # --- the arm an implementation would actually ship: compressed, not dense.
+    # Identical blocks share one sparsity pattern AND one coloring, so the whole
+    # Jacobian is C_jac directional derivatives over all K blocks at once, and
+    # the Hessian C_hess Hessian-vector products. The colors are computed from
+    # the block's own pattern, taken from the emitted NLP rather than assumed.
+    jac_seeds, n_jac_colors = _block_column_colors(ev, model, steps, dim, kind="jacobian")
+    hess_seeds, n_hess_colors = _block_column_colors(ev, model, steps, dim, kind="hessian")
+    Sj = jnp.asarray(jac_seeds.reshape(-1, steps, dim))
+    Sh = jnp.asarray(hess_seeds.reshape(-1, steps, dim))
+
+    jvp_all = jax.jit(
+        jax.vmap(  # over colors
+            jax.vmap(  # over blocks
+                lambda zb, wv, v: jax.jvp(lambda zz: residuals(zz, wv), (zb,), (v,))[1],
+                in_axes=(0, None, None),
+            ),
+            in_axes=(None, None, 0),
+        )
+    )
+    hvp_all = jax.jit(
+        jax.vmap(
+            jax.vmap(
+                lambda zb, wv, lm, v: jax.jvp(
+                    jax.grad(lambda zz: lagrangian(zz, wv, lm)), (zb,), (v,)
+                )[1],
+                in_axes=(0, None, 0, None),
+            ),
+            in_axes=(None, None, None, 0),
+        )
+    )
+
+    def compressed_jac():
+        return jax.block_until_ready(jvp_all(Z, w, Sj))
+
+    def compressed_hess():
+        return jax.block_until_ready(hvp_all(Z, w, L, Sh))
+
+    print(
+        f"  block coloring: {n_jac_colors} Jacobian colors, {n_hess_colors} Hessian colors",
+        flush=True,
+    )
+
+    compared, diff = verify_template(ev, model, residuals, lagrangian, x, lam, steps, dim)
+    print(f"  template vs tape: {compared} entries compared, max |diff| {diff:.3e}", flush=True)
+    if compared == 0:
+        raise SystemExit("verification compared NOTHING; the timing below would be meaningless")
+    if diff > 1e-10:
+        raise SystemExit(f"template disagrees with the tape by {diff:.3e}; not a candidate")
+
+    results: dict = {
+        "K": K,
+        "n": int(n),
+        "m": int(m_rows),
+        "jacobian_colors": int(n_jac_colors),
+        "hessian_colors": int(n_hess_colors),
+    }
     for name, base, cand in (
-        ("jacobian", baseline_jac, candidate_jac),
-        ("hessian", baseline_hess, candidate_hess),
+        ("jacobian", baseline_jac, compressed_jac),
+        ("hessian", baseline_hess, compressed_hess),
+        ("jacobian_dense", baseline_jac, candidate_jac),
+        ("hessian_dense", baseline_hess, candidate_hess),
     ):
+        if skip_dense and name.endswith("_dense"):
+            # A dense per-block Hessian is O(n_block^2) per block; at real block
+            # sizes it is a memory wall, not an informative arm.
+            continue
         t_compile = time.perf_counter()
         base()
         cand()  # warm-up: pays the XLA trace/compile, which is not per-call cost
@@ -191,11 +368,24 @@ def main() -> int:
     ap.add_argument("--reps", type=int, default=5)
     ap.add_argument("--kill-speedup", type=float, default=2.0)
     ap.add_argument("--out", default="")
+    ap.add_argument("--skip-dense", action="store_true")
+    ap.add_argument(
+        "--allow-load",
+        action="store_true",
+        help="run under load anyway. For SHAKING OUT THE SCRIPT only — numbers "
+        "produced this way are not measurements (CLAUDE.md §9) and are labelled so.",
+    )
     args = ap.parse_args()
 
     print("#1370 Part B entry experiment", flush=True)
     load = load_gate()
-    if load > 2.0:
+    if load > 2.0 and args.allow_load:
+        print(
+            "WARNING: running under load with --allow-load; these numbers are NOT a "
+            "measurement and must not be quoted.",
+            flush=True,
+        )
+    elif load > 2.0:
         print(
             f"REFUSING: 1-min load average {load:.2f} > 2.0; a timing claim under load is "
             "not a measurement (CLAUDE.md §9).",
@@ -204,7 +394,7 @@ def main() -> int:
         return 2
 
     ks = [int(t) for t in args.ks.split(",")]
-    out = [run_one(K, args.steps, args.dim, args.reps) for K in ks]
+    out = [run_one(K, args.steps, args.dim, args.reps, args.skip_dense) for K in ks]
 
     # Probe-fired assertion (§6): a run that measured nothing must not exit 0.
     measured = sum(1 for r in out if "jacobian" in r and "hessian" in r)
