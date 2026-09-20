@@ -225,6 +225,21 @@ def feasibility_problem(x: np.ndarray, sf: StdForm, check_integrality: bool) -> 
     left out of its tolerance scale.
     """
     x = np.asarray(x, dtype=np.float64)
+    if check_integrality and sf.int_idx.size:
+        # #1380: integrality FIRST, then test the rows at the point being
+        # CLAIMED -- the integral one. Checking the rows at the fractional point
+        # and integrality separately lets a column inside INT_TOL buy ``M *
+        # INT_TOL`` of row slack: on ``x <= 1e7 z`` a binary read back at 1e-6
+        # carries x all the way to 10 while passing both tests, and the route
+        # then reports an objective below the model's true optimum.
+        seg = x[sf.int_idx]
+        frac = np.abs(seg - np.round(seg))
+        k = int(np.argmax(frac))
+        if frac[k] > INT_TOL:
+            return f"integer column {int(sf.int_idx[k])} = {seg[k]:.9g} is fractional"
+        from discopt.validation.feasibility import snap_integer_columns
+
+        x = snap_integer_columns(x, sf.int_idx)
     ax = np.abs(x)
     huge = ax >= READBACK_LIMIT
     if sf.m:
@@ -252,12 +267,6 @@ def feasibility_problem(x: np.ndarray, sf: StdForm, check_integrality: bool) -> 
     if hi.size:
         j = int(hi[0])
         return f"x[{j}] = {x[j]:.6g} above its upper bound {sf.xu[j]:.6g}"
-    if check_integrality and sf.int_idx.size:
-        seg = x[sf.int_idx]
-        frac = np.abs(seg - np.round(seg))
-        k = int(np.argmax(frac))
-        if frac[k] > INT_TOL:
-            return f"integer column {int(sf.int_idx[k])} = {seg[k]:.9g} is fractional"
     return None
 
 

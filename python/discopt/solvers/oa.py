@@ -1280,12 +1280,60 @@ class _DecomposedProblem:
     obj_is_linear: bool = False
     oa_objective_is_convex: bool = True
     oa_constraint_mask: Optional[list[bool]] = None
+    #: Rows OA may linearize: convex AND not already carried exactly by the
+    #: master. ``oa_constraint_mask`` remains the pure convexity certificate the
+    #: no-good-cut soundness gates read (:func:`_assignment_proven_infeasible`);
+    #: this is the strictly smaller cut-eligibility mask. See
+    #: :func:`_oa_cut_eligible_mask` for why the two must not be the same list.
+    oa_cut_mask: Optional[list[bool]] = None
     master_bound_valid: bool = True
     model: Optional[Model] = None
     # A ``model._constraints`` entry that is not a :class:`Constraint` has no
     # evaluator row, so it cannot appear in the per-row mask; it still blocks the
     # convexity certificate (#1297).
     oa_has_unclassified_constraints: bool = False
+
+
+def _oa_cut_eligible_mask(
+    convex_mask: Optional[list[bool]], nonlinear_indices: list[int], n_rows: int
+) -> Optional[list[bool]]:
+    """Restrict OA constraint cuts to rows the master does NOT already carry exactly.
+
+    ``_decompose_model`` splits every evaluator row in two: a row whose
+    coefficients :func:`_extract_body_coeffs` recovers symbolically goes into
+    ``linear_A_rows`` and enters the master *exactly*; everything else goes into
+    ``nonlinear_indices``. An affine row is convex, so the convexity mask marks
+    it true and :func:`_add_oa_cuts` used to linearize it as well — re-deriving a
+    row the master already had, from ``g(x_bar)`` and ``J(x_bar)`` in floating
+    point.
+
+    That re-derivation is not exact. Measured on ``bchoco07`` (2026-09-20): all
+    97 rows classified convex were affine rows already in the master, every cut's
+    coefficient vector came back bit-identical (``max|dA| = 0.0``), and the
+    right-hand side of constraint 95 came back **2.747e-07** away from the
+    symbolic one. ``_add_oa_cuts`` appends a ``==`` row in both directions, so
+    the master then held ``a.x <= b`` together with ``a.x >= b + 2.7e-07``:
+    infeasible by construction. The master MILP reported infeasible at node 1 of
+    iteration 0, with zero NLP subproblems run, and ``solve_oa`` published that
+    as ``status="infeasible"`` — a false infeasibility certificate (CLAUDE.md
+    §1) on a model SCIP could not prove infeasible in 19570 nodes. ``bchoco08``
+    was the same defect; on ``bchoco06`` the duplicates merely accumulated, 5740
+    cuts that moved the bound not at all.
+
+    Skipping them is bound-neutral in exact arithmetic: the skipped cut *is* the
+    row already present. The three instances above kept their bound to the digit
+    with the cut count at 0.
+
+    The result is deliberately a SEPARATE list from ``convex_mask``, which stays
+    the pure convexity certificate. :func:`_assignment_proven_infeasible` admits
+    a no-good cut only when ``all(constraint_convex_mask)`` holds, so folding
+    "already exact in the master" into that mask would silently disable the
+    proven-infeasible path on every model that has an affine row.
+    """
+    if convex_mask is None:
+        return None
+    nonlinear = set(int(i) for i in nonlinear_indices)
+    return [bool(convex_mask[i]) and i in nonlinear for i in range(n_rows)]
 
 
 @dataclass(frozen=True)
@@ -1460,6 +1508,9 @@ def _decompose_model(model: Model) -> _DecomposedProblem:
         obj_is_linear=obj_is_linear,
         oa_objective_is_convex=oa_convexity.objective_is_convex,
         oa_constraint_mask=rows.convex_mask,
+        oa_cut_mask=_oa_cut_eligible_mask(
+            rows.convex_mask, nonlinear_indices, evaluator.n_constraints
+        ),
         master_bound_valid=(obj_is_linear or oa_convexity.objective_is_convex),
         model=model,
         oa_has_unclassified_constraints=rows.has_unclassified,
@@ -5342,11 +5393,19 @@ def solve_lp_nlp_bb(
         if (model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE)
         else 1.0
     )
-    if decomp.oa_constraint_mask is not None and not all(decomp.oa_constraint_mask):
+    if decomp.oa_cut_mask is not None and not all(decomp.oa_cut_mask):
+        # Report the CUT mask, not the convexity mask: a row can be convex and
+        # still be skipped because the master already carries it exactly (see
+        # ``_oa_cut_eligible_mask``). Logging the convexity count here claimed
+        # cuts that were never generated -- on ``bchoco07`` it said "97 of 153
+        # classified convex" for 97 rows that are all affine and all already in
+        # the master.
         logger.warning(
-            "LP/NLP BB: generating OA cuts only for %d of %d constraints classified convex",
-            sum(1 for is_convex in decomp.oa_constraint_mask if is_convex),
-            len(decomp.oa_constraint_mask),
+            "LP/NLP BB: generating OA cuts for %d of %d rows (%d convex; the rest are "
+            "either nonconvex or already exact in the master)",
+            sum(1 for eligible in decomp.oa_cut_mask if eligible),
+            len(decomp.oa_cut_mask),
+            sum(1 for is_convex in (decomp.oa_constraint_mask or []) if is_convex),
         )
     if not decomp.obj_is_linear and not decomp.oa_objective_is_convex:
         logger.warning(
@@ -5523,7 +5582,7 @@ def solve_lp_nlp_bb(
             oa_A_rows,
             oa_b_rows,
             decomp.obj_is_linear,
-            decomp.oa_constraint_mask,
+            decomp.oa_cut_mask,
             decomp.oa_objective_is_convex,
             equality_relaxation=equality_relaxation,
             oa_cut_relaxable=oa_cut_relaxable,
@@ -5696,7 +5755,7 @@ def solve_lp_nlp_bb(
                 oa_A_rows,
                 oa_b_rows,
                 decomp.obj_is_linear,
-                decomp.oa_constraint_mask,
+                decomp.oa_cut_mask,
                 decomp.oa_objective_is_convex,
                 interior_point_store,
                 rootsearch_strategy=shot_config.rootsearch_strategy,
@@ -5757,7 +5816,7 @@ def solve_lp_nlp_bb(
                         decomp.constraint_senses,
                         oa_A_rows,
                         oa_b_rows,
-                        decomp.oa_constraint_mask,
+                        decomp.oa_cut_mask,
                         oa_cut_relaxable=oa_cut_relaxable,
                         cut_provenance=cut_provenance,
                     )
@@ -5816,7 +5875,7 @@ def solve_lp_nlp_bb(
             oa_A_rows,
             oa_b_rows,
             decomp.obj_is_linear,
-            decomp.oa_constraint_mask,
+            decomp.oa_cut_mask,
             decomp.oa_objective_is_convex,
             equality_relaxation=equality_relaxation,
             oa_cut_relaxable=oa_cut_relaxable,
@@ -6659,11 +6718,19 @@ def solve_oa(
         if (model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE)
         else 1.0
     )
-    if decomp.oa_constraint_mask is not None and not all(decomp.oa_constraint_mask):
+    if decomp.oa_cut_mask is not None and not all(decomp.oa_cut_mask):
+        # Report the CUT mask, not the convexity mask: a row can be convex and
+        # still be skipped because the master already carries it exactly (see
+        # ``_oa_cut_eligible_mask``). Logging the convexity count here claimed
+        # cuts that were never generated -- on ``bchoco07`` it said "97 of 153
+        # classified convex" for 97 rows that are all affine and all already in
+        # the master.
         logger.warning(
-            "OA: generating OA cuts only for %d of %d constraints classified convex",
-            sum(1 for is_convex in decomp.oa_constraint_mask if is_convex),
-            len(decomp.oa_constraint_mask),
+            "OA: generating OA cuts for %d of %d rows (%d convex; the rest are "
+            "either nonconvex or already exact in the master)",
+            sum(1 for eligible in decomp.oa_cut_mask if eligible),
+            len(decomp.oa_cut_mask),
+            sum(1 for is_convex in (decomp.oa_constraint_mask or []) if is_convex),
         )
     if not decomp.obj_is_linear and not decomp.oa_objective_is_convex:
         logger.warning(
@@ -7779,7 +7846,7 @@ def solve_oa(
                 oa_A_rows,
                 oa_b_rows,
                 decomp.obj_is_linear,
-                decomp.oa_constraint_mask,
+                decomp.oa_cut_mask,
                 decomp.oa_objective_is_convex,
                 equality_relaxation=equality_relaxation,
                 oa_cut_relaxable=oa_cut_relaxable,
@@ -7812,7 +7879,7 @@ def solve_oa(
                 oa_A_rows,
                 oa_b_rows,
                 decomp.obj_is_linear,
-                decomp.oa_constraint_mask,
+                decomp.oa_cut_mask,
                 decomp.oa_objective_is_convex,
                 equality_relaxation=equality_relaxation,
                 oa_cut_relaxable=oa_cut_relaxable,
@@ -7852,7 +7919,7 @@ def solve_oa(
             oa_A_rows,
             oa_b_rows,
             decomp.obj_is_linear,
-            decomp.oa_constraint_mask,
+            decomp.oa_cut_mask,
             decomp.oa_objective_is_convex,
             equality_relaxation=equality_relaxation,
             oa_cut_relaxable=oa_cut_relaxable,
@@ -7872,7 +7939,7 @@ def solve_oa(
                 oa_A_rows,
                 oa_b_rows,
                 decomp.obj_is_linear,
-                decomp.oa_constraint_mask,
+                decomp.oa_cut_mask,
                 decomp.oa_objective_is_convex,
                 equality_relaxation=equality_relaxation,
                 oa_cut_relaxable=oa_cut_relaxable,
@@ -7918,7 +7985,7 @@ def solve_oa(
                 oa_A_rows,
                 oa_b_rows,
                 decomp.obj_is_linear,
-                decomp.oa_constraint_mask,
+                decomp.oa_cut_mask,
                 decomp.oa_objective_is_convex,
                 equality_relaxation=equality_relaxation,
                 oa_cut_relaxable=oa_cut_relaxable,
@@ -8040,7 +8107,7 @@ def solve_oa(
                             oa_A_rows,
                             oa_b_rows,
                             decomp.obj_is_linear,
-                            decomp.oa_constraint_mask,
+                            decomp.oa_cut_mask,
                             decomp.oa_objective_is_convex,
                             equality_relaxation=equality_relaxation,
                             oa_cut_relaxable=oa_cut_relaxable,
@@ -8231,7 +8298,7 @@ def solve_oa(
                             oa_A_rows,
                             oa_b_rows,
                             decomp.obj_is_linear,
-                            decomp.oa_constraint_mask,
+                            decomp.oa_cut_mask,
                             decomp.oa_objective_is_convex,
                             equality_relaxation=equality_relaxation,
                             oa_cut_relaxable=oa_cut_relaxable,
@@ -8490,7 +8557,7 @@ def solve_oa(
                 oa_A_rows,
                 oa_b_rows,
                 decomp.obj_is_linear,
-                decomp.oa_constraint_mask,
+                decomp.oa_cut_mask,
                 decomp.oa_objective_is_convex,
                 equality_relaxation=equality_relaxation,
                 oa_cut_relaxable=oa_cut_relaxable,
@@ -8669,7 +8736,7 @@ def solve_oa(
                 oa_A_rows,
                 oa_b_rows,
                 decomp.obj_is_linear,
-                decomp.oa_constraint_mask,
+                decomp.oa_cut_mask,
                 decomp.oa_objective_is_convex,
                 equality_relaxation=equality_relaxation,
                 oa_cut_relaxable=oa_cut_relaxable,
@@ -8725,7 +8792,7 @@ def solve_oa(
                         oa_A_rows,
                         oa_b_rows,
                         decomp.obj_is_linear,
-                        decomp.oa_constraint_mask,
+                        decomp.oa_cut_mask,
                         decomp.oa_objective_is_convex,
                         interior_point_store,
                         rootsearch_strategy=mip_nlp_shot_config.rootsearch_strategy,
@@ -8759,7 +8826,7 @@ def solve_oa(
                         oa_A_rows,
                         oa_b_rows,
                         decomp.obj_is_linear,
-                        decomp.oa_constraint_mask,
+                        decomp.oa_cut_mask,
                         decomp.oa_objective_is_convex,
                         equality_relaxation=equality_relaxation,
                         oa_cut_relaxable=oa_cut_relaxable,
@@ -8838,7 +8905,7 @@ def solve_oa(
                     oa_A_rows,
                     oa_b_rows,
                     decomp.obj_is_linear,
-                    decomp.oa_constraint_mask,
+                    decomp.oa_cut_mask,
                     decomp.oa_objective_is_convex,
                     equality_relaxation=equality_relaxation,
                     oa_cut_relaxable=oa_cut_relaxable,
@@ -8895,7 +8962,7 @@ def solve_oa(
                             decomp.constraint_senses,
                             oa_A_rows,
                             oa_b_rows,
-                            decomp.oa_constraint_mask,
+                            decomp.oa_cut_mask,
                             oa_cut_relaxable=oa_cut_relaxable,
                             cut_provenance=cut_provenance,
                         )
@@ -8946,7 +9013,7 @@ def solve_oa(
                     oa_A_rows,
                     oa_b_rows,
                     decomp.obj_is_linear,
-                    decomp.oa_constraint_mask,
+                    decomp.oa_cut_mask,
                     decomp.oa_objective_is_convex,
                     equality_relaxation=equality_relaxation,
                     oa_cut_relaxable=oa_cut_relaxable,
@@ -9149,6 +9216,7 @@ def solve_oa(
         status = "optimal" if _certified_gap_converged() and not has_unresolved else "feasible"
         if termination_reason in {"cycling", "stalling"}:
             status = "feasible"
+        _unverified_incumbent = False
         if _exit_refusal is not None:
             # An unverified incumbent's objective is not a proven upper bound, so
             # the gap it participates in is not a certificate and the run is not
@@ -9158,6 +9226,24 @@ def solve_oa(
             status = "feasible"
             reported_gap = None
             final_reason = "unverified_incumbent"
+            # #1380: the point and its objective still reach the caller -- a caller
+            # that wants to look at what the gate refused can -- but the fact that
+            # they are UNVERIFIED has to travel with them in a form a consumer can
+            # branch on. ``status`` and ``gap_certified`` do not distinguish this
+            # from an ordinary uncertified time-limited run that found a perfectly
+            # good incumbent, and that ambiguity is what let the number be consumed
+            # as a primal bound.
+            #
+            # Measured on ``min -x + 3z + 0.001x^2`` s.t. ``x <= 1e7 z``,
+            # ``x in [0,10]``, ``z`` binary (true optimum -6.9): the route's point
+            # failed verification at ``z = 1.0009e-06`` -- a binary that is not a
+            # binary -- and ``_merge_route_and_fallback`` then ranked its objective
+            # -9.899997 against the fallback's correctly re-derived -6.1e-09 and
+            # preferred it for being smaller. The whole solve returned a value three
+            # units below anything the model attains. The merge is where that
+            # decision is made and where it is now refused; this flag is what lets
+            # it tell the two cases apart.
+            _unverified_incumbent = True
         # ``gap_certified`` must agree with ``status``: it is the field a user
         # reads (and ``result_io.summary_text`` renders) to decide whether the
         # reported gap is a certificate. Deriving it from ``reported_gap is not
@@ -9175,6 +9261,7 @@ def solve_oa(
             bound=(_obj_sign * bound if bound is not None else None),
             gap=reported_gap,
             x=_build_x_dict(incumbent, model),
+            solver_stats=({"oa/unverified_incumbent": 1.0} if _unverified_incumbent else None),
             wall_time=wall_time,
             mip_count=mip_count,
             subnlp_calls=nlp_subproblem_count,

@@ -411,6 +411,56 @@ def check_variable_bounds(model, x_flat: np.ndarray) -> VerifyResult:
     return VerifyResult(True)
 
 
+def snap_integer_columns(x: np.ndarray, int_idx) -> np.ndarray:
+    """``x`` with the columns in ``int_idx`` rounded to their nearest integer.
+
+    The index-keyed primitive behind :func:`snap_integers`, for the matrix paths
+    (``StdForm.int_idx``, the MILP engine's offset list) that have no ``Model``.
+    See :func:`snap_integers` for why every feasibility test on a point with
+    integer columns has to run on the snapped vector.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    idx = np.asarray(int_idx, dtype=np.int64).ravel()
+    if idx.size == 0:
+        return x
+    out = x.copy()
+    out[idx] = np.round(out[idx])
+    return out
+
+
+def snap_integers(model, x_flat: np.ndarray) -> np.ndarray:
+    """``x_flat`` with every INTEGER/BINARY column rounded to its nearest integer.
+
+    A point is only ever *claimed* at its integral realisation: a solver that
+    reports ``z = 1e-6`` for a binary is claiming ``z = 0``, and the value it
+    reports for the objective is the value of the claim, not of the fractional
+    point it happened to compute. Verifying the fractional point instead lets a
+    column inside :data:`INT_TOL` carry ``M * INT_TOL`` of constraint slack — on a
+    big-M row (``x <= 1e7 z``) that is 10 units of violation bought with 1e-6 of
+    fractionality, enough to certify an *optimal* value below the true optimum.
+
+    Snapping is a no-op on a genuinely integral point (``round`` of an exact
+    integer is that integer, bit for bit), so this only ever rejects points whose
+    feasibility rests on fractionality the solver has already declared absent.
+
+    Callers must run :func:`check_variable_bounds` FIRST, which proves every such
+    column is within :data:`INT_TOL` of an integer; the snap then moves each by at
+    most that much.
+    """
+    from discopt.modeling.core import VarType
+
+    out = np.array(x_flat, dtype=np.float64, copy=True)
+    off = 0
+    for v in model._variables:
+        size = int(getattr(v, "size", 1))
+        if off + size > out.shape[0]:
+            break
+        if v.var_type in (VarType.INTEGER, VarType.BINARY):
+            out[off : off + size] = np.round(out[off : off + size])
+        off += size
+    return out
+
+
 def jacobian_row_scales(J: np.ndarray, x_flat: np.ndarray) -> np.ndarray:
     """``max_j |J_ij| * |x_j|`` per row — the row's first-order term magnitude.
 
@@ -637,6 +687,17 @@ def verify_point(
     res = check_variable_bounds(model, x_flat)
     if not res.ok:
         return res
+
+    # #1380: verify the point the solver is CLAIMING -- its integral realisation
+    # -- not the fractional point it computed. ``check_variable_bounds`` above has
+    # just proved every integer column is within INT_TOL of an integer, so the
+    # snap moves nothing further than that; what it removes is the ability of a
+    # column at 1e-6 to buy M*1e-6 of slack on a big-M row.
+    x_flat = snap_integers(model, x_flat)
+    res = check_variable_bounds(model, x_flat)
+    if not res.ok:
+        # The integral realisation is out of bounds -- the claim is not feasible.
+        return VerifyResult(False, None, f"{res.reason} (at the integral point)")
 
     try:
         # #75: via the dispatcher, so the selected backend is honoured and the
