@@ -403,7 +403,12 @@ class _ScaledExpressionMatcher:
             right_const = _constant_value(expr.right)
             if right_const is not None:
                 return _ScaledExpressionMatcher.match(expr.left, scale * right_const, leaf_match)
-            return None
+            # Neither operand is constant, so there is no scale left to peel — but
+            # the product may still be a leaf this rule recognizes (``x*x`` is a
+            # square; #1395). Offer it to ``leaf_match`` instead of rejecting it
+            # here. A leaf hook that does not want a product returns ``None``, which
+            # is exactly the old behaviour.
+            return leaf_match(expr, scale)
 
         return leaf_match(expr, scale)
 
@@ -427,6 +432,25 @@ def _match_scaled_square_var(
     scale: float,
     metadata: FlatVariableMetadata,
 ) -> Optional[tuple[int, float]]:
+    """Match ``c * x**2`` — and the identical ``c * x*x`` — in one flat variable.
+
+    Both spellings are accepted (#1395). ``x*x`` is exactly ``x**2``, so every
+    rule consuming this matcher (the sum-of-squares, sqrt-sum-of-squares,
+    separable-quadratic and univariate-quadratic rules) is as sound on the ``Mul``
+    spelling as it already is on the ``Pow`` one — but until #1395 only the ``Pow``
+    node was recognized, so the same model written ``x*x`` lost every
+    square-based inference. Measured on ``x`` declared over ``[-5, 5]``:
+    ``x**2 <= 4`` tightened the box to ``[-2, 2]`` while ``x*x <= 4`` left it at
+    ``[-5, 5]``, and ``x**2 <= -1`` was refuted by ``sum_of_squares_upper_bound``
+    while ``x*x <= -1`` fell through to the continuous NLP and returned
+    ``status="error"`` instead of ``infeasible``.
+
+    The ``Mul`` arm requires both operands to resolve to the *same* flat scalar
+    index. Anything else — two different variables (a genuine bilinear term), a
+    non-scalar operand, or a nested product like ``(2*x)*(3*x)`` whose operands are
+    not bare variables — stays unmatched, exactly as before.
+    """
+
     def leaf_match(leaf: object, leaf_scale: float) -> Optional[tuple[int, float]]:
         if isinstance(leaf, BinaryOp) and leaf.op == "**":
             exponent = _constant_value(leaf.right)
@@ -436,6 +460,17 @@ def _match_scaled_square_var(
             if flat_idx is None:
                 return None
             return flat_idx, leaf_scale
+        if isinstance(leaf, BinaryOp) and leaf.op == "*":
+            # ``_ScaledExpressionMatcher`` has already peeled any constant factor,
+            # so a ``*`` arriving here has two non-constant operands: a square iff
+            # they are the same scalar variable.
+            left_idx = metadata.scalar_flat_index(leaf.left)
+            if left_idx is None:
+                return None
+            right_idx = metadata.scalar_flat_index(leaf.right)
+            if right_idx is None or right_idx != left_idx:
+                return None
+            return left_idx, leaf_scale
         return None
 
     return _ScaledExpressionMatcher.match(expr, scale, leaf_match)
