@@ -66,11 +66,15 @@ def test_export_var_index_refuses_sliced_subscript_loudly():
     ``TypeError: only int indices permitted`` from np.ravel_multi_index.
     """
     import pytest
-    from discopt.export._extract import _var_index, flatten_variables
+    from discopt.export._extract import _var_index, _VarOffsets, flatten_variables
 
     m, x, _ = _dae_like_model()
     flat_vars = flatten_variables(m)
-    model_vars = list(m._variables)
+    # ``_var_index`` takes the prebuilt offset map, not the raw variable list: the
+    # list form rescanned from the start on every occurrence, which was quadratic
+    # over a long sum. Wrap here rather than teaching ``_var_index`` to accept both
+    # -- a per-call isinstance branch on the hot path, bought for one test.
+    model_vars = _VarOffsets(list(m._variables))
 
     # Scalar element still resolves.
     assert _var_index(x[1, 1], flat_vars, model_vars) == 3
