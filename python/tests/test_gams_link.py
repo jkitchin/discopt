@@ -475,7 +475,13 @@ def test_smoke_gms_optimum_via_from_gams(entry):
     # the full time_limit. The correct incumbent is found in the first seconds;
     # the remaining time is pure gap-closing effort, so a short budget is enough
     # to validate the optimum without tripping the harness timeout.
-    result = model.solve(time_limit=30)
+    #
+    # "A short budget" was 30s, which for nlp_rosenbrock meant 30s of exactly
+    # the gap-closing effort this comment calls pointless — it was the single
+    # most expensive case in this file. Every other entry certifies in well
+    # under a second, so 5s only ever binds on the instances the comment is
+    # about, and on those the incumbent is already final.
+    result = model.solve(time_limit=5)
     # Nonconvex instances may return "feasible" (the solver declines to certify a
     # global gap); either way the reported optimum must match the known value.
     assert result.status in ("optimal", "feasible")

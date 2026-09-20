@@ -382,7 +382,13 @@ def test_real_ball_mk2_30_bound_is_sound_and_no_false_certificate():
     symptom is only partly addressed — this PR closes the relaxation-coverage half.
     The assertions below are written to keep holding if a later primal fix lands.
     """
-    result = solve_lp_spatial_bb(_ball_mk2_real(30), time_limit=20.0, require_incremental=True)
+    # Budget measured against the assertion: the bound is -27.88 at 2s (1042
+    # nodes), -27.88 at 5s (2863) and -26.89 at 20s (11264) — it creeps upward
+    # but stays ~27 below the 0.0 oracle at every budget, so `bound <= 0.0` is
+    # equally exercised by a short run. The engine explores >1000 nodes within
+    # 2s, so the relaxation coverage this test is about is fully engaged. 3s
+    # keeps margin; the old 20s was 17s of waste per run.
+    result = solve_lp_spatial_bb(_ball_mk2_real(30), time_limit=3.0, require_incremental=True)
     assert result is not None, "engine declines the real ball_mk2_30"
     assert result.bound is not None
     assert result.bound <= 0.0 + 1e-6, f"dual bound {result.bound} crossed the 0.0 oracle"
