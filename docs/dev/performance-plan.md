@@ -9653,3 +9653,130 @@ regime uses them for.
 
 Note this does not touch #1236's correctness content. The two separator fixes
 (§69, §71.1–71.2) are independent of the flag and ship regardless.
+
+## 73. #1352/#1355/#1356 the OA convexity false negative, and four falsified explanations of a false certificate (2026-09-19)
+
+#1352 reported that an objective written with `dm.sum` — a PSD quadratic — was
+not recognised as convex by OA, so it never got objective cuts. The fix makes OA
+consult the interval-Hessian certificate and the exact-QP route. Chasing its
+graduation panel turned up a **false `optimal` on `gams01`** that took four
+hypotheses to place, none of which survived. This section records the fix, the
+four falsifications, and one retraction of a claim published earlier in the same
+work — per CLAUDE.md §4 and §11.
+
+### 73.1 Retraction — the SCIP `.cip` evidence against our `gams01` bound was invalid
+
+An earlier round of this work claimed SCIP exhibited a feasible `gams01` point at
+**23885.441**, below our reported bound of 28274.71, and offered that as proof the
+bound was false. **That claim is withdrawn.** It rested on reading SCIP's `b*/x*/i*`
+variable names as `.nl` column indices. Comparing bounds column by column shows a
+permutation — SCIP column 10 has ub 18.4597 where ours has 24, and its column 13 has
+ub 24 where ours has 14.7446 — so those names encode SCIP's *internal* ordering
+(binaries first), not the `.nl` order. No point was ever mapped correctly and the
+comparison never happened.
+
+The conclusion happens to survive on better evidence (§73.2), but the argument does
+not, and must not be repeated.
+
+### 73.2 `gams01` does report a false certificate — on the oracle, not on SCIP
+
+`minlplib.solu` gives `=best= 21380.20059` and `=bestdual= 2355.887174`. Our
+reported bound of **28274.712715258527** is above the best known *primal* and 12x
+the best known *dual*, so it is false by either reading. Our own solver agrees:
+at TL=600 the same instance returns `feasible`, bound **949.56**, gap 96.6 %, 5217
+nodes. Nothing about 28274.71 is a bound.
+
+Three properties place it out of scope for this PR:
+
+* **Pre-existing.** It reproduces with all four of this PR's flags OFF at TL=29.5:
+  `optimal`, bound == objective == 28274.712715258527, nodes = 31.
+* **Flag-independent.** It appears in the baseline arm, so no flag here causes it.
+* **Load-dependent.** 14/14 solo repetitions at the same deadline were bit-identical
+  and *clean* (63 nodes, bound 562.699). It needs a loaded machine to appear, which
+  is why it shows up in a panel and not in a single run.
+
+The failing mechanism is the tree's own `global_lower_bound` collapsing onto the
+incumbent, so `_gap_converged(tree, ...)` closes the search. The prime suspect is
+`process_evaluated` step 1 in `crates/discopt-core/src/bnb/tree_manager.rs`, which
+prunes a node whose `local_lower_bound >= cutoff_value()` *before* any
+`bound_trusted` check, so a sentinelled (1e30) node can be pruned as "dominated";
+`update_global_lower_bound` then sees `min_lb == INFINITY` and sets
+`global_lower_bound = incumbent_value`. That is a hypothesis, not a finding — it has
+not been confirmed and no fix is proposed here.
+
+### 73.3 Falsified — the convex-quadratic objective bound is not live on `gams01`
+
+`_convex_objective_lower_bound` in `python/discopt/solver.py` mixes a *model*
+gradient with a *true* objective value:
+
+    grad = H @ x_hat + g   # gradient of the constant-Hessian quadratic MODEL
+    fx = f(x_hat)          # value of the TRUE objective
+
+which is unsound the moment the true objective is not that quadratic. On `gams01`
+it is not: the probe measured `max|H(a) - H(b)| = 3.419004e+02` over sampled points,
+so the objective is convex but **non**-quadratic. The mechanism is nevertheless not
+the culprit, because the gate correctly rejects it: `_objective_is_convex_quadratic`
+returns **False** (the term classifier reports `general_nl: 340`), so
+`_use_convex_obj_bound` is False and the code never runs. Hypothesis killed by its
+own entry experiment.
+
+### 73.4 Falsified — the route/fallback merge contributes nothing
+
+`_merge_route_and_fallback` was the second suspect. In 14/14 clean runs the route
+returned `{'status': 'unknown', 'objective': None, 'bound': None, 'bound_valid':
+False}`, so it contributes no bound to merge. Killed.
+
+### 73.5 Falsified — the OA `CUTOFF` bound promotion is unreachable here
+
+The third suspect was the `SolveStatus.CUTOFF` branch in `solvers/oa.py`, which
+promotes `master_objective_cutoff` to a bound. That branch is live only under
+`mip_nlp_profile == "shot"` with gurobi; on this path `master_objective_cutoff` is
+None. Killed.
+
+### 73.6 Retraction — `watercontamination0202` was not a false certificate
+
+An earlier note in this work recorded discopt falsely certifying
+`watercontamination0202`. **Withdrawn.** The grep that produced it matched
+`watercontamination0202r`, whose reference is 97.90446 against our 97.90444 —
+inside tolerance. There was no violation.
+
+### 73.7 `DISCOPT_FARKAS_RAY_CLEANUP` graduates (#1355)
+
+The §5 panel: 990 rows, **7346 certificate checks**, 198 instances x 30 s, the two
+arms differing only in this flag.
+
+| | cleanup OFF | cleanup ON |
+|---|---|---|
+| certified instances | 97 | **100** |
+| total wall, all instances | 3362.6 s | **3293.8 s** |
+| bounds above their reference optimum | **1** (`gams01`) | 0 |
+| certification regressions | — | 1 (`gams01`) |
+
+Both §5 bars are met. The single "regression" is `gams01` losing a certificate it
+should never have had (§73.2) — with the cleanup OFF that arm is the one row in
+7346 checks that reports a bound above its reference optimum. Losing it is the fix.
+
+Graduated **default ON**; `=0` opts out and the legacy path is untouched. Verified
+on a §8 import tree built from the worktree (asserted `discopt.__file__` and a
+`_rust.abi3.so` differing from the pre-flip build), three arms of the captured OA
+master:
+
+| `DISCOPT_FARKAS_RAY_CLEANUP` | status | MILPs | bound |
+|---|---|---|---|
+| unset | optimal | 31 | 0.0031842969 |
+| `=1` | optimal | 31 | 0.0031842969 |
+| `=0` | feasible | 52 | 0.0019696441 |
+
+Unset is bit-identical to the opt-in arm and materially different from the opt-out,
+which is what makes this a test of the *default* rather than of the flag.
+
+### 73.8 A §8 incident, recorded because it nearly published a wrong result
+
+A local `pytest` run in the `discopt-1352` worktree reported the failing CI test as
+passing. It was importing `discopt` from **`/Users/jkitchin/projects/discopt`** —
+the main tree — because `site-packages/discopt.pth` points there and nothing in the
+worktree overrides it. The "it passes locally" inference was withdrawn and the run
+repeated on a verified tree. This is the second time in this repository that a
+worktree measurement silently ran against the main tree; CLAUDE.md §8 exists for it,
+and the rule that caught it is *assert `__file__` **and** a version marker* — here,
+post-merge markers (`_relax/scaling.py` absent, `_relax/module_status.py` present).
