@@ -50,7 +50,7 @@ from .interval import Interval
 
 def evaluate_interval(
     expr: Expression,
-    model: Model,
+    model: Optional[Model],
     box: Optional[dict] = None,
     _cache: Optional[dict] = None,
 ) -> Interval:
@@ -59,7 +59,15 @@ def evaluate_interval(
     Args:
         expr: The expression to evaluate.
         model: The :class:`~discopt.modeling.core.Model` the expression
-            references. Variables are looked up by object identity.
+            references. Accepted for symmetry with the rest of the layer and
+            threaded through the walk, but never consulted: a variable's
+            enclosure comes from ``box`` or from its own ``lb``/``ub``. ``None``
+            is therefore valid, and is what a caller with no model in hand --
+            e.g. the ``atan2`` sign analysis in
+            :mod:`discopt.modeling._atan2`, which runs at expression-build time
+            -- passes. Keep it that way: a ``model`` that became load-bearing
+            here would silently change those callers' answers
+            (``test_enclosure_ignores_model_argument``).
         box: Optional dict ``{Variable: Interval}`` that overrides the
             variable's declared bounds. When ``None`` or a variable is
             missing, the declared ``(lb, ub)`` of the variable is used.
@@ -122,7 +130,7 @@ def _reduced_count(arr: np.ndarray, axis: Optional[int]) -> int:
         return int(arr.size)
 
 
-def _eval(expr: Expression, model: Model, box: dict, cache: dict) -> Interval:
+def _eval(expr: Expression, model: Optional[Model], box: dict, cache: dict) -> Interval:
     eid = id(expr)
     if eid in cache:
         return cache[eid]
@@ -131,7 +139,7 @@ def _eval(expr: Expression, model: Model, box: dict, cache: dict) -> Interval:
     return result
 
 
-def _eval_impl(expr: Expression, model: Model, box: dict, cache: dict) -> Interval:
+def _eval_impl(expr: Expression, model: Optional[Model], box: dict, cache: dict) -> Interval:
     # --- Leaves -----------------------------------------------------
     if isinstance(expr, Constant):
         v = np.asarray(expr.value, dtype=np.float64)
@@ -394,7 +402,9 @@ def _eval_power(expr: BinaryOp, left: Interval, right: Interval) -> Interval:
     return iv.exp(Interval.point(n) * iv.log(left))
 
 
-def _eval_function_call(expr: FunctionCall, model: Model, box: dict, cache: dict) -> Interval:
+def _eval_function_call(
+    expr: FunctionCall, model: Optional[Model], box: dict, cache: dict
+) -> Interval:
     if not expr.args:
         return _unbounded(())
     args = [_eval(a, model, box, cache) for a in expr.args]
@@ -416,6 +426,21 @@ def _eval_function_call(expr: FunctionCall, model: Model, box: dict, cache: dict
 
     if expr.func_name == "centropy" and len(args) == 2:
         return iv.centropy(args[0], args[1])
+
+    if expr.func_name == "atan2" and len(args) == 2:
+        # atan2 maps EVERY argument pair into (-pi, pi], so this enclosure is
+        # unconditionally sound and needs no sign analysis of the arguments.
+        #
+        # It matters because the generic multi-argument arm below returns
+        # [-inf, +inf], and an unbounded enclosure becomes an unbounded aux
+        # floor in `uniform_relax._build_multivar` -- i.e. no finite dual bound
+        # at all, so the solve cannot certify even a trivially bounded
+        # objective. A raw `atan2` node only reaches here from `serialize.loads`
+        # or the GAMS link on a cut-straddling box (`dm.atan2` rewrites into
+        # `atan` instead and never builds one), but a finite [-pi, pi] is
+        # strictly better than nothing for those.
+        shape = np.broadcast_shapes(args[0].lo.shape, args[1].lo.shape)
+        return Interval(np.full(shape, -np.pi), np.full(shape, np.pi))
 
     if len(args) != 1:
         return _unbounded(args[0].lo.shape)
@@ -501,7 +526,9 @@ def _registered_interval(name, expr, model, box, cache):
         return None
 
 
-def _eval_matmul(expr: MatMulExpression, model: Model, box: dict, cache: dict) -> Interval:
+def _eval_matmul(
+    expr: MatMulExpression, model: Optional[Model], box: dict, cache: dict
+) -> Interval:
     """Interval matrix–vector or matrix–matrix product.
 
     ``discopt`` uses ``MatMulExpression`` primarily for constant-matrix

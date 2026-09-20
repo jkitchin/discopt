@@ -160,7 +160,7 @@ The translator supports the algebraic operators (`+ - * / **`, unary minus) and
 the intrinsic functions discopt models natively: `exp`, `log`, `log2`, `log10`,
 `sqrt`, `sqr`, `abs`, `sin`, `cos`, `tan`, `arcsin`, `arccos`, `arctan`, `sinh`,
 `cosh`, `tanh`, `sigmoid`, `sign`, `errf`, the `power`/`rpower`/`cvpower`/
-`vcpower` family, `div`, and `min`/`max`.
+`vcpower` family, `div`, `min`/`max`, and `arctan2` (see below).
 
 It also handles the **safeguarded evaluation forms** GAMS emits in compiled NL
 code for numerical safety — `slexp`/`sqexp` (exp), `sllog10`/`sqlog10` (log10),
@@ -170,14 +170,25 @@ their out-of-domain extrapolation, so they map to the intended base function
 (curvature profile + interval enclosure) and has a rigorous relaxation, so it is
 solved to a **certified global** optimum.
 
-Functions without a tailored McCormick rule (e.g. `atan2`, `centropy`,
-`signpower`) are not dead ends: discopt's relaxation compiler automatically
-falls back to a rigorous **αBB** relaxation, which certifies a global optimum
-whenever the interval Hessian over the box is finite. Reaching the correct
-optimum and *certifying* it as global are still distinct, though — discopt sets
-`gap_certified` only when it produced a valid finite dual bound (McCormick or
-αBB), and the link reports `LocallyOptimal` otherwise rather than overstating a
-local solution as global (see Status mapping).
+`arctan2` is rewritten **exactly** when the imported bounds put the whole box in
+one half-plane — `atan(y/x)` for `x > 0`, `±π/2 − atan(x/y)` for sign-definite
+`y` — which turns it into ordinary `atan` over a ratio and makes it solvable to
+a **certified global** optimum. See `discopt.modeling._atan2`; `dm.atan2` uses
+the same rewrite but *raises* when it cannot fire, whereas the link keeps the
+opaque node (an imported model's bounds are not the importer's to change).
+
+The remaining two-argument forms — `centropy`, `signpower`, and `atan2` on a box
+that straddles its branch cut — have **no rigorous relaxation** and are solved on
+the local path. Be precise about why, because an earlier version of this section
+said the opposite: the αBB fallback does *not* rescue them. `rigorous_alpha`
+needs an interval Hessian, and `interval_ad._function_call` abstains on **every**
+call with more than one argument before it even looks at the name, so αBB returns
+`+inf` and declines. Their enclosure then comes from `uniform_relax`'s
+interval floor, which is sound but carries no dual bound (for a raw `atan2` node
+that floor is the unconditionally valid `[-π, π]`; for the others it is
+unbounded). discopt sets `gap_certified` only when it produced a valid finite
+dual bound, so the link reports these as `LocallyOptimal` rather than
+overstating a local solution as global (see Status mapping).
 
 **Discontinuous** intrinsics (`ceil`, `floor`, `round`, `trunc`, `frac`, `mod`,
 `ifthen`) have no valid continuous relaxation and are rejected with a clear
