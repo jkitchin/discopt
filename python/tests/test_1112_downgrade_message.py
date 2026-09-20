@@ -160,7 +160,14 @@ def _solve_capturing(model, **kwargs):
 @pytest.fixture(scope="module")
 def reduced_solve():
     """One solve of the traceable CustomCall model, shared by the tests below."""
-    return _solve_capturing(_traceable_custom_model(), mccormick_bounds="lp", time_limit=25)
+    # Budget measured against what the dependent tests assert. All three log
+    # flags (REDUCED_ACTIVE, the #120 guard, the absence of CIRCULAR) are
+    # identical at 2 s, 5 s and 25 s -- they are emitted during setup, not
+    # search -- and the bound is bit-identical at 5 s and 25 s
+    # (0.541341132946451; still climbing at 2 s, 0.4009). This solve never
+    # terminates, so the other 20 s was pure waste. 5 s is the first budget at
+    # which the bound is final, which is what the soundness test compares.
+    return _solve_capturing(_traceable_custom_model(), mccormick_bounds="lp", time_limit=5)
 
 
 def test_reduced_space_solve_does_not_recommend_the_flag_already_passed(reduced_solve):

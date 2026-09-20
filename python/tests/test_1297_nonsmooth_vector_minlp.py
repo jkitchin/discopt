@@ -58,7 +58,20 @@ def _slack(v):
     return 1e-6 * (1 + abs(v))
 
 
-@pytest.mark.parametrize("n", [2, 3, 4])
+# The four SPELLINGS are the regression surface of #1297 -- every way of
+# writing the same nonsmooth row must certify the same optimum -- so all four
+# stay. The size sweep is a robustness check on top of that, and measured cost
+# is FLAT in n (3.46 s at n=2, 2.33 s at n=4; every case certifies in 3 nodes,
+# and the 60 s limit never binds), so dropping a size is the only lever here
+# and it is worth ~11 s of the file's 38 s. Keeping the endpoints {2, 4}
+# preserves "certifies at more than one size, including the largest"; n=3 is
+# interior and exercises no distinct path (OPT is linear in n: 0.5/1.5/2.5).
+#
+# The per-case 3 s is not search: it is ~29 POUNCE NLP subsolves of primal
+# heuristics (root multistart 1.57 s, feasibility pump 0.74 s, integer local
+# search 0.67 s) on a model that closes in 3 nodes. That is a solver-side
+# heuristic-budget question, not something this test can size around.
+@pytest.mark.parametrize("n", [2, 4])
 @pytest.mark.parametrize("spelling", SPELLINGS)
 def test_default_solve_certifies_the_optimum(n, spelling):
     r = _max_model(n, spelling).solve(time_limit=60)
