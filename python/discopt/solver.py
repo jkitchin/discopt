@@ -18,7 +18,7 @@ import os
 import time
 import weakref
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar, Union, cast
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypeGuard, TypeVar, Union, cast
 
 import numpy as np
 
@@ -4305,6 +4305,58 @@ def _root_bound_seed_enabled() -> bool:
     )
 
 
+#: #1401: the magnitude at which a reported dual bound is "no bound" rather than a
+#: number. One order below ``CONSTRAINT_INF`` (1e20, the LP layer's infinity), so a
+#: value merely *approaching* the cap is refused too.
+#:
+#: This is NOT ``_SENTINEL_THRESHOLD``. That constant is 1e29 — it answers a
+#: different question ("is this an infeasibility marker / bogus incumbent?", set
+#: just below the 1e30 ``INFEASIBILITY_SENTINEL``) and would wave a 1e20-derived
+#: bound straight through, which is exactly the confusion
+#: :func:`_finalize_reported_bound` warns about: "the refusal threshold is the same
+#: ``1e19`` the #930 gate and the LP layer's ``_INF`` use, NOT the ``1e29``
+#: infeasibility-marker threshold, which would wave 1e20 through". Both constants
+#: are correct for their own question; the bug is using one for the other.
+#:
+#: (An unrelated ``_SENTINEL_THRESHOLD = 1e19`` lives in ``discopt/debug/context.py``
+#: — same name, different value, different module. Do not import either one here.)
+_EFF_INF_BOUND: float = 1e19
+
+
+def _bound_is_usable(value: Optional[float]) -> TypeGuard[float]:
+    """#1401: is *value* a dual bound anyone can report, or is it "no bound"?
+
+    The LP layer's "no bound" is the sentinel ``1e20``, **not** ``inf``, and it
+    survives arithmetic as an ordinary finite number — ``np.isfinite(4.4e21)`` is
+    True, which is the hole :func:`_finalize_reported_bound` documents. A gate
+    written as ``np.isfinite(v)`` therefore accepts a sentinel-derived value and
+    treats "the relaxation proved nothing" as a proved bound.
+
+    This is the single predicate for that question, so a new adoption site cannot
+    re-open the hole by writing the ``np.isfinite`` half and forgetting the
+    magnitude half — nor by reaching for ``_SENTINEL_THRESHOLD``, which is 1e29
+    (see :data:`_EFF_INF_BOUND`).
+
+    Returns a :class:`~typing.TypeGuard` rather than a plain ``bool`` so that the
+    ``Optional[float]`` it is called on narrows to ``float`` inside the true
+    branch, exactly as the inline ``v is not None and np.isfinite(v)`` it replaces
+    did. Without it mypy rejects the arithmetic at each call site.
+
+    Measured on QPLIB_2967 (MAXIMIZE, ``time_limit=20``): the spatial exit
+    reported ``bound=4.4495549999999977e+21`` with ``gap=4.07e20`` — 445x past
+    this threshold — and because that looked finite the #138 root-relaxation
+    fallback was skipped entirely. Handed the same value, the composer refused it.
+
+    With the refusal in place the same instance reports ``bound=None`` and the
+    existing "No valid dual bound was produced" diagnostic fires. Note what this
+    did *not* buy: the fallback now runs and finds nothing either, so the gain on
+    this instance is the honest report, not a tighter number. An earlier draft of
+    #1401 claimed the fallback's bound "is strictly more informative than
+    4.45e21"; measured, it is ``None``. The claim was unmeasured and is retracted.
+    """
+    return value is not None and bool(np.isfinite(value)) and abs(float(value)) < _EFF_INF_BOUND
+
+
 def _finalize_reported_bound(
     *,
     tree_bound_internal: Optional[float],
@@ -4356,7 +4408,7 @@ def _finalize_reported_bound(
     # Effective-infinity refusal threshold (see docstring): 1e19, one order
     # below the LP layer's 1e20 sentinel so values merely approaching the cap
     # are refused too — matching ``_admissible_probe_bound``.
-    _eff_inf = 1e19
+    _eff_inf = _EFF_INF_BOUND
     best: Optional[float] = None
     if (
         tree_bound_valid
@@ -17315,8 +17367,10 @@ def solve_model(
             ):
                 _rig_int = min(float(_glb_int), _taint_floor_internal)
                 if (
-                    np.isfinite(_rig_int)
-                    and abs(_rig_int) < _SENTINEL_THRESHOLD
+                    # #1401: 1e19, not the 1e29 infeasibility marker this previously
+                    # used. A *certificate* must not rest on a sentinel-derived
+                    # frontier value; tightening here can only refuse more.
+                    _bound_is_usable(_rig_int)
                     and _gap_values_converged(float(_inc_int), _rig_int, gap_tolerance, abs_gap_tol)
                 ):
                     _gap_certified = True
@@ -17501,7 +17555,10 @@ def solve_model(
             _glb_int = stats["global_lower_bound"]
             if not _tree_bound_poisoned and _glb_int is not None and np.isfinite(_glb_int):
                 _rig_int = min(_taint_floor_internal, float(_glb_int))
-                if np.isfinite(_rig_int) and abs(_rig_int) < _SENTINEL_THRESHOLD:
+                # #1401: was ``abs(_rig_int) < _SENTINEL_THRESHOLD``, which is 1e29
+                # -- the infeasibility-marker threshold, not the effective-infinity
+                # one. It waved a 1e20-derived frontier value through as a bound.
+                if _bound_is_usable(_rig_int):
                     bound_val = (
                         -_rig_int if model._objective.sense == ObjectiveSense.MAXIMIZE else _rig_int
                     )
@@ -17512,6 +17569,47 @@ def solve_model(
                     if obj_val is not None and np.isfinite(obj_val):
                         gap_val = abs(obj_val - bound_val) / max(1.0, abs(obj_val))
 
+    # #1401: refuse an EFFECTIVELY INFINITE frontier bound, the same way every
+    # other consumer of a tree bound in this file already does.
+    #
+    # The LP layer's "no bound" is the sentinel ``1e20``, not ``inf``, and it
+    # survives arithmetic as an ordinary finite number — ``np.isfinite(4.4e21)``
+    # is True. ``_finalize_reported_bound`` — documented as "the ONE composition
+    # of an *uncertified* exit's reported dual bound, shared by every solve path"
+    # — refuses such a value at 1e19; this path took
+    # ``stats["global_lower_bound"]`` behind ``np.isfinite`` alone.
+    #
+    # The neighbouring gates do NOT already cover this, contrary to what a reader
+    # (and an earlier draft of this comment) would assume from the name: the
+    # taint-recovery branch just above tests ``abs(_rig_int) < _SENTINEL_THRESHOLD``,
+    # and that constant is **1e29**, so it waves a 1e20-derived value through as
+    # well. Both branches now use :func:`_bound_is_usable`.
+    #
+    # Measured on QPLIB_2967 (MAXIMIZE, time_limit=20, status='feasible',
+    # gap_certified=False): the user was shown
+    # ``bound=4.4495549999999977e+21, gap=4.07e20`` where the honest report is
+    # "no dual bound", and because the value *looks* finite ``_rr_needed`` below
+    # was False, so the #138 root-relaxation fallback never ran at all. Handed
+    # the same number, the shared composer refuses it (returns None).
+    #
+    # After the refusal that instance reports ``bound=None`` with the existing
+    # "No valid dual bound was produced" diagnostic, and ``objective`` is
+    # bit-identical (10.928202213846527 on both arms). The fallback does now run
+    # and also yields nothing here — so on this instance the fix buys the honest
+    # report, not a tighter bound.
+    #
+    # Scoped to the uncertified exit, matching the composer's documented scope: a
+    # certified exit's bound is tied to the incumbent by the closed gap that
+    # granted the certificate, so it cannot be the sentinel unless the incumbent
+    # is too (and a sentinel incumbent is refused upstream by the same threshold).
+    if not _gap_certified and bound_val is not None and not _bound_is_usable(bound_val):
+        bound_val = None
+        gap_val = None
+        _bound_source = None
+        # It was never a proved bound, so it carries no provenance to preserve;
+        # let the fallbacks below treat this exit as bound-less, which it is.
+        _bound_from_taint_recovery = False
+
     # Root cut-pool bound: a rigorous global lower bound the strengthened root
     # relaxation already proved during setup (nvs19: -1156 vs the cut-less tree's
     # -88237). The tree's per-node cuts prune children but never lift the frontier
@@ -17521,10 +17619,9 @@ def solve_model(
     # fallback recomputes from scratch — it is both stronger and free. If it meets
     # the incumbent, the re-certification below upgrades the exit to "optimal".
     if (
-        _root_pool_bound is not None
-        and np.isfinite(_root_pool_bound)
+        _bound_is_usable(_root_pool_bound)  # #1401: not merely np.isfinite
         and model._objective.sense == ObjectiveSense.MINIMIZE
-        and (bound_val is None or not np.isfinite(bound_val) or _root_pool_bound > bound_val)
+        and (not _bound_is_usable(bound_val) or _root_pool_bound > bound_val)
     ):
         bound_val = _root_pool_bound
         # The pool bound is rigorous independently of the tree's taint, so it
@@ -17552,7 +17649,11 @@ def solve_model(
     # discarded to None) and could report a root-relaxation bound STRONGER than
     # the taint floor (tanksize: floor 0.847 vs root relaxation 0.868). Run it in
     # that case too and keep the tighter of the two rigorous bounds.
-    _rr_needed = bound_val is None or not np.isfinite(bound_val) or _bound_from_taint_recovery
+    # #1401: an effectively-infinite value is "no bound", so it must make the
+    # fallback NEEDED rather than satisfy it. The refusal above already nulls the
+    # frontier case; this clause covers anything the blocks in between may have
+    # adopted, so the sentinel can never satisfy this test by looking finite.
+    _rr_needed = not _bound_is_usable(bound_val) or _bound_from_taint_recovery
     # Whatever is genuinely left of ``time_limit``, and no more. The search loop
     # above withholds ``_ROOT_FALLBACK_RESERVE_S`` precisely when it is bound-less,
     # so in the case this fallback exists to serve the remainder is positive and the
@@ -17581,7 +17682,10 @@ def solve_model(
             )
         else:
             _rr = _admissible_probe_bound(_root_probe_bound, _root_lb_snapshot, _root_ub_snapshot)
-        if _rr is not None and np.isfinite(_rr):
+        # #1401: the fallback's own value goes through the same predicate. A
+        # sentinel-derived relaxation bound is "nothing proved", and adopting it
+        # here would re-open the hole one line after closing it.
+        if _bound_is_usable(_rr):
             # Negate for MAXIMIZE: a lower bound on ``-obj`` is an upper bound on
             # ``obj``. The relaxation is a valid outer approximation either way, so
             # the surfaced bound is rigorous and on the correct side of the
@@ -17591,7 +17695,7 @@ def solve_model(
             # bound, a MAXIMIZE the smaller upper bound). When the independently
             # rigorous fallback wins, the taint-recovery gate lifts (it may
             # re-certify below, exactly the pre-fix behavior).
-            if bound_val is None or not np.isfinite(bound_val):
+            if not _bound_is_usable(bound_val):  # #1401: not merely np.isfinite
                 bound_val = _rr_signed
                 _bound_from_taint_recovery = False
                 _bound_source = "root_relaxation"
