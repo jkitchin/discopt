@@ -55,12 +55,13 @@ convex-nonseparable ``cvxnonsep_*`` family (the class that narrowed the governed
 set to ``rens`` only): 0 certified-objective degradations, 0 lost incumbents,
 0 soundness violations.
 
-The governed set has since gained ``direct`` — the root DIRECT sampling probe in
-``solver.py`` (``DISCOPT_DIRECT_HEURISTIC``, itself default-OFF). It is governed
-from the day it was wired rather than after a regression was measured; see
-:data:`EXPENSIVE_SOURCES` for why it qualifies. Note that a governed source whose
-own feature flag is off never reaches :meth:`allowed`/:meth:`record`, so this
-addition is inert on the default path.
+The governed set briefly gained ``direct`` — the root DIRECT sampling probe in
+``solver.py``, behind a default-OFF ``DISCOPT_DIRECT_HEURISTIC``. #1388 retired
+that flag and the probe with it: the gate promised a §5 panel that was never run,
+and the only DIRECT measurement in the tree
+(``docs/dev/direct-entry-2026-08-12.md``) is the entry experiment for the
+``solver="direct"`` *backend*, which ships, not for this heuristic. So the
+governed set is once more exactly the source whose own panel measured it.
 """
 
 from __future__ import annotations
@@ -95,40 +96,17 @@ K_DISABLE = 2
 #: NOT governed here, precisely because the evidence for throttling them does not
 #: hold on the convex class.
 #:
-#: ``direct`` joins the set for the same two reasons ``rens`` did, and for no
-#: instance-specific reason (CLAUDE.md §2 — it is a *class* of heuristic, keyed on
-#: nothing but its own measured hit-rate):
-#:
-#: 1. **It is expensive in the governed sense.** It is a whole derivative-free
-#:    sampling search fired once at the root — hundreds of objective/constraint
-#:    evaluations over the full box (``_DIRECT_HEURISTIC_MAX_EVALS`` in
-#:    ``solver.py``), in the same "one big thing at the root" shape as the RENS
-#:    nested B&B, not a cheap finder like multistart or the pump.
-#: 2. **Its payoff is exactly the kind that generalizes badly.** DIRECT's own
-#:    entry experiment (``docs/dev/direct-entry-2026-08-12.md``) measured it
-#:    *tying at the optimum* on 4 of 13 panel instances — cases where the local
-#:    path already had the answer and sampling could contribute nothing but wall
-#:    — and landing in a worse basin than the default start on 1 more
-#:    (griewank_3). That is precisely the "spends, does not improve" profile the
-#:    class hit-rate exists to detect, so it must be throttleable from the day it
-#:    is wired rather than after a regression is measured. (The worse-basin case
-#:    cannot regress an *answer* here: the wiring only injects through
-#:    ``inject_incumbent``, which accepts strict improvements only. What it can
-#:    still do is spend the budget for nothing, which is what this throttle is
-#:    for.)
-#:
-#: Being governed costs nothing when the heuristic is off: the DIRECT root
-#: heuristic is itself default-OFF behind ``DISCOPT_DIRECT_HEURISTIC``, so
-#: ``allowed("direct")``/``record("direct")`` are never reached on the default
-#: path and the governed set is measurement-bounded exactly as before.
-EXPENSIVE_SOURCES = frozenset({"rens", "direct"})
+#: ``direct`` (the root DIRECT sampling probe) was governed here from the day it
+#: was wired; #1388 retired it with ``DISCOPT_DIRECT_HEURISTIC``, so the governed
+#: set is back to the one source its own panel measured.
+EXPENSIVE_SOURCES = frozenset({"rens"})
 
 #: The sources the governor throttles at all. A source not listed here is always
 #: allowed and never accrues a throttle (``record`` still tracks its stats for
 #: observability, but never disables it). Currently identical to
 #: :data:`EXPENSIVE_SOURCES`; kept separate so a future cheap-but-losing source
 #: could be governed without the gap gate.
-GOVERNED_SOURCES = frozenset({"rens", "direct"})
+GOVERNED_SOURCES = frozenset({"rens"})
 
 
 def _governor_enabled() -> bool:

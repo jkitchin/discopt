@@ -51,28 +51,6 @@ logger = logging.getLogger(__name__)
 _PSD_TOL = 1e-10
 
 
-def _psd_qform_enabled() -> bool:
-    """Whether the exact PSD-on-Q convexity fast path is active.
-
-    **Default OFF** (Phase 4 item 3, bound-changing regime — CLAUDE.md §5).
-    The path is a *sound tightening*: on a purely quadratic body the
-    Hessian is the constant matrix ``2·Q``, so an exact eigenvalue PSD
-    test on ``Q`` certifies convexity rigorously where the conservative
-    interval-Hessian + Gershgorin row-sum enclosure would abstain. It can
-    therefore prove *more* constraints/objectives convex, which changes
-    node relaxations and counts — hence it ships behind a flag,
-    default-off until validated on consecutive nightly runs.
-
-    Enable with ``DISCOPT_PSD_QFORM=1`` (also ``true``/``yes``/``on``).
-    """
-    return os.environ.get("DISCOPT_PSD_QFORM", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
-
-
 def _qp_exact_convexity_enabled() -> bool:
     """Whether the exact QP/MIQP objective-Hessian convexity route is active.
 
@@ -158,9 +136,11 @@ def certify_quadratic_objective_convex(model: Model, *, deadline: Optional[float
     the objective quadratic. On that branch the objective is *exactly* quadratic,
     so its Hessian is a constant matrix — there is no enclosure and no box
     dependence, and an exact symmetric-eigenvalue test on it is a global
-    convexity proof valid on every sub-box. This is the identical argument
-    :func:`_certify_quadratic_psd` makes; the only difference is where the
-    coefficients come from. ``extract_qp_data`` walks the model through the Rust
+    convexity proof valid on every sub-box. A flag-gated sibling,
+    ``_certify_quadratic_psd``, made the identical argument from
+    ``quadratic_form.extract_quadratic``; #1388 retired it with
+    ``DISCOPT_PSD_QFORM``, and this default-ON route is what remains.
+    ``extract_qp_data`` walks the model through the Rust
     repr / algebraic / autodiff ladder and handles the vectorized API, whereas
     ``quadratic_form.extract_quadratic`` (and the scalar interval-Hessian walker
     behind :func:`certify_convex`) does not — which is why a convex QP written
@@ -238,48 +218,6 @@ def certify_quadratic_objective_convex(model: Model, *, deadline: Optional[float
     return quadratic_is_psd(hessian, tol=_PSD_TOL) is True
 
 
-def _certify_quadratic_psd(expr: Expression, model: Model) -> Optional[Curvature]:
-    """Exact convexity verdict for a *purely quadratic* body, or ``None``.
-
-    Returns ``Curvature.CONVEX`` when the body ``xᵀ Q x + cᵀ x + d`` has
-    ``Q ⪰ 0`` (Hessian ``2·Q ⪰ 0`` — convex everywhere, box-independent),
-    ``Curvature.CONCAVE`` when ``Q ⪯ 0``, and ``None`` in every other
-    case: the body is not purely quadratic (extraction abstained), ``Q``
-    is indefinite, or ``Q`` is not numerically usable. ``None`` means "I
-    cannot certify from Q" — the caller MUST then fall back to the
-    existing rigorous interval-Hessian path; it must never assume convex.
-
-    This is sound because extraction is exact-or-abstain: a returned
-    ``(Q, c, d)`` reproduces the body identically (verified to 1e-12 on
-    random points in ``test_quadratic_form.py``), so ``2·Q`` *is* the
-    body's Hessian — no enclosure, no looseness.
-    """
-    # Local import: keep the convexity package import-light and avoid any
-    # cycle with the broader _relax package that quadratic_form pulls in.
-    from discopt._relax.quadratic_form import (
-        extract_quadratic,
-        quadratic_is_nsd,
-        quadratic_is_psd,
-    )
-
-    n = sum(v.size for v in model._variables)
-    res = extract_quadratic(expr, n, model)
-    if res is None:
-        # Not purely quadratic — abstain; caller uses the rigorous path.
-        return None
-    Q, _c, _d = res
-
-    is_psd = quadratic_is_psd(Q, tol=_PSD_TOL)
-    if is_psd is True:
-        return Curvature.CONVEX
-    is_nsd = quadratic_is_nsd(Q, tol=_PSD_TOL)
-    if is_nsd is True:
-        return Curvature.CONCAVE
-    # Indefinite, or Q unusable (non-finite) — abstain to the rigorous
-    # path rather than claim anything.
-    return None
-
-
 def certify_convex(
     expr: Expression,
     model: Model,
@@ -305,19 +243,6 @@ def certify_convex(
           the expression as non-convex.
     """
     # Exact PSD-on-Q fast path (Phase 4 item 3, flag default-OFF). When a
-    # body is *purely quadratic*, its Hessian is the constant matrix
-    # ``2·Q`` and an exact eigenvalue test on ``Q`` certifies convexity
-    # rigorously — strictly tighter than (and never looser than) the
-    # interval-Hessian + Gershgorin enclosure below. On abstention
-    # (non-quadratic body, indefinite Q, or unusable Q) this returns
-    # ``None`` and we fall through to the rigorous path unchanged. The
-    # verdict is box-independent, so the ``box`` argument does not affect
-    # it (a global quadratic convexity proof holds on every sub-box).
-    if _psd_qform_enabled():
-        q_verdict = _certify_quadratic_psd(expr, model)
-        if q_verdict is not None:
-            return q_verdict
-
     try:
         ad = interval_hessian(expr, model, box=box)
     except ValueError:

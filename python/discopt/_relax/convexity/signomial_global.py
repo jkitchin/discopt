@@ -82,8 +82,14 @@ Soundness contract
   efficiency heuristics (gap-guided coordinate choice, split at the node's
   relaxation point) and never affect validity.
 
-This is opt-in (``DISCOPT_SGO``; default OFF) and general (keyed only on model
-structure, never on instance names), per the repo's bound-changing-flag policy.
+Reached by an explicit ``solve(solver="sgo")`` and general (keyed only on model
+structure, never on instance names). It is deliberately **not** auto-routed from
+a plain ``solve()``: a default-OFF ``DISCOPT_SGO`` env flag used to do that,
+promising a graduation panel that was never run, and #1388 retired it under
+CLAUDE.md §5. The engine was kept rather than deleted precisely because giving it
+an addressable selector costs nothing -- the same shape ``solver="gp-minlp"``
+already had. Auto-routing it would be a bound-changing default change and would
+need the §5 panel first.
 
 References
 ----------

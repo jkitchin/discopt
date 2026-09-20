@@ -683,187 +683,6 @@ def _gdp_config_primal_enabled() -> bool:
 #: ``solve_direct``'s standalone ``max_evals=5000`` on purpose: this is ONE bounded
 #: probe standing next to multistart / RENS / RINS at the root, not a search in its
 #: own right. The size is taken from the backend's own entry experiment
-#: (``docs/dev/direct-entry-2026-08-12.md``, "Second measured claim"): with the
-#: measured defaults (``divide="one"``, ``break_ties=True``), of the 12 panel
-#: instances that reached 1e-2 relative accuracy at all, **11 reached it within 200
-#: evaluations** (43, 193, 59, 127, 65, 65, 175, 121, 71, 101, 23; the twelfth,
-#: rastrigin_2, needed 513). A few hundred is therefore where the cheap part of
-#: DIRECT's curve lives on that panel. This is NOT a claim that 300 is optimal for
-#: the corpus — it is the flag's opening value, to be moved only by a measurement.
-_DIRECT_HEURISTIC_MAX_EVALS = 300
-
-#: Eq. 4's relative floor for the root probe. Larger than ``solve_direct``'s 1e-4
-#: deliberately: this probe wants the *basin*, and the surrounding solver (subnlp,
-#: the node NLPs, B&B itself) does the refining — which is exactly the survey's
-#: advice whenever DIRECT is hybridized with a local method.
-_DIRECT_HEURISTIC_EPSILON = 1e-2
-
-
-def _direct_heuristic_enabled() -> bool:
-    """Whether the governed root DIRECT primal heuristic runs (**default OFF**).
-
-    ``DISCOPT_DIRECT_HEURISTIC=1`` (also ``on``/``true``/``yes``) turns it on. The
-    polarity is the inverse of :func:`discopt.heuristic_governor._governor_enabled`
-    — that flag guards a *graduated* default-ON policy, this one guards a new
-    default-OFF one — and the accepted spellings are the same set.
-
-    Default-OFF per CLAUDE.md §5: a new primal source ships behind a flag until a
-    corpus-wide differential panel measures it net-positive. Note which regime it
-    sits in — this is **heuristic-policy**, not bound-changing. A primal heuristic
-    can only ever cost B&B *nodes*: it proposes points, every proposal is re-verified
-    by the caller's own feasibility check and then screened by ``inject_incumbent``'s
-    strict-improvement test, and it never touches the dual bound, the relaxation, or
-    the certificate arithmetic. So the flag's risk is wasted wall, never a wrong
-    optimum, a loose bound, or a lost certificate.
-    """
-    return os.environ.get("DISCOPT_DIRECT_HEURISTIC", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
-
-
-def _direct_root_primal(
-    evaluator,
-    lb,
-    ub,
-    int_offsets,
-    int_sizes,
-    cl_list,
-    cu_list,
-    *,
-    max_evals: int = _DIRECT_HEURISTIC_MAX_EVALS,
-    deadline: Optional[float] = None,
-    feasibility_tolerance: float = 1e-6,
-):
-    """A bounded DIRECT sampling probe over the root box.
-
-    Returns ``(x, objective, evaluations)`` for the best *near-feasible* point the
-    probe sampled, or ``None`` when the probe does not apply or found nothing. The
-    caller must re-verify the point through its own acceptance path — this returns a
-    candidate, never an incumbent.
-
-    :class:`~discopt.solvers.direct._DirectSearch` is driven directly rather than
-    through :func:`~discopt.solvers.direct.solve_direct`: the local-refinement loop
-    and the ``SolveResult`` contract belong to the standalone backend, and here the
-    surrounding B&B already owns both the refining and the reporting. What is wanted
-    from DIRECT at the root is one thing — a point in a basin the local starts did
-    not reach.
-
-    Declines quietly (``None``, a debug log, no exception) in the two cases where
-    DIRECT is undefined:
-
-    * **no continuous degrees of freedom** — DIRECT trisects a box, and a pure
-      integer model has nothing to trisect;
-    * **a non-finite side** — an infinite side has no midpoint and no centre-vertex
-      distance.
-
-    ``solve_direct`` raises on both, correctly: there the user asked for DIRECT and a
-    silent substitution would be an approximation they did not sanction. Here nobody
-    asked; declining is the honest answer and raising would abort a solve over an
-    optional heuristic.
-    """
-    from discopt.solvers.direct import _DirectSearch
-
-    lb = np.asarray(lb, dtype=np.float64).reshape(-1)
-    ub = np.asarray(ub, dtype=np.float64).reshape(-1)
-
-    integer_mask = np.zeros(lb.size, dtype=bool)
-    for _off, _size in zip(int_offsets, int_sizes):
-        integer_mask[_off : _off + _size] = True
-
-    if not bool((~integer_mask).any()):
-        logger.debug("DIRECT root primal: no continuous degrees of freedom; skipping")
-        return None
-    if not (bool(np.all(np.isfinite(lb))) and bool(np.all(np.isfinite(ub)))):
-        logger.debug("DIRECT root primal: box is not finite on every variable; skipping")
-        return None
-    if bool(np.any(ub < lb)):
-        logger.debug("DIRECT root primal: empty box (ub < lb); skipping")
-        return None
-
-    _cl = np.asarray(cl_list, dtype=np.float64) if cl_list else None
-    _cu = np.asarray(cu_list, dtype=np.float64) if cu_list else None
-    # The caller sets and clears the two together, and the violation sum below
-    # indexes both against the same ``g``. Check that rather than assume it: a
-    # length mismatch does not raise in numpy, it broadcasts or truncates, so the
-    # failure mode is a silently *wrong violation* -- and therefore a wrong
-    # feasibility verdict on a candidate incumbent -- not a crash. Refuse loudly
-    # (CLAUDE.md §3); the caller reports it as a warning and continues without the
-    # probe, which costs nodes and never correctness.
-    if (_cl is None) != (_cu is None):
-        raise ValueError(
-            "DIRECT root primal: constraint bounds must be supplied as a pair "
-            f"(cl_list={'set' if _cl is not None else 'empty'}, "
-            f"cu_list={'set' if _cu is not None else 'empty'})"
-        )
-    if _cl is not None and _cu is not None and _cl.shape != _cu.shape:
-        raise ValueError(
-            f"DIRECT root primal: constraint bound length mismatch cl={_cl.shape} vs cu={_cu.shape}"
-        )
-    # Binding the pair makes the invariant explicit so the violation term below is
-    # not reaching through an Optional.
-    _bounds = (_cl, _cu) if (_cl is not None and _cu is not None) else None
-
-    def _oracle(x: np.ndarray) -> tuple[float, float]:
-        fval = float(evaluator.evaluate_objective(x))
-        if not np.isfinite(fval):
-            # A point where the objective is undefined must lose every comparison
-            # rather than poison the ordering with a NaN.
-            fval = np.inf
-        viol = 0.0
-        if _bounds is not None:
-            _lo, _hi = _bounds
-            g = np.asarray(evaluator.evaluate_constraints(x), dtype=np.float64).reshape(-1)
-            if g.shape != _lo.shape:
-                # Same reasoning as the pairing check above: numpy would
-                # broadcast or truncate rather than raise, and the result would
-                # be a violation computed against the wrong rows.
-                raise ValueError(
-                    f"DIRECT root primal: evaluator returned {g.shape[0]} constraint "
-                    f"values but {_lo.shape[0]} bounds were supplied"
-                )
-            g = np.where(np.isfinite(g), g, np.inf)
-            viol = float(np.sum(np.maximum(0.0, g - _hi)) + np.sum(np.maximum(0.0, _lo - g)))
-            if not np.isfinite(viol):
-                # inf - inf on a two-sided-infinite row: unusable, not feasible.
-                viol = np.inf
-        return fval, viol
-
-    search = _DirectSearch(
-        lb,
-        ub,
-        integer_mask=integer_mask,
-        epsilon=_DIRECT_HEURISTIC_EPSILON,
-        divide="one",
-        break_ties=True,
-    )
-    search.eps_cons = float(feasibility_tolerance)
-    search.run(_oracle, int(max_evals), deadline=deadline)
-
-    if search.best_feasible_point is None or search.best_feasible_value is None:
-        logger.debug(
-            "DIRECT root primal: no near-feasible point in %d evaluations", search.stats.evals
-        )
-        return None
-    return (
-        np.asarray(search.best_feasible_point, dtype=np.float64),
-        float(search.best_feasible_value),
-        int(search.stats.evals),
-    )
-
-
-#: Share of the remaining wall-clock budget the #823 constructor may spend, and the
-#: absolute cap on that share. A root constructor must be *cheap when it fails*: it
-#: runs before the tree does any work, so every second it spends is a second B&B does
-#: not get. Measured un-bounded (deadline = the whole remaining budget), the search
-#: cost batch_processing 71% of its nodes at 60 s — 307 nodes OFF, 89 ON — while
-#: finding nothing there, i.e. it charged the models it cannot help for the one it
-#: can. The cap is sized from the measured per-attempt cost of 0.018 s on cstr: 15 s
-#: buys ~800 fixed-integer sub-NLPs, comfortably more than the ``max_configs=256``
-#: plan budget can consume, so bounding the clock does not shorten the search that
-#: actually succeeds.
 _GDP_CONFIG_BUDGET_FRACTION = 0.15
 _GDP_CONFIG_BUDGET_CAP_S = 15.0
 
@@ -7114,30 +6933,6 @@ _ROOT_CUT_POOL_MAX_ENV = int(os.environ.get("DISCOPT_ROOT_CUT_MAX", "200"))
 
 # Marchand-Wolsey aggregation c-MIR separator (cert:P3). DEFAULT-OFF, bound-
 # changing per CLAUDE.md §5: it ships dark behind this flag until proven on
-# nightlies. Read per-solve (below) so it can be toggled after ``import discopt``.
-# The separator is validity-gated (nonnegative row combination + valid MIR ⇒
-# valid cut; Rust ``aggregation_validity_random_systems`` property test), so
-# enabling it can only add valid cuts, never a false certificate.
-_CMIR_AGGREGATION_ENV_DEFAULT = os.environ.get("DISCOPT_CMIR_AGGREGATION", "0").lower() not in (
-    "0",
-    "",
-    "false",
-    "no",
-    "off",
-)
-
-
-def _cmir_aggregation_enabled() -> bool:
-    """Whether the aggregation c-MIR separator is enabled for this solve.
-
-    Re-reads ``DISCOPT_CMIR_AGGREGATION`` each call (default-off) so tests and
-    callers can toggle it after import; falls back to the import-time default."""
-    val = os.environ.get("DISCOPT_CMIR_AGGREGATION")
-    if val is None:
-        return _CMIR_AGGREGATION_ENV_DEFAULT
-    return val.lower() not in ("0", "", "false", "no", "off")
-
-
 #: Re-entrancy guard for the #1236 cheap-first probe: the probe solves the
 #: UN-LIFTED model through ``solve_model`` itself, and must not probe again.
 #:
@@ -8891,9 +8686,20 @@ def solve_model(
         relaxation is the exact convex log-space NLP (``yᵢ = log xᵢ`` per node),
         yielding a rigorous, certifiable global optimum (issue #116). Raises
         ``ValueError`` if the model is not a GP-structured MINLP. This path is
-        *not* auto-routed by a plain ``solve()`` unless the ``DISCOPT_GP_MINLP``
-        environment flag is set (default off); ``solver="gp-minlp"`` is the
-        explicit opt-in. See :mod:`discopt.gp`.
+        *not* auto-routed by a plain ``solve()``: ``solver="gp-minlp"`` is the
+        only way in. (A default-OFF ``DISCOPT_GP_MINLP`` env flag used to
+        auto-route it; #1388 retired the flag, which never ran the graduation
+        panel it promised. No capability was lost -- the explicit selector was
+        always the real interface.) See :mod:`discopt.gp`.
+        Use ``"sgo"`` for the signomial global engine: a mixed-sign signomial
+        minimised over a strictly-positive box (optionally with signomial
+        inequality constraints and positive-bounded integer variables) is
+        non-convex with no exact convex reformulation, so the GP path abstains.
+        This engine certifies that class by spatial branch-and-bound on the
+        certified log-domain DC envelope -- every node bound is a rigorous dual
+        bound, and a closed tree certifies the global optimum. Raises
+        ``ValueError`` if the model is outside the class. Also never
+        auto-routed, for the same reason and by the same issue.
     solver="amp" options
         The AMP backend also accepts ``rel_gap``, ``abs_tol``, ``max_iter``,
         ``n_init_partitions``, ``partition_method``, ``milp_time_limit``,
@@ -9064,69 +8870,6 @@ def solve_model(
         raise ValueError(f"root_cut_rounds must be >= 0, got {_root_cut_rounds}")
     if _root_cut_max < 1:
         raise ValueError(f"root_cut_max must be >= 1, got {_root_cut_max}")
-
-    # --- Presolve substitution entry (#844, P2(a′), opt-in) ---------------
-    # Solve a REDUCED model in which every variable determined by a linear
-    # equality has been substituted out of every row and the objective, then
-    # lift the incumbent back through the postsolve chain and verify it against
-    # the PRISTINE model (#779). Bound-changing in the sense of CLAUDE.md §5
-    # (it rewrites the model the relaxation is built from), so it is gated
-    # behind ``DISCOPT_PRESOLVE_SUBSTITUTE``, default OFF. Declined whenever a
-    # caller-supplied object is expressed in the ORIGINAL variable space —
-    # a warm-start point, a callback, lazy constraints or a decomposition
-    # structure — because handing those to the reduced model would silently
-    # misinterpret them.
-    try:
-        from discopt.solvers._presolve_substitute import (
-            build_reduced as _sub_build_reduced,
-        )
-        from discopt.solvers._presolve_substitute import (
-            lift_result as _sub_lift_result,
-        )
-        from discopt.solvers._presolve_substitute import (
-            reduced_solve_scope as _sub_scope,
-        )
-
-        _sub_blocked = (
-            initial_point is not None
-            or lazy_constraints is not None
-            or incumbent_callback is not None
-            or node_callback is not None
-            or decomposition_structure is not None
-        )
-        _sub = None if _sub_blocked else _sub_build_reduced(model)
-    except Exception as _sub_exc:  # pragma: no cover - capability probe
-        logger.debug("substitution presolve entry unavailable: %s", _sub_exc)
-        _sub = None
-    if _sub is not None:
-        import inspect as _inspect
-
-        _reduced_model, _sub_chain, _sub_pristine, _sub_prep_s = _sub
-        _frame = _inspect.currentframe()
-        if _frame is None:  # pragma: no cover - no Python frame introspection
-            raise RuntimeError(
-                "DISCOPT_PRESOLVE_SUBSTITUTE needs frame introspection to forward "
-                "solve arguments to the reduced solve; this interpreter does not "
-                "provide it. Unset the flag to use the default path."
-            )
-        _names, _, _kwname, _lv = _inspect.getargvalues(_frame)
-        _fwd = {k: _lv[k] for k in _names if k != "model"}
-        if _kwname:
-            _fwd.update(_lv[_kwname])
-        # Charge the reduction's own wall time against the caller's budget so
-        # ``solve(time_limit=N)`` still tracks N end to end.
-        _fwd["time_limit"] = max(1.0, float(time_limit) - _sub_prep_s)
-        with _sub_scope():
-            _sub_result = solve_model(_reduced_model, **_fwd)
-        _lifted: Optional[SolveResult] = _sub_lift_result(
-            model, _reduced_model, _sub_chain, _sub_pristine, _sub_result
-        )
-        if _lifted is not None:
-            return _lifted
-        logger.warning(
-            "substitution presolve: result could not be lifted and verified; "
-            "re-solving the original model"
-        )
 
     # Anchor the whole-solve clock HERE, before any reformulation / presolve /
     # relaxation-build work — not at the B&B loop entry below. Preprocessing
@@ -9415,7 +9158,8 @@ def solve_model(
     # with the automatic GP fast path below), ``"amp"``, ``"gurobi"``,
     # ``"mip-nlp"``,
     # ``"gp"`` (force the GP log-space path), ``"gp-minlp"`` (force the
-    # GP-structured MINLP y-space branch-and-bound), ``"bb"`` (force classic
+    # GP-structured MINLP y-space branch-and-bound), ``"sgo"`` (force the
+    # signomial global engine), ``"bb"`` (force classic
     # branch-and-bound, opting out of the automatic GP fast path), and
     # ``"direct"`` (derivative-free sampling search — returns NO certificate).
     # Reject anything else rather than silently falling through to B&B.
@@ -9426,13 +9170,14 @@ def solve_model(
         "mip-nlp",
         "gp",
         "gp-minlp",
+        "sgo",
         "bb",
         "direct",
         "surrogate",
     ):
         raise ValueError(
             f"Unknown solver={_solver!r}. Choose one of None, 'amp', 'gurobi', "
-            "'mip-nlp', 'gp', 'gp-minlp', 'bb', 'direct', 'surrogate'."
+            "'mip-nlp', 'gp', 'gp-minlp', 'sgo', 'bb', 'direct', 'surrogate'."
         )
     gurobi_options = kwargs.pop("gurobi_options", None) if _solver == "gurobi" else None
 
@@ -10142,6 +9887,43 @@ def solve_model(
             raise RuntimeError("GP reformulation failed unexpectedly.")
         return result
 
+    # --- Signomial global (certified spatial B&B on the log-domain DC envelope) ---
+    # Reached only by an explicit ``solver="sgo"``. It was previously reachable
+    # ONLY through the default-OFF ``DISCOPT_SGO`` auto-route flag, which #1388
+    # retired: the flag promised a graduation panel that was never run, and the
+    # engine had no addressable entry point of its own. Giving it one is what
+    # kept the implementation rather than deleting it -- the same shape
+    # ``solver="gp-minlp"`` already had.
+    if _solver == "sgo":
+        from discopt._relax.convexity.signomial_global import (
+            classify_signomial_global,
+            solve_signomial_global,
+        )
+
+        if classify_signomial_global(model) is None:
+            raise ValueError(
+                "solver='sgo' was requested but the model is not a signomial "
+                "program the global engine recognises. It needs a single "
+                "MINIMISE objective; every variable continuous or integer with "
+                "a strictly positive, finite [lb, ub]; every constraint a "
+                "signomial inequality (<= / >=); and a genuinely mixed-sign "
+                "objective or constraint body -- a program with no negative "
+                "term anywhere is a posynomial GP that solver='gp' owns. See "
+                "discopt._relax.convexity.signomial_global."
+                "classify_signomial_global for the exact preconditions."
+            )
+
+        _warn_abs_gap_ignored("The signomial global engine", abs_gap_tolerance)
+        sgo_result = solve_signomial_global(
+            model,
+            time_limit=time_limit,
+            gap_tolerance=gap_tolerance,
+            max_nodes=max_nodes if max_nodes else 100000,
+        )
+        if sgo_result is None:  # pragma: no cover - guarded by classify above
+            raise RuntimeError("Signomial global solve failed unexpectedly.")
+        return sgo_result
+
     # --- GP-MINLP (y-space node relaxations + integer B&B) fast path ---
     if _solver == "gp-minlp":
         import warnings
@@ -10238,72 +10020,6 @@ def solve_model(
             )
             if gp_result is not None:
                 return gp_result
-
-    # --- Auto GP-MINLP fast path (opt-in, DISCOPT_GP_MINLP; default OFF) ---
-    # A MINLP whose continuous relaxation is a geometric program solves exactly
-    # via y-space node relaxations + integer branch-and-bound (issue #116) — each
-    # node bound is a rigorous convex-GP bound, so a closed tree certifies. This
-    # changes default-solve behaviour for a class of models, so per the repo's
-    # bound-changing-flag discipline it stays behind a default-OFF env flag until
-    # a corpus-wide differential panel graduates it; ``solver="gp-minlp"`` is the
-    # always-available explicit opt-in. ``classify_gp_minlp`` bails cheaply on
-    # non-GP / no-integer models, and the same callback/opt-out guards as the
-    # pure-GP path apply.
-    if (
-        _solver is None
-        and not _has_bb_callbacks
-        and not skip_convex_check
-        and os.environ.get("DISCOPT_GP_MINLP", "0").strip().lower() in ("1", "true", "yes", "on")
-    ):
-        from discopt.gp import classify_gp_minlp, solve_gp_minlp
-
-        if classify_gp_minlp(model) is not None:
-            gp_minlp_result = solve_gp_minlp(
-                model,
-                time_limit=time_limit,
-                gap_tolerance=gap_tolerance,
-                max_nodes=max_nodes,
-                nlp_solver=nlp_solver,
-                ipopt_options=ipopt_options,
-            )
-            if gp_minlp_result is not None:
-                return gp_minlp_result
-
-    # --- Signomial (mixed-sign) global fast path (opt-in, DISCOPT_SGO; OFF) ---
-    # A mixed-sign signomial minimised over a strictly-positive box (optionally
-    # with signomial inequality constraints and/or positive-bounded INTEGER
-    # variables — issue #741 Task 2) is non-convex with no exact convex
-    # reformulation, so the GP path abstains (issue #114). This scheme certifies
-    # that class via spatial branch-and-bound on the certified log-domain DC
-    # envelope (integers driven by integer branching wrapping the same node
-    # relaxation): every node bound is a rigorous dual bound and a closed tree
-    # certifies the global optimum. It changes default-solve behaviour for a
-    # class of models, so per the bound-changing flag discipline it stays behind
-    # a default-OFF env flag until a differential panel graduates it.
-    # ``classify_signomial_global`` bails cheaply on anything outside the class
-    # (binary / 0-lb vars, non-signomial or equality constraints, single-sign /
-    # non-signomial objective), preserving the sound GP abstention.
-    if (
-        _solver is None
-        and not _has_bb_callbacks
-        and not skip_convex_check
-        and os.environ.get("DISCOPT_SGO", "0").strip().lower() in ("1", "true", "yes", "on")
-    ):
-        from discopt._relax.convexity.signomial_global import (
-            classify_signomial_global,
-            solve_signomial_global,
-        )
-
-        if classify_signomial_global(model) is not None:
-            _warn_abs_gap_ignored("The signomial global engine", abs_gap_tolerance)
-            sgo_result = solve_signomial_global(
-                model,
-                time_limit=time_limit,
-                gap_tolerance=gap_tolerance,
-                max_nodes=max_nodes if max_nodes else 100000,
-            )
-            if sgo_result is not None:
-                return sgo_result
 
     # --- Benders / Lagrangian decomposition: opt-in, structure-exploiting ---
     if decomposition is not None:
@@ -15914,112 +15630,6 @@ def solve_model(
                             logger.info("Continuous multistart found incumbent: obj=%.6g", _obj_cms)
                 except Exception as e:
                     logger.debug("Continuous multistart failed: %s", e)
-
-            # --- Root DIRECT probe (governed primal source, default OFF) ---
-            # A bounded derivative-free sampling search over the WHOLE root box,
-            # standing alongside the multistart / pump / RENS / RINS sources above.
-            # What it adds is coverage no local start has: every source above is
-            # seeded from the relaxation point or from perturbations of it, so on a
-            # model whose relaxation lands in the wrong basin they all inherit that
-            # basin. DIRECT samples the box by geometry instead, so it can propose a
-            # point from a basin no start reached (the entry experiment's
-            # goldstein_price 30 -> 3, ackley 15.06 -> 0, shubert -32.8 -> -123.6;
-            # ``docs/dev/direct-entry-2026-08-12.md``).
-            #
-            # Soundness (heuristic-policy regime, CLAUDE.md §5): this is a PRIMAL
-            # source and nothing else. It can only ever cost B&B *nodes* — never a
-            # bound, never a certificate. Concretely: the dual bound is not read and
-            # not written here; the probe touches no relaxation, no cut pool and no
-            # node bound; every point it proposes is re-evaluated and re-checked for
-            # constraint and integer feasibility below by this path's OWN standard
-            # (identical to the pump/ILS/diving checks) and then passed to
-            # ``_inject_incumbent``, which screens it against the user's callbacks
-            # and accepts it only if it strictly improves the incumbent. A worse or
-            # bogus proposal is therefore discarded, not believed.
-            #
-            # G2 governor: DIRECT is expensive in the governed sense (a whole
-            # sampling search fired at the root) and its entry experiment already
-            # shows the miss profile the class hit-rate exists to detect — 4/13 ties
-            # at an optimum the local path already had. ``allowed``/``record`` let it
-            # throttle itself off once it stops paying (see
-            # ``heuristic_governor.EXPENSIVE_SOURCES``). ``gap_open`` mirrors the
-            # root binary-seed enumeration: as a *finder* (no incumbent) it always
-            # gets through, since securing the first incumbent wins; as an *improver*
-            # it stops once the root optimum is proven.
-            #
-            # The flag is tested FIRST and nothing above it is evaluated, so with
-            # ``DISCOPT_DIRECT_HEURISTIC`` unset this whole block is one `os.environ`
-            # lookup and the default path is byte-identical to the pre-wiring one:
-            # no tree read, no relaxation touch, no governor entry.
-            if _direct_heuristic_enabled() and _heuristic_governor.allowed(
-                "direct",
-                gap_open=(tree.incumbent() is None or not _root_optimum_proven()),
-            ):
-                _direct_inc0 = tree.incumbent()
-                _direct_obj0 = (
-                    float(_direct_inc0[1])
-                    if _direct_inc0 is not None and np.isfinite(_direct_inc0[1])
-                    else np.inf
-                )
-                logger.info(
-                    "Root DIRECT probe: entering (budget=%d evaluations)",
-                    _DIRECT_HEURISTIC_MAX_EVALS,
-                )
-                try:
-                    _dr = _direct_root_primal(
-                        evaluator,
-                        lb,
-                        ub,
-                        int_offsets,
-                        int_sizes,
-                        cl_list,
-                        cu_list,
-                        deadline=_deadline,
-                    )
-                    if _dr is not None:
-                        _x_dr, _, _evals_dr = _dr
-                        _x_dr = np.asarray(_x_dr, dtype=np.float64).copy()
-                        # Re-verified HERE by this path's own standard, exactly as
-                        # the pump / ILS / diving results are, rather than trusted
-                        # because the probe reported it feasible.
-                        _obj_dr = float(evaluator.evaluate_objective(_x_dr))
-                        _dr_feas = not cl_list or _check_constraint_feasibility(
-                            evaluator, _x_dr, cl_list, cu_list
-                        )
-                        _dr_ok = bool(
-                            np.isfinite(_obj_dr)
-                            and _obj_dr < _SENTINEL_THRESHOLD
-                            and _dr_feas
-                            and _is_integer_feasible_solution(_x_dr, int_offsets, int_sizes)
-                        )
-                        _dr_accepted = bool(_inject_incumbent(_x_dr, _obj_dr)) if _dr_ok else False
-                        # Both markers are INFO on purpose: without them a
-                        # differential arm showing no change cannot tell "the probe
-                        # ran and its point was declined" from "the gate never
-                        # opened" (CLAUDE.md §6).
-                        logger.info(
-                            "Root DIRECT probe: %d evaluations, candidate obj=%.6g, "
-                            "verified=%s, accepted=%s",
-                            _evals_dr,
-                            _obj_dr,
-                            _dr_ok,
-                            _dr_accepted,
-                        )
-                except Exception as _e:
-                    # Reported, not swallowed: an explicitly-enabled heuristic that
-                    # cannot run must not read as "it ran and did not help"
-                    # (CLAUDE.md §7). The solve continues — a failed primal source
-                    # costs nodes, never correctness.
-                    logger.warning(
-                        "Root DIRECT probe raised (%s: %s); continuing without it",
-                        type(_e).__name__,
-                        _e,
-                    )
-                _direct_inc1 = tree.incumbent()
-                _direct_improved = bool(
-                    _direct_inc1 is not None and float(_direct_inc1[1]) < _direct_obj0 - 1e-9
-                )
-                _heuristic_governor.record("direct", _direct_improved)
 
         # --- SubNLP primal heuristic ---
         # Fix integers in the best relaxation solution, then solve the
@@ -24385,55 +23995,6 @@ def _separate_mir_cuts(lp_data, x_vertex, n_orig, int_idx, a_ub_orig, b_ub_orig,
     return embedded[:max_cuts], rhs[:max_cuts]
 
 
-def _separate_aggregation_mir_cuts(
-    lp_data, x_vertex, n_orig, int_idx, a_ub_orig, b_ub_orig, max_cuts: int = 8
-):
-    """Separate Marchand-Wolsey aggregation c-MIR cuts from the original ``<=``
-    rows at the crossover vertex, via the Rust ``aggregation_mir_cuts_py`` binding.
-
-    Pairs ``<=`` rows with nonnegative weights to cancel a continuous variable,
-    forms the valid implied aggregate row, and applies the same complemented MIR
-    (bound substitution + delta-scan) as :func:`_separate_mir_cuts` to it. A
-    nonnegative combination of ``<=`` rows is a valid ``<=`` inequality, and MIR
-    on it is valid for the integer hull, so every emitted cut is valid for the
-    original feasible set — no integer-feasible point is ever removed (proven by
-    the Rust ``aggregation_validity_random_systems`` property test).
-
-    **Default-off**: this is the ``DISCOPT_CMIR_AGGREGATION`` feature-flagged
-    path; the caller gates the call, this helper only does the separation. Same
-    contract as :func:`_separate_mir_cuts`: returns ``(coeffs, rhs)`` embedded
-    into the current standard-form columns, or ``None`` when the binding is
-    unavailable, lower bounds are non-finite, or no cut is produced."""
-    if a_ub_orig is None or np.asarray(a_ub_orig).shape[0] < 2:
-        return None  # aggregation needs at least two rows to combine
-    try:
-        from discopt._rust import aggregation_mir_cuts_py
-    except ImportError:
-        return None
-    lo = np.asarray(lp_data.x_l, dtype=np.float64)[:n_orig]
-    if not np.all(np.isfinite(lo)):
-        return None  # the MIR lower-bound shift requires finite lower bounds
-    hi = np.asarray(lp_data.x_u, dtype=np.float64)[:n_orig].copy()
-    hi[~np.isfinite(hi)] = np.inf
-    integ = np.zeros(n_orig, dtype=bool)
-    integ[[j for j in int_idx if j < n_orig]] = True
-    res = aggregation_mir_cuts_py(
-        np.ascontiguousarray(a_ub_orig, dtype=np.float64),
-        np.ascontiguousarray(b_ub_orig, dtype=np.float64),
-        np.ascontiguousarray(lo),
-        np.ascontiguousarray(hi),
-        integ,
-        np.ascontiguousarray(np.asarray(x_vertex, dtype=np.float64)[:n_orig]),
-    )
-    if res is None:
-        return None
-    coeffs, rhs = np.asarray(res[0], dtype=np.float64), np.asarray(res[1], dtype=np.float64)
-    n_cur = int(_dense_A(lp_data.A_eq).shape[1])
-    embedded = np.zeros((coeffs.shape[0], n_cur), dtype=np.float64)
-    embedded[:, :n_orig] = coeffs[:, :n_orig]
-    return embedded[:max_cuts], rhs[:max_cuts]
-
-
 def _extract_clique_edges(model: Model) -> list[tuple[int, int]]:
     """Conflict-graph 2-clique edges from the Rust presolve clique pass.
 
@@ -24537,7 +24098,7 @@ def _root_cover_cut_loop(
     has_clique = bool(clique_edges)
     has_gomory = bool(len(int_idx))
     if not has_cover and not has_clique and not has_gomory:
-        return lp_data, 0, {"cover_clique": 0, "gomory": 0, "mir": 0, "aggregation": 0}
+        return lp_data, 0, {"cover_clique": 0, "gomory": 0, "mir": 0}
 
     total = 0
     # Per-source cut counts (cert:P3.1b instrumentation). Surfaced on the MILP
@@ -24545,7 +24106,7 @@ def _root_cover_cut_loop(
     # aggregation c-MIR separator actually *fired* on the default path (a cut
     # count of 0 with the flag on means the branch never separated — a wiring or
     # scoping finding, not a bound result). Pure instrumentation; no math change.
-    by_source = {"cover_clique": 0, "gomory": 0, "mir": 0, "aggregation": 0}
+    by_source = {"cover_clique": 0, "gomory": 0, "mir": 0}
     for _round in range(max_rounds):
         if time.perf_counter() - t_start >= time_limit:
             break
@@ -24631,24 +24192,6 @@ def _root_cover_cut_loop(
                 lp_data = _augment_lpdata_with_mir_cuts(lp_data, mc, mr)
                 round_added += int(mc.shape[0])
                 by_source["mir"] += int(mc.shape[0])
-        # Aggregation c-MIR (cert:P3): DEFAULT-OFF, gated by
-        # DISCOPT_CMIR_AGGREGATION. Combines pairs of <= rows to cancel a
-        # continuous variable, then applies the same complemented MIR as above —
-        # valid by construction (nonnegative row combo + valid MIR). Same round-0
-        # / POUNCE-mode gate as single-row MIR; reuses the MIR augmentation.
-        if has_gomory and _round == 0 and _cmir_aggregation_enabled():
-            try:
-                agg = _separate_aggregation_mir_cuts(
-                    lp_data, x_vertex, n_orig, int_idx, A_ub_orig, b_ub_orig
-                )
-            except Exception as _agg_exc:
-                logger.debug("aggregation c-MIR separation skipped: %s", _agg_exc)
-                agg = None
-            if agg is not None:
-                ac, ar = agg
-                lp_data = _augment_lpdata_with_mir_cuts(lp_data, ac, ar)
-                round_added += int(ac.shape[0])
-                by_source["aggregation"] += int(ac.shape[0])
         if cuts:  # cover/clique reference original columns (< n_orig), still valid
             lp_data = _augment_lpdata_with_cover_cuts(lp_data, n_orig, cuts)
             round_added += len(cuts)
@@ -25957,7 +25500,7 @@ def _solve_milp_bb(
         np.asarray(lp_data.x_u, dtype=np.float64),
         row_sense=_declared_row_senses(lp_data, _A_eq_dense),
     )
-    _cut_by_source = {"cover_clique": 0, "gomory": 0, "mir": 0, "aggregation": 0}
+    _cut_by_source = {"cover_clique": 0, "gomory": 0, "mir": 0}
     try:
         _is_bin = _binary_mask(model, n_orig)
         # Conflict-graph clique edges (only worth extracting if binaries exist).
@@ -25986,13 +25529,11 @@ def _solve_milp_bb(
         )
         if _n_cuts:
             logger.info(
-                "root cuts added %d valid inequalities "
-                "(cover/clique=%d gomory=%d mir=%d aggregation=%d)",
+                "root cuts added %d valid inequalities (cover/clique=%d gomory=%d mir=%d)",
                 _n_cuts,
                 _cut_by_source.get("cover_clique", 0),
                 _cut_by_source.get("gomory", 0),
                 _cut_by_source.get("mir", 0),
-                _cut_by_source.get("aggregation", 0),
             )
     except Exception as _cc_exc:
         logger.debug("root cuts skipped: %s", _cc_exc)
