@@ -12,6 +12,13 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **Three optional-dependency extras: `torch`, `plot`, `gurobi`** (v0.9.0 release
+  audit). Each names a package the code already imported but nothing installed.
+  `torch` is deliberately **not** folded into `nn` (which is the small ONNX
+  toolchain) nor into `all` — nobody reading ONNX should pay for a
+  multi-hundred-MB wheel; `gurobi` stays out of `all` because it needs a license
+  as well as the wheel; `plot` (matplotlib, for `ParetoFront.plot()`) is in `all`.
+
 - **`dm.register_function` — a named composite the relaxer treats as one atom**
   (#1248 component A, for the plugin needs in #1249). A plugin knows structure
   that generic factorable relaxation throws away: written in primitives, the
@@ -343,8 +350,426 @@ The release procedure that produces these entries is documented in
   what AMPL itself writes (`ex1221.nl` declares 5 variables and an `x2` block)
   — so no starting value is invented for the rest. Without the argument no
   section is written, exactly as before.
+- **Source complementarity residuals and the local-vs-certified result contract**
+  (#1148, RFC #1123 slice 2). POUNCE's internal barrier/KKT complementarity is a
+  property of the *generated NLP*; the MPCC condition `0 <= f ⊥ g >= 0` is a
+  property of the *user's model*. They are different numbers and were previously
+  neither separated nor reported. Measured on `max x+y s.t. x==y, 0 <= x ⊥ y >= 0`
+  after a Scholtes homotopy at `t=1e-8`: the generated rows are violated by
+  `1.0e-8` while the source complementarity `min(x, y)` is `1.4e-4` — four orders
+  of magnitude apart at the same point, with the returned objective (`-2.8e-4`)
+  *below* the true optimum (`0`). `discopt.mpec_report` now measures the declared
+  operands (which survive every rebuilding pass, #1147) and reports, each carrying
+  the formula that produced it: the complementarity residual (`min(f, g)`, the MCP
+  normal map for a box form, `product` or Fischer-Burmeister on request), the
+  declared-bound violation per operand, source primal feasibility against the
+  *original* rows and bounds, `max_i y_i(1-y_i)` over binary selectors after
+  checking `0 <= y_i <= 1`, and the lowered rows' own residual beside them so the
+  two can be compared. Tolerances are scaled by the relation's declared scale, and
+  the worst-case residual a Scholtes regularization at `t` *admits* (POUNCE Gate 0,
+  jkitchin/pounce#794) is reported rather than left to imply exact orthogonality —
+  as `Residual.admitted_scale`, per residual definition (`sqrt(t)` for `min`, `t`
+  for the product form, `(2-sqrt(2))·sqrt(t)` for Fischer-Burmeister), and
+  documented as an upper bound on the admitted residual rather than a limit on
+  attainable accuracy: `f·g <= t` also admits `(f, g) = (0, 1)`, whose residual is
+  exactly `0` at every positive `t`.
+  `SourceResidualReport.as_dict()` is the shared benchmark schema of
+  jkitchin/pounce#780.
+- **A distinct terminal status for local results** (`discopt.status`):
+  `"local_optimal"`, `"local_limit"` and `"local_infeasible"`. A status, not a flag beside
+  `"optimal"` — the benchmark harness scores `status == OPTIMAL` with no gap as a
+  *proved optimum*, so a local stationary point reported as optimal is read by the
+  release gate as a certificate; and every consumer that pattern-matches on the
+  status would inherit the bug from a flag. A stalled MPEC continuation reports
+  `"local_infeasible"`, never `"infeasible"`, which is a certificate in the other
+  direction. `"local_optimal"` means a local *stationary* point and is reserved for
+  a point a subsolver converged to; a usable-but-stalled iterate is still reported,
+  with its residuals and as a warm start, under the weaker `"local_limit"`, which
+  is in `LOCAL_STATUSES` and so inherits the same no-dual-bound guard.
+  `SolveResult.__post_init__` **raises** if a local status carries a
+  `bound` or `root_bound` and forces `gap_certified=False`: a local result may
+  become an incumbent only after independent verification
+  (`mpec_report.accept_local_incumbent`, which gates on the source residuals and
+  not on the lowered relaxation), and may never become a dual bound. Stationarity
+  classifications are never claimed, because discopt checks no C-/M-/S- conditions.
+  The benchmark harness gains `SolveStatus.LOCAL` and a shared
+  `DISCOPT_STATUS_MAP`, so `--subprocess` cannot score a solve differently from
+  the in-process path; both `incorrect_count` and `proved_optimal_count` skip a
+  local row.
+- **`mpec.solve_mpec` returns one type for every method.** Previously switching
+  one keyword changed the returned type, the type of `status` (enum vs. str) and
+  whether a certification field existed at all, so no caller could write one
+  branch that read a result. All three arms now return a
+  `modeling.core.SolveResult`; the Scholtes arm carries its continuation trace
+  (per-stage `t`, subsolver status, accept/reject reason and achieved source
+  residual) rather than discarding it, and reports the achieved residual
+  independently of the final homotopy parameter. A model left carrying a Scholtes
+  *relaxation* is now refused by the solve guard rather than certified: the guard
+  distinguishes "has a lowering" from "has an **exact** lowering"
+  (`mpec.RELAXING_METHODS`).
+- **Complementarity is a first-class relation with durable source provenance**
+  (#1147, RFC #1123 slice 1). `mpec.Complementarity` was three fields (`f`, `g`,
+  `name`) recorded on `Model._complementarities` and then discarded by **every**
+  model-rebuilding pass — measured on `main`, `before=1 / after=0` for GDP
+  lowering under `big-m`/`hull`/`mbigm`, integer-product expansion and factorable
+  reformulation alike. All that survived a lowering was string-level: the pair
+  name baked into generated identifiers (`_gdp_aux_disj_pair0_0_0`). A source
+  complementarity residual computed against such a model would have measured the
+  *relaxed row* rather than the source product, printed a small number, and been
+  believed. The relation now carries its source operands, the bounds it declares
+  on them, a residual scale, a role (`ComplementarityRole`: NCP pair / box MCP /
+  generated-from-KKT / generated-from-disjunct), the generating parent's
+  identity, shape/index for vectorized pairs, and per-model lowering state; each
+  of the four rebuilding passes forwards the relation set explicitly and raises
+  `ComplementarityProvenanceError` — naming the relation and the pass — rather
+  than dropping one it cannot resolve. Resolution is by **object identity**, and
+  backend-facing flat indices are derived at the solver boundary
+  (`flat_source_indices`) instead of persisted through it, because presolve/FBBT
+  renumber columns exactly when a stored index would be needed. They are prefix
+  sums over the **target model's** variable list, not `Variable._index` (the
+  declaring model's position): a relation's operands are shared objects, so a
+  model holding them in a different order needs its own layout, and a provenance
+  query must never write shared state to get the right answer.
+- **The box-bounded MCP form**, `Model.mcp(F, z, lb=..., ub=...)` /
+  `mpec.box_mcp`: a residual paired with a variable on `[l, u]`, with the
+  symmetric NCP pair as the `l=0, u=+inf` special case (recorded and lowered as
+  that pair, so the two forms cannot diverge on the case they share). #1147
+  **represents** the general box form and deliberately does not lower it; a model
+  carrying an unlowered relation is refused by every `mpec.reformulate_*` entry
+  point and by the solver boundary — `solve_model`, so the callers that never go
+  through `Model.solve` (the differentiable-solve paths, the primal heuristics)
+  are refused too — rather than being solved as though the condition were absent
+  and certified. Which form a relation is, is read off its **declared bounds**
+  (`Complementarity.is_symmetric_nonnegative`), never off its `role`: the role is
+  provenance, and `Complementarity` is public, so a directly-constructed relation
+  with box bounds and the default `role=NCP_PAIR` must not be able to talk its way
+  into a two-branch lowering.
+
+- **Lowering state is model state**, `Model._lowered_complementarities` — an
+  identity map from relation to the method that lowered it into *that* model, read
+  via `pair.is_lowered_into(model)` / `pair.lowering_in(model)`. A relation is
+  shared, so neither the mark nor the method can live on it: weak references on the
+  relation made any model carrying one unpicklable and made `copy.deepcopy`
+  silently drop the mark (the clone then refused to solve), and a plain `lowering`
+  field held only whichever lowering ran last, so a relation lowered by GDP into
+  one model and SOS1 into another stopped describing the first model's rows.
+  `carry_complementarities` propagates the source model's own method, and only when
+  the source actually carries the rows — keying it on "lowered somewhere" let an
+  unlowered source hand the destination a mark for rows neither model had,
+  bypassing the solve guard.
+
+### Changed
+
+- **`DISCOPT_CONVEX_KERNEL` graduated to default-ON** (#1346). The convex-kernel
+  route now runs by default on the models it claims; `DISCOPT_CONVEX_KERNEL=0`
+  remains as the opt-out and the legacy path is intact (CLAUDE.md §5). Graduated
+  under the Regime-2 gate by
+  `discopt_benchmarks/scripts/issue1346_convex_kernel_graduation_panel.py` over the
+  66-instance in-repo corpus, arms interleaved within each instance with the arm
+  order alternated by index, `deterministic=True`. Gate 1 *cert-clean* PASS (0
+  unsound bounds, 0 certification regressions, 0 objective drift, 0 errors); gate 2
+  *net-positive* PASS on the routed class::
+
+      clay0303hfsg   off  feasible/UNCERTIFIED 29911.20 (12.2% above opt)  90.2 s
+                     on   optimal/CERTIFIED    26669.1096   149 nodes      21.2 s
+      syn05hfsg      off  optimal  277 nodes  23.8 s  ->  on  optimal  2 nodes  0.01 s
+
+  Node counts carry that result, not wall: 277 -> 2 is structural, and both outcomes
+  reproduced across four independent runs. **Concentration caveat, stated because it
+  bounds the claim:** only 3 of the 66 in-repo instances are eligible for this route
+  at all. Full numbers in `docs/dev/convex-kernel-plan.md`. The long default-OFF
+  period was never a failed panel — #798 proved both §5 bars and #800 deferred
+  graduation to #807's *SCIP wall parity*, a bar above what §5 asks; #807 remains
+  open as a performance issue and is no longer a graduation gate.
+- **Dependency floors raised: `feral` 0.16.0 -> 0.18.0 (Rust), `pounce-solver`
+  >=0.10 -> >=0.12 (Python).** A requirement bump only -- no discopt call site,
+  default or flag changed with it, and neither dependency's API surface that
+  discopt consumes moved. `feral` is source-compatible (`cargo check -p
+  discopt-core` clean, `cargo test -p discopt-core` green); the lockfile also
+  carries `feral-{kahip,metis,scotch}` 0.2.1 -> 0.3.0, which sit on the
+  multifrontal side discopt does not call. `pounce-solver` 0.12.0 is the current
+  PyPI release.
+
+  NOT MEASURED: neither CLAUDE.md §5 regime has been run against these floors --
+  no certifying panel, no captured-LP fill/nnz comparison -- so nothing here
+  claims bound-neutrality or net-positivity for the LU kernel under feral 0.18.0.
+  The acceptance split that measurement owes is stated in the pin comment in
+  `crates/discopt-core/Cargo.toml`.
+
+- **`discopt.nn` is renamed `discopt.ml`** (#1219). The package was named for one
+  of the four things it does: decision trees and tree ensembles (`tree.py`,
+  `formulations/tree_ensemble.py`, the sklearn readers) are first-class in it,
+  and the `Surrogate` protocol admits GP means, kernel expansions, soft trees and
+  symbolic formulas — none of them networks. Its own dispatcher is
+  `add_predictor()`, not `add_network()`. Nothing about the formulations changed;
+  this is a rename plus a deprecation shim.
+
+  `import discopt.nn` still works, emits a `DeprecationWarning`, and forwards by
+  **object identity** rather than by copy: every submodule path
+  (`discopt.nn.network`, `discopt.nn.formulations.base`,
+  `discopt.nn.readers.sklearn_reader`, …) resolves to the same module object as
+  its `discopt.ml` counterpart, so `isinstance(f, discopt.ml.NNFormulation)`
+  holds for objects built through the old spelling. `test_1219_nn_shim.py` pins
+  that (it fails on 6 of 7 tests with the shim removed). The shim is scheduled
+  for removal in 0.10. The `[nn]` and `[ml]` install extras are dependency sets
+  (ONNX and scikit-learn respectively), not module paths, and are unchanged.
+
+- **The benchmark neutrality harness refuses wall-limited rows** (#1187, part 2).
+  `deterministic=True` cannot equalise work on a run that terminates on the wall
+  clock, because the terminating condition *is* the wall clock — `time_limit` is
+  role 1 and stays live by design. Two arms that both ended `status=time_limit`
+  therefore did different amounts of work: measured on `beuster` at 120 s, two
+  builds differing only in Python marshaling cost issued 3858 OBBT probe LPs
+  against 942 — 4.1× the work — for the same 3 nodes and the same bound. Reading
+  neutrality off such a row is reading noise; #1180's sweep did, on 13 of 66 rows,
+  and manufactured a reproducible "0.516× regression" that re-measured as a
+  5×-more-nodes, 30 %-tighter-bound improvement. `cert_neutrality.wall_limited_rows`
+  names those rows, `check_neutrality(..., exclude=…)` skips exactly the named set,
+  and both `check_cert_neutrality.py` and `graduation_gate.py` print them as
+  UNMEASURED — an excluded row yields no verdict rather than a silent pass. A row
+  wall-limited in only one arm (a *lost* certification) stays a violation, and
+  `node_limit` rows stay comparable: that budget is a deterministic count.
+
+  Status alone does not identify these rows, which the #1187 panel demonstrated by
+  hitting one: a run cut off by `time_limit` while holding an incumbent reports
+  **feasible**, and that is the common case. `tls2` at a 30 s budget ends
+  `feasible` at the wall every time and returned 245 / 217 / 179 nodes with three
+  different dual bounds across three *baseline* runs — it does not reproduce
+  against itself, in either arm of an interleaved A/B. So `wall_limited_rows` also
+  takes the per-instance `budgets` and treats an unsettled row that spent >=98 % of
+  its budget as wall-limited; both gate scripts now pass them.
+
+- **`interval_eval` did not reduce a `SumExpression`** — it returned the
+  operand's *elementwise* enclosure while `dag_compiler` lowers the same node to
+  `jnp.sum(operand, axis=...)`. `sum(x)` over `x in [0,10]^2` came back as
+  `[0, 10]` instead of `[0, 20]`: an enclosure that **does not contain the
+  value**, i.e. unsound in the narrow direction, and the wrong shape. This is not
+  confined to a diagnostic — `evaluate_interval` is on the solve path (nonlinear
+  bound tightening, the uniform and OA relaxations, the g-convex injection),
+  where a too-narrow enclosure is an invalid FBBT tightening of exactly the class
+  that cuts the optimum out of the box. Found by the #1148 source-residual probe,
+  which read a violation of `0.0` on a row `sum(x) <= 10` at `x = (6, 6)` where
+  the truth is `2.0`. The reduction now sums the endpoints (summation is monotone,
+  so no interval subtlety) and rounds outward, as the sibling `_eval_matmul`
+  reduction already did. The outward step is the **accumulation** bound, not a
+  single ULP: measured against an exact `fractions.Fraction` reference over 3000
+  random sums (*n* ∈ [4, 600], heavy cancellation at ~1e8), a one-ULP widening
+  still returned an enclosure that did **not** contain the true sum on 2289 of
+  them, worst shortfall 1.5e-6; with the accumulation bound, 0 of 3000.
+
+  The bound is chosen from the reduction order numpy **actually** used:
+  `(log2(n) + 2)·eps·Σ|x_i|` when the reduction runs along the unit-stride axis
+  (where numpy sums pairwise) and `(n - 1)·eps·Σ|x_i|` when it runs across a
+  strided axis, where numpy accumulates sequentially — its `sum` documentation
+  makes pairwise precision conditional on the memory axis, and applying the
+  pairwise factor to a strided reduction understates the error by ~*n*/log2(*n*).
+  Counterexample: a C-contiguous `(10002, 2)` array of ones with `1e16` first and
+  `-1e16` last has exact column sums of `10000`, and the pairwise-factored
+  enclosure of `dm.sum(v, axis=0)` was `[-67.89, 67.89]` — missing the value by
+  three orders of magnitude, on the same certified-bound path. The magnitude sum
+  `Σ|x_i|` is itself rounded up before scaling, since it is a float64 sum too.
+  The strided factor is `max(n - 1, log2(n) + 2)` rather than a bare `n - 1`: the
+  two cross at `n = 5`, and taking the smaller would make a *soundness* fix narrow
+  strided enclosures for a handful of terms — bound-changing, for no benefit. As
+  written, the pairwise path is untouched and the strided path only ever widens.
+
+  **Who was exposed:** models built through the Python modeling API that use
+  `dm.sum(...)`. The `.nl` reader emits no `SumExpression` at all (measured: 0 of
+  the 66 files in `python/tests/data/minlplib_nl/`), so no `.nl` instance, panel
+  or gate could exercise this — which is why it survived. Regression coverage is
+  `python/tests/test_interval_sum_reduction.py`, including a differential check
+  that a dual bound never exceeds the true optimum on Python-API `dm.sum` models.
+  The sibling reduction in `_eval_matmul` had the same one-ULP gap over its
+  `k`-term dot products (measured: 190 of 400 random products missed the truth).
+  It was tracked separately as #1161 because widening matmul enclosures is a
+  bound-affecting change needing its own differential evidence; that work landed
+  in #1171 and is merged into this head, so **both** reductions now go through
+  the shared `_widen_sum` and no one-ULP reduction remains in this module.
+
+- **`accept_local_incumbent` trusted a cached source-residual report** and so
+  vouched for a point nobody had measured. A `SourceResidualReport` records no
+  point and no model, but the gate accepted `result.mpec_report` when one was
+  carried and then verified whatever `x_flat` it was handed. On
+  `min -x-y  s.t.  x == y, 0 <= x ⊥ y >= 0` with Scholtes rows at `t = 1e-8`, a
+  report taken at the exactly complementary `(0, 0)` admitted `(1e-4, 1e-4)`,
+  whose source residual is `1e-4` and whose objective `-2e-4` is **below** the
+  true optimum of `0` — an invalid incumbent cutoff that, fed to a global solve,
+  fathoms the optimum away, and the exact hazard the function exists to block.
+  The report is now recomputed at the acceptance boundary against the actual
+  candidate and the model's current relations; the `report=` keyword is gone
+  rather than left as a way to supply one. The same recomputation closes the
+  model-side face of the hole (a report taken before a relation was declared no
+  longer vouches for a model that now carries it). Regressions:
+  `test_review3_1_*` in `python/tests/test_mpec_source_residuals.py`, both with
+  the accepted-at-`(0, 0)` control retained.
+- **An iteration-limited MPEC iterate was promoted to `"local_optimal"`**, which
+  the new status vocabulary defines as a local *stationary* point. With the
+  subsolver allowed zero iterations it performs no optimization and returns its
+  own starting point under `ITERATION_LIMIT`; the wrapper published that as a
+  stationary point — on the distance model from `x0 = (5, 5)`, a point at which
+  the generated product row is violated by `24`. The merge base preserved
+  `ITERATION_LIMIT`, so this was a regression introduced by the local-status work,
+  in the one direction the vocabulary exists to prevent. The iterate is still
+  reported (it is a warm start and it carries its residuals — that is the
+  stalled-stage handling added earlier in this entry), but under `"local_limit"`,
+  and `ContinuationTrace` now distinguishes *accepting* an iterate from
+  *converging*: `ContinuationStage.certified` records whether the subsolver
+  converged at that stage, `reported_point_certified` whether the stage behind the
+  reported point did, and `converged` reads the latter rather than
+  `any_stage_accepted`. Regression:
+  `test_review3_3_a_zero_iteration_subsolver_does_not_report_local_optimal`, with
+  a converged-run control that must still say `"local_optimal"`.
+- **`binary_multilinear_reform`'s abstain guard no longer keys on
+  `_complementarities`** (#1147). The guard existed so the pass would not drop
+  structure it does not copy — but every earlier rebuilding pass emptied that
+  list, so its premise evaporated at a pass boundary: after GDP lowering the
+  condition is materialized into ordinary rows and the list was empty. The
+  relation set is now forwarded explicitly, so there is nothing left to protect;
+  the SOS/indicator and builder-block clauses of the guard are unchanged.
+- **Unnamed complementarity relations get a name unique on the model** (#1147).
+  The fallback counted within the list handed to the lowering, and
+  `Model.complementarity` hands over exactly one relation — so every unnamed
+  declaration became `compl0` and emitted `compl0_f_nonneg` twice, silently. The
+  name is now assigned at the single point every lowering funnels through, so the
+  `.nl` importer (`nl_compl{k}`), the fluent API and a hand-built pair all get a
+  unique one; it also makes a relation identifiable in a provenance error without
+  parsing generated identifiers.
+- **`bilevel`'s KKT complementarity pairs are recorded on the model**, so the
+  `FROM_KKT` role and the lower-level row named in `parent` are live provenance
+  the rebuilding passes carry, rather than labels nothing ever read (#1147).
+- No behavior change to solving. Per CLAUDE.md's bound-neutral regime, over the
+  66-instance in-repo `.nl` corpus at a 10 s limit with both arms measured on the
+  same idle host: status and objective identical on 66/66 instances, and every
+  recorded field (status, objective, bound, `node_count`, `gap_certified`)
+  identical on all 45 instances that converged in both arms. The four remaining
+  differences are all unconverged (`time_limit`/`feasible`) rows whose node count
+  varies with how much wall clock the fixed budget buys — not a bound change.
+
+- **`solver="surrogate"`: the initial design is sized from the dimension alone,
+  `2(n+1)`, not from the evaluation budget** (closes #1036). The old rule,
+  `max(n+2, min(10n, max_evals // 2))`, made the design — and therefore the whole
+  trajectory — a step function of `max_evals`, so two runs at different budgets
+  were two different searches rather than one search and its continuation.
+  Measured on the `on_evaluation` traces, 17 of 30 budget pairs over
+  `{40, 46, 60, 80, 100}` diverged at evaluation 1; after the change, 0 of 30.
+  That invalidated every "the incumbent first reached the tolerance at evaluation
+  `k`, so a budget of `B > k` has headroom" statement made about this backend,
+  including the one the convergence panel's budgets were set from. The smaller
+  design is also measurably better: over 8 functions × 12 seeds at
+  `max_evals=100`, mean evaluations to 1e-2 relative error (a non-reaching seed
+  counted at the full budget) falls from 67.8 to 60.0 with RBF and from 65.6 to
+  61.1 with kriging, improving 6 of 8 and 4 of 6 functions respectively. The two
+  that regress are the two the module docstring already names as this backend's
+  hard shapes — a sharply scaled objective (`goldstein_price`) and a densely
+  multimodal one (`rastrigin_2`); `n_initial` remains the override and the
+  docstring now says which shapes to raise it for. `n+2` beats `2(n+1)` on the
+  RBF panel mean by 0.3% but takes `goldstein_price` from 4/12 seeds reaching the
+  tolerance to 0/12, so it was not taken. Full panel:
+  `docs/dev/surrogate-initial-design-2026-08-29.md`.
+  `test_reaches_the_published_optimum_within_a_small_budget` now asserts a
+  population statistic — a quorum of seeds reaching the tolerance plus the median
+  relative error — with budgets re-derived as the evaluation at which the last of
+  8 seeds first reaches it, plus ~50% headroom. The old single-seed pass/fail on
+  a chaotic deterministic search was a statement about one machine's floating
+  point: the `hartman_3` failure reported in #1036 does not reproduce on
+  Linux/OpenBLAS, where the whole panel passes.
+  `test_a_larger_budget_continues_the_same_search` pins the nesting property that
+  makes the budget derivation valid at all.
+
+- **`discopt_benchmarks/tests/test_interop.py` deleted; a no-op suite guard added
+  in its place** (closes #1050). The file's 20 tests were written against a
+  `discopt._rust` surface that never existed — all 14 helpers they referenced
+  (`create_test_bounds`, `create_test_sparse`, `get_all_array_outputs`,
+  `get_shared_buffer`, `create_batch`, `benchmark_roundtrip`,
+  `trigger_test_panic`, …) are absent from the compiled module, and the one
+  concrete dtype claim it made was wrong about the real boundary (it asserted
+  CSR `indices.dtype == np.int32`; `solve_lp_warm_csc_py` takes `i64`). Its
+  intent is covered by executing tests: `python/tests/test_batch_dispatch.py`
+  (34 tests) is a class-for-class superset of its array-transfer, dtype,
+  zero-copy — the same `ctypes.data` pointer identity — batch-shape, latency and
+  invalid-input sections; `test_simplex_lp.py` covers the LP infeasible status;
+  `relaxation_harness.assert_containment` covers the sampled McCormick soundness
+  property. `conftest.py` now fails any session in which a test skips with a
+  placeholder-harness reason ("not yet available", "replace with actual",
+  `NotImplementedError`) or in which a module declaring `MUST_EXECUTE` runs
+  nothing — the two signatures of a suite decaying into a no-op while reporting
+  green. Verified against the deleted file itself: it exits 1 and names all 20.
+
+- **`discopt_benchmarks/tests/test_correctness.py` runs** (#1116, contributes to
+  #1050). All 98 of its tests skipped unconditionally on a `solve_instance` stub
+  that raised `NotImplementedError`, with the false reason "discopt not yet
+  available" — including the two in `TestDeterminism`, the repository's only
+  run-to-run reproducibility assertions and therefore the only consumer of
+  `solve(deterministic=...)`. They now solve real instances, `TestFeasibility`'s
+  two assertion-free bodies check the incumbent and its integrality, the ten
+  `TestEdgeCases` stubs are real models, and the module joins CI's
+  python-correctness lane. Instances resolve from `python/tests/data/minlplib_nl/`
+  and then `$DISCOPT_MINLPLIB_NL`; a missing one still skips, but for a true
+  reason. 99 collected, 87 passed, 12 skipped locally.
+
+- **`solve(deterministic=...)` now defaults to `False` and is no longer a dead
+  parameter** (`solver`, #1116). It was documented as "Ensure deterministic
+  results" and read **nowhere** on the solve path — a default that named a
+  guarantee the solver did not provide. It is now wired to the real mode (below),
+  and defaults OFF because turning that mode on by default is a bound-changing
+  default flip (CLAUDE.md §5) with no graduation panel behind it. Callers who
+  passed `deterministic=True` expecting reproducibility now get it; callers who
+  relied on the old *default* get today's behaviour unchanged.
+
+### Removed
+
+- **`DISCOPT_LP_SPATIAL_MIXED` retired** (#1357). #860 widened the LP-spatial gate to
+  mixed/MAXIMIZE behind this flag; the flag ran its CLAUDE.md §5 graduation panel and
+  **failed bar (2)** — sound, but not net-positive — so §5's retirement rule applies
+  rather than leaving it default-OFF forever. The measurement that killed it (20 s
+  budget, 70 newly in-scope in-repo instances, off vs on) was *cert-clean* (0
+  certification regressions, 0 `incumbent_verification_failed`, 0 unsound bounds) and
+  net-negative — `gains=1 improved=1 lost_incumbents=2`::
+
+      instance    off                          on
+      tspn12      no incumbent (30.6 s)        feasible 262.647 (9.3 s)
+      ex1252a     feasible 183660.35 (24.5 s)  feasible 149530.99 (14.9 s)
+      tls2        feasible 11.30 (20.1 s)      NO INCUMBENT (13.6 s)
+      st_e31      feasible -2.00 (22.2 s)      NO INCUMBENT (14.8 s)
+
+  **What was retired is shipping it, not the capability**: the `mixed=` widening is
+  sound and separately tested, and stays available to an explicit caller. The killing
+  measurement moved onto `_is_in_scope` so it outlives the flag, and
+  `test_1357_lp_spatial_mixed_retired.py` pins the retirement.
+- **`DISCOPT_POUNCE_DECLARED_BOX` retired** (#1358). Its §5 panel
+  (`scripts/pounce_declared_box_panel.py`, in-repo MINLPLib corpus, arms interleaved)
+  came back gate 1 cert-clean **PASS**, gate 2 net-positive **INCONCLUSIVE** — and
+  inconclusive *by construction*: only 2 of 66 instances (`st_miqp3`, `st_miqp4`, both
+  at exactly 1e15) declare a bound in `[1e15, 1e19)`, the rest being small-bounded or
+  default-boxed at 1e20, above POUNCE's own infinity. Re-running cannot change that.
+  Under §5 a flag whose panel cannot terminate is deleted rather than held OFF
+  forever. The **scoped** `declared_box_honored()` override is kept — it moves the
+  threshold for one call rather than for the process, which is the mechanism #1327's
+  retry uses, and is why that retry needs no §5 graduation. All three of #1319's
+  repros return the correct certified optimum with no flag set.
 
 ### Fixed
+
+- **Three imports in the shipped package raised a naked `ModuleNotFoundError`**
+  (v0.9.0 release audit). Each reads as a broken package rather than a missing
+  optional dependency:
+  - `CUTEstProblem.to_instance_info()` did `from benchmarks.metrics import
+    InstanceInfo`. `benchmarks` is the **harness** package under
+    `discopt_benchmarks/`, and maturin's `python-source = "python"` puts only
+    `python/discopt/**` in the wheel — so the method was broken for *every*
+    pip-installed user, with no test covering it. Worth naming because it is a
+    near-miss: `discopt.benchmarks.metrics` *does* ship and does **not** define
+    `InstanceInfo`, so this was never a missing `discopt.` prefix.
+  - `discopt.ml.readers.torch_reader` imported `torch.nn`; the `nn` extra is the
+    ONNX toolchain and has never included torch.
+  - `ParetoFront.plot()` imported `matplotlib.pyplot`.
+
+  All three now raise an `ImportError` naming what to install, matching the shape
+  `solvers/gurobi.py` already used. `test_optional_imports_declared.py` pins the
+  **class** rather than the three instances: any third-party import in
+  `python/discopt/` that is neither declared in `pyproject.toml` nor wrapped in a
+  `try/except ImportError` fails the test. It is a static AST check, so it runs on
+  a bare checkout with no build.
 
 - **#1329 (correctness, P0): a recycled `id()` served a stale evaluator, and
   with it a false certified optimum.** `evaluator_fingerprint` was built from
@@ -896,359 +1321,6 @@ The release procedure that produces these entries is documented in
   that third shape, discriminating a *fraction or capped piece* of the remaining
   time (role 2, recorded) from *all* of it (role 1, the caller passing its budget
   down).
-
-### Changed
-
-- **Dependency floors raised: `feral` 0.16.0 -> 0.18.0 (Rust), `pounce-solver`
-  >=0.10 -> >=0.12 (Python).** A requirement bump only -- no discopt call site,
-  default or flag changed with it, and neither dependency's API surface that
-  discopt consumes moved. `feral` is source-compatible (`cargo check -p
-  discopt-core` clean, `cargo test -p discopt-core` green); the lockfile also
-  carries `feral-{kahip,metis,scotch}` 0.2.1 -> 0.3.0, which sit on the
-  multifrontal side discopt does not call. `pounce-solver` 0.12.0 is the current
-  PyPI release.
-
-  NOT MEASURED: neither CLAUDE.md §5 regime has been run against these floors --
-  no certifying panel, no captured-LP fill/nnz comparison -- so nothing here
-  claims bound-neutrality or net-positivity for the LU kernel under feral 0.18.0.
-  The acceptance split that measurement owes is stated in the pin comment in
-  `crates/discopt-core/Cargo.toml`.
-
-- **`discopt.nn` is renamed `discopt.ml`** (#1219). The package was named for one
-  of the four things it does: decision trees and tree ensembles (`tree.py`,
-  `formulations/tree_ensemble.py`, the sklearn readers) are first-class in it,
-  and the `Surrogate` protocol admits GP means, kernel expansions, soft trees and
-  symbolic formulas — none of them networks. Its own dispatcher is
-  `add_predictor()`, not `add_network()`. Nothing about the formulations changed;
-  this is a rename plus a deprecation shim.
-
-  `import discopt.nn` still works, emits a `DeprecationWarning`, and forwards by
-  **object identity** rather than by copy: every submodule path
-  (`discopt.nn.network`, `discopt.nn.formulations.base`,
-  `discopt.nn.readers.sklearn_reader`, …) resolves to the same module object as
-  its `discopt.ml` counterpart, so `isinstance(f, discopt.ml.NNFormulation)`
-  holds for objects built through the old spelling. `test_1219_nn_shim.py` pins
-  that (it fails on 6 of 7 tests with the shim removed). The shim is scheduled
-  for removal in 0.10. The `[nn]` and `[ml]` install extras are dependency sets
-  (ONNX and scikit-learn respectively), not module paths, and are unchanged.
-
-- **The benchmark neutrality harness refuses wall-limited rows** (#1187, part 2).
-  `deterministic=True` cannot equalise work on a run that terminates on the wall
-  clock, because the terminating condition *is* the wall clock — `time_limit` is
-  role 1 and stays live by design. Two arms that both ended `status=time_limit`
-  therefore did different amounts of work: measured on `beuster` at 120 s, two
-  builds differing only in Python marshaling cost issued 3858 OBBT probe LPs
-  against 942 — 4.1× the work — for the same 3 nodes and the same bound. Reading
-  neutrality off such a row is reading noise; #1180's sweep did, on 13 of 66 rows,
-  and manufactured a reproducible "0.516× regression" that re-measured as a
-  5×-more-nodes, 30 %-tighter-bound improvement. `cert_neutrality.wall_limited_rows`
-  names those rows, `check_neutrality(..., exclude=…)` skips exactly the named set,
-  and both `check_cert_neutrality.py` and `graduation_gate.py` print them as
-  UNMEASURED — an excluded row yields no verdict rather than a silent pass. A row
-  wall-limited in only one arm (a *lost* certification) stays a violation, and
-  `node_limit` rows stay comparable: that budget is a deterministic count.
-
-  Status alone does not identify these rows, which the #1187 panel demonstrated by
-  hitting one: a run cut off by `time_limit` while holding an incumbent reports
-  **feasible**, and that is the common case. `tls2` at a 30 s budget ends
-  `feasible` at the wall every time and returned 245 / 217 / 179 nodes with three
-  different dual bounds across three *baseline* runs — it does not reproduce
-  against itself, in either arm of an interleaved A/B. So `wall_limited_rows` also
-  takes the per-instance `budgets` and treats an unsettled row that spent >=98 % of
-  its budget as wall-limited; both gate scripts now pass them.
-
-- **`interval_eval` did not reduce a `SumExpression`** — it returned the
-  operand's *elementwise* enclosure while `dag_compiler` lowers the same node to
-  `jnp.sum(operand, axis=...)`. `sum(x)` over `x in [0,10]^2` came back as
-  `[0, 10]` instead of `[0, 20]`: an enclosure that **does not contain the
-  value**, i.e. unsound in the narrow direction, and the wrong shape. This is not
-  confined to a diagnostic — `evaluate_interval` is on the solve path (nonlinear
-  bound tightening, the uniform and OA relaxations, the g-convex injection),
-  where a too-narrow enclosure is an invalid FBBT tightening of exactly the class
-  that cuts the optimum out of the box. Found by the #1148 source-residual probe,
-  which read a violation of `0.0` on a row `sum(x) <= 10` at `x = (6, 6)` where
-  the truth is `2.0`. The reduction now sums the endpoints (summation is monotone,
-  so no interval subtlety) and rounds outward, as the sibling `_eval_matmul`
-  reduction already did. The outward step is the **accumulation** bound, not a
-  single ULP: measured against an exact `fractions.Fraction` reference over 3000
-  random sums (*n* ∈ [4, 600], heavy cancellation at ~1e8), a one-ULP widening
-  still returned an enclosure that did **not** contain the true sum on 2289 of
-  them, worst shortfall 1.5e-6; with the accumulation bound, 0 of 3000.
-
-  The bound is chosen from the reduction order numpy **actually** used:
-  `(log2(n) + 2)·eps·Σ|x_i|` when the reduction runs along the unit-stride axis
-  (where numpy sums pairwise) and `(n - 1)·eps·Σ|x_i|` when it runs across a
-  strided axis, where numpy accumulates sequentially — its `sum` documentation
-  makes pairwise precision conditional on the memory axis, and applying the
-  pairwise factor to a strided reduction understates the error by ~*n*/log2(*n*).
-  Counterexample: a C-contiguous `(10002, 2)` array of ones with `1e16` first and
-  `-1e16` last has exact column sums of `10000`, and the pairwise-factored
-  enclosure of `dm.sum(v, axis=0)` was `[-67.89, 67.89]` — missing the value by
-  three orders of magnitude, on the same certified-bound path. The magnitude sum
-  `Σ|x_i|` is itself rounded up before scaling, since it is a float64 sum too.
-  The strided factor is `max(n - 1, log2(n) + 2)` rather than a bare `n - 1`: the
-  two cross at `n = 5`, and taking the smaller would make a *soundness* fix narrow
-  strided enclosures for a handful of terms — bound-changing, for no benefit. As
-  written, the pairwise path is untouched and the strided path only ever widens.
-
-  **Who was exposed:** models built through the Python modeling API that use
-  `dm.sum(...)`. The `.nl` reader emits no `SumExpression` at all (measured: 0 of
-  the 66 files in `python/tests/data/minlplib_nl/`), so no `.nl` instance, panel
-  or gate could exercise this — which is why it survived. Regression coverage is
-  `python/tests/test_interval_sum_reduction.py`, including a differential check
-  that a dual bound never exceeds the true optimum on Python-API `dm.sum` models.
-  The sibling reduction in `_eval_matmul` had the same one-ULP gap over its
-  `k`-term dot products (measured: 190 of 400 random products missed the truth).
-  It was tracked separately as #1161 because widening matmul enclosures is a
-  bound-affecting change needing its own differential evidence; that work landed
-  in #1171 and is merged into this head, so **both** reductions now go through
-  the shared `_widen_sum` and no one-ULP reduction remains in this module.
-
-- **`accept_local_incumbent` trusted a cached source-residual report** and so
-  vouched for a point nobody had measured. A `SourceResidualReport` records no
-  point and no model, but the gate accepted `result.mpec_report` when one was
-  carried and then verified whatever `x_flat` it was handed. On
-  `min -x-y  s.t.  x == y, 0 <= x ⊥ y >= 0` with Scholtes rows at `t = 1e-8`, a
-  report taken at the exactly complementary `(0, 0)` admitted `(1e-4, 1e-4)`,
-  whose source residual is `1e-4` and whose objective `-2e-4` is **below** the
-  true optimum of `0` — an invalid incumbent cutoff that, fed to a global solve,
-  fathoms the optimum away, and the exact hazard the function exists to block.
-  The report is now recomputed at the acceptance boundary against the actual
-  candidate and the model's current relations; the `report=` keyword is gone
-  rather than left as a way to supply one. The same recomputation closes the
-  model-side face of the hole (a report taken before a relation was declared no
-  longer vouches for a model that now carries it). Regressions:
-  `test_review3_1_*` in `python/tests/test_mpec_source_residuals.py`, both with
-  the accepted-at-`(0, 0)` control retained.
-- **An iteration-limited MPEC iterate was promoted to `"local_optimal"`**, which
-  the new status vocabulary defines as a local *stationary* point. With the
-  subsolver allowed zero iterations it performs no optimization and returns its
-  own starting point under `ITERATION_LIMIT`; the wrapper published that as a
-  stationary point — on the distance model from `x0 = (5, 5)`, a point at which
-  the generated product row is violated by `24`. The merge base preserved
-  `ITERATION_LIMIT`, so this was a regression introduced by the local-status work,
-  in the one direction the vocabulary exists to prevent. The iterate is still
-  reported (it is a warm start and it carries its residuals — that is the
-  stalled-stage handling added earlier in this entry), but under `"local_limit"`,
-  and `ContinuationTrace` now distinguishes *accepting* an iterate from
-  *converging*: `ContinuationStage.certified` records whether the subsolver
-  converged at that stage, `reported_point_certified` whether the stage behind the
-  reported point did, and `converged` reads the latter rather than
-  `any_stage_accepted`. Regression:
-  `test_review3_3_a_zero_iteration_subsolver_does_not_report_local_optimal`, with
-  a converged-run control that must still say `"local_optimal"`.
-
-### Added
-
-- **Source complementarity residuals and the local-vs-certified result contract**
-  (#1148, RFC #1123 slice 2). POUNCE's internal barrier/KKT complementarity is a
-  property of the *generated NLP*; the MPCC condition `0 <= f ⊥ g >= 0` is a
-  property of the *user's model*. They are different numbers and were previously
-  neither separated nor reported. Measured on `max x+y s.t. x==y, 0 <= x ⊥ y >= 0`
-  after a Scholtes homotopy at `t=1e-8`: the generated rows are violated by
-  `1.0e-8` while the source complementarity `min(x, y)` is `1.4e-4` — four orders
-  of magnitude apart at the same point, with the returned objective (`-2.8e-4`)
-  *below* the true optimum (`0`). `discopt.mpec_report` now measures the declared
-  operands (which survive every rebuilding pass, #1147) and reports, each carrying
-  the formula that produced it: the complementarity residual (`min(f, g)`, the MCP
-  normal map for a box form, `product` or Fischer-Burmeister on request), the
-  declared-bound violation per operand, source primal feasibility against the
-  *original* rows and bounds, `max_i y_i(1-y_i)` over binary selectors after
-  checking `0 <= y_i <= 1`, and the lowered rows' own residual beside them so the
-  two can be compared. Tolerances are scaled by the relation's declared scale, and
-  the worst-case residual a Scholtes regularization at `t` *admits* (POUNCE Gate 0,
-  jkitchin/pounce#794) is reported rather than left to imply exact orthogonality —
-  as `Residual.admitted_scale`, per residual definition (`sqrt(t)` for `min`, `t`
-  for the product form, `(2-sqrt(2))·sqrt(t)` for Fischer-Burmeister), and
-  documented as an upper bound on the admitted residual rather than a limit on
-  attainable accuracy: `f·g <= t` also admits `(f, g) = (0, 1)`, whose residual is
-  exactly `0` at every positive `t`.
-  `SourceResidualReport.as_dict()` is the shared benchmark schema of
-  jkitchin/pounce#780.
-- **A distinct terminal status for local results** (`discopt.status`):
-  `"local_optimal"`, `"local_limit"` and `"local_infeasible"`. A status, not a flag beside
-  `"optimal"` — the benchmark harness scores `status == OPTIMAL` with no gap as a
-  *proved optimum*, so a local stationary point reported as optimal is read by the
-  release gate as a certificate; and every consumer that pattern-matches on the
-  status would inherit the bug from a flag. A stalled MPEC continuation reports
-  `"local_infeasible"`, never `"infeasible"`, which is a certificate in the other
-  direction. `"local_optimal"` means a local *stationary* point and is reserved for
-  a point a subsolver converged to; a usable-but-stalled iterate is still reported,
-  with its residuals and as a warm start, under the weaker `"local_limit"`, which
-  is in `LOCAL_STATUSES` and so inherits the same no-dual-bound guard.
-  `SolveResult.__post_init__` **raises** if a local status carries a
-  `bound` or `root_bound` and forces `gap_certified=False`: a local result may
-  become an incumbent only after independent verification
-  (`mpec_report.accept_local_incumbent`, which gates on the source residuals and
-  not on the lowered relaxation), and may never become a dual bound. Stationarity
-  classifications are never claimed, because discopt checks no C-/M-/S- conditions.
-  The benchmark harness gains `SolveStatus.LOCAL` and a shared
-  `DISCOPT_STATUS_MAP`, so `--subprocess` cannot score a solve differently from
-  the in-process path; both `incorrect_count` and `proved_optimal_count` skip a
-  local row.
-- **`mpec.solve_mpec` returns one type for every method.** Previously switching
-  one keyword changed the returned type, the type of `status` (enum vs. str) and
-  whether a certification field existed at all, so no caller could write one
-  branch that read a result. All three arms now return a
-  `modeling.core.SolveResult`; the Scholtes arm carries its continuation trace
-  (per-stage `t`, subsolver status, accept/reject reason and achieved source
-  residual) rather than discarding it, and reports the achieved residual
-  independently of the final homotopy parameter. A model left carrying a Scholtes
-  *relaxation* is now refused by the solve guard rather than certified: the guard
-  distinguishes "has a lowering" from "has an **exact** lowering"
-  (`mpec.RELAXING_METHODS`).
-- **Complementarity is a first-class relation with durable source provenance**
-  (#1147, RFC #1123 slice 1). `mpec.Complementarity` was three fields (`f`, `g`,
-  `name`) recorded on `Model._complementarities` and then discarded by **every**
-  model-rebuilding pass — measured on `main`, `before=1 / after=0` for GDP
-  lowering under `big-m`/`hull`/`mbigm`, integer-product expansion and factorable
-  reformulation alike. All that survived a lowering was string-level: the pair
-  name baked into generated identifiers (`_gdp_aux_disj_pair0_0_0`). A source
-  complementarity residual computed against such a model would have measured the
-  *relaxed row* rather than the source product, printed a small number, and been
-  believed. The relation now carries its source operands, the bounds it declares
-  on them, a residual scale, a role (`ComplementarityRole`: NCP pair / box MCP /
-  generated-from-KKT / generated-from-disjunct), the generating parent's
-  identity, shape/index for vectorized pairs, and per-model lowering state; each
-  of the four rebuilding passes forwards the relation set explicitly and raises
-  `ComplementarityProvenanceError` — naming the relation and the pass — rather
-  than dropping one it cannot resolve. Resolution is by **object identity**, and
-  backend-facing flat indices are derived at the solver boundary
-  (`flat_source_indices`) instead of persisted through it, because presolve/FBBT
-  renumber columns exactly when a stored index would be needed. They are prefix
-  sums over the **target model's** variable list, not `Variable._index` (the
-  declaring model's position): a relation's operands are shared objects, so a
-  model holding them in a different order needs its own layout, and a provenance
-  query must never write shared state to get the right answer.
-- **The box-bounded MCP form**, `Model.mcp(F, z, lb=..., ub=...)` /
-  `mpec.box_mcp`: a residual paired with a variable on `[l, u]`, with the
-  symmetric NCP pair as the `l=0, u=+inf` special case (recorded and lowered as
-  that pair, so the two forms cannot diverge on the case they share). #1147
-  **represents** the general box form and deliberately does not lower it; a model
-  carrying an unlowered relation is refused by every `mpec.reformulate_*` entry
-  point and by the solver boundary — `solve_model`, so the callers that never go
-  through `Model.solve` (the differentiable-solve paths, the primal heuristics)
-  are refused too — rather than being solved as though the condition were absent
-  and certified. Which form a relation is, is read off its **declared bounds**
-  (`Complementarity.is_symmetric_nonnegative`), never off its `role`: the role is
-  provenance, and `Complementarity` is public, so a directly-constructed relation
-  with box bounds and the default `role=NCP_PAIR` must not be able to talk its way
-  into a two-branch lowering.
-
-- **Lowering state is model state**, `Model._lowered_complementarities` — an
-  identity map from relation to the method that lowered it into *that* model, read
-  via `pair.is_lowered_into(model)` / `pair.lowering_in(model)`. A relation is
-  shared, so neither the mark nor the method can live on it: weak references on the
-  relation made any model carrying one unpicklable and made `copy.deepcopy`
-  silently drop the mark (the clone then refused to solve), and a plain `lowering`
-  field held only whichever lowering ran last, so a relation lowered by GDP into
-  one model and SOS1 into another stopped describing the first model's rows.
-  `carry_complementarities` propagates the source model's own method, and only when
-  the source actually carries the rows — keying it on "lowered somewhere" let an
-  unlowered source hand the destination a mark for rows neither model had,
-  bypassing the solve guard.
-
-### Changed
-
-- **`binary_multilinear_reform`'s abstain guard no longer keys on
-  `_complementarities`** (#1147). The guard existed so the pass would not drop
-  structure it does not copy — but every earlier rebuilding pass emptied that
-  list, so its premise evaporated at a pass boundary: after GDP lowering the
-  condition is materialized into ordinary rows and the list was empty. The
-  relation set is now forwarded explicitly, so there is nothing left to protect;
-  the SOS/indicator and builder-block clauses of the guard are unchanged.
-- **Unnamed complementarity relations get a name unique on the model** (#1147).
-  The fallback counted within the list handed to the lowering, and
-  `Model.complementarity` hands over exactly one relation — so every unnamed
-  declaration became `compl0` and emitted `compl0_f_nonneg` twice, silently. The
-  name is now assigned at the single point every lowering funnels through, so the
-  `.nl` importer (`nl_compl{k}`), the fluent API and a hand-built pair all get a
-  unique one; it also makes a relation identifiable in a provenance error without
-  parsing generated identifiers.
-- **`bilevel`'s KKT complementarity pairs are recorded on the model**, so the
-  `FROM_KKT` role and the lower-level row named in `parent` are live provenance
-  the rebuilding passes carry, rather than labels nothing ever read (#1147).
-- No behavior change to solving. Per CLAUDE.md's bound-neutral regime, over the
-  66-instance in-repo `.nl` corpus at a 10 s limit with both arms measured on the
-  same idle host: status and objective identical on 66/66 instances, and every
-  recorded field (status, objective, bound, `node_count`, `gap_certified`)
-  identical on all 45 instances that converged in both arms. The four remaining
-  differences are all unconverged (`time_limit`/`feasible`) rows whose node count
-  varies with how much wall clock the fixed budget buys — not a bound change.
-
-- **`solver="surrogate"`: the initial design is sized from the dimension alone,
-  `2(n+1)`, not from the evaluation budget** (closes #1036). The old rule,
-  `max(n+2, min(10n, max_evals // 2))`, made the design — and therefore the whole
-  trajectory — a step function of `max_evals`, so two runs at different budgets
-  were two different searches rather than one search and its continuation.
-  Measured on the `on_evaluation` traces, 17 of 30 budget pairs over
-  `{40, 46, 60, 80, 100}` diverged at evaluation 1; after the change, 0 of 30.
-  That invalidated every "the incumbent first reached the tolerance at evaluation
-  `k`, so a budget of `B > k` has headroom" statement made about this backend,
-  including the one the convergence panel's budgets were set from. The smaller
-  design is also measurably better: over 8 functions × 12 seeds at
-  `max_evals=100`, mean evaluations to 1e-2 relative error (a non-reaching seed
-  counted at the full budget) falls from 67.8 to 60.0 with RBF and from 65.6 to
-  61.1 with kriging, improving 6 of 8 and 4 of 6 functions respectively. The two
-  that regress are the two the module docstring already names as this backend's
-  hard shapes — a sharply scaled objective (`goldstein_price`) and a densely
-  multimodal one (`rastrigin_2`); `n_initial` remains the override and the
-  docstring now says which shapes to raise it for. `n+2` beats `2(n+1)` on the
-  RBF panel mean by 0.3% but takes `goldstein_price` from 4/12 seeds reaching the
-  tolerance to 0/12, so it was not taken. Full panel:
-  `docs/dev/surrogate-initial-design-2026-08-29.md`.
-  `test_reaches_the_published_optimum_within_a_small_budget` now asserts a
-  population statistic — a quorum of seeds reaching the tolerance plus the median
-  relative error — with budgets re-derived as the evaluation at which the last of
-  8 seeds first reaches it, plus ~50% headroom. The old single-seed pass/fail on
-  a chaotic deterministic search was a statement about one machine's floating
-  point: the `hartman_3` failure reported in #1036 does not reproduce on
-  Linux/OpenBLAS, where the whole panel passes.
-  `test_a_larger_budget_continues_the_same_search` pins the nesting property that
-  makes the budget derivation valid at all.
-
-- **`discopt_benchmarks/tests/test_interop.py` deleted; a no-op suite guard added
-  in its place** (closes #1050). The file's 20 tests were written against a
-  `discopt._rust` surface that never existed — all 14 helpers they referenced
-  (`create_test_bounds`, `create_test_sparse`, `get_all_array_outputs`,
-  `get_shared_buffer`, `create_batch`, `benchmark_roundtrip`,
-  `trigger_test_panic`, …) are absent from the compiled module, and the one
-  concrete dtype claim it made was wrong about the real boundary (it asserted
-  CSR `indices.dtype == np.int32`; `solve_lp_warm_csc_py` takes `i64`). Its
-  intent is covered by executing tests: `python/tests/test_batch_dispatch.py`
-  (34 tests) is a class-for-class superset of its array-transfer, dtype,
-  zero-copy — the same `ctypes.data` pointer identity — batch-shape, latency and
-  invalid-input sections; `test_simplex_lp.py` covers the LP infeasible status;
-  `relaxation_harness.assert_containment` covers the sampled McCormick soundness
-  property. `conftest.py` now fails any session in which a test skips with a
-  placeholder-harness reason ("not yet available", "replace with actual",
-  `NotImplementedError`) or in which a module declaring `MUST_EXECUTE` runs
-  nothing — the two signatures of a suite decaying into a no-op while reporting
-  green. Verified against the deleted file itself: it exits 1 and names all 20.
-
-- **`discopt_benchmarks/tests/test_correctness.py` runs** (#1116, contributes to
-  #1050). All 98 of its tests skipped unconditionally on a `solve_instance` stub
-  that raised `NotImplementedError`, with the false reason "discopt not yet
-  available" — including the two in `TestDeterminism`, the repository's only
-  run-to-run reproducibility assertions and therefore the only consumer of
-  `solve(deterministic=...)`. They now solve real instances, `TestFeasibility`'s
-  two assertion-free bodies check the incumbent and its integrality, the ten
-  `TestEdgeCases` stubs are real models, and the module joins CI's
-  python-correctness lane. Instances resolve from `python/tests/data/minlplib_nl/`
-  and then `$DISCOPT_MINLPLIB_NL`; a missing one still skips, but for a true
-  reason. 99 collected, 87 passed, 12 skipped locally.
-
-- **`solve(deterministic=...)` now defaults to `False` and is no longer a dead
-  parameter** (`solver`, #1116). It was documented as "Ensure deterministic
-  results" and read **nowhere** on the solve path — a default that named a
-  guarantee the solver did not provide. It is now wired to the real mode (below),
-  and defaults OFF because turning that mode on by default is a bound-changing
-  default flip (CLAUDE.md §5) with no graduation panel behind it. Callers who
-  passed `deterministic=True` expecting reproducibility now get it; callers who
-  relied on the old *default* get today's behaviour unchanged.
-
-### Fixed
-
 - **Reported objective could sit BELOW the true global minimum on quotient
   expressions, at `status = optimal`** (#1151). `minimize x/y + y/x` over
   `[1e-3, 1e3]^2` returned `1.998683979470214`; the global minimum is exactly 2
