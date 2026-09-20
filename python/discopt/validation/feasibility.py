@@ -333,16 +333,35 @@ def feasible_distance_cap(grad_norms, term_scale=None) -> np.ndarray:
     is inert unless ``||grad g||_inf < 1e-2``, i.e. on a row that is nearly flat
     in EVERY variable — where no small move fixes the residual and calling the
     point near-feasible is not a statement about anything.
+
+    The noise floor is ADDED to the distance allowance, not ``max``-ed with it
+    (#1392). A noise floor and an allowance answer different questions — "how
+    small a residual can this arithmetic even resolve" and "how far may the point
+    sit from the surface" — and the residual carries both, so combining them with
+    ``max`` lets the larger one erase the smaller. Measured on ``synthes3`` via
+    ``nlp_bb``: the big-M row ``x0 - 10*y9 <= 0`` at ``x0 = 1.0750640431770233e-12``
+    (lower bound 0), ``y9 = 0`` evaluates to ``1.0751399770470016e-12`` — the row
+    body and its own linear term disagree by 7.6e-17, ordinary double-precision
+    noise on a unit-scale evaluation. ``x0`` has exactly ``1.0750640431770233e-12``
+    of room to its bound, so the distance allowance is that same number, 7.6e-17
+    BELOW the violation: the cap rejected the point over a shortfall four orders
+    of magnitude under its own declared floor, and the whole solve returned
+    ``status="error"`` with a correct incumbent (68.00974056776073 against
+    minlplib's proven ``=opt=`` 68.00974052) withheld. Adding the floor keeps every
+    recorded rejection — #1254's point is 2.0e-7 against an allowance of 2.3e-11,
+    #770's violations are 0.4-17.6 — since a 1e-12 addition cannot reach a
+    violation nine orders above it.
     """
     g = np.abs(np.asarray(grad_norms, dtype=np.float64))
-    cap = np.maximum(SMALL_ROW_ABS_FLOOR, FEASIBLE_DISTANCE_TOL * g)
+    # Cancellation noise is not a distance: a row built from terms of magnitude
+    # 1e5 carries ~1e-9*1e5 of pure floating-point residual no matter where the
+    # point is, and a cap that cut into that would reject points for the
+    # arithmetic's rounding rather than for their position.
+    # ``test_polish_feasibility_gate_1199`` holds the boundary this protects.
+    floor = np.broadcast_to(np.float64(SMALL_ROW_ABS_FLOOR), g.shape)
     if term_scale is not None:
-        # Cancellation noise is not a distance: a row built from terms of
-        # magnitude 1e5 carries ~1e-9*1e5 of pure floating-point residual no
-        # matter where the point is, and a cap that cut into that would reject
-        # points for the arithmetic's rounding rather than for their position.
-        # ``test_polish_feasibility_gate_1199`` holds the boundary this protects.
-        cap = np.maximum(cap, CANCELLATION_RTOL * np.abs(np.asarray(term_scale, np.float64)))
+        floor = np.maximum(floor, CANCELLATION_RTOL * np.abs(np.asarray(term_scale, np.float64)))
+    cap = floor + FEASIBLE_DISTANCE_TOL * g
     return np.where(np.isfinite(g), cap, np.inf)
 
 
