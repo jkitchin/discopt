@@ -64,7 +64,22 @@ _DEFAULT_POINTS = 3
 
 
 def g_convex_cuts_enabled() -> bool:
-    """Whether ``DISCOPT_G_CONVEX_CUTS`` enables the injector (default OFF)."""
+    """Whether ``DISCOPT_G_CONVEX_CUTS`` enables the injector (default OFF).
+
+    **CLAUDE.md §5 state: awaiting graduation — panel owed, never run.** Recorded
+    here, not only in the module docstring, because this one-line gate is where a
+    reader triaging the flag actually lands; the #1345 audit classified this flag
+    "status unrecorded" for exactly that reason.
+
+    *What it is waiting for:* the Regime-2 differential panel — flag ON vs OFF over
+    the in-repo corpus — requiring both (1) cert-clean (no unsound bound, no
+    certification regression) and (2) net-positive (node count / wall / bound).
+    The cuts are constructed to be rigorously valid (see the module docstring's
+    interval-arithmetic intercept), so the open question is bar (2), not soundness.
+    *Outcome if the panel is not run:* §5 retirement — this module and the flag are
+    deleted together, the measurement that none was ever taken recorded. Tracked in
+    ``docs/dev/flag-retirement-audit.md``.
+    """
     return os.environ.get("DISCOPT_G_CONVEX_CUTS", "0").strip().lower() in (
         "1",
         "true",

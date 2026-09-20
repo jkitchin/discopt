@@ -7,6 +7,32 @@ documented opt-out**. A gate in none of them is a defect.
 First taken 2026-09-19 against `0ae8cad` (issue #1345). A new default-OFF gate over
 solver math adds its row here in the same PR that introduces the flag.
 
+**Re-derived 2026-09-20 against `924169b`** (v0.9.0 release audit). The methodology below
+was re-run rather than trusted; the numbers hold:
+
+```
+call sites scanned                 : 97
+distinct DISCOPT_* flags read      : 89   (was 86)
+  default is a literal "0"         : 16   (was 19)
+    numeric knobs ("0" is a value) :  2   out of scope
+    gates over non-solver behaviour:  3   out of scope
+    gates over solver math         : 11   <- this audit
+```
+
+The 86 -> 89 growth is **not** new default-OFF gates — the literal-`"0"` set is fully
+accounted for, so no new row is owed. The 19 -> 16 drop is #1346 (graduated), #1357 and
+#1358 (retired). Of the 11 live gates, two are resolved below and **nine are in none of
+§5's three states**, tracked in #1388.
+
+**Why no panel was ever run, which the first pass did not identify.** The infrastructure is
+generic and healthy: `discopt_benchmarks/scripts/graduation_gate.py` drives arms from
+`generality_sweep.GRADUATION_ARMS`, and the nightly `graduation-gate.yml` passes no
+`--flags` so the gated set tracks the registry instead of a drifting copy. **None of the
+nine flags is in that registry** — there is no arm to run. (Note `psd_cost_gate` in
+`GRADUATION_ARMS` is `DISCOPT_PSD_COST_GATE`, a *different* flag from `DISCOPT_PSD_QFORM`.)
+The first step for each of the nine is one `ARMS` entry, then
+`graduation_gate.py --flags <arm>`.
+
 ## How the population was determined
 
 `environ.get("DISCOPT_…")` call sites across `python/discopt` (350 files), classified by
@@ -46,7 +72,7 @@ steady state.
 | ~~`DISCOPT_LP_SPATIAL_MIXED`~~ | *"it ran its graduation panel and did NOT graduate, on **both**"*; *"Sound but harmful stays OFF, with the measurement recorded"* | panel ran, failed | **RETIRED (#1357).** Flag and both production call sites removed; the `mixed=` capability and its tests kept, with the killing measurement moved onto `_is_in_scope` so it survives the flag. |
 | ~~`DISCOPT_POUNCE_DECLARED_BOX`~~ | *"Default-OFF pending the §5 graduation gate"*; #1327's panel: gate 1 cert-clean **PASS**, gate 2 net-positive **INCONCLUSIVE** (only 2 of 66 instances are in the affected window) | panel ran, inconclusive by construction | **RETIRED (#1358).** Flag removed; the **scoped** `declared_box_honored()` override kept — it is what #1327's retry uses, and moving the threshold for one call is a different mechanism from moving it for the process. Panel result preserved on `finite_bound_threshold`. |
 | ~~`DISCOPT_CONVEX_KERNEL`~~ | default-OFF, never default-ON; 3,105 lines of Rust behind it | panel run, **passed both bars** | **GRADUATED (#1346).** Default-ON, `=0` opt-out kept per §5. The park was never a failed panel: #798 proved both bars and #800 deferred graduation to #807's *SCIP wall parity*, a bar above what §5 asks. Graduation also had to fix a latent routing defect — the gate claimed every pure LP/MILP — which the corpus panel could not see. |
-| `DISCOPT_NLP_NATIVE` | *"Default stays OFF on the remaining grounds — the speedup …"* | measured, reasoned | **Keep as documented opt-out** — it already states why it is not the default. Confirm the docstring also says what would change that. |
+| `DISCOPT_NLP_NATIVE` | *"Default stays OFF on the remaining grounds — the speedup …"*, plus (2026-09-20) the bar that would flip it | measured, reasoned | **RESOLVED — keep as a documented opt-out.** The "confirm it says what would change that" action is done: the comment now names the blocking bar explicitly — a Regime-2 panel with **zero MIQP-batch certification regressions** (the perturbation is the risk, not the speed) and a more-than-modest wall win. |
 | `DISCOPT_CMIR_AGGREGATION` | *"ships dark behind this flag until proven on nightlies"* | panel owed, never run | **Run the panel or retire.** |
 | `DISCOPT_COEF_TIGHTEN` | *"default-OFF until a corpus-wide differential panel graduates it"* (#282) | panel owed, never run | **Run the panel or retire.** |
 | `DISCOPT_SGO` | *"a default-OFF env flag until a differential panel graduates it"* | panel owed, never run | **Run the panel or retire.** |
@@ -56,7 +82,7 @@ steady state.
 | `DISCOPT_PSD_QFORM` | *"can prove more constraints/objectives convex, which changes node relaxations and counts — hence it ships behind a flag"* | panel owed, never run | **Run the panel or retire.** |
 | `DISCOPT_G_CONVEX_CUTS` | gate function is one line; rationale is thin | **status unrecorded** | **Record a status first.** A gate whose docstring does not say what it is waiting for cannot be triaged; that absence is the defect. |
 | `DISCOPT_DIRECT_HEURISTIC` | substantial measurement, incl. `docs/dev/direct-entry-2026-08-12.md`; explicitly *heuristic-policy, not bound-changing* | measured, regime stated | **Read the recorded panel and decide.** The evidence exists; the verdict was never written down. |
-| `DISCOPT_IPX_CHEAP_FIRST` | *"the gate only ever decides which of two correct routes runs"*; measurement language present | measured, soundness-neutral | **Read the recorded panel and decide.** |
+| `DISCOPT_IPX_CHEAP_FIRST` | the falsification *and* the verdict are both in `_ipx_cheap_first_enabled`: node count was the wrong metric; re-measured in wall clock the gate is **11.1x slower** for a 6.9 % node saving (12 instances, interleaved, 2 reps, pooled sd <= 0.26 s) | measured, verdict recorded | **RESOLVED — keep as a documented opt-out.** The 2026-09-19 pass read this as "verdict never written down"; that was wrong. The docstring says *"Kept default-OFF rather than deleted, per the `DISCOPT_CUT_INHERIT` precedent... Re-graduating it requires a WALL-CLOCK panel"* — §5 state 3, complete. Corrected 2026-09-20. |
 
 ## Gates added after the first audit
 
@@ -98,6 +124,8 @@ is sound, separately tested (four cases in `test_lp_spatial_bb.py`), and is what
 by "keep reusable pieces, regression fixtures and benchmark cases; the entry point goes".
 The graduation measurement moved onto `_is_in_scope`'s docstring rather than dying with
 the flag, so anyone weighing the widening again starts from the evidence.
+
+**The nine that remain now have an owner-facing home: #1388.** #1345's "done when" required that no flag be left as "recorded and forgotten"; nine were, until the v0.9.0 release audit. #1388 carries the checklist, the per-flag reasoning, and the `GRADUATION_ARMS` step each one needs first.
 
 It also does not re-run any panel. Every verdict above rests on what the tree already
 records — which is the point: the evidence was never the missing part.

@@ -30,6 +30,20 @@ correctness only.
 > **Note the C-25..C-28 range is the NN backlog** — do not confuse with the CORE
 > findings (C-29..C-32).
 
+> **Module paths below are as-of each finding's date; three have since moved.**
+> Findings record the tree as it stood when they were written, so their paths are
+> evidence and are deliberately left unrewritten. Translate as you read:
+>
+> | as written in a finding | current location |
+> |---|---|
+> | `python/discopt/_numpy/mccormick.py` | merged into `python/discopt/_relax/mccormick.py` — there is no longer a separate numpy port |
+> | `python/discopt/oa.py` | `python/discopt/solvers/oa.py` |
+> | `python/discopt/gdpopt_loa.py` | `python/discopt/solvers/gdpopt_loa.py` |
+>
+> All three appear only inside findings already marked `fixed` (C-32, C-35), so no
+> open loop item depends on them. A finding added after 2026-09-20 should cite the
+> current path directly rather than extend this table.
+
 ---
 
 ## 0. Loop protocol (binding on the implementing agent)

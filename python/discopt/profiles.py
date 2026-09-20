@@ -60,13 +60,8 @@ def _user_config_paths() -> list[Path]:
 def _load_toml(path: Path) -> dict:
     if not path.exists():
         return {}
-    try:
-        import tomllib  # py311+
-    except ModuleNotFoundError:  # pragma: no cover - py310 fallback
-        try:
-            import tomli as tomllib  # type: ignore
-        except ModuleNotFoundError:
-            return {}  # no TOML reader -> user config silently unavailable
+    import tomllib  # stdlib since 3.11; requires-python is >=3.12
+
     try:
         with open(path, "rb") as f:
             data = tomllib.load(f)

@@ -28,7 +28,7 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           # One abi3 wheel per platform covers every supported interpreter --
-          # see the abi3-py310 note in Cargo.toml. No `-i` list: an explicit
+          # see the abi3-py312 note in Cargo.toml. No `-i` list: an explicit
           # interpreter list here would silently define coverage per platform,
           # which is exactly how #1055 happened.
           args: --release --out dist

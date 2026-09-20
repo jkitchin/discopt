@@ -2392,6 +2392,11 @@ _POUNCE_BATCH_MULTISTART = False
 # POUNCE (discopt#932). Default stays OFF on the remaining grounds — the speedup
 # is neutral-to-modest and the path can perturb MIQP-batch certification; flipping
 # the default is a §5 graduation-panel decision, not a bug fix.
+# §5 state: KEPT AS A DOCUMENTED OPT-OUT. What would change it, stated so the
+# next reader does not mistake this for a stalled graduation: a Regime-2 panel
+# showing (1) cert-clean with ZERO MIQP-batch certification regressions -- that
+# perturbation is the blocking risk, not the speed -- and (2) a wall-clock win
+# that is more than neutral-to-modest on the routed population.
 _NLP_NATIVE_DEFAULT = os.environ.get("DISCOPT_NLP_NATIVE", "0").lower() not in (
     "0",
     "false",

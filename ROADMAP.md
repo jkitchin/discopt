@@ -74,7 +74,7 @@ discopt followed a 4-phase development plan. Phases 1-4 are complete. Phases 5-8
 |-----------------------------------|-------------|-----------------------------------------------------------|
 | POUNCE integration                | Done        | Pure-Rust Ipopt port via Python bindings (`nlp_solver="pounce"`); default single-solve backend, replaced the old ripopt crate |
 | CUTEst interface                  | Done        | PyCUTEst evaluator for NLP benchmarking                   |
-| Documentation + example notebooks | Done        | 43 notebooks, Jupyter Book site builds with zero warnings |
+| Documentation + example notebooks | Done        | 66 notebooks, Jupyter Book site builds with zero warnings |
 | Release engineering               | Done        | Published on PyPI, maturin build, CI auto-publish on tags |
 | Tiered Python test suite          | Done        | Fast PR-tier + full + integration markers (#69)           |
 | Examiner / KKT validator          | Done        | `Model.solve(validate=True)`, dual recovery (#55, #83)    |

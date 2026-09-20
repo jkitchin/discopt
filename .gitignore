@@ -43,7 +43,9 @@ coverage.svg
 /reports/
 /discopt_benchmarks/reports/
 
-# Generated course material (built from python/discopt/course/)
+# Course material materialized by `discopt tutor install` from the
+# discopt-course plugin (#430). The source left this repo; the ignore
+# stays so a local install at the repo root is not reported untracked.
 /course/
 
 # Build output
