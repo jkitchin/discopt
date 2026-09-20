@@ -15,9 +15,15 @@ limit on a large-stack worker thread, gated so shallow models are unaffected; th
 ``_model_contains_custom_call`` walker was made explicit-stack iterative.
 
 These tests are written to be robust to the *ambient* recursion limit (CI runs at
-the default 1000; pytest may raise it locally): the model is sized relative to
-``sys.getrecursionlimit()`` so the inner walk is always deeper than the ambient
-limit, and any explicit limit change is restored in a ``finally``.
+the default 1000; pytest may raise it locally). Two strategies, both valid, and
+any explicit limit change is restored in a ``finally``:
+
+* the cheap scans size the model relative to ``sys.getrecursionlimit()`` so the
+  inner walk is always deeper than the ambient limit;
+* the tests that run the *rewrite* lower the limit under a fixed-size model
+  instead. Sizing those against the ambient limit makes their cost a function of
+  the environment — the rewrite grows ~n^1.55 — which timed out the coverage
+  lane at >120s on 2026-09-20.
 """
 
 from __future__ import annotations
@@ -31,6 +37,7 @@ import sys  # noqa: E402
 
 import discopt.modeling as dm  # noqa: E402
 import pytest  # noqa: E402
+from discopt._relax import factorable_reform  # noqa: E402
 from discopt._relax.factorable_reform import (  # noqa: E402
     _find_clearable_denominator,
     _max_expr_node_count,
@@ -122,10 +129,45 @@ def test_has_clearable_denominator_no_recursion_error():
 
 
 def test_factorable_reformulate_no_recursion_error():
-    """The full reformulation pass completes on a deep graph and stays sound."""
-    n = _depth_for_limit()
+    """The full reformulation pass completes on a deep graph and stays sound.
+
+    Sized against a *lowered* limit rather than the ambient one. The claim —
+    "a body deeper than the live recursion limit reformulates instead of
+    ``RecursionError``" — is identical either way, but ``_depth_for_limit()``
+    makes the model size a function of the environment, and the reformulation
+    walk grows ~n^1.55 (measured: 0.10s at n=1200, 0.31s at n=2500, 0.56s at
+    n=3500, x3.3 under ``--cov``). That is what timed out the coverage lane at
+    >120s on 2026-09-20 while the same test took 1.3s locally. Lowering the
+    limit instead fixes the cost at ~0.2s on every machine.
+
+    The ambient-limit path is NOT given up: ``test_has_factorable_work_…`` and
+    ``test_has_clearable_denominator_…`` still run at ``_depth_for_limit()``,
+    and cost 0.03-0.06s there because only the rewrite is expensive. Unlike
+    ``test_factorable_walk_under_lowered_limit`` below, this test does not
+    monkeypatch ``_DEEP_RECURSION_SIZE_GATE``, so the *production* gate is what
+    has to fire.
+    """
+    n = 700
+    lowered = 400
     m = _deep_division_model(n)
-    out = factorable_reformulate(m)
+
+    # §6: prove the setup is meaningful before trusting the result. Without
+    # these the test degrades to "a small model reformulates", which says
+    # nothing about #271 and would still report a pass.
+    assert _max_expr_node_count(m) > factorable_reform._DEEP_RECURSION_SIZE_GATE, (
+        "model is below the production size gate — the deep path would not engage"
+    )
+    assert _recursion_headroom_need(m) > lowered, (
+        "headroom need does not exceed the lowered limit — nothing to test"
+    )
+    assert n > lowered, "body is shallower than the limit; the walk would not overflow"
+
+    old = sys.getrecursionlimit()
+    sys.setrecursionlimit(lowered)
+    try:
+        out = factorable_reformulate(m)
+    finally:
+        sys.setrecursionlimit(old)
     # The pass returns a model (rewritten or, defensively, the original) — never
     # a crash. Clearing the sign-definite denominators changes the model.
     assert isinstance(out, dm.Model)

@@ -25,8 +25,21 @@ class TestOnnxReaderHardening:
 
     @staticmethod
     def _save(model, tmp_path, name):
-        import onnx
+        """Save with the IR version the declared opset actually needs.
 
+        ``helper.make_model`` stamps ``onnx.IR_VERSION`` — whatever the
+        *installed* onnx is newest able to emit — regardless of the opset the
+        model declares. onnxruntime refuses an IR version newer than it knows,
+        so an onnx that moves ahead of onnxruntime breaks every test here with
+        "Unsupported model IR version: 14, max supported IR version: 13" even
+        though the graphs are plain opset-13. These models are opset 13, whose
+        minimum IR version is 7; stamping that is both truthful about the model
+        and immune to the two packages drifting apart again.
+        """
+        import onnx
+        from onnx import helper
+
+        model.ir_version = helper.find_min_ir_version_for(list(model.opset_import))
         path = str(tmp_path / name)
         onnx.save(model, path)
         return path
