@@ -269,6 +269,28 @@ _UNARY: dict[str, Callable[[Expression], Expression]] = {
     "entropy": lambda a: dm.FunctionCall("entropy", a),
 }
 
+
+def _arctan2(y: Expression, x: Expression) -> Expression:
+    """GAMS ``arctan2(y, x)``, exactly rewritten when the bounds allow it.
+
+    Unlike :func:`discopt.modeling.atan2`, which raises on a cut-straddling box,
+    this keeps the opaque ``atan2`` node there. That is deliberate: such a model
+    solves *today* on the local path and is reported as ``LocallyOptimal``
+    (never overstated as global), so turning a working — if uncertified — solve
+    into a hard error would be a capability regression for the GAMS link, which
+    imports models whose bounds it does not control. When the rewrite *does*
+    fire, the same model becomes certifiable, which is a strict improvement.
+
+    The asymmetry with ``dm.atan2`` is the point: a user writing ``dm.atan2``
+    owns the bounds and should be told to fix them (CLAUDE.md §3, refuse
+    loudly); an imported model's bounds are not the importer's to change.
+    """
+    from discopt.modeling._atan2 import rewrite_atan2
+
+    rewritten = rewrite_atan2(dm._wrap(y), dm._wrap(x))
+    return rewritten if rewritten is not None else dm.FunctionCall("atan2", y, x)
+
+
 _BINARY: dict[str, Callable[[Expression, Expression], Expression]] = {
     "power": lambda a, b: a**b,
     "rpower": lambda a, b: a**b,
@@ -278,7 +300,7 @@ _BINARY: dict[str, Callable[[Expression, Expression], Expression]] = {
     "div0": lambda a, b: a / b,
     "min": dm.minimum,
     "max": dm.maximum,
-    "arctan2": lambda a, b: dm.FunctionCall("atan2", a, b),
+    "arctan2": _arctan2,
     # Safeguarded eval forms can also appear with a second argument carrying the
     # smoothing threshold; it only affects out-of-domain numerical behaviour, so
     # the intended function is the base form on the first argument.

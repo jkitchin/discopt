@@ -142,6 +142,9 @@ from discopt.infeasibility import (
     compute_iis as compute_iis,
 )
 from discopt.modeling import (
+    Atan2BranchCutError as Atan2BranchCutError,
+)
+from discopt.modeling import (
     Constraint as Constraint,
 )
 
@@ -196,6 +199,9 @@ from discopt.modeling import (
 )
 from discopt.modeling import (
     atan as atan,
+)
+from discopt.modeling import (
+    atan2 as atan2,
 )
 from discopt.modeling import (
     atanh as atanh,
