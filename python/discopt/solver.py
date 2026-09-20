@@ -5329,7 +5329,7 @@ def _withhold_stale_certificate(
     gap_tolerance: float,
     abs_gap_tol: float,
     where: str,
-) -> tuple[str, Optional[float], bool]:
+) -> tuple[str, Optional[float], bool, Optional[float]]:
     """Withdraw a certificate the FINAL ``(objective, bound)`` pair does not support.
 
     A tree computes its gap against the incumbent it converged on, and the
@@ -5357,18 +5357,64 @@ def _withhold_stale_certificate(
     promotes a status, and never touches ``bound``. A withdrawal replaces the
     stale ``gap`` with the honest one computed from the published pair.
 
-    Returns the possibly-corrected ``(status, gap, gap_certified)``.
+    Returns the possibly-corrected ``(status, gap, gap_certified, bound)``.
     """
     if not gap_certified:
-        return status, gap_val, gap_certified
+        return status, gap_val, gap_certified, bound_val
     if obj_val is None or bound_val is None:
-        return status, gap_val, gap_certified
+        return status, gap_val, gap_certified, bound_val
     if not np.isfinite(obj_val) or not np.isfinite(bound_val):
-        return status, gap_val, gap_certified
+        return status, gap_val, gap_certified, bound_val
+
+    # #1385: the CROSSED pair first, because the convergence test cannot see it.
+    # ``_gap_values_converged`` computes ``max(0.0, ub - lb)``, so an INVERTED
+    # pair clamps to gap 0 and reads as converged -- which is why
+    # ``_recertify_gap_closed``'s own docstring says "the caller still owns the
+    # on-correct-side guard". This guard did not own it, and the omission made it
+    # blind to the one case it exists to catch.
+    #
+    # Measured on the vendored ``nvs14`` with ``nlp_bb=True`` at a 60 s limit
+    # (minimise; two independent routes attain -40358.154769):
+    #
+    #     status="optimal"  objective=-40358.154769  bound=+314.237382
+    #     bound_valid=True  gap_certified=True  bound_source="bnb_tree"
+    #
+    # A lower bound 40672 ABOVE the incumbent it is reported against -- the
+    # literal CLAUDE.md §1 invariant (``bound <= incumbent`` for min sense) --
+    # published as a certificate, and this guard waved it through because
+    # ``max(0.0, ...)`` had already turned the inversion into a zero gap.
+    #
+    # The crossing itself is a defect further up (the NLP-BB root bound is wrong
+    # on this model, not merely loose); what belongs HERE is refusing to certify
+    # a pair that contradicts itself, whatever produced it.
+    if _bound_crosses_objective(float(bound_val), float(obj_val), is_maximize):
+        crossed_gap = abs(float(obj_val) - float(bound_val)) / max(1.0, abs(float(obj_val)))
+        logger.warning(
+            "%s: withdrawing the optimality certificate (#1385) - the reported dual "
+            "bound %.12g CROSSES the incumbent %.12g it is reported against "
+            "(%s sense); a bound past its own incumbent is not a certificate, "
+            "whatever produced it.",
+            where,
+            float(bound_val),
+            float(obj_val),
+            "max" if is_maximize else "min",
+        )
+        # #1244's rule, applied here: clear the CLAIM with the number. We cannot
+        # tell which side is wrong, but the incumbent has been feasibility-verified
+        # by the exit gate and this bound has not, so the bound is the weaker
+        # claim. Leaving it standing with ``bound_valid`` would publish a dual
+        # bound this branch has just proved inconsistent with its own incumbent.
+        # ...and the gap goes with the bound. ``gap`` is defined as
+        # ``(objective - bound) / |objective|``; with no bound there is no gap, and
+        # publishing the crossed value beside ``bound=None`` would be a third
+        # number contradicting the other two.
+        del crossed_gap
+        return ("feasible" if status == "optimal" else status), None, False, None
+
     if _recertify_gap_closed(
         float(obj_val), float(bound_val), is_maximize, gap_tolerance, abs_gap_tol
     ):
-        return status, gap_val, gap_certified
+        return status, gap_val, gap_certified, bound_val
 
     honest_gap = abs(float(obj_val) - float(bound_val)) / max(1.0, abs(float(obj_val)))
     logger.warning(
@@ -5384,7 +5430,7 @@ def _withhold_stale_certificate(
         honest_gap,
         "feasible" if status == "optimal" else status,
     )
-    return ("feasible" if status == "optimal" else status), honest_gap, False
+    return ("feasible" if status == "optimal" else status), honest_gap, False, bound_val
 
 
 def _gap_criterion(ub: float, lb: float, gap_tolerance: float, abs_gap_tol: float) -> Optional[str]:
@@ -17759,7 +17805,7 @@ def solve_model(
     # #1383: the certificate must survive the FINAL (objective, bound) pair.
     # Everything above may still have moved `obj_val` after the tree computed
     # its gap, and nothing re-asked whether the certificate still holds.
-    status, gap_val, _gap_certified = _withhold_stale_certificate(
+    status, gap_val, _gap_certified, bound_val = _withhold_stale_certificate(
         status,
         obj_val,
         bound_val,
@@ -20317,7 +20363,7 @@ def _solve_nlp_bb(
     # #1383: the certificate must survive the FINAL (objective, bound) pair.
     # Everything above may still have moved `obj_val` after the tree computed
     # its gap, and nothing re-asked whether the certificate still holds.
-    status, gap_val, _gap_certified = _withhold_stale_certificate(
+    status, gap_val, _gap_certified, bound_val = _withhold_stale_certificate(
         status,
         obj_val,
         bound_val,
@@ -20420,7 +20466,36 @@ def _solve_node_nlp(
                     "fixed-box infeasibility probe skipped: %s: %s", type(exc).__name__, exc
                 )
 
-    if nlp_solver in ("pounce", "ipm", "sparse_ipm"):
+    if nlp_solver != "ipopt":
+        # #1384: everything that is not an EXPLICIT ``ipopt`` request solves with
+        # POUNCE, the documented default and a CORE dependency.
+        #
+        # This used to be spelled as a whitelist -- ``in ("pounce", "ipm",
+        # "sparse_ipm")`` -- with an unconditional ``ipopt`` fallthrough for
+        # everything else. cyipopt is an OPTIONAL dependency
+        # (``pip install discopt[ipopt]``), so any value that missed the
+        # whitelist turned a working install into ``ImportError: cyipopt is
+        # required``.
+        #
+        # It is reached, and not by a typo: the big-M MILP reformulation
+        # deliberately reassigns ``nlp_solver = "simplex"`` to route the lifted
+        # model onto the monolithic Rust MILP engine, and that value then travels
+        # into the NLP-BB path as the NODE solver. Measured on the vendored
+        # ``nvs02``/``nvs07``/``nvs10``/``nvs11``/``nvs12``/``nvs14``/``nvs15``
+        # with ``nlp_bb=True``: the node received ``nlp_solver='simplex'`` and the
+        # solve raised ``ImportError`` -- including when the caller had explicitly
+        # asked for ``nlp_solver="pounce"``, so an explicit request for a core
+        # backend was answered by an optional one that was not installed.
+        #
+        # A selector that does not name this layer's backend must not be read as
+        # naming ONE -- least of all the only one that can be absent. Whitelisting
+        # the fallback rather than the default is the general form of that.
+        if nlp_solver not in ("pounce", "ipm", "sparse_ipm"):
+            logger.debug(
+                "node NLP: nlp_solver=%r does not name a node backend (it is a "
+                "selector for another layer); solving with POUNCE.",
+                nlp_solver,
+            )
         # "ipm"/"sparse_ipm" are deprecated aliases — the JAX IPM is retired as a
         # node NLP solver, so all route to POUNCE (the pure-Rust Ipopt port).
         # Native path (discopt#281): solve the .nl directly via POUNCE's own AD,
@@ -26586,7 +26661,7 @@ def _solve_milp_bb(
     # #1383: the certificate must survive the FINAL (objective, bound) pair.
     # Everything above may still have moved `obj_val` after the tree computed
     # its gap, and nothing re-asked whether the certificate still holds.
-    status, gap_val, _gap_certified = _withhold_stale_certificate(
+    status, gap_val, _gap_certified, bound_val = _withhold_stale_certificate(
         status,
         obj_val,
         bound_val,
@@ -27445,7 +27520,7 @@ def _solve_miqp_bb(
     # #1383: the certificate must survive the FINAL (objective, bound) pair.
     # Everything above may still have moved `obj_val` after the tree computed
     # its gap, and nothing re-asked whether the certificate still holds.
-    status, gap_val, _gap_certified = _withhold_stale_certificate(
+    status, gap_val, _gap_certified, bound_val = _withhold_stale_certificate(
         status,
         obj_val,
         bound_val,
