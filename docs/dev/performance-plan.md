@@ -9863,3 +9863,71 @@ net-positive bar is carried by the measurements on the class each flag targets �
 of the gate: cert-clean, with no instance regressing and no incumbent failing
 independent feasibility verification. Neither flag is left pending, which is the
 #1345 rule this PR is bound by.
+
+### 73.10 Falsified — the `test_issue_1066` CI flake is not the wall, it is a race
+
+`test_the_single_tree_stops_when_its_own_bound_certifies_the_incumbent` went red
+intermittently on Linux CI during #1360 and is unrelated to #1352/#1355/#1356 —
+both PR flags are bit-identical on it (3.4 s, 73 restarts, `converged_early` True
+with `DISCOPT_OA_MASTER_GAP_SCALED` and `DISCOPT_FARKAS_RAY_CLEANUP` each at `0`
+and `1`). Recorded here because two published explanations were wrong and the
+measurement that killed them is worth keeping.
+
+**Retraction 1 (§11).** The fixture's docstring claims the certificate "becomes
+available early and the separator does not stop". Measured per check-in on macOS:
+
+    restart 61..72   gap 9.76e-01 .. 9.91e-01   (9760x the 1e-4 tolerance)
+    restart 73       gap <= 1e-4, the early exit fires
+
+The gap does not close because the dual bound rises — `lb` creeps 0.005999 →
+0.006999 across those twelve restarts. It closes because the *incumbent* drops,
+0.2927 → 0.008, when the separator finally accepts the all-eight-open assignment
+at restart 73, ~2 restarts before it runs dry. (The docstring's "four units at
+`x = 0.5`" is also wrong: that sums to 2.0 against a demand of 4.0. The optimum
+is all eight open at 0.5, objective 0.008.)
+
+**Retraction 2 (§11).** The flake was published in this PR as a contention
+lottery at the 60 s wall, from the job slowing 830 s → 1237 s (1.49x) when main
+added ~86 tests. A guard separating "cut short" from "asked and declined" passed
+on CI while the run still failed, so those runs were never truncated. Withdrawn.
+
+**The mechanism.** The Linux failure, with the diagnostic in place:
+
+    reason='optimal', restarts=66, terminated=False, converged_early=False,
+    bound=0.007999999995733842, objective=0.00800000154522579
+
+`reason='optimal'` means the separator ran dry on its own at 66 restarts, and the
+final bound and objective *do* satisfy the gap (1.9e-7 against 1e-4). The
+certificate existed; no check-in ever saw it. The early exit is consulted only at
+**restart** events (`milp_highs.py:624`), and the last tree ends without
+requesting a cut — so **convergence discovered in the final tree is structurally
+unobservable to the early exit**. macOS passes only because the good incumbent
+lands at restart 73 with two restarts left to see it. The test asserts that
+convergence happens at least one restart before the end: a race, with which
+symmetric assignment the master reaches first differing across HiGHS builds.
+
+**Also ruled out, each by measurement.** HiGHS thread nondeterminism (invariant at
+`threads` 0 and 1; at 2 and 8 the route abandons `lp_nlp_bb` entirely — answer
+still 0.008 but `mip_nlp_trace` is None, which makes the test die with
+`TypeError` rather than a named failure, same at `time_limit` 4 s and 5 s).
+Dependency drift (green and red runs installed identical versions). A knife-edge
+on gap *precision* — falsified outright: the gap is 9760x tolerance one restart
+before it fires. `terminate_polls == restarts == 73`, so the documented 1 s
+interrupt poll never fires on this master at all, because `milp_highs.py:623`
+resets its clock on every restart and restarts here are ~49 ms apart.
+
+**Two repair attempts, both falsified.** Seeding the known optimum via
+`initial_point` does not help — that seeds the NLP start, not the incumbent; the
+minimum gap seen while running stays 0.976 and the exit fires at restart 77 of 77.
+Lowering the demand so the master reaches the optimum early does not help either:
+at demand 3.0/2.0/1.0/0.5 the run ends `reason='optimal'` with
+`converged_early=False` (39/98/190/132 restarts), because the optimum is
+all-eight-open regardless of demand. Of the five variants only the shipped
+demand=4.0 fires at all.
+
+**Disposition.** Pre-existing, owned by #1066, not folded into #1360 — the test
+was restored to its `main` state there on the owner's call. Fixing it means a
+fixture in which the separator provably outlives the certificate, which neither
+attempt above achieved, or accepting that the final tree's convergence is never
+observed. Note that "fixing" the latter by consulting after the loop would be
+wrong: nothing stopped early, so reporting `converged_early` would be false.

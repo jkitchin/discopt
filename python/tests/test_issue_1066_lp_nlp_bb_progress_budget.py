@@ -442,37 +442,14 @@ def test_a_negative_poll_interval_is_refused():
 
 
 def _separator_outlives_the_certificate():
-    """A convex MINLP whose separator keeps cutting after the gap is closed.
+    """A convex MINLP whose separator keeps cutting long after the gap is closed.
 
     Eight symmetric on/off units, four of which must open: the master enumerates
     equivalent integer assignments and the separator vetoes each one, so the
-    restart loop keeps going (75 restarts, measured) past the instant the master's
-    dual bound meets the NLP incumbent. Optimum 0.008 with four units at
-    ``x = 0.5``.
-
-    **Retraction (#1360, CLAUDE.md §11).** This docstring used to claim the
-    certificate "becomes available early and the separator does not stop".
-    Measured per check-in, that is false, and believing it cost three CI rounds
-    spent looking at the wall instead of at the race. The real trajectory:
-
-        restart 61..72   gap 9.76e-01 .. 9.91e-01   (9760x the 1e-4 tolerance)
-        restart 73       gap <= 1e-4, the early exit fires
-
-    The gap does not close because the dual bound rises -- ``lb`` only creeps
-    0.005999 -> 0.006999. It closes because the *incumbent* drops, 0.2927 -> 0.008,
-    when the separator finally accepts a four-open assignment at restart 73. So the
-    certificate becomes available at restart 73 of the ~75 the separator needs, and
-    the margin this test rides on is **about two restarts out of seventy-five**.
-
-    That margin is the whole story of its Linux-only intermittency: the race is
-    "does the good incumbent arrive before the separator runs dry", and which
-    symmetric assignment the master reaches first is exactly what differs between
-    HiGHS builds and platforms. On macOS it is reproducible (4/4 reps, 73 restarts,
-    invariant at ``threads`` 0 and 1 and at ``time_limit`` 8..300); on Linux it
-    sometimes lands the other side. The fixture wants re-conditioning so the
-    certificate is genuinely available early -- seeding the good incumbent would
-    test the same property with a wide margin instead of a coin flip -- which
-    changes what this fixture covers and so is not folded into #1360.
+    restart loop keeps going (75 restarts, measured) well past the instant the
+    master's dual bound meets the NLP incumbent. Optimum 0.008 with four units at
+    ``x = 0.5``... the point is not the number, it is that the certificate becomes
+    available early and the separator does not stop.
     """
     import discopt.modeling as dm
 
@@ -500,36 +477,8 @@ def test_the_single_tree_stops_when_its_own_bound_certifies_the_incumbent():
     # master: naming an opt-in backend made the default algorithm depend on
     # whether highspy happened to be installed. The whole module already
     # ``importorskip``s highspy, so pinning it here changes no coverage.
-    #
-    # The budget is 300 s, not the 60 s this was written with, and the extra 240 s
-    # buy nothing on an idle machine: the solve takes 3.6 s and the run is
-    # bit-identical at 60 s and at 300 s (73 restarts, ``gap_tolerance``, measured
-    # #1360). The budget is loose because the early exit only fires at restart 73
-    # of the ~75 the separator needs, so the run has to finish essentially in full
-    # -- and a *guillotined* run reports exactly this test's failure signature:
-    # ``dual_bound_observations > 0`` (so the first assert passes) with
-    # ``converged_early`` False. Raising the wall removes that failure mode and
-    # weakens no assertion below -- every one of them still has to hold, on the
-    # same 73-restart trajectory.
-    #
-    # It is NOT, however, the cause of the Linux flake, and the earlier claim here
-    # that it was (a "contention lottery", from the job slowing 830 s -> 1237 s
-    # when main added ~86 tests) is retracted: the guard below passes on CI, so
-    # those runs were never cut short. The measured cause is the ~2-restart race
-    # documented on ``_separator_outlives_the_certificate``.
     res = _separator_outlives_the_certificate().solve(
-        time_limit=300, mip_nlp_method="lp_nlp_bb", milp_solver="highs"
-    )
-    # A tight wall, or a HiGHS ``threads`` setting that slows this tiny master, can
-    # make the route abandon lp_nlp_bb altogether: the answer stays correct
-    # (0.008) but ``mip_nlp_trace`` is None, and without this the next line dies
-    # with ``TypeError: 'NoneType' object is not subscriptable`` -- which names
-    # neither the route nor the reason (CLAUDE.md §6). Measured #1360 at
-    # ``time_limit`` 4 s and 5 s, and with ``threads`` 2 and 8.
-    assert res.mip_nlp_trace is not None, (
-        "the solve never ran lp_nlp_bb, so this test measured nothing about the "
-        f"early exit: status={str(res.status)!r}, objective={res.objective!r}, "
-        f"bound={res.bound!r} -- the route was abandoned before the single tree ran"
+        time_limit=60, mip_nlp_method="lp_nlp_bb", milp_solver="highs"
     )
     stats = res.mip_nlp_trace["summary"]["callback_stats"]
 
@@ -537,31 +486,7 @@ def test_the_single_tree_stops_when_its_own_bound_certifies_the_incumbent():
         "no check-in carried a dual bound, so the early exit was never asked "
         "anything -- this test would pass on a driver that cannot certify at all"
     )
-    # Separate "the early exit was asked and declined" from "the run was cut short
-    # before it could be asked" (CLAUDE.md §6). Without this, contention reads as a
-    # defect in the early exit and costs a bisect; with it, the failure names its
-    # own cause.
-    assert res.mip_nlp_trace["termination_reason"] not in ("termination_hook", "time_limit"), (
-        "the solve was cut short at its wall before the separator ran dry "
-        f"(reason={res.mip_nlp_trace['termination_reason']!r}, "
-        f"restarts={stats['restarts']}) -- this is a starved runner, not a "
-        "regression in the early exit; raise the budget rather than the tolerance"
-    )
-    # Carry the evidence in the message. A bare ``assert False is True`` says only
-    # that the early exit did not fire and nothing about why, which cost three CI
-    # rounds on this very line: the wall theory it suggested was wrong (the guard
-    # above passes, so the run was never cut short) and there was no way to tell
-    # from the log. CLAUDE.md §6 -- an instrument that cannot say what it saw is
-    # not an instrument.
-    assert stats["converged_early"] is True, (
-        "the master's dual bound never met the incumbent inside the gap tolerance "
-        "before the separator ran dry: "
-        f"reason={res.mip_nlp_trace['termination_reason']!r}, "
-        f"restarts={stats['restarts']}, "
-        f"dual_bound_observations={stats['dual_bound_observations']}, "
-        f"status={str(res.status)!r}, bound={res.bound!r}, objective={res.objective!r}, "
-        f"callback_stats={stats!r}"
-    )
+    assert stats["converged_early"] is True
     assert stats["restarts"] > 1, "the separator ran dry on its own; nothing was cut short"
     assert res.mip_nlp_trace["termination_reason"] == "gap_tolerance"
     assert str(res.status) in ("SolveStatus.OPTIMAL", "optimal")
