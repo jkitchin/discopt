@@ -140,12 +140,20 @@ class _IncumbentThenExhaustTree:
             self._inc = (np.asarray(sol, dtype=float).copy(), float(obj))
         return None
 
-    def import_results(self, ids, lbs, sols, feas, certified_infeasible=None):
+    def import_results(
+        self, ids, lbs, sols, feas, certified_infeasible=None, sentinel_is_exclusion=None
+    ):
         # #956 T3': the real tree now also takes a per-node RIGOROUS emptiness
-        # certificate. Forwarded verbatim — this double must not silently drop it,
-        # or these tests would stop exercising the path they guard.
+        # certificate. C-47 adds a second meaning-carrying mask: whether each
+        # `1e30` is a justified EXCLUSION of the region or a failure to bound it.
+        # Both are forwarded verbatim — this double must not silently drop either,
+        # or these tests would stop exercising the path they guard. (Dropping
+        # `sentinel_is_exclusion` in particular would make the double *more*
+        # conservative than the real tree and hide a regression.)
         self._imported += 1
-        return self._t.import_results(ids, lbs, sols, feas, certified_infeasible)
+        return self._t.import_results(
+            ids, lbs, sols, feas, certified_infeasible, sentinel_is_exclusion
+        )
 
     def incumbent(self):
         return self._inc

@@ -19,9 +19,29 @@ pub(crate) const SENTINEL_THRESHOLD: f64 = 1e29;
 
 /// Refuse to let a *failure* sentinel become a node's `local_lower_bound`
 /// (see `TreeManager::import_results`). Bound-changing — a node that used to
-/// prune as "dominated" on the sentinel is now branched or floored — so it ships
-/// behind a flag per CLAUDE.md §5, default OFF until the differential panel
-/// passes. `DISCOPT_TREE_SENTINEL_PRUNE_GUARD=1` turns it on.
+/// prune as "dominated" on the sentinel is now branched or floored — so it
+/// shipped behind a flag per CLAUDE.md §5 and **graduated to default ON** on the
+/// differential panel below. `DISCOPT_TREE_SENTINEL_PRUNE_GUARD=0` is the
+/// opt-out, kept so the legacy path stays A/B-able.
+///
+/// Graduation panel (2026-09-20, 63 MINLPLib instances, 20 s each, interleaved
+/// OFF/ON, 340 executed checks):
+/// * *cert-clean* — 0 violations: no bound above its reference optimum, no
+///   certified objective below a proven optimum, no solution on a proven
+///   infeasible instance, no objective drift > 1e-4. Certified 49/63 in **both**
+///   arms; `CERT_GAINED=[] CERT_LOST=[]`.
+/// * *cost* — 5/63 instances changed node count, +570 nodes total (11284 →
+///   11854) for +0.6 s total wall (349.7 s → 350.3 s). Four of the five sit at
+///   the 20 s limit, where node count measures throughput rather than work, and
+///   two of those improved their dual bound (`casctanks` 6.041 → 6.250,
+///   `tanksize` 1.26600 → 1.26629). Among the instances that *terminate*,
+///   exactly one moved: `ex14_1_9`, 5 → 11 nodes, same objective, same
+///   certificate, 0.2 s in both arms.
+///
+/// §5's *net-positive* bar does not gate this one: it exists for bound-tightening
+/// features (the `DISCOPT_CUT_INHERIT` lesson), and this is a soundness guard,
+/// which §1 governs. The measured price of refusing to certify a subtree that was
+/// never bounded is 6 nodes across the corpus.
 fn sentinel_prune_guard() -> bool {
     // The env read latches in a `OnceLock`, so a test process could otherwise
     // only ever observe one arm — and the regression IS the difference between
@@ -33,7 +53,8 @@ fn sentinel_prune_guard() -> bool {
     }
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        std::env::var("DISCOPT_TREE_SENTINEL_PRUNE_GUARD").is_ok_and(|v| v.trim() == "1")
+        // Default ON: only an explicit `=0` takes the legacy path.
+        !std::env::var("DISCOPT_TREE_SENTINEL_PRUNE_GUARD").is_ok_and(|v| v.trim() == "0")
     })
 }
 
@@ -1615,8 +1636,21 @@ mod tests {
     /// checks and — because `1e30 >= +inf` is false, so the bound-cut in step 1
     /// could not fire before the first incumbent — was fathomed AND promoted,
     /// making the VETOED point the incumbent and reporting it `optimal`.
+    ///
+    /// C-47 split the tail of this test by the sentinel's MEANING. The
+    /// bound-treatment assertions below used to be written once, for a sentinel
+    /// that did not say which kind it was; with `sentinel_prune_guard()` ON a
+    /// *failure* sentinel no longer becomes the node's bound, so it fathoms
+    /// untrusted and pins the tree bound at -inf — which is the whole point of
+    /// the guard. A declared *exclusion* keeps the pre-existing treatment.
     #[test]
     fn sentinelled_integer_node_is_never_promoted_to_the_incumbent() {
+        for is_exclusion in [false, true] {
+            sentinelled_integer_node_is_never_promoted_inner(is_exclusion);
+        }
+    }
+
+    fn sentinelled_integer_node_is_never_promoted_inner(is_exclusion: bool) {
         let mut tm = TreeManager::new(
             1,
             vec![0.0],
@@ -1638,7 +1672,7 @@ mod tests {
             solution: vec![3.0], // INTEGER-feasible, and the excluded point
             is_feasible: true,
             certified_infeasible: false,
-            sentinel_is_exclusion: false,
+            sentinel_is_exclusion: is_exclusion,
         }]);
         let stats = tm.process_evaluated();
 
@@ -1665,10 +1699,20 @@ mod tests {
             "every integer variable is fixed here, so the node has no branch direction \
              and is fathomed — the point is that it is fathomed WITHOUT being promoted"
         );
-        assert!(
-            !tm.bound_unresolved,
-            "a sentinelled node must not discard the whole tree bound (measured: it costs \
-             m3 its certificate); the Python taint floor accounts for it"
+        // A DECLARED exclusion is a region the caller removed on purpose, so no
+        // bound is owed for it and the tree bound survives. A *failure* sentinel
+        // is a subtree nobody bounded: the guard demotes it to -inf at import, it
+        // fathoms untrusted here, and the tree bound must go to -inf with it.
+        //
+        // The pre-C-47 text asserted the first for both, on the measured ground
+        // that it "costs m3 its certificate". The graduation panel retracts that:
+        // with the guard ON, m3 still exits `optimal obj=37.80000007276868
+        // bound=37.8 cert=True nodes=0`, identical to the OFF arm — it certifies
+        // at the root and never reaches this branch.
+        assert_eq!(
+            tm.bound_unresolved, !is_exclusion,
+            "a declared exclusion must not discard the tree bound; an unbounded \
+             subtree must (is_exclusion={is_exclusion})"
         );
         assert_eq!(
             tm.unresolved_floor,

@@ -3228,10 +3228,20 @@ own justification — it is not a side effect of a port.
 
 ## C-47 (P1, FIXED, 2026-09-20) — a *failure* sentinel installed as a node's lower bound lets the tree certify a subtree it never bounded
 
-**Status: FIXED behind `DISCOPT_TREE_SENTINEL_PRUNE_GUARD`. Regression tests:
+**Status: FIXED, default ON (`DISCOPT_TREE_SENTINEL_PRUNE_GUARD=0` is the
+opt-out). Regression tests:
 `tree_manager.rs::a_failed_relaxation_does_not_certify_its_subtree` (fails
 without the fix — `glb=5`, the incumbent falsely certified — and passes with it)
-and `::a_declared_exclusion_still_prunes`.**
+and `::a_declared_exclusion_still_prunes`; `test_c47_sentinel_meaning.py` pins
+the producer side.**
+
+**Graduation panel (2026-09-20, 63 instances × 20 s, interleaved, 340 executed
+checks): cert-clean, 0 violations, certified 49/63 in *both* arms,
+`CERT_GAINED=[] CERT_LOST=[]`. Cost +570 nodes (11284 → 11854) for +0.6 s wall;
+four of the five differing instances are at the time limit — two of them with a
+*better* dual bound — and among the instances that terminate exactly one moved
+(`ex14_1_9`, 5 → 11 nodes, same objective, same certificate). Audit row in
+`docs/dev/flag-retirement-audit.md`.**
 
 Found while investigating #1352. **Latent, not live**: four separate Python
 callers each compensate, so no end-to-end false certificate reproduces on the
