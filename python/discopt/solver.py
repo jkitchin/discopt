@@ -41,6 +41,7 @@ from discopt.constants import SENTINEL_THRESHOLD as _SENTINEL_THRESHOLD
 from discopt.constants import STARTING_POINT_CLIP as _SPC
 from discopt.debug import outermost_solve as _debug_outermost_solve
 from discopt.modeling.core import (
+    Constant,
     Constraint,
     CustomCall,
     Model,
@@ -5591,6 +5592,63 @@ def _declared_box_tightening(model: Model, deadline: Optional[float] = None):
         return None
 
 
+def _constant_objective_result(model: Model, t_start: float) -> Optional[SolveResult]:
+    """Decide a model with **no columns** here; return ``None`` for anything else.
+
+    A model that declares no variables has one feasible point -- the empty
+    assignment -- and an objective that is a constant, so its optimum is that
+    constant and the certificate is exact. Before #1385 the model instead
+    classified as a pure LP and went to HiGHS, which answered ``kModelEmpty``;
+    that name is not in ``_solve_lp``'s status dispatch, so it fell into the
+    catch-all and came back ``status="error"`` with ``objective=None`` -- the
+    constant discarded, and the outer layer then blaming "a nonlinear term with
+    no envelope". Nobody writes this model by hand, but a generator whose loop
+    body emitted no columns for a degenerate configuration does.
+
+    Deliberately narrow, and fails closed on every doubt:
+
+    * only a model with zero declared variables is decided here; anything with a
+      column takes its usual route, so no established path changes;
+    * the objective must be a :class:`Constant` node. A zero-variable model
+      cannot build anything else today, but if one ever arrives this returns
+      ``None`` rather than guessing a value -- the §3 ordering, a fall-through
+      to the honest failure beats a fabricated certificate;
+    * a 0-d constant only. A vector objective on a variable-free model has no
+      defined scalar optimum, so it is not this function's to answer;
+    * any declared constraint hands the model back. With no columns a constraint
+      is a constant relation, and deciding whether it holds (and reporting
+      ``infeasible`` when it does not) is a separate question from this one.
+
+    ``maximize`` needs no sign handling: the sole feasible point attains the
+    constant in either sense.
+    """
+    if model._variables:
+        return None
+    objective = model._objective
+    if objective is None or model._constraints:
+        return None
+    expr = objective.expression
+    if not isinstance(expr, Constant) or np.ndim(expr.value) != 0:
+        return None
+    value = float(expr.value)
+    if not math.isfinite(value):
+        return None
+    logger.debug(
+        "model declares no variables; its constant objective %r is the optimum (#1385)", value
+    )
+    return SolveResult(
+        status="optimal",
+        objective=value,
+        bound=value,
+        gap=0.0,
+        x={},
+        wall_time=time.perf_counter() - t_start,
+        node_count=0,
+        gap_certified=True,
+        bound_valid=True,
+    )
+
+
 def _check_finite_bounds(model: Model, tightening=None) -> None:
     """Warn if any variable has very large or infinite declared bounds.
 
@@ -8960,6 +9018,11 @@ def solve_model(
         box or fewer cuts — never makes it unsound.
         """
         return _remaining_budget() <= floor
+
+    # --- #1385: a model with no columns is decided here, not by a backend ---
+    trivial = _constant_objective_result(model, _solve_t0)
+    if trivial is not None:
+        return trivial
 
     # Slice held back from the search for the root-relaxation fallback so that
     # bound recovery happens INSIDE ``time_limit`` (see ``_ROOT_FALLBACK_RESERVE_S``).

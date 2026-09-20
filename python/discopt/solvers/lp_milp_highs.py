@@ -1181,6 +1181,24 @@ def solve_lp_std(sf: StdForm, *, time_limit: Optional[float] = None) -> HighsOut
             last_reason = "HiGHS could not decide between infeasible and unbounded"
         elif name in ("kTimeLimit", "kIterationLimit"):
             return done(HighsOutcome("time_limit", highs_status=name, message=name))
+        elif name == "kModelEmpty" and sf.n == 0 and sf.m == 0:
+            # #1385: an LP with no columns and no rows has one feasible point --
+            # the empty assignment -- so ``obj_const`` is the optimum and the
+            # certificate is exact. This name was not in the dispatch above, so
+            # it fell to the catch-all and returned ``error`` with the constant
+            # discarded. The shape test is the certificate: we answer only for a
+            # model that really is empty, never for a HiGHS status we merely
+            # recognise by name.
+            return done(
+                HighsOutcome(
+                    "optimal",
+                    x=np.zeros(0, dtype=np.float64),
+                    objective=float(sf.obj_const),
+                    bound=float(sf.obj_const),
+                    gap_certified=True,
+                    highs_status=name,
+                )
+            )
         else:
             return done(HighsOutcome("error", highs_status=name, message=f"HiGHS LP status {name}"))
 
