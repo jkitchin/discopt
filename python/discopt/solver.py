@@ -18183,6 +18183,21 @@ def _solve_continuous(
     constraint_bounds = None
     backend_evaluator = cast("NLPEvaluator", _BoundOverrideEvaluator(evaluator, lb, ub))
 
+    # Declared block structure (#1370). `_BoundOverrideEvaluator` changes bounds
+    # and nothing else — same columns, same rows — so labels resolved against the
+    # underlying evaluator are valid for this solve and for every node box the
+    # B&B tightens to. Resolution is skipped entirely for a model that declares
+    # nothing, which is every model that has not asked for this.
+    pounce_block_structure = None
+    if nlp_solver == "pounce":
+        from discopt.block_structure import block_structure_for_model, has_declaration
+
+        if has_declaration(model):
+            resolved = block_structure_for_model(model, evaluator)
+            if resolved is not None:
+                pounce_block_structure = resolved.as_pair()
+                logger.debug("block structure declared: %s", resolved.summary())
+
     # Primal-dual warm start (#1247): POUNCE takes the previous solve's
     # multipliers and barrier parameter alongside the point, and derives its own
     # warm-start options (``warm_start_init_point``, ``mu_init``, the bound
@@ -18208,6 +18223,7 @@ def _solve_continuous(
             x0,
             constraint_bounds=constraint_bounds,
             options=opts,
+            block_structure=pounce_block_structure,
             warm_start=pounce_warm_start,
         )
     else:

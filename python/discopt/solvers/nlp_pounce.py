@@ -101,6 +101,24 @@ def _kkt_from_info(info: dict) -> Optional[dict[str, float]]:
     return out or None
 
 
+def _linear_solver_from_info(info: dict) -> Optional[dict]:
+    """What the backend reports about its linear solver, or ``None`` (#1370).
+
+    POUNCE reports the block-structured factorization under ``linear_solver``
+    (``blocks``, ``n_blocks``, ``border_dim``) once pounce#955 ships; 0.12.0, the
+    current pin, reports no such key at all. Absent is carried as ``None`` rather
+    than as an empty dict that a caller could read as "the block path ran and
+    found nothing" — the same rule ``_kkt_from_info`` follows for a residual the
+    solver never reported.
+    """
+    raw = info.get("linear_solver")
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return dict(raw)
+    return {"report": raw}
+
+
 def solve_nlp(
     evaluator: NLPEvaluator,
     x0: np.ndarray,
@@ -108,6 +126,7 @@ def solve_nlp(
     options: Optional[dict] = None,
     kkt_schur_block: Optional[Sequence[int]] = None,
     ordering: Optional[Sequence[int]] = None,
+    block_structure: Optional[tuple[Sequence[int], Sequence[int]]] = None,
     warm_start: Optional[object] = None,
 ) -> NLPResult:
     """Solve an NLP using pounce with the NLPEvaluator callbacks.
@@ -128,6 +147,19 @@ def solve_nlp(
         ordering: Optional sequence of KKT-space indices giving a custom
             factorization ordering, handed to ``pounce.Problem.set_ordering``.
             Correctness-safe for the same reason as ``kkt_schur_block``.
+        block_structure: Optional ``(var_blocks, con_blocks)`` in **NLP index
+            space** — one block id per column and one per row, negative for the
+            shared border — handed to ``pounce.Problem.set_block_structure``,
+            which maps the declaration onto the KKT layout itself (which columns
+            survived fixing, how rows split into equalities and inequalities) and
+            factorizes the blocks in parallel over a shared border (#1370,
+            pounce#955). Unlike ``kkt_schur_block``, which takes KKT-space
+            indices a modelling layer cannot reliably produce, this is the space
+            the model knows; build it with
+            :func:`discopt.block_structure.resolve_block_structure` rather than by
+            hand, so the labels are checked against the emitted problem's own
+            sparsity. Correctness-safe in the same sense as the two above: the
+            factorization changes, the solution does not.
         warm_start: Optional ``pounce.WarmStart`` carrying a previous solve's
             primal point, constraint and bound multipliers, and barrier
             parameter (#1247). Handed to ``pounce.Problem.solve``, which derives
@@ -260,6 +292,30 @@ def solve_nlp(
                 _logger.debug("pounce rejected ordering, using default")
         else:
             _logger.debug("pounce has no set_ordering; ignoring passthrough")
+    if block_structure is not None:
+        var_blocks, con_blocks = block_structure
+        vb = [int(b) for b in var_blocks]
+        cb = [int(b) for b in con_blocks]
+        if len(vb) != n or len(cb) != m:
+            # Not pounce's fallback territory: a length mismatch means the labels
+            # were built against a different problem than the one being solved,
+            # and a partition that is merely in-range names the wrong columns.
+            raise ValueError(
+                f"block_structure has {len(vb)} variable and {len(cb)} constraint labels, "
+                f"but this NLP has {n} columns and {m} rows. Build the labels from the "
+                "evaluator that serves the solve (discopt.block_structure."
+                "resolve_block_structure)."
+            )
+        if hasattr(problem, "set_block_structure"):
+            try:
+                problem.set_block_structure(vb, cb)
+            except (TypeError, ValueError, RuntimeError):
+                _logger.debug("pounce rejected block_structure, using full space")
+        else:
+            # pounce-solver 0.12.0, the current pin, has no such method: the
+            # block-structured KKT path is pounce#955 and unreleased. Degrade to
+            # the full-space solve rather than raising (#394's pattern).
+            _logger.debug("pounce has no set_block_structure; ignoring passthrough")
 
     t0 = time.perf_counter()
     try:
@@ -308,6 +364,7 @@ def solve_nlp(
         x=np.asarray(x),
         objective=float(info.get("obj_val", np.nan)),
         kkt=_kkt_from_info(info),
+        linear_solver=_linear_solver_from_info(info),
         multipliers=np.asarray(multipliers) if multipliers is not None else None,
         bound_multipliers_lower=np.asarray(mult_x_L) if mult_x_L is not None else None,
         bound_multipliers_upper=np.asarray(mult_x_U) if mult_x_U is not None else None,
@@ -323,6 +380,7 @@ def solve_nlp_from_model(
     options: Optional[dict] = None,
     kkt_schur_block: Optional[Sequence[int]] = None,
     ordering: Optional[Sequence[int]] = None,
+    block_structure: object = "auto",
 ) -> NLPResult:
     """Convenience: create an NLPEvaluator from a model and solve with POUNCE.
 
@@ -344,6 +402,17 @@ def solve_nlp_from_model(
         options: POUNCE/Ipopt options dict.
         kkt_schur_block: Optional Schur/block-triangular KKT partition (see above).
         ordering: Optional custom KKT-space factorization ordering (see above).
+        block_structure: ``"auto"`` (the default) resolves the model's own
+            declaration — :meth:`Model.set_block` /
+            :meth:`Model.set_constraint_block` — against the evaluator that
+            serves this solve, and passes the labels on; a model that declares
+            nothing is solved exactly as before. An explicit
+            ``(var_blocks, con_blocks)`` pair is validated against the same
+            evaluator and then passed; ``None`` skips the feature entirely. An
+            inconsistent declaration raises
+            :class:`~discopt.block_structure.BlockStructureError` rather than
+            being downgraded to a full-space solve: it means the model says
+            something about itself that is not true.
 
     Returns:
         NLPResult with solution.
@@ -351,6 +420,21 @@ def solve_nlp_from_model(
     from discopt._tape_nlp_evaluator import make_evaluator
 
     evaluator = make_evaluator(model)
+    labels: Optional[tuple[Sequence[int], Sequence[int]]] = None
+    if isinstance(block_structure, str):
+        if block_structure != "auto":
+            raise ValueError(
+                f"block_structure={block_structure!r}; pass 'auto', None, or an explicit "
+                "(var_blocks, con_blocks) pair."
+            )
+        from discopt.block_structure import block_structure_for_model
+
+        resolved = block_structure_for_model(model, evaluator)
+        labels = resolved.as_pair() if resolved is not None else None
+    elif block_structure is not None:
+        from discopt.block_structure import validate_block_labels
+
+        labels = validate_block_labels(block_structure, evaluator).as_pair()
 
     if x0 is None:
         lb, ub = evaluator.variable_bounds
@@ -364,4 +448,5 @@ def solve_nlp_from_model(
         options=options,
         kkt_schur_block=kkt_schur_block,
         ordering=ordering,
+        block_structure=labels,
     )

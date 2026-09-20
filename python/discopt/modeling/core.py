@@ -4866,6 +4866,17 @@ class Model:
         self._decomp_stages: dict[str, int] = {}
         self._decomp_blocks: dict[str, int] = {}
         self._coupling_keys: set = set()
+        # Element-wise block labels for the structure-aware KKT path (#1370).
+        # ``_block_labels_var`` maps a variable NAME to one block id per element
+        # (flat, C order); ``_block_labels_con`` maps a constraint name AND/OR
+        # ``id(constraint)`` to one id per row. Negative = shared / linking.
+        # Written by ``set_block``/``set_constraint_block``, resolved into NLP
+        # index space by ``discopt.block_structure``. Separate from
+        # ``_decomp_blocks`` on purpose: that one is whole-variable and feeds
+        # ``discopt.decomposition``, which cannot represent a variable whose
+        # elements span blocks.
+        self._block_labels_var: dict[str, np.ndarray] = {}
+        self._block_labels_con: dict = {}
         # Named index sets registered via ``set()`` (see ``discopt.modeling.sets``).
         self._sets: list = []
         # Linear constraint blocks emitted directly into the Rust builder
@@ -5959,13 +5970,104 @@ class Model:
             self.set_stage(v, 2)
         return self
 
-    def set_block(self, var: "Variable", block_id: int) -> "Model":
-        """Assign a variable to an explicit decomposition block.
+    def set_block(self, var: "Variable", block_id) -> "Model":
+        """Assign a variable — or each of its elements — to a block.
+
+        Two granularities, one vocabulary (#1370):
+
+        * ``set_block(y, 3)`` assigns the WHOLE variable to block 3. This is the
+          decomposition annotation :func:`discopt.decomposition.detect_decomposition`
+          has always consumed, and it is stored exactly where it always was.
+        * ``set_block(V, ids)`` with an array-like ``ids`` broadcastable to
+          ``V.shape`` assigns block membership **per element**. A model that
+          stores K replicas in one array variable — K contingency cases, K
+          scenarios, K trajectories — cannot say what it means at whole-variable
+          granularity, and that is the case the structure-aware KKT path exists
+          for.
+
+        A **negative** id means *shared* (the arrowhead border):
+        ``model.set_block(p_base, -1)``.
+
+        Element labels are consumed by
+        :mod:`discopt.block_structure`, which resolves them into the emitted
+        NLP's index space and hands them to POUNCE. They are deliberately NOT
+        written into ``_decomp_blocks``: a variable whose elements span several
+        blocks has no single decomposition block, and inventing one would feed
+        ``discopt.decomposition`` a partition the model never declared.
 
         Accepts a :class:`Variable`, a name string, or an indexed reference
         (``y[i]``, resolved to the whole variable).
         """
-        self._decomp_blocks[self._decomp_var_name(var)] = int(block_id)
+        name = self._decomp_var_name(var)
+        if isinstance(block_id, (int, np.integer)) and not isinstance(block_id, bool):
+            self._decomp_blocks[name] = int(block_id)
+            self._block_labels_var.pop(name, None)
+            return self
+
+        target = None
+        for v in self._variables:
+            if v.name == name:
+                target = v
+                break
+        if target is None:
+            raise ValueError(
+                f"set_block: no variable named {name!r} on this model, so an "
+                "element-wise block declaration cannot be shape-checked. Add the "
+                "variable first, or pass the Variable object."
+            )
+        ids = np.asarray(block_id)
+        if ids.dtype == bool or not np.issubdtype(ids.dtype, np.integer):
+            raise TypeError(
+                f"set_block: block ids for {name!r} must be integers (negative = shared); "
+                f"got dtype {ids.dtype}."
+            )
+        shape = target.shape if target.shape != () else (1,)
+        try:
+            ids = np.broadcast_to(ids, shape)
+        except ValueError as exc:
+            raise ValueError(
+                f"set_block: block ids of shape {ids.shape} are not broadcastable to "
+                f"variable {name!r} of shape {target.shape}."
+            ) from exc
+        self._block_labels_var[name] = np.ascontiguousarray(ids, dtype=np.int64).reshape(-1)
+        self._decomp_blocks.pop(name, None)
+        return self
+
+    def set_constraint_block(self, constraint: Union[Constraint, str], block_id) -> "Model":
+        """Assign a constraint — or each of its rows — to a block (#1370).
+
+        ``block_id`` is an int, or an array-like of one id per row for an
+        array-valued body (one :class:`Constraint`, many rows). Negative means
+        *linking*: the row's dual is placed with the shared border.
+
+        Declaring constraints is **optional**. Left undeclared, a row's block is
+        derived from the columns it actually touches in the emitted NLP's
+        Jacobian — a row over block ``b``'s columns (plus shared ones) is block
+        ``b``'s, a row spanning two blocks is linking. That derivation is
+        mechanical, not a heuristic: it reads the declared variable partition and
+        the row's own sparsity, and it is checked either way. Declare a row
+        explicitly to override it — most usefully to push a row that touches only
+        shared columns onto the border deliberately.
+
+        Accepts the :class:`Constraint` object returned by :meth:`subject_to`, or
+        its name. Rows added through the fast builder path
+        (:meth:`add_linear_constraints`) are materialized fresh on every read, so
+        their object identity does not survive; declare those **by name**.
+        """
+        ids = np.asarray(block_id)
+        if ids.dtype == bool or not np.issubdtype(ids.dtype, np.integer):
+            raise TypeError(
+                "set_constraint_block: block ids must be integers (negative = linking); "
+                f"got dtype {ids.dtype}."
+            )
+        labels = np.ascontiguousarray(ids, dtype=np.int64).reshape(-1)
+        if isinstance(constraint, str):
+            self._block_labels_con[constraint] = labels
+            return self
+        cname = getattr(constraint, "name", None)
+        self._block_labels_con[id(constraint)] = labels
+        if cname:
+            self._block_labels_con[cname] = labels
         return self
 
     def mark_coupling(self, constraint: Union[Constraint, str]) -> "Model":

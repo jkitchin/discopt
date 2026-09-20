@@ -1038,7 +1038,13 @@ _STATE_PLAIN = ("_aux_counter", "_decomp_stages", "_decomp_blocks")
 _STATE_AS_SORTED_LIST = ("_zero_spanning_factor_auxes",)
 
 #: Attributes carried in "state" by a bespoke encoder.
-_STATE_BESPOKE = ("_coupling_keys", "_sets", "_simplex_lowerings")
+_STATE_BESPOKE = (
+    "_coupling_keys",
+    "_sets",
+    "_simplex_lowerings",
+    "_block_labels_var",
+    "_block_labels_con",
+)
 
 _MODEL_STATE = (
     _STATE_IN_OWN_SECTION
@@ -1130,6 +1136,80 @@ def _dec_coupling_keys(d: Optional[dict], rows: list) -> set:
     return out
 
 
+def _enc_block_labels_var(model: Model) -> dict:
+    """Element-wise variable block labels (``Model.set_block`` with an array, #1370).
+
+    Keyed by variable name, which is stable across a round-trip, so this is a
+    plain name -> list-of-ints map. Written for the same reason the coupling
+    marks are: a label that vanishes on reload does not merely lose a hint --
+    ``block_structure`` would emit a partition the user never declared, or none.
+    """
+    labels: dict = getattr(model, "_block_labels_var", {}) or {}
+    return {
+        str(name): [int(v) for v in np.asarray(vals).reshape(-1)] for name, vals in labels.items()
+    }
+
+
+def _dec_block_labels_var(d: Optional[dict]) -> dict:
+    if not d:
+        return {}
+    return {str(name): np.asarray(vals, dtype=np.int64) for name, vals in d.items()}
+
+
+def _enc_block_labels_con(model: Model, rows: list) -> dict:
+    """Per-row constraint block labels (``Model.set_constraint_block``, #1370).
+
+    The store holds both name keys and ``id(constraint)`` keys pointing at the
+    same labels (so a lookup succeeds from either handle). ``id`` is a
+    process-local address, so it is written as a ROW INDEX -- and an id matching
+    no row is refused rather than dropped, exactly as for a coupling mark.
+    """
+    store: dict = getattr(model, "_block_labels_con", {}) or {}
+    row_of_id = {id(con): i for i, con in enumerate(rows)}
+    names: dict[str, list[int]] = {}
+    indexed: list[dict] = []
+    for key, vals in store.items():
+        payload = [int(v) for v in np.asarray(vals).reshape(-1)]
+        if isinstance(key, str):
+            names[key] = payload
+        elif isinstance(key, int):
+            idx = row_of_id.get(key)
+            if idx is None:
+                raise SerializationError(
+                    "a constraint block label refers to a constraint object that is not "
+                    "among this model's rows, so it cannot be written as a stable "
+                    "reference. Re-declare it on the current model "
+                    "(Model.set_constraint_block), or declare it by name."
+                )
+            indexed.append({"row": idx, "labels": payload})
+        else:
+            raise SerializationError(
+                f"cannot serialize a constraint block label keyed by {type(key).__name__}; "
+                "Model.set_constraint_block records a name string or a constraint object."
+            )
+    return {"names": names, "rows": sorted(indexed, key=lambda d: d["row"])}
+
+
+def _dec_block_labels_con(d: Optional[dict], rows: list) -> dict:
+    if not d:
+        return {}
+    out: dict = {}
+    for name, vals in (d.get("names") or {}).items():
+        out[str(name)] = np.asarray(vals, dtype=np.int64)
+    for entry in d.get("rows", []):
+        idx = int(entry["row"])
+        if idx >= len(rows):
+            raise SerializationError(
+                f"a constraint block label refers to row {idx}, but the model has {len(rows)} rows."
+            )
+        labels = np.asarray(entry["labels"], dtype=np.int64)
+        out[id(rows[idx])] = labels
+        cname = getattr(rows[idx], "name", None)
+        if cname:
+            out[cname] = labels
+    return out
+
+
 def _enc_simplex_lowerings(model: Model) -> list[dict]:
     out = []
     for rec in getattr(model, "_simplex_lowerings", []) or []:
@@ -1172,6 +1252,8 @@ def _enc_state(model: Model, rows: list) -> dict:
     state["_coupling_keys"] = _enc_coupling_keys(model, rows)
     state["_sets"] = _enc_sets(model)
     state["_simplex_lowerings"] = _enc_simplex_lowerings(model)
+    state["_block_labels_var"] = _enc_block_labels_var(model)
+    state["_block_labels_con"] = _enc_block_labels_con(model, rows)
     return state
 
 
@@ -1185,6 +1267,8 @@ def _dec_state(state: Optional[dict], model: Model, rows: list) -> None:
         if name in state:
             setattr(model, name, set(state[name]))
     model._coupling_keys = _dec_coupling_keys(state.get("_coupling_keys"), rows)
+    model._block_labels_var = _dec_block_labels_var(state.get("_block_labels_var"))
+    model._block_labels_con = _dec_block_labels_con(state.get("_block_labels_con"), rows)
     model._sets = _dec_sets(state.get("_sets", []))
     model._simplex_lowerings = _dec_simplex_lowerings(state.get("_simplex_lowerings", []))
 
