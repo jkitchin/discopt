@@ -6883,6 +6883,22 @@ class Model:
             (``max_nodes``, the gap) with real slack against ``time_limit``. Expect
             a longer run: nothing truncates a stage early any more.
 
+            **``time_limit`` still binds** (#1371). "Expect a longer run" means up
+            to the wall, not past it: a stage that would have been cut short by its
+            role-2 share now runs until the *solve* deadline instead, and no
+            further. Until #1371 the two were removed together — the role-2 helpers
+            answered "no clock at all" — and this mode was silently exempt from
+            #1152's "hard wall with an anytime bound". Measured then:
+            ``casctanks`` took 600.04 s against ``time_limit=60`` (10.0x) and
+            ``bchoco08`` 376.28 s against 30 s (12.5x), where the same solves with
+            ``deterministic=False`` returned in 60.23 s and 30.11 s.
+
+            The consequence for reproducibility is unchanged and is the sentence
+            above: give the solve a budget generous enough that role-1 never binds.
+            If it does bind, you get a truncated — and therefore machine-speed
+            dependent — answer, which is the trade this mode exists to let you
+            avoid, not an overrun.
+
             Until #1116 this defaulted to ``True`` and was read nowhere. See
             :meth:`discopt.solver.solve_model`.
         partitions : int, default 0
