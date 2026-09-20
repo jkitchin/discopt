@@ -975,6 +975,17 @@ def test_no_shipped_module_outside_the_differentiable_subsystem_builds_the_jax_e
         "_relax/differentiable.py",
         "_relax/differentiable_solve.py",
         "_relax/pounce_layer.py",
+        # #1370 Part B. Unlike the three above, this module IS reachable from the
+        # default solve path -- but only past a default-OFF flag AND a model that
+        # declares a block partition, and its JAX import is function-local, so an
+        # ordinary solve never executes it. It needs the JAX evaluator
+        # specifically: it drives `_cons_fn_jit` and `_lagrangian_hvp_fn_jit`, the
+        # jitted forms the tape has no counterpart for. Because that reachability
+        # is what the other three do not have, the entry is not left to stand on
+        # its own -- `test_block_vector_eval_is_the_only_gate_onto_the_jax_path`
+        # below pins BOTH arms of the gate, so this line cannot decay into a
+        # silent default-path leak.
+        "_block_eval.py",
     }
     offenders = []
     scanned = 0
@@ -1028,4 +1039,92 @@ def test_lp_tape_rung_declines_a_nonlinear_body():
     affine.minimize(y)
     assert pc._extract_lp_data_tape(affine) is not None, (
         "the gate declined an affine body, so the decline above proves nothing"
+    )
+
+
+_BLOCK_GATE_DRIVER = """\
+import sys
+import numpy as np
+import discopt.modeling as dm
+from discopt import Model
+from discopt.solvers.nlp_pounce import solve_nlp_from_model
+
+# K identical blocks over a shared parameter vector, coupled across time, and
+# DECLARED -- the compressed path refuses an undeclared model, so a driver
+# without set_block would take the off-arm no matter how the flag is set and
+# both arms would read the same (CLAUDE.md §6).
+K, steps, dim = 4, 6, 3
+m = Model("blocks")
+w = m.continuous("w", shape=(dim,), lb=-2.0, ub=2.0)
+z = m.continuous("z", shape=(K, steps, dim), lb=-10.0, ub=10.0)
+zc = z[:, :-1, :]
+rhs = -w[None, None, :] * zc + 0.1 * dm.sin(zc) + 0.05 * zc * z[:, 1:, :]
+m.subject_to(z[:, 1:, :] - zc - 0.1 * rhs == 0.0, name="dyn")
+m.minimize(dm.sum((z - 1.0) ** 2) + 0.01 * dm.sum(w**2))
+m.set_block(z, np.repeat(np.arange(K, dtype=np.int64), steps * dim).reshape(K, steps, dim))
+m.set_block(w, -1)
+
+r = solve_nlp_from_model(m)
+leaked = sorted(k for k in sys.modules if k == "jax" or k.startswith("jax."))
+print("STATUS:" + str(r.status.name))
+print("OBJ:" + repr(None if r.objective is None else float(r.objective)))
+print("JAXMODS:" + str(len(leaked)))
+"""
+
+
+@pytest.mark.slow
+def test_block_vector_eval_is_the_only_gate_onto_the_jax_path():
+    """``_block_eval.py`` is on the allowlist above; this is what earns it.
+
+    The module is reachable from the default solve path, so allowlisting it on
+    the strength of "it needs JAX on purpose" would be exactly the silent
+    weakening the grep exists to prevent. Both arms are asserted instead, on the
+    SAME block-declaring model, so the entry is pinned to the flag rather than to
+    the module:
+
+    * flag off (the default) -- a solve of a model that declares blocks must
+      still leave ``sys.modules`` JAX-free. This is the invariant that matters;
+      the grep is only a proxy for it.
+    * flag on -- JAX must actually be imported. That is the vacuity control: if
+      the compressed path silently refused (an admission failure, a coloring
+      that does not pay, a renamed flag), the off-arm would pass for the wrong
+      reason and this file would be guarding nothing.
+
+    Asserting a real objective on both arms keeps a solve that died early from
+    satisfying either one.
+    """
+    off = _run_raw(_BLOCK_GATE_DRIVER)
+    assert off["STATUS"] == "OPTIMAL", f"off-arm did no real work: {off}"
+    assert off["OBJ"] != "None", f"off-arm returned no solution: {off}"
+    assert off["JAXMODS"] == "0", (
+        f"a default solve of a block-declaring model imported {off['JAXMODS']} jax "
+        "modules -- DISCOPT_BLOCK_VECTOR_EVAL is no longer what gates the JAX path"
+    )
+
+    import os
+
+    env = dict(os.environ)
+    env["DISCOPT_BLOCK_VECTOR_EVAL"] = "1"
+    out = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(_BLOCK_GATE_DRIVER)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=600,
+    )
+    assert out.returncode == 0, f"on-arm failed\nstdout={out.stdout}\nstderr={out.stderr[-3000:]}"
+    on = {}
+    for line in out.stdout.splitlines():
+        k, _, v = line.partition(":")
+        if _:
+            on[k] = v
+    assert on["STATUS"] == "OPTIMAL", f"on-arm did no real work: {on}"
+    assert on["OBJ"] != "None", f"on-arm returned no solution: {on}"
+    assert int(on["JAXMODS"]) > 0, (
+        "with DISCOPT_BLOCK_VECTOR_EVAL=1 the compressed path did not import jax, so "
+        "it never engaged -- the off-arm above is then vacuous, not a guarantee"
+    )
+    # The point of the feature, not just of the gate: same model, same answer.
+    assert float(on["OBJ"]) == pytest.approx(float(off["OBJ"]), rel=1e-6), (
+        f"the compressed path changed the objective: {on['OBJ']} vs {off['OBJ']}"
     )

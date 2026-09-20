@@ -166,6 +166,13 @@ class NLPResult:
     #: that hold a convexity certificate and may soundly read it. See
     #: :data:`discopt.solvers.nlp_ipopt.IPOPT_LOCALLY_INFEASIBLE`.
     raw_status: Optional[int] = None
+    #: What the backend reports about the linear solver it factorized with, or
+    #: ``None`` when it reports nothing (#1370). POUNCE fills this with its
+    #: block-structured factorization report — ``blocks``, ``n_blocks``,
+    #: ``border_dim`` — when a declared partition engaged the block path, which
+    #: is how a caller tells "the labels were used" from "the labels were
+    #: validated, handed over, and quietly declined".
+    linear_solver: Optional[dict] = None
 
 
 # ---------------------------------------------------------------------------

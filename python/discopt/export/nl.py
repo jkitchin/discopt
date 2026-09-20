@@ -58,6 +58,7 @@ def to_nl(
     path: Union[str, Path, None] = None,
     *,
     initial_point: Union[dict, None] = None,
+    block_structure_file: Union[str, Path, None] = None,
 ) -> Union[str, None]:
     """Export a discopt Model to AMPL .nl text format.
 
@@ -81,12 +82,34 @@ def to_nl(
         :meth:`Model.set_initial_point` attaches one explicitly — or no section
         at all when the model carries none. Passing ``{}`` writes no section
         even when the model does carry one; an explicit argument always wins.
+    block_structure_file : str or Path, optional
+        Also write the model's declared block partition (#1370) beside the
+        ``.nl``, in the companion format POUNCE's CLI reads: first line ``n m``,
+        then n variable labels and m constraint labels, whitespace-separated,
+        negative for the shared border. Requires a declaration
+        (:meth:`Model.set_block`); a model that declares nothing raises.
+
+        Passing this **forces the Python writer** for the ``.nl`` itself. The
+        labels have to be written in the ``.nl``'s own column order, which is a
+        permutation of the model's (:meth:`_NLWriter._reorder_vars_canonical`),
+        and the Python writer is the one that can hand over the permutation it
+        used. The two writers are diffed byte-for-byte, so the file is the same
+        one the Rust writer would have produced — taking the mapping from the
+        writer that actually ran is simply the only way the labels cannot drift
+        from the columns they name.
 
     Returns
     -------
     str or None
         The .nl text if *path* is ``None``, otherwise ``None``.
     """
+    if block_structure_file is not None:
+        return _to_nl_with_block_structure(
+            model,
+            path,
+            initial_point=initial_point,
+            block_structure_file=block_structure_file,
+        )
     # Ahead of the Rust fast path on purpose. `_NLWriter.write()` makes this same
     # call (#1218), but `to_nl` only reaches that writer when `_rust_nl_text`
     # declines -- so relying on it would make the refusal depend on whether the
@@ -107,6 +130,66 @@ def to_nl(
         Path(path).write_text(text)
         return None
     return text
+
+
+def _to_nl_with_block_structure(
+    model: Model,
+    path: Union[str, Path, None],
+    *,
+    initial_point: Union[dict, None],
+    block_structure_file: Union[str, Path],
+) -> Union[str, None]:
+    """``.nl`` plus its companion block-label file, from one writer (#1370).
+
+    The two files are produced by the SAME ``_NLWriter`` instance so the labels
+    are indexed by the very permutation that wrote the columns. Deriving the
+    permutation a second time — even with identical code — would be a second
+    source of truth for the one thing this feature has to get right.
+    """
+    from discopt._tape_nlp_evaluator import make_evaluator
+    from discopt.block_structure import block_structure_for_model
+
+    refuse_non_algebraic_relations(model, ".nl")
+    model.validate(for_solve=False)
+
+    structure = block_structure_for_model(model, make_evaluator(model), required=True)
+    assert structure is not None  # required=True raises otherwise
+
+    writer = _NLWriter(model, initial_point=initial_point)
+    text = writer.write()
+
+    var_labels = _block_labels_in_nl_order(writer, model, structure.var_blocks)
+    con_labels = [int(b) for b in structure.con_blocks]
+    if len(con_labels) != len(writer._con_linear):
+        # The evaluator and the writer expand array bodies and builder rows in
+        # the same order (both row-major, both expression rows then builder
+        # rows), so a disagreement in COUNT means one of them changed and the
+        # labels would be written against rows they do not describe.
+        raise ValueError(
+            f"the emitted NLP has {len(con_labels)} rows but the .nl writer emitted "
+            f"{len(writer._con_linear)}; refusing to write block labels that would name "
+            "the wrong rows."
+        )
+
+    lines = [f"{len(var_labels)} {len(con_labels)}"]
+    lines.append(" ".join(str(b) for b in var_labels))
+    lines.append(" ".join(str(b) for b in con_labels))
+    Path(block_structure_file).write_text("\n".join(lines) + "\n")
+
+    if path is not None:
+        Path(path).write_text(text)
+        return None
+    return text
+
+
+def _block_labels_in_nl_order(writer: "_NLWriter", model: Model, var_blocks: Any) -> list[int]:
+    """Permute model-space column labels into the writer's ``.nl`` column order."""
+    offsets = variable_flat_offsets(model)
+    labels = [0] * len(writer._flat_vars)
+    for nl_index, (var, elem) in enumerate(writer._flat_vars):
+        flat = offsets[id(var)] + int(elem)
+        labels[nl_index] = int(var_blocks[flat])
+    return labels
 
 
 _RUST_NL_ENV = "DISCOPT_RUST_NL"
