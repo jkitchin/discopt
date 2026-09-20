@@ -13987,6 +13987,11 @@ def solve_model(
         if n_batch == 0:
             break
 
+        # Allocated here, not at its first write below, because the node solve
+        # itself can record a rigorous exclusion (see the fuller note at the
+        # user-callback block, and `_solve_batch_pounce`'s `excl_out`).
+        _exclusion_mask = np.zeros(n_batch, dtype=bool)
+
         # C-42 Part 2 — lazy re-separation, global-bound-stall governor. Under
         # pool inheritance the square/PSD point separators are skipped at
         # nodes; on the tspn05 class that skip is load-bearing for closure
@@ -14283,6 +14288,7 @@ def solve_model(
                 batch_psols=batch_psols,
                 multistart=_POUNCE_BATCH_MULTISTART,
                 convex=_model_is_convex,
+                excl_out=_exclusion_mask,
             )
             # A convex node whose relaxation objective is not KKT-valid (and
             # could not be polished) is not a valid lower bound; decertify the
@@ -16319,7 +16325,6 @@ def solve_model(
         # not acceptable, #1038/#748 -- sets it True, which is exactly the pruning
         # behaviour those issues specify, preserved unchanged.
         _requeue_mask = None
-        _exclusion_mask = np.zeros(n_batch, dtype=bool)
         if lazy_constraints is not None or incumbent_callback is not None:
             # #1365: a node whose integer point a lazy cut vetoed is returned to
             # the frontier and re-solved against the cut, not fathomed. The cap
@@ -18733,6 +18738,11 @@ def _solve_nlp_bb(
         # This resolves degenerate bounds (e.g., x <= M*y with y fixed at 0)
         # that cause IPM convergence failures.
         node_infeasible_mask = np.zeros(n_batch, dtype=bool)
+        # Which of the sentinels written below are a PROVEN-empty region rather
+        # than a failure to bound one (C-47). This path already draws exactly
+        # that line for `_unconverged_fathom`; the flag carries it across the
+        # Rust boundary so TreeManager can refuse to prune on the other kind.
+        result_excl = np.zeros(n_batch, dtype=bool)
         if cl_list:
             for i in range(n_batch):
                 node_lb_i = np.array(batch_lb[i])
@@ -18810,6 +18820,7 @@ def _solve_nlp_bb(
                 batch_psols=batch_psols,
                 multistart=_POUNCE_BATCH_MULTISTART,
                 convex=_model_is_convex,
+                excl_out=result_excl,
             )
             # Convex MINLP: the NLP objective is the node lower bound. A node
             # whose relaxation did not reach KKT (and could not be polished) is
@@ -18999,6 +19010,12 @@ def _solve_nlp_bb(
                         not _model_is_convex and not node_infeasible_mask[i]
                     ):
                         _unconverged_fathom = True
+                    else:
+                        # The complement: a clean INFEASIBLE on a convex node, or a
+                        # node already carrying a rigorous emptiness certificate.
+                        # That IS a proof the region is empty, so the sentinel prune
+                        # is justified and the guard must not demote it (C-47).
+                        result_excl[i] = True
                     lb_c = np.clip(node_lb, -_SPC, _SPC)
                     ub_c = np.clip(node_ub, -_SPC, _SPC)
                     result_sols[i] = 0.5 * (lb_c + ub_c)
@@ -19010,6 +19027,7 @@ def _solve_nlp_bb(
             for idx in np.flatnonzero(node_infeasible_mask):
                 i = int(idx)
                 result_lbs[i] = _INFEASIBILITY_SENTINEL
+                result_excl[i] = True
                 result_feas[i] = False
 
         # --- Feasibility pump after root node ---
@@ -19291,7 +19309,9 @@ def _solve_nlp_bb(
         # only from a rigorous certificate; the same sentinel also encodes soft
         # failures, and fathoming those would be #927's false-certificate mode.
         t_rust_start = time.perf_counter()
-        tree.import_results(result_ids, result_lbs, result_sols, result_feas, node_infeasible_mask)
+        tree.import_results(
+            result_ids, result_lbs, result_sols, result_feas, node_infeasible_mask, result_excl
+        )
         tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
 
@@ -20290,6 +20310,7 @@ def _solve_batch_pounce(
     batch_psols=None,
     multistart=False,
     convex=False,
+    excl_out=None,
 ):
     """Solve a batch of node NLP relaxations in parallel with POUNCE.
 
@@ -20308,6 +20329,14 @@ def _solve_batch_pounce(
     integrality). POUNCE is a true filter-IPM (KKT-valid), so unlike the JAX
     IPM its converged objective needs no polish pass on convex models; the
     caller still applies the nonconvex / constraint-feasibility post-checks.
+
+    ``excl_out``, when given, is a length-``n_batch`` bool array the caller owns;
+    entry ``i`` is set when node ``i``'s sentinel is a PROVEN-empty region rather
+    than a failure to bound one (C-47). Only a clean ``INFEASIBLE`` on a *convex*
+    node qualifies — the same rule the serial path applies — so a stall, an error
+    or a restoration failure leaves it False and the node stays open. Without this
+    the batch path's rigorous verdicts, which reach the caller as a bare sentinel
+    indistinguishable from a failure, would be demoted and lose real certificates.
 
     Starting points per node:
 
@@ -20497,6 +20526,8 @@ def _solve_batch_pounce(
                 convex=convex,
             )
             result_sols[i] = np.asarray(res.x, dtype=np.float64)
+            if convex and res.status == SolveStatus.INFEASIBLE and excl_out is not None:
+                excl_out[i] = True
             if res.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
                 obj = float(res.objective)
                 if np.isfinite(obj):
@@ -20512,6 +20543,7 @@ def _solve_batch_pounce(
         best_obj = None
         best_x = None
         best_status = None
+        saw_infeasible = False
         for s in range(n_starts):
             x, info = results[i * n_starts + s]
             # Native results come back in .nl column order; map to evaluator
@@ -20524,6 +20556,8 @@ def _solve_batch_pounce(
             if best_x is None:
                 best_x = x_arr  # placeholder if no start is accepted
             status = _IPOPT_STATUS_MAP.get(info.get("status", -100), SolveStatus.ERROR)
+            if status == SolveStatus.INFEASIBLE:
+                saw_infeasible = True
             # Accept the same statuses as the serial pounce node path; anything
             # else (infeasible, restoration failure, errors) is not usable.
             if status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
@@ -20533,6 +20567,11 @@ def _solve_batch_pounce(
                     best_x = x_arr
                     best_status = status
         result_sols[i] = best_x
+        if best_obj is None and saw_infeasible and convex and excl_out is not None:
+            # No start produced a usable objective and POUNCE declared the node
+            # infeasible. On a convex node that IS a proof the box is empty (the
+            # serial path's rule), so the sentinel prune below is rigorous.
+            excl_out[i] = True
         if best_obj is not None:
             result_lbs[i] = best_obj
             # A non-KKT (ITERATION_LIMIT) convex objective is not a valid LB.
@@ -25633,7 +25672,7 @@ def _solve_milp_bb(
     # the user's constraints.
     _c_m = np.asarray(lp_data_orig.c[:n_orig])
 
-    def _recover_or_decertify(i, lbs, sols, node_lb_i, node_ub_i):
+    def _recover_or_decertify(i, lbs, sols, node_lb_i, node_ub_i, excl):
         nonlocal _gap_certified
         rec = _pounce_recover_node_bound(
             node_lb_i,
@@ -25648,12 +25687,16 @@ def _solve_milp_bb(
             time_limit,
         )
         if rec is None:
+            # The caller's sentinel stays, but NOTHING proved this region empty --
+            # so it is not a justified exclusion (C-47) and `excl` stays False.
+            # Decertifying is the compensation the tree used to depend on.
             _gap_certified = False
         elif rec[0] == "optimal":
             lbs[i] = rec[1]
             sols[i] = rec[2][:n_vars]
         else:  # Phase-1-certified infeasible node: prune is rigorous.
             lbs[i] = _INFEASIBILITY_SENTINEL
+            excl[i] = True
 
     def _maybe_inject_snapped(x_row, node_lb_i, node_ub_i):
         """Snap-fix-resolve only: near-integral interior points become incumbents.
@@ -25794,6 +25837,9 @@ def _solve_milp_bb(
             result_lbs = np.empty(n_batch, dtype=np.float64)
             result_sols = np.empty((n_batch, n_vars), dtype=np.float64)
             result_feas = np.zeros(n_batch, dtype=bool)
+            # Which sentinels are a PROVEN-empty region rather than a failure to
+            # bound one (C-47). Only the rigorous arms below set it.
+            result_excl = np.zeros(n_batch, dtype=bool)
             for i in range(n_batch):
                 node_lb = np.array(batch_lb[i])
                 node_ub = np.array(batch_ub[i])
@@ -25806,11 +25852,12 @@ def _solve_milp_bb(
                         _maybe_inject_snapped(result_sols[i], node_lb, node_ub)
                 elif out is not None:  # POUNCE-certified infeasible: rigorous prune
                     result_lbs[i] = _INFEASIBILITY_SENTINEL
+                    result_excl[i] = True
                     result_sols[i] = _mid
                 else:  # unavailable/stalled: original-problem recovery or decertify
                     result_lbs[i] = _INFEASIBILITY_SENTINEL
                     result_sols[i] = _mid
-                    _recover_or_decertify(i, result_lbs, result_sols, node_lb, node_ub)
+                    _recover_or_decertify(i, result_lbs, result_sols, node_lb, node_ub, result_excl)
         else:
             # The JAX LP-IPM node path was retired (#370). Node LP relaxations
             # use the structured engine (Rust simplex, or POUNCE); reaching here
@@ -25854,7 +25901,7 @@ def _solve_milp_bb(
             break
 
         t_rust_start = time.perf_counter()
-        tree.import_results(result_ids, result_lbs, result_sols, result_feas)
+        tree.import_results(result_ids, result_lbs, result_sols, result_feas, None, result_excl)
         tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
 
@@ -26415,7 +26462,7 @@ def _solve_miqp_bb(
             how=how,
         )
 
-    def _handle_nonclean(i, lbs, sols, x_full, obj_val, node_lb_i, node_ub_i):
+    def _handle_nonclean(i, lbs, sols, x_full, obj_val, node_lb_i, node_ub_i, excl):
         # A node whose QP relaxation did not cleanly converge (non-KKT, solver
         # failure, or NaN iterate) is not a valid lower bound, and — crucially —
         # is not a proof of infeasibility. Pruning it as rigorously infeasible is
@@ -26487,6 +26534,7 @@ def _solve_miqp_bb(
                 _maybe_inject_snapped_or_rounded(sols[i], node_lb_i, node_ub_i)
         elif rec is not None:  # Phase-1-certified infeasible: rigorous prune.
             lbs[i] = _INFEASIBILITY_SENTINEL
+            excl[i] = True
         else:  # inconclusive — keep the node open, never a false-infeasible.
             lbs[i] = -np.inf
             _gap_certified = False
@@ -26571,6 +26619,12 @@ def _solve_miqp_bb(
         result_lbs = np.full(n_batch, _INFEASIBILITY_SENTINEL, dtype=np.float64)
         result_sols = np.empty((n_batch, n_vars), dtype=np.float64)
         result_feas = np.zeros(n_batch, dtype=bool)
+        # Which sentinels are a PROVEN-empty region rather than a failure to bound
+        # one (C-47). NOTE that `result_lbs` is INITIALIZED to the sentinel here, so
+        # the `infeasible[i]` arm below leaves it in place rather than assigning it
+        # -- the flag has to be set there explicitly or a rigorous POUNCE Phase-1
+        # verdict would be demoted to "unbounded" and lose a real certificate.
+        result_excl = np.zeros(n_batch, dtype=bool)
 
         for i in range(n_batch):
             node_lb = np.array(batch_lb[i])
@@ -26580,6 +26634,7 @@ def _solve_miqp_bb(
 
             if infeasible[i]:
                 # POUNCE Phase-1-certified empty box: a sound infeasibility prune.
+                result_excl[i] = True
                 result_sols[i] = 0.5 * (lb_c + ub_c)
             elif clean[i] and _node_point_feasible(x_vals[i], node_lb, node_ub):
                 # KKT-valid relaxation optimum -> a valid node lower bound.
@@ -26595,7 +26650,9 @@ def _solve_miqp_bb(
                 obj_seed = (
                     obj_vals[i] + float(qp_data.obj_const) if np.isfinite(obj_vals[i]) else np.nan
                 )
-                _handle_nonclean(i, result_lbs, result_sols, x_seed, obj_seed, node_lb, node_ub)
+                _handle_nonclean(
+                    i, result_lbs, result_sols, x_seed, obj_seed, node_lb, node_ub, result_excl
+                )
 
         jax_time += time.perf_counter() - t_jax_start
 
@@ -26617,7 +26674,7 @@ def _solve_miqp_bb(
             break
 
         t_rust_start = time.perf_counter()
-        tree.import_results(result_ids, result_lbs, result_sols, result_feas)
+        tree.import_results(result_ids, result_lbs, result_sols, result_feas, None, result_excl)
         tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
 
