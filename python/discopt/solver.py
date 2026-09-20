@@ -6922,30 +6922,6 @@ _ROOT_CUT_POOL_MAX_ENV = int(os.environ.get("DISCOPT_ROOT_CUT_MAX", "200"))
 
 # Marchand-Wolsey aggregation c-MIR separator (cert:P3). DEFAULT-OFF, bound-
 # changing per CLAUDE.md §5: it ships dark behind this flag until proven on
-# nightlies. Read per-solve (below) so it can be toggled after ``import discopt``.
-# The separator is validity-gated (nonnegative row combination + valid MIR ⇒
-# valid cut; Rust ``aggregation_validity_random_systems`` property test), so
-# enabling it can only add valid cuts, never a false certificate.
-_CMIR_AGGREGATION_ENV_DEFAULT = os.environ.get("DISCOPT_CMIR_AGGREGATION", "0").lower() not in (
-    "0",
-    "",
-    "false",
-    "no",
-    "off",
-)
-
-
-def _cmir_aggregation_enabled() -> bool:
-    """Whether the aggregation c-MIR separator is enabled for this solve.
-
-    Re-reads ``DISCOPT_CMIR_AGGREGATION`` each call (default-off) so tests and
-    callers can toggle it after import; falls back to the import-time default."""
-    val = os.environ.get("DISCOPT_CMIR_AGGREGATION")
-    if val is None:
-        return _CMIR_AGGREGATION_ENV_DEFAULT
-    return val.lower() not in ("0", "", "false", "no", "off")
-
-
 #: Re-entrancy guard for the #1236 cheap-first probe: the probe solves the
 #: UN-LIFTED model through ``solve_model`` itself, and must not probe again.
 #:
@@ -8699,9 +8675,20 @@ def solve_model(
         relaxation is the exact convex log-space NLP (``yᵢ = log xᵢ`` per node),
         yielding a rigorous, certifiable global optimum (issue #116). Raises
         ``ValueError`` if the model is not a GP-structured MINLP. This path is
-        *not* auto-routed by a plain ``solve()`` unless the ``DISCOPT_GP_MINLP``
-        environment flag is set (default off); ``solver="gp-minlp"`` is the
-        explicit opt-in. See :mod:`discopt.gp`.
+        *not* auto-routed by a plain ``solve()``: ``solver="gp-minlp"`` is the
+        only way in. (A default-OFF ``DISCOPT_GP_MINLP`` env flag used to
+        auto-route it; #1388 retired the flag, which never ran the graduation
+        panel it promised. No capability was lost -- the explicit selector was
+        always the real interface.) See :mod:`discopt.gp`.
+        Use ``"sgo"`` for the signomial global engine: a mixed-sign signomial
+        minimised over a strictly-positive box (optionally with signomial
+        inequality constraints and positive-bounded integer variables) is
+        non-convex with no exact convex reformulation, so the GP path abstains.
+        This engine certifies that class by spatial branch-and-bound on the
+        certified log-domain DC envelope -- every node bound is a rigorous dual
+        bound, and a closed tree certifies the global optimum. Raises
+        ``ValueError`` if the model is outside the class. Also never
+        auto-routed, for the same reason and by the same issue.
     solver="amp" options
         The AMP backend also accepts ``rel_gap``, ``abs_tol``, ``max_iter``,
         ``n_init_partitions``, ``partition_method``, ``milp_time_limit``,
@@ -9223,7 +9210,8 @@ def solve_model(
     # with the automatic GP fast path below), ``"amp"``, ``"gurobi"``,
     # ``"mip-nlp"``,
     # ``"gp"`` (force the GP log-space path), ``"gp-minlp"`` (force the
-    # GP-structured MINLP y-space branch-and-bound), ``"bb"`` (force classic
+    # GP-structured MINLP y-space branch-and-bound), ``"sgo"`` (force the
+    # signomial global engine), ``"bb"`` (force classic
     # branch-and-bound, opting out of the automatic GP fast path), and
     # ``"direct"`` (derivative-free sampling search — returns NO certificate).
     # Reject anything else rather than silently falling through to B&B.
@@ -9234,13 +9222,14 @@ def solve_model(
         "mip-nlp",
         "gp",
         "gp-minlp",
+        "sgo",
         "bb",
         "direct",
         "surrogate",
     ):
         raise ValueError(
             f"Unknown solver={_solver!r}. Choose one of None, 'amp', 'gurobi', "
-            "'mip-nlp', 'gp', 'gp-minlp', 'bb', 'direct', 'surrogate'."
+            "'mip-nlp', 'gp', 'gp-minlp', 'sgo', 'bb', 'direct', 'surrogate'."
         )
     gurobi_options = kwargs.pop("gurobi_options", None) if _solver == "gurobi" else None
 
@@ -9950,6 +9939,43 @@ def solve_model(
             raise RuntimeError("GP reformulation failed unexpectedly.")
         return result
 
+    # --- Signomial global (certified spatial B&B on the log-domain DC envelope) ---
+    # Reached only by an explicit ``solver="sgo"``. It was previously reachable
+    # ONLY through the default-OFF ``DISCOPT_SGO`` auto-route flag, which #1388
+    # retired: the flag promised a graduation panel that was never run, and the
+    # engine had no addressable entry point of its own. Giving it one is what
+    # kept the implementation rather than deleting it -- the same shape
+    # ``solver="gp-minlp"`` already had.
+    if _solver == "sgo":
+        from discopt._relax.convexity.signomial_global import (
+            classify_signomial_global,
+            solve_signomial_global,
+        )
+
+        if classify_signomial_global(model) is None:
+            raise ValueError(
+                "solver='sgo' was requested but the model is not a signomial "
+                "program the global engine recognises. It needs a single "
+                "MINIMISE objective; every variable continuous or integer with "
+                "a strictly positive, finite [lb, ub]; every constraint a "
+                "signomial inequality (<= / >=); and a genuinely mixed-sign "
+                "objective or constraint body -- a program with no negative "
+                "term anywhere is a posynomial GP that solver='gp' owns. See "
+                "discopt._relax.convexity.signomial_global."
+                "classify_signomial_global for the exact preconditions."
+            )
+
+        _warn_abs_gap_ignored("The signomial global engine", abs_gap_tolerance)
+        sgo_result = solve_signomial_global(
+            model,
+            time_limit=time_limit,
+            gap_tolerance=gap_tolerance,
+            max_nodes=max_nodes if max_nodes else 100000,
+        )
+        if sgo_result is None:  # pragma: no cover - guarded by classify above
+            raise RuntimeError("Signomial global solve failed unexpectedly.")
+        return sgo_result
+
     # --- GP-MINLP (y-space node relaxations + integer B&B) fast path ---
     if _solver == "gp-minlp":
         import warnings
@@ -10046,72 +10072,6 @@ def solve_model(
             )
             if gp_result is not None:
                 return gp_result
-
-    # --- Auto GP-MINLP fast path (opt-in, DISCOPT_GP_MINLP; default OFF) ---
-    # A MINLP whose continuous relaxation is a geometric program solves exactly
-    # via y-space node relaxations + integer branch-and-bound (issue #116) — each
-    # node bound is a rigorous convex-GP bound, so a closed tree certifies. This
-    # changes default-solve behaviour for a class of models, so per the repo's
-    # bound-changing-flag discipline it stays behind a default-OFF env flag until
-    # a corpus-wide differential panel graduates it; ``solver="gp-minlp"`` is the
-    # always-available explicit opt-in. ``classify_gp_minlp`` bails cheaply on
-    # non-GP / no-integer models, and the same callback/opt-out guards as the
-    # pure-GP path apply.
-    if (
-        _solver is None
-        and not _has_bb_callbacks
-        and not skip_convex_check
-        and os.environ.get("DISCOPT_GP_MINLP", "0").strip().lower() in ("1", "true", "yes", "on")
-    ):
-        from discopt.gp import classify_gp_minlp, solve_gp_minlp
-
-        if classify_gp_minlp(model) is not None:
-            gp_minlp_result = solve_gp_minlp(
-                model,
-                time_limit=time_limit,
-                gap_tolerance=gap_tolerance,
-                max_nodes=max_nodes,
-                nlp_solver=nlp_solver,
-                ipopt_options=ipopt_options,
-            )
-            if gp_minlp_result is not None:
-                return gp_minlp_result
-
-    # --- Signomial (mixed-sign) global fast path (opt-in, DISCOPT_SGO; OFF) ---
-    # A mixed-sign signomial minimised over a strictly-positive box (optionally
-    # with signomial inequality constraints and/or positive-bounded INTEGER
-    # variables — issue #741 Task 2) is non-convex with no exact convex
-    # reformulation, so the GP path abstains (issue #114). This scheme certifies
-    # that class via spatial branch-and-bound on the certified log-domain DC
-    # envelope (integers driven by integer branching wrapping the same node
-    # relaxation): every node bound is a rigorous dual bound and a closed tree
-    # certifies the global optimum. It changes default-solve behaviour for a
-    # class of models, so per the bound-changing flag discipline it stays behind
-    # a default-OFF env flag until a differential panel graduates it.
-    # ``classify_signomial_global`` bails cheaply on anything outside the class
-    # (binary / 0-lb vars, non-signomial or equality constraints, single-sign /
-    # non-signomial objective), preserving the sound GP abstention.
-    if (
-        _solver is None
-        and not _has_bb_callbacks
-        and not skip_convex_check
-        and os.environ.get("DISCOPT_SGO", "0").strip().lower() in ("1", "true", "yes", "on")
-    ):
-        from discopt._relax.convexity.signomial_global import (
-            classify_signomial_global,
-            solve_signomial_global,
-        )
-
-        if classify_signomial_global(model) is not None:
-            _warn_abs_gap_ignored("The signomial global engine", abs_gap_tolerance)
-            sgo_result = solve_signomial_global(
-                model,
-                time_limit=time_limit,
-                gap_tolerance=gap_tolerance,
-                max_nodes=max_nodes if max_nodes else 100000,
-            )
-            if sgo_result is not None:
-                return sgo_result
 
     # --- Benders / Lagrangian decomposition: opt-in, structure-exploiting ---
     if decomposition is not None:
@@ -24133,55 +24093,6 @@ def _separate_mir_cuts(lp_data, x_vertex, n_orig, int_idx, a_ub_orig, b_ub_orig,
     return embedded[:max_cuts], rhs[:max_cuts]
 
 
-def _separate_aggregation_mir_cuts(
-    lp_data, x_vertex, n_orig, int_idx, a_ub_orig, b_ub_orig, max_cuts: int = 8
-):
-    """Separate Marchand-Wolsey aggregation c-MIR cuts from the original ``<=``
-    rows at the crossover vertex, via the Rust ``aggregation_mir_cuts_py`` binding.
-
-    Pairs ``<=`` rows with nonnegative weights to cancel a continuous variable,
-    forms the valid implied aggregate row, and applies the same complemented MIR
-    (bound substitution + delta-scan) as :func:`_separate_mir_cuts` to it. A
-    nonnegative combination of ``<=`` rows is a valid ``<=`` inequality, and MIR
-    on it is valid for the integer hull, so every emitted cut is valid for the
-    original feasible set — no integer-feasible point is ever removed (proven by
-    the Rust ``aggregation_validity_random_systems`` property test).
-
-    **Default-off**: this is the ``DISCOPT_CMIR_AGGREGATION`` feature-flagged
-    path; the caller gates the call, this helper only does the separation. Same
-    contract as :func:`_separate_mir_cuts`: returns ``(coeffs, rhs)`` embedded
-    into the current standard-form columns, or ``None`` when the binding is
-    unavailable, lower bounds are non-finite, or no cut is produced."""
-    if a_ub_orig is None or np.asarray(a_ub_orig).shape[0] < 2:
-        return None  # aggregation needs at least two rows to combine
-    try:
-        from discopt._rust import aggregation_mir_cuts_py
-    except ImportError:
-        return None
-    lo = np.asarray(lp_data.x_l, dtype=np.float64)[:n_orig]
-    if not np.all(np.isfinite(lo)):
-        return None  # the MIR lower-bound shift requires finite lower bounds
-    hi = np.asarray(lp_data.x_u, dtype=np.float64)[:n_orig].copy()
-    hi[~np.isfinite(hi)] = np.inf
-    integ = np.zeros(n_orig, dtype=bool)
-    integ[[j for j in int_idx if j < n_orig]] = True
-    res = aggregation_mir_cuts_py(
-        np.ascontiguousarray(a_ub_orig, dtype=np.float64),
-        np.ascontiguousarray(b_ub_orig, dtype=np.float64),
-        np.ascontiguousarray(lo),
-        np.ascontiguousarray(hi),
-        integ,
-        np.ascontiguousarray(np.asarray(x_vertex, dtype=np.float64)[:n_orig]),
-    )
-    if res is None:
-        return None
-    coeffs, rhs = np.asarray(res[0], dtype=np.float64), np.asarray(res[1], dtype=np.float64)
-    n_cur = int(_dense_A(lp_data.A_eq).shape[1])
-    embedded = np.zeros((coeffs.shape[0], n_cur), dtype=np.float64)
-    embedded[:, :n_orig] = coeffs[:, :n_orig]
-    return embedded[:max_cuts], rhs[:max_cuts]
-
-
 def _extract_clique_edges(model: Model) -> list[tuple[int, int]]:
     """Conflict-graph 2-clique edges from the Rust presolve clique pass.
 
@@ -24285,7 +24196,7 @@ def _root_cover_cut_loop(
     has_clique = bool(clique_edges)
     has_gomory = bool(len(int_idx))
     if not has_cover and not has_clique and not has_gomory:
-        return lp_data, 0, {"cover_clique": 0, "gomory": 0, "mir": 0, "aggregation": 0}
+        return lp_data, 0, {"cover_clique": 0, "gomory": 0, "mir": 0}
 
     total = 0
     # Per-source cut counts (cert:P3.1b instrumentation). Surfaced on the MILP
@@ -24293,7 +24204,7 @@ def _root_cover_cut_loop(
     # aggregation c-MIR separator actually *fired* on the default path (a cut
     # count of 0 with the flag on means the branch never separated — a wiring or
     # scoping finding, not a bound result). Pure instrumentation; no math change.
-    by_source = {"cover_clique": 0, "gomory": 0, "mir": 0, "aggregation": 0}
+    by_source = {"cover_clique": 0, "gomory": 0, "mir": 0}
     for _round in range(max_rounds):
         if time.perf_counter() - t_start >= time_limit:
             break
@@ -24379,24 +24290,6 @@ def _root_cover_cut_loop(
                 lp_data = _augment_lpdata_with_mir_cuts(lp_data, mc, mr)
                 round_added += int(mc.shape[0])
                 by_source["mir"] += int(mc.shape[0])
-        # Aggregation c-MIR (cert:P3): DEFAULT-OFF, gated by
-        # DISCOPT_CMIR_AGGREGATION. Combines pairs of <= rows to cancel a
-        # continuous variable, then applies the same complemented MIR as above —
-        # valid by construction (nonnegative row combo + valid MIR). Same round-0
-        # / POUNCE-mode gate as single-row MIR; reuses the MIR augmentation.
-        if has_gomory and _round == 0 and _cmir_aggregation_enabled():
-            try:
-                agg = _separate_aggregation_mir_cuts(
-                    lp_data, x_vertex, n_orig, int_idx, A_ub_orig, b_ub_orig
-                )
-            except Exception as _agg_exc:
-                logger.debug("aggregation c-MIR separation skipped: %s", _agg_exc)
-                agg = None
-            if agg is not None:
-                ac, ar = agg
-                lp_data = _augment_lpdata_with_mir_cuts(lp_data, ac, ar)
-                round_added += int(ac.shape[0])
-                by_source["aggregation"] += int(ac.shape[0])
         if cuts:  # cover/clique reference original columns (< n_orig), still valid
             lp_data = _augment_lpdata_with_cover_cuts(lp_data, n_orig, cuts)
             round_added += len(cuts)
@@ -25692,7 +25585,7 @@ def _solve_milp_bb(
         np.asarray(lp_data.x_u, dtype=np.float64),
         row_sense=_declared_row_senses(lp_data, _A_eq_dense),
     )
-    _cut_by_source = {"cover_clique": 0, "gomory": 0, "mir": 0, "aggregation": 0}
+    _cut_by_source = {"cover_clique": 0, "gomory": 0, "mir": 0}
     try:
         _is_bin = _binary_mask(model, n_orig)
         # Conflict-graph clique edges (only worth extracting if binaries exist).
@@ -25721,13 +25614,11 @@ def _solve_milp_bb(
         )
         if _n_cuts:
             logger.info(
-                "root cuts added %d valid inequalities "
-                "(cover/clique=%d gomory=%d mir=%d aggregation=%d)",
+                "root cuts added %d valid inequalities (cover/clique=%d gomory=%d mir=%d)",
                 _n_cuts,
                 _cut_by_source.get("cover_clique", 0),
                 _cut_by_source.get("gomory", 0),
                 _cut_by_source.get("mir", 0),
-                _cut_by_source.get("aggregation", 0),
             )
     except Exception as _cc_exc:
         logger.debug("root cuts skipped: %s", _cc_exc)
