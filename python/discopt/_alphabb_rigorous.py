@@ -32,6 +32,24 @@ def rigorous_alpha(expr, model, box=None):
     only to the nonlinear variables, keeping the relaxation as tight as the
     diagonal-dominance bound allows.
 
+    The row bounds come from ``convexity.eigenvalue.gershgorin_row_lower_bounds``
+    (#1397). This function used to evaluate that formula itself with a plain
+    round-to-nearest ``np.sum`` and no outward rounding, which made it *not*
+    rigorous despite its name: rounding the off-diagonal radius down raises
+    ``gershgorin_lo`` above its true value and leaves ``alpha`` below
+    ``-lambda_min/2``, so the alphaBB body is nonconvex and its box minimum —
+    used as this node's lower bound — can exceed the true minimum. That is a
+    false dual bound, not a loose one. Measured by calling *this* function and
+    grading its output against the same Gershgorin formula in exact rational
+    arithmetic over the same float entries (every binary64 is a rational, so the
+    oracle has no error of its own): **513 of 1120 rows** came back with
+    ``alpha`` provably below ``-lambda_min/2``, worst shortfall 5.76e-4 — and at
+    *every* scale from ``||A||_F = 1e0`` to 1e12, not only large ones, because the
+    old code carried no margin at all. An absolute margin could not have fixed it
+    either, the error being O(u*||A||); the correct, outward-rounded computation
+    already existed one module away. Regression:
+    ``python/tests/test_1397_alphabb_alpha_dominates_nonconvexity.py``.
+
     Args:
         expr: Scalar :class:`~discopt.modeling.core.Expression`.
         model: Model defining the flat variable layout.
@@ -44,19 +62,14 @@ def rigorous_alpha(expr, model, box=None):
     """
     import numpy as np
 
+    from discopt._relax.convexity.eigenvalue import gershgorin_row_lower_bounds
     from discopt._relax.convexity.interval_ad import interval_hessian
 
     iad = interval_hessian(expr, model, box)
-    h_lo = np.asarray(iad.hess.lo, dtype=float)
-    h_hi = np.asarray(iad.hess.hi, dtype=float)
-    abs_max = np.maximum(np.abs(h_lo), np.abs(h_hi))
-    with np.errstate(invalid="ignore"):
-        # Per-row off-diagonal radius = sum of |.| over the row minus the diagonal.
-        # ``inf - inf`` on an abstaining (unbounded) row yields NaN, mapped to +inf
-        # below; suppress the benign RuntimeWarning for the whole computation.
-        row_radius = abs_max.sum(axis=1) - np.abs(np.diag(abs_max))
-        gershgorin_lo = np.diag(h_lo) - row_radius
-        alpha = np.maximum(0.0, -0.5 * gershgorin_lo)
-    # NaN arises from inf - inf at abstaining nodes; treat as unbounded.
-    alpha = np.where(np.isnan(alpha), np.inf, alpha)
-    return alpha
+    # Rigorous, outward-rounded, and per-row: a row whose entries are unbounded
+    # comes back as ``-inf``, which becomes ``alpha_i = +inf`` below and signals
+    # that no useful alphaBB relaxation exists for that variable on this box.
+    gershgorin_lo = gershgorin_row_lower_bounds(iad.hess)
+    # ``0.5 *`` is exact in binary floating point, so halving the (already
+    # outward-rounded) bound introduces no error of its own.
+    return np.asarray(np.maximum(0.0, -0.5 * gershgorin_lo), dtype=np.float64)

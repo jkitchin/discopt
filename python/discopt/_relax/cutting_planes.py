@@ -20,6 +20,7 @@ from typing import NamedTuple, Optional
 import numpy as np
 
 from discopt._flat_index import resolve_scalar_slot
+from discopt._relax.convexity.eigenvalue import psd_decision_slack
 from discopt._relax.nonlinear_bound_tightening import is_effectively_finite
 from discopt.constants import ALPHABB_EPS, ALPHABB_SAFETY
 from discopt.modeling.core import (
@@ -585,11 +586,38 @@ def generate_alphabb_quadratic_oa_cuts_from_evaluator(
         hess_sub = hess[np.ix_(curved, curved)]
         hess_sub = 0.5 * (hess_sub + hess_sub.T)
         min_eig = float(np.linalg.eigvalsh(hess_sub)[0])
+        # ``ALPHABB_EPS`` gates only whether a cut is attempted at all, and
+        # skipping one is unconditionally safe — so an absolute constant is
+        # appropriate here (#1397).
         if min_eig >= -ALPHABB_EPS:
             continue
 
+        # The safety margin, by contrast, is what makes the cut *valid*.
+        # ``q_under <= q`` holds for any ``alpha >= 0`` because each bracket
+        # ``(x_i - lb_i)(ub_i - x_i)`` is nonnegative in the box; what the margin
+        # has to buy is the **convexity** of ``q_under``, since only a convex
+        # ``q_under`` has its tangent as a global underestimator. That needs
+        # ``hess_sub + 2*diag(alpha) >= 0``, i.e. ``alpha >= -lambda_min/2``
+        # against the *true* minimum eigenvalue — and ``eigvalsh`` can return a
+        # minimum above the true one by up to ~5.42*u*||H|| (measured; see
+        # ``convexity.eigenvalue.psd_decision_slack``). An absolute
+        # ``ALPHABB_SAFETY = 1e-6`` therefore covered that error only while
+        # ||H|| <~ 1.7e9. Measured on *this* generator, with ``alpha`` recovered
+        # from the cut it returns and graded against the constructed spectrum
+        # (oracle ``H = V diag(ev) V^T``, so ``eigvalsh`` never grades itself):
+        # **84 of 504 cuts invalid**, with the onset exactly where predicted —
+        # 0/72 at ||H||_F = 1e0/1e3/1e6/1e9, 12/72 at 1e10, 35/72 at 1e12, 37/72
+        # at 1e14. An invalid cut here is a nonconvex "underestimator" whose
+        # tangent can exclude points satisfying ``q(x) <= 0`` — a cut that is not
+        # a relaxation (#1397). Regression:
+        # ``python/tests/test_1397_alphabb_alpha_dominates_nonconvexity.py``.
+        #
+        # The absolute constant stays as a *floor* — it is also the deliberate
+        # strict-underestimation margin, which an O(1) problem still wants — and
+        # the eigensolver's own error at this Hessian's magnitude is added on top.
+        eig_slack = psd_decision_slack(float(np.linalg.norm(hess_sub, "fro")))
         alpha = np.zeros_like(x_sol, dtype=np.float64)
-        alpha[curved] = max(0.0, -0.5 * min_eig + ALPHABB_SAFETY)
+        alpha[curved] = max(0.0, -0.5 * min_eig + max(ALPHABB_SAFETY, eig_slack))
 
         perturbation = float(
             np.sum(alpha[curved] * (x_sol[curved] - x_lb[curved]) * (x_ub[curved] - x_sol[curved]))

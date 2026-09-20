@@ -75,6 +75,13 @@ def test_gmi_cuts_valid_by_exact_enumeration():
             A_eq=np.zeros((0, n)),
             b_eq=np.zeros(0),
             c=c,
+            c0=0.0,
+            c0_negate=False,
+            # ``_solve_lp`` re-checks its affine objective model against the
+            # evaluator at the LP optimum. This double's objective IS ``c @ x``
+            # (no constant), so a consistent stub states that rather than
+            # letting the helper skip the check.
+            ev=types.SimpleNamespace(evaluate_objective=lambda x, _c=c: float(_c @ x)),
             sense_max=True,
         )
         _obj, x, _duals, h = _solve_lp(root, [], [])
@@ -925,3 +932,169 @@ def test_root_cuts_not_skipped_on_array_valued_constraint_model(monkeypatch, cap
     assert r.objective == pytest.approx(scalar.objective, abs=1e-4, rel=1e-4)
     skipped = [rec.message for rec in caplog.records if "root cuts skipped" in rec.message]
     assert not skipped, f"root-cut stage silently skipped: {skipped}"
+
+
+# ── the objective's CONSTANT term ────────────────────────────────────────────
+#
+# ``_RootLP`` derived the LP objective from ``evaluate_gradient`` alone, so
+# ``c @ x`` was the objective only up to ``f(0)`` and the stage published the
+# LP optimum WITHOUT that constant. Every model above has a zero constant,
+# which is why the stage's graduation panel never saw it. A negative constant
+# on a MINIMIZE model makes the reported bound sit ABOVE the true optimum --
+# a false dual bound, not a weak one.
+#
+# Found on nvs14: the exact integer-bilinear lift's binary expansion puts
+# ``f(0) = -40792.141`` into an otherwise linear objective, and the published
+# bound was ``+314.237`` against a true optimum of ``-40358.155``, with that
+# optimum feasible for the LP the bound came from (max row violation 5.7e-14).
+# The tests below are on the class -- any objective with a constant -- not on
+# that instance.
+
+OBJ_CONST = -4321.5
+
+
+def _build_convex_minlp_with_constant(sense: str) -> Model:
+    """``_build_convex_minlp`` with a large constant added to the objective.
+
+    Same feasible set, same argmin/argmax, optimum shifted by ``OBJ_CONST``.
+    """
+    m = Model(f"rc_const_{sense}")
+    f0 = m.continuous("f0", lb=0.0, ub=10.0)
+    f1 = m.continuous("f1", lb=0.0, ub=10.0)
+    y0 = m.binary("y0")
+    y1 = m.binary("y1")
+    m.subject_to(f0 - 8.0 * y0 <= 0.0)
+    m.subject_to(f1 - 8.0 * y1 <= 0.0)
+    m.subject_to(f0 + f1 >= 3.0)
+    m.subject_to(f0 * f0 + f1 * f1 <= 16.0)
+    if sense == "max":
+        m.maximize(f0 + f1 - 2.5 * y0 - 2.5 * y1 + OBJ_CONST)
+    else:
+        m.minimize(f0 + 2.0 * f1 + 2.5 * y0 + 2.5 * y1 + OBJ_CONST)
+    return m
+
+
+@pytest.mark.parametrize("sense", ["max", "min"])
+def test_rootlp_carries_the_objective_constant(sense):
+    """``c @ x + c0`` must BE the objective, at points neither sample chose."""
+    from discopt._relax.nlp_evaluator import NLPEvaluator
+    from discopt.solvers._root_cuts import _RootLP
+
+    m = _build_convex_minlp_with_constant(sense)
+    ev = NLPEvaluator(m)
+    lb = np.array([0.0, 0.0, 0.0, 0.0])
+    ub = np.array([10.0, 10.0, 1.0, 1.0])
+    is_int = np.array([False, False, True, True])
+    root = _RootLP(m, ev, lb, ub, is_int, is_int.copy(), sense_max=(sense == "max"))
+    assert root.c0 == pytest.approx(OBJ_CONST, abs=1e-9), (
+        f"objective constant dropped: c0={root.c0}, declared {OBJ_CONST}"
+    )
+
+    rng = np.random.default_rng(12345)
+    checked = 0
+    for _ in range(5):
+        x = np.array([rng.uniform(0, 10), rng.uniform(0, 10), rng.uniform(0, 1), rng.uniform(0, 1)])
+        f_internal = float(ev.evaluate_objective(x))
+        f_declared = -f_internal if root.c0_negate else f_internal
+        assert float(root.c @ x) + root.c0 == pytest.approx(f_declared, abs=1e-7, rel=1e-9)
+        checked += 1
+    assert checked == 5, "probe made no comparisons"
+
+
+@pytest.mark.parametrize("sense", ["max", "min"])
+def test_root_lp_bound_is_valid_when_the_objective_has_a_constant(monkeypatch, sense):
+    """The bound the stage publishes must not cross the true optimum.
+
+    Pre-fix this failed by exactly ``|OBJ_CONST|``: min reported a bound above
+    the optimum (unsound), max a bound below it.
+    """
+    from discopt._relax.nlp_evaluator import NLPEvaluator
+
+    _flag(monkeypatch, True)
+    opt = _build_convex_minlp_with_constant(sense).solve(time_limit=30, nlp_bb=True).objective
+    assert opt is not None
+
+    m2 = _build_convex_minlp_with_constant(sense)
+    ev = NLPEvaluator(m2)
+    lb = np.array([0.0, 0.0, 0.0, 0.0])
+    ub = np.array([10.0, 10.0, 1.0, 1.0])
+    is_int = np.array([False, False, True, True])
+    res = generate_root_cuts(m2, ev, lb, ub, is_int, is_int.copy())
+    assert res.lp_bound is not None, "stage produced no bound — nothing was tested"
+    if sense == "max":
+        assert res.lp_bound >= opt - 1e-6, (
+            f"root LP bound {res.lp_bound} below the optimum {opt} — unsound"
+        )
+    else:
+        assert res.lp_bound <= opt + 1e-6, (
+            f"root LP bound {res.lp_bound} above the optimum {opt} — unsound"
+        )
+
+
+@pytest.mark.parametrize("sense", ["max", "min"])
+def test_end_to_end_bound_is_valid_when_the_objective_has_a_constant(monkeypatch, sense):
+    """Through ``Model.solve``: the published ``bound`` must not cross the optimum."""
+    _flag(monkeypatch, False)
+    base = _build_convex_minlp_with_constant(sense).solve(time_limit=30, nlp_bb=True)
+    assert base.objective is not None
+
+    _flag(monkeypatch, True)
+    r = _build_convex_minlp_with_constant(sense).solve(time_limit=30, nlp_bb=True)
+    assert r.objective == pytest.approx(base.objective, abs=1e-4, rel=1e-4)
+    assert r.bound is not None, "no bound published — nothing was tested"
+    if sense == "max":
+        assert r.bound >= base.objective - 1e-4, f"bound {r.bound} < optimum {base.objective}"
+    else:
+        assert r.bound <= base.objective + 1e-4, f"bound {r.bound} > optimum {base.objective}"
+
+
+def test_an_lp_objective_that_does_not_match_the_model_is_declined():
+    """The third-point re-check: if ``c``/``c0`` disagree with the evaluator at
+    the LP optimum, the LP is declined rather than reported as a bound.
+
+    Guards the class the constant bug belongs to (an affine model of the
+    objective that is not the objective), independently of how it arose.
+    """
+    from discopt._relax.nlp_evaluator import NLPEvaluator
+    from discopt.solvers._root_cuts import _RootLP, _solve_lp
+
+    m = _build_convex_minlp_with_constant("min")
+    ev = NLPEvaluator(m)
+    lb = np.array([0.0, 0.0, 0.0, 0.0])
+    ub = np.array([10.0, 10.0, 1.0, 1.0])
+    is_int = np.array([False, False, True, True])
+    root = _RootLP(m, ev, lb, ub, is_int, is_int.copy(), sense_max=False)
+
+    obj, x, _duals, _h = _solve_lp(root, [], [])
+    assert obj is not None and x is not None, "control arm did not solve — nothing was tested"
+
+    root.c0 = root.c0 + 1234.0  # the bug's shape: a wrong constant
+    bad_obj, bad_x, _, _ = _solve_lp(root, [], [])
+    assert bad_obj is None and bad_x is None, (
+        f"a mismatched objective was reported as a bound: {bad_obj}"
+    )
+
+
+@pytest.mark.slow
+def test_nvs14_published_bound_does_not_cross_its_optimum():
+    """Named gate probe for the class above (CLAUDE.md §2).
+
+    nvs14's exact integer-bilinear lift puts a large negative constant into an
+    otherwise linear objective; the NLP-BB route published ``bound=+314.237``
+    for a minimisation whose optimum is ``-40358.154769`` (minlplib.solu).
+    """
+    from discopt.modeling.core import from_nl
+
+    nl = Path(__file__).parent / "data" / "minlplib_nl" / "nvs14.nl"
+    if not nl.exists():  # pragma: no cover - corpus not vendored
+        pytest.skip(f"instance not vendored: {nl}")
+    opt = -40358.154769231216  # minlplib.solu
+    r = from_nl(str(nl)).solve(nlp_bb=True, time_limit=60)
+    assert r.bound is not None, "no bound published — nothing was tested"
+    assert r.bound <= opt + 1e-4, (
+        f"published bound {r.bound} is above the known optimum {opt} — false dual bound"
+    )
+    if r.root_bound is not None:
+        assert r.root_bound <= opt + 1e-4, (
+            f"published root_bound {r.root_bound} is above the known optimum {opt}"
+        )
