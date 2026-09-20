@@ -9697,6 +9697,13 @@ Three properties place it out of scope for this PR:
 
 ### 73.2.1 The mechanism, confirmed — a failed relaxation is pruned as "dominated"
 
+> **Partly retracted — read §73.2.2 first.** The mechanism described below is real
+> and re-confirmed. The conclusion this section draws from it ("`gams01` certified
+> false", "a pre-existing P0-class correctness defect") is **withdrawn**: on the
+> default path `gams01` issues no certificate at all. §73.2.2 carries the
+> measurement, the four compensating guards that explain it, and the corrected
+> disposition.
+
 `process_evaluated` step 1 in `crates/discopt-core/src/bnb/tree_manager.rs` prunes
 any node with `local_lower_bound >= cutoff_value()` **before** any `bound_trusted`
 check. A node the orchestrator sentinelled (1e30) because its relaxation *failed*
@@ -9731,6 +9738,62 @@ orchestrator interface plus its own §5 panel.
 defect, independent of #1352/#1355/#1356, and the fix touches the Rust/Python node
 interface. Folding it in would mix it with three unrelated fixes against the "keep PRs
 scoped" rule. It is recorded here with a reproduction so it can be picked up directly.
+
+### 73.2.2 Retraction — §73.2.1's headline claim ("`gams01` certified false") is withdrawn
+
+**Retracted, 2026-09-20.** §73.2.1 closes by calling the sentinel prune a defect that
+certifies `gams01` falsely and labels it "a pre-existing P0-class correctness defect".
+The *mechanism* it describes is real and is re-confirmed below. The *consequence* is
+not: on the default path `gams01` issues no certificate at all.
+
+    gams01: status=feasible obj=28274.7 bound=595.83 gap_certified=False
+            t=60.2s  ref_best=21380.20  ref_dual=2355.89
+
+The reported bound (595.83) is far below the best known primal (21380.20), and
+`gap_certified` is False. Nothing is over-claimed. §73.2.1 inferred an end-to-end
+false certificate from a probe run against `TreeManager` in isolation and never
+measured the default path; that inference was wrong and is withdrawn. (CLAUDE.md §11.)
+
+**Why the isolated probe does not imply a false certificate.** Every orchestrator path
+compensates for the Rust behaviour before it can reach a `SolveResult`, and there are
+four of them, each with its own vocabulary:
+
+| path | compensation |
+|---|---|
+| main MINLP sweep (`solver.py:15109`) | sets `_nonrigorous_fathom`, floors `_taint_floor_internal` at the node's pop-time bound; the reported bound becomes `min(frontier, taint_floor)` |
+| `_solve_nlp_bb` | sets `_unconverged_fathom` and clears `_gap_certified` |
+| `_solve_milp_bb` | clears `_gap_certified` alongside the sentinel write (`:25619`/`:25624`) |
+| `_solve_miqp_bb` | clears `_gap_certified` alongside the sentinel write (`:26431`/`:26460`) |
+
+**Corrected disposition: a latent unsoundness in the Rust tree, masked by four
+duplicated Python guards.** That is a weaker claim than §73.2.1's and a real one. The
+tree's own `global_lower_bound` is not a sound dual bound in isolation; it is sound
+only because four separate callers each remember to distrust it. A fifth caller, or
+one of the four losing its guard in a refactor, is a false certificate with no
+remaining defence.
+
+**Two further corrections to §73.2.1's analysis.**
+
+1. It located the defect only at `process_evaluated` step 1. The upstream half is
+   `import_results` (`tree_manager.rs:501`):
+
+       node.local_lower_bound = result.lower_bound.max(node.local_lower_bound);
+
+   `max()` is justified in-comment as "the tighter (larger) one is the sound choice" —
+   true only when *both* operands are valid bounds. The `1e30` sentinel is not a bound,
+   so this installs a non-bound **as** the node's bound. Step 1 then prunes on it. The
+   sentinel never needed to be "reinterpreted"; it should never have become
+   `local_lower_bound` in the first place. Note `import_results:518` already knows this
+   (`bound_trusted` excludes the sentinel) — the value is distrusted for promotion to
+   the incumbent one line after being trusted as a bound.
+
+2. It claimed the fix "has to separate the two meanings at the PyO3 boundary (a
+   distinct 'excluded by callback' signal on `NodeResult`)" as if that distinction had
+   to be invented. It already exists on the Python side: #748 (`solver.py:16345-16360`)
+   deliberately records a callback rejection as `_nonrigorous_fathom` **without**
+   touching `_taint_floor_internal`, precisely because a veto legitimately excludes the
+   region while a failed relaxation does not. The work is to *communicate* an existing
+   distinction across the boundary, not to derive one.
 
 ### 73.3 Falsified — the convex-quadratic objective bound is not live on `gams01`
 

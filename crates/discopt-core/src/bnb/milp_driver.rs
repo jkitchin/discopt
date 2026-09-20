@@ -2986,6 +2986,7 @@ fn solve_node(
                 solution: Vec::new(),
                 is_feasible: false,
                 certified_infeasible: false,
+                sentinel_is_exclusion: false,
             },
             basis: None,
             incumbent: None,
@@ -3039,6 +3040,7 @@ fn solve_node(
                     solution: vec![0.0; ctx.ns],
                     is_feasible: false,
                     certified_infeasible: false,
+                    sentinel_is_exclusion: true,
                 },
                 basis: None,
                 incumbent: None,
@@ -3177,6 +3179,7 @@ fn solve_node(
             solution: Vec::new(),
             is_feasible: false,
             certified_infeasible: false,
+            sentinel_is_exclusion: false,
         },
         basis: None,
         incumbent: None,
@@ -3209,6 +3212,7 @@ fn solve_node(
                     solution: midpoint(lb_k, ub_k),
                     is_feasible: false,
                     certified_infeasible: false,
+                    sentinel_is_exclusion: false,
                 };
                 return out;
             }
@@ -3360,6 +3364,7 @@ fn solve_node(
                 solution: xs.to_vec(),
                 is_feasible: feasible,
                 certified_infeasible: false,
+                sentinel_is_exclusion: false,
             };
         }
         LpStatus::Infeasible => {
@@ -3389,6 +3394,7 @@ fn solve_node(
                     solution: vec![0.0; ctx.ns],
                     is_feasible: false,
                     certified_infeasible: false,
+                    sentinel_is_exclusion: true,
                 };
             } else {
                 out.result = NodeResult {
@@ -3397,6 +3403,7 @@ fn solve_node(
                     solution: midpoint(lb_k, ub_k),
                     is_feasible: false,
                     certified_infeasible: false,
+                    sentinel_is_exclusion: false,
                 };
             }
         }
@@ -3423,6 +3430,7 @@ fn solve_node(
                 solution: midpoint(lb_k, ub_k),
                 is_feasible: false,
                 certified_infeasible: false,
+                sentinel_is_exclusion: false,
             };
         }
     }
