@@ -47,6 +47,7 @@ from discopt.modeling.core import (
     SolveResult,
     VarType,
 )
+from discopt.modeling.core import repr_space_cutoff as _repr_space_cutoff
 from discopt.solver_tuning import current as _tuning
 from discopt.solver_tuning import enter_scope as _enter_tuning_scope
 from discopt.solver_tuning import heuristic_entry_share as _heuristic_entry_share
@@ -14157,8 +14158,22 @@ def solve_model(
                 _itp_probing = _node_probing_enabled()
                 _itp_probe_max = _node_probe_max_vars()
                 _itp_inc = tree.incumbent()
+                # #1373: the kernel applies the cutoff against the REPR's own
+                # objective under the repr's declared sense, so it needs the
+                # incumbent in the MODEL's space -- ``tree.incumbent()[1]`` is the
+                # internal minimization-space value (``-f`` for a maximize). Feeding
+                # the internal value built the row ``f >= -f(x_inc)``, which on a
+                # maximize model with a negative optimum is stricter than valid: it
+                # emptied every child box and certified a false ``optimal``.
+                # ``repr_space_cutoff`` converts and then VERIFIES against the
+                # incumbent point, returning None (cutoff-free FBBT -- a looser box,
+                # which is sound) when the spaces cannot be shown to agree.
                 _itp_cutoff = (
-                    float(_itp_inc[1])
+                    _repr_space_cutoff(
+                        _model_repr,
+                        float(_itp_inc[1]),
+                        incumbent_point=_itp_inc[0],
+                    )
                     if _itp_inc is not None
                     and np.isfinite(_itp_inc[1])
                     and _itp_inc[1] < _SENTINEL_THRESHOLD
@@ -16600,10 +16615,20 @@ def solve_model(
             incumbent_info = tree.incumbent()
             if incumbent_info is not None:
                 inc_sol, inc_obj = incumbent_info
-                if inc_obj < _SENTINEL_THRESHOLD:
+                # #1373: ``fbbt_with_cutoff`` reads the repr's declared sense and
+                # builds ``f >= z`` for a maximize, so ``z`` must be in the MODEL's
+                # space, not the tree's internal minimization space. ``None`` means
+                # the spaces could not be shown to agree; skipping this *optional*
+                # cutoff tightening keeps a valid, looser box.
+                _c3_cutoff = (
+                    _repr_space_cutoff(_model_repr, float(inc_obj), incumbent_point=inc_sol)
+                    if inc_obj < _SENTINEL_THRESHOLD
+                    else None
+                )
+                if _c3_cutoff is not None:
                     try:
                         fbbt_lbs, fbbt_ubs = _model_repr.fbbt_with_cutoff(
-                            max_iter=10, tol=1e-8, incumbent_bound=float(inc_obj)
+                            max_iter=10, tol=1e-8, incumbent_bound=_c3_cutoff
                         )
                         fbbt_lbs = np.asarray(fbbt_lbs, dtype=np.float64)
                         fbbt_ubs = np.asarray(fbbt_ubs, dtype=np.float64)
@@ -18777,8 +18802,14 @@ def _solve_nlp_bb(
                 _itp_probing = _node_probing_enabled()
                 _itp_probe_max = _node_probe_max_vars()
                 _itp_inc = tree.incumbent()
+                # #1373: model-space, verified -- see the spatial loop's copy of
+                # this conversion for why the internal value is a false certificate.
                 _itp_cutoff = (
-                    float(_itp_inc[1])
+                    _repr_space_cutoff(
+                        in_tree_presolve_repr,
+                        float(_itp_inc[1]),
+                        incumbent_point=_itp_inc[0],
+                    )
                     if _itp_inc is not None
                     and np.isfinite(_itp_inc[1])
                     and _itp_inc[1] < _SENTINEL_THRESHOLD

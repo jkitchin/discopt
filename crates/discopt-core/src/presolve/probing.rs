@@ -229,7 +229,11 @@ const MAX_INT_PEEL: usize = 8;
 /// makes probing optimality-aware (`objective ⋈ incumbent`): a fixing whose
 /// sub-box cannot reach the incumbent is discarded — sound inside branch &
 /// bound because such points cannot improve the incumbent. Every returned bound
-/// is a subset of the corresponding input bound.
+/// is a subset of the corresponding input bound. `incumbent` reaches the cutoff
+/// row through [`fbbt_with_cutoff`], so it is in the **model's own objective
+/// space** (`f(x_inc)`, positive-as-written for a maximize), not a caller's
+/// internal minimization space — see that function for the mismatch's cost
+/// (issue #1373).
 ///
 /// `var_bounds` is the node box (one interval per variable). `deadline` bounds
 /// wall time; on expiry the pass returns whatever it has contracted so far

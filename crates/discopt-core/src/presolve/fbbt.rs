@@ -1713,6 +1713,21 @@ pub(crate) fn seed_block_interval(v: &crate::expr::VarInfo) -> Interval {
 /// (for maximize). This allows FBBT to exploit incumbent information for
 /// tighter bounds without LP solves.
 ///
+/// # `bound` is in the MODEL's objective space, not the solver's
+///
+/// The row is built against `model.objective` under `model.objective_sense`, so
+/// `bound` must be the value of the model's *own* objective at the incumbent --
+/// `f(x_inc)`, positive-as-written for a maximize. The Python solver, the B&B
+/// tree and the LP relaxation rows all carry the objective in the internal
+/// *minimization* space (`-f` for a maximize), so a caller holding
+/// `tree.incumbent()[1]` must convert before calling in
+/// (`discopt.modeling.core.repr_space_cutoff`).
+///
+/// Passing the internal value for a maximize model builds `f >= -f(x_inc)`,
+/// which is *stricter* than valid whenever `f(x_inc) < 0`: it empties boxes that
+/// contain the optimum, and because callers consume the empty verdict as a
+/// rigorous fathom the tree then certifies a false `optimal` (issue #1373).
+///
 /// Returns tightened variable bounds (indexed by variable index, not offset).
 pub fn fbbt_with_cutoff(
     model: &ModelRepr,
