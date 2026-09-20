@@ -189,6 +189,9 @@ def compute_disjunctive_config_bound(
 
     ``root_floor`` is the caller's existing valid bound for the box (used as the
     inherited bound of unprocessed leaves, keeping the pass anytime-valid).
+    ``incumbent`` is in the **internal minimization space** — it is compared
+    against ``node.lower_bound`` (an internal LP bound) and forwarded verbatim to
+    :func:`obbt_tighten_root`, whose cutoff rows are internal too (#1373).
     Declines (``bound=None``) when the model carries no configuration metadata,
     the indicator count exceeds ``max_indicators``, or nothing above ``-inf``
     could be certified within budget.

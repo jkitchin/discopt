@@ -163,8 +163,13 @@ def probe_box(
     max_vars : int
         Budget: at most this many discrete variables are probed.
     incumbent : float, optional
-        A valid incumbent objective (upper bound on the optimum). When given,
-        probing becomes optimality-aware via a cutoff constraint
+        A valid incumbent objective, in the **model's own objective sense** (the
+        value of ``f`` at a feasible point, positive-as-written for a MAXIMIZE
+        model -- NOT the internal ``-f``). The Rust kernel builds the cutoff row
+        against the repr's objective under the repr's declared sense, so it reads
+        this value in the model's space; passing an internally-negated value to a
+        maximize model prunes the wrong half and can cut off the optimum (#1373).
+        When given, probing becomes optimality-aware via a cutoff constraint
         (``objective ⋈ incumbent``); a fixing whose sub-box cannot reach the
         incumbent is discarded. Sound because the incumbent bounds the optimum.
 

@@ -571,6 +571,36 @@ def _extract_linear_constraints(
     return A_ub, b_ub, A_eq, b_eq, n_vars
 
 
+def _internal_cutoff_row(model: Model, obj_coeffs: np.ndarray) -> np.ndarray:
+    """The row of the internal-space cutoff ``row @ x <= z_internal``.
+
+    ``obj_coeffs`` are the coefficients ``c`` of the *user's* objective
+    ``f(x) = c'x``.  Every cutoff parameter in this layer carries the incumbent
+    in the **internal minimization space** — ``z = -f(x_inc)`` for a MAXIMIZE
+    model, which is what ``tree.incumbent()[1]`` and AMP's ``UB`` hold — so the
+    row expressing "no worse than the incumbent" is the *internal* objective's
+    row, ``sign * c`` with ``sign = objective_sense_sign(model)``, and the
+    right-hand side is the cutoff verbatim in both senses:
+
+    * minimize: ``c'x <= z``, i.e. ``f(x) <= f(x_inc)``;
+    * maximize: ``-c'x <= z``, i.e. ``f(x) >= -z = f(x_inc)``.
+
+    Getting this wrong is issue #1373.  Negating the right-hand side on the
+    maximize arm (which is what this did, while every caller handed it an
+    internal value) gives ``-c'x <= -z``, i.e. ``f(x) >= z = -f(x_inc)`` — a
+    cut at the *reflected* incumbent.  Whenever ``f(x_inc) < 0`` that is
+    strictly tighter than valid and excludes the optimum; measured on
+    ``max -2x - 3y`` s.t. ``x + y >= 5`` it empties the feasible region outright,
+    so the cutoff was silently dead on every maximize model rather than helpful.
+    The sign itself comes from the one definition of it (#1299), never rewritten
+    by hand here.
+    """
+    from discopt.modeling.core import objective_sense_sign
+
+    sign = objective_sense_sign(model)
+    return sign * np.asarray(obj_coeffs, dtype=np.float64).reshape(1, -1)
+
+
 def _extract_linear_objective(
     model: Model,
     n_vars: int,
@@ -705,10 +735,12 @@ def run_obbt(
     (min and max) subject to the model's linear constraints to find
     the tightest possible bounds.
 
-    When ``incumbent_cutoff`` is provided, the constraint ``f(x) <= z*``
-    is added (using the objective's linear coefficients), which can
-    dramatically tighten bounds by excluding regions that cannot improve
-    on the incumbent.
+    When ``incumbent_cutoff`` is provided, the constraint ``f_int(x) <= z*`` is
+    added (using the objective's linear coefficients), which can dramatically
+    tighten bounds by excluding regions that cannot improve on the incumbent.
+    ``z*`` is in the **internal minimization space** — ``-f(x_inc)`` for a
+    MAXIMIZE model, the space ``tree.incumbent()`` and AMP's ``UB`` carry (see
+    :func:`_internal_cutoff_row`; #1373).
 
     Args:
         model: The optimization model.
@@ -717,9 +749,12 @@ def run_obbt(
         min_width: Skip variables whose bound width is below this threshold.
         time_limit_per_lp: Time limit per LP solve in seconds.
         total_time_limit: Wall-clock limit for the whole OBBT pass in seconds.
-        incumbent_cutoff: If provided, adds ``c'x <= incumbent_cutoff``
-            as an additional inequality constraint (using linear objective
-            coefficients). Only effective when the objective is linear.
+        incumbent_cutoff: If provided, adds the internal-space cutoff row
+            ``sign * c'x <= incumbent_cutoff`` as an additional inequality
+            constraint (using linear objective coefficients), where ``sign`` is
+            ``objective_sense_sign(model)``. The value is in the internal
+            minimization space, NOT the user's sense (#1373). Only effective
+            when the objective is linear.
 
     Returns:
         ObbtResult with tightened bounds and statistics.
@@ -763,18 +798,13 @@ def run_obbt(
 
     # --- Add incumbent cutoff constraint: c'x <= z* ---
     if incumbent_cutoff is not None and model._objective is not None:
-        from discopt.modeling.core import ObjectiveSense
-
         obj_coeffs = _extract_linear_objective(model, n_vars)
         if obj_coeffs is not None:
-            # For maximization, negate: max c'x equiv min -c'x,
-            # so c'x >= z* becomes -c'x <= -z*
-            if model._objective.sense == ObjectiveSense.MAXIMIZE:
-                cutoff_row = -obj_coeffs.reshape(1, -1)
-                cutoff_rhs = np.array([-incumbent_cutoff])
-            else:
-                cutoff_row = obj_coeffs.reshape(1, -1)
-                cutoff_rhs = np.array([incumbent_cutoff])
+            # ``incumbent_cutoff`` is in the INTERNAL minimization space, and the
+            # rhs is that value verbatim in BOTH senses (#1373 -- the maximize arm
+            # used to negate it, cutting at the reflected incumbent).
+            cutoff_row = _internal_cutoff_row(model, obj_coeffs)
+            cutoff_rhs = np.array([float(incumbent_cutoff)])
             if A_ub is not None and b_ub is not None:
                 A_ub = np.vstack([A_ub, cutoff_row])
                 b_ub = np.concatenate([b_ub, cutoff_rhs])
@@ -972,7 +1002,10 @@ def run_obbt_on_relaxation(
     ``c_obj^T x <= incumbent_cutoff - obj_offset`` is added (using the
     relaxation's objective row), excluding regions that cannot beat the best
     known feasible objective and often delivering a bigger tightening than
-    the structural envelopes alone.
+    the structural envelopes alone.  ``relaxation._c`` / ``_obj_offset`` are
+    built in the **minimize convention** (a maximize objective is negated —
+    ``uniform_relax.build_uniform_relaxation``), so the cutoff must be in that
+    same internal space, not the user's sense (#1373).
 
     Parameters
     ----------
@@ -985,8 +1018,9 @@ def run_obbt_on_relaxation(
     time_limit_per_lp : float, optional
         Per-LP time limit in seconds.  ``None`` for no limit.
     incumbent_cutoff : float, optional
-        Cutoff on ``c_obj^T x + obj_offset`` (i.e. the relaxation objective in
-        the same scale as the user's objective).
+        Cutoff on ``c_obj^T x + obj_offset`` — the relaxation objective, which
+        is in the **internal minimization space** (``-f`` for a maximize model),
+        NOT the user's sense (#1373).
     min_width : float
         Skip variables whose box width is below this.
     deadline : float, optional
@@ -1711,16 +1745,11 @@ def bootstrap_finite_bounds(
         # polytope so an open variable that can only grow by worsening the
         # objective gets a finite bound from the cutoff alone.
         if incumbent_cutoff is not None and model._objective is not None:
-            from discopt.modeling.core import ObjectiveSense
-
             obj_coeffs = _extract_linear_objective(model, n_vars)
             if obj_coeffs is not None and np.any(obj_coeffs):
-                if model._objective.sense == ObjectiveSense.MAXIMIZE:
-                    cutoff_row = -obj_coeffs.reshape(1, -1)
-                    cutoff_rhs = np.array([-incumbent_cutoff])
-                else:
-                    cutoff_row = obj_coeffs.reshape(1, -1)
-                    cutoff_rhs = np.array([incumbent_cutoff])
+                # Internal minimization space, exactly as in ``run_obbt`` (#1373).
+                cutoff_row = _internal_cutoff_row(model, obj_coeffs)
+                cutoff_rhs = np.array([float(incumbent_cutoff)])
                 if A_ub is not None and b_ub is not None:
                     A_ub = np.vstack([A_ub, cutoff_row])
                     b_ub = np.concatenate([b_ub, cutoff_rhs])
@@ -1880,8 +1909,14 @@ def obbt_tighten_root(
         build — its carried bounds are keyed by column index and a truncated build
         has a different lifted layout.
     incumbent_cutoff : float, optional
-        If a feasible objective is known, add ``obj <= cutoff`` to the polytope
-        (optimality-based tightening) — often a much larger reduction.
+        If a feasible objective is known, add ``obj_internal <= cutoff`` to the
+        polytope (optimality-based tightening) — often a much larger reduction.
+        The value is in the **internal minimization space** (``-f(x_inc)`` for a
+        MAXIMIZE model), the space ``tree.incumbent()`` carries; every consumer
+        this forwards to — :func:`bootstrap_finite_bounds`,
+        :func:`dbbt_on_relaxation`, :func:`run_obbt_on_relaxation` — reads it
+        in that one space (#1373: they did not, and the mismatch cut the optimum
+        out of the box on a maximize model).
     cascade_aux : bool, default False
         Capture OBBT's tightening of the lifted *auxiliary* (product/ratio)
         columns and propagate it back onto the original variables through the

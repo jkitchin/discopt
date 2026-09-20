@@ -3636,6 +3636,81 @@ def objective_sense_sign(model: Model) -> float:
     return -1.0 if model._objective.sense == ObjectiveSense.MAXIMIZE else 1.0
 
 
+def repr_space_cutoff(
+    repr_: Any,
+    internal_cutoff: Optional[float],
+    *,
+    incumbent_point: Optional[np.ndarray] = None,
+    tol: float = 1e-6,
+) -> Optional[float]:
+    """Internal (minimization-space) cutoff in ``repr_``'s own objective space.
+
+    The B&B tree, the LP relaxation rows and every evaluator carry the objective
+    in the internal *minimization* space (``-f`` for a MAXIMIZE model), so
+    ``tree.incumbent()[1]`` is ``-f(x_inc)``.  ``repr_`` is a Rust ``ModelRepr``
+    handle, and its cutoff-aware kernels (``fbbt_with_cutoff``,
+    ``in_tree_presolve``) build the cutoff row against the repr's objective
+    *expression* under the repr's declared ``objective_sense``: for a maximize
+    they build ``f >= z``, so ``z`` must be ``f(x_inc)``, not ``-f(x_inc)``.
+    Handing them the internal value makes the row ``f >= -f(x_inc)``, which on a
+    maximize model with a negative optimum is *stricter* than valid and fathoms
+    the optimum -- issue #1373, a false ``optimal`` with ``gap_certified=True``.
+
+    The conversion keys off ``repr_.objective_sense`` rather than the Python
+    model's because the repr is what the kernel reads (presolve clones the sense
+    through, but the kernel's own declaration is the authority).  Use this at
+    every such boundary rather than writing the sign by hand; see
+    :func:`objective_sense_sign` for why (#1299).
+
+    Returns ``None`` -- meaning *run the reduction without a cutoff* -- whenever
+    the two spaces cannot be shown to agree:
+
+    * ``internal_cutoff`` is ``None`` or non-finite;
+    * ``repr_.objective_sense`` is missing or unrecognized;
+    * ``incumbent_point`` is supplied, is evaluable against the repr, and the
+      repr's objective there does **not** match the converted cutoff.
+
+    A skipped cutoff is a looser box, which is sound (CLAUDE.md §3); a cutoff in
+    the wrong space is a false certificate.  The verification is what makes this
+    an assertion rather than a convention: it also catches a repr whose
+    objective has been rescaled or offset away from the tree's value, which no
+    amount of sign bookkeeping would.
+    """
+    if internal_cutoff is None:
+        return None
+    internal = float(internal_cutoff)
+    if not np.isfinite(internal):
+        return None
+
+    try:
+        sense = str(repr_.objective_sense)
+    except Exception:  # pragma: no cover - defensive: older/foreign handle
+        return None
+    if sense == "minimize":
+        cutoff = internal
+    elif sense == "maximize":
+        cutoff = -internal
+    else:  # pragma: no cover - defensive
+        return None
+
+    if incumbent_point is not None:
+        point = np.asarray(incumbent_point, dtype=np.float64).ravel()
+        try:
+            n_cols = int(repr_.n_vars)
+        except Exception:  # pragma: no cover - defensive
+            n_cols = -1
+        if point.size == n_cols and np.all(np.isfinite(point)):
+            try:
+                at_point = float(repr_.evaluate_objective(point))
+            except Exception:  # pragma: no cover - defensive
+                at_point = float("nan")
+            if not np.isfinite(at_point) or abs(at_point - cutoff) > tol * (1.0 + abs(cutoff)):
+                # The repr's objective at the incumbent is not the cutoff we
+                # derived, so the two spaces are NOT the same space. Refuse.
+                return None
+    return cutoff
+
+
 # ─────────────────────────────────────────────────────────────
 # Parameter (for parametric optimization / sensitivity)
 # ─────────────────────────────────────────────────────────────

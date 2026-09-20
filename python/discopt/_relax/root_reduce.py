@@ -30,6 +30,15 @@ Soundness (the load-bearing invariant, §0.2/§0.3):
   * **Cutoff-optional.** With no finite incumbent the cutoff-using stages degrade to
     their structural (no-cutoff) subset — FBBT still propagates constraints, OBBT
     still projects — so the loop is always sound to call, incumbent or not.
+  * **One cutoff space (#1373).** ``incumbent_cutoff`` is in the **internal
+    minimization space** (—``f(x_inc)`` for a MAXIMIZE model), the space
+    ``tree.incumbent()[1]`` carries. S3's rows are internal, so it takes the value
+    verbatim; S2's Rust kernel builds its row against the repr's *own* objective
+    under the repr's declared sense, so S2 converts with ``repr_space_cutoff``
+    first. Handing the internal value straight to S2 on a maximize model builds
+    ``f >= -f(x_inc)``, which is stricter than valid once ``f(x_inc) < 0`` and
+    empties boxes that hold the optimum — the one way this tighten-only loop
+    could still produce a false certificate.
 
 The loop is behind a flag (``root_fixpoint`` / ``DISCOPT_ROOT_FIXPOINT``,
 default OFF until T2.6) at its solver integration point; this module is pure and
@@ -46,7 +55,7 @@ from typing import Optional
 
 import numpy as np
 
-from discopt.modeling.core import Model
+from discopt.modeling.core import Model, repr_space_cutoff
 
 logger = logging.getLogger(__name__)
 
@@ -129,14 +138,16 @@ def _stage_fbbt_with_cutoff(
                     v.ub = ub[off : off + sz].reshape(v.ub.shape)
                 off += sz
             repr_ = model_to_repr(model, getattr(model, "_builder", None))
+            # #1373: ``incumbent_cutoff`` is in the INTERNAL minimization space
+            # (the convention for every cutoff parameter in this layer -- see the
+            # module docstring), while ``fbbt_with_cutoff`` builds the cutoff row
+            # against the repr's own objective under the repr's declared sense.
+            # ``repr_space_cutoff`` converts; ``None`` means the spaces could not
+            # be shown to agree, and cutoff-free FBBT is a looser, sound box.
             fbbt_lbs, fbbt_ubs = repr_.fbbt_with_cutoff(
                 max_iter=max_iter,
                 tol=tol,
-                incumbent_bound=(
-                    float(incumbent_cutoff)
-                    if incumbent_cutoff is not None and np.isfinite(incumbent_cutoff)
-                    else None
-                ),
+                incumbent_bound=repr_space_cutoff(repr_, incumbent_cutoff),
             )
         except Exception as exc:
             # C-41: surface, never silently swallow — a swallowed error here is the
@@ -235,8 +246,14 @@ def run_root_fixpoint(
     model, lb, ub
         The (already reformulated) model and the current root box.
     incumbent_cutoff
-        A valid upper bound on the optimum (an incumbent objective). When None the
-        cutoff-using stages degrade to their structural subset (still sound).
+        A valid upper bound on the optimum (an incumbent objective) in the
+        **internal minimization space** — ``-f(x_inc)`` for a MAXIMIZE model,
+        the space ``tree.incumbent()[1]`` carries. Both cutoff-using stages read
+        it in that one space: S3 forwards it to :func:`obbt_tighten_root`, whose
+        rows are internal, and S2 converts it to the repr's own sense with
+        ``repr_space_cutoff`` before handing it to the Rust kernel (#1373). When
+        None the cutoff-using stages degrade to their structural subset (still
+        sound).
     deadline
         Absolute ``time.perf_counter()`` budget for the whole loop; each stage is
         additionally deadline-clamped. The loop stops the moment it is reached.

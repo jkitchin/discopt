@@ -87,6 +87,13 @@ pub struct InTreeDelta {
 /// ignored — `node_lb`/`node_ub` override them). Returns an
 /// [`InTreeDelta`] containing the post-tightening bounds.
 ///
+/// `incumbent` is forwarded verbatim to [`fbbt_with_cutoff`] and
+/// [`probe_node_bounds`], so it is in the **model's own objective space** —
+/// `f(x_inc)`, positive-as-written for a maximize — and NOT the caller's
+/// internal minimization space. See `fbbt_with_cutoff` for what the mismatch
+/// costs: an emptied box that the caller consumes as a rigorous fathom, hence a
+/// false `optimal` (issue #1373).
+///
 /// The pass is a no-op (returns `ran = false`, copies `node_lb` /
 /// `node_ub` unchanged) when the schedule says to skip this depth.
 pub fn run_in_tree_presolve(
