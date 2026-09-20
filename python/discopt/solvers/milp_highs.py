@@ -615,6 +615,16 @@ def solve_milp_with_lazy_cuts(
 
         if not pending:
             status = _status_map(highspy).get(h.getModelStatus(), SolveStatus.ERROR)
+            if terminate_callback is not None:
+                # The tree finished on its own, so there is nothing left to
+                # interrupt -- but this is the ONLY moment at which a master that
+                # converges inside its FINAL tree can be observed at all. The
+                # separator falls silent exactly when the incumbent becomes good,
+                # so that convergence arrives with no restart left to carry a
+                # check-in, and the hook never sees the certificate it exists to
+                # detect. The answer is deliberately ignored: reporting "stopped
+                # early" for a tree that ran to completion would be false.
+                _consult("final", bound, time.time() - t0)
             break
 
         # A cut was requested, so this tree is stale: append the rows and rebuild.

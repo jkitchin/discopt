@@ -5716,6 +5716,12 @@ def solve_lp_nlp_bb(
     #: never had anything to judge, which is NOT the same as "it judged and said
     #: keep going" (CLAUDE.md §6); it is exported in ``callback_stats``.
     bound_observations = [0]
+    #: The gap was *seen* to meet tolerance at some check-in. Strictly weaker than
+    #: ``converged_at``, which additionally means the observation stopped the
+    #: master. A master that converges inside its final tree is only ever the
+    #: former: by then the separator has fallen silent, so no restart remains to
+    #: carry a check-in and there is nothing left to cut short.
+    converged_observed = [False]
 
     def _master_bound_internal(raw) -> Optional[float]:
         """The master's dual bound in the internal minimization sense, or None."""
@@ -5727,7 +5733,13 @@ def solve_lp_nlp_bb(
         return value
 
     def callback_terminate(snapshot: dict[str, object]) -> bool:
-        if (time.perf_counter() - t_start) >= float(time_limit):
+        # The post-loop check-in: the master has already stopped on its own, so
+        # this one only *observes*. It must not claim the wall, must not stop
+        # anything, and must not consult the caller's hook -- asking a user hook
+        # whether to terminate a master that has already terminated would be a
+        # question with no meaning.
+        is_final = snapshot.get("context") == "final"
+        if not is_final and (time.perf_counter() - t_start) >= float(time_limit):
             return True
         lb = _master_bound_internal(snapshot.get("dual_bound"))
         ub = incumbent_obj
@@ -5747,9 +5759,15 @@ def solve_lp_nlp_bb(
                 # -- gap 6.3e-5, inside the 1e-4 default -- at 5.1 s of a 60 s
                 # limit, then rebuilt its tree five more times and was reported
                 # ``feasible`` at the wall (measured 2026-08-29).
+                converged_observed[0] = True
+                if is_final:
+                    # Seen, but nothing was cut short: the master had already
+                    # finished. Recording this as an early exit would be a false
+                    # claim about why the solve ended (CLAUDE.md §1).
+                    return False
                 converged_at[0] = lb if converged_at[0] is None else max(converged_at[0], lb)
                 return True
-        if hook is None:
+        if is_final or hook is None:
             return False
         context: dict[str, object] = {
             "event": "termination",
@@ -5882,6 +5900,13 @@ def solve_lp_nlp_bb(
     # on any other master this count is 0 and the exit is inert by construction.
     callback_stats["dual_bound_observations"] = int(bound_observations[0])
     callback_stats["converged_early"] = bool(converged_at[0] is not None)
+    # "Early" means the certificate STOPPED the master; "observed" means a
+    # check-in saw it at all, including the post-loop one. Which of the two a
+    # converging master reaches depends on whether its last accepted incumbent
+    # arrives with a restart left to carry the observation -- a scheduling
+    # detail, not a property of the solve. Assert on this one, not on
+    # ``converged_early``, when the question is "did the exit ever see the gap".
+    callback_stats["converged_observed"] = bool(converged_observed[0])
     callback_terminated = bool(callback_stats.get("terminated"))
     status, termination_reason = _lp_nlp_bb_exit_status(
         converged_early=converged_at[0] is not None,

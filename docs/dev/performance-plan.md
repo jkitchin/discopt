@@ -9931,3 +9931,73 @@ fixture in which the separator provably outlives the certificate, which neither
 attempt above achieved, or accepting that the final tree's convergence is never
 observed. Note that "fixing" the latter by consulting after the loop would be
 wrong: nothing stopped early, so reporting `converged_early` would be false.
+
+### 73.11 Retraction — §73.10's disposition was wrong on both counts
+
+§73.10 concluded two things that later measurement falsified. CLAUDE.md §11
+requires retracting one's own published claims in writing, so both are withdrawn
+here, and the PR #1360 body carried the first of them and has been corrected.
+
+**Retraction 1 — "pre-existing, not folded into #1360".** Withdrawn. The failure
+*is* caused by #1360. The evidence §73.10 rested on was an absence (the test also
+looked marginal on `main`); the evidence against it is a presence: `1066` fails in
+0 of 8 recent `main` CI runs and 4 of 5 on the branch. A subprocess A/B over the
+branch's four flags, run interleaved under a load gate (load 2.60, two repetitions,
+identical both times), isolates a single one:
+
+| arm | restarts | lazy cuts | mipsol calls |
+|---|---|---|---|
+| `DISCOPT_OA_NLP_SCALED_TOL=0` (main's behaviour) | 75 | 223 | 354 |
+| `DISCOPT_OA_NLP_SCALED_TOL=1` (graduated in #1360) | 73 | 228 | 347 |
+
+`DISCOPT_OA_CONVEXITY_CERTIFICATE`, `DISCOPT_FARKAS_RAY_CLEANUP` and
+`DISCOPT_CONVEX_ROUTE_SYNTACTIC_OBJECTIVE` are bit-for-bit no-ops on this fixture;
+setting only `DISCOPT_OA_NLP_SCALED_TOL=0` reproduces main's trajectory exactly.
+The #1356 tolerance changes which fixed-NLP incumbents the separator accepts, which
+moves the master by two restarts — enough, on Linux, to carry the good incumbent
+past the last restart that could observe it. The flag is not at fault and is not
+being retreated from: it graduated on its own panel, and every arm above returns
+the same certified optimum 0.008.
+
+**Retraction 2 — "consulting after the loop would be wrong".** Withdrawn, and it
+was hiding a real defect. The claim conflated two different facts: that nothing was
+*cut short*, and that nothing was *seen*. Only the first justifies withholding
+`converged_early`; the second was never justified at all. Check-ins were raised
+only at restart and interrupt events, and a master stops restarting exactly when
+its separator falls silent — which is when the incumbent has become good. So
+convergence reached inside the **final tree was structurally unobservable**: the
+certificate existed and nothing was ever allowed to look at it. Linux CI printed
+that state verbatim — `bound=0.007999999996` against `objective=0.008000001545`, a
+1.9e-7 gap against a 1e-4 tolerance, reported as `converged_early=False`.
+
+**The fix (#1360).** `solve_milp_with_lazy_cuts` raises one post-loop check-in with
+`context="final"` when the tree finishes on its own, and its answer is **ignored** —
+there is nothing left to interrupt, and honouring a stop there would report a
+completed solve as one we cut short (§73.10's instinct, kept). OA separates the two
+facts: `converged_early` still means the certificate *stopped* the master, and the
+new `converged_observed` means a check-in *saw* it. Status and `termination_reason`
+are untouched, so the change is bound-neutral (§5 regime 1). Measured on the
+fixture, varying only the demand:
+
+| demand | restarts | `converged_early` | `converged_observed` | reason | objective |
+|---|---|---|---|---|---|
+| 0.5 | 132 | False | **True** | optimal | 0.008 |
+| 1.0 | 190 | False | **True** | optimal | 0.008 |
+| 2.0 | 98 | False | **True** | optimal | 0.008 |
+| 3.0 | 39 | False | **True** | optimal | 0.008 |
+| 4.0 | 73 | True | True | gap_tolerance | 0.008 |
+
+The four `False` rows are the previously invisible certificates. Which row a run
+lands on is scheduling, not a property of the solve — so the end-to-end test now
+asserts `converged_observed`, the guarantee the exit actually owes, and accepts
+either terminal reason. That is a re-pointing, not a weakening: the test still
+pins `status == OPTIMAL`, the objective, and `bound <= incumbent`, which is what
+the `rsyn0820m02m` regression it exists for would violate. The stop path itself
+keeps deterministic coverage in
+`test_a_callback_that_says_stop_stops_the_loop_and_says_so` and the
+`_lp_nlp_bb_exit_status` unit tests.
+
+**Still open, not fixed here.** `terminate_polls == restarts` on this master, so
+the 1 s in-tree interrupt poll never fires: `milp_highs.py` resets `last_poll` at
+every restart and restarts are ~49 ms apart. That is a dead clock on any
+frequently-restarting master, and it is a separate defect from this one.
