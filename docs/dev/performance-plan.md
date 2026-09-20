@@ -9808,3 +9808,58 @@ repeated on a verified tree. This is the second time in this repository that a
 worktree measurement silently ran against the main tree; CLAUDE.md §8 exists for it,
 and the rule that caught it is *assert `__file__` **and** a version marker* — here,
 post-merge markers (`_relax/scaling.py` absent, `_relax/module_status.py` present).
+
+### 73.9 Re-verifying the six certificate flips at a longer limit
+
+The first #1360 graduation panel ran at a 30 s limit and showed six instances whose
+certificate differed between arms. Six flips over 198 instances would be the
+`DISCOPT_CUT_INHERIT` signature — cert-clean but not net-positive — so before
+graduating anything the six were re-run at **180 s**, interleaved, two reps, on the
+§8-verified import tree (`discopt.__file__` under `pytree3/`, post-merge markers
+asserted). A flip that disappears when the clock is loosened was never a flag
+effect; it was the arm running out of time.
+
+Arms are cumulative, so each adjacent pair isolates one flag — `(convexity
+certificate, scaled NLP tol, Farkas cleanup, route gate)`:
+
+| arm | flags | isolates |
+|---|---|---|
+| B0 | 0,0,0,0 | baseline |
+| T | 0,1,0,0 | B0→T = `DISCOPT_OA_NLP_SCALED_TOL` |
+| H | 0,1,1,0 | T→H = `DISCOPT_FARKAS_RAY_CLEANUP` |
+| J | 0,1,1,1 | H→J = `DISCOPT_CONVEX_ROUTE_SYNTACTIC_OBJECTIVE` |
+| K | 1,1,1,1 | J→K = `DISCOPT_OA_CONVEXITY_CERTIFICATE` |
+
+`EXECUTED_RUNS 60`, `EXECUTED_COMPARISONS 10`, `INCUMBENTS FAILING VERIFICATION:
+none` (CLAUDE.md §6 — the probe prints its own executed counts and exits non-zero at
+zero).
+
+| instance | B0 | T | H | J | K | verdict |
+|---|---|---|---|---|---|---|
+| `clay0203m` | ✓ | ✓ | ✓ | ✓ | ✓ | wall artifact — all arms certify, 127 nodes, bound 41573.26250280856 identical |
+| `p_ball_10b_5p_3d_m` | ✓ | ✓ | ✓ | ✓ | ✓ | wall artifact — 1751 nodes, bound 44.004217 identical; the instance *needs* 53–54 s, so a 30 s limit could never have certified it in any arm |
+| `tls2` | SPLIT | ✓ | ✓ | SPLIT | SPLIT | **not attributable** — the same arm disagrees between reps (rep 1: all five certify; rep 2: B0/J/K do not). Run-to-run nondeterminism, which is exactly what the second rep exists to expose (§9) |
+| `m7_ar25_1` | ✗ | ✗ | ✓ | ✓ | ✓ | **real, and it is the Farkas flag** — the step is T→H. B0/T run the full 180 s to 9619/9705 nodes and end `feasible`; H/J/K certify in 4.4 s at 0 nodes |
+| `watercontamination0303r` | ✓ | ✓ | ✓ | ✓ | ✓ | wall artifact — 257 nodes, bound 424.544103877176 identical |
+| `QPLIB_10056` | ✓ | ✓ | ✓ | ✓ | ✓ | wall artifact — 3635 nodes, bound -33.860171026798085 identical |
+
+**Result: not one flip is attributable to `DISCOPT_OA_NLP_SCALED_TOL` (B0→T) or
+`DISCOPT_OA_CONVEXITY_CERTIFICATE` (J→K).** Four of six are wall artifacts, one is
+run-to-run noise, and the single reproducible flip is won by the Farkas cleanup,
+which §73.7 had already graduated on its own 198-instance panel.
+
+**Retraction (§11).** The first panel's reading of `m7_ar25_1` — "arm J certifies in
+4.44 s at 0 nodes, arm K takes 30.27 s and 953 nodes and ends `feasible`, so the
+convexity certificate costs this instance its certificate" — is **withdrawn**. At
+180 s, K is bit-identical to J (0 nodes, 4.4 s, bound 143.58499999999148) in both
+reps. The 953-node K run was load-dependent, not a flag effect; it was published
+from a single uninterleaved 30 s arm and should not have been.
+
+**Disposition.** Both flags ship default-ON with a `=0` opt-out, which is what the
+code already does (`oa.py:1554`, `_relax/convexity/certificate.py:129`). The §5
+net-positive bar is carried by the measurements on the class each flag targets — the
+#1352 K=6 model (72 MILPs / `feasible` → 17 MILPs / `optimal`) and `port-12-3-2`
+(`feasible` at 30 s → `optimal` in 1.22 s) — and this panel supplies the other half
+of the gate: cert-clean, with no instance regressing and no incumbent failing
+independent feasibility verification. Neither flag is left pending, which is the
+#1345 rule this PR is bound by.
