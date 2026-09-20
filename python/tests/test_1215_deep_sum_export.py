@@ -65,14 +65,18 @@ SHAPES = {
 }
 
 
-# The n=20000 MPS cases cost 8-18 s uninstrumented but 35-74 s under
-# `--cov` (measured, M4 Pro), and CI's coverage lane runs `--timeout=120` on a
-# slower runner -- so the default timeout was deciding this test rather than the
-# assertion, exactly what the `python-correctness-slow` lane's `--timeout=1800`
-# comment in `ci.yml` warns against. The assertion is unchanged and the sizes are
-# untouched (`test_the_old_failure_point_is_actually_crossed` pins them); only the
-# hang backstop is sized for an instrumented run.
-@pytest.mark.timeout(600)
+# The n=20000 MPS cases used to cost 8-18 s uninstrumented and 35-74 s under
+# `--cov`, which needed a 600 s backstop just to stop the timeout deciding the
+# test. That cost was not the model size: `to_mps` was quadratic TWICE over --
+# a dense (variable x row) membership scan building COLUMNS, and a linear rescan
+# of the variable list per variable occurrence in `_var_index`. Both are now
+# O(nnz)/O(1) and the worst case here is 0.52 s, or 1.23 s under `--cov`.
+#
+# The sizes and assertions are untouched (`test_the_old_failure_point_is_actually
+# _crossed` pins them). The timeout stays only as a REGRESSION BACKSTOP: 60 s is
+# ~50x the instrumented cost, so it cannot flake, but a reintroduced quadratic
+# (74 s under `--cov` at these sizes) trips it instead of silently taxing CI.
+@pytest.mark.timeout(60)
 @pytest.mark.parametrize("writer", sorted(WRITERS))
 @pytest.mark.parametrize("shape", sorted(SHAPES))
 @pytest.mark.parametrize("n", SIZES)
