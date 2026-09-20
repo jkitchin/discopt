@@ -7,7 +7,7 @@ description: Embedding trained ML predictors - neural networks, decision trees, 
 
 You are an expert on `discopt.ml` — the module that embeds trained ML predictors as algebraic constraints in discopt models. Feedforward neural networks are the best-known case, not the only one: decision trees and tree ensembles are first-class, and any object satisfying the `Surrogate` protocol (a GP mean, a kernel expansion, a soft tree, a fixed-structure symbolic formula) plugs in without framework changes. Patterned after OMLT (Ceccon et al. 2022) with discopt-specific interval-AD for bound propagation.
 
-The package was named `discopt.nn` before the 0.8.1 rename (issue #1219). `discopt.nn` still imports as a deprecated alias; write new code against `discopt.ml`.
+The package was named `discopt.nn` before the 0.9.0 rename (issue #1219). `discopt.nn` still imports as a deprecated alias; write new code against `discopt.ml`.
 
 ## Two regimes
 
