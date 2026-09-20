@@ -17,6 +17,49 @@ use crate::bnb::pool::{NodePool, SelectionStrategy};
 /// the two in sync.
 pub(crate) const SENTINEL_THRESHOLD: f64 = 1e29;
 
+/// Refuse to let a *failure* sentinel become a node's `local_lower_bound`
+/// (see `TreeManager::import_results`). Bound-changing — a node that used to
+/// prune as "dominated" on the sentinel is now branched or floored — so it ships
+/// behind a flag per CLAUDE.md §5, default OFF until the differential panel
+/// passes. `DISCOPT_TREE_SENTINEL_PRUNE_GUARD=1` turns it on.
+fn sentinel_prune_guard() -> bool {
+    // The env read latches in a `OnceLock`, so a test process could otherwise
+    // only ever observe one arm — and the regression IS the difference between
+    // the arms, so both must run in the same binary. Hence a test-only
+    // thread-local override, compiled out of release builds.
+    #[cfg(test)]
+    if let Some(v) = test_guard_override::get() {
+        return v;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("DISCOPT_TREE_SENTINEL_PRUNE_GUARD").is_ok_and(|v| v.trim() == "1")
+    })
+}
+
+#[cfg(test)]
+mod test_guard_override {
+    use std::cell::Cell;
+    thread_local! {
+        static OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+    pub(super) fn get() -> Option<bool> {
+        OVERRIDE.with(|c| c.get())
+    }
+    /// Forces `sentinel_prune_guard()` on the current thread until dropped.
+    pub(super) struct Scoped(Option<bool>);
+    impl Scoped {
+        pub(super) fn new(v: bool) -> Self {
+            Scoped(OVERRIDE.with(|c| c.replace(Some(v))))
+        }
+    }
+    impl Drop for Scoped {
+        fn drop(&mut self) {
+            OVERRIDE.with(|c| c.set(self.0));
+        }
+    }
+}
+
 /// A batch of nodes exported for relaxation evaluation.
 #[derive(Debug)]
 pub struct ExportBatch {
@@ -54,6 +97,31 @@ pub struct NodeResult {
     /// from the sentinel instead would be unsound: the same sentinel also encodes
     /// *soft* failures, and fathoming those is the #927 false-certificate mode.
     pub certified_infeasible: bool,
+    /// The node's `1e30` sentinel is a **justified exclusion** of its region —
+    /// not a failure to bound it.
+    ///
+    /// Two kinds of caller set this. A user callback that vetoes the region (a
+    /// `lazy_constraints` rejection past the requeue cap, or an
+    /// `incumbent_callback` veto — #1038/#748): the caller really did remove it.
+    /// And an in-tree driver that encodes a *rigorous emptiness proof* as the
+    /// sentinel (an FBBT-empty box, or a Farkas-verified infeasible LP, in
+    /// `milp_driver.rs`): the region is genuinely empty. Pruning on the sentinel
+    /// is correct in both.
+    ///
+    /// The `1e30` sentinel is overloaded: it means BOTH "this region is excluded"
+    /// and "this node could not be bounded". Pruning is correct
+    /// for the first and unsound for the second, and the two are
+    /// indistinguishable from the value alone — so, exactly as with
+    /// `certified_infeasible` above, the meaning has to be carried rather than
+    /// inferred. The orchestrator already draws this distinction internally
+    /// (#748 records a callback rejection WITHOUT flooring
+    /// `_taint_floor_internal`, precisely because a veto excludes a region while
+    /// a failed relaxation does not); this field is how that existing
+    /// distinction crosses the boundary.
+    ///
+    /// `false` (the default for callers that do not set it) is the conservative
+    /// arm: the node is treated as unbounded rather than excluded.
+    pub sentinel_is_exclusion: bool,
 }
 
 /// Statistics from processing a batch of evaluated nodes.
@@ -498,7 +566,30 @@ impl TreeManager {
             // relaxation hit the deadline) it imports `-inf`; without this floor a
             // single such open node would drag `global_lower_bound` to `-inf` and
             // discard the bound the parent already proved.
-            node.local_lower_bound = result.lower_bound.max(node.local_lower_bound);
+            //
+            // The `max()` is sound only because BOTH operands are valid bounds —
+            // "the tighter one wins" is a statement about bounds. The `1e30`
+            // failure sentinel is not a bound: nothing proved it, and taking it
+            // here installs a non-bound AS the node's bound, after which step 1
+            // of `process_evaluated` prunes the node as "dominated" and
+            // `update_global_lower_bound` can collapse the tree bound onto the
+            // incumbent — certifying a subtree that was never bounded. (One line
+            // below, `bound_trusted` already refuses to trust this same value for
+            // promotion to the incumbent; it must not be trusted as a bound
+            // either.) A *callback exclusion* is different — the caller really did
+            // remove the region — so it keeps the sentinel and still prunes.
+            let effective_lb = if sentinel_prune_guard()
+                && result.lower_bound >= SENTINEL_THRESHOLD
+                && !result.sentinel_is_exclusion
+            {
+                // "No bound proved" — the same value the orchestrator imports for
+                // a node it could not bound, and a path this code already handles
+                // soundly: floored at the parent bound, untrusted, branched.
+                f64::NEG_INFINITY
+            } else {
+                result.lower_bound
+            };
+            node.local_lower_bound = effective_lb.max(node.local_lower_bound);
             // Store solution for warm-starting children.
             node.parent_solution = Some(result.solution.clone());
         }
@@ -933,15 +1024,25 @@ impl TreeManager {
                     // of the incumbent, which keeps a gap-closed exit rigorous
                     // without pinning the whole tree bound at -inf.
                     //
-                    // A SENTINELLED node (#1038) is excluded from this floor: its
-                    // `node_lb` is 1e30, not a bound anything proved, and
-                    // `update_global_lower_bound` caps the floor at the incumbent
-                    // — so flooring at 1e30 would collapse the global bound ONTO
-                    // the incumbent and certify the very subtree that was removed
-                    // without proof. The orchestrator already accounts for these
-                    // nodes rigorously, flooring the reported bound at their
-                    // pop-time bound (`_taint_floor_internal`, solver.py) and
-                    // barring an `infeasible` verdict (`_nonrigorous_fathom`).
+                    // A node still carrying the 1e30 sentinel in `node_lb` is
+                    // excluded from this floor: 1e30 is not a bound anything
+                    // proved, and `update_global_lower_bound` caps the floor at
+                    // the incumbent — so flooring at 1e30 would collapse the
+                    // global bound ONTO the incumbent and certify the very
+                    // subtree that was removed without proof. The orchestrator
+                    // already accounts for these nodes rigorously, flooring the
+                    // reported bound at their pop-time bound
+                    // (`_taint_floor_internal`, solver.py) and barring an
+                    // `infeasible` verdict (`_nonrigorous_fathom`).
+                    //
+                    // With `sentinel_prune_guard()` ON, a node that reaches here
+                    // carrying the sentinel is a CALLBACK EXCLUSION (#1038/#748)
+                    // — `import_results` no longer lets a *failure* sentinel
+                    // through, so a failed node arrives with its inherited parent
+                    // bound and takes the floor above, which is the sound
+                    // treatment this branch always wanted to give it. The
+                    // exclusion case keeps the pre-existing behaviour: the caller
+                    // removed the region deliberately, so no floor is owed.
                     self.unresolved_floor = self.unresolved_floor.min(node_lb);
                 }
                 self.pool.get_mut(result.node_id).status = NodeStatus::Fathomed;
@@ -1395,6 +1496,7 @@ mod tests {
             solution: vec![0.5, 0.7],
             is_feasible: false,
             certified_infeasible: false,
+            sentinel_is_exclusion: false,
         }]);
 
         let proc_stats = tm.process_evaluated();
@@ -1426,6 +1528,7 @@ mod tests {
             solution: vec![1.0, 0.0],
             is_feasible: true,
             certified_infeasible: false,
+            sentinel_is_exclusion: false,
         }]);
         let stats = tm.process_evaluated();
         assert_eq!(stats.fathomed, 1);
@@ -1465,6 +1568,7 @@ mod tests {
             solution: vec![3.5],
             is_feasible: false,
             certified_infeasible: true,
+            sentinel_is_exclusion: false,
         }]);
         let stats = tm.process_evaluated();
 
@@ -1496,6 +1600,7 @@ mod tests {
             solution: vec![3.5],
             is_feasible: false,
             certified_infeasible: false,
+            sentinel_is_exclusion: false,
         }]);
         let stats = tm.process_evaluated();
         assert_eq!(stats.pruned, 0, "an UNPROVEN sentinel must not prune");
@@ -1533,6 +1638,7 @@ mod tests {
             solution: vec![3.0], // INTEGER-feasible, and the excluded point
             is_feasible: true,
             certified_infeasible: false,
+            sentinel_is_exclusion: false,
         }]);
         let stats = tm.process_evaluated();
 
@@ -1594,6 +1700,7 @@ mod tests {
             solution: vec![3.5],
             is_feasible: false,
             certified_infeasible: false,
+            sentinel_is_exclusion: false,
         }]);
         tm.process_evaluated();
 
@@ -1611,6 +1718,7 @@ mod tests {
                 solution: vec![2.5],
                 is_feasible: false,
                 certified_infeasible: false,
+                sentinel_is_exclusion: false,
             },
             NodeResult {
                 node_id: batch.node_ids[1],
@@ -1618,6 +1726,7 @@ mod tests {
                 solution: vec![5.5],
                 is_feasible: false,
                 certified_infeasible: false,
+                sentinel_is_exclusion: false,
             },
         ]);
         let stats = tm.process_evaluated();
@@ -1659,6 +1768,7 @@ mod tests {
             solution: vec![3.5],
             is_feasible: false,
             certified_infeasible: false,
+            sentinel_is_exclusion: false,
         }]);
         tm.process_evaluated().pruned == 1
     }
@@ -2025,6 +2135,7 @@ mod tests {
             solution: vec![1.0],
             is_feasible: true,
             certified_infeasible: false,
+            sentinel_is_exclusion: false,
         }]);
         tm.process_evaluated();
 
@@ -2055,6 +2166,7 @@ mod tests {
                 solution: vec![2.3, 1.7],
                 is_feasible: false,
                 certified_infeasible: false,
+                sentinel_is_exclusion: false,
             }]);
             let stats = tm.process_evaluated();
 
@@ -2093,6 +2205,7 @@ mod tests {
             solution: vec![5.0],
             is_feasible: true,
             certified_infeasible: false,
+            sentinel_is_exclusion: false,
         }]);
         tm.process_evaluated();
         assert_eq!(tm.incumbent().unwrap().1, 10.0);
@@ -2125,6 +2238,7 @@ mod tests {
             solution: vec![5.0],
             is_feasible: false,
             certified_infeasible: false,
+            sentinel_is_exclusion: false,
         }]);
         tm.process_evaluated();
 
@@ -2157,6 +2271,7 @@ mod tests {
             solution: vec![3.5, 4.5],
             is_feasible: false,
             certified_infeasible: false,
+            sentinel_is_exclusion: false,
         }]);
         tm.process_evaluated();
         // Root branched on the most-fractional variable (both are 0.5 from
@@ -2174,6 +2289,7 @@ mod tests {
                 solution: vec![3.0, 4.5],
                 is_feasible: false,
                 certified_infeasible: false,
+                sentinel_is_exclusion: false,
             },
             NodeResult {
                 node_id: batch.node_ids[1],
@@ -2181,6 +2297,7 @@ mod tests {
                 solution: vec![4.0, 4.5],
                 is_feasible: false,
                 certified_infeasible: false,
+                sentinel_is_exclusion: false,
             },
         ]);
         let stats = tm.process_evaluated();
@@ -2207,6 +2324,7 @@ mod tests {
             solution: vec![0.5, 0.5],
             is_feasible: false,
             certified_infeasible: false,
+            sentinel_is_exclusion: false,
         }]);
         let stats = tm.process_evaluated();
         // With no pseudocost observations and threshold=8, both fractional
@@ -2238,6 +2356,7 @@ mod tests {
             solution: vec![0.5, 0.5],
             is_feasible: false,
             certified_infeasible: false,
+            sentinel_is_exclusion: false,
         }]);
         tm.process_evaluated();
 
@@ -2252,6 +2371,7 @@ mod tests {
                 solution: vec![0.0, 0.5],
                 is_feasible: false,
                 certified_infeasible: false,
+                sentinel_is_exclusion: false,
             },
             NodeResult {
                 node_id: batch.node_ids[1],
@@ -2259,6 +2379,7 @@ mod tests {
                 solution: vec![1.0, 0.5],
                 is_feasible: false,
                 certified_infeasible: false,
+                sentinel_is_exclusion: false,
             },
         ]);
         tm.process_evaluated();
@@ -2275,6 +2396,7 @@ mod tests {
                 solution: batch.lb[i].clone(),
                 is_feasible: true,
                 certified_infeasible: false,
+                sentinel_is_exclusion: false,
             });
         }
         tm.import_results(&node_results);
@@ -2336,6 +2458,7 @@ mod tests {
             solution: vec![0.5, 0.0],
             is_feasible: false,
             certified_infeasible: false,
+            sentinel_is_exclusion: false,
         }]);
         tm.process_evaluated();
         // Children c1, c2 (x0 fixed to 0 / 1). c1: good LP, lb=2.0, fractional
@@ -2354,6 +2477,7 @@ mod tests {
                 },
                 is_feasible: false,
                 certified_infeasible: false,
+                sentinel_is_exclusion: false,
             },
             NodeResult {
                 node_id: batch.node_ids[1],
@@ -2361,6 +2485,7 @@ mod tests {
                 solution: batch.lb[1].clone(),
                 is_feasible: true,
                 certified_infeasible: false,
+                sentinel_is_exclusion: false,
             },
         ]);
         tm.process_evaluated();
@@ -2378,6 +2503,7 @@ mod tests {
                 solution: mid(&batch.lb[0], &batch.ub[0]),
                 is_feasible: false,
                 certified_infeasible: false,
+                sentinel_is_exclusion: false,
             },
             NodeResult {
                 node_id: batch.node_ids[1],
@@ -2385,6 +2511,7 @@ mod tests {
                 solution: mid(&batch.lb[1], &batch.ub[1]),
                 is_feasible: false,
                 certified_infeasible: false,
+                sentinel_is_exclusion: false,
             },
         ]);
         tm.process_evaluated();
@@ -2443,6 +2570,7 @@ mod tests {
             solution: vec![0.5, 0.0],
             is_feasible: false,
             certified_infeasible: false,
+            sentinel_is_exclusion: false,
         }]);
         tm.process_evaluated();
         // One child's LP fails; its box midpoint is fractional at var 1.
@@ -2454,6 +2582,7 @@ mod tests {
             solution: mid(&batch.lb[0], &batch.ub[0]),
             is_feasible: false,
             certified_infeasible: false,
+            sentinel_is_exclusion: false,
         }]);
         let stats = tm.process_evaluated();
         assert_eq!(
@@ -2489,6 +2618,7 @@ mod tests {
             solution: vec![1.0, 0.0],
             is_feasible: true,
             certified_infeasible: false,
+            sentinel_is_exclusion: false,
         }]);
         tm.process_evaluated();
         assert_eq!(tm.incumbent().map(|(_, v)| v), Some(2.0));
@@ -2545,6 +2675,7 @@ mod tests {
             solution: vec![0.5, 0.7],
             is_feasible: false,
             certified_infeasible: false,
+            sentinel_is_exclusion: false,
         }]);
         tm.process_evaluated();
         let ts = tm.stats();
@@ -2604,6 +2735,7 @@ mod tests {
             solution: vec![3.5],
             is_feasible: false,
             certified_infeasible: false,
+            sentinel_is_exclusion: false,
         }]);
         assert_eq!(tm.process_evaluated().branched, 1);
         let batch = tm.export_batch(1);
@@ -2625,6 +2757,7 @@ mod tests {
             solution: vec![3.0],
             is_feasible: true,
             certified_infeasible: false,
+            sentinel_is_exclusion: false,
         }]);
         let stats = tm.process_evaluated();
         assert_eq!(stats.incumbent_updates, 1);
@@ -2644,10 +2777,132 @@ mod tests {
                 solution: vec![3.0],
                 is_feasible: true,
                 certified_infeasible: false,
+                sentinel_is_exclusion: false,
             }]);
             tm.process_evaluated();
             assert_eq!(tm.incumbent().unwrap().1, raw);
             assert!(!tm.stats().bound_contradicted, "raw {raw} flagged");
         }
+    }
+
+    /// Build the shape of the defect: the root branches; one child returns a
+    /// clean integer-feasible point (incumbent 5.0); its sibling returns the
+    /// `1e30` sentinel for the reason `is_exclusion` selects.
+    fn tm_after_sibling_sentinel(is_exclusion: bool) -> TreeManager {
+        let mut tm = TreeManager::new(
+            2,
+            vec![0.0, 0.0],
+            vec![1.0, 1.0],
+            two_int_vars(),
+            SelectionStrategy::BestFirst,
+        );
+        tm.initialize();
+        // Root: valid bound 1.0, fractional at var 0 -> branches var 0.
+        let batch = tm.export_batch(1);
+        tm.import_results(&[NodeResult {
+            node_id: batch.node_ids[0],
+            lower_bound: 1.0,
+            solution: vec![0.5, 0.0],
+            is_feasible: false,
+            certified_infeasible: false,
+            sentinel_is_exclusion: false,
+        }]);
+        tm.process_evaluated();
+
+        let batch = tm.export_batch(2);
+        assert_eq!(
+            batch.node_ids.len(),
+            2,
+            "root should have produced 2 children"
+        );
+        tm.import_results(&[
+            // The sentinelled sibling: its region was either never bounded or
+            // deliberately excluded -- that is exactly what `is_exclusion` says.
+            NodeResult {
+                node_id: batch.node_ids[0],
+                lower_bound: 1e30,
+                solution: mid(&batch.lb[0], &batch.ub[0]),
+                is_feasible: false,
+                certified_infeasible: false,
+                sentinel_is_exclusion: is_exclusion,
+            },
+            // A clean integer-feasible point: the incumbent, 5.0.
+            NodeResult {
+                node_id: batch.node_ids[1],
+                lower_bound: 5.0,
+                solution: batch.lb[1].clone(),
+                is_feasible: true,
+                certified_infeasible: false,
+                sentinel_is_exclusion: false,
+            },
+        ]);
+        tm.process_evaluated();
+        tm
+    }
+
+    #[test]
+    fn a_failed_relaxation_does_not_certify_its_subtree() {
+        // THE REGRESSION. Guard OFF (today's shipped default): `import_results`
+        // installs the 1e30 sentinel AS the sibling's `local_lower_bound`, step 1
+        // of `process_evaluated` prunes it as "dominated" (1e30 >= 5.0), and with
+        // nothing left open `update_global_lower_bound` collapses the tree bound
+        // onto the incumbent. The tree reads as closed at 5.0 while a subtree
+        // that was never bounded could hold anything better.
+        {
+            let _g = test_guard_override::Scoped::new(false);
+            let tm = tm_after_sibling_sentinel(false);
+            assert_eq!(
+                tm.stats().global_lower_bound,
+                5.0,
+                "pre-fix behaviour: the bound collapsed onto the incumbent"
+            );
+        }
+        // Guard ON: the sentinel is not a bound, so it never becomes one. The
+        // node keeps the 1.0 its parent proved, stays in the search, and the
+        // global bound may not exceed it -- the incumbent is NOT certified.
+        {
+            let _g = test_guard_override::Scoped::new(true);
+            let tm = tm_after_sibling_sentinel(false);
+            let stats = tm.stats();
+            assert_eq!(
+                tm.incumbent().map(|(_, v)| v),
+                Some(5.0),
+                "the clean sibling must still become the incumbent"
+            );
+            assert!(
+                stats.global_lower_bound < 5.0,
+                "a failed relaxation must not certify the incumbent: glb={}",
+                stats.global_lower_bound
+            );
+            assert_eq!(
+                stats.global_lower_bound, 1.0,
+                "the bound must be what was actually proved -- the root's 1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn a_declared_exclusion_still_prunes() {
+        // The sentinel's OTHER meaning (#1038/#748): the caller really did remove
+        // the region, so pruning is correct and must be preserved -- the guard is
+        // a soundness fix, not a blanket refusal to prune. Both arms must agree
+        // here, which is what shows the fix discriminates on the REASON rather
+        // than on the value.
+        let off = {
+            let _g = test_guard_override::Scoped::new(false);
+            tm_after_sibling_sentinel(true).stats().global_lower_bound
+        };
+        let on = {
+            let _g = test_guard_override::Scoped::new(true);
+            tm_after_sibling_sentinel(true).stats().global_lower_bound
+        };
+        assert_eq!(
+            off, on,
+            "a declared exclusion must behave identically under both arms"
+        );
+        assert_eq!(
+            off, 5.0,
+            "an excluded region leaves the incumbent certified"
+        );
     }
 }

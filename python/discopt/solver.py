@@ -4498,6 +4498,7 @@ def _invoke_pre_import_callbacks(
     _cut_pool,
     tree_bound_valid=True,
     requeue_mask=None,
+    exclusion_mask=None,
 ):
     """Check lazy constraints and incumbent callbacks before importing results.
 
@@ -4609,6 +4610,8 @@ def _invoke_pre_import_callbacks(
                     requeue_mask[i] = True
                 else:
                     result_lbs[i] = _INFEASIBILITY_SENTINEL
+                    if exclusion_mask is not None:
+                        exclusion_mask[i] = True
                     n_rejected += 1
                 for cut in cuts:
                     coeffs, rhs, sense = cut_result_to_dense(cut, model)
@@ -4632,6 +4635,8 @@ def _invoke_pre_import_callbacks(
                 accept = None
             if accept is False:
                 result_lbs[i] = _INFEASIBILITY_SENTINEL
+                if exclusion_mask is not None:
+                    exclusion_mask[i] = True
                 n_rejected += 1
                 logger.info(
                     "Incumbent callback rejected solution at node %d",
@@ -16302,7 +16307,19 @@ def solve_model(
             )
 
         # --- User callbacks: lazy constraints and incumbent filtering ---
+        #
+        # `_exclusion_mask` carries the MEANING of a callback-set `1e30` across the
+        # Rust boundary. The sentinel is overloaded -- "this region is excluded" and
+        # "this node could not be bounded" are the same float -- and only the first
+        # justifies pruning the node as dominated. Everything the sweep sentinels
+        # for its own reasons (a failed NLP, a diverged relaxation, a constraint
+        # violation) leaves the mask False, which is the conservative arm: the tree
+        # then treats those as unbounded rather than as grounds to close the gap
+        # over them. Only a user veto -- the caller asserting the point/region is
+        # not acceptable, #1038/#748 -- sets it True, which is exactly the pruning
+        # behaviour those issues specify, preserved unchanged.
         _requeue_mask = None
+        _exclusion_mask = np.zeros(n_batch, dtype=bool)
         if lazy_constraints is not None or incumbent_callback is not None:
             # #1365: a node whose integer point a lazy cut vetoed is returned to
             # the frontier and re-solved against the cut, not fathomed. The cap
@@ -16327,6 +16344,7 @@ def solve_model(
                 _cut_pool=_cut_pool,
                 tree_bound_valid=_gap_certified,
                 requeue_mask=_requeue_mask,
+                exclusion_mask=_exclusion_mask,
             )
             if _requeue_mask.any():
                 for _rq_idx in np.flatnonzero(_requeue_mask):
@@ -16343,6 +16361,7 @@ def solve_model(
                         )
                         _requeue_mask[_rq_idx] = False
                         result_lbs[_rq_idx] = _INFEASIBILITY_SENTINEL
+                        _exclusion_mask[_rq_idx] = True
                         _n_cb_rejected += 1
             # #748: a callback rejection sentinels a FEASIBLE node without proving
             # its region empty of acceptable points — a non-rigorous fathom. It is
@@ -16458,6 +16477,13 @@ def solve_model(
         # infeasible, tree still ran 4000+ nodes to the time limit). The mask is set
         # only from a rigorous certificate; the same sentinel also encodes soft
         # failures, and fathoming those would be #927's false-certificate mode.
+        #
+        # A rigorous infeasibility certificate is the other justified exclusion:
+        # the region is PROVEN empty, so removing it proves something. Those nodes
+        # are pruned by `certified_infeasible` in step 0 regardless, but saying so
+        # here keeps the two flags consistent rather than relying on the order the
+        # tree happens to apply them in.
+        _exclusion_mask |= node_infeasible_mask
         t_rust_start = time.perf_counter()
         if _requeue_mask is not None and _requeue_mask.any():
             # A requeued node is OPEN again, so no result may be imported for it
@@ -16470,11 +16496,17 @@ def solve_model(
                 result_sols[_keep],
                 result_feas[_keep],
                 node_infeasible_mask[_keep],
+                _exclusion_mask[_keep],
             )
             tree.requeue_nodes(np.ascontiguousarray(result_ids[_requeue_mask]))
         else:
             tree.import_results(
-                result_ids, result_lbs, result_sols, result_feas, node_infeasible_mask
+                result_ids,
+                result_lbs,
+                result_sols,
+                result_feas,
+                node_infeasible_mask,
+                _exclusion_mask,
             )
         tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
