@@ -442,3 +442,43 @@ class TestSharedOnlyRow:
     def test_and_is_derived_onto_the_border_when_left_alone(self):
         m, _ = two_block_model()
         assert resolve_block_structure(m, _evaluator(m)).con_blocks.tolist()[-1] == -1
+
+
+class TestLegacyAnnotationsAreNotPunished:
+    """A Benders/Lagrangian annotation must not break an ordinary solve.
+
+    ``set_block(var, k)`` predates this feature. A partition that is a perfectly
+    good decomposition can be a poor *arrowhead* — its blocks meeting in the
+    objective, say — and refusing to solve such a model would be #1370
+    punishing it for an annotation aimed at `discopt.decomposition`.
+    """
+
+    def _coupled_legacy_model(self) -> Model:
+        m = Model("legacy")
+        a = m.continuous("a", lb=-5, ub=5)
+        b = m.continuous("b", lb=-5, ub=5)
+        m.minimize(a * b + a**2 + b**2)  # couples the two blocks in the objective
+        m.subject_to(a >= 1)
+        m.subject_to(b >= 1)
+        m.set_block(a, 0).set_block(b, 1)
+        return m
+
+    def test_unsuitable_legacy_partition_is_declined_not_raised(self):
+        m = self._coupled_legacy_model()
+        assert has_declaration(m)
+        assert block_structure_for_model(m, _evaluator(m)) is None
+
+    def test_but_the_same_partition_declared_element_wise_raises(self):
+        m = Model("explicit")
+        v = m.continuous("v", shape=(2,), lb=-5, ub=5)
+        m.minimize(v[0] * v[1] + v[0] ** 2 + v[1] ** 2)
+        m.subject_to(v[0] >= 1)
+        m.subject_to(v[1] >= 1)
+        m.set_block(v, [0, 1])
+        with pytest.raises(BlockStructureError):
+            block_structure_for_model(m, _evaluator(m))
+
+    def test_legacy_model_still_solves(self):
+        m = self._coupled_legacy_model()
+        result = m.solve(nlp_solver="pounce")
+        assert result.status in ("optimal", SolveStatus.OPTIMAL)

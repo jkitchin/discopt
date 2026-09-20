@@ -42,6 +42,7 @@ full-space solve.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -49,6 +50,8 @@ import numpy as np
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from discopt.modeling.core import Model
+
+_logger = logging.getLogger(__name__)
 
 
 class BlockStructureError(ValueError):
@@ -424,6 +427,17 @@ def block_structure_for_model(
     ``required=True`` turns "nothing declared" into a refusal, for a caller that
     asked for the block path explicitly and would otherwise get a silent
     full-space solve.
+
+    **Two kinds of declaration, and they are not refused alike.** The element-wise
+    API (:meth:`Model.set_block` with an array,
+    :meth:`Model.set_constraint_block`) exists only for this feature, so a
+    partition it declares that is not an arrowhead is a modelling bug and
+    raises. Whole-variable ``set_block``/``first_stage`` annotations predate it
+    and mean "this is how the model decomposes for Benders/Lagrangian" — a
+    partition perfectly valid there can be a poor arrowhead here (its blocks may
+    meet in the objective), and failing an ordinary solve over it would be this
+    feature punishing a model for an annotation aimed at another one. Those are
+    logged and solved full-space instead.
     """
     if not has_declaration(model):
         if required:
@@ -432,4 +446,18 @@ def block_structure_for_model(
                 "assign variables to blocks and a negative id for the shared ones."
             )
         return None
-    return resolve_block_structure(model, evaluator)
+    declared_for_kkt = bool(
+        getattr(model, "_block_labels_var", None) or getattr(model, "_block_labels_con", None)
+    )
+    try:
+        return resolve_block_structure(model, evaluator)
+    except BlockStructureError:
+        if declared_for_kkt or required:
+            raise
+        _logger.info(
+            "the model's decomposition annotations do not form a block-structured KKT "
+            "partition; solving full-space. Declare one explicitly with "
+            "Model.set_block(var, ids) to see why [block-structure-declined].",
+            exc_info=True,
+        )
+        return None
