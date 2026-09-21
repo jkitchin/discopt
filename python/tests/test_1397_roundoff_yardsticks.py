@@ -645,3 +645,156 @@ def test_the_signomial_tolerances_themselves_did_not_move():
 
     assert signomial._ZERO_TOL == 1e-12
     assert signomial._EXP_TOL == 1e-12
+
+
+# ---------------------------------------------------------------------------
+# The accumulated objective Hessian (audit doc site 8, §6.11)
+#
+# ``problem_classifier._extract_quadratic_terms`` built each Hessian cell with a
+# running ``q_terms[(i, j)] = q_terms.get((i, j), 0.0) + v``. That is the same
+# three-addend cancellation as the signomial buckets above, but the consumer is
+# worse: the cell's *sign* is read as a convexity certificate.
+# ``perspective.py`` gates on ``Q[flat, flat] <= _ZERO_TOL`` to decide a diagonal
+# term is not a positive square, so a sign that flips from ``-1`` to ``+1`` offers
+# a **concave** term as a perspective candidate. A perspective lift is valid only
+# for a convex square; applied to a concave one it cuts off feasible points, which
+# is a false bound -- the one category CLAUDE.md §1 gives no slack.
+#
+# The fix is at the source, not at the gate: by the time ``perspective.py`` sees
+# ``Q`` the contributions are gone and no yardstick can recover the sign. Every
+# quadratic consumer (QP classification, convexity detection, RLT, perspective)
+# reads this same extractor, so fixing the cell makes all of them exact at once.
+# ---------------------------------------------------------------------------
+
+#: A diagonal Hessian cell needs three contributions to cancel catastrophically
+#: (a two-double sum always rounds to something carrying the exact sign). These are
+#: magnitudes at which ``ulp(M) > 1`` so the middle contribution is swallowed whole.
+HESSIAN_SWAMPING_MAGNITUDES = (1e16, 1e17, 1e18, 1e20)
+
+
+def _swamped_hessian_model(magnitude: float, middle: float):
+    """A model whose ``x*x`` Hessian cell is ``M - |middle| - M`` in source order.
+
+    ``dm`` does not fold constants, so the three ``x*x`` terms reach the extractor
+    as three separate contributions to cell ``(0, 0)`` in exactly this order. The
+    exact coefficient is ``middle``; left-to-right it is 0.0 for ``M`` large enough.
+    A second variable carries an honest convex square so the model stays a QP the
+    perspective pass will look at, and the big-M linkage makes ``x`` semicontinuous.
+    """
+    m = dm.Model()
+    x = m.continuous("x", lb=0.0, ub=10.0)
+    z = m.continuous("z", lb=0.0, ub=10.0)
+    y = m.binary("y")
+    m.subject_to(x - 5.0 * y <= 0)
+    m.minimize(magnitude * x * x + middle * x * x - magnitude * x * x + 0.5 * z * z)
+    return m
+
+
+@pytest.mark.parametrize("magnitude", HESSIAN_SWAMPING_MAGNITUDES)
+@pytest.mark.parametrize("middle", [-1.0, 1.0])
+def test_a_swamped_hessian_cell_keeps_its_exact_sign(magnitude, middle):
+    """The class: a diagonal Hessian cell must not be handed to a sign gate wrong."""
+    from discopt._relax.problem_classifier import _extract_quadratic_terms
+
+    # The witness must actually swamp, or the test proves nothing (CLAUDE.md §6).
+    running = 0.0
+    for v in (2.0 * magnitude, 2.0 * middle, -2.0 * magnitude):
+        running += v
+    assert running == 0.0, f"M={magnitude:.0e} did not swamp the middle term; witness invalid"
+
+    m = _swamped_hessian_model(magnitude, middle)
+    terms, _c, _const = _extract_quadratic_terms(m._objective.expression, m, 3)
+    got = terms[(0, 0)]
+    # 0.5 x'Qx convention: a term q*x^2 lands as Q[j, j] = 2q.
+    assert got == pytest.approx(2.0 * middle), (
+        f"M={magnitude:.0e}: Q[0,0] extracted as {got!r} where the exact sum is "
+        f"{2.0 * middle} -- the running += lost the middle contribution entirely"
+    )
+    assert np.sign(got) == np.sign(middle), (
+        f"M={magnitude:.0e}: the extracted cell's SIGN is {np.sign(got)} but the exact "
+        f"coefficient is {middle}; every downstream convexity gate reads this sign"
+    )
+
+
+@pytest.mark.parametrize("magnitude", HESSIAN_SWAMPING_MAGNITUDES)
+def test_a_concave_term_is_never_offered_as_a_perspective_candidate(magnitude):
+    """The consumer: the false bound the sign flip produced.
+
+    ``-1.0 * x*x`` is concave. Its perspective lift ``x^2/y`` is a valid
+    strengthening only for a convex square, so offering this term cuts off
+    feasible points of the original model.
+    """
+    from discopt._relax.perspective import (
+        _objective_hessian,
+        find_candidates,
+        perspective_objective_terms,
+    )
+
+    m = _swamped_hessian_model(magnitude, -1.0)
+    Q, _n = _objective_hessian(m)
+    assert Q[0, 0] == pytest.approx(-2.0), f"M={magnitude:.0e}: Hessian cell is {Q[0, 0]!r}"
+
+    on_x = [c for c in find_candidates(m) if c.flat == 0]
+    assert on_x == [], (
+        f"M={magnitude:.0e}: the concave x*x term was offered as a perspective candidate "
+        f"{[(c.flat, c.q) for c in on_x]} -- lifting it cuts off feasible points"
+    )
+    emitted = [t for t in perspective_objective_terms(m) if t[0] == 0]
+    assert emitted == [], f"M={magnitude:.0e}: concave perspective term emitted: {emitted}"
+
+
+def test_a_genuinely_convex_square_is_still_lifted():
+    """No-weakening arm: the fix makes the cell exact, not the gate timid."""
+    from discopt._relax.perspective import find_candidates
+
+    m = dm.Model()
+    a = m.continuous("a", lb=0.0, ub=10.0)
+    b = m.binary("b")
+    m.subject_to(a - 5.0 * b <= 0)
+    m.minimize(0.5 * 3.0 * a * a)
+    cands = [(c.flat, c.q) for c in find_candidates(m)]
+    assert cands == [(0, pytest.approx(1.5))], f"the honest convex square stopped lifting: {cands}"
+
+
+def test_an_exactly_cancelling_hessian_cell_is_absent_not_zero():
+    """No-weakening arm: an exact cancellation must not leave a phantom nonzero.
+
+    ``terms`` is documented as the Hessian's *nonzeros*; summing exactly must not
+    start reporting structural zeros, or every sparsity consumer sees a denser
+    matrix than the function has.
+    """
+    from discopt._relax.problem_classifier import _extract_quadratic_terms
+
+    m = dm.Model()
+    x = m.continuous("x", lb=1.0, ub=2.0)
+    z = m.continuous("z", lb=1.0, ub=2.0)
+    m.minimize(4.0 * x * x - 4.0 * x * x + 2.0 * z * z)
+    terms, _c, _const = _extract_quadratic_terms(m._objective.expression, m, 2)
+    assert terms.get((0, 0), 0.0) == 0.0, f"phantom cell for the cancelled x*x: {terms}"
+    assert terms[(1, 1)] == pytest.approx(4.0)
+
+
+def test_an_ordinary_quadratic_objective_extracts_unchanged():
+    """No-weakening arm: the everyday QP must come out bit-identical."""
+    from discopt._relax.problem_classifier import _extract_quadratic_terms
+
+    m = dm.Model()
+    x = m.continuous("x", lb=-5.0, ub=5.0)
+    z = m.continuous("z", lb=-5.0, ub=5.0)
+    m.minimize(2.0 * x * x + 3.0 * x * z - 1.5 * z * z + 4.0 * x - 7.0)
+    terms, c, const = _extract_quadratic_terms(m._objective.expression, m, 2)
+    assert terms[(0, 0)] == 4.0
+    assert terms[(1, 1)] == -3.0
+    # Symmetric convention: an off-diagonal q*x*z splits into Q[0,1] = Q[1,0] = q,
+    # so 0.5 x'Qx recovers q*x*z.
+    assert terms[(0, 1)] == 3.0
+    assert terms[(1, 0)] == 3.0
+    assert c[0] == 4.0
+    assert const == -7.0
+
+
+def test_the_perspective_and_classifier_tolerances_did_not_move():
+    from discopt._relax import perspective, problem_classifier
+
+    assert perspective._ZERO_TOL == 1e-12
+    assert problem_classifier._QP_DENSE_Q_MAX_BYTES == 256 * 1024 * 1024

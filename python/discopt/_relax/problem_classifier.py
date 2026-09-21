@@ -9,6 +9,7 @@ to classify problems, then extracts standard-form data using the JAX DAG compile
 from __future__ import annotations
 
 import logging
+import math
 from enum import Enum
 from typing import TYPE_CHECKING, NamedTuple, Optional, cast
 
@@ -657,7 +658,22 @@ def _extract_quadratic_terms(expr, model: Model, n: int):
     walk, only its nonzeros; see :func:`_materialise_Q` for why it must not be
     allocated on a wide model.
     """
-    q_terms: dict[tuple[int, int], float] = {}
+    # #1397: each Hessian cell keeps the LIST of contributions and is summed
+    # exactly by ``math.fsum`` at the end, not accumulated with a running ``+=``.
+    # A running sum makes the cell's error ``O(n * u * sum|v|)``, and the cell's
+    # *sign* is read downstream as a convexity certificate: ``perspective.py``
+    # gates on ``Q[j, j] <= _ZERO_TOL`` (1e-12) to decide a term is not a positive
+    # square. Measured on ``1e16*x*x - 1.0*x*x - 1e16*x*x + 0.5*x*x``, whose exact
+    # ``Q[0,0]`` is -1.0: the running sum loses the -1.0 below ulp(1e16) = 2.0,
+    # cancels the two large terms to 0.0, and lands on **+1.0**. A *concave* term
+    # was therefore offered as a perspective candidate with ``q = 0.5`` and
+    # emitted -- a perspective lift is only valid for a convex square, so the
+    # strengthened relaxation cuts off feasible points and the bound is false.
+    # Every coefficient is a double, hence an exact binary rational, so the exact
+    # sum of a cell is representable and ``fsum`` returns it correctly rounded
+    # once: the sign and zero-ness downstream become exact rather than
+    # order-dependent. See docs/dev/1397-absolute-tolerance-audit-2026-09-20.md §6.11.
+    q_contrib: dict[tuple[int, int], list[float]] = {}
     c = np.zeros(n, dtype=np.float64)
     const = 0.0
 
@@ -668,7 +684,7 @@ def _extract_quadratic_terms(expr, model: Model, n: int):
         # to the next extractor exactly as it did on the IndexError before.
         if not (0 <= i < n and 0 <= j < n):
             raise _NotQuadraticError(f"Hessian cell ({i}, {j}) outside the model's {n} flat slots")
-        q_terms[(i, j)] = q_terms.get((i, j), 0.0) + v
+        q_contrib.setdefault((i, j), []).append(v)
 
     def _get_var_index(node):
         """Get the flat variable index for a variable-like node, or None."""
@@ -701,10 +717,13 @@ def _extract_quadratic_terms(expr, model: Model, n: int):
         # stack removes the depth limit; nothing else about the walk changes.
         #
         # Children are pushed in reverse so they pop in source order: the
-        # accumulations into ``c``/``const``/``q_terms`` are floating-point sums,
-        # and reordering them would perturb the last ulp of every extracted
-        # coefficient — a bound-neutral change under CLAUDE.md §5 regime 1 must be
-        # bit-identical, so the order is preserved deliberately.
+        # accumulations into ``c``/``const`` are floating-point sums, and reordering
+        # them would perturb the last ulp of every extracted coefficient — a
+        # bound-neutral change under CLAUDE.md §5 regime 1 must be bit-identical, so
+        # the order is preserved deliberately. (``q_terms`` no longer depends on this:
+        # #1397 made each Hessian cell an exact ``math.fsum`` of its contributions, so
+        # it is order-independent by construction. ``c``/``const`` still are, which is
+        # why the order still matters here.)
         nonlocal const
 
         stack: list[tuple[object, float, bool]] = [(root, root_scale, root_allow_array)]
@@ -861,6 +880,9 @@ def _extract_quadratic_terms(expr, model: Model, n: int):
             raise _NotQuadraticError(f"Unhandled expression type: {type(node).__name__}")
 
     _walk(expr)
+    # #1397: exact per-cell sums, in first-touch order (dicts preserve insertion
+    # order), so the returned contract is unchanged apart from the rounding.
+    q_terms = {key: math.fsum(vals) for key, vals in q_contrib.items()}
     return q_terms, c, const
 
 

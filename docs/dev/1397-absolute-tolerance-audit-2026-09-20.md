@@ -761,3 +761,119 @@ comparison* would have found the real site. The rows were nonetheless useful —
 the wrong pointer is what turned up §6.9 — but a table entry naming a file must be
 verified against that file before anything is concluded from it, which is CLAUDE.md's
 "look up an API before calling it" applied to one's own notes.
+
+### 6.11 Site 8: the accumulated objective Hessian (`problem_classifier.py`)
+
+§6.9's signomial defect asked an obvious follow-up: *where else does a running `+=`
+build a number whose sign is later read as a certificate?* The answer is the place
+with the widest blast radius in the relaxation layer.
+
+`_extract_quadratic_terms` built each Hessian cell with
+
+```python
+q_terms[(i, j)] = q_terms.get((i, j), 0.0) + v
+```
+
+so a cell touched `k` times carries an error of order `k·u·Σ|v|`. That alone is not a
+defect — an error proportional to the inputs is what floating-point arithmetic is. It
+becomes one because of who reads the result. `perspective.py` gates on
+
+```python
+if Q[flat, flat] <= _ZERO_TOL:   # _ZERO_TOL = 1e-12
+    continue                     # "not a positive square"
+```
+
+That is an absolute constant asked a scale-dependent question — the §4 pattern
+exactly — but the consequence is worse than a missed tightening. The gate is reading
+the cell's **sign** as a convexity certificate.
+
+**Measured** (`1e16*x*x - 1.0*x*x - 1e16*x*x + 0.5*x*x`, with `x` made
+semicontinuous by `x - 5y <= 0`):
+
+```
+Q[0,0] extracted      : 1.0
+exact 2*fsum          : -1.0
+perspective candidate on x: [(0, 0.5)]
+perspective terms     : [(0, 2)]
+```
+
+The exact coefficient is negative: the term is **concave**. The extractor returned
+it positive, the gate accepted it as a positive square, and
+`perspective_objective_terms` emitted a perspective lift for it. A perspective
+reformulation `x²/y` is a valid strengthening *only* for a convex square; applied to
+a concave term it cuts off feasible points of the original model, which is a false
+bound — the one category CLAUDE.md §1 gives no slack. Note the sign did not merely
+get noisy, it **inverted**: `ulp(1e16) = 2.0` swallows the `-1.0` whole, so the
+running sum reaches exactly `0.0` and the trailing `+0.5` sets the sign by itself.
+
+**The fix belongs at the source, not at the gate.** This is the §3 "hard, right fix"
+distinction and it is not stylistic: by the time `perspective.py` receives `Q` the
+individual contributions are gone, so *no* yardstick computed from `Q` can recover
+the sign. Each cell therefore keeps the list of its contributions and is summed once
+by `math.fsum`:
+
+```python
+q_contrib.setdefault((i, j), []).append(v)      # in _qadd
+...
+q_terms = {key: math.fsum(vals) for key, vals in q_contrib.items()}
+```
+
+As in §6.9 the addends are all doubles, hence exact binary rationals, so `fsum`
+returns the exact sum correctly rounded once: the cell's sign and zero-ness become
+**exact** and the absolute `_ZERO_TOL` comparison is dimensionally coherent again
+with no slack term and no strength given up. Dicts preserve insertion order, so the
+documented "first-touch order" contract of the returned `terms` is unchanged apart
+from the rounding, and an exactly cancelling cell still sums to `0.0` rather than
+appearing as a phantom nonzero (pinned by a no-weakening arm).
+
+**Why this supersedes the §6.6 patch for perspective sites E and H.** §6.6 recorded
+sites E (`Q[flat, flat] <= _ZERO_TOL`) and H (`not (cand.q > _ZERO_TOL)`) as fixed by
+scaling the separability gate in `perspective.py`. That patch is correct for what it
+covers — a *row* magnitude — but it cannot help E and H, which read a single cell.
+Those two rows are now fixed at the extractor instead, and the §6.6 change stands on
+its own merits for the row-coupling gate. This is the audit's own row being
+re-measured and found only partly addressed; recorded per CLAUDE.md §11.
+
+**Blast radius, and why the panel is mandatory.** Every quadratic consumer reads this
+extractor — QP classification, convexity detection, RLT, perspective — so fixing the
+cell makes all of them exact at once and is bound-affecting for all of them. It is
+the widest-reaching change in the PR and the reason the CLAUDE.md §5 differential
+panel is run over the final tree rather than the tree as of §6.10; an earlier panel
+run was killed at 3/66 precisely because continuing would have measured a tree that
+was about to change. The panel result is recorded in §6.13 and on PR #1407.
+
+Verification: 14 parameterized arms (4 magnitudes × both signs on the extractor, 4
+magnitudes on the perspective consumer) fail on the base tree with the `q_contrib`
+and `math.fsum` markers asserted **absent** there, and pass here; each first asserts
+that its own witness actually swamps the middle contribution (§6). Four no-weakening
+arms pass on **both** trees: a genuinely convex square is still lifted (`q = 1.5`),
+an exactly cancelling cell stays absent rather than becoming a phantom zero, an
+ordinary QP objective extracts bit-identically, and both tolerances are pinned
+unmoved.
+
+### 6.12 The linear accumulators in the same function: classified, not fixed
+
+`_extract_quadratic_terms` also accumulates `c[idx] += scale * val` and
+`const += ...`. These are the *same* class of running sum as §6.11 and the honest
+thing is to say why they are not being changed rather than leave the reader to wonder
+whether they were missed.
+
+They are **out of class for this issue** because no unsound consumer has been
+demonstrated for them. §4's five checks ask whether an absolute constant is compared
+against a scale-dependent quantity; the defect in §6.11 is that a *sign* read from
+the accumulated value gates a soundness-relevant reformulation. The linear
+coefficients have no such gate: `c` is consumed as data by the LP/QP builders, where a
+relative error of order `k·u` in a coefficient is ordinary floating-point
+representation error and is bounded by the relaxation's own outward rounding, not by
+a sign test. `const` shifts the objective uniformly and cannot flip a comparison
+between two candidate solutions of the same model.
+
+That is a statement about the consumers as they exist today, not a proof that a
+running sum is fine. If a future gate reads `sign(c[j])` or `c[j] == 0.0` as a
+structural certificate — the way `perspective.py` reads the Hessian diagonal — this
+becomes the same defect and the same one-line `fsum` fix applies. The contributions
+are already collected per cell for `q`; doing the same for `c` is cheap. It is being
+left alone because a change with no demonstrated defect behind it is exactly the
+hypothesis-driven work CLAUDE.md §4 forbids, and because it would widen the
+bound-affecting surface of a PR whose differential panel covers the changes that do
+have a demonstrated defect behind them.
