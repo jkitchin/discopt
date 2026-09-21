@@ -20254,6 +20254,59 @@ def _solve_nlp_bb(
                 f"{_exit_cmp} comparisons over {_declared_rows} declared rows)"
             )
 
+        # The reported objective must describe the reported POINT.
+        #
+        # ``obj_val`` arrived from the tree as an NLP solve's own converged value,
+        # and every adjustment above takes it from another NLP solve
+        # (``_ref_obj``, ``nlp_unscaled.objective``) -- never from the model's own
+        # objective at the point that is actually leaving. The integer snap above
+        # does not touch it at ALL: it replaces ``sol_flat`` with the rounded point
+        # and leaves the number describing the unrounded one. So the two can
+        # describe different points, and on this path that same number is also
+        # published as the dual bound.
+        #
+        # Measured over the 66-instance corpus (both routes, 110 pairs with a
+        # point and an objective): 5 pairs report an objective that is not
+        # ``f(x)`` at their own returned point, ALL of them on this route and all
+        # OPTIMISTIC -- nvs07 -7.34e-04 (with ``gap_certified=True``), tspn12
+        # -1.26e-05, tspn10 -5.73e-06, tspn08 -3.75e-06, st_e36 +1.49e-06.
+        # Identical to every digit across two independent audit runs.
+        #
+        # Both values are in the evaluator's internal (minimize) sense here --
+        # this runs BEFORE the MAXIMIZE negation below, deliberately, so one
+        # negation applies to whichever value is kept.
+        #
+        # Unconditional, not "only when it differs by more than x": ``f(x)`` is
+        # what the objective IS, and a threshold would keep a smaller lie. The
+        # certificate is re-tested against the corrected pair downstream
+        # (``_withhold_stale_certificate``), so a gap that was only closed by the
+        # optimistic number is withdrawn rather than republished.
+        if obj_val is not None:
+            try:
+                _obj_at_point = float(evaluator.evaluate_objective(sol_flat))
+            except Exception as _oe:  # pragma: no cover - evaluator robustness
+                # Not "keep the stale number": the point cleared the exit gate, so
+                # the evaluator just worked on it. Failing here is unexplained, and
+                # a refusal beats publishing a number nothing checked (§3/§7).
+                raise RuntimeError(
+                    "NLP-BB could not evaluate the objective at the point it is "
+                    f"about to report: {type(_oe).__name__}: {_oe}"
+                ) from _oe
+            if not np.isfinite(_obj_at_point):
+                raise RuntimeError(
+                    "NLP-BB: the objective at the reported point is "
+                    f"{_obj_at_point}, which is not a reportable value"
+                )
+            if abs(_obj_at_point - obj_val) > 1e-9 * (1.0 + abs(obj_val)):
+                logger.info(
+                    "NLP-BB: reporting the objective at the returned point "
+                    "(%.12g) rather than the solve's converged value (%.12g); "
+                    "they describe different points.",
+                    _obj_at_point,
+                    obj_val,
+                )
+            obj_val = _obj_at_point
+
         assert model._objective is not None
         if model._objective.sense == ObjectiveSense.MAXIMIZE:
             obj_val = -obj_val
