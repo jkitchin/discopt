@@ -808,7 +808,28 @@ impl TreeManager {
                 .and_then(|hint_idx| {
                     let val = result.solution.get(hint_idx)?;
                     let frac = val - val.floor();
-                    if frac > 1e-5 && frac < 1.0 - 1e-5 {
+                    // #1414: an explicit hint is honored whenever the value is not
+                    // EXACTLY integral, not merely when it is fractional by more
+                    // than the 1e-5 integrality tolerance. A hint is never set
+                    // spontaneously -- the orchestrator sets one only when it has
+                    // established that this column must be branched, and the case
+                    // it was added for is precisely a value inside the tolerance:
+                    // on #1380's repro (`min -x + 3z` s.t. `x <= 1e7 z`,
+                    // `x in [0, 10]`, `z` binary) the root vertex is `z = 1e-6`,
+                    // whose integral realisation `z = 0` violates the row by 10.
+                    // Under the old window that hint was discarded, most-fractional
+                    // selection then found no candidate either, and the node was
+                    // dropped with no children: the search ended at `nodes = 1`
+                    // with a gap of 10. Branching at `floor(z) = 0` covers
+                    // `z <= 0` and `z >= 1` (a sound, exhaustive cover) and each
+                    // child fixes the column, so the discrete domain strictly
+                    // shrinks and termination is preserved.
+                    let actionable = if frac > 1e-5 && frac < 1.0 - 1e-5 {
+                        true
+                    } else {
+                        *val != val.round()
+                    };
+                    if actionable {
                         Some((
                             Some(BranchDecision {
                                 var_index: hint_idx,

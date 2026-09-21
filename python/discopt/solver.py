@@ -478,8 +478,11 @@ def _select_priority_branch_var(
     Returns the flat index of the priority variable whose relaxation value is
     most fractional and that is not already pinned by the node box, or ``None``
     when no priority variable is branchable here (all fixed or integral — the
-    standard selector then applies). A hint is honoured by the Rust tree only
-    when the variable is fractional, matching this filter.
+    standard selector then applies). This filter only ever returns a column with
+    ``min(frac, 1 - frac) > tol``, so the hint it sets is honoured by the Rust
+    tree's ordinary fractional arm; #1414 widened that gate to also honour a hint
+    on a non-exactly-integral column, but nothing this function returns can reach
+    the widened arm.
     """
     sol = np.asarray(solution)
     best: Optional[int] = None
@@ -11267,6 +11270,21 @@ def solve_model(
     #
     # #1229 (plan §12, H5): a pure LP / MILP bound for the HiGHS route skips root
     # presolve and the presolve-gated passes below; HiGHS presolves internally.
+    #
+    # #1414: H5's premise is "presolve only tightens *bounds*, and HiGHS presolves
+    # the model itself". That is true of every pass gated below EXCEPT coefficient
+    # tightening, which rewrites *coefficients* -- and a big-M coefficient is
+    # exactly what HiGHS cannot recover on its own, because its own 1e-6 MIP
+    # integrality tolerance is defeated by a large enough M. Measured on #1380's
+    # repro (``x <= M*z``, ``x in [0,10]``, ``min -x + 3z``, true optimum -7):
+    # at M=1e7, ``z=1e-6`` is inside HiGHS's tolerance AND makes the row exactly
+    # feasible at x=10, so HiGHS returns it, discopt correctly rejects the rounded
+    # incumbent ("row 0 violated by 10") and the solve ends in ``error``. With the
+    # row tightened to ``x <= 10*z`` the relaxation is exact and the route returns
+    # -7.0 with nothing to branch on. So ``presolve_requested`` is kept separate:
+    # the HiGHS skip must not disable coefficient tightening, while a *user's*
+    # ``presolve=False`` still does.
+    presolve_requested = presolve
     if presolve and _highs_takes_pure_lp_milp(
         model,
         solver_name=_solver,
@@ -11339,7 +11357,13 @@ def solve_model(
     # only place tightened coefficients reach the relaxation compiler. Skipped
     # once the budget is blown (#654): declining it leaves the original,
     # still-valid rows.
-    if presolve and not _deadline_exhausted():
+    #
+    # #1414: gated on ``presolve_requested``, NOT ``presolve`` — the latter has
+    # already been cleared by the HiGHS pure-LP/MILP skip above, and coefficient
+    # tightening is the one pass below that skip whose product HiGHS cannot
+    # reproduce internally (see the note there). A user's explicit
+    # ``presolve=False`` still disables it.
+    if presolve_requested and not _deadline_exhausted():
         try:
             from discopt.solvers._root_presolve import (
                 coef_tighten_enabled,
@@ -11351,7 +11375,10 @@ def solve_model(
                 if n_ct > 0:
                     logger.info("Coefficient tightening: strengthened %d big-M rows", n_ct)
         except Exception as e:
-            logger.debug("Coefficient tightening failed: %s", e)
+            # Sound to decline (the original rows stay valid), but never silent:
+            # a swallowed failure here would make a graduation panel measure
+            # nothing and read as "neutral" (CLAUDE.md §6).
+            logger.warning("Coefficient tightening failed, leaving rows untightened: %s", e)
 
     # --- Reverse-AD interval tightening (M9 of #51, opt-in) ---
     # Iterates Gauss-Seidel reverse-mode interval AD over every
@@ -23901,9 +23928,81 @@ def _pounce_snap_incumbent(
     rec = _pounce_recover_node_bound(
         fl, fu, c, obj_const, A_ub, b_ub, A_eq, b_eq, t_start, time_limit, Q=Q
     )
-    if rec is not None and rec[0] == "optimal":
+    if rec is None or rec[0] != "optimal":
+        return None
+
+    _raw = np.asarray(rec[2], dtype=np.float64)
+    _dev = float(np.max(np.abs(_raw[idx] - snapped)))
+    if _dev == 0.0:
+        # The engine honored every pin *exactly*, so `rec` already describes the
+        # very point this function claims, and its objective was computed there.
+        # Return it untouched: this is the overwhelmingly common case, and
+        # leaving it alone keeps the repair below strictly gated on the defect
+        # condition, so a solve that never meets that condition is bit-identical
+        # to the pre-#1414 path (CLAUDE.md §5, bound-neutral regime).
         return rec[1], rec[2]
-    return None
+
+    # #1414: do NOT trust the engine's value for a column this function FIXED.
+    # The fixed columns were pinned to `snapped` above, so the point being
+    # claimed is the one with those exact values; an engine that returns a
+    # pinned column off its bound by even a rounding error has returned a
+    # DIFFERENT point, and on a column with a large coefficient that error is
+    # not small in the rows. Measured on #1380's repro at M = 1e12
+    # (`min -x + 3z` s.t. `x <= 1e12 z`, `x in [0, 10]`, `z` binary): with `z`
+    # pinned to [0, 0] the re-solve returned `optimal` at `z = 1.336e-11`, and
+    # `1e12 * 1.336e-11 = 13.4` is enough row slack to carry `x = 10`. So the
+    # "purified incumbent" was neither integral nor feasible, yet it passed
+    # every downstream row check *because* the check used the engine's `z`. It
+    # was injected as an incumbent of -9.99999999994, whose cutoff closed the
+    # gap at the root, and the route reported `optimal` at that value against a
+    # true optimum of -7.0 — a false certificate.
+    #
+    # Write the pinned values back exactly, recompute the objective AT that
+    # point (never report a value computed elsewhere), and verify the rows
+    # there. Failing that verification means this snap has no feasible
+    # completion, which is `None` — the documented "no incumbent" answer every
+    # caller already handles — not a point to hand on.
+    x = _raw.copy()
+    x[idx] = snapped
+    # The objective spans `c`; the rows span the matrices' own column count. Those
+    # differ between callers (some pass the declared columns, some the augmented
+    # standard form), so each is taken from the object that defines it rather than
+    # assumed equal -- a mismatch here would raise inside a solve.
+    _cv = np.asarray(c, dtype=np.float64)
+    _obj = float(np.dot(_cv, x[: _cv.size])) + float(obj_const)
+    if Q is not None:
+        _Qm = np.asarray(Q, dtype=np.float64)
+        _xq = x[: _Qm.shape[0]]
+        _obj += 0.5 * float(_xq @ (_Qm @ _xq))
+    _nr = None
+    for _M in (A_ub, A_eq):
+        if _M is not None and getattr(_M, "ndim", 0) == 2:
+            _nr = int(_M.shape[1])
+            break
+    if _nr is None:
+        _nr = int(_cv.size)
+    _xr = x[:_nr]
+    if not _matrix_solution_feasible(
+        _xr, A_ub, b_ub, A_eq, b_eq, list(zip(fl[:_nr].tolist(), fu[:_nr].tolist()))
+    ):
+        # Observable, so a panel can tell "this guard never fired" from "it fired
+        # and changed nothing" (CLAUDE.md §6).
+        logger.debug(
+            "snap-incumbent: rejected (#1414) -- at its exact pinned integer "
+            "values the point leaves the declared rows; the engine had returned "
+            "the fixed columns off their bounds by up to %.3g.",
+            _dev,
+        )
+        return None
+    logger.debug(
+        "snap-incumbent: repaired (#1414) -- the engine returned pinned columns off "
+        "their bounds by up to %.3g; the rows still hold at the exact integral "
+        "point, whose objective is %.17g (the engine reported %.17g).",
+        _dev,
+        _obj,
+        float(rec[1]),
+    )
+    return _obj, x
 
 
 # #1064: round-fix-resolve tries at most this many candidate roundings per
@@ -24902,7 +25001,53 @@ def _root_dive(
             if not fracs:
                 # ``obj`` already includes ``lp_data.obj_const`` (added by the
                 # node solver); ``x`` spans the structural columns.
-                return float(obj), x
+                #
+                # #1414: "not fracs" is a 1e-6 TOLERANCE, not integrality — a
+                # coordinate at exactly 1e-6 from an integer clears it while
+                # still being off its integer. Returning such a point verbatim
+                # returns the RELAXATION objective as if it were attained, and
+                # the caller injects it straight into the tree (a cutoff), where
+                # it prunes every genuinely integral point that is worse than a
+                # value nothing achieves. Measured on #1380's repro,
+                # ``min -x + 3z`` s.t. ``x <= 1e7 z``, ``x in [0, 10]``, ``z``
+                # binary: the dive returned ``x = 10, z = 1e-6`` with objective
+                # -9.999997, which collapsed the tree's gap to 0 and pruned the
+                # true optimum -7.0 at the root (``nodes = 1``). This dive is
+                # documented above as existing *for* weak-relaxation big-M
+                # models, so that class is exactly where it must not do this.
+                #
+                # Pin every integer at its exact value and re-solve the
+                # continuous columns — the same fix-and-repair step the dive
+                # already takes each iteration — so the point returned is
+                # exactly integral and its objective is the value it actually
+                # attains. A non-optimal repair means the dive found no
+                # incumbent (``None``); that is the honest outcome, and the
+                # caller treats a missing dive incumbent as a missing hint.
+                _off = [j for j in int_idx if float(x[j]) != float(round(x[j]))]
+                if not _off:
+                    # Already exactly integral — the overwhelmingly common exit,
+                    # since the dive FIXES each integer it decides (``xl[j] =
+                    # xu[j] = v``) and the node LP returns it exactly at that
+                    # bound. No extra solve, so this path is unchanged.
+                    return float(obj), x
+                logger.debug(
+                    "root-dive: repairing (#1414) -- %d integer column(s) came back "
+                    "off an exact integer by up to %.3g; re-solving with every "
+                    "integer pinned at its rounded value, since the objective "
+                    "reported here becomes a cutoff.",
+                    len(_off),
+                    max(abs(float(x[_j]) - float(round(x[_j]))) for _j in _off),
+                )
+                _xl_f = xl.copy()
+                _xu_f = xu.copy()
+                for _j in int_idx:
+                    _v = float(round(x[_j]))
+                    _xl_f[_j] = _v
+                    _xu_f[_j] = _v
+                _out_f = node_solve(lp_data, _xl_f, _xu_f, n_vars, n_orig, t_start, time_limit)
+                if _out_f is None or _out_f[2] != "optimal" or _out_f[1] is None:
+                    return None
+                return float(_out_f[0]), np.asarray(_out_f[1], dtype=np.float64)
             j = max(fracs, key=lambda t: t[1])[0]
             v = float(round(x[j]))
             xl[j] = v
@@ -26367,6 +26512,85 @@ def _solve_milp_bb(
             how="snapped",
         )
 
+    def _integral_claim_branch_col(x_row) -> int | None:
+        """Would the tree fathom this node on a point with no feasible integral
+        realisation? If so, which column must be branched? (#1414, #1380 class.)
+
+        The tree fathoms a node and promotes its point the moment every integer
+        coordinate is within ``INTEGRALITY_TOL`` (1e-5) of an integer. But the
+        point a caller is finally handed is the *integral realisation* — the raw
+        vertex is not an answer to the declared model, because its integer
+        columns are not integers (#1380). So "integral within tolerance" is the
+        wrong question to fathom on; the right one is whether the realisation
+        satisfies the declared rows.
+
+        Those two answers diverge exactly when a column's coefficient is large
+        enough that a movement inside the integrality tolerance moves a row
+        outside the feasibility tolerance. Measured on #1380's repro,
+        ``min -x + 3z`` s.t. ``x <= 1e7 z``, ``x in [0, 10]``, ``z`` binary: the
+        root vertex is ``x = 10, z = 1e-6``, which satisfies ``x - 1e7 z <= 0``
+        *exactly* (both sides are 10) and passes every integrality test at 1e-5.
+        So the tree fathomed the root, the search ended at ``nodes=1``, and the
+        realisation ``z = 0`` violates that row by 10. The post-search #1380
+        repair then re-derived the incumbent at ``z = 0`` (objective ~0) while
+        the dual bound stayed at the vertex's -9.999997, and #1383 withdrew the
+        certificate: this route reported ``feasible`` with ``-4.7e-09`` against a
+        true optimum of -7.0. No *absolute* integrality tolerance closes this
+        class -- the offending ``z = 10/M`` shrinks without bound as M grows.
+
+        Returning a column index makes the caller do two things, and BOTH are
+        required -- each alone is a no-op:
+
+        1. Sentinel the node's bound as a NON-exclusion, which is an existing,
+           documented route: ``import_results`` maps a non-exclusion sentinel to
+           ``-inf``, floors it at the parent's (valid) bound, and marks it
+           ``bound_trusted = false``, so ``process_evaluated`` can neither fathom
+           nor promote it and falls through to BRANCHING (#1038, where a node
+           whose integer point a user callback vetoed takes the same path).
+           Nothing is pruned and no bound is lost beyond this node's own
+           improvement on its parent.
+        2. Set an explicit branch hint on the returned column. Without it the
+           node reaches step 3 of ``process_evaluated`` and *most-fractional
+           selection finds no candidate*, because the offending coordinate is
+           inside the same 1e-5 window that caused the problem -- so the node is
+           dropped with no children and the search still ends at ``nodes = 1``
+           (measured). The hint names the column whose rounding broke a row, and
+           ``process_evaluated`` honors an explicit hint on any value that is not
+           exactly integral (see the #1414 note there).
+
+        The column returned is the rounded coordinate that moved furthest, ties
+        broken by lowest index, so the choice is deterministic.
+
+        Sound and terminating: branching on the offending column is always valid,
+        and the child that fixes it makes the row bind at an integer value, so
+        that child's own LP settles the question. On the repro the children give
+        ``z = 0 -> 0`` and ``z = 1 -> -7``, and the route certifies -7.0.
+
+        Cost: nothing on a node whose integers are already exactly integral --
+        the overwhelmingly common case, since branching fixes a column to
+        ``[k, k]`` and the simplex returns it nonbasic exactly at that bound, so
+        ``rounded == x_row`` and the row check is skipped. It is paid only on a
+        node that lands *near* an integer without being fixed there, which is the
+        fragile case this guard exists for. Measured inert across the in-repo
+        corpus (see the #1414 panel), so the guard is bound-neutral there.
+        """
+        if not _is_integer_feasible_solution(x_row, int_offsets, int_sizes):
+            return None  # genuinely fractional: the tree branches on its own
+        _rounded, _ = _round_incumbent_integers(x_row, int_offsets, int_sizes)
+        _rounded = np.asarray(_rounded, dtype=np.float64)
+        _raw = np.asarray(x_row, dtype=np.float64)
+        _moved = np.flatnonzero(_rounded[:n_orig] != _raw[:n_orig])
+        if _moved.size == 0:
+            # Rounding is a no-op, so the realisation IS the point the node's LP
+            # already certified against these rows. Nothing to re-check.
+            return None
+        if _matrix_solution_feasible(
+            _rounded[:n_orig], _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m, _declared_box
+        ):
+            return None
+        _dist = np.abs(_rounded[_moved] - _raw[_moved])
+        return int(_moved[int(np.argmax(_dist))])
+
     # Path B: in POUNCE-only mode the structured engine solves node relaxations
     # directly (no JAX recompile on cut-augmented shapes): the exact-vertex
     # simplex by default, or the POUNCE IPM. Checked once here. POUNCE
@@ -26468,6 +26692,8 @@ def _solve_milp_bb(
             # Which sentinels are a PROVEN-empty region rather than a failure to
             # bound one (C-47). Only the rigorous arms below set it.
             result_excl = np.zeros(n_batch, dtype=bool)
+            # (node_id, column) pairs from `_integral_claim_branch_col` (#1414).
+            _unpromotable_hints: list[tuple[int, int]] = []
             for i in range(n_batch):
                 node_lb = np.array(batch_lb[i])
                 node_ub = np.array(batch_ub[i])
@@ -26478,6 +26704,29 @@ def _solve_milp_bb(
                     result_sols[i] = out[1]
                     if result_lbs[i] < _SENTINEL_THRESHOLD:
                         _maybe_inject_snapped(result_sols[i], node_lb, node_ub)
+                        # #1414: refuse to let the tree FATHOM on a tolerance-
+                        # integral point whose integral realisation leaves the
+                        # declared rows. Sentinel (non-exclusion) routes the node
+                        # to branching instead; see
+                        # `_integral_claim_unpromotable` for the measurement and
+                        # why nothing is pruned. Ordered after the snap injection
+                        # deliberately: that recovery re-solves the continuous
+                        # columns with the integers fixed and verifies the result,
+                        # so it can still contribute a VALID incumbent from this
+                        # box (on the repro, `z = 0, x = 0`) before the node is
+                        # handed back to branching.
+                        _bad_col = _integral_claim_branch_col(result_sols[i])
+                        if _bad_col is not None:
+                            logger.info(
+                                "MILP-BB: node %d looks integral at tolerance but its "
+                                "integral realisation leaves the declared rows "
+                                "(#1414); branching on column %d instead of "
+                                "fathoming.",
+                                int(batch_ids[i]),
+                                _bad_col,
+                            )
+                            result_lbs[i] = _INFEASIBILITY_SENTINEL
+                            _unpromotable_hints.append((int(batch_ids[i]), _bad_col))
                 elif out is not None:  # POUNCE-certified infeasible: rigorous prune
                     result_lbs[i] = _INFEASIBILITY_SENTINEL
                     result_excl[i] = True
@@ -26529,6 +26778,15 @@ def _solve_milp_bb(
             break
 
         t_rust_start = time.perf_counter()
+        if _unpromotable_hints:
+            # #1414: name the column whose rounding broke a row, so step 3 of
+            # `process_evaluated` has a branching direction. Set after any other
+            # hint source so it wins for these nodes: they have no branching
+            # candidate at all without it.
+            tree.set_branch_hints(
+                np.array([nid for nid, _ in _unpromotable_hints], dtype=np.int64),
+                np.array([col for _, col in _unpromotable_hints], dtype=np.int64),
+            )
         tree.import_results(result_ids, result_lbs, result_sols, result_feas, None, result_excl)
         tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start

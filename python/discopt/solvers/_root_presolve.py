@@ -17,29 +17,51 @@ def coef_tighten_enabled() -> bool:
     """Whether ``DISCOPT_COEF_TIGHTEN`` opt-in flag is set (default OFF, #282).
 
     Bound-changing presolve (CLAUDE.md §5): the strengthened LP relaxation is
-    only smaller than the original, never larger, so it is sound, but it stays
-    default-OFF until a corpus-wide differential panel graduates it.
+    only smaller than the original, never larger, so it is sound.
 
-    **§5 state: graduation candidate — the benefit IS measured, the panel is not.**
-    Recorded here because the #1345 audit read this docstring, saw only "until a
-    panel graduates it", and classified the flag *panel owed, never run* — which
-    put it on #1388's retirement list. Its own Stage-2 verdict
-    (``docs/dev/issue-282-stage2-verdict.md``) says the opposite:
+    **§5 state (#1414, 2026-09-21): KEPT AS A DOCUMENTED OPT-OUT.** The
+    graduation panel was run, and the three-outcome rule needs an answer, so here
+    it is with the numbers.
 
-        Coefficient tightening is the load-bearing lever exactly as Stage 0
-        predicted: ``syn40m`` +2608 → +1145 %.
+    *Why it is not the default.* BAR 1 (cert-clean) passes; BAR 2 (net-positive)
+    does not. Measured on the in-repo corpus over the 92-instance population where
+    ``tighten_bigm_coefficients`` actually fires (flag ON vs OFF, 60 s/instance):
 
-    52-62 rows tightened on the ``rsyn*`` family, where it moves the root barely
-    at all — the `rsyn` gap is a different failure mode from `syn40m`'s big-M
-    charge. Note what that document *falsifies* is **Stage 2** (Marchand-Wolsey
-    VUB substitution plus a sustained aggregation loop), not Stage 1, which is
-    this flag. Do not read its FALSIFIED banner as a verdict on coefficient
-    tightening.
+      * node count — 95.0 % of scored instances neutral (±2 %), pooled ON/OFF
+        ratio 1.0542, i.e. very slightly *worse*;
+      * answer quality — 0 of 92 status transitions, no ``error`` rows in either
+        arm; bound 4 tighter / 5 looser / 7 same, incumbent 3 better / 2 worse /
+        2 equal. The bound/incumbent rows are single-rep and time-limited, so
+        they measure progress at 60 s rather than relaxation strength; the status
+        column is the robust part, and it is flat.
 
-    *What it needs:* the Regime-2 differential panel over the in-repo corpus, with
-    an ``ARMS`` entry in ``generality_sweep.GRADUATION_ARMS`` so
-    ``graduation_gate.py`` can run it — the missing wiring #1388 identified. Not a
-    retirement candidate.
+    A cert-clean but neutral flag does not graduate (the ``DISCOPT_CUT_INHERIT``
+    lesson: sound is not the same as helpful).
+
+    *Why it is not retired either.* It is the only mechanism in the tree that
+    removes the #1380/#1414 big-M weakness at the source rather than coping with
+    it: on ``min -x + 3z`` s.t. ``x <= M z``, ``x in [0, 10]``, ``z`` binary, it
+    rewrites the row to ``x <= 10 z``, which makes the relaxation exact and leaves
+    the search nothing to branch on (0 extra nodes at every ``M``). The default
+    path now certifies that class on its own — #1414 fixed the root dive, the
+    fathom-and-promote and the pinned-column trust that made it fail — but it
+    does so by *branching*, and a user whose model is a wall of big-M indicator
+    rows is exactly the case where paying presolve to delete that branching is
+    the better trade. The corpus cannot see this because MINLPLib's big-M rows
+    arrive already tightened by the modeller.
+
+    *What would change it.* A differential panel on a population of
+    **user-authored** big-M models (rows whose indicator coefficient exceeds the
+    implied bound), showing the node-count win the repro shows. Wiring exists for
+    the run: add an ``ARMS`` entry in ``generality_sweep.GRADUATION_ARMS`` so
+    ``graduation_gate.py`` drives it.
+
+    Its Stage-2 verdict document (``docs/dev/issue-282-stage2-verdict.md``)
+    reports ``syn40m`` +2608 → +1145 % and 52-62 rows tightened on the ``rsyn*``
+    family, where the root barely moves. What that document FALSIFIES is
+    **Stage 2** (Marchand-Wolsey VUB substitution plus a sustained aggregation
+    loop), not Stage 1, which is this flag; do not read its banner as a verdict on
+    coefficient tightening.
     """
     val = os.environ.get("DISCOPT_COEF_TIGHTEN", "0").strip().lower()
     return val not in ("", "0", "false", "off", "no")
