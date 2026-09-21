@@ -187,8 +187,10 @@ pub fn reduced_cost_fixing(
         // point. `None` means `c̄_j`'s sign is not resolved at its own scale, so no
         // tightening from this block is justified (#1409).
         let err = info.reduced_cost_errors[block_idx];
-        if !(err >= 0.0) {
+        if err.is_nan() || err < 0.0 {
             // NaN or negative: not a bound. Refuse this block rather than trust it.
+            // (Spelled out rather than `!(err >= 0.0)`, which clippy's
+            // `neg_cmp_op_on_partial_ord` rejects; the two arms are identical.)
             continue;
         }
         let cbar_mag = cbar.abs() - err;
