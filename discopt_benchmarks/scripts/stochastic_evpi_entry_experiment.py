@@ -99,7 +99,7 @@ class Family:
 #
 #   min_{Kp,Ki,Kd}  sum_s p_s * int e_s(t)^2 dt
 #   s.t.  dx_s/dt = -tau_x,s x_s^2 + tau_u,s u_s + tau_d,s d_s      (implicit Euler)
-#         e_s = x_s - xbar_s
+#         e_s = xbar_s - x_s
 #         u_s = Kp e_s + Ki I_s + Kd de_s/dt
 #
 # Nonconvex through x^2 and through the bilinear products of the first-stage gains with
@@ -133,6 +133,31 @@ def _pid_scenarios(n_scen: int) -> list[tuple[float, dict]]:
     return out
 
 
+def _pid_scenarios_wide(n_scen: int) -> list[tuple[float, dict]]:
+    """Same plant, far more heterogeneous scenarios.
+
+    EVPI is the quantity the whole method rides on, and it is driven by how much the
+    scenarios disagree about the first stage. Sweeping heterogeneity measures that
+    dependence instead of picking one spread and reporting the answer it happens to give.
+    """
+    rng = np.random.default_rng(20260921)
+    out = []
+    for _ in range(n_scen):
+        out.append(
+            (
+                1.0 / n_scen,
+                {
+                    "xbar": float(rng.uniform(0.3, 3.0)),
+                    "tau_x": float(rng.uniform(0.05, 2.5)),
+                    "tau_u": float(rng.uniform(0.3, 3.0)),
+                    "tau_d": float(rng.uniform(0.05, 1.5)),
+                    "d": float(rng.uniform(-1.5, 1.5)),
+                },
+            )
+        )
+    return out
+
+
 def _pid_recourse(model: Model, fs: dict, data: dict, s: int):
     dt = _PID_HORIZON / _PID_STEPS
     xbar, tx, tu, td, dist = (
@@ -144,22 +169,22 @@ def _pid_recourse(model: Model, fs: dict, data: dict, s: int):
     )
     kp, ki, kd = fs["Kp"], fs["Ki"], fs["Kd"]
 
-    x_prev = model.continuous(f"x_{s}_0", lb=0.0, ub=3.0)
+    x_prev = model.continuous(f"x_{s}_0", lb=-2.0, ub=6.0)
     model.subject_to(x_prev == 0.0)
     e_prev = None
-    integral_prev = model.continuous(f"I_{s}_0", lb=-20.0, ub=20.0)
+    integral_prev = model.continuous(f"I_{s}_0", lb=-40.0, ub=40.0)
     model.subject_to(integral_prev == 0.0)
 
     cost = None
     for k in range(1, _PID_STEPS + 1):
-        x_k = model.continuous(f"x_{s}_{k}", lb=0.0, ub=3.0)
-        e_k = model.continuous(f"e_{s}_{k}", lb=-3.0, ub=3.0)
-        integral_k = model.continuous(f"I_{s}_{k}", lb=-20.0, ub=20.0)
-        u_k = model.continuous(f"u_{s}_{k}", lb=-30.0, ub=30.0)
+        x_k = model.continuous(f"x_{s}_{k}", lb=-2.0, ub=6.0)
+        e_k = model.continuous(f"e_{s}_{k}", lb=-6.0, ub=6.0)
+        integral_k = model.continuous(f"I_{s}_{k}", lb=-40.0, ub=40.0)
+        u_k = model.continuous(f"u_{s}_{k}", lb=-80.0, ub=80.0)
 
-        model.subject_to(e_k == x_k - xbar)
+        model.subject_to(e_k == xbar - x_k)
         model.subject_to(integral_k == integral_prev + e_k * dt)
-        de = (e_k - e_prev) / dt if e_prev is not None else (e_k - (0.0 - xbar)) / dt
+        de = (e_k - e_prev) / dt if e_prev is not None else (e_k - (xbar - 0.0)) / dt
         model.subject_to(u_k == kp * e_k + ki * integral_k + kd * de)
         # implicit Euler on the nonconvex plant
         model.subject_to(x_k == x_prev + dt * (-tx * x_k * x_k + tu * u_k + td * dist))
@@ -314,6 +339,13 @@ FAMILIES: dict[str, Family] = {
         _est_recourse,
         "temporal-decomposition parameter estimation, Cao & Zavala 5.2; n_x = 2 + (S-1)",
     ),
+    "pid_wide": Family(
+        "pid_wide",
+        lambda n_scen: _pid_first_stage(),
+        _pid_scenarios_wide,
+        _pid_recourse,
+        "PID tuning with high scenario heterogeneity (EVPI sensitivity); n_x = 3",
+    ),
     "pooling": Family(
         "pooling",
         lambda n_scen: _pool_first_stage(),
@@ -403,6 +435,7 @@ class CellResult:
     discopt_root_gap: float | None = None
     decomposition_wins: bool | None = None
     sub_wall: float | None = None
+    candidate_spread: float | None = None
     sub_certified: int = 0
     sub_statuses: list[str] = field(default_factory=list)
     alpha_statuses: list[str] = field(default_factory=list)
@@ -499,6 +532,24 @@ def run_cell(
             flush=True,
         )
 
+    # How much do the scenarios disagree about the first stage? This is what drives EVPI
+    # and how much branching the method needs. Reported so a near-zero decomposed gap can
+    # be told apart from a degenerate instance where every scenario wants the same x.
+    if candidates and len(candidates) == n_scen:
+        spec_box = {name: (lb, ub) for name, lb, ub in first_stage_spec(family, n_scen)}
+        spreads = []
+        for name in candidates[0]:
+            vals = [c[name] for c in candidates]
+            lo, hi = spec_box[name]
+            width = max(hi - lo, 1e-12)
+            spreads.append((max(vals) - min(vals)) / width)
+        cell.candidate_spread = max(spreads) if spreads else None
+        print(
+            f"    scenario disagreement (max normalised spread of x_s): "
+            f"{cell.candidate_spread:.4f}",
+            flush=True,
+        )
+
     # --- arm 2b: the method's own upper bound (mean candidate, Cao & Zavala 2.2) --------
     if candidates and len(candidates) == n_scen:
         wsum = sum(weights) or 1.0
@@ -545,6 +596,37 @@ def run_cell(
     return cell
 
 
+def markdown_table(cells: list[dict]) -> str:
+    """Render measured cells as the markdown table the plan doc's SS5 carries."""
+    head = (
+        "| family | S | n_x | decomposed root gap | discopt root gap | verdict | "
+        "scenario disagreement | subs certified | monolith status |\n"
+        "|---|---|---|---|---|---|---|---|---|\n"
+    )
+    rows = []
+    for c in cells:
+        verdict = (
+            "n/a"
+            if c.get("decomposition_wins") is None
+            else ("**decomp**" if c["decomposition_wins"] else "monolith")
+        )
+        rows.append(
+            "| {family} | {scenarios} | {n_first_stage} | {dec} | {root} | {verdict} | "
+            "{spread} | {cert}/{scenarios} | {status} |".format(
+                family=c["family"],
+                scenarios=c["scenarios"],
+                n_first_stage=c["n_first_stage"],
+                dec=_fmt(c.get("decomposed_root_gap")),
+                root=_fmt(c.get("discopt_root_gap")),
+                verdict=verdict,
+                spread=_fmt_num(c.get("candidate_spread")),
+                cert=c.get("sub_certified", 0),
+                status=c.get("monolith_status"),
+            )
+        )
+    return head + "\n".join(rows)
+
+
 def _write_report(path: str, payload: dict) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w") as fh:
@@ -555,7 +637,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--families", default="pid,estimation,pooling")
+    ap.add_argument("--families", default="pid,pid_wide,estimation,pooling")
     ap.add_argument("--scenarios", default="4,8,16")
     ap.add_argument("--time-limit", type=float, default=60.0, help="monolith budget (s)")
     ap.add_argument("--sub-time-limit", type=float, default=30.0, help="per-subproblem budget (s)")
@@ -563,7 +645,18 @@ def main() -> int:
         "--replicates", type=int, default=3, help="monolith repeats, for the root-bound spread"
     )
     ap.add_argument("--out", default="reports/stochastic_evpi_entry.json")
+    ap.add_argument(
+        "--summarize",
+        metavar="JSON",
+        help="re-render the markdown table from an existing report and exit",
+    )
     args = ap.parse_args()
+
+    if args.summarize:
+        with open(args.summarize) as fh:
+            payload = json.load(fh)
+        print(markdown_table(payload["cells"]))
+        return 0
 
     # rule 8: prove which code is loaded
     import discopt
@@ -621,6 +714,7 @@ def main() -> int:
         print(
             f"  {c.family:<11} S={c.scenarios:<4} n_x={c.n_first_stage:<3} "
             f"dec_gap={_fmt(c.decomposed_root_gap)} root_gap={_fmt(c.discopt_root_gap)} "
+            f"spread={_fmt_num(c.candidate_spread)} "
             f"subs_certified={c.sub_certified}/{c.scenarios} "
             f"mono_status={c.monolith_status} root_bound_sd={spread} "
             f"sub_wall={c.sub_wall or float('nan'):.1f}s "
@@ -646,6 +740,10 @@ def main() -> int:
         print("FAIL: zero comparisons executed -- the probe measured nothing.", flush=True)
         return 1
     return 0
+
+
+def _fmt_num(v: float | None) -> str:
+    return "n/a" if v is None else f"{v:.3f}"
 
 
 def _fmt(v: float | None) -> str:
