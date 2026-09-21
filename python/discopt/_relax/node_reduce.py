@@ -39,6 +39,7 @@ from typing import Optional
 
 import numpy as np
 
+from discopt._relax._numeric import FLOAT_EPS, ROUNDOFF_OPS
 from discopt.modeling.core import Model
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,16 @@ logger = logging.getLogger(__name__)
 # Guard tolerances mirror ``dbbt_on_relaxation`` (obbt.py) and the Rust
 # ``reduced_cost_fixing`` kernel (duality.rs) so the reduction is the same math.
 _RC_TOL = 1e-7  # a reduced cost below this magnitude does not press its bound
+# #1397: ``_RC_TOL`` is an absolute floor on a *scale-dependent* quantity. ``d_j =
+# c_j - (A^T y)_j`` is a difference, so its own size says nothing about how much of
+# it is arithmetic noise: with objective/row terms of magnitude 1e9, a ``d_j`` of
+# 1e-7 is indistinguishable from zero, and this routine then DIVIDES the gap by it.
+# The error direction is the unsound one -- an over-stated ``|d_j|`` makes
+# ``gap/d_j`` too small, i.e. it tightens the bound too far and can fix the optimum
+# out of the box. So the reduced cost is deflated by its own round-off bound before
+# both the deadband test and the division; ``rc_absum`` (``|c_j| + (|A|^T|y|)_j``,
+# supplied by ``MccormickLPResult``) is that bound's scale. Without it the
+# reduction is refused for want of a scale rather than run on an absolute guess.
 _EPS = 1e-7  # minimum improvement to record a tightening
 
 
@@ -82,6 +93,7 @@ def _dbbt_from_reduced_costs(
     z_lp: float,
     cutoff: float,
     is_int: np.ndarray,
+    rc_absum: Optional[np.ndarray] = None,
 ) -> tuple[np.ndarray, np.ndarray, int, bool]:
     """DBBT + integer RC-fixing from the node LP's reduced costs (moves (ii)+(iii)).
 
@@ -105,6 +117,15 @@ def _dbbt_from_reduced_costs(
     gap += 1e-6 * (1.0 + abs(float(cutoff)))
 
     n = min(lb.size, d.shape[0])
+    # #1397: per-column round-off bound on ``d_j``. No scale supplied -> zero slack,
+    # i.e. exactly today's absolute deadband; the caller decides whether to hand one
+    # over, and ``reduce_node`` refuses the reduction outright when it cannot.
+    slack = np.zeros(n, dtype=np.float64)
+    if rc_absum is not None:
+        a = np.abs(np.asarray(rc_absum, dtype=np.float64)).ravel()
+        if a.shape[0] >= n:
+            mag = np.where(np.isfinite(a[:n]), a[:n], np.inf)
+            slack = ROUNDOFF_OPS * FLOAT_EPS * mag
     n_tight = 0
     for j in range(n):
         dj = float(d[j])
@@ -112,15 +133,23 @@ def _dbbt_from_reduced_costs(
             continue
         if lb[j] > ub[j]:
             continue
-        if dj > _RC_TOL and np.isfinite(lb[j]):
-            cand = lb[j] + gap / dj
+        # Deflate |d_j| by its round-off bound, then use the DEFLATED value as the
+        # divisor: the valid inequality is ``d_true * (x_j - bound_j) <= gap`` and
+        # ``|d_j| - slack`` is the smallest |d_true| consistent with what was
+        # measured, so ``gap / (|d_j| - slack)`` is the loosest -- and only sound --
+        # candidate. An infinite slack refuses the column.
+        d_safe = abs(dj) - float(slack[j])
+        if not (d_safe > _RC_TOL):
+            continue
+        if dj > 0.0 and np.isfinite(lb[j]):
+            cand = lb[j] + gap / d_safe
             if is_int[j]:
                 cand = np.floor(cand + 1e-9)
             if cand < ub[j] - _EPS:
                 ub[j] = max(lb[j], cand)
                 n_tight += 1
-        elif dj < -_RC_TOL and np.isfinite(ub[j]):
-            cand = ub[j] - gap / (-dj)
+        elif dj < 0.0 and np.isfinite(ub[j]):
+            cand = ub[j] - gap / d_safe
             if is_int[j]:
                 cand = np.ceil(cand - 1e-9)
             if cand > lb[j] + _EPS:
@@ -279,14 +308,21 @@ def reduce_node(
     # z_lp = safe_bound (NEVER the raw LP objective) — the C-15 rule.
     rc = getattr(lp_result, "reduced_costs", None)
     safe_bound = getattr(lp_result, "safe_bound", None)
+    # #1397: ``rc_absum`` is the round-off scale of those reduced costs. An LP that
+    # reported reduced costs without one gives no way to tell a pressed bound from a
+    # cancellation residue, and moves (ii)/(iii) divide by that number -- so the
+    # reduction is skipped, exactly as it is skipped when marginals are absent
+    # entirely. Refusing is sound; guessing with an absolute deadband is not.
+    rc_absum = getattr(lp_result, "rc_absum", None)
     if (
         rc is not None
+        and rc_absum is not None
         and safe_bound is not None
         and cutoff_f is not None
         and np.isfinite(safe_bound)
     ):
         lb, ub, nt, infeas = _dbbt_from_reduced_costs(
-            lb, ub, rc, float(safe_bound), cutoff_f, is_int
+            lb, ub, rc, float(safe_bound), cutoff_f, is_int, rc_absum
         )
         total_tight += nt
         if infeas:

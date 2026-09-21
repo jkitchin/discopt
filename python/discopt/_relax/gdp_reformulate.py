@@ -21,6 +21,7 @@ from collections.abc import Callable
 
 import numpy as np
 
+from discopt._relax._numeric import FLOAT_EPS, ROUNDOFF_OPS
 from discopt.modeling.core import (
     _SELECT_ONE_ROWS,
     GDP_AUX_PREFIX,
@@ -801,6 +802,210 @@ def _bound_expression(
 
     # Fallback: unknown expression type
     return -np.inf, np.inf
+
+
+def bound_expression_error(expr: Expression, model: Model) -> tuple[float, float]:
+    """#1397: upper bounds on the floating-point error in each of
+    :func:`_bound_expression`'s two endpoints for *expr*, as ``(err_lo, err_hi)``.
+
+    :func:`_bound_expression` is plain ``float`` interval arithmetic with **no
+    outward rounding**, so its ``lo`` is not a rigorous under-estimate of the true
+    infimum and its ``hi`` is not a rigorous over-estimate of the supremum. That is
+    harmless where the interval is only used to *size* something (a big-M, a
+    heuristic width) but not where a caller reads a *sign* off it: comparing ``lo``
+    against an absolute margin such as ``factorable_reform._ZERO_MARGIN`` (1e-9)
+    silently assumes the endpoint is exact, and one ulp of a 1e17 sum is 16.0 --
+    ten orders of magnitude past the margin. The true infimum is no less than
+    ``lo - err_lo`` and the true supremum no more than ``hi + err_hi``.
+
+    This walks the same DAG with the same operator dispatch and propagates a
+    first-order bound: each node contributes a few ulps of its own endpoint, plus
+    its operands' errors scaled by the node's local sensitivity -- ``|b|`` and
+    ``|a|`` for a product ``a*b``, ``1/|b|`` and ``|a|/b^2`` for ``a/b``,
+    ``p|v|^(p-1)`` for an integer power, ``|f'|`` for a monotone unary function.
+    Because ``_bound_expression`` picks each endpoint from a specific operand
+    corner, the error is tracked **per endpoint** rather than as one scalar: a
+    denominator ``0.01 + x`` with ``x.ub = +inf`` has an exact lower endpoint and an
+    infinite upper one, and collapsing the two would refuse a perfectly sound
+    sign inference. (Measured: doing so lost 92 of 303 denominator clears on the
+    in-repo corpus, three ``heatexch_gen*`` instances going to zero.)
+
+    A node whose sensitivity this cannot bound -- an unknown call, a non-integer
+    power, a non-sign-definite quotient -- yields ``inf`` for the affected
+    endpoint, which makes a caller's sign test on that endpoint fail: the
+    inference is refused rather than guessed at (CLAUDE.md §3).
+
+    The bound is deliberately loose. Every caller uses it to *widen* a refusal
+    threshold, so an over-estimate costs only the strength of an optional rewrite
+    while an under-estimate costs soundness.
+    """
+    return _bound_error(expr, model)
+
+
+#: ``ROUNDOFF_OPS`` ulps per node: ``_bound_expression`` evaluates up to four
+#: products/quotients and a min/max at one node, so a single ulp under-counts.
+#: Same constant as :func:`~discopt._relax._numeric.roundoff_slack`.
+_ERR_UNIT = ROUNDOFF_OPS * FLOAT_EPS
+
+
+def _mul0(a: float, b: float) -> float:
+    """``a * b`` with ``0 * inf == 0``: a zero sensitivity transmits no error, and
+    plain float multiplication would make it NaN (which compares False everywhere
+    and would silently *pass* a sign test)."""
+    if a == 0.0 or b == 0.0:
+        return 0.0
+    return a * b
+
+
+def _corner_err(val: float, err: float) -> float:
+    """Local round-off of an endpoint plus the propagated error reaching it."""
+    return err + _ERR_UNIT * abs(val)
+
+
+def _pick_err(target: float, corners) -> float:
+    """Error of whichever corner value ``_bound_expression`` selected for *target*.
+
+    ``max`` over ties, and over *all* corners when float comparison matches none of
+    them (an ``inf`` endpoint), so an unmatched endpoint is never given a smaller
+    error than the corners it was chosen from.
+    """
+    matched = [e for v, e in corners if v == target]
+    return max(matched) if matched else max((e for _, e in corners), default=np.inf)
+
+
+def _bound_error(expr: Expression, model: Model) -> tuple[float, float]:
+    if isinstance(expr, (Variable, Constant, IndexExpression)):
+        # Declared bounds and literals are exact floats: no arithmetic happened.
+        return 0.0, 0.0
+
+    terms = _sumover_terms(expr)
+    if terms is not None:
+        # Left-fold of ``t1 + ... + tn``: lo endpoints add, hi endpoints add.
+        e_lo = e_hi = 0.0
+        for term in terms:
+            t_elo, t_ehi = _bound_error(term, model)
+            e_lo += t_elo
+            e_hi += t_ehi
+        lo, hi = _bound_expression(expr, model)
+        return _corner_err(lo, e_lo), _corner_err(hi, e_hi)
+
+    if isinstance(expr, BinaryOp):
+        el_lo, el_hi = _bound_error(expr.left, model)
+        er_lo, er_hi = _bound_error(expr.right, model)
+        l_lo, l_hi = _bound_expression(expr.left, model)
+        r_lo, r_hi = _bound_expression(expr.right, model)
+        lo, hi = _bound_expression(expr, model)
+
+        if expr.op == "+":
+            return _corner_err(lo, el_lo + er_lo), _corner_err(hi, el_hi + er_hi)
+        if expr.op == "-":
+            # lo = l_lo - r_hi, hi = l_hi - r_lo.
+            return _corner_err(lo, el_lo + er_hi), _corner_err(hi, el_hi + er_lo)
+        if expr.op in ("*", "/"):
+            # ``_bound_expression`` takes min/max over the four corner combinations,
+            # so each endpoint inherits the error of whichever corner attained it.
+            corners: list[tuple[float, float]] = []
+            for a, ea in ((l_lo, el_lo), (l_hi, el_hi)):
+                for b, eb in ((r_lo, er_lo), (r_hi, er_hi)):
+                    if expr.op == "*":
+                        corners.append((a * b, _mul0(abs(b), ea) + _mul0(abs(a), eb)))
+                    else:
+                        if not (r_lo > 0 or r_hi < 0):
+                            return np.inf, np.inf  # matches the (-inf, inf) branch
+                        ab = abs(b)
+                        corners.append((a / b, ea / ab + _mul0(abs(a), eb) / (ab * ab)))
+            return (
+                _corner_err(lo, _pick_err(lo, corners)),
+                _corner_err(hi, _pick_err(hi, corners)),
+            )
+        if expr.op == "**" and isinstance(expr.right, Constant):
+            p = float(expr.right.value)
+            if p == int(p) and p > 0:
+                p_int = int(p)
+                if p_int % 2 == 0 and l_lo < 0 < l_hi:
+                    # ``(0.0, max(lb**p, ub**p))``: the lower endpoint is the exact
+                    # literal 0.0, so only the upper one carries error.
+                    e_up = max(
+                        _mul0(p_int * abs(l_lo) ** (p_int - 1), el_lo),
+                        _mul0(p_int * abs(l_hi) ** (p_int - 1), el_hi),
+                    )
+                    return 0.0, _corner_err(hi, e_up)
+                vals = (
+                    (l_lo**p_int, _mul0(p_int * abs(l_lo) ** (p_int - 1), el_lo)),
+                    (l_hi**p_int, _mul0(p_int * abs(l_hi) ** (p_int - 1), el_hi)),
+                )
+                return (
+                    _corner_err(lo, _pick_err(lo, vals)),
+                    _corner_err(hi, _pick_err(hi, vals)),
+                )
+        return np.inf, np.inf
+
+    if isinstance(expr, UnaryOp):
+        e_lo, e_hi = _bound_error(expr.operand, model)
+        if expr.op == "neg":
+            return e_hi, e_lo  # lo = -arg_hi, hi = -arg_lo
+        if expr.op == "abs":
+            return _abs_error(expr.operand, model, e_lo, e_hi)
+        return np.inf, np.inf
+
+    if isinstance(expr, FunctionCall):
+        e_lo, e_hi = _bound_error(expr.args[0], model)
+        a_lo, a_hi = _bound_expression(expr.args[0], model)
+        lo, hi = _bound_expression(expr, model)
+        name = expr.func_name
+        if name == "neg":
+            return e_hi, e_lo
+        if name == "abs":
+            return _abs_error(expr.args[0], model, e_lo, e_hi)
+        if name in ("sin", "cos"):
+            # ``_bound_expression`` returns the exact literal interval (-1, 1)
+            # regardless of the argument, so no argument error reaches it.
+            return 0.0, 0.0
+        if name in ("exp", "log", "sqrt"):
+            # All three are monotone increasing, so endpoints map to endpoints and
+            # the local sensitivity is |f'| at that endpoint.
+            d_lo, d_hi = _MONOTONE_SLOPE[name](a_lo, a_hi)
+            return _corner_err(lo, _mul0(d_lo, e_lo)), _corner_err(hi, _mul0(d_hi, e_hi))
+        return np.inf, np.inf
+
+    return np.inf, np.inf
+
+
+def _abs_error(operand: Expression, model: Model, e_lo: float, e_hi: float) -> tuple[float, float]:
+    """``|u|``: on a straddling interval the lower endpoint is the exact literal
+    0.0; otherwise both endpoints are ``|`` of an operand endpoint, so the error
+    can arrive from either side."""
+    a_lo, a_hi = _bound_expression(operand, model)
+    worst = max(e_lo, e_hi)
+    if a_lo <= 0 <= a_hi:
+        return 0.0, worst
+    return worst, worst
+
+
+def _slope_exp(a_lo: float, a_hi: float) -> tuple[float, float]:
+    # f' = exp, evaluated at each endpoint; matches the branch's own clamping.
+    lo = float(np.exp(a_lo)) if np.isfinite(a_lo) else 0.0
+    hi = float(np.exp(a_hi)) if np.isfinite(a_hi) else np.inf
+    return lo, hi
+
+
+def _slope_log(a_lo: float, a_hi: float) -> tuple[float, float]:
+    # f' = 1/x on x > 0; the branch returns -inf where the endpoint is <= 0, and
+    # an infinite endpoint carries no usable sensitivity.
+    lo = 1.0 / a_lo if a_lo > 0 else np.inf
+    hi = 1.0 / a_hi if a_hi > 0 else np.inf
+    return lo, hi
+
+
+def _slope_sqrt(a_lo: float, a_hi: float) -> tuple[float, float]:
+    # f' = 1/(2*sqrt(x)); the branch clamps a negative endpoint to 0, where the
+    # slope is unbounded.
+    lo = 1.0 / (2.0 * np.sqrt(a_lo)) if a_lo > 0 else np.inf
+    hi = 1.0 / (2.0 * np.sqrt(a_hi)) if a_hi > 0 else np.inf
+    return float(lo), float(hi)
+
+
+_MONOTONE_SLOPE = {"exp": _slope_exp, "log": _slope_log, "sqrt": _slope_sqrt}
 
 
 # ── Indicator constraint reformulation ──

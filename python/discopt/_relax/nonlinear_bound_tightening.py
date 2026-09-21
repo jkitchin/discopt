@@ -19,7 +19,14 @@ from typing import Callable, NoReturn, Optional, Sequence, TypeVar
 import numpy as np
 
 from discopt._flat_index import flat_index_in_shape
-from discopt._relax._numeric import is_effectively_finite as _is_effectively_finite
+from discopt._relax._numeric import (
+    ROUNDOFF_OPS,
+    roundoff_slack,
+    roundoff_slack_arr,
+)
+from discopt._relax._numeric import (
+    is_effectively_finite as _is_effectively_finite,
+)
 from discopt._relax.quadratic_form import (
     extract_quadratic_support,
     polynomial_degree_bound,
@@ -59,6 +66,15 @@ _EMPTY_INTERVAL_FEAS_TOL = 1e-6
 #: Integrality tolerance (conftest ``integrality=1e-5``) for the empty-integer-box proof.
 _INTEGER_BOX_TOL = 1e-5
 _FLOAT_EPS = float(np.finfo(np.float64).eps)
+
+# #1397: the round-off bound and its operation count now live in ``_numeric`` so the
+# other scale-exposed yardsticks in this layer (``factorable_reform``'s denominator
+# sign gate, the reduced-cost deadbands) share one definition and one justification.
+# The module-private aliases are kept because this file's rules read better with them
+# and the #1397 regression suite pins them.
+_CROSSOVER_OPS = ROUNDOFF_OPS
+_roundoff_slack = roundoff_slack
+_roundoff_slack_arr = roundoff_slack_arr
 
 
 @dataclass(frozen=True)
@@ -598,7 +614,7 @@ def _tighten_affine_argument_interval(
         tightened_ub[flat_idx] = new_ub
         return
 
-    if new_lb - new_ub <= _EMPTY_INTERVAL_FEAS_TOL:
+    if new_lb - new_ub <= _EMPTY_INTERVAL_FEAS_TOL + _roundoff_slack(new_lb, new_ub):
         # Sub-tolerance crossover (floating-point rounding on a degenerate box):
         # snap to a degenerate point and let the node NLP validate, rather than
         # certify a false infeasibility (issue #27a; hda fixed-value at ~68930).
@@ -736,7 +752,7 @@ def _tighten_affine_upper_bound(
             tightened_ub[idx] = new_ub
             continue
 
-        if new_lb - new_ub <= _EMPTY_INTERVAL_FEAS_TOL:
+        if new_lb - new_ub <= _EMPTY_INTERVAL_FEAS_TOL + _roundoff_slack(new_lb, new_ub):
             # Sub-tolerance crossover: snap to a degenerate point rather than
             # certify a false infeasibility (issue #27a).
             mid = 0.5 * (new_lb + new_ub)
@@ -826,6 +842,19 @@ def _tighten_univariate_quadratic_interval(
     quadratic branch compares the discriminant, since the constraint violation of
     ``a*x^2 + b*x <= rhs`` at its vertex equals ``-discriminant / (4a)`` (issue
     #27a). Such residuals are deferred to the node NLP for exact validation.
+
+    **Caller contract (#1397).** ``rhs`` must already be widened *outward* by a
+    bound on its own accumulation error — the caller's ``float_err``. The constant
+    branch below compares ``rhs`` directly and does no arithmetic of its own, so
+    its soundness rests entirely on that: an outward-widened ``rhs`` can only make
+    the branch declare feasibility more readily, never infeasibility. The
+    discriminant branch cannot lean on the caller, because ``b*b + 4*a*rhs`` is a
+    *fresh* cancellation built here: at large ``|b|`` the two terms are big and
+    nearly equal, so the difference carries an error of a few ulps of the larger,
+    which at ``|b| ~ 1e8`` already exceeds the whole 1e-6 tolerance. It therefore
+    subtracts :func:`_roundoff_slack` of its own two terms, in *discriminant*
+    units — unmultiplied by ``4a``, unlike the tolerance, because it bounds the
+    error of the discriminant itself rather than a constraint violation.
     """
     if abs(a) <= 1e-12:
         if abs(b) <= 1e-12:
@@ -836,8 +865,10 @@ def _tighten_univariate_quadratic_interval(
         return (max(lb, bound), ub)
 
     discriminant = b * b + 4.0 * a * rhs
-    # Vertex violation = -discriminant / (4a); infeasible only beyond tolerance.
-    if discriminant < -4.0 * a * _EMPTY_INTERVAL_FEAS_TOL:
+    # Vertex violation = -discriminant / (4a); infeasible only beyond tolerance,
+    # and only beyond the round-off of the cancellation that built the
+    # discriminant (#1397 -- see the caller contract in the docstring).
+    if discriminant < -4.0 * a * _EMPTY_INTERVAL_FEAS_TOL - _roundoff_slack(b * b, 4.0 * a * rhs):
         return None
     discriminant = max(discriminant, 0.0)
     sqrt_disc = float(np.sqrt(discriminant))
@@ -881,6 +912,11 @@ class SumOfSquaresUpperBoundRule(NonlinearBoundTighteningRule):
             terms = _cached_flat_terms(model, constraint.body)
 
             constant_term = 0.0
+            # #1397: running bound on the magnitude of the terms ``constant_term`` is
+            # a signed sum of. The sum's round-off is a few ulps of THIS, not of the
+            # (possibly cancelled-to-nothing) result, so the result cannot supply its
+            # own yardstick and it has to be accumulated alongside.
+            constant_absum = 0.0
             square_coeffs: dict[int, float] = {}
             matches_pattern = True
 
@@ -888,6 +924,7 @@ class SumOfSquaresUpperBoundRule(NonlinearBoundTighteningRule):
                 const_val = _constant_value(term)
                 if const_val is not None:
                     constant_term += scale * const_val
+                    constant_absum += abs(scale * const_val)
                     continue
 
                 match = self._match_scaled_square(term, scale, metadata)
@@ -905,17 +942,27 @@ class SumOfSquaresUpperBoundRule(NonlinearBoundTighteningRule):
                 continue
 
             rhs = -constant_term
+            rhs_slack = _roundoff_slack(constant_absum)
             # A negative upper bound on a nonnegative sum of squares is genuine
             # infeasibility only beyond the feasibility tolerance; a sub-tolerance
             # excess (e.g. an eps-scale hull-perspective residual) is feasible
-            # within tolerance and must not be pruned (issue #27a).
-            if rhs < -_EMPTY_INTERVAL_FEAS_TOL:
+            # within tolerance and must not be pruned (issue #27a). It is also
+            # genuine only beyond the round-off of the sum that produced it
+            # (#1397): at ``constant_absum ~ 1e10`` one ulp already exceeds the
+            # whole tolerance, so without this the rule proves infeasibility from
+            # rounding noise and the node is pruned.
+            if rhs < -_EMPTY_INTERVAL_FEAS_TOL - rhs_slack:
                 _prove_infeasible(
                     self.name,
                     constraint,
                     "nonnegative sum of squares has a negative upper bound",
                 )
-            rhs = max(0.0, rhs)
+            # #1397: widen outward before the clamp. ``max(0.0, rhs)`` alone turns a
+            # spurious negative into ``radius = 0``, i.e. it FIXES every x_i in the
+            # row to zero -- a tightening built from round-off. Adding the bound
+            # first makes the radius an over-estimate, which can only enlarge the
+            # box and so can never remove a feasible point.
+            rhs = max(0.0, rhs + rhs_slack)
             for flat_idx, coeff in square_coeffs.items():
                 if coeff <= 0.0:
                     continue
@@ -1038,6 +1085,8 @@ class SqrtSumOfSquaresUpperBoundRule(NonlinearBoundTighteningRule):
             terms = _cached_flat_terms(model, constraint.body)
 
             constant_term = 0.0
+            # #1397: see the same accumulator in SumOfSquaresUpperBoundRule.
+            constant_absum = 0.0
             sqrt_match: Optional[tuple[float, dict[int, float]]] = None
             matches_pattern = True
 
@@ -1045,6 +1094,7 @@ class SqrtSumOfSquaresUpperBoundRule(NonlinearBoundTighteningRule):
                 const_val = _constant_value(term)
                 if const_val is not None:
                     constant_term += scale * const_val
+                    constant_absum += abs(scale * const_val)
                     continue
 
                 match = self._match_scaled_sqrt_sum_of_squares(term, scale, metadata)
@@ -1061,15 +1111,20 @@ class SqrtSumOfSquaresUpperBoundRule(NonlinearBoundTighteningRule):
                 continue
 
             rhs = -constant_term / sqrt_coeff
+            # #1397: the accumulation bound divided by the same coefficient, so the
+            # slack lands in the same units as ``rhs``.
+            rhs_slack = _roundoff_slack(constant_absum) / sqrt_coeff
             # Infeasible only beyond the feasibility tolerance (see issue #27a);
             # a sub-tolerance excess is feasible within tolerance and deferred.
-            if rhs < -_EMPTY_INTERVAL_FEAS_TOL:
+            # And only beyond the round-off of the sum behind it (#1397).
+            if rhs < -_EMPTY_INTERVAL_FEAS_TOL - rhs_slack:
                 _prove_infeasible(
                     self.name,
                     constraint,
                     "nonnegative sqrt sum of squares has a negative upper bound",
                 )
-            rhs = max(0.0, rhs)
+            # #1397: widen outward before the clamp -- see the sibling rule.
+            rhs = max(0.0, rhs + rhs_slack)
             squared_rhs = rhs * rhs
 
             for flat_idx, coeff in square_coeffs.items():
@@ -1116,16 +1171,25 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
         model: Model,
         constraint,
         metadata: FlatVariableMetadata,
-    ) -> Optional[tuple[float, dict[int, tuple[float, float]]]]:
+    ) -> Optional[tuple[float, dict[int, tuple[float, float]], float]]:
         """Bound-independent half of the row scan; see ``_cached_row_structure``.
 
-        Returns ``(constant_term, {flat_idx: (quad_coeff, linear_coeff)})``, or
-        ``None`` when the row is not a separable convex quadratic this rule can
-        use. The arithmetic is exactly the loop this replaced, in the same order.
+        Returns ``(constant_term, {flat_idx: (quad_coeff, linear_coeff)},
+        constant_absum)``, or ``None`` when the row is not a separable convex
+        quadratic this rule can use. The arithmetic is exactly the loop this
+        replaced, in the same order.
+
+        ``constant_absum`` is the magnitude of the constant leaves ``constant_term``
+        is a signed sum of (#1397). ``tighten`` needs it because ``constant_term``
+        cannot describe its own error: ``-0.4e + 1e16 - 1e16 + 0.3e`` evaluates to
+        ``+0.3e`` where exact arithmetic gives ``-0.1e``, and ``abs(constant_term)``
+        reads that as an O(1e-1) quantity with an O(1e-17) error rather than the
+        residue of a 2e16-magnitude cancellation.
         """
         terms = _cached_flat_terms(model, constraint.body)
 
         constant_term = 0.0
+        constant_absum = 0.0
         quad_coeffs: dict[int, float] = {}
         linear_coeffs: dict[int, float] = {}
 
@@ -1133,6 +1197,7 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
             const_val = _constant_value(term)
             if const_val is not None:
                 constant_term += scale * const_val
+                constant_absum += abs(scale * const_val)
                 continue
 
             square_match = self._match_scaled_square(term, scale, metadata)
@@ -1161,7 +1226,7 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
         }
         if any(a < -1e-12 for a, _ in coeffs.values()):
             return None
-        return constant_term, coeffs
+        return constant_term, coeffs, constant_absum
 
     def tighten(
         self,
@@ -1187,7 +1252,7 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
             )
             if structure is None:
                 continue
-            constant_term, coeffs = structure
+            constant_term, coeffs, constant_absum = structure
 
             min_contribs: dict[int, float] = {}
             for flat_idx, (a, b) in coeffs.items():
@@ -1206,10 +1271,21 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
             # leave-one-out rest for x1 came out 0 instead of -1, x1 >= -0.4 replaced
             # x1 >= -0.6, and a feasible LP at x1 = -0.5 was certified infeasible.
             # Widening outward by it keeps every inference valid in exact arithmetic.
+            #
+            # #1397: the constant's share of this bound is ``constant_absum``, the
+            # magnitude of the constant leaves, NOT ``abs(constant_term)`` as it was
+            # written. The two differ exactly when the constant is itself a cancelled
+            # sum, which is the case this bound exists to cover: with a single square
+            # over a box straddling zero every ``min_contribs`` value is 0, so
+            # ``abs(constant_term)`` was the ONLY scale in the product, and a constant
+            # that cancelled from 1e16 down to 0.6 contributed a float_err of 1e-16
+            # instead of 35. Measured on this tree: ``x**2 - 0.4e + M - M + 0.3e <= 0``
+            # (exact row ``x**2 <= 0.1*spacing(M)``, feasible at x = 0) was proved
+            # infeasible at every M from 1e11 to 1e16.
             float_err = (
                 (len(min_contribs) + 4.0)
                 * _FLOAT_EPS
-                * (sum(abs(v) for v in min_contribs.values()) + abs(constant_term))
+                * (sum(abs(v) for v in min_contribs.values()) + constant_absum)
             )
             # Declare infeasibility only when the minimum separable activity
             # exceeds the upper bound by more than the feasibility tolerance;
@@ -1254,7 +1330,7 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
                 if new_lb <= new_ub:
                     tightened_lb[flat_idx] = new_lb
                     tightened_ub[flat_idx] = new_ub
-                elif new_lb <= new_ub + _EMPTY_INTERVAL_FEAS_TOL:
+                elif new_lb <= new_ub + _EMPTY_INTERVAL_FEAS_TOL + _roundoff_slack(new_lb, new_ub):
                     # Sub-tolerance crossover: snap to a degenerate box instead
                     # of pruning, leaving validation to the node NLP.
                     tightened_lb[flat_idx] = new_ub
@@ -1703,6 +1779,16 @@ class QuadraticEqualityBoundsRule(NonlinearBoundTighteningRule):
         square_lb: float,
         square_ub: float,
     ) -> Optional[tuple[float, float]]:
+        """Intersect ``[current_lb, current_ub]`` with the preimage of the square range.
+
+        **Caller contract (#1397).** ``square_lb`` and ``square_ub`` must already be
+        widened *outward* by a bound on their own accumulation error -- lower side
+        reduced, upper side raised. This routine holds no scale information of its
+        own: the constant that produced the range was a signed sum computed by the
+        caller, and a range that cancelled to ~0 from 1e12-magnitude terms is
+        indistinguishable here from a genuine tight range. Both call sites widen
+        before calling.
+        """
         # A negative upper bound on x**2 is infeasible only beyond the
         # feasibility tolerance; a sub-tolerance residual (e.g. eps-scale hull
         # perspective) is feasible within tolerance and deferred (issue #27a).
@@ -1722,7 +1808,11 @@ class QuadraticEqualityBoundsRule(NonlinearBoundTighteningRule):
             elif new_ub <= 0.0:
                 new_ub = min(new_ub, -inner)
 
-        if new_lb > new_ub + 1e-12:
+        # #1397: the crossover of two bounds in the VARIABLE's units, so 1e-12 is a
+        # yardstick only for an O(1) box. ``new_lb``/``new_ub`` come out of a sqrt and
+        # a max/min against the incoming box; at |x| ~ 1e6 one ulp already exceeds
+        # 1e-12, and the ``None`` return is pruned upstream with no further check.
+        if new_lb > new_ub + 1e-12 + _roundoff_slack(new_lb, new_ub):
             return None
         return new_lb, new_ub
 
@@ -1744,6 +1834,8 @@ class QuadraticEqualityBoundsRule(NonlinearBoundTighteningRule):
             terms = _cached_flat_terms(model, constraint.body)
 
             constant_term = 0.0
+            # #1397: magnitude of the constant leaves, for the round-off bound below.
+            constant_absum = 0.0
             affine_match: Optional[tuple[Optional[int], float, float]] = None
             square_match: Optional[tuple[int, float]] = None
             matches_pattern = True
@@ -1752,6 +1844,7 @@ class QuadraticEqualityBoundsRule(NonlinearBoundTighteningRule):
                 const_val = _constant_value(term)
                 if const_val is not None:
                     constant_term += scale * const_val
+                    constant_absum += abs(scale * const_val)
                     continue
 
                 match = _match_scaled_square_var(term, scale, metadata)
@@ -1793,6 +1886,16 @@ class QuadraticEqualityBoundsRule(NonlinearBoundTighteningRule):
                 -constant_term - square_coeff * square_min,
                 -constant_term - square_coeff * square_max,
             )
+            # #1397: this range is a difference of ``constant_term`` (itself a signed
+            # sum) and the scaled square activity, so widen it outward by the
+            # round-off of those terms before it becomes a bound on the affine
+            # variable. Without it the row ``y - x**2 + 0.4e + M - M - 0.3e == 0``
+            # -- exactly ``y = x**2 + 0.1*spacing(M)``, satisfied by y = 0, x ~ 0 --
+            # pushed y's lower bound up to ``0.3*spacing(M)`` and the box against a
+            # fixed y = 0 was reported empty, at every M from 1e12 up.
+            linear_target_slack = _roundoff_slack(
+                constant_absum, square_coeff * square_min, square_coeff * square_max
+            )
             _tighten_affine_argument_interval(
                 tightened_lb,
                 tightened_ub,
@@ -1800,8 +1903,8 @@ class QuadraticEqualityBoundsRule(NonlinearBoundTighteningRule):
                 linear_idx,
                 linear_coeff,
                 linear_offset,
-                arg_lb=min(linear_target_values),
-                arg_ub=max(linear_target_values),
+                arg_lb=min(linear_target_values) - linear_target_slack,
+                arg_ub=max(linear_target_values) + linear_target_slack,
             )
 
             linear_endpoint_a = linear_coeff * float(tightened_lb[linear_idx]) + linear_offset
@@ -1814,8 +1917,19 @@ class QuadraticEqualityBoundsRule(NonlinearBoundTighteningRule):
             )
             required_square_lb = min(required_square_values)
             required_square_ub = max(required_square_values)
-            feasible_square_lb = max(required_square_lb, square_min, 0.0)
-            feasible_square_ub = min(required_square_ub, square_max)
+            # #1397: the round-off of ``(-constant_term - linear_expr) / square_coeff``,
+            # in square units. Two pieces, kept separate because they live in
+            # different units: the row-unit accumulation error divided by the same
+            # coefficient the value was, plus the error of squaring the box, which is
+            # already in square units.
+            square_slack = (
+                _roundoff_slack(constant_absum, linear_expr_lb, linear_expr_ub) / abs(square_coeff)
+            ) + _roundoff_slack(square_min, square_max)
+            # Widen outward before these become inferences: lower side down, upper
+            # side up. Raising the lower side on rounding noise would lift the inner
+            # radius in the preimage below and carve out feasible points.
+            feasible_square_lb = max(required_square_lb - square_slack, square_min, 0.0)
+            feasible_square_ub = min(required_square_ub, square_max) + square_slack
             if feasible_square_lb > feasible_square_ub + 1e-12:
                 _prove_infeasible(
                     self.name,
@@ -1868,9 +1982,20 @@ class SquareDifferenceLowerBoundRule(NonlinearBoundTighteningRule):
         scale: float,
         metadata: FlatVariableMetadata,
         square_coeffs: dict[int, float],
+        const_absum: list[float],
     ) -> Optional[float]:
+        """Walk a square-sum row, returning its signed constant.
+
+        ``const_absum`` is a one-element accumulator, threaded the same way
+        ``square_coeffs`` is: it collects ``sum(|scale * const|)`` over the constant
+        leaves, so the caller knows the *magnitude of the terms* the returned
+        constant is a signed sum of. The return value alone cannot supply that --
+        a constant that cancelled to ~0 from two 1e12 leaves is indistinguishable
+        from a genuine 0 -- and #1397 needs it to bound the sum's round-off.
+        """
         const_val = _constant_value(expr)
         if const_val is not None:
+            const_absum[0] += abs(scale * const_val)
             return scale * const_val
 
         match = _match_scaled_square_var(expr, scale, metadata)
@@ -1880,18 +2005,28 @@ class SquareDifferenceLowerBoundRule(NonlinearBoundTighteningRule):
             return 0.0
 
         if isinstance(expr, UnaryOp) and expr.op == "neg":
-            return self._collect_square_sum(expr.operand, -scale, metadata, square_coeffs)
+            return self._collect_square_sum(
+                expr.operand, -scale, metadata, square_coeffs, const_absum
+            )
 
         if isinstance(expr, BinaryOp):
             if expr.op == "+":
-                left = self._collect_square_sum(expr.left, scale, metadata, square_coeffs)
-                right = self._collect_square_sum(expr.right, scale, metadata, square_coeffs)
+                left = self._collect_square_sum(
+                    expr.left, scale, metadata, square_coeffs, const_absum
+                )
+                right = self._collect_square_sum(
+                    expr.right, scale, metadata, square_coeffs, const_absum
+                )
                 if left is None or right is None:
                     return None
                 return left + right
             if expr.op == "-":
-                left = self._collect_square_sum(expr.left, scale, metadata, square_coeffs)
-                right = self._collect_square_sum(expr.right, -scale, metadata, square_coeffs)
+                left = self._collect_square_sum(
+                    expr.left, scale, metadata, square_coeffs, const_absum
+                )
+                right = self._collect_square_sum(
+                    expr.right, -scale, metadata, square_coeffs, const_absum
+                )
                 if left is None or right is None:
                     return None
                 return left + right
@@ -1899,18 +2034,18 @@ class SquareDifferenceLowerBoundRule(NonlinearBoundTighteningRule):
                 left_const = _constant_value(expr.left)
                 if left_const is not None:
                     return self._collect_square_sum(
-                        expr.right, scale * left_const, metadata, square_coeffs
+                        expr.right, scale * left_const, metadata, square_coeffs, const_absum
                     )
                 right_const = _constant_value(expr.right)
                 if right_const is not None:
                     return self._collect_square_sum(
-                        expr.left, scale * right_const, metadata, square_coeffs
+                        expr.left, scale * right_const, metadata, square_coeffs, const_absum
                     )
             if expr.op == "/":
                 right_const = _constant_value(expr.right)
                 if right_const is not None:
                     return self._collect_square_sum(
-                        expr.left, scale / right_const, metadata, square_coeffs
+                        expr.left, scale / right_const, metadata, square_coeffs, const_absum
                     )
 
         return None
@@ -1919,21 +2054,25 @@ class SquareDifferenceLowerBoundRule(NonlinearBoundTighteningRule):
         self,
         constraint,
         metadata: FlatVariableMetadata,
-    ) -> Optional[tuple[float, int, float, list[tuple[int, float]]]]:
+    ) -> Optional[tuple[float, int, float, list[tuple[int, float]], float]]:
         """Bound-independent half of the row scan; see ``_cached_row_structure``.
 
-        Returns ``(constant_term, target_idx, target_scale, positive)`` -- the
-        negative square this rule tightens and the positive squares whose box
-        activity bounds it -- or ``None`` when the row is not of that shape. The
-        arithmetic is exactly the prologue this replaced, in the same order, and
-        ``positive`` keeps its original list order because the caller sums over
-        it in floating point.
+        Returns ``(constant_term, target_idx, target_scale, positive, const_absum)``
+        -- the negative square this rule tightens, the positive squares whose box
+        activity bounds it, and the magnitude of the constant leaves
+        ``constant_term`` is a signed sum of (#1397) -- or ``None`` when the row is
+        not of that shape. The arithmetic is exactly the prologue this replaced, in
+        the same order, and ``positive`` keeps its original list order because the
+        caller sums over it in floating point.
         """
         if getattr(constraint, "sense", None) != "==":
             return None
 
         square_coeffs: dict[int, float] = {}
-        constant = self._collect_square_sum(constraint.body, 1.0, metadata, square_coeffs)
+        const_absum = [0.0]
+        constant = self._collect_square_sum(
+            constraint.body, 1.0, metadata, square_coeffs, const_absum
+        )
         if constant is None:
             return None
         constant_term = float(constant)
@@ -1945,7 +2084,7 @@ class SquareDifferenceLowerBoundRule(NonlinearBoundTighteningRule):
             return None
 
         target_idx, target_coeff = negative[0]
-        return constant_term, target_idx, -target_coeff, positive
+        return constant_term, target_idx, -target_coeff, positive, const_absum[0]
 
     def tighten(
         self,
@@ -1968,10 +2107,15 @@ class SquareDifferenceLowerBoundRule(NonlinearBoundTighteningRule):
             )
             if structure is None:
                 continue
-            constant_term, target_idx, target_scale, positive = structure
+            constant_term, target_idx, target_scale, positive, const_absum = structure
 
             rhs_lb = constant_term
             rhs_ub = constant_term
+            # #1397: ``rhs_absum`` bounds the magnitude of the terms ``rhs_lb``/``rhs_ub``
+            # are signed sums of, so their round-off can be bounded. Seeded from the
+            # constant leaves' own abs-sum rather than from ``abs(constant_term)``,
+            # which would read a cancelled constant as carrying no scale.
+            rhs_absum = const_absum
             for flat_idx, coeff in positive:
                 sq_lb, sq_ub = QuadraticEqualityBoundsRule._square_interval(
                     float(tightened_lb[flat_idx]),
@@ -1979,18 +2123,29 @@ class SquareDifferenceLowerBoundRule(NonlinearBoundTighteningRule):
                 )
                 rhs_lb += coeff * sq_lb
                 rhs_ub += coeff * sq_ub
+                rhs_absum += abs(coeff * sq_lb) + abs(coeff * sq_ub)
 
+            rhs_slack = _roundoff_slack(rhs_absum)
             # Infeasible only beyond the feasibility tolerance (issue #27a); a
             # sub-tolerance residual is feasible within tolerance and deferred.
-            if rhs_ub < -_EMPTY_INTERVAL_FEAS_TOL:
+            # And only beyond the round-off of the activity sum (#1397): squares of
+            # a 1e7-wide box already reach 1e14, where one ulp of the sum dwarfs the
+            # 1e-6 tolerance and a rounding residual reads as proof of infeasibility.
+            if rhs_ub < -_EMPTY_INTERVAL_FEAS_TOL - rhs_slack:
                 _prove_infeasible(
                     self.name,
                     constraint,
                     "positive square activity cannot balance the negative square",
                 )
 
-            feasible_square_lb = max(0.0, rhs_lb / target_scale)
-            feasible_square_ub = max(0.0, rhs_ub / target_scale)
+            # #1397: widen each side outward, in square units, before it becomes an
+            # inference. A lower bound on x**2 must be UNDER-estimated and an upper
+            # bound OVER-estimated; the previous ``max(0.0, .../target_scale)`` did
+            # neither, so a rounding residual could raise the inner radius and carve
+            # a hole that excludes a feasible point.
+            square_slack = rhs_slack / target_scale
+            feasible_square_lb = max(0.0, rhs_lb / target_scale - square_slack)
+            feasible_square_ub = max(0.0, rhs_ub / target_scale + square_slack)
             if feasible_square_lb > feasible_square_ub + _EMPTY_INTERVAL_FEAS_TOL:
                 _prove_infeasible(
                     self.name,
@@ -3020,7 +3175,7 @@ class DefinedVariableForwardRule(NonlinearBoundTighteningRule):
             # Decide here what a crossed (``upd_lo > upd_hi``) interval means,
             # rather than constructing the ``Interval`` and letting its dataclass
             # invariant raise out of the whole tightening pass (#1197).
-            if upd_lo > upd_hi + _EMPTY_INTERVAL_FEAS_TOL:
+            if upd_lo > upd_hi + _EMPTY_INTERVAL_FEAS_TOL + _roundoff_slack(upd_lo, upd_hi):
                 # Beyond any rounding slack the defining expression's enclosure
                 # and the variable's box share no point. That is a genuine empty
                 # interval, reported the way every sibling rule reports one --
@@ -3284,7 +3439,9 @@ class ConvexQuadraticEllipsoidRule(NonlinearBoundTighteningRule):
                     if new_lb <= new_ub:
                         tightened_lb[flat_idx] = new_lb
                         tightened_ub[flat_idx] = new_ub
-                    elif new_lb <= new_ub + _EMPTY_INTERVAL_FEAS_TOL:
+                    elif new_lb <= new_ub + _EMPTY_INTERVAL_FEAS_TOL + _roundoff_slack(
+                        new_lb, new_ub
+                    ):
                         # Sub-tolerance crossover: snap to a degenerate box
                         # instead of pruning, leaving validation to the node NLP.
                         tightened_lb[flat_idx] = new_ub
@@ -3335,13 +3492,14 @@ DEFAULT_NONLINEAR_BOUND_RULES: tuple[NonlinearBoundTighteningRule, ...] = (
 def _snap_tolerant_crossovers(lb: np.ndarray, ub: np.ndarray) -> None:
     """Collapse sub-tolerance ``lb > ub`` crossovers to a degenerate box in place.
 
-    Where ``ub < lb <= ub + _EMPTY_INTERVAL_FEAS_TOL`` the lower bound is pulled
+    Where ``ub < lb <= ub + _EMPTY_INTERVAL_FEAS_TOL + _roundoff_slack_arr(lb, ub)``
+    the lower bound is pulled
     down to the (exact, more constraining) upper bound, yielding ``lb == ub``
     rather than an empty box. This keeps an approximate reformulation's eps-scale
     residual from manufacturing a hard infeasibility while leaving the genuine
     bound intact for the node NLP to validate.
     """
-    crossed = (lb > ub) & (lb <= ub + _EMPTY_INTERVAL_FEAS_TOL)
+    crossed = (lb > ub) & (lb <= ub + _EMPTY_INTERVAL_FEAS_TOL + _roundoff_slack_arr(lb, ub))
     if np.any(crossed):
         lb[crossed] = ub[crossed]
 
@@ -3406,7 +3564,10 @@ def tighten_nonlinear_bounds(
     def _count_tightened(lb: np.ndarray, ub: np.ndarray) -> int:
         return int(_count_changed(lb, initial_lb) + _count_changed(ub, initial_ub))
 
-    empty_initial = np.flatnonzero(tightened_lb > tightened_ub + _EMPTY_INTERVAL_FEAS_TOL)
+    empty_initial = np.flatnonzero(
+        tightened_lb
+        > tightened_ub + _EMPTY_INTERVAL_FEAS_TOL + _roundoff_slack_arr(tightened_lb, tightened_ub)
+    )
     if empty_initial.size > 0:
         first_idx = int(empty_initial[0])
         return (
@@ -3499,7 +3660,12 @@ def tighten_nonlinear_bounds(
             cand_ub_arr = np.asarray(cand_ub, dtype=np.float64)
             tightened_lb = np.maximum(prev_lb, cand_lb_arr)
             tightened_ub = np.minimum(prev_ub, cand_ub_arr)
-            empty_indices = np.flatnonzero(tightened_lb > tightened_ub + _EMPTY_INTERVAL_FEAS_TOL)
+            empty_indices = np.flatnonzero(
+                tightened_lb
+                > tightened_ub
+                + _EMPTY_INTERVAL_FEAS_TOL
+                + _roundoff_slack_arr(tightened_lb, tightened_ub)
+            )
             if empty_indices.size > 0:
                 _mark_rule(rule.name)
                 first_idx = int(empty_indices[0])

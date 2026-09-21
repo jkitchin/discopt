@@ -1,7 +1,11 @@
 # #1397 — the absolute-tolerance audit
 
-**Status:** complete. Four scale-exposed unsound sites found and fixed; the rest
-classified below. **Date:** 2026-09-20. **Branch:** `audit/1397-absolute-tolerance-sweep`.
+**Status:** the classification is complete; the fixes landed over three PRs. Four
+scale-exposed unsound sites were fixed in the original sweep, a fifth in PR #1400,
+and the remaining six in the follow-up PR recorded in **§6**, which also
+**retracts two prescriptions made here** (§0's `max` shape and §4.5's
+`* max(1, |new_lb|, |new_ub|)`). Read §6 before acting on §0 or §4.5.
+**Date:** 2026-09-20. **Branch:** `audit/1397-absolute-tolerance-sweep`.
 
 ## 0. The defect class, and nothing else
 
@@ -43,6 +47,17 @@ Three properties make this the right shape, and each one was load-bearing:
    these fixes were kept bound-neutral where they had to be.
 3. **The floor still does real work**: it handles the near-zero case, where the
    scale-carrying term vanishes and a gate with no floor would decide on dust.
+
+> **Correction (§6, CLAUDE.md §11).** The `max` in that shape is wrong for the
+> round-off subclass and was retracted after this section was written. `max` is
+> right when the absolute constant and the scaled term answer the *same* question
+> at different scales. It is wrong when they answer *different* questions — a
+> feasibility tolerance is a statement about the model, a round-off bound is a
+> statement about the arithmetic, and a residual can be inside neither while
+> exceeding each alone. Those two **add** (#1392's lesson, restated):
+> `margin = ABSOLUTE_FLOOR + K*u*sum|terms|`. The additive form is also never
+> looser than the bare gate, so property 1 above still holds, and at O(1) scale the
+> added slack is O(1e-15), so property 2 still holds.
 
 ## 1. Method
 
@@ -392,12 +407,12 @@ for the reason in §4.6.
 | site | constant | the unsound direction | status |
 |---|---|---|---|
 | `validation/feasibility.py:140` | `FEASIBLE_DISTANCE_TOL` | **measured, confirmed.** A relative roundoff allowance `16·u·(\|ub\|+\|x\|)` is added into `room`, then divided by this absolute constant and multiplied by `\|J_ij\|`. A column pinned *on* the bound that blocks its improving direction — true room exactly 0 — is credited with phantom room ∝ \|bound\|. Measured on a hand-oracle row: the returned improving-gradient norm goes 1.0 → 1000.0 (its plain sup-norm ceiling) as the bound sweeps 1e0 → 1e11, inflating the acceptance cap from 1e-4 to 1e-1. At that point #1284's tightening is a silent no-op — and #1284 exists because the untightened cap certified a point 0.87 away in `y` against a true optimum of −6.699. Default path, two call sites (`solver.py:3107`, `_relax/primal_heuristics.py:639`), and it gates whether a point becomes the incumbent. | **fixed, PR #1400** |
-| `_relax/nonlinear_bound_tightening.py:58` | `_EMPTY_INTERVAL_FEAS_TOL` | 17 comparison lines. `new_lb - new_ub <= tol` snaps a sub-tolerance crossover to a midpoint instead of declaring the node infeasible. A *larger* tolerance is therefore the safe direction; the unsound direction is this absolute 1e-6 being too small relative to scale — on a box with bounds ~1e10, ordinary rounding crossover exceeds it, falls through, and emits `status="infeasible"`. Needs `* max(1, \|new_lb\|, \|new_ub\|)`. | open |
-| `_relax/node_reduce.py:48` | `_RC_TOL` | reduced-cost fixing. `dj` carries objective-over-variable units; a genuine zero reduced cost reading above an absolute 1e-7 at large objective scale makes `cand = lb + gap/dj` spuriously small and **fixes the optimum out of the box**. Same shape at `solver.py:23939` (`_RCF_RC_TOL`). | open |
-| `_relax/perspective.py:74` | `_ZERO_TOL` | 13 comparison lines, used as `coeff < -_ZERO_TOL` — coefficients carry the model's units, so at small coefficient scale a genuinely negative term reads as zero and a perspective reformulation is applied to a form that does not admit it. | open |
-| `_relax/convexity/posynomial.py:54` | `_POS_TOL` | `all(arr > _POS_TOL)` decides posynomial-ness from coefficient signs; same units argument. | open |
-| `_relax/factorable_reform.py:69` | `_ZERO_MARGIN` | `lo > _ZERO_MARGIN` decides a bound is strictly positive before a reformulation that requires it. | open |
-| `solvers/lp_simplex.py:46` | `_BOUND_SNAP_TOL = 1e-3` | snaps `x` onto a bound without recomputing the objective; 1e-3 is enormous next to the declared `abs=1e-6`. Reached from `lp_pounce.py:403` as `(lb - ub) <= _BOUND_SNAP_TOL * (1.0 + ...)` — *that* call site is scaled; the unscaled uses need separate treatment. | open |
+| `_relax/nonlinear_bound_tightening.py:58` | `_EMPTY_INTERVAL_FEAS_TOL` | 17 comparison lines. `new_lb - new_ub <= tol` snaps a sub-tolerance crossover to a midpoint instead of declaring the node infeasible. A *larger* tolerance is therefore the safe direction; the unsound direction is this absolute 1e-6 being too small relative to scale — on a box with bounds ~1e10, ordinary rounding crossover exceeds it, falls through, and emits `status="infeasible"`. ~~Needs `* max(1, \|new_lb\|, \|new_ub\|)`.~~ **That prescription was falsified before the fix landed — see §6.1.** The scale lives in the row's *inputs*, not in the crossover it produces. | **fixed, §6** |
+| `_relax/node_reduce.py:48` | `_RC_TOL` | reduced-cost fixing. `dj` carries objective-over-variable units; a genuine zero reduced cost reading above an absolute 1e-7 at large objective scale makes `cand = lb + gap/dj` spuriously small and **fixes the optimum out of the box**. Same shape at `solver.py:23939` (`_RCF_RC_TOL`). | **fixed, §6** |
+| `_relax/perspective.py:74` | `_ZERO_TOL` | The unsound direction is **not** the one guessed here (see §6.3): the reach is the *separability* gate, which computed the off-diagonal mass as `\|Q[j,:]\|.sum() - \|Q[j,j]\|` — a difference of two large numbers — and `find_candidates`' own docstring calls that gate a soundness condition. At `Q[j,j] = 1e12` a genuine cross-term below one ulp (1.2e-4) is absorbed and the subtraction returns exactly `0.0`, certifying a coupled row separable. Plus two accumulated-coefficient sign tests on the semicontinuity row. | **fixed, §6** |
+| `_relax/convexity/posynomial.py:54` | `_POS_TOL` | **Reclassified, not scale-exposed (§6.4).** The guessed reach (`all(arr > _POS_TOL)`) is in `log_lattice.py`, not this file, and every one of its comparands is *declared model data* — a variable's `lb` or a constant leaf — never an accumulated quantity. In `posynomial.py` itself the comparands are a monomial exponent (a model literal, O(1) by construction) and a monomial coefficient, which is a **product** chain: products preserve sign exactly and carry relative error only, so a truly non-positive coefficient cannot read positive. Both remaining uses refuse on failure. | **not a defect** |
+| `_relax/factorable_reform.py:69` | `_ZERO_MARGIN` | `lo > _ZERO_MARGIN` decides a denominator is strictly positive before clearing it. Confirmed unsound and **worse than the row above**: clearing a sign-indefinite denominator does not weaken the bound, it *flips the inequality* wherever the denominator is negative, so the rewritten model has a different feasible set than the one the user wrote. Measured: 5 unsound clears at `M = 1e16…1e18` (§6.2). | **fixed, §6** |
+| `solvers/lp_simplex.py:46` | `_BOUND_SNAP_TOL = 1e-3` | **Reclassified as a deliberate guard (§6.5).** Its own comment states the intent: 1e-3 is "far below any meaningful constraint scale, so a genuine solver defect (a large off-box value) is left intact to surface in tests." Making it scale-relative would *widen* the snap on large models and mask exactly the defects it exists to expose. Weakening a fail-loud guard to make a dimensional argument tidy is what CLAUDE.md §1/§3 forbid. The `lp_pounce.py:403` use is already relative. | **kept, documented** |
 
 Two further sites from the same sweep are **flag-gated**, so they are not on a
 default certifying path and are recorded here rather than fixed:
@@ -426,6 +441,9 @@ item 3 (the CI probe) is complete here; item 2 (every unsound site fixed) has
 5 of 12 done in this PR and a 6th in PR #1400. The remaining six are listed above
 in the issue's own priority order, `_EMPTY_INTERVAL_FEAS_TOL` now first.
 
+**Update (§6): the remaining six are resolved** — four fixed, two reclassified
+with the reasoning recorded — so item 2 is complete and #1397 can be closed.
+
 ## 5. What this audit does not cover
 
 - **Rust.** `crates/discopt-core/` was not swept. The `INF = 1e20` sentinel
@@ -438,3 +456,179 @@ in the issue's own priority order, `_EMPTY_INTERVAL_FEAS_TOL` now first.
 - **Whether any fixed site was ever hit in practice.** The fixes are justified by
   provable invalidity of the margin, not by a corpus instance that failed. No
   claim is made that a released solve returned a wrong answer because of these.
+
+## 6. Update — the remaining six, and two retractions
+
+**Date:** 2026-09-20. **Branch:** `fix/1397-remaining-scale-yardsticks`.
+
+This section closes item 2 of the issue. Of the six sites left open by §4.5, four
+were confirmed unsound and fixed, and two were reclassified with the reasoning
+recorded rather than "fixed" to make a table tidy. It also **retracts two
+prescriptions made earlier in this document** (CLAUDE.md §11), because both were
+falsified by measurement before any code landed.
+
+### 6.1 `_EMPTY_INTERVAL_FEAS_TOL` — and the retraction of `max(1, |result|)`
+
+§4.5 prescribed `* max(1, |new_lb|, |new_ub|)`. **Retracted.** A cancellation
+residual is *small by construction*: terms of magnitude 1e10 that cancel to
+`+3e-5` give `max(1, 3e-5) = 1`, so the prescription changes nothing at exactly the
+site it was written for. Worse, at `M = 1e14` the multiplicative form yields a
+threshold of 1e8, which would snap away a genuinely empty interval 1.4e6 wide —
+turning a soundness fix into a soundness defect in the other direction.
+
+**The scale lives in the inputs, not in the result.** The fix is an additive
+round-off bound over the terms the crossover was differenced from,
+`ROUNDOFF_OPS * u * sum|terms|`, now shared from `_relax/_numeric.py`
+(`roundoff_slack`, `roundoff_slack_arr`) so the other layers reuse one definition.
+`_EMPTY_INTERVAL_FEAS_TOL` still reads `1e-6`, and is pinned as unchanged by a test.
+
+Two-arm verification: with the marker asserted **absent**, 81 of 117 pinning tests
+fail on the baseline; all 117 pass on the fix. The suite sweeps four row shapes ×
+five magnitudes (1e11 … 1e18) and carries a matching *no-weakening* arm at every
+point — a genuine violation at the same magnitude, which must still be proved —
+because the cheap way to pass the first arm is to stop proving infeasibility.
+
+### 6.2 `factorable_reform._ZERO_MARGIN` — the denominator sign gate
+
+`_find_clearable_denominator` licenses multiplying a whole constraint through by a
+denominator once it believes the denominator is sign-definite, deciding that from
+`_bound_expression`, which is plain float interval arithmetic with **no outward
+rounding**. Its `lo` is therefore not a rigorous under-estimate of the true
+infimum, and reading a *sign* off it against an absolute 1e-9 is the defect class.
+
+This one is worse than a lost tightening. Clearing a sign-indefinite denominator
+**flips the inequality** wherever the denominator is negative, so the rewritten
+model has a different feasible set than the one the user wrote — a false-optimal
+and false-infeasible generator.
+
+*Entry experiment* (`scripts/audit_1397_denominator_sign_margin.py`): denominators
+of the form `y + M - M + residue` (`dm` does not fold constants, so the four leaves
+survive and the float evaluation genuinely cancels) whose exact infimum is −0.5 or
+−8.0 while the folded lower bound clears 1e-9. **Baseline: 5 unsound clears,
+exit 1. After the fix: 0, exit 0**, with a no-weakening arm of four genuinely
+definite boxes that must still clear.
+
+*The fix* is a rigorous per-endpoint error propagation over `_bound_expression`'s
+own operator dispatch, `gdp_reformulate.bound_expression_error(expr, model)
+-> (err_lo, err_hi)`, and the sign test becomes `lo > _ZERO_MARGIN + err_lo`
+(and `hi < -_ZERO_MARGIN - err_hi`), with `dmin` reduced by the same slack before
+the clamp. `_ZERO_MARGIN` itself does not move.
+
+**Per-endpoint, not a scalar — measured.** A first version collapsed both endpoints
+into one error and lost **92 of 303** denominator clears on the 66-instance in-repo
+corpus, three `heatexch_gen*` instances to zero. The reason is that the endpoints
+fail separately: `0.01 + x` with `x.ub = +inf` has an exact lower endpoint and an
+unusable upper one, and the positive-sign test reads the *lower* one. Returning a
+pair, plus monotone-slope handlers for `exp`/`log`/`sqrt` and the exact literal
+`(-1, 1)` of `sin`/`cos`, brings it to **303 → 303: zero strength lost**
+(`scripts/audit_1397_denominator_clear_strength.py`, both arms interleaved in one
+process). Both CLAUDE.md §5 bars are therefore met — cert-clean and not harmful.
+
+Anything `bound_expression_error` cannot bound returns `inf` and the clear is
+refused; the McCormick-lp path bounds the division instead. Refusing is sound;
+guessing is not (CLAUDE.md §3).
+
+### 6.3 The reduced-cost deadbands — `node_reduce._RC_TOL`, `solver._RCF_RC_TOL`
+
+§4.5 named the unsound direction correctly but not the yardstick. A reduced cost is
+a **difference** — `c_j - (A^T y)_j` at the simplex site, `mult_x_L - mult_x_U`
+(IPM bound multipliers) at the POUNCE site — so its own magnitude says nothing
+about how much of it is the round-off of the arithmetic that produced it. Two bound
+multipliers of magnitude 1e9 differ by one ulp at 2.4e-7, past the 1e-7 deadband.
+The unsound direction is specific and not conservative: RC-fixing **divides** the
+optimality gap by `|d_j|`, so an over-stated `|d_j|` makes `gap/|d_j|` too small and
+can fix the true optimum out of the box. (Derived: the pre-existing
+`gap += 1e-6*(1 + |z_inc|)` margin only covers this for `|c| <= ~500`.)
+
+The yardstick is #1397's check 2 read literally — the magnitude of the terms the
+difference was taken of — so it is computed *by the code that forms the difference*
+and carried alongside it: `MccormickLPResult.rc_absum` (`|c_j| + (|A|^T|y|)_j`, one
+extra matvec on the same sparse structure) and `LPResult.rc_absum` (`|mult_l| +
+|mult_u|` from POUNCE, `|c_j| + (|A|^T|y|)_j` from the in-house simplex). `|A|^T|y|`
+rather than `|A^T y|`, because the dot product's own cancellation is part of the
+error. Both consumers then use `d_safe = |d_j| - roundoff_slack(absum_j)` for
+**both** the deadband test and the divisor, and **refuse the reduction entirely**
+when no scale was reported. Neither constant moves.
+
+Two-arm verification (`scripts/audit_1397_reduced_cost_deadband.py`, one probe run
+against both trees, the baseline arm reached by dropping the kwarg the pre-fix
+signature does not accept): **baseline 6 unsound fixes, exit 1; fix 0, exit 0**,
+with a no-weakening arm requiring an honest reduced cost to land on the *same*
+`floor()` — a 1e-16-relative slack must not move it.
+
+### 6.4 `posynomial._POS_TOL` — reclassified, not a defect
+
+§4.5's cited comparison (`all(arr > _POS_TOL)`) is in
+`_relax/convexity/log_lattice.py`, not `posynomial.py`, and all three of its uses
+compare **declared model data** — a variable's `lb`, a constant leaf — not an
+accumulated quantity, so there is no arithmetic whose error could invert the test.
+
+In `posynomial.py` itself there are three uses and none is scale-exposed:
+
+- `abs(exp) > _POS_TOL` on a monomial **exponent**. Exponents are model literals,
+  O(1)–O(10) by construction; a cancellation residue reaching 1e-12 would need
+  exponents of magnitude ≳1e4, which are not representable model inputs in any
+  meaningful sense.
+- `abs(right.coeff) <= _POS_TOL` → `return None`, and `coeff <= _POS_TOL` →
+  `return None`. Both **refuse on failure**, the sound direction. The unsound
+  direction would be a truly non-positive coefficient reading positive, and that
+  cannot happen: `Monomial.coeff` is built by a **product** chain
+  (`left.coeff * right.coeff`, `mono.coeff * scale`), never a sum, and
+  floating-point multiplication preserves sign exactly and carries relative error
+  only.
+
+### 6.5 `lp_simplex._BOUND_SNAP_TOL` — kept as a documented guard
+
+The constant's own comment states its design: 1e-3 is chosen "comfortably above
+observed simplex round-off (~1e-4 on wide-range LPs) yet far below any meaningful
+constraint scale, so a genuine solver defect (a large off-box value) is left intact
+to surface in tests." The gate is therefore not a soundness threshold that a scale
+factor would make coherent — it is a **fail-loud guard**, and scaling it by problem
+magnitude would *widen* the snap on large models, silently absorbing precisely the
+defects it exists to expose. CLAUDE.md §1 and §3 forbid weakening a guard to make a
+gate or an argument pass, so the honest outcome is to record the classification and
+leave the constant alone. The related `lp_pounce.py:403` use is already relative.
+
+### 6.6 Two further sites found during the follow-up
+
+Both are the same class, both found while reading the sites above, both fixed here:
+
+- `perspective.find_candidates`' separability gate computed the off-diagonal mass as
+  `|Q[j,:]|.sum() - |Q[j,j]|`. That is a catastrophic difference, so the quantity
+  compared against the absolute 1e-12 was itself scale-dependent: at
+  `Q[j,j] = 1e12` (ulp 1.2e-4) a genuine cross-term of 1e-5 is absorbed by the row
+  sum and the subtraction returns exactly `0.0`. The docstring calls each gate "a
+  soundness condition, not a heuristic", and this one feeds a perspective
+  strengthening of the OA master cut that is valid only for a separable term. The
+  fix sums the off-diagonals **directly**: a sum of non-negative terms has no
+  cancellation, so its error is relative to itself and the absolute comparison is
+  coherent again. Zero cost, tolerance unchanged. Two-arm: 4 pinning tests fail on
+  the baseline, all pass on the fix, with a no-weakening arm at the same four
+  diagonals and no cross-term.
+- The same function's semicontinuity-row scan compared *accumulated* coefficients
+  (`terms[i] = terms.get(i, 0.0) + v`) and an accumulated constant against the same
+  absolute 1e-12. A coefficient that is truly zero can survive cancellation as a
+  small nonzero, and that row is what licenses "`y = 0` pins `x` to 0" — a spurious
+  `cx > 0` would let the perspective row forbid points the original model allows.
+  The magnitude of the cancelled contributions is not observable from the surviving
+  coefficients, but it is bounded below by the row's own magnitude, so the coherent
+  test is relative to the row. This only ever rejects more rows than before, and the
+  rows it newly rejects have `U` beyond `_U_CAP` anyway.
+
+### 6.7 Where the shared definition lives
+
+`python/discopt/_relax/_numeric.py` is now the single home for the round-off bound:
+`FLOAT_EPS`, `ROUNDOFF_OPS = 8.0`, `roundoff_slack(*terms)`,
+`roundoff_slack_arr(lo, hi)`, and `is_effectively_finite`. Every fix above imports
+from it rather than re-deriving a local constant, so the justification lives in one
+docstring and the operation count can only be changed in one place.
+
+Two rules recorded there, both from measurement:
+
+- **Filter on `math.isfinite`, never on `EFFECTIVE_INF = 1e19`.** That sentinel means
+  "no scale information" for a *declared bound* (the default box is ±9.999e19). It is
+  wrong for a *computed row quantity*: `b*b` at `|b| = 1e12` is a genuine 1e24 and
+  must contribute its scale, not be discarded as a sentinel.
+- **Force `0 * inf` to `0` in the propagation.** Plain float gives `NaN`, which
+  compares `False` everywhere — so a NaN error bound would silently *pass* a sign
+  test. That is the measurement-discipline failure of §7 applied to the instrument.

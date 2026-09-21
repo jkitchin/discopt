@@ -289,14 +289,23 @@ def solve_lp(
     y = np.asarray(dual, dtype=np.float64)
     dual_values = y if (y.shape[0] == m and np.all(np.isfinite(y))) else None
     reduced_costs = None
+    rc_absum = None
     if dual_values is not None:
         rc = c_arr.copy()
+        # #1397: the round-off scale of that difference, accumulated on exactly the same
+        # path. ``|A|^T |y|`` rather than ``|A^T y|`` because the dot product's own
+        # cancellation is part of the error the consumer must not mistake for signal;
+        # the same sparse structure makes it one extra matvec per side.
+        absum = np.abs(c_arr)
         if m_ub:
             rc = rc - np.asarray(a_ub.T @ y[:m_ub]).ravel()
+            absum = absum + np.asarray(abs(a_ub).T @ np.abs(y[:m_ub])).ravel()
         if m_eq:
             rc = rc - np.asarray(a_eq.T @ y[m_ub:]).ravel()
+            absum = absum + np.asarray(abs(a_eq).T @ np.abs(y[m_ub:])).ravel()
         if np.all(np.isfinite(rc)):
             reduced_costs = rc
+            rc_absum = absum
 
     return LPResult(
         status=SolveStatus.OPTIMAL,
@@ -304,6 +313,7 @@ def solve_lp(
         objective=float(obj),
         dual_values=dual_values,
         reduced_costs=reduced_costs,
+        rc_absum=rc_absum,
         basis=None,
     )
 
