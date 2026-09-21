@@ -1449,3 +1449,54 @@ endpoint", as sweeps with no-weakening arms: 8 of the new parametrizations fail 
 base tree (marker asserted absent) and pass here; the no-weakening arms — the
 cancelling constant must still widen both endpoints, a genuine violation at the same
 magnitude must still be proved — pass on both trees, which is what they are for.
+
+### 9.4 The §5 differential panel
+
+`scripts/per_endpoint_roundoff_panel.py`, 66 in-repo instances
+(`python/tests/data/minlplib_nl/`), `max_nodes=300`, `time_limit=20 s`, the two
+arms interleaved **within** each instance with the order alternating so a machine
+that gets busier mid-run cannot systematically favour one (CLAUDE.md §9). Each arm
+runs in its own subprocess, which asserts the `#1415` marker present (fix) or
+absent (base) in the module it actually loaded before solving anything (§8); the
+panel first asserts the two arm files differ at all, so a green run cannot be the
+change compared against itself.
+
+**Bar 1 — cert-clean: PASS.**
+
+| check | result |
+| --- | --- |
+| executed comparisons (panel) | 214 |
+| dual bound above reference optimum (`known_optima.toml`, both arms, backstops included) | **0** of 32 comparisons |
+| `bound <= incumbent`, all four arm pairs, all 66 instances | **0** violations of 224 comparisons |
+| certification regressions (certified in base, not in fix) | **0** — 48 → 48 |
+| status contradictions | 0 |
+| objective drift beyond tolerance | 0 |
+| crashes on either arm | 0 |
+
+**Bar 2 — net-positive: neutral, which is the expected and wanted answer.** Over
+the 50 instances where neither arm hit the wall-clock backstop: **total nodes 1870
+→ 1870, zero instances whose node count moved, zero whose dual bound moved**; total
+wall 152.9 s → 154.0 s (+0.7 %, one interleaved run, within this machine's noise —
+no spread was collected, so no timing claim is made from it). This is the right
+outcome to want here: the change is a *bug fix on `main`*, not a proposed
+strengthening, so the bar it must clear is "changes nothing it should not", and a
+bit-identical node count on 50 instances is the strongest form of that.
+
+Two rows differ between arms at all, and both are time-limited (backstop) on both
+arms, i.e. outside the comparable set:
+
+* `nvs05` — identical node count (27), bound differing in the last two ulps
+  (`2.708077400890263` vs `...657`). Float noise from a wall-clock stop.
+* `tls2` — 63 vs 89 nodes, bound `2.84477` vs `2.86672` (both far under its
+  `5.3000000000` reference optimum, and the fix's is the *tighter* of the two).
+  This is the instance §8.6 already measured as **bimodal at the time limit**, with
+  the base arm contradicting itself across 9 reps with the fix's code not loaded.
+
+**Coverage limit, stated rather than implied.** Only 16 of the 66 corpus instances
+have an entry in `python/tests/data/known_optima.toml`, so the oracle comparison is
+32 arm-results, not 132. The `minlplib.solu` snapshot CLAUDE.md points at
+(`~/Dropbox/projects/discopt-minlp-benchmark/`) is not present in this environment.
+The `bound <= incumbent` invariant above is what covers the other 50: it needs no
+oracle and it is the certificate invariant CLAUDE.md §1 names, checked in both
+directions across arms so a bound that got unsoundly tighter on the fix arm is
+caught against the base arm's independently-found incumbent.
