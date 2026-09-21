@@ -632,3 +632,35 @@ Two rules recorded there, both from measurement:
 - **Force `0 * inf` to `0` in the propagation.** Plain float gives `NaN`, which
   compares `False` everywhere — so a NaN error bound would silently *pass* a sign
   test. That is the measurement-discipline failure of §7 applied to the instrument.
+
+### 6.8 What the deflation cost, measured: one test's last float bit
+
+`pytest -m smoke` on the fix branch failed exactly once, and the failure is worth
+recording because it is the *only* behavioural change the whole §6 round of fixes
+produced on the existing suite:
+
+```
+python/tests/test_amp.py::test_gas_square_difference_tightening_strengthens_root_relaxation
+    assert tightened_lb[4] >= 45.0
+E   assert np.float64(44.99999999999986) >= 45.0
+```
+
+Measured on the gas benchmark: `lb[4]` is declared `30.0`, the
+`square_difference_lower_bound` rule still fires, and it still moves the bound to the
+Weymouth-implied `45.0` — now landing **1.42e-13** short of exactly `45.0`, because the
+rule deflates its result outward by the round-off slack of the arithmetic that produced
+it.
+
+That shortfall is the fix working. It is a *lower* bound, so over-stating it cuts the
+optimum out of the box and under-stating it costs only tightening strength — the
+asymmetry §0 is built on. The assert is what was wrong: it hard-pinned the last bit of
+a float-derived tightening, while the sibling unit test of the same rule's exact output
+(`test_square_difference_tightens_weymouth_like_upstream_pressure`) already used
+`pytest.approx` and passed unchanged for exactly that reason. The integration assert
+now states the contract in two parts — the bound moved materially off its declared
+`30.0`, and it reaches `45.0` up to round-off.
+
+No tolerance constant moved to make it pass; `_EMPTY_INTERVAL_FEAS_TOL` is still
+pinned at `1e-6` by `python/tests/test_1397_roundoff_yardsticks.py`. The scale of the
+cost is the point: across a 1951-test smoke run, the price of making six yardsticks
+dimensionally coherent was one assertion's fourteenth decimal place.
