@@ -584,10 +584,17 @@ def _extract_linear_coefficients_sparse(expr, model: Model, n: int):
 def _materialise_Q(terms: dict[tuple[int, int], float], n: int) -> np.ndarray:
     """Assemble a Hessian from ``{(row, col): value}`` accumulated entries (#863).
 
-    Dense while ``(n, n)`` float64 fits ``_QP_DENSE_Q_MAX_BYTES`` — bit-identical to
-    the ``np.zeros((n, n))`` this replaced, because the dict performs the same
-    ``+=`` additions in the same order starting from the same 0.0 — and scipy CSR
-    beyond it. ``dense_Q()`` re-densifies for consumers.
+    Dense while ``(n, n)`` float64 fits ``_QP_DENSE_Q_MAX_BYTES``, scipy CSR beyond
+    it. ``dense_Q()`` re-densifies for consumers.
+
+    #863's bit-identity argument used to read "the dict performs the same ``+=``
+    additions in the same order starting from the same 0.0", which was true when this
+    was written and is **no longer**: #1397 made each cell an exact ``math.fsum`` of
+    its contributions, because the cell's *sign* is read downstream as a convexity
+    certificate and a running ``+=`` could invert it. So this now assembles values
+    that differ from the dense predecessor's in the last ulp — by construction, in the
+    direction of the exact sum. The assembly itself is still a plain write and adds no
+    error of its own; what changed is the summation upstream, not this function.
 
     The dict is what makes the sparse arm reachable at all. ``np.zeros((n, n))`` is
     91 GB on ``watercontamination0202`` (106,711 variables); macOS *allows* that

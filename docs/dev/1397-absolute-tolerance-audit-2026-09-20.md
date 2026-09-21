@@ -917,3 +917,50 @@ examined and why they were left. This is the audit's own standard applied to its
 helpers' findings: a site is a defect when an absolute constant is compared against
 a scale-dependent quantity **and** an error in that comparison can make a bound
 wrong. The second half of that conjunction is doing most of the work.
+
+### 6.15 Site 8, second pass: two more consumers, and a docstring the fix invalidated
+
+An audit helper re-read the same chain independently and arrived at `_qadd` from the
+other direction (from §6.9's signomial find, reasoning that the same pattern would
+recur). Two of its findings change what §6.11 should say; both were verified here
+before being recorded.
+
+**The blast radius is wider than `perspective.py`.** §6.11 named the perspective
+candidate gate as the unsound consumer. There are two more, on the OA/GDP path, and
+they are **default ON**:
+
+- `solvers/oa.py:2949-2962` (aggregate perspective objective cut) shifts the `y=0`
+  branch by `q·x̄²`. Validity needs `q_detected ≤ q_true`; with `q_true < 0` read as
+  positive, the shift is invalid outright — a cut excluding feasible points.
+- `solvers/oa.py:3105` (`_disaggregate_objective_cut`) refuses on
+  `not np.isfinite(q) or q <= 0.0` — the same sign test, and the same fooling. Its
+  own docstring explains that a term removed from one row and not another leaves the
+  master double-counting, "an over-estimate of ``f``, i.e. an invalid bound".
+
+So three independent consumers gate on the sign of a number the extractor was
+computing with a running `+=`, and two of them are on a default-ON path. This does
+not change the fix — `math.fsum` at the source makes the cell exact for all three at
+once, which is precisely the §3 argument for fixing the extractor rather than each
+gate. It does change the *severity*: §6.11 should be read as "three consumers, two
+default-ON", not one.
+
+**The fix invalidated a docstring, and that was caught by a reader rather than by
+me.** `_materialise_Q`'s docstring justified #863's bit-identity claim with "the dict
+performs the same ``+=`` additions in the same order starting from the same 0.0".
+That was accurate when written and the §6.11 change makes it false: cells are now
+exact `fsum` results, which differ from the dense predecessor's in the last ulp by
+construction. Left alone it would have told the next reader that a bound-neutral
+guarantee still holds when it no longer does. Corrected in place, stating what
+changed and which direction the difference goes. Recorded here because "my change
+falsified a neighbouring comment" is the same class of error as §11's "retract a
+published claim" — a stale justification is a false claim that happens to live in a
+docstring.
+
+**`_EPS`, one detail sharper than §6.14 put it.** The helper's independent reading
+agreed `_EPS` is out of class and added the mechanism: at `|ub[j]| = 1e12` the ulp is
+~1.2e-4, so `ub[j] - 1e-7 == ub[j]` **exactly, by absorption** — the test does not
+merely become relatively weak, it degenerates to `cand < ub[j]` and accepts any
+one-ulp change. The cost is per-node staging churn in `_reduce_node_and_stage`
+(`solver.py:3680`), which rewrites the batch box and pending entry for a 1-ulp move.
+That makes the coherence complaint real and its consequence a *performance* one, not
+a §1 one — the classification in §6.14 stands, with a better reason than it gave.
