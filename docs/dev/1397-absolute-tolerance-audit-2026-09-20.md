@@ -457,7 +457,7 @@ with the reasoning recorded — so item 2 is complete and #1397 can be closed.
   provable invalidity of the margin, not by a corpus instance that failed. No
   claim is made that a released solve returned a wrong answer because of these.
 
-## 6. Update — the remaining six, and two retractions
+## 6. Update — the remaining six, and three retractions
 
 **Date:** 2026-09-20. **Branch:** `fix/1397-remaining-scale-yardsticks`.
 
@@ -465,7 +465,9 @@ This section closes item 2 of the issue. Of the six sites left open by §4.5, fo
 were confirmed unsound and fixed, and two were reclassified with the reasoning
 recorded rather than "fixed" to make a table tidy. It also **retracts two
 prescriptions made earlier in this document** (CLAUDE.md §11), because both were
-falsified by measurement before any code landed.
+falsified by measurement before any code landed, and in §6.13 **retracts a result I
+published from this PR's own panel** — a `tls2` certification gain that the spread
+test showed to be a wall-clock artifact.
 
 ### 6.1 `_EMPTY_INTERVAL_FEAS_TOL` — and the retraction of `max(1, |result|)`
 
@@ -877,6 +879,103 @@ left alone because a change with no demonstrated defect behind it is exactly the
 hypothesis-driven work CLAUDE.md §4 forbids, and because it would widen the
 bound-affecting surface of a PR whose differential panel covers the changes that do
 have a demonstrated defect behind them.
+
+### 6.13 The §5 differential panel: result, and a retraction
+
+The panel required by CLAUDE.md §5 for a bound-changing change was run over the
+**final** tree of this PR, interleaved base/fix, one instance at a time:
+
+```
+python -u panel_1397.py <base-worktree> <fix-worktree> panel_1397_final.json --reps 5
+```
+
+Launched 22:18:32 at load average 3.55 on 14 cores, with no process of my own
+competing (CLAUDE.md §9's load gate; an earlier round in this series was invalidated
+by three zombie probes of mine at 99% CPU, so this was checked explicitly rather than
+assumed). Both arms were load-gated identically by construction: the panel alternates
+arms per instance rather than running base-then-fix, so any drift in machine load hits
+both columns.
+
+Final line of the log, which is CLAUDE.md §6's executed-assertion count and the reason
+this panel can be believed at all:
+
+```
+EXECUTED COMPARISONS: 66 of 66
+bound differences surviving the spread test: 1 ['nvs05']
+```
+
+**First pass: 62 of 66 instances bit-identical in the dual bound.** Four differed and
+were re-measured 5 reps per arm:
+
+| instance | base range (5 reps) | sd | fix range (5 reps) | sd | verdict |
+|---|---|---|---|---|---|
+| `contvar` | `[171259.27256139443, 180801.31613405075]` | 4267.33 | `[180801.31613405063, 180801.31613405063]` | 0 | overlapping → wall-clock artifact |
+| `nvs05` | `[4.046044721969811, 4.046044721969811]` | 0 | `[5.470716109909194, 5.470716109909194]` | 0 | **disjoint → REAL** |
+| `tanksize` | `[1.2662152044076513, 1.266412848540781]` | 8.03e-5 | `[1.2662262839434653, 1.266270424402608]` | 1.83e-5 | overlapping → wall-clock artifact |
+| `tls2` | `[3.1819001304431507, 5.29999842045334]` | 0.947242 | `[3.1819001304431507, 5.29999842045334]` | 0.947242 | overlapping → wall-clock artifact |
+
+Exactly one instance moved deterministically. `nvs05` is reproducible to the last bit
+in *both* arms (sd 0 on each side), which is what distinguishes a real bound change
+from the three instances whose apparent movement is the node-limit/time-limit lottery.
+
+**Bar 1, cert-clean.** Bounds checked against `minlplib.solu` as the oracle:
+
+| instance | reference | fix bound | slack |
+|---|---|---|---|
+| `nvs05` | `=opt= 5.4709341080` | 5.470716109909194 | below by 2.18e-4 — **valid** |
+| `tls2` | `=opt= 5.3000000000` | 5.29999842045334 | below — valid |
+| `tanksize` | `=opt= 1.2686437540` | 1.266391942225201 | below — valid |
+| `contvar` | `=bestdual= 560271.2759` | 180801.31613405063 | far below — valid |
+
+No bound anywhere on the panel exceeds its reference optimum. Certification
+transitions over all 66: **49 `True→True`, 15 `False→False`, 2 `False→True`, and zero
+`True→False`** — no instance that was certified lost certification. `incorrect_count`
+is 0. The one real change is a *tightening* that closes nearly the whole remaining
+root gap on `nvs05` (4.046 → 5.4707 against an optimum of 5.4709) while staying
+strictly below the optimum, which is exactly the shape a sound bound improvement has.
+
+**Bar 2, net-positive.** One instance substantially and deterministically improved, 65
+unchanged, none harmed. Node counts moved on the four disputed instances only, in both
+directions (`nvs05` 71→111, `tls2` 205→153), consistent with the lottery on three of
+them and with a different — tighter — relaxation on `nvs05`.
+
+Both bars pass, so the fix ships default-ON with no flag, as a correctness fix rather
+than a graduation candidate.
+
+**Retraction (CLAUDE.md §11).** On first pass I wrote that `tls2` "gained
+certification (uncertified → certified) … Big improvement, sound", from the single
+first-pass sample where base read 3.1819 and fix read 5.29999. **That claim was
+wrong and is withdrawn.** The 5-rep re-measurement gives base and fix *identical*
+ranges `[3.1819001304431507, 5.29999842045334]` and *identical* standard deviation
+0.947242: `tls2` reaches the certifying bound in some runs and stalls in others, in
+both arms equally, and the first-pass pairing caught base on a low draw and fix on a
+high one. The `False→True` in the transition count above is real as a log entry and
+an artifact as a claim about this change. Only `nvs05` survives as a genuine
+improvement. This is the second time in this series that a single-sample bound
+comparison read as a solver result and was a timing artifact; the spread test is what
+caught it both times.
+
+**Mid-run edits, and why the measurement still holds.** Three commits landed in the
+fix worktree while the panel was running (22:21 docs, 22:23 a docstring, 22:31 tests).
+That would normally void the run, so it was checked rather than waved through:
+`git diff 00434501..HEAD -- python/discopt/` is one file, `problem_classifier.py`,
+11 insertions and 4 deletions, and **every changed line is `_materialise_Q` docstring
+text** — no executable line changed. The panel therefore measured the behaviour of the
+tree as it stands, and its numbers are the final tree's numbers.
+
+**What the panel does *not* establish: reachability of the reduced-cost sites.**
+`_tuning().phase2_dbbt` was measured `False`, so the `node_reduce` half of the §6.3
+reduced-cost fix sits behind a default-OFF Regime-2 flag with no production reach
+today; and `_root_reduced_cost_fixing` was not reached on a 5-binary knapsack under
+either MILP backend (including `DISCOPT_LP_MILP_BACKEND=rust`) nor on `alan` or
+`clay0303hfsg`. The `audit_1397_reduced_cost_deadband.py` result — 6 unsound
+tightenings under base, 0 under fix — is therefore a **function-level** measurement of
+a latent defect, not a demonstration of live impact, and should not be read as one.
+That is the honest scope: the §6.3 fix removes a defect from a path that is correct
+to fix and currently cold. (Separately: `phase2_dbbt` is not listed in
+`docs/dev/flag-retirement-audit.md`, which the three-outcome rule in CLAUDE.md §5
+requires of a default-OFF gate over solver math. Noted here rather than fixed, to
+keep this PR scoped.)
 
 ### 6.14 Two more `node_reduce` constants: strength knobs, not soundness gates
 
