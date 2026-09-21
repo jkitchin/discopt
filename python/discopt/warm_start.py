@@ -239,6 +239,21 @@ def check_feasibility(
     * every violation test is a *strict* comparison, and every strict comparison
       against NaN is ``False``, so an all-NaN point passed both the bounds loop
       and all three sense branches with no exception raised at all.
+
+    A third mechanism of the same class reached the same verdict without either
+    an exception or a NaN: the rows were **mis-attributed**. The walk advanced one
+    index per :class:`~discopt.modeling.core.Constraint` *object* while the
+    evaluator emits one row per flat *element*, so an array-valued body left its
+    rows after the first unread and desynchronised every constraint behind it, and
+    ``model._builder_linear_constraints()`` rows (#840) were never examined at all.
+    Rows are now enumerated from
+    :meth:`~discopt._relax.nlp_evaluator.NLPEvaluator.constraint_row_map` — the
+    evaluator's own map, built from the same ``_source_constraints`` /
+    ``_constraint_flat_sizes`` as the row stream — which makes that class
+    structurally impossible rather than merely fixed. This is the same fix #908
+    applied to the two *in-solver* incumbent verifiers, which
+    :mod:`discopt.validation.feasibility` now owns; this function is the verifier
+    the *benchmark* correctness gate uses and was not migrated with them.
     """
     violations: list[str] = []
 
@@ -286,42 +301,91 @@ def check_feasibility(
     # Constraint feasibility (requires evaluator)
     try:
         from discopt._tape_nlp_evaluator import make_evaluator
-        from discopt.modeling.core import Constraint
 
         evaluator = make_evaluator(model)  # #1063: canonical funnel, not the JAX ctor
-        if evaluator.n_constraints > 0:
-            cons = evaluator.evaluate_constraints(x_flat)
-            idx = 0
-            for c in model._constraints:
-                if not isinstance(c, Constraint):
-                    continue
-                val = cons[idx]
-                if not np.isfinite(val):
-                    # #1402 mechanism B in the constraint arm: a NaN body fails
-                    # `val > tol`, `abs(val) > tol` and `val < -tol` alike, so
-                    # without this the row is silently treated as satisfied.
-                    name = c.name or f"constraint_{idx}"
+        n_rows = int(evaluator.n_constraints)
+        if n_rows > 0:
+            cons = np.asarray(evaluator.evaluate_constraints(x_flat), dtype=float).ravel()
+            if cons.size != n_rows:
+                # Fail closed rather than index into a short row stream: an
+                # IndexError here would be a refusal too, but a SHORT-by-design
+                # stream would silently leave the tail rows unchecked.
+                violations.append(
+                    f"evaluator returned {cons.size} constraint values for "
+                    f"{n_rows} rows; feasibility is NOT verified"
+                )
+            else:
+                # #1402 mechanism C: enumerate rows from the evaluator's OWN map,
+                # never by walking `model._constraints` with one index per object.
+                # See `constraint_row_map`'s docstring and
+                # `discopt/validation/feasibility.py` (#908): the per-object walk
+                # this replaces was wrong in the wrongly-ACCEPT direction twice
+                # over, and neither way raises or produces a NaN, so #1402's other
+                # two mechanisms leave it untouched:
+                #
+                #   * an array-valued body is ONE `Constraint` and MANY rows
+                #     (`x <= 1` on a 3-vector is one object, three rows), so rows
+                #     1..k-1 of every vector constraint went unread and every
+                #     constraint after the first vector one read the WRONG row;
+                #   * the evaluator's row set is `model._constraints` PLUS
+                #     `model._builder_linear_constraints()` (#840), so the
+                #     builder-resident rows were never examined at all.
+                #
+                # Measured on this tree by `scripts/audit_1402_row_attribution.py`:
+                # three separate points, each violating a row by 4.0, were all
+                # reported FEASIBLE.
+                checked = np.zeros(n_rows, dtype=bool)
+                for start, stop, c in evaluator.constraint_row_map():
+                    sense = c.sense if isinstance(c.sense, str) else c.sense.value
+                    base = c.name or f"constraint_{start}"
+                    for r in range(start, stop):
+                        checked[r] = True
+                        val = float(cons[r])
+                        # A vector constraint's rows need distinguishable names;
+                        # a scalar one keeps the bare name it always had.
+                        name = base if stop - start == 1 else f"{base}[{r - start}]"
+                        if not np.isfinite(val):
+                            # #1402 mechanism B in the constraint arm: a NaN body
+                            # fails `val > tol`, `abs(val) > tol` and `val < -tol`
+                            # alike, so without this the row is silently treated
+                            # as satisfied.
+                            violations.append(
+                                f"Constraint '{name}': body evaluated to {val!r}, so the row "
+                                "cannot be checked"
+                            )
+                        elif sense == "<=":
+                            if val > tol:
+                                violations.append(
+                                    f"Constraint '{name}': value {val:.6g} > 0 (sense <=)"
+                                )
+                        elif sense == "==":
+                            if abs(val) > tol:
+                                violations.append(
+                                    f"Constraint '{name}': |value| = {abs(val):.6g} != 0 (sense ==)"
+                                )
+                        elif sense == ">=":
+                            if val < -tol:
+                                violations.append(
+                                    f"Constraint '{name}': value {val:.6g} < 0 (sense >=)"
+                                )
+                        else:
+                            # An unrecognised sense matched none of the three
+                            # branches and fell out of the old walk silently,
+                            # leaving the row unchecked with no trace.
+                            violations.append(
+                                f"Constraint '{name}': unrecognised sense {c.sense!r}, so the "
+                                "row cannot be checked"
+                            )
+                n_unchecked = int(np.sum(~checked))
+                if n_unchecked:
+                    # The map is built from the same `_source_constraints` /
+                    # `_constraint_flat_sizes` as the row stream, so this cannot
+                    # fire today. It is the guard that keeps a future drift from
+                    # degrading back into a silent partial check.
                     violations.append(
-                        f"Constraint '{name}': body evaluated to {val!r}, so the row "
-                        "cannot be checked"
+                        f"constraint_row_map covered {n_rows - n_unchecked} of {n_rows} "
+                        f"evaluator rows; {n_unchecked} row(s) were never checked"
                     )
-                    idx += 1
-                    continue
-                if c.sense == "<=":
-                    if val > tol:
-                        name = c.name or f"constraint_{idx}"
-                        violations.append(f"Constraint '{name}': value {val:.6g} > 0 (sense <=)")
-                elif c.sense == "==":
-                    if abs(val) > tol:
-                        name = c.name or f"constraint_{idx}"
-                        violations.append(
-                            f"Constraint '{name}': |value| = {abs(val):.6g} != 0 (sense ==)"
-                        )
-                elif c.sense == ">=":
-                    if val < -tol:
-                        name = c.name or f"constraint_{idx}"
-                        violations.append(f"Constraint '{name}': value {val:.6g} < 0 (sense >=)")
-                idx += 1
     except Exception as e:
         # #1402 mechanism A: this arm used to log at DEBUG and fall through to
         # `return len(violations) == 0`, so an evaluator error produced
