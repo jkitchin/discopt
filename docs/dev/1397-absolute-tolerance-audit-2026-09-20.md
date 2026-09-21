@@ -391,7 +391,7 @@ for the reason in §4.6.
 
 | site | constant | the unsound direction | status |
 |---|---|---|---|
-| `validation/feasibility.py:140` | `FEASIBLE_DISTANCE_TOL` | **measured, confirmed.** A relative roundoff allowance `16·u·(\|ub\|+\|x\|)` is added into `room`, then divided by this absolute constant and multiplied by `\|J_ij\|`. A column pinned *on* the bound that blocks its improving direction — true room exactly 0 — is credited with phantom room ∝ \|bound\|. Measured on a hand-oracle row: the returned improving-gradient norm goes 1.0 → 1000.0 (its plain sup-norm ceiling) as the bound sweeps 1e0 → 1e11, inflating the acceptance cap from 1e-4 to 1e-1. At that point #1284's tightening is a silent no-op — and #1284 exists because the untightened cap certified a point 0.87 away in `y` against a true optimum of −6.699. Default path, two call sites (`solver.py:3107`, `_relax/primal_heuristics.py:639`), and it gates whether a point becomes the incumbent. | **next PR** |
+| `validation/feasibility.py:140` | `FEASIBLE_DISTANCE_TOL` | **measured, confirmed.** A relative roundoff allowance `16·u·(\|ub\|+\|x\|)` is added into `room`, then divided by this absolute constant and multiplied by `\|J_ij\|`. A column pinned *on* the bound that blocks its improving direction — true room exactly 0 — is credited with phantom room ∝ \|bound\|. Measured on a hand-oracle row: the returned improving-gradient norm goes 1.0 → 1000.0 (its plain sup-norm ceiling) as the bound sweeps 1e0 → 1e11, inflating the acceptance cap from 1e-4 to 1e-1. At that point #1284's tightening is a silent no-op — and #1284 exists because the untightened cap certified a point 0.87 away in `y` against a true optimum of −6.699. Default path, two call sites (`solver.py:3107`, `_relax/primal_heuristics.py:639`), and it gates whether a point becomes the incumbent. | **fixed, PR #1400** |
 | `_relax/nonlinear_bound_tightening.py:58` | `_EMPTY_INTERVAL_FEAS_TOL` | 17 comparison lines. `new_lb - new_ub <= tol` snaps a sub-tolerance crossover to a midpoint instead of declaring the node infeasible. A *larger* tolerance is therefore the safe direction; the unsound direction is this absolute 1e-6 being too small relative to scale — on a box with bounds ~1e10, ordinary rounding crossover exceeds it, falls through, and emits `status="infeasible"`. Needs `* max(1, \|new_lb\|, \|new_ub\|)`. | open |
 | `_relax/node_reduce.py:48` | `_RC_TOL` | reduced-cost fixing. `dj` carries objective-over-variable units; a genuine zero reduced cost reading above an absolute 1e-7 at large objective scale makes `cand = lb + gap/dj` spuriously small and **fixes the optimum out of the box**. Same shape at `solver.py:23939` (`_RCF_RC_TOL`). | open |
 | `_relax/perspective.py:74` | `_ZERO_TOL` | 13 comparison lines, used as `coeff < -_ZERO_TOL` — coefficients carry the model's units, so at small coefficient scale a genuinely negative term reads as zero and a perspective reformulation is applied to a form that does not admit it. | open |
@@ -415,10 +415,16 @@ the first, `hda` at ~68930 for the second. Landing them alongside five convexity
 fixes would make a bound-changing PR that no single differential panel can
 attribute.
 
+**Update (PR #1400): `FEASIBLE_DISTANCE_TOL` is fixed**, in its own PR for exactly
+that attribution reason, so item 2 stands at 6 of 12 and the remaining list is six,
+not seven. The cap on the round-off allowance leaves all four #1284-pinned
+allowances byte-identical and `portfol_roundlot`'s tie still breaking with 24x
+margin; the measurement is in that PR.
+
 So: **#1397 cannot be closed by this PR.** Item 1 (the table) is complete here;
 item 3 (the CI probe) is complete here; item 2 (every unsound site fixed) has
-5 of 12 done. The remaining seven are listed above in the issue's own priority
-order, `FEASIBLE_DISTANCE_TOL` first because it is the one with a measurement.
+5 of 12 done in this PR and a 6th in PR #1400. The remaining six are listed above
+in the issue's own priority order, `_EMPTY_INTERVAL_FEAS_TOL` now first.
 
 ## 5. What this audit does not cover
 

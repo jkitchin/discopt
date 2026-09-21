@@ -1,9 +1,9 @@
 """Entry experiment for validation/feasibility.py's FEASIBLE_DISTANCE_TOL (#1397).
 
-!! THIS PROBE EXITS 1 ON PURPOSE -- DO NOT WIRE IT INTO CI AS A PASS GATE. !!
-It documents a defect that is NOT yet fixed (audit section 4.5), so a nonzero exit
-is the CORRECT result today. It becomes an exit-0 gate only once the fix lands,
-and at that point it should move to a pytest file alongside the other #1397 tests.
+This probe now EXITS 0: the fix landed with this commit, and the pytest
+regression that pins the class is python/tests/test_1397_feasible_distance_tol_scale.py.
+Run it against an older tree (pass that tree's root as argv[1]) to reproduce the
+pre-fix measurement, which was 15 of 15 inflated verdicts and exit 1.
 
 Claim under test: in ``improving_gradient_norms`` the round-off allowance
 ``slack = 16*_EPS`` is RELATIVE (it multiplies ``|ub| + |x|``) but the divisor
@@ -84,11 +84,15 @@ for exponent in range(0, 15):
 print(f"\nrow: [-{W:.0f}, +1] * x,  body must decrease,  col0 pinned on ub=B (blocked),")
 print(f"     col1 interior.  TRUE improving grad norm = {TRUE_NORM:.1f} at every B;")
 print(f"     plain sup-norm = {W:.0f} is the ceiling the clip imposes.\n")
-print(f"{'B (=ub0)':>10} {'phantom room':>14} {'returned':>12} {'true':>8} "
-      f"{'inflation':>11} {'claimed dv':>12} {'true dv':>10}")
+print(
+    f"{'B (=ub0)':>10} {'phantom room':>14} {'returned':>12} {'true':>8} "
+    f"{'inflation':>11} {'claimed dv':>12} {'true dv':>10}"
+)
 for B, ph, got, plain, cr, tr in rows:
-    print(f"{B:10.0e} {ph:14.3e} {got:12.4f} {TRUE_NORM:8.1f} "
-          f"{got / TRUE_NORM:10.1f}x {cr:12.3e} {tr:10.3e}")
+    print(
+        f"{B:10.0e} {ph:14.3e} {got:12.4f} {TRUE_NORM:8.1f} "
+        f"{got / TRUE_NORM:10.1f}x {cr:12.3e} {tr:10.3e}"
+    )
 
 print(f"\nexecuted comparisons: {CHECKS}")
 if CHECKS == 0:
@@ -96,21 +100,29 @@ if CHECKS == 0:
     sys.exit(2)
 
 sat = TOL / (32.0 * EPS)
-print(f"\nphantom room reaches FEASIBLE_DISTANCE_TOL (frac saturates at 1, blocked")
+print("\nphantom room reaches FEASIBLE_DISTANCE_TOL (frac saturates at 1, blocked")
 print(f"column credited with its FULL |J|) at B >= {sat:.3e}")
 print(f"inflated verdicts: {len(INFLATED)} of {CHECKS}")
 if INFLATED:
     worst = max(INFLATED, key=lambda r: r[2])
-    print(f"WORST: at B={worst[0]:.0e} the returned norm is {worst[1]:.4f} vs a true "
-          f"{TRUE_NORM:.1f} ({worst[2]:.1f}x)")
-    print(f"       => cap {TOL * worst[1]:.3e} instead of {TOL * TRUE_NORM:.3e}: a violation "
-          f"up to {TOL * worst[1]:.3e} is certified feasible")
+    print(
+        f"WORST: at B={worst[0]:.0e} the returned norm is {worst[1]:.4f} vs a true "
+        f"{TRUE_NORM:.1f} ({worst[2]:.1f}x)"
+    )
+    print(
+        f"       => cap {TOL * worst[1]:.3e} instead of {TOL * TRUE_NORM:.3e}: a violation "
+        f"up to {TOL * worst[1]:.3e} is certified feasible"
+    )
     full = [r for r in INFLATED if r[1] >= W * (1.0 - 1e-9)]
     if full:
-        print(f"       => at B >= {min(r[0] for r in full):.0e} the returned value EQUALS the "
-              f"plain sup-norm {W:.0f}: #1284's tightening is a silent no-op")
+        print(
+            f"       => at B >= {min(r[0] for r in full):.0e} the returned value EQUALS the "
+            f"plain sup-norm {W:.0f}: #1284's tightening is a silent no-op"
+        )
 
 confirmed = bool(INFLATED)
-print(f"\n{'CONFIRMED' if confirmed else 'NOT CONFIRMED'}: a relative allowance over an "
-      f"absolute divisor makes the #1284 tightening scale-dependent")
+print(
+    f"\n{'CONFIRMED' if confirmed else 'NOT CONFIRMED'}: a relative allowance over an "
+    f"absolute divisor makes the #1284 tightening scale-dependent"
+)
 sys.exit(1 if confirmed else 0)
