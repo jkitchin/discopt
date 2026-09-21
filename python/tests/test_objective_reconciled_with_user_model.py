@@ -136,3 +136,30 @@ def test_an_ordinary_solve_still_reports_its_own_objective():
     fi = float(ev.evaluate_objective(np.asarray(flat, float)))
     f = -fi if getattr(ev, "_negate", False) else fi
     assert r.objective == pytest.approx(f, abs=1e-9, rel=1e-12)
+
+
+def test_a_builder_held_objective_is_not_second_guessed():
+    """The regression the smoke suite caught (#681 builder tests).
+
+    ``add_linear_objective`` puts the real objective in the Rust builder and
+    leaves a zero placeholder in ``_objective``. Evaluating that placeholder
+    returns 0.0 at every point, so an unguarded reconciliation "corrected" a
+    correct objective of 3 to 0 and then withdrew a VALID certificate because
+    the bound crossed the number it had just broken.
+    """
+    import scipy.sparse as sp
+    from discopt.modeling.core import Model
+
+    m = Model("bobj")
+    x = m.continuous("x", shape=(2,), lb=0.0, ub=10.0)
+    m.add_linear_objective(np.array([1.0, 2.0]), x, sense="minimize")
+    m.add_linear_constraints(sp.csr_matrix(np.array([[1.0, 1.0]])), x, ">=", np.array([3.0]))
+    m._materialize_builder_linear_rows()
+    assert getattr(m._objective, "_is_placeholder", False), (
+        "fixture no longer uses a builder-held objective — the guard is untested"
+    )
+    r = m.solve(time_limit=10, gap_tolerance=1e-4)
+    assert r.status == "optimal", f"status {r.status!r}; the objective was second-guessed"
+    assert r.objective == pytest.approx(3.0, abs=1e-6), (
+        f"objective {r.objective!r} — a builder-held objective must be left alone"
+    )

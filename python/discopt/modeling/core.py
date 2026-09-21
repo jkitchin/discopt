@@ -8208,6 +8208,23 @@ class Model:
         import numpy as _np
 
         _log = _logging.getLogger(__name__)
+
+        # The evaluator can only speak for an objective that lives in
+        # ``_objective``. ``add_linear_objective`` / ``add_quadratic_objective``
+        # put the real objective in the Rust BUILDER and leave a zero placeholder
+        # here, flagged ``_is_placeholder``; evaluating that placeholder returns
+        # 0.0 for every point. Caught by the smoke suite (#681 builder tests):
+        # this pass "corrected" a correct objective of 3 to 0 and then withdrew a
+        # valid certificate because the bound then crossed it. A reconciliation
+        # that cannot see the objective must not have an opinion about it.
+        if self._objective is None or getattr(self._objective, "_is_placeholder", False):
+            _log.debug(
+                "objective reconciliation skipped: this model's objective is not "
+                "resident in `_objective` (builder-held or absent), so the "
+                "evaluator cannot represent it."
+            )
+            return
+
         try:
             flat: list[float] = []
             for v in self._variables:
