@@ -1211,10 +1211,166 @@ failures**. A separate positive control confirms five well-conditioned blocks
 tiny-but-honest) are all still collected — a soundness fix that quietly disables the
 feature is not a fix.
 
-### 7.6 Site 10 is deferred, not cleared
+### 7.6 Site 10 was deferred here, and is settled in §8
 
 The same peer report named `_relax/cutting_planes.py`'s `hessian_tol` (default `1e-8`,
 consumed as `np.abs(hess) > hessian_tol` to pick the "curved" variable set) as a
-candidate. It arrived truncated and is **not** verified here. It is recorded as an open
-candidate rather than classified, so this document does not repeat §7.1's mistake in
-the other direction by implying it was checked.
+candidate. It arrived truncated and was **not** verified at the time of §7. It was
+carried as issue #1413 and measured afterwards: **scale-exposed and unsound**. §8 is
+that measurement and its fix.
+
+## 8. Site 10 — `cutting_planes.py` `hessian_tol`: scale-exposed and UNSOUND
+
+### 8.1 The mechanism
+
+`generate_alphabb_quadratic_oa_cuts_from_evaluator` emits the tangent of
+
+    q_under(x) = q(x) − Σ_i α_i (x_i − lb_i)(ub_i − x_i)
+
+and that tangent underestimates `q` only where `q_under` is **convex**, i.e. where
+`hess + 2·diag(α) ⪰ 0` over **every** variable. `α` was placed on `curved`, selected by
+`np.abs(hess) > hessian_tol` with `hessian_tol = 1e-8`, while `under_grad` is the
+**full** Jacobian row. A variable whose entire Hessian row *and* column sat below `1e-8`
+was therefore dropped from `curved`, kept its negative curvature, received **no** `α`,
+and left `q_under` concave in its direction — where a tangent is an **over**estimator.
+The emitted "underestimator" then removed points satisfying `q(x) ≤ 0`.
+
+This is site 3's defect (§2, `ALPHABB_SAFETY`) approached from the other side: site 3
+gave `α` too small a value on the variables it covered; site 10 gave `α` no value at all
+on variables it did not cover. The already-shipped `psd_decision_slack` **cannot** reach
+it — `eig_slack` is added to `alpha[curved]`, and no amount of `α` on the curved
+variables convexifies a direction `α` does not act on. Verified by identical
+measurements before and after `cedf1f31`.
+
+The yardstick failure is the audit's own recurring one, in its purest form. This Hessian
+is **symbolic**: `_constraint_row_quadratic_hessian` → `_quadratic_polynomial` →
+`_quadratic_hessian_from_polynomial`, whose docstring says "structural quadratic
+Hessian". A coefficient absent from the row is therefore an **exact** `0.0`, while a
+coefficient that was computed and came out tiny is a **real curvature**. `|h| > 1e-8`
+conflated two different facts about the row. It is the same erasure `sq.get(i, 0.0)`
+performed at site 9 (§7).
+
+### 8.2 The measurement
+
+Entry experiment on `cedf1f31`, **89,711 executed checks**, load-gated per §8 of
+CLAUDE.md. Reproducer `5·x0·x1 − ε·x2² ≤ 0` with `ε = 4.9e-9`, so x2's entire Hessian
+row is `−9.8e-9` — just inside the old threshold. x0/x1 on `[−0.1, 0.1]` (a narrow box
+on the bilinear pair is ordinary after a few rounds of branching); the cut is taken at
+an `x*` with x2 **at a bound**, which is where an LP relaxation solution sits.
+
+| x2 box width | worst violation of a **feasible** point | predicted `0.75·ε·W² − α·δ²` |
+| ---: | ---: | ---: |
+| 1e2 | 0 | −5.0e-02 |
+| 1e3 | 0 | −4.6e-02 |
+| 3e3 | 0 | −1.7e-02 |
+| 1e4 | **3.175e-01** | 3.175e-01 |
+| 1e5 | **3.670e+01** | 3.670e+01 |
+| 1e6 | **3.675e+03** | 3.675e+03 |
+
+Four-significant-figure agreement at every firing width, and the sign flip between 3e3
+and 1e4 — the crossover where the uncovered curvature overtakes the α penalty on the
+bilinear pair — is predicted too. Firing point at W = 1e4: `x = [0, 0, −5000]`, row value
+`−1.225e-01 ≤ 0` (strictly feasible), cut violated by `3.175e-01`.
+
+**A retraction (§11).** An earlier run of this probe reported `0.000e+00` at every width
+and a verdict of BENIGN. It evaluated the cut at `x2* = 0`, where the tangent of the
+concave `−ε·x2²` is flat, so the cut carries no x2 term and the defect cannot express
+itself. That verdict was wrong and is retracted; it was caught only because the
+algebraic firing condition had been derived first and disagreed with the measurement,
+not by any signal from the probe. The evaluation point is part of the experiment.
+
+### 8.3 The fix
+
+Two changes, neither of them a tolerance:
+
+1. **The threshold is removed, not retuned.** Support selection becomes `hess != 0.0` —
+   an exact zero, which is the right question to ask of a symbolic Hessian. The dead
+   `hessian_tol` parameter is deleted (no caller anywhere in `python/` passed it).
+2. **The convexity `q_under` rests on is verified, not argued.** After `α` is placed,
+   `hess_sub + 2·diag(α)` is formed on the *same index set* `α` was placed on and its
+   smallest eigenvalue checked; a negative one refuses the row. One `eigvalsh` on a
+   matrix already formed. The #1413 defect was exactly a condition that held on the
+   submatrix the code looked at while failing on the row it emitted a cut for, so
+   checking it where `α` actually lives is what makes a recurrence impossible rather
+   than unlikely.
+
+A support variable without a finite box still refuses the row, since `α` multiplies
+`(x_i − lb_i)(ub_i − x_i)` and there is nothing to place it on (CLAUDE.md §3: refuse
+loudly rather than relax on a side that cannot be justified).
+
+### 8.4 Verification
+
+`python/tests/test_1413_alphabb_uncovered_curvature.py`, 8 tests, no `slow` marker.
+One guards the premise — that x2's Hessian entry really does sit inside the old `1e-8`
+threshold and really is negative — so the rest cannot pass vacuously (§6). The central
+assertion is the class, not the instance: *no emitted cut may remove a point that
+satisfies the row it was derived from*, swept over the box width that drives the
+exposure. Two further tests are capability controls: an ordinary nonconvex row still
+gets its cut, and a variable that appears only **linearly** — with an unbounded box, so
+that pulling it into the support would refuse the row outright — stays out of the
+support, which is the "structurally absent ≠ computed and tiny" distinction stated as a
+test.
+
+Before/after was measured against both trees with a load gate asserting the
+`hessian_tol` parameter **present** on the baseline and **absent** on the fix (§8).
+Baseline: **3 failures** (widths 1e4/1e5/1e6, the three firing scales). Fixed: **8
+passed**. The surrounding cutting-plane and αBB suites — 909 tests, including
+`test_1397_alphabb_alpha_dominates_nonconvexity.py` (site 3) — pass unchanged, so this
+is not a soundness fix that quietly disables the feature.
+
+### 8.5 The §5 differential panel
+
+Interleaved panel over the in-repo 61-file corpus (66 instances), 20 s wall limit, both
+arms adjacent in time per instance with the order alternating by index, each arm its own
+process with its own load gate (`hessian_tol` parameter present on base, absent on fix).
+
+**Result: 66 of 66 compared, 0 bound differences surviving the spread test.** 63
+instances were **bit-identical** in both bound and node count. Three were disputed on a
+single sample and all three dissolved under 5 reps per arm with the disjoint-range test:
+
+| instance | base range | fix range | verdict |
+| --- | --- | --- | --- |
+| `casctanks` | [6.103967, 6.249662] | [6.103967, 6.249662] | overlapping → artifact |
+| `tanksize` | [1.2662854, 1.2664282] | [1.2662615, 1.2664306] | overlapping → artifact |
+| `tls2` | [3.181900, 5.299998] | [2.974896, 3.181900] | overlapping → artifact (see §8.6) |
+
+Bar 1 (cert-clean) over all 66, oracle `minlplib.solu` with explicit `=opt=`/`=best=`/
+`=feas=` precedence: **62 executed oracle comparisons, 0 bounds above their reference
+optimum**, 3 instances with no usable primal oracle entry (`bchoco06/07/08`).
+
+### 8.6 `tls2` — a certification flip that is not a regression
+
+The panel's single sample printed `tls2` as `gap_certified True -> False`, which under §5
+is a bar-1 **failure**, and `certclean.py` duly reported `BAR 1: FAIL`. It was not
+excused; it was measured, twice.
+
+**First, the mechanism was ruled out.** `tls2`'s reference optimum is `5.3000000000` and
+the base arm's certifying bound is `5.29999842` — a *valid and essentially tight* dual
+bound, so this was never a case of the fix removing a false bound. The obvious
+alternative was that the widened support rule (`hess != 0.0`) pulls variables with
+tiny-but-nonzero curvature into `curved`, where the finite-box requirement then refuses
+rows the old rule cut. A probe over all of `tls2`'s rows **falsified** it: **22 rows
+examined, 0 rows pass the finite-box gate under the OLD rule and 0 under the NEW one** —
+the αBB quadratic generator contributes nothing to `tls2` at the root in either arm, so
+the fix is not mechanically involved in its bound at all.
+
+**Second, the flip was measured directly.** 9 reps per arm recording `gap_certified` per
+rep, 18 executed solves:
+
+| arm | certified | bound when certified | bounds when not |
+| --- | --- | --- | --- |
+| base | **5/9** | `5.29999842045334`, 153 nodes | 2.9748964 / 3.1360195 / 3.1819001 |
+| fix | **5/9** | `5.29999842045334`, 153 nodes | 2.9748964 / 3.1360195 / 3.1819001 |
+
+Identical certification rate, the identical bound and node count on every certifying rep,
+and the same discrete set of non-certifying outcomes with matching node counts. `tls2`'s
+certification is **bimodal at the 20 s limit**, and the decisive evidence is that the
+**base arm contradicts itself** — reps 1, 2, 7, 8 uncertified and 3, 4, 5, 6, 9
+certified, with the fix's code not loaded. No property of the fix can explain that.
+
+**A note on the instrument, not the result.** `certclean.py`'s cert-regression test
+grades a single sample per arm, which is under-powered for a bimodal instance; that is a
+defect in the probe, not a reason to exempt an instance from it. The checker was **not**
+edited to skip `tls2` — weakening a gate to pass it is exactly what CLAUDE.md §1
+forbids. Its raw verdict stands in the record alongside the 18-solve measurement that
+grades the specific flip it flagged.

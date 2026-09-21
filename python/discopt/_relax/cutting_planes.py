@@ -532,7 +532,6 @@ def generate_alphabb_quadratic_oa_cuts_from_evaluator(
     x_ub: np.ndarray,
     constraint_senses: Optional[list[str]] = None,
     convex_mask: Optional[list[bool]] = None,
-    hessian_tol: float = 1e-8,
 ) -> list[LinearCut]:
     """Generate OA cuts from alpha-BB relaxations of nonconvex quadratic rows.
 
@@ -545,6 +544,13 @@ def generate_alphabb_quadratic_oa_cuts_from_evaluator(
     satisfying ``q_under(x) <= q(x)`` over the box. Every point feasible for the
     original row therefore satisfies ``q_under(x) <= 0``, so a tangent cut of
     the convex underestimator is a valid relaxation cut.
+
+    ``alpha`` must cover **every** variable the row curves in, not a subset: the
+    emitted cut is the tangent of ``q_under``, and a direction where ``q_under``
+    stays concave has its tangent as an *over*-estimator there, so the cut can
+    remove points satisfying ``q(x) <= 0``. The support is therefore selected by an
+    exact zero, and the convexity of ``q_under`` is verified rather than argued
+    (#1413).
     """
     m = evaluator.n_constraints
     if m == 0:
@@ -573,10 +579,35 @@ def generate_alphabb_quadratic_oa_cuts_from_evaluator(
         if hess is None:
             continue
 
-        hess_nz = np.abs(hess) > hessian_tol
-        curved = np.flatnonzero(np.any(hess_nz, axis=0) | np.any(hess_nz, axis=1))
+        # Structural support, decided by an EXACT zero rather than by a small number.
+        # This Hessian is symbolic -- `_constraint_row_quadratic_hessian` goes through
+        # `_quadratic_polynomial` -> `_quadratic_hessian_from_polynomial` -- so a
+        # coefficient absent from the row is exactly 0.0, while a coefficient that was
+        # computed and came out tiny is a real curvature. The old selection
+        # (`|hess| > hessian_tol`, 1e-8) conflated the two: it dropped the second kind
+        # from `curved`, and since `alpha` is applied only to `curved` while
+        # `under_grad` below is the FULL Jacobian row, a dropped variable with negative
+        # curvature left `q_under` concave in its direction. The tangent of a concave
+        # function is an OVERestimator, so the "underestimator" cut removed points that
+        # satisfy `q(x) <= 0` -- a cut that is not a relaxation.
+        #
+        # Measured on `cedf1f31` (#1413) with `5*x0*x1 - eps*x2^2 <= 0`, eps = 4.9e-9 so
+        # x2's entire Hessian row is -9.8e-9, just inside the old threshold: the cut
+        # removed a strictly feasible point by 3.18e-01 at x2-box width 1e4, 3.67e+01 at
+        # 1e5 and 3.67e+03 at 1e6 -- matching the predicted `0.75*eps*W^2` to four
+        # significant figures. It needs x2* at a box extreme, which is where an LP
+        # relaxation solution sits. `psd_decision_slack` cannot reach it: no amount of
+        # alpha on the curved variables convexifies a direction alpha does not act on.
+        #
+        # The threshold is not retuned, it is removed: "structurally absent" and
+        # "computed and tiny" are different facts about the row (#1397).
+        curved = np.flatnonzero(np.any(hess != 0.0, axis=0) | np.any(hess != 0.0, axis=1))
         if curved.size == 0:
             continue
+        # alpha can only be placed on a variable with a finite box, since the bracket
+        # `(x_i - lb_i)(ub_i - x_i)` is what it multiplies. A support variable without
+        # one cannot be convexified here, so the row is refused rather than relaxed on a
+        # side that cannot be justified (CLAUDE.md #3).
         if not all(
             is_effectively_finite(float(x_lb[idx])) and is_effectively_finite(float(x_ub[idx]))
             for idx in curved
@@ -618,6 +649,17 @@ def generate_alphabb_quadratic_oa_cuts_from_evaluator(
         eig_slack = psd_decision_slack(float(np.linalg.norm(hess_sub, "fro")))
         alpha = np.zeros_like(x_sol, dtype=np.float64)
         alpha[curved] = max(0.0, -0.5 * min_eig + max(ALPHABB_SAFETY, eig_slack))
+
+        # Verify the property the cut's validity rests on, rather than arguing it:
+        # the tangent underestimates `q_under` only where `q_under` is convex, i.e.
+        # `hess + 2*diag(alpha) >= 0` over every variable the row curves in. The
+        # #1413 defect was precisely that this condition held on the submatrix the
+        # code looked at while failing on the row it emitted a cut for, so checking
+        # it on the same index set `alpha` is placed on is what makes a recurrence
+        # impossible rather than unlikely. One `eigvalsh` on a matrix already formed.
+        curvature = hess_sub + 2.0 * np.diag(np.full(curved.size, float(alpha[curved[0]])))
+        if float(np.linalg.eigvalsh(curvature)[0]) < 0.0:
+            continue
 
         perturbation = float(
             np.sum(alpha[curved] * (x_sol[curved] - x_lb[curved]) * (x_ub[curved] - x_sol[curved]))
