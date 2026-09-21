@@ -238,6 +238,24 @@ class TestSnapFixResolvePurification:
 # Increment 4: reduced-cost fixing via relaxation duals
 # ---------------------------------------------------------------------------
 class TestReducedCostFixing:
+    # #1397: ``_reduced_cost_fixing`` now REFUSES every column when ``rc_absum`` is
+    # None. ``d_j = c_j - (A^T y)_j`` is a difference, so its round-off scale lives in
+    # the magnitudes it is a difference *of*; without that scale the function cannot
+    # tell a real reduced cost from the rounding of a cancellation, and it divides by
+    # ``d_j`` to produce a bound. Refusing is the only sound answer.
+    #
+    # Every test below therefore supplies a scale. That is not a formality: a test
+    # that omits it exercises only the refusal, and three of the tests in this class
+    # assert the *absence* of fixing, so they would keep passing while proving nothing
+    # (CLAUDE.md §6). ``test_never_cuts_the_optimum`` in particular is a soundness
+    # sweep whose whole content is "the tightening did not cut x*" -- a blanket
+    # refusal satisfies it vacuously, which is why it now counts its tightenings and
+    # fails if none happened.
+    #
+    # The realistic scale is ``|c_j| + (|A|^T |y|)_j``, which is >= |d_j| and usually
+    # well above it. Using |d_j| alone would understate the round-off; these tests use
+    # a value comfortably above |d_j| so the slack is a genuine one.
+
     def test_tightens_and_fixes(self):
         # z_lp=10, z_inc=12, gap=2 (+ tiny margin).
         #  d0=5  (lb): x0 <= 0 + floor(2/5)=0   -> fixed to 0
@@ -246,29 +264,55 @@ class TestReducedCostFixing:
         lb = np.array([0.0, 0.0, 0.0])
         ub = np.array([5.0, 10.0, 8.0])
         rc = np.array([5.0, 0.5, -3.0])
-        nlb, nub, nch = S._reduced_cost_fixing(lb, ub, [0, 1, 2], rc, z_lp=10.0, z_inc=12.0)
+        # O(1) magnitudes: the slack is ~8*eps*10 = 1.8e-14, so every expectation
+        # below is the same one this test has always made.
+        absum = np.array([10.0, 4.0, 9.0])
+        nlb, nub, nch = S._reduced_cost_fixing(
+            lb, ub, [0, 1, 2], rc, z_lp=10.0, z_inc=12.0, rc_absum=absum
+        )
         assert nch == 3
         assert nlb[0] == 0.0 and nub[0] == 0.0
         assert nub[1] == 4.0
         assert nlb[2] == 8.0 and nub[2] == 8.0
 
+    def test_no_scale_refuses_every_column(self):
+        """#1397: without ``rc_absum`` the function must fix nothing at all.
+
+        This is the contract the other tests lean on. It is pinned explicitly so
+        that a future change restoring the old unconditional behaviour fails here
+        rather than silently turning the sweeps below back into no-ops.
+        """
+        lb = np.array([0.0, 0.0, 0.0])
+        ub = np.array([5.0, 10.0, 8.0])
+        rc = np.array([5.0, 0.5, -3.0])
+        nlb, nub, nch = S._reduced_cost_fixing(lb, ub, [0, 1, 2], rc, z_lp=10.0, z_inc=12.0)
+        assert nch == 0
+        assert np.array_equal(nlb, lb) and np.array_equal(nub, ub)
+
     def test_negative_gap_is_noop(self):
         lb = np.array([0.0])
         ub = np.array([5.0])
-        nlb, nub, nch = S._reduced_cost_fixing(lb, ub, [0], np.array([5.0]), z_lp=12.0, z_inc=10.0)
+        nlb, nub, nch = S._reduced_cost_fixing(
+            lb, ub, [0], np.array([5.0]), z_lp=12.0, z_inc=10.0, rc_absum=np.array([10.0])
+        )
         assert nch == 0 and nub[0] == 5.0
 
     def test_near_zero_reduced_cost_skipped(self):
-        # A basic / degenerate variable (|d| below tol) is never fixed.
+        # A basic / degenerate variable (|d| below tol) is never fixed. A scale is
+        # supplied so this exercises the DEADBAND, not the missing-scale refusal.
         lb = np.array([0.0])
         ub = np.array([5.0])
-        nlb, nub, nch = S._reduced_cost_fixing(lb, ub, [0], np.array([1e-9]), z_lp=10.0, z_inc=12.0)
+        nlb, nub, nch = S._reduced_cost_fixing(
+            lb, ub, [0], np.array([1e-9]), z_lp=10.0, z_inc=12.0, rc_absum=np.array([2.0])
+        )
         assert nch == 0 and nub[0] == 5.0
 
     def test_never_cuts_the_optimum(self):
         # The true optimum x* with objective <= z_inc must survive RCF: any
         # integer x* satisfies d_j*(x*_j - bound_j) <= gap term-by-term.
         rng = np.random.default_rng(0)
+        checks = 0  # executed-assertion count (CLAUDE.md §6)
+        tightenings = 0
         for _ in range(200):
             n = 4
             lb = np.zeros(n)
@@ -277,7 +321,12 @@ class TestReducedCostFixing:
             z_lp = rng.uniform(-5, 5)
             gap = rng.uniform(0, 6)
             z_inc = z_lp + gap
-            nlb, nub, _ = S._reduced_cost_fixing(lb, ub, list(range(n)), rc, z_lp, z_inc)
+            # A realistic |c_j| + (|A|^T|y|)_j: at least |d_j|, generally larger.
+            absum = np.abs(rc) + rng.uniform(0.0, 4.0, n)
+            nlb, nub, nch = S._reduced_cost_fixing(
+                lb, ub, list(range(n)), rc, z_lp, z_inc, rc_absum=absum
+            )
+            tightenings += int(nch)
             # Any integer point whose reduced-cost objective estimate is within
             # the gap must lie inside the tightened box.
             for x in rng.integers(0, 6, (50, n)).astype(float):
@@ -286,6 +335,11 @@ class TestReducedCostFixing:
                 est = z_lp + sum(rc[j] * (x[j] - (lb[j] if rc[j] > 0 else ub[j])) for j in range(n))
                 if est <= z_inc + 1e-12:  # an "improving" point per the LP bound
                     assert np.all(x >= nlb - 1e-9) and np.all(x <= nub + 1e-9)
+                    checks += 1
+        # Without these two counters the sweep degrades to a no-op that reads as a
+        # pass: if the function fixes nothing, "x* survived" is trivially true.
+        assert tightenings > 0, "no column was ever tightened; the sweep proved nothing"
+        assert checks > 0, "no improving point was ever tested; the sweep proved nothing"
 
     def test_end_to_end_answer_unchanged_with_and_without_rcf(self, monkeypatch):
         import pytest as _pytest
