@@ -8156,6 +8156,13 @@ class Model:
         # objective). Downgrade-only: this replaces a number, and then the shared
         # certificate guard re-tests the pair, so a gap that existed only in
         # lifted space is withdrawn rather than republished.
+        #
+        # This makes the REPORT honest; it does not make the lift exact. The gate
+        # still measures an absolute row violation against rows whose objective
+        # sensitivity the lift itself introduced, so the search still explores a
+        # space that is not equivalent to this model at solver tolerance. That is
+        # tracked in #1414 (with #1380's unfiled follow-up folded into it); this
+        # reconciliation is the CLAUDE.md #3 workaround that ships alongside it.
         if (
             isinstance(result, SolveResult)
             and result.objective is not None
