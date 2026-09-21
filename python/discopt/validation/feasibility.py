@@ -234,8 +234,39 @@ def improving_gradient_norms(J, x, lb, ub, direction, integer_mask=None) -> np.n
         # ``x11 = 0`` integer, rejected 5.63185816304395e-06 against a cap of
         # 5.631858163043949e-06).
         slack = 16.0 * _EPS
-        up = np.maximum(ub - x, 0.0) + slack * (np.abs(ub) + np.abs(x))
-        down = np.maximum(x - lb, 0.0) + slack * (np.abs(lb) + np.abs(x))
+        # The allowance is CAPPED at ``slack * FEASIBLE_DISTANCE_TOL`` (#1397).
+        # ``slack * (|bound| + |x|)`` is the honest round-off of ``room`` itself,
+        # but ``room`` is then divided by an absolute FEASIBLE_DISTANCE_TOL and
+        # multiplied by ``|J_ij|``, so a relative allowance is amplified by up to
+        # ``|J_ij| / FEASIBLE_DISTANCE_TOL`` before it reaches the cap. Two
+        # different round-offs were being conflated: ``room``'s own (which says
+        # room is *uncertain* by that much, not that it is *at least* that much)
+        # and the one this allowance exists to absorb, which is the tie in
+        # ``viol <= cap``.
+        #
+        # Sizing it, so the constant is derived and not chosen: adding ``a`` to
+        # each room gives ``dfrac_j = a / TOL`` and hence ``dcap = TOL *
+        # sum_j |J_ij| * a / TOL = a * sum_j |J_ij|``. Requiring that to stay at
+        # round-off level, ``dcap <= K*u*cap = K*u*TOL*grad``, and ``grad <=
+        # sum_j |J_ij|`` because every ``frac <= 1``, so ``a <= K*u*TOL``
+        # suffices. Both terms are in x-units, so the ``min`` is dimensionally
+        # coherent; it is a ``min`` and not a ``max`` because the smaller of
+        # "room's own round-off" and "what the amplification can absorb" is the
+        # one that keeps the cap honest.
+        #
+        # Measured: without the cap, a column pinned EXACTLY on the bound that
+        # blocks its improving direction -- true room exactly 0 -- is credited
+        # with phantom room proportional to |bound|. On a row ``[-1000, +1]``
+        # with col 0 pinned at ``ub = B``, the returned norm went 1.0 (the true
+        # value) -> 1000.0 (the plain sup-norm) as B swept 1e0 -> 1e11,
+        # inflating the acceptance cap from 1e-4 to 1e-1 and making #1284's
+        # tightening a silent no-op. The cap leaves the allowance BYTE-IDENTICAL
+        # on every case #1284 pins (portfol_roundlot, clay0303hfsg: there
+        # ``|bound| + |x| < 1e-7``, so the ``min`` selects the original term) and
+        # still breaks portfol_roundlot's tie with 24x margin.
+        allow = slack * FEASIBLE_DISTANCE_TOL
+        up = np.maximum(ub - x, 0.0) + np.minimum(slack * (np.abs(ub) + np.abs(x)), allow)
+        down = np.maximum(x - lb, 0.0) + np.minimum(slack * (np.abs(lb) + np.abs(x)), allow)
         up = up[None, :]
         down = down[None, :]
         room = np.where(step > 0, up, np.where(step < 0, down, 0.0))
@@ -245,7 +276,11 @@ def improving_gradient_norms(J, x, lb, ub, direction, integer_mask=None) -> np.n
                 raise ValueError(f"integer_mask has {mask.size} entries for {n} columns")
             r = np.clip(np.round(x), np.ceil(lb), np.floor(ub))
             gap = r - x
-            to_int = np.abs(gap) + slack * (np.abs(r) + np.abs(x))
+            # Same cap, same derivation (#1397). The integer arm is if anything
+            # more exposed: the ``gap == 0`` branch below credits a column that is
+            # ALREADY on its integer with ``to_int``, which without the cap is
+            # pure round-off scaled by ``|r| + |x|``.
+            to_int = np.abs(gap) + np.minimum(slack * (np.abs(r) + np.abs(x)), allow)
             int_room = np.where(step * np.sign(gap)[None, :] > 0, to_int[None, :], 0.0)
             int_room = np.where((gap == 0.0)[None, :] & (step != 0), to_int[None, :], int_room)
             room = np.where(mask[None, :], int_room, room)
