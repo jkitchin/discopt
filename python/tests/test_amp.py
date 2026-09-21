@@ -2663,7 +2663,16 @@ def test_gas_square_difference_tightening_strengthens_root_relaxation():
     tightened_lb, tightened_ub, stats = tighten_nonlinear_bounds(m, raw_lb, raw_ub)
 
     assert "square_difference_lower_bound" in stats.applied_rules
-    assert tightened_lb[4] >= 45.0
+    # The rule moves lb[4] from its declared 30.0 to the Weymouth-implied ~45.0.
+    # #1397: that bound is now deflated outward by the round-off slack of the float
+    # arithmetic that produced it -- a *lower* bound which over-states cuts the optimum
+    # out of the box, so under-stating is the only sound direction. The value that used
+    # to land on exactly 45.0 is now 44.99999999999986, short by 1.42e-13. Assert the
+    # contract rather than the last bit, matching the tolerance discipline of
+    # ``test_square_difference_tightens_weymouth_like_upstream_pressure`` above, which
+    # already uses ``pytest.approx`` on the same rule's output.
+    assert tightened_lb[4] > 44.0
+    assert tightened_lb[4] == pytest.approx(45.0)
 
     part_vars = sorted(
         set(terms.partition_candidates)
