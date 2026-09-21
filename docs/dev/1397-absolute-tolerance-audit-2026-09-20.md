@@ -1317,3 +1317,60 @@ Baseline: **3 failures** (widths 1e4/1e5/1e6, the three firing scales). Fixed: *
 passed**. The surrounding cutting-plane and αBB suites — 909 tests, including
 `test_1397_alphabb_alpha_dominates_nonconvexity.py` (site 3) — pass unchanged, so this
 is not a soundness fix that quietly disables the feature.
+
+### 8.5 The §5 differential panel
+
+Interleaved panel over the in-repo 61-file corpus (66 instances), 20 s wall limit, both
+arms adjacent in time per instance with the order alternating by index, each arm its own
+process with its own load gate (`hessian_tol` parameter present on base, absent on fix).
+
+**Result: 66 of 66 compared, 0 bound differences surviving the spread test.** 63
+instances were **bit-identical** in both bound and node count. Three were disputed on a
+single sample and all three dissolved under 5 reps per arm with the disjoint-range test:
+
+| instance | base range | fix range | verdict |
+| --- | --- | --- | --- |
+| `casctanks` | [6.103967, 6.249662] | [6.103967, 6.249662] | overlapping → artifact |
+| `tanksize` | [1.2662854, 1.2664282] | [1.2662615, 1.2664306] | overlapping → artifact |
+| `tls2` | [3.181900, 5.299998] | [2.974896, 3.181900] | overlapping → artifact (see §8.6) |
+
+Bar 1 (cert-clean) over all 66, oracle `minlplib.solu` with explicit `=opt=`/`=best=`/
+`=feas=` precedence: **62 executed oracle comparisons, 0 bounds above their reference
+optimum**, 3 instances with no usable primal oracle entry (`bchoco06/07/08`).
+
+### 8.6 `tls2` — a certification flip that is not a regression
+
+The panel's single sample printed `tls2` as `gap_certified True -> False`, which under §5
+is a bar-1 **failure**, and `certclean.py` duly reported `BAR 1: FAIL`. It was not
+excused; it was measured, twice.
+
+**First, the mechanism was ruled out.** `tls2`'s reference optimum is `5.3000000000` and
+the base arm's certifying bound is `5.29999842` — a *valid and essentially tight* dual
+bound, so this was never a case of the fix removing a false bound. The obvious
+alternative was that the widened support rule (`hess != 0.0`) pulls variables with
+tiny-but-nonzero curvature into `curved`, where the finite-box requirement then refuses
+rows the old rule cut. A probe over all of `tls2`'s rows **falsified** it: **22 rows
+examined, 0 rows pass the finite-box gate under the OLD rule and 0 under the NEW one** —
+the αBB quadratic generator contributes nothing to `tls2` at the root in either arm, so
+the fix is not mechanically involved in its bound at all.
+
+**Second, the flip was measured directly.** 9 reps per arm recording `gap_certified` per
+rep, 18 executed solves:
+
+| arm | certified | bound when certified | bounds when not |
+| --- | --- | --- | --- |
+| base | **5/9** | `5.29999842045334`, 153 nodes | 2.9748964 / 3.1360195 / 3.1819001 |
+| fix | **5/9** | `5.29999842045334`, 153 nodes | 2.9748964 / 3.1360195 / 3.1819001 |
+
+Identical certification rate, the identical bound and node count on every certifying rep,
+and the same discrete set of non-certifying outcomes with matching node counts. `tls2`'s
+certification is **bimodal at the 20 s limit**, and the decisive evidence is that the
+**base arm contradicts itself** — reps 1, 2, 7, 8 uncertified and 3, 4, 5, 6, 9
+certified, with the fix's code not loaded. No property of the fix can explain that.
+
+**A note on the instrument, not the result.** `certclean.py`'s cert-regression test
+grades a single sample per arm, which is under-powered for a bimodal instance; that is a
+defect in the probe, not a reason to exempt an instance from it. The checker was **not**
+edited to skip `tls2` — weakening a gate to pass it is exactly what CLAUDE.md §1
+forbids. Its raw verdict stands in the record alongside the 18-solve measurement that
+grades the specific flip it flagged.
