@@ -12,6 +12,7 @@ pub mod expr;
 pub mod lp;
 pub mod nl_parser;
 pub mod nl_writer;
+pub mod numeric;
 pub mod presolve;
 pub mod profile;
 pub mod term_classifier;

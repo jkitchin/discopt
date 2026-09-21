@@ -3842,6 +3842,18 @@ fn rc_fix_force_refactor() -> bool {
 /// the incumbent). A small positive slack on the gap and an inward integer floor
 /// keep numerical error on the *safe* side (never fixing out an improving point);
 /// a singular/ill-conditioned basis solve returns `None` (no fixing).
+///
+/// The gap slack is **not** on its own enough, and #1409 is the measurement that
+/// says so: it is relative to the *gap*, while the dominant error is relative to the
+/// *divisor* `d_j`, which is a cancelling difference whose round-off is bounded by
+/// `S_j = |c_j| + Σ|a_ij y_i|` rather than by `|d_j|`. Overstating `|d_j|` shrinks
+/// `⌊gap/|d_j|⌋`, so the two errors are not in the same currency and the wrong one
+/// was being covered. On the #1409 witness (`S_j = 2e14`, `d_j = 1e7`) the computed
+/// divisor was high by 6.25e-3, turning a valid `maxk = 3` into `2` and excluding a
+/// point that beat the incumbent by 9.37e-3 — 9374× the solver's absolute tolerance
+/// — while the slack supplied a relative widening of only 3.3e-14. The divisor is
+/// therefore deflated toward zero by its own error bound before the division, and a
+/// column whose reduced-cost *sign* is unresolved at its own scale is skipped.
 #[allow(clippy::too_many_arguments)]
 fn reduced_cost_fix(
     sp: &SparseCols,
@@ -3914,19 +3926,40 @@ fn reduced_cost_fix(
         if !is_int[j] || basis.col_status[j] == BASIC {
             continue;
         }
-        // Reduced cost d_j = c_j − A_jᵀ y (sparse dot over column j's nonzeros).
-        let dj = c[j] - sp.dot(j, &y);
+        // Reduced cost d_j = c_j − A_jᵀ y (sparse dot over column j's nonzeros),
+        // carrying the magnitude sum its round-off is bounded by. `d_j` is a
+        // cancelling difference, so `|d_j|` says nothing about its own accuracy:
+        // the error is governed by `S_j = |c_j| + Σ|a_ij y_i|` (#1409).
+        let (dot, dot_abs, nnz) = sp.dot_with_magnitude(j, &y);
+        let dj = c[j] - dot;
+        let s_j = c[j].abs() + dot_abs;
+        // The divisor must be deflated *toward zero* before dividing: overstating
+        // `|d_j|` shrinks `⌊gap/|d_j|⌋` and can land it a whole integer low, which
+        // fixes an improving point out of the box. The gap's own `1e-6` relative
+        // slack cannot cover this — it is relative to the *gap*, this error is
+        // relative to the *divisor*, and on the #1409 witness the divisor error was
+        // four orders of magnitude the wider of the two. `None` means the sign of
+        // `d_j` is not resolved at this column's scale, so no fixing is justified.
+        let Some(dj_safe) = crate::numeric::deflated_magnitude(dj, s_j, nnz) else {
+            continue;
+        };
+        // `tol` is unchanged (#1397's non-goal: the yardstick changes, never the
+        // tolerance) — it is now applied to the deflated magnitude, which is the
+        // quantity the division actually rests on.
+        if dj_safe <= tol {
+            continue;
+        }
         match basis.col_status[j] {
-            x if x == AT_LOWER && dj > tol => {
-                let maxk = (gap / dj).floor();
+            x if x == AT_LOWER && dj > 0.0 => {
+                let maxk = (gap / dj_safe).floor();
                 let nu = new_l[j] + maxk;
                 if nu < new_u[j] - 0.5 {
                     new_u[j] = nu;
                     changed = true;
                 }
             }
-            x if x == AT_UPPER && dj < -tol => {
-                let maxk = (gap / -dj).floor();
+            x if x == AT_UPPER && dj < 0.0 => {
+                let maxk = (gap / dj_safe).floor();
                 let nl = new_u[j] - maxk;
                 if nl > new_l[j] + 0.5 {
                     new_l[j] = nl;
@@ -5578,6 +5611,165 @@ mod tests {
         assert!(
             fixed >= 1,
             "no incumbent on the ladder produced a fixing at all"
+        );
+    }
+
+    /// #1409 Finding 1: the divisor `d_j = c_j − A_jᵀy` is a cancelling difference, so
+    /// its round-off is bounded by `S_j = |c_j| + Σ|a_ij y_i|`, not by `|d_j|`.
+    /// **Over**-stating `|d_j|` shrinks `⌊gap/|d_j|⌋` and can land it a whole integer
+    /// low, writing an upper bound that excludes an improving point — a false
+    /// tightening on a default-ON, certifying path.
+    ///
+    /// The witness below was derived in exact rational arithmetic (`fractions.Fraction`,
+    /// so no float stands in for the truth anywhere in its construction) and its
+    /// before/after behaviour predicted before this fix was written:
+    ///
+    /// | quantity | value |
+    /// |---|---|
+    /// | `S_j` | 2.0000001e14 |
+    /// | `d_j` exact | `10000000.0` |
+    /// | `d_j` as the CSC loop computes it | `10000000.00625` |
+    /// | `U − z` | `30000000.0093745` |
+    /// | valid `maxk = ⌊(U−z)/d_j⌋` | **3** |
+    /// | `maxk` the pre-fix code wrote | **2** |
+    ///
+    /// Objective at `x_j = 3` is `z + 3·d_j = −0.0093745`, i.e. it beats the incumbent
+    /// `U = 0` by 9.37e-3 — **9374× the solver's 1e-6 absolute tolerance**, so the
+    /// excluded point is not within noise of the incumbent. Meanwhile the gap's `1e-6`
+    /// relative slack supplies a widening of only 3.3e-14 here: it is relative to the
+    /// *gap* while the error is relative to the *divisor*, which is why it cannot cover
+    /// this and why the fix deflates the divisor rather than widening the gap further.
+    #[test]
+    fn rc_fix_never_excludes_an_improving_point_when_the_divisor_cancels() {
+        let mut asserts = 0usize;
+
+        // One structural integer column on a box [0, 10], plus one slack per row so
+        // the `m` slacks can be the basis and the structural column sits AT_LOWER.
+        let (ns, m) = (1usize, 4usize);
+        let n = ns + m;
+        // Column 0's nonzeros, in CSC (row) order. Summed left to right against
+        // y = 1 this is fl(1e14 + 0.1 − 1e14 − 10000000.1): the two 1e14 partial sums
+        // round, and the residue lands 6.25e-3 ABOVE the exact −1e7.
+        let col0 = [1e14, 0.1, -1e14, -10000000.1];
+        let mut dense = vec![0.0f64; m * n];
+        for (i, v) in col0.iter().enumerate() {
+            dense[i * n] = *v;
+            dense[i * n + ns + i] = 1.0; // slack column i, row i
+        }
+        let sp = SparseCols::from_dense(&dense, m, n);
+
+        let c = vec![0.0; n];
+        let l = vec![0.0; n];
+        let mut u = vec![INF; n];
+        u[0] = 10.0;
+        let is_int = {
+            let mut v = vec![false; n];
+            v[0] = true;
+            v
+        };
+        // Duals are handed in directly (the reuse path): `dual.len() == m` and finite,
+        // so no factorization is attempted and `y` is exactly this vector.
+        let y = vec![1.0f64; m];
+        let basis = Basis::from_basic(n, (ns..n).collect());
+        assert_eq!(
+            basis.col_status[0], AT_LOWER,
+            "the column under test must be nonbasic at its lower bound"
+        );
+        asserts += 1;
+
+        // --- the premise: this fixture really does mis-compute the divisor ---
+        // Without this, a fix that made the function refuse everything would pass the
+        // soundness assertion below vacuously (CLAUDE.md §6).
+        let (dot, dot_abs, nnz) = sp.dot_with_magnitude(0, &y);
+        let dj_computed = c[0] - dot;
+        const DJ_EXACT: f64 = 10_000_000.0;
+        assert_eq!(nnz, 4, "the witness column must have all four nonzeros");
+        asserts += 1;
+        assert!(
+            dj_computed > DJ_EXACT,
+            "premise broken: the computed divisor {dj_computed:?} must OVERSTATE the \
+             exact {DJ_EXACT:?}, else this fixture cannot express the defect"
+        );
+        asserts += 1;
+        assert!(
+            dot_abs > 1e14,
+            "premise broken: S_j = {dot_abs:?} must dwarf |d_j| for the cancellation \
+             to matter"
+        );
+        asserts += 1;
+
+        // --- the soundness property ---
+        // z chosen so ⌊(U − z)/d_j_exact⌋ = 3 with x_j = 3 strictly improving.
+        let node_obj = -30_000_000.009_374_5f64;
+        let incumbent = 0.0f64;
+        const MAXK_VALID: f64 = 3.0;
+        let obj_at_maxk = node_obj + MAXK_VALID * DJ_EXACT;
+        assert!(
+            obj_at_maxk < incumbent - 1e-6,
+            "premise broken: x_j = {MAXK_VALID} must beat the incumbent by more than \
+             the solver's own absolute tolerance, got objective {obj_at_maxk:?}"
+        );
+        asserts += 1;
+
+        let fixed = reduced_cost_fix(
+            &sp, m, &c, &basis, &y, node_obj, incumbent, &l, &u, ns, &is_int, 1e-9,
+        );
+        let (_, new_u) = fixed.expect(
+            "the fixture must still produce a fixing — a `None` here would satisfy \
+             'the optimum survived' trivially and prove nothing (CLAUDE.md §6)",
+        );
+        // The bound must not exclude the improving point. Pre-fix this wrote 2.0.
+        assert!(
+            new_u[0] >= MAXK_VALID,
+            "FALSE TIGHTENING: new_u[0] = {:?} excludes the improving point x_j = \
+             {MAXK_VALID}, whose objective {obj_at_maxk:?} beats the incumbent \
+             {incumbent:?}",
+            new_u[0]
+        );
+        asserts += 1;
+        // ...and it must still be a real tightening, or the fix bought soundness by
+        // disabling the feature.
+        assert!(
+            new_u[0] < u[0] - 0.5,
+            "the fixing became a no-op: new_u[0] = {:?} vs the original box upper \
+             bound {:?}",
+            new_u[0],
+            u[0]
+        );
+        asserts += 1;
+
+        assert_eq!(asserts, 7, "probe must have executed every assertion");
+    }
+
+    /// The capability control for the test above: deflating the divisor must not turn
+    /// reduced-cost fixing off on an ordinary well-scaled column, where `S_j` is the
+    /// same order as `|d_j|` and the error bound is negligible. Without this, the
+    /// #1409 fix could be "refuse everything" and the soundness test would still pass.
+    #[test]
+    fn rc_fix_still_fixes_an_ordinary_well_scaled_column() {
+        let (sp, m, ns, c, _b, l, u) = rc_fix_fixture();
+        let n = l.len();
+        let opts = SimplexOptions::default();
+        let sol = crate::lp::simplex::solve_lp_cols(sp.clone(), m, n, &c, &l, &u, &_b, &opts);
+        assert_eq!(sol.status, LpStatus::Optimal, "fixture LP must solve");
+        let is_int = vec![true, true, true, false, false];
+
+        let mut fixings = 0usize;
+        for k in 0..12 {
+            let incumbent = sol.obj + 0.25 * k as f64;
+            if reduced_cost_fix(
+                &sp, m, &c, &sol.basis, &sol.dual, sol.obj, incumbent, &l, &u, ns, &is_int,
+                opts.tol,
+            )
+            .is_some()
+            {
+                fixings += 1;
+            }
+        }
+        assert!(
+            fixings >= 1,
+            "the divisor deflation disabled reduced-cost fixing on a well-scaled \
+             column: no incumbent on a 12-rung ladder produced a fixing"
         );
     }
 

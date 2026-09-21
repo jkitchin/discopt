@@ -313,13 +313,94 @@ def test_reduced_cost_fixing_pass_tightens_upper_bound():
     m.subject_to(x >= 0.0)
     m.minimize(x)
     repr_ = model_to_repr(m)
-    info = {"lp_value": 0.0, "cutoff": 10.0, "reduced_costs": [2.0]}
+    # `reduced_cost_errors` is required (#1409): an absolute bound on each reduced
+    # cost's round-off. Zero here because 2.0 is a literal, not a computed dot.
+    info = {
+        "lp_value": 0.0,
+        "cutoff": 10.0,
+        "reduced_costs": [2.0],
+        "reduced_cost_errors": [0.0],
+    }
     _, stats = repr_.presolve(passes=["reduced_cost_fixing"], reduced_cost_info=info)
-    # gap = 10, cbar = 2, lb = 0 ⇒ new_ub = 5.
-    assert stats["bounds_hi"][0] <= 5.0 + 1e-9
+    # gap = 10, cbar = 2, lb = 0 ⇒ new_ub = 5 in exact arithmetic. The pass widens the
+    # gap by 1e-6 * (1 + |cutoff|) before dividing (#1409), so 5.0 is a floor on the
+    # endpoint, not an equality: 5 + 1.1e-5/2 ≈ 5.0000055.
+    assert stats["bounds_hi"][0] >= 5.0
+    assert stats["bounds_hi"][0] <= 5.0 + 1e-6 * (1.0 + 10.0) / 2.0 + 1e-12
     deltas = [d for d in stats["deltas"] if d["pass_name"] == "reduced_cost_fixing"]
     assert deltas
     assert deltas[0]["bounds_tightened"] >= 1
+
+
+def test_reduced_cost_fixing_requires_error_bounds():
+    """#1409: the boundary refuses reduced costs with no error bound.
+
+    This pass is handed the reduced costs as bare scalars — no column, no matrix, no
+    duals — so it cannot bound their round-off itself. Assuming exactness would
+    reintroduce the scale-blind absolute tolerance #1397 removed, so the binding
+    raises instead.
+    """
+    m = do.Model("rcf_needs_errors")
+    x = m.continuous("x", lb=0.0, ub=100.0)
+    m.subject_to(x >= 0.0)
+    m.minimize(x)
+    repr_ = model_to_repr(m)
+
+    with pytest.raises(KeyError, match="reduced_cost_errors"):
+        repr_.presolve(
+            passes=["reduced_cost_fixing"],
+            reduced_cost_info={"lp_value": 0.0, "cutoff": 10.0, "reduced_costs": [2.0]},
+        )
+
+    with pytest.raises(ValueError, match="reduced_cost_errors"):
+        repr_.presolve(
+            passes=["reduced_cost_fixing"],
+            reduced_cost_info={
+                "lp_value": 0.0,
+                "cutoff": 10.0,
+                "reduced_costs": [2.0],
+                "reduced_cost_errors": [0.0, 0.0],
+            },
+        )
+
+
+def test_reduced_cost_fixing_error_bound_swamping_cost_blocks_tightening():
+    """#1409: an unresolved reduced-cost sign yields no bound, but a resolved one does.
+
+    Both arms run the same fixture, so a pass here cannot be bought by the feature
+    simply being off.
+    """
+    m = do.Model("rcf_swamped")
+    x = m.continuous("x", lb=0.0, ub=100.0)
+    m.subject_to(x >= 0.0)
+    m.minimize(x)
+
+    def run(err):
+        repr_ = model_to_repr(m)
+        _, stats = repr_.presolve(
+            passes=["reduced_cost_fixing"],
+            reduced_cost_info={
+                "lp_value": 0.0,
+                "cutoff": 10.0,
+                "reduced_costs": [2.0],
+                "reduced_cost_errors": [err],
+            },
+        )
+        return stats
+
+    # cbar = 2 known only to ±3 could be negative: no upper bound follows.
+    blind = run(3.0)
+    assert blind["bounds_hi"][0] == 100.0
+    blind_deltas = [d for d in blind["deltas"] if d["pass_name"] == "reduced_cost_fixing"]
+    assert blind_deltas[0]["bounds_tightened"] == 0
+
+    # The same cbar with a producer-sized bound still tightens.
+    ok = run(1e-9)
+    assert ok["bounds_hi"][0] < 100.0
+    ok_deltas = [d for d in ok["deltas"] if d["pass_name"] == "reduced_cost_fixing"]
+    assert ok_deltas[0]["bounds_tightened"] >= 1
+    # Deflating the divisor can only push the endpoint outward.
+    assert ok["bounds_hi"][0] >= 5.0
 
 
 def test_reduced_cost_fixing_no_info_is_noop():
@@ -344,10 +425,16 @@ def test_run_root_presolve_reduced_cost_reports_count():
     m.subject_to(x >= 0.0)
     m.minimize(x)
     repr_ = model_to_repr(m)
-    info = {"lp_value": 0.0, "cutoff": 6.0, "reduced_costs": [-3.0]}
+    info = {
+        "lp_value": 0.0,
+        "cutoff": 6.0,
+        "reduced_costs": [-3.0],
+        "reduced_cost_errors": [0.0],
+    }
     _, stats = run_root_presolve(repr_, reduced_cost=True, reduced_cost_info=info)
     assert "reduced_cost_fixing" in stats
-    # cbar = -3, ub = 10, gap = 6 ⇒ new_lb = 10 + 6 / (-3) = 8.
+    # cbar = -3, ub = 10, gap = 6 ⇒ new_lb = 10 + 6 / (-3) = 8 in exact arithmetic;
+    # the gap slack moves it slightly below 8 (#1409).
     assert stats["reduced_cost_fixing"]["bounds_tightened"] >= 1
 
 

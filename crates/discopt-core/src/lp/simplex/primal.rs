@@ -524,26 +524,9 @@ fn row_residual_floor(grain: f64) -> f64 {
 /// verdict on its own merits.
 const RAY_CERT_REL: f64 = 1e-7;
 
-/// The classic dot-product error factor `γ_k = k·u/(1 − k·u)` (Higham, *Accuracy and
-/// Stability of Numerical Algorithms*, §3.1): a sum of `k` floating-point terms
-/// evaluated in any order differs from the exact sum by at most `γ_k · Σ|terms|`.
-///
-/// `u` is taken as `f64::EPSILON` — **twice** the true unit roundoff `2⁻⁵³` — so the
-/// first-order bound carries a factor-2 headroom over the `O(u²)` terms it drops and
-/// over the float64 evaluation of the margin expression itself. (The Python
-/// boundary's sharp NS margin, `_safe_lp_lower_bound_sharp`, buys the same headroom
-/// with `u = 2⁻⁵³` and an explicit ×1.0625; see
-/// `docs/dev/ns-sharp-margin-2026-07-16.md` §2.) Returns `+∞` — no usable bound, the
-/// caller must bail — once `k·u ≥ 1`.
-#[inline]
-fn gamma(k: usize) -> f64 {
-    let ku = k as f64 * f64::EPSILON;
-    if ku >= 1.0 {
-        f64::INFINITY
-    } else {
-        ku / (1.0 - ku)
-    }
-}
+// The dot-product error factor lives in `crate::numeric` so the reduced-cost fixing
+// paths share this definition instead of re-deriving a factor each (#1409).
+use crate::numeric::gamma;
 
 /// `v` nudged upward by a few ulps, covering the rounding of the handful of
 /// operations that produced it. Used where only an *upper* bound on `v` is sound

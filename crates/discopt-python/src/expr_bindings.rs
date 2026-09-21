@@ -1008,7 +1008,10 @@ impl PyModelRepr {
     ///
     /// `reduced_cost_info`, when given, is a dict with keys
     /// `lp_value: float`, `cutoff: float`, `reduced_costs: list[float]`
-    /// (one per variable block). Required for the
+    /// (one per variable block) and `reduced_cost_errors: list[float]`
+    /// (same length; an absolute error bound on each reduced cost —
+    /// `gamma(nnz_j + 2) * S_j` where `S_j = |c_j| + sum_i |a_ij y_i|`, #1409).
+    /// All four keys are required; a missing one raises. Required for the
     /// `"reduced_cost_fixing"` pass to do anything; otherwise that pass
     /// is a no-op.
     /// Default order matches the historical
@@ -1082,10 +1085,39 @@ impl PyModelRepr {
                         )
                     })?
                     .extract()?;
+                // #1409: the error bound is a required input, not an optional extra.
+                // `c̄_j = c_j − A_jᵀy` is a cancelling difference, so dividing the gap
+                // by an over-stated `|c̄_j|` can write a bound that excludes an
+                // improving point. Only the producer of `c̄_j` can bound it, so refuse
+                // at the boundary with the formula rather than assume exactness.
+                let reduced_cost_errors: Vec<f64> = d
+                    .get_item("reduced_cost_errors")?
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyKeyError::new_err(
+                            "reduced_cost_info missing 'reduced_cost_errors': an absolute \
+                             error bound per reduced cost is required (#1409). The reduced \
+                             cost c_j - A_j^T y is a cancelling difference whose round-off \
+                             is governed by S_j = |c_j| + sum_i |a_ij y_i|, not by |c_j-bar|; \
+                             supply gamma(nnz_j + 2) * S_j with gamma(k) = k*eps/(1 - k*eps) \
+                             and eps = 2**-52. Pass zeros only for exact literal reduced \
+                             costs.",
+                        )
+                    })?
+                    .extract()?;
+                if reduced_cost_errors.len() != reduced_costs.len() {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "reduced_cost_info: 'reduced_cost_errors' has length {} but \
+                         'reduced_costs' has length {}; one error bound per reduced cost \
+                         is required (#1409)",
+                        reduced_cost_errors.len(),
+                        reduced_costs.len()
+                    )));
+                }
                 Some(ReducedCostInfo {
                     lp_value,
                     cutoff,
                     reduced_costs,
+                    reduced_cost_errors,
                 })
             }
             None => None,
