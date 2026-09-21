@@ -456,6 +456,12 @@ with the reasoning recorded — so item 2 is complete and #1397 can be closed.
 - **Whether any fixed site was ever hit in practice.** The fixes are justified by
   provable invalidity of the margin, not by a corpus instance that failed. No
   claim is made that a released solve returned a wrong answer because of these.
+- **Bare numeric literals compared inline** — added 2026-09-21, see §7.1. §1's sweep
+  matches constants by **name**, so a threshold written as a literal at its comparison
+  site was never enumerated. This exclusion was discovered, not designed: it is how
+  `edge_concave.py`'s `1e-12` / `1e-9` (§7, a §4.5 site) escaped all 103 rows of §4
+  while this document read as complete over `_relax/`. Anything below about coverage of
+  the Python relaxation layer means *named* constants in it.
 
 ## 6. Update — the remaining six, and three retractions
 
@@ -1063,3 +1069,152 @@ one-ulp change. The cost is per-node staging churn in `_reduce_node_and_stage`
 (`solver.py:3680`), which rewrites the batch box and pending entry for a 1-ulp move.
 That makes the coherence complaint real and its consequence a *performance* one, not
 a §1 one — the classification in §6.14 stands, with a better reason than it gave.
+
+## 7. Site 9 — and a retraction of this audit's own coverage claim
+
+**Date:** 2026-09-21. **Same branch.** Reported as a candidate by a peer session,
+verified here before any code was written.
+
+### 7.1 The retraction (CLAUDE.md §11)
+
+I stated, in this conversation and on the strength of §6, that *"all three items of
+#1397's definition of done are complete; #1397 can be closed once this PR merges —
+nothing else remains in it."* **That was wrong, and this section is the retraction.**
+
+The error was not in any individual row. It was in treating §1's *name-pattern* sweep
+as if it had been a sweep of *comparison sites*. The `RX` regex in §1 matches constants
+whose **name** carries a tolerance word. A bare numeric literal compared inline carries
+no name, so it was never enumerated — and §4's 103 rows inherited that blind spot
+without saying so. `edge_concave.py` compares against the literals `1e-12` and `1e-9`
+with no named constant anywhere in the file:
+
+```bash
+$ grep -c 'edge_concave\|hessian_tol' docs/dev/1397-absolute-tolerance-audit-2026-09-20.md
+0
+```
+
+§5 lists three exclusions — Rust, value-constants, practice-hit claims — and **none of
+them covers `_relax/`**. So the document read as complete over the Python relaxation
+layer while in fact covering only the *named* constants in it. §5 now records this as a
+fourth exclusion, and it is the one that matters most, because the inline-literal sites
+are exactly the ones no one gave a name to and therefore no one defended.
+
+### 7.2 The site
+
+`_relax/edge_concave.py` accumulated the `x_i^2` coefficients of each candidate block
+with a running `+=`, then read the **sign** of the result to choose `sense`:
+
+```python
+sq[i] = sq.get(i, 0.0) + float(coeff)          # :146, running sum
+...
+diag = [sq.get(i, 0.0) for i in varset]        # :156
+if all(v <= 1e-12 for v in diag) and any(v < -1e-9 for v in diag):
+    sense = "under"
+elif all(v >= -1e-12 for v in diag) and any(v > 1e-9 for v in diag):
+    sense = "over"
+```
+
+`sense` is not a tightness knob. At `mccormick_lp.py:3159` it selects the **direction**
+of the inequality appended to the node LP, and the two branches emit opposite rows
+(`A.x - q <= -B` versus `q - A.x <= B`). For an edge-concave block the *minimum* is at a
+box vertex, so vertex data gives a valid under-estimator; for an edge-convex block the
+*maximum* is at a vertex. Flip the sign and the vertex-derived hyperplane is emitted on
+the side where it is not a bound at all.
+
+**There is no downstream check.** `_separate_edge_concave`'s `_append(rows, rhs)` stacks
+the row straight into `milp._A_ub` / `milp._b_ub` — no feasible-point sampling, no
+incumbent verification — and the whole function sits inside
+`except Exception: logger.debug(...)`. The path is default-ON
+(`DISCOPT_EDGE_CONCAVE` defaults true) inside the default MINLP node relaxer.
+
+A purely bilinear variable makes the block reachable with a **single** contaminated
+entry: `sq.get(i, 0.0)` returns `0.0`, which satisfies both `all(v <= 1e-12)` and
+`all(v >= -1e-12)`, so it blocks neither branch. That `.get` default also erased the
+distinction the fix needs — a *structurally absent* coefficient is an exact zero, while
+a *computed* one near zero is not.
+
+### 7.3 Entry experiment, and the severity
+
+Reached through the real `Model` → `distribute_products` → `_expr_to_polynomial` → 
+`collect_edge_concave_quadratics` path, not a synthetic proxy (#727 lesson). The
+pattern is addends `[M, t, -M, -u]` with `t < u`, so the true sum is negative
+(edge-concave), but `t` exceeds half an ulp of `M` while `u` does not:
+
+| quantity | value |
+| --- | --- |
+| addends | `[51903611.79275842, 5.5700e-09, -51903611.79275842, -5.9653e-09]` |
+| true sum (`math.fsum`) | `-3.952954e-10` — negative, edge-**concave** |
+| running sum | `+1.485329e-09` — clears the `1e-9` edge-**convex** threshold |
+| collected `sense` | `"over"` — the wrong side |
+
+63 of 800,000 random trials flip this way. The residue scales with the magnitude that
+cancelled while `1e-9` does not, so severity is unbounded. Invalidity of the emitted
+cut over a width-10 box:
+
+| cancelling magnitude `M` | worst true curvature still read as positive | cut invalid by |
+| --- | --- | --- |
+| 1e6 | 0 | 0 |
+| 1e8 | 6.41e-09 | 6.41e-07 |
+| 1e10 | 9.34e-07 | **9.34e-05** |
+| 1e12 | 5.59e-05 | **5.59e-03** |
+| 1e14 | 6.89e-03 | **6.89e-01** |
+| 1e16 | 9.29e-01 | **9.29e+01** |
+
+Everything from `M = 1e10` up exceeds the 1e-6 feasibility tolerance. This is a §4.5
+site — scale-exposed, unsound, on a certifying path — not a round-off curiosity.
+
+**The same threshold also loses valid cuts.** The `all(v <= 1e-12)` / `any(v < -1e-9)`
+pair is internally incoherent: a diagonal in `(-1e-9, -1e-12]` satisfies the `all` test
+but fails the `any` test, so a genuinely edge-concave block whose only curvature sits in
+that window is silently dropped. Measured: the same reproducer under two other addend
+orders yields no block at all, and an honest single-addend curvature of `-1e-30` was
+discarded outright. The fix recovers both.
+
+### 7.4 The fix
+
+Per #1397's non-goal, **no constant's value changed**. The yardstick changed:
+
+1. Coefficients accumulate into **lists**, summed once with `math.fsum` — correctly
+   rounded, so the sum no longer depends on term order (the same `fsum`-at-the-source
+   move as §6.11).
+2. A new `_definite_sign(total, addends)` returns `+1` / `-1` only when
+   `|total| > 64 * (n+1) * eps * Σ|addend|`, and `0` otherwise. The bound carries the
+   units of the addends, because the error inherited from the upstream expansion is set
+   by the magnitudes that went *in*, not by the magnitude that came *out*.
+3. A variable absent from the accumulator is an exact zero and is compatible with either
+   sense. A variable whose coefficient does not clear its own round-off bound has **no
+   determined sign** and disqualifies the block. Refusing is the sound choice: a cut
+   whose side cannot be justified is not emitted (CLAUDE.md §3).
+
+`64` is a safety factor on a round-off bound, not a tuned tolerance: an uncancelled
+coefficient clears it by ~14 orders of magnitude, and the cancelling case falls ~1e6
+*below* it, so no nearby value behaves differently.
+
+The module docstring's claim that detection "is exact for a quadratic (constant
+Hessian)" was corrected in the same commit. It was true symbolically and false of the
+floating-point accumulation the code actually performs — the same class of error as
+§6.15's stale `_materialise_Q` docstring.
+
+### 7.5 Verification
+
+`python/tests/test_1397_edge_concave_sign.py`, 15 tests, no `slow` marker (so it
+collects under CI's default `-m "not slow"`), including a 6-point sweep over the
+cancelling magnitude. One test guards the premise — that the reproducer really does
+invert the sign — so the rest cannot pass vacuously (§6).
+
+Before/after was measured by running the behavioural assertions against both trees
+with a load gate asserting `_definite_sign` **absent** on the baseline and **present**
+on the fix (§8). Baseline: 11 checks, **7 failures** — the wrong `sense` at every
+magnitude from 1e8 to 1e16, plus the lost `-1e-30` block. Fixed: 11 checks, **0
+failures**. A separate positive control confirms five well-conditioned blocks
+(edge-concave, edge-convex, purely-bilinear partner, accumulated-but-uncancelled,
+tiny-but-honest) are all still collected — a soundness fix that quietly disables the
+feature is not a fix.
+
+### 7.6 Site 10 is deferred, not cleared
+
+The same peer report named `_relax/cutting_planes.py`'s `hessian_tol` (default `1e-8`,
+consumed as `np.abs(hess) > hessian_tol` to pick the "curved" variable set) as a
+candidate. It arrived truncated and is **not** verified here. It is recorded as an open
+candidate rather than classified, so this document does not repeat §7.1's mistake in
+the other direction by implying it was checked.
