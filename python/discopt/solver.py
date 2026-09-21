@@ -4374,8 +4374,10 @@ def _root_bound_seed_enabled() -> bool:
 #: infeasibility-marker threshold, which would wave 1e20 through". Both constants
 #: are correct for their own question; the bug is using one for the other.
 #:
-#: (An unrelated ``_SENTINEL_THRESHOLD = 1e19`` lives in ``discopt/debug/context.py``
-#: — same name, different value, different module. Do not import either one here.)
+#: (``discopt/debug/context.py`` asks the same question for its display and keeps
+#: its own ``_NO_BOUND_MAGNITUDE = 1e19``; #1401 renamed it from
+#: ``_SENTINEL_THRESHOLD``, which collided with this module's 1e29 constant of
+#: that name. Deliberately not shared: the debug layer does not import the solver.)
 _EFF_INF_BOUND: float = 1e19
 
 
