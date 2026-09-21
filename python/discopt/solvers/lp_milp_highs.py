@@ -939,6 +939,75 @@ def open_column_coefficient_ratio(sf: StdForm) -> float:
     return float((absA.data[on_open] / row_max[absA.row[on_open]]).min())
 
 
+#: Safety factor on the round-off bound for a reduced cost, covering error accumulated
+#: inside HiGHS's own factorization and refinement rather than just the final dot product.
+#: The measured separation makes the exact value immaterial: on 120 well-scaled LPs the
+#: worst relative violation is 7.87e-17, and on the #1410 counterexample it is 1.0, so
+#: every threshold between 1e-14 and 1e-6 gives byte-identical behaviour. This is a
+#: round-off bound, not a tuned tolerance.
+_DUAL_CERT_SAFETY = 64.0
+
+
+def box_dual_violation(sf: StdForm, x: np.ndarray, row_dual: np.ndarray) -> float:
+    """How far HiGHS's returned primal/dual pair is from being a dual-feasible certificate.
+
+    For ``min cᵀx s.t. Ax = b, xl <= x <= xu`` the reduced costs ``d = c - Aᵀy`` must, at
+    an optimal basis, satisfy ``d_j >= 0`` where ``x_j`` sits at ``xl_j``, ``d_j <= 0``
+    where it sits at ``xu_j``, and ``d_j == 0`` where it is interior. Returned relative to
+    each reduced cost's own scale ``|c_j| + (|A|ᵀ|y|)_j``, because ``d_j`` is a *difference*
+    and the round-off it can carry is set by the magnitudes cancelling in it, not by
+    ``|d_j|`` (the #1392/#1397 yardstick rule: scaling a cancellation residual by the
+    result is useless — the scale lives in the inputs).
+
+    A violation far above round-off means the pair HiGHS returned does not certify the LP
+    it was handed, which is a statement about HiGHS's arithmetic on *this* matrix and
+    therefore about every LP it solves in the tree.
+
+    #1410: measured 7.87e-17 worst over 120 well-scaled LPs, versus 1.0 on the instance
+    where the MILP route certified a false optimum (miss 0.0171 on a true optimum of
+    -0.01513). Used as a guard signal it caught 8/8 wrong HiGHS simplex optima over 4200
+    generated badly scaled LPs at a cost of 11/4192 (0.26%) correct results decertified;
+    the pre-existing :data:`UNSCALABLE_OPEN_RATIO` proxy caught the same 8/8 but
+    decertified 3197/4192 (76.3%).
+    """
+    y = np.asarray(row_dual, dtype=np.float64).ravel()
+    xv = np.asarray(x, dtype=np.float64).ravel()
+    d = sf.c - np.asarray(sf.A.T @ y).ravel()
+    absA = abs(sp.csc_matrix(sf.A))  # noqa: N806
+    scale = np.maximum(np.abs(sf.c) + np.asarray(absA.T @ np.abs(y)).ravel(), np.finfo(float).tiny)
+    # An infinite (or sentinel-magnitude) side is not a bound a column can sit at, and
+    # forming the test band against it yields ``inf - inf`` -> NaN, which would make every
+    # comparison below false and silently empty the check. Slack columns all carry
+    # ``xu = INF``, so this is the common case, not an edge one.
+    fin_lo = sf.xl > -INF
+    fin_hi = sf.xu < INF
+    lo = np.where(fin_lo, sf.xl, 0.0)
+    hi = np.where(fin_hi, sf.xu, 0.0)
+    at_lo = fin_lo & (xv <= lo + 1e-9 * (1.0 + np.abs(lo)))
+    at_hi = fin_hi & (xv >= hi - 1e-9 * (1.0 + np.abs(hi)))
+    # A fixed column (xl == xu) is at both bounds at once and prices either way, so it
+    # constrains nothing; an interior column must price to zero.
+    lo_only = at_lo & ~at_hi
+    hi_only = at_hi & ~at_lo
+    v = np.zeros_like(d)
+    v[lo_only] = np.maximum(0.0, -d[lo_only])
+    v[hi_only] = np.maximum(0.0, d[hi_only])
+    interior = ~at_lo & ~at_hi
+    v[interior] = np.abs(d[interior])
+    return float((v / scale).max()) if v.size else 0.0
+
+
+def dual_violation_tolerance(sf: StdForm) -> float:
+    """Round-off bound on :func:`box_dual_violation` for ``sf``.
+
+    ``d_j`` sums ``nnz_j + 1`` terms, so its error is bounded by ``(nnz_j + 1) * u`` times
+    its own scale; the widest column sets the bound for the whole vector.
+    """
+    A = sp.csc_matrix(sf.A)  # noqa: N806
+    max_col_nnz = int(np.diff(A.indptr).max()) if A.shape[1] else 0
+    return _DUAL_CERT_SAFETY * (max_col_nnz + 1) * float(np.finfo(float).eps)
+
+
 def _relax_huge_box(sf: StdForm, huge_lo: np.ndarray, huge_hi: np.ndarray) -> StdForm:
     """``sf`` with the huge finite bounds opened to infinity, one side at a time: a
     relaxation of ``sf`` that keeps every ordinary declared bound."""
@@ -1633,6 +1702,29 @@ def solve_milp_std(
                 "the MILP HiGHS solved is not the model's relaxation"
             )
             return done(out)
+        # #1410: the cross-check above compares two NUMBERS and so only catches a tree
+        # bound that is already wrong at the root. The failure it misses is the opposite
+        # shape: a root bound that is perfectly valid while HiGHS prunes the true optimum
+        # deeper in the tree, returning a bound ABOVE it. That cannot be caught by any
+        # comparison of the root bound to the tree bound -- but it can be caught by asking
+        # whether HiGHS's arithmetic on this matrix produces a certificate at all. If the
+        # root LP's own primal/dual pair is not dual-feasible in unscaled doubles, every
+        # LP HiGHS solves in the tree is suspect, and the tree's bound is not a
+        # certificate. Measured: 7.87e-17 on well-scaled LPs, 1.0 on the #1410 instance,
+        # where UNSCALABLE_OPEN_RATIO missed by a factor of 1.43 (1.366e-6 vs 9.537e-7).
+        if lp.x is not None and lp.row_dual is not None:
+            dual_viol = box_dual_violation(sf, lp.x, lp.row_dual)
+            dual_tol = dual_violation_tolerance(sf)
+            stats["milp/root_dual_violation"] = dual_viol
+            if dual_viol > dual_tol:
+                stats["milp/root_dual_unverified"] = 1.0
+                decertify_root_check(
+                    f"the root LP's own primal/dual pair is dual-infeasible by "
+                    f"{dual_viol:.3g} relative (round-off bound {dual_tol:.3g}), so "
+                    f"HiGHS's arithmetic on this matrix does not certify the LPs it "
+                    f"solves in the tree"
+                )
+                return done(out)
         if out.bound is None and out.status != "optimal":
             # No tree bound yet (limit hit before the root finished): the NS root
             # bound is a valid one, so report it rather than nothing.
