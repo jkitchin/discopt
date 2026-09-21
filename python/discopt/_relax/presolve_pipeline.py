@@ -79,6 +79,17 @@ def run_root_presolve(
         max_iterations: cap on full sweeps over the pass list. The
             orchestrator stops earlier if a sweep makes no progress.
         time_limit_ms: wall-clock cap (0 disables).
+        reduced_cost: enable reduced-cost fixing (E2).
+        reduced_cost_info: required by ``reduced_cost`` to do anything. A dict with
+            ``lp_value``, ``cutoff``, ``reduced_costs`` (one per variable block) and
+            ``reduced_cost_errors`` (same length). The last is an absolute bound on
+            each reduced cost's round-off and is **required**, not optional: a reduced
+            cost ``c_j - A_j^T y`` is a cancelling difference, so dividing the gap by
+            an over-stated ``|c_bar_j|`` can write a bound that excludes an improving
+            point (#1409). Compute it as ``gamma(nnz_j + 2) * S_j`` with
+            ``S_j = |c_j| + sum_i |a_ij y_i|`` and
+            ``gamma(k) = k * eps / (1 - k * eps)``, ``eps = 2**-52``; pass zeros only
+            when the reduced costs are exact literals. Omitting the key raises.
 
     Returns:
         ``(new_model_repr, stats)`` where ``stats`` is a dict mirroring

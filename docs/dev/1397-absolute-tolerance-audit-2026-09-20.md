@@ -446,9 +446,13 @@ with the reasoning recorded — so item 2 is complete and #1397 can be closed.
 
 ## 5. What this audit does not cover
 
-- **Rust.** `crates/discopt-core/` was not swept. The `INF = 1e20` sentinel
-  discipline documented in CLAUDE.md is the same class of hazard and has its own
-  history of producing false certified bounds; a Rust-side sweep is separate work.
+- **Rust.** `crates/discopt-core/` was not swept — **partially closed, see §9**
+  (2026-09-21, #1409): reduced-cost fixing, the one Rust site the audit named
+  explicitly, has been swept and fixed on both its paths. The rest of the Rust
+  sweep remains open and is deliberately out of #1409's scope: the `INF = 1e20`
+  sentinel discipline documented in CLAUDE.md is the same class of hazard and has
+  its own history of producing false certified bounds, as do FBBT and the other
+  presolve passes. That remainder is still separate work.
 - **Constants that are values, not thresholds.** Step sizes, perturbations,
   divisors and numeric knobs whose `0` is a value rather than an off-switch were
   enumerated but not classified — there is no comparison to be dimensionally
@@ -1374,3 +1378,259 @@ defect in the probe, not a reason to exempt an instance from it. The checker was
 edited to skip `tls2` — weakening a gate to pass it is exactly what CLAUDE.md §1
 forbids. Its raw verdict stands in the record alongside the 18-solve measurement that
 grades the specific flip it flagged.
+
+## 9. The Rust side, part 1: reduced-cost fixing (#1409)
+
+**Date:** 2026-09-21. **Branch:** `fix/1409-rc-fix-divisor-error`. **Scope:**
+reduced-cost fixing only, on both of its Rust paths. This section exists so §5's
+"Rust was not swept" stops being open-ended: it is now a bounded statement about
+what remains, not a blanket one.
+
+### 9.1 Why this site and not the whole crate
+
+§6.3 fixed the *Python* reduced-cost deadbands (`node_reduce._RC_TOL`,
+`solver._RCF_RC_TOL`) and noted that the Rust implementations of the same rule were
+not examined. That is the gap #1409 closes. The rest of the Rust sweep — the
+`INF = 1e20` sentinel discipline, FBBT, the other presolve passes — is explicitly
+**not** in scope; naming it here is not a claim that it is done.
+
+### 9.2 The defect: the divisor, not the deadband
+
+The Python sites in §6.3 were *deadbands* — "is `c̄_j` big enough to trust its
+sign?" The Rust site has the same deadband **and a second, sharper exposure the
+Python sweep's pattern does not name**: `c̄_j` is not only compared, it is
+**divided by**.
+
+```text
+maxk = floor(gap / |d_j|)          d_j = c_j − A_jᵀy
+```
+
+`d_j` is a cancelling difference, so its round-off is bounded by
+`S_j = |c_j| + Σ_i |a_ij y_i|`, **not** by `|d_j|`. The asymmetry is what makes this
+unsound rather than merely imprecise: **over**-stating `|d_j|` *shrinks* the
+quotient, and because the quotient is floored, an overstatement of a few ulps can
+drop `maxk` by a whole integer — writing `u_j = l_j + (K−1)` when the true bound is
+`l_j + K` and fixing an improving point out of the box. On a default-ON certifying
+path.
+
+### 9.3 Why the existing mitigation does not cover it — the two errors are in
+different currencies
+
+`bnb::milp_driver::reduced_cost_fix` already widened the gap:
+
+```text
+gap = (incumbent − node_obj) + 1e-6 · (1 + |incumbent|)
+```
+
+That slack is relative to the **gap**. The dominant error is relative to the
+**divisor**. The two are unrelated quantities, and on a badly scaled column the
+second dwarfs the first by orders of magnitude. This is the #1397 thesis in its
+sharpest form: the margin that was there was not merely too small, it was measuring
+something else.
+
+**The measured witness.** A 4-nonzero column `[1e14, 0.1, -1e14, -1.00000001e7]`
+with `y = 1` and `c_j = 0` (four terms, because Sterbenz makes a 2-term cancelling
+subtraction of nearby floats *exact* — the error needs a third term so an
+intermediate partial sum rounds):
+
+| quantity | value |
+| --- | --- |
+| `S_j = |c_j| + Σ|a_ij y_i|` | `2.0000001e14` |
+| `d_j`, exact | `10000000.0` |
+| `d_j`, as computed in float64 | `10000000.00625` |
+| `U − z` | `30000000.0093745` |
+| `maxk` valid in exact arithmetic | **3** |
+| `maxk` written before the fix | **2** |
+| the excluded point's objective margin over the incumbent | `9.37e-3` = **9374 ×** the `1e-6` tolerance |
+| widening the gap slack actually supplies | `3.3e-14` |
+
+The last two rows are the whole argument. The point being cut is not marginal — it
+beats the incumbent by nearly four orders of magnitude more than the solver's own
+tolerance — and the mitigation in place covers it by a factor of `3.5e-10`.
+
+**The margin scales with the column, which is why no constant fixes it.** The
+amount by which an improving point is wrongly excluded is `≈ K · γ_k · S_j / 2`.
+It grows with the column's magnitude sum without bound. Any absolute constant is
+sound only below some scale and silently unsound above it.
+
+### 9.4 The fix
+
+`crate::numeric` (new) holds the two definitions, so the formula has one home
+rather than being re-derived per call site — the divergence between the two
+reduced-cost paths is exactly how one of them ended up strictly weaker:
+
+- `gamma(k) = k·u / (1 − k·u)`, `u = f64::EPSILON` (Higham §3.1; `u` is *twice* the
+  true unit roundoff, buying factor-2 headroom over the dropped `O(u²)` terms).
+  Returns `+∞` once `k·u ≥ 1`, i.e. "no usable bound, bail". This function was
+  *moved* here from `lp::simplex::primal`, where it already existed with the same
+  docstring and seven callers; those callers are unchanged.
+- `deflated_magnitude(d, abs_sum, k)` → `Option<f64>`: `|d| − gamma(k+2)·abs_sum`,
+  or `None` when that is not positive. The `+2` covers the `c_j − dot` subtraction
+  and the evaluation of the bound itself.
+
+**`tol` did not change.** #1397's non-goal is binding: the yardstick changes, never
+the tolerance. `tol` is now applied to the *deflated* magnitude — the quantity the
+division actually rests on. The new gate is strictly stricter than the old, since
+`dj_safe ≤ |dj|` means `dj_safe > tol` implies `|dj| > tol`; the change is monotone
+in the safe direction and can only decline fixings the old code made, never add one.
+
+`SparseCols::dot_with_magnitude` already existed (used by the Farkas certificate
+path at `primal.rs:3586`), so no new dot-product helper was needed on the live path.
+
+### 9.5 The second path: `presolve::duality`, and a falsified premise
+
+#1409 recommended fixing `presolve::duality::reduced_cost_fixing` on the grounds
+that it and `bnb::milp_driver`'s "should share one helper" returning the dot
+alongside its magnitude sum. **That premise is false and was not implemented.**
+`duality::reduced_cost_fixing` receives `reduced_costs: Vec<f64>` as bare per-block
+scalars — no column, no constraint matrix, no dual vector — so it cannot compute
+`S_j` at all. Only the *producer* of `c̄_j` can. What the two paths share is the
+bound **formula** in `crate::numeric`, not a dot-product helper.
+
+So the fix there inverts the direction: `ReducedCostInfo` gained a **required**
+`reduced_cost_errors: Vec<f64>`, and an absent or wrong-length vector makes the pass
+tighten nothing and set `ReducedCostStats::refused_unbounded_error`. The PyO3
+boundary raises rather than defaulting. Per CLAUDE.md §3, a loud refusal beats a
+cheap approximation: any constant stand-in here would be precisely the scale-blind
+absolute tolerance this audit exists to remove.
+
+That path also lacked the live path's gap slack entirely, which is the second half of
+what made it strictly weaker; it now carries it. One behavioural consequence is
+recorded rather than hidden, in
+`duality::tests::zero_gap_no_longer_pinches_an_ordinary_column`: at `cutoff == lp_value`
+the pass no longer collapses a variable to a point, because a `1e-6·(1+|cutoff|)`
+window stays open. That is the correct conservative answer — at a zero raw gap the
+round-off in `cutoff` and `lp_value` exceeds the gap itself, so "no improving point
+has `x_j > l_j`" is not certifiable.
+
+**This path has no production caller.** None of the three `run_root_presolve` call
+sites passes `reduced_cost_info` or enables `reduced_cost=True`; it is reachable only
+from the Python boundary and its tests. It was fixed rather than retired because it
+is a live, documented, exported API with a binding, and leaving a known-unsound
+formula behind one is not a defensible resting state.
+
+### 9.6 Three retractions from the probes that found this (CLAUDE.md §11)
+
+All three were my own published statements in the course of this work, and each is
+an instrument defect rather than a wrong measurement — the §6-and-later failure mode
+this audit keeps rediscovering.
+
+1. **"185 integer-boundary crossings found."** The probe omitted the shipped gap
+   slack entirely. Every one of the 185 had a relative divisor error of `~2.3e-11`
+   against the slack's `~1e-6` relative widening, so the shipped code was sound on
+   all of them. The probe proved nothing about the function it claimed to measure.
+2. **"A crossing at `d_true = 1.00000099`, `U − z = 1.0`."** The probe added the
+   slack but then compared `maxk` against `floor(gap_SLACKED / d_true)`. The slacked
+   gap is a deliberate outward loosening, not part of the bound being certified, so
+   it is the wrong yardstick. Graded correctly, the valid `maxk` is
+   `floor(1.0/1.00000099) = 0` and the code wrote `0` — it was **correct**.
+3. **"HYPOTHESIS FALSIFIED — Finding 1 is unreachable at these scales"**, exited 3.
+   This is the one worth keeping. The crossing window is
+   `nudge < eps − sigma ≈ 1e-12`; the probe's `nudge` grid started at `1e-7`, five
+   orders of magnitude too coarse to land inside it. It searched a region where the
+   crossing is *arithmetically impossible* and reported the absence as a result —
+   CLAUDE.md §6 exactly. Replacing the blind grid with a **directed** construction
+   (pick the column, *measure* its realized relative divisor error `eps`, then choose
+   `U − z` so `(U−z)/d_true` lands inside the window, iterating because `sigma`
+   depends on `U − z`) produced **660 witnesses** immediately.
+
+The transferable lesson is in (3): a grid search over a defect window narrower than
+the grid spacing returns "falsified" and reads like a finding. A blind sweep needs
+its resolution justified against the width of the thing it is looking for, or it is
+not evidence of absence.
+
+### 9.7 Verification
+
+- **Regression test, fails before and passes after** —
+  `bnb::milp_driver::tests::rc_fix_never_excludes_an_improving_point_when_the_divisor_cancels`,
+  built on the §9.3 witness. Seven counted assertions and a final
+  `assert_eq!(asserts, 7)` (§6). Against the reverted divisor — verified by the
+  absence of `deflated_magnitude` from the function, not assumed — it fails with
+  `new_u[0] = 2.0`; with the fix it passes with `new_u[0] = 3.0`, still a real
+  tightening from `10.0`. The fixing is `.expect()`-ed rather than `if let`-ed, so a
+  `None` cannot satisfy "the optimum survived" trivially.
+- **Capability control** — `rc_fix_still_fixes_an_ordinary_well_scaled_column`
+  passes on **both** arms, so the fix cannot have bought soundness by disabling
+  reduced-cost fixing. A soundness test that passes when the feature is off is not a
+  test.
+- `cargo test -p discopt-core`: 768 passed, 0 failed.
+- `pytest -m smoke`: 1952 passed, 2 skipped.
+- `pytest -m slow python/tests/test_adversarial_recent_fixes.py`: 19 passed.
+- **§5 differential panel** — bound-changing regime (node counts move), not
+  bound-neutral. Two *builds* rather than a flag, since an unconditional soundness
+  fix on a default-ON path is not a graduation candidate; each arm asserts the
+  `reduced_cost_errors` marker present/absent at startup, so measuring the same build
+  twice is caught. Script:
+  `discopt_benchmarks/scripts/issue1409_rc_fix_divisor_panel.py`. Result in §9.8.
+
+### 9.8 Panel result
+
+Run 2026-09-21 on the 66-instance in-repo corpus at 60 s/instance, two *builds*
+(`base` = `29ef5423`, `fix` = this branch). Each arm printed its load gate before
+measuring (CLAUDE.md §8) — distinct `discopt.__file__` **and** distinct `_rust.abi3.so` per
+worktree, with the `#1409 divisor bound` marker asserted **ABSENT** on `base` and
+**PRESENT** on `fix`, so measuring the same build twice would have been caught.
+
+| check | result |
+|---|---|
+| compared instances | 66 |
+| unstable (excluded from the differential) | **0** |
+| `incorrect_count` | **0** |
+| certification regressions | **0** |
+| bound moved past a reference optimum | **0** |
+| objective drift beyond `rel=1e-4` | **0** |
+| **BAR 1 cert-clean** | **PASS** |
+
+BAR 2 (net-positive) does not apply: this is an unconditional soundness fix on a
+default-ON path, not a flag graduation. The bar it must clear is *cert-clean and not
+broadly harmful*, reported below.
+
+#### Node counts
+
+**64 of 66 instances are exactly node-identical between the arms.** The two that
+differ are exactly the two that **hit the 60 s limit**:
+
+| instance | base | fix | delta | status (both arms) |
+|---|---|---|---|---|
+| `tanksize` | 6634 | 6650 | +16 | `time_limit` |
+| `tspn10` | 479 | 511 | +32 | `feasible`, 60.1 s |
+
+Under a time limit the node count measures *throughput*, not the size of the search
+tree, and both arms of the panel were run back-to-back while `cargo clippy`, the test
+suite and corpus scans were also on the machine. Per §9 that makes these two numbers
+uninterpretable as a search-tree effect without a quiet control, so both instances were
+re-run **interleaved** (`base, fix, base, fix, base, fix`), 3 reps per arm, on an
+otherwise idle machine (load 2.88 at start, 3.62 at end):
+
+| instance | arm | values | mean | sd |
+|---|---|---|---|---|
+| `tanksize` | base | 6650, 6643, 6645 | 6646.00 | 3.61 |
+| `tanksize` | fix  | 6658, 6641, 6634 | 6644.33 | 12.34 |
+| `tspn10`   | base | 511, 479, 479 | 489.67 | 18.48 |
+| `tspn10`   | fix  | 511, 511, 511 | 511.00 | **0.00** |
+
+**Both contended-panel values lie inside the quiet envelope of *either* arm**
+(`tanksize` [6634, 6658] contains both 6634 and 6650; `tspn10` [479, 511] contains both
+479 and 511), so neither panel delta is distinguishable from run-to-run variance.
+
+Two further observations, both against a regression:
+
+- `tanksize`'s **dual bound is bit-identical (`0.8701341215386577`) in all six quiet
+  runs and in both panel arms**. Only the number of nodes that fit into 60 s moves; the
+  search itself is unchanged. The delta of means is `-1.67` — the *fix* arm explored
+  slightly fewer nodes on average, the opposite sign to the panel's `+16`.
+- `tspn10` (MINIMIZE, so a higher dual bound is tighter) returned
+  `179.05495372536387` in **all three** fix reps, while `base` returned three
+  *different* bounds (`179.05495372536387`, `179.01224366648097`, `179.02567197443764`).
+  The fix arm is both perfectly reproducible (sd 0) and weakly *better*: its bound
+  equals the best value `base` ever reached and exceeds it in two of three reps. Both
+  arms stay far below `=bestdual= 222.4932607`, so no bound is invalid.
+
+#### Interpretation
+
+The fix deflates the reduced-cost divisor by its own round-off bound, so it can only
+ever *weaken* reduced-cost fixing — fix fewer columns, never more. The expected
+signature is therefore "identical or slightly more nodes, never a worse bound", and
+that is what the panel shows: zero bound, certification and objective movement
+anywhere on the corpus, with node movement confined to two instances whose node count
+is a throughput measure and which show no effect once measured under quiet load.
