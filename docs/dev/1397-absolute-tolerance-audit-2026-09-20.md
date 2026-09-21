@@ -877,3 +877,43 @@ left alone because a change with no demonstrated defect behind it is exactly the
 hypothesis-driven work CLAUDE.md §4 forbids, and because it would widen the
 bound-affecting surface of a PR whose differential panel covers the changes that do
 have a demonstrated defect behind them.
+
+### 6.14 Two more `node_reduce` constants: strength knobs, not soundness gates
+
+An audit helper flagged `node_reduce._EPS = 1e-7` as a sibling of the reduced-cost
+deadband fixed in §6.3, on the grounds that it is an absolute constant compared
+against `ub[j] - cand`, which is scale-dependent. The observation about the units is
+right; the classification is not, and the distinction is the one §4's check list
+exists to make.
+
+```python
+cand = lb[j] + gap / d_safe        # the bound; _EPS does not appear
+if cand < ub[j] - _EPS:            # ... only whether to record it
+    ub[j] = max(lb[j], cand)
+```
+
+`_EPS` does not participate in computing `cand`. It decides only whether an
+*already sound* bound is a large enough improvement to be worth writing down. Both
+error directions are therefore benign: too large and a valid tightening is skipped
+(strength lost, bound still correct); zero and a 1e-20 tightening is recorded
+(pointless, bound still correct). On a variable with `ub[j] = 1e12` the absolute
+1e-7 threshold does mean sub-1e-7 tightenings are never recorded — a real
+scale-dependence, and a real strength question, but not a soundness one. Contrast
+§6.3's `_RC_TOL`, which gates a *division* (`gap / d_safe`) and so sets the bound's
+value directly: over-stating `|d_j|` there shrinks the step and can fix the optimum
+out of the box. Same shape, opposite consequence.
+
+The neighbouring `np.floor(cand + 1e-9)` / `np.ceil(cand - 1e-9)` integrality nudges
+are also scale-exposed — at `cand = 1e10` the 1e-9 is far below the ulp (1.9e-6) and
+the nudge silently becomes a no-op — but they are sound in *both* regimes, because
+the nudge direction only ever weakens. For an upper bound, `floor(cand + 1e-9)` can
+return 3 where the exact floor is 2; that is a looser upper bound, hence sound. When
+the nudge vanishes at large magnitude, the plain floor is returned, which is also
+sound. A constant whose failure mode in every regime is "weaker bound" is not a
+#1397 defect.
+
+Both are recorded here rather than fixed, so the next reader can see they were
+examined and why they were left. This is the audit's own standard applied to its
+helpers' findings: a site is a defect when an absolute constant is compared against
+a scale-dependent quantity **and** an error in that comparison can make a bound
+wrong. The second half of that conjunction is doing most of the work.
