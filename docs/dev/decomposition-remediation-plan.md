@@ -82,7 +82,17 @@ Every task below traces to one of these findings. Line numbers are as of commit
 | A5 | GBD: **no feasibility cuts** — infeasible recourse handled only by no-good cuts on an all-binary master (exponential), else `NotImplementedError` mid-solve. | `benders/gbd.py:387-398, 422-427, 453-457` |
 | A6 | Advisor never proposes **OA** for convex MINLP although OA cuts dominate GBD cuts (Duran & Grossmann 1986) and `solvers/oa.py` exists. GBD hardcoded `cut_strength=0.6` vs Benders 0.9; no OA candidate. | `advisor/candidates.py:98-130`, `advisor/scoring.py:122-134` |
 | A7 | `MethodKind.INDEPENDENT_BLOCKS` falls back to **monolithic** `model.solve()`; the parallel layer (`ThreadPoolComm`, `SchedulingGraph`, `map_subproblems`) has **no caller** in any solve path. | `ir/reformulation.py:92-98` |
-| A8 | Nonconvex models: GBD runs heuristically (`bound=None`). No NGBD-style rigorous alternative using the existing McCormick/relaxation machinery in `_relax/`. | `benders/gbd.py:44-56` |
+| A8 | Nonconvex models: GBD runs heuristically (`bound=None`). No NGBD-style rigorous alternative using the existing McCormick/relaxation machinery in `_relax/`. | `benders/gbd.py:44-56` 
+
+> **A8 has a second candidate answer (2026-09-21).** Besides the NGBD spike (T3.3, not
+> run), the scenario-decomposed global B&B of Cao & Zavala (2019) — relax
+> non-anticipativity for the node lower bound, fix the first stage for the upper bound,
+> branch on the first-stage variables only — attacks the same gap from the B&B side
+> rather than the cut side. Planned separately in
+> `docs/dev/scenario-decomposed-global-bb-plan.md`, which carries its own entry
+> experiment and verdict. Its scope is `discopt.stochastic`; the general block-angular
+> generalisation (SNoGloDe) still needs the `Model.subset` primitive that deferred T1.4.
+
 
 ### Scalability / engineering (S)
 
@@ -430,6 +440,12 @@ true value function from below), and compare that bound with the AMP global
 solver's root bound. Record in §7: bound quality, wall time, and integration cost.
 Only if the bound is competitive does a full NGBD task get scheduled (new plan
 section, not this one).
+
+**Cross-reference (2026-09-21):** `docs/dev/scenario-decomposed-global-bb-plan.md` is the
+competing answer to A8 and has run *its* entry experiment. If that method is adopted,
+re-scope T3.3 before running it — the two produce rigorous bounds for the same class, and
+NGBD's advantage (finite termination with an all-integer first stage) is orthogonal to the
+other's (branching dimension independent of the scenario count).
 
 ---
 
