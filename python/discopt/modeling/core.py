@@ -8125,6 +8125,51 @@ class Model:
                 result.status,
             )
 
+        # --- The objective must be THIS model's objective at the returned point -
+        #
+        # A solve may run on a REFORMULATED model -- `factorable_reformulate`
+        # lifts subexpressions into `_fr_aux_*` columns, `reformulate_integer_*`
+        # binary-expands integer factors into `_ipx_*` columns -- and the value it
+        # reports is that lifted model's objective at the lifted point. The lift is
+        # exact in exact arithmetic, but its big-M rows carry the binary-expansion
+        # weights, so a row violation INSIDE the absolute feasibility tolerance
+        # buys objective in proportion to those weights.
+        #
+        # Measured on `nvs07` via the NLP-BB route (minlplib optimum 4.0). The
+        # lifted model is `factorable -> integer-bilinear`, 84 columns, 261 rows:
+        #
+        #   reported objective   3.9992714241881955   gap_certified=True
+        #   lifted objective at the reported point    3.9992714241881955  (agrees)
+        #   worst lifted row violation                9.82e-09  (gate is 1e-06)
+        #   THIS model's objective at that same point 4.000005454149035
+        #
+        # 64 lifted rows sit violated by ~1e-9..1e-8, each a big-M row whose
+        # objective sensitivity reaches 3.3e+04; the objective slack they can buy
+        # totals 7.345e-04 against an observed super-optimality of 7.286e-04. So
+        # the solve certified a value 7.3e-04 BELOW an attainable optimum -- a
+        # false optimal, CLAUDE.md #1's worst class -- while every check it ran
+        # agreed with it, because they all ran in the lifted space.
+        #
+        # The user's model is the arbiter of what its objective is. `self` is
+        # pristine here: the reformulations rebind `solve_model`'s local, never
+        # this object (root cuts may APPEND rows, which cannot change the
+        # objective). Downgrade-only: this replaces a number, and then the shared
+        # certificate guard re-tests the pair, so a gap that existed only in
+        # lifted space is withdrawn rather than republished.
+        #
+        # This makes the REPORT honest; it does not make the lift exact. The gate
+        # still measures an absolute row violation against rows whose objective
+        # sensitivity the lift itself introduced, so the search still explores a
+        # space that is not equivalent to this model at solver tolerance. That is
+        # tracked in #1414 (with #1380's unfiled follow-up folded into it); this
+        # reconciliation is the CLAUDE.md #3 workaround that ships alongside it.
+        if (
+            isinstance(result, SolveResult)
+            and result.objective is not None
+            and result.x is not None
+        ):
+            self._reconcile_objective_with_model(result)
+
         # --- #1313: remember the point this model was solved to ---------------- #
         # ``Model.sensitivity()`` runs its own local NLP, whose starting point
         # decides which local solution the derivatives describe on a nonconvex
@@ -8155,6 +8200,118 @@ class Model:
             self._last_solve_result = result
 
         return result
+
+    def _reconcile_objective_with_model(self, result: "SolveResult") -> None:
+        """Make ``result.objective`` this model's objective at ``result.x``.
+
+        See the call site for the measurement this exists for. Best-effort by
+        design in ONE direction only: when the check cannot be made it leaves the
+        result exactly as it was (no worse than before) and says so at WARNING,
+        so a silently skipped check is visible rather than indistinguishable from
+        a passing one. When the check CAN be made, its verdict is final.
+        """
+        import logging as _logging
+
+        import numpy as _np
+
+        _log = _logging.getLogger(__name__)
+
+        # The evaluator can only speak for an objective that lives in
+        # ``_objective``. ``add_linear_objective`` / ``add_quadratic_objective``
+        # put the real objective in the Rust BUILDER and leave a zero placeholder
+        # here, flagged ``_is_placeholder``; evaluating that placeholder returns
+        # 0.0 for every point. Caught by the smoke suite (#681 builder tests):
+        # this pass "corrected" a correct objective of 3 to 0 and then withdrew a
+        # valid certificate because the bound then crossed it. A reconciliation
+        # that cannot see the objective must not have an opinion about it.
+        if self._objective is None or getattr(self._objective, "_is_placeholder", False):
+            _log.debug(
+                "objective reconciliation skipped: this model's objective is not "
+                "resident in `_objective` (builder-held or absent), so the "
+                "evaluator cannot represent it."
+            )
+            return
+
+        point = result.x
+        if point is None or result.objective is None:
+            return
+
+        try:
+            flat: list[float] = []
+            for v in self._variables:
+                if v.name not in point:
+                    _log.warning(
+                        "objective reconciliation skipped: the result carries no value "
+                        "for %r, so this model's objective cannot be evaluated at the "
+                        "point being reported; leaving objective=%r as the solver "
+                        "reported it.",
+                        v.name,
+                        result.objective,
+                    )
+                    return
+                flat.extend(_np.atleast_1d(_np.asarray(point[v.name], float)).ravel().tolist())
+            from discopt._tape_nlp_evaluator import make_evaluator
+
+            ev = make_evaluator(self)
+            f_internal = float(ev.evaluate_objective(_np.asarray(flat, float)))
+        except Exception as exc:  # pragma: no cover - evaluator robustness
+            _log.warning(
+                "objective reconciliation skipped (%s: %s); leaving objective=%r as "
+                "the solver reported it.",
+                type(exc).__name__,
+                exc,
+                result.objective,
+            )
+            return
+
+        f_declared = -f_internal if getattr(ev, "_negate", False) else f_internal
+        if not _np.isfinite(f_declared):
+            _log.warning(
+                "objective reconciliation skipped: this model's objective at the "
+                "reported point is %r; leaving objective=%r.",
+                f_declared,
+                result.objective,
+            )
+            return
+
+        reported = float(result.objective)
+        if abs(f_declared - reported) <= 1e-9 * (1.0 + abs(reported)):
+            return
+
+        _log.warning(
+            "%s: reporting this model's objective at the returned point (%.12g) "
+            "rather than the solver's internal value (%.12g); they differ by %.3e, "
+            "which means the solve ran on a reformulated model whose optimum does "
+            "not transfer at this tolerance.",
+            self.name,
+            f_declared,
+            reported,
+            f_declared - reported,
+        )
+        result.objective = f_declared
+
+        # The certificate was granted against the number just replaced. Re-test it
+        # with the same arbiter every other site uses.
+        from discopt.solver import _withhold_stale_certificate
+
+        _is_max = self._objective is not None and self._objective.sense == ObjectiveSense.MAXIMIZE
+        status, gap, certified, bound = _withhold_stale_certificate(
+            result.status,
+            result.objective,
+            result.bound,
+            result.gap,
+            bool(getattr(result, "gap_certified", False)),
+            _is_max,
+            1e-4,
+            1e-6,
+            f"{self.name}: objective reconciliation",
+        )
+        result.status, result.gap, result.gap_certified, result.bound = (
+            status,
+            gap,
+            certified,
+            bound,
+        )
 
     def sensitivity(
         self,
