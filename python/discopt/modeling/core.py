@@ -8225,10 +8225,14 @@ class Model:
             )
             return
 
+        point = result.x
+        if point is None or result.objective is None:
+            return
+
         try:
             flat: list[float] = []
             for v in self._variables:
-                if v.name not in result.x:
+                if v.name not in point:
                     _log.warning(
                         "objective reconciliation skipped: the result carries no value "
                         "for %r, so this model's objective cannot be evaluated at the "
@@ -8238,7 +8242,7 @@ class Model:
                         result.objective,
                     )
                     return
-                flat.extend(_np.atleast_1d(_np.asarray(result.x[v.name], float)).ravel().tolist())
+                flat.extend(_np.atleast_1d(_np.asarray(point[v.name], float)).ravel().tolist())
             from discopt._tape_nlp_evaluator import make_evaluator
 
             ev = make_evaluator(self)
