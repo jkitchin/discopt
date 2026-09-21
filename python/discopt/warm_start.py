@@ -223,8 +223,45 @@ def check_feasibility(
     Returns a tuple ``(is_feasible, violations)`` where *violations* is a
     list of human-readable strings describing any constraint or bound
     violations found.
+
+    **This verifier fails closed (#1402).** It is used as the *independent*
+    feasibility check behind a reported incumbent, so "I could not evaluate the
+    point" must never be reported as "the point is feasible". Every way of not
+    reaching a verdict — a wrong-length vector, a non-finite entry, an evaluator
+    that raises, a constraint that evaluates to NaN — yields ``False`` with a
+    violation naming the reason. Two mechanisms previously returned
+    ``(True, [])`` for a point that was never checked:
+
+    * the constraint arm's ``except Exception`` left ``violations`` empty, so an
+      evaluator error read as a clean bill of health (measured: a length-1 vector
+      for a 2-variable model, whose evaluator raises ``ValueError``, was reported
+      feasible for a model infeasible everywhere in its box);
+    * every violation test is a *strict* comparison, and every strict comparison
+      against NaN is ``False``, so an all-NaN point passed both the bounds loop
+      and all three sense branches with no exception raised at all.
     """
     violations: list[str] = []
+
+    # #1402 mechanism A, first half: a length mismatch is why the evaluator
+    # raises, so name it here rather than letting it surface as an opaque error.
+    x_flat = np.asarray(x_flat, dtype=float).ravel()
+    n_expected = sum(int(v.size) for v in model._variables)
+    if x_flat.size != n_expected:
+        violations.append(
+            f"solution vector has {x_flat.size} entries but the model has "
+            f"{n_expected} variable entries: the point cannot be checked"
+        )
+        return False, violations
+
+    # #1402 mechanism B: NaN/inf fail every strict comparison below, so gate on
+    # finiteness explicitly instead of letting the comparisons pass them through.
+    if not np.all(np.isfinite(x_flat)):
+        n_bad = int(np.sum(~np.isfinite(x_flat)))
+        violations.append(
+            f"solution vector has {n_bad} non-finite entr{'y' if n_bad == 1 else 'ies'} "
+            "(NaN or inf): the point cannot be checked"
+        )
+        return False, violations
 
     # Variable bounds
     offset = 0
@@ -259,6 +296,17 @@ def check_feasibility(
                 if not isinstance(c, Constraint):
                     continue
                 val = cons[idx]
+                if not np.isfinite(val):
+                    # #1402 mechanism B in the constraint arm: a NaN body fails
+                    # `val > tol`, `abs(val) > tol` and `val < -tol` alike, so
+                    # without this the row is silently treated as satisfied.
+                    name = c.name or f"constraint_{idx}"
+                    violations.append(
+                        f"Constraint '{name}': body evaluated to {val!r}, so the row "
+                        "cannot be checked"
+                    )
+                    idx += 1
+                    continue
                 if c.sense == "<=":
                     if val > tol:
                         name = c.name or f"constraint_{idx}"
@@ -275,7 +323,17 @@ def check_feasibility(
                         violations.append(f"Constraint '{name}': value {val:.6g} < 0 (sense >=)")
                 idx += 1
     except Exception as e:
-        logger.debug("Feasibility check skipped (evaluator error): %s", e)
+        # #1402 mechanism A: this arm used to log at DEBUG and fall through to
+        # `return len(violations) == 0`, so an evaluator error produced
+        # `(True, [])` — "verified feasible" for a point whose constraints were
+        # never evaluated. The log message said "skipped"; the return value said
+        # "verified". A verifier that cannot verify must answer no (CLAUDE.md §3,
+        # §7): the error becomes a violation rather than a silence.
+        logger.debug("Feasibility check could not evaluate constraints: %s", e)
+        violations.append(
+            f"constraints could not be evaluated ({type(e).__name__}: {e}); "
+            "feasibility is NOT verified"
+        )
 
     return len(violations) == 0, violations
 
