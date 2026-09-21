@@ -1882,20 +1882,30 @@ class QuadraticEqualityBoundsRule(NonlinearBoundTighteningRule):
                 float(tightened_lb[square_idx]),
                 float(tightened_ub[square_idx]),
             )
-            linear_target_values = (
-                -constant_term - square_coeff * square_min,
-                -constant_term - square_coeff * square_max,
-            )
-            # #1397: this range is a difference of ``constant_term`` (itself a signed
-            # sum) and the scaled square activity, so widen it outward by the
-            # round-off of those terms before it becomes a bound on the affine
-            # variable. Without it the row ``y - x**2 + 0.4e + M - M - 0.3e == 0``
-            # -- exactly ``y = x**2 + 0.1*spacing(M)``, satisfied by y = 0, x ~ 0 --
-            # pushed y's lower bound up to ``0.3*spacing(M)`` and the box against a
-            # fixed y = 0 was reported empty, at every M from 1e12 up.
-            linear_target_slack = _roundoff_slack(
-                constant_absum, square_coeff * square_min, square_coeff * square_max
-            )
+            # #1397: each endpoint is a difference of ``constant_term`` (itself a
+            # signed sum) and the scaled square activity, so widen it outward by the
+            # round-off of the terms THAT endpoint was built from before it becomes a
+            # bound on the affine variable. Without any widening the row
+            # ``y - x**2 + 0.4e + M - M - 0.3e == 0`` -- exactly
+            # ``y = x**2 + 0.1*spacing(M)``, satisfied by y = 0, x ~ 0 -- pushed y's
+            # lower bound up to ``0.3*spacing(M)`` and the box against a fixed y = 0
+            # was reported empty, at every M from 1e12 up.
+            #
+            # #1415: the two endpoints get their OWN bounds, not one bound over both.
+            # ``square_min`` and ``square_max`` are separate quantities from separate
+            # arithmetic; lumping them charged each endpoint the other's magnitude,
+            # which on a wide box is the only magnitude in the row. Measured on
+            # ``y - exp(x) == 0, x - y**2 == 0`` over the +-9.999e19 default box: at
+            # ``square_min = 0`` (a box straddling zero, so the lower endpoint is
+            # exact) the lumped bound still widened it by ``8*eps*square_max``, which
+            # at ``y_ub ~ 1.8e5`` is 5.6e-5 -- so ``x >= 0`` came out ``x >= -5.6e-5``
+            # and the ``y = exp(x) >= 1`` that follows from it came out 0.99994.
+            # Per-endpoint is the same bound restricted to the terms each endpoint
+            # actually differenced, so it is no less sound and never wider.
+            linear_target_min_value = -constant_term - square_coeff * square_min
+            linear_target_max_value = -constant_term - square_coeff * square_max
+            linear_target_min_slack = _roundoff_slack(constant_absum, square_coeff * square_min)
+            linear_target_max_slack = _roundoff_slack(constant_absum, square_coeff * square_max)
             _tighten_affine_argument_interval(
                 tightened_lb,
                 tightened_ub,
@@ -1903,33 +1913,60 @@ class QuadraticEqualityBoundsRule(NonlinearBoundTighteningRule):
                 linear_idx,
                 linear_coeff,
                 linear_offset,
-                arg_lb=min(linear_target_values) - linear_target_slack,
-                arg_ub=max(linear_target_values) + linear_target_slack,
+                arg_lb=min(
+                    linear_target_min_value - linear_target_min_slack,
+                    linear_target_max_value - linear_target_max_slack,
+                ),
+                arg_ub=max(
+                    linear_target_min_value + linear_target_min_slack,
+                    linear_target_max_value + linear_target_max_slack,
+                ),
             )
 
             linear_endpoint_a = linear_coeff * float(tightened_lb[linear_idx]) + linear_offset
             linear_endpoint_b = linear_coeff * float(tightened_ub[linear_idx]) + linear_offset
             linear_expr_lb = min(linear_endpoint_a, linear_endpoint_b)
             linear_expr_ub = max(linear_endpoint_a, linear_endpoint_b)
-            required_square_values = (
-                (-constant_term - linear_expr_lb) / square_coeff,
-                (-constant_term - linear_expr_ub) / square_coeff,
-            )
-            required_square_lb = min(required_square_values)
-            required_square_ub = max(required_square_values)
             # #1397: the round-off of ``(-constant_term - linear_expr) / square_coeff``,
-            # in square units. Two pieces, kept separate because they live in
-            # different units: the row-unit accumulation error divided by the same
-            # coefficient the value was, plus the error of squaring the box, which is
-            # already in square units.
-            square_slack = (
-                _roundoff_slack(constant_absum, linear_expr_lb, linear_expr_ub) / abs(square_coeff)
-            ) + _roundoff_slack(square_min, square_max)
+            # in square units -- the row-unit accumulation error divided by the same
+            # coefficient the value was.
+            #
+            # #1415: per endpoint, for the reason given above. The two required-square
+            # values are built from ``linear_expr_lb`` and ``linear_expr_ub``
+            # separately, and the squared box error that used to be lumped in with
+            # them belongs to ``square_min``/``square_max`` -- so it is carried by
+            # those two candidates below instead of being charged to both sides of
+            # the required range.
+            required_square_lo_value = (-constant_term - linear_expr_lb) / square_coeff
+            required_square_hi_value = (-constant_term - linear_expr_ub) / square_coeff
+            required_square_lo_slack = _roundoff_slack(constant_absum, linear_expr_lb) / abs(
+                square_coeff
+            )
+            required_square_hi_slack = _roundoff_slack(constant_absum, linear_expr_ub) / abs(
+                square_coeff
+            )
+            required_square_lb = min(
+                required_square_lo_value - required_square_lo_slack,
+                required_square_hi_value - required_square_hi_slack,
+            )
+            required_square_ub = max(
+                required_square_lo_value + required_square_lo_slack,
+                required_square_hi_value + required_square_hi_slack,
+            )
             # Widen outward before these become inferences: lower side down, upper
             # side up. Raising the lower side on rounding noise would lift the inner
-            # radius in the preimage below and carve out feasible points.
-            feasible_square_lb = max(required_square_lb - square_slack, square_min, 0.0)
-            feasible_square_ub = min(required_square_ub, square_max) + square_slack
+            # radius in the preimage below and carve out feasible points. ``square_min``
+            # and ``square_max`` come out of one multiply each, so each carries its own
+            # magnitude's round-off and no other's.
+            feasible_square_lb = max(
+                required_square_lb,
+                square_min - _roundoff_slack(square_min),
+                0.0,
+            )
+            feasible_square_ub = min(
+                required_square_ub,
+                square_max + _roundoff_slack(square_max),
+            )
             if feasible_square_lb > feasible_square_ub + 1e-12:
                 _prove_infeasible(
                     self.name,
@@ -2111,11 +2148,17 @@ class SquareDifferenceLowerBoundRule(NonlinearBoundTighteningRule):
 
             rhs_lb = constant_term
             rhs_ub = constant_term
-            # #1397: ``rhs_absum`` bounds the magnitude of the terms ``rhs_lb``/``rhs_ub``
-            # are signed sums of, so their round-off can be bounded. Seeded from the
+            # #1397: these bound the magnitude of the terms ``rhs_lb``/``rhs_ub`` are
+            # signed sums of, so their round-off can be bounded. Seeded from the
             # constant leaves' own abs-sum rather than from ``abs(constant_term)``,
             # which would read a cancelled constant as carrying no scale.
-            rhs_absum = const_absum
+            #
+            # #1415: one accumulator per side. ``rhs_lb`` sums the ``sq_lb`` terms and
+            # ``rhs_ub`` the ``sq_ub`` ones; a single accumulator over both charged
+            # each side the other's magnitude, which on a wide box (``sq_ub`` the
+            # square of a 1e10 bound, ``sq_lb`` exactly 0) is the whole bound.
+            rhs_lb_absum = const_absum
+            rhs_ub_absum = const_absum
             for flat_idx, coeff in positive:
                 sq_lb, sq_ub = QuadraticEqualityBoundsRule._square_interval(
                     float(tightened_lb[flat_idx]),
@@ -2123,15 +2166,17 @@ class SquareDifferenceLowerBoundRule(NonlinearBoundTighteningRule):
                 )
                 rhs_lb += coeff * sq_lb
                 rhs_ub += coeff * sq_ub
-                rhs_absum += abs(coeff * sq_lb) + abs(coeff * sq_ub)
+                rhs_lb_absum += abs(coeff * sq_lb)
+                rhs_ub_absum += abs(coeff * sq_ub)
 
-            rhs_slack = _roundoff_slack(rhs_absum)
+            rhs_lb_slack = _roundoff_slack(rhs_lb_absum)
+            rhs_ub_slack = _roundoff_slack(rhs_ub_absum)
             # Infeasible only beyond the feasibility tolerance (issue #27a); a
             # sub-tolerance residual is feasible within tolerance and deferred.
             # And only beyond the round-off of the activity sum (#1397): squares of
             # a 1e7-wide box already reach 1e14, where one ulp of the sum dwarfs the
             # 1e-6 tolerance and a rounding residual reads as proof of infeasibility.
-            if rhs_ub < -_EMPTY_INTERVAL_FEAS_TOL - rhs_slack:
+            if rhs_ub < -_EMPTY_INTERVAL_FEAS_TOL - rhs_ub_slack:
                 _prove_infeasible(
                     self.name,
                     constraint,
@@ -2143,9 +2188,8 @@ class SquareDifferenceLowerBoundRule(NonlinearBoundTighteningRule):
             # bound OVER-estimated; the previous ``max(0.0, .../target_scale)`` did
             # neither, so a rounding residual could raise the inner radius and carve
             # a hole that excludes a feasible point.
-            square_slack = rhs_slack / target_scale
-            feasible_square_lb = max(0.0, rhs_lb / target_scale - square_slack)
-            feasible_square_ub = max(0.0, rhs_ub / target_scale + square_slack)
+            feasible_square_lb = max(0.0, (rhs_lb - rhs_lb_slack) / target_scale)
+            feasible_square_ub = max(0.0, (rhs_ub + rhs_ub_slack) / target_scale)
             if feasible_square_lb > feasible_square_ub + _EMPTY_INTERVAL_FEAS_TOL:
                 _prove_infeasible(
                     self.name,

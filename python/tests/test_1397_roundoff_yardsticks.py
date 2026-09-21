@@ -282,6 +282,117 @@ def test_the_tolerance_constant_itself_did_not_move():
     assert nbt._EMPTY_INTERVAL_FEAS_TOL == 1e-6
 
 
+# --------------------------------------------------------------------------- #
+# #1415: one bound per endpoint, not one bound over both
+#
+# The round-off bound above is a bound on the arithmetic that produced ONE
+# quantity. Where a rule computes an interval, its two endpoints are two separate
+# quantities from two separate accumulations, and handing both to one
+# ``_roundoff_slack`` call charges each endpoint the other's magnitude. On a wide
+# box that other magnitude is the only magnitude in the row, so the widening is
+# unbounded by anything the endpoint itself touched -- it is not a round-off bound
+# any more, it is the box width.
+#
+# This is the same lesson #1397 already recorded for ``bound_expression_error``
+# ("the endpoints fail separately, which is why it returns a pair"), applied to the
+# two square-rule sites that were still lumping. It costs no soundness: restricting
+# the bound to the terms an endpoint was actually differenced from is the same
+# bound, over a subset, so it is never wider and never under-states that endpoint's
+# error.
+#
+# Found by the AMP lane going red on ``main`` (#1415): ``y = exp(x), x = y**2``
+# over the +-9.999e19 default box. ``x >= y**2 >= 0`` is exact -- a box straddling
+# zero gives ``square_min = 0`` with no arithmetic at all -- yet the lumped bound
+# widened it by ``8*eps*square_max``, so ``x >= 0`` came out ``x >= -5.6e-5`` and
+# the ``y = exp(x) >= 1`` that follows came out ``y >= 0.99994``.
+# --------------------------------------------------------------------------- #
+
+#: Upper bounds whose square is large enough that ``8*eps*B**2`` swamps the exact
+#: lower endpoint. At 1e5 it is already 1.8e-5, past the 1e-6 tolerance.
+SQUARE_BOX_BOUNDS = (1e5, 1e8, 1e10, 1e12)
+
+
+@pytest.mark.parametrize("bound", SQUARE_BOX_BOUNDS)
+def test_an_exact_square_lower_endpoint_is_not_widened_by_the_upper_one(bound):
+    """``y = x**2`` over a box straddling zero: ``y >= 0`` is exact, so it must hold."""
+    m = dm.Model()
+    x = m.continuous("x", lb=-bound, ub=bound)
+    y = m.continuous("y", lb=-1e20, ub=1e20)
+    m.minimize(y)
+    m.subject_to(y - x * x == 0)
+
+    lb, _ub, stats = _declared_box_tightening(m)
+    assert "quadratic_equality_bounds" in stats.applied_rules
+    assert lb[1] == 0.0, (
+        f"|x| <= {bound:.0e}: y >= x**2 >= 0 came out y >= {lb[1]:.6e}. The lower "
+        f"endpoint is ``square_min = 0`` -- no arithmetic, no round-off -- so its "
+        f"widening is the upper endpoint's magnitude charged to it"
+    )
+
+
+@pytest.mark.parametrize("magnitude", MAGNITUDES)
+def test_the_shared_constant_still_widens_both_endpoints(magnitude):
+    """No-weakening arm: splitting the bound must not drop the constant's share.
+
+    The cancelling constant is differenced into *both* endpoints, so it stays in
+    both bounds. The cheap way to pass the arm above is to stop widening, which
+    would put back the #1397 defect this file exists for.
+    """
+    spacing = float(np.spacing(magnitude))
+    m = dm.Model()
+    x = m.continuous("x", lb=-1e10, ub=1e10)
+    y = m.continuous("y", lb=-1e20, ub=1e20)
+    m.minimize(y)
+    m.subject_to(y - x * x + 0.4 * spacing + magnitude - magnitude - 0.3 * spacing == 0)
+
+    lb, _ub, stats = _declared_box_tightening(m)
+    assert not stats.infeasible
+    assert lb[1] <= 0.0, (
+        f"M={magnitude:.0e}: the row is ``y = x**2 + 0.1*spacing(M)`` in exact "
+        f"arithmetic and floats fold its constant to the wrong sign, so y's lower "
+        f"bound must still be widened below the float target; it came out "
+        f"{lb[1]:.6e}"
+    )
+
+
+@pytest.mark.parametrize("bound", SQUARE_BOX_BOUNDS)
+def test_a_square_difference_lower_bound_survives_a_wide_upper_endpoint(bound):
+    """``x**2 = y**2`` with ``y >= 3``: the ``x >= 3`` that follows must survive."""
+    m = dm.Model()
+    x = m.continuous("x", lb=0.0, ub=1e6)
+    y = m.continuous("y", lb=3.0, ub=bound)
+    m.minimize(x)
+    m.subject_to(-(x * x) + y * y == 0)
+
+    lb, _ub, stats = _declared_box_tightening(m)
+    assert "square_difference_lower_bound" in stats.applied_rules, (
+        f"y <= {bound:.0e}: the rule stopped firing entirely -- ``rhs_lb``'s slack "
+        f"was charged the magnitude of ``sq_ub``, which swallowed the whole bound"
+    )
+    # ``rhs_lb = 9`` is a sum of one term, so its own slack is ~1e-14 -- the pin is
+    # two-sided: below 3 the upper endpoint is leaking in, above 3 the slack has
+    # gone missing and a feasible x would be cut.
+    assert lb[0] == pytest.approx(3.0, abs=1e-9), (
+        f"y <= {bound:.0e}: x >= 3 came out x >= {lb[0]!r}"
+    )
+
+
+@pytest.mark.parametrize("magnitude", MAGNITUDES)
+def test_a_genuine_violation_is_still_proved_on_a_wide_square_box(magnitude):
+    """No-weakening arm for both rules at a box wide enough to hide the violation."""
+    m = dm.Model()
+    x = m.continuous("x", lb=-1e10, ub=1e10)
+    y = m.continuous("y", lb=0.0, ub=0.0)
+    m.minimize(x)
+    m.subject_to(y - x * x + magnitude - magnitude - _genuine(magnitude) == 0)
+
+    _lb, _ub, stats = _declared_box_tightening(m)
+    assert stats.infeasible, (
+        f"M={magnitude:.0e}: ``x**2 = -{_genuine(magnitude):.3e}`` stopped being "
+        f"proved infeasible -- the per-endpoint slack has become an amnesty"
+    )
+
+
 # ---------------------------------------------------------------------------------
 # #1397, second site: ``factorable_reform._ZERO_MARGIN`` -- the denominator sign gate
 #

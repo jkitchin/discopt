@@ -1634,3 +1634,129 @@ signature is therefore "identical or slightly more nodes, never a worse bound", 
 that is what the panel shows: zero bound, certification and objective movement
 anywhere on the corpus, with node movement confined to two instances whose node count
 is a throughput measure and which show no effect once measured under quiet load.
+
+## 10. #1415 — the round-off bound was right, its *scope* was not
+
+The AMP integration lane went red on `main` at `cedf1f3`, the merge of this audit's
+own §6 PR (#1407), and stayed red for three consecutive `main` commits. The failing
+assertion was in `python/tests/test_amp_integration.py`:
+
+```
+test_tighten_proves_exp_square_cycle_infeasible
+    assert tightened_lb[1] >= 1.0
+E   assert np.float64(0.9999439608414549) >= 1.0
+```
+
+This section records what that shortfall was, because it is a **second defect of the
+same family as the one this audit exists for**, introduced by the fix for the first.
+
+### 10.1 The mechanism
+
+`roundoff_slack(*terms)` bounds the round-off of **one** quantity, built from
+**those** terms. Where a rule computes an *interval*, its two endpoints are two
+separate quantities from two separate accumulations. Three sites handed both
+endpoints' terms to one call and charged the resulting bound to each endpoint:
+
+| file | site | lumped |
+| --- | --- | --- |
+| `nonlinear_bound_tightening.py` | `QuadraticEqualityBoundsRule`, linear target | `square_min` **and** `square_max` |
+| `nonlinear_bound_tightening.py` | `QuadraticEqualityBoundsRule`, required square | `linear_expr_lb` **and** `linear_expr_ub`; `square_min` **and** `square_max` |
+| `nonlinear_bound_tightening.py` | `SquareDifferenceLowerBoundRule` | one `rhs_absum` over every `sq_lb` **and** every `sq_ub` |
+
+On a wide box the endpoint that is *not* being computed carries the only magnitude
+in the row, so the widening is bounded by nothing the endpoint itself touched — it
+is the box width, not a round-off bound. This is §0's own defect class ("an absolute
+tolerance must not be asked a scale-dependent question") with the polarity reversed:
+here a *scale-dependent* yardstick is asked a question whose scale is somebody else's.
+
+The audit already had this lesson and recorded it one section away. §6.2's
+`bound_expression_error` returns a **pair** precisely because "a first, scalar-error
+version lost 92 of 303 — the endpoints fail separately". §6.1 did not carry it across.
+
+### 10.2 The measurement
+
+`y = exp(x)`, `x = y**2` over the ±9.999e19 default box — infeasible, and the
+tightening proves it. `x >= y**2 >= 0` is *exact*: a box straddling zero gives
+`square_min = 0` with no arithmetic at all. The lumped bound widened it by
+`8·eps·square_max` anyway, which at `y_ub ≈ 1.8e5` is `5.6e-5`, so `x >= 0` came out
+`x >= -5.6e-5` and the `y = exp(x) >= 1` that follows from it came out `0.99994`.
+
+Two arms, marker `#1415` asserted present/absent in the module actually loaded
+(§8 of CLAUDE.md), sweeping the box width:
+
+| `|x| <=` | `y >= x**2` lower bound, base | fixed | `x >= 3` from `x**2 = y**2`, `y in [3, B]`, base | fixed |
+| --- | --- | --- | --- | --- |
+| 1e5 | `-1.776e-05` | `0.0` | 2.9999970 | 3.0 |
+| 1e8 | `-17.76` | `0.0` | rule did not fire | 3.0 |
+| 1e10 | `-1.776e+05` | `0.0` | rule did not fire | 3.0 |
+| 1e12 | `-1.776e+05` | `0.0` | rule did not fire | 3.0 |
+
+The second rule does not merely lose strength: past 1e8 the lumped bound exceeds the
+whole `rhs_lb`, `max(0.0, ...)` clamps the inner radius to zero and
+`square_difference_lower_bound` stops appearing in `applied_rules` at all.
+
+### 10.3 The fix, and why it is not a weakening
+
+Each endpoint gets a bound over the terms **it** was differenced from. That is the
+same bound restricted to a subset of its terms, so it is never wider and never
+under-states that endpoint's own error — soundness is unchanged in direction and
+strength is restored. The shared constant (`constant_absum`, `const_absum`) is
+differenced into *both* endpoints and therefore stays in *both* bounds, which is why
+every §6 regression arm still passes unchanged.
+
+Pinned in `python/tests/test_1397_roundoff_yardsticks.py` under "#1415: one bound per
+endpoint", as sweeps with no-weakening arms: 8 of the new parametrizations fail on the
+base tree (marker asserted absent) and pass here; the no-weakening arms — the
+cancelling constant must still widen both endpoints, a genuine violation at the same
+magnitude must still be proved — pass on both trees, which is what they are for.
+
+### 10.4 The §5 differential panel
+
+`scripts/per_endpoint_roundoff_panel.py`, 66 in-repo instances
+(`python/tests/data/minlplib_nl/`), `max_nodes=300`, `time_limit=20 s`, the two
+arms interleaved **within** each instance with the order alternating so a machine
+that gets busier mid-run cannot systematically favour one (CLAUDE.md §9). Each arm
+runs in its own subprocess, which asserts the `#1415` marker present (fix) or
+absent (base) in the module it actually loaded before solving anything (§8); the
+panel first asserts the two arm files differ at all, so a green run cannot be the
+change compared against itself.
+
+**Bar 1 — cert-clean: PASS.**
+
+| check | result |
+| --- | --- |
+| executed comparisons (panel) | 214 |
+| dual bound above reference optimum (`known_optima.toml`, both arms, backstops included) | **0** of 32 comparisons |
+| `bound <= incumbent`, all four arm pairs, all 66 instances | **0** violations of 224 comparisons |
+| certification regressions (certified in base, not in fix) | **0** — 48 → 48 |
+| status contradictions | 0 |
+| objective drift beyond tolerance | 0 |
+| crashes on either arm | 0 |
+
+**Bar 2 — net-positive: neutral, which is the expected and wanted answer.** Over
+the 50 instances where neither arm hit the wall-clock backstop: **total nodes 1870
+→ 1870, zero instances whose node count moved, zero whose dual bound moved**; total
+wall 152.9 s → 154.0 s (+0.7 %, one interleaved run, within this machine's noise —
+no spread was collected, so no timing claim is made from it). This is the right
+outcome to want here: the change is a *bug fix on `main`*, not a proposed
+strengthening, so the bar it must clear is "changes nothing it should not", and a
+bit-identical node count on 50 instances is the strongest form of that.
+
+Two rows differ between arms at all, and both are time-limited (backstop) on both
+arms, i.e. outside the comparable set:
+
+* `nvs05` — identical node count (27), bound differing in the last two ulps
+  (`2.708077400890263` vs `...657`). Float noise from a wall-clock stop.
+* `tls2` — 63 vs 89 nodes, bound `2.84477` vs `2.86672` (both far under its
+  `5.3000000000` reference optimum, and the fix's is the *tighter* of the two).
+  This is the instance §8.6 already measured as **bimodal at the time limit**, with
+  the base arm contradicting itself across 9 reps with the fix's code not loaded.
+
+**Coverage limit, stated rather than implied.** Only 16 of the 66 corpus instances
+have an entry in `python/tests/data/known_optima.toml`, so the oracle comparison is
+32 arm-results, not 132. The `minlplib.solu` snapshot CLAUDE.md points at
+(`~/Dropbox/projects/discopt-minlp-benchmark/`) is not present in this environment.
+The `bound <= incumbent` invariant above is what covers the other 50: it needs no
+oracle and it is the certificate invariant CLAUDE.md §1 names, checked in both
+directions across arms so a bound that got unsoundly tighter on the fix arm is
+caught against the base arm's independently-found incumbent.
