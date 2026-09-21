@@ -17,6 +17,11 @@ effective-infinity threshold is ``1e19`` and is **not** ``SENTINEL_THRESHOLD``
 (``1e29``, the infeasibility-marker / bogus-incumbent threshold). Nothing here
 depends on ``QPLIB_2967``; the corpus row lives in
 ``scripts/audit_1401_sentinel_bound_reported.py``.
+
+That corpus row is no longer the only discriminating end-to-end instrument.
+``test_a_synthetic_model_reproduces_the_class_pre_fix`` reproduces the class
+from a model built in this file, in both senses, so the end-to-end guard does
+not rest on one corpus file remaining in the tree.
 """
 
 from __future__ import annotations
@@ -132,18 +137,18 @@ def test_bound_is_usable_classifies_the_boundary(value, usable):
 @pytest.mark.parametrize("bound", BOXES)
 @pytest.mark.parametrize("maximize", [True, False], ids=["max", "min"])
 def test_no_sentinel_derived_bound_is_ever_reported(bound, maximize):
-    """A forward GUARD, not the reproducer -- measured, these arms pass pre-fix too.
+    """A forward GUARD: measured, *these* arms pass pre-fix too.
 
-    Stated plainly so the next reader does not mistake a passing sweep for evidence
-    that the class reproduces synthetically: a box reaching the sentinel is NOT
-    sufficient to trigger #1401. The observed trigger needs the tainted-frontier
-    arithmetic a real instance produces, and the discriminating instrument is the
-    ``QPLIB_2967`` row of ``scripts/audit_1401_sentinel_bound_reported.py``
-    (baseline exit 1, fix exit 0). What discriminates *here* is the predicate block
-    above: 13 of this file's tests fail against pre-fix code.
+    A box reaching the sentinel is not by itself enough to trigger #1401 -- these
+    single-box arms report an ordinary bound on both sides of the fix. So this
+    sweep earns its place as the assertion that no *future* path re-opens the hole
+    on an ordinary large box, not as the reproducer.
 
-    This sweep earns its place as the assertion that no *future* path re-opens the
-    hole on an ordinary large box, which is the shape the class takes.
+    It is NOT true, however, that only a real instance can reproduce the class.
+    That was this file's original claim and it is withdrawn: a synthetic model
+    does reproduce it, and
+    ``test_a_synthetic_model_reproduces_the_class_pre_fix`` below is the arm that
+    does. See its docstring for the measurement.
     """
     res = _sentinel_box_model(bound, maximize).solve(time_limit=10.0)
     b = res.bound
@@ -180,4 +185,54 @@ def test_the_sweep_actually_reports_bounds():
     assert reported > 0, (
         f"all {checked} rows reported no usable bound at all -- the sweep cannot "
         "distinguish 'sentinels are refused' from 'nothing is ever reported'"
+    )
+
+
+@pytest.mark.parametrize("maximize", [True, False], ids=["max", "min"])
+def test_a_synthetic_model_reproduces_the_class_pre_fix(maximize):
+    """The DISCRIMINATING end-to-end arm, and it needs no corpus file.
+
+    A single sentinel-reaching box is not enough (see the sweep above), but a
+    *sum* of bilinear terms each pairing an unbounded column with a bounded one
+    is: every McCormick endpoint contributes a ``DEFAULT_VARIABLE_BOUND``-scale
+    term and the frontier minimum lands orders past the refusal point, which is
+    the same shape ``QPLIB_2967``'s tainted frontier takes.
+
+    Measured, both arms load-gated on ``solver._bound_is_usable`` being absent /
+    present (CLAUDE.md §8), ``max_nodes=8``::
+
+        pre-fix (ee6f572)   max bound=+2.9997000000000026e+20   <- sentinel reported
+                            min bound=-2.9997000000000026e+20   <- sentinel reported
+        fixed   (754b3c1)   max bound=None                      <- honest
+                            min bound=None                      <- honest
+
+    This retracts the claim this file shipped with -- that "a box reaching the
+    sentinel is NOT sufficient ... the observed trigger needs the tainted-frontier
+    arithmetic a real instance produces". The trigger needs tainted-frontier
+    arithmetic, yes; it does not need a real instance to produce it. The
+    distinction matters because it decides whether the class keeps an end-to-end
+    guard if the QPLIB corpus is ever trimmed.
+    """
+    m = dm.Model("sentinel_sum_bilinear")
+    ys = [m.continuous(f"y{i}") for i in range(3)]  # unbounded -> 9.999e19 box
+    zs = [m.continuous(f"z{i}", lb=-1.0, ub=1.0) for i in range(3)]
+    k = m.integer("k", lb=0, ub=2)
+    obj = 0
+    for y, z in zip(ys, zs):
+        m.subject_to(y * z <= 1.0)
+        m.subject_to(y * z >= -1.0)
+        obj = obj + y * z
+    (m.maximize if maximize else m.minimize)(obj + 0.25 * k)
+
+    res = m.solve(max_nodes=8, time_limit=120.0)
+    b = res.bound
+    if b is None:
+        return  # "no bound" is the honest report
+    b = float(b)
+    assert not (np.isfinite(b) and abs(b) >= EFF_INF), (
+        f"{'max' if maximize else 'min'}: reported bound={b!r}, which is finite "
+        f"but {abs(b) / EFF_INF:.1f}x past the {EFF_INF:g} effective-infinity "
+        "refusal -- the LP sentinel propagated through arithmetic, not a bound "
+        f"anyone proved (objective={res.objective!r}, "
+        f"gap_certified={getattr(res, 'gap_certified', None)})"
     )

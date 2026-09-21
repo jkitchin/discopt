@@ -19,9 +19,21 @@ from .checkpoints import Checkpoint
 if TYPE_CHECKING:
     from .steer import DebugSteer
 
-# Bounds sentinel used by the solver for infeasible / failed relaxations. Kept
-# in sync with solver._SENTINEL_THRESHOLD; values at/above this are "no bound".
-_SENTINEL_THRESHOLD = 1e19
+# "No bound" cutoff for the DEBUG DISPLAY: an incumbent at or above this
+# magnitude is the LP layer's infinity sentinel carried through arithmetic, not
+# a number to show a user.
+#
+# #1401: renamed from ``_SENTINEL_THRESHOLD``, which collided with
+# ``solver._SENTINEL_THRESHOLD`` -- same identifier, DIFFERENT value (1e29) and a
+# different question ("is this the infeasibility marker?" vs "is this
+# effectively infinite?"). The old comment here claimed the two were "kept in
+# sync"; they never were, and that claim is exactly the confusion that made the
+# first draft of the #1401 fix a no-op. 1e19 is the right value for the question
+# this module asks, so the value is unchanged -- only the name and the false
+# claim go. Deliberately a module-local constant, not an import of
+# ``solver._EFF_INF_BOUND``: the debug layer must not take a dependency on the
+# solver module to display a number.
+_NO_BOUND_MAGNITUDE = 1e19
 
 
 @dataclass
@@ -108,7 +120,7 @@ class DebugContext:
         inc_obj: Optional[float] = None
         if inc is not None:
             _, obj = inc
-            if np.isfinite(obj) and obj < _SENTINEL_THRESHOLD:
+            if np.isfinite(obj) and obj < _NO_BOUND_MAGNITUDE:
                 inc_obj = float(obj)
 
         gap = stats.get("gap")
@@ -150,7 +162,7 @@ class DebugContext:
         inc = state.get("incumbent")
         inc_obj = (
             float(inc)
-            if inc is not None and np.isfinite(inc) and float(inc) < _SENTINEL_THRESHOLD
+            if inc is not None and np.isfinite(inc) and float(inc) < _NO_BOUND_MAGNITUDE
             else None
         )
         gap = state.get("gap")
