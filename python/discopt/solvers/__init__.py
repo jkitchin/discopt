@@ -56,6 +56,14 @@ class LPResult:
     objective: Optional[float] = None
     dual_values: Optional[np.ndarray] = None
     reduced_costs: Optional[np.ndarray] = None
+    #: #1397: per-column round-off scale of ``reduced_costs`` -- the sum of absolute
+    #: magnitudes of the two terms that difference was taken of. A reduced cost is a
+    #: *difference*, so its own size says nothing about how much of it is arithmetic
+    #: noise, and reduced-cost fixing DIVIDES the optimality gap by it: an
+    #: over-stated ``|d_j|`` tightens too far and can fix the optimum out of the box.
+    #: ``None`` when the engine did not report one, which means a consumer must not
+    #: trust a small ``d_j`` (see ``solver._reduced_cost_fixing``).
+    rc_absum: Optional[np.ndarray] = None
     basis: Optional[object] = None
     iterations: int = 0
     wall_time: float = 0.0

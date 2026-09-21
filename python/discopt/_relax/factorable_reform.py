@@ -60,7 +60,12 @@ from discopt.modeling.core import (
 )
 from discopt.mpec import ComplementarityProvenanceError, carry_complementarities
 
-from .gdp_reformulate import _bound_expression, _collect_variables, _is_linear
+from .gdp_reformulate import (
+    _bound_expression,
+    _collect_variables,
+    _is_linear,
+    bound_expression_error,
+)
 from .term_classifier import _get_flat_index, distribute_products
 
 # A denominator counts as sign-definite only when its interval is bounded away
@@ -875,6 +880,34 @@ def _lift_objective_atoms(expr: Expression, model: Model, lifter: "_Lifter") -> 
     return expr
 
 
+def _denominator_sign_slack(denom: Expression, model: Model) -> tuple[float, float]:
+    """#1397: how much of each ``_bound_expression(denom)`` endpoint could be round-off.
+
+    Returned as ``(lo_slack, hi_slack)`` in the denominator's own units so each adds
+    to :data:`_ZERO_MARGIN` directly. ``inf`` for an endpoint whose interval error
+    :func:`bound_expression_error` cannot bound (an unknown call, a non-sign-definite
+    nested quotient), which makes that sign test fail -- the clear is refused and the
+    McCormick-``lp`` path bounds the division instead. That is the sound direction:
+    clearing is an *optional* rewrite, so refusing one costs tightening strength,
+    while clearing a sign-indefinite denominator flips the constraint over part of
+    the box.
+
+    The endpoints are tracked separately because they fail separately: ``0.01 + x``
+    with ``x.ub = +inf`` has an exact lower endpoint and an unusable upper one, and
+    its *lower* endpoint is the one the positive-sign test reads.
+
+    ``dmin`` is reduced by the same slack at the call site, because
+    :func:`_clear_divisions` divides the cleared body by it to keep the absolute
+    feasibility tolerance sound: an over-stated ``dmin`` would under-scale that body
+    and let a gross violation slip under the tolerance.
+    """
+    err_lo, err_hi = bound_expression_error(denom, model)
+    return (
+        float(err_lo) if np.isfinite(err_lo) else np.inf,
+        float(err_hi) if np.isfinite(err_hi) else np.inf,
+    )
+
+
 def _find_clearable_denominator(expr: Expression, model: Model):
     """Return the denominator ``D`` of the first division term ``N/D`` in
     *expr*'s additive structure whose ``D`` is non-constant and sign-definite
@@ -890,10 +923,23 @@ def _find_clearable_denominator(expr: Expression, model: Model):
             d = expr.right
             if not isinstance(d, Constant):
                 lo, hi = _bound_expression(d, model)
-                if lo > _ZERO_MARGIN:
-                    return d, 1, lo
-                if hi < -_ZERO_MARGIN:
-                    return d, -1, -hi
+                # #1397: ``_ZERO_MARGIN`` alone assumes ``lo``/``hi`` are exact.
+                # They are not -- ``_bound_expression`` is plain float interval
+                # arithmetic with no outward rounding -- and clearing a denominator
+                # that can in fact change sign FLIPS the inequality over part of
+                # the box, which is a false-optimal generator, not a weaker bound.
+                # So the yardstick carries that arithmetic's own error; see
+                # :func:`bound_expression_error`. Measured (see
+                # ``scripts/audit_1397_denominator_sign_margin.py``): ``y + M - M +
+                # 1e-8`` over ``y in [-0.5, 1]`` folds to ``lo = 1e-8``, clearing a
+                # 1e-9 margin, while its true infimum is ``-0.5``; the gate cleared
+                # it at every M from 1e16 to 1e18. An O(1) denominator is
+                # unaffected: its error is 0.0 (declared bounds are exact floats).
+                lo_slack, hi_slack = _denominator_sign_slack(d, model)
+                if lo > _ZERO_MARGIN + lo_slack:
+                    return d, 1, lo - lo_slack
+                if hi < -_ZERO_MARGIN - hi_slack:
+                    return d, -1, -hi - hi_slack
             # Search the numerator for a nested division.
             return _find_clearable_denominator(expr.left, model)
     if isinstance(expr, UnaryOp) and expr.op == "neg":

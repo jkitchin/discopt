@@ -27,6 +27,7 @@ import numpy as np
 # nonlinear bound tightening) are imported lazily at their nonlinear-path call
 # sites, so a pure LP/MILP/MIQP solve never pays JAX/XLA cold-start.
 from discopt import _timing
+from discopt._relax._numeric import roundoff_slack
 from discopt._relax.model_utils import flat_variable_bounds
 from discopt._relax.problem_classifier import _DENSE_A_MAX_BYTES, _sp_issparse
 from discopt._relax.problem_classifier import dense_A as _dense_A
@@ -24118,10 +24119,22 @@ def _pounce_round_incumbent(
 
 
 # Reduced costs below this are treated as zero (basic / degenerate -> no fix).
+#
+# #1397: this absolute deadband answers a scale-free question ("is this reduced cost
+# structurally nonzero?") but ``d_j`` is a *difference* -- for POUNCE it is
+# ``mult_x_L - mult_x_U`` -- so its own magnitude says nothing about how much of it is
+# the round-off of the arithmetic that produced it. Two bound multipliers of magnitude
+# 1e9 differ by one ulp at 2.4e-7, which clears this deadband while carrying no
+# information. The unsound direction is specific and not conservative: RCF *divides*
+# the optimality gap by ``|d_j|``, so an over-stated ``|d_j|`` makes ``gap/|d_j|`` too
+# small and can fix the true optimum out of the box -- a false-optimal certificate.
+# The fix deflates ``|d_j|`` by its own round-off bound (``_numeric.roundoff_slack`` of
+# the terms the difference was taken of, reported as ``LPResult.rc_absum``) before both
+# the deadband test and the division. The constant itself does not move (#1397 non-goal).
 _RCF_RC_TOL = 1e-7
 
 
-def _reduced_cost_fixing(lb, ub, int_idx, reduced_costs, z_lp, z_inc):
+def _reduced_cost_fixing(lb, ub, int_idx, reduced_costs, z_lp, z_inc, rc_absum=None):
     """Tighten integer variable bounds by LP reduced-cost fixing.
 
     For a minimization relaxation with optimum ``z_lp`` (a valid lower bound),
@@ -24141,6 +24154,15 @@ def _reduced_cost_fixing(lb, ub, int_idx, reduced_costs, z_lp, z_inc):
     bounds — RCF never cuts it. ``gap`` is inflated by a small relative
     margin so interior-point dual tolerance cannot over-tighten. Returns
     tightened ``(lb, ub)`` copies and the number of bound changes.
+
+    ``rc_absum`` (#1397) is the per-column round-off scale of ``reduced_costs``:
+    the sum of the magnitudes of the two terms each difference was taken of. Every
+    ``|d_j|`` is deflated by ``roundoff_slack`` of that scale before it is used, both
+    as the deadband test and as the divisor, so a reduced cost that is indistinguishable
+    from zero at its own scale yields no fix and a noisy one yields a weaker fix.
+    Deflating is the sound direction: a smaller divisor gives a *wider* bound.
+    ``rc_absum=None`` means the engine reported no scale, and every column is then
+    skipped -- refusing is sound, guessing with an absolute deadband is not.
     """
     lb = np.array(lb, dtype=np.float64).copy()
     ub = np.array(ub, dtype=np.float64).copy()
@@ -24150,16 +24172,26 @@ def _reduced_cost_fixing(lb, ub, int_idx, reduced_costs, z_lp, z_inc):
     # Safety margin for IPM dual tolerance: never tighten so hard we risk the
     # optimum (correctness over aggressiveness).
     gap += 1e-6 * (1.0 + abs(float(z_inc)))
+    if rc_absum is None:
+        # #1397: no scale reported -> no column can be certified nonzero. Refuse.
+        return lb, ub, 0
+    absum = np.abs(np.asarray(rc_absum, dtype=np.float64)).ravel()
     changes = 0
     for j in int_idx:
         d = float(reduced_costs[j])
-        if d > _RCF_RC_TOL:
-            new_ub = lb[j] + float(np.floor(gap / d + 1e-9))
+        if j >= absum.shape[0] or not np.isfinite(absum[j]):
+            continue
+        # #1397: how much of ``d`` could be round-off in the arithmetic that formed it.
+        d_safe = abs(d) - roundoff_slack(float(absum[j]))
+        if not (d_safe > _RCF_RC_TOL):
+            continue
+        if d > 0.0:
+            new_ub = lb[j] + float(np.floor(gap / d_safe + 1e-9))
             if new_ub < ub[j] - 0.5:
                 ub[j] = max(lb[j], new_ub)
                 changes += 1
-        elif d < -_RCF_RC_TOL:
-            new_lb = ub[j] - float(np.floor(gap / (-d) + 1e-9))
+        else:
+            new_lb = ub[j] - float(np.floor(gap / d_safe + 1e-9))
             if new_lb > lb[j] + 0.5:
                 lb[j] = min(ub[j], new_lb)
                 changes += 1
@@ -24261,8 +24293,15 @@ def _root_reduced_cost_fixing(lp_data, n_orig, lb, ub, int_offsets, int_sizes, t
     if inc is None:
         return lb, ub, None
     z_inc, x_inc = inc
+    rc_absum = getattr(res, "rc_absum", None)
     new_lb, new_ub, n_changes = _reduced_cost_fixing(
-        lb, ub, int_idx, np.asarray(res.reduced_costs), z_lp, z_inc
+        lb,
+        ub,
+        int_idx,
+        np.asarray(res.reduced_costs),
+        z_lp,
+        z_inc,
+        rc_absum=None if rc_absum is None else np.asarray(rc_absum),
     )
     if n_changes:
         logger.info("root reduced-cost fixing tightened %d integer bound(s)", n_changes)

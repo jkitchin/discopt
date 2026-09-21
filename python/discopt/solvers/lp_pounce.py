@@ -1128,6 +1128,11 @@ def _solve_core(
     mult_l = np.asarray(info.get("mult_x_L", []), dtype=np.float64)
     mult_u = np.asarray(info.get("mult_x_U", []), dtype=np.float64)
     reduced_costs = (mult_l - mult_u) if mult_l.size and mult_u.size else None
+    # #1397: the round-off scale of that difference is the sum of the magnitudes of
+    # the two multipliers it was taken of -- not the size of the difference itself.
+    # A ``mult_l - mult_u`` of 1e-7 formed from two 1e9 multipliers is
+    # indistinguishable from zero, and RC-fixing divides the gap by it.
+    rc_absum = (np.abs(mult_l) + np.abs(mult_u)) if reduced_costs is not None else None
 
     return LPResult(
         status=status,
@@ -1135,6 +1140,7 @@ def _solve_core(
         objective=obj,
         dual_values=dual_values,
         reduced_costs=reduced_costs,
+        rc_absum=rc_absum,
         basis=None,
         iterations=iters,
         wall_time=wall_time,

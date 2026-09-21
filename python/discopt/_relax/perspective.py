@@ -141,14 +141,29 @@ def _semicontinuity_rows(model: Model) -> dict[int, tuple[Variable, int, float]]
             # Anything else propagates -- a swallowed failure here would read as
             # "this model has no semicontinuous structure" (CLAUDE.md §7).
             continue
-        if len(terms) != 2 or abs(const) > _ZERO_TOL:
+        if len(terms) != 2:
             continue
         sign = 1.0 if con.sense == "<=" else -1.0
         (i, ai), (j, aj) = terms.items()
         ai, aj = sign * ai, sign * aj
+        # #1397: ``terms`` and ``const`` are *accumulated* sums
+        # (``terms[i] = terms.get(i, 0.0) + v``), so a coefficient that is truly zero
+        # can survive cancellation as a small nonzero and a truly nonzero constant can
+        # cancel to below 1e-12. Both matter for soundness here: this row is what
+        # licenses "y = 0 pins x to 0", and a spurious ``cx > 0`` read off a row where
+        # ``x`` does not actually appear would let the perspective row ``x**2 <= s*y``
+        # forbid points the original model allows. The residue of cancelling
+        # contributions of magnitude ``S`` is ``O(u*S)``, and ``S`` is not observable
+        # from the surviving coefficients -- but it is bounded below by the row's own
+        # magnitude, so the coherent test is *relative to the row*, not absolute. This
+        # only ever rejects more rows than before (the sound direction), and the rows it
+        # newly rejects have ``U`` beyond ``_U_CAP`` anyway.
+        row_scale = max(1.0, abs(ai), abs(aj))
+        if abs(const) > _ZERO_TOL * row_scale:
+            continue
         # Orient as  ai*x + aj*y <= 0  with ai > 0 > aj, i.e.  x <= (-aj/ai) y.
         for (xi, cx), (yi, cy) in ((((i, ai), (j, aj))), (((j, aj), (i, ai)))):
-            if cx <= _ZERO_TOL or cy >= -_ZERO_TOL:
+            if cx <= _ZERO_TOL * row_scale or cy >= -_ZERO_TOL * row_scale:
                 continue
             xvar, xelem = flat_to_ref[xi]
             yvar, yelem = flat_to_ref[yi]
@@ -228,7 +243,19 @@ def find_candidates(model: Model) -> list[_Candidate]:
                 continue
             if Q[flat, flat] <= _ZERO_TOL:
                 continue
-            off = np.abs(Q[flat, :]).sum() - abs(Q[flat, flat])
+            # #1397: sum the off-diagonals DIRECTLY. The previous form,
+            # ``np.abs(Q[flat, :]).sum() - abs(Q[flat, flat])``, is a difference of two
+            # large numbers, so the quantity compared against the absolute 1e-12 was
+            # itself scale-dependent: with ``Q[flat, flat] = 1e12`` (ulp 1.2e-4) a
+            # genuine cross-term of 1e-5 is absorbed by the row sum and the subtraction
+            # returns exactly 0.0 -- a non-separable row read as separable, and the
+            # separability gate is a *soundness* condition per this docstring, not a
+            # heuristic. Summing only the off-diagonal entries has no cancellation at
+            # all (every term is non-negative), so its error is relative to ``off``
+            # itself and the absolute comparison is coherent again. The tolerance does
+            # not move: this is a yardstick fix, not a tolerance fix (#1397 non-goal).
+            row = np.abs(Q[flat, :])
+            off = float(np.delete(row, flat).sum())
             if off > _ZERO_TOL:
                 continue
             if _bound(v, e, "lb") < -_ZERO_TOL:

@@ -382,6 +382,13 @@ class MccormickLPResult:
     col_status: Optional[np.ndarray] = None  # final std-form column status (warm basis)
     safe_bound: Optional[float] = None  # Neumaier-Shcherbina safe LP lower bound (== lower_bound)
     reduced_costs: Optional[np.ndarray] = None  # d_j = c_j - (A^T y)_j for the ORIGINAL columns
+    #: #1397: per-column round-off scale of ``reduced_costs``, ``|c_j| + (|A|^T|y|)_j``.
+    #: ``d_j`` is a *difference*, so its own magnitude says nothing about how much of
+    #: it could be arithmetic noise -- a ``d_j`` of 1e-7 built by cancelling two 1e9
+    #: terms is indistinguishable from zero, and reduced-cost fixing divides by it.
+    #: Populated on exactly the same path and under the same conditions as
+    #: ``reduced_costs``; ``None`` means a consumer must not trust a small ``d_j``.
+    rc_absum: Optional[np.ndarray] = None
 
     def __post_init__(self) -> None:
         # #961 contract: ``optimal`` asserts a solved relaxation WITH a certified
@@ -920,8 +927,19 @@ class MccormickLPRelaxer:
                     A_sp = A if sp.issparse(A) else sp.csr_matrix(np.asarray(A, dtype=np.float64))
                     if A_sp.shape[0] == y.shape[0] and A_sp.shape[1] >= n0:
                         c_full = np.asarray(inc.c, dtype=np.float64)
-                        rc = c_full[:n0] - np.asarray(A_sp[:, :n0].T @ y, dtype=np.float64).ravel()
+                        Ay = np.asarray(A_sp[:, :n0].T @ y, dtype=np.float64).ravel()
+                        rc = c_full[:n0] - Ay
                         res.reduced_costs = rc
+                        # #1397: the two terms this difference is taken of, summed in
+                        # absolute value -- the only scale that says how much of a
+                        # small ``d_j`` could be round-off. ``|A|^T|y|`` (not
+                        # ``|A^T y|``) because the dot product's own cancellation is
+                        # part of the error, and the same sparse structure makes it
+                        # one extra matvec.
+                        res.rc_absum = (
+                            np.abs(c_full[:n0])
+                            + np.asarray(abs(A_sp[:, :n0]).T @ np.abs(y), dtype=np.float64).ravel()
+                        )
                         res.dual = y
                         res.col_status = cert.col_status
                         res.safe_bound = (
@@ -2118,6 +2136,14 @@ class MccormickLPRelaxer:
                     _out.safe_bound = (
                         float(_sb) if _sb is not None and np.isfinite(_sb) else float(bound)
                     )
+                    # #1397: carry the round-off scale of those same reduced costs.
+                    # Absent (``None``) when the inner solve did not produce one, in
+                    # which case a consumer must not trust a small ``d_j``.
+                    _abs = getattr(_presep_res, "rc_absum", None)
+                    if _abs is not None:
+                        _abs = np.asarray(_abs, dtype=np.float64)
+                        if _abs.shape[0] >= self._n_orig:
+                            _out.rc_absum = _abs[: self._n_orig]
         return _out
 
     def _has_unbounded_nonlinear_col(self, milp) -> bool:

@@ -25,13 +25,18 @@ reformulation is required — the cut references existing columns.
 
 Soundness rests on edge-concavity: a function that is *not* edge-concave can have
 a vertex-hull "underestimator" that cuts off true points, so detection
-(sign-definite square coefficients) is mandatory and is exact for a quadratic
-(constant Hessian).
+(sign-definite square coefficients) is mandatory. It is exact for a quadratic
+*symbolically* — the Hessian is constant — but the square coefficients reach this
+module as a floating-point accumulation over the expanded polynomial, and a sign read
+off a cancelling sum can be wrong (#1397). Detection therefore declares a sign only
+when the accumulated coefficient clears the round-off bound of its own addends, and
+declines the block otherwise: a cut whose side cannot be justified is not emitted.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import os
 from dataclasses import dataclass
 from itertools import product
@@ -96,6 +101,38 @@ class EdgeConcaveQuadratic:
     sense: str
 
 
+#: Safety factor on the round-off bound for an accumulated square coefficient. The
+#: separation makes the exact value immaterial: for a coefficient assembled without
+#: cancellation the bound is ~1e-14 relative and the sign reads cleanly, while the
+#: cancelling case that motivated this (#1397) leaves a residue ~1e6 times *below* the
+#: bound. This is a round-off bound, not a tuned tolerance — it carries the units of
+#: the addends, which is the whole point.
+_SIGN_SAFETY = 64.0
+
+
+def _definite_sign(total: float, addends: list[float]) -> int:
+    """Sign of ``total`` when it is larger than the error of its own accumulation.
+
+    Returns ``+1``/``-1`` when the sign is determined and ``0`` when it is not. The
+    yardstick is ``n * eps * sum |addend|``: the error inherited from forming the
+    addends upstream (the polynomial expansion multiplies coefficients) is bounded by
+    the magnitudes that went in, not by the magnitude that came out. A fixed absolute
+    threshold cannot do this job, because the residue of a cancelling sum grows with
+    the terms that cancelled while the threshold does not — measured in #1397, a true
+    curvature of -3.95e-10 accumulates to +1.49e-09 from addends of magnitude 5.2e7,
+    clearing a 1e-9 threshold with the wrong sign.
+    """
+    if not math.isfinite(total):
+        return 0
+    scale = math.fsum(abs(a) for a in addends)
+    tol = _SIGN_SAFETY * (len(addends) + 1) * float(np.finfo(float).eps) * scale
+    if total > tol:
+        return 1
+    if total < -tol:
+        return -1
+    return 0
+
+
 def collect_edge_concave_quadratics(model, *, max_factors: int = 12) -> list[EdgeConcaveQuadratic]:
     """Find edge-concave / edge-convex quadratic blocks in objective + constraints.
 
@@ -104,6 +141,13 @@ def collect_edge_concave_quadratics(model, *, max_factors: int = 12) -> list[Edg
     tight term by term), it spans 2..``max_factors`` variables, and all
     ``x_i^2`` coefficients are sign-definite (all <= 0 with one < 0 ->
     edge-concave; all >= 0 with one > 0 -> edge-convex).
+
+    Sign-definiteness is decided by :func:`_definite_sign`, per coefficient and
+    relative to that coefficient's own accumulation, because ``sense`` selects the
+    direction of the emitted inequality and a sign read off a cancelling sum can
+    invert it (#1397). A variable carrying no square term at all is an exact zero and
+    is compatible with either sense; a variable whose accumulated coefficient does not
+    clear its round-off bound has no determined sign and disqualifies the block.
     """
     from discopt._relax.milp_relaxation import _expr_to_polynomial
     from discopt._relax.term_classifier import distribute_products
@@ -128,35 +172,70 @@ def collect_edge_concave_quadratics(model, *, max_factors: int = 12) -> list[Edg
         if poly is None:
             continue
         const, terms = poly
-        sq: dict[int, float] = {}
-        bilin: dict[tuple[int, int], float] = {}
-        lin: dict[int, float] = {}
+        # Accumulate every coefficient group as a LIST, not a running sum. The square
+        # coefficients decide ``sense``, which decides the *direction* of the emitted
+        # inequality, so a sign read off a cancelling running sum can invert the cut
+        # (#1397). Keeping the addends lets the sum be correctly rounded (``math.fsum``)
+        # and — the part that matters — lets the sign be tested against the round-off
+        # bound of its own accumulation rather than against a fixed constant.
+        sq_terms: dict[int, list[float]] = {}
+        bilin_terms: dict[tuple[int, int], list[float]] = {}
+        lin_terms: dict[int, list[float]] = {}
+        const_terms: list[float] = [const]
         varset: set[int] = set()
         ok = True
         for coeff, mono in terms:
             d = len(mono)
             if d == 0:
-                const += float(coeff)
+                const_terms.append(float(coeff))
             elif d == 1:
-                lin[mono[0]] = lin.get(mono[0], 0.0) + float(coeff)
+                lin_terms.setdefault(mono[0], []).append(float(coeff))
                 varset.add(mono[0])
             elif d == 2:
                 i, j = int(mono[0]), int(mono[1])
                 if i == j:
-                    sq[i] = sq.get(i, 0.0) + float(coeff)
+                    sq_terms.setdefault(i, []).append(float(coeff))
                 else:
                     key = (min(i, j), max(i, j))
-                    bilin[key] = bilin.get(key, 0.0) + float(coeff)
+                    bilin_terms.setdefault(key, []).append(float(coeff))
                 varset.update((i, j))
             else:
                 ok = False
                 break
-        if not ok or not bilin or not (2 <= len(varset) <= max_factors):
+        if not ok or not bilin_terms or not (2 <= len(varset) <= max_factors):
             continue
-        diag = [sq.get(i, 0.0) for i in varset]
-        if all(v <= 1e-12 for v in diag) and any(v < -1e-9 for v in diag):
+        const = math.fsum(const_terms)
+        sq = {i: math.fsum(v) for i, v in sq_terms.items()}
+        bilin = {k: math.fsum(v) for k, v in bilin_terms.items()}
+        lin = {i: math.fsum(v) for i, v in lin_terms.items()}
+        # Sign-definiteness, decided per entry against that entry's own accumulation
+        # scale. A variable absent from ``sq_terms`` has an exactly-zero square
+        # coefficient and is compatible with either sense; a variable whose accumulated
+        # coefficient does not clear its round-off bound has an *undetermined* sign and
+        # is compatible with neither, because the vertex hull is a valid bound only on
+        # the side the true curvature actually takes. Refusing the block there is the
+        # sound choice: a cut we cannot justify is not emitted (CLAUDE.md §3).
+        signs: list[int] = []
+        undetermined = False
+        for i in varset:
+            if i not in sq_terms:
+                signs.append(0)
+                continue
+            s = _definite_sign(sq[i], sq_terms[i])
+            if s == 0:
+                undetermined = True
+                break
+            signs.append(s)
+        if undetermined:
+            logger.debug(
+                "edge-concave: square coefficient sign undetermined within round-off; "
+                "block over %s skipped",
+                sorted(varset),
+            )
+            continue
+        if all(s <= 0 for s in signs) and any(s < 0 for s in signs):
             sense = "under"
-        elif all(v >= -1e-12 for v in diag) and any(v > 1e-9 for v in diag):
+        elif all(s >= 0 for s in signs) and any(s > 0 for s in signs):
             sense = "over"
         else:
             continue
