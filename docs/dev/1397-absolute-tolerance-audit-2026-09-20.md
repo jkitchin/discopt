@@ -408,7 +408,7 @@ for the reason in §4.6.
 |---|---|---|---|
 | `validation/feasibility.py:140` | `FEASIBLE_DISTANCE_TOL` | **measured, confirmed.** A relative roundoff allowance `16·u·(\|ub\|+\|x\|)` is added into `room`, then divided by this absolute constant and multiplied by `\|J_ij\|`. A column pinned *on* the bound that blocks its improving direction — true room exactly 0 — is credited with phantom room ∝ \|bound\|. Measured on a hand-oracle row: the returned improving-gradient norm goes 1.0 → 1000.0 (its plain sup-norm ceiling) as the bound sweeps 1e0 → 1e11, inflating the acceptance cap from 1e-4 to 1e-1. At that point #1284's tightening is a silent no-op — and #1284 exists because the untightened cap certified a point 0.87 away in `y` against a true optimum of −6.699. Default path, two call sites (`solver.py:3107`, `_relax/primal_heuristics.py:639`), and it gates whether a point becomes the incumbent. | **fixed, PR #1400** |
 | `_relax/nonlinear_bound_tightening.py:58` | `_EMPTY_INTERVAL_FEAS_TOL` | 17 comparison lines. `new_lb - new_ub <= tol` snaps a sub-tolerance crossover to a midpoint instead of declaring the node infeasible. A *larger* tolerance is therefore the safe direction; the unsound direction is this absolute 1e-6 being too small relative to scale — on a box with bounds ~1e10, ordinary rounding crossover exceeds it, falls through, and emits `status="infeasible"`. ~~Needs `* max(1, \|new_lb\|, \|new_ub\|)`.~~ **That prescription was falsified before the fix landed — see §6.1.** The scale lives in the row's *inputs*, not in the crossover it produces. | **fixed, §6** |
-| `_relax/node_reduce.py:48` | `_RC_TOL` | reduced-cost fixing. `dj` carries objective-over-variable units; a genuine zero reduced cost reading above an absolute 1e-7 at large objective scale makes `cand = lb + gap/dj` spuriously small and **fixes the optimum out of the box**. Same shape at `solver.py:23939` (`_RCF_RC_TOL`). | **fixed, §6** |
+| `_relax/node_reduce.py:48` | `_RC_TOL` | reduced-cost fixing. `dj` carries objective-over-variable units; a genuine zero reduced cost reading above an absolute 1e-7 at large objective scale makes `cand = lb + gap/dj` spuriously small and **fixes the optimum out of the box**. Same shape at `solver.py:24017` (`_RCF_RC_TOL`; the line cited when this table was written has moved). | **fixed, §6** |
 | `_relax/perspective.py:74` | `_ZERO_TOL` | The unsound direction is **not** the one guessed here (see §6.3): the reach is the *separability* gate, which computed the off-diagonal mass as `\|Q[j,:]\|.sum() - \|Q[j,j]\|` — a difference of two large numbers — and `find_candidates`' own docstring calls that gate a soundness condition. At `Q[j,j] = 1e12` a genuine cross-term below one ulp (1.2e-4) is absorbed and the subtraction returns exactly `0.0`, certifying a coupled row separable. Plus two accumulated-coefficient sign tests on the semicontinuity row. | **fixed, §6** |
 | `_relax/convexity/posynomial.py:54` | `_POS_TOL` | **Reclassified, not scale-exposed (§6.4).** The guessed reach (`all(arr > _POS_TOL)`) is in `log_lattice.py`, not this file, and every one of its comparands is *declared model data* — a variable's `lb` or a constant leaf — never an accumulated quantity. In `posynomial.py` itself the comparands are a monomial exponent (a model literal, O(1) by construction) and a monomial coefficient, which is a **product** chain: products preserve sign exactly and carry relative error only, so a truly non-positive coefficient cannot read positive. Both remaining uses refuse on failure. | **not a defect** |
 | `_relax/factorable_reform.py:69` | `_ZERO_MARGIN` | `lo > _ZERO_MARGIN` decides a denominator is strictly positive before clearing it. Confirmed unsound and **worse than the row above**: clearing a sign-indefinite denominator does not weaken the bound, it *flips the inequality* wherever the denominator is negative, so the rewritten model has a different feasible set than the one the user wrote. Measured: 5 unsound clears at `M = 1e16…1e18` (§6.2). | **fixed, §6** |
@@ -587,7 +587,15 @@ factor would make coherent — it is a **fail-loud guard**, and scaling it by pr
 magnitude would *widen* the snap on large models, silently absorbing precisely the
 defects it exists to expose. CLAUDE.md §1 and §3 forbid weakening a guard to make a
 gate or an argument pass, so the honest outcome is to record the classification and
-leave the constant alone. The related `lp_pounce.py:403` use is already relative.
+leave the constant alone. A correction to §4.5's row while we are here: it says this constant is "reached from
+`lp_pounce.py:403`". It is not. `lp_pounce.py:183` defines its **own**
+`_BOUND_SNAP_TOL = 1e-7`, for a different quantity — an `lb > ub` *inversion*, not an
+off-box `x` — and `:403` uses that one, relatively
+(`(lb - ub) <= _BOUND_SNAP_TOL * (1.0 + abs(ub))`). `lp_simplex.py:46`'s `1e-3` is read
+from exactly two lines, both inside `lp_simplex.py`. There is no cross-module reach and
+no shared constant, so the "one is scaled, the other is not" inconsistency the row
+implies does not exist: the relative form is right for a bound inversion and the
+absolute form is right for a fail-loud off-box guard.
 
 ### 6.6 Two further sites found during the follow-up
 
@@ -664,3 +672,92 @@ No tolerance constant moved to make it pass; `_EMPTY_INTERVAL_FEAS_TOL` is still
 pinned at `1e-6` by `python/tests/test_1397_roundoff_yardsticks.py`. The scale of the
 cost is the point: across a 1951-test smoke run, the price of making six yardsticks
 dimensionally coherent was one assertion's fourteenth decimal place.
+
+### 6.9 A seventh site, found by following a misattribution: `signomial._ZERO_TOL`
+
+§4.5's `perspective.py` row quotes a comparison, `coeff < -_ZERO_TOL`, that **does not
+appear in `perspective.py` at all**. It is `_relax/convexity/signomial.py:92` and `:99`,
+against a *different* `_ZERO_TOL` defined at `signomial.py:66`. The table conflated two
+same-named constants in two modules. (§6.6 fixed the real `perspective.py` sites, which
+are a different shape entirely — so both rows were right that something was wrong, and
+wrong about where.)
+
+Chasing the misattribution found the worst site in this audit.
+`signomial._merge_like_terms` combined monomials sharing an exponent vector with a
+**running** accumulation:
+
+```python
+buckets[key] += mono.coeff          # signomial.py:139, before
+...
+coeff = buckets[key]
+if abs(coeff) <= _ZERO_TOL:        # 1e-12, absolute
+    continue                       # "the term cancelled" -> dropped
+```
+
+so the merged coefficient carried an error of order `n · u · Σ|coeff|` and was then
+(a) compared against an absolute `1e-12` to decide the term had cancelled and (b) read
+for its **sign** by `is_mixed_sign` / `has_negative_term`.
+
+**The witness needs three addends.** For two doubles the rounded sum always has the sign
+of the exact sum, so nothing at this site is reachable with two terms — which is likely
+why it survived. With three it falls apart immediately: `ulp(1e16) = 2.0`, so in
+`1e16 + 1.0 - 1e16` the `1.0` is lost before the two large terms cancel, and the running
+sum reaches **exactly 0.0** while the exact sum is **1.0**.
+
+Measured on `1e16*x*y + 1.0*x*y - 1e16*x*y + 3.0*x`:
+
+| | before | after |
+|---|---|---|
+| merged `x*y` coefficient | dropped as cancelled | `1.0` |
+| `form.evaluate` at `x = y = 1` | **3.0** | **4.0** |
+
+The parsed expression is 4.0. So `is_signomial` returned a form that **evaluates
+differently from the expression it was given**, directly breaking this module's stated
+contract that "a non-`None` return is a genuine signomial on the strictly-positive box".
+With the middle coefficient negated the lost term is the *only* negative one, so
+`has_negative_term` read `False`, the form presented as a pure posynomial, and
+`signomial_global` would build its DC relaxation for the wrong function — a false bound
+carrying `gap_certified=True`.
+
+Reachability is narrower than the other six: the signomial global engine is reached only
+by an explicit `solver="sgo"` (#1388 retired the default-OFF auto-route flag), so this is
+not on the default solve path. It is still a certifying engine, and §1 does not have a
+default-path exemption.
+
+**The fix is `math.fsum`, and it is a yardstick fix, not a tolerance fix.** Every
+coefficient is a double, hence an exact binary rational, so the bucket's exact sum is
+representable and `fsum` returns it correctly rounded once. The sign and the zero-ness
+of the result become *exact* — which is precisely what makes the absolute `_ZERO_TOL`
+comparison dimensionally coherent again. Note the difference from the other six fixes:
+there the round-off is unavoidable and had to be **bounded** additively; here it can be
+**removed**, so no slack term appears and no tightening strength is given up. Where that
+option exists it is strictly better than a bound.
+
+Verification: 8 parameterized arms over magnitudes `1e16 … 1e20` fail on the base tree
+with `math.fsum` asserted absent and pass here, each first asserting that its own witness
+actually swamps the middle term (§6); three no-weakening arms — an exactly cancelling
+bucket still collapses, an ordinary mixed-sign signomial parses unchanged, and both
+tolerances are pinned unmoved — pass on **both** trees. The existing corpus is unaffected:
+239 passed, 1 skipped across every `signomial`/`posynomial`/`gp`/`log_lattice` test.
+
+### 6.10 Two more §4.5 citations corrected
+
+Recorded so the table is not trusted where it was guessing (CLAUDE.md §11):
+
+- **`_RCF_RC_TOL` is at `solver.py:24017`**, not `:23939`. The fix in §6.3 is unaffected;
+  only the citation was stale.
+- **`_BOUND_SNAP_TOL` is two unrelated constants**, corrected inline in §6.5.
+- **`posynomial._POS_TOL`'s `all(arr > _POS_TOL)` is `log_lattice.py:212`** against a
+  *third* same-named constant at `log_lattice.py:107` — already recorded in §6.4, and the
+  reclassification there stands: `log_lattice`'s comparands are variable lower bounds, and
+  `posynomial.py` never accumulates a coefficient (it has no `+=` over coefficients at
+  all, unlike `signomial.py:139`). That asymmetry between the two modules is exactly why
+  one is a defect and the other is not.
+
+**The lesson for the audit method.** Three of §4.5's rows cited a file that did not
+contain the quoted code, in each case because two or three modules define a constant with
+the same name. A grep for the *constant* found the definition; a grep for the *quoted
+comparison* would have found the real site. The rows were nonetheless useful — following
+the wrong pointer is what turned up §6.9 — but a table entry naming a file must be
+verified against that file before anything is concluded from it, which is CLAUDE.md's
+"look up an API before calling it" applied to one's own notes.

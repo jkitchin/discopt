@@ -520,3 +520,128 @@ def test_the_perspective_tolerance_itself_did_not_move():
     from discopt._relax import perspective
 
     assert perspective._ZERO_TOL == 1e-12
+
+
+# ---------------------------------------------------------------------------
+# signomial._ZERO_TOL -- the merged coefficient is an ACCUMULATED sum
+#
+# ``_merge_like_terms`` combined monomials sharing an exponent vector with a
+# running ``buckets[key] += mono.coeff``, then compared the result against an
+# absolute ``_ZERO_TOL = 1e-12`` to decide the term had cancelled, and let
+# ``is_mixed_sign`` / ``has_negative_term`` read its *sign*. A running sum over
+# terms of magnitude ``M`` carries an error of order ``n * u * M``, so both the
+# zero test and the sign read were scale-exposed.
+#
+# The canonical witness needs THREE addends -- the float sum of two doubles
+# always has the sign of their exact sum -- so the sweep is over the magnitude
+# that swallows the middle term: with ``ulp(1e16) = 2.0``, adding 1.0 to 1e16
+# changes nothing, and the subsequent ``-1e16`` then cancels to exactly 0.0
+# while the exact sum is 1.0.
+#
+# Unsound consequences, both pinned below:
+#   * the dropped term makes ``is_signomial`` return a form that EVALUATES
+#     DIFFERENTLY from the expression it parsed, breaking the module's stated
+#     contract that a non-``None`` return is a genuine signomial;
+#   * when the lost term is the only negative one, the form reads as a pure
+#     posynomial, so the signomial global engine (``solver="sgo"``, which
+#     reports ``gap_certified=True``) builds its DC relaxation for the wrong
+#     function.
+# ---------------------------------------------------------------------------
+
+# Magnitudes whose ulp exceeds the 1.0 middle coefficient (ulp(1e16) = 2.0).
+SIGNOMIAL_SWAMPING_MAGNITUDES = (1e16, 1e17, 1e18, 1e20)
+
+
+def _swamped_bucket_model(magnitude, middle):
+    """``M*x*y + middle*x*y - M*x*y + 3*x``: exact ``x*y`` coefficient ``middle``.
+
+    A running left-to-right sum loses ``middle`` entirely (it is below
+    ``ulp(M)``) and then cancels the two ``M`` terms to exactly 0.0.
+    """
+    m = dm.Model()
+    x = m.continuous("x", lb=1.0, ub=2.0)
+    y = m.continuous("y", lb=1.0, ub=2.0)
+    expr = magnitude * x * y + middle * x * y - magnitude * x * y + 3.0 * x
+    return m, expr
+
+
+@pytest.mark.parametrize("magnitude", SIGNOMIAL_SWAMPING_MAGNITUDES)
+def test_a_swamped_monomial_is_not_silently_dropped(magnitude):
+    from discopt._relax.convexity.signomial import is_signomial
+
+    # Establish that the construction really does swamp the middle term, so a
+    # pass cannot come from the witness failing to land (CLAUDE.md §6).
+    running = 0.0
+    for c in (magnitude, 1.0, -magnitude):
+        running += c
+    assert running == 0.0, f"M={magnitude:.0e} did not swamp the 1.0; witness invalid"
+
+    m, expr = _swamped_bucket_model(magnitude, 1.0)
+    form = is_signomial(expr, m)
+    assert form is not None
+    # True body at x = y = 1 is 1.0*1*1 + 3.0*1 = 4.0.
+    value = form.evaluate({0: 1.0, 1: 1.0})
+    assert value == pytest.approx(4.0), (
+        f"M={magnitude:.0e}: is_signomial returned a form evaluating to {value} where the "
+        f"parsed expression is 4.0 -- the x*y term (exact coefficient 1.0) was dropped as "
+        f"'cancelled' because the running sum reached exactly 0.0"
+    )
+
+
+@pytest.mark.parametrize("magnitude", SIGNOMIAL_SWAMPING_MAGNITUDES)
+def test_a_swamped_negative_monomial_still_reads_as_negative(magnitude):
+    from discopt._relax.convexity.signomial import is_signomial
+
+    m, expr = _swamped_bucket_model(magnitude, -1.0)
+    form = is_signomial(expr, m)
+    assert form is not None
+    assert form.has_negative_term, (
+        f"M={magnitude:.0e}: the only negative monomial (exact coefficient -1.0) vanished, so "
+        f"a mixed-sign signomial reads as a pure posynomial and the DC relaxation would be "
+        f"built for the wrong function"
+    )
+    assert form.is_mixed_sign
+    value = form.evaluate({0: 1.0, 1: 1.0})
+    assert value == pytest.approx(2.0), f"M={magnitude:.0e}: body is 3.0 - 1.0 = 2.0, got {value}"
+
+
+def test_a_genuinely_cancelling_bucket_is_still_collapsed():
+    """No-weakening arm: an exact cancellation must still disappear.
+
+    The fix makes the bucket sum exact; it must not make it *timid*. ``5*x*y``
+    minus itself is exactly zero and has to collapse, or the canonical form stops
+    being canonical and ``x - x`` masquerades as a two-term signomial.
+    """
+    from discopt._relax.convexity.signomial import is_signomial
+
+    m = dm.Model()
+    p = m.continuous("p", lb=1.0, ub=2.0)
+    q = m.continuous("q", lb=1.0, ub=2.0)
+    form = is_signomial(5.0 * p * q - 5.0 * p * q + 2.0 * p, m)
+    assert form is not None
+    assert len(form.monomials) == 1, (
+        f"the exactly-cancelling p*q bucket survived as {[m.coeff for m in form.monomials]}"
+    )
+    assert form.monomials[0].coeff == pytest.approx(2.0)
+    assert not form.has_negative_term
+
+
+def test_an_ordinary_mixed_sign_signomial_is_unaffected():
+    """No-weakening arm: the everyday case must parse exactly as before."""
+    from discopt._relax.convexity.signomial import is_signomial
+
+    m = dm.Model()
+    x = m.continuous("x", lb=1.0, ub=4.0)
+    y = m.continuous("y", lb=1.0, ub=4.0)
+    form = is_signomial(2.0 * x**2 * y - 3.0 * x * y**0.5 + 1.5 * y, m)
+    assert form is not None
+    assert len(form.monomials) == 3
+    assert form.is_mixed_sign
+    assert form.evaluate({0: 1.0, 1: 1.0}) == pytest.approx(2.0 - 3.0 + 1.5)
+
+
+def test_the_signomial_tolerances_themselves_did_not_move():
+    from discopt._relax.convexity import signomial
+
+    assert signomial._ZERO_TOL == 1e-12
+    assert signomial._EXP_TOL == 1e-12

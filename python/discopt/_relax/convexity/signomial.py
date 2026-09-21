@@ -126,20 +126,45 @@ def _merge_like_terms(monomials: list[Monomial]) -> list[Monomial]:
     signomial. The exponent vector is keyed on the sorted ``(offset, rounded
     exponent)`` pairs of its non-zero entries.
     """
-    buckets: dict[tuple[tuple[int, float], ...], float] = {}
+    buckets: dict[tuple[tuple[int, float], ...], list[float]] = {}
     order: list[tuple[tuple[int, float], ...]] = []
     exps_by_key: dict[tuple[tuple[int, float], ...], dict[int, float]] = {}
     for mono in monomials:
         nz = {off: e for off, e in mono.exponents.items() if abs(e) > _EXP_TOL}
         key = tuple(sorted((off, round(e / _EXP_TOL) * _EXP_TOL) for off, e in nz.items()))
         if key not in buckets:
-            buckets[key] = 0.0
+            buckets[key] = []
             order.append(key)
             exps_by_key[key] = nz
-        buckets[key] += mono.coeff
+        buckets[key].append(mono.coeff)
     merged: list[Monomial] = []
     for key in order:
-        coeff = buckets[key]
+        # #1397: sum the bucket EXACTLY. A running ``+=`` is a cancelling
+        # accumulation, so the merged coefficient carried an error of order
+        # ``n * u * sum|coeff|`` -- and it is then compared against an absolute
+        # ``_ZERO_TOL`` and, worse, read for its *sign* by ``is_mixed_sign`` /
+        # ``has_negative_term``. Measured: the coefficients ``1e16, 1.0, -1e16``
+        # (exact sum 1.0) accumulate left-to-right to exactly 0.0, because the
+        # 1.0 is below ulp(1e16) = 2.0 and is lost before the 1e16 cancels. The
+        # whole unit term was then dropped here as "cancelled", so
+        # ``is_signomial`` returned a form that *evaluates differently from the
+        # expression it parsed* -- 3.0 against a true 4.0 on the probe in
+        # ``test_1397_roundoff_yardsticks.py`` -- breaking this module's stated
+        # contract that a non-``None`` return is a genuine signomial. With the
+        # sign flipped (exact sum -1.0) the lost term is the only negative one,
+        # so the form reads as a pure posynomial and the signomial global engine
+        # builds a DC relaxation for the wrong function: a false bound carrying
+        # ``gap_certified=True``.
+        #
+        # ``math.fsum`` is the yardstick fix rather than a tolerance fix: each
+        # coefficient is a double, hence an exact binary rational, so their sum
+        # is exactly representable and fsum returns it correctly rounded once.
+        # The sign and the zero-ness of the result are then exact, which is what
+        # makes the absolute ``_ZERO_TOL`` comparison below dimensionally
+        # coherent -- the round-off it was being asked to absorb is gone, not
+        # merely bounded. No tolerance changed, and an exactly-cancelling bucket
+        # (``5*x*y - 5*x*y``) still sums to 0.0 and is still dropped.
+        coeff = math.fsum(buckets[key])
         if abs(coeff) <= _ZERO_TOL:
             continue
         merged.append(Monomial(coeff, dict(exps_by_key[key])))
