@@ -90,11 +90,15 @@ time_limit_seconds = 3600
 # T2.6). Before this table existed, cert0/cert1/cert2 named `suite = "global50"`
 # with no suite to resolve it against — the recon flag in §11's "Wiring
 # corrections (2026-07-02)". The panel is the 50-instance BARON head-to-head set
-# vendored as `config/baron_global50.txt`. 49 of the 50 have a `.nl` in the local
+# vendored as `config/baron_global50.txt`. All 50 have a `.nl` in the local
 # corpus (`python/tests/data/minlplib_nl/`) and run out of the box with no
-# --fetch; st_miqp5 is listed but ships only as a binary `.nl` discopt cannot
-# parse (skipped by R1 for the same reason), so it resolves to 49 locally and to
-# all 50 with `--fetch`. 60 s per-instance cap matches the measurement of record
+# --fetch, so the panel resolves to 50 locally. (Historical note: this comment
+# used to say st_miqp5 "ships only as a binary `.nl` discopt cannot parse" and
+# that the panel resolved to 49. The file IS binary-format `.nl` — its header
+# starts `b3`, not `g3` — but the parser reads it: measured 2026-09-22, it
+# parses and solves to -333.8889 in ~0.6 s, and a full 50/50 panel run resolved
+# every instance. Do not reconcile a 49-vs-50 count against the old claim.)
+# 60 s per-instance cap matches the measurement of record
 # (`scripts/global_opt_baron_vs_discopt.py --time-limit 60`).
 description = "Certification panel: 50-instance BARON head-to-head set (cert-gap-plan §11)"
 sources = ["minlplib"]

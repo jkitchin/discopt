@@ -35,6 +35,59 @@ distinct DISCOPT_* flags read      : 83   (was 89)
 ```
 
 **Zero gates are now in none of §5's three states** — the defect the rule names is closed.
+
+> ### RETRACTED 2026-09-22 — see [#1421](https://github.com/jkitchin/discopt/issues/1421)
+>
+> The sentence immediately above is **false**, and not marginally. It is true only of the
+> population this document's scan can see, and that scan recognises **one** of the four ways
+> this codebase reads a `DISCOPT_*` boolean gate. Measured with `ast` over 352 files under
+> `python/discopt/`:
+>
+> ```
+> FORM 1  environ.get(F, '<lit>')       : 66 flags
+>           of which default '0'        : 10  <-- the ONLY form scanned
+>           of which default ''         : 11
+> FORM 2  environ.get(F)  [default None]: 16 flags
+> FORM 3  _env_flag(F, default=...)     : 46 flags
+>           default=False (OFF)         : 23
+>
+> flags the scan sees       : 10
+> flags the scan CANNOT see : 50   (overlap with the scanned set: none)
+> ```
+>
+> The 23 `_env_flag(..., default=False)` gates are default-OFF stated more plainly than any
+> `"0"` literal, and many are squarely bound-changing solver math — the whole `DISCOPT_RLT`
+> family, `SHOR_SDP_ROOT_BOUND`, `PHASE2_DBBT`, `MULTILINEAR_COUPLING_RLT`,
+> `SOS1_SELECTOR_BRANCH`. None has ever appeared in this audit.
+>
+> **Why the marker below could not catch this.** `test_1345_flag_retirement_audit.py` argues
+> that cross-checking the scan against the document is "strictly STRONGER" than a numeric
+> floor, because "a regex that silently stops matching some gates now fails here". That holds
+> for a regex that *stops* matching. This one never matched these forms at all, so the scan
+> and the marker are both derived from the same too-narrow definition of "default-OFF" and
+> agree with each other while the real population is several times larger. Two instruments,
+> one blind spot, mutual confirmation — the §6 failure mode, in the instrument built to
+> enforce §5.
+>
+> **Polarity is not readable from the default literal.** Five of the eleven `""`-default
+> flags (`CONVEX_STALL_ABSTAIN`, `GDP_CONFIG_PRIMAL`, `NLPBB_ROOT_CUTS`, `QUBO_PRIMAL`,
+> `ROOT_BOUND_SEED`) are default-**ON**: their predicate is negative (`not in ("0","false",
+> "no")`) or returns `True` on the empty string. A widening that treats every `""` default as
+> OFF misclassifies all five. Polarity has to come from the gate's own comparison, or from
+> `_env_flag`'s `default=` keyword.
+>
+> **Six `""`-default gates over solver math are missing rows**, and #1421 records what a
+> `docs/dev` grep already turns up for them — including `DISCOPT_OBBT_ITERATE`, whose §5 panel
+> **was already run** (issue-282 plan, Workstream B, "HOLD" 2026-07-18: sound, 0 violations,
+> **0/82 certifications gained**) and whose result was never brought here. That is the #1388
+> lesson repeating: grep `docs/dev` before triaging from a docstring.
+>
+> **The marker below is left at its current value on purpose.** Moving it to 11 (the
+> `""`-default fix alone) would make the test agree with the document again at a new number
+> while 50 flags stayed invisible — the same failure this retraction reports, one number to
+> the right. A partial widening was written and deliberately reverted. The marker moves once,
+> to the real population, under #1421; until then it should be read as *"gates of FORM 1 with
+> a `\"0\"` default"*, which is all it has ever meant.
 The five that remain: `COEF_TIGHTEN`, `G_CONVEX_CUTS`, `OA_INFEASIBLE_NOGOOD`,
 `IPX_CHEAP_FIRST` and `NLP_NATIVE` — all five now **documented opt-outs**.
 `COEF_TIGHTEN` was the last graduation candidate; its panel was run under #1414 and
