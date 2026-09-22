@@ -532,6 +532,16 @@ def _refuse_unsupported(model: Model) -> None:
             name = getattr(con, "name", None)
             where = f" named {name!r}" if name else ""
             raise SerializationError(f"cannot serialize: the model carries {what}{where}. {remedy}")
+    # #1430: a disjunction built by ``Model.disjunction()``/``make_disjunct()`` and
+    # never attached is not IN the model, so a document faithfully records a model
+    # without it -- and the reloaded model carries no record that anything was
+    # dropped, so ``validate``'s guard cannot fire on it either. That reopens the
+    # exact silent-drop this document is written to avoid, one layer removed, and
+    # ``solve_batch(workers > 1)`` walks straight into it: it serializes each model
+    # for a worker, so a forgotten disjunction would be refused at ``workers=1`` and
+    # silently dropped at ``workers=3`` -- the worker-count equivalence that module
+    # documents, broken by a guard that only ran on one arm.
+    model._reject_unattached_gdp_blocks()
 
 
 # ── variables / parameters ─────────────────────────────────────────────────
@@ -1029,7 +1039,19 @@ _STATE_DERIVED = frozenset({"_names", "_builder", "_flat_var_offsets_cache"})
 #: result=...)`` -> ``saved_result``, which is in ``_STATE_IN_OWN_SECTION`` above.
 #: Writing this one too would make a reloaded model silently claim a solve nobody
 #: in the new process ran, and ``sensitivity()`` would cross-check against it.
-_STATE_NOT_CARRIED = frozenset({"_last_solve_result"})
+#:
+#: ``_gdp_factory_disjunctions`` / ``_gdp_factory_disjuncts`` (#1430) are the
+#: build-time record of what ``Model.disjunction()`` / ``Model.make_disjunct()``
+#: handed the caller, kept so ``validate`` can refuse a block that was never
+#: attached. They are not carried because by the time a document exists there is
+#: nothing left in them to carry: ``_refuse_unsupported`` runs
+#: ``_reject_unattached_gdp_blocks`` first, so every tracked block is already
+#: attached and therefore already written out as part of ``_constraints``.
+#: Writing the record too would persist an identity-keyed bookkeeping list whose
+#: entries the reloaded model no longer owns.
+_STATE_NOT_CARRIED = frozenset(
+    {"_last_solve_result", "_gdp_factory_disjunctions", "_gdp_factory_disjuncts"}
+)
 
 #: Attributes carried verbatim in the "state" section (plain JSON-safe values).
 _STATE_PLAIN = ("_aux_counter", "_decomp_stages", "_decomp_blocks")

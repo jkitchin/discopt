@@ -181,6 +181,59 @@ class TestAttachedFormsStillSolve:
         assert r.objective == pytest.approx(-20.0, abs=1e-4)
 
 
+class TestSerializationCannotLaunderTheDrop:
+    """The guard has to hold on the serialization path too, or it holds on one
+    arm of ``solve_batch`` and not the other.
+
+    A document records the ATTACHED model, so a forgotten disjunction is written
+    out as if it never existed -- and the reloaded model carries no record that
+    anything was dropped, so ``validate``'s guard cannot fire on it either. That
+    reopens the silent drop one layer removed, and ``solve_batch(workers > 1)``
+    walks straight into it: it serializes each model for a worker, so the same
+    model would be refused at ``workers=1`` and silently mis-solved at
+    ``workers=3`` -- breaking the worker-count equivalence ``discopt.batch``
+    documents.
+    """
+
+    def test_dumps_refuses_an_unattached_disjunction(self):
+        m, x, y = _base()
+        m.disjunction([[x >= 4, y >= 1], [y >= 6, x >= 1]], name="mode")
+        with pytest.raises(ValueError, match="never added to it"):
+            dm.dumps(m)
+
+    def test_dumps_refuses_an_orphan_disjunct(self):
+        m, x, y = _base()
+        d = m.make_disjunct("a")
+        d.subject_to(x >= 4)
+        with pytest.raises(ValueError, match="never added to it"):
+            dm.dumps(m)
+
+    def test_solve_batch_agrees_across_worker_counts(self):
+        """The equivalence ``discopt.batch`` documents, on the model this issue is
+        about: refused at ``workers=1`` (the solve raises, and the batch reports it
+        as an error result rather than aborting) and refused at ``workers=3`` too."""
+        from discopt.batch import solve_batch
+
+        def bad():
+            m, x, y = _base()
+            m.disjunction([[x >= 4, y >= 1], [y >= 6, x >= 1]], name="mode")
+            return m
+
+        serial = solve_batch([bad(), bad()], workers=1, max_nodes=500)
+        parallel = solve_batch([bad(), bad()], workers=3, max_nodes=500)
+        for arm, results in (("workers=1", serial), ("workers=3", parallel)):
+            for r in results:
+                assert r.status == "error", f"{arm}: status={r.status} objective={r.objective}"
+                assert "never added to it" in (r.error or ""), f"{arm}: {r.error!r}"
+
+    def test_dumps_still_writes_an_attached_disjunction(self):
+        m, x, y = _base()
+        m.either_or([[x >= 4, y >= 1], [y >= 6, x >= 1]])
+        reloaded = dm.loads(dm.dumps(m))
+        r = reloaded.solve(time_limit=30)
+        assert r.objective == pytest.approx(_TRUE_OPTIMUM, abs=1e-4)
+
+
 class TestGuardDoesNotOverreach:
     def test_empty_unattached_disjunct_is_allowed(self):
         """A disjunct with no constraints contributes an unused indicator binary
