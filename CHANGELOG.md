@@ -718,6 +718,45 @@ The release procedure that produces these entries is documented in
 
 ### Removed
 
+- **The G2 effort governor is retired** (`discopt/heuristic_governor.py`,
+  `DISCOPT_HEURISTIC_GOVERNOR`; #1431, CLAUDE.md §5 *Retired*). It kept a
+  **process-lifetime** miss-streak per heuristic class, so two solves in which
+  RENS failed to improve latched it off for the rest of the process
+  (`K_DISABLE = 2`) and every later `Model.solve()` in that process ran without
+  it — including models RENS is the heuristic that solves. A solve's answer
+  became a function of what else the process had solved, which is a
+  reproducibility violation and the source of order-dependent false failures in
+  the correctness lane.
+
+  Measured: two `ball_mk2_30` solves (8 s) then `portfol_roundlot` (60 s,
+  `nlp_bb=True`) returned `time_limit` with **no incumbent** at 2641 nodes;
+  with the governor off, or its stats reset, the same solve returned `optimal`
+  0.0282905 at **3 nodes**. The root bound was bit-identical across arms and so
+  was the first node NLP (same `x0`, `x`, `obj_val`, `iter_count`), so only
+  whether RENS ran differed.
+
+  Two defects, both fixed by removal. The latch was **permanent**: `record()` is
+  the only place clearing `disabled`, but it is reached only when `allowed()`
+  returned True, so a disabled source could never re-enable itself despite the
+  docstring promising it would. And the memory crossed **unrelated models**.
+
+  Retirement rather than rescoping, because the entry experiment showed
+  `record("rens")` fires **at most once per top-level solve** (max 1 over 6
+  instances, vs `K_DISABLE = 2`) — exactly as the module docstring said — so a
+  per-solve reset could never reach the threshold and would have been
+  indistinguishable from the flag being off, leaving a governor that no longer
+  governed anything. The per-solve gap-open condition RENS also carried is
+  sound and non-contaminating and is preserved inline at the call site.
+
+  Note this contradicts the 0/13 RENS hit-rate the G2 graduation panel recorded:
+  `portfol_roundlot` is a counter-example where RENS is decisive (3 nodes vs
+  2637). `rins`, `lbranch` and `enumerate` were never in `GOVERNED_SOURCES`, so
+  their `allowed()` gates already returned True unconditionally and were dead
+  code; the earlier entry below describing DIRECT as "registered as a governed
+  source … alongside `rens`" was likewise never true in effect — `record()`
+  early-returns for any source outside `GOVERNED_SOURCES`, so that counter read
+  0 always.
+
 - **Six default-OFF `DISCOPT_*` gates retired** (#1388, CLAUDE.md §5). Each was in
   none of §5's three states — a defect the rule names explicitly. After this the
   number of solver-math gates in that condition is **zero**; the five that remain

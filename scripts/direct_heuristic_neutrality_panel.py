@@ -34,7 +34,6 @@ os.environ["DISCOPT_NATIVE_SPATIAL_KERNEL"] = "0"
 from pathlib import Path  # noqa: E402
 
 import discopt  # noqa: E402
-from discopt.heuristic_governor import governor  # noqa: E402
 from discopt.modeling import from_nl  # noqa: E402
 
 # CLAUDE.md 8: prove which code is loaded, and that it is the version under test.
@@ -58,14 +57,18 @@ def run(name, flag):
         os.environ.pop("DISCOPT_DIRECT_HEURISTIC", None)
     else:
         os.environ["DISCOPT_DIRECT_HEURISTIC"] = flag
-    governor().reset()
     m = from_nl(str(CORPUS / f"{name}.nl"))
     faulthandler.dump_traceback_later(TL + 60.0, exit=False)
     try:
         r = m.solve(max_nodes=MAX_NODES, time_limit=TL)
     finally:
         faulthandler.cancel_dump_traceback_later()
-    return r, int(governor().snapshot().get("direct", {}).get("calls", 0))
+    # #1431: this used to return a "direct" fire count read from the G2
+    # governor's snapshot. That counter was always 0 -- ``record()`` early-returns
+    # for any source not in ``GOVERNED_SOURCES``, and "direct" never was one -- so
+    # the fire proof this panel printed was inert (CLAUDE.md 6). The governor is
+    # now retired (#1431); the count is reported as None rather than a fake 0.
+    return r, None
 
 
 def key(r):
@@ -86,7 +89,7 @@ for name in NAMES:
     got = {}
     for label, flag in (("unset", None), ("=0", "0"), ("=1", "1")):
         t0 = time.perf_counter()
-        r, c = run(name, flag)
+        r, c = run(name, flag)  # c is None: see run() (#1431)
         wall = time.perf_counter() - t0
         got[label] = (r, c, wall)
         # The backstop binding is the thing that makes an arm uncomparable.
@@ -94,7 +97,7 @@ for name in NAMES:
         print(
             f"   {label:6s} nodes={r.node_count} status={r.status} "
             f"obj={r.objective!r} bnd={r.bound!r} cert={r.gap_certified} "
-            f"direct_calls={c} wall={wall:.1f}s"
+            f"direct_calls={'n/a' if c is None else c} wall={wall:.1f}s"
             f"{'  <-- TIME BACKSTOP BOUND, arm not comparable' if hit_tl else ''}",
             flush=True,
         )

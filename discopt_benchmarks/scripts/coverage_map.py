@@ -206,16 +206,6 @@ def run(args: argparse.Namespace) -> dict:
     except Exception as e:
         errs["psd_sep"] = str(e)
 
-    # G2 effort governor (#541): process-lifetime singleton with a real
-    # throttled_events counter per governed source. Fresh subprocess = clean
-    # singleton, so snapshot() after the solve is the governor fire proof.
-    try:
-        from discopt.heuristic_governor import governor as _gov
-
-        _gov().reset()
-    except Exception as e:
-        errs["governor"] = str(e)
-
     model = from_nl(args.instance)
     t0 = time.perf_counter()
     solve_kwargs = {"time_limit": args.time_limit, "gap_tolerance": 1e-4}
@@ -223,14 +213,6 @@ def run(args: argparse.Namespace) -> dict:
         solve_kwargs["solver"] = args.solver
     result = model.solve(**solve_kwargs)
     wall = time.perf_counter() - t0
-
-    try:
-        from discopt.heuristic_governor import governor as _gov
-
-        gov_snap = _gov().snapshot()
-    except Exception:
-        gov_snap = {}
-    gov_throttled = sum(int(s.get("throttled_events", 0)) for s in gov_snap.values())
 
     # zero-spanning lift fires on the reformulated model (see wrap above);
     # also honor a tag on the original model as a fallback.
@@ -261,8 +243,11 @@ def run(args: argparse.Namespace) -> dict:
         "psd_separate_calls": c["psd_separate_calls"],
         "psd_enabled": c["psd_enabled"],
         "rlt_enabled": c["rlt_enabled"],
-        "governor_snapshot": gov_snap,
-        "governor_throttled_events": gov_throttled,
+        # #1431: the G2 governor is retired. These keys are kept so existing
+        # readers of this JSON do not KeyError, and are explicitly null/None
+        # rather than 0 so a reader cannot mistake "retired" for "never fired".
+        "governor_snapshot": None,
+        "governor_throttled_events": None,
         "zerospan_lift_fired": zerospan,
         "wall_s": wall,
         "node_count": getattr(result, "node_count", None),

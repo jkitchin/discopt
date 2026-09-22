@@ -566,7 +566,8 @@ panel green for 3 consecutive nightlies before default-on.
 > solves; nvs05 does ~59 LP/node").** #723's first three levers are handled:
 > convexity re-classification is de-duped (commit `ecff43e`), the RENS primal
 > heuristic is throttled by the default-ON G2 governor (`heuristic_governor.py`,
-> `EXPENSIVE_SOURCES = {"rens"}`), and the interval-`__mul__` / JIT-recompile
+> `EXPENSIVE_SOURCES = {"rens"}`) — **retired 2026-09-22, see #1431 and the
+> retirement note at the end of this section**, and the interval-`__mul__` / JIT-recompile
 > overheads are cut (`ecff43e`, `bfc9d55`). Lever 3 — "nvs05 does ~59 per-node LP
 > solves; find why and *bound it*" — was the open one, and the entry experiment
 > (measurement before code, Dev-Philosophy #4) **falsified the "cap it" framing**

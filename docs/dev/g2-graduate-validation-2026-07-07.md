@@ -1,5 +1,17 @@
 # G2-graduate — the heuristic effort-governor flips DEFAULT-ON (broad-validated, 2026-07-07)
 
+> **RETIRED 2026-09-22 (#1431).** The G2 governor described below has been removed
+> (`discopt/heuristic_governor.py` and `DISCOPT_HEURISTIC_GOVERNOR` are gone). Its
+> stats were **process-lifetime**, so a RENS miss-streak earned on one model
+> latched RENS off for every later solve in the same process — making a solve's
+> answer depend on what else the process had solved. Measured: two `ball_mk2_30`
+> solves then `portfol_roundlot` returned no incumbent at 2641 nodes, versus
+> `optimal` 0.0282905 at 3 nodes with the governor off. The disable was also
+> permanent (`record()`, the only place clearing it, is unreachable once
+> `allowed()` returns False). The 0/13 RENS hit-rate recorded below is
+> contradicted by `portfol_roundlot`, where RENS is decisive. This document is
+> kept as the historical measurement record, not as a description of the code.
+
 **Status:** graduated. `DISCOPT_HEURISTIC_GOVERNOR` flipped default **OFF → ON**
 in `python/discopt/heuristic_governor.py`; `DISCOPT_HEURISTIC_GOVERNOR=0`
 (also `off`/`false`/`no`/empty) is the live escape hatch (never a dead flag).
