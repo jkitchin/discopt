@@ -15,6 +15,7 @@ import functools
 import logging
 import math
 import os
+import threading
 import time
 import weakref
 from collections.abc import Mapping
@@ -4504,6 +4505,94 @@ def _finalize_reported_bound(
     return bound_val, gap_val, source
 
 
+class FeasibilityCallbackError(RuntimeError):
+    """A feasibility-defining callback raised, so the solve certifies nothing (#1436).
+
+    ``lazy_constraints`` and ``incumbent_callback`` do not *advise* the search --
+    they define which points are acceptable. When one of them raises, the node
+    proceeds with no cut and no rejection, so the tree searches the model WITHOUT
+    the restriction the caller asked for and then reports a certificate for it.
+
+    Measured before this existed, on ``min -x - y`` over ``{0..3}^2`` where the
+    callback is the only thing imposing ``x + y <= 2`` (true optimum ``-2``): a
+    callback raising ``KeyError`` produced ``status="optimal"``,
+    ``objective=-6.0``, ``gap_certified=True`` at ``x = y = 3`` -- a point the
+    callback itself excludes -- with a ``logger.warning`` as the only signal, and
+    logging is unconfigured in most scripts.
+
+    Raised at the END of the solve rather than at the failing node, deliberately:
+    ``solve_model``'s node loop is wrapped in many broad ``except Exception``
+    handlers, so an exception raised at the callback site can be swallowed a
+    second time on its way out and the refusal silently becomes a no-op (the
+    CLAUDE.md §6 failure -- an instrument that measures nothing and reports a
+    pass). A recorded flag survives every one of them.
+
+    ``cut_callback`` and ``node_callback`` are deliberately NOT covered. A cut is
+    a *strengthening* and a node callback is an observer, so losing either can
+    only loosen a bound, never invalidate one; both keep failing soft. Measured
+    contrast on the #1278 spatial model, 22 invocations all raising: objective and
+    bound bit-identical to the no-callback run.
+    """
+
+
+class _CallbackFailures(threading.local):
+    """Per-thread record of feasibility-callback failures in the current solve.
+
+    ``threading.local`` for the same reason ``_convex_kernel._AttemptClock`` is:
+    two solves on two threads must not read each other's failures. A subclass's
+    ``__init__`` re-runs the first time the object is touched on each thread, so a
+    thread that has never solved reads an empty record rather than ``AttributeError``.
+    """
+
+    def __init__(self):
+        self.failures: list[tuple[str, BaseException]] = []
+
+
+_CALLBACK_FAILURES = _CallbackFailures()
+
+
+def _reset_callback_failures() -> None:
+    """Clear the record at the start of a solve, so a failure cannot leak forward
+    from a previous solve on this thread and refuse an unrelated result."""
+    _CALLBACK_FAILURES.failures = []
+
+
+def _record_callback_failure(which: str, exc: BaseException) -> None:
+    """Note that a feasibility-defining callback raised (#1436)."""
+    _CALLBACK_FAILURES.failures.append((which, exc))
+
+
+def _refuse_on_callback_failure() -> None:
+    """Refuse the result when a feasibility-defining callback failed (#1436).
+
+    The dual bound the tree proved is still sound -- the callbacks only ever
+    RESTRICT the feasible set, and a lower bound on a relaxation bounds every
+    restriction of it -- so nothing sound is discarded by refusing. What is not
+    sound is the pair the caller reads as the answer: the incumbent may violate
+    the very constraints the callback exists to impose, and ``status="optimal"``
+    with ``gap_certified=True`` asserts optimality over a feasible set that was
+    never enforced.
+    """
+    failures = _CALLBACK_FAILURES.failures
+    if not failures:
+        return
+    counts: dict[str, int] = {}
+    for which, _exc in failures:
+        counts[which] = counts.get(which, 0) + 1
+    first_which, first_exc = failures[0]
+    detail = ", ".join(f"{which} ({n}x)" for which, n in sorted(counts.items()))
+    _reset_callback_failures()
+    raise FeasibilityCallbackError(
+        f"the solve is refused: {detail} raised during the search. These callbacks "
+        "define which points are acceptable, so every node they failed at proceeded "
+        "with no cut and no rejection -- the tree searched the model WITHOUT the "
+        "restriction you asked for, and reporting its result would certify an "
+        "optimum for a relaxation of your model. Fix the callback, or handle the "
+        "error inside it if you meant the failure to be tolerated. The first "
+        f"failure was from {first_which} and is chained below."
+    ) from first_exc
+
+
 def _invoke_pre_import_callbacks(
     *,
     model,
@@ -4621,7 +4710,11 @@ def _invoke_pre_import_callbacks(
             try:
                 cuts = lazy_constraints(ctx, model)
             except Exception as e:
+                # #1436: still soft HERE -- one node's failure must not abort the
+                # batch mid-flight -- but recorded, so the solve refuses to hand
+                # back a certificate for a model this restriction never reached.
                 logger.warning("Lazy constraint callback raised an exception: %s", e)
+                _record_callback_failure("lazy_constraints", e)
                 cuts = None
             if cuts:
                 # Reject the point FIRST: even if cut insertion below were to
@@ -4655,7 +4748,10 @@ def _invoke_pre_import_callbacks(
             try:
                 accept = incumbent_callback(ctx, model, solution)
             except Exception as e:
+                # #1436: a failed veto means the point was accepted unvetted, so the
+                # result is not certifiable even though this node proceeds.
                 logger.warning("Incumbent callback raised an exception: %s", e)
+                _record_callback_failure("incumbent_callback", e)
                 accept = None
             if accept is False:
                 result_lbs[i] = _INFEASIBILITY_SENTINEL
@@ -4756,6 +4852,7 @@ def _screen_heuristic_incumbent(
             cuts = lazy_constraints(ctx, model)
         except Exception as e:
             logger.warning("Lazy constraint callback raised an exception: %s", e)
+            _record_callback_failure("lazy_constraints", e)  # #1436
             cuts = None
         if cuts:
             # The excluded point must never be accepted even if cut insertion
@@ -4776,6 +4873,7 @@ def _screen_heuristic_incumbent(
             accept = incumbent_callback(ctx, model, solution)
         except Exception as e:
             logger.warning("Incumbent callback raised an exception: %s", e)
+            _record_callback_failure("incumbent_callback", e)  # #1436
             accept = None
         if accept is False:
             logger.info("Incumbent callback rejected a heuristic incumbent candidate")
@@ -8757,6 +8855,35 @@ def _stamp_layer_timing(fn: _F) -> _F:
     return cast(_F, wrapper)
 
 
+def _refusing_on_callback_failure(fn: _F) -> _F:
+    """Outermost wrapper on ``solve_model``: refuse a result whose feasibility
+    callbacks failed (#1436).
+
+    Placed at the TOP of the decorator stack on purpose. ``solve_model`` has many
+    return paths and its node loop is wrapped in a long list of broad
+    ``except Exception`` handlers; a refusal raised at the failing node can be
+    caught by one of them on the way out, which would leave the guard looking
+    installed while measuring nothing. Here it is the last thing that runs, on
+    every path, and ``functools.wraps`` keeps the real signature visible to
+    ``solve_model_accepted_kwargs``'s ``inspect.signature`` (which the docstring
+    there already relies on through the existing decorators).
+
+    The reset is in the ``try``, not a ``finally``: a solve that raises for its own
+    reasons must not have that exception replaced by this one, and the next solve
+    on this thread resets on entry anyway.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        _reset_callback_failures()
+        result = fn(*args, **kwargs)
+        _refuse_on_callback_failure()
+        return result
+
+    return cast(_F, wrapper)
+
+
+@_refusing_on_callback_failure
 @_stamp_layer_timing
 @_scoped_deep_recursion
 @_scoped_tuning

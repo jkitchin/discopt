@@ -29,6 +29,7 @@ from discopt.callbacks import (
     CutResult,
     cut_result_to_dense,
 )
+from discopt.solver import FeasibilityCallbackError
 
 # ── Helper: build a simple MILP ──
 
@@ -352,8 +353,22 @@ class TestCallbackExceptionHandling:
         # Solver should still produce a result
         assert result.status in ("optimal", "feasible", "infeasible", "node_limit")
 
-    def test_lazy_callback_exception_logged(self, caplog):
-        """A lazy constraint callback that raises should not crash the solver."""
+    def test_lazy_callback_exception_refuses_the_result(self, caplog):
+        """A lazy constraint callback that raises must not yield a certificate (#1436).
+
+        This test previously asserted ``status in ("optimal", "feasible",
+        "infeasible", "node_limit")`` — i.e. that a solve whose feasibility
+        callback failed returns a normal result. It does not crash, which was the
+        property worth keeping; but "does not crash" was not distinguished from
+        "certifies a relaxation", and the latter is what it was actually pinning.
+        Measured on ``min -x - y`` over ``{0..3}^2`` with the callback imposing
+        ``x + y <= 2`` (true optimum ``-2``): a raising callback produced
+        ``status="optimal"``, ``objective=-6.0``, ``gap_certified=True`` at
+        ``x = y = 3`` — a point the callback itself excludes.
+
+        The contract now: the search still runs and still logs (user code does not
+        abort a batch mid-flight), and the RESULT is refused.
+        """
         m, x, y = _simple_milp()
 
         def bad_lazy(ctx, model):
@@ -362,11 +377,25 @@ class TestCallbackExceptionHandling:
         import logging
 
         with caplog.at_level(logging.WARNING, logger="discopt.solver"):
-            result = m.solve(lazy_constraints=bad_lazy, time_limit=30)
-        assert result.status in ("optimal", "feasible", "infeasible", "node_limit")
+            with pytest.raises(FeasibilityCallbackError) as exc:
+                m.solve(lazy_constraints=bad_lazy, time_limit=30)
+        # The original error is chained, not replaced: the user needs it to debug.
+        assert isinstance(exc.value.__cause__, ValueError)
+        assert "intentional lazy error" in str(exc.value.__cause__)
+        assert "lazy_constraints" in str(exc.value)
+        # The soft-failure behaviour INSIDE the search is unchanged: still logged,
+        # still per-node, so one bad node does not abort the batch.
+        assert any("Lazy constraint callback raised" in r.message for r in caplog.records), (
+            "the per-node warning must survive — it is how a user sees WHICH nodes failed"
+        )
 
-    def test_incumbent_callback_exception_logged(self, caplog):
-        """An incumbent callback that raises should not crash the solver."""
+    def test_incumbent_callback_exception_refuses_the_result(self, caplog):
+        """An incumbent callback that raises must not yield a certificate (#1436).
+
+        Same correction as the lazy-constraint test above. A failed veto means the
+        point was accepted unvetted, so the incumbent may be one the callback
+        exists to reject.
+        """
         m, x, y = _simple_milp()
 
         def bad_inc(ctx, model, solution):
@@ -375,8 +404,12 @@ class TestCallbackExceptionHandling:
         import logging
 
         with caplog.at_level(logging.WARNING, logger="discopt.solver"):
-            result = m.solve(incumbent_callback=bad_inc, time_limit=30)
-        assert result.status in ("optimal", "feasible", "infeasible", "node_limit")
+            with pytest.raises(FeasibilityCallbackError) as exc:
+                m.solve(incumbent_callback=bad_inc, time_limit=30)
+        assert isinstance(exc.value.__cause__, TypeError)
+        assert "intentional incumbent error" in str(exc.value.__cause__)
+        assert "incumbent_callback" in str(exc.value)
+        assert any("Incumbent callback raised" in r.message for r in caplog.records)
 
 
 @pytest.mark.slow
