@@ -127,3 +127,41 @@ def test_env_default_is_on():
     with pytest.MonkeyPatch.context() as mp:
         mp.delenv("DISCOPT_PUMP_REPAIR", raising=False)
         assert PH._pump_repair_enabled() is True
+
+
+def test_repair_is_attempted_at_most_once_per_pump(monkeypatch):
+    """The cap that made the change affordable (#1435).
+
+    The repair is cheap when it *succeeds* — the pump returns that round. What
+    costs is a rounding that cannot be repaired: uncapped, the pump pays for a
+    failed repair on every one of its ``max_rounds`` rounds and returns nothing
+    anyway. Measured over a 118-instance MINLPLib panel, that cost a median -8.5%
+    node throughput on the 30 instances it moved, for no primal gain — so the
+    repair runs once per pump. A rounding whose repair succeeds succeeds on the
+    first round, which is why one attempt keeps the whole measured gain.
+    """
+    m = dm.Model()
+    x = m.continuous("x", lb=0.0, ub=10.0)
+    k = m.integer("k", lb=0, ub=10)
+    # Infeasible for every integer k, so no round can ever produce a point and
+    # the pump is forced to run all of max_rounds rounds.
+    m.subject_to(x * x + k * k <= -1.0)
+    m.minimize(x + k)
+
+    calls = {"n": 0}
+    real = PH._repair_to_feasible
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(PH, "_repair_to_feasible", counting)
+    evaluator = _make_evaluator(m)
+    rounds = 5
+    out = PH.feasibility_pump(m, np.array([0.0, 0.0]), max_rounds=rounds, evaluator=evaluator)
+
+    assert out is None, "premise: this model has no feasible point to find"
+    assert rounds > 1, "premise: the pump ran more rounds than the cap allows repairs"
+    assert calls["n"] == PH._PUMP_REPAIR_ATTEMPTS == 1, (
+        f"repair ran {calls['n']}x over {rounds} rounds; the cap is {PH._PUMP_REPAIR_ATTEMPTS}"
+    )

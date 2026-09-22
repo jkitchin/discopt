@@ -448,6 +448,7 @@ def feasibility_pump(
         backend = get_nlp_solver("auto")
 
     rng = np.random.default_rng(42)
+    repairs_left = _PUMP_REPAIR_ATTEMPTS
 
     for round_idx in range(max_rounds):
         # Always run the first round (a feasible incumbent is the primary goal,
@@ -513,12 +514,13 @@ def feasibility_pump(
             ):
                 x_cand = _verified_pump_point(evaluator, nlp_result.x, int_mask)
 
-            if x_cand is None:
+            if x_cand is None and repairs_left > 0:
                 # #1435: second candidate from the SAME pinned subproblem, a
                 # min-norm feasibility repair rather than an objective solve.
                 # Runs only when the objective projection produced nothing, so
                 # no point this pump finds today is displaced or lost — the
                 # repair can only add a round that would otherwise have failed.
+                repairs_left -= 1
                 x_rep = _repair_to_feasible(evaluator, x0, deadline)
                 if x_rep is not None:
                     x_cand = _verified_pump_point(evaluator, x_rep, int_mask)
@@ -553,6 +555,17 @@ def _verified_pump_point(
         return None
     return x_cand
 
+
+#: Repair attempts allowed per :func:`feasibility_pump` call (#1435). The repair
+#: is cheap when it succeeds and the pump returns immediately, so this bounds the
+#: case that actually costs: a model whose rounding *cannot* be repaired, where
+#: an uncapped repair pays ~0.2 s on every one of the five rounds and returns
+#: nothing. Measured over a 118-instance MINLPLib panel, uncapped cost a median
+#: **-8.5 %** node throughput on the 30 instances it moved (worst -25 %) for zero
+#: primal gain outside the probe instance — CLAUDE.md §2's "benefit confined to a
+#: named instance" verdict. One attempt keeps the gain, because a rounding whose
+#: repair succeeds succeeds on the first round.
+_PUMP_REPAIR_ATTEMPTS = 1
 
 #: Outer re-linearizations allowed to :func:`_repair_to_feasible` (#1435). A
 #: deterministic WORK cap in #912's sense, not a wall budget: the repair stops as
