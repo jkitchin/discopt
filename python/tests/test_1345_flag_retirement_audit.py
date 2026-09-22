@@ -125,13 +125,22 @@ def test_every_default_off_solver_math_gate_has_an_audit_verdict():
     audit = AUDIT.read_text()
     assert gates, "classification removed every flag — the exclusion sets are wrong"
 
-    missing = [g for g in sorted(gates) if f"`{g}`" not in audit]
+    # A ROW, not a mention. The first version of this test accepted any occurrence of
+    # the flag name in the document, and two gates passed it on prose alone:
+    # `DISCOPT_OBBT_ITERATE` (named in a paragraph about a verdict nobody acted on) and
+    # `DISCOPT_RLT` (named only as "the whole DISCOPT_RLT family"). Both then turned out
+    # to have decisive recorded verdicts. Measuring a mention is the same class of error
+    # as measuring a docstring: it counts the flag being *spoken about*, not triaged.
+    rows = {line.split("`")[1] for line in audit.splitlines() if line.startswith("| `DISCOPT_")}
+    missing = [g for g in sorted(gates) if g not in rows]
     assert not missing, (
-        "default-OFF gate(s) over solver math with no row in "
+        "default-OFF gate(s) over solver math with no ROW in "
         f"docs/dev/flag-retirement-audit.md: {missing}. Per CLAUDE.md §5, a new gate "
         "adds its row in the same PR that introduces the flag — graduate, retire, or "
         "keep as a documented opt-out. `panel owed, never run` is a legitimate row "
-        "and the audit says so; having NO row is the defect §5 names."
+        "and the audit says so; having NO row is the defect §5 names. A paragraph "
+        "mentioning the flag is NOT a row: it does not state a verdict, and this test "
+        "used to accept one."
     )
 
     # Cross-check the scan against the document's declared population. Unlike the
