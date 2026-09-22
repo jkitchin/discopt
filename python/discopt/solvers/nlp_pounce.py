@@ -144,12 +144,15 @@ def solve_nlp(
             unsuitable, so the solution is unchanged and only factorization time
             differs (Parker, Garcia & Bent, arXiv:2602.17968). Honored only on
             the default FERAL + exact-Hessian path.
+
         ordering: Optional sequence of KKT-space indices giving a custom
             factorization ordering, handed to ``pounce.Problem.set_ordering``.
             Correctness-safe for the same reason as ``kkt_schur_block``.
-        block_structure: Optional ``(var_blocks, con_blocks)`` in **NLP index
-            space** — one block id per column and one per row, negative for the
-            shared border — handed to ``pounce.Problem.set_block_structure``,
+
+        block_structure: Optional ``(var_blocks, con_blocks)`` in
+            **NLP index space** — one block id per column and one per row,
+            negative for the shared border — handed to
+            ``pounce.Problem.set_block_structure``,
             which maps the declaration onto the KKT layout itself (which columns
             survived fixing, how rows split into equalities and inequalities) and
             factorizes the blocks in parallel over a shared border (#1370,
@@ -160,6 +163,7 @@ def solve_nlp(
             hand, so the labels are checked against the emitted problem's own
             sparsity. Correctness-safe in the same sense as the two above: the
             factorization changes, the solution does not.
+
         warm_start: Optional ``pounce.WarmStart`` carrying a previous solve's
             primal point, constraint and bound multipliers, and barrier
             parameter (#1247). Handed to ``pounce.Problem.solve``, which derives

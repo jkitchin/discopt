@@ -843,18 +843,17 @@ class Expression:
     def min(self, axis: Optional[int] = None, out=None, **kwargs) -> "Expression":
         """Smallest element of this expression, as a balanced binary fold.
 
+        Requires a statically known shape, since the elements have to be indexed
+        out one at a time to be folded -- raises :class:`TypeError` rather than
+        guessing when the shape is not known (a matmul result, a custom call).
+
         Parameters
         ----------
         axis : None
             Accepted only so ``np.min(expr)`` dispatches here (numpy's reduction
-            protocol calls ``expr.min(axis=..., out=...)``). Must be ``None``; see
-            below.
+            protocol calls ``expr.min(axis=..., out=...)``). Must be ``None``.
         out, ``**kwargs``
             Refused; see :meth:`_reject_numpy_reduction_kwargs`.
-
-        Requires a statically known shape, since the elements have to be indexed
-        out one at a time to be folded -- raises :class:`TypeError` rather than
-        guessing when the shape is not known (a matmul result, a custom call).
 
         Examples
         --------
@@ -2984,12 +2983,12 @@ def _minmax_operands(fname: str, args: tuple) -> list[Expression]:
 
 
 def minimum(*args: Union[Expression, float]) -> Expression:
-    """
+    r"""
     Element-wise minimum of two or more expressions.
 
     Parameters
     ----------
-    *args : Expression or float
+    \*args : Expression or float
         Two or more operands, broadcast against each other element-wise. Three or
         more are folded into a balanced tree of binary ``min`` nodes (issue
         #1238), which is ``ceil(log2(n))`` deep rather than ``n - 1``; the two
