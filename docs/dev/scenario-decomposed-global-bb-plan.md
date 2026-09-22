@@ -1,8 +1,10 @@
-# Scenario-decomposed global branch and bound (A8)
+# Scenario-decomposed global branch and bound (A8): evaluated, NOT scheduled
 
-**Date:** 2026-09-21
-**Status:** entry experiment run; see §5 for the verdict
-**Audience:** an implementing agent executing this plan phase by phase.
+**Date:** 2026-09-22
+**Status: DECLINED — measurement recorded, implementation not scheduled.** The entry
+experiment ran (§5) and the method works as advertised on the class it targets; that
+class is not discopt's. Kept as the record so the next reader does not re-derive it.
+**Audience:** whoever next considers a decomposition-based global method here.
 **Scope:** a new global method for two-stage stochastic nonconvex NLPs, living in
 `python/discopt/stochastic/`, reusing `python/discopt/decomposition/` (structure,
 parallel) and `python/discopt/_relax/` (relaxation, FBBT/OBBT).
@@ -43,8 +45,9 @@ premises of that draft**, both recorded here per CLAUDE.md §4/§11:
    **101.5 / 62.6 / ≥10000 / 10.6 %**. The relevant baseline is the monolithic
    relaxation, not the best achievable dual bound.
 
-Both corrections widen the case for building it. §4 exists because neither number was
-measured against *discopt's* root bound.
+Both corrections widened the case for *evaluating* it, which is what §4/§5 did. They do
+not survive as an argument for building it: see §5's verdict, which turns on scope
+rather than on either of these numbers.
 
 ---
 
@@ -117,7 +120,7 @@ future work and call it "challenging because of memory management and load imbal
 
 ---
 
-## 2. Why this fits here
+## 2. What it would have reused (unchanged facts)
 
 - **The structure layer already produces the inputs.** `decomposition/structure.py`'s
   `DecompositionStructure` carries `blocks`, `complicating_vars`, `coupling_constraints`,
@@ -137,7 +140,7 @@ future work and call it "challenging because of memory management and load imbal
 
 ---
 
-## 3. Correctness contract (binding)
+## 3. Correctness contract (binding on any revival)
 
 1. **`β_s` is a dual bound, never an incumbent.** The node lower bound sums
    `SolveResult.bound` over scenarios, and only when `bound_valid` is true. Summing
@@ -162,7 +165,7 @@ future work and call it "challenging because of memory management and load imbal
 
 ---
 
-## 4. Entry experiment (run before any implementation)
+## 4. Entry experiment (as run)
 
 Per CLAUDE.md §4, the falsifying experiment runs first.
 
@@ -200,76 +203,134 @@ python -u -m discopt_benchmarks.scripts.stochastic_evpi_entry_experiment \
 
 ---
 
-## 5. Results
+## 5. Results (2026-09-22)
 
-<!-- RESULTS -->
+Run: `reports/stochastic_evpi_entry.json` (12 cells, 3961 s, 2 monolith replicates) plus
+`reports/stochastic_evpi_entry_rerun.json` (the 4 cells whose upper bound the first sweep
+suppressed, re-run with the fixed candidate rule at 1 replicate). **`reports/` is
+gitignored, so those files are not in-tree — the table below is the durable record**, and
+`discopt_benchmarks/scripts/stochastic_evpi_entry_experiment.py` regenerates it
+(`--summarize` re-renders the table from a saved report). Budgets: 120 s monolith,
+40 s per subproblem, `deterministic=True` throughout. `discopt.__file__` asserted to the
+worktree; load average 0.9–1.0 before and after, no competing job.
+
+| family | S | n_x | decomposed LB | discopt root bound | better bound | decomposed root gap | discopt root gap | scenario disagreement | subs certified |
+|---|---|---|---|---|---|---|---|---|---|
+| pooling | 4 | 2 | −28.0115 | −27.5143 | monolith | 1.81% | **0.0000%** | 0.255 | 4/4 |
+| pooling | 8 | 2 | −26.6315 | −25.7894 | monolith | 3.27% | **0.0000%** | 0.406 | 8/8 |
+| pooling | 16 | 2 | −27.7079 | −27.1349 | monolith | 2.11% | **0.0000%** | 0.462 | 16/16 |
+| pid | 4 | 3 | 0.080456 | 0.025008 | **decomp** | **0.0006%** | 68.92% | 0.000 | 4/4 |
+| pid | 8 | 3 | 0.061990 | 0.016807 | **decomp** | **7.75%** | 74.99% | 0.000 | 6/8 |
+| pid | 16 | 3 | 0.065083 | **−1e−12** | **decomp** | **3.85%** | 100.00% | 0.000 | 13/16 |
+| pid_wide | 4 | 3 | 0.401738 | 0.163690 | **decomp** | **0.0002%** | 59.25% | 0.000 | 4/4 |
+| pid_wide | 8 | 3 | 0.248568 | 0.104770 | **decomp** | n/a (x̂ infeasible in 1 scenario) | n/a | 0.000 | 7/8 |
+| pid_wide | 16 | 3 | 0.250199 | **−1e−12** | **decomp** | **0.066%** | 100.00% | 0.000 | 15/16 |
+| estimation | 4 | 5 | −0.000193 | 0.0000382 | monolith | 104.32% | 99.14% | 0.828 | 2/4 |
+| estimation | 8 | 9 | −0.002534 | 0.000973 | monolith | 147.98% | 81.58% | n/a | 1/8 |
+| estimation | 16 | 17 | −0.501343 | **none** | (degenerate) | n/a | n/a | n/a | 1/16 |
+
+**Tally.** Bound-level: decomposed better in 7 of 12 cells. Gap-level (the pre-registered
+metric): 5 wins of 10 comparable cells. The split is perfectly clean by family — all
+decomposed wins are PID, all monolith wins are pooling or estimation.
+
+### 5.1 What the numbers say
+
+- **Where the first stage enters the recourse nonlinearly and the scenarios agree (PID,
+  disagreement 0.000), the decomposition is not a speedup — it is the difference between
+  an answer and none.** At S=16 discopt on the extensive form returns the *trivial* bound
+  `−1e−12` with no feasible point after 120 s; the decomposed arm returns 0.065 and an
+  incumbent, gap 3.85 % against the monolith's 100 %.
+- **Where the first stage enters the recourse only linearly (pooling), our relaxation is
+  already exact at the root** (`nodes=1`, gap 0.0000 %, bit-identical across replicates)
+  and the decomposition is pure overhead, losing by 1.8–3.3 points.
+- **Where blocks can satisfy themselves independently (estimation, disagreement 0.828),
+  EVPI is enormous and grows with S** (104 % → 148 %): each time block fits its own data
+  almost perfectly once its linking states are free, so the root bound is worthless.
+- **discopt's root bound was bit-identical across replicates in every cell** (sd = 0)
+  under `deterministic=True`, so `solver.py`'s reproducibility retraction did not bite
+  here.
+
+### 5.2 Caveats that cut *for* the method, stated so the verdict is not read as stronger than it is
+
+- **Uncertified subproblems make the measured decomposed bound an underestimate of the
+  method's true bound.** Only 2/4, 1/8 and 1/16 estimation subproblems certified. An
+  uncertified subproblem still contributes a *valid* dual bound (nothing here is unsound),
+  but one below its true `β_s`. The estimation losses are therefore pessimistic-for-the-
+  method, not clean losses.
+- **The upper bound used here is the paper's *fallback*, not its primary.** Cao & Zavala
+  take x̂ from a local NLP solve of the extensive form and only fall back to the mean of
+  the subproblem minimisers. Only the fallback was implemented, which is why `pid_wide`
+  S=8 has no α at all.
+- **No real-corpus instances exist for this structure.** Neither MINLPLib nor
+  `python/tests/data/minlplib_nl/` contains a two-stage stochastic instance, so all three
+  families are constructed. This is a named residual risk, not corpus validation.
+- **Two bugs in the probe were found and fixed mid-flight** (a positive-feedback sign
+  error that made every fixed-gain PID scenario infeasible; an all-S-candidates
+  restriction that suppressed the upper bound on 4 cells). Both would have produced
+  confident, wrong conclusions — the first a false "PID unmeasurable", the second a false
+  "no headroom at S≥8".
+
+### 5.3 Verdict: DECLINED
+
+The method works, on the class it targets. **That class is not discopt's**, and that —
+not the bound numbers — is what decides this:
+
+1. **It does not solve MINLPs.** Cao & Zavala assume a **continuous** first stage; an
+   integer first stage is their own stated future work, because branching on integers
+   interacts with the exhaustive-subdivision argument carrying the convergence proof
+   (§1.2). discopt is an MINLP solver. A stochastic-NLP global solver is a *different
+   product*, not a capability increment.
+2. **The one structure already in this repo that fits, measured worst.**
+   `discopt.dae.fit.fit_trajectories` builds one collocation block per trajectory on a
+   shared model with shared parameters — first stage plus blocks, exactly this shape. It
+   is the `estimation` family above, and its root bound lost at S=4 and S=8 and degraded
+   as S grew. The in-repo use case is the anti-case.
+3. **Nothing in the corpus exercises it.** There is no two-stage stochastic instance in
+   MINLPLib or the in-repo corpus, so the method could never be regression-tested by the
+   panels that gate everything else here (CLAUDE.md §5).
+4. **The win is confined to low-EVPI instances**, and EVPI is a property of the *user's*
+   model that we cannot assume. Both PID families measured disagreement 0.000 — even the
+   variant built specifically to be heterogeneous.
+
+**For the MINLP-facing version of A8, the other candidate is the right one.** NGBD
+(`LiTomasgardBarton2011`, the unrun T3.3 spike) has finite termination *with an
+all-integer first stage* — it targets the class discopt is actually for. Reading the full
+Cao & Zavala paper changed which A8 candidate looks more on-mission, in the opposite
+direction from what this plan was opened to argue.
+
+### 5.4 What would change this
+
+Any one of these, and this doc becomes a live plan again:
+
+- A user or collaborator brings **two-stage stochastic nonconvex NLPs** as a real workload
+  (Laird's group is the obvious source, given SNoGloDe).
+- The integer-first-stage extension appears in the literature with a convergence proof, at
+  which point the method becomes MINLP-relevant rather than adjacent.
+- `discopt.dae.fit` acquires users whose fits are **globally** unsolvable today *and* whose
+  block disagreement is small — i.e. the estimation family's numbers invert on real data.
+
+Until then: not scheduled. Phases retained in §6 as a sketch, explicitly not a queue.
 
 ---
 
-## 6. Implementation phases (conditional on §5)
+## 6. If revisited: implementation sketch (NOT a work queue)
 
-Each task names files, algorithm, tests and an exit gate. Phases run in order.
+Kept because it is cheap to keep and expensive to re-derive. Nothing here is scheduled.
 
-### Phase 0 — make a scenario buildable standalone
+The staging that made sense, in order, was: (0) extend the recourse-builder contract to
+`(model, data, s, first_stage)` plus a `first_stage_builder`, so `build_extensive_form`
+and a new `build_scenario_model(s)` construct the same first stage in different `Model`s
+— the only API gap, since the callback pattern already avoids expression-DAG surgery;
+(1) `β(X0)`, `α(X0)` and EVPI through `decomposition/parallel/comm.py`, which is the
+whole method's value on its own and its own go/no-go signal; (2) a Python-level
+first-stage-only spatial B&B (per-node cost is S global solves, so loop overhead is
+noise), then the inherited scenario cut and subproblem reuse as a **bound-neutral** change
+(node count and certified objective exactly unchanged), then `max(relaxation, β(X))` as a
+co-bound; (3) OBBT at every node, strong branching, the UB schedule, the thread backend;
+(4) a `solve_global` surface plus a `MethodKind` member.
 
-**T0.1 — retargetable recourse builder.** Extend the builder contract to
-`recourse_builder(model, data, s, first_stage)` (keyword-optional, so today's
-3-argument callables keep working — inspect the signature, do not guess), and add
-`first_stage_builder(model) -> dict[str, Variable]` so `build_extensive_form` and a new
-`build_scenario_model(s)` construct the *same* first stage in different `Model`s.
-*Files:* `python/discopt/stochastic/extensive_form.py`, `scenario.py`.
-*Gate:* a test builds the monolith and the S standalone subproblems from one pair of
-callbacks and asserts that fixing the first stage at a point gives
-`Σ_s p_s · sub_s = monolith` to 1e-9 — with an **executed-comparison count** asserted
-non-zero (CLAUDE.md measurement §6).
-
-### Phase 1 — the bounds, no tree
-
-**T1.1 — `root_bounds(...)`**: compute `β(X0)`, `α(X0)` and the EVPI for a declared
-two-stage model, through `decomposition/parallel/comm.py` so the reduce order is fixed.
-*Gate:* on the §4 families, `β ≤ z ≤ α` holds on every instance; thread and sequential
-backends agree bit-for-bit; ≥1 comparison asserted per instance.
-
-**T1.2 — bound hygiene.** `β_s` sums `bound` only when `bound_valid`; a limit-terminated
-subproblem degrades the node, never inflates it. *Gate:* a regression test that forces a
-1 ms subproblem budget and asserts the node bound goes to `-inf` rather than to a sum of
-incumbents.
-
-### Phase 2 — the tree
-
-**T2.1 — first-stage-only spatial B&B** in Python (per-node cost is S global solves, so
-loop overhead is noise; the Rust tree is not touched). Node selection = best bound;
-subdivision = exhaustive (longest edge, branch point `Σ x̃_s/|S|` clamped away from the
-bounds); delete-by-infeasibility when any `β_s = ∞`.
-*Gate:* on each §4 family the returned `objective`/`bound` bracket the extensive-form
-solve's certified optimum, and `gap_certified` is never set when any subproblem was
-uncertified.
-
-**T2.2 — inherited scenario cut + subproblem reuse** (§1.3). *Gate:* bound-neutral —
-node count and certified objective **exactly unchanged**, wall time down; per CLAUDE.md
-§5's bound-neutral regime any drift means the change is wrong.
-
-**T2.3 — co-bound with the existing relaxation**: node bound = `max(relaxation bound,
-β(X))`, warm-starting subproblems from the relaxation solution. *Gate:* differential —
-node counts non-increasing on the panel, no bound above a known optimum.
-
-### Phase 3 — the accelerators
-
-**T3.1** OBBT at every node over the first stage (2·n_x LPs).
-**T3.2** Strong branching scored by relaxation-bound improvement, widest-range fallback.
-**T3.3** UB schedule (first 3 levels, then every 2).
-**T3.4** `backend="threads"` for the per-node subproblem map.
-*Gate for the phase:* wall-clock improvement measured with an interleaved control and a
-reported spread (CLAUDE.md measurement §9); bound-neutrality checked for T3.1–T3.3.
-
-### Phase 4 — surface
-
-`discopt.stochastic.solve_global(...)` mirroring `solve_lshaped`'s signature; a
-`MethodKind` member for the advisor (`advisor/types.py` registers `DANTZIG_WOLFE`,
-`ADMM`, `SCHUR`, … but nothing for a globally-valid decomposition); `Soundness` for it is
-`PROVEN_EQUIVALENT` on nonconvex models, which no current candidate can claim.
-
----
+The correctness contract in §3 is the part that must survive any revival: **sum subproblem
+dual bounds, never incumbents.**
 
 ## 7. Out of scope (and why)
 
@@ -294,7 +355,18 @@ reported spread (CLAUDE.md measurement §9); bound-neutrality checked for T3.1�
   without reading the paper, which is the §4 entry-experiment discipline applied to the
   literature rather than to code.
 
-<!-- DECISION LOG -->
+- **2026-09-22 — DECLINED after the entry experiment.** 12 cells + 4 re-run cells; the
+  decomposed root bound beat discopt's in 7 of 12 (all PID), lost in 5 (pooling,
+  estimation). The verdict does not turn on the bound numbers: the method assumes a
+  continuous first stage (so it is not an MINLP method), nothing in the corpus exercises
+  it, and the one in-repo structure that fits (`dae.fit` multi-experiment fitting) is the
+  family whose root bound measured worst and degraded with S. Recorded rather than
+  scheduled, per CLAUDE.md's rule that a measurement taken must be acted on. NGBD (T3.3)
+  is the A8 candidate that targets discopt's actual class.
+- **2026-09-22 — the pre-registered metric was a bad choice, replaced and labelled.**
+  Normalising both root bounds by an incumbent silenced the probe on 5 of 12 cells,
+  including those carrying the largest effect. Two valid lower bounds compare directly.
+  The bound-level statistic is post hoc and says so wherever it appears.
 
 ---
 

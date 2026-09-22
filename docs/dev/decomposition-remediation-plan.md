@@ -82,16 +82,21 @@ Every task below traces to one of these findings. Line numbers are as of commit
 | A5 | GBD: **no feasibility cuts** — infeasible recourse handled only by no-good cuts on an all-binary master (exponential), else `NotImplementedError` mid-solve. | `benders/gbd.py:387-398, 422-427, 453-457` |
 | A6 | Advisor never proposes **OA** for convex MINLP although OA cuts dominate GBD cuts (Duran & Grossmann 1986) and `solvers/oa.py` exists. GBD hardcoded `cut_strength=0.6` vs Benders 0.9; no OA candidate. | `advisor/candidates.py:98-130`, `advisor/scoring.py:122-134` |
 | A7 | `MethodKind.INDEPENDENT_BLOCKS` falls back to **monolithic** `model.solve()`; the parallel layer (`ThreadPoolComm`, `SchedulingGraph`, `map_subproblems`) has **no caller** in any solve path. | `ir/reformulation.py:92-98` |
-| A8 | Nonconvex models: GBD runs heuristically (`bound=None`). No NGBD-style rigorous alternative using the existing McCormick/relaxation machinery in `_relax/`. | `benders/gbd.py:44-56` 
+| A8 | Nonconvex models: GBD runs heuristically (`bound=None`). No NGBD-style rigorous alternative using the existing McCormick/relaxation machinery in `_relax/`. | `benders/gbd.py:44-56` |
 
-> **A8 has a second candidate answer (2026-09-21).** Besides the NGBD spike (T3.3, not
-> run), the scenario-decomposed global B&B of Cao & Zavala (2019) — relax
-> non-anticipativity for the node lower bound, fix the first stage for the upper bound,
-> branch on the first-stage variables only — attacks the same gap from the B&B side
-> rather than the cut side. Planned separately in
-> `docs/dev/scenario-decomposed-global-bb-plan.md`, which carries its own entry
-> experiment and verdict. Its scope is `discopt.stochastic`; the general block-angular
-> generalisation (SNoGloDe) still needs the `Model.subset` primitive that deferred T1.4.
+> **A8's second candidate was evaluated and DECLINED (2026-09-22).** The
+> scenario-decomposed global B&B of Cao & Zavala (2019) — relax non-anticipativity for the
+> node lower bound, fix the first stage for the upper bound, branch on the first-stage
+> variables only — was worked up and its entry experiment run:
+> `docs/dev/scenario-decomposed-global-bb-plan.md`. Measured result: its root bound beats
+> discopt's in 7 of 12 cells (dramatically so where the first stage enters the recourse
+> nonlinearly — at S=16 discopt returns the trivial bound with no incumbent), and loses
+> where our relaxation is already root-exact or where blocks satisfy themselves
+> independently. It is **not scheduled**, because it assumes a *continuous* first stage
+> (not an MINLP method), no corpus instance exercises it, and the one in-repo structure
+> that fits (`dae.fit` multi-experiment fitting) is the family that measured worst.
+> **T3.3/NGBD remains the A8 candidate aimed at discopt's actual class** — it has finite
+> termination with an all-integer first stage.
 
 
 ### Scalability / engineering (S)
@@ -441,11 +446,14 @@ solver's root bound. Record in §7: bound quality, wall time, and integration co
 Only if the bound is competitive does a full NGBD task get scheduled (new plan
 section, not this one).
 
-**Cross-reference (2026-09-21):** `docs/dev/scenario-decomposed-global-bb-plan.md` is the
-competing answer to A8 and has run *its* entry experiment. If that method is adopted,
-re-scope T3.3 before running it — the two produce rigorous bounds for the same class, and
-NGBD's advantage (finite termination with an all-integer first stage) is orthogonal to the
-other's (branching dimension independent of the scenario count).
+**Cross-reference (2026-09-22):** the competing A8 candidate
+(`docs/dev/scenario-decomposed-global-bb-plan.md`) ran its entry experiment and was
+DECLINED — it assumes a continuous first stage, so it is not an MINLP method. That makes
+T3.3 the A8 candidate still worth running: NGBD's finite termination with an all-integer
+first stage is precisely the property the declined method lacks. Its entry experiment
+should reuse the harness built for the other one
+(`discopt_benchmarks/scripts/stochastic_evpi_entry_experiment.py`), whose scenario
+families and bound-comparison reporting transfer directly.
 
 ---
 
