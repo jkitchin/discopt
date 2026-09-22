@@ -32,12 +32,18 @@ fn main() {
     // `x + y` costs a single node -- not two `Var`s and an `Add`.
     constraint!(m, c0, x[0] + 2.0 * y[0] + 3.0 * z[0] <= 10.0);
     let one_linear = m.arena().len();
-    println!("+1 linear row  (x + 2y + 3z <= c): +{} nodes", one_linear - after_vars);
+    println!(
+        "+1 linear row  (x + 2y + 3z <= c): +{} nodes",
+        one_linear - after_vars
+    );
     checks += 1;
 
     constraint!(m, c1, x[1] + y[1] <= 10.0);
     let two = m.arena().len();
-    println!("+1 linear row  (x + y <= c):       +{} nodes", two - one_linear);
+    println!(
+        "+1 linear row  (x + y <= c):       +{} nodes",
+        two - one_linear
+    );
     checks += 1;
 
     // Stage 4-5: no fusion is available for a nonlinear body, so these are the
@@ -56,7 +62,11 @@ fn main() {
     // the RHS constant is folded into the bound. A linear row costs its writer
     // and its backends no DAG walk at all.
     let cons = m.constraints();
-    let c = cons.algebraic().iter().find(|c| c.name == "c0").expect("c0");
+    let c = cons
+        .algebraic()
+        .iter()
+        .find(|c| c.name == "c0")
+        .expect("c0");
     let arena = m.arena();
     println!("\nfinal node of the linear row: {:?}", arena.get(c.lhs));
     println!("its bounds: [{}, {}]", c.lower, c.upper);
@@ -67,7 +77,10 @@ fn main() {
     drop(cons);
     let before_sum = m.arena().len();
     constraint!(m, c4, sum!(x[i] for i in 0..100) <= 10.0);
-    println!("\n+1 row summing 100 terms:          +{} nodes", m.arena().len() - before_sum);
+    println!(
+        "\n+1 row summing 100 terms:          +{} nodes",
+        m.arena().len() - before_sum
+    );
     checks += 1;
 
     eprintln!("# executed: {checks} stage measurements");

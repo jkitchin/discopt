@@ -31,7 +31,7 @@ The next planned release is **`v0.9.0`** (minor bump on top of `v0.8.0`).
       `321 passed, 118 skipped`, and all 118 were unconditional-skip stubs in
       `tests/test_correctness.py` and `tests/test_interop.py` that had never
       executed (#1050) -- not optional-dependency gates. Both are resolved:
-      `test_correctness.py`'s 98 now solve real instances, and `test_interop.py`
+      `test_correctness.py`'s 109 now solve real instances, and `test_interop.py`
       was deleted (it tested 14 `discopt._rust` helpers that never existed; its
       real intent is covered by `python/tests/test_batch_dispatch.py`).
       A skip count is still worth reading, but a *stub* skip now fails the
@@ -39,7 +39,7 @@ The next planned release is **`v0.9.0`** (minor bump on top of `v0.8.0`).
 - [ ] `pytest discopt_benchmarks/tests/test_correctness.py -m correctness -v` --
       **the `-m` is required**, for the same reason as the `python/tests` item
       below: that file is now marked `correctness`, which the root `addopts`
-      deselects, so the bare command above silently collects and deselects all 99.
+      deselects, so the bare command above silently collects and deselects all 109.
       This is the lane that checks the reported objective against MINLPLib's
       `.solu`, that no dual bound exceeds a known optimum, that incumbents are
       feasible and integral, and (`TestDeterminism`) that a `deterministic=True`
@@ -63,7 +63,18 @@ The next planned release is **`v0.9.0`** (minor bump on top of `v0.8.0`).
       `-m "correctness and slow"`, which neither the PR jobs nor a default local
       `pytest` run reaches.
 - [ ] `make bench-smoke` -- smoke benchmark passes.
-- [ ] Phase gates relevant to this release. Each `--gate phaseN` check reads the matching suite's most recent results in `results/`, so run `--suite phaseN` first. These runs are expensive (each suite uses a 3600 s per-instance time limit) and are typically a CI-only step for patch releases:
+- [ ] Phase gates relevant to this release. **NOT EVALUABLE as of 2026-09-22 -- see
+      [#1420](https://github.com/jkitchin/discopt/issues/1420); do not read a PASS or a FAIL from
+      `--gate phaseN` as evidence until it is fixed.** The evaluator ignores each criterion's
+      declared `suite` key, so criteria naming `nlp_cutest`, `lp_netlib`, `full` and `comparison`
+      are all scored against whichever single results file was loaded (two criteria in `phase1`
+      observably report the identical value). A further 10 criteria need `reference_solvers`,
+      which the CLI never passes, and 1 (`phase1.sparse_accuracy`) has no branch at all -- 11 of
+      39 criteria are structurally unreachable, including 3 of the 7 in `phase4`, the release
+      gate. `[suites.comparison]` also names `config/comparison_instances.txt`, which does not
+      exist. Certification evidence for v0.9.0 came instead from the `global50` panel plus the
+      corpus correctness lane, both of which are sound. The commands below are retained for when
+      #1420 lands. Each `--gate phaseN` check reads the matching suite's most recent results in `results/`, so run `--suite phaseN` first. These runs are expensive (each suite uses a 3600 s per-instance time limit -- measured 2026-09-22, `phase1` filters the local corpus to 35 instances and `phase3` to 55, and `run_benchmarks.py` exposes no `--time-limit` override, so the pair is up to ~90 h of wall) and are typically a CI-only step for patch releases:
   - [ ] `python discopt_benchmarks/run_benchmarks.py --suite phase1 && python discopt_benchmarks/run_benchmarks.py --gate phase1`
   - [ ] `python discopt_benchmarks/run_benchmarks.py --suite phase3 && python discopt_benchmarks/run_benchmarks.py --gate phase3`
   - [ ] `phase4` is the release gate and needs **no** `[suites.phase4]` entry — every one of its seven criteria names `full` or `comparison` (see
@@ -152,7 +163,7 @@ directly; always re-export from org.
 
 - [ ] `pyproject.toml` -- bump `version = "X.Y.Z"`.
 - [ ] `python/discopt/__init__.py` -- bump `__version__ = "X.Y.Z"`.
-- [ ] `CITATION.cff` -- bump `version: X.Y.Z` to match the tag. (`.zenodo.json` carries no version; Zenodo derives it from the git tag when the GitHub release is archived.)
+- [ ] `CITATION.cff` -- bump `version: X.Y.Z` to match the tag. (`.zenodo.json` carries no version; Zenodo derives it from the git tag when the GitHub release is archived.) Note this file tracks the **last released** version, so finding the previous version here before this step is correct, not stale. The file currently carries no `date-released:` key -- add one set to the tag date while you are here.
 - [ ] Grep for hard-coded version strings that might have been missed:
   `rg -n '\bA\.B\.C\b' --glob '!CHANGELOG.md' --glob '!docs/_build' --glob '!target'`
   (substitute the previous version `A.B.C`).

@@ -83,7 +83,11 @@ fn rss_bytes() -> std::io::Result<u64> {
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("VmRSS:") {
             let mut it = rest.split_whitespace();
-            let value: u64 = it.next().expect("VmRSS value").parse().expect("VmRSS is numeric");
+            let value: u64 = it
+                .next()
+                .expect("VmRSS value")
+                .parse()
+                .expect("VmRSS is numeric");
             let unit = it.next().expect("VmRSS unit");
             assert_eq!(unit, "kB", "VmRSS reported in {unit}, expected kB");
             return Ok(value * 1024);
@@ -139,7 +143,11 @@ fn memory_parent() -> Result<(), Box<dyn std::error::Error>> {
             let out = std::process::Command::new(&exe)
                 .args(["--memory-child", name, &n.to_string()])
                 .output()?;
-            assert!(out.status.success(), "{name}/{n}: child failed: {:?}", out.status);
+            assert!(
+                out.status.success(),
+                "{name}/{n}: child failed: {:?}",
+                out.status
+            );
             print!("{}", String::from_utf8(out.stdout)?);
             emitted += 1;
         }
