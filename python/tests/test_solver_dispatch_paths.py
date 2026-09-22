@@ -17,6 +17,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import pytest
 from discopt.callbacks import CutResult
 from discopt.modeling.core import Model
+from discopt.solver import FeasibilityCallbackError
 
 pytestmark = pytest.mark.smoke
 
@@ -121,15 +122,29 @@ def test_incumbent_callback_veto_on_spatial_batch_loop():
     assert res.objective == pytest.approx(4.0, abs=1e-4)
 
 
-def test_incumbent_callback_exception_fails_soft():
-    # A buggy user callback is logged and ignored; the solve still certifies
-    # the true optimum (soft-fail contract, INT-1/#413).
+def test_incumbent_callback_exception_refuses_the_result():
+    # #1436. This previously asserted the soft-fail contract (INT-1/#413) --
+    # "logged and ignored; the solve still certifies the true optimum". It does
+    # certify 2.0 here, but only because nothing in THIS model depends on the
+    # callback: an incumbent callback exists to veto points, so a failed veto
+    # means the incumbent was accepted unvetted. On a model where the callback is
+    # the only thing excluding a point, the same soft-fail certified the excluded
+    # point as a global optimum (measured: -6.0 at x=y=3 where the enforced
+    # optimum is -2.0, gap_certified=True).
+    #
+    # The dispatch-path coverage this test exists for is kept below, on the same
+    # model with no callback.
     m, x, y, b = _bilinear_binary_model()
 
     def boom(ctx, model, sol):
         raise RuntimeError("user bug")
 
-    res = m.solve(incumbent_callback=boom, time_limit=120.0)
+    with pytest.raises(FeasibilityCallbackError) as exc:
+        m.solve(incumbent_callback=boom, time_limit=120.0)
+    assert isinstance(exc.value.__cause__, RuntimeError)
+
+    m2, _x, _y, _b = _bilinear_binary_model()
+    res = m2.solve(time_limit=120.0)
     assert res.status in ("optimal", "feasible")
     assert res.objective == pytest.approx(2.0, abs=1e-4)
 

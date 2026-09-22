@@ -471,7 +471,14 @@ def _with_kernel_on(monkeypatch):
     [
         {"incumbent_callback": (lambda ctx, model, sol: None)},
         {"node_callback": (lambda ctx, model: None)},
-        {"lazy_constraints": (lambda ctx, model, sol: [])},
+        # `lazy_constraints` takes (ctx, model) -- NOT (ctx, model, sol), which is
+        # `incumbent_callback`'s signature. This entry carried the 3-arg form, so
+        # it raised `TypeError: <lambda>() missing 1 required positional argument:
+        # 'sol'` at every integer-feasible node. That was swallowed (#1436), so
+        # the case passed while exercising a callback that never ran once: it
+        # tested the route, not the feature. Corrected to the real signature so
+        # the parametrization means what its name says.
+        {"lazy_constraints": (lambda ctx, model: [])},
         {"mccormick_bounds": "none"},
         {"use_learned_relaxations": True},
     ],
