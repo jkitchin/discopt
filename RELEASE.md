@@ -99,6 +99,23 @@ The next planned release is **`v0.9.0`** (minor bump on top of `v0.8.0`).
 - [ ] New features since the last release have a notebook or tutorial entry under `docs/notebooks/` and are linked from `docs/_toc.yml`.
 - [ ] New citation keys added to `docs/references.bib`; rendered page `docs/references.md` still builds.
 - [ ] `make notebooks` -- every notebook in `docs/notebooks/` and `manuscript/` executes end-to-end without error (600 s timeout per notebook).
+      **This needs the `discopt-doe` plugin installed**, and nothing in the repo
+      declares that: `docs/notebooks/cstr_fit_doe_optimize.ipynb` does
+      `from discopt import doe`, which `discopt` has not provided since
+      [#410](https://github.com/jkitchin/discopt/pull/410) extracted it to the
+      standalone `discopt-doe` distribution (`discopt` is a namespace package, so
+      installing the plugin restores the `discopt.doe` import path unchanged). CI
+      never runs `make notebooks`, so nothing catches this before a release. If
+      that one notebook is the only failure, check the plugin before reaching for
+      the notebook:
+      ```bash
+      python -c "from discopt import doe"   # ImportError => install the plugin
+      ```
+      Measured 2026-09-22: an *editable* plugin install whose source tree had been
+      moved presented exactly as a broken notebook -- `pip show discopt-doe`
+      reported it installed and healthy while `import` failed, because the
+      editable finder still mapped `discopt.doe` to a path that no longer existed.
+      `pip show` is not evidence that a plugin imports; run the import.
 - [ ] `docs/intro.md` landing page reflects the headline features of this release.
 - [ ] API docs (`autoapi`) regenerated as part of the Jupyter Book build -- spot-check that a few new public symbols appear.
 
