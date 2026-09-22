@@ -408,3 +408,45 @@ def test_generate_report_renders_not_measured_distinctly():
     )
     assert "not measured" in md, md[md.find("## Phase Gate"):][:800]
     assert "nlp_cutest" in md, "the declared suite is not shown in the report"
+
+
+def test_gate_with_no_panel_of_its_own_name_still_evaluates(two_suites):
+    """phase4 declares no `[suites.phase4]`; its evidence is entirely in other suites.
+
+    `--gate phase4` used to abort with "No results found for gate 'phase4'" before it
+    ever read the criteria, so the release gate — the one that decides whether a
+    version ships — could not be run at all. `benchmark=None` is now legal as long as
+    `suite_results` carries the declared suites.
+    """
+    gate = {"criteria": {
+        "from_alpha": {"min": 2, "suite": "alpha", "metric": "solved_count"},
+        "from_nowhere": {"min": 1, "suite": "nowhere", "metric": "solved_count"},
+    }}
+    all_passed, criteria = evaluate_phase_gate(
+        "phase4", None, gate, suite_results={"alpha": two_suites["alpha"]}
+    )
+    by_name = {c.name: c for c in criteria}
+    assert by_name["from_alpha"].status == "pass", by_name["from_alpha"]
+    assert by_name["from_alpha"].actual == 2
+    assert by_name["from_nowhere"].status == "not_measured"
+    assert not all_passed
+
+
+def test_shipped_phase4_gate_declares_no_suite_of_its_own_name():
+    """Pins the config shape the fix above exists for.
+
+    If someone later adds `[suites.phase4]`, this test fails and the None-primary
+    path stops being exercised by the real config — at which point read the branch
+    again rather than deleting it (cert gates have the same shape).
+    """
+    import run_benchmarks as rb
+
+    cfg = rb._load_toml_config()
+    assert "phase4" not in cfg.get("suites", {}), (
+        "phase4 now has a suite entry; re-check the benchmark=None path in "
+        "_run_gate_check, which exists because it did not."
+    )
+    declared = {
+        c.get("suite") for c in cfg["gates"]["phase4"]["criteria"].values()
+    }
+    assert declared == {"full", "comparison"}, declared

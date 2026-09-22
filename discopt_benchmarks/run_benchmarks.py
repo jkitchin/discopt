@@ -216,15 +216,18 @@ def _run_gate_check(args):
     print(f"{'='*60}\n")
 
     results_path = Path(args.output) if args.output else _find_latest_results(args.gate)
-    if not results_path or not results_path.exists():
-        print(f"ERROR: No results found for gate '{args.gate}'.")
-        print(f"Run benchmarks first: python run_benchmarks.py --suite {args.gate}")
-        sys.exit(1)
-
-    benchmark = BenchmarkResults.load(results_path)
+    # A panel named after the gate is not required: `phase4` has no `[suites.phase4]`
+    # and every one of its criteria is declared against `full` or `comparison`, so its
+    # evidence comes from those suites' own files. Its absence is only fatal for the
+    # baseline mode below, and for a TOML gate whose declared suites are ALL missing.
+    benchmark = (
+        BenchmarkResults.load(results_path)
+        if results_path and results_path.exists()
+        else None
+    )
 
     # Mode 1: baseline regression gate
-    baseline = load_baseline(args.gate)
+    baseline = load_baseline(args.gate) if benchmark is not None else None
     if baseline is not None:
         # Pull MINLPLib known optima from the cached index if available.
         known_optima = _known_optima_for_gate(args)
@@ -248,11 +251,23 @@ def _run_gate_check(args):
     if not gate_config:
         print(f"ERROR: No baseline at baselines/{args.gate}.json AND no gate "
               f"configuration in benchmarks.toml for '{args.gate}'")
+        if benchmark is None:
+            print(f"(No results found for '{args.gate}' either. "
+                  f"Run: python run_benchmarks.py --suite {args.gate})")
         sys.exit(1)
 
     suite_results = _load_suite_results_for_gate(
         gate_config, args.gate, benchmark, getattr(args, "suite_results", None)
     )
+    if not suite_results:
+        declared = sorted(
+            {c.get("suite", "") for c in gate_config.get("criteria", {}).values() if c.get("suite")}
+        )
+        print(f"ERROR: gate '{args.gate}' has no evidence. Its criteria are declared "
+              f"against {declared}, and no results file was found for any of them.")
+        for suite in declared:
+            print(f"  {suite}: {_how_to_produce(suite)}")
+        sys.exit(1)
 
     all_passed, criteria = evaluate_phase_gate(
         args.gate,
@@ -306,7 +321,7 @@ def _run_gate_check(args):
 def _load_suite_results_for_gate(
     gate_config: dict,
     gate_name: str,
-    primary: BenchmarkResults,
+    primary: BenchmarkResults | None,
     overrides: list[str] | None = None,
 ) -> dict[str, BenchmarkResults]:
     """Latest results for every suite the gate's criteria declare.
@@ -341,7 +356,7 @@ def _load_suite_results_for_gate(
         if not suite or suite in tried:
             continue
         tried.add(suite)
-        if suite == gate_name or suite == getattr(primary, "suite", None):
+        if primary is not None and (suite == gate_name or suite == primary.suite):
             loaded[suite] = primary
             continue
         path = _find_latest_results(suite)

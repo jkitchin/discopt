@@ -63,25 +63,36 @@ The next planned release is **`v0.9.0`** (minor bump on top of `v0.8.0`).
       `-m "correctness and slow"`, which neither the PR jobs nor a default local
       `pytest` run reaches.
 - [ ] `make bench-smoke` -- smoke benchmark passes.
-- [ ] Phase gates relevant to this release. **NOT EVALUABLE as of 2026-09-22 -- see
-      [#1420](https://github.com/jkitchin/discopt/issues/1420); do not read a PASS or a FAIL from
-      `--gate phaseN` as evidence until it is fixed.** The evaluator ignores each criterion's
-      declared `suite` key, so criteria naming `nlp_cutest`, `lp_netlib`, `full` and `comparison`
-      are all scored against whichever single results file was loaded (two criteria in `phase1`
-      observably report the identical value). A further 10 criteria need `reference_solvers`,
-      which the CLI never passes, and 1 (`phase1.sparse_accuracy`) has no branch at all -- 11 of
-      39 criteria are structurally unreachable, including 3 of the 7 in `phase4`, the release
-      gate. `[suites.comparison]` also names `config/comparison_instances.txt`, which does not
-      exist. Certification evidence for v0.9.0 came instead from the `global50` panel plus the
-      corpus correctness lane, both of which are sound. The commands below are retained for when
-      #1420 lands. Each `--gate phaseN` check reads the matching suite's most recent results in `results/`, so run `--suite phaseN` first. These runs are expensive (each suite uses a 3600 s per-instance time limit -- measured 2026-09-22, `phase1` filters the local corpus to 35 instances and `phase3` to 55, and `run_benchmarks.py` exposes no `--time-limit` override, so the pair is up to ~90 h of wall) and are typically a CI-only step for patch releases:
+- [ ] Phase gates relevant to this release. The evaluator was repaired by
+      [#1420](https://github.com/jkitchin/discopt/issues/1420) (it had been ignoring each criterion's
+      declared `suite`, so criteria naming `nlp_cutest`, `lp_netlib`, `full` and `comparison` were
+      all scored against whichever single results file was loaded, and two `phase1` criteria
+      observably reported the identical number). A `--gate phaseN` verdict is now evidence.
+      **Read the three statuses as three different things:** `PASS`/`FAIL` are measured solver
+      results; `NOT MEASURED` means the criterion's panel does not exist on this machine, and it
+      blocks the gate exactly as a failure does. Do not clear a `NOT MEASURED` by deleting the
+      criterion — produce the panel, or record in the release notes that the gate is unmet.
+      Measured 2026-09-22 on this tree: `phase1` = 3 PASS / 1 FAIL (`interop_overhead` 0.6267 vs
+      ≤ 0.05, a real miss) / 4 NOT MEASURED, and `phase4` (the release gate) = 1 PASS / 1 FAIL
+      (`beats_couenne` 0.8571) / 5 NOT MEASURED. Four of those unmeasured criteria need corpora
+      with no loader in this tree (Netlib, SuiteSparse) or their own harness (CUTEst, via
+      `scripts/run_cutest_benchmarks.py`); the rest need a `full` corpus run. Certification
+      evidence for v0.9.0 therefore still comes from the `global50` panel plus the corpus
+      correctness lane, both of which are sound and independently reported.
+      Each `--gate phaseN` check reads the most recent results in `reports/` for **each suite its
+      criteria declare** (use `--suite-results SUITE=PATH` when a panel was saved under a
+      different name). These runs are expensive (each suite uses a 3600 s per-instance time limit
+      -- measured 2026-09-22, `phase1` filters the local corpus to 35 instances and `phase3` to
+      55, and `run_benchmarks.py` exposes no `--time-limit` override, so the pair is up to ~90 h
+      of wall) and are typically a CI-only step for patch releases:
   - [ ] `python discopt_benchmarks/run_benchmarks.py --suite phase1 && python discopt_benchmarks/run_benchmarks.py --gate phase1`
   - [ ] `python discopt_benchmarks/run_benchmarks.py --suite phase3 && python discopt_benchmarks/run_benchmarks.py --gate phase3`
-  - [ ] `phase4` is the release gate and needs **no** `[suites.phase4]` entry — every one of its seven criteria names `full` or `comparison` (see
-        `[gates.phase4.criteria]`). `--gate` defaults to looking for results from a suite of its own name, so point it at the corpus run explicitly:
+  - [ ] `phase4` is the release gate and needs **no** `[suites.phase4]` entry — every one of its seven criteria names
+        `full` or `comparison` (see `[gates.phase4.criteria]`), and since #1420 the gate loads those suites directly, so
+        it runs with no arguments once the panels exist:
         ```bash
-        python discopt_benchmarks/run_benchmarks.py --suite full --output results/full.json
-        python discopt_benchmarks/run_benchmarks.py --gate phase4 --output results/full.json
+        python discopt_benchmarks/run_benchmarks.py --suite full
+        python discopt_benchmarks/run_benchmarks.py --gate phase4
         ```
         (Earlier revisions of this checklist said to skip phase4 "until a `[suites.phase4]` entry is added". That was a misreading of
         `_run_gate_check`, which accepts `--output` in place of the same-named suite; corrected 2026-09-20 for v0.9.0.)

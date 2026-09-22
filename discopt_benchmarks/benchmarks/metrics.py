@@ -956,7 +956,7 @@ def reference_solver_columns(
 
 def evaluate_phase_gate(
     gate_name: str,
-    benchmark: BenchmarkResults,
+    benchmark: BenchmarkResults | None,
     gate_config: dict,
     reference_solvers: dict[str, list[SolveResult]] | None = None,
     known_optima: dict[str, float] | None = None,
@@ -973,7 +973,10 @@ def evaluate_phase_gate(
 
     ``benchmark`` remains the fallback for criteria whose declared suite matches it
     (by ``benchmark.suite`` or by ``gate_name``) and for a caller that passes no
-    ``suite_results`` at all.
+    ``suite_results`` at all. It may be ``None`` when the gate has no panel of its
+    own name: ``phase4`` declares no ``[suites.phase4]`` at all and every one of its
+    criteria names ``full`` or ``comparison``, so its verdict comes entirely from
+    ``suite_results``.
 
     ``reference_solvers``, when given, overrides the per-suite columns derived from
     the loaded results; leave it None to use whatever solver columns each suite's
@@ -995,9 +998,10 @@ def evaluate_phase_gate(
     available: dict[str, BenchmarkResults] = dict(suite_results or {})
     # The directly-supplied results answer for their own suite and for the gate name,
     # so `--gate phase1` against a `phase1_*.json` keeps working unchanged.
-    for key in (getattr(benchmark, "suite", None), gate_name):
-        if key and key not in available:
-            available[key] = benchmark
+    if benchmark is not None:
+        for key in (getattr(benchmark, "suite", None), gate_name):
+            if key and key not in available:
+                available[key] = benchmark
 
     for crit_name, crit_config in gate_config.get("criteria", {}).items():
         actual = float("nan")
