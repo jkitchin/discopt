@@ -756,6 +756,89 @@ def convex_kernel_enabled() -> bool:
     return os.environ.get("DISCOPT_CONVEX_KERNEL", "1") not in ("0", "", "false", "False")
 
 
+def keep_declined_bound_enabled() -> bool:
+    """`DISCOPT_CONVEX_KERNEL_KEEP_BOUND` opt-out (default-ON, #1422).
+
+    **§5 graduation panel, run 2026-09-22 before this shipped**
+    (``scratchpad/ck_panel1422.py``): ON vs OFF, interleaved within each instance,
+    over the 39 convex-kernel-eligible instances of the MINLPLib snapshot at an 8 s
+    budget, **73 executed comparisons**.
+
+    * *cert-clean* — **0 violations of every kind**: no bound above its reference
+      optimum, no certification regression, no status change, no objective drift,
+      no bound made looser.
+    * *net-positive* — **16 of 39 gain a dual bound where the OFF arm has none**
+      (0 lost, 0 loosened). Total wall 190.7 s both arms, **-0.0%**: the mechanism
+      reads a number the tree already computed, so it cannot cost time.
+
+    Graduated on introduction on that panel, per the ``DISCOPT_FARKAS_RAY_CLEANUP``
+    / ``DISCOPT_TREE_SENTINEL_PRUNE_GUARD`` precedent. The ``=0`` opt-out and the
+    legacy path are kept intact, as §5 requires.
+
+    Gates whether ``Model.solve`` adopts the rigorous dual bound a **declined**
+    convex-kernel attempt already proved (:func:`last_declined_bound`) when the
+    default path finishes with a weaker bound or none at all.
+
+    **What it fixes.** The attempt is granted ``min(time_limit,
+    DISCOPT_CONVEX_KERNEL_BUDGET)`` -- the *whole* budget for any ``time_limit <=
+    120``. On a model it then declines, the caller gets ~0 s of default path, its
+    #654 deadline short-circuit, and ``bound=None`` -- while the kernel had in fact
+    proved a bound and thrown it away. Measured over the 39 convex-kernel-eligible
+    instances of the MINLPLib snapshot at an 8 s budget, **82% of all kernel wall
+    (152 s of 185 s) is spent on models it declines**, and 15 of the 20 decliners
+    carry a finite discarded bound.
+
+    **Why this and not the two obvious alternatives**, both eliminated by
+    measurement rather than taste:
+
+    * *Cap the attempt to a fraction of the budget* -- built and rejected under
+      #911: the kernel needs ~0.8 of a tight budget exactly where it wins.
+    * *Abandon an attempt holding no incumbent* -- falsified for #1422. The kernel
+      finds its first incumbent essentially **at convergence**: 10 of 19 certifiers
+      at >=97% of their own wall, 16 of 19 past 50%. Simulated at a 50%-of-budget
+      threshold it destroys certifications in the tight-budget regime (3 of 16 at
+      ``tl=4 s``). "No incumbent yet" does not predict "will not certify".
+
+    Adopting the bound takes **no time from the attempt**, so unlike both of those
+    it cannot cost a certification. It does not fix the allocation -- that remains
+    open on #1422 -- it stops the allocation being paid for nothing.
+
+    **Soundness.** A declined attempt has no verified incumbent, so #779's
+    cross-check is unavailable and this is a genuine trust step, taken on evidence:
+    every declined bound on those 39 instances was checked against ``minlplib.solu``
+    (``scratchpad/ck_soundness.py``) -- **12 oracle-backed comparisons, 0 bounds
+    above their reference optimum**, 19/19 certifiers matching. Two guards ship with
+    it regardless, in ``Model.solve``: the bound is adopted only when it is *better*
+    than what the default path proved, and it is **rejected loudly** (logged at
+    ERROR, result unchanged) if it crosses an incumbent the solve actually found,
+    which is a live contradiction test on every solve that finds one. It is never
+    used to prune, so it cannot cut off an optimum even if wrong.
+
+    **The bounds are valid but of varying quality, and that is measured, not
+    assumed.** They range from nearly worthless -- ``p_ball_20b_5p_2d_m`` proves
+    ~0 against a true optimum of 2.437 -- to substantial: ``clay0303hfsg`` proves
+    19188.0 against an optimum of 26669.1, and ``ball_mk2_30`` proves -28.8789
+    where the solve reports ``bound=None`` today. The case for adopting them rests
+    on their being **free**, not on their being tight, and an earlier claim on
+    #1422 that the ``p_ball_*`` bounds were "essentially the exact bound" was
+    retracted there: it assumed those optima were 0 without consulting the oracle.
+
+    Note what this is NOT a substitute for. Disabling the kernel outright
+    (``DISCOPT_CONVEX_KERNEL=0``) hands ``ball_mk2_30``'s whole 8 s budget to the
+    default path, which then proves **-27.8836** -- tighter than the -28.8789
+    recovered here. The comparison that matters is against the *same*
+    configuration, where the attempt runs and declines and the answer is ``None``;
+    the allocation problem that makes the default path's better bound unreachable
+    is #1422's item 4 and remains open.
+    """
+    return os.environ.get("DISCOPT_CONVEX_KERNEL_KEEP_BOUND", "1") not in (
+        "0",
+        "",
+        "false",
+        "False",
+    )
+
+
 def dominated_cols_enabled() -> bool:
     """`DISCOPT_CVX_DOMINATED_COLS` opt-out (default-ON inside the kernel, #879).
 
@@ -826,6 +909,9 @@ class _AttemptClock(threading.local):
         # whole attempt to ``SolveResult.wall_time`` and needs this split to keep
         # the documented ``rust_time + python_time == wall_time`` partition true.
         self.rust_seconds = 0.0
+        # Rigorous dual bound proved by a DECLINED attempt, in the MODEL's objective
+        # values, or None (#1422). See :func:`last_declined_bound`.
+        self.declined_bound: Optional[float] = None
 
 
 _ATTEMPT = _AttemptClock()
@@ -845,6 +931,43 @@ def last_attempt_seconds() -> float:
     subclass's ``__init__`` the first time the object is touched on each thread.
     """
     return float(_ATTEMPT.seconds)
+
+
+def last_declined_bound() -> Optional[float]:
+    """Dual bound proved by the last DECLINED attempt on this thread, or ``None``.
+
+    #1422. The kernel's result is adopted only when it fully certifies optimality
+    (:func:`try_convex_solve`), so on every other outcome the tree's rigorous dual
+    bound was computed and then thrown away — while the attempt had already spent
+    the caller's whole budget, leaving the default path ~0 s and no bound of its
+    own. ``ball_mk2_30`` is the issue's own instance: the kernel proves ``-28.8789``
+    and ``Model.solve`` reports ``bound=None``.
+
+    **Published only for ``time_limit`` / ``node_limit``** — the two outcomes whose
+    ``bound`` is the running minimum over *open* nodes, i.e. a genuine dual bound on
+    a tree that simply ran out of budget. ``exhausted`` (numerical non-closure) and a
+    certified-but-unverifiable incumbent are deliberately excluded: in both the
+    kernel is already telling us something is off, and a bound is not worth taking
+    from a run we have just decided not to trust.
+
+    Soundness evidence (entry experiment, ``scratchpad/ck_soundness.py``): every
+    declined bound on the 39 convex-kernel-eligible instances of the MINLPLib
+    snapshot, checked against ``minlplib.solu``. **12 oracle-backed comparisons, 0
+    bounds above their reference optimum**, plus 19/19 certifiers matching the
+    oracle. Their quality varies and the range is measured, not assumed: from
+    nearly worthless (``p_ball_20b_5p_2d_m`` proves ~0 against a true optimum of
+    2.437) to substantial (``clay0303hfsg`` proves 19188.0 against 26669.1). See
+    :func:`keep_declined_bound_enabled` for why that does not weaken the case, and
+    for the measurement showing this is no substitute for fixing the allocation —
+    with the kernel disabled entirely, ``ball_mk2_30``'s default path proves
+    **-27.8836**, tighter than the -28.8789 recovered here.
+
+    In the MODEL's objective values (``solve_convex_tree`` adds the objective
+    constant back to ``bound`` at its single chokepoint), so no caller has to
+    re-shift it. Reset to ``None`` on entry to every attempt, so a stale reading
+    from a previous solve on this thread can never be adopted.
+    """
+    return _ATTEMPT.declined_bound
 
 
 def last_attempt_rust_seconds() -> float:
@@ -910,6 +1033,9 @@ def try_convex_solve(
     """
     _ATTEMPT.seconds = 0.0
     _ATTEMPT.rust_seconds = 0.0
+    # #1422: cleared BEFORE the flag check, so a flag-off solve (and any later solve
+    # on this thread) can never read a bound left behind by an earlier attempt.
+    _ATTEMPT.declined_bound = None
     if not convex_kernel_enabled():
         return None
     # Clock starts HERE, after the flag check, so a flag-off solve reads exactly 0.0
@@ -963,6 +1089,21 @@ def _attempt_convex_solve(
     # limit / feasible-only / no-incumbent outcome defers to the default path, which
     # then gets the caller's budget MINUS what this attempt just spent (#911).
     if r["status"] != "optimal" or incumbent is None or inc_x.size == 0:
+        # #1422: the tree's rigorous dual bound used to die here with the attempt,
+        # after it had already spent the caller's whole budget. Publish it for
+        # ``Model.solve`` to adopt (behind DISCOPT_CONVEX_KERNEL_KEEP_BOUND) -- but
+        # ONLY from the two outcomes whose ``bound`` is a genuine minimum over open
+        # nodes. See :func:`last_declined_bound` for the soundness evidence and for
+        # why ``exhausted`` is excluded.
+        if r["status"] in ("time_limit", "node_limit"):
+            from discopt.solvers._gap import BOUND_INF
+
+            _b = r.get("bound")
+            # ``BOUND_INF`` is the solvers' shared "no bound yet" sentinel (1e19).
+            # The kernel reports the sentinel rather than ``inf``, so a plain
+            # ``isfinite`` check would adopt "no bound" as if it were one.
+            if _b is not None and np.isfinite(_b) and abs(float(_b)) < BOUND_INF:
+                _ATTEMPT.declined_bound = float(_b)
         return None
     status = "optimal"
 

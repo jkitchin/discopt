@@ -7514,6 +7514,10 @@ class Model:
         # #1422: the native-tree share of ``_ck_elapsed``, so the attempt can be
         # billed to ``wall_time`` without breaking its rust/python partition.
         _ck_rust_elapsed = 0.0
+        # #1422: the rigorous dual bound a DECLINED attempt proved and used to throw
+        # away, adopted below only if it beats what the default path manages. None
+        # whenever the flag is off, the attempt certified, or no tree ran.
+        _ck_declined_bound: Optional[float] = None
         # #1346: an EXPLICIT ``solver=`` is a decision, not a hint. Consulting the
         # convex kernel for a route the caller has already ruled out costs them a
         # convexity classification they can never benefit from -- and #911 charges
@@ -7531,8 +7535,10 @@ class Model:
             _ck_res = None
             try:
                 from discopt.solvers._convex_kernel import (
+                    keep_declined_bound_enabled,
                     last_attempt_rust_seconds,
                     last_attempt_seconds,
+                    last_declined_bound,
                     try_convex_solve,
                 )
 
@@ -7546,6 +7552,8 @@ class Model:
                     # either way.
                     _ck_elapsed = last_attempt_seconds()
                     _ck_rust_elapsed = min(_ck_elapsed, last_attempt_rust_seconds())
+                    if keep_declined_bound_enabled():
+                        _ck_declined_bound = last_declined_bound()
             except Exception:
                 _ck_res = None
             if _ck_res is not None:
@@ -8016,6 +8024,85 @@ class Model:
                 _fb_elapsed = _time.perf_counter() - _t_fb0
                 result.wall_time += _fb_elapsed
                 result.python_time += _fb_elapsed
+
+        # --- Adopt a DECLINED convex-kernel attempt's dual bound (#1422) ------ #
+        # The attempt above took ``min(time_limit, DISCOPT_CONVEX_KERNEL_BUDGET)`` --
+        # the caller's WHOLE budget for any ``time_limit <= 120`` -- so on a model it
+        # declines, everything below it ran with ~0 s left and typically reports no
+        # bound at all. The kernel had nonetheless PROVED one and dropped it on the
+        # floor: on ``ball_mk2_30`` (this issue's instance) its tree proves -28.8789
+        # while the solve returns ``bound=None``. Measured over the 39 kernel-eligible
+        # instances of the MINLPLib snapshot at an 8 s budget, 82% of all kernel wall
+        # (152.0 s of 185.4 s) goes to models it declines, and 15 of those 20 carry a
+        # finite discarded bound.
+        #
+        # This buys the bound back at zero cost to the attempt, which is why it is
+        # viable where the two ALLOCATION fixes are not: a fractional cap was built
+        # and rejected under #911, and abandon-on-no-incumbent was falsified for this
+        # issue -- the kernel finds its first incumbent essentially AT convergence
+        # (16 of 19 certifiers past 50% of their own wall, 10 past 97%), so
+        # "no incumbent yet" predicts nothing and cutting on it costs certifications
+        # at exactly the tight budgets where the waste hurts. This does not fix the
+        # allocation; it stops the allocation being paid for nothing.
+        #
+        # Runs after the #844 merge so the two bound merges compose -- whichever of
+        # the three routes proved the tightest bound is the one reported.
+        #
+        # Soundness: a declined attempt has no verified incumbent, so #779's
+        # cross-check is unavailable here. The evidence that stands in for it is in
+        # ``keep_declined_bound_enabled`` (12 oracle-backed comparisons against
+        # ``minlplib.solu``, 0 bounds above their reference optimum), and only the two
+        # outcomes whose ``bound`` is a genuine minimum over OPEN nodes are published
+        # at all. Two guards ship regardless. Above all, this bound is NEVER used to
+        # prune: it lands on an already-finished result, so even if it were wrong it
+        # could not cut an optimum out of any search.
+        if _ck_declined_bound is not None:
+            # ``_s * bound`` is a LOWER bound in minimization space for either sense,
+            # so one comparison covers both (``objective_sense_sign`` is -1.0 for a
+            # MAXIMIZE model, whose ``bound`` is an upper bound). This is the #860
+            # lesson from the merge above: an unconditional ``max`` stays SOUND on a
+            # maximize model but keeps the LOOSER of the two bounds.
+            from discopt.solvers._gap import (
+                bound_inversion_tolerance as _bound_inversion_tolerance,
+            )
+            from discopt.solvers._gap import optimality_gap as _optimality_gap
+
+            _s = objective_sense_sign(self)
+            _cand = _s * float(_ck_declined_bound)
+            _obj = result.objective
+            _cur = result.bound
+            _inv_tol = _bound_inversion_tolerance(
+                _cand, _s * float(_obj) if _obj is not None else _cand
+            )
+            if _obj is not None and _cand - _s * float(_obj) > _inv_tol:
+                # Guard 1 -- the bound crosses an incumbent this solve actually
+                # found. One of the two is unsound and nothing here can tell which,
+                # so report neither: leave the default path's result untouched and
+                # say so loudly rather than ship a broken certificate (§3).
+                _logging.getLogger("discopt.solver").error(
+                    "convex kernel: DISCARDING the declined attempt's dual bound %.12g — it "
+                    "crosses the incumbent %.12g this solve found, so one of the two is "
+                    "unsound. Keeping the default path's result unchanged. Please report "
+                    "this against #1422 with the model.",
+                    float(_ck_declined_bound),
+                    float(_obj),
+                )
+            elif _cur is None or _cand > _s * float(_cur):
+                # Guard 2 -- adopt only when it is strictly TIGHTER than whatever the
+                # routes above proved (and whenever they proved nothing).
+                #
+                # ``_set_bound``, not ``result.bound = ...``: the (bound, bound_valid,
+                # bound_source) triple moves together (#1244), and a bound installed
+                # beside a stale ``bound_valid=False`` is discarded by every consumer
+                # that checks the flag -- i.e. silently buys back nothing.
+                # ``bnb_tree``: the convex kernel is a native branch-and-bound tree
+                # and this is its frontier bound, the same standard the other B&B
+                # routes report under that provenance.
+                result._set_bound(float(_ck_declined_bound), valid=True, source="bnb_tree")
+                if _obj is not None:
+                    # ``optimality_gap`` takes (lb, ub) in MINIMIZATION sense, which
+                    # is exactly the space the comparisons above work in.
+                    result.gap = _optimality_gap(_cand, _s * float(_obj))
 
         # Attach model reference and auto-generate LLM explanation
         result._model = self
