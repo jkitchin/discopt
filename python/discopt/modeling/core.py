@@ -4965,6 +4965,23 @@ class Model:
         # rather than attached by the pass so the four size quantities of #1182
         # requirement 4 survive pickling and copying with the model.
         self._simplex_lowerings: list = []
+        # GDP building blocks constructed on this model that have not been
+        # attached to it (#1430). ``Model.disjunction()`` and
+        # ``Model.make_disjunct()`` are FACTORIES: alone among the disjunctive
+        # helpers on ``Model`` (``either_or``, ``if_else``, ``if_then``,
+        # ``implies``, ``add_disjunction``) they build an object and append
+        # nothing to ``_constraints``. A caller who forgets the attaching call
+        # gets a model whose disjunctive structure is simply ABSENT, and the
+        # solver then certifies ``status="optimal"`` for the relaxed problem:
+        # measured, ``m.disjunction([[x >= 4, y >= 1], [y >= 6, x >= 1]])`` on
+        # ``min x + y`` over ``[0, 10]^2`` returns ``0.0`` with ``bound=-1e-12``
+        # where the correct optimum is ``5.0``, and the ``make_disjunct`` form
+        # returns ``0.0/0.0``. These two lists are what lets ``validate`` refuse
+        # that loudly instead of shipping a false certificate (CLAUDE.md §1/§3).
+        # Build-time bookkeeping only: nothing on the solve path reads them, and
+        # they are not serialized — a document records the attached model.
+        self._gdp_factory_disjunctions: list = []
+        self._gdp_factory_disjuncts: list = []
         # Decomposition annotations (Benders / Lagrangian). Populated by
         # ``set_stage``/``first_stage``/``second_stage``/``set_block``/
         # ``mark_coupling``; consumed by ``discopt.decomposition``. Empty by
@@ -6875,12 +6892,27 @@ class Model:
         Returns
         -------
         _DisjunctiveConstraint
+
+        Raises
+        ------
+        ValueError
+            Not here — but :meth:`validate` (and therefore :meth:`solve`) refuses
+            a model still holding a disjunction this factory built that was never
+            nested into an attached one (#1430). Dropping it silently would have
+            the solver certify an optimum for the *relaxed* problem.
         """
-        return _DisjunctiveConstraint(
+        dc = _DisjunctiveConstraint(
             disjuncts=disjuncts,
             name=name,
             semantics=_coerce_disjunction_semantics(semantics),
         )
+        # #1430: remember what this factory handed out, so ``validate`` can tell a
+        # disjunction that was nested into the model from one that was forgotten.
+        # Tracked by identity at the *construction* site rather than reconstructed
+        # later from the constraint list: an unattached object leaves no trace in
+        # the model at all, so there is nothing to find after the fact.
+        self._gdp_factory_disjunctions.append(dc)
+        return dc
 
     def make_disjunct(self, name: str) -> "Disjunct":
         """Create a named disjunct block with an auto-generated indicator.
@@ -6898,8 +6930,19 @@ class Model:
         -------
         >>> d1 = m.make_disjunct("mode_a")
         >>> d1.subject_to(x <= 3)
+
+        Raises
+        ------
+        ValueError
+            Not here — but :meth:`validate` (and therefore :meth:`solve`) refuses a
+            model holding a non-empty disjunct that was never passed to
+            :meth:`add_disjunction` (#1430). Its indicator binary IS registered on
+            the model while its constraints are not, so the silent outcome is a
+            certified optimum for a model missing every row the block carried.
         """
-        return Disjunct(name, self)
+        d = Disjunct(name, self)
+        self._gdp_factory_disjuncts.append(d)  # #1430; see ``_unattached_gdp_blocks``
+        return d
 
     def add_disjunction(
         self,
@@ -6949,6 +6992,11 @@ class Model:
         _require_semantics_supported(resolved, _SELECT_ONE_ROWS, "add_disjunction()")
         for d in disjuncts:
             self.if_then(d.indicator.variable, d._constraints, name=d.name)
+            # #1430: the block's rows are now in ``_constraints``; record that so
+            # ``validate`` does not report it as forgotten. Set per disjunct rather
+            # than for the call, so a list that raises part-way through leaves an
+            # honest record of which blocks actually made it in.
+            d._attached = True
         indicators = [d.indicator.variable for d in disjuncts]
         # Named ``_select``, not ``_xor``: this row is the select-one selector
         # cardinality (exactly one indicator active), not a truth-XOR over the
@@ -8626,6 +8674,112 @@ class Model:
                 f"'{self_name}'."
             )
 
+    def _unattached_gdp_blocks(self) -> tuple[list, list]:
+        """Disjunctive blocks built on this model that never reached it (#1430).
+
+        ``Model.disjunction()`` and ``Model.make_disjunct()`` are the only two
+        disjunctive helpers on ``Model`` that do not append to ``_constraints``:
+        they are factories whose product must be nested into an attached
+        disjunction (``either_or``/``if_else``, or another ``disjunction``) or
+        passed to ``add_disjunction``. When it is not, the model the solver sees
+        is the RELAXED one and it certifies an optimum for that — the failure
+        this predicate exists to catch.
+
+        Returns
+        -------
+        tuple of (list of _DisjunctiveConstraint, list of Disjunct)
+            Only *roots*: a floating disjunction nested inside another floating
+            one is the parent's problem, and reporting both would name one
+            mistake twice. An unattached disjunct holding **no** constraints is
+            not reported — it contributes an unused indicator binary and nothing
+            else, so it cannot change an answer, and refusing it would reject the
+            legitimate pattern of building blocks in a loop and using a subset.
+        """
+        # Every disjunction reachable from the model's own constraint list, and
+        # transitively through nesting. ``attached`` is what the solve will see.
+        attached: set[int] = set()
+        # Every disjunction that is nested inside SOME other tracked disjunction,
+        # attached or not; used to report roots only.
+        nested: set[int] = set()
+
+        def _children(dc):
+            # Only descend through a well-formed ``list[list]``. A malformed
+            # ``disjuncts`` is a real error, but it is the GDP pass's to report
+            # with its own message -- this walk must not pre-empt it with a
+            # TypeError raised from inside ``validate``.
+            for group in dc.disjuncts if isinstance(dc.disjuncts, (list, tuple)) else ():
+                if not isinstance(group, (list, tuple)):
+                    continue
+                for item in group:
+                    if isinstance(item, _DisjunctiveConstraint):
+                        yield item
+
+        def _walk(dc, seen: set) -> None:
+            # ``seen`` guards a self-referential nesting, which is a user error
+            # rather than an impossibility: recursing forever on it would hang
+            # ``validate`` instead of reporting the model.
+            if id(dc) in seen:
+                return
+            seen.add(id(dc))
+            attached.add(id(dc))
+            for child in _children(dc):
+                nested.add(id(child))
+                _walk(child, seen)
+
+        for c in self._constraints:
+            if isinstance(c, _DisjunctiveConstraint):
+                _walk(c, set())
+        # A floating disjunction can itself nest another floating one; mark those
+        # so only the outermost forgotten object is reported.
+        for dc in self._gdp_factory_disjunctions:
+            if id(dc) in attached:
+                continue
+            for child in _children(dc):
+                nested.add(id(child))
+
+        floating = [
+            dc
+            for dc in self._gdp_factory_disjunctions
+            if id(dc) not in attached and id(dc) not in nested
+        ]
+        orphans = [d for d in self._gdp_factory_disjuncts if not d._attached and d._constraints]
+        return floating, orphans
+
+    def _reject_unattached_gdp_blocks(self) -> None:
+        """Refuse a model whose disjunctive structure was built but never added.
+
+        #1430. Measured before this guard: ``m.disjunction([[x >= 4, y >= 1],
+        [y >= 6, x >= 1]])`` on ``min x + y`` over ``[0, 10]^2`` returned
+        ``status="optimal"``, ``objective=0.0``, ``bound=-1e-12`` — the true
+        optimum is ``5.0`` — and the ``make_disjunct`` form without
+        ``add_disjunction`` returned ``0.0``/``0.0``. Both are false certificates
+        for a problem the caller did not pose, produced in silence. Refusing is
+        the fix CLAUDE.md §3 asks for; there is no sound way to guess whether the
+        caller meant the disjunction to apply.
+        """
+        floating, orphans = self._unattached_gdp_blocks()
+        if not floating and not orphans:
+            return
+        lines = []
+        for dc in floating:
+            what = f"Model.disjunction(name={dc.name!r})" if dc.name else "Model.disjunction(...)"
+            lines.append(
+                f"  - {what}, {len(dc.disjuncts)} disjunct(s): nest it inside a disjunction "
+                "that IS on the model, or add it directly with "
+                "m.either_or([[...], [...]]) instead of m.disjunction(...)"
+            )
+        for d in orphans:
+            lines.append(
+                f"  - Model.make_disjunct({d.name!r}), {len(d._constraints)} constraint(s): "
+                f"pass it to m.add_disjunction([...]) — its indicator "
+                f"'{d.name}_active' is on the model but its constraints are not"
+            )
+        raise ValueError(
+            f"model {self.name!r}: {len(lines)} disjunctive block(s) were built on this "
+            "model but never added to it, so solving it would silently drop them and "
+            "certify an optimum for the relaxed problem:\n" + "\n".join(lines)
+        )
+
     def validate(self, *, for_solve: bool = True):
         """
         Validate model consistency.
@@ -8647,9 +8801,12 @@ class Model:
         ------
         ValueError
             If the objective is not set, variable names are not unique,
-            variable bounds are inconsistent (lb > ub), or any objective/
-            constraint references a variable/parameter owned by a *different*
-            model (which would silently alias by flat index — finding M3).
+            variable bounds are inconsistent (lb > ub), a disjunctive block built
+            by :meth:`disjunction`/:meth:`make_disjunct` was never attached to the
+            model (#1430 — solving it would silently drop the block), or any
+            objective/constraint references a variable/parameter owned by a
+            *different* model (which would silently alias by flat index —
+            finding M3).
         """
         if self._objective is None:
             raise ValueError("No objective set. Call m.minimize() or m.maximize().")
@@ -8700,6 +8857,7 @@ class Model:
                 )
             con_names.add(cname)
 
+        self._reject_unattached_gdp_blocks()
         self._check_ownership()
 
     # ── Model statistics ──
@@ -9336,6 +9494,9 @@ class Disjunct:
         assert isinstance(bv, BooleanVar)
         self.indicator: "BooleanVar" = bv
         self._constraints: list[Constraint] = []
+        # #1430: set by ``Model.add_disjunction``. False means this block's
+        # constraints live nowhere but here, so a solve would silently omit them.
+        self._attached = False
 
     def subject_to(
         self,
