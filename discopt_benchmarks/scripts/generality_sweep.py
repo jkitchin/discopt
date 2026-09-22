@@ -205,6 +205,20 @@ ARMS: dict[str, dict] = {
         "struct_attr": None,
         "regime": "bound_changing",
     },
+    # #282/#1414 activity-based big-M coefficient tightening. Rewrites a binary's
+    # coefficient down to the rest-of-row activity slack, preserving the
+    # integer-feasible set exactly while shrinking the LP relaxation:
+    # ``bound_changing``. This is the wiring #1388 found missing — the flag's own
+    # docstring had asked for an ``ARMS`` entry so ``graduation_gate.py`` could
+    # run it, and without one the flag was un-graduatable rather than merely
+    # ungraduated, which is why #1388 misfiled it as a retirement candidate.
+    # No static struct proxy: "has a binary-indicator row with activity slack" is
+    # a property of the FBBT box, not of the .nl header.
+    "coef_tighten": {
+        "env": {"DISCOPT_COEF_TIGHTEN": "1"},
+        "struct_attr": None,
+        "regime": "bound_changing",
+    },
     "all": {"env": dict(FLAGS_ON), "struct_attr": None, "regime": "bound_changing"},
 }
 
@@ -225,6 +239,8 @@ GRADUATION_ARMS = (
     "root_build_deadline",
     # #1355 Farkas-ray noise cleanup, wired 2026-09-19
     "farkas_ray_cleanup",
+    # #282/#1414 big-M coefficient tightening, wired 2026-09-21
+    "coef_tighten",
     # #1351 affine_power_partition GRADUATED default-ON 2026-09-19 -- dropped from
     # the graduation bundle because the "off" control now runs the same code, so an
     # ON-vs-control arm would compare a config against itself. Its ARMS entry stays

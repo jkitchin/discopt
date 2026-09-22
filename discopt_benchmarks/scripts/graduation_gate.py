@@ -42,9 +42,12 @@ decision.
   * ``regression_rate`` at/below the documented threshold
     (:data:`MAX_REGRESSION_RATE`).
 
-A flag is **graduation-eligible** (ready for its flip PR) only after
-:data:`GREEN_STREAK_REQUIRED` *consecutive* eligible verdicts in the ledger — the
-"3 green nightlies" rule made checkable.
+A flag is **graduation-eligible** (ready for its flip PR) after
+:data:`GREEN_STREAK_REQUIRED` *consecutive* eligible verdicts in the ledger. That is
+**1** since CLAUDE.md §5's 2026-07-17 update, which dropped consecutive-nightly
+graduation in favor of the panel gate: one passing run meeting both bars suffices, and
+the nightly panel is the ongoing regression watch rather than a graduation gate. See
+the note on :data:`GREEN_STREAK_REQUIRED`.
 
 **Corpus honesty (read §4 of the plan doc).** The held-out arm needs the full
 ~4,800-instance MINLPLib corpus in ``~/Dropbox/projects/discopt-minlp-benchmark``,
@@ -125,9 +128,20 @@ LEDGER_PATH = _REPO / "docs" / "dev" / "data" / "graduation-ledger.jsonl"
 # this. 0.10 is the documented ceiling — a flag regressing >10 % of its
 # structure-carrying held-out instances is not ready to be a default.
 MAX_REGRESSION_RATE = 0.10
-# Consecutive green verdicts required before a flag is graduation-eligible (the
-# "3 green nightlies" rule).
-GREEN_STREAK_REQUIRED = 3
+# Consecutive green verdicts required before a flag is graduation-eligible.
+#
+# Was 3 — the "3 green nightlies" rule. **CLAUDE.md §5 dropped that on 2026-07-17**
+# ("consecutive-nightly graduation was dropped in favor of the panel gate […] One
+# passing graduation-gate run meeting both bars suffices"), first applied to the
+# #309 flags, and this constant was never updated to match. It does not gate
+# ``Verdict.eligible`` — it only shapes the report — so the stale 3 could not pass a
+# bad flag, but it *could* withhold a good one: a passing panel reads as "1/3" and
+# invites a reviewer to wait for two nightlies that policy no longer requires.
+# Corrected to 1 while working #1414, whose graduation decision is read off this
+# report. The two substantive bars (0 soundness violations AND cert-neutral AND
+# regression_rate ≤ MAX_REGRESSION_RATE) are unchanged; only the stale streak
+# multiplier is. The streak is still computed and printed, as provenance.
+GREEN_STREAK_REQUIRED = 1
 
 
 # --------------------------------------------------------------------------- #
