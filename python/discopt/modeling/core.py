@@ -7512,6 +7512,9 @@ class Model:
         # off (it is reset on entry and the clock starts after the flag check), so the
         # default path subtracts a literal zero and every deadline below is unchanged.
         _ck_elapsed = 0.0
+        # #1422: the native-tree share of ``_ck_elapsed``, so the attempt can be
+        # billed to ``wall_time`` without breaking its rust/python partition.
+        _ck_rust_elapsed = 0.0
         # #1346: an EXPLICIT ``solver=`` is a decision, not a hint. Consulting the
         # convex kernel for a route the caller has already ruled out costs them a
         # convexity classification they can never benefit from -- and #911 charges
@@ -7529,6 +7532,7 @@ class Model:
             _ck_res = None
             try:
                 from discopt.solvers._convex_kernel import (
+                    last_attempt_rust_seconds,
                     last_attempt_seconds,
                     try_convex_solve,
                 )
@@ -7542,6 +7546,7 @@ class Model:
                     # still has its consumed wall deducted -- the caller paid for it
                     # either way.
                     _ck_elapsed = last_attempt_seconds()
+                    _ck_rust_elapsed = min(_ck_elapsed, last_attempt_rust_seconds())
             except Exception:
                 _ck_res = None
             if _ck_res is not None:
@@ -7765,6 +7770,39 @@ class Model:
                 del self._solve_deadline
             except AttributeError:
                 pass
+
+        # --- Bill the convex-kernel attempt to the reported wall (#1422) ------ #
+        # #911 made the DECLINED attempt's wall count against the budget handed to
+        # ``solve_model``; it never made it count in what the solve REPORTS. The two
+        # halves have to move together, because subtracting the attempt from the
+        # budget is precisely what makes ``solve_model``'s own clock start after the
+        # attempt is over: on an eligible-but-uncertifiable model the attempt takes
+        # ``min(time_limit, DISCOPT_CONVEX_KERNEL_BUDGET)`` -- the whole budget for
+        # any ``time_limit <= 120`` -- so ``solve_model`` gets ~0 s, takes its #654
+        # deadline short-circuit, and reports a wall measured from an anchor set
+        # after the budget was already gone.
+        #
+        # Measured on ``clay0303hfsg`` (in-repo corpus) at ``time_limit=8``:
+        #
+        #     status=time_limit  nodes=0  reported_wall=0.061 s  TRUE wall=8.528 s
+        #     convex-kernel attempt=8.051 s   unaccounted=8.466 s
+        #
+        # i.e. an 8.5-second solve reported as 61 milliseconds, a 140x under-report.
+        # That is the defect behind #1422, whose ``ball_mk2_30`` reading
+        # (``status='time_limit' nodes=0 t=0.010s`` against an 8 s budget) is the same
+        # signature: the status was honest -- the budget really was spent -- and the
+        # WALL was the lie. Every consumer that buckets by time reads this field;
+        # this repo's own benchmark runner reports median time over solved instances
+        # and total wall over all of them from it.
+        #
+        # Charged the same way the #844 fallback below charges its own wall, and split
+        # so the documented ``rust_time + python_time == wall_time`` partition
+        # survives: the native tree is Rust, the spec build / convexity classification
+        # and the #779 incumbent verification are Python.
+        if _ck_elapsed > 0.0:
+            result.wall_time += _ck_elapsed
+            result.rust_time += _ck_rust_elapsed
+            result.python_time += _ck_elapsed - _ck_rust_elapsed
 
         # --- No-incumbent fallback to the LP-per-node spatial engine (#844) ---
         # A class of pure-integer MINLPs (tln4/tln5/tln6, ball_mk2_30) returns NO

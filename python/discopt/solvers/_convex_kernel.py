@@ -822,6 +822,10 @@ def solve_convex_tree(spec: dict, *, time_limit_s: Optional[float] = None, **cfg
 class _AttemptClock(threading.local):
     def __init__(self) -> None:
         self.seconds = 0.0
+        # The native-tree share of ``seconds`` (#1422). ``Model.solve`` bills the
+        # whole attempt to ``SolveResult.wall_time`` and needs this split to keep
+        # the documented ``rust_time + python_time == wall_time`` partition true.
+        self.rust_seconds = 0.0
 
 
 _ATTEMPT = _AttemptClock()
@@ -841,6 +845,20 @@ def last_attempt_seconds() -> float:
     subclass's ``__init__`` the first time the object is touched on each thread.
     """
     return float(_ATTEMPT.seconds)
+
+
+def last_attempt_rust_seconds() -> float:
+    """Native-tree share of :func:`last_attempt_seconds`, in seconds (#1422).
+
+    The attempt is spec build + convexity classification (Python/JAX), the native
+    convex tree (Rust), and the #779 incumbent verification (Python/JAX). ``Model.solve``
+    bills the whole attempt to ``SolveResult.wall_time``; without this split it would
+    have to guess which side of the documented ``rust_time``/``python_time`` partition
+    to charge, and the partition is documented as exact. Always ``<=``
+    :func:`last_attempt_seconds`, and exactly 0.0 when no tree ran (flag off, or a
+    model the spec builder declined).
+    """
+    return float(_ATTEMPT.rust_seconds)
 
 
 def try_convex_solve(
@@ -891,6 +909,7 @@ def try_convex_solve(
     The fraction was dropped rather than shipped as a dead knob.
     """
     _ATTEMPT.seconds = 0.0
+    _ATTEMPT.rust_seconds = 0.0
     if not convex_kernel_enabled():
         return None
     # Clock starts HERE, after the flag check, so a flag-off solve reads exactly 0.0
@@ -920,12 +939,19 @@ def _attempt_convex_solve(
 
     budget = min(time_limit, float(os.environ.get("DISCOPT_CONVEX_KERNEL_BUDGET", "120")))
     t0 = time.perf_counter()
-    r = solve_convex_tree(
-        spec,
-        time_limit_s=budget,
-        gap_tol=gap_tolerance,
-        initial_incumbent=None,
-    )
+    try:
+        r = solve_convex_tree(
+            spec,
+            time_limit_s=budget,
+            gap_tol=gap_tolerance,
+            initial_incumbent=None,
+        )
+    finally:
+        # Publish the native tree's wall even when it raised: the caller still paid
+        # for it and still has to bill it (#1422). Records only -- nothing is
+        # swallowed, the exception propagates to ``try_convex_solve``'s own
+        # ``finally`` exactly as before.
+        _ATTEMPT.rust_seconds = time.perf_counter() - t0
     wall = time.perf_counter() - t0
 
     incumbent = r["incumbent"]
