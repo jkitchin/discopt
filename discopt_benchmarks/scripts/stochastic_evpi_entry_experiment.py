@@ -436,6 +436,8 @@ class CellResult:
     decomposition_wins: bool | None = None
     sub_wall: float | None = None
     candidate_spread: float | None = None
+    candidate_coverage: float | None = None
+    candidate_source: str | None = None
     sub_certified: int = 0
     sub_statuses: list[str] = field(default_factory=list)
     alpha_statuses: list[str] = field(default_factory=list)
@@ -535,7 +537,8 @@ def run_cell(
     # How much do the scenarios disagree about the first stage? This is what drives EVPI
     # and how much branching the method needs. Reported so a near-zero decomposed gap can
     # be told apart from a degenerate instance where every scenario wants the same x.
-    if candidates and len(candidates) == n_scen:
+    if candidates:
+        cell.candidate_coverage = len(candidates) / n_scen
         spec_box = {name: (lb, ub) for name, lb, ub in first_stage_spec(family, n_scen)}
         spreads = []
         for name in candidates[0]:
@@ -551,32 +554,49 @@ def run_cell(
         )
 
     # --- arm 2b: the method's own upper bound (mean candidate, Cao & Zavala 2.2) --------
-    if candidates and len(candidates) == n_scen:
+    spec_all = first_stage_spec(family, n_scen)
+    if candidates:
         wsum = sum(weights) or 1.0
         xhat = {
             name: sum(w * c[name] for w, c in zip(weights, candidates, strict=True)) / wsum
             for name in candidates[0]
         }
-        alpha = 0.0
-        ok = True
-        for s in range(n_scen):
-            sub, _, _ = build_subproblem(family, n_scen, s, fix=xhat)
-            try:
-                res = _solve(sub, sub_time_limit)
-            except Exception:
-                cell.failures.append(f"ub sub {s}: {traceback.format_exc()}")
-                ok = False
-                break
-            cell.alpha_statuses.append(str(res.status))
-            if res.objective is None or not math.isfinite(float(res.objective)):
-                ok = False
-                cell.failures.append(f"ub sub {s}: no incumbent at xhat (status={res.status})")
-                print(f"    ub sub {s}: NO INCUMBENT (status={res.status})", flush=True)
-                break
-            alpha += float(res.objective)
-        if ok:
-            cell.alpha = alpha
-            print(f"    alpha (fixed-xhat UB) = {alpha:.6g}", flush=True)
+        # a subproblem that returned no point still needs its coordinates supplied
+        for name, lb, ub in spec_all:
+            xhat.setdefault(name, 0.5 * (lb + ub))
+        cell.candidate_source = (
+            "mean_of_subproblem_minimisers"
+            if len(candidates) == n_scen
+            else f"mean_of_{len(candidates)}_of_{n_scen}_minimisers"
+        )
+    else:
+        xhat = {name: 0.5 * (lb + ub) for name, lb, ub in spec_all}
+        cell.candidate_source = "box_midpoint"
+    alpha = 0.0
+    ok = True
+    for s in range(n_scen):
+        sub, _, _ = build_subproblem(family, n_scen, s, fix=xhat)
+        try:
+            res = _solve(sub, sub_time_limit)
+        except Exception:
+            cell.failures.append(f"ub sub {s}: {traceback.format_exc()}")
+            ok = False
+            break
+        cell.alpha_statuses.append(str(res.status))
+        if res.objective is None or not math.isfinite(float(res.objective)):
+            # x_hat is infeasible for this scenario (or no feasible point was found in
+            # budget): no upper bound from this candidate. Not a probe failure.
+            ok = False
+            cell.failures.append(f"ub sub {s}: no incumbent at xhat (status={res.status})")
+            print(f"    ub sub {s}: NO INCUMBENT (status={res.status})", flush=True)
+            break
+        alpha += float(res.objective)
+    if ok:
+        cell.alpha = alpha
+        print(
+            f"    alpha (fixed-xhat UB, {cell.candidate_source}) = {alpha:.6g}",
+            flush=True,
+        )
 
     # --- compare ------------------------------------------------------------------------
     incumbents = [
@@ -715,6 +735,7 @@ def main() -> int:
             f"  {c.family:<11} S={c.scenarios:<4} n_x={c.n_first_stage:<3} "
             f"dec_gap={_fmt(c.decomposed_root_gap)} root_gap={_fmt(c.discopt_root_gap)} "
             f"spread={_fmt_num(c.candidate_spread)} "
+            f"cand={c.candidate_source} "
             f"subs_certified={c.sub_certified}/{c.scenarios} "
             f"mono_status={c.monolith_status} root_bound_sd={spread} "
             f"sub_wall={c.sub_wall or float('nan'):.1f}s "
