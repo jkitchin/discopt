@@ -87,21 +87,6 @@ _R3A_BRANCH_COUNT_SINK: Optional[dict] = None
 logger = logging.getLogger(__name__)
 
 
-def _get_heuristic_governor():
-    """Return the process-lifetime heuristic governor (G2).
-
-    Lazy-imported so the module has no import-time coupling to the governor and
-    so ``heuristic_governor`` (a small leaf module) stays independently testable.
-    The governor is **default-ON** since G2-graduate: it throttles the RENS root
-    primal heuristic (the single largest per-node NLP-solve source, 0 % hit-rate
-    on the easy panel). ``DISCOPT_HEURISTIC_GOVERNOR=0`` is the escape hatch that
-    restores the pre-governor behaviour byte-for-byte.
-    """
-    from discopt.heuristic_governor import governor
-
-    return governor()
-
-
 def _verify_and_inject_candidate(
     tree,
     x_inc,
@@ -13763,8 +13748,6 @@ def solve_model(
     # the (improver-role) heuristics; ``found`` counts those that strictly
     # improved the incumbent — the success signal in the contingent.
     _heur_state = {"calls": 0, "found": 0, "cost": 0.0}
-    # G2: the hit-rate-adaptive governor (default-OFF; see heuristic_governor.py).
-    _heuristic_governor = _get_heuristic_governor()
 
     def _improver_allowed(cost: float) -> bool:
         """Bind this solve's governor knobs to the shared contingent test (#1344)."""
@@ -16207,12 +16190,6 @@ def solve_model(
             and _subnlp_calls < subnlp_max_calls
             and not _root_optimum_proven()
             and _improver_allowed(_HEUR_COST["enumerate"])
-            # G2 governor: gate the enumeration only in its improver role (an
-            # incumbent already exists); as a finder (no incumbent) gap is open
-            # so allowed() lets it through — securing the first incumbent wins.
-            and _heuristic_governor.allowed(
-                "enumerate", gap_open=tree.incumbent() is None or not _root_optimum_proven()
-            )
             # F4: the binary-seed enumeration issues up to 2**k full sub-NLPs; do
             # not start it when the budget is exhausted (primal heuristic — sound).
             and _root_heur_nlp_entry_ok(evaluator)
@@ -16264,7 +16241,6 @@ def solve_model(
                 _enum_inc1 = tree.incumbent()
                 _enum_improved = _enum_inc1 is not None and float(_enum_inc1[1]) < _enum_obj0 - 1e-9
                 _record_improver(_HEUR_COST["enumerate"], _enum_improved)
-                _heuristic_governor.record("enumerate", _enum_improved)
 
         # --- Root disjunct-configuration primal (#823, flag-gated, default OFF) ---
         # The enumeration above self-gates off above 4 binaries, so on a big-M GDP
@@ -16488,7 +16464,6 @@ def solve_model(
                     and _lns_best_idx is not None
                     and (_deadline - time.perf_counter()) > _DEADLINE_NODE_FLOOR_S
                     and _improver_allowed(_HEUR_COST["rins"])
-                    and _heuristic_governor.allowed("rins", gap_open=_lns_gap_open)
                 ):
                     _rins_obj0 = float(_lns_inc[1])
                     _rins_improved = False
@@ -16516,7 +16491,6 @@ def solve_model(
                     except Exception as _e:
                         logger.debug("LNS RINS failed: %s", _e)
                     _record_improver(_HEUR_COST["rins"], _rins_improved)
-                    _heuristic_governor.record("rins", _rins_improved)
 
                 # (2b) One-hot swap search (improve). For set-partition /
                 # assignment-structured MIQPs (``sum_k x[i,k] == 1``), a single bit
@@ -16568,7 +16542,6 @@ def solve_model(
                     and _lns_gap_open
                     and (_deadline - time.perf_counter()) > 1.0
                     and _improver_allowed(_HEUR_COST["lbranch"])
-                    and _heuristic_governor.allowed("lbranch", gap_open=_lns_gap_open)
                 ):
                     _lb_k = _lns_k_schedule[min(_lns_lb_calls, len(_lns_k_schedule) - 1)]
                     _lns_lb_calls += 1
@@ -16611,7 +16584,6 @@ def solve_model(
                     except Exception as _e:
                         logger.debug("LNS local-branching failed: %s", _e)
                     _record_improver(_HEUR_COST["lbranch"], _lb_improved)
-                    _heuristic_governor.record("lbranch", _lb_improved)
 
         # --- User cut callback at EVERY node (#1278 D) ---
         if cut_callback is not None and _cut_pool is not None:
@@ -19057,8 +19029,6 @@ def _solve_nlp_bb(
     _HEUR_SUCCESS_GAIN = 3.0
     _HEUR_COST = {"rins": 5.0, "lbranch": 10.0}
     _heur_state = {"calls": 0, "found": 0, "cost": 0.0}
-    # G2: the hit-rate-adaptive governor (default-OFF; see heuristic_governor.py).
-    _heuristic_governor = _get_heuristic_governor()
 
     def _improver_allowed(cost: float) -> bool:
         """Bind this solve's governor knobs to the shared contingent test (#1344)."""
@@ -19572,7 +19542,7 @@ def _solve_nlp_bb(
                     and float(tree.incumbent()[1]) - float(best_root_obj)
                     > gap_tolerance * (abs(float(tree.incumbent()[1])) + 1e-10)
                 )
-                if rens_enabled and _heuristic_governor.allowed("rens", gap_open=_rens_gap_open):
+                if rens_enabled and _rens_gap_open:
                     _rens_improved = False
                     _rens_obj0 = (
                         float(tree.incumbent()[1]) if tree.incumbent() is not None else float("inf")
@@ -19642,7 +19612,6 @@ def _solve_nlp_bb(
                                 logger.info("NLP-BB RENS incumbent: obj=%.6g", rens_obj)
                     except Exception as e:
                         logger.debug("RENS failed: %s", e)
-                    _heuristic_governor.record("rens", _rens_improved)
 
                 # --- Feasibility pump (fallback when RENS does not apply) ---
                 if not _root_incumbent:
@@ -19854,7 +19823,6 @@ def _solve_nlp_bb(
                         _lns_best_idx is not None
                         and (_lns_deadline - time.perf_counter()) > _DEADLINE_NODE_FLOOR_S
                         and _improver_allowed(_HEUR_COST["rins"])
-                        and _heuristic_governor.allowed("rins", gap_open=True)
                     ):
                         _rins_obj0 = float(_lns_inc[1])
                         _rins_improved = False
@@ -19888,12 +19856,9 @@ def _solve_nlp_bb(
                         except Exception as _e:
                             logger.debug("NLP-BB LNS RINS failed: %s", _e)
                         _record_improver(_HEUR_COST["rins"], _rins_improved)
-                        _heuristic_governor.record("rins", _rins_improved)
                     # (2) Local branching — Hamming-ball sub-MIP, escalating k.
-                    if (
-                        (_lns_deadline - time.perf_counter()) > 1.0
-                        and _improver_allowed(_HEUR_COST["lbranch"])
-                        and _heuristic_governor.allowed("lbranch", gap_open=True)
+                    if (_lns_deadline - time.perf_counter()) > 1.0 and _improver_allowed(
+                        _HEUR_COST["lbranch"]
                     ):
                         _lb_k = _lns_k_schedule[min(_lns_lb_calls, len(_lns_k_schedule) - 1)]
                         _lns_lb_calls += 1
@@ -19942,7 +19907,6 @@ def _solve_nlp_bb(
                         except Exception as _e:
                             logger.debug("NLP-BB LNS local-branching failed: %s", _e)
                         _record_improver(_HEUR_COST["lbranch"], _lb_improved)
-                        _heuristic_governor.record("lbranch", _lb_improved)
 
         # Root-node certification snapshot (cert:T0.1).
         if iteration == 0:

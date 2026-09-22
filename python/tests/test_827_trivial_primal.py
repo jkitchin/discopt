@@ -59,7 +59,17 @@ def _solve(inst: str, flag: str, tl: float):
     # budget on this instance, so leaving it on means neither arm reaches the seed.
     os.environ["DISCOPT_CONVEX_KERNEL"] = "0"
     try:
-        return dm.from_nl(str(BENCH / f"{inst}.nl")).solve(time_limit=tl)
+        # #1431: ``deterministic=True`` makes the run elapsed-independent. With the
+        # G2 governor retired, RENS is no longer throttled, and on this instance it
+        # can reach the origin within the 8 s wall on a fast/idle machine but not a
+        # loaded one -- so the OFF arm's "finds no incumbent" premise became a
+        # coin-flip (observed failing 2 of 3 repeats). Under ``deterministic`` the
+        # RENS sub-solve gets the caller's own time_limit rather than a slice of
+        # what is LEFT on the wall (see the ``_role2_slice`` note in solver.py), and
+        # both arms are stable: OFF None / ON 0.0 on 3 of 3 repeats. Every assertion
+        # below is unchanged -- this removes a timing dependence, it does not relax
+        # the test.
+        return dm.from_nl(str(BENCH / f"{inst}.nl")).solve(time_limit=tl, deterministic=True)
     finally:
         for k, v in prev.items():
             if v is None:
