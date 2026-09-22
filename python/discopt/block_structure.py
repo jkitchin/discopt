@@ -216,9 +216,11 @@ def resolve_block_structure(
 
     Args:
         model: the declaring model (``set_block`` / ``set_constraint_block``).
+
         evaluator: the NLP evaluator that will serve the solve — the authority on
             the index space. Its ``constraint_row_map``, ``jacobian_structure``
             and ``hessian_structure`` are what the labels are checked against.
+
         check_hessian: run the Lagrangian-Hessian cross-block check. On by
             default; it is the stronger of the two off-by-one detectors, because
             it sees couplings the Jacobian does not (an objective term over two

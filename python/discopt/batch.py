@@ -164,7 +164,7 @@ def solve_batch(
     start_method: str = "spawn",
     **solve_kwargs: Any,
 ) -> list["SolveResult"]:
-    """Solve many independent models and return their results in input order.
+    r"""Solve many independent models and return their results in input order.
 
     Parameters
     ----------
@@ -190,7 +190,7 @@ def solve_batch(
         ``if __name__ == "__main__":`` — the standard multiprocessing rule. A
         worker that dies because of a missing guard is reported as such rather
         than as a bare ``BrokenProcessPool``.
-    **solve_kwargs
+    \*\*solve_kwargs
         Passed to :meth:`Model.solve` for every model. Callback and debug
         arguments are refused (they cannot cross a process boundary); pass them
         to individual ``solve()`` calls instead.
