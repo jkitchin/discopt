@@ -5,14 +5,28 @@ discopt followed a 4-phase development plan. Phases 1-4 are complete. Phases 5-8
 > **These tables record each task as it was completed, not the architecture as it
 > stands.** Several were later superseded, and the rows are deliberately left
 > as-written rather than back-edited. Where they disagree with the tree, the tree
-> wins. The ones that mislead most often, as of v0.8.0:
+> wins. The ones that mislead most often, as of v0.9.0:
 >
-> - **JAX is not on the default solve path.** A default solve imports zero `jax`
->   modules (measured). T8's "JIT-compiled grad/Hessian/Jacobian via JAX" is now the
->   POUNCE Rust AD tape (`_tape_nlp_evaluator.py`); `DISCOPT_NLP_EVAL=jax` is the
->   opt-out. T4's DAG compiler and T19's batch relaxation evaluator are numpy — the
->   `_relax` directory was named `_jax` before the removal, so its name is not a
->   guide either.
+> - **JAX is not the default evaluator, but it is still a core dependency and can
+>   still load on the default path.** T8's "JIT-compiled grad/Hessian/Jacobian via
+>   JAX" is now the POUNCE Rust AD tape (`_tape_nlp_evaluator.py`);
+>   `DISCOPT_NLP_EVAL=jax` is the opt-out. T4's DAG compiler and T19's batch
+>   relaxation evaluator are numpy — the `_relax` directory was named `_jax` before
+>   the removal, so its name is not a guide either. `_relax/mccormick.py` is the
+>   exception that proves the rule: that one file *is* `jax.numpy`, and a default
+>   solve never imports it (measured — `discopt._relax.mccormick` absent from
+>   `sys.modules` after an `optimal` solve that loaded 50 other `_relax` modules).
+>
+>   What an earlier version of this note got wrong is the *unconditional* claim
+>   that "a default solve imports zero `jax` modules". An ordinary nonlinear solve
+>   imports zero **unless** the model contains an expression with no POUNCE tape
+>   opcode, in which case `build_evaluator` deliberately falls back to the legacy
+>   JAX evaluator and loads it — and that fallback is on the default path. Measured
+>   2026-09-22 on a plain `Model.solve()` of `dm.norm(X, 2)` with a 3×3 `X` and no
+>   user `import jax`, `sys.modules` goes from **0 to 218** `jax` entries; the same
+>   measurement on a tape-supported model (`x*y + x**2 - y`) stays at **0**.
+>   `jax`/`jaxlib` are in `[project] dependencies`, not an extra, and `estimate.py`
+>   uses `jax.jacobian` for exact sensitivity Jacobians.
 > - **The pure-JAX IPM (T17) has been retired**, so T9a's "replaced by T17" no
 >   longer describes anything live. `nlp_solver="ipm"` survives only as a
 >   back-compat alias. The NLP backends are `pounce` and `cyipopt`.
@@ -93,7 +107,7 @@ New problem types to make discopt competitive across the full optimization lands
 | Robust optimization               | Done    | Box/ellipsoidal/polyhedral uncertainty sets, adjustable robust counterparts  |
 | Multi-objective optimization      | Done    | Weighted sum, AUGMECON2 ε-constraint, weighted Tchebycheff, NBI, NNC via `discopt.mo`; hypervolume / IGD / spread / ε indicators. Evolutionary/Bayesian/interactive methods remain future work. |
 | Bilevel optimization              | Done    | `discopt.bilevel`: KKT and strong-duality reformulations of the follower, including certified/convex-NLP followers |
-| Complementarity problems (MPEC)   | Done    | `Model.complementarity(x, y)` (elementwise over vectors/arrays) via GDP disjunction (default), Scholtes regularization, or SOS1 |
+| Complementarity problems (MPEC)   | Done    | `Model.complementarity(x, y)` (elementwise over vectors/arrays) via GDP disjunction (default), Scholtes regularization, or SOS1, plus the box-bounded **MCP** form `Model.mcp(F, z, lb=..., ub=...)`. v0.9.0 made the relation first-class: durable source provenance on the model (`_lowered_complementarities` is model state, not a solve-local detail), names unique on the model, and `mpec.solve_mpec` returns **one** type whichever method is chosen. Source complementarity residuals are reported, and an iteration-limited iterate is no longer promoted to `"local_optimal"` |
 | Derivative-free optimization      | Done    | `solver="direct"` (DIRECT sampling search over black-box `dm.custom` bodies) and `solver="surrogate"` (model-based search for expensive black boxes); both explicitly **non-certifying**, and a governed DIRECT variant runs as a root primal heuristic (v0.8.0) |
 | Geometric programming             | Done    | `discopt.gp`: posynomial detection with an exact log-space convex reformulation (auto-routed), plus GP-structured MINLPs via integer B&B over exact convex log-space node relaxations (`solver="gp-minlp"`) |
 
@@ -108,7 +122,7 @@ New problem types to make discopt competitive across the full optimization lands
 | Dantzig-Wolfe / branch-and-price  | Deferred (by design) | Column generation + branch-and-price on the dualized blocks. **Deferred from the Phase 6 decomposition work** because it is a much larger, separable body of work than the dual bounds that shipped: it needs a full column-generation loop (restricted master + pricing subproblems + column management) and a branch-and-price scheme whose branching rules must preserve the pricing structure (generic branching breaks the subproblem). The shipped Lagrangian relaxation already delivers the core value here — tighter-than-LP dual bounds, separable subproblems, and the B&B node-bound hook; Dantzig–Wolfe is the *primal* (column-generation) dual to it and an enhancement, not a prerequisite. Scoped out to keep the decomposition PR focused and shippable. |
 | Decomposition Advisor             | In progress | Automatic decomposition-as-a-transformation pass: `model.analyze_decomposition()` analyzes structure, discovers exploitable blocks, scores/ranks candidates, explains the recommendation, and reformulates via `decompose()`. **Shipped:** graph infrastructure (`decomposition/graph/`, Rust kernels in `crates/discopt-core/src/decomp/`), block detection + candidate generators (`advisor/`, incl. an **Outer-Approximation** candidate that outranks GBD on convex MINLP), method-aware scoring, explained recommendation + counterfactuals, reformulation IR (`ir/`, `DecomposedModel.solve()` wrapping the Benders/GBD/OA/Lagrangian drivers) whose `SoundnessCertificate` now runs the convexity classifier, parallel execution actually consumed by the drivers (`parallel/`), the learning loop wired end-to-end (`learning/`: `solve(decomposition="auto", record_decomposition=True)` records telemetry; a store auto-wires the instance-based policy), `.dec` (GCG) import/export, and `solve(decomposition="auto")`. **Remaining:** KaHyPar hypergraph border detection (optional dep), Geoffrion feasibility cuts for non-binary GBD masters, weight calibration from telemetry, wiring the Rust CC/SCC bindings from Python, and the additional methods (Dantzig–Wolfe / ADMM / Schur / PH). Design spec: `docs/design/decomposition-advisor.md`; walkthrough: `docs/notebooks/decomposition_advisor.ipynb`; remediation plan: `docs/dev/decomposition-remediation-plan.md` |
 | Global optimization beyond B&B    | Done    | AMP (Adaptive Multivariate Partitioning) global MINLP solver (#23, #86)      |
-| Convex NLP fast path              | Done    | SUSPECT-style convexity detector + convex-NLP fast path (#46)                |
+| Convex NLP fast path              | Done    | SUSPECT-style convexity detector + convex-NLP fast path (#46). The convex **kernel** graduated to default-ON in v0.9.0 (#1346) after its §5 panel; `DISCOPT_CONVEX_KERNEL=0` remains the opt-out |
 | Structural presolve pipeline      | Done    | 22 structural passes wired into the root presolve pipeline (#53)             |
 | Convexification roadmap M1-M11    | Done    | M2/M3 arithmetics, M4/M5/M9/M10 root passes, M6 eigenvalue bound (#51)       |
 | Deadline-aware JAX IPM            | Done    | Wall-clock `time_limit` honored inside JAX-compiled `while_loop`s (#80)      |
@@ -120,13 +134,18 @@ New problem types to make discopt competitive across the full optimization lands
 | Set and index abstractions        | Done    | Named sets, indexed variables/constraints, set algebra for sparse models     |
 | Piecewise-linear functions        | Done    | SOS2 constraints in modeling API                                             |
 | Native indicator constraints      | Done    | `_IndicatorConstraint` class in modeling API                                 |
-| Warm-starting API                 | Done    | `m.solve(initial_solution=...)` with validation                              |
+| Warm-starting API                 | Done    | `m.solve(initial_solution=...)` with validation; v0.9.0 added the **primal-dual** warm start and `SolveResult.kkt` (#1247), and `from_nl` now keeps a `.nl` file's initial point so a round-trip preserves it (#1222) |
 | Export formats (MPS/LP)           | Done    | `to_mps()`, `to_lp()` in `discopt.export`, GAMS writer                      |
 | Callback and cut generation API   | Done    | Lazy constraint, incumbent, and node callbacks in B&B                        |
 | Infeasibility analysis (IIS)      | Done    | `compute_iis()` via deletion filtering in `discopt.infeasibility`            |
 | Pyomo import                      | Done    | `from_pyomo()` converter for Var, Constraint, Objective, GDP constructs      |
 | GAMS import                       | Done    | `from_gams()` reader for .gms scalar models                                 |
 | GAMS solver link                  | Done    | `discopt.gams`: run discopt *as* a GAMS solver via the GMO/GEV control-file link |
+| Named composite functions         | Done    | `dm.register_function` — a user-named composite the relaxer treats as **one atom** rather than re-deriving envelopes term by term (v0.9.0) |
+| Batched independent solves        | Done    | `dm.solve_batch` — many small independent global solves, optionally in parallel (v0.9.0) |
+| Optimization-as-a-block           | Done    | `dm.argmin` (inner NLP as a block of an outer model) and `dm.argmin_kkt` (the lowered arm of the same trade) (#1216) |
+| NumPy-shaped modeling surface     | Done    | Vector `min`/`max` (#1238) and the #1233/#1234/#1235 gap-closing batch, so array expressions behave the way the NumPy they resemble does (v0.9.0) |
+| FAIR provenance                   | Done    | A `.dopt` document records its schema id and provenance, and result files carry a validation report (#1266) |
 
 ## Phase 8: POUNCE-Only Solver Stack
 
@@ -146,3 +165,27 @@ gates, and risk register: [docs/design/pounce-only-roadmap.md](docs/design/pounc
 
 Detailed status, increment-level history, and the remaining open items for each
 task live in [docs/design/pounce-only-roadmap.md](docs/design/pounce-only-roadmap.md).
+
+## Where the work is now (post-v0.9.0)
+
+Phases 1–4 are closed. Of 5–8, most rows are `Done`; what remains, and is the
+place to start, is:
+
+- **Phase 8 P5 — benchmark-gated parity at MIPLIB/MINLPLib scale.** The largest
+  open item, and the one the release comparison keeps pointing at. Everything else
+  in P0–P4 is shipped or nearly so.
+- **Phase 8 P2/P3 cut gaps** — c-MIR aggregation with upper-bound complementation,
+  cross-round re-separation, flow-cover and implied-bound cuts.
+- **Phase 6 Decomposition Advisor** — the one `In progress` row. Remaining:
+  KaHyPar hypergraph border detection, Geoffrion feasibility cuts for non-binary
+  GBD masters, weight calibration from telemetry, wiring the Rust CC/SCC bindings
+  from Python, and the additional methods. Dantzig–Wolfe / branch-and-price is
+  deferred *by design*, not stalled — see its row.
+- **Phase 5 conic coverage** — SOCP, SDP and the general conic families are the
+  only rows still `Planned`. Nothing else in Phase 5 is open.
+
+Two standing disciplines are not roadmap rows but gate work in these areas:
+`docs/dev/flag-retirement-audit.md` (every default-OFF gate over solver math is
+Graduated, Retired, or a documented opt-out — CLAUDE.md §5) and
+`docs/dev/correctness-issues.md` (the prioritized correctness backlog, which
+outranks performance work touching the same layer).
