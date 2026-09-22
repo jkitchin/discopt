@@ -126,6 +126,14 @@ def main():
         help="In gate mode, treat >1.5x per-instance time regression as failure"
     )
     parser.add_argument(
+        "--suite-results", action="append", default=[], metavar="SUITE=PATH",
+        help="In gate mode, supply the results file for a criterion's declared suite "
+             "(repeatable). Use this when a panel was saved under a name that is not "
+             "the suite's, e.g. --suite-results global50=reports/cert0_2026-08-11.json. "
+             "Auto-discovery only accepts reports/<suite>_*.json, so the mapping must "
+             "be stated rather than assumed."
+    )
+    parser.add_argument(
         "--report-format", type=str, default=None,
         choices=[None, "default", "minlplib"],
         help="Report style (default = legacy markdown, minlplib = MINLPLib-style per-class table)"
@@ -242,27 +250,120 @@ def _run_gate_check(args):
               f"configuration in benchmarks.toml for '{args.gate}'")
         sys.exit(1)
 
-    all_passed, criteria = evaluate_phase_gate(
-        args.gate, benchmark, gate_config, known_optima=_known_optima_for_gate(args)
+    suite_results = _load_suite_results_for_gate(
+        gate_config, args.gate, benchmark, getattr(args, "suite_results", None)
     )
 
-    # Display results
-    print(f"{'Criterion':<40s} {'Target':>12s} {'Actual':>12s} {'Status':>8s}")
-    print("-" * 75)
+    all_passed, criteria = evaluate_phase_gate(
+        args.gate,
+        benchmark,
+        gate_config,
+        known_optima=_known_optima_for_gate(args),
+        suite_results=suite_results,
+    )
+
+    # Display results. The `Suite` column is not decoration: before #1420 every
+    # criterion was evaluated against one file regardless of the suite it declared,
+    # and there was no way to see that from the output.
+    print(f"{'Criterion':<34s} {'Suite':<16s} {'Target':>10s} {'Actual':>10s}  Status")
+    print("-" * 88)
     for c in criteria:
         target_str = f"{'≥' if c.direction == 'min' else '≤'} {c.target}"
-        actual_str = f"{c.actual:.4f}" if isinstance(c.actual, float) else str(c.actual)
-        status = "✅ PASS" if c.passed else "🔴 FAIL"
-        print(f"{c.name:<40s} {target_str:>12s} {actual_str:>12s} {status:>8s}")
+        if c.status == "not_measured":
+            actual_str = "--"
+            status = "⚪ NOT MEASURED"
+        else:
+            actual_str = f"{c.actual:.4f}" if isinstance(c.actual, float) else str(c.actual)
+            status = "✅ PASS" if c.passed else "🔴 FAIL"
+        print(
+            f"{c.name:<34s} {c.suite:<16s} {target_str:>10s} {actual_str:>10s}  {status}"
+        )
+        if c.detail:
+            print(f"{'':<34s} └─ {c.detail}")
+
+    failed = [c for c in criteria if c.status == "fail"]
+    unmeasured = [c for c in criteria if c.status == "not_measured"]
 
     print()
     if all_passed:
         print("✅ ALL CRITERIA PASSED — proceed to next phase")
         sys.exit(0)
-    else:
-        failed = [c for c in criteria if not c.passed]
+
+    # A not-measured criterion blocks the gate exactly as a failure does — a gate
+    # must never go green on something nobody measured — but the two are reported
+    # separately so the reader knows whether to fix the solver or the panel.
+    if failed:
         print(f"🔴 {len(failed)} CRITERIA FAILED — do not proceed")
-        sys.exit(1)
+    if unmeasured:
+        print(
+            f"⚪ {len(unmeasured)} CRITERIA NOT MEASURED — the gate cannot pass until "
+            "each one has a panel (see the reasons above). This is a missing "
+            "measurement, not a solver result."
+        )
+    sys.exit(1)
+
+
+def _load_suite_results_for_gate(
+    gate_config: dict,
+    gate_name: str,
+    primary: BenchmarkResults,
+    overrides: list[str] | None = None,
+) -> dict[str, BenchmarkResults]:
+    """Latest results for every suite the gate's criteria declare.
+
+    Each criterion in ``benchmarks.toml`` names the suite it is measured on; the
+    evaluator needs one ``BenchmarkResults`` per distinct suite. Suites with no
+    results file on disk are simply absent from the map, which the evaluator turns
+    into a named ``not_measured`` verdict rather than a silent substitution.
+
+    ``overrides`` are ``SUITE=PATH`` strings from ``--suite-results``. They exist for
+    the real case where a panel was saved under a name that is not its suite's — e.g.
+    ``reports/cert0_*.json`` carries ``suite="cert0"`` but is in fact the global50
+    panel the cert0 criteria are declared against. Auto-discovery will not assume
+    that; the operator states it, and the mapping lands in the run's output.
+    """
+    loaded: dict[str, BenchmarkResults] = {}
+    for spec in overrides or []:
+        if "=" not in spec:
+            print(f"ERROR: --suite-results expects SUITE=PATH, got {spec!r}", file=sys.stderr)
+            sys.exit(1)
+        suite, _, raw = spec.partition("=")
+        path = Path(raw)
+        if not path.exists():
+            print(f"ERROR: --suite-results {suite}: {path} does not exist", file=sys.stderr)
+            sys.exit(1)
+        loaded[suite] = BenchmarkResults.load(path)
+        print(f"  suite {suite!r}: {path}  (explicit --suite-results)")
+
+    tried: set[str] = set(loaded)
+    for crit in gate_config.get("criteria", {}).values():
+        suite = crit.get("suite")
+        if not suite or suite in tried:
+            continue
+        tried.add(suite)
+        if suite == gate_name or suite == getattr(primary, "suite", None):
+            loaded[suite] = primary
+            continue
+        path = _find_latest_results(suite)
+        if path and path.exists():
+            loaded[suite] = BenchmarkResults.load(path)
+            print(f"  suite {suite!r}: {path}")
+        else:
+            how = _how_to_produce(suite)
+            print(f"  suite {suite!r}: no results in reports/ — criteria not measured. {how}")
+    print()
+    return loaded
+
+
+def _how_to_produce(suite: str) -> str:
+    """One line telling the reader which harness produces a missing suite's panel."""
+    cfg = _load_suite_config(suite)
+    if cfg is None:
+        return f"No [suites.{suite}] entry in benchmarks.toml."
+    for src in cfg.get("sources", []) or []:
+        if src not in _LOADABLE_SOURCES:
+            return _SOURCE_HARNESS.get(src, f"No {src} loader exists in this tree.")
+    return f"Run: python -u discopt_benchmarks/run_benchmarks.py --suite {suite}"
 
 
 def _known_optima_for_gate(args) -> dict[str, float]:
@@ -481,6 +582,7 @@ def _run_benchmark(args):
 
     # Load suite config
     suite_config = _load_suite_config(args.suite)
+    _require_loadable_sources(args.suite, suite_config)
     time_limit = suite_config.get("time_limit_seconds", 3600) if suite_config else 3600
 
     # Build solver configs
@@ -672,12 +774,28 @@ def _run_benchmark(args):
 
 
 def _find_latest_results(suite: str) -> Path | None:
-    """Find the most recent results file for a suite."""
+    """Most recent `reports/{suite}_*.json` that is actually a BenchmarkResults file.
+
+    The glob is loose and `reports/` is shared: `phase3_*` also matches the gate
+    *reports* this very command writes (`phase3_gate_*.json`), and `global50_*` also
+    matches the 3-way script's output (`global50_3way_*.json`). Both carry different
+    schemas, and taking the newest match blindly made `--gate phase3` and `--gate
+    cert0` die with `KeyError: 'suite'` instead of evaluating. Skip anything that
+    does not carry the three keys `BenchmarkResults.load` requires.
+    """
     reports_dir = Path("reports")
     if not reports_dir.exists():
         return None
-    candidates = sorted(reports_dir.glob(f"{suite}_*.json"), reverse=True)
-    return candidates[0] if candidates else None
+    required = {"suite", "timestamp", "solver_results"}
+    for path in sorted(reports_dir.glob(f"{suite}_*.json"), reverse=True):
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        if isinstance(data, dict) and required <= set(data):
+            return path
+    return None
 
 
 def _load_toml_config() -> dict:
@@ -706,6 +824,49 @@ def _load_suite_config(suite_name: str) -> dict | None:
     return config.get("suites", {}).get(suite_name)
 
 
+#: Instance corpora this runner can actually load. Everything else needs a different
+#: harness (CUTEst has `scripts/run_cutest_benchmarks.py` + `config/cutest_suites.toml`)
+#: or has no loader in the tree at all.
+_LOADABLE_SOURCES = {"minlplib"}
+
+_SOURCE_HARNESS = {
+    "cutest": (
+        "CUTEst runs through its own harness: "
+        "`python -u discopt_benchmarks/scripts/run_cutest_benchmarks.py --suite cutest_nlp` "
+        "(suites in config/cutest_suites.toml). It needs `make setup-cutest` first."
+    ),
+    "netlib": "No Netlib loader exists in this tree.",
+    "kennington": "No Kennington loader exists in this tree.",
+    "suitesparse": "No SuiteSparse loader exists in this tree.",
+}
+
+
+def _require_loadable_sources(suite: str, suite_config: dict | None) -> None:
+    """Refuse a suite whose declared corpus this runner cannot load.
+
+    ``sources`` was decorative: every suite went through the MINLPLib loader whatever
+    it declared, so `--suite lp_netlib` ran 122 MINLPLib instances and saved them as
+    `reports/lp_netlib_*.json` — a panel of the wrong corpus under the right name,
+    which a phase gate would then read as Netlib evidence (measured 2026-09-22 on
+    `6dc49ebe`; same for nlp_cutest, sparse_matrices, lp_kennington). Refuse instead:
+    a missing panel is recoverable, a mislabelled one is not.
+    """
+    sources = list((suite_config or {}).get("sources", []) or [])
+    unloadable = [s for s in sources if s not in _LOADABLE_SOURCES]
+    if not unloadable:
+        return
+    print(
+        f"ERROR: suite {suite!r} declares sources={sources}, but this runner can only "
+        f"load {sorted(_LOADABLE_SOURCES)}. Running it anyway would resolve instances "
+        "from MINLPLib and save them under this suite's name — the wrong corpus "
+        "labelled as the right one.",
+        file=sys.stderr,
+    )
+    for s in unloadable:
+        print(f"  {s}: {_SOURCE_HARNESS.get(s, 'No loader exists in this tree.')}", file=sys.stderr)
+    sys.exit(1)
+
+
 def _read_instance_list(path: str | Path | None) -> set[str] | None:
     """Parse an instance-list file (one name per line; '#'-comments ignored).
 
@@ -715,6 +876,11 @@ def _read_instance_list(path: str | Path | None) -> set[str] | None:
     """
     if not path:
         return None
+    # `instance_list` may be given inline as a TOML array (e.g. minlptests_smoke)
+    # rather than a path. Before this, `Path(<list>)` raised TypeError and the suite
+    # could not be run at all.
+    if isinstance(path, (list, tuple)):
+        return {str(n) for n in path}
     p = Path(path)
     if not p.is_absolute():
         p = Path(__file__).parent / p
@@ -755,6 +921,8 @@ def _instance_list_order(path: str | Path | None) -> list[str]:
     """Same as _read_instance_list but preserves file order."""
     if not path:
         return []
+    if isinstance(path, (list, tuple)):
+        return [str(n) for n in path]
     p = Path(path)
     if not p.is_absolute():
         p = Path(__file__).parent / p

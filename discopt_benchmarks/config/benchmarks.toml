@@ -80,9 +80,19 @@ instance_list = "config/suites/full.txt"
 time_limit_seconds = 600
 
 [suites.comparison]
-description = "Head-to-head comparison on curated set"
+# The head-to-head panel the phase2/3/4 `geomean_ratio_vs_*` / `solve_count_ratio_vs_*`
+# criteria are declared against. It pointed at `config/comparison_instances.txt`, which
+# `git log --all -- <path>` shows NEVER existed in this repository's history — the entry
+# was aspirational, so `--suite comparison` resolved to 0 instances and every criterion
+# declared against it was unreachable (#1420 §D).
+#
+# Re-pointed at the BARON head-to-head list, which is the curated comparison set that
+# actually exists and is the measurement of record (CLAUDE.md "3-way head-to-head").
+# `global50` uses the same list at a 60 s cap; this entry keeps the longer cap the
+# phase2/3/4 criteria were written for.
+description = "Head-to-head comparison on the curated BARON panel (same list as global50)"
 sources = ["minlplib"]
-instance_list = "config/comparison_instances.txt"
+instance_list = "config/baron_global50.txt"
 time_limit_seconds = 3600
 
 [suites.global50]
@@ -196,6 +206,14 @@ description = "Phase 1 → Phase 2 gate (Month 14)"
   nlp_convergence_rate = { min = 0.80, suite = "nlp_cutest", metric = "convergence_rate" }
   lp_netlib_pass_rate = { min = 0.95, suite = "lp_netlib", metric = "pass_rate" }
   lp_vs_highs_geomean = { max = 3.0, suite = "lp_netlib", metric = "geomean_ratio_vs_highs" }
+  # NOT MEASURABLE TODAY, and deliberately left in place (#1420 §C). There is no
+  # SuiteSparse corpus in this tree and no `max_residual_vs_suitesparse` branch in
+  # `evaluate_phase_gate`, so this reports `NOT MEASURED` and blocks the phase1 gate.
+  # That is the truthful state: discopt's sparse factorization has never been
+  # validated against SuiteSparse here. Deleting the criterion would let phase1 go
+  # green on a check nobody ran, which is the weakening CLAUDE.md §1 forbids. To
+  # clear it: vendor/point at a SuiteSparse set, add a loader, and implement the
+  # metric — then this line passes on evidence.
   sparse_accuracy = { max = 1e-12, suite = "sparse_matrices", metric = "max_residual_vs_suitesparse" }
   relaxation_valid = { min = 1.0, suite = "phase1", metric = "relaxation_validity_rate" }
   interop_overhead = { max = 0.05, suite = "phase1", metric = "python_orchestration_fraction" }

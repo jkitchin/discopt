@@ -43,9 +43,15 @@ def generate_report(
     reference_solvers: Optional[dict[str, list[SolveResult]]] = None,
     known_optima: Optional[dict[str, float]] = None,
     output_path: Optional[Path] = None,
+    suite_results: Optional[dict[str, BenchmarkResults]] = None,
 ) -> str:
     """
     Generate a comprehensive markdown benchmark report.
+
+    ``suite_results`` maps suite name -> results for the gate section. Pass it
+    (even empty) to get strict per-criterion suite routing; omitting it evaluates
+    every criterion against ``benchmark`` regardless of the suite it declares,
+    which is the pre-#1420 behaviour and should not be used for a rendered report.
 
     Returns the report as a string and optionally writes to file.
     """
@@ -281,13 +287,17 @@ def generate_report(
             gate_name, benchmark, gate_config,
             reference_solvers=reference_solvers,
             known_optima=known_optima,
+            suite_results=suite_results if suite_results is not None else {},
         )
 
         status = "✅ PASSED" if all_passed else "🔴 FAILED"
         lines.append(f"**Overall: {status}**")
         lines.append("")
-        lines.append("| Criterion | Target | Actual | Status |")
-        lines.append("|-----------|--------|--------|--------|")
+        # The `Suite` and `Notes` columns exist because a criterion that could not be
+        # measured used to render identically to one that was measured and missed
+        # (#1420). Both still block the gate; only one is a solver result.
+        lines.append("| Criterion | Suite | Target | Actual | Status | Notes |")
+        lines.append("|-----------|-------|--------|--------|--------|-------|")
 
         for c in criteria:
             if c.direction == "min":
@@ -304,9 +314,13 @@ def generate_report(
             else:
                 actual_str = str(c.actual)
 
-            status_mark = "✅" if c.passed else "🔴"
+            if getattr(c, "status", "") == "not_measured":
+                status_mark = "⚪ not measured"
+            else:
+                status_mark = "✅" if c.passed else "🔴"
             lines.append(
-                f"| {c.name} | {target_str} | {actual_str} | {status_mark} |"
+                f"| {c.name} | {getattr(c, 'suite', '')} | {target_str} | "
+                f"{actual_str} | {status_mark} | {getattr(c, 'detail', '')} |"
             )
         lines.append("")
 
