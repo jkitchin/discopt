@@ -590,3 +590,78 @@ pump did not get smaller, it got *useful*, which is the distinction §6.7 turns 
 CLAUDE.md §5's "Out of scope" sense — it exists so the default can be A/B'd,
 which is how the corpus panel below was run in a single tree — not a graduation
 gate, and it takes no row in the flag-retirement audit.
+
+#### 6.8a The corpus panel, the cost it found, and the cap
+
+The instance gate above is a *probe*, not the case for the change (CLAUDE.md §2).
+The case is the corpus panel, and the first one **failed its second bar**.
+
+**Uncapped, 118 MINLPLib-snapshot instances at `tl=20 s`, ON vs OFF, interleaved
+within each instance** (120 drawn by `random.Random(1435)` from the `MB*`/`MI*`
+nonlinear probtypes, excluding the 66 vendored; `johnall` and `saa_2` timed out
+of the harness):
+
+- **Bar 1 (cert-clean): PASS.** 0 bounds above a `minlplib.solu` reference
+  optimum, 0 certification regressions, every ON incumbent independently
+  feasibility-verified.
+- **Bar 2 (net-positive): FAIL.** 0 incumbents gained, 0 lost, 0 improved, 0
+  worsened — 118 unchanged — and node throughput **down on 30 instances, median
+  −8.5 %**: `sfacloc1_3_90` −25 %, `o9_ar4_1` −17 %, `o7_ar3_1` −14 %,
+  `autocorr_bern25-06` −10 %.
+
+That is §5's *sound but not helpful* verdict, and on its own it kills the change
+as written. The mechanism is plain: the repair is cheap when it **succeeds**
+(the pump returns that round), and the panel is dominated by the other case — a
+rounding that cannot be repaired, where an uncapped repair pays ~0.2 s on every
+one of the pump's five rounds, twice per root, and returns nothing.
+
+**The reshape.** Hypothesis: the cost is repeated *failed* repairs, and one
+attempt per pump keeps the entire gain, because a rounding whose repair succeeds
+succeeds on the **first** round. Kill criterion stated in advance: *if
+`heatexch_gen2` loses its incumbent, or the worst node-losers do not recover,
+the whole change is reverted.* Entry experiment, both halves:
+
+| instance | uncapped | capped (`_PUMP_REPAIR_ATTEMPTS = 1`) |
+|---|---|---|
+| `sfacloc1_3_90` | −25 % | **0 %** (223 → 223 nodes) |
+| `autocorr_bern25-06` | −10 % | **0 %** (36287 → 36297) |
+| `fo9`, `no7_ar2_1` | moved | **0 %** |
+| `o9_ar4_1` | −17 % | −5.6 % |
+| `o7_ar3_1` | −14 % | −4.8 % |
+| `heatexch_gen2` | 834176.34 | **834176.34**, 63 nodes, 2/2 |
+
+**Capped panel, 66 vendored instances at `tl=20 s`:** bar 1 clean, bar 2
+**1 incumbent gained, 0 lost, 0 worsened, node count 4 up / 0 down**.
+
+One row flagged and is **not** a regression: `tls2` showed OFF certifying
+`optimal` in 14.34 s / 153 nodes in this run while the uncapped run had OFF
+*and* ON both at `feasible` / 205 nodes. Three of those four cells are
+bit-identical; the cell that moved is **OFF**, which runs the same code in both
+runs (with the repair disabled no candidate can come from it). `tls2`'s
+completion time sits right on the 20 s limit, so it certifies on a lucky draw —
+the same bimodality this document warns about throughout. The ON arm has never
+been the cell that varies.
+
+**The honest rate.** The repair can only help an instance that finds no
+incumbent at all. That population is **66** across both panels (57 external + 9
+vendored), and the repair converts **1** of them. It is adopted because it is
+sound, never loses a point, and — capped — costs nothing measurable, not because
+it is broadly transformative. Anyone revisiting this should read it as "a free
+strict improvement with a low hit rate on this corpus", which is a different
+claim from the one §6.8's instance table alone would support.
+
+**A measurement failure worth recording (CLAUDE.md §8).** The first capped
+external panel produced 114 of 120 children failing with `AssertionError: tree
+predates the #1435 repair` — because the working tree was switched to `main`
+mid-run for unrelated work, and the panel's children import `discopt` from that
+tree. The §8 marker assertion is the only reason this was caught: without it the
+run would have compared `main` against `main`, returned a flawless null result
+(0 gained, 0 lost, 0 node change), and read as the cleanest possible pass.
+**Do not run `git checkout` in a tree a panel is measuring**, and keep the
+version-marker assertion in every panel child.
+
+**Still in flight at the time of writing:** the capped re-run of the 120-instance
+external panel (the uncapped one above is what failed bar 2). It is the cost
+check the cap exists to satisfy; the spot-checks in the reshape table are drawn
+from it but are not a substitute for it. If it does not show the cost is
+broadly ~0, the change is reverted and this section stands as the diagnosis.
