@@ -622,8 +622,25 @@ def _trivial_primal_enabled() -> bool:
     candidates (origin projected into the box, box-center, all-lb, all-ub), verifies
     each against the true constraints, and injects the best VERIFIED-feasible one.
     Primal-only: it only ever seeds a feasible incumbent (and only when none exists
-    yet), so the dual bound / certificate are untouched. Gated to pure-continuous
-    models (a trivial point need not be integer-feasible)."""
+    yet), so the dual bound / certificate are untouched.
+
+    **Integer models are deliberately IN scope** (#1422). This paragraph used to end
+    "Gated to pure-continuous models (a trivial point need not be integer-feasible)",
+    which described a gate that does not exist and never did: ``_pure_continuous`` is
+    in scope at the seed site and is not consulted there. The implementation's actual
+    design is the one stated in the inline comment above that site — the candidates
+    (origin, box-center, bound corners) are integer-feasible whenever the integer
+    bounds are integral (as in ``ball_mk2_30``), and a non-integer candidate is
+    filtered downstream by the sub-solver's ``ws_int_feas`` integrality check before
+    it can become an incumbent. Sound either way: verified here against the true
+    constraints AND re-verified downstream before injection. The stale sentence
+    mattered beyond tidiness because ``docs/dev/flag-retirement-audit.md`` triages
+    flags from their gate docstrings, and that audit already records getting four of
+    nine wrong by doing so.
+
+    §5 state: **kept as a documented opt-out** — see the ``DISCOPT_TRIVIAL_PRIMAL``
+    row in ``docs/dev/flag-retirement-audit.md`` for the panel that was run and why
+    it is not the default."""
     return os.environ.get("DISCOPT_TRIVIAL_PRIMAL", "").strip().lower() in (
         "1",
         "true",
