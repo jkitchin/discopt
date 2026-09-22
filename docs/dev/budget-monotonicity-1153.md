@@ -512,3 +512,81 @@ operations rather than seconds, so its cost is knowable in advance instead of
 estimated at a 2.0 s default that is 3x wrong, and so the same work is done on
 every machine. It is the one lever left that changes the cost/value ratio rather
 than sliding along it.
+
+### 6.8 #1435 — the pump's projection was the wrong projection (fix landed)
+
+§6.7 left exactly one direction: make the pump **cheaper for the same value**
+rather than smaller. #1435 is that lever, found by following the one remaining
+question §6.7 does not answer — *why does the pump so often return nothing?*
+
+**The mechanism, measured to the call.** The fix-and-solve round pins the
+integers and then minimizes the **model objective** over the continuous
+variables, and tests **only that solve's terminal iterate** for constraint
+feasibility. Feasibility is incidental to what that solve optimizes, so whether
+the pump returns anything is decided by where the solve happened to *stop* —
+which `_deadline_wall_cap` derives from the caller's remaining wall. Measured on
+`heatexch_gen2`'s second (NLP-seeded) root pump at `time_limit=60`, sweeping the
+per-solve cap over the same subproblem:
+
+| `max_wall_time` | 0.05 s | 0.1 s | 0.2 s | 0.5 s | 1.0 s | 3.0 s |
+|---|---|---|---|---|---|---|
+| terminal iterate constraint-feasible | — | **yes** | — | — | — | — |
+
+and equivalently on the deterministic axis, `max_iter` ∈ {10, 25, 50, 75, **100**,
+150, 300} is feasible at **100** alone. A feasible point is *on the projection
+path* and is discarded because only the endpoint is checked. That is a primal
+heuristic whose **outcome** is a function of `time_limit`, which is #1153's gate
+directly — and it explains the same family §6.7 names, not one instance.
+
+**A fixed probe iteration count is not the fix** (CLAUDE.md §2): feasibility at
+exactly 100 and not at 75, 150 or 300 is a knife-edge tuned to this instance.
+
+**Falsified on the way (CLAUDE.md §4, §11).** The first hypothesis was that the
+round-2 projection's `ITERATION_LIMIT` iterate was a feasible point being
+discarded unchecked, since `_PUMP_ACCEPT_STATUSES` contained `TIME_LIMIT` but not
+`ITERATION_LIMIT` — making the accept set itself budget-dependent. Kill criterion
+stated in advance: *if admitting it still returns no incumbent at `time_limit=10`,
+the hypothesis dies.* It was implemented and measured: **no incumbent, 3 of 3**,
+pump wall unchanged (1.935 s vs 1.910 s). The iterate is genuinely infeasible.
+The widening was **reverted**; the comment above `_PUMP_ACCEPT_STATUSES` now
+records why it is not there.
+
+**The fix.** `_repair_to_feasible` in `_relax/primal_heuristics.py` adds a
+*second* candidate per pump round, from the same pinned subproblem: a min-norm
+elastic normal step (`pounce.project_to_feasible`), i.e. the projection a
+feasibility pump is supposed to take (Fischetti–Glover–Lodi; Bonami et al. for
+the MINLP form) — minimize distance to the rounding subject to the constraints,
+not the original objective. It reads **no clock**; its cost is a bounded number
+of sparse QPs, so it is the #912 shape §6.7 asks for. It runs **only** when the
+objective solve produced no verified point, so nothing the pump finds today is
+displaced, and every candidate still passes the same independent
+`_is_integer_feasible` + `_check_constraint_feasibility` gate, so soundness is
+untouched.
+
+Measured on `heatexch_gen2`'s pump #2, per round: the objective solve is
+infeasible on all 5 rounds at ~0.45 s each; the repair is **feasible on 4 of 5**
+at ~0.20 s each. pounce's default of 3 outer re-linearizations is not enough
+(0 of 5) — the feasible set is curved enough that a tangent step lands outside
+it — so the cap is 10, with `tol` set to the verifier's own 1e-6 so it is a work
+*cap* rather than a target.
+
+**Instance gate, 3 reps interleaved, load-gated:**
+
+| rung | before (`df2bc458`) | after |
+|---|---|---|
+| 5 s | none, 3/3 | none, 3/3 |
+| 10 s | none, 3/3 | **834176.34**, 3/3 |
+| 20 s | none, 3/3, 31 nodes, bound 555767.79 | **834176.34**, 3/3, **63 nodes**, bound **558540.17** |
+
+The incumbent is independently feasibility-verified, and sits above the
+reference optimum 635838.85 as a feasible suboptimal point should; the dual
+bound stays below the reference dual 583986.91. Note the baseline finds nothing
+at *any* rung here — the earlier "2 of 3 at 5 s" reading in probe 1 was
+probe-perturbed timing on a bimodal instance, and is retracted (CLAUDE.md §11).
+The node count rising 31 → 63 at 20 s is the incumbent finally pruning: the
+pump did not get smaller, it got *useful*, which is the distinction §6.7 turns on.
+
+`DISCOPT_PUMP_REPAIR=0` opts out. It is an opt-*out* for a shipped default in
+CLAUDE.md §5's "Out of scope" sense — it exists so the default can be A/B'd,
+which is how the corpus panel below was run in a single tree — not a graduation
+gate, and it takes no row in the flag-retirement audit.
