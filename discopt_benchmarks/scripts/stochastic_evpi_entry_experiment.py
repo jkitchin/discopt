@@ -616,35 +616,64 @@ def run_cell(
     return cell
 
 
+def bound_winner(cell: dict) -> str | None:
+    """Which arm produced the higher (better) valid lower bound at the root.
+
+    Added after the first full sweep (post hoc, and labelled as such in the plan doc):
+    the pre-registered metric normalises both bounds by an incumbent, so a cell where
+    NO arm finds a feasible point yields no comparison at all -- which is exactly what
+    happened on 5 of 12 cells. Two valid lower bounds on the same minimisation are
+    directly comparable without any incumbent, and higher is strictly better, so this is
+    both the more robust statistic and the one available in more cells.
+    """
+    lb = cell.get("lb_decomposed")
+    roots = cell.get("root_bounds") or []
+    if lb is None and not roots:
+        return None
+    if not roots:
+        return "decomposed (monolith produced no root bound)"
+    if lb is None:
+        return "monolith"
+    return "decomposed" if lb > max(roots) else "monolith"
+
+
 def markdown_table(cells: list[dict]) -> str:
     """Render measured cells as the markdown table the plan doc's SS5 carries."""
     head = (
-        "| family | S | n_x | decomposed root gap | discopt root gap | verdict | "
-        "scenario disagreement | subs certified | monolith status |\n"
-        "|---|---|---|---|---|---|---|---|---|\n"
+        "| family | S | n_x | decomposed LB | discopt root bound | better bound | "
+        "decomposed root gap | discopt root gap | scenario disagreement | "
+        "subs certified | monolith status |\n"
+        "|---|---|---|---|---|---|---|---|---|---|---|\n"
     )
     rows = []
     for c in cells:
-        verdict = (
-            "n/a"
-            if c.get("decomposition_wins") is None
-            else ("**decomp**" if c["decomposition_wins"] else "monolith")
-        )
+        roots = c.get("root_bounds") or []
+        win = bound_winner(c)
         rows.append(
-            "| {family} | {scenarios} | {n_first_stage} | {dec} | {root} | {verdict} | "
-            "{spread} | {cert}/{scenarios} | {status} |".format(
+            "| {family} | {scenarios} | {n_first_stage} | {lb} | {root} | {win} | "
+            "{dec} | {rootgap} | {spread} | {cert}/{scenarios} | {status} |".format(
                 family=c["family"],
                 scenarios=c["scenarios"],
                 n_first_stage=c["n_first_stage"],
+                lb=_fmt_sig(c.get("lb_decomposed")),
+                root=_fmt_sig(max(roots)) if roots else "none",
+                win="**decomp**" if win and win.startswith("decomposed") else (win or "n/a"),
                 dec=_fmt(c.get("decomposed_root_gap")),
-                root=_fmt(c.get("discopt_root_gap")),
-                verdict=verdict,
+                rootgap=_fmt(c.get("discopt_root_gap")),
                 spread=_fmt_num(c.get("candidate_spread")),
                 cert=c.get("sub_certified", 0),
                 status=c.get("monolith_status"),
             )
         )
-    return head + "\n".join(rows)
+    tally = [bound_winner(c) for c in cells]
+    dec = sum(1 for t in tally if t and t.startswith("decomposed"))
+    mono = sum(1 for t in tally if t == "monolith")
+    return (
+        head
+        + "\n".join(rows)
+        + f"\n\nBound-level tally: decomposed better in {dec} of {dec + mono} "
+        f"comparable cells (monolith better in {mono})."
+    )
 
 
 def _write_report(path: str, payload: dict) -> None:
@@ -761,6 +790,10 @@ def main() -> int:
         print("FAIL: zero comparisons executed -- the probe measured nothing.", flush=True)
         return 1
     return 0
+
+
+def _fmt_sig(v: float | None) -> str:
+    return "n/a" if v is None else f"{v:.6g}"
 
 
 def _fmt_num(v: float | None) -> str:
