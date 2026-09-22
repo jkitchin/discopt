@@ -98,6 +98,13 @@ def test_root_gap_ratio_gate_no_keyerror():
         def get_results(self, name):
             return [res] if name == "discopt" else []
 
+        def get_solvers(self):
+            # The evaluator derives reference columns from the panel when the caller
+            # supplies none (#1420); a stub standing in for BenchmarkResults has to
+            # answer this. Here there is no reference column — the test passes
+            # `reference_solvers` explicitly in the arm that needs one.
+            return ["discopt"]
+
     gate_cfg = {
         "criteria": {
             "rg": {"max": 1.3, "suite": "global50", "metric": "root_gap_ratio_vs_baron"}

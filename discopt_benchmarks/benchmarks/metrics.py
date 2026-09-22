@@ -878,32 +878,130 @@ def detect_regressions(
 
 @dataclass
 class GateCriterionResult:
-    """Result of evaluating a single phase gate criterion."""
+    """Result of evaluating a single phase gate criterion.
+
+    ``status`` separates the two things ``passed=False`` used to conflate (#1420):
+
+      * ``"fail"``          -- the metric WAS computed and missed its target.
+      * ``"not_measured"``  -- the metric could not be computed at all (no results
+        for the declared suite, no reference solver column, unimplemented metric).
+        ``detail`` names which.
+
+    ``not_measured`` still sets ``passed=False``: a gate must never go green on a
+    criterion nobody measured. The distinction is for the *reader* — "we ran it and
+    it missed" and "we never ran it" demand different responses, and rendering both
+    as a red FAIL is what let 11 of 39 criteria sit unreachable unnoticed.
+    """
     name: str
     target: float
     actual: float
     passed: bool
     direction: str  # "min" or "max" — whether actual must be >= or <= target
     description: str = ""
+    suite: str = ""
+    status: str = "fail"  # "pass" | "fail" | "not_measured"
+    detail: str = ""
+
+
+#: Every metric name ``evaluate_phase_gate`` knows how to compute. A criterion whose
+#: ``metric`` is not here (or does not match one of the ``_vs_<solver>`` prefixes) is
+#: reported ``not_measured: unknown metric`` rather than silently keeping the ``nan``
+#: initialiser — which is how ``max_residual_vs_suitesparse`` sat in the phase1 gate
+#: with no implementing branch, indistinguishable from a real failure (#1420 §C).
+_EXACT_GATE_METRICS = frozenset({
+    "solved_count",
+    "convergence_rate",
+    "pass_rate",
+    "incorrect_count",
+    "root_gap_populated_fraction",
+    "closed_within_10_nodes_fraction",
+    "gpu_vs_cpu_speedup",
+    "median_nodes_per_second",
+    "median_seconds_per_node",
+    "python_orchestration_fraction",
+    "rust_tree_overhead_fraction",
+    "relaxation_validity_rate",
+    "node_reduction_vs_classical",
+    "problem_classes_beating_baron",
+})
+
+_PREFIX_GATE_METRICS = ("geomean_ratio_vs_", "root_gap_ratio_vs_", "solve_count_ratio_vs_")
+
+
+def _is_known_gate_metric(metric: str) -> bool:
+    if metric in _EXACT_GATE_METRICS:
+        return True
+    if metric.startswith("solved_count_le") and metric.endswith("var"):
+        return True
+    return any(metric.startswith(p) for p in _PREFIX_GATE_METRICS)
+
+
+def reference_solver_columns(
+    benchmark: BenchmarkResults,
+) -> dict[str, list[SolveResult]]:
+    """The non-discopt solver columns of a results file, keyed by solver name.
+
+    A multi-solver run (``--solvers discopt,scip``) already carries the reference
+    columns the ``*_ratio_vs_<solver>`` metrics need; before #1420 nothing handed
+    them to the evaluator, so all ten such criteria stayed at ``nan``. ``discopt``
+    and its ablation variants (``discopt_cpu``, ``discopt_classical_branching``)
+    are excluded: they are the subject, not a reference.
+    """
+    return {
+        name: benchmark.get_results(name)
+        for name in benchmark.get_solvers()
+        if not name.startswith("discopt")
+    }
 
 
 def evaluate_phase_gate(
     gate_name: str,
-    benchmark: BenchmarkResults,
+    benchmark: BenchmarkResults | None,
     gate_config: dict,
-    reference_solvers: Optional[dict[str, list[SolveResult]]] = None,
-    known_optima: Optional[dict[str, float]] = None,
+    reference_solvers: dict[str, list[SolveResult]] | None = None,
+    known_optima: dict[str, float] | None = None,
+    suite_results: dict[str, BenchmarkResults] | None = None,
 ) -> tuple[bool, list[GateCriterionResult]]:
     """
     Evaluate all criteria for a phase gate.
+
+    Each criterion in ``benchmarks.toml`` declares the ``suite`` it is measured on.
+    ``suite_results`` maps suite name -> the results for that suite; a criterion
+    whose declared suite is absent is reported ``not_measured`` rather than being
+    evaluated against whatever single file happened to be loaded (#1420 §A — two
+    criteria declared against different suites were reporting identical values).
+
+    ``benchmark`` remains the fallback for criteria whose declared suite matches it
+    (by ``benchmark.suite`` or by ``gate_name``) and for a caller that passes no
+    ``suite_results`` at all. It may be ``None`` when the gate has no panel of its
+    own name: ``phase4`` declares no ``[suites.phase4]`` at all and every one of its
+    criteria names ``full`` or ``comparison``, so its verdict comes entirely from
+    ``suite_results``.
+
+    ``reference_solvers``, when given, overrides the per-suite columns derived from
+    the loaded results; leave it None to use whatever solver columns each suite's
+    own file carries.
 
     Returns (all_passed, list_of_criterion_results).
     """
     criteria_results = []
     all_passed = True
 
-    discopt_results = benchmark.get_results("discopt")
-    instance_info = benchmark.instance_info
+    # Passing no map at all is SINGLE-PANEL mode: `benchmark` answers for every
+    # criterion regardless of the suite it declares. That is the pre-#1420 behaviour
+    # and it is wrong for any caller that renders a gate verdict for a human — it is
+    # retained only for unit tests that exercise one metric against one stub panel.
+    # Every production caller (the CLI, the report generator) passes a map, even an
+    # empty one, and so gets strict routing.
+    single_panel = suite_results is None
+
+    available: dict[str, BenchmarkResults] = dict(suite_results or {})
+    # The directly-supplied results answer for their own suite and for the gate name,
+    # so `--gate phase1` against a `phase1_*.json` keeps working unchanged.
+    if benchmark is not None:
+        for key in (getattr(benchmark, "suite", None), gate_name):
+            if key and key not in available:
+                available[key] = benchmark
 
     for crit_name, crit_config in gate_config.get("criteria", {}).items():
         actual = float("nan")
@@ -911,90 +1009,163 @@ def evaluate_phase_gate(
         direction = "min" if "min" in crit_config else "max"
 
         metric = crit_config.get("metric", "")
+        suite = crit_config.get("suite", "")
+        unmeasured: str | None = None
 
-        # Dispatch to metric functions
-        if metric == "solved_count":
-            actual = solved_count(discopt_results)
-        elif metric.startswith("solved_count_le") and metric.endswith("var"):
-            max_v = int(metric.replace("solved_count_le", "").replace("var", ""))
-            actual = solved_count_by_size(discopt_results, instance_info, max_v)
-        elif metric == "convergence_rate" or metric == "pass_rate":
-            if known_optima:
-                actual = subsolver_pass_rate(discopt_results, known_optima)
-        elif metric == "incorrect_count":
-            if known_optima:
-                actual = incorrect_count(discopt_results, known_optima)
-        elif metric.startswith("geomean_ratio_vs_"):
-            ref_solver = metric.replace("geomean_ratio_vs_", "")
-            if reference_solvers and ref_solver in reference_solvers:
-                actual = geometric_mean_ratio(discopt_results, reference_solvers[ref_solver])
-        elif metric == "root_gap_populated_fraction":
-            actual = root_gap_populated_fraction(discopt_results)
-        elif metric == "closed_within_10_nodes_fraction":
-            actual = closed_within_10_nodes_fraction(discopt_results)
-        elif metric.startswith("root_gap_ratio_vs_"):
-            ref_solver = metric.replace("root_gap_ratio_vs_", "")
-            if reference_solvers and ref_solver in reference_solvers:
-                actual = root_gap_ratio(discopt_results, reference_solvers[ref_solver])
-        elif metric == "gpu_vs_cpu_speedup":
-            cpu_results = benchmark.get_results("discopt_cpu")
-            if cpu_results:
-                stats = gpu_vs_cpu_speedup(discopt_results, cpu_results)
-                actual = stats["median_speedup"]
-        elif metric == "median_nodes_per_second":
-            nps = [r.nodes_per_second for r in discopt_results if r.nodes_per_second is not None]
-            actual = float(np.median(nps)) if nps else 0.0
-        elif metric == "median_seconds_per_node":
-            # Median wall seconds per B&B node over rows that opened a tree
-            # (cert:T1.x performance exit). Lower is better.
-            spn = [
-                r.wall_time / r.node_count
-                for r in discopt_results
-                if r.node_count > 0 and r.wall_time not in (None, float("inf"))
-            ]
-            actual = float(np.median(spn)) if spn else float("nan")
-        elif metric == "python_orchestration_fraction" or metric == "rust_tree_overhead_fraction":
-            profile = layer_profiling_summary(discopt_results)
-            if metric == "python_orchestration_fraction":
-                actual = profile["mean_python_fraction"]
-            else:
-                actual = profile["mean_rust_fraction"]
-        elif metric == "relaxation_validity_rate":
-            # All relaxation lower bounds must be valid (≤ known optimum)
-            if known_optima:
-                valid = 0
-                total = 0
-                for r in discopt_results:
-                    if r.bound is not None and r.instance in known_optima:
-                        total += 1
-                        if r.bound <= known_optima[r.instance] + 1e-6:
-                            valid += 1
-                actual = valid / max(total, 1)
-        elif metric == "node_reduction_vs_classical":
-            baseline = benchmark.get_results("discopt_classical_branching")
-            if baseline:
-                actual = node_count_reduction(discopt_results, baseline)
-        elif metric == "problem_classes_beating_baron":
-            if reference_solvers and "baron" in reference_solvers:
-                beating = problem_classes_beating(
-                    discopt_results, reference_solvers["baron"], instance_info
-                )
-                actual = len(beating)
-        elif metric.startswith("solve_count_ratio_vs_"):
-            ref_solver = metric.replace("solve_count_ratio_vs_", "")
-            if reference_solvers and ref_solver in reference_solvers:
-                ref_solved = solved_count(reference_solvers[ref_solver])
-                our_solved = solved_count(discopt_results)
-                actual = our_solved / max(ref_solved, 1)
+        bench = benchmark if (single_panel or not suite) else available.get(suite)
+        if bench is None:
+            unmeasured = f"no results loaded for declared suite {suite!r}"
+        elif not _is_known_gate_metric(metric):
+            unmeasured = f"unknown metric {metric!r}: no branch in evaluate_phase_gate"
 
-        # Evaluate pass/fail
-        if direction == "min":
-            passed = actual >= target
-        else:
-            passed = actual <= target
+        if unmeasured is None:
+            assert bench is not None  # narrowed above
+            discopt_results = bench.get_results("discopt")
+            instance_info = bench.instance_info
+            refs = reference_solvers
+            if refs is None:
+                refs = reference_solver_columns(bench)
 
-        if math.isnan(actual):
+            if not discopt_results:
+                unmeasured = f"suite {suite!r} results carry no 'discopt' solver column"
+
+            # Dispatch to metric functions
+            elif metric == "solved_count":
+                actual = solved_count(discopt_results)
+            elif metric.startswith("solved_count_le") and metric.endswith("var"):
+                max_v = int(metric.replace("solved_count_le", "").replace("var", ""))
+                actual = solved_count_by_size(discopt_results, instance_info, max_v)
+            elif metric == "convergence_rate" or metric == "pass_rate":
+                if known_optima:
+                    actual = subsolver_pass_rate(discopt_results, known_optima)
+                else:
+                    unmeasured = "no known-optima oracle available"
+            elif metric == "incorrect_count":
+                if known_optima:
+                    actual = incorrect_count(discopt_results, known_optima)
+                else:
+                    unmeasured = "no known-optima oracle available"
+            elif metric.startswith("geomean_ratio_vs_"):
+                ref_solver = metric.replace("geomean_ratio_vs_", "")
+                if refs and ref_solver in refs:
+                    actual = geometric_mean_ratio(discopt_results, refs[ref_solver])
+                    if math.isinf(actual):
+                        # geometric_mean_ratio returns inf when the two solvers share
+                        # no solved instance. That is an empty comparison, not a ratio
+                        # of infinity — reporting it as a numeric FAIL invites reading
+                        # it as "catastrophically slower".
+                        actual = float("nan")
+                        unmeasured = (
+                            f"no instance in suite {suite!r} was solved by BOTH "
+                            f"discopt and {ref_solver}, so the ratio is over an "
+                            "empty set"
+                        )
+                else:
+                    unmeasured = (
+                        f"suite {suite!r} results carry no {ref_solver!r} column "
+                        f"(re-run with --solvers discopt,{ref_solver})"
+                    )
+            elif metric == "root_gap_populated_fraction":
+                actual = root_gap_populated_fraction(discopt_results)
+            elif metric == "closed_within_10_nodes_fraction":
+                actual = closed_within_10_nodes_fraction(discopt_results)
+            elif metric.startswith("root_gap_ratio_vs_"):
+                ref_solver = metric.replace("root_gap_ratio_vs_", "")
+                if refs and ref_solver in refs:
+                    actual = root_gap_ratio(discopt_results, refs[ref_solver])
+                else:
+                    unmeasured = (
+                        f"suite {suite!r} results carry no {ref_solver!r} column "
+                        f"(re-run with --solvers discopt,{ref_solver})"
+                    )
+            elif metric == "gpu_vs_cpu_speedup":
+                cpu_results = bench.get_results("discopt_cpu")
+                if cpu_results:
+                    stats = gpu_vs_cpu_speedup(discopt_results, cpu_results)
+                    actual = stats["median_speedup"]
+                else:
+                    unmeasured = f"suite {suite!r} results carry no 'discopt_cpu' column"
+            elif metric == "median_nodes_per_second":
+                nps = [
+                    r.nodes_per_second for r in discopt_results if r.nodes_per_second is not None
+                ]
+                actual = float(np.median(nps)) if nps else 0.0
+            elif metric == "median_seconds_per_node":
+                # Median wall seconds per B&B node over rows that opened a tree
+                # (cert:T1.x performance exit). Lower is better.
+                spn = [
+                    r.wall_time / r.node_count
+                    for r in discopt_results
+                    if r.node_count > 0 and r.wall_time not in (None, float("inf"))
+                ]
+                if spn:
+                    actual = float(np.median(spn))
+                else:
+                    unmeasured = "no row opened a B&B tree, so seconds-per-node is undefined"
+            elif metric in ("python_orchestration_fraction", "rust_tree_overhead_fraction"):
+                profile = layer_profiling_summary(discopt_results)
+                if metric == "python_orchestration_fraction":
+                    actual = profile["mean_python_fraction"]
+                else:
+                    actual = profile["mean_rust_fraction"]
+            elif metric == "relaxation_validity_rate":
+                # All relaxation lower bounds must be valid (≤ known optimum)
+                if known_optima:
+                    valid = 0
+                    total = 0
+                    for r in discopt_results:
+                        if r.bound is not None and r.instance in known_optima:
+                            total += 1
+                            if r.bound <= known_optima[r.instance] + 1e-6:
+                                valid += 1
+                    if total:
+                        actual = valid / total
+                    else:
+                        unmeasured = "no row carries both a bound and a known optimum"
+                else:
+                    unmeasured = "no known-optima oracle available"
+            elif metric == "node_reduction_vs_classical":
+                baseline = bench.get_results("discopt_classical_branching")
+                if baseline:
+                    actual = node_count_reduction(discopt_results, baseline)
+                else:
+                    unmeasured = (
+                        f"suite {suite!r} results carry no "
+                        "'discopt_classical_branching' ablation column"
+                    )
+            elif metric == "problem_classes_beating_baron":
+                if refs and "baron" in refs:
+                    beating = problem_classes_beating(
+                        discopt_results, refs["baron"], instance_info
+                    )
+                    actual = len(beating)
+                else:
+                    unmeasured = (
+                        f"suite {suite!r} results carry no 'baron' column "
+                        "(BARON runs via scripts/global_opt_baron_vs_discopt.py, "
+                        "not this harness — see CLAUDE.md)"
+                    )
+            elif metric.startswith("solve_count_ratio_vs_"):
+                ref_solver = metric.replace("solve_count_ratio_vs_", "")
+                if refs and ref_solver in refs:
+                    ref_solved = solved_count(refs[ref_solver])
+                    our_solved = solved_count(discopt_results)
+                    actual = our_solved / max(ref_solved, 1)
+                else:
+                    unmeasured = (
+                        f"suite {suite!r} results carry no {ref_solver!r} column "
+                        f"(re-run with --solvers discopt,{ref_solver})"
+                    )
+
+        if unmeasured is None and math.isnan(actual):
+            unmeasured = f"metric {metric!r} returned NaN on suite {suite!r}"
+
+        if unmeasured is not None:
+            status = "not_measured"
             passed = False
+        else:
+            passed = actual >= target if direction == "min" else actual <= target
+            status = "pass" if passed else "fail"
 
         if not passed:
             all_passed = False
@@ -1005,6 +1176,9 @@ def evaluate_phase_gate(
             actual=actual,
             passed=passed,
             direction=direction,
+            suite=suite,
+            status=status,
+            detail=unmeasured or "",
         ))
 
     return all_passed, criteria_results
