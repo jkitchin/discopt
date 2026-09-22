@@ -556,6 +556,29 @@ def _pump_model():
     return m
 
 
+def _assert_bad_point_rejected(model, out, bad, repair):
+    """The pump must never hand back the backend's bad point.
+
+    #1435 gave the pump a SECOND candidate source — a min-norm feasibility repair
+    of the same rounding, which reads no clock — so ``out is None`` stopped being
+    the way to say "the bad point was rejected": the repair can legitimately go on
+    to find a real feasible point for this model (``xc + xb >= 0.5``). With the
+    repair off this is the original assertion, verbatim. With it on the check is
+    strictly stronger than ``is None``, which a pump that had quietly stopped
+    producing anything would also satisfy.
+    """
+    if repair == "0":
+        assert out is None
+        return
+    if out is None:
+        return  # the repair may fail; it may not be wrong
+    assert not np.allclose(out, bad, equal_nan=True), "the backend's bad point came back"
+    evaluator = cached_evaluator(model)
+    assert ph._check_constraint_feasibility(evaluator, out), (
+        "the pump returned a point that fails the constraint check it is gated on"
+    )
+
+
 @pytest.mark.unit
 class TestFeasibilityPumpEdges:
     def test_backend_failure_then_deadline_stops(self):
@@ -568,19 +591,21 @@ class TestFeasibilityPumpEdges:
         )
         assert out is None
 
-    def test_nan_solution_rejected(self):
+    @pytest.mark.parametrize("repair", ["0", "1"])
+    def test_nan_solution_rejected(self, monkeypatch, repair):
+        monkeypatch.setenv("DISCOPT_PUMP_REPAIR", repair)
         m = _pump_model()
-        out = ph.feasibility_pump(
-            m, np.array([0.4, 0.3]), max_rounds=1, backend=_mk_backend([np.nan, np.nan])
-        )
-        assert out is None
+        bad = np.array([np.nan, np.nan])
+        out = ph.feasibility_pump(m, np.array([0.4, 0.3]), max_rounds=1, backend=_mk_backend(bad))
+        _assert_bad_point_rejected(m, out, bad, repair)
 
-    def test_constraint_infeasible_solution_rejected(self):
+    @pytest.mark.parametrize("repair", ["0", "1"])
+    def test_constraint_infeasible_solution_rejected(self, monkeypatch, repair):
+        monkeypatch.setenv("DISCOPT_PUMP_REPAIR", repair)
         m = _pump_model()
-        out = ph.feasibility_pump(
-            m, np.array([0.4, 0.3]), max_rounds=1, backend=_mk_backend([0.0, 0.0])
-        )
-        assert out is None
+        bad = np.array([0.0, 0.0])
+        out = ph.feasibility_pump(m, np.array([0.4, 0.3]), max_rounds=1, backend=_mk_backend(bad))
+        _assert_bad_point_rejected(m, out, bad, repair)
 
     def test_bounds_restored_after_pump(self):
         m = _pump_model()
