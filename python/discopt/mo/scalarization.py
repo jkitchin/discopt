@@ -137,9 +137,50 @@ class _TimeBudget:
         return False
 
 
-def _tag(method: str, budget: "_TimeBudget") -> str:
-    """Append ``/truncated`` to *method* when the budget was hit (MO7)."""
-    return f"{method}/truncated" if budget.truncated else method
+class _SweepHealth:
+    """Records sweep cells that produced no point for an *inconclusive* reason (#1442).
+
+    A subproblem that returns ``status="infeasible"`` has been *proved* to have
+    no solution, and a sweep may reason from that. Every other empty outcome —
+    ``error``, ``time_limit``, ``node_limit``, ``iteration_limit``, or an
+    incumbent the solver declined to certify — proves nothing: it leaves a hole
+    in the front that the caller has no way to see from a shorter list of
+    points. Recording the cell makes the hole visible; ``epsilon_constraint``
+    additionally must not treat such a cell as a proof about the cells after it.
+    """
+
+    def __init__(self) -> None:
+        self.cells: list[tuple[dict, str]] = []
+
+    def record(self, params: dict, status: str) -> None:
+        self.cells.append((dict(params), str(status)))
+
+    @property
+    def incomplete(self) -> bool:
+        return bool(self.cells)
+
+    def warn(self, method: str) -> None:
+        """Emit one warning naming how many cells were lost and why."""
+        if not self.cells:
+            return
+        statuses = sorted({st for _, st in self.cells})
+        warnings.warn(
+            f"{method}: {len(self.cells)} subproblem(s) returned no solution for a "
+            f"reason that is not a proof of infeasibility ({', '.join(statuses)}), so "
+            f"the returned front may be missing Pareto points. See "
+            f"ParetoFront.incomplete_cells; the method tag is suffixed '/incomplete'.",
+            UserWarning,
+            stacklevel=3,
+        )
+
+
+def _tag(method: str, budget: "_TimeBudget", health: "Optional[_SweepHealth]" = None) -> str:
+    """Append ``/truncated`` (budget hit, MO7) and ``/incomplete`` (#1442) to *method*."""
+    if budget.truncated:
+        method = f"{method}/truncated"
+    if health is not None and health.incomplete:
+        method = f"{method}/incomplete"
+    return method
 
 
 def _add_tracked(model, constraint, name, tracked: list) -> None:
@@ -307,6 +348,7 @@ def weighted_sum(
             if weights.ndim == 1:
                 weights = weights[None, :]
         _warn_large_grid(len(weights), "weighted_sum")
+        health = _SweepHealth()
 
         # Build sense signs for the internal min-convention expression.
         signs = np.array([1.0 if s == "min" else -1.0 for s in senses_list], dtype=np.float64)
@@ -347,7 +389,12 @@ def weighted_sum(
             wall = time.perf_counter() - t0
 
             if result.x is None:
-                continue  # skip infeasible / failed
+                # #1442: a proven-infeasible weight cell contributes nothing and
+                # is expected; any other empty status leaves a hole the caller
+                # must be able to see.
+                if result.status != "infeasible":
+                    health.record({"weights": w.tolist()}, result.status)
+                continue
             obj_vec = _collect_objectives_at_x(objectives, model, result.x, evaluator)
             points.append(
                 ParetoPoint(
@@ -362,13 +409,15 @@ def weighted_sum(
     finally:
         model._objective = saved_obj
 
+    health.warn("weighted_sum")
     front = ParetoFront(
         points=points,
-        method=_tag("weighted_sum", budget),
+        method=_tag("weighted_sum", budget, health),
         objective_names=names,
         senses=senses_list,
         ideal=ideal_arr,
         nadir=nadir_arr,
+        incomplete_cells=health.cells,
     )
     return front.filtered() if filter else front
 
@@ -435,6 +484,18 @@ def epsilon_constraint(
     ``total_time_limit`` (overall wall-clock budget; on expiry the sweep returns
     the partial front tagged ``".../truncated"``). A warning is emitted when the
     grid exceeds ~200 subproblems (MO7).
+
+    An ε cell the solver *proves* infeasible ends the inner sweep, because every
+    tighter cell is then infeasible too. A cell that merely fails to answer —
+    ``error``, ``time_limit``, ``node_limit``, ``iteration_limit``, or an
+    incumbent the solver declined to certify — proves nothing about the cells
+    after it, so the sweep continues past it and records it on
+    :attr:`~discopt.mo.pareto.ParetoFront.incomplete_cells` (#1442). Before
+    #1442 those two cases were conflated and one unanswered cell silently
+    discarded every remaining ε value, dropping real Pareto points from a front
+    still tagged ``"augmecon2"``. Check
+    :attr:`~discopt.mo.pareto.ParetoFront.incomplete` before relying on the
+    completeness claim above.
     """
     senses_list = _as_senses(senses, len(objectives))
     names = _default_names(objectives, objective_names)
@@ -446,6 +507,7 @@ def epsilon_constraint(
     if payoff not in ("lexicographic", "simple"):
         raise ValueError(f"payoff must be 'lexicographic' or 'simple', got {payoff!r}")
     use_bypass = bool(bypass) and augmented
+    health = _SweepHealth()
     _warn_large_grid(n_points ** (k - 1), "epsilon_constraint")
 
     saved_obj = model._objective
@@ -560,8 +622,9 @@ def epsilon_constraint(
         def _run_solve(min_eps_vec):
             """Set ε parameters from min-convention values and solve.
 
-            Returns ``(result, wall, obj_vec, slack_inner)`` or
-            ``(None, wall, None, None)`` on infeasibility.
+            Returns ``(result, wall, obj_vec, slack_inner, status)``; ``result`` is
+            ``None`` when the subproblem returned no point, and ``status`` then
+            says why — only ``"infeasible"`` is a proof of infeasibility (#1442).
             """
             nonlocal last_x
             for idx in range(len(non_primary)):
@@ -576,21 +639,26 @@ def epsilon_constraint(
             result = model.solve(**kwargs)
             wall = time.perf_counter() - t0
             if result.x is None:
-                return None, wall, None, None
+                # #1442: hand the status back. "infeasible" is a proof the
+                # caller may reason from; every other empty status is not.
+                return None, wall, None, None, str(result.status)
             obj_vec = _collect_objectives_at_x(objectives, model, result.x, evaluator)
             # Innermost slack (min-convention): eps_inner - sign*f_inner >= 0.
             i_inner = non_primary[inner_axis]
             slack_inner = float(min_eps_vec[inner_axis] - signs[i_inner] * obj_vec[i_inner])
             last_x = result.x
-            return result, wall, obj_vec, slack_inner
+            return result, wall, obj_vec, slack_inner, str(result.status)
 
-        def _record(result, wall, obj_vec, min_eps_vec):
-            params_record = {
+        def _eps_record(min_eps_vec):
+            return {
                 "epsilon": {
                     f"f{i + 1}": float(signs[i] * min_eps_vec[idx])
                     for idx, i in enumerate(non_primary)
                 }
             }
+
+        def _record(result, wall, obj_vec, min_eps_vec):
+            params_record = _eps_record(min_eps_vec)
             points.append(
                 ParetoPoint(
                     x={kk: np.asarray(v).copy() for kk, v in result.x.items()},
@@ -619,11 +687,20 @@ def epsilon_constraint(
                     min_eps_vec[a] = float(min_grids[a][gi])
                 min_eps_vec[inner_axis] = float(inner_grid[inner_pos])
 
-                result, wall, obj_vec, slack_inner = _run_solve(min_eps_vec)
+                result, wall, obj_vec, slack_inner, status = _run_solve(min_eps_vec)
                 if result is None:
-                    # Infeasible: tightening the innermost ε further stays
-                    # infeasible, so abandon the rest of this inner sweep.
-                    break
+                    if status == "infeasible":
+                        # PROVEN infeasible: tightening the innermost ε further
+                        # stays infeasible, so abandon the rest of this sweep.
+                        break
+                    # #1442: anything else (error / time_limit / node_limit /
+                    # iteration_limit, or an incumbent the solver declined to
+                    # certify) proves nothing about the tighter cells that
+                    # follow. Record the hole and carry on; treating it as a
+                    # proof silently dropped every remaining Pareto point.
+                    health.record(_eps_record(min_eps_vec), status)
+                    inner_pos += 1
+                    continue
                 _record(result, wall, obj_vec, min_eps_vec)
 
                 if use_bypass and inner_step > 0 and slack_inner is not None:
@@ -639,13 +716,16 @@ def epsilon_constraint(
         # vars and parameters (and any rows other code appended) in place.
         _remove_tracked(model, tracked_cons)
 
+    base = "augmecon2" if augmented else "epsilon_constraint"
+    health.warn(base)
     front = ParetoFront(
         points=points,
-        method=_tag("augmecon2" if augmented else "epsilon_constraint", budget),
+        method=_tag(base, budget, health),
         objective_names=names,
         senses=senses_list,
         ideal=ideal_arr,
         nadir=nadir_arr,
+        incomplete_cells=health.cells,
     )
     return front.filtered() if filter else front
 
@@ -737,6 +817,7 @@ def weighted_tchebycheff(
             if weights.ndim == 1:
                 weights = weights[None, :]
         _warn_large_grid(len(weights), "weighted_tchebycheff")
+        health = _SweepHealth()
 
         # Pre-normalize (f_i - ideal_i) / span_i in min-convention.
         signs = np.array([1.0 if s == "min" else -1.0 for s in senses_list], dtype=np.float64)
@@ -794,6 +875,9 @@ def weighted_tchebycheff(
             wall = time.perf_counter() - t0
 
             if result.x is None:
+                # #1442: only a proven infeasibility is an expected empty cell.
+                if result.status != "infeasible":
+                    health.record({"weights": w_normed.tolist()}, result.status)
                 continue
             obj_vec = _collect_objectives_at_x(objectives, model, result.x, evaluator)
             points.append(
@@ -810,12 +894,14 @@ def weighted_tchebycheff(
         model._objective = saved_obj
         _remove_tracked(model, tracked_cons)
 
+    health.warn("weighted_tchebycheff")
     front = ParetoFront(
         points=points,
-        method=_tag("weighted_tchebycheff", budget),
+        method=_tag("weighted_tchebycheff", budget, health),
         objective_names=names,
         senses=senses_list,
         ideal=ideal_arr,
         nadir=nadir_arr,
+        incomplete_cells=health.cells,
     )
     return front.filtered() if filter else front

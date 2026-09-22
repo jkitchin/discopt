@@ -21,6 +21,7 @@ from discopt.mo.scalarization import (
     _default_names,
     _remove_tracked,
     _simplex_lattice,
+    _SweepHealth,
     _tag,
     _TimeBudget,
     _unique_name,
@@ -122,6 +123,7 @@ def normal_boundary_intersection(
     tracked_cons: list = []
     budget = _TimeBudget(total_time_limit)
     _warn_large_grid(n_points ** (k - 1), "normal_boundary_intersection")
+    health = _SweepHealth()
     # Compile each objective once and reuse across the nadir estimate, the
     # payoff matrix, and every accepted point (MO5). Aux t/b parameters are
     # appended later; objectives do not reference them, so this stays valid.
@@ -205,6 +207,10 @@ def normal_boundary_intersection(
             wall = time.perf_counter() - t0
 
             if result.x is None:
+                # #1442: only a proven infeasibility is an expected empty cell;
+                # anything else leaves a hole the caller must be able to see.
+                if result.status != "infeasible":
+                    health.record({"w_chim": w_normed.tolist()}, result.status)
                 continue
             obj_vec = _collect_objectives_at_x(objectives, model, result.x, evaluator)
             points.append(
@@ -221,13 +227,15 @@ def normal_boundary_intersection(
         model._objective = saved_obj
         _remove_tracked(model, tracked_cons)
 
+    health.warn("nbi")
     front = ParetoFront(
         points=points,
-        method=_tag("nbi", budget),
+        method=_tag("nbi", budget, health),
         objective_names=names,
         senses=senses_list,
         ideal=ideal_arr,
         nadir=nadir_arr,
+        incomplete_cells=health.cells,
     )
     return front.filtered() if filter else front
 
@@ -276,6 +284,7 @@ def normalized_normal_constraint(
     tracked_cons: list = []
     budget = _TimeBudget(total_time_limit)
     _warn_large_grid(n_points ** (k - 1), "normalized_normal_constraint")
+    health = _SweepHealth()
     # Compile each objective once and reuse across the nadir estimate, the
     # payoff matrix, and every accepted point (MO5). Aux xp parameters are
     # appended later; objectives do not reference them, so this stays valid.
@@ -359,6 +368,10 @@ def normalized_normal_constraint(
             wall = time.perf_counter() - t0
 
             if result.x is None:
+                # #1442: only a proven infeasibility is an expected empty cell;
+                # anything else leaves a hole the caller must be able to see.
+                if result.status != "infeasible":
+                    health.record({"w_chim": w_normed.tolist()}, result.status)
                 continue
             obj_vec = _collect_objectives_at_x(objectives, model, result.x, evaluator)
             points.append(
@@ -375,12 +388,14 @@ def normalized_normal_constraint(
         model._objective = saved_obj
         _remove_tracked(model, tracked_cons)
 
+    health.warn("nnc")
     front = ParetoFront(
         points=points,
-        method=_tag("nnc", budget),
+        method=_tag("nnc", budget, health),
         objective_names=names,
         senses=senses_list,
         ideal=ideal_arr,
         nadir=nadir_arr,
+        incomplete_cells=health.cells,
     )
     return front.filtered() if filter else front

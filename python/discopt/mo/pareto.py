@@ -128,6 +128,14 @@ class ParetoFront:
     nadir : numpy.ndarray or None
         Per-objective worst values on the Pareto set (payoff-table estimate).
         ``None`` if not computed.
+    incomplete_cells : list[tuple[dict, str]]
+        Sweep cells that produced no point for a reason that is **not** a proof
+        of infeasibility (#1442) — ``error``, ``time_limit``, ``node_limit``,
+        ``iteration_limit``, or an incumbent the solver declined to certify.
+        Each entry is ``(scalarization_params, status)``. Non-empty means the
+        front may be missing Pareto points: a cell that did not answer is not a
+        cell with no answer. Empty is the normal case. Cells the solver *proved*
+        infeasible are not recorded here — they genuinely contribute no point.
     """
 
     points: list[ParetoPoint]
@@ -136,6 +144,17 @@ class ParetoFront:
     senses: list[str]
     ideal: Optional[np.ndarray] = None
     nadir: Optional[np.ndarray] = None
+    incomplete_cells: list[tuple[dict, str]] = field(default_factory=list)
+
+    @property
+    def incomplete(self) -> bool:
+        """True when at least one sweep cell failed inconclusively (#1442).
+
+        A ``True`` here means the front is a lower bound on the Pareto set:
+        points may be missing. Completeness claims (AUGMECON2's, in particular)
+        hold only when this is ``False``.
+        """
+        return bool(self.incomplete_cells)
 
     # ── Accessors ──
 
@@ -190,6 +209,7 @@ class ParetoFront:
                 senses=list(self.senses),
                 ideal=self.ideal,
                 nadir=self.nadir,
+                incomplete_cells=list(self.incomplete_cells),
             )
         # Collapse tolerance-equal duplicate objective vectors, keeping the
         # first occurrence (and its scalarization_params). This is done before
@@ -217,6 +237,7 @@ class ParetoFront:
             senses=list(self.senses),
             ideal=self.ideal,
             nadir=self.nadir,
+            incomplete_cells=list(self.incomplete_cells),
         )
 
     # ── Indicators ──
