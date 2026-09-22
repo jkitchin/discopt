@@ -158,6 +158,20 @@ class BoxRobustFormulation:
                 nominal = unc.parameter.value
                 delta = unc.delta
 
+                # #1437: a parameter that does not OCCUR in this expression
+                # contributes no uncertainty to it, so there is nothing to
+                # robustify. Without this the finite difference below is taken
+                # between two copies of the same expression -- identically zero,
+                # but still syntactically variable-bearing, so
+                # ``_contains_variable`` said True and the bilinear branch ran:
+                # it added an aux variable, two degenerate rows
+                # (``(e - e) - t <= 0``, i.e. ``t >= 0`` and nothing else) and a
+                # penalty term to an expression that needed none. Measured, this
+                # is what put a ``Constant((2,)) * ro_abs1`` into the objective of
+                # a model whose uncertain parameter appeared only in a CONSTRAINT.
+                if not _contains_uncertain_param(expr, {pname}):
+                    continue
+
                 # Compute coefficient of p_k by substituting all params to nominal
                 # except p_k, then evaluating at p_k = p_bar and p_k = p_bar + 1.
                 expr_at_nom = expr
@@ -193,41 +207,87 @@ class BoxRobustFormulation:
                     wc_penalty = BinaryOp("-", wc_expr, base)
                     result = BinaryOp("+", result, wc_penalty)
                 else:
-                    # Bilinear: absolute-value linearization.
+                    # Bilinear: absolute-value linearization, ONE AUX PER
+                    # COMPONENT (#1437).
+                    #
+                    # The box counterpart of ``sum_j coeff_j(x) * xi_j`` over
+                    # ``|xi_j| <= delta_j`` is ``sum_j delta_j * |coeff_j(x)|``.
+                    # That is a per-component statement: component j's worst case
+                    # is reached at ``xi_j = +-delta_j`` independently of the
+                    # others. Before this, ONE scalar ``t`` was created for the
+                    # whole parameter and multiplied by the whole ``delta``
+                    # vector, which
+                    #   (a) lumped every component into a single aggregate
+                    #       coefficient (the finite difference perturbs EVERY
+                    #       component by 1 at once, giving ``sum_j coeff_j``), and
+                    #   (b) produced a shape-``(k,)`` term -- ``Constant(delta) *
+                    #       t`` with scalar ``t`` -- inside a scalar row or
+                    #       objective, which the LP route rejects with
+                    #       ``jax.grad ... Output had shape: (2,)`` and POUNCE
+                    #       with ``cannot reshape array of shape (2,) into (1,)``.
+                    # A scalar parameter has k = 1, so that case is unchanged.
+                    nominal_arr = np.atleast_1d(np.asarray(nominal, dtype=float))
+                    delta_arr = np.atleast_1d(np.asarray(delta, dtype=float))
+                    if delta_arr.size == 1 and nominal_arr.size > 1:
+                        delta_arr = np.full(nominal_arr.shape, float(delta_arr.flat[0]))
+                    is_scalar_param = np.ndim(nominal) == 0
                     t_ub = _estimate_coeff_bound(m)
-                    t_var = m.continuous(
-                        f"{self._prefix}_abs{aux_idx}",
-                        lb=0,
-                        ub=t_ub,
-                    )
-                    aux_idx += 1
 
-                    # |coeff| <= t:  coeff - t <= 0  and  -coeff - t <= 0
-                    new_constraints.append(
-                        Constraint(
-                            body=BinaryOp("-", coeff_expr, t_var),
-                            sense="<=",
-                            rhs=0.0,
-                            name=f"{self._prefix}_abs_pos{aux_idx - 1}",
-                        )
-                    )
-                    new_constraints.append(
-                        Constraint(
-                            body=BinaryOp(
-                                "-", BinaryOp("*", Constant(np.array(-1.0)), coeff_expr), t_var
-                            ),
-                            sense="<=",
-                            rhs=0.0,
-                            name=f"{self._prefix}_abs_neg{aux_idx - 1}",
-                        )
-                    )
+                    for j in range(nominal_arr.size):
+                        if float(delta_arr.flat[j]) == 0.0:
+                            # A component with no uncertainty contributes no
+                            # penalty; emitting one would add an aux variable and
+                            # two rows that can only ever be slack.
+                            continue
+                        # coeff_j = g(p_bar + e_j) - g(p_bar): the finite
+                        # difference in component j ALONE, which is the
+                        # coefficient multiplying xi_j.
+                        if is_scalar_param:
+                            bumped = Constant(np.asarray(nominal, dtype=float) + 1.0)
+                        else:
+                            step = np.zeros_like(nominal_arr)
+                            step.flat[j] = 1.0
+                            bumped = Constant((nominal_arr + step).reshape(np.shape(nominal)))
+                        unit_j = substitute_param(expr_at_nom, pname, bumped)
+                        coeff_j = BinaryOp("-", unit_j, base)
 
-                    # Penalty: delta * t
-                    penalty = BinaryOp("*", Constant(delta), t_var)
-                    if maximize:
-                        result = BinaryOp("+", result, penalty)
-                    else:
-                        result = BinaryOp("-", result, penalty)
+                        t_var = m.continuous(
+                            f"{self._prefix}_abs{aux_idx}",
+                            lb=0,
+                            ub=t_ub,
+                        )
+                        aux_idx += 1
+
+                        # |coeff_j| <= t_j:  coeff_j - t_j <= 0  and  -coeff_j - t_j <= 0
+                        new_constraints.append(
+                            Constraint(
+                                body=BinaryOp("-", coeff_j, t_var),
+                                sense="<=",
+                                rhs=0.0,
+                                name=f"{self._prefix}_abs_pos{aux_idx - 1}",
+                            )
+                        )
+                        new_constraints.append(
+                            Constraint(
+                                body=BinaryOp(
+                                    "-",
+                                    BinaryOp("*", Constant(np.array(-1.0)), coeff_j),
+                                    t_var,
+                                ),
+                                sense="<=",
+                                rhs=0.0,
+                                name=f"{self._prefix}_abs_neg{aux_idx - 1}",
+                            )
+                        )
+
+                        # Penalty: delta_j * t_j -- a SCALAR coefficient times a
+                        # scalar aux, so the result keeps the host expression's
+                        # shape.
+                        penalty = BinaryOp("*", Constant(np.array(float(delta_arr.flat[j]))), t_var)
+                        if maximize:
+                            result = BinaryOp("+", result, penalty)
+                        else:
+                            result = BinaryOp("-", result, penalty)
 
             return result, new_constraints
 
