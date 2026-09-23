@@ -777,3 +777,58 @@ pump's gate rejects `gasnet`'s own shipped incumbent. That is a plausible primal
 weakness in exactly the direction §6.7 and #1435 care about, but changing a
 heuristic's feasibility tolerance is solver math and needs its own §5
 graduation panel, not a footnote in someone else's. Tracked as #1449.
+
+### 6.8c The capped external panel, re-run under the correct verifier
+
+120 instances, `tl=20 s`, same 2 harness timeouts (`johnall`, `saa_2`), 118
+compared, incumbents verified with `verify_point` per §6.8b.
+
+**Gate 1 (cert-clean): PASS, cleanly.** 0 bounds above a reference optimum, 0
+certification regressions, **0 unverified incumbents**. `gasnet` verifies
+`True`, same incumbent, arms still bit-identical — confirming §6.8b's diagnosis
+on the exact row that raised the flag. This is the first Gate 1 result in this
+document that actually checked variable bounds and integrality.
+
+**Gate 2 (net-positive): 1 found, 1 lost.** The gain is
+`kan_peaks_h1_n2_g24` again; the loss is `oil2`, which the previous two panels
+did not show.
+
+`oil2` was chased rather than explained away, and it is a **wall-boundary flip,
+not a repair failure**:
+
+| budget | OFF found | ON found |
+|---|---|---|
+| `tl=20 s`, interleaved, 6 reps | 6/6 | 5/6 |
+| `tl=40 s`, interleaved, 4 reps | **4/4** | **4/4** |
+
+Pooled with the three panel runs: OFF 9/9, ON 7/9 at `tl=20`; at `tl=40` the two
+arms are indistinguishable and their objectives agree to 1e-9. `oil2`'s OFF arm
+— *identical code in every run* — reported 3, 7 and 13 nodes across the three
+panels, always finishing at the 20 s wall. The mechanism is the one the cap
+bounds rather than removes: a ~0.2 s repair attempt on an instance whose
+incumbent lands within ~0.2 s of the limit can cost it.
+
+**The instrument limitation this exposes, which matters beyond #1435.**
+**86 of the 118 compared instances (73 %) run to the wall.** Their incumbent
+discovery is therefore timing-dependent, and *both* of Gate 2's signals —
+`kan_peaks_h1_n2_g24` and `oil2` — are in that group. A single-run Gate 2 over
+this panel cannot resolve an effect of ±1 instance, because ±1 is its noise
+floor. The two signals are not equally solid, and only repetition shows it:
+
+* `kan_peaks_h1_n2_g24` — OFF has **never** found an incumbent (0 of 4
+  observations); ON found one in both capped panels and in the clean-tree
+  re-check, bit-identically. A robust conversion.
+* `oil2` — ON finds it ~78 % of the time, OFF ~100 %. A probabilistic loss.
+
+So the honest reading of #1435 is **sound, with a robust but small primal gain
+and a small timing-dependent cost**, not the unqualified "1 found, 0 lost" §6.8a
+reported. The change stays because Gate 1 is clean and the gain reproduces while
+the loss does not, but the Gate 2 margin is one instance wide and should not be
+quoted as though it were more.
+
+**Binding for future §5 graduation panels on this corpus:** a wall-limited A/B
+where most instances hit the limit has a ±1-instance resolution, and a one-shot
+run cannot distinguish a real conversion from a timing flip. Repeat the
+instances that move, in both arms, before believing either direction — or budget
+by work (node limit) rather than wall. Neither of the two signals here would
+have been interpretable without the repetitions above.
