@@ -512,3 +512,212 @@ operations rather than seconds, so its cost is knowable in advance instead of
 estimated at a 2.0 s default that is 3x wrong, and so the same work is done on
 every machine. It is the one lever left that changes the cost/value ratio rather
 than sliding along it.
+
+### 6.8 #1435 — the pump's projection was the wrong projection (fix landed)
+
+§6.7 left exactly one direction: make the pump **cheaper for the same value**
+rather than smaller. #1435 is that lever, found by following the one remaining
+question §6.7 does not answer — *why does the pump so often return nothing?*
+
+**The mechanism, measured to the call.** The fix-and-solve round pins the
+integers and then minimizes the **model objective** over the continuous
+variables, and tests **only that solve's terminal iterate** for constraint
+feasibility. Feasibility is incidental to what that solve optimizes, so whether
+the pump returns anything is decided by where the solve happened to *stop* —
+which `_deadline_wall_cap` derives from the caller's remaining wall. Measured on
+`heatexch_gen2`'s second (NLP-seeded) root pump at `time_limit=60`, sweeping the
+per-solve cap over the same subproblem:
+
+| `max_wall_time` | 0.05 s | 0.1 s | 0.2 s | 0.5 s | 1.0 s | 3.0 s |
+|---|---|---|---|---|---|---|
+| terminal iterate constraint-feasible | — | **yes** | — | — | — | — |
+
+and equivalently on the deterministic axis, `max_iter` ∈ {10, 25, 50, 75, **100**,
+150, 300} is feasible at **100** alone. A feasible point is *on the projection
+path* and is discarded because only the endpoint is checked. That is a primal
+heuristic whose **outcome** is a function of `time_limit`, which is #1153's gate
+directly — and it explains the same family §6.7 names, not one instance.
+
+**A fixed probe iteration count is not the fix** (CLAUDE.md §2): feasibility at
+exactly 100 and not at 75, 150 or 300 is a knife-edge tuned to this instance.
+
+**Falsified on the way (CLAUDE.md §4, §11).** The first hypothesis was that the
+round-2 projection's `ITERATION_LIMIT` iterate was a feasible point being
+discarded unchecked, since `_PUMP_ACCEPT_STATUSES` contained `TIME_LIMIT` but not
+`ITERATION_LIMIT` — making the accept set itself budget-dependent. Kill criterion
+stated in advance: *if admitting it still returns no incumbent at `time_limit=10`,
+the hypothesis dies.* It was implemented and measured: **no incumbent, 3 of 3**,
+pump wall unchanged (1.935 s vs 1.910 s). The iterate is genuinely infeasible.
+The widening was **reverted**; the comment above `_PUMP_ACCEPT_STATUSES` now
+records why it is not there.
+
+**The fix.** `_repair_to_feasible` in `_relax/primal_heuristics.py` adds a
+*second* candidate per pump round, from the same pinned subproblem: a min-norm
+elastic normal step (`pounce.project_to_feasible`), i.e. the projection a
+feasibility pump is supposed to take (Fischetti–Glover–Lodi; Bonami et al. for
+the MINLP form) — minimize distance to the rounding subject to the constraints,
+not the original objective. It reads **no clock**; its cost is a bounded number
+of sparse QPs, so it is the #912 shape §6.7 asks for. It runs **only** when the
+objective solve produced no verified point, so nothing the pump finds today is
+displaced, and every candidate still passes the same independent
+`_is_integer_feasible` + `_check_constraint_feasibility` gate, so soundness is
+untouched.
+
+Measured on `heatexch_gen2`'s pump #2, per round: the objective solve is
+infeasible on all 5 rounds at ~0.45 s each; the repair is **feasible on 4 of 5**
+at ~0.20 s each. pounce's default of 3 outer re-linearizations is not enough
+(0 of 5) — the feasible set is curved enough that a tangent step lands outside
+it — so the cap is 10, with `tol` set to the verifier's own 1e-6 so it is a work
+*cap* rather than a target.
+
+**Instance gate, 3 reps interleaved, load-gated:**
+
+| rung | before (`df2bc458`) | after |
+|---|---|---|
+| 5 s | none, 3/3 | none, 3/3 |
+| 10 s | none, 3/3 | **834176.34**, 3/3 |
+| 20 s | none, 3/3, 31 nodes, bound 555767.79 | **834176.34**, 3/3, **63 nodes**, bound **558540.17** |
+
+The incumbent is independently feasibility-verified, and sits above the
+reference optimum 635838.85 as a feasible suboptimal point should; the dual
+bound stays below the reference dual 583986.91. Note the baseline finds nothing
+at *any* rung here — the earlier "2 of 3 at 5 s" reading in probe 1 was
+probe-perturbed timing on a bimodal instance, and is retracted (CLAUDE.md §11).
+The node count rising 31 → 63 at 20 s is the incumbent finally pruning: the
+pump did not get smaller, it got *useful*, which is the distinction §6.7 turns on.
+
+`DISCOPT_PUMP_REPAIR=0` opts out. It is an opt-*out* for a shipped default in
+CLAUDE.md §5's "Out of scope" sense — it exists so the default can be A/B'd,
+which is how the corpus panel below was run in a single tree — not a graduation
+gate, and it takes no row in the flag-retirement audit.
+
+#### 6.8a The corpus panel, the cost it found, and the cap
+
+The instance gate above is a *probe*, not the case for the change (CLAUDE.md §2).
+The case is the corpus panel, and the first one **failed its second bar**.
+
+**Uncapped, 118 MINLPLib-snapshot instances at `tl=20 s`, ON vs OFF, interleaved
+within each instance** (120 drawn by `random.Random(1435)` from the `MB*`/`MI*`
+nonlinear probtypes, excluding the 66 vendored; `johnall` and `saa_2` timed out
+of the harness):
+
+- **Bar 1 (cert-clean): PASS.** 0 bounds above a `minlplib.solu` reference
+  optimum, 0 certification regressions, every ON incumbent independently
+  feasibility-verified.
+- **Bar 2 (net-positive): FAIL.** 0 incumbents gained, 0 lost, 0 improved, 0
+  worsened — 118 unchanged — and node throughput **moved on 30 instances, 28 of
+  them down, median −8.5 %**. Sorted worst first: `multiplants_stg1a` −76.2 %
+  (63 → 15 nodes), `autocorr_bern45-45` / `sfacloc2_2_80` / `waterful2` −57.1 %,
+  `autocorr_bern25-19` −51.6 %, … `sfacloc1_3_90` −25 %, `o9_ar4_1` −17 %.
+  (An earlier draft of this section quoted `sfacloc1_3_90`'s −25 % as the *worst*
+  case; it is not, it was simply the first one I looked at. Corrected per
+  CLAUDE.md §11 — the true worst is three times larger, which strengthens rather
+  than weakens the case for the cap.)
+
+That is §5's *sound but not helpful* verdict, and on its own it kills the change
+as written. The mechanism is plain: the repair is cheap when it **succeeds**
+(the pump returns that round), and the panel is dominated by the other case — a
+rounding that cannot be repaired, where an uncapped repair pays ~0.2 s on every
+one of the pump's five rounds, twice per root, and returns nothing.
+
+**The reshape.** Hypothesis: the cost is repeated *failed* repairs, and one
+attempt per pump keeps the entire gain, because a rounding whose repair succeeds
+succeeds on the **first** round. Kill criterion stated in advance: *if
+`heatexch_gen2` loses its incumbent, or the worst node-losers do not recover,
+the whole change is reverted.* Entry experiment, both halves:
+
+| instance | uncapped | capped (`_PUMP_REPAIR_ATTEMPTS = 1`) |
+|---|---|---|
+| `sfacloc1_3_90` | −25 % | **0 %** (223 → 223 nodes) |
+| `autocorr_bern25-06` | −10 % | **0 %** (36287 → 36297) |
+| `fo9`, `no7_ar2_1` | moved | **0 %** |
+| `o9_ar4_1` | −17 % | −5.6 % |
+| `o7_ar3_1` | −14 % | −4.8 % |
+| `heatexch_gen2` | 834176.34 | **834176.34**, 63 nodes, 2/2 |
+
+**Capped panel, 66 vendored instances at `tl=20 s`:** bar 1 clean, bar 2
+**1 incumbent gained, 0 lost, 0 worsened, node count 4 up / 0 down**.
+
+One row flagged and is **not** a regression: `tls2` showed OFF certifying
+`optimal` in 14.34 s / 153 nodes in this run while the uncapped run had OFF
+*and* ON both at `feasible` / 205 nodes. Three of those four cells are
+bit-identical; the cell that moved is **OFF**, which runs the same code in both
+runs (with the repair disabled no candidate can come from it). `tls2`'s
+completion time sits right on the 20 s limit, so it certifies on a lucky draw —
+the same bimodality this document warns about throughout. The ON arm has never
+been the cell that varies.
+
+**The honest rate.** The repair can only help an instance that finds no
+incumbent at all. That population is **67** across both capped panels (57
+external + 10 vendored), and the repair converts **2** of them
+(`heatexch_gen2` vendored, `kan_peaks_h1_n2_g24` external). It is adopted
+because it is sound, never loses a point, and — capped — costs nothing
+measurable, not because it is broadly transformative. Anyone revisiting this
+should read it as "a free strict improvement with a low hit rate on this
+corpus", which is a different claim from the one §6.8's instance table alone
+would support.
+
+**A measurement failure worth recording (CLAUDE.md §8).** The first capped
+external panel produced 114 of 120 children failing with `AssertionError: tree
+predates the #1435 repair` — because the working tree was switched to `main`
+mid-run for unrelated work, and the panel's children import `discopt` from that
+tree. The §8 marker assertion is the only reason this was caught: without it the
+run would have compared `main` against `main`, returned a flawless null result
+(0 gained, 0 lost, 0 node change), and read as the cleanest possible pass.
+**Do not run `git checkout` in a tree a panel is measuring**, and keep the
+version-marker assertion in every panel child.
+
+**The capped external panel — the measurement the cap exists to satisfy.**
+120 instances at `tl=20 s`, 2 harness timeouts (`johnall`, `saa_2`, both timing
+out in the uncapped run too), 118 compared.
+
+*Bar 2 (net-positive):* **1 incumbent found where none existed
+(`kan_peaks_h1_n2_g24`), 0 lost, 0 worsened, 117 unchanged; node count 12 up /
+15 down.* The cost the cap was built to remove is gone: the uncapped run moved
+30 instances, 28 of them **down**, median **−8.5 %**, worst **−76.2 %**
+(`multiplants_stg1a`, 63 → 15). Capped, 26 move, only **15** down, median of
+the moved **−2.1 %**, worst **−57.1 %** (`var_con5`, 7 → 3 — a 4-node
+difference on a tiny instance, which is what a percentage does to small
+denominators). Over all 118 compared instances the median node change is
+**0.0 %** in both runs; what changed is the tail.
+
+*Bar 1 (cert-clean):* 0 bounds above the reference optimum, 0 certification
+regressions, 0 lost incumbents. One row flags: `gasnet`'s ON incumbent fails
+independent feasibility verification — but **so does its OFF incumbent**, and
+the two arms are bit-identical (obj `6999381.553035677`, bound
+`864103.864320254`, 3 nodes, `feasible`). Its objective matches the `.solu`
+reference to ~1.3e-9 relative; this is a tolerance artifact in the panel's
+verifier at 1e7 magnitude, present with the repair disabled, and therefore not
+something this change caused. It is noted rather than fixed here.
+
+`kan_peaks_h1_n2_g24` was checked against the false-primal failure mode before
+being counted: sense is **minimize** and the oracle is `=opt= -5.1956649970`, so
+an incumbent of `0.3344124554665887` is a legal feasible-suboptimal point, and
+the bound `-5.195664996854543` sits below it — the certificate invariant holds.
+Had the instance been a maximization this row would have been a false primal and
+the change dead.
+
+**A second measurement failure, and the re-check it forced (CLAUDE.md §8, §9).**
+While that panel was running, a mutation test briefly wrote a sabotaged
+`primal_heuristics.py` into the same tree the panel's children import from —
+with the constraint check removed from the accept path. Progress at the time was
+44/120. **The §8 marker assertion would not have caught this**: the sabotage left
+`_repair_to_feasible` present, so every child would have imported it happily and
+the panel would have reported whatever the sabotaged code produced. The failure
+mode it could produce is precisely an ON incumbent that never passed the
+feasibility gate — i.e. a fabricated bar-2 gain.
+
+Instances 34–52 (a band wider than the ~39–44 the timing implies, and containing
+both flagged rows) were therefore re-run in both arms in a verified-clean tree
+and diffed field-by-field against the recorded panel: 254 field comparisons.
+`kan_peaks_h1_n2_g24` and `gasnet` reproduce **bit-for-bit in all four cells**,
+and **no incumbent appears or disappears anywhere in the band** — the only
+signature the sabotage could have left. The 12 differing fields are bounds (and
+one 15th-digit objective) on instances whose node counts also drifted, symmetric
+across arms: ordinary wall-limit nondeterminism on a 20 s budget. The panel
+stands.
+
+The lesson generalizes past the §8 one above: **do not mutate *or* switch a tree
+a panel is measuring** — run mutation tests in a separate worktree, or after the
+panel. A version marker defends against the wrong *version*; nothing in the
+child defends against the right version being edited underneath it.

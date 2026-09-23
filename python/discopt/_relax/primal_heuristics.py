@@ -277,6 +277,15 @@ def _is_nlp_feasible(result: NLPResult) -> bool:
 # turns Ipopt −5 ``Maximum_WallTime_Exceeded`` into exactly this status, so this
 # is the status a clamped solve actually returns (verified, not assumed).
 #
+# ITERATION_LIMIT is deliberately NOT in the set, and #1435 measured why adding
+# it is not the fix it looks like: that hypothesis was that the round-2
+# projection's ITERATION_LIMIT iterate on ``heatexch_gen2`` was a feasible point
+# being discarded unchecked. Admitting it (3 reps, ``time_limit=10``) left the
+# instance with no incumbent 3/3 — the iterate is genuinely infeasible, so the
+# widening buys a ``_check_constraint_feasibility`` call and nothing else. The
+# real mechanism was that the objective projection is the wrong projection; see
+# ``_repair_to_feasible``.
+#
 # Trusting a non-converged point here is sound ONLY because the pump re-verifies
 # it independently of the status immediately below — ``_is_integer_feasible``
 # after snapping the pinned integers, then ``_check_constraint_feasibility`` on
@@ -439,6 +448,7 @@ def feasibility_pump(
         backend = get_nlp_solver("auto")
 
     rng = np.random.default_rng(42)
+    repairs_left = _PUMP_REPAIR_ATTEMPTS
 
     for round_idx in range(max_rounds):
         # Always run the first round (a feasible incumbent is the primary goal,
@@ -494,26 +504,185 @@ def feasibility_pump(
                 # is not a subclass of Exception; treat any failure as this round
                 # producing no point and perturb on the next round.
                 logger.debug("fix-and-solve NLP round failed: %s: %s", type(exc).__name__, exc)
-                continue
+                nlp_result = None
 
-        if nlp_result.status not in _PUMP_ACCEPT_STATUSES or nlp_result.x is None:
-            continue
+            x_cand = None
+            if (
+                nlp_result is not None
+                and nlp_result.status in _PUMP_ACCEPT_STATUSES
+                and nlp_result.x is not None
+            ):
+                x_cand = _verified_pump_point(evaluator, nlp_result.x, int_mask)
 
-        x_cand = np.asarray(nlp_result.x).copy()
-        # Snap any tiny drift on the pinned integers, then require BOTH integer
-        # and constraint feasibility. Checking constraints here (not just
-        # integrality, which is trivially satisfied once integers are pinned) is
-        # what makes the perturbation loop useful: an infeasible rounding is
-        # rejected and the next round tries a perturbed neighbour instead of
-        # returning a point the caller will only discard.
-        x_cand[int_mask] = np.round(x_cand[int_mask])
-        if not _is_integer_feasible(x_cand, int_mask):
-            continue
-        if not _check_constraint_feasibility(evaluator, x_cand):
-            continue
-        return x_cand
+            if x_cand is None and repairs_left > 0:
+                # #1435: second candidate from the SAME pinned subproblem, a
+                # min-norm feasibility repair rather than an objective solve.
+                # Runs only when the objective projection produced nothing, so
+                # no point this pump finds today is displaced or lost — the
+                # repair can only add a round that would otherwise have failed.
+                repairs_left -= 1
+                x_rep = _repair_to_feasible(evaluator, x0, deadline)
+                if x_rep is not None:
+                    x_cand = _verified_pump_point(evaluator, x_rep, int_mask)
+
+        if x_cand is not None:
+            return x_cand
 
     return None
+
+
+def _verified_pump_point(
+    evaluator: NLPEvaluator,
+    x: np.ndarray,
+    int_mask: np.ndarray,
+) -> Optional[np.ndarray]:
+    """A pump candidate, or ``None`` — snap the pinned integers, then verify.
+
+    Checking constraints here (not just integrality, which is trivially satisfied
+    once the integers are pinned) is what makes the perturbation loop useful: an
+    infeasible rounding is rejected and the next round tries a perturbed
+    neighbour instead of returning a point the caller will only discard.
+
+    This is the pump's whole feasibility evidence, and it is deliberately
+    independent of how the candidate was produced — see ``_PUMP_ACCEPT_STATUSES``
+    on why a solver status is a hint about convergence and never the evidence.
+    """
+    x_cand = np.asarray(x, dtype=float).copy()
+    x_cand[int_mask] = np.round(x_cand[int_mask])
+    if not _is_integer_feasible(x_cand, int_mask):
+        return None
+    if not _check_constraint_feasibility(evaluator, x_cand):
+        return None
+    return x_cand
+
+
+#: Repair attempts allowed per :func:`feasibility_pump` call (#1435). The repair
+#: is cheap when it succeeds and the pump returns immediately, so this bounds the
+#: case that actually costs: a model whose rounding *cannot* be repaired, where
+#: an uncapped repair pays ~0.2 s on every one of the five rounds and returns
+#: nothing. Measured over a 118-instance MINLPLib panel, uncapped cost a median
+#: **-8.5 %** node throughput on the 30 instances it moved -- 28 of those 30 moved
+#: DOWN, worst **-76.2 %** (``multiplants_stg1a``, 63 nodes -> 15) -- for zero
+#: primal gain outside the probe instance, CLAUDE.md §2's "benefit confined to a
+#: named instance" verdict. One attempt keeps the gain, because a rounding whose
+#: repair succeeds succeeds on the first round.
+#:
+#: (The worst-case figure was first published as "-25 %", which was wrong: it came
+#: from eyeballing the head of the list rather than computing the distribution.
+#: Retracted and corrected per CLAUDE.md §11.)
+_PUMP_REPAIR_ATTEMPTS = 1
+
+#: Outer re-linearizations allowed to :func:`_repair_to_feasible` (#1435). A
+#: deterministic WORK cap in #912's sense, not a wall budget: the repair stops as
+#: soon as its nonlinear violation is within ``_PUMP_REPAIR_TOL``, so on a model
+#: whose rounding is easy to repair this costs one or two sparse QPs and the cap
+#: never binds. It exists only so a rounding that cannot be repaired at all
+#: cannot spin. pounce's own default is 3, which is a first-tangent-step budget;
+#: measured on ``heatexch_gen2``'s root pump, 3 outer steps leave every round
+#: infeasible and 10 repair 4 of 5 (0.20 s each), because the feasible set there
+#: is curved enough that a tangent step lands outside it.
+_PUMP_REPAIR_OUTER_ITERS = 10
+
+#: Violation tolerance handed to the repair. The same 1e-6 that
+#: :func:`_check_constraint_feasibility` verifies against, so the repair stops
+#: exactly when the point it is producing would pass, rather than at some looser
+#: or tighter criterion of its own.
+_PUMP_REPAIR_TOL = 1e-6
+
+
+def _pump_repair_enabled() -> bool:
+    """Whether the pump's feasibility repair runs (#1435). Default ON.
+
+    An opt-*out* for a shipped default, not a graduation gate — it exists so the
+    default can be A/B'd, which is how the panel in the #1435 PR was run in one
+    tree. See CLAUDE.md §5's "Out of scope" clause.
+    """
+    return os.environ.get("DISCOPT_PUMP_REPAIR", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _repair_to_feasible(
+    evaluator: NLPEvaluator,
+    x0: np.ndarray,
+    deadline: Optional[float] = None,
+) -> Optional[np.ndarray]:
+    """Repair ``x0`` onto the constraints by a min-norm elastic normal step.
+
+    This is the projection a feasibility pump actually wants, and the reason
+    #1435 exists is that the pump was not doing it. The fix-and-solve round
+    above minimizes the MODEL OBJECTIVE with the integers pinned and then tests
+    only that solve's terminal iterate; feasibility is incidental to what it
+    optimizes. Measured on ``heatexch_gen2``'s root pump, that trajectory is
+    constraint-feasible at iteration ~100 and infeasible at 75, 150 and 300 — so
+    whether the pump returned anything was decided by where the solve happened to
+    stop, which ``_deadline_wall_cap`` derives from the caller's remaining wall.
+    That is a primal heuristic whose OUTCOME is a function of ``time_limit``, and
+    it is how a 10 s budget came to return no incumbent where a 5 s budget
+    returned one on 1 run in 3 (#1153's gate; three reps per rung, statuses
+    bit-identical at the large budget).
+
+    ``pounce.project_to_feasible`` minimizes ``½‖x − x0‖²`` subject to a
+    linearization of the rows, elastically relaxed and safeguarded on the TRUE
+    nonlinear violation, so it never returns a point whose violation is worse
+    than ``x0``'s. It reads no clock — its cost is ``max_iter`` sparse QPs — so
+    unlike the objective projection its answer is the same on every machine and
+    at every budget, which is the #912 direction §6.7 of
+    ``docs/dev/budget-monotonicity-1153.md`` names as the one lever left.
+
+    Returns ``None`` — leaving the round to fail exactly as it does today —
+    when ``DISCOPT_PUMP_REPAIR=0``, when pounce is not installed, when the
+    repair raises, or when the caller's deadline has already passed. Soundness
+    is unaffected either way:
+    the returned point is verified by :func:`_verified_pump_point` like any
+    other candidate, and ``inject_incumbent`` enforces strict improvement on top.
+    """
+    if not _pump_repair_enabled():
+        return None
+    if deadline is not None and _now() >= deadline:
+        return None
+    try:
+        import pounce
+
+        from discopt.solvers.nlp_pounce import _infer_constraint_bounds, _IpoptCallbacks
+    except ImportError as exc:
+        logger.debug("feasibility repair unavailable (pounce absent): %s", exc)
+        return None
+
+    lb, ub = evaluator.variable_bounds
+    if evaluator.n_constraints > 0:
+        cl, cu = _infer_constraint_bounds(evaluator)
+    else:
+        cl = np.empty(0, dtype=float)
+        cu = np.empty(0, dtype=float)
+    try:
+        x_rep, report = pounce.project_to_feasible(
+            _IpoptCallbacks(evaluator),
+            np.asarray(x0, dtype=float),
+            lb=np.asarray(lb, dtype=float),
+            ub=np.asarray(ub, dtype=float),
+            cl=np.asarray(cl, dtype=float),
+            cu=np.asarray(cu, dtype=float),
+            tol=_PUMP_REPAIR_TOL,
+            max_iter=_PUMP_REPAIR_OUTER_ITERS,
+            return_report=True,
+        )
+    except BaseException as exc:
+        # Same contract as the fix-and-solve round above: pounce reaches Python
+        # through PyO3 and can raise PanicException, which is not an Exception.
+        logger.debug("feasibility repair failed: %s: %s", type(exc).__name__, exc)
+        return None
+    logger.debug(
+        "feasibility repair: violation %.3g -> %.3g in %s outer iters (%s)",
+        report.violation_initial,
+        report.violation_final,
+        report.iterations,
+        report.termination,
+    )
+    return np.asarray(x_rep, dtype=float)
 
 
 def _check_constraint_feasibility(

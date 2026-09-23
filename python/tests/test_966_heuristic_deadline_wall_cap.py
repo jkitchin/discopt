@@ -183,10 +183,22 @@ def test_time_limited_but_feasible_point_is_accepted():
     np.testing.assert_allclose(out, feasible)
 
 
-def test_time_limited_but_INFEASIBLE_point_is_still_rejected():
+@pytest.mark.parametrize("repair", ["0", "1"])
+def test_time_limited_but_INFEASIBLE_point_is_still_rejected(monkeypatch, repair):
     """SOUNDNESS PIN. Accepting TIME_LIMIT relocates a status hint; it must never
     relax the feasibility evidence. This point violates ``x + y0 + y1 + y2 >= 1``
-    (all-zero), and the constraint check — not the status — must reject it."""
+    (all-zero), and the constraint check — not the status — must reject it.
+
+    Parametrized over ``DISCOPT_PUMP_REPAIR`` by #1435, which gave the pump a
+    SECOND candidate source (a min-norm feasibility repair of the same rounding).
+    With the repair OFF this is the original pin, unchanged and still exact: the
+    pump has one candidate, it is infeasible, and nothing comes back. With the
+    repair ON the pump can return a point — but it must be a point the repair
+    *found*, never the backend's, and it must clear the same independent
+    constraint check. That arm is strictly stronger than ``out is None``, which
+    would pass just as well if the pump had silently stopped producing anything.
+    """
+    monkeypatch.setenv("DISCOPT_PUMP_REPAIR", repair)
     m = _small_minlp()
     ev = cached_evaluator(m)
     infeasible = np.zeros(4)
@@ -201,7 +213,17 @@ def test_time_limited_but_INFEASIBLE_point_is_still_rejected():
     )
 
     assert captured, "pump never invoked the NLP backend (vacuous pass)"
-    assert out is None, "an INFEASIBLE point was accepted on the strength of its status"
+    if repair == "0":
+        assert out is None, "an INFEASIBLE point was accepted on the strength of its status"
+        return
+    if out is None:
+        return  # the repair is entitled to fail; it is not entitled to be wrong
+    assert not np.allclose(out, infeasible), (
+        "the backend's INFEASIBLE point came back through the repair path"
+    )
+    assert ph._check_constraint_feasibility(ev, out), (
+        "the pump returned a point that fails the constraint check it is gated on"
+    )
 
 
 def test_pump_does_not_widen_the_shared_feasibility_gate():
