@@ -776,4 +776,4 @@ gate being ~1000x stricter than the incumbent standard means the pump can
 pump's gate rejects `gasnet`'s own shipped incumbent. That is a plausible primal
 weakness in exactly the direction §6.7 and #1435 care about, but changing a
 heuristic's feasibility tolerance is solver math and needs its own §5
-graduation panel, not a footnote in someone else's. Tracked separately.
+graduation panel, not a footnote in someone else's. Tracked as #1449.
