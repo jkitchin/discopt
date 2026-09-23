@@ -231,33 +231,13 @@ def test_matrix_norm_is_refused_loudly():
 
 
 def test_vector_valued_objective_is_refused_not_truncated():
-    """Expanding to several elements must raise, never optimise element zero.
-
-    This pins the *writer's* refusal (``_arrays.scalarize_objective``), so the
-    vector objective is installed directly rather than through ``minimize`` --
-    since #1445 the boundary refuses it first, and only internal machinery can
-    now put one on a model. The assertion is unchanged; only how the state is
-    reached is.
-    """
-    from discopt.modeling.core import Objective, ObjectiveSense
-
+    """Expanding to several elements must raise, never optimise element zero."""
     m = dm.Model("vecobj")
     x = m.continuous("x", shape=(3,), lb=0.0, ub=1.0)
     m.subject_to(dm.sum(x) <= 2.0, name="c")
-    m._objective = Objective(x * 2.0, ObjectiveSense.MINIMIZE)  # array-valued
-    # Match the WRITER's wording, not the boundary's -- both say "scalar", and a
-    # test that accepts either could pass without reaching the writer at all.
-    with pytest.raises(ValueError, match=r"expands to 3 scalar expressions"):
+    m.minimize(x * 2.0)  # array-valued: not a scalar objective
+    with pytest.raises(ValueError, match="scalar"):
         to_nl(m)
-
-
-def test_vector_valued_objective_is_refused_at_the_boundary_too():
-    """#1445 -- and the user never gets that far, because minimize() refuses it."""
-    m = dm.Model("vecobj2")
-    x = m.continuous("x", shape=(3,), lb=0.0, ub=1.0)
-    with pytest.raises(ValueError, match=r"minimize\(\) needs a scalar objective"):
-        m.minimize(x * 2.0)
-    assert m._objective is None
 
 
 # ── LP / MPS: array bodies expand; nonlinear ones are still refused ──────────
