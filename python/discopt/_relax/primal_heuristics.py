@@ -719,6 +719,28 @@ def _check_constraint_feasibility(
     that already holds the bounds its rows were built with (see
     :func:`row_violations`); :func:`scaled_violation_ratio` reports the same test
     as a magnitude, for a caller that must RANK two points rather than judge one.
+
+    **This is a heuristic's accept gate, NOT the incumbent verifier.** To judge
+    whether a point may BE an incumbent, call
+    :func:`discopt.validation.feasibility.verify_point` — the single verifier
+    every incumbent-promoting path agrees on (#908). The two differ on both
+    halves of the job and must not be substituted for one another:
+
+    * This function tests constraint rows only. ``verify_point`` additionally
+      checks variable bounds and integrality, and snaps integers first (#1380).
+      Using this one to verify an incumbent leaves those two conditions
+      **entirely unchecked**.
+    * This function is deliberately ~1000x stricter on the rows it does test
+      (``tol + rtol*scale``, ``rtol=1e-9``, against ``verify_point``'s
+      ``abs_tol*rowscale`` at 1e-6). Being conservative about what a *heuristic
+      proposes* is sound; applying that bar to an incumbent the solver already
+      holds reports failures that are not failures.
+
+    Measured (gasnet, #1435's panel): a legitimate incumbent violating one row
+    by 3.5e-5 — first-order distance to that row's surface 1.7e-9 — is rejected
+    here (tolerance 3.26e-5) and accepted by ``verify_point`` (3.16e-2). A
+    corpus panel used this function as its Gate 1 incumbent check and reported a
+    cert-clean FAIL on that instance in both arms.
     """
     if evaluator.n_constraints == 0:
         return True
@@ -844,6 +866,29 @@ def combined_tolerance(
 
     One definition, used by every site that decides or reports against that test,
     so a threshold and the number compared to it can never drift apart.
+
+    THIS IS DELIBERATELY STRICTER THAN ``verify_point``; DO NOT "FIX" IT (#1449).
+    This gate is a heuristic PRE-FILTER, not the incumbent guard. The judge
+    downstream, :func:`discopt.validation.feasibility.verify_point`, allows
+    ``abs_tol*max(anchor, scale)``, which on a row whose terms are of magnitude
+    3.16e4 is 3.16e-2 against this function's 3.26e-5 -- a ~970x gap. #1449
+    proposed closing it. The gap is real and so is the discarded work: re-running
+    ``verify_point`` on every rejection this gate made during real solves, 8 of 57
+    compared rejections (14.0 %) on a 119-instance MINLPLib sample were points
+    ``verify_point`` accepts outright (1 of 62 on the vendored corpus).
+
+    Closing it changes nothing. A 117-instance differential panel at 20 s/instance
+    (alignment ON vs OFF, interleaved) was cert-clean -- no bound above a reference
+    optimum, no certification regression, every incumbent independently verified --
+    and NEUTRAL: 30/30 instances certified, 61/61 with an incumbent, total wall
+    +0.15 %, dual bound 6 tighter / 8 looser. Its single objective difference
+    (``autocorr_bern40-20``) did not reproduce: 8 interleaved repeats per arm gave
+    OFF -50223.5 +/- 158.0 and ON -50236.0 +/- 117.8, with the best value of all 16
+    runs found by the OFF arm. The implementation was retired under CLAUDE.md §5's
+    three-outcome rule rather than left as a stalled flag. Rejected points the
+    judge would accept are evidently not points that become better incumbents --
+    the pump goes on to find an equivalent one. Reopen only with evidence of a
+    primal LOSS attributable to this threshold, not of a rejection count.
     """
     scale = np.asarray(scale, dtype=np.float64)
     allowed = tol + rtol * scale

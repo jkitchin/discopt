@@ -682,13 +682,9 @@ denominators). Over all 118 compared instances the median node change is
 **0.0 %** in both runs; what changed is the tail.
 
 *Bar 1 (cert-clean):* 0 bounds above the reference optimum, 0 certification
-regressions, 0 lost incumbents. One row flags: `gasnet`'s ON incumbent fails
-independent feasibility verification — but **so does its OFF incumbent**, and
-the two arms are bit-identical (obj `6999381.553035677`, bound
-`864103.864320254`, 3 nodes, `feasible`). Its objective matches the `.solu`
-reference to ~1.3e-9 relative; this is a tolerance artifact in the panel's
-verifier at 1e7 magnitude, present with the repair disabled, and therefore not
-something this change caused. It is noted rather than fixed here.
+regressions, 0 lost incumbents. One row flagged — `gasnet`, in **both** arms,
+bit-identically (obj `6999381.553035677`, bound `864103.864320254`, 3 nodes,
+`feasible`). **The flag was the panel's fault, not the solver's.** See §6.8b.
 
 `kan_peaks_h1_n2_g24` was checked against the false-primal failure mode before
 being counted: sense is **minimize** and the oracle is `=opt= -5.1956649970`, so
@@ -721,3 +717,118 @@ The lesson generalizes past the §8 one above: **do not mutate *or* switch a tre
 a panel is measuring** — run mutation tests in a separate worktree, or after the
 panel. A version marker defends against the wrong *version*; nothing in the
 child defends against the right version being edited underneath it.
+
+### 6.8b The `gasnet` Gate 1 flag was an instrument defect (diagnosed after the merge)
+
+§6.8a reported `gasnet` failing Gate 1's incumbent verification in both arms and
+dismissed it as "a tolerance artifact in the panel's verifier at 1e7 magnitude".
+**The conclusion — not a regression, not caused by #1435 — was right. The
+mechanism was wrong, and the panel was wrong in a way that mattered more than the
+flag it raised.** Retracted per CLAUDE.md §11.
+
+The panel verified incumbents with
+`_relax.primal_heuristics._check_constraint_feasibility`. That is the feasibility
+**pump's accept gate**. The canonical incumbent verifier is
+`validation.feasibility.verify_point`, whose own module docstring calls it "the
+single incumbent-feasibility verifier (#908)" and which every
+incumbent-promoting path in the solver agrees on. Measured on `gasnet`'s
+incumbent, on a fresh model built from the same `.nl`:
+
+| verifier | verdict |
+|---|---|
+| `verify_point` (canonical) | **ok=True** |
+| `_check_constraint_feasibility` (pump gate) | **False** |
+
+One row of 69 fails the pump gate, at ratio **1.07** — violation 3.48e-5 against
+a tolerance of 3.26e-5. The row's terms are of magnitude 3.2e4 and its gradient
+norm is 2.0e4, so the **first-order distance from the point to that row's
+surface is 1.7e-9**. Rows 21 and 22 carry all-but-identical violations (3.50e-5,
+3.54e-5) and pass, purely because their scale is slightly larger. The magnitude
+that matters is the row's 3e4, not the objective's 1e7 — the original
+explanation named the wrong quantity.
+
+The two tolerances differ by ~1000x by design, and both are right for their own
+job: `tol + rtol*scale` with `rtol=1e-9` for what a *heuristic may propose*,
+`abs_tol*rowscale` at 1e-6 for what the *solver may hold*. Being conservative
+about a heuristic's proposal is sound. Applying that bar to an incumbent the
+solver already owns reports failures that are not failures.
+
+**The part that is worse than a false alarm.** `verify_point` also checks
+variable bounds and integrality, and snaps integers before judging (#1380).
+`_check_constraint_feasibility` checks constraint rows and nothing else. So the
+Gate 1 line "every ON incumbent independently feasibility-verified" was, for
+every panel run in this document, simultaneously **too strict on constraints and
+blind to bounds and integrality**. An incumbent violating a variable bound
+outright would have passed. That is a CLAUDE.md §6 defect — an instrument
+reporting a check it did not perform — and it is the reason this section exists
+rather than a one-line correction.
+
+Fixed by pointing the panel at `verify_point` and recording the failure *reason*
+rather than a bare `False`, and by a cross-reference on
+`_check_constraint_feasibility` naming `verify_point` as the incumbent verifier
+so the substitution is not available to the next reader. The capped external
+panel was then re-run end to end under the corrected verifier; the result is
+recorded below.
+
+**The open question this surfaced, which is NOT fixed here.** The pump's accept
+gate being ~1000x stricter than the incumbent standard means the pump can
+*discard points that would be perfectly valid incumbents* — demonstrated: the
+pump's gate rejects `gasnet`'s own shipped incumbent. That is a plausible primal
+weakness in exactly the direction §6.7 and #1435 care about, but changing a
+heuristic's feasibility tolerance is solver math and needs its own §5
+graduation panel, not a footnote in someone else's. Tracked as #1449.
+
+### 6.8c The capped external panel, re-run under the correct verifier
+
+120 instances, `tl=20 s`, same 2 harness timeouts (`johnall`, `saa_2`), 118
+compared, incumbents verified with `verify_point` per §6.8b.
+
+**Gate 1 (cert-clean): PASS, cleanly.** 0 bounds above a reference optimum, 0
+certification regressions, **0 unverified incumbents**. `gasnet` verifies
+`True`, same incumbent, arms still bit-identical — confirming §6.8b's diagnosis
+on the exact row that raised the flag. This is the first Gate 1 result in this
+document that actually checked variable bounds and integrality.
+
+**Gate 2 (net-positive): 1 found, 1 lost.** The gain is
+`kan_peaks_h1_n2_g24` again; the loss is `oil2`, which the previous two panels
+did not show.
+
+`oil2` was chased rather than explained away, and it is a **wall-boundary flip,
+not a repair failure**:
+
+| budget | OFF found | ON found |
+|---|---|---|
+| `tl=20 s`, interleaved, 6 reps | 6/6 | 5/6 |
+| `tl=40 s`, interleaved, 4 reps | **4/4** | **4/4** |
+
+Pooled with the three panel runs: OFF 9/9, ON 7/9 at `tl=20`; at `tl=40` the two
+arms are indistinguishable and their objectives agree to 1e-9. `oil2`'s OFF arm
+— *identical code in every run* — reported 3, 7 and 13 nodes across the three
+panels, always finishing at the 20 s wall. The mechanism is the one the cap
+bounds rather than removes: a ~0.2 s repair attempt on an instance whose
+incumbent lands within ~0.2 s of the limit can cost it.
+
+**The instrument limitation this exposes, which matters beyond #1435.**
+**86 of the 118 compared instances (73 %) run to the wall.** Their incumbent
+discovery is therefore timing-dependent, and *both* of Gate 2's signals —
+`kan_peaks_h1_n2_g24` and `oil2` — are in that group. A single-run Gate 2 over
+this panel cannot resolve an effect of ±1 instance, because ±1 is its noise
+floor. The two signals are not equally solid, and only repetition shows it:
+
+* `kan_peaks_h1_n2_g24` — OFF has **never** found an incumbent (0 of 4
+  observations); ON found one in both capped panels and in the clean-tree
+  re-check, bit-identically. A robust conversion.
+* `oil2` — ON finds it ~78 % of the time, OFF ~100 %. A probabilistic loss.
+
+So the honest reading of #1435 is **sound, with a robust but small primal gain
+and a small timing-dependent cost**, not the unqualified "1 found, 0 lost" §6.8a
+reported. The change stays because Gate 1 is clean and the gain reproduces while
+the loss does not, but the Gate 2 margin is one instance wide and should not be
+quoted as though it were more.
+
+**Binding for future §5 graduation panels on this corpus:** a wall-limited A/B
+where most instances hit the limit has a ±1-instance resolution, and a one-shot
+run cannot distinguish a real conversion from a timing flip. Repeat the
+instances that move, in both arms, before believing either direction — or budget
+by work (node limit) rather than wall. Neither of the two signals here would
+have been interpretable without the repetitions above.
