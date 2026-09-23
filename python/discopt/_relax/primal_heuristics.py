@@ -866,6 +866,29 @@ def combined_tolerance(
 
     One definition, used by every site that decides or reports against that test,
     so a threshold and the number compared to it can never drift apart.
+
+    THIS IS DELIBERATELY STRICTER THAN ``verify_point``; DO NOT "FIX" IT (#1449).
+    This gate is a heuristic PRE-FILTER, not the incumbent guard. The judge
+    downstream, :func:`discopt.validation.feasibility.verify_point`, allows
+    ``abs_tol*max(anchor, scale)``, which on a row whose terms are of magnitude
+    3.16e4 is 3.16e-2 against this function's 3.26e-5 -- a ~970x gap. #1449
+    proposed closing it. The gap is real and so is the discarded work: re-running
+    ``verify_point`` on every rejection this gate made during real solves, 8 of 57
+    compared rejections (14.0 %) on a 119-instance MINLPLib sample were points
+    ``verify_point`` accepts outright (1 of 62 on the vendored corpus).
+
+    Closing it changes nothing. A 117-instance differential panel at 20 s/instance
+    (alignment ON vs OFF, interleaved) was cert-clean -- no bound above a reference
+    optimum, no certification regression, every incumbent independently verified --
+    and NEUTRAL: 30/30 instances certified, 61/61 with an incumbent, total wall
+    +0.15 %, dual bound 6 tighter / 8 looser. Its single objective difference
+    (``autocorr_bern40-20``) did not reproduce: 8 interleaved repeats per arm gave
+    OFF -50223.5 +/- 158.0 and ON -50236.0 +/- 117.8, with the best value of all 16
+    runs found by the OFF arm. The implementation was retired under CLAUDE.md §5's
+    three-outcome rule rather than left as a stalled flag. Rejected points the
+    judge would accept are evidently not points that become better incumbents --
+    the pump goes on to find an equivalent one. Reopen only with evidence of a
+    primal LOSS attributable to this threshold, not of a rejection count.
     """
     scale = np.asarray(scale, dtype=np.float64)
     allowed = tol + rtol * scale
