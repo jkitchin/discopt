@@ -34,16 +34,22 @@ feasible box -- the reported value is not merely suboptimal, it is unattainable.
 Mechanism at ``C=1e8``, reproduced identically 3/3: the route returns
 ``x=2.7275725368179037e-13`` instead of ``0``, and ``1e8 * 2.7e-13 = 2.7e-05``.
 
-**Why this is xfail rather than fixed here.** The route's own engine is the
-in-house Rust simplex, which is ALSO the default MINLP per-node LP engine, so
-changing its termination test is bound-changing for every nonlinear solve and
-needs the §5 graduation panel. The #1229 HiGHS route already carries the guard
-this one lacks ("HiGHS's *labels* are never trusted for a certificate"), so the
-principled fix is scale-aware termination or porting that verification -- not a
-tolerance tweak, which CLAUDE.md §3 forbids. Tracked by the issue this test
-names; the marker is ``strict`` so that whoever fixes it is forced to remove it.
+**Root cause, and why it was not the simplex.** The engine answering was not the
+Rust simplex at all but POUNCE, the Rust Ipopt port -- an INTERIOR-POINT method.
+``_solve_lp`` documented its order as "Rust simplex -> POUNCE, or POUNCE ->
+simplex when ``prefer_pounce`` is set (the user passed ``nlp_solver="pounce"``)",
+but its single call site computed that flag as ``nlp_solver == "pounce"`` against
+a parameter whose DEFAULT is ``"pounce"``. It was therefore true for every
+caller, the order was always inverted, and the exact simplex was never consulted.
+An IPM converges in variable space, so the residual above is exactly what it is
+supposed to leave behind; the defect was asking it to certify an LP at all.
 
-The DEFAULT path is unaffected: ``DISCOPT_LP_MILP_BACKEND`` defaults to
+The fix restores the documented order, so these tests now assert the corrected
+behaviour. It changes an ENGINE ORDER and no solver's numerics -- in particular
+it does not touch the Rust simplex, which is also the default MINLP per-node LP
+engine, so nothing about nonlinear solves changes.
+
+The DEFAULT path was never affected: ``DISCOPT_LP_MILP_BACKEND`` defaults to
 ``highs``, which is exact on every cell above.
 """
 
@@ -68,11 +74,6 @@ def _scaled_model(C: float, *, integer: bool = False):
 
 
 @pytest.mark.parametrize("C", [1e6, 1e8, 1e10, 1e12])
-@pytest.mark.xfail(
-    strict=True,
-    reason="Rust LP route certifies on a variable-space tolerance, ignoring "
-    "objective scale; see this module's docstring for the measured family",
-)
 def test_the_rust_lp_route_certificate_respects_objective_scale(C, monkeypatch):
     monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
     r = _scaled_model(C).solve(time_limit=5.0, gap_tolerance=1e-4)
@@ -108,16 +109,45 @@ def test_the_integer_variant_is_exact_on_both_backends(C, monkeypatch):
         )
 
 
-@pytest.mark.parametrize("C", [1e12])
+@pytest.mark.parametrize("C", [1e8, 1e10, 1e12])
 def test_the_reported_objective_is_at_least_attainable(C, monkeypatch):
     """The strongest form: ``C*x + y/C`` with ``x, y >= 0`` cannot be negative.
 
     A reported value below zero is not a suboptimal answer, it is one no feasible
-    point attains. Separated from the approx-optimum test above so the record
-    shows this is a distinct and worse symptom.
+    point attains -- kept as its own test because it is a distinct and worse
+    symptom than "off by more than the tolerance", and it is the one that would
+    survive any future retuning of tolerances.
     """
     monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
     r = _scaled_model(C).solve(time_limit=5.0, gap_tolerance=1e-4)
-    if r.objective is None:
-        pytest.skip("no incumbent to judge")
-    pytest.xfail("reports a negative objective for a provably non-negative one")
+    assert r.objective is not None, "fixture invalid: this cell must produce an incumbent"
+    assert r.objective >= -1e-12, (
+        f"C={C:g}: reported {r.objective!r} for an objective that is non-negative on "
+        f"the whole feasible box -- no feasible point attains this value"
+    )
+
+
+def test_the_lp_route_leads_with_the_exact_engine(monkeypatch):
+    """The root cause, pinned directly rather than only through its symptom.
+
+    ``_solve_lp`` is documented as simplex-first; a flag computed from a
+    parameter whose default was ``"pounce"`` inverted that for every caller, so
+    an interior-point method answered every pure LP. This asserts the simplex is
+    consulted first, which is what makes the scale results above hold.
+    """
+    import discopt.solver as solver
+
+    seen = []
+    original = solver._solve_lp_simplex
+
+    def _record(model, t_start, time_limit=None):
+        seen.append("simplex")
+        return original(model, t_start, time_limit)
+
+    monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
+    monkeypatch.setattr(solver, "_solve_lp_simplex", _record)
+    _scaled_model(1e8).solve(time_limit=5.0, gap_tolerance=1e-4)
+    assert seen == ["simplex"], (
+        "the exact LP engine was not consulted first; the route has inverted its "
+        "documented engine order again"
+    )
