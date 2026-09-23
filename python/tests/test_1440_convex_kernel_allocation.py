@@ -25,8 +25,10 @@ seconds, so they do not become a speed test on a loaded runner.
 
 from __future__ import annotations
 
+import logging
 import os
 
+import discopt.modeling as dm
 import numpy as np
 import pytest
 from discopt.modeling import from_nl
@@ -239,19 +241,24 @@ def _bilinear(sense: str):
 
     ``x*y`` on a box is nonconvex, so ``build_convex_spec`` declines it and the
     solve goes through the default path -- which is the path the recovery block
-    sits on. The test asserts the refusal rather than assuming it (CLAUDE.md #6).
+    sits on. The test below asserts that refusal rather than assuming it
+    (CLAUDE.md #6).
     """
-    from discopt import Model
-
-    m = Model()
+    m = dm.Model("bilinear_1440")
     x = m.continuous("x", lb=0.0, ub=4.0)
     y = m.continuous("y", lb=0.0, ub=4.0)
-    m.constraint(x + y <= 6.0)
     if sense == "min":
         m.minimize(x * y)
     else:
         m.maximize(x * y)
+    m.subject_to(x + y <= 6.0)
     return m
+
+
+#: The point published as the declined attempt's incumbent. Feasible in
+#: ``_bilinear`` (1 + 2 <= 6, both inside [0, 4]) with objective 2.0, so the #772
+#: false-primal screen that runs on whatever is adopted passes it on its merits.
+POINT = {"x": np.array(1.0), "y": np.array(2.0)}
 
 
 class TestTheAdoptionGuards:
@@ -259,8 +266,9 @@ class TestTheAdoptionGuards:
 
     The end-to-end tests above need the kernel to reach convergence-adjacent work
     on a real instance, which is a machine-speed question. These drive the block
-    directly by publishing a synthetic point, so the guards are pinned on every
-    runner regardless of speed.
+    directly by publishing a synthetic point and starving the default path -- the
+    same technique ``test_1422_declined_kernel_bound.py`` uses for the bound -- so
+    the guards are pinned on every runner regardless of speed.
     """
 
     @staticmethod
@@ -269,14 +277,27 @@ class TestTheAdoptionGuards:
         default path return ``fake``."""
         import discopt.solver as _solver
 
+        monkeypatch.setattr(ck, "last_attempt_seconds", lambda: 0.0)
+        monkeypatch.setattr(ck, "last_attempt_rust_seconds", lambda: 0.0)
+        monkeypatch.setattr(ck, "last_declined_bound", lambda: None)
         monkeypatch.setattr(ck, "last_declined_incumbent", lambda: published)
-        monkeypatch.setattr(_solver, "solve_model", lambda *a, **k: fake)
+        monkeypatch.setattr(_solver, "solve_model", lambda model, **kw: fake)
 
     @staticmethod
-    def _fake(objective=None, bound=None, status="time_limit", certified=False):
+    def _fake(objective=None, bound=None, status="time_limit", certified=False, x=None):
         from discopt.modeling.core import SolveResult
 
-        r = SolveResult(status=status, objective=objective, gap_certified=certified)
+        # ``bound`` goes through the CONSTRUCTOR, not only ``_set_bound``:
+        # ``__post_init__`` downgrades ``gap_certified`` on a result whose bound is
+        # absent or non-finite, so a "certified" fake built without one arrives
+        # UNcertified and the test silently exercises a different branch.
+        r = SolveResult(
+            status=status,
+            objective=objective,
+            bound=bound,
+            x=x or {},
+            gap_certified=certified,
+        )
         if bound is not None:
             r._set_bound(bound, valid=True, source="bnb_tree")
         return r
@@ -290,8 +311,7 @@ class TestTheAdoptionGuards:
     def test_a_point_is_adopted_when_the_default_path_found_none(self, monkeypatch):
         from discopt.solvers._gap import optimality_gap
 
-        point = {"x": np.array(1.0), "y": np.array(2.0)}
-        self._stub(monkeypatch, (2.0, point), fake=self._fake(bound=-16.0))
+        self._stub(monkeypatch, (2.0, POINT), fake=self._fake(bound=-16.0))
         r = _bilinear("min").solve(time_limit=2.0, gap_tolerance=1e-4)
         assert r.objective == pytest.approx(2.0)
         assert set(r.x) == {"x", "y"}
@@ -303,8 +323,7 @@ class TestTheAdoptionGuards:
         )
 
     def test_a_worse_point_is_ignored(self, monkeypatch):
-        point = {"x": np.array(1.0), "y": np.array(2.0)}
-        self._stub(monkeypatch, (2.0, point), fake=self._fake(objective=0.5, bound=-16.0))
+        self._stub(monkeypatch, (2.0, POINT), fake=self._fake(objective=0.5, bound=-16.0))
         r = _bilinear("min").solve(time_limit=2.0, gap_tolerance=1e-4)
         assert r.objective == pytest.approx(0.5), (
             "adopting a WORSE incumbent than the solve already had is a regression, not a recovery"
@@ -316,12 +335,11 @@ class TestTheAdoptionGuards:
         A sign-blind comparison would adopt 2.0 over 6.0 here and report the worse
         of the two as the incumbent.
         """
-        point = {"x": np.array(1.0), "y": np.array(2.0)}
-        self._stub(monkeypatch, (2.0, point), fake=self._fake(objective=6.0, bound=16.0))
+        self._stub(monkeypatch, (2.0, POINT), fake=self._fake(objective=6.0, bound=16.0))
         r = _bilinear("max").solve(time_limit=2.0, gap_tolerance=1e-4)
         assert r.objective == pytest.approx(6.0)
 
-        self._stub(monkeypatch, (2.0, point), fake=self._fake(bound=16.0))
+        self._stub(monkeypatch, (2.0, POINT), fake=self._fake(bound=16.0))
         r = _bilinear("max").solve(time_limit=2.0, gap_tolerance=1e-4)
         assert r.objective == pytest.approx(2.0), (
             "a maximize model with no incumbent should still adopt the recovered point"
@@ -329,44 +347,52 @@ class TestTheAdoptionGuards:
 
     def test_a_point_that_beats_a_certified_optimum_is_refused_loudly(self, monkeypatch, caplog):
         """Two claims that cannot both be right: report neither, say so (§3)."""
-        point = {"x": np.array(1.0), "y": np.array(2.0)}
+        # The candidate must beat the certified OBJECTIVE while staying above the
+        # certified BOUND: a certificate holds with ``bound`` up to a tolerance below
+        # the incumbent, and a candidate in that sliver is the only way to reach this
+        # branch. A candidate below the bound as well trips the bound guard first,
+        # and the test would then pass while never exercising the branch it is named
+        # for -- so the numbers here are the point of the test.
         self._stub(
             monkeypatch,
-            (2.0, point),
-            fake=self._fake(objective=3.0, bound=3.0, status="optimal", certified=True),
+            (2.9995, POINT),
+            fake=self._fake(
+                objective=3.0,
+                bound=2.999,
+                status="optimal",
+                certified=True,
+                x={"x": np.array(3.0), "y": np.array(1.0)},
+            ),
         )
-        with caplog.at_level("ERROR", logger="discopt.solver"):
+        with caplog.at_level(logging.ERROR, logger="discopt.solver"):
             r = _bilinear("min").solve(time_limit=2.0, gap_tolerance=1e-4)
         assert r.objective == pytest.approx(3.0), "a certified result was overwritten"
         assert r.gap_certified is True
-        assert any("DISCARDING" in rec.message for rec in caplog.records), (
+        assert any("DISCARDING" in rec.getMessage() for rec in caplog.records), (
             "the contradiction was resolved SILENTLY -- CLAUDE.md §3 requires a "
             "loud refusal, not a quiet preference"
         )
 
     def test_an_infeasibility_proof_is_not_overwritten_by_a_point(self, monkeypatch, caplog):
-        point = {"x": np.array(1.0), "y": np.array(2.0)}
-        self._stub(monkeypatch, (2.0, point), fake=self._fake(status="infeasible"))
-        with caplog.at_level("ERROR", logger="discopt.solver"):
+        self._stub(monkeypatch, (2.0, POINT), fake=self._fake(status="infeasible"))
+        with caplog.at_level(logging.ERROR, logger="discopt.solver"):
             r = _bilinear("min").solve(time_limit=2.0, gap_tolerance=1e-4)
         assert r.status == "infeasible"
         assert r.objective is None
-        assert any("DISCARDING" in rec.message for rec in caplog.records)
+        assert any("DISCARDING" in rec.getMessage() for rec in caplog.records)
 
     def test_a_point_below_a_proven_dual_bound_is_refused_loudly(self, monkeypatch, caplog):
-        point = {"x": np.array(1.0), "y": np.array(2.0)}
-        self._stub(monkeypatch, (2.0, point), fake=self._fake(bound=5.0))
-        with caplog.at_level("ERROR", logger="discopt.solver"):
+        self._stub(monkeypatch, (2.0, POINT), fake=self._fake(bound=5.0))
+        with caplog.at_level(logging.ERROR, logger="discopt.solver"):
             r = _bilinear("min").solve(time_limit=2.0, gap_tolerance=1e-4)
         assert r.objective is None, (
             "a point BELOW a dual bound the solve proved was adopted; one of the two "
             "is unsound and neither may be reported"
         )
-        assert any("DISCARDING" in rec.message for rec in caplog.records)
+        assert any("DISCARDING" in rec.getMessage() for rec in caplog.records)
 
     def test_the_opt_out_disables_adoption(self, monkeypatch):
         monkeypatch.setenv("DISCOPT_CONVEX_KERNEL_KEEP_INCUMBENT", "0")
-        point = {"x": np.array(1.0), "y": np.array(2.0)}
-        self._stub(monkeypatch, (2.0, point), fake=self._fake(bound=-16.0))
+        self._stub(monkeypatch, (2.0, POINT), fake=self._fake(bound=-16.0))
         r = _bilinear("min").solve(time_limit=2.0, gap_tolerance=1e-4)
         assert r.objective is None, "=0 must restore the pre-#1440 behaviour exactly"

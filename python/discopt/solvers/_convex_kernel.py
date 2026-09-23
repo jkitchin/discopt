@@ -797,17 +797,36 @@ def keep_declined_incumbent_enabled() -> bool:
     #1422's abandon-on-no-incumbent both do. It does **not** fix the allocation --
     #1440's item stays open. It stops more of the spend being paid for nothing.
 
-    **The panel this is owed, and why it is not attached.** §5's net-positive bar
-    wants breadth. Only **4 of 124** ``.nl`` instances in this repository are
-    kernel-eligible and only one exercises this mechanism, so the in-repo corpus
-    cannot score it; the MINLPLib snapshot can, and is absent from the environment
-    this was built in, whose network policy denies ``www.minlplib.org`` (403 at the
-    proxy CONNECT). Shipping default-ON therefore rests on the soundness argument
-    above -- verification, not breadth -- plus the mechanism being post-hoc: it
-    lands on an already-finished result and is never used to prune, so it cannot
-    cut an optimum out of any search. **What would change this row:** the snapshot
-    panel over the 39 eligible instances, ON vs OFF interleaved, scoring incumbents
-    gained against ``minlplib.solu``.
+    **The §5 panel, run in the PR that introduces this flag** (2026-09-23,
+    ``scratchpad/k1440/panel1440.py``), in two parts, because the standard 8 s panel
+    budget is BELOW the window the table above measures and would otherwise score a
+    mechanism that never fires:
+
+    * *Exposure*, all 66 vendored instances x 2 arms at 8 s, interleaved within each
+      instance: **302 executed comparisons, 0 violations** -- no bound above its
+      reference optimum (``known_optima.toml``), no incumbent below one, every
+      reported incumbent independently re-verified against a fresh parse, no
+      certification regression. **0 gains and 0 losses**: at 8 s no in-repo attempt
+      is holding a point yet, so the corpus measures that the flag is inert outside
+      its class rather than that it is useless. Total wall 246.0 s ON against
+      245.2 s OFF (**+0.3%**) -- the verification is one point evaluation.
+    * *Benefit*, the 3 kernel-eligible instances x 2 arms at 14 s, the budget the
+      table above shows the window opens at: **14 executed comparisons, 0
+      violations, 1 gain, 0 losses** (``clay0303hfsg`` 47287.5613 where OFF reports
+      ``objective=None``), wall +0.2%.
+
+    Cert-clean on both parts and net-positive on every instance that can exercise
+    it, which is the §5 pair. The corpus is small for the second bar -- only **4 of
+    124** ``.nl`` instances here are kernel-eligible and one exercises this
+    mechanism -- and the MINLPLib snapshot that would widen it is absent from the
+    environment this was built in, whose network policy denies ``www.minlplib.org``
+    (403 at the proxy CONNECT). The soundness argument does not depend on that
+    breadth: the point is verified rather than inferred, and the adoption is
+    post-hoc -- it lands on an already-finished result and is never used to prune,
+    so it cannot cut an optimum out of any search. **What would widen the benefit
+    column:** the snapshot panel over the 39 eligible instances at a budget above
+    each one's first-incumbent time, scoring incumbents gained against
+    ``minlplib.solu``.
     """
     return os.environ.get("DISCOPT_CONVEX_KERNEL_KEEP_INCUMBENT", "1") not in (
         "0",
