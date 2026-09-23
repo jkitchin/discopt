@@ -605,9 +605,14 @@ of the harness):
   optimum, 0 certification regressions, every ON incumbent independently
   feasibility-verified.
 - **Bar 2 (net-positive): FAIL.** 0 incumbents gained, 0 lost, 0 improved, 0
-  worsened — 118 unchanged — and node throughput **down on 30 instances, median
-  −8.5 %**: `sfacloc1_3_90` −25 %, `o9_ar4_1` −17 %, `o7_ar3_1` −14 %,
-  `autocorr_bern25-06` −10 %.
+  worsened — 118 unchanged — and node throughput **moved on 30 instances, 28 of
+  them down, median −8.5 %**. Sorted worst first: `multiplants_stg1a` −76.2 %
+  (63 → 15 nodes), `autocorr_bern45-45` / `sfacloc2_2_80` / `waterful2` −57.1 %,
+  `autocorr_bern25-19` −51.6 %, … `sfacloc1_3_90` −25 %, `o9_ar4_1` −17 %.
+  (An earlier draft of this section quoted `sfacloc1_3_90`'s −25 % as the *worst*
+  case; it is not, it was simply the first one I looked at. Corrected per
+  CLAUDE.md §11 — the true worst is three times larger, which strengthens rather
+  than weakens the case for the cap.)
 
 That is §5's *sound but not helpful* verdict, and on its own it kills the change
 as written. The mechanism is plain: the repair is cheap when it **succeeds**
@@ -643,12 +648,14 @@ the same bimodality this document warns about throughout. The ON arm has never
 been the cell that varies.
 
 **The honest rate.** The repair can only help an instance that finds no
-incumbent at all. That population is **66** across both panels (57 external + 9
-vendored), and the repair converts **1** of them. It is adopted because it is
-sound, never loses a point, and — capped — costs nothing measurable, not because
-it is broadly transformative. Anyone revisiting this should read it as "a free
-strict improvement with a low hit rate on this corpus", which is a different
-claim from the one §6.8's instance table alone would support.
+incumbent at all. That population is **67** across both capped panels (57
+external + 10 vendored), and the repair converts **2** of them
+(`heatexch_gen2` vendored, `kan_peaks_h1_n2_g24` external). It is adopted
+because it is sound, never loses a point, and — capped — costs nothing
+measurable, not because it is broadly transformative. Anyone revisiting this
+should read it as "a free strict improvement with a low hit rate on this
+corpus", which is a different claim from the one §6.8's instance table alone
+would support.
 
 **A measurement failure worth recording (CLAUDE.md §8).** The first capped
 external panel produced 114 of 120 children failing with `AssertionError: tree
@@ -660,8 +667,57 @@ run would have compared `main` against `main`, returned a flawless null result
 **Do not run `git checkout` in a tree a panel is measuring**, and keep the
 version-marker assertion in every panel child.
 
-**Still in flight at the time of writing:** the capped re-run of the 120-instance
-external panel (the uncapped one above is what failed bar 2). It is the cost
-check the cap exists to satisfy; the spot-checks in the reshape table are drawn
-from it but are not a substitute for it. If it does not show the cost is
-broadly ~0, the change is reverted and this section stands as the diagnosis.
+**The capped external panel — the measurement the cap exists to satisfy.**
+120 instances at `tl=20 s`, 2 harness timeouts (`johnall`, `saa_2`, both timing
+out in the uncapped run too), 118 compared.
+
+*Bar 2 (net-positive):* **1 incumbent found where none existed
+(`kan_peaks_h1_n2_g24`), 0 lost, 0 worsened, 117 unchanged; node count 12 up /
+15 down.* The cost the cap was built to remove is gone: the uncapped run moved
+30 instances, 28 of them **down**, median **−8.5 %**, worst **−76.2 %**
+(`multiplants_stg1a`, 63 → 15). Capped, 26 move, only **15** down, median of
+the moved **−2.1 %**, worst **−57.1 %** (`var_con5`, 7 → 3 — a 4-node
+difference on a tiny instance, which is what a percentage does to small
+denominators). Over all 118 compared instances the median node change is
+**0.0 %** in both runs; what changed is the tail.
+
+*Bar 1 (cert-clean):* 0 bounds above the reference optimum, 0 certification
+regressions, 0 lost incumbents. One row flags: `gasnet`'s ON incumbent fails
+independent feasibility verification — but **so does its OFF incumbent**, and
+the two arms are bit-identical (obj `6999381.553035677`, bound
+`864103.864320254`, 3 nodes, `feasible`). Its objective matches the `.solu`
+reference to ~1.3e-9 relative; this is a tolerance artifact in the panel's
+verifier at 1e7 magnitude, present with the repair disabled, and therefore not
+something this change caused. It is noted rather than fixed here.
+
+`kan_peaks_h1_n2_g24` was checked against the false-primal failure mode before
+being counted: sense is **minimize** and the oracle is `=opt= -5.1956649970`, so
+an incumbent of `0.3344124554665887` is a legal feasible-suboptimal point, and
+the bound `-5.195664996854543` sits below it — the certificate invariant holds.
+Had the instance been a maximization this row would have been a false primal and
+the change dead.
+
+**A second measurement failure, and the re-check it forced (CLAUDE.md §8, §9).**
+While that panel was running, a mutation test briefly wrote a sabotaged
+`primal_heuristics.py` into the same tree the panel's children import from —
+with the constraint check removed from the accept path. Progress at the time was
+44/120. **The §8 marker assertion would not have caught this**: the sabotage left
+`_repair_to_feasible` present, so every child would have imported it happily and
+the panel would have reported whatever the sabotaged code produced. The failure
+mode it could produce is precisely an ON incumbent that never passed the
+feasibility gate — i.e. a fabricated bar-2 gain.
+
+Instances 34–52 (a band wider than the ~39–44 the timing implies, and containing
+both flagged rows) were therefore re-run in both arms in a verified-clean tree
+and diffed field-by-field against the recorded panel: 254 field comparisons.
+`kan_peaks_h1_n2_g24` and `gasnet` reproduce **bit-for-bit in all four cells**,
+and **no incumbent appears or disappears anywhere in the band** — the only
+signature the sabotage could have left. The 12 differing fields are bounds (and
+one 15th-digit objective) on instances whose node counts also drifted, symmetric
+across arms: ordinary wall-limit nondeterminism on a 20 s budget. The panel
+stands.
+
+The lesson generalizes past the §8 one above: **do not mutate *or* switch a tree
+a panel is measuring** — run mutation tests in a separate worktree, or after the
+panel. A version marker defends against the wrong *version*; nothing in the
+child defends against the right version being edited underneath it.

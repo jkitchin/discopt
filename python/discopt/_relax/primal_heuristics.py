@@ -561,10 +561,15 @@ def _verified_pump_point(
 #: case that actually costs: a model whose rounding *cannot* be repaired, where
 #: an uncapped repair pays ~0.2 s on every one of the five rounds and returns
 #: nothing. Measured over a 118-instance MINLPLib panel, uncapped cost a median
-#: **-8.5 %** node throughput on the 30 instances it moved (worst -25 %) for zero
-#: primal gain outside the probe instance — CLAUDE.md §2's "benefit confined to a
+#: **-8.5 %** node throughput on the 30 instances it moved -- 28 of those 30 moved
+#: DOWN, worst **-76.2 %** (``multiplants_stg1a``, 63 nodes -> 15) -- for zero
+#: primal gain outside the probe instance, CLAUDE.md §2's "benefit confined to a
 #: named instance" verdict. One attempt keeps the gain, because a rounding whose
 #: repair succeeds succeeds on the first round.
+#:
+#: (The worst-case figure was first published as "-25 %", which was wrong: it came
+#: from eyeballing the head of the list rather than computing the distribution.
+#: Retracted and corrected per CLAUDE.md §11.)
 _PUMP_REPAIR_ATTEMPTS = 1
 
 #: Outer re-linearizations allowed to :func:`_repair_to_feasible` (#1435). A
