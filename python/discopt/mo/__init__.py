@@ -33,6 +33,27 @@ When to use which method
 * :func:`normalized_normal_constraint` -- robust geometric scalarization
   with explicit objective normalization.
 
+Completeness and the ``incomplete`` flag
+----------------------------------------
+
+The completeness claims above describe each method's *scalarization*, and hold
+only when every subproblem actually answered. A cell that returns ``error``,
+``time_limit``, ``node_limit``, ``iteration_limit``, or an incumbent the solver
+declined to certify leaves a hole in the front, and no scalarization can fill
+it. Such cells are recorded on
+:attr:`~discopt.mo.pareto.ParetoFront.incomplete_cells`; check
+:attr:`~discopt.mo.pareto.ParetoFront.incomplete` before relying on a
+completeness claim or on an indicator computed from the front (#1442)::
+
+    front = epsilon_constraint(m, objs, senses=["max", "min"])
+    if front.incomplete:
+        print(front.incomplete_cells)   # [(scalarization_params, status), ...]
+
+A sweep that hits such a cell also warns and suffixes its ``method`` tag with
+``"/incomplete"``, alongside the existing ``"/truncated"`` for a spent
+``total_time_limit``. A cell the solver *proved* infeasible is not a hole and is
+not recorded.
+
 See the crucible articles under ``.crucible/wiki/methods/`` for algorithmic
 background.
 
