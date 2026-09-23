@@ -7612,6 +7612,7 @@ class Model:
         # away, adopted below only if it beats what the default path manages. None
         # whenever the flag is off, the attempt certified, or no tree ran.
         _ck_declined_bound: Optional[float] = None
+        _ck_declined_incumbent: Optional[tuple] = None
         # #1346: an EXPLICIT ``solver=`` is a decision, not a hint. Consulting the
         # convex kernel for a route the caller has already ruled out costs them a
         # convexity classification they can never benefit from -- and #911 charges
@@ -7629,16 +7630,30 @@ class Model:
             _ck_res = None
             try:
                 from discopt.solvers._convex_kernel import (
+                    convex_kernel_reserve_seconds,
                     keep_declined_bound_enabled,
+                    keep_declined_incumbent_enabled,
                     last_attempt_rust_seconds,
                     last_attempt_seconds,
                     last_declined_bound,
+                    last_declined_incumbent,
                     try_convex_solve,
                 )
 
                 try:
+                    # #1440: withhold a bounded slice so a DECLINED attempt cannot
+                    # leave the default path with ~0 s. Default 0.0 -- the attempt
+                    # is byte-identical until the knob is set, because a reserve is
+                    # the fractional cap under another name and #1422 measured a
+                    # 50 % cutoff destroying 3 of 16 certifications at a 4 s budget.
+                    # See ``convex_kernel_reserve_seconds`` for the measured closure
+                    # of every other candidate (predictor, free seed, pump seed, and
+                    # the ORACLE-seed ceiling that kills the #764 port outright).
+                    _ck_reserve = convex_kernel_reserve_seconds(float(time_limit))
                     _ck_res = try_convex_solve(
-                        self, time_limit=time_limit, gap_tolerance=gap_tolerance
+                        self,
+                        time_limit=max(0.0, float(time_limit) - _ck_reserve),
+                        gap_tolerance=gap_tolerance,
                     )
                 finally:
                     # In the ``finally`` so an attempt that raised part-way through
@@ -7648,6 +7663,8 @@ class Model:
                     _ck_rust_elapsed = min(_ck_elapsed, last_attempt_rust_seconds())
                     if keep_declined_bound_enabled():
                         _ck_declined_bound = last_declined_bound()
+                    if keep_declined_incumbent_enabled():
+                        _ck_declined_incumbent = last_declined_incumbent()
             except Exception:
                 _ck_res = None
             if _ck_res is not None:
@@ -8118,6 +8135,112 @@ class Model:
                 _fb_elapsed = _time.perf_counter() - _t_fb0
                 result.wall_time += _fb_elapsed
                 result.python_time += _fb_elapsed
+
+        # --- Adopt a DECLINED convex-kernel attempt's INCUMBENT (#1440) ------- #
+        # Same waste, the other half of it. #1422 bought back the dual bound a
+        # declined attempt proved and dropped; a declined attempt also discards any
+        # FEASIBLE POINT it found. Both come out of the budget the attempt already
+        # spent, so neither changes the allocation #1440 is about -- and the
+        # allocation is not fixable directly: the two obvious repairs (a fractional
+        # cap, abandon-on-no-incumbent) were built and falsified under #911 and
+        # #1422 respectively. Recovering what the spend already produced is what is
+        # left, and it is free.
+        #
+        # Measured on ``clay0303hfsg`` (kernel-eligible, declines at any budget below
+        # ~16 s): at a 12 s limit the attempt holds a point with objective 47287.5613
+        # against a reference optimum of 26669.10955143 -- valid, not a false primal
+        # -- while proving a bound of 23239.60-25496.44. Today that solve returns an
+        # incumbent of NONE with the kernel on; with the kernel off it returns an
+        # incumbent but a bound of -0.0, a 100% gap. Adopting both halves reports a
+        # ~50% gap where neither configuration reported anything usable.
+        #
+        # Soundness -- this is a STRONGER argument than the bound's, not a weaker
+        # one. A dual bound can only be inferred; an incumbent is CHECKABLE, and this
+        # one is checked twice against the PRISTINE model before it can be reported:
+        # once by #779's ``_incumbent_is_feasible`` (the full row-map verifier) at the
+        # publication site in ``_convex_kernel``, and again by the #772 false-primal
+        # screen below, which runs on whatever ``result.x`` holds by then and so
+        # covers the adopted point with no change of its own. A point is never a
+        # certificate either way: ``gap_certified`` is never set here, and the status
+        # is never upgraded -- a recovered incumbent turns "time limit, nothing found"
+        # into "time limit, here is a feasible point", which is exactly what it is.
+        if _ck_declined_incumbent is not None:
+            from discopt.solvers._gap import (
+                bound_inversion_tolerance as _ci_inv_tol_fn,
+            )
+            from discopt.solvers._gap import optimality_gap as _ci_gap_fn
+
+            _ci_obj, _ci_x = _ck_declined_incumbent
+            # Minimization space for either sense, as in the bound merge below:
+            # ``objective_sense_sign`` is -1.0 for MAXIMIZE, so ``_s * value`` is
+            # always "smaller is better" and one set of comparisons covers both.
+            _s = objective_sense_sign(self)
+            _ci_cand = _s * float(_ci_obj)
+            _ci_cur = None if result.objective is None else _s * float(result.objective)
+            _ci_log = _logging.getLogger("discopt.solver")
+            if _ci_cur is not None and _ci_cand >= _ci_cur:
+                # Nothing to buy: the default path already found this point or better.
+                # (Not an error, and by far the common case -- the kernel declines
+                # most often on models the default path then solves outright.)
+                pass
+            elif result.status == "infeasible":
+                # The default path PROVED no feasible point exists and the kernel
+                # holds one that the row-map verifier accepted. One of the two is
+                # unsound and nothing here can tell which, so report neither and say
+                # so loudly rather than overwrite a proof with a point (§3).
+                _ci_log.error(
+                    "convex kernel: DISCARDING the declined attempt's verified incumbent "
+                    "%.12g — this solve returned status='infeasible', so one of the two is "
+                    "unsound. Keeping the default path's result unchanged. Please report "
+                    "this against #1440 with the model.",
+                    float(_ci_obj),
+                )
+            elif result.gap_certified:
+                # A certified result asserts its incumbent IS the optimum; a verified
+                # feasible point strictly better than it contradicts the certificate.
+                # Same refusal as above -- never silently break a certificate, never
+                # silently keep one the evidence disputes.
+                _ci_log.error(
+                    "convex kernel: DISCARDING the declined attempt's verified incumbent "
+                    "%.12g — it improves on the CERTIFIED optimum %.12g this solve "
+                    "reported, so one of the two is unsound. Keeping the default path's "
+                    "result unchanged. Please report this against #1440 with the model.",
+                    float(_ci_obj),
+                    float(result.objective) if result.objective is not None else float("nan"),
+                )
+            elif (
+                result.bound is not None
+                and result.bound_valid
+                and _s * float(result.bound) - _ci_cand
+                > _ci_inv_tol_fn(_s * float(result.bound), _ci_cand)
+            ):
+                # The point sits BELOW a dual bound this solve proved valid. Same
+                # refusal: a rigorous bound and a verified point cannot both be right.
+                _ci_log.error(
+                    "convex kernel: DISCARDING the declined attempt's verified incumbent "
+                    "%.12g — it crosses the dual bound %.12g this solve proved, so one of "
+                    "the two is unsound. Keeping the default path's result unchanged. "
+                    "Please report this against #1440 with the model.",
+                    float(_ci_obj),
+                    float(result.bound),
+                )
+            else:
+                result.objective = float(_ci_obj)
+                result.x = dict(_ci_x)
+                # ``gap`` has to move with the pair it is computed from (#1386): a
+                # gap left over from the default path's (bound, objective) describes
+                # numbers that are no longer both there. Recompute it when a valid
+                # bound exists and drop it otherwise, rather than leave a stale one.
+                if result.bound is not None and result.bound_valid:
+                    result.gap = _ci_gap_fn(_s * float(result.bound), _ci_cand)
+                else:
+                    result.gap = None
+                _ci_log.debug(
+                    "convex kernel: adopted the declined attempt's verified incumbent "
+                    "%.12g (previous: %s)",
+                    float(_ci_obj),
+                    "none" if _ci_cur is None else f"{_s * _ci_cur:.12g}",
+                )
 
         # --- Adopt a DECLINED convex-kernel attempt's dual bound (#1422) ------ #
         # The attempt above took ``min(time_limit, DISCOPT_CONVEX_KERNEL_BUDGET)`` --
