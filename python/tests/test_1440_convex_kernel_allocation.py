@@ -432,7 +432,28 @@ class TestTheBoundedReserve:
         """
         monkeypatch.setenv("DISCOPT_CONVEX_KERNEL_RESERVE_FRAC", "5.0")
         monkeypatch.setenv("DISCOPT_CONVEX_KERNEL_RESERVE_CAP", "1e9")
-        assert ck.convex_kernel_reserve_seconds(8.0) == pytest.approx(4.0)
+        assert ck.convex_kernel_reserve_seconds(2.0) == pytest.approx(1.0)
+
+    def test_the_reserve_saturates_and_the_env_cap_cannot_raise_it(self, monkeypatch):
+        """#1153: a role-2 carve must stop growing with the caller's budget.
+
+        Regression on the real defect ``test_no_unsaturated_role2_carve`` caught:
+        with only the env knobs bounding it, ``RESERVE_CAP=1e9`` left the reserve
+        tracking ``0.5 * time_limit`` upward forever, so a bigger budget bought
+        more preprocessing instead of more search. The ceiling is a module
+        constant the environment can lower but never raise.
+        """
+        monkeypatch.setenv("DISCOPT_CONVEX_KERNEL_RESERVE_FRAC", "5.0")
+        monkeypatch.setenv("DISCOPT_CONVEX_KERNEL_RESERVE_CAP", "1e9")
+        wide = [ck.convex_kernel_reserve_seconds(t) for t in (100.0, 1_000.0, 3_600.0)]
+        assert wide == [pytest.approx(ck._RESERVE_MAX_S)] * 3, (
+            f"the reserve still grows with the budget ({wide}) -- it is an "
+            f"unsaturated role-2 carve (#1153)"
+        )
+        monkeypatch.setenv("DISCOPT_CONVEX_KERNEL_RESERVE_CAP", "0.5")
+        assert ck.convex_kernel_reserve_seconds(3_600.0) == pytest.approx(0.5), (
+            "the env cap must still be able to LOWER the reserve"
+        )
 
     def test_a_non_finite_or_non_positive_budget_reserves_nothing(self, monkeypatch):
         monkeypatch.setenv("DISCOPT_CONVEX_KERNEL_RESERVE_FRAC", "0.25")

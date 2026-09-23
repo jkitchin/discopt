@@ -757,6 +757,16 @@ def convex_kernel_enabled() -> bool:
     return os.environ.get("DISCOPT_CONVEX_KERNEL", "1") not in ("0", "", "false", "False")
 
 
+#: Hard ceiling on the #1440 reserve, in seconds. A module constant, not a knob:
+#: the reserve is a role-2 wall carve off the caller's budget, so under #1153 it
+#: must SATURATE -- beyond this every further second the caller grants goes to the
+#: search rather than to more preprocessing. 2.0 s is where the measurement puts
+#: it: the default path finds a feasible point on the one in-repo member of the
+#: harmed class in under 2 s (in 0.5 s once the attempt has warmed the evaluator
+#: cache), so a larger reserve buys nothing and costs the attempt.
+_RESERVE_MAX_S = 2.0
+
+
 def convex_kernel_reserve_seconds(time_limit: float) -> float:
     """Seconds withheld from the attempt for the default path (#1440). Default 0.0.
 
@@ -833,10 +843,17 @@ def convex_kernel_reserve_seconds(time_limit: float) -> float:
         return 0.0
     if not (frac > 0.0) or not math.isfinite(time_limit) or time_limit <= 0.0:
         return 0.0
-    # Never withhold so much that the attempt is pointless: the reserve is capped
-    # at half the budget whatever the knobs say, so a mis-set frac cannot silently
-    # turn the kernel off (which is what ``DISCOPT_CONVEX_KERNEL=0`` is for).
-    return float(min(frac * time_limit, max(0.0, cap), 0.5 * time_limit))
+    # ``_RESERVE_MAX_S`` is in the ``min`` so the carve SATURATES, and it is a
+    # module constant rather than the env ``cap`` so that it cannot be raised: with
+    # only the knobs bounding it, ``DISCOPT_CONVEX_KERNEL_RESERVE_CAP=1e9`` left
+    # ``0.5 * time_limit`` growing with the caller's budget, which is exactly
+    # #1153's pathology -- a bigger budget buying more preprocessing instead of
+    # more search (nvs19: 30 s -> -1098.2 over 38403 nodes, 60 s -> -1001.2 over
+    # 7619). Caught by ``test_no_unsaturated_role2_carve``, which was right.
+    # The half-budget term stays for the other end: a mis-set frac must not
+    # silently turn the kernel off, which is what ``DISCOPT_CONVEX_KERNEL=0`` is
+    # for. The env cap can now only LOWER the reserve, never raise it.
+    return float(min(frac * time_limit, max(0.0, cap), 0.5 * time_limit, _RESERVE_MAX_S))
 
 
 def keep_declined_incumbent_enabled() -> bool:
