@@ -33,7 +33,48 @@ class TreeEnsembleFormulation:
     scaling : OffsetScaling, optional
         Input/output affine scaling.
     split_eps : float
-        Epsilon for encoding strict inequalities ``x[j] > threshold``.
+        Half-width of the separation band around each split threshold, applied
+        **symmetrically**: a leaf whose path goes left at a node requires
+        ``x[j] <= thr - split_eps``, and one that goes right requires
+        ``x[j] >= thr + split_eps`` (#1447).
+
+        It must exceed the solver's absolute feasibility tolerance (1e-6). A
+        MILP solver may satisfy a constraint to within that tolerance, and a
+        decision tree is **discontinuous** at its thresholds, so tolerance-sized
+        slack becomes an O(1) error in the prediction. Before #1447 only the
+        right branch was separated, and by exactly 1e-6 -- equal to the
+        tolerance, so its protection was fully consumed. The left branch had
+        none at all, which is how a returned point could sit 3.1e-14 on the
+        *wrong* side of a threshold while the binary claimed the leaf on the
+        near side: the MIP reported 3.1526 where ``ensemble.predict(x)`` gave
+        -2.8501, a discrepancy of 6.00 at the optimizer's own solution.
+
+        The margin that matters is ``split_eps - tol``, which must be positive:
+        a leaf's rows are satisfiable to within ``tol``, so at ``split_eps ==
+        tol`` the protection is exactly consumed. Hence the 1e-5 default, ten
+        times the tolerance. **Measured** on a one-node tree splitting ``[0, 1]``
+        at 0.5, for both 1e-6 and 1e-5, the set the encoding excludes is *not* the
+        full ``(thr - eps, thr + eps)`` band -- ``thr - eps`` and ``thr + eps``
+        both solve, and so does ``thr - tol`` -- it is the threshold **point**
+        itself:
+
+        ===============  ==================  ===========
+        ``x``            ``predict(x)``      MILP
+        ===============  ==================  ===========
+        ``0.5 - eps``    1.0                 1.0
+        ``0.5``          1.0                 **infeasible**
+        ``0.5 + eps``    3.0                 3.0
+        ===============  ==================  ===========
+
+        That is the trade, stated plainly: a point sitting *exactly* on a
+        threshold now makes the model infeasible, where before it was assigned a
+        leaf it may not belong to. A discontinuous function cannot have both --
+        one side of the breakpoint must be given up -- and giving it up **loudly**
+        beats assigning it silently to the leaf with the better value, which is
+        the direction that admits values the tree never attains. A tree is
+        piecewise constant, so this costs no attainable leaf value in an
+        unconstrained optimization; it can only bite a model whose other
+        constraints pin an input onto a threshold, and then it says so.
     """
 
     def __init__(
@@ -42,7 +83,7 @@ class TreeEnsembleFormulation:
         ensemble: TreeEnsembleDefinition,
         prefix: str,
         scaling: OffsetScaling | None = None,
-        split_eps: float = 1e-6,
+        split_eps: float = 1e-5,
     ):
         if ensemble.input_bounds is None:
             raise ValueError("TreeEnsembleDefinition.input_bounds is required for MILP formulation")
@@ -99,20 +140,30 @@ class TreeEnsembleFormulation:
                     thr = float(tree.threshold[node])
 
                     if direction == "left":
-                        # x[j] <= threshold when this leaf is selected. The
-                        # per-constraint big-M `max(ub_j - thr, 0)` is exactly
-                        # the slack needed to reach the feature's upper bound
-                        # when z=0, and inert (clamped to 0) for out-of-box
-                        # thresholds, so it never cuts a feasible point (F2).
-                        M_j = max(float(ub_arr[j]) - thr, 0.0)
+                        # x[j] <= threshold - eps when this leaf is selected.
+                        # The `- eps` is #1447: without it the constraint is
+                        # `x <= thr`, which a solver may satisfy to within its
+                        # feasibility tolerance, letting x sit just ABOVE thr
+                        # while this leaf is claimed -- the side `predict()`
+                        # sends to the sibling. Separated symmetrically with the
+                        # right branch below, so a claimed leaf really does
+                        # contain the returned point.
+                        #
+                        # The per-constraint big-M `max(ub_j - rhs, 0)` is
+                        # exactly the slack needed to reach the feature's upper
+                        # bound when z=0, and inert (clamped to 0) for out-of-box
+                        # thresholds, so a non-selected leaf's row never cuts a
+                        # feasible point (F2).
+                        rhs_thr = thr - self._split_eps
+                        M_j = max(float(ub_arr[j]) - rhs_thr, 0.0)
                         m.subject_to(
-                            inputs[j] <= thr + M_j * (1 - z[l_idx]),
+                            inputs[j] <= rhs_thr + M_j * (1 - z[l_idx]),
                             name=f"{pfx}_t{t}_sL_{node}_{l_idx}",
                         )
                     else:
-                        # x[j] > threshold when this leaf is selected. Big-M
-                        # `max(thr + eps - lb_j, 0)` reaches the feature's lower
-                        # bound when z=0 and clamps to 0 for out-of-box
+                        # x[j] >= threshold + eps when this leaf is selected.
+                        # Big-M `max(thr + eps - lb_j, 0)` reaches the feature's
+                        # lower bound when z=0 and clamps to 0 for out-of-box
                         # thresholds (F2).
                         rhs_thr = thr + self._split_eps
                         M_j = max(rhs_thr - float(lb_arr[j]), 0.0)

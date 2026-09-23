@@ -393,7 +393,7 @@ class TestMOLHeatEquation:
         mol.discretize()
 
         u_var = mol.get_field("u")
-        m.minimize(0 * u_var[0])
+        m.minimize(0 * u_var[0, 0])  # a MOL field is 2-D; index both axes (#1445)
         result = m.solve()
         assert result.status == "optimal"
 
@@ -415,7 +415,7 @@ class TestMOLHeatEquation:
         mol.discretize()
 
         u_var = mol.get_field("u")
-        m.minimize(0 * u_var[0])
+        m.minimize(0 * u_var[0, 0])  # a MOL field is 2-D; index both axes (#1445)
         result = m.solve()
         assert result.status == "optimal"
 
@@ -443,7 +443,7 @@ class TestMOLHeatEquation:
         mol.discretize()
 
         u_var = mol.get_field("u")
-        m.minimize(0 * u_var[0])
+        m.minimize(0 * u_var[0, 0])  # a MOL field is 2-D; index both axes (#1445)
         result = m.solve()
         assert result.status == "optimal"
 
@@ -541,7 +541,7 @@ class TestBoundaryConditionEdgeCases:
         mol.discretize()
 
         u_var = mol.get_field("u")
-        m.minimize(0 * u_var[0])
+        m.minimize(0 * u_var[0, 0])  # a MOL field is 2-D; index both axes (#1445)
         result = m.solve()
         assert result.status == "optimal"
 
@@ -562,6 +562,6 @@ class TestBoundaryConditionEdgeCases:
         mol.discretize()
 
         u_var = mol.get_field("u")
-        m.minimize(0 * u_var[0])
+        m.minimize(0 * u_var[0, 0])  # a MOL field is 2-D; index both axes (#1445)
         result = m.solve()
         assert result.status == "optimal"

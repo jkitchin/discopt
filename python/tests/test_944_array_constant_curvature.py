@@ -275,7 +275,9 @@ class TestNegativeIndexReachesTheRepr:
 
         m = dm.Model("boolidx")
         x = m.continuous("x", shape=(3,), lb=0, ub=1)
-        m.minimize(IndexExpression(x, True) * 1.0)
+        # Reduced to a scalar (#1445) so the objective itself is well-formed;
+        # the IndexExpression under test is still the thing model_to_repr walks.
+        m.minimize(dm.sum(IndexExpression(x, True) * 1.0))
         with pytest.raises(IndexError):
             model_to_repr(m, getattr(m, "_builder", None))
 

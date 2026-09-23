@@ -130,13 +130,30 @@ def test_helper_declines_a_non_constant_objective_node():
 
 @pytest.mark.smoke
 def test_helper_declines_a_vector_constant():
-    """A vector objective on a variable-free model has no scalar optimum."""
+    """A vector objective on a variable-free model has no scalar optimum.
+
+    This pins the *helper's* defensive check, so the invalid objective is
+    installed directly rather than through ``minimize`` -- since #1445 the
+    boundary refuses it, and internal machinery (deserialization, reformulation
+    passes) is the only way such an objective can now reach the solver. The
+    assertion is unchanged; only how the state is reached is.
+    """
+    from discopt.modeling.core import Objective, ObjectiveSense
     from discopt.solver import _constant_objective_result
 
     m = Model()
-    m.minimize(Constant([1.0, 2.0]))
+    m._objective = Objective(Constant([1.0, 2.0]), ObjectiveSense.MINIMIZE)
 
     assert _constant_objective_result(m, 0.0) is None
+
+
+@pytest.mark.smoke
+def test_minimize_refuses_a_vector_constant_at_the_boundary():
+    """#1445 -- the same objective is now refused where it is written."""
+    m = Model()
+    with pytest.raises(ValueError, match=r"minimize\(\) needs a scalar objective"):
+        m.minimize(Constant([1.0, 2.0]))
+    assert m._objective is None, "a refused objective must not be stored"
 
 
 @pytest.mark.smoke

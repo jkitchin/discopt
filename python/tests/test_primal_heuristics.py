@@ -376,7 +376,7 @@ class TestIntegerMask:
         """Continuous-only model has all-False mask."""
         m = Model("cont")
         m.continuous("x", shape=(3,), lb=0, ub=1)
-        m.minimize(m._variables[0])
+        m.minimize(m._variables[0][0])  # scalar objective (#1445); the mask is what is under test
         mask = _get_integer_mask(m)
         assert mask.shape == (3,)
         assert not np.any(mask)
@@ -387,7 +387,7 @@ class TestIntegerMask:
         m.continuous("x", shape=(2,), lb=0, ub=1)
         m.binary("y")
         m.integer("z", lb=0, ub=10)
-        m.minimize(m._variables[0])
+        m.minimize(m._variables[0][0])  # scalar objective (#1445); the mask is what is under test
         mask = _get_integer_mask(m)
         # x(2 cont) + y(1 binary) + z(1 int) = [F, F, T, T]
         assert mask.shape == (4,)
