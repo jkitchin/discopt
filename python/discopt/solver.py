@@ -5543,6 +5543,72 @@ def _withhold_stale_certificate(
     abs_gap_tol: float,
     where: str,
 ) -> tuple[str, Optional[float], bool, Optional[float]]:
+    """:func:`_withhold_stale_certificate_inner`, with the REPORTED gap normalised.
+
+    #1386 defines the published ``gap`` as ``|objective - bound|`` over
+    ``max(|objective|, |bound|, 1.0)``. Every route's exit recomputes it by hand as
+    ``|obj - bound| / max(1.0, |obj|)`` -- the tree's own hybrid denominator, which
+    is correct for the internal termination test and wrong for the reported number
+    because it **drops ``|bound|``**. The two disagree exactly when
+    ``|bound| > max(1, |objective|)``.
+
+    Measured on the vendored ``nvs09`` at a 4 s limit (minimise, ``status="feasible"``,
+    ``objective=-37.894800``, ``bound=-50.589648``): the reported gap was
+    **0.335002** against the **0.250938** its own published pair gives -- the solver
+    overstating its own remaining gap by 33%. The error is one-directional
+    (``max(1.0, |ub|) <= max(|lb|, |ub|, 1.0)``), so a gap is never understated and
+    no certificate was ever granted on it.
+
+    This wrapper is where the correction lives because all four exits that publish
+    a gap already call through here, and at every one of them the returned
+    ``gap_val`` feeds ``SolveResult(gap=...)`` and nothing else -- it is read by no
+    branch. Correcting it therefore cannot move a bound, a status or a
+    certificate; the decision still belongs to ``_recertify_gap_closed`` inside.
+
+    Found by adversarial probe T8 (loop 4, iteration 2), 61 executed comparisons
+    over the vendored corpus plus 13 hand-built models, 1 violation.
+    """
+    status, gap_val, gap_certified, bound_val = _withhold_stale_certificate_inner(
+        status,
+        obj_val,
+        bound_val,
+        gap_val,
+        gap_certified,
+        is_maximize,
+        gap_tolerance,
+        abs_gap_tol,
+        where,
+    )
+    # A withdrawn bound legitimately carries ``gap=None`` -- there is no pair to
+    # compute a gap from, so normalisation must not invent one.
+    if (
+        gap_val is not None
+        and obj_val is not None
+        and bound_val is not None
+        and np.isfinite(obj_val)
+        and np.isfinite(bound_val)
+    ):
+        from discopt.solvers._gap import optimality_gap as _contract_gap
+
+        # ``optimality_gap`` takes (lb, ub) in MINIMISATION sense; on a maximise
+        # model ``bound_val`` is the UPPER bound, so both are negated into that
+        # space rather than passed in the model's sense.
+        _lb, _ub = (-bound_val, -obj_val) if is_maximize else (bound_val, obj_val)
+        gap_val = _contract_gap(_lb, _ub)
+    return status, gap_val, gap_certified, bound_val
+
+
+def _withhold_stale_certificate_inner(
+    status: str,
+    obj_val: Optional[float],
+    bound_val: Optional[float],
+    gap_val: Optional[float],
+    gap_certified: bool,
+    is_maximize: bool,
+    gap_tolerance: float,
+    abs_gap_tol: float,
+    where: str,
+) -> tuple[str, Optional[float], bool, Optional[float]]:
     """Withdraw a certificate the FINAL ``(objective, bound)`` pair does not support.
 
     A tree computes its gap against the incumbent it converged on, and the
