@@ -85,6 +85,7 @@ value in ``python/tests/data/known_optima.toml``.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 import time
@@ -754,6 +755,66 @@ def convex_kernel_enabled() -> bool:
     performance issue; it is no longer a graduation gate.
     """
     return os.environ.get("DISCOPT_CONVEX_KERNEL", "1") not in ("0", "", "false", "False")
+
+
+def convex_kernel_reserve_seconds(time_limit: float) -> float:
+    """Seconds withheld from the attempt for the default path (#1440). Default 0.0.
+
+    ``DISCOPT_CONVEX_KERNEL_RESERVE_FRAC`` (of the caller's budget) capped by
+    ``DISCOPT_CONVEX_KERNEL_RESERVE_CAP`` seconds. At the default frac of ``0`` the
+    reserve is ``0.0`` and the attempt is byte-identical to before, so this is an
+    A/B knob first and a candidate default second.
+
+    **Why a reserve is the only surviving candidate**, measured for #1440 over the
+    4 convex-kernel-eligible instances this repository contains (of 151 ``.nl``
+    files; `www.minlplib.org` is denied by this environment's network policy, so
+    the 39-instance snapshot panel is unavailable):
+
+    * The issue's own suggestion, a **pre-attempt structural predictor**, cannot be
+      fitted. The eligible set is bimodal -- ``syn05m``, ``cvxnonsep_psig40r`` and
+      ``syn05hfsg`` certify in 0.043-0.062 s at every budget from 1 s to 16 s and
+      never touch the allocation; ``clay0303hfsg`` consumes 100 % of every one of
+      those budgets. A threshold separating three points from one is a
+      single-instance solution (CLAUDE.md §2), not a class fix.
+    * A **free trivial seed** does not exist here: 16 executed candidate checks
+      (origin, box-centre, both bound corners) over the 4 instances yield **0**
+      points that pass the #779 verifier.
+    * A **bounded pump seed** (relaxation NLP -> feasibility pump -> verify) finds a
+      verified point on 3 of the 4, but not on the one in the harmed class: 1.92 s
+      spent on ``clay0303hfsg``, nothing returned.
+    * **Seeding the tree is worth nothing here anyway**, and that is an upper bound,
+      not an estimate. Handing the tree an ORACLE cutoff -- the reference optimum
+      itself -- leaves it at **149 nodes and 16.0-16.1 s**, against 149 nodes and
+      16.1-16.3 s unseeded. The attempt's cost is the 149 nodes' own relaxation
+      work (~9 nodes/s), not exploration a cutoff would prune, so no seed of any
+      provenance can rescue the #764 design for this class.
+
+    **What a reserve costs**, and why it is default-0 rather than simply switched
+    on: it is the fractional cap under another name, and #1422 measured a
+    50 %-of-budget cutoff destroying **3 of 16 certifications at a 4 s budget**.
+    §5's cert-clean bar forbids a certification regression outright, so this ships
+    OFF until a panel says otherwise -- and the panel that matters is over the
+    snapshot's 19 certifiers, which is the population a reserve can hurt and which
+    has **zero members here** (all 3 in-repo certifiers finish in <0.07 s, so any
+    reserve below ~90 % of the budget is invisible to them).
+
+    Note also that #911's stated ground for rejecting the cap -- ``clay0303hfsg``
+    "certifies in ~8 s" -- does not reproduce on the current tree: it declines at
+    8 s, at 10 s and at 16 s, and its certifying run takes 149 nodes and ~16 s.
+    Recorded per CLAUDE.md §4; it weakens the case against a cap without being a
+    case for one.
+    """
+    try:
+        frac = float(os.environ.get("DISCOPT_CONVEX_KERNEL_RESERVE_FRAC", "0"))
+        cap = float(os.environ.get("DISCOPT_CONVEX_KERNEL_RESERVE_CAP", "2.0"))
+    except ValueError:
+        return 0.0
+    if not (frac > 0.0) or not math.isfinite(time_limit) or time_limit <= 0.0:
+        return 0.0
+    # Never withhold so much that the attempt is pointless: the reserve is capped
+    # at half the budget whatever the knobs say, so a mis-set frac cannot silently
+    # turn the kernel off (which is what ``DISCOPT_CONVEX_KERNEL=0`` is for).
+    return float(min(frac * time_limit, max(0.0, cap), 0.5 * time_limit))
 
 
 def keep_declined_incumbent_enabled() -> bool:

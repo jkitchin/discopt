@@ -7630,6 +7630,7 @@ class Model:
             _ck_res = None
             try:
                 from discopt.solvers._convex_kernel import (
+                    convex_kernel_reserve_seconds,
                     keep_declined_bound_enabled,
                     keep_declined_incumbent_enabled,
                     last_attempt_rust_seconds,
@@ -7640,8 +7641,19 @@ class Model:
                 )
 
                 try:
+                    # #1440: withhold a bounded slice so a DECLINED attempt cannot
+                    # leave the default path with ~0 s. Default 0.0 -- the attempt
+                    # is byte-identical until the knob is set, because a reserve is
+                    # the fractional cap under another name and #1422 measured a
+                    # 50 % cutoff destroying 3 of 16 certifications at a 4 s budget.
+                    # See ``convex_kernel_reserve_seconds`` for the measured closure
+                    # of every other candidate (predictor, free seed, pump seed, and
+                    # the ORACLE-seed ceiling that kills the #764 port outright).
+                    _ck_reserve = convex_kernel_reserve_seconds(float(time_limit))
                     _ck_res = try_convex_solve(
-                        self, time_limit=time_limit, gap_tolerance=gap_tolerance
+                        self,
+                        time_limit=max(0.0, float(time_limit) - _ck_reserve),
+                        gap_tolerance=gap_tolerance,
                     )
                 finally:
                     # In the ``finally`` so an attempt that raised part-way through
