@@ -5500,6 +5500,34 @@ class Model:
 
     # ── Objective ──
 
+    @staticmethod
+    def _scalar_objective(expr: Expression, sense: str) -> Expression:
+        """Refuse a non-scalar objective here, where the user's line is (#1445).
+
+        A shape-``(k,)`` objective used to be accepted silently and surfaced only
+        at solve time as ``jax.grad``'s "Gradient only defined for scalar-output
+        functions", or as a wall of ``pounce::py ERROR`` lines -- six frames below
+        anything the caller wrote, naming a library they never imported. Every
+        route failed loudly (no false bound was ever produced), but none of them
+        said what was wrong with the model.
+
+        Anything of ``size == 1`` is scalar for this purpose -- shape ``()``,
+        ``(1,)`` and ``(1, 1)`` all denote a single number and all already
+        worked, so they stay accepted. Only a genuinely multi-element objective
+        is refused.
+        """
+        shape = getattr(expr, "shape", None)
+        if shape is None or int(np.prod(shape)) == 1:
+            return expr
+        raise ValueError(
+            f"{sense}() needs a scalar objective, got shape {tuple(shape)}. "
+            f"Reduce it first -- dm.sum(expr) for a total, expr[i] for one "
+            f"component, or w @ expr for a weighted combination. To "
+            f"optimize several objectives at once, see discopt.mo "
+            f"(weighted_sum / epsilon_constraint), which returns a Pareto front "
+            f"rather than a single point."
+        )
+
     def minimize(self, expr: Expression):
         """
         Set the objective to minimize.
@@ -5507,14 +5535,23 @@ class Model:
         Parameters
         ----------
         expr : Expression
-            Expression to minimize.
+            Expression to minimize. Must be scalar (any shape whose total size
+            is 1); a multi-element expression is refused (#1445) -- reduce it,
+            or use :mod:`discopt.mo` for several objectives.
+
+        Raises
+        ------
+        ValueError
+            If ``expr`` has more than one element.
 
         Examples
         --------
         >>> m.minimize(cost @ x)
         >>> m.minimize(dm.sum(lambda i: c[i] * x[i], over=range(n)))
         """
-        self._objective = Objective(_wrap(expr), ObjectiveSense.MINIMIZE)
+        self._objective = Objective(
+            self._scalar_objective(_wrap(expr), "minimize"), ObjectiveSense.MINIMIZE
+        )
 
     def maximize(self, expr: Expression):
         """
@@ -5523,13 +5560,22 @@ class Model:
         Parameters
         ----------
         expr : Expression
-            Expression to maximize.
+            Expression to maximize. Must be scalar (any shape whose total size
+            is 1); a multi-element expression is refused (#1445) -- reduce it,
+            or use :mod:`discopt.mo` for several objectives.
+
+        Raises
+        ------
+        ValueError
+            If ``expr`` has more than one element.
 
         Examples
         --------
         >>> m.maximize(profit @ x - dm.sum(penalty * y))
         """
-        self._objective = Objective(_wrap(expr), ObjectiveSense.MAXIMIZE)
+        self._objective = Objective(
+            self._scalar_objective(_wrap(expr), "maximize"), ObjectiveSense.MAXIMIZE
+        )
 
     # ── Bound scoping: the shared primitive behind every fix ──────────
 
