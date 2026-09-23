@@ -756,6 +756,67 @@ def convex_kernel_enabled() -> bool:
     return os.environ.get("DISCOPT_CONVEX_KERNEL", "1") not in ("0", "", "false", "False")
 
 
+def keep_declined_incumbent_enabled() -> bool:
+    """`DISCOPT_CONVEX_KERNEL_KEEP_INCUMBENT` opt-out (default-ON, #1440).
+
+    The incumbent counterpart of :func:`keep_declined_bound_enabled`. A declined
+    attempt discards not only the dual bound #1429 now recovers but, in the window
+    between its first incumbent and convergence, a **feasible point** as well.
+
+    **Why this is a stronger soundness argument than #1429's, not a weaker one.**
+    That flag adopts a bound, which cannot be checked -- its docstring has to rest
+    on ``build_convex_spec`` being a faithful relaxation, evidenced by an oracle
+    panel. An incumbent is **directly verifiable**, and this publishes one only
+    after it passes :func:`_incumbent_is_feasible` -- the very #779 guard the
+    certify path already gates on, evaluating the PRISTINE model's rows, bounds and
+    integrality at the point. A point that passes it is feasible, so for a
+    minimization its objective is at or above the true optimum: adopting it cannot
+    produce a false primal. Verification failure publishes nothing (fail closed).
+
+    **Measured on the one harmed-class instance this repository contains**
+    (``clay0303hfsg``; see ``test_1440_convex_kernel_allocation.py`` for why the
+    "zero members in-repo" record was wrong). The incumbent arrives late, which is
+    the back-loading #1422 measured, so the window is real but narrow:
+
+    ======  ==============================  =====================
+    budget  declined attempt holds one      value
+    ======  ==============================  =====================
+    10 s    0 / 5                           --
+    12 s    4 / 5                           47287.56
+    14 s    5 / 5                           47287.56
+    ======  ==============================  =====================
+
+    Verified feasible against the pristine model on every run that produced one
+    (``verify_point(...).ok = True``), and above the reference optimum 26669.11 --
+    valid, not a false primal. At 14 s the same attempt also proves a bound of
+    23239.6--25496.4, so ON yields *both* columns where today it yields only the
+    bound and the ``DISCOPT_CONVEX_KERNEL=0`` arm yields only a 100 %-gap incumbent.
+
+    **What this does and does not settle.** Like #1429 it takes no time from the
+    attempt, so it cannot cost a certification the way #911's fractional cap and
+    #1422's abandon-on-no-incumbent both do. It does **not** fix the allocation --
+    #1440's item stays open. It stops more of the spend being paid for nothing.
+
+    **The panel this is owed, and why it is not attached.** §5's net-positive bar
+    wants breadth. Only **4 of 124** ``.nl`` instances in this repository are
+    kernel-eligible and only one exercises this mechanism, so the in-repo corpus
+    cannot score it; the MINLPLib snapshot can, and is absent from the environment
+    this was built in, whose network policy denies ``www.minlplib.org`` (403 at the
+    proxy CONNECT). Shipping default-ON therefore rests on the soundness argument
+    above -- verification, not breadth -- plus the mechanism being post-hoc: it
+    lands on an already-finished result and is never used to prune, so it cannot
+    cut an optimum out of any search. **What would change this row:** the snapshot
+    panel over the 39 eligible instances, ON vs OFF interleaved, scoring incumbents
+    gained against ``minlplib.solu``.
+    """
+    return os.environ.get("DISCOPT_CONVEX_KERNEL_KEEP_INCUMBENT", "1") not in (
+        "0",
+        "",
+        "false",
+        "False",
+    )
+
+
 def keep_declined_bound_enabled() -> bool:
     """`DISCOPT_CONVEX_KERNEL_KEEP_BOUND` opt-out (default-ON, #1422).
 
@@ -912,6 +973,10 @@ class _AttemptClock(threading.local):
         # Rigorous dual bound proved by a DECLINED attempt, in the MODEL's objective
         # values, or None (#1422). See :func:`last_declined_bound`.
         self.declined_bound: Optional[float] = None
+        # VERIFIED feasible point held by a DECLINED attempt, as
+        # ``(objective, x_dict)``, or None (#1440). Published only after the #779
+        # guard passes on the pristine model. See :func:`last_declined_incumbent`.
+        self.declined_incumbent: Optional[tuple] = None
 
 
 _ATTEMPT = _AttemptClock()
@@ -931,6 +996,34 @@ def last_attempt_seconds() -> float:
     subclass's ``__init__`` the first time the object is touched on each thread.
     """
     return float(_ATTEMPT.seconds)
+
+
+def last_declined_incumbent() -> Optional[tuple]:
+    """VERIFIED feasible point held by the last DECLINED attempt, or ``None``.
+
+    Returns ``(objective, x_dict)`` in the MODEL's own objective values and
+    variable names, or ``None``. #1440, the incumbent counterpart of
+    :func:`last_declined_bound`.
+
+    **Published only for ``time_limit`` / ``node_limit``**, the same two outcomes
+    the bound uses and for the same reason: ``exhausted`` means the kernel is
+    already telling us something is off, and nothing is worth taking from a run we
+    have just decided not to trust.
+
+    **Published only after the point VERIFIES.** ``_incumbent_is_feasible`` --
+    #779's guard, which the certify path gates on -- evaluates the pristine model's
+    rows, bounds and integrality at the point. That is the whole soundness argument
+    and it is a check rather than an inference: a point that passes is feasible, so
+    for a minimization its objective is at or above the true optimum, and adopting
+    it cannot produce a false primal. A failed or raising verification publishes
+    nothing.
+
+    Measured on ``clay0303hfsg`` (see :func:`keep_declined_incumbent_enabled`): the
+    point arrives late, as #1422's back-loading predicts -- 0/5 declined attempts
+    hold one at a 10 s budget, 4/5 at 12 s, 5/5 at 14 s -- and every one that
+    appeared verified, at 47287.56 against a reference optimum of 26669.11.
+    """
+    return _ATTEMPT.declined_incumbent
 
 
 def last_declined_bound() -> Optional[float]:
@@ -1036,6 +1129,7 @@ def try_convex_solve(
     # #1422: cleared BEFORE the flag check, so a flag-off solve (and any later solve
     # on this thread) can never read a bound left behind by an earlier attempt.
     _ATTEMPT.declined_bound = None
+    _ATTEMPT.declined_incumbent = None
     if not convex_kernel_enabled():
         return None
     # Clock starts HERE, after the flag check, so a flag-off solve reads exactly 0.0
@@ -1104,6 +1198,12 @@ def _attempt_convex_solve(
             # ``isfinite`` check would adopt "no bound" as if it were one.
             if _b is not None and np.isfinite(_b) and abs(float(_b)) < BOUND_INF:
                 _ATTEMPT.declined_bound = float(_b)
+        # #1440: the same attempt may also be holding a feasible point, which dies
+        # here with it. Deliberately OUTSIDE the status gate above: that gate exists
+        # because only those two statuses make ``bound`` a genuine minimum over OPEN
+        # nodes, and an incumbent carries no such caveat -- it is a POINT, and the
+        # verifier settles it directly whatever the tree's status was.
+        _publish_declined_incumbent(model, incumbent, inc_x)
         return None
     status = "optimal"
 
@@ -1132,6 +1232,10 @@ def _attempt_convex_solve(
             gap,
             gap_tolerance,
         )
+        # #1440: this decline discards a point that ``_incumbent_is_feasible`` has
+        # ALREADY accepted six lines above -- the gap, not the point, is what failed
+        # the re-test. Recover it like any other declined incumbent.
+        _publish_declined_incumbent(model, incumbent, inc_x)
         return None
     return SolveResult(
         status=status,
@@ -1144,6 +1248,43 @@ def _attempt_convex_solve(
         gap_certified=(status == "optimal"),
         nlp_bb=False,
     )
+
+
+def _publish_declined_incumbent(model, incumbent, inc_x) -> None:
+    """#1440: offer a DECLINED attempt's feasible point to :meth:`Model.solve`.
+
+    Unlike the dual bound #1422 recovers, an incumbent can be CHECKED rather than
+    inferred -- so it is, with #779's guard, against the PRISTINE model, before it is
+    published at all. Fail closed: anything that does not verify, or that raises
+    while being verified, publishes nothing and leaves the default path untouched.
+
+    Idempotent per attempt by construction: ``try_convex_solve`` clears the slot
+    before each attempt, and only one decline path runs per attempt.
+    """
+    import numpy as np
+
+    if incumbent is None or not np.isfinite(incumbent):
+        return
+    inc_x = np.asarray(inc_x, float)
+    if inc_x.size == 0:
+        return
+    try:
+        x_dict, x_flat = _unflatten(model, inc_x)
+        if _incumbent_is_feasible(model, x_flat):
+            _ATTEMPT.declined_incumbent = (float(incumbent), x_dict)
+        else:
+            logger.debug(
+                "convex kernel: a declined attempt's incumbent %.12g did not verify "
+                "against the pristine model; not publishing it",
+                float(incumbent),
+            )
+    except Exception as exc:  # pragma: no cover - verifier robustness
+        logger.debug(
+            "convex kernel: verifying a declined attempt's incumbent raised %s: %s; "
+            "not publishing it",
+            type(exc).__name__,
+            exc,
+        )
 
 
 def _unflatten(model, inc_x):

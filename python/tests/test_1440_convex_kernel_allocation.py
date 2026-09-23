@@ -42,16 +42,28 @@ REFERENCE_OPTIMUM = 26669.10955143
 #: 12 s, consuming ~100% of each; certifies at 16 s using 99.6% of it.
 TIGHT = 2.0
 
+#: Budget at which the declined attempt reliably HOLDS a feasible point (#1440).
+#: The kernel's work is back-loaded -- its first incumbent arrives essentially at
+#: convergence -- so this is measured, not guessed: 5 replicates each gave 0/5 at
+#: 10 s, 4/5 at 12 s and 5/5 at 14 s, always the same point (47287.5613). The
+#: tests that use it skip rather than fail when nothing was published, since a
+#: slower machine legitimately reaches convergence later.
+RECOVERY_BUDGET = 14.0
+
 
 def _fresh():
     return from_nl(_NL)
 
 
-pytestmark = pytest.mark.skipif(
+#: Applied per class rather than module-wide: the adoption guards below drive the
+#: block with a synthetic point on a model built in-process, so they must keep
+#: running on a tree that does not vendor this instance.
+needs_nl = pytest.mark.skipif(
     not os.path.exists(_NL), reason="vendored clay0303hfsg.nl not present"
 )
 
 
+@needs_nl
 class TestTheHarmedClassIsPresentInThisRepository:
     """Corrects #1422's "zero members of the harmed class" record."""
 
@@ -81,6 +93,7 @@ class TestTheHarmedClassIsPresentInThisRepository:
         )
 
 
+@needs_nl
 class TestTheSoundnessInvariantsAnyFixMustKeep:
     @pytest.mark.slow
     def test_a_recovered_declined_bound_never_exceeds_the_optimum(self):
@@ -125,6 +138,7 @@ class TestTheSoundnessInvariantsAnyFixMustKeep:
                 )
 
 
+@needs_nl
 class TestTheKernelStillEarnsItsKeepHere:
     """The other half: a fix must not stop this instance certifying.
 
@@ -144,3 +158,215 @@ class TestTheKernelStillEarnsItsKeepHere:
             f"certified {r.objective!r} against the reference optimum {REFERENCE_OPTIMUM!r}"
         )
         assert r.bound <= REFERENCE_OPTIMUM + 1e-6
+
+
+@needs_nl
+class TestTheDeclinedAttemptsIncumbentIsRecovered:
+    """#1440: a declined attempt also discards any FEASIBLE POINT it found.
+
+    Same waste as #1422's discarded dual bound, the other half of it, and free in
+    the same way: it recovers what the spend already produced rather than changing
+    the allocation. ``DISCOPT_CONVEX_KERNEL_KEEP_INCUMBENT`` gates it (default ON).
+    """
+
+    def test_the_flag_is_on_by_default_and_has_a_working_opt_out(self, monkeypatch):
+        monkeypatch.delenv("DISCOPT_CONVEX_KERNEL_KEEP_INCUMBENT", raising=False)
+        assert ck.keep_declined_incumbent_enabled() is True
+        monkeypatch.setenv("DISCOPT_CONVEX_KERNEL_KEEP_INCUMBENT", "0")
+        assert ck.keep_declined_incumbent_enabled() is False
+
+    @pytest.mark.slow
+    def test_a_published_point_is_feasible_in_the_pristine_model(self):
+        """Whatever is published must be a point, not a number someone hopes is one.
+
+        ``_incumbent_is_feasible`` runs before publication; this re-checks it here
+        with the same verifier on a FRESH parse, so the test does not take the
+        publisher's word for its own guard.
+        """
+        from discopt.validation.feasibility import verify_point
+
+        ck.try_convex_solve(_fresh(), time_limit=RECOVERY_BUDGET, gap_tolerance=1e-4)
+        published = ck.last_declined_incumbent()
+        if published is None:
+            pytest.skip(
+                f"no incumbent was published at {RECOVERY_BUDGET}s on this machine; "
+                f"the kernel's first incumbent arrives essentially at convergence, so "
+                f"a slower machine legitimately has none to recover"
+            )
+        obj, xd = published
+        m = _fresh()
+        flat = np.concatenate(
+            [np.atleast_1d(np.asarray(xd[v.name], dtype=float)).ravel() for v in m._variables]
+        )
+        assert verify_point(m, flat).ok, (
+            "a point that does NOT satisfy the pristine model was published as a "
+            "recoverable incumbent -- this is the false-primal class (CLAUDE.md §1)"
+        )
+        assert obj >= REFERENCE_OPTIMUM - 1e-3, (
+            f"published incumbent {obj!r} is BELOW the reference optimum {REFERENCE_OPTIMUM!r}"
+        )
+
+    @pytest.mark.slow
+    def test_the_published_point_reaches_the_caller(self):
+        """The fails-before assertion: publication is worthless if nothing adopts it.
+
+        Measured before the fix, 3 reps at this budget: the attempt held
+        47287.5613 every time and ``Model.solve`` returned ``objective=None`` every
+        time. With the kernel off the solve reports an incumbent but a bound of
+        -0.0 (a 100% gap), so neither configuration reported a usable pair.
+        """
+        m = _fresh()
+        r = m.solve(time_limit=RECOVERY_BUDGET, gap_tolerance=1e-4)
+        published = ck.last_declined_incumbent()
+        if published is None:
+            pytest.skip(f"no incumbent was published at {RECOVERY_BUDGET}s on this machine")
+        if r.gap_certified:
+            pytest.skip("this machine certified within the budget; nothing was declined")
+        assert r.objective is not None, (
+            f"the declined attempt published a verified incumbent {published[0]!r} "
+            f"and the solve still reported none -- the recovery is not wired up"
+        )
+        assert r.objective == pytest.approx(published[0], rel=1e-9), (
+            f"reported {r.objective!r} against the published {published[0]!r}"
+        )
+        assert r.x, "an objective was adopted without the point it came from"
+        assert not r.gap_certified, "a recovered incumbent is never a certificate"
+        assert r.objective >= REFERENCE_OPTIMUM - 1e-3
+
+
+def _bilinear(sense: str):
+    """A model the convex kernel REFUSES, so the adoption path is what is tested.
+
+    ``x*y`` on a box is nonconvex, so ``build_convex_spec`` declines it and the
+    solve goes through the default path -- which is the path the recovery block
+    sits on. The test asserts the refusal rather than assuming it (CLAUDE.md #6).
+    """
+    from discopt import Model
+
+    m = Model()
+    x = m.continuous("x", lb=0.0, ub=4.0)
+    y = m.continuous("y", lb=0.0, ub=4.0)
+    m.constraint(x + y <= 6.0)
+    if sense == "min":
+        m.minimize(x * y)
+    else:
+        m.maximize(x * y)
+    return m
+
+
+class TestTheAdoptionGuards:
+    """Deterministic unit coverage of the adoption block itself.
+
+    The end-to-end tests above need the kernel to reach convergence-adjacent work
+    on a real instance, which is a machine-speed question. These drive the block
+    directly by publishing a synthetic point, so the guards are pinned on every
+    runner regardless of speed.
+    """
+
+    @staticmethod
+    def _stub(monkeypatch, published, *, fake):
+        """Publish ``published`` as the declined attempt's incumbent and make the
+        default path return ``fake``."""
+        import discopt.solver as _solver
+
+        monkeypatch.setattr(ck, "last_declined_incumbent", lambda: published)
+        monkeypatch.setattr(_solver, "solve_model", lambda *a, **k: fake)
+
+    @staticmethod
+    def _fake(objective=None, bound=None, status="time_limit", certified=False):
+        from discopt.modeling.core import SolveResult
+
+        r = SolveResult(status=status, objective=objective, gap_certified=certified)
+        if bound is not None:
+            r._set_bound(bound, valid=True, source="bnb_tree")
+        return r
+
+    def test_the_fixture_model_is_refused_by_the_kernel(self):
+        assert ck.build_convex_spec(_bilinear("min")) is None, (
+            "the fixture is now kernel-eligible, so these tests would exercise the "
+            "kernel's own accept path instead of the adoption block"
+        )
+
+    def test_a_point_is_adopted_when_the_default_path_found_none(self, monkeypatch):
+        from discopt.solvers._gap import optimality_gap
+
+        point = {"x": np.array(1.0), "y": np.array(2.0)}
+        self._stub(monkeypatch, (2.0, point), fake=self._fake(bound=-16.0))
+        r = _bilinear("min").solve(time_limit=2.0, gap_tolerance=1e-4)
+        assert r.objective == pytest.approx(2.0)
+        assert set(r.x) == {"x", "y"}
+        assert r.x["x"] == pytest.approx(1.0)
+        assert not r.gap_certified, "a recovered point must never certify"
+        assert r.status == "time_limit", "a recovered point must not upgrade the status"
+        assert r.gap == pytest.approx(optimality_gap(-16.0, 2.0)), (
+            "the gap must be recomputed from the pair actually reported (#1386)"
+        )
+
+    def test_a_worse_point_is_ignored(self, monkeypatch):
+        point = {"x": np.array(1.0), "y": np.array(2.0)}
+        self._stub(monkeypatch, (2.0, point), fake=self._fake(objective=0.5, bound=-16.0))
+        r = _bilinear("min").solve(time_limit=2.0, gap_tolerance=1e-4)
+        assert r.objective == pytest.approx(0.5), (
+            "adopting a WORSE incumbent than the solve already had is a regression, not a recovery"
+        )
+
+    def test_the_sense_is_respected(self, monkeypatch):
+        """On a MAXIMIZE model, 'better' means LARGER -- the #860 lesson.
+
+        A sign-blind comparison would adopt 2.0 over 6.0 here and report the worse
+        of the two as the incumbent.
+        """
+        point = {"x": np.array(1.0), "y": np.array(2.0)}
+        self._stub(monkeypatch, (2.0, point), fake=self._fake(objective=6.0, bound=16.0))
+        r = _bilinear("max").solve(time_limit=2.0, gap_tolerance=1e-4)
+        assert r.objective == pytest.approx(6.0)
+
+        self._stub(monkeypatch, (2.0, point), fake=self._fake(bound=16.0))
+        r = _bilinear("max").solve(time_limit=2.0, gap_tolerance=1e-4)
+        assert r.objective == pytest.approx(2.0), (
+            "a maximize model with no incumbent should still adopt the recovered point"
+        )
+
+    def test_a_point_that_beats_a_certified_optimum_is_refused_loudly(self, monkeypatch, caplog):
+        """Two claims that cannot both be right: report neither, say so (§3)."""
+        point = {"x": np.array(1.0), "y": np.array(2.0)}
+        self._stub(
+            monkeypatch,
+            (2.0, point),
+            fake=self._fake(objective=3.0, bound=3.0, status="optimal", certified=True),
+        )
+        with caplog.at_level("ERROR", logger="discopt.solver"):
+            r = _bilinear("min").solve(time_limit=2.0, gap_tolerance=1e-4)
+        assert r.objective == pytest.approx(3.0), "a certified result was overwritten"
+        assert r.gap_certified is True
+        assert any("DISCARDING" in rec.message for rec in caplog.records), (
+            "the contradiction was resolved SILENTLY -- CLAUDE.md §3 requires a "
+            "loud refusal, not a quiet preference"
+        )
+
+    def test_an_infeasibility_proof_is_not_overwritten_by_a_point(self, monkeypatch, caplog):
+        point = {"x": np.array(1.0), "y": np.array(2.0)}
+        self._stub(monkeypatch, (2.0, point), fake=self._fake(status="infeasible"))
+        with caplog.at_level("ERROR", logger="discopt.solver"):
+            r = _bilinear("min").solve(time_limit=2.0, gap_tolerance=1e-4)
+        assert r.status == "infeasible"
+        assert r.objective is None
+        assert any("DISCARDING" in rec.message for rec in caplog.records)
+
+    def test_a_point_below_a_proven_dual_bound_is_refused_loudly(self, monkeypatch, caplog):
+        point = {"x": np.array(1.0), "y": np.array(2.0)}
+        self._stub(monkeypatch, (2.0, point), fake=self._fake(bound=5.0))
+        with caplog.at_level("ERROR", logger="discopt.solver"):
+            r = _bilinear("min").solve(time_limit=2.0, gap_tolerance=1e-4)
+        assert r.objective is None, (
+            "a point BELOW a dual bound the solve proved was adopted; one of the two "
+            "is unsound and neither may be reported"
+        )
+        assert any("DISCARDING" in rec.message for rec in caplog.records)
+
+    def test_the_opt_out_disables_adoption(self, monkeypatch):
+        monkeypatch.setenv("DISCOPT_CONVEX_KERNEL_KEEP_INCUMBENT", "0")
+        point = {"x": np.array(1.0), "y": np.array(2.0)}
+        self._stub(monkeypatch, (2.0, point), fake=self._fake(bound=-16.0))
+        r = _bilinear("min").solve(time_limit=2.0, gap_tolerance=1e-4)
+        assert r.objective is None, "=0 must restore the pre-#1440 behaviour exactly"
