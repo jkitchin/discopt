@@ -789,14 +789,36 @@ def convex_kernel_reserve_seconds(time_limit: float) -> float:
       work (~9 nodes/s), not exploration a cutoff would prune, so no seed of any
       provenance can rescue the #764 design for this class.
 
-    **What a reserve costs**, and why it is default-0 rather than simply switched
-    on: it is the fractional cap under another name, and #1422 measured a
-    50 %-of-budget cutoff destroying **3 of 16 certifications at a 4 s budget**.
-    §5's cert-clean bar forbids a certification regression outright, so this ships
-    OFF until a panel says otherwise -- and the panel that matters is over the
-    snapshot's 19 certifiers, which is the population a reserve can hurt and which
-    has **zero members here** (all 3 in-repo certifiers finish in <0.07 s, so any
-    reserve below ~90 % of the budget is invisible to them).
+    **The A/B was run** (2026-09-23, ``scratchpad/k1440/reserve_ab.py``, 4 instances
+    x 5 budgets x 2 arms, interleaved within each cell, ``frac=0.25 cap=2.0``):
+    **20 cells, 44 executed soundness comparisons, 0 violations.**
+
+    * *Cert-clean -- PASSES.* All 15 certifier cells stay ``cert=True`` with
+      bit-identical objective and bound, attempts 0.044-0.069 s. A reserve is simply
+      invisible to a 0.05 s attempt, so there is no certification to regress.
+    * *Net-positive -- FAILS.* The whole effect is on ``clay0303hfsg``: at 2 s it
+      gains an incumbent (29192.72 against none) and a bound (1700 against ~0); at
+      8 s it gains an incumbent (36612.98 against none) and loses dual (2200 against
+      2431); at 16 s it loses BOTH (47287.56/25496.44 against 36397.83/25923.04,
+      because the attempt that keeps its full 16 s holds a better point at the
+      deadline for #1440's recovery to adopt). 1 s and 4 s are ties. Two gains, one
+      loss, seventeen neutral cells, all on one instance -- CLAUDE.md §2's "benefit
+      confined to a named instance", so it does not graduate.
+
+    **§5 classification: OUT OF SCOPE for the three-outcome rule** -- this is a
+    numeric tuning knob whose ``0`` is a *value* rather than an off-switch, the
+    ``DISCOPT_HEUR_OFFSET`` / ``DISCOPT_ROOT_CUT_ROUNDS`` shape named in §5's "Out
+    of scope" clause, not a stalled graduation gate. Stated here because
+    ``docs/dev/flag-retirement-audit.md`` triages from gate docstrings and already
+    records getting four of nine wrong by doing so.
+
+    **What would make it a default:** the panel over the snapshot's 19 certifiers,
+    which is the population a reserve can actually hurt and which has **zero members
+    here** -- all 3 in-repo certifiers finish in <0.07 s, so any reserve below ~90 %
+    of the budget is invisible to them, and the cert-clean pass above is therefore
+    weaker evidence than its 15-for-15 looks. #1422 measured a 50 %-of-budget cutoff
+    destroying **3 of 16 certifications at a 4 s budget** on that corpus; until that
+    is re-measured with the reserve's exact arithmetic, OFF is the honest default.
 
     Note also that #911's stated ground for rejecting the cap -- ``clay0303hfsg``
     "certifies in ~8 s" -- does not reproduce on the current tree: it declines at

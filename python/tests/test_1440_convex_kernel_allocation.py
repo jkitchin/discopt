@@ -396,3 +396,75 @@ class TestTheAdoptionGuards:
         self._stub(monkeypatch, (2.0, POINT), fake=self._fake(bound=-16.0))
         r = _bilinear("min").solve(time_limit=2.0, gap_tolerance=1e-4)
         assert r.objective is None, "=0 must restore the pre-#1440 behaviour exactly"
+
+
+class TestTheBoundedReserve:
+    """#1440: the attempt may be made to leave the default path a bounded slice.
+
+    Default ``0.0`` -- the attempt is byte-identical until the knob is set. The
+    measured reason it is not a default (cert-clean, but its benefit is confined to
+    one instance at two of five budgets, with a counterexample at a third) is on
+    ``convex_kernel_reserve_seconds``, together with the closure of every other
+    candidate fix for the allocation.
+    """
+
+    def test_no_reserve_by_default(self, monkeypatch):
+        monkeypatch.delenv("DISCOPT_CONVEX_KERNEL_RESERVE_FRAC", raising=False)
+        for tl in (1.0, 8.0, 120.0, 3600.0):
+            assert ck.convex_kernel_reserve_seconds(tl) == 0.0, (
+                f"tl={tl}: a reserve appeared without the knob being set, so the "
+                f"attempt is no longer byte-identical by default"
+            )
+
+    def test_the_reserve_is_a_fraction_under_a_cap(self, monkeypatch):
+        monkeypatch.setenv("DISCOPT_CONVEX_KERNEL_RESERVE_FRAC", "0.25")
+        monkeypatch.setenv("DISCOPT_CONVEX_KERNEL_RESERVE_CAP", "2.0")
+        assert ck.convex_kernel_reserve_seconds(4.0) == pytest.approx(1.0)
+        assert ck.convex_kernel_reserve_seconds(8.0) == pytest.approx(2.0), "cap binds"
+        assert ck.convex_kernel_reserve_seconds(3600.0) == pytest.approx(2.0)
+
+    def test_the_reserve_never_takes_more_than_half_the_budget(self, monkeypatch):
+        """A mis-set knob must not silently turn the kernel off.
+
+        Turning it off is what ``DISCOPT_CONVEX_KERNEL=0`` is for; a reserve that
+        swallowed the budget would disable the kernel while still reporting it as
+        enabled, which is the kind of silent divergence CLAUDE.md §3 refuses.
+        """
+        monkeypatch.setenv("DISCOPT_CONVEX_KERNEL_RESERVE_FRAC", "5.0")
+        monkeypatch.setenv("DISCOPT_CONVEX_KERNEL_RESERVE_CAP", "1e9")
+        assert ck.convex_kernel_reserve_seconds(8.0) == pytest.approx(4.0)
+
+    def test_a_non_finite_or_non_positive_budget_reserves_nothing(self, monkeypatch):
+        monkeypatch.setenv("DISCOPT_CONVEX_KERNEL_RESERVE_FRAC", "0.25")
+        assert ck.convex_kernel_reserve_seconds(float("inf")) == 0.0
+        assert ck.convex_kernel_reserve_seconds(0.0) == 0.0
+        assert ck.convex_kernel_reserve_seconds(-1.0) == 0.0
+
+    def test_an_unparseable_knob_reserves_nothing(self, monkeypatch):
+        """Fail closed: a typo must not change the allocation."""
+        monkeypatch.setenv("DISCOPT_CONVEX_KERNEL_RESERVE_FRAC", "one quarter")
+        assert ck.convex_kernel_reserve_seconds(8.0) == 0.0
+
+
+@needs_nl
+class TestTheReserveReachesTheAttempt:
+    @pytest.mark.slow
+    def test_the_attempt_is_shortened_by_the_reserve(self, monkeypatch):
+        """The knob has to move the ATTEMPT, not just compute a number.
+
+        Measured on the harmed instance, which consumes 100% of every budget from
+        1 s to 16 s: without the reserve the attempt spends ~the whole budget, with
+        it the attempt stops a reserve short and the default path gets that slice.
+        """
+        monkeypatch.setenv("DISCOPT_CONVEX_KERNEL_RESERVE_FRAC", "0.25")
+        monkeypatch.setenv("DISCOPT_CONVEX_KERNEL_RESERVE_CAP", "2.0")
+        _fresh().solve(time_limit=8.0, gap_tolerance=1e-4)
+        spent = ck.last_attempt_seconds()
+        assert spent <= 6.0 + 1.0, (
+            f"the attempt spent {spent:.3f}s of an 8s budget with a 2s reserve set; "
+            f"the reserve is not reaching try_convex_solve"
+        )
+        assert spent >= 3.0, (
+            f"the attempt spent only {spent:.3f}s -- the reserve has taken far more "
+            f"than it was asked for, which would disable the kernel by stealth"
+        )
