@@ -848,44 +848,6 @@ def _scale_from_jacobian(jac, x: np.ndarray) -> np.ndarray:
     return jac @ np.abs(np.asarray(x, dtype=np.float64))
 
 
-def _pump_gate_align_enabled() -> bool:
-    """Whether the pump's accept gate uses ``verify_point``'s row bound (#1449).
-
-    DEFAULT OFF — a §5 graduation gate over solver math, with a row in
-    ``docs/dev/flag-retirement-audit.md``. What would flip it: a corpus panel
-    meeting both bars (cert-clean AND net-positive).
-
-    The gate is a PRE-FILTER, not the guard. Every heuristic candidate is
-    re-verified by ``solver._native_kernel_verify_point`` ->
-    :func:`discopt.validation.feasibility.verify_point` before it may seed a
-    cutoff or become an incumbent -- "a heuristic's own reported objective is
-    never trusted directly". So the gate's job is to predict that verdict, and
-    it currently predicts it ~1000x too strictly: it holds candidates to
-    ``tol + rtol*scale`` (rtol=1e-9) where the judge allows
-    ``abs_tol*max(anchor, scale)``. A pre-filter stricter than its own judge
-    discards work for no reason.
-
-    Measured (#1449 entry experiment, ``verify_point`` re-run on every rejection
-    the gate made during a real solve): on a 119-instance MINLPLib sample,
-    **8 of 57 compared rejections (14.0 %)** were points ``verify_point``
-    accepts outright -- 7x the issue's 2 % kill criterion. On the 66-instance
-    vendored corpus the rate is 1 of 62 (1.6 %); the class is real but its
-    density is instance-dependent.
-
-    Enabling only ever LOOSENS the pre-filter (``abs_tol*max(1, scale)`` is
-    never below ``tol + rtol*scale`` for ``abs_tol == tol``), so it can only
-    pass MORE candidates through to ``verify_point`` -- never fewer, and never
-    any that ``verify_point`` would reject. Soundness rests on that downstream
-    guard, which this does not touch.
-    """
-    return os.environ.get("DISCOPT_PUMP_GATE_ALIGN", "0").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
-    )
-
-
 def combined_tolerance(
     scale: np.ndarray,
     tol: float = 1e-6,
@@ -904,22 +866,32 @@ def combined_tolerance(
 
     One definition, used by every site that decides or reports against that test,
     so a threshold and the number compared to it can never drift apart.
+
+    THIS IS DELIBERATELY STRICTER THAN ``verify_point``; DO NOT "FIX" IT (#1449).
+    This gate is a heuristic PRE-FILTER, not the incumbent guard. The judge
+    downstream, :func:`discopt.validation.feasibility.verify_point`, allows
+    ``abs_tol*max(anchor, scale)``, which on a row whose terms are of magnitude
+    3.16e4 is 3.16e-2 against this function's 3.26e-5 -- a ~970x gap. #1449
+    proposed closing it. The gap is real and so is the discarded work: re-running
+    ``verify_point`` on every rejection this gate made during real solves, 8 of 57
+    compared rejections (14.0 %) on a 119-instance MINLPLib sample were points
+    ``verify_point`` accepts outright (1 of 62 on the vendored corpus).
+
+    Closing it changes nothing. A 117-instance differential panel at 20 s/instance
+    (alignment ON vs OFF, interleaved) was cert-clean -- no bound above a reference
+    optimum, no certification regression, every incumbent independently verified --
+    and NEUTRAL: 30/30 instances certified, 61/61 with an incumbent, total wall
+    +0.15 %, dual bound 6 tighter / 8 looser. Its single objective difference
+    (``autocorr_bern40-20``) did not reproduce: 8 interleaved repeats per arm gave
+    OFF -50223.5 +/- 158.0 and ON -50236.0 +/- 117.8, with the best value of all 16
+    runs found by the OFF arm. The implementation was retired under CLAUDE.md §5's
+    three-outcome rule rather than left as a stalled flag. Rejected points the
+    judge would accept are evidently not points that become better incumbents --
+    the pump goes on to find an equivalent one. Reopen only with evidence of a
+    primal LOSS attributable to this threshold, not of a rejection count.
     """
     scale = np.asarray(scale, dtype=np.float64)
-    if _pump_gate_align_enabled():
-        # #1449: the loosening half admits whatever EITHER standard admits, so
-        # the pre-filter can never discard a candidate its own judge would take.
-        # ``tol*max(1, scale)`` is verify_point's row bound at anchor 1 (the
-        # ``|rhs|`` anchor is not held here, and omitting it only shrinks the
-        # bound). The legacy ``tol + rtol*scale`` is kept in the max because it
-        # is very slightly LARGER for ``scale <= 1.001`` -- additive vs
-        # multiplicative -- and dropping it there would make "align" tighten the
-        # gate on small rows, which is the one thing this change must not do.
-        # Being marginally looser than the judge costs a wasted verify_point
-        # call and nothing else: the judge is downstream and untouched.
-        allowed = np.maximum(tol + rtol * scale, tol * np.maximum(1.0, scale))
-    else:
-        allowed = tol + rtol * scale
+    allowed = tol + rtol * scale
     if grad_inf is None:
         return allowed
     return np.minimum(allowed, feasible_distance_cap(grad_inf, scale))
