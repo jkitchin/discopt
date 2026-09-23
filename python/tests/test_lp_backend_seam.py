@@ -1,8 +1,14 @@
 """Routing tests for the LP backend seam (roadmap P0.4).
 
-``_solve_lp`` tries matrix-form engines in SIMPLEX-first order, always. HiGHS has
-been removed from the LP path entirely (issue #356); the HiGHS-free engines are
-the pure-Rust warm-started simplex and POUNCE.
+``_solve_lp`` tries matrix-form engines in SIMPLEX-first order, always.
+
+**Where this route sits.** A pure LP does NOT reach it by default: since #1229 the
+entry classifier sends pure LP/MILP to the HiGHS route (``_solve_lp_highs``, with
+discopt-verified certificates), and ``_solve_lp`` has a single call site behind
+the ``DISCOPT_LP_MILP_BACKEND=rust`` opt-out -- which is why the fixture below
+pins that variable. #356 removed HiGHS from *this* function's engine list, and
+#1229 later put the HiGHS route in FRONT of the whole function; both are true and
+they are about different layers.
 
 **This changed (#1454).** The order used to be POUNCE-first by default -- the
 "POUNCE everywhere" reading of roadmap P0.4 -- inverted by a ``prefer_pounce``

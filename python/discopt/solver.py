@@ -22091,9 +22091,14 @@ def _solve_lp(
 
     POUNCE remains the fallback, for the cases the simplex declines (binding
     unavailable, or a genuine failure); it is an LP ENGINE ORDER that changes
-    here, and no solver's numerics. Note this route runs only under
-    ``DISCOPT_LP_MILP_BACKEND=rust``; the default is the #1229 HiGHS route, which
-    was exact on every cell above and is untouched.
+    here, and no solver's numerics.
+
+    **Reachability.** This function is NOT on the default path for a pure LP.
+    Since #1229 the entry classifier routes pure LP/MILP to ``_solve_lp_highs``
+    (verified 2026-09-23: a default solve calls that and nothing else), and this
+    function has a single call site behind the ``DISCOPT_LP_MILP_BACKEND=rust``
+    opt-out. The HiGHS route was exact on every cell of the table above, so the
+    defect described here was only ever reachable by opting out.
 
     The
     fragile JAX LP-IPM last resort was **retired** in issue #364: the hardened
