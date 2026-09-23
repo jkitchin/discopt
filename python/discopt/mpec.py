@@ -1038,6 +1038,54 @@ def _pending(model: Model, pairs: list[Complementarity]) -> list[Complementarity
     return [p for p in pairs if not p.is_lowered_into(model)]
 
 
+def _require_not_already_lowered(model: Model, pairs: list[Complementarity]) -> None:
+    """Refuse a Scholtes homotopy over relations this model lowered another way (#1446).
+
+    :func:`reformulate_scholtes` skips a relation the model already carries rows
+    for (:func:`_pending`), which is right for an idempotent re-lower: the rows
+    are already there and are the same rows. For the *homotopy* it is fatal and
+    silent. The ``f*g <= t`` row is never emitted, so **nothing in the model
+    depends on ``t``**; the continuation then drives a parameter no constraint
+    reads, every stage returns the same point, and each is recorded
+    ``accepted=True, reason="subsolver converged", certified=True`` because each
+    subsolve genuinely did converge -- on the unregularized problem.
+
+    Measured on ``min (x0-2)^2 + (x1-1)^2`` s.t. ``0 <= x0 _|_ x1 >= 0`` over
+    ``[0,3]^2``, whose optimum is ``1.0`` at ``(2, 0)``:
+
+    ========================================  =========  ================
+    pair built with                           objective  ``x0*x1``
+    ========================================  =========  ================
+    ``Model.complementarity`` (lowers eagerly)  1.67e-09  **2.0**
+    ``mpec.complementarity`` (pure factory)     1.0       2.0e-08
+    ========================================  =========  ================
+
+    The first row is not an approximation of the second; it is the answer to a
+    different problem, reported as a converged local solve. Hence a refusal
+    rather than a silent re-lower or a warning (CLAUDE.md #3).
+
+    :meth:`Model.complementarity` already refuses ``method="scholtes"`` and
+    points at :func:`complementarity` + :func:`solve_mpec`. This closes the
+    reverse direction: lowered as ``gdp``/``sos1``, then handed to the homotopy.
+    """
+    clashes = [
+        (p, p.lowering_in(model)) for p in pairs if p.lowering_in(model) not in (None, "scholtes")
+    ]
+    if not clashes:
+        return
+    names = ", ".join(f"{p.name or '<unnamed>'} (lowered as {method!r})" for p, method in clashes)
+    raise ValueError(
+        f"solve_mpec(method='scholtes') cannot regularize {len(clashes)} relation(s) "
+        f"this model has already lowered another way: {names}. The homotopy's "
+        f"'f*g <= t' row is only emitted for a relation it lowers itself, so it "
+        f"would drive 't' with no constraint reading it and report the "
+        f"UNREGULARIZED answer as a converged local solve (#1446). "
+        f"Model.complementarity(...) lowers on the spot -- build the pair with "
+        f"discopt.mpec.complementarity(f, g) instead, which records the relation "
+        f"without lowering it, and pass it here."
+    )
+
+
 def _require_lowerable(pairs: list[Complementarity], method: str) -> None:
     r"""Refuse to lower a relation whose form this slice does not encode.
 
@@ -1606,6 +1654,7 @@ def _solve_scholtes(
             "'validate' would have been accepted and silently ignored."
         )
 
+    _require_not_already_lowered(model, pairs)
     t = model.parameter("_mpec_t", value=t0)
     reformulate_scholtes(model, pairs, t)
 
