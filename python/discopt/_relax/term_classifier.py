@@ -498,11 +498,11 @@ def estimate_distributed_terms(expr: Expression) -> int:
 # will expand to.  Symbolic distribution is exponential in the nesting depth of
 # sums-inside-products, and NOTHING else bounds it: the pre-solve structural
 # scans (``has_factorable_work`` and the integer-product / quadratic detectors)
-# distribute the raw model body purely to look for a pattern, with no deadline,
-# no size check, and -- because the scan runs on the deep-recursion worker thread
-# that ``convexity.rules`` joins without a timeout -- no way for the solver to
-# take the time limit back.  ``johnall`` (MINLPLib) asks this path for an
-# expansion of 3.19e9 terms and overran a 20 s ``time_limit`` by 44 minutes.
+# distribute the raw model body purely to look for a pattern, with no size check
+# and no deadline -- these passes run inside ``solve_model`` before branch and
+# bound starts and neither accept nor check one, so the time limit cannot reach
+# them.  ``johnall`` (MINLPLib) asks this path for an expansion of 3.19e9 terms
+# and overran a 20 s ``time_limit`` by 44 minutes.
 #
 # Set from measurement, not taste.  Surveyed over 1610 MINLPLib instances
 # (5,072,187 distribute calls), the largest expansion any instance legitimately
@@ -520,9 +520,9 @@ def estimate_distributed_terms(expr: Expression) -> int:
 # ``sqrt`` node in ``convexity.patterns.is_homogeneous_psd_quadratic``
 # (``glider400``), and ``binary_multilinear_reform._poly_add`` (``hadamard_9``,
 # which still overran 300 s against a 60 s limit with this budget in force).
-# All three reach the solver through the same untimed ``t.join()`` in
-# ``convexity.rules._run_with_deep_recursion``; bounding that join is the
-# class-level fix and is tracked separately.
+# All three are pre-solve passes that run with no deadline; threading one into
+# them (they all have an existing "found nothing" path to take on expiry) is the
+# class-level fix, tracked in issue #1456.
 #
 # Over budget the expression is returned with its affordable subtrees distributed
 # and the offending product left intact -- ALGEBRAICALLY IDENTICAL either way, so

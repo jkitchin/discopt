@@ -5,13 +5,13 @@ minutes of a 20-second time limit.
 exponential in how deeply sums nest inside products.  Nothing bounded it.  The
 pre-solve structural scans (``has_factorable_work``, the integer-product and
 quadratic detectors) distribute the raw model body purely to look for a pattern
-— with no deadline, no size check, and no way for the solver to take the time
-back, because the scan runs on the deep-recursion worker thread that
-``convexity.rules`` joins *without a timeout*.
+— with no size check and no deadline: these passes run inside ``solve_model``
+before branch and bound starts and neither accept nor check one, so the time
+limit cannot reach them.
 
 MINLPLib's ``johnall`` asks that path for an expansion of 3.19e9 terms.  Measured
 before the budget: ``time_limit=20`` returned after 44+ minutes, having never
-reached branch and bound.  After: 22.0 s.
+reached branch and bound.  After: 19.4 s, status ``time_limit``.
 
 The budget is a backstop against a pathology, not a capability/speed trade.
 Surveyed over 1610 MINLPLib instances (5,072,187 distribute calls), the largest
@@ -24,8 +24,8 @@ Two other paths blow the same time limit by different mechanisms and are NOT
 fixed here — a whole-model-sized ``eigvalsh`` per ``sqrt`` node in
 ``convexity.patterns`` (``glider400``) and ``binary_multilinear_reform._poly_add``
 (``hadamard_9``, still 300 s+ against a 60 s limit with this budget in force).
-All three reach the solver through one untimed ``t.join()`` in
-``convexity.rules._run_with_deep_recursion``, which is the class-level fix.
+All three are pre-solve passes running with no deadline; threading one into them
+is the class-level fix, tracked in issue #1456.
 
 Truncation is ALGEBRAICALLY IDENTITY-PRESERVING (that is what
 ``test_budgeted_result_is_algebraically_identical`` pins), so no constraint or
