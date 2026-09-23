@@ -1,14 +1,38 @@
 """Routing tests for the LP backend seam (roadmap P0.4).
 
-``_solve_lp`` tries matrix-form engines in POUNCE-first order by default
-(``nlp_solver`` now defaults to ``"pounce"`` — POUNCE everywhere), and flips
-to simplex-first when the user opts into the back-compat ``nlp_solver="ipm"``
-alias. HiGHS has been removed from the LP path entirely (issue #356); the
-HiGHS-free engines are the pure-Rust warm-started simplex and POUNCE. These
-tests pin:
+``_solve_lp`` tries matrix-form engines in SIMPLEX-first order, always. HiGHS has
+been removed from the LP path entirely (issue #356); the HiGHS-free engines are
+the pure-Rust warm-started simplex and POUNCE.
 
-  - default LP solves route to POUNCE (the universal default),
-  - ``nlp_solver="ipm"`` opts into the simplex-first route,
+**This changed (#1454).** The order used to be POUNCE-first by default -- the
+"POUNCE everywhere" reading of roadmap P0.4 -- inverted by a ``prefer_pounce``
+argument computed as ``nlp_solver == "pounce"`` against a parameter whose DEFAULT
+is ``"pounce"``. It was therefore true for every caller. POUNCE is an
+interior-point method: it converges in VARIABLE space, so on an LP whose
+objective coefficients span orders of magnitude a residual well inside any
+feasibility tolerance is amplified into a large OBJECTIVE error, which the route
+reported with ``gap_certified=True``.
+
+Measured on ``min C*x + (1/C)*y  s.t. x + y >= 1, x,y in [0,1]`` (optimum
+``x=0, y=1``, value ``1/C``), 24 comparisons over six ratios::
+
+    C      simplex   POUNCE-first (old default)
+    1e4    0.0       7.518e-07
+    1e6    0.0       7.518e-05
+    1e8    0.0       2.728e-05
+    1e12   0.0       1.331e-05   -- and NEGATIVE, for an objective that is
+                                    provably non-negative on the feasible box
+
+all certified, crossing the documented ``abs=1e-6`` tolerance between 1e4 and
+1e6. CLAUDE.md §1 puts the certificate above a routing preference, so the exact
+engine now leads for a pure LP and POUNCE is the fallback. An explicit
+``nlp_solver="pounce"`` no longer reorders the LP path -- POUNCE remains the NLP
+engine everywhere it is the right one, but it does not certify LPs.
+
+These tests pin:
+
+  - default LP solves route to the exact simplex,
+  - ``nlp_solver="ipm"`` is the same route (the back-compat alias still works),
   - when the simplex is unavailable the LP falls back to POUNCE (not the JAX IPM),
   - all routes agree on the optimum, and duals are exposed either way.
 """
@@ -56,19 +80,21 @@ class TestLPBackendSeam:
         # so pin the opt-out that keeps this seam reachable.
         monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
 
-    def test_default_routes_to_pounce(self, monkeypatch):
-        # POUNCE is now the universal default: the default solve must route to
-        # the POUNCE engine and must NOT consult the simplex.
+    def test_default_routes_to_the_exact_simplex(self, monkeypatch):
+        # #1454: the EXACT engine leads for a pure LP. This assertion was the
+        # reverse until an IPM answering every LP was measured certifying
+        # objectives up to 7.5e-5 wrong (see the module docstring).
         simplex_calls = _spy(monkeypatch, "_solve_lp_simplex")
         pounce_calls = _spy(monkeypatch, "_solve_lp_pounce")
         res = _build_lp().solve(time_limit=30)
         assert res.status == "optimal"
         assert abs(res.objective - 12.0) < 1e-5
-        assert pounce_calls == [True]
-        assert simplex_calls == []  # POUNCE is default; simplex never consulted
+        assert simplex_calls == [True]
+        assert pounce_calls == []  # simplex succeeded; POUNCE never consulted
 
     def test_ipm_alias_routes_to_simplex(self, monkeypatch):
-        # The "ipm" back-compat alias opts into the simplex-first route.
+        # The "ipm" back-compat alias still names the simplex route; since #1454
+        # that is also the default, so this pins the alias rather than a choice.
         simplex_calls = _spy(monkeypatch, "_solve_lp_simplex")
         pounce_calls = _spy(monkeypatch, "_solve_lp_pounce")
         res = _build_lp().solve(nlp_solver="ipm", time_limit=30)
@@ -77,12 +103,21 @@ class TestLPBackendSeam:
         assert simplex_calls == [True]
         assert pounce_calls == []  # simplex succeeded; POUNCE never consulted
 
-    def test_pounce_request_routes_to_pounce(self, monkeypatch):
-        pounce_calls = _spy(monkeypatch, "_solve_lp_pounce")
+    def test_an_explicit_pounce_request_still_gets_the_exact_engine_for_an_lp(self, monkeypatch):
+        """#1454: ``nlp_solver="pounce"`` no longer reorders the LP path.
+
+        POUNCE stays the NLP engine everywhere it is the right one; what it may
+        no longer do is CERTIFY a pure LP, because it cannot do so at arbitrary
+        objective scale. Honouring the request here was indistinguishable from
+        honouring the default anyway -- ``nlp_solver`` reaches ``solve_model``
+        through ``**kwargs`` with the same value either way -- so there was no
+        way to keep the explicit case without keeping the defect.
+        """
+        simplex_calls = _spy(monkeypatch, "_solve_lp_simplex")
         res = _build_lp().solve(nlp_solver="pounce", time_limit=30)
         assert res.status == "optimal"
         assert abs(res.objective - 12.0) < 1e-5
-        assert pounce_calls == [True]
+        assert simplex_calls == [True]
 
     def test_fallback_to_pounce_when_simplex_unavailable(self, monkeypatch):
         # In the simplex-first ("ipm") route, a missing simplex falls back to
