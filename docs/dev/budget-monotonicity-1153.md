@@ -682,13 +682,9 @@ denominators). Over all 118 compared instances the median node change is
 **0.0 %** in both runs; what changed is the tail.
 
 *Bar 1 (cert-clean):* 0 bounds above the reference optimum, 0 certification
-regressions, 0 lost incumbents. One row flags: `gasnet`'s ON incumbent fails
-independent feasibility verification — but **so does its OFF incumbent**, and
-the two arms are bit-identical (obj `6999381.553035677`, bound
-`864103.864320254`, 3 nodes, `feasible`). Its objective matches the `.solu`
-reference to ~1.3e-9 relative; this is a tolerance artifact in the panel's
-verifier at 1e7 magnitude, present with the repair disabled, and therefore not
-something this change caused. It is noted rather than fixed here.
+regressions, 0 lost incumbents. One row flagged — `gasnet`, in **both** arms,
+bit-identically (obj `6999381.553035677`, bound `864103.864320254`, 3 nodes,
+`feasible`). **The flag was the panel's fault, not the solver's.** See §6.8b.
 
 `kan_peaks_h1_n2_g24` was checked against the false-primal failure mode before
 being counted: sense is **minimize** and the oracle is `=opt= -5.1956649970`, so
@@ -721,3 +717,63 @@ The lesson generalizes past the §8 one above: **do not mutate *or* switch a tre
 a panel is measuring** — run mutation tests in a separate worktree, or after the
 panel. A version marker defends against the wrong *version*; nothing in the
 child defends against the right version being edited underneath it.
+
+### 6.8b The `gasnet` Gate 1 flag was an instrument defect (diagnosed after the merge)
+
+§6.8a reported `gasnet` failing Gate 1's incumbent verification in both arms and
+dismissed it as "a tolerance artifact in the panel's verifier at 1e7 magnitude".
+**The conclusion — not a regression, not caused by #1435 — was right. The
+mechanism was wrong, and the panel was wrong in a way that mattered more than the
+flag it raised.** Retracted per CLAUDE.md §11.
+
+The panel verified incumbents with
+`_relax.primal_heuristics._check_constraint_feasibility`. That is the feasibility
+**pump's accept gate**. The canonical incumbent verifier is
+`validation.feasibility.verify_point`, whose own module docstring calls it "the
+single incumbent-feasibility verifier (#908)" and which every
+incumbent-promoting path in the solver agrees on. Measured on `gasnet`'s
+incumbent, on a fresh model built from the same `.nl`:
+
+| verifier | verdict |
+|---|---|
+| `verify_point` (canonical) | **ok=True** |
+| `_check_constraint_feasibility` (pump gate) | **False** |
+
+One row of 69 fails the pump gate, at ratio **1.07** — violation 3.48e-5 against
+a tolerance of 3.26e-5. The row's terms are of magnitude 3.2e4 and its gradient
+norm is 2.0e4, so the **first-order distance from the point to that row's
+surface is 1.7e-9**. Rows 21 and 22 carry all-but-identical violations (3.50e-5,
+3.54e-5) and pass, purely because their scale is slightly larger. The magnitude
+that matters is the row's 3e4, not the objective's 1e7 — the original
+explanation named the wrong quantity.
+
+The two tolerances differ by ~1000x by design, and both are right for their own
+job: `tol + rtol*scale` with `rtol=1e-9` for what a *heuristic may propose*,
+`abs_tol*rowscale` at 1e-6 for what the *solver may hold*. Being conservative
+about a heuristic's proposal is sound. Applying that bar to an incumbent the
+solver already owns reports failures that are not failures.
+
+**The part that is worse than a false alarm.** `verify_point` also checks
+variable bounds and integrality, and snaps integers before judging (#1380).
+`_check_constraint_feasibility` checks constraint rows and nothing else. So the
+Gate 1 line "every ON incumbent independently feasibility-verified" was, for
+every panel run in this document, simultaneously **too strict on constraints and
+blind to bounds and integrality**. An incumbent violating a variable bound
+outright would have passed. That is a CLAUDE.md §6 defect — an instrument
+reporting a check it did not perform — and it is the reason this section exists
+rather than a one-line correction.
+
+Fixed by pointing the panel at `verify_point` and recording the failure *reason*
+rather than a bare `False`, and by a cross-reference on
+`_check_constraint_feasibility` naming `verify_point` as the incumbent verifier
+so the substitution is not available to the next reader. The capped external
+panel was then re-run end to end under the corrected verifier; the result is
+recorded below.
+
+**The open question this surfaced, which is NOT fixed here.** The pump's accept
+gate being ~1000x stricter than the incumbent standard means the pump can
+*discard points that would be perfectly valid incumbents* — demonstrated: the
+pump's gate rejects `gasnet`'s own shipped incumbent. That is a plausible primal
+weakness in exactly the direction §6.7 and #1435 care about, but changing a
+heuristic's feasibility tolerance is solver math and needs its own §5
+graduation panel, not a footnote in someone else's. Tracked separately.
