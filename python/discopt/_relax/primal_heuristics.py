@@ -719,6 +719,28 @@ def _check_constraint_feasibility(
     that already holds the bounds its rows were built with (see
     :func:`row_violations`); :func:`scaled_violation_ratio` reports the same test
     as a magnitude, for a caller that must RANK two points rather than judge one.
+
+    **This is a heuristic's accept gate, NOT the incumbent verifier.** To judge
+    whether a point may BE an incumbent, call
+    :func:`discopt.validation.feasibility.verify_point` — the single verifier
+    every incumbent-promoting path agrees on (#908). The two differ on both
+    halves of the job and must not be substituted for one another:
+
+    * This function tests constraint rows only. ``verify_point`` additionally
+      checks variable bounds and integrality, and snaps integers first (#1380).
+      Using this one to verify an incumbent leaves those two conditions
+      **entirely unchecked**.
+    * This function is deliberately ~1000x stricter on the rows it does test
+      (``tol + rtol*scale``, ``rtol=1e-9``, against ``verify_point``'s
+      ``abs_tol*rowscale`` at 1e-6). Being conservative about what a *heuristic
+      proposes* is sound; applying that bar to an incumbent the solver already
+      holds reports failures that are not failures.
+
+    Measured (gasnet, #1435's panel): a legitimate incumbent violating one row
+    by 3.5e-5 — first-order distance to that row's surface 1.7e-9 — is rejected
+    here (tolerance 3.26e-5) and accepted by ``verify_point`` (3.16e-2). A
+    corpus panel used this function as its Gate 1 incumbent check and reported a
+    cert-clean FAIL on that instance in both arms.
     """
     if evaluator.n_constraints == 0:
         return True
