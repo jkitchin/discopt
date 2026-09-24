@@ -479,6 +479,18 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
+- **BREAKING: the minimum supported Python is now 3.12** (`requires-python =
+  ">=3.12"`, was `">=3.10"`; `1f9585ec`). The 3.10 floor was never real: all 15
+  `python-version:` entries across `.github/workflows/` run 3.12, so nothing had
+  ever executed a test, an import or a typecheck on 3.10 — which is how #1055
+  (macOS and Windows wheels covering 3.12 only) stayed invisible through a
+  release. Raising the declaration makes it match what is actually tested rather
+  than promising a tier no job covers. `abi3-py310` -> `abi3-py312` in
+  `Cargo.toml` moves with it, as `.github/scripts/check_wheel_coverage.py`
+  requires, and the `tomli>=2; python_version < "3.11"` dev dependency goes away
+  with it (`tomllib` is stdlib from 3.11). Users on 3.10 or 3.11 should stay on
+  v0.8.0.
+
 - **`DISCOPT_CONVEX_KERNEL` graduated to default-ON** (#1346). The convex-kernel
   route now runs by default on the models it claims; `DISCOPT_CONVEX_KERNEL=0`
   remains as the opt-out and the legacy path is intact (CLAUDE.md §5). Graduated
