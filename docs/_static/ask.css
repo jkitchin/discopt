@@ -90,13 +90,30 @@ body.discopt-ask-open .discopt-ask-toggle {
   }
 }
 
-/* ---- Panel -------------------------------------------------------------- */
+/* ---- Panel --------------------------------------------------------------
+   The panel is fixed to the viewport, but it does NOT float over the page:
+   the open state pads the body by the same width, so the book reflows into
+   what is left and nothing is ever covered. Measured on the built docs at a
+   1280px viewport before this: the panel hid 208px of <article> and the whole
+   272px secondary sidebar, which is how the "Contents" list ended up sliced
+   down its right edge.
+
+   One width drives both halves -- the panel and the body padding -- so they
+   cannot drift apart. It lives on :root as a custom property because the
+   resize handle writes it from JS; `min(..., 100vw)` appears in both places
+   for the same reason it appears here, to keep an over-large stored value
+   from exceeding the viewport.
+   ------------------------------------------------------------------------ */
+:root {
+  --discopt-ask-width: 24rem;
+}
+
 .discopt-ask-panel {
   position: fixed;
   top: 0;
   right: 0;
   z-index: 1000;
-  width: min(30rem, 100vw);
+  width: min(var(--discopt-ask-width), 100vw);
   height: 100vh;
   /* Keeps the answer and the sources scrollable independently of the page. */
   display: flex;
@@ -113,6 +130,78 @@ body.discopt-ask-open .discopt-ask-toggle {
 }
 .discopt-ask-panel[hidden] {
   display: none;
+}
+
+/* Make room rather than cover. Guarded by the same 700px breakpoint the panel
+   itself uses: below it the panel is the full viewport width, and padding the
+   body by 100vw would leave the page nothing to reflow into. There the panel
+   is a full-screen dialog and overlaying is the correct behaviour.
+
+   No transition: the body reflows on every pointer move while the handle is
+   being dragged, and animating a layout property through that is visibly
+   worse than snapping to it. */
+@media (min-width: 701px) {
+  body.discopt-ask-open {
+    padding-right: min(var(--discopt-ask-width), 100vw);
+  }
+}
+
+/* ---- Resize handle ------------------------------------------------------
+   A 24rem panel suits a question and a few citations; a long generated answer
+   wants more, and a wide article wants less. Rather than pick for the reader,
+   the panel's left edge drags. The hit area is wider than the visible rule so
+   it can be grabbed without precision, and it is a focusable separator so the
+   width is reachable from the keyboard too (see ask.js).
+   ------------------------------------------------------------------------ */
+.discopt-ask-resize {
+  /* `fixed`, not `absolute`, although it is a child of the panel: the panel is
+     a scroll container (`overflow-y: auto`), which both clips a child sitting
+     at a negative offset and scrolls it away with the content. Anchoring to
+     the viewport instead keeps the handle on the panel's left edge whatever
+     the answer does. Straddles the edge -- 9px wide, offset 4px -- so it is
+     grabbable from either side. */
+  position: fixed;
+  top: 0;
+  right: calc(min(var(--discopt-ask-width), 100vw) - 4px);
+  width: 9px;
+  height: 100vh;
+  z-index: 1001;
+  cursor: col-resize;
+  background: none;
+  border: none;
+  padding: 0;
+  touch-action: none;
+}
+.discopt-ask-resize:hover::after,
+.discopt-ask-resize:focus-visible::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 3px;
+  width: 3px;
+  height: 100%;
+  background: var(--pst-color-primary, #e87a1e);
+}
+.discopt-ask-resize:focus-visible {
+  outline: none;
+}
+
+/* While dragging, stop the pointer from selecting the article text it passes
+   over, and stop every iframe/embed on the page from eating the pointermove. */
+body.discopt-ask-resizing {
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: col-resize;
+}
+body.discopt-ask-resizing iframe {
+  pointer-events: none;
+}
+
+@media (max-width: 700px) {
+  /* Nothing to resize into: the panel is already the whole viewport. */
+  .discopt-ask-resize {
+    display: none;
+  }
 }
 
 .discopt-ask-head {

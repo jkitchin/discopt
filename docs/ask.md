@@ -12,6 +12,13 @@ Search always works. The answer half is strictly opt-in: nothing is downloaded
 until you pick a model and click **Load model**. If you never do, you still get
 ranked, linked passages, which is most of the value on a reference manual.
 
+The panel opens beside the page rather than on top of it: the book reflows into
+the space that is left, so the text you were reading and the page contents stay
+visible while you ask about them. Drag its left edge to trade width between the
+two — the handle takes the arrow keys as well — and the width is remembered for
+next time. On a phone-width screen there is nothing to reflow into, so the panel
+covers the page and you close it to read on.
+
 Nothing you type leaves your browser. There is no API key, no server, and no
 telemetry — the assistant is a static JavaScript file, and the only
 third-party request it ever makes is fetching model weights from the WebLLM
