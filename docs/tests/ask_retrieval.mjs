@@ -289,6 +289,123 @@ console.log("  top-5 " + top5 + "/" + EVAL.length + " (floor " + THRESHOLD_TOP5 
 check(top1 >= THRESHOLD_TOP1, "top-1 above the floor");
 check(top5 >= THRESHOLD_TOP5, "top-5 above the floor");
 
+// ---- The answer reader ---------------------------------------------------
+//
+// `parseAnswer` is the pure half of renderAnswer(): text in, block structure
+// out, no DOM. It is tested here rather than in the browser suite because the
+// browser suite cannot get a model to speak -- a 900 MB WebGPU download is not
+// a CI step -- so without this the markdown and TeX handling has no guard at
+// all and regresses to the flat `\[ … \]` a reader reported.
+console.log("\nanswer rendering");
+
+const ANSWER = [
+  "## Quadratic programming",
+  "",
+  "QP is an optimization problem of the form",
+  "",
+  "\\[",
+  "\\min_{x} \\quad \\tfrac{1}{2} x^\\top Q x + c^\\top x",
+  "\\]",
+  "",
+  "where \\(Q\\) is symmetric [1]. Use `dm.Model` to build one [2, 3].",
+  "",
+  "- **Convex** when $Q \\succeq 0$ [1]",
+  "- Nonconvex otherwise",
+  "",
+  "```python",
+  "m = dm.Model()",
+  "```"
+].join("\n");
+
+const blocks = ask.parseAnswer(ANSWER);
+const types = blocks.map((b) => b.type);
+check(types.includes("heading"), "a `## ` line becomes a heading, not prose");
+check(types.includes("math"), "a display \\[ … \\] block is lifted out of the prose");
+check(types.includes("list"), "a `- ` run becomes a list");
+check(types.includes("code"), "a fenced block becomes code");
+
+const math = blocks.find((b) => b.type === "math");
+check(
+  math && math.text.includes("\\min_{x}") && !math.text.includes("\\["),
+  "the math block carries bare TeX, with its delimiters stripped"
+);
+
+const code = blocks.find((b) => b.type === "code");
+check(code && code.lang === "python", "the fence language is kept");
+check(code && code.text === "m = dm.Model()", "the fenced body survives verbatim");
+
+// Citations are the point of the exercise: they have to come out as numbers
+// the renderer can turn into links, including a grouped `[2, 3]`.
+const flat = blocks
+  .filter((b) => b.inline)
+  .reduce((a, b) => a.concat(b.inline), [])
+  .concat(
+    blocks
+      .filter((b) => b.items)
+      .reduce((a, b) => a.concat(b.items.reduce((x, y) => x.concat(y), [])), [])
+  );
+const cites = flat.filter((t) => t.t === "cite").map((t) => t.n);
+check(cites.length >= 4, "citations are tokenized, not left as text (" + cites.length + ")");
+check(
+  cites.includes(1) && cites.includes(2) && cites.includes(3),
+  "a grouped [2, 3] becomes two citations: " + JSON.stringify(cites)
+);
+check(
+  flat.some((t) => t.t === "math" && t.v.includes("Q")),
+  "inline \\( … \\) and $ … $ become math tokens"
+);
+check(
+  flat.some((t) => t.t === "code" && t.v === "dm.Model"),
+  "inline `code` survives"
+);
+check(
+  flat.some((t) => t.t === "strong" && t.v === "Convex"),
+  "**bold** survives inside a list item"
+);
+
+// Prices are not equations. Without the guard in parseInline this eats the
+// prose between two dollar amounts and renders it as TeX.
+const money = ask.parseInline("it costs $12, or $30 with support");
+check(
+  !money.some((t) => t.t === "math"),
+  "a dollar amount is not mistaken for inline math"
+);
+
+// Half-written TeX and unterminated fences are the NORMAL mid-stream state,
+// since renderAnswer runs on every delta. They must not throw.
+let streamed = 0;
+for (let i = 1; i <= ANSWER.length; i += 7) {
+  ask.parseAnswer(ANSWER.slice(0, i));
+  streamed++;
+}
+check(streamed > 20, "every prefix of a streaming answer parses (" + streamed + " prefixes)");
+
+// The passage previews under an answer cannot be typeset -- they are cut at
+// 260 characters, often mid-expression -- so they drop display math and unwrap
+// inline math instead of showing the reader raw TeX.
+const QP = ask.excerpt(
+  "A quadratic program (QP) is an optimization problem of the form \\[ " +
+    "\\min_{x} \\quad \\tfrac{1}{2} x^\\top Q\\, x + c^\\top x \\] " +
+    "where \\(x \\in \\mathbb{R}^n\\) is the vector of decision variables."
+);
+check(!QP.includes("\\["), "a preview drops display-math delimiters: " + QP.slice(0, 60));
+check(!QP.includes("\\tfrac"), "a preview drops TeX control sequences");
+check(QP.includes("quadratic program"), "a preview keeps the prose around the math");
+
+// The relations carry the sentence, so a short glyph map survives the strip.
+// Without it "x \\in \\mathbb{R}^n" previews as "x R^n", which reads as a typo.
+const REL = ask.excerpt(
+  "The feasible set is every point with \\(x \\in \\mathbb{R}^n\\) and " +
+    "\\(Q \\succeq 0\\) and \\(A x \\le b\\) holding simultaneously here."
+);
+check(REL.includes("\u2208"), "\\in survives as a glyph: " + REL.slice(0, 70));
+check(REL.includes("\u2264"), "\\le survives as a glyph");
+check(!/\\[a-zA-Z]/.test(REL), "no backslash command is left in a preview: " + REL);
+
+// A passage that is almost entirely an equation must not preview as blank.
+const MOSTLY = ask.excerpt("\\[ x^2 + y^2 = z^2 \\]");
+check(MOSTLY.trim().length > 0, "an equation-only passage still previews something");
+
 // Prove the probe fired: a refactor that made every `check` unreachable would
 // otherwise print a clean run and exit 0.
 if (checks === 0) {
