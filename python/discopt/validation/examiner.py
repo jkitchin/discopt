@@ -24,7 +24,7 @@ from typing import Optional
 
 import numpy as np
 
-from discopt._dual_recovery import recover_multipliers, row_metadata
+from discopt._dual_recovery import jacobian_for_recovery, recover_multipliers, row_metadata
 from discopt.modeling.core import Model, ObjectiveSense, VarType
 from discopt.validation.feasibility import jacobian_row_scales
 
@@ -183,7 +183,7 @@ def examine(
 
     # ── 2. Primal constraint feasibility (unscaled + scaled) ────────────────
     jac = (
-        evaluator.evaluate_jacobian(x_flat)
+        jacobian_for_recovery(evaluator, x_flat, m=int(sense_arr.size))
         if sense_arr.size
         else np.empty((0, x_flat.size), dtype=float)
     )

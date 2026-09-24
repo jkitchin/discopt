@@ -124,6 +124,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+import scipy.sparse as sparse
 
 logger = logging.getLogger(__name__)
 
@@ -565,8 +566,13 @@ def _jacobian_row_scales_checked(J: np.ndarray, x_flat: np.ndarray) -> tuple[np.
     refactor. The public helper's per-row 0.0 is right for callers that have no
     batch to fall back for.
     """
-    J = np.asarray(J, dtype=np.float64)
     xw = np.abs(np.asarray(x_flat, dtype=np.float64))
+    if sparse.issparse(J):
+        # NOT np.asarray(J): on a scipy sparse matrix that returns a 0-d OBJECT
+        # array rather than raising, so the shape checks below would report
+        # "expected a 2-D Jacobian, got shape ()" for a perfectly good Jacobian.
+        return _sparse_row_scales_checked(J, xw)
+    J = np.asarray(J, dtype=np.float64)
     if J.ndim != 2:
         raise ValueError(f"expected a 2-D Jacobian, got shape {J.shape}")
     if J.shape[1] != xw.shape[0]:
@@ -587,6 +593,62 @@ def _jacobian_row_scales_checked(J: np.ndarray, x_flat: np.ndarray) -> tuple[np.
         scales[bad_rows] = 0.0
         return scales, False
     return np.asarray(terms.max(axis=1), dtype=np.float64), True
+
+
+def _sparse_row_scales_checked(J, xw: np.ndarray) -> tuple[np.ndarray, bool]:
+    """:func:`_jacobian_row_scales_checked` for a sparse ``J``, same answers.
+
+    Kept in the same module and reached from the same entry point rather than
+    written out at the call site: #1151 was in part a consequence of this
+    quantity existing as three hand-written copies, and a sparse fourth copy
+    would be the same mistake in a new representation.
+
+    ``max_j |J_ij| * |x_j|`` is a maximum of NON-NEGATIVE terms, which is what
+    makes the sparse form exact rather than an approximation: a structurally
+    absent entry contributes ``0``, and zero cannot raise a maximum over
+    non-negative values. A row with no stored entries therefore scores 0.0 —
+    the same answer the dense path gives for a row of zeros, and the caller's
+    floor then holds it to the plain absolute tolerance.
+    """
+    if J.shape[1] != xw.shape[0]:
+        raise ValueError(f"Jacobian has {J.shape[1]} columns, point has {xw.shape[0]}")
+    m = int(J.shape[0])
+    if m == 0:
+        return np.zeros(0, dtype=np.float64), True
+
+    if not np.isfinite(xw).all():
+        # The one place where sparsity would LOOSEN the answer, so it is handled
+        # before the product rather than discovered after it. A dense row has an
+        # entry in every column, so a non-finite ``x_j`` poisons every row: the
+        # term is ``inf`` where ``J_ij != 0`` and ``|0| * inf = NaN`` where it is
+        # zero, and either way ``~finite.all(axis=1)`` marks the row. Sparsity
+        # drops exactly the ``|0| * inf`` half, so a structurally absent entry
+        # would quietly leave the row finite and hand the caller a LARGER scale —
+        # a more permissive activity test, which is the #1151 failure direction.
+        # Reproduce the dense verdict instead: every row unestimatable.
+        return np.zeros(m, dtype=np.float64), False
+
+    # ``inf * 0`` is NaN and numpy warns; the result is discarded either way.
+    with np.errstate(invalid="ignore"):
+        terms = abs(J).multiply(xw[None, :])
+    terms = sparse.csr_matrix(terms, dtype=np.float64)
+
+    finite = np.isfinite(terms.data)
+    all_finite = bool(finite.all())
+    if all_finite:
+        scales = terms.max(axis=1).toarray().ravel()
+        return np.asarray(scales, dtype=np.float64), True
+
+    # Any non-finite term makes the whole row's magnitude unestimatable. Map each
+    # stored entry back to its row through the CSR row pointers -- the sparse
+    # equivalent of ``~finite.all(axis=1)``.
+    row_of_entry = np.repeat(np.arange(m), np.diff(terms.indptr))
+    bad_rows = np.zeros(m, dtype=bool)
+    bad_rows[row_of_entry[~finite]] = True
+    terms.data = np.where(finite, terms.data, 0.0)
+    scales = np.asarray(terms.max(axis=1).toarray().ravel(), dtype=np.float64)
+    scales[bad_rows] = 0.0
+    return scales, False
 
 
 def _row_scales_and_gradients(evaluator, x_flat: np.ndarray, rows: np.ndarray, box=None):
