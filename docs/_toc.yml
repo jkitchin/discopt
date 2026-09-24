@@ -98,6 +98,7 @@ parts:
       - file: api
   - caption: Appendix
     chapters:
+      - file: ask
       - file: comparison
       - file: gams_solver_link
       - file: references

@@ -12,6 +12,47 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **An in-browser assistant for the documentation** (`docs/ask.md`), ported from
+  the POUNCE project's. A floating **Ask** pill on every page opens a question
+  box over the book. It has two independent halves: BM25 retrieval over a
+  prebuilt index, which always works, and opt-in generation by a WebLLM model
+  running on the reader's own GPU. Nothing leaves the browser — no API key, no
+  server, no telemetry — and the model half downloads nothing until the reader
+  picks one and clicks. This is unrelated to `discopt.llm`, which calls a hosted
+  model through litellm and can see the reader's actual optimization model; this
+  one can see only these docs.
+
+  **The index is built from the rendered HTML, not from the source**, which is
+  the one design decision worth stating. POUNCE's builder parses mdBook
+  markdown; that does not port, and not merely because two thirds of these pages
+  are notebooks. The heading anchors are not derivable from the source without
+  reimplementing Sphinx's slugifier, and an anchor that does not match is a
+  citation that lands silently at the top of the page and looks like it worked.
+  Reading `docs/_build/html` takes the anchors, URLs and prose from the artifact
+  the reader is served, at the cost of an ordering constraint that `make docs`
+  now enforces by running `scripts/build-docs-index.py` as a post-build step.
+
+  Measured on the v0.9.0 book: 1118 passages from 87 pages, 100% carrying a
+  heading anchor, 1280 KB — one download, cached thereafter. The generated
+  `autoapi/` reference is deliberately excluded (thousands of signature stubs
+  would swamp the prose pages a question is actually about). Two guards, both
+  under `make ask-check`: `docs/tests/ask_retrieval.mjs` runs 65 checks over the
+  index, including a 20-query labelled set that must keep finding the right page
+  (currently 18/20 top-1, 20/20 top-5, against floors of 13 and 17), and
+  `docs/tests/ask_e2e.py` runs 23 checks in headless Chromium — the panel
+  mounts, ask.js locates its own assets from a *nested* page, and every anchor
+  it cites resolves and scrolls.
+
+  Two failure modes this cost real time to find, recorded so they are not
+  rediscovered. Pygments wraps every code token in its own `<span>`, so the
+  obvious way to recover block structure from HTML — joining with newlines —
+  shatters `dm.Model` into three lines; the index still looks healthy and still
+  returns hits, just never for the name a reader typed. And `html_js_files`
+  emits no `id`, while `document.currentScript` is null inside a
+  `DOMContentLoaded` handler, so the script could not find itself and resolved
+  its index against the current page — which works on `/index.html` and 404s on
+  every nested page.
+
 - **Three optional-dependency extras: `torch`, `plot`, `gurobi`** (v0.9.0 release
   audit). Each names a package the code already imported but nothing installed.
   `torch` is deliberately **not** folded into `nn` (which is the small ONNX
