@@ -81,10 +81,15 @@ The next planned release is **`v0.9.0`** (minor bump on top of `v0.8.0`).
       correctness lane, both of which are sound and independently reported.
       Each `--gate phaseN` check reads the most recent results in `reports/` for **each suite its
       criteria declare** (use `--suite-results SUITE=PATH` when a panel was saved under a
-      different name). These runs are expensive (each suite uses a 3600 s per-instance time limit
-      -- measured 2026-09-22, `phase1` filters the local corpus to 35 instances and `phase3` to
-      55, and `run_benchmarks.py` exposes no `--time-limit` override, so the pair is up to ~90 h
-      of wall) and are typically a CI-only step for patch releases:
+      different name). These runs are expensive (each suite uses a 3600 s per-instance time
+      limit and `run_benchmarks.py` exposes no `--time-limit` override) and are typically a
+      CI-only step for patch releases. Re-measured 2026-09-24 against the current corpus:
+      `phase1` filters to **73** instances and `phase3` to **106**, not the 35/55 this file
+      previously recorded, so the `instances x cap` worst case is ~179 h rather than the ~90 h
+      quoted here before. Treat that as a bound, not an estimate: it assumes every instance
+      burns its full hour, which is not how either suite behaves -- the real cost is set by the
+      tail of instances that do NOT solve quickly, and `--workers` is ignored by the figure
+      entirely. Measure the tail before planning around either number:
   - [ ] `python discopt_benchmarks/run_benchmarks.py --suite phase1 && python discopt_benchmarks/run_benchmarks.py --gate phase1`
   - [ ] `python discopt_benchmarks/run_benchmarks.py --suite phase3 && python discopt_benchmarks/run_benchmarks.py --gate phase3`
   - [ ] `phase4` is the release gate and needs **no** `[suites.phase4]` entry — every one of its seven criteria names
