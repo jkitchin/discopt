@@ -23,23 +23,57 @@ role   what decides how much work runs                status
 
 Role 3 is strictly worse than role 2: a role-2 gate at least terminates.
 
-Why this is a work count and not the deadline #1456 asked for
---------------------------------------------------------------
+A work count *and* a deadline — which clock goes where
+------------------------------------------------------
 
-#1456's "what done means" asked for a wall-clock deadline threaded into these
-passes. That prescription was retracted (see the issue's second revision). A
-deadline decides *how much structure a pass recognises*, so under it the same
-model on a busy machine gets a different relaxation, a different bound and a
-different node count — which makes CLAUDE.md §5's bound-neutral regime
-(``node_count`` and certified ``objective`` **exactly** unchanged) permanently
-unenforceable on exactly the instances this issue is about.
+**Retraction (CLAUDE.md §11).** An earlier revision of this docstring said
+#1456's deadline "prescription was retracted (see the issue's second revision)".
+That was wrong and is withdrawn here: #1456's "what done means" asks for a
+deadline in items 1–3, and the issue has no such revision. The deadline shipped
+(``_relax/presolve_deadline.py``); the alternative that sentence was written to
+defend — a deterministic node *allowance*, predicting pre-solve cost from DAG
+size — was built and then falsified, because the pathological instances are the
+*small* ones (``johnall`` 5,432 nodes / 44 min against ``glider400`` 38,087
+nodes / 28.4 s), so it was deleted.
 
-That is not a judgement invented here. The sibling pass in the very same
-function already follows the rule: ``dependent_vars.find_functionally_dependent_names``
-carries ``_SCAN_WORK_BUDGET``, an operation count, and ``_relax/dependent_vars.py``
-says why in as many words — *"bounding it with a clock would make the search tree
+What survives is the distinction that objection was groping for, which is about
+*where* a clock is read and not whether one may exist:
+
+*A clock that truncates a traversal and keeps the half-built result* decides how
+much structure that pass recognises — so the same model on a busy machine gets a
+different relaxation and a different node count, from an intermediate state
+nothing downstream was written against. That is #912's role 2 and it stays out of
+this region. The sibling pass says so in as many words:
+``dependent_vars.find_functionally_dependent_names`` carries ``_SCAN_WORK_BUDGET``,
+an operation count, because *"bounding it with a clock would make the search tree
 a function of machine speed, the exact defect #912 exists to prevent"*.
 ``discopt._work_budget.WorkBudget`` is the shared primitive #912 built for it.
+
+*A clock that selects between the pass's own two documented outcomes* is a
+different thing, and it is what #1456 ships in two places:
+
+- ``PresolveDeadline.afford`` decides whether an optional pass may *start* — the
+  gate this file's own module already applies to the later root-setup phases
+  (``_deadline_exhausted``, #654).
+- ``PresolveDeadline.abandon_hook`` is read once per constraint *inside* a
+  running pass and, when it fires, the pass drops everything it has built and
+  returns the model it was handed.
+
+Both can only fire once the caller's entire ``time_limit`` is already spent,
+which is exactly the state in which the ungated alternative does not terminate at
+all; both are inert wherever the budget is ample — every instance on which §5's
+bound-neutral regime can be run — and where they fire, the arm they would be
+compared against has no answer to compare. Neither can produce a third state: the
+outcome is "rewritten" or "unchanged", and the unchanged one is what the pass
+already returns when it finds nothing.
+
+The second was added because the first was measured to be insufficient, not for
+symmetry. ``truck`` at ``time_limit=10`` was profiled consulting the entry gate
+for ``factorable`` at t+0.60 s and not again until **t+81.52 s**.
+
+Neither bounds the other and neither bounds this file: a leaf budget bounds ONE
+iteration, the deadline bounds the pass and the AGGREGATE, and the inventory
+below is what keeps a newly added pass from reopening the class.
 
 What this file does
 -------------------
@@ -159,6 +193,11 @@ _BUDGET_HOME = {
     "_MAX_MONOMIALS": "discopt._relax.binary_multilinear_reform",
     "_DISTRIBUTE_TERM_BUDGET": "discopt._relax.term_classifier",
     "_FBBT_MAX_ITER": "discopt._relax.disjunctive_config_bound",
+    # Not a work count: the #1456 outer-loop deadline. A row may name it
+    # ALONGSIDE a work budget (never instead of one) when the budget bounds
+    # each iteration and the deadline bounds the loop — the distinction
+    # ``truck`` forced (81.5 s across 10.9 M correctly-budgeted iterations).
+    "PresolveDeadline": "discopt._relax.presolve_deadline",
 }
 
 _CATEGORIES = ("terminal", "bounded", "wall", "trivial", "residual")
@@ -203,17 +242,24 @@ INVENTORY: tuple[tuple[str, str, str, str], ...] = (
         "bounded",
         "_FBBT_MAX_ITER",
     ),
+    # ``_DISTRIBUTE_TERM_BUDGET`` bounds ONE distribute, and the note on these
+    # two rows used to stop there. ``truck`` falsified that as a bound on the
+    # pass: 81.5 s inside a single ``factorable`` call at ``time_limit=10``,
+    # with the term budget doing its job throughout — the cost was the loop
+    # OVER constraints, which no leaf budget sees. Both entry points now also
+    # take #1456's outer-loop deadline and abandon wholesale, which is what
+    # bounds the pass; the term budget still bounds each iteration of it.
     (
         "discopt._relax.factorable_reform",
         "factorable_reformulate",
         "bounded",
-        "_DISTRIBUTE_TERM_BUDGET",
+        "_DISTRIBUTE_TERM_BUDGET, PresolveDeadline",
     ),
     (
         "discopt._relax.factorable_reform",
         "has_factorable_work",
         "bounded",
-        "_DISTRIBUTE_TERM_BUDGET",
+        "_DISTRIBUTE_TERM_BUDGET, PresolveDeadline",
     ),
     (
         "discopt._relax.term_classifier",
@@ -245,6 +291,9 @@ INVENTORY: tuple[tuple[str, str, str, str], ...] = (
     ("discopt._relax.integer_product_reform", "_iml_extend", "trivial", "one pass over x0"),
     ("discopt._relax.integer_product_reform", "_ipx_extend", "trivial", "one pass over x0"),
     ("discopt._relax.learned_relaxations", "load_pretrained_registry", "trivial", "file load"),
+    # The entry gate itself (#1456): one monotonic clock read per optional pass,
+    # O(1), and it is the thing that bounds the aggregate rather than any leaf.
+    ("discopt._relax.presolve_deadline", "PresolveDeadline", "trivial", "clock read per pass"),
     ("discopt._relax.model_utils", "_dcb_flat", "trivial", "flat index map"),
     (
         "discopt._relax.nonlinear_bound_tightening",
@@ -272,7 +321,7 @@ INVENTORY: tuple[tuple[str, str, str, str], ...] = (
     ("discopt._relax.convexity.eigenvalue_arith", "quadratic_form_bound", "residual", ""),
     ("discopt._relax.convexity.g_convex_inject", "inject_g_convex_cuts", "residual", ""),
     ("discopt._relax.convexity.signomial_global", "classify_signomial_global", "residual", ""),
-    ("discopt._relax.factorable_reform", "canonicalize_entropy", "residual", ""),
+    ("discopt._relax.factorable_reform", "canonicalize_entropy", "residual", "entry-gated #1456"),
     ("discopt._relax.gdp_reformulate", "reformulate_gdp", "residual", ""),
     (
         "discopt._relax.integer_product_reform",
@@ -280,7 +329,12 @@ INVENTORY: tuple[tuple[str, str, str, str], ...] = (
         "residual",
         "",
     ),
-    ("discopt._relax.integer_product_reform", "has_nonconvex_integer_bilinear", "residual", ""),
+    (
+        "discopt._relax.integer_product_reform",
+        "has_nonconvex_integer_bilinear",
+        "residual",
+        "entry-gated #1456",
+    ),
     ("discopt._relax.integer_product_reform", "reformulate_integer_bilinear", "residual", ""),
     ("discopt._relax.integer_product_reform", "reformulate_integer_multilinear", "residual", ""),
     ("discopt._relax.objective_epigraph", "relax_objective_defining_equality", "residual", ""),
@@ -321,9 +375,14 @@ def test_no_unrecorded_presolve_pass():
         "Either give it a deterministic work budget (see\n"
         "discopt._work_budget.WorkBudget, and _relax/dependent_vars.py for the\n"
         "worked example) and record it `bounded`, or add it to INVENTORY with a\n"
-        "category and the measurement behind it. Do NOT reach for a wall clock:\n"
-        "that is #912's role 2, and it makes structure recognition a function of\n"
-        "machine speed.\n\n" + "\n".join(f"  {m}.{n}" for m, n in new)
+        "category and the measurement behind it. A clock that TRUNCATES a\n"
+        "traversal and keeps the half-built result is not an option — that is\n"
+        "#912's role 2 and it makes structure recognition a function of machine\n"
+        "speed. PresolveDeadline is: `afford` decides whether an optional pass may\n"
+        "start, `abandon_hook` lets a running one drop everything and return the\n"
+        "model unchanged. Both pick between outcomes the pass already produces, and\n"
+        "a pass behind either is still recorded here by what bounds each iteration.\n\n"
+        + "\n".join(f"  {m}.{n}" for m, n in new)
     )
 
 

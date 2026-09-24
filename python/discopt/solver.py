@@ -10697,9 +10697,28 @@ def solve_model(
     # objective be detected as convex and certify on the convex fast path. The
     # rewrites are exact and convexity-preserving, so they run unconditionally
     # and return the model unchanged when nothing matches.
+    # --- #1456: the optional structure passes below now see the deadline.
+    #
+    # Each is a walk over the model's expression DAG with an existing "found
+    # nothing, model unchanged" path, and none could see ``time_limit``: at
+    # ``time_limit=5`` this block alone cost ``densitymod`` 27.0 s, ``truck``
+    # 26.1 s and ``telecomsp_metro`` 13.2 s, before a single node was explored.
+    # Bounding them one at a time does not fix it — no one pass dominates
+    # ``densitymod``, so per-pass budgets sum to several times the user's limit.
+    # The gate is this function's own ``_deadline_exhausted``, i.e. exactly the
+    # phase-entry check the later root-setup phases have carried since #654;
+    # this block sits above its first call site and was the stretch that missed
+    # it. Declining a pass only ever weakens a still-valid bound.
+    # See ``_relax/presolve_deadline.py`` for why this is a clock and not a
+    # deterministic work allowance (that design was built and falsified).
+    from discopt._relax.presolve_deadline import PresolveDeadline
+
+    _presolve_deadline = PresolveDeadline(_deadline_exhausted)
+
     from discopt._relax.factorable_reform import canonicalize_entropy
 
-    model = canonicalize_entropy(model)
+    if _presolve_deadline.afford("canonicalize_entropy"):
+        model = canonicalize_entropy(model)
 
     # --- Objective-defining-equality relaxation (the SUSPECT "objective
     # constraint"). When the model is `min/max z` with z a free scalar that
@@ -10832,7 +10851,11 @@ def solve_model(
     try:
         from discopt._relax.dependent_vars import find_functionally_dependent_names
 
-        _dependent_var_names = find_functionally_dependent_names(model)
+        # Its own ``_SCAN_WORK_BUDGET`` bounds ONE call deterministically; the
+        # deadline decides whether the block can still afford the call at all
+        # (#1456). Measured 5.25 s on ``densitymod`` with that budget in force.
+        if _presolve_deadline.afford("find_functionally_dependent_names"):
+            _dependent_var_names = find_functionally_dependent_names(model)
     except Exception as _dep_exc:  # pragma: no cover - defensive
         logger.debug("functional-dependency detection skipped: %s", _dep_exc)
 
@@ -10855,7 +10878,7 @@ def solve_model(
             reformulate_binary_multilinear,
         )
 
-        if has_binary_multilinear_work(model):
+        if _presolve_deadline.afford("binary_multilinear") and has_binary_multilinear_work(model):
             _bml = reformulate_binary_multilinear(model)
             if _bml is not model:
                 from discopt._relax.problem_classifier import ProblemClass, classify_problem
@@ -10932,7 +10955,18 @@ def solve_model(
     _prereform_model = None
     _prereform_nvars = 0
 
-    if has_factorable_work(model):
+    # #1456 item 2. The entry gate alone leaves the *first* heavy pass unbounded,
+    # and factorable reform is the pass that was measured overrunning: ``truck``
+    # spent 81.5 s between two consecutive entry checks, inside this one call,
+    # against ``time_limit=10``. One hook serves both the scan and the rewrite so
+    # the pass is recorded once however far it got; both respond by returning the
+    # model untouched, which is the answer they already give when they find
+    # nothing.
+    _factorable_expired = _presolve_deadline.abandon_hook("factorable")
+
+    if _presolve_deadline.afford("factorable") and has_factorable_work(
+        model, deadline=_factorable_expired
+    ):
         # Tighten variable bounds with FBBT *before* the reform so its interval
         # checks see finite bounds. A fractional-power-of-product lift (issue
         # #138) only fires when the lifted base has a finite interval; constraint
@@ -10981,17 +11015,27 @@ def solve_model(
             # per-node bound loops below.
             _prereform_model = model
             _prereform_nvars = sum(v.size for v in model._variables)
-            model = factorable_reformulate(model)
-            # factorable_reformulate builds a FRESH model object that does not
-            # carry the convexity-classification budget attribute. Without this
-            # the dispatch classify below reads the 15 s default instead of the
-            # intended fraction of ``time_limit`` and can overrun a tight budget
-            # on the (larger) lifted model — heatexch_gen3: 12 s classify under a
-            # 15 s solve budget. Re-assert the budget (and clear any stale cache).
-            model._convexity_classification_cache = None
-            clear_declared_box_cache(model)
-            model._convexity_time_budget = _convexity_time_budget
-            model._solve_deadline = _solve_t0 + float(time_limit)  # #654 (see above)
+            model = factorable_reformulate(model, deadline=_factorable_expired)
+            if model is _prereform_model:
+                # #1456 item 2: the rewrite abandoned mid-traversal and handed
+                # back the model it was given. Undo the bookkeeping above — a
+                # non-None ``_prereform_model`` tells the per-node interval bound
+                # that aux columns were appended, and none were — and leave the
+                # untouched model's caches alone; the fix-ups below exist only
+                # because the reform normally returns a *fresh* object.
+                _prereform_model = None
+                _prereform_nvars = 0
+            else:
+                # factorable_reformulate builds a FRESH model object that does not
+                # carry the convexity-classification budget attribute. Without this
+                # the dispatch classify below reads the 15 s default instead of the
+                # intended fraction of ``time_limit`` and can overrun a tight budget
+                # on the (larger) lifted model — heatexch_gen3: 12 s classify under
+                # a 15 s solve budget. Re-assert the budget (clear any stale cache).
+                model._convexity_classification_cache = None
+                clear_declared_box_cache(model)
+                model._convexity_time_budget = _convexity_time_budget
+                model._solve_deadline = _solve_t0 + float(time_limit)  # #654 (above)
         # A *convex* model with a clearable denominator is deliberately left
         # untouched here: many such divisions (e.g. the rotated-SOC ``x**2/z``)
         # are solved exactly by the convex NLP fast path, and clearing would
@@ -11190,7 +11234,11 @@ def solve_model(
         # the MIQP-batch certification path). This witness is far cheaper than a
         # full convexity classification (~6s on ex1263), so the common path and
         # the reformulated path both stay fast.
-        if not _did_multilinear_reform and has_nonconvex_integer_bilinear(model):
+        if (
+            not _did_multilinear_reform
+            and _presolve_deadline.afford("integer_bilinear")
+            and has_nonconvex_integer_bilinear(model)
+        ):
             _ipx = reformulate_integer_bilinear(model)
             # Adopt the reformulation ONLY when it eliminates *all* nonlinearity,
             # i.e. yields an equivalent pure MILP. If other nonlinear terms remain
@@ -11367,6 +11415,26 @@ def solve_model(
                         )
     except Exception as _ipx_exc:  # pragma: no cover - defensive
         logger.debug("integer-bilinear reformulation skipped: %s", _ipx_exc)
+
+    # #1456 item 3: abstention is logged, not silent. A skipped pass means the
+    # relaxation below is built from less recognized structure, so a reader
+    # comparing two runs of the same model — or a panel checking whether a run
+    # was clock-decided at all — has to be able to see it in one line rather
+    # than reconstruct it from per-pass debug records.
+    if _presolve_deadline.skipped or _presolve_deadline.abandoned:
+        # Skipped and abandoned are reported as separate lists on purpose: both
+        # mean structure this solve did not recognize, but an abandoned pass also
+        # *spent* the budget it walked before giving up, which is what a reader
+        # asking "where did my time limit go" needs to be able to tell apart.
+        logger.info(
+            "pre-solve structure passes gave up for want of time budget (%s): "
+            "skipped before starting: %s; abandoned mid-traversal: %s "
+            "— structure recognition is weaker and the relaxation may be looser "
+            "(#1456)",
+            _presolve_deadline.stopped_on,
+            ", ".join(_presolve_deadline.skipped) or "none",
+            ", ".join(_presolve_deadline.abandoned) or "none",
+        )
 
     # --- Build Rust model representation for FBBT ---
     global _IN_TREE_PRESOLVE_GLOBAL_CALLS
