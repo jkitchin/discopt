@@ -520,9 +520,10 @@ def estimate_distributed_terms(expr: Expression) -> int:
 # ``sqrt`` node in ``convexity.patterns.is_homogeneous_psd_quadratic``
 # (``glider400``), and ``binary_multilinear_reform._poly_add`` (``hadamard_9``,
 # which still overran 300 s against a 60 s limit with this budget in force).
-# All three are pre-solve passes that run with no deadline; threading one into
-# them (they all have an existing "found nothing" path to take on expiry) is the
-# class-level fix, tracked in issue #1456.
+# Both were fixed the same way in #1456 -- a deterministic bound on the work,
+# not a wall-clock deadline, so that what a pre-solve pass recognizes does not
+# depend on machine load (which would make the bound-neutral verification
+# regime in CLAUDE.md sec.5 unenforceable on exactly these instances).
 #
 # Over budget the expression is returned with its affordable subtrees distributed
 # and the offending product left intact -- ALGEBRAICALLY IDENTICAL either way, so
