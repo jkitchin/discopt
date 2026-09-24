@@ -102,8 +102,17 @@ def _solved_model():
 
 
 def test_schema_minor_is_bumped_for_the_non_additive_change():
-    """1.1 promised additive minors; the bool index kind and list axis are not."""
-    assert S.SCHEMA == "discopt.model/1.2"
+    """1.1 promised additive minors; the bool index kind and list axis are not.
+
+    1.2 was that bump. 1.3 adds the registered-atom tag (#1248 A), which *is*
+    additive -- a reader that ignores the key gets the lowering and relaxes it
+    term by term, which is sound -- but the minor still moves, because absence of
+    the key has two meanings and only the minor tells them apart: "this model has
+    no registered atoms" (1.3) versus "the writer could not record them" (≤1.2).
+    A 1.2 reader that reloads and re-saves a 1.3 document drops the tags
+    permanently, and the minor is what lets that be detected rather than guessed.
+    """
+    assert S.SCHEMA == "discopt.model/1.3"
 
 
 def test_legacy_11_document_restores_a_tagged_float_in_the_trace():

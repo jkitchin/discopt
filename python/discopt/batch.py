@@ -20,6 +20,18 @@ which would drag the unpicklable model back into the pipe. The worker clears it
 and this module re-attaches the caller's *own* model object on the way out, so a
 returned result behaves like one from a local solve.
 
+**Registered atoms need to be registered in the worker too.** The document a
+worker receives records which nodes are registered composites (#1248 A), and
+:func:`discopt.modeling.loads` restores the tag — but only for a name the
+*reading* process has registered, because the envelope must be re-derived from a
+definition this process holds rather than trusted from a name. Under ``spawn``
+each worker re-imports the parent's ``__main__``, so a module-level
+``register_function(...)`` is present in the worker and the atom is restored; a
+registration made inside a function that only the parent runs is not, and those
+models relax term by term in the worker. That is sound — the document carries the
+lowering, so the model is complete without the registry — but it is a looser
+bound than the same call gets at ``workers=1``, so register at import time.
+
 What a parallel batch does NOT do is make each solve deterministic: a wall-clock
 ``time_limit`` buys less work when N solves share the machine, so a budget-limited
 model can legitimately return a different bound under ``workers=8`` than under
