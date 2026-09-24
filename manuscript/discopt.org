@@ -1097,14 +1097,14 @@ We further validate on instances from MINLPLib cite:&Bussieck2003, imported via 
 Two columns are reported separately throughout, and the distinction is the whole point. /Certified/ counts the instances on which a solver *asserted* a global certificate. /Matches oracle/ counts the instances whose returned objective agrees with the published optimum to tolerance, whether or not the solver proved it. A solver can match the oracle without certifying --- it found the answer but did not close the gap --- and the two numbers are not interchangeable.
 
 #+NAME: tab-h2h-wide
-#+CAPTION: discopt vs. full-licence BARON on 199 MINLPLib instances, 60~s per instance, Apple M4 Pro. From =reports/global_opt_baron_vs_discopt_2026-07-18T14-09-20.json= via =panel_tally.py=. Median is over oracle-matched instances; total wall is over all 199.
+#+CAPTION: discopt vs. full-licence BARON on 199 MINLPLib instances, 60~s per instance, Apple M4 Pro. From ~reports/global_opt_baron_vs_discopt_2026-07-18T14-09-20.json~ via ~panel_tally.py~. Median is over oracle-matched instances; total wall is over all 199.
 | Solver  | Certified | Matches oracle | Gap | Violations | No incumbent | Median (s) | Total wall (s) |
 |---------+-----------+----------------+-----+------------+--------------+------------+----------------|
 | discopt |       121 |            158 |  20 |          0 |           21 |       2.38 |         4564.7 |
 | BARON   |        97 |            166 |  27 |          1 |            5 |       0.05 |          919.7 |
 
 #+NAME: tab-h2h-3way
-#+CAPTION: Three-way comparison on the 50-instance =global50= panel, 60~s per instance, Apple M4 Pro. From =reports/global50_3way_2026-07-28T08-03-28.json= via =panel_tally.py=.
+#+CAPTION: Three-way comparison on the 50-instance ~global50~ panel, 60~s per instance, Apple M4 Pro. From ~reports/global50_3way_2026-07-28T08-03-28.json~ via ~panel_tally.py~.
 | Solver  | Certified | Matches oracle | Gap | Violations | No incumbent | Median (s) | Total wall (s) |
 |---------+-----------+----------------+-----+------------+--------------+------------+----------------|
 | discopt |        48 |             48 |   0 |          0 |            2 |       0.33 |          294.7 |
@@ -1158,7 +1158,7 @@ All 453 instances parse, and 4448 assertions against the library's own metadata 
 *What we do not claim.* QPLIB is ingested and verified, but it is *not yet wired into a benchmark suite*, and this paper reports *no QPLIB solve panel*. What the corpus has supported so far is relaxation-level measurement. The clearest of these is the root-bound effect of the linear-equality (Sherali--Adams constraint-factor) RLT family cite:&Sherali1990 on continuous nonconvex QPs: for a linear equality $a^\top x + c = 0$ and a variable $x_j$, the product $(a^\top x + c)\,x_j = 0$ linearizes over the lifted product columns to $\sum_i a_i X_{ij} + c\,x_j = 0$, which holds with equality at every feasible point and so can never cut one, and which --- unlike the bound-factor families --- contains no box data and is therefore identical at every node. Table ref:tab-qplib-rlt reports the measured root LP bound with and without it. The McCormick-only root bound is hopeless on this class, and on the instances that respond, /all/ of the recoverable gap comes from this equality family; the bound-factor rows added nothing on top of it. No bound crossed its published optimum on any instance in the probe.
 
 #+NAME: tab-qplib-rlt
-#+CAPTION: Root LP bound on five continuous nonconvex QPLIB QPs: McCormick alone, plus the linear-equality RLT family, against the published optimum. The family is gated =off= by default pending the graduation panel of Section ref:sec-soundness.
+#+CAPTION: Root LP bound on five continuous nonconvex QPLIB QPs: McCormick alone, plus the linear-equality RLT family, against the published optimum. The family is gated ~off~ by default pending the graduation panel of Section [[ref:sec-soundness]].
 | Instance   | McCormick | + linear-eq RLT | Optimum  | Gap closed |
 |------------+-----------+-----------------+----------+------------|
 | QPLIB_1157 |  -14.8046 |        -11.7716 | -10.9482 |     78.6\% |
