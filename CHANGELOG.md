@@ -24,16 +24,34 @@ The release procedure that produces these entries is documented in
   that generic factorable relaxation throws away: written in primitives, the
   Redlich-Kister binary a CALPHAD phase is priced with —
   `x(1-x)(L0 + L1(2x-1)) + RT[x ln x + (1-x) ln(1-x)]` — is relaxed term by term,
-  which loses every cancellation between the terms. Measured over `x in [0, 1]`
-  (`scripts/entry_1248_envelope_gain.py`): the root bound misses the true optimum
-  by 4% to 324%, and the ONE-VARIABLE global solve takes 131 to 7559 nodes.
+  which loses every cancellation between the terms.
 
   `register_function(name, lower)` names that composite. The model still carries
   the **lowering** — an ordinary primitive expression — so evaluation, `.nl`
   export, the Rust core and presolve need no new opcode and are untouched; what
-  changes is that the relaxation layer envelopes the whole atom. Measured on the
-  same family: 7559 → 35, 2655 → 47, 1741 → 15, 1729 → 25 and 2019 → 19 nodes
-  (56x–216x), with the same optimum in every row.
+  changes is that the relaxation layer envelopes the whole atom.
+
+  **Measured payoff, with a retraction.** This entry first reported a root gap of
+  "4% to 324%", primitive solves of "131 to 7559 nodes", and a "56x–216x" speedup
+  from naming the composite. Those numbers were real but measured something else:
+  `entropy` had no `_UNIVARIATE_FN` entry, so every `dm.xlogx` term in the
+  *primitive* arm reached the relaxation engine's interval floor (#1277). Almost
+  the whole ratio was that missing envelope, not this mechanism. With the envelope
+  in place (20 interleaved solves on the same family, same optimum in every one),
+  the primitive arm needs 23–51 nodes and the registered arm 15–47:
+
+  | L0 | L1 | RT | primitive | registered | ratio | was reported |
+  |---:|---:|---:|----------:|-----------:|------:|-------------:|
+  | 3.0 | 0.0 | 1.0 | 51 | 35 | 1.46x | 216x |
+  | 5.0 | 0.0 | 1.0 | 51 | 47 | 1.09x | 56.5x |
+  | 3.0 | 1.5 | 1.0 | 23 | 15 | 1.53x | 116x |
+  | 8.0 | -4.0 | 1.0 | 29 | 25 | 1.16x | 69.2x |
+  | 20000.0 | 5000.0 | 8314.0 | 29 | 19 | 1.53x | 106x |
+
+  The mechanism still earns its keep — a strict node-count reduction in every row
+  at the same optimum, and it is general rather than specific to this family — but
+  the honest figure is **1.1x–1.5x, not two orders of magnitude**. The per-row
+  table is maintained in `python/tests/test_1248_register_function.py`.
 
   Nothing is taken on trust. `f` and `f'` are evaluated on the lowering through
   the solver's own tape, and the per-box curvature verdict is an **interval
