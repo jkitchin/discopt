@@ -40,7 +40,7 @@ unconditional once invoked.
 
 from __future__ import annotations
 
-from typing import Callable, TypeVar
+from typing import Callable, Optional, TypeVar
 
 import numpy as np
 
@@ -1024,7 +1024,7 @@ def _has_unbounded_nonlinear_term(body: Expression, model: Model) -> bool:
     return walk(dist)
 
 
-def has_factorable_work(model: Model) -> bool:
+def has_factorable_work(model: Model, *, deadline: Optional[Callable[[], bool]] = None) -> bool:
     """True if any constraint/objective has a clearable division or a mixed
     repeated-factor product — i.e. the pass would change the model.
 
@@ -1036,11 +1036,23 @@ def has_factorable_work(model: Model) -> bool:
     The structural scan recurses one frame per expression node; on a deep
     ``from_nl`` graph that can exceed the default recursion limit, so it runs
     with size-scaled recursion headroom (issue #271).
+
+    ``deadline`` is #1456 item 2: a coarse abstention check, consulted once per
+    constraint in the outer loop and never inside the per-expression walk, so
+    the check itself is not a cost.  On expiry the scan takes its existing
+    "found nothing" path and the caller leaves the model alone.  Without it a
+    pass-entry gate is not enough — ``truck`` was measured spending **81.5 s**
+    between two consecutive gate checks, i.e. inside this one pass, against
+    ``time_limit=10``.
     """
-    return _run_factorable_with_headroom(model, lambda: _has_factorable_work_inner(model))
+    return _run_factorable_with_headroom(
+        model, lambda: _has_factorable_work_inner(model, deadline=deadline)
+    )
 
 
-def _has_factorable_work_inner(model: Model) -> bool:
+def _has_factorable_work_inner(
+    model: Model, *, deadline: Optional[Callable[[], bool]] = None
+) -> bool:
     def scan(expr: Expression) -> bool:
         if _find_clearable_denominator(expr, model) is not None:
             return True
@@ -1057,7 +1069,16 @@ def _has_factorable_work_inner(model: Model) -> bool:
 
     if model._objective is not None and scan(model._objective.expression):
         return True
-    return any(isinstance(c, Constraint) and scan(c.body) for c in model._constraints)
+    for c in model._constraints:
+        # #1456 item 2. Abstaining here is the same answer the scan gives when
+        # it finds nothing, so it costs structure recognition and never
+        # correctness: the caller's response to False is "leave the model
+        # alone".
+        if deadline is not None and deadline():
+            return False
+        if isinstance(c, Constraint) and scan(c.body):
+            return True
+    return False
 
 
 def has_clearable_denominator(model: Model) -> bool:
@@ -1600,7 +1621,12 @@ def canonicalize_entropy(model: Model) -> Model:
         return model
 
 
-def factorable_reformulate(model: Model, *, clear_only: bool = False) -> Model:
+def factorable_reformulate(
+    model: Model,
+    *,
+    clear_only: bool = False,
+    deadline: Optional[Callable[[], bool]] = None,
+) -> Model:
     """Return a model equivalent to *model* with sign-definite denominators
     cleared and mixed repeated-factor products lifted to bilinear form.
 
@@ -1618,15 +1644,32 @@ def factorable_reformulate(model: Model, *, clear_only: bool = False) -> Model:
     The rewrite walkers recurse one frame per expression node; on a deep
     ``from_nl`` graph that can exceed the default recursion limit, so the whole
     pass runs with size-scaled recursion headroom (issue #271).
+
+    ``deadline`` (#1456 item 2) is checked once per constraint in the rebuild
+    loop.  On expiry the pass abandons **wholesale** and returns the original
+    model: the half-built replacement is discarded rather than returned, so an
+    abstention is always the documented "returned unchanged" outcome and never
+    a partially rewritten model.  That is what makes a clock admissible here —
+    it selects between two states the pass already produces, and cannot invent
+    a third.  It is not even a new escape: the rebuild loop has always been able
+    to bail to the original model from any point inside itself (the defensive
+    ``except Exception: return model`` below), so abandoning is an existing,
+    exercised return path reached for a new reason.
     """
     return _run_factorable_with_headroom(
-        model, lambda: _factorable_reformulate_inner(model, clear_only=clear_only)
+        model,
+        lambda: _factorable_reformulate_inner(model, clear_only=clear_only, deadline=deadline),
     )
 
 
-def _factorable_reformulate_inner(model: Model, *, clear_only: bool = False) -> Model:
+def _factorable_reformulate_inner(
+    model: Model,
+    *,
+    clear_only: bool = False,
+    deadline: Optional[Callable[[], bool]] = None,
+) -> Model:
     try:
-        if not _has_factorable_work_inner(model):
+        if not _has_factorable_work_inner(model, deadline=deadline):
             return model
 
         new_model = Model(model.name)
@@ -1639,6 +1682,12 @@ def _factorable_reformulate_inner(model: Model, *, clear_only: bool = False) -> 
 
         rebuilt: list[Constraint] = []
         for c in model._constraints:
+            # #1456 item 2. Wholesale abandonment: ``new_model`` and everything
+            # ``lifter`` has built for it are dropped on the floor, and the
+            # caller gets the model it passed in. A partial rewrite would be a
+            # third state nothing downstream is written against.
+            if deadline is not None and deadline():
+                return model
             if not isinstance(c, Constraint):
                 rebuilt.append(c)  # pass through anything exotic untouched
                 continue

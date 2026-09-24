@@ -519,6 +519,85 @@ def _support_restricted(Q: np.ndarray) -> np.ndarray:
     return Q
 
 
+def _quadratic_sign_form(expr: Expression, model: Model):
+    """``(Q_support, c, const)`` for an eigenvalue SIGN test, or ``None``.
+
+    Returns exactly what ``_support_restricted(_quadratic_data(expr, model)[0])``
+    returns — the same submatrix, bit for bit — **without ever materialising the
+    ``(n_total, n_total)`` Hessian** (#1456).
+
+    #814 and #1458 cut the *eigendecomposition* down to the support, which left
+    the allocation as the whole cost.  Measured on ``glider400`` (5215 variables,
+    401 calls from one ``has_factorable_work`` scan): ``_quadratic_data`` spends
+    26.8 s, of which 26.2 s is the single line ``0.5 * (Q + Q.T)`` — three dense
+    218 MB temporaries per call, for quadratics that touch a handful of
+    variables.  Building the support submatrix straight from the sparse term
+    dict costs **0.002 s** for the same 401 calls, a 16,709x reduction, with all
+    401 PSD/NSD sign decisions and every ``c``/``const`` identical.
+
+    (Recorded per CLAUDE.md §4: the first attempt — reorder to restrict support
+    *before* symmetrising, keeping the dense extraction — was measured at 3.5x
+    against a pre-stated 5x kill criterion and abandoned.  Caching was measured
+    too: all 401 expressions are distinct objects, so there is nothing to reuse.
+    The allocation had to go, not be reordered or memoised.)
+
+    BIT-IDENTICAL, deliberately, so this is a bound-NEUTRAL change (§5) and can
+    be verified by "node count and objective exactly unchanged" rather than by a
+    differential panel:
+
+    * ``_extract_quadratic_terms`` is the same walk ``_extract_quadratic_coefficients``
+      performs — the latter is a thin wrapper that materialises its result — so
+      the cell values, including #1397's exact ``math.fsum``, are the same doubles.
+    * The support is taken on the SYMMETRISED values against the same ``1e-12``,
+      which for a symmetric matrix is the same index set as
+      ``_support_restricted``'s column test, and is emitted in ascending global
+      index order exactly as ``np.ix_`` does.
+    * The wide-model refusal is preserved.  ``_quadratic_data`` returns ``None``
+      once ``(n, n)`` float64 exceeds ``_QP_DENSE_Q_MAX_BYTES`` because its
+      consumers were dense (#863).  This consumer no longer is, so the refusal
+      could now be lifted — that would recognise structure on wide models that is
+      currently declined, which is *bound-changing* and belongs in its own PR
+      behind the §5 differential panel.  It is kept here so that this change
+      alters nothing but the clock.
+    """
+    from discopt._relax.problem_classifier import (
+        _QP_DENSE_Q_MAX_BYTES,
+        _extract_quadratic_terms,
+    )
+
+    n = _total_scalar_variables(model)
+    if (n * n * 8) > _QP_DENSE_Q_MAX_BYTES:
+        return None
+    try:
+        terms, c, const = _extract_quadratic_terms(expr, model, n)
+    except Exception:
+        return None
+
+    # Symmetrise on the nonzeros only: ``0.5 * (Q + Q.T)`` restricted to the
+    # cells either triangle actually touches.  A cell absent from both is 0.0 in
+    # the dense arm too, so it can be neither in the support nor in the submatrix.
+    sym: dict[tuple[int, int], float] = {}
+    for i, j in terms:
+        if (i, j) in sym:
+            continue
+        v = 0.5 * (terms.get((i, j), 0.0) + terms.get((j, i), 0.0))
+        sym[(i, j)] = v
+        sym[(j, i)] = v
+
+    support = sorted({i for (i, _j), v in sym.items() if abs(v) > 1e-12})
+    if not support:
+        # ``_support_restricted`` returns 0x0 for an all-zero Q; callers decide
+        # what an empty spectrum means.
+        return np.zeros((0, 0), dtype=np.float64), np.asarray(c, dtype=np.float64), float(const)
+    pos = {g: k for k, g in enumerate(support)}
+    sub = np.zeros((len(support), len(support)), dtype=np.float64)
+    for (i, j), v in sym.items():
+        ki, kj = pos.get(i), pos.get(j)
+        if ki is not None and kj is not None:
+            sub[ki, kj] = v
+    return sub, np.asarray(c, dtype=np.float64), float(const)
+
+
 def _linear_vector_matrix(expr: Expression, model: Model) -> Optional[np.ndarray]:
     """Return A for vector affine form ``A @ x`` with no constant term."""
     n_total = _total_scalar_variables(model)
@@ -711,21 +790,25 @@ def is_homogeneous_psd_quadratic(expr: Expression, model: Model) -> bool:
         sub = mat[:, cols]
         eigvals = np.linalg.eigvalsh(sub.T @ sub)
         return bool(float(np.min(eigvals)) >= -1e-10)
-    data = _quadratic_data(expr, model)
-    if data is None:
-        return False
-    Q, c, const = data
-    if not np.allclose(c, 0.0, atol=1e-10):
-        return False
-    if abs(const) > 1e-10:
-        return False
     # #1456: this is a min-eigenvalue SIGN test, so it is exact on the support
     # (see ``_support_restricted``). Without this, one ``sqrt`` node in
     # glider400's 5215-variable model costs a 5215x5215 eigendecomposition;
     # measured, 20 such calls spent 119 s -- 97.6% of a solve given a 20 s
     # time_limit. The sibling ``quadratic_curvature`` got this treatment in
     # #814 and this function was missed.
-    Qs = _support_restricted(Q)
+    #
+    # ``_quadratic_sign_form`` returns that same submatrix bit for bit without
+    # allocating the whole-model Hessian first, which after the eigendecomposition
+    # was cut down had become the entire remaining cost: 26.2 s of glider400's
+    # 26.8 s, in the symmetrisation line alone.
+    data = _quadratic_sign_form(expr, model)
+    if data is None:
+        return False
+    Qs, c, const = data
+    if not np.allclose(c, 0.0, atol=1e-10):
+        return False
+    if abs(const) > 1e-10:
+        return False
     if Qs.size == 0:
         return True  # Q is entirely zero: the zero form is PSD
     eigvals = np.linalg.eigvalsh(Qs)
@@ -740,23 +823,26 @@ def quadratic_curvature(expr: Expression, model: Model) -> Optional[Curvature]:
     fallback when the DCP walker leaves a degree-2 polynomial at UNKNOWN
     because its structure only becomes visible after symbolic expansion.
     """
-    data = _quadratic_data(expr, model)
-    if data is None:
-        return None
-    Q, _c, _const = data
-    if np.allclose(Q, 0.0, atol=1e-10):
-        return Curvature.AFFINE
     # #814: restrict the eigenproblem to the nonzero SUPPORT of Q, which is exact
     # for the CONVEX (min >= 0) / CONCAVE (max <= 0) sign tests below. Without it
     # one gas-pipe flow term in gastrans582's 2186-var model triggers an
     # O(n_total**3) eigvalsh and grinds the root relaxation build for 75s+ before
     # B&B even starts. Shared with ``is_homogeneous_psd_quadratic`` via
-    # ``_support_restricted`` so the two cannot drift apart again (#1456: they
+    # ``_quadratic_sign_form`` so the two cannot drift apart again (#1456: they
     # had, and the miss cost glider400 97.6% of its time limit).
-    # The all-zero-support case cannot arrive here: the ``allclose(Q, 0)`` test
-    # above (atol 1e-10, looser than the 1e-12 support threshold) already
-    # returned AFFINE for it, so ``eigvals`` below is never empty.
-    Q = _support_restricted(Q)
+    #
+    # #1456: the submatrix now comes back without the whole-model Hessian being
+    # built at all — bit-identical, so every classification below is unchanged.
+    data = _quadratic_sign_form(expr, model)
+    if data is None:
+        return None
+    Q, _c, _const = data
+    # Equivalent to the old whole-Q test: every entry outside the support is
+    # exactly 0.0, so it cannot make an ``allclose(..., atol=1e-10)`` differ.
+    # The all-zero-support case is absorbed here too — a 0x0 array is vacuously
+    # allclose to zero — so ``eigvals`` below is never empty.
+    if np.allclose(Q, 0.0, atol=1e-10):
+        return Curvature.AFFINE
     eigvals = np.linalg.eigvalsh(Q)
     if float(np.min(eigvals)) >= -1e-10:
         return Curvature.CONVEX
