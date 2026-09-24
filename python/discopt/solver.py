@@ -11861,7 +11861,7 @@ def solve_model(
         if problem_class == ProblemClass.LP:
             if _lp_milp_backend() == "highs":
                 return _solve_lp_highs(model, t_start, time_limit)
-            return _solve_lp(model, t_start, time_limit, prefer_pounce=nlp_solver == "pounce")
+            return _solve_lp(model, t_start, time_limit)
         elif problem_class == ProblemClass.QP:
             if _pure_continuous:
                 if _pure_continuous_convexity_known and _pure_continuous_is_convex:
@@ -22058,12 +22058,49 @@ def _solve_lp(
     model: Model,
     t_start: float,
     time_limit: float | None = None,
-    prefer_pounce: bool = False,
 ) -> SolveResult:
     """Solve an LP through the pure-Rust simplex (then POUNCE if installed).
 
-    Engine order is Rust simplex -> POUNCE, or POUNCE -> Rust simplex when
-    ``prefer_pounce`` is set (the user passed ``nlp_solver="pounce"``). The
+    Engine order is Rust simplex -> POUNCE, always. It used to invert to
+    POUNCE -> simplex under a ``prefer_pounce`` argument documented as "the user
+    passed ``nlp_solver="pounce"``" -- but the only call site computed it as
+    ``nlp_solver == "pounce"`` against a parameter whose DEFAULT is ``"pounce"``
+    (``solve_model``'s signature), so it was true for every caller and the
+    documented order never ran. An interior-point method answered every pure LP
+    and the exact simplex was never consulted.
+
+    That is a wrong ANSWER, not a preference: an IPM converges in variable space,
+    and on an LP whose objective coefficients span orders of magnitude a residual
+    well inside any feasibility tolerance is amplified into a large objective
+    error, which this route then reported as a certified optimum. Measured on
+    ``min C*x + (1/C)*y  s.t. x + y >= 1, x,y in [0,1]`` (optimum ``x=0, y=1``,
+    value ``1/C``), 24 comparisons over six ratios::
+
+        C      simplex/HiGHS err   POUNCE-first err (this route)
+        1e4    0.0                 7.518e-07
+        1e6    0.0                 7.518e-05
+        1e8    0.0                 2.728e-05
+        1e12   0.0                 1.331e-05   (reported NEGATIVE, see below)
+
+    all with ``gap_certified=True``, crossing the documented ``abs=1e-6``
+    tolerance between 1e4 and 1e6. At ``C=1e12`` it reported ``-1.331e-05`` for
+    an objective ``C*x + y/C`` with ``x, y >= 0``, which is provably
+    non-negative -- a value no feasible point attains. At ``C=1e8`` it returned
+    ``x=2.7275725368179037e-13`` instead of ``0``, and ``1e8 * 2.7e-13 =
+    2.7e-05``. The simplex returns ``x=0.0, y=1.0`` exactly on every one of them.
+
+    POUNCE remains the fallback, for the cases the simplex declines (binding
+    unavailable, or a genuine failure); it is an LP ENGINE ORDER that changes
+    here, and no solver's numerics.
+
+    **Reachability.** This function is NOT on the default path for a pure LP.
+    Since #1229 the entry classifier routes pure LP/MILP to ``_solve_lp_highs``
+    (verified 2026-09-23: a default solve calls that and nothing else), and this
+    function has a single call site behind the ``DISCOPT_LP_MILP_BACKEND=rust``
+    opt-out. The HiGHS route was exact on every cell of the table above, so the
+    defect described here was only ever reachable by opting out.
+
+    The
     fragile JAX LP-IPM last resort was **retired** in issue #364: the hardened
     pure-Rust simplex (iterative refinement, condition/growth signals, dual
     anti-cycling, EXPAND anti-degeneracy) is the single robust LP engine, so a
@@ -22073,9 +22110,9 @@ def _solve_lp(
     """
     from discopt.solvers.lp_pounce import declared_box_honored
 
+    # The exact engine leads. See this function's docstring for the measurement
+    # that removed the inversion.
     engines = [_solve_lp_simplex, _solve_lp_pounce]
-    if prefer_pounce:
-        engines.reverse()
 
     def _attempt() -> "SolveResult | _DeferredUnbounded | None":
         """First real answer from the engine order, else any held deferral."""
