@@ -691,6 +691,33 @@ class TapeNLPEvaluator:
         np.add.at(dense, (rows, cols), self.evaluate_jacobian_values(x))
         return dense
 
+    def evaluate_sparse_jacobian(self, x: np.ndarray):
+        """The same Jacobian as CSR, without the scatter into a dense array.
+
+        The tape is *natively* sparse — ``jacobian_structure()`` is COO and
+        ``evaluate_jacobian_values()`` are its values — so :meth:`evaluate_jacobian`
+        reaches its dense ``(m, n)`` contract by throwing the structure away. For a
+        caller that only wants to multiply or factorise, that scatter is the entire
+        cost: on MINLPLib ``arki0014`` it is a (17525, 19305) array, 2.707 GB, to
+        carry 75,329 nonzeros — 0.022 % dense, about 0.7 MB as CSR.
+
+        Named to match :meth:`NLPEvaluator.evaluate_sparse_jacobian` so a caller can
+        ask for the sparse form by ``hasattr`` without knowing which evaluator it
+        holds; ``_dual_recovery.jacobian_for_recovery`` is the first such caller.
+
+        The result is *exactly* the dense matrix, not an approximation of it:
+        ``coo_matrix`` sums duplicate ``(row, col)`` entries on conversion, which is
+        the same accumulation ``np.add.at`` performs above.
+        """
+        import scipy.sparse as sp
+
+        m, n = self._n_constraints, self._n_variables
+        if m == 0:
+            return sp.csr_matrix((0, n), dtype=np.float64)
+        rows, cols = self.jacobian_structure()
+        vals = self.evaluate_jacobian_values(x)
+        return sp.coo_matrix((vals, (rows, cols)), shape=(m, n), dtype=np.float64).tocsr()
+
     def evaluate_hessian_values(
         self, x: np.ndarray, obj_factor: float, lambda_: np.ndarray
     ) -> np.ndarray:

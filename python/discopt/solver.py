@@ -5083,11 +5083,19 @@ def _duals_against_declared_box(
     if not (bad_lb.any() or bad_ub.any()):
         return constraint_duals, bound_duals_lower, bound_duals_upper
 
-    from discopt._dual_recovery import recover_multipliers, row_metadata
+    from discopt._dual_recovery import (
+        jacobian_for_recovery,
+        recover_multipliers,
+        row_metadata,
+    )
 
     sense_arr, rhs_arr, _labels = row_metadata(evaluator)
     body = evaluator.evaluate_constraints(x_flat) if sense_arr.size else np.empty(0, dtype=float)
-    jac = evaluator.evaluate_jacobian(x_flat) if sense_arr.size else np.empty((0, n), dtype=float)
+    jac = (
+        jacobian_for_recovery(evaluator, x_flat, m=int(sense_arr.size))
+        if sense_arr.size
+        else np.empty((0, n), dtype=float)
+    )
     grad = evaluator.evaluate_gradient(x_flat)
 
     rec = recover_multipliers(

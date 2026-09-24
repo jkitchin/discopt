@@ -32,12 +32,69 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+import scipy.sparse as sparse
 from scipy.optimize import lsq_linear
 
 # Distance within which a point counts as sitting ON a bound / row. Matches
 # ``examiner.ACTIVE_TOL``; kept here so the solver does not have to import the
 # validation layer just to name a tolerance.
 ACTIVE_TOL = 1e-6
+
+
+def _jac_rows(jac) -> int:
+    """Number of Jacobian ROWS, for dense and sparse alike.
+
+    Exists because ``jac.size`` is the wrong question and silently gives a
+    plausible answer: on a scipy sparse matrix ``.size`` is ``nnz``, not
+    rows x columns (CLAUDE.md). The idiom ``np.zeros(jac.shape[0]) if jac.size
+    else np.zeros(0)`` is correct for a dense Jacobian — ``size == 0`` exactly
+    when there are no entries — but for a *structurally empty* sparse Jacobian
+    it returns a length-zero ``mu_full`` for a matrix that has rows, and the
+    caller then scatters row multipliers into nothing.
+    """
+    return int(jac.shape[0]) if getattr(jac, "shape", None) is not None else 0
+
+
+def jacobian_for_recovery(evaluator, x_flat: np.ndarray, *, m: int):
+    """The Jacobian to fit multipliers against — sparse when dense would be huge.
+
+    Both evaluators expose ``evaluate_jacobian`` as a dense ``(m, n)`` contract,
+    and both reach it by building the sparse Jacobian they already have and
+    throwing the structure away: :class:`TapeNLPEvaluator` scatters its COO
+    triplets with ``np.add.at``, and :class:`NLPEvaluator` above
+    ``_DENSE_JACOBIAN_COMPILE_LIMIT`` runs the sparse colouring path and calls
+    ``.toarray()``. For a multiplier fit that densification is pure loss.
+    Measured on MINLPLib ``arki0014`` at ``time_limit=20``:
+
+        evaluate_jacobian(x)     (17525, 19305)   2.707 GB, 75,329 nnz (0.022 %)
+        the least-squares A      (19305, 16676)   2.575 GB, 55,333 nnz (0.017 %)
+
+    — about 9.4 GB of dense arrays carrying 75k numbers, and then a bounded dense
+    least squares on them. Two ``faulthandler`` dumps 60 s apart showed the same
+    ``numpy.linalg.lstsq`` frame, and the solve ran past 600 s against a 20 s
+    limit. The same system as CSR is roughly 0.7 MB.
+
+    Above the same limit, therefore, ask for the sparse matrix the evaluator was
+    going to build anyway and never densify it. Below it the dense path is
+    genuinely dense and cheap, so it stays — which is also what keeps every model
+    that reports duals today reporting bit-identical duals, since
+    :func:`recover_multipliers` takes its arithmetic from the representation it
+    is handed. The threshold is a shape, evaluated once, with no clock in it.
+
+    Shared by the solver's declared-box refit and by
+    :mod:`discopt.validation.examiner` rather than written at one call site: the
+    two run the same fit on the same models, so a size that defeats one defeats
+    the other.
+    """
+    from discopt._relax.nlp_evaluator import _DENSE_JACOBIAN_COMPILE_LIMIT
+
+    n = int(x_flat.size)
+    if m * n > _DENSE_JACOBIAN_COMPILE_LIMIT and hasattr(evaluator, "evaluate_sparse_jacobian"):
+        # May still hand back a dense array when an evaluator's sparsity
+        # infrastructure is unavailable; that is its pre-existing behaviour and
+        # stays exact, because the representation is what decides the solver.
+        return evaluator.evaluate_sparse_jacobian(x_flat)
+    return evaluator.evaluate_jacobian(x_flat)
 
 
 def row_metadata(evaluator):
@@ -127,6 +184,18 @@ def recover_multipliers(
 
     ``jac`` rows follow ``body``/``sense_arr``/``rhs_arr``; the returned
     ``mu_full`` uses the Lagrangian convention μ ≥ 0 for "<=", μ ≤ 0 for ">=".
+
+    ``jac`` may be dense or a scipy sparse matrix, and **the least-squares system
+    keeps whichever representation it arrived in**. That is a deliberate contract,
+    not an implementation detail: :func:`scipy.optimize.lsq_linear` factorises a
+    dense system exactly and runs LSMR on a sparse one, and the two do not agree
+    bit for bit (measured: costs within 1.2e-13 relative, arguments differing by
+    1.1e-06). Multipliers are reported output, so that difference is visible to a
+    user. Every caller that passes a dense ``jac`` therefore gets exactly the
+    numbers it got before; only a caller that has chosen the sparse form — the
+    solver, when the dense Jacobian would be gigabytes (see
+    ``solver._duals_against_declared_box``) — takes the iterative path, and there
+    the alternative is not a better answer but no answer at all.
     """
     cont_idx = np.where(is_continuous)[0]
     if cont_idx.size == 0:
@@ -140,7 +209,7 @@ def recover_multipliers(
             mu_act=np.zeros(0),
             lam_lb_act=np.zeros(0),
             lam_ub_act=np.zeros(0),
-            mu_full=np.zeros(jac.shape[0]) if jac.size else np.zeros(0),
+            mu_full=np.zeros(_jac_rows(jac)),
             lam_lb_full=np.zeros(x_flat.size),
             lam_ub_full=np.zeros(x_flat.size),
             stat_resid=np.zeros(0),
@@ -150,7 +219,15 @@ def recover_multipliers(
         )
 
     grad_c = grad[cont_idx]
-    jac_c = jac[:, cont_idx] if jac.size else np.empty((0, cont_idx.size))
+    use_sparse = sparse.issparse(jac)
+    if use_sparse:
+        jac_c = (
+            sparse.csr_matrix(jac)[:, cont_idx]
+            if _jac_rows(jac)
+            else sparse.csr_matrix((0, cont_idx.size))
+        )
+    else:
+        jac_c = jac[:, cont_idx] if _jac_rows(jac) else np.empty((0, cont_idx.size))
     lb_c = lb[cont_idx]
     ub_c = ub[cont_idx]
     x_c = x_flat[cont_idx]
@@ -181,7 +258,7 @@ def recover_multipliers(
         # ``stationarity``. Shared with ``validation.feasibility`` rather than
         # written out again: three hand-written copies is how #1151 came to be
         # fixed in one place and left standing in the other two.
-        if jac.size:
+        if _jac_rows(jac):
             from discopt.validation.feasibility import jacobian_row_scales
 
             jac_scale = jacobian_row_scales(jac, x_flat)
@@ -212,7 +289,7 @@ def recover_multipliers(
             mu_act=np.zeros(0),
             lam_lb_act=np.zeros(0),
             lam_ub_act=np.zeros(0),
-            mu_full=np.zeros(jac.shape[0]) if jac.size else np.zeros(0),
+            mu_full=np.zeros(_jac_rows(jac)),
             lam_lb_full=np.zeros(x_flat.size),
             lam_ub_full=np.zeros(x_flat.size),
             stat_resid=grad_c,
@@ -226,29 +303,53 @@ def recover_multipliers(
     var_ub_y: list[float] = []
     if n_mu:
         sub_sense = sense_arr[row_select]
-        sub_jac = jac_c[row_select, :].copy()
         flip = sub_sense == ">="
-        sub_jac[flip, :] *= -1.0
+        if use_sparse:
+            # Row scaling as a diagonal product rather than ``sub_jac[flip, :] *=
+            # -1.0``: in-place row assignment on a CSR matrix either raises or
+            # triggers a sparsity-change warning and a silent format conversion.
+            signs = sparse.diags(np.where(flip, -1.0, 1.0))
+            sub_jac = signs @ jac_c[row_select, :]
+        else:
+            sub_jac = jac_c[row_select, :].copy()
+            sub_jac[flip, :] *= -1.0
         cols.append(sub_jac.T)
         for s in sub_sense:
             var_lb_y.append(-np.inf if s == "==" else 0.0)
             var_ub_y.append(np.inf)
     if n_llb:
-        I_lb = np.zeros((cont_idx.size, n_llb))
-        for k, j in enumerate(lb_active):
-            I_lb[j, k] = -1.0
+        if use_sparse:
+            I_lb = sparse.coo_matrix(
+                (np.full(n_llb, -1.0), (lb_active, np.arange(n_llb))),
+                shape=(cont_idx.size, n_llb),
+            )
+        else:
+            I_lb = np.zeros((cont_idx.size, n_llb))
+            for k, j in enumerate(lb_active):
+                I_lb[j, k] = -1.0
         cols.append(I_lb)
         var_lb_y.extend([0.0] * n_llb)
         var_ub_y.extend([np.inf] * n_llb)
     if n_lub:
-        I_ub = np.zeros((cont_idx.size, n_lub))
-        for k, j in enumerate(ub_active):
-            I_ub[j, k] = 1.0
+        if use_sparse:
+            I_ub = sparse.coo_matrix(
+                (np.ones(n_lub), (ub_active, np.arange(n_lub))),
+                shape=(cont_idx.size, n_lub),
+            )
+        else:
+            I_ub = np.zeros((cont_idx.size, n_lub))
+            for k, j in enumerate(ub_active):
+                I_ub[j, k] = 1.0
         cols.append(I_ub)
         var_lb_y.extend([0.0] * n_lub)
         var_ub_y.extend([np.inf] * n_lub)
 
-    A = np.concatenate(cols, axis=1) if cols else np.zeros((cont_idx.size, 0))
+    if use_sparse:
+        # ``hstack`` of nothing is an error, and ``cols`` is only empty when the
+        # active set is, which returned above; the guard mirrors the dense line.
+        A = sparse.hstack(cols, format="csr") if cols else sparse.csr_matrix((cont_idx.size, 0))
+    else:
+        A = np.concatenate(cols, axis=1) if cols else np.zeros((cont_idx.size, 0))
     b = -grad_c
 
     try:
@@ -269,7 +370,7 @@ def recover_multipliers(
     lam_lb_act = y[n_mu : n_mu + n_llb] if n_llb else np.zeros(0)
     lam_ub_act = y[n_mu + n_llb :] if n_lub else np.zeros(0)
 
-    mu_full = np.zeros(jac.shape[0]) if jac.size else np.zeros(0)
+    mu_full = np.zeros(_jac_rows(jac))
     if n_mu:
         # mu_act is in "flipped to ≤ form"; un-flip ">=" rows back to original sign.
         mu_signed = mu_act.copy()
