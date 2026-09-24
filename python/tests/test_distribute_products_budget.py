@@ -56,12 +56,25 @@ from discopt._relax.term_classifier import (  # noqa: E402
     distribution_exceeds_budget,
     estimate_distributed_terms,
 )
+from discopt.modeling.core import BinaryOp  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
-# Generous: the point is "bounded", not "fast".  Unbudgeted, the expressions
-# below take minutes to hours, so any ceiling in this range separates the two.
-WALL_CEILING_S = 20.0
+# A COARSE BACKSTOP, not the guard.  The property these tests are really about
+# is deterministic — how many terms the budget lets the walk spend — and each
+# wall-clock assertion below is paired with the term-count assertion that says
+# it directly.  This ceiling only has to separate "bounded" (seconds) from the
+# unbudgeted behaviour (``johnall``: 44 minutes), so it is set with room for a
+# loaded machine rather than tight to the fast case.
+#
+# It was 20.0 s and flaked: CI measured 20.07 s for
+# ``test_budget_is_a_running_total_not_a_per_node_limit`` on the coverage lane,
+# which runs two xdist workers with tracing on a 2-core runner — 4.1x the 4.9 s
+# this machine measures for the same test unloaded.  A threshold a busy runner
+# crosses is a threshold that reports load, not correctness (CLAUDE.md §9), and
+# the fix for that is a deterministic assertion plus a ceiling with real margin,
+# not a tighter one.  60 s is still 44x under the pathology it exists to catch.
+WALL_CEILING_S = 60.0
 
 
 def _blowup_model(n_factors: int = 9, width: int = 7):
@@ -83,10 +96,38 @@ def _blowup_model(n_factors: int = 9, width: int = 7):
     return m, x, body
 
 
-def _eval_at(expr, model, xs: np.ndarray) -> float:
+def _evaluator(expr, model):
+    """Compile *expr* once and return ``f(xs) -> float``.
+
+    Compiled ONCE per expression, not once per sample point: a budget-truncated
+    blowup body compiles to a 7.2-million-node tree that costs ~2.8 s to walk,
+    so recompiling it for every point spent ~14 s re-deriving the same function.
+    That is what pushed ``test_budgeted_result_is_algebraically_identical`` past
+    the coverage lane's 120 s per-test timeout.
+    """
     from discopt._relax.dag_compiler import compile_expression
 
-    return float(np.asarray(compile_expression(expr, model)(xs)))
+    fn = compile_expression(expr, model)
+    return lambda xs: float(np.asarray(fn(xs)))
+
+
+def _additive_terms(expr) -> int:
+    """How many additive terms *expr* actually carries, counted iteratively.
+
+    The deterministic form of "the budget bounded this": a distributed result's
+    term count is what the budget spends, and unlike wall-clock it does not
+    depend on what else the machine is doing.  Iterative because a distributed
+    blowup nests millions deep and recursion would hit the interpreter limit.
+    """
+    n, stack = 0, [expr]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, BinaryOp) and cur.op in ("+", "-"):
+            stack.append(cur.left)
+            stack.append(cur.right)
+        else:
+            n += 1
+    return n
 
 
 def test_the_blowup_premise_still_holds():
@@ -104,8 +145,14 @@ def test_oversized_distribution_returns_promptly():
     t0 = time.perf_counter()
     out = distribute_products(body)
     dt = time.perf_counter() - t0
-    assert dt < WALL_CEILING_S, f"distribute_products took {dt:.1f}s"
     assert out is not None
+    # Deterministic: it returned an expression the budget actually bounded, not
+    # one that happened to finish inside a ceiling on a quiet machine.
+    produced = _additive_terms(out)
+    assert produced <= _DISTRIBUTE_TERM_BUDGET, (
+        f"{produced:,} terms against a {_DISTRIBUTE_TERM_BUDGET:,}-term budget"
+    )
+    assert dt < WALL_CEILING_S, f"distribute_products took {dt:.1f}s"
 
 
 def test_budget_is_a_running_total_not_a_per_node_limit():
@@ -134,11 +181,33 @@ def test_budget_is_a_running_total_not_a_per_node_limit():
     assert estimate_distributed_terms(term) > _DISTRIBUTE_TERM_BUDGET, "total must exceed it"
 
     t0 = time.perf_counter()
-    distribute_products(term)
+    out = distribute_products(term)
     dt = time.perf_counter() - t0
+
+    # THE ASSERTION, and it is deterministic: how many terms came out.  A
+    # running total spends one shared pool over the whole expression, so the
+    # result cannot carry more terms than the pool holds.  A per-node limit --
+    # the hole this test exists for -- would let each of the 40 summands spend
+    # 117,649 of its own and hand back 4,705,960, 4.5x over.  Measured here:
+    # 941,224 terms, 0.90x the budget.
+    produced = _additive_terms(out)
+    assert produced <= _DISTRIBUTE_TERM_BUDGET, (
+        f"{produced:,} terms distributed against a {_DISTRIBUTE_TERM_BUDGET:,}-term "
+        f"budget: it is being spent per node, not as a running total "
+        f"(a per-node limit yields {per_term * n_terms:,})"
+    )
+    # The coarse backstop, for a budget that bounded the OUTPUT without bounding
+    # the WORK.  See WALL_CEILING_S: this is not the property under test.
     assert dt < WALL_CEILING_S, f"took {dt:.1f}s: the budget is not bounding the total"
 
 
+# Intrinsically expensive, and not a symptom: the budget's whole job is to let
+# the walk spend ~1e6 terms, so a truncated result IS a ~7.2e6-node tree and
+# evaluating it costs ~2.9 s a point on this machine — 19 s for the test, which
+# tracing and two xdist workers on a 2-core CI runner multiply by ~4.  The 120 s
+# per-test timeout the coverage lane passes is for ordinary unit tests; this one
+# declares what it actually needs rather than sampling fewer points to fit.
+@pytest.mark.timeout(300)
 def test_budgeted_result_is_algebraically_identical():
     """SOUNDNESS. Truncation loses recognizable structure, never meaning. If this
     fails, a constraint means something different after the budget trips and the
@@ -149,11 +218,13 @@ def test_budgeted_result_is_algebraically_identical():
 
     rng = np.random.default_rng(1449)
     n = int(np.prod(x.shape))
+    f_body = _evaluator(body, m)
+    f_out = _evaluator(out, m)
     checks = 0
     for _ in range(5):
         xs = rng.uniform(0.5, 2.0, size=n)
-        a = _eval_at(body, m, xs)
-        b = _eval_at(out, m, xs)
+        a = f_body(xs)
+        b = f_out(xs)
         assert np.isfinite(a) and a != 0.0, "degenerate sample point"
         np.testing.assert_allclose(b, a, rtol=1e-9)
         checks += 1
