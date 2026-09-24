@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The release procedure that produces these entries is documented in
 [`RELEASE.md`](RELEASE.md).
 
+## [Unreleased]
+
+### Fixed
+
+- **The published docs assistant now has a search index.** `docs.yml` ran
+  `jupyter-book build docs/` and nothing else, but `_static/ask-index.json` is a
+  *post-build* artifact — it is generated from the rendered HTML, because the
+  heading anchors it cites only exist once Sphinx has run. `make docs` runs both
+  steps; the deploy workflow ran only the first, so every site it published
+  served a panel whose index 404s on the reader's first question. The workflow
+  now builds the index and runs both assistant guards (`ask_retrieval.mjs`,
+  `ask_e2e.py`) before uploading, and the browser guard asserts the index is
+  fetched *and* served 200 — the exact shape of the bug.
+- **The Ask panel makes room for the page instead of covering it** (#1467). The
+  open panel pads the body by its own width so the book reflows beside it, its
+  left edge drags (and takes the arrow keys) to trade width between the two, and
+  the chosen width is remembered. At phone widths there is nothing to reflow
+  into, so it still overlays.
+
 ## [0.9.0] - 2026-09-24
 
 ### Added

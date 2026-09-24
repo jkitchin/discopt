@@ -36,8 +36,27 @@ jobs:
         run: |
           pip install "jupyter-book<2" sphinxcontrib-bibtex sphinx-autoapi
           pip install jax jaxlib numpy scipy
+          pip install playwright && playwright install --with-deps chromium
       - name: Build Jupyter Book
         run: jupyter-book build docs/
+      # The docs assistant's search index is NOT a source file: it is built from
+      # the rendered HTML, because the anchors and URLs it cites only exist once
+      # Sphinx has run (docs/ask.md, "For maintainers"). `make docs` has always
+      # run both steps; this workflow ran only the first, so every site this job
+      # ever published served a panel whose index 404s -- search-only mode with
+      # nothing to search, on a shipped feature. The builder exits non-zero on
+      # zero pages, zero chunks or zero anchored chunks, so an index that built
+      # but indexed nothing cannot pass here either.
+      - name: Build the docs-assistant search index
+        run: python scripts/build-docs-index.py
+      # `make ask-check` minus the rebuild it just did. The retrieval half needs
+      # only node; the browser half is what would have caught the shape of the
+      # bug above, since it asserts the index is fetched AND served 200 from the
+      # same nested-page layout a reader gets.
+      - name: Guard the docs assistant
+        run: |
+          node docs/tests/ask_retrieval.mjs docs/_build/html/_static/ask-index.json
+          python docs/tests/ask_e2e.py
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
