@@ -965,18 +965,18 @@ The honest headline is therefore: discopt's certificate is *sound everywhere it 
 # TODO(#466): the $\approx 200$-instance BARON/SCIP head-to-head figures ($\approx 180$ each vs discopt's $\approx 120$) are the owner's recent measured run; before submission, pin these counts to the exact benchmark artifact (results JSON + oracle) and replace the "$\approx$" figures with the exact per-solver certified/feasible/violation tallies and a comparison table.
 
 #+NAME: tab-minlplib
-#+CAPTION: MINLPLib smoke test results (9 instances, 60s time limit, v0.8.0, Apple M4 Pro). Best known objectives from MINLPLib. Reproduced by the manuscript smoke-test notebook.
+#+CAPTION: MINLPLib smoke test results (9 instances, 60s time limit, v0.9.0, Apple M4 Pro). Best known objectives from MINLPLib. Reproduced by the manuscript smoke-test notebook.
 | Instance | $n$ | $m$ | Status   | $f^*$      | Best Known | Time (s) | Nodes  |
 |----------+-----+-----+----------+------------+------------+----------+--------|
-| chance   |   4 |   3 | optimal  | 29.894     | 29.894     |    0.033 |      0 |
-| dispatch |   4 |   2 | optimal  | 3155.288   | 3155.288   |    0.198 |     23 |
-| ex1221   |   5 |   5 | optimal  | 7.667      | 7.667      |    0.189 |      5 |
-| ex1226   |   5 |   5 | optimal  | -17.000    | -17.000    |    0.331 |      5 |
-| gear     |   4 |   0 | optimal  | 0.000      | 0.000      |    0.147 |     31 |
-| nvs01    |   3 |   3 | optimal  | 12.470     | 12.470     |    0.289 |      3 |
-| nvs03    |   2 |   2 | optimal  | 16.000     | 16.000     |    0.025 |      3 |
-| nvs04    |   2 |   0 | optimal  | 0.720      | 0.720      |    0.047 |      5 |
-| nvs06    |   2 |   0 | optimal  | 1.770      | 1.770      |    0.168 |      5 |
+| chance   |   4 |   3 | optimal  | 29.894     | 29.894     |    0.016 |      0 |
+| dispatch |   4 |   2 | optimal  | 3155.288   | 3155.288   |    0.215 |     23 |
+| ex1221   |   5 |   5 | optimal  | 7.667      | 7.667      |    0.262 |      5 |
+| ex1226   |   5 |   5 | optimal  | -17.000    | -17.000    |    1.072 |      5 |
+| gear     |   4 |   0 | optimal  | 0.000      | 0.000      |    0.039 |      3 |
+| nvs01    |   3 |   3 | optimal  | 12.470     | 12.470     |    0.726 |      3 |
+| nvs03    |   2 |   2 | optimal  | 16.000     | 16.000     |    0.006 |      0 |
+| nvs04    |   2 |   0 | optimal  | 0.720      | 0.720      |    0.045 |      5 |
+| nvs06    |   2 |   0 | optimal  | 1.770      | 1.770      |    0.160 |      5 |
 
 All 9 instances now certify global optimality, and every certified objective matches the MINLPLib oracle to the $10^{-3}$ reporting tolerance; the notebook that produces this table asserts the comparison on all 9 rows and reports the executed comparison count, so a silently-skipped check cannot read as a pass. Every instance closes in well under one second, against a 60~s budget.
 
