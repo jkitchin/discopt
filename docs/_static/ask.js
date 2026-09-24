@@ -43,6 +43,15 @@
   var TOP_SHOW = 6; // passages listed as sources
   var MAX_CTX_CHARS = 900; // per passage, into the prompt
   var LS_MODEL = "discopt-ask-model";
+  var LS_WIDTH = "discopt-ask-width";
+
+  // Panel width, in px. The open panel makes room by padding the body rather
+  // than covering the page (see ask.css), so its width is the article's loss:
+  // the floor keeps the question box usable, and the ceiling keeps a stored or
+  // dragged value from squeezing the book to nothing on a narrow screen.
+  var WIDTH_MIN = 280;
+  var WIDTH_MAX_FRAC = 0.6; // of the viewport
+  var WIDTH_STEP = 16; // per arrow key
 
   var state = {
     index: null, // { chunks, N, avgdl, df, docs }
@@ -447,6 +456,117 @@
     document.head.appendChild(link);
   }
 
+  // ------------------------------------------------------------- width ----
+
+  function clampWidth(px) {
+    var max = Math.max(WIDTH_MIN, Math.round(window.innerWidth * WIDTH_MAX_FRAC));
+    return Math.min(max, Math.max(WIDTH_MIN, Math.round(px)));
+  }
+
+  function currentWidth() {
+    // Read back what is actually in effect rather than a cached copy, so a
+    // keyboard step after a drag starts from where the drag ended.
+    var raw = getComputedStyle(document.documentElement).getPropertyValue("--discopt-ask-width");
+    var px = parseFloat(raw);
+    if (!isFinite(px)) return WIDTH_MIN;
+    return raw.indexOf("rem") > -1
+      ? px * parseFloat(getComputedStyle(document.documentElement).fontSize)
+      : px;
+  }
+
+  function applyWidth(px, remember) {
+    var w = clampWidth(px);
+    document.documentElement.style.setProperty("--discopt-ask-width", w + "px");
+    if (ui.resize) {
+      ui.resize.setAttribute("aria-valuenow", String(w));
+      ui.resize.setAttribute(
+        "aria-valuemax",
+        String(Math.max(WIDTH_MIN, Math.round(window.innerWidth * WIDTH_MAX_FRAC)))
+      );
+    }
+    if (remember) {
+      try {
+        localStorage.setItem(LS_WIDTH, String(w));
+      } catch (e) {
+        /* private mode: the panel still resizes, the width just is not kept */
+      }
+    }
+    return w;
+  }
+
+  function restoreWidth() {
+    var stored = null;
+    try {
+      stored = localStorage.getItem(LS_WIDTH);
+    } catch (e) {
+      /* private mode: fall through to the stylesheet's default */
+    }
+    // Only override the stylesheet when there is something to restore; an
+    // unparseable or absent value must leave the CSS default in place rather
+    // than pin the panel to the floor.
+    var px = stored === null ? NaN : parseFloat(stored);
+    if (isFinite(px)) applyWidth(px, false);
+  }
+
+  function buildResizeHandle() {
+    var handle = el("button", "discopt-ask-resize");
+    handle.type = "button";
+    handle.setAttribute("role", "separator");
+    handle.setAttribute("aria-orientation", "vertical");
+    handle.setAttribute("aria-label", "Resize the assistant panel");
+    handle.setAttribute("aria-valuemin", String(WIDTH_MIN));
+    handle.title = "Drag to resize";
+
+    var dragging = false;
+
+    handle.addEventListener("pointerdown", function (e) {
+      dragging = true;
+      // Capture so the drag keeps tracking over the article, over an iframe,
+      // and past the viewport edge -- without it the pointer is lost the
+      // moment it leaves the 9px handle.
+      handle.setPointerCapture(e.pointerId);
+      document.body.classList.add("discopt-ask-resizing");
+      e.preventDefault();
+    });
+
+    handle.addEventListener("pointermove", function (e) {
+      if (!dragging) return;
+      applyWidth(window.innerWidth - e.clientX, false);
+    });
+
+    function endDrag(e) {
+      if (!dragging) return;
+      dragging = false;
+      if (handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId);
+      document.body.classList.remove("discopt-ask-resizing");
+      // Persist once, on release, rather than on every pointermove.
+      applyWidth(currentWidth(), true);
+    }
+    handle.addEventListener("pointerup", endDrag);
+    handle.addEventListener("pointercancel", endDrag);
+
+    handle.addEventListener("keydown", function (e) {
+      // Left grows the panel because the panel is on the right: the handle
+      // moves the way the arrow points.
+      var delta =
+        e.key === "ArrowLeft" ? WIDTH_STEP : e.key === "ArrowRight" ? -WIDTH_STEP : null;
+      if (delta === null) return;
+      e.preventDefault();
+      applyWidth(currentWidth() + delta, true);
+    });
+
+    // A width stored on a wide screen must not survive onto a narrow one as a
+    // panel wider than the book. Re-clamping on resize costs nothing and is
+    // the only thing standing between a 900px stored width and a 600px window.
+    window.addEventListener("resize", function () {
+      if (!ui.panel || ui.panel.hidden) return;
+      applyWidth(currentWidth(), false);
+    });
+
+    ui.resize = handle;
+    return handle;
+  }
+
   function setStatus(text, kind) {
     if (!ui.status) return;
     ui.status.textContent = text || "";
@@ -538,6 +658,7 @@
     panel.hidden = true;
     panel.setAttribute("role", "dialog");
     panel.setAttribute("aria-label", "discopt docs assistant");
+    panel.appendChild(buildResizeHandle());
 
     var head = el("div", "discopt-ask-head");
     head.appendChild(el("h2", "discopt-ask-title", "Ask discopt"));
@@ -863,6 +984,7 @@
   function init() {
     injectStylesheet();
     buildPanel();
+    restoreWidth();
     if (!buildToggle()) {
       // Not a rendered book page (404, print view, redirect stub): drop the
       // panel too rather than leave an unreachable dialog in the DOM.

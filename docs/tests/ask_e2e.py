@@ -107,6 +107,79 @@ with sync_playwright() as p:
     toggle.click()
     check("panel opens", page.locator(".discopt-ask-panel").is_visible())
 
+    # ---- The open panel makes room; it does not cover the page. ------------
+    # Before this was fixed the panel was a plain fixed overlay at right: 0,
+    # and on the default 1280px viewport it hid 208px of <article> and the
+    # whole 272px secondary sidebar -- which is what a reader sees as the
+    # "Contents" list sliced off down its right edge. Geometry, not a
+    # screenshot, so it cannot pass by rendering differently.
+    def _overlap(a, b):
+        return min(a["x"] + a["width"], b["x"] + b["width"]) - max(a["x"], b["x"])
+
+    panel_box = page.locator(".discopt-ask-panel").bounding_box()
+    measured = 0
+    for sel in ("article.bd-article", ".bd-sidebar-secondary", ".bd-sidebar-primary"):
+        loc = page.locator(sel)
+        if loc.count() == 0 or not loc.first.is_visible():
+            continue
+        bb = loc.first.bounding_box()
+        if bb is None or bb["width"] == 0:
+            continue
+        measured += 1
+        ov = _overlap(bb, panel_box)
+        # 1px of slack for subpixel layout, not for a real overlap.
+        check(f"open panel does not cover {sel}", ov <= 1, f"{ov:.0f}px covered")
+    # Without this the loop above is a no-op that reports nothing and reads as
+    # a pass -- the exact shape CLAUDE.md section 6 exists to forbid.
+    check("occlusion was actually measured against page content", measured >= 2, measured)
+
+    check(
+        "reflow introduced no horizontal scrollbar",
+        not page.evaluate(
+            "document.documentElement.scrollWidth > document.documentElement.clientWidth"
+        ),
+    )
+
+    # ---- The width is draggable, clamped, and remembered. ------------------
+    handle = page.locator(".discopt-ask-resize")
+    check("resize handle is present", handle.count() == 1, handle.count())
+    if handle.count() == 1:
+        before = panel_box["width"]
+        hb = handle.bounding_box()
+        page.mouse.move(hb["x"] + hb["width"] / 2, hb["y"] + 200)
+        page.mouse.down()
+        page.mouse.move(hb["x"] - 120, hb["y"] + 200, steps=8)
+        page.mouse.up()
+        widened = page.locator(".discopt-ask-panel").bounding_box()["width"]
+        check("dragging the handle widens the panel", widened > before + 100, (before, widened))
+
+        art = page.locator("article.bd-article").first.bounding_box()
+        check(
+            "the widened panel still covers nothing",
+            _overlap(art, page.locator(".discopt-ask-panel").bounding_box()) <= 1,
+        )
+
+        # A drag past the floor must stop at it rather than collapse the panel.
+        hb = handle.bounding_box()
+        page.mouse.move(hb["x"] + hb["width"] / 2, hb["y"] + 200)
+        page.mouse.down()
+        page.mouse.move(page.viewport_size["width"] + 400, hb["y"] + 200, steps=8)
+        page.mouse.up()
+        floored = page.locator(".discopt-ask-panel").bounding_box()["width"]
+        check("a drag past the minimum clamps instead of collapsing", floored >= 279, floored)
+
+        stored = page.evaluate("localStorage.getItem('discopt-ask-width')")
+        check("the dragged width is remembered", stored is not None and stored.isdigit(), stored)
+
+    # Closing gives the page its width back.
+    page.locator(".discopt-ask-close").click()
+    check(
+        "closing restores the body padding",
+        page.evaluate("getComputedStyle(document.body).paddingRight") in ("0px", ""),
+        page.evaluate("getComputedStyle(document.body).paddingRight"),
+    )
+    toggle.click()
+
     box = page.locator(".discopt-ask-input")
     box.fill("feasibility based bound tightening")
     page.locator(".discopt-ask-submit").click()
