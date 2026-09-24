@@ -134,9 +134,13 @@ jobs:
       - name: Install the wheel in a fresh venv and solve on the HiGHS route
         shell: bash
         run: |
-          python -m venv smoke-venv
-          if [ -x smoke-venv/bin/python ]; then PY=smoke-venv/bin/python; else PY=smoke-venv/Scripts/python.exe; fi
-          wheels=(dist/*.whl)
+          python -m venv "$GITHUB_WORKSPACE/smoke-venv"
+          # Absolute, because the `cd` below leaves the checkout: a relative
+          # interpreter path stops resolving there and the job dies with exit
+          # 127 before wheel_smoke.py ever runs (v0.9.0, run 36046289966).
+          venv="$GITHUB_WORKSPACE/smoke-venv"
+          if [ -x "$venv/bin/python" ]; then PY="$venv/bin/python"; else PY="$venv/Scripts/python.exe"; fi
+          wheels=("$GITHUB_WORKSPACE"/dist/*.whl)
           if [ "${#wheels[@]}" -ne 1 ]; then echo "expected one wheel, got: ${wheels[*]}"; exit 1; fi
           "$PY" -m pip install "${wheels[0]}"
           # Run from outside the checkout so `import discopt` cannot resolve to ./python.
