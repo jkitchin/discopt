@@ -134,12 +134,19 @@ jobs:
       - name: Install the wheel in a fresh venv and solve on the HiGHS route
         shell: bash
         run: |
-          python -m venv "$GITHUB_WORKSPACE/smoke-venv"
-          # Absolute, because the `cd` below leaves the checkout: a relative
-          # interpreter path stops resolving there and the job dies with exit
-          # 127 before wheel_smoke.py ever runs (v0.9.0, run 36046289966).
-          venv="$GITHUB_WORKSPACE/smoke-venv"
-          if [ -x "$venv/bin/python" ]; then PY="$venv/bin/python"; else PY="$venv/Scripts/python.exe"; fi
+          # The venv lives OUTSIDE the checkout and is named by an absolute
+          # path. Both halves are load-bearing, and each was learned from a
+          # failed v0.9.0 release run:
+          #   - absolute, because the `cd` below leaves the checkout; a relative
+          #     interpreter path stops resolving and the job dies with exit 127
+          #     before wheel_smoke.py ever runs (run 36046289966);
+          #   - outside the checkout, because wheel_smoke.py rejects a discopt
+          #     imported from under the repo root -- putting the venv inside the
+          #     checkout makes site-packages a subdirectory of it and trips that
+          #     provenance guard (run 36049766106).
+          venv="$RUNNER_TEMP/smoke-venv"
+          python -m venv "$venv"
+          if [ "$RUNNER_OS" = "Windows" ]; then PY="$venv/Scripts/python.exe"; else PY="$venv/bin/python"; fi
           wheels=("$GITHUB_WORKSPACE"/dist/*.whl)
           if [ "${#wheels[@]}" -ne 1 ]; then echo "expected one wheel, got: ${wheels[*]}"; exit 1; fi
           "$PY" -m pip install "${wheels[0]}"
