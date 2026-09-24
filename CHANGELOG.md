@@ -496,6 +496,36 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
+- **LLM request timeouts are tunable through `DISCOPT_LLM_TIMEOUT`, and a
+  timeout now says how to raise itself.** The limits were six literals scattered
+  across `llm/` — 5 s in `commentary.py` and twice in `advisor.py`, 10 s in
+  `reformulation.py` and `diagnosis.py`, 30 s in `chat.py` — with no way to
+  change any of them short of editing the source. They are tuned for a hosted
+  API, and a local backend blows through the short ones on every call, so the
+  features most likely to be used with ollama were the ones least able to be.
+
+  Resolution order is now explicit `timeout=` > `DISCOPT_LLM_TIMEOUT` (seconds)
+  > the per-call-site default, via `provider.resolve_timeout()`. The call sites
+  pass their own value as that *default* rather than as a literal, which is what
+  makes one variable raise all six while preserving each site's intent when the
+  variable is unset — commentary's 5 s exists so LLM chatter cannot stall a B&B
+  solve, and it stays 5 s by default. An explicit argument still wins over the
+  environment, so a caller can ask for a *shorter* limit than the shell sets.
+
+  A timeout failure now names the variable and a concrete value to give it
+  (`export DISCOPT_LLM_TIMEOUT=120`) instead of only reporting that the request
+  expired; non-timeout failures are unchanged, and are not given the advice.
+  Timeouts are recognized through the `__cause__`/`__context__` chain by type
+  name as well as `TimeoutError`, so provider SDK classes match without
+  importing litellm's optional provider dependencies to name them. A malformed
+  or non-positive `DISCOPT_LLM_TIMEOUT` is ignored with a warning rather than
+  raising: a typo in a shell profile should not take down a working solve.
+
+  No default changes value. `python/tests/test_llm_timeout.py` (24 tests) covers
+  the precedence rules, the malformed-value fallback, cause-chain detection
+  including a cyclic chain, and that the resolved timeout actually reaches
+  `litellm.completion()`.
+
 - **BREAKING: the minimum supported Python is now 3.12** (`requires-python =
   ">=3.12"`, was `">=3.10"`; `1f9585ec`). The 3.10 floor was never real: all 17
   `python-version:` entries across `.github/workflows/` run 3.12, so nothing had

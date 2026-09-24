@@ -43,6 +43,38 @@ export DISCOPT_LLM_MODEL="ollama/llama3"
 export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
+### Request Timeouts
+
+Timeouts resolve the same way:
+
+1. Explicit `timeout=` parameter on the function call
+2. `DISCOPT_LLM_TIMEOUT` environment variable (seconds)
+3. A per-feature default
+
+The defaults are tuned for a hosted API and are deliberately uneven — 60 s for
+tool-calling (`from_description()`, `chat()`), 30 s for a plain completion,
+and as little as 5 s for streaming B&B commentary, where a slow LLM must not
+be allowed to stall the solve. `DISCOPT_LLM_TIMEOUT` raises *all* of them at
+once, which is usually what you want with a local model:
+
+```bash
+export DISCOPT_LLM_MODEL="ollama/llama3"
+export DISCOPT_LLM_TIMEOUT=300
+```
+
+A request that times out says so and names the variable, so you do not have to
+come back here to find it:
+
+```text
+RuntimeError: LLM call timed out after 30s: ...
+Increase the limit by setting DISCOPT_LLM_TIMEOUT (seconds), e.g.
+`export DISCOPT_LLM_TIMEOUT=120`, or pass timeout= to this call. ...
+```
+
+An explicit `timeout=` still wins over the environment, so a caller that needs
+a *shorter* limit than your shell sets can ask for one. A malformed or
+non-positive value is ignored with a warning rather than raising.
+
 ## Features Overview
 
 ### Result Explanation (`explain()`)
