@@ -66,7 +66,12 @@ from .gdp_reformulate import (
     _is_linear,
     bound_expression_error,
 )
-from .term_classifier import _get_flat_index, distribute_products
+from .term_classifier import (
+    _get_flat_index,
+    distribute_products,
+    distribution_exceeds_budget,
+)
+from .term_classifier import estimate_distributed_terms as _estimate_distributed_terms
 
 # A denominator counts as sign-definite only when its interval is bounded away
 # from zero by at least this margin — guards against a denominator that merely
@@ -494,37 +499,6 @@ def _rebuild_product(coeff: float, atoms: list[Expression]) -> Expression:
 # factor to a bounded aux ``w_i == f_i`` and relax the resulting bilinear /
 # multilinear product of variables directly.
 _DISTRIBUTE_TERM_LIMIT = 1024  # est. distributed-term count above which a product is lifted
-_TERM_CAP = 1 << 40  # saturate the estimate so deep blowups can't overflow
-
-
-def _estimate_distributed_terms(expr: Expression) -> int:
-    """Estimate how many additive terms ``distribute_products(expr)`` would yield.
-
-    A product multiplies its operands' term counts, an integer power raises the
-    base's, a sum adds them; every opaque leaf (variable, call, division,
-    constant) counts as one.  Saturated at ``_TERM_CAP`` so a deeply nested
-    blowup cannot overflow before it trips the limit.
-    """
-    if isinstance(expr, BinaryOp):
-        if expr.op in ("+", "-"):
-            return min(
-                _estimate_distributed_terms(expr.left) + _estimate_distributed_terms(expr.right),
-                _TERM_CAP,
-            )
-        if expr.op == "*":
-            return min(
-                _estimate_distributed_terms(expr.left) * _estimate_distributed_terms(expr.right),
-                _TERM_CAP,
-            )
-        if expr.op == "**" and isinstance(expr.right, Constant):
-            n = float(expr.right.value)
-            n_int = int(n)
-            if n == n_int and n_int >= 1:
-                return min(int(_estimate_distributed_terms(expr.left) ** n_int), _TERM_CAP)
-        return 1
-    if isinstance(expr, UnaryOp):
-        return _estimate_distributed_terms(expr.operand)
-    return 1
 
 
 def _collect_mul_factors(expr: Expression) -> list[Expression]:
@@ -1016,7 +990,20 @@ def _has_unbounded_nonlinear_term(body: Expression, model: Model) -> bool:
     unbounded above).  When clearing introduces such a term the rewrite must be
     rejected and the original quotient kept — the McCormick-``lp`` path bounds the
     division soundly.
+
+    FAILS CLOSED when the body is too large to distribute within
+    :func:`~.term_classifier.distribution_exceeds_budget`.  This guard is the one
+    caller of ``distribute_products`` whose "found nothing" answer *enables* a
+    rewrite rather than declining one, so a partial distribution cannot be read
+    as a clean bill of health.  The exposure is not hypothetical: the degree-2
+    test below rejects any term with a sum factor (``_decompose_poly_product``
+    files those under ``extra``), and clearing itself wraps the whole body in
+    ``scale * body`` whenever ``dmin < 1``, so an undistributed body presents as
+    a single product with a sum factor and walks straight past the check —
+    re-enabling exactly the gear4-class false infeasibility this exists to stop.
     """
+    if distribution_exceeds_budget(body):
+        return True
     dist = distribute_products(body)
 
     def walk(e: Expression) -> bool:

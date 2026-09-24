@@ -456,7 +456,181 @@ def _distribute_power_over_product(base: Expression, n: int) -> Expression | Non
     return None
 
 
+# Saturate the term estimate so a deeply nested blowup cannot overflow before it
+# trips a limit.
+_TERM_CAP = 1 << 40
+
+
+def estimate_distributed_terms(expr: Expression) -> int:
+    """Estimate how many additive terms :func:`distribute_products` would yield.
+
+    A product multiplies its operands' term counts, an integer power raises the
+    base's, a sum adds them; every opaque leaf (variable, call, division,
+    constant) counts as one.  Saturated at :data:`_TERM_CAP`.
+
+    Monotone up the tree — every node's estimate is >= each child's — which is
+    what lets :func:`distribute_products` decide the whole expression is
+    affordable with a single check at the root.
+    """
+    if isinstance(expr, BinaryOp):
+        if expr.op in ("+", "-"):
+            return min(
+                estimate_distributed_terms(expr.left) + estimate_distributed_terms(expr.right),
+                _TERM_CAP,
+            )
+        if expr.op == "*":
+            return min(
+                estimate_distributed_terms(expr.left) * estimate_distributed_terms(expr.right),
+                _TERM_CAP,
+            )
+        if expr.op == "**" and isinstance(expr.right, Constant):
+            n = float(expr.right.value)
+            n_int = int(n)
+            if n == n_int and n_int >= 1:
+                return min(int(estimate_distributed_terms(expr.left) ** n_int), _TERM_CAP)
+        return 1
+    if isinstance(expr, UnaryOp):
+        return estimate_distributed_terms(expr.operand)
+    return 1
+
+
+# Ceiling on the number of additive terms a single ``distribute_products`` call
+# will expand to.  Symbolic distribution is exponential in the nesting depth of
+# sums-inside-products, and NOTHING else bounds it: the pre-solve structural
+# scans (``has_factorable_work`` and the integer-product / quadratic detectors)
+# distribute the raw model body purely to look for a pattern, with no size check
+# and no deadline -- these passes run inside ``solve_model`` before branch and
+# bound starts and neither accept nor check one, so the time limit cannot reach
+# them.  ``johnall`` (MINLPLib) asks this path for an expansion of 3.19e9 terms
+# and overran a 20 s ``time_limit`` by 44 minutes.
+#
+# Set from measurement, not taste.  Surveyed over 1610 MINLPLib instances
+# (5,072,187 distribute calls), the largest expansion any instance legitimately
+# asks for is 998,002 terms (``truck``); the cheapest pathology is ``saa_2`` at
+# 2.18e9, ~2200x higher.  This budget sits in that gap: it truncates 2 of 1610
+# instances -- ``johnall`` and ``saa_2``, both >2000x over -- and leaves every
+# other corpus instance expanded exactly as before.  So it is a backstop against
+# a pathology, not a tuning knob trading capability for speed.
+#
+# It bounds THIS mechanism, not the pre-solve scan as a whole.  Distribution
+# costs ~3.6 us/term at this size and grows superlinearly (measured 0.43 us/term
+# at 1.7e3 terms, 5.21 us/term at 5.8e6), so a single at-budget call still costs
+# ~4 s.  Two other scan paths blow the same time limit by different mechanisms
+# and are untouched by this constant: a whole-model-sized ``eigvalsh`` per
+# ``sqrt`` node in ``convexity.patterns.is_homogeneous_psd_quadratic``
+# (``glider400``), and ``binary_multilinear_reform._poly_add`` (``hadamard_9``,
+# which still overran 300 s against a 60 s limit with this budget in force).
+# All three are pre-solve passes that run with no deadline; threading one into
+# them (they all have an existing "found nothing" path to take on expiry) is the
+# class-level fix, tracked in issue #1456.
+#
+# Over budget the expression is returned with its affordable subtrees distributed
+# and the offending product left intact -- ALGEBRAICALLY IDENTICAL either way, so
+# no constraint or objective changes meaning.  What is lost is pattern
+# recognition: a detector sees less structure, a relaxation drops a term it
+# cannot linearize (a weaker bound, never a wrong one), a reformulation pass
+# declines to fire.  Every consumer was audited to abstain rather than conclude
+# -- with ONE exception, ``factorable_reform._has_unbounded_nonlinear_term``,
+# whose ``False`` *enables* a rewrite and which therefore consults
+# :func:`distribution_exceeds_budget` and fails closed.
+_DISTRIBUTE_TERM_BUDGET = 1 << 20  # 1,048,576 terms; 1.05x the corpus maximum
+
+
+def distribution_exceeds_budget(expr: Expression) -> bool:
+    """True if :func:`distribute_products` would refuse to fully expand *expr*.
+
+    For callers whose "found nothing" answer is load-bearing: a partial
+    distribution means "could not look", not "looked and there was nothing", and
+    such a caller must fail closed rather than read the two as the same.
+    """
+    return estimate_distributed_terms(expr) > _DISTRIBUTE_TERM_BUDGET
+
+
 def distribute_products(
+    expr: Expression, protected_squares: frozenset[int] | None = None
+) -> Expression:
+    """Recursively distribute multiplication over addition/subtraction, up to a
+    term budget (:data:`_DISTRIBUTE_TERM_BUDGET`).
+
+    Beyond the budget the offending product is left undistributed rather than
+    expanded; the result is algebraically identical, so this is a loss of
+    recognizable structure, never of correctness.  See the budget's definition
+    for why it exists and what depends on it.
+    """
+    est = estimate_distributed_terms(expr)
+    if est <= _DISTRIBUTE_TERM_BUDGET:
+        return _distribute_unbudgeted(expr, protected_squares)
+    result = _distribute_within_budget(expr, protected_squares, {}, [_DISTRIBUTE_TERM_BUDGET])
+    logger.warning(
+        "distribute_products: %s estimated terms exceeds the %s-term budget; the "
+        "oversized products were left undistributed (algebraically identical, but "
+        "structure may go unrecognized and bounds may be weaker)",
+        f"{est:,}",
+        f"{_DISTRIBUTE_TERM_BUDGET:,}",
+    )
+    return result
+
+
+def _distribute_within_budget(
+    expr: Expression,
+    protected_squares: frozenset[int] | None,
+    memo: dict[int, int],
+    remaining: list[int],
+) -> Expression:
+    """Distribute what the budget still affords; leave the rest intact.
+
+    *remaining* is a one-element mutable cell holding the terms left to spend.
+    It is a RUNNING TOTAL, not a per-node limit: bounding each node separately
+    bounds nothing, because a sum of 3000 sub-products each just under the limit
+    still costs 3e9 terms — the exact shape that motivated this budget.  Spending
+    from a shared pool caps the whole call.
+
+    Descending rather than refusing the whole expression outright matters: one
+    blown-up term in a long sum must not cost the other terms their distribution.
+    The traversal is left-to-right, so which terms get distributed depends on
+    where the budget runs out — deterministic for a given expression, but not a
+    property any caller should lean on.
+
+    Only reached when the root is over budget, so the repeated estimates are off
+    the hot path; *memo* keeps them linear anyway.
+    """
+    # A protected node (issue #155 affine square, issue #358 convex-subexpression
+    # lift) is returned with its identity intact, exactly as the unbudgeted walk
+    # does. Without this an over-budget protected node would be descended into
+    # and rebuilt, and the linearizer's id()-keyed ``composite_var_map`` would no
+    # longer resolve it -- silently dropping the lift on precisely the large
+    # models this path exists for.
+    if protected_squares is not None and id(expr) in protected_squares:
+        return expr
+    est = memo.get(id(expr))
+    if est is None:
+        est = memo[id(expr)] = estimate_distributed_terms(expr)
+    if est <= remaining[0]:
+        remaining[0] -= est
+        return _distribute_unbudgeted(expr, protected_squares)
+    if isinstance(expr, BinaryOp) and expr.op in ("+", "-"):
+        left = _distribute_within_budget(expr.left, protected_squares, memo, remaining)
+        right = _distribute_within_budget(expr.right, protected_squares, memo, remaining)
+        if left is expr.left and right is expr.right:
+            return expr
+        return BinaryOp(expr.op, left, right)
+    if isinstance(expr, UnaryOp):
+        operand = _distribute_within_budget(expr.operand, protected_squares, memo, remaining)
+        if operand is expr.operand:
+            return expr
+        return UnaryOp(expr.op, operand)
+    # A ``*`` or ``**`` the budget cannot afford: distribute inside its operands
+    # where affordable, but do not multiply them out.
+    if isinstance(expr, BinaryOp):
+        left = _distribute_within_budget(expr.left, protected_squares, memo, remaining)
+        right = _distribute_within_budget(expr.right, protected_squares, memo, remaining)
+        if left is expr.left and right is expr.right:
+            return expr
+        return BinaryOp(expr.op, left, right)
+    return expr
+
+
+def _distribute_unbudgeted(
     expr: Expression, protected_squares: frozenset[int] | None = None
 ) -> Expression:
     """Recursively distribute multiplication over addition/subtraction.
@@ -502,15 +676,15 @@ def distribute_products(
                 # (a*b)**n → a**n * b**n when the base is a pure product; leaves a
                 # sum base (e.g. (a+b)**n) untouched (helper returns None) so the
                 # ``**2`` square-of-sum path and higher sum-powers are unaffected.
-                base = distribute_products(expr.left, protected_squares)
+                base = _distribute_unbudgeted(expr.left, protected_squares)
                 expanded = _distribute_power_over_product(base, n_int)
                 if expanded is not None:
                     return expanded
             if exp_val == 2.0:
-                left = distribute_products(expr.left, protected_squares)
+                left = _distribute_unbudgeted(expr.left, protected_squares)
                 return _distribute_mul(left, left)
-        left = distribute_products(expr.left, protected_squares)
-        right = distribute_products(expr.right, protected_squares)
+        left = _distribute_unbudgeted(expr.left, protected_squares)
+        right = _distribute_unbudgeted(expr.right, protected_squares)
         if expr.op == "*":
             return _distribute_mul(left, right)
         # Preserve node identity when nothing distributed, so id()-keyed maps
@@ -519,7 +693,7 @@ def distribute_products(
             return expr
         return BinaryOp(expr.op, left, right)
     if isinstance(expr, UnaryOp):
-        operand = distribute_products(expr.operand, protected_squares)
+        operand = _distribute_unbudgeted(expr.operand, protected_squares)
         if operand is expr.operand:
             return expr
         return UnaryOp(expr.op, operand)
