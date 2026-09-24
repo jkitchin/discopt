@@ -22,7 +22,7 @@ Set the API key for your chosen provider via environment variables:
 
 | Provider | Environment Variable | Model String Example |
 |----------|---------------------|---------------------|
-| Anthropic | `ANTHROPIC_API_KEY` | `anthropic/claude-sonnet-4-20250514` |
+| Anthropic | `ANTHROPIC_API_KEY` | `anthropic/claude-sonnet-5` |
 | OpenAI | `OPENAI_API_KEY` | `openai/gpt-4o` |
 | Google | `GEMINI_API_KEY` | `gemini/gemini-pro` |
 | Ollama (local) | *(none needed)* | `ollama/llama3` |
@@ -35,7 +35,7 @@ Models are resolved in this priority order:
 
 1. Explicit `model=` parameter on the function call
 2. `DISCOPT_LLM_MODEL` environment variable
-3. Default: `anthropic/claude-sonnet-4-20250514`
+3. Default: `anthropic/claude-sonnet-5`
 
 ```bash
 # Set your preferred model globally

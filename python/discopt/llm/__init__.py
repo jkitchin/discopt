@@ -12,7 +12,7 @@ LLM provider and model are configured via:
 
 1. Explicit ``model=`` parameter on each function
 2. ``DISCOPT_LLM_MODEL`` environment variable
-3. Default: ``"anthropic/claude-sonnet-4-20250514"``
+3. Default: ``"anthropic/claude-sonnet-5"``
 
 The API key is set via the provider's standard environment variable:
 
@@ -76,7 +76,7 @@ def get_completion(
     messages : list of dict
         Chat messages in OpenAI format (role/content dicts).
     model : str, optional
-        LLM model string (e.g. ``"anthropic/claude-sonnet-4-20250514"``).
+        LLM model string (e.g. ``"anthropic/claude-sonnet-5"``).
         Falls back to ``DISCOPT_LLM_MODEL`` env var, then default.
     max_tokens : int, default 2048
         Maximum tokens in response.

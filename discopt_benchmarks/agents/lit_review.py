@@ -494,7 +494,7 @@ class RelevanceAnalyzer:
             prompt = self._build_analysis_prompt(paper)
             try:
                 response = self.llm_client.messages.create(
-                    model="claude-sonnet-4-20250514",
+                    model="claude-sonnet-5",
                     max_tokens=800,
                     messages=[{"role": "user", "content": prompt}],
                 )

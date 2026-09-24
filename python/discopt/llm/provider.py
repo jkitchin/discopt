@@ -2,7 +2,7 @@
 LLM provider — thin wrapper around litellm for universal model access.
 
 Model string examples:
-  - ``"anthropic/claude-sonnet-4-20250514"``
+  - ``"anthropic/claude-sonnet-5"``
   - ``"openai/gpt-4o"``
   - ``"gemini/gemini-pro"``
   - ``"ollama/llama3"``
@@ -11,7 +11,7 @@ Model string examples:
 Configuration priority:
   1. Explicit ``model=`` parameter
   2. ``DISCOPT_LLM_MODEL`` environment variable
-  3. Default: ``"anthropic/claude-sonnet-4-20250514"``
+  3. Default: ``"anthropic/claude-sonnet-5"``
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "anthropic/claude-sonnet-4-20250514"
+DEFAULT_MODEL = "anthropic/claude-sonnet-5"
 
 
 def _get_model(model: str | None = None) -> str:

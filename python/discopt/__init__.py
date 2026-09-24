@@ -333,7 +333,7 @@ def chat(llm_model: str | None = None, verbose: bool = True):
     Parameters
     ----------
     llm_model : str, optional
-        LLM model string (e.g. ``"anthropic/claude-sonnet-4-20250514"``).
+        LLM model string (e.g. ``"anthropic/claude-sonnet-5"``).
     verbose : bool, default True
         Print LLM responses to stdout.
 

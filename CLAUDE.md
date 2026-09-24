@@ -390,21 +390,22 @@ All notebooks live in `docs/notebooks/` and should always include relevant `{cit
 
 ## LLM Integration (`python/discopt/llm/`)
 
-Optional LLM-powered features using litellm as a universal adapter (100+ providers). Install with `pip install discopt[llm]`.
+Optional LLM-powered features using litellm as a universal adapter (100+ providers).
+Install with `pip install discopt[llm]`. `ls python/discopt/llm/` for the file map — the
+names are self-describing (`prompts.py`, `serializer.py`, `advisor.py`, `commentary.py`,
+`diagnosis.py`, `chat.py`, `reformulation.py`). What you cannot derive:
 
-- **`llm/__init__.py`** — `is_available()`, `get_completion()` convenience wrapper
-- **`llm/provider.py`** — Thin litellm wrapper; model resolution: explicit `model=` > `DISCOPT_LLM_MODEL` env var > default `anthropic/claude-sonnet-4-20250514`
-- **`llm/serializer.py`** — Serialize Model/SolveResult to structured text for LLM context
-- **`llm/prompts.py`** — All prompt templates (explain, formulate, diagnose, teach, debug)
-- **`llm/safety.py`** — Output validation, bounds clamping, name sanitization
-- **`llm/tools.py`** — OpenAI-format tool definitions + `ModelBuilder` for structured `from_description()`
-- **`llm/advisor.py`** — Rule-based + LLM-augmented solver parameter suggestions, pre-solve analysis
-- **`llm/commentary.py`** — `SolveCommentator` for streaming B&B commentary
-- **`llm/diagnosis.py`** — Infeasibility diagnosis, convergence analysis, limit diagnosis
-- **`llm/chat.py`** — `ChatSession` for conversational model building (`discopt.chat()`)
-- **`llm/reformulation.py`** — Auto-reformulation detection (big-M, weak bounds, symmetry, bilinear)
-
-**Safety invariant**: LLM outputs never affect solver math. Formulations pass `validate()`. Explanations are sanitized. Graceful degradation when litellm is unavailable.
+- **Safety invariant — the one rule that constrains every change here.** LLM outputs
+  **never** affect solver math. Formulations pass `validate()`; explanations are
+  sanitized (`safety.py` also does bounds clamping and name sanitization); everything
+  degrades gracefully when litellm is absent. A feature that lets a model response reach
+  a bound, a cut or a branching decision is rejected on sight.
+- **Model resolution** (`provider.py`): explicit `model=` > `DISCOPT_LLM_MODEL` env var >
+  `DEFAULT_MODEL`. Change the default in `provider.py` only — but note the string is
+  duplicated across docstrings, `docs/llm_features.md`, the `llm-feature-expert` agent and
+  a notebook, so grep the whole tree for the old ID when bumping it.
+- **`from_description()` uses function calling, not code generation** (`tools.py`'s
+  OpenAI-format defs + `ModelBuilder`), so the LLM never emits Python that gets executed.
 
 ## Claude Code skills (`python/discopt/skills/`)
 
@@ -419,20 +420,13 @@ discopt install-skills --dev            # symlink, for `pip install -e`
 discopt install-skills --force          # overwrite
 ```
 
-- **`skills/commands/`** (8) — `/formulate`, `/debug`, `/diagnose`, `/reformulate`,
-  `/explain-model`, `/convert`, `/estimate`, `/benchmark-report`
-- **`skills/agents/`** (17) — `minlp-solver-expert`, `presolve-expert`,
-  `convex-relaxation-expert`, `convexity-detection-expert`, `differentiability-expert`,
-  `ipopt-expert`, `highs-expert`, `scip-expert`, `amp-expert`, `modeling-expert`,
-  `heuristics-expert`, `estimation-expert`, `ml-embedding-expert`,
-  `multiobjective-expert`, `robust-opt-expert`, `benchmarking-expert`,
-  `llm-feature-expert`
-- **`skills/__init__.py`** — `commands_dir()`, `agents_dir()`, `iter_commands()`,
-  `iter_agents()` for programmatic discovery.
+`ls python/discopt/skills/commands/` (8) and `skills/agents/` (17) for the current set;
+`skills/__init__.py` exposes `commands_dir()`, `agents_dir()`, `iter_commands()`,
+`iter_agents()` for programmatic discovery.
 
-Editing a command or agent means editing the file under `python/discopt/skills/`;
-editing a copy under `.claude/` changes only that one machine's install and is
-lost on the next `install-skills` (use `--dev` to symlink instead).
+**The gotcha:** editing a command or agent means editing the file under
+`python/discopt/skills/`. Editing a copy under `.claude/` changes only that one machine's
+install and is silently lost on the next `install-skills` (use `--dev` to symlink instead).
 
 Not in the bundle, and not slash commands: `discopt-dev` ships an **`adversary`
 CLI verb** (`discopt-dev adversary` — the agent that files the adversarial issues),
