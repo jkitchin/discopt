@@ -35,6 +35,16 @@ sphinx:
     napoleon_use_ivar: true
     autoapi_keep_files: false
     autoapi_add_toctree_entry: false
+    # The in-browser docs assistant (docs/ask.md explains it to readers).
+    # ask.js links ask.css itself, from alongside its own <script src>, so only
+    # the script is listed here. Both are served out of _static/, and so is
+    # ask-index.json -- but the index is NOT a source file: it is built from
+    # the rendered HTML by scripts/build-docs-index.py as a post-build step,
+    # because the anchors and URLs it cites only exist once Sphinx has run.
+    # A build without that step leaves the panel searching nothing, which is
+    # why `make docs` runs both and `make ask-check` guards the result.
+    html_js_files:
+      - ["ask.js", {"id": "discopt-ask"}]
     suppress_warnings:
       - etoc.toctree
       - myst.header

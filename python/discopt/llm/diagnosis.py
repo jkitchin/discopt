@@ -183,7 +183,7 @@ def _llm_diagnose(
     llm_model: str | None,
 ) -> str | None:
     """Use LLM to interpret the violation data and suggest fixes."""
-    from discopt.llm.provider import complete
+    from discopt.llm.provider import complete, resolve_timeout
     from discopt.llm.serializer import serialize_model
 
     model_text = serialize_model(model)
@@ -213,7 +213,7 @@ def _llm_diagnose(
             messages=[{"role": "user", "content": prompt}],
             model=llm_model,
             max_tokens=1024,
-            timeout=10.0,
+            timeout=resolve_timeout(default=10.0),
         )
         if raw and raw.strip():
             return raw.strip()

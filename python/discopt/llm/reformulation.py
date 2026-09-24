@@ -353,7 +353,7 @@ def _llm_analyze(
     llm_model: str | None,
 ) -> list[ReformulationSuggestion]:
     """Use LLM to identify additional reformulation opportunities."""
-    from discopt.llm.provider import complete
+    from discopt.llm.provider import complete, resolve_timeout
     from discopt.llm.serializer import serialize_model
 
     model_text = serialize_model(model)
@@ -380,7 +380,7 @@ def _llm_analyze(
             messages=[{"role": "user", "content": prompt}],
             model=llm_model,
             max_tokens=1024,
-            timeout=10.0,
+            timeout=resolve_timeout(default=10.0),
         )
         raw = raw.strip()
         if raw.startswith("```"):

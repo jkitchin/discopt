@@ -66,6 +66,7 @@ OUT_OF_SCOPE = {
 NOT_A_GATE = {
     "DISCOPT_DECOMP_STORE": "a filesystem path for the decomposition record store",
     "DISCOPT_LLM_MODEL": "a litellm model identifier",
+    "DISCOPT_LLM_TIMEOUT": "a request timeout in seconds; 0 would be a duration, not an off-switch",
     "DISCOPT_PROVENANCE_AUTHOR": "an author name stamped into a provenance block",
     "DISCOPT_LP_SPATIAL_PLUNGE": (
         "a three-state override: unset defers to the caller's `require_incremental`, "

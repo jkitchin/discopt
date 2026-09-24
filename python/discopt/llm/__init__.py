@@ -64,7 +64,7 @@ def get_completion(
     model: str | None = None,
     max_tokens: int = 2048,
     temperature: float = 0.0,
-    timeout: float = 30.0,
+    timeout: float | None = None,
     **kwargs,
 ) -> str:
     r"""Get a completion from the configured LLM provider.
@@ -82,8 +82,9 @@ def get_completion(
         Maximum tokens in response.
     temperature : float, default 0.0
         Sampling temperature.
-    timeout : float, default 30.0
-        Request timeout in seconds.
+    timeout : float, optional
+        Request timeout in seconds. Defaults to ``DISCOPT_LLM_TIMEOUT`` if set,
+        else 30 s. See :func:`discopt.llm.provider.resolve_timeout`.
     \*\*kwargs
         Additional arguments passed to litellm.
 

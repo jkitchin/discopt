@@ -1,0 +1,346 @@
+/* ==========================================================================
+   discopt docs assistant (docs/_static/ask.js) — panel styling.
+
+   Ships as its own stylesheet rather than as part of the theme because ask.js
+   links it itself, from alongside its own <script src>, so the pair stays
+   self-contained and relocatable: both files are served out of _static/ and
+   neither hardcodes the site base.
+
+   Ported from the POUNCE project's assistant, which is styled against
+   mdBook's theme variables. Every one of those has been remapped to its
+   pydata-sphinx-theme equivalent (--pst-color-*), and every colour keeps the
+   literal fallback it had, so the panel still renders legibly under a theme
+   that defines neither.
+   ========================================================================== */
+
+/* ---- Floating toggle, lower-right ---------------------------------------
+   A filled pill pinned to the viewport, rather than an icon inline in the
+   theme's header: in POUNCE, where this started life as one more small glyph
+   among the print / repo / edit icons, readers did not find it. A pill is the
+   shape a reader already recognises as "ask something here", and it stays on
+   screen when the header scrolls away.
+
+   z-index sits just under .discopt-ask-panel (1000) and above the theme's
+   header and sidebar, so the panel covers the button rather than the reverse; the
+   button is hidden outright while the panel is open (see below), because the
+   panel is right-aligned and would otherwise swallow the click target.
+   ------------------------------------------------------------------------ */
+.discopt-ask-toggle {
+  position: fixed;
+  right: 1.25rem;
+  bottom: 1.25rem;
+  z-index: 999;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45em;
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--pst-color-primary, #e87a1e);
+  color: #1a1411;
+  border: 1px solid var(--pst-color-primary, #e87a1e);
+  border-radius: 999px;
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  line-height: 1.2;
+  padding: 0.6em 1.15em;
+  cursor: pointer;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.3), 0 8px 28px rgba(0, 0, 0, 0.22);
+  transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+.discopt-ask-toggle:hover {
+  background: var(--pst-color-primary-highlight, #b56a12);
+  border-color: var(--pst-color-primary-highlight, #b56a12);
+  color: #fdf6e8;
+  transform: translateY(-1px);
+  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.34), 0 10px 32px rgba(0, 0, 0, 0.26);
+}
+.discopt-ask-toggle:active {
+  transform: translateY(0);
+}
+.discopt-ask-toggle:focus-visible {
+  outline: 2px solid var(--pst-color-text-base, #f1e4cb);
+  outline-offset: 2px;
+}
+.discopt-ask-toggle-icon {
+  display: block;
+  width: 1.15em;
+  height: 1.15em;
+  flex: none;
+}
+.discopt-ask-toggle-icon svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  fill: currentColor;
+}
+
+/* Open panel is right-aligned and full height: it lies over the button, so
+   take the button out rather than leave an unclickable one underneath. */
+body.discopt-ask-open .discopt-ask-toggle {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .discopt-ask-toggle {
+    transition: none;
+  }
+  .discopt-ask-toggle:hover {
+    transform: none;
+  }
+}
+
+/* ---- Panel -------------------------------------------------------------- */
+.discopt-ask-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 1000;
+  width: min(30rem, 100vw);
+  height: 100vh;
+  /* Keeps the answer and the sources scrollable independently of the page. */
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 1rem 1.1rem 1.2rem;
+  box-sizing: border-box;
+  overflow-y: auto;
+  background: var(--pst-color-background, #1a1411);
+  color: var(--pst-color-text-base, #f1e4cb);
+  border-left: 1px solid var(--pst-color-border, #3a2c20);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.28);
+  font-size: 0.9rem;
+}
+.discopt-ask-panel[hidden] {
+  display: none;
+}
+
+.discopt-ask-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.discopt-ask-title {
+  margin: 0;
+  font-size: 1.15rem;
+  border-bottom: none;
+  color: var(--pst-color-primary, #e87a1e);
+}
+.discopt-ask-close {
+  background: none;
+  border: none;
+  color: var(--pst-color-text-muted, #a88a5e);
+  font-size: 1.5rem;
+  line-height: 1;
+  padding: 0 0.2em;
+  cursor: pointer;
+}
+.discopt-ask-close:hover {
+  color: var(--pst-color-primary, #e87a1e);
+}
+
+/* ---- Status line -------------------------------------------------------- */
+.discopt-ask-status {
+  font-size: 0.8rem;
+  opacity: 0.8;
+  min-height: 1.2em;
+}
+.discopt-ask-status-busy {
+  color: var(--pst-color-primary-highlight, #b56a12);
+  opacity: 1;
+}
+.discopt-ask-status-ok {
+  color: var(--pst-color-primary, #e87a1e);
+  opacity: 1;
+}
+.discopt-ask-status-error {
+  color: var(--pst-color-warning, #cc2200);
+  opacity: 1;
+}
+
+/* ---- Question ----------------------------------------------------------- */
+.discopt-ask-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.discopt-ask-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  font: inherit;
+  padding: 0.5em 0.6em;
+  border-radius: 5px;
+  border: 1px solid var(--pst-color-border, #3a2c20);
+  background: var(--pst-color-background, #1f1813);
+  color: var(--pst-color-text-base, #f1e4cb);
+}
+.discopt-ask-input:focus {
+  outline: none;
+  border-color: var(--pst-color-primary, #e87a1e);
+}
+.discopt-ask-submit {
+  align-self: flex-start;
+  font: inherit;
+  font-weight: 600;
+  padding: 0.35em 1.2em;
+  border-radius: 5px;
+  border: 1px solid var(--pst-color-primary, #e87a1e);
+  background: var(--pst-color-primary, #e87a1e);
+  color: #1a1411;
+  cursor: pointer;
+}
+.discopt-ask-submit:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ---- Model row ---------------------------------------------------------- */
+.discopt-ask-model {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem;
+  border-radius: 5px;
+  border: 1px solid var(--pst-color-border, #3a2c20);
+  background: var(--pst-color-surface, #221a13);
+}
+.discopt-ask-select,
+.discopt-ask-load {
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.25em 0.6em;
+  border-radius: 4px;
+  border: 1px solid var(--pst-color-text-muted, #a88a5e);
+  background: transparent;
+  color: var(--pst-color-text-base, #f1e4cb);
+  cursor: pointer;
+}
+.discopt-ask-select option {
+  color: var(--pst-color-text-base, #f1e4cb);
+  background: var(--pst-color-background, #1a1411);
+}
+.discopt-ask-load:hover:not(:disabled) {
+  border-color: var(--pst-color-primary, #e87a1e);
+  color: var(--pst-color-primary, #e87a1e);
+}
+.discopt-ask-load:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.discopt-ask-note {
+  flex: 1 1 100%;
+  font-size: 0.78rem;
+  opacity: 0.75;
+  line-height: 1.35;
+}
+
+/* ---- Answer ------------------------------------------------------------- */
+.discopt-ask-answer:empty {
+  display: none;
+}
+.discopt-ask-answer-body {
+  margin: 0;
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+.discopt-ask-answer-body code {
+  font-size: 0.85em;
+  color: var(--pst-color-inline-code, #ffcf8f);
+}
+
+/* ---- Sources ------------------------------------------------------------ */
+.discopt-ask-sources:empty {
+  display: none;
+}
+.discopt-ask-sources-title {
+  margin: 0.4rem 0 0.3rem;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.7;
+  border-bottom: none;
+}
+.discopt-ask-source-list {
+  margin: 0;
+  padding-left: 1.4em;
+}
+.discopt-ask-source-list li {
+  margin-bottom: 0.7rem;
+}
+.discopt-ask-source-link {
+  font-weight: 600;
+  color: var(--pst-color-link, #ffb262);
+}
+.discopt-ask-badge {
+  margin-left: 0.45em;
+  padding: 0.05em 0.4em;
+  border-radius: 3px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  vertical-align: 0.1em;
+  color: var(--pst-color-background, #1a1411);
+  background: var(--pst-color-surface, #8a6d3b);
+}
+.discopt-ask-excerpt {
+  margin: 0.2rem 0 0;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  opacity: 0.78;
+}
+
+/* ---- Footer ------------------------------------------------------------- */
+.discopt-ask-foot {
+  margin-top: auto;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--pst-color-border, #3a2c20);
+  font-size: 0.75rem;
+  opacity: 0.7;
+  line-height: 1.45;
+}
+.discopt-ask-foot a {
+  color: var(--pst-color-link, #ffb262);
+}
+
+/* ---- Narrow screens ----------------------------------------------------- */
+@media (max-width: 700px) {
+  .discopt-ask-panel {
+    width: 100vw;
+    border-left: none;
+  }
+  /* Icon-only circle: at this width the label costs more page than it buys,
+     and the button still carries its aria-label and title. */
+  .discopt-ask-toggle {
+    right: 1rem;
+    bottom: 1rem;
+    padding: 0;
+    width: 2.9rem;
+    height: 2.9rem;
+    justify-content: center;
+  }
+  .discopt-ask-toggle-label {
+    display: none;
+  }
+  .discopt-ask-toggle-icon {
+    width: 1.35rem;
+    height: 1.35rem;
+  }
+  /* The theme's previous/next chapter footer sits at the very bottom of the
+     scroll, which is exactly where the floating pill lands. Give it room so
+     the pill does not cover the "next" link. */
+  .prev-next-area {
+    margin-bottom: 3.25rem;
+  }
+}
+
+/* Printing a page should not print the assistant. */
+@media print {
+  .discopt-ask-panel,
+  .discopt-ask-toggle {
+    display: none !important;
+  }
+}

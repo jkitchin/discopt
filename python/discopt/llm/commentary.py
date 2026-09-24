@@ -200,7 +200,7 @@ class SolveCommentator:
     def _generate_comment_sync(self, state: dict) -> str | None:
         """Synchronous LLM call to generate a commentary message."""
         try:
-            from discopt.llm.provider import complete
+            from discopt.llm.provider import complete, resolve_timeout
         except ImportError:
             return None
 
@@ -226,7 +226,7 @@ class SolveCommentator:
                 messages=[{"role": "user", "content": prompt}],
                 model=self._llm_model,
                 max_tokens=150,
-                timeout=5.0,
+                timeout=resolve_timeout(default=5.0),
             )
             return raw.strip() if raw else None
         except Exception:

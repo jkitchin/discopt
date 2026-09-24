@@ -106,7 +106,7 @@ CUTEST_ENV      := $(CUTEST_PREFIX)/env.sh
         bench-notebook bench-smoke bench-phase3-gate bench-tests \
         bench-cutest bench-cutest-smoke setup-cutest check-cutest \
         bench-nlp-smoke bench-nlp-full bench-minlplib-nlp-smoke bench-minlplib-nlp \
-        docs docs-open notebooks \
+        docs docs-open ask-check notebooks \
         gams-build gams-register gams-install gams-test gams-verify \
         graduation-gate graduation-gate-ci \
         bench-lp-smoke bench-qp-smoke bench-milp-smoke bench-miqp-smoke bench-minlp-smoke bench-global-smoke \
@@ -157,6 +157,7 @@ help:
 	@echo "  make notebooks          Execute all notebooks in place (docs/notebooks/ + manuscript/)"
 	@echo "  make docs               Build Jupyter Book documentation"
 	@echo "  make docs-open          Build and open Jupyter Book in browser"
+	@echo "  make ask-check          Rebuild the docs-assistant index + run its retrieval suite"
 	@echo "  make clean              Remove build artifacts"
 	@echo ""
 	@echo "Per-category benchmarks:"
@@ -620,10 +621,30 @@ notebooks: build
 
 # --- Documentation -----------------------------------------------------------
 
+# The docs assistant's search index is built FROM the rendered HTML, not from
+# the source (docs/ask.md explains why: the heading anchors it cites only exist
+# once Sphinx has run). So it is a post-build step, and `docs` runs both -- a
+# bare `jupyter-book build` leaves the Ask panel searching nothing.
 docs:
 	@echo "==> Building Jupyter Book..."
 	jupyter-book build docs/
+	@echo "==> Building the docs-assistant search index..."
+	$(PYTHON) scripts/build-docs-index.py
 	@echo "==> Jupyter Book built: docs/_build/html/index.html"
+
+# Guards the assistant, in two halves. The retrieval suite tests the ranking on
+# the index alone (stemmer/tokenizer behaviour, code surviving extraction whole,
+# a labelled query set that must still find the right page); the browser suite
+# tests what only exists once a page runs -- that the panel mounts, that ask.js
+# finds its own assets from a nested page, and that every anchor it cites is
+# real. Needs node, playwright, and an existing docs/_build/html (`make docs`).
+ask-check:
+	@echo "==> Rebuilding the docs-assistant search index..."
+	$(PYTHON) scripts/build-docs-index.py
+	@echo "==> Running the retrieval suite..."
+	node docs/tests/ask_retrieval.mjs docs/_build/html/_static/ask-index.json
+	@echo "==> Running the browser suite..."
+	$(PYTHON) docs/tests/ask_e2e.py
 
 docs-open: docs
 	@echo "==> Opening Jupyter Book in browser..."

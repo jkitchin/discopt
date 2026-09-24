@@ -289,7 +289,7 @@ def _llm_augment(
     llm_model: str | None,
 ) -> dict | None:
     """Use LLM to refine solver parameter suggestions."""
-    from discopt.llm.provider import complete
+    from discopt.llm.provider import complete, resolve_timeout
     from discopt.llm.serializer import serialize_model
 
     model_text = serialize_model(model)
@@ -312,7 +312,7 @@ def _llm_augment(
             messages=[{"role": "user", "content": prompt}],
             model=llm_model,
             max_tokens=512,
-            timeout=5.0,
+            timeout=resolve_timeout(default=5.0),
         )
         import json
 
@@ -334,7 +334,7 @@ def _llm_presolve(
     llm_model: str | None,
 ) -> list[str]:
     """Use LLM for semantic pre-solve analysis."""
-    from discopt.llm.provider import complete
+    from discopt.llm.provider import complete, resolve_timeout
     from discopt.llm.serializer import serialize_model
 
     model_text = serialize_model(model)
@@ -356,7 +356,7 @@ def _llm_presolve(
             messages=[{"role": "user", "content": prompt}],
             model=llm_model,
             max_tokens=512,
-            timeout=5.0,
+            timeout=resolve_timeout(default=5.0),
         )
         warnings = []
         for line in raw.strip().split("\n"):
