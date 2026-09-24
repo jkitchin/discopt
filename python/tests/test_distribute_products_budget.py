@@ -20,12 +20,13 @@ cheapest pathology is ``saa_2`` at 2.18e9.  The budget sits in that gap and
 truncates 2 of 1610 instances — ``johnall`` and ``saa_2``, both >2000x over.
 
 SCOPE: this bounds ``distribute_products``, not pre-solve scanning as a whole.
-Two other paths blow the same time limit by different mechanisms and are NOT
+Two other paths blow the same time limit by different mechanisms and are not
 fixed here — a whole-model-sized ``eigvalsh`` per ``sqrt`` node in
 ``convexity.patterns`` (``glider400``) and ``binary_multilinear_reform._poly_add``
 (``hadamard_9``, still 300 s+ against a 60 s limit with this budget in force).
-All three are pre-solve passes running with no deadline; threading one into them
-is the class-level fix, tracked in issue #1456.
+Both were fixed in #1456, by bounding the work deterministically rather than by
+a wall-clock deadline; see ``test_1456_psd_quadratic_support.py`` and
+``test_binary_multilinear_work_budget.py``.
 
 Truncation is ALGEBRAICALLY IDENTITY-PRESERVING (that is what
 ``test_budgeted_result_is_algebraically_identical`` pins), so no constraint or

@@ -78,7 +78,7 @@ Scope and soundness rules:
   McCormick on the existing paths; rerouting them wholesale is out of scope
   here (and would change behavior on the whole binary-quadratic class).
 - Expansion and the emitted MILP are budgeted (``_MAX_MONOMIALS``,
-  ``_MAX_PRODUCT_OPS``, ``_MAX_ROWS``): a blow-up aborts and falls back
+  ``_MAX_EXPAND_OPS``, ``_MAX_ROWS``): a blow-up aborts and falls back
   rather than emitting a MILP too large for the (dense-marshaling) in-house
   MILP engines.
 
@@ -138,7 +138,7 @@ _MIN_DEGREE = 3
 # matrix): autocorr_bern25-25 needs ~1.6k rows under the squared-form encoding
 # and fits comfortably; a 15k-row flat expansion of the same model would OOM.
 _MAX_MONOMIALS = 200_000
-_MAX_PRODUCT_OPS = 10_000_000
+_MAX_EXPAND_OPS = 10_000_000
 _MAX_ROWS = 6_000
 # Largest constant integer exponent expanded by repeated multiplication.
 _MAX_POW = 16
@@ -329,7 +329,7 @@ def _gate_eval(node: Expression, memo: dict[int, tuple[int, bool, bool]]) -> tup
 
 class _ExpandCtx:
     """Shared state of one reformulation attempt: the (var, elem) -> reference
-    registry, the binary/integer-likeness caches, and the product-op budget."""
+    registry, the binary/integer-likeness caches, and the expansion-work budget."""
 
     def __init__(self) -> None:
         self.refs: dict[tuple[int, int], Expression] = {}
@@ -346,7 +346,29 @@ class _ExpandCtx:
         return key
 
 
-def _poly_add(p: dict, q: dict, sign: float = 1.0) -> dict:
+def _poly_add(p: dict, q: dict, ctx: _ExpandCtx, sign: float = 1.0) -> dict:
+    # #1456: ``_MAX_MONOMIALS`` bounds the SIZE of the result and the old
+    # product-op budget bounded the work of ONE ``_poly_mul``; nothing bounded
+    # the cumulative WORK of the accumulate loop. ``out = dict(p)`` copies the
+    # whole accumulator on every call, so accumulating a polynomial that sits
+    # just under the size budget is quadratic in the number of addends -- and
+    # every individual call passes every existing check.
+    #
+    # Measured on hadamard_9 with this budget lifted out of the way: 200,000
+    # adds copying 2.0e10 entries over 154 s, ending in
+    # ``_Unsupported("monomial budget exceeded")``. It never had a
+    # reformulation to deliver; the whole 154 s bought the answer "unchanged".
+    # This is a pre-solve pass, so a ``time_limit`` cannot reach it.
+    #
+    # So charge adds to the same running total as products. The budget VALUE is
+    # unchanged -- only what counts against it -- and that is what makes the
+    # change free: surveyed over all 1610 MINLPLib instances the pass fires on
+    # 52, and the most cumulative work any instance that actually receives a
+    # reformulation asks for is 959,794 (``autocorr_bern35-09``), a 10.4x
+    # margin. The 1610-instance A/B changed no instance's outcome.
+    ctx.ops += len(p) + len(q)
+    if ctx.ops > _MAX_EXPAND_OPS:
+        raise _Unsupported("expansion work budget exceeded")
     out = dict(p)
     for m, c in q.items():
         nc = out.get(m, 0.0) + sign * c
@@ -367,8 +389,8 @@ def _poly_scale(p: dict, c: float) -> dict:
 
 def _poly_mul(p: dict, q: dict, ctx: _ExpandCtx) -> dict:
     ctx.ops += len(p) * len(q)
-    if ctx.ops > _MAX_PRODUCT_OPS:
-        raise _Unsupported("product-op budget exceeded")
+    if ctx.ops > _MAX_EXPAND_OPS:
+        raise _Unsupported("expansion work budget exceeded")
     out: dict = {}
     for m1, c1 in p.items():
         for m2, c2 in q.items():
@@ -462,15 +484,15 @@ def _expand_eval(node: Expression, memo: dict[int, dict], ctx: _ExpandCtx) -> di
     if isinstance(node, SumOverExpression):
         out: dict = {}
         for t in node.terms:
-            out = _poly_add(out, memo[id(t)])
+            out = _poly_add(out, memo[id(t)], ctx)
         return out
     if isinstance(node, BinaryOp):
         left = memo[id(node.left)]
         right = memo[id(node.right)]
         if node.op == "+":
-            return _poly_add(left, right)
+            return _poly_add(left, right, ctx)
         if node.op == "-":
-            return _poly_add(left, right, sign=-1.0)
+            return _poly_add(left, right, ctx, sign=-1.0)
         if node.op == "*":
             return _poly_mul(left, right, ctx)
         if node.op == "/":
@@ -793,7 +815,7 @@ def _process_body(root: Expression, ctx: _ExpandCtx, eff: Optional[float]) -> _P
                 squares.append(_SquareTerm(coef, inner, grid[0], grid[1], grid[2]))
                 continue
         poly = _expand_to_multilinear(node, ctx)
-        flat = _poly_add(flat, _poly_scale(poly, coef))
+        flat = _poly_add(flat, _poly_scale(poly, coef), ctx)
     return _ProcessedBody(flat=flat, squares=squares)
 
 

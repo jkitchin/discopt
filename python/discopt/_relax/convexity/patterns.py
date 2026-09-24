@@ -495,6 +495,30 @@ def _quadratic_data(expr: Expression, model: Model):
     return Q, np.asarray(c, dtype=np.float64), float(const)
 
 
+def _support_restricted(Q: np.ndarray) -> np.ndarray:
+    """Restrict a symmetric ``Q`` to the nonzero support of its rows/columns.
+
+    ``_quadratic_data`` hands back ``Q`` as a full ``n_total x n_total`` dense
+    matrix, so a quadratic touching a handful of variables still costs an
+    ``O(n_total**3)`` ``eigvalsh`` (#814). The omitted rows/columns are all-zero
+    and contribute exactly-zero eigenvalues, which can never flip a
+    ``min >= -tol`` or ``max <= tol`` sign test — so every eigenvalue-SIGN
+    classification is identical on the submatrix, while the cost drops to the
+    support dimension.
+
+    This is only valid for sign tests against a tolerance that admits zero. Do
+    not use it where the *number* or *magnitude* of zero eigenvalues matters
+    (rank, determinant, condition number).
+
+    Returns a ``0x0`` array when ``Q`` is entirely zero; callers decide what an
+    empty spectrum means rather than having this function guess.
+    """
+    support = np.nonzero(np.any(np.abs(Q) > 1e-12, axis=0))[0]
+    if support.size < Q.shape[0]:
+        return Q[np.ix_(support, support)]
+    return Q
+
+
 def _linear_vector_matrix(expr: Expression, model: Model) -> Optional[np.ndarray]:
     """Return A for vector affine form ``A @ x`` with no constant term."""
     n_total = _total_scalar_variables(model)
@@ -676,8 +700,16 @@ def is_homogeneous_psd_quadratic(expr: Expression, model: Model) -> bool:
     """True when ``expr`` is ``x^T Q x`` (no linear/constant term) with Q PSD."""
     mat = _sum_of_squares_linear_matrix(expr, model)
     if mat is not None:
-        q = mat.T @ mat
-        eigvals = np.linalg.eigvalsh(q)
+        # ``mat`` is ``A`` from ``sum((A@x)*(A@x)) == x^T (A^T A) x``, with a
+        # column per scalar variable IN THE WHOLE MODEL. Forming the full Gram
+        # matrix and decomposing it is the same #814 blow-up as below: an
+        # all-zero column of ``A`` is an all-zero row/column of ``A^T A``, so
+        # dropping it is the support restriction, exact for this sign test.
+        cols = np.nonzero(np.any(np.abs(mat) > 1e-12, axis=0))[0]
+        if cols.size == 0:
+            return True  # A == 0, so ||A x||**2 == 0: the zero form is PSD
+        sub = mat[:, cols]
+        eigvals = np.linalg.eigvalsh(sub.T @ sub)
         return bool(float(np.min(eigvals)) >= -1e-10)
     data = _quadratic_data(expr, model)
     if data is None:
@@ -687,7 +719,16 @@ def is_homogeneous_psd_quadratic(expr: Expression, model: Model) -> bool:
         return False
     if abs(const) > 1e-10:
         return False
-    eigvals = np.linalg.eigvalsh(Q)
+    # #1456: this is a min-eigenvalue SIGN test, so it is exact on the support
+    # (see ``_support_restricted``). Without this, one ``sqrt`` node in
+    # glider400's 5215-variable model costs a 5215x5215 eigendecomposition;
+    # measured, 20 such calls spent 119 s -- 97.6% of a solve given a 20 s
+    # time_limit. The sibling ``quadratic_curvature`` got this treatment in
+    # #814 and this function was missed.
+    Qs = _support_restricted(Q)
+    if Qs.size == 0:
+        return True  # Q is entirely zero: the zero form is PSD
+    eigvals = np.linalg.eigvalsh(Qs)
     return bool(float(np.min(eigvals)) >= -1e-10)
 
 
@@ -705,18 +746,17 @@ def quadratic_curvature(expr: Expression, model: Model) -> Optional[Curvature]:
     Q, _c, _const = data
     if np.allclose(Q, 0.0, atol=1e-10):
         return Curvature.AFFINE
-    # #814: `_quadratic_data` returns Q as a full n_total x n_total dense matrix,
-    # so a quadratic that involves only a few variables (e.g. one gas-pipe flow
-    # term in gastrans582's 2186-var model) still triggers an O(n_total^3)
-    # eigvalsh — which grinds the root relaxation build for 75s+ before B&B even
-    # starts. Restrict the eigenproblem to the nonzero SUPPORT of Q: the omitted
-    # rows/cols are all-zero, contributing exactly-zero eigenvalues that can never
-    # flip the CONVEX (min >= 0) or CONCAVE (max <= 0) sign tests below, so the
-    # classification is identical while the eigvalsh cost drops to the support
-    # dimension (a handful of vars).
-    support = np.nonzero(np.any(np.abs(Q) > 1e-12, axis=0))[0]
-    if 0 < support.size < Q.shape[0]:
-        Q = Q[np.ix_(support, support)]
+    # #814: restrict the eigenproblem to the nonzero SUPPORT of Q, which is exact
+    # for the CONVEX (min >= 0) / CONCAVE (max <= 0) sign tests below. Without it
+    # one gas-pipe flow term in gastrans582's 2186-var model triggers an
+    # O(n_total**3) eigvalsh and grinds the root relaxation build for 75s+ before
+    # B&B even starts. Shared with ``is_homogeneous_psd_quadratic`` via
+    # ``_support_restricted`` so the two cannot drift apart again (#1456: they
+    # had, and the miss cost glider400 97.6% of its time limit).
+    # The all-zero-support case cannot arrive here: the ``allclose(Q, 0)`` test
+    # above (atol 1e-10, looser than the 1e-12 support threshold) already
+    # returned AFFINE for it, so ``eigvals`` below is never empty.
+    Q = _support_restricted(Q)
     eigvals = np.linalg.eigvalsh(Q)
     if float(np.min(eigvals)) >= -1e-10:
         return Curvature.CONVEX
