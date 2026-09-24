@@ -59,9 +59,16 @@ discopt is a hybrid Mixed-Integer Nonlinear Programming (MINLP) solver combining
    **A graduation attempt has three outcomes, not two (added 2026-09-19, #1345).**
    "A cert-clean but neutral-or-harmful flag stays OFF, with the measurement
    recorded" is where flags accumulate: it records an answer and gives it nowhere
-   to go. Measured on `0ae8cad`: 86 `DISCOPT_*` flags are read, 19 default to a
-   literal `"0"`, and **14 of those gate solver math** — nearly every one already
-   carrying its measurement in a docstring. What §5 lacked was an exit. Every
+   to go. Measured on `7b3a1e0a` by `python/tests/flag_audit_scan.py`: **138**
+   distinct `DISCOPT_*` flags across 145 read sites — 47 default-OFF, 68
+   default-ON, 19 selectors, 4 undecidable — and **45 of the default-OFF gates
+   are solver math**, nearly every one already carrying its measurement in a
+   docstring. (An earlier figure here, "86 flags / 19 defaulting to `\"0\"` / 14
+   gating solver math", was **retracted 2026-09-22 by #1421**: it came from a scan
+   that recognised only `environ.get(F, "0")` and was blind to the 46 `_env_flag(F,
+   default=...)` sites, 23 of them default-OFF bound-changing math. Two instruments
+   shared the blind spot and confirmed each other. Re-derive from the scan script;
+   do not copy a flag count forward.) What §5 lacked was an exit. Every
    default-OFF gate over solver math is therefore in exactly one of three states,
    and a gate in none of them is a defect:
    - **Graduated** — the panel passed both bars. Flip the default, keep the `=0`
@@ -216,9 +223,19 @@ not when a first increment lands. The lifecycle:
 ## Commands
 
 ### Install
+
+`discopt` is a maturin/Rust build, and `discopt_benchmarks` does **not** depend on it —
+installing only the benchmark package leaves you without a working solver. The canonical
+source install (matches `CONTRIBUTING.md`):
+
 ```bash
-cd discopt_benchmarks && pip install -e ".[dev]"
+pip install -e ".[dev,pounce,ipopt,highs]"        # discopt itself
+cd crates/discopt-python && maturin develop && cd ../..   # build the Rust bindings
+cd discopt_benchmarks && pip install -e ".[dev]" && cd ..  # benchmark harness (separate pkg)
 ```
+
+Re-run `maturin develop` after any change under `crates/`; the Python tests import the
+compiled extension, not the Rust source.
 
 ### Tests
 ```bash
@@ -289,13 +306,13 @@ times out most, since its slowest instances leave the population. Both columns
 are in the runner's summary table.
 
 **Benchmark instance corpus**: `~/Dropbox/projects/discopt-minlp-benchmark/` holds
-the full MINLPLib snapshot — ~4,800 `.nl` instances (`minlplib/nl/`), reference
+the full MINLPLib snapshot — 1,610 `.nl` instances (`minlplib/nl/`), reference
 optima/dual bounds (`minlplib.solu`), problem-type/size metadata
 (`minlplib_types.csv`, `problem_sizes.csv`), curated problem lists by runtime
 (`problems_{small,short,medium,long}.txt`), SCIP reference results
 (`scip_join.csv`), and a standalone `benchmark.py`/`Makefile` harness with prior
 results in `results/`. Use it to draw instances beyond the in-repo test corpus
-(e.g. when a fix targets operators/structures the 61-file
+(e.g. when a fix targets operators/structures the 66-file
 `python/tests/data/minlplib_nl/` corpus doesn't exercise), and use `minlplib.solu`
 as the oracle for correctness checks.
 
@@ -319,9 +336,30 @@ mypy python/discopt/
 ## Architecture
 
 - **`python/discopt/modeling/`** — Python modeling API with expression DAG system for MINLP formulation, supporting continuous/binary/integer variables and operator overloading that maps to Rust AST. Imported as `from discopt import Model` or `import discopt.modeling as dm`.
-- **`python/discopt/_relax/`** — the relaxation layer: DAG compiler, McCormick/alphaBB envelopes, cutting planes, factorable reformulation, convexity detection, NLP evaluator, relaxation compiler. Named `_jax` until the JAX removal; it is **numpy**, and JAX does not enter `sys.modules` during a solve. Do not reason about "the JAX layer" from this directory's contents.
+- **`python/discopt/_relax/`** — the relaxation layer: DAG compiler, McCormick/alphaBB envelopes, cutting planes, factorable reformulation, convexity detection, NLP evaluator, relaxation compiler. Named `_jax` until the JAX removal; it is **numpy**. Do not reason about "the JAX layer" from this directory's contents. (This bullet used to add "and JAX does not enter `sys.modules` during a solve" — that is the unconditional claim the Project Overview above explicitly labels **false**. An *ordinary* solve imports zero `jax` modules; a model with an expression lacking a POUNCE opcode hits the legacy fallback and loads it. Believe the Overview.)
 - **`python/discopt/solvers/`** — external-solver wrappers (`highspy` is a core dependency: the pure LP/MILP route `lp_milp_highs.py` and the OA/GDP paths; cyipopt NLP wrapper). NOTE: the default MINLP per-node LP engine is the **in-house Rust simplex** (`MccormickLPRelaxer(backend="simplex")` → `crates/discopt-core/src/lp/simplex/`), not HiGHS — do not plan MINLP node work against a "HiGHS backend". Pure LP/MILP models classified at entry are routed to HiGHS with discopt-verified certificates (`docs/dev/lp-milp-highs-routing-plan.md`; opt-out `DISCOPT_LP_MILP_BACKEND=rust`).
-- **`python/discopt/ml/`** — ML predictor embedding + trainable surrogate module (named `discopt.nn` until #1219; `discopt.nn` remains as a deprecation shim that forwards by object identity). Embeds trained feedforward NNs, decision trees and tree ensembles as algebraic constraints in MINLP models (inspired by OMLT). Only two of the four encodings are MIP — `relu_bigm.py` and `formulations/tree_ensemble.py` emit binaries and big-M; `full_space.py` emits smooth activation equalities and `reduced_space.py` emits nested expressions with no binaries. `network.py` defines `NetworkDefinition`/`DenseLayer`/`Activation`; `bounds.py` does interval-arithmetic bound propagation; `scaling.py` defines `OffsetScaling` (input/output affine scaling); `tree.py` + `formulations/tree_ensemble.py` do the decision-tree/ensemble MILP embedding (Mišić-style per-leaf encoding). `formulations/` has `FullSpaceFormulation` (smooth activations), `ReluBigMFormulation` (big-M MILP), and `ReducedSpaceFormulation` (lean full-space: one var per layer, affine+activation fused). `predictor.py`'s `add_predictor(model, inputs, predictor, ...)` is the convenience dispatcher that auto-detects the predictor type, formulates it, and links it to your input variables. `presolve.py` has `NNPresolvePass` (informational v0). `readers/` loads ONNX (`onnx_reader`), sklearn MLPs + trees + ensembles (`sklearn_reader`), and torch `Sequential` (`torch_reader`). `trainable.py` is the **training** counterpart (the other regime): `TrainableNetwork`/`TrainableDense`/`TrainableKernelExpansion` create surrogate weights as decision `Variable`s and emit symbolic expressions (matrix form, smooth activations only) so a surrogate can be trained *simultaneously* with a physics model (e.g. a neural rate law inside a collocation DAE, à la Lueg et al. 2025); `train()` is a thin local-NLP solve, and `TrainableNetwork.freeze()`/`from_definition()` bridge to/from the frozen `NetworkDefinition` path. `surrogate.py` declares the `Surrogate` protocol (`runtime_checkable`): the duck-typed contract any trainable surrogate satisfies (`__call__(x)->expression` plus `parameters`/`n_parameters`/`l2_penalty`/`initial_values`), so custom surrogates — a GP mean, a soft tree, a fixed-structure symbolic formula — plug in without framework changes. Optional dep: `pip install discopt[nn]`.
+- **`python/discopt/ml/`** — ML predictor embedding + trainable surrogates (inspired by
+  OMLT). Optional dep: `pip install discopt[nn]`. `ls` the directory for the file map; what
+  you cannot derive from it:
+  - **Two regimes, not one.** *Frozen* — embed an already-trained NN/tree/ensemble as
+    algebraic constraints (`network.py`, `formulations/`, `readers/` for ONNX, sklearn,
+    torch `Sequential`); entry point `predictor.py:add_predictor()`, which auto-detects the
+    predictor type. *Trainable* (`trainable.py`) — weights become decision `Variable`s
+    emitting symbolic expressions, so a surrogate trains *simultaneously* with a physics
+    model (a neural rate law inside a collocation DAE, à la Lueg et al. 2025).
+    `TrainableNetwork.freeze()`/`from_definition()` bridge the two; `train()` is a thin
+    local-NLP solve, not a deep-learning trainer.
+  - **Only two of the four encodings are MIP.** `relu_bigm.py` and
+    `formulations/tree_ensemble.py` emit binaries and big-M; `full_space.py` (smooth
+    activation equalities) and `reduced_space.py` (nested expressions, one var per layer)
+    emit **no binaries**. Do not assume embedding a network makes the model a MIP.
+  - **`surrogate.py`'s `Surrogate` protocol is `runtime_checkable` and duck-typed**
+    (`__call__(x)->expression`, `parameters`, `n_parameters`, `l2_penalty`,
+    `initial_values`), so a GP mean, a soft tree or a fixed-structure symbolic formula
+    plugs in with no framework change.
+  - Named `discopt.nn` until #1219; `discopt.nn` remains a deprecation shim forwarding by
+    object identity. `presolve.py`'s `NNPresolvePass` is informational v0 — it does not
+    tighten anything.
 - **`python/discopt/dae/`** — DAE/ODE discretization for dynamic optimization (no solver/DAG-compiler changes). `collocation.py` (`DAEBuilder` + `ContinuousSet`) transcribes ODEs/index-1 DAEs/2nd-order ODEs via orthogonal collocation on finite elements (Radau/Legendre); `finite_difference.py` (`FDBuilder`) and `mol.py` (`MOLBuilder`, method of lines for PDEs) are alternatives; `polynomials.py` holds the collocation matrices/roots. `fit.py` adds multi-experiment fitting glue (`Trajectory`, `fit_trajectories`, `TrajectoryFit`): one collocation block per trajectory on a shared model wired to one RHS, so a trainable surrogate's weights are shared and trained jointly.
 - **`python/discopt/solver.py`** — Solver orchestrator: end-to-end `Model.solve()` via B&B.
 - **`crates/discopt-core/`** — Rust: Expression IR, B&B tree, .nl parser, FBBT/presolve.
@@ -407,8 +445,11 @@ in this repo, so treat that README's framing of them as unverified here.
 ## Key Constraints
 
 - **Correctness is non-negotiable**: Every phase gate enforces `incorrect_count ≤ 0`. Never weaken this check.
-- **Numerical tolerances**: abs=1e-6, rel=1e-4, integrality=1e-5, factorization=1e-12 (defined in `conftest.py`).
-- **ruff** line-length is 100 chars, targeting Python 3.10+. Pinned to v0.14.6 across pre-commit and CI.
+- **Numerical tolerances**: abs=1e-6, rel=1e-4, integrality=1e-5, factorization=1e-12
+  (the `numerical_tolerance` fixture in `discopt_benchmarks/tests/conftest.py` — there are
+  several `conftest.py` files; this is the one).
+- **Python is 3.12+** (`requires-python = ">=3.12"`); **ruff** line-length is 100 chars,
+  `target-version = "py312"`, pinned to v0.14.6 across pre-commit and CI.
 - **Coverage** must stay ≥85% (restored by #87 after the post-AMP-merge lowering).
 - Tests have a 300-second default timeout (configurable in `pyproject.toml`).
 - **`np.asarray()` on a scipy sparse matrix does not raise** — it returns a 0-d
