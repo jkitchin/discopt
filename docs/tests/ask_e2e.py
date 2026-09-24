@@ -107,6 +107,79 @@ with sync_playwright() as p:
     toggle.click()
     check("panel opens", page.locator(".discopt-ask-panel").is_visible())
 
+    # ---- The open panel makes room; it does not cover the page. ------------
+    # Before this was fixed the panel was a plain fixed overlay at right: 0,
+    # and on the default 1280px viewport it hid 208px of <article> and the
+    # whole 272px secondary sidebar -- which is what a reader sees as the
+    # "Contents" list sliced off down its right edge. Geometry, not a
+    # screenshot, so it cannot pass by rendering differently.
+    def _overlap(a, b):
+        return min(a["x"] + a["width"], b["x"] + b["width"]) - max(a["x"], b["x"])
+
+    panel_box = page.locator(".discopt-ask-panel").bounding_box()
+    measured = 0
+    for sel in ("article.bd-article", ".bd-sidebar-secondary", ".bd-sidebar-primary"):
+        loc = page.locator(sel)
+        if loc.count() == 0 or not loc.first.is_visible():
+            continue
+        bb = loc.first.bounding_box()
+        if bb is None or bb["width"] == 0:
+            continue
+        measured += 1
+        ov = _overlap(bb, panel_box)
+        # 1px of slack for subpixel layout, not for a real overlap.
+        check(f"open panel does not cover {sel}", ov <= 1, f"{ov:.0f}px covered")
+    # Without this the loop above is a no-op that reports nothing and reads as
+    # a pass -- the exact shape CLAUDE.md section 6 exists to forbid.
+    check("occlusion was actually measured against page content", measured >= 2, measured)
+
+    check(
+        "reflow introduced no horizontal scrollbar",
+        not page.evaluate(
+            "document.documentElement.scrollWidth > document.documentElement.clientWidth"
+        ),
+    )
+
+    # ---- The width is draggable, clamped, and remembered. ------------------
+    handle = page.locator(".discopt-ask-resize")
+    check("resize handle is present", handle.count() == 1, handle.count())
+    if handle.count() == 1:
+        before = panel_box["width"]
+        hb = handle.bounding_box()
+        page.mouse.move(hb["x"] + hb["width"] / 2, hb["y"] + 200)
+        page.mouse.down()
+        page.mouse.move(hb["x"] - 120, hb["y"] + 200, steps=8)
+        page.mouse.up()
+        widened = page.locator(".discopt-ask-panel").bounding_box()["width"]
+        check("dragging the handle widens the panel", widened > before + 100, (before, widened))
+
+        art = page.locator("article.bd-article").first.bounding_box()
+        check(
+            "the widened panel still covers nothing",
+            _overlap(art, page.locator(".discopt-ask-panel").bounding_box()) <= 1,
+        )
+
+        # A drag past the floor must stop at it rather than collapse the panel.
+        hb = handle.bounding_box()
+        page.mouse.move(hb["x"] + hb["width"] / 2, hb["y"] + 200)
+        page.mouse.down()
+        page.mouse.move(page.viewport_size["width"] + 400, hb["y"] + 200, steps=8)
+        page.mouse.up()
+        floored = page.locator(".discopt-ask-panel").bounding_box()["width"]
+        check("a drag past the minimum clamps instead of collapsing", floored >= 279, floored)
+
+        stored = page.evaluate("localStorage.getItem('discopt-ask-width')")
+        check("the dragged width is remembered", stored is not None and stored.isdigit(), stored)
+
+    # Closing gives the page its width back.
+    page.locator(".discopt-ask-close").click()
+    check(
+        "closing restores the body padding",
+        page.evaluate("getComputedStyle(document.body).paddingRight") in ("0px", ""),
+        page.evaluate("getComputedStyle(document.body).paddingRight"),
+    )
+    toggle.click()
+
     box = page.locator(".discopt-ask-input")
     box.fill("feasibility based bound tightening")
     page.locator(".discopt-ask-submit").click()
@@ -157,6 +230,91 @@ with sync_playwright() as p:
     check("a mid-page citation was available to test", deep is not None)
     if deep:
         check(f"mid-page citation scrolls to {deep[1]}", deep[2] > 0, deep[2])
+
+    # ---- The answer renders as prose, not as its own source. --------------
+    # A reader reported seeing a literal "\\[ \\min_x ... \\]" where the formula
+    # belongs and "[2]" as three inert characters beside the passage list it
+    # names. renderAnswer now parses markdown and TeX; this drives the SHIPPED
+    # renderer through the seam ask.js exposes, with real hits already loaded
+    # from the search above, so the citation links resolve against real chunks.
+    page.goto(NESTED, wait_until="networkidle")
+    page.locator(".discopt-ask-toggle").click()
+    page.locator(".discopt-ask-input").fill("feasibility based bound tightening")
+    page.locator(".discopt-ask-submit").click()
+    page.wait_for_selector(".discopt-ask-source-link", timeout=30000)
+
+    seam = page.evaluate("!!document.querySelector('.discopt-ask-panel').__discoptRenderAnswer")
+    check("the renderer seam is exposed", seam)
+
+    ANSWER = (
+        "## Quadratic programming\n\n"
+        "QP has the form\n\n"
+        "\\[\n\\min_{x} \\tfrac{1}{2} x^\\top Q x\n\\]\n\n"
+        "where \\(Q\\) is symmetric [1]. Build one with `dm.Model` [2].\n\n"
+        "- **Convex** when Q is PSD [1]\n\n"
+        "```python\nm = dm.Model()\n```\n"
+    )
+    page.evaluate(
+        "(t) => document.querySelector('.discopt-ask-panel').__discoptRenderAnswer(t, true)",
+        ANSWER,
+    )
+    page.wait_for_timeout(1500)  # MathJax typesets asynchronously
+
+    answer = page.locator(".discopt-ask-answer")
+    check("the answer heading is an element", answer.locator("h3, h4, h5").count() > 0)
+    check("a fenced block becomes <pre><code>", answer.locator("pre code").count() > 0)
+    check("a list item becomes <li>", answer.locator("li").count() > 0)
+    check("bold becomes <strong>", answer.locator("strong").count() > 0)
+
+    # Citations: links, pointing at the passages the sources list shows.
+    cites = answer.locator("a.discopt-ask-cite")
+    check("citations render as links", cites.count() >= 2, cites.count())
+    cite_hrefs = [cites.nth(i).get_attribute("href") for i in range(cites.count())]
+    check(
+        "every citation link carries an anchor into the book",
+        all(h and h.startswith("http") and "#" in h for h in cite_hrefs),
+        cite_hrefs[:3],
+    )
+    src_hrefs = [
+        page.locator(".discopt-ask-source-link").nth(i).get_attribute("href")
+        for i in range(page.locator(".discopt-ask-source-link").count())
+    ]
+    check(
+        "[1] points at the first listed passage",
+        bool(cite_hrefs) and bool(src_hrefs) and cite_hrefs[0] == src_hrefs[0],
+        (cite_hrefs[0] if cite_hrefs else None, src_hrefs[0] if src_hrefs else None),
+    )
+    check("citation text still reads [n]", cites.first.inner_text().strip() == "[1]")
+
+    # MathJax: the integration node cannot test. The book already loads
+    # MathJax 3, and it reads textContent -- so the no-HTML invariant holds and
+    # a typeset display block leaves an <mjx-container> behind.
+    check(
+        "MathJax 3 is available to the panel",
+        page.evaluate("!!(window.MathJax && window.MathJax.typesetPromise)"),
+    )
+    check(
+        "display math is typeset, not shown as raw TeX",
+        answer.locator("mjx-container").count() > 0,
+        answer.locator("mjx-container").count(),
+    )
+    check(
+        "no raw TeX delimiter survives in the answer",
+        "\\[" not in answer.inner_text(),
+        answer.inner_text()[:120],
+    )
+
+    # The invariant the renderer exists to protect: model text is never markup.
+    page.evaluate(
+        "(t) => document.querySelector('.discopt-ask-panel').__discoptRenderAnswer(t, true)",
+        "<img src=x onerror=alert(1)> and [evil](javascript:alert(2))",
+    )
+    check("model output cannot inject an element", answer.locator("img").count() == 0)
+    check(
+        "a javascript: link is rendered as text, not a link",
+        answer.locator("a[href^='javascript']").count() == 0,
+    )
+    check("the escaped markup is still shown to the reader", "<img" in answer.inner_text())
 
     # The docs page itself renders.
     page.goto(f"{BASE}/ask.html", wait_until="networkidle")

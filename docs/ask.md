@@ -12,6 +12,13 @@ Search always works. The answer half is strictly opt-in: nothing is downloaded
 until you pick a model and click **Load model**. If you never do, you still get
 ranked, linked passages, which is most of the value on a reference manual.
 
+The panel opens beside the page rather than on top of it: the book reflows into
+the space that is left, so the text you were reading and the page contents stay
+visible while you ask about them. Drag its left edge to trade width between the
+two — the handle takes the arrow keys as well — and the width is remembered for
+next time. On a phone-width screen there is nothing to reflow into, so the panel
+covers the page and you close it to read on.
+
 Nothing you type leaves your browser. There is no API key, no server, and no
 telemetry — the assistant is a static JavaScript file, and the only
 third-party request it ever makes is fetching model weights from the WebLLM
@@ -38,6 +45,15 @@ mention `Model` outranking the modeling guide's section on it. Use the
 
 Passages are cut at heading boundaries, so every citation lands on the section
 that answered rather than at the top of a long notebook.
+
+Answers are rendered rather than shown as their own source: the model writes
+markdown and TeX, so headings, lists, bold, fenced code and equations come out
+as themselves, and the book's own MathJax typesets the mathematics. The
+bracketed `[2]` the model cites with is a **link** to the passage it names —
+the same deep link as the numbered entry below the answer. The passage previews
+are the one place mathematics is not typeset: they are cut at 260 characters,
+often mid-expression, so they drop display equations and unwrap inline ones to
+their symbols instead of showing you raw `\[ … \]`.
 
 ## Requirements for written answers
 

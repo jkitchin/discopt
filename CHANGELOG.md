@@ -10,6 +10,40 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Fixed
+
+- **The docs assistant renders its answers instead of showing their source.**
+  The model writes markdown and cites with bracketed numbers, but the panel
+  printed the whole reply as one pre-wrapped string: a literal `\[ \min_x … \]`
+  where the equation belongs, and `[2]` as three inert characters beside the
+  passage list it names. Answers are now parsed into real blocks — headings,
+  lists, bold, inline code, fenced code — the book's own MathJax typesets the
+  mathematics, and every `[n]` is a link to the passage it cites. The one
+  invariant is unchanged: model output is still written only with
+  `textContent`, never as HTML, so it cannot inject markup or a
+  `javascript:` link.
+- **Passage previews no longer show raw TeX.** They are cut at 260 characters,
+  often mid-expression, so they drop display equations and unwrap inline ones
+  to their symbols (`\in` → ∈) rather than being handed to MathJax.
+- **The status line no longer overlaps the question box.** The panel is a flex
+  column, so a two-line message was shrunk to its `min-height` and drawn across
+  the textarea below it.
+
+- **The published docs assistant now has a search index.** `docs.yml` ran
+  `jupyter-book build docs/` and nothing else, but `_static/ask-index.json` is a
+  *post-build* artifact — it is generated from the rendered HTML, because the
+  heading anchors it cites only exist once Sphinx has run. `make docs` runs both
+  steps; the deploy workflow ran only the first, so every site it published
+  served a panel whose index 404s on the reader's first question. The workflow
+  now builds the index and runs both assistant guards (`ask_retrieval.mjs`,
+  `ask_e2e.py`) before uploading, and the browser guard asserts the index is
+  fetched *and* served 200 — the exact shape of the bug.
+- **The Ask panel makes room for the page instead of covering it** (#1467). The
+  open panel pads the body by its own width so the book reflows beside it, its
+  left edge drags (and takes the arrow keys) to trade width between the two, and
+  the chosen width is remembered. At phone widths there is nothing to reflow
+  into, so it still overlays.
+
 ## [0.9.0] - 2026-09-24
 
 ### Added

@@ -90,13 +90,30 @@ body.discopt-ask-open .discopt-ask-toggle {
   }
 }
 
-/* ---- Panel -------------------------------------------------------------- */
+/* ---- Panel --------------------------------------------------------------
+   The panel is fixed to the viewport, but it does NOT float over the page:
+   the open state pads the body by the same width, so the book reflows into
+   what is left and nothing is ever covered. Measured on the built docs at a
+   1280px viewport before this: the panel hid 208px of <article> and the whole
+   272px secondary sidebar, which is how the "Contents" list ended up sliced
+   down its right edge.
+
+   One width drives both halves -- the panel and the body padding -- so they
+   cannot drift apart. It lives on :root as a custom property because the
+   resize handle writes it from JS; `min(..., 100vw)` appears in both places
+   for the same reason it appears here, to keep an over-large stored value
+   from exceeding the viewport.
+   ------------------------------------------------------------------------ */
+:root {
+  --discopt-ask-width: 24rem;
+}
+
 .discopt-ask-panel {
   position: fixed;
   top: 0;
   right: 0;
   z-index: 1000;
-  width: min(30rem, 100vw);
+  width: min(var(--discopt-ask-width), 100vw);
   height: 100vh;
   /* Keeps the answer and the sources scrollable independently of the page. */
   display: flex;
@@ -113,6 +130,78 @@ body.discopt-ask-open .discopt-ask-toggle {
 }
 .discopt-ask-panel[hidden] {
   display: none;
+}
+
+/* Make room rather than cover. Guarded by the same 700px breakpoint the panel
+   itself uses: below it the panel is the full viewport width, and padding the
+   body by 100vw would leave the page nothing to reflow into. There the panel
+   is a full-screen dialog and overlaying is the correct behaviour.
+
+   No transition: the body reflows on every pointer move while the handle is
+   being dragged, and animating a layout property through that is visibly
+   worse than snapping to it. */
+@media (min-width: 701px) {
+  body.discopt-ask-open {
+    padding-right: min(var(--discopt-ask-width), 100vw);
+  }
+}
+
+/* ---- Resize handle ------------------------------------------------------
+   A 24rem panel suits a question and a few citations; a long generated answer
+   wants more, and a wide article wants less. Rather than pick for the reader,
+   the panel's left edge drags. The hit area is wider than the visible rule so
+   it can be grabbed without precision, and it is a focusable separator so the
+   width is reachable from the keyboard too (see ask.js).
+   ------------------------------------------------------------------------ */
+.discopt-ask-resize {
+  /* `fixed`, not `absolute`, although it is a child of the panel: the panel is
+     a scroll container (`overflow-y: auto`), which both clips a child sitting
+     at a negative offset and scrolls it away with the content. Anchoring to
+     the viewport instead keeps the handle on the panel's left edge whatever
+     the answer does. Straddles the edge -- 9px wide, offset 4px -- so it is
+     grabbable from either side. */
+  position: fixed;
+  top: 0;
+  right: calc(min(var(--discopt-ask-width), 100vw) - 4px);
+  width: 9px;
+  height: 100vh;
+  z-index: 1001;
+  cursor: col-resize;
+  background: none;
+  border: none;
+  padding: 0;
+  touch-action: none;
+}
+.discopt-ask-resize:hover::after,
+.discopt-ask-resize:focus-visible::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 3px;
+  width: 3px;
+  height: 100%;
+  background: var(--pst-color-primary, #e87a1e);
+}
+.discopt-ask-resize:focus-visible {
+  outline: none;
+}
+
+/* While dragging, stop the pointer from selecting the article text it passes
+   over, and stop every iframe/embed on the page from eating the pointermove. */
+body.discopt-ask-resizing {
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: col-resize;
+}
+body.discopt-ask-resizing iframe {
+  pointer-events: none;
+}
+
+@media (max-width: 700px) {
+  /* Nothing to resize into: the panel is already the whole viewport. */
+  .discopt-ask-resize {
+    display: none;
+  }
 }
 
 .discopt-ask-head {
@@ -145,6 +234,11 @@ body.discopt-ask-open .discopt-ask-toggle {
   font-size: 0.8rem;
   opacity: 0.8;
   min-height: 1.2em;
+  /* The panel is a flex column, so without this the status is shrunk to
+     min-height while its text keeps its own height -- a two-line message
+     ("Showing passages. Load a model above for a written answer.") then
+     overflows its box and is drawn across the question textarea below it. */
+  flex: none;
 }
 .discopt-ask-status-busy {
   color: var(--pst-color-primary-highlight, #b56a12);
@@ -241,14 +335,82 @@ body.discopt-ask-open .discopt-ask-toggle {
 .discopt-ask-answer:empty {
   display: none;
 }
+/* Block structure is parsed now (see renderAnswer in ask.js), so paragraphs
+   wrap normally -- `pre-wrap` here used to be what stood in for it, and with
+   real <p>/<ul>/<pre> elements it only reintroduces the model's own line
+   breaks in the middle of a sentence. */
 .discopt-ask-answer-body {
-  margin: 0;
-  white-space: pre-wrap;
+  margin: 0 0 0.6rem;
   line-height: 1.5;
 }
-.discopt-ask-answer-body code {
+.discopt-ask-answer-body:last-child {
+  margin-bottom: 0;
+}
+.discopt-ask-answer code {
   font-size: 0.85em;
   color: var(--pst-color-inline-code, #ffcf8f);
+}
+.discopt-ask-answer-h {
+  margin: 0.8rem 0 0.35rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+  line-height: 1.3;
+}
+.discopt-ask-answer-list {
+  margin: 0 0 0.6rem;
+  padding-left: 1.3em;
+  line-height: 1.5;
+}
+.discopt-ask-answer-list li {
+  margin-bottom: 0.25rem;
+}
+.discopt-ask-answer-link {
+  color: var(--pst-color-link, #ffb262);
+}
+
+/* A fenced block in a 24rem panel is narrower than most of the code in this
+   book, so it scrolls sideways rather than wrapping a signature mid-argument. */
+.discopt-ask-code {
+  margin: 0 0 0.6rem;
+  padding: 0.5rem 0.6rem;
+  overflow-x: auto;
+  border-radius: 4px;
+  background: var(--pst-color-surface, #2b2118);
+  border: 1px solid var(--pst-color-border, #3a2c20);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+.discopt-ask-code code {
+  color: inherit;
+  white-space: pre;
+}
+
+/* Display math: the same escape hatch, because a long equation has no wrap
+   point at all. Until MathJax typesets it this is the raw \[ … \], which is
+   readable on its own -- the fallback is degraded, not broken. */
+.discopt-ask-math {
+  margin: 0 0 0.6rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+  font-size: 0.95em;
+}
+.discopt-ask-math-inline {
+  overflow-wrap: anywhere;
+}
+
+/* Citations. `[2]` is a link to the passage it cites, and has to read as one
+   at 0.8rem without turning the prose into a field of brackets -- hence the
+   weight and colour rather than an underline. */
+.discopt-ask-cite {
+  color: var(--pst-color-link, #ffb262);
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+  padding: 0 0.05em;
+}
+.discopt-ask-cite:hover,
+.discopt-ask-cite:focus-visible {
+  text-decoration: underline;
 }
 
 /* ---- Sources ------------------------------------------------------------ */

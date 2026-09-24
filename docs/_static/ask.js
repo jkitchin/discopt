@@ -43,6 +43,15 @@
   var TOP_SHOW = 6; // passages listed as sources
   var MAX_CTX_CHARS = 900; // per passage, into the prompt
   var LS_MODEL = "discopt-ask-model";
+  var LS_WIDTH = "discopt-ask-width";
+
+  // Panel width, in px. The open panel makes room by padding the body rather
+  // than covering the page (see ask.css), so its width is the article's loss:
+  // the floor keeps the question box usable, and the ceiling keeps a stored or
+  // dragged value from squeezing the book to nothing on a narrow screen.
+  var WIDTH_MIN = 280;
+  var WIDTH_MAX_FRAC = 0.6; // of the viewport
+  var WIDTH_STEP = 16; // per arrow key
 
   var state = {
     index: null, // { chunks, N, avgdl, df, docs }
@@ -447,6 +456,117 @@
     document.head.appendChild(link);
   }
 
+  // ------------------------------------------------------------- width ----
+
+  function clampWidth(px) {
+    var max = Math.max(WIDTH_MIN, Math.round(window.innerWidth * WIDTH_MAX_FRAC));
+    return Math.min(max, Math.max(WIDTH_MIN, Math.round(px)));
+  }
+
+  function currentWidth() {
+    // Read back what is actually in effect rather than a cached copy, so a
+    // keyboard step after a drag starts from where the drag ended.
+    var raw = getComputedStyle(document.documentElement).getPropertyValue("--discopt-ask-width");
+    var px = parseFloat(raw);
+    if (!isFinite(px)) return WIDTH_MIN;
+    return raw.indexOf("rem") > -1
+      ? px * parseFloat(getComputedStyle(document.documentElement).fontSize)
+      : px;
+  }
+
+  function applyWidth(px, remember) {
+    var w = clampWidth(px);
+    document.documentElement.style.setProperty("--discopt-ask-width", w + "px");
+    if (ui.resize) {
+      ui.resize.setAttribute("aria-valuenow", String(w));
+      ui.resize.setAttribute(
+        "aria-valuemax",
+        String(Math.max(WIDTH_MIN, Math.round(window.innerWidth * WIDTH_MAX_FRAC)))
+      );
+    }
+    if (remember) {
+      try {
+        localStorage.setItem(LS_WIDTH, String(w));
+      } catch (e) {
+        /* private mode: the panel still resizes, the width just is not kept */
+      }
+    }
+    return w;
+  }
+
+  function restoreWidth() {
+    var stored = null;
+    try {
+      stored = localStorage.getItem(LS_WIDTH);
+    } catch (e) {
+      /* private mode: fall through to the stylesheet's default */
+    }
+    // Only override the stylesheet when there is something to restore; an
+    // unparseable or absent value must leave the CSS default in place rather
+    // than pin the panel to the floor.
+    var px = stored === null ? NaN : parseFloat(stored);
+    if (isFinite(px)) applyWidth(px, false);
+  }
+
+  function buildResizeHandle() {
+    var handle = el("button", "discopt-ask-resize");
+    handle.type = "button";
+    handle.setAttribute("role", "separator");
+    handle.setAttribute("aria-orientation", "vertical");
+    handle.setAttribute("aria-label", "Resize the assistant panel");
+    handle.setAttribute("aria-valuemin", String(WIDTH_MIN));
+    handle.title = "Drag to resize";
+
+    var dragging = false;
+
+    handle.addEventListener("pointerdown", function (e) {
+      dragging = true;
+      // Capture so the drag keeps tracking over the article, over an iframe,
+      // and past the viewport edge -- without it the pointer is lost the
+      // moment it leaves the 9px handle.
+      handle.setPointerCapture(e.pointerId);
+      document.body.classList.add("discopt-ask-resizing");
+      e.preventDefault();
+    });
+
+    handle.addEventListener("pointermove", function (e) {
+      if (!dragging) return;
+      applyWidth(window.innerWidth - e.clientX, false);
+    });
+
+    function endDrag(e) {
+      if (!dragging) return;
+      dragging = false;
+      if (handle.hasPointerCapture(e.pointerId)) handle.releasePointerCapture(e.pointerId);
+      document.body.classList.remove("discopt-ask-resizing");
+      // Persist once, on release, rather than on every pointermove.
+      applyWidth(currentWidth(), true);
+    }
+    handle.addEventListener("pointerup", endDrag);
+    handle.addEventListener("pointercancel", endDrag);
+
+    handle.addEventListener("keydown", function (e) {
+      // Left grows the panel because the panel is on the right: the handle
+      // moves the way the arrow points.
+      var delta =
+        e.key === "ArrowLeft" ? WIDTH_STEP : e.key === "ArrowRight" ? -WIDTH_STEP : null;
+      if (delta === null) return;
+      e.preventDefault();
+      applyWidth(currentWidth() + delta, true);
+    });
+
+    // A width stored on a wide screen must not survive onto a narrow one as a
+    // panel wider than the book. Re-clamping on resize costs nothing and is
+    // the only thing standing between a 900px stored width and a 600px window.
+    window.addEventListener("resize", function () {
+      if (!ui.panel || ui.panel.hidden) return;
+      applyWidth(currentWidth(), false);
+    });
+
+    ui.resize = handle;
+    return handle;
+  }
+
   function setStatus(text, kind) {
     if (!ui.status) return;
     ui.status.textContent = text || "";
@@ -538,6 +658,7 @@
     panel.hidden = true;
     panel.setAttribute("role", "dialog");
     panel.setAttribute("aria-label", "discopt docs assistant");
+    panel.appendChild(buildResizeHandle());
 
     var head = el("div", "discopt-ask-head");
     head.appendChild(el("h2", "discopt-ask-title", "Ask discopt"));
@@ -741,7 +862,7 @@
   // and stray `*` bullets are noise. So the preview, and only the preview,
   // is flattened to prose.
   function excerpt(text, max) {
-    var flat = text
+    var flat = stripTex(text)
       .replace(/^\s*(```+|~~~+).*$/gm, " ") // fence lines
       .replace(/^\s{0,3}#{1,6}\s+/gm, "") // stray headings
       .replace(/^\s{0,3}[-*+]\s+/gm, "· ") // bullets
@@ -754,6 +875,47 @@
       .trim();
     max = max || 260;
     return flat.length > max ? flat.slice(0, max) + "…" : flat;
+  }
+
+  // The answer above is typeset; a preview cannot be. It is cut at 260
+  // characters, which lands mid-expression often enough that handing it to
+  // MathJax would show parse errors rather than formulas -- and typesetting
+  // six previews on every keystroke-fast query is work for something nobody
+  // reads as mathematics anyway. So the preview drops display math (a block
+  // equation is never the sentence that tells a reader whether to click) and
+  // unwraps inline math to its symbols, which is what the surrounding prose
+  // reads as. Without this a QP passage previews as
+  // "of the form \[ \min_{x} \quad \tfrac{1}{2} x^\top Q\, x ...".
+  var TEX_GLYPH = {
+    in: "\u2208", le: "\u2264", leq: "\u2264", ge: "\u2265", geq: "\u2265",
+    ne: "\u2260", neq: "\u2260", approx: "\u2248", succeq: "\u2ab0",
+    preceq: "\u2aaf", times: "\u00d7", cdot: "\u00b7", top: "\u22a4",
+    sum: "\u03a3", forall: "\u2200", exists: "\u2203",
+    rightarrow: "\u2192", to: "\u2192", infty: "\u221e",
+    alpha: "\u03b1", beta: "\u03b2", lambda: "\u03bb", mu: "\u03bc",
+    sigma: "\u03c3"
+  };
+
+  function stripTex(text) {
+    var out = text
+      .replace(/\\\[[\s\S]*?\\\]/g, " ") // \[ … \] display
+      .replace(/\$\$[\s\S]*?\$\$/g, " ") // $$ … $$ display
+      .replace(/\\begin\{[a-z*]+\}[\s\S]*?\\end\{[a-z*]+\}/gi, " ")
+      .replace(/\\\(([\s\S]*?)\\\)/g, "$1") // \( … \) inline
+      .replace(/\\[,;!:]/g, " ") // punctuation spacing macros (\, \; \! \:)
+      .replace(/\\(text|mathrm|mathbf|mathbb|operatorname)\{([^{}]*)\}/g, "$2")
+      // The relations carry the sentence. Dropping them with everything else
+      // turns "x \in \mathbb{R}^n" into "x R^n", which reads as a typo;
+      // these few substitutions are the difference between a preview a reader
+      // can skim and one they have to decode.
+      .replace(/\\(in|le|leq|ge|geq|ne|neq|approx|succeq|preceq|times|cdot|top|sum|forall|exists|rightarrow|to|infty|alpha|beta|lambda|mu|sigma)\b/g, function (m, name) {
+        return TEX_GLYPH[name] || "";
+      })
+      .replace(/\\[a-zA-Z]+/g, "") // remaining control sequences
+      .replace(/[{}]/g, "");
+    // A passage that is *mostly* an equation would preview as nothing at all,
+    // which is worse than noise -- fall back to the untouched text.
+    return out.replace(/\s+/g, " ").trim().length < 40 ? text : out;
   }
 
   function buildPrompt(question, hits) {
@@ -786,21 +948,291 @@
     ];
   }
 
-  // Model output is rendered as text, never as HTML: inline `code` becomes a
-  // <code> element and everything else stays a text node, so a stray angle
-  // bracket in an answer cannot become markup.
-  function renderAnswer(text) {
-    ui.answer.textContent = "";
-    var para = el("p", "discopt-ask-answer-body");
-    var parts = text.split(/(`[^`]+`)/);
-    parts.forEach(function (part) {
-      if (part.length > 2 && part.charAt(0) === "`" && part.charAt(part.length - 1) === "`") {
-        para.appendChild(el("code", null, part.slice(1, -1)));
-      } else if (part) {
-        para.appendChild(document.createTextNode(part));
+  // ----------------------------------------------------- answer rendering --
+  //
+  // The model is told to write markdown and to cite with bracketed numbers, so
+  // rendering it as one flat pre-wrapped string showed readers the source: a
+  // literal `\[ \min_x … \]` where the formula belongs, and `[2]` as three
+  // inert characters next to a passage list it refers to.
+  //
+  // This is a deliberately small markdown+TeX reader, split in two halves:
+  // `parseAnswer` is pure and returns plain data (node tests it through the
+  // seam at the bottom of this file), and the DOM half below consumes that.
+  // The split is what lets the ONE invariant here survive: model output is
+  // only ever written with textContent, never as HTML. Every branch below
+  // either creates a text node or sets `.textContent`; there is no innerHTML
+  // path, so a stray angle bracket in an answer still cannot become markup.
+  // MathJax is safe on the same terms — it reads textContent, not markup.
+
+  var FENCE_RE = /^\s{0,3}(```+|~~~+)\s*([A-Za-z0-9_+-]*)\s*$/;
+  var HEADING_RE = /^\s{0,3}(#{1,6})\s+(.*)$/;
+  var UL_RE = /^\s{0,3}[-*+]\s+(.*)$/;
+  var OL_RE = /^\s{0,3}\d+[.)]\s+(.*)$/;
+  var MATH_OPEN_RE = /^\s*(\\\[|\$\$)(.*)$/;
+
+  // One alternation scanned left to right, so precedence falls out of the
+  // order rather than out of chained replaces that corrupt each other's
+  // output (a `*` inside `$…$` being read as emphasis, say).
+  var INLINE_RE = new RegExp(
+    "`([^`]+)`" + // 1 inline code
+      "|\\\\\\(([\\s\\S]*?)\\\\\\)" + // 2 \( … \)
+      "|\\[([^\\]\\n]+)\\]\\(([^)\\s]+)\\)" + // 3,4 [text](url)
+      "|\\[\\s*(\\d+(?:\\s*[,;]\\s*\\d+)*)\\s*\\]" + // 5 [2] or [1, 2]
+      "|\\*\\*([^*]+)\\*\\*" + // 6 strong
+      "|\\*([^*\\n]+)\\*" + // 7 emphasis
+      "|\\$([^$\\n]+?)\\$", // 8 $ … $
+    "g"
+  );
+
+  function parseInline(text) {
+    var out = [];
+    var last = 0;
+    var m;
+    INLINE_RE.lastIndex = 0;
+    while ((m = INLINE_RE.exec(text)) !== null) {
+      if (m.index > last) out.push({ t: "text", v: text.slice(last, m.index) });
+      if (m[1] !== undefined) out.push({ t: "code", v: m[1] });
+      else if (m[2] !== undefined) out.push({ t: "math", v: m[2].trim() });
+      else if (m[3] !== undefined) out.push({ t: "link", v: m[3], href: m[4] });
+      else if (m[5] !== undefined) {
+        m[5].split(/[,;]/).forEach(function (n) {
+          out.push({ t: "cite", n: parseInt(n, 10) });
+        });
+      } else if (m[6] !== undefined) out.push({ t: "strong", v: m[6] });
+      else if (m[7] !== undefined) out.push({ t: "em", v: m[7] });
+      else if (m[8] !== undefined) {
+        // `$12, $30` is money and `$` alone is a shell prompt. Require
+        // non-space at both ends and at least one character that is not a
+        // digit or separator, or this eats prose between two prices.
+        var tex = m[8];
+        if (/^\S/.test(tex) && /\S$/.test(tex) && /[^\d.,\s]/.test(tex)) {
+          out.push({ t: "math", v: tex });
+        } else {
+          out.push({ t: "text", v: m[0] });
+        }
+      }
+      last = m.index + m[0].length;
+    }
+    if (last < text.length) out.push({ t: "text", v: text.slice(last) });
+    return out;
+  }
+
+  function parseAnswer(text) {
+    var lines = String(text === null || text === undefined ? "" : text)
+      .replace(/\r\n?/g, "\n")
+      .split("\n");
+    var blocks = [];
+    var para = [];
+    var i = 0;
+
+    function flushPara() {
+      var joined = para.join(" ").trim();
+      para = [];
+      if (joined) blocks.push({ type: "para", inline: parseInline(joined) });
+    }
+
+    while (i < lines.length) {
+      var line = lines[i];
+
+      var fence = FENCE_RE.exec(line);
+      if (fence) {
+        flushPara();
+        var closer = new RegExp("^\\s{0,3}" + fence[1].charAt(0) + "{" + fence[1].length + ",}\\s*$");
+        var code = [];
+        i++;
+        // An unterminated fence is the normal case mid-stream, so running off
+        // the end is not an error: it renders as the block it is becoming.
+        while (i < lines.length && !closer.test(lines[i])) code.push(lines[i++]);
+        i++;
+        blocks.push({ type: "code", lang: fence[2] || "", text: code.join("\n") });
+        continue;
+      }
+
+      var mathOpen = MATH_OPEN_RE.exec(line);
+      if (mathOpen) {
+        flushPara();
+        var close = mathOpen[1] === "$$" ? "$$" : "\\]";
+        var rest = mathOpen[2];
+        var body = [];
+        var end = rest.indexOf(close);
+        if (end >= 0) {
+          body.push(rest.slice(0, end));
+          i++;
+        } else {
+          if (rest.trim()) body.push(rest);
+          i++;
+          while (i < lines.length && lines[i].indexOf(close) < 0) body.push(lines[i++]);
+          if (i < lines.length) {
+            var tail = lines[i].slice(0, lines[i].indexOf(close));
+            if (tail.trim()) body.push(tail);
+            i++;
+          }
+        }
+        var tex = body.join("\n").trim();
+        if (tex) blocks.push({ type: "math", text: tex });
+        continue;
+      }
+
+      var heading = HEADING_RE.exec(line);
+      if (heading) {
+        flushPara();
+        blocks.push({
+          type: "heading",
+          level: heading[1].length,
+          inline: parseInline(heading[2].trim())
+        });
+        i++;
+        continue;
+      }
+
+      var ul = UL_RE.exec(line);
+      var ol = ul ? null : OL_RE.exec(line);
+      if (ul || ol) {
+        flushPara();
+        var ordered = !!ol;
+        var items = [];
+        while (i < lines.length) {
+          var um = UL_RE.exec(lines[i]);
+          var om = um ? null : OL_RE.exec(lines[i]);
+          if (um && !ordered) items.push(um[1]);
+          else if (om && ordered) items.push(om[1]);
+          else if (items.length && /^\s+\S/.test(lines[i])) {
+            // A wrapped continuation line belongs to the item above it.
+            items[items.length - 1] += " " + lines[i].trim();
+          } else break;
+          i++;
+        }
+        blocks.push({
+          type: "list",
+          ordered: ordered,
+          items: items.map(parseInline)
+        });
+        continue;
+      }
+
+      if (!line.trim()) {
+        flushPara();
+        i++;
+        continue;
+      }
+
+      para.push(line);
+      i++;
+    }
+    flushPara();
+    return blocks;
+  }
+
+  // A model can emit any URL it likes, including `javascript:`. Anything that
+  // is not http(s) after resolution is rendered as plain text instead.
+  function safeHref(href) {
+    try {
+      var u = new URL(href, window.location.href);
+      return u.protocol === "http:" || u.protocol === "https:" ? u.href : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // `[2]` in the prose is the second passage in the list below it, which is
+  // the second excerpt buildPrompt() handed the model -- same array, same
+  // order. Linking it to the passage's own deep link makes the citation do
+  // the useful thing in one click instead of being three inert characters.
+  function citationNode(n) {
+    var hit = (state.lastHits || [])[n - 1];
+    if (!hit) return document.createTextNode("[" + n + "]");
+    var a = el("a", "discopt-ask-cite", "[" + n + "]");
+    a.href = hrefFor(hit.chunk);
+    a.title = hit.chunk.h;
+    a.setAttribute("aria-label", "Passage " + n + ": " + hit.chunk.h);
+    return a;
+  }
+
+  function inlineNodes(tokens, into) {
+    tokens.forEach(function (tok) {
+      if (tok.t === "code") into.appendChild(el("code", null, tok.v));
+      else if (tok.t === "strong") into.appendChild(el("strong", null, tok.v));
+      else if (tok.t === "em") into.appendChild(el("em", null, tok.v));
+      else if (tok.t === "cite") into.appendChild(citationNode(tok.n));
+      else if (tok.t === "math") {
+        into.appendChild(el("span", "discopt-ask-math-inline", "\\(" + tok.v + "\\)"));
+      } else if (tok.t === "link") {
+        var href = safeHref(tok.href);
+        if (!href) {
+          into.appendChild(document.createTextNode(tok.v));
+          return;
+        }
+        var a = el("a", "discopt-ask-answer-link", tok.v);
+        a.href = href;
+        a.rel = "nofollow noopener";
+        into.appendChild(a);
+      } else if (tok.v !== undefined) {
+        into.appendChild(document.createTextNode(tok.v));
       }
     });
-    ui.answer.appendChild(para);
+  }
+
+  // MathJax 3 is already on every page of this book (sphinx.ext.mathjax loads
+  // it), so there is nothing to fetch -- but it typesets on page load, long
+  // before an answer exists, so the panel has to ask for its own subtree.
+  //
+  // Only when the stream ENDS. Typesetting on every delta re-renders the whole
+  // answer per token and flickers, and half-written TeX is a parse error the
+  // reader would watch scroll past.
+  function typesetMath(node) {
+    var MJ = typeof window !== "undefined" && window.MathJax;
+    if (!MJ) return;
+    if (!node.querySelector(".discopt-ask-math, .discopt-ask-math-inline")) return;
+    try {
+      if (MJ.typesetPromise) {
+        MJ.typesetPromise([node]).catch(function (e) {
+          // Not swallowed: a model writing broken TeX is the model's problem,
+          // not a panel fault, and the raw TeX stays readable underneath.
+          console.warn("discopt-ask: MathJax could not typeset the answer:", e);
+        });
+      } else if (MJ.typeset) {
+        MJ.typeset([node]);
+      }
+    } catch (e) {
+      console.warn("discopt-ask: MathJax could not typeset the answer:", e);
+    }
+  }
+
+  function renderAnswer(text, final) {
+    ui.answer.textContent = "";
+    parseAnswer(text).forEach(function (b) {
+      if (b.type === "code") {
+        var pre = el("pre", "discopt-ask-code");
+        pre.appendChild(el("code", b.lang ? "language-" + b.lang : null, b.text));
+        ui.answer.appendChild(pre);
+        return;
+      }
+      if (b.type === "math") {
+        ui.answer.appendChild(el("div", "discopt-ask-math", "\\[" + b.text + "\\]"));
+        return;
+      }
+      if (b.type === "heading") {
+        // Offset so an answer's "#" cannot outrank the panel's own headings.
+        var h = el("h" + Math.min(6, b.level + 2), "discopt-ask-answer-h");
+        inlineNodes(b.inline, h);
+        ui.answer.appendChild(h);
+        return;
+      }
+      if (b.type === "list") {
+        var list = el(b.ordered ? "ol" : "ul", "discopt-ask-answer-list");
+        b.items.forEach(function (item) {
+          var li = el("li");
+          inlineNodes(item, li);
+          list.appendChild(li);
+        });
+        ui.answer.appendChild(list);
+        return;
+      }
+      var p = el("p", "discopt-ask-answer-body");
+      inlineNodes(b.inline, p);
+      ui.answer.appendChild(p);
+    });
+    if (final) typesetMath(ui.answer);
   }
 
   async function ask(question) {
@@ -849,6 +1281,9 @@
           renderAnswer(acc);
         }
       }
+      // Re-render once the text is complete, which is when the math is
+      // well-formed enough to typeset and the citations are worth linking.
+      renderAnswer(acc, true);
       setStatus("Answered from the passages below.", "ok");
     } catch (err) {
       setStatus("Failed: " + (err && err.message ? err.message : err), "error");
@@ -863,6 +1298,14 @@
   function init() {
     injectStylesheet();
     buildPanel();
+    restoreWidth();
+    // Browser test seam, mirroring the node one at the bottom of this file.
+    // docs/tests/ask_e2e.py drives the REAL renderer through this, because the
+    // only other way to make a model speak is a 900 MB WebGPU download, which
+    // is not a CI step -- and a copy of the renderer inside the test would go
+    // green while the shipped one regressed. It exposes nothing a reader could
+    // not already reach by asking a question.
+    ui.panel.__discoptRenderAnswer = renderAnswer;
     if (!buildToggle()) {
       // Not a rendered book page (404, print view, redirect stub): drop the
       // panel too rather than leave an unreachable dialog in the DOM.
@@ -890,7 +1333,12 @@
         queryTerms: queryTerms,
         search: search,
         buildPrompt: buildPrompt,
-        MAX_CTX_CHARS: MAX_CTX_CHARS
+        MAX_CTX_CHARS: MAX_CTX_CHARS,
+        // The answer reader is pure and returns plain data, so the markdown
+        // and TeX handling is testable without a browser.
+        parseInline: parseInline,
+        parseAnswer: parseAnswer,
+        excerpt: excerpt
       };
     }
   } else if (document.readyState === "loading") {
