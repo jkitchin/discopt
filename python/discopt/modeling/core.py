@@ -4603,7 +4603,7 @@ class SolveResult:
             Use LLM for a rich, context-aware explanation. Falls back
             to a template string if litellm is unavailable.
         model : str, optional
-            LLM model string (e.g. ``"anthropic/claude-sonnet-4-20250514"``).
+            LLM model string (e.g. ``"anthropic/claude-sonnet-5"``).
         """
         if llm:
             try:
@@ -10115,7 +10115,7 @@ def from_gams(path: str) -> Model:
 def from_description(
     description: str,
     data: Optional[dict] = None,
-    llm_model: str = "claude-sonnet-4-20250514",
+    llm_model: str = "claude-sonnet-5",
     validate: bool = True,
     explain: bool = True,
 ) -> Model:
@@ -10132,7 +10132,7 @@ def from_description(
     data : dict, optional
         Named data arrays (DataFrames, numpy arrays, dicts) available
         to the formulation agent.
-    llm_model : str, default "claude-sonnet-4-20250514"
+    llm_model : str, default "claude-sonnet-5"
         LLM model to use for formulation.
     validate : bool, default True
         Validate the generated model before returning.

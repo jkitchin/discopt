@@ -10,7 +10,7 @@ You are an expert on `discopt.llm` — the optional LLM layer that adds natural-
 ## Your Expertise
 
 - **Core safety invariant**: LLM outputs never affect solver math directly. Generated formulations pass through `validate()`; explanations are sanitized; suggested reformulations are re-derived by deterministic code before being applied. The solver runs identically with or without `litellm` installed.
-- **litellm adapter**: universal LLM client supporting 100+ providers (Anthropic, OpenAI, Google, Bedrock, Vertex, Ollama, ...). Model resolution order: explicit `model=` kwarg → `DISCOPT_LLM_MODEL` env var → default `anthropic/claude-sonnet-4-20250514`.
+- **litellm adapter**: universal LLM client supporting 100+ providers (Anthropic, OpenAI, Google, Bedrock, Vertex, Ollama, ...). Model resolution order: explicit `model=` kwarg → `DISCOPT_LLM_MODEL` env var → default `anthropic/claude-sonnet-5`.
 - **Features**:
   - **`formulate`**: build a discopt `Model` from a natural-language description via tool-calling.
   - **`explain`**: human-readable (optionally LLM-generated) explanation of a `SolveResult`.

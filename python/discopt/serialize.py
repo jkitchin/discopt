@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import logging
 import math
 import warnings
 from pathlib import Path
@@ -101,6 +102,8 @@ from discopt.modeling.core import (
 from discopt.provenance import capture as _capture_provenance
 from discopt.provenance import skew_warning
 
+logger = logging.getLogger(__name__)
+
 #: Format identifier written into every document. The minor bumped to 1.1 when
 #: the provenance block was added: additive, so a 1.0 reader still reads a 1.1
 #: document (it ignores the extra key) and this reader still reads a 1.0 one
@@ -118,7 +121,7 @@ from discopt.provenance import skew_warning
 #: "invalid sum axis". That is a clean refusal rather than a mis-build, and it is
 #: the best that can be done for readers already shipped: they never looked at
 #: the minor. Forward compatibility is not claimed.
-SCHEMA = "discopt.model/1.2"
+SCHEMA = "discopt.model/1.3"
 
 #: Major version this reader accepts. A document whose major differs is refused
 #: rather than best-effort parsed.
@@ -323,8 +326,40 @@ class _NodeTable:
                     continue
             self._alive.append(node)
             self._seen[key] = len(self.nodes)
-            self.nodes.append(self._encode(node))
+            enc = self._encode(node)
+            # Placed BEFORE tagging: `_tag_atom` may add the atom's argument to
+            # the table, and the index reserved above is only correct if this
+            # node is already at it.
+            self.nodes.append(enc)
+            self._tag_atom(node, enc)
         return self._seen[id(expr)]
+
+    def _tag_atom(self, node: Any, enc: dict) -> None:
+        """Record that *node* is the lowering of a registered atom (#1248 A).
+
+        The tag is a Python attribute (``operators.ATOM_ATTR``) on an ordinary
+        expression object, so it does not survive a round-trip through this
+        document unless it is written down.  Losing it is *sound* -- the reader
+        gets the lowering and relaxes it term by term -- but it is silently
+        looser, and the path that loses it is exactly ``solve_batch(workers>1)``,
+        which ships every model through ``dumps``/``loads``.  A registered
+        composite therefore lost its envelope in every worker process, at no
+        error and with nothing to see but a slower solve.
+
+        What is written is the atom's NAME and a reference to its ARGUMENT.  The
+        body is this node itself, so it needs no reference; the argument does,
+        because a lowering may bury it arbitrarily deep (and, for a lowering
+        that ignores it, may not contain it at all -- hence ``add`` rather than a
+        lookup).  ``atom_of`` returns ``None`` for a tag whose registration has
+        since been dropped or replaced, so a stale tag is never written.
+        """
+        from discopt.operators import atom_of
+
+        tag = atom_of(node)
+        if tag is None:
+            return
+        name, arg = tag  # `atom_of` returns (name, arg); the registration stays behind
+        enc["atom"] = {"n": name, "arg": self.add(arg)}
 
     def _ref(self, node: Any) -> int:
         idx = self._seen.get(id(node))
@@ -509,7 +544,98 @@ def _decode_nodes(table: list[dict], variables: list[Variable], params: list[Par
             built.append(SumExpression(built[nd["a"]], _dec_axis(nd["axis"])))
         elif op == "sum_over":
             built.append(SumOverExpression([built[a] for a in nd["args"]]))
+    _retag_atoms(table, built, variables, params)
     return built
+
+
+def _same_structure(a: Any, b: Any, var_ids: dict, param_ids: dict) -> bool:
+    """Do *a* and *b* encode to byte-identical node tables?
+
+    Reuses the writer rather than hand-rolling a second notion of expression
+    equality -- ``Expression.__eq__`` builds a ``Constraint`` rather than
+    comparing, so there is no operator to lean on, and a bespoke walker here
+    would be a second implementation to keep in sync with ``_encode``.  The
+    ``atom`` key is dropped before comparing: it is what this comparison is
+    being used to decide, so leaving it in would make the test circular.
+    """
+    try:
+        tables = []
+        for expr in (a, b):
+            t = _NodeTable(var_ids, param_ids)
+            t.add(expr)
+            tables.append([{k: v for k, v in nd.items() if k != "atom"} for nd in t.nodes])
+    except Exception as exc:  # noqa: BLE001 - any failure to encode means "cannot verify"
+        logger.debug("atom re-derivation could not encode a body (%s: %s)", type(exc).__name__, exc)
+        return False
+    return tables[0] == tables[1]
+
+
+def _retag_atoms(table: list[dict], built: list[Any], variables: list, params: list) -> None:
+    """Restore the registered-atom tags the document recorded (#1248 A).
+
+    Re-tagging is not a matter of trusting the name.  The document carries the
+    body that the registration *at write time* produced, while the relaxer would
+    derive its envelope from whatever the registry holds under that name *now*.
+    After a ``register_function(..., replace=True)`` those are different
+    functions and the new envelope would cut the old body's true points -- the
+    false bound ``atom_of``'s identity check exists to prevent (#1248, commit
+    ``4725635b``).  A name alone cannot carry that identity across a process, so
+    this re-derives it: the tag is restored only if re-lowering the *current*
+    registration on the decoded argument reproduces the decoded body exactly.
+
+    Every way of failing that check -- the name is not registered here, the
+    lowering raises, the bodies differ -- leaves the node untagged, which is the
+    term-by-term relaxation of the body the model actually carries, and sound.
+    Sound, but invisible from the outside: the only symptom is a looser bound.
+    The two failures that indicate a *caller* defect rather than an absent
+    registration therefore log at DEBUG on ``discopt.serialize``.
+    """
+    if not any("atom" in nd for nd in table):
+        return
+    from discopt.operators import ATOM_ATTR, get_registered
+
+    var_ids = {id(v): i for i, v in enumerate(variables)}
+    param_ids = {id(p): i for i, p in enumerate(params)}
+
+    for i, nd in enumerate(table):
+        spec = nd.get("atom")
+        if not isinstance(spec, dict):
+            continue
+        name, arg_ref = spec.get("n"), spec.get("arg")
+        if not isinstance(name, str) or not isinstance(arg_ref, int):
+            continue
+        if not (0 <= arg_ref < len(built)) or i >= len(built):
+            continue
+        fn = get_registered(name)
+        if fn is None:
+            continue
+        arg, body = built[arg_ref], built[i]
+        try:
+            rebuilt = fn.lower(arg)
+        except Exception as exc:  # noqa: BLE001 - arbitrary user code; abstain, but say so
+            # The abstention is the sound outcome, so this must not raise -- but a
+            # registration that blows up on its own recorded argument is a defect in
+            # the *caller's* code, and the only symptom otherwise is a quietly looser
+            # bound.  Leave the trace: `logging.getLogger("discopt.serialize")`.
+            logger.debug(
+                "atom %r: re-lowering the current registration raised %s: %s; "
+                "loading the recorded body term by term instead",
+                name,
+                type(exc).__name__,
+                exc,
+            )
+            continue
+        if not _same_structure(body, rebuilt, var_ids, param_ids):
+            logger.debug(
+                "atom %r: the current registration lowers to a different body than the "
+                "document records; loading the recorded body term by term instead",
+                name,
+            )
+            continue
+        try:
+            setattr(body, ATOM_ATTR, (name, arg, fn))
+        except AttributeError:  # pragma: no cover - a slotted node cannot be tagged
+            continue
 
 
 # ── relations we refuse, by name ───────────────────────────────────────────

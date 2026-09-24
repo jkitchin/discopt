@@ -32,6 +32,7 @@ from scripts.global_opt_baron_vs_discopt import (
     bound_violates_oracle,
     classify,
     parse_baron_root,
+    parse_lst,
     root_gap_from,
 )
 from scripts.global_opt_baron_vs_discopt import write_report as write_baron_report
@@ -254,3 +255,70 @@ def test_report_names_a_false_infeasibility_claim(tmp_path):
     assert "false infeasibility claims" in text
     assert "hda" in text and "19 Infeasible - No Solution" in text
     assert "scored VIOLATION, not a miss" in text
+
+
+# --------------------------------------------------------------------------- #
+# GAMS writes `**** OBJECTIVE VALUE` even when it returned no point
+# --------------------------------------------------------------------------- #
+# The mirror image of #1053. That fix made a false *infeasibility claim* a
+# VIOLATION; this one stops a *non-answer* from becoming one. GAMS emits the
+# `**** OBJECTIVE VALUE` line unconditionally -- usually `0.0` -- so for a
+# minimize model with a positive optimum the placeholder is strictly "better"
+# than the oracle and `classify` scored it as an incumbent beating the proven
+# global. Measured on the 199-instance panel
+# `reports/global_opt_baron_vs_discopt_2026-07-18T14-09-20.json`: three of
+# BARON's four VIOLATIONs were runs that returned nothing at all.
+
+
+@pytest.mark.parametrize(
+    "status,placeholder,known",
+    [
+        # prob10: `14 No Solution Returned`, obj 0.0, oracle 3.4455.
+        ("14 No Solution Returned", 0.0, 3.4455),
+        # wastewater05m2: `6 Intermediate Infeasible`, obj 0.0, oracle 229.70.
+        ("6 Intermediate Infeasible", 0.0, 229.70058),
+        # kall_congruentcircles_c62: `5 Locally Infeasible`, the value at the
+        # infeasible point the search stopped on, oracle 1.2876.
+        ("5 Locally Infeasible", 0.158, 1.28760),
+    ],
+)
+def test_placeholder_objective_from_a_no_solution_run_is_not_an_incumbent(
+    status, placeholder, known
+):
+    """The three false BARON violations from the 2026-07-18 panel, by name."""
+    lst = f"**** MODEL STATUS {status}\n**** OBJECTIVE VALUE {placeholder:.4f}\n"
+    run = parse_lst(lst)
+    assert run.status == status
+    assert run.objective is None, "placeholder scored as an incumbent"
+    assert classify(run.status, run.objective, known, maximize=False) == NA
+
+
+def test_status_19_still_violates_after_its_objective_is_dropped():
+    """ANTI-REGRESSION for #1053: nulling the objective must not soften it.
+
+    19 is in both status lists. `_claims_infeasible` is checked *before* the
+    `obj is None` arm in `classify`, so the false-infeasibility VIOLATION
+    survives -- if that order ever flips, this test fails.
+    """
+    run = parse_lst("**** MODEL STATUS 19 Infeasible - No Solution\n**** OBJECTIVE VALUE 0.0000\n")
+    assert run.objective is None
+    assert classify(run.status, run.objective, -5964.534084, maximize=False) == VIOLATION
+
+
+def test_a_real_incumbent_is_never_dropped():
+    """ANTI-VACUITY CONTROL: statuses that DO return a point keep their objective.
+
+    Without this, nulling every objective would pass the tests above while
+    deleting the harness's entire incumbent column.
+    """
+    for status, obj, known, want in [
+        ("1 Optimal", 7.667, 7.667, OK),
+        ("2 Locally Optimal", 6.9358, 5.4709, GAP),
+        ("8 Integer Solution", 3155.288, 3155.288, OK),
+        # ex1252: the one genuine BARON flag left on the panel -- `1 Optimal`
+        # asserts a certified global, at 223191.3362 against a 128893.741 oracle.
+        ("1 Optimal", 223191.3362, 128893.7410, VIOLATION),
+    ]:
+        run = parse_lst(f"**** MODEL STATUS {status}\n**** OBJECTIVE VALUE {obj}\n")
+        assert run.objective == pytest.approx(obj), f"{status} lost its incumbent"
+        assert classify(run.status, run.objective, known, maximize=False) == want

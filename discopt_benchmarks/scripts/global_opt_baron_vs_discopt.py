@@ -127,6 +127,36 @@ def _claims_infeasible(status: str) -> bool:
     return s == "infeasible" or s.startswith(_GAMS_INFEASIBLE_STATUSES)
 
 
+# GAMS model statuses under which no usable incumbent was returned. GAMS still
+# writes a ``**** OBJECTIVE VALUE`` line for every one of these -- usually
+# ``0.0``, sometimes the value at the infeasible point the search stopped on --
+# and that number is a placeholder, not a feasible point.
+#
+# Reading it as an incumbent is the mirror image of #1053. That fix made a
+# *false infeasibility claim* a VIOLATION; this list stops a *non-answer* from
+# becoming one. For a minimize model with a positive optimum the placeholder
+# ``0.0`` is strictly "better" than the oracle, so `classify` scored it as an
+# incumbent beating the proven global -- the single most serious verdict the
+# harness has -- on a run that returned nothing at all. Measured on the
+# 199-instance panel `reports/global_opt_baron_vs_discopt_2026-07-18T14-09-20.json`:
+# `prob10` (14 No Solution Returned, obj 0.0, oracle 3.4455),
+# `wastewater05m2` (6 Intermediate Infeasible, obj 0.0, oracle 229.70) and
+# `kall_congruentcircles_c62` (5 Locally Infeasible, obj 0.158, oracle 1.2876)
+# were all recorded as BARON correctness violations that never happened.
+#
+# 5 and 6 are absent from `_GAMS_INFEASIBLE_STATUSES` above because they are not
+# assertions that the feasible set is empty -- and for exactly that reason their
+# objective is not an incumbent either. Both halves follow from the same fact.
+# 19 is in both lists: `_claims_infeasible` runs first in `classify`, so its
+# VIOLATION verdict is unchanged.
+_GAMS_NO_SOLUTION_STATUSES = ("5 ", "6 ", "12 ", "13 ", "14 ", "19 ")
+
+
+def _no_solution_returned(status: str) -> bool:
+    """Did the run end without a usable incumbent, whatever objective it printed?"""
+    return (status or "").strip().lower().startswith(_GAMS_NO_SOLUTION_STATUSES)
+
+
 def bound_violates_oracle(bound: float | None, known: float | None, maximize: bool) -> bool:
     """Does the reported *dual bound* cross the known global optimum?
 
@@ -417,6 +447,13 @@ def parse_lst(lst: str) -> SolverRun:
     if m := _OV.search(lst):
         with contextlib.suppress(ValueError):
             run.objective = float(m.group(1))
+    # GAMS prints ``**** OBJECTIVE VALUE`` unconditionally, including for runs
+    # that returned no point. Drop it when the model status says so, rather than
+    # letting a placeholder ``0.0`` be scored as an incumbent -- see
+    # `_GAMS_NO_SOLUTION_STATUSES`. `_claims_infeasible` is checked earlier in
+    # `classify`, so status 19 still yields its #1053 VIOLATION.
+    if _no_solution_returned(run.status):
+        run.objective = None
     if m := _RU.search(lst):
         with contextlib.suppress(ValueError):
             run.wall_time = float(m.group(1))
@@ -654,8 +691,7 @@ def write_report(rows: list[Row], tl: float, out_dir: Path, ts: str) -> Path:
         "",
         f"- **Solved correctly** (objective matches oracle — the fair capability "
         f"metric): discopt **{d[OK]}**  ·  BARON **{b[OK]}**",
-        f"- Certified-global *claim* (status only): discopt {d_cert}  ·  "
-        f"BARON {b_cert}",
+        f"- Certified-global *claim* (status only): discopt {d_cert}  ·  BARON {b_cert}",
         "> BARON-via-GAMS reports `2 Locally Optimal` / `8 Integer Solution` on "
         "many instances it has solved to the global optimum, so its *claim* count "
         "undercounts it (~2x). **Rank by *solved* (`ok`), not by the claim count.**",

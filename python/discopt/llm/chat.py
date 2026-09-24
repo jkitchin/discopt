@@ -27,7 +27,7 @@ class ChatSession:
     Parameters
     ----------
     llm_model : str, optional
-        LLM model string (e.g. ``"anthropic/claude-sonnet-4-20250514"``).
+        LLM model string (e.g. ``"anthropic/claude-sonnet-5"``).
     verbose : bool, default True
         Print LLM responses to stdout.
 
@@ -92,14 +92,14 @@ class ChatSession:
         # Multi-turn tool-calling loop
         max_turns = 15
         for _ in range(max_turns):
-            from discopt.llm.provider import complete_with_tools
+            from discopt.llm.provider import complete_with_tools, resolve_timeout
 
             response = complete_with_tools(
                 messages=self._messages,
                 tools=self._tools,
                 model=self._llm_model,
                 max_tokens=4096,
-                timeout=30.0,
+                timeout=resolve_timeout(default=30.0),
             )
 
             tool_calls = getattr(response, "tool_calls", None)
