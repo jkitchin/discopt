@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The release procedure that produces these entries is documented in
 [`RELEASE.md`](RELEASE.md).
 
-## [0.9.0] - 2026-09-22
+## [0.9.0] - 2026-09-24
 
 ### Added
 
@@ -458,6 +458,25 @@ The release procedure that produces these entries is documented in
   unlowered source hand the destination a mark for rows neither model had,
   bypassing the solve guard.
 
+
+- **A declined convex-kernel attempt now publishes its verified incumbent**
+  (#1440, closing the other half of #1422's dual-bound recovery). The attempt
+  takes `min(time_limit, DISCOPT_CONVEX_KERNEL_BUDGET)` — the caller's whole
+  budget for any `time_limit <= 120` — so on a model it declines, everything
+  after it runs with ~0 s left. Measured on the 3 kernel-eligible instances among
+  66 vendored: `clay0303hfsg` consumes **99.8%** of an 8 s budget and then
+  declines, which is the harmed-class signature on the very instance #911 cites
+  to foreclose a fractional cap. A declined attempt discards a *feasible point*;
+  it is now published after `_incumbent_is_feasible` (#779's row-map verifier)
+  against the **pristine** model, and adopted by `Model.solve`, which re-screens
+  it through the #772 false-primal guard. Gated by
+  `DISCOPT_CONVEX_KERNEL_KEEP_INCUMBENT` (default ON, `=0` opt-out). The
+  allocation question itself is settled by measurement rather than left open:
+  every non-reallocating repair measured **zero**, and the one mechanism that
+  helps is cert-clean but not broadly net-positive, so it ships as a bounded knob
+  at default `0` (byte-identical) rather than as a default — CLAUDE.md §5's
+  "sound is not helpful" outcome, recorded.
+
 ### Changed
 
 - **`DISCOPT_CONVEX_KERNEL` graduated to default-ON** (#1346). The convex-kernel
@@ -715,6 +734,20 @@ The release procedure that produces these entries is documented in
   default flip (CLAUDE.md §5) with no graduation panel behind it. Callers who
   passed `deterministic=True` expecting reproducibility now get it; callers who
   relied on the old *default* get today's behaviour unchanged.
+
+
+- **The feasibility pump's gate/judge tolerance alignment was investigated and
+  deliberately not made** (#1449, closed by #1453). The pump's accept gate is a
+  *pre-filter*, not the incumbent guard — every candidate it passes is
+  re-verified by `validation.feasibility.verify_point` — but the two used
+  different row bounds: the gate `tol + rtol*scale` (3.26e-5 at scale 3.16e4)
+  against the judge's `abs_tol*max(anchor, scale)` (3.16e-2), a ~970x gap with
+  the *filter* stricter than its own *judge*. The entry experiment (CLAUDE.md §4,
+  run on real corpus instances before implementing) confirmed the premise: over a
+  119-instance MINLPLib sample, **8 of 57 compared rejections (14.0%)** were
+  points `verify_point` accepts outright — 7x the issue's own 2% kill criterion.
+  The *consequence* did not hold, so the gap is documented as real and
+  intentional rather than closed. The measurement is recorded on the issue.
 
 ### Removed
 
@@ -1805,6 +1838,168 @@ The release procedure that produces these entries is documented in
   it does not need a 3.10 job to catch the next one. A companion test feeds the
   scanner a known violation plus three correctly-guarded imports, so a broken
   scanner cannot pass vacuously.
+
+
+- **#1436 (correctness, P0): a raising feasibility callback was swallowed, and
+  the search certified a point the callback excludes.** `lazy_constraints` and
+  `incumbent_callback` do not *advise* the search — they define which points are
+  acceptable — but both catch sites logged a warning and let the node proceed
+  "as normal (no cut, no rejection)", so the tree searched the model *without*
+  the caller's restriction and then certified the result. On `min -x - y` over
+  `x, y in {0..3}` where the callback is the only thing imposing `x + y <= 2`
+  (true optimum **-2**): a working callback returns `unknown`/bound -6.0, while
+  the same callback raising `KeyError` returns **`optimal`, objective -6.0,
+  `gap_certified=True`** at `x = y = 3` — a point the caller's own callback
+  excludes. The only signal was a `logger.warning`, and logging is unconfigured
+  in most scripts. Both failures are now recorded on a `threading.local` and
+  `solve_model` raises `FeasibilityCallbackError` on the way out, carrying the
+  per-callback failure count with the first exception chained. Recorded-and-
+  refused rather than raised at the failing node for a measured reason: 17 broad
+  `except Exception` handlers sit between the callback gate and the function
+  head, so an exception raised at the site can be swallowed a second time — the
+  guard would look installed while measuring nothing. `cut_callback` and
+  `node_callback` are deliberately untouched and still fail soft: a cut is a
+  strengthening, so losing it can only loosen the bound, never invalidate it
+  (measured bit-identical over 22 raising invocations).
+
+- **#1437 (`ro`): two mathematically identical spellings of an uncertain row
+  gave different answers, and one crashed on every route.** In
+  `ro/formulations/box.py`'s `_robustify_expr`, a parameter that does **not**
+  occur in the expression still took the bilinear branch — the coefficient is a
+  finite difference `g(p+1) - g(p)`, which for an absent `p` is identically zero
+  but still *syntactically* variable-bearing — adding a spurious aux variable,
+  two degenerate rows and a penalty to the **objective** of a model whose
+  uncertain parameter appeared only in a constraint. Compounding it, a vector
+  parameter got one scalar aux multiplied by the whole delta vector, which is
+  shape-wrong (`Output had shape: (2,)`) and wrong in principle: the box
+  counterpart of `sum_j coeff_j(x)·xi_j` needs **one aux per component**. Absent
+  parameters are now skipped and the coefficient extracted per component. All
+  three spellings of the same row now return the true robust optimum **16.2**
+  (from enumerating the box's 4 vertices) with a worst-case row residual of
+  exactly `0.0`.
+
+- **#1435 (heuristics): the root feasibility pump's outcome was a function of
+  `time_limit`.** The fix-and-solve round pins the integers, minimizes the model
+  objective over the continuous variables, and tested **only that solve's
+  terminal iterate** for feasibility. Feasibility is incidental to what that
+  solve optimizes, so whether the pump returned anything was decided by where
+  the solve happened to stop — which is derived from the caller's remaining
+  wall. That is #1153's monotonicity gate directly: on `heatexch_gen2` a 10 s
+  budget returned a worse answer than a 5 s one. Sweeping the per-solve cap on
+  that instance's second root pump, the terminal iterate is feasible at 0.1 s
+  and at no other cap tried; on the deterministic axis it is feasible at
+  `max_iter=100` alone. A feasible point is *on the projection path* and was
+  thrown away because only the endpoint was ever checked. The pump now has a
+  clock-independent projection; a fixed probe iteration count would have been
+  tuning to that knife-edge (CLAUDE.md §2) and was not done.
+
+- **#1442 (`mo`): an unanswered sweep cell was treated as a proof of
+  infeasibility.** `epsilon_constraint` abandoned **every remaining ε cell** the
+  moment one subproblem returned no solution vector. That shortcut is licensed
+  only by a *proven* `"infeasible"`; `error`, `time_limit`, `node_limit`,
+  `iteration_limit` and an uncertified incumbent prove nothing about the tighter
+  cells that follow. The front came back short, still tagged `augmecon2`, with
+  nothing to distinguish it from a complete one — while `discopt/mo/__init__.py`
+  advertises the method as "complete for general (including nonconvex) fronts".
+  Measured on a 2-objective pure-integer model small enough to enumerate
+  exhaustively (25 feasible points, 7 true Pareto vectors): the **default**
+  `payoff="lexicographic"` returned 5, missing `(2,2)` and `(3,5)`, because one
+  `'error'` cell at ε ≈ 7.99999937 ended the sweep and the 6 tighter cells —
+  which contain both missing vectors — were never attempted. Only a proven
+  infeasibility now truncates the sweep.
+
+- **#1446 (`mpec`): a Scholtes homotopy over a pre-lowered relation certified
+  the unregularized problem.** `solve_mpec(method="scholtes")` ran its full
+  10-stage continuation, marked every stage `optimal`/`accepted`/`certified`,
+  and returned a point violating complementarity by **2.0**. The hypothesis
+  recorded on the issue — a stale compiled evaluator — is falsified and recorded
+  as such. The actual cause: `Model.complementarity()` lowers the pair on the
+  spot (`gdp`/`sos1`), so `reformulate_scholtes` skips it (`_pending()` treats an
+  already-lowered relation as done, which is right for an idempotent re-lower and
+  fatal for the homotopy). The `f·g <= t` row is never emitted, **nothing in the
+  model depends on `t`**, and each stage genuinely converges — on the
+  unregularized problem. On `min (x0-2)² + (x1-1)²` s.t. `0 <= x0 ⊥ x1 >= 0`,
+  optimum **1.0**: the eager-lowering route returned 1.67e-09 with `x0·x1 = 2.0`,
+  the pure factory returned **1.0** with `x0·x1 = 2.0e-08`. The first is not an
+  approximation of the second; it is the answer to a different problem. The
+  homotopy now refuses a pair already lowered by another method, naming the
+  relation, the method that lowered it, and the call that fixes it.
+
+- **#1447 (`ml`): tree split separation in the ensemble encoding.** Fixed in
+  `ml/formulations/tree_ensemble.py` alongside #1446, with its own test.
+
+- **#1454 (LP, correctness): a pure LP was answered by an interior-point method
+  and the wrong objective reported `gap_certified=True`.** `_solve_lp`
+  documented its order as "Rust simplex → POUNCE, or POUNCE → simplex when
+  `prefer_pounce` is set", but its single call site computed that flag as
+  `nlp_solver == "pounce"` against a parameter whose **default is `"pounce"`** —
+  so it was true for every caller, the order was always inverted, and the exact
+  simplex was never consulted. An IPM converging in variable space is doing
+  exactly what it should; the defect was asking it to certify an LP. On
+  `min C*x + (1/C)*y  s.t. x + y >= 1, x,y in [0,1]` (optimum `1/C` at `x=0,
+  y=1`, so the error is purely the solver's), the objective error crossed the
+  documented `abs=1e-6` tolerance between `C=1e4` and `C=1e6` and reached
+  7.518e-05 — every cell carrying `gap_certified=True`. At `C=1e12` it reported
+  a certified **-1.331e-05** for an objective provably non-negative on the
+  feasible box. All 24 cells are now exact, 0 certified-but-wrong. **#1454
+  blamed the Rust simplex; that was wrong**, and the correction matters because
+  it changes the risk — the simplex returns `x=0.0, y=1.0` exactly on every cell.
+
+- **#1456 (pre-solve): a `time_limit` could not reach a pass that runs before
+  branch and bound starts.** Three mechanisms were measured blowing one, fixed
+  across three PRs. (1) `distribute_products` expands `(a+b)*c` exponentially in
+  how deeply sums nest inside products with **nothing bounding it** — MINLPLib
+  `johnall` asks that path for **3,187,671,040 terms**, taking 44+ minutes at
+  `time_limit=20` without ever reaching B&B; distribution now runs under a term
+  budget and returns with the offending product left intact, which is
+  *algebraically identical* (pinned at 5 random points, `rtol=1e-9`) and loses
+  only pattern recognition — a weaker bound, never a wrong one. (2)
+  `is_homogeneous_psd_quadratic` ran a whole-model `eigvalsh` per `sqrt` node
+  because `_quadratic_data` returns `Q` as a full `n_total x n_total` dense
+  matrix, so a quadratic touching two variables cost `O(n_total**3)`: on
+  `glider400`, 20 calls totalling **119.47 s**, 97.6% of a solve given
+  `time_limit=20`, now a largest matrix of **2x2** in 0.01 s. The support
+  restriction is exact — omitted rows and columns are all-zero and contribute
+  exactly-zero eigenvalues, which cannot flip a `min >= -1e-10` sign test — and
+  both call sites now share `_support_restricted()` so they cannot drift apart
+  again, which is how this one was missed after #814 fixed its neighbour. (3)
+  `binary_multilinear_reform._poly_add` did 200,000 adds copying 2.0e10 entries
+  over 154 s on `hadamard_9`, now aborting in 4.6 s with the same answer.
+  Finally, `_relax/presolve_deadline.py` gives the pre-solve structure passes a
+  deadline they can *see*, wired in at five pass entries with per-constraint
+  abandonment inside `factorable`'s two entry points, and abstention logged
+  rather than silent. Measured at `time_limit=5` before the gate, the
+  reformulation block alone took `densitymod` 27.0 s (49% of the solve),
+  `pb302095` 33.0 s, `truck` 26.1 s (81%), `telecomsp_metro` 13.2 s (79%).
+
+- **Post-solve dual recovery densified a 0.02%-dense Jacobian and ran a dense
+  bounded least squares on it** (#1460). Found while attributing `arki0014`'s
+  overrun during the #1456 work, where it turned out not to be a pre-solve
+  problem at all: all five pre-solve passes finished at t+19.10 s, well inside
+  `time_limit=20`, and the remaining ~580 s were a single `numpy.linalg.lstsq`
+  in `_duals_against_declared_box`. The chain allocated **~9.4 GB of dense
+  arrays to carry 75,329 nonzeros** — the assembled `A` is (19305, 16676) at
+  0.017% density, roughly 0.7 MB as CSR — and two `faulthandler` dumps 60 s
+  apart showed the identical `lstsq` frame; the call was killed at 600 s having
+  never returned. Both evaluators already hold the sparse matrix and throw the
+  structure away to honour a dense `(m, n)` return contract, so
+  `TapeNLPEvaluator` gains `evaluate_sparse_jacobian` (the tape is natively COO,
+  and `coo_matrix` sums duplicate entries exactly as `np.add.at` does, so the
+  result is *exactly* the dense matrix), and a shared
+  `_dual_recovery.jacobian_for_recovery` asks for it above the same
+  `m * n > _DENSE_JACOBIAN_COMPILE_LIMIT` **shape** threshold the evaluator
+  already uses — a shape evaluated once, no clock. `arki0014` at
+  `time_limit=20`: **>600 s killed → 75.77 s**, Jacobian 0.33 s sparse.
+  Representation follows the input, not the size: `lsq_linear` factorises a
+  dense system exactly and runs LSMR on a sparse one, and they do **not** agree
+  bit for bit (measured on a 200x120 system at 1.7% density, costs agree to
+  1.2e-13 relative but the arguments differ by 1.1e-06), so a dense `jac` keeps
+  exactly the old path and every model that reports duals today reports
+  bit-identical duals. Two CLAUDE.md traps were hit in the process:
+  `np.asarray()` on a scipy sparse matrix returns a 0-d **object** array rather
+  than raising, and `.size` on a sparse matrix is `nnz`, not rows x columns — the
+  idiom `np.zeros(jac.shape[0]) if jac.size else np.zeros(0)` silently returns a
+  length-zero `mu_full` for a structurally empty sparse Jacobian.
 
 ## [0.8.0] - 2026-08-16
 
