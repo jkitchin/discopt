@@ -12,6 +12,23 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **The docs assistant renders its answers instead of showing their source.**
+  The model writes markdown and cites with bracketed numbers, but the panel
+  printed the whole reply as one pre-wrapped string: a literal `\[ \min_x … \]`
+  where the equation belongs, and `[2]` as three inert characters beside the
+  passage list it names. Answers are now parsed into real blocks — headings,
+  lists, bold, inline code, fenced code — the book's own MathJax typesets the
+  mathematics, and every `[n]` is a link to the passage it cites. The one
+  invariant is unchanged: model output is still written only with
+  `textContent`, never as HTML, so it cannot inject markup or a
+  `javascript:` link.
+- **Passage previews no longer show raw TeX.** They are cut at 260 characters,
+  often mid-expression, so they drop display equations and unwrap inline ones
+  to their symbols (`\in` → ∈) rather than being handed to MathJax.
+- **The status line no longer overlaps the question box.** The panel is a flex
+  column, so a two-line message was shrunk to its `min-height` and drawn across
+  the textarea below it.
+
 - **The published docs assistant now has a search index.** `docs.yml` ran
   `jupyter-book build docs/` and nothing else, but `_static/ask-index.json` is a
   *post-build* artifact — it is generated from the rendered HTML, because the

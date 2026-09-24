@@ -234,6 +234,11 @@ body.discopt-ask-resizing iframe {
   font-size: 0.8rem;
   opacity: 0.8;
   min-height: 1.2em;
+  /* The panel is a flex column, so without this the status is shrunk to
+     min-height while its text keeps its own height -- a two-line message
+     ("Showing passages. Load a model above for a written answer.") then
+     overflows its box and is drawn across the question textarea below it. */
+  flex: none;
 }
 .discopt-ask-status-busy {
   color: var(--pst-color-primary-highlight, #b56a12);
@@ -330,14 +335,82 @@ body.discopt-ask-resizing iframe {
 .discopt-ask-answer:empty {
   display: none;
 }
+/* Block structure is parsed now (see renderAnswer in ask.js), so paragraphs
+   wrap normally -- `pre-wrap` here used to be what stood in for it, and with
+   real <p>/<ul>/<pre> elements it only reintroduces the model's own line
+   breaks in the middle of a sentence. */
 .discopt-ask-answer-body {
-  margin: 0;
-  white-space: pre-wrap;
+  margin: 0 0 0.6rem;
   line-height: 1.5;
 }
-.discopt-ask-answer-body code {
+.discopt-ask-answer-body:last-child {
+  margin-bottom: 0;
+}
+.discopt-ask-answer code {
   font-size: 0.85em;
   color: var(--pst-color-inline-code, #ffcf8f);
+}
+.discopt-ask-answer-h {
+  margin: 0.8rem 0 0.35rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+  line-height: 1.3;
+}
+.discopt-ask-answer-list {
+  margin: 0 0 0.6rem;
+  padding-left: 1.3em;
+  line-height: 1.5;
+}
+.discopt-ask-answer-list li {
+  margin-bottom: 0.25rem;
+}
+.discopt-ask-answer-link {
+  color: var(--pst-color-link, #ffb262);
+}
+
+/* A fenced block in a 24rem panel is narrower than most of the code in this
+   book, so it scrolls sideways rather than wrapping a signature mid-argument. */
+.discopt-ask-code {
+  margin: 0 0 0.6rem;
+  padding: 0.5rem 0.6rem;
+  overflow-x: auto;
+  border-radius: 4px;
+  background: var(--pst-color-surface, #2b2118);
+  border: 1px solid var(--pst-color-border, #3a2c20);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+.discopt-ask-code code {
+  color: inherit;
+  white-space: pre;
+}
+
+/* Display math: the same escape hatch, because a long equation has no wrap
+   point at all. Until MathJax typesets it this is the raw \[ … \], which is
+   readable on its own -- the fallback is degraded, not broken. */
+.discopt-ask-math {
+  margin: 0 0 0.6rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+  font-size: 0.95em;
+}
+.discopt-ask-math-inline {
+  overflow-wrap: anywhere;
+}
+
+/* Citations. `[2]` is a link to the passage it cites, and has to read as one
+   at 0.8rem without turning the prose into a field of brackets -- hence the
+   weight and colour rather than an underline. */
+.discopt-ask-cite {
+  color: var(--pst-color-link, #ffb262);
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+  padding: 0 0.05em;
+}
+.discopt-ask-cite:hover,
+.discopt-ask-cite:focus-visible {
+  text-decoration: underline;
 }
 
 /* ---- Sources ------------------------------------------------------------ */
