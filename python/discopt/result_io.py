@@ -5,8 +5,10 @@ daemon returns a result over a socket as JSON, and the CLI renders it (or writes
 it) -- both go through here so there is one implementation and it is testable
 without a socket or a real solve.
 
-``_model`` and ``infeasibility_certificate`` are dropped (see below); numpy
-arrays become nested lists.
+``_model`` is dropped -- it is a live object graph, not data. Everything else
+is carried, including the validation report and the infeasibility certificate
+(both have their own sections below, and the certificate's caveat is worth
+reading before using its numbers); numpy arrays become nested lists.
 
 Provenance (#1266)
 ------------------

@@ -115,8 +115,7 @@ The release procedure that produces these entries is documented in
   the CLI deserializes a daemon reply and then re-serializes it to disk, so a
   report left as a plain dict would be refused by the encoder at exactly that
   step and vanish. A `validation_report` that is not an `ExaminerReport` raises
-  rather than being dropped. `infeasibility_certificate` is still dropped: it
-  is a backend object rather than a report and needs its own encoding.
+  rather than being dropped.
 
   `infeasibility_certificate` is carried too, and the earlier "non-JSON-safe"
   grouping with `_model` was simply wrong about it: it is a three-field
@@ -498,7 +497,7 @@ The release procedure that produces these entries is documented in
 ### Changed
 
 - **BREAKING: the minimum supported Python is now 3.12** (`requires-python =
-  ">=3.12"`, was `">=3.10"`; `1f9585ec`). The 3.10 floor was never real: all 15
+  ">=3.12"`, was `">=3.10"`; `1f9585ec`). The 3.10 floor was never real: all 17
   `python-version:` entries across `.github/workflows/` run 3.12, so nothing had
   ever executed a test, an import or a typecheck on 3.10 — which is how #1055
   (macOS and Windows wheels covering 3.12 only) stayed invisible through a
@@ -629,7 +628,7 @@ The release procedure that produces these entries is documented in
   `python/tests/test_interval_sum_reduction.py`, including a differential check
   that a dual bound never exceeds the true optimum on Python-API `dm.sum` models.
   The sibling reduction in `_eval_matmul` had the same one-ULP gap over its
-  `k`-term dot products (measured: 190 of 400 random products missed the truth).
+  `k`-term dot products (measured: 166 of 400 random products missed the truth, worst shortfall 8.5e-07).
   It was tracked separately as #1161 because widening matmul enclosures is a
   bound-affecting change needing its own differential evidence; that work landed
   in #1171 and is merged into this head, so **both** reductions now go through
@@ -821,9 +820,15 @@ The release procedure that produces these entries is documented in
   0 always.
 
 - **Six default-OFF `DISCOPT_*` gates retired** (#1388, CLAUDE.md §5). Each was in
-  none of §5's three states — a defect the rule names explicitly. After this the
-  number of solver-math gates in that condition is **zero**; the five that remain
-  each carry a recorded status.
+  none of §5's three states — a defect the rule names explicitly.
+
+  **Retracted, 2026-09-22 (#1421).** This entry originally continued: "After this
+  the number of solver-math gates in that condition is **zero**; the five that
+  remain each carry a recorded status." That was false when written, and is now
+  measured false by a factor of nine — a re-derived scan counts **45** default-OFF
+  gates over solver math, of which 5 carry a recorded status; 37 had no row in the
+  audit at all. The claim is withdrawn in full; the six retirements below stand.
+  See `docs/dev/flag-retirement-audit.md`.
   - `DISCOPT_GP_MINLP` — **no capability lost.** It gated *auto-routing* from a
     plain `solve()`, never the engine; `solver="gp-minlp"` is unchanged.
   - `DISCOPT_SGO` — **flag only; the 1,532-line signomial global engine was kept**
@@ -1806,7 +1811,11 @@ The release procedure that produces these entries is documented in
   #1053 supposed.
 
 - **macOS and Windows wheels covered only Python 3.12** (`fix(release)`, #1056,
-  closes #1055). `pyproject.toml` declares `requires-python = ">=3.10"`, but the
+  closes #1055). *Superseded later in this same release by the 3.12 floor (see
+  BREAKING above): the tree now declares `requires-python = ">=3.12"`, pyo3 builds
+  `abi3-py312`, and `tomli` is gone. The 3.10 figures below describe the state at
+  the time of #1056 and are kept as the record of that fix.*
+  `pyproject.toml` declares `requires-python = ">=3.10"`, but the
   release workflow's macOS and Windows jobs passed no interpreter list, so maturin
   built against the runner's `setup-python` version alone. v0.8.0 published 11
   wheels covering 4 of 12 platform/version combinations off Linux; `pip install
@@ -1974,6 +1983,14 @@ The release procedure that produces these entries is documented in
   feasible box. All 24 cells are now exact, 0 certified-but-wrong. **#1454
   blamed the Rust simplex; that was wrong**, and the correction matters because
   it changes the risk — the simplex returns `x=0.0, y=1.0` exactly on every cell.
+
+  **Reachability.** This defect was not on the default path. Since #1229 the entry
+  classifier routes a pure LP or MILP to the HiGHS route, which was exact on every
+  cell of the table above; `_solve_lp` has a single call site behind the
+  `DISCOPT_LP_MILP_BACKEND=rust` opt-out, so the false certificate was reachable
+  only by opting out. It is recorded at full weight anyway: the opt-out exists so a
+  default can be A/B'd, and a route that answers wrongly when selected is exactly
+  what that comparison would have been built on.
 
 - **#1456 (pre-solve): a `time_limit` could not reach a pass that runs before
   branch and bound starts.** Three mechanisms were measured blowing one, fixed
