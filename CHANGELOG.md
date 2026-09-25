@@ -95,6 +95,31 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **A page that runs discopt in the browser** (`crates/discopt-wasm/web/`),
+  built the way the POUNCE project's Pyodide page is built. A CodeMirror 6
+  editor, a console, a Run button, and a dropdown holding one model of each
+  problem class — LP, MILP, QP, MIQP, NLP, MINLP. Pyodide supplies CPython
+  compiled to WebAssembly and discopt installs into it as an emscripten wheel;
+  nothing is uploaded and there is no server component.
+
+  Three things about it are deliberate. **The examples are executed, not just
+  shipped**: `python/tests/test_wasm_examples.py` parses `examples.js` and runs
+  every model against the local discopt, because an example that raises would
+  otherwise only ever fail in somebody's browser — and the dropdown's default is
+  the page's first impression. They are the same six models as
+  `docs/notebooks/problem_classes.ipynb`, so the page and the notebook cannot
+  drift into disagreeing about what the solver does with each class.
+  **CodeMirror is vendored, not fetched from a CDN**, with a committed build
+  script and a version manifest, so the page has no third-party request and
+  works offline. And **the wheel is installed with `deps: false`**, skipping
+  `jax`, `jaxlib` and `highspy`, which have no emscripten build and which no
+  route this page takes reaches; the worker then imports `discopt.modeling` and
+  raises if any of the three turned up in `sys.modules`, so that divergence from
+  the declared metadata fails loudly at install time rather than confusingly at
+  the first solve.
+
+  This commit lands the page; the emscripten wheel build is separate.
+
 - **An in-browser assistant for the documentation** (`docs/ask.md`), ported from
   the POUNCE project's. A floating **Ask** pill on every page opens a question
   box over the book. It has two independent halves: BM25 retrieval over a

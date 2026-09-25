@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>discopt in the browser</title>
+<script>
+  // Resolve the theme before first paint, so a dark-mode reload does not flash
+  // the light palette. "auto" is resolved here rather than in a media query so
+  // the CSS below needs exactly one dark block: everything downstream keys off
+  // data-theme, which is always explicitly light or dark. app.js re-resolves on
+  // change, and also hands the editor its own palette -- CodeMirror carries its
+  // own theme, which no amount of page CSS reaches.
+  (function () {
+    var pref = 'auto';
+    try { pref = localStorage.getItem('discopt-theme') || 'auto'; } catch (e) {}
+    var dark = pref === 'dark' ||
+      (pref === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  })();
+</script>
+<style>
+  :root {
+    --bg: #fbfaf8; --panel: #ffffff; --ink: #1b1a18; --muted: #6b6660;
+    --line: #e3ded6; --accent: #1d5fa8; --ok: #1f7a4d; --bad: #a32020;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  :root[data-theme="dark"] {
+    --bg: #14161a; --panel: #1c1f24; --ink: #e8eaee; --muted: #949aa4;
+    --line: #2d323a; --accent: #6fb0f0; --ok: #6ec894; --bad: #ef8080;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2rem 1.25rem 4rem; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 62rem; margin: 0 auto; }
+  .masthead { display: flex; align-items: center; justify-content: space-between;
+              gap: 1rem; flex-wrap: wrap; margin-bottom: .5rem; }
+  h1 { font-size: 1.6rem; margin: 0; letter-spacing: -.01em; }
+  h1 .name { font-family: var(--mono); color: var(--accent); }
+  h2 { font-size: 1rem; margin: 0 0 .75rem; text-transform: uppercase;
+       letter-spacing: .08em; color: var(--muted); }
+  .theme { color: var(--muted); font-size: .85rem;
+           display: flex; align-items: center; gap: .4rem; }
+  .theme select { font-size: 13px; padding: .3rem .4rem; }
+  .lede { color: var(--muted); margin: 0 0 1.5rem; max-width: 46rem; }
+  code { font-family: var(--mono); font-size: .9em; }
+  section { margin-top: 1.75rem; }
+  .row { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
+  /* CodeMirror inserts its own element before the textarea and hides it. The
+     border lives on that element, so it is styled by class rather than by a
+     wrapper this page controls. */
+  .cm-editor {
+    border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
+    font-size: 13px; max-height: 38rem;
+  }
+  .cm-editor.cm-focused { outline: none; border-color: var(--accent); }
+  .cm-scroller { min-height: 22rem; max-height: 38rem; }
+  select {
+    font: 14px system-ui, sans-serif; padding: .5rem .6rem; color: var(--ink);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+  }
+  button {
+    font: 600 15px/1 system-ui, sans-serif; padding: .7rem 1.4rem;
+    background: var(--accent); color: #fff; border: 0; border-radius: 8px; cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  button.ghost { background: transparent; color: var(--accent);
+                 border: 1px solid var(--accent); padding: .5rem 1rem; font-size: 14px; }
+  /* The console keeps its terminal colours in both themes — it is showing
+     solver output, not page content. */
+  pre#out {
+    margin: 0; padding: .9rem 1rem; min-height: 8rem; max-height: 30rem; overflow: auto;
+    background: #12141a; color: #dde2ea; border-radius: 10px;
+    border: 1px solid var(--line);
+    font: 12px/1.45 var(--mono); white-space: pre-wrap; word-break: break-word;
+  }
+  .status { color: var(--muted); font-size: .9rem; }
+  .status.err { color: var(--bad); }
+  .note { color: var(--muted); font-size: .85rem; margin-top: .6rem; }
+  #example-title { color: var(--muted); font-size: .9rem; margin: 0 0 .6rem; }
+  footer { margin-top: 3rem; color: var(--muted); font-size: .85rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <header class="masthead">
+    <h1><span class="name">discopt</span> in the browser</h1>
+    <label class="theme">
+      Theme
+      <select id="theme">
+        <option value="auto">Auto</option>
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
+      </select>
+    </label>
+  </header>
+  <p class="lede">
+    Write a model, solve it — both in this tab.
+    <a href="https://pyodide.org">Pyodide</a> supplies CPython compiled to WebAssembly,
+    and <code>discopt</code> itself is built for emscripten: the modeling API, the Rust
+    branch-and-bound core and the in-house simplex, the same
+    <code>import discopt.modeling as dm</code> you would write locally. The dropdown
+    holds one model of each problem class — LP, MILP, QP, MIQP, NLP, MINLP — so you can
+    see what the solver does with each. No server, no install, nothing uploaded.
+  </p>
+
+  <div class="row">
+    <select id="example" aria-label="Example model"></select>
+    <button id="run" disabled>Run</button>
+    <button id="cancel" class="ghost" disabled>Cancel</button>
+    <button id="dl-code" class="ghost">Download script</button>
+    <span id="status" class="status">starting…</span>
+  </div>
+
+  <section>
+    <h2>Model</h2>
+    <p id="example-title"></p>
+    <textarea id="code" spellcheck="false"></textarea>
+    <p class="note">
+      Edit freely — the editor is CodeMirror and Ctrl/⌘-Enter runs. The first run
+      downloads Pyodide and the discopt wheel (tens of MB, cached by the browser
+      afterwards); the time reported below excludes it and is the solve alone.
+      Cancel kills the worker outright, because a solve holds the thread.
+    </p>
+  </section>
+
+  <section>
+    <h2>Output</h2>
+    <pre id="out"></pre>
+  </section>
+
+  <footer>
+    discopt is a hybrid MINLP solver: spatial branch-and-bound over a Rust core, with
+    certified bounds —
+    <a href="https://github.com/jkitchin/discopt">github.com/jkitchin/discopt</a>.
+  </footer>
+</main>
+<script type="module" src="./app.js"></script>
+</body>
+</html>

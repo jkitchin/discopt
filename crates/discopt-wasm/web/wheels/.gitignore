@@ -1,0 +1,7 @@
+# Built wheels and their manifests are staged here by build-wheel.sh and
+# uploaded by the docs deploy; they are not committed. An emscripten wheel is
+# valid for exactly one Pyodide build, so a committed one goes stale silently
+# the moment either version moves -- the manifest check in worker.js exists
+# because that happens.
+*
+!.gitignore
