@@ -419,6 +419,70 @@ Tutorial notebooks are available in `docs/notebooks/`:
 
 Full documentation is built with Jupyter Book: `jupyter-book build docs/`
 
+## Related projects
+
+discopt is not the only tool in any of these spaces, and for several of them it
+is the newer one. This section is here so you can tell quickly whether discopt
+is the right fit or whether one of these is -- and, where discopt overlaps with
+an established package, what the difference actually is.
+
+**Design of experiments and parameter estimation.** discopt does
+weighted-least-squares estimation with exact Fisher-information Jacobians in the
+core, and model-based DoE (D/A/E-optimality, identifiability, estimability,
+model discrimination) in the [discopt-doe](https://github.com/jkitchin/discopt-doe)
+plugin.
+
+| Project | What it does |
+|---|---|
+| [**Pyomo.DoE**](https://pyomo.readthedocs.io/en/stable/explanation/analysis/doe/doe.html) | Model-based DoE for Pyomo models: builds the FIM from model sensitivities and optimizes A/D/E-optimality, including for dynamic (Pyomo.DAE) models. The closest analogue to `discopt.doe`; if your model is already in Pyomo, start here. |
+| [**pydex**](https://github.com/salvadorgarciamunoz/pydex) | Optimal experiment design over a candidate grid: D/A/E/V-optimal, CVaR and pseudo-Bayesian criteria, continuous or apportioned to exact designs. It takes a *simulator* -- any Python function, a scipy ODE integration, or a Pyomo.DAE model -- and gets sensitivities by finite differences or the implicit function theorem, so it applies where there is no closed-form algebraic response. The OED problem itself is formulated in Pyomo, so any Pyomo-accessible solver can solve it. (This is [salvadorgarciamunoz/pydex](https://github.com/salvadorgarciamunoz/pydex), a fork of [the original](https://github.com/KennedyPutraKusumo/pydex) by Kusumo et al.) |
+| [**Pyomo parmest**](https://pyomo.readthedocs.io/en/stable/explanation/analysis/parmest/index.html) | Parameter estimation for Pyomo models with bootstrap and likelihood-ratio confidence regions. |
+
+**Global and MINLP solvers.** These are what discopt is validated and benchmarked
+against; see [Benchmarks](#benchmarks) above.
+
+| Project | Notes |
+|---|---|
+| [**BARON**](https://minlp.com/baron-solver) | The reference commercial global MINLP solver, and the one discopt's standard head-to-head panel compares against (run through GAMS, since the AMPL binary ships demo-licensed). |
+| [**SCIP**](https://github.com/scipopt/scip) | Open-source (Apache-2.0) constraint-integer programming with spatial B&B. It reads `.nl` directly, so it is the one external global solver that runs inside discopt's own benchmark harness. |
+| [**Couenne**](https://github.com/coin-or/Couenne) | COIN-OR's spatial branch-and-bound global solver for nonconvex MINLPs, built on factorable reformulation and McCormick envelopes -- the same relaxation machinery discopt's `_relax/` layer implements. |
+| [**HiGHS**](https://github.com/ERGO-Code/HiGHS) | High-performance LP/MIP/QP. discopt routes models it classifies as *pure* LP/MILP to HiGHS and verifies the certificate itself; its own Rust simplex drives the MINLP node LPs. |
+| [**Alpine.jl**](https://github.com/lanl-ansi/Alpine.jl) | Julia/JuMP global solver built on adaptive multivariate partitioning -- the same AMP idea behind discopt's `solver="amp"`. |
+| [**EAGO.jl**](https://github.com/PSORLab/EAGO.jl) | Julia global and robust optimization with McCormick relaxations and an extensible B&B. |
+
+**NLP and automatic differentiation.**
+
+| Project | Notes |
+|---|---|
+| [**POUNCE**](https://github.com/jkitchin/pounce) | Pure-Rust port of Ipopt, and discopt's default NLP solver and AD tape. Usable standalone. |
+| [**Ipopt**](https://github.com/coin-or/Ipopt) / [**cyipopt**](https://github.com/mechmotum/cyipopt) | The interior-point NLP solver POUNCE ports, and its Python bindings -- available in discopt as `nlp_solver="cyipopt"`. |
+| [**CasADi**](https://github.com/casadi/casadi) | Symbolic framework for numeric optimization with forward/reverse AD and C-code generation. Overlaps discopt's modeling and DAE layers; it is a framework for building solvers rather than a global MINLP solver itself. |
+
+**Modeling layers.** discopt has its own algebraic modeling API, but it does not
+require you to switch to it.
+
+| Project | Notes |
+|---|---|
+| [**Pyomo**](https://github.com/Pyomo/pyomo) | discopt registers itself as a Pyomo solver -- `SolverFactory("discopt")` after `pip install discopt[pyomo]`. See [docs/pyomo_solver.md](docs/pyomo_solver.md). |
+| [**JuMP**](https://github.com/jump-dev/JuMP.jl) | The Julia modeling layer; the front end for Alpine.jl and EAGO.jl above. |
+| [**CVXPY**](https://github.com/cvxpy/cvxpy) | Disciplined convex programming. If your problem is DCP-compliant and has no integers, CVXPY is the more direct route. |
+
+**Machine-learning surrogates in optimization.** discopt's `discopt.ml` is
+explicitly inspired by OMLT, and adds a *trainable* regime in which surrogate
+weights are decision variables fit simultaneously with a physics model.
+
+| Project | Notes |
+|---|---|
+| [**OMLT**](https://github.com/cog-imperial/OMLT) | Embeds trained neural networks and gradient-boosted trees into Pyomo models (big-M, full-space, reduced-space, and ONNX import). |
+| [**gurobi-machinelearning**](https://github.com/Gurobi/gurobi-machinelearning) | The same idea against Gurobi, with scikit-learn, Keras and PyTorch readers. |
+
+**Benchmark libraries.**
+
+| Project | Notes |
+|---|---|
+| [**MINLPLib**](https://www.minlplib.org/) | The MINLP instance library and its reference optima. discopt reads its `.nl` and `.gms` files directly and uses `minlplib.solu` as the correctness oracle. |
+| [**QPLIB**](https://qplib.zib.de/) | 453 quadratic instances (390 nonconvex), read natively by `discopt.interfaces.qplib`. Unlike MINLPLib it ships reference solution *vectors*, so an incumbent can be feasibility-verified directly. |
+
 ## Project Statistics
 
 *Last updated: 2026-09-19*
