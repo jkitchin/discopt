@@ -12,6 +12,18 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **The docs site no longer shows `global\_opt` with a visible backslash.**
+  In a LaTeX document `\text{global\_opt}` is exactly right; MathJax 3
+  implements none of TeX's text-mode escapes and prints the backslash. Measured
+  against pdflatex and MathJax 3 (24 compiles x 24 renderings): inside
+  `\text{}`/`\texttt{}` *no* spelling satisfies both engines, while inside
+  `\mathtt{}`/`\mathrm{}` or bare math, `\_ \% \# \& \$ \{ \}` are exact
+  under both. `to_latex()` is documented as markup to paste into a paper, so
+  rendering only for MathJax was not an option. `_latex_text` now emits every
+  special as a math-mode atom between `\text{}` runs — verified exact in both
+  engines over a 15-string corpus — the three affected notebook equations use a
+  math wrapper, and a test greps every authored page so the habit cannot come
+  back.
 - **The docs assistant renders its answers instead of showing their source.**
   The model writes markdown and cites with bracketed numbers, but the panel
   printed the whole reply as one pre-wrapped string: a literal `\[ \min_x … \]`

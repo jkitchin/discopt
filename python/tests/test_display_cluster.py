@@ -191,9 +191,39 @@ def test_l4_matmul_parenthesised_under_power():
 # ----------------------------------------------------------------------------- L7
 def test_l7_latex_text_escapes_math_specials_no_html_entities():
     out = _latex_text("a & b_c%d#e")
-    # LaTeX specials escaped, wrapped in \text{}, and NO HTML entity injected.
-    assert out == r"\text{a \& b\_c\%d\#e}"
+    # Specials are MATH-mode atoms between \text{} runs, not escapes inside one.
+    # The previous golden here was `\text{a \& b\_c\%d\#e}`, which is what
+    # pdflatex wants and what MathJax prints the backslash of: the docs site
+    # shipped a visible `global\_opt`. Measured 2026-09-24 against pdflatex and
+    # MathJax 3 (scratchpad/dual_probe.py): this form is exact in BOTH.
+    assert out == r"\text{a }\&\text{ b}\_\text{c}\%\text{d}\#\text{e}"
     assert "&amp;" not in out
+
+
+def test_l7_latex_text_never_escapes_inside_text_mode():
+    # The class of bug, not the one reported instance: MathJax implements none of
+    # TeX's text-mode escapes, so a backslash-escaped special inside \text{} is
+    # rendered literally. No output of this function may contain one.
+    specials = "_%#&$~^\\"
+    checked = 0
+    for ch in specials:
+        out = _latex_text(f"a{ch}b")
+        checked += 1
+        for wrapper in (r"\text{", r"\texttt{"):
+            start = out.find(wrapper)
+            while start != -1:
+                end = out.index("}", start)
+                assert "\\" not in out[start + len(wrapper) : end], (
+                    f"{ch!r} produced a text-mode escape: {out!r}"
+                )
+                start = out.find(wrapper, end)
+    assert checked == len(specials), checked
+
+
+def test_l7_latex_text_empty_is_still_a_math_fragment():
+    # Callers interpolate the result straight into an `aligned` row; "" would
+    # leave a bare `&& \\` that changes the column structure.
+    assert _latex_text("") == r"\text{}"
 
 
 def test_l7_escape_html_is_html_only():

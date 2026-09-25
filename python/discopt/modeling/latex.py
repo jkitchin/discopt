@@ -228,8 +228,10 @@ def _constraint_to_latex(c: Any) -> str:
         kind = type(c).__name__.lstrip("_")
         label = getattr(c, "name", None)
         text = f"{kind}: {label}" if label else kind
-        escaped = text.replace("_", r"\_")
-        return rf"\text{{[{escaped}]}}"
+        # Route through the shared escaper rather than hand-rolling one: a
+        # constraint name is arbitrary user text, and `_` was the only special it
+        # handled — and handled the way MathJax prints literally (_MATH_ATOMS).
+        return _latex_text(f"[{text}]")
     sense = {"<=": r"\le", ">=": r"\ge", "==": "="}.get(c.sense, c.sense)
     body = c.body
     if isinstance(body, BinaryOp) and body.op == "-":
@@ -393,34 +395,62 @@ def model_to_html(model: Any, max_rows: int | None = None) -> str:
     )
 
 
-# LaTeX special characters that must be escaped when arbitrary text appears in a
-# math environment (inside `\text{...}` or a fallback). Ordered so the backslash
-# substitution runs first and does not re-escape the escapes it introduces.
-_LATEX_ESCAPES = (
-    ("\\", r"\textbackslash{}"),
-    ("&", r"\&"),
-    ("%", r"\%"),
-    ("$", r"\$"),
-    ("#", r"\#"),
-    ("_", r"\_"),
-    ("{", r"\{"),
-    ("}", r"\}"),
-    ("~", r"\textasciitilde{}"),
-    ("^", r"\textasciicircum{}"),
-)
+# LaTeX specials, rendered as MATH-mode atoms rather than escaped inside
+# `\text{...}`. This output has two consumers that disagree about text mode:
+# MathJax typesets it in the notebook and on the docs site, and `to_latex()` is
+# documented as markup to paste into a paper. Inside `\text{}`, pdflatex REQUIRES
+# `\_` while MathJax 3 does not implement it and prints the backslash literally —
+# which is the `global\_opt` that shipped to the docs site. There is no text-mode
+# spelling both engines accept.
+#
+# Math mode has one. Measured 2026-09-24 against pdflatex 3.141592653 and MathJax
+# 3 in Chromium (scratchpad/dual_probe.py, 24 compiles x 24 renderings): each
+# spelling below compiles under pdflatex AND renders as exactly its character
+# under MathJax. `\hat{}` and `\tilde{}` are the accents with no base glyph, which
+# is how both engines draw a bare caret and tilde.
+_MATH_ATOMS = {
+    "_": r"\_",
+    "%": r"\%",
+    "#": r"\#",
+    "&": r"\&",
+    "$": r"\$",
+    "{": r"\{",
+    "}": r"\}",
+    "^": r"\hat{}",
+    "~": r"\tilde{}",
+    # The one character with no exact dual-target spelling: `\backslash` compiles
+    # in both, but MathJax draws U+2216 SET MINUS, not U+005C. Every text-mode
+    # alternative (`\textbackslash`, `\char92`) renders as its own source under
+    # MathJax, which is strictly worse. Disclosed rather than silent.
+    "\\": r"\backslash",
+}
 
 
 def _latex_text(s: str) -> str:
-    """Render arbitrary prose safely inside a math environment as ``\\text{...}``.
+    """Render arbitrary prose safely into a math environment.
 
-    Escapes the LaTeX specials (``% _ # & $ { } \\ ~ ^``) so an unknown-node repr or
-    a stray string cannot break math mode, and — unlike the old shared escaper —
-    never injects HTML entities (``&amp;``) into a LaTeX ``aligned`` block (L7).
+    Emits runs of ordinary characters as ``\\text{...}`` and every LaTeX special
+    (``% _ # & $ { } \\ ~ ^``) as a math-mode atom between those runs, so an
+    unknown-node repr or a stray string can neither break math mode nor print a
+    literal backslash under MathJax (see ``_MATH_ATOMS``). Never injects HTML
+    entities (``&amp;``) into a LaTeX ``aligned`` block (L7).
     """
-    out = s
-    for ch, rep in _LATEX_ESCAPES:
-        out = out.replace(ch, rep)
-    return rf"\text{{{out}}}"
+    parts: list[str] = []
+    run: list[str] = []
+    for ch in s:
+        atom = _MATH_ATOMS.get(ch)
+        if atom is None:
+            run.append(ch)
+            continue
+        if run:
+            parts.append(rf"\text{{{''.join(run)}}}")
+            run = []
+        parts.append(atom)
+    if run:
+        parts.append(rf"\text{{{''.join(run)}}}")
+    # An empty string still has to be a math-mode fragment, not nothing: callers
+    # interpolate the result straight into an `aligned` row.
+    return "".join(parts) or r"\text{}"
 
 
 def _escape_html(s: str) -> str:
