@@ -10,6 +10,20 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Changed
+
+- **`import discopt` no longer pulls the `_multiprocessing` C extension.**
+  `discopt.modeling` re-exports `solve_batch`, so `discopt.batch` is imported by
+  every `import discopt`, and it imported `multiprocessing` at module level —
+  a capability only `solve_batch(workers>1)` uses, and one `workers=1` returns
+  before reaching. The import now lives in the two functions that build a pool.
+  No API change: `solve_batch` is exported and behaves exactly as before.
+  This makes the package importable on CPython builds that ship no
+  `_multiprocessing` (Pyodide/WebAssembly), where the eager import previously
+  made *all* of discopt unimportable. Regression tests reproduce that
+  environment with a `sys.meta_path` blocker and solve an LP, a MILP and an
+  MINLP with the multiprocessing names unimportable.
+
 ### Fixed
 
 - **The docs assistant renders its answers instead of showing their source.**

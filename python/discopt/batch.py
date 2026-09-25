@@ -42,12 +42,18 @@ unaffected — those are the ones the equivalence test uses.
 from __future__ import annotations
 
 import logging
-import multiprocessing
 import pickle
 from collections.abc import Iterator
-from concurrent.futures import ProcessPoolExecutor
-from concurrent.futures.process import BrokenProcessPool
 from typing import TYPE_CHECKING, Any, Iterable, Optional, cast
+
+# ``multiprocessing`` and ``concurrent.futures.process`` are imported inside the
+# two functions that build a pool, not here. ``discopt.modeling`` imports this
+# module for ``solve_batch``, so a module-level import would put the
+# ``_multiprocessing`` C extension on the critical path of every ``import
+# discopt`` — including ``workers=1``, which returns before a pool exists. That
+# extension is absent from some CPython builds (Pyodide/WebAssembly ships no
+# ``_multiprocessing``), where it made the whole package unimportable for a
+# capability no serial solve uses.
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from discopt.modeling.core import Model, SolveResult
@@ -165,6 +171,8 @@ def _solve_locally(model: "Model", kwargs: dict) -> "SolveResult":
 
 def _run_pool(payloads: list, workers: int, ctx) -> list:
     """Run the worker calls in a process pool, returning results in input order."""
+    from concurrent.futures import ProcessPoolExecutor
+
     with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool:
         return list(pool.map(_solve_serialized, payloads))
 
@@ -277,6 +285,9 @@ def solve_batch(
             )
 
     if payloads:
+        import multiprocessing
+        from concurrent.futures.process import BrokenProcessPool
+
         ctx = multiprocessing.get_context(start_method)
         try:
             completed = _run_pool(payloads, workers, ctx)
