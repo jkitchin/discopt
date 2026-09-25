@@ -233,3 +233,27 @@ def test_certificate_gap_helper_refutes_on_default_box():
     x_stall = np.array([1.7339e8])
     out = _convex_nlp_certificate_gap(ev, x_stall, None, lb, ub, cl, cu, -math.log(x_stall[0]))
     assert out is None, f"default-box stall must be refuted, got {out}"
+
+
+def test_default_box_epigraph_optimum_still_certifies():
+    """A genuine optimum whose objective is a FREE (default-box) epigraph variable must
+    stay certified. ``min t s.t. t >= x1^2 + x2^2, x1 + x2 >= 4`` has its optimum at
+    x1 = x2 = 2, t = 8. At that point the Lagrangian gradient on ``t`` is roundoff
+    (~1e-14); widening the Lagrangian refutation to the 9.999e19 box amplified it into
+    a spurious witness and withheld this certificate (caught by
+    ``test_gams.py::TestGamsImportObjvarEmbedded``). The far box is refuted only with
+    a primal feasible witness, which a genuine optimum does not have."""
+    m = dm.Model("epigraph_default")
+    x1 = m.continuous("x1", lb=0.0)
+    x2 = m.continuous("x2", lb=0.0)
+    t = m.continuous("t", lb=-_BOX_UB)
+    m.subject_to(x1 + x2 >= 4)
+    m.subject_to(x1 - x2 <= 1)
+    m.subject_to(x1**2 + x2**2 - t <= 0)
+    m.minimize(t)
+    r = m.solve(nlp_solver="ipm")
+    assert r.status == "optimal" and r.gap_certified, (
+        f"genuine epigraph optimum lost its certificate (status={r.status}, "
+        f"gap_certified={r.gap_certified}, obj={r.objective!r})"
+    )
+    assert r.objective == pytest.approx(8.0, rel=1e-5, abs=1e-5)

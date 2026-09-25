@@ -18408,25 +18408,15 @@ def _convex_nlp_certificate_gap(
     # spurious direction from a near-zero (numerically noisy) gradient finds no real
     # descent and does not fire — a genuine optimum, which has no better feasible
     # point, is never rejected.
-    #
-    # The vertex is built from the box with the TRUE bound-infinity cutoff
-    # (``CONSTRAINT_INF`` = 1e20), not the ``_INF = 1e19`` sentinel used above: the
-    # default box ``DEFAULT_VARIABLE_BOUND`` = 9.999e19 is FINITE (#850), so a
-    # variable declared without an upper bound (or any bound in [1e19, 1e20)) must
-    # get a vertex. Capping it at 1e19 read it as +∞, formed no vertex, and let
-    # ``min -log(x)`` on the default box certify its interior stall (#853 regression).
-    # Any point of this box is feasible, so a witness found here stays sound.
-    lb_v = np.where(lb > -_CONSTRAINT_INF, lb, -np.inf)
-    ub_v = np.where(ub < _CONSTRAINT_INF, ub, np.inf)
     y_fw = x.copy()
     moved = False
     for j in range(n):
         rj = float(reduced[j])
-        if rj > 0.0 and np.isfinite(lb_v[j]) and lb_v[j] < x[j]:
-            y_fw[j] = lb_v[j]
+        if rj > 0.0 and np.isfinite(lb_c[j]) and lb_c[j] < x[j]:
+            y_fw[j] = lb_c[j]
             moved = True
-        elif rj < 0.0 and np.isfinite(ub_v[j]) and ub_v[j] > x[j]:
-            y_fw[j] = ub_v[j]
+        elif rj < 0.0 and np.isfinite(ub_c[j]) and ub_c[j] > x[j]:
+            y_fw[j] = ub_c[j]
             moved = True
     if moved:
         d = y_fw - x
@@ -18474,6 +18464,87 @@ def _convex_nlp_certificate_gap(
                 # optimality tolerance: the dual bound these multipliers support is
                 # more than tol below f(x). Withhold the certificate.
                 return None
+
+    # --- Primal better-point refutation on the far box (#853, default box) ---
+    # The refutation above caps bounds at ``_INF = 1e19``, so a bound in [1e19, 1e20)
+    # — including the default box ``DEFAULT_VARIABLE_BOUND = 9.999e19``, which is
+    # FINITE (#850) — reads as +∞ and gets no vertex: ``min -log(x), x >= 1`` with no
+    # declared ub still certified its interior stall (obj = bound = -18.97 vs box
+    # optimum -46.05). The Lagrangian test cannot simply be widened to that box: at a
+    # genuine optimum the reduced gradient on a default-box column is floating-point
+    # noise (~1e-14), which a ~1e20 step amplifies into a spurious Lagrangian
+    # "witness" (inexact multipliers, roundoff of L at magnitude 1e20) and rejects a
+    # true optimum (``min objvar s.t. objvar = x1^2 + x2^2, ...``). So on that far box
+    # demand a PRIMAL witness instead: an in-box point that satisfies the constraints
+    # at least as well as the incumbent and beats f(x) by more than the tolerance. Such
+    # a point is a direct proof that x is not optimal — a genuine optimum has none, so
+    # this cannot reject one — and it only ever withholds. Run only when the
+    # full-box vertex actually uses a bound the capped test could not see, so every
+    # other model takes exactly the path above.
+    lb_v = np.where(lb > -_CONSTRAINT_INF, lb, -np.inf)
+    ub_v = np.where(ub < _CONSTRAINT_INF, ub, np.inf)
+    y_pv = x.copy()
+    far = False
+    for j in range(n):
+        gj = float(grad[j])
+        if gj > 0.0 and np.isfinite(lb_v[j]) and lb_v[j] < x[j]:
+            y_pv[j] = lb_v[j]
+            far = far or not np.isfinite(lb_c[j])
+        elif gj < 0.0 and np.isfinite(ub_v[j]) and ub_v[j] > x[j]:
+            y_pv[j] = ub_v[j]
+            far = far or not np.isfinite(ub_c[j])
+    if far:
+        lo_on = cl > -_INF
+        hi_on = cu < _INF
+
+        def _viol(cv: np.ndarray) -> float:
+            if m == 0:
+                return 0.0
+            v = np.maximum(
+                np.where(lo_on, cl - cv, 0.0),
+                np.where(hi_on, cv - cu, 0.0),
+            )
+            return float(np.max(v, initial=0.0))
+
+        viol_tol = max(_viol(cons), 1e-9)
+        f0 = (
+            float(obj_internal)
+            if obj_internal is not None
+            else float(evaluator.evaluate_objective(x))
+        )
+        margin_p = max(gap_tolerance, 1e-6) * (1.0 + abs(f0))
+        d_p = y_pv - x
+
+        def _feasible_obj(t: float) -> float:
+            y = x + t * d_p
+            if m > 0:
+                cy = np.asarray(evaluator.evaluate_constraints(y), np.float64)
+                if not np.all(np.isfinite(cy)) or _viol(cy) > viol_tol:
+                    return np.inf
+            val = float(evaluator.evaluate_objective(y))
+            return val if np.isfinite(val) else np.inf
+
+        # Along the segment the feasible set of a convex problem is an interval
+        # containing t=0 and f is convex on it, so (f, +∞ outside) is unimodal and
+        # golden-section applies. ``best`` is the value of an exhibited feasible point.
+        gr = 0.6180339887498949
+        a, b = 0.0, 1.0
+        c_ = b - gr * (b - a)
+        e_ = a + gr * (b - a)
+        fc, fe = _feasible_obj(c_), _feasible_obj(e_)
+        best = min(f0, _feasible_obj(1.0), fc, fe)
+        for _ in range(_FW_LINE_SEARCH_ITERS):
+            if fc < fe:
+                b, e_, fe = e_, c_, fc
+                c_ = b - gr * (b - a)
+                fc = _feasible_obj(c_)
+            else:
+                a, c_, fc = c_, e_, fe
+                e_ = a + gr * (b - a)
+                fe = _feasible_obj(e_)
+            best = min(best, fc, fe)
+        if f0 - best > margin_p:
+            return None
 
     return stationarity_rel, complementarity_rel
 
