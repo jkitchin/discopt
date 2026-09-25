@@ -398,6 +398,17 @@ body.discopt-ask-resizing iframe {
   overflow-wrap: anywhere;
 }
 
+/* An expression MathJax rejected, demoted to prose (see demoteBadMath). It is
+   the model's TeX that was malformed, not the answer around it, so this reads
+   as an aside rather than as an error: no red, no box. The dotted underline is
+   the only signal, and the title attribute says what happened. */
+.discopt-ask-math-failed {
+  font-style: italic;
+  opacity: 0.85;
+  border-bottom: 1px dotted currentColor;
+  overflow-wrap: anywhere;
+}
+
 /* Citations. `[2]` is a link to the passage it cites, and has to read as one
    at 0.8rem without turning the prose into a field of brackets -- hence the
    weight and colour rather than an underline. */

@@ -406,6 +406,38 @@ check(!/\\[a-zA-Z]/.test(REL), "no backslash command is left in a preview: " + R
 const MOSTLY = ask.excerpt("\\[ x^2 + y^2 = z^2 \\]");
 check(MOSTLY.trim().length > 0, "an equation-only passage still previews something");
 
+// texToProse: the fallback for an expression MathJax REJECTED. Distinct from
+// excerpt/stripTex, which drops display math because prose carries the preview;
+// here the expression IS the content, so every wrapper is unwrapped instead.
+const BADENV = ask.texToProse("\\begin{split}\n\\min_x c^\\top x \\\\ Ax = b\n\\end{aligned}");
+check(!BADENV.includes("\\"), "a mismatched environment leaves no backslash: " + BADENV);
+check(!/begin|end\{/.test(BADENV), "the environment delimiters are gone: " + BADENV);
+check(BADENV.includes("min"), "the operator name survives demotion: " + BADENV);
+check(BADENV.includes("Ax = b"), "the body survives demotion: " + BADENV);
+
+// stripTex would hand back the untouched source here (its <40-char guard), which
+// is the raw TeX the reader was never meant to see. That is why this is separate.
+check(
+  ask.stripTex("\\begin{split} x \\end{aligned}").includes("\\begin"),
+  "stripTex still returns short input untouched (the guard texToProse must not share)"
+);
+check(
+  !ask.texToProse("\\begin{split} x \\end{aligned}").includes("\\begin"),
+  "texToProse does not inherit that guard"
+);
+
+// A two-argument macro must not be flattened: \tfrac{1}{2} -> "12" would be a
+// WRONG number on the page, the one outcome worse than unreadable text.
+check(ask.texToProse("\\tfrac{1}{2} x").startsWith("1/2"), "\\tfrac renders as a ratio");
+check(
+  ask.texToProse("\\frac{UB - LB}{|UB|}").startsWith("(UB - LB)/"),
+  "a compound numerator is parenthesised: " + ask.texToProse("\\frac{UB - LB}{|UB|}")
+);
+check(ask.texToProse("\\quad x \\quad").trim() === "x", "spacing macros become space");
+check(ask.texToProse("\\left( x \\right)").includes("( x )"), "\\left/\\right are dropped");
+check(ask.texToProse("") === "", "empty input returns empty, not undefined");
+check(ask.texToProse("\\texttt{rel_gap}") === "rel_gap", "\\texttt is unwrapped");
+
 // Prove the probe fired: a refactor that made every `check` unreachable would
 // otherwise print a clean run and exit 0.
 if (checks === 0) {
