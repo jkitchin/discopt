@@ -304,6 +304,39 @@ with sync_playwright() as p:
         answer.inner_text()[:120],
     )
 
+    # Malformed TeX from a small local model. Reported from the live panel: a
+    # 1B model wrote \begin{split} and closed it with \end{aligned}, and MathJax
+    # drew its red-on-yellow "\begin{split} ended with \end{aligned}" box into
+    # the middle of the answer. typesetPromise RESOLVES on a TeX error, so the
+    # .catch never fires -- the check has to be for <mjx-merror> in the output.
+    BAD = (
+        "1. The standard form of a Linear Program is given by:\n\n"
+        "\\[\n\\begin{split}\n\\min_x c^\\top x \\\\ Ax = b\n\\end{aligned}\n\\]\n\n"
+        "and inline \\(\\begin{split} x \\end{aligned}\\) too.\n"
+    )
+    page.evaluate(
+        "(t) => document.querySelector('.discopt-ask-panel').__discoptRenderAnswer(t, true)",
+        BAD,
+    )
+    page.wait_for_timeout(1500)
+    check(
+        "a MathJax error box never reaches the reader",
+        answer.locator("mjx-merror").count() == 0,
+        answer.locator("mjx-merror").count(),
+    )
+    check(
+        "the rejected expression is demoted to prose",
+        answer.locator(".discopt-ask-math-failed").count() >= 1,
+        answer.locator(".discopt-ask-math-failed").count(),
+    )
+    bad_text = answer.inner_text()
+    check(
+        "the demoted expression is readable, not raw TeX",
+        "\\begin" not in bad_text and "ended with" not in bad_text,
+        bad_text[:160],
+    )
+    check("the prose around the bad math survives", "standard form" in bad_text)
+
     # The invariant the renderer exists to protect: model text is never markup.
     page.evaluate(
         "(t) => document.querySelector('.discopt-ask-panel').__discoptRenderAnswer(t, true)",

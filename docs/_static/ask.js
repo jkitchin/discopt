@@ -918,6 +918,57 @@
     return out.replace(/\s+/g, " ").trim().length < 40 ? text : out;
   }
 
+  // The same glyph pass as stripTex, but for an expression that IS the content
+  // rather than one interrupting prose, so every wrapper is UNWRAPPED instead
+  // of dropped and there is no short-result fallback: stripTex would hand back
+  // the untouched source, which for demoteBadMath is the raw TeX the reader was
+  // never meant to see. Returns the original only when stripping leaves nothing
+  // at all -- showing something unreadable beats showing an empty box.
+  // Layout-only control sequences: they position glyphs, they are not glyphs.
+  var TEX_DROP = {
+    left: 1, right: 1, displaystyle: 1, textstyle: 1, limits: 1, nolimits: 1,
+    big: 1, Big: 1, bigg: 1, Bigg: 1, nonumber: 1, notag: 1, mathopen: 1, mathclose: 1
+  };
+  var TEX_SPACE = { quad: 1, qquad: 1, thinspace: 1, medspace: 1, thickspace: 1, hfill: 1 };
+
+  function texToProse(text) {
+    var out = text
+      .replace(/^\s*\\\[|\\\]\s*$/g, " ")
+      .replace(/^\s*\$\$|\$\$\s*$/g, " ")
+      .replace(/\\begin\{[a-z*]*\}([\s\S]*?)\\end\{[a-z*]*\}/gi, "$1")
+      // A \begin with no \end (or vice versa) is exactly the malformed case
+      // this path exists for, so drop the stragglers by name.
+      .replace(/\\(begin|end)\{[a-z*]*\}/gi, " ")
+      .replace(/\\\(([\s\S]*?)\\\)/g, "$1")
+      .replace(/\\\\/g, "  ") // TeX row break -- a gap, not a glyph
+      .replace(/\\[,;!:]/g, " ")
+      // Before the generic unwrap: \tfrac{1}{2} has TWO arguments, and a
+      // one-group unwrap turns it into "12" -- a wrong number rather than
+      // unreadable text, which is the one outcome worse than showing nothing.
+      // A compound numerator or denominator is parenthesised, because a flat
+      // "UB - LB/|UB|" is not the same formula as the one the model wrote.
+      .replace(/\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g, function (m, num, den) {
+        var wrap = function (s) {
+          return /[-+*/\s]/.test(s.trim()) ? "(" + s.trim() + ")" : s.trim();
+        };
+        return wrap(num) + "/" + wrap(den);
+      })
+      .replace(/\\(text|texttt|textbf|textit|mathrm|mathbf|mathbb|mathtt|mathsf|operatorname)\{([^{}]*)\}/g, "$2")
+      .replace(/\\([a-zA-Z]+)/g, function (m, name) {
+        if (Object.prototype.hasOwnProperty.call(TEX_GLYPH, name)) return TEX_GLYPH[name];
+        if (Object.prototype.hasOwnProperty.call(TEX_DROP, name)) return "";
+        if (Object.prototype.hasOwnProperty.call(TEX_SPACE, name)) return " ";
+        // Everything else keeps its NAME. \min, \max, \log, \argmin are words a
+        // reader recognises; deleting them (as the preview path does, where
+        // prose carries the sentence) leaves "_x c^T x" with the operator gone.
+        return name;
+      })
+      .replace(/[{}]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    return out || text;
+  }
+
   function buildPrompt(question, hits) {
     var context = hits
       .map(function (hit, n) {
@@ -1155,7 +1206,9 @@
       else if (tok.t === "em") into.appendChild(el("em", null, tok.v));
       else if (tok.t === "cite") into.appendChild(citationNode(tok.n));
       else if (tok.t === "math") {
-        into.appendChild(el("span", "discopt-ask-math-inline", "\\(" + tok.v + "\\)"));
+        var im = el("span", "discopt-ask-math-inline", "\\(" + tok.v + "\\)");
+        im.__tex = tok.v;
+        into.appendChild(im);
       } else if (tok.t === "link") {
         var href = safeHref(tok.href);
         if (!href) {
@@ -1185,16 +1238,42 @@
     if (!node.querySelector(".discopt-ask-math, .discopt-ask-math-inline")) return;
     try {
       if (MJ.typesetPromise) {
-        MJ.typesetPromise([node]).catch(function (e) {
-          // Not swallowed: a model writing broken TeX is the model's problem,
-          // not a panel fault, and the raw TeX stays readable underneath.
-          console.warn("discopt-ask: MathJax could not typeset the answer:", e);
-        });
+        MJ.typesetPromise([node])
+          .then(function () {
+            demoteBadMath(node);
+          })
+          .catch(function (e) {
+            console.warn("discopt-ask: MathJax could not typeset the answer:", e);
+            demoteBadMath(node);
+          });
       } else if (MJ.typeset) {
         MJ.typeset([node]);
+        demoteBadMath(node);
       }
     } catch (e) {
       console.warn("discopt-ask: MathJax could not typeset the answer:", e);
+      demoteBadMath(node);
+    }
+  }
+
+  // A TeX error does NOT leave the source visible: MathJax replaces the node
+  // with an <mjx-merror> box -- on the docs theme, red on yellow, mid-answer
+  // ("\begin{split} ended with \end{aligned}", reported from a 1B local model).
+  // `typesetPromise` also RESOLVES on such an error rather than rejecting, so
+  // the .catch above never sees it. A small model writing malformed TeX is
+  // expected, not exceptional, so each failed expression falls back to the same
+  // readable prose the passage previews use. No repair is attempted: guessing
+  // the intended environment would put invented mathematics on the page.
+  function demoteBadMath(node) {
+    var mathNodes = node.querySelectorAll(".discopt-ask-math, .discopt-ask-math-inline");
+    for (var i = 0; i < mathNodes.length; i++) {
+      var m = mathNodes[i];
+      if (!m.querySelector("mjx-merror")) continue;
+      var raw = typeof m.__tex === "string" ? m.__tex : "";
+      m.textContent = "";
+      m.className += " discopt-ask-math-failed";
+      m.appendChild(document.createTextNode(texToProse(raw)));
+      m.title = "This expression could not be typeset; showing it as text.";
     }
   }
 
@@ -1208,7 +1287,12 @@
         return;
       }
       if (b.type === "math") {
-        ui.answer.appendChild(el("div", "discopt-ask-math", "\\[" + b.text + "\\]"));
+        var mb = el("div", "discopt-ask-math", "\\[" + b.text + "\\]");
+        // Kept as a JS property, not an attribute: it is model text, and the
+        // no-HTML invariant says it never becomes markup. Used only to render
+        // a readable fallback if MathJax rejects it (see typesetMath).
+        mb.__tex = b.text;
+        ui.answer.appendChild(mb);
         return;
       }
       if (b.type === "heading") {
@@ -1338,7 +1422,12 @@
         // and TeX handling is testable without a browser.
         parseInline: parseInline,
         parseAnswer: parseAnswer,
-        excerpt: excerpt
+        excerpt: excerpt,
+        // Also the fallback for math MathJax rejects (demoteBadMath), which is
+        // the case worth testing directly: malformed TeX is exactly what does
+        // not survive a round trip through the browser's own parser.
+        stripTex: stripTex,
+        texToProse: texToProse
       };
     }
   } else if (document.readyState === "loading") {

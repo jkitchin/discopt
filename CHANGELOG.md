@@ -28,6 +28,16 @@ The release procedure that produces these entries is documented in
 - **The status line no longer overlaps the question box.** The panel is a flex
   column, so a two-line message was shrunk to its `min-height` and drawn across
   the textarea below it.
+- **Math the model writes badly no longer paints a MathJax error box into the
+  answer.** A 1B local model opened `\begin{split}` and closed it with
+  `\end{aligned}`; MathJax replaced the expression with its red-on-yellow
+  "`\begin{split}` ended with `\end{aligned}`" box mid-answer. Nothing caught
+  it because `typesetPromise` *resolves* on a TeX error rather than rejecting —
+  the failure only exists in the DOM, as an `<mjx-merror>` element. Each
+  expression now keeps its source, and any that MathJax rejects is demoted to
+  readable prose (`\frac{UB - LB}{|UB|}` → `(UB - LB)/|UB|`) rather than
+  repaired: guessing the intended environment would put invented mathematics on
+  the page. Small models writing malformed TeX is expected, not exceptional.
 
 - **The published docs assistant now has a search index.** `docs.yml` ran
   `jupyter-book build docs/` and nothing else, but `_static/ask-index.json` is a
