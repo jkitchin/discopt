@@ -10,6 +10,20 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Changed
+
+- **`import discopt` no longer pulls the `_multiprocessing` C extension.**
+  `discopt.modeling` re-exports `solve_batch`, so `discopt.batch` is imported by
+  every `import discopt`, and it imported `multiprocessing` at module level —
+  a capability only `solve_batch(workers>1)` uses, and one `workers=1` returns
+  before reaching. The import now lives in the two functions that build a pool.
+  No API change: `solve_batch` is exported and behaves exactly as before.
+  This makes the package importable on CPython builds that ship no
+  `_multiprocessing` (Pyodide/WebAssembly), where the eager import previously
+  made *all* of discopt unimportable. Regression tests reproduce that
+  environment with a `sys.meta_path` blocker and solve an LP, a MILP and an
+  MINLP with the multiprocessing names unimportable.
+
 ### Fixed
 
 - **OA's feasibility evaluators now forward `timing_bucket` (issue #74 again).**
@@ -23,9 +37,18 @@ The release procedure that produces these entries is documented in
   over-report that layer by exactly the restoration cost. `solver.py`'s
   cut-augmented proxy has forwarded the attribute since #74; these two were
   written later and did not.
-
-### Fixed
-
+- **The docs site no longer shows `global\_opt` with a visible backslash.**
+  In a LaTeX document `\text{global\_opt}` is exactly right; MathJax 3
+  implements none of TeX's text-mode escapes and prints the backslash. Measured
+  against pdflatex and MathJax 3 (24 compiles x 24 renderings): inside
+  `\text{}`/`\texttt{}` *no* spelling satisfies both engines, while inside
+  `\mathtt{}`/`\mathrm{}` or bare math, `\_ \% \# \& \$ \{ \}` are exact
+  under both. `to_latex()` is documented as markup to paste into a paper, so
+  rendering only for MathJax was not an option. `_latex_text` now emits every
+  special as a math-mode atom between `\text{}` runs — verified exact in both
+  engines over a 15-string corpus — the three affected notebook equations use a
+  math wrapper, and a test greps every authored page so the habit cannot come
+  back.
 - **The docs assistant renders its answers instead of showing their source.**
   The model writes markdown and cites with bracketed numbers, but the panel
   printed the whole reply as one pre-wrapped string: a literal `\[ \min_x … \]`
