@@ -1,0 +1,12 @@
+{
+  "name": "discopt-wasm-tests",
+  "private": true,
+  "description": "End-to-end check that the staged emscripten wheels actually solve under Pyodide.",
+  "type": "module",
+  "scripts": {
+    "test": "node examples_in_pyodide.mjs"
+  },
+  "dependencies": {
+    "pyodide": "0.28.3"
+  }
+}

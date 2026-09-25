@@ -1,7 +1,24 @@
-# Built wheels and their manifests are staged here by build-wheel.sh and
-# uploaded by the docs deploy; they are not committed. An emscripten wheel is
-# valid for exactly one Pyodide build, so a committed one goes stale silently
-# the moment either version moves -- the manifest check in worker.js exists
-# because that happens.
-*
-!.gitignore
+# The wheels here ARE committed, deliberately. Nothing is ignored; this file
+# exists only to say why, because an earlier version of it ignored them and the
+# reasoning needs to be visible where the decision is.
+#
+# Building an emscripten wheel needs ~1 GB of toolchain -- Pyodide's patched
+# emsdk, a Rust nightly and a wasm-exception-handling sysroot -- which the docs
+# workflow has no reason to carry on every run. So `build-wheel.sh` is run by
+# hand and its output is committed, and the deploy only copies files. This is
+# what POUNCE does with `pounce-solver`, and the two must agree: the page
+# installs both wheels into one interpreter.
+#
+# The cost is that a wheel can go stale. An emscripten wheel is valid for
+# exactly one Pyodide build, so if either version moves and nobody rebuilds,
+# the page breaks. Two things catch that instead of a visitor:
+#
+#   * `build-wheel.sh --check` runs in CI, and compares the staged manifests'
+#     `pyodide_version` against the pin in `worker.js` and the wheel version
+#     against `pyproject.toml`.
+#   * `worker.js` re-checks the same thing at load and refuses with a message
+#     naming the rebuild command.
+#
+# Neither catches a wheel that is merely *old* -- built from a commit whose
+# Python source has since changed. Rebuild and re-commit when the page should
+# show new solver behaviour; the version check will not remind you.

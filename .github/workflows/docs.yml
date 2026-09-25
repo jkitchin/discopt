@@ -10,6 +10,7 @@ on:
     paths:
       - "docs/**"
       - "python/discopt/**"
+      - "crates/discopt-wasm/**"
       - ".github/workflows/docs.yml"
   # Keep a manual button so the site can be republished without a docs commit
   # (e.g. after a Pages settings change or a failed deploy).
@@ -57,6 +58,71 @@ jobs:
         run: |
           node docs/tests/ask_retrieval.mjs docs/_build/html/_static/ask-index.json
           python docs/tests/ask_e2e.py
+      # The in-browser solver page. It is static -- HTML, two ES modules, a
+      # vendored CodeMirror bundle and two emscripten wheels -- so staging it is
+      # a copy, not a build.
+      #
+      # The wheels are COMMITTED rather than built here. Building one needs
+      # Pyodide's patched emsdk, a Rust nightly and a wasm-EH sysroot, roughly a
+      # gigabyte of toolchain, which is not worth carrying on a docs run; see
+      # crates/discopt-wasm/build-wheel.sh. The trade is that a stale or missing
+      # wheel would be invisible from here, so it is asserted below instead:
+      # without these tests a visitor is the one who discovers that `import
+      # discopt` fails on the live page.
+      #
+      # One build from main, not one per tag: the page is the current solver,
+      # and an archived copy per release would be a fleet of pages quietly
+      # serving old wheels.
+      - name: Check the staged wasm wheels
+        run: crates/discopt-wasm/build-wheel.sh --check
+      - name: Stage the in-browser solver page
+        run: |
+          set -euo pipefail
+          site="docs/_build/html/wasm"
+          mkdir -p "$site"
+          cp -a crates/discopt-wasm/web/. "$site/"
+          find "$site" -name .gitignore -delete
+          # Named explicitly rather than globbed: a glob that matches nothing
+          # succeeds, which is the failure this step exists to prevent.
+          test -s "$site/index.html"
+          test -s "$site/app.js"
+          test -s "$site/worker.js"
+          test -s "$site/examples.js"
+          test -s "$site/vendor/codemirror.bundle.js"
+          test -s "$site/wheels/discopt-wheel.json"
+          test -s "$site/wheels/pounce-wheel.json"
+          # And the manifests must name wheels that actually arrived -- copying
+          # a manifest without its wheel is exactly how this breaks.
+          python - "$site" <<'PY'
+          import json, pathlib, sys
+          site = pathlib.Path(sys.argv[1])
+          checked = 0
+          for manifest in sorted((site / "wheels").glob("*-wheel.json")):
+              wheel = site / "wheels" / json.loads(manifest.read_text())["wheel"]
+              assert wheel.is_file() and wheel.stat().st_size > 0, wheel
+              print(f"  {wheel.name}  {wheel.stat().st_size} bytes")
+              checked += 1
+          assert checked == 2, f"expected 2 staged wheels, found {checked}"
+          print(f"staged wheels verified: {checked}")
+          PY
+      # Static checks cannot see this class of failure. Both browser bugs found
+      # while building the page -- LP/MILP dying on a missing highspy, and MIQP
+      # dying on a Rayon pool that cannot exist without pthreads -- were
+      # invisible to pytest and to every assertion above, because they need a
+      # real Pyodide interpreter with these exact wheels in it. So the staged
+      # site is served and the six examples are actually solved.
+      - name: Solve the examples under real Pyodide
+        run: |
+          set -euo pipefail
+          npm --prefix crates/discopt-wasm/tests ci
+          python -m http.server -d docs/_build/html/wasm 8731 &
+          server=$!
+          trap 'kill $server' EXIT
+          for _ in $(seq 1 30); do
+            curl -sfo /dev/null http://localhost:8731/wheels/discopt-wheel.json && break
+            sleep 1
+          done
+          node crates/discopt-wasm/tests/examples_in_pyodide.mjs http://localhost:8731
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:

@@ -1,0 +1,55 @@
+name: Browser page
+
+# The in-browser solver page, checked on the PR that changes it.
+#
+# The same check runs in the docs workflow, but that one is a push-to-main
+# trigger: it publishes first and reports second, so a broken page would be live
+# by the time it failed. This job gates the change instead, and needs none of
+# the docs build -- the page is static and the wheels are committed, so it is a
+# static server plus a Pyodide interpreter.
+on:
+  pull_request:
+    paths:
+      - "crates/discopt-wasm/**"
+      - ".github/workflows/wasm.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wasm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # Version pins first: an emscripten wheel is valid for exactly one Pyodide
+      # build, and a mismatch here fails as "package does not exist" further
+      # down, which reads like anything but a stale wheel.
+      - name: Check the staged wheels
+        run: crates/discopt-wasm/build-wheel.sh --check
+      # Solving the examples is the only check that sees a browser-only failure.
+      # Two shipped in this page and neither was visible to pytest or to lint:
+      # LP and MILP dying on a highspy that has no wasm build, and MIQP dying on
+      # a Rayon pool that cannot exist without pthreads.
+      - name: Solve the examples under real Pyodide
+        run: |
+          set -euo pipefail
+          npm --prefix crates/discopt-wasm/tests ci
+          python -m http.server -d crates/discopt-wasm/web 8731 &
+          server=$!
+          trap 'kill $server' EXIT
+          for _ in $(seq 1 30); do
+            curl -sfo /dev/null http://localhost:8731/wheels/discopt-wheel.json && break
+            sleep 1
+          done
+          node crates/discopt-wasm/tests/examples_in_pyodide.mjs http://localhost:8731

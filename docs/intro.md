@@ -41,6 +41,16 @@ Model.solve()  -->  Python orchestrator  -->  Rust B&B kernel / TreeManager
 
 **Parameter estimation** (`python/discopt/estimate.py`): Model-based parameter estimation via weighted least-squares NLP with exact sensitivity Jacobians via JAX autodiff (no finite differences), Fisher-Information-based covariance, and confidence intervals {cite:p}`Franceschini2008`. Optimal design of experiments (FIM-based D/A/E-optimal design, sequential DoE, identifiability analysis) lives in the standalone [discopt-doe](https://github.com/jkitchin/discopt-doe) plugin, which shares the same `Experiment` interface.
 
+## Try it without installing anything
+
+discopt runs in the browser — the whole solver, compiled to WebAssembly, with an
+editor and a console. See [Run discopt in your browser](browser.md), or go
+straight to the solver page:
+
+```{raw} html
+<p><a href="wasm/index.html"><strong>&rarr; Open the in-browser solver</strong></a></p>
+```
+
 ## Quick Start
 
 ```python

@@ -126,7 +126,12 @@ where
     {
         use rayon::prelude::*;
         const PAR_MIN_BATCH: usize = 4;
-        if instances.len() >= PAR_MIN_BATCH {
+        // `threads_available()` as well as the size floor: rayon's global pool
+        // is built lazily on this first `par_iter`, and on a threadless
+        // platform that build *panics* instead of erroring (see
+        // `crate::parallel`). Nothing downstream can catch it, so the question
+        // is asked before entering the branch.
+        if instances.len() >= PAR_MIN_BATCH && crate::parallel::threads_available() {
             return instances.par_iter().map(&solve_one).collect();
         }
     }

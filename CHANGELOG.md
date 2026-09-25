@@ -10,6 +10,20 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Added
+
+- **discopt runs in the browser.** `crates/discopt-wasm/web/` is a single static
+  page — CodeMirror editor, console, Run button, and a dropdown with one model
+  per problem class — that installs discopt and `pounce-solver` as emscripten
+  wheels into Pyodide 0.28.3 and solves entirely client-side. It is published
+  with the documentation at `/wasm/`, linked from the landing page and from the
+  new `docs/browser.md`. Both wheels are committed rather than built in CI,
+  because building one needs ~1 GB of toolchain; `build-wheel.sh --check` and a
+  load-time check in `worker.js` guard against a version-stale wheel.
+  `crates/discopt-wasm/tests/examples_in_pyodide.mjs` solves all six examples in
+  a real Pyodide interpreter as part of the docs workflow, which is the only
+  check that catches browser-only failures.
+
 ### Changed
 
 - **`import discopt` no longer pulls the `_multiprocessing` C extension.**
@@ -25,6 +39,25 @@ The release procedure that produces these entries is documented in
   MINLP with the multiprocessing names unimportable.
 
 ### Fixed
+
+- **A threadless platform no longer kills the solve with a Rust panic.** Rayon
+  builds its global thread pool lazily and *panics* when that build fails, and
+  the panic reaches Python as `pyo3_runtime.PanicException`, which derives from
+  `BaseException` deliberately — so the `except Exception` serial fallbacks at
+  both POUNCE wave sites in `solver.py` never fired for it, and the solve died
+  instead of degrading. Measured under Pyodide, which has no pthreads: a MIQP
+  aborted with `ThreadPoolBuildError { kind: IOError(Os { code: 6, kind:
+  WouldBlock }) }`. Every parallel entry point now asks whether OS threads exist
+  before entering it — `discopt_core::parallel::threads_available` for
+  discopt-core's batch simplex and MILP node loops,
+  `solver._os_threads_available` for the POUNCE NLP and QP waves — and takes the
+  serial path that was already there when they do not. The catches were *not*
+  widened to `BaseException`: a panic from inside a wave is a real bug and stays
+  loud. A capability probe rather than a `sys.platform` test, so the next
+  threadless environment is covered too. Verified by solving the same MIQP both
+  ways: identical certified optimum, and the wave is entered 3 times with
+  threads and 0 times without.
+
 
 - **OA's feasibility evaluators now forward `timing_bucket` (issue #74 again).**
   `nlp_ipopt`'s `_charge_evaluator` reads `evaluator.timing_bucket` to decide
