@@ -15,6 +15,7 @@ import functools
 import logging
 import math
 import os
+import sys
 import threading
 import time
 import weakref
@@ -86,6 +87,46 @@ _R3A_BRANCH_COUNT_SINK: Optional[dict] = None
 # backed NLPEvaluator that ``nlp_ipopt`` imports at module scope.
 
 logger = logging.getLogger(__name__)
+
+
+@functools.lru_cache(maxsize=1)
+def _os_threads_available() -> bool:
+    """True when this interpreter can start an OS thread.
+
+    POUNCE's batch entry points solve a node wave in one parallel Rayon pass,
+    and Rayon builds its global pool lazily on that first call. When the build
+    fails it **panics**::
+
+        thread '<unnamed>' panicked at rayon-core/src/registry.rs:171:10:
+        The global thread pool has not been initialized.:
+        ThreadPoolBuildError { kind: IOError(Os { code: 6, kind: WouldBlock }) }
+
+    which crosses the PyO3 boundary as ``pyo3_runtime.PanicException``. That
+    class derives from ``BaseException`` *deliberately* (pyo3 ``src/panic.rs``:
+    "so that it will typically propagate all the way through the stack and
+    cause the Python interpreter to exit"), so the ``except Exception`` serial
+    fallbacks at both wave sites never fire for it — the solve dies instead of
+    degrading. Measured under Pyodide 0.28.3, which has no pthreads: the MIQP
+    path aborted here with no usable traceback for a user.
+
+    So the precondition is checked before the call rather than caught after it.
+    Widening those catches to ``BaseException`` would also swallow a panic from
+    *inside* a wave, which is a real bug and must stay loud.
+
+    A capability probe, not a platform test: ``sys.platform == "emscripten"``
+    would cover Pyodide and silently miss the next threadless environment (wasi,
+    a sandbox that blocks ``clone``, a container already at its thread limit).
+    Spawning one thread asks exactly what Rayon is about to ask. Cached for the
+    process — ``lru_cache`` on a no-argument function.
+    """
+    started = threading.Event()
+    try:
+        worker = threading.Thread(target=started.set, daemon=True)
+        worker.start()
+    except RuntimeError:  # "can't start new thread"
+        return False
+    worker.join(timeout=30.0)
+    return started.is_set()
 
 
 def _verify_and_inject_candidate(
@@ -21250,6 +21291,14 @@ def _solve_batch_pounce(
     trusted = np.ones(n_batch, dtype=bool)
 
     try:
+        # A wave is one parallel Rayon pass, so it needs OS threads. On a
+        # platform without them the pool build panics past every handler here
+        # (see ``_os_threads_available``); raising first routes to the serial
+        # path this ``except`` already implements.
+        if not _os_threads_available():
+            raise RuntimeError(
+                f"POUNCE node waves need OS threads; {sys.platform} cannot start one"
+            )
         with _timing.charge("pounce"):
             results = pounce.solve_nlp_batch(
                 problems,
@@ -23814,6 +23863,14 @@ def _pounce_qp_relaxation_nodes(qp_data, batch_lb, batch_ub, n_orig, t_start, ti
 
         solve_qp_batch = getattr(pounce, "solve_qp_batch", None)
     except ImportError:
+        solve_qp_batch = None
+
+    # "Unavailable" is a capability, not just a missing symbol: the entry point
+    # exists on a threadless platform but cannot run there, and calling it
+    # panics past the fallback below (see ``_os_threads_available``). Treating
+    # that as unavailable is exactly what this function's docstring promises.
+    if solve_qp_batch is not None and not _os_threads_available():
+        logger.debug("No OS threads (%s); using the serial QP node path", sys.platform)
         solve_qp_batch = None
 
     if solve_qp_batch is not None:

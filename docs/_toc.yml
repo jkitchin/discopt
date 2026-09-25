@@ -39,6 +39,7 @@ parts:
       - file: notebooks/tutorial_solver_selection
   - caption: Tutorials
     chapters:
+      - file: browser
       - file: notebooks/quickstart
       - file: notebooks/modeling_guide
       - file: notebooks/sets_and_indexing

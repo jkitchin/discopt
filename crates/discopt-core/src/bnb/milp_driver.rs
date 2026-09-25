@@ -2330,7 +2330,10 @@ fn solve_milp_node_search(
                 // Small batches don't amortize task-spawn overhead; solve those
                 // serially. PAR_MIN_BATCH is conservative — the bench tunes it.
                 const PAR_MIN_BATCH: usize = 4;
-                if batch.node_ids.len() >= PAR_MIN_BATCH {
+                // And only where rayon can actually build its pool: that build
+                // panics rather than erroring on a threadless platform, which
+                // no caller can catch (see `crate::parallel`).
+                if batch.node_ids.len() >= PAR_MIN_BATCH && crate::parallel::threads_available() {
                     (0..batch.node_ids.len())
                         .into_par_iter()
                         .map(|k| {

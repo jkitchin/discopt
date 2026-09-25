@@ -1,0 +1,6 @@
+{
+  "wheel": "discopt-0.9.1.dev0-cp312-abi3-emscripten_4_0_9_wasm32.whl",
+  "version": "0.9.1.dev0",
+  "pyodide_version": "0.28.3",
+  "emscripten_version": "4.0.9"
+}

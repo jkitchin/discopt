@@ -9,17 +9,23 @@
 // jax, jaxlib, highspy and pounce-solver alongside numpy and scipy, and three of
 // those cannot be installed under Pyodide at all (jaxlib and highspy publish no
 // emscripten wheel and never will; jax is pure Python but hard-pins jaxlib).
-// None of them is needed to solve: measured on a desktop, `import discopt`
-// loads zero jax and zero highspy modules, and a full MINLP solve still loads
-// zero of either -- every use site is a function-local import behind a route
-// this page does not take.
-//
+// None of the three is imported eagerly: every use site is a function-local
+// import, so `import discopt.modeling` loads zero jax and zero highspy modules.
 // So the wheel is installed with `deps: false` and the dependencies this page
 // really needs are installed explicitly, in order. That is a deliberate
 // divergence between the browser's dependency contract and the declared one,
-// and it is recorded here rather than hidden: if discopt ever grows an eager
-// import of one of those three, this page breaks and the declared metadata was
-// right all along.
+// and it is recorded here rather than hidden.
+//
+// What that argument does NOT establish -- and an earlier version of this
+// comment wrongly claimed it did -- is that no *route* reaches them. Lazy
+// imports move the failure from install time to solve time; they do not remove
+// it. Pure LP and MILP really do route to highspy by default, and both examples
+// raised `HighsUnavailable` when first run under this page's constraints. The
+// fix is below, at the install; the lesson is here: "nothing imports it at
+// startup" is not "nothing needs it". The check that would have caught it is
+// `python/tests/test_wasm_examples.py`, which now runs every example with these
+// three modules blocked, because a plain pytest run has all three installed and
+// therefore cannot see this class of failure at all.
 
 const PYODIDE_VERSION = '0.28.3';
 const params = new URLSearchParams(self.location.search);
@@ -109,15 +115,63 @@ async function installDiscopt() {
   const pounceWheel = await wheelFromManifest('pounce', 'pounce');
   await micropip.install(pounceWheel);
 
-  // See the header: `deps: false` skips jax, jaxlib and highspy, which are
-  // declared but unreachable here and unnecessary for every route this page
-  // takes.
+  // See the header: `deps: false` skips jax, jaxlib and highspy, none of which
+  // has an emscripten wheel.
+  //
+  // `callKwargs`, NOT `micropip.install(wheel, { deps: false })`. Pyodide maps
+  // a trailing JS object to a *positional* argument, so the plain call binds
+  // `{deps: false}` to micropip's second parameter (`keep_going`) and the
+  // `deps` flag is silently dropped -- the install then tries to resolve the
+  // real dependency list and dies with
+  //
+  //     ValueError: Can't find a pure Python 3 wheel for:
+  //     'jaxlib>=0.4', 'highspy>=1.10', 'jax>=0.4'
+  //
+  // Nothing about the call site looks wrong; it just quietly means something
+  // else. `callKwargs` passes the object as keyword arguments, which is what
+  // was meant.
   const discoptWheel = await wheelFromManifest('discopt', 'discopt');
-  await micropip.install(discoptWheel, { deps: false });
+  await micropip.install.callKwargs(discoptWheel, { deps: false });
+
+  // Route pure LP and MILP through the in-house Rust simplex instead of HiGHS.
+  //
+  // This is NOT a workaround for the page: `DISCOPT_LP_MILP_BACKEND=rust` is
+  // discopt's shipped, supported opt-out from the #1229 HiGHS route, and the
+  // Rust route it selects is the fully certified engine that was the default
+  // before that route landed. Bounds are still certified; nothing is weakened.
+  //
+  // It is required, not cosmetic. A pure LP dispatches to `_solve_lp_highs`
+  // unconditionally when the backend is `highs` (solver.py:11939), and that
+  // route deliberately has no fallback -- it raises `HighsUnavailable` rather
+  // than quietly solving by some other means. Since highspy cannot install
+  // here, the LP and MILP examples -- the first two in the dropdown, LP being
+  // what the page opens on -- both died on:
+  //
+  //   discopt.solvers.lp_milp_highs.HighsUnavailable:
+  //   the LP/MILP HiGHS route needs highspy>=1.10
+  //
+  // An earlier note in this file claimed every jax/highspy use site was
+  // unreachable from the page. That was wrong; this is the correction. The
+  // backend is read per solve (`_lp_milp_backend()`), not at import, but it is
+  // set before the import below so the environment is settled in one place.
+  //
+  // The consequence is worth stating plainly rather than hiding: the LP and
+  // MILP numbers this page prints come from the Rust simplex, so they are not a
+  // measurement of the HiGHS route a desktop install takes by default.
+  await pyodide.runPythonAsync(`
+import os
+
+os.environ["DISCOPT_LP_MILP_BACKEND"] = "rust"
+`);
 
   // Fail loudly and immediately if the deps-false gamble was wrong, rather than
   // letting the first solve report a confusing ImportError from inside the
   // solver. This import is the exact claim the header makes.
+  //
+  // Note what this guard does and does not cover: it proves nothing was pulled
+  // in at *import* time. Both examples above imported cleanly and failed at
+  // *solve* time, which is why `python/tests/test_wasm_examples.py` runs every
+  // example with these three modules blocked.
   await pyodide.runPythonAsync(`
 import discopt.modeling as dm  # noqa: F401
 import sys
