@@ -26,6 +26,17 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **OA's feasibility evaluators now forward `timing_bucket` (issue #74 again).**
+  `nlp_ipopt`'s `_charge_evaluator` reads `evaluator.timing_bucket` to decide
+  which layer to charge derivative-callback time to; its "undeclared" arm is
+  documented as existing for duck-typed evaluators from *outside* the package.
+  `oa.py`'s `_FeasibilityEvaluator` and `_ElasticFeasibilityEvaluator` are
+  in-tree wrappers that enumerate their members explicitly, so they fell to that
+  arm: every OA feasibility subproblem logged a warning aimed at external code
+  and left its callback time with the enclosing region, making the layer profile
+  over-report that layer by exactly the restoration cost. `solver.py`'s
+  cut-augmented proxy has forwarded the attribute since #74; these two were
+  written later and did not.
 - **The docs site no longer shows `global\_opt` with a visible backslash.**
   In a LaTeX document `\text{global\_opt}` is exactly right; MathJax 3
   implements none of TeX's text-mode escapes and prints the backslash. Measured

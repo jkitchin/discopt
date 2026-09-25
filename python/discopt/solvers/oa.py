@@ -2152,6 +2152,21 @@ class _FeasibilityEvaluator:
         return 0
 
     @property
+    def timing_bucket(self):
+        """Forward the wrapped evaluator's layer (issue #74).
+
+        Same reason as ``solver.py``'s cut-augmented proxy: this class
+        enumerates its members explicitly rather than delegating through
+        ``__getattr__``, so an attribute on the wrapped evaluator does not reach
+        ``nlp_ipopt``'s ``_charge_evaluator`` on its own. Without this, every OA
+        feasibility subproblem falls to the "undeclared" arm, which both logs a
+        warning aimed at *external* duck-typed evaluators and leaves the
+        derivative-callback time charged to the enclosing region -- the layer
+        profile over-reports that layer by exactly the restoration cost.
+        """
+        return self._eval.timing_bucket
+
+    @property
     def variable_bounds(self):
         return self._lb, self._ub
 
@@ -2294,6 +2309,12 @@ class _ElasticFeasibilityEvaluator:
     @property
     def n_constraints(self) -> int:
         return len(self._rows)
+
+    @property
+    def timing_bucket(self):
+        """Forward the wrapped evaluator's layer (issue #74). See
+        :class:`_FeasibilityEvaluator.timing_bucket` for why this is explicit."""
+        return self._eval.timing_bucket
 
     @property
     def variable_bounds(self):
