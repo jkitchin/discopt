@@ -230,7 +230,16 @@ directly; always re-export from org.
 
 - [ ] Draft a GitHub Release for tag `vX.Y.Z`.
 - [ ] Title: `discopt vX.Y.Z`.
-- [ ] Body: paste the new `CHANGELOG.md` section plus a short "Highlights" paragraph.
+- [ ] Body: a short "Highlights" section, then the new `CHANGELOG.md` section —
+      **unless it does not fit.** A GitHub release body is capped at 125,000
+      characters and the whole section must fit under that, headings and all.
+      Measure before pasting (`awk '/^## \[X\.Y\.Z\]/,/^## \[/' CHANGELOG.md | wc -c`);
+      v0.9.0's section was 145,684 characters and could not be pasted at all.
+      When it does not fit, publish Highlights plus a permalink to the section at
+      the release tag — `https://github.com/jkitchin/discopt/blob/vX.Y.Z/CHANGELOG.md`
+      — and say in the body how large the full changelog is, so the link reads as
+      a deliberate choice rather than an omission. Link the *tag*, never `main`:
+      `main` moves, and §12 adds an `## [Unreleased]` header to it minutes later.
 - [ ] Attach any relevant phase gate reports or benchmark plots.
 - [ ] Publish the release (not draft).
 

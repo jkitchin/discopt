@@ -174,7 +174,7 @@ jobs:
           merge-multiple: true
           path: dist
       # Green build jobs are not evidence of coverage: v0.8.0 published with
-      # eight of twelve platform/version combinations missing and every job
+      # nine of twelve platform/version combinations missing and every job
       # passed. Check the artifact list itself, before the upload.
       - name: Verify wheel coverage
         run: python .github/scripts/check_wheel_coverage.py dist

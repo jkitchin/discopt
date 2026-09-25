@@ -1925,7 +1925,7 @@ The release procedure that produces these entries is documented in
   `pyproject.toml` declares `requires-python = ">=3.10"`, but the
   release workflow's macOS and Windows jobs passed no interpreter list, so maturin
   built against the runner's `setup-python` version alone. v0.8.0 published 11
-  wheels covering 4 of 12 platform/version combinations off Linux; `pip install
+  wheels covering 3 of 12 platform/version combinations off Linux; `pip install
   discopt` on macOS or Windows under 3.10, 3.11 or 3.13 fell through to the sdist
   and failed on a missing Rust toolchain, which reads as a broken package rather
   than a missing wheel. Present since at least v0.7.0, whose file list has the
