@@ -18408,15 +18408,25 @@ def _convex_nlp_certificate_gap(
     # spurious direction from a near-zero (numerically noisy) gradient finds no real
     # descent and does not fire — a genuine optimum, which has no better feasible
     # point, is never rejected.
+    #
+    # The vertex is built from the box with the TRUE bound-infinity cutoff
+    # (``CONSTRAINT_INF`` = 1e20), not the ``_INF = 1e19`` sentinel used above: the
+    # default box ``DEFAULT_VARIABLE_BOUND`` = 9.999e19 is FINITE (#850), so a
+    # variable declared without an upper bound (or any bound in [1e19, 1e20)) must
+    # get a vertex. Capping it at 1e19 read it as +∞, formed no vertex, and let
+    # ``min -log(x)`` on the default box certify its interior stall (#853 regression).
+    # Any point of this box is feasible, so a witness found here stays sound.
+    lb_v = np.where(lb > -_CONSTRAINT_INF, lb, -np.inf)
+    ub_v = np.where(ub < _CONSTRAINT_INF, ub, np.inf)
     y_fw = x.copy()
     moved = False
     for j in range(n):
         rj = float(reduced[j])
-        if rj > 0.0 and np.isfinite(lb_c[j]) and lb_c[j] < x[j]:
-            y_fw[j] = lb_c[j]
+        if rj > 0.0 and np.isfinite(lb_v[j]) and lb_v[j] < x[j]:
+            y_fw[j] = lb_v[j]
             moved = True
-        elif rj < 0.0 and np.isfinite(ub_c[j]) and ub_c[j] > x[j]:
-            y_fw[j] = ub_c[j]
+        elif rj < 0.0 and np.isfinite(ub_v[j]) and ub_v[j] > x[j]:
+            y_fw[j] = ub_v[j]
             moved = True
     if moved:
         d = y_fw - x
