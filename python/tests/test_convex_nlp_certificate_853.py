@@ -125,3 +125,135 @@ def test_certificate_gap_helper_refutes_vanishing_gradient_stall():
     assert out2 is not None, "genuine boundary optimum must not be refuted"
     stat, comp = out2
     assert stat < 1e-4 and comp < 1e-6, f"boundary optimum must certify, got {stat}, {comp}"
+
+
+# --- Default / large box: ub in [1e19, 1e20) (#853 regression, 2026-09-25) ---------
+#
+# The refutation above first formed its Frank-Wolfe vertex from ``_INF = 1e19``-capped
+# bounds, so the default box ``DEFAULT_VARIABLE_BOUND = 9.999e19`` — FINITE per #850 —
+# read as +inf and got no vertex. Every continuous variable declared WITHOUT an upper
+# bound therefore still certified the interior -log stall (obj = bound = -18.97) while
+# the box optimum is -log(9.999e19) = -46.05: a dual bound crossing the box optimum by
+# ~27. The vertex now uses the true 1e20 bound-infinity cutoff.
+
+from discopt.constants import DEFAULT_VARIABLE_BOUND  # noqa: E402
+
+_BOX_UB = DEFAULT_VARIABLE_BOUND
+
+
+def _assert_no_certificate(name: str, r) -> None:
+    assert not (r.status == "optimal" and r.gap_certified), (
+        f"{name}: still emits a certificate (status={r.status}, "
+        f"gap_certified={r.gap_certified}, obj={r.objective!r}, bound={r.bound!r})"
+    )
+
+
+@pytest.mark.parametrize("solver", ["ipm", "ipopt", "pounce"])
+def test_neglog_default_box_not_false_optimal(solver):
+    """``min -log(x), x >= 1`` with NO declared ub (default box 9.999e19). Before the
+    fix: optimal, gap_certified=True, obj=bound=-18.97 vs box optimum -46.05."""
+    m = dm.Model("neg_log_default")
+    x = m.continuous("x", lb=1.0)
+    m.minimize(-dm.log(x))
+    r = m.solve(nlp_solver=solver)
+    _assert_sound("default box", r, -math.log(_BOX_UB))
+    _assert_no_certificate("default box", r)
+
+
+@pytest.mark.parametrize("ub", [1e19, 5e19, 9e19], ids=lambda v: f"ub={v:.0e}")
+def test_neglog_large_explicit_ub_not_false_optimal(ub):
+    """Explicit ub in [1e19, 1e20) is a finite bound and must be refuted like 1e12."""
+    r = _neglog(ub).solve(nlp_solver="ipm")
+    _assert_sound(f"ub={ub:.0e}", r, -math.log(ub))
+    _assert_no_certificate(f"ub={ub:.0e}", r)
+
+
+def test_neglog_shifted_default_box_not_false_optimal():
+    """``min -log(1+x), x >= 0`` on the default box (box optimum -log(1+9.999e19))."""
+    m = dm.Model("neg_log1p_default")
+    x = m.continuous("x", lb=0.0)
+    m.minimize(-dm.log(1 + x))
+    r = m.solve(nlp_solver="ipm")
+    _assert_sound("-log(1+x) default box", r, -math.log(1.0 + _BOX_UB))
+    _assert_no_certificate("-log(1+x) default box", r)
+
+
+def test_neglog_two_var_constrained_default_box_not_false_optimal():
+    """``min -log(x)-log(y) s.t. x+y >= 2`` on the default box: the constraint is slack
+    at the stall (zero multiplier), so the refutation must still reach the corner."""
+    m = dm.Model("neg_log2_default")
+    x = m.continuous("x", lb=1e-3)
+    y = m.continuous("y", lb=1e-3)
+    m.subject_to(x + y >= 2)
+    m.minimize(-dm.log(x) - dm.log(y))
+    r = m.solve(nlp_solver="ipm")
+    _assert_sound("two-var default box", r, -2.0 * math.log(_BOX_UB))
+    _assert_no_certificate("two-var default box", r)
+
+
+def test_maximize_log_default_box_not_false_optimal():
+    """``max log(x), x >= 1`` on the default box. Box optimum +46.05; a valid upper
+    bound must be >= it. Before the fix the certified bound was +18.97 (below max)."""
+    m = dm.Model("max_log_default")
+    x = m.continuous("x", lb=1.0)
+    m.maximize(dm.log(x))
+    r = m.solve(nlp_solver="ipm")
+    opt = math.log(_BOX_UB)
+    if r.bound is not None:
+        assert r.bound >= opt - 1e-4 * opt, f"UNSOUND upper bound {r.bound!r} < max {opt:.6g}"
+    _assert_no_certificate("max log default box", r)
+
+
+def test_default_box_interior_optimum_still_certifies():
+    """A GENUINE interior optimum on the default box must stay certified: the
+    refutation now forms a vertex at 9.999e19, but ``L`` there is far worse, so no
+    witness exists. ``min x^2/2 - log(x)`` has its optimum at x=1, obj=0.5."""
+    m = dm.Model("interior_default")
+    x = m.continuous("x", lb=1e-3)
+    m.minimize(0.5 * x**2 - dm.log(x))
+    r = m.solve(nlp_solver="ipm")
+    assert r.status == "optimal" and r.gap_certified, (
+        f"genuine interior optimum lost its certificate (status={r.status}, "
+        f"gap_certified={r.gap_certified})"
+    )
+    assert r.objective == pytest.approx(0.5, rel=1e-5, abs=1e-6)
+
+
+def test_certificate_gap_helper_refutes_on_default_box():
+    """Unit test: with ub = DEFAULT_VARIABLE_BOUND the helper must refute the stall
+    (it returned a certifiable tuple before the fix)."""
+    from discopt.solver import _convex_nlp_certificate_gap, _make_evaluator
+
+    m = dm.Model("neg_log_default_unit")
+    xv = m.continuous("x", lb=1.0)
+    m.minimize(-dm.log(xv))
+    ev = _make_evaluator(m)
+    lb, ub = np.array([1.0]), np.array([_BOX_UB])
+    cl = cu = np.empty(0)
+    x_stall = np.array([1.7339e8])
+    out = _convex_nlp_certificate_gap(ev, x_stall, None, lb, ub, cl, cu, -math.log(x_stall[0]))
+    assert out is None, f"default-box stall must be refuted, got {out}"
+
+
+def test_default_box_epigraph_optimum_still_certifies():
+    """A genuine optimum whose objective is a FREE (default-box) epigraph variable must
+    stay certified. ``min t s.t. t >= x1^2 + x2^2, x1 + x2 >= 4`` has its optimum at
+    x1 = x2 = 2, t = 8. At that point the Lagrangian gradient on ``t`` is roundoff
+    (~1e-14); widening the Lagrangian refutation to the 9.999e19 box amplified it into
+    a spurious witness and withheld this certificate (caught by
+    ``test_gams.py::TestGamsImportObjvarEmbedded``). The far box is refuted only with
+    a primal feasible witness, which a genuine optimum does not have."""
+    m = dm.Model("epigraph_default")
+    x1 = m.continuous("x1", lb=0.0)
+    x2 = m.continuous("x2", lb=0.0)
+    t = m.continuous("t", lb=-_BOX_UB)
+    m.subject_to(x1 + x2 >= 4)
+    m.subject_to(x1 - x2 <= 1)
+    m.subject_to(x1**2 + x2**2 - t <= 0)
+    m.minimize(t)
+    r = m.solve(nlp_solver="ipm")
+    assert r.status == "optimal" and r.gap_certified, (
+        f"genuine epigraph optimum lost its certificate (status={r.status}, "
+        f"gap_certified={r.gap_certified}, obj={r.objective!r})"
+    )
+    assert r.objective == pytest.approx(8.0, rel=1e-5, abs=1e-5)
