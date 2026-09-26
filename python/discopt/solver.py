@@ -17943,8 +17943,51 @@ def solve_model(
                 # certified an objective below the true optimum. See
                 # ``_polish_preserves_feasibility`` for the measurement and for why
                 # the bar is never-degrade rather than plain feasibility.
+                # A purification exists to REPAIR the incumbent's continuous digits.
+                # When the incumbent violates NOTHING -- every row and every declared
+                # bound holds exactly, not merely within tolerance -- there is nothing
+                # to repair, and a polished point with a WORSE objective is a pure
+                # loss that can re-open a gap the tree already closed. Measured:
+                # ``min acosh(x)`` on ``[1, 3]`` -- the tree certifies 0 at ``x = 1``;
+                # the polish, re-solved over the declared box, stops a barrier
+                # distance inside at ``x = 1 + 1.5e-10``, where acosh's infinite
+                # slope makes the objective 1.74e-5; the 1e-4 "unchanged" window
+                # accepted it and the 1e-6 absolute gap then failed, turning a
+                # certified ``optimal`` into ``feasible``. (Latent until FBBT's
+                # outward rounding stopped pinning ``x`` to an exact ``[1, 1]`` box,
+                # which the ``_fix_lb < _fix_ub`` test had mistaken for an
+                # integer-fixed column.) EXACT, not tolerance, feasibility is the
+                # bar on purpose: an incumbent that beats the optimum by spending
+                # its feasibility tolerance DOES need the worse, truly feasible
+                # polished point (#1285), and still gets it.
+                from discopt._relax.primal_heuristics import row_violations as _row_viol
+
+                # The polish's own box: the declared bounds on free columns, the
+                # rounded value on integer columns (so an integer at 0.99999999 is
+                # "not exact" and keeps its repair).
+                _inc_violation_free = bool(
+                    np.all(sol_flat >= _fix_lb) and np.all(sol_flat <= _fix_ub)
+                ) and (
+                    cl_list is None
+                    or len(cl_list) == 0
+                    or not bool(
+                        np.any(
+                            _row_viol(
+                                evaluator,
+                                sol_flat,
+                                np.asarray(cl_list, dtype=np.float64),
+                                np.asarray(cu_list, dtype=np.float64),
+                            )
+                            > 0.0
+                        )
+                    )
+                )
+                _degrades_sound_incumbent = _inc_violation_free and _pobj > obj_val
                 _accept = (
-                    _polish_preserves_feasibility(evaluator, _refined, sol_flat, cl_list, cu_list)
+                    not _degrades_sound_incumbent
+                    and _polish_preserves_feasibility(
+                        evaluator, _refined, sol_flat, cl_list, cu_list
+                    )
                     and (
                         _unchanged
                         or (

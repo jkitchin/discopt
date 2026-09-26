@@ -1760,3 +1760,115 @@ The `bound <= incumbent` invariant above is what covers the other 50: it needs n
 oracle and it is the certificate invariant CLAUDE.md §1 names, checked in both
 directions across arms so a bound that got unsoundly tighter on the fix arm is
 caught against the base arm's independently-found incumbent.
+
+## 11. The Rust side, part 2: FBBT interval arithmetic (adversarial round, 2026-09-26)
+
+§5 and §9.1 left Rust FBBT explicitly unswept ("FBBT … is explicitly **not** in
+scope"). An adversarial fuzzing round found a false certificate that lives exactly
+there, so this section closes that part of the remainder. (It also falsifies the
+standing claim in `p3-branch-and-reduce-probing-entry-2026-07-13.md` that "FBBT
+derives only valid bounds (outward-rounded interval arithmetic)": before this
+change `presolve/fbbt.rs` did no outward rounding at all, and said so in its own
+entropy comment — "this module's usual absence of outward rounding".)
+
+### 11.1 The defect
+
+Found by a random pure-integer fuzzer against an exact enumeration oracle
+(badly-scaled coefficients, seed 9219), then delta-debugged to
+
+```
+min  x2 - 1/(x0 + 10)        x0 ∈ {-2,-1,0},  x2 ∈ {0,1}
+s.t. (-3460*x2**3 + -1.15) + 3461.89 >= 0
+```
+
+Both `x2 = 0` (slack 3460.74) and `x2 = 1` (slack 0.74) are feasible; the optimum
+is `x2 = 0`, `-0.125`. discopt returned `status="optimal"`, objective `0.875`,
+**bound `0.875`** — a dual bound above the true optimum.
+
+Mechanism, measured: the backward pass through the two constant additions
+computed the preimage of `-3460*x2**3` as `<= -9.1e-14` where the exact value is
+`<= 0` (`fl(-1.15 + 3461.89)` is not the exact sum, and nothing rounded outward);
+the odd-root inversion amplified that to `x2 >= 2.97e-6`; the integrality snap
+(margin `1e-8`) turned it into `x2 = 1`. The pre-reform FBBT
+(`solver.py`, before `factorable_reformulate`) writes that box back into the model,
+so every later stage — the feasibility pump included — only ever saw `x2 = 1`. The
+same row with the constants pre-folded (`+ 3460.74`) does not round and solved
+correctly, which is the signature of an arithmetic defect rather than a modelling
+one.
+
+### 11.2 The fix
+
+`presolve/fbbt.rs` interval arithmetic is outward-rounded, default ON,
+`DISCOPT_FBBT_OUTWARD_ROUND=0` restoring the legacy arithmetic bit-for-bit for A/B:
+
+* **Elementary operations** (`+ − × ÷`, including the `SumOver` / `Sum` backward
+  preimages and the integer-power chain) use the directed operations added to
+  `crate::numeric` (`add_down`/`add_up`, …). They use error-free transformations —
+  TwoSum for `±`, an FMA residual for `×`/`÷` — to learn whether and in which
+  direction a result rounded, and step one ulp only then. **An exact result is
+  returned bit-for-bit**, which is why the corpus below is node-identical on every
+  certified instance.
+* Every partial sum of an accumulation is directed. A guard applied once at the end
+  of a cancelling sum is sized by the (small) result, not by the partial sums whose
+  rounding produced the error, and does not bound it — the #1415 lesson (§10) in
+  a different place.
+* **libm results** (`exp`, `ln`, `powf`, trig, …, not correctly rounded) are widened
+  by 2 ulp. **Closed-form inversions that combine libm values** — branch offsets
+  `atan(y) + k*PI` (with `PI` itself only the nearest double), differences of logs
+  in `logit`, the softplus inverse — are widened by 8 ulp of the operand scale.
+* The forward sigmoid rule used `0.5 + 0.5*tanh(x/2)`, which cancels to exactly `0`
+  below `x ≈ -37` and made the upper endpoint smaller than the true positive value;
+  it now uses the stable `e^x/(1+e^x)` form (legacy formula kept under the opt-out).
+
+### 11.2a A latent terminal-polish defect the fix exposed
+
+The first test sweep with the fix found one certification regression:
+`test_relaxation_coverage.py::test_operator_has_valid_tight_bound[acosh]`
+(`min acosh(x)` on `[1, 3]`) went `optimal` → `feasible`. The tree was identical in
+both arms (incumbent 0 at `x = 1`, gap 5e-324 after 3 nodes); the difference was
+the terminal KKT polish. Legacy FBBT's incumbent cutoff pinned `x` to an exact
+`[1, 1]`, and the polish's `_fix_lb < _fix_ub` test — meant to find integer-fixed
+columns — skipped it by accident. Under outward rounding the pin is
+`[1, 1 + 4 ulp]` (`cosh(0)` guarded), so the polish widened `x` to its declared
+box, the IPM stopped a barrier distance inside at `x = 1 + 1.5e-10`, acosh's
+infinite slope made the objective 1.74e-5, the 1e-4 "unchanged" purification
+window adopted it, and the 1e-6 absolute gap then failed.
+
+The polish now refuses a purification that WORSENS the objective of an incumbent
+that violates nothing exactly (every row and every bound of the polish's own box,
+not merely within tolerance). Exact rather than tolerance feasibility is the bar
+on purpose: #1285's incumbent beats the optimum by spending its feasibility
+tolerance and still needs — and still gets — the worse, truly feasible polished
+point (`test_1285_certificate_after_polish_swap.py` passes).
+
+### 11.3 Verification
+
+* Rust: `rounding_residue_cannot_fix_a_binary_through_an_odd_root` (the reduced
+  row, binary and continuous) passes with the fix and **fails under
+  `DISCOPT_FBBT_OUTWARD_ROUND=0`** (`Binary: FBBT cut off the feasible point x = 0:
+  [1, 1]`); `numeric` tests pin the directed operations (exact-when-exact, bracket
+  the round-to-nearest result on the residual's side, overflow clamping). `cargo
+  test -p discopt-core --lib`: 780 passed. `cargo clippy -D warnings` clean in both
+  CI configurations.
+* Python: `python/tests/test_fbbt_outward_rounding.py` — FBBT keeps `x2 = 0`,
+  the solve certifies `-0.125`, and a subprocess under the opt-out asserts the
+  fixture still rounds (so the other tests cannot pass vacuously, §6).
+* **Corpus panel** (`pf_panel.py`, 66 in-repo instances, 30 s, jobs 4; OFF arm =
+  `DISCOPT_FBBT_OUTWARD_ROUND=0`, ON arm `--vs` OFF): proved 49 → 49, gained 0,
+  lost 0. **All 49 certified instances are identical in status, node count, dual
+  bound and objective** (bound-neutral). 8 rows differ, all unproved at the wall on
+  *both* arms: 4 bounds looser (`4stufen`, `beuster`, `tanksize`, `tls2`), 4
+  tighter or deeper (`heatexch_gen3` 783 → 43888, `tspn08`, `tspn12`, `nvs05`).
+  `4stufen`/`beuster` were re-run 3× interleaved and are **deterministic**, not
+  noise: FBBT output differs only at the ~1e-15 relative level, and that is enough
+  to steer a 3-node, time-limited root trajectory. No bound in either arm crosses
+  its incumbent or reference.
+* The same dump shows the legacy defect on unmodified corpus instances: legacy FBBT
+  raised declared lower bounds by rounding alone on **8 variables of `beuster` and
+  7 of `4stufen`** (`lb = 0.001` → `0.0010000000000000087`), excluding points of
+  the declared box; the fixed arithmetic: 0.
+
+**Still open (named, not claimed done):** the Python-side interval evaluators were
+covered by §§6–10; other Rust presolve passes that do their own arithmetic rather
+than calling `presolve::fbbt`'s interval functions (the rest of §9.1's remainder)
+are not swept here.

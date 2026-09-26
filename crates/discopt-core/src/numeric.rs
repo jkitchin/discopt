@@ -66,6 +66,232 @@ pub fn deflated_magnitude(d: f64, abs_sum: f64, k: usize) -> Option<f64> {
     }
 }
 
+// ─────────────────────────────────────────────────────────────
+// Directed rounding (rigorous interval endpoints)
+// ─────────────────────────────────────────────────────────────
+//
+// IEEE-754 `+ - * /` are correctly rounded: the computed result is the exact result
+// rounded to nearest. An interval endpoint computed that way can therefore land on
+// the WRONG side of the exact value by up to half an ulp, and a backward FBBT chain
+// can amplify that: an exact-zero preimage computed as `-9e-14`, pushed through an
+// odd root, becomes a `3e-6` lower bound on a binary, which integer rounding then
+// snaps to `1` — cutting off the optimum and certifying a false optimum.
+//
+// The functions below return a value on the requested side of the exact result.
+// They use error-free transformations (TwoSum; an FMA residual for `*` and `/`) to
+// learn whether — and in which direction — the rounding happened, and step one ulp
+// only when it went the wrong way. An exact result is returned bit-for-bit, so
+// integer-valued arithmetic (most of a MILP's) is unchanged.
+//
+// Non-finite operands pass through with IEEE semantics (`±∞` is already the loosest
+// possible endpoint). A finite operation that overflows to `±∞` on the wrong side
+// is clamped to `∓f64::MAX`, the representable value just inside it.
+
+/// The next representable `f64` above `x`. `+∞` and NaN are returned unchanged.
+///
+/// `f64::next_up` would do, but it is stable only from Rust 1.86 and the MSRV is
+/// 1.84; this is the same bit-step.
+#[inline]
+pub fn next_up(x: f64) -> f64 {
+    if x.is_nan() || x == f64::INFINITY {
+        return x;
+    }
+    if x == 0.0 {
+        // Both +0.0 and -0.0 step to the smallest positive subnormal.
+        return f64::from_bits(1);
+    }
+    let bits = x.to_bits();
+    if x > 0.0 {
+        f64::from_bits(bits + 1)
+    } else {
+        f64::from_bits(bits - 1)
+    }
+}
+
+/// The next representable `f64` below `x`. `-∞` and NaN are returned unchanged.
+#[inline]
+pub fn next_down(x: f64) -> f64 {
+    -next_up(-x)
+}
+
+/// Magnitude below which an FMA residual may be inexact (gradual underflow), so the
+/// directed operations below stop trusting it and step unconditionally.
+const RESIDUAL_TRUST_FLOOR: f64 = 1e-290;
+
+#[inline]
+fn two_sum_err(a: f64, b: f64, s: f64) -> f64 {
+    // Knuth's TwoSum: `a + b == s + err` exactly, for finite a, b, s.
+    let bp = s - a;
+    let ap = s - bp;
+    (a - ap) + (b - bp)
+}
+
+/// A lower bound on the exact `a + b`.
+#[inline]
+pub fn add_down(a: f64, b: f64) -> f64 {
+    let s = a + b;
+    if !(a.is_finite() && b.is_finite()) {
+        return s;
+    }
+    if s == f64::INFINITY {
+        return f64::MAX;
+    }
+    if !s.is_finite() {
+        return s;
+    }
+    if two_sum_err(a, b, s) < 0.0 {
+        next_down(s)
+    } else {
+        s
+    }
+}
+
+/// An upper bound on the exact `a + b`.
+#[inline]
+pub fn add_up(a: f64, b: f64) -> f64 {
+    let s = a + b;
+    if !(a.is_finite() && b.is_finite()) {
+        return s;
+    }
+    if s == f64::NEG_INFINITY {
+        return f64::MIN;
+    }
+    if !s.is_finite() {
+        return s;
+    }
+    if two_sum_err(a, b, s) > 0.0 {
+        next_up(s)
+    } else {
+        s
+    }
+}
+
+/// A lower bound on the exact `a - b`.
+#[inline]
+pub fn sub_down(a: f64, b: f64) -> f64 {
+    add_down(a, -b)
+}
+
+/// An upper bound on the exact `a - b`.
+#[inline]
+pub fn sub_up(a: f64, b: f64) -> f64 {
+    add_up(a, -b)
+}
+
+/// Sign of `exact - computed` for `p = a * b`: `-1`, `0`, `+1`, or `None` when the
+/// residual cannot be trusted (underflow territory).
+#[inline]
+fn mul_err_sign(a: f64, b: f64, p: f64) -> Option<i8> {
+    if p.abs() < RESIDUAL_TRUST_FLOOR && a != 0.0 && b != 0.0 {
+        return None;
+    }
+    let e = a.mul_add(b, -p);
+    Some(if e > 0.0 {
+        1
+    } else if e < 0.0 {
+        -1
+    } else {
+        0
+    })
+}
+
+/// A lower bound on the exact `a * b`.
+#[inline]
+pub fn mul_down(a: f64, b: f64) -> f64 {
+    let p = a * b;
+    if !(a.is_finite() && b.is_finite()) {
+        return p;
+    }
+    if p == f64::INFINITY {
+        return f64::MAX;
+    }
+    if !p.is_finite() {
+        return p;
+    }
+    match mul_err_sign(a, b, p) {
+        Some(s) if s >= 0 => p,
+        _ => next_down(p),
+    }
+}
+
+/// An upper bound on the exact `a * b`.
+#[inline]
+pub fn mul_up(a: f64, b: f64) -> f64 {
+    let p = a * b;
+    if !(a.is_finite() && b.is_finite()) {
+        return p;
+    }
+    if p == f64::NEG_INFINITY {
+        return f64::MIN;
+    }
+    if !p.is_finite() {
+        return p;
+    }
+    match mul_err_sign(a, b, p) {
+        Some(s) if s <= 0 => p,
+        _ => next_up(p),
+    }
+}
+
+/// Sign of `exact - computed` for `q = a / b` (b finite, nonzero), or `None`.
+#[inline]
+fn div_err_sign(a: f64, b: f64, q: f64) -> Option<i8> {
+    if q.abs() < RESIDUAL_TRUST_FLOOR && a != 0.0 {
+        return None;
+    }
+    // r = a - q*b exactly (for a correctly rounded q), and a/b = q + r/b.
+    let r = (-q).mul_add(b, a);
+    if !r.is_finite() {
+        return None;
+    }
+    let s = if r == 0.0 {
+        0
+    } else if (r > 0.0) == (b > 0.0) {
+        1
+    } else {
+        -1
+    };
+    Some(s)
+}
+
+/// A lower bound on the exact `a / b`.
+#[inline]
+pub fn div_down(a: f64, b: f64) -> f64 {
+    let q = a / b;
+    if !(a.is_finite() && b.is_finite()) || b == 0.0 {
+        return q;
+    }
+    if q == f64::INFINITY {
+        return f64::MAX;
+    }
+    if !q.is_finite() {
+        return q;
+    }
+    match div_err_sign(a, b, q) {
+        Some(s) if s >= 0 => q,
+        _ => next_down(q),
+    }
+}
+
+/// An upper bound on the exact `a / b`.
+#[inline]
+pub fn div_up(a: f64, b: f64) -> f64 {
+    let q = a / b;
+    if !(a.is_finite() && b.is_finite()) || b == 0.0 {
+        return q;
+    }
+    if q == f64::NEG_INFINITY {
+        return f64::MIN;
+    }
+    if !q.is_finite() {
+        return q;
+    }
+    match div_err_sign(a, b, q) {
+        Some(s) if s <= 0 => q,
+        _ => next_up(q),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,5 +321,102 @@ mod tests {
         // Non-finite input is a refusal, never a silent pass-through.
         assert!(deflated_magnitude(f64::NAN, 1.0, 1).is_none());
         assert!(deflated_magnitude(1.0, f64::INFINITY, 1).is_none());
+    }
+
+    #[test]
+    fn next_up_down_step_one_ulp_and_pass_infinities() {
+        assert_eq!(next_up(1.0), 1.0 + f64::EPSILON);
+        assert_eq!(next_down(1.0), 1.0 - f64::EPSILON / 2.0);
+        assert!(next_up(0.0) > 0.0 && next_up(-0.0) > 0.0);
+        assert!(next_down(0.0) < 0.0);
+        assert_eq!(next_up(f64::INFINITY), f64::INFINITY);
+        assert_eq!(next_down(f64::NEG_INFINITY), f64::NEG_INFINITY);
+        assert_eq!(next_up(f64::NEG_INFINITY), -f64::MAX);
+        assert!(next_up(f64::NAN).is_nan());
+    }
+
+    #[test]
+    fn directed_ops_are_exact_when_exact() {
+        // Bit-identical on exact arithmetic: the property that keeps an
+        // integer-coefficient model's FBBT unchanged.
+        assert_eq!(add_down(2.0, 3.0), 5.0);
+        assert_eq!(add_up(2.0, 3.0), 5.0);
+        assert_eq!(sub_down(3461.89, 3461.89), 0.0);
+        assert_eq!(mul_down(3.0, -4.0), -12.0);
+        assert_eq!(mul_up(3.0, -4.0), -12.0);
+        assert_eq!(div_down(1.0, 4.0), 0.25);
+        assert_eq!(div_up(-1.0, 4.0), -0.25);
+    }
+
+    /// The directed pair must bracket the round-to-nearest result, on the side the
+    /// exact residual (TwoSum / FMA) says the rounding went.
+    #[test]
+    fn directed_ops_bracket_the_exact_result() {
+        // The #9219 chain: fl(-1.15 + 3461.89) is not the exact sum of the two
+        // doubles; the directed pair must bracket it (TwoSum error is exact).
+        let (a, b) = (-1.15_f64, 3461.89_f64);
+        let s = a + b;
+        let err = two_sum_err(a, b, s);
+        assert!(err != 0.0, "fixture must actually round");
+        let (lo, hi) = (add_down(a, b), add_up(a, b));
+        assert!(lo <= s && s <= hi && lo < hi);
+        // exact = s + err lies inside [lo, hi]
+        if err > 0.0 {
+            assert_eq!(lo, s);
+            assert!(hi > s);
+        } else {
+            assert_eq!(hi, s);
+            assert!(lo < s);
+        }
+        // Sweep: directed results always straddle the round-to-nearest result, on
+        // the side the exact residual says.
+        let vals: [f64; 10] = [
+            0.1,
+            -0.1,
+            1.0 / 3.0,
+            -2.0 / 3.0,
+            3460.74,
+            -3461.89,
+            1e-300,
+            7e300,
+            -1.15,
+            1e16,
+        ];
+        let mut n = 0;
+        for &x in &vals {
+            for &y in &vals {
+                let p = x * y;
+                if p.is_finite() && p.abs() > 1e-280 {
+                    let e = x.mul_add(y, -p);
+                    let (d, u) = (mul_down(x, y), mul_up(x, y));
+                    assert!(d <= p && p <= u);
+                    assert!(if e > 0.0 {
+                        u > p
+                    } else if e < 0.0 {
+                        d < p
+                    } else {
+                        d == p && u == p
+                    });
+                    n += 1;
+                }
+                if y != 0.0 {
+                    let q = x / y;
+                    if q.is_finite() && q.abs() > 1e-280 {
+                        let (d, u) = (div_down(x, y), div_up(x, y));
+                        assert!(d <= q && q <= u);
+                        n += 1;
+                    }
+                }
+            }
+        }
+        assert!(n > 100, "sweep executed {n} checks");
+    }
+
+    #[test]
+    fn directed_ops_clamp_overflow_on_the_inner_side() {
+        assert_eq!(add_down(f64::MAX, f64::MAX), f64::MAX);
+        assert_eq!(add_up(f64::MAX, f64::MAX), f64::INFINITY);
+        assert_eq!(mul_up(-f64::MAX, 2.0), f64::MIN);
+        assert_eq!(mul_down(-f64::MAX, 2.0), f64::NEG_INFINITY);
     }
 }
