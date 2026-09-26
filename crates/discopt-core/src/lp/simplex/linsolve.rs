@@ -467,10 +467,23 @@ impl FeralLU {
     }
 
     /// One-norm condition estimate `κ₁ ≈ ‖B‖₁·‖B⁻¹‖₁` of the current basis
-    /// (Hager–Higham, via feral#94). `None` unless in numeric-focus mode and
-    /// factorized. A large value flags an ill-conditioned node — the signal that
-    /// drives in-engine recovery (refine / perturb / branch) instead of a solver
-    /// swap (discopt#364).
+    /// (Hager–Higham, via feral#94), reconstructing `B` from the numeric-focus
+    /// retained copy. `None` unless in numeric-focus mode and factorized.
+    ///
+    /// **This is the convenience form, not the one the engine calls.** Every node
+    /// factor comes from [`node_feral_lu`], which has no numeric focus, so this
+    /// returns `None` there — pinned by `condition_estimate_tracks_conditioning`.
+    /// A caller that *has* the basis (every simplex site does) wants
+    /// [`condition_estimate_sparse`](Self::condition_estimate_sparse), which needs
+    /// no retained copy.
+    ///
+    /// This docstring used to claim κ₁ was "the signal that drives in-engine
+    /// recovery (refine / perturb / branch)". That was false for the whole life of
+    /// the method: it had zero production callers, and the recovery trigger at
+    /// [`super::dual`]'s optimality confirmation read [`growth`](Self::growth)
+    /// instead. Corrected here rather than deleted, because the measurement that
+    /// found the false claim also found the signal is worth having — see
+    /// [`condition_estimate_sparse`](Self::condition_estimate_sparse).
     pub fn condition_estimate(&mut self) -> Option<f64> {
         let mat = self.build_basis_matrix()?.ok()?;
         match (self.lu.as_mut()?, mat) {
@@ -479,6 +492,66 @@ impl FeralLU {
             // build_basis_matrix builds to match the live factor kind, so the
             // cross arms are unreachable; degrade to None rather than panic.
             _ => None,
+        }
+    }
+
+    /// One-norm condition estimate `κ₁ ≈ ‖B‖₁·‖B⁻¹‖₁` of the basis whose sparse
+    /// columns are `cols`, solving with the factor already in hand.
+    ///
+    /// `cols[slot]` lists the `(row, value)` nonzeros of basis slot `slot`, exactly
+    /// the form [`LinearSolver::factorize_sparse`] takes — so a caller passes the
+    /// same columns it factorized.
+    ///
+    /// **Why this exists alongside [`condition_estimate`](Self::condition_estimate).**
+    /// feral's estimator takes the basis as an *argument* and does not retain it
+    /// (`SparseLu::condition_estimate_1`); the no-argument wrapper rebuilds it from
+    /// the numeric-focus retained copy, which the hot path never pays for. The
+    /// signal was therefore unreachable exactly where it was wanted. This form asks
+    /// the caller for what it already has.
+    ///
+    /// Cost: one `O(nnz)` matrix build plus feral's `≤ 2·5+1` ftran/btran solves
+    /// against the existing factor. No refactorization, no `with_numeric_focus`, no
+    /// `O(m²)` retention.
+    ///
+    /// **The working factor is not the basis's fresh LU, and that was measured, not
+    /// assumed.** At a mid-solve call the factor may carry Forrest-Tomlin eta
+    /// updates on top of its base LU, so the solves this estimator performs are not
+    /// the ones a fresh factorization of `cols` would perform. Over the 66-instance
+    /// `minlplib_nl` corpus at 20 s/instance — 335,033 dual optimality-confirmation
+    /// points, each estimated both ways — the ratio of this estimate to one from a
+    /// fresh `with_numeric_focus` factorization of the same basis has
+    /// `p01 = p25 = median = p75 = p99 = 1.0000`, with 335,031/335,033 (100.00%)
+    /// agreeing inside one order of magnitude (extremes 0.080 and 6.2). Treat them
+    /// as the same signal at the decade granularity a condition-number trigger
+    /// uses; do not read a factor-of-two difference as meaningful.
+    ///
+    /// `None` when unfactorized, or when the matrix build or the estimate fails.
+    /// Callers must read `None` as *no signal*, never as *well-conditioned*: the
+    /// conservative response is to fall back to whatever decision would have been
+    /// made without κ₁. Note feral only checks the dimension, so passing a basis
+    /// other than the factored one yields a meaningless number rather than an error.
+    pub fn condition_estimate_sparse(
+        &mut self,
+        m: usize,
+        cols: &[Vec<(usize, f64)>],
+    ) -> Option<f64> {
+        match self.lu.as_mut()? {
+            Factored::Sparse(lu) => {
+                let b = SparseColMatrix::from_sparse_columns(m, cols).ok()?;
+                lu.condition_estimate_1(&b).ok()
+            }
+            Factored::Dense(lu) => {
+                // The dense factor is only chosen for small `m`, so the O(m²)
+                // scatter here is bounded by the same rule that picked it.
+                let mut dense = vec![vec![0.0; m]; m];
+                for (slot, col) in cols.iter().enumerate() {
+                    for &(row, v) in col {
+                        dense[slot][row] = v;
+                    }
+                }
+                let b = GeneralMatrix::from_columns(m, &dense).ok()?;
+                lu.condition_estimate_1(&b).ok()
+            }
         }
     }
 
@@ -1204,6 +1277,82 @@ mod tests {
         let mut plain = FeralLU::new();
         plain.factorize(2, &ident).unwrap();
         assert!(plain.condition_estimate().is_none());
+    }
+
+    /// The basis-taking form must work on the factor the engine actually runs:
+    /// `node_feral_lu()`, no numeric focus, no retained copy — precisely where
+    /// `condition_estimate()` returns `None`. That gap is why κ₁ had no callers.
+    #[test]
+    fn condition_estimate_sparse_works_without_numeric_focus() {
+        // diag(1, 1e-10) as sparse columns.
+        let cols: Vec<Vec<(usize, f64)>> = vec![vec![(0, 1.0)], vec![(1, 1e-10)]];
+        let mut lu = node_feral_lu();
+        lu.factorize_sparse(2, &cols).unwrap();
+
+        // The old form is blind here — not because the basis is fine, but because
+        // it insists on a retained copy this factor never made.
+        assert!(
+            lu.condition_estimate().is_none(),
+            "no retained basis, so the no-argument form cannot estimate"
+        );
+
+        let k = lu
+            .condition_estimate_sparse(2, &cols)
+            .expect("the basis-taking form needs no retention");
+        assert!(k > 1e9, "κ₁(diag(1,1e-10)) ≈ 1e10, got {k}");
+
+        // And it agrees with the numeric-focus route on the same matrix, so the
+        // cheap form is not a different (weaker) number.
+        let dense = vec![vec![1.0, 0.0], vec![0.0, 1e-10]];
+        let mut nf = FeralLU::new().with_numeric_focus();
+        nf.factorize(2, &dense).unwrap();
+        let k_nf = nf.condition_estimate().expect("numeric-focus + factorized");
+        let ratio = k / k_nf;
+        assert!(
+            (0.5..=2.0).contains(&ratio),
+            "cheap κ₁ {k:e} should track the numeric-focus κ₁ {k_nf:e} (ratio {ratio})"
+        );
+    }
+
+    /// A well-conditioned basis must read as well-conditioned, or the estimate
+    /// carries no information: κ₁(I) ≈ 1 through the same entry point.
+    #[test]
+    fn condition_estimate_sparse_is_quiet_on_a_benign_basis() {
+        let cols: Vec<Vec<(usize, f64)>> = vec![vec![(0, 1.0)], vec![(1, 1.0)]];
+        let mut lu = node_feral_lu();
+        lu.factorize_sparse(2, &cols).unwrap();
+        let k = lu.condition_estimate_sparse(2, &cols).expect("factorized");
+        assert!((k - 1.0).abs() < 1e-6, "κ₁(I) ≈ 1, got {k}");
+    }
+
+    #[test]
+    fn growth_is_blind_to_a_class_kappa_sees() {
+        // `growth` is `‖U‖∞ / ‖U₀‖∞` -- it measures what ELIMINATION did. On a
+        // diagonal matrix no elimination happens, so growth is exactly 1 no
+        // matter how ill-conditioned the matrix is. κ₁ sees it immediately.
+        // This is why the two signals are not interchangeable, and why a
+        // growth-only trigger has a blind spot by construction rather than by
+        // tuning. Measured on the 66-instance `minlplib_nl` corpus: of 328,711
+        // dual optimality-confirmation points, 672 (0.2%) trip
+        // `GROWTH_REFINE_TRIGGER`, while 13,768 (4.2%) have growth <= 1e4 and
+        // kappa_1 > 1e10 -- the worst at growth exactly 1.000 with kappa_1 ~ 7e18.
+        let ill = vec![vec![1.0, 0.0], vec![0.0, 1e-10]];
+
+        let mut plain = FeralLU::new();
+        plain.factorize(2, &ill).unwrap();
+        let g = plain.growth().expect("factorized");
+
+        let mut nf = FeralLU::new().with_numeric_focus();
+        nf.factorize(2, &ill).unwrap();
+        let k = nf.condition_estimate().expect("numeric-focus + factorized");
+
+        assert!(
+            g <= 1.0 + 1e-12,
+            "growth should be ~1 on a diagonal (no elimination), got {g}"
+        );
+        assert!(k > 1e9, "κ₁ should be ~1e10, got {k}");
+        // The trigger the engine actually uses would stay silent here.
+        assert!(g <= 1e4, "growth {g} is below GROWTH_REFINE_TRIGGER=1e4");
     }
 
     #[test]
