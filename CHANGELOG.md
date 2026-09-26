@@ -12,6 +12,33 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **`Model.piecewise` / `dm.piecewise`: declared piecewise-linear functions**
+  (#1482). `y = m.piecewise(x, breakpoints, values, method=..., name=...)`
+  declares a tabulated univariate function (a pump curve, a tariff schedule, a
+  property table) and returns a variable equal to its piecewise-linear
+  interpolant; `values` may also be a callable sampled at the breakpoints, and an
+  array input applies the function elementwise. The call lowers, at declaration,
+  to one of four **exact** MILP encodings, so the model solved is the model
+  declared and solves certify as usual: `"incremental"` (default), `"log"` (the
+  Gray-code SOS2 embedding from `_relax/embedding.py`, which thereby gains its
+  first production caller), `"disaggregated"`, and `"sos2"` (a declared
+  `Model.sos2` set). Default chosen by measurement: on two interleaved panels of
+  seeded random nonconvex tables (60 + 75 runs,
+  `discopt_benchmarks/scripts/piecewise_method_panel.py`, every run certified and
+  all methods agreeing on every objective) `"incremental"` had the lowest shifted
+  geometric-mean wall time (0.857 s / 0.509 s) against `"log"` (0.867 / 0.671),
+  `"disaggregated"` (1.427 / 0.786) and `"sos2"` (4.629, roughly 40x slower on
+  33-breakpoint tables because its generic lowering adds O(n^2) rows). An input
+  whose domain is not inside the breakpoint span — an infinite bound included —
+  raises `PiecewiseDomainError` instead of being silently clamped; the check is
+  recorded on the model, repeated by `validate()` before every solve (so a bound
+  widened afterwards is caught), and carried through `dm.dumps`/`dm.loads`.
+  Repeated breakpoints (jumps) and multivariate tables are refused. Automatic PWL
+  *approximation* of nonlinear terms is deliberately not offered: it is not a
+  relaxation and could not carry a certificate. New notebook
+  `docs/notebooks/piecewise_linear.ipynb` and gallery example
+  `example_piecewise_pumps`.
+
 - **`dm.external`: external functions with caller-supplied derivatives** — the
   grey-box node, discopt's analogue of Pyomo's `ExternalGreyBoxModel`. Wrap a
   compiled simulator, a subprocess or a legacy kernel by supplying `fn`, `jac`

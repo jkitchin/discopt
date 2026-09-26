@@ -1188,6 +1188,7 @@ _STATE_AS_SORTED_LIST = ("_zero_spanning_factor_auxes",)
 #: Attributes carried in "state" by a bespoke encoder.
 _STATE_BESPOKE = (
     "_atan2_preconditions",
+    "_piecewise_domains",
     "_coupling_keys",
     "_sets",
     "_simplex_lowerings",
@@ -1417,11 +1418,32 @@ def _dec_atan2_preconditions(docs: Optional[list], nodes: list) -> list:
     return [(nodes[d["denominator"]], d["sign"], d["label"]) for d in docs or []]
 
 
+def _enc_piecewise_domains(model: Model, table) -> list[dict]:
+    """The input domains this model's ``piecewise`` calls were declared against.
+
+    Same reason as the ``atan2`` guard: the lowered rows force each input into its
+    breakpoint span, and the check that catches a bound widened past it after
+    declaration lives here. Dropping it on load would let a reloaded model clamp
+    a widened input silently (#1482). The input is written through the shared
+    node table so it aliases the node the rows already carry.
+    """
+    return [
+        {"input": table.add(expr), "lo": float(lo), "hi": float(hi), "label": label}
+        for expr, lo, hi, label in getattr(model, "_piecewise_domains", []) or []
+    ]
+
+
+def _dec_piecewise_domains(docs: Optional[list], nodes: list) -> list:
+    """Rebuild the domain guard list. A document predating it simply has none."""
+    return [(nodes[d["input"]], float(d["lo"]), float(d["hi"]), d["label"]) for d in docs or []]
+
+
 def _enc_state(model: Model, rows: list, table) -> dict:
     state: dict[str, Any] = {name: getattr(model, name) for name in _STATE_PLAIN}
     for name in _STATE_AS_SORTED_LIST:
         state[name] = sorted(getattr(model, name, set()) or set())
     state["_atan2_preconditions"] = _enc_atan2_preconditions(model, table)
+    state["_piecewise_domains"] = _enc_piecewise_domains(model, table)
     state["_coupling_keys"] = _enc_coupling_keys(model, rows)
     state["_sets"] = _enc_sets(model)
     state["_simplex_lowerings"] = _enc_simplex_lowerings(model)
@@ -1440,6 +1462,7 @@ def _dec_state(state: Optional[dict], model: Model, rows: list, nodes: list) -> 
         if name in state:
             setattr(model, name, set(state[name]))
     model._atan2_preconditions = _dec_atan2_preconditions(state.get("_atan2_preconditions"), nodes)
+    model._piecewise_domains = _dec_piecewise_domains(state.get("_piecewise_domains"), nodes)
     model._coupling_keys = _dec_coupling_keys(state.get("_coupling_keys"), rows)
     model._block_labels_var = _dec_block_labels_var(state.get("_block_labels_var"))
     model._block_labels_con = _dec_block_labels_con(state.get("_block_labels_con"), rows)

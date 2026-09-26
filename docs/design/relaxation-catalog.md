@@ -417,7 +417,7 @@ dead when all three are reachable from `polyhedral_oa.py` (1,239 of 2,199 lines 
 it credited `differentiable_solve.py` with 8 documentation references and `embedding.py` with
 17 — those belong to a same-named *function* in the production `_relax/differentiable.py` and
 to the unrelated `discopt.ml` embedding docs. Re-measured over the AST graph, the module
-`differentiable_solve.py` has one doc reference and `embedding.py` has none. Resolving relative
+`differentiable_solve.py` has one doc reference and `embedding.py` has none. (Since #1482 `embedding.py` is production code — `Model.piecewise`'s `"log"` method imports it — and its `incubating` entry is gone.) Resolving relative
 imports per PEP 328 matters for the same reason: mis-anchoring `from .foo import bar` turns it
 into a self-edge and makes dead modules look live, which is how `monotonicity.py` was missed by
 both passes.

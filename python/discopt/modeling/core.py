@@ -3163,6 +3163,35 @@ def if_else(
     return model.if_else(condition, then_value, else_value, name=name)
 
 
+def piecewise(
+    x: Expression,
+    breakpoints,
+    values,
+    *,
+    method: str = "incremental",
+    name: Optional[str] = None,
+) -> Variable:
+    """Declared piecewise-linear function (free-function form of :meth:`Model.piecewise`).
+
+    Discovers the owning :class:`Model` from the variables in *x* and delegates
+    to :meth:`Model.piecewise`. See that method for the full contract.
+
+    Examples
+    --------
+    >>> import discopt.modeling as dm
+    >>> cost = dm.piecewise(load, [0, 50, 80, 100], [0, 400, 760, 1100])
+    """
+    if not isinstance(x, Expression):
+        raise TypeError(f"piecewise() input must be a model expression, got {type(x).__name__}.")
+    model = _find_owning_model(x)
+    if model is None:
+        raise ValueError(
+            "piecewise() could not determine the owning Model (no variables in the "
+            "input); call model.piecewise(...) directly instead."
+        )
+    return model.piecewise(x, breakpoints, values, method=method, name=name)
+
+
 def udf(fn: Callable) -> Callable:
     """Compose a Python-callable user-defined function into the expression DAG.
 
@@ -4909,6 +4938,12 @@ class Model:
         # this prevents. Empty for the overwhelming majority of models, and the
         # check costs one interval walk per entry, not a walk of the model.
         self._atan2_preconditions: list[tuple[Expression, str, str]] = []
+        # The input domain every `piecewise` call relied on, as
+        # ``(input_expr, span_lo, span_hi, label)``. The lowered rows force the
+        # input into the breakpoint span, so a bound widened past it after
+        # declaration would silently clamp the model; `validate()` re-checks
+        # (see `discopt.modeling._piecewise.check_domains`, issue #1482).
+        self._piecewise_domains: list[tuple[Expression, float, float, str]] = []
         # Persistent set of declared variable/parameter names for O(1)
         # uniqueness checks (M7). Rebuilding ``{v.name ...} | {p.name ...}`` on
         # every declaration made model construction O(n²); this set is updated
@@ -6858,6 +6893,110 @@ class Model:
             Constraint name.
         """
         self._constraints.append(_SOSConstraint(2, variables, name))
+
+    # ── Piecewise-linear functions ──
+
+    def piecewise(
+        self,
+        x: "Expression",
+        breakpoints,
+        values,
+        *,
+        method: str = "incremental",
+        name: Optional[str] = None,
+    ) -> Variable:
+        """Declare ``y = f(x)`` for a tabulated piecewise-linear function ``f``.
+
+        ``f`` is the continuous piecewise-linear interpolant of the table
+        ``(breakpoints[i], values[i])`` on ``[breakpoints[0], breakpoints[-1]]``.
+        The call returns a new continuous variable ``y`` and adds the mixed-integer
+        linear rows that tie it to ``f(x)``; ``y`` can then be used anywhere an
+        expression can (objective, constraints, other nonlinear terms).
+
+        The rows are an **exact** representation of the graph of ``f``, not an
+        approximation of it: at every feasible point ``y == f(x)``, at the
+        breakpoints and between them. A solve of a model using ``y`` is therefore
+        a solve of the declared model, and its certificate (``gap_certified``)
+        means what it always means. If the table was sampled from some nonlinear
+        function, the model solved is the one with the *interpolant*; the table is
+        the declaration.
+
+        Parameters
+        ----------
+        x : Expression
+            The input: a scalar variable, an element ``v[i]``, an array variable
+            (the same function is applied elementwise and ``y`` has ``x``'s shape),
+            or a scalar expression over variables.
+        breakpoints : array_like
+            Strictly increasing, finite, at least two entries. Repeated
+            breakpoints (jumps) are refused; model a discontinuous function with
+            :meth:`either_or`.
+        values : array_like or callable
+            ``f`` at each breakpoint, finite; or a callable ``g(float) -> float``
+            sampled at the breakpoints (``f`` is then the interpolant of those
+            samples).
+        method : str, default ``"incremental"``
+            The MILP encoding. All are exact; they differ in size and LP strength.
+
+            * ``"incremental"`` (``"inc"``, ``"delta"``) -- ``n - 2`` ordering
+              binaries, locally ideal. Default: lowest shifted-geometric-mean
+              wall time on two interleaved panels of seeded random tables
+              (``discopt_benchmarks/scripts/piecewise_method_panel.py``; numbers
+              in ``docs/notebooks/piecewise_linear.ipynb``).
+            * ``"log"`` (``"logarithmic"``, ``"ebd"``) -- ``ceil(log2(n - 1))``
+              binaries via the Gray-code SOS2 embedding
+              (:mod:`discopt._relax.embedding`), locally ideal. Fewest binaries;
+              a close second on the panels.
+            * ``"disaggregated"`` (alias ``"dcc"``) -- one binary per segment,
+              locally ideal.
+            * ``"sos2"`` (``"lambda"``) -- convex-combination weights under a
+              declared :meth:`sos2` set, lowered at solve time by the generic SOS2
+              reformulation (one binary per breakpoint, O(n^2) exclusion rows).
+              Slowest on the panels. The model writers refuse SOS relations, so
+              use another method for a model you intend to export.
+        name : str, optional
+            Name of the output variable ``y``. Auxiliary variables and rows get a
+            ``_pwl<k>_<name>`` prefix.
+
+        Returns
+        -------
+        Variable
+            The output ``y``, with bounds ``[min(values), max(values)]``.
+
+        Raises
+        ------
+        PiecewiseDomainError
+            (a ``ValueError``) if the domain of ``x`` is not contained in
+            ``[breakpoints[0], breakpoints[-1]]`` -- an infinite bound included.
+            The rows would otherwise restrict ``x`` to the span, silently
+            clamping the model. The declared bounds of a variable are compared
+            exactly; a composite expression is judged by its interval enclosure.
+            Because bounds are mutable, :meth:`validate` repeats the check before
+            every solve.
+        ValueError
+            For a malformed table or an unknown *method*.
+
+        Notes
+        -----
+        Univariate only. The encodings follow :cite:t:`Vielma2010`; the
+        logarithmic one is :cite:t:`Vielma2011`.
+
+        Examples
+        --------
+        >>> q = m.continuous("q", lb=0, ub=40)            # flow, m3/h
+        >>> head = m.piecewise(q, [0, 10, 20, 30, 40],
+        ...                    [52, 50, 45, 36, 22], name="head")
+        >>> m.subject_to(head >= 30)
+        """
+        from discopt.modeling._piecewise import (
+            PiecewiseLinear,
+            build_piecewise,
+            normalize_piecewise_method,
+        )
+
+        canonical = normalize_piecewise_method(method)
+        table = PiecewiseLinear.from_table(breakpoints, values)
+        return build_piecewise(self, x, table, canonical, name)
 
     # ── Logical propositions ──
 
@@ -8987,6 +9126,12 @@ class Model:
         from discopt.modeling._atan2 import check_preconditions
 
         check_preconditions(self)
+
+        # Same reasoning for a piecewise input whose bound was widened past the
+        # breakpoint span after declaration: the rows would clamp it silently.
+        from discopt.modeling._piecewise import check_domains
+
+        check_domains(self)
 
         names = set()
         for var in self._variables:

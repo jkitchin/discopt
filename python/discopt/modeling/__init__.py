@@ -18,6 +18,7 @@ Examples
 """
 
 from discopt.batch import solve_batch
+from discopt.modeling._piecewise import PiecewiseDomainError, PiecewiseLinear
 from discopt.modeling.argmin import (
     argmin,
     argmin_kkt,
@@ -86,6 +87,7 @@ from discopt.modeling.core import (
     maximum,
     minimum,
     norm,
+    piecewise,
     prod,
     round_,
     sigmoid,
@@ -168,6 +170,9 @@ __all__ = [
     "minimum",
     "maximum",
     "if_else",
+    "piecewise",
+    "PiecewiseDomainError",
+    "PiecewiseLinear",
     "udf",
     "custom",
     "external",
