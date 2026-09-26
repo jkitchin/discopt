@@ -117,20 +117,40 @@ but the global *guarantee* is gone — so do not read `result.objective` as glob
   box ⇒ no valid envelope ⇒ no sound bound. This is the most common cause of a
   `status="feasible"`, `gap_certified=False` result. *Fix:* add finite bounds.
 
-- **Black-box / user-defined functions** (`udf`, `custom`, `CustomCall`). These
-  call arbitrary Python and have **no algebraic relaxation**, so the bounding step
-  cannot reason about them. They are evaluated pointwise during local NLP solves
-  only — useful for modeling convenience, but they reduce the run to local
-  optimization with no global certificate. If the body traces through the
-  reduced-space `MCBox` type you *do* get a certificate — see
+- **Black-box / user-defined functions** (`udf`, `custom`, `external`,
+  `CustomCall`). These call arbitrary Python and have **no algebraic relaxation**,
+  so the bounding step cannot reason about them. They are evaluated pointwise
+  during local NLP solves only — useful for modeling convenience, but they reduce
+  the run to local optimization with no global certificate. If the body traces
+  through the reduced-space `MCBox` type you *do* get a certificate — see
   {doc}`notebooks/reduced_space_customcall`. If it does not, `solver="direct"`
   gives you a systematic global *search* over the box in place of a single local
   solve ({doc}`notebooks/direct_global`) — still with no certificate, but a much
   better answer on a multimodal objective.
 
+  The degradation is **whole-model, not per-term**. One opaque body anywhere in the
+  objective or a constraint routes the entire solve to the local NLP path, so the
+  algebraic structure in the *rest* of the model stops being exploited too. If only
+  a small part of your model is genuinely opaque, it is worth asking whether that
+  part can be written algebraically (or traced through `MCBox`) before accepting
+  the loss for everything else.
+
+  `solver="amp"` **refuses** such a model outright rather than returning
+  something: it certifies by linearizing a partitioned relaxation, and there is
+  nothing to linearize. That is a deliberate refusal, not a limitation to work
+  around.
+
 - **External simulators, table lookups, or interpolated data** used as objective
   or constraint terms. Same reason as black-box functions: discopt cannot
   construct a valid under/over-estimator for something it cannot see symbolically.
+  {doc}`notebooks/external_function_node` shows how to embed one with
+  `dm.external(fn, jac=..., hess=...)` — you supply the derivatives, the block
+  becomes twice differentiable and solves on the NLP path, and it is
+  `status="feasible"` with no dual bound, by contract. Supplying derivatives buys
+  you a *solvable* block, not a *boundable* one; a certificate would additionally
+  need a valid interval or Lipschitz enclosure of the block over a box, which
+  discopt cannot obtain from a function it can only evaluate pointwise and would
+  have no way to verify if you asserted it.
 
 - **Operators with no implemented envelope, or genuinely non-factorable
   expressions.** If an intrinsic is outside the supported menu above, or an

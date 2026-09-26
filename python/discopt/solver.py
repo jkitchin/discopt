@@ -6140,15 +6140,24 @@ def _is_pure_continuous(model: Model) -> bool:
     return all(v.var_type == VarType.CONTINUOUS for v in model._variables)
 
 
-def _expression_contains_custom_call(root) -> bool:
-    """True if the expression DAG rooted at ``root`` contains a ``CustomCall``.
+def _iter_custom_calls(root):
+    """Yield every ``CustomCall`` in the expression DAG rooted at ``root``.
 
-    Shared by :func:`_model_contains_custom_call` (the whole-model test) and the
-    alphaBB gate in :func:`solve_model` (#1114), which asks the same question of
-    a single expression.
+    The one traversal behind both questions the solver asks about opaque nodes:
+    *is there one* (:func:`_expression_contains_custom_call`, the alphaBB gate at
+    #1114, :func:`_model_contains_custom_call`) and *which ones are they*
+    (:func:`_external_blocks_without_hessian`, which has to inspect each node's
+    callable). Duplicating the walk would mean two copies of the recursion-depth
+    reasoning below, and the second copy is where a missed child field hides.
+
+    One deliberate behaviour change from the boolean version this replaced: that
+    one returned at the first ``CustomCall`` and so never descended into its
+    ``args``, missing an opaque node nested inside another's arguments. This
+    yields and keeps walking. Strictly more correct, and no existing caller can
+    tell the difference -- they only asked whether the count was zero.
     """
     if root is None:
-        return False
+        return
     # Explicit-stack DFS (not Python recursion): ``from_nl`` can build a single
     # body tens of thousands of nodes deep, which a per-node recursive walk would
     # overflow the default recursion limit on (issue #271).
@@ -6156,7 +6165,7 @@ def _expression_contains_custom_call(root) -> bool:
     while stack:
         expr = stack.pop()
         if isinstance(expr, CustomCall):
-            return True
+            yield expr
         # Generic child traversal mirroring the DAG node fields used elsewhere
         # (e.g. discopt._relax.cutting_planes): BinaryOp/MatMul -> left/right,
         # UnaryOp/SumExpression -> operand, FunctionCall/CustomCall -> args,
@@ -6175,7 +6184,101 @@ def _expression_contains_custom_call(root) -> bool:
             stack.append(base)
         stack.extend(getattr(expr, "args", ()) or ())
         stack.extend(getattr(expr, "terms", ()) or ())
-    return False
+
+
+def _expression_contains_custom_call(root) -> bool:
+    """True if the expression DAG rooted at ``root`` contains a ``CustomCall``.
+
+    Shared by :func:`_model_contains_custom_call` (the whole-model test) and the
+    alphaBB gate in :func:`solve_model` (#1114), which asks the same question of
+    a single expression.
+    """
+    return any(True for _ in _iter_custom_calls(root))
+
+
+def _model_custom_calls(model: Model):
+    """Yield every ``CustomCall`` in *model*'s objective and constraint bodies."""
+    obj = getattr(model, "_objective", None)
+    if obj is not None:
+        yield from _iter_custom_calls(getattr(obj, "expression", None))
+    for c in model._constraints:
+        yield from _iter_custom_calls(getattr(c, "body", None))
+
+
+def _external_blocks_without_hessian(model: Model) -> list[str]:
+    """Names of *external* blocks (``dm.external``) in *model* that have no Hessian.
+
+    An external block's derivatives come from the caller, and ``hess=`` is
+    optional at build time because ``solver="direct"`` needs values only. The NLP
+    path does not: it asks for second derivatives, and a Hessian-less block can
+    only answer by failing inside the callback. Before ``dm.external`` existed
+    that failure was measured as a flood of ``pounce::py`` ERROR lines followed by
+    ``status="error"`` and a withheld incumbent -- a dead end with no statement of
+    what was wrong. So the solver asks up front instead; see the refusal in
+    :func:`solve_model`.
+
+    An ordinary ``dm.custom`` node is not external (discopt differentiates it) and
+    never appears here.
+    """
+    from discopt.modeling.external import external_spec
+
+    missing = []
+    for node in _model_custom_calls(model):
+        spec = external_spec(getattr(node, "fn", None))
+        if spec is not None and not spec.has_hessian and spec.name not in missing:
+            missing.append(spec.name)
+    return missing
+
+
+def _external_block_failure(model: Model) -> Optional[BaseException]:
+    """The first error raised by any ``dm.external`` callable in *model*, or None.
+
+    Raising from inside a callback is not sufficient to reach the caller. POUNCE
+    catches an exception thrown from a Hessian callback, logs it as
+    ``ERROR pounce::py: hessian(): JaxRuntimeError: INTERNAL: CpuCallback
+    error...``, and lets the solve continue -- so a transposed ``hess`` produced
+    ~40 stderr lines and then a withheld-incumbent ``status="error"`` result,
+    while ``Model.solve()`` returned normally. Measured, on the wrong-rank-Hessian
+    case in ``python/tests/test_external_function.py``.
+
+    The value and Jacobian wrappers behave differently again: their errors *do*
+    reach the caller, but wrapped, with JAX's ``INTERNAL: CpuCallback error
+    calling callback`` on the first line. So all three roles need this, for two
+    different reasons -- see :func:`_reraise_external_failure`, which handles both
+    and is what callers use.
+    """
+    from discopt.modeling.external import external_failure
+
+    for node in _model_custom_calls(model):
+        exc = external_failure(getattr(node, "fn", None))
+        if exc is not None:
+            return exc
+    return None
+
+
+def _reraise_external_failure(model: Model, cause: Optional[BaseException] = None) -> None:
+    """Re-raise a ``dm.external`` callable's recorded error, naming it first.
+
+    Returns normally when no external block failed, so a caller can follow this
+    with its own ``raise``. There are two distinct failures to cover and both need
+    it, which is why this is a helper rather than one inline check:
+
+    * the error **propagates** but wrapped -- the exception's first line is
+      ``JaxRuntimeError: INTERNAL: CpuCallback error calling callback`` and the
+      message naming the callable is at the end of the text. Pass *cause*.
+    * the error is **swallowed** -- POUNCE catches an exception thrown from a
+      Hessian callback, logs it, and the solve runs on to a withheld-incumbent
+      ``status="error"``, so nothing reaches the caller at all. Pass no *cause*.
+
+    Which one happens depends on which callback the backend was inside, which is
+    the backend's business; this makes the caller's experience the same either way.
+    """
+    exc = _external_block_failure(model)
+    if exc is None:
+        return
+    raise ValueError(f"the solve was aborted: an external function raised. {exc}") from (
+        cause if cause is not None else exc
+    )
 
 
 def _model_contains_custom_call(model: Model) -> bool:
@@ -10254,19 +10357,50 @@ def solve_model(
                 stacklevel=2,
             )
 
-        return solve_direct(
-            model,
-            time_limit=time_limit,
-            nlp_solver=nlp_solver,
-            initial_point=initial_point,
-            **direct_kwargs,
-        )
+        try:
+            return solve_direct(
+                model,
+                time_limit=time_limit,
+                nlp_solver=nlp_solver,
+                initial_point=initial_point,
+                **direct_kwargs,
+            )
+        except Exception as exc:
+            # Nothing is swallowed: this re-raises the original unchanged unless an
+            # external block recorded a failure, in which case ours leads and the
+            # original is chained.
+            _reraise_external_failure(model, exc)
+            raise
 
     # --- AMP (Adaptive Multivariate Partitioning) global solver ---
     if _solver == "amp":
         import warnings
 
         from discopt.solvers.amp import solve_amp
+
+        # AMP is a *certifying* solver: it bounds the objective by partitioning the
+        # box and solving a MILP relaxation. An opaque CustomCall body (dm.custom,
+        # dm.external) has no algebraic form for that MILP to linearize, so AMP can
+        # never bound it. It does not produce a WRONG bound -- measured, it produces
+        # none at all -- but it gets there by way of an internal error that names
+        # nothing: "AMP: MILP build/solve failed at iteration 1: too many indices
+        # for array: array is 0-dimensional" followed by status="error" and
+        # objective=None. Refuse up front instead, naming the backends that do work
+        # on an opaque body. This mirrors the NLP-path gate below; unlike that one,
+        # there is no Hessian that could rescue it -- the obstruction is the missing
+        # relaxation, not the missing derivative.
+        if _model_contains_custom_call(model):
+            raise ValueError(
+                "solver='amp' cannot solve a model containing an opaque dm.custom / "
+                "dm.external body: AMP certifies by linearizing a partitioned "
+                "relaxation, and an opaque body has no algebraic form to linearize. "
+                "Use Model.solve(solver='direct') for a systematic derivative-free "
+                "global search over the box, Model.solve(solver='surrogate'), or the "
+                "default path for a single local NLP solve — none of which certify "
+                "global optimality, which is the price of the opaque body. If the "
+                "body traces through the reduced-space MCBox type, drop solver= and "
+                "the default path will certify it instead."
+            )
 
         amp_kwargs = {}
         amp_option_keys = (
@@ -11753,20 +11887,49 @@ def solve_model(
                     "the discopt._relax.mcbox intrinsic namespace), rebuild it from dm.* "
                     "primitives (see dm.udf), or remove the integer/binary variables."
                 )
+            # A dm.external block whose caller supplied no Hessian cannot answer
+            # the NLP path's second-derivative request. Refuse here, naming both
+            # fixes, rather than let it fail inside the callback: that failure is
+            # logged by POUNCE and swallowed, so the solve ran on to status="error"
+            # with the incumbent withheld and nothing said why (the measured
+            # behaviour before dm.external existed). solver="direct" and
+            # solver="surrogate" dispatch ABOVE this gate on purpose, so both
+            # remain reachable for a Hessian-less block.
+            _no_hess = _external_blocks_without_hessian(model)
+            if _no_hess:
+                raise ValueError(
+                    "Model contains dm.external block(s) with no Hessian: "
+                    + ", ".join(repr(n) for n in _no_hess)
+                    + ". The NLP path needs second derivatives. Pass hess=... to "
+                    "dm.external (shape: out_shape + x.shape + x.shape), or solve with "
+                    "Model.solve(solver='direct'), a derivative-free global search that "
+                    "needs values only."
+                )
             logger.info(
                 "Model contains a dm.custom(...) AD-only user function outside the "
                 "sound reduced-space (MCBox) scope — solving on the local NLP path "
                 "only (no global optimality certificate)."
             )
-            result = _solve_continuous(
-                model,
-                time_limit,
-                ipopt_options,
-                t_start,
-                nlp_solver,
-                initial_point=initial_point,
-                warm_start=warm_start,
-            )
+            # A dm.external callable that raised must not be reported as a solve
+            # outcome. These errors are structural (None, unconvertible, wrong
+            # shape) rather than numerical, so they are deterministic bugs in the
+            # model, not hard instances -- and they are checked even when the solve
+            # returned a result, because a `hess` of the wrong shape is wrong
+            # whether or not this particular run happened to need it.
+            try:
+                result = _solve_continuous(
+                    model,
+                    time_limit,
+                    ipopt_options,
+                    t_start,
+                    nlp_solver,
+                    initial_point=initial_point,
+                    warm_start=warm_start,
+                )
+            except Exception as exc:
+                _reraise_external_failure(model, exc)
+                raise
+            _reraise_external_failure(model)
             # C-33/SC-1 (#998) applies here a fortiori: an opaque dm.custom body
             # cannot be inspected at all, so convexity can never be established
             # for it — the single NLP's objective is a LOCAL optimum only, and

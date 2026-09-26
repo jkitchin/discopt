@@ -12,6 +12,63 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **`dm.external`: external functions with caller-supplied derivatives** — the
+  grey-box node, discopt's analogue of Pyomo's `ExternalGreyBoxModel`. Wrap a
+  compiled simulator, a subprocess or a legacy kernel by supplying `fn`, `jac`
+  and (for the NLP path) `hess`; discopt consumes them instead of trying to
+  differentiate the body. This closes a real gap: measured before this existed, a
+  plain-numpy body failed on *every* path including `solver="direct"` with
+  `TracerArrayConversionError`, and a hand-rolled `jax.custom_jvp` got its
+  Jacobian consumed and then died on `hessian(): Pure callbacks do not support
+  JVP`, ending `status="error"` with the incumbent withheld.
+
+  The mechanism is **nested** `jax.custom_jvp` — one rule contracting the
+  caller's Jacobian with the tangent, and the Jacobian itself a `custom_jvp`
+  function whose rule contracts the caller's Hessian. That second level is what
+  makes the block twice differentiable. Validated against an analytic Hessian and
+  a symbolic twin before implementation: 9/9 exact agreement (0.000e+00),
+  including under `jit` and in the forward-over-reverse HVP pattern POUNCE
+  requests; end-to-end through `Model.solve()` the external model matched its
+  symbolic twin to 1.558e-08 on the objective and 1.821e-08 on `x`
+  (constraint residual 4.842e-12). No evaluator or solver-core change was needed.
+
+  It reuses `CustomCall`, so it inherits that contract **unchanged and
+  deliberately**: no global certificate (`status="feasible"`, `bound`/`gap`
+  `None`), a hard refusal with integer/binary variables, and a refusal from `.nl`
+  export. `jac` is required — for a genuine black box the honest tool is
+  `dm.custom` with `solver="direct"` — and a model containing a Hessian-less
+  block is refused up front with a message naming both fixes rather than failing
+  deep inside POUNCE.
+
+### Fixed
+
+- **`solver="amp"` now refuses an opaque body instead of failing internally.** AMP
+  certifies by linearizing a partitioned relaxation, and an opaque `dm.custom` /
+  `dm.external` body has no algebraic form to linearize. It produced no false
+  bound, but it reached that state via `AMP: MILP build/solve failed at iteration
+  1: too many indices for array: array is 0-dimensional` followed by
+  `status="error"` with `objective=None` — nothing naming the cause. It now raises
+  up front, naming `solver="direct"`, `solver="surrogate"` and the default local
+  NLP path as the backends that do work on an opaque body. This affected plain
+  `dm.custom` too, not just the new `dm.external`, and the fix is keyed on
+  `CustomCall` so it covers both.
+
+- **An external callable's error now reaches the caller.** POUNCE catches an
+  exception raised inside a Hessian callback, logs it as `ERROR pounce::py:
+  hessian(): JaxRuntimeError: INTERNAL: CpuCallback error...`, and lets the solve
+  continue — so a transposed `hess` produced ~40 stderr lines and then a
+  withheld-incumbent `status="error"` while `Model.solve()` returned normally.
+  The wrappers now record the first failure and the solver re-raises it, naming
+  the callable, the role and both shapes. On the `solver="direct"` path the error
+  did propagate but JAX's `INTERNAL: CpuCallback error calling callback` took the
+  first line; ours leads now.
+- **A `None` return from an external callable is rejected instead of becoming
+  NaN.** `np.asarray(None, dtype=float)` does not raise — it returns
+  `array(nan)`, with exactly the shape a scalar block declares. A missing
+  `return` statement therefore passed validation and fed NaN to the solver as a
+  value. `None` is now rejected explicitly, before the (otherwise deliberate)
+  lenient coercion that accepts lists and integer arrays.
+
 - **discopt runs in the browser.** `crates/discopt-wasm/web/` is a single static
   page — CodeMirror editor, console, Run button, and a dropdown with one model
   per problem class — that installs discopt and `pounce-solver` as emscripten
