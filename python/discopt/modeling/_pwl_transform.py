@@ -567,7 +567,7 @@ def _lower_outer(model, leaf, w, bps, samples, bands, prefix) -> None:
     ``b - x = h*wl_i``, so the tapers are linear rows in ``(wl_i, wr_i, z_i)``;
     with ``z_i = 0`` every term vanishes and ``d_i = 0``.
     """
-    from discopt.modeling._piecewise import _lin
+    from discopt.modeling._piecewise import _lin, _value_reference
 
     add = model.subject_to
     s = len(bps) - 1
@@ -584,10 +584,20 @@ def _lower_outer(model, leaf, w, bps, samples, bands, prefix) -> None:
     b = np.asarray(bps)
     v = np.asarray(samples)
     wterms = [wl[i] for i in range(s)] + [wr[i] for i in range(s)]
-    add(leaf == _lin(np.concatenate([b[:-1], b[1:]]), wterms), name=f"{prefix}_x")
+    # Centred on the first breakpoint and on a central sample (#1495, the #1494
+    # class): with sum(wl + wr) = sum(z) = 1 these equal the uncentred
+    # ``leaf == sum b w`` rows exactly, but a solver meets that sum only to a
+    # tolerance eps, and uncentred the leaf may then drift by |b_0| * eps -- at
+    # b_0 = 1e5 enough to certify 2.5e-5 on a problem whose minimum is 0. Centred,
+    # the drift is span * eps. ``_value_reference`` keeps a sample equal to the
+    # reference up to rounding from becoming a droppable ~1e-16 coefficient.
+    cv = _value_reference(v)
+    bx = np.concatenate([b[:-1], b[1:]]) - b[0]
+    vw = np.concatenate([v[:-1], v[1:]]) - cv
+    add(leaf == _lin(bx, wterms, b[0]), name=f"{prefix}_x")
     dterms = [d[i] for i in range(s)]
     add(
-        w == _lin(np.concatenate([v[:-1], v[1:], np.ones(s)]), wterms + dterms),
+        w == _lin(np.concatenate([vw, np.ones(s)]), wterms + dterms, cv),
         name=f"{prefix}_w",
     )
     for i, bd in enumerate(bands):
@@ -1084,6 +1094,18 @@ class PWLTransformation:
             }
             history.append(entry)
             if self.mode == "outer" and r.status == "infeasible" and r.gap_certified:
+                if best_x is not None:
+                    # The same tripwire as below, for the extreme case: an earlier
+                    # round produced a point VERIFIED on the original model, so a
+                    # relaxation claiming emptiness is not a relaxation (or its
+                    # solver's infeasible label is false). Publishing "infeasible"
+                    # next to a known feasible point would be a false certificate.
+                    raise AssertionError(
+                        "nonlinear_to_pwl: the outer approximation was reported "
+                        f"infeasible in round {rounds} after round(s) before it produced "
+                        f"a point verified on the original model (objective {best_obj}); "
+                        "the outer approximation is not a relaxation"
+                    )
                 # The relaxation is infeasible, so the original is: a certificate.
                 return self._result(
                     status="infeasible",
