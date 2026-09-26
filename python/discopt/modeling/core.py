@@ -6979,7 +6979,11 @@ class Model:
         Notes
         -----
         Univariate only. The encodings follow :cite:t:`Vielma2010`; the
-        logarithmic one is :cite:t:`Vielma2011`.
+        logarithmic one is :cite:t:`Vielma2011`. To replace terms that are
+        *nonlinear functions* (``exp(x)``, ``x**3``) by piecewise-linear
+        constructs, use :func:`nonlinear_to_pwl`, which keeps the certificate
+        question explicit (a rigorous outer approximation, or an uncertified
+        approximation).
 
         Examples
         --------

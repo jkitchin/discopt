@@ -14,7 +14,9 @@ feasibility tolerance), at the breakpoints and between them. So a model built
 from these rows is the model the user declared, and a certificate on it is a
 certificate on the user's problem. That is what separates this construct from
 approximating a *nonlinear* term by a PWL surrogate, which is not a relaxation
-and would need its own certificate story; that is deliberately not offered here.
+and needs its own certificate story -- that is :func:`discopt.modeling.nonlinear_to_pwl`
+(:mod:`discopt.modeling._pwl_transform`), whose ``"outer"`` mode builds a rigorous
+outer approximation and whose ``"approximate"`` mode never claims a bound.
 
 The encodings
 -------------

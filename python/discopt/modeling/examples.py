@@ -1059,6 +1059,46 @@ def example_piecewise_pumps():
 
 
 # ═══════════════════════════════════════════════════════════════
+# EXAMPLE: Economic dispatch with valve-point loading (nonlinear_to_pwl)
+#
+#   The classic 3-unit test system of Walters & Sheble (1993). Each unit's
+#   fuel cost is a quadratic plus a rectified sine "valve-point" ripple,
+#
+#       C_k(P) = a_k + b_k P + c_k P^2 + |e_k sin(f_k (Pmin_k - P))|,
+#
+#   which is nonconvex and non-smooth. Every C_k is univariate, so
+#   dm.nonlinear_to_pwl(m) can replace each one by a rigorous piecewise-linear
+#   outer approximation and turn the model into a MILP; refining the
+#   partition until a verified dispatch meets the bound certifies the
+#   original model's optimum (about 8234.07).
+# ═══════════════════════════════════════════════════════════════
+
+
+def example_valve_point_dispatch():
+    m = dm.Model("valve_point_dispatch")
+
+    a = [561.0, 310.0, 78.0]
+    b = [7.92, 7.85, 7.97]
+    c = [0.001562, 0.00194, 0.00482]
+    e = [300.0, 200.0, 150.0]
+    f = [0.0315, 0.042, 0.063]
+    pmin = [100.0, 100.0, 50.0]
+    pmax = [600.0, 400.0, 200.0]
+    demand = 850.0
+
+    p = m.continuous("P", shape=(3,), lb=np.array(pmin), ub=np.array(pmax))
+    cost = [
+        a[k] + b[k] * p[k] + c[k] * p[k] ** 2 + dm.abs(e[k] * dm.sin(f[k] * (pmin[k] - p[k])))
+        for k in range(3)
+    ]
+    m.minimize(cost[0] + cost[1] + cost[2])
+    m.subject_to(dm.sum(p) == demand, name="demand")
+
+    print(m)
+    return m
+
+
+# ═══════════════════════════════════════════════════════════════
 # Run all examples that don't require the solver backend
 # ═══════════════════════════════════════════════════════════════
 
@@ -1077,6 +1117,7 @@ if __name__ == "__main__":
         ("Parametric / Sensitivity", example_parametric),
         ("Logical Constraints / GDP", example_logical_constraints),
         ("Piecewise-linear pump curves", example_piecewise_pumps),
+        ("Valve-point dispatch (nonlinear_to_pwl)", example_valve_point_dispatch),
         ("NN Surrogate Optimization", example_nn_surrogate),
         ("Transportation (named sets)", example_transportation),
         ("Assignment (indexed binaries)", example_assignment),

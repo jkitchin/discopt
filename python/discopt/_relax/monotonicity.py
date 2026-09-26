@@ -30,6 +30,7 @@ evaluator does not recognise abstain to ``UNKNOWN``. The public surface is
 intentionally small::
 
     classify_monotonicity(expr, model=None, box=None) -> Monotonicity
+    derivative_enclosure(expr, var, box) -> Interval | None
     Monotonicity  (enum)
 """
 
@@ -109,6 +110,30 @@ def classify_monotonicity(
     if all(_finite(p) and bool(np.all(np.asarray(p.hi) <= 0.0)) for p in partials):
         return Monotonicity.NONINCREASING
     return Monotonicity.UNKNOWN
+
+
+def derivative_enclosure(expr: Expression, var: Variable, box: dict) -> Optional[Interval]:
+    """Interval enclosure of ``d expr / d var`` over ``box``, or ``None``.
+
+    Uses the same forward-mode interval AD as :func:`classify_monotonicity`, so
+    the enclosure is a proof: the true partial derivative lies inside it at every
+    point of the box. ``None`` means no finite enclosure could be established (an
+    atom without a derivative rule, a domain issue, a non-finite result) -- a
+    sound abstention the caller must handle, never a zero.
+
+    Args:
+        expr: A scalar expression.
+        var: A scalar (size-1) variable.
+        box: ``{Variable: Interval}`` overriding declared bounds.
+    """
+    try:
+        _value, grad = _walk(expr, box, {})
+    except _Abstain:
+        return None
+    d = grad.get(var)
+    if d is None:
+        return Interval.point(0.0)
+    return d if _finite(d) else None
 
 
 def _is_zero(p: Interval) -> bool:

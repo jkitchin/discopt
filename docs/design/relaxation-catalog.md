@@ -151,7 +151,9 @@ convex-quadratic *ellipsoid* rule behind `DISCOPT_ELLIPSOID_BOUNDS`, default off
 it evaluates `x_i x_j` as a product of independent intervals -- see issue #1193),
 `crates/discopt-core/src/presolve/fbbt.rs` (forward/backward interval FBBT),
 `cutting_planes.py` (RLT / OA / lift-and-project cuts), `cover_cuts.py` (knapsack cover
-cuts), `monotonicity.py` (per-expression monotonicity for DCP composition).
+cuts), `monotonicity.py` (per-expression monotonicity for DCP composition; its interval-AD
+`derivative_enclosure` also supplies the mean-value error bands of `dm.nonlinear_to_pwl`'s
+outer mode, #1482, which made it production code).
 
 ---
 
@@ -417,7 +419,7 @@ dead when all three are reachable from `polyhedral_oa.py` (1,239 of 2,199 lines 
 it credited `differentiable_solve.py` with 8 documentation references and `embedding.py` with
 17 — those belong to a same-named *function* in the production `_relax/differentiable.py` and
 to the unrelated `discopt.ml` embedding docs. Re-measured over the AST graph, the module
-`differentiable_solve.py` has one doc reference and `embedding.py` has none. (Since #1482 `embedding.py` is production code — `Model.piecewise`'s `"log"` method imports it — and its `incubating` entry is gone.) Resolving relative
+`differentiable_solve.py` has one doc reference and `embedding.py` has none. (Since #1482 `embedding.py` and `monotonicity.py` are production code — imported by `Model.piecewise`'s `"log"` method and by `dm.nonlinear_to_pwl` respectively — and their `incubating` entries are gone.) Resolving relative
 imports per PEP 328 matters for the same reason: mis-anchoring `from .foo import bar` turns it
 into a self-edge and makes dead modules look live, which is how `monotonicity.py` was missed by
 both passes.

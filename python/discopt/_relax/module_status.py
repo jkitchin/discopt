@@ -147,14 +147,6 @@ MODULE_STATUS: Final[dict[str, ModuleStatus]] = {
         ),
     ),
     # -- incubating: tested, no production call site yet -------------------
-    "monotonicity": ModuleStatus(
-        status="incubating",
-        reason=(
-            "SUSPECT-style monotonicity proofs via interval AD, the counterpart "
-            "to _relax/convexity. Wired in when a dispatcher consumes the "
-            "verdict for DCP composition (docs/design/relaxation-catalog.md)."
-        ),
-    ),
     "operator_relaxations": ModuleStatus(
         status="incubating",
         reason=(
