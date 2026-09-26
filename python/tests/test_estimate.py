@@ -350,3 +350,239 @@ class TestAnalyticVerification:
 
         np.testing.assert_allclose(result_rep.covariance[0, 0], var_single / n_rep, rtol=1e-3)
         assert result_rep.n_observations == n_rep * len(x_data)
+
+
+# ──────────────────────────────────────────────────────────
+# Constrained experiment models: the total derivative dy/dθ
+# ──────────────────────────────────────────────────────────
+
+
+class StateExperiment(Experiment):
+    """y_i = z_i, with z_i pinned to k*x_i by an equality constraint.
+
+    Statistically identical to :class:`SingleParamExperiment`, but every
+    response reads a *state* variable rather than an expression in k, so
+    ``∂y/∂k`` at the fixed solution is zero and only the implicit term
+    ``(∂y/∂z)(dz/dk)`` carries the information.
+    """
+
+    def __init__(self, x_data, sigma=0.1):
+        self.x_data = np.asarray(x_data, dtype=float)
+        self.sigma = float(sigma)
+
+    def create_model(self, **kwargs):
+        m = dm.Model("state_experiment")
+        k = m.continuous("k", lb=-20.0, ub=20.0)
+        z = m.continuous("z", shape=(len(self.x_data),), lb=-1e3, ub=1e3)
+        for i, xi in enumerate(self.x_data):
+            m.subject_to(z[i] == k * xi, name=f"state_{i}")
+        responses = {f"y_{i}": z[i] for i in range(len(self.x_data))}
+        return ExperimentModel(
+            model=m,
+            unknown_parameters={"k": k},
+            design_inputs={},
+            responses=responses,
+            measurement_error={n: self.sigma for n in responses},
+        )
+
+
+class NonlinearStateExperiment(Experiment):
+    """y_i = z_i with z_i == k**2 * x_i — a non-identity chain rule."""
+
+    def __init__(self, x_data, sigma=0.1):
+        self.x_data = np.asarray(x_data, dtype=float)
+        self.sigma = float(sigma)
+
+    def create_model(self, **kwargs):
+        m = dm.Model("nonlinear_state")
+        k = m.continuous("k", lb=0.1, ub=20.0)
+        z = m.continuous("z", shape=(len(self.x_data),), lb=-1e3, ub=1e3)
+        for i, xi in enumerate(self.x_data):
+            m.subject_to(z[i] == k * k * xi, name=f"state_{i}")
+        responses = {f"y_{i}": z[i] for i in range(len(self.x_data))}
+        return ExperimentModel(
+            model=m,
+            unknown_parameters={"k": k},
+            design_inputs={},
+            responses=responses,
+            measurement_error={n: self.sigma for n in responses},
+        )
+
+
+class PinnedDesignInputExperiment(Experiment):
+    """y_i = z_i with z_i == k * F_i, where the design inputs F are pinned data.
+
+    The multi-experiment campaign shape, and the one that caught a real defect:
+    each block's conditions are pinned with ``Variable.fix``, so ``F`` occupies
+    columns of ``x_flat`` that no equation determines. Classifying every
+    non-parameter column as a *state* makes the square-system test see 2n states
+    against n equations and refuse a model that is perfectly well posed — which
+    is what ``docs/notebooks/cstr_fit_doe_optimize.ipynb`` does (15 equality
+    rows, 20 columns, 5 of them pinned flows).
+    """
+
+    def __init__(self, x_data, sigma=0.1):
+        self.x_data = np.asarray(x_data, dtype=float)
+        self.sigma = float(sigma)
+
+    def create_model(self, **kwargs):
+        m = dm.Model("pinned_design")
+        k = m.continuous("k", lb=-20.0, ub=20.0)
+        F = m.continuous("F", shape=(len(self.x_data),), lb=0.0, ub=1e3)
+        z = m.continuous("z", shape=(len(self.x_data),), lb=-1e3, ub=1e3)
+        for i in range(len(self.x_data)):
+            m.subject_to(z[i] == k * F[i], name=f"state_{i}")
+        F.fix(self.x_data)
+        responses = {f"y_{i}": z[i] for i in range(len(self.x_data))}
+        return ExperimentModel(
+            model=m,
+            unknown_parameters={"k": k},
+            design_inputs={"F": F},
+            responses=responses,
+            measurement_error={n: self.sigma for n in responses},
+        )
+
+
+class UnderdeterminedExperiment(Experiment):
+    """One state variable, no equation determining it."""
+
+    def __init__(self, x_data, sigma=0.1):
+        self.x_data = np.asarray(x_data, dtype=float)
+        self.sigma = float(sigma)
+
+    def create_model(self, **kwargs):
+        m = dm.Model("underdetermined")
+        k = m.continuous("k", lb=-20.0, ub=20.0)
+        z = m.continuous("z", shape=(len(self.x_data),), lb=-1e3, ub=1e3)
+        # Only the first state is pinned; the rest float free.
+        m.subject_to(z[0] == k * self.x_data[0], name="state_0")
+        responses = {f"y_{i}": k * xi for i, xi in enumerate(self.x_data)}
+        return ExperimentModel(
+            model=m,
+            unknown_parameters={"k": k},
+            design_inputs={},
+            responses=responses,
+            measurement_error={n: self.sigma for n in responses},
+        )
+
+
+class ActiveInequalityExperiment(Experiment):
+    """A state pinned by an equality, plus an inequality active at the solution."""
+
+    def __init__(self, x_data, sigma=0.1):
+        self.x_data = np.asarray(x_data, dtype=float)
+        self.sigma = float(sigma)
+
+    def create_model(self, **kwargs):
+        m = dm.Model("active_inequality")
+        k = m.continuous("k", lb=-20.0, ub=20.0)
+        z = m.continuous("z", shape=(len(self.x_data),), lb=-1e3, ub=1e3)
+        for i, xi in enumerate(self.x_data):
+            m.subject_to(z[i] == k * xi, name=f"state_{i}")
+        # Strictly binding: the data want z_0 = 2, so this cap cuts the
+        # optimum and carries a nonzero multiplier. A cap placed exactly at
+        # the unconstrained optimum would be degenerate, and "active" there
+        # is genuinely ambiguous rather than a useful test.
+        m.subject_to(z[0] <= 1.5, name="cap_0")
+        responses = {f"y_{i}": z[i] for i in range(len(self.x_data))}
+        return ExperimentModel(
+            model=m,
+            unknown_parameters={"k": k},
+            design_inputs={},
+            responses=responses,
+            measurement_error={n: self.sigma for n in responses},
+        )
+
+
+class TestConstrainedModelFIM:
+    """The FIM must use the total derivative dy/dθ, not the partial ∂y/∂θ.
+
+    Regression tests for the defect where ``_compute_estimation_fim`` took
+    ``jax.jacobian`` at the fixed solution vector, dropping the
+    ``(∂y/∂z)(dz/dθ)`` term. On a model whose responses are pure states that
+    term is the whole derivative, so the FIM came back exactly zero and the
+    reported standard errors were zero — infinite confidence.
+    """
+
+    X_DATA = np.array([1.0, 2.0, 3.0])
+    SIGMA = 0.1
+
+    def _data(self, k_true=2.0):
+        return {f"y_{i}": k_true * self.X_DATA[i] for i in range(len(self.X_DATA))}
+
+    def test_state_response_fim_matches_analytic(self):
+        """y_i = z_i, z_i == k*x_i gives the same FIM as the direct form."""
+        result = estimate_parameters(StateExperiment(self.X_DATA, self.SIGMA), self._data())
+
+        fim_analytic = np.sum(self.X_DATA**2) / self.SIGMA**2
+        np.testing.assert_allclose(result.fim[0, 0], fim_analytic, rtol=1e-4)
+        assert result.fim[0, 0] > 0.0
+
+    def test_state_and_direct_forms_agree(self):
+        """Two statistically identical models must report the same covariance."""
+        direct = estimate_parameters(SingleParamExperiment(self.X_DATA), self._data())
+        stated = estimate_parameters(StateExperiment(self.X_DATA, self.SIGMA), self._data())
+
+        np.testing.assert_allclose(stated.fim, direct.fim, rtol=1e-4)
+        np.testing.assert_allclose(stated.covariance, direct.covariance, rtol=1e-4)
+        np.testing.assert_allclose(
+            stated.standard_errors["k"], direct.standard_errors["k"], rtol=1e-4
+        )
+
+    def test_nonlinear_state_chain_rule(self):
+        """z_i == k^2 * x_i exercises a non-identity dz/dk.
+
+        dy_i/dk = 2*k*x_i, so FIM = sum((2*k*x_i)^2) / sigma^2 — a value the
+        identity-chain-rule case could not distinguish from a bug.
+        """
+        result = estimate_parameters(
+            NonlinearStateExperiment(self.X_DATA, self.SIGMA), self._data()
+        )
+
+        k_hat = result.parameters["k"]
+        np.testing.assert_allclose(k_hat, np.sqrt(2.0), rtol=1e-4)
+
+        fim_analytic = np.sum((2.0 * k_hat * self.X_DATA) ** 2) / self.SIGMA**2
+        np.testing.assert_allclose(result.fim[0, 0], fim_analytic, rtol=1e-4)
+
+    def test_unconstrained_model_unchanged(self):
+        """With no constraints the partial is the total — behavior must not drift."""
+        result = estimate_parameters(SingleParamExperiment(self.X_DATA), self._data())
+
+        fim_analytic = np.sum(self.X_DATA**2) / self.SIGMA**2
+        np.testing.assert_allclose(result.fim[0, 0], fim_analytic, rtol=1e-4)
+
+    def test_pinned_design_inputs_are_data_not_states(self):
+        """A pinned design input must not count against the square-system test.
+
+        Regression for the defect that classified every non-parameter column as
+        a state: with F pinned, the system is n equations in n states, but the
+        naive classification counted 2n and refused. The FIM is the same
+        analytic value as the direct form, because F is data either way.
+        """
+        result = estimate_parameters(
+            PinnedDesignInputExperiment(self.X_DATA, self.SIGMA), self._data()
+        )
+
+        fim_analytic = np.sum(self.X_DATA**2) / self.SIGMA**2
+        np.testing.assert_allclose(result.fim[0, 0], fim_analytic, rtol=1e-4)
+        np.testing.assert_allclose(result.parameters["k"], 2.0, rtol=1e-4)
+
+    def test_refusal_message_accounts_for_pinned_columns(self):
+        """The squareness refusal must say how many columns it treated as data.
+
+        Without that number the message is unactionable: a reader sees a state
+        count they cannot reconcile with the model they wrote.
+        """
+        with pytest.raises(ValueError, match="pinned at lb == ub"):
+            estimate_parameters(UnderdeterminedExperiment(self.X_DATA, self.SIGMA), self._data())
+
+    def test_underdetermined_states_refuse(self):
+        """Fewer equations than states: refuse rather than report a partial."""
+        with pytest.raises(ValueError, match="state variable"):
+            estimate_parameters(UnderdeterminedExperiment(self.X_DATA, self.SIGMA), self._data())
+
+    def test_active_inequality_refuses(self):
+        """An active inequality binds the states: refuse rather than guess."""
+        with pytest.raises(ValueError, match="active"):
+            estimate_parameters(ActiveInequalityExperiment(self.X_DATA, self.SIGMA), self._data())
