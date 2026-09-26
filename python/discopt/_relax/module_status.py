@@ -147,15 +147,6 @@ MODULE_STATUS: Final[dict[str, ModuleStatus]] = {
         ),
     ),
     # -- incubating: tested, no production call site yet -------------------
-    "embedding": ModuleStatus(
-        status="incubating",
-        reason=(
-            "Gray-code SOS2 embedding helper owned by the AMP lane (#44/#86) "
-            "and exercised through bilinear_lambda's kwargs in test_amp*. Wired "
-            "in when AMP's piecewise convex-hull builder adopts the logarithmic "
-            "encoding in place of one binary per interval."
-        ),
-    ),
     "monotonicity": ModuleStatus(
         status="incubating",
         reason=(

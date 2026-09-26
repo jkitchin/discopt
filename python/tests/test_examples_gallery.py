@@ -41,6 +41,7 @@ _GALLERY = [
     "example_facility_location",
     "example_parametric",
     "example_logical_constraints",
+    "example_piecewise_pumps",
     "example_transportation",
     "example_assignment",
     "example_multicommodity_flow",

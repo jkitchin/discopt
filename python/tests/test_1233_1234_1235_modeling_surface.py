@@ -46,6 +46,7 @@ _NON_INTRINSIC = frozenset(
         "custom",
         "udf",
         "if_else",
+        "piecewise",  # adds an output variable and rows, like if_else (#1482)
         "model_from_repr",
         "bulk_construction_gc",
         # logical / GDP helpers

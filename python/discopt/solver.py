@@ -5368,6 +5368,21 @@ def _strong_branch_lp(
 
 _BOUND_WARN_THRESHOLD = 1e15
 
+# Dynamic range (max|a_ij| / min|a_ij| within one row or column) at which the
+# row's own coefficient spread can consume the solver's absolute feasibility
+# tolerance.
+#
+# Derivation, not a round number: summing a row activity in double precision
+# carries a relative error of order `R * u` where `R` is the row's dynamic
+# range and `u = 2.2e-16` is the unit roundoff -- the small coefficients are
+# what gets cancelled away against the large ones. The absolute feasibility
+# test in this repo is 1e-6 (the `numerical_tolerance` fixture). Setting
+# `R * 2.2e-16 <= 1e-6` gives `R <= 4.5e9`, so a row at or beyond ~1e9 can no
+# longer be evaluated to the accuracy its own feasibility test demands. 1e9 is
+# that bound rounded *down* to a decade, which is the conservative direction
+# for a warning: it fires slightly before the tolerance is actually gone.
+_SCALING_WARN_THRESHOLD = 1e9
+
 
 def _optimal_relative_gap(objective: float) -> Optional[float]:
     """Return the relative gap for a certified optimum."""
@@ -6117,6 +6132,133 @@ def _check_finite_bounds(model: Model, tightening=None) -> None:
             "Add tighter explicit bounds, e.g. m.continuous('x', lb=0, ub=1000).",
         ]
         warnings.warn(" ".join(p for p in parts if p), stacklevel=3)
+
+
+def _scaling_diagnostics_enabled() -> bool:
+    """Whether the once-per-solve scaling warning runs. Default ON; ``=0`` opts out.
+
+    An opt-*out* for a shipped default, which CLAUDE.md's flag policy lists as
+    explicitly out of scope for the three-state graduation rule: it exists so the
+    default can be A/B'd and so a caller who has already read the number (or does
+    not want to pay for it) can decline.
+
+    **Why there is a knob at all — the measured cost.** The check needs a
+    ``ModelRepr``, and no ``ModelRepr`` exists at the pre-dispatch block, so it
+    pays a whole conversion of its own. That conversion cannot be shared with the
+    one the B&B route builds later: the pre-dispatch block deliberately runs on
+    the model the *user declared*, before GDP reformulation invents auxiliary
+    binaries, so the two reprs are of different models. Nor can the range
+    computation be lifted into Python off the ``_cached_flat_terms`` the bound
+    tightening just populated — that would fork ``compute_equilibration`` into a
+    second implementation, and CLAUDE.md's own retracted flag count is the
+    standing example of two instruments sharing a blind spot and confirming each
+    other.
+
+    So the cost is one extra ``model_to_repr`` plus the walk. Measured
+    interleaved, 11 reps, ``(model_to_repr) vs (model_to_repr + diagnostics)``,
+    66 timed measurements::
+
+        syn10m04m                   1.6 ms (sd 0.1) ->    1.8 ms (sd 0.1)  +0.2 ms
+        qapw                       57.4 ms (sd 1.7) ->   73.7 ms (sd 19.6) +16.3 ms
+        acopf_caseactivsg70k_qcqp  5533  ms (sd 147) -> 6010  ms (sd 129)  +477  ms
+
+    i.e. the *walk* is 8-12 % of a conversion, and the conversion is the real
+    bill: ~1.8 ms on a small model, ~6.0 s on the largest instance in the
+    MINLPLib corpus. Default-ON because a diagnostic nobody sees is the exact
+    defect being fixed here -- the ranges were already being computed and
+    discarded, and a default-OFF warning would re-create that. The knob is for
+    the tail: a 6 s tax is immaterial against a 70k-bus ACOPF that no route
+    finishes quickly, but a caller solving many mid-size models in a loop can
+    decline it.
+    """
+    # Empty is deliberately NOT an off-value (same shape as
+    # ``_gdp_config_primal_enabled``): unset must not read as off.
+    return os.environ.get("DISCOPT_SCALING_DIAGNOSTICS", "").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _check_model_scaling(model: Model) -> None:
+    """Warn when a linear row or column spans a dynamic range the tolerances cannot carry.
+
+    Sibling of :func:`_check_finite_bounds`, and called from the same
+    once-per-solve pre-dispatch block for the same #1059 reason: how badly a
+    model is scaled is a property of the *model*, not of whichever solver family
+    happens to run it, so it must be reported before the route is chosen.
+
+    The numbers come from the Curtis-Reid equilibration pass
+    (``crates/discopt-core/src/presolve/scaling.rs``), which has computed
+    ``worst_row_dynamic_range`` / ``worst_col_dynamic_range`` since it was
+    written. Until this function existed they went nowhere: the pass is
+    default-off in the presolve pipeline, and its adapter kept only
+    ``linear_rows_sampled`` and dropped both ranges on the floor, so no caller
+    -- Rust or Python -- could ever see them. This reads them through
+    ``PyModelRepr.scaling_diagnostics()``, which runs the pure computation
+    without the orchestrator and without applying any scaling: it is a
+    diagnostic, and it does not change a single bound, cut or branching
+    decision.
+
+    Deliberately *not* what this does: apply the scale factors. Doing that
+    changes the LP the solver sees and is a bound-changing change under
+    CLAUDE.md §5, needing a full differential panel. Reporting the number the
+    user can act on needs none of that.
+
+    **Known limitation, so that silence is not over-read.** This sees the
+    *linear* part of the model only -- ``compute_equilibration`` skips any row
+    whose body is not a degree-1 polynomial. A model whose conditioning problem
+    lives in nonlinear Jacobian entries gets no warning from here. Covering
+    those means bounding each Jacobian entry over the declared box (reverse AD
+    on the POUNCE tape plus FBBT, the shape of Pyomo's ``report_scaling``);
+    both ingredients exist in this tree and neither is wired up, so a quiet
+    solve means "no badly scaled *linear* row", not "well scaled".
+
+    Costs one extra ``model_to_repr``; see :func:`_scaling_diagnostics_enabled`
+    for the measurement and the ``DISCOPT_SCALING_DIAGNOSTICS=0`` opt-out.
+    """
+    if not _scaling_diagnostics_enabled():
+        return
+
+    try:
+        from discopt._rust import model_to_repr
+
+        repr_ = model_to_repr(model, getattr(model, "_builder", None))
+        diag = repr_.scaling_diagnostics()
+    except Exception as exc:  # pragma: no cover - diagnostic must never break a solve
+        # Not a swallowed error in an *instrument* (CLAUDE.md §7): this is a
+        # user-facing warning on the solve path, and a model this helper cannot
+        # convert is a model the caller still deserves an answer for. The
+        # failure is logged, not hidden.
+        logger.debug("Scaling diagnostics unavailable: %s", exc)
+        return
+
+    if int(diag.get("linear_rows_sampled", 0)) == 0:
+        return  # no linear rows sampled: nothing was measured, so say nothing
+
+    row_range = float(diag.get("worst_row_dynamic_range") or 0.0)
+    col_range = float(diag.get("worst_col_dynamic_range") or 0.0)
+    if row_range < _SCALING_WARN_THRESHOLD and col_range < _SCALING_WARN_THRESHOLD:
+        return
+
+    import warnings
+
+    parts: list[str] = []
+    if row_range >= _SCALING_WARN_THRESHOLD:
+        where = diag.get("worst_row_name") or f"index {diag.get('worst_row_index')}"
+        parts.append(f"constraint {where} spans a coefficient ratio of {row_range:.3g}")
+    if col_range >= _SCALING_WARN_THRESHOLD:
+        where = diag.get("worst_col_name") or f"index {diag.get('worst_col_index')}"
+        parts.append(f"variable {where} spans a coefficient ratio of {col_range:.3g}")
+    warnings.warn(
+        f"Badly scaled model: {'; '.join(parts)}. Above ~{_SCALING_WARN_THRESHOLD:.0e} the "
+        f"spread within a single row or column consumes the 1e-6 absolute feasibility "
+        f"tolerance, so a reported 'optimal' can rest on residuals that are numerical "
+        f"noise. Rescale the offending row or column (change units, or divide the "
+        f"constraint through by its largest coefficient) before trusting tight gaps.",
+        stacklevel=3,
+    )
 
 
 def _detect_nonlinear_bound_infeasibility(model: Model, tightening=None) -> Optional[str]:
@@ -9859,6 +10001,9 @@ def solve_model(
         model, deadline=_role2_deadline(time.perf_counter() + _nbt_budget_s)
     )
     _check_finite_bounds(model, _declared_tightening)
+    # Same block, same reason (#1059): scaling is a property of the declared
+    # model, so it is reported once here rather than by whichever family runs.
+    _check_model_scaling(model)
     nonlinear_infeasibility = _detect_nonlinear_bound_infeasibility(model, _declared_tightening)
     if nonlinear_infeasibility is not None:
         logger.info(

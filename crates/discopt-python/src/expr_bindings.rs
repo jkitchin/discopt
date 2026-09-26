@@ -775,6 +775,48 @@ impl PyModelRepr {
         Ok((lb_arr.into_any().unbind(), ub_arr.into_any().unbind()))
     }
 
+    /// Curtis-Reid equilibration diagnostics for the linear part of the
+    /// model, without running the presolve orchestrator.
+    ///
+    /// Returns a dict with `linear_rows_sampled`, `worst_row_dynamic_range`,
+    /// `worst_col_dynamic_range`, `worst_row_index`, `worst_col_index`,
+    /// `worst_row_name`, `worst_col_name`. The two ranges are the
+    /// single-number "is this model badly scaled?" answer; the indices and
+    /// names say which row and column attain them.
+    ///
+    /// The names are resolved here rather than by the caller because the
+    /// indices are positions in *this* `ModelRepr`, and a Python `Model`'s
+    /// constraint list does not index the same way once blocks are
+    /// flattened -- handing back a raw index would invite a caller to name
+    /// the wrong row.
+    ///
+    /// `ScalingPass` has computed these since it was written, but the pass
+    /// is off by default and its delta had nowhere to go, so no caller ever
+    /// saw them. This accessor is the cheap read-only route for the
+    /// once-per-solve model-health check, which wants the numbers and not
+    /// the scale factors.
+    fn scaling_diagnostics(&self, py: Python<'_>) -> PyResult<PyObject> {
+        use discopt_core::presolve::scaling::compute_equilibration;
+        let (_factors, stats) = compute_equilibration(&self.inner);
+        let dict = PyDict::new(py);
+        dict.set_item("linear_rows_sampled", stats.linear_rows_sampled)?;
+        dict.set_item("worst_row_dynamic_range", stats.worst_row_dynamic_range)?;
+        dict.set_item("worst_col_dynamic_range", stats.worst_col_dynamic_range)?;
+        dict.set_item("worst_row_index", stats.worst_row_index)?;
+        dict.set_item("worst_col_index", stats.worst_col_index)?;
+        let row_name = stats
+            .worst_row_index
+            .and_then(|i| self.inner.constraints.get(i))
+            .and_then(|c| c.name.clone());
+        let col_name = stats
+            .worst_col_index
+            .and_then(|j| self.inner.variables.get(j))
+            .map(|v| v.name.clone());
+        dict.set_item("worst_row_name", row_name)?;
+        dict.set_item("worst_col_name", col_name)?;
+        Ok(dict.into())
+    }
+
     /// Eliminate continuous scalar variables uniquely determined by a
     /// singleton equality constraint (M10 of #51).
     ///
@@ -1220,6 +1262,12 @@ impl PyModelRepr {
             }
             if let Some(cs) = &d.col_scales {
                 dd.set_item("col_scales", cs.clone())?;
+            }
+            if let Some(r) = d.worst_row_dynamic_range {
+                dd.set_item("worst_row_dynamic_range", r)?;
+            }
+            if let Some(c) = d.worst_col_dynamic_range {
+                dd.set_item("worst_col_dynamic_range", c)?;
             }
             if !d.structure.cliques.is_empty() {
                 let edges: Vec<(usize, usize)> = d.structure.cliques.clone();

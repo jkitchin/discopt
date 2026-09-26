@@ -3,9 +3,22 @@
 //! ## What this pass does
 //!
 //! Computes Curtis–Reid-style geometric-mean scale factors for the
-//! linear part of the model and stores them on the pass delta so
-//! downstream solvers can apply them consistently. The pass itself
-//! does not rewrite the model — it only emits the numbers.
+//! linear part of the model and stores them on the pass delta. The pass
+//! itself does not rewrite the model — it only emits the numbers.
+//!
+//! **What actually consumes this, as of the diagnostics change.** The two
+//! *dynamic ranges* have a consumer: they ride the delta out to Python and
+//! are read directly by `PyModelRepr::scaling_diagnostics`, which backs the
+//! once-per-solve "badly scaled model" warning in `solver.py`. The *scale
+//! factors* still have none — no LP, NLP or IPM path reads `row_scales` /
+//! `col_scales` off the delta, and the `scaling` pass is off by default in
+//! `_relax/presolve_pipeline.py`. This paragraph used to assert the
+//! opposite ("downstream solvers can apply them consistently", below, as if
+//! it were shipped behaviour); it was aspirational when written and was
+//! never true. Applying the factors changes the LP the solver sees, so it
+//! is a bound-changing change under CLAUDE.md §5 and needs a differential
+//! panel before any path may consume them. Do not read the "Why this is a
+//! presolve pass" section below as a description of what happens today.
 //!
 //! For each linear constraint `Σ a_ij x_j  ⊙  b_i`, define
 //!
@@ -54,6 +67,18 @@ pub struct ScalingStats {
     /// Largest ratio (max / min) observed in any single column before
     /// scaling.
     pub worst_col_dynamic_range: f64,
+    /// Index of the constraint attaining `worst_row_dynamic_range`,
+    /// and of the variable attaining `worst_col_dynamic_range`.
+    /// `None` when no linear row (resp. column) was sampled.
+    ///
+    /// The ranges alone say "something in this model is badly scaled"
+    /// without saying *what*, which a user cannot act on. The maxima
+    /// are taken in a loop that already knows the index, so recording
+    /// it is free and turns the number into a pointer at the offending
+    /// row or column.
+    pub worst_row_index: Option<usize>,
+    /// See [`Self::worst_row_index`].
+    pub worst_col_index: Option<usize>,
 }
 
 /// Scale-factor result of running [`compute_equilibration`].
@@ -136,6 +161,7 @@ pub fn compute_equilibration(model: &ModelRepr) -> (ScalingFactors, ScalingStats
         let dyn_range = hi / lo;
         if dyn_range.is_finite() && dyn_range > stats.worst_row_dynamic_range {
             stats.worst_row_dynamic_range = dyn_range;
+            stats.worst_row_index = Some(i);
         }
         let g = (lo * hi).sqrt();
         if g > 0.0 && g.is_finite() {
@@ -151,6 +177,7 @@ pub fn compute_equilibration(model: &ModelRepr) -> (ScalingFactors, ScalingStats
         let dyn_range = hi / lo;
         if dyn_range.is_finite() && dyn_range > stats.worst_col_dynamic_range {
             stats.worst_col_dynamic_range = dyn_range;
+            stats.worst_col_index = Some(j);
         }
         let g = (lo * hi).sqrt();
         if g > 0.0 && g.is_finite() {
@@ -321,5 +348,88 @@ mod tests {
         let (f, s) = compute_equilibration(&model);
         assert_eq!(f.row_scales[0], 1.0);
         assert_eq!(s.linear_rows_sampled, 0);
+    }
+
+    /// The worst row/column must be *identifiable*, not just measurable.
+    ///
+    /// Two rows, the second far worse than the first: the stats must report
+    /// the second one's range AND point at the second one. A diagnostic that
+    /// says "some row spans 1e12" without saying which is not actionable, and
+    /// before these indices existed that is all a caller could have been told.
+    #[test]
+    fn worst_row_and_column_are_identified() {
+        let mut arena = ExprArena::new();
+        let x = scalar_var(&mut arena, "x", 0);
+        let y = scalar_var(&mut arena, "y", 1);
+        // row 0: 1 x + 1 y  -> range 1
+        let row0 = {
+            let a = lin(&mut arena, 1.0, x);
+            let b = lin(&mut arena, 1.0, y);
+            add(&mut arena, a, b)
+        };
+        // row 1: 1e6 x + 1e-6 y -> range 1e12, and column x now spans
+        // 1e6 / 1 = 1e6 across the two rows while y spans 1 / 1e-6 = 1e6.
+        let row1 = {
+            let a = lin(&mut arena, 1e6, x);
+            let b = lin(&mut arena, 1e-6, y);
+            add(&mut arena, a, b)
+        };
+        let model = ModelRepr {
+            arena,
+            objective: x,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![
+                ConstraintRepr {
+                    body: row0,
+                    sense: ConstraintSense::Le,
+                    rhs: 1.0,
+                    name: Some("fine".into()),
+                },
+                ConstraintRepr {
+                    body: row1,
+                    sense: ConstraintSense::Le,
+                    rhs: 1.0,
+                    name: Some("badly_scaled".into()),
+                },
+            ],
+            variables: vec![vinfo("x", 0), vinfo("y", 1)],
+            n_vars: 2,
+        };
+        let (_f, s) = compute_equilibration(&model);
+        assert_eq!(s.linear_rows_sampled, 2);
+        assert!(
+            (s.worst_row_dynamic_range - 1e12).abs() / 1e12 < 1e-9,
+            "row range = {}",
+            s.worst_row_dynamic_range
+        );
+        assert_eq!(s.worst_row_index, Some(1), "must point at the bad row");
+        assert!(
+            (s.worst_col_dynamic_range - 1e6).abs() / 1e6 < 1e-9,
+            "col range = {}",
+            s.worst_col_dynamic_range
+        );
+        // Both columns span 1e6, so the first to attain it wins -- the point
+        // is that *a* column is named, deterministically.
+        assert_eq!(s.worst_col_index, Some(0));
+    }
+
+    /// A model with no linear rows leaves both indices `None`, so a caller
+    /// cannot mistake "nothing measured" for "row 0 is the problem".
+    #[test]
+    fn no_linear_rows_leaves_indices_unset() {
+        let mut arena = ExprArena::new();
+        let x = scalar_var(&mut arena, "x", 0);
+        let model = ModelRepr {
+            arena,
+            objective: x,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![],
+            variables: vec![vinfo("x", 0)],
+            n_vars: 1,
+        };
+        let (_f, s) = compute_equilibration(&model);
+        assert_eq!(s.linear_rows_sampled, 0);
+        assert_eq!(s.worst_row_index, None);
+        assert_eq!(s.worst_col_index, None);
     }
 }
