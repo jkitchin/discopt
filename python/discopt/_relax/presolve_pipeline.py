@@ -200,6 +200,12 @@ def run_root_presolve(
         "row_scales": None,
         "col_scales": None,
         "linear_rows_sampled": 0,
+        # The two "is this model badly scaled?" numbers. The Rust pass has
+        # always computed them; until now the adapter kept only
+        # `linear_rows_sampled` and dropped both here, which is why no
+        # caller could see them.
+        "worst_row_dynamic_range": None,
+        "worst_col_dynamic_range": None,
     }
     cliques_total: dict = {
         "edges": [],
@@ -240,6 +246,10 @@ def run_root_presolve(
                 scaling_total["row_scales"] = list(d["row_scales"])
             if d.get("col_scales") is not None:
                 scaling_total["col_scales"] = list(d["col_scales"])
+            if d.get("worst_row_dynamic_range") is not None:
+                scaling_total["worst_row_dynamic_range"] = float(d["worst_row_dynamic_range"])
+            if d.get("worst_col_dynamic_range") is not None:
+                scaling_total["worst_col_dynamic_range"] = float(d["worst_col_dynamic_range"])
             scaling_total["linear_rows_sampled"] = int(d.get("work_units", 0))
         elif d["pass_name"] == "cliques":
             edges = d.get("cliques", []) or []

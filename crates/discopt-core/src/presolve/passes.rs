@@ -348,6 +348,13 @@ impl PresolvePass for ScalingPass {
         let mut delta = PresolveDelta::empty("scaling", ctx.iter);
         delta.row_scales = Some(factors.row_scales);
         delta.col_scales = Some(factors.col_scales);
+        // `compute_equilibration` has always returned these two, and this
+        // adapter used to keep only `linear_rows_sampled`, dropping both
+        // dynamic ranges here — the one place they could have left the pass.
+        // They are the "is this model badly scaled?" numbers a user actually
+        // wants, so carry them on the delta beside the factors.
+        delta.worst_row_dynamic_range = Some(stats.worst_row_dynamic_range);
+        delta.worst_col_dynamic_range = Some(stats.worst_col_dynamic_range);
         delta.work_units = stats.linear_rows_sampled as u64;
         delta
     }

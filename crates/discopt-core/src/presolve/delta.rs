@@ -150,6 +150,20 @@ pub struct PresolveDelta {
     pub row_scales: Option<Vec<f64>>,
     /// Curtis–Reid column scale factors, one per variable block.
     pub col_scales: Option<Vec<f64>>,
+    /// Largest `max/min` coefficient ratio observed in any single row
+    /// *before* scaling, and the same for any single column. `None` for
+    /// passes that do not compute scaling.
+    ///
+    /// These are the single-number "is this model badly scaled?"
+    /// diagnostics. `ScalingStats` has computed them since the pass was
+    /// written, but nothing carried them off the pass: the adapter kept
+    /// only `linear_rows_sampled` (as `work_units`) and dropped both
+    /// ranges on the floor, so no caller — Rust or Python — could see
+    /// them. Carrying them here puts them on the same delta the scale
+    /// factors already ride on.
+    pub worst_row_dynamic_range: Option<f64>,
+    /// See [`Self::worst_row_dynamic_range`].
+    pub worst_col_dynamic_range: Option<f64>,
 
     // ─── Accounting ───────────────────────────────────────────────
     /// Wall-clock time spent in this pass invocation (milliseconds).
@@ -177,6 +191,8 @@ impl PresolveDelta {
             structure: StructureManifest::default(),
             row_scales: None,
             col_scales: None,
+            worst_row_dynamic_range: None,
+            worst_col_dynamic_range: None,
             wall_time_ms: 0.0,
             work_units: 0,
         }
