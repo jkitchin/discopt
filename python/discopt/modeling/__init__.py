@@ -19,6 +19,13 @@ Examples
 
 from discopt.batch import solve_batch
 from discopt.modeling._piecewise import PiecewiseDomainError, PiecewiseLinear
+from discopt.modeling._pwl_transform import (
+    PWLSkippedTerm,
+    PWLTerm,
+    PWLTransformation,
+    PWLTransformError,
+    nonlinear_to_pwl,
+)
 from discopt.modeling.argmin import (
     argmin,
     argmin_kkt,
@@ -173,6 +180,11 @@ __all__ = [
     "piecewise",
     "PiecewiseDomainError",
     "PiecewiseLinear",
+    "nonlinear_to_pwl",
+    "PWLTransformation",
+    "PWLTransformError",
+    "PWLTerm",
+    "PWLSkippedTerm",
     "udf",
     "custom",
     "external",

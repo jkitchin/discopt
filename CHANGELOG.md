@@ -33,11 +33,40 @@ The release procedure that produces these entries is documented in
   raises `PiecewiseDomainError` instead of being silently clamped; the check is
   recorded on the model, repeated by `validate()` before every solve (so a bound
   widened afterwards is caught), and carried through `dm.dumps`/`dm.loads`.
-  Repeated breakpoints (jumps) and multivariate tables are refused. Automatic PWL
-  *approximation* of nonlinear terms is deliberately not offered: it is not a
-  relaxation and could not carry a certificate. New notebook
+  Repeated breakpoints (jumps) and multivariate tables are refused. New notebook
   `docs/notebooks/piecewise_linear.ipynb` and gallery example
   `example_piecewise_pumps`.
+
+- **`dm.nonlinear_to_pwl`: piecewise-linear approximation of nonlinear terms**
+  (#1482, the second half). Replaces every maximal univariate nonlinear
+  subexpression of a bounded scalar input by a PWL MILP construct, on a copy of the
+  model (the original is never mutated); multivariate terms, vector nodes,
+  `Parameter`-dependent terms and unbounded or huge-range inputs stay exact and are
+  reported in `.skipped`. A PWL approximation is not a relaxation, so the
+  certificate question is answered explicitly by two modes:
+  - `mode="outer"` (default) is a **rigorous outer approximation**: `w - chord`
+    is confined per segment to a band that provably contains `g - chord`, the
+    intersection of a direct interval evaluation and two mean-value tapers with
+    `g'` enclosed by interval AD (`monotonicity.derivative_enclosure`, new; the
+    module leaves `incubating`). The relaxation's bound is therefore valid for the
+    original model; the transformed solution is verified on the original (and
+    polished by a local NLP with integers fixed), and the result is `optimal`/
+    `gap_certified=True` only when that verified incumbent meets the bound.
+    Otherwise the partition is refined (the relaxed point plus the widest tenth of
+    the segments, capped at `max_breakpoints`) and re-solved; an infeasible
+    relaxation certifies infeasibility of the original. Every band is also
+    self-checked against point enclosures at build time, and a bound that passes a
+    verified objective raises -- both guards are exercised by mutation tests.
+  - `mode="approximate"` uses the chord interpolant and **never** carries a bound
+    (`bound=None`, `gap_certified=False`, `algorithm_route` states the model solved
+    was an approximation); `feasible` only for a point verified on the original.
+
+  Measured over the in-repo corpus instances with a reference optimum
+  (`discopt_benchmarks/scripts/nonlinear_to_pwl_corpus_panel.py`): outer mode, 0
+  soundness violations; approximate mode, 0 contract violations. It is **slower**
+  than discopt's own spatial branch-and-bound on those instances, and is offered as
+  the tool for producing a MILP on purpose, not as a faster default. Gallery
+  example `example_valve_point_dispatch` (Walters & Sheble 1993).
 
 - **`dm.external`: external functions with caller-supplied derivatives** — the
   grey-box node, discopt's analogue of Pyomo's `ExternalGreyBoxModel`. Wrap a
