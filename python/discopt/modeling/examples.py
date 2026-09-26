@@ -1017,6 +1017,48 @@ def example_surrogate_expensive_blackbox():
 
 
 # ═══════════════════════════════════════════════════════════════
+# EXAMPLE: Pump scheduling with tabulated power curves (Model.piecewise)
+#
+#   Three pumps in parallel must deliver 95 m3/h. Each pump's shaft power
+#   is known only as a table from the manufacturer's curve, and the curves
+#   are nonconvex (efficiency peaks mid-range). A running pump must carry at
+#   least 10 m3/h and costs 2 kW of auxiliaries.
+#
+#   minimize    sum_k P_k(q_k) + 2 on_k
+#   subject to  sum_k q_k = 95
+#               10 on_k <= q_k <= 50 on_k,  on_k in {0, 1}
+#
+#   P_k is declared with m.piecewise: the table IS the function, so the
+#   MILP below is the model, not an approximation of it, and the solve is
+#   certified (gap_certified=True).
+# ═══════════════════════════════════════════════════════════════
+
+
+def example_piecewise_pumps():
+    m = dm.Model("pump_scheduling_pwl")
+
+    flow_table = [0.0, 10.0, 20.0, 30.0, 40.0, 50.0]  # m3/h
+    power_tables = [  # kW at each tabulated flow
+        [0.0, 6.0, 9.0, 11.5, 15.5, 22.0],
+        [0.0, 5.0, 9.5, 12.0, 14.5, 19.0],
+        [0.0, 7.0, 8.5, 10.0, 14.0, 21.0],
+    ]
+    demand = 95.0
+
+    q = m.continuous("q", shape=(3,), lb=0.0, ub=50.0)
+    on = m.binary("on", shape=(3,))
+    power = [m.piecewise(q[k], flow_table, power_tables[k], name=f"power{k}") for k in range(3)]
+
+    m.minimize(dm.sum(power) + 2.0 * dm.sum(on))
+    m.subject_to(dm.sum(q) == demand, name="demand")
+    m.subject_to(q <= 50.0 * on, name="run_max")
+    m.subject_to(q >= 10.0 * on, name="run_min")
+
+    print(m)
+    return m
+
+
+# ═══════════════════════════════════════════════════════════════
 # Run all examples that don't require the solver backend
 # ═══════════════════════════════════════════════════════════════
 
@@ -1034,6 +1076,7 @@ if __name__ == "__main__":
         ("Facility Location", example_facility_location),
         ("Parametric / Sensitivity", example_parametric),
         ("Logical Constraints / GDP", example_logical_constraints),
+        ("Piecewise-linear pump curves", example_piecewise_pumps),
         ("NN Surrogate Optimization", example_nn_surrogate),
         ("Transportation (named sets)", example_transportation),
         ("Assignment (indexed binaries)", example_assignment),
