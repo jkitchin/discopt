@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from discopt.export import _arrays
-from discopt.export._common import refuse_non_algebraic_relations
+from discopt.export._common import binary_box_is_default, refuse_non_algebraic_relations
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -205,8 +205,11 @@ class _GamsWriter:
 
         # Write bounds for non-default bounds
         for var in self.model._variables:
-            if var.var_type == VarType.BINARY:
-                continue  # 0-1 is implicit
+            if var.var_type == VarType.BINARY and binary_box_is_default(var.lb, var.ub):
+                continue  # 0-1 is implicit in the `Binary Variables` declaration
+            # A pinned binary (EX-3) falls through to the ordinary bound path
+            # below, which emits the explicit `.lo`/`.up` that GAMS needs to
+            # honor the pin — the declaration alone would restore the 0-1 box.
             lb_arr = np.asarray(var.lb)
             ub_arr = np.asarray(var.ub)
             if var.shape == () or var.shape == (1,):
