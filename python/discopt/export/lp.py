@@ -14,6 +14,7 @@ from pathlib import Path
 
 from discopt.export._arrays import scalarize_body, scalarize_objective
 from discopt.export._common import (
+    binary_box_is_default,
     builder_objective,
     iter_builder_linear_rows,
     refuse_non_algebraic_relations,
@@ -163,8 +164,11 @@ def to_lp(model: Model, path: str | Path | None = None) -> str | None:
     # Bounds section
     lines.append("Bounds")
     for vname, vtype, _shape, lb, ub in flat_vars:
-        if vtype == VarType.BINARY:
-            # Binary bounds are implicit (0 <= x <= 1)
+        if vtype == VarType.BINARY and binary_box_is_default(lb, ub):
+            # Binary bounds are implicit (0 <= x <= 1) only while the box is
+            # the declared one. A pinned binary falls through and gets an
+            # explicit bound line, which overrides the `Binaries` listing's
+            # implicit 0-1 (EX-3).
             continue
         if lb <= -1e19 and ub >= 1e19:
             lines.append(f"  {vname} Free")

@@ -16,6 +16,7 @@ import numpy as np
 
 from discopt.export._arrays import scalarize_body, scalarize_objective
 from discopt.export._common import (
+    binary_box_is_default,
     builder_objective,
     iter_builder_linear_rows,
     refuse_non_algebraic_relations,
@@ -200,7 +201,11 @@ def to_mps(model: Model, path: str | Path | None = None) -> str | None:
         lb_val = float(lb)
         ub_val = float(ub)
 
-        if vtype == VarType.BINARY:
+        if vtype == VarType.BINARY and binary_box_is_default(lb_val, ub_val):
+            # `BV` *means* 0 <= x <= 1, so it is only right for a binary that
+            # still has its full box. A pinned binary falls through to the `FX`
+            # branch below and keeps its integrality from the INTORG marker,
+            # which is written independently of this section (EX-3).
             lines.append(f" BV BND  {vname}")
         elif lb_val <= -1e19 and ub_val >= 1e19:
             # Free variable

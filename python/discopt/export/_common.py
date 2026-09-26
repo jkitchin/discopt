@@ -300,3 +300,27 @@ def refuse_non_algebraic_relations(model: Model, fmt: str) -> None:
             "ordinary algebraic rows and variable bounds only, so there is "
             f"nothing faithful to write. {remedy}"
         )
+
+
+def binary_box_is_default(lb, ub) -> bool:
+    """True if a binary variable still carries its full declared ``[0, 1]`` box.
+
+    Every writer has a shorthand for a binary column — MPS ``BV``, an LP
+    ``Binaries`` listing, a GAMS ``Binary Variables`` declaration — and each
+    shorthand *means* ``0 <= x <= 1``. Emitting it for a binary whose box has
+    been narrowed (``x.fix(1)``, ``x.fix(1, where=mask)``, or a presolve-style
+    pin) silently widens the column back out, so the exported file is a
+    **relaxation** of the model discopt was handed and an external solver
+    answers a different question. Measured before this guard existed: a model
+    with ``x`` pinned at 1 and objective ``x + y`` exported to MPS and to LP,
+    read back with HiGHS, optimized to **0** instead of 1 (EX-3).
+
+    Writers therefore take the shorthand only when this returns True and fall
+    through to their ordinary bound-emitting path otherwise. The test is
+    elementwise so a partially pinned array (``where=`` mask) is caught: one
+    narrowed element is enough to disqualify the whole block, since the
+    shorthand is declared per variable, not per element.
+    """
+    lo = np.asarray(lb, dtype=np.float64)
+    hi = np.asarray(ub, dtype=np.float64)
+    return bool(np.all(lo <= 0.0) and np.all(hi >= 1.0))
