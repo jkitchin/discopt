@@ -199,6 +199,14 @@ body containing `jnp.floor`, a table lookup, or a simulator behind
 `jax.pure_callback` returns zero or meaningless gradients — and a gradient method
 will then sit perfectly still **while reporting success**.
 
+If you *do* have trustworthy derivatives for the opaque part — an adjoint solver, a
+hand-written Jacobian — then DIRECT is not your only option:
+{doc}`external_function_node` shows `dm.external(fn, jac=..., hess=...)`, which
+supplies them to the NLP path explicitly instead of hoping AD finds them. That
+gets you fast local convergence rather than a box search, at the cost of finding
+only a local optimum. Neither route produces a certificate. DIRECT remains the
+right answer when no derivatives exist or the objective is genuinely multimodal.
+
 ```python
 def staircase():
     m = dm.Model("staircase")
@@ -355,6 +363,7 @@ shape implemented here.
 | The model is algebraic | the default solver — you get a certificate |
 | Opaque body that traces through `MCBox` | the default solver — still certified, see {doc}`reduced_space_customcall` |
 | Opaque body, evaluation is cheap (ms–s) | `solver="direct"` |
+| Opaque body, but you can supply its Jacobian (and Hessian) | `dm.external` on the default path — local, fast, see {doc}`external_function_node` |
 | Opaque body, evaluation is expensive (minutes+) | a surrogate method; DIRECT will spend hundreds of calls |
 | Experiments taking hours or days, human in the loop | a sequential design campaign, not a blocking solve |
 | You need a *proof*, not a good point | no derivative-free method will give you one |

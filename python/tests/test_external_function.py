@@ -505,3 +505,41 @@ class TestInheritedRefusals:
         with pytest.raises(Exception) as excinfo:
             m.to_nl()
         assert "CustomCall" in str(excinfo.value) or "custom" in str(excinfo.value).lower()
+
+    def test_amp_refuses_an_opaque_block_instead_of_failing_internally(self):
+        """``solver="amp"`` must refuse up front, not die inside its MILP build.
+
+        AMP certifies by linearizing a partitioned relaxation, which an opaque body
+        has no algebraic form for. Measured before the refusal: ``AMP: MILP
+        build/solve failed at iteration 1: too many indices for array: array is
+        0-dimensional``, then ``status="error"`` with ``objective=None`` -- no false
+        bound, but no statement of the cause either.
+
+        The message must name a backend that *does* work, otherwise the refusal
+        just relocates the dead end.
+        """
+        m, _ = _model(external=True)
+        with pytest.raises(ValueError) as excinfo:
+            m.solve(solver="amp")
+        msg = str(excinfo.value)
+        assert "amp" in msg.lower()
+        assert "direct" in msg, "the refusal must name a backend that works"
+        # The failure mode this replaced must not be what the user sees.
+        assert "0-dimensional" not in msg and "too many indices" not in msg
+
+    def test_amp_refusal_covers_plain_dm_custom_too(self):
+        """The guard is keyed on ``CustomCall``, not on ``dm.external`` (§2).
+
+        The AMP dead end was never specific to external blocks -- an ordinary
+        ``dm.custom`` body hit the same internal error. Fixing the class rather
+        than the instance is only demonstrated if the plain node is covered, so
+        this asserts it directly.
+        """
+        m = dm.Model("plain-custom")
+        x = m.continuous("x", shape=(2,), lb=0.2, ub=3.0)
+        m.minimize(dm.sum(x))
+        blk = dm.custom(lambda v: v[0] * v[1], name="opaque")
+        m.subject_to(blk(x) == 1.0, name="block")
+        with pytest.raises(ValueError) as excinfo:
+            m.solve(solver="amp")
+        assert "direct" in str(excinfo.value)

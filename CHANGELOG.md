@@ -42,6 +42,17 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **`solver="amp"` now refuses an opaque body instead of failing internally.** AMP
+  certifies by linearizing a partitioned relaxation, and an opaque `dm.custom` /
+  `dm.external` body has no algebraic form to linearize. It produced no false
+  bound, but it reached that state via `AMP: MILP build/solve failed at iteration
+  1: too many indices for array: array is 0-dimensional` followed by
+  `status="error"` with `objective=None` — nothing naming the cause. It now raises
+  up front, naming `solver="direct"`, `solver="surrogate"` and the default local
+  NLP path as the backends that do work on an opaque body. This affected plain
+  `dm.custom` too, not just the new `dm.external`, and the fix is keyed on
+  `CustomCall` so it covers both.
+
 - **An external callable's error now reaches the caller.** POUNCE catches an
   exception raised inside a Hessian callback, logs it as `ERROR pounce::py:
   hessian(): JaxRuntimeError: INTERNAL: CpuCallback error...`, and lets the solve

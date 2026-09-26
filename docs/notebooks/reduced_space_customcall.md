@@ -18,7 +18,17 @@ low-dimensional DOF space.
 If you can write a function with discopt primitives (`dm.exp`, `dm.log`, arithmetic on
 variables, ...), do so — `dm.udf` keeps full global-solver support. Reach for
 `dm.custom` only when the body genuinely cannot be expressed that way (e.g. it calls
-into external JAX code). A `CustomCall` is opaque, so:
+into external JAX code).
+
+`dm.custom` requires a **JAX-traceable** body. If yours is not traceable at all — a
+compiled simulator, a subprocess, a legacy Fortran kernel — `dm.custom` cannot wrap
+it, and the failure is a raw `ConcretizationTypeError`. Use
+{doc}`external_function_node` (`dm.external`) for that case: you supply the value
+*and* the derivatives, and the block solves on the local NLP path. It gets you no
+certificate either way, so everything below about the opaque fallback applies to it
+verbatim.
+
+A `CustomCall` is opaque, so:
 
 - **If the body traces soundly through `MCBox`** — arithmetic (`+ - * / **`) and the
   `discopt._relax.mcbox` intrinsic namespace (`exp`, `log`, `sqrt`, fractional powers,

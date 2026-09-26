@@ -10378,6 +10378,30 @@ def solve_model(
 
         from discopt.solvers.amp import solve_amp
 
+        # AMP is a *certifying* solver: it bounds the objective by partitioning the
+        # box and solving a MILP relaxation. An opaque CustomCall body (dm.custom,
+        # dm.external) has no algebraic form for that MILP to linearize, so AMP can
+        # never bound it. It does not produce a WRONG bound -- measured, it produces
+        # none at all -- but it gets there by way of an internal error that names
+        # nothing: "AMP: MILP build/solve failed at iteration 1: too many indices
+        # for array: array is 0-dimensional" followed by status="error" and
+        # objective=None. Refuse up front instead, naming the backends that do work
+        # on an opaque body. This mirrors the NLP-path gate below; unlike that one,
+        # there is no Hessian that could rescue it -- the obstruction is the missing
+        # relaxation, not the missing derivative.
+        if _model_contains_custom_call(model):
+            raise ValueError(
+                "solver='amp' cannot solve a model containing an opaque dm.custom / "
+                "dm.external body: AMP certifies by linearizing a partitioned "
+                "relaxation, and an opaque body has no algebraic form to linearize. "
+                "Use Model.solve(solver='direct') for a systematic derivative-free "
+                "global search over the box, Model.solve(solver='surrogate'), or the "
+                "default path for a single local NLP solve — none of which certify "
+                "global optimality, which is the price of the opaque body. If the "
+                "body traces through the reduced-space MCBox type, drop solver= and "
+                "the default path will certify it instead."
+            )
+
         amp_kwargs = {}
         amp_option_keys = (
             "rel_gap",
