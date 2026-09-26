@@ -1089,32 +1089,44 @@ impl<'a> PreparedDual<'a> {
                                     // otherwise certify with the sharper x_B. Sound either
                                     // way — the decision is only ever made *more* accurate,
                                     // and the common (benign-growth) path is untouched.
-                                    let refined_xb: Option<Vec<f64>> =
-                                        if lu.growth().is_some_and(|g| g > GROWTH_REFINE_TRIGGER) {
-                                            crate::profile::incr(
-                                                crate::profile::Ctr::RefinedRecoveryAttemptsDual,
-                                            );
-                                            match refined_basic_values(
-                                                sp, b, n, m, l, u, &basis, &stat,
-                                            ) {
-                                                Some(xb_r) => {
-                                                    if select_leaving(
-                                                        m, &basis, l, u, &gamma, &xb_r, tol, bland,
-                                                    )
-                                                    .is_some()
-                                                    {
-                                                        crate::profile::incr(
+                                    //
+                                    // growth is one-sided (see KAPPA_REFINE_TRIGGER): it
+                                    // cannot see a near-singular basis that elimination
+                                    // never had to fight. When the κ₁ check is enabled it
+                                    // covers that blind spot, and is evaluated *only* if
+                                    // growth stayed quiet — the 0.2% that already recover
+                                    // must not pay for an estimate whose answer they do
+                                    // not use.
+                                    let unstable =
+                                        lu.growth().is_some_and(|g| g > GROWTH_REFINE_TRIGGER)
+                                            || kappa_refine_trigger().is_some_and(|line| {
+                                                basis_condition(&mut lu, sp, m, &basis)
+                                                    .is_some_and(|k| k > line)
+                                            });
+                                    let refined_xb: Option<Vec<f64>> = if unstable {
+                                        crate::profile::incr(
+                                            crate::profile::Ctr::RefinedRecoveryAttemptsDual,
+                                        );
+                                        match refined_basic_values(sp, b, n, m, l, u, &basis, &stat)
+                                        {
+                                            Some(xb_r) => {
+                                                if select_leaving(
+                                                    m, &basis, l, u, &gamma, &xb_r, tol, bland,
+                                                )
+                                                .is_some()
+                                                {
+                                                    crate::profile::incr(
                                                     crate::profile::Ctr::RefinedRecoveryRescuesDual,
                                                 );
-                                                        return None; // sharper x_B infeasible → cold fallback
-                                                    }
-                                                    Some(xb_r)
+                                                    return None; // sharper x_B infeasible → cold fallback
                                                 }
-                                                None => None, // fresh factor failed; keep the exact x_B
+                                                Some(xb_r)
                                             }
-                                        } else {
-                                            None
-                                        };
+                                            None => None, // fresh factor failed; keep the exact x_B
+                                        }
+                                    } else {
+                                        None
+                                    };
                                     let xb_final: &[f64] = refined_xb.as_deref().unwrap_or(&xb);
                                     // Row duals `y = B⁻ᵀ c_B` for the safe dual bound;
                                     // empty (caller falls back) if the btran fails.
@@ -1550,6 +1562,134 @@ fn recompute_basic_values(
 /// untouched.
 const GROWTH_REFINE_TRIGGER: f64 = 1e4;
 
+/// Condition-number line above which the optimality gate re-solves `x_B`, when
+/// `DISCOPT_LP_KAPPA_RECOVERY` is on.
+///
+/// **Why a second trigger at all.** [`GROWTH_REFINE_TRIGGER`] reads
+/// `‖U‖∞ / ‖U₀‖∞` — how far elimination pushed the factor. That is one-sided: on
+/// a basis where no elimination happens, growth is exactly 1 however singular the
+/// basis is (`linsolve::growth_is_blind_to_a_class_kappa_sees`). Measured over the
+/// 66-instance `minlplib_nl` corpus at 20 s/instance, 335,033 confirmation points:
+/// 677 (0.20%) trip growth, while 13,749 (4.10%) sit at growth ≤ 1e4 with
+/// κ₁ > 1e10, the worst at growth exactly 1.000 and κ₁ ≈ 7.1e18.
+///
+/// Those κ₁ figures are the number *this* code path reads — the estimate against
+/// the working factor, Forrest-Tomlin etas included — not a fresh refactorization.
+/// The two were measured to be the same signal before the line was set: over the
+/// same 335,033 points the cheap/fresh ratio has p01 = median = p99 = 1.0000 and
+/// 100.00% of pairs agree within one order of magnitude (extremes 0.08 and 6.2).
+///
+/// **Why 1e12 and not the textbook line.** A solve against a basis of condition
+/// `κ` carries relative error ≈ `κ·u`, `u = 2.2e-16`; setting that equal to the
+/// feasibility tolerance the certified `x_B` is tested against gives `κ ≈ 4.5e6`.
+/// That line is *useless as a trigger*: the same corpus puts the **median** κ₁ at
+/// 1.39e6, with 52.0% of all confirmation points above 1e6, so recovery would run
+/// on half of every solve. Real LP codes live with κ that large and lean on
+/// refinement, which is what this engine already does. 1e12 is the line where the
+/// error swamps the decision rather than merely approaching it: `κ·u ≈ 2e-4`, so
+/// `x_B` has under four correct digits and the feasibility test that certifies it
+/// is comparing noise. Below that, a refined recompute mostly re-confirms what the
+/// working factor already said; above it, the answer is not trustworthy at all.
+/// The measured exceedance curve is why the line lands here and not a decade
+/// either side: 1e8 → 19.1% of confirmations, 1e10 → 4.10%, **1e12 → 2.66%**,
+/// 1e14 → 0.92%. 1e12 is ≈ the 97.3rd percentile (p95 2.39e9, p99 8.03e13).
+const KAPPA_REFINE_TRIGGER: f64 = 1e12;
+
+/// The κ₁ line for the optimality-gate recovery, or `None` when the check is off.
+///
+/// Default **off**, and — per the three-state rule (CLAUDE.md §5, #1345) — this is
+/// a **documented opt-in, not a stalled graduation**. A κ₁ trip makes the engine
+/// certify a *different* `x_B`, and can send a node to the cold fallback that
+/// would otherwise have returned `Optimal`, so it is bound-changing and the
+/// graduation gate applies. **The panel has been run** — do not read this flag as
+/// owing one.
+///
+/// `discopt_benchmarks/scripts/kappa_recovery_graduation_panel.py`, 66 instances of
+/// `python/tests/data/minlplib_nl` × 2 arms, 20 s/instance, interleaved with the
+/// arm order alternating:
+///
+/// - **Cert-clean bar: passed.** 543 executed checks, 0 violations, certification
+///   48/48 in both arms, 0 status or certification disagreements, every incumbent
+///   independently re-verified by the false-primal screen. The single loosened dual
+///   bound (`heatexch_gen2`) was chased down and is a budget-boundary artifact: a
+///   6-replicate interleaved control found it bimodal *within* the OFF arm, with
+///   the within-OFF spread exactly equal to the OFF↔ON gap (7696.9029).
+/// - **Fired, provably** (§6): 10,818 κ₁-caused refined recomputes over 12
+///   instances, **5 of them rescues** — the refined `x_B` was primal-infeasible
+///   where the working `x_B` looked feasible, so an optimality confirmation from a
+///   basis with under four correct digits was averted. `nvs05` ON reaches the true
+///   global optimum (5.470934111 vs. reference 5.470934108) where OFF finishes
+///   7.6% above it.
+/// - **Net-positive bar: not met.** Nodes +0.72% (5827 → 5869), wall +2.80%
+///   (428.5 s → 440.6 s; one replicate per instance at load average 4–10, so treat
+///   the wall figure as indicative, §9). `clay0303hfsg` is the cost shape to know:
+///   +10,194 attempts, ≈54 refined recomputes per node on a 189-node solve.
+///
+/// **Why it is not the default, and what would change that.** The OFF arm produced
+/// no wrong answer on this corpus, so ON buys the removal of a *latent* risk at a
+/// measured cost — which is negative against §5's net-positive bar as written
+/// (nodes / wall / bound). The `DISCOPT_TREE_SENTINEL_PRUNE_GUARD` precedent
+/// graduated a soundness guard over exactly this objection, but it had a
+/// *demonstrated* false certificate behind it and this does not. Two findings would
+/// flip it: a corpus instance where the OFF arm certifies a bound the oracle
+/// refutes (then it graduates as a soundness guard, cost irrelevant), or an
+/// estimate cadence cheap enough to erase the +2.8% — the obvious candidate being
+/// to re-estimate only after a refactorization or eta-count threshold rather than
+/// at every confirmation point, which is what `clay0303hfsg` is paying for.
+///
+/// `1/true/on` selects [`KAPPA_REFINE_TRIGGER`]; an explicit positive float
+/// overrides the line so the panel can sweep it.
+///
+/// Unrecognized input is refused rather than defaulted, for the reason on
+/// [`parse_stall_patience`]: a typo in an A/B harness's arm that reads as a valid
+/// setting makes the harness measure one arm twice.
+fn kappa_refine_trigger() -> Option<f64> {
+    static LINE: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    *LINE.get_or_init(|| {
+        let raw = std::env::var("DISCOPT_LP_KAPPA_RECOVERY").unwrap_or_default();
+        parse_kappa_recovery(&raw).unwrap_or_else(|e| panic!("{e}"))
+    })
+}
+
+/// The parse table behind [`kappa_refine_trigger`], split out so the accepted and
+/// rejected spellings are testable without a process-global `OnceLock`.
+fn parse_kappa_recovery(raw: &str) -> Result<Option<f64>, String> {
+    match raw.trim() {
+        "" | "0" | "false" | "False" | "off" | "OFF" => Ok(None),
+        "1" | "true" | "True" | "on" | "ON" => Ok(Some(KAPPA_REFINE_TRIGGER)),
+        other => match other.parse::<f64>() {
+            Ok(v) if v.is_finite() && v > 1.0 => Ok(Some(v)),
+            _ => Err(format!(
+                "DISCOPT_LP_KAPPA_RECOVERY={other:?} is not a recognized value. \
+                 Use 1/true/on (κ₁ > {KAPPA_REFINE_TRIGGER:e}), 0/false/off (the \
+                 default, disabled), or an explicit finite threshold > 1. A \
+                 threshold ≤ 1 is rejected because κ₁ ≥ 1 always, so it would fire \
+                 on every basis."
+            )),
+        },
+    }
+}
+
+/// κ₁ of the current basis, estimated against the factor already in hand.
+///
+/// Rebuilds the basis columns the same way [`PreparedDual::prepare`] does — the
+/// O(nnz) CSC slice, no dense `m × m` intermediate — and hands them to feral's
+/// Hager–Higham estimator. Costs ≤ 11 ftran/btran solves against `lu`; it does
+/// **not** refactorize, and needs no numeric-focus retention.
+///
+/// `None` means *no estimate*, never *well-conditioned*: the caller keeps the
+/// decision it would have made without κ₁.
+fn basis_condition(lu: &mut FeralLU, sp: &SparseCols, m: usize, basis: &[usize]) -> Option<f64> {
+    let cols: Vec<Vec<(usize, f64)>> = basis
+        .iter()
+        .map(|&j| {
+            let (rows, vals) = sp.col(j);
+            rows.iter().zip(vals).map(|(&r, &v)| (r, v)).collect()
+        })
+        .collect();
+    lu.condition_estimate_sparse(m, &cols)
+}
+
 /// Recompute `x_B` for the final basis via a **fresh** numeric-focus factorization
 /// with iterative refinement (discopt#364). The dual's working factor accumulates
 /// Forrest–Tomlin update error across pivots; a fresh factor of the same basis
@@ -1824,6 +1964,41 @@ mod tests {
 
     fn opts() -> SimplexOptions {
         SimplexOptions::default()
+    }
+
+    /// The κ₁ recovery must be *off* when unset, must accept an explicit sweep
+    /// threshold (the panel needs that), and must refuse anything else rather than
+    /// silently reading as a valid setting — the `parse_stall_patience` lesson:
+    /// a typo in an A/B harness's arm otherwise makes it measure one arm twice.
+    #[test]
+    fn kappa_recovery_parse_table() {
+        // Default and every off spelling: no line, so the trigger is unreachable.
+        for off in ["", "  ", "0", "false", "False", "off", "OFF"] {
+            assert_eq!(
+                parse_kappa_recovery(off).unwrap(),
+                None,
+                "{off:?} must disable the κ₁ check"
+            );
+        }
+        for on in ["1", "true", "True", "on", "ON"] {
+            assert_eq!(
+                parse_kappa_recovery(on).unwrap(),
+                Some(KAPPA_REFINE_TRIGGER),
+                "{on:?} must select the default line"
+            );
+        }
+        // An explicit threshold overrides, so the graduation panel can sweep it.
+        assert_eq!(parse_kappa_recovery("1e10").unwrap(), Some(1e10));
+        assert_eq!(parse_kappa_recovery(" 2.5e9 ").unwrap(), Some(2.5e9));
+
+        // κ₁ ≥ 1 by definition, so a line at or below 1 would fire on every basis
+        // — that is a mistake, not a configuration.
+        for bad in ["1.0", "0.5", "-3", "nan", "inf", "yes", "1e", "on!"] {
+            assert!(
+                parse_kappa_recovery(bad).is_err(),
+                "{bad:?} must be refused, not defaulted"
+            );
+        }
     }
 
     /// [`opts`] with the #1013 cost perturbation OFF.
