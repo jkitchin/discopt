@@ -119,7 +119,8 @@ was believed.
    path is broken" into "this path is fine". `copy.deepcopy(Model)` raises
    `TypeError: cannot pickle 'builtins.PyModelRepr'`; a bare `except` hid it and an
    entire fallback was an invisible no-op while reported as working. Let probes
-   crash. This is §3 applied to the thing you are using to judge §3.
+   crash. (The `TypeError` itself is gone since #1479 — `Model.__deepcopy__`
+   now copies fresh, solved, `from_nl` and fast-API models — but the lesson stands.) This is §3 applied to the thing you are using to judge §3.
 8. **Verify which code you actually loaded.** Before any measurement in a worktree
    or against a branch, assert both `module.__file__` *and* a marker string unique
    to the version under test (and, for a baseline run, assert that marker
@@ -362,6 +363,7 @@ mypy python/discopt/
     tighten anything.
 - **`python/discopt/dae/`** — DAE/ODE discretization for dynamic optimization (no solver/DAG-compiler changes). `collocation.py` (`DAEBuilder` + `ContinuousSet`) transcribes ODEs/index-1 DAEs/2nd-order ODEs via orthogonal collocation on finite elements (Radau/Legendre); `finite_difference.py` (`FDBuilder`) and `mol.py` (`MOLBuilder`, method of lines for PDEs) are alternatives; `polynomials.py` holds the collocation matrices/roots. `fit.py` adds multi-experiment fitting glue (`Trajectory`, `fit_trajectories`, `TrajectoryFit`): one collocation block per trajectory on a shared model wired to one RHS, so a trainable surrogate's weights are shared and trained jointly.
 - **`python/discopt/solver.py`** — Solver orchestrator: end-to-end `Model.solve()` via B&B.
+- **`python/discopt/transformations.py`** — named registry over the existing reformulation functions (`gdp.*`, `integer.*`, `binary.multilinear`, `mpec.*`): `apply_to` (in place), `create_using` (on a `Model.clone()`), and `check` (copy + `diff_models`, no solve) — the unit for verifying a reformulation without a whole-solve flag A/B. Entries resolve to the *same function objects* the solver calls; solver call sites (AMP's GDP lowering included) are not routed through it. Register a new reformulation here so it can be checked in isolation.
 - **`crates/discopt-core/`** — Rust: Expression IR, B&B tree, .nl parser, FBBT/presolve.
 - **`crates/discopt-python/`** — Rust: PyO3 bindings with zero-copy numpy.
 - **`discopt_benchmarks/`** — Benchmark orchestration, phase gate criteria, performance testing.
