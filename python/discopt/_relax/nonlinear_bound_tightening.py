@@ -562,6 +562,25 @@ def _apply_integrality(
     return lb, ub
 
 
+def _row_space_excess_is_infeasible(excess: float, *terms: float) -> bool:
+    """Is a row's least violation on the box an infeasibility PROOF?
+
+    ``excess`` is how far the row's best value on the current box misses its bound,
+    in the ROW's own units; ``terms`` are the quantities it was computed from, which
+    size the round-off. The bar is the one every row verdict in this module uses:
+    the feasibility tolerance plus the computation's round-off.
+
+    The monotone-function rules used to test emptiness *after* dividing the row by
+    the function's coefficient, against an absolute ``1e-12``. That is a
+    scale-exposed yardstick (the #1397 class): the division inflates a rounding
+    residue by ``1/|coeff|``. Measured (adversarial fuzz, seed 20047):
+    ``-4.7e-05*log(x2 + 10) + 1.1270...e-4 == 0`` with ``x2`` binary holds at
+    ``x2 = 1`` to ~1e-16, but ``log(11)`` fell 1.1e-12 short of the divided
+    requirement and the model was certified ``infeasible`` in 0.3 s.
+    """
+    return excess > _EMPTY_INTERVAL_FEAS_TOL + _roundoff_slack(*terms)
+
+
 def _constraint_label(constraint) -> str:
     name = getattr(constraint, "name", None)
     return str(name) if name else repr(constraint)
@@ -1583,11 +1602,25 @@ class MonotoneFunctionEqualityRule(NonlinearBoundTighteningRule):
             feasible_func_lb = max(required_func_lb, func_min)
             feasible_func_ub = min(required_func_ub, func_max)
             if feasible_func_lb > feasible_func_ub + 1e-12:
-                _prove_infeasible(
-                    self.name,
-                    constraint,
-                    f"{func_name}(argument) range cannot satisfy linked equality",
-                )
+                # The emptiness is measured in FUNCTION space, i.e. after dividing
+                # the row by ``func_coeff``; the row's own violation is that gap
+                # times ``|func_coeff|``. Verdict in row space (see
+                # ``_row_space_excess_is_infeasible``); a sub-tolerance miss is
+                # feasible within tolerance and this row declines to tighten.
+                if _row_space_excess_is_infeasible(
+                    abs(func_coeff) * (feasible_func_lb - feasible_func_ub),
+                    func_coeff * func_min,
+                    func_coeff * func_max,
+                    linear_expr_lb,
+                    linear_expr_ub,
+                    constant_term,
+                ):
+                    _prove_infeasible(
+                        self.name,
+                        constraint,
+                        f"{func_name}(argument) range cannot satisfy linked equality",
+                    )
+                continue
 
             arg_lb = domain_lb
             arg_ub = domain_ub
@@ -1724,21 +1757,37 @@ class MonotoneFunctionBoundsRule(NonlinearBoundTighteningRule):
             rhs = -constant_term / func_coeff
             if func_coeff > 0.0:
                 if rhs < func_min - 1e-12:
-                    _prove_infeasible(
-                        self.name,
-                        constraint,
-                        f"{func_name}(argument) cannot be <= {rhs}",
-                    )
+                    # Row-space verdict: the row's least value on the box is
+                    # ``func_coeff*func_min + constant_term``; see
+                    # ``_row_space_excess_is_infeasible``.
+                    if _row_space_excess_is_infeasible(
+                        func_coeff * func_min + constant_term,
+                        func_coeff * func_min,
+                        constant_term,
+                    ):
+                        _prove_infeasible(
+                            self.name,
+                            constraint,
+                            f"{func_name}(argument) cannot be <= {rhs}",
+                        )
+                    continue
                 upper = _inverse_monotone_upper(func_name, rhs)
                 if upper is not None:
                     arg_ub = upper if arg_ub is None else min(arg_ub, upper)
             else:
                 if rhs > func_max + 1e-12:
-                    _prove_infeasible(
-                        self.name,
-                        constraint,
-                        f"{func_name}(argument) cannot be >= {rhs}",
-                    )
+                    # ``func_coeff < 0``: the row's least value is at ``func_max``.
+                    if _row_space_excess_is_infeasible(
+                        func_coeff * func_max + constant_term,
+                        func_coeff * func_max,
+                        constant_term,
+                    ):
+                        _prove_infeasible(
+                            self.name,
+                            constraint,
+                            f"{func_name}(argument) cannot be >= {rhs}",
+                        )
+                    continue
                 lower = _inverse_monotone_lower(func_name, rhs)
                 if lower is not None:
                     arg_lb = lower if arg_lb is None else max(arg_lb, lower)

@@ -1868,6 +1868,45 @@ point (`test_1285_certificate_after_polish_swap.py` passes).
   7 of `4stufen`** (`lb = 0.001` → `0.0010000000000000087`), excluding points of
   the declared box; the fixed arithmetic: 0.
 
+### 11.4 A second find in the same round: a function-space yardstick in the Python rules
+
+The confirming fuzz round on the fixed build (4 × 80 seeds) found one more unsound
+verdict, on the Python side and pre-existing (identical under
+`DISCOPT_FBBT_OUTWARD_ROUND=0`): seed 20047 was certified `infeasible` in 0.3 s
+while the oracle had a feasible integer point. `MonotoneFunctionBoundsRule` read
+
+```
+-4.7e-05*log(x2 + 10) + 1 + (-0.99988729...) == 0        x2 binary
+```
+
+divided it by the function coefficient, and compared the required `log` value with
+`log(11)` against an absolute `1e-12` **in function space**. The split constant
+`1 + (-0.99988729...)` cancels to a residue of ~1e-16, which the division by
+`4.7e-5` inflated to 1.1e-12 — past the yardstick — although the row itself holds at
+`x2 = 1` to ~1e-16. It is §§2–10's class exactly: an absolute constant applied to a
+quantity whose scale is set by something else (here, `1/|coeff|`). The row-space
+verdicts in this module (`_EMPTY_INTERVAL_FEAS_TOL` + `roundoff_slack`) had been
+fixed by #1397; the two monotone-function rules still tested emptiness after the
+division.
+
+Fix: both monotone rules (`MonotoneFunctionBoundsRule` and the linked-equality
+rule) now take the verdict in row space via `_row_space_excess_is_infeasible`
+(`excess > _EMPTY_INTERVAL_FEAS_TOL + roundoff_slack(terms)`), and a sub-tolerance
+miss declines to tighten from that row (always sound) instead of proving the model
+infeasible. Every non-degenerate tightening is unchanged. Regression test
+`python/tests/test_nbt_monotone_row_space_verdict.py` fails on the old rule (2
+failures) and passes with the fix; it includes a control that a genuine row-space
+miss is still refused.
+
+**Tolerance semantics, recorded so the next adversary does not re-derive it.** With
+the false proof gone, seed 20047's certified incumbent misses one equality (terms of
+magnitude ~3e5) by 4.55e-4 absolute, i.e. 1.4e-9 relative; seed 22026's misses an
+equality with terms ~7e4 by 1.9e-5 (`scaled_violation_ratio` 0.27). Both are
+ACCEPTED by the scale-aware arbiter (`tol + rtol*scale`) by design, and both beat an
+oracle that demands 1e-7 absolute. That is a difference in feasibility semantics,
+not a false certificate; an oracle for badly-scaled equalities must use the
+arbiter's relative tolerance or it will report these as "incumbent beats oracle".
+
 **Still open (named, not claimed done):** the Python-side interval evaluators were
 covered by §§6–10; other Rust presolve passes that do their own arithmetic rather
 than calling `presolve::fbbt`'s interval functions (the rest of §9.1's remainder)
