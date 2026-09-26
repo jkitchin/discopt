@@ -48,6 +48,20 @@ function; see :cite:t:`Vielma2010` for the unifying treatment and
 A two-breakpoint table is a single segment; every method then lowers to the two
 linear equalities of that segment and adds no binary.
 
+Conditioning
+------------
+Every convex-combination row is written *centred* on the first breakpoint,
+``x - b_0 == sum_j (b_j - b_0) lambda_j`` (and ``y - c == sum_j (v_j - c)
+lambda_j`` with ``c`` a central sample, see ``_value_reference``), never as
+``x == sum_j b_j lambda_j``. The two are equal on the
+exact feasible set, but a MILP solver satisfies ``sum(lambda) = 1`` and
+``z in {0, 1}`` only to a tolerance ``eps``; the uncentred row then lets ``x``
+drift by ``|b_0| * eps`` -- 0.5 at ``b_0 = 1e6`` with ``eps = 5e-7`` -- while
+every row still reads as satisfied to a *relative* tolerance. That was a certified
+wrong optimum and a certified "infeasible" (#1494). Centred, the drift is
+``(b_{n-1} - b_0) * eps``, the table's own resolution scale. ``"incremental"``
+has always been centred.
+
 Domain agreement
 ----------------
 Every formulation forces ``b_0 <= x <= b_{n-1}``. A declared domain wider than
@@ -294,6 +308,34 @@ def _lin(coeffs, terms, constant: float = 0.0) -> "Expression":
     return expr + float(constant) if constant != 0.0 else expr
 
 
+#: Smallest nonzero coefficient a centred value row may carry. The same floor
+#: ``_pwl_transform._COEF_FLOOR`` keeps band coefficients above: an entry at or
+#: below HiGHS's ``small_matrix_value`` (1e-12 at the most permissive) is dropped
+#: on the way in, and the verified HiGHS route then refuses the whole model.
+_TINY_COEF = 1e-11
+
+
+def _value_reference(values) -> float:
+    """The constant ``c`` a value row ``y == c + sum_j (v_j - c) w_j`` is centred on.
+
+    Any ``c`` gives an exactly equivalent row (the weights sum to 1); ``c`` only
+    decides conditioning. Centring on ``v_0`` alone is wrong when another sample
+    equals ``v_0`` up to rounding -- ``cos`` sampled symmetrically gives
+    ``v_j - v_0 ~ 1e-16``, a coefficient no LP backend keeps. So ``c`` is the
+    sample minimising ``max_j |v_j - c|`` among those leaving every difference
+    exactly zero or at least :data:`_TINY_COEF`. If no sample qualifies (every
+    sample has a distinct near-duplicate) the row is left uncentred, ``c = 0``:
+    that is the pre-#1494 row, exact, and no worse conditioned than before.
+    """
+    v = np.asarray(values, dtype=np.float64)
+    spread = np.max(np.abs(v[:, None] - v[None, :]), axis=1)
+    for k in np.argsort(spread, kind="stable"):
+        d = v - v[k]
+        if np.all((d == 0.0) | (np.abs(d) >= _TINY_COEF)):
+            return float(v[k])
+    return 0.0
+
+
 def _lower_one(
     model: "Model",
     x: "Expression",
@@ -320,8 +362,13 @@ def _lower_one(
         lam = model.continuous(f"{prefix}_lam", shape=(n,), lb=0.0, ub=1.0)
         lams = [lam[j] for j in range(n)]
         add(_lin(np.ones(n), lams) == 1.0, name=f"{prefix}_convex")
-        add(x == _lin(b, lams), name=f"{prefix}_x")
-        add(y == _lin(v, lams), name=f"{prefix}_y")
+        # Centred: see the ``Conditioning`` note in the module docstring (#1494).
+        # Equivalent to ``x == sum(b_j lam_j)`` given the convexity row, but a
+        # tolerance-level residual in ``sum(lam) = 1`` now moves x by
+        # (span * residual), not (|b_0| * residual).
+        cv = _value_reference(v)
+        add(x == _lin(b - b[0], lams, b[0]), name=f"{prefix}_x")
+        add(y == _lin(v - cv, lams, cv), name=f"{prefix}_y")
         if method == "sos2":
             model.sos2(lams, name=f"{prefix}_sos2")
             return
@@ -358,8 +405,13 @@ def _lower_one(
             add(lo_w[i] + hi_w[i] == zs[i], name=f"{prefix}_seg{i}")
         add(_lin(np.ones(s), zs) == 1.0, name=f"{prefix}_choose")
         w_terms = [lo_w[i] for i in range(s)] + [hi_w[i] for i in range(s)]
-        add(x == _lin(np.concatenate([b[:-1], b[1:]]), w_terms), name=f"{prefix}_x")
-        add(y == _lin(np.concatenate([v[:-1], v[1:]]), w_terms), name=f"{prefix}_y")
+        # Centred for the same reason as the lambda rows (#1494): with
+        # sum(wl + wr) = sum(z) = 1 this is exactly the uncentred row.
+        cv = _value_reference(v)
+        bx = np.concatenate([b[:-1], b[1:]]) - b[0]
+        vy = np.concatenate([v[:-1], v[1:]]) - cv
+        add(x == _lin(bx, w_terms, b[0]), name=f"{prefix}_x")
+        add(y == _lin(vy, w_terms, cv), name=f"{prefix}_y")
         return
 
     if method == "incremental":
