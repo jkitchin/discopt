@@ -1184,15 +1184,22 @@ class PWLTransformation:
             [np.asarray(x[v.name], dtype=np.float64).reshape(-1) for v in orig._variables]
         )
         found: list[tuple[np.ndarray, float]] = []
-        res = verify_point(orig, flat, with_objective=True)
+        # #1496: ``verify_point`` accepts a point up to tolerance OUTSIDE the box, and
+        # the objective there can beat every in-box point -- an incumbent below the
+        # certified bound (``min (x-0.3)**2`` at x = 1e4 - 1e-4), or one that trips
+        # the tripwire on a valid bound (``max exp(x)`` at x = 18 + eps). The point
+        # published is therefore the one clipped into the box with integers rounded,
+        # and it is that point which is verified and whose objective is used.
+        res = verify_point(orig, cand := _into_box(orig, flat), with_objective=True)
         if res.ok:
             assert res.objective is not None  # with_objective=True on an ok result
-            found.append((flat, float(res.objective)))
+            found.append((cand, float(res.objective)))
         else:
             notes.append(f"transformed point not feasible for the original: {res.reason}")
         if polish:
             polished = _polish(orig, flat, notes)
             if polished is not None:
+                polished = _into_box(orig, polished)
                 res2 = verify_point(orig, polished, with_objective=True)
                 if res2.ok:
                     assert res2.objective is not None
@@ -1328,6 +1335,21 @@ def _polish(model: "Model", x0: np.ndarray, notes: list[str]) -> Optional[np.nda
         notes.append("polish NLP returned no point")
         return None
     return np.asarray(x, dtype=np.float64)
+
+
+def _into_box(model: "Model", x: np.ndarray) -> np.ndarray:
+    """*x* clipped into the declared bounds, integer columns rounded (#1496)."""
+    from discopt.modeling.core import VarType
+
+    lo, hi = _flat_bounds(model)
+    out = np.clip(np.asarray(x, dtype=np.float64), lo, hi)
+    off = 0
+    for v in model._variables:
+        if v.var_type in (VarType.INTEGER, VarType.BINARY):
+            sl = slice(off, off + v.size)
+            out[sl] = np.clip(np.round(out[sl]), lo[sl], hi[sl])
+        off += v.size
+    return out
 
 
 def _flat_bounds(model: "Model") -> tuple[np.ndarray, np.ndarray]:
