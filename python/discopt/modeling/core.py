@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import builtins as _builtins
 import contextlib as _contextlib
+import copy as _copy
 import gc
 import math
 import re
@@ -4898,6 +4899,11 @@ def _is_fast_linear_quadratic_family(model) -> bool:
     return True
 
 
+# Solve caches that ``Model.__init__`` itself declares. ``Model.__deepcopy__`` resets
+# these to ``None`` on the copy and omits every other ``*_cache`` attribute (#1479).
+_MODEL_INIT_CACHES = frozenset({"_flat_var_offsets_cache"})
+
+
 class Model:
     """
     A Mixed-Integer Nonlinear Program.
@@ -5068,6 +5074,101 @@ class Model:
         #: record to carry, and inventing one at construction would date the model
         #: to when it was *built* rather than when it was saved.
         self.provenance: Optional[dict] = None
+
+    # ── Copying (#1479) ──────────────────────────────────────────────
+    #
+    # The default ``copy.deepcopy`` works on a freshly built model but failed in
+    # two states every real model reaches: a model read by ``from_nl`` (the Rust
+    # ``PyModelRepr`` in ``_nl_repr``: "cannot pickle 'builtins.PyModelRepr'")
+    # and a model that has been *solved* (the evaluator caches hold the POUNCE
+    # module: "cannot pickle 'module' object"). A model built with the fast
+    # linear API failed a third way, on the Rust ``PyModelBuilder`` that is the
+    # sole store of its rows. ``__deepcopy__`` handles exactly those three
+    # things and deep-copies everything else as the default would, so a fresh
+    # model copies byte-for-byte as before (asserted in ``test_transformations``).
+
+    def __deepcopy__(self, memo: dict) -> "Model":
+        cls = type(self)
+        new = cls.__new__(cls)
+        memo[id(self)] = new
+        for key, value in self.__dict__.items():
+            if key.endswith("_cache"):
+                # Solve-time memoisation (evaluators, convexity, FBBT structure,
+                # the native NLP base, flat offsets). Keyed by object identity
+                # and rebuilt on demand, so a copy starts cold rather than
+                # inheriting entries that describe the original's objects. A
+                # cache ``__init__`` declares is reset to its declared ``None``;
+                # a lazily attached one is left absent, as on a fresh model
+                # (every reader goes through ``getattr(model, name, None)``).
+                if key in _MODEL_INIT_CACHES:
+                    new.__dict__[key] = None
+                continue
+            if key == "_builder":
+                new.__dict__[key] = None  # rebuilt below from the Python-side record
+                continue
+            if key == "_nl_repr":
+                # The parsed ``.nl`` source: read-only after ``from_nl`` and read
+                # by nothing on the solve path. A copy shares it rather than
+                # dropping it, which keeps the copy's attribute set faithful.
+                new.__dict__[key] = value
+                continue
+            try:
+                new.__dict__[key] = _copy.deepcopy(value, memo)
+            except TypeError as exc:
+                raise TypeError(
+                    f"Model {self.name!r}: attribute {key!r} ({type(value).__name__}) "
+                    f"cannot be deep-copied: {exc}. Model.__deepcopy__ knows how to "
+                    "handle solve caches (*_cache), the Rust builder and _nl_repr; "
+                    "a new uncopyable attribute must be taught to it here rather "
+                    "than silently dropped."
+                ) from exc
+        if self._builder is not None:
+            new._replay_builder()
+        return new
+
+    def _replay_builder(self) -> None:
+        """Rebuild the Rust builder of a copy from its retained Python-side blocks.
+
+        Every builder-resident row enters through :meth:`add_linear_constraints`
+        (the ``Model.constraint`` fast path included) and every builder-resident
+        objective through :meth:`add_linear_objective` /
+        :meth:`add_quadratic_objective`, each of which records its inputs on the
+        model. Replaying those records through the same entry points gives the
+        copy a builder with the same rows, in the same order.
+        """
+        blocks = list(self._builder_linear_blocks)
+        lin_obj = self._builder_linear_objective
+        quad_obj = self._builder_quadratic_objective
+        objective = self._objective
+        self._builder = None
+        self._builder_linear_blocks = []
+        self._get_builder()
+        for A, x, sense, b, name in blocks:
+            self.add_linear_constraints(A, x, sense, b, name=name)
+        if lin_obj is not None:
+            c_vec, x, constant, sense = lin_obj
+            self.add_linear_objective(c_vec, x, constant=constant, sense=sense)
+        elif quad_obj is not None:
+            Q, c_vec, x, constant, sense = quad_obj
+            self.add_quadratic_objective(Q, c_vec, x, constant=constant, sense=sense)
+        # The objective entry points install a fresh placeholder; keep the
+        # copied one so the copy's objective object graph matches the original's.
+        self._objective = objective
+
+    def clone(self) -> "Model":
+        """Return an independent deep copy of this model.
+
+        The copy owns new :class:`Variable`, :class:`Constraint` and
+        :class:`Parameter` objects (a variable of the copy is *not* a variable of
+        the original, and fixing one leaves the other alone). Solve caches are
+        not carried -- the copy starts cold -- but the last solve result and the
+        ``.nl`` source path are, since the copy is still the same model. Works on
+        fresh, solved, ``from_nl`` and fast-API-built models.
+
+        This is the copy :func:`discopt.transformations.create_using` runs a
+        transformation on.
+        """
+        return _copy.deepcopy(self)
 
     # ── Rich representation (LaTeX / HTML in standard PSE form) ──
 
@@ -6655,11 +6756,10 @@ class Model:
         >>> m.complementarity(x, y)
         """
         from discopt import mpec
+        from discopt.transformations import get as _get_transformation
 
-        if method == "gdp":
-            lower = mpec.reformulate_gdp
-        elif method == "sos1":
-            lower = mpec.reformulate_sos1
+        if method in ("gdp", "sos1"):
+            lower = _get_transformation(f"mpec.{method}")
         elif method == "scholtes":
             raise ValueError(
                 "method='scholtes' is a solve-time regularization homotopy, not "
@@ -6684,7 +6784,7 @@ class Model:
             role=mpec.ComplementarityRole.NCP_PAIR,
             scale=scale,
         )
-        lower(self, [pair])
+        lower.apply(self, pairs=[pair])
         self._complementarities.append(pair)
         return pair
 
@@ -6746,7 +6846,9 @@ class Model:
             # l=0, u=+inf IS the symmetric pair; lower it exactly as
             # ``complementarity`` would rather than leaving an unlowered
             # relation the solver must refuse.
-            mpec.reformulate_gdp(self, [pair])
+            from discopt.transformations import get as _get_transformation
+
+            _get_transformation("mpec.gdp").apply(self, pairs=[pair])
         self._complementarities.append(pair)
         return pair
 

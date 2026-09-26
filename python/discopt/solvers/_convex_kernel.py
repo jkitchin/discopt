@@ -468,12 +468,12 @@ def build_convex_spec(model, bounds=None) -> Optional[dict]:
 
 
 def _build(model, bounds) -> dict:
-    from discopt._relax.gdp_reformulate import reformulate_gdp
     from discopt._relax.model_utils import flat_variable_bounds
     from discopt._tape_nlp_evaluator import make_evaluator
     from discopt.modeling.core import VarType
+    from discopt.transformations import get as _get_transformation
 
-    m = reformulate_gdp(model, method="big-m")
+    m = _get_transformation("gdp").apply(model, method="big-m")
     lb, ub = flat_variable_bounds(m)
     n = len(lb)
     lb = lb.astype(float)
