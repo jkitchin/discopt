@@ -455,15 +455,20 @@ def _response_jacobian_wrt_parameters(
     ------
     ValueError
         If an inequality constraint is active at the solution, if the
-        equality system is not square in the state variables, or if
+        equality system is not square in the *free* state variables, or if
         ``∂g/∂z`` is singular. In each case dz/dθ is not characterized by
         the equalities alone, and a partial derivative would be a silently
         wrong covariance rather than an approximate one.
+
+        A column pinned at ``lb == ub`` is data, not a state, and does not
+        count toward the squareness test — see the classification comment in
+        the body. Pinned design inputs are the ordinary multi-experiment
+        case, so getting this wrong refuses well-posed campaign models.
     """
     import jax
     import jax.numpy as jnp
 
-    from discopt.parametric import compile_expression
+    from discopt.parametric import compile_expression, variable_slices
 
     def response_vector(x_flat_arg):
         return jnp.stack([fn(x_flat_arg, p_flat) for fn in response_fns])
@@ -521,20 +526,50 @@ def _response_jacobian_wrt_parameters(
 
     n_x = int(J_full.shape[1])
     param_set = set(param_indices)
-    state_indices = [i for i in range(n_x) if i not in param_set]
+
+    # Every column of x_flat is exactly one of three things, and conflating
+    # the last two is a bug that refuses well-posed models:
+    #
+    #   1. an unknown parameter θ            -> the columns we differentiate for
+    #   2. a *pinned* variable (lb == ub)    -> data, not a state
+    #   3. everything else                   -> a state z, which the equalities
+    #                                           must determine from θ
+    #
+    # Case 2 is the design-input case, and it is the common one: a
+    # multi-experiment campaign pins each block's conditions with
+    # ``Variable.fix`` (possibly elementwise via ``where=``), so those columns
+    # are constants of the estimation. ``d(pinned)/dθ = 0``, so they contribute
+    # nothing to the total derivative — but counting them as states inflates
+    # the state count and makes the squareness test below reject a model whose
+    # actual state system is square. The classification is on the *box*, not on
+    # ``em.design_inputs``, so a presolve-style pin or any other fixed column is
+    # handled by the same rule.
+    pinned = np.zeros(n_x, dtype=bool)
+    slices = variable_slices(model)
+    for var in model._variables:
+        sl = slices[var.name]
+        width = sl.stop - sl.start
+        lo = np.broadcast_to(np.asarray(var.lb, dtype=np.float64).ravel(), (width,))
+        hi = np.broadcast_to(np.asarray(var.ub, dtype=np.float64).ravel(), (width,))
+        pinned[sl] = lo == hi
+
+    state_indices = [i for i in range(n_x) if i not in param_set and not pinned[i]]
 
     # (n_eq, n_x_total)
     G_full = np.asarray(jax.jacobian(eq_residuals)(x_flat), dtype=np.float64)
     n_eq = int(G_full.shape[0])
 
     if n_eq != len(state_indices):
+        n_pinned = int(pinned.sum())
         raise ValueError(
             "Cannot compute an exact parameter Jacobian: the model has "
             f"{n_eq} equality constraint row(s) but {len(state_indices)} "
-            "state variable(s), so the states are not determined by the "
+            "free state variable(s), so the states are not determined by the "
             "constraints given the parameters. The Fisher Information Matrix "
             "needs a square, solvable state system; add the missing "
-            "equations, or remove the variables that no equation determines."
+            f"equations, or pin the variables no equation determines. "
+            f"({n_pinned} column(s) are pinned at lb == ub and were counted as "
+            "data rather than states.)"
         )
 
     G_z = G_full[:, state_indices]

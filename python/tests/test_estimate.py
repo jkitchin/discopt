@@ -409,6 +409,40 @@ class NonlinearStateExperiment(Experiment):
         )
 
 
+class PinnedDesignInputExperiment(Experiment):
+    """y_i = z_i with z_i == k * F_i, where the design inputs F are pinned data.
+
+    The multi-experiment campaign shape, and the one that caught a real defect:
+    each block's conditions are pinned with ``Variable.fix``, so ``F`` occupies
+    columns of ``x_flat`` that no equation determines. Classifying every
+    non-parameter column as a *state* makes the square-system test see 2n states
+    against n equations and refuse a model that is perfectly well posed — which
+    is what ``docs/notebooks/cstr_fit_doe_optimize.ipynb`` does (15 equality
+    rows, 20 columns, 5 of them pinned flows).
+    """
+
+    def __init__(self, x_data, sigma=0.1):
+        self.x_data = np.asarray(x_data, dtype=float)
+        self.sigma = float(sigma)
+
+    def create_model(self, **kwargs):
+        m = dm.Model("pinned_design")
+        k = m.continuous("k", lb=-20.0, ub=20.0)
+        F = m.continuous("F", shape=(len(self.x_data),), lb=0.0, ub=1e3)
+        z = m.continuous("z", shape=(len(self.x_data),), lb=-1e3, ub=1e3)
+        for i in range(len(self.x_data)):
+            m.subject_to(z[i] == k * F[i], name=f"state_{i}")
+        F.fix(self.x_data)
+        responses = {f"y_{i}": z[i] for i in range(len(self.x_data))}
+        return ExperimentModel(
+            model=m,
+            unknown_parameters={"k": k},
+            design_inputs={"F": F},
+            responses=responses,
+            measurement_error={n: self.sigma for n in responses},
+        )
+
+
 class UnderdeterminedExperiment(Experiment):
     """One state variable, no equation determining it."""
 
@@ -517,6 +551,31 @@ class TestConstrainedModelFIM:
 
         fim_analytic = np.sum(self.X_DATA**2) / self.SIGMA**2
         np.testing.assert_allclose(result.fim[0, 0], fim_analytic, rtol=1e-4)
+
+    def test_pinned_design_inputs_are_data_not_states(self):
+        """A pinned design input must not count against the square-system test.
+
+        Regression for the defect that classified every non-parameter column as
+        a state: with F pinned, the system is n equations in n states, but the
+        naive classification counted 2n and refused. The FIM is the same
+        analytic value as the direct form, because F is data either way.
+        """
+        result = estimate_parameters(
+            PinnedDesignInputExperiment(self.X_DATA, self.SIGMA), self._data()
+        )
+
+        fim_analytic = np.sum(self.X_DATA**2) / self.SIGMA**2
+        np.testing.assert_allclose(result.fim[0, 0], fim_analytic, rtol=1e-4)
+        np.testing.assert_allclose(result.parameters["k"], 2.0, rtol=1e-4)
+
+    def test_refusal_message_accounts_for_pinned_columns(self):
+        """The squareness refusal must say how many columns it treated as data.
+
+        Without that number the message is unactionable: a reader sees a state
+        count they cannot reconcile with the model they wrote.
+        """
+        with pytest.raises(ValueError, match="pinned at lb == ub"):
+            estimate_parameters(UnderdeterminedExperiment(self.X_DATA, self.SIGMA), self._data())
 
     def test_underdetermined_states_refuse(self):
         """Fewer equations than states: refuse rather than report a partial."""
