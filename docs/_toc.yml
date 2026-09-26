@@ -76,7 +76,6 @@ parts:
       - file: notebooks/model_serialization
       - file: notebooks/model_representations
       - file: notebooks/pyomo_solver
-      - file: pyomo_solver
       - file: notebooks/callbacks
       - file: notebooks/interactive_debugger
   - caption: Solver Backends
@@ -93,7 +92,6 @@ parts:
       - file: notebooks/mecp_crossing_points
       - file: notebooks/ac_opf
       - file: notebooks/decision_focused_learning
-      - file: notebooks/estimation
       - file: notebooks/tutorial_estimation
       - file: notebooks/cstr_fit_doe_optimize
   - caption: API Reference

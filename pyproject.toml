@@ -69,7 +69,7 @@ llm = ["litellm>=1.0"]
 sdp = ["scs>=3.2"]
 nn = ["onnx>=1.14", "onnxruntime>=1.16"]
 # Use discopt as a Pyomo solver: `SolverFactory("discopt")`. Pure-Python bridge
-# that round-trips through a temporary AMPL .nl file. See docs/pyomo_solver.md.
+# that round-trips through a temporary AMPL .nl file. See docs/notebooks/pyomo_solver.ipynb.
 pyomo = ["pyomo>=6.7"]
 ml = ["scikit-learn>=1.0"]
 # `discopt.ml.readers.torch_reader` imports `torch.nn` to walk an

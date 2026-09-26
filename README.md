@@ -49,7 +49,7 @@ Jacobian, and Hessian evaluation.
 - **Embedded inner problems** -- `dm.argmin` places an inner NLP as a block of an outer model, with `dm.argmin_kkt` as its lowered (stationarity-constraint) arm
 - **Vector reductions** -- `xs.max()` / `xs.min()` reduce a shaped operand, alongside the element-wise `dm.maximum` / `dm.minimum`
 - **Model persistence with provenance** -- `Model.save("m.dopt")` / `discopt.load(...)` round-trip a model with a recorded schema id and FAIR provenance
-- **Pyomo solver plugin** -- use discopt from existing Pyomo models via `SolverFactory("discopt")` (`pip install discopt[pyomo]`); see [docs/pyomo_solver.md](docs/pyomo_solver.md)
+- **Pyomo solver plugin** -- use discopt from existing Pyomo models via `SolverFactory("discopt")` (`pip install discopt[pyomo]`); see [docs/notebooks/pyomo_solver.ipynb](docs/notebooks/pyomo_solver.ipynb)
 - **GAMS solver link** -- run discopt *as* a GAMS solver through the GMO/GEV API (`discopt gams-register`, `discopt gams-daemon`); see [docs/gams_solver_link.md](docs/gams_solver_link.md)
 - **Warm solve daemon** -- `discopt solve model.nl` routes through a persistent daemon that keeps the process warm across solves
 - **Dynamic optimization** -- DAE collocation (Radau/Legendre), finite differences, and method-of-lines for optimal control, parameter estimation, and PDE-constrained optimization, with multi-experiment trajectory fitting
@@ -466,7 +466,7 @@ require you to switch to it.
 
 | Project | Notes |
 |---|---|
-| [**Pyomo**](https://github.com/Pyomo/pyomo) | discopt registers itself as a Pyomo solver -- `SolverFactory("discopt")` after `pip install discopt[pyomo]`. See [docs/pyomo_solver.md](docs/pyomo_solver.md). |
+| [**Pyomo**](https://github.com/Pyomo/pyomo) | discopt registers itself as a Pyomo solver -- `SolverFactory("discopt")` after `pip install discopt[pyomo]`. See [docs/notebooks/pyomo_solver.ipynb](docs/notebooks/pyomo_solver.ipynb). |
 | [**JuMP**](https://github.com/jump-dev/JuMP.jl) | The Julia modeling layer; the front end for Alpine.jl and EAGO.jl above. |
 | [**CVXPY**](https://github.com/cvxpy/cvxpy) | Disciplined convex programming. If your problem is DCP-compliant and has no integers, CVXPY is the more direct route. |
 
