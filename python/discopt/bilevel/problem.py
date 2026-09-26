@@ -52,7 +52,6 @@ from discopt.bilevel import kkt as _kkt
 from discopt.bilevel import strong_duality as _sd
 from discopt.bilevel.symbolic_diff import diff
 from discopt.modeling.core import Constant, Constraint, Expression, Model, Variable, VarType
-from discopt.mpec import reformulate_gdp, reformulate_sos1
 
 logger = logging.getLogger(__name__)
 
@@ -427,10 +426,11 @@ class BilevelProblem:
                 # The big-M complementarity encodings cannot certify an unbounded
                 # multiplier without a vacuous big-M — refuse before emitting it.
                 self._require_bounded_multipliers(mpec_method)
-                if mpec_method == "gdp":
-                    reformulate_gdp(self.model, kkt.comp_pairs)
-                else:
-                    reformulate_sos1(self.model, kkt.comp_pairs)
+                from discopt.transformations import get as _get_transformation
+
+                _get_transformation("mpec.gdp" if mpec_method == "gdp" else "mpec.sos1").apply(
+                    self.model, pairs=kkt.comp_pairs
+                )
                 # Record the relations ON THE MODEL so their provenance is live
                 # (#1147). ``build_kkt`` labels each pair FROM_KKT with the
                 # lower-level row as its parent, but nothing under ``bilevel/``

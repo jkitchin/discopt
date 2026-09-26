@@ -6721,11 +6721,10 @@ class Model:
         >>> m.complementarity(x, y)
         """
         from discopt import mpec
+        from discopt.transformations import get as _get_transformation
 
-        if method == "gdp":
-            lower = mpec.reformulate_gdp
-        elif method == "sos1":
-            lower = mpec.reformulate_sos1
+        if method in ("gdp", "sos1"):
+            lower = _get_transformation(f"mpec.{method}")
         elif method == "scholtes":
             raise ValueError(
                 "method='scholtes' is a solve-time regularization homotopy, not "
@@ -6750,7 +6749,7 @@ class Model:
             role=mpec.ComplementarityRole.NCP_PAIR,
             scale=scale,
         )
-        lower(self, [pair])
+        lower.apply(self, pairs=[pair])
         self._complementarities.append(pair)
         return pair
 
@@ -6812,7 +6811,9 @@ class Model:
             # l=0, u=+inf IS the symmetric pair; lower it exactly as
             # ``complementarity`` would rather than leaving an unlowered
             # relation the solver must refuse.
-            mpec.reformulate_gdp(self, [pair])
+            from discopt.transformations import get as _get_transformation
+
+            _get_transformation("mpec.gdp").apply(self, pairs=[pair])
         self._complementarities.append(pair)
         return pair
 

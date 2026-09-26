@@ -18,12 +18,16 @@ point, so a transformation can be run on its own, on a copy, and diffed::
     report.diff.added_variables
 
 **What this module is not.** It adds no transformation and changes none: every
-registered entry resolves to the *same function object* the solver calls, and
-no solver call site was rerouted through it. The solver's own sequencing (the
-AMP route's ``reformulate_gdp(..., respect_disjunction_methods=False)``, the
-binary/integer product passes, the MPEC lowerings) is untouched, so the solve
-path is bound-neutral by construction. ``Transformation.apply`` is the exact
-call those sites make, for code that wants to go through the registry.
+registered entry resolves, at call time, to the function it names on its module
+(so a test's ``monkeypatch`` of that module attribute still takes effect). The
+solver's call sites -- every GDP lowering including the AMP route's
+``respect_disjunction_methods=False`` call, the binary/integer product passes,
+the MPEC and bilevel complementarity lowerings -- dispatch through
+:meth:`Transformation.apply`, which is the bare function call plus a check of
+its return type. The solver still decides *when* each runs and whether to adopt
+the result; the registry decides nothing. That dispatch was verified
+bound-neutral per CLAUDE.md §5 (identical status, objective, bound and node
+count against ``main`` on the #1479 panel).
 
 **Two function contracts, one API.** The wrapped functions come in two shapes:
 

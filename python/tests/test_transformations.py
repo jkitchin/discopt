@@ -8,8 +8,8 @@ Two things are under test:
   tests below fail on the pre-#1479 tree for exactly those reasons.
 * ``discopt.transformations`` -- every registered entry must be the *same*
   function object the solver calls (the framework wraps; it reimplements
-  nothing, and no solver call site -- the AMP route's GDP lowering included --
-  was rerouted), ``create_using`` must never touch its input, and ``apply_to``
+  nothing; the solver's call sites -- the AMP route's GDP lowering included --
+  dispatch through it), ``create_using`` must never touch its input, and ``apply_to``
   must leave a model whose variables all report it as their owner.
 """
 
@@ -295,3 +295,66 @@ def test_style_mismatch_is_refused():
     t = dt.Transformation("test.bad2", lambda m: m, "in_place", "test only")
     with pytest.raises(TypeError, match="registered in-place"):
         t.apply(_gdp_model())
+
+
+# ── The solver's call sites dispatch through the registry ─────────────────
+
+
+@pytest.fixture
+def dispatched(monkeypatch):
+    calls: list[tuple[str, dict]] = []
+    orig = dt.Transformation.apply
+
+    def counted(self, model, **options):
+        calls.append((self.name, dict(options)))
+        return orig(self, model, **options)
+
+    monkeypatch.setattr(dt.Transformation, "apply", counted)
+    return calls
+
+
+def test_default_solve_lowers_gdp_through_the_registry(dispatched):
+    r = _gdp_model().solve(time_limit=30)
+    assert r.objective == pytest.approx(5.0, abs=1e-5)
+    assert ("gdp", {"method": "big-m"}) in dispatched
+
+
+def test_amp_route_lowers_gdp_through_the_registry_with_its_own_options(dispatched):
+    r = _gdp_model().solve(solver="amp", time_limit=30)
+    assert r.objective == pytest.approx(5.0, abs=1e-5)
+    amp = [o for n, o in dispatched if n == "gdp"]
+    assert {"method": "big-m", "respect_disjunction_methods": False} in amp
+
+
+def test_integer_product_pass_goes_through_the_registry(dispatched):
+    m = dm.Model("ib")
+    a = m.integer("a", lb=0, ub=5)
+    c = m.integer("c", lb=0, ub=5)
+    m.minimize(-(a * c) + 2 * a + c)
+    m.subject_to(a * c <= 10)
+    m.solve(time_limit=30)
+    names = {n for n, _ in dispatched}
+    assert names & {"integer.bilinear", "integer.multilinear", "binary.multilinear"}
+
+
+def test_model_complementarity_lowers_through_the_registry(dispatched):
+    m = dm.Model("mp")
+    x = m.continuous("x", lb=0, ub=10)
+    y = m.continuous("y", lb=0, ub=10)
+    m.complementarity(x, y, method="sos1")
+    assert [n for n, _ in dispatched] == ["mpec.sos1"]
+
+
+def test_a_module_monkeypatch_still_reaches_the_call_site(monkeypatch):
+    """The registry resolves ``module:attr`` per call, so patching the module
+    attribute (what existing tests do) still intercepts the solver's call."""
+    seen = []
+    real = gdp_reformulate.reformulate_gdp
+
+    def spy(model, *args, **kwargs):
+        seen.append(kwargs)
+        return real(model, *args, **kwargs)
+
+    monkeypatch.setattr(gdp_reformulate, "reformulate_gdp", spy)
+    _gdp_model().solve(time_limit=30)
+    assert seen

@@ -10008,14 +10008,14 @@ def solve_model(
                 stacklevel=2,
             )
 
-        from discopt._relax.gdp_reformulate import reformulate_gdp
+        from discopt.transformations import get as _get_transformation
 
         # #1059 fallback: keep the caller's model. ``reformulate_gdp`` is what the
         # MIP-NLP family needs, but if the route does not certify we hand the
         # remaining budget back to the default path, and that path must see the
         # model it was called with rather than a big-M reformulation of it.
         _pre_route_model = model
-        model = reformulate_gdp(model, method=resolved_gdp_method)
+        model = _get_transformation("gdp").apply(model, method=resolved_gdp_method)
 
         # #1334: the lowering appends a selector binary per disjunct, and the warm
         # start was flattened against the variables the USER declared -- so
@@ -10478,9 +10478,9 @@ def solve_model(
         if "abs_tol" not in amp_kwargs and abs_gap_tolerance is not None:
             amp_kwargs["abs_tol"] = abs_gap_tol
 
-        from discopt._relax.gdp_reformulate import reformulate_gdp
+        from discopt.transformations import get as _get_transformation
 
-        model = reformulate_gdp(
+        model = _get_transformation("gdp").apply(
             model,
             method=amp_gdp_method,
             respect_disjunction_methods=False,
@@ -10762,7 +10762,6 @@ def solve_model(
     if gdp_method == "oa":
         import warnings
 
-        from discopt._relax.gdp_reformulate import reformulate_gdp
         from discopt.solvers.mip_nlp import solve_mip_nlp
         from discopt.solvers.mip_nlp_options import (
             FP_OPTION_KEYS,
@@ -10812,7 +10811,9 @@ def solve_model(
         # no declaration.
         _warn_abs_gap_ignored("gdp_method='oa' (MINLP outer approximation)", abs_gap_tolerance)
 
-        model = reformulate_gdp(model, method="big-m")
+        from discopt.transformations import get as _get_transformation
+
+        model = _get_transformation("gdp").apply(model, method="big-m")
 
         return solve_mip_nlp(
             model,
@@ -10850,9 +10851,9 @@ def solve_model(
     _captured_gams_initial_values = getattr(model, "_gams_initial_values", None)
 
     # --- GDP reformulation: convert indicator/disjunctive/SOS to standard MINLP ---
-    from discopt._relax.gdp_reformulate import reformulate_gdp
+    from discopt.transformations import get as _get_transformation
 
-    model = reformulate_gdp(model, method=gdp_method)
+    model = _get_transformation("gdp").apply(model, method=gdp_method)
 
     # #1255: the lowering appends a selector binary per disjunct, so a warm start
     # flattened against the variables the USER declared no longer describes this
@@ -11056,13 +11057,11 @@ def solve_model(
     # pass abstains (returns the model unchanged) on anything it cannot
     # linearize exactly, so it is a no-op everywhere else.
     try:
-        from discopt._relax.binary_multilinear_reform import (
-            has_binary_multilinear_work,
-            reformulate_binary_multilinear,
-        )
+        from discopt._relax.binary_multilinear_reform import has_binary_multilinear_work
+        from discopt.transformations import get as _get_transformation
 
         if _presolve_deadline.afford("binary_multilinear") and has_binary_multilinear_work(model):
-            _bml = reformulate_binary_multilinear(model)
+            _bml = _get_transformation("binary.multilinear").apply(model)
             if _bml is not model:
                 from discopt._relax.problem_classifier import ProblemClass, classify_problem
                 from discopt._relax.term_classifier import classify_nonlinear_terms
@@ -11246,12 +11245,12 @@ def solve_model(
             )
             from discopt._relax.integer_product_reform import (
                 has_integer_multilinear_reformulation_work,
-                reformulate_integer_multilinear,
             )
+            from discopt.transformations import get as _get_transformation
 
             if has_integer_multilinear_reformulation_work(model):
                 _iml_n0 = sum(v.size for v in model._variables)
-                _iml = reformulate_integer_multilinear(model)
+                _iml = _get_transformation("integer.multilinear").apply(model)
                 if _iml is not model:
                     from discopt._relax.problem_classifier import ProblemClass, classify_problem
                     from discopt._relax.term_classifier import classify_nonlinear_terms
@@ -11403,10 +11402,8 @@ def solve_model(
     # MIR cuts). Value-preserving and gated to integer-bilinear models, so it is a
     # no-op everywhere else.
     try:
-        from discopt._relax.integer_product_reform import (
-            has_nonconvex_integer_bilinear,
-            reformulate_integer_bilinear,
-        )
+        from discopt._relax.integer_product_reform import has_nonconvex_integer_bilinear
+        from discopt.transformations import get as _get_transformation
 
         # Gate on a *distinct-variable* integer-bilinear term ``x_i*x_j`` (i != j).
         # Its Hessian is indefinite, so this is a cheap, sound *nonconvexity*
@@ -11422,7 +11419,7 @@ def solve_model(
             and _presolve_deadline.afford("integer_bilinear")
             and has_nonconvex_integer_bilinear(model)
         ):
-            _ipx = reformulate_integer_bilinear(model)
+            _ipx = _get_transformation("integer.bilinear").apply(model)
             # Adopt the reformulation ONLY when it eliminates *all* nonlinearity,
             # i.e. yields an equivalent pure MILP. If other nonlinear terms remain
             # (e.g. the transcendentals in gear), the model would still go through
@@ -19198,11 +19195,11 @@ def _solve_nlp_bb(
     For nonconvex problems the NLP objective is NOT a valid lower bound;
     the solver runs in heuristic mode and reports gap_certified=False.
     """
-    from discopt._relax.gdp_reformulate import reformulate_gdp
     from discopt.modeling.core import ObjectiveSense
+    from discopt.transformations import get as _get_transformation
 
     model_before_gdp = model
-    model = reformulate_gdp(model, method="big-m")
+    model = _get_transformation("gdp").apply(model, method="big-m")
 
     rust_time = 0.0
     jax_time = 0.0
