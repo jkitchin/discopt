@@ -1597,12 +1597,48 @@ const KAPPA_REFINE_TRIGGER: f64 = 1e12;
 
 /// The κ₁ line for the optimality-gate recovery, or `None` when the check is off.
 ///
-/// Default **off** (CLAUDE.md §5, bound-changing): a κ₁ trip makes the engine
+/// Default **off**, and — per the three-state rule (CLAUDE.md §5, #1345) — this is
+/// a **documented opt-in, not a stalled graduation**. A κ₁ trip makes the engine
 /// certify a *different* `x_B`, and can send a node to the cold fallback that
-/// would otherwise have returned `Optimal`. Graduating it needs the corpus
-/// differential panel, not a unit test. `1/true/on` selects
-/// [`KAPPA_REFINE_TRIGGER`]; an explicit positive float overrides the line so the
-/// panel can sweep it.
+/// would otherwise have returned `Optimal`, so it is bound-changing and the
+/// graduation gate applies. **The panel has been run** — do not read this flag as
+/// owing one.
+///
+/// `discopt_benchmarks/scripts/kappa_recovery_graduation_panel.py`, 66 instances of
+/// `python/tests/data/minlplib_nl` × 2 arms, 20 s/instance, interleaved with the
+/// arm order alternating:
+///
+/// - **Cert-clean bar: passed.** 543 executed checks, 0 violations, certification
+///   48/48 in both arms, 0 status or certification disagreements, every incumbent
+///   independently re-verified by the false-primal screen. The single loosened dual
+///   bound (`heatexch_gen2`) was chased down and is a budget-boundary artifact: a
+///   6-replicate interleaved control found it bimodal *within* the OFF arm, with
+///   the within-OFF spread exactly equal to the OFF↔ON gap (7696.9029).
+/// - **Fired, provably** (§6): 10,818 κ₁-caused refined recomputes over 12
+///   instances, **5 of them rescues** — the refined `x_B` was primal-infeasible
+///   where the working `x_B` looked feasible, so an optimality confirmation from a
+///   basis with under four correct digits was averted. `nvs05` ON reaches the true
+///   global optimum (5.470934111 vs. reference 5.470934108) where OFF finishes
+///   7.6% above it.
+/// - **Net-positive bar: not met.** Nodes +0.72% (5827 → 5869), wall +2.80%
+///   (428.5 s → 440.6 s; one replicate per instance at load average 4–10, so treat
+///   the wall figure as indicative, §9). `clay0303hfsg` is the cost shape to know:
+///   +10,194 attempts, ≈54 refined recomputes per node on a 189-node solve.
+///
+/// **Why it is not the default, and what would change that.** The OFF arm produced
+/// no wrong answer on this corpus, so ON buys the removal of a *latent* risk at a
+/// measured cost — which is negative against §5's net-positive bar as written
+/// (nodes / wall / bound). The `DISCOPT_TREE_SENTINEL_PRUNE_GUARD` precedent
+/// graduated a soundness guard over exactly this objection, but it had a
+/// *demonstrated* false certificate behind it and this does not. Two findings would
+/// flip it: a corpus instance where the OFF arm certifies a bound the oracle
+/// refutes (then it graduates as a soundness guard, cost irrelevant), or an
+/// estimate cadence cheap enough to erase the +2.8% — the obvious candidate being
+/// to re-estimate only after a refactorization or eta-count threshold rather than
+/// at every confirmation point, which is what `clay0303hfsg` is paying for.
+///
+/// `1/true/on` selects [`KAPPA_REFINE_TRIGGER`]; an explicit positive float
+/// overrides the line so the panel can sweep it.
 ///
 /// Unrecognized input is refused rather than defaulted, for the reason on
 /// [`parse_stall_patience`]: a typo in an A/B harness's arm that reads as a valid
