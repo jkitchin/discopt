@@ -106,6 +106,11 @@ from discopt.modeling.core import (
 from discopt.modeling.core import (
     abs_ as abs,
 )
+from discopt.modeling.external import (
+    ExternalSpec,
+    external,
+    external_spec,
+)
 from discopt.modeling.implicit import (
     implicit,
     implicit_full_space,
@@ -165,6 +170,9 @@ __all__ = [
     "if_else",
     "udf",
     "custom",
+    "external",
+    "external_spec",
+    "ExternalSpec",
     "argmin",
     "argmin_kkt",
     "argmin_layer",
