@@ -142,6 +142,71 @@ def _called_name(call: ast.Call) -> str | None:
     return f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)
 
 
+# ``discopt.transformations`` entry points that name a pass INDIRECTLY, by
+# registry key, and so must be resolved through the registry rather than
+# recorded as passes themselves. See :func:`_resolve_registry_target`.
+_DISPATCH = {
+    ("discopt.transformations", "get"),
+    ("discopt.transformations", "TransformationFactory"),
+    ("discopt.transformations", "apply_to"),
+    ("discopt.transformations", "create_using"),
+    ("discopt.transformations", "check"),
+}
+
+
+def _resolve_registry_target(nm: str, call: ast.Call) -> tuple[str, str]:
+    """Map ``get("gdp")`` to the pass it dispatches to.
+
+    #1479 routed four of this region's reformulations through the named
+    transformation registry, so the call site reads
+    ``get("gdp").apply(model, ...)`` and no longer names ``reformulate_gdp``.
+    Recording the *dispatcher* as the pass instead would be the wrong repair:
+    one ``discopt.transformations.get`` row would stand in for an open-ended
+    registry, so a newly registered unbounded reformulation called from here
+    would satisfy the ratchet while nothing bounds it — exactly the class
+    #1456 exists to close, reopened by the row meant to account for it.
+
+    The registry resolves statically: every ``target`` is a ``"module:attr"``
+    string (deliberately, so importing the registry imports none of the
+    reformulation layers), so the dispatch can be followed without running the
+    solver. The pass behind the key is what goes in ``found``, which keeps each
+    underlying row live and keeps a newly registered pass unrecorded until
+    someone categorises it.
+
+    A key this cannot resolve is a hard failure, never a skip (rule 7): a
+    computed transformation name in this region would silently blind the
+    ratchet, and a silent blinding is indistinguishable from a clean bill.
+    """
+    import discopt.transformations as _T
+
+    assert call.args, (
+        f"{nm}() in the pre-solve region is called with no transformation name, "
+        "so the ratchet cannot tell which pass it dispatches to. Call it with a "
+        "literal registry key."
+    )
+    key = call.args[0]
+    assert isinstance(key, ast.Constant) and isinstance(key.value, str), (
+        f"{nm}(...) in the pre-solve region is called with a non-literal "
+        f"transformation name ({ast.dump(key)[:60]}...). The ratchet resolves the "
+        "registry statically, so a computed key would hide which pass runs here "
+        "— and hiding it is the #1456 defect. Use a literal key."
+    )
+    name = key.value
+    assert name in _T._REGISTRY, (
+        f"{nm}({name!r}) in the pre-solve region names no registered "
+        f"transformation; registered: {', '.join(_T.available())}"
+    )
+    target = _T._REGISTRY[name].target
+    if callable(target):
+        return target.__module__, target.__name__
+    module, _, attr = target.partition(":")
+    assert module and attr, (
+        f"transformation {name!r} has target {target!r}, which is not "
+        "'module:attr' — the ratchet cannot resolve the pass behind it."
+    )
+    return module, attr
+
+
 def _scan() -> tuple[int, int, set[tuple[str, str]]]:
     """Return ``(start, end, {(module, callee)})`` for ``solve_model``'s pre-solve
     region.
@@ -149,6 +214,9 @@ def _scan() -> tuple[int, int, set[tuple[str, str]]]:
     Resolution is via the ``from discopt.X import y`` statements inside the
     region itself — these passes are imported locally, at the point of use, so
     the import site is the authority on which module a bare name came from.
+
+    A call through the named transformation registry is resolved to the pass it
+    dispatches to, by :func:`_resolve_registry_target`.
     """
     tree = ast.parse(_SOLVER.read_text())
     fn = next(
@@ -167,6 +235,13 @@ def _scan() -> tuple[int, int, set[tuple[str, str]]]:
     end = min(ends)
 
     origin: dict[str, str] = {}
+    # The name as *imported*, before any ``as`` alias. The registry entry points
+    # are imported under an alias at every call site
+    # (``import get as _get_transformation``), so matching :data:`_DISPATCH` on
+    # the local alias would silently not match — and not matching means the
+    # dispatcher gets recorded as the pass, which is the failure this map exists
+    # to prevent.
+    imported_as: dict[str, str] = {}
     for n in ast.walk(fn):
         if (
             isinstance(n, ast.ImportFrom)
@@ -174,14 +249,20 @@ def _scan() -> tuple[int, int, set[tuple[str, str]]]:
             and (n.module or "").startswith("discopt")
         ):
             for a in n.names:
-                origin.setdefault(a.asname or a.name, n.module)
+                local = a.asname or a.name
+                if local not in origin:
+                    origin[local] = n.module
+                    imported_as[local] = a.name
 
     found: set[tuple[str, str]] = set()
     for n in ast.walk(fn):
         if isinstance(n, ast.Call) and n.lineno < end:
             nm = _called_name(n)
             if nm in origin:
-                found.add((origin[nm], nm))
+                if (origin[nm], imported_as[nm]) in _DISPATCH:
+                    found.add(_resolve_registry_target(nm, n))
+                else:
+                    found.add((origin[nm], nm))
     return fn.lineno, end, found
 
 
@@ -409,6 +490,71 @@ def test_the_ratchet_actually_fires(tmp_path, monkeypatch):
         f"new ones, so every other test here is vacuous. Saw: {sorted(found)}"
     )
     assert sorted(found - _KEYS) == [("discopt._relax.brand_new_pass", "scan_everything")]
+
+
+def test_the_ratchet_sees_through_the_registry(tmp_path, monkeypatch):
+    """Rule 6 for the indirect call path, which is the one that nearly broke it.
+
+    #1479 moved four of this region's reformulations behind
+    ``transformations.get(...)``. If the scanner resolved only direct calls, the
+    four rows would go stale and one dispatcher row would replace them — after
+    which registering a new unbounded reformulation and calling it from here
+    would pass the ratchet silently. So require, on a synthetic ``solve_model``,
+    that dispatching by registry key is reported as the *underlying* pass and
+    that a newly registered one is still reported as unrecorded.
+    """
+    import discopt.transformations as _T
+
+    fake = tmp_path / "solver.py"
+    fake.write_text(
+        "def solve_model(model, time_limit=None):\n"
+        "    from discopt.transformations import get as _g\n"
+        "    model = _g('gdp').apply(model, method='big-m')\n"
+        "    model = _g('test.unbounded_newcomer').apply(model)\n"
+        "    return _solve_continuous(model)\n"
+    )
+    monkeypatch.setitem(globals(), "_SOLVER", fake)
+    monkeypatch.setitem(
+        _T._REGISTRY,
+        "test.unbounded_newcomer",
+        _T.Transformation(
+            name="test.unbounded_newcomer",
+            target="discopt._relax.brand_new_pass:reformulate_everything",
+            style="functional",
+            summary="synthetic, for this test only",
+        ),
+    )
+    _start, _end, found = _scan()
+
+    # The dispatcher itself is never a pass.
+    assert ("discopt.transformations", "get") not in found
+    assert ("discopt.transformations", "_g") not in found
+    # A registered key resolves to the function the solver actually runs, so the
+    # INVENTORY row for that function stays live.
+    assert ("discopt._relax.gdp_reformulate", "reformulate_gdp") in found
+    # ... and a newcomer behind the registry is still caught by the ratchet.
+    assert sorted(found - _KEYS) == [("discopt._relax.brand_new_pass", "reformulate_everything")], (
+        f"the ratchet does not fire through the registry. Saw: {sorted(found)}"
+    )
+
+
+def test_a_computed_transformation_key_is_refused(tmp_path, monkeypatch):
+    """A key the scanner cannot resolve must fail loudly, not be skipped.
+
+    Rule 7 applied to the ratchet: ``if not literal: continue`` would turn "this
+    region dispatches a pass I cannot identify" into "this region is clean", and
+    a computed key is precisely how a pass would arrive here unrecorded.
+    """
+    fake = tmp_path / "solver.py"
+    fake.write_text(
+        "def solve_model(model, time_limit=None):\n"
+        "    from discopt.transformations import get as _g\n"
+        "    model = _g('gdp.' + method).apply(model)\n"
+        "    return _solve_continuous(model)\n"
+    )
+    monkeypatch.setitem(globals(), "_SOLVER", fake)
+    with pytest.raises(AssertionError, match="non-literal"):
+        _scan()
 
 
 def test_recorded_passes_still_exist():
