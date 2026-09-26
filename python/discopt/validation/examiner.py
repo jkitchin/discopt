@@ -148,9 +148,9 @@ def examine(
         _LogicalConstraint,
     )
     if any(isinstance(c, _gdp_types) for c in model._constraints):
-        from discopt._relax.gdp_reformulate import reformulate_gdp
+        from discopt.transformations import get as _get_transformation
 
-        model = reformulate_gdp(model)
+        model = _get_transformation("gdp").apply(model)
 
     from discopt._tape_nlp_evaluator import make_evaluator
 

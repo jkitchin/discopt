@@ -63,9 +63,9 @@ def solve_gdpopt_loa(
     t_start = time.perf_counter()
 
     # 1. Reformulate GDP to standard MINLP via big-M
-    from discopt._relax.gdp_reformulate import reformulate_gdp
+    from discopt.transformations import get as _get_transformation
 
-    reformulated = reformulate_gdp(model, method="big-m")
+    reformulated = _get_transformation("gdp").apply(model, method="big-m")
 
     # 2. Build NLP evaluator for the reformulated model
     from discopt._relax.convexity import classify_oa_cut_convexity

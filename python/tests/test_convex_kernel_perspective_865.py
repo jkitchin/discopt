@@ -316,12 +316,19 @@ def test_clay0303hfsg_root_relaxation_is_sound_not_too_tight():
     opt = known_optimum("clay0303hfsg")
     spec = build_convex_spec(dm.from_nl(os.path.join(_DATA, "clay0303hfsg.nl")))
     assert spec is not None
+    # The kernel optimises ``c @ x``; the objective's constant is not a kernel
+    # input (cc239ea). Pop it exactly as ``solve_convex_tree`` does and compare
+    # bounds on the model's scale -- passing ``**spec`` straight through raised
+    # ``TypeError: unexpected keyword argument 'obj_const'`` (#1479).
+    spec = dict(spec)
+    obj_const = float(spec.pop("obj_const", 0.0))
     compared = 0
     for sep in (0, 2, 12):
         r = dict(_rust.solve_convex_node_py(**spec, max_sep_rounds=sep))
+        bound, raw = r["bound"] + obj_const, r["raw_bound"] + obj_const
         compared += 1
-        assert r["bound"] <= opt + 1e-6, f"sep={sep}: root safe bound {r['bound']} > {opt}"
-        assert r["raw_bound"] <= opt + 1e-6, f"sep={sep}: raw root bound {r['raw_bound']} > {opt}"
+        assert bound <= opt + 1e-6, f"sep={sep}: root safe bound {bound} > {opt}"
+        assert raw <= opt + 1e-6, f"sep={sep}: raw root bound {raw} > {opt}"
     assert compared == 3, "the root bound must have been compared at every setting"
 
 

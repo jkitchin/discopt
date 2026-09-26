@@ -1564,7 +1564,11 @@ def solve_mpec(
                 "for every method (#1148). Call Model.solve(stream=True) directly on "
                 "the reformulated model if you need the update stream."
             )
-        (reformulate_sos1 if method == "sos1" else reformulate_gdp)(model, pairs)
+        from discopt.transformations import get as _get_transformation
+
+        _get_transformation("mpec.sos1" if method == "sos1" else "mpec.gdp").apply(
+            model, pairs=pairs
+        )
         result = cast("SolveResult", model.solve(**solve_kwargs))
         result.mpec_report = _report_for(
             model,
@@ -1656,7 +1660,9 @@ def _solve_scholtes(
 
     _require_not_already_lowered(model, pairs)
     t = model.parameter("_mpec_t", value=t0)
-    reformulate_scholtes(model, pairs, t)
+    from discopt.transformations import get as _get_transformation
+
+    _get_transformation("mpec.scholtes").apply(model, pairs=pairs, t=t)
 
     backend = get_nlp_solver("auto")
     opts = dict(nlp_options) if nlp_options else {}
