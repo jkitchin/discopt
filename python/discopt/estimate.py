@@ -20,6 +20,7 @@ discopt.doe : Optimal design of experiments using the same Experiment
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Any, Union
 
@@ -397,6 +398,173 @@ def estimate_parameters(
     )
 
 
+# Tolerance for deciding that an inequality constraint is active at the
+# solution. An active inequality binds the states, so the equality-only
+# implicit-function argument in ``_response_jacobian_wrt_parameters`` no
+# longer characterizes dz/dθ and the Jacobian is refused rather than
+# silently computed from the equalities alone.
+#
+# This is the house absolute constraint tolerance (1e-6), not something
+# tighter: a local NLP solve routinely stops a few times 1e-6 *inside* a
+# constraint it is genuinely pressed against. Measured on the regression
+# model in ``TestConstrainedModelFIM``, a binding ``z[0] <= 2`` settles at a
+# residual of -4.4e-06. Judging that slack would classify a bound state as
+# free and hand back exactly the wrong Jacobian, so the test errs toward
+# refusing.
+_ACTIVE_INEQUALITY_TOL = 1e-6
+
+# Above this condition number the state Jacobian ∂g/∂z is solved, but the
+# resulting sensitivities carry few correct digits, so the caller is warned.
+_ILL_CONDITIONED_STATE_JACOBIAN = 1e12
+
+
+def _response_jacobian_wrt_parameters(
+    em: ExperimentModel,
+    model: Model,
+    x_flat: Any,
+    p_flat: Any,
+    response_fns: list,
+    param_indices: list[int],
+) -> np.ndarray:
+    """Total derivative dy/dθ of the responses w.r.t. the unknown parameters.
+
+    A response may read *state* variables that the model's constraints
+    determine from θ. The derivative that a Fisher Information Matrix needs is
+    the total one,
+
+    .. math::
+        \\frac{dy}{d\\theta} = \\frac{\\partial y}{\\partial\\theta}
+        + \\frac{\\partial y}{\\partial z}\\,\\frac{dz}{d\\theta},
+
+    where the states ``z`` follow θ along the equality constraints
+    ``g(θ, z) = 0``. Differentiating that system gives the implicit-function
+    relation
+
+    .. math::
+        \\frac{dz}{d\\theta} = -\\left(\\frac{\\partial g}{\\partial z}\\right)^{-1}
+        \\frac{\\partial g}{\\partial\\theta}.
+
+    Taking ``∂y/∂θ`` alone — the Jacobian at the *fixed* solution vector —
+    drops the second term. On a model whose responses are pure states that
+    term is the entire derivative, so the FIM comes back zero and the reported
+    covariance and standard errors are zero: infinite confidence from a
+    model that determines nothing. This routine computes the total derivative
+    instead, and refuses where the implicit-function argument does not hold.
+
+    Raises
+    ------
+    ValueError
+        If an inequality constraint is active at the solution, if the
+        equality system is not square in the state variables, or if
+        ``∂g/∂z`` is singular. In each case dz/dθ is not characterized by
+        the equalities alone, and a partial derivative would be a silently
+        wrong covariance rather than an approximate one.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    from discopt.parametric import compile_expression
+
+    def response_vector(x_flat_arg):
+        return jnp.stack([fn(x_flat_arg, p_flat) for fn in response_fns])
+
+    # (n_responses, n_x_total) — the partial ∂y/∂x at the solution.
+    J_full = np.asarray(jax.jacobian(response_vector)(x_flat), dtype=np.float64)
+
+    constraints = list(getattr(model, "_constraints", ()) or ())
+    if not constraints:
+        # No constraints: no states to follow, so the partial *is* the total.
+        return J_full[:, param_indices]
+
+    eq_specs: list[tuple[Any, float]] = []
+    active: list[str] = []
+    for con in constraints:
+        body_fn = compile_expression(con.body, model)
+        rhs = float(con.rhs)
+        if con.sense == "==":
+            eq_specs.append((body_fn, rhs))
+            continue
+        residual = (
+            np.atleast_1d(np.asarray(body_fn(x_flat, p_flat), dtype=np.float64)).ravel() - rhs
+        )
+        if con.sense == "<=":
+            is_active = residual >= -_ACTIVE_INEQUALITY_TOL
+        elif con.sense == ">=":
+            is_active = residual <= _ACTIVE_INEQUALITY_TOL
+        else:
+            raise ValueError(
+                f"Constraint {con.name!r} has unrecognized sense {con.sense!r}; "
+                "cannot classify it for the estimation Jacobian."
+            )
+        if bool(np.any(is_active)):
+            active.append(con.name)
+
+    if active:
+        raise ValueError(
+            "Cannot compute an exact parameter Jacobian: the inequality "
+            f"constraint(s) {sorted(active)} are active at the estimation "
+            "solution. An active inequality binds the state variables, so "
+            "dz/dθ is not determined by the equality constraints alone and "
+            "the Fisher Information Matrix would be wrong. Reformulate the "
+            "active inequality as an equality, or relax it so it is slack "
+            "at the solution."
+        )
+
+    if not eq_specs:
+        # Only inactive inequalities: nothing locally determines the states,
+        # so there is no implicit dependence to add.
+        return J_full[:, param_indices]
+
+    def eq_residuals(x_flat_arg):
+        parts = [jnp.atleast_1d(fn(x_flat_arg, p_flat)).ravel() - rhs for fn, rhs in eq_specs]
+        return jnp.concatenate(parts)
+
+    n_x = int(J_full.shape[1])
+    param_set = set(param_indices)
+    state_indices = [i for i in range(n_x) if i not in param_set]
+
+    # (n_eq, n_x_total)
+    G_full = np.asarray(jax.jacobian(eq_residuals)(x_flat), dtype=np.float64)
+    n_eq = int(G_full.shape[0])
+
+    if n_eq != len(state_indices):
+        raise ValueError(
+            "Cannot compute an exact parameter Jacobian: the model has "
+            f"{n_eq} equality constraint row(s) but {len(state_indices)} "
+            "state variable(s), so the states are not determined by the "
+            "constraints given the parameters. The Fisher Information Matrix "
+            "needs a square, solvable state system; add the missing "
+            "equations, or remove the variables that no equation determines."
+        )
+
+    G_z = G_full[:, state_indices]
+    G_theta = G_full[:, param_indices]
+
+    try:
+        dz_dtheta = np.linalg.solve(G_z, -G_theta)
+    except np.linalg.LinAlgError as exc:
+        raise ValueError(
+            "Cannot compute an exact parameter Jacobian: the state Jacobian "
+            "dg/dz is singular at the estimation solution, so dz/dtheta is "
+            "not defined. The model does not determine its states uniquely "
+            "from the parameters at this point."
+        ) from exc
+
+    condition = float(np.linalg.cond(G_z))
+    if condition > _ILL_CONDITIONED_STATE_JACOBIAN:
+        warnings.warn(
+            "State Jacobian dg/dz is ill-conditioned at the estimation "
+            f"solution (condition number {condition:.3e}). The parameter "
+            "sensitivities, and so the covariance and standard errors "
+            "derived from them, may carry few correct digits.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    # dy/dθ = ∂y/∂θ + (∂y/∂z)(dz/dθ)
+    return J_full[:, param_indices] + J_full[:, state_indices] @ dz_dtheta
+
+
 def _compute_estimation_fim(
     em: ExperimentModel,
     result: dm.SolveResult,
@@ -404,7 +572,9 @@ def _compute_estimation_fim(
 ) -> np.ndarray:
     """Compute Fisher Information Matrix at the estimation solution.
 
-    Uses JAX autodiff to compute the Jacobian dy/dθ, then:
+    Uses JAX autodiff to compute the *total* Jacobian dy/dθ — including the
+    dependence of any state variables on θ through the model's equality
+    constraints (see :func:`_response_jacobian_wrt_parameters`) — then:
     FIM = J^T (N Σ^{-1}) J
 
     where N is a diagonal matrix of per-response replication counts
@@ -415,9 +585,6 @@ def _compute_estimation_fim(
     For estimation, the unknown parameters are Variables, so the Jacobian
     is computed w.r.t. the variable values (not model Parameters).
     """
-    import jax
-    import jax.numpy as jnp
-
     from discopt.parametric import (
         compile_expression,
         extract_x_flat,
@@ -449,16 +616,9 @@ def _compute_estimation_fim(
     # Build a dummy p_flat (model may or may not have Parameters)
     p_flat = flatten_params(model)
 
-    def response_vector(x_flat_arg):
-        return jnp.stack([fn(x_flat_arg, p_flat) for fn in response_fns])
-
-    # Full Jacobian w.r.t. x_flat
-    J_full = jax.jacobian(response_vector)(x_flat)
-    # shape: (n_responses, n_x_total)
-
-    # Extract columns for unknown parameters only
-    J = J_full[:, param_indices]
-    # shape: (n_responses, n_unknown_params)
+    # Total derivative dy/dθ, following the states along the equality
+    # constraints. shape: (n_responses, n_unknown_params)
+    J = _response_jacobian_wrt_parameters(em, model, x_flat, p_flat, response_fns, param_indices)
 
     # Measurement covariance (diagonal)
     sigma = np.array([em.measurement_error[name] for name in em.response_names])
