@@ -172,6 +172,9 @@ def main() -> int:
     rows: list[dict] = []
     checks = 0
     violations: list[str] = []
+    # Uncertified incumbent changes: legitimate, but the whole point of the panel,
+    # so they are collected and scored against the oracle rather than discarded.
+    incumbent_moves: list[dict] = []
 
     for i, name in enumerate(names):
         path = _NL_DIR / f"{name}.nl"
@@ -221,13 +224,43 @@ def main() -> int:
         checks += 1
         if off["gap_certified"] and not on["gap_certified"]:
             violations.append(f"{name}: certification lost with the flag ON")
+        # Objective drift is a violation only between two arms that both CERTIFIED
+        # optimality -- two certified optima of the same model must agree. On an
+        # instance neither arm proved (a time limit), a different incumbent is the
+        # expected outcome of changing when the engine distrusts a basis, and it is
+        # not evidence of unsoundness: the soundness question there is "is the
+        # incumbent past the reference optimum", which is checked above against
+        # `cert-optima.json`, and independently by the false-primal screen.
+        #
+        # This was wrong in the first version, which flagged any drift. It would
+        # have reported `nvs05` as a violation -- where the OFF arm sits at
+        # 5.8873550 (7.6% above optimal) and the ON arm returns 5.4709341, the true
+        # optimum to 2.5e-9. Calling that a violation would have inverted the
+        # finding. Narrowing the rule does not weaken the panel (CLAUDE.md §1): the
+        # oracle, bound-vs-incumbent, certification and false-primal checks are
+        # untouched, and uncertified drift is still REPORTED below, just not
+        # counted as a defect.
+        both_certified = off["gap_certified"] and on["gap_certified"]
         if off["objective"] is not None and on["objective"] is not None:
             checks += 1
             drift = abs(on["objective"] - off["objective"])
             if drift > _TOL_REL * max(1.0, abs(off["objective"])) + _TOL_ABS:
-                violations.append(
-                    f"{name}: objective drift {off['objective']} -> {on['objective']}"
-                )
+                if both_certified:
+                    violations.append(
+                        f"{name}: objective drift between two CERTIFIED arms "
+                        f"{off['objective']} -> {on['objective']}"
+                    )
+                else:
+                    incumbent_moves.append(
+                        {
+                            "instance": name,
+                            "off": off["objective"],
+                            "on": on["objective"],
+                            "off_status": off["status"],
+                            "on_status": on["status"],
+                            "reference": ref,
+                        }
+                    )
 
         extra = on["attempts"] - off["attempts"]
         print(
@@ -280,6 +313,7 @@ def main() -> int:
                 "instances_where_kappa_fired": fired_on,
                 "instances_disagreeing": disagree,
                 "bounds_loosened": loosened,
+                "incumbent_moves": incumbent_moves,
                 "nodes_off": nodes_off,
                 "nodes_on": nodes_on,
                 "wall_off": wall_off,
@@ -292,6 +326,28 @@ def main() -> int:
 
     print(f"\ninstances                 : {len(rows)}")
     print(f"dual bounds loosened      : {len(loosened)} {[d['instance'] for d in loosened]}")
+
+    better = worse = unknown = 0
+    for mv in incumbent_moves:
+        r = mv["reference"]
+        if r is None:
+            unknown += 1
+            continue
+        # distance to the oracle, sense-agnostic: an incumbent is valid on the
+        # far side of the optimum, so "better" means strictly closer to it.
+        if abs(mv["on"] - r) < abs(mv["off"] - r):
+            better += 1
+        else:
+            worse += 1
+    print(
+        f"uncertified incumbent moves: {len(incumbent_moves)} "
+        f"(closer to optimum {better}, further {worse}, no oracle {unknown})"
+    )
+    for mv in incumbent_moves:
+        print(
+            f"    {mv['instance']:20s} {mv['off']} [{mv['off_status']}] -> "
+            f"{mv['on']} [{mv['on_status']}]  ref={mv['reference']}"
+        )
     print(f"executed checks           : {checks}")
     print(f"violations                : {len(violations)}")
     for v in violations:
