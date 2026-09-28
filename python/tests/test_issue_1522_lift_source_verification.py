@@ -102,6 +102,9 @@ def test_node_limit_incumbent_passes_check_feasibility(monkeypatch, max_nodes):
     that exit deterministically; everything downstream of it is the default path.
     """
     monkeypatch.setattr(S, "_native_kernel_seed", lambda *a, **k: (None, None))
+    # The in-tree primal step (default ON) certifies this solve at node 1, so it
+    # never reaches the repair exercised here; this is the ``=0`` path.
+    monkeypatch.setenv("DISCOPT_NATIVE_NLP_PRIMAL", "0")
     m = _prob09()
     r = m.solve(deterministic=True, max_nodes=max_nodes)
     assert r.status == "node_limit"
@@ -194,3 +197,34 @@ def test_a_primal_hook_defect_is_raised_not_skipped(monkeypatch):
     monkeypatch.setattr(S, "_native_kernel_repair_point", boom)
     with pytest.raises(RuntimeError, match="hook defect #1522"):
         _unseeded_solve(monkeypatch, "1", 50)
+
+
+def _all_integer_model() -> Model:
+    m = Model("int_product")
+    x = m.integer("x", lb=0, ub=5)
+    y = m.integer("y", lb=0, ub=5)
+    m.subject_to(x * y >= 2, name="prod")
+    m.minimize(x + y)
+    return m
+
+
+def test_all_integer_step_verifies_the_rounded_point_without_an_nlp(monkeypatch):
+    """With every column fixed, the local NLP is a solve over one point.
+
+    Measured under the in-tree hook on nvs13 / nvs18 / nvs17: the POUNCE solve
+    returned exactly the rounded point with the same verdict on 39 of 39 calls, at
+    ~40x the cost of verifying it directly. So the step verifies it directly.
+    """
+
+    def no_nlp(*a, **k):
+        raise AssertionError("an all-integer point must not reach the NLP solver")
+
+    monkeypatch.setattr(S, "_solve_node_nlp_kkt", no_nlp)
+    m = _all_integer_model()
+
+    out = S._native_kernel_repair_point(m, np.array([1.2, 1.9]), None, None)
+    assert out is not None
+    x_new, obj = out
+    assert np.array_equal(x_new, [1.0, 2.0]) and obj == pytest.approx(3.0)
+    # The rounded point (0, 0) violates x*y >= 2: nothing is returned.
+    assert S._native_kernel_repair_point(m, np.array([0.4, 0.4]), None, None) is None

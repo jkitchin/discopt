@@ -1259,6 +1259,15 @@ def _native_kernel_repair_point(model, x_flat, source, outer_deadline, max_s=Non
         x0 = np.where(int_mask, np.round(x0), x0)
         fix_lb = np.where(int_mask, x0, fix_lb)
         fix_ub = np.where(int_mask, x0, fix_ub)
+    if not np.any(fix_lb < fix_ub):
+        # Nothing is free once the integers are fixed (an all-integer lift — the
+        # nvs* class), so the "local NLP" is a solve over a single point: it returns
+        # the rounded point and the verifier decides. Verify it directly. Measured
+        # on nvs13 / nvs18 / nvs17 under the in-tree hook: the POUNCE solve returned
+        # exactly this point with the same verdict on 39 of 39 calls, at 49-96 ms per
+        # call against 1.2-2.5 ms for the verification alone.
+        ok, obj = _native_kernel_verify_point(model, x0, source=source)
+        return (x0, float(obj)) if ok and obj is not None else None
     cl, cu = _infer_constraint_bounds(model, evaluator)
     constraint_bounds = list(zip(cl, cu)) if cl else None
     opts = pounce_option_defaults()

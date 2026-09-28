@@ -1214,7 +1214,7 @@ class SolverTuning:
     """
 
     native_nlp_primal: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_NATIVE_NLP_PRIMAL", default=False)
+        default_factory=lambda: _env_flag("DISCOPT_NATIVE_NLP_PRIMAL", default=True)
     )
     """Run a local NLP inside the native spatial kernel's tree (#1522,
     ``DISCOPT_NATIVE_NLP_PRIMAL``).
@@ -1232,7 +1232,26 @@ class SolverTuning:
     when it accepts a new incumbent and at nodes 1, 2, 4, 8, ...; the hook runs one
     KKT re-solve of the lift from the node's LP point and returns the point only if
     it verifies on the lift AND on the pre-reform model. Primal only: the reported
-    bound is still the min of the closed regions' rigorous bounds.
+    bound is still the min of the closed regions' rigorous bounds. When no column is
+    free once the integers are fixed (the all-integer ``nvs*`` class) the point is
+    verified directly: the POUNCE solve returned the same point and verdict on 39 of
+    39 calls, at ~40x the cost.
+
+    **Default ON** since the #1522 follow-up graduation panel (CLAUDE.md §5), flag
+    OFF vs ON over both in-repo MINLPLib corpora (150 pairs, 30 s,
+    ``deterministic=True``). Cert-clean: 0 errors, 0 infeasible incumbents (each
+    re-checked with ``check_feasibility`` on a fresh parse), 0 bounds above a known
+    optimum, 0 certification regressions, 0 objective drift; the hook fired on all
+    24 kernel-routed instances and never with the flag OFF. Net-positive: on the
+    certified instances node counts fell on 6 (``prob06`` 13 -> 3, ``dispatch``
+    31 -> 25, ``fuel`` 204 -> 151, ``mathopt5_8`` 57 -> 41, ``util`` 599 -> 493,
+    ``st_e06`` 2 -> 1) and rose on none; on the time-limited ones (3 interleaved
+    reps each) ``tanksize`` gains its optimal incumbent 1.26864 and a bound of
+    1.2549 +- 0.0007 against none / 0.870, ``nvs20`` gains an incumbent 230.92 and
+    bound 204.70 against none / 166.59, ``st_e31``'s bound tightens -2.00586 ->
+    -2.00091 and ``nvs17``'s -1619.5 +- 45.7 -> -1562.7 +- 26.7; ``nvs19/23/24``
+    are within one sd. ``=0`` restores the pre-#1522 kernel exactly (no hook is
+    passed, and the tree is then node-for-node identical).
     """
 
     # --- determinism (#1116) --------------------------------------------------

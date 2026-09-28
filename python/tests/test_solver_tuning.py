@@ -38,7 +38,8 @@ def test_defaults_match_legacy_env_defaults():
     assert t.ils_solve_cap == 2
     assert t.lp_warmstart is True
     assert t.lp_cold_dual_start is False
-    assert t.native_nlp_primal is False
+    # #1522 follow-up: graduated default-ON; "0" is the escape hatch.
+    assert t.native_nlp_primal is True
     assert t.rlt is False
     assert t.rlt_lineq is False
     assert t.rlt_lineq_max == 4096
@@ -81,7 +82,7 @@ def test_defaults_match_legacy_env_defaults():
         ("DISCOPT_SQUARE_SEPARATE", "0", "square_separate", False),
         ("DISCOPT_LP_WARMSTART", "0", "lp_warmstart", False),
         ("DISCOPT_LP_COLD_DUAL_START", "1", "lp_cold_dual_start", True),
-        ("DISCOPT_NATIVE_NLP_PRIMAL", "1", "native_nlp_primal", True),
+        ("DISCOPT_NATIVE_NLP_PRIMAL", "0", "native_nlp_primal", False),
         ("DISCOPT_PSD_COST_GATE", "1", "psd_cost_gate", True),
         # G1.3: graduated default-ON, so "0" is the escape hatch that restores OFF.
         ("DISCOPT_PSD_COST_GATE", "0", "psd_cost_gate", False),
