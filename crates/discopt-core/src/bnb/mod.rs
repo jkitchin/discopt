@@ -18,7 +18,8 @@ pub mod tree_manager;
 pub use branching::{BranchDecision, Pseudocosts, VarBranchInfo};
 pub use in_tree_presolve::{
     is_scalar_layout, run_in_tree_presolve, run_in_tree_presolve_scalar, run_in_tree_presolve_view,
-    scalarize_for_fbbt, InTreeDelta, InTreePresolveOptions, ScalarFbbtView,
+    scalarize_for_fbbt, scalarize_for_fbbt_with, ArrayRowStats, InTreeDelta, InTreePresolveOptions,
+    ScalarFbbtView, ARRAY_ROW_NODE_BUDGET,
 };
 pub use node::{Node, NodeId, NodeStatus};
 pub use pool::{NodePool, SelectionStrategy};

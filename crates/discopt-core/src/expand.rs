@@ -129,7 +129,7 @@ fn broadcast(a: &[usize], b: &[usize]) -> Option<Vec<usize>> {
     Some(out)
 }
 
-fn numel(shape: &[usize]) -> usize {
+pub(crate) fn numel(shape: &[usize]) -> usize {
     shape
         .iter()
         .product::<usize>()
@@ -137,7 +137,7 @@ fn numel(shape: &[usize]) -> usize {
 }
 
 /// Row-major flat index of `idx` within `shape`.
-fn flat_of(idx: &[usize], shape: &[usize]) -> usize {
+pub(crate) fn flat_of(idx: &[usize], shape: &[usize]) -> usize {
     let mut flat = 0usize;
     for (axis, &i) in idx.iter().enumerate() {
         let mut stride = 1usize;
@@ -150,7 +150,7 @@ fn flat_of(idx: &[usize], shape: &[usize]) -> usize {
 }
 
 /// Row-major multi-index of flat position `pos` within `shape`.
-fn idx_of(mut pos: usize, shape: &[usize]) -> Vec<usize> {
+pub(crate) fn idx_of(mut pos: usize, shape: &[usize]) -> Vec<usize> {
     let mut out = vec![0usize; shape.len()];
     for axis in (0..shape.len()).rev() {
         let d = shape[axis].max(1);
@@ -163,7 +163,7 @@ fn idx_of(mut pos: usize, shape: &[usize]) -> Vec<usize> {
 /// Flat index into `operand_shape` for output multi-index `out_idx`, applying
 /// numpy broadcasting: a size-1 operand axis is read at 0 whatever the output
 /// index is, and missing leading axes are ignored.
-fn broadcast_flat(out_idx: &[usize], operand_shape: &[usize]) -> usize {
+pub(crate) fn broadcast_flat(out_idx: &[usize], operand_shape: &[usize]) -> usize {
     let r = operand_shape.len();
     let lead = out_idx.len() - r;
     let mut idx = vec![0usize; r];
@@ -214,7 +214,7 @@ fn slice_indices(
 
 /// The per-axis index lists an [`IndexSpec`] selects from `base_shape`, and
 /// whether each axis is dropped (a scalar index) or kept (a slice).
-fn index_axes(
+pub(crate) fn index_axes(
     spec: &IndexSpec,
     base_shape: &[usize],
 ) -> Result<Vec<(Vec<usize>, bool)>, ExpandError> {
@@ -312,6 +312,55 @@ pub(crate) fn shapes_of(arena: &ExprArena) -> Result<Vec<Vec<usize>>, ExpandErro
     let n = arena.len();
     let mut shapes: Vec<Vec<usize>> = vec![Vec::new(); n];
     for i in 0..n {
+        shapes[i] = node_shape(arena, i, &shapes)?;
+    }
+    Ok(shapes)
+}
+
+/// Per-node variant of [`shapes_of`]: `None` for a node this arena cannot shape
+/// and for every node above one, `Some(shape)` for the rest.
+///
+/// [`shapes_of`] is all-or-nothing, which is right for a consumer that must
+/// expand the whole model. The in-tree FBBT view (#1568) scalarises row by row
+/// instead, so one unshapeable node must cost only the rows that contain it.
+pub(crate) fn shapes_of_partial(arena: &ExprArena) -> Vec<Option<Vec<usize>>> {
+    let n = arena.len();
+    let mut shapes: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut ok = vec![false; n];
+    for i in 0..n {
+        let children_ok = match arena.get(ExprId(i)) {
+            ExprNode::BinaryOp { left, right, .. } => ok[left.0] && ok[right.0],
+            ExprNode::MatMul { left, right } => ok[left.0] && ok[right.0],
+            ExprNode::UnaryOp { operand, .. } | ExprNode::Sum { operand, .. } => ok[operand.0],
+            ExprNode::Index { base, .. } => ok[base.0],
+            ExprNode::FunctionCall { args, .. } => args.iter().all(|a| ok[a.0]),
+            ExprNode::SumOver { terms } => terms.iter().all(|t| ok[t.0]),
+            ExprNode::Constant(_)
+            | ExprNode::ConstantArray(..)
+            | ExprNode::Variable { .. }
+            | ExprNode::Parameter { .. } => true,
+        };
+        if children_ok {
+            if let Ok(s) = node_shape(arena, i, &shapes) {
+                shapes[i] = s;
+                ok[i] = true;
+            }
+        }
+    }
+    shapes
+        .into_iter()
+        .zip(ok)
+        .map(|(s, good)| good.then_some(s))
+        .collect()
+}
+
+/// Shape of node `i` from its children's (already computed) shapes.
+fn node_shape(
+    arena: &ExprArena,
+    i: usize,
+    shapes: &[Vec<usize>],
+) -> Result<Vec<usize>, ExpandError> {
+    {
         let s: Vec<usize> = match arena.get(ExprId(i)) {
             ExprNode::Constant(_) => Vec::new(),
             ExprNode::ConstantArray(_, shape) => shape.clone(),
@@ -382,9 +431,8 @@ pub(crate) fn shapes_of(arena: &ExprArena) -> Result<Vec<Vec<usize>>, ExpandErro
                 acc
             }
         };
-        shapes[i] = s;
+        Ok(s)
     }
-    Ok(shapes)
 }
 
 /// Numpy `@` result shape for the four rank combinations discopt emits.

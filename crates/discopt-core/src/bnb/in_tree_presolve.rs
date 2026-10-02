@@ -24,7 +24,11 @@
 //! every node. `depth_stride = 1` runs at every node;
 //! `depth_stride = 0` disables the pass.
 
-use crate::expr::{ExprArena, ExprId, ExprNode, IndexElem, IndexSpec, ModelRepr, VarInfo, VarType};
+use crate::expand::{broadcast_flat, flat_of, idx_of, index_axes, numel, shapes_of_partial};
+use crate::expr::{
+    BinOp, ConstraintRepr, ExprArena, ExprId, ExprNode, IndexElem, IndexSpec, MathFunc, ModelRepr,
+    VarInfo, VarType,
+};
 use crate::presolve::fbbt::{
     any_empty_beyond, fbbt_with_cutoff, repair_subtol_crossings, Interval, FEAS_TOL,
 };
@@ -47,6 +51,12 @@ pub struct InTreePresolveOptions {
     pub probing: bool,
     /// Cap on the number of discrete variables probed per node (budget).
     pub probe_max_vars: usize,
+    /// Expand array-valued constraint rows element-wise inside the per-scalar
+    /// FBBT view (issue #1568), so FBBT tightens each element of a vector row
+    /// instead of reading the whole array as its hull. Only consulted on the
+    /// per-scalar path ([`run_in_tree_presolve_scalar`] on a model with an
+    /// array block); see [`scalarize_for_fbbt_with`].
+    pub expand_array_rows: bool,
 }
 
 impl Default for InTreePresolveOptions {
@@ -57,6 +67,7 @@ impl Default for InTreePresolveOptions {
             tol: 1e-6,
             probing: false,
             probe_max_vars: 32,
+            expand_array_rows: false,
         }
     }
 }
@@ -79,6 +90,11 @@ pub struct InTreeDelta {
     pub subtol_repaired: usize,
     /// True iff the schedule actually ran the pass at this node.
     pub ran: bool,
+    /// Scalar rows the array-row expansion added to the FBBT view (#1568);
+    /// 0 when the expansion is off or the model has no array-structured row.
+    pub array_rows_added: usize,
+    /// Array-structured rows left on the hull path (refused or over budget).
+    pub array_rows_on_hull: usize,
 }
 
 /// Run in-tree FBBT at a node with the given local bounds.
@@ -115,6 +131,7 @@ pub fn run_in_tree_presolve(
             infeasible: false,
             subtol_repaired: 0,
             ran: false,
+            ..Default::default()
         };
     }
 
@@ -243,6 +260,7 @@ pub fn run_in_tree_presolve(
         infeasible,
         subtol_repaired,
         ran: true,
+        ..Default::default()
     }
 }
 
@@ -295,9 +313,43 @@ pub struct ScalarFbbtView {
     n_scalar: usize,
     /// `(view variable index, flat offset, size)` per proxy block.
     proxies: Vec<(usize, usize, usize)>,
+    /// What the element-wise row expansion did (#1568); all zero when it is off.
+    array_rows: ArrayRowStats,
 }
 
+/// What [`scalarize_for_fbbt_with`] did with array-valued rows (issue #1568).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ArrayRowStats {
+    /// Source constraints whose array-structured body was expanded.
+    pub constraints_expanded: usize,
+    /// Scalar rows appended for them (one per element of each body).
+    pub scalar_rows_added: usize,
+    /// Array-structured constraints left on the hull path because some node
+    /// in the body has no exact element-wise form (or no static shape).
+    pub constraints_refused: usize,
+    /// Array-structured constraints left on the hull path because the node
+    /// budget [`ARRAY_ROW_NODE_BUDGET`] was spent on earlier rows.
+    pub constraints_over_budget: usize,
+    /// True when an array-structured objective was replaced by its scalar
+    /// expansion (the cutoff row then propagates per element as well).
+    pub objective_expanded: bool,
+}
+
+/// Cap on the arena nodes the row expansion may append per view (#1568).
+///
+/// The view is rebuilt at every node the kernel runs, so the expansion is paid
+/// per node; this keeps a huge vectorised model (a dense `A @ x` with 1e5 rows)
+/// from turning one FBBT call into millions of nodes. Rows past the budget keep
+/// the hull behaviour -- sound, just untightened -- and are counted in
+/// [`ArrayRowStats::constraints_over_budget`].
+pub const ARRAY_ROW_NODE_BUDGET: usize = 250_000;
+
 impl ScalarFbbtView {
+    /// What the array-row expansion did (#1568).
+    pub fn array_row_stats(&self) -> &ArrayRowStats {
+        &self.array_rows
+    }
+
     /// Number of scalar slots (the length of a node box).
     pub fn n_scalar(&self) -> usize {
         self.n_scalar
@@ -368,6 +420,33 @@ fn single_element_flat(spec: &IndexSpec, shape: &[usize]) -> Option<usize> {
 /// layout is not the contiguous `offset_b = sum_{c<b} size_c` layout a node box
 /// is indexed by, or when a `Variable` node disagrees with its block.
 pub fn scalarize_for_fbbt(model: &ModelRepr) -> Result<ScalarFbbtView, String> {
+    scalarize_for_fbbt_with(model, false)
+}
+
+/// [`scalarize_for_fbbt`], optionally expanding array-valued rows (#1568).
+///
+/// With `expand_array_rows`, every constraint whose body is array-STRUCTURED
+/// (array-valued, like `z - sigmoid(zh) == 0`, or scalar-valued over arrays,
+/// like `sum(x) <= 5`) additionally contributes one scalar row per element of
+/// its body, built over the per-scalar slots: element `k` of the body, in the
+/// row-major order `expand::expand` (and so the AD tape and `.nl` writer) uses.
+/// FBBT then reads and tightens each element through that row instead of
+/// through the hull proxy.
+///
+/// * The original row is KEPT (it still reads the proxy hull). Each scalar row
+///   is an exact restatement of one element of it, so the feasible set is
+///   unchanged; and every interval the hull row could derive, the per-element
+///   rows derive from a subset of the hull box, so adding them can only tighten.
+/// * An array-structured objective is replaced by its scalar expansion (the
+///   same function; only the cutoff row reads it).
+/// * A row with any node that has no exact element-wise form -- a matrix
+///   `norm2`, `min`/`max`/`sign`/`norm1`/`normInf`/`normP` over an array, a
+///   negative-stride slice, an unshapeable node -- is left exactly as before
+///   (hull only) and counted, never approximated.
+pub fn scalarize_for_fbbt_with(
+    model: &ModelRepr,
+    expand_array_rows: bool,
+) -> Result<ScalarFbbtView, String> {
     let mut run = 0usize;
     for (b, v) in model.variables.iter().enumerate() {
         if v.offset != run {
@@ -499,18 +578,471 @@ pub fn scalarize_for_fbbt(model: &ModelRepr) -> Result<ScalarFbbtView, String> {
         arena.add(rewritten);
     }
 
+    let mut constraints = model.constraints.clone();
+    let mut objective = model.objective;
+    let mut array_rows = ArrayRowStats::default();
+    if expand_array_rows {
+        let mut rs = RowScalarizer::new(model, &mut arena);
+        let base_len = rs.arena.len();
+        for c in &model.constraints {
+            if !rs.arrayish[c.body.0] {
+                continue;
+            }
+            if rs.arena.len() - base_len > ARRAY_ROW_NODE_BUDGET {
+                array_rows.constraints_over_budget += 1;
+                continue;
+            }
+            match rs.lower(c.body) {
+                Some(elems) => {
+                    array_rows.constraints_expanded += 1;
+                    array_rows.scalar_rows_added += elems.len();
+                    for (k, e) in elems.into_iter().enumerate() {
+                        constraints.push(ConstraintRepr {
+                            body: e,
+                            sense: c.sense,
+                            rhs: c.rhs,
+                            name: c.name.as_ref().map(|n| format!("{n}[{k}]")),
+                        });
+                    }
+                }
+                None => array_rows.constraints_refused += 1,
+            }
+        }
+        if rs.arrayish[model.objective.0] && rs.arena.len() - base_len <= ARRAY_ROW_NODE_BUDGET {
+            if let Some(elems) = rs.lower(model.objective) {
+                if elems.len() == 1 {
+                    objective = elems[0];
+                    array_rows.objective_expanded = true;
+                }
+            }
+        }
+    }
+
     Ok(ScalarFbbtView {
         model: ModelRepr {
             arena,
-            objective: model.objective,
+            objective,
             objective_sense: model.objective_sense,
-            constraints: model.constraints.clone(),
+            constraints,
             n_vars: variables.len(),
             variables,
         },
         n_scalar,
         proxies,
+        array_rows,
     })
+}
+
+/// Element-wise lowering of array-structured nodes into the view arena (#1568).
+///
+/// Works on the ORIGINAL model's arena for structure and shapes, and appends
+/// scalar nodes to the view arena, whose first `model.arena.len()` ids are the
+/// original ids one-for-one. A node that is not array-structured is reused by
+/// id (its view node is already exact: a scalar over scalar slots). Lowering is
+/// memoised per node, so a subexpression shared by several rows or elements is
+/// lowered once and stays shared.
+struct RowScalarizer<'a> {
+    src: &'a ModelRepr,
+    arena: &'a mut ExprArena,
+    shapes: Vec<Option<Vec<usize>>>,
+    /// The node, or something under it, is array-valued: reading it through
+    /// the view would go through a hull proxy (or a hull interval).
+    arrayish: Vec<bool>,
+    /// `None` = not lowered yet; `Some(None)` = refused; `Some(Some(e))` = the
+    /// node's elements, row-major.
+    memo: Vec<Option<Option<Vec<ExprId>>>>,
+    slot_node: std::collections::HashMap<usize, ExprId>,
+    const_node: std::collections::HashMap<u64, ExprId>,
+}
+
+/// Univariate functions that act element-wise on an array argument and have an
+/// FBBT rule as a scalar call. Deliberately a whitelist: `Min`/`Max`/`Sign` and
+/// the `Norm1`/`NormInf`/`NormP` reductions are not listed, so a row using them
+/// over an array is refused rather than reinterpreted.
+fn elementwise_unary(f: MathFunc) -> bool {
+    matches!(
+        f,
+        MathFunc::Exp
+            | MathFunc::Log
+            | MathFunc::Log2
+            | MathFunc::Log10
+            | MathFunc::Sqrt
+            | MathFunc::Sin
+            | MathFunc::Cos
+            | MathFunc::Tan
+            | MathFunc::Atan
+            | MathFunc::Sinh
+            | MathFunc::Cosh
+            | MathFunc::Asin
+            | MathFunc::Acos
+            | MathFunc::Tanh
+            | MathFunc::Abs
+            | MathFunc::Asinh
+            | MathFunc::Acosh
+            | MathFunc::Atanh
+            | MathFunc::Erf
+            | MathFunc::Log1p
+            | MathFunc::Sigmoid
+            | MathFunc::Softplus
+            | MathFunc::Entropy
+    )
+}
+
+impl<'a> RowScalarizer<'a> {
+    fn new(src: &'a ModelRepr, arena: &'a mut ExprArena) -> Self {
+        let n = src.arena.len();
+        let shapes = shapes_of_partial(&src.arena);
+        let mut arrayish = vec![false; n];
+        for i in 0..n {
+            let node = src.arena.get(ExprId(i));
+            let many = shapes[i].as_ref().is_some_and(|s| numel(s) > 1);
+            arrayish[i] = many
+                || match node {
+                    ExprNode::Variable { size, .. } => *size > 1,
+                    // `x[i]` on a variable is already a scalar slot in the view.
+                    ExprNode::Index { base, .. } => {
+                        arrayish[base.0]
+                            && !matches!(arena.get(ExprId(i)), ExprNode::Variable { size: 1, .. })
+                    }
+                    ExprNode::BinaryOp { left, right, .. } => arrayish[left.0] || arrayish[right.0],
+                    ExprNode::MatMul { left, right } => arrayish[left.0] || arrayish[right.0],
+                    ExprNode::UnaryOp { operand, .. } | ExprNode::Sum { operand, .. } => {
+                        arrayish[operand.0]
+                    }
+                    ExprNode::FunctionCall { args, .. } => args.iter().any(|a| arrayish[a.0]),
+                    ExprNode::SumOver { terms } => terms.iter().any(|t| arrayish[t.0]),
+                    ExprNode::Constant(_)
+                    | ExprNode::ConstantArray(..)
+                    | ExprNode::Parameter { .. } => false,
+                };
+        }
+        RowScalarizer {
+            src,
+            arena,
+            shapes,
+            arrayish,
+            memo: vec![None; n],
+            slot_node: std::collections::HashMap::new(),
+            const_node: std::collections::HashMap::new(),
+        }
+    }
+
+    /// The elements of `root`, lowering every array-structured node under it
+    /// that is not memoised yet; `None` if any of them is refused.
+    fn lower(&mut self, root: ExprId) -> Option<Vec<ExprId>> {
+        // Children have lower ids than parents, so ascending id order over the
+        // reachable array-structured set is a valid bottom-up order -- no
+        // recursion, however deep the expression.
+        let mut todo: Vec<usize> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![root.0];
+        while let Some(i) = stack.pop() {
+            if !self.arrayish[i] || self.memo[i].is_some() || !seen.insert(i) {
+                continue;
+            }
+            todo.push(i);
+            match self.src.arena.get(ExprId(i)) {
+                ExprNode::BinaryOp { left, right, .. } | ExprNode::MatMul { left, right } => {
+                    stack.push(left.0);
+                    stack.push(right.0);
+                }
+                ExprNode::UnaryOp { operand, .. } | ExprNode::Sum { operand, .. } => {
+                    stack.push(operand.0)
+                }
+                ExprNode::Index { base, .. } => stack.push(base.0),
+                ExprNode::FunctionCall { args, .. } => stack.extend(args.iter().map(|a| a.0)),
+                ExprNode::SumOver { terms } => stack.extend(terms.iter().map(|t| t.0)),
+                _ => {}
+            }
+        }
+        todo.sort_unstable();
+        for i in todo {
+            let r = self.lower_node(i);
+            self.memo[i] = Some(r);
+        }
+        self.elems(root.0)
+    }
+
+    /// Elements of an already-processed node (a non-array node is itself).
+    fn elems(&self, i: usize) -> Option<Vec<ExprId>> {
+        if !self.arrayish[i] {
+            // Not array-structured: one element (or none, for an empty array,
+            // which no caller can broadcast against -- refuse it).
+            let n = numel(self.shapes[i].as_ref()?);
+            return (n == 1).then(|| vec![ExprId(i)]);
+        }
+        self.memo[i].clone().flatten()
+    }
+
+    fn slot(&mut self, s: usize) -> ExprId {
+        if let Some(&id) = self.slot_node.get(&s) {
+            return id;
+        }
+        let name = self.arena_var_name(s);
+        let id = self.arena.add(ExprNode::Variable {
+            name,
+            index: s,
+            size: 1,
+            shape: vec![],
+        });
+        self.slot_node.insert(s, id);
+        id
+    }
+
+    fn arena_var_name(&self, s: usize) -> String {
+        // Debug metadata only; the block is located by the contiguous layout.
+        let mut run = 0usize;
+        for v in &self.src.variables {
+            if s < run + v.size {
+                return format!("{}[{}]", v.name, s - run);
+            }
+            run += v.size;
+        }
+        format!("x[{s}]")
+    }
+
+    fn constant(&mut self, v: f64) -> ExprId {
+        if let Some(&id) = self.const_node.get(&v.to_bits()) {
+            return id;
+        }
+        let id = self.arena.add(ExprNode::Constant(v));
+        self.const_node.insert(v.to_bits(), id);
+        id
+    }
+
+    fn is_zero(&self, id: ExprId) -> bool {
+        matches!(self.arena.get(id), ExprNode::Constant(v) if *v == 0.0)
+    }
+
+    fn sum_of(&mut self, parts: Vec<ExprId>) -> ExprId {
+        match parts.len() {
+            0 => self.constant(0.0),
+            1 => parts[0],
+            _ => self.arena.add(ExprNode::SumOver { terms: parts }),
+        }
+    }
+
+    /// Lower one array-structured node whose array children are memoised.
+    fn lower_node(&mut self, i: usize) -> Option<Vec<ExprId>> {
+        let shape = self.shapes[i].clone()?;
+        let count = numel(&shape);
+        let node = self.src.arena.get(ExprId(i)).clone();
+        let out: Vec<ExprId> = match node {
+            ExprNode::Constant(_) => return None,
+            ExprNode::ConstantArray(data, _) | ExprNode::Parameter { value: data, .. } => {
+                // A parameter is fixed for the solve: a constant, as in `expand`.
+                if data.len() < count {
+                    return None;
+                }
+                data[..count].iter().map(|v| self.constant(*v)).collect()
+            }
+            ExprNode::Variable { index, size, .. } => {
+                let blk = self.src.variables.get(index)?;
+                if size != count || blk.size != size {
+                    return None;
+                }
+                (0..size).map(|e| self.slot(blk.offset + e)).collect()
+            }
+            ExprNode::Index { base, index } => {
+                let bshape = self.shapes[base.0].clone()?;
+                let belems = self.elems(base.0)?;
+                if belems.len() != numel(&bshape) {
+                    return None;
+                }
+                let axes = index_axes(&index, &bshape).ok()?;
+                let kept: Vec<usize> = (0..axes.len()).filter(|&j| !axes[j].1).collect();
+                let kept_shape: Vec<usize> = kept.iter().map(|&j| axes[j].0.len()).collect();
+                let mut v = Vec::with_capacity(numel(&kept_shape));
+                for pos in 0..numel(&kept_shape) {
+                    let kidx = idx_of(pos, &kept_shape);
+                    let mut full = vec![0usize; bshape.len()];
+                    let mut which = 0usize;
+                    for (axis, (sel, dropped)) in axes.iter().enumerate() {
+                        full[axis] = if *dropped {
+                            sel[0]
+                        } else {
+                            which += 1;
+                            sel[kidx[which - 1]]
+                        };
+                    }
+                    v.push(belems[flat_of(&full, &bshape)]);
+                }
+                v
+            }
+            ExprNode::BinaryOp { op, left, right } => {
+                let (ls, rs) = (self.shapes[left.0].clone()?, self.shapes[right.0].clone()?);
+                let (le, re) = (self.elems(left.0)?, self.elems(right.0)?);
+                let mut v = Vec::with_capacity(count);
+                for pos in 0..count {
+                    let idx = idx_of(pos, &shape);
+                    let (a, b) = (le[broadcast_flat(&idx, &ls)], re[broadcast_flat(&idx, &rs)]);
+                    v.push(self.arena.add(ExprNode::BinaryOp {
+                        op,
+                        left: a,
+                        right: b,
+                    }));
+                }
+                v
+            }
+            ExprNode::UnaryOp { op, operand } => {
+                let oe = self.elems(operand.0)?;
+                if oe.len() != count {
+                    return None;
+                }
+                oe.into_iter()
+                    .map(|a| self.arena.add(ExprNode::UnaryOp { op, operand: a }))
+                    .collect()
+            }
+            ExprNode::FunctionCall { func, args } => match func {
+                MathFunc::Prod | MathFunc::Norm2 => {
+                    // `shapes_of` admits these only over a rank-1 argument.
+                    if args.len() != 1 || self.shapes[args[0].0].as_ref()?.len() != 1 {
+                        return None;
+                    }
+                    let terms = self.elems(args[0].0)?;
+                    if terms.is_empty() {
+                        return None;
+                    }
+                    if func == MathFunc::Prod {
+                        let mut acc = terms[0];
+                        for t in &terms[1..] {
+                            acc = self.arena.add(ExprNode::BinaryOp {
+                                op: BinOp::Mul,
+                                left: acc,
+                                right: *t,
+                            });
+                        }
+                        vec![acc]
+                    } else {
+                        // sqrt(sum t^2) with `t^2` as an even power, so its
+                        // interval is nonnegative (t*t would not be).
+                        let two = self.constant(2.0);
+                        let sq: Vec<ExprId> = terms
+                            .iter()
+                            .map(|t| {
+                                self.arena.add(ExprNode::BinaryOp {
+                                    op: BinOp::Pow,
+                                    left: *t,
+                                    right: two,
+                                })
+                            })
+                            .collect();
+                        let total = self.sum_of(sq);
+                        vec![self.arena.add(ExprNode::FunctionCall {
+                            func: MathFunc::Sqrt,
+                            args: vec![total],
+                        })]
+                    }
+                }
+                f if elementwise_unary(f) && args.len() == 1 => {
+                    let ash = self.shapes[args[0].0].clone()?;
+                    let ae = self.elems(args[0].0)?;
+                    let mut v = Vec::with_capacity(count);
+                    for pos in 0..count {
+                        let idx = idx_of(pos, &shape);
+                        let a = ae[broadcast_flat(&idx, &ash)];
+                        v.push(self.arena.add(ExprNode::FunctionCall {
+                            func: f,
+                            args: vec![a],
+                        }));
+                    }
+                    v
+                }
+                _ => return None,
+            },
+            ExprNode::SumOver { terms } => {
+                let mut per: Vec<(Vec<usize>, Vec<ExprId>)> = Vec::with_capacity(terms.len());
+                for t in &terms {
+                    per.push((self.shapes[t.0].clone()?, self.elems(t.0)?));
+                }
+                let mut v = Vec::with_capacity(count);
+                for pos in 0..count {
+                    let idx = idx_of(pos, &shape);
+                    let parts: Vec<ExprId> = per
+                        .iter()
+                        .map(|(s, e)| e[broadcast_flat(&idx, s)])
+                        .collect();
+                    v.push(self.sum_of(parts));
+                }
+                v
+            }
+            ExprNode::Sum { operand, axis } => {
+                let os = self.shapes[operand.0].clone()?;
+                let oe = self.elems(operand.0)?;
+                if oe.len() != numel(&os) {
+                    return None;
+                }
+                match axis {
+                    None => vec![self.sum_of(oe)],
+                    Some(ax) => {
+                        let mut v = Vec::with_capacity(count);
+                        for pos in 0..count {
+                            let oidx = idx_of(pos, &shape);
+                            let mut parts = Vec::with_capacity(os[ax]);
+                            for j in 0..os[ax] {
+                                let mut full = Vec::with_capacity(os.len());
+                                let mut it = oidx.iter();
+                                for axis_i in 0..os.len() {
+                                    full.push(if axis_i == ax { j } else { *it.next()? });
+                                }
+                                parts.push(oe[flat_of(&full, &os)]);
+                            }
+                            v.push(self.sum_of(parts));
+                        }
+                        v
+                    }
+                }
+            }
+            ExprNode::MatMul { left, right } => {
+                let (ls, rs) = (self.shapes[left.0].clone()?, self.shapes[right.0].clone()?);
+                let (le, re) = (self.elems(left.0)?, self.elems(right.0)?);
+                if le.len() != numel(&ls) || re.len() != numel(&rs) {
+                    return None;
+                }
+                let inner = if ls.len() == 1 { ls[0] } else { ls[1] };
+                let (rows, cols) = match (ls.len(), rs.len()) {
+                    (1, 1) => (1usize, 1usize),
+                    (2, 1) => (ls[0], 1),
+                    (1, 2) => (1, rs[1]),
+                    (2, 2) => (ls[0], rs[1]),
+                    _ => return None,
+                };
+                let mut v = Vec::with_capacity(rows * cols);
+                for r in 0..rows {
+                    for c in 0..cols {
+                        let mut parts = Vec::with_capacity(inner);
+                        for p in 0..inner {
+                            let lf = if ls.len() == 1 {
+                                p
+                            } else {
+                                flat_of(&[r, p], &ls)
+                            };
+                            let rf = if rs.len() == 1 {
+                                p
+                            } else {
+                                flat_of(&[p, c], &rs)
+                            };
+                            let (a, b) = (le[lf], re[rf]);
+                            // An exact-zero coefficient contributes exactly 0 at
+                            // every real point; dropping it keeps a sparse
+                            // `A @ x` row sparse.
+                            if self.is_zero(a) || self.is_zero(b) {
+                                continue;
+                            }
+                            parts.push(self.arena.add(ExprNode::BinaryOp {
+                                op: BinOp::Mul,
+                                left: a,
+                                right: b,
+                            }));
+                        }
+                        v.push(self.sum_of(parts));
+                    }
+                }
+                v
+            }
+        };
+        (out.len() == count).then_some(out)
+    }
 }
 
 /// [`run_in_tree_presolve`] on a PER-SCALAR node box (issue #1513).
@@ -543,7 +1075,7 @@ pub fn run_in_tree_presolve_scalar(
             model, node_lb, node_ub, node_depth, incumbent, opts,
         ));
     }
-    let view = scalarize_for_fbbt(model)?;
+    let view = scalarize_for_fbbt_with(model, opts.expand_array_rows)?;
     Ok(run_in_tree_presolve_view(
         &view, node_lb, node_ub, node_depth, incumbent, opts,
     ))
@@ -580,6 +1112,9 @@ pub fn run_in_tree_presolve_view(
     let mut d = run_in_tree_presolve(&view.model, &full_lb, &full_ub, node_depth, incumbent, opts);
     d.lb.truncate(n);
     d.ub.truncate(n);
+    let st = &view.array_rows;
+    d.array_rows_added = st.scalar_rows_added;
+    d.array_rows_on_hull = st.constraints_refused + st.constraints_over_budget;
     if d.ran && !d.infeasible {
         // Count scalar half-bounds only, so the count cannot include a proxy.
         let mut t = 0u32;
@@ -821,6 +1356,7 @@ mod tests {
             tol: 1e-9,
             probing: true,
             probe_max_vars: 32,
+            expand_array_rows: false,
         };
         let delta = run_in_tree_presolve(&model, &[3.0, 0.0], &[10.0, 1.0], 1, None, &opts);
         assert!(delta.ran);
@@ -868,6 +1404,7 @@ mod tests {
             tol: 1e-9,
             probing: false,
             probe_max_vars: 0,
+            expand_array_rows: false,
         };
         // x fixed at 2.5 by two derivations disagreeing in the last ulps.
         let lo = [2.5, 0.0];
@@ -906,6 +1443,7 @@ mod tests {
             tol: 1e-9,
             probing: false,
             probe_max_vars: 0,
+            expand_array_rows: false,
         };
         // x >= 10 AND y >= 10 with x + y <= 5 — infeasible by 15, not by noise.
         let d = run_in_tree_presolve(&model, &[10.0, 10.0], &[10.0, 10.0], 0, None, &opts);
@@ -926,6 +1464,7 @@ mod tests {
             tol: 1e-9,
             probing: false,
             probe_max_vars: 0,
+            expand_array_rows: false,
         };
         let mut checked = 0usize;
         for k in 0..40 {
@@ -971,6 +1510,7 @@ mod tests {
             tol: 1e-8, // << FEAS_TOL (1e-6): the window the old test fathomed in
             probing: true,
             probe_max_vars: 8,
+            expand_array_rows: false,
         };
         let mut checked = 0usize;
         for eps in [1e-7, 5e-7, 9e-7] {
@@ -1002,6 +1542,7 @@ mod tests {
             tol: 1e-8,
             probing: true,
             probe_max_vars: 8,
+            expand_array_rows: false,
         };
         let d = run_in_tree_presolve(&model, &[10.0, 10.0], &[10.0, 10.0], 0, None, &opts);
         assert!(d.ran);
@@ -1049,6 +1590,7 @@ mod tests {
             tol: 1e-9,
             probing: false,
             probe_max_vars: 0,
+            expand_array_rows: false,
         }
     }
 
@@ -1389,5 +1931,490 @@ mod tests {
         // The kernel must actually DO something on this class, else the
         // soundness check above is vacuous.
         assert!(tightened_any > 100, "only {tightened_any} tightenings");
+    }
+
+    // ── #1568: element-wise expansion of array-valued rows ───────────────
+
+    fn opts_rows(expand: bool) -> InTreePresolveOptions {
+        InTreePresolveOptions {
+            expand_array_rows: expand,
+            ..opts1()
+        }
+    }
+
+    fn bin(arena: &mut ExprArena, op: BinOp, left: ExprId, right: ExprId) -> ExprId {
+        arena.add(ExprNode::BinaryOp { op, left, right })
+    }
+
+    fn row(body: ExprId, sense: ConstraintSense, rhs: f64) -> ConstraintRepr {
+        ConstraintRepr {
+            body,
+            sense,
+            rhs,
+            name: None,
+        }
+    }
+
+    // A fixed 2-3-1 sigmoid net, the shape `discopt.ml`'s full-space form emits.
+    const WT: [[f64; 2]; 3] = [[0.9, -1.3], [-0.4, 0.7], [1.6, 0.2]];
+    const B: [f64; 3] = [0.1, -0.2, 0.05];
+    const V: [f64; 3] = [1.2, -0.8, 0.5];
+    const C: f64 = -0.3;
+
+    /// Blocks: x (2,) in [-1,1], zh (3,) in [-5,5], z (3,) in [0,1] (flat
+    /// slots 0-1, 2-4, 5-7). Rows, every one made only of WHOLE-array
+    /// references:
+    ///   zh - (WT @ x + b) == 0          (`matmul`)  or
+    ///   zh - (sum(WT * x, axis=1) + b) == 0  (`!matmul`, `W.T * x` + axis sum)
+    ///   z - sigmoid(zh) == 0
+    /// objective: min sum(v * z) + c (array-structured, scalar-valued).
+    fn sigmoid_net(matmul: bool) -> ModelRepr {
+        let mut a = ExprArena::new();
+        let x = arr_var(&mut a, "x", 0, vec![2]);
+        let zh = arr_var(&mut a, "zh", 1, vec![3]);
+        let z = arr_var(&mut a, "z", 2, vec![3]);
+        let wt = a.add(ExprNode::ConstantArray(
+            WT.iter().flatten().copied().collect(),
+            vec![3, 2],
+        ));
+        let b = a.add(ExprNode::ConstantArray(B.to_vec(), vec![3]));
+        let lin = if matmul {
+            a.add(ExprNode::MatMul { left: wt, right: x })
+        } else {
+            let prod = bin(&mut a, BinOp::Mul, wt, x);
+            a.add(ExprNode::Sum {
+                operand: prod,
+                axis: Some(1),
+            })
+        };
+        let pre = bin(&mut a, BinOp::Add, lin, b);
+        let r1 = bin(&mut a, BinOp::Sub, zh, pre);
+        let sig = a.add(ExprNode::FunctionCall {
+            func: MathFunc::Sigmoid,
+            args: vec![zh],
+        });
+        let r2 = bin(&mut a, BinOp::Sub, z, sig);
+        let v = a.add(ExprNode::ConstantArray(V.to_vec(), vec![3]));
+        let vz = bin(&mut a, BinOp::Mul, v, z);
+        let s = a.add(ExprNode::Sum {
+            operand: vz,
+            axis: None,
+        });
+        let c = a.add(ExprNode::Constant(C));
+        let obj = bin(&mut a, BinOp::Add, s, c);
+        ModelRepr {
+            arena: a,
+            objective: obj,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![
+                row(r1, ConstraintSense::Eq, 0.0),
+                row(r2, ConstraintSense::Eq, 0.0),
+            ],
+            variables: vec![
+                arr_vinfo("x", 0, vec![2], -1.0, 1.0),
+                arr_vinfo("zh", 2, vec![3], -5.0, 5.0),
+                arr_vinfo("z", 5, vec![3], 0.0, 1.0),
+            ],
+            n_vars: 8,
+        }
+    }
+
+    /// The SAME net written one scalar row per element, over `x[i]` element
+    /// references, with the node structure the expansion builds (an n-ary
+    /// `SumOver` per dot product) -- the reference the expansion must equal.
+    fn sigmoid_net_scalar_rows() -> ModelRepr {
+        let mut a = ExprArena::new();
+        let x = arr_var(&mut a, "x", 0, vec![2]);
+        let zh = arr_var(&mut a, "zh", 1, vec![3]);
+        let z = arr_var(&mut a, "z", 2, vec![3]);
+        let xs: Vec<ExprId> = (0..2).map(|i| elem(&mut a, x, i)).collect();
+        let mut cons = Vec::new();
+        let mut zs = Vec::new();
+        for k in 0..3 {
+            let terms: Vec<ExprId> = (0..2)
+                .map(|j| {
+                    let w = a.add(ExprNode::Constant(WT[k][j]));
+                    bin(&mut a, BinOp::Mul, w, xs[j])
+                })
+                .collect();
+            let dot = a.add(ExprNode::SumOver { terms });
+            let bk = a.add(ExprNode::Constant(B[k]));
+            let pre = bin(&mut a, BinOp::Add, dot, bk);
+            let zhk = elem(&mut a, zh, k);
+            let r1 = bin(&mut a, BinOp::Sub, zhk, pre);
+            cons.push(row(r1, ConstraintSense::Eq, 0.0));
+            let zk = elem(&mut a, z, k);
+            let sig = a.add(ExprNode::FunctionCall {
+                func: MathFunc::Sigmoid,
+                args: vec![zhk],
+            });
+            let r2 = bin(&mut a, BinOp::Sub, zk, sig);
+            cons.push(row(r2, ConstraintSense::Eq, 0.0));
+            let vk = a.add(ExprNode::Constant(V[k]));
+            zs.push(bin(&mut a, BinOp::Mul, vk, zk));
+        }
+        let s = a.add(ExprNode::SumOver { terms: zs });
+        let c = a.add(ExprNode::Constant(C));
+        let obj = bin(&mut a, BinOp::Add, s, c);
+        ModelRepr {
+            arena: a,
+            objective: obj,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: cons,
+            variables: vec![
+                arr_vinfo("x", 0, vec![2], -1.0, 1.0),
+                arr_vinfo("zh", 2, vec![3], -5.0, 5.0),
+                arr_vinfo("z", 5, vec![3], 0.0, 1.0),
+            ],
+            n_vars: 8,
+        }
+    }
+
+    fn net_root_box() -> (Vec<f64>, Vec<f64>) {
+        let lb = vec![-1.0, -1.0, -5.0, -5.0, -5.0, 0.0, 0.0, 0.0];
+        let ub = vec![1.0, 1.0, 5.0, 5.0, 5.0, 1.0, 1.0, 1.0];
+        (lb, ub)
+    }
+
+    /// The issue's measurement, pinned: with `x0` branched to [0, 1] and `x1`
+    /// to [-1, 0], the vectorised rows tighten NOTHING without the expansion
+    /// (every reference is a hull proxy) and, with it, give exactly the box of
+    /// the same rows written per element -- for both the `@` and the
+    /// `W.T * x` + axis-sum forms of the linear layer.
+    #[test]
+    fn array_rows_match_scalar_rows_on_sigmoid_net() {
+        let (mut lb, mut ub) = net_root_box();
+        lb[0] = 0.0;
+        ub[1] = 0.0;
+        let reference =
+            run_in_tree_presolve_scalar(&sigmoid_net_scalar_rows(), &lb, &ub, 0, None, &opts1())
+                .unwrap();
+        assert!(reference.ran && !reference.infeasible);
+        // The scalar-row model really does tighten every zh and z element.
+        for k in 2..8 {
+            assert!(
+                reference.ub[k] - reference.lb[k] < 0.75 * (ub[k] - lb[k]),
+                "reference did not tighten slot {k}"
+            );
+        }
+        let mut checks = 0;
+        for matmul in [true, false] {
+            let model = sigmoid_net(matmul);
+            let off =
+                run_in_tree_presolve_scalar(&model, &lb, &ub, 0, None, &opts_rows(false)).unwrap();
+            assert_eq!(
+                off.bounds_tightened, 0,
+                "hull path tightened (matmul={matmul})"
+            );
+            assert_eq!(off.array_rows_added, 0);
+            let on =
+                run_in_tree_presolve_scalar(&model, &lb, &ub, 0, None, &opts_rows(true)).unwrap();
+            assert!(on.ran && !on.infeasible);
+            assert_eq!(
+                on.array_rows_added, 6,
+                "3 rows per layer row (matmul={matmul})"
+            );
+            assert_eq!(on.array_rows_on_hull, 0);
+            for k in 0..8 {
+                assert!(
+                    (on.lb[k] - reference.lb[k]).abs() <= 1e-9
+                        && (on.ub[k] - reference.ub[k]).abs() <= 1e-9,
+                    "slot {k} (matmul={matmul}): on [{}, {}] vs scalar rows [{}, {}]",
+                    on.lb[k],
+                    on.ub[k],
+                    reference.lb[k],
+                    reference.ub[k]
+                );
+                checks += 1;
+            }
+        }
+        assert_eq!(checks, 16);
+    }
+
+    fn sigmoid(t: f64) -> f64 {
+        1.0 / (1.0 + (-t).exp())
+    }
+
+    /// Differential bound test + feasible-point sampling on the net, with and
+    /// without an incumbent cutoff (which reads the EXPANDED objective):
+    ///   * ON never cuts a feasible point (a point on the network graph inside
+    ///     a random sub-box) and never fathoms its box;
+    ///   * ON is never looser than OFF on any slot;
+    ///   * ON is strictly tighter somewhere often enough that the comparison is
+    ///     not vacuous.
+    #[test]
+    fn array_rows_never_looser_and_never_cut_a_feasible_point() {
+        let mut seed: u64 = 0x1568;
+        let mut rnd = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 11) as f64) / ((1u64 << 53) as f64)
+        };
+        let (rlb, rub) = net_root_box();
+        let mut checked = 0usize;
+        let mut strictly_tighter = 0usize;
+        for matmul in [true, false] {
+            let model = sigmoid_net(matmul);
+            for trial in 0..1500 {
+                let xp = [2.0 * rnd() - 1.0, 2.0 * rnd() - 1.0];
+                let mut p = vec![xp[0], xp[1]];
+                let mut obj = C;
+                let mut zs = Vec::new();
+                for k in 0..3 {
+                    let zh = WT[k][0] * xp[0] + WT[k][1] * xp[1] + B[k];
+                    p.push(zh);
+                    zs.push(sigmoid(zh));
+                    obj += V[k] * sigmoid(zh);
+                }
+                p.extend(zs);
+                let mut lb = vec![0.0; 8];
+                let mut ub = vec![0.0; 8];
+                for k in 0..8 {
+                    lb[k] = p[k] - (p[k] - rlb[k]) * rnd();
+                    ub[k] = p[k] + (rub[k] - p[k]) * rnd();
+                }
+                let cutoff = (trial % 2 == 1).then(|| obj + 0.05 * rnd());
+                let mut on_o = opts_rows(true);
+                let mut off_o = opts_rows(false);
+                on_o.probing = trial % 3 == 0;
+                off_o.probing = on_o.probing;
+                let on = run_in_tree_presolve_scalar(&model, &lb, &ub, 0, cutoff, &on_o).unwrap();
+                let off = run_in_tree_presolve_scalar(&model, &lb, &ub, 0, cutoff, &off_o).unwrap();
+                assert!(
+                    !on.infeasible,
+                    "ON fathomed a box containing feasible {p:?}"
+                );
+                assert!(!off.infeasible);
+                let mut tighter = false;
+                for k in 0..8 {
+                    assert!(
+                        on.lb[k] <= p[k] + 1e-9 && p[k] <= on.ub[k] + 1e-9,
+                        "ON cut feasible {p:?} at slot {k}: [{}, {}]",
+                        on.lb[k],
+                        on.ub[k]
+                    );
+                    assert!(
+                        on.lb[k] >= off.lb[k] - 1e-9 && on.ub[k] <= off.ub[k] + 1e-9,
+                        "ON looser than OFF at slot {k}: [{}, {}] vs [{}, {}]",
+                        on.lb[k],
+                        on.ub[k],
+                        off.lb[k],
+                        off.ub[k]
+                    );
+                    if on.lb[k] > off.lb[k] + 1e-7 || on.ub[k] < off.ub[k] - 1e-7 {
+                        tighter = true;
+                    }
+                }
+                strictly_tighter += tighter as usize;
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 3000);
+        assert!(
+            strictly_tighter > 1000,
+            "only {strictly_tighter} boxes tighter"
+        );
+    }
+
+    /// `sum(x) <= 5` over a whole-array reference: the hull path reads every
+    /// element as the hull and derives nothing; the expanded row bounds each
+    /// element, and a branch on `x[0]` flows to the others.
+    #[test]
+    fn sum_row_tightens_each_element() {
+        let mut a = ExprArena::new();
+        let x = arr_var(&mut a, "x", 0, vec![3]);
+        let s = a.add(ExprNode::Sum {
+            operand: x,
+            axis: None,
+        });
+        let model = ModelRepr {
+            arena: a,
+            objective: s,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![row(s, ConstraintSense::Le, 5.0)],
+            variables: vec![arr_vinfo("x", 0, vec![3], 0.0, 10.0)],
+            n_vars: 3,
+        };
+        let (lb, ub) = ([3.0, 0.0, 0.0], [10.0, 10.0, 10.0]);
+        let off =
+            run_in_tree_presolve_scalar(&model, &lb, &ub, 0, None, &opts_rows(false)).unwrap();
+        assert_eq!(off.bounds_tightened, 0);
+        let on = run_in_tree_presolve_scalar(&model, &lb, &ub, 0, None, &opts_rows(true)).unwrap();
+        assert_eq!(on.array_rows_added, 1);
+        assert!((on.ub[0] - 5.0).abs() <= 1e-9, "x0 ub {}", on.ub[0]);
+        assert!((on.ub[1] - 2.0).abs() <= 1e-9, "x1 ub {}", on.ub[1]);
+        assert!((on.ub[2] - 2.0).abs() <= 1e-9, "x2 ub {}", on.ub[2]);
+    }
+
+    /// Indexing that stays array-valued: a slice `x[1:3]` and a partial index
+    /// `X[1]` of a matrix are expanded to exactly the selected elements, in
+    /// row-major order, and nothing else is touched.
+    #[test]
+    fn slice_and_partial_index_rows_select_the_right_elements() {
+        let mut a = ExprArena::new();
+        let x = arr_var(&mut a, "x", 0, vec![3]);
+        let xm = arr_var(&mut a, "X", 1, vec![2, 2]);
+        let sl = a.add(ExprNode::Index {
+            base: x,
+            index: IndexSpec::Multi(vec![IndexElem::Slice {
+                start: Some(1),
+                stop: Some(3),
+                step: None,
+            }]),
+        });
+        let row1 = a.add(ExprNode::Index {
+            base: xm,
+            index: IndexSpec::Scalar(1),
+        });
+        // X[1] - [0.5, 2.0] <= 0  (per element: X[1,0] <= 0.5, X[1,1] <= 2.0)
+        let cap = a.add(ExprNode::ConstantArray(vec![0.5, 2.0], vec![2]));
+        let r2 = bin(&mut a, BinOp::Sub, row1, cap);
+        let model = ModelRepr {
+            arena: a,
+            objective: sl,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![
+                row(sl, ConstraintSense::Le, 1.0),
+                row(r2, ConstraintSense::Le, 0.0),
+            ],
+            variables: vec![
+                arr_vinfo("x", 0, vec![3], 0.0, 10.0),
+                arr_vinfo("X", 3, vec![2, 2], 0.0, 10.0),
+            ],
+            n_vars: 7,
+        };
+        let lb = [0.0; 7];
+        let ub = [10.0; 7];
+        let on = run_in_tree_presolve_scalar(&model, &lb, &ub, 0, None, &opts_rows(true)).unwrap();
+        assert_eq!(on.array_rows_added, 4);
+        // An array-valued objective is not scalar: left as is, not expanded.
+        let view = scalarize_for_fbbt_with(&model, true).unwrap();
+        assert!(!view.array_row_stats().objective_expanded);
+        let want_ub = [10.0, 1.0, 1.0, 10.0, 10.0, 0.5, 2.0];
+        for k in 0..7 {
+            assert!(
+                (on.ub[k] - want_ub[k]).abs() <= 1e-9,
+                "slot {k}: ub {} want {}",
+                on.ub[k],
+                want_ub[k]
+            );
+            assert_eq!(on.lb[k], 0.0);
+        }
+    }
+
+    /// `norm2` and `prod` over a vector expand to their exact scalar forms
+    /// (`sqrt(sum x_i^2)` with an even power, a product chain).
+    #[test]
+    fn norm2_and_prod_rows_expand_exactly() {
+        let mut a = ExprArena::new();
+        let x = arr_var(&mut a, "x", 0, vec![2]);
+        let n2 = a.add(ExprNode::FunctionCall {
+            func: MathFunc::Norm2,
+            args: vec![x],
+        });
+        let y = arr_var(&mut a, "y", 1, vec![2]);
+        let pr = a.add(ExprNode::FunctionCall {
+            func: MathFunc::Prod,
+            args: vec![y],
+        });
+        let model = ModelRepr {
+            arena: a,
+            objective: n2,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![
+                row(n2, ConstraintSense::Le, 1.0),
+                row(pr, ConstraintSense::Ge, 4.0),
+            ],
+            variables: vec![
+                arr_vinfo("x", 0, vec![2], -5.0, 5.0),
+                arr_vinfo("y", 2, vec![2], 0.1, 8.0),
+            ],
+            n_vars: 4,
+        };
+        let lb = [-5.0, -5.0, 0.1, 0.1];
+        let ub = [5.0, 5.0, 8.0, 8.0];
+        let on = run_in_tree_presolve_scalar(&model, &lb, &ub, 0, None, &opts_rows(true)).unwrap();
+        assert_eq!(on.array_rows_added, 2);
+        for k in 0..2 {
+            assert!(on.lb[k] >= -1.0 - 1e-9 && on.ub[k] <= 1.0 + 1e-9, "x[{k}]");
+        }
+        // y0 * y1 >= 4 with y in [0.1, 8] forces each y_i >= 0.5.
+        for k in 2..4 {
+            assert!(on.lb[k] >= 0.5 - 1e-9, "y[{}] lb {}", k - 2, on.lb[k]);
+        }
+    }
+
+    /// A row with a node that has no exact element-wise form -- here `norm1`
+    /// and `max` over an array, which `shapes_of` types as element-wise but
+    /// are reductions -- is refused WHOLE: no scalar row is added for it, it is
+    /// counted, and the box equals the hull path's. An expandable row next to
+    /// it is still expanded.
+    #[test]
+    fn unexpandable_rows_stay_on_the_hull_path() {
+        let mut a = ExprArena::new();
+        let x = arr_var(&mut a, "x", 0, vec![2]);
+        let n1 = a.add(ExprNode::FunctionCall {
+            func: MathFunc::Norm1,
+            args: vec![x],
+        });
+        let s = a.add(ExprNode::Sum {
+            operand: x,
+            axis: None,
+        });
+        let mx = a.add(ExprNode::FunctionCall {
+            func: MathFunc::Max,
+            args: vec![x],
+        });
+        let mixed = bin(&mut a, BinOp::Add, s, mx);
+        let base = ModelRepr {
+            arena: a,
+            objective: s,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![
+                row(n1, ConstraintSense::Le, 1.0),
+                row(mixed, ConstraintSense::Le, 3.0),
+            ],
+            variables: vec![arr_vinfo("x", 0, vec![2], 0.0, 4.0)],
+            n_vars: 2,
+        };
+        let (lb, ub) = ([0.0, 0.0], [4.0, 4.0]);
+        let view = scalarize_for_fbbt_with(&base, true).unwrap();
+        let st = view.array_row_stats();
+        assert_eq!(st.constraints_refused, 2);
+        assert_eq!(st.scalar_rows_added, 0);
+        assert_eq!(view.model().constraints.len(), 2);
+        let on = run_in_tree_presolve_scalar(&base, &lb, &ub, 0, None, &opts_rows(true)).unwrap();
+        let off = run_in_tree_presolve_scalar(&base, &lb, &ub, 0, None, &opts_rows(false)).unwrap();
+        assert_eq!(on.array_rows_on_hull, 2);
+        assert_eq!((on.lb, on.ub), (off.lb, off.ub));
+
+        // Add an expandable row; only it is expanded.
+        let mut m = base.clone();
+        m.constraints.push(row(s, ConstraintSense::Le, 1.0));
+        let view = scalarize_for_fbbt_with(&m, true).unwrap();
+        let st = view.array_row_stats();
+        assert_eq!((st.constraints_expanded, st.constraints_refused), (1, 2));
+        assert_eq!(view.model().constraints.len(), 4);
+    }
+
+    /// The flag OFF is the pre-#1568 view, node for node and row for row.
+    #[test]
+    fn expansion_off_is_the_legacy_view() {
+        let model = sigmoid_net(true);
+        let legacy = scalarize_for_fbbt(&model).unwrap();
+        let off = scalarize_for_fbbt_with(&model, false).unwrap();
+        assert_eq!(off.array_row_stats(), &ArrayRowStats::default());
+        assert_eq!(legacy.model().arena.len(), model.arena.len());
+        assert_eq!(off.model().arena.len(), model.arena.len());
+        assert_eq!(off.model().constraints.len(), model.constraints.len());
+        assert_eq!(off.model().objective, model.objective);
+        let on = scalarize_for_fbbt_with(&model, true).unwrap();
+        // ON keeps every original row first, then appends the scalar rows.
+        assert_eq!(on.model().constraints.len(), model.constraints.len() + 6);
+        for (c, o) in model.constraints.iter().zip(&on.model().constraints) {
+            assert_eq!(c.body, o.body);
+        }
+        assert!(on.array_row_stats().objective_expanded);
     }
 }

@@ -186,8 +186,11 @@ def probe_box(
     once, so ``z[0] + z[1] == 1`` over a binary ``z`` of shape ``(2,)`` was
     reported infeasible.) The returned bounds are intersected with the model's
     current bounds, so the result is a sound subset of the input box.
+    Array-valued rows are expanded per element unless ``DISCOPT_FBBT_ARRAY_ROWS=0``
+    (#1568), exactly as in the B&B node loop.
     """
     from discopt._rust import model_to_repr
+    from discopt.solver import _fbbt_array_rows_enabled
 
     repr_ = model_to_repr(model, getattr(model, "_builder", None))
     n_blocks = repr_.n_var_blocks
@@ -210,6 +213,7 @@ def probe_box(
         incumbent=(float(incumbent) if incumbent is not None and np.isfinite(incumbent) else None),
         probing=True,
         probe_max_vars=max_vars,
+        expand_array_rows=_fbbt_array_rows_enabled(),
     )
 
     if delta["infeasible"]:

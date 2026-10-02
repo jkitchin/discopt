@@ -976,6 +976,12 @@ impl PyModelRepr {
     /// `probe_max_vars` discrete variables are probed per node. Sound —
     /// contracts only on proven infeasibility, never loosens.
     ///
+    /// When `expand_array_rows = True` (#1568), an array-structured constraint
+    /// row (`z - sigmoid(zh) == 0`, `A @ x <= b`, `sum(x) <= 5`) also
+    /// contributes one scalar row per element to the per-scalar view, so FBBT
+    /// tightens each element instead of reading the array as its hull. The
+    /// solver passes `DISCOPT_FBBT_ARRAY_ROWS` here (default ON; `=0` opts out).
+    ///
     /// Returns a dict with keys:
     /// - `lb`, `ub`: numpy arrays of post-tightening per-variable bounds.
     /// - `bounds_tightened`: int — number of half-bounds that tightened.
@@ -992,6 +998,7 @@ impl PyModelRepr {
         incumbent=None,
         probing=false,
         probe_max_vars=32,
+        expand_array_rows=false,
     ))]
     fn in_tree_presolve(
         &self,
@@ -1005,6 +1012,7 @@ impl PyModelRepr {
         incumbent: Option<f64>,
         probing: bool,
         probe_max_vars: usize,
+        expand_array_rows: bool,
     ) -> PyResult<PyObject> {
         use discopt_core::bnb::{run_in_tree_presolve_scalar, InTreePresolveOptions};
         let opts = InTreePresolveOptions {
@@ -1013,6 +1021,7 @@ impl PyModelRepr {
             tol,
             probing,
             probe_max_vars,
+            expand_array_rows,
         };
         // #1513: per-SCALAR box (length `n_vars`), the B&B node box as-is. A
         // wrong length or an unscalarizable repr is a loud ValueError.
@@ -1040,6 +1049,10 @@ impl PyModelRepr {
         // and each of these events could previously have fathomed a live node.
         out.set_item("subtol_repaired", delta.subtol_repaired)?;
         out.set_item("ran", delta.ran)?;
+        // #1568: what the array-row expansion did, so a caller (and a probe)
+        // can tell "expanded and found nothing" from "never expanded".
+        out.set_item("array_rows_added", delta.array_rows_added)?;
+        out.set_item("array_rows_on_hull", delta.array_rows_on_hull)?;
         Ok(out.into_any().unbind())
     }
 

@@ -2382,6 +2382,70 @@ def _in_tree_array_fbbt_enabled() -> bool:
     )
 
 
+# #1568: firings of the in-tree kernel whose FBBT view carried element-wise
+# expansions of array-valued rows (``array_rows_added > 0``). A flag-ON run of an
+# array model with this at 0 means the flag never reached the kernel. Reset with
+# the other in-tree counters at the top of ``solve_model``.
+_IN_TREE_ARRAY_ROW_CALLS = 0
+
+
+def _in_tree_array_row_calls() -> int:
+    """Firings of the in-tree kernel that propagated expanded array rows (#1568)."""
+    return _IN_TREE_ARRAY_ROW_CALLS
+
+
+def _note_array_rows(delta) -> None:
+    global _IN_TREE_ARRAY_ROW_CALLS
+    if delta["ran"] and int(delta["array_rows_added"]) > 0:
+        _IN_TREE_ARRAY_ROW_CALLS += 1
+
+
+def _fbbt_array_rows_enabled() -> bool:
+    """Whether in-tree FBBT expands array-valued rows per element (#1568).
+
+    ``DISCOPT_FBBT_ARRAY_ROWS`` -- **default ON** (graduated under CLAUDE.md §5 in
+    the PR that introduced it); ``=0`` restores the hull-only view.
+
+    The per-scalar FBBT view (#1513) rewrites a single-element reference
+    ``x[i]`` onto its scalar slot but reads a whole-array reference (``sum(x)``,
+    ``W.T @ x``, an elementwise vector row) through a hull proxy that FBBT never
+    tightens. A row made only of whole-array references -- every ``discopt.ml``
+    layer, ``zh - (W.T @ x + b) == 0`` / ``z - sigmoid(zh) == 0`` -- therefore
+    propagated nothing per element: on the 2-10-1 sigmoid net with ``x0`` branched
+    to ``[0, 1]`` and ``x1`` to ``[-1, 0]`` the kernel tightened 2 half-bounds on
+    the vectorised model against 26 on the same rows written per element.
+
+    With the flag, each array-structured row additionally contributes one scalar
+    row per element (row-major, the AD tape's order) built over the scalar slots;
+    the original row is kept, so the box can only get tighter, and a row with a
+    node that has no exact element-wise form is left on the hull path and counted
+    (``array_rows_on_hull``). Models whose variable blocks are all scalars (every
+    ``.nl`` instance) do not take the per-scalar path and are unaffected.
+
+    Graduation panel (§5, flag ON vs OFF, interleaved, 30 s/solve):
+
+    * in-repo corpus, 66 ``.nl`` files: kernel output byte-identical ON vs OFF
+      on 131 boxes (root + one bisection each), ``array_rows_added == 0`` --
+      neutral by construction (scalar layout);
+    * 27 array models (20 ``discopt.ml`` sigmoid/tanh nets 10x1..50x1, 10x2,
+      25x2; 7 vectorised QP/bilinear/exp-MINLP models), 54 solves: cert-clean
+      (every incumbent verified by ``check_feasibility``, no bound crossing its
+      incumbent, no certification regression, identical incumbents) and
+      net-positive -- certified 2 -> 6, optimality gap tighter on 22/27 and
+      looser on none, total wall 666 s -> 566 s, SGM(1) 16.5 s -> 12.8 s.
+
+    The cost: the expanded rows make every kernel call do real work -- 0.15 /
+    1.5 / 4.5 ms per call ON against 0.02 / 0.04 / 0.05 ms OFF on the 10x1 /
+    50x1 / 25x2 sigmoid nets -- already paid inside the panel's wall numbers.
+    """
+    return os.environ.get("DISCOPT_FBBT_ARRAY_ROWS", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
 def _in_tree_presolve_refusal(repr_, n_box: int) -> str | None:
     """Why the in-tree kernel cannot take an ``n_box``-long node box, or None.
 
@@ -12901,9 +12965,10 @@ def solve_model(
         )
 
     # --- Build Rust model representation for FBBT ---
-    global _IN_TREE_PRESOLVE_GLOBAL_CALLS, _IN_TREE_PRESOLVE_NLPBB_CALLS
+    global _IN_TREE_PRESOLVE_GLOBAL_CALLS, _IN_TREE_PRESOLVE_NLPBB_CALLS, _IN_TREE_ARRAY_ROW_CALLS
     _IN_TREE_PRESOLVE_GLOBAL_CALLS = 0  # PF1 telemetry reset (issue #632)
     _IN_TREE_PRESOLVE_NLPBB_CALLS = 0  # #1513
+    _IN_TREE_ARRAY_ROW_CALLS = 0  # #1568
     _IN_TREE_PRESOLVE_SKIPPED.clear()  # #1513
     _model_repr = None
     try:
@@ -16438,10 +16503,12 @@ def solve_model(
                     incumbent=_itp_cutoff,
                     probing=_itp_probing,
                     probe_max_vars=_itp_probe_max,
+                    expand_array_rows=_fbbt_array_rows_enabled(),
                 )
                 if not _itp_delta["ran"]:
                     continue
                 _IN_TREE_PRESOLVE_GLOBAL_CALLS += 1
+                _note_array_rows(_itp_delta)
                 if _itp_delta["infeasible"]:
                     # Rigorous fathom: the node box is empty (FBBT/probing
                     # proof), so its subtree holds no feasible point.
@@ -21885,10 +21952,12 @@ def _solve_nlp_bb(
                     incumbent=_itp_cutoff,
                     probing=_itp_probing,
                     probe_max_vars=_itp_probe_max,
+                    expand_array_rows=_fbbt_array_rows_enabled(),
                 )
                 if delta["ran"]:
                     global _IN_TREE_PRESOLVE_NLPBB_CALLS
                     _IN_TREE_PRESOLVE_NLPBB_CALLS += 1
+                    _note_array_rows(delta)
                 if delta["ran"] and delta["infeasible"]:
                     # Rigorous fathom: the node box is empty (FBBT/probing
                     # proof). Mark infeasible so the node is pruned soundly.
