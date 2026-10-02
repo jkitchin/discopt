@@ -3215,8 +3215,10 @@ def _objective_is_convex_quadratic(
                     remaining_budget,
                 )
                 return False
-        lb = np.array([v.lb for v in model._variables for _ in range(v.size)], dtype=np.float64)
-        ub = np.array([v.ub for v in model._variables for _ in range(v.size)], dtype=np.float64)
+        # #1569: one entry per SCALAR. The old ``[v.lb for v ... for _ in
+        # range(v.size)]`` repeated a shape-(n,) variable's whole bound array n
+        # times, so every array-variable model raised here and abstained.
+        lb, ub = flat_variable_bounds(model)
         lb_f = np.where(np.isfinite(lb), lb, -1.0)
         ub_f = np.where(np.isfinite(ub), ub, 1.0)
         # Evaluate the Hessian at two distinct points: a genuine quadratic has a

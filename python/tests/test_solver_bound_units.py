@@ -151,15 +151,14 @@ def test_objective_is_convex_quadratic():
     ev = NLPEvaluator(m)
     assert _objective_is_convex_quadratic(m, ev, 2)
 
-    # Array-shaped variables currently make the detector ABSTAIN (False):
-    # its flat-bounds construction duplicates whole per-variable bound arrays
-    # instead of flattening them, so the Hessian probe point has the wrong
-    # shape and the try/except abstains. Abstention only loosens the bound
-    # (sound); this test documents the limitation so a future fix flips it.
+    # Array-shaped variables: the detector used to ABSTAIN here because its
+    # flat-bounds construction duplicated whole per-variable bound arrays, so
+    # the Hessian probe point had the wrong shape. Fixed by #1569 -- the array
+    # form now agrees with the scalar form above.
     m_arr = Model("cq_arr")
     x = m_arr.continuous("x", lb=-5.0, ub=5.0, shape=(2,))
     m_arr.minimize(x[0] ** 2 + x[1] ** 2 + x[0] * x[1])
-    assert not _objective_is_convex_quadratic(m_arr, NLPEvaluator(m_arr), 2)
+    assert _objective_is_convex_quadratic(m_arr, NLPEvaluator(m_arr), 2)
 
     m2 = Model("ncq")
     y = m2.continuous("y", lb=-5.0, ub=5.0)
