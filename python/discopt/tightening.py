@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -62,7 +63,9 @@ def _block_sizes(shapes: list[list[int]]) -> list[int]:
     return sizes
 
 
-def fbbt_box(model: Model, *, max_iter: int = 20, tol: float = 1e-9) -> BoundTightening:
+def fbbt_box(
+    model: Model, *, max_iter: int = 20, tol: float = 1e-9, repr_: Any = None
+) -> BoundTightening:
     """Tighten ``model``'s variable bounds with feasibility-based bound tightening.
 
     Runs FBBT (iterated to a fixpoint, up to ``max_iter`` sweeps) over the model's
@@ -80,6 +83,9 @@ def fbbt_box(model: Model, *, max_iter: int = 20, tol: float = 1e-9) -> BoundTig
         a sweep changes nothing).
     tol : float
         Numerical tolerance for empty-interval (infeasibility) detection.
+    repr_ : ModelRepr, optional
+        A ``model_to_repr`` result for ``model`` the caller already built; built
+        here when omitted.
 
     Returns
     -------
@@ -87,7 +93,10 @@ def fbbt_box(model: Model, *, max_iter: int = 20, tol: float = 1e-9) -> BoundTig
     """
     from discopt._rust import model_to_repr
 
-    repr_ = model_to_repr(model)
+    # The builder carries a fast-API model's variables and rows; without it the
+    # repr misses them (every other ``model_to_repr`` call site passes it).
+    if repr_ is None:
+        repr_ = model_to_repr(model, getattr(model, "_builder", None))
     n_blocks = repr_.n_var_blocks
     shapes = repr_.var_shapes()
     sizes = _block_sizes(shapes)

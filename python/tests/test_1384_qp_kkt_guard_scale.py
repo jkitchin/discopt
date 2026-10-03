@@ -117,7 +117,14 @@ def test_guard_still_refuses_a_drifted_point_at_every_scale(scale):
 
 @pytest.mark.parametrize("scale", [1.0, 1e4, 1e8])
 def test_guard_accepts_a_converged_point_at_every_scale(scale):
-    """A residual well inside the scale-relative allowance is accepted."""
+    """A residual well inside the scale-relative allowance is accepted.
+
+    Since #1596 the continuous QP route certifies its objective only with the
+    backend's multipliers (a dual bound that charges the complementarity), so the
+    engine reports them as a real backend does: at ``(0.5, 1.5)`` the gradient is
+    ``scale * (-1, -1)``, so the row ``x + y <= 2`` carries ``lam = scale``, i.e.
+    ``dual_values = -scale`` in the HiGHS sign convention, and no bound is active.
+    """
     from discopt.solvers import QPResult, SolveStatus
 
     allowance = S._QP_KKT_RESIDUAL_TOL * 4.0 * scale
@@ -128,10 +135,14 @@ def test_guard_accepts_a_converged_point_at_every_scale(scale):
             x=np.array([0.5, 1.5]),
             objective=0.5 * scale,
             kkt_error=1e-3 * allowance,
+            dual_values=np.array([-scale]),
+            reduced_costs=np.zeros(2),
         )
 
     out = S._solve_qp_matrix(_scaled_qp(scale), time.perf_counter(), None, good_engine, "POUNCE")
     assert out is not None and out.status == "optimal"
+    assert out.gap_certified
+    assert out.bound <= 0.5 * scale * (1.0 + 1e-9)
 
 
 class TestStationarityScale:

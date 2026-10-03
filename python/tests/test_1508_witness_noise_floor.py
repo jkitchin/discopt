@@ -17,6 +17,8 @@ those suites are the kill criterion for this change.
 
 from __future__ import annotations
 
+import os
+
 import discopt.modeling as dm
 import numpy as np
 import pytest
@@ -66,6 +68,7 @@ def test_ulp_noise_does_not_manufacture_a_witness(rho):
 
     executed = 0
     withheld = []
+    why: list = []
     for seed in range(20):
         rng = np.random.default_rng(seed)
         x = x0 * (1.0 + rho * rng.standard_normal(2))
@@ -73,12 +76,62 @@ def test_ulp_noise_does_not_manufacture_a_witness(rho):
         obj = float(ev.evaluate_objective(x))
         cert = _convex_nlp_certificate(ev, x, lam, _LB, _UB, cl, cu, obj, gap_tolerance=1e-6)
         executed += 1
-        if cert is None or cert.bound is not None or cert.better_x is not None:
+        # Since #1596 a certified point carries an explicit dual bound; ``bound is
+        # None`` is the withheld verdict.
+        if cert is None or cert.bound is None or cert.better_x is not None:
             withheld.append(seed)
+            # Enough to tell a state leak from a numerical one when this fails only
+            # under xdist (CLAUDE.md sec. 7: an instrument must say why).
+            why.append(
+                (
+                    seed,
+                    type(ev).__name__,
+                    None
+                    if cert is None
+                    else (
+                        cert.bound if cert.bound is None else cert.bound - obj,
+                        cert.better_obj,
+                        cert.stationarity_rel,
+                        cert.complementarity_rel,
+                    ),
+                )
+            )
         else:
             assert cert.stationarity_rel < 1e-4 and cert.complementarity_rel < 1e-6
+            assert cert.bound <= obj
+            assert cert.bound == pytest.approx(obj, rel=1e-6, abs=1e-6)
     assert executed == 20  # the probe fired (CLAUDE.md sec. 6)
-    assert withheld == [], f"noise-level perturbation withheld/altered seeds {withheld}"
+    assert withheld == [], (
+        f"noise-level perturbation withheld/altered seeds {withheld}; "
+        f"(seed, evaluator, (bound - obj, better_obj, stat, comp)): {why[:4]}; "
+        f"env: {sorted((k, v) for k, v in os.environ.items() if k.startswith('DISCOPT_'))}"
+    )
+
+
+def _internals(ev, x, lam, cl, cu, f_x, cert):
+    """What the bound computation saw, for a failure seen only under CI xdist."""
+    import discopt.solver as S
+
+    cons = np.asarray(ev.evaluate_constraints(x), dtype=np.float64)
+    grad = np.asarray(ev.evaluate_gradient(x), dtype=np.float64)
+    parts = S._rigorous_bound_parts(ev, x, lam, cons, grad, _LB, _UB, cl, cu, f_x, [])
+    fns = {
+        n: getattr(getattr(S, n), "__module__", "?")
+        for n in (
+            "_rigorous_bound_parts",
+            "_outward_tangent_bound",
+            "_tangent_box_bound",
+            "_gap_values_converged",
+            "_no_witness_certificate",
+            "_certificate_box",
+        )
+    }
+    return (
+        f"cert={cert} f_x={f_x!r} parts={parts} cl={cl} cu={cu} cons={cons} grad={grad} "
+        f"lam={lam} CONSTRAINT_INF={S._CONSTRAINT_INF} abs_gap={S._DEFAULT_ABS_GAP_TOL} "
+        f"eps={np.finfo(np.float64).eps} fns={fns} np={np.__version__} "
+        f"env={sorted((k, v) for k, v in os.environ.items() if k.startswith('DISCOPT_'))}"
+    )
 
 
 def test_exact_optimum_still_certifies_exactly():
@@ -91,4 +144,12 @@ def test_exact_optimum_still_certifies_exactly():
     cert = _convex_nlp_certificate(
         ev, x, lam, _LB, _UB, cl, cu, float(ev.evaluate_objective(x)), gap_tolerance=1e-6
     )
-    assert cert is not None and cert.bound is None and cert.better_x is None
+    # Since #1596 a point with no witness carries an explicit dual bound (``None``
+    # now means "not certified"); at an exact KKT point it equals the objective to
+    # rounding and never exceeds it, and no better point is reported.
+    f_x = float(ev.evaluate_objective(x))
+    assert cert is not None and cert.bound is not None and cert.better_x is None, _internals(
+        ev, x, lam, cl, cu, f_x, cert
+    )
+    assert cert.bound <= f_x
+    assert cert.bound == pytest.approx(f_x, rel=1e-9, abs=1e-9)

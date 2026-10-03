@@ -228,14 +228,20 @@ def test_translated_qp_bound_is_not_the_expanded_polynomial(c0):
     """``min (y - c0)**2 - 3 (y - c0)`` on ``[c0, c0 + 4]``; the optimum is -2.25.
 
     Before: bound -2.2501220703125 at 1e6 (error ~ c0**2 * eps) and the certificate
-    withdrawn at 1000001.48, 3.3e6 and 7.7e6. The bound must now be the objective of
-    the certified point, accurate to the point's own optimality error."""
+    withdrawn at 1000001.48, 3.3e6 and 7.7e6. The bound must now be accurate to the
+    point's own optimality error, not to the expanded polynomial's ``c0**2 * eps``.
+    Since #1596 it is a dual bound that charges the backend's unconverged
+    complementarity rather than the objective itself, so it sits at or below the
+    true optimum. Measured (#1605): -2.250000001002788 at every ``c0`` -- 1.0e-9
+    below the optimum, the same at each translation, which is the invariance this
+    file is about."""
     m = dm.Model("q")
     y = m.continuous("y", lb=c0, ub=c0 + 4)
     m.minimize((y - c0) ** 2 - 3 * (y - c0))
     r = m.solve(time_limit=20)
     assert r.status == "optimal" and r.gap_certified, (r.status, r.objective, r.bound)
-    assert r.bound == r.objective
+    assert r.bound <= r.objective
+    assert -2.25 - 2e-9 <= r.bound <= -2.25, r.bound
     assert r.objective == pytest.approx(-2.25, abs=1e-8)
 
 
