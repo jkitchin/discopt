@@ -1375,11 +1375,13 @@ class TestIfElse:
         """Aux variable bounds soundly enclose both branch images."""
         m = dm.Model("ie")
         x = m.continuous("x", lb=-1.0, ub=1.0)
-        # then in [0,1] (x), else in [0,1] (-x over [-1,0] is [0,1]); union [-1,1]
+        # then in [0,1] (x over x >= 0), else in [0,1] (-x over x <= 0): each branch
+        # is enclosed over the region where it is selected, so the union is [0,1]
+        # (the whole-box enclosure [-1,1] was sound but loose).
         w = m.if_else(x >= 0, x, -x)
         lb = float(np.asarray(w.lb).reshape(()))
         ub = float(np.asarray(w.ub).reshape(()))
-        assert lb <= -1.0 + 1e-9
+        assert -1e-9 <= lb <= 0.0 + 1e-9
         assert ub >= 1.0 - 1e-9
 
     def test_equality_condition_rejected(self):
