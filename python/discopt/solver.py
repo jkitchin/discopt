@@ -10859,6 +10859,8 @@ def solve_model(
     branching_rule: Optional[str] = None,
     # #1620: HiGHS options for the HiGHS LP/MILP route; see ``_scoped_highs_options``.
     highs_options: Optional[dict[str, Any]] = None,
+    # #1620 B-04: user scaling for ``solver="pounce"``'s NLP arm.
+    pounce_scaling: Optional[dict[str, Any]] = None,
     # #917: extra wall-clock seconds this solve may take *only if* it holds an
     # incumbent when ``time_limit`` expires. Set by ``Model.solve`` to the #844
     # fallback reserve it withheld, so a primary that found a primal reclaims the
@@ -10992,7 +10994,23 @@ def solve_model(
         certificate is still verified by discopt, so an option can change speed
         and node count, never a reported bound's validity. On any other route
         (a nonlinear model, ``milp_backend="native"``, a callback) the options
-        are not used and a ``UserWarning`` says so.
+        are not used and a ``UserWarning`` says so. The route hands HiGHS its
+        standard form ``A x = b`` with one slack column per inequality row, not
+        the ranged rows of an ``m.to_mps()`` export, so HiGHS's node count can
+        differ from an MPS solve of the same model by a large factor (measured
+        ~9x median on a bin-packing MILP; ``docs/dev/lp-milp-highs-routing-plan.md``,
+        2026-10-05 entry).
+    pounce_scaling : dict, optional
+        User scaling for ``solver="pounce"``'s NLP interior-point arm (#1620
+        B-04), handed to POUNCE's ``set_problem_scaling`` under
+        ``nlp_scaling_method="user-scaling"``: ``{"objective": s}`` multiplies
+        the objective by ``s > 0`` and ``{"variables": {x: f}}`` solves in
+        ``f * x`` (``f`` a positive scalar or an array of the variable's shape;
+        unlisted variables keep factor 1). The point, objective and multipliers
+        come back in the model's own units. Only the NLP arm has user scaling:
+        on a model the route sends to the convex LP/QP engine, and on any other
+        ``solver``, passing it raises ``ValueError``, as does combining it with
+        a different ``nlp_scaling_method`` in ``pounce_options``.
     ipopt_options : dict, optional
         Options passed to the NLP engine: POUNCE (the default ``nlp_solver``)
         or cyipopt (``nlp_solver="ipopt"``).
@@ -11391,6 +11409,14 @@ def solve_model(
     # --- #1533: solver="pounce" -- one POUNCE interior-point solve, nothing else ---
     # Dispatched before every presolve, reformulation and cut-injection pass below:
     # the route's contract is that the model as written reaches the IPM.
+    if (
+        pounce_scaling is not None
+        and (solver if solver is not None else kwargs.get("solver")) != "pounce"
+    ):
+        raise ValueError(
+            "pounce_scaling applies only to solver='pounce' (its NLP interior-point "
+            "arm); this solve does not run it (#1620)."
+        )
     if (solver if solver is not None else kwargs.get("solver")) == "pounce":
         kwargs.pop("solver", None)
         if kwargs:
@@ -11410,6 +11436,7 @@ def solve_model(
             incumbent_callback=incumbent_callback,
             nlp_solver=nlp_solver,
             ignored=_pounce_ignored,
+            scaling=pounce_scaling,
         )
 
     # Slice held back from the search for the root-relaxation fallback so that
@@ -22334,6 +22361,7 @@ def _solve_continuous(
     certify_convex: bool = False,
     tighten_bounds: bool = True,
     raw_status_out: Optional[list] = None,
+    pounce_scaling: Optional[tuple[float, Optional[np.ndarray]]] = None,
 ) -> SolveResult:
     """Solve a purely continuous model directly with NLP solver (no B&B).
 
@@ -22343,6 +22371,8 @@ def _solve_continuous(
     solve of the model as written, and a box the solver tightened first changes
     the iterates a reader of the log is studying. ``raw_status_out``, when a list
     is passed, receives the NLP backend's own return code (Ipopt numbering).
+    ``pounce_scaling`` is the ``solver="pounce"`` user scaling (#1620 B-04),
+    already resolved to ``(obj_scaling, x_scaling)`` over the flat columns.
 
     ``warm_start`` is the dual half of ``Model.solve(warm_start=...)`` (#1247):
     ``{"x", "constraint_duals", "bound_duals_lower", "bound_duals_upper",
@@ -22477,6 +22507,7 @@ def _solve_continuous(
             block_structure=pounce_block_structure,
             warm_start=pounce_warm_start,
             solve_report=True,
+            problem_scaling=pounce_scaling,
         )
     else:
         # "ipm"/"sparse_ipm" resolve to POUNCE upstream (the JAX IPM is retired);
@@ -22814,6 +22845,7 @@ _POUNCE_ROUTE_HONOURED = frozenset(
         "lazy_constraints",
         "incumbent_callback",
         "solver",
+        "pounce_scaling",
         "kwargs",
     }
 )
@@ -22863,6 +22895,60 @@ def _resolve_pounce_options(
     return dict(pounce_options)
 
 
+def _resolve_pounce_scaling(
+    model: Model, scaling: Optional[Mapping[str, Any]]
+) -> Optional[tuple[float, Optional[np.ndarray]]]:
+    """``solve(pounce_scaling=...)`` as ``(obj_scaling, x_scaling)`` over the flat columns.
+
+    Every factor must be finite and positive; a key other than ``"objective"`` /
+    ``"variables"``, a variable of another model, or a factor of the wrong shape
+    raises. ``None`` (and an empty dict) mean no user scaling (#1620 B-04).
+    """
+    from discopt.export._common import variable_flat_offsets
+    from discopt.modeling.core import Variable
+
+    if scaling is None:
+        return None
+    if not isinstance(scaling, Mapping):
+        raise TypeError(f"pounce_scaling must be a dict, got {type(scaling).__name__}")
+    unknown = sorted(set(scaling) - {"objective", "variables"})
+    if unknown:
+        raise ValueError(
+            f"pounce_scaling has unknown keys {unknown}; the keys are 'objective' and 'variables'"
+        )
+    if not scaling:
+        return None
+
+    def _positive(what: str, value: Any) -> np.ndarray:
+        arr = np.asarray(value, dtype=np.float64)
+        if not np.all(np.isfinite(arr)) or not np.all(arr > 0.0):
+            raise ValueError(f"pounce_scaling {what} must be finite and positive, got {value!r}")
+        return arr
+
+    obj = float(_positive("objective factor", scaling.get("objective", 1.0)).reshape(()))
+    variables = scaling.get("variables")
+    if not variables:
+        return obj, None
+    if not isinstance(variables, Mapping):
+        raise TypeError("pounce_scaling['variables'] must be a dict {Variable: factor}")
+    offsets = variable_flat_offsets(model)
+    x_s = np.ones(sum(v.size for v in model._variables))
+    for var, factor in variables.items():
+        if not isinstance(var, Variable) or id(var) not in offsets:
+            raise ValueError(
+                f"pounce_scaling['variables'] key {var!r} is not a variable of this model"
+            )
+        f = _positive(f"factor for {var.name!r}", factor)
+        if f.shape not in ((), tuple(var.shape)):
+            raise ValueError(
+                f"pounce_scaling factor for {var.name!r} has shape {f.shape}; expected a "
+                f"scalar or the variable's shape {tuple(var.shape)}"
+            )
+        off = offsets[id(var)]
+        x_s[off : off + var.size] = np.broadcast_to(f, var.shape).ravel()
+    return obj, x_s
+
+
 def _strip_local_claims(result: SolveResult) -> SolveResult:
     """No dual bound and no certified gap on a result that is not a certificate."""
     result.gap_certified = False
@@ -22885,6 +22971,7 @@ def _solve_pounce_route(
     incumbent_callback,
     nlp_solver: str,
     ignored: list[str],
+    scaling: Optional[dict[str, Any]] = None,
 ) -> SolveResult:
     """``Model.solve(solver="pounce")``: one POUNCE interior-point solve (#1533).
 
@@ -22967,7 +23054,17 @@ def _solve_pounce_route(
     def _remaining() -> float:
         return max(float(time_limit) - (time.perf_counter() - t_start), 0.0)
 
+    resolved_scaling = _resolve_pounce_scaling(model, scaling)
     pclass = classify_problem(model)
+
+    if pclass in (ProblemClass.LP, ProblemClass.QP) and resolved_scaling is not None:
+        kind = "an LP" if pclass == ProblemClass.LP else "a QP"
+        raise ValueError(
+            f"pounce_scaling was passed, but this model is {kind}, "
+            "which solver='pounce' sends to POUNCE's convex interior-point engine; that "
+            "engine has no user scaling (only the NLP arm does). Drop pounce_scaling, or "
+            "scale the model's rows and columns directly (#1620)."
+        )
 
     if pclass in (ProblemClass.LP, ProblemClass.QP):
         from discopt.solvers import convex_ipm_pounce as _cvx
@@ -23147,6 +23244,7 @@ def _solve_pounce_route(
         warm_start=warm_start,
         tighten_bounds=False,
         raw_status_out=raw_status,
+        pounce_scaling=resolved_scaling,
     )
     result.wall_time = time.perf_counter() - t_start
     if result.status == "optimal" and raw_status and raw_status[0] == _IPOPT_SOLVED_TO_ACCEPTABLE:
