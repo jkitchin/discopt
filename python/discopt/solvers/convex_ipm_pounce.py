@@ -80,6 +80,7 @@ from typing import Any, List, Optional, Tuple, Union
 import numpy as np
 import scipy.sparse as sp
 
+from discopt._relax.convexity.eigenvalue import exact_psd as _exact_psd
 from discopt.solvers import LPResult, QPResult, SolveStatus
 from discopt.solvers.lp_pounce import (
     _INF,
@@ -132,82 +133,9 @@ _EXACT_PSD_SPARSE_ROW_NNZ = 8
 #: load. Exhausting it means "not decided exactly", never "PSD".
 _EXACT_PSD_UPDATE_BUDGET = 500_000
 
-#: Bit-length cap on a rational entry in the budgeted elimination; past it the
-#: elimination stops as undecided (entry growth is what makes elimination slow).
-_EXACT_PSD_MAX_BITS = 2048
-
 #: Above this many quadratically-active variables the dense eigenvalue test is not
 #: run at all; only the sparse exact elimination can prove such a Hessian PSD.
 _EIG_PSD_MAX_N = 4000
-
-
-def _exact_psd(Q: np.ndarray, budget: Optional[int] = None) -> Optional[bool]:
-    """Decide ``Q`` PSD exactly, by sparse symmetric elimination over the rationals.
-
-    Every float is a dyadic rational, so ``Fraction`` represents ``Q`` exactly and
-    the verdict carries no tolerance. A symmetric matrix is PSD iff elimination on a
-    positive pivot leaves a PSD Schur complement; a negative diagonal, or a zero
-    diagonal whose row is not zero, refutes it. Any positive diagonal is a valid
-    pivot (a symmetric permutation preserves PSD-ness), so the pivot is the row with
-    the fewest nonzeros (minimum degree, ties by index -- deterministic), which
-    keeps sparse elimination sparse.
-
-    Returns ``True``/``False`` when decided. With a ``budget`` (exact updates), also
-    returns ``None`` -- undecided -- once the budget or the
-    :data:`_EXACT_PSD_MAX_BITS` entry size is exhausted. ``budget=None`` is the
-    unbounded exact test.
-    """
-    import heapq
-    from fractions import Fraction
-
-    n = Q.shape[0]
-    rows: dict[int, dict[int, Fraction]] = {i: {} for i in range(n)}
-    ii, jj = np.nonzero(Q)
-    for i, j in zip(ii.tolist(), jj.tolist()):
-        rows[i][j] = Fraction(float(Q[i, j]))
-
-    def refuted(i: int) -> bool:
-        r = rows[i]
-        d = r.get(i, 0)
-        return d < 0 or (d == 0 and bool(r))
-
-    if any(refuted(i) for i in rows):
-        return False
-    heap = [(len(r), i) for i, r in rows.items() if r]
-    heapq.heapify(heap)
-    ops = 0
-    while heap:
-        deg, p = heapq.heappop(heap)
-        if p not in rows or len(rows[p]) != deg:
-            continue  # stale entry
-        prow = rows.pop(p)
-        piv = prow.pop(p)
-        nbrs = list(prow.items())
-        for i, a_ip in nbrs:
-            ri = rows[i]
-            del ri[p]
-            f = a_ip / piv
-            for j, a_pj in nbrs:
-                v = ri.get(j, 0) - f * a_pj
-                if v == 0:
-                    ri.pop(j, None)
-                    continue
-                if budget is not None and (
-                    v.numerator.bit_length() + v.denominator.bit_length() > _EXACT_PSD_MAX_BITS
-                ):
-                    return None
-                ri[j] = v
-            ops += len(nbrs)
-            if budget is not None and ops > budget:
-                return None
-        for i, _ in nbrs:
-            if refuted(i):
-                return False
-            if rows[i]:
-                heapq.heappush(heap, (len(rows[i]), i))
-            else:
-                del rows[i]
-    return True
 
 
 def certify_psd(Q: np.ndarray) -> bool:

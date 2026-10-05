@@ -399,6 +399,7 @@ impl PyModelRepr {
                         MathFunc::Sigmoid => "sigmoid",
                         MathFunc::Softplus => "softplus",
                         MathFunc::Entropy => "entropy",
+                        MathFunc::Centropy => "centropy",
                         MathFunc::Norm1 => "norm1",
                         MathFunc::NormInf => "norminf",
                         MathFunc::NormP(_) => unreachable!(),
@@ -2013,6 +2014,7 @@ fn convert_expr(
                 "sigmoid" => MathFunc::Sigmoid,
                 "softplus" => MathFunc::Softplus,
                 "entropy" => MathFunc::Entropy,
+                "centropy" => MathFunc::Centropy,
                 "norm1" => MathFunc::Norm1,
                 "norminf" => MathFunc::NormInf,
                 // General integer-order p-norm "norm{p}" (p != 1, 2, inf).
@@ -2035,6 +2037,15 @@ fn convert_expr(
             let mut args = Vec::new();
             for a in &py_args_tuple {
                 args.push(convert_expr(_py, a, arena, var_ids, param_ids)?);
+            }
+            // The core evaluates and bounds `centropy` from exactly two operands;
+            // any other arity is a malformed model, refused here rather than read
+            // as NaN downstream (#1661).
+            if func == MathFunc::Centropy && args.len() != 2 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "centropy takes 2 arguments, got {}",
+                    args.len()
+                )));
             }
             Ok(arena.intern(ExprNode::FunctionCall { func, args }))
         }

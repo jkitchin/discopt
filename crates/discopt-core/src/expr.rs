@@ -106,6 +106,10 @@ pub enum MathFunc {
     /// `entropy(0) = 0`. Convex on `[0, inf)`, minimized at `x = 1/e` with value
     /// `-1/e`. Undefined for `x < 0`.
     Entropy,
+    /// Relative entropy (`centropy(x, y) = x*ln(x/y)`, GAMS' intrinsic), with
+    /// the `x -> 0+` limit `0`. Jointly convex on `x >= 0, y > 0`, decreasing in
+    /// `y`. Undefined for `x < 0` or `y <= 0`. Takes exactly two arguments.
+    Centropy,
     /// L1 norm (sum of absolute values).
     Norm1,
     /// L-infinity norm (maximum absolute value).
@@ -132,6 +136,19 @@ pub fn xlogx(x: f64) -> f64 {
         f64::NAN
     } else {
         x * x.max(XLOG_FLOOR).ln()
+    }
+}
+
+/// `x*ln(x/y)` with the numerator floored at [`XLOG_FLOOR`] -- the same
+/// formula as `_relax/dag_compiler.py` (`x * log(max(x, 1e-300) / y)`), so the
+/// Rust and Python evaluators agree pointwise, and the same contract as
+/// [`xlogx`]: `centropy(0, y) = 0`. Outside the domain (`x < 0` or `y <= 0`)
+/// it returns NaN.
+pub fn centropy(x: f64, y: f64) -> f64 {
+    if x < 0.0 || y.is_nan() || y <= 0.0 {
+        f64::NAN
+    } else {
+        x * (x.max(XLOG_FLOOR) / y).ln()
     }
 }
 
@@ -1453,6 +1470,7 @@ impl ExprArena {
                     | MathFunc::Sigmoid
                     | MathFunc::Softplus
                     | MathFunc::Entropy
+                    | MathFunc::Centropy
                     | MathFunc::Norm1
                     | MathFunc::NormInf
                     | MathFunc::NormP(_)
@@ -1624,6 +1642,9 @@ impl ExprArena {
                     // Numerically stable softplus: max(x,0) + ln(1 + e^{-|x|}).
                     MathFunc::Softplus => a0.max(0.0) + (-a0.abs()).exp().ln_1p(),
                     MathFunc::Entropy => xlogx(a0),
+                    MathFunc::Centropy => args
+                        .get(1)
+                        .map_or(f64::NAN, |&b| centropy(a0, self.evaluate(b, x))),
                     MathFunc::Abs => a0.abs(),
                     MathFunc::Sign => {
                         if a0 > 0.0 {
@@ -2066,6 +2087,9 @@ impl ModelRepr {
                     // Numerically stable softplus: max(x,0) + ln(1 + e^{-|x|}).
                     MathFunc::Softplus => a0.max(0.0) + (-a0.abs()).exp().ln_1p(),
                     MathFunc::Entropy => xlogx(a0),
+                    MathFunc::Centropy => args
+                        .get(1)
+                        .map_or(f64::NAN, |&b| centropy(a0, self.evaluate_node(b, x))),
                     MathFunc::Abs => a0.abs(),
                     MathFunc::Sign => {
                         if a0 > 0.0 {

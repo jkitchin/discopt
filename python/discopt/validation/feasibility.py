@@ -793,9 +793,48 @@ def check_constraints(model, x_flat: np.ndarray, evaluator=None) -> VerifyResult
         from discopt._tape_nlp_evaluator import make_evaluator
 
         evaluator = make_evaluator(model)
+    verdict = _row_verdicts(model, x_flat, evaluator)
+    if verdict.error is not None:
+        return VerifyResult(False, None, verdict.error)
+    if not np.any(verdict.failed):
+        return VerifyResult(True)
+    bad = np.nonzero(verdict.failed)[0]
+    w = int(bad[int(np.argmax(verdict.viol[bad] - verdict.allowed[bad]))])
+    if not verdict.scaled:
+        return VerifyResult(False, None, f"row {w} violated by {verdict.viol[w]:.3e}")
+    return VerifyResult(
+        False,
+        None,
+        f"row {w} violated by {verdict.viol[w]:.3e} (allowed {verdict.allowed[w]:.3e})",
+    )
+
+
+@dataclass(frozen=True)
+class _RowVerdicts:
+    """Per-row outcome of :func:`check_constraints`'s test.
+
+    ``failed[i]`` is the verdict on flat row ``i``; ``viol`` its violation and
+    ``allowed`` the allowance it was judged against (``ABS_TOL * anchor`` for a row
+    that never became a suspect). ``error`` is set, and the arrays are empty, when
+    the rows could not be judged at all -- a caller must then refuse to vouch.
+    ``scaled`` records whether the scale-aware allowance was computed.
+    """
+
+    failed: np.ndarray
+    viol: np.ndarray
+    allowed: np.ndarray
+    scaled: bool = False
+    error: Optional[str] = None
+
+
+def _row_verdicts(model, x_flat: np.ndarray, evaluator) -> _RowVerdicts:
+    empty = np.zeros(0, dtype=np.float64)
+
+    def refuse(reason: str) -> _RowVerdicts:
+        return _RowVerdicts(np.zeros(0, dtype=bool), empty, empty, error=reason)
 
     if evaluator.n_constraints <= 0:
-        return VerifyResult(True)
+        return _RowVerdicts(np.zeros(0, dtype=bool), empty, empty)
 
     g = np.asarray(evaluator.evaluate_constraints(x_flat), dtype=np.float64)
     row_map = evaluator.constraint_row_map()
@@ -803,9 +842,7 @@ def check_constraints(model, x_flat: np.ndarray, evaluator=None) -> VerifyResult
     if g.shape[0] < n_rows:
         # The evaluator produced fewer rows than its own map claims. Refuse to
         # vouch rather than check a prefix.
-        return VerifyResult(
-            False, None, f"evaluator produced {g.shape[0]} rows, map wants {n_rows}"
-        )
+        return refuse(f"evaluator produced {g.shape[0]} rows, map wants {n_rows}")
 
     # Pass 1 — residuals under the Jacobian-FREE (stricter) bound. Rows that
     # clear this also clear the scale-aware bound, which is never smaller, so the
@@ -816,7 +853,7 @@ def check_constraints(model, x_flat: np.ndarray, evaluator=None) -> VerifyResult
     for start, stop, con in row_map:
         sense = _sense_str(con)
         if sense is None:
-            return VerifyResult(False, None, f"unknown constraint sense {con.sense!r}")
+            return refuse(f"unknown constraint sense {con.sense!r}")
         # Honour Constraint.rhs. Bodies built through the operator API are
         # normalised to rhs == 0, but the field is settable and the evaluator
         # compiles the BODY ONLY, so `body <sense> rhs` must be re-centred here.
@@ -824,11 +861,13 @@ def check_constraints(model, x_flat: np.ndarray, evaluator=None) -> VerifyResult
         for i in range(start, stop):
             val = float(g[i]) - rhs
             if not math.isfinite(val):
-                return VerifyResult(False, None, f"non-finite residual in row {i}")
+                return refuse(f"non-finite residual in row {i}")
             viol[i] = _row_violation(val, sense)
             if viol[i] > 0.0:
                 direction[i] = -1.0 if sense == ">=" else float(np.sign(val))
             anchor[i] = max(1.0, abs(rhs))
+    allowed = ABS_TOL * anchor
+    failed = np.zeros(n_rows, dtype=bool)
 
     # Pass 1 selects the rows that could fail EITHER bound. The absolute bound is
     # ``ABS_TOL * anchor``; the small-row cap (#1254) can be as low as
@@ -839,7 +878,7 @@ def check_constraints(model, x_flat: np.ndarray, evaluator=None) -> VerifyResult
     # over a line, and an exactly-satisfied row (violation 0) never is.
     suspect = np.nonzero((viol > ABS_TOL * anchor) | (viol > SMALL_ROW_ABS_FLOOR))[0]
     if suspect.size == 0:
-        return VerifyResult(True)
+        return _RowVerdicts(failed, viol, allowed)
 
     # Pass 2 — only the suspect rows get the full scale-keyed bound.
     from discopt._relax.model_utils import flat_variable_bounds
@@ -853,23 +892,14 @@ def check_constraints(model, x_flat: np.ndarray, evaluator=None) -> VerifyResult
         # No Jacobian: no scale estimate, so no cap either (it would be a cap
         # built on nothing). The rows that fail the plain absolute bound are the
         # rejection, exactly as before the cap existed.
-        hard = suspect[viol[suspect] > ABS_TOL * anchor[suspect]]
-        if hard.size == 0:
-            return VerifyResult(True)
-        worst = int(hard[int(np.argmax(viol[hard]))])
-        return VerifyResult(False, None, f"row {worst} violated by {viol[worst]:.3e}")
-    allowed = np.minimum(
+        failed[suspect] = viol[suspect] > allowed[suspect]
+        return _RowVerdicts(failed, viol, allowed)
+    allowed[suspect] = np.minimum(
         ABS_TOL * np.maximum(anchor[suspect], scales),
         feasible_distance_cap(grad_norms, scales),
     )
-    over = viol[suspect] > allowed
-    if np.any(over):
-        k = int(np.argmax(np.where(over, viol[suspect] - allowed, -np.inf)))
-        w = int(suspect[k])
-        return VerifyResult(
-            False, None, f"row {w} violated by {viol[w]:.3e} (allowed {allowed[k]:.3e})"
-        )
-    return VerifyResult(True)
+    failed[suspect] = viol[suspect] > allowed[suspect]
+    return _RowVerdicts(failed, viol, allowed, scaled=True)
 
 
 def max_constraint_violation(model, x_flat, evaluator=None) -> float:
@@ -956,6 +986,354 @@ class _DeclaredModelView:
         return getattr(self._model, name)
 
 
+# ── declared non-algebraic constraints (#1659) ──────────────────────────────
+
+
+def _column_indices(expr, model) -> np.ndarray:
+    """Flat columns of a variable or an indexed variable, in its own order.
+
+    Indicators, SOS members and boolean variables are always one of these two
+    forms; anything else is refused rather than guessed at.
+    """
+    from discopt.modeling.core import IndexExpression, Variable
+
+    base, index = (expr.base, expr.index) if isinstance(expr, IndexExpression) else (expr, None)
+    if not isinstance(base, Variable):
+        raise TypeError(f"expected a variable or an indexed variable, got {type(expr).__name__}")
+    offset = 0
+    for v in model._variables:
+        if v is base:
+            break
+        offset += int(v.size)
+    else:
+        raise ValueError(f"variable {base.name!r} is not a column of the model")
+    cols = offset + np.arange(int(base.size)).reshape(tuple(base.shape) or ())
+    if index is not None:
+        cols = cols[index]
+    return np.atleast_1d(np.asarray(cols, dtype=np.int64)).ravel()
+
+
+class _StackedRows:
+    """An evaluator whose rows are ``base``'s followed by chosen rows of ``extra``.
+
+    ``extra_entries`` are indices into ``extra.constraint_row_map()``. Both
+    evaluators are over the same columns. Everything that is not about rows (the
+    objective, its gradient) is ``base``'s.
+    """
+
+    def __init__(self, base, extra, extra_entries):
+        self._base = base
+        self._extra = extra
+        emap = extra.constraint_row_map()
+        bmap = list(base.constraint_row_map()) if base.n_constraints > 0 else []
+        off = bmap[-1][1] if bmap else 0
+        self._base_rows = off
+        rows: list[int] = []
+        out = list(bmap)
+        for k in extra_entries:
+            start, stop, con = emap[k]
+            out.append((off, off + (stop - start), con))
+            off += stop - start
+            rows.extend(range(start, stop))
+        self._rows = np.asarray(rows, dtype=np.int64)
+        self._map = out
+        self.n_constraints = off
+
+    def constraint_row_map(self):
+        return list(self._map)
+
+    def evaluate_constraints(self, x):
+        parts = []
+        if self._base_rows:
+            parts.append(np.asarray(self._base.evaluate_constraints(x), dtype=np.float64))
+        if self._rows.size:
+            g = np.asarray(self._extra.evaluate_constraints(x), dtype=np.float64)
+            parts.append(g[self._rows])
+        return np.concatenate(parts) if parts else np.zeros(0, dtype=np.float64)
+
+    def evaluate_sparse_jacobian(self, x):
+        blocks = []
+        if self._base_rows:
+            blocks.append(sparse.csr_matrix(_dense_jacobian(self._base, x)))
+        if self._rows.size:
+            blocks.append(sparse.csr_matrix(_dense_jacobian(self._extra, x))[self._rows])
+        return sparse.vstack(blocks, format="csr")
+
+    def evaluate_jacobian(self, x):
+        return self.evaluate_sparse_jacobian(x).toarray()
+
+    def evaluate_objective(self, x):
+        return self._base.evaluate_objective(x)
+
+    def evaluate_gradient(self, x):
+        return self._base.evaluate_gradient(x)
+
+
+class DeclaredLogic:
+    """The declared disjunctive, indicator, SOS and logical constraints (#1659).
+
+    The NLP evaluator compiles algebraic rows only, so on a model declared with
+    ``either_or`` / ``if_then`` / ``sos1`` / ``logical`` the rows the caller wrote
+    inside those constraints were never judged: ``verify_point`` saw zero rows and
+    passed any point in the box. Measured on the #1659 witness, a hull incumbent
+    violating its selected disjunct's row ``y >= exp(x) - 1`` by 5.9e-5 -- an
+    objective 5.4e-5 below the true optimum -- was certified, and the #1537 E
+    repair skipped the model as "non-algebraic".
+
+    Construct once, BEFORE the solve, like the declared evaluator: the algebraic
+    rows inside the logic are compiled now, so a later in-place rewrite of their
+    expressions cannot change what is judged. Every row is judged by
+    :func:`check_constraints`' own per-row test; the logic decides which rows
+    must hold at the point's integral realisation:
+
+    * a disjunction holds when at least one disjunct has every item holding
+      (``SELECT_ONE`` projects to the union of its disjuncts; nested
+      disjunctions recurse);
+    * an indicator row must hold when the indicator equals its active value;
+    * SOS1 allows one nonzero member, SOS2 two that are adjacent;
+    * a logical constraint is evaluated on the booleans' integral values.
+    """
+
+    def __init__(self, model):
+        from discopt.modeling.core import (
+            Constraint,
+            Model,
+            _DisjunctiveConstraint,
+            _IndicatorConstraint,
+            _LogicalConstraint,
+            _SOSConstraint,
+        )
+
+        self._leaves: list = []
+        self._nodes: list = []
+        self._bool_cols: dict[int, int] = {}
+
+        def leaf(c):
+            self._leaves.append(c)
+            return ("leaf", len(self._leaves) - 1)
+
+        def disjunction(c):
+            arms = []
+            for disjunct in c.disjuncts:
+                items = []
+                for item in disjunct:
+                    if type(item) is Constraint:
+                        items.append(leaf(item))
+                    elif isinstance(item, _DisjunctiveConstraint):
+                        items.append(disjunction(item))
+                    else:
+                        raise TypeError(
+                            f"disjunct item of type {type(item).__name__} is not checkable"
+                        )
+                arms.append(("all", items))
+            return ("any", arms, c.name)
+
+        for c in model._constraints:
+            if type(c) is Constraint:
+                continue
+            if isinstance(c, _DisjunctiveConstraint):
+                self._nodes.append(disjunction(c))
+            elif isinstance(c, _IndicatorConstraint):
+                cols = _column_indices(c.indicator, model)
+                if cols.size != 1:
+                    raise ValueError(f"indicator of {c.name!r} is not a scalar")
+                self._nodes.append(
+                    ("ind", int(cols[0]), float(c.active_value), leaf(c.constraint), c.name)
+                )
+            elif isinstance(c, _SOSConstraint):
+                cols = np.concatenate([_column_indices(v, model) for v in c.variables])
+                self._nodes.append(("sos", int(c.sos_type), cols, c.name))
+            elif isinstance(c, _LogicalConstraint):
+                self._index_booleans(c.expression, model)
+                self._nodes.append(("logic", c.expression, c.name))
+            else:
+                raise TypeError(f"constraint of type {type(c).__name__} is not checkable")
+
+        self._evaluator = None
+        if self._leaves:
+            from discopt._tape_nlp_evaluator import make_evaluator
+            from discopt.modeling.core import Constant
+
+            sub = Model(f"{model.name}__declared_logic")
+            sub._variables = list(model._variables)
+            sub._constraints = list(self._leaves)
+            sub.minimize(Constant(0.0))
+            self._evaluator = make_evaluator(sub)
+            entries = self._evaluator.constraint_row_map()
+            if len(entries) != len(self._leaves) or any(
+                e[2] is not c for e, c in zip(entries, self._leaves)
+            ):
+                raise RuntimeError("declared-logic row map does not follow its constraints")
+
+    def __bool__(self) -> bool:
+        return bool(self._nodes)
+
+    def _index_booleans(self, expr, model) -> None:
+        from discopt.modeling.core import (
+            BooleanVar,
+            LogicalAnd,
+            LogicalAtLeast,
+            LogicalAtMost,
+            LogicalEquivalent,
+            LogicalExactly,
+            LogicalImplies,
+            LogicalNot,
+            LogicalOr,
+        )
+
+        if isinstance(expr, BooleanVar):
+            cols = _column_indices(expr.variable, model)
+            if cols.size != 1:
+                raise ValueError("a boolean in a logical constraint is not a scalar")
+            self._bool_cols[id(expr)] = int(cols[0])
+        elif isinstance(expr, (LogicalAnd, LogicalOr, LogicalEquivalent)):
+            self._index_booleans(expr.left, model)
+            self._index_booleans(expr.right, model)
+        elif isinstance(expr, LogicalNot):
+            self._index_booleans(expr.operand, model)
+        elif isinstance(expr, LogicalImplies):
+            self._index_booleans(expr.antecedent, model)
+            self._index_booleans(expr.consequent, model)
+        elif isinstance(expr, (LogicalAtLeast, LogicalAtMost, LogicalExactly)):
+            for op in expr.operands:
+                self._index_booleans(op, model)
+        else:
+            raise TypeError(f"logical node {type(expr).__name__} is not checkable")
+
+    def _truth(self, expr, x) -> bool:
+        from discopt.modeling.core import (
+            BooleanVar,
+            LogicalAnd,
+            LogicalAtLeast,
+            LogicalAtMost,
+            LogicalEquivalent,
+            LogicalExactly,
+            LogicalImplies,
+            LogicalNot,
+            LogicalOr,
+        )
+
+        if isinstance(expr, BooleanVar):
+            return bool(round(float(x[self._bool_cols[id(expr)]])) == 1)
+        if isinstance(expr, LogicalAnd):
+            return self._truth(expr.left, x) and self._truth(expr.right, x)
+        if isinstance(expr, LogicalOr):
+            return self._truth(expr.left, x) or self._truth(expr.right, x)
+        if isinstance(expr, LogicalEquivalent):
+            return self._truth(expr.left, x) == self._truth(expr.right, x)
+        if isinstance(expr, LogicalNot):
+            return not self._truth(expr.operand, x)
+        if isinstance(expr, LogicalImplies):
+            return (not self._truth(expr.antecedent, x)) or self._truth(expr.consequent, x)
+        n_true = sum(self._truth(op, x) for op in expr.operands)
+        if isinstance(expr, LogicalAtLeast):
+            return n_true >= expr.k
+        if isinstance(expr, LogicalAtMost):
+            return n_true <= expr.k
+        if isinstance(expr, LogicalExactly):
+            return n_true == expr.k
+        raise TypeError(f"logical node {type(expr).__name__} is not checkable")
+
+    def _leaf_scores(self, model, x) -> np.ndarray:
+        """Per leaf: worst ``violation / allowance`` over its rows (``<= 1`` holds)."""
+        if self._evaluator is None:
+            return np.zeros(0, dtype=np.float64)
+        v = _row_verdicts(model, x, self._evaluator)
+        if v.error is not None:
+            raise ValueError(f"declared-logic rows: {v.error}")
+        # ``allowed`` is positive on every row (``ABS_TOL * anchor`` at least), and a
+        # row fails exactly when this ratio exceeds 1.
+        ratio = v.viol / v.allowed
+        out = np.zeros(len(self._leaves), dtype=np.float64)
+        for k, (start, stop, _con) in enumerate(self._evaluator.constraint_row_map()):
+            if stop > start:
+                out[k] = float(np.max(ratio[start:stop]))
+        return out
+
+    def _score(self, node, scores, x) -> float:
+        kind = node[0]
+        if kind == "leaf":
+            return float(scores[node[1]])
+        if kind == "all":
+            return max((self._score(n, scores, x) for n in node[1]), default=0.0)
+        if kind == "any":
+            return min(self._score(n, scores, x) for n in node[1])
+        if kind == "ind":
+            _k, col, active, sub, _name = node
+            return self._score(sub, scores, x) if float(x[col]) == active else 0.0
+        raise AssertionError(kind)
+
+    def _realise(self, node, scores, x, out: list[int]) -> None:
+        kind = node[0]
+        if kind == "leaf":
+            out.append(node[1])
+        elif kind == "all":
+            for n in node[1]:
+                self._realise(n, scores, x, out)
+        elif kind == "any":
+            best = min(node[1], key=lambda n: self._score(n, scores, x))
+            self._realise(best, scores, x, out)
+        elif kind == "ind":
+            _k, col, active, sub, _name = node
+            if float(x[col]) == active:
+                self._realise(sub, scores, x, out)
+
+    def check(self, model, x_snapped) -> VerifyResult:
+        """Verdict on the point's integral realisation (see the class docstring)."""
+        x = np.asarray(x_snapped, dtype=np.float64)
+        scores = self._leaf_scores(model, x)
+        for pos, node in enumerate(self._nodes):
+            kind = node[0]
+            label = node[-1] if node[-1] is not None else f"#{pos}"
+            if kind in ("any", "ind"):
+                worst = self._score(node, scores, x)
+                if worst > 1.0:
+                    what = "disjunction" if kind == "any" else "indicator constraint"
+                    return VerifyResult(
+                        False,
+                        None,
+                        f"{what} {label!r} not satisfied "
+                        f"(closest row violation {worst:.3g}x its allowance)",
+                    )
+            elif kind == "sos":
+                _k, sos_type, cols, _name = node
+                nz = np.nonzero(np.abs(x[cols]) > ABS_TOL)[0]
+                ok = nz.size <= 1 or (sos_type == 2 and nz.size == 2 and nz[1] - nz[0] == 1)
+                if not ok:
+                    return VerifyResult(
+                        False, None, f"SOS{sos_type} {label!r} has nonzero members {nz.tolist()}"
+                    )
+            elif kind == "logic":
+                if not self._truth(node[1], x):
+                    return VerifyResult(False, None, f"logical constraint {label!r} is false")
+        return VerifyResult(True)
+
+    def realised_evaluator(self, model, x_snapped, base_evaluator):
+        """``base_evaluator``'s rows plus the logic rows that must hold at the point.
+
+        Each disjunction contributes the disjunct closest to holding (by the same
+        per-row allowance :meth:`check` uses), each active indicator its row. SOS
+        and logical constraints contribute no rows; a move that breaks one is
+        caught by re-checking the moved point.
+        """
+        x = np.asarray(x_snapped, dtype=np.float64)
+        scores = self._leaf_scores(model, x)
+        chosen: list[int] = []
+        for node in self._nodes:
+            if node[0] in ("any", "ind"):
+                self._realise(node, scores, x, chosen)
+        if not chosen:
+            return base_evaluator
+        return _StackedRows(base_evaluator, self._evaluator, sorted(set(chosen)))
+
+
+def has_declared_logic(model) -> bool:
+    """True when ``model`` declares any non-algebraic constraint."""
+    from discopt.modeling.core import Constraint
+
+    return any(type(c) is not Constraint for c in model._constraints)
+
+
 def verify_point(
     model,
     x_flat,
@@ -963,6 +1341,7 @@ def verify_point(
     with_objective: bool = False,
     evaluator=None,
     variables=None,
+    logic: Optional[DeclaredLogic] = None,
 ) -> VerifyResult:
     """Verify ``x_flat`` is feasible for ``model``; optionally return its objective.
 
@@ -985,6 +1364,11 @@ def verify_point(
     columns to ``model._variables``; judging the declared point against the
     extended list is a length mismatch, not a verdict. It requires ``evaluator``
     (built on the same declared model), since the rows must match the columns.
+
+    ``logic`` (#1659) is a :class:`DeclaredLogic` for the model's disjunctive,
+    indicator, SOS and logical constraints, which the evaluator does not compile.
+    Without one it is built from ``model`` when the model declares any; with
+    ``variables`` it must be passed, built before the solve like the evaluator.
     """
     from discopt.modeling.core import ObjectiveSense
 
@@ -1029,6 +1413,17 @@ def verify_point(
         res = check_constraints(model, x_flat, evaluator=evaluator)
         if not res.ok:
             return res
+        if logic is None and has_declared_logic(model):
+            if variables is not None:
+                raise ValueError(
+                    "the model declares non-algebraic constraints; verify_point("
+                    "variables=...) needs the DeclaredLogic built with the evaluator"
+                )
+            logic = DeclaredLogic(model)
+        if logic:
+            res = logic.check(model, x_flat)
+            if not res.ok:
+                return res
         if not with_objective:
             return VerifyResult(True)
         obj_min = float(evaluator.evaluate_objective(x_flat))
