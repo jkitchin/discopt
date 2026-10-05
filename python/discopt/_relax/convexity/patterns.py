@@ -65,6 +65,7 @@ from discopt.modeling.core import (
     Variable,
 )
 
+from .eigenvalue import psd_proved
 from .lattice import Curvature
 
 logger = logging.getLogger(__name__)
@@ -568,7 +569,9 @@ def _support_restricted(Q: np.ndarray) -> np.ndarray:
     Returns a ``0x0`` array when ``Q`` is entirely zero; callers decide what an
     empty spectrum means rather than having this function guess.
     """
-    support = np.nonzero(np.any(np.abs(Q) > 1e-12, axis=0))[0]
+    # Exact nonzeros (#1660): a ``1e-12`` cut dropped ``-1e-13 * x**2`` from the
+    # support, so the sign test never saw the negative curvature it carries.
+    support = np.nonzero(np.any(Q != 0.0, axis=0))[0]
     if support.size < Q.shape[0]:
         return Q[np.ix_(support, support)]
     return Q
@@ -641,7 +644,8 @@ def _quadratic_sign_form(expr: Expression, model: Model):
         sym[(i, j)] = v
         sym[(j, i)] = v
 
-    support = sorted({i for (i, _j), v in sym.items() if abs(v) > 1e-12})
+    # Exact nonzeros, matching ``_support_restricted`` (#1660).
+    support = sorted({i for (i, _j), v in sym.items() if v != 0.0})
     if not support:
         # ``_support_restricted`` returns 0x0 for an all-zero Q; callers decide
         # what an empty spectrum means.
@@ -928,19 +932,11 @@ def is_affine_norm_square(expr: Expression, model: Model) -> bool:
 
 def is_homogeneous_psd_quadratic(expr: Expression, model: Model) -> bool:
     """True when ``expr`` is ``x^T Q x`` (no linear/constant term) with Q PSD."""
-    mat = _sum_of_squares_linear_matrix(expr, model)
-    if mat is not None:
-        # ``mat`` is ``A`` from ``sum((A@x)*(A@x)) == x^T (A^T A) x``, with a
-        # column per scalar variable IN THE WHOLE MODEL. Forming the full Gram
-        # matrix and decomposing it is the same #814 blow-up as below: an
-        # all-zero column of ``A`` is an all-zero row/column of ``A^T A``, so
-        # dropping it is the support restriction, exact for this sign test.
-        cols = np.nonzero(np.any(np.abs(mat) > 1e-12, axis=0))[0]
-        if cols.size == 0:
-            return True  # A == 0, so ||A x||**2 == 0: the zero form is PSD
-        sub = mat[:, cols]
-        eigvals = np.linalg.eigvalsh(sub.T @ sub)
-        return bool(float(np.min(eigvals)) >= -1e-10)
+    if _sum_of_squares_linear_matrix(expr, model) is not None:
+        # ``sum((A@x)*(A@x))`` with the two factors equal is ``||A x||**2``: PSD and
+        # homogeneous by construction, for every ``A``. The eigenvalue test this
+        # replaced decided an identity by floating point (#1660).
+        return True
     # #1456: this is a min-eigenvalue SIGN test, so it is exact on the support
     # (see ``_support_restricted``). Without this, one ``sqrt`` node in
     # glider400's 5215-variable model costs a 5215x5215 eigendecomposition;
@@ -956,14 +952,13 @@ def is_homogeneous_psd_quadratic(expr: Expression, model: Model) -> bool:
     if data is None:
         return False
     Qs, c, const = data
-    if not np.allclose(c, 0.0, atol=1e-10):
-        return False
-    if abs(const) > 1e-10:
+    # Exactly homogeneous (#1660): ``sqrt(x^T Q x + c^T x)`` is not a norm for
+    # any nonzero ``c``, however small -- a box makes a tiny term matter.
+    if np.any(c != 0.0) or const != 0.0:
         return False
     if Qs.size == 0:
         return True  # Q is entirely zero: the zero form is PSD
-    eigvals = np.linalg.eigvalsh(Qs)
-    return bool(float(np.min(eigvals)) >= -1e-10)
+    return psd_proved(Qs)
 
 
 def quadratic_curvature(expr: Expression, model: Model) -> Optional[Curvature]:
@@ -988,16 +983,17 @@ def quadratic_curvature(expr: Expression, model: Model) -> Optional[Curvature]:
     if data is None:
         return None
     Q, _c, _const = data
-    # Equivalent to the old whole-Q test: every entry outside the support is
-    # exactly 0.0, so it cannot make an ``allclose(..., atol=1e-10)`` differ.
-    # The all-zero-support case is absorbed here too — a 0x0 array is vacuously
-    # allclose to zero — so ``eigvals`` below is never empty.
-    if np.allclose(Q, 0.0, atol=1e-10):
+    # #1660: every verdict here is box-free, so it must hold on every box. The
+    # absolute ``1e-10`` tests this replaces called ``-1e-11 * x**2`` AFFINE and
+    # ``-1e-11 * x**2 + y**2`` CONVEX; on ``x in [-1e4, 1e4]`` that negative
+    # curvature is worth -1e-3 and the convex-QP route certified a false bound.
+    # AFFINE now means Q is exactly zero (the support is exact, so that is an
+    # empty support), and CONVEX/CONCAVE need a proof (``psd_proved``).
+    if Q.size == 0:
         return Curvature.AFFINE
-    eigvals = np.linalg.eigvalsh(Q)
-    if float(np.min(eigvals)) >= -1e-10:
+    if psd_proved(Q):
         return Curvature.CONVEX
-    if float(np.max(eigvals)) <= 1e-10:
+    if psd_proved(-Q):
         return Curvature.CONCAVE
     return Curvature.UNKNOWN
 
