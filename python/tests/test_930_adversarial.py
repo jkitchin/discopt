@@ -268,10 +268,22 @@ def test_maximize_bound_is_the_negated_min_space_value(monkeypatch):
         assert result.bound is not None, (
             f"{name}: the gate admitted {admitted!r} but no dual bound was reported"
         )
-        assert result.bound == pytest.approx(expected, rel=1e-9), (
-            f"{name}: reported bound {result.bound!r} is not the negation of the "
-            f"admitted min-space value (expected {expected!r}); a MAXIMIZE dual "
-            "bound with the wrong sign is a false certificate"
+        tol = 1e-9 * max(1.0, abs(expected))
+        # The merge may only TIGHTEN the negated probe value: another rigorous
+        # source (the root relaxation, the tree) can land below it within the
+        # time budget -- measured on bchoco07 at 5 s: root relaxation 0.9999909
+        # against the probe's 1.0000000000008 -- so "the probe is binding" was a
+        # property of one machine's speed, not of the code. What a dropped or
+        # doubled negation produces is the probe value with the WRONG sign, which
+        # these two assertions still refuse.
+        assert result.bound <= expected + tol, (
+            f"{name}: reported bound {result.bound!r} is looser than the negation of "
+            f"the admitted min-space value (expected <= {expected!r})"
+        )
+        assert abs(result.bound - expected) < abs(result.bound + expected), (
+            f"{name}: reported bound {result.bound!r} sits nearer the UN-negated "
+            f"admitted value {-expected!r} than its negation {expected!r}; a MAXIMIZE "
+            "dual bound with the wrong sign is a false certificate"
         )
         checks += 1
 
