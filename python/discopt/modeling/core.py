@@ -5229,6 +5229,25 @@ def _counts_solve_depth(fn):
 _SOLVE_OWNED_MODELS: _contextvars.ContextVar[frozenset[int]] = _contextvars.ContextVar(
     "discopt_solve_owned_models", default=frozenset()
 )
+#: The box each owned model's caller declared, flat ``(lb, ub)``, recorded at the
+#: owner's entry (before any solve-time tightening writes the model). Read by
+#: :func:`solve_entry_box`.
+_SOLVE_ENTRY_BOXES: _contextvars.ContextVar[dict] = _contextvars.ContextVar(
+    "discopt_solve_entry_boxes", default={}
+)
+
+
+def solve_entry_box(model: "Model") -> Optional[tuple[np.ndarray, np.ndarray]]:
+    """The flat ``(lb, ub)`` box ``model`` carried when the current solve began, or
+    ``None`` outside a solve.
+
+    The solve tightens the model's variable bounds in place (FBBT, nonlinear
+    tightening, ...) and :func:`_solve_owns_model` restores them on exit, so during
+    the solve ``Variable.lb``/``ub`` are the WORKING box. Anything that must speak
+    about the model the user declared -- the duals it reports, judged against the
+    declared bounds by the examiner -- reads this instead.
+    """
+    return _SOLVE_ENTRY_BOXES.get().get(id(model))
 
 
 @_contextlib.contextmanager
@@ -5265,6 +5284,17 @@ def _solve_owns_model(model: "Model") -> "Iterator[bool]":
         return
     token = _SOLVE_OWNED_MODELS.set(owned | {id(model)})
     vars_entry = list(model._variables)
+    _lbs = [np.asarray(v.lb, dtype=np.float64).ravel() for v in vars_entry]
+    _ubs = [np.asarray(v.ub, dtype=np.float64).ravel() for v in vars_entry]
+    box_token = _SOLVE_ENTRY_BOXES.set(
+        {
+            **_SOLVE_ENTRY_BOXES.get(),
+            id(model): (
+                np.concatenate(_lbs) if _lbs else np.zeros(0),
+                np.concatenate(_ubs) if _ubs else np.zeros(0),
+            ),
+        }
+    )
     cons_entry = list(model._constraints)
     objective_entry = model._objective
     names_entry = set(model._names)
@@ -5293,6 +5323,7 @@ def _solve_owns_model(model: "Model") -> "Iterator[bool]":
                 # the restored Python-side records (the path ``clone`` uses).
                 model._replay_builder()
         finally:
+            _SOLVE_ENTRY_BOXES.reset(box_token)
             _SOLVE_OWNED_MODELS.reset(token)
 
 

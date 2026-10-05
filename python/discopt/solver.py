@@ -22653,12 +22653,23 @@ def _solve_continuous(
     # of the user's model; refit against the declared box when that happened.
     # No-op when it did not, which is the usual case.
     if nlp_result.x is not None:
+        # ``raw_lb``/``raw_ub`` are the model's bounds when the evaluator was built,
+        # which an earlier pass of this solve may already have tightened in place:
+        # on nlp_cvx_204_010 they read [-1, 1] where the user declared the default
+        # +/-9.999e19 box, so a 1.8e-9 barrier residue passed this check and the
+        # examiner, judging against the declared box, found a CS violation of
+        # 1.75e12. The box recorded at the solve's entry is the declared one.
+        from discopt.modeling.core import solve_entry_box
+
+        _decl = solve_entry_box(model)
+        if _decl is None or _decl[0].size != np.asarray(raw_lb).size:
+            _decl = (np.asarray(raw_lb, dtype=float), np.asarray(raw_ub, dtype=float))
         constraint_duals, bound_duals_lower, bound_duals_upper = _duals_against_declared_box(
             model=model,
             evaluator=evaluator,
             x_flat=np.asarray(nlp_result.x, dtype=float),
-            declared_lb=np.asarray(raw_lb, dtype=float),
-            declared_ub=np.asarray(raw_ub, dtype=float),
+            declared_lb=np.asarray(_decl[0], dtype=float),
+            declared_ub=np.asarray(_decl[1], dtype=float),
             solved_lb=lb,
             solved_ub=ub,
             constraint_duals=constraint_duals,
