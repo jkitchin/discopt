@@ -44,6 +44,8 @@ and is reported ``loose-but-sound`` — never unsound, never a fallback.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import dataclasses
 import logging
 import math
@@ -126,6 +128,68 @@ def _finite(*vals: float) -> bool:
 # --------------------------------------------------------------------------- #
 # LinForm — an affine expression over the relaxation's columns
 # --------------------------------------------------------------------------- #
+def perspective_oa_enabled() -> bool:
+    """``DISCOPT_PERSPECTIVE_OA`` (#1662): prove perspective composites for OA cuts.
+
+    With it ON, the convex-lift certificate (``_Builder._dcp``) runs the
+    perspective-composite rule (``convexity.rules._classify_perspective_composite``,
+    #1617 C-12b) inside :func:`~discopt._relax.convexity.rules.perspective_proof_scope`,
+    so a proven-convex GDP hull row ``yhat*g(v/yhat) - eps*g(0)*(1-y)`` is lifted
+    and outer-approximated by gradient cuts in the spatial tree instead of being
+    McCormick-relaxed factor by factor. Only the node relaxation sees the proof:
+    ``classify_model`` and the NLP-BB route switch do not, which is what kept
+    ``DISCOPT_PERSPECTIVE_COMPOSITE`` default-OFF, and neither do the OBBT/DBBT
+    relaxations (:func:`perspective_oa_suppressed`). Read at call time.
+
+    Default ON since #1662's CLAUDE.md section 5 panel: cert-clean on the 66-instance
+    corpus (404 bound checks, 102/102 certified both arms) and on 7 ``*hfsg``
+    instances at 300 s, where no bound got looser, the root bound tightened on 5
+    of 7 and the final bound on 2 (``rsyn0830m03hfsg`` 4333.8 -> 1581.5, optimum
+    1543.06), and every incumbent the flag produced passed ``verify_point``.
+    ``DISCOPT_PERSPECTIVE_OA=0`` restores the McCormick path; see
+    ``docs/dev/flag-retirement-audit.md``.
+    """
+    return os.environ.get("DISCOPT_PERSPECTIVE_OA", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
+
+
+#: #1662: set while a bound-tightening pass (root/node OBBT, DBBT) builds its
+#: relaxation. The perspective OA rows then stay out of that relaxation, so the
+#: flag changes only the node LP and the tightening passes see exactly the OFF
+#: relaxation -- their budgets, candidate filters and results are the OFF ones.
+_PERSPECTIVE_OA_SUPPRESSED: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "discopt_perspective_oa_suppressed", default=False
+)
+
+
+@contextlib.contextmanager
+def perspective_oa_suppressed():
+    """Build relaxations inside this block as if ``DISCOPT_PERSPECTIVE_OA`` were OFF.
+
+    #1662: with the OA rows in the OBBT relaxation, each OBBT LP is larger, the
+    sweep's time budget covers fewer of them, and its LP solutions -- hence its
+    candidate filtering -- differ. On ``casctanks`` that left x121..x128 untightened
+    (ub 1.4 instead of 1.066) and the root bound looser than OFF (6.041 vs 6.068).
+    Bound tightening is a separate lever from the node bound; keeping it on the OFF
+    relaxation makes the flag add rows to the node LP and change nothing else.
+    """
+    token = _PERSPECTIVE_OA_SUPPRESSED.set(True)
+    try:
+        yield
+    finally:
+        _PERSPECTIVE_OA_SUPPRESSED.reset(token)
+
+
+def _perspective_oa_active() -> bool:
+    """The flag is ON and no bound-tightening pass has suppressed it."""
+    return perspective_oa_enabled() and not _PERSPECTIVE_OA_SUPPRESSED.get()
+
+
 @dataclasses.dataclass
 class LinForm:
     """``const + sum_j coef_j * col_j`` over relaxation columns (orig ∪ aux).
@@ -694,7 +758,7 @@ class _ModelAnalysisCache:
         # shared evaluate_interval id() memo can never go stale — see bounds()).
         self.expr: dict[int, object] = {}
         # id(cnode) -> classify_expr verdict (Curvature enum or None on failure).
-        self.dcp: dict[int, object] = {}
+        self.dcp: dict[tuple[int, bool], object] = {}
         # id(cnode) -> (value_fn, grad_fn) or None if compilation failed.
         self.compiled: dict[int, object] = {}
         # id(cnode) -> sorted tuple of support columns, or None if the subtree
@@ -1000,17 +1064,21 @@ class _Builder:
         """Global DCP curvature verdict of ``node`` (box-independent; ``None`` on
         classifier failure — the same abstain the inline try/except produced)."""
         cache = self._analysis.dcp
-        nid = id(node)
-        v = cache.get(nid, _UNSET)
+        # #1662: the verdict depends on the flag, so it is part of the key.
+        persp = _perspective_oa_active()
+        key = (id(node), persp)
+        v = cache.get(key, _UNSET)
         if v is not _UNSET:
             return v
         from discopt._relax.convexity import classify_expr
+        from discopt._relax.convexity.rules import perspective_proof_scope
 
         # #1520: no except. ``classify_expr`` answers ``Curvature.UNKNOWN`` for
         # anything it cannot prove; its only raise is the deadline abort, which
         # needs a caller-armed cache (none here). An exception is a defect.
-        v = classify_expr(self._expr(node), self.model)
-        cache[nid] = v
+        with perspective_proof_scope(persp):
+            v = classify_expr(self._expr(node), self.model)
+        cache[key] = v
         return v
 
     def _compiled(self, node: CNode):
@@ -1462,6 +1530,11 @@ class _Builder:
                 return False  # integer power -> monomial/square owner
             (child,) = node.children
             return not is_affine(child)
+        if kind == "prod" and _perspective_oa_active():
+            # #1662: a perspective ``L * g(A/L)`` (the GDP hull row) is a product
+            # the rules can prove convex inside the proof scope; a bilinear
+            # product stays UNKNOWN there and is declined by ``_try_convex_lift``.
+            return True
         return False  # prod (bilinear) / opaque
 
     def _try_convex_lift(self, node: CNode) -> Optional[LinForm]:

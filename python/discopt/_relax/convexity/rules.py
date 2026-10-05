@@ -56,6 +56,8 @@ Ceccon, Siirola, Misener (2020), "SUSPECT," TOP.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import logging
 import os
 import sys
@@ -969,6 +971,8 @@ def perspective_composite_enabled() -> bool:
     spatial path *without* the NLP-BB route switch, or an NLP-BB that keeps pace
     with the spatial tree on the ``rsyn*m03/m04`` instances.
     """
+    if _PERSPECTIVE_PROOF_SCOPE.get():
+        return True
     return os.environ.get("DISCOPT_PERSPECTIVE_COMPOSITE", "0").strip().lower() not in (
         "0",
         "false",
@@ -978,17 +982,68 @@ def perspective_composite_enabled() -> bool:
     )
 
 
-def _perspective_atoms(e_expr: Expression, l_expr: Expression) -> Optional[list[BinaryOp]]:
-    """The ``A / L`` atoms of ``e_expr``, or ``None`` if a variable sits outside one.
+# #1662: the perspective-composite rule enabled for one caller only. The spatial
+# relaxation (``uniform_relax._Builder._dcp``) consumes the proof for OA cuts
+# inside this scope; ``classify_model`` and the route decision run outside it, so
+# the proof cannot re-route the model to NLP-BB.
+_PERSPECTIVE_PROOF_SCOPE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "discopt_perspective_proof_scope", default=False
+)
 
-    An atom is a ``/`` node whose divisor is structurally ``l_expr``; it is not
+
+@contextlib.contextmanager
+def perspective_proof_scope(enabled: bool = True):
+    """Enable the perspective-composite rule for classifications made inside.
+
+    Callers must not share a ``classify_expr`` cache across the scope boundary:
+    a verdict cached inside would leak a proof to a caller outside it.
+    """
+    token = _PERSPECTIVE_PROOF_SCOPE.set(bool(enabled))
+    try:
+        yield
+    finally:
+        _PERSPECTIVE_PROOF_SCOPE.reset(token)
+
+
+def _reciprocal_numerator(node: Expression, l_expr: Expression) -> Optional[Expression]:
+    """``A`` if ``node`` is a ratio ``A / L`` with ``L`` structurally ``l_expr``.
+
+    Two spellings: ``A / L`` as written, and ``L**-1 * A`` (either factor order),
+    the form the canonical DAG reconstructs a division into (#1662). Both
+    denote the same value, so the perspective identity is unaffected.
+    """
+    from .patterns import _expr_struct_eq
+
+    if not isinstance(node, BinaryOp):
+        return None
+    if node.op == "/" and _expr_struct_eq(node.right, l_expr):
+        return node.left
+    if node.op == "*":
+        for recip, num in ((node.left, node.right), (node.right, node.left)):
+            if (
+                isinstance(recip, BinaryOp)
+                and recip.op == "**"
+                and isinstance(recip.right, Constant)
+                and np.ndim(recip.right.value) == 0
+                and float(recip.right.value) == -1.0
+                and _expr_struct_eq(recip.left, l_expr)
+            ):
+                return num
+    return None
+
+
+def _perspective_atoms(
+    e_expr: Expression, l_expr: Expression
+) -> Optional[list[tuple[Expression, Expression]]]:
+    """The ``(A / L, A)`` atoms of ``e_expr``, or ``None`` if a variable sits outside one.
+
+    An atom is a ratio node whose divisor is structurally ``l_expr`` (see
+    :func:`_reciprocal_numerator`), paired with its numerator; it is not
     descended into. Any ``Variable`` (or indexed ``Variable``) reached outside an
     atom means ``e_expr`` is not a function of the ratios alone, and the
     perspective identity does not apply. ``Parameter`` leaves are constants.
     """
-    from .patterns import _expr_struct_eq
-
-    atoms: list[BinaryOp] = []
+    atoms: list[tuple[Expression, Expression]] = []
     seen: set[int] = set()
     stack: list[Expression] = [e_expr]
     while stack:
@@ -996,8 +1051,9 @@ def _perspective_atoms(e_expr: Expression, l_expr: Expression) -> Optional[list[
         if id(node) in seen:
             continue
         seen.add(id(node))
-        if isinstance(node, BinaryOp) and node.op == "/" and _expr_struct_eq(node.right, l_expr):
-            atoms.append(node)
+        num = _reciprocal_numerator(node, l_expr)
+        if num is not None:
+            atoms.append((node, num))
             continue
         if isinstance(node, Variable):
             return None
@@ -1052,12 +1108,12 @@ def _classify_perspective_composite(
             if key in cache:
                 seeded[key] = cache[key]
         ok = True
-        for atom in atoms:
-            if classify_expr(atom.left, model, cache) != Curvature.AFFINE:
+        for atom, num in atoms:
+            if classify_expr(num, model, cache) != Curvature.AFFINE:
                 ok = False
                 break
             # sign(A / L) = sign(A) since L > 0.
-            num_sign = classify_expr_info(atom.left, model, cache).sign
+            num_sign = classify_expr_info(num, model, cache).sign
             seeded[id(atom)] = ExprInfo(Curvature.AFFINE, num_sign)
         if not ok:
             continue
