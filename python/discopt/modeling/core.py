@@ -5332,6 +5332,84 @@ def _post_solve_abs_gap_tol(result: "SolveResult", abs_gap_tolerance: Optional[f
     return float(_resolve_abs_gap_tolerance(abs_gap_tolerance))
 
 
+def _affine_scalar_terms(expr) -> Optional[tuple[dict, float]]:
+    """``({Variable: coef}, const)`` for an affine expression over SCALAR variables,
+    else ``None``. Used only to restrict an ``if_else`` branch's enclosure box."""
+    if isinstance(expr, Constant):
+        v = np.asarray(expr.value)
+        return ({}, float(v.reshape(()))) if v.size == 1 else None
+    if isinstance(expr, Variable):
+        return ({expr: 1.0}, 0.0) if expr.size == 1 and expr.shape in ((), (1,)) else None
+    if isinstance(expr, UnaryOp) and expr.op == "neg":
+        r = _affine_scalar_terms(expr.operand)
+        return None if r is None else ({k: -a for k, a in r[0].items()}, -r[1])
+    if isinstance(expr, BinaryOp):
+        if expr.op in ("+", "-"):
+            left, right = _affine_scalar_terms(expr.left), _affine_scalar_terms(expr.right)
+            if left is None or right is None:
+                return None
+            sgn = 1.0 if expr.op == "+" else -1.0
+            coef = dict(left[0])
+            for k, a in right[0].items():
+                coef[k] = coef.get(k, 0.0) + sgn * a
+            return coef, left[1] + sgn * right[1]
+        if expr.op in ("*", "/"):
+            left, right = _affine_scalar_terms(expr.left), _affine_scalar_terms(expr.right)
+            if left is None or right is None:
+                return None
+            if expr.op == "/":
+                if right[0] or right[1] == 0.0:
+                    return None
+                return {k: a / right[1] for k, a in left[0].items()}, left[1] / right[1]
+            if not left[0]:
+                return {k: left[1] * a for k, a in right[0].items()}, left[1] * right[1]
+            if not right[0]:
+                return {k: right[1] * a for k, a in left[0].items()}, right[1] * left[1]
+    return None
+
+
+def _condition_box(cond) -> Optional[dict]:
+    """The declared box of the variables in ``cond`` (``body <= 0``) tightened by one
+    bound-propagation step on that row, as ``{Variable: Interval}``; ``None`` when the
+    condition is absent, not affine over scalar variables, or tightens nothing.
+
+    Sound: every point of the declared box satisfying ``cond`` lies in the returned
+    box. An empty result (the condition cannot hold) is also ``None``.
+    """
+    if cond is None or getattr(cond, "sense", None) != "<=":
+        return None
+    aff = _affine_scalar_terms(cond.body - cond.rhs if cond.rhs else cond.body)
+    if aff is None or not aff[0]:
+        return None
+    from discopt._relax.convexity.interval import Interval
+
+    coef, const = aff
+    lo = {v: float(np.asarray(v.lb).reshape(())) for v in coef}
+    hi = {v: float(np.asarray(v.ub).reshape(())) for v in coef}
+    mins = {v: min(a * lo[v], a * hi[v]) for v, a in coef.items()}
+    if not all(np.isfinite(m_) for m_ in mins.values()):
+        return None
+    # ``np.sum``, not ``sum``: this module's ``sum`` is the modeling ``dm.sum``.
+    total_min = const + float(np.sum(list(mins.values())))
+    box: dict = {}
+    for v, a in coef.items():
+        if a == 0.0:
+            continue
+        # a*v <= -(const + sum_{j != v} min(a_j v_j))
+        rest = total_min - mins[v]
+        lim = -rest / a
+        nlo, nhi = lo[v], hi[v]
+        if a > 0.0:
+            nhi = min(nhi, lim)
+        else:
+            nlo = max(nlo, lim)
+        if nlo > nhi:
+            return None
+        if (nlo, nhi) != (lo[v], hi[v]):
+            box[v] = Interval(nlo, nhi)
+    return box or None
+
+
 class Model:
     """
     A Mixed-Integer Nonlinear Program.
@@ -7387,7 +7465,11 @@ class Model:
         return pair
 
     def _branch_bounds(
-        self, then_expr: "Expression", else_expr: "Expression"
+        self,
+        then_expr: "Expression",
+        else_expr: "Expression",
+        then_cond: Optional["Constraint"] = None,
+        else_cond: Optional["Constraint"] = None,
     ) -> tuple[float, float]:
         """Sound bounds for an if_else auxiliary variable.
 
@@ -7396,14 +7478,25 @@ class Model:
         interval enclosures of the two branch expressions. Falls back to the
         default (huge) bounds when either enclosure is non-finite or cannot be
         computed; presolve/FBBT tighten from there. Always sound.
+
+        Each branch is enclosed over the box restricted by the condition under
+        which it is SELECTED (``then_cond`` / ``else_cond``), not the whole box:
+        a branch is never evaluated outside its own region, and on
+        ``if_else(x >= 0, exp(x) - 1, log(-x + 3))`` over ``x in [-10, 10]`` the
+        whole-box enclosure of ``log(-x + 3)`` is undefined, which left ``w`` on
+        the default +/-9.999e19 box -- a bound the hull reformulation rightly
+        refuses, so the solve raised (#1043's own repro). The restriction is one
+        bound-propagation step on a linear condition over scalar variables;
+        anything else keeps the declared box, which is always sound.
         """
         from discopt._relax.convexity.interval_eval import evaluate_interval
 
         los: list[float] = []
         his: list[float] = []
-        for e in (then_expr, else_expr):
+        for e, cond in ((then_expr, then_cond), (else_expr, else_cond)):
+            box = _condition_box(cond)
             try:
-                iv = evaluate_interval(e, self)
+                iv = evaluate_interval(e, self, box)
                 lo = float(np.asarray(iv.lo).reshape(()))
                 hi = float(np.asarray(iv.hi).reshape(()))
             except Exception:
@@ -7474,12 +7567,12 @@ class Model:
             )
         then_expr = _wrap(then_value)
         else_expr = _wrap(else_value)
-        lb, ub = self._branch_bounds(then_expr, else_expr)
+        # condition is normalized to ``body <= 0``; its complement is ``-body <= 0``.
+        complement = Constraint(-condition.body, sense="<=", rhs=0.0)
+        lb, ub = self._branch_bounds(then_expr, else_expr, condition, complement)
         self._aux_counter += 1
         base = name or "ifelse"
         w = self.continuous(f"_{base}_{self._aux_counter}", lb=lb, ub=ub)
-        # condition is normalized to ``body <= 0``; its complement is ``-body <= 0``.
-        complement = Constraint(-condition.body, sense="<=", rhs=0.0)
         # Force the hull (perspective) reformulation: it disaggregates the
         # disjunct variables, so each branch's nonlinear body is relaxed only
         # over its own active region. Big-M keeps every branch's equation in
