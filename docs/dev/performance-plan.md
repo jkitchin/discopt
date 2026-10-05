@@ -10269,3 +10269,42 @@ where it planned for four. That is a documentation fix, not a behaviour change.
 The original `rsyn0820m02m` motivation for the in-tree poll stands and is
 confirmed by row 3: with no restarts at all, the interrupt arm is the only thing
 speaking, and it fired 22 times.
+
+## 74. #1619 (2026-10-05): three measured outcomes
+
+### 74.1 Falsified — a pre-reform LP bound does not pay for itself (D-17)
+
+The factorable lift distributes products over sums. On #1619's phase-split model
+(`min phi*g(xa) + (1-phi)*g(xb)`, `g` = ideal-mixing entropy plus a Margules term)
+the uniform LP of the lifted model is **-16.08** at the root against **-6.12** for
+the same relaxation of the model as written (optimum -0.968): `phi*g(xa)` becomes
+`phi*entropy(xa) + phi*xa - 20*phi*xa**2 + ...`, and the sum of the per-term
+envelopes is far below the envelope of the sum. The hypothesis "max-combining the
+pre-reform LP bound per node certifies faster" was built as
+`DISCOPT_PREREFORM_LP_BOUND` and measured:
+
+| arm | issue model root bound | nodes | wall |
+|---|---|---|---|
+| OFF | -12.15 | 1449 | 46.8 s |
+| root only | -6.11 | 1449 | 45.6 s |
+| every node | -6.11 | 1215 | 60.3 s (time limit) |
+
+Corpus panel (root-only, 206 comparisons, 20 s): cert-clean, certified 180 -> 179
+(`st_e36` loses its certificate on the extra LP's time, 2/2 repeats), wall 834 ->
+844 s. Retired (`flag-retirement-audit.md`). The real remedy -- relaxing the
+product as written instead of distributing it -- changes the factorable reform and
+needs its own entry experiment.
+
+### 74.2 Falsified — a tighter alphaBB Hessian moves no bound (D-05)
+
+The exact expanded-polynomial Hessian enclosure cuts six-hump camel's alpha from
+(94.9, 20.5) to (46.9, 4.5), and across 87 node boxes of a `mccormick_bounds="none"`
+solve the summed alpha from 2600 to 2165. Over 14 polynomial test functions x
+{default, `mccormick_bounds="none"`} (28 rows, 30 s) it changed no status, bound or
+certificate (nodes 6536 vs 6578, the difference one time-limited row): the alphaBB
+bound never wins the per-node `max`. Retired.
+
+### 74.3 Graduated — binary QPs to the MILP route (C-01b)
+
+`DISCOPT_BINARY_QUADRATIC_MILP` (default ON): 39 instances, wall 84.5 s -> 16.1 s,
+nodes 2065 -> 157, 0 false certificates, 39/39 certified both arms. See the audit row.

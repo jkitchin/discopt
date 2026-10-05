@@ -162,9 +162,15 @@ def _exact_psd(Q: np.ndarray, budget: Optional[int] = None) -> Optional[bool]:
 
     n = Q.shape[0]
     rows: dict[int, dict[int, Fraction]] = {i: {} for i in range(n)}
-    ii, jj = np.nonzero(Q)
-    for i, j in zip(ii.tolist(), jj.tolist()):
-        rows[i][j] = Fraction(float(Q[i, j]))
+    if sp.issparse(Q):
+        coo = sp.coo_matrix(Q)
+        for i, j, v in zip(coo.row.tolist(), coo.col.tolist(), coo.data.tolist()):
+            if v != 0.0:
+                rows[i][j] = Fraction(float(v))
+    else:
+        ii, jj = np.nonzero(Q)
+        for i, j in zip(ii.tolist(), jj.tolist()):
+            rows[i][j] = Fraction(float(Q[i, j]))
 
     def refuted(i: int) -> bool:
         r = rows[i]
@@ -230,23 +236,46 @@ def certify_psd(Q: np.ndarray) -> bool:
     uses for this purpose (``solver._CONVEX_OBJ_PSD_EIG_ROUNDOFF_K``, #1397); a
     matrix that does not is treated as unproved, never as PSD.
     """
-    Q = np.asarray(Q, dtype=np.float64)
-    if not np.all(np.isfinite(Q)):
-        return False
-    S = 0.5 * (Q + Q.T)
-    active = np.flatnonzero(np.any(S != 0.0, axis=1))
-    S = S[np.ix_(active, active)]
-    if S.size == 0:
-        return True
-    n = S.shape[0]
-    if n <= _EXACT_PSD_MAX_N:
-        return bool(_exact_psd(S))
-    if np.count_nonzero(S) <= _EXACT_PSD_SPARSE_ROW_NNZ * n:
-        exact = _exact_psd(S, budget=_EXACT_PSD_UPDATE_BUDGET)
-        if exact is not None:
-            return exact
-    if n > _EIG_PSD_MAX_N:
-        return False
+    if sp.issparse(Q):
+        # #1619 A-22: the same test without ever forming the dense (n, n) matrix;
+        # only the active block reaches the eigenvalue fallback, densified there.
+        Qs = sp.csr_matrix(Q, dtype=np.float64)
+        if not np.all(np.isfinite(Qs.data)):
+            return False
+        Ss = (0.5 * (Qs + Qs.T)).tocsr()
+        Ss.eliminate_zeros()
+        active = np.flatnonzero(np.diff(Ss.indptr) > 0)
+        if active.size == 0:
+            return True
+        Ss = Ss[active][:, active]
+        n = Ss.shape[0]
+        if n <= _EXACT_PSD_MAX_N:
+            return bool(_exact_psd(Ss))
+        if Ss.nnz <= _EXACT_PSD_SPARSE_ROW_NNZ * n:
+            exact = _exact_psd(Ss, budget=_EXACT_PSD_UPDATE_BUDGET)
+            if exact is not None:
+                return exact
+        if n > _EIG_PSD_MAX_N:
+            return False
+        S = Ss.toarray()
+    else:
+        Q = np.asarray(Q, dtype=np.float64)
+        if not np.all(np.isfinite(Q)):
+            return False
+        S = 0.5 * (Q + Q.T)
+        active = np.flatnonzero(np.any(S != 0.0, axis=1))
+        S = S[np.ix_(active, active)]
+        if S.size == 0:
+            return True
+        n = S.shape[0]
+        if n <= _EXACT_PSD_MAX_N:
+            return bool(_exact_psd(S))
+        if np.count_nonzero(S) <= _EXACT_PSD_SPARSE_ROW_NNZ * n:
+            exact = _exact_psd(S, budget=_EXACT_PSD_UPDATE_BUDGET)
+            if exact is not None:
+                return exact
+        if n > _EIG_PSD_MAX_N:
+            return False
     from discopt.solver import _CONVEX_OBJ_PSD_EIG_ROUNDOFF_K
 
     eigs = np.linalg.eigvalsh(S)
@@ -609,6 +638,21 @@ def _kkt_parts(res: Any, n_ub: int) -> Tuple[np.ndarray, np.ndarray]:
     return dual, rc
 
 
+def _onto_box(x, lb: np.ndarray, ub: np.ndarray) -> np.ndarray:
+    """The engine's point projected onto its own simple bounds (#1537).
+
+    The interior-point method's final iterate can sit a rounding error outside a
+    bound it was handed: ``min 1e8*x + x**2/2`` over ``x >= 0`` returned
+    ``x = -1.2e-16`` and published the objective ``-1.2e-8``, below the true
+    optimum 0, at a point outside the declared box. The box is the one constraint
+    that can be met exactly, so the point is clipped onto it (``lb``/``ub`` are the
+    engine's: a bound it treated as infinite is not imposed). Nothing is trusted
+    from the clip -- the route's feasibility guard and certificate run on the
+    clipped point.
+    """
+    return np.asarray(np.clip(np.asarray(x, dtype=np.float64), lb, ub), dtype=np.float64)
+
+
 def solve_lp(
     c: np.ndarray,
     A_ub: Optional[Union[np.ndarray, sp.spmatrix]] = None,
@@ -653,7 +697,7 @@ def solve_lp(
         )
     n_ub = 0 if A_ub is None else int(A_ub.shape[0])
     dual, rc = _kkt_parts(res, n_ub)
-    x = np.asarray(res.x, dtype=np.float64)
+    x = _onto_box(res.x, lb, ub)
     return LPResult(
         status=SolveStatus.OPTIMAL,
         x=x,
@@ -699,7 +743,8 @@ def solve_qp(
         raise ImportError("pounce is required. Install it with:\n  pip install pounce-solver")
     if integrality is not None and np.any(np.asarray(integrality) == 1):
         raise ValueError("POUNCE's convex QP IPM is continuous; integrality is not supported.")
-    Q_arr = np.asarray(Q, dtype=np.float64)
+    # #1619 A-22: a sparse Q stays sparse (POUNCE takes scipy.sparse P).
+    Q_arr: Any = sp.csr_matrix(Q) if sp.issparse(Q) else np.asarray(Q, dtype=np.float64)
     c_arr = np.asarray(c, dtype=np.float64).ravel()
     n = len(c_arr)
     if Q_arr.shape != (n, n):
@@ -734,7 +779,11 @@ def solve_qp(
     # 0.12.0 wheel, with bit-identical iterates.
     if raw not in ("optimal", "optimal_inaccurate"):
         assert A is not None and cl is not None and cu is not None
-        status, why = _verdict_status(raw, c_arr, A, cl, cu, lb, ub, Q_arr)
+        # The ray certificate stacks Q under the (already dense) rows; it runs
+        # only on this non-optimal path, so densifying a sparse Q here is the
+        # same trade the rows make (#1619).
+        Q_dense = Q_arr.toarray() if sp.issparse(Q_arr) else Q_arr
+        status, why = _verdict_status(raw, c_arr, A, cl, cu, lb, ub, Q_dense)
         return QPResult(
             status=status,
             iterations=iters,
@@ -744,11 +793,11 @@ def solve_qp(
         )
     n_ub = 0 if A_ub is None else int(A_ub.shape[0])
     dual, rc = _kkt_parts(res, n_ub)
-    x = np.asarray(res.x, dtype=np.float64)
+    x = _onto_box(res.x, lb, ub)
     return QPResult(
         status=SolveStatus.OPTIMAL,
         x=x,
-        objective=float(0.5 * x @ Q_arr @ x + c_arr @ x),
+        objective=float(0.5 * x @ (Q_arr @ x) + c_arr @ x),
         dual_values=dual,
         reduced_costs=rc,
         iterations=iters,

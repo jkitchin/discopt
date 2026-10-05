@@ -199,23 +199,45 @@ def test_wrong_direction_square_falls_back_to_flat_and_stays_exact():
 # ---------------------------------------------------------------------------
 
 
-def test_mixed_continuous_factor_not_fired():
+def test_mixed_continuous_factor_not_fired(monkeypatch):
     m = Model()
     b = [m.integer(f"b{i}", lb=0, ub=1) for i in range(2)]
     x = m.continuous("x", lb=0, ub=2)
     m.minimize(b[0] * b[1] * x + x)
+    # The cheap witness sees the all-binary subterm ``b0*b1`` at degree 2 (#1619)
+    # but the pass still abstains: the monomial ``b0*b1*x`` has a continuous factor.
+    assert B.has_binary_multilinear_work(m)
+    assert B.reformulate_binary_multilinear(m) is m
+    monkeypatch.setenv(B.BINARY_QUADRATIC_MILP_ENV, "0")
     assert not B.has_binary_multilinear_work(m)
     assert B.reformulate_binary_multilinear(m) is m
 
 
-def test_binary_quadratic_not_fired():
-    """Degree-2-only binary models keep their current path (McCormick is
-    already exact per bilinear term there)."""
+def test_binary_quadratic_not_fired_under_the_legacy_threshold(monkeypatch):
+    """``DISCOPT_BINARY_QUADRATIC_MILP=0``: degree-2-only binary models keep the
+    spatial path (the pre-#1619 behaviour)."""
+    monkeypatch.setenv(B.BINARY_QUADRATIC_MILP_ENV, "0")
     m = Model()
     b = [m.integer(f"b{i}", lb=0, ub=1) for i in range(3)]
     m.minimize(b[0] * b[1] + b[1] * b[2] - b[0])
     assert not B.has_binary_multilinear_work(m)
     assert B.reformulate_binary_multilinear(m) is m
+
+
+def test_binary_quadratic_fires_by_default():
+    """#1619 C-01b: a binary QP is linearized exactly and solved as a MILP."""
+    m = Model()
+    b = [m.integer(f"b{i}", lb=0, ub=1) for i in range(3)]
+    m.minimize(b[0] * b[1] + b[1] * b[2] - b[0])
+    assert B.has_binary_multilinear_work(m)
+    r = B.reformulate_binary_multilinear(m)
+    assert r is not m
+    assert len(r._variables) > len(m._variables)
+    # Exact: every bit assignment keeps its objective, so the optimum is -1.
+    best = min(x0 * x1 + x1 * x2 - x0 for x0, x1, x2 in itertools.product([0, 1], repeat=3))
+    res = m.solve()
+    assert res.status == "optimal"
+    assert res.objective == pytest.approx(best)
 
 
 def test_general_integer_factor_not_fired():

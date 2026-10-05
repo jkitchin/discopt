@@ -1950,6 +1950,10 @@ def _try_native_spatial_kernel(
         # ``SolverTuning.lp_cold_dual_start``.
         cold_dual_start=bool(_tuning().lp_cold_dual_start),
     )
+    # #1619 D-11: unit-independent branch choice (see the helper; default ON).
+    # The kernel's own default is the legacy rule, so ``=0`` passes nothing.
+    if _scale_free_branching_enabled():
+        solve_kwargs["scale_free_branching"] = True
     if _bound_reserve > 0.0:
         solve_kwargs["bound_time_extension_s"] = float(_bound_reserve)
     # #917: hand the kernel the caller's withheld #844 reserve so it can reclaim
@@ -9313,6 +9317,31 @@ def _ipx_cheap_first_enabled() -> bool:
     )
 
 
+def _scale_free_branching_enabled() -> bool:
+    """#1619 D-11: ``DISCOPT_SCALE_FREE_BRANCHING`` for the native spatial kernel.
+
+    Picks the term to branch by its McCormick gap relative to its aux column's
+    root width and the operand by its width relative to its own root width
+    (``SpatialTreeConfig::scale_free_branching``), so the branch choice does not
+    change with the units a column is written in. Read at call time and passed
+    per solve rather than read in Rust, whose ``OnceLock`` would latch one arm
+    for a whole process.
+
+    Graduated on introduction (CLAUDE.md §5), default ON, ``=0`` restores the
+    absolute-width rule. Units panel (``issue1619_scale_free_branching_panel.py``:
+    three seeded pooling plants and Haverly 1-3, p/q/pq formulations, flows in
+    1/10/100 barrels, 54 rows at 60 s): 0 false certificates, 0 lost, certified
+    45 -> 47, nodes 581,667 -> 459,675, wall 542 -> 457 s, median node-count
+    spread across units 1.17 -> 1.00 (the issue's plant: 15,745 / 1,351 / 593
+    -> 741 / 649 / 519). Corpus (``recentre_graduation_panel.py --flag``, 204
+    comparisons, 20 s): 0 false, 0 bad points, certified 180 = 180, wall 801 ->
+    799 s, one instance changed (nvs13, 637 -> 649 nodes, certified in both).
+    Known outlier: Haverly 3 q-form in barrels, 87 -> 3,969 nodes (0.2 -> 0.8 s),
+    traced to the absolute McCormick-tightness tolerance, not the branch rule.
+    """
+    return os.environ.get("DISCOPT_SCALE_FREE_BRANCHING", "1") != "0"
+
+
 def _p3_force_cut_path_enabled() -> bool:
     """cert:P3.1c experiment toggle (``DISCOPT_P3_FORCE_CUT_PATH``, default-OFF).
 
@@ -13153,7 +13182,10 @@ def solve_model(
     # reaches this call site is a defect (or a broken #1147 provenance chain) and
     # must fail the solve: the old ``except Exception`` + DEBUG log made a crashed
     # pass indistinguishable from 'nothing to linearize' (CLAUDE.md §3/§7).
-    from discopt._relax.binary_multilinear_reform import has_binary_multilinear_work
+    from discopt._relax.binary_multilinear_reform import (
+        binary_quadratic_milp_enabled,
+        has_binary_multilinear_work,
+    )
     from discopt._relax.problem_classifier import ProblemClass, classify_problem
     from discopt.transformations import get as _get_transformation
 
@@ -13208,9 +13240,15 @@ def solve_model(
                 # redundant) FBBT root presolve on the lifted rows and use
                 # the monolithic Rust simplex MILP engine, unless the
                 # cert:P3.1c cut-reachability experiment keeps the solve
-                # on the cut-carrying _solve_milp_bb path.
+                # on the cut-carrying _solve_milp_bb path. #1619 C-01b: under
+                # DISCOPT_BINARY_QUADRATIC_MILP the exact MILP instead takes the
+                # default pure-MILP route (HiGHS, #1229), like any user MILP.
                 presolve = False
-                if nlp_solver == "pounce" and not _p3_force_cut_path_enabled():
+                if (
+                    nlp_solver == "pounce"
+                    and not _p3_force_cut_path_enabled()
+                    and not binary_quadratic_milp_enabled()
+                ):
                     nlp_solver = "simplex"
                 # Incumbent seeding. A user warm start is over the ORIGINAL
                 # variables; the aux columns (z = prod b, y = E(b),
@@ -21192,11 +21230,30 @@ def _lagrangian_slope(
     rows = np.flatnonzero(lam_r != 0.0)
     lam_nz = lam_r[rows]
     if _sp_issparse(jac):
+        # #1619 A-22: only a column's STORED entries enter its sum. An entry that is
+        # absent (or a row with lam 0) contributes an exact 0 product with an exact
+        # 0 error term, and ``math.fsum`` is exact, so dropping them leaves every
+        # ``g[j]`` bit-identical -- while the old dense (rows x unsure) block was
+        # 2000 x 4000 on the issue's chain QP and its loop the whole 28 s of wall.
         import scipy.sparse as _sps
 
-        cols = _sps.csc_matrix(jac)[rows][:, unsure].toarray()
-    else:
-        cols = np.asarray(jac, dtype=np.float64)[np.ix_(rows, unsure)]
+        csc = _sps.csc_matrix(jac)
+        csc.sort_indices()
+        for j in unsure:
+            lo, hi = csc.indptr[j], csc.indptr[j + 1]
+            a = np.asarray(csc.data[lo:hi], dtype=np.float64)
+            lam_j = lam_r[csc.indices[lo:hi]]
+            keep = lam_j != 0.0
+            a, lam_j = a[keep], lam_j[keep]
+            p = a * lam_j
+            e = _two_product_err(a, lam_j, p)
+            if not (np.all(np.isfinite(p)) and np.all(np.isfinite(e))):
+                continue  # keep the a-priori bound for this component
+            gj = math.fsum([float(gf[j]), *p.tolist(), *e.tolist()])
+            g[j] = gj
+            err[j] = float(np.spacing(abs(gj))) if gj != 0.0 else 0.0
+        return g, err, mag
+    cols = np.asarray(jac, dtype=np.float64)[np.ix_(rows, unsure)]
     for t, j in enumerate(unsure):
         a = cols[:, t]
         p = a * lam_nz
@@ -23138,6 +23195,7 @@ def _solve_pounce_route(
                     relaxes_huge_bounds=True,
                     reject_reason=reject_reason,
                     x0=qp_x0,
+                    sparse=True,
                 )
         except _cvx.IndefiniteQPError as exc:
             # #1616 A-18: an objective that is structurally a positive-weighted sum
@@ -23168,6 +23226,7 @@ def _solve_pounce_route(
                     reject_reason=reject_reason,
                     x0=qp_x0,
                     sos_lift=lift,
+                    sparse=True,
                 )
             else:
                 warnings.warn(
@@ -26016,6 +26075,16 @@ def _solve_node_nlp_kkt(
 _QP_KKT_RESIDUAL_TOL = 1e-6
 
 
+def _q_matrix(Q: Any) -> Any:
+    """``Q`` as an operand for ``@`` and ``abs``: scipy CSR when it is sparse, else a
+    dense ``float64`` array (#1619 A-22). ``np.asarray`` on a sparse matrix does not
+    raise -- it wraps it in a 0-d object array -- so a QP helper that may receive
+    the sparse ``Q`` of the ``solver="pounce"`` route goes through this."""
+    if _sp_issparse(Q):
+        return Q.tocsr()
+    return _dense_Q(Q)
+
+
 def _qp_stationarity_scale(
     Q: np.ndarray,
     c: np.ndarray,
@@ -26047,8 +26116,8 @@ def _qp_stationarity_scale(
     scale = 1.0
     x = np.asarray(x, dtype=np.float64).reshape(-1)
     c = np.asarray(c, dtype=np.float64).reshape(-1)
-    if Q.size and x.size:
-        Qx = np.asarray(Q, dtype=np.float64) @ x
+    if Q.shape[0] and x.size:
+        Qx = np.asarray(_q_matrix(Q) @ x, dtype=np.float64).ravel()
         if Qx.size:
             scale = max(scale, float(np.max(np.abs(Qx))))
     if c.size:
@@ -28065,7 +28134,7 @@ def _qp_objective_at_point(
     if not np.isfinite(f_decl):
         return expanded
     ax = np.abs(x)
-    mag = abs(float(obj_const)) + float(np.abs(c) @ ax) + float(ax @ (np.abs(Q) @ ax))
+    mag = abs(float(obj_const)) + float(np.abs(c) @ ax) + float(ax @ (abs(_q_matrix(Q)) @ ax))
     if abs(f_decl - expanded) <= 64.0 * np.finfo(float).eps * (mag + abs(expanded)):
         return f_decl
     return expanded
@@ -28098,7 +28167,7 @@ def _qp_reduced_costs_at(
     if m > 0 and (row_dual is None or np.asarray(row_dual).size != m):
         return None
     xs = np.asarray(x, dtype=np.float64)
-    rc = np.asarray(np.asarray(Q, dtype=np.float64) @ xs, dtype=np.float64).ravel()
+    rc = np.asarray(_q_matrix(Q) @ xs, dtype=np.float64).ravel()
     rc = rc + np.asarray(c, dtype=np.float64).ravel()
     y = np.asarray(row_dual, dtype=np.float64).ravel() if m > 0 else np.zeros(0)
     k = 0
@@ -28286,7 +28355,7 @@ def _qp_convex_certificate(
     lb = np.array([float(b[0]) for b in bounds], dtype=np.float64)
     ub = np.array([float(b[1]) for b in bounds], dtype=np.float64)
 
-    Qd = np.asarray(Q, dtype=np.float64)
+    Qd = _q_matrix(Q)
     cd = np.asarray(c, dtype=np.float64).ravel()
 
     def _f_exp(y: np.ndarray) -> float:
@@ -28311,7 +28380,7 @@ def _qp_convex_certificate(
     else:
         f_e = _f_exp(xs)
         ax = np.abs(xs)
-        mag = abs(float(obj_const)) + float(np.abs(cd) @ ax) + float(ax @ (np.abs(Qd) @ ax))
+        mag = abs(float(obj_const)) + float(np.abs(cd) @ ax) + float(ax @ (abs(Qd) @ ax))
         if np.isfinite(f_tape) and abs(f_tape - f_e) <= 64.0 * np.finfo(float).eps * (
             mag + abs(f_e)
         ):
@@ -28380,6 +28449,7 @@ def _solve_qp_matrix(
     reject_reason: list[str] | None = None,
     x0: np.ndarray | None = None,
     sos_lift: tuple | None = None,
+    sparse: bool = False,
 ) -> SolveResult | None:
     """Solve a QP/MIQP through a matrix-form ``solve_qp`` backend.
 
@@ -28417,12 +28487,24 @@ def _solve_qp_matrix(
     feasibility guard, the objective re-evaluation, the #1596 certificate, the
     named duals) runs on the original problem; only the backend's own KKT
     residual is judged on the system it solved.
+
+    ``sparse=True`` (#1619 A-22) extracts ``Q`` and the rows as scipy CSR at any
+    size and keeps them sparse through the backend call and every check after it.
+    Only a backend that accepts sparse ``Q`` may ask for it (POUNCE's qp-ipm, the
+    ``solver="pounce"`` route); the chain QP of the issue (n = 4000, 4000
+    nonzeros in ``Q``) peaked at 722.7 MB dense.
     """
-    from discopt._relax.problem_classifier import extract_qp_data
+    import scipy.sparse as _sp
+
+    from discopt._relax.problem_classifier import extract_qp_data, sparse_qp_matrices
     from discopt.modeling.core import ObjectiveSense
     from discopt.solvers import SolveStatus
 
-    qp_data = extract_qp_data(model)
+    if sparse:
+        with sparse_qp_matrices():
+            qp_data = extract_qp_data(model)
+    else:
+        qp_data = extract_qp_data(model)
     n_orig = sum(v.size for v in model._variables)
 
     # Build bounds list (original variables only, no slacks)
@@ -28433,7 +28515,15 @@ def _solve_qp_matrix(
         )
     )
 
-    A_eq_full = _dense_A(qp_data.A_eq)
+    if sparse:
+        # A rung that cannot emit COO still returns dense; CSR keeps one layout.
+        A_eq_full = (
+            qp_data.A_eq.tocsr()
+            if _sp_issparse(qp_data.A_eq)
+            else _sp.csr_matrix(_dense_A(qp_data.A_eq))
+        )
+    else:
+        A_eq_full = _dense_A(qp_data.A_eq)
     n_total = A_eq_full.shape[1] if A_eq_full.shape[0] > 0 else n_orig
     n_slack = n_total - n_orig
     b_eq_full = np.asarray(qp_data.b_eq)
@@ -28459,7 +28549,10 @@ def _solve_qp_matrix(
         integrality = int_arr
 
     # Q matrix: only the original variable part (no slacks)
-    Q_orig = _dense_Q(qp_data.Q)[:n_orig, :n_orig]
+    if sparse and _sp_issparse(qp_data.Q):
+        Q_orig = qp_data.Q.tocsr()[:n_orig, :n_orig]
+    else:
+        Q_orig = _dense_Q(qp_data.Q)[:n_orig, :n_orig]
     c_orig = np.asarray(qp_data.c[:n_orig])
 
     start_kw: dict[str, Any] = {}

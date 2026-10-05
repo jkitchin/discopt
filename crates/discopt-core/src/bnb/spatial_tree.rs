@@ -219,6 +219,18 @@ pub struct SpatialTreeConfig {
     /// Taken at most once. `None` (the default) reproduces the prior deadline
     /// exactly.
     pub bound_time_extension: Option<Duration>,
+    /// #1619 D-11: choose the spatial branch scale-free. Off (the default), the
+    /// term to branch is the one with the largest absolute McCormick gap
+    /// `|x_aux - f(x)|` and its operand the one with the widest absolute box, so
+    /// the tree depends on the units the model is written in: the issue's pooling
+    /// plant took 15,745 nodes with flows in barrels and 593 in hundreds of
+    /// barrels. On, each term's gap is divided by its aux column's root width and
+    /// each operand's width by its own root width, which a change of units (a
+    /// positive rescaling of a column) leaves unchanged. Branching order only:
+    /// every child pair still covers its parent box, so no bound moves. `false`
+    /// here (the struct default) is the legacy rule; the Python orchestrator turns
+    /// it on by default (`DISCOPT_SCALE_FREE_BRANCHING`, graduated; `=0` opts out).
+    pub scale_free_branching: bool,
 }
 
 impl Default for SpatialTreeConfig {
@@ -238,6 +250,7 @@ impl Default for SpatialTreeConfig {
             initial_incumbent: None,
             incumbent_time_extension: None,
             bound_time_extension: None,
+            scale_free_branching: false,
         }
     }
 }
@@ -743,12 +756,33 @@ pub fn solve_spatial_tree_with_hook(
         // (b) every lifted term McCormick-tight — fixed-width EnvTerms and the
         //     affine-form product (BlfTerm) terms alike.
         let width = |c: usize| hi[c] - lo[c];
+        // #1619 D-11: the widths and gaps the branch CHOICE compares. Scale-free,
+        // both are relative to the column's root width; otherwise absolute.
+        let choice_width = |c: usize| {
+            if config.scale_free_branching {
+                width(c) / root_w[c]
+            } else {
+                width(c)
+            }
+        };
+        let choice_gap = |gap: f64, aux: usize| {
+            if config.scale_free_branching {
+                gap / root_w[aux]
+            } else {
+                gap
+            }
+        };
+        // `worst_gap` (absolute) decides McCormick-tightness; `worst_score` picks
+        // the term to branch. They coincide unless `scale_free_branching`.
         let mut worst_gap = 0.0f64;
+        let mut worst_score = 0.0f64;
         let mut branch_col: Option<usize> = None;
         for t in &spec.terms {
-            let (gap, col) = term_gap_and_branch_col(t, x, &width);
-            if gap > worst_gap {
-                worst_gap = gap;
+            let (gap, col) = term_gap_and_branch_col(t, x, &choice_width);
+            worst_gap = worst_gap.max(gap);
+            let score = choice_gap(gap, t.aux_col());
+            if score > worst_score {
+                worst_score = score;
                 branch_col = Some(col);
             }
         }
@@ -756,13 +790,15 @@ pub fn solve_spatial_tree_with_hook(
             let a_val = t.a_const + dot_form(&t.a_cols, &t.a_coeffs, x);
             let b_val = t.b_const + dot_form(&t.b_cols, &t.b_coeffs, x);
             let gap = (x[t.w] - a_val * b_val).abs();
-            if gap > worst_gap {
-                worst_gap = gap;
+            worst_gap = worst_gap.max(gap);
+            let score = choice_gap(gap, t.w);
+            if score > worst_score {
+                worst_score = score;
                 // Spatial-branch the widest operand column across A ∪ B.
                 let mut best = None;
                 let mut best_w = -1.0f64;
                 for &c in t.a_cols.iter().chain(t.b_cols.iter()) {
-                    let cw = width(c);
+                    let cw = choice_width(c);
                     if cw > best_w {
                         best_w = cw;
                         best = Some(c);
@@ -1030,6 +1066,35 @@ mod tests {
             terms: vec![EnvTerm::Bilinear { i: 0, j: 1, w: 2 }],
             blf_terms: vec![],
             obbt_candidates: vec![0, 1],
+        }
+    }
+
+    /// #1619 D-11: the operand a bilinear branch splits must not depend on the
+    /// units a column is written in. Node widths `(0.75, 2.5)` inside root widths
+    /// `(1.5, 2.5)`, then the same node with `y` rescaled by 0.01: the legacy
+    /// (absolute) rule flips from `y` to `x`; the root-relative rule keeps `y`.
+    #[test]
+    fn scale_free_operand_choice_is_unit_invariant() {
+        let t = EnvTerm::Bilinear { i: 0, j: 1, w: 2 };
+        let x = [1.0, 1.0, 1.0];
+        let pick = |node: [f64; 2], root: [f64; 2], relative: bool| {
+            let width = move |c: usize| {
+                if relative {
+                    node[c] / root[c]
+                } else {
+                    node[c]
+                }
+            };
+            term_gap_and_branch_col(&t, &x, &width).1
+        };
+        for relative in [false, true] {
+            let a = pick([0.75, 2.5], [1.5, 2.5], relative);
+            let b = pick([0.75, 0.025], [1.5, 0.025], relative);
+            if relative {
+                assert_eq!((a, b), (1, 1), "relative rule changed with the units");
+            } else {
+                assert_eq!((a, b), (1, 0), "the probe must show the legacy unit dependence");
+            }
         }
     }
 
