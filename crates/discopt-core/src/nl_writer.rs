@@ -1059,6 +1059,7 @@ mod func_table_tests {
             | MathFunc::Atanh
             | MathFunc::Erf
             | MathFunc::Entropy
+            | MathFunc::Centropy
             | MathFunc::Norm1
             | MathFunc::NormInf
             | MathFunc::NormP(_) => false,
@@ -1094,6 +1095,7 @@ mod func_table_tests {
         MathFunc::Sigmoid,
         MathFunc::Softplus,
         MathFunc::Entropy,
+        MathFunc::Centropy,
         MathFunc::Norm1,
         MathFunc::NormInf,
         MathFunc::NormP(3),

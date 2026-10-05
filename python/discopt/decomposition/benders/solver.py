@@ -42,11 +42,17 @@ from __future__ import annotations
 
 import logging
 import time
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
 
-from discopt.decomposition._linear import extract_linear, relative_gap, solution_dict
+from discopt.decomposition._linear import (
+    extract_linear,
+    first_nonlinear_reason,
+    relative_gap,
+    solution_dict,
+)
 from discopt.decomposition.structure import (
     DecompositionStructure,
     detect_decomposition,
@@ -104,19 +110,12 @@ def _model_is_linear(model: Model) -> bool:
     """True iff every constraint body and the objective are linear.
 
     Used to route between classical Benders (linear recourse LP) and Generalized
-    Benders (convex-NLP recourse).
+    Benders (convex-NLP recourse). The witness is :func:`extract_linear` itself
+    (#1657), so a linear MILP spelled with array sums (``dm.sum(x[i, :])``,
+    ``dm.sum(c * x)``, ``c @ x``) is recognised as linear exactly when the
+    classical-Benders extractor can take it apart.
     """
-    from discopt._relax.gdp_reformulate import _is_linear
-    from discopt.modeling.core import Constraint
-
-    for c in model._constraints:
-        if not isinstance(c, Constraint):
-            return False
-        if not _is_linear(c.body):
-            return False
-    if model._objective is not None and not _is_linear(model._objective.expression):
-        return False
-    return True
+    return first_nonlinear_reason(model) is None
 
 
 # ── Column partition ──────────────────────────────────────────
@@ -242,8 +241,20 @@ def solve_benders(
         structure = detect_decomposition(model)
 
     # Nonlinear objective/constraint -> Generalized Benders (convex-NLP recourse).
-    if not _model_is_linear(model):
+    # The witness is the classical extractor itself (#1657): GBD is chosen exactly
+    # when ``extract_linear`` cannot take the model apart, and the reason is said
+    # out loud so a linear model misread as nonlinear is visible, not silent.
+    try:
+        lin = extract_linear(model)
+    except NotImplementedError as exc:
         from discopt.decomposition.benders.gbd import solve_gbd
+
+        warnings.warn(
+            f"decomposition='benders': model not recognised as linear, so using "
+            f"Generalized Benders (convex-NLP recourse): {exc}",
+            UserWarning,
+            stacklevel=2,
+        )
 
         return solve_gbd(
             model,
@@ -254,7 +265,6 @@ def solve_benders(
             nlp_solver=nlp_solver,
         )
 
-    lin = extract_linear(model)
     part = _partition_columns(model, structure)
     mcols, scols = part.master_cols, part.sub_cols
     n_master = len(mcols)

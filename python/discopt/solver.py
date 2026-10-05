@@ -3939,6 +3939,15 @@ def _nonlinear_point_excess(
         if n_rows is not None:
             n = min(n, int(n_rows))
         if n > 0:
+            # #1659: a row that does not evaluate to a number at ``x`` is not
+            # satisfied by it. Without this a NaN row vanished: ``viol.max()`` is NaN,
+            # Python's ``max(-inf, nan)`` keeps ``-inf``, and the gate reported
+            # "nothing checked" -- PASSING -- on a point outside a row's domain (a
+            # hull perspective ``log(v/eps + 3)`` at ``v = -4e-7``), which the
+            # spatial exit then certified at an infeasible objective.
+            bad = ~np.isfinite(g[:n])
+            if bad.any():
+                return np.inf, f"constraint row {int(np.argmax(bad))} is not finite", 2 * n
             viol = np.maximum(np.maximum(cl[:n] - g[:n], g[:n] - cu[:n]), 0.0)
             n_compared += 2 * n
             excess = max(excess, float(viol.max()))
@@ -4075,6 +4084,50 @@ def _polish_repairs_rows(evaluator, x_new, x_old, cl_list, cu_list) -> bool:
     if ratio_old <= 0.0:
         return False
     return scaled_violation_ratio(evaluator, x_new, cl_arr, cu_arr) < ratio_old
+
+
+class _RowArbiter(NamedTuple):
+    """The rows a spatial-B&B incumbent is judged against (#1659).
+
+    ``evaluator``/``cl``/``cu`` describe the rows; ``n_cols`` is how many leading
+    flat columns of a search point they read (``None``: all of them).
+    """
+
+    evaluator: Any
+    cl: Any
+    cu: Any
+    n_cols: Optional[int]
+
+    def view(self, x):
+        x = np.asarray(x, dtype=np.float64)
+        return x if self.n_cols is None else x[: self.n_cols]
+
+
+def _spatial_row_arbiter(evaluator, cl_list, cu_list, prereform_model, prereform_nvars):
+    """The rows that decide whether a spatial-B&B point is feasible (#1659).
+
+    When the factorable lift ran, the search evaluator holds the LIFTED model: aux
+    defining rows such as ``1e8*aux*(lam + 1e-8) - 1e8*v == 0``, multiplied
+    through by ``1/dmin`` so the fixed absolute tolerance stays sound for the
+    quotient they replace (``factorable_reform._clear_divisions``). Those rows are
+    a faithful *encoding* of the model but a poor *ruler*: on #1659's hull GDP the
+    terminal polish returned the true optimum with 4.3e-9 of IPM noise in an
+    inactive disjunct's disaggregated column, which that row amplifies to a
+    1.3e-4 residual, so the polish was rejected and the tree incumbent -- an
+    injected relaxation point violating ``y >= exp(x) - 1`` by 5.9e-5 -- was
+    certified ``optimal`` 5.4e-5 below the true optimum.
+
+    The model before the lift is what the reported point must satisfy: its
+    variables are the first ``prereform_nvars`` flat columns (aux columns are
+    appended after the originals), and the lift's aux values are not reported.
+    So that model's rows over that slice are the arbiter. Without a lift the
+    search evaluator already IS the model.
+    """
+    if prereform_model is None:
+        return _RowArbiter(evaluator, cl_list, cu_list, None)
+    pf_eval = _make_evaluator(prereform_model)
+    pf_cl, pf_cu = _infer_constraint_bounds(prereform_model, pf_eval)
+    return _RowArbiter(pf_eval, pf_cl, pf_cu, int(prereform_nvars))
 
 
 def _is_integer_feasible_solution(x, int_offsets, int_sizes, tol=1e-5):
@@ -19598,8 +19651,20 @@ def solve_model(
                         _xv = np.where(_nbb_int_mask | ~np.isfinite(_xv), _xc, _xv)
                         _cands.append(_xv)
                 for _xk in _cands:
-                    if _cl is not None and not _check_constraint_feasibility(
-                        evaluator, _xk, _cl, _cu
+                    # #1659: these are RELAXATION points (or a box vertex), not NLP
+                    # solutions, so nothing has driven their rows to convergence: one
+                    # that clears the 1e-4 search tolerance may spend all of it, and
+                    # an incumbent that spends row tolerance can beat the optimum --
+                    # the tree then prunes against an infeasible value. Hold them to
+                    # the declared 1e-6 (term-scaled), as the exit gates do -- AND to the
+                    # search's own arbiter, whose #1254 feasible-distance cap the
+                    # absolute test lacks: a point 2.6e-7 outside
+                    # ``10**y1 + 10**y2 + s <= 10**z`` but 0.87 away in ``y`` passes
+                    # the absolute test alone (test_1284).
+                    if _cl is not None and (
+                        not _check_constraint_feasibility(evaluator, _xk, _cl, _cu)
+                        or _nonlinear_point_excess(evaluator, _xk, _cl, _cu)[0]
+                        > _NLPBB_EXIT_ABS_TOL
                     ):
                         continue
                     _obj_i = float(evaluator.evaluate_objective(_xk))
@@ -20144,6 +20209,10 @@ def solve_model(
             )
             incumbent = None
 
+    # #1659: set by the spatial exit gate below; consumed just before the final
+    # certificate check.
+    _spatial_exit_unverified = False
+
     if incumbent is not None:
         sol_flat = np.array(sol_array)
         # C-3: snap near-integral discrete coordinates to exact integers before
@@ -20159,6 +20228,9 @@ def solve_model(
         if _rounded_feas:
             sol_flat = _rounded_inc
         x_dict = _unpack_solution(model, sol_flat)
+        # #1659: the rows the reported point is judged against -- the pre-lift
+        # model's when the factorable lift ran (see ``_spatial_row_arbiter``).
+        _arb = _spatial_row_arbiter(evaluator, cl_list, cu_list, _prereform_model, _prereform_nvars)
 
         # Refine the incumbent's continuous variables with a KKT-accurate
         # re-solve (integers fixed at their incumbent values). The batched JAX
@@ -20309,7 +20381,7 @@ def solve_model(
                 # ``|df/dx| * d`` (8.7e-6) exceeds its first-order bar by design.
                 if _unchanged and _pobj > obj_val + 1e-12 * (1.0 + abs(obj_val)):
                     _unchanged = _polish_repairs_rows(
-                        evaluator, _refined, sol_flat, cl_list, cu_list
+                        _arb.evaluator, _arb.view(_refined), _arb.view(sol_flat), _arb.cl, _arb.cu
                     )
                 # An objective improvement from the re-solve is adopted ONLY for
                 # convex models, where the integer-fixed continuous relaxation is
@@ -20327,16 +20399,39 @@ def solve_model(
                 # certified an objective below the true optimum. See
                 # ``_polish_preserves_feasibility`` for the measurement and for why
                 # the bar is never-degrade rather than plain feasibility.
+                # #1659: both feasibility legs read the pre-lift rows (``_arb``), and a
+                # candidate at which any of them is not a number is refused outright:
+                # the comparisons below cannot rank a NaN, and a point outside a
+                # row's domain is not one the rows vouch for.
+                _arb_rows_finite = _arb.evaluator.n_constraints == 0 or bool(
+                    np.all(
+                        np.isfinite(
+                            np.asarray(
+                                _arb.evaluator.evaluate_constraints(_arb.view(_refined)),
+                                dtype=np.float64,
+                            )
+                        )
+                    )
+                )
                 _accept = (
-                    _polish_preserves_feasibility(evaluator, _refined, sol_flat, cl_list, cu_list)
+                    _arb_rows_finite
+                    and (
+                        not _arb.cl
+                        or _check_constraint_feasibility(
+                            _arb.evaluator, _arb.view(_refined), _arb.cl, _arb.cu
+                        )
+                    )
+                    and _polish_preserves_feasibility(
+                        _arb.evaluator, _arb.view(_refined), _arb.view(sol_flat), _arb.cl, _arb.cu
+                    )
                     and (
                         _unchanged
                         or (
                             _improved
                             and (
-                                not cl_list
+                                not _arb.cl
                                 or _check_constraint_feasibility(
-                                    evaluator, _refined, cl_list, cu_list
+                                    _arb.evaluator, _arb.view(_refined), _arb.cl, _arb.cu
                                 )
                             )
                         )
@@ -20349,6 +20444,41 @@ def solve_model(
                     obj_val = _pobj
         except Exception as _exc:
             logger.debug("Incumbent KKT polish failed: %s", _exc)
+
+        # --- #1659: exit gate ---
+        # Every acceptance gate on this path runs at ``_check_constraint_feasibility``'s
+        # 1e-4 default, so a relaxation point injected as an incumbent may spend that
+        # whole tolerance -- and an incumbent that spends row tolerance can beat the
+        # true optimum. Measured on #1659 (hull GDP, ``y >= exp(x) - 1``): a point
+        # 5.9e-5 outside that row certified ``optimal`` at -0.386349, 5.4e-5 below
+        # the true -0.386294. The repo's declared feasibility tolerance is 1e-6 abs
+        # (CLAUDE.md "Key Constraints"); NLP-BB holds its exit to exactly that
+        # (#954), with the same term-scaled forgiveness, and so does this gate. It
+        # judges the point that actually leaves, against the pre-lift rows
+        # (``_arb``). A point it refuses is still reported -- it cleared the search's
+        # own gates -- but never certified (status downgraded below, after every
+        # step that could re-earn a certificate).
+        _sx_exc, _sx_where, _sx_cmp = _nonlinear_point_excess(
+            _arb.evaluator, _arb.view(sol_flat), _arb.cl, _arb.cu
+        )
+        # The term-scaled absolute test has no #1254 feasible-distance cap; the
+        # search's arbiter does, so the point must clear both.
+        if _sx_cmp > 0 and _sx_exc <= _NLPBB_EXIT_ABS_TOL and _arb.cl:
+            if not _check_constraint_feasibility(
+                _arb.evaluator, _arb.view(sol_flat), _arb.cl, _arb.cu
+            ):
+                _sx_exc, _sx_where = np.inf, "a row (outside the #1254 feasible-distance cap)"
+        if _sx_cmp > 0 and _sx_exc > _NLPBB_EXIT_ABS_TOL:
+            _spatial_exit_unverified = True
+            logger.warning(
+                "spatial B&B (#1659): the incumbent fails the exit gate (%s violated "
+                "by %.3e beyond the term-scaled tolerance, declared abs tol %.0e, %d "
+                "comparisons); reporting it UNCERTIFIED.",
+                _sx_where,
+                _sx_exc,
+                _NLPBB_EXIT_ABS_TOL,
+                _sx_cmp,
+            )
 
         # Negate objective back for maximization (B&B tree tracks minimization)
         from discopt.modeling.core import ObjectiveSense
@@ -20924,6 +21054,14 @@ def solve_model(
         _prov_delta = _prov_now - _bound_prov_at_entry.get(_prov_tag, 0)
         if _prov_delta > 0:
             _solver_stats[f"bound_provenance/{_prov_tag}"] = float(_prov_delta)
+
+    # #1659: an incumbent outside the declared rows is never certified. Applied
+    # here, after every step above that can (re-)earn a certificate.
+    if _spatial_exit_unverified:
+        _solver_stats["spatial/exit_gate_refused"] = 1.0
+        if status == "optimal":
+            status = "feasible"
+        _gap_certified = False
 
     # #1383: the certificate must survive the FINAL (objective, bound) pair.
     # Everything above may still have moved `obj_val` after the tree computed
@@ -22622,12 +22760,23 @@ def _solve_continuous(
     # of the user's model; refit against the declared box when that happened.
     # No-op when it did not, which is the usual case.
     if nlp_result.x is not None:
+        # ``raw_lb``/``raw_ub`` are the model's bounds when the evaluator was built,
+        # which an earlier pass of this solve may already have tightened in place:
+        # on nlp_cvx_204_010 they read [-1, 1] where the user declared the default
+        # +/-9.999e19 box, so a 1.8e-9 barrier residue passed this check and the
+        # examiner, judging against the declared box, found a CS violation of
+        # 1.75e12. The box recorded at the solve's entry is the declared one.
+        from discopt.modeling.core import solve_entry_box
+
+        _decl = solve_entry_box(model)
+        if _decl is None or _decl[0].size != np.asarray(raw_lb).size:
+            _decl = (np.asarray(raw_lb, dtype=float), np.asarray(raw_ub, dtype=float))
         constraint_duals, bound_duals_lower, bound_duals_upper = _duals_against_declared_box(
             model=model,
             evaluator=evaluator,
             x_flat=np.asarray(nlp_result.x, dtype=float),
-            declared_lb=np.asarray(raw_lb, dtype=float),
-            declared_ub=np.asarray(raw_ub, dtype=float),
+            declared_lb=np.asarray(_decl[0], dtype=float),
+            declared_ub=np.asarray(_decl[1], dtype=float),
             solved_lb=lb,
             solved_ub=ub,
             constraint_duals=constraint_duals,
@@ -28387,6 +28536,21 @@ def _qp_convex_certificate(
             obj_fn = ev.evaluate_objective
             grad_fn = ev.evaluate_gradient
 
+    # #1655: the certificate's "feasible value" is the objective AT the point, and its
+    # premise check ("a valid bound may not sit above a feasible point") assumes the
+    # point IS feasible. An IPM point satisfies its equality rows only to its own
+    # tolerance, and a row scaled by a large factor turns that into objective: on the
+    # glass-composition least-squares QP, ``sum(x) == 1`` off by 5.1e-11 moved
+    # ``sum e_k**2`` (``e_k`` defined by rows scaled by ``1/d_k`` up to 500) 3.3e-8
+    # BELOW the optimum, the rigorous bound then sat above it, and the certificate
+    # was refused as a failed premise. The point is moved onto its equality rows
+    # first; the bound is valid for any sign-consistent multipliers, so the duals
+    # from ``x`` still apply, and the projected point is the one reported.
+    xp = _project_onto_equality_rows(xs, A, cl, cu, lb, ub)
+    projected = xp is not None
+    if xp is not None:
+        xs = xp
+
     if estimate_lam:
         lam = _qp_estimated_multipliers(
             A, cl, cu, np.asarray(grad_fn(xs), dtype=np.float64).ravel(), xs, lb, ub
@@ -28416,7 +28580,76 @@ def _qp_convex_certificate(
     # certified answer and removed no false one.
     if cert is None or cert.bound is None or cert.complementarity_rel > max(gap_tolerance, 1e-6):
         return None
+    if projected and cert.better_x is None:
+        # The certified point is the projected one, not the backend's: report it.
+        cert = cert._replace(better_x=xs, better_obj=float(evaluator.evaluate_objective(xs)))
     return cert
+
+
+def _project_onto_equality_rows(
+    x: np.ndarray,
+    A,  # noqa: N803
+    cl: np.ndarray,
+    cu: np.ndarray,
+    lb: np.ndarray,
+    ub: np.ndarray,
+) -> Optional[np.ndarray]:
+    """``x`` moved onto its equality rows ``A_E x = b_E`` by a minimum-norm step over
+    the columns strictly inside their box, or ``None`` (#1655).
+
+    ``None`` when there is nothing to repair (no equality row is off by more than
+    round-off at its own term scale), when the step would leave the box, or when it
+    does not leave every row -- equalities and inequalities alike -- at least as
+    satisfied as ``x`` left it. So a returned point is never less feasible than ``x``.
+    """
+    m = int(A.shape[0])
+    if m == 0:
+        return None
+    eq = np.flatnonzero(np.isfinite(cl) & (cl == cu))
+    if eq.size == 0:
+        return None
+    import scipy.sparse as _sps
+    from scipy.sparse.linalg import lsmr
+
+    As = _sps.csr_matrix(A, dtype=np.float64)
+    x = np.asarray(x, dtype=np.float64)
+    ax = np.abs(x)
+    scale_rows = np.asarray(abs(As) @ ax, dtype=np.float64).ravel() + np.abs(cl)
+
+    def residuals(z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        g = np.asarray(As @ z, dtype=np.float64).ravel()
+        with np.errstate(invalid="ignore"):
+            viol = np.maximum(np.maximum(cl - g, g - cu), 0.0)
+        viol = np.where(np.isfinite(viol), viol, 0.0)
+        return g, viol
+
+    g0, v0 = residuals(x)
+    noise = 8.0 * np.finfo(float).eps * (1.0 + scale_rows)
+    if not np.any(v0[eq] > noise[eq]):
+        return None
+    span = np.where(np.isfinite(ub - lb), ub - lb, np.inf)
+    margin = 1e-9 * (1.0 + np.minimum(ax, span))
+    free = np.flatnonzero((x - lb > margin) & (ub - x > margin))
+    if free.size == 0:
+        return None
+    AE = As[eq][:, free]  # noqa: N806
+    z = x.copy()
+    for _ in range(2):  # one refinement pass recovers the digits lsmr leaves
+        r = cl[eq] - np.asarray(As[eq] @ z, dtype=np.float64).ravel()
+        if not np.any(np.abs(r) > noise[eq]):
+            break
+        dx = lsmr(AE, r, atol=1e-15, btol=1e-15, maxiter=10 * (AE.shape[0] + AE.shape[1]))[0]
+        if not np.all(np.isfinite(dx)):
+            return None
+        z[free] += dx
+    if np.any(z < lb) or np.any(z > ub):
+        return None
+    _, v1 = residuals(z)
+    if np.any(v1 > np.maximum(v0, noise)):
+        return None
+    if not float(v1[eq].max()) < float(v0[eq].max()):
+        return None
+    return z
 
 
 def _pounce_sos_lift(model: Model) -> Optional[tuple]:

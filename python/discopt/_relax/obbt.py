@@ -2027,6 +2027,7 @@ def obbt_tighten_root(
         MccormickLPRelaxer,
         build_milp_relaxation,
     )
+    from discopt._relax.uniform_relax import perspective_oa_suppressed
 
     # OBBT uses only the relaxer's model/terms/disc to cold-build the envelope
     # (it never calls ``solve_at_node``), so skip the incremental fast-path
@@ -2112,13 +2113,16 @@ def obbt_tighten_root(
         # convergence early-stop (measured only when the caller opts in).
         _width_before = _finite_box_width() if min_improvement is not None else 0.0
         try:
-            milp, varmap = build_milp_relaxation(
-                relaxer._model,
-                relaxer._terms,
-                relaxer._disc,
-                bound_override=(lb, ub),
-                build_deadline=build_deadline,
-            )
+            # #1662: OBBT tightens on the relaxation the perspective-OA flag
+            # leaves alone (see ``uniform_relax.perspective_oa_suppressed``).
+            with perspective_oa_suppressed():
+                milp, varmap = build_milp_relaxation(
+                    relaxer._model,
+                    relaxer._terms,
+                    relaxer._disc,
+                    bound_override=(lb, ub),
+                    build_deadline=build_deadline,
+                )
         except Exception as exc:  # noqa: BLE001 - keeps the tightening found so far
             # #1520: kept as a sound fallback, aligned with the node relaxer's cold
             # build (``MccormickLPRelaxer._solve_at_node_impl`` reports the same
@@ -2169,13 +2173,14 @@ def obbt_tighten_root(
                 # varmap -- the layout can differ from the round's first build, and
                 # the cascade below reads aux columns through it.
                 try:
-                    milp, varmap = build_milp_relaxation(
-                        relaxer._model,
-                        relaxer._terms,
-                        relaxer._disc,
-                        bound_override=(lb, ub),
-                        build_deadline=build_deadline,
-                    )
+                    with perspective_oa_suppressed():  # #1662, as above
+                        milp, varmap = build_milp_relaxation(
+                            relaxer._model,
+                            relaxer._terms,
+                            relaxer._disc,
+                            bound_override=(lb, ub),
+                            build_deadline=build_deadline,
+                        )
                 except Exception as exc:  # noqa: BLE001 - keeps the bounds already found
                     # #1520: kept as a sound fallback (same builder and policy as the
                     # root envelope build above): the DBBT bounds already applied are
@@ -2653,6 +2658,7 @@ def measure_discarded_aux_tightening(
         return None
     try:
         from discopt._relax.mccormick_lp import MccormickLPRelaxer, build_milp_relaxation
+        from discopt._relax.uniform_relax import perspective_oa_suppressed
 
         # OBBT uses only the relaxer's model/terms/disc to cold-build the envelope
         # (it never calls ``solve_at_node``), so skip the incremental fast-path
@@ -2661,12 +2667,13 @@ def measure_discarded_aux_tightening(
         relaxer = MccormickLPRelaxer(model, build_incremental=False)
         if not relaxer.has_relaxable_nonlinearity:
             return None
-        milp, _ = build_milp_relaxation(
-            relaxer._model,
-            relaxer._terms,
-            relaxer._disc,
-            bound_override=(lb, ub),
-        )
+        with perspective_oa_suppressed():  # #1662: the OBBT relaxation
+            milp, _ = build_milp_relaxation(
+                relaxer._model,
+                relaxer._terms,
+                relaxer._disc,
+                bound_override=(lb, ub),
+            )
         n_orig = relaxer._n_orig
         n_total = len(milp._bounds)
         if n_total <= n_orig:

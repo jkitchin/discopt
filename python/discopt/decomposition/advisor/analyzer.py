@@ -108,28 +108,19 @@ class StructureReport:
 
 
 def _model_is_nonlinear(model) -> bool:
-    """Best-effort: does any constraint body contain a nonlinear term?
+    """Does any algebraic constraint body or the objective contain a nonlinear term?
 
-    Uses the modeling layer's ``_is_linear`` predicate; on any import/inspection
-    failure it conservatively reports ``False`` (classical Benders is the safe
-    default and GBD is only *offered*, never forced).
+    #1657: this used the GDP ``_is_linear`` predicate, which has no arm for a
+    full array reduction (``dm.sum(x[i, :])``) and so reported a linear MILP
+    nonlinear — and disagreed with the Benders dispatcher, which also looks at
+    the objective. Both now ask the same witness,
+    :func:`discopt.decomposition._linear.first_nonlinear_reason`, which is the
+    classical-Benders extractor itself. Non-algebraic rows (SOS, indicator,
+    disjunctive) carry no body to be nonlinear and are not counted here.
     """
-    try:
-        from discopt._relax.gdp_reformulate import _is_linear
-    except Exception as exc:  # noqa: BLE001 - classical Benders is the safe default
-        logger.debug(
-            "linearity predicate unavailable, not offering GBD: %s: %s", type(exc).__name__, exc
-        )
-        return False
-    for c in model._constraints:
-        body = getattr(c, "body", None)
-        try:
-            if body is not None and not _is_linear(body):
-                return True
-        except Exception as exc:  # noqa: BLE001 - conservatively treat the row as linear
-            logger.debug("linearity check raised on a body: %s: %s", type(exc).__name__, exc)
-            continue
-    return False
+    from discopt.decomposition._linear import first_nonlinear_reason
+
+    return first_nonlinear_reason(model, algebraic_only=True) is not None
 
 
 class StructureAnalyzer:

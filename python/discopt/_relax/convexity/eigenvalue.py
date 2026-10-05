@@ -32,6 +32,8 @@ Rohn (1994), "Positive definiteness and stability of interval
 
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
 
 from .interval import (
@@ -88,6 +90,127 @@ def psd_decision_slack(magnitude: float) -> float:
     if not np.isfinite(mag) or mag <= 0.0:
         return 0.0
     return _PSD_DECISION_K * _UNIT_ROUNDOFF * mag
+
+
+#: Bit-length cap on a rational entry in a budgeted :func:`exact_psd`; past it the
+#: elimination stops as undecided (entry growth is what makes elimination slow).
+EXACT_PSD_MAX_BITS = 2048
+
+#: Deterministic work budget (exact rational multiply-subtract updates) for the
+#: :func:`psd_proved` fallback. An operation count, never a wall-clock limit, so a
+#: verdict does not depend on machine load; exhausting it means "not proved".
+PSD_PROVED_EXACT_BUDGET = 500_000
+
+
+def exact_psd(Q: np.ndarray, budget: Optional[int] = None) -> Optional[bool]:
+    """Decide ``Q`` PSD exactly, by sparse symmetric elimination over the rationals.
+
+    Every float is a dyadic rational, so ``Fraction`` represents ``Q`` exactly and
+    the verdict carries no tolerance. A symmetric matrix is PSD iff elimination on a
+    positive pivot leaves a PSD Schur complement; a negative diagonal, or a zero
+    diagonal whose row is not zero, refutes it. Any positive diagonal is a valid
+    pivot (a symmetric permutation preserves PSD-ness), so the pivot is the row with
+    the fewest nonzeros (minimum degree, ties by index -- deterministic), which
+    keeps sparse elimination sparse.
+
+    Returns ``True``/``False`` when decided. With a ``budget`` (exact updates), also
+    returns ``None`` -- undecided -- once the budget or the
+    :data:`EXACT_PSD_MAX_BITS` entry size is exhausted. ``budget=None`` is the
+    unbounded exact test.
+    """
+    import heapq
+    from fractions import Fraction
+
+    import scipy.sparse as sp
+
+    n = Q.shape[0]
+    rows: dict[int, dict[int, Fraction]] = {i: {} for i in range(n)}
+    if sp.issparse(Q):
+        # #1619 A-22: a scipy-sparse Q is read off its stored entries, never densified.
+        coo = sp.coo_matrix(Q)
+        for i, j, v in zip(coo.row.tolist(), coo.col.tolist(), coo.data.tolist()):
+            if v != 0.0:
+                rows[i][j] = Fraction(float(v))
+    else:
+        ii, jj = np.nonzero(Q)
+        for i, j in zip(ii.tolist(), jj.tolist()):
+            rows[i][j] = Fraction(float(Q[i, j]))
+
+    def refuted(i: int) -> bool:
+        r = rows[i]
+        d = r.get(i, 0)
+        return d < 0 or (d == 0 and bool(r))
+
+    if any(refuted(i) for i in rows):
+        return False
+    heap = [(len(r), i) for i, r in rows.items() if r]
+    heapq.heapify(heap)
+    ops = 0
+    while heap:
+        deg, p = heapq.heappop(heap)
+        if p not in rows or len(rows[p]) != deg:
+            continue  # stale entry
+        prow = rows.pop(p)
+        piv = prow.pop(p)
+        nbrs = list(prow.items())
+        for i, a_ip in nbrs:
+            ri = rows[i]
+            del ri[p]
+            f = a_ip / piv
+            for j, a_pj in nbrs:
+                v = ri.get(j, 0) - f * a_pj
+                if v == 0:
+                    ri.pop(j, None)
+                    continue
+                if budget is not None and (
+                    v.numerator.bit_length() + v.denominator.bit_length() > EXACT_PSD_MAX_BITS
+                ):
+                    return None
+                ri[j] = v
+            ops += len(nbrs)
+            if budget is not None and ops > budget:
+                return None
+        for i, _ in nbrs:
+            if refuted(i):
+                return False
+            if rows[i]:
+                heapq.heappush(heap, (len(rows[i]), i))
+            else:
+                del rows[i]
+    return True
+
+
+def psd_proved(Q: np.ndarray) -> bool:
+    """True only when the symmetric ``Q`` is PROVED positive semidefinite (#1660).
+
+    ``Q`` is taken as exact: its float entries are the coefficients the caller
+    extracted. The computed ``lambda_min`` of ``eigvalsh`` is the exact eigenvalue of
+    a matrix within ``O(u*||Q||)`` of ``Q`` (backward stability plus Weyl), so
+
+    * ``lambda_min >= +psd_decision_slack(||Q||_F)`` proves PSD;
+    * ``lambda_min <  -psd_decision_slack(||Q||_F)`` refutes it;
+    * in between -- the band a singular PSD matrix such as ``(x - y)**2`` lands
+      in, and the one an absolute ``-1e-10`` licence used to certify indefinite
+      matrices from -- :func:`exact_psd` decides by rational elimination under
+      :data:`PSD_PROVED_EXACT_BUDGET`; an undecided elimination is "not proved".
+
+    The slack is relative, so ``-1e-11 * x**2 + y**2`` (``lambda_min = -1e-11``
+    against ``||Q|| ~ 1``) is refuted rather than admitted: the box can make a
+    tiny eigenvalue matter (``x in [-1e4, 1e4]`` turns it into ``-1e-3``), and a
+    curvature verdict is box-free, so it must hold for every box.
+    """
+    Qa = np.asarray(Q, dtype=np.float64)
+    if Qa.ndim != 2 or Qa.shape[0] != Qa.shape[1] or not np.all(np.isfinite(Qa)):
+        return False
+    if Qa.shape[0] == 0:
+        return True
+    lam_min = float(np.linalg.eigvalsh(Qa)[0])
+    slack = psd_decision_slack(float(np.linalg.norm(Qa, "fro")))
+    if lam_min >= slack and lam_min > 0.0:
+        return True
+    if lam_min < -slack:
+        return False
+    return bool(exact_psd(Qa, budget=PSD_PROVED_EXACT_BUDGET))
 
 
 def interval_magnitude(H: Interval) -> float:
