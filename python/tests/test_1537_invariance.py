@@ -111,6 +111,8 @@ TRANSFORMS = {
     "shift1e3": lambda m: translate(m, 1e3, seed=1),
     "shift1e6": lambda m: translate(m, 1e6, seed=2),
     "rows1e-3": lambda m: rescale_rows(m, 1e-3),
+    # #1537 B names row scaling in {1e-3, 1e3, 1e6}; 1e3 was missing.
+    "rows1e3": lambda m: rescale_rows(m, 1e3),
     "rows1e6": lambda m: rescale_rows(m, 1e6),
 }
 
