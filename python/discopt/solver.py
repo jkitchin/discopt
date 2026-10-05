@@ -4073,6 +4073,50 @@ def _polish_repairs_rows(evaluator, x_new, x_old, cl_list, cu_list) -> bool:
     return scaled_violation_ratio(evaluator, x_new, cl_arr, cu_arr) < ratio_old
 
 
+class _RowArbiter(NamedTuple):
+    """The rows a spatial-B&B incumbent is judged against (#1659).
+
+    ``evaluator``/``cl``/``cu`` describe the rows; ``n_cols`` is how many leading
+    flat columns of a search point they read (``None``: all of them).
+    """
+
+    evaluator: Any
+    cl: Any
+    cu: Any
+    n_cols: Optional[int]
+
+    def view(self, x):
+        x = np.asarray(x, dtype=np.float64)
+        return x if self.n_cols is None else x[: self.n_cols]
+
+
+def _spatial_row_arbiter(evaluator, cl_list, cu_list, prereform_model, prereform_nvars):
+    """The rows that decide whether a spatial-B&B point is feasible (#1659).
+
+    When the factorable lift ran, the search evaluator holds the LIFTED model: aux
+    defining rows such as ``1e8*aux*(lam + 1e-8) - 1e8*v == 0``, multiplied
+    through by ``1/dmin`` so the fixed absolute tolerance stays sound for the
+    quotient they replace (``factorable_reform._clear_divisions``). Those rows are
+    a faithful *encoding* of the model but a poor *ruler*: on #1659's hull GDP the
+    terminal polish returned the true optimum with 4.3e-9 of IPM noise in an
+    inactive disjunct's disaggregated column, which that row amplifies to a
+    1.3e-4 residual, so the polish was rejected and the tree incumbent -- an
+    injected relaxation point violating ``y >= exp(x) - 1`` by 5.9e-5 -- was
+    certified ``optimal`` 5.4e-5 below the true optimum.
+
+    The model before the lift is what the reported point must satisfy: its
+    variables are the first ``prereform_nvars`` flat columns (aux columns are
+    appended after the originals), and the lift's aux values are not reported.
+    So that model's rows over that slice are the arbiter. Without a lift the
+    search evaluator already IS the model.
+    """
+    if prereform_model is None:
+        return _RowArbiter(evaluator, cl_list, cu_list, None)
+    pf_eval = _make_evaluator(prereform_model)
+    pf_cl, pf_cu = _infer_constraint_bounds(prereform_model, pf_eval)
+    return _RowArbiter(pf_eval, pf_cl, pf_cu, int(prereform_nvars))
+
+
 def _is_integer_feasible_solution(x, int_offsets, int_sizes, tol=1e-5):
     """Return True if all discrete variables are integral within tolerance."""
     for off, sz in zip(int_offsets, int_sizes):
@@ -19533,8 +19577,15 @@ def solve_model(
                         _xv = np.where(_nbb_int_mask | ~np.isfinite(_xv), _xc, _xv)
                         _cands.append(_xv)
                 for _xk in _cands:
-                    if _cl is not None and not _check_constraint_feasibility(
-                        evaluator, _xk, _cl, _cu
+                    # #1659: these are RELAXATION points (or a box vertex), not NLP
+                    # solutions, so nothing has driven their rows to convergence: one
+                    # that clears the 1e-4 search tolerance may spend all of it, and
+                    # an incumbent that spends row tolerance can beat the optimum --
+                    # the tree then prunes against an infeasible value. Hold them to
+                    # the declared 1e-6 (term-scaled), as the exit gates do.
+                    if _cl is not None and (
+                        _nonlinear_point_excess(evaluator, _xk, _cl, _cu)[0]
+                        > _NLPBB_EXIT_ABS_TOL
                     ):
                         continue
                     _obj_i = float(evaluator.evaluate_objective(_xk))
@@ -20079,6 +20130,10 @@ def solve_model(
             )
             incumbent = None
 
+    # #1659: set by the spatial exit gate below; consumed just before the final
+    # certificate check.
+    _spatial_exit_unverified = False
+
     if incumbent is not None:
         sol_flat = np.array(sol_array)
         # C-3: snap near-integral discrete coordinates to exact integers before
@@ -20094,6 +20149,9 @@ def solve_model(
         if _rounded_feas:
             sol_flat = _rounded_inc
         x_dict = _unpack_solution(model, sol_flat)
+        # #1659: the rows the reported point is judged against -- the pre-lift
+        # model's when the factorable lift ran (see ``_spatial_row_arbiter``).
+        _arb = _spatial_row_arbiter(evaluator, cl_list, cu_list, _prereform_model, _prereform_nvars)
 
         # Refine the incumbent's continuous variables with a KKT-accurate
         # re-solve (integers fixed at their incumbent values). The batched JAX
@@ -20244,7 +20302,7 @@ def solve_model(
                 # ``|df/dx| * d`` (8.7e-6) exceeds its first-order bar by design.
                 if _unchanged and _pobj > obj_val + 1e-12 * (1.0 + abs(obj_val)):
                     _unchanged = _polish_repairs_rows(
-                        evaluator, _refined, sol_flat, cl_list, cu_list
+                        _arb.evaluator, _arb.view(_refined), _arb.view(sol_flat), _arb.cl, _arb.cu
                     )
                 # An objective improvement from the re-solve is adopted ONLY for
                 # convex models, where the integer-fixed continuous relaxation is
@@ -20262,16 +20320,19 @@ def solve_model(
                 # certified an objective below the true optimum. See
                 # ``_polish_preserves_feasibility`` for the measurement and for why
                 # the bar is never-degrade rather than plain feasibility.
+                # #1659: both feasibility legs read the pre-lift rows (``_arb``).
                 _accept = (
-                    _polish_preserves_feasibility(evaluator, _refined, sol_flat, cl_list, cu_list)
+                    _polish_preserves_feasibility(
+                        _arb.evaluator, _arb.view(_refined), _arb.view(sol_flat), _arb.cl, _arb.cu
+                    )
                     and (
                         _unchanged
                         or (
                             _improved
                             and (
-                                not cl_list
+                                not _arb.cl
                                 or _check_constraint_feasibility(
-                                    evaluator, _refined, cl_list, cu_list
+                                    _arb.evaluator, _arb.view(_refined), _arb.cl, _arb.cu
                                 )
                             )
                         )
@@ -20284,6 +20345,34 @@ def solve_model(
                     obj_val = _pobj
         except Exception as _exc:
             logger.debug("Incumbent KKT polish failed: %s", _exc)
+
+        # --- #1659: exit gate ---
+        # Every acceptance gate on this path runs at ``_check_constraint_feasibility``'s
+        # 1e-4 default, so a relaxation point injected as an incumbent may spend that
+        # whole tolerance -- and an incumbent that spends row tolerance can beat the
+        # true optimum. Measured on #1659 (hull GDP, ``y >= exp(x) - 1``): a point
+        # 5.9e-5 outside that row certified ``optimal`` at -0.386349, 5.4e-5 below
+        # the true -0.386294. The repo's declared feasibility tolerance is 1e-6 abs
+        # (CLAUDE.md "Key Constraints"); NLP-BB holds its exit to exactly that
+        # (#954), with the same term-scaled forgiveness, and so does this gate. It
+        # judges the point that actually leaves, against the pre-lift rows
+        # (``_arb``). A point it refuses is still reported -- it cleared the search's
+        # own gates -- but never certified (status downgraded below, after every
+        # step that could re-earn a certificate).
+        _sx_exc, _sx_where, _sx_cmp = _nonlinear_point_excess(
+            _arb.evaluator, _arb.view(sol_flat), _arb.cl, _arb.cu
+        )
+        if _sx_cmp > 0 and _sx_exc > _NLPBB_EXIT_ABS_TOL:
+            _spatial_exit_unverified = True
+            logger.warning(
+                "spatial B&B (#1659): the incumbent fails the exit gate (%s violated "
+                "by %.3e beyond the term-scaled tolerance, declared abs tol %.0e, %d "
+                "comparisons); reporting it UNCERTIFIED.",
+                _sx_where,
+                _sx_exc,
+                _NLPBB_EXIT_ABS_TOL,
+                _sx_cmp,
+            )
 
         # Negate objective back for maximization (B&B tree tracks minimization)
         from discopt.modeling.core import ObjectiveSense
@@ -20859,6 +20948,14 @@ def solve_model(
         _prov_delta = _prov_now - _bound_prov_at_entry.get(_prov_tag, 0)
         if _prov_delta > 0:
             _solver_stats[f"bound_provenance/{_prov_tag}"] = float(_prov_delta)
+
+    # #1659: an incumbent outside the declared rows is never certified. Applied
+    # here, after every step above that can (re-)earn a certificate.
+    if _spatial_exit_unverified:
+        _solver_stats["spatial/exit_gate"] = "refused"
+        if status == "optimal":
+            status = "feasible"
+        _gap_certified = False
 
     # #1383: the certificate must survive the FINAL (objective, bound) pair.
     # Everything above may still have moved `obj_val` after the tree computed
