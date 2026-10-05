@@ -169,6 +169,10 @@ _EXEMPT = {
         "an extra wall-clock slice granted on holding an incumbent; forwarding it "
         "would let the probe overrun the budget that bounds it"
     ),
+    "pounce_scaling": (
+        "#1620: refused unless solver='pounce', whose route returns at the top of "
+        "solve_model, before any reformulation or probe runs"
+    ),
 }
 
 

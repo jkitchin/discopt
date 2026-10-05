@@ -116,6 +116,10 @@ def test_843_small_qubo_full_solve_seeds_incumbent_by_default(monkeypatch, caplo
     """End-to-end at the graduated DEFAULT (env unset): the QUBO primal seeds the
     incumbent and the solve certifies the optimum — soundly (obj <= optimum)."""
     monkeypatch.delenv("DISCOPT_QUBO_PRIMAL", raising=False)
+    # The QUBO primal seeds the SPATIAL path. Since #1619 (C-01b) a QUBO this size
+    # is linearized exactly and solved as a MILP instead; the seed still serves a
+    # QUBO past the linearization's row cap, which this pins it for.
+    monkeypatch.setenv("DISCOPT_BINARY_QUADRATIC_MILP", "0")
     m = _small_qubo(seed=3, n=10)
     ev = NLPEvaluator(m)
     nn = ev.n_variables
@@ -144,6 +148,8 @@ def test_843_optout_restores_legacy_path(monkeypatch):
         return real(model, **kw)
 
     monkeypatch.setattr(qp, "qubo_local_search", _spy)
+    # Spatial path, as above (#1619 C-01b sends a small QUBO to the MILP route).
+    monkeypatch.setenv("DISCOPT_BINARY_QUADRATIC_MILP", "0")
     monkeypatch.setenv("DISCOPT_QUBO_PRIMAL", "0")
     _small_qubo(seed=4, n=8).solve(time_limit=15)
     assert calls == [], "#843: opt-out (=0) must not invoke the QUBO primal"
