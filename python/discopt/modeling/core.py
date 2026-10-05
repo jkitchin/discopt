@@ -8772,8 +8772,14 @@ class Model:
                 a is b for a, b in zip(self._constraints, _declared_cons_entry)
             )
 
+        def _declared_logic_now():
+            """#1659: the declared disjunctive/indicator/SOS/logical rows, or None."""
+            from discopt.validation.feasibility import DeclaredLogic, has_declared_logic
+
+            return DeclaredLogic(self) if has_declared_logic(self) else None
+
         def _withhold_unverified_certificate(
-            res: "SolveResult", evaluator=None, declared=None
+            res: "SolveResult", evaluator=None, declared=None, logic=None
         ) -> None:
             """#1561 certified-incumbent backstop: no certificate on a point
             ``verify_point`` rejects.
@@ -8819,6 +8825,7 @@ class Model:
 
                     evaluator = make_evaluator(self)
                     declared = _declared_vars_entry
+                    logic = _declared_logic_now()
                 if evaluator is not None:
                     if declared is None:
                         raise ValueError("a pre-solve evaluator needs its declared variables")
@@ -8832,7 +8839,9 @@ class Model:
                     ]
                 )
                 if evaluator is not None:
-                    _verdict = verify_point(self, _flat, evaluator=evaluator, variables=declared)
+                    _verdict = verify_point(
+                        self, _flat, evaluator=evaluator, variables=declared, logic=logic
+                    )
                 else:
                     _verdict = verify_point(self, _flat)
                 _ok, _reason = bool(_verdict.ok), _verdict.reason
@@ -8856,7 +8865,9 @@ class Model:
             res.solver_stats = dict(res.solver_stats or {})
             res.solver_stats["certificate/incumbent_unverified"] = 1.0
 
-        def _repair_published_incumbent(res: "SolveResult", evaluator=None, declared=None) -> None:
+        def _repair_published_incumbent(
+            res: "SolveResult", evaluator=None, declared=None, logic=None
+        ) -> None:
             """#1537 E: publish the incumbent repaired to float noise, and re-judge
             the certificate on the repaired objective.
 
@@ -8912,15 +8923,17 @@ class Model:
 
                 evaluator = make_evaluator(self)
                 declared = _declared_vars_entry
+                logic = _declared_logic_now()
             if declared is None:
                 raise ValueError("a pre-solve evaluator needs its declared variables")
             _names = [d.name for d in declared]
             if not set(_names) <= set(res.x):
                 stats["certificate/repair_skipped"] = "result lacks a declared column"
                 return
-            if any(type(c) is not Constraint for c in _declared_cons_entry):
+            if logic is None and any(type(c) is not Constraint for c in _declared_cons_entry):
                 # A disjunction / indicator / SOS / logical row is not in the declared
-                # evaluator's rows, so a move judged on those rows alone could break it.
+                # evaluator's rows, and none were frozen with it, so a move judged on
+                # those rows alone could break one.
                 stats["certificate/repair_skipped"] = "non-algebraic rows"
                 return
             # Any EXTRA column in ``res.x`` (a factorable-lift ``_fr_aux_*``, a
@@ -8931,13 +8944,27 @@ class Model:
             _flat = _np.concatenate(
                 [_np.atleast_1d(_np.asarray(res.x[n], dtype=_np.float64)).ravel() for n in _names]
             )
-            rep = repair_point(self, _flat, evaluator=evaluator, variables=declared)
+            _rows_ev = evaluator
+            if logic:
+                # #1659: repair against the declared rows plus the logic rows the
+                # point must meet -- its closest disjunct, its active indicators.
+                # The moved point is then re-judged on the whole logic below.
+                from discopt.validation.feasibility import _DeclaredModelView, snap_integers
+
+                _view = _DeclaredModelView(self, declared)
+                _rows_ev = logic.realised_evaluator(_view, snap_integers(_view, _flat), evaluator)
+            rep = repair_point(self, _flat, evaluator=_rows_ev, variables=declared)
             if rep.x is None:
                 if rep.excess_before > 0.0:
                     stats["certificate/repair_declined"] = rep.reason
                 return
             verdict = verify_point(
-                self, rep.x, with_objective=True, evaluator=evaluator, variables=declared
+                self,
+                rep.x,
+                with_objective=True,
+                evaluator=evaluator,
+                variables=declared,
+                logic=logic,
             )
             if not verdict.ok or verdict.objective is None:
                 stats["certificate/repair_declined"] = f"repaired point: {verdict.reason}"
@@ -9198,6 +9225,7 @@ class Model:
         # is retained for API compatibility but no longer suppresses the withhold.
         _verify_snap = None
         _verify_snap_vars = None
+        _verify_snap_logic = None
         if self._constraints and not _is_fast_linear_quadratic_family(self):
             # #840: this model is genuinely nonlinear (an expression constraint plus a
             # nonlinear objective or constraint), so it routes to spatial B&B, which
@@ -9234,6 +9262,9 @@ class Model:
                     if _model_unchanged_since_entry()
                     else _declared_variables(self)
                 )
+                # #1659: and the rows inside disjunctions / indicators, which the
+                # evaluator above does not compile, frozen at the same moment.
+                _verify_snap_logic = _declared_logic_now()
             except Exception as _snap_exc:
                 # Same §7 point as the verification handler below: without the
                 # snapshot the false-primal guard cannot run at all, so this is a
@@ -9909,13 +9940,17 @@ class Model:
             # point verify_point rejects loses its certificate whatever the repair
             # below makes of the point.
             if _verify_snap is not None and _verify_snap_vars is not None:
-                _withhold_unverified_certificate(result, _verify_snap[0], _verify_snap_vars)
+                _withhold_unverified_certificate(
+                    result, _verify_snap[0], _verify_snap_vars, _verify_snap_logic
+                )
             else:
                 _withhold_unverified_certificate(result)
             # #1537 E: publish the incumbent repaired to float noise and re-judge its
             # certificate on the repaired objective (downgrade-only; bound untouched).
             if _verify_snap is not None and _verify_snap_vars is not None:
-                _repair_published_incumbent(result, _verify_snap[0], _verify_snap_vars)
+                _repair_published_incumbent(
+                    result, _verify_snap[0], _verify_snap_vars, _verify_snap_logic
+                )
             else:
                 _repair_published_incumbent(result)
             _guard_unresolved_objective(result)
