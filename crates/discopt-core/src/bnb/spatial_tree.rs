@@ -1093,7 +1093,11 @@ mod tests {
             if relative {
                 assert_eq!((a, b), (1, 1), "relative rule changed with the units");
             } else {
-                assert_eq!((a, b), (1, 0), "the probe must show the legacy unit dependence");
+                assert_eq!(
+                    (a, b),
+                    (1, 0),
+                    "the probe must show the legacy unit dependence"
+                );
             }
         }
     }
