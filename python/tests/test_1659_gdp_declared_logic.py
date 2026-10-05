@@ -14,6 +14,7 @@ reported ``optimal`` at -0.386348729, a point violating ``y >= exp(x) - 1`` by
 
 from __future__ import annotations
 
+import functools
 import math
 
 import discopt.modeling as dm
@@ -53,12 +54,33 @@ def test_reported_point_meets_its_disjunct(method):
 
 
 def test_backstop_decertifies_and_repairs_an_infeasible_disjunct(monkeypatch):
-    """With the polish refusing to move the point (main's behaviour), the
-    declared-model check must withhold the certificate and the repair must
-    publish a point that meets the disjunct."""
-    monkeypatch.setattr(solver, "_polish_preserves_feasibility", lambda *a, **k: False)
+    """The route certifies the issue's point (``y`` short of ``exp(x) - 1`` by
+    5.9e-5); the declared-model check must withhold the certificate and the repair
+    must publish a point that meets the disjunct.
+
+    Since #1664 the tree no longer produces that point, so it is injected after
+    the route returns: this pins the backstop, not the route. Without
+    ``DeclaredLogic`` the check passed it (an ``either_or`` model had no rows to
+    judge) and the repair skipped the model as "non-algebraic rows".
+    """
+    route = solver.solve_model
+
+    @functools.wraps(route)
+    def certify_the_bad_point(model, *a, **k):
+        r = route(model, *a, **k)
+        assert r.status == "optimal" and r.gap_certified, (r.status, r.gap_certified)
+        xs, ys = math.log(2.0), 1.0 - 5.9e-5
+        r.x = dict(r.x)
+        r.x["x"], r.x["y"] = np.asarray(xs), np.asarray(ys)
+        r.objective = ys - 2.0 * xs
+        injected.append(r.objective)
+        return r
+
+    injected: list[float] = []
+    monkeypatch.setattr(solver, "solve_model", certify_the_bad_point)
     m, x, y = _witness()
     r = m.solve(gdp_method="hull", time_limit=60)
+    assert injected, "the route was not intercepted, so no bad point was checked"
     stats = r.solver_stats or {}
     assert stats.get("certificate/incumbent_unverified") == 1.0
     assert not r.gap_certified and r.status != "optimal"
