@@ -1072,6 +1072,7 @@ mod tests {
             MathFunc::Sigmoid,
             MathFunc::Softplus,
             MathFunc::Entropy,
+            MathFunc::Centropy,
             MathFunc::Norm1,
             MathFunc::NormInf,
             MathFunc::NormP(3),
