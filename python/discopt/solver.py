@@ -20974,7 +20974,7 @@ def solve_model(
     # #1659: an incumbent outside the declared rows is never certified. Applied
     # here, after every step above that can (re-)earn a certificate.
     if _spatial_exit_unverified:
-        _solver_stats["spatial/exit_gate"] = "refused"
+        _solver_stats["spatial/exit_gate_refused"] = 1.0
         if status == "optimal":
             status = "feasible"
         _gap_certified = False

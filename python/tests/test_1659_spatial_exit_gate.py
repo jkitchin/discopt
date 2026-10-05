@@ -17,10 +17,9 @@ from __future__ import annotations
 import math
 import warnings
 
+import discopt.modeling as dm
 import numpy as np
 import pytest
-
-import discopt.modeling as dm
 from discopt.solver import _nonlinear_point_excess, _spatial_row_arbiter
 
 TRUE_OPT = 1.0 - 2.0 * math.log(2.0)
