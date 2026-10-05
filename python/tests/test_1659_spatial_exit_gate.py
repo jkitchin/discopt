@@ -94,3 +94,46 @@ def test_exit_gate_measures_the_reported_violation():
     assert n_bad > 0 and n_good > 0
     assert exc_bad > 1e-6
     assert exc_good <= 1e-6
+
+
+def test_exit_gate_refuses_a_row_that_is_not_a_number():
+    """A NaN row is an infinite violation, never "nothing checked" (#1659).
+
+    ``max(-inf, nan)`` is ``-inf`` in Python, so the gate used to fold a NaN row
+    away and pass the point -- which let the spatial exit certify ``y = 20`` on
+    ``max y, (y == exp(x) + 2) or (y == log(x + 3))`` (true optimum e^2 + 2).
+    """
+    from discopt.solver import _infer_constraint_bounds, _make_evaluator
+
+    m = dm.Model("nan_row")
+    x = m.continuous("x", lb=-10, ub=10)
+    m.subject_to(dm.log(x + 3) <= 5)
+    m.minimize(x)
+    ev = _make_evaluator(m)
+    cl, cu = _infer_constraint_bounds(m, ev)
+    with np.errstate(invalid="ignore"):
+        exc, where, n = _nonlinear_point_excess(ev, np.array([-5.0]), cl, cu)
+    assert n > 0
+    assert exc == np.inf and "not finite" in where
+
+
+@pytest.mark.slow
+def test_hull_polish_outside_a_perspective_domain_is_not_adopted():
+    """The #1043 two-branch model: the polish may not certify y at its bound."""
+    from discopt.modeling.core import Constraint
+
+    m = dm.Model("off_log_1659")
+    x = m.continuous("x", lb=-2.0, ub=2.0)
+    y = m.continuous("y", lb=-10.0, ub=20.0)
+    m.maximize(y)
+    m.either_or(
+        [
+            [Constraint(body=y - (dm.exp(x) + 2.0), sense="==", rhs=0.0)],
+            [Constraint(body=y - dm.log(x + 3.0), sense="==", rhs=0.0)],
+        ],
+        name="br",
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = m.solve(gdp_method="hull")
+    assert r.objective == pytest.approx(math.exp(2.0) + 2.0, rel=1e-6)

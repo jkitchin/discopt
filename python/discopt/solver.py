@@ -3935,6 +3935,15 @@ def _nonlinear_point_excess(
         if n_rows is not None:
             n = min(n, int(n_rows))
         if n > 0:
+            # #1659: a row that does not evaluate to a number at ``x`` is not
+            # satisfied by it. Without this a NaN row vanished: ``viol.max()`` is NaN,
+            # Python's ``max(-inf, nan)`` keeps ``-inf``, and the gate reported
+            # "nothing checked" -- PASSING -- on a point outside a row's domain (a
+            # hull perspective ``log(v/eps + 3)`` at ``v = -4e-7``), which the
+            # spatial exit then certified at an infeasible objective.
+            bad = ~np.isfinite(g[:n])
+            if bad.any():
+                return np.inf, f"constraint row {int(np.argmax(bad))} is not finite", 2 * n
             viol = np.maximum(np.maximum(cl[:n] - g[:n], g[:n] - cu[:n]), 0.0)
             n_compared += 2 * n
             excess = max(excess, float(viol.max()))
@@ -19584,8 +19593,7 @@ def solve_model(
                     # the tree then prunes against an infeasible value. Hold them to
                     # the declared 1e-6 (term-scaled), as the exit gates do.
                     if _cl is not None and (
-                        _nonlinear_point_excess(evaluator, _xk, _cl, _cu)[0]
-                        > _NLPBB_EXIT_ABS_TOL
+                        _nonlinear_point_excess(evaluator, _xk, _cl, _cu)[0] > _NLPBB_EXIT_ABS_TOL
                     ):
                         continue
                     _obj_i = float(evaluator.evaluate_objective(_xk))
@@ -20320,9 +20328,23 @@ def solve_model(
                 # certified an objective below the true optimum. See
                 # ``_polish_preserves_feasibility`` for the measurement and for why
                 # the bar is never-degrade rather than plain feasibility.
-                # #1659: both feasibility legs read the pre-lift rows (``_arb``).
+                # #1659: both feasibility legs read the pre-lift rows (``_arb``), and a
+                # candidate at which any of them is not a number is refused outright:
+                # the comparisons below cannot rank a NaN, and a point outside a
+                # row's domain is not one the rows vouch for.
+                _arb_rows_finite = _arb.evaluator.n_constraints == 0 or bool(
+                    np.all(
+                        np.isfinite(
+                            np.asarray(
+                                _arb.evaluator.evaluate_constraints(_arb.view(_refined)),
+                                dtype=np.float64,
+                            )
+                        )
+                    )
+                )
                 _accept = (
-                    _polish_preserves_feasibility(
+                    _arb_rows_finite
+                    and _polish_preserves_feasibility(
                         _arb.evaluator, _arb.view(_refined), _arb.view(sol_flat), _arb.cl, _arb.cu
                     )
                     and (
