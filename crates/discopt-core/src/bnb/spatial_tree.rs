@@ -104,6 +104,12 @@ pub enum TreeStatus {
     Exhausted,
     /// No feasible point exists (the root relaxation was infeasible).
     Infeasible,
+    /// The caller's [`IncumbentValueFn`] answered [`IncumbentPrice::Decline`]: at a
+    /// McCormick-tight point the lifted objective and the caller's objective
+    /// disagree beyond what slack explains, so this kernel's model is not the
+    /// caller's problem (#1656). Neither the incumbent nor the bound is a claim
+    /// about the caller's problem; the caller solves it another way.
+    Declined,
 }
 
 /// Whether `bound` closes the region against `inc` under the configured gap.
@@ -377,7 +383,26 @@ pub type PrimalHook<'a> = dyn FnMut(&[f64], Option<f64>) -> Option<(f64, Vec<f64
 ///
 /// The tree accepts at `max(cᵀx, value)`: never more optimistic than before, and
 /// never more optimistic than the value the caller publishes.
-pub type IncumbentValueFn<'a> = dyn FnMut(&[f64]) -> Option<f64> + 'a;
+///
+/// Called with the point and its `cᵀx`; see [`IncumbentPrice`] for the answers.
+pub type IncumbentValueFn<'a> = dyn FnMut(&[f64], f64) -> IncumbentPrice + 'a;
+
+/// An [`IncumbentValueFn`]'s answer for one McCormick-tight point (#1656).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum IncumbentPrice {
+    /// The caller's objective at the point, in internal minimize units.
+    Value(f64),
+    /// The objective cannot be evaluated there: the point is not accepted.
+    Reject,
+    /// The point's `cᵀx` and the caller's objective disagree by more than lifted
+    /// slack can explain, so the lift is not the caller's problem (MINLPLib
+    /// `prob10`: `cᵀx = 2.345` at a point whose objective is 3.446, a lift
+    /// strictly looser than the model). The search stops with
+    /// [`TreeStatus::Declined`]: pricing alone would keep it honest but not
+    /// finished, since its bound can never pass the lift's own optimum and it
+    /// would run to its node or time limit.
+    Decline,
+}
 
 /// True value of a lifted term at the point `x` (structural columns), for the
 /// McCormick-exactness feasibility test. `None` for a sqrt of a negative argument
@@ -846,13 +871,39 @@ pub fn solve_spatial_tree_with_hooks(
                     None => Some(lp_obj),
                     Some(f) => {
                         n_incumbent_value_calls += 1;
-                        // NaN fails `is_finite` and rejects the point.
-                        f(x).filter(|v| v.is_finite()).map(|v| {
-                            if v > lp_obj {
-                                n_incumbent_value_raised += 1;
+                        match f(x, lp_obj) {
+                            // NaN fails `is_finite` and rejects the point.
+                            IncumbentPrice::Value(v) if v.is_finite() => {
+                                if v > lp_obj {
+                                    n_incumbent_value_raised += 1;
+                                }
+                                Some(v.max(lp_obj))
                             }
-                            v.max(lp_obj)
-                        })
+                            IncumbentPrice::Value(_) | IncumbentPrice::Reject => None,
+                            IncumbentPrice::Decline => {
+                                let frontier =
+                                    heap.iter().map(|n| n.pb).fold(f64::INFINITY, f64::min);
+                                return SpatialTreeResult {
+                                    status: TreeStatus::Declined,
+                                    incumbent,
+                                    incumbent_x,
+                                    bound: global_lb_closed.min(frontier).min(bound),
+                                    node_count,
+                                    n_lp_solves,
+                                    n_uncertified,
+                                    n_undecided,
+                                    incumbent_extension_s: extension_s,
+                                    bound_extension_s,
+                                    root_bound,
+                                    root_time_s,
+                                    root_status,
+                                    n_primal_hook_calls,
+                                    n_primal_hook_improvements,
+                                    n_incumbent_value_calls,
+                                    n_incumbent_value_raised,
+                                };
+                            }
+                        }
                     }
                 };
                 if let Some(obj) = priced {
@@ -1841,6 +1892,56 @@ mod gap_criterion_tests {
             blf_terms: vec![],
             obbt_candidates: vec![0, 1],
         }
+    }
+
+    /// #1656: an [`IncumbentValueFn`] that echoes `cᵀx` is node-for-node the
+    /// unpriced search; one that raises the value keeps the incumbent honest;
+    /// `Reject` keeps every LP point out; `Decline` stops at the first tight point.
+    #[test]
+    fn incumbent_value_fn_answers() {
+        let spec = super::tests::xy_min_spec();
+        let cfg = SpatialTreeConfig {
+            max_nodes: 5000,
+            gap_tol: 1e-5,
+            ..SpatialTreeConfig::default()
+        };
+        let opts = SimplexOptions::default();
+        let base = solve_spatial_tree(&spec, &cfg, &opts);
+
+        let mut echo = |_x: &[f64], lp: f64| IncumbentPrice::Value(lp);
+        let e = solve_spatial_tree_with_hooks(&spec, &cfg, &opts, None, Some(&mut echo));
+        assert_eq!((e.status, e.node_count), (base.status, base.node_count));
+        assert_eq!((e.incumbent, e.bound), (base.incumbent, base.bound));
+        assert!(
+            e.n_incumbent_value_calls >= 1,
+            "the function was never consulted"
+        );
+        assert_eq!(e.n_incumbent_value_raised, 0);
+
+        let mut raise = |_x: &[f64], lp: f64| IncumbentPrice::Value(lp + 1.0);
+        let r = solve_spatial_tree_with_hooks(&spec, &cfg, &opts, None, Some(&mut raise));
+        assert!(r.n_incumbent_value_raised >= 1);
+        // Every accepted value is some tight point's `cᵀx + 1`, and a tight point's
+        // `cᵀx` is the optimum up to lifted slack.
+        if let (Some(ri), Some(bi)) = (r.incumbent, base.incumbent) {
+            assert!(
+                ri >= bi + 1.0 - 1e-4,
+                "a raised price was not kept: {ri} vs {bi}"
+            );
+        }
+
+        let mut reject = |_x: &[f64], _lp: f64| IncumbentPrice::Reject;
+        let j = solve_spatial_tree_with_hooks(&spec, &cfg, &opts, None, Some(&mut reject));
+        assert!(
+            j.incumbent.is_none(),
+            "a rejected point became the incumbent"
+        );
+
+        let mut decline = |_x: &[f64], _lp: f64| IncumbentPrice::Decline;
+        let d = solve_spatial_tree_with_hooks(&spec, &cfg, &opts, None, Some(&mut decline));
+        assert_eq!(d.status, TreeStatus::Declined);
+        assert_eq!(d.n_incumbent_value_calls, 1);
+        assert!(d.node_count <= base.node_count);
     }
 
     /// #1522: a hook handing back the optimum at the root is adopted, recorded as

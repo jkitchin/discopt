@@ -1375,11 +1375,12 @@ def _native_kernel_primal_hook(model, source, sign, off, n_orig, outer_deadline)
 def _native_kernel_incumbent_value(model, source, sign, off):
     """The kernel's incumbent pricing callback (#1656, ``incumbent_value=``).
 
-    Returns ``price(x)``: the objective of the problem the caller posed (``source``'s
-    pre-reform model when ``model`` is the factorable lift, else ``model``) at the
-    LP point ``x``, mapped to the kernel's internal minimize units with
-    ``internal = sign * model_obj - off``. The kernel accepts a McCormick-tight
-    point at ``max(c'x, price(x))``.
+    Returns ``price(x, lp_obj)`` for a McCormick-tight LP point ``x`` whose lifted
+    objective is ``lp_obj`` (internal units). It evaluates the objective of the
+    problem the caller posed (``source``'s pre-reform model when ``model`` is the
+    factorable lift, else ``model``) at ``x``, mapped to the kernel's internal
+    minimize units with ``internal = sign * model_obj - off``. The kernel accepts
+    the point at ``max(lp_obj, internal)``.
 
     Why: ``c'x`` is the objective only when every lifted term is exact, and the
     acceptance test allows each term ``mccormick_tol`` of slack, which composes
@@ -1389,6 +1390,15 @@ def _native_kernel_incumbent_value(model, source, sign, off):
     (objective AT the point, 0.0273552, vs bound 0.0273451) was 3.7e-4 apart: the
     certificate was withdrawn. Pricing the point keeps the incumbent a value some
     point attains, which is what the gap test and every prune against it assume.
+
+    Answers ``"decline"`` when the two disagree by more than #789's tolerance
+    (``1e-4 * (1 + |published value|)``, the test that already declines a kernel
+    result whose final incumbent disagrees with the model): then the lift is not
+    the caller's problem, as on MINLPLib ``prob10`` (``c'x = 2.345`` at a point
+    whose objective is 3.446). The kernel stops with ``"declined"`` and the
+    Python path solves the model. Without this the priced kernel stayed honest
+    but could not finish: its bound cannot pass the lift's own optimum, and it ran
+    100 000 nodes to ``node_limit``.
 
     ``None`` (point not accepted) when the objective is not finite there. No
     ``except``: an evaluator failure is raised by the binding when the tree
@@ -1401,11 +1411,16 @@ def _native_kernel_incumbent_value(model, source, sign, off):
     n_target = int(ev.n_variables)
     negate = bool(getattr(ev, "_negate", False))
 
-    def price(x):
+    def price(x, lp_obj):
         f = float(ev.evaluate_objective(np.asarray(x, dtype=np.float64)[:n_target]))
         declared = -f if negate else f
         internal = sign * declared - off
-        return internal if math.isfinite(internal) else None
+        if not math.isfinite(internal):
+            return None
+        lp_published = sign * (float(lp_obj) + off)
+        if abs(declared - lp_published) > 1e-4 * (1.0 + abs(lp_published)):
+            return "decline"
+        return internal
 
     return price
 
@@ -2039,6 +2054,15 @@ def _try_native_spatial_kernel(
     # ``solver.py``'s #764 note had already observed that ``node_limit`` "sends the
     # kernel back to the Python path" — as a nuisance for a benchmark panel, without
     # recognizing it as a live defect on the default solve path.
+    if native_status == "declined":
+        # #1656: the pricing callback found a tight point whose lifted objective
+        # disagrees with the model's -- the lift is not this problem.
+        logger.info(
+            "native spatial kernel declined after %d nodes: lifted and model objectives "
+            "disagree at a McCormick-tight point (#1656); solving on the Python path",
+            int(res.get("node_count") or 0),
+        )
+        return None
     if native_status not in ("optimal", "time_limit", "node_limit"):
         return None  # other incomplete exits retain the established Python fallback
     if native_status == "optimal" and res.get("incumbent") is None:

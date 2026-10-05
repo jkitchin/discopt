@@ -62,6 +62,27 @@ def test_native_kernel_certifies_the_published_pair():
     assert stats["tree/incumbent_value_raised"] >= 1
 
 
+def test_kernel_declines_a_lift_looser_than_the_model():
+    """MINLPLib ``prob10``: the kernel's lift is strictly looser than the model
+    (``c'x = 2.345`` at a McCormick-tight point whose objective is 3.446). Priced
+    honestly the kernel could never close (100 000 nodes to ``node_limit``); it
+    must decline at that point, exactly as #789 declined its final incumbent
+    before, and leave the model to the Python tree, which certifies 3.4455."""
+    import pathlib
+
+    from discopt.modeling.core import from_nl
+
+    path = pathlib.Path(__file__).parent / "data" / "minlplib" / "prob10.nl"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = from_nl(str(path)).solve(time_limit=30)
+    assert r.status == "optimal", (r.status, r.objective, r.bound, r.algorithm_route)
+    assert r.gap_certified
+    assert r.algorithm_route.startswith("spatial-bb"), r.algorithm_route
+    assert r.objective == pytest.approx(3.44550379, rel=1e-6)
+    assert r.node_count < 1000
+
+
 def _haverly():
     m = dm.Model("haverly")
     fA, fB, fC, x, y, cX, cY = (

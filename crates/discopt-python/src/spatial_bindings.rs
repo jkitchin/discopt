@@ -18,7 +18,8 @@
 
 use discopt_core::bnb::spatial_kernel::{BlfTerm, EnvTerm, FixedRow, SpatialKernelSpec};
 use discopt_core::bnb::spatial_tree::{
-    solve_spatial_tree_with_hooks, IncumbentValueFn, PrimalHook, SpatialTreeConfig, TreeStatus,
+    solve_spatial_tree_with_hooks, IncumbentPrice, IncumbentValueFn, PrimalHook, SpatialTreeConfig,
+    TreeStatus,
 };
 use discopt_core::lp::simplex::SimplexOptions;
 use numpy::{PyArray1, PyReadonlyArray1};
@@ -374,21 +375,39 @@ pub fn solve_spatial_tree_py<'py>(
                 }
             })
         };
-        let mut price = |x: &[f64]| -> Option<f64> {
+        // `incumbent_value(x, lp_obj)` returns a float (the value), None (reject
+        // the point) or the string "decline" (stop: `TreeStatus::Declined`).
+        let mut price = |x: &[f64], lp_obj: f64| -> IncumbentPrice {
             if value_err.is_some() {
-                return None;
+                return IncumbentPrice::Reject;
             }
-            let cb = incumbent_value.as_ref()?;
+            let Some(cb) = incumbent_value.as_ref() else {
+                return IncumbentPrice::Value(lp_obj);
+            };
             Python::with_gil(|py| {
                 let arr = PyArray1::from_slice(py, x);
-                match cb
-                    .call1(py, (arr,))
-                    .and_then(|r| r.extract::<Option<f64>>(py))
-                {
+                let answer = cb.call1(py, (arr, lp_obj)).and_then(|r| {
+                    let r = r.bind(py);
+                    if r.is_none() {
+                        Ok(IncumbentPrice::Reject)
+                    } else if let Ok(word) = r.extract::<String>() {
+                        if word == "decline" {
+                            Ok(IncumbentPrice::Decline)
+                        } else {
+                            Err(PyValueError::new_err(format!(
+                                "incumbent_value returned {word:?}; expected a float, \
+                                 None or \"decline\""
+                            )))
+                        }
+                    } else {
+                        r.extract::<f64>().map(IncumbentPrice::Value)
+                    }
+                });
+                match answer {
                     Ok(v) => v,
                     Err(e) => {
                         value_err = Some(e);
-                        None
+                        IncumbentPrice::Reject
                     }
                 }
             })
@@ -418,6 +437,7 @@ pub fn solve_spatial_tree_py<'py>(
         TreeStatus::TimeLimit => "time_limit",
         TreeStatus::Exhausted => "exhausted",
         TreeStatus::Infeasible => "infeasible",
+        TreeStatus::Declined => "declined",
     };
     let out = PyDict::new(py);
     out.set_item("status", status)?;

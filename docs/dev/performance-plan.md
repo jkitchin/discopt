@@ -10347,3 +10347,24 @@ owner decision measured on its own panels, and is not something to change on
 the strength of one model. `SolveResult.mip_count` now carries the route's
 masters through the fallback merge, so the 6 s of OA work is no longer reported
 as `mip_count = 0`.
+
+### 74.3 #1656: the A/B corpus panel caught a regression in the first kernel fix
+
+The #1656 kernel fix prices every McCormick-tight LP point at the posed model's
+objective, because `c'x` there can be optimistic. On `(x*y - 1)**2` it was
+optimistic by 7.5e-6, from 1e-6 term slack composed through `x**2 * y**2`. The
+first version only priced. An A/B panel was run over the in-repo corpus:
+26 instances with reference optima at 30 s, and 96 without at 20 s (base
+`f6726fb` vs branch, separate worktree and venv, code identity asserted per
+arm). It found one certification regression: MINLPLib `prob10`, `optimal` in 17
+nodes → `node_limit` at 100 000.
+
+On `prob10` the kernel's lift is strictly looser than the model. At node 3 it had
+"certified" 2.345 on a point whose objective is 3.446. #789's final check
+(kernel vs verified objective, `1e-4*(1 + |obj|)`) declined that result, and the
+Python tree certified 3.4455. Priced, the kernel never accepts that point, but
+its bound cannot pass the lift's optimum either, so it ran to its node limit,
+and #1153 accepts a `node_limit` exit. The fix applies #789's rule at the first
+such point: the pricing callback answers `"decline"`, the tree stops with
+`TreeStatus::Declined`, and the Python path solves the model as before (now
+declined at node 3, 17 Python nodes, as on base).
