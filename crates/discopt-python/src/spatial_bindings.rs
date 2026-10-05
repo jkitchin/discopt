@@ -18,7 +18,7 @@
 
 use discopt_core::bnb::spatial_kernel::{BlfTerm, EnvTerm, FixedRow, SpatialKernelSpec};
 use discopt_core::bnb::spatial_tree::{
-    solve_spatial_tree_with_hook, PrimalHook, SpatialTreeConfig, TreeStatus,
+    solve_spatial_tree_with_hooks, IncumbentValueFn, PrimalHook, SpatialTreeConfig, TreeStatus,
 };
 use discopt_core::lp::simplex::SimplexOptions;
 use numpy::{PyArray1, PyReadonlyArray1};
@@ -42,11 +42,11 @@ use std::time::{Duration, Instant};
     blf_w, blf_a_ptr, blf_a_cols, blf_a_coeffs, blf_a_const,
     blf_b_ptr, blf_b_cols, blf_b_coeffs, blf_b_const,
     obbt_candidates,
-    max_nodes=100_000, gap_tol=1e-6, rel_gap_tol=f64::INFINITY, abs_gap_tol=0.0, int_tol=1e-5, mccormick_tol=1e-6,
+    max_nodes=100_000, gap_tol=1e-6, rel_gap_tol=f64::INFINITY, abs_gap_tol=0.0, obj_offset=0.0, int_tol=1e-5, mccormick_tol=1e-6,
     min_box_width=1e-9, run_obbt=false, run_propagation=true,
     propagation_rounds=15, initial_incumbent=None, time_limit_s=None,
     incumbent_time_extension_s=None, bound_time_extension_s=None,
-    cold_dual_start=false, primal_hook=None,
+    cold_dual_start=false, primal_hook=None, incumbent_value=None,
 ))]
 pub fn solve_spatial_tree_py<'py>(
     py: Python<'py>,
@@ -81,6 +81,7 @@ pub fn solve_spatial_tree_py<'py>(
     gap_tol: f64,
     rel_gap_tol: f64,
     abs_gap_tol: f64,
+    obj_offset: f64,
     int_tol: f64,
     mccormick_tol: f64,
     min_box_width: f64,
@@ -93,6 +94,7 @@ pub fn solve_spatial_tree_py<'py>(
     bound_time_extension_s: Option<f64>,
     cold_dual_start: bool,
     primal_hook: Option<PyObject>,
+    incumbent_value: Option<PyObject>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let c = c.as_slice()?;
     let integrality = integrality.as_slice()?;
@@ -313,6 +315,7 @@ pub fn solve_spatial_tree_py<'py>(
         gap_tol,
         rel_gap_tol,
         abs_gap_tol,
+        obj_offset,
         int_tol,
         mccormick_tol,
         min_box_width,
@@ -345,33 +348,67 @@ pub fn solve_spatial_tree_py<'py>(
     // exception is not a "no improvement": the first one is kept, the hook is not
     // called again, and the error is raised once the tree returns (CLAUDE.md §7).
     let mut hook_err: Option<PyErr> = None;
+    // #1656: the optional `incumbent_value(x) -> float | None`, the caller's
+    // internal-units objective at a McCormick-tight LP point (see
+    // `IncumbentValueFn`). Same GIL and error rule as the primal hook: the first
+    // exception rejects that point and every later one, and is raised on return.
+    let mut value_err: Option<PyErr> = None;
     // Release the GIL for the (potentially long) solve.
-    let res = py.allow_threads(|| match primal_hook.as_ref() {
-        None => solve_spatial_tree_with_hook(&spec, &cfg, &opts, None),
-        Some(cb) => {
-            let mut call = |x: &[f64], inc: Option<f64>| -> Option<(f64, Vec<f64>)> {
-                if hook_err.is_some() {
-                    return None;
-                }
-                Python::with_gil(|py| {
-                    let arr = PyArray1::from_slice(py, x);
-                    match cb
-                        .call1(py, (arr, inc))
-                        .and_then(|r| r.extract::<Option<(f64, Vec<f64>)>>(py))
-                    {
-                        Ok(v) => v,
-                        Err(e) => {
-                            hook_err = Some(e);
-                            None
-                        }
+    let res = py.allow_threads(|| {
+        let mut call = |x: &[f64], inc: Option<f64>| -> Option<(f64, Vec<f64>)> {
+            if hook_err.is_some() {
+                return None;
+            }
+            let cb = primal_hook.as_ref()?;
+            Python::with_gil(|py| {
+                let arr = PyArray1::from_slice(py, x);
+                match cb
+                    .call1(py, (arr, inc))
+                    .and_then(|r| r.extract::<Option<(f64, Vec<f64>)>>(py))
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        hook_err = Some(e);
+                        None
                     }
-                })
-            };
-            let hook: &mut PrimalHook<'_> = &mut call;
-            solve_spatial_tree_with_hook(&spec, &cfg, &opts, Some(hook))
-        }
+                }
+            })
+        };
+        let mut price = |x: &[f64]| -> Option<f64> {
+            if value_err.is_some() {
+                return None;
+            }
+            let cb = incumbent_value.as_ref()?;
+            Python::with_gil(|py| {
+                let arr = PyArray1::from_slice(py, x);
+                match cb
+                    .call1(py, (arr,))
+                    .and_then(|r| r.extract::<Option<f64>>(py))
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        value_err = Some(e);
+                        None
+                    }
+                }
+            })
+        };
+        let hook: Option<&mut PrimalHook<'_>> = if primal_hook.is_some() {
+            Some(&mut call)
+        } else {
+            None
+        };
+        let value_fn: Option<&mut IncumbentValueFn<'_>> = if incumbent_value.is_some() {
+            Some(&mut price)
+        } else {
+            None
+        };
+        solve_spatial_tree_with_hooks(&spec, &cfg, &opts, hook, value_fn)
     });
     if let Some(e) = hook_err {
+        return Err(e);
+    }
+    if let Some(e) = value_err {
         return Err(e);
     }
 
@@ -407,5 +444,7 @@ pub fn solve_spatial_tree_py<'py>(
     // #1522: whether the primal hook fired and how often it replaced the incumbent.
     out.set_item("n_primal_hook_calls", res.n_primal_hook_calls)?;
     out.set_item("n_primal_hook_improvements", res.n_primal_hook_improvements)?;
+    out.set_item("n_incumbent_value_calls", res.n_incumbent_value_calls)?;
+    out.set_item("n_incumbent_value_raised", res.n_incumbent_value_raised)?;
     Ok(out)
 }

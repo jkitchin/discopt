@@ -1372,6 +1372,44 @@ def _native_kernel_primal_hook(model, source, sign, off, n_orig, outer_deadline)
     return hook
 
 
+def _native_kernel_incumbent_value(model, source, sign, off):
+    """The kernel's incumbent pricing callback (#1656, ``incumbent_value=``).
+
+    Returns ``price(x)``: the objective of the problem the caller posed (``source``'s
+    pre-reform model when ``model`` is the factorable lift, else ``model``) at the
+    LP point ``x``, mapped to the kernel's internal minimize units with
+    ``internal = sign * model_obj - off``. The kernel accepts a McCormick-tight
+    point at ``max(c'x, price(x))``.
+
+    Why: ``c'x`` is the objective only when every lifted term is exact, and the
+    acceptance test allows each term ``mccormick_tol`` of slack, which composes
+    through nested lifts. On ``(x*y - 1)**2 + 0.01*(x - 2)**2 + 0.01*(y - 3)**2``
+    over ``[-100, 100]**2`` the accepted point's ``c'x`` sat 7.5e-6 below the
+    objective at that point, the tree stopped against it, and the published pair
+    (objective AT the point, 0.0273552, vs bound 0.0273451) was 3.7e-4 apart: the
+    certificate was withdrawn. Pricing the point keeps the incumbent a value some
+    point attains, which is what the gap test and every prune against it assume.
+
+    ``None`` (point not accepted) when the objective is not finite there. No
+    ``except``: an evaluator failure is raised by the binding when the tree
+    returns (CLAUDE.md §7).
+    """
+    from discopt._tape_nlp_evaluator import make_evaluator
+
+    target = model if source is None else source[0]
+    ev = make_evaluator(target)
+    n_target = int(ev.n_variables)
+    negate = bool(getattr(ev, "_negate", False))
+
+    def price(x):
+        f = float(ev.evaluate_objective(np.asarray(x, dtype=np.float64)[:n_target]))
+        declared = -f if negate else f
+        internal = sign * declared - off
+        return internal if math.isfinite(internal) else None
+
+    return price
+
+
 # Cap on the number of FREE integers (span > 0.5 in the presolved box) the seed
 # enumerates over: 2**k sub-NLP solves. Presolve typically fixes most, leaving a
 # handful (tanksize: 5 of 9 free). Above this the enumeration is skipped for a single
@@ -1943,6 +1981,12 @@ def _try_native_spatial_kernel(
         abs_gap_tol=(
             _DEFAULT_ABS_GAP_TOL if abs_gap_tolerance is None else float(abs_gap_tolerance)
         ),
+        # #1656: the relative arm is judged on the PUBLISHED objective
+        # ``internal + off``. Without it a constant in the objective (``(x*y - 1)**2``
+        # expands to +1) set the scale: the kernel stopped at 8.8e-5 relative to its
+        # internal -1.10 while the published pair (0.02735) was 3.6e-3 apart, and
+        # ``_refuse_unclosed_published_pair`` withdrew the certificate.
+        obj_offset=off,
         time_limit_s=remaining,
         # Node-LP start basis (default OFF). The kernel's cold two-phase primal
         # grinds to `max_iter` on equality-rich, hence primal-degenerate,
@@ -1964,6 +2008,8 @@ def _try_native_spatial_kernel(
         solve_kwargs["incumbent_time_extension_s"] = float(incumbent_time_extension)
     if initial_incumbent is not None:
         solve_kwargs["initial_incumbent"] = float(initial_incumbent)
+    # #1656: price every McCormick-tight point at the posed problem's objective.
+    solve_kwargs["incumbent_value"] = _native_kernel_incumbent_value(model, source, sign, off)
     if _tuning().native_nlp_primal:
         solve_kwargs["primal_hook"] = _native_kernel_primal_hook(
             model, source, sign, off, n_orig, outer_deadline
@@ -2256,6 +2302,14 @@ def _try_native_spatial_kernel(
     _native_stats["tree/primal_hook_calls"] = float(int(res.get("n_primal_hook_calls") or 0))
     _native_stats["tree/primal_hook_improvements"] = float(
         int(res.get("n_primal_hook_improvements") or 0)
+    )
+    # #1656: how many accepted LP points were priced, and how many were priced
+    # above their lifted ``c'x`` (an optimistic incumbent the old test would keep).
+    _native_stats["tree/incumbent_value_calls"] = float(
+        int(res.get("n_incumbent_value_calls") or 0)
+    )
+    _native_stats["tree/incumbent_value_raised"] = float(
+        int(res.get("n_incumbent_value_raised") or 0)
     )
 
     # #1236: root-node certification metrics, mapped out of the kernel's internal
@@ -9049,6 +9103,13 @@ def _merge_route_and_fallback(route, fallback, is_maximize: bool):
     _l_nodes = getattr(loser, "node_count", None)
     if _w_nodes is not None or _l_nodes is not None:
         winner.node_count = int(_w_nodes or 0) + int(_l_nodes or 0)
+    # #1658: ``mip_count`` is the same kind of statistic. OA solved its masters
+    # before handing over, so a fallback that won reported ``mip_count=0`` for a
+    # solve that ran 51 of them.
+    _w_mips = getattr(winner, "mip_count", None)
+    _l_mips = getattr(loser, "mip_count", None)
+    if _w_mips is not None or _l_mips is not None:
+        winner.mip_count = int(_w_mips or 0) + int(_l_mips or 0)
     return winner
 
 

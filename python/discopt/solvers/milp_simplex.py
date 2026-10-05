@@ -344,21 +344,30 @@ def _fbbt_eq_bounds(
         lo_valid = np.where(pos, maxrest_finite, minrest_finite)
         hi_valid = np.where(pos, minrest_finite, maxrest_finite)
 
+        # #1656: a derived bound never passes the column's OPPOSITE bound. When the
+        # feasible set is non-empty, exact FBBT cannot cross, so a float crossing is
+        # rounding and the opposite bound is the value it rounds to (measured on the
+        # corpus: ex1221/ex1225 cross by 4e-11..3e-10). Uncapped, a crossing fed back
+        # into the next round and diverged: on a Haverly child box whose rows were
+        # inconsistent by 2.9e-8, a column came back with lower bound 6.9e23 over an
+        # upper bound of 0, and the NS bound built on it was +1.7e53.
         new_lo = np.full(lb.shape[0], -np.inf)
         sel = lo_valid & np.isfinite(lo_cand)
         if sel.any():
             np.maximum.at(new_lo, cols[sel], lo_cand[sel])
-        upd_lo = new_lo > lb + tol
+        cand_lo = np.minimum(new_lo, ub)
+        upd_lo = cand_lo > lb + tol
         if upd_lo.any():
-            lb = np.where(upd_lo, np.maximum(lb, new_lo), lb)
+            lb = np.where(upd_lo, cand_lo, lb)
 
         new_hi = np.full(ub.shape[0], np.inf)
         sel = hi_valid & np.isfinite(hi_cand)
         if sel.any():
             np.minimum.at(new_hi, cols[sel], hi_cand[sel])
-        upd_hi = new_hi < ub - tol
+        cand_hi = np.maximum(new_hi, lb)
+        upd_hi = cand_hi < ub - tol
         if upd_hi.any():
-            ub = np.where(upd_hi, np.minimum(ub, new_hi), ub)
+            ub = np.where(upd_hi, cand_hi, ub)
 
         if not (upd_lo.any() or upd_hi.any()):
             break

@@ -130,6 +130,14 @@ pub enum TreeStatus {
 /// at `|inc| >= 1` with `rel_gap_tol >= gap_tol` the second clause is implied by
 /// the first, so those solves are unchanged. The defaults (`rel_gap_tol = inf`)
 /// reproduce the purely absolute test.
+///
+/// #1656: the relative arm is measured on the objective the caller is handed,
+/// `inc + obj_offset`, not on the kernel's constant-free internal value. The two
+/// differ whenever the objective carries a constant: `(xy-1)^2 + ...` expands to
+/// an internal optimum of -1.1026 with offset +1.13, published as 0.02735. The
+/// internal test closed a 9.7e-5 gap as 8.8e-5 relative; against the published
+/// 0.02735 it is 3.6e-3, and `_refuse_unclosed_published_pair` (#1536) withdrew
+/// the certificate the kernel had stopped on. The gap itself is offset-invariant.
 #[inline]
 fn gap_closed(bound: f64, inc: f64, config: &SpatialTreeConfig) -> bool {
     let absolute_closed = bound >= inc - config.gap_tol; // false on NaN
@@ -140,7 +148,8 @@ fn gap_closed(bound: f64, inc: f64, config: &SpatialTreeConfig) -> bool {
     if gap <= config.abs_gap_tol {
         return true;
     }
-    gap <= config.rel_gap_tol * inc.abs().max(bound.abs()).max(1e-10)
+    let (inc_pub, bound_pub) = (inc + config.obj_offset, bound + config.obj_offset);
+    gap <= config.rel_gap_tol * inc_pub.abs().max(bound_pub.abs()).max(1e-10)
 }
 
 /// Tunables for [`solve_spatial_tree`].
@@ -160,6 +169,11 @@ pub struct SpatialTreeConfig {
     pub rel_gap_tol: f64,
     /// Absolute gap that satisfies the #1263 clause on its own.
     pub abs_gap_tol: f64,
+    /// Constant added to the internal objective to give the published one
+    /// (`meta_obj_offset`). Only the relative arm of [`gap_closed`] reads it, so the
+    /// relative gap is judged on the scale the caller sees (#1656). `0.0` (the
+    /// default) reproduces the pre-#1656 test.
+    pub obj_offset: f64,
     /// Integrality tolerance for incumbent acceptance / integer branching.
     pub int_tol: f64,
     /// McCormick-exactness tolerance for incumbent acceptance (`|x_aux − f|`).
@@ -229,6 +243,7 @@ impl Default for SpatialTreeConfig {
             gap_tol: 1e-6,
             rel_gap_tol: f64::INFINITY,
             abs_gap_tol: 0.0,
+            obj_offset: 0.0,
             int_tol: 1e-5,
             mccormick_tol: 1e-6,
             min_box_width: 1e-9,
@@ -311,6 +326,12 @@ pub struct SpatialTreeResult {
     pub n_primal_hook_calls: usize,
     /// #1522: primal-hook calls that replaced the incumbent (see above).
     pub n_primal_hook_improvements: usize,
+    /// #1656: how many McCormick-tight LP points the caller's
+    /// [`IncumbentValueFn`] priced, and how many of those it priced ABOVE `cᵀx`
+    /// (the point's lifted objective was optimistic). Both 0 with no function.
+    pub n_incumbent_value_calls: usize,
+    /// #1656: [`IncumbentValueFn`] calls whose value exceeded `cᵀx` (see above).
+    pub n_incumbent_value_raised: usize,
 }
 
 /// A caller-supplied primal heuristic for [`solve_spatial_tree_with_hook`] (#1522).
@@ -336,6 +357,27 @@ pub struct SpatialTreeResult {
 /// but a value that no feasible point attains would prune regions that hold the
 /// optimum, which is why the contract demands a verified point.
 pub type PrimalHook<'a> = dyn FnMut(&[f64], Option<f64>) -> Option<(f64, Vec<f64>)> + 'a;
+
+/// The caller's objective at a McCormick-tight LP point, for
+/// [`solve_spatial_tree_with_hooks`] (#1656).
+///
+/// Called with the point (all `n_cols` columns) before the tree accepts it as the
+/// incumbent; returns the objective, in the kernel's internal minimize units, of
+/// the point the caller will PUBLISH from it, or `None` when that objective cannot
+/// be evaluated (the point is then not accepted).
+///
+/// Why the kernel needs one. A point is accepted when every lifted term is tight
+/// to `mccormick_tol`, but `cᵀx` is the true objective only when the terms are
+/// exact: each term's slack composes through the lift. On `(xy-1)^2 + ...` over
+/// `[-100, 100]^2` the lift `w = x^2 * y^2` reads `x^2` with slack 8.1e-7 and
+/// multiplies it by `y^2 ~ 7.8`, so `cᵀx` sat 7.5e-6 BELOW the objective at the
+/// point -- 2.7x the relative gap the caller asked for on an optimum of 0.0274. The
+/// tree pruned and stopped against a value no point attains, and the published
+/// pair (the objective AT the point) could not close.
+///
+/// The tree accepts at `max(cᵀx, value)`: never more optimistic than before, and
+/// never more optimistic than the value the caller publishes.
+pub type IncumbentValueFn<'a> = dyn FnMut(&[f64]) -> Option<f64> + 'a;
 
 /// True value of a lifted term at the point `x` (structural columns), for the
 /// McCormick-exactness feasibility test. `None` for a sqrt of a negative argument
@@ -437,10 +479,25 @@ pub fn solve_spatial_tree_with_hook(
     spec: &SpatialKernelSpec,
     config: &SpatialTreeConfig,
     opts: &SimplexOptions,
+    hook: Option<&mut PrimalHook<'_>>,
+) -> SpatialTreeResult {
+    solve_spatial_tree_with_hooks(spec, config, opts, hook, None)
+}
+
+/// [`solve_spatial_tree_with_hook`] with an optional [`IncumbentValueFn`] (#1656)
+/// pricing every McCormick-tight LP point before it is accepted. `None` is exactly
+/// [`solve_spatial_tree_with_hook`].
+pub fn solve_spatial_tree_with_hooks(
+    spec: &SpatialKernelSpec,
+    config: &SpatialTreeConfig,
+    opts: &SimplexOptions,
     mut hook: Option<&mut PrimalHook<'_>>,
+    mut value_fn: Option<&mut IncumbentValueFn<'_>>,
 ) -> SpatialTreeResult {
     let mut n_primal_hook_calls = 0usize;
     let mut n_primal_hook_improvements = 0usize;
+    let mut n_incumbent_value_calls = 0usize;
+    let mut n_incumbent_value_raised = 0usize;
     // Best-bound frontier: a min-heap on the inherited lower bound. Exploring the
     // lowest-bound region first lifts the global frontier minimum (the reported dual
     // bound) as fast as possible — the key to certifying instances like tanksize
@@ -562,6 +619,8 @@ pub fn solve_spatial_tree_with_hook(
                 root_status,
                 n_primal_hook_calls,
                 n_primal_hook_improvements,
+                n_incumbent_value_calls,
+                n_incumbent_value_raised,
             };
         }
         // Fathom by the parent bound if the incumbent already dominates it. The
@@ -594,6 +653,8 @@ pub fn solve_spatial_tree_with_hook(
                 root_status,
                 n_primal_hook_calls,
                 n_primal_hook_improvements,
+                n_incumbent_value_calls,
+                n_incumbent_value_raised,
             };
         }
         node_count += 1;
@@ -776,13 +837,31 @@ pub fn solve_spatial_tree_with_hook(
         let mut accepted_lp_point = false;
         if int_ok && terms_tight {
             // Feasible point: accept if it improves the incumbent. The objective is
-            // linear over the (now-tight) lifted columns, so `cᵀx` is the true
-            // objective at this feasible point.
-            let obj = dot(&spec.c, x);
-            if incumbent.map(|inc| obj < inc - 1e-12).unwrap_or(true) {
-                incumbent = Some(obj);
-                incumbent_x = x[..spec.n_cols].to_vec();
-                accepted_lp_point = true;
+            // linear over the (now-tight) lifted columns, so `cᵀx` is the objective
+            // at this point up to the terms' composed slack; the caller's
+            // `value_fn` prices that slack in (#1656, see [`IncumbentValueFn`]).
+            let lp_obj = dot(&spec.c, x);
+            if incumbent.map(|inc| lp_obj < inc - 1e-12).unwrap_or(true) {
+                let priced = match value_fn.as_mut() {
+                    None => Some(lp_obj),
+                    Some(f) => {
+                        n_incumbent_value_calls += 1;
+                        // NaN fails `is_finite` and rejects the point.
+                        f(x).filter(|v| v.is_finite()).map(|v| {
+                            if v > lp_obj {
+                                n_incumbent_value_raised += 1;
+                            }
+                            v.max(lp_obj)
+                        })
+                    }
+                };
+                if let Some(obj) = priced {
+                    if incumbent.map(|inc| obj < inc - 1e-12).unwrap_or(true) {
+                        incumbent = Some(obj);
+                        incumbent_x = x[..spec.n_cols].to_vec();
+                        accepted_lp_point = true;
+                    }
+                }
             }
         }
         // #1522: the caller's local primal step, from this node's LP point. Adopted
@@ -883,6 +962,8 @@ pub fn solve_spatial_tree_with_hook(
                 root_status,
                 n_primal_hook_calls,
                 n_primal_hook_improvements,
+                n_incumbent_value_calls,
+                n_incumbent_value_raised,
             }
         }
         None => SpatialTreeResult {
@@ -901,6 +982,8 @@ pub fn solve_spatial_tree_with_hook(
             root_status,
             n_primal_hook_calls,
             n_primal_hook_improvements,
+            n_incumbent_value_calls,
+            n_incumbent_value_raised,
         },
     }
 }
@@ -1684,6 +1767,35 @@ mod gap_criterion_tests {
             }
         }
         assert_eq!(checked, 35, "probe ran {checked} comparisons");
+    }
+
+    /// #1656: the relative arm is judged on `inc + obj_offset`, the objective the
+    /// caller is handed. The internal pair of the `(xy-1)^2` least squares
+    /// (-1.102645878, -1.102743252; offset 1.13) is 8.8e-5 relative internally but
+    /// 3.6e-3 relative once published, so it must stay open.
+    #[test]
+    fn relative_clause_uses_published_objective() {
+        let base = SpatialTreeConfig {
+            gap_tol: 1e-4,
+            rel_gap_tol: 1e-4,
+            abs_gap_tol: 1e-6,
+            ..Default::default()
+        };
+        let with_off = SpatialTreeConfig {
+            obj_offset: 1.13,
+            ..base
+        };
+        let (inc, bound) = (-1.102645878110912, -1.1027432524576144);
+        assert!(gap_closed(bound, inc, &base), "internal scale closes it");
+        assert!(
+            !gap_closed(bound, inc, &with_off),
+            "published scale keeps it open"
+        );
+        // A gap within 1e-4 of the published 0.0273541 still closes.
+        assert!(gap_closed(inc - 2.0e-6, inc, &with_off));
+        // The offset only rescales the relative arm: the absolute arms ignore it.
+        assert!(gap_closed(inc - 5e-7, inc, &with_off));
+        assert!(!gap_closed(inc - 2e-4, inc, &with_off));
     }
 
     /// #1522: with no hook, `solve_spatial_tree_with_hook` is `solve_spatial_tree`

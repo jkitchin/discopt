@@ -61,13 +61,29 @@ finite-precision floor). Dual infeasibility and complementarity are linear in
 the objective, so a solve of ``sigma*objective`` stopped at ``tol`` is stopped at
 ``tol/sigma`` in the caller's units -- 8192x looser on ``3200*j**2``, where the
 mapped-back complementarity of 6.6e-6 failed the #1384 stationarity guard and
-the solve came back ``error``. The engine is therefore handed ``tol*sigma``
-(:func:`engine_tol`): the caller-unit stopping test is the one asked for, and the
-primal residual, which ``sigma`` does not touch, is held at least as tight --
-down to a floor of ``16*eps`` (:data:`_ENGINE_TOL_FLOOR`), below which the scaled
-problem (coefficients at most 1) cannot resolve its residual and the engine runs
-to ``iteration_limit``. The floor only ever loosens the request; the #1384
-stationarity guard downstream still judges every point the engine returns.
+the solve came back ``error``. ``tol*sigma`` (:func:`engine_tol`) is the engine
+tolerance that holds the caller's ``tol`` in the caller's units -- down to a
+floor of ``16*eps`` (:data:`_ENGINE_TOL_FLOOR`), below which the scaled problem
+(coefficients at most 1) cannot resolve its residual and the engine runs to
+``iteration_limit``.
+
+Handing it ``tol*sigma`` unconditionally cost iterations for nothing on LPs whose
+complementarity bottoms out at roundoff (#1658). The engine measures
+complementarity on the recomputed slack, so it cannot fall below about
+``eps * |row activity| * |dual|``; on a 10-flow blending LP with a contract row
+tight at every feasible point (no strict interior, ``sigma = 2**-7``) that floor
+is ~5e-9 in engine units, ``tol*sigma`` asked for 7.8e-11, and the engine ran 59
+iterations to its stall exit where 16 reached the same point (caller-unit
+complementarity 6.6e-7 vs 6.0e-7). The primal residual, which the issue
+suspected, was 1-2e-11 and passed. So :func:`_solve` runs the engine at the
+caller's ``tol`` first and re-runs it at ``tol*sigma``, warm-started from that
+point, only when the mapped-back residual fails :func:`caller_unit_converged`:
+primal absolute, dual infeasibility and complementarity against ``tol`` times
+the stationarity scale ``max(1, |c|, |Px|, |y|, |z|)`` (Ipopt's ``s_d``, the
+yardstick the #1384 guard applies). The ``3200*j**2`` class above fails that test
+and takes the re-run; the blending LP passes it and does not. The floor only
+ever loosens the request; the #1384 stationarity guard downstream still judges
+every point the engine returns.
 """
 
 from __future__ import annotations
@@ -373,6 +389,63 @@ def engine_tol(tol: Optional[float], sigma: float) -> Optional[float]:
     return max(want, _ENGINE_TOL_FLOOR)
 
 
+def _stationarity_scale_caller(res: Any, P, c: np.ndarray) -> float:
+    """The yardstick a mapped-back KKT residual is measured against (#1658).
+
+    ``max(1, |c|, |P x|, |y|, |z|)`` in the caller's units: the magnitude of the
+    largest term entering the stationarity residual ``P x + c + A'y - z``, which
+    is Ipopt's ``s_d`` (Wachter & Biegler 2006, eq. 5) and the yardstick the
+    #1384 guard downstream (``solver._qp_stationarity_scale``) applies. The
+    ``max(1, ...)`` floor makes an O(1) instance an absolute test.
+    """
+    mags = [1.0]
+    if c is not None and np.size(c):
+        mags.append(float(np.max(np.abs(c))))
+    x = getattr(res, "x", None)
+    if P is not None and x is not None and np.size(x):
+        Px = P @ np.asarray(x, dtype=np.float64)
+        if np.size(Px):
+            mags.append(float(np.max(np.abs(Px))))
+    for key in ("y", "z", "z_lb", "z_ub"):
+        v = getattr(res, key, None)
+        if v is not None and np.size(v):
+            mags.append(float(np.max(np.abs(v))))
+    m = max(mags)
+    return m if math.isfinite(m) else 1.0
+
+
+def caller_unit_converged(res: Any, P, c: np.ndarray, tol: float) -> bool:
+    """Whether the caller-unit result ``res`` meets ``tol`` (#1658).
+
+    The primal residual is tested absolutely (``sigma`` does not touch it); dual
+    infeasibility and complementarity, which carry the objective's units, against
+    ``tol`` times :func:`_stationarity_scale_caller`. A result with no residual
+    breakdown is not judged converged here, so it gets the ``tol*sigma`` re-solve.
+    """
+    resid = getattr(res, "residuals", None) or {}
+    pr = resid.get("primal_infeasibility")
+    du = resid.get("dual_infeasibility")
+    co = resid.get("complementarity")
+    if pr is None or du is None or co is None:
+        return False
+    yard = tol * _stationarity_scale_caller(res, P, c)
+    return float(pr) <= tol and float(du) <= yard and float(co) <= yard
+
+
+def _merge_attempts(first: Any, second: Any) -> Any:
+    """``second`` as the answer, carrying the work of both engine runs (#1658).
+
+    ``iters`` is the total the caller paid for; ``iterates`` concatenates the two
+    traces so a printed trace or a solve report shows the re-solve rather than
+    hiding it.
+    """
+    out = SimpleNamespace(**vars(second))
+    out.iters = int(first.iters or 0) + int(second.iters or 0)
+    out.iterates = list(first.iterates or []) + list(second.iterates or [])
+    out.retried_at_scaled_tol = True
+    return out
+
+
 def _unscale_result(res: Any, sigma: float) -> Any:
     """``res`` of the engine solve of ``sigma * objective``, in the caller's units.
 
@@ -484,36 +557,59 @@ def _solve(
 
     started_unix_nanos = time.time_ns()
     t0 = time.perf_counter()
-    try:
-        res = _pounce_solve_qp(
-            P=P_eng,
-            c=c_eng,
-            A=A,
-            b=b,
-            G=G,
-            h=h,
-            lb=lb,
-            ub=ub,
-            tol=engine_tol(opts.get("tol"), sigma),
-            max_iter=opts.get("max_iter"),
-            time_limit=limit,
-            collect_iterates=print_level > 0 or solve_report,
-            method="ipm",
-            tau=opts.get("tau"),
-            tau_max=opts.get("tau_max"),
-            # #1615 B-01b: a primal start seeds the IPM; it does not change the
-            # solution (the objective scale touches only the duals, not ``x``).
-            warm_start=None if x0 is None else {"x": np.asarray(x0, dtype=np.float64)},
-        )
-    except ValueError as exc:
-        # POUNCE's PSD guard: the convex engine refuses an indefinite P before
-        # iterating. Re-raised as a distinct type so the route can tell it from
-        # a malformed-input error, which must still propagate.
-        if P is not None and "positive semidefinite" in str(exc):
-            raise IndefiniteQPError(str(exc)) from exc
-        raise
+    caller_tol = _ENGINE_DEFAULT_TOL if opts.get("tol") is None else float(opts["tol"])
+
+    def _run(tol_eng, warm, budget):
+        try:
+            return _pounce_solve_qp(
+                P=P_eng,
+                c=c_eng,
+                A=A,
+                b=b,
+                G=G,
+                h=h,
+                lb=lb,
+                ub=ub,
+                tol=tol_eng,
+                max_iter=opts.get("max_iter"),
+                time_limit=budget,
+                collect_iterates=print_level > 0 or solve_report,
+                method="ipm",
+                tau=opts.get("tau"),
+                tau_max=opts.get("tau_max"),
+                # #1615 B-01b: a primal start seeds the IPM; it does not change the
+                # solution (the objective scale touches only the duals, not ``x``).
+                warm_start=warm,
+            )
+        except ValueError as exc:
+            # POUNCE's PSD guard: the convex engine refuses an indefinite P before
+            # iterating. Re-raised as a distinct type so the route can tell it from
+            # a malformed-input error, which must still propagate.
+            if P is not None and "positive semidefinite" in str(exc):
+                raise IndefiniteQPError(str(exc)) from exc
+            raise
+
+    # #1658: the caller's ``tol`` first (module docstring, "Objective scale"); the
+    # ``tol*sigma`` re-solve, warm-started from that point, only when it fails the
+    # caller-unit test.
+    raw = _run(
+        opts.get("tol"),
+        None if x0 is None else {"x": np.asarray(x0, dtype=np.float64)},
+        limit,
+    )
+    res = _unscale_result(raw, sigma)
+    if (
+        sigma != 1.0
+        and res.status == "optimal"
+        and not caller_unit_converged(res, P, c, caller_tol)
+    ):
+        spent = time.perf_counter() - t0
+        budget = None if limit is None else max(0.0, limit - spent)
+        retry = _unscale_result(_run(engine_tol(opts.get("tol"), sigma), raw, budget), sigma)
+        # A re-solve that did not finish (its budget, an engine failure) leaves the
+        # first ``optimal`` standing; the #1384 guard downstream still judges it.
+        res = _merge_attempts(res, retry if retry.status == "optimal" else res)
     wall = time.perf_counter() - t0
-    res = _unscale_result(res, sigma)
     if print_level > 0:
         _print_trace("lp-ipm" if P is None else "qp-ipm", res)
 
