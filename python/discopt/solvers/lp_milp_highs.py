@@ -593,15 +593,24 @@ def _exact_ray(d: np.ndarray, sf: StdForm, deadline: Optional[float]) -> bool:
 FBBT_ROUNDS = 20
 #: Most columns the exact dual correction zeroes, and most correction rounds. Past
 #: either the rational elimination is too slow for a fallback; the bound is then left
-#: uncertified (never guessed).
+#: uncertified (never guessed). Each round is bounded by the column cap and
+#: :data:`EXACT_MAX_WORK`, and all rounds together by :data:`EXACT_MAX_TOTAL_WORK`,
+#: so the round cap only has to let a correction that CONVERGES finish. #1655's
+#: robust-counterpart LP (budget set, Gamma = 1) needed 9-16 rounds -- zeroing one
+#: wrong-signed dual column disturbs the next -- and converged to a bound equal to
+#: the objective in 0.01 s, where the old cap of 8 left the NS bound 19% below the
+#: optimum and the LP uncertified.
 EXACT_MAX_COLUMNS = 256
-EXACT_MAX_ROUNDS = 8
+EXACT_MAX_ROUNDS = 64
 #: Work cap for one rational elimination, in bit operations (entries updated times the
 #: bit length of the operands). Rational elimination can grow its denominators, and a
 #: fallback must not hang a solve; a count, not a clock, so whether a bound is certified
 #: does not depend on machine speed (#912). Calibrated on dense 60-bit rational systems
 #: at 1.0-2.2e8 units/s (n=60: 5.9e8 units, 6.0 s), so the cap is ~1-2 s of elimination.
 EXACT_MAX_WORK = 200_000_000
+#: #1655: work cap summed over every elimination of one correction (~2-4 s), so the
+#: raised round cap cannot multiply the per-elimination worst case.
+EXACT_MAX_TOTAL_WORK = 2 * EXACT_MAX_WORK
 _EPS = float(np.finfo(np.float64).eps)
 
 
@@ -703,9 +712,13 @@ def _on_open_side(r, sf: StdForm, j: int) -> bool:
     return bool((r > 0 and sf.xl[j] <= -READBACK_LIMIT) or (r < 0 and sf.xu[j] >= READBACK_LIMIT))
 
 
-def _exact_solve(M: list, rhs: list, deadline: Optional[float]) -> Optional[list]:
+def _exact_solve(
+    M: list, rhs: list, deadline: Optional[float], spent: Optional[list] = None
+) -> Optional[list]:
     """``M z = rhs`` over the rationals by Gaussian elimination; ``None`` if singular, past
-    ``EXACT_MAX_WORK`` bit operations, or past the caller's ``deadline``."""
+    ``EXACT_MAX_WORK`` bit operations, or past the caller's ``deadline``. ``spent``, a
+    one-element list, accumulates the work across calls and refuses past
+    ``EXACT_MAX_TOTAL_WORK`` (#1655)."""
     from fractions import Fraction
 
     def size(q: Fraction) -> int:
@@ -726,9 +739,14 @@ def _exact_solve(M: list, rhs: list, deadline: Optional[float]) -> Optional[list
         for r in range(col + 1, n):
             if T[r][col] != 0:
                 f = T[r][col] / p
-                work += (n + 1 - col) * (size(f) + row_size)
+                step = (n + 1 - col) * (size(f) + row_size)
+                work += step
                 if work > EXACT_MAX_WORK:
                     return None
+                if spent is not None:
+                    spent[0] += step
+                    if spent[0] > EXACT_MAX_TOTAL_WORK:
+                        return None
                 T[r] = [a - f * b for a, b in zip(T[r], T[col])]
     z = [Fraction(0)] * n
     for i in reversed(range(n)):
@@ -763,6 +781,7 @@ def exact_ns_bound(
     Y = [Fraction(float(v)) for v in y]
     open_cols = np.flatnonzero((sf.xl <= -READBACK_LIMIT) | (sf.xu >= READBACK_LIMIT))
     held: list[int] = []
+    spent = [0]
     for rnd in range(EXACT_MAX_ROUNDS + 1):
         if deadline is not None and time.perf_counter() > deadline:
             return None, "time limit reached during the exact dual correction"
@@ -791,7 +810,7 @@ def exact_ns_bound(
         block = sf.A[:, indep].tocsr()[prow].toarray()  # rank x rank, block[i, k] = A[prow_i, S_k]
         rcS = _exact_reduced_costs(Y, sf, indep)
         M = [[Fraction(float(block[i, kc])) for i in range(rank)] for kc in range(rank)]
-        dy = _exact_solve(M, [rcS[j] for j in indep], deadline)
+        dy = _exact_solve(M, [rcS[j] for j in indep], deadline, spent)
         if dy is None:
             return None, "pivot block singular in exact arithmetic, or work/time limit reached"
         for i, v in zip(prow, dy):
@@ -2269,6 +2288,50 @@ def _withdraw(out: HighsOutcome, why: str) -> HighsOutcome:
     return out
 
 
+#: #1655: budget of the #1634 presolve-free cross-solve, as a multiple of the primary
+#: solve's wall time (floored at :data:`PRESOLVE_CROSS_MIN_BUDGET` seconds).
+PRESOLVE_CROSS_BUDGET_FACTOR = 20.0
+PRESOLVE_CROSS_MIN_BUDGET = 2.0
+
+#: #1655: magnitude cap on the integral matrix and cost entries of
+#: :func:`presolve_exact_class`.
+PRESOLVE_EXACT_MAX_COEF = 1000.0
+
+
+def presolve_exact_class(sf: StdForm) -> bool:
+    """Is ``sf`` in the class where HiGHS's absolute presolve tolerances are exact?
+
+    #1655: the #1634 cross-check exists because HiGHS's MIP presolve decides on
+    ABSOLUTE tolerances (1e-7 on costs, 1e-6 on rows) and, on a badly scaled model,
+    treats a nonzero difference as a tie -- #1634's witness fixed ``x2`` on a cost
+    difference of ``0.0064 / 4.9e5 = 1.3e-8``. When every matrix entry and cost is an
+    integer of magnitude at most :data:`PRESOLVE_EXACT_MAX_COEF` = 1e3, and every
+    right-hand side and finite bound an integer below 2**52, the quantities that
+    mechanism compares are exact: a cost difference per unit of a column,
+    ``c_j/a_ij - c_k/a_ik``, is a rational with denominator at most 1e6, so it is 0 or
+    at least 1e-6 -- ten times the 1e-7 tie tolerance -- and a row-activity
+    difference over integral bounds is 0 or at least 1. Every #1634 witness and
+    generator instance has non-integral entries spanning nine decades; the class
+    excludes all of them by construction. Every other route check (#1295, #1410,
+    #1509, the NS root bound) still runs on such a model.
+    """
+    if sf.A.nnz == 0:
+        return False
+    vals = [np.asarray(sf.A.data, dtype=np.float64), np.asarray(sf.c, dtype=np.float64)]
+    for v in vals:
+        if not (np.all(np.abs(v) <= PRESOLVE_EXACT_MAX_COEF) and np.all(v == np.round(v))):
+            return False
+    lim = 2.0**52
+    rest = [np.asarray(sf.b, dtype=np.float64)]
+    fin_l = sf.xl[sf.xl > -READBACK_LIMIT]
+    fin_u = sf.xu[sf.xu < READBACK_LIMIT]
+    for v in (*rest, fin_l, fin_u):
+        a = np.asarray(v, dtype=np.float64)
+        if not (np.all(np.abs(a) < lim) and np.all(a == np.round(a))):
+            return False
+    return True
+
+
 def _cross_check_presolve(sf: StdForm, out: HighsOutcome, kw: dict[str, Any]) -> HighsOutcome:
     """#1634: hold a HiGHS MILP certificate against a second, presolve-free solve.
 
@@ -2294,6 +2357,14 @@ def _cross_check_presolve(sf: StdForm, out: HighsOutcome, kw: dict[str, Any]) ->
     (:func:`_weaker_bound`); one that cannot run for want of budget is withdrawn (#1309).
     The budget already spent is the primary solve's ``wall_time``.
     """
+    if presolve_exact_class(sf):
+        # #1655: the hazard this check exists for cannot arise here (see
+        # :func:`presolve_exact_class`), and on such a model -- a pure-binary
+        # scheduling MILP HiGHS proves in 0.07 s -- the presolve-free solve ran for
+        # the whole budget and withdrew a correct certificate (260-330 s without a
+        # limit). Every other route check still ran on the primary.
+        out.stats["milp/presolve_cross_check_exact_class"] = 1.0
+        return out
     kw = dict(kw)
     if kw["time_limit"] is not None:
         kw["time_limit"] = max(0.0, float(kw["time_limit"]) - float(out.wall_time))
@@ -2302,6 +2373,14 @@ def _cross_check_presolve(sf: StdForm, out: HighsOutcome, kw: dict[str, Any]) ->
             return _withdraw(
                 out, "no time budget left to cross-check it against a presolve-free solve"
             )
+    # #1655: a cross-solve that cannot conclude quickly is given up quickly. Its
+    # no-verdict outcome is a withdrawal either way (below), so capping it only
+    # changes how long the withdrawal takes, never what is certified on a verdict
+    # that arrives within the cap.
+    cap = max(PRESOLVE_CROSS_MIN_BUDGET, PRESOLVE_CROSS_BUDGET_FACTOR * float(out.wall_time))
+    if kw["time_limit"] is None or kw["time_limit"] > cap:
+        kw["time_limit"] = cap
+        out.stats["milp/presolve_cross_check_budget"] = cap
     cross = _solve_milp_scaled(sf, presolve=False, **kw)
     out.stats["milp/presolve_cross_check_ran"] = 1.0
     out.stats["milp/presolve_cross_check_time"] = float(cross.wall_time)

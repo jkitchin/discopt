@@ -28339,6 +28339,21 @@ def _qp_convex_certificate(
             obj_fn = ev.evaluate_objective
             grad_fn = ev.evaluate_gradient
 
+    # #1655: the certificate's "feasible value" is the objective AT the point, and its
+    # premise check ("a valid bound may not sit above a feasible point") assumes the
+    # point IS feasible. An IPM point satisfies its equality rows only to its own
+    # tolerance, and a row scaled by a large factor turns that into objective: on the
+    # glass-composition least-squares QP, ``sum(x) == 1`` off by 5.1e-11 moved
+    # ``sum e_k**2`` (``e_k`` defined by rows scaled by ``1/d_k`` up to 500) 3.3e-8
+    # BELOW the optimum, the rigorous bound then sat above it, and the certificate
+    # was refused as a failed premise. The point is moved onto its equality rows
+    # first; the bound is valid for any sign-consistent multipliers, so the duals
+    # from ``x`` still apply, and the projected point is the one reported.
+    xp = _project_onto_equality_rows(xs, A, cl, cu, lb, ub)
+    projected = xp is not None
+    if xp is not None:
+        xs = xp
+
     if estimate_lam:
         lam = _qp_estimated_multipliers(
             A, cl, cu, np.asarray(grad_fn(xs), dtype=np.float64).ravel(), xs, lb, ub
@@ -28368,7 +28383,76 @@ def _qp_convex_certificate(
     # certified answer and removed no false one.
     if cert is None or cert.bound is None or cert.complementarity_rel > max(gap_tolerance, 1e-6):
         return None
+    if projected and cert.better_x is None:
+        # The certified point is the projected one, not the backend's: report it.
+        cert = cert._replace(better_x=xs, better_obj=float(evaluator.evaluate_objective(xs)))
     return cert
+
+
+def _project_onto_equality_rows(
+    x: np.ndarray,
+    A,  # noqa: N803
+    cl: np.ndarray,
+    cu: np.ndarray,
+    lb: np.ndarray,
+    ub: np.ndarray,
+) -> Optional[np.ndarray]:
+    """``x`` moved onto its equality rows ``A_E x = b_E`` by a minimum-norm step over
+    the columns strictly inside their box, or ``None`` (#1655).
+
+    ``None`` when there is nothing to repair (no equality row is off by more than
+    round-off at its own term scale), when the step would leave the box, or when it
+    does not leave every row -- equalities and inequalities alike -- at least as
+    satisfied as ``x`` left it. So a returned point is never less feasible than ``x``.
+    """
+    m = int(A.shape[0])
+    if m == 0:
+        return None
+    eq = np.flatnonzero(np.isfinite(cl) & (cl == cu))
+    if eq.size == 0:
+        return None
+    import scipy.sparse as _sps
+    from scipy.sparse.linalg import lsmr
+
+    As = _sps.csr_matrix(A, dtype=np.float64)
+    x = np.asarray(x, dtype=np.float64)
+    ax = np.abs(x)
+    scale_rows = np.asarray(abs(As) @ ax, dtype=np.float64).ravel() + np.abs(cl)
+
+    def residuals(z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        g = np.asarray(As @ z, dtype=np.float64).ravel()
+        with np.errstate(invalid="ignore"):
+            viol = np.maximum(np.maximum(cl - g, g - cu), 0.0)
+        viol = np.where(np.isfinite(viol), viol, 0.0)
+        return g, viol
+
+    g0, v0 = residuals(x)
+    noise = 8.0 * np.finfo(float).eps * (1.0 + scale_rows)
+    if not np.any(v0[eq] > noise[eq]):
+        return None
+    span = np.where(np.isfinite(ub - lb), ub - lb, np.inf)
+    margin = 1e-9 * (1.0 + np.minimum(ax, span))
+    free = np.flatnonzero((x - lb > margin) & (ub - x > margin))
+    if free.size == 0:
+        return None
+    AE = As[eq][:, free]  # noqa: N806
+    z = x.copy()
+    for _ in range(2):  # one refinement pass recovers the digits lsmr leaves
+        r = cl[eq] - np.asarray(As[eq] @ z, dtype=np.float64).ravel()
+        if not np.any(np.abs(r) > noise[eq]):
+            break
+        dx = lsmr(AE, r, atol=1e-15, btol=1e-15, maxiter=10 * (AE.shape[0] + AE.shape[1]))[0]
+        if not np.all(np.isfinite(dx)):
+            return None
+        z[free] += dx
+    if np.any(z < lb) or np.any(z > ub):
+        return None
+    _, v1 = residuals(z)
+    if np.any(v1 > np.maximum(v0, noise)):
+        return None
+    if not float(v1[eq].max()) < float(v0[eq].max()):
+        return None
+    return z
 
 
 def _pounce_sos_lift(model: Model) -> Optional[tuple]:
