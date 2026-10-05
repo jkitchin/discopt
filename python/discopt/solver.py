@@ -19591,9 +19591,15 @@ def solve_model(
                     # that clears the 1e-4 search tolerance may spend all of it, and
                     # an incumbent that spends row tolerance can beat the optimum --
                     # the tree then prunes against an infeasible value. Hold them to
-                    # the declared 1e-6 (term-scaled), as the exit gates do.
+                    # the declared 1e-6 (term-scaled), as the exit gates do -- AND to the
+                    # search's own arbiter, whose #1254 feasible-distance cap the
+                    # absolute test lacks: a point 2.6e-7 outside
+                    # ``10**y1 + 10**y2 + s <= 10**z`` but 0.87 away in ``y`` passes
+                    # the absolute test alone (test_1284).
                     if _cl is not None and (
-                        _nonlinear_point_excess(evaluator, _xk, _cl, _cu)[0] > _NLPBB_EXIT_ABS_TOL
+                        not _check_constraint_feasibility(evaluator, _xk, _cl, _cu)
+                        or _nonlinear_point_excess(evaluator, _xk, _cl, _cu)[0]
+                        > _NLPBB_EXIT_ABS_TOL
                     ):
                         continue
                     _obj_i = float(evaluator.evaluate_objective(_xk))
@@ -20344,6 +20350,12 @@ def solve_model(
                 )
                 _accept = (
                     _arb_rows_finite
+                    and (
+                        not _arb.cl
+                        or _check_constraint_feasibility(
+                            _arb.evaluator, _arb.view(_refined), _arb.cl, _arb.cu
+                        )
+                    )
                     and _polish_preserves_feasibility(
                         _arb.evaluator, _arb.view(_refined), _arb.view(sol_flat), _arb.cl, _arb.cu
                     )
@@ -20384,6 +20396,13 @@ def solve_model(
         _sx_exc, _sx_where, _sx_cmp = _nonlinear_point_excess(
             _arb.evaluator, _arb.view(sol_flat), _arb.cl, _arb.cu
         )
+        # The term-scaled absolute test has no #1254 feasible-distance cap; the
+        # search's arbiter does, so the point must clear both.
+        if _sx_cmp > 0 and _sx_exc <= _NLPBB_EXIT_ABS_TOL and _arb.cl:
+            if not _check_constraint_feasibility(
+                _arb.evaluator, _arb.view(sol_flat), _arb.cl, _arb.cu
+            ):
+                _sx_exc, _sx_where = np.inf, "a row (outside the #1254 feasible-distance cap)"
         if _sx_cmp > 0 and _sx_exc > _NLPBB_EXIT_ABS_TOL:
             _spatial_exit_unverified = True
             logger.warning(
