@@ -5,11 +5,12 @@
 
 use crate::expr::{
     xlogx, BinOp, ConstraintSense, ExprArena, ExprId, ExprNode, MathFunc, ModelRepr,
-    ObjectiveSense, UnOp, VarType,
+    ObjectiveSense, UnOp, VarType, XLOG_FLOOR,
 };
 use crate::presolve::directed::{
     abs_down, abs_up, add_down, add_up, div_down, div_up, lib_down, lib_up, mul_down, mul_up,
-    powi_down, powi_up, root_down, root_up, sqrt_down, sqrt_up, sub_down, sub_up,
+    next_down, next_up, powi_down, powi_up, root_down, root_up, sqrt_down, sqrt_up, sub_down,
+    sub_up, LIB_ULPS,
 };
 use std::f64::consts::PI;
 use std::time::Instant;
@@ -982,6 +983,10 @@ fn eval_node_interval(
                     Interval::new(lib_down(sp(a0.lo)).max(0.0), lib_up(sp(a0.hi)))
                 }
                 MathFunc::Entropy => entropy_interval(&a0),
+                MathFunc::Centropy => match args.get(1) {
+                    Some(b) => centropy_interval(&a0, &node_bounds[b.0]),
+                    None => Interval::new(f64::NEG_INFINITY, f64::INFINITY),
+                },
                 MathFunc::Abs => interval_abs(&a0),
                 MathFunc::Sign => Interval::new(-1.0, 1.0),
                 // Single-argument Min/Max (audited with #1582): returning the
@@ -1642,6 +1647,34 @@ fn backward_propagate_with(
                         );
                     }
                 }
+                MathFunc::Centropy => {
+                    // `x*ln(x/y)` (#1661): each operand's preimage is projected
+                    // with the other operand at its forward box, so each
+                    // projection is a superset of the true one.
+                    if let [xa, ya] = args[..] {
+                        let (xb, yb) = (node_bounds[xa.0], node_bounds[ya.0]);
+                        if let Some(px) = centropy_x_preimage(&xb, &yb, &tightened) {
+                            backward_propagate_with(
+                                arena,
+                                xa,
+                                px,
+                                node_bounds,
+                                var_bounds,
+                                reduce_counts,
+                            );
+                        }
+                        if let Some(py) = centropy_y_preimage(&xb, &yb, &tightened) {
+                            backward_propagate_with(
+                                arena,
+                                ya,
+                                py,
+                                node_bounds,
+                                var_bounds,
+                                reduce_counts,
+                            );
+                        }
+                    }
+                }
                 MathFunc::Erf => {
                     // erf increasing onto (-1, 1); invert with erfinv, clamped
                     // to the open domain and widened by a small margin so the
@@ -2219,6 +2252,233 @@ fn entropy_interval(a: &Interval) -> Interval {
     // Outward (#1504): `xlogx` is a libm composite, and `ENTROPY_MIN` is -1/e
     // rounded to nearest.
     Interval::new(lib_down(lo), lib_up(f_lo.max(f_hi)))
+}
+
+/// Outward enclosure of `x*ln(x/y)` at one point of its domain (`x >= 0`,
+/// `y > 0`, both finite), as `(lo, hi)`.
+///
+/// The error is absolute at scale `x`: `ln` of a ratio carrying a relative
+/// rounding error `u` is off by about `u`, times `x`, plus `ln`'s own relative
+/// error on `|ln(x/y)|`. `abs_down`/`abs_up` widen by `LIB_ULPS * eps * (|v| +
+/// scale)`, so `scale = 4x` covers the quotient, the log, and the product. When
+/// the quotient leaves the normal range (`x/y` under- or overflows) the log is
+/// taken as `ln x - ln y`, whose error scales with `x*(|ln x| + |ln y|)`.
+fn centropy_point(x: f64, y: f64) -> (f64, f64) {
+    if x == 0.0 {
+        return (0.0, 0.0); // the limit, exactly
+    }
+    let q = x / y;
+    let (l, scale) = if q.is_normal() {
+        (q.ln(), 4.0 * x)
+    } else {
+        let (lx, ly) = (x.ln(), y.ln());
+        (lx - ly, 4.0 * x * (1.0 + lx.abs() + ly.abs()))
+    };
+    let v = x * l;
+    (abs_down(v, scale), abs_up(v, scale))
+}
+
+/// Forward enclosure of `centropy(x, y) = x*ln(x/y)` over the box `a x b` (#1661).
+///
+/// On `x >= 0, y > 0` the function is decreasing in `y` (`d/dy = -x/y <= 0`)
+/// and convex in `x`, so over the box
+///
+/// * the maximum is at `y = b.lo` and an endpoint of `a`;
+/// * the minimum is at `y = b.hi`: `-b.hi/e` when the minimizer `x = b.hi/e`
+///   lies in `a`, else the smaller endpoint value. `-b.hi/e` is also the
+///   unconstrained minimum over `x >= 0`, so taking it when the minimizer is
+///   only *near* `a` is still a valid lower bound -- the membership test is
+///   widened rather than risk misclassifying by a rounding.
+///
+/// Outside the domain, or with an unbounded operand, the enclosure is the
+/// whole line: sound, and the honest answer.
+fn centropy_interval(a: &Interval, b: &Interval) -> Interval {
+    let whole = Interval::new(f64::NEG_INFINITY, f64::INFINITY);
+    let finite = a.lo.is_finite() && a.hi.is_finite() && b.lo.is_finite() && b.hi.is_finite();
+    if !finite || a.lo < 0.0 || b.lo <= 0.0 || a.lo > a.hi || b.lo > b.hi {
+        return whole;
+    }
+    let (_, hi_l) = centropy_point(a.lo, b.lo);
+    let (_, hi_h) = centropy_point(a.hi, b.lo);
+    let hi = hi_l.max(hi_h);
+    let argmin = b.hi * ENTROPY_ARGMIN;
+    let near = 8.0 * f64::EPSILON * argmin;
+    let lo = if a.lo <= argmin + near && a.hi >= argmin - near {
+        lib_down(-argmin)
+    } else {
+        let (lo_l, _) = centropy_point(a.lo, b.hi);
+        let (lo_h, _) = centropy_point(a.hi, b.hi);
+        lo_l.min(lo_h)
+    };
+    if lo.is_nan() || hi.is_nan() {
+        return whole;
+    }
+    Interval::new(lo, hi)
+}
+
+/// Whether `x*ln(x/y)` is defined on the whole box with finite bounds.
+fn centropy_box_ok(a: &Interval, b: &Interval) -> bool {
+    a.lo.is_finite()
+        && a.hi.is_finite()
+        && b.lo.is_finite()
+        && b.hi.is_finite()
+        && a.lo >= 0.0
+        && b.lo > 0.0
+        && a.lo <= a.hi
+        && b.lo <= b.hi
+}
+
+/// Absolute error bound on `xlogx(t)` for `t <= tmax`, used to shift a bisection
+/// target outward so the inverted endpoint cannot land inside the true preimage.
+/// `1e-290` covers the `XLOG_FLOOR` clamp below `t = 1e-300`.
+fn xlogx_err_scale(tmax: f64) -> f64 {
+    4.0 * tmax * (1.0 + tmax.max(XLOG_FLOOR).ln().abs()) + 1e-290
+}
+
+/// Bracket margin for classifying a box against the minimizer `1/e`.
+const CENTROPY_BRANCH_TOL: f64 = 1e-12;
+
+/// `x`-projection of `{(x, y) in a x b : centropy(x, y) in out}` (#1661).
+///
+/// With `t = x/y`, `centropy(x, y) = y*h(t)` for `h(t) = t*ln(t)`. Because the
+/// function decreases in `y`, `x` is feasible iff `f(x, b.hi) <= out.hi` and
+/// `f(x, b.lo) >= out.lo`:
+///
+/// * `h(x/b.hi) <= out.hi/b.hi` is a sublevel set of the convex `h`: an
+///   interval, bounded on each side by the inverse on that monotone branch;
+/// * `h(x/b.lo) >= out.lo/b.lo` is a superlevel set: the complement of an
+///   interval, which bounds `x` only when one of its two pieces misses `a`.
+///
+/// Each bisection target is shifted outward by the error bound of `xlogx`, so
+/// the root it returns lies outside the true preimage, and the back-scaling to
+/// `x` is rounded outward. `None` when nothing tightens or the box is off the
+/// domain.
+fn centropy_x_preimage(a: &Interval, b: &Interval, out: &Interval) -> Option<Interval> {
+    if !centropy_box_ok(a, b) || out.lo.is_nan() || out.hi.is_nan() {
+        return None;
+    }
+    let (mut lo, mut hi) = (a.lo, a.hi);
+    let argmin_lo = ENTROPY_ARGMIN * (1.0 - CENTROPY_BRANCH_TOL);
+    let argmin_hi = ENTROPY_ARGMIN * (1.0 + CENTROPY_BRANCH_TOL);
+    if out.hi.is_finite() {
+        let yh = b.hi;
+        let (tlo, thi) = (a.lo / yh, a.hi / yh);
+        let c = abs_up(out.hi / yh, xlogx_err_scale(lib_up(thi)));
+        if c < ENTROPY_MIN * (1.0 + CENTROPY_BRANCH_TOL) {
+            return None; // empty preimage: report nothing, let emptiness surface elsewhere
+        }
+        if thi > argmin_lo {
+            // Sublevel set's right end, on the increasing branch.
+            let inp = Interval::new(tlo.max(argmin_lo), thi);
+            let t2 = entropy_inv(c, &inp, true)?;
+            hi = hi.min(lib_up(lib_up(t2 + ENTROPY_INV_MARGIN) * yh));
+        }
+        if tlo < argmin_hi {
+            // Left end, on the decreasing branch.
+            let inp = Interval::new(tlo, thi.min(argmin_hi));
+            let t1 = entropy_inv(c, &inp, false)?;
+            lo = lo.max(lib_down(lib_down(t1 - ENTROPY_INV_MARGIN).max(0.0) * yh));
+        }
+    }
+    if out.lo.is_finite() {
+        let yl = b.lo;
+        let (tlo, thi) = (a.lo / yl, a.hi / yl);
+        let scale = xlogx_err_scale(lib_up(thi));
+        let d = abs_down(out.lo / yl, scale);
+        if d > ENTROPY_MIN * (1.0 - CENTROPY_BRANCH_TOL) {
+            // `{h >= d}` = `[0, s1] u [s2, inf)` with s1 < 1/e < s2. A piece that
+            // misses the box drops out; the other bounds `x`.
+            // `[0, s1]` meets the box iff `tlo <= s1`, i.e. `tlo` is left of 1/e
+            // and `h(tlo) >= d`; `[s2, inf)` meets it iff `thi >= s2`. Decided on
+            // values rounded up, so a piece is dropped only when it surely
+            // misses (s1 can sit far closer to 1/e than the branch tolerance).
+            let left_empty = tlo >= argmin_hi || abs_up(xlogx(tlo), scale) < d;
+            let right_empty = thi <= argmin_lo || abs_up(xlogx(thi), scale) < d;
+            if left_empty && right_empty {
+                return None; // empty preimage
+            }
+            if left_empty {
+                let inp = Interval::new(tlo.max(argmin_lo), thi);
+                let s2 = entropy_inv(d, &inp, true)?;
+                lo = lo.max(lib_down(lib_down(s2 - ENTROPY_INV_MARGIN).max(0.0) * yl));
+            } else if right_empty {
+                let inp = Interval::new(tlo, thi.min(argmin_hi));
+                let s1 = entropy_inv(d, &inp, false)?;
+                hi = hi.min(lib_up(lib_up(s1 + ENTROPY_INV_MARGIN) * yl));
+            }
+        }
+    }
+    if lo > a.lo || hi < a.hi {
+        Some(Interval::new(lo, hi))
+    } else {
+        None
+    }
+}
+
+/// `x*exp(-c/x)`, the `y` at which `centropy(x, y) = c`, rounded outward in the
+/// direction `up`.
+///
+/// `up = true` bounds `{y : f(x, y) >= c}` from above, `up = false` bounds
+/// `{y : f(x, y) <= c}` from below. At `x = 0` the value is `0` for every `y`,
+/// so the answer is all-or-nothing rather than the `x -> 0` limit (which would
+/// be wrong at `c = 0`, where it is `0` but every `y` qualifies): `+inf` when
+/// every `y` qualifies (`up`) or none does (`!up`), else `0`.
+fn centropy_y_root(x: f64, c: f64, up: bool) -> f64 {
+    if x == 0.0 {
+        let all = if up { c <= 0.0 } else { c >= 0.0 };
+        return if all == up { f64::INFINITY } else { 0.0 };
+    }
+    let z = -c / x;
+    let v = x * z.exp();
+    // `z` carries a relative error of ~1 ulp, which `exp` turns into a relative
+    // error of `|z|` ulps; `exp` and the product add a few more.
+    let rel = LIB_ULPS * f64::EPSILON * (2.0 + z.abs());
+    if up {
+        next_up(v + rel * v.abs())
+    } else {
+        next_down(v - rel * v.abs()).max(0.0)
+    }
+}
+
+/// `y`-projection of `{(x, y) in a x b : centropy(x, y) in out}` (#1661).
+///
+/// For fixed `x > 0`, `centropy` falls monotonically in `y`, so
+/// `f <= out.hi` iff `y >= g(x; out.hi)` and `f >= out.lo` iff
+/// `y <= g(x; out.lo)` with `g(x; c) = x*exp(-c/x)`. Projecting over `x` in `a`
+/// takes the minimum of the first and the maximum of the second. `g(.; c)` is
+/// increasing for `c >= 0`; for `c < 0` it falls to its minimum `-c*e` at
+/// `x = -c` and rises after, so its maximum is at an endpoint.
+fn centropy_y_preimage(a: &Interval, b: &Interval, out: &Interval) -> Option<Interval> {
+    if !centropy_box_ok(a, b) || out.lo.is_nan() || out.hi.is_nan() {
+        return None;
+    }
+    let (mut lo, mut hi) = (b.lo, b.hi);
+    if out.hi.is_finite() {
+        let c = out.hi;
+        let xs = if c >= 0.0 {
+            a.lo
+        } else {
+            (-c).clamp(a.lo, a.hi)
+        };
+        let g = centropy_y_root(xs, c, false);
+        if g.is_finite() {
+            lo = lo.max(g);
+        }
+    }
+    if out.lo.is_finite() {
+        let c = out.lo;
+        // Increasing for `c > 0`, unimodal-down for `c < 0`, and `x = 0` is a
+        // jump at `c <= 0`: the endpoint maximum covers all three.
+        let g = centropy_y_root(a.lo, c, true).max(centropy_y_root(a.hi, c, true));
+        if g.is_finite() {
+            hi = hi.min(g);
+        }
+    }
+    if lo > b.lo || hi < b.hi {
+        Some(Interval::new(lo, hi))
+    } else {
+        None
+    }
 }
 
 /// Preimage of `out` under `entropy`, restricted to the forward box `inp`.
@@ -4242,6 +4502,211 @@ mod entropy_tests {
             args: vec![x],
         });
         let var_bounds = vec![Interval::new(0.0, 1.0)];
+        let node_bounds = forward_propagate(&arena, e, &var_bounds);
+        let got = node_bounds[e.0];
+        assert!(
+            (got.lo - ENTROPY_MIN).abs() < 1e-12 && got.hi.abs() < 1e-12,
+            "forward FBBT gave [{}, {}], expected [-1/e, 0]",
+            got.lo,
+            got.hi
+        );
+    }
+
+    // -- centropy x*ln(x/y) (#1661) --
+
+    #[test]
+    fn centropy_interval_encloses_sampled_values() {
+        // Sample every box on a grid (including x = 0, degenerate boxes, and
+        // boxes straddling and missing the minimizer y/e) at 41x41 points and
+        // require each true value inside the enclosure. Also require the
+        // enclosure to be tight: within 1e-9 relative of the sampled hull's
+        // ends where the extremum is a sampled corner.
+        let xs = [0.0, 1e-300, 1e-9, 0.01, 0.2, 0.3679, 0.5, 1.0, 3.0, 1e6];
+        let ys = [1e-300, 1e-9, 0.01, 0.5, 1.0, 2.0, 1e6];
+        let mut checked = 0usize;
+        for (i, &xl) in xs.iter().enumerate() {
+            for &xh in &xs[i..] {
+                for (j, &yl) in ys.iter().enumerate() {
+                    for &yh in &ys[j..] {
+                        let r = centropy_interval(&Interval::new(xl, xh), &Interval::new(yl, yh));
+                        assert!(r.lo <= r.hi, "empty enclosure {r:?}");
+                        for a in 0..=40 {
+                            let x = xl + (xh - xl) * (a as f64) / 40.0;
+                            for b in 0..=40 {
+                                let y = yl + (yh - yl) * (b as f64) / 40.0;
+                                let v = crate::expr::centropy(x, y);
+                                if !v.is_finite() {
+                                    continue; // overflowed corner: enclosure is +inf
+                                }
+                                assert!(
+                                    r.lo <= v && v <= r.hi,
+                                    "x={x:e} y={y:e} v={v:e} not in [{:e}, {:e}]",
+                                    r.lo,
+                                    r.hi
+                                );
+                                checked += 1;
+                            }
+                        }
+                        // Corner extremes are attained, so the ends are tight.
+                        let top = crate::expr::centropy(xl, yl).max(crate::expr::centropy(xh, yl));
+                        if top.is_finite() {
+                            assert!(r.hi - top <= 1e-9 * (1.0 + top.abs()) * (1.0 + xh));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 100_000, "only {checked} samples executed");
+    }
+
+    #[test]
+    fn centropy_interval_minimum_at_interior_argmin() {
+        // x in [0, 1], y = 1: min is -1/e at x = 1/e, max is 0.
+        let r = centropy_interval(&Interval::new(0.0, 1.0), &Interval::new(1.0, 1.0));
+        assert!((r.lo - ENTROPY_MIN).abs() < 1e-14 && r.lo <= ENTROPY_MIN);
+        assert!(r.hi >= 0.0 && r.hi < 1e-14);
+        // x in [1, 2], y in [1, 2]: decreasing in y, increasing in x here.
+        let r = centropy_interval(&Interval::new(1.0, 2.0), &Interval::new(1.0, 2.0));
+        assert!(r.lo <= -2.0f64.ln() && r.lo > -2.0f64.ln() - 1e-12);
+        assert!(r.hi >= 2.0 * 2.0f64.ln() && r.hi < 2.0 * 2.0f64.ln() + 1e-12);
+    }
+
+    #[test]
+    fn centropy_interval_abstains_off_domain_or_unbounded() {
+        let whole = |r: Interval| r.lo == f64::NEG_INFINITY && r.hi == f64::INFINITY;
+        let one = Interval::new(1.0, 2.0);
+        assert!(whole(centropy_interval(&Interval::new(-1.0, 1.0), &one)));
+        assert!(whole(centropy_interval(&one, &Interval::new(0.0, 1.0))));
+        assert!(whole(centropy_interval(&one, &Interval::new(-1.0, 1.0))));
+        assert!(whole(centropy_interval(
+            &Interval::new(0.0, f64::INFINITY),
+            &one
+        )));
+        assert!(whole(centropy_interval(
+            &one,
+            &Interval::new(1.0, f64::INFINITY)
+        )));
+    }
+
+    #[test]
+    fn centropy_preimages_keep_every_sampled_feasible_point() {
+        // For each box and each output window cut from the sampled range, every
+        // sampled (x, y) whose value lies in the window must survive both
+        // projections. Windows are cut at sampled values, so points sit exactly
+        // on the window edges -- where an unsound inversion would cut them.
+        let xs = [0.0, 1e-8, 0.05, 0.3, 0.3679, 0.37, 1.0, 2.5, 40.0];
+        let ys = [1e-6, 0.1, 0.9, 1.0, 3.0, 100.0];
+        let n = 24;
+        let (mut checked, mut tightened) = (0usize, 0usize);
+        for (i, &xl) in xs.iter().enumerate() {
+            for &xh in &xs[i..] {
+                for (j, &yl) in ys.iter().enumerate() {
+                    for &yh in &ys[j..] {
+                        let (a, b) = (Interval::new(xl, xh), Interval::new(yl, yh));
+                        let mut pts = Vec::new();
+                        for p in 0..=n {
+                            let x = (xl + (xh - xl) * (p as f64) / (n as f64)).min(xh);
+                            for q in 0..=n {
+                                let y = (yl + (yh - yl) * (q as f64) / (n as f64)).min(yh);
+                                pts.push((x, y, crate::expr::centropy(x, y)));
+                            }
+                        }
+                        let mut vals: Vec<f64> = pts.iter().map(|t| t.2).collect();
+                        vals.sort_by(|u, v| u.partial_cmp(v).unwrap());
+                        let k = vals.len();
+                        let cuts = [0, k / 10, k / 3, k / 2, 2 * k / 3, 9 * k / 10, k - 1];
+                        for &l in &cuts {
+                            for &h in &cuts {
+                                if h < l {
+                                    continue;
+                                }
+                                for out in [
+                                    Interval::new(vals[l], vals[h]),
+                                    Interval::new(f64::NEG_INFINITY, vals[h]),
+                                    Interval::new(vals[l], f64::INFINITY),
+                                ] {
+                                    let px = centropy_x_preimage(&a, &b, &out);
+                                    let py = centropy_y_preimage(&a, &b, &out);
+                                    tightened += px.is_some() as usize + py.is_some() as usize;
+                                    let px = px.unwrap_or(a);
+                                    let py = py.unwrap_or(b);
+                                    for &(x, y, v) in &pts {
+                                        if v < out.lo || v > out.hi {
+                                            continue;
+                                        }
+                                        assert!(
+                                            px.lo <= x && x <= px.hi && py.lo <= y && y <= py.hi,
+                                            "cut ({x:e}, {y:e}) f={v:e} out=[{:e}, {:e}] \
+                                             box x[{xl:e},{xh:e}] y[{yl:e},{yh:e}] \
+                                             px=[{:e},{:e}] py=[{:e},{:e}]",
+                                            out.lo,
+                                            out.hi,
+                                            px.lo,
+                                            px.hi,
+                                            py.lo,
+                                            py.hi
+                                        );
+                                        checked += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            checked > 1_000_000,
+            "only {checked} feasible samples executed"
+        );
+        assert!(tightened > 1_000, "only {tightened} projections tightened");
+    }
+
+    #[test]
+    fn centropy_preimages_tighten_a_known_case() {
+        // x*ln(x/y) <= 0 with y in [1, 2] forces x <= y <= 2 for x in [0, 10];
+        let a = Interval::new(0.0, 10.0);
+        let b = Interval::new(1.0, 2.0);
+        let px = centropy_x_preimage(&a, &b, &Interval::new(f64::NEG_INFINITY, 0.0)).unwrap();
+        assert!(px.hi >= 2.0 && px.hi < 2.0 + 1e-6, "{px:?}");
+        // f >= -0.1 with x in [0, 1]: at x = 0 every y qualifies -> no bound.
+        assert!(centropy_y_preimage(
+            &Interval::new(0.0, 1.0),
+            &Interval::new(1e-3, 5.0),
+            &Interval::new(-0.1, f64::INFINITY),
+        )
+        .is_none());
+        // f <= -0.3 with x in [0.1, 1]: y >= min x*exp(0.3/x) = 0.3*e at x = 0.3.
+        let py = centropy_y_preimage(
+            &Interval::new(0.1, 1.0),
+            &Interval::new(1e-3, 5.0),
+            &Interval::new(f64::NEG_INFINITY, -0.3),
+        )
+        .unwrap();
+        let want = 0.3 * std::f64::consts::E;
+        assert!(py.lo <= want && py.lo > want - 1e-12, "{py:?}");
+    }
+
+    #[test]
+    fn centropy_forward_fbbt_bounds_a_two_argument_call() {
+        let mut arena = ExprArena::new();
+        let x = arena.intern(ExprNode::Variable {
+            name: "x".to_string(),
+            index: 0,
+            size: 1,
+            shape: vec![],
+        });
+        let y = arena.intern(ExprNode::Variable {
+            name: "y".to_string(),
+            index: 1,
+            size: 1,
+            shape: vec![],
+        });
+        let e = arena.intern(ExprNode::FunctionCall {
+            func: MathFunc::Centropy,
+            args: vec![x, y],
+        });
+        let var_bounds = vec![Interval::new(0.0, 1.0), Interval::new(1.0, 1.0)];
         let node_bounds = forward_propagate(&arena, e, &var_bounds);
         let got = node_bounds[e.0];
         assert!(

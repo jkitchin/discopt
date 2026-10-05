@@ -124,17 +124,16 @@ def test_decomposes_only_the_support():
 def test_the_sum_of_squares_branch_is_also_restricted():
     """The ``sum((A@x)*(A@x))`` branch formed the full Gram matrix ``A^T A``,
     with a row and column per variable in the model — the same blow-up on a
-    different branch.  Dropping ``A``'s all-zero columns is the same exact
-    restriction, so the verdict is still computed, not assumed."""
+    different branch.  Since #1660 the branch decides nothing numerically:
+    ``sum((A@x)*(A@x))`` with equal factors is ``||A x||**2``, PSD for every
+    ``A``, so no Gram matrix is formed or decomposed at all."""
     m = dm.Model("sos1456")
     v = m.continuous("v", shape=(3,), lb=-1.0, ub=1.0)
     for i in range(N_EXTRA):
         m.continuous(f"w{i}", lb=-1.0, ub=1.0)
     with _EigSpy() as spy:
         assert pat.is_homogeneous_psd_quadratic(dm.sum(v * v), m) is True
-    assert spy.shapes, "the sum-of-squares branch was not taken"
-    worst = max(s[0] for s in spy.shapes)
-    assert worst <= 3, f"formed a {worst}x{worst} Gram matrix for 3 variables"
+    assert spy.shapes == [], f"decomposed {spy.shapes} for an identity"
 
 
 def test_a_full_support_quadratic_is_unchanged():
