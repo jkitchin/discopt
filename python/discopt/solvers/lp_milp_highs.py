@@ -33,6 +33,7 @@ import contextlib
 import contextvars
 import dataclasses
 import logging
+import os
 import time
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
@@ -1690,6 +1691,39 @@ def _fixed_integer_lp(sf: "StdForm", x: np.ndarray, time_limit: Optional[float])
     return solve_lp_std(dataclasses.replace(sf, xl=xl, xu=xu), time_limit=time_limit)
 
 
+def _repair_refused_incumbent(
+    sf: "StdForm",
+    x: np.ndarray,
+    root: HighsOutcome,
+    time_limit: Optional[float],
+    stats: dict,
+) -> Optional[tuple[np.ndarray, float]]:
+    """A verified point carrying the integers of a refused HiGHS incumbent, or ``None``.
+
+    #1654: the LP of ``sf`` with every integer column fixed at ``round(x_j)``
+    (:func:`_fixed_integer_lp`), re-verified by :func:`_verified_mip_point`. Only a
+    point that passes the same gates as any HiGHS incumbent is returned, so the
+    repair can add a feasible point and never an infeasible one. Skipped when the
+    root LP already proved the relaxation empty (that branch reports infeasible), or
+    when ``x`` is not finite.
+    """
+    if root.status == "infeasible" or not sf.int_idx.size:
+        return None
+    x = np.asarray(x, dtype=np.float64).ravel()
+    if x.shape != (sf.n,) or not np.all(np.isfinite(x)):
+        return None
+    if time_limit is not None and time_limit <= 0.0:
+        stats["milp/incumbent_repair_skipped"] = 1.0
+        return None
+    stats["milp/incumbent_repair_ran"] = 1.0
+    fx = _fixed_integer_lp(sf, x, time_limit)
+    pt = _verified_mip_point(sf, fx.x) if fx.status == "optimal" else None
+    if pt is not None:
+        stats["milp/incumbent_repaired"] = 1.0
+        stats["milp/fixed_int_objective"] = float(pt[1])
+    return pt
+
+
 def logical_column_scales(sf: StdForm, n_struct: Optional[int]) -> Optional[np.ndarray]:
     """Power-of-two factors that equilibrate the route's own logical columns, or ``None``.
 
@@ -1767,6 +1801,228 @@ def _scale_logicals(sf: StdForm, f: np.ndarray) -> StdForm:
     return StdForm.from_arrays(sf.c * f, A, sf.b, xl, xu, sf.obj_const, sf.int_idx)
 
 
+#: #1654: safety factor on the round-off margin of the activity slack ``d`` that
+#: coefficient tightening removes. ``d`` is a floating-point sum of the row's terms,
+#: whose error is at most ``(k + 2) * eps * sum|terms|`` for ``k`` terms; shrinking ``d``
+#: by this factor times that bound only makes the tightening weaker, never invalid
+#: (any ``0 <= d' <= d`` is exact). A margin relative to the row scale itself would
+#: be set by the big-M being removed: 1e-9 of 1e9 left ``M`` at 11 where 10 is exact.
+_COEF_TIGHTEN_SAFETY = 8.0
+
+
+def coefficient_tightened(sf: StdForm) -> tuple[Optional[StdForm], int]:
+    """``sf`` with every binary's big-M coefficient shrunk to its row's activity bound.
+
+    #1654: the classic MIP coefficient tightening (Savelsbergh 1994; Achterberg 2007
+    §10.1). Take a one-sided row ``a x <= U`` -- in this standard form, ``a x + s = b``
+    with a single-entry logical ``s`` whose range has one finite side -- and a binary
+    ``y`` in it with coefficient ``a_k``. With ``maxact`` the row's maximal activity
+    over the declared box of every OTHER column:
+
+    * ``a_k > 0`` and ``d = U - maxact > 0``: the row is slack by ``d`` at ``y = 0``,
+      so ``a_k -> a_k - d`` and ``U -> U - d``;
+    * ``a_k < 0`` and ``d = U - (maxact + a_k) > 0``: the row is slack by ``d`` at
+      ``y = 1``, so ``a_k -> a_k + d``.
+
+    Each rewrite leaves the row's restriction at ``y = 0`` and at ``y = 1`` exactly as
+    it was over the box, so the set of INTEGER-feasible points -- and therefore the
+    MILP's optimum, every feasible point and every valid bound -- is unchanged; only
+    the LP relaxation tightens. On a big-M row ``s_i + p_i <= s_j + M (1 - y)`` over
+    ``s in [0, 200]`` it replaces ``M = 1e9`` by ``209``, which removes the trap that
+    makes the model unsolvable in floating point: HiGHS accepts ``y`` within 1e-6 of
+    integral, and ``1e-6 * 1e9`` is a thousand units of row slack. Any ``d' in [0, d]``
+    is also exact, so ``d`` is reduced by a round-off margin before use.
+
+    Only binary columns (integer, box ``[0, 1]``) are rewritten; a row with an
+    unbounded or sentinel-magnitude column has no finite activity bound and is left
+    alone; ranged and equality rows are left alone. Returns ``(form, n_rewritten)``,
+    ``form`` ``None`` when nothing changed.
+    """
+    if not sf.int_idx.size or sf.A.nnz == 0:
+        return None, 0
+    is_bin = np.zeros(sf.n, dtype=bool)
+    ii = sf.int_idx
+    is_bin[ii[(sf.xl[ii] == 0.0) & (sf.xu[ii] == 1.0)]] = True
+    if not is_bin.any():
+        return None, 0
+    logical = _logical_columns(sf)
+    csc = sp.csc_matrix(sf.A)
+    # row -> its logical column (exactly one per one-sided inequality row)
+    row_logical = np.full(sf.m, -1, dtype=np.int64)
+    n_log = np.zeros(sf.m, dtype=np.int64)
+    for j in np.flatnonzero(logical):
+        i = int(csc.indices[csc.indptr[j]])
+        row_logical[i] = j
+        n_log[i] += 1
+    finite_box = (np.abs(sf.xl) < READBACK_LIMIT) & (np.abs(sf.xu) < READBACK_LIMIT)
+    A = sp.csr_matrix(sf.A, copy=True)  # noqa: N806
+    A.sort_indices()
+    b = sf.b.copy()
+    n_rewritten = 0
+    for i in range(sf.m):
+        if n_log[i] != 1:
+            continue
+        j_s = int(row_logical[i])
+        lo, hi = A.indptr[i], A.indptr[i + 1]
+        cols = A.indices[lo:hi]
+        if not np.any(is_bin[cols]):
+            continue
+        k_s = lo + int(np.flatnonzero(cols == j_s)[0])
+        sig = float(A.data[k_s])
+        ends = sorted((sig * sf.xl[j_s], sig * sf.xu[j_s]))
+        lo_fin = abs(ends[0]) < READBACK_LIMIT
+        hi_fin = abs(ends[1]) < READBACK_LIMIT
+        if lo_fin == hi_fin:
+            continue  # ranged (or free) row: not a one-sided inequality
+        # ``a x = b - sig*s``: ``<= b - min(sig*s)`` when that end is finite, else
+        # ``>= b - max(sig*s)``. Work in ``<=`` form; ``sgn`` maps back.
+        sgn = 1.0 if lo_fin else -1.0
+        U = sgn * (b[i] - (ends[0] if lo_fin else ends[1]))  # noqa: N806
+        others = np.flatnonzero(cols != j_s) + lo
+        if not np.all(finite_box[A.indices[others]]):
+            continue
+        for k_ent in others:
+            kq = int(k_ent)
+            if not is_bin[int(A.indices[kq])]:
+                continue
+            g = sgn * A.data[others]
+            cj = A.indices[others]
+            terms = np.maximum(g * sf.xl[cj], g * sf.xu[cj])
+            gk = sgn * float(A.data[kq])
+            maxact_rest = float(terms.sum()) - max(gk, 0.0)
+            scale = float(np.abs(terms).sum()) + abs(U) + abs(gk)
+            margin = _COEF_TIGHTEN_SAFETY * (terms.size + 2) * np.finfo(float).eps * scale
+            if gk > 0.0:
+                d = U - maxact_rest - margin
+                if not 0.0 < d < gk:
+                    continue
+                gk_new, U = gk - d, U - d  # noqa: N806
+                b[i] -= sgn * d
+            else:
+                d = U - (maxact_rest + gk) - margin
+                if not 0.0 < d < -gk:
+                    continue
+                gk_new = gk + d
+            A.data[kq] = sgn * gk_new
+            n_rewritten += 1
+    if not n_rewritten:
+        return None, 0
+    return (
+        StdForm.from_arrays(sf.c, sp.csc_matrix(A), b, sf.xl, sf.xu, sf.obj_const, sf.int_idx),
+        n_rewritten,
+    )
+
+
+def _coef_tighten_enabled() -> bool:
+    """``DISCOPT_MILP_COEF_TIGHTEN`` (default ON; ``=0`` restores the pre-#1654 route).
+
+    Graduated on introduction by the §5 panel recorded in
+    ``docs/dev/issue-1654-coef-tighten-panel-2026-10-05.md`` (certified 22/48 -> 48/48
+    on three big-M families, 0 soundness violations); the opt-out keeps the
+    pre-#1654 route reachable for A/B measurement.
+    """
+    return os.environ.get("DISCOPT_MILP_COEF_TIGHTEN", "1") != "0"
+
+
+def _coefficient_tightening_rescue(
+    sf: StdForm, out: HighsOutcome, kw: dict[str, Any], t0: float
+) -> HighsOutcome:
+    """#1654: re-solve a MILP the route could not certify on its coefficient-tightened
+    form (:func:`coefficient_tightened`), and adopt what that solve proves.
+
+    Runs only when the primary result is NOT certified, so a model this route
+    certifies today is untouched. The tightened form has exactly ``sf``'s
+    integer-feasible set, so its certified bound and infeasibility are statements
+    about ``sf`` -- but that is a claim about exact arithmetic, so the tightened solve
+    goes through the whole certified pipeline (#1295, #1509, #1621, #1634, #1612), its
+    incumbent is re-verified on ``sf`` itself, and a verified point of the primary
+    below its bound refutes it. Anything less returns the primary, improved at most by
+    a better verified incumbent.
+    """
+    sf_ct, n_rw = coefficient_tightened(sf)
+    if sf_ct is None:
+        return out
+    out.stats["milp/coef_tightened_entries"] = float(n_rw)
+    kw2 = dict(kw)
+    if kw["time_limit"] is not None:
+        kw2["time_limit"] = float(kw["time_limit"]) - (time.monotonic() - t0)
+        if kw2["time_limit"] <= 0.0:
+            out.stats["milp/coef_tighten_skipped"] = 1.0
+            return out
+    # The primary's user start is a point of ``sf`` and so of the tightened form too.
+    ct = _certified_milp(sf_ct, kw2)
+    if ct.gap_certified and ct.status == "optimal":
+        ct = _tighten_feasibility_artefact(sf_ct, ct, kw2, time.monotonic())
+    out.stats["milp/coef_tighten_ran"] = 1.0
+    out.stats["milp/coef_tighten_time"] = float(ct.wall_time)
+    out.labels["milp/coef_tighten_status"] = ct.status
+    pt = _verified_mip_point(sf, ct.x)
+    if pt is None and ct.x is not None:
+        rem = (
+            None if kw["time_limit"] is None else float(kw["time_limit"]) - (time.monotonic() - t0)
+        )
+        pt = _repair_refused_incumbent(sf, ct.x, ct, rem, out.stats)
+    mine = _verified_mip_point(sf, out.x)
+    best = min((p for p in (pt, mine) if p is not None), key=lambda p: p[1], default=None)
+
+    def merged(base: HighsOutcome, primary: HighsOutcome) -> HighsOutcome:
+        base.stats = {**primary.stats, **base.stats}
+        base.labels = {**primary.labels, **base.labels}
+        base.node_count += primary.node_count
+        base.iterations += primary.iterations
+        base.wall_time = time.monotonic() - t0
+        return base
+
+    why = None
+    if ct.gap_certified and ct.status == "infeasible":
+        if best is not None:
+            why = (
+                f"tightened form certified infeasible, but a verified point ({best[1]:.12g}) exists"
+            )
+        else:
+            ct.labels["milp/bound_provenance"] = "coef-tightened"
+            ct.x = None
+            ct = merged(ct, out)
+            ct.labels.pop("milp/certificate", None)
+            return ct
+    elif ct.gap_certified and ct.status == "optimal" and ct.bound is not None:
+        claim = float(ct.bound)
+        if best is None:
+            why = "tightened form certified optimal, but its incumbent fails on the model"
+        elif claim - best[1] > CERT_ABS + CERT_REL * abs(claim):
+            why = f"tightened bound {claim:.12g} is above a verified point ({best[1]:.12g})"
+        else:
+            x, obj = best
+            bound = min(claim, obj)
+            ct.x, ct.objective, ct.bound = x, obj, bound
+            if not _gap_closed(obj, bound, kw):
+                ct.status, ct.gap_certified = "feasible", False
+                ct.labels["milp/certificate"] = "declined"
+            ct.labels["milp/bound_provenance"] = (
+                f"{ct.labels.get('milp/bound_provenance', 'highs-fp')} on the "
+                "coefficient-tightened form (#1654)"
+            )
+            ct.message = ct.message or "certified on the coefficient-tightened form (#1654)"
+            ct = merged(ct, out)
+            # The primary's decline is superseded; only the tightened solve's own
+            # verdict may label the result.
+            if ct.gap_certified:
+                ct.labels.pop("milp/certificate", None)
+            return ct
+    else:
+        why = f"tightened solve not certified ({ct.status}: {ct.message or 'no message'})"
+    out.labels["milp/coef_tighten_declined"] = why
+    # No certificate either way: keep the primary, with the better verified point.
+    if best is not None and (out.objective is None or best[1] < out.objective - 1e-12):
+        out.x, out.objective = best
+        out.stats["milp/incumbent_from_coef_tighten"] = 1.0
+        if out.status in ("error", "time_limit", "node_limit"):
+            out.status = "feasible"
+        bounds = [b for b in (out.bound, ct.root_bound, out.root_bound) if b is not None]
+        out.bound = min(max(bounds), best[1]) if bounds else None
+    return out
+
+
 def solve_milp_std(
     sf: StdForm,
     *,
@@ -1798,6 +2054,8 @@ def solve_milp_std(
     out = _certified_milp(sf, kw)
     if out.gap_certified and out.status == "optimal":
         out = _tighten_feasibility_artefact(sf, out, kw, t0)
+    if not out.gap_certified and out.status != "unbounded" and _coef_tighten_enabled():
+        out = _coefficient_tightening_rescue(sf, out, kw, t0)
     return out
 
 
@@ -2425,6 +2683,7 @@ def _solve_milp_std(
 
     x = None
     obj = None
+    repaired_why: Optional[str] = None
     if info.primal_solution_status == highspy.SolutionStatus.kSolutionStatusFeasible:
         x = np.asarray(h.getSolution().col_value, dtype=np.float64)
         why = readback_problem(x, sf) or feasibility_problem(x, sf, check_integrality=True)
@@ -2444,20 +2703,37 @@ def _solve_milp_std(
                         message=f"HiGHS MILP incumbent ({name}) refused: {why}",
                     )
                 )  # fmt: skip
-            return done(
-                HighsOutcome(
-                    "error", message=f"HiGHS MILP incumbent ({name}): {why}",
-                    highs_status=name, node_count=nodes,
+            repaired = _repair_refused_incumbent(sf, x, root, remaining(), stats)
+            # #1654: HiGHS's tree accepts an integer column within its
+            # ``mip_feasibility_tolerance`` of integral, so on a big-M row ``x <= M z``
+            # a binary read back at ``1 - 9e-7`` buys ``9e-7 * M`` of slack, and the
+            # integral realisation the route verifies (#1380) violates the row by that
+            # much. The point is refused, rightly -- but the integer assignment it
+            # carries is still a candidate: the LP over those integers, re-verified on
+            # ``sf``, is a genuine feasible point, and it replaces the refused one.
+            # HiGHS's tree bound does not rest on the refused point (a node closed on
+            # a near-integral LP point closed at that LP's value, a relaxation of the
+            # node), so it goes through every check below exactly as an ordinary
+            # incumbent's would; the gap is re-tested on the repaired objective.
+            if repaired is None:
+                return done(
+                    HighsOutcome(
+                        "error", message=f"HiGHS MILP incumbent ({name}): {why}",
+                        highs_status=name, node_count=nodes,
+                    )
+                )  # fmt: skip
+            x, obj = repaired
+            repaired_why = why
+            labels["milp/incumbent_repaired"] = why
+        else:
+            obj = float(sf.c @ x) + sf.obj_const
+            h_obj = float(info.objective_function_value)  # includes the passed offset
+            mismatch = abs(obj - h_obj)
+            stats["milp/objective_mismatch"] = mismatch
+            if mismatch > 1e-6 * (1.0 + abs(obj)):
+                logger.warning(
+                    "HiGHS MILP objective %.12g differs from the recomputed %.12g", h_obj, obj
                 )
-            )  # fmt: skip
-        obj = float(sf.c @ x) + sf.obj_const
-        h_obj = float(info.objective_function_value)  # includes the passed offset
-        mismatch = abs(obj - h_obj)
-        stats["milp/objective_mismatch"] = mismatch
-        if mismatch > 1e-6 * (1.0 + abs(obj)):
-            logger.warning(
-                "HiGHS MILP objective %.12g differs from the recomputed %.12g", h_obj, obj
-            )
 
     raw = float(info.mip_dual_bound)  # includes the passed offset
     bound = raw if np.isfinite(raw) else None
@@ -2486,6 +2762,17 @@ def _solve_milp_std(
     if bound is not None and obj is not None:
         bound = min(bound, obj)
     out.bound = bound if out.status in ("optimal", "feasible", "time_limit", "node_limit") else None
+    if repaired_why is not None and out.status == "optimal":
+        # #1654: kOptimal closed HiGHS's gap on the REFUSED point's objective; the
+        # repaired point may sit above it, so the stop rule is asked again.
+        gap_kw = {"abs_gap_tolerance": abs_gap_tolerance, "gap_tolerance": gap_tolerance}
+        if out.bound is None or not _gap_closed(float(obj), float(out.bound), gap_kw):  # type: ignore[arg-type]
+            out.status, out.gap_certified = "feasible", False
+            labels["milp/certificate"] = "declined"
+        out.message = (
+            f"HiGHS MILP incumbent ({name}) refused ({repaired_why}); reporting the "
+            "fixed-integer LP over its integers, verified on the model (#1654)"
+        )
 
     def decertify_root_check(why: str) -> None:
         """Strip the certificate from a result whose NS-safe root check did not
