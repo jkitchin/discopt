@@ -5226,6 +5226,7 @@ def _lp_nlp_bb_exit_status(
     gap: Optional[float],
     gap_tolerance: float,
     hook_stopped_before_wall: bool,
+    infeasibility_proven: bool,
 ) -> tuple[str, Optional[str]]:
     """The status and termination reason :func:`solve_lp_nlp_bb` exits with.
 
@@ -5248,6 +5249,16 @@ def _lp_nlp_bb_exit_status(
     that clause fires: the search really did stop on the clock, and the trace
     should keep saying so. Status answers "is the answer proven"; the reason
     answers "why did the loop end". They are different questions.
+
+    A master that ends ``infeasible`` is an infeasibility certificate only when
+    the master is a relaxation of the feasible set and nothing but valid rows
+    pruned it: ``infeasibility_proven`` (#1673 B4). With an incumbent in hand it
+    is never one -- the incumbent is a feasible point -- and the run is
+    ``feasible``. Without one and without the proof it is ``no_feasible_point``.
+    Measured on ``min (x0+4)^2 + (x2-2)^2 s.t. x0**-3.5 - x2**2 <= 0`` (optimum
+    21.555), which a false convexity certificate sent here: the OA cuts of the
+    concave ``-x2**2`` emptied the master and the run reported ``infeasible``
+    while also returning an incumbent of 54.53.
     """
     from discopt.solvers import SolveStatus
 
@@ -5264,7 +5275,10 @@ def _lp_nlp_bb_exit_status(
         termination_reason = "termination_hook" if hook_stopped_before_wall else "time_limit"
         status = "time_limit" if not has_incumbent else "feasible"
     elif master_status == SolveStatus.INFEASIBLE:
-        status = "infeasible"
+        if has_incumbent:
+            status = "feasible"
+        else:
+            status = "infeasible" if infeasibility_proven else "no_feasible_point"
     elif master_status == SolveStatus.TIME_LIMIT:
         status = "time_limit" if not has_incumbent else "feasible"
     elif master_status == SolveStatus.ITERATION_LIMIT:
@@ -5761,6 +5775,19 @@ def solve_lp_nlp_bb(
             "disabling certified bound/gap reporting and skipping objective OA cuts"
         )
     master_bound_valid = decomp.master_bound_valid and not heuristic_nonconvex
+    #: #1673 B4: the master is a relaxation of the FEASIBLE SET (every row's OA
+    #: cuts are valid) -- the warrant for reading a master ``infeasible`` as a
+    #: proof. Independent of the objective, which ``master_bound_valid`` covers.
+    master_feasible_set_valid = (
+        not heuristic_nonconvex
+        and not decomp.oa_has_unclassified_constraints
+        and (
+            decomp.n_cons == 0 or bool(decomp.oa_constraint_mask and all(decomp.oa_constraint_mask))
+        )
+    )
+    #: No-good cuts on assignments NOT proven infeasible (``add_no_good_cuts``):
+    #: heuristic pruning, after which an empty master proves nothing.
+    heuristic_nogood_cuts = [0]
     cut_provenance = MIPNLPCutProvenance()
     callback_events: list[dict[str, object]] = []
 
@@ -6235,6 +6262,8 @@ def solve_lp_nlp_bb(
                     integer_binary_expansion=integer_binary_expansion,
                     cut_provenance=cut_provenance,
                 )
+                if integer_cut_added and not proven_infeasible:
+                    heuristic_nogood_cuts[0] += 1
             add_oa_cuts_at(x_master)
 
         rows = collect_new_lazy_cuts(start, np.asarray(master_x, dtype=np.float64))
@@ -6554,6 +6583,7 @@ def solve_lp_nlp_bb(
         hook_stopped_before_wall=(
             hook is not None and (time.perf_counter() - t_start) < float(time_limit)
         ),
+        infeasibility_proven=(master_feasible_set_valid and heuristic_nogood_cuts[0] == 0),
     )
     if early_exit_unconfirmed:
         # The master was stopped by the early exit, not by the clock or a hook;

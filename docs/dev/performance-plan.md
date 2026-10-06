@@ -10633,3 +10633,36 @@ Every other row is faster or within 3 s.
 instances are not in the repository and minlplib.org is not reachable from the
 environment this was written in, so it has to run on a machine with the
 MINLPLib corpus.
+
+### 76.7 Review B4: a false convexity certificate became a false `infeasible`
+
+The owner's re-review found `test_fp_relaxation_soundness.py::test_fp_certifies_true_optimum`
+failing on the route: `min (x0+4)^2 + (x2-2)^2` s.t. `x0**-3.5 - x2**2 <= 0`,
+`x0 in [1e-3, 200]`, `x2` integer in `[0, 200]` (optimum 21.555127 at `x2 = 3`)
+reported `infeasible`, beside an incumbent of 54.53. Two defects, both fixed:
+
+- **The interval-Hessian certificate passed a concave row as convex.** It sized
+  the Gershgorin slack by the Frobenius norm of the WHOLE Hessian. The `x0` row
+  reaches 5e17 on this box, so the slack was 1769, and the `x2` row's exact `-2`
+  passed. The row is not convex (`-x2**2`), and this predates #1673. #1673 made it
+  visible because `oa` happened to fall back on this model and `lp_nlp_bb` did
+  not. **Fix:** each row is judged against the slack of its own magnitude
+  (`eigenvalue.gershgorin_certifies_psd` / `_nsd`, used by `certificate.py` and
+  `g_convexity.py`). A row's Gershgorin bound is computed from that row alone,
+  so `O(u·‖H_i‖)` is its rounding. Over the in-repo corpus (150 `.nl` files),
+  the verdict changes on one row of one instance: `nvs08` row 2, which is this
+  same row. `nvs08` certifies 23.4497273 on both arms. The §76.4 panel's routed
+  population is unchanged (26 in-repo instances, 16/16 portfolios).
+- **LP/NLP-BB read an empty master as a proof.** `_lp_nlp_bb_exit_status` mapped
+  a master `infeasible` to `infeasible` even with an incumbent in hand. Now
+  `infeasible` requires three things: no incumbent, every row certified convex
+  (`master_feasible_set_valid`), and no no-good cut on an assignment that was not
+  proven infeasible. With an incumbent the status is `feasible`. Otherwise it is
+  `no_feasible_point`. With the pre-fix certificate forced back in, the default
+  route now falls back and certifies 21.555.
+
+Pinned by `test_1673_b4_false_convexity_infeasible.py`. Each fix was checked
+fail-before separately: 5 failures with both reverted, 2 with only the
+exit-status change reverted. On the explicit `simplex`-master path, a model the
+certificate wrongly calls convex can still end `infeasible` with no incumbent.
+That status rests on the certificate, which is the fix for this case.
