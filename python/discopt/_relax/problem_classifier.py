@@ -174,6 +174,30 @@ _FORCE_SPARSE_A: contextvars.ContextVar[bool] = contextvars.ContextVar(
 )
 
 
+#: #1619 (A-22): the same switch for the quadratic objective's ``Q`` (read by
+#: :func:`_materialise_Q` and :func:`_quadratic_form_to_coefficients`), scoped by
+#: :func:`sparse_qp_matrices`.
+_FORCE_SPARSE_Q: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "discopt_force_sparse_Q", default=False
+)
+
+
+@contextlib.contextmanager
+def sparse_qp_matrices():
+    """Within this block, ``Q`` and the constraint matrices are emitted as CSR at any size.
+
+    For a QP caller whose every consumer of ``Q``, ``A_eq`` and ``A_ub`` is
+    sparse-aware (#1619 A-22): the ``solver="pounce"`` QP route. A dense ``Q`` of
+    the issue's 4000-variable chain QP is 128 MB for 4000 nonzeros.
+    """
+    token_q = _FORCE_SPARSE_Q.set(True)
+    try:
+        with sparse_constraint_matrices():
+            yield
+    finally:
+        _FORCE_SPARSE_Q.reset(token_q)
+
+
 @contextlib.contextmanager
 def sparse_constraint_matrices():
     """Within this block, constraint matrices are emitted as scipy CSR at any size.
@@ -706,7 +730,7 @@ def _materialise_Q(terms: dict[tuple[int, int], float], n: int) -> np.ndarray:
     """
     if n == 0:
         return np.zeros((0, 0), dtype=np.float64)
-    if (n * n * 8) <= _QP_DENSE_Q_MAX_BYTES:
+    if (n * n * 8) <= _QP_DENSE_Q_MAX_BYTES and not _FORCE_SPARSE_Q.get():
         Q = np.zeros((n, n), dtype=np.float64)
         for (_i, _j), _v in terms.items():
             Q[_i, _j] = _v
@@ -1776,7 +1800,7 @@ def _quadratic_form_to_coefficients(form, n: int):
 
     # Dense while it comfortably fits, sparse beyond that (#863) -- consumers
     # accept either, and a dense Q is 5.3 GB at n = 25,700.
-    if (n * n * 8) <= _QP_DENSE_Q_MAX_BYTES:
+    if (n * n * 8) <= _QP_DENSE_Q_MAX_BYTES and not _FORCE_SPARSE_Q.get():
         Q = np.zeros((n, n), dtype=np.float64)
         if len(rows):
             Q[rows, cols] = vals

@@ -29,6 +29,7 @@ from discopt._relax import (
     integer_product_reform,
     nonsmooth_lift,
 )
+from discopt.modeling import _relax_integrality
 from discopt.modeling.core import from_nl
 
 CORPUS = sorted((pathlib.Path(__file__).parent / "data" / "minlplib_nl").glob("*.nl"))
@@ -139,6 +140,7 @@ EXPECTED = {
     "mpec.sos1": mpec.reformulate_sos1,
     "mpec.scholtes": mpec.reformulate_scholtes,
     "nonsmooth.epigraph": nonsmooth_lift.lift_nonsmooth_atoms,
+    "core.relax_integrality": _relax_integrality.relax_integrality,
 }
 
 
@@ -148,6 +150,7 @@ def test_every_registered_name_is_the_solvers_own_function():
         assert dt.get(name).function is fn, name
     assert dt.TransformationFactory is dt.get
     assert not dt.get("mpec.scholtes").exact
+    assert not dt.get("core.relax_integrality").exact
 
 
 @pytest.mark.parametrize("method", ["big-m", "hull", "mbigm", "auto"])

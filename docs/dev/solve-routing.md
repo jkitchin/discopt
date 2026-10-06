@@ -47,7 +47,8 @@ solve_model(...)                                          [solver.py:2017]
   │                             opt-out =0): class ∈ {MIQP, MIQCP, MIQCQP, MINLP} AND certified
   │                             convex at the root AND no option the MIP-NLP family ignores
   │                             (nlp_bb, node_callback, ...) ──► solver="mip-nlp",
-  │                             mip_nlp_method="oa" (HiGHS master); else fall through
+  │                             mip_nlp_method="lp_nlp_bb" (HiGHS master; #1658,
+  │                             DISCOPT_CONVEX_ROUTE_METHOD=oa restores "oa"); else fall through
   │
   ├─ GDP INTERCEPT (model has disjunctions / logic)          [two-axis contract → §4]
   │     gdp_method="oa"    ──► Outer Approximation (solve_oa) (deprecated → mip-nlp/oa)
@@ -92,7 +93,7 @@ classify_problem(model)                                   [problem_classifier.py
   │
   ├─ MIQP  convexity check (eigenvalue):
   │          convex    ──► normally never reached: the convex-MINLP auto-route above already
-  │                         sent it to mip-nlp/oa. Reached only when that route refused
+  │                         sent it to mip-nlp/lp_nlp_bb. Reached only when that route refused
   │                         (opt-out =0, or a caller option it ignores) ──► _solve_miqp_bb
   │                         (self-hosted B&B, POUNCE node QPs; #359)
   │          nonconvex ──► fall through (→ Subtree A)   (a convex MIQP solver would false-certify)
@@ -107,7 +108,7 @@ classify_problem(model)                                   [problem_classifier.py
         │     (status="error" ⇒ fall through to Subtree A)
         ├─ CONVEX MINLP (nlp_bb=None & convex & no lazy/incumbent/cut callback) ──► Subtree B
         │     (_solve_nlp_bb). As for convex MIQP, only reached when the auto-route above
-        │     refused; by default a root-certified convex MINLP is solved by mip-nlp/oa.
+        │     refused; by default a root-certified convex MINLP is solved by mip-nlp/lp_nlp_bb.
         └─ NONCONVEX MINLP / forced-spatial QP·MIQP / nlp_bb=True   ──► Subtree A
 ```
 
@@ -120,7 +121,7 @@ classify_problem(model)                                   [problem_classifier.py
 | QP·MIQP convexity | eigenvalue test | convex→fast solver; indefinite→spatial (avoids false-optimal) |
 | LP / MILP engine | `milp_backend=` keyword (`highs`/`native`, wins), else `DISCOPT_LP_MILP_BACKEND` (default `highs`, opt-out `rust`), `nlp_solver` | HiGHS (verified route) / Rust simplex B&B / Rust tree + POUNCE |
 | NLP·MINLP convexity | eigenvalue, memoized | convex→single-NLP or NLP-BB; nonconvex→spatial |
-| convex-MINLP auto-route | `solver=None`, class MIQP/MIQCP/MIQCQP/MINLP, root-certified convex, `DISCOPT_CONVEX_MINLP_ROUTE` (default on) | mip-nlp/oa (HiGHS master); refused → NLP-BB / MIQP-BB below |
+| convex-MINLP auto-route | `solver=None`, class MIQP/MIQCP/MIQCQP/MINLP, root-certified convex, `DISCOPT_CONVEX_MINLP_ROUTE` (default on) | mip-nlp/lp_nlp_bb (HiGHS master; `DISCOPT_CONVEX_ROUTE_METHOD=oa` for OA, #1658); refused → NLP-BB / MIQP-BB below |
 | `nlp_bb` | None(auto) / True / False | auto: convex MINLP → OA auto-route, NLP-BB only if that refuses; True forces NLP-BB (and blocks the auto-route) |
 
 ---
@@ -197,7 +198,7 @@ TERMINATION: tree finished | gap converged | deadline | node cap
 
 ## 3. Subtree B — `_solve_nlp_bb` (nonlinear Branch-and-Bound)
 
-Reached for `nlp_bb=True`, and for a convex MINLP under `nlp_bb=None` only when the convex-MINLP auto-route to mip-nlp/oa refused it (§1). Each node solves the original
+Reached for `nlp_bb=True`, and for a convex MINLP under `nlp_bb=None` only when the convex-MINLP auto-route to mip-nlp/lp_nlp_bb refused it (§1). Each node solves the original
 **NLP with discrete vars bound-fixed** instead of a McCormick relaxation. For a
 *convex* MINLP the converged node NLP objective is a valid lower bound (certifies
 gap); for nonconvex it runs in heuristic mode (`gap_certified=False`).

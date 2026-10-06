@@ -29,7 +29,7 @@ import warnings
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union, cast
 
 import numpy as np
 
@@ -5226,6 +5226,7 @@ def _lp_nlp_bb_exit_status(
     gap: Optional[float],
     gap_tolerance: float,
     hook_stopped_before_wall: bool,
+    infeasibility_proven: bool,
 ) -> tuple[str, Optional[str]]:
     """The status and termination reason :func:`solve_lp_nlp_bb` exits with.
 
@@ -5248,6 +5249,16 @@ def _lp_nlp_bb_exit_status(
     that clause fires: the search really did stop on the clock, and the trace
     should keep saying so. Status answers "is the answer proven"; the reason
     answers "why did the loop end". They are different questions.
+
+    A master that ends ``infeasible`` is an infeasibility certificate only when
+    the master is a relaxation of the feasible set and nothing but valid rows
+    pruned it: ``infeasibility_proven`` (#1673 B4). With an incumbent in hand it
+    is never one -- the incumbent is a feasible point -- and the run is
+    ``feasible``. Without one and without the proof it is ``no_feasible_point``.
+    Measured on ``min (x0+4)^2 + (x2-2)^2 s.t. x0**-3.5 - x2**2 <= 0`` (optimum
+    21.555), which a false convexity certificate sent here: the OA cuts of the
+    concave ``-x2**2`` emptied the master and the run reported ``infeasible``
+    while also returning an incumbent of 54.53.
     """
     from discopt.solvers import SolveStatus
 
@@ -5264,7 +5275,10 @@ def _lp_nlp_bb_exit_status(
         termination_reason = "termination_hook" if hook_stopped_before_wall else "time_limit"
         status = "time_limit" if not has_incumbent else "feasible"
     elif master_status == SolveStatus.INFEASIBLE:
-        status = "infeasible"
+        if has_incumbent:
+            status = "feasible"
+        else:
+            status = "infeasible" if infeasibility_proven else "no_feasible_point"
     elif master_status == SolveStatus.TIME_LIMIT:
         status = "time_limit" if not has_incumbent else "feasible"
     elif master_status == SolveStatus.ITERATION_LIMIT:
@@ -5761,6 +5775,19 @@ def solve_lp_nlp_bb(
             "disabling certified bound/gap reporting and skipping objective OA cuts"
         )
     master_bound_valid = decomp.master_bound_valid and not heuristic_nonconvex
+    #: #1673 B4: the master is a relaxation of the FEASIBLE SET (every row's OA
+    #: cuts are valid) -- the warrant for reading a master ``infeasible`` as a
+    #: proof. Independent of the objective, which ``master_bound_valid`` covers.
+    master_feasible_set_valid = (
+        not heuristic_nonconvex
+        and not decomp.oa_has_unclassified_constraints
+        and (
+            decomp.n_cons == 0 or bool(decomp.oa_constraint_mask and all(decomp.oa_constraint_mask))
+        )
+    )
+    #: No-good cuts on assignments NOT proven infeasible (``add_no_good_cuts``):
+    #: heuristic pruning, after which an empty master proves nothing.
+    heuristic_nogood_cuts = [0]
     cut_provenance = MIPNLPCutProvenance()
     callback_events: list[dict[str, object]] = []
 
@@ -5922,11 +5949,30 @@ def solve_lp_nlp_bb(
         if perspective_epigraph is not None:
             evaluator._perspective_epigraph = perspective_epigraph  # type: ignore[attr-defined]
 
+    #: #1658: the best fixed-NLP point the screen below refused, kept only as an
+    #: UNVERIFIED warm start for a caller with no verified incumbent -- never a
+    #: bound, never certified. The count is exported (CLAUDE.md §6).
+    best_refused: list[Optional[tuple[np.ndarray, float]]] = [None]
+    refused_candidates = [0]
+
     def accept_incumbent(x: np.ndarray, obj: float) -> None:
         nonlocal incumbent, incumbent_obj
         if incumbent_obj is None or obj < incumbent_obj:
-            incumbent = np.asarray(x, dtype=np.float64).copy()
-            incumbent_obj = float(obj)
+            # #1658: the screen ``solve_oa``'s ``verified_candidate`` applies. This
+            # driver adopted every fixed-NLP point as-is, and the incumbent closes
+            # the gap and is what leaves. Measured on ``portfol_roundlot`` with rows
+            # scaled by 10^U(-3,3): it certified an incumbent violating row 5 by
+            # 3.0e-3 (allowed 1e-6), which the #772 guard in ``Model.solve`` then
+            # withheld, leaving ``status="error"``.
+            x_out, obj_out, refusal = _exit_verified_incumbent(model, x, obj, obj_sign, warn=False)
+            if refusal is not None:
+                refused_candidates[0] += 1
+                logger.debug("lp_nlp_bb: candidate incumbent %.12g refused: %s", obj, refusal)
+                if best_refused[0] is None or obj < best_refused[0][1]:
+                    best_refused[0] = (np.asarray(x, dtype=np.float64).copy(), float(obj))
+                return
+            incumbent = np.asarray(x_out, dtype=np.float64).copy()
+            incumbent_obj = float(obj_out)
             _record_interior_point(
                 incumbent,
                 "callback_incumbent",
@@ -6092,7 +6138,14 @@ def solve_lp_nlp_bb(
                 relaxable=relaxable,
             )
             rhs = float(oa_b_rows[idx])
-            if float(np.dot(row, master_x)) > rhs + 1e-6:
+            # #1658: the violation is judged per unit of the row's largest
+            # coefficient when that is below 1 (a row scaled by 1e-5 has its
+            # violation scaled by 1e-5 too); rows of norm >= 1 are tested exactly
+            # as before. Measured on flay03m with rows scaled by 10^U(-6,6): an
+            # OA cut violated by 1.2e-2 per unit coefficient read 6.6e-7 raw, was
+            # not returned, and the master point was accepted 3.3e-4 short.
+            row_norm = float(np.max(np.abs(row))) if row.size else 0.0
+            if float(np.dot(row, master_x)) > rhs + 1e-6 * min(1.0, row_norm):
                 rows.append((row, rhs))
         return rows
 
@@ -6209,6 +6262,8 @@ def solve_lp_nlp_bb(
                     integer_binary_expansion=integer_binary_expansion,
                     cut_provenance=cut_provenance,
                 )
+                if integer_cut_added and not proven_infeasible:
+                    heuristic_nogood_cuts[0] += 1
             add_oa_cuts_at(x_master)
 
         rows = collect_new_lazy_cuts(start, np.asarray(master_x, dtype=np.float64))
@@ -6300,7 +6355,7 @@ def solve_lp_nlp_bb(
             value += float(decomp.obj_coeffs[1])
         return value
 
-    def callback_terminate(snapshot: dict[str, object]) -> bool:
+    def callback_terminate(snapshot: dict[str, object]) -> Union[bool, str]:
         # The post-loop check-in: the master has already stopped on its own, so
         # this one only *observes*. It must not claim the wall, must not stop
         # anything, and must not consult the caller's hook -- asking a user hook
@@ -6356,7 +6411,10 @@ def solve_lp_nlp_bb(
             raw = hook(context)
         except Exception as exc:  # never swallowed (CLAUDE.md §7)
             raise RuntimeError(f"termination_hook failed during LP/NLP BB solve: {exc}") from exc
-        return _validate_external_termination(raw)
+        # #1658 review B2: a hook stop hands the rest of the budget to the caller
+        # (the #1066 guard's fallback), so the master must not spend it on its
+        # #1634 cross-solve; see ``milp_highs.solve_milp_with_lazy_cuts``.
+        return "abandon" if _validate_external_termination(raw) else False
 
     lazy_kwargs: dict[str, object] = dict(
         c=master.c,
@@ -6525,6 +6583,7 @@ def solve_lp_nlp_bb(
         hook_stopped_before_wall=(
             hook is not None and (time.perf_counter() - t_start) < float(time_limit)
         ),
+        infeasibility_proven=(master_feasible_set_valid and heuristic_nogood_cuts[0] == 0),
     )
     if early_exit_unconfirmed:
         # The master was stopped by the early exit, not by the clock or a hook;
@@ -6548,6 +6607,19 @@ def solve_lp_nlp_bb(
     # ``bound_validity``; this narrows ``gap_certified`` only, and only ever
     # from True to False.
     gap_is_certified = bool(master_bound_valid and gap is not None and gap <= gap_tolerance)
+    callback_stats["refused_candidates"] = int(refused_candidates[0])
+    unverified_incumbent = False
+    if incumbent is None and best_refused[0] is not None:
+        # #1658: every candidate failed the screen. Return the best one as
+        # ``solve_oa`` does: unverified, uncertified, flagged so the #1059 merge
+        # does not rank it as a primal bound (#1380). The master bound is left
+        # alone -- the master never saw this point.
+        incumbent, incumbent_obj = best_refused[0]
+        unverified_incumbent = True
+        status = "feasible"
+        gap = None
+        gap_is_certified = False
+        termination_reason = "unverified_incumbent"
     single_tree_trace: dict[str, object] = {
         "schema_version": 1,
         "solver": "mip-nlp",
@@ -6620,6 +6692,7 @@ def solve_lp_nlp_bb(
             subnlp_calls=nlp_subproblem_count,
             gap_certified=gap_is_certified,
             mip_nlp_trace=single_tree_trace,
+            solver_stats=({"oa/unverified_incumbent": 1.0} if unverified_incumbent else None),
         )
 
     return SolveResult(
@@ -9617,6 +9690,17 @@ def solve_oa(
                 termination_reason = "gap"
                 stop_after_master_pool = True
                 break
+
+        # #1619 E-02: the gap test above sits inside the fixed-NLP candidate loop,
+        # so an iteration that runs no candidate never reached it. The SHOT
+        # profile's ``deduplicate_used_assignments`` empties the candidate list as
+        # soon as the master repeats an integer assignment it has already solved,
+        # and on synthes1 the certified gap closed at iteration 2 (LB 6.0097589089
+        # vs UB 6.0097589107) while the loop solved ~1600 more masters until the
+        # time limit. The same test, once per iteration, regardless of candidates.
+        if not stop_after_master_pool and _certified_gap_converged():
+            termination_reason = "gap"
+            stop_after_master_pool = True
 
         if stop_after_master_pool:
             iteration_record["termination_reason"] = termination_reason

@@ -292,9 +292,17 @@ def test_the_scale_aware_slack_is_wired_into_both_paths():
         ln for ln in cert_src.splitlines() if "_PSD_TOL" in ln and not ln.lstrip().startswith("#")
     ]
     assert not live, f"an absolute _PSD_TOL comparison survives in certificate.py: {live}"
-    assert cert_src.count("psd_decision_slack(") >= 2, (
-        "certificate.py must scale BOTH the rank-1 coefficient test and the Gershgorin verdicts"
+    assert "psd_decision_slack(" in cert_src, (
+        "certificate.py must scale the rank-1 coefficient test"
     )
-    assert "interval_magnitude(hess)" in cert_src, (
-        "the Gershgorin verdict does not scale by the interval Hessian's magnitude"
+    # #1673 B4: the Gershgorin verdicts take their slack per row, inside these
+    # helpers, never from the whole matrix's norm.
+    assert "gershgorin_certifies_psd(hess)" in cert_src, (
+        "the Gershgorin convex verdict does not use the per-row scaled slack"
+    )
+    assert "gershgorin_certifies_nsd(hess)" in cert_src, (
+        "the Gershgorin concave verdict does not use the per-row scaled slack"
+    )
+    assert "interval_magnitude(hess)" not in cert_src, (
+        "a matrix-wide slack came back into certificate.py (#1673 B4)"
     )

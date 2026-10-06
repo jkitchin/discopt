@@ -2009,6 +2009,10 @@ def _try_native_spatial_kernel(
         # ``SolverTuning.lp_cold_dual_start``.
         cold_dual_start=bool(_tuning().lp_cold_dual_start),
     )
+    # #1619 D-11: unit-independent branch choice (see the helper; default ON).
+    # The kernel's own default is the legacy rule, so ``=0`` passes nothing.
+    if _scale_free_branching_enabled():
+        solve_kwargs["scale_free_branching"] = True
     if _bound_reserve > 0.0:
         solve_kwargs["bound_time_extension_s"] = float(_bound_reserve)
     # #917: hand the kernel the caller's withheld #844 reserve so it can reclaim
@@ -8254,6 +8258,18 @@ def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str, dict[str
     #1229 made ``highspy`` a core dependency; see :func:`_convex_route_oa_master`
     for the panel that retired the in-house master.
 
+    **The target moved to ``lp_nlp_bb`` (#1658, 2026-10-06).** Both of #1141's
+    reasons for ``"oa"`` have expired: HiGHS is a core dependency, and the
+    ``lp_nlp_bb`` deficit #1141 measured was on the in-house master. Three
+    LP/NLP-BB defects were fixed on the way: stale-tree offers judged by the
+    HiGHS lazy master, absolute violation tests on scaled rows, and unverified
+    fixed-NLP incumbents (``docs/dev/performance-plan.md`` §76.1-76.3). Panel
+    (§76.4): plain ``solve(time_limit=30)``, arms interleaved, the 26 in-repo
+    instances the router diverts at row-scale spans 0/3/6 plus 16 #1658
+    portfolios, 498 bound checks / 0 violations: ``lp_nlp_bb`` 92/94 optimal, 10
+    fallbacks, 339.5 s; ``"oa"`` 91/94, 22 fallbacks, 342.0 s; no certificate
+    lost. ``DISCOPT_CONVEX_ROUTE_METHOD=oa`` restores the old target.
+
     Every gate below is a *refusal* to route: an unknown convexity verdict, a
     nonconvex model, a missing MILP backend, or an opaque ``dm.custom`` body all
     leave the model on the sound default path. The route never fires on a model
@@ -8328,14 +8344,34 @@ def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str, dict[str
     # since #1229), and it never silently changes the algorithm -- the #1141
     # defect.
     master = _convex_route_oa_master()
+    method = _convex_route_method()
     return (
-        "oa",
+        method,
         (
-            f"mip-nlp/oa: {problem_class.value} certified convex at the root "
+            f"mip-nlp/{method}: {problem_class.value} certified convex at the root "
             f"(DISCOPT_CONVEX_MINLP_ROUTE; master={master})"
         ),
         {"milp_solver": master},
     )
+
+
+#: The MIP-NLP methods the convex-MINLP route may target (#1658).
+_CONVEX_ROUTE_METHODS = ("oa", "lp_nlp_bb")
+
+
+def _convex_route_method() -> str:
+    """The convex-MINLP route's MIP-NLP method (``DISCOPT_CONVEX_ROUTE_METHOD``).
+
+    See ``docs/dev/performance-plan.md`` §76 for the panel this default rests on.
+    Any value outside :data:`_CONVEX_ROUTE_METHODS` raises rather than being
+    silently replaced: a typo must not run an algorithm nobody asked for.
+    """
+    raw = os.environ.get("DISCOPT_CONVEX_ROUTE_METHOD", "lp_nlp_bb").strip().lower()
+    if raw not in _CONVEX_ROUTE_METHODS:
+        raise ValueError(
+            f"DISCOPT_CONVEX_ROUTE_METHOD={raw!r} is not one of {_CONVEX_ROUTE_METHODS}"
+        )
+    return raw
 
 
 def _convex_kernel_defers_to_route_enabled() -> bool:
@@ -8392,6 +8428,15 @@ def _convex_route_preempts_kernel(
         return None
     if _mip_nlp_ignored_options(option_values):
         return None
+    if _convex_minlp_route_enabled():
+        # #1658 review B3: a misconfigured route is the caller's error, not a
+        # router defect. Read both settings before the ``except`` below, which
+        # would otherwise log ``DISCOPT_CONVEX_ROUTE_METHOD=ecp`` (or a retired
+        # ``DISCOPT_CONVEX_ROUTE_OA_MASTER``) as a fallback, run the kernel, and
+        # answer ``optimal`` -- while the same setting raises on any model the
+        # kernel does not take.
+        _convex_route_method()
+        _convex_route_oa_master()
     saved = {
         a: getattr(model, a, _PROBE_UNSET)
         for a in (
@@ -9449,6 +9494,31 @@ def _ipx_cheap_first_enabled() -> bool:
         "yes",
         "on",
     )
+
+
+def _scale_free_branching_enabled() -> bool:
+    """#1619 D-11: ``DISCOPT_SCALE_FREE_BRANCHING`` for the native spatial kernel.
+
+    Picks the term to branch by its McCormick gap relative to its aux column's
+    root width and the operand by its width relative to its own root width
+    (``SpatialTreeConfig::scale_free_branching``), so the branch choice does not
+    change with the units a column is written in. Read at call time and passed
+    per solve rather than read in Rust, whose ``OnceLock`` would latch one arm
+    for a whole process.
+
+    Graduated on introduction (CLAUDE.md §5), default ON, ``=0`` restores the
+    absolute-width rule. Units panel (``issue1619_scale_free_branching_panel.py``:
+    three seeded pooling plants and Haverly 1-3, p/q/pq formulations, flows in
+    1/10/100 barrels, 54 rows at 60 s): 0 false certificates, 0 lost, certified
+    45 -> 47, nodes 581,667 -> 459,675, wall 542 -> 457 s, median node-count
+    spread across units 1.17 -> 1.00 (the issue's plant: 15,745 / 1,351 / 593
+    -> 741 / 649 / 519). Corpus (``recentre_graduation_panel.py --flag``, 204
+    comparisons, 20 s): 0 false, 0 bad points, certified 180 = 180, wall 801 ->
+    799 s, one instance changed (nvs13, 637 -> 649 nodes, certified in both).
+    Known outlier: Haverly 3 q-form in barrels, 87 -> 3,969 nodes (0.2 -> 0.8 s),
+    traced to the absolute McCormick-tightness tolerance, not the branch rule.
+    """
+    return os.environ.get("DISCOPT_SCALE_FREE_BRANCHING", "1") != "0"
 
 
 def _p3_force_cut_path_enabled() -> bool:
@@ -10997,6 +11067,8 @@ def solve_model(
     branching_rule: Optional[str] = None,
     # #1620: HiGHS options for the HiGHS LP/MILP route; see ``_scoped_highs_options``.
     highs_options: Optional[dict[str, Any]] = None,
+    # #1620 B-04: user scaling for ``solver="pounce"``'s NLP arm.
+    pounce_scaling: Optional[dict[str, Any]] = None,
     # #917: extra wall-clock seconds this solve may take *only if* it holds an
     # incumbent when ``time_limit`` expires. Set by ``Model.solve`` to the #844
     # fallback reserve it withheld, so a primary that found a primal reclaims the
@@ -11130,7 +11202,23 @@ def solve_model(
         certificate is still verified by discopt, so an option can change speed
         and node count, never a reported bound's validity. On any other route
         (a nonlinear model, ``milp_backend="native"``, a callback) the options
-        are not used and a ``UserWarning`` says so.
+        are not used and a ``UserWarning`` says so. The route hands HiGHS its
+        standard form ``A x = b`` with one slack column per inequality row, not
+        the ranged rows of an ``m.to_mps()`` export, so HiGHS's node count can
+        differ from an MPS solve of the same model by a large factor (measured
+        ~9x median on a bin-packing MILP; ``docs/dev/lp-milp-highs-routing-plan.md``,
+        2026-10-05 entry).
+    pounce_scaling : dict, optional
+        User scaling for ``solver="pounce"``'s NLP interior-point arm (#1620
+        B-04), handed to POUNCE's ``set_problem_scaling`` under
+        ``nlp_scaling_method="user-scaling"``: ``{"objective": s}`` multiplies
+        the objective by ``s > 0`` and ``{"variables": {x: f}}`` solves in
+        ``f * x`` (``f`` a positive scalar or an array of the variable's shape;
+        unlisted variables keep factor 1). The point, objective and multipliers
+        come back in the model's own units. Only the NLP arm has user scaling:
+        on a model the route sends to the convex LP/QP engine, and on any other
+        ``solver``, passing it raises ``ValueError``, as does combining it with
+        a different ``nlp_scaling_method`` in ``pounce_options``.
     ipopt_options : dict, optional
         Options passed to the NLP engine: POUNCE (the default ``nlp_solver``)
         or cyipopt (``nlp_solver="ipopt"``).
@@ -11529,6 +11617,14 @@ def solve_model(
     # --- #1533: solver="pounce" -- one POUNCE interior-point solve, nothing else ---
     # Dispatched before every presolve, reformulation and cut-injection pass below:
     # the route's contract is that the model as written reaches the IPM.
+    if (
+        pounce_scaling is not None
+        and (solver if solver is not None else kwargs.get("solver")) != "pounce"
+    ):
+        raise ValueError(
+            "pounce_scaling applies only to solver='pounce' (its NLP interior-point "
+            "arm); this solve does not run it (#1620)."
+        )
     if (solver if solver is not None else kwargs.get("solver")) == "pounce":
         kwargs.pop("solver", None)
         if kwargs:
@@ -11548,6 +11644,7 @@ def solve_model(
             incumbent_callback=incumbent_callback,
             nlp_solver=nlp_solver,
             ignored=_pounce_ignored,
+            scaling=pounce_scaling,
         )
 
     # Slice held back from the search for the root-relaxation fallback so that
@@ -13264,7 +13361,10 @@ def solve_model(
     # reaches this call site is a defect (or a broken #1147 provenance chain) and
     # must fail the solve: the old ``except Exception`` + DEBUG log made a crashed
     # pass indistinguishable from 'nothing to linearize' (CLAUDE.md §3/§7).
-    from discopt._relax.binary_multilinear_reform import has_binary_multilinear_work
+    from discopt._relax.binary_multilinear_reform import (
+        binary_quadratic_milp_enabled,
+        has_binary_multilinear_work,
+    )
     from discopt._relax.problem_classifier import ProblemClass, classify_problem
     from discopt.transformations import get as _get_transformation
 
@@ -13319,9 +13419,15 @@ def solve_model(
                 # redundant) FBBT root presolve on the lifted rows and use
                 # the monolithic Rust simplex MILP engine, unless the
                 # cert:P3.1c cut-reachability experiment keeps the solve
-                # on the cut-carrying _solve_milp_bb path.
+                # on the cut-carrying _solve_milp_bb path. #1619 C-01b: under
+                # DISCOPT_BINARY_QUADRATIC_MILP the exact MILP instead takes the
+                # default pure-MILP route (HiGHS, #1229), like any user MILP.
                 presolve = False
-                if nlp_solver == "pounce" and not _p3_force_cut_path_enabled():
+                if (
+                    nlp_solver == "pounce"
+                    and not _p3_force_cut_path_enabled()
+                    and not binary_quadratic_milp_enabled()
+                ):
                     nlp_solver = "simplex"
                 # Incumbent seeding. A user warm start is over the ORIGINAL
                 # variables; the aux columns (z = prod b, y = E(b),
@@ -21388,11 +21494,30 @@ def _lagrangian_slope(
     rows = np.flatnonzero(lam_r != 0.0)
     lam_nz = lam_r[rows]
     if _sp_issparse(jac):
+        # #1619 A-22: only a column's STORED entries enter its sum. An entry that is
+        # absent (or a row with lam 0) contributes an exact 0 product with an exact
+        # 0 error term, and ``math.fsum`` is exact, so dropping them leaves every
+        # ``g[j]`` bit-identical -- while the old dense (rows x unsure) block was
+        # 2000 x 4000 on the issue's chain QP and its loop the whole 28 s of wall.
         import scipy.sparse as _sps
 
-        cols = _sps.csc_matrix(jac)[rows][:, unsure].toarray()
-    else:
-        cols = np.asarray(jac, dtype=np.float64)[np.ix_(rows, unsure)]
+        csc = _sps.csc_matrix(jac)
+        csc.sort_indices()
+        for j in unsure:
+            lo, hi = csc.indptr[j], csc.indptr[j + 1]
+            a = np.asarray(csc.data[lo:hi], dtype=np.float64)
+            lam_j = lam_r[csc.indices[lo:hi]]
+            keep = lam_j != 0.0
+            a, lam_j = a[keep], lam_j[keep]
+            p = a * lam_j
+            e = _two_product_err(a, lam_j, p)
+            if not (np.all(np.isfinite(p)) and np.all(np.isfinite(e))):
+                continue  # keep the a-priori bound for this component
+            gj = math.fsum([float(gf[j]), *p.tolist(), *e.tolist()])
+            g[j] = gj
+            err[j] = float(np.spacing(abs(gj))) if gj != 0.0 else 0.0
+        return g, err, mag
+    cols = np.asarray(jac, dtype=np.float64)[np.ix_(rows, unsure)]
     for t, j in enumerate(unsure):
         a = cols[:, t]
         p = a * lam_nz
@@ -22557,6 +22682,7 @@ def _solve_continuous(
     certify_convex: bool = False,
     tighten_bounds: bool = True,
     raw_status_out: Optional[list] = None,
+    pounce_scaling: Optional[tuple[float, Optional[np.ndarray]]] = None,
 ) -> SolveResult:
     """Solve a purely continuous model directly with NLP solver (no B&B).
 
@@ -22566,6 +22692,8 @@ def _solve_continuous(
     solve of the model as written, and a box the solver tightened first changes
     the iterates a reader of the log is studying. ``raw_status_out``, when a list
     is passed, receives the NLP backend's own return code (Ipopt numbering).
+    ``pounce_scaling`` is the ``solver="pounce"`` user scaling (#1620 B-04),
+    already resolved to ``(obj_scaling, x_scaling)`` over the flat columns.
 
     ``warm_start`` is the dual half of ``Model.solve(warm_start=...)`` (#1247):
     ``{"x", "constraint_duals", "bound_duals_lower", "bound_duals_upper",
@@ -22700,6 +22828,7 @@ def _solve_continuous(
             block_structure=pounce_block_structure,
             warm_start=pounce_warm_start,
             solve_report=True,
+            problem_scaling=pounce_scaling,
         )
     else:
         # "ipm"/"sparse_ipm" resolve to POUNCE upstream (the JAX IPM is retired);
@@ -23048,6 +23177,7 @@ _POUNCE_ROUTE_HONOURED = frozenset(
         "lazy_constraints",
         "incumbent_callback",
         "solver",
+        "pounce_scaling",
         "kwargs",
     }
 )
@@ -23097,6 +23227,60 @@ def _resolve_pounce_options(
     return dict(pounce_options)
 
 
+def _resolve_pounce_scaling(
+    model: Model, scaling: Optional[Mapping[str, Any]]
+) -> Optional[tuple[float, Optional[np.ndarray]]]:
+    """``solve(pounce_scaling=...)`` as ``(obj_scaling, x_scaling)`` over the flat columns.
+
+    Every factor must be finite and positive; a key other than ``"objective"`` /
+    ``"variables"``, a variable of another model, or a factor of the wrong shape
+    raises. ``None`` (and an empty dict) mean no user scaling (#1620 B-04).
+    """
+    from discopt.export._common import variable_flat_offsets
+    from discopt.modeling.core import Variable
+
+    if scaling is None:
+        return None
+    if not isinstance(scaling, Mapping):
+        raise TypeError(f"pounce_scaling must be a dict, got {type(scaling).__name__}")
+    unknown = sorted(set(scaling) - {"objective", "variables"})
+    if unknown:
+        raise ValueError(
+            f"pounce_scaling has unknown keys {unknown}; the keys are 'objective' and 'variables'"
+        )
+    if not scaling:
+        return None
+
+    def _positive(what: str, value: Any) -> np.ndarray:
+        arr = np.asarray(value, dtype=np.float64)
+        if not np.all(np.isfinite(arr)) or not np.all(arr > 0.0):
+            raise ValueError(f"pounce_scaling {what} must be finite and positive, got {value!r}")
+        return arr
+
+    obj = float(_positive("objective factor", scaling.get("objective", 1.0)).reshape(()))
+    variables = scaling.get("variables")
+    if not variables:
+        return obj, None
+    if not isinstance(variables, Mapping):
+        raise TypeError("pounce_scaling['variables'] must be a dict {Variable: factor}")
+    offsets = variable_flat_offsets(model)
+    x_s = np.ones(sum(v.size for v in model._variables))
+    for var, factor in variables.items():
+        if not isinstance(var, Variable) or id(var) not in offsets:
+            raise ValueError(
+                f"pounce_scaling['variables'] key {var!r} is not a variable of this model"
+            )
+        f = _positive(f"factor for {var.name!r}", factor)
+        if f.shape not in ((), tuple(var.shape)):
+            raise ValueError(
+                f"pounce_scaling factor for {var.name!r} has shape {f.shape}; expected a "
+                f"scalar or the variable's shape {tuple(var.shape)}"
+            )
+        off = offsets[id(var)]
+        x_s[off : off + var.size] = np.broadcast_to(f, var.shape).ravel()
+    return obj, x_s
+
+
 def _strip_local_claims(result: SolveResult) -> SolveResult:
     """No dual bound and no certified gap on a result that is not a certificate."""
     result.gap_certified = False
@@ -23119,6 +23303,7 @@ def _solve_pounce_route(
     incumbent_callback,
     nlp_solver: str,
     ignored: list[str],
+    scaling: Optional[dict[str, Any]] = None,
 ) -> SolveResult:
     """``Model.solve(solver="pounce")``: one POUNCE interior-point solve (#1533).
 
@@ -23201,7 +23386,17 @@ def _solve_pounce_route(
     def _remaining() -> float:
         return max(float(time_limit) - (time.perf_counter() - t_start), 0.0)
 
+    resolved_scaling = _resolve_pounce_scaling(model, scaling)
     pclass = classify_problem(model)
+
+    if pclass in (ProblemClass.LP, ProblemClass.QP) and resolved_scaling is not None:
+        kind = "an LP" if pclass == ProblemClass.LP else "a QP"
+        raise ValueError(
+            f"pounce_scaling was passed, but this model is {kind}, "
+            "which solver='pounce' sends to POUNCE's convex interior-point engine; that "
+            "engine has no user scaling (only the NLP arm does). Drop pounce_scaling, or "
+            "scale the model's rows and columns directly (#1620)."
+        )
 
     if pclass in (ProblemClass.LP, ProblemClass.QP):
         from discopt.solvers import convex_ipm_pounce as _cvx
@@ -23275,6 +23470,7 @@ def _solve_pounce_route(
                     relaxes_huge_bounds=True,
                     reject_reason=reject_reason,
                     x0=qp_x0,
+                    sparse=True,
                 )
         except _cvx.IndefiniteQPError as exc:
             # #1616 A-18: an objective that is structurally a positive-weighted sum
@@ -23305,6 +23501,7 @@ def _solve_pounce_route(
                     reject_reason=reject_reason,
                     x0=qp_x0,
                     sos_lift=lift,
+                    sparse=True,
                 )
             else:
                 warnings.warn(
@@ -23381,6 +23578,7 @@ def _solve_pounce_route(
         warm_start=warm_start,
         tighten_bounds=False,
         raw_status_out=raw_status,
+        pounce_scaling=resolved_scaling,
     )
     result.wall_time = time.perf_counter() - t_start
     if result.status == "optimal" and raw_status and raw_status[0] == _IPOPT_SOLVED_TO_ACCEPTABLE:
@@ -26152,6 +26350,16 @@ def _solve_node_nlp_kkt(
 _QP_KKT_RESIDUAL_TOL = 1e-6
 
 
+def _q_matrix(Q: Any) -> Any:
+    """``Q`` as an operand for ``@`` and ``abs``: scipy CSR when it is sparse, else a
+    dense ``float64`` array (#1619 A-22). ``np.asarray`` on a sparse matrix does not
+    raise -- it wraps it in a 0-d object array -- so a QP helper that may receive
+    the sparse ``Q`` of the ``solver="pounce"`` route goes through this."""
+    if _sp_issparse(Q):
+        return Q.tocsr()
+    return _dense_Q(Q)
+
+
 def _qp_stationarity_scale(
     Q: np.ndarray,
     c: np.ndarray,
@@ -26183,8 +26391,8 @@ def _qp_stationarity_scale(
     scale = 1.0
     x = np.asarray(x, dtype=np.float64).reshape(-1)
     c = np.asarray(c, dtype=np.float64).reshape(-1)
-    if Q.size and x.size:
-        Qx = np.asarray(Q, dtype=np.float64) @ x
+    if Q.shape[0] and x.size:
+        Qx = np.asarray(_q_matrix(Q) @ x, dtype=np.float64).ravel()
         if Qx.size:
             scale = max(scale, float(np.max(np.abs(Qx))))
     if c.size:
@@ -28201,7 +28409,7 @@ def _qp_objective_at_point(
     if not np.isfinite(f_decl):
         return expanded
     ax = np.abs(x)
-    mag = abs(float(obj_const)) + float(np.abs(c) @ ax) + float(ax @ (np.abs(Q) @ ax))
+    mag = abs(float(obj_const)) + float(np.abs(c) @ ax) + float(ax @ (abs(_q_matrix(Q)) @ ax))
     if abs(f_decl - expanded) <= 64.0 * np.finfo(float).eps * (mag + abs(expanded)):
         return f_decl
     return expanded
@@ -28234,7 +28442,7 @@ def _qp_reduced_costs_at(
     if m > 0 and (row_dual is None or np.asarray(row_dual).size != m):
         return None
     xs = np.asarray(x, dtype=np.float64)
-    rc = np.asarray(np.asarray(Q, dtype=np.float64) @ xs, dtype=np.float64).ravel()
+    rc = np.asarray(_q_matrix(Q) @ xs, dtype=np.float64).ravel()
     rc = rc + np.asarray(c, dtype=np.float64).ravel()
     y = np.asarray(row_dual, dtype=np.float64).ravel() if m > 0 else np.zeros(0)
     k = 0
@@ -28422,7 +28630,7 @@ def _qp_convex_certificate(
     lb = np.array([float(b[0]) for b in bounds], dtype=np.float64)
     ub = np.array([float(b[1]) for b in bounds], dtype=np.float64)
 
-    Qd = np.asarray(Q, dtype=np.float64)
+    Qd = _q_matrix(Q)
     cd = np.asarray(c, dtype=np.float64).ravel()
 
     def _f_exp(y: np.ndarray) -> float:
@@ -28447,7 +28655,7 @@ def _qp_convex_certificate(
     else:
         f_e = _f_exp(xs)
         ax = np.abs(xs)
-        mag = abs(float(obj_const)) + float(np.abs(cd) @ ax) + float(ax @ (np.abs(Qd) @ ax))
+        mag = abs(float(obj_const)) + float(np.abs(cd) @ ax) + float(ax @ (abs(Qd) @ ax))
         if np.isfinite(f_tape) and abs(f_tape - f_e) <= 64.0 * np.finfo(float).eps * (
             mag + abs(f_e)
         ):
@@ -28600,6 +28808,7 @@ def _solve_qp_matrix(
     reject_reason: list[str] | None = None,
     x0: np.ndarray | None = None,
     sos_lift: tuple | None = None,
+    sparse: bool = False,
 ) -> SolveResult | None:
     """Solve a QP/MIQP through a matrix-form ``solve_qp`` backend.
 
@@ -28637,12 +28846,24 @@ def _solve_qp_matrix(
     feasibility guard, the objective re-evaluation, the #1596 certificate, the
     named duals) runs on the original problem; only the backend's own KKT
     residual is judged on the system it solved.
+
+    ``sparse=True`` (#1619 A-22) extracts ``Q`` and the rows as scipy CSR at any
+    size and keeps them sparse through the backend call and every check after it.
+    Only a backend that accepts sparse ``Q`` may ask for it (POUNCE's qp-ipm, the
+    ``solver="pounce"`` route); the chain QP of the issue (n = 4000, 4000
+    nonzeros in ``Q``) peaked at 722.7 MB dense.
     """
-    from discopt._relax.problem_classifier import extract_qp_data
+    import scipy.sparse as _sp
+
+    from discopt._relax.problem_classifier import extract_qp_data, sparse_qp_matrices
     from discopt.modeling.core import ObjectiveSense
     from discopt.solvers import SolveStatus
 
-    qp_data = extract_qp_data(model)
+    if sparse:
+        with sparse_qp_matrices():
+            qp_data = extract_qp_data(model)
+    else:
+        qp_data = extract_qp_data(model)
     n_orig = sum(v.size for v in model._variables)
 
     # Build bounds list (original variables only, no slacks)
@@ -28653,7 +28874,15 @@ def _solve_qp_matrix(
         )
     )
 
-    A_eq_full = _dense_A(qp_data.A_eq)
+    if sparse:
+        # A rung that cannot emit COO still returns dense; CSR keeps one layout.
+        A_eq_full = (
+            qp_data.A_eq.tocsr()
+            if _sp_issparse(qp_data.A_eq)
+            else _sp.csr_matrix(_dense_A(qp_data.A_eq))
+        )
+    else:
+        A_eq_full = _dense_A(qp_data.A_eq)
     n_total = A_eq_full.shape[1] if A_eq_full.shape[0] > 0 else n_orig
     n_slack = n_total - n_orig
     b_eq_full = np.asarray(qp_data.b_eq)
@@ -28679,7 +28908,10 @@ def _solve_qp_matrix(
         integrality = int_arr
 
     # Q matrix: only the original variable part (no slacks)
-    Q_orig = _dense_Q(qp_data.Q)[:n_orig, :n_orig]
+    if sparse and _sp_issparse(qp_data.Q):
+        Q_orig = qp_data.Q.tocsr()[:n_orig, :n_orig]
+    else:
+        Q_orig = _dense_Q(qp_data.Q)[:n_orig, :n_orig]
     c_orig = np.asarray(qp_data.c[:n_orig])
 
     start_kw: dict[str, Any] = {}

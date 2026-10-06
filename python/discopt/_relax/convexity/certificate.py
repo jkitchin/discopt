@@ -39,9 +39,8 @@ import numpy as np
 from discopt.modeling.core import Constraint, Expression, Model
 
 from .eigenvalue import (
-    gershgorin_lambda_max,
-    gershgorin_lambda_min,
-    interval_magnitude,
+    gershgorin_certifies_nsd,
+    gershgorin_certifies_psd,
     psd_2x2_sufficient,
     psd_decision_slack,
 )
@@ -288,16 +287,13 @@ def certify_convex(
 
     # Gershgorin's bounds are rigorous (outward-rounded), so the only slack the
     # verdict needs is the widening that outward rounding itself introduced,
-    # which is O(u·‖H‖) — hence scaled by the interval's magnitude, not an
-    # absolute constant (#1397).
-    slack = psd_decision_slack(interval_magnitude(hess))
-
-    lam_min = gershgorin_lambda_min(hess)
-    if lam_min >= -slack:
+    # which is O(u·‖H_i‖) for row i — scaled by each row's OWN magnitude, not
+    # an absolute constant (#1397) and not the whole matrix's norm (#1673 B4:
+    # a 5e17 row licensed an exact -2 on another row as PSD).
+    if gershgorin_certifies_psd(hess):
         return Curvature.CONVEX
 
-    lam_max = gershgorin_lambda_max(hess)
-    if lam_max <= slack:
+    if gershgorin_certifies_nsd(hess):
         return Curvature.CONCAVE
 
     return None
