@@ -216,6 +216,17 @@ def _early_exit_model():
     return m
 
 
+#: The early-exit tests' gap tolerance. At the default 1e-4, whether the check-in ever
+#: sees the gap closed before HiGHS finishes on its own depends on which OpenBLAS kernel
+#: the runner's CPU selects: measured with ``OPENBLAS_CORETYPE``, the SkylakeX and
+#: Prescott kernels exit early (413 / 534 incumbent offers), Haswell, Zen and Sandybridge
+#: run to ``optimal`` (470) and never exit early -- so on an AVX2 CI runner the
+#: unconfirmed-bound test failed and its siblings passed without testing anything. At
+#: 1e-2 every one of those five kernels exits early (350-357 offers, against ~470 for a
+#: run to completion) and certifies the same 0.008.
+_EARLY_EXIT_GAP = 1e-2
+
+
 def _lp_nlp_bb(model):
     """The single-tree driver on the HiGHS lazy master, called directly so a solve
     that does not certify is not replaced by the route's fallback, with a caller
@@ -226,6 +237,7 @@ def _lp_nlp_bb(model):
     r = solve_lp_nlp_bb(
         model,
         time_limit=60.0,
+        gap_tolerance=_EARLY_EXIT_GAP,
         milp_solver="highs",
         termination_hook=lambda ctx: bool(seen.append(dict(ctx))),
     )
@@ -287,6 +299,7 @@ def test_lp_nlp_bb_early_exit_confirmed_by_a_bound_a_hair_lower(monkeypatch):
     r = _lp_nlp_bb(_early_exit_model())
     stats = r.mip_nlp_trace["summary"]["callback_stats"]
     assert fired, "the lazy-master cross-check never ran"
+    assert stats["converged_early"] is True, stats  # the early exit fired (CLAUDE.md §6)
     assert stats["early_exit_unconfirmed"] is False, stats
     assert r.gap_certified
     assert r.bound is not None and r.bound <= fired[-1] + 1e-12, (r.bound, fired)
@@ -299,6 +312,7 @@ def test_lp_nlp_bb_early_exit_still_certifies_when_confirmed():
     r = _lp_nlp_bb(_early_exit_model())
     stats = r.mip_nlp_trace["summary"]["callback_stats"]
     assert stats["presolve_cross_check"]["ran"]
+    assert stats["converged_early"] is True, stats  # the early exit fired (CLAUDE.md §6)
     assert stats["early_exit_unconfirmed"] is False
     assert r.gap_certified
     assert r.objective == pytest.approx(0.008, abs=1e-6)

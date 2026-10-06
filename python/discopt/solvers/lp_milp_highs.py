@@ -106,7 +106,11 @@ _PRESOLVE_RULE_PARALLEL_ROWS_AND_COLS = 1 << 13
 #: Sparsify is the one taken: it only re-expresses rows to cut fill, while 9 and 12
 #: eliminate columns. On 23 HiGHS check instances in this route's standard form, sparsify
 #: on and off gave the same status and objective on every instance (panel in the #1667 PR).
-#: The upstream bug is tracked in #1671: re-measure and drop this bit once HiGHS fixes it.
+#: The upstream bug is tracked in #1671. Through highspy 1.15.1 it still cycles. HiGHS's
+#: unreleased ``latest`` branch does not: it stops at ERGO-Code/HiGHS PR 2962 (bisected).
+#: ``test_1671_highs_presolve_cycle_canary.py`` fails once the installed HiGHS stops
+#: cycling on the hand-off. Then re-measure the panel and drop this bit or keep it as a
+#: documented opt-out.
 _PRESOLVE_RULE_SPARSIFY = 1 << 14
 #: Every ``presolve_rule_off`` bit the MILP route sets.
 MILP_PRESOLVE_RULE_OFF = _PRESOLVE_RULE_PARALLEL_ROWS_AND_COLS | _PRESOLVE_RULE_SPARSIFY
