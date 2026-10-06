@@ -262,6 +262,7 @@ def solve_nlp(
     block_structure: Optional[tuple[Sequence[int], Sequence[int]]] = None,
     warm_start: Optional[object] = None,
     solve_report: bool = False,
+    problem_scaling: Optional[tuple[float, Optional[np.ndarray]]] = None,
 ) -> NLPResult:
     """Solve an NLP using pounce with the NLPEvaluator callbacks.
 
@@ -312,6 +313,13 @@ def solve_nlp(
             restoration statistics, timing) as ``NLPResult.solve_report``
             (#1534). Off by default: the single-NLP route asks for it, the
             thousands of node solves inside a branch-and-bound do not.
+
+        problem_scaling: Optional ``(obj_scaling, x_scaling)`` handed to
+            ``pounce.Problem.set_problem_scaling`` with
+            ``nlp_scaling_method="user-scaling"`` (#1620 B-04). ``x_scaling`` is
+            one positive factor per column (``None`` for none); POUNCE reports
+            the point, objective and multipliers back in the caller's units.
+            Passing it with a different ``nlp_scaling_method`` raises.
     """
     if not POUNCE_AVAILABLE:
         raise ImportError(
@@ -412,6 +420,31 @@ def solve_nlp(
                     type(exc).__name__,
                     exc,
                 )
+
+    # #1620 B-04: user scaling, ``(obj_scaling, x_scaling)`` in this NLP's own
+    # units (``x_scaling`` one positive factor per column, or ``None``). POUNCE
+    # applies it only under ``nlp_scaling_method="user-scaling"``; a different
+    # method passed alongside it would leave the factors silently unused, so that
+    # combination is refused.
+    if problem_scaling is not None:
+        obj_s, x_s = problem_scaling
+        method = opts.get("nlp_scaling_method", "user-scaling")
+        if method != "user-scaling":
+            raise ValueError(
+                f"user problem scaling was passed together with nlp_scaling_method="
+                f"{method!r}; POUNCE applies the factors only under "
+                "nlp_scaling_method='user-scaling'. Drop one of the two."
+            )
+        if x_s is not None and np.shape(x_s) != (n,):
+            raise ValueError(
+                f"variable scaling has shape {np.shape(x_s)}, but this NLP has {n} columns"
+            )
+        problem.add_option("nlp_scaling_method", "user-scaling")
+        problem.set_problem_scaling(
+            float(obj_s),
+            None if x_s is None else np.asarray(x_s, dtype=np.float64),
+            None,
+        )
 
     # Structure-aware KKT passthroughs (pounce#180). Both are correctness-safe:
     # pounce transparently falls back to the full-space path when the partition

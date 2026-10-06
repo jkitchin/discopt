@@ -394,6 +394,12 @@ INVENTORY: tuple[tuple[str, str, str, str], ...] = (
     ),
     ("discopt._relax.convexity.eigenvalue_arith", "QuadraticForm", "trivial", "constructor"),
     ("discopt._relax.convexity.g_convex_inject", "g_convex_cuts_enabled", "trivial", "env read"),
+    (
+        "discopt._relax.binary_multilinear_reform",
+        "binary_quadratic_milp_enabled",
+        "trivial",
+        "env read (#1619)",
+    ),
     ("discopt._relax.convexity.patterns", "clear_declared_box_cache", "trivial", "cache clear"),
     ("discopt._relax.integer_product_reform", "_iml_extend", "trivial", "one pass over x0"),
     ("discopt._relax.integer_product_reform", "_ipx_extend", "trivial", "one pass over x0"),

@@ -68,6 +68,8 @@ def to_gams(
     model: Model,
     path: str | Path | None = None,
     model_type: str | None = None,
+    *,
+    initial_point: dict | None = None,
 ) -> str | None:
     """Export a discopt Model to GAMS (.gms) format.
 
@@ -80,6 +82,22 @@ def to_gams(
         Otherwise return the .gms string.
     model_type : str, optional
         GAMS model type (LP, MIP, NLP, MINLP, etc.).  Auto-detected if not given.
+    initial_point : dict, optional
+        ``{Variable: value}`` starting guess, in the form :func:`to_nl`'s
+        ``initial_point`` and :meth:`Model.solve`'s ``initial_solution`` take
+        (validated, bound-clamped and integrality-rounded the same way). Written
+        as each element's ``.l`` level (#1620 B-14). The three-way contract is
+        :func:`to_nl`'s: ``None`` (the default) writes the point attached to the
+        model (``from_nl``'s ``x`` segment, :meth:`Model.set_initial_point`), a
+        non-empty dict wins, and ``{}`` writes no supplied point.
+
+        An element with no supplied value gets the interior *fallback* level of
+        :func:`_starting_level` (box midpoint, one unit in from a half-open
+        side) when it is a scalar variable: GAMS evaluates the model at the
+        levels during generation, and at its default level 0 a ``log(x)`` or
+        ``a / x`` aborts the solve before the solver runs. That fallback is a
+        domain-safety default, not a guess anyone chose -- pass a point to
+        replace it.
 
     Returns
     -------
@@ -98,7 +116,15 @@ def to_gams(
     # by name rather than die on ``con.body`` in the equation writer (#1218).
     # This writer emits plain GAMS equations, not an EMP/JAMS disjunctive model.
     refuse_non_algebraic_relations(model, "GAMS")
-    writer = _GamsWriter(model, model_type)
+    if initial_point is None:
+        point = dict(getattr(model, "_initial_point", None) or {})
+    elif initial_point:
+        from discopt.export.nl import _keyed_initial_point
+
+        point = _keyed_initial_point(model, initial_point)
+    else:
+        point = {}
+    writer = _GamsWriter(model, model_type, point)
     text = writer.write()
     if path is not None:
         Path(path).write_text(text)
@@ -107,8 +133,15 @@ def to_gams(
 
 
 class _GamsWriter:
-    def __init__(self, model: Model, model_type: str | None):
+    def __init__(
+        self,
+        model: Model,
+        model_type: str | None,
+        initial_point: dict[tuple[str, int], float] | None = None,
+    ):
         self.model = model
+        # (name, element) -> level the caller supplied (#1620 B-14).
+        self._initial_point = dict(initial_point or {})
         self._model_type = model_type
         self._set_counter = 0
         # Map Variable -> (set_names, set_elements) for indexed variables
@@ -207,7 +240,10 @@ class _GamsWriter:
         # Write bounds for non-default bounds
         for var in self.model._variables:
             if var.var_type == VarType.BINARY and binary_box_is_default(var.lb, var.ub):
-                continue  # 0-1 is implicit in the `Binary Variables` declaration
+                # 0-1 is implicit in the `Binary Variables` declaration; only a
+                # supplied level is written.
+                self._write_given_levels(lines, var)
+                continue
             # A pinned binary (EX-3) falls through to the ordinary bound path
             # below, which emits the explicit `.lo`/`.up` that GAMS needs to
             # honor the pin — the declaration alone would restore the 0-1 box.
@@ -228,9 +264,10 @@ class _GamsWriter:
                     lines.append(f"{var.name}.lo = {lb_val};")
                 if ub_val < 1e18:
                     lines.append(f"{var.name}.up = {ub_val};")
-                lvl = _starting_level(lb_val, ub_val)
-                if lvl != 0.0:
-                    lines.append(f"{var.name}.l = {lvl};")
+                given = self._initial_point.get((var.name, 0))
+                lvl = float(given) if given is not None else _starting_level(lb_val, ub_val)
+                if lvl != 0.0 or given is not None:
+                    lines.append(f"{var.name}.l = {lvl!r};")
             else:
                 # X-2 (#413) / EX-4: an array-variable block is NOT a scalar.
                 # The previous code only emitted a bound when it was UNIFORM
@@ -243,8 +280,20 @@ class _GamsWriter:
                 # heterogeneous, emit one line per element at its 1-based label.
                 self._write_array_bound(lines, var, lb_arr, "lo", -1e18, np.greater)
                 self._write_array_bound(lines, var, ub_arr, "up", 1e18, np.less)
+                self._write_given_levels(lines, var)
 
         lines.append("")
+
+    def _write_given_levels(self, lines: list[str], var: Variable) -> None:
+        """Emit ``.l`` for every element of ``var`` the caller supplied a level for."""
+        for k in range(var.size):
+            given = self._initial_point.get((var.name, k))
+            if given is None:
+                continue
+            if var.name in self._var_sets:
+                lines.append(f"{var.name}.l({self._element_label(var, k)}) = {float(given)!r};")
+            else:
+                lines.append(f"{var.name}.l = {float(given)!r};")
 
     def _element_label(self, var: Variable, k: int) -> str:
         """1-based, quoted GAMS label(s) for flat element ``k`` of ``var``.

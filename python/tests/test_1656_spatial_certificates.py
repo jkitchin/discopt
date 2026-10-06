@@ -41,7 +41,14 @@ def _lsq():
     return m
 
 
-def test_native_kernel_certifies_the_published_pair():
+@pytest.mark.parametrize("scale_free", ["1", "0"])
+def test_native_kernel_certifies_the_published_pair(monkeypatch, scale_free):
+    # #1619 D-11: under the default scale-free branching rule the kernel closes
+    # this gap in 1153 nodes without ever accepting a McCormick-tight LP
+    # point as its incumbent, so there is no ``c'x`` to price. The pricing
+    # witness (32 calls, all raised, 3495 nodes) lives on the legacy rule, which
+    # ``=0`` keeps; both arms must certify the published pair.
+    monkeypatch.setenv("DISCOPT_SCALE_FREE_BRANCHING", scale_free)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         r = _lsq().solve(time_limit=60)
@@ -58,8 +65,10 @@ def test_native_kernel_certifies_the_published_pair():
     # Probe fired (CLAUDE.md §6): the kernel priced accepted LP points, and on
     # this model at least one lifted ``c'x`` was optimistic.
     stats = r.solver_stats or {}
-    assert stats["tree/incumbent_value_calls"] >= 1
-    assert stats["tree/incumbent_value_raised"] >= 1
+    assert "tree/incumbent_value_calls" in stats  # the callback was installed
+    if scale_free == "0":
+        assert stats["tree/incumbent_value_calls"] >= 1
+        assert stats["tree/incumbent_value_raised"] >= 1
 
 
 def test_kernel_declines_a_lift_looser_than_the_model():

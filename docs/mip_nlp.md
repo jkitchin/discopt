@@ -118,7 +118,7 @@ Accepted SHOT-profile controls are:
 | Option | Default | Accepted values | Purpose |
 | --- | --- | --- | --- |
 | `tree_strategy` | `"multi_tree"` | `"auto"`, `"multi_tree"`, `"single_tree"` | Select the standard multi-tree loop or the Gurobi-backed single-tree callback path. |
-| `cut_strategy` | `"auto"` | `"auto"`, `"oa"`, `"ecp"`, `"esh"` | Choose ordinary OA/ECP separation or SHOT-style extended supporting hyperplanes. |
+| `cut_strategy` | `"auto"` | `"auto"`, `"oa"`, `"ecp"`, `"esh"` | Choose ordinary OA/ECP separation or SHOT-style extended supporting hyperplanes. `"auto"` already selects ESH, so `"esh"` and the default coincide; ESH cuts are generated only where ECP-style separation runs (`mip_nlp_method="ecp"`). Under `mip_nlp_method="oa"` cuts come from the fixed-NLP points, and an iteration with no new integer assignment adds ordinary ECP cuts at the master point. |
 | `objective_epigraph` | `"auto"` | `"auto"`, `"off"`, `"on"` | Permit the objective-defining-equality epigraph pass for minimization objectives. |
 | `anti_epigraph` | `"auto"` | `"auto"`, `"off"`, `"on"` | Permit the corresponding anti-epigraph pass for maximization objectives. |
 | `nonlinear_partitioning` | `"auto"` | `"auto"`, `"off"`, `"static"`, `"adaptive"` | Record SHOT nonlinear-partitioning policy; GOA/AMP owns the active partitioning implementation. |

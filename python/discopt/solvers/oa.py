@@ -9618,6 +9618,17 @@ def solve_oa(
                 stop_after_master_pool = True
                 break
 
+        # #1619 E-02: the gap test above sits inside the fixed-NLP candidate loop,
+        # so an iteration that runs no candidate never reached it. The SHOT
+        # profile's ``deduplicate_used_assignments`` empties the candidate list as
+        # soon as the master repeats an integer assignment it has already solved,
+        # and on synthes1 the certified gap closed at iteration 2 (LB 6.0097589089
+        # vs UB 6.0097589107) while the loop solved ~1600 more masters until the
+        # time limit. The same test, once per iteration, regardless of candidates.
+        if not stop_after_master_pool and _certified_gap_converged():
+            termination_reason = "gap"
+            stop_after_master_pool = True
+
         if stop_after_master_pool:
             iteration_record["termination_reason"] = termination_reason
         iteration_cuts_added = int(len(oa_A_rows) - cuts_before)
