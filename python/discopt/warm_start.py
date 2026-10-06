@@ -429,6 +429,67 @@ def _tail_default(v: Variable) -> np.ndarray:
     return mid
 
 
+def _fill_defined_aux_columns(model: Model, x: np.ndarray, n_head: int, evaluator) -> np.ndarray:
+    """Set each reform-added column to the value its defining equality implies (#1668).
+
+    The factorable lift appends a scalar aux ``w`` together with the row
+    ``w - f(x) == 0``. Padding ``w`` with the box midpoint made every such row
+    violated, so a start that was feasible on the user's model was rejected on the
+    reformulated one and lost as an incumbent. Evaluating ``w = f(x)`` makes the
+    completed point feasible by construction.
+
+    Only rows of exactly the form ``Variable - expr == 0`` with the variable among
+    the appended columns are used; the row body is linear in ``w`` with unit
+    coefficient, so one row evaluation gives ``w = w_old - body(x)``. Auxes may
+    depend on one another, so it sweeps until nothing moves (bounded by the number
+    of appended columns). Anything it cannot define keeps its padded default, and
+    the caller's own feasibility gate still decides whether the point is used.
+    """
+    from discopt.modeling.core import BinaryOp, ConstraintSense
+
+    start_of: dict[int, int] = {}
+    off = 0
+    for v in model._variables:
+        if off >= n_head and int(v.size) == 1 and v.var_type == VarType.CONTINUOUS:
+            start_of[id(v)] = off
+        off += int(v.size)
+    if not start_of:
+        return x
+
+    defining: list[tuple[int, int]] = []  # (row index, column)
+    for i, c in enumerate(model._constraints):
+        body = getattr(c, "body", None)
+        if (
+            getattr(c, "sense", None) in ("==", ConstraintSense.EQ)
+            and isinstance(body, BinaryOp)
+            and body.op == "-"
+            and id(body.left) in start_of
+        ):
+            defining.append((i, start_of[id(body.left)]))
+    if not defining:
+        return x
+
+    if evaluator is None:
+        from discopt._tape_nlp_evaluator import make_evaluator
+
+        evaluator = make_evaluator(model)
+
+    out = x.copy()
+    for _ in range(len(defining) + 1):
+        moved = False
+        for i, j in defining:
+            g = np.asarray(evaluator.evaluate_constraints(out), dtype=np.float64)
+            if g.size != len(model._constraints):
+                return x  # row layout is not the model's: do not guess
+            new = out[j] - g[i]
+            if np.isfinite(new) and abs(new - out[j]) > 1e-12 * (1.0 + abs(new)):
+                out[j] = new
+                moved = True
+        if not moved:
+            break
+    return out
+
+
 def complete_initial_point(model: Model, x_head, *, evaluator=None):
     """Extend a warm start over a PREFIX of ``model``'s variables to the whole vector.
 
@@ -488,6 +549,8 @@ def complete_initial_point(model: Model, x_head, *, evaluator=None):
         x[start : start + size] = _tail_default(v)
         if v.var_type in (VarType.BINARY, VarType.INTEGER):
             discrete_cols.extend(range(start, start + size))
+
+    x = _fill_defined_aux_columns(model, x, x_head.size, evaluator)
 
     if not discrete_cols:
         return x
