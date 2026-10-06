@@ -8258,6 +8258,18 @@ def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str, dict[str
     #1229 made ``highspy`` a core dependency; see :func:`_convex_route_oa_master`
     for the panel that retired the in-house master.
 
+    **The target moved to ``lp_nlp_bb`` (#1658, 2026-10-06).** Both of #1141's
+    reasons for ``"oa"`` have expired: HiGHS is a core dependency, and the
+    ``lp_nlp_bb`` deficit #1141 measured was on the in-house master. Three
+    LP/NLP-BB defects were fixed on the way: stale-tree offers judged by the
+    HiGHS lazy master, absolute violation tests on scaled rows, and unverified
+    fixed-NLP incumbents (``docs/dev/performance-plan.md`` §76.1-76.3). Panel
+    (§76.4): plain ``solve(time_limit=30)``, arms interleaved, the 26 in-repo
+    instances the router diverts at row-scale spans 0/3/6 plus 16 #1658
+    portfolios, 498 bound checks / 0 violations: ``lp_nlp_bb`` 92/94 optimal, 10
+    fallbacks, 339.5 s; ``"oa"`` 91/94, 22 fallbacks, 342.0 s; no certificate
+    lost. ``DISCOPT_CONVEX_ROUTE_METHOD=oa`` restores the old target.
+
     Every gate below is a *refusal* to route: an unknown convexity verdict, a
     nonconvex model, a missing MILP backend, or an opaque ``dm.custom`` body all
     leave the model on the sound default path. The route never fires on a model
@@ -8332,14 +8344,34 @@ def _convex_minlp_auto_route(model: Model) -> tuple[Optional[str], str, dict[str
     # since #1229), and it never silently changes the algorithm -- the #1141
     # defect.
     master = _convex_route_oa_master()
+    method = _convex_route_method()
     return (
-        "oa",
+        method,
         (
-            f"mip-nlp/oa: {problem_class.value} certified convex at the root "
+            f"mip-nlp/{method}: {problem_class.value} certified convex at the root "
             f"(DISCOPT_CONVEX_MINLP_ROUTE; master={master})"
         ),
         {"milp_solver": master},
     )
+
+
+#: The MIP-NLP methods the convex-MINLP route may target (#1658).
+_CONVEX_ROUTE_METHODS = ("oa", "lp_nlp_bb")
+
+
+def _convex_route_method() -> str:
+    """The convex-MINLP route's MIP-NLP method (``DISCOPT_CONVEX_ROUTE_METHOD``).
+
+    See ``docs/dev/performance-plan.md`` §76 for the panel this default rests on.
+    Any value outside :data:`_CONVEX_ROUTE_METHODS` raises rather than being
+    silently replaced: a typo must not run an algorithm nobody asked for.
+    """
+    raw = os.environ.get("DISCOPT_CONVEX_ROUTE_METHOD", "lp_nlp_bb").strip().lower()
+    if raw not in _CONVEX_ROUTE_METHODS:
+        raise ValueError(
+            f"DISCOPT_CONVEX_ROUTE_METHOD={raw!r} is not one of {_CONVEX_ROUTE_METHODS}"
+        )
+    return raw
 
 
 def _convex_kernel_defers_to_route_enabled() -> bool:
@@ -8396,6 +8428,15 @@ def _convex_route_preempts_kernel(
         return None
     if _mip_nlp_ignored_options(option_values):
         return None
+    if _convex_minlp_route_enabled():
+        # #1658 review B3: a misconfigured route is the caller's error, not a
+        # router defect. Read both settings before the ``except`` below, which
+        # would otherwise log ``DISCOPT_CONVEX_ROUTE_METHOD=ecp`` (or a retired
+        # ``DISCOPT_CONVEX_ROUTE_OA_MASTER``) as a fallback, run the kernel, and
+        # answer ``optimal`` -- while the same setting raises on any model the
+        # kernel does not take.
+        _convex_route_method()
+        _convex_route_oa_master()
     saved = {
         a: getattr(model, a, _PROBE_UNSET)
         for a in (

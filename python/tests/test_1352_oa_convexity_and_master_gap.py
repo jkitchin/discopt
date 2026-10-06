@@ -218,7 +218,8 @@ def test_router_sends_certificate_only_objective_to_bnb(monkeypatch):
     assert _convex_minlp_auto_route(_portfolio(3, "dm.sum"))[0] is not None
     r = _portfolio(3, "dm.sum").solve(time_limit=60)
     assert r.status == "optimal"
-    assert r.node_count == 0
+    # Certified on the route itself (any method: the gate is what is tested here).
+    assert (r.algorithm_route or "").startswith("mip-nlp/"), r.algorithm_route
     assert "fell back" not in (r.algorithm_route or "")
     assert r.bound <= TRUE_OPT_K3 + 1e-9
 

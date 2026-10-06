@@ -358,14 +358,75 @@ def gershgorin_lambda_max(H: Interval) -> float:
     if not (np.all(np.isfinite(lo)) and np.all(np.isfinite(hi))):
         return float(np.inf)
 
+    return float(gershgorin_row_upper_bounds(H).max())
+
+
+def gershgorin_row_upper_bounds(H: Interval) -> np.ndarray:
+    """Sound per-row Gershgorin upper bounds on ``λ_max`` over ``H``.
+
+    The mirror of :func:`gershgorin_row_lower_bounds`:
+    ``c_i = sup(H_ii) + Σ_{j ≠ i} max(|H_ij|_lo, |H_ij|_hi)``, rounded toward
+    ``+∞``, and ``λ_max ≤ max_i c_i``.
+    """
+    lo = np.asarray(H.lo, dtype=np.float64)
+    hi = np.asarray(H.hi, dtype=np.float64)
+    if lo.ndim != 2 or lo.shape[0] != lo.shape[1]:
+        raise ValueError(f"Expected square Hessian; got shape {lo.shape}")
     abs_sup = np.maximum(np.abs(lo), np.abs(hi))
     np.fill_diagonal(abs_sup, 0.0)
 
     row_sum = _row_offdiag_abs_sum_upper(abs_sup)
 
     diag_hi = np.diag(hi)
-    bounds = _round_up_exact0(diag_hi + row_sum)  # ``_exact0``: see λ_min above
-    return float(bounds.max())
+    with np.errstate(invalid="ignore"):
+        raw = diag_hi + row_sum
+    raw = np.where(np.isnan(raw), np.inf, raw)
+    return np.asarray(_round_up_exact0(raw), dtype=np.float64)  # ``_exact0``: see λ_min
+
+
+def _row_decision_slack(H: Interval, floor: float | None) -> np.ndarray:
+    """Per-row acceptance slack for a Gershgorin sign test (#1673 B4).
+
+    Row ``i``'s Gershgorin bound is computed from row ``i``'s entries only, so
+    the rounding it can carry is ``O(u · ‖H_i‖)`` -- the row's own magnitude, not
+    the whole matrix's. Scaling by the matrix's Frobenius norm instead licensed
+    a row to be as negative as ``K·u`` times the LARGEST row: on
+    ``x0**-3.5 - x2**2`` with ``x0 in [1e-3, 200]`` the ``x0`` row reaches 5e17,
+    the slack became 1769, and the ``x2`` row's exact ``-2`` passed as PSD -- a
+    false convexity certificate that sent a nonconvex MINLP to outer
+    approximation, whose invalid cuts then emptied the master (a false
+    ``infeasible``). ``floor``, when given, is an absolute lower limit on every
+    row's slack (``g_convexity``'s explicit ``tol``).
+    """
+    lo = np.asarray(H.lo, dtype=np.float64)
+    hi = np.asarray(H.hi, dtype=np.float64)
+    row_mag = np.linalg.norm(np.maximum(np.abs(lo), np.abs(hi)), axis=1)
+    slack = np.array([psd_decision_slack(float(m)) for m in row_mag], dtype=np.float64)
+    if floor is not None:
+        slack = np.maximum(slack, float(floor))
+    return slack
+
+
+def gershgorin_certifies_psd(H: Interval, floor: float | None = None) -> bool:
+    """True when every row's Gershgorin lower bound clears its own slack.
+
+    Each row's bound is judged against :func:`_row_decision_slack`, never a
+    slack sized by another row. A non-finite entry abstains (``False``).
+    """
+    lo = np.asarray(H.lo, dtype=np.float64)
+    hi = np.asarray(H.hi, dtype=np.float64)
+    if not (np.all(np.isfinite(lo)) and np.all(np.isfinite(hi))):
+        return False
+    return bool(np.all(gershgorin_row_lower_bounds(H) >= -_row_decision_slack(H, floor)))
+
+
+def gershgorin_certifies_nsd(H: Interval, floor: float | None = None) -> bool:
+    """True when every row's Gershgorin upper bound is below its own slack."""
+    lo = np.asarray(H.lo, dtype=np.float64)
+    hi = np.asarray(H.hi, dtype=np.float64)
+    if not (np.all(np.isfinite(lo)) and np.all(np.isfinite(hi))):
+        return False
+    return bool(np.all(gershgorin_row_upper_bounds(H) <= _row_decision_slack(H, floor)))
 
 
 def psd_2x2_sufficient(H: Interval) -> bool:
@@ -414,6 +475,9 @@ __all__ = [
     "gershgorin_lambda_min",
     "gershgorin_lambda_max",
     "gershgorin_row_lower_bounds",
+    "gershgorin_row_upper_bounds",
+    "gershgorin_certifies_psd",
+    "gershgorin_certifies_nsd",
     "psd_2x2_sufficient",
     "psd_decision_slack",
     "interval_magnitude",

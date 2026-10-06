@@ -19,7 +19,8 @@ directions at once, and both are swept here:
   zero eigenvalue reads as a small negative and a valid certificate is lost.
 
 The two arms are deliberately run on the *gate as composed in the shipped
-function* — ``_psd_slack(aug, tol)`` against ``gershgorin_lambda_min(aug)`` — and
+function* — ``gershgorin_certifies_psd(aug, tol)``, whose slack is taken per
+Gershgorin row since #1673 B4 — and
 ``test_the_shipped_certificate_uses_the_scaled_slack`` asserts that composition
 is what ``certify_g_convex`` actually evaluates, so the unit arms cannot drift
 away from the code they are pinning. A fourth arm exercises the whole function
@@ -40,11 +41,10 @@ from fractions import Fraction
 import numpy as np
 import pytest
 from discopt._relax.convexity.eigenvalue import (
-    gershgorin_lambda_min,
-    interval_magnitude,
+    gershgorin_certifies_psd,
     psd_decision_slack,
 )
-from discopt._relax.convexity.g_convexity import _psd_slack, certify_g_convex
+from discopt._relax.convexity.g_convexity import certify_g_convex
 from discopt._relax.convexity.interval import Interval
 
 #: Magnitudes of the tested matrix. The small end is where an absolute licence
@@ -64,16 +64,21 @@ RELATIVE_CEILING = 1e-12
 U = float(np.finfo(np.float64).eps)
 
 
-def _diagonal_interval(diag_entries):
-    """Degenerate interval matrix ``diag(entries)``.
+def _diagonal_interval(diag_entries, row0_hi=None):
+    """Interval matrix ``diag(entries)``, its ``[0, 0]`` entry ``[entries[0], row0_hi]``.
 
     Diagonal, so the Gershgorin row bound is *exact* (no off-diagonal radius to
     round outward) and ``λ_min`` is the least entry with no enclosure slop. That
     removes the enclosure from the measurement and leaves only the gate.
+    ``row0_hi`` gives the negative row the tested magnitude (#1673 B4: the slack
+    is per row, so a row's licence is sized by that row alone).
     """
     d = np.asarray(diag_entries, dtype=np.float64)
-    m = np.diag(d)
-    return Interval(m.copy(), m.copy())
+    lo = np.diag(d)
+    hi = lo.copy()
+    if row0_hi is not None:
+        hi[0, 0] = float(row0_hi)
+    return Interval(lo, hi)
 
 
 def _exact_min_diagonal(entries):
@@ -98,11 +103,12 @@ def test_admitted_relative_nonconvexity_is_bounded_at_every_scale(magnitude):
     for exponent in range(-22, -3):
         delta = 10.0**exponent
         entries = [-delta] + [magnitude] * 3
-        aug = _diagonal_interval(entries)
+        aug = _diagonal_interval(entries, row0_hi=magnitude)
 
-        mag = interval_magnitude(aug)
-        slack = _psd_slack(aug, None)
-        admitted = gershgorin_lambda_min(aug) >= -slack
+        # The magnitude of the row carrying the negative eigenvalue.
+        mag = float(np.hypot(delta, magnitude))
+        slack = psd_decision_slack(mag)
+        admitted = gershgorin_certifies_psd(aug)
 
         # The oracle: the exact least eigenvalue of a diagonal matrix.
         exact_min = _exact_min_diagonal(entries)
@@ -179,11 +185,11 @@ def test_a_genuine_zero_eigenvalue_is_still_admitted_at_large_scale(magnitude):
     roundoff = 5.0 * U * magnitude
     for factor in (0.1, 0.5, 1.0, 2.0):
         entries = [-roundoff * factor] + [magnitude] * 3
-        aug = _diagonal_interval(entries)
-        slack = _psd_slack(aug, None)
+        aug = _diagonal_interval(entries, row0_hi=magnitude)
+        slack = psd_decision_slack(magnitude)
         checked += 1
         if factor <= 1.0:
-            assert gershgorin_lambda_min(aug) >= -slack, (
+            assert gershgorin_certifies_psd(aug), (
                 f"at |aug|_F ~ {magnitude:.0e} a zero eigenvalue displaced by "
                 f"{roundoff * factor:.3e} (={5.0 * factor:.1f}·u·|aug|) was refused; "
                 f"slack={slack:.3e}. An absolute tolerance would have refused it "
@@ -200,19 +206,16 @@ def test_the_shipped_certificate_uses_the_scaled_slack():
     calls.
     """
     src = inspect.getsource(certify_g_convex)
-    assert "_psd_slack(aug, tol)" in src, (
-        "certify_g_convex no longer evaluates _psd_slack(aug, tol); the unit "
-        f"sweeps in this file are no longer pinning the shipped gate. Source:\n{src}"
+    assert "gershgorin_certifies_psd(aug, tol)" in src, (
+        "certify_g_convex no longer evaluates gershgorin_certifies_psd(aug, tol); the "
+        f"unit sweeps in this file are no longer pinning the shipped gate. Source:\n{src}"
     )
+    assert "gershgorin_certifies_nsd(aug, tol)" in src
     # The absolute comparisons the fix replaced must not come back.
     for dead in (">= -tol", "<= tol:"):
         assert dead not in src, f"an absolute {dead!r} comparison has returned to certify_g_convex"
-    # The slack must be taken from the augmented matrix, not the raw Hessian:
-    # rho ranges up to _MAX_RHO, so aug can dwarf H.
-    helper = inspect.getsource(_psd_slack)
-    assert "interval_magnitude(aug)" in helper, (
-        "_psd_slack must scale by the tested (augmented) matrix's own magnitude"
-    )
+    # The slack is taken from the augmented matrix (rho ranges up to _MAX_RHO,
+    # so aug can dwarf H) -- the helper receives ``aug`` itself, asserted above.
 
 
 @pytest.mark.parametrize("scale", (1e0, 1e3, 1e6, 1e9))

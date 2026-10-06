@@ -31,6 +31,7 @@ def _status(**over):
         gap=0.5,
         gap_tolerance=TOL,
         hook_stopped_before_wall=False,
+        infeasibility_proven=True,
     )
     kw.update(over)
     return _lp_nlp_bb_exit_status(**kw)
@@ -80,7 +81,9 @@ def test_the_early_exit_keeps_its_own_reason():
 @pytest.mark.parametrize(
     "master_status,expected",
     [
-        (SolveStatus.INFEASIBLE, "infeasible"),
+        # #1673 B4: an incumbent is a feasible point, so an empty master
+        # beside one is never an infeasibility certificate.
+        (SolveStatus.INFEASIBLE, "feasible"),
         (SolveStatus.TIME_LIMIT, "feasible"),
         (SolveStatus.ITERATION_LIMIT, "feasible"),
         (SolveStatus.OPTIMAL, "feasible"),
@@ -89,6 +92,18 @@ def test_the_early_exit_keeps_its_own_reason():
 def test_master_status_branches_with_an_open_gap(master_status, expected):
     """Every non-callback branch keeps the meaning it had before the split."""
     assert _status(master_status=master_status, gap=0.5)[0] == expected
+
+
+@pytest.mark.parametrize("proven,expected", [(True, "infeasible"), (False, "no_feasible_point")])
+def test_an_empty_master_is_infeasible_only_with_the_proof(proven, expected):
+    """#1673 B4: no incumbent, empty master -- certified only when proven."""
+    status, _ = _status(
+        master_status=SolveStatus.INFEASIBLE,
+        has_incumbent=False,
+        gap=None,
+        infeasibility_proven=proven,
+    )
+    assert status == expected
 
 
 def test_an_iteration_limit_without_an_incumbent_is_reported_as_such():
