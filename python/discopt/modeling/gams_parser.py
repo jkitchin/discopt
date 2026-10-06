@@ -112,7 +112,62 @@ _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _STRING_RE = re.compile(r'"[^"]*"|\'[^\']*\'')
 
 
+_SET_DIRECTIVE_RE = re.compile(
+    r"^\$(?:if\s+not\s+set\s+(?P<guard>\w+)\s+\$)?"
+    r"(?:set|setglobal|setlocal)\s+(?P<name>\w+)\s*(?P<value>.*?)\s*$",
+    re.I,
+)
+_COMPILE_VAR_RE = re.compile(r"%([A-Za-z_][\w.]*)%")
+
+
+def _substitute_compile_vars(src: str) -> str:
+    """Apply ``$set`` compile-time variables to ``%name%`` references.
+
+    MINLPLib writes ``$if not set NLP $set NLP NLP`` and then ``Solve m using
+    %NLP% ...``. The tokenizer used to drop every ``%`` it met, which read that
+    as ``NLP`` only by accident; it now refuses unknown characters (#1666), so
+    the substitution GAMS performs is done here. Control lines are left for the
+    tokenizer to skip, and so is a ``$ontext`` block. A reference to a variable
+    no ``$set`` defined is refused.
+    """
+    defined: dict[str, str] = {}
+    out: list[str] = []
+    in_text = False
+    for line in src.split("\n"):
+        head = line.lstrip().lower()
+        if line.startswith("$"):
+            if head.startswith("$ontext"):
+                in_text = True
+            elif head.startswith("$offtext"):
+                in_text = False
+            m = _SET_DIRECTIVE_RE.match(line)
+            if m and not in_text:
+                guard = m.group("guard")
+                if guard is None or guard.lower() not in defined:
+                    value = m.group("value")
+                    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+                        value = value[1:-1]
+                    defined[m.group("name").lower()] = value
+            out.append(line)
+            continue
+        if in_text or "%" not in line:
+            out.append(line)
+            continue
+
+        def sub(m: re.Match, lineno: int = len(out) + 1) -> str:
+            name = m.group(1).lower()
+            if name not in defined:
+                raise GamsParseError(
+                    f"Undefined compile-time variable %{m.group(1)}% at line {lineno}"
+                )
+            return defined[name]
+
+        out.append(_COMPILE_VAR_RE.sub(sub, line))
+    return "\n".join(out)
+
+
 def _tokenize(src: str) -> list[Token]:
+    src = _substitute_compile_vars(src)
     tokens: list[Token] = []
     i = 0
     line = 1
@@ -126,8 +181,13 @@ def _tokenize(src: str) -> list[Token]:
             line += 1
             col = 1
             continue
-        # whitespace
-        if ch in " \t\r":
+        # whitespace. A tab advances to the next 8-column stop, so a table laid
+        # out with tabs keeps its values under their column headers (#1666).
+        if ch == "\t":
+            i += 1
+            col += 8 - (col - 1) % 8
+            continue
+        if ch in " \r":
             i += 1
             col += 1
             continue
@@ -141,6 +201,16 @@ def _tokenize(src: str) -> list[Token]:
             # inside an expression (handled by parser).  At line start it's
             # a control directive we skip.
             if col == 1:
+                directive = _IDENT_RE.match(src, i + 1)
+                if directive and directive.group().lower() == "ontext":
+                    # A $ontext ... $offtext block is a comment: skip to the
+                    # line after $offtext rather than reading it as statements.
+                    end = re.compile(r"^\$offtext\b.*$", re.I | re.M).search(src, i)
+                    if end is None:
+                        raise GamsParseError(f"$ontext at line {line} has no matching $offtext")
+                    line += src.count("\n", i, end.end())
+                    i = end.end()
+                    continue
                 while i < n and src[i] != "\n":
                     i += 1
                 continue
@@ -200,9 +270,9 @@ def _tokenize(src: str) -> list[Token]:
             i += 1
             col += 1
             continue
-        # skip unknown
-        i += 1
-        col += 1
+        # A character no rule reads is refused: skipping it silently changed
+        # what the model meant (#1666).
+        raise GamsParseError(f"Unexpected character {ch!r} at line {line}, column {col}")
     tokens.append(Token(_Tok.EOF, "", line, col))
     return tokens
 
@@ -213,6 +283,7 @@ class GamsSet:
     name: str
     elements: list[str]
     description: str = ""
+    domain: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -458,6 +529,83 @@ class _Parser:
     def _skip_semi(self):
         if self._match_sym(";"):
             self._advance()
+
+    # ── Labels and explanatory text (#1666) ──
+
+    @staticmethod
+    def _touches(a: Token, b: Token) -> bool:
+        """Does ``b`` start where ``a`` ends, with no whitespace between?"""
+        return a.kind != _Tok.STRING and a.line == b.line and b.col == a.col + len(a.value)
+
+    def _read_label_parts(self) -> list[str]:
+        """Read one data label and return its per-dimension parts.
+
+        A GAMS label is a quoted string or an unbroken run of letters, digits,
+        ``_``, ``-`` and ``+``; ``.`` joins the parts of a multi-dimensional key.
+        The tokenizer splits ``san-diego`` into three tokens and reads ``1.2`` as
+        one NUMBER, so the label is rebuilt from tokens that touch and then split
+        at its dots. Reading ``san-diego`` as two labels built a different model
+        with no diagnostic (#1666).
+        """
+        parts: list[str] = []
+        while True:
+            t = self._cur()
+            if t.kind == _Tok.STRING:
+                parts.append(self._advance().value)
+            elif t.kind in (_Tok.IDENT, _Tok.NUMBER):
+                run = [self._advance()]
+                while True:
+                    nxt = self._cur()
+                    if not self._touches(run[-1], nxt):
+                        break
+                    if nxt.kind in (_Tok.IDENT, _Tok.NUMBER):
+                        run.append(self._advance())
+                    elif (
+                        nxt.kind == _Tok.SYMBOL
+                        and nxt.value in ("-", "+", ".")
+                        and self._peek(1).kind in (_Tok.IDENT, _Tok.NUMBER, _Tok.STRING)
+                        and self._touches(nxt, self._peek(1))
+                    ):
+                        run.append(self._advance())
+                    else:
+                        break
+                raw = "".join(tok.value for tok in run)
+                pieces = raw.split(".")
+                if any(not piece for piece in pieces):
+                    raise GamsParseError(f"Malformed label {raw!r} at line {t.line}")
+                parts.extend(pieces)
+            else:
+                raise GamsParseError(
+                    f"Expected a label at line {t.line}, column {t.col}, got {t.value!r}"
+                )
+            if self._match_sym("."):
+                self._advance()
+                continue
+            return parts
+
+    def _parse_decl_text(self, *, whole_line: bool = False) -> str:
+        """Explanatory text after a declared name (and domain), quoted or not.
+
+        GAMS lets the text go unquoted: it runs to the end of the line, or to the
+        ``/`` that opens the data, or to the ``,`` that starts the next item.
+        Reading the words as more declared names misassigned every declaration
+        after them (#1666). ``whole_line`` is a Table's text, which ends only at
+        the end of the line.
+        """
+        line = self.tokens[self.pos - 1].line
+        if self._cur().kind == _Tok.STRING and self._cur().line == line:
+            return self._advance().value
+        words: list[str] = []
+        while True:
+            t = self._cur()
+            if t.kind == _Tok.EOF or t.line != line:
+                break
+            if t.kind == _Tok.SYMBOL and (
+                t.value in ("/", ";") or (t.value == "," and not whole_line)
+            ):
+                break
+            words.append(self._advance().value)
+        return " ".join(words)
 
     # ── Keywords ──
 
@@ -706,19 +854,17 @@ class _Parser:
             name_tok = self._expect(_Tok.IDENT)
             name = name_tok.value
             # optional domain
+            domain: list[str] = []
             if self._match_sym("("):
-                self._parse_domain()
-            # optional description string
-            desc = ""
-            if self._cur().kind == _Tok.STRING:
-                desc = self._advance().value
+                domain = self._parse_domain()
+            desc = self._parse_decl_text()
             # data in /.../
             elements: list[str] = []
             if self._match_sym("/"):
                 self._advance()  # skip /
                 elements = self._parse_set_elements()
                 self._expect(_Tok.SYMBOL, "/")
-            self.sets[name] = GamsSet(name, elements, desc)
+            self.sets[name] = GamsSet(name, elements, desc, domain)
             # optional comma between items
             if self._match_sym(","):
                 self._advance()
@@ -729,18 +875,22 @@ class _Parser:
         elements: list[str] = []
         while not self._at_end() and not self._match_sym("/"):
             tok = self._cur()
-            if tok.kind == _Tok.IDENT or tok.kind == _Tok.NUMBER:
-                name = self._advance().value
-                # check for range  name*name
-                if self._match_sym("*"):
-                    self._advance()  # skip *
-                    end_tok = self._advance()
-                    elements.extend(self._expand_range(name, end_tok.value))
-                else:
-                    elements.append(name)
+            parts = self._read_label_parts()
+            if len(parts) != 1:
+                raise GamsParseError(
+                    f"Multi-dimensional set element {'.'.join(parts)!r} at line "
+                    f"{tok.line} is not supported"
+                )
+            if self._match_sym("*"):  # range  a1*a5
+                self._advance()
+                end = self._read_label_parts()
+                if len(end) != 1:
+                    raise GamsParseError(f"Malformed set range at line {tok.line}")
+                elements.extend(self._expand_range(parts[0], end[0]))
             else:
-                self._advance()  # skip commas etc
-            # skip comma
+                elements.append(parts[0])
+            # The rest of the line up to ',' or '/' is the element's text.
+            self._parse_decl_text()
             if self._match_sym(","):
                 self._advance()
         return elements
@@ -757,7 +907,7 @@ class _Parser:
         if m1 and m2 and m1.group(1) == m2.group(1):
             prefix = m1.group(1)
             return [f"{prefix}{x}" for x in range(int(m1.group(2)), int(m2.group(2)) + 1)]
-        return [start, end]
+        raise GamsParseError(f"Cannot expand set range {start}*{end}")
 
     # ── Alias ──
 
@@ -785,9 +935,7 @@ class _Parser:
         self._advance()  # skip 'scalar'/'scalars'
         while not self._at_end() and not self._match_sym(";"):
             name = self._expect(_Tok.IDENT).value
-            desc = ""
-            if self._cur().kind == _Tok.STRING:
-                desc = self._advance().value
+            desc = self._parse_decl_text()
             val = 0.0
             if self._match_sym("/"):
                 self._advance()
@@ -838,9 +986,7 @@ class _Parser:
             domain: list[str] = []
             if self._match_sym("("):
                 domain = self._parse_domain()
-            desc = ""
-            if self._cur().kind == _Tok.STRING:
-                desc = self._advance().value
+            desc = self._parse_decl_text()
             data: dict = {}
             if self._match_sym("/"):
                 self._advance()
@@ -874,106 +1020,168 @@ class _Parser:
         while not self._at_end() and not self._match_sym("/"):
             start = self.pos
             keys: list[str] = []
-            while self._cur().kind in (_Tok.IDENT, _Tok.NUMBER):
-                keys.append(self._advance().value)
-                if self._match_sym("."):
-                    self._advance()  # multi-dim key separator
-                    continue
-                break
+            if self._cur().kind in (_Tok.IDENT, _Tok.NUMBER, _Tok.STRING) and not (
+                self._cur_is_inf()
+            ):
+                keys = self._read_label_parts()
             if keys and not self._value_follows():
-                # No value after the chain. An IDENT label keeps GAMS's
+                # No value after the label. An IDENT label keeps GAMS's
                 # value-less form (``/a, b, c/`` -> 0.0); a lone NUMBER was the
                 # value itself, under the empty key.
-                if len(keys) == 1 and self.tokens[start].kind == _Tok.NUMBER:
+                if self.pos == start + 1 and self.tokens[start].kind == _Tok.NUMBER:
                     self.pos = start
                     keys = []
-            # read value
-            neg = False
-            if self._match_sym("-"):
-                self._advance()
-                neg = True
-            elif self._match_sym("+"):
-                self._advance()
-            if self._cur().kind == _Tok.NUMBER:
-                val = float(self._advance().value)
-                if neg:
-                    val = -val
-            else:
-                val = 0.0
+            val_line = self._cur().line
+            val = self._read_signed_value() if self._value_follows() else 0.0
             key = tuple(keys) if len(keys) > 1 else (keys[0] if keys else ("",))
             data[key] = val
             if self._match_sym(","):
                 self._advance()
+            elif not self._match_sym("/") and self._cur().line == val_line:
+                t = self._cur()
+                raise GamsParseError(
+                    f"Unexpected {t.value!r} after a data record at line {t.line}, column {t.col}"
+                )
         return data
+
+    def _cur_is_inf(self) -> bool:
+        t = self._cur()
+        return t.kind == _Tok.IDENT and t.value.lower() == "inf"
+
+    def _read_signed_value(self) -> float:
+        """A data value: an optionally signed number or ``inf``."""
+        neg = False
+        if self._match_sym("-"):
+            self._advance()
+            neg = True
+        elif self._match_sym("+"):
+            self._advance()
+        if self._cur_is_inf():
+            self._advance()
+            val = float("inf")
+        else:
+            val = float(self._expect(_Tok.NUMBER).value)
+        return -val if neg else val
 
     def _value_follows(self) -> bool:
         """Is the parser sitting on a numeric value (with an optional sign)?"""
         if self._match_sym("-") or self._match_sym("+"):
-            return self._peek(1).kind == _Tok.NUMBER
-        return self._cur().kind == _Tok.NUMBER
+            nxt = self._peek(1)
+            return nxt.kind == _Tok.NUMBER or (
+                nxt.kind == _Tok.IDENT and nxt.value.lower() == "inf"
+            )
+        return self._cur().kind == _Tok.NUMBER or self._cur_is_inf()
 
     # ── Tables ──
 
     def _parse_table_decl(self):
+        """``Table name(domain) text`` followed by a header line and data rows.
+
+        GAMS places a table by layout, so this reads it by line: the first body
+        line (and each line starting ``+``) holds column labels, every other line
+        is a row label followed by values, and a value belongs to the column
+        whose label it sits under. Collecting only IDENT headers lost numeric
+        labels entirely, and assigning values left to right moved a value past a
+        blank cell into the wrong column (#1666). A value under no column label
+        is refused.
+        """
         self._advance()  # skip 'table'
         name = self._expect(_Tok.IDENT).value
         domain: list[str] = []
         if self._match_sym("("):
             domain = self._parse_domain()
-        desc = ""
-        if self._cur().kind == _Tok.STRING:
-            desc = self._advance().value
-        # Read column headers and rows until semicolon
-        col_headers: list[str] = []
-        data: dict = {}
-        # First collect column headers (identifiers before first row data)
+        desc = self._parse_decl_text(whole_line=True)
+        lines: list[list[Token]] = []
         while not self._at_end() and not self._match_sym(";"):
-            if self._cur().kind == _Tok.IDENT:
-                # could be col header or row label
-                # heuristic: if next token is also IDENT or NUMBER and we haven't
-                # started rows yet, these are col headers
-                if not col_headers or (
-                    self._peek(1).kind in (_Tok.IDENT, _Tok.NUMBER)
-                    and not any(isinstance(v, dict) for v in data.values())
-                ):
-                    # check if this starts a data row
-                    # a data row starts with ident followed by numbers
-                    j = self.pos + 1
-                    has_numbers = False
-                    while j < len(self.tokens) and self.tokens[j].kind == _Tok.NUMBER:
-                        has_numbers = True
-                        j += 1
-                    if has_numbers and col_headers:
-                        # This is a row
-                        row_label = self._advance().value
-                        row_data: list[float] = []
-                        while self._cur().kind == _Tok.NUMBER:
-                            row_data.append(float(self._advance().value))
-                        for ci, col in enumerate(col_headers):
-                            if ci < len(row_data):
-                                key = (row_label, col)
-                                data[key] = row_data[ci]
-                    else:
-                        col_headers.append(self._advance().value)
-                else:
-                    # row
-                    row_label = self._advance().value
-                    row_data = []
-                    while self._cur().kind == _Tok.NUMBER:
-                        row_data.append(float(self._advance().value))
-                    for ci, col in enumerate(col_headers):
-                        if ci < len(row_data):
-                            data[(row_label, col)] = row_data[ci]
-            elif self._cur().kind == _Tok.SYMBOL and self._cur().value == "+":
-                # continuation line with + for additional columns
-                self._advance()
-                # read more column headers
-                while self._cur().kind == _Tok.IDENT:
-                    col_headers.append(self._advance().value)
+            t = self._advance()
+            if lines and lines[-1][0].line == t.line:
+                lines[-1].append(t)
             else:
-                self._advance()
-        self._skip_semi()
+                lines.append([t])
+        self._expect(_Tok.SYMBOL, ";")
+
+        data: dict = {}
+        headers: list[tuple[list[str], int, int]] | None = None
+        rows_seen: set[tuple[str, ...]] = set()  # per header block
+        for toks in lines:
+            if toks[0].kind == _Tok.SYMBOL and toks[0].value == "+":
+                headers = self._table_header(toks[1:])
+                rows_seen = set()
+                continue
+            if headers is None:
+                headers = self._table_header(toks)
+                continue
+            row = self._table_row(name, domain, toks, headers, data)
+            key = tuple(part.lower() for part in row)
+            if row and key in rows_seen:
+                raise GamsParseError(
+                    f"Table '{name}': row {'.'.join(row)!r} at line {toks[0].line} "
+                    f"repeats a row of the same block"
+                )
+            rows_seen.add(key)
         self.tables[name] = GamsTable(name, domain, data, desc)
+
+    def _table_labels(self, toks: list[Token]) -> list[tuple[list[str], int, int]]:
+        """Split one table line into labels with their column spans."""
+        sub = _Parser([*toks, Token(_Tok.EOF, "", -1, 0)])
+        out = []
+        while not sub._at_end():
+            first = sub._cur()
+            parts = sub._read_label_parts()
+            last = sub.tokens[sub.pos - 1]
+            width = len(last.value) + (2 if last.kind == _Tok.STRING else 0)
+            out.append((parts, first.col, last.col + width))
+        return out
+
+    def _table_header(self, toks: list[Token]) -> list[tuple[list[str], int, int]]:
+        if not toks:
+            raise GamsParseError("Table continuation '+' has no column labels")
+        return self._table_labels(toks)
+
+    def _table_row(self, name, domain, toks, headers, data):
+        line = toks[0].line
+        n_col = len(headers[0][0])
+        has_label = not domain or len(domain) > n_col
+        row: list[str] = []
+        k = 0
+        if has_label:
+            sub = _Parser([*toks, Token(_Tok.EOF, "", -1, 0)])
+            row = sub._read_label_parts()
+            k = sub.pos
+        values: list[tuple[float, int, int]] = []
+        while k < len(toks):
+            start = toks[k]
+            sign = 1.0
+            if start.kind == _Tok.SYMBOL and start.value in ("-", "+") and k + 1 < len(toks):
+                sign = -1.0 if start.value == "-" else 1.0
+                k += 1
+            t = toks[k]
+            if t.kind == _Tok.NUMBER:
+                val = float(t.value)
+            elif t.kind == _Tok.IDENT and t.value.lower() == "inf":
+                val = float("inf")
+            else:
+                raise GamsParseError(
+                    f"Table '{name}': expected a number at line {line}, column {t.col}, "
+                    f"got {t.value!r}"
+                )
+            values.append((sign * val, start.col, t.col + len(t.value)))
+            k += 1
+        for val, v0, v1 in values:
+            under = [parts for parts, h0, h1 in headers if v0 < h1 and h0 < v1]
+            if len(under) != 1:
+                raise GamsParseError(
+                    f"Table '{name}': the value {val:g} at line {line}, column {v0} "
+                    f"does not sit under exactly one column label"
+                )
+            key = [*row, *under[0]]
+            if domain and len(key) != len(domain):
+                raise GamsParseError(
+                    f"Table '{name}' has {len(domain)} dimensions but line {line} "
+                    f"gives the key {'.'.join(key)!r}"
+                )
+            data[tuple(key) if len(key) > 1 else key[0]] = val
+        return row
 
     # ── Variables ──
 
@@ -991,9 +1199,7 @@ class _Parser:
             domain: list[str] = []
             if self._match_sym("("):
                 domain = self._parse_domain()
-            desc = ""
-            if self._cur().kind == _Tok.STRING:
-                desc = self._advance().value
+            desc = self._parse_decl_text()
             self.variables[name] = GamsVariable(name, var_type, domain, desc)
             if self._match_sym(","):
                 self._advance()
@@ -1008,9 +1214,7 @@ class _Parser:
             domain: list[str] = []
             if self._match_sym("("):
                 domain = self._parse_domain()
-            desc = ""
-            if self._cur().kind == _Tok.STRING:
-                desc = self._advance().value
+            desc = self._parse_decl_text()
             self.equations[name] = GamsEquation(name, domain, desc)
             if self._match_sym(","):
                 self._advance()
@@ -1071,8 +1275,7 @@ class _Parser:
     def _parse_model_decl(self):
         self._advance()  # skip 'model'
         name = self._expect(_Tok.IDENT).value
-        if self._cur().kind == _Tok.STRING:
-            self._advance()  # skip description
+        self._parse_decl_text()  # explanatory text
         self._expect(_Tok.SYMBOL, "/")
         eqs: list[str] = []
         if self._match_ident("all"):
@@ -1363,6 +1566,8 @@ class _ModelBuilder:
 
         # 1. Resolve sets (including aliases)
         self._resolve_sets()
+        # 1b. Every data label must lie in its declared domain (#1666)
+        self._check_data_domains()
         # 2. Resolve scalars and parameters
         self._resolve_scalars()
         self._resolve_parameters()
@@ -1393,6 +1598,62 @@ class _ModelBuilder:
         for alias, original in self.p.aliases.items():
             if original in self.set_elements:
                 self.set_elements[alias] = self.set_elements[original]
+
+    def _check_data_domains(self):
+        """Refuse data whose labels are not members of the declared domain.
+
+        GAMS rejects such data at compile time ($170 domain violation). Accepting
+        it is how a misread label used to vanish: a mangled ``san`` or a
+        description word read as a label became an entry no equation ever looked
+        up, and the model solved with that data missing (#1666). Labels are
+        case-insensitive in GAMS, so each one is rewritten to the spelling its
+        set declared -- otherwise ``Seattle`` data never reached the ``seattle``
+        rows. A ``*`` (universe) domain position is not checked.
+        """
+
+        def canon(owner: str, domain: list[str], key) -> tuple[str, ...]:
+            parts = key if isinstance(key, tuple) else (key,)
+            if parts == ("",) or len(parts) != len(domain):
+                raise GamsParseError(
+                    f"'{owner}' is declared over ({', '.join(domain)}) but has the data "
+                    f"key {'.'.join(parts) or '(none)'!r}"
+                )
+            out = []
+            for part, dom in zip(parts, domain):
+                if dom == "*":
+                    out.append(part)
+                    continue
+                elems = self._lookup_set_elements(dom)
+                if elems is None:
+                    raise GamsParseError(f"'{owner}' is declared over the unknown set '{dom}'")
+                spelled = {e.lower(): e for e in elems}.get(part.lower())
+                if spelled is None:
+                    raise GamsParseError(
+                        f"'{owner}': the label {part!r} is not an element of the set '{dom}'"
+                    )
+                out.append(spelled)
+            return tuple(out)
+
+        def fix(owner: str, domain: list[str], data: dict) -> dict:
+            fixed = {}
+            for key, val in data.items():
+                parts = canon(owner, domain, key)
+                new_key = parts if len(parts) > 1 else parts[0]
+                if new_key in fixed:
+                    raise GamsParseError(f"'{owner}': the key {new_key!r} is given twice")
+                fixed[new_key] = val
+            return fixed
+
+        for gs in self.p.sets.values():
+            if gs.domain:
+                elems = [canon(gs.name, gs.domain, e)[0] for e in gs.elements]
+                gs.elements[:] = elems
+        for gp in self.p.parameters.values():
+            if gp.domain:
+                gp.data = fix(gp.name, gp.domain, gp.data)
+        for gt in self.p.tables.values():
+            if gt.domain:
+                gt.data = fix(gt.name, gt.domain, gt.data)
 
     def _resolve_scalars(self):
         for name, gs in self.p.scalars.items():

@@ -47,13 +47,11 @@ def test_card_and_comparison_in_scalar_assignment():
     assert _obj(m, [0.0, 0.0]) == pytest.approx(1.0, rel=1e-12)
 
 
-@pytest.mark.xfail(
-    reason="#745: a dollar condition over Table data (link(i,j)) is silently "
-    "treated as always-true — the restriction vanishes. Probe flips when fixed.",
-    strict=False,
-)
 def test_parameter_membership_dollar_condition():
     # Sparse-network pattern: only arcs with link(i,j) nonzero enter the sum.
+    # This was xfail under #745, but the condition was never the fault: the
+    # Table reader filled values left to right, so ``r1 _ 1`` landed under c1
+    # instead of c2 and the condition selected the wrong arcs (#1666).
     gms = textwrap.dedent("""\
         Sets i / r1, r2 /
              j / c1, c2 / ;
