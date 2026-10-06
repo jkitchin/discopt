@@ -17,7 +17,7 @@ point, so a transformation can be run on its own, on a copy, and diffed::
     report = dt.check("integer.bilinear", m)        # copy + diff, no solve
     report.diff.added_variables
 
-**What this module is not.** It adds no transformation and changes none: every
+**What this module is not.** It changes no transformation: every
 registered entry resolves, at call time, to the function it names on its module
 (so a test's ``monkeypatch`` of that module attribute still takes effect). The
 solver's call sites -- every GDP lowering including the AMP route's
@@ -27,7 +27,9 @@ the MPEC and bilevel complementarity lowerings -- dispatch through
 its return type. The solver still decides *when* each runs and whether to adopt
 the result; the registry decides nothing. That dispatch was verified
 bound-neutral per CLAUDE.md §5 (identical status, objective, bound and node
-count against ``main`` on the #1479 panel).
+count against ``main`` on the #1479 panel). One entry is not a solver pass:
+``core.relax_integrality`` (#1620, :mod:`discopt.modeling._relax_integrality`),
+a user-facing continuous relaxation that no solve path calls.
 
 **Two function contracts, one API.** The wrapped functions come in two shapes:
 
@@ -641,6 +643,13 @@ register(
     "discopt._relax.nonsmooth_lift:lift_nonsmooth_atoms",
     style="functional",
     summary="Exactly lift monotone-position abs/max/min atoms to smooth epigraph rows (#1501)",
+)
+register(
+    "core.relax_integrality",
+    "discopt.modeling._relax_integrality:relax_integrality",
+    style="in_place",
+    exact=False,
+    summary="Continuous relaxation: binary/integer variables become continuous (#1620)",
 )
 register(
     "mpec.gdp",

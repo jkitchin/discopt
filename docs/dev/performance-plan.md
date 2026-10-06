@@ -10369,7 +10369,46 @@ such point: the pricing callback answers `"decline"`, the tree stops with
 `TreeStatus::Declined`, and the Python path solves the model as before (now
 declined at node 3, 17 Python nodes, as on base).
 
-## 75. #1658 finished: the convex-MINLP route targets LP/NLP-BB, after three LP/NLP-BB fixes (2026-10-06)
+## 75. #1619 (2026-10-05): three measured outcomes
+
+### 75.1 Falsified — a pre-reform LP bound does not pay for itself (D-17)
+
+The factorable lift distributes products over sums. On #1619's phase-split model
+(`min phi*g(xa) + (1-phi)*g(xb)`, `g` = ideal-mixing entropy plus a Margules term)
+the uniform LP of the lifted model is **-16.08** at the root against **-6.12** for
+the same relaxation of the model as written (optimum -0.968): `phi*g(xa)` becomes
+`phi*entropy(xa) + phi*xa - 20*phi*xa**2 + ...`, and the sum of the per-term
+envelopes is far below the envelope of the sum. The hypothesis "max-combining the
+pre-reform LP bound per node certifies faster" was built as
+`DISCOPT_PREREFORM_LP_BOUND` and measured:
+
+| arm | issue model root bound | nodes | wall |
+|---|---|---|---|
+| OFF | -12.15 | 1449 | 46.8 s |
+| root only | -6.11 | 1449 | 45.6 s |
+| every node | -6.11 | 1215 | 60.3 s (time limit) |
+
+Corpus panel (root-only, 206 comparisons, 20 s): cert-clean, certified 180 -> 179
+(`st_e36` loses its certificate on the extra LP's time, 2/2 repeats), wall 834 ->
+844 s. Retired (`flag-retirement-audit.md`). The real remedy -- relaxing the
+product as written instead of distributing it -- changes the factorable reform and
+needs its own entry experiment.
+
+### 75.2 Falsified — a tighter alphaBB Hessian moves no bound (D-05)
+
+The exact expanded-polynomial Hessian enclosure cuts six-hump camel's alpha from
+(94.9, 20.5) to (46.9, 4.5), and across 87 node boxes of a `mccormick_bounds="none"`
+solve the summed alpha from 2600 to 2165. Over 14 polynomial test functions x
+{default, `mccormick_bounds="none"`} (28 rows, 30 s) it changed no status, bound or
+certificate (nodes 6536 vs 6578, the difference one time-limited row): the alphaBB
+bound never wins the per-node `max`. Retired.
+
+### 75.3 Graduated — binary QPs to the MILP route (C-01b)
+
+`DISCOPT_BINARY_QUADRATIC_MILP` (default ON): 39 instances, wall 84.5 s -> 16.1 s,
+nodes 2065 -> 157, 0 false certificates, 39/39 certified both arms. See the audit row.
+
+## 76. #1658 finished: the convex-MINLP route targets LP/NLP-BB, after three LP/NLP-BB fixes (2026-10-06)
 
 §74.2 left #1658 open: the auto-routed OA still missed its 6 s decision point on
 the n = 20 portfolio, because each HiGHS master is ~2x the retired in-house one.
@@ -10379,7 +10418,7 @@ because HiGHS was then optional (§25.10/§25.11), a reason #1229 retired. Drivi
 `lp_nlp_bb` to graduation turned up three defects in it, each found by a
 measurement and each fixed at its root.
 
-### 75.1 The HiGHS lazy master judged offers from a stale tree
+### 76.1 The HiGHS lazy master judged offers from a stale tree
 
 Called directly, `lp_nlp_bb` with `milp_solver="highs"` returned `feasible`
 (bound 0.0058, optimum 0.01044) on the n = 20 big-M portfolio after 2 s. (An
@@ -10403,7 +10442,7 @@ judged as before. A first version declined *every* offer from a stale tree; it
 was sound but cost the perspective portfolio 854 → 2201 nodes. The targeted
 version: 773 nodes, 7.5 s.
 
-### 75.2 Absolute violation tests on scaled rows
+### 76.2 Absolute violation tests on scaled rows
 
 `flay03m` with rows scaled by 10^U(-6,6) stopped after 1.9 s with its master
 *optimal* at 48.9738 against an incumbent of 48.9898 (gap 3.3e-4). The accepted
@@ -10423,7 +10462,7 @@ Fixes:
 
 Multi-tree OA was unaffected: it adds its cuts without a violation test.
 
-### 75.3 LP/NLP-BB adopted unverified incumbents
+### 76.3 LP/NLP-BB adopted unverified incumbents
 
 `portfol_roundlot` with rows scaled by 10^U(-3,3) came back `status="error"`
 through the route. `lp_nlp_bb` had certified an incumbent violating row 5 by
@@ -10436,11 +10475,11 @@ unverified warm start, returned `feasible`, uncertified and flagged
 fix the same instance certifies on the route, the incumbent repaired onto its
 bounds by the exit gate's snap.
 
-### 75.4 The route panel
+### 76.4 The route panel
 
 Plain `Model.solve(time_limit=30)`, no kwargs, arms set by
 `DISCOPT_CONVEX_ROUTE_METHOD` and interleaved per instance, idle 4-core container
-(load ≤ 3.2). Run on the shipping code (the `ceil` lift of 75.2). Instances:
+(load ≤ 3.2). Run on the shipping code (the `ceil` lift of 76.2). Instances:
 - every in-repo `.nl` the router diverts (26), at row-scale spans 0, 3 and 6
   (§25.13's protocol, seeded per file);
 - the #1658 portfolio family (n ∈ {12, 16, 20, 24}, seeds 21/22, big-M and
@@ -10460,7 +10499,7 @@ route fired 94/94 in each arm.
 | portfolios | 16/16, 10 fell back, 114.9 s | 16/16, **0** fell back, **50.1 s** |
 
 The gain is `clay0303hfsg@3`, and no certificate is lost. An earlier run of this
-panel, before 75.2/75.3, lost `portfol_roundlot@3` and showed the
+panel, before 76.2/76.3, lost `portfol_roundlot@3` and showed the
 `flay03m@6` regression; both are fixed above and are now tests.
 
 **The cost, recorded:** the in-repo wall rises by ~20–30 s per span, all of it

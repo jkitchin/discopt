@@ -75,7 +75,7 @@ class TestRouteGates:
         monkeypatch.delenv(MASTER_ENV, raising=False)
         monkeypatch.delenv("DISCOPT_CONVEX_ROUTE_METHOD", raising=False)
         method, reason, opts = _convex_minlp_auto_route(_load("gbd"))
-        # `"lp_nlp_bb"` since #1658 (performance-plan §75; `"oa"` from #1141 to then).
+        # `"lp_nlp_bb"` since #1658 (performance-plan §76; `"oa"` from #1141 to then).
         assert method == "lp_nlp_bb"
         assert reason.startswith("mip-nlp/lp_nlp_bb:")
         assert "certified convex" in reason

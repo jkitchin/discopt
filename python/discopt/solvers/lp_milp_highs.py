@@ -93,8 +93,23 @@ _MAX_NODES_CAP = 2**31 - 1
 #: which the same absolute test misfires. The reduction is unsound on badly scaled columns
 #: and the route has no way to re-derive a bound HiGHS's presolve took away, so it is off.
 _PRESOLVE_RULE_PARALLEL_ROWS_AND_COLS = 1 << 13
+#: HiGHS ``presolve_rule_off`` bit for ``kPresolveRuleSparsify`` (rule 14). The MILP route
+#: switches it off (#1667) because it is the trigger of a presolve cycle that never returns.
+#:
+#: On the #1667 unit-commitment hand-off (2904 rows, 4344 columns of this route's slack
+#: form), ``h.run()`` stays in ``HPresolve::fastPresolveLoop`` -> ``rowPresolve`` forever.
+#: A stack sample confirmed this. That loop polls neither ``time_limit`` nor the interrupt
+#: callbacks, so ``Model.solve(time_limit=20)`` was still running after 120 s and the route
+#: had no way to stop it. Bisected over ``presolve_rule_off``: turning off rule 9
+#: (doubleton equation), 12 (aggregator) or 14 (sparsify) alone breaks the cycle
+#: (``Optimal`` 450623.7692 in 5-6 s), and rules 7, 8, 10, 11, 15, 16 alone do not.
+#: Sparsify is the one taken: it only re-expresses rows to cut fill, while 9 and 12
+#: eliminate columns. On 23 HiGHS check instances in this route's standard form, sparsify
+#: on and off gave the same status and objective on every instance (panel in the #1667 PR).
+#: The upstream bug is tracked in #1671: re-measure and drop this bit once HiGHS fixes it.
+_PRESOLVE_RULE_SPARSIFY = 1 << 14
 #: Every ``presolve_rule_off`` bit the MILP route sets.
-MILP_PRESOLVE_RULE_OFF = _PRESOLVE_RULE_PARALLEL_ROWS_AND_COLS
+MILP_PRESOLVE_RULE_OFF = _PRESOLVE_RULE_PARALLEL_ROWS_AND_COLS | _PRESOLVE_RULE_SPARSIFY
 #: The only terminal statuses a limit can produce.
 _LIMIT_STATUSES = ("kTimeLimit", "kIterationLimit", "kSolutionLimit", "kInterrupt")
 

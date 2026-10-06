@@ -57,7 +57,7 @@ def _affine_monomial_fires(model) -> bool:
 
 def _solve(model, flag: str, tl: float):  # model: freshly built by the caller
     os.environ[FLAG] = flag
-    fires = FLAG != "DISCOPT_RECENTRE" and _affine_monomial_fires(model)
+    fires = FLAG == "DISCOPT_LIFT_AFFINE_MONOMIALS" and _affine_monomial_fires(model)
     t0 = time.perf_counter()
     try:
         r = model.solve(time_limit=tl)

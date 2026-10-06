@@ -121,11 +121,20 @@ def exact_psd(Q: np.ndarray, budget: Optional[int] = None) -> Optional[bool]:
     import heapq
     from fractions import Fraction
 
+    import scipy.sparse as sp
+
     n = Q.shape[0]
     rows: dict[int, dict[int, Fraction]] = {i: {} for i in range(n)}
-    ii, jj = np.nonzero(Q)
-    for i, j in zip(ii.tolist(), jj.tolist()):
-        rows[i][j] = Fraction(float(Q[i, j]))
+    if sp.issparse(Q):
+        # #1619 A-22: a scipy-sparse Q is read off its stored entries, never densified.
+        coo = sp.coo_matrix(Q)
+        for i, j, v in zip(coo.row.tolist(), coo.col.tolist(), coo.data.tolist()):
+            if v != 0.0:
+                rows[i][j] = Fraction(float(v))
+    else:
+        ii, jj = np.nonzero(Q)
+        for i, j in zip(ii.tolist(), jj.tolist()):
+            rows[i][j] = Fraction(float(Q[i, j]))
 
     def refuted(i: int) -> bool:
         r = rows[i]

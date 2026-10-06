@@ -87,8 +87,12 @@ class MIPNLPInteriorPointStore:
         self.n_vars = int(n_vars)
         self.int_indices = tuple(int(i) for i in int_indices)
         self.integer_tol = float(integer_tol)
-        self.lb = None if lb is None else _as_vector("lb", lb, self.n_vars)
-        self.ub = None if ub is None else _as_vector("ub", ub, self.n_vars)
+        # A bound may be infinite (an unbounded continuous column): the store only
+        # uses them to clip rounded integer values, and ``np.clip`` honours +-inf.
+        # Refusing them made the SHOT profile raise on every model with a free
+        # column (#1619: 4stufen, contvar, dispatch, ... of the in-repo corpus).
+        self.lb = None if lb is None else _as_vector("lb", lb, self.n_vars, allow_inf=True)
+        self.ub = None if ub is None else _as_vector("ub", ub, self.n_vars, allow_inf=True)
         self.records: list[MIPNLPInteriorPointRecord] = []
 
     def add(
@@ -246,8 +250,8 @@ def rootsearch_between_points(
     start = _as_vector("interior_point", interior_point, n_vars)
     end = _as_vector("candidate", candidate, n_vars)
     int_idx = tuple(int(i) for i in int_indices)
-    lb_vec = None if lb is None else _as_vector("lb", lb, n_vars)
-    ub_vec = None if ub is None else _as_vector("ub", ub, n_vars)
+    lb_vec = None if lb is None else _as_vector("lb", lb, n_vars, allow_inf=True)
+    ub_vec = None if ub is None else _as_vector("ub", ub, n_vars, allow_inf=True)
 
     if fixed_discrete and int_idx:
         start_sig = tuple(
@@ -530,11 +534,15 @@ def _normalize_strategy(strategy: str) -> str:
     raise ValueError("rootsearch strategy must be one of: auto, none, bisection, toms748.")
 
 
-def _as_vector(name: str, values: VectorLike, n_vars: Optional[int] = None) -> np.ndarray:
+def _as_vector(
+    name: str, values: VectorLike, n_vars: Optional[int] = None, *, allow_inf: bool = False
+) -> np.ndarray:
     arr = np.asarray(values, dtype=np.float64).reshape(-1)
     if n_vars is not None and arr.shape != (int(n_vars),):
         raise ValueError(f"{name} has shape {arr.shape}; expected ({int(n_vars)},).")
-    if not np.all(np.isfinite(arr)):
+    if np.any(np.isnan(arr)):
+        raise ValueError(f"{name} must not contain NaN.")
+    if not allow_inf and not np.all(np.isfinite(arr)):
         raise ValueError(f"{name} must contain only finite values.")
     return arr
 

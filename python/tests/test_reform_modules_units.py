@@ -192,10 +192,13 @@ def autocorr_energy(bits, k_max):
 # ---------------------------------------------------------------------------
 
 
-def test_gate_witness_detection():
+def test_gate_witness_detection(monkeypatch):
     """The gate fires exactly on a supported degree>=3 all-binary product and
     stays off for degree-2, non-binary factors, and unsupported structure
-    (False must always be safe: the pass is simply skipped)."""
+    (False must always be safe: the pass is simply skipped). That is the legacy
+    threshold, ``DISCOPT_BINARY_QUADRATIC_MILP=0``; by default (#1619 C-01b) an
+    all-binary degree-2 product is a witness too."""
+    monkeypatch.setenv(B.BINARY_QUADRATIC_MILP_ENV, "0")
     m = Model("gate")
     b = [m.binary(f"b{i}") for i in range(3)]
     x = m.continuous("x", lb=0.0, ub=1.0)
@@ -217,6 +220,10 @@ def test_gate_witness_detection():
     empty = Model("noobj")
     empty.binary("b")
     assert not B.has_binary_multilinear_work(empty)  # no objective -> nothing to gain
+
+    monkeypatch.delenv(B.BINARY_QUADRATIC_MILP_ENV)
+    assert B.has_binary_multilinear_work(with_obj(b[0] * b[1]))  # degree 2 (#1619)
+    assert not B.has_binary_multilinear_work(with_obj(dm.sin(b[0] * b[1])))  # unsupported
 
 
 def test_gate_witness_in_constraint_body():
@@ -531,7 +538,7 @@ def test_reformulation_objvar_secant_exactness():
         assert float(_eval(rm._objective.expression, env)) == pytest.approx(e, abs=1e-9)
 
 
-def test_reformulate_abstains_out_of_scope():
+def test_reformulate_abstains_out_of_scope(monkeypatch):
     """The pass must return the model object *unchanged* whenever it cannot
     fire exactly — never a partial rewrite."""
     # No objective.
@@ -542,11 +549,15 @@ def test_reformulate_abstains_out_of_scope():
     m, b = _cubic_model()
     m.sos1([b[0], b[1]])
     assert B.reformulate_binary_multilinear(m) is m
-    # Degree-2-only binary models stay on the existing McCormick paths.
+    # Degree-2-only binary models stay on the existing McCormick paths under the
+    # legacy threshold; by default (#1619 C-01b) they are linearized.
     m2 = Model("deg2")
     c = [m2.binary(f"b{i}") for i in range(2)]
     m2.minimize(c[0] * c[1])
+    assert B.reformulate_binary_multilinear(m2) is not m2
+    monkeypatch.setenv(B.BINARY_QUADRATIC_MILP_ENV, "0")
     assert B.reformulate_binary_multilinear(m2) is m2
+    monkeypatch.delenv(B.BINARY_QUADRATIC_MILP_ENV)
     # A continuous factor in a degree-3 monomial is not exactly linearizable.
     m3 = Model("cont")
     d = [m3.binary(f"b{i}") for i in range(2)]

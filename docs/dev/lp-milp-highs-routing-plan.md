@@ -1498,3 +1498,33 @@ all in the badly scaled family, the dual check passing on every one before and a
 filed as #1634). The issue's X-30d witness is a different mechanism (HiGHS's own dual
 bound sits `1e-6` above the strictly feasible optimum, exactly at the abs tolerance, and
 the #1551 evaluation-error check then withdraws it) and is not changed here.
+
+**2026-10-05 — #1620 C-04: why `Model.solve()` takes ~10x the nodes of an MPS export
+of the same MILP. Explained; the route is unchanged (the 2026-10-03 decision above
+stands).** The issue's 14-item / 8-truck bin-packing MILP certifies 7 on both paths,
+but the route reported 3754 nodes against 680 for `m.to_mps()` read straight into
+`highspy`. Measured on `098c8f2`, HiGHS 1.15.1, load 0.3, the route's own `StdForm`
+(captured from `_solve_milp_std`) passed with `_pass_model`, against the same `StdForm`
+with its 8 logicals folded into ranged rows, HiGHS default options plus `random_seed`
+0..9 (each seed run twice; node counts repeat exactly):
+
+| form | nodes (seeds 0..9) | median nodes | median `run()` wall (sd) |
+|---|---|---|---|
+| `StdForm` (8 slack columns) | 3754 2637 2429 1501 2539 6034 5703 1411 1737 836 | 2484 | 2.16 s (1.03) |
+| ranged rows (= the MPS) | 680 103 334 881 141 228 516 210 131 356 | 281 | 0.23 s (0.08) |
+
+- *It is the formulation, not an option.* On the MPS file alone, the route's
+  `presolve_rule_off`, `mip_abs_gap=1e-6` and `mip_feasibility_tolerance=1e-6` change
+  nothing (seeds 0..4: 680/103/334/881/141 with and without each; the rule-off arm
+  707/103/334/940/141). The route's #1634 presolve-free cross-check is a second solve
+  whose nodes (1104 here) are *not* added to `node_count`.
+- *The seed spread is as large as the gap on a single run.* On this symmetric model one
+  form alone spans 103..940 (rows) and 836..6034 (slacks) across seeds, so a one-seed
+  comparison overstates or understates it; the medians above are the claim.
+- This instance is the bin-packing/set-cover class the 2026-10-03 entry experiment
+  already found to gain most from native rows (set cover geomean 0.54). It is one more
+  data point for that decision's reopening criterion (a §5 panel on a broad MILP set),
+  not a reason to change the route on one instance (CLAUDE.md §2).
+- What a user can do today: `highs_options={"output_flag": True}` shows the HiGHS log
+  of the route's solves; `m.to_mps()` + `highspy` solves the ranged-row form, without
+  discopt's certificate checks.

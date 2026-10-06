@@ -73,10 +73,13 @@ Scope and soundness rules:
   by non-constants, vector expressions) aborts the pass, which then returns
   the model **unchanged** — the solver keeps its existing paths, so the pass
   never regresses a model it cannot handle exactly.
-- The rewrite fires only when a term of total degree >= ``_MIN_DEGREE`` (3) is
-  present. Degree-2-only binary models are already handled exactly per-term by
-  McCormick on the existing paths; rerouting them wholesale is out of scope
-  here (and would change behavior on the whole binary-quadratic class).
+- The rewrite fires when a term of total degree >= 2 is present (#1619 C-01b,
+  ``DISCOPT_BINARY_QUADRATIC_MILP``, default ON). Before that it required degree
+  >= ``_MIN_DEGREE`` (3), on the argument that McCormick is already exact per
+  term on a binary product -- true of the node relaxation, but it left a binary
+  QP on spatial branch and bound, where the issue's 16-binary lattice took 83
+  nodes against 5 for HiGHS on the linearization (graduation panel: wall
+  84.5 s -> 16.1 s over 39 instances). ``=0`` restores the degree-3 threshold.
 - Expansion and the emitted MILP are budgeted (``_MAX_MONOMIALS``,
   ``_MAX_EXPAND_OPS``, ``_MAX_ROWS``): a blow-up aborts and falls back
   rather than emitting a MILP too large for the (dense-marshaling) in-house
@@ -97,6 +100,7 @@ recursive walkers (term classifier, LP extractor) at O(log n) depth.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -129,10 +133,43 @@ from discopt.mpec import carry_complementarities
 _Mono = frozenset
 _EMPTY: frozenset = frozenset()
 
-# Fire only when a genuine degree>=3 term exists: n=2 products are already
-# exact per-term under McCormick on the existing paths (see module docstring),
-# and degree >= 3 is where the nested-bilinear relaxation is loose.
+# The legacy threshold (``DISCOPT_BINARY_QUADRATIC_MILP=0``): fire only when a
+# degree>=3 term exists, on the argument that n=2 products are exact per term
+# under McCormick and degree >= 3 is where the nested-bilinear relaxation is
+# loose. See :func:`_min_degree` for the default.
 _MIN_DEGREE = 3
+
+#: #1619 C-01b: also fire on degree-2-only binary-product models, sending a
+#: binary QP (``x_s * x_t`` over binaries) to the MILP route as its exact
+#: Fortet linearization instead of to spatial branch and bound, and hand every
+#: exact MILP this pass produces to the default pure-MILP route (HiGHS, #1229)
+#: rather than forcing the in-house Rust MILP engine. Default ON; ``=0``
+#: restores the degree-3 threshold and the forced engine.
+BINARY_QUADRATIC_MILP_ENV = "DISCOPT_BINARY_QUADRATIC_MILP"
+
+
+def binary_quadratic_milp_enabled() -> bool:
+    """``DISCOPT_BINARY_QUADRATIC_MILP`` (#1619 C-01b), read at call time.
+
+    Graduated on introduction (CLAUDE.md §5) by
+    ``discopt_benchmarks/scripts/issue1619_binary_quadratic_milp_panel.py``: 39
+    instances (the two corpus members it reaches, seeded dopant-lattice, max-cut,
+    unconstrained BQP, quadratic-knapsack, k-cardinality, facility, and the
+    degree >= 3 autocorrelation / cubic families whose engine it changes), 60 s,
+    OFF/ON interleaved, brute-force oracle on every pure-binary instance with
+    n <= 20: 0 false certificates, 0 incumbents failing re-verification, 0 lost,
+    0 disagreements, certified 39/39 in both arms; wall 84.5 s -> 16.1 s, nodes
+    2065 -> 157, no family slower. ``=0`` opts out.
+    """
+    return os.environ.get(BINARY_QUADRATIC_MILP_ENV, "1") != "0"
+
+
+def _min_degree() -> int:
+    """The smallest product degree the pass fires on: ``_MIN_DEGREE``, or 2 under
+    :func:`binary_quadratic_milp_enabled`."""
+    return 2 if binary_quadratic_milp_enabled() else _MIN_DEGREE
+
+
 # Budget caps: abort (fall back to the existing paths) rather than emit an
 # intractable MILP. The row cap is calibrated to the in-house MILP engines'
 # dense LP marshaling (extract_lp_data materializes an (m, n+m) float64
@@ -246,7 +283,9 @@ def _witness_scan(root: Expression) -> bool:
     """Iterative post-order scan computing, per node, ``(degree, all_binary,
     supported)`` — degree saturating at ``_DEG_CAP`` — and reporting whether
     any ``*``/``**`` node reaches degree >= ``_MIN_DEGREE`` with all-binary
-    variables and fully supported structure underneath."""
+    variables and fully supported structure underneath (degree >= 2 under
+    ``DISCOPT_BINARY_QUADRATIC_MILP=1``, #1619)."""
+    min_degree = _min_degree()
     # memo: id(node) -> (deg, all_bin, ok)
     memo: dict[int, tuple[int, bool, bool]] = {}
     stack: list[Expression] = [root]
@@ -270,7 +309,7 @@ def _witness_scan(root: Expression) -> bool:
         if (
             ok
             and all_bin
-            and deg >= _MIN_DEGREE
+            and deg >= min_degree
             and isinstance(node, BinaryOp)
             and node.op in ("*", "**")
         ):
@@ -1022,7 +1061,7 @@ def _reformulate(model: Model) -> Model:
             max_degree = max(max_degree, 2 * inner_deg)
             n_secant_rows += sq.n_secants
             n_squares += 1
-    if max_degree < _MIN_DEGREE:
+    if max_degree < _min_degree():
         return model
     n_rows = (
         len(model._constraints)
