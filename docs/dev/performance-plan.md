@@ -10270,9 +10270,108 @@ The original `rsyn0820m02m` motivation for the in-tree poll stands and is
 confirmed by row 3: with no restarts at all, the interrupt arm is the only thing
 speaking, and it fired 22 times.
 
-## 74. #1619 (2026-10-05): three measured outcomes
+## 74. #1658 POUNCE `tol*sigma` and the HiGHS OA master: one falsified hypothesis, two measurements (2026-10-05)
 
-### 74.1 Falsified — a pre-reform LP bound does not pay for itself (D-17)
+#1658 reported two performance regressions between `11679030` and `cb4b7d4e`.
+Measurements here are on a 4-core cloud container, so absolute wall times run
+slower than the report's.
+
+### 74.1 Falsified: "the primal residual stalls at roundoff"
+
+The issue attributed the 16 → 59 iteration jump on its 10-flow blending LP (a
+contract row tight at every feasible point, `sigma = 2**-7`, engine `tol =
+7.8e-11`) to `tol*sigma` tightening the *primal* test. The engine's own iterate
+trace refutes it. From iteration 15 on, the primal residual is 1–2e-11 and dual
+infeasibility is ~7e-13, both under the engine `tol`. What does not converge is
+**complementarity**, which stalls at ~5e-9 in engine units because the engine
+recomputes it from the true slack (`eps * |activity| * |z|`). A tolerance scan on
+the scaled problem confirms this: `tol = 1e-8` → 16 iterations (complementarity
+4.65e-9), `1e-9` → 26, `2e-10` → 33, `7.8e-11` → 59, `1e-10` → 77. The 43 extra
+iterations bought nothing: caller-unit complementarity was 6.6e-7 at the end
+against 6.0e-7 at iteration 16.
+
+Fix (`convex_ipm_pounce._solve`): run at the caller's `tol`, and re-run at
+`tol*sigma` (warm-started) only when the mapped-back residual fails
+`caller_unit_converged`. That test is primal absolute; dual infeasibility and
+complementarity are measured against `tol * max(1, |c|, |Px|, |y|, |z|)`, the
+#1384 guard's yardstick. Results:
+- Blend LP: 59 → 16 iterations, and 18 → 16 without the contract row.
+- The #1537 cases (`k/2*j**2`, k = 6400 and 1e6) still take the re-run, pinned by
+  `test_1658_pounce_tol_and_oa_master.py`.
+- All 15 `test_1537_pounce_objective_scale.py` cases pass.
+
+### 74.2 The OA master: per-master cost, not cuts or cutoffs
+
+Reproduced with OA called directly on the n = 20 portfolio
+(`solve_mip_nlp(method="oa", time_limit=60)`):
+
+| model / master | masters | master time | of which #1634 cross-solve | total | certified |
+|---|---|---|---|---|---|
+| perspective / HiGHS | 51 | 22.0 s | 11.0 s | 24.2 s | yes |
+| perspective / in-house (`auto`, retired) | 51 | 6.0 s | — | 8.2 s | yes |
+| big-M / HiGHS | 61 | 58.3 s | 30.1 s | 60.3 s | **no** |
+| big-M / in-house (`auto`, retired) | 81 | 19.0 s | — | 21.6 s | yes |
+
+The HiGHS master gets the same cuts and reaches the same master count as the
+in-house one (51 on perspective). Neither master is given an incumbent cutoff on
+this route: the SHOT controls are Gurobi-only. The per-master cost is the
+difference. The primary HiGHS solve is ~2x the in-house one, and the #1634
+presolve-free cross-solve doubles it again.
+
+Three things were tried on the captured masters and do **not** help:
+- **Seeding the master with its own optimum** (`mip_start`): 0.33 → 0.36 s.
+- **HiGHS options**: `mip_rel_gap` up to 1e-2, symmetry detection off, presolve
+  off, and pseudo-cost reliability all came within ±25 %.
+- **HiGHS `objective_bound`**: it is not a MIP cutoff. Set 0.1 % below a master's
+  optimum, HiGHS still returned that optimum as `Optimal`.
+
+A SHOT-style improving master was also prototyped and rejected (cutoff row `c'x
+<= UB - delta` plus `mip_max_improving_sols = 1`). Each master dropped to ~0.06 s,
+but the stopped masters' dual bound never moved. Proposals wandered, and OA's
+50-iteration stall guard abandoned the loop uncertified at 72 masters.
+
+What shipped (`DISCOPT_OA_MASTER_CONFIRM_ON_DEMAND`, default ON, `=0` restores
+the old behaviour): OA asks for the cross-solve only on a master whose bound
+would close the gap or close at least half of the remaining certified gap. Every
+other master's bound is recorded as heuristic, never certified, so certificates
+are exactly as guarded as before. Results:
+- **Perspective:** 24.2 s → 14.5 s, with 6 cross-solves instead of 51.
+- **Big-M:** uncertified at 60 s → certified in 15.7 s (46 masters, 6 cross-solves).
+
+**Not restored:** the auto-routed solve still misses its #1143 decision point
+(6 s of a 60 s limit) on this container and falls back. The retired in-house
+master would miss it too (8.2 s). Getting OA under the decision point here would
+need a per-master solve about 2x faster than HiGHS's on this class. That would
+mean revisiting the `auto` retirement in `_convex_route_oa_master`, which is an
+owner decision measured on its own panels, and is not something to change on
+the strength of one model. `SolveResult.mip_count` now carries the route's
+masters through the fallback merge, so the 6 s of OA work is no longer reported
+as `mip_count = 0`.
+
+### 74.3 #1656: the A/B corpus panel caught a regression in the first kernel fix
+
+The #1656 kernel fix prices every McCormick-tight LP point at the posed model's
+objective, because `c'x` there can be optimistic. On `(x*y - 1)**2` it was
+optimistic by 7.5e-6, from 1e-6 term slack composed through `x**2 * y**2`. The
+first version only priced. An A/B panel was run over the in-repo corpus:
+26 instances with reference optima at 30 s, and 96 without at 20 s (base
+`f6726fb` vs branch, separate worktree and venv, code identity asserted per
+arm). It found one certification regression: MINLPLib `prob10`, `optimal` in 17
+nodes → `node_limit` at 100 000.
+
+On `prob10` the kernel's lift is strictly looser than the model. At node 3 it had
+"certified" 2.345 on a point whose objective is 3.446. #789's final check
+(kernel vs verified objective, `1e-4*(1 + |obj|)`) declined that result, and the
+Python tree certified 3.4455. Priced, the kernel never accepts that point, but
+its bound cannot pass the lift's optimum either, so it ran to its node limit,
+and #1153 accepts a `node_limit` exit. The fix applies #789's rule at the first
+such point: the pricing callback answers `"decline"`, the tree stops with
+`TreeStatus::Declined`, and the Python path solves the model as before (now
+declined at node 3, 17 Python nodes, as on base).
+
+## 75. #1619 (2026-10-05): three measured outcomes
+
+### 75.1 Falsified — a pre-reform LP bound does not pay for itself (D-17)
 
 The factorable lift distributes products over sums. On #1619's phase-split model
 (`min phi*g(xa) + (1-phi)*g(xb)`, `g` = ideal-mixing entropy plus a Margules term)
@@ -10295,7 +10394,7 @@ Corpus panel (root-only, 206 comparisons, 20 s): cert-clean, certified 180 -> 17
 product as written instead of distributing it -- changes the factorable reform and
 needs its own entry experiment.
 
-### 74.2 Falsified — a tighter alphaBB Hessian moves no bound (D-05)
+### 75.2 Falsified — a tighter alphaBB Hessian moves no bound (D-05)
 
 The exact expanded-polynomial Hessian enclosure cuts six-hump camel's alpha from
 (94.9, 20.5) to (46.9, 4.5), and across 87 node boxes of a `mccormick_bounds="none"`
@@ -10304,7 +10403,7 @@ solve the summed alpha from 2600 to 2165. Over 14 polynomial test functions x
 certificate (nodes 6536 vs 6578, the difference one time-limited row): the alphaBB
 bound never wins the per-node `max`. Retired.
 
-### 74.3 Graduated — binary QPs to the MILP route (C-01b)
+### 75.3 Graduated — binary QPs to the MILP route (C-01b)
 
 `DISCOPT_BINARY_QUADRATIC_MILP` (default ON): 39 instances, wall 84.5 s -> 16.1 s,
 nodes 2065 -> 157, 0 false certificates, 39/39 certified both arms. See the audit row.

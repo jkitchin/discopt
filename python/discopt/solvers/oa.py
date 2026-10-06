@@ -36,6 +36,7 @@ import numpy as np
 from discopt.modeling.core import Constraint, Model, ObjectiveSense, SolveResult, VarType
 from discopt.solvers import pounce_incumbent_options, pounce_option_defaults
 from discopt.solvers._gap import (
+    GAP_ABS_TOL,
     bound_inversion_tolerance,
     master_gap_tolerance,
     optimality_gap,
@@ -151,6 +152,37 @@ _CUT_SOURCE_ORDER = (
 _INITIAL_POA_PHASES = frozenset({"auto", "initial"})
 _PERIODIC_RELAXATION_PHASES = frozenset({"periodic"})
 _SHOT_MASTER_FEATURE_BACKEND = "gurobi"
+
+
+def _highs_master_confirm_on_demand_enabled() -> bool:
+    """``DISCOPT_OA_MASTER_CONFIRM_ON_DEMAND`` opt-out (default ON, #1658).
+
+    The HiGHS master's bound is held against a second, presolve-free HiGHS solve
+    before it may be certified (#1634). OA certifies a master bound only when it
+    closes the gap, and between closes the bound is progress telemetry. With
+    this on, the main loop asks for that cross-solve only on a master whose
+    bound would close the gap or close at least half of the remaining certified
+    gap (:func:`_master_bound_confirmed`); every other master's bound is recorded
+    as heuristic, never certified. Certificates are therefore exactly as
+    guarded as before, and the published bound at a non-converged exit is
+    within a factor of two (in gap) of the best bound HiGHS reported.
+
+    Measured on the n=20 cardinality-constrained portfolio of #1658 (OA called
+    directly, ``time_limit=60``): the cross-solves were 11.0 of 22.0 s of master
+    time on the perspective model (51 masters) and 30.1 of 58.3 s on big-M (61
+    masters, uncertified at 60 s). ``=0`` cross-checks every master again.
+    """
+    return os.environ.get("DISCOPT_OA_MASTER_CONFIRM_ON_DEMAND", "1").strip() != "0"
+
+
+def _master_bound_confirmed(master_result) -> bool:
+    """False only for a master whose #1634 cross-solve was skipped on request.
+
+    A backend that never runs the cross-solve (the in-house engine, Gurobi) is
+    not marked and reads True, which is what it read before #1658.
+    """
+    diag = (getattr(master_result, "callback_stats", None) or {}).get("presolve_cross_check")
+    return not (isinstance(diag, dict) and diag.get("confirmed") is False)
 
 
 def _normalize_optional_hook(name: str, hook: Any) -> Any:
@@ -4523,8 +4555,14 @@ def _solve_master_milp(
     objective_cutoff: Optional[float] = None,
     mip_solution_limit: Optional[int] = None,
     integer_binary_expansion: Optional[_IntegerBinaryExpansion] = None,
+    confirm_bound_from: Optional[float] = None,
 ):
-    """Build and solve the master MILP."""
+    """Build and solve the master MILP.
+
+    ``confirm_bound_from`` (master units, HiGHS only) is forwarded to
+    :func:`discopt.solvers.milp_highs.solve_milp`; see
+    :func:`_master_bound_confirmed` for how the loop reads the result.
+    """
     try:
         gurobi_controls = (
             objective_cutoff is not None or mip_solution_limit is not None or mip_start is not None
@@ -4598,6 +4636,8 @@ def _solve_master_milp(
     }
     if gurobi_options:
         solve_kwargs["options"] = gurobi_options
+    if confirm_bound_from is not None and str(milp_solver).lower() == "highs":
+        solve_kwargs["confirm_bound_from"] = float(confirm_bound_from)
     if full_mip_start is not None:
         solve_kwargs["mip_start"] = full_mip_start
     if solution_pool:
@@ -7781,6 +7821,34 @@ def solve_oa(
             return None
         return cutoff + 1e-8 * (1.0 + abs(cutoff))
 
+    def _master_confirm_threshold() -> Optional[float]:
+        """Master-units bound below which the HiGHS cross-solve is skipped (#1658).
+
+        ``None`` (cross-check every claim) until OA holds an incumbent and a
+        certified bound, and whenever the master is not a valid relaxation.
+        Otherwise the lower of the bound that closes at least half of the
+        certified gap and the bound that closes the gap outright. The closing
+        window uses ``max(|UB|, |certified_LB|)``, which is at least
+        :func:`optimality_gap`'s own denominator for any bound between the two,
+        so a master that would close the gap is never skipped.
+        """
+        if (
+            str(milp_solver).lower() != "highs"
+            or not _highs_master_confirm_on_demand_enabled()
+            or not master_bound_valid
+            or local_cut_added
+        ):
+            return None
+        lb_c = _trace_value(certified_LB)
+        ub_now = _trace_value(UB)
+        if lb_c is None or ub_now is None or not (np.isfinite(lb_c) and np.isfinite(ub_now)):
+            return None
+        if ub_now <= lb_c:
+            return None
+        window = max(GAP_ABS_TOL, float(gap_tolerance) * max(abs(ub_now), abs(lb_c)))
+        threshold = min(lb_c + 0.5 * (ub_now - lb_c), ub_now - window)
+        return _master_objective_from_evaluator(threshold)
+
     def _shot_master_controls() -> tuple[
         dict[str, object], Optional[np.ndarray], Optional[float], Optional[int], Optional[float]
     ]:
@@ -8833,6 +8901,7 @@ def solve_oa(
             objective_cutoff=master_objective_cutoff,
             mip_solution_limit=master_solution_limit,
             integer_binary_expansion=integer_binary_expansion,
+            confirm_bound_from=_master_confirm_threshold(),
         )
         mip_count += 1
         convex_bounding_record = _maybe_update_convex_bounding_bound(
@@ -9043,7 +9112,11 @@ def solve_oa(
         if master_result.bound is not None:
             master_bound = _evaluator_objective_from_master(master_result.bound)
             if master_bound is not None:
-                if master_bound_valid and not local_cut_added:
+                if not _master_bound_confirmed(master_result):
+                    # #1658: the #1634 cross-solve was skipped on request; the
+                    # bound is HiGHS's word only, so it is never certified.
+                    _record_heuristic_bound(master_bound, "primary_master_unconfirmed")
+                elif master_bound_valid and not local_cut_added:
                     _promote_certified_bound(master_bound, "primary_master")
                 else:
                     _record_heuristic_bound(master_bound, "primary_master")

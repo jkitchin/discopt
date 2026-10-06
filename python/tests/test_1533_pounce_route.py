@@ -171,11 +171,15 @@ def test_pounce_options_reach_the_nlp_engine(spy_nlp):
 def test_pounce_options_reach_the_convex_engine(spy_convex, capsys):
     _lp().solve(solver="pounce", pounce_options={"tol": 1e-10, "max_iter": 50, "print_level": 1})
     call = spy_convex[0]
-    # The engine solves ``sigma * objective`` and receives ``tol * sigma``, so the
-    # caller's ``tol`` holds in the caller's units (#1537, ``engine_tol``).
+    # The engine solves ``sigma * objective``. It first receives the caller's
+    # ``tol``; only a point that fails the caller-unit test is re-solved at
+    # ``tol * sigma`` (#1537 ``engine_tol``, #1658).
     sigma = convex_ipm_pounce.objective_scale(None, np.array([-1.0, -2.0]))  # _lp's c
     assert sigma == 0.5
-    assert call["tol"] == 1e-10 * sigma
+    assert call["tol"] == 1e-10
+    assert len(spy_convex) <= 2
+    if len(spy_convex) == 2:
+        assert spy_convex[1]["tol"] == 1e-10 * sigma
     assert call["max_iter"] == 50
     assert spy_convex[0]["collect_iterates"] is True
     assert "lp-ipm" in capsys.readouterr().out  # print_level>0 prints the trace

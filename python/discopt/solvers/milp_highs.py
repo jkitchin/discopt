@@ -350,6 +350,7 @@ def solve_milp(
     gap_tolerance: float = 1e-4,
     max_nodes: int = 1_000_000,
     mip_start: Optional[np.ndarray] = None,
+    confirm_bound_from: Optional[float] = None,
 ) -> MILPResult:
     """Solve ``min c^T x  s.t.  A_ub x <= b_ub, A_eq x == b_eq`` with HiGHS.
 
@@ -357,6 +358,14 @@ def solve_milp(
     it drops into ``get_milp_solver``'s contract. ``bound`` is HiGHS's dual bound,
     held against a second, presolve-free HiGHS solve (#1634,
     :func:`_cross_check_presolve`) before it is returned.
+
+    ``confirm_bound_from`` (#1658) lets a caller that will only *certify* a bound
+    at or above some level skip the cross-solve below it: when the primary is
+    not ``infeasible`` and its bound is below ``confirm_bound_from``, the primary
+    is returned unconfirmed, marked ``callback_stats["presolve_cross_check"]
+    ["confirmed"] = False``. Such a bound is HiGHS's word only (the #1634 panel
+    measured 1/1200 false bounds with presolve on), so the caller must not treat it
+    as certified. ``None`` (the default) cross-checks every claim, as before.
     """
     t0 = time.time()
     kw: dict[str, Any] = dict(
@@ -371,7 +380,27 @@ def solve_milp(
         mip_start=mip_start,
     )
     primary = _solve_milp_once(time_limit=time_limit, presolve=True, **kw)
-    return _cross_check_presolve(primary, kw, time_limit, t0)
+    if (
+        confirm_bound_from is not None
+        and primary.status != SolveStatus.INFEASIBLE
+        and primary.bound is not None
+        and float(primary.bound) < float(confirm_bound_from)
+    ):
+        primary.callback_stats = {
+            **(primary.callback_stats or {}),
+            "presolve_cross_check": {
+                "ran": False,
+                "confirmed": False,
+                "primary_status": primary.status.value,
+                "confirm_bound_from": float(confirm_bound_from),
+            },
+        }
+        return primary
+    res = _cross_check_presolve(primary, kw, time_limit, t0)
+    diag = (res.callback_stats or {}).get("presolve_cross_check")
+    if isinstance(diag, dict):
+        diag["confirmed"] = True
+    return res
 
 
 def _solve_milp_once(
