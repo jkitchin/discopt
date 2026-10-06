@@ -6,7 +6,8 @@ MIP presolve cycles forever on the #1667 unit-commitment hand-off -- in
 ``time_limit`` nor the interrupt callbacks. That bit is a workaround for an upstream
 bug, and #1671 says to re-measure and either drop it or keep it as a documented
 opt-out once HiGHS fixes the bug. This test makes that step happen: it fails when the
-installed HiGHS stops cycling.
+installed HiGHS stops cycling, and while HiGHS still cycles it checks that the route
+keeps sparsify off.
 
 ``data/highs_presolve_cycle_1671.mps.gz`` is the route's hand-off itself, written by
 ``Highs.writeModel`` at the ``h.run()`` call in ``_solve_milp_std``: 2904 rows, 4344
@@ -125,3 +126,10 @@ def test_highs_presolve_still_cycles_on_the_1667_handoff(handoff_mps):
             "lp_milp_highs.MILP_PRESOLVE_RULE_OFF or keep it as a documented opt-out, "
             "and update or retire this test."
         )
+    # Still cycling: the route must keep the workaround on, or Model.solve hangs (#1667).
+    from discopt.solvers import lp_milp_highs
+
+    assert lp_milp_highs.MILP_PRESOLVE_RULE_OFF & _SPARSIFY, (
+        f"HiGHS {githash} still cycles with sparsify on, but the MILP route no longer "
+        "switches it off (#1667)"
+    )
