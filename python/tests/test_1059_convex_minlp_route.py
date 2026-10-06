@@ -73,9 +73,11 @@ class TestRouteGates:
     def test_fires_on_convex_minlp(self, monkeypatch):
         monkeypatch.setenv(ROUTE_ENV, "1")
         monkeypatch.delenv(MASTER_ENV, raising=False)
+        monkeypatch.delenv("DISCOPT_CONVEX_ROUTE_METHOD", raising=False)
         method, reason, opts = _convex_minlp_auto_route(_load("gbd"))
-        # `"oa"` since #1141 (performance-plan §25.11 chose it over `lp_nlp_bb`).
-        assert method == "oa"
+        # `"lp_nlp_bb"` since #1658 (performance-plan §75; `"oa"` from #1141 to then).
+        assert method == "lp_nlp_bb"
+        assert reason.startswith("mip-nlp/lp_nlp_bb:")
         assert "certified convex" in reason
         # HiGHS master by default since performance-plan §25.13; the reason says so.
         assert opts == {"milp_solver": "highs"}
@@ -93,8 +95,24 @@ class TestRouteGates:
     def test_explicit_highs_is_accepted(self, monkeypatch):
         monkeypatch.setenv(ROUTE_ENV, "1")
         monkeypatch.setenv(MASTER_ENV, "highs")
+        monkeypatch.delenv("DISCOPT_CONVEX_ROUTE_METHOD", raising=False)
         method, reason, opts = _convex_minlp_auto_route(_load("gbd"))
-        assert method == "oa" and opts == {"milp_solver": "highs"}, reason
+        assert method == "lp_nlp_bb" and opts == {"milp_solver": "highs"}, reason
+
+    def test_route_method_opt_out_restores_oa(self, monkeypatch):
+        """``DISCOPT_CONVEX_ROUTE_METHOD=oa`` restores the pre-#1658 target."""
+        monkeypatch.setenv(ROUTE_ENV, "1")
+        monkeypatch.setenv("DISCOPT_CONVEX_ROUTE_METHOD", "oa")
+        method, reason, opts = _convex_minlp_auto_route(_load("gbd"))
+        assert method == "oa" and reason.startswith("mip-nlp/oa:"), reason
+        assert opts == {"milp_solver": "highs"}
+
+    def test_an_unknown_route_method_raises(self, monkeypatch):
+        """A typo must not silently pick an algorithm."""
+        monkeypatch.setenv(ROUTE_ENV, "1")
+        monkeypatch.setenv("DISCOPT_CONVEX_ROUTE_METHOD", "ecp")
+        with pytest.raises(ValueError, match="DISCOPT_CONVEX_ROUTE_METHOD"):
+            _convex_minlp_auto_route(_load("gbd"))
 
     def test_an_unknown_master_raises(self, monkeypatch):
         """A typo must not silently pick an engine."""
@@ -194,7 +212,7 @@ class TestRouteDispatch:
         m = _load("gbd")
         result = m.solve(time_limit=30)
         assert result.algorithm_route is not None
-        assert "mip-nlp/oa" in result.algorithm_route
+        assert result.algorithm_route.startswith("mip-nlp/lp_nlp_bb:"), result.algorithm_route
 
     def test_route_off_leaves_the_field_unset(self, monkeypatch):
         """The opt-out must restore the pre-graduation behaviour exactly."""
@@ -215,13 +233,16 @@ class TestRoutedMasterEngine:
         import discopt.solvers.milp_highs as milp_highs
 
         calls = []
-        real = milp_highs.solve_milp
+        # Both entry points: OA's master is ``solve_milp``, LP/NLP-BB's (the route
+        # target since #1658) is ``solve_milp_with_lazy_cuts``.
+        for name in ("solve_milp", "solve_milp_with_lazy_cuts"):
+            real = getattr(milp_highs, name)
 
-        def _counting(*a, **kw):
-            calls.append(1)
-            return real(*a, **kw)
+            def _counting(*a, _real=real, **kw):
+                calls.append(1)
+                return _real(*a, **kw)
 
-        monkeypatch.setattr(milp_highs, "solve_milp", _counting)
+            monkeypatch.setattr(milp_highs, name, _counting)
         return calls
 
     def test_default_solve_runs_the_master_on_highs(self, monkeypatch):
@@ -230,7 +251,8 @@ class TestRoutedMasterEngine:
         calls = self._count_highs_calls(monkeypatch)
         m = _load("gbd")
         r = m.solve(time_limit=60)
-        assert r.algorithm_route is not None and r.algorithm_route.startswith("mip-nlp/oa")
+        assert r.algorithm_route is not None
+        assert r.algorithm_route.startswith("mip-nlp/lp_nlp_bb:"), r.algorithm_route
         assert r.status == "optimal" and r.gap_certified
         assert r.objective == pytest.approx(2.2, abs=1e-6)
         assert len(calls) > 0

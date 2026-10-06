@@ -184,6 +184,18 @@ def _prepare_cut_row(
         a_min = float(np.min(liftable))
         room = min(10.0 * small_tol / a_min, scale_cap)
         headroom = math.floor(math.log2(room))
+        # #1658: a row whose largest coefficient is below 1 is also lifted until it
+        # is in [1, 2). HiGHS judges a row against an ABSOLUTE feasibility
+        # tolerance, so on a row with coefficients ~5.5e-5 (flay03m, rows scaled by
+        # 10^U(-6,6)) a master point violating an OA cut by 1.2e-2 per unit of
+        # coefficient read as feasible (6.6e-7 raw), and LP/NLP-BB stopped 3.3e-4
+        # short of the optimum. Exact for the same reason as above, and capped by
+        # the same ``scale_cap``.
+        if a_max < 1.0:
+            headroom = max(
+                headroom,
+                min(math.ceil(-math.log2(a_max)), math.floor(math.log2(scale_cap))),
+            )
         if headroom > 0:
             scale = 2.0**headroom
             coeffs = coeffs * scale
@@ -925,6 +937,9 @@ def solve_milp_with_lazy_cuts(
         "lazy_cuts": 0,
         "node_cuts": 0,
         "restarts": 0,
+        # #1658: improving solutions HiGHS offered from a stale tree that
+        # violate a pending row, and so were not judged -- see ``_callback``.
+        "stale_offers": 0,
         # How many times the hook was actually asked. Zero with a hook installed
         # is "it never got a look in", NOT "it kept saying continue" (§6).
         "terminate_polls": 0,
@@ -977,6 +992,21 @@ def solve_milp_with_lazy_cuts(
 
         x = np.asarray(data_out.mip_solution, dtype=np.float64).ravel()[:n]
         counts["mipsol_calls"] += 1
+        if pending and any(float(np.dot(a, x)) > r + 1e-9 * max(1.0, abs(r)) for a, r in pending):
+            # #1658: this tree is already stale. A cut was requested and HiGHS has
+            # not honoured the interrupt yet, so it keeps offering improving
+            # solutions of a model that lacks the pending rows. One that violates
+            # a pending row must not be judged: a separator that reports only rows
+            # it has not emitted before (OA's) finds nothing new and accepts it.
+            # Measured on the #1658 n=20 big-M portfolio: a point with master
+            # objective 0.0058 and true objective 0.0301 (optimum 0.0104) was
+            # accepted, became HiGHS's incumbent, capped the master's dual bound
+            # at 0.0058 and left LP/NLP-BB uncertified. An offer that satisfies
+            # every pending row is judged as usual -- it is checked against the
+            # whole row set the separator has emitted.
+            counts["stale_offers"] += 1
+            data_in.user_interrupt = True
+            return
         # CLAUDE.md §7: a separator that raises must crash the solve, not be read
         # as "this point is fine" -- an accepted point becomes the OA incumbent.
         raw = lazy_callback(x)

@@ -63,7 +63,7 @@ def test_routed_kernel_eligible_model_goes_to_the_route(tree_calls, monkeypatch)
 
     assert tree_calls == [], "the kernel's tree ran on a model the route takes"
     assert ck.last_deferred_reason() is not None
-    assert "mip-nlp/oa" in (r.algorithm_route or "")
+    assert (r.algorithm_route or "").startswith("mip-nlp/"), r.algorithm_route
     # Soundness: the route's answer is the oracle's, and its bound does not cross it.
     opt = _known_optimum()
     assert r.objective is not None

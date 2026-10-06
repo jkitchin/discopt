@@ -5922,11 +5922,30 @@ def solve_lp_nlp_bb(
         if perspective_epigraph is not None:
             evaluator._perspective_epigraph = perspective_epigraph  # type: ignore[attr-defined]
 
+    #: #1658: the best fixed-NLP point the screen below refused, kept only as an
+    #: UNVERIFIED warm start for a caller with no verified incumbent -- never a
+    #: bound, never certified. The count is exported (CLAUDE.md §6).
+    best_refused: list[Optional[tuple[np.ndarray, float]]] = [None]
+    refused_candidates = [0]
+
     def accept_incumbent(x: np.ndarray, obj: float) -> None:
         nonlocal incumbent, incumbent_obj
         if incumbent_obj is None or obj < incumbent_obj:
-            incumbent = np.asarray(x, dtype=np.float64).copy()
-            incumbent_obj = float(obj)
+            # #1658: the screen ``solve_oa``'s ``verified_candidate`` applies. This
+            # driver adopted every fixed-NLP point as-is, and the incumbent closes
+            # the gap and is what leaves. Measured on ``portfol_roundlot`` with rows
+            # scaled by 10^U(-3,3): it certified an incumbent violating row 5 by
+            # 3.0e-3 (allowed 1e-6), which the #772 guard in ``Model.solve`` then
+            # withheld, leaving ``status="error"``.
+            x_out, obj_out, refusal = _exit_verified_incumbent(model, x, obj, obj_sign, warn=False)
+            if refusal is not None:
+                refused_candidates[0] += 1
+                logger.debug("lp_nlp_bb: candidate incumbent %.12g refused: %s", obj, refusal)
+                if best_refused[0] is None or obj < best_refused[0][1]:
+                    best_refused[0] = (np.asarray(x, dtype=np.float64).copy(), float(obj))
+                return
+            incumbent = np.asarray(x_out, dtype=np.float64).copy()
+            incumbent_obj = float(obj_out)
             _record_interior_point(
                 incumbent,
                 "callback_incumbent",
@@ -6092,7 +6111,14 @@ def solve_lp_nlp_bb(
                 relaxable=relaxable,
             )
             rhs = float(oa_b_rows[idx])
-            if float(np.dot(row, master_x)) > rhs + 1e-6:
+            # #1658: the violation is judged per unit of the row's largest
+            # coefficient when that is below 1 (a row scaled by 1e-5 has its
+            # violation scaled by 1e-5 too); rows of norm >= 1 are tested exactly
+            # as before. Measured on flay03m with rows scaled by 10^U(-6,6): an
+            # OA cut violated by 1.2e-2 per unit coefficient read 6.6e-7 raw, was
+            # not returned, and the master point was accepted 3.3e-4 short.
+            row_norm = float(np.max(np.abs(row))) if row.size else 0.0
+            if float(np.dot(row, master_x)) > rhs + 1e-6 * min(1.0, row_norm):
                 rows.append((row, rhs))
         return rows
 
@@ -6548,6 +6574,18 @@ def solve_lp_nlp_bb(
     # ``bound_validity``; this narrows ``gap_certified`` only, and only ever
     # from True to False.
     gap_is_certified = bool(master_bound_valid and gap is not None and gap <= gap_tolerance)
+    callback_stats["refused_candidates"] = int(refused_candidates[0])
+    unverified_incumbent = False
+    if incumbent is None and best_refused[0] is not None:
+        # #1658: every candidate failed the screen. Return the best one as
+        # ``solve_oa`` does: unverified, uncertified, flagged so the #1059 merge
+        # does not rank it as a primal bound (#1380). The master bound is left
+        # alone -- the master never saw this point.
+        incumbent, incumbent_obj = best_refused[0]
+        unverified_incumbent = True
+        status = "feasible"
+        gap = None
+        gap_is_certified = False
     single_tree_trace: dict[str, object] = {
         "schema_version": 1,
         "solver": "mip-nlp",
@@ -6620,6 +6658,7 @@ def solve_lp_nlp_bb(
             subnlp_calls=nlp_subproblem_count,
             gap_certified=gap_is_certified,
             mip_nlp_trace=single_tree_trace,
+            solver_stats=({"oa/unverified_incumbent": 1.0} if unverified_incumbent else None),
         )
 
     return SolveResult(

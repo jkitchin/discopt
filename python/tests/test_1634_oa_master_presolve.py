@@ -92,8 +92,11 @@ def test_truth_is_the_issue_value():
     assert _truth(C181, A181, B181, UB181) == pytest.approx(TRUTH181, abs=1e-15)
 
 
-def test_convex_minlp_route_does_not_certify_the_pruned_master():
-    """End to end: on ``main`` this certifies 0.02082 (``gap_certified=True``)."""
+@pytest.mark.parametrize("route_method", ["oa", "lp_nlp_bb"])
+def test_convex_minlp_route_does_not_certify_the_pruned_master(monkeypatch, route_method):
+    """End to end: on ``main`` this certifies 0.02082 (``gap_certified=True``).
+    Run under both route targets (#1658 moved the default to ``lp_nlp_bb``)."""
+    monkeypatch.setenv("DISCOPT_CONVEX_ROUTE_METHOD", route_method)
     m = Model("oa1634")
     xs = [m.integer(f"x{j}", lb=0, ub=UB181[j]) for j in range(5)]
     z = m.continuous("z", lb=0.0, ub=1.0)
@@ -103,7 +106,7 @@ def test_convex_minlp_route_does_not_certify_the_pruned_master():
         m.subject_to(sum(A181[i][j] * xs[j] for j in range(5)) + s == B181[i])
     r = m.solve(time_limit=60)
     route = str(r.algorithm_route)
-    assert route.startswith("mip-nlp/oa") and "master=highs" in route, route
+    assert route.startswith(f"mip-nlp/{route_method}:") and "master=highs" in route, route
     assert r.bound is not None
     assert r.bound <= TRUTH181 + YARD, (r.bound, TRUTH181)
     if r.gap_certified:

@@ -10368,3 +10368,123 @@ and #1153 accepts a `node_limit` exit. The fix applies #789's rule at the first
 such point: the pricing callback answers `"decline"`, the tree stops with
 `TreeStatus::Declined`, and the Python path solves the model as before (now
 declined at node 3, 17 Python nodes, as on base).
+
+## 75. #1658 finished: the convex-MINLP route targets LP/NLP-BB, after three LP/NLP-BB fixes (2026-10-06)
+
+§74.2 left #1658 open: the auto-routed OA still missed its 6 s decision point on
+the n = 20 portfolio, because each HiGHS master is ~2x the retired in-house one.
+§25.12 had already measured the alternative, `lp_nlp_bb` on HiGHS: 26/26 certified
+in 30.9 s against `"oa"`'s 24/26 in 108.3 s. The route stayed on `"oa"` only
+because HiGHS was then optional (§25.10/§25.11), a reason #1229 retired. Driving
+`lp_nlp_bb` to graduation turned up three defects in it, each found by a
+measurement and each fixed at its root.
+
+### 75.1 The HiGHS lazy master judged offers from a stale tree
+
+Called directly, `lp_nlp_bb` with `milp_solver="highs"` returned `feasible`
+(bound 0.0058, optimum 0.01044) on the n = 20 big-M portfolio after 2 s. (An
+earlier 1.0 s measurement was on the in-house master: no `milp_solver` passed.)
+The master's bound had been capped at the objective of an *accepted* master
+point: z integral and every linear row satisfied, master objective 0.0058, true
+objective at that same point **0.0301**. The pool held perspective rows violated
+at the point by 0.012, every one marked emitted.
+
+Mechanism: within one HiGHS tree run, the improving-solution callback keeps
+firing after the separator has returned cuts and requested the restart. Point A's
+rows are pending, not yet added, when point B arrives. OA's separator reports
+only rows it has not emitted, so it finds nothing new for B and accepts it. B
+becomes HiGHS's incumbent and prunes against 0.0058. This cannot produce a false
+certificate, since 0.0058 is a valid lower bound, but the master can never
+certify.
+
+Fix (`milp_highs.solve_milp_with_lazy_cuts`): an offer violating a pending row is
+declined (`callback_stats["stale_offers"]`); one satisfying every pending row is
+judged as before. A first version declined *every* offer from a stale tree; it
+was sound but cost the perspective portfolio 854 → 2201 nodes. The targeted
+version: 773 nodes, 7.5 s.
+
+### 75.2 Absolute violation tests on scaled rows
+
+`flay03m` with rows scaled by 10^U(-6,6) stopped after 1.9 s with its master
+*optimal* at 48.9738 against an incumbent of 48.9898 (gap 3.3e-4). The accepted
+master point violated an OA cut by 6.6e-7 raw, which is 1.2e-2 per unit of the
+row's largest coefficient (5.5e-5). Two absolute tests let it through:
+- the separator's `row·x > rhs + 1e-6`;
+- HiGHS's own absolute feasibility tolerance, on copies of that row already in
+  the master.
+
+Fixes:
+- **Separator** (`collect_new_lazy_cuts`): the threshold becomes `1e-6 *
+  min(1, ‖row‖∞)`. That is identical for rows of norm ≥ 1 and more sensitive
+  only below.
+- **HiGHS lazy rows** (`_prepare_cut_row`): a row whose largest coefficient is
+  below 1 is lifted by a power of two into [1, 2). The scaling is exact, so it is
+  the same inequality bit-for-bit, and capped as before.
+
+Multi-tree OA was unaffected: it adds its cuts without a violation test.
+
+### 75.3 LP/NLP-BB adopted unverified incumbents
+
+`portfol_roundlot` with rows scaled by 10^U(-3,3) came back `status="error"`
+through the route. `lp_nlp_bb` had certified an incumbent violating row 5 by
+3.0e-3 (allowed 1e-6), and the #772 false-primal guard in `Model.solve` withheld
+it. The driver's `accept_incumbent` took every fixed-NLP point as-is, where
+`solve_oa` screens each one with `_exit_verified_incumbent` (§`verified_candidate`,
+#1537). It now applies the same screen. The best refused point is kept as an
+unverified warm start, returned `feasible`, uncertified and flagged
+`oa/unverified_incumbent` so the #1059 merge does not rank it (#1380). After the
+fix the same instance certifies on the route, the incumbent repaired onto its
+bounds by the exit gate's snap.
+
+### 75.4 The route panel
+
+Plain `Model.solve(time_limit=30)`, no kwargs, arms set by
+`DISCOPT_CONVEX_ROUTE_METHOD` and interleaved per instance, idle 4-core container
+(load ≤ 3.2). Run on the shipping code (the `ceil` lift of 75.2). Instances:
+- every in-repo `.nl` the router diverts (26), at row-scale spans 0, 3 and 6
+  (§25.13's protocol, seeded per file);
+- the #1658 portfolio family (n ∈ {12, 16, 20, 24}, seeds 21/22, big-M and
+  perspective: 16).
+
+That is 94 instances per arm. Every incumbent was re-verified with
+`verify_point`. Every bound was checked against `known_optima.toml` and against
+both arms' verified incumbents: **498 checks, 0 violations, 0 errors**, and the
+route fired 94/94 in each arm.
+
+| subset | `oa` | `lp_nlp_bb` |
+|---|---|---|
+| all 94 | 91 optimal, 22 fell back, 342.0 s | **92 optimal, 10 fell back, 339.5 s** |
+| in-repo, span 0 | 26/26, 3 fell back, 53.7 s | 26/26, 2 fell back, 74.1 s |
+| in-repo, span 3 | 25/26, 4 fell back, 69.4 s | **26/26**, 3 fell back, 89.3 s |
+| in-repo, span 6 | 24/26, 5 fell back, 103.9 s | 24/26, 5 fell back, 126.0 s |
+| portfolios | 16/16, 10 fell back, 114.9 s | 16/16, **0** fell back, **50.1 s** |
+
+The gain is `clay0303hfsg@3`, and no certificate is lost. An earlier run of this
+panel, before 75.2/75.3, lost `portfol_roundlot@3` and showed the
+`flay03m@6` regression; both are fixed above and are now tests.
+
+**The cost, recorded:** the in-repo wall rises by ~20–30 s per span, all of it
+from the six `cvxnonsep_nsig30` / `cvxnonsep_psig30` rows (each 11–15 s → 27–29 s).
+Neither arm certifies those on the route; both fall back and then certify.
+- `"oa"` hands over at its #1143 decision point (5 s).
+- `lp_nlp_bb` runs under the #1066 progress-trend guard, which keeps a route while
+  its gap shrinks.
+
+Putting `lp_nlp_bb` on the decision point would cut real wins: the perspective
+portfolio certifies at 7.5 s on a 60 s limit, and §25.11 recorded an
+`rsyn0820m02m` `lp_nlp_bb` win at 39.3 s.
+
+**Result.** `lp_nlp_bb` is the route target (`DISCOPT_CONVEX_ROUTE_METHOD=oa`
+restores `"oa"`). On the issue's reproducer, n = 20 at `time_limit=60`, both
+formulations certify on the route with no fallback:
+
+| model | before | after |
+|---|---|---|
+| perspective | 10.6 s, via fallback | **7.5 s on the route** |
+| big-M | 6.5 s, via fallback | **2.2 s on the route** |
+
+The `syn`/`rsyn` class is not in the repository and minlplib.org is not
+reachable from this environment, so the class this route exists for is covered
+only by §25.11/§25.12's earlier `lp_nlp_bb`/HiGHS measurements. A `syn`/`rsyn`
+panel with `DISCOPT_CONVEX_KERNEL=0` (§25.13's protocol) on the full corpus is
+the check to run next.
