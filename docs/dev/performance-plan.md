@@ -10527,3 +10527,109 @@ reachable from this environment, so the class this route exists for is covered
 only by §25.11/§25.12's earlier `lp_nlp_bb`/HiGHS measurements. A `syn`/`rsyn`
 panel with `DISCOPT_CONVEX_KERNEL=0` (§25.13's protocol) on the full corpus is
 the check to run next.
+### 76.5 Review of #1673: three blocking findings, fixed
+
+The owner's review at `ffe3c80e` found no soundness defect and three blockers.
+
+- **B1, the fail-before for the stale-offer guard is timing-dependent.** On
+  `main` at `1d9d27ac`, on the Linux container this work was done on, 12 big-M
+  portfolios return `feasible` with the bound capped, 2/2 runs each: n ∈ {18,
+  20, 22, 26, 30}, seeds 21–23, including the n = 20 seed-21 reproducer. The
+  reviewer's macOS run of `main` certified that seed-21 case 3/3. Whether HiGHS
+  offers a stale point depends on where its time-based interrupt polls land. The
+  test (`test_lazy_master_does_not_judge_offers_from_a_stale_tree`) now runs
+  three instances that `main` gets wrong here, and keeps the `stale_offers`
+  counter as the probe that holds on every platform.
+- **B2, the #1634 cross-check spent the fallback's budget.** On `rsyn0815m03m`
+  (`DISCOPT_CONVEX_KERNEL=0`, `time_limit=30`), the #1066 guard handed over at
+  17.0 s. The lazy master's cross-solve then ran to 26.2 s on the route's *full*
+  budget, the fallback got 4.2 s, and the solve ended at 36.3 s; `main` ends at
+  30.1 s. The guard's stop now reaches the master as `"abandon"`. The cross-solve
+  gets no time, and the unconfirmed bound is withdrawn rather than published
+  (`callback_stats["abandoned"]`). A convergence stop still gets its confirming
+  cross-solve. The fallback overrunning its own deadline once it starts is an
+  older, separate issue, which this route switch had put on the default path.
+- **B3, a misconfigured route was swallowed on kernel-eligible models.** The
+  #1624 pre-check's `except` logged `DISCOPT_CONVEX_ROUTE_METHOD=ecp` (and a
+  retired `DISCOPT_CONVEX_ROUTE_OA_MASTER`) as a fallback, ran the kernel and
+  answered `optimal`. Both settings are now read before that `try`, and a test
+  on `clay0303hfsg` pins it.
+
+Non-blocking items, also addressed:
+- The lift into [1, 2) is now `lift_to_unit=True` on the lazy rows only; the
+  whole-model fitting that serves the OA, GOA and GDP masters no longer lifts,
+  so those masters are as on `main`.
+- The stale-offer decline uses `min(1e-9·max(1, |r|), 1e-6·min(1, ‖a‖∞))`, so
+  it covers every violation the separator would report.
+- LP/NLP-BB sets `termination_reason="unverified_incumbent"`.
+- `solve-routing.md` and the `Model.solve` docstring now name the new target.
+
+**The reviewer's `syn`/`rsyn` panel** (local MINLPLib corpus; recorded as their
+measurement, since minlplib.org is not reachable from this environment). It
+covers 40 instances: 32 `syn`/`rsyn` up to 1500 variables, plus `squfl`,
+`batchs`, `sssd`, `slay`, `fo7_2`, `portfol`, `clay0204m` and `ravempb`. It ran
+`main` against `main`+#1673 at `ffe3c80e`, before the B2 fix, interleaved, at
+`time_limit=30`: 814 comparisons, 0 violations.
+
+| lane | arm | optimal | fell back | total wall |
+|---|---|---|---|---|
+| `DISCOPT_CONVEX_KERNEL=0` | main | 21 | 10 | 681 s |
+| `DISCOPT_CONVEX_KERNEL=0` | PR | 22 | 5 | 680 s |
+| default | main | 29 | 10 | 400 s |
+| default | PR | 30 | 5 | 402 s |
+
+- **Certificates:** `batchs101006m` gained in both lanes, none lost.
+- **Dual bounds** are much tighter on uncertified routed rows (`rsyn0815m03m`
+  7166 → 3216, reference 2828).
+- **Incumbents are worse on five maximization rows:** `syn40m04m` 901.1 → 680.9,
+  `rsyn0830m03m` 1508 → 1097, `rsyn0820m04m` 2396 → 2141, `rsyn0815m03m`
+  2794 → 2708, `rsyn0820m03m` 1957 → 1929.
+
+Part of the incumbent loss is B2 starving the fallback. This panel has to be
+re-run on the B2 fix before #1658 closes.
+
+### 76.6 After the review: one more lazy-master hole, a falsified fix, and the re-run panel
+
+Re-running §76.4's panel on the review fixes merged with `main` at `1d9d27ac`
+(which brought #1667's presolve sparsify off) lost `tls2@6` and slowed two rows.
+Bisected with #1667's presolve rule restored by monkeypatch:
+
+- **`tls2@6`: a final solution no callback judged.** With sparsify off, the lazy
+  master finished `optimal` at 4.3; the separator's only accepted point was 5.3
+  (optimum 5.3). HiGHS does not route every solution through
+  `kCallbackMipImprovingSolution` (one found in presolve or postsolve is never
+  offered), so the master's own optimum was never separated. **Fix:** when a
+  tree finishes with no cut pending, its final solution is separated if it
+  beats the best accepted point (`callback_stats["final_offers"]`). Result: 2.1 s
+  certified, pinned by `test_lazy_master_separates_a_final_solution_no_callback_judged`.
+- **`portfol_roundlot`: a premature early exit, correctly refused.** The
+  check-in bound sat 8.2e-7 above the final master's optimum: the #1634
+  presolve-pruning the cross-check exists for. The cross-check refused it, and
+  the fallback certified (16.8 s against 4.7 s under the old presolve rule).
+  - **Falsified:** "the cross-solve stops a tolerance short at the same
+    `mip_rel_gap`". Tightening its gaps tenfold left the cross bound unchanged
+    (it was already at the master optimum). Reverted, not shipped.
+- **`clay0303hfsg@3`: budget edge.** It certifies in 16.2–17.5 s, against the
+  progress guard's 15 s checkpoint at a 30 s limit. It certified on the route in
+  the final run.
+
+Re-run panel, the shipping code, same protocol as §76.4: **497 checks, 0
+violations, 0 errors**, and the route fired 94/94 in each arm.
+
+| subset | `oa` | `lp_nlp_bb` |
+|---|---|---|
+| all 94 | 90 optimal, 22 fell back, 336.5 s | **92 optimal, 10 fell back, 350.2 s** |
+| in-repo, span 0 | 26/26, 3 fell back, 53.4 s | 26/26, 3 fell back, 86.0 s |
+| in-repo, span 3 | 25/26, 4 fell back, 69.4 s | **26/26**, 2 fell back, 86.3 s |
+| in-repo, span 6 | 24/26, 5 fell back, 96.1 s | 24/26, 5 fell back, 125.0 s |
+| portfolios | 15/16, 10 fell back, 117.6 s | **16/16, 0 fell back, 52.8 s** |
+
+The gains are `clay0303hfsg@3` and `portfolio20_s22_persp`, and no certificate is
+lost. The +13.7 s total is the six `cvxnonsep_*sig30` rows recorded in §76.4
+(+12–17 s each; both arms fall back on them) plus `portfol_roundlot` (+2.8 s).
+Every other row is faster or within 3 s.
+
+**Still to run:** the reviewer's `syn`/`rsyn` panel (§76.5) on this code. The
+instances are not in the repository and minlplib.org is not reachable from the
+environment this was written in, so it has to run on a machine with the
+MINLPLib corpus.

@@ -29,7 +29,7 @@ import warnings
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union, cast
 
 import numpy as np
 
@@ -6326,7 +6326,7 @@ def solve_lp_nlp_bb(
             value += float(decomp.obj_coeffs[1])
         return value
 
-    def callback_terminate(snapshot: dict[str, object]) -> bool:
+    def callback_terminate(snapshot: dict[str, object]) -> Union[bool, str]:
         # The post-loop check-in: the master has already stopped on its own, so
         # this one only *observes*. It must not claim the wall, must not stop
         # anything, and must not consult the caller's hook -- asking a user hook
@@ -6382,7 +6382,10 @@ def solve_lp_nlp_bb(
             raw = hook(context)
         except Exception as exc:  # never swallowed (CLAUDE.md §7)
             raise RuntimeError(f"termination_hook failed during LP/NLP BB solve: {exc}") from exc
-        return _validate_external_termination(raw)
+        # #1658 review B2: a hook stop hands the rest of the budget to the caller
+        # (the #1066 guard's fallback), so the master must not spend it on its
+        # #1634 cross-solve; see ``milp_highs.solve_milp_with_lazy_cuts``.
+        return "abandon" if _validate_external_termination(raw) else False
 
     lazy_kwargs: dict[str, object] = dict(
         c=master.c,
@@ -6586,6 +6589,7 @@ def solve_lp_nlp_bb(
         status = "feasible"
         gap = None
         gap_is_certified = False
+        termination_reason = "unverified_incumbent"
     single_tree_trace: dict[str, object] = {
         "schema_version": 1,
         "solver": "mip-nlp",

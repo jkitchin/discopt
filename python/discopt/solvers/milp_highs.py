@@ -113,6 +113,22 @@ def _highs_matrix_window(h, highspy) -> tuple[float, float]:
     return out[0], out[1]
 
 
+def _violates_pending(a: np.ndarray, r: float, x: np.ndarray) -> bool:
+    """Whether ``x`` violates the pending lazy row ``a @ x <= r`` (#1658).
+
+    The threshold is the smaller of a ``1e-9`` relative test and OA's separator
+    test (``1e-6 * min(1, |a|_inf)``, ``oa.collect_new_lazy_cuts``), so every
+    point the separator would call violated is declined here too. With the
+    relative test alone, a row of norm 1e-5 left a window -- violations between
+    1e-11 and 1e-9 -- in which neither the decline nor the separator acted
+    (review of #1673). Declining more is always safe: the point is offered again
+    by the rebuilt tree, where the row is present.
+    """
+    a_norm = float(np.max(np.abs(a))) if a.size else 0.0
+    tol = min(1e-9 * max(1.0, abs(r)), 1e-6 * min(1.0, a_norm))
+    return float(np.dot(a, x)) > r + tol
+
+
 def _prepare_cut_row(
     coeffs: np.ndarray,
     rhs: float,
@@ -120,8 +136,15 @@ def _prepare_cut_row(
     ub: np.ndarray,
     small_tol: float,
     large_tol: float,
+    *,
+    lift_to_unit: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Make ``coeffs @ x <= rhs`` safe to hand :meth:`highspy.Highs.addRow`.
+
+    ``lift_to_unit`` (#1658) additionally lifts a row whose largest coefficient is
+    below 1 into [1, 2) by a power of two. Only the LP/NLP-BB lazy rows ask for it
+    (see the comment at the lift); the whole-model fitting that serves the OA,
+    GOA and GDP masters leaves it off, so those masters are unchanged.
 
     HiGHS silently discards any matrix entry with ``|value| <= small_matrix_value``
     and reports the discard as ``kWarning`` -- neither an error nor a clean add.
@@ -191,7 +214,7 @@ def _prepare_cut_row(
         # coefficient read as feasible (6.6e-7 raw), and LP/NLP-BB stopped 3.3e-4
         # short of the optimum. Exact for the same reason as above, and capped by
         # the same ``scale_cap``.
-        if a_max < 1.0:
+        if lift_to_unit and a_max < 1.0:
             headroom = max(
                 headroom,
                 min(math.ceil(-math.log2(a_max)), math.floor(math.log2(scale_cap))),
@@ -840,6 +863,16 @@ def solve_milp_with_lazy_cuts(
     when HiGHS has none yet. Returning true stops the search and sets
     ``callback_stats["terminated"]``.
 
+    Returning the string ``"abandon"`` (#1658 review B2) stops it the same way and
+    also says the caller is handing its remaining budget elsewhere: the #1634
+    presolve-free cross-solve then gets no time, so the bound it would have
+    confirmed is withdrawn (``callback_stats["abandoned"]``). Without it the
+    cross-solve ran on the route's *full* budget after the #1066 guard had
+    already handed over: on ``rsyn0815m03m`` it ran from 17.0 s to 26.2 s of a
+    30 s limit, the fallback got 4.2 s, and the solve ended at 36.3 s. A
+    convergence stop (plain ``True``) keeps the cross-solve, which is what
+    confirms its certificate.
+
     The in-tree poll is what makes a progress budget honest: restarts alone are
     not a clock. On ``rsyn0820m02m`` the master separates rarely enough that a
     restart-only hook had nothing to judge at the checkpoint and abandoned a run
@@ -940,6 +973,9 @@ def solve_milp_with_lazy_cuts(
         # #1658: improving solutions HiGHS offered from a stale tree that
         # violate a pending row, and so were not judged -- see ``_callback``.
         "stale_offers": 0,
+        # #1658: final tree solutions no callback had judged, separated after the
+        # tree finished -- see the loop below.
+        "final_offers": 0,
         # How many times the hook was actually asked. Zero with a hook installed
         # is "it never got a look in", NOT "it kept saying continue" (§6).
         "terminate_polls": 0,
@@ -959,6 +995,8 @@ def solve_milp_with_lazy_cuts(
     best: list[Optional[np.ndarray]] = [None]
     best_obj: list[Optional[float]] = [None]
 
+    abandoned = [False]
+
     def _consult(context: str, dual_bound, elapsed: float) -> bool:
         """Ask the caller's hook whether to stop. Never swallows (CLAUDE.md §7)."""
         snapshot: dict[str, object] = dict(counts)
@@ -966,7 +1004,12 @@ def solve_milp_with_lazy_cuts(
         snapshot["elapsed"] = elapsed
         snapshot["dual_bound"] = dual_bound
         counts["terminate_polls"] += 1
-        return bool(terminate_callback(snapshot))
+        answer = terminate_callback(snapshot)
+        if isinstance(answer, str) and answer == "abandon":
+            if context != "final":
+                abandoned[0] = True
+            return True
+        return bool(answer)
 
     def _callback(callback_type, message, data_out, data_in, user_data):
         if callback_type == highspy.cb.HighsCallbackType.kCallbackMipInterrupt:
@@ -992,7 +1035,7 @@ def solve_milp_with_lazy_cuts(
 
         x = np.asarray(data_out.mip_solution, dtype=np.float64).ravel()[:n]
         counts["mipsol_calls"] += 1
-        if pending and any(float(np.dot(a, x)) > r + 1e-9 * max(1.0, abs(r)) for a, r in pending):
+        if pending and any(_violates_pending(a, r, x) for a, r in pending):
             # #1658: this tree is already stale. A cut was requested and HiGHS has
             # not honoured the interrupt yet, so it keeps offering improving
             # solutions of a model that lacks the pending rows. One that violates
@@ -1061,6 +1104,35 @@ def solve_milp_with_lazy_cuts(
             break
 
         if not pending:
+            # #1658 (review of #1673): HiGHS does not route every solution through
+            # kCallbackMipImprovingSolution -- one found in presolve or postsolve
+            # is never offered. A tree can then finish "optimal" on a point the
+            # separator never saw, and the loop ends with its bound stuck below the
+            # incumbent: tls2 with rows scaled by 10^U(-6,6), under #1667's
+            # presolve rules, finished optimal at 4.3 with the separator's only
+            # accepted point at 5.3 (optimum 5.3). The final solution is therefore
+            # separated here whenever it beats the best accepted point; cuts
+            # rebuild the tree as usual, no cuts make it the accepted point.
+            final_info = h.getInfo()
+            if final_info.primal_solution_status == highspy.SolutionStatus.kSolutionStatusFeasible:
+                x_fin = np.asarray(h.getSolution().col_value, dtype=np.float64).ravel()[:n]
+                obj_fin = float(c_arr @ x_fin)
+                if best_obj[0] is None or obj_fin < best_obj[0] - 1e-9 * max(1.0, abs(best_obj[0])):
+                    counts["final_offers"] += 1
+                    raw_fin = lazy_callback(x_fin)
+                    fin_rows = (
+                        []
+                        if raw_fin is None
+                        else [
+                            (np.asarray(a, dtype=np.float64).ravel(), float(r)) for a, r in raw_fin
+                        ]
+                    )
+                    if fin_rows:
+                        pending.extend(fin_rows)
+                        counts["lazy_cuts"] += len(fin_rows)
+                    else:
+                        best[0], best_obj[0] = x_fin.copy(), obj_fin
+        if not pending:
             status = _status_map(highspy).get(h.getModelStatus(), SolveStatus.ERROR)
             if terminate_callback is not None:
                 # The tree finished on its own, so there is nothing left to
@@ -1092,7 +1164,9 @@ def solve_milp_with_lazy_cuts(
         for coeffs, rhs in pending:
             if coeffs.shape[0] != n:
                 raise ValueError(f"lazy cut has {coeffs.shape[0]} coefficients, expected {n}")
-            idx, vals, row_rhs = _prepare_cut_row(coeffs, float(rhs), lb, ub, small_tol, large_tol)
+            idx, vals, row_rhs = _prepare_cut_row(
+                coeffs, float(rhs), lb, ub, small_tol, large_tol, lift_to_unit=True
+            )
             if idx.size == 0:
                 # Nothing survived, so there is no row to add. Adding nothing would
                 # restart an identical tree forever on a point the separator keeps
@@ -1124,6 +1198,11 @@ def solve_milp_with_lazy_cuts(
     # #1634: the master's bound is the OA lower bound; hold it against a presolve-free
     # solve of the final master before it leaves this function.
     time_left = None if time_limit is None else float(time_limit) - (time.time() - t0)
+    if abandoned[0]:
+        # The caller stopped this search to spend its budget elsewhere (see the
+        # docstring): the cross-solve gets none, and the unconfirmed bound is
+        # withdrawn rather than published.
+        time_left = 0.0
     status, bound, cross_diag = _cross_check_lazy_master(
         h, highspy, status, bound, time_left, objective=obj_out
     )
@@ -1140,6 +1219,7 @@ def solve_milp_with_lazy_cuts(
             **counts,
             "terminated": terminated,
             "terminate_context": terminate_context,
+            "abandoned": bool(abandoned[0]),
             "presolve_cross_check": cross_diag,
         },
     )

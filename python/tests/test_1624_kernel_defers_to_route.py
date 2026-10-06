@@ -135,3 +135,21 @@ def test_probe_classification_is_held_to_the_callers_time_limit(monkeypatch):
     assert deadline is not None and t0 < deadline <= time.perf_counter() + 2.0
     for attr in ("_convexity_time_budget", "_solve_deadline", "_convexity_classification_cache"):
         assert not hasattr(m, attr), attr
+
+
+@pytest.mark.parametrize(
+    "env, value",
+    [("DISCOPT_CONVEX_ROUTE_METHOD", "ecp"), ("DISCOPT_CONVEX_ROUTE_OA_MASTER", "auto")],
+)
+def test_route_misconfiguration_raises_on_a_kernel_eligible_model(monkeypatch, env, value):
+    """#1673 review B3: the #1624 pre-check's ``except`` swallowed a misconfigured
+    route on kernel-eligible models (it logged, ran the kernel and answered
+    ``optimal``), while the same setting raised on every other model. A bad
+    setting must raise everywhere."""
+    monkeypatch.delenv("DISCOPT_CONVEX_KERNEL_DEFER_TO_ROUTE", raising=False)
+    monkeypatch.delenv("DISCOPT_CONVEX_KERNEL", raising=False)
+    monkeypatch.delenv("DISCOPT_CONVEX_MINLP_ROUTE", raising=False)
+    monkeypatch.setenv(env, value)
+    assert ck.build_convex_spec(from_nl(_NL)) is not None, "probe must be kernel-eligible"
+    with pytest.raises(ValueError, match=env):
+        from_nl(_NL).solve(time_limit=30)

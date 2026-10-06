@@ -8428,6 +8428,15 @@ def _convex_route_preempts_kernel(
         return None
     if _mip_nlp_ignored_options(option_values):
         return None
+    if _convex_minlp_route_enabled():
+        # #1658 review B3: a misconfigured route is the caller's error, not a
+        # router defect. Read both settings before the ``except`` below, which
+        # would otherwise log ``DISCOPT_CONVEX_ROUTE_METHOD=ecp`` (or a retired
+        # ``DISCOPT_CONVEX_ROUTE_OA_MASTER``) as a fallback, run the kernel, and
+        # answer ``optimal`` -- while the same setting raises on any model the
+        # kernel does not take.
+        _convex_route_method()
+        _convex_route_oa_master()
     saved = {
         a: getattr(model, a, _PROBE_UNSET)
         for a in (

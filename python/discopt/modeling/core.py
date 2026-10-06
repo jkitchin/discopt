@@ -4473,7 +4473,7 @@ class SolveResult:
     # ``None`` means no automatic routing took place — either the caller named a
     # solver explicitly, or the router declined and the default path ran. When
     # populated it is a human-readable reason, e.g.
-    # ``"mip-nlp/oa: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE;
+    # ``"mip-nlp/lp_nlp_bb: minlp certified convex at the root (DISCOPT_CONVEX_MINLP_ROUTE;
     # master=highs)"``.
     algorithm_route: Optional[str] = None
 
@@ -8229,10 +8229,12 @@ class Model:
             "nonconvex model under NLP-BB" warning.
         nlp_bb : bool or None, default None
             Nonlinear Branch & Bound mode. When ``None`` (default), a MINLP
-            certified convex at the root is auto-routed to outer approximation
-            (``solver="mip-nlp"``, ``mip_nlp_method="oa"``; opt out with
-            ``DISCOPT_CONVEX_MINLP_ROUTE=0``); a convex MINLP the route refuses
-            (e.g. the caller set an option OA ignores) falls back to NLP-BB, and
+            certified convex at the root is auto-routed to LP/NLP branch and
+            bound (``solver="mip-nlp"``, ``mip_nlp_method="lp_nlp_bb"`` on the
+            HiGHS master since #1658; ``DISCOPT_CONVEX_ROUTE_METHOD=oa`` selects
+            outer approximation, ``DISCOPT_CONVEX_MINLP_ROUTE=0`` opts out); a
+            convex MINLP the route refuses (e.g. the caller set an option the
+            MIP-NLP family ignores) falls back to NLP-BB, and
             everything else runs spatial B&B. When ``True``, forces NLP-BB
             (heuristic mode if nonconvex) and suppresses the OA auto-route.
             When ``False``, forces spatial B&B.

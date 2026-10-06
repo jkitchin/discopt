@@ -296,13 +296,26 @@ def test_route_fallback_merge_keeps_the_route_masters():
 # ── item 2, continued: LP/NLP-BB on HiGHS, now the route's target ───────────
 
 
-def test_lazy_master_does_not_judge_offers_from_a_stale_tree(monkeypatch):
+def _portfolio_seeded(n, seed, perspective=False):
+    return _portfolio(n=n, seed=seed, perspective=perspective)
+
+
+@pytest.mark.parametrize("n, seed", [(18, 22), (22, 23), (30, 23)])
+def test_lazy_master_does_not_judge_offers_from_a_stale_tree(monkeypatch, n, seed):
     """HiGHS keeps offering improving solutions of a tree whose cut is already
     pending. Judged there, an offer that violates a pending row looked clean to a
     separator that reports only rows it has not emitted, and was accepted: on the
     n=20 big-M portfolio a point with master objective 0.0058 and true objective
     0.0301 (optimum 0.01044) became HiGHS's incumbent, capped the dual bound at
-    0.0058, and LP/NLP-BB came back ``feasible``. Fails before #1658."""
+    0.0058, and LP/NLP-BB came back ``feasible``.
+
+    Fail-before is timing-dependent: whether HiGHS offers a stale point depends on
+    where its interrupt polls land. On ``main`` at 1d9d27ac, on the Linux CI-class
+    container this was written on, all three instances here (and 9 more of the
+    family) return ``feasible`` with the bound capped, 2/2 runs each; a macOS run
+    certified the n=20 seed-21 case on ``main`` (review of #1673). The status
+    assertions catch the defect where it shows; the ``stale_offers`` counter is
+    the probe that the guard fired on every platform (CLAUDE.md §6)."""
     from discopt.solvers.mip_nlp import solve_mip_nlp
 
     seen = []
@@ -317,16 +330,50 @@ def test_lazy_master_does_not_judge_offers_from_a_stale_tree(monkeypatch):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         r = solve_mip_nlp(
-            _portfolio(n=20, perspective=False),
+            _portfolio_seeded(n, seed),
             method="lp_nlp_bb",
             milp_solver="highs",
             time_limit=60,
         )
     assert r.status == "optimal" and r.gap_certified, (r.status, r.objective, r.bound)
-    assert r.objective == pytest.approx(0.0104420249, rel=1e-6)
     assert r.bound <= r.objective
-    # Probe fired (CLAUDE.md §6): the guard declined at least one stale offer.
     assert seen and sum(int(s.get("stale_offers", 0)) for s in seen) >= 1, seen
+
+
+def test_hook_stop_does_not_spend_the_budget_on_the_cross_check():
+    """#1673 review B2: when the caller's termination hook stops the lazy master
+    (the #1066 guard handing over to the fallback), the #1634 cross-solve must not
+    run on the route's remaining budget -- on rsyn0815m03m it ran 17.0 s -> 26.2 s
+    of a 30 s limit and the fallback overran to 36.3 s. The bound it would have
+    confirmed is withdrawn instead."""
+    import time
+
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    calls = []
+
+    def hook(ctx):
+        calls.append(ctx["elapsed"])
+        return True
+
+    t = time.perf_counter()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = solve_mip_nlp(
+            _portfolio(n=20, perspective=True),
+            method="lp_nlp_bb",
+            milp_solver="highs",
+            time_limit=60,
+            mip_nlp_options={"termination_hook": hook},
+        )
+    wall = time.perf_counter() - t
+    assert calls, "the hook was never consulted"
+    stats = r.mip_nlp_trace["summary"]["callback_stats"]
+    assert stats["abandoned"] is True
+    assert stats["presolve_cross_check"].get("ran") is not True
+    assert "no time budget" in str(stats["presolve_cross_check"].get("withdrawn"))
+    assert r.status != "optimal" and not r.gap_certified
+    assert wall < 20.0, wall
 
 
 @pytest.mark.parametrize("perspective", [False, True], ids=["big_m", "perspective"])
@@ -352,7 +399,14 @@ def test_lazy_cut_rows_below_unit_norm_are_lifted_exactly():
     coeffs = np.array([5.5e-5, -2.0e-5, 0.0, 1.0e-6])
     rhs = 3.0e-5
     lb, ub = np.zeros(4), np.ones(4)
-    idx, vals, row_rhs = milp_highs._prepare_cut_row(coeffs, rhs, lb, ub, 1e-9, 1e15)
+    # Off by default: the whole-model fitting that serves the OA/GOA/GDP
+    # masters (``_stack_rows``) does not lift, so those masters are unchanged.
+    _, vals0, rhs0 = milp_highs._prepare_cut_row(coeffs, rhs, lb, ub, 1e-9, 1e15)
+    np.testing.assert_array_equal(vals0, coeffs[np.flatnonzero(coeffs)])
+    assert rhs0 == rhs
+    idx, vals, row_rhs = milp_highs._prepare_cut_row(
+        coeffs, rhs, lb, ub, 1e-9, 1e15, lift_to_unit=True
+    )
     scale = vals[0] / coeffs[idx[0]]
     mant, _ = np.frexp(scale)
     assert mant == 0.5  # an exact power of two: the same inequality bit-for-bit
@@ -361,7 +415,7 @@ def test_lazy_cut_rows_below_unit_norm_are_lifted_exactly():
     assert row_rhs == rhs * scale
     # A row already at unit norm is untouched.
     idx1, vals1, rhs1 = milp_highs._prepare_cut_row(
-        np.array([1.5, -0.25]), 2.0, np.zeros(2), np.ones(2), 1e-9, 1e15
+        np.array([1.5, -0.25]), 2.0, np.zeros(2), np.ones(2), 1e-9, 1e15, lift_to_unit=True
     )
     np.testing.assert_array_equal(vals1, [1.5, -0.25])
     assert rhs1 == 2.0
@@ -410,3 +464,41 @@ def test_lp_nlp_bb_never_certifies_an_unverified_incumbent():
         assert not unverified
     else:
         assert verdict.ok or unverified, verdict.reason
+
+
+def test_lazy_master_separates_a_final_solution_no_callback_judged(monkeypatch):
+    """HiGHS does not route every solution through its improving-solution
+    callback (one found in presolve/postsolve is never offered), so a tree could
+    finish ``optimal`` on a point the separator never saw. ``tls2`` with rows
+    scaled by 10^U(-6,6), under #1667's presolve rules: the master finished at
+    4.3 with the separator's only accepted point at 5.3 (optimum 5.3), and
+    LP/NLP-BB returned ``feasible``. The final solution is now separated when it
+    beats the best accepted point."""
+    import pathlib
+    import sys
+
+    sys.path.insert(0, str(pathlib.Path(__file__).parent))
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+    from test_1537_row_scaling import _per_row_scaled
+
+    seen = []
+    real = milp_highs.solve_milp_with_lazy_cuts
+
+    def _spy(*a, **kw):
+        r = real(*a, **kw)
+        seen.append(dict(r.callback_stats or {}))
+        return r
+
+    monkeypatch.setattr(milp_highs, "solve_milp_with_lazy_cuts", _spy)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = solve_mip_nlp(
+            _per_row_scaled("tls2.nl", 6.0),
+            method="lp_nlp_bb",
+            milp_solver="highs",
+            time_limit=60,
+        )
+    assert r.status == "optimal" and r.gap_certified, (r.status, r.objective, r.bound)
+    assert r.objective == pytest.approx(5.3, rel=1e-6)
+    assert r.bound <= r.objective + 1e-9
+    assert seen and sum(int(s.get("final_offers", 0)) for s in seen) >= 1, seen
