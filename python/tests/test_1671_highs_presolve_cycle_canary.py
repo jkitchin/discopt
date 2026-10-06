@@ -66,7 +66,8 @@ _SPARSIFY = 1 << 14  # kPresolveRuleSparsify, the #1667 workaround
 
 PROBE = textwrap.dedent(
     """\
-    import sys, highspy
+    import os, sys, highspy
+    os.nice(19)  # the cycling arm spins a core for KILL_AFTER s; yield it to other tests
     h = highspy.Highs()
     h.setOptionValue("output_flag", False)
     h.setOptionValue("time_limit", 5.0)
