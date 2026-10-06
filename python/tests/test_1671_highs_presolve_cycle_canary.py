@@ -30,6 +30,15 @@ A full ``run()`` behaves the same way: on 1.15.1 it is still running long after 
 5 s. On ``latest``, every arm reaches that optimum in about 3 s, and main's route
 (sparsify on) certifies ``optimal`` 450623.7692 in 11 s.
 
+The upstream change that stops the cycle was found by a first-parent ``git bisect`` of
+the HiGHS ``latest`` branch, 04024d7..8a5f9c1d8, running the ``highs`` CLI on this file
+with ``--time_limit 20`` and killing it at 60 s. The first commit that is ``Optimal`` is
+6c6282ba3, the merge of ERGO-Code/HiGHS PR 2962 ("Remove continuous singletons from
+double-sided rows", 2026-08-25); its first parent f7b87ae01 is still killed. That PR
+adds a presolve reduction and does not touch the loop's polling. It may remove the
+rows the cycle needs on this model without fixing the loop itself. So the re-measure
+this test asks for has to include the sparsify panel, and not only this file.
+
 The probe is ``presolve()`` alone, which finishes in under 0.2 s whenever it
 terminates. Each arm therefore runs in a subprocess that is killed after
 ``KILL_AFTER`` seconds, 50x that. The sparsify-off arm is the positive control: it
@@ -109,9 +118,10 @@ def test_highs_presolve_still_cycles_on_the_1667_handoff(handoff_mps):
     if cycling is not None:
         pytest.fail(
             f"HiGHS {githash} no longer cycles in presolve on the #1667 hand-off with "
-            f"sparsify ON (returned {cycling}). The upstream bug behind #1671 is fixed in "
-            "the installed HiGHS. Re-measure the sparsify panel from the #1667 PR on this "
-            "HiGHS, then either drop _PRESOLVE_RULE_SPARSIFY from "
+            f"sparsify ON (returned {cycling}). The installed HiGHS no longer hits the "
+            "upstream bug behind #1671 here (bisected to ERGO-Code/HiGHS PR 2962). "
+            "Re-measure the sparsify panel from the #1667 PR on this HiGHS, then "
+            "either drop _PRESOLVE_RULE_SPARSIFY from "
             "lp_milp_highs.MILP_PRESOLVE_RULE_OFF or keep it as a documented opt-out, "
             "and update or retire this test."
         )
