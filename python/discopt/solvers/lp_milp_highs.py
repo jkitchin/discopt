@@ -633,9 +633,16 @@ EXACT_MAX_TOTAL_WORK = 2 * EXACT_MAX_WORK
 _EPS = float(np.finfo(np.float64).eps)
 
 
-def fbbt_box(sf: StdForm, k: Optional[int] = None) -> StdForm:
+def fbbt_box(sf: StdForm, k: Optional[int] = None, open_limit: float = INF) -> StdForm:
     """``sf`` with the open bound sides of its first ``k`` columns (default: all) replaced
     by finite sides implied by ``A[:, :k] x = b`` and the declared box.
+
+    A side is *open* when its magnitude is at least ``open_limit``. The default is the
+    ``1e20`` sentinel, which every certificate caller uses. #1678 passes
+    ``READBACK_LIMIT``, so a declared huge finite side such as the default
+    ``±9.999e19`` box also counts as open. Such a side is then left out of the
+    activity sums, which only loosens them. It is replaced only by a strictly tighter
+    derived side.
 
     With ``k = n`` the box contains ``{A x = b, xl <= x <= xu}``, so an NS bound or a
     Farkas proof over it holds for the declared problem. With ``k < n`` it contains the
@@ -654,8 +661,9 @@ def fbbt_box(sf: StdForm, k: Optional[int] = None) -> StdForm:
     if vals.size == 0:
         return sf
     m = sf.m
-    lb = np.where(sf.xl[:kk] <= -INF, -np.inf, sf.xl[:kk])
-    ub = np.where(sf.xu[:kk] >= INF, np.inf, sf.xu[:kk])
+    lim = float(open_limit)
+    lb = np.where(sf.xl[:kk] <= -lim, -np.inf, sf.xl[:kk])
+    ub = np.where(sf.xu[:kk] >= lim, np.inf, sf.xu[:kk])
     pos = vals > 0.0
     b_r = sf.b[rows]
     slack_r = (np.bincount(rows, minlength=m)[rows] + 8.0) * _EPS
@@ -699,8 +707,14 @@ def fbbt_box(sf: StdForm, k: Optional[int] = None) -> StdForm:
         if not moved.any():
             break
     xl, xu = sf.xl.copy(), sf.xu.copy()
-    xl[:kk] = np.where((sf.xl[:kk] <= -INF) & np.isfinite(lb), lb, sf.xl[:kk])
-    xu[:kk] = np.where((sf.xu[:kk] >= INF) & np.isfinite(ub), ub, sf.xu[:kk])
+    # A sentinel side takes any finite derived side (the certificate callers' rule); a
+    # declared huge finite side only a tighter one.
+    xl0, xu0 = sf.xl[:kk], sf.xu[:kk]
+    with np.errstate(invalid="ignore"):
+        take_l = (xl0 <= -lim) & np.isfinite(lb) & ((xl0 <= -INF) | (lb > xl0))
+        take_u = (xu0 >= lim) & np.isfinite(ub) & ((xu0 >= INF) | (ub < xu0))
+    xl[:kk] = np.where(take_l, lb, xl0)
+    xu[:kk] = np.where(take_u, ub, xu0)
     return dataclasses.replace(sf, xl=xl, xu=xu)
 
 
@@ -1848,7 +1862,9 @@ def _scale_logicals(sf: StdForm, f: np.ndarray) -> StdForm:
 _COEF_TIGHTEN_SAFETY = 8.0
 
 
-def coefficient_tightened(sf: StdForm) -> tuple[Optional[StdForm], int]:
+def coefficient_tightened(
+    sf: StdForm, *, implied_bounds: bool = False
+) -> tuple[Optional[StdForm], int]:
     """``sf`` with every binary's big-M coefficient shrunk to its row's activity bound.
 
     #1654: the classic MIP coefficient tightening (Savelsbergh 1994; Achterberg 2007
@@ -1875,15 +1891,33 @@ def coefficient_tightened(sf: StdForm) -> tuple[Optional[StdForm], int]:
     unbounded or sentinel-magnitude column has no finite activity bound and is left
     alone; ranged and equality rows are left alone. Returns ``(form, n_rewritten)``,
     ``form`` ``None`` when nothing changed.
+
+    ``implied_bounds`` (#1678, ``DISCOPT_MILP_IMPLIED_BOUNDS``) first gives every
+    non-logical column with an open side (magnitude ``>= READBACK_LIMIT``, which
+    includes the default ``±9.999e19`` box) the finite side implied by the rows,
+    using the outward-rounded FBBT of :func:`fbbt_box`. On facility location with
+    ``x`` left at the default bound, ``x_ij <= d_j`` follows from the demand equality,
+    and the big-M rows become tightenable. The tightened form DECLARES that box
+    ``B``. Every feasible point of ``sf`` lies in ``B``, and ``B`` lies inside the
+    declared box. Over ``B`` each rewritten row has the same integer restrictions as
+    before. So the tightened form has exactly ``sf``'s integer-feasible set. If the
+    implied box is empty, nothing is rewritten and the route decides the instance.
     """
     if not sf.int_idx.size or sf.A.nnz == 0:
         return None, 0
+    logical = _logical_columns(sf)
+    xl, xu = sf.xl, sf.xu
+    if implied_bounds:
+        ib = fbbt_box(sf, open_limit=READBACK_LIMIT)
+        xl = np.where(logical, sf.xl, ib.xl)
+        xu = np.where(logical, sf.xu, ib.xu)
+        if np.any(xl > xu):
+            return None, 0
     is_bin = np.zeros(sf.n, dtype=bool)
     ii = sf.int_idx
-    is_bin[ii[(sf.xl[ii] == 0.0) & (sf.xu[ii] == 1.0)]] = True
+    is_bin[ii[(xl[ii] == 0.0) & (xu[ii] == 1.0)]] = True
     if not is_bin.any():
         return None, 0
-    logical = _logical_columns(sf)
     csc = sp.csc_matrix(sf.A)
     # row -> its logical column (exactly one per one-sided inequality row)
     row_logical = np.full(sf.m, -1, dtype=np.int64)
@@ -1892,7 +1926,7 @@ def coefficient_tightened(sf: StdForm) -> tuple[Optional[StdForm], int]:
         i = int(csc.indices[csc.indptr[j]])
         row_logical[i] = j
         n_log[i] += 1
-    finite_box = (np.abs(sf.xl) < READBACK_LIMIT) & (np.abs(sf.xu) < READBACK_LIMIT)
+    finite_box = (np.abs(xl) < READBACK_LIMIT) & (np.abs(xu) < READBACK_LIMIT)
     A = sp.csr_matrix(sf.A, copy=True)  # noqa: N806
     A.sort_indices()
     b = sf.b.copy()
@@ -1925,7 +1959,7 @@ def coefficient_tightened(sf: StdForm) -> tuple[Optional[StdForm], int]:
                 continue
             g = sgn * A.data[others]
             cj = A.indices[others]
-            terms = np.maximum(g * sf.xl[cj], g * sf.xu[cj])
+            terms = np.maximum(g * xl[cj], g * xu[cj])
             gk = sgn * float(A.data[kq])
             maxact_rest = float(terms.sum()) - max(gk, 0.0)
             scale = float(np.abs(terms).sum()) + abs(U) + abs(gk)
@@ -1946,7 +1980,7 @@ def coefficient_tightened(sf: StdForm) -> tuple[Optional[StdForm], int]:
     if not n_rewritten:
         return None, 0
     return (
-        StdForm.from_arrays(sf.c, sp.csc_matrix(A), b, sf.xl, sf.xu, sf.obj_const, sf.int_idx),
+        StdForm.from_arrays(sf.c, sp.csc_matrix(A), b, xl, xu, sf.obj_const, sf.int_idx),
         n_rewritten,
     )
 
@@ -1960,6 +1994,22 @@ def _coef_tighten_enabled() -> bool:
     pre-#1654 route reachable for A/B measurement.
     """
     return os.environ.get("DISCOPT_MILP_COEF_TIGHTEN", "1") != "0"
+
+
+def _implied_bounds_enabled() -> bool:
+    """``DISCOPT_MILP_IMPLIED_BOUNDS`` (#1678, default ON; ``=0`` restores the #1654
+    tightening over the declared box only).
+
+    Gives open columns their row-implied bounds before the #1654 tightening
+    (:func:`coefficient_tightened`). It is bound-changing because it changes the
+    tightened LP on a class the #1654 panel did not cover: big-M rows over columns left
+    at the default box. It was graduated on introduction by the §5 panel recorded in
+    ``docs/dev/issue-1678-implied-bounds-panel-2026-10-10.md``. On the open-box
+    families, certified went from 39/100 to 63/100. The #1654 families and the HiGHS
+    check set were unchanged, apart from one extra certificate (2122). There were 0
+    soundness violations and 0 certification regressions.
+    """
+    return os.environ.get("DISCOPT_MILP_IMPLIED_BOUNDS", "1") != "0"
 
 
 def _coefficient_tightening_rescue(
@@ -1977,7 +2027,7 @@ def _coefficient_tightening_rescue(
     below its bound refutes it. Anything less returns the primary, improved at most by
     a better verified incumbent.
     """
-    sf_ct, n_rw = coefficient_tightened(sf)
+    sf_ct, n_rw = coefficient_tightened(sf, implied_bounds=_implied_bounds_enabled())
     if sf_ct is None:
         return out
     out.stats["milp/coef_tightened_entries"] = float(n_rw)
