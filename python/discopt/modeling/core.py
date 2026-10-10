@@ -4431,6 +4431,14 @@ class SolveResult:
     # never load-bearing, like ``kkt``.
     solve_report: Optional[dict[str, Any]] = None
 
+    # POUNCE qp-ipm's final primal-dual iterate (``x``, ``y``, ``z``, ``z_lb``,
+    # ``z_ub`` in the objective units the engine was handed, rows in the order the
+    # ``solver="pounce"`` QP route built them) -- set only by that route (#1679).
+    # ``solve(warm_start=...)`` forwards it so the next qp-ipm solve starts from the
+    # full iterate instead of from ``x`` alone. Seeds an iteration; never changes a
+    # verdict.
+    pounce_qp_iterate: Optional[dict[str, np.ndarray]] = None
+
     # Witness for an infeasible result, when the backend computed one. An
     # ``InfeasibilityCertificate`` (per-row minimal constraint violations, in
     # LP-row order) for LPs solved via the POUNCE engine; None otherwise.
@@ -8684,6 +8692,9 @@ class Model:
                 "bound_duals_lower": bound_duals_from_result(self, warm_start.bound_duals_lower),
                 "bound_duals_upper": bound_duals_from_result(self, warm_start.bound_duals_upper),
                 "barrier_parameter": (warm_start.kkt or {}).get("barrier_parameter"),
+                # #1679: the qp-ipm arm of solver="pounce" seeds from the engine's
+                # own iterate; the named duals above are in a different row order.
+                "pounce_qp_iterate": warm_start.pounce_qp_iterate,
             }
 
         # Pre-solve LLM analysis (advisory only, never blocks solving)

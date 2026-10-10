@@ -90,13 +90,16 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any, List, Optional, Tuple, Union
 
 import numpy as np
 import scipy.sparse as sp
 
-from discopt._relax.convexity.eigenvalue import exact_psd as _exact_psd
+from discopt._relax.convexity import eigenvalue as _eig
+from discopt._relax.convexity.eigenvalue import exact_psd as _exact_psd  # noqa: F401 (re-export)
+from discopt._relax.convexity.eigenvalue import psd_certified
 from discopt.solvers import LPResult, QPResult, SolveStatus
 from discopt.solvers.lp_pounce import (
     _INF,
@@ -128,30 +131,13 @@ class IndefiniteQPError(ValueError):
     """
 
 
-#: Up to this many quadratically-active variables :func:`certify_psd` decides PSD
-#: by the exact rational test with no budget. Rational entries grow during
-#: elimination of a dense full-rank matrix, so the cost is steep: measured on dense
-#: random ``A'A``, 0.16 s at n=30, 3.3 s at 60, 228 s at 150.
-_EXACT_PSD_MAX_N = 30
-
-#: Above :data:`_EXACT_PSD_MAX_N`, a Hessian with at most this many nonzeros per
-#: active row (on average) is still decided exactly, by the sparse elimination
-#: under :data:`_EXACT_PSD_UPDATE_BUDGET` (#1616). These are the matrices the
-#: eigenvalue margin cannot prove: a singular PSD Hessian such as a graph Laplacian
-#: (``sum (x[i+1]-x[i])**2``, ``lambda_min = 0`` exactly) fails any margin
-#: ``lambda_min >= K*eps*||Q||``, and such Hessians are typically sparse with little
-#: fill. Denser matrices go straight to the eigenvalue test, as before.
-_EXACT_PSD_SPARSE_ROW_NNZ = 8
-
-#: Deterministic work budget (exact rational multiply-subtract updates) for the
-#: sparse exact elimination above :data:`_EXACT_PSD_MAX_N`. An operation count,
-#: never a wall-clock limit, so the route a model takes does not depend on machine
-#: load. Exhausting it means "not decided exactly", never "PSD".
-_EXACT_PSD_UPDATE_BUDGET = 500_000
-
-#: Above this many quadratically-active variables the dense eigenvalue test is not
-#: run at all; only the sparse exact elimination can prove such a Hessian PSD.
-_EIG_PSD_MAX_N = 4000
+#: The thresholds of :func:`certify_psd`, which since #1679 live with the shared
+#: predicate :func:`~discopt._relax.convexity.eigenvalue.psd_certified` (see the
+#: constants there for the measurements behind them). Aliased, not copied.
+_EXACT_PSD_MAX_N = _eig.PSD_CERT_EXACT_MAX_N
+_EXACT_PSD_SPARSE_ROW_NNZ = _eig.PSD_CERT_SPARSE_ROW_NNZ
+_EXACT_PSD_UPDATE_BUDGET = _eig.PSD_PROVED_EXACT_BUDGET
+_EIG_PSD_MAX_N = _eig.PSD_CERT_EIG_MAX_N
 
 
 def certify_psd(Q: np.ndarray) -> bool:
@@ -163,62 +149,49 @@ def certify_psd(Q: np.ndarray) -> bool:
     convex IPM then stops at a saddle and the route would certify it ``optimal``.
     So convexity is decided here, before the QP arm can label anything optimal.
 
-    Rows and columns that are identically zero (variables appearing only linearly)
-    are dropped first. Up to :data:`_EXACT_PSD_MAX_N` remaining variables the test
-    is exact (:func:`_exact_psd`). Beyond that, a sparse Hessian (at most
-    :data:`_EXACT_PSD_SPARSE_ROW_NNZ` nonzeros per row on average) is still decided
-    exactly under a deterministic work budget, at any size (#1616) -- this proves
-    singular PSD Hessians (graph Laplacians) that no floating-point margin can.
-    Otherwise, or when that budget runs out, the computed minimum eigenvalue must
-    clear the scale-carrying roundoff margin ``K * eps * ||Q||_2`` the repo already
-    uses for this purpose (``solver._CONVEX_OBJ_PSD_EIG_ROUNDOFF_K``, #1397); a
-    matrix that does not is treated as unproved, never as PSD.
+    #1679: this is :func:`discopt._relax.convexity.eigenvalue.psd_certified`, the
+    same predicate the exact QP objective certificate behind ``Model.convexity()``
+    and the default solver's convex fast path use, so the two can no longer
+    disagree on a Hessian (they did: ``m.convexity()`` accepted the float Gram
+    matrix of a rank-deficient least-squares model -- indefinite in exact
+    arithmetic -- that this proof refused). See that function for the procedure.
     """
-    if sp.issparse(Q):
-        # #1619 A-22: the same test without ever forming the dense (n, n) matrix;
-        # only the active block reaches the eigenvalue fallback, densified there.
-        Qs = sp.csr_matrix(Q, dtype=np.float64)
-        if not np.all(np.isfinite(Qs.data)):
-            return False
-        Ss = (0.5 * (Qs + Qs.T)).tocsr()
-        Ss.eliminate_zeros()
-        active = np.flatnonzero(np.diff(Ss.indptr) > 0)
-        if active.size == 0:
-            return True
-        Ss = Ss[active][:, active]
-        n = Ss.shape[0]
-        if n <= _EXACT_PSD_MAX_N:
-            return bool(_exact_psd(Ss))
-        if Ss.nnz <= _EXACT_PSD_SPARSE_ROW_NNZ * n:
-            exact = _exact_psd(Ss, budget=_EXACT_PSD_UPDATE_BUDGET)
-            if exact is not None:
-                return exact
-        if n > _EIG_PSD_MAX_N:
-            return False
-        S = Ss.toarray()
-    else:
-        Q = np.asarray(Q, dtype=np.float64)
-        if not np.all(np.isfinite(Q)):
-            return False
-        S = 0.5 * (Q + Q.T)
-        active = np.flatnonzero(np.any(S != 0.0, axis=1))
-        S = S[np.ix_(active, active)]
-        if S.size == 0:
-            return True
-        n = S.shape[0]
-        if n <= _EXACT_PSD_MAX_N:
-            return bool(_exact_psd(S))
-        if np.count_nonzero(S) <= _EXACT_PSD_SPARSE_ROW_NNZ * n:
-            exact = _exact_psd(S, budget=_EXACT_PSD_UPDATE_BUDGET)
-            if exact is not None:
-                return exact
-        if n > _EIG_PSD_MAX_N:
-            return False
-    from discopt.solver import _CONVEX_OBJ_PSD_EIG_ROUNDOFF_K
+    return psd_certified(Q)
 
-    eigs = np.linalg.eigvalsh(S)
-    margin = _CONVEX_OBJ_PSD_EIG_ROUNDOFF_K * np.finfo(np.float64).eps * float(np.max(np.abs(eigs)))
-    return bool(eigs.min() >= margin)
+
+#: The iterate blocks ``pounce.qp.solve_qp(warm_start=...)`` reads: the primal
+#: point, the equality (``y``) and inequality (``z``) multipliers, and the lower /
+#: upper bound multipliers.
+_WARM_START_KEYS = ("x", "y", "z", "z_lb", "z_ub")
+
+
+def _warm_start_arrays(warm_start: Any, n: int, n_eq: int, n_ub: int) -> dict:
+    """``warm_start`` (a primal array, or a mapping over :data:`_WARM_START_KEYS`)
+    as validated float arrays in the caller's units (#1615 B-01b, #1679).
+
+    POUNCE silently ignores a start whose dimensions do not match, so a mismatch is
+    refused here instead -- including a multiplier block, which would otherwise be
+    dropped while the call appears to have used it.
+    """
+    if isinstance(warm_start, Mapping):
+        unknown = sorted(set(warm_start) - set(_WARM_START_KEYS))
+        if unknown:
+            raise ValueError(f"warm_start has keys {unknown}; it accepts {list(_WARM_START_KEYS)}")
+        if warm_start.get("x") is None:
+            raise ValueError("a warm_start mapping needs the primal point 'x'")
+        items = {k: v for k, v in warm_start.items() if v is not None}
+    else:
+        items = {"x": warm_start}
+    sizes = {"x": n, "y": n_eq, "z": n_ub, "z_lb": n, "z_ub": n}
+    out = {}
+    for k, v in items.items():
+        arr = np.asarray(v, dtype=np.float64).ravel()
+        if arr.shape != (sizes[k],):
+            raise ValueError(f"warm_start[{k!r}] has {arr.size} entries; this QP needs {sizes[k]}")
+        if not np.all(np.isfinite(arr)):
+            raise ValueError(f"warm_start[{k!r}] has non-finite entries")
+        out[k] = arr
+    return out
 
 
 def convex_engine_options(options: Optional[dict]) -> dict:
@@ -233,6 +206,18 @@ def convex_engine_options(options: Optional[dict]) -> dict:
     # ``qp_presolve``, ``qp_hsde``, ...) are POUNCE options file / CLI options that
     # ``pounce.qp.solve_qp`` exposes no argument for, so no discopt call can set
     # them. Say where they do work rather than lump them in with NLP options.
+    # #1679: some ``qp_*`` CLI options *are* reachable -- ``pounce.qp.solve_qp`` takes
+    # ``qp_tau`` / ``qp_tau_max`` as ``tau`` / ``tau_max``, and discopt forwards
+    # those. Name the spelling that works instead of claiming there is none.
+    renamed = {k: k[3:] for k in unknown if k.startswith("qp_") and k[3:] in CONVEX_OPTION_KEYS}
+    if renamed:
+        spelled = ", ".join(f"{k!r} -> {v!r}" for k, v in sorted(renamed.items()))
+        raise ValueError(
+            f"pounce_options {sorted(renamed)} are the POUNCE command-line spellings of "
+            f"options that pounce.qp.solve_qp, which solver='pounce' calls for this "
+            f"model, takes under another name. Pass them as: {spelled}. Refused rather "
+            f"than silently renamed. That engine accepts {sorted(CONVEX_OPTION_KEYS)}."
+        )
     cli_only = [k for k in unknown if k.startswith("qp_")]
     if cli_only:
         raise ValueError(
@@ -470,7 +455,7 @@ def _solve(
     time_limit: Optional[float],
     options: Optional[dict],
     solve_report: bool = False,
-    x0: Optional[np.ndarray] = None,
+    start: Optional[dict] = None,
 ) -> Tuple[
     str,
     Any,
@@ -543,11 +528,15 @@ def _solve(
     # #1658: the caller's ``tol`` first (module docstring, "Objective scale"); the
     # ``tol*sigma`` re-solve, warm-started from that point, only when it fails the
     # caller-unit test.
-    raw = _run(
-        opts.get("tol"),
-        None if x0 is None else {"x": np.asarray(x0, dtype=np.float64)},
-        limit,
-    )
+    # ``start`` is in the caller's units; the engine solves ``sigma * objective``, so
+    # its multipliers are ``sigma`` times the caller's (``x`` does not depend on it).
+    warm0 = None
+    if start is not None:
+        warm0 = {
+            k: np.asarray(v, dtype=np.float64) * (1.0 if k == "x" else sigma)
+            for k, v in start.items()
+        }
+    raw = _run(opts.get("tol"), warm0, limit)
     res = _unscale_result(raw, sigma)
     if (
         sigma != 1.0
@@ -742,15 +731,18 @@ def solve_qp(
     gap_tolerance: float = 1e-4,
     options: Optional[dict] = None,
     solve_report: bool = False,
-    warm_start: Optional[np.ndarray] = None,
+    warm_start: Union[np.ndarray, Mapping, None] = None,
 ) -> QPResult:
     """Solve ``min ½x'Qx + c'x`` s.t. linear rows with POUNCE's qp-ipm.
 
     ``bounds`` default to free variables (the shared QP contract).
     ``solve_report=True`` attaches the solve's ``pounce.solve-report/v1``
-    document as ``QPResult.solve_report`` (#1534). ``warm_start`` is a primal
-    point of length ``n`` that seeds the interior-point iteration (#1615 B-01b);
-    it never changes the answer.
+    document as ``QPResult.solve_report`` (#1534). ``warm_start`` seeds the
+    interior-point iteration and never changes the answer: a primal point of
+    length ``n`` (#1615 B-01b), or a mapping with ``x`` and any of the
+    multiplier blocks ``y`` (``A_eq`` rows), ``z`` (``A_ub`` rows), ``z_lb``,
+    ``z_ub`` in the caller's objective units -- e.g. a previous result's
+    :attr:`QPResult.warm_start_state` (#1679).
 
     Raises:
         IndefiniteQPError: ``Q`` is not PSD (POUNCE's own check).
@@ -773,14 +765,13 @@ def solve_qp(
             "convex QP IPM may not certify its answer."
         )
     lb, ub = _engine_box(bounds, n, default_lb=-np.inf)
-    x0 = None
+    start = None
     if warm_start is not None:
-        x0 = np.asarray(warm_start, dtype=np.float64).ravel()
-        if x0.shape != (n,):
-            # POUNCE silently ignores a mismatched start; refuse it here instead.
-            raise ValueError(f"warm_start has {x0.size} entries for a QP with {n} variables")
+        n_eq = 0 if A_eq is None or b_eq is None else int(A_eq.shape[0])
+        n_ub = 0 if A_ub is None or b_ub is None else int(A_ub.shape[0])
+        start = _warm_start_arrays(warm_start, n, n_eq, n_ub)
     raw, res, wall, A, cl, cu, report = _solve(
-        Q_arr, c_arr, A_ub, b_ub, A_eq, b_eq, lb, ub, time_limit, options, solve_report, x0
+        Q_arr, c_arr, A_ub, b_ub, A_eq, b_eq, lb, ub, time_limit, options, solve_report, start
     )
     iters = int(res.iters)
     # ``optimal_inaccurate`` is the engine's own ``optimal`` iterate re-judged on its
@@ -823,4 +814,9 @@ def solve_qp(
         kkt_error=res.kkt_error,
         solve_report=report,
         message="" if raw == "optimal" else f"the engine reported {raw!r}",
+        warm_start_state={
+            k: np.array(v, dtype=np.float64)
+            for k in _WARM_START_KEYS
+            if (v := getattr(res, k, None)) is not None
+        },
     )

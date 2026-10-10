@@ -86,6 +86,7 @@ from discopt.solvers import (
     pounce_option_defaults,
 )
 from discopt.solvers import _gap as _gap_mod
+from discopt.solvers._pounce_report import report_in_model_sense as _report_in_model_sense
 from discopt.validation.feasibility import (
     SMALL_ROW_ABS_FLOOR as _validation_small_row_abs_floor,
 )
@@ -22875,6 +22876,11 @@ def _solve_continuous(
     obj_val = nlp_result.objective
     if obj_val is not None and model._objective.sense == ObjectiveSense.MAXIMIZE:
         obj_val = -obj_val
+    # #1679: the evaluator carries the whole objective (constant included) but
+    # minimizes ``-f`` for a MAXIMIZE model, so the report gets only the sign flip.
+    _report_in_model_sense(
+        nlp_result.solve_report, 0.0, model._objective.sense == ObjectiveSense.MAXIMIZE
+    )
 
     constraint_duals = _unpack_constraint_duals(evaluator, nlp_result.multipliers)
     bound_duals_lower = _unpack_bound_duals(model, nlp_result.bound_multipliers_lower)
@@ -23414,6 +23420,13 @@ def _solve_pounce_route(
             _ip = np.asarray(initial_point, dtype=np.float64).ravel()
             if _ip.size == n_flat and np.all(np.isfinite(_ip)):
                 qp_x0 = _ip
+        # #1679: ``warm_start=<previous result>`` also carries qp-ipm's own final
+        # iterate, multipliers included; ``initial_solution`` is a point only.
+        # Measured (pounce.qp, a feasible MPC neighbour): 10 iterations from ``x``
+        # alone, 1 from the full iterate.
+        qp_iterate_start = (
+            (warm_start or {}).get("pounce_qp_iterate") if qp_x0 is not None else None
+        )
         _dropped_starts = (
             []
             if qp_x0 is not None
@@ -23470,6 +23483,7 @@ def _solve_pounce_route(
                     relaxes_huge_bounds=True,
                     reject_reason=reject_reason,
                     x0=qp_x0,
+                    iterate_start=qp_iterate_start,
                     sparse=True,
                 )
         except _cvx.IndefiniteQPError as exc:
@@ -23500,6 +23514,7 @@ def _solve_pounce_route(
                     relaxes_huge_bounds=True,
                     reject_reason=reject_reason,
                     x0=qp_x0,
+                    iterate_start=qp_iterate_start,
                     sos_lift=lift,
                     sparse=True,
                 )
@@ -27568,6 +27583,15 @@ def _solve_lp_matrix(
         logger.debug("%s LP solve failed: %s", engine, e)
         return None
 
+    # #1679: the backend never saw ``obj_const`` or the MAXIMIZE flip; put its solve
+    # report (if it wrote one) in the units ``SolveResult.objective`` uses.
+    assert model._objective is not None
+    _report_in_model_sense(
+        getattr(result, "solve_report", None),
+        float(lp_data.obj_const),
+        model._objective.sense == ObjectiveSense.MAXIMIZE,
+    )
+
     wall_time = time.perf_counter() - t_start
 
     if result.status == SolveStatus.OPTIMAL:
@@ -28809,6 +28833,7 @@ def _solve_qp_matrix(
     x0: np.ndarray | None = None,
     sos_lift: tuple | None = None,
     sparse: bool = False,
+    iterate_start: dict | None = None,
 ) -> SolveResult | None:
     """Solve a QP/MIQP through a matrix-form ``solve_qp`` backend.
 
@@ -28832,7 +28857,10 @@ def _solve_qp_matrix(
 
     ``x0``, a primal point over the model's flattened variables, is forwarded as
     ``warm_start=`` -- only to a backend that takes one (POUNCE qp-ipm, #1615
-    B-01b); the caller passes it only then.
+    B-01b); the caller passes it only then. ``iterate_start`` is a previous
+    solve's :attr:`SolveResult.pounce_qp_iterate`; its multiplier blocks join the
+    start when every one of them matches this problem's row and column counts (the
+    same model, possibly with changed data), and are dropped otherwise (#1679).
 
     ``sos_lift`` is a continuous objective's
     :func:`~discopt._relax.convexity.patterns.weighted_affine_square_decomposition`
@@ -28945,6 +28973,23 @@ def _solve_qp_matrix(
         if "warm_start" in start_kw:
             ws = start_kw["warm_start"]
             start_kw["warm_start"] = np.concatenate([ws, A_l @ ws + b_l])
+    if iterate_start and "warm_start" in start_kw:
+        n_s_cols = len(c_s)
+        want = {
+            "y": 0 if A_eq_s is None or b_eq_s is None else int(A_eq_s.shape[0]),
+            "z": 0 if A_ub_s is None or b_ub is None else int(A_ub_s.shape[0]),
+            "z_lb": n_s_cols,
+            "z_ub": n_s_cols,
+        }
+        duals = {k: v for k, v in iterate_start.items() if k in want and v is not None}
+        if duals and all(np.size(v) == want[k] for k, v in duals.items()):
+            start_kw["warm_start"] = {"x": start_kw["warm_start"], **duals}
+        elif duals:
+            logger.info(
+                "%s: the warm start's multipliers do not match this problem's rows; "
+                "starting from its primal point only",
+                engine,
+            )
     try:
         result = solve_qp_fn(
             Q=Q_s,
@@ -28968,6 +29013,11 @@ def _solve_qp_matrix(
     wall_time = time.perf_counter() - t_start
     assert model._objective is not None
     sense = model._objective.sense
+    # #1679: the backend minimized without ``obj_const_s`` (the lifted problem's own
+    # constant under ``sos_lift``) and without the MAXIMIZE flip.
+    _report_in_model_sense(
+        getattr(result, "solve_report", None), obj_const_s, sense == ObjectiveSense.MAXIMIZE
+    )
 
     objective = None
     if result.objective is not None:
@@ -29148,6 +29198,7 @@ def _solve_qp_matrix(
                 Q_orig=Q_orig,
             )
 
+        qp_iterate = getattr(result, "warm_start_state", None) or None
         if not qp_certified:
             return SolveResult(
                 status="feasible",
@@ -29164,6 +29215,7 @@ def _solve_qp_matrix(
                 constraint_duals=cd,
                 bound_duals_lower=bdl,
                 bound_duals_upper=bdu,
+                pounce_qp_iterate=qp_iterate,
             )
         sr = SolveResult(
             status="optimal",
@@ -29196,6 +29248,7 @@ def _solve_qp_matrix(
             constraint_duals=cd,
             bound_duals_lower=bdl,
             bound_duals_upper=bdu,
+            pounce_qp_iterate=qp_iterate,
         )
         # A detected QP with PSD Q is a convex problem solved directly without
         # B&B -- semantically the same as the convex NLP fast path.

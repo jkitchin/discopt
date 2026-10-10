@@ -213,6 +213,106 @@ def psd_proved(Q: np.ndarray) -> bool:
     return bool(exact_psd(Qa, budget=PSD_PROVED_EXACT_BUDGET))
 
 
+#: Up to this many active variables :func:`psd_certified` settles the eigenvalue
+#: test's undecided band by the exact rational test with no budget. Rational
+#: entries grow during elimination of a dense full-rank matrix: measured on dense
+#: random ``A'A``, 0.16 s at n=30, 3.3 s at 60, 228 s at 150 (#1533 review).
+PSD_CERT_EXACT_MAX_N = 30
+
+#: Above :data:`PSD_CERT_EXACT_MAX_N`, a Hessian with at most this many nonzeros
+#: per active row (on average) is tried by the budgeted sparse exact elimination
+#: *before* the eigenvalue test (#1616): a singular PSD Hessian such as a graph
+#: Laplacian fails every floating-point margin, and such Hessians are sparse.
+PSD_CERT_SPARSE_ROW_NNZ = 8
+
+#: Above this many active variables no dense eigenvalue test is run; only the
+#: sparse exact elimination can prove such a Hessian PSD.
+PSD_CERT_EIG_MAX_N = 4000
+
+
+def psd_certified(Q) -> bool:
+    """True only when ``Q`` (symmetrized, dense or scipy-sparse) is PROVED PSD (#1679).
+
+    The one PSD predicate shared by the ``solver="pounce"`` route
+    (:func:`discopt.solvers.convex_ipm_pounce.certify_psd`, which decides whether a
+    QP may go to the convex qp-ipm and be certified ``optimal``) and by the exact
+    QP objective certificate behind :meth:`Model.convexity` and the default
+    solver's convex fast path
+    (:func:`~discopt._relax.convexity.certificate.certify_quadratic_objective_convex`).
+    Before #1679 the latter accepted any ``lambda_min >= -slack``, i.e. "PSD to
+    within roundoff", which is not a proof: the float-assembled Gram matrix
+    ``2 K'K`` of a rank-deficient ``K`` is indefinite in exact arithmetic
+    (measured: ``exact_psd`` refutes it for every rank-deficient ``K`` tried, with
+    ``lambda_min ~ -1e-14``), so ``m.convexity()`` said convex where the route's
+    proof correctly said no.
+
+    Rows/columns that are identically zero are dropped first (a variable that only
+    appears linearly). Then, on the remaining ``n`` active variables:
+
+    1. ``n > PSD_CERT_EXACT_MAX_N`` and sparse (at most
+       :data:`PSD_CERT_SPARSE_ROW_NNZ` nonzeros per row): budgeted exact elimination;
+       a decided verdict is returned.
+    2. ``n > PSD_CERT_EIG_MAX_N``: not proved.
+    3. The computed ``lambda_min`` against ``s = psd_decision_slack(||Q||_F)``:
+       ``lambda_min >= s > 0`` proves PSD, ``lambda_min < -s`` refutes it (the
+       computed spectrum is exact for a matrix within ``O(u ||Q||)`` of ``Q``).
+    4. In the band between: the exact rational test -- unbudgeted up to
+       :data:`PSD_CERT_EXACT_MAX_N` variables, under
+       :data:`PSD_PROVED_EXACT_BUDGET` above; an undecided elimination is "not
+       proved", never PSD.
+    """
+    import scipy.sparse as sp
+
+    if sp.issparse(Q):
+        Qs = sp.csr_matrix(Q, dtype=np.float64)
+        if not np.all(np.isfinite(Qs.data)):
+            return False
+        Ss = (0.5 * (Qs + Qs.T)).tocsr()
+        Ss.eliminate_zeros()
+        active = np.flatnonzero(np.diff(Ss.indptr) > 0)
+        if active.size == 0:
+            return True
+        Ss = Ss[active][:, active]
+        n = Ss.shape[0]
+        if n > PSD_CERT_EXACT_MAX_N and Ss.nnz <= PSD_CERT_SPARSE_ROW_NNZ * n:
+            exact = exact_psd(Ss, budget=PSD_PROVED_EXACT_BUDGET)
+            if exact is not None:
+                return exact
+        if n > PSD_CERT_EIG_MAX_N:
+            return False
+        S = Ss.toarray()
+    else:
+        Qa = np.asarray(Q, dtype=np.float64)
+        if Qa.ndim != 2 or Qa.shape[0] != Qa.shape[1] or not np.all(np.isfinite(Qa)):
+            return False
+        S = 0.5 * (Qa + Qa.T)
+        active = np.flatnonzero(np.any(S != 0.0, axis=1))
+        S = S[np.ix_(active, active)]
+        if S.size == 0:
+            return True
+        n = S.shape[0]
+        if n > PSD_CERT_EXACT_MAX_N and np.count_nonzero(S) <= PSD_CERT_SPARSE_ROW_NNZ * n:
+            exact = exact_psd(S, budget=PSD_PROVED_EXACT_BUDGET)
+            if exact is not None:
+                return exact
+        if n > PSD_CERT_EIG_MAX_N:
+            return False
+    eigs = np.linalg.eigvalsh(S)
+    lam_min = float(eigs[0])
+    slack = psd_decision_slack(float(np.linalg.norm(S, "fro")))
+    # The proof side also clears the ``K * eps * ||S||_2`` margin the route used
+    # before (``solver._CONVEX_OBJ_PSD_EIG_ROUNDOFF_K``, #1397) -- whichever is
+    # larger -- so sharing this predicate never loosens a proof the route made.
+    proof_margin = max(slack, _PSD_DECISION_K * 2.0 * _UNIT_ROUNDOFF * float(np.max(np.abs(eigs))))
+    if lam_min > 0.0 and lam_min >= proof_margin:
+        return True
+    if lam_min < -slack:
+        return False
+    if n <= PSD_CERT_EXACT_MAX_N:
+        return bool(exact_psd(S))
+    return bool(exact_psd(S, budget=PSD_PROVED_EXACT_BUDGET))
+
+
 def interval_magnitude(H: Interval) -> float:
     """Frobenius norm of the entry-wise absolute supremum of an interval matrix.
 
