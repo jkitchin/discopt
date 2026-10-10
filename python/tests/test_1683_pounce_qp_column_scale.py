@@ -132,31 +132,63 @@ def test_unit_scaled_qp_is_handed_over_unchanged():
     assert cvx.column_scale(Q, A, None, 2) is None
 
 
+def _dense_reference_residuals(r, Q, c, A, b, G, h, lb, ub):
+    """POUNCE's residual definitions, written out densely and independently."""
+    Qd, Ad, Gd = (M.toarray() if sp.issparse(M) else np.asarray(M) for M in (Q, A, G))
+    x = np.asarray(r.x)
+    slack = h - Gd @ x
+    primal = max(
+        np.max(np.abs(Ad @ x - b)),
+        np.max(np.maximum(-slack, 0.0)),
+        np.max(np.maximum(lb - x, 0.0)),
+        np.max(np.maximum(x - ub, 0.0)),
+    )
+    grad = Qd @ x + c + Ad.T @ r.y + Gd.T @ r.z - r.z_lb + r.z_ub
+    comp = max(
+        np.max(np.abs(r.z * slack)),
+        np.max(np.abs(r.z_lb * (x - lb))),
+        np.max(np.abs(r.z_ub * (ub - x))),
+    )
+    return {
+        "primal_infeasibility": primal,
+        "dual_infeasibility": np.max(np.abs(grad)),
+        "complementarity": comp,
+    }
+
+
 def test_caller_residuals_match_the_engines_own_definition(monkeypatch):
-    """The recomputation reproduces POUNCE's ``QpResiduals`` on an unscaled solve."""
+    """The recomputation implements POUNCE's ``QpResiduals`` definitions.
+
+    At truncated iterates (every residual O(1e-3..10), so the definition and not
+    roundoff decides) it is checked against an independent dense evaluation of
+    those definitions at the returned point. Against the engine's own report it
+    is checked only at the optimum and to 1e-9: on Linux the engine's reported
+    residuals at a truncated iterate are not those of the iterate it returns
+    (measured: dual 0.261 reported vs 0.522 at the returned point, which macOS
+    reports exactly), which is why the route recomputes from the returned point.
+    """
     import pounce.qp as pq
 
     Q, c, A_eq, b_eq, bounds = _mpc_matrices(N=40, UA=1.0)
     c = c + 0.3  # a nonzero linear term, so every block of the residual is exercised
     lb = np.array([b[0] for b in bounds])
     ub = np.array([b[1] for b in bounds])
+    assert np.all(np.isfinite(lb)) and np.all(np.isfinite(ub))
     G = sp.csr_matrix(np.ones((1, len(c))))
     h = np.array([5.0])
-    # Compare at early (truncated) iterates, where every residual is O(1e-3..10)
-    # and the definitions -- not roundoff -- decide agreement; at the optimum the
-    # residuals are ~1e-12 and only roundoff-level agreement is meaningful.
     executed = 0
     for max_iter in (2, 3, 4, None):
         r = pq.solve_qp(P=Q, c=c, A=A_eq, b=b_eq, G=G, h=h, lb=lb, ub=ub, max_iter=max_iter)
         assert r.status == ("optimal" if max_iter is None else "iteration_limit")
         mine = cvx.caller_residuals(r.x, r.y, r.z, r.z_lb, r.z_ub, Q, c, A_eq, b_eq, G, h, lb, ub)
-        eng = r.residuals
+        ref = _dense_reference_residuals(r, Q, c, A_eq, b_eq, G, h, lb, ub)
         for key in ("primal_infeasibility", "dual_infeasibility", "complementarity"):
             if max_iter is None:
-                assert abs(mine[key] - eng[key]) <= 1e-9, key
+                assert abs(mine[key] - r.residuals[key]) <= 1e-9, key
+                assert abs(mine[key] - ref[key]) <= 1e-12, key
             else:
-                assert eng[key] > 1e-3, (key, max_iter)
-                assert mine[key] == pytest.approx(eng[key], rel=1e-9), (key, max_iter)
+                assert ref[key] > 1e-3, (key, max_iter)
+                assert mine[key] == pytest.approx(ref[key], rel=1e-9), (key, max_iter)
             executed += 1
     assert executed == 12
 
