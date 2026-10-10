@@ -1325,7 +1325,7 @@ def extend_initial_point(reformed: Model, x0) -> Optional[np.ndarray]:
         if abs(x[j] - r) > 1e-6:
             return None
         x[j] = float(r)
-    out = list(x)
+    out: list[float] = [float(v) for v in x]
     last_y = 0.0
     for entry in spec:
         kind = entry[0]

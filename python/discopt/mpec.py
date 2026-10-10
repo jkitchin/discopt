@@ -1909,6 +1909,12 @@ def _solve_scholtes(
 
     wall = time.perf_counter() - wall0
     if best_x is None:
+
+        def _last_iterate() -> Optional[dict[int, np.ndarray]]:
+            # Typed thunk: a conditional between two lambdas types as the first
+            # lambda's ``Callable[[], dict]``, which the ``None`` branch violates.
+            return point_from_flat(model, x_cur) if stages else None
+
         # No stage converged. This is "the local solver failed to find a point",
         # NOT an infeasibility proof — publishing it as ``infeasible`` would be a
         # false certificate in the direction nothing downstream checks (#1148 §B).
@@ -1921,7 +1927,7 @@ def _solve_scholtes(
                 model,
                 report_pairs,
                 snapshot,
-                (lambda: point_from_flat(model, x_cur)) if stages else (lambda: None),
+                _last_iterate,
                 kind=residual_kind,
                 continuation=trace,
                 notes=(
