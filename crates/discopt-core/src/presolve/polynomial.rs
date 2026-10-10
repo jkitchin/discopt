@@ -137,11 +137,166 @@ impl Polynomial {
 /// Returns `None` if any non-polynomial atom is encountered (division
 /// by a non-constant, transcendental, non-integer power, abs, …) so
 /// the caller can leave such expressions alone.
+///
+/// **Unbounded.** This expands products and integer powers in full; a
+/// product of `k` sums of width `w` produces `w^k` monomials. A caller that
+/// runs before the time limit and cannot afford that must use
+/// [`try_polynomial_budgeted`] instead (#1686).
 pub fn try_polynomial(arena: &ExprArena, root: ExprId) -> Option<Polynomial> {
+    let mut work = PolyWork::unlimited();
+    match try_polynomial_work(arena, root, &mut work) {
+        Ok(p) => Some(p),
+        Err(PolyStop::NotPolynomial) => None,
+        // `u64::MAX` cannot be spent by any expansion that fits in memory.
+        Err(PolyStop::BudgetExhausted) => None,
+    }
+}
+
+/// Outcome of a budgeted expansion that did not produce a polynomial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolyBudgetedError {
+    /// The expression contains a non-polynomial atom (same as
+    /// [`try_polynomial`] returning `None`).
+    NotPolynomial,
+    /// The expansion would have exceeded the work budget. Nothing is known
+    /// about the expression; the caller must abstain, not guess.
+    BudgetExhausted,
+}
+
+/// Work allowance for [`try_polynomial_budgeted`], in two separately capped
+/// currencies. Both are **operation counts**, never a clock (#912).
+///
+/// - `linear`: node visits, leaf monomials, and copies through a constant
+///   factor (`c * p`, `p / c`, `p ^ 1`). Proportional to the size of the
+///   expression *as a tree*; only exceeds the arena size when shared
+///   subtrees are re-walked.
+/// - `expansion`: monomials created by multiplying two non-constant
+///   polynomials (products and integer powers ≥ 2). This is the
+///   `w^k` term that makes a product of sums blow up (#1686).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PolyBudget {
+    /// Allowance for linear work.
+    pub linear: u64,
+    /// Allowance for expansion work.
+    pub expansion: u64,
+}
+
+impl PolyBudget {
+    /// No limit in either currency.
+    pub const UNLIMITED: PolyBudget = PolyBudget {
+        linear: u64::MAX,
+        expansion: u64::MAX,
+    };
+}
+
+/// Units actually spent by one [`try_polynomial_budgeted`] call.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PolySpent {
+    /// Linear units spent.
+    pub linear: u64,
+    /// Expansion units spent.
+    pub expansion: u64,
+}
+
+/// [`try_polynomial`] with a deterministic work budget (#1686).
+///
+/// The budget is an **operation count**, not a clock (#912's rule: a clock
+/// would make the result a function of machine load). See [`PolyBudget`] for
+/// what is charged. A product is priced *before* it is formed, so an
+/// over-budget cross-product is refused without being allocated.
+///
+/// Returns the result and the units spent (also on failure). Within budget
+/// the result is identical to [`try_polynomial`]: the budget only decides
+/// whether the expansion runs to completion, never how it is computed.
+pub fn try_polynomial_budgeted(
+    arena: &ExprArena,
+    root: ExprId,
+    budget: PolyBudget,
+) -> (Result<Polynomial, PolyBudgetedError>, PolySpent) {
+    let mut work = PolyWork {
+        budget,
+        spent: PolySpent::default(),
+    };
+    let r = match try_polynomial_work(arena, root, &mut work) {
+        Ok(p) => Ok(p),
+        Err(PolyStop::NotPolynomial) => Err(PolyBudgetedError::NotPolynomial),
+        Err(PolyStop::BudgetExhausted) => Err(PolyBudgetedError::BudgetExhausted),
+    };
+    (r, work.spent)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PolyStop {
+    NotPolynomial,
+    BudgetExhausted,
+}
+
+/// Remaining work for one expansion. `unlimited()` is `u64::MAX` in both
+/// currencies, which keeps the unbudgeted [`try_polynomial`] path
+/// behaviourally unchanged.
+struct PolyWork {
+    budget: PolyBudget,
+    spent: PolySpent,
+}
+
+impl PolyWork {
+    fn unlimited() -> Self {
+        PolyWork {
+            budget: PolyBudget::UNLIMITED,
+            spent: PolySpent::default(),
+        }
+    }
+
+    #[inline]
+    fn linear(&mut self, units: u64) -> Result<(), PolyStop> {
+        if units > self.budget.linear {
+            return Err(PolyStop::BudgetExhausted);
+        }
+        self.budget.linear -= units;
+        self.spent.linear = self.spent.linear.saturating_add(units);
+        Ok(())
+    }
+
+    #[inline]
+    fn expansion(&mut self, units: u64) -> Result<(), PolyStop> {
+        if units > self.budget.expansion {
+            return Err(PolyStop::BudgetExhausted);
+        }
+        self.budget.expansion -= units;
+        self.spent.expansion = self.spent.expansion.saturating_add(units);
+        Ok(())
+    }
+
+    /// Charge `multiply_into(l, r)`: a copy through a constant factor when
+    /// either side has no monomials, a genuine expansion otherwise.
+    fn product(&mut self, l: &Polynomial, r: &Polynomial) -> Result<(), PolyStop> {
+        let (nl, nr) = (l.monomials.len() as u64, r.monomials.len() as u64);
+        let cost = nl
+            .saturating_mul(nr)
+            .saturating_add(nl)
+            .saturating_add(nr)
+            .saturating_add(1);
+        if nl == 0 || nr == 0 {
+            self.linear(cost)
+        } else {
+            self.expansion(cost)
+        }
+    }
+}
+
+fn not_poly<T>(o: Option<T>) -> Result<T, PolyStop> {
+    o.ok_or(PolyStop::NotPolynomial)
+}
+
+fn try_polynomial_work(
+    arena: &ExprArena,
+    root: ExprId,
+    work: &mut PolyWork,
+) -> Result<Polynomial, PolyStop> {
     let mut p = Polynomial::default();
-    walk_into_polynomial(arena, root, 1.0, &mut p)?;
+    walk_into_polynomial(arena, root, 1.0, &mut p, work)?;
     canonicalise(&mut p);
-    Some(p)
+    Ok(p)
 }
 
 fn walk_into_polynomial(
@@ -149,100 +304,115 @@ fn walk_into_polynomial(
     id: ExprId,
     sign: f64,
     out: &mut Polynomial,
-) -> Option<()> {
+    work: &mut PolyWork,
+) -> Result<(), PolyStop> {
+    // One unit per node visit: a DAG whose shared subtrees are re-walked as a
+    // tree is exponential in its arena size even when it pushes no monomials.
+    work.linear(1)?;
     match arena.get(id) {
         ExprNode::Constant(v) => {
             out.constant += sign * *v;
-            Some(())
+            Ok(())
         }
         ExprNode::Parameter { value, shape, .. } => {
             if shape.is_empty() || (shape.len() == 1 && shape[0] == 1) {
-                out.constant += sign * value.first().copied()?;
-                Some(())
+                out.constant += sign * not_poly(value.first().copied())?;
+                Ok(())
             } else {
-                None
+                Err(PolyStop::NotPolynomial)
             }
         }
         ExprNode::ConstantArray(data, shape) => {
             if data.len() == 1 && shape.iter().all(|&d| d == 1) {
                 out.constant += sign * data[0];
-                Some(())
+                Ok(())
             } else {
-                None
+                Err(PolyStop::NotPolynomial)
             }
         }
         ExprNode::Variable { size, .. } if *size == 1 => {
+            work.linear(1)?;
             out.monomials.push(Monomial {
                 coeff: sign,
                 factors: vec![(id, 1)],
             });
-            Some(())
+            Ok(())
         }
         ExprNode::Index { base, .. } => match arena.get(*base) {
             ExprNode::Variable { .. } => {
+                work.linear(1)?;
                 out.monomials.push(Monomial {
                     coeff: sign,
                     factors: vec![(id, 1)],
                 });
-                Some(())
+                Ok(())
             }
-            _ => None,
+            _ => Err(PolyStop::NotPolynomial),
         },
         ExprNode::UnaryOp { op, operand } => match op {
-            UnOp::Neg => walk_into_polynomial(arena, *operand, -sign, out),
-            UnOp::Abs => None,
+            UnOp::Neg => walk_into_polynomial(arena, *operand, -sign, out, work),
+            UnOp::Abs => Err(PolyStop::NotPolynomial),
         },
         ExprNode::BinaryOp { op, left, right } => match op {
             BinOp::Add => {
-                walk_into_polynomial(arena, *left, sign, out)?;
-                walk_into_polynomial(arena, *right, sign, out)
+                walk_into_polynomial(arena, *left, sign, out, work)?;
+                walk_into_polynomial(arena, *right, sign, out, work)
             }
             BinOp::Sub => {
-                walk_into_polynomial(arena, *left, sign, out)?;
-                walk_into_polynomial(arena, *right, -sign, out)
+                walk_into_polynomial(arena, *left, sign, out, work)?;
+                walk_into_polynomial(arena, *right, -sign, out, work)
             }
             BinOp::Mul => {
-                let lp = try_polynomial(arena, *left)?;
-                let rp = try_polynomial(arena, *right)?;
+                let lp = try_polynomial_work(arena, *left, work)?;
+                let rp = try_polynomial_work(arena, *right, work)?;
+                work.product(&lp, &rp)?;
                 multiply_into(out, sign, &lp, &rp);
-                Some(())
+                Ok(())
             }
             BinOp::Div => {
                 // Polynomial only if the denominator is a numeric constant.
-                let denom = constant_value(arena, *right)?;
+                let denom = not_poly(constant_value(arena, *right))?;
                 if denom == 0.0 {
-                    return None;
+                    return Err(PolyStop::NotPolynomial);
                 }
-                let p = try_polynomial(arena, *left)?;
+                let p = try_polynomial_work(arena, *left, work)?;
+                work.linear(p.monomials.len() as u64)?;
                 add_scaled(out, sign / denom, &p);
-                Some(())
+                Ok(())
             }
             BinOp::Pow => {
-                let exp = constant_value(arena, *right)?;
+                let exp = not_poly(constant_value(arena, *right))?;
                 let exp_int = exp.round() as i64;
                 if (exp - exp_int as f64).abs() > 1e-12 || exp_int < 0 {
-                    return None;
+                    return Err(PolyStop::NotPolynomial);
                 }
                 if exp_int == 0 {
                     out.constant += sign * 1.0;
-                    return Some(());
+                    return Ok(());
                 }
-                let base_poly = try_polynomial(arena, *left)?;
-                let powered = power_polynomial(&base_poly, exp_int as u32)?;
+                let base_poly = try_polynomial_work(arena, *left, work)?;
+                let powered = power_polynomial(&base_poly, exp_int as u32, work)?;
+                // The copy is priced in the currency that created it.
+                let n = powered.monomials.len() as u64;
+                if exp_int == 1 {
+                    work.linear(n)?;
+                } else {
+                    work.expansion(n)?;
+                }
                 add_scaled(out, sign, &powered);
-                Some(())
+                Ok(())
             }
         },
         ExprNode::Sum { operand, axis } if axis.is_none() => {
-            walk_into_polynomial(arena, *operand, sign, out)
+            walk_into_polynomial(arena, *operand, sign, out, work)
         }
         ExprNode::SumOver { terms } => {
             for t in terms {
-                walk_into_polynomial(arena, *t, sign, out)?;
+                walk_into_polynomial(arena, *t, sign, out, work)?;
             }
-            Some(())
+            Ok(())
         }
-        _ => None,
+        _ => Err(PolyStop::NotPolynomial),
     }
 }
 
@@ -316,9 +486,9 @@ fn merge_factors(a: &[(ExprId, u32)], b: &[(ExprId, u32)]) -> Vec<(ExprId, u32)>
     out
 }
 
-fn power_polynomial(p: &Polynomial, n: u32) -> Option<Polynomial> {
+fn power_polynomial(p: &Polynomial, n: u32, work: &mut PolyWork) -> Result<Polynomial, PolyStop> {
     if n == 0 {
-        return Some(Polynomial {
+        return Ok(Polynomial {
             constant: 1.0,
             ..Default::default()
         });
@@ -326,13 +496,14 @@ fn power_polynomial(p: &Polynomial, n: u32) -> Option<Polynomial> {
     let mut result = p.clone();
     for _ in 1..n {
         let mut next = Polynomial::default();
+        work.product(&result, p)?;
         multiply_into(&mut next, 1.0, &result, p);
         next.constant += 0.0;
         result = next;
         canonicalise(&mut result);
     }
     canonicalise(&mut result);
-    Some(result)
+    Ok(result)
 }
 
 fn canonicalise(p: &mut Polynomial) {

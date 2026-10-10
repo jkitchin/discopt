@@ -7541,6 +7541,17 @@ def _check_model_scaling(model: Model) -> None:
         logger.debug("Scaling diagnostics unavailable: %s", exc)
         return
 
+    # #1686: rows whose symbolic expansion exceeded the deterministic work
+    # budget in ``compute_equilibration`` were skipped, not examined. Say so,
+    # so a quiet diagnostic is not over-read as covering them.
+    n_over = int(diag.get("rows_over_budget", 0) or 0)
+    if n_over:
+        logger.info(
+            "Scaling diagnostics: %d constraint(s) skipped -- their polynomial "
+            "expansion exceeded the work budget (#1686); ranges cover the rest.",
+            n_over,
+        )
+
     if int(diag.get("linear_rows_sampled", 0)) == 0:
         return  # no linear rows sampled: nothing was measured, so say nothing
 

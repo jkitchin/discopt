@@ -74,7 +74,8 @@ pub use passes::{
     ReducedCostFixingPass, ReductionConstraintsPass, RedundancyPass, ScalingPass, SimplifyPass,
 };
 pub use polynomial::{
-    reformulate_polynomial, try_polynomial, Monomial, Polynomial, ReformulationStats,
+    reformulate_polynomial, try_polynomial, try_polynomial_budgeted, Monomial, PolyBudget,
+    PolyBudgetedError, PolySpent, Polynomial, ReformulationStats,
 };
 pub use probing::{
     probe_binary_vars, probe_node_bounds, Implication, NodeProbeResult, ProbingResult,

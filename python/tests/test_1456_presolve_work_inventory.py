@@ -752,3 +752,91 @@ def test_the_budget_free_modules_are_all_recorded_residual():
             pytest.fail("unreachable")
         checked += 1
     assert checked >= 4, f"only checked {checked} rows from the budget-free modules"
+
+
+# ---------------------------------------------------------------------------
+# Rust work behind a *method call* on a ``ModelRepr`` (#1686)
+# ---------------------------------------------------------------------------
+#
+# The scanner above records calls to names imported ``from discopt.X``. A method
+# called on an object one of those returned is invisible to it, and the
+# ``model_to_repr`` row's "marshal, linear" note says nothing about what is then
+# *called on* the repr. #1686 was exactly that blind spot: ``_check_model_scaling``
+# (run from this region) calls ``repr.scaling_diagnostics()``, whose Rust
+# ``compute_equilibration`` expanded every row with ``try_polynomial`` and no term
+# budget — ~115 s of a ``time_limit=5`` solve on a 9 x 7 product of sums, before
+# branch and bound. These rows record each such method and the Rust budget that
+# bounds it; the tests keep the claim tied to the source and to the behaviour.
+#
+# (method, solver.py helper that calls it, Rust budget symbols, stats key the
+#  binding reports when the budget fires)
+RUST_METHOD_INVENTORY: tuple[tuple[str, str, str, str], ...] = (
+    (
+        "scaling_diagnostics",
+        "_check_model_scaling",
+        "ROW_EXPANSION_BUDGET,MODEL_EXPANSION_BUDGET,LINEAR_ARENA_FACTOR",
+        "rows_over_budget",
+    ),
+)
+
+_SCALING_RS = Path(__file__).resolve().parents[2] / ("crates/discopt-core/src/presolve/scaling.rs")
+
+
+def test_rust_method_rows_are_called_from_the_region():
+    """Each recorded method is still called by its helper, and the helper is
+    still called from the pre-solve region — otherwise the row is stale."""
+    tree = ast.parse(_SOLVER.read_text())
+    fn = next(
+        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "solve_model"
+    )
+    _start, end, _found = _scan()
+    region_calls = {
+        _called_name(n) for n in ast.walk(fn) if isinstance(n, ast.Call) and n.lineno < end
+    }
+    checked = 0
+    for method, helper, _budget, _key in RUST_METHOD_INVENTORY:
+        assert helper in region_calls, f"{helper} is no longer called before the solve"
+        hfn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == helper)
+        called = {_called_name(n) for n in ast.walk(hfn) if isinstance(n, ast.Call)}
+        assert method in called, f"{helper} no longer calls .{method}()"
+        checked += 1
+    assert checked == len(RUST_METHOD_INVENTORY) > 0
+
+
+def test_rust_method_budgets_are_live_in_source():
+    """The ``bounded`` claim is about Rust code, so read the Rust code: each
+    budget symbol must still be defined and still be used by the pass."""
+    # Production code only: the Rust unit tests legitimately call the
+    # unbudgeted expansion to check the budgeted one against it.
+    src = _SCALING_RS.read_text().split("#[cfg(test)]")[0]
+    checked = 0
+    for _method, _helper, budget, _key in RUST_METHOD_INVENTORY:
+        for sym in budget.split(","):
+            assert f"pub const {sym}: u64" in src, f"{sym} is gone from {_SCALING_RS.name}"
+            assert src.count(sym) >= 2, f"{sym} is defined but never used"
+            checked += 1
+    assert "try_polynomial_budgeted" in src and "try_polynomial(&" not in src, (
+        "compute_equilibration expands rows with the unbudgeted try_polynomial again (#1686)"
+    )
+    assert checked >= 3
+
+
+def test_scaling_diagnostics_abstains_on_a_product_of_sums():
+    """#1686 THE REGRESSION, deterministically: the 9 x 7 product-of-sums row
+    (~4.0e7 monomials) is abstained on and counted, not expanded. Before the fix
+    the binding had no ``rows_over_budget`` key and this call took ~115 s."""
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from discopt._rust import model_to_repr
+    from test_distribute_products_budget import _blowup_model
+
+    m, x, body = _blowup_model()
+    m.subject_to(body <= 1e6)
+    m.subject_to(1e4 * x[0] + 1e-4 * x[1] <= 3.0)
+    m.minimize(x[0])
+    diag = model_to_repr(m, getattr(m, "_builder", None)).scaling_diagnostics()
+    assert diag["rows_over_budget"] == 1
+    # The linear row beside it is still measured exactly.
+    assert diag["linear_rows_sampled"] == 1
+    assert diag["worst_row_dynamic_range"] == pytest.approx(1e8, rel=1e-12)
