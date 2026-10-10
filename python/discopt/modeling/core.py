@@ -7271,6 +7271,28 @@ class Model:
                 "if_then: the indicator must be a binary variable or a BooleanVar, got "
                 f"{type(indicator).__name__}."
             )
+        # #1677: ``1 - z`` is the natural way to say "if z == 0". It is exactly an
+        # indicator on ``z`` with active value 0; any other expression has no single
+        # 0/1 column, so refuse at the call rather than raise inside ``solve()``.
+        active_value = 1
+        if (
+            isinstance(indicator, BinaryOp)
+            and indicator.op == "-"
+            and isinstance(indicator.left, Constant)
+            and np.ndim(indicator.left.value) == 0
+            and float(indicator.left.value) == 1.0
+            and isinstance(indicator.right, (Variable, BooleanVar))
+        ):
+            indicator = indicator.right
+            if isinstance(indicator, BooleanVar):
+                indicator = indicator.variable
+            active_value = 0
+        if not isinstance(indicator, (Variable, IndexExpression)):
+            raise TypeError(
+                "if_then: the indicator must be a binary variable (or '1 - z' for a "
+                f"binary z), not {type(indicator).__name__}; introduce a binary "
+                "variable linked to the expression instead."
+            )
         for k, c in enumerate(then_constraints):
             c.name = f"{name}_then_{k}" if name else None
             # Store as indicator constraint; Rust presolve will handle
@@ -7279,7 +7301,7 @@ class Model:
                 _IndicatorConstraint(
                     indicator=indicator,
                     constraint=c,
-                    active_value=1,
+                    active_value=active_value,
                 )
             )
 
