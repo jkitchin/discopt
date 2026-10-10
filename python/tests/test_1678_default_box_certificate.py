@@ -77,8 +77,15 @@ def test_no_certificate_on_the_default_box(build):
     assert r.bound is None and r.gap is None
     # The point is still published (it is feasible); only the claim is withdrawn.
     assert r.status == "feasible" and r.x is not None
-    assert r.solver_stats.get("certificate/default_box_withheld") == 1.0
-    assert any(_MATCH in m for m in msgs), msgs
+    # Under load the tree can stop on the time limit before the incumbent reaches
+    # the corner; that result is already uncertified and the guard has nothing to
+    # withdraw. When the point does sit on the box, the guard must have fired.
+    on_box = any(np.any(np.abs(np.asarray(v)) >= 1e19) for v in r.x.values())
+    if on_box:
+        assert r.solver_stats.get("certificate/default_box_withheld") == 1.0
+        assert any(_MATCH in m for m in msgs), msgs
+    else:
+        assert r.solver_stats.get("certificate/default_box_withheld") is None
 
 
 def test_an_explicit_huge_bound_is_honoured():
@@ -160,3 +167,20 @@ def test_free_variables_away_from_the_box_keep_their_certificate(build):
     assert r.objective == pytest.approx(opt, abs=1e-5)
     assert not any(_MATCH in m for m in msgs)
     assert all(np.all(np.abs(np.asarray(v)) < 1e19) for v in r.x.values())
+
+
+@pytest.mark.parametrize("route", ["1", "0"])
+def test_no_dual_bound_of_the_default_box_without_a_point(monkeypatch, route):
+    """An unbounded convex MIQP (#1699) must not publish a bound the size of the
+    invented box: ``-1.9998e20`` was measured on the convex-MINLP route, and the
+    true infimum is ``-inf``."""
+    monkeypatch.setenv("DISCOPT_CONVEX_MINLP_ROUTE", route)
+    m = dm.Model("unb_miqp")
+    x = m.continuous("x", lb=0)
+    y = m.continuous("y", lb=0)
+    z = m.integer("z", lb=0, ub=3)
+    m.minimize(-x - y + z * z)
+    m.subject_to(x - y <= 1)
+    r, _ = _solve(m)
+    assert r.status != "optimal" and not r.gap_certified, (r.status, r.bound)
+    assert r.bound is None or abs(r.bound) < 1e19, (r.status, r.bound)

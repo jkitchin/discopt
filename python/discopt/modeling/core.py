@@ -10413,9 +10413,13 @@ class Model:
         LP/MILP route proves ``unbounded`` directly (``_highs_std_form`` hands
         the default sides to HiGHS as infinite). This guard is the class-level
         backstop for every other route. It only ever downgrades.
+
+        The same holds for a dual bound with no point behind it. A finite
+        ``bound`` of magnitude past ``EFFECTIVE_INF`` on a model with a defaulted
+        side is a relaxation of the invented box (an unbounded convex MIQP
+        measured ``unknown`` with ``bound = -1.9998e20``, twice the default box,
+        #1699). It is cleared the same way.
         """
-        if result.x is None:
-            return
         import logging as _dlogging
         import warnings as _warnings
 
@@ -10428,7 +10432,7 @@ class Model:
         _on_side = EFFECTIVE_INF
         hits: list[str] = []
         by_name = {v.name: v for v in self._variables}
-        for name, val in result.x.items():
+        for name, val in (result.x or {}).items():
             v = by_name.get(name)
             if v is None:
                 continue
@@ -10440,19 +10444,37 @@ class Model:
             on = ((ub >= _sentinel) & (xv >= _on_side)) | ((lb <= -_sentinel) & (xv <= -_on_side))
             if on.any():
                 hits.append(name if xv.size == 1 else f"{name}{list(_np.flatnonzero(on)[:3])}")
-        if not hits:
+        box_bound = False
+        if not hits and result.bound is not None:
+            b = float(result.bound)
+            box_bound = _np.isfinite(b) and abs(b) >= _on_side
+            box_bound = box_bound and any(
+                bool(_np.any(_np.asarray(v.ub) >= _sentinel))
+                or bool(_np.any(_np.asarray(v.lb) <= -_sentinel))
+                for v in self._variables
+            )
+        if not (hits or box_bound):
             return
         had_claim = result.status == "optimal" or bool(result.gap_certified)
         had_bound = result.bound is not None
         if not (had_claim or had_bound):
             return
+        if hits:
+            what = (
+                f"the returned point sits on the default variable bound "
+                f"(+/-{DEFAULT_VARIABLE_BOUND:g}) for {', '.join(hits[:5])}"
+            )
+        else:
+            what = (
+                f"the dual bound {result.bound:g} is of the order of the default "
+                f"variable bound (+/-{DEFAULT_VARIABLE_BOUND:g})"
+            )
         msg = (
-            f"{self.name}: the returned point sits on the default variable bound "
-            f"(+/-{DEFAULT_VARIABLE_BOUND:g}) for {', '.join(hits[:5])}. That bound "
+            f"{self.name}: {what}. That bound "
             f"stands in for 'no bound', so the result describes a box the model never "
             f"declared: the problem as posed may be unbounded or have no attained "
-            f"optimum. Reporting status 'feasible' with no dual bound instead of a "
-            f"certificate (#1678). Declare finite lb/ub for these variables to "
+            f"optimum. Reporting no dual bound and no certificate "
+            f"(#1678). Declare finite lb/ub for these variables to "
             f"solve a bounded problem."
         )
         _dlogging.getLogger("discopt.solver").warning(msg)
