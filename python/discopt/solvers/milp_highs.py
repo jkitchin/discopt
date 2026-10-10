@@ -438,6 +438,57 @@ def solve_milp(
     return res
 
 
+def is_unconfirmed(res: MILPResult) -> bool:
+    """True iff *res* is a :func:`solve_milp` result returned unconfirmed (#1658)."""
+    diag = (res.callback_stats or {}).get("presolve_cross_check")
+    return isinstance(diag, dict) and diag.get("confirmed") is False
+
+
+def confirm_bound(
+    primary: MILPResult,
+    c: np.ndarray,
+    A_ub: Optional[Union[np.ndarray, sp.spmatrix]] = None,
+    b_ub: Optional[np.ndarray] = None,
+    A_eq: Optional[Union[np.ndarray, sp.spmatrix]] = None,
+    b_eq: Optional[np.ndarray] = None,
+    bounds: Optional[BoundList] = None,
+    integrality: Optional[np.ndarray] = None,
+    time_limit: Optional[float] = None,
+    gap_tolerance: float = 1e-4,
+    mip_start: Optional[np.ndarray] = None,
+) -> MILPResult:
+    """Run the deferred #1634 cross-solve on a result :func:`solve_milp` left unconfirmed.
+
+    For a caller that passed ``confirm_bound_from`` and later decides it does need
+    the bound certified (#1680: the Lagrangian dual confirms a block bound only when
+    the dual value it feeds would improve the best certified one). The arguments
+    must be the ones the primary was solved with. ``time_limit`` is the budget for
+    the cross-solve alone. The primary goes through the same
+    :func:`_cross_check_presolve` that :func:`solve_milp` applies when it does not
+    defer, so the published bound is ``min`` of both configurations and a claim the
+    cross-solve cannot confirm is withdrawn. A result that is not unconfirmed is
+    returned unchanged.
+    """
+    if not is_unconfirmed(primary):
+        return primary
+    kw: dict[str, Any] = dict(
+        c=c,
+        A_ub=A_ub,
+        b_ub=b_ub,
+        A_eq=A_eq,
+        b_eq=b_eq,
+        bounds=bounds,
+        integrality=integrality,
+        gap_tolerance=gap_tolerance,
+        mip_start=mip_start,
+    )
+    res = _cross_check_presolve(primary, kw, time_limit, time.time())
+    diag = (res.callback_stats or {}).get("presolve_cross_check")
+    if isinstance(diag, dict):
+        diag["confirmed"] = True
+    return res
+
+
 def _solve_milp_once(
     c: np.ndarray,
     A_ub: Optional[Union[np.ndarray, sp.spmatrix]],

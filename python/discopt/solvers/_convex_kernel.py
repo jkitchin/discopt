@@ -527,12 +527,52 @@ def _build(model, bounds) -> dict:
         raise NotConvexKernel("objective is not affine")
     obj_const = float(-_c0a if negate else _c0a)
 
-    # Classify rows linear (constant Jacobian) vs nonlinear.
-    ja = ev.evaluate_jacobian(xa)
-    jb = ev.evaluate_jacobian(xb)
-    lin_rows = np.all(np.isclose(ja, jb, atol=1e-9), axis=1)
+    # #1680: the two model-level refusals below used to run only AFTER the row
+    # classification, which scattered the constraint Jacobian into two DENSE
+    # ``(m, n)`` arrays (plus an ``isclose`` temporary of the same size) -- on a
+    # bulk-row LP (``add_linear_constraints``) that is quadratic memory spent only
+    # to refuse: 12k x 12k peaked at 5.1 GB. Both refusals depend on nothing the
+    # classification computes, so asking them first returns ``None`` for exactly
+    # the same models, without the scatter.
+    if not is_int.any():
+        # See the matching refusal at the end of this function (#1346): a model
+        # with no integer variable keeps the NLP path whatever its rows are.
+        raise NotConvexKernel("no integer variable: a continuous convex NLP keeps the NLP path")
+    if int(ev.n_constraints) != len(senses):
+        # ``senses[i]`` / ``_constraint_expr(m, i)`` index ``m._constraints`` by
+        # Jacobian ROW. That is only valid when every constraint is one scalar row
+        # and there are no builder rows (``add_linear_constraints``, fast families)
+        # appended after them. Otherwise the loop below indexed past ``senses`` and
+        # raised ``IndexError`` -- which ``Model.solve`` swallowed as "no kernel" --
+        # so refusing here keeps that outcome while making it explicit.
+        raise NotConvexKernel("constraint rows do not map 1:1 onto scalar constraints")
+
+    # Classify rows linear (constant Jacobian) vs nonlinear. Sparse throughout
+    # (#1680): the tape's Jacobian is natively COO, and both evaluations share the
+    # structure, so the summed CSR patterns coincide and ``isclose`` on the stored
+    # values is exactly the dense ``isclose`` (implicit zeros compare equal).
+    ja = _sparse_jacobian(ev, xa, n)
+    jb = _sparse_jacobian(ev, xb, n)
+    if ja.shape != jb.shape or not (
+        np.array_equal(ja.indptr, jb.indptr) and np.array_equal(ja.indices, jb.indices)
+    ):
+        # Patterns differ (cannot happen for a fixed tape; guard the assumption
+        # rather than trust it): compare on the union pattern instead.
+        jb = jb + 0.0 * ja
+        ja = ja + 0.0 * jb
+        ja.sort_indices()
+        jb.sort_indices()
+    close = np.isclose(ja.data, jb.data, atol=1e-9)
+    row_of_entry = np.repeat(np.arange(ja.shape[0]), np.diff(ja.indptr))
+    n_bad = np.bincount(row_of_entry[~close], minlength=ja.shape[0])
+    lin_rows = n_bad == 0
+    if lin_rows.all():
+        # Same refusal as the ``not nl_specs`` one below (#1346): every row is
+        # linear, so ``nl_specs`` would stay empty. Asked here so an LP/MILP never
+        # reaches the per-row densification.
+        raise NotConvexKernel("no nonlinear row: an LP/MILP belongs to the LP/MILP route")
     g0 = np.asarray(ev.evaluate_constraints(xa), float)
-    const = g0 - ja @ xa
+    const = g0 - np.asarray(ja @ xa, float).ravel()
     offsets = _flat_offsets(m)
 
     le_rows, eq_rows = [], []  # each: (cols, coeffs, rhs)
@@ -540,7 +580,7 @@ def _build(model, bounds) -> dict:
     for i in range(ja.shape[0]):
         s = senses[i]
         if lin_rows[i]:
-            a = np.asarray(ja[i], float)
+            a = ja.getrow(i).toarray().ravel().astype(float)
             ci = float(const[i])
             if s == "<=":
                 le_rows.append((a, -ci))
@@ -608,6 +648,28 @@ def _build(model, bounds) -> dict:
         # model on the path that can produce real ones.
         raise NotConvexKernel("no integer variable: a continuous convex NLP keeps the NLP path")
     return _marshal(n, c, sense_max, is_int, lb, ub, le_rows, eq_rows, nl_specs, obj_const)
+
+
+def _sparse_jacobian(ev, x, n):
+    """The constraint Jacobian at ``x`` as CSR (no dense ``(m, n)`` scatter, #1680).
+
+    Uses the evaluator's ``evaluate_sparse_jacobian`` when it has one (both the
+    tape and the numpy evaluator do); a dense-only evaluator is converted once.
+    """
+    import scipy.sparse as sp
+
+    fn = getattr(ev, "evaluate_sparse_jacobian", None)
+    if fn is not None:
+        J = fn(x)
+        if isinstance(J, tuple):  # (rows, cols, vals) COO convention
+            r, c, v = J
+            J = sp.coo_matrix((v, (r, c)), shape=(int(ev.n_constraints), n))
+        J = sp.csr_matrix(J, dtype=np.float64)
+    else:
+        J = sp.csr_matrix(np.atleast_2d(np.asarray(ev.evaluate_jacobian(x), dtype=np.float64)))
+    J.sum_duplicates()
+    J.sort_indices()
+    return J
 
 
 def _constraint_expr(model, row_idx):
