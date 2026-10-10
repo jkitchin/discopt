@@ -631,37 +631,64 @@ def estimate_distributed_terms(expr: Expression) -> int:
     their factor subtrees) made the unmemoized recursion cost the *tree* size,
     not the DAG size. Same arithmetic, same saturation, same value.
     """
-    return _estimate_terms(expr, {})
+    return _estimate_terms(expr, {}, False)
 
 
-def _estimate_terms(expr: Expression, memo: dict[int, int]) -> int:
+def _estimate_terms(expr: Expression, memo: dict[int, int], unfolded: bool) -> int:
+    """``unfolded=True`` is :func:`_unfolded_term_bound`'s variant: a quotient by
+    a nonzero scalar constant counts its numerator's terms (the fold rewrites
+    ``(a + b) / 2`` as ``0.5*a + 0.5*b``); every other node as above."""
     hit = memo.get(id(expr))
     if hit is not None:
         return hit
     if isinstance(expr, BinaryOp):
         if expr.op in ("+", "-"):
             est = min(
-                _estimate_terms(expr.left, memo) + _estimate_terms(expr.right, memo), _TERM_CAP
+                _estimate_terms(expr.left, memo, unfolded)
+                + _estimate_terms(expr.right, memo, unfolded),
+                _TERM_CAP,
             )
         elif expr.op == "*":
             est = min(
-                _estimate_terms(expr.left, memo) * _estimate_terms(expr.right, memo), _TERM_CAP
+                _estimate_terms(expr.left, memo, unfolded)
+                * _estimate_terms(expr.right, memo, unfolded),
+                _TERM_CAP,
             )
         elif expr.op == "**" and isinstance(expr.right, Constant):
             n = float(expr.right.value)
             n_int = int(n)
             if n == n_int and n_int >= 1:
-                est = min(int(_estimate_terms(expr.left, memo) ** n_int), _TERM_CAP)
+                est = min(int(_estimate_terms(expr.left, memo, unfolded) ** n_int), _TERM_CAP)
             else:
                 est = 1
+        elif unfolded and expr.op == "/" and _scalar_constant(expr.right) not in (None, 0.0):
+            est = _estimate_terms(expr.left, memo, unfolded)
         else:
             est = 1
     elif isinstance(expr, UnaryOp):
-        est = _estimate_terms(expr.operand, memo)
+        est = _estimate_terms(expr.operand, memo, unfolded)
     else:
         est = 1
     memo[id(expr)] = est
     return est
+
+
+def _unfolded_term_bound(expr: Expression) -> int:
+    """An upper bound on ``estimate_distributed_terms(fold_affine_constants(expr))``
+    that skips the fold (~80% of the cost of computing that value exactly:
+    measured 9.1 s of 11.0 s on telecomsp_nor_sun's 21,271 bodies).
+
+    Why it bounds: the fold only rewrites maximal affine forms (``+``, ``-``,
+    ``neg``, product or quotient by a scalar constant), replacing one by a sum
+    over its *distinct* atoms with merged coefficients plus at most one constant.
+    The estimate of an affine form is the sum of its leaves' estimates (a scalar
+    constant factor counts 1, and here so does a constant divisor); merging atoms,
+    dropping zero coefficients and collapsing constants only remove leaves, and
+    each atom is itself folded, so by induction its estimate does not grow.
+    ``**`` and ``*`` are monotone in their operands; ``_TERM_CAP`` saturation is
+    monotone.
+    """
+    return _estimate_terms(expr, {}, True)
 
 
 # Ceiling on the number of additive terms a single ``distribute_products`` call
@@ -760,6 +787,15 @@ def model_distribution_terms(model: Model) -> int:
     :data:`_DISTRIBUTE_TERM_BUDGET` (beyond which the call stops distributing).
     Linear in the model's DAG size; no body is distributed to compute it.
     """
+    return _model_distribution_terms(model, exact=True)
+
+
+def _model_distribution_terms(model: Model, *, exact: bool) -> int:
+    if not exact:
+        return sum(
+            min(_unfolded_term_bound(body), _DISTRIBUTE_TERM_BUDGET)
+            for body in _model_bodies(model)
+        )
     total = 0
     for body in _model_bodies(model):
         est = estimate_distributed_terms(fold_affine_constants(body))
@@ -776,6 +812,11 @@ def model_distribution_exceeds_budget(model: Model, *, pass_name: str) -> bool:
     logged (#1456 item 4): it means weaker structure recognition, and a reader
     comparing two runs must be able to see that.
     """
+    # The fold-free upper bound settles every model that fits (all MINLPLib
+    # instances but johnall and saa_2) at a fifth of the cost; only a model it
+    # cannot clear pays for the exact, folded count.
+    if _model_distribution_terms(model, exact=False) <= _MODEL_DISTRIBUTE_TERM_BUDGET:
+        return False
     total = model_distribution_terms(model)
     if total <= _MODEL_DISTRIBUTE_TERM_BUDGET:
         return False

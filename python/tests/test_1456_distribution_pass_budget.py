@@ -152,5 +152,32 @@ def test_not_affine_message_does_not_render_the_subtree():
     assert _node_summary(m._constraints[0].body) == "BinaryOp('-')"
 
 
+def test_unfolded_bound_dominates_the_folded_estimate():
+    m = dm.Model("u")
+    a, b, c = (m.continuous(n, lb=-1, ub=1) for n in "abc")
+    cases = [
+        (a + b) / 2 * (c + 1),  # the fold turns the quotient into a 2-term sum
+        ((a + 3) - 3) * (b - b + c),  # cancellations shrink it
+        (2 * a + a - 3 * a + b) ** 3,
+        -((a + b + c) / 4) * (a - 1) / 2,
+        (a * b + c) * (a / b + 1),  # a non-constant quotient stays opaque
+    ]
+    checked = 0
+    for e in cases:
+        exact = tc.estimate_distributed_terms(tc.fold_affine_constants(e))
+        assert tc._unfolded_term_bound(e) >= exact, e
+        checked += 1
+    assert checked == len(cases)
+
+
+def test_model_gate_skips_the_fold_when_the_bound_clears(monkeypatch):
+    """The fold is ~80% of the exact count's cost; a model the fold-free bound
+    clears must not pay for it."""
+    m = _oversized_model(2)
+    assert tc._model_distribution_terms(m, exact=False) <= tc._MODEL_DISTRIBUTE_TERM_BUDGET
+    _forbid(monkeypatch, tc, "fold_affine_constants")
+    assert tc.model_distribution_exceeds_budget(m, pass_name="test") is False
+
+
 if __name__ == "__main__":  # pragma: no cover
     sys.exit(pytest.main([__file__, "-q"]))
