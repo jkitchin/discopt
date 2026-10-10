@@ -6752,6 +6752,40 @@ def _gap_criterion(ub: float, lb: float, gap_tolerance: float, abs_gap_tol: floa
     return None
 
 
+def _apply_convexity_charge(result: Any, charge: float, args: tuple, kwargs: dict) -> None:
+    """Subtract an accepted "convex up to charge" from the published bound (#1682).
+
+    ``charge`` bounds, in the internal MINIMIZE sense, how far any lower bound the
+    convex machinery derived can sit above the true one when the exact-QP route
+    accepted an objective whose Hessian is only proved ``lambda_min >= -delta``
+    (see :func:`discopt._relax.convexity.certificate.quadratic_objective_charge`).
+    The published bound moves by it -- down for a MINIMIZE model, up for a
+    MAXIMIZE one, whose ``bound`` is an upper bound -- as does ``root_bound``, and
+    both gaps are recomputed from the moved pair. The certificate is re-judged by
+    the caller (#1536) on the moved pair. A zero charge is a no-op.
+    """
+    if not charge or not isinstance(result, SolveResult):
+        return
+    model = args[0] if args else kwargs.get("model")
+    is_max = False
+    if isinstance(model, Model) and model._objective is not None:
+        from discopt.modeling.core import ObjectiveSense
+
+        is_max = model._objective.sense == ObjectiveSense.MAXIMIZE
+    shift = float(charge) if is_max else -float(charge)
+    if result.bound is not None and np.isfinite(result.bound):
+        result.bound = float(result.bound) + shift
+        if result.objective is not None and np.isfinite(result.objective):
+            result.gap = _gap_mod.reported_gap(float(result.objective), result.bound)
+    if result.root_bound is not None and np.isfinite(result.root_bound):
+        result.root_bound = float(result.root_bound) + shift
+        if result.objective is not None and np.isfinite(result.objective):
+            result.root_gap = _gap_mod.reported_gap(float(result.objective), result.root_bound)
+    if result.solver_stats is None:
+        result.solver_stats = {}
+    result.solver_stats["convexity/charge"] = float(charge)
+
+
 def _refuse_unclosed_published_pair(
     result: SolveResult, gap_tolerance: float, abs_gap_tol: float
 ) -> None:
@@ -10784,8 +10818,13 @@ def _stamp_layer_timing(fn: _F) -> _F:
         _name_depth = len(_ROUTE_NAME)
         _state_depth = len(_ROUTE_FALLBACK_STATE)
         _gap_depth = len(_GAP_TOLERANCES)
+        from discopt._relax.convexity.certificate import convexity_charge_scope
+
         try:
-            result = fn(*args, **kwargs)
+            # #1682: every convexity charge accepted during THIS call is recorded
+            # here and subtracted from the published bound below.
+            with convexity_charge_scope() as _charge_scope:
+                result = fn(*args, **kwargs)
         finally:
             _route_note = (
                 _ROUTE_FALLBACK_NOTE[_route_depth]
@@ -10863,6 +10902,10 @@ def _stamp_layer_timing(fn: _F) -> _F:
         result.jax_time = min(spent["jax"], result.python_time)
         # #1536: the single point every route's result passes through, after the
         # #1059 route/fallback merge -- so it judges the pair actually published.
+        # #1682: subtract any accepted convexity charge BEFORE the published pair
+        # is judged, so the #1536 check below re-decides the certificate on the
+        # charged bound.
+        _apply_convexity_charge(result, _charge_scope.total, args, kwargs)
         if _gap_tols is not None:
             # #1537 E: the tolerances this certificate is judged at (AMP's
             # ``rel_gap``/``abs_tol``, else the caller's), so ``Model.solve``'s
@@ -11535,6 +11578,10 @@ def solve_model(
     # #1533: ``pounce_options`` names the same POUNCE options as ``ipopt_options``.
     ipopt_options = _resolve_pounce_options(ipopt_options, pounce_options)
     _GAP_TOLERANCES.append((float(gap_tolerance), abs_gap_tol))
+    # #1682: the exact-QP convexity route sizes an acceptable charge against this.
+    from discopt._relax.convexity.certificate import set_charge_scope_abs_gap_tol
+
+    set_charge_scope_abs_gap_tol(abs_gap_tol)
 
     # --- Enforce float64 precision ---
     # JAX defaults to float32 unless JAX_ENABLE_X64=1 is set *before* importing
