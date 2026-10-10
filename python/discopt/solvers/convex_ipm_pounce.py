@@ -119,6 +119,17 @@ the solve report and the downstream #1384 / #1596 guards (which recompute from
 whose columns are already unit-scaled gets ``d = None`` and is handed over
 unchanged. ``DISCOPT_POUNCE_QP_COLSCALE=0`` (:data:`COLSCALE_ENV`) restores the
 unscaled hand-off; it is an opt-out for A/B, not a pending graduation.
+
+Graduation panel (CLAUDE.md §5, flag OFF vs ON, interleaved, every incumbent
+re-checked with ``check_feasibility`` at 1e-6). Plain convex QPLIB, 9 instances
+that route to qp-ipm: bit-identical in both arms (their columns are already
+balanced, ``d = None``). The same QPLIB instances with variables re-expressed in
+random units (``x' = 10**U(lo, hi) * x``, 16 pairs that reach qp-ipm): total
+IPM iterations 1141 -> 751, 10 better / 2 same / 4 worse; QPLIB_8785 went from
+time_limit to certified optimal, and on QPLIB_8495 the OFF arm stopped at a
+feasible point of objective 210935 while the ON arm reached the true 42857.
+No instance lost certification, every certified bound stayed at or below its
+incumbent, and objectives that both arms returned agree to <= 1.5e-8 relative.
 """
 
 from __future__ import annotations
