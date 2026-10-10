@@ -40,10 +40,14 @@ from discopt._relax.scalarize import (
     sum_is_full_reduction,
 )
 from discopt._relax.term_classifier import (
+    _DISTRIBUTE_TERM_BUDGET,
     NonlinearTerms,
     _compute_var_offset,
     _get_flat_index,
+    distribute_bodies,
     distribute_products,
+    estimate_distributed_terms,
+    fold_affine_constants,
 )
 from discopt.modeling.core import (
     BinaryOp,
@@ -1791,10 +1795,11 @@ def _quadratic_constraint_forms(model: Model, n_vars: int) -> list[_QuadForm]:
     parent can emit a two-sided equality product row.
     """
     forms: list[_QuadForm] = []
-    for constraint in model._constraints:
-        if constraint.sense not in ("<=", "=="):
-            continue
-        poly = _expr_to_polynomial(distribute_products(constraint.body), model)
+    kept = [c for c in model._constraints if c.sense in ("<=", "==")]
+    # #1456: one distribution budget for the whole loop, not one per body.
+    dists = distribute_bodies([c.body for c in kept], pass_name="RLT quadratic-constraint scan")
+    for constraint, dist in zip(kept, dists):
+        poly = _expr_to_polynomial(dist, model)
         if poly is None:
             continue
         const, terms = poly
@@ -1831,6 +1836,19 @@ def _quadratic_constraint_forms(model: Model, n_vars: int) -> list[_QuadForm]:
             continue
         forms.append((quad, lin, const_acc, constraint.sense))
     return forms
+
+
+def _node_summary(e: Expression) -> str:
+    """A constant-cost description of *e* for a "not affine" ``ValueError``.
+
+    The affine walk raises ``ValueError`` as its routine abstention signal and
+    every caller catches it, so the message is almost never read -- but an
+    f-string ``{e}`` renders the whole subtree first. On a shared-DAG product
+    that rendering is tree-sized (johnall: seconds per raise, re-raised at every
+    relaxation build; #1456). Type and operator identify the refused node.
+    """
+    op = getattr(e, "op", None)
+    return type(e).__name__ if op is None else f"{type(e).__name__}({op!r})"
 
 
 def _linearize_affine_expr_sparse(
@@ -1884,12 +1902,14 @@ def _linearize_affine_expr_sparse(
             if e.size == 1:
                 coeff[offset] = coeff.get(offset, 0.0) + scale
                 return
-            raise ValueError(f"Cannot use array variable as scalar affine argument: {e}")
+            raise ValueError(
+                f"Cannot use array variable as scalar affine argument: {_node_summary(e)}"
+            )
 
         if isinstance(e, IndexExpression):
             flat = _get_flat_index(e, model)
             if flat is None:
-                raise ValueError(f"Cannot linearize IndexExpression: {e}")
+                raise ValueError(f"Cannot linearize IndexExpression: {_node_summary(e)}")
             coeff[flat] = coeff.get(flat, 0.0) + scale
             return
 
@@ -1913,12 +1933,12 @@ def _linearize_affine_expr_sparse(
                 if isinstance(e.right, Constant):
                     visit(e.left, scale * scalar_value(e.right))
                     return
-                raise ValueError(f"Non-affine product in univariate argument: {e}")
+                raise ValueError(f"Non-affine product in univariate argument: {_node_summary(e)}")
             if e.op == "/":
                 if isinstance(e.right, Constant):
                     visit(e.left, scale / scalar_value(e.right))
                     return
-                raise ValueError(f"Non-affine division in univariate argument: {e}")
+                raise ValueError(f"Non-affine division in univariate argument: {_node_summary(e)}")
             if e.op == "**":
                 if isinstance(e.right, Constant):
                     exp = scalar_value(e.right)
@@ -1928,7 +1948,7 @@ def _linearize_affine_expr_sparse(
                     if exp == 0.0:
                         const_acc[0] += scale
                         return
-                raise ValueError(f"Non-affine power in univariate argument: {e}")
+                raise ValueError(f"Non-affine power in univariate argument: {_node_summary(e)}")
 
         if isinstance(e, SumExpression):
             # Only a full reduction is the single affine row this builds; an axis
@@ -1937,7 +1957,9 @@ def _linearize_affine_expr_sparse(
             # ``ValueError`` is this walk's "not affine" signal -- every caller
             # catches it and abstains.
             if not sum_is_full_reduction(e):
-                raise ValueError(f"Axis-reduced sum is array-valued, not one affine row: {e}")
+                raise ValueError(
+                    f"Axis-reduced sum is array-valued, not one affine row: {_node_summary(e)}"
+                )
             op = e.operand
             if isinstance(op, Variable):
                 offset = _compute_var_offset(op, model)
@@ -1950,7 +1972,7 @@ def _linearize_affine_expr_sparse(
             # statically known) is refused, never guessed.
             elems = scalar_elements(op)
             if elems is None:
-                raise ValueError(f"Sum operand has no static scalar expansion: {e}")
+                raise ValueError(f"Sum operand has no static scalar expansion: {_node_summary(e)}")
             for elem in elems:
                 visit(elem, scale)
             return
@@ -1959,7 +1981,7 @@ def _linearize_affine_expr_sparse(
             # ``c @ x`` with a scalar result is the contraction ``sum_k c_k x_k``.
             contraction = scalar_matmul_contraction(e)
             if contraction is None:
-                raise ValueError(f"Matmul is not a scalar contraction: {e}")
+                raise ValueError(f"Matmul is not a scalar contraction: {_node_summary(e)}")
             visit(contraction, scale)
             return
 
@@ -1968,7 +1990,7 @@ def _linearize_affine_expr_sparse(
                 visit(term, scale)
             return
 
-        raise ValueError(f"Unsupported affine argument node {type(e).__name__}: {e}")
+        raise ValueError(f"Unsupported affine argument node: {_node_summary(e)}")
 
     visit(expr, 1.0)
     return coeff, const_acc[0]
@@ -2651,7 +2673,27 @@ def _finite_bound_or_none(value: Optional[float]) -> Optional[float]:
 
 
 def _expand_integer_powers_for_relaxation(expr: Expression, model: Model) -> Expression:
-    """Expand small integer powers of affine expressions for existing monomial lifts."""
+    """Expand small integer powers of affine expressions for existing monomial lifts.
+
+    #1456: when distributing *expr* would exceed the per-call budget
+    ``_DISTRIBUTE_TERM_BUDGET``, *expr* is returned unchanged. ``visit`` below
+    re-distributes at every ``*`` node of an unmemoized walk, each call bounded
+    by that budget but not their number -- on johnall's objective term that is
+    minutes of distribution for a result the per-call budget would truncate
+    anyway. Undistributed, the term is not a recognised separable shape and the
+    sole caller's bound abstains (``None``), which is always sound. The estimate
+    is an upper bound on what ``visit`` builds (it expands every integer power,
+    ``visit`` only those up to ``_MAX_OBJECTIVE_LIFT_POWER``), and no MINLPLib
+    body but johnall's and saa_2's exceeds the budget, so elsewhere this is
+    bound-neutral.
+    """
+    if estimate_distributed_terms(fold_affine_constants(expr)) > _DISTRIBUTE_TERM_BUDGET:
+        logger.debug(
+            "integer-power expansion skipped: distributing the term would exceed the "
+            "%s-term budget (#1456); the separable objective bound abstains",
+            f"{_DISTRIBUTE_TERM_BUDGET:,}",
+        )
+        return expr
 
     def visit(node: Expression) -> Expression:
         if isinstance(node, BinaryOp):
@@ -3538,6 +3580,12 @@ def _separable_objective_lower_bound(
 
         # Distribute this single term and fold each resulting sub-term through the
         # simple-shape matchers (polynomial path needs the expanded form).
+        # #1456: a term the per-call distribution budget cannot afford would come
+        # back with products left intact -- not a separable shape -- after up to
+        # the full budget of work, repeated at every relaxation build. Abstain
+        # without paying for it (only johnall's and saa_2's bodies are that big).
+        if estimate_distributed_terms(fold_affine_constants(term)) > _DISTRIBUTE_TERM_BUDGET:
+            return None
         sub_terms: list[tuple[float, Expression]] = []
         _flatten_additive_terms(distribute_products(term), scale, sub_terms)
         for sub_scale, sub_term in sub_terms:

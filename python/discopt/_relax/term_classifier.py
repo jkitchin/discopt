@@ -42,6 +42,7 @@ from discopt._relax.scalarize import scalar_elements, scalar_matmul_contraction,
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
+    Constraint,
     Expression,
     FunctionCall,
     IndexExpression,
@@ -623,27 +624,44 @@ def estimate_distributed_terms(expr: Expression) -> int:
     Monotone up the tree — every node's estimate is >= each child's — which is
     what lets :func:`distribute_products` decide the whole expression is
     affordable with a single check at the root.
+
+    Memoized on node identity (#1456): the estimate is a pure function of the
+    subtree, and an expression DAG with shared subtrees (``from_nl`` common
+    subexpressions, or a :func:`distribute_products` result, whose terms share
+    their factor subtrees) made the unmemoized recursion cost the *tree* size,
+    not the DAG size. Same arithmetic, same saturation, same value.
     """
+    return _estimate_terms(expr, {})
+
+
+def _estimate_terms(expr: Expression, memo: dict[int, int]) -> int:
+    hit = memo.get(id(expr))
+    if hit is not None:
+        return hit
     if isinstance(expr, BinaryOp):
         if expr.op in ("+", "-"):
-            return min(
-                estimate_distributed_terms(expr.left) + estimate_distributed_terms(expr.right),
-                _TERM_CAP,
+            est = min(
+                _estimate_terms(expr.left, memo) + _estimate_terms(expr.right, memo), _TERM_CAP
             )
-        if expr.op == "*":
-            return min(
-                estimate_distributed_terms(expr.left) * estimate_distributed_terms(expr.right),
-                _TERM_CAP,
+        elif expr.op == "*":
+            est = min(
+                _estimate_terms(expr.left, memo) * _estimate_terms(expr.right, memo), _TERM_CAP
             )
-        if expr.op == "**" and isinstance(expr.right, Constant):
+        elif expr.op == "**" and isinstance(expr.right, Constant):
             n = float(expr.right.value)
             n_int = int(n)
             if n == n_int and n_int >= 1:
-                return min(int(estimate_distributed_terms(expr.left) ** n_int), _TERM_CAP)
-        return 1
-    if isinstance(expr, UnaryOp):
-        return estimate_distributed_terms(expr.operand)
-    return 1
+                est = min(int(_estimate_terms(expr.left, memo) ** n_int), _TERM_CAP)
+            else:
+                est = 1
+        else:
+            est = 1
+    elif isinstance(expr, UnaryOp):
+        est = _estimate_terms(expr.operand, memo)
+    else:
+        est = 1
+    memo[id(expr)] = est
+    return est
 
 
 # Ceiling on the number of additive terms a single ``distribute_products`` call
@@ -699,6 +717,127 @@ def distribution_exceeds_budget(expr: Expression) -> bool:
     return estimate_distributed_terms(expr) > _DISTRIBUTE_TERM_BUDGET
 
 
+# Ceiling on the terms ONE PASS may spend distributing EVERY body of a model
+# (#1456, the johnall regression of 2026-10-09).
+#
+# ``_DISTRIBUTE_TERM_BUDGET`` bounds one call, and a pass that distributes every
+# constraint body makes one call per body -- so the per-call budget bounds an
+# iteration, never the pass. ``johnall`` is exactly that shape: 190 constraint
+# bodies of 129 DAG nodes, each asking for 16.8 M terms, each therefore spending
+# the full per-call budget (611,757 output DAG nodes, ~1.8 s apiece) -- ~340 s of
+# distribution per pass before a single detector walks the result, and the
+# integer-product detector then walked each result as a *tree* (8.26 M nodes, the
+# output shares its factor subtrees). ``has_nonconvex_integer_bilinear`` never
+# returned against ``time_limit=10``/``20``.
+#
+# Set from measurement (``sum_body min(est, _DISTRIBUTE_TERM_BUDGET)`` over all
+# 1610 MINLPLib instances, 2026-10-09): the largest legitimate total is 4,107,430
+# terms (``acopf_caseactivsg70k_qcqp``, 1,016,477 bodies -- a total that grows
+# with model size, which is fine); the next two are ``johnall`` at 200,278,212
+# and ``saa_2`` at 2,097,170,814. 2**24 = 16,777,216 sits in that gap, 4.1x above
+# the corpus maximum and 11.9x below the cheapest pathology, so it truncates
+# exactly those two instances -- the same two the per-call budget truncates --
+# and changes nothing anywhere else. A backstop, not a tuning knob.
+#
+# A deterministic work count, not a clock: what a pass recognises must not
+# depend on machine load (#912; CLAUDE.md §5's bound-neutral regime).
+_MODEL_DISTRIBUTE_TERM_BUDGET = 1 << 24
+
+
+def _model_bodies(model: Model):
+    if model._objective is not None:
+        yield model._objective.expression
+    for c in model._constraints:
+        if isinstance(c, Constraint):
+            yield c.body
+
+
+def model_distribution_terms(model: Model) -> int:
+    """Terms a pass spends distributing every body of *model* once.
+
+    Each body is charged what :func:`distribute_products` would actually spend on
+    it -- its estimate after the same affine fold, capped at the per-call
+    :data:`_DISTRIBUTE_TERM_BUDGET` (beyond which the call stops distributing).
+    Linear in the model's DAG size; no body is distributed to compute it.
+    """
+    total = 0
+    for body in _model_bodies(model):
+        est = estimate_distributed_terms(fold_affine_constants(body))
+        total += min(est, _DISTRIBUTE_TERM_BUDGET)
+    return total
+
+
+def model_distribution_exceeds_budget(model: Model, *, pass_name: str) -> bool:
+    """True when a pass that distributes every body of *model* must abstain.
+
+    The deterministic work budget for the whole-model distributing pre-solve
+    passes (:data:`_MODEL_DISTRIBUTE_TERM_BUDGET`). A pass that gets ``True``
+    takes its existing "found nothing / model unchanged" path. Abstention is
+    logged (#1456 item 4): it means weaker structure recognition, and a reader
+    comparing two runs must be able to see that.
+    """
+    total = model_distribution_terms(model)
+    if total <= _MODEL_DISTRIBUTE_TERM_BUDGET:
+        return False
+    logger.warning(
+        "%s: distributing every body would cost %s terms, over the %s-term "
+        "per-pass budget; the pass abstains and leaves the model unchanged "
+        "(structure may go unrecognized and bounds may be weaker; #1456)",
+        pass_name,
+        f"{total:,}",
+        f"{_MODEL_DISTRIBUTE_TERM_BUDGET:,}",
+    )
+    return True
+
+
+def distribute_bodies(
+    bodies,
+    *,
+    pass_name: str,
+    protected_squares: frozenset[int] | None = None,
+):
+    """Yield :func:`distribute_products` of each of *bodies*, under the per-pass
+    budget :data:`_MODEL_DISTRIBUTE_TERM_BUDGET` (#1456).
+
+    For a pass that distributes every body of a model. Each body is folded and
+    estimated first (linear in its DAG size, no distribution); when the total the
+    pass would spend -- each body charged ``min(estimate, per-call budget)``, as
+    in :func:`model_distribution_terms` -- fits the per-pass budget, every body
+    is distributed exactly as :func:`distribute_products` distributes it. Over
+    it, a body that fits the per-call budget is still distributed in full, and a
+    body that does not is yielded folded but undistributed (logged once, here)
+    rather than partially distributed to the per-call budget.
+
+    That second output is the shape a partially distributed body already has --
+    an algebraically identical expression with products left intact -- so every
+    consumer audited for the per-call budget (see its definition) handles it the
+    same way: as structure not recognised, never as a wrong conclusion. The
+    decision is a function of the model alone: a deterministic work count, not
+    a clock.
+    """
+    prepared = []
+    total = 0
+    for body in bodies:
+        folded = fold_affine_constants(body, protected_squares)
+        est = estimate_distributed_terms(folded)
+        prepared.append((folded, est))
+        total += min(est, _DISTRIBUTE_TERM_BUDGET)
+    whole = total <= _MODEL_DISTRIBUTE_TERM_BUDGET
+    if not whole:
+        logger.warning(
+            "%s: distributing every body would cost %s terms, over the %s-term "
+            "per-pass budget; the %d bodies the per-call budget cannot afford are "
+            "left undistributed (algebraically identical, but structure may go "
+            "unrecognized and bounds may be weaker; #1456)",
+            pass_name,
+            f"{total:,}",
+            f"{_MODEL_DISTRIBUTE_TERM_BUDGET:,}",
+            sum(1 for _f, e in prepared if e > _DISTRIBUTE_TERM_BUDGET),
+        )
+    for folded, est in prepared:
+        yield _distribute_folded(folded, est, protected_squares, whole)
+
+
 def distribute_products(
     expr: Expression, protected_squares: frozenset[int] | None = None
 ) -> Expression:
@@ -711,9 +850,26 @@ def distribute_products(
     for why it exists and what depends on it.
     """
     expr = fold_affine_constants(expr, protected_squares)
-    est = estimate_distributed_terms(expr)
+    return _distribute_folded(expr, estimate_distributed_terms(expr), protected_squares, True)
+
+
+def _distribute_folded(
+    expr: Expression,
+    est: int,
+    protected_squares: frozenset[int] | None,
+    partial: bool,
+) -> Expression:
+    """Distribute an already-folded *expr* whose term estimate is *est*.
+
+    ``partial=False`` is the per-pass budget's mode (:func:`distribute_bodies`):
+    a body the per-call budget cannot afford is returned folded but otherwise
+    undistributed, instead of being distributed up to the per-call budget --
+    which is what costs a whole-model pass ``n_bodies`` times that budget.
+    """
     if est <= _DISTRIBUTE_TERM_BUDGET:
         return _distribute_unbudgeted(expr, protected_squares)
+    if not partial:
+        return expr
     result = _distribute_within_budget(expr, protected_squares, {}, [_DISTRIBUTE_TERM_BUDGET])
     logger.warning(
         "distribute_products: %s estimated terms exceeds the %s-term budget; the "
@@ -1755,8 +1911,16 @@ def _classify_nonlinear_terms_python(model: Model) -> NonlinearTerms:
     # Distribute multiplication over addition/subtraction first so that products
     # of the form ``y * (x^p - c)`` decompose into ``y*x^p - y*c``, exposing the
     # ``y * x^p`` bilinear-with-fractional-power pattern to classification.
+    #
+    # #1456: every body goes through ONE per-pass distribution budget
+    # (``distribute_bodies``), not just the per-call one. Unchanged wherever the
+    # model's total distribution fits it (every MINLPLib instance but johnall and
+    # saa_2); there the oversized bodies stay undistributed, and an intact product
+    # of non-constant factors is flagged ``general_nl`` below -- the same answer a
+    # per-call-truncated product already gets.
+    bodies: list[Expression] = []
     if model._objective is not None:
-        _classify_node(distribute_products(model._objective.expression))
+        bodies.append(model._objective.expression)
 
     # ── Scan constraints ──
     # Array-valued bodies are expanded element-wise first (#981). A vectorized
@@ -1769,8 +1933,9 @@ def _classify_nonlinear_terms_python(model: Model) -> NonlinearTerms:
         rows = scalar_elements(constraint.body)
         if rows is None:
             rows = [constraint.body]
-        for body in rows:
-            _classify_node(distribute_products(body))
+        bodies.extend(rows)
+    for dist in distribute_bodies(bodies, pass_name="classify_nonlinear_terms"):
+        _classify_node(dist)
 
     # ── Build partition_candidates ──
     # Variables that appear in product terms (not just monomials, since x^2 is

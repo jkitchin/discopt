@@ -55,7 +55,11 @@ from discopt.mpec import carry_complementarities
 from discopt.solver_tuning import _env_flag
 
 from .factorable_reform import _collect_mul_factors
-from .term_classifier import _compute_var_offset, distribute_products
+from .term_classifier import (
+    _compute_var_offset,
+    distribute_products,
+    model_distribution_exceeds_budget,
+)
 
 # Skip an integer factor whose range needs more than this many bits — the
 # expansion adds one binary and one aux product per bit, so a huge range would
@@ -732,6 +736,16 @@ def _for_each_int_bilinear(expr: Expression, implied, fn) -> None:
                     _for_each_int_bilinear(c, implied, fn)
 
 
+def _over_distribution_budget(model: Model, pass_name: str) -> bool:
+    """#1456: every detector here distributes EVERY body of the model and walks
+    the result, so its cost is the model's whole distribution, which the
+    per-call ``_DISTRIBUTE_TERM_BUDGET`` does not bound (``johnall``:
+    ``has_nonconvex_integer_bilinear`` never returned at ``time_limit=10``).
+    Over the per-pass budget the detector reports "nothing found", which is the
+    answer every caller already handles by leaving the model unchanged."""
+    return model_distribution_exceeds_budget(model, pass_name=pass_name)
+
+
 def _bodies(model: Model):
     for c in model._constraints:
         if isinstance(c, Constraint):
@@ -809,6 +823,8 @@ def has_integer_product_work(model: Model, implied=frozenset(), multilinear: boo
     integer square (integer or *implied*-integer factor) this pass can linearize.
     When *multilinear* is set, also detect integer-multilinear products (issue
     #707)."""
+    if _over_distribution_budget(model, "integer-product reform"):
+        return False
     for body in _bodies(model):
         found = []
         _for_each_int_bilinear(body, implied, lambda ints: found.append(True))
@@ -823,6 +839,8 @@ def has_integer_multilinear_work(model: Model, implied=frozenset()) -> bool:
     """True if any constraint/objective has an integer-*multilinear* product
     (>=3 factors, <=1 continuous, >=1 integer/implied-integer) — the class the
     ``DISCOPT_INTEGER_MULTILINEAR_REFORM`` pass linearizes (issue #707)."""
+    if _over_distribution_budget(model, "integer-multilinear reform"):
+        return False
     return any(_has_int_multilinear(body, implied) for body in _bodies(model))
 
 
@@ -837,6 +855,8 @@ def has_nonconvex_integer_bilinear(model: Model) -> bool:
     """
     from .implied_integer import detect_implied_integers
 
+    if _over_distribution_budget(model, "integer-bilinear nonconvexity witness"):
+        return False
     implied = frozenset(detect_implied_integers(model))
     found: list[bool] = []
     for body in _bodies(model):

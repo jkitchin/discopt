@@ -150,7 +150,7 @@ def collect_edge_concave_quadratics(model, *, max_factors: int = 12) -> list[Edg
     clear its round-off bound has no determined sign and disqualifies the block.
     """
     from discopt._relax.milp_relaxation import _expr_to_polynomial
-    from discopt._relax.term_classifier import distribute_products
+    from discopt._relax.term_classifier import distribute_bodies
 
     bodies = []
     if getattr(model, "_objective", None) is not None:
@@ -160,10 +160,11 @@ def collect_edge_concave_quadratics(model, *, max_factors: int = 12) -> list[Edg
 
     blocks: list[EdgeConcaveQuadratic] = []
     seen: set = set()
-    for body in bodies:
+    # #1456: one distribution budget for the whole loop, not one per body.
+    for dist in distribute_bodies(bodies, pass_name="edge-concave detection"):
         # #1520: no except. ``_expr_to_polynomial`` declines by returning ``None``
         # (skipped just below); a raise is a defect, not "no edge-concave block".
-        poly = _expr_to_polynomial(distribute_products(body), model)
+        poly = _expr_to_polynomial(dist, model)
         if poly is None:
             continue
         const, terms = poly
