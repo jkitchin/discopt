@@ -6091,6 +6091,12 @@ class Model:
             Upper bound (scalar broadcast to *shape*, or array matching *shape*).
             ``None`` means the default. A NaN entry raises ``ValueError``.
 
+            The default ``±9.999e19`` means *no bound* (#1678): an LP/MILP that
+            runs off along it is reported ``unbounded``, and any other result
+            whose point sits on it is ``feasible`` with no dual bound, never a
+            certified ``optimal`` at that corner. An explicit bound below it,
+            however large, is honoured as declared.
+
         Returns
         -------
         Variable
@@ -9338,6 +9344,7 @@ class Model:
                 _withhold_unverified_certificate(_ck_res)
                 _repair_published_incumbent(_ck_res)
                 _guard_unresolved_objective(_ck_res)
+                self._withhold_default_box_certificate(_ck_res)
                 return _ck_res
 
         from discopt._relax.deadline import deadline_scope
@@ -10110,6 +10117,8 @@ class Model:
             else:
                 _repair_published_incumbent(result)
             _guard_unresolved_objective(result)
+            # #1678 (b): after every other guard, so nothing re-grants it.
+            self._withhold_default_box_certificate(result)
 
         if llm:
             try:
@@ -10183,6 +10192,9 @@ class Model:
         _no_bound_by_design = isinstance(result, SolveResult) and (
             (result.algorithm_route or "").startswith("pounce:")
             or bool((result.solver_stats or {}).get("certificate/objective_unresolved"))
+            # #1678 (b): withdrawn because it rested on the default box, with its
+            # own warning naming the variables.
+            or bool((result.solver_stats or {}).get("certificate/default_box_withheld"))
         )
         if isinstance(result, SolveResult) and result.bound is None and result.status == "error":
             # #1507: the envelope/epigraph advice below describes a relaxation that
@@ -10371,6 +10383,87 @@ class Model:
             self._last_solve_result = result
 
         return result
+
+    def _withhold_default_box_certificate(self, result: "SolveResult") -> None:
+        """#1678 (b): no certificate that rests on the default ``±9.999e19`` box.
+
+        A variable declared without a bound gets ``DEFAULT_VARIABLE_BOUND`` on
+        that side. That number is a stand-in for "no bound" -- the user never
+        wrote it -- so a result whose point sits on it describes the box discopt
+        invented, not the problem the user posed. ``min x - z**2`` with
+        ``z*x <= 3``, ``x`` free and ``z in [-2, 2]`` is unbounded (``z = 0``,
+        ``x -> -inf``), yet the spatial tree published ``optimal`` with
+        objective = bound = ``-9.999e19`` and ``gap_certified=True``. That is a
+        false certificate.
+
+        A side counts as defaulted when its magnitude is at least
+        ``DEFAULT_VARIABLE_BOUND``. The value is indistinguishable from an
+        explicitly written ``9.999e19``, and both mean "unbounded" (the AMPL and
+        NL convention reads ``>= 1e20`` the same way). An explicit finite bound
+        below it, even a huge one such as ``1e18``, is honoured as posed (#850).
+
+        A point "sits on" a defaulted side when its coordinate is past
+        ``EFFECTIVE_INF`` (``1e19``), the threshold at which POUNCE and Ipopt
+        themselves read a value as infinite. Incumbents only approach the corner (``-9.9984e19`` was
+        measured), so an equality test would miss them. When a coordinate does,
+        the result loses its certificate and its dual bound: ``optimal`` becomes
+        ``feasible``, ``gap_certified`` is set ``False``, and ``bound``/``gap``
+        are cleared. A bound proved over the invented box says nothing about the
+        unbounded problem. ``unbounded`` and ``infeasible`` are left alone. The
+        LP/MILP route proves ``unbounded`` directly (``_highs_std_form`` hands
+        the default sides to HiGHS as infinite). This guard is the class-level
+        backstop for every other route. It only ever downgrades.
+        """
+        if result.x is None:
+            return
+        import logging as _dlogging
+        import warnings as _warnings
+
+        import numpy as _np
+
+        from discopt._relax._numeric import EFFECTIVE_INF
+        from discopt.constants import DEFAULT_VARIABLE_BOUND
+
+        _sentinel = DEFAULT_VARIABLE_BOUND * (1.0 - 1e-12)
+        _on_side = EFFECTIVE_INF
+        hits: list[str] = []
+        by_name = {v.name: v for v in self._variables}
+        for name, val in result.x.items():
+            v = by_name.get(name)
+            if v is None:
+                continue
+            xv = _np.atleast_1d(_np.asarray(val, dtype=_np.float64)).ravel()
+            lb = _np.broadcast_to(_np.asarray(v.lb, dtype=_np.float64), v.shape).ravel()
+            ub = _np.broadcast_to(_np.asarray(v.ub, dtype=_np.float64), v.shape).ravel()
+            if xv.shape != lb.shape:
+                continue
+            on = ((ub >= _sentinel) & (xv >= _on_side)) | ((lb <= -_sentinel) & (xv <= -_on_side))
+            if on.any():
+                hits.append(name if xv.size == 1 else f"{name}{list(_np.flatnonzero(on)[:3])}")
+        if not hits:
+            return
+        had_claim = result.status == "optimal" or bool(result.gap_certified)
+        had_bound = result.bound is not None
+        if not (had_claim or had_bound):
+            return
+        msg = (
+            f"{self.name}: the returned point sits on the default variable bound "
+            f"(+/-{DEFAULT_VARIABLE_BOUND:g}) for {', '.join(hits[:5])}. That bound "
+            f"stands in for 'no bound', so the result describes a box the model never "
+            f"declared: the problem as posed may be unbounded or have no attained "
+            f"optimum. Reporting status 'feasible' with no dual bound instead of a "
+            f"certificate (#1678). Declare finite lb/ub for these variables to "
+            f"solve a bounded problem."
+        )
+        _dlogging.getLogger("discopt.solver").warning(msg)
+        _warnings.warn(msg, UserWarning, stacklevel=3)
+        if result.status == "optimal":
+            result.status = "feasible"
+        result.gap_certified = False
+        result._set_bound(None, valid=False)
+        result.gap = None
+        result.solver_stats = dict(result.solver_stats or {})
+        result.solver_stats["certificate/default_box_withheld"] = 1.0
 
     def _reconcile_objective_with_model(self, result: "SolveResult") -> None:
         """Make ``result.objective`` this model's objective at ``result.x``.

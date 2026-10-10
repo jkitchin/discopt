@@ -367,8 +367,10 @@ def test_lp_unbounded_needs_a_verified_ray_and_point(highs):
     assert res.status == "unbounded" and _on_highs_route(res)
 
 
-def test_lp_default_box_corner_is_optimal_not_error(highs):
-    """``min -x`` on the default ±9.999e19 box (#850/#937) survives the readback guard."""
+def test_lp_default_box_is_unbounded_not_error(highs):
+    """``min -x`` with ``x`` declared free: the default ±9.999e19 box means "no
+    bound" (#1678 b), so the route proves ``unbounded`` by a verified ray instead of
+    certifying the invented corner (#850/#937 had pinned ``optimal`` there)."""
     m = dm.Model("corner")
     x = m.continuous("x")
     y = m.continuous("y", lb=0.0, ub=1.0)
@@ -376,8 +378,22 @@ def test_lp_default_box_corner_is_optimal_not_error(highs):
     m.subject_to(x + y >= 0, name="c")
     res = m.solve()
     assert _on_highs_route(res)
+    assert res.status == "unbounded"
+    assert res.objective is None and res.x is None
+
+
+def test_lp_explicit_huge_box_corner_is_optimal_not_error(highs):
+    """An explicit huge finite bound is honoured as posed and survives the readback
+    guard: ``optimal`` at the corner."""
+    m = dm.Model("corner_explicit")
+    x = m.continuous("x", lb=-9.9e19, ub=9.9e19)
+    y = m.continuous("y", lb=0.0, ub=1.0)
+    m.minimize(-x - y)
+    m.subject_to(x + y >= 0, name="c")
+    res = m.solve()
+    assert _on_highs_route(res)
     assert res.status == "optimal"
-    assert res.objective == pytest.approx(-9.999e19 - 1.0, rel=1e-12)
+    assert res.objective == pytest.approx(-9.9e19 - 1.0, rel=1e-12)
 
 
 @pytest.mark.parametrize("build", [_mixed_lp, lambda: _knapsack()], ids=["lp", "milp"])
@@ -554,14 +570,18 @@ def test_milp_integer_infeasible_is_certified_with_highs_provenance(highs):
     assert "milp/infeasible_provenance_farkas" not in res.solver_stats
 
 
-def test_milp_on_the_default_box_is_not_falsely_infeasible(highs):
+@pytest.mark.parametrize("y_box", [None, 9.9e19], ids=["default", "explicit-huge"])
+def test_milp_on_the_default_box_is_not_falsely_infeasible(highs, y_box):
     """HiGHS MIP given the finite ±9.999e19 box of the free column ``y`` answered
     ``kInfeasible``, and the route certified it. Feasible: optimum 4.0 at x=(-1, 2, 1,
-    3, 3), y=0 (scipy and the Rust route agree). Found by adversarial testing."""
+    3, 3), y=0 (scipy and the Rust route agree). Found by adversarial testing.
+
+    Since #1678 (b) the default box reaches HiGHS as open, so the huge-box relaxation
+    is exercised by an explicit sentinel-adjacent bound instead."""
     m = dm.Model("milp_default_box")
     lo, hi = [-1, 1, 0, 0, 3], [-1, 8, 2, 4, 3]
     x = [m.integer(f"x{j}", lb=lo[j], ub=hi[j]) for j in range(5)]
-    y = m.continuous("y")
+    y = m.continuous("y") if y_box is None else m.continuous("y", lb=-y_box, ub=y_box)
     m.minimize(-4 * x[0] + 4 * x[1] - 4 * x[2] - x[3] + 5 * y - 1)
     m.subject_to(-3 * x[2] + 2 * x[3] + 5 * x[4] - 5 * y == 18)
     m.subject_to(-x[0] + 5 * x[1] + x[2] + 4 * x[3] + x[4] <= 27)
@@ -573,7 +593,8 @@ def test_milp_on_the_default_box_is_not_falsely_infeasible(highs):
     assert _on_highs_route(res)
     assert res.status == "optimal" and res.gap_certified
     assert res.objective == pytest.approx(4.0, abs=1e-6)
-    assert res.solver_stats.get("milp/huge_box_relaxed") == 1.0
+    if y_box is not None:
+        assert res.solver_stats.get("milp/huge_box_relaxed") == 1.0
 
 
 def test_milp_declared_lower_bound_beside_a_default_side_survives(highs):

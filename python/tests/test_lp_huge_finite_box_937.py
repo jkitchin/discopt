@@ -81,10 +81,10 @@ def test_simplex_reports_unbounded_at_the_inf_sentinel():
 def test_model_solve_on_the_default_continuous_box_is_not_error():
     """End-to-end: the issue's model must not come back ``error``.
 
-    ``m.continuous(lb=0)`` leaves the default upper bound ``9.999e19``, so the LP
-    as posed is bounded and the sound verdict is ``optimal`` at ``-2 * 9.999e19``
-    — the certificate the #850 guard's own comment says the exact simplex should
-    supply. What it must never be is ``error``.
+    ``m.continuous(lb=0)`` leaves the default upper bound ``9.999e19``, which since
+    #1678 (b) is read as "no bound": the LP runs off along ``z`` and the sound
+    verdict is ``unbounded`` (#850 had read the default as finite and certified
+    ``optimal`` at ``-2 * 9.999e19``). What it must never be is ``error``.
     """
     import discopt.modeling as dm
 
@@ -95,8 +95,24 @@ def test_model_solve_on_the_default_continuous_box_is_not_error():
 
     res = m.solve()
     assert res.status != "error", "the #937 defect: a correct verdict lost to `error`"
-    assert res.status == "optimal"
-    assert res.objective == pytest.approx(-2.0 * 9.999e19, rel=1e-9)
+    assert res.status == "unbounded"
+    assert res.objective is None and res.x is None
+
+
+def test_model_solve_on_an_explicit_huge_finite_box_is_optimal_at_the_corner():
+    """The #850 contract for a bound the user actually wrote: ``ub=1e17`` is a real
+    finite bound (in the [1e15, 1e20) band POUNCE relaxes), so the LP is bounded and
+    the certificate is ``optimal`` at the corner -- never ``error`` or ``unbounded``."""
+    import discopt.modeling as dm
+
+    m = dm.Model("explicit_huge")
+    z = m.continuous("z", shape=(2,), lb=0, ub=1e17)
+    m.minimize(-z[0] - z[1])
+    m.subject_to(z[0] + z[1] >= 1.0, name="lower")
+
+    res = m.solve()
+    assert res.status == "optimal" and res.gap_certified
+    assert res.objective == pytest.approx(-2.0e17, rel=1e-9)
 
 
 @pytest.mark.smoke
