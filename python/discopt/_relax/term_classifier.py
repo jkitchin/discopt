@@ -39,6 +39,7 @@ import numpy as np
 
 from discopt._flat_index import resolve_scalar_slot
 from discopt._relax.scalarize import scalar_elements, scalar_matmul_contraction, static_shape
+from discopt._work_budget import WorkBudget
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -877,6 +878,40 @@ def distribute_bodies(
         )
     for folded, est in prepared:
         yield _distribute_folded(folded, est, protected_squares, whole)
+
+
+#: :class:`~discopt._work_budget.WorkBudget` kind for a lazy whole-model pass:
+#: distributed terms, each body charged ``min(estimate, per-call budget)``.
+DISTRIBUTED_TERMS = "distributed_terms"
+
+
+def pass_distribution_budget() -> WorkBudget:
+    """A fresh per-pass budget of :data:`_MODEL_DISTRIBUTE_TERM_BUDGET`
+    distributed terms, for :func:`distribute_charged`."""
+    return WorkBudget({DISTRIBUTED_TERMS: _MODEL_DISTRIBUTE_TERM_BUDGET})
+
+
+def distribute_charged(expr: Expression, budget: WorkBudget) -> Expression | None:
+    """:func:`distribute_products` of *expr*, charged to a per-pass *budget*.
+
+    The lazy form of :func:`distribute_bodies`, for a pass that may stop early
+    (a scan that returns on its first hit) and so must not fold and estimate
+    every body up front. The body is charged what :func:`distribute_products`
+    spends on it -- its folded estimate capped at the per-call
+    :data:`_DISTRIBUTE_TERM_BUDGET`, the same charge as
+    :func:`model_distribution_terms` -- and the result is identical to
+    :func:`distribute_products`. Returns ``None``, charging nothing, when the
+    body does not fit what is left: the caller abstains. A deterministic work
+    count over the bodies in model order, not a clock (#1456).
+    """
+    folded = fold_affine_constants(expr)
+    est = estimate_distributed_terms(folded)
+    cost = min(est, _DISTRIBUTE_TERM_BUDGET)
+    left = budget.remaining(DISTRIBUTED_TERMS)
+    if left is not None and cost > left:
+        return None
+    budget.charge(DISTRIBUTED_TERMS, cost)
+    return _distribute_folded(folded, est, None, True)
 
 
 def distribute_products(
