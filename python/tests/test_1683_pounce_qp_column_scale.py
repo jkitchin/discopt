@@ -142,15 +142,23 @@ def test_caller_residuals_match_the_engines_own_definition(monkeypatch):
     ub = np.array([b[1] for b in bounds])
     G = sp.csr_matrix(np.ones((1, len(c))))
     h = np.array([5.0])
-    r = pq.solve_qp(P=Q, c=c, A=A_eq, b=b_eq, G=G, h=h, lb=lb, ub=ub)
-    assert r.status == "optimal"
-    mine = cvx.caller_residuals(r.x, r.y, r.z, r.z_lb, r.z_ub, Q, c, A_eq, b_eq, G, h, lb, ub)
-    eng = r.residuals
+    # Compare at early (truncated) iterates, where every residual is O(1e-3..10)
+    # and the definitions -- not roundoff -- decide agreement; at the optimum the
+    # residuals are ~1e-12 and only roundoff-level agreement is meaningful.
     executed = 0
-    for key in ("primal_infeasibility", "dual_infeasibility", "complementarity"):
-        assert mine[key] == pytest.approx(eng[key], rel=1e-6, abs=1e-14), key
-        executed += 1
-    assert executed == 3
+    for max_iter in (2, 3, 4, None):
+        r = pq.solve_qp(P=Q, c=c, A=A_eq, b=b_eq, G=G, h=h, lb=lb, ub=ub, max_iter=max_iter)
+        assert r.status == ("optimal" if max_iter is None else "iteration_limit")
+        mine = cvx.caller_residuals(r.x, r.y, r.z, r.z_lb, r.z_ub, Q, c, A_eq, b_eq, G, h, lb, ub)
+        eng = r.residuals
+        for key in ("primal_infeasibility", "dual_infeasibility", "complementarity"):
+            if max_iter is None:
+                assert abs(mine[key] - eng[key]) <= 1e-9, key
+            else:
+                assert eng[key] > 1e-3, (key, max_iter)
+                assert mine[key] == pytest.approx(eng[key], rel=1e-9), (key, max_iter)
+            executed += 1
+    assert executed == 12
 
 
 def test_scaled_and_unscaled_solves_agree_and_meet_kkt_in_caller_units(monkeypatch):
