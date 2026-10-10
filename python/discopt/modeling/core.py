@@ -10431,7 +10431,12 @@ class Model:
         _sentinel = DEFAULT_VARIABLE_BOUND * (1.0 - 1e-12)
         _on_side = EFFECTIVE_INF
         hits: list[str] = []
-        by_name = {v.name: v for v in self._variables}
+        # A variable the model never references (GAMS ``obj =e= f(x)`` folded into
+        # the objective leaves ``obj`` behind) is free in every sense: its value
+        # is arbitrary, often the box side, and it cannot make the problem
+        # unbounded. ``None`` means "could not tell", and then every variable counts.
+        used = self._referenced_variable_names()
+        by_name = {v.name: v for v in self._variables if used is None or v.name in used}
         for name, val in (result.x or {}).items():
             v = by_name.get(name)
             if v is None:
@@ -10451,7 +10456,7 @@ class Model:
             box_bound = box_bound and any(
                 bool(_np.any(_np.asarray(v.ub) >= _sentinel))
                 or bool(_np.any(_np.asarray(v.lb) <= -_sentinel))
-                for v in self._variables
+                for v in by_name.values()
             )
         if not (hits or box_bound):
             return
@@ -10486,6 +10491,52 @@ class Model:
         result.gap = None
         result.solver_stats = dict(result.solver_stats or {})
         result.solver_stats["certificate/default_box_withheld"] = 1.0
+
+    def _referenced_variable_names(self) -> Optional[frozenset[str]]:
+        """Names of the variables the objective or any constraint touches.
+
+        Returns ``None`` whenever the answer is not certain: no expression
+        objective, a builder/``.nl`` model, a non-algebraic constraint (indicator,
+        disjunction, SOS, logical), or any node type this walk does not know. A
+        caller treats ``None`` as "every variable is referenced", so an
+        incomplete walk can only make a guard fire more, never less.
+        """
+        if self._objective is None or getattr(self, "_nl_repr", None) is not None:
+            return None
+        if self._builder_linear_objective is not None:
+            return None
+        if self._builder_quadratic_objective is not None:
+            return None
+        roots: list = [self._objective.expression]
+        for c in self._constraints:
+            if type(c) is not Constraint:
+                return None
+            roots.append(c.body)
+        found: set[str] = set()
+        seen: set[int] = set()
+        stack = roots
+        while stack:
+            e = stack.pop()
+            if id(e) in seen:
+                continue
+            seen.add(id(e))
+            if isinstance(e, Variable):
+                found.add(e.name)
+            elif isinstance(e, (Constant, Parameter)):
+                pass
+            elif isinstance(e, IndexExpression):
+                stack.append(e.base)
+            elif isinstance(e, (BinaryOp, MatMulExpression)):
+                stack.extend((e.left, e.right))
+            elif isinstance(e, (UnaryOp, SumExpression)):
+                stack.append(e.operand)
+            elif isinstance(e, (FunctionCall, CustomCall)):
+                stack.extend(e.args)
+            elif isinstance(e, SumOverExpression):
+                stack.extend(e.terms)
+            else:
+                return None
+        return frozenset(found)
 
     def _reconcile_objective_with_model(self, result: "SolveResult") -> None:
         """Make ``result.objective`` this model's objective at ``result.x``.

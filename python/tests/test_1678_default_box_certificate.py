@@ -184,3 +184,30 @@ def test_no_dual_bound_of_the_default_box_without_a_point(monkeypatch, route):
     r, _ = _solve(m)
     assert r.status != "optimal" and not r.gap_certified, (r.status, r.bound)
     assert r.bound is None or abs(r.bound) < 1e19, (r.status, r.bound)
+
+
+def test_an_unreferenced_free_variable_does_not_block_the_certificate():
+    """A GAMS ``obj =e= f(x)`` folded into the objective leaves ``obj`` referenced
+    by nothing, and the solver may report it at the box side. It cannot make the
+    problem unbounded, so it must not withdraw the certificate (test_1613's
+    semicontinuous cases measured ``feasible`` until the guard skipped it)."""
+    import textwrap
+
+    from discopt.modeling.gams_parser import parse_gams
+
+    m = parse_gams(
+        textwrap.dedent(
+            """
+            Semicont Variable x; Variable obj;
+            x.lo = 2; x.up = 10;
+            Equation e; e.. obj =e= sqr(x - 0.8);
+            Model mm /all/; Solve mm using minlp minimizing obj;
+            """
+        )
+    )
+    assert m._referenced_variable_names() is not None
+    assert "obj" not in m._referenced_variable_names()
+    r, msgs = _solve(m)
+    assert r.status == "optimal" and r.gap_certified, (r.status, r.x)
+    assert r.objective == pytest.approx(0.64, abs=1e-6)
+    assert not any(_MATCH in m for m in msgs)
