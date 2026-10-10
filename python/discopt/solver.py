@@ -35358,9 +35358,18 @@ def _solve_miqp_bb(
             # Report "unknown", uncertified.
             status = "unknown"
             _gap_certified = False
+        elif not _gap_certified:
+            # #1699: a node whose relaxation POUNCE could neither solve nor prove
+            # empty (e.g. an unbounded convex MIQP: the node QP runs to the 1e20
+            # box and returns no iterate) was kept open at lb=-inf and then
+            # dropped when its integers were fixed. An exhausted tree that
+            # contains such a node proves nothing -- "infeasible" would be a
+            # false verdict on a feasible model. Report it honestly.
+            status = "unknown"
         else:
-            # Tree exhausted with no feasible node: infeasibility *is* a certified
-            # conclusion, so leave _gap_certified untouched.
+            # Tree exhausted with no feasible node and every pruned node carried
+            # a proof: infeasibility *is* a certified conclusion, so leave
+            # _gap_certified untouched.
             status = "infeasible"
 
     # Interactive debugger: terminal checkpoint. Fired after the status
