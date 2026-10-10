@@ -366,11 +366,17 @@ INVENTORY: tuple[tuple[str, str, str, str], ...] = (
         "bounded",
         "_DISTRIBUTE_TERM_BUDGET, PresolveDeadline",
     ),
+    # The scan is also bounded per pass: it charges each body it distributes to
+    # ``_MODEL_DISTRIBUTE_TERM_BUDGET`` (``distribute_charged``) and abstains on
+    # exhaustion, and its distributed-body walks are memoised, so the term charge
+    # bounds them too. Before that they re-walked shared subtrees and
+    # re-decomposed every sub-product: ~40 s of the #1456 blowup fixture's
+    # 45 s against ``time_limit=5``, all before the deadline was first read.
     (
         "discopt._relax.factorable_reform",
         "has_factorable_work",
         "bounded",
-        "_DISTRIBUTE_TERM_BUDGET, PresolveDeadline",
+        "_DISTRIBUTE_TERM_BUDGET,_MODEL_DISTRIBUTE_TERM_BUDGET, PresolveDeadline",
     ),
     # Bounded per call AND per pass: ``_DISTRIBUTE_TERM_BUDGET`` alone let the
     # Python route spend 191 x 1 M terms on johnall's unreformed model (the hang
