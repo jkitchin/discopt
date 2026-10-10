@@ -218,9 +218,16 @@ def certify_quadratic_objective_convex(model: Model, *, deadline: Optional[float
         return False
     hessian = dense_Q(quad)
 
-    from discopt._relax.quadratic_form import quadratic_is_psd
+    # #1679: a PROOF, the same predicate the ``solver="pounce"`` route certifies a
+    # QP with (``convex_ipm_pounce.certify_psd``). ``quadratic_is_psd`` -- used here
+    # before -- accepts ``lambda_min >= -slack``, "PSD to within roundoff", which
+    # admitted the float Gram matrix ``2 K'K`` of a rank-deficient least-squares
+    # model although ``exact_psd`` refutes it (lambda_min ~ -1e-14). The objective
+    # is then "not proven convex" here; its structural sum-of-squares spelling is
+    # still proven by the DCP walker, which does not go through this matrix.
+    from .eigenvalue import psd_certified
 
-    return quadratic_is_psd(hessian) is True
+    return psd_certified(hessian)
 
 
 def certify_convex(
