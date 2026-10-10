@@ -119,13 +119,15 @@ pub enum TreeStatus {
 /// — which is exactly how a fathom looser than the certificate becomes a false
 /// `Optimal`.
 ///
-/// Purely ABSOLUTE, as this kernel has always been. #1243 briefly gave it a
-/// relative second arm so it would match the Python tree's disjunction; that was
-/// reverted, because the relative arm never existed here and adding one can only
-/// LOOSEN the fathom — a caller tightening `abs_gap_tolerance` would have
-/// widened the effective tolerance by orders of magnitude on a large objective.
-/// `solver.py` now maps a caller's absolute tolerance through `min`, so this
-/// route honours a tightening and declines a loosening.
+/// The tolerance is split in two regimes (#1615 D-12), chosen by `solver.py`:
+/// * `gap_tolerance <=` the 1e-4 default: `gap_tol` is an ABSOLUTE test. A
+///   relative arm here can only LOOSEN the fathom (#1243 was reverted for that), so
+///   `solver.py` maps a caller's absolute tolerance through `min` and honours a
+///   tightening but declines a loosening.
+/// * `gap_tolerance >` the default: the caller explicitly asked for a RELATIVE
+///   stop, so `solver.py` lifts `gap_tol` to 1e300 (not `inf`: `-inf >= -inf`
+///   would pass the first clause on a bound-less node) and the test reduces to
+///   `abs_gap_tol` OR `rel_gap_tol` below.
 ///
 /// #1263: the absolute `gap_tol` is additionally CONJOINED with the documented
 /// `solver.py` criterion (absolute `abs_gap_tol` OR relative `rel_gap_tol` against
@@ -135,7 +137,7 @@ pub enum TreeStatus {
 /// incumbent 2.7e-5 over a true optimum of 0). A conjunction can only TIGHTEN, and
 /// at `|inc| >= 1` with `rel_gap_tol >= gap_tol` the second clause is implied by
 /// the first, so those solves are unchanged. The defaults (`rel_gap_tol = inf`)
-/// reproduce the purely absolute test.
+/// reproduce the absolute test.
 ///
 /// #1656: the relative arm is measured on the objective the caller is handed,
 /// `inc + obj_offset`, not on the kernel's constant-free internal value. The two
