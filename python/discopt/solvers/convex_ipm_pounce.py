@@ -84,6 +84,52 @@ yardstick the #1384 guard applies). The ``3200*j**2`` class above fails that tes
 and takes the re-run; the blending LP passes it and does not. The floor only
 ever loosens the request; the #1384 stationarity guard downstream still judges
 every point the engine returns.
+
+Column scale
+------------
+qp-ipm's iteration count depended on the units of the variables (#1683). The
+linear-MPC QP ``x[k+1] = 0.95 x[k] + (0.1/UA) u[k]``, ``u in [-2UA, 2UA]``,
+objective ``sum x**2 + 0.01 sum u**2 / UA**2`` is the same problem for every
+``UA``, yet at N = 200 it took 13 iterations at ``UA = 1`` and 115 at
+``UA = 6e4`` (94 vs 14 at N = 1200); ``pounce.qp.solve_qp`` has no scaling
+argument. For a QP, :func:`_solve` therefore hands the engine the substitution
+``x = d * xt``: ``D P D``, ``d * c``, ``A D``, ``G D``, ``lb / d``, ``ub / d``,
+with ``d`` from :func:`column_scale` (power-of-two Ruiz on the columns of
+``[P; A; G]``), and maps back ``x = d * xt``, ``z_lb = zt_lb / d``,
+``z_ub = zt_ub / d``; ``y``, ``z`` and the objective are unchanged. Every ``d_j``
+is a power of two, so both directions are exact. A warm start is mapped forward
+the same way. Measured after: 13 iterations at every ``UA`` in
+``{1, 1e3, 6e4, 1e6}`` and at both N.
+
+The scale is **one-sided** (``d >= 1``): only columns whose entries are small
+(a variable in large units) are scaled up. The engine's dual residual maps back
+as ``r_j / (sigma * d_j)``, so ``d_j >= 1`` never amplifies it and ``tol*sigma``
+still holds the caller's ``tol`` in caller units. A two-sided scale was measured
+and rejected: on QPLIB_8938 a ``d_j = 2**-11`` column sent the caller-unit dual
+residual to 5.0e-8 (3.9e-12 unscaled), and the re-solve that would restore it
+must ask the engine for ``tol*sigma*min(d)`` = 4.9e-12 -- below the 1.1e-11
+row-residual floor, which the engine's single ``tol`` also has to meet -- and ran
+18 -> 219 iterations to the limit.
+
+Because the engine's residuals are then in scaled coordinates, they are not
+used: :func:`caller_residuals` recomputes POUNCE's own residual definitions on
+the caller's data at the point the route returns, and :func:`caller_unit_converged`,
+the solve report and the downstream #1384 / #1596 guards (which recompute from
+``x`` and the multipliers on the caller's matrices anyway) all judge that. A QP
+whose columns are already unit-scaled gets ``d = None`` and is handed over
+unchanged. ``DISCOPT_POUNCE_QP_COLSCALE=0`` (:data:`COLSCALE_ENV`) restores the
+unscaled hand-off; it is an opt-out for A/B, not a pending graduation.
+
+Graduation panel (CLAUDE.md §5, flag OFF vs ON, interleaved, every incumbent
+re-checked with ``check_feasibility`` at 1e-6). Plain convex QPLIB, 9 instances
+that route to qp-ipm: bit-identical in both arms (their columns are already
+balanced, ``d = None``). The same QPLIB instances with variables re-expressed in
+random units (``x' = 10**U(lo, hi) * x``, 16 pairs that reach qp-ipm): total
+IPM iterations 1141 -> 751, 10 better / 2 same / 4 worse; QPLIB_8785 went from
+time_limit to certified optimal, and on QPLIB_8495 the OFF arm stopped at a
+feasible point of objective 210935 while the ON arm reached the true 42857.
+No instance lost certification, every certified bound stayed at or below its
+incumbent, and objectives that both arms returned agree to <= 1.5e-8 relative.
 """
 
 from __future__ import annotations
@@ -368,6 +414,224 @@ def caller_unit_converged(res: Any, P, c: np.ndarray, tol: float) -> bool:
     return float(pr) <= tol and float(du) <= yard and float(co) <= yard
 
 
+#: Opt-out for the power-of-two column equilibration of the qp-ipm hand-off
+#: (#1683). See the module docstring ("Column scale"); ``=0`` restores the
+#: unscaled hand-off bit for bit.
+COLSCALE_ENV = "DISCOPT_POUNCE_QP_COLSCALE"
+
+#: Ruiz passes :func:`column_scale` makes at most. Each pass halves every column's
+#: log2 distance from unit norm, so ten passes reach the rounding fixed point from
+#: any column norm within ``2**±1000``; on every QP measured (#1683) it stops on
+#: "no exponent changed" in 2-7 passes.
+_COLSCALE_ROUNDS = 10
+
+#: ``|log2 d_j|`` is clamped here so ``lb/d``, ``ub/d`` and ``x*d`` can neither
+#: overflow nor fall into the subnormal range for any finite bound the route hands
+#: the engine (``|b| < finite_bound_threshold() = 1e15``, about ``2**50``).
+_COLSCALE_MAX_EXP = 60
+
+
+def colscale_enabled() -> bool:
+    """Whether the qp-ipm hand-off is column-equilibrated (``DISCOPT_POUNCE_QP_COLSCALE``)."""
+    from discopt.solver_tuning import _env_flag
+
+    return _env_flag(COLSCALE_ENV, default=True)
+
+
+def _col_absmax(M, n: int) -> np.ndarray:
+    """``max_i |M_ij|`` per column (``0`` for an empty column)."""
+    if M is None:
+        return np.zeros(n)
+    if sp.issparse(M):
+        if M.nnz == 0:
+            return np.zeros(n)
+        out = abs(sp.csc_matrix(M)).max(axis=0).toarray()
+    else:
+        arr = np.asarray(M, dtype=np.float64)
+        if arr.size == 0:
+            return np.zeros(n)
+        out = np.max(np.abs(arr), axis=0)
+    return np.asarray(out, dtype=np.float64).ravel()
+
+
+def _scale_cols(M, d: np.ndarray):
+    """``M @ diag(d)``, exact because every ``d_j`` is a power of two."""
+    if M is None:
+        return None
+    if sp.issparse(M):
+        return sp.csr_matrix(M) @ sp.diags(d)
+    return np.asarray(M, dtype=np.float64) * d[None, :]
+
+
+def _scale_sym(P, d: np.ndarray):
+    """``diag(d) @ P @ diag(d)``, exact because every ``d_j`` is a power of two."""
+    if P is None:
+        return None
+    if sp.issparse(P):
+        Dg = sp.diags(d)
+        return sp.csr_matrix(Dg @ sp.csr_matrix(P) @ Dg)
+    return np.asarray(P, dtype=np.float64) * d[:, None] * d[None, :]
+
+
+def column_scale(P, A, G, n: int) -> Optional[np.ndarray]:
+    """Power-of-two Ruiz column equilibration of ``[P; A; G]`` (#1683).
+
+    Returns ``d`` (every entry an exact power of two) such that the columns of
+    ``D P D``, ``A D`` and ``G D`` have infinity norm in ``[2**-0.5, 2**0.5)`` up
+    to the coupling ``P`` introduces, or ``None`` when no column moves (``d = 1``),
+    so a QP that is already unit-scaled is handed over unchanged. A column with no
+    entry in any of the three matrices keeps ``d_j = 1``.
+    """
+    e = np.zeros(n, dtype=np.int64)
+    a_nrm = [_col_absmax(A, n), _col_absmax(G, n)]
+    for _ in range(_COLSCALE_ROUNDS):
+        d = np.ldexp(1.0, e)
+        nrm = np.maximum(a_nrm[0], a_nrm[1]) * d
+        if P is not None:
+            nrm = np.maximum(nrm, _col_absmax(_scale_sym(P, d), n))
+        live = (nrm > 0) & np.isfinite(nrm)
+        step = np.zeros(n, dtype=np.int64)
+        # round(-log2(nrm)/2): the exponent that brings the column norm to ~1.
+        step[live] = np.rint(-0.5 * np.log2(nrm[live])).astype(np.int64)
+        # One-sided (``d >= 1``): see the docstring.
+        new = np.clip(e + step, 0, _COLSCALE_MAX_EXP)
+        if np.array_equal(new, e):
+            break
+        e = new
+    if not np.any(e):
+        return None
+    return np.ldexp(1.0, e)
+
+
+def caller_residuals(
+    x: np.ndarray,
+    y,
+    z,
+    z_lb,
+    z_ub,
+    P,
+    c: np.ndarray,
+    A,
+    b,
+    G,
+    h,
+    lb: np.ndarray,
+    ub: np.ndarray,
+) -> dict:
+    """POUNCE's ``QpResiduals`` recomputed on the caller's (unscaled) data (#1683).
+
+    Same definitions as ``pounce-convex``'s ``kkt_residuals``: primal
+    ``max(|Ax-b|, max(0, Gx-h), bound violation)``, dual
+    ``||Px + c + A'y + G'z - z_lb + z_ub||_inf`` and complementarity
+    ``max |z_i * slack_i|`` over inequality rows and finite bounds. A
+    column-equilibrated engine reports these in its own coordinates, where an
+    infinity norm of a per-column-scaled residual has no exact inverse; the
+    caller-unit test (:func:`caller_unit_converged`) and the solve report need
+    them in the caller's.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    n = x.size
+    zero = np.zeros(0)
+    pr = [0.0]
+    grad = np.array(c, dtype=np.float64)
+    if P is not None:
+        grad = grad + np.asarray(P @ x, dtype=np.float64).ravel()
+    comp = [0.0]
+    if A is not None and b is not None and np.size(b):
+        pr.append(float(np.max(np.abs(np.asarray(A @ x).ravel() - b))))
+        if y is not None:
+            grad = grad + np.asarray(A.T @ np.asarray(y, dtype=np.float64)).ravel()
+    if G is not None and h is not None and np.size(h):
+        slack = h - np.asarray(G @ x).ravel()
+        pr.append(float(np.max(np.maximum(-slack, 0.0))))
+        if z is not None:
+            zz = np.asarray(z, dtype=np.float64).ravel()
+            grad = grad + np.asarray(G.T @ zz).ravel()
+            comp.append(float(np.max(np.abs(zz * slack))))
+    flb, fub = np.isfinite(lb), np.isfinite(ub)
+    bound_viol = max(
+        float(np.max(np.where(flb, lb - x, 0.0), initial=0.0)),
+        float(np.max(np.where(fub, x - ub, 0.0), initial=0.0)),
+    )
+    pr.append(bound_viol)
+    zl = zero if z_lb is None else np.asarray(z_lb, dtype=np.float64).ravel()
+    zu = zero if z_ub is None else np.asarray(z_ub, dtype=np.float64).ravel()
+    if zl.size == n:
+        grad = grad - zl
+        comp.append(float(np.max(np.abs(np.where(flb, zl * (x - np.where(flb, lb, 0.0)), 0.0)))))
+    if zu.size == n:
+        grad = grad + zu
+        comp.append(float(np.max(np.abs(np.where(fub, zu * (np.where(fub, ub, 0.0) - x), 0.0)))))
+    du = float(np.max(np.abs(grad))) if grad.size else 0.0
+    out = {
+        "primal_infeasibility": max(pr),
+        "bound_violation": bound_viol,
+        "dual_infeasibility": du,
+        "complementarity": max(comp),
+    }
+    out["kkt_error"] = max(out["primal_infeasibility"], du, out["complementarity"])
+    return out
+
+
+def _unscale_columns(res: Any, d: np.ndarray, caller: dict) -> Any:
+    """``res`` (already in the caller's objective units) mapped back through ``x = d*xt``.
+
+    ``x`` multiplies by ``d`` and the bound multipliers divide by it; the row
+    multipliers ``y``, ``z`` and the objective do not change. All exact (``d`` is
+    a power of two). The residuals are recomputed on the caller's data
+    (:func:`caller_residuals`) at the point the route returns -- ``x`` projected
+    onto the caller's box, as :func:`_onto_box` does -- rather than taken from
+    the engine, whose dual residual is measured in the scaled coordinates. The
+    trace's per-iteration ``dual_infeasibility`` stays in engine coordinates (its
+    infinity norm has no exact inverse); the objective it records is invariant.
+    """
+    x = np.asarray(res.x, dtype=np.float64) * d
+    z_lb = None if res.z_lb is None else np.asarray(res.z_lb, dtype=np.float64) / d
+    z_ub = None if res.z_ub is None else np.asarray(res.z_ub, dtype=np.float64) / d
+    resid = caller_residuals(
+        _onto_box(x, caller["lb"], caller["ub"]),
+        res.y,
+        res.z,
+        z_lb,
+        z_ub,
+        caller["P"],
+        caller["c"],
+        caller["A"],
+        caller["b"],
+        caller["G"],
+        caller["h"],
+        caller["lb"],
+        caller["ub"],
+    )
+    out = SimpleNamespace(**{k: getattr(res, k) for k in _RESULT_FIELDS if hasattr(res, k)})
+    out.x = x
+    out.z_lb = z_lb
+    out.z_ub = z_ub
+    out.residuals = resid
+    out.kkt_error = resid["kkt_error"]
+    out.column_scale = d
+    return out
+
+
+#: The ``QpResult`` fields the route reads; :func:`_unscale_columns` copies these.
+_RESULT_FIELDS = (
+    "status",
+    "success",
+    "iters",
+    "x",
+    "obj",
+    "y",
+    "z",
+    "z_lb",
+    "z_ub",
+    "kkt_error",
+    "residuals",
+    "iterates",
+    "scaling_warning",
+    "objective_scale",
+)
+
+
 def _merge_attempts(first: Any, second: Any) -> Any:
     """``second`` as the answer, carrying the work of both engine runs (#1658).
 
@@ -487,9 +751,19 @@ def _solve(
     h = None if b_ub is None else np.asarray(b_ub, dtype=np.float64).ravel()
     b = None if b_eq is None else np.asarray(b_eq, dtype=np.float64).ravel()
 
-    sigma = objective_scale(P, c)  # module docstring, "Objective scale" (#1537)
-    P_eng = P if P is None or sigma == 1.0 else P * sigma
-    c_eng = c if sigma == 1.0 else c * sigma
+    # Module docstring, "Column scale" (#1683): QP only, ``d = None`` when no column
+    # moves, so an already unit-scaled QP is handed over exactly as before.
+    d = column_scale(P, A, G, n) if P is not None and colscale_enabled() else None
+    caller = {"P": P, "c": c, "A": A, "b": b, "G": G, "h": h, "lb": lb, "ub": ub}
+    P_s, c_s, A, G, lb_eng, ub_eng = P, c, A, G, lb, ub
+    if d is not None:
+        P_s, c_s = _scale_sym(P, d), c * d
+        A, G = _scale_cols(A, d), _scale_cols(G, d)
+        lb_eng, ub_eng = lb / d, ub / d
+
+    sigma = objective_scale(P_s, c_s)  # module docstring, "Objective scale" (#1537)
+    P_eng = P_s if P_s is None or sigma == 1.0 else P_s * sigma
+    c_eng = c_s if sigma == 1.0 else c_s * sigma
 
     started_unix_nanos = time.time_ns()
     t0 = time.perf_counter()
@@ -504,8 +778,8 @@ def _solve(
                 b=b,
                 G=G,
                 h=h,
-                lb=lb,
-                ub=ub,
+                lb=lb_eng,
+                ub=ub_eng,
                 tol=tol_eng,
                 max_iter=opts.get("max_iter"),
                 time_limit=budget,
@@ -530,14 +804,29 @@ def _solve(
     # caller-unit test.
     # ``start`` is in the caller's units; the engine solves ``sigma * objective``, so
     # its multipliers are ``sigma`` times the caller's (``x`` does not depend on it).
+    # Under the column scale ``x = d*xt`` the engine's ``xt`` is ``x/d`` and its bound
+    # multipliers are ``d`` times the caller's; the row multipliers do not move.
     warm0 = None
     if start is not None:
-        warm0 = {
-            k: np.asarray(v, dtype=np.float64) * (1.0 if k == "x" else sigma)
-            for k, v in start.items()
-        }
+        warm0 = {}
+        for k, v in start.items():
+            arr = np.asarray(v, dtype=np.float64)
+            if k == "x":
+                warm0[k] = arr if d is None else arr / d
+            elif k in ("z_lb", "z_ub") and d is not None:
+                warm0[k] = arr * d * sigma
+            else:
+                warm0[k] = arr * sigma
+
+    def _to_caller(engine_res):
+        out = _unscale_result(engine_res, sigma)
+        return out if d is None else _unscale_columns(out, d, caller)
+
     raw = _run(opts.get("tol"), warm0, limit)
-    res = _unscale_result(raw, sigma)
+    res = _to_caller(raw)
+    # ``d >= 1``, so the column scale never amplifies the engine's dual residual on
+    # its way back (``r_j / (sigma * d_j)``) and ``tol*sigma`` is still the engine
+    # tolerance that holds ``tol`` in caller units (module docstring, "Column scale").
     if (
         sigma != 1.0
         and res.status == "optimal"
@@ -545,7 +834,7 @@ def _solve(
     ):
         spent = time.perf_counter() - t0
         budget = None if limit is None else max(0.0, limit - spent)
-        retry = _unscale_result(_run(engine_tol(opts.get("tol"), sigma), raw, budget), sigma)
+        retry = _to_caller(_run(engine_tol(opts.get("tol"), sigma), raw, budget))
         # A re-solve that did not finish (its budget, an engine failure) leaves the
         # first ``optimal`` standing; the #1384 guard downstream still judges it.
         res = _merge_attempts(res, retry if retry.status == "optimal" else res)
