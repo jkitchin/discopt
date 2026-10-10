@@ -2515,6 +2515,40 @@ def _gap_closed(obj: float, bound: float, kw: dict[str, Any]) -> bool:
     )
 
 
+def _adopt_better_cross_incumbent(sf: StdForm, out: HighsOutcome, cross: HighsOutcome) -> None:
+    """#1678 II.19: publish the cross-solve's incumbent when it is verified and better.
+
+    The presolve-free solve is a full HiGHS solve; its incumbent often beats the
+    primary's (measured: multi-knapsack ``NV=30, NR=5``, ``gap_tolerance=0.01``, seed
+    103 -- primary -126.0943, cross -126.5926, and the route kept the worse point).
+    Discarding a point the route has itself verified costs the incumbent, and -- since
+    the gap is re-tested against ``out.objective`` -- it can also cost the
+    certificate: the cross bound is certified relative to the cross incumbent, so
+    re-testing it against the worse primary incumbent can reopen a gap that is
+    closed. Only the point moves; it passes :func:`_verified_mip_point`, the same
+    gates as any HiGHS incumbent, and no bound is adopted from it. The caller has
+    already ruled out a point refuting the primary's bound by more than the equality
+    yardstick (:func:`_cross_check_presolve`).
+
+    A point better by no more than that same yardstick (``CERT_ABS + CERT_REL |obj|``)
+    is not adopted: the verifier admits rows violated within tolerance, so such a gain
+    is tolerance, not a better point. Measured on the #1640 piecewise case: the
+    cross point verified at -7.3e-7 against an exact optimum of 0 (the primary's), and
+    adopting it published a super-optimal incumbent that the solve-level verifier then
+    refused and re-solved.
+    """
+    if out.objective is None:
+        return
+    pt = _verified_mip_point(sf, cross.x)
+    if pt is None:
+        return
+    if out.objective - pt[1] <= CERT_ABS + CERT_REL * abs(out.objective):
+        return
+    out.stats["milp/presolve_cross_incumbent_adopted"] = 1.0
+    out.stats["milp/presolve_cross_incumbent_gain"] = float(out.objective - pt[1])
+    out.x, out.objective = pt
+
+
 def _weaker_bound(
     sf: StdForm, out: HighsOutcome, cross: HighsOutcome, kw: dict[str, Any]
 ) -> HighsOutcome:
@@ -2556,7 +2590,10 @@ def _weaker_bound(
     if out.status != "optimal" or out.bound is None or cross.bound is None:
         return out
     out.stats["milp/presolve_cross_bound"] = float(cross.bound)
+    _adopt_better_cross_incumbent(sf, out, cross)
     if cross.bound >= out.bound:
+        if out.objective is not None and out.bound > out.objective:
+            out.bound = out.objective
         return out
     claim = float(out.bound)
     out.bound = min(cross.bound, out.objective) if out.objective is not None else cross.bound
