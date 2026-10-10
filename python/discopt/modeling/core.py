@@ -5433,6 +5433,110 @@ def _affine_scalar_terms(expr) -> Optional[tuple[dict, float]]:
     return None
 
 
+def _scalar_binary_leaf_key(expr) -> Optional[tuple[int, int]]:
+    """``(id(variable), flat_column)`` when ``expr`` is ONE binary column -- a scalar
+    binary :class:`Variable` or a scalar-valued index into one -- else ``None``."""
+    if isinstance(expr, Variable):
+        if expr.var_type is VarType.BINARY and int(expr.size) == 1:
+            return (id(expr), 0)
+        return None
+    if isinstance(expr, IndexExpression) and isinstance(expr.base, Variable):
+        base = expr.base
+        if base.var_type is not VarType.BINARY:
+            return None
+        try:
+            cols = np.arange(int(base.size)).reshape(tuple(base.shape) or ())[expr.index]
+        except (IndexError, TypeError, ValueError):
+            return None
+        cols = np.asarray(cols)
+        return (id(base), int(cols.reshape(()))) if cols.size == 1 else None
+    return None
+
+
+def _affine_binary_terms(expr) -> Optional[tuple[dict, float]]:
+    """``({key: (leaf, coef)}, const)`` for an expression affine in single binary
+    columns (see :func:`_scalar_binary_leaf_key`), else ``None``."""
+    if isinstance(expr, Constant):
+        v = np.asarray(expr.value)
+        return ({}, float(v.reshape(()))) if v.size == 1 else None
+    key = _scalar_binary_leaf_key(expr)
+    if key is not None:
+        return ({key: (expr, 1.0)}, 0.0)
+    if isinstance(expr, UnaryOp) and expr.op == "neg":
+        r = _affine_binary_terms(expr.operand)
+        return None if r is None else ({k: (e, -a) for k, (e, a) in r[0].items()}, -r[1])
+    if isinstance(expr, BinaryOp) and expr.op in ("+", "-", "*", "/"):
+        left, right = _affine_binary_terms(expr.left), _affine_binary_terms(expr.right)
+        if left is None or right is None:
+            return None
+        if expr.op in ("+", "-"):
+            sgn = 1.0 if expr.op == "+" else -1.0
+            terms = dict(left[0])
+            for k, (e, a) in right[0].items():
+                e0, a0 = terms.get(k, (e, 0.0))
+                terms[k] = (e0, a0 + sgn * a)
+            return terms, left[1] + sgn * right[1]
+        if expr.op == "/":
+            if right[0] or right[1] == 0.0:
+                return None
+            return {k: (e, a / right[1]) for k, (e, a) in left[0].items()}, left[1] / right[1]
+        if not left[0]:
+            return {k: (e, left[1] * a) for k, (e, a) in right[0].items()}, left[1] * right[1]
+        if not right[0]:
+            return {k: (e, right[1] * a) for k, (e, a) in left[0].items()}, right[1] * left[1]
+    return None
+
+
+def _normalize_indicator(indicator, where: str):
+    """``(column, active_value)`` for an ``if_then`` indicator (#1677).
+
+    A plain variable / indexed variable passes through with ``active_value=1``
+    (non-binary selectors are refused downstream by the integrality gates, as
+    before). A ``BooleanVar`` is its backing binary; ``~b`` is that binary with
+    ``active_value=0``. A compound expression is accepted only when it is an
+    affine function of ONE binary column taking exactly the values {0, 1}: ``z``
+    itself (``active_value=1``) or its complement ``1 - z`` (``active_value=0``).
+    Normalising here means every consumer -- the big-M / hull GDP lowering, the
+    certificate verifier, serialization, the MPEC residuals -- sees a single 0/1
+    column plus the value that activates the rows, which they all already handle.
+    Anything else has no 0/1 column to act as the indicator and is refused now
+    rather than with a ``TypeError`` deep inside ``solve()``.
+    """
+    if isinstance(indicator, BooleanVar):
+        return indicator.variable, 1
+    if isinstance(indicator, LogicalNot) and isinstance(indicator.operand, BooleanVar):
+        return indicator.operand.variable, 0
+    if isinstance(indicator, LogicalExpression):
+        raise TypeError(
+            f"{where}: the indicator must be a binary variable or a BooleanVar, not "
+            f"the logical expression {indicator!r}; state it with "
+            "m.logical(expr.implies(...)) or introduce a BooleanVar for it."
+        )
+    if not isinstance(indicator, Expression):
+        raise TypeError(
+            f"{where}: the indicator must be a binary variable or a BooleanVar, got "
+            f"{type(indicator).__name__}."
+        )
+    if isinstance(indicator, (Variable, IndexExpression)):
+        return indicator, 1
+    aff = _affine_binary_terms(indicator)
+    if aff is not None:
+        terms = {k: ea for k, ea in aff[0].items() if ea[1] != 0.0}
+        if len(terms) == 1:
+            ((leaf, coef),) = terms.values()
+            const = aff[1]
+            if const == 0.0 and coef == 1.0:
+                return leaf, 1
+            if const == 1.0 and coef == -1.0:
+                return leaf, 0
+    raise TypeError(
+        f"{where}: the indicator expression {indicator!r} is not a 0/1 indicator. "
+        "Use a binary variable z (active when z == 1) or its complement 1 - z "
+        "(active when z == 0); any other expression has no single binary column "
+        "taking exactly the values {0, 1}."
+    )
+
+
 def _condition_box(cond) -> Optional[dict]:
     """The declared box of the variables in ``cond`` (``body <= 0``) tightened by one
     bound-propagation step on that row, as ``{Variable: Interval}``; ``None`` when the
@@ -7253,7 +7357,7 @@ class Model:
 
     def if_then(
         self,
-        indicator: Variable,
+        indicator: "Expression | BooleanVar | LogicalNot",
         then_constraints: list[Constraint],
         name: Optional[str] = None,
     ):
@@ -7266,8 +7370,11 @@ class Model:
 
         Parameters
         ----------
-        indicator : Variable
-            A binary variable.
+        indicator : Variable, BooleanVar or expression
+            A binary variable (or ``BooleanVar``). The complement ``1 - z`` of a
+            binary ``z`` (or ``~b`` of a ``BooleanVar``) is also accepted and means
+            "if ``z == 0``"; it is stored as ``z`` with active value 0 (#1677). Any
+            other expression is refused with a ``TypeError``.
         then_constraints : list of Constraint
             Constraints that must hold when the indicator is active.
         name : str, optional
@@ -7294,20 +7401,9 @@ class Model:
         # #1617: a ``BooleanVar`` (from :meth:`boolean`) is backed by a binary
         # Variable; use it. Any other logical expression has no single 0/1 column to
         # act as the indicator -- refuse here, at the call, rather than with a
-        # ``float()`` TypeError deep inside ``solve()``.
-        if isinstance(indicator, BooleanVar):
-            indicator = indicator.variable
-        elif isinstance(indicator, LogicalExpression):
-            raise TypeError(
-                "if_then: the indicator must be a binary variable or a BooleanVar, not "
-                f"the logical expression {indicator!r}; state it with "
-                "m.logical(expr.implies(...)) or introduce a BooleanVar for it."
-            )
-        elif not isinstance(indicator, Expression):
-            raise TypeError(
-                "if_then: the indicator must be a binary variable or a BooleanVar, got "
-                f"{type(indicator).__name__}."
-            )
+        # ``float()`` TypeError deep inside ``solve()``. #1677: a complemented
+        # binary ``1 - z`` (or ``~b``) is the same column with ``active_value=0``.
+        indicator, active_value = _normalize_indicator(indicator, "if_then")
         for k, c in enumerate(then_constraints):
             c.name = f"{name}_then_{k}" if name else None
             # Store as indicator constraint; Rust presolve will handle
@@ -7316,7 +7412,7 @@ class Model:
                 _IndicatorConstraint(
                     indicator=indicator,
                     constraint=c,
-                    active_value=1,
+                    active_value=active_value,
                 )
             )
 
