@@ -190,6 +190,113 @@ def _perspective_oa_active() -> bool:
     return perspective_oa_enabled() and not _PERSPECTIVE_OA_SUPPRESSED.get()
 
 
+def convex_lift_vertex_enclosure_enabled() -> bool:
+    """``DISCOPT_CONVEX_LIFT_VERTEX_ENCLOSURE`` (#1678 II.7): curvature-based aux box.
+
+    ``_Builder._try_convex_lift`` sizes the lifted aux column from the node's
+    natural interval enclosure and declines the lift when that enclosure is
+    non-finite or exceeds the #358 conditioning magnitude. For a GDP hull row
+    ``yhat*g(v/yhat)`` the natural enclosure is the dependency-problem product
+    ``[eps, 1] * [0, v_ub/eps]`` -- about ``2e10`` for a true range of a few
+    hundred -- so at the ROOT box (``y`` free) the proven-convex row was never
+    lifted, the root LP carried no perspective OA, and ``root_bound`` stayed at
+    the McCormick value while the children (``y`` fixed) were lifted.
+
+    With the flag ON, a node the guard would decline, whose curvature is
+    already certified over the box and whose support has at most
+    ``_VERTEX_ENCLOSURE_MAX_VARS`` variables, gets the enclosure its curvature
+    implies: a convex function attains its maximum over a box at a vertex, and
+    lies above its tangent at the box centre, whose minimum over the box is
+    closed-form (concave: mirrored). Both sides are widened by an outward margin
+    and intersected with the natural enclosure. If the refined range still fails
+    the guard the lift is declined as before. The refined range gates the lift
+    and bounds a fresh aux; when the decomposition already collapsed to a single
+    aux (the hull product does), that aux keeps the bounds it was built with,
+    which are exactly the OFF relaxation's -- the lift then only ADDS the OA rows.
+    Bound-tightening passes (:func:`perspective_oa_suppressed`) keep the old
+    enclosure, so OBBT/DBBT see the unchanged relaxation. Read at call time.
+
+    **Graduated 2026-10-10 (#1678): default ON**, ``=0`` restores the natural
+    enclosure. §5 panel (``issue1678_vertex_enclosure_panel.py``, 30 s, OFF/ON
+    interleaved, fresh subprocess per arm; 1017 executed checks, 0 violations):
+    30 convex GDPs under ``gdp_method="hull"`` (big-M oracle) certified 30/30 both
+    arms, synthesis family root tighter on 18/18 and nodes 148 -> 54 (fewer on 17,
+    none more), placement family identical; the 66-instance corpus and MINLPLib's
+    54 ``*hfsg`` certified 49/49 and 41/41, zero node/bound drift where both
+    certify -- it fires there only on ``nvs06``/``nvs21``, outcome unchanged.
+    """
+    return os.environ.get("DISCOPT_CONVEX_LIFT_VERTEX_ENCLOSURE", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
+
+
+#: Support-size cap for the vertex enclosure (2**k value evaluations per node).
+_VERTEX_ENCLOSURE_MAX_VARS = 10
+#: Relative outward margin on the vertex/tangent enclosure (covers floating-point
+#: error in the value and gradient evaluations; the enclosure is otherwise exact).
+_VERTEX_ENCLOSURE_REL_MARGIN = 1e-9
+
+
+def _curvature_enclosure(
+    f: Callable,
+    grad_f: Callable,
+    idxs: list[int],
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+    curvature: str,
+) -> Optional[tuple[float, float]]:
+    """Enclosure of a box-certified convex/concave ``f`` from its curvature.
+
+    Convex: ``max f`` is attained at a vertex of the box; ``f(x) >= f(c) +
+    grad f(c).(x - c)`` gives ``min f >= f(c) - sum_i |grad_i f(c)| h_i`` with
+    ``c`` the centre and ``h`` the half-widths. Concave is the mirror image. Each
+    side is widened by ``_VERTEX_ENCLOSURE_REL_MARGIN`` (relative to its
+    magnitude and to the tangent's spread). ``None`` when the support is too
+    large or any evaluation is non-finite (the caller then keeps declining).
+    """
+    k = len(idxs)
+    if k == 0 or k > _VERTEX_ENCLOSURE_MAX_VARS:
+        return None
+    lo = flat_lb[idxs]
+    hi = flat_ub[idxs]
+    centre = 0.5 * (lo + hi)
+    half = 0.5 * (hi - lo)
+    x = np.where(
+        np.isfinite(flat_lb) & np.isfinite(flat_ub), 0.5 * (flat_lb + flat_ub), 0.0
+    ).astype(np.float64)
+    vals = []
+    for mask in range(1 << k):
+        for b in range(k):
+            x[idxs[b]] = hi[b] if (mask >> b) & 1 else lo[b]
+        v = float(np.asarray(f(x)).reshape(()))
+        if not math.isfinite(v):
+            return None
+        vals.append(v)
+    x[idxs] = centre
+    fc = float(np.asarray(f(x)).reshape(()))
+    g = np.asarray(grad_f(x), dtype=np.float64).ravel()
+    if not math.isfinite(fc) or g.size <= max(idxs):
+        return None
+    gi = g[idxs]
+    if not np.all(np.isfinite(gi)):
+        return None
+    spread = float(np.sum(np.abs(gi) * half))
+    m = _VERTEX_ENCLOSURE_REL_MARGIN
+    if curvature == "convex":
+        top = max(vals)
+        low = fc - spread
+    else:
+        top = fc + spread
+        low = min(vals)
+    pad_top = m * (1.0 + abs(top) + spread)
+    pad_low = m * (1.0 + abs(low) + spread)
+    return low - pad_low, top + pad_top
+
+
 @dataclasses.dataclass
 class LinForm:
     """``const + sum_j coef_j * col_j`` over relaxation columns (orig ∪ aux).
@@ -1587,6 +1694,29 @@ class _Builder:
 
         # Sound interval enclosure of g over the box -> finite aux column bounds.
         col_lo, col_hi = self.bounds(node)
+        if (
+            not (
+                math.isfinite(col_lo)
+                and math.isfinite(col_hi)
+                and max(abs(col_lo), abs(col_hi)) <= _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE
+            )
+            and not _PERSPECTIVE_OA_SUPPRESSED.get()
+            and convex_lift_vertex_enclosure_enabled()
+        ):
+            # #1678 II.7: the natural enclosure would decline the lift (loose
+            # interval product, e.g. a hull row's ``[eps,1]*[0,v_ub/eps]``). Use
+            # the enclosure the certified curvature implies instead.
+            compiled = self._compiled(node)
+            ref = (
+                None
+                if compiled is None
+                else _curvature_enclosure(
+                    compiled[0], compiled[1], idxs, flat_lb, flat_ub, curvature
+                )
+            )
+            if ref is not None:
+                col_lo = max(col_lo, ref[0]) if math.isfinite(col_lo) else ref[0]
+                col_hi = min(col_hi, ref[1]) if math.isfinite(col_hi) else ref[1]
         if not (math.isfinite(col_lo) and math.isfinite(col_hi)) or col_hi < col_lo:
             return None
         # Conditioning guard (#358): a wide/ill-conditioned node whose value range
