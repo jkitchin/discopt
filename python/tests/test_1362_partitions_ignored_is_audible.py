@@ -40,7 +40,7 @@ def _lp_route_minlp():
 
 
 def _partition_warnings(record):
-    return [str(w.message) for w in record if "partitions" in str(w.message)]
+    return [str(w.message) for w in record if "partitions=" in str(w.message)]
 
 
 def test_an_ignored_partitions_request_warns():
