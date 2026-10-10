@@ -269,9 +269,12 @@ def describe_poles(poles: list[ObjectivePole]) -> str:
 
     def one(ps: list[ObjectivePole]) -> str:
         p = ps[0]
-        terms = ", ".join(f"`{q.term}`" for q in ps)
+        # Distinct terms only: the twelve residuals of a kinetic fit each hold
+        # their own ``k1 / (k2 - k1)`` node with the same text (#1680).
+        names = list(dict.fromkeys(q.term for q in ps))
+        terms = ", ".join(f"`{t}`" for t in names)
         head = (
-            f"{terms} {'divide' if len(ps) > 1 else 'divides'} by `{p.denominator}`, "
+            f"{terms} {'divide' if len(names) > 1 else 'divides'} by `{p.denominator}`, "
             f"whose range over the variable box [{p.lo:.6g}, {p.hi:.6g}] contains 0"
         )
         if p.excluded_by_constraints:

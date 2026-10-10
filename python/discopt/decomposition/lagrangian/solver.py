@@ -30,6 +30,7 @@ and ``objective`` is the best recovered feasible value.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass
 
@@ -117,7 +118,14 @@ def solve_lagrangian(
         gap_tolerance=gap_tolerance,
         max_iterations=max_iterations,
         method=method,
-        prefer_pounce=(nlp_solver == "pounce"),
+        # #1680: not derived from ``nlp_solver``. A Lagrangian model is linear,
+        # so there is no NLP subproblem for ``nlp_solver`` to select; deriving
+        # ``prefer_pounce`` from its ``"pounce"`` default put the recovery LP and
+        # the Kelley master on the POUNCE IPM, which measured ~3x the wall of the
+        # whole solve on the exact simplex (GAP 5x30, seeds 1-3: 8.0/10.9/7.8 s vs
+        # 2.5/3.6/2.5 s, identical bound and incumbent). An explicit ``config``
+        # still selects POUNCE.
+        prefer_pounce=False,
         backend=backend,
     )
     if cfg.method not in ("subgradient", "bundle", "kelley"):
@@ -137,6 +145,19 @@ def solve_lagrangian(
     # is unavailable, so POUNCE-only installs keep working.
     # #1614 D-27: HiGHS when available (an exact-vertex engine, as #986 requires).
     milp, _ = get_decomposition_master_solver()
+    # #1680: confirm a block bound with the #1634 presolve-free cross-solve only
+    # when the dual value it feeds would raise ``best_L``. Block solves first run
+    # unconfirmed (``confirm_bound_from=inf``); the sum ``L_hat`` of their HiGHS
+    # bounds decides whether to confirm. Sound: the confirmed bound of a block is
+    # ``min`` of the two configurations, so the confirmed ``L <= L_hat``. If
+    # ``L_hat <= best_L`` the confirmed ``L`` could not have improved ``best_L``
+    # either, so ``best_L`` -- the only certificate this solver reports -- is
+    # still assigned only from confirmed values. An unconfirmed ``L_hat`` steers
+    # only the next multiplier (step length, cutting-plane model), as the
+    # approximate subproblem optimum already did.
+    from discopt.solvers import milp_highs as _milp_highs
+
+    lazy_confirm = milp is _milp_highs.solve_milp
     # ``lp`` only picks the next multiplier iterate (the Kelley/bundle master over
     # λ) and recovers a primal incumbent; the dual bound at that λ is always
     # recomputed by ``_subproblem``, so this seam is not certificate-producing and
@@ -253,6 +274,10 @@ def solve_lagrangian(
 
     comm = select_backend(cfg.backend)
 
+    # Per-block (result, solve arguments) of the latest ``_subproblem`` call, for
+    # ``_confirm``. Each block writes only its own key, so ``threads`` is safe.
+    block_last: dict[int, tuple] = {}
+
     def _solve_block(b: int):
         cols = col_arrays[b]
         if cols.size == 0:
@@ -260,15 +285,34 @@ def solve_lagrangian(
         cb = c_lag_global[cols]
         A_ub = block_A[b] if block_A[b].shape[0] else None
         b_ub = block_r[b] if block_A[b].shape[0] else None
-        res = milp(
-            cb,
+        kw = dict(
             A_ub=A_ub,
             b_ub=b_ub,
             bounds=block_bounds[b],
             integrality=block_intg[b],
-            time_limit=max(1.0, cfg.time_limit - (time.time() - t0)),
             gap_tolerance=cfg.gap_tolerance,
         )
+        extra = {"confirm_bound_from": math.inf} if lazy_confirm else {}
+        res = milp(
+            cb,
+            time_limit=max(1.0, cfg.time_limit - (time.time() - t0)),
+            **kw,
+            **extra,
+        )
+        block_last[b] = (res, cb, kw)
+        return _block_value(res, cols)
+
+    def _confirm_block(b: int):
+        cols = col_arrays[b]
+        if cols.size == 0:
+            return (0.0, np.zeros(0), cols)
+        res, cb, kw = block_last[b]
+        res = _milp_highs.confirm_bound(
+            res, cb, time_limit=max(1.0, cfg.time_limit - (time.time() - t0)), **kw
+        )
+        return _block_value(res, cols)
+
+    def _block_value(res, cols):
         if res.x is None:
             return None
         sub_lb = (
@@ -291,7 +335,13 @@ def solve_lagrangian(
         certify a bound (same contract as the monolithic version)."""
         nonlocal c_lag_global
         c_lag_global = lin.c + (A_c.T @ lam if m_coup else np.zeros(n))
-        results = comm.map(exec_order, _solve_block)
+        return _assemble(comm.map(exec_order, _solve_block), lam)
+
+    def _confirm(lam: np.ndarray):
+        """Confirm the latest ``_subproblem`` blocks (#1634) and re-assemble."""
+        return _assemble(comm.map(exec_order, _confirm_block), lam)
+
+    def _assemble(results, lam: np.ndarray):
         if any(res is None for res in results):
             return None, None, None
         z = np.zeros(n, dtype=np.float64)
@@ -344,6 +394,8 @@ def solve_lagrangian(
             status = "time_limit"
             break
         L, z, residual = _subproblem(lam)
+        if lazy_confirm and L is not None and L > best_L:
+            L, z, residual = _confirm(lam)
         if L is None or z is None:
             # Could not certify a bound at this lambda; stop.
             break

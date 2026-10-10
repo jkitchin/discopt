@@ -86,6 +86,7 @@ from discopt.solvers import (
     pounce_option_defaults,
 )
 from discopt.solvers import _gap as _gap_mod
+from discopt.solvers._pounce_report import report_in_model_sense as _report_in_model_sense
 from discopt.validation.feasibility import (
     SMALL_ROW_ABS_FLOOR as _validation_small_row_abs_floor,
 )
@@ -6751,6 +6752,46 @@ def _gap_criterion(ub: float, lb: float, gap_tolerance: float, abs_gap_tol: floa
     return None
 
 
+def _apply_convexity_charge(result: Any, charge: float, args: tuple, kwargs: dict) -> None:
+    """Subtract an accepted "convex up to charge" from the published bound (#1682).
+
+    ``charge`` bounds, in the internal MINIMIZE sense, how far any lower bound the
+    convex machinery derived can sit above the true one when the exact-QP route
+    accepted an objective whose Hessian is only proved ``lambda_min >= -delta``
+    (see :func:`discopt._relax.convexity.certificate.quadratic_objective_charge`).
+    The published bound moves by it -- down for a MINIMIZE model, up for a
+    MAXIMIZE one, whose ``bound`` is an upper bound -- as does ``root_bound``, and
+    both gaps are recomputed from the moved pair. The certificate is re-judged by
+    the caller (#1536) on the moved pair. A zero charge is a no-op.
+    """
+    if not charge or not isinstance(result, SolveResult):
+        return
+    model = args[0] if args else kwargs.get("model")
+    is_max = False
+    if isinstance(model, Model) and model._objective is not None:
+        from discopt.modeling.core import ObjectiveSense
+
+        is_max = model._objective.sense == ObjectiveSense.MAXIMIZE
+    shift = float(charge) if is_max else -float(charge)
+    if result.bound is not None and np.isfinite(result.bound):
+        # Moving a bound AWAY from the incumbent keeps whatever validity claim
+        # it carried (#1244: the triple moves together through ``_set_bound``).
+        result._set_bound(
+            float(result.bound) + shift,
+            valid=bool(result.bound_valid),
+            source=result.bound_source,
+        )
+        if result.objective is not None and np.isfinite(result.objective):
+            result.gap = _gap_mod.reported_gap(float(result.objective), result.bound)
+    if result.root_bound is not None and np.isfinite(result.root_bound):
+        result.root_bound = float(result.root_bound) + shift
+        if result.objective is not None and np.isfinite(result.objective):
+            result.root_gap = _gap_mod.reported_gap(float(result.objective), result.root_bound)
+    if result.solver_stats is None:
+        result.solver_stats = {}
+    result.solver_stats["convexity/charge"] = float(charge)
+
+
 def _refuse_unclosed_published_pair(
     result: SolveResult, gap_tolerance: float, abs_gap_tol: float
 ) -> None:
@@ -7007,6 +7048,36 @@ def _warn_abs_gap_not_loosened(abs_gap_tolerance: Optional[float], gap_tolerance
         "solve explores at least as many nodes as it would with no absolute tolerance "
         "at all. Raise gap_tolerance to loosen this route.",
         stacklevel=2,
+    )
+
+
+def _warn_native_kernel_bypassed(options: list[str]) -> None:
+    """Say so when a search option moves a spatial solve off the native kernel (#1678).
+
+    The native Rust kernel (default ON) runs its own fixed best-first search and calls
+    no node callback, so ``_native_kernel_feature_safe`` routes a solve that sets
+    ``strategy``, ``rlt``, ``partitions``, ``presolve=False``,
+    ``in_tree_presolve_stride``, ``obbt_at_root=False`` or ``node_callback`` to the
+    Python tree, which honours them. That is sound -- the Python tree is the trusted
+    path -- but it changes the engine, its node counts, its gap-tolerance semantics
+    (the kernel stops absolutely at ``gap_tolerance <= 1e-4``; the Python tree uses
+    absolute-OR-relative) and usually its wall time, and the caller was told nothing.
+    Silent when the kernel is opted out (``DISCOPT_NATIVE_SPATIAL_KERNEL=0``), since
+    then nothing moved.
+    """
+    if not options or not _native_spatial_kernel_enabled():
+        return
+    import warnings
+
+    warnings.warn(
+        "Option(s) "
+        + ", ".join(options)
+        + " are not supported by the native spatial branch-and-bound kernel, so this "
+        "solve runs on the Python spatial tree instead (algorithm_route "
+        "'spatial-bb: ... (Python tree)'). Node counts, wall time and the gap-tolerance "
+        "test (absolute-or-relative rather than the kernel's absolute stop) can differ "
+        "from a solve without these options.",
+        stacklevel=3,
     )
 
 
@@ -7395,10 +7466,10 @@ def _check_finite_bounds(model: Model, tightening=None) -> None:
         if any("[default]" in entry for entry in bad_vars):
             default_note = (
                 f"A bound marked [default] is the box applied to a column you declared "
-                f"with no bounds: {DEFAULT_VARIABLE_BOUND:.6g}, which is FINITE (it sits "
-                f"just below the {_CONSTRAINT_INF:.6g} infinity sentinel), so the solve "
-                f"can return a certified 'optimal' sitting on that corner rather than "
-                f"'unbounded'."
+                f"with no bounds ({DEFAULT_VARIABLE_BOUND:.6g}). discopt reads it as 'no "
+                f"bound' (#1678): an LP/MILP that runs off along it is proved 'unbounded', "
+                f"and any other result whose point sits on it is reported 'feasible' with "
+                f"no dual bound, never a certified 'optimal' at that corner."
             )
         parts = [
             f"Variables with very large or infinite declared bounds: {', '.join(bad_vars[:5])}.",
@@ -7509,6 +7580,17 @@ def _check_model_scaling(model: Model) -> None:
         # failure is logged, not hidden.
         logger.debug("Scaling diagnostics unavailable: %s", exc)
         return
+
+    # #1686: rows whose symbolic expansion exceeded the deterministic work
+    # budget in ``compute_equilibration`` were skipped, not examined. Say so,
+    # so a quiet diagnostic is not over-read as covering them.
+    n_over = int(diag.get("rows_over_budget", 0) or 0)
+    if n_over:
+        logger.info(
+            "Scaling diagnostics: %d constraint(s) skipped -- their polynomial "
+            "expansion exceeded the work budget (#1686); ranges cover the rest.",
+            n_over,
+        )
 
     if int(diag.get("linear_rows_sampled", 0)) == 0:
         return  # no linear rows sampled: nothing was measured, so say nothing
@@ -10753,8 +10835,13 @@ def _stamp_layer_timing(fn: _F) -> _F:
         _name_depth = len(_ROUTE_NAME)
         _state_depth = len(_ROUTE_FALLBACK_STATE)
         _gap_depth = len(_GAP_TOLERANCES)
+        from discopt._relax.convexity.certificate import convexity_charge_scope
+
         try:
-            result = fn(*args, **kwargs)
+            # #1682: every convexity charge accepted during THIS call is recorded
+            # here and subtracted from the published bound below.
+            with convexity_charge_scope() as _charge_scope:
+                result = fn(*args, **kwargs)
         finally:
             _route_note = (
                 _ROUTE_FALLBACK_NOTE[_route_depth]
@@ -10832,6 +10919,10 @@ def _stamp_layer_timing(fn: _F) -> _F:
         result.jax_time = min(spent["jax"], result.python_time)
         # #1536: the single point every route's result passes through, after the
         # #1059 route/fallback merge -- so it judges the pair actually published.
+        # #1682: subtract any accepted convexity charge BEFORE the published pair
+        # is judged, so the #1536 check below re-decides the certificate on the
+        # charged bound.
+        _apply_convexity_charge(result, _charge_scope.total, args, kwargs)
         if _gap_tols is not None:
             # #1537 E: the tolerances this certificate is judged at (AMP's
             # ``rel_gap``/``abs_tol``, else the caller's), so ``Model.solve``'s
@@ -11504,6 +11595,10 @@ def solve_model(
     # #1533: ``pounce_options`` names the same POUNCE options as ``ipopt_options``.
     ipopt_options = _resolve_pounce_options(ipopt_options, pounce_options)
     _GAP_TOLERANCES.append((float(gap_tolerance), abs_gap_tol))
+    # #1682: the exact-QP convexity route sizes an acceptable charge against this.
+    from discopt._relax.convexity.certificate import set_charge_scope_abs_gap_tol
+
+    set_charge_scope_abs_gap_tol(abs_gap_tol)
 
     # --- Enforce float64 precision ---
     # JAX defaults to float32 unless JAX_ENABLE_X64=1 is set *before* importing
@@ -12778,6 +12873,10 @@ def solve_model(
         if _amp_x0 is not None:
             amp_kwargs["initial_point"] = _amp_x0
 
+        # #1678: every route names itself (#1614); AMP returned
+        # ``algorithm_route=None``. ``_stamp_layer_timing`` only fills a gap, so a
+        # more specific string set inside AMP still wins.
+        _declare_route("amp: adaptive multivariate partitioning (MILP relaxation + local NLP)")
         return solve_amp(
             model,
             time_limit=time_limit,
@@ -13133,6 +13232,7 @@ def solve_model(
         if "milp_solver" in kwargs:
             loa_kwargs["milp_solver"] = kwargs.pop("milp_solver")
 
+        _declare_route("gdpopt-loa: logic-based outer approximation (MILP master + NLP)")
         return solve_gdpopt_loa(
             model,
             time_limit=time_limit,
@@ -15333,6 +15433,17 @@ def solve_model(
     _native_budget_spent = (
         _native_setup_deadline is not None and time.perf_counter() >= _native_setup_deadline
     )
+    _native_search_levers = _native_kernel_ignored_levers(
+        strategy=strategy,
+        rlt=rlt,
+        partitions=partitions,
+        presolve=presolve,
+        in_tree_presolve_stride=in_tree_presolve_stride,
+        kwargs=kwargs,
+    )
+    _warn_native_kernel_bypassed(
+        _native_search_levers + (["node_callback"] if node_callback is not None else [])
+    )
     if not _native_budget_spent and _native_kernel_feature_safe(
         mccormick_bounds=mccormick_bounds,
         initial_point=initial_point,
@@ -15340,14 +15451,7 @@ def solve_model(
         incumbent_callback=incumbent_callback,
         node_callback=node_callback,
         kwargs=kwargs,
-        search_levers=_native_kernel_ignored_levers(
-            strategy=strategy,
-            rlt=rlt,
-            partitions=partitions,
-            presolve=presolve,
-            in_tree_presolve_stride=in_tree_presolve_stride,
-            kwargs=kwargs,
-        ),
+        search_levers=_native_search_levers,
     ):
         _native_result = _try_native_spatial_kernel(
             model,
@@ -22875,6 +22979,11 @@ def _solve_continuous(
     obj_val = nlp_result.objective
     if obj_val is not None and model._objective.sense == ObjectiveSense.MAXIMIZE:
         obj_val = -obj_val
+    # #1679: the evaluator carries the whole objective (constant included) but
+    # minimizes ``-f`` for a MAXIMIZE model, so the report gets only the sign flip.
+    _report_in_model_sense(
+        nlp_result.solve_report, 0.0, model._objective.sense == ObjectiveSense.MAXIMIZE
+    )
 
     constraint_duals = _unpack_constraint_duals(evaluator, nlp_result.multipliers)
     bound_duals_lower = _unpack_bound_duals(model, nlp_result.bound_multipliers_lower)
@@ -23048,7 +23157,11 @@ def _solve_continuous(
         if not passes_false_primal_screen(evaluator, np.asarray(nlp_result.x, dtype=np.float64)):
             logger.warning(
                 "continuous NLP returned an infeasible point (status=%s, obj=%s); "
-                "withholding the incumbent — no feasible solution was found.",
+                "withholding the incumbent — no feasible solution was found. "
+                "result.x is None; the final iterate is in result.last_iterate "
+                "(max violation in result.last_iterate_violation). It is a primal "
+                "point only (no multipliers or barrier state), so restarting from "
+                "it is a cold primal start, not a warm restart.",
                 status,
                 obj_val,
             )
@@ -23414,6 +23527,13 @@ def _solve_pounce_route(
             _ip = np.asarray(initial_point, dtype=np.float64).ravel()
             if _ip.size == n_flat and np.all(np.isfinite(_ip)):
                 qp_x0 = _ip
+        # #1679: ``warm_start=<previous result>`` also carries qp-ipm's own final
+        # iterate, multipliers included; ``initial_solution`` is a point only.
+        # Measured (pounce.qp, a feasible MPC neighbour): 10 iterations from ``x``
+        # alone, 1 from the full iterate.
+        qp_iterate_start = (
+            (warm_start or {}).get("pounce_qp_iterate") if qp_x0 is not None else None
+        )
         _dropped_starts = (
             []
             if qp_x0 is not None
@@ -23470,6 +23590,7 @@ def _solve_pounce_route(
                     relaxes_huge_bounds=True,
                     reject_reason=reject_reason,
                     x0=qp_x0,
+                    iterate_start=qp_iterate_start,
                     sparse=True,
                 )
         except _cvx.IndefiniteQPError as exc:
@@ -23500,6 +23621,7 @@ def _solve_pounce_route(
                     relaxes_huge_bounds=True,
                     reject_reason=reject_reason,
                     x0=qp_x0,
+                    iterate_start=qp_iterate_start,
                     sos_lift=lift,
                     sparse=True,
                 )
@@ -23530,11 +23652,10 @@ def _solve_pounce_route(
                     wall_time=wall,
                     error=(
                         "POUNCE reported the problem unbounded, but it treats a declared "
-                        "bound of magnitude >= 1e15 (including the 9.999e19 default box "
-                        "of a variable declared without bounds) as infinite, so over the "
-                        "box as declared the optimum may sit at that corner instead. "
-                        "Give the unbounded variables explicit infinite bounds "
-                        "(lb=-numpy.inf / ub=numpy.inf) or realistic finite ones."
+                        "bound of magnitude in [1e15, 1e20) as infinite, so over the box "
+                        "as declared the optimum may sit at that corner instead. Give "
+                        "the unbounded variables no bound (or lb=-numpy.inf / "
+                        "ub=numpy.inf) or realistic finite ones."
                     ),
                 )
             elif outcome is None:
@@ -26449,10 +26570,47 @@ def _scalar_constraint_layout(
     return eq_names, ub_info
 
 
-#: Above this many dense Jacobian entries the row-matching dual layout is not
-#: attempted (it builds the constraint Jacobian densely); duals are then reported
-#: only through the scalar layout, exactly as before #1618.
-_ROW_MATCH_MAX_ENTRIES = 20_000_000
+#: Above this many Jacobian nonzeros the row-matching dual layout is not attempted
+#: (its per-row matching is a Python loop); duals are then reported only through
+#: the scalar layout, exactly as before #1618. Until #1680 this was a cap on DENSE
+#: entries (``m * n > 20e6``) because the matcher densified both the solved
+#: matrices and the Jacobian -- which on a bulk-row model was the HiGHS route's
+#: peak-memory term, and silently dropped every dual above ~4.5k x 4.5k. The
+#: matcher is sparse now, so the cap bounds work, not memory.
+_ROW_MATCH_MAX_NNZ = 5_000_000
+
+
+def _csr_rows(A: Any, n_cols: int) -> Any:
+    """``A[:, :n_cols]`` as canonical CSR (sorted, duplicates summed), never dense.
+
+    Sparse input stays sparse. Dense input goes through :func:`_dense_A` first,
+    which raises on an object / non-2-D array instead of letting a 0-d object
+    array through (CLAUDE.md: ``np.asarray`` on a scipy matrix does not raise).
+    """
+    import scipy.sparse as sp
+
+    if sp.issparse(A):
+        M = sp.csr_matrix(A, dtype=np.float64)
+    else:
+        M = sp.csr_matrix(_dense_A(A))
+    if M.shape[1] > n_cols:
+        M = M[:, :n_cols].tocsr()
+    M.sum_duplicates()
+    M.sort_indices()
+    if not sp.issparse(M):  # pragma: no cover - guards the contract above
+        raise TypeError("_csr_rows must return a scipy sparse matrix")
+    return M
+
+
+def _sparse_constraint_jacobian(ev: Any, x: np.ndarray) -> Any:
+    """The constraint Jacobian at ``x`` without a dense ``(m, n)`` scatter.
+
+    Both evaluators expose ``evaluate_sparse_jacobian`` (the tape returns CSR from
+    its native COO; the numpy evaluator may return CSC or, as its own fallback, a
+    dense array -- ``_csr_rows`` accepts either).
+    """
+    fn = getattr(ev, "evaluate_sparse_jacobian", None)
+    return fn(x) if fn is not None else ev.evaluate_jacobian(x)
 
 
 def _matched_row_constraint_duals(
@@ -26495,24 +26653,28 @@ def _matched_row_constraint_duals(
     whatever orientation the extractor chose; an equality's multiplier is
     ``λ = -s·rd``, ``s`` mapping the solved row onto ``body = 0``.
     """
-    # Dense, 2-D, validated (CLAUDE.md: never ``np.asarray`` a scipy matrix).
-    A_ub = None if A_ub is None else _dense_A(A_ub)
-    A_eq = None if A_eq is None else _dense_A(A_eq)
-    n_ub = 0 if A_ub is None else int(A_ub.shape[0])
-    n_eq = 0 if A_eq is None else int(A_eq.shape[0])
+    # Sparse end to end (#1680). This used to ``_dense_A`` both solved matrices and
+    # scatter the Jacobian densely, which on a bulk-row model was the HiGHS route's
+    # peak memory. ``_csr_rows`` validates its input like ``_dense_A`` does
+    # (CLAUDE.md: ``np.asarray`` on a scipy matrix returns a 0-d object array).
+    A_ub_s = None if A_ub is None else _csr_rows(A_ub, n_orig)
+    A_eq_s = None if A_eq is None else _csr_rows(A_eq, n_orig)
+    n_ub = 0 if A_ub_s is None else int(A_ub_s.shape[0])
+    n_eq = 0 if A_eq_s is None else int(A_eq_s.shape[0])
     if (n_ub and b_ub is None) or (n_eq and b_eq is None):
         return None
     if row_dual.size != n_ub + n_eq or n_ub + n_eq == 0:
         return None
     ev = _make_evaluator(model)
     m_ev = int(ev.n_constraints)
-    if m_ev == 0 or m_ev * n_orig > _ROW_MATCH_MAX_ENTRIES:
+    if m_ev == 0:
         return None
     if int(ev.n_variables) != n_orig:
         return None
     x0 = np.zeros(n_orig, dtype=np.float64)
-    J = ev.evaluate_jacobian(x0)
-    J = np.asarray(J.toarray() if hasattr(J, "toarray") else J, dtype=np.float64)
+    J = _csr_rows(_sparse_constraint_jacobian(ev, x0), n_orig)
+    if J.nnz > _ROW_MATCH_MAX_NNZ:
+        return None
     g0 = np.asarray(ev.evaluate_constraints(x0), dtype=np.float64).reshape(-1)
     # Row bounds from the row map itself: ``_infer_constraint_bounds`` covers only
     # ``model._constraints``, not the builder rows the evaluator appends (#840).
@@ -26529,31 +26691,45 @@ def _matched_row_constraint_duals(
     def _close(a: np.ndarray, b: np.ndarray) -> bool:
         return bool(np.allclose(a, b, rtol=1e-9, atol=1e-12))
 
-    # Candidates by sparsity pattern, so the match is not O(rows^2) dense compares.
+    def _row(M, k: int) -> tuple[tuple, np.ndarray]:
+        # (support, values) of row k with explicit zeros dropped -- the dense
+        # ``flatnonzero(row != 0)`` support and the row's values on it. Two rows
+        # with the same support are ``allclose`` iff their values on it are
+        # (both are exactly zero everywhere else).
+        lo_, hi_ = int(M.indptr[k]), int(M.indptr[k + 1])
+        vals = M.data[lo_:hi_]
+        nz = vals != 0.0
+        return tuple(M.indices[lo_:hi_][nz].tolist()), vals[nz]
+
+    # Candidates by sparsity pattern, so the match is not O(rows^2) compares.
     by_support: dict[tuple, list[int]] = {}
+    j_vals: list[np.ndarray] = []
     for k in range(m_ev):
-        by_support.setdefault(tuple(np.flatnonzero(J[k] != 0.0)), []).append(k)
+        sup, vals = _row(J, k)
+        by_support.setdefault(sup, []).append(k)
+        j_vals.append(vals)
 
     # Non-None whenever the matching count is nonzero (checked above).
     b_ub_v = np.zeros(0) if b_ub is None else np.asarray(b_ub, dtype=np.float64).reshape(-1)
     b_eq_v = np.zeros(0) if b_eq is None else np.asarray(b_eq, dtype=np.float64).reshape(-1)
     if b_ub_v.size != n_ub or b_eq_v.size != n_eq:
         return None
-    solved: list[tuple[np.ndarray, float, bool]] = []  # (a, b, is_eq)
-    if A_ub is not None:
+    solved: list[tuple[Any, int, float, bool]] = []  # (matrix, row, b, is_eq)
+    if A_ub_s is not None:
         for j in range(n_ub):
-            solved.append((np.asarray(A_ub[j, :n_orig], np.float64), float(b_ub_v[j]), False))
-    if A_eq is not None:
+            solved.append((A_ub_s, j, float(b_ub_v[j]), False))
+    if A_eq_s is not None:
         for i in range(n_eq):
-            solved.append((np.asarray(A_eq[i, :n_orig], np.float64), float(b_eq_v[i]), True))
+            solved.append((A_eq_s, i, float(b_eq_v[i]), True))
 
     row_value: dict[int, float] = {}
     bad_rows: set[int] = set()
-    for r, (a, b, is_eq) in enumerate(solved):
+    for r, (M, j, b, is_eq) in enumerate(solved):
+        sup, a = _row(M, j)
         hits: list[tuple[int, float]] = []
-        for k in by_support.get(tuple(np.flatnonzero(a != 0.0)), []):
+        for k in by_support.get(sup, []):
             for s in (1.0, -1.0):
-                if not _close(a, s * J[k]):
+                if not _close(a, s * j_vals[k]):
                     continue
                 if is_eq:
                     ok = cl[k] == cu[k] and _close(np.array(b), np.array(s * (cl[k] - g0[k])))
@@ -27525,12 +27701,15 @@ def _solve_lp_matrix(
         lp_data = extract_lp_data(model)
     n_orig = sum(v.size for v in model._variables)
 
-    bounds = list(
-        zip(
-            np.asarray(lp_data.x_l[:n_orig]).tolist(),
-            np.asarray(lp_data.x_u[:n_orig]).tolist(),
-        )
-    )
+    # #1678 (b): a side at the default box magnitude means "no bound" -- handed on
+    # as the 1e20 infinity, as ``_highs_std_form`` does for the default route, so
+    # the engines here prove ``unbounded`` instead of certifying the corner.
+    _default_side = DEFAULT_VARIABLE_BOUND * (1.0 - 1e-12)
+    _xl = np.array(lp_data.x_l[:n_orig], dtype=np.float64)
+    _xu = np.array(lp_data.x_u[:n_orig], dtype=np.float64)
+    _xl[_xl <= -_default_side] = -_CONSTRAINT_INF
+    _xu[_xu >= _default_side] = _CONSTRAINT_INF
+    bounds = list(zip(_xl.tolist(), _xu.tolist()))
 
     # A rung that cannot emit COO (the tape / autodiff fallbacks) still returns a
     # dense array; ``_dense_A`` validates it and CSR keeps the rest of this
@@ -27567,6 +27746,15 @@ def _solve_lp_matrix(
             raise
         logger.debug("%s LP solve failed: %s", engine, e)
         return None
+
+    # #1679: the backend never saw ``obj_const`` or the MAXIMIZE flip; put its solve
+    # report (if it wrote one) in the units ``SolveResult.objective`` uses.
+    assert model._objective is not None
+    _report_in_model_sense(
+        getattr(result, "solve_report", None),
+        float(lp_data.obj_const),
+        model._objective.sense == ObjectiveSense.MAXIMIZE,
+    )
 
     wall_time = time.perf_counter() - t_start
 
@@ -28809,6 +28997,7 @@ def _solve_qp_matrix(
     x0: np.ndarray | None = None,
     sos_lift: tuple | None = None,
     sparse: bool = False,
+    iterate_start: dict | None = None,
 ) -> SolveResult | None:
     """Solve a QP/MIQP through a matrix-form ``solve_qp`` backend.
 
@@ -28832,7 +29021,10 @@ def _solve_qp_matrix(
 
     ``x0``, a primal point over the model's flattened variables, is forwarded as
     ``warm_start=`` -- only to a backend that takes one (POUNCE qp-ipm, #1615
-    B-01b); the caller passes it only then.
+    B-01b); the caller passes it only then. ``iterate_start`` is a previous
+    solve's :attr:`SolveResult.pounce_qp_iterate`; its multiplier blocks join the
+    start when every one of them matches this problem's row and column counts (the
+    same model, possibly with changed data), and are dropped otherwise (#1679).
 
     ``sos_lift`` is a continuous objective's
     :func:`~discopt._relax.convexity.patterns.weighted_affine_square_decomposition`
@@ -28945,6 +29137,23 @@ def _solve_qp_matrix(
         if "warm_start" in start_kw:
             ws = start_kw["warm_start"]
             start_kw["warm_start"] = np.concatenate([ws, A_l @ ws + b_l])
+    if iterate_start and "warm_start" in start_kw:
+        n_s_cols = len(c_s)
+        want = {
+            "y": 0 if A_eq_s is None or b_eq_s is None else int(A_eq_s.shape[0]),
+            "z": 0 if A_ub_s is None or b_ub is None else int(A_ub_s.shape[0]),
+            "z_lb": n_s_cols,
+            "z_ub": n_s_cols,
+        }
+        duals = {k: v for k, v in iterate_start.items() if k in want and v is not None}
+        if duals and all(np.size(v) == want[k] for k, v in duals.items()):
+            start_kw["warm_start"] = {"x": start_kw["warm_start"], **duals}
+        elif duals:
+            logger.info(
+                "%s: the warm start's multipliers do not match this problem's rows; "
+                "starting from its primal point only",
+                engine,
+            )
     try:
         result = solve_qp_fn(
             Q=Q_s,
@@ -28968,6 +29177,11 @@ def _solve_qp_matrix(
     wall_time = time.perf_counter() - t_start
     assert model._objective is not None
     sense = model._objective.sense
+    # #1679: the backend minimized without ``obj_const_s`` (the lifted problem's own
+    # constant under ``sos_lift``) and without the MAXIMIZE flip.
+    _report_in_model_sense(
+        getattr(result, "solve_report", None), obj_const_s, sense == ObjectiveSense.MAXIMIZE
+    )
 
     objective = None
     if result.objective is not None:
@@ -29148,6 +29362,7 @@ def _solve_qp_matrix(
                 Q_orig=Q_orig,
             )
 
+        qp_iterate = getattr(result, "warm_start_state", None) or None
         if not qp_certified:
             return SolveResult(
                 status="feasible",
@@ -29164,6 +29379,7 @@ def _solve_qp_matrix(
                 constraint_duals=cd,
                 bound_duals_lower=bdl,
                 bound_duals_upper=bdu,
+                pounce_qp_iterate=qp_iterate,
             )
         sr = SolveResult(
             status="optimal",
@@ -29196,6 +29412,7 @@ def _solve_qp_matrix(
             constraint_duals=cd,
             bound_duals_lower=bdl,
             bound_duals_upper=bdu,
+            pounce_qp_iterate=qp_iterate,
         )
         # A detected QP with PSD Q is a convex problem solved directly without
         # B&B -- semantically the same as the convex NLP fast path.
@@ -31997,10 +32214,16 @@ def _highs_std_form(model: Model):
     form, integers marked, so every certificate is about exactly what was solved."""
     import scipy.sparse as _sp
 
-    from discopt._relax.problem_classifier import extract_lp_data
+    from discopt._relax.problem_classifier import extract_lp_data, sparse_constraint_matrices
     from discopt.solvers.lp_milp_highs import StdForm
 
-    lp_data = extract_lp_data(model)
+    # #1680: CSR at any size. Every consumer here is sparse-aware -- ``StdForm``
+    # converts to CSC regardless, and the dual recovery / slack decomposition below
+    # already receive CSR above ``_DENSE_A_MAX_BYTES`` -- so under that budget the
+    # dense ``A_eq`` was pure cost: 256 MB on a 4000-row bulk LP (traced with
+    # tracemalloc to ``_materialise_A``), the HiGHS route's peak the issue measured.
+    with sparse_constraint_matrices():
+        lp_data = extract_lp_data(model)
     n_orig = sum(v.size for v in model._variables)
     _, _, _, int_offsets, int_sizes = _extract_variable_info(model)
     int_idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
@@ -32010,9 +32233,19 @@ def _highs_std_form(model: Model):
         A = _sp.csc_matrix((0, c.shape[0]))
     elif not _sp.issparse(A):
         A = _dense_A(A)
-    sf = StdForm.from_arrays(
-        c, A, lp_data.b_eq, lp_data.x_l, lp_data.x_u, float(lp_data.obj_const), int_idx
-    )
+    # #1678 (b): a structural side at the default box magnitude is the model's
+    # stand-in for "no bound" (see ``Model._withhold_default_box_certificate``), so
+    # HiGHS gets it as open. ``min -x`` over ``x >= 0`` is then proved ``unbounded``
+    # by a verified ray, not certified ``optimal`` at the invented 9.999e19 corner.
+    # An explicit finite side below the default, however large, passes through.
+    from discopt.solvers.lp_milp_highs import INF as _HIGHS_INF
+
+    x_l = np.array(lp_data.x_l, dtype=np.float64).ravel()
+    x_u = np.array(lp_data.x_u, dtype=np.float64).ravel()
+    _default_side = DEFAULT_VARIABLE_BOUND * (1.0 - 1e-12)
+    x_l[:n_orig][x_l[:n_orig] <= -_default_side] = -_HIGHS_INF
+    x_u[:n_orig][x_u[:n_orig] >= _default_side] = _HIGHS_INF
+    sf = StdForm.from_arrays(c, A, lp_data.b_eq, x_l, x_u, float(lp_data.obj_const), int_idx)
     if sf.n < n_orig:
         raise ValueError(f"standard form has {sf.n} columns for {n_orig} model variables")
     return lp_data, n_orig, sf
@@ -35137,9 +35370,18 @@ def _solve_miqp_bb(
             # Report "unknown", uncertified.
             status = "unknown"
             _gap_certified = False
+        elif not _gap_certified:
+            # #1699: a node whose relaxation POUNCE could neither solve nor prove
+            # empty (e.g. an unbounded convex MIQP: the node QP runs to the 1e20
+            # box and returns no iterate) was kept open at lb=-inf and then
+            # dropped when its integers were fixed. An exhausted tree that
+            # contains such a node proves nothing -- "infeasible" would be a
+            # false verdict on a feasible model. Report it honestly.
+            status = "unknown"
         else:
-            # Tree exhausted with no feasible node: infeasibility *is* a certified
-            # conclusion, so leave _gap_certified untouched.
+            # Tree exhausted with no feasible node and every pruned node carried
+            # a proof: infeasibility *is* a certified conclusion, so leave
+            # _gap_certified untouched.
             status = "infeasible"
 
     # Interactive debugger: terminal checkpoint. Fired after the status

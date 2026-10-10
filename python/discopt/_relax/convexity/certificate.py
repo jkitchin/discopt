@@ -29,10 +29,12 @@ Adjiman, Dallwig, Floudas, Neumaier (1998), "αBB — I. Theoretical
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import logging
 import os
 import time
-from typing import Optional
+from typing import Iterator, Optional
 
 import numpy as np
 
@@ -81,6 +83,168 @@ def _qp_exact_convexity_enabled() -> bool:
         "no",
         "off",
     )
+
+
+def _convex_charge_enabled() -> bool:
+    """Whether a solve may accept a QP objective as "convex up to a charge" (#1682).
+
+    **Default ON** (graduated on introduction; opt-out ``DISCOPT_CONVEX_CHARGE=0``
+    restores the strict #1679 refusal). The CLAUDE.md §5 panel is recorded in
+    ``docs/dev/flag-retirement-audit.md``: over 299 corpus QP/MIQP instances only 5
+    (QPLIB 10046/10048/10050/10056/10066) trigger it; on those plus the #1682
+    Gram least-squares example, 2 reps x 60 s interleaved, certified 0/6 -> 3/6,
+    every bound tightened and none above its reference optimum, 0 violations.
+
+    When :func:`~.eigenvalue.psd_certified` cannot prove the objective Hessian
+    ``Q`` PSD -- the float Gram matrix ``2 K'K`` of a rank-deficient ``K`` is
+    indefinite in exact arithmetic at ``lambda_min ~ -1e-14`` (#1679) -- the
+    exact-QP route may still accept it, inside a solve only, when
+    :func:`~.eigenvalue.rigorous_psd_shift` proves ``lambda_min(Q) >= -delta`` and
+    the charge ``delta/2 * D**2`` over the bounded box of the quadratic variables
+    is at most :data:`CONVEX_CHARGE_ABS_TOL_FRACTION` of the solve's absolute gap
+    tolerance. The solve then subtracts the charge from its published bound
+    (``solver._apply_convexity_charge``). See :func:`quadratic_objective_charge`.
+    """
+    return os.environ.get("DISCOPT_CONVEX_CHARGE", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+#: A charge is accepted only when it is at most this fraction of the solve's
+#: absolute gap tolerance, so subtracting it from the published bound leaves the
+#: certificate room to close (#1682). The published pair is re-judged after the
+#: subtraction (``solver._refuse_unclosed_published_pair``) either way.
+CONVEX_CHARGE_ABS_TOL_FRACTION = 0.1
+
+#: A bound at or beyond this magnitude is the solver's effective infinity
+#: (``DEFAULT_VARIABLE_BOUND = 9.999e19``; the LP layer's ``1e20`` sentinel).
+_CHARGE_INF_BOUND = 1e19
+
+#: Relative/absolute widening of every box width in the charge's diameter, so a
+#: point the solver returns up to this far outside its bounds is still covered.
+_CHARGE_BOX_SLACK = 1e-6
+
+
+class ConvexityChargeScope:
+    """Per-solve record of accepted convexity charges (#1682).
+
+    Created by ``solver._stamp_layer_timing`` for each ``solve_model`` call;
+    ``abs_gap_tol`` is filled in by ``solve_model`` once resolved. ``charges`` maps
+    ``id(model)`` to the largest charge accepted for that model object -- the same
+    model re-classified (a nested solve clears the memo) is not double counted;
+    distinct models (reformulations) add up, which can only over-subtract.
+    """
+
+    __slots__ = ("abs_gap_tol", "charges")
+
+    def __init__(self) -> None:
+        self.abs_gap_tol: Optional[float] = None
+        self.charges: dict[int, float] = {}
+
+    def record(self, model: Model, charge: float) -> None:
+        key = id(model)
+        self.charges[key] = max(self.charges.get(key, 0.0), float(charge))
+
+    @property
+    def total(self) -> float:
+        return float(sum(self.charges.values()))
+
+
+#: The active solve's charge scope, or ``None`` outside a solve. A ContextVar so
+#: the large-stack worker of ``_scoped_deep_recursion`` (which runs on a COPY of
+#: the caller's context) shares the same mutable scope object.
+_CHARGE_SCOPE: contextvars.ContextVar[Optional[ConvexityChargeScope]] = contextvars.ContextVar(
+    "discopt_convexity_charge_scope", default=None
+)
+
+
+@contextlib.contextmanager
+def convexity_charge_scope() -> Iterator[ConvexityChargeScope]:
+    """Open a fresh charge scope for one solve; nested solves get their own.
+
+    On exit a nested scope's charges are also merged (per-model maximum) into the
+    enclosing scope: the outer solve may reuse a convexity verdict memoized while
+    the nested solve ran, and must then still subtract the charge. If the outer
+    result was built from the nested (already charged) bound, that subtracts the
+    charge twice -- an over-subtraction, which is sound.
+    """
+    parent = _CHARGE_SCOPE.get()
+    scope = ConvexityChargeScope()
+    token = _CHARGE_SCOPE.set(scope)
+    try:
+        yield scope
+    finally:
+        _CHARGE_SCOPE.reset(token)
+        if parent is not None:
+            for key, charge in scope.charges.items():
+                parent.charges[key] = max(parent.charges.get(key, 0.0), charge)
+
+
+def set_charge_scope_abs_gap_tol(abs_gap_tol: float) -> None:
+    """Tell the active scope (if any) the solve's absolute gap tolerance."""
+    scope = _CHARGE_SCOPE.get()
+    if scope is not None:
+        scope.abs_gap_tol = float(abs_gap_tol)
+
+
+def quadratic_objective_charge(hessian: np.ndarray, x_l, x_u) -> Optional[float]:
+    """Rigorous charge for treating ``1/2 x'Qx + c'x`` as convex on a box (#1682).
+
+    Let ``S`` be the symmetric part of ``hessian`` restricted to its active
+    (nonzero) rows, ``lambda_min(S) >= -delta`` proved by
+    :func:`~.eigenvalue.rigorous_psd_shift`, and ``F`` any feasible set inside the
+    box ``[l, u]`` of those variables. For any ``x_hat`` and ``y`` in the box, the
+    quadratic is its own second-order Taylor expansion:
+
+        ``f(y) = f(x_hat) + grad f(x_hat)'(y - x_hat) + 1/2 (y - x_hat)' S (y - x_hat)
+               >= f(x_hat) + grad f(x_hat)'(y - x_hat) - delta/2 ||y - x_hat||^2
+               >= [f(x_hat) + grad f(x_hat)'(y - x_hat)] - delta/2 D^2``
+
+    with ``D^2 = sum_j (u_j - l_j)^2`` over the active variables (inactive ones do
+    not enter the quadratic term). The bracket is exactly the first-order model a
+    convex method's lower bound rests on: at an exact KKT point over polyhedral
+    ``F`` it is ``>= f(x_hat)`` for every ``y in F``; at the approximate point a
+    solver returns it is ``>= f(x_hat) - eps(x_hat)``, ``eps`` the same first-order
+    (Frank-Wolfe) residual the convex path already has to account for on a
+    genuinely convex objective, and a linearization cut or a Lagrangian
+    linearization bound is the same bracket again. So every lower bound the convex
+    machinery derives on ``F`` -- or on any node's sub-box, which only shrinks
+    ``D`` -- overstates the true one by at most ``delta/2 D^2`` beyond what it
+    would on a convex objective, and subtracting that charge from the published
+    bound makes it valid again.
+
+    Each width is widened by ``2 * 1e-6 * (1 + |l_j| + |u_j|)`` so a returned point
+    up to that far outside its bounds is covered, and the result is doubled as a
+    margin for the rounding in computing ``D^2`` itself.
+
+    Returns ``None`` -- no acceptance -- when an active variable is unbounded
+    (``|bound| >= 1e19``) or no shift is proved.
+    """
+    from .eigenvalue import rigorous_psd_shift
+
+    Q = np.asarray(hessian, dtype=np.float64)
+    S = 0.5 * (Q + Q.T)
+    active = np.flatnonzero(np.any(S != 0.0, axis=1))
+    if active.size == 0:
+        return 0.0
+    lo = np.asarray(x_l, dtype=np.float64).ravel()
+    hi = np.asarray(x_u, dtype=np.float64).ravel()
+    if lo.size != Q.shape[0] or hi.size != Q.shape[0]:
+        return None
+    lo, hi = lo[active], hi[active]
+    if not (np.all(np.isfinite(lo)) and np.all(np.isfinite(hi))):
+        return None
+    if np.any(np.abs(lo) >= _CHARGE_INF_BOUND) or np.any(np.abs(hi) >= _CHARGE_INF_BOUND):
+        return None
+    delta = rigorous_psd_shift(S[np.ix_(active, active)])
+    if delta is None:
+        return None
+    width = np.maximum(hi - lo, 0.0) + 2.0 * _CHARGE_BOX_SLACK * (1.0 + np.abs(lo) + np.abs(hi))
+    charge = 2.0 * 0.5 * float(delta) * float(np.sum(width * width))
+    return charge if np.isfinite(charge) else None
 
 
 def _oa_convexity_certificate_enabled() -> bool:
@@ -206,7 +370,8 @@ def certify_quadratic_objective_convex(model: Model, *, deadline: Optional[float
         return False
     if deadline is not None and time.perf_counter() > deadline:
         return False
-    quad = extract_qp_data(model).Q
+    qd = extract_qp_data(model)
+    quad = qd.Q
     # Re-check the dimension we actually got BEFORE densifying: builder-resident
     # rows are not in ``model._constraints``, so the pre-gate above can still be
     # cleared by a model whose extracted form is far larger. ``.shape`` is
@@ -218,9 +383,33 @@ def certify_quadratic_objective_convex(model: Model, *, deadline: Optional[float
         return False
     hessian = dense_Q(quad)
 
-    from discopt._relax.quadratic_form import quadratic_is_psd
+    # #1679: a PROOF, the same predicate the ``solver="pounce"`` route certifies a
+    # QP with (``convex_ipm_pounce.certify_psd``). ``quadratic_is_psd`` -- used here
+    # before -- accepts ``lambda_min >= -slack``, "PSD to within roundoff", which
+    # admitted the float Gram matrix ``2 K'K`` of a rank-deficient least-squares
+    # model although ``exact_psd`` refutes it (lambda_min ~ -1e-14). The objective
+    # is then "not proven convex" here; its structural sum-of-squares spelling is
+    # still proven by the DCP walker, which does not go through this matrix.
+    from .eigenvalue import psd_certified
 
-    return quadratic_is_psd(hessian) is True
+    if psd_certified(hessian):
+        return True
+    # #1682: "convex up to a charge", inside a solve only (the scope's owner
+    # subtracts the charge from the published bound; ``Model.convexity()`` and
+    # every caller outside a solve keep the strict proof).
+    scope = _CHARGE_SCOPE.get()
+    if scope is None or scope.abs_gap_tol is None or not _convex_charge_enabled():
+        return False
+    charge = quadratic_objective_charge(hessian, qd.x_l, qd.x_u)
+    if charge is None or charge > CONVEX_CHARGE_ABS_TOL_FRACTION * scope.abs_gap_tol:
+        return False
+    scope.record(model, charge)
+    logger.info(
+        "QP objective accepted as convex up to a charge of %.3g (#1682); the solve "
+        "subtracts it from the published bound.",
+        charge,
+    )
+    return True
 
 
 def certify_convex(
@@ -377,4 +566,12 @@ def refresh_convex_mask(
     return refreshed
 
 
-__all__ = ["certify_convex", "certify_quadratic_objective_convex", "refresh_convex_mask"]
+__all__ = [
+    "ConvexityChargeScope",
+    "certify_convex",
+    "certify_quadratic_objective_convex",
+    "convexity_charge_scope",
+    "quadratic_objective_charge",
+    "refresh_convex_mask",
+    "set_charge_scope_abs_gap_tol",
+]

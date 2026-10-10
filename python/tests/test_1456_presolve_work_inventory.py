@@ -299,6 +299,10 @@ _BUDGET_HOME = {
     "_MAX_EXPAND_OPS": "discopt._relax.binary_multilinear_reform",
     "_MAX_MONOMIALS": "discopt._relax.binary_multilinear_reform",
     "_DISTRIBUTE_TERM_BUDGET": "discopt._relax.term_classifier",
+    # The per-PASS distribution budget: what a pass that distributes every body
+    # of the model may spend in total (#1456, johnall: 191 bodies x the per-call
+    # budget each).
+    "_MODEL_DISTRIBUTE_TERM_BUDGET": "discopt._relax.term_classifier",
     "_FBBT_MAX_ITER": "discopt._relax.disjunctive_config_bound",
     # Not a work count: the #1456 outer-loop deadline. A row may name it
     # ALONGSIDE a work budget (never instead of one) when the budget bounds
@@ -362,17 +366,55 @@ INVENTORY: tuple[tuple[str, str, str, str], ...] = (
         "bounded",
         "_DISTRIBUTE_TERM_BUDGET, PresolveDeadline",
     ),
+    # The scan is also bounded per pass: it charges each body it distributes to
+    # ``_MODEL_DISTRIBUTE_TERM_BUDGET`` (``distribute_charged``) and abstains on
+    # exhaustion, and its distributed-body walks are memoised, so the term charge
+    # bounds them too. Before that they re-walked shared subtrees and
+    # re-decomposed every sub-product: ~40 s of the #1456 blowup fixture's
+    # 45 s against ``time_limit=5``, all before the deadline was first read.
     (
         "discopt._relax.factorable_reform",
         "has_factorable_work",
         "bounded",
-        "_DISTRIBUTE_TERM_BUDGET, PresolveDeadline",
+        "_DISTRIBUTE_TERM_BUDGET,_MODEL_DISTRIBUTE_TERM_BUDGET, PresolveDeadline",
     ),
+    # Bounded per call AND per pass: ``_DISTRIBUTE_TERM_BUDGET`` alone let the
+    # Python route spend 191 x 1 M terms on johnall's unreformed model (the hang
+    # #1456 moved to once the integer detectors were gated); it now distributes
+    # through ``distribute_bodies``.
     (
         "discopt._relax.term_classifier",
         "classify_nonlinear_terms",
         "bounded",
-        "_DISTRIBUTE_TERM_BUDGET",
+        "_DISTRIBUTE_TERM_BUDGET,_MODEL_DISTRIBUTE_TERM_BUDGET",
+    ),
+    # The integer-product detectors distribute and walk every body of the model;
+    # that whole-model distribution is their cost, and each entry point abstains
+    # ("nothing to do", model unchanged) when it exceeds the per-pass budget
+    # (johnall: ``has_nonconvex_integer_bilinear`` never returned at T=10).
+    (
+        "discopt._relax.integer_product_reform",
+        "has_integer_multilinear_reformulation_work",
+        "bounded",
+        "_MODEL_DISTRIBUTE_TERM_BUDGET",
+    ),
+    (
+        "discopt._relax.integer_product_reform",
+        "has_nonconvex_integer_bilinear",
+        "bounded",
+        "_MODEL_DISTRIBUTE_TERM_BUDGET",
+    ),
+    (
+        "discopt._relax.integer_product_reform",
+        "reformulate_integer_bilinear",
+        "bounded",
+        "_MODEL_DISTRIBUTE_TERM_BUDGET",
+    ),
+    (
+        "discopt._relax.integer_product_reform",
+        "reformulate_integer_multilinear",
+        "bounded",
+        "_MODEL_DISTRIBUTE_TERM_BUDGET",
     ),
     # --- wall: role 2, recorded in the #912 inventory -------------------------
     ("discopt._relax.nonlinear_bound_tightening", "tighten_nonlinear_bounds", "wall", "NBT"),
@@ -401,6 +443,12 @@ INVENTORY: tuple[tuple[str, str, str, str], ...] = (
         "env read (#1619)",
     ),
     ("discopt._relax.convexity.patterns", "clear_declared_box_cache", "trivial", "cache clear"),
+    (
+        "discopt._relax.convexity.certificate",
+        "set_charge_scope_abs_gap_tol",
+        "trivial",
+        "ContextVar read + float store (#1682)",
+    ),
     ("discopt._relax.integer_product_reform", "_iml_extend", "trivial", "one pass over x0"),
     ("discopt._relax.integer_product_reform", "_ipx_extend", "trivial", "one pass over x0"),
     ("discopt._relax.learned_relaxations", "load_pretrained_registry", "trivial", "file load"),
@@ -442,20 +490,6 @@ INVENTORY: tuple[tuple[str, str, str, str], ...] = (
     ("discopt._relax.convexity.signomial_global", "classify_signomial_global", "residual", ""),
     ("discopt._relax.factorable_reform", "canonicalize_entropy", "residual", "entry-gated #1456"),
     ("discopt._relax.gdp_reformulate", "reformulate_gdp", "residual", ""),
-    (
-        "discopt._relax.integer_product_reform",
-        "has_integer_multilinear_reformulation_work",
-        "residual",
-        "",
-    ),
-    (
-        "discopt._relax.integer_product_reform",
-        "has_nonconvex_integer_bilinear",
-        "residual",
-        "entry-gated #1456",
-    ),
-    ("discopt._relax.integer_product_reform", "reformulate_integer_bilinear", "residual", ""),
-    ("discopt._relax.integer_product_reform", "reformulate_integer_multilinear", "residual", ""),
     ("discopt._relax.objective_epigraph", "relax_objective_defining_equality", "residual", ""),
     ("discopt._relax.presolve_pipeline", "propagate_bounds_to_model", "residual", ""),
     ("discopt._relax.problem_classifier", "classify_problem", "residual", ""),
@@ -698,19 +732,22 @@ def test_residual_count_is_visible():
     pass, never by reclassifying one without a measurement.
     """
     residual = sorted(k for k, c in _CATEGORY.items() if c == "residual")
-    assert len(residual) == 17, (
-        f"the #1456 role-3 backlog changed ({len(residual)} entries, expected 17).\n"
+    assert len(residual) == 13, (
+        f"the #1456 role-3 backlog changed ({len(residual)} entries, expected 13).\n"
         "Bounding one: drop this number and re-categorise the row `bounded` with "
         "its budget symbol.\nAdding one: bound it instead.\n"
         + "\n".join(f"  {m}.{n}" for m, n in residual)
     )
 
 
-def test_the_four_budget_free_modules_are_all_recorded_residual():
-    """The four modules measured to contain no bound of any kind must not be
-    sitting in the inventory under a category that excuses them."""
+def test_the_budget_free_modules_are_all_recorded_residual():
+    """The modules measured to contain no bound of any kind must not be
+    sitting in the inventory under a category that excuses them.
+
+    ``integer_product_reform`` was the fourth until #1456 gated its detectors on
+    ``_MODEL_DISTRIBUTE_TERM_BUDGET``; its rows are ``bounded`` on that symbol
+    now, which ``test_bounded_rows_name_a_live_budget`` verifies."""
     budget_free = {
-        "discopt._relax.integer_product_reform",
         "discopt._relax.gdp_reformulate",
         "discopt._relax.symbolic.cut_recognizer",
         "discopt._relax.convexity.signomial_global",
@@ -726,4 +763,92 @@ def test_the_four_budget_free_modules_are_all_recorded_residual():
         if cat == "bounded":  # pragma: no cover - guarded by the assert above
             pytest.fail("unreachable")
         checked += 1
-    assert checked >= 6, f"only checked {checked} rows from the budget-free modules"
+    assert checked >= 4, f"only checked {checked} rows from the budget-free modules"
+
+
+# ---------------------------------------------------------------------------
+# Rust work behind a *method call* on a ``ModelRepr`` (#1686)
+# ---------------------------------------------------------------------------
+#
+# The scanner above records calls to names imported ``from discopt.X``. A method
+# called on an object one of those returned is invisible to it, and the
+# ``model_to_repr`` row's "marshal, linear" note says nothing about what is then
+# *called on* the repr. #1686 was exactly that blind spot: ``_check_model_scaling``
+# (run from this region) calls ``repr.scaling_diagnostics()``, whose Rust
+# ``compute_equilibration`` expanded every row with ``try_polynomial`` and no term
+# budget — ~115 s of a ``time_limit=5`` solve on a 9 x 7 product of sums, before
+# branch and bound. These rows record each such method and the Rust budget that
+# bounds it; the tests keep the claim tied to the source and to the behaviour.
+#
+# (method, solver.py helper that calls it, Rust budget symbols, stats key the
+#  binding reports when the budget fires)
+RUST_METHOD_INVENTORY: tuple[tuple[str, str, str, str], ...] = (
+    (
+        "scaling_diagnostics",
+        "_check_model_scaling",
+        "ROW_EXPANSION_BUDGET,MODEL_EXPANSION_BUDGET,LINEAR_ARENA_FACTOR",
+        "rows_over_budget",
+    ),
+)
+
+_SCALING_RS = Path(__file__).resolve().parents[2] / ("crates/discopt-core/src/presolve/scaling.rs")
+
+
+def test_rust_method_rows_are_called_from_the_region():
+    """Each recorded method is still called by its helper, and the helper is
+    still called from the pre-solve region — otherwise the row is stale."""
+    tree = ast.parse(_SOLVER.read_text())
+    fn = next(
+        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "solve_model"
+    )
+    _start, end, _found = _scan()
+    region_calls = {
+        _called_name(n) for n in ast.walk(fn) if isinstance(n, ast.Call) and n.lineno < end
+    }
+    checked = 0
+    for method, helper, _budget, _key in RUST_METHOD_INVENTORY:
+        assert helper in region_calls, f"{helper} is no longer called before the solve"
+        hfn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == helper)
+        called = {_called_name(n) for n in ast.walk(hfn) if isinstance(n, ast.Call)}
+        assert method in called, f"{helper} no longer calls .{method}()"
+        checked += 1
+    assert checked == len(RUST_METHOD_INVENTORY) > 0
+
+
+def test_rust_method_budgets_are_live_in_source():
+    """The ``bounded`` claim is about Rust code, so read the Rust code: each
+    budget symbol must still be defined and still be used by the pass."""
+    # Production code only: the Rust unit tests legitimately call the
+    # unbudgeted expansion to check the budgeted one against it.
+    src = _SCALING_RS.read_text().split("#[cfg(test)]")[0]
+    checked = 0
+    for _method, _helper, budget, _key in RUST_METHOD_INVENTORY:
+        for sym in budget.split(","):
+            assert f"pub const {sym}: u64" in src, f"{sym} is gone from {_SCALING_RS.name}"
+            assert src.count(sym) >= 2, f"{sym} is defined but never used"
+            checked += 1
+    assert "try_polynomial_budgeted" in src and "try_polynomial(&" not in src, (
+        "compute_equilibration expands rows with the unbudgeted try_polynomial again (#1686)"
+    )
+    assert checked >= 3
+
+
+def test_scaling_diagnostics_abstains_on_a_product_of_sums():
+    """#1686 THE REGRESSION, deterministically: the 9 x 7 product-of-sums row
+    (~4.0e7 monomials) is abstained on and counted, not expanded. Before the fix
+    the binding had no ``rows_over_budget`` key and this call took ~115 s."""
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from discopt._rust import model_to_repr
+    from test_distribute_products_budget import _blowup_model
+
+    m, x, body = _blowup_model()
+    m.subject_to(body <= 1e6)
+    m.subject_to(1e4 * x[0] + 1e-4 * x[1] <= 3.0)
+    m.minimize(x[0])
+    diag = model_to_repr(m, getattr(m, "_builder", None)).scaling_diagnostics()
+    assert diag["rows_over_budget"] == 1
+    # The linear row beside it is still measured exactly.
+    assert diag["linear_rows_sampled"] == 1
+    assert diag["worst_row_dynamic_range"] == pytest.approx(1e8, rel=1e-12)

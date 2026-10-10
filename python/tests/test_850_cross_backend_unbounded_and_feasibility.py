@@ -27,7 +27,12 @@ Decision taken (documented on the issue): the default box is the problem **as
 posed** — a real (if huge) finite bound — so the sound certificate is ``optimal``
 at the corner, which the exact simplex, ``ipm`` and ``ipopt`` already produce.
 The two fixes make POUNCE agree with that exact oracle rather than emit a
-contradicting certificate:
+contradicting certificate.
+
+**Superseded for the default box by #1678 (b).** The default ``±9.999e19`` is not a
+bound anyone declared, so it is now read as "no bound": Obs 1 is ``unbounded`` on
+every engine. The decision above still governs a bound the user *wrote* in the
+``[1e15, 1e20)`` band, and the mechanism tests below use such a bound (``1e17``):
 
 1. ``_matrix_solution_feasible`` now uses the per-row term-scaled tolerance
    ``|viol_i| ≤ tol + rtol·Σ_j|A_ij||x_j|`` (the same convention as
@@ -148,7 +153,7 @@ def _stub_exact(c, A_ub=None, b_ub=None, A_eq=None, b_eq=None, bounds=None, **kw
 
 
 def test_obs1_unbounded_with_relaxed_bound_degrades():
-    """Obs 1: an engine that reports UNBOUNDED on the default continuous box (a
+    """Obs 1: an engine that reports UNBOUNDED on a declared ``[1e15, 1e20)`` box (a
     bound it silently relaxed to ∞) must not be certified — ``_solve_lp_matrix``
     declines so the caller falls through to the exact simplex.
 
@@ -166,7 +171,7 @@ def test_obs1_unbounded_with_relaxed_bound_degrades():
     ``test_obs1_deferred_unbounded_is_never_promoted_to_the_answer`` below.
     """
     m = dm.Model("u")
-    x = m.continuous("x", lb=0)  # default ub = 9.999e19
+    x = m.continuous("x", lb=0, ub=1e17)  # declared, inside the [1e15, 1e20) window
     m.minimize(-x)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -185,7 +190,7 @@ def test_obs1_verdict_from_a_box_honoring_engine_is_not_deferred():
     finite, so its UNBOUNDED is a statement about the box as declared and must be
     passed straight through — discarding it threw away a real certificate."""
     m = dm.Model("u3")
-    x = m.continuous("x", lb=0)  # default ub = 9.999e19, inside the window
+    x = m.continuous("x", lb=0, ub=1e17)  # declared, inside the window
     m.minimize(-x)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -201,14 +206,14 @@ def test_obs1_deferred_unbounded_is_never_promoted_to_the_answer(monkeypatch):
     left to defer to, the declined verdict is still NOT the answer.
 
     Over a finite ``[1e15, 1e20)`` box an ``unbounded`` claim can be false — on
-    ``min -x`` over the default box the truth is ``optimal`` at the corner, which
+    ``min -x`` over ``[0, 1e17]`` the truth is ``optimal`` at the corner, which
     is exactly the certificate #850 decided is sound — so promoting the held
     verdict would emit a false certificate on a bounded problem. The solve reports
     ``error`` (not a certificate) plus a diagnostic naming the cause, which is what
     #937 asks for: no longer *undiagnosable*, without inventing an answer.
     """
     m = dm.Model("u4")
-    x = m.continuous("x", lb=0)  # default ub = 9.999e19
+    x = m.continuous("x", lb=0, ub=1e17)  # declared, inside the [1e15, 1e20) window
     m.minimize(-x)
 
     def _deferring(model, t_start, time_limit=None):
@@ -270,18 +275,33 @@ def test_obs3_exact_point_accepted():
 # ── End-to-end: the certificate every backend must produce ──
 
 
-@pytest.mark.parametrize("backend", ["ipm", "ipopt"])
-def test_obs1_default_box_optimal_at_corner(backend):
-    """min -x on the default continuous box returns ``optimal`` at the sentinel
-    corner on the exact/ipm/ipopt paths — the certificate POUNCE must now match."""
+@pytest.mark.parametrize("backend", ["ipm", "ipopt", "pounce"])
+def test_obs1_explicit_huge_box_optimal_at_corner(backend):
+    """min -x on a DECLARED huge finite box returns ``optimal`` at the corner on
+    every engine -- the box as posed, the #850 decision."""
+    m = dm.Model("unb")
+    x = m.continuous("x", lb=0, ub=1e17)
+    m.minimize(-x)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = m.solve(nlp_solver=backend)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(-1e17, rel=1e-9)
+
+
+@pytest.mark.parametrize("backend", ["ipm", "ipopt", "pounce"])
+def test_obs1_default_box_is_unbounded(backend):
+    """#1678 (b): the DEFAULT box is not a declared bound -- it stands in for "no
+    bound" -- so min -x over ``x >= 0`` is ``unbounded`` on every engine, not
+    ``optimal`` at an invented 9.999e19 corner."""
     m = dm.Model("unb")
     x = m.continuous("x", lb=0)
     m.minimize(-x)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         r = m.solve(nlp_solver=backend)
-    assert r.status == "optimal"
-    assert r.objective == pytest.approx(-9.999e19, rel=1e-9)
+    assert r.status == "unbounded"
+    assert r.objective is None and r.x is None
 
 
 @pytest.mark.parametrize("backend", ["ipm", "ipopt"])
@@ -318,6 +338,10 @@ def test_obs3_general_inequality_feasible_optimum(backend):
     "build",
     [
         pytest.param(lambda m: (m.continuous("x", lb=0), m.minimize(-m._variables[0])), id="obs1"),
+        pytest.param(
+            lambda m: (m.continuous("x", lb=0, ub=1e17), m.minimize(-m._variables[0])),
+            id="obs1-explicit",
+        ),
         pytest.param(
             lambda m: (
                 m.continuous("x", lb=0, ub=1e6),

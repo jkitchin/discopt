@@ -284,3 +284,52 @@ def convex_report(
         },
         "iterations": iterations,
     }
+
+
+def report_in_model_sense(report: Optional[dict], offset: float, maximize: bool) -> None:
+    """Map, in place, ``report``'s objective values to the model's own objective (#1679).
+
+    The engine minimizes ``f_eng``; the model's objective is
+    ``f = sign * (f_eng + offset)`` with ``sign = -1`` for a MAXIMIZE model. The
+    matrix-form LP/QP engines never see the objective's constant term (``offset``,
+    the ``obj_const`` of the extracted LP/QP data), and every engine sees a
+    maximized objective negated, so the document POUNCE wrote -- or
+    :func:`convex_report` built -- disagreed with ``SolveResult.objective``: the
+    dispatch QP of #1679 reported ``final_objective`` 7553.38 against
+    ``res.objective`` 10529.92 (the omitted constant).
+
+    Rewritten: ``solution.objective``, ``statistics.final_objective`` and every
+    ``iterations[*].objective``; ``problem.minimize`` becomes ``not maximize``.
+    The engine-space values are kept verbatim under ``engine_*`` keys, and
+    ``problem.objective_mapping`` records ``offset`` and ``sign``. A report already
+    carrying ``objective_mapping`` is left alone, so no call path can shift it twice.
+    """
+    if not isinstance(report, dict):
+        return
+    problem = report.setdefault("problem", {})
+    if not isinstance(problem, dict) or "objective_mapping" in problem:
+        return
+    sign = -1.0 if maximize else 1.0
+    off = float(offset)
+
+    def _map(v: Any) -> Any:
+        return None if v is None else sign * (float(v) + off)
+
+    solution = report.get("solution")
+    if isinstance(solution, dict) and "objective" in solution:
+        solution["engine_objective"] = solution["objective"]
+        solution["objective"] = _map(solution["objective"])
+    stats = report.get("statistics")
+    if isinstance(stats, dict) and "final_objective" in stats:
+        stats["engine_final_objective"] = stats["final_objective"]
+        stats["final_objective"] = _map(stats["final_objective"])
+    for row in report.get("iterations") or []:
+        if isinstance(row, dict) and "objective" in row:
+            row["engine_objective"] = row["objective"]
+            row["objective"] = _map(row["objective"])
+    problem["minimize"] = not maximize
+    problem["objective_mapping"] = {
+        "offset": off,
+        "sign": sign,
+        "rule": "objective = sign * (engine_objective + offset)",
+    }

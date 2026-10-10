@@ -4431,6 +4431,14 @@ class SolveResult:
     # never load-bearing, like ``kkt``.
     solve_report: Optional[dict[str, Any]] = None
 
+    # POUNCE qp-ipm's final primal-dual iterate (``x``, ``y``, ``z``, ``z_lb``,
+    # ``z_ub`` in the objective units the engine was handed, rows in the order the
+    # ``solver="pounce"`` QP route built them) -- set only by that route (#1679).
+    # ``solve(warm_start=...)`` forwards it so the next qp-ipm solve starts from the
+    # full iterate instead of from ``x`` alone. Seeds an iteration; never changes a
+    # verdict.
+    pounce_qp_iterate: Optional[dict[str, np.ndarray]] = None
+
     # Witness for an infeasible result, when the backend computed one. An
     # ``InfeasibilityCertificate`` (per-row minimal constraint violations, in
     # LP-row order) for LPs solved via the POUNCE engine; None otherwise.
@@ -4558,6 +4566,16 @@ class SolveResult:
     # certificate) is derived from it. ``last_iterate_violation`` is its max
     # constraint/bound violation in the declared model. ``None`` when ``x`` was
     # reported, or the route keeps no iterate.
+    #
+    # #1678 (contract decided): ``x`` is NEVER the withheld iterate. ``x`` is the
+    # incumbent -- a point that passed the feasibility screen -- and a caller who
+    # reads ``res.x`` after a ``max_iter``/time stop must not be handed an
+    # infeasible point as a solution. ``last_iterate`` carries primal values only:
+    # no multipliers, slacks or barrier parameter, so ``initial_point=
+    # res.last_iterate`` is a cold primal start from an infeasible point and can
+    # fail on a hard NLP where a true warm restart (shifted bounds plus
+    # multipliers) would not. The solver logs a warning naming this field when it
+    # withholds ``x``.
     last_iterate: Optional[dict[str, np.ndarray]] = None
     last_iterate_violation: Optional[float] = None
 
@@ -5344,9 +5362,43 @@ def _solve_leaves_model_unchanged(fn):
             from discopt._evaluator_cache import solution_state_fingerprint
 
             setattr(result, "_problem_fingerprint", solution_state_fingerprint(model))
+        if owner:
+            _attach_block_duals(model, result)
         return result
 
     return wrapper
+
+
+def _attach_block_duals(model: "Model", result: "SolveResult") -> None:
+    """Key the duals of each named ``add_linear_constraints`` block by its name (#1680).
+
+    The routes name a builder row ``f"{name}_{r}"`` (the row names every exporter
+    and the evaluator share), so a block's duals came back as ``demand_0``,
+    ``demand_1``, ... and a caller had to reassemble them positionally. This adds
+    ``constraint_duals[name]`` -- shape ``(m,)``, row ``r`` of the block's ``A``
+    at position ``r`` -- alongside the per-row keys, which stay for backward
+    compatibility.
+
+    Fail-closed, like the per-row matcher it reads from: a block gets the entry
+    only when EVERY one of its rows has a dual, its name is used by no other
+    block, and the name is not already a key (a Python constraint of the same
+    name keeps its own dual). Values are copied, never recomputed.
+    """
+    cd = getattr(result, "constraint_duals", None)
+    blocks = getattr(model, "_builder_linear_blocks", None)
+    if not cd or not blocks:
+        return
+    counts: dict[str, int] = {}
+    for blk in blocks:
+        if blk[4]:
+            counts[blk[4]] = counts.get(blk[4], 0) + 1
+    for A, _x, _sense, _b, name in blocks:
+        if not name or counts[name] != 1 or name in cd:
+            continue
+        keys = [f"{name}_{r}" for r in range(int(A.shape[0]))]
+        if not keys or any(k not in cd or np.size(cd[k]) != 1 for k in keys):
+            continue
+        cd[name] = np.array([float(np.asarray(cd[k]).reshape(())) for k in keys], dtype=float)
 
 
 def _post_solve_abs_gap_tol(result: "SolveResult", abs_gap_tolerance: Optional[float]) -> float:
@@ -5397,6 +5449,110 @@ def _affine_scalar_terms(expr) -> Optional[tuple[dict, float]]:
             if not right[0]:
                 return {k: right[1] * a for k, a in left[0].items()}, right[1] * left[1]
     return None
+
+
+def _scalar_binary_leaf_key(expr) -> Optional[tuple[int, int]]:
+    """``(id(variable), flat_column)`` when ``expr`` is ONE binary column -- a scalar
+    binary :class:`Variable` or a scalar-valued index into one -- else ``None``."""
+    if isinstance(expr, Variable):
+        if expr.var_type is VarType.BINARY and int(expr.size) == 1:
+            return (id(expr), 0)
+        return None
+    if isinstance(expr, IndexExpression) and isinstance(expr.base, Variable):
+        base = expr.base
+        if base.var_type is not VarType.BINARY:
+            return None
+        try:
+            cols = np.arange(int(base.size)).reshape(tuple(base.shape) or ())[expr.index]
+        except (IndexError, TypeError, ValueError):
+            return None
+        cols = np.asarray(cols)
+        return (id(base), int(cols.reshape(()))) if cols.size == 1 else None
+    return None
+
+
+def _affine_binary_terms(expr) -> Optional[tuple[dict, float]]:
+    """``({key: (leaf, coef)}, const)`` for an expression affine in single binary
+    columns (see :func:`_scalar_binary_leaf_key`), else ``None``."""
+    if isinstance(expr, Constant):
+        v = np.asarray(expr.value)
+        return ({}, float(v.reshape(()))) if v.size == 1 else None
+    key = _scalar_binary_leaf_key(expr)
+    if key is not None:
+        return ({key: (expr, 1.0)}, 0.0)
+    if isinstance(expr, UnaryOp) and expr.op == "neg":
+        r = _affine_binary_terms(expr.operand)
+        return None if r is None else ({k: (e, -a) for k, (e, a) in r[0].items()}, -r[1])
+    if isinstance(expr, BinaryOp) and expr.op in ("+", "-", "*", "/"):
+        left, right = _affine_binary_terms(expr.left), _affine_binary_terms(expr.right)
+        if left is None or right is None:
+            return None
+        if expr.op in ("+", "-"):
+            sgn = 1.0 if expr.op == "+" else -1.0
+            terms = dict(left[0])
+            for k, (e, a) in right[0].items():
+                e0, a0 = terms.get(k, (e, 0.0))
+                terms[k] = (e0, a0 + sgn * a)
+            return terms, left[1] + sgn * right[1]
+        if expr.op == "/":
+            if right[0] or right[1] == 0.0:
+                return None
+            return {k: (e, a / right[1]) for k, (e, a) in left[0].items()}, left[1] / right[1]
+        if not left[0]:
+            return {k: (e, left[1] * a) for k, (e, a) in right[0].items()}, left[1] * right[1]
+        if not right[0]:
+            return {k: (e, right[1] * a) for k, (e, a) in left[0].items()}, right[1] * left[1]
+    return None
+
+
+def _normalize_indicator(indicator, where: str):
+    """``(column, active_value)`` for an ``if_then`` indicator (#1677).
+
+    A plain variable / indexed variable passes through with ``active_value=1``
+    (non-binary selectors are refused downstream by the integrality gates, as
+    before). A ``BooleanVar`` is its backing binary; ``~b`` is that binary with
+    ``active_value=0``. A compound expression is accepted only when it is an
+    affine function of ONE binary column taking exactly the values {0, 1}: ``z``
+    itself (``active_value=1``) or its complement ``1 - z`` (``active_value=0``).
+    Normalising here means every consumer -- the big-M / hull GDP lowering, the
+    certificate verifier, serialization, the MPEC residuals -- sees a single 0/1
+    column plus the value that activates the rows, which they all already handle.
+    Anything else has no 0/1 column to act as the indicator and is refused now
+    rather than with a ``TypeError`` deep inside ``solve()``.
+    """
+    if isinstance(indicator, BooleanVar):
+        return indicator.variable, 1
+    if isinstance(indicator, LogicalNot) and isinstance(indicator.operand, BooleanVar):
+        return indicator.operand.variable, 0
+    if isinstance(indicator, LogicalExpression):
+        raise TypeError(
+            f"{where}: the indicator must be a binary variable or a BooleanVar, not "
+            f"the logical expression {indicator!r}; state it with "
+            "m.logical(expr.implies(...)) or introduce a BooleanVar for it."
+        )
+    if not isinstance(indicator, Expression):
+        raise TypeError(
+            f"{where}: the indicator must be a binary variable or a BooleanVar, got "
+            f"{type(indicator).__name__}."
+        )
+    if isinstance(indicator, (Variable, IndexExpression)):
+        return indicator, 1
+    aff = _affine_binary_terms(indicator)
+    if aff is not None:
+        terms = {k: ea for k, ea in aff[0].items() if ea[1] != 0.0}
+        if len(terms) == 1:
+            ((leaf, coef),) = terms.values()
+            const = aff[1]
+            if const == 0.0 and coef == 1.0:
+                return leaf, 1
+            if const == 1.0 and coef == -1.0:
+                return leaf, 0
+    raise TypeError(
+        f"{where}: the indicator expression {indicator!r} is not a 0/1 indicator. "
+        "Use a binary variable z (active when z == 1) or its complement 1 - z "
+        "(active when z == 0); any other expression has no single binary column "
+        "taking exactly the values {0, 1}."
+    )
 
 
 def _condition_box(cond) -> Optional[dict]:
@@ -5934,6 +6090,12 @@ class Model:
         ub : float or numpy.ndarray, default 9.999e19
             Upper bound (scalar broadcast to *shape*, or array matching *shape*).
             ``None`` means the default. A NaN entry raises ``ValueError``.
+
+            The default ``±9.999e19`` means *no bound* (#1678): an LP/MILP that
+            runs off along it is reported ``unbounded``, and any other result
+            whose point sits on it is ``feasible`` with no dual bound, never a
+            certified ``optimal`` at that corner. An explicit bound below it,
+            however large, is honoured as declared.
 
         Returns
         -------
@@ -7063,6 +7225,9 @@ class Model:
             Right-hand side, shape ``(m,)`` or scalar (broadcast).
         name : str, optional
             Prefix for constraint names (``"{name}_0"``, ``"{name}_1"``, ...).
+            After a solve, ``result.constraint_duals[name]`` holds the block's
+            duals as one ``(m,)`` array in row order, alongside the per-row
+            ``"{name}_{r}"`` keys (#1680).
 
         Raises
         ------
@@ -7216,7 +7381,7 @@ class Model:
 
     def if_then(
         self,
-        indicator: Variable,
+        indicator: "Expression | BooleanVar | LogicalNot",
         then_constraints: list[Constraint],
         name: Optional[str] = None,
     ):
@@ -7229,8 +7394,11 @@ class Model:
 
         Parameters
         ----------
-        indicator : Variable
-            A binary variable.
+        indicator : Variable, BooleanVar or expression
+            A binary variable (or ``BooleanVar``). The complement ``1 - z`` of a
+            binary ``z`` (or ``~b`` of a ``BooleanVar``) is also accepted and means
+            "if ``z == 0``"; it is stored as ``z`` with active value 0 (#1677). Any
+            other expression is refused with a ``TypeError``.
         then_constraints : list of Constraint
             Constraints that must hold when the indicator is active.
         name : str, optional
@@ -7257,42 +7425,9 @@ class Model:
         # #1617: a ``BooleanVar`` (from :meth:`boolean`) is backed by a binary
         # Variable; use it. Any other logical expression has no single 0/1 column to
         # act as the indicator -- refuse here, at the call, rather than with a
-        # ``float()`` TypeError deep inside ``solve()``.
-        if isinstance(indicator, BooleanVar):
-            indicator = indicator.variable
-        elif isinstance(indicator, LogicalExpression):
-            raise TypeError(
-                "if_then: the indicator must be a binary variable or a BooleanVar, not "
-                f"the logical expression {indicator!r}; state it with "
-                "m.logical(expr.implies(...)) or introduce a BooleanVar for it."
-            )
-        elif not isinstance(indicator, Expression):
-            raise TypeError(
-                "if_then: the indicator must be a binary variable or a BooleanVar, got "
-                f"{type(indicator).__name__}."
-            )
-        # #1677: ``1 - z`` is the natural way to say "if z == 0". It is exactly an
-        # indicator on ``z`` with active value 0; any other expression has no single
-        # 0/1 column, so refuse at the call rather than raise inside ``solve()``.
-        active_value = 1
-        if (
-            isinstance(indicator, BinaryOp)
-            and indicator.op == "-"
-            and isinstance(indicator.left, Constant)
-            and np.ndim(indicator.left.value) == 0
-            and float(indicator.left.value) == 1.0
-            and isinstance(indicator.right, (Variable, BooleanVar))
-        ):
-            indicator = indicator.right
-            if isinstance(indicator, BooleanVar):
-                indicator = indicator.variable
-            active_value = 0
-        if not isinstance(indicator, (Variable, IndexExpression)):
-            raise TypeError(
-                "if_then: the indicator must be a binary variable (or '1 - z' for a "
-                f"binary z), not {type(indicator).__name__}; introduce a binary "
-                "variable linked to the expression instead."
-            )
+        # ``float()`` TypeError deep inside ``solve()``. #1677: a complemented
+        # binary ``1 - z`` (or ``~b``) is the same column with ``active_value=0``.
+        indicator, active_value = _normalize_indicator(indicator, "if_then")
         for k, c in enumerate(then_constraints):
             c.name = f"{name}_then_{k}" if name else None
             # Store as indicator constraint; Rust presolve will handle
@@ -8706,6 +8841,9 @@ class Model:
                 "bound_duals_lower": bound_duals_from_result(self, warm_start.bound_duals_lower),
                 "bound_duals_upper": bound_duals_from_result(self, warm_start.bound_duals_upper),
                 "barrier_parameter": (warm_start.kkt or {}).get("barrier_parameter"),
+                # #1679: the qp-ipm arm of solver="pounce" seeds from the engine's
+                # own iterate; the named duals above are in a different row order.
+                "pounce_qp_iterate": warm_start.pounce_qp_iterate,
             }
 
         # Pre-solve LLM analysis (advisory only, never blocks solving)
@@ -9206,6 +9344,7 @@ class Model:
                 _withhold_unverified_certificate(_ck_res)
                 _repair_published_incumbent(_ck_res)
                 _guard_unresolved_objective(_ck_res)
+                self._withhold_default_box_certificate(_ck_res)
                 return _ck_res
 
         from discopt._relax.deadline import deadline_scope
@@ -9978,6 +10117,8 @@ class Model:
             else:
                 _repair_published_incumbent(result)
             _guard_unresolved_objective(result)
+            # #1678 (b): after every other guard, so nothing re-grants it.
+            self._withhold_default_box_certificate(result)
 
         if llm:
             try:
@@ -10051,6 +10192,9 @@ class Model:
         _no_bound_by_design = isinstance(result, SolveResult) and (
             (result.algorithm_route or "").startswith("pounce:")
             or bool((result.solver_stats or {}).get("certificate/objective_unresolved"))
+            # #1678 (b): withdrawn because it rested on the default box, with its
+            # own warning naming the variables.
+            or bool((result.solver_stats or {}).get("certificate/default_box_withheld"))
         )
         if isinstance(result, SolveResult) and result.bound is None and result.status == "error":
             # #1507: the envelope/epigraph advice below describes a relaxation that
@@ -10128,6 +10272,41 @@ class Model:
                 self.name,
                 result.status,
             )
+        elif (
+            isinstance(result, SolveResult)
+            and result.bound is not None
+            and result.status in ("feasible", "time_limit", "node_limit", "iteration_limit")
+            and not result.gap_certified
+            and not _no_bound_by_design
+            and (_poles := _objective_poles_or_none(self))
+            and not all(p.excluded_by_constraints for p in _poles)
+        ):
+            # #1680: the pole case of the #1493 diagnostic when a bound DID come
+            # back. A least-squares fit of ``k1/(k2-k1) * (...)`` is bounded below by
+            # 0 (every term is squared), so the tree is not fathomed at the root the
+            # way ``min 1/x`` is: it branches until the time limit, because every
+            # node box that still meets the pole set (here the whole diagonal
+            # ``k1 == k2``) keeps the trivial bound and cannot be pruned. Measured on
+            # the A->B->C reproducer: ``time_limit=30`` returned at 30.2 s with
+            # ``bound=0.0`` and the right incumbent and said nothing about why the
+            # gap stayed open. Only on an uncertified result, so it never adds noise
+            # to a certified one; detection only, like the branch above.
+            from discopt._relax.poles import describe_poles
+
+            _logging.getLogger("discopt.solver").warning(
+                "The gap did not close for model %r (status=%s, bound=%.6g): its "
+                "objective has a pole inside the variable box -- %s. Every branch-and-"
+                "bound node whose box meets the pole keeps a weak bound and cannot be "
+                "pruned, so the search runs to its limit without certifying. If "
+                "the singularity is removable (a 0/0 such as k1/(k2-k1)*(exp(-k1*t)-"
+                "exp(-k2*t)) at k1 == k2), rewrite the expression without the division; "
+                "otherwise bound the denominator away from zero or split the model by "
+                "its sign.",
+                self.name,
+                result.status,
+                float(result.bound),
+                describe_poles(_poles),
+            )
 
         # --- The objective must be THIS model's objective at the returned point -
         #
@@ -10204,6 +10383,160 @@ class Model:
             self._last_solve_result = result
 
         return result
+
+    def _withhold_default_box_certificate(self, result: "SolveResult") -> None:
+        """#1678 (b): no certificate that rests on the default ``±9.999e19`` box.
+
+        A variable declared without a bound gets ``DEFAULT_VARIABLE_BOUND`` on
+        that side. That number is a stand-in for "no bound" -- the user never
+        wrote it -- so a result whose point sits on it describes the box discopt
+        invented, not the problem the user posed. ``min x - z**2`` with
+        ``z*x <= 3``, ``x`` free and ``z in [-2, 2]`` is unbounded (``z = 0``,
+        ``x -> -inf``), yet the spatial tree published ``optimal`` with
+        objective = bound = ``-9.999e19`` and ``gap_certified=True``. That is a
+        false certificate.
+
+        A side counts as defaulted when its magnitude is at least
+        ``DEFAULT_VARIABLE_BOUND``. The value is indistinguishable from an
+        explicitly written ``9.999e19``, and both mean "unbounded" (the AMPL and
+        NL convention reads ``>= 1e20`` the same way). An explicit finite bound
+        below it, even a huge one such as ``1e18``, is honoured as posed (#850).
+
+        A point "sits on" a defaulted side when its coordinate is past
+        ``EFFECTIVE_INF`` (``1e19``), the threshold at which POUNCE and Ipopt
+        themselves read a value as infinite. Incumbents only approach the corner (``-9.9984e19`` was
+        measured), so an equality test would miss them. When a coordinate does,
+        the result loses its certificate and its dual bound: ``optimal`` becomes
+        ``feasible``, ``gap_certified`` is set ``False``, and ``bound``/``gap``
+        are cleared. A bound proved over the invented box says nothing about the
+        unbounded problem. ``unbounded`` and ``infeasible`` are left alone. The
+        LP/MILP route proves ``unbounded`` directly (``_highs_std_form`` hands
+        the default sides to HiGHS as infinite). This guard is the class-level
+        backstop for every other route. It only ever downgrades.
+
+        The same holds for a dual bound with no point behind it. A finite
+        ``bound`` of magnitude past ``EFFECTIVE_INF`` on a model with a defaulted
+        side is a relaxation of the invented box (an unbounded convex MIQP
+        measured ``unknown`` with ``bound = -1.9998e20``, twice the default box,
+        #1699). It is cleared the same way.
+        """
+        import logging as _dlogging
+        import warnings as _warnings
+
+        import numpy as _np
+
+        from discopt._relax._numeric import EFFECTIVE_INF
+        from discopt.constants import DEFAULT_VARIABLE_BOUND
+
+        _sentinel = DEFAULT_VARIABLE_BOUND * (1.0 - 1e-12)
+        _on_side = EFFECTIVE_INF
+        hits: list[str] = []
+        # A variable the model never references (GAMS ``obj =e= f(x)`` folded into
+        # the objective leaves ``obj`` behind) is free in every sense: its value
+        # is arbitrary, often the box side, and it cannot make the problem
+        # unbounded. ``None`` means "could not tell", and then every variable counts.
+        used = self._referenced_variable_names()
+        by_name = {v.name: v for v in self._variables if used is None or v.name in used}
+        for name, val in (result.x or {}).items():
+            v = by_name.get(name)
+            if v is None:
+                continue
+            xv = _np.atleast_1d(_np.asarray(val, dtype=_np.float64)).ravel()
+            lb = _np.broadcast_to(_np.asarray(v.lb, dtype=_np.float64), v.shape).ravel()
+            ub = _np.broadcast_to(_np.asarray(v.ub, dtype=_np.float64), v.shape).ravel()
+            if xv.shape != lb.shape:
+                continue
+            on = ((ub >= _sentinel) & (xv >= _on_side)) | ((lb <= -_sentinel) & (xv <= -_on_side))
+            if on.any():
+                hits.append(name if xv.size == 1 else f"{name}{list(_np.flatnonzero(on)[:3])}")
+        box_bound = False
+        if not hits and result.bound is not None:
+            b = float(result.bound)
+            box_bound = _np.isfinite(b) and abs(b) >= _on_side
+            box_bound = box_bound and any(
+                bool(_np.any(_np.asarray(v.ub) >= _sentinel))
+                or bool(_np.any(_np.asarray(v.lb) <= -_sentinel))
+                for v in by_name.values()
+            )
+        if not (hits or box_bound):
+            return
+        had_claim = result.status == "optimal" or bool(result.gap_certified)
+        had_bound = result.bound is not None
+        if not (had_claim or had_bound):
+            return
+        if hits:
+            what = (
+                f"the returned point sits on the default variable bound "
+                f"(+/-{DEFAULT_VARIABLE_BOUND:g}) for {', '.join(hits[:5])}"
+            )
+        else:
+            what = (
+                f"the dual bound {result.bound:g} is of the order of the default "
+                f"variable bound (+/-{DEFAULT_VARIABLE_BOUND:g})"
+            )
+        msg = (
+            f"{self.name}: {what}. That bound "
+            f"stands in for 'no bound', so the result describes a box the model never "
+            f"declared: the problem as posed may be unbounded or have no attained "
+            f"optimum. Reporting no dual bound and no certificate "
+            f"(#1678). Declare finite lb/ub for these variables to "
+            f"solve a bounded problem."
+        )
+        _dlogging.getLogger("discopt.solver").warning(msg)
+        _warnings.warn(msg, UserWarning, stacklevel=3)
+        if result.status == "optimal":
+            result.status = "feasible"
+        result.gap_certified = False
+        result._set_bound(None, valid=False)
+        result.gap = None
+        result.solver_stats = dict(result.solver_stats or {})
+        result.solver_stats["certificate/default_box_withheld"] = 1.0
+
+    def _referenced_variable_names(self) -> Optional[frozenset[str]]:
+        """Names of the variables the objective or any constraint touches.
+
+        Returns ``None`` whenever the answer is not certain: no expression
+        objective, a builder/``.nl`` model, a non-algebraic constraint (indicator,
+        disjunction, SOS, logical), or any node type this walk does not know. A
+        caller treats ``None`` as "every variable is referenced", so an
+        incomplete walk can only make a guard fire more, never less.
+        """
+        if self._objective is None or getattr(self, "_nl_repr", None) is not None:
+            return None
+        if self._builder_linear_objective is not None:
+            return None
+        if self._builder_quadratic_objective is not None:
+            return None
+        roots: list = [self._objective.expression]
+        for c in self._constraints:
+            if type(c) is not Constraint:
+                return None
+            roots.append(c.body)
+        found: set[str] = set()
+        seen: set[int] = set()
+        stack = roots
+        while stack:
+            e = stack.pop()
+            if id(e) in seen:
+                continue
+            seen.add(id(e))
+            if isinstance(e, Variable):
+                found.add(e.name)
+            elif isinstance(e, (Constant, Parameter)):
+                pass
+            elif isinstance(e, IndexExpression):
+                stack.append(e.base)
+            elif isinstance(e, (BinaryOp, MatMulExpression)):
+                stack.extend((e.left, e.right))
+            elif isinstance(e, (UnaryOp, SumExpression)):
+                stack.append(e.operand)
+            elif isinstance(e, (FunctionCall, CustomCall)):
+                stack.extend(e.args)
+            elif isinstance(e, SumOverExpression):
+                stack.extend(e.terms)
+            else:
+                return None
+        return frozenset(found)
 
     def _reconcile_objective_with_model(self, result: "SolveResult") -> None:
         """Make ``result.objective`` this model's objective at ``result.x``.

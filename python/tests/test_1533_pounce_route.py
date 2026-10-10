@@ -258,15 +258,27 @@ def test_unbounded_lp_with_infinite_bounds():
     assert m.solve(solver="pounce").status == "unbounded"
 
 
-def test_unbounded_over_the_default_box_is_not_certified():
-    """The 9.999e19 default box is finite as declared; 'unbounded' would be false."""
+def test_unbounded_over_a_declared_huge_box_is_not_certified():
+    """A declared bound in [1e15, 1e20) is finite as posed, and POUNCE relaxes it to
+    infinity, so its 'unbounded' could be false."""
+    m = dm.Model()
+    x = m.continuous("x", lb=0, ub=1e17)
+    m.minimize(-x)
+    m.subject_to(x >= 1)
+    res = m.solve(solver="pounce")
+    assert res.status == "error"
+    assert "[1e15, 1e20)" in res.error
+
+
+def test_unbounded_over_the_default_box_is_reported():
+    """#1678 (b): the default box means "no bound", so POUNCE's relaxation of it
+    changes nothing and its 'unbounded' is about the problem as posed."""
     m = dm.Model()
     x = m.continuous("x", lb=0)
     m.minimize(-x)
     m.subject_to(x >= 1)
     res = m.solve(solver="pounce")
-    assert res.status == "error"
-    assert "9.999e19" in res.error
+    assert res.status == "unbounded"
 
 
 # ── #1539 review ─────────────────────────────────────────────────────────────

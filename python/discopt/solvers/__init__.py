@@ -157,6 +157,10 @@ class QPResult:
     #: the engine itself reported and which verification withheld the verdict it
     #: implied. ``""`` when the backend records none.
     message: str = ""
+    #: POUNCE qp-ipm's final primal-dual iterate (``x``, ``y``, ``z``, ``z_lb``,
+    #: ``z_ub``) in the caller's objective units, for seeding a nearby solve
+    #: (#1679); ``None`` for any other backend or status.
+    warm_start_state: Optional[dict] = None
 
 
 @dataclass

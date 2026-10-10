@@ -13,7 +13,7 @@ import contextvars
 import logging
 import math
 from enum import Enum
-from typing import TYPE_CHECKING, NamedTuple, Optional, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional, cast
 
 import numpy as np
 
@@ -2495,7 +2495,7 @@ def extract_qcp_data(model: Model) -> QCPData:
     return extract_qcp_data_algebraic(model)
 
 
-def _qp_terms_tape(model: Model, n_orig: int) -> tuple[np.ndarray, np.ndarray, float] | None:
+def _qp_terms_tape(model: Model, n_orig: int) -> tuple[Any, np.ndarray, float] | None:
     """``(Q, c, d)`` of a quadratic objective from the JAX-free tape evaluator.
 
     Returns ``None`` when the tape cannot represent the model, so the caller
@@ -2534,7 +2534,25 @@ def _qp_terms_tape(model: Model, n_orig: int) -> tuple[np.ndarray, np.ndarray, f
         return None
 
     x_zero = np.zeros(n_orig, dtype=np.float64)
-    Q = np.asarray(ev.evaluate_hessian(x_zero), dtype=np.float64)
+    Q: Any
+    if (n_orig * n_orig * 8) <= _QP_DENSE_Q_MAX_BYTES and not _FORCE_SPARSE_Q.get():
+        Q = np.asarray(ev.evaluate_hessian(x_zero), dtype=np.float64)
+    else:
+        # #1679: the tape's Hessian is natively lower-triangle COO. Scattering it
+        # into a dense (n, n) array ignored ``sparse_qp_matrices`` (and the #863
+        # size cap), so the ``solver="pounce"`` QP route handed POUNCE a dense
+        # Hessian for every model that reaches this rung -- e.g. an MPC QP whose
+        # objective is ``dm.sum(x**2)``. Same values as the dense arm: ``coo`` sums
+        # duplicates exactly as ``np.add.at`` does, and the strict lower triangle
+        # is mirrored the same way.
+        import scipy.sparse as _sp
+
+        rows, cols = ev.hessian_structure()
+        vals = ev.evaluate_hessian_values(x_zero, 1.0, np.zeros(ev.n_constraints))
+        lower = _sp.coo_matrix(
+            (np.asarray(vals, dtype=np.float64), (rows, cols)), shape=(n_orig, n_orig)
+        ).tocsr()
+        Q = (lower + _sp.tril(lower, -1).T).tocsr()
     c_vec = np.asarray(ev.evaluate_gradient(x_zero), dtype=np.float64)
     obj_const = float(ev.evaluate_objective(x_zero))
     assert model._objective is not None
@@ -2602,10 +2620,16 @@ def _extract_qp_data_autodiff(model: Model) -> QPData:
     n_slack = lp_data.c.shape[0] - n_orig
 
     # Extend Q with zeros for slack variables
+    Q_full: Any
     if n_slack > 0:
         n_total = n_orig + n_slack
-        Q_full = np.zeros((n_total, n_total), dtype=np.float64)
-        Q_full[:n_orig, :n_orig] = Q
+        if _sp_issparse(Q):
+            Q_full = cast(Any, Q).tocoo()
+            Q_full.resize((n_total, n_total))
+            Q_full = Q_full.tocsr()
+        else:
+            Q_full = np.zeros((n_total, n_total), dtype=np.float64)
+            Q_full[:n_orig, :n_orig] = Q
         c_full = np.concatenate([c_vec, np.zeros(n_slack, dtype=np.float64)])
     else:
         Q_full = Q

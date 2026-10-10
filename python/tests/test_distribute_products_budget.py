@@ -321,7 +321,12 @@ def test_the_unbounded_term_guard_fails_closed():
 @pytest.mark.slow
 def test_a_blowup_model_honours_its_time_limit():
     """END TO END: the defect as the user met it. Pre-solve scanning must not
-    consume the time limit. ``johnall`` overran 20 s by 44 minutes."""
+    consume the time limit. ``johnall`` overran 20 s by 44 minutes.
+
+    The bound was 120 s while the factorable scan alone took ~40 s here (it
+    re-walked shared subtrees of the distributed body and re-decomposed every
+    sub-product). With that scan linear the solve measures ~9 s under load, so
+    30 s catches a return of that cost without timing out a slow runner."""
     m, x, body = _blowup_model()
     m.subject_to(body <= 1e6)
     m.minimize(dm.sum([x[i] for i in range(int(np.prod(x.shape)))]))
@@ -329,4 +334,4 @@ def test_a_blowup_model_honours_its_time_limit():
     t0 = time.perf_counter()
     m.solve(time_limit=5.0)
     dt = time.perf_counter() - t0
-    assert dt < 120.0, f"solve ran {dt:.1f}s against a 5s time_limit"
+    assert dt < 30.0, f"solve ran {dt:.1f}s against a 5s time_limit"

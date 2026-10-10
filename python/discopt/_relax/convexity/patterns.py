@@ -799,6 +799,156 @@ def _affine_square_sum_matrix(
     return np.asarray(rows, dtype=np.float64), np.asarray(consts, dtype=np.float64)
 
 
+def _summed_vector_square_base(node: Expression) -> Optional[Expression]:
+    """``v`` when ``node`` is ``dm.sum(v**2)`` or ``dm.sum(v * v)`` (full reduction)."""
+    if not isinstance(node, SumExpression) or node.axis is not None:
+        return None
+    op = node.operand
+    if (
+        isinstance(op, BinaryOp)
+        and op.op == "**"
+        and isinstance(op.right, Constant)
+        and op.right.value.ndim == 0
+        and float(op.right.value) == 2.0
+    ):
+        return op.left
+    if isinstance(op, BinaryOp) and op.op == "*" and (op.left is op.right):
+        return op.left
+    return None
+
+
+def _vector_affine_rows(expr: Expression, model: Model, n_total: int):
+    """``(A, b)`` with ``expr == A @ x_flat + b`` element-wise (flattened), or ``None``.
+
+    #1679: the vector spelling of least squares, ``dm.sum((K @ x - b)**2)``, is a
+    sum of squares of the affine rows of ``K @ x - b``; the scalar extractor
+    refuses a vector-valued node, so the sum-of-squares lift never saw it. Handled
+    exactly (each coefficient is the float the expression itself would multiply by,
+    no tolerance): variables (whole, or indexed by a slice / index array), constants,
+    ``M @ v`` / ``v @ M`` with a constant matrix ``M`` and a 1-D affine ``v``, ``+``
+    and ``-`` (with scalar broadcasting), ``neg``, and ``*`` / ``/`` by a constant
+    scalar or an equal-shape constant array (no other broadcasting: ``x + ones((3, 1))``
+    is 3x3 and is refused). Anything else returns ``None`` -- an
+    abstention, never a guess. ``A`` is CSR of shape ``(m, n_total)``.
+    """
+
+    def same_or_scalar(s1: tuple, s2: tuple) -> Optional[tuple]:
+        # Result shape when ``s1`` and ``s2`` combine element-wise with *no* broadcasting
+        # except a size-1 operand against the other's exact shape; ``None`` otherwise.
+        # Anything wider (``(3,) + (3, 1) -> (3, 3)``) would change the element count
+        # behind a matching size, so it is refused rather than flattened wrongly.
+        try:
+            out = tuple(np.broadcast_shapes(s1, s2))
+        except ValueError:
+            return None
+        if s1 == s2:
+            return out
+        if int(np.prod(s2)) == 1 and out == s1:
+            return out
+        if int(np.prod(s1)) == 1 and out == s2:
+            return out
+        return None
+
+    def rec(e: Expression):
+        if isinstance(e, Constant):
+            val = np.asarray(e.value, dtype=np.float64)
+            v = val.ravel()
+            return _sp.csr_matrix((v.size, n_total)), v, tuple(val.shape)
+        if isinstance(e, Variable):
+            off = _var_offset(model, e)
+            if off is None:
+                return None
+            cols = off + np.arange(e.size)
+            A = _sp.csr_matrix(
+                (np.ones(e.size), (np.arange(e.size), cols)), shape=(e.size, n_total)
+            )
+            return A, np.zeros(e.size), tuple(e.shape)
+        if isinstance(e, IndexExpression) and isinstance(e.base, Variable):
+            off = _var_offset(model, e.base)
+            if off is None:
+                return None
+            try:
+                picked = np.asarray(np.arange(e.base.size).reshape(e.base.shape)[e.index])
+            except (IndexError, TypeError, ValueError):
+                return None
+            sel = picked.ravel()
+            k = sel.size
+            A = _sp.csr_matrix((np.ones(k), (np.arange(k), off + sel)), shape=(k, n_total))
+            return A, np.zeros(k), tuple(picked.shape)
+        if isinstance(e, UnaryOp) and e.op == "neg":
+            r = rec(e.operand)
+            return None if r is None else (-r[0], -r[1], r[2])
+        if isinstance(e, MatMulExpression):
+            if isinstance(e.left, Constant):
+                M = np.asarray(e.left.value, dtype=np.float64)
+                r = rec(e.right)
+                if r is None or M.ndim not in (1, 2):
+                    return None
+                M2 = M.reshape(1, -1) if M.ndim == 1 else M
+            elif isinstance(e.right, Constant):
+                M = np.asarray(e.right.value, dtype=np.float64)
+                r = rec(e.left)
+                if r is None or M.ndim not in (1, 2):
+                    return None
+                M2 = M.reshape(1, -1) if M.ndim == 1 else M.T
+            else:
+                return None
+            # Only matrix-vector / vector-vector products of a 1-D affine operand.
+            if len(r[2]) != 1 or M2.shape[1] != r[2][0] or not np.all(np.isfinite(M2)):
+                return None
+            mshape: tuple = () if M.ndim == 1 else (M2.shape[0],)
+            return _sp.csr_matrix(_sp.csr_matrix(M2) @ r[0]), M2 @ r[1], mshape
+        if isinstance(e, BinaryOp) and e.op in ("+", "-"):
+            lr, rr = rec(e.left), rec(e.right)
+            if lr is None or rr is None:
+                return None
+            (A1, b1, s1), (A2, b2, s2) = lr, rr
+            shape = same_or_scalar(s1, s2)
+            if shape is None:
+                return None
+            m1, m2 = A1.shape[0], A2.shape[0]
+            if m1 != m2:
+                if m1 == 1:
+                    A1, b1 = _sp.vstack([A1] * m2).tocsr(), np.repeat(b1, m2)
+                elif m2 == 1:
+                    A2, b2 = _sp.vstack([A2] * m1).tocsr(), np.repeat(b2, m1)
+                else:
+                    return None
+            s = 1.0 if e.op == "+" else -1.0
+            return (A1 + s * A2).tocsr(), b1 + s * b2, shape
+        if isinstance(e, BinaryOp) and e.op in ("*", "/"):
+            if isinstance(e.right, Constant):
+                cval, other = np.asarray(e.right.value, dtype=np.float64), e.left
+            elif isinstance(e.left, Constant) and e.op == "*":
+                cval, other = np.asarray(e.left.value, dtype=np.float64), e.right
+            else:
+                return None
+            r = rec(other)
+            if r is None or not np.all(np.isfinite(cval)):
+                return None
+            A, b, sh = r
+            shape = same_or_scalar(sh, tuple(cval.shape))
+            if shape is None or shape != sh:
+                return None
+            cst = cval.ravel()
+            if cst.size == 1:
+                f = float(cst[0])
+                if e.op == "/":
+                    if f == 0.0:
+                        return None
+                    return (A / f).tocsr(), b / f, sh
+                return (A * f).tocsr(), b * f, sh
+            if e.op == "/":
+                if np.any(cst == 0.0):
+                    return None
+                return _sp.csr_matrix(_sp.diags(1.0 / cst) @ A), b / cst, sh
+            return _sp.csr_matrix(_sp.diags(cst) @ A), b * cst, sh
+        return None
+
+    out = rec(expr)
+    return None if out is None else (out[0], out[1])
+
+
 def weighted_affine_square_decomposition(
     expr: Expression, model: Model, sign: float = 1.0
 ) -> Optional[tuple[np.ndarray, _sp.csr_matrix, np.ndarray, np.ndarray, float]]:
@@ -848,6 +998,26 @@ def weighted_affine_square_decomposition(
                 break
         if not np.isfinite(scale):
             return None
+        vec_base = _summed_vector_square_base(node)
+        if vec_base is not None:
+            # #1679: ``dm.sum(v**2)`` for a vector affine ``v`` -- one weighted square
+            # per element of ``v``.
+            if scale == 0.0:
+                continue
+            if scale < 0.0:
+                return None
+            rows = _vector_affine_rows(vec_base, model, n_total)
+            if rows is None:
+                return None
+            A_v, b_v = rows
+            coo = A_v.tocoo()
+            base_row = len(weights)
+            r_idx.extend((coo.row + base_row).tolist())
+            c_idx.extend(coo.col.tolist())
+            vals.extend(coo.data.tolist())
+            weights.extend([scale] * A_v.shape[0])
+            consts.extend(np.asarray(b_v, dtype=np.float64).tolist())
+            continue
         base: Optional[Expression] = None
         if (
             isinstance(node, BinaryOp)

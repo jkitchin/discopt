@@ -40,6 +40,7 @@ unconditional once invoked.
 
 from __future__ import annotations
 
+import logging
 from typing import Callable, Optional, TypeVar
 
 import numpy as np
@@ -71,13 +72,18 @@ from .gdp_reformulate import (
     bound_expression_error,
 )
 from .term_classifier import (
+    DISTRIBUTED_TERMS,
     _affine_atom_key,
     _affine_walk,
     _get_flat_index,
+    distribute_charged,
     distribute_products,
     distribution_exceeds_budget,
+    pass_distribution_budget,
 )
 from .term_classifier import estimate_distributed_terms as _estimate_distributed_terms
+
+logger = logging.getLogger(__name__)
 
 # A denominator counts as sign-definite only when its interval is bounded away
 # from zero by at least this margin — guards against a denominator that merely
@@ -753,10 +759,22 @@ def _is_integer_valued_affine(expr: Expression) -> bool:
 
 
 def _collect_mul_factors(expr: Expression) -> list[Expression]:
-    """Flatten a left/right-nested ``*`` chain into its factor list."""
-    if isinstance(expr, BinaryOp) and expr.op == "*":
-        return _collect_mul_factors(expr.left) + _collect_mul_factors(expr.right)
-    return [expr]
+    """Flatten a left/right-nested ``*`` chain into its factor list.
+
+    Left-to-right order, iterative and linear in the chain length (#1456): the
+    recursive ``left + right`` list concatenation was quadratic in it, and the
+    walkers that call this at every ``*`` node of a chain made it cubic.
+    """
+    out: list[Expression] = []
+    stack = [expr]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, BinaryOp) and node.op == "*":
+            stack.append(node.right)
+            stack.append(node.left)
+        else:
+            out.append(node)
+    return out
 
 
 def _lift_affine_monomials_enabled() -> bool:
@@ -1516,25 +1534,51 @@ def _has_factorable_work_inner(
         # own right (pre-distribute, the same walk the prelift makes).
         if _lift_affine_monomials_enabled() and _scan_for_translated_monomial(expr):
             return True
-        dist = distribute_products(expr)
+        dist = distribute_charged(expr, budget)
+        if dist is None:
+            raise _ScanBudgetExhausted
         if _scan_for_mixed_product(dist, model):
             return True
         if _scan_for_liftable_call(dist, model):
             return True
         return _scan_for_liftable_fractional_power(dist, model)
 
-    if model._objective is not None and scan(model._objective.expression):
-        return True
-    for c in model._constraints:
-        # #1456 item 2. Abstaining here is the same answer the scan gives when
-        # it finds nothing, so it costs structure recognition and never
-        # correctness: the caller's response to False is "leave the model
-        # alone".
-        if deadline is not None and deadline():
-            return False
-        if isinstance(c, Constraint) and scan(c.body):
+    # #1456: the scan distributes every body it reaches, so it spends from the
+    # same deterministic per-pass budget as the other whole-model distributing
+    # passes (``_MODEL_DISTRIBUTE_TERM_BUDGET``). The distributed scans below are
+    # linear in the distributed DAG (memoised), so the term charge bounds them
+    # too. Without it ``johnall`` -- hundreds of bodies each just under the
+    # per-call budget -- distributed and walked every one before the solve's
+    # time limit was consulted.
+    budget = pass_distribution_budget()
+    try:
+        if model._objective is not None and scan(model._objective.expression):
             return True
+        for c in model._constraints:
+            # #1456 item 2. Abstaining here is the same answer the scan gives
+            # when it finds nothing, so it costs structure recognition and never
+            # correctness: the caller's response to False is "leave the model
+            # alone".
+            if deadline is not None and deadline():
+                return False
+            if isinstance(c, Constraint) and scan(c.body):
+                return True
+    except _ScanBudgetExhausted:
+        # The same abstention as the deadline's, but decided by the model alone.
+        logger.warning(
+            "factorable reform scan: distributing the bodies would exceed the "
+            "%s-term per-pass budget after %s terms; the scan abstains and the "
+            "model is left unreformulated (structure may go unrecognized and "
+            "bounds may be weaker; #1456)",
+            f"{budget.limits[DISTRIBUTED_TERMS]:,}",
+            f"{budget.spent(DISTRIBUTED_TERMS):,}",
+        )
+        return False
     return False
+
+
+class _ScanBudgetExhausted(Exception):
+    """Private: the factorable scan's per-pass distribution budget ran out."""
 
 
 def has_clearable_denominator(model: Model) -> bool:
@@ -1563,36 +1607,125 @@ def has_clearable_denominator(model: Model) -> bool:
     )
 
 
-def _scan_for_mixed_product(expr: Expression, model: Model) -> bool:
+_IMPURE = object()  # memo sentinel: the node is not a pure polynomial product factor
+
+
+def _pure_product_summary(expr: Expression, model: Model, memo: dict[int, object]):
+    """Summarise *expr* as a factor of a polynomial ``*``-tree.
+
+    Returns ``None`` if *expr* is (or its ``*``-tree contains) a factor
+    :func:`_decompose_poly_product` would file under ``extra``. Otherwise
+    returns ``(slots, repeated)``: the flat indices of the variables in the
+    factor, and whether some variable's total exponent is >= 2 -- exactly the
+    two facts :func:`_needs_lift` reads off ``powers`` (``len(powers) >= 2``
+    and ``any(exp >= 2)``). For a ``*`` node this is the decomposition of its
+    whole ``*``-tree, computed bottom-up: ``slots`` is the union of the
+    operands' and ``repeated`` holds iff an operand repeats or the operands
+    share a variable (exponents add and are all >= 1). Memoised by node
+    identity, so a sub-product shared by many products -- the distributed form
+    of a product of sums shares every prefix -- is summarised once instead of
+    once per product that contains it.
+    """
+    nid = id(expr)
+    hit = memo.get(nid)
+    if hit is not None:
+        return None if hit is _IMPURE else hit
+    out: object
+    if isinstance(expr, BinaryOp) and expr.op == "*":
+        left = _pure_product_summary(expr.left, model, memo)
+        right = _pure_product_summary(expr.right, model, memo) if left is not None else None
+        if left is None or right is None:
+            out = _IMPURE
+        else:
+            ls, lrep = left
+            rs, rrep = right
+            out = (ls | rs, lrep or rrep or not ls.isdisjoint(rs))
+    elif isinstance(expr, Constant) and expr.value.ndim == 0:
+        out = (frozenset(), False)
+    else:
+        leaf = _leaf_index_and_exp(expr, model)
+        out = _IMPURE if leaf is None else (frozenset((leaf[1],)), leaf[2] >= 2)
+    memo[nid] = out
+    return None if out is _IMPURE else out
+
+
+def _scan_for_mixed_product(
+    expr: Expression,
+    model: Model,
+    memo: dict[int, bool] | None = None,
+    summaries: dict[int, object] | None = None,
+) -> bool:
+    """True if some ``*`` node of *expr* decomposes (``_decompose_poly_product``)
+    with no ``extra`` factor into a product that :func:`_needs_lift`.
+
+    Each DAG node is visited once (#1456 follow-up). The previous form called
+    ``_decompose_poly_product`` at every ``*`` node -- a walk of that node's
+    whole ``*``-tree -- and then recursed into its operands and decomposed each
+    sub-product again: quadratic in a product's length, and a *tree* walk over
+    a budget-truncated distributed body that shares its subtrees. On the #1456
+    blowup fixture that was 9.9 M decompositions and 92 M factor visits, ~110 s
+    of a 5 s ``time_limit``. Now a ``*`` node's decomposition is read off
+    :func:`_pure_product_summary`, which builds it bottom-up once per node.
+
+    Exact, not an approximation: a ``*`` node with a non-polynomial factor
+    decomposes with ``extra`` non-empty, so it never answered True and only its
+    operands are scanned; a pure ``*`` node's verdict is :func:`_needs_lift` of
+    its own decomposition, which the summary reproduces, and nothing below it
+    needs scanning -- its sub-products have a subset of its variables with
+    exponents no larger (all exponents are integers >= 1), so a sub-product that
+    needs lifting implies the node does, and its leaves contain no ``*``.
+    """
+    if memo is None:
+        memo = {}
+    if summaries is None:
+        summaries = {}
+    nid = id(expr)
+    hit = memo.get(nid)
+    if hit is not None:
+        return hit
+    found = False
     if isinstance(expr, BinaryOp):
-        if expr.op == "*":
-            decomp = _decompose_poly_product(expr, model)
-            if decomp is not None:
-                _coeff, powers, extra = decomp
-                if not extra and _needs_lift(powers):
-                    return True
-        return _scan_for_mixed_product(expr.left, model) or _scan_for_mixed_product(
-            expr.right, model
-        )
-    if isinstance(expr, UnaryOp):
-        return _scan_for_mixed_product(expr.operand, model)
-    return False
+        summary = _pure_product_summary(expr, model, summaries) if expr.op == "*" else None
+        if summary is not None:
+            slots, repeated = summary
+            found = repeated and len(slots) >= 2
+        else:
+            found = _scan_for_mixed_product(
+                expr.left, model, memo, summaries
+            ) or _scan_for_mixed_product(expr.right, model, memo, summaries)
+    elif isinstance(expr, UnaryOp):
+        found = _scan_for_mixed_product(expr.operand, model, memo, summaries)
+    memo[nid] = found
+    return found
 
 
-def _scan_for_liftable_call(expr: Expression, model: Model) -> bool:
+def _scan_for_liftable_call(
+    expr: Expression, model: Model, memo: dict[int, bool] | None = None
+) -> bool:
     """True if *expr* contains a transcendental node whose argument the
-    auxiliary-variable factorization would lift (see ``_should_lift_call_arg``)."""
+    auxiliary-variable factorization would lift (see ``_should_lift_call_arg``).
+
+    Memoised by node identity, so a shared subexpression is scanned once (#1456
+    follow-up); the verdict is a pure function of the node."""
+    if memo is None:
+        memo = {}
+    nid = id(expr)
+    hit = memo.get(nid)
+    if hit is not None:
+        return hit
+    found = False
     if isinstance(expr, FunctionCall):
-        if _should_lift_call_arg(expr, model) is not None:
-            return True
-        return any(_scan_for_liftable_call(a, model) for a in expr.args)
-    if isinstance(expr, BinaryOp):
-        return _scan_for_liftable_call(expr.left, model) or _scan_for_liftable_call(
-            expr.right, model
+        found = _should_lift_call_arg(expr, model) is not None or any(
+            _scan_for_liftable_call(a, model, memo) for a in expr.args
         )
-    if isinstance(expr, UnaryOp):
-        return _scan_for_liftable_call(expr.operand, model)
-    return False
+    elif isinstance(expr, BinaryOp):
+        found = _scan_for_liftable_call(expr.left, model, memo) or _scan_for_liftable_call(
+            expr.right, model, memo
+        )
+    elif isinstance(expr, UnaryOp):
+        found = _scan_for_liftable_call(expr.operand, model, memo)
+    memo[nid] = found
+    return found
 
 
 def _scan_for_liftable_call_power(
@@ -1629,7 +1762,9 @@ def _scan_for_liftable_call_power(
     return found
 
 
-def _scan_for_liftable_fractional_power(expr: Expression, model: Model) -> bool:
+def _scan_for_liftable_fractional_power(
+    expr: Expression, model: Model, memo: dict[int, bool] | None = None
+) -> bool:
     """True if *expr* contains a fractional power ``base**p`` (non-integer *p*)
     over a *composite* base — a product, sum/affine, or other multi-leaf
     sub-expression — but NOT a single variable or an integer power of one.
@@ -1652,7 +1787,17 @@ def _scan_for_liftable_fractional_power(expr: Expression, model: Model) -> bool:
     ``_scan_for_liftable_call``), so they are untouched. A single-variable base
     (``x**0.5``) is relaxed natively via ``fractional_power_var_map`` and is
     excluded by ``_is_simple_power_base``.
+
+    Memoised by node identity (#1456 follow-up): a shared subexpression is
+    scanned once.
     """
+    if memo is None:
+        memo = {}
+    nid = id(expr)
+    hit = memo.get(nid)
+    if hit is not None:
+        return hit
+    found = False
     if isinstance(expr, BinaryOp):
         if (
             expr.op == "**"
@@ -1661,13 +1806,15 @@ def _scan_for_liftable_fractional_power(expr: Expression, model: Model) -> bool:
             and not _is_simple_power_base(expr.left, model)
             and len(_collect_variables(expr.left)) >= 1
         ):
-            return True
-        return _scan_for_liftable_fractional_power(
-            expr.left, model
-        ) or _scan_for_liftable_fractional_power(expr.right, model)
-    if isinstance(expr, UnaryOp):
-        return _scan_for_liftable_fractional_power(expr.operand, model)
-    return False
+            found = True
+        else:
+            found = _scan_for_liftable_fractional_power(
+                expr.left, model, memo
+            ) or _scan_for_liftable_fractional_power(expr.right, model, memo)
+    elif isinstance(expr, UnaryOp):
+        found = _scan_for_liftable_fractional_power(expr.operand, model, memo)
+    memo[nid] = found
+    return found
 
 
 # ---------------------------------------------------------------------------
