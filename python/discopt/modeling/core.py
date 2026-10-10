@@ -5344,9 +5344,43 @@ def _solve_leaves_model_unchanged(fn):
             from discopt._evaluator_cache import solution_state_fingerprint
 
             setattr(result, "_problem_fingerprint", solution_state_fingerprint(model))
+        if owner:
+            _attach_block_duals(model, result)
         return result
 
     return wrapper
+
+
+def _attach_block_duals(model: "Model", result: "SolveResult") -> None:
+    """Key the duals of each named ``add_linear_constraints`` block by its name (#1680).
+
+    The routes name a builder row ``f"{name}_{r}"`` (the row names every exporter
+    and the evaluator share), so a block's duals came back as ``demand_0``,
+    ``demand_1``, ... and a caller had to reassemble them positionally. This adds
+    ``constraint_duals[name]`` -- shape ``(m,)``, row ``r`` of the block's ``A``
+    at position ``r`` -- alongside the per-row keys, which stay for backward
+    compatibility.
+
+    Fail-closed, like the per-row matcher it reads from: a block gets the entry
+    only when EVERY one of its rows has a dual, its name is used by no other
+    block, and the name is not already a key (a Python constraint of the same
+    name keeps its own dual). Values are copied, never recomputed.
+    """
+    cd = getattr(result, "constraint_duals", None)
+    blocks = getattr(model, "_builder_linear_blocks", None)
+    if not cd or not blocks:
+        return
+    counts: dict[str, int] = {}
+    for blk in blocks:
+        if blk[4]:
+            counts[blk[4]] = counts.get(blk[4], 0) + 1
+    for A, _x, _sense, _b, name in blocks:
+        if not name or counts[name] != 1 or name in cd:
+            continue
+        keys = [f"{name}_{r}" for r in range(int(A.shape[0]))]
+        if not keys or any(k not in cd or np.size(cd[k]) != 1 for k in keys):
+            continue
+        cd[name] = np.array([float(np.asarray(cd[k]).reshape(())) for k in keys], dtype=float)
 
 
 def _post_solve_abs_gap_tol(result: "SolveResult", abs_gap_tolerance: Optional[float]) -> float:
@@ -7063,6 +7097,9 @@ class Model:
             Right-hand side, shape ``(m,)`` or scalar (broadcast).
         name : str, optional
             Prefix for constraint names (``"{name}_0"``, ``"{name}_1"``, ...).
+            After a solve, ``result.constraint_duals[name]`` holds the block's
+            duals as one ``(m,)`` array in row order, alongside the per-row
+            ``"{name}_{r}"`` keys (#1680).
 
         Raises
         ------
@@ -10105,6 +10142,41 @@ class Model:
                 "something to bound.",
                 self.name,
                 result.status,
+            )
+        elif (
+            isinstance(result, SolveResult)
+            and result.bound is not None
+            and result.status in ("feasible", "time_limit", "node_limit", "iteration_limit")
+            and not result.gap_certified
+            and not _no_bound_by_design
+            and (_poles := _objective_poles_or_none(self))
+            and not all(p.excluded_by_constraints for p in _poles)
+        ):
+            # #1680: the pole case of the #1493 diagnostic when a bound DID come
+            # back. A least-squares fit of ``k1/(k2-k1) * (...)`` is bounded below by
+            # 0 (every term is squared), so the tree is not fathomed at the root the
+            # way ``min 1/x`` is: it branches until the time limit, because every
+            # node box that still meets the pole set (here the whole diagonal
+            # ``k1 == k2``) keeps the trivial bound and cannot be pruned. Measured on
+            # the A->B->C reproducer: ``time_limit=30`` returned at 30.2 s with
+            # ``bound=0.0`` and the right incumbent and said nothing about why the
+            # gap stayed open. Only on an uncertified result, so it never adds noise
+            # to a certified one; detection only, like the branch above.
+            from discopt._relax.poles import describe_poles
+
+            _logging.getLogger("discopt.solver").warning(
+                "The gap did not close for model %r (status=%s, bound=%.6g): its "
+                "objective has a pole inside the variable box -- %s. Every branch-and-"
+                "bound node whose box meets the pole keeps a weak bound and cannot be "
+                "pruned, so the search runs to its limit without certifying. If "
+                "the singularity is removable (a 0/0 such as k1/(k2-k1)*(exp(-k1*t)-"
+                "exp(-k2*t)) at k1 == k2), rewrite the expression without the division; "
+                "otherwise bound the denominator away from zero or split the model by "
+                "its sign.",
+                self.name,
+                result.status,
+                float(result.bound),
+                describe_poles(_poles),
             )
 
         # --- The objective must be THIS model's objective at the returned point -

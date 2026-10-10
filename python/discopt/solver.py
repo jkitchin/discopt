@@ -26449,10 +26449,47 @@ def _scalar_constraint_layout(
     return eq_names, ub_info
 
 
-#: Above this many dense Jacobian entries the row-matching dual layout is not
-#: attempted (it builds the constraint Jacobian densely); duals are then reported
-#: only through the scalar layout, exactly as before #1618.
-_ROW_MATCH_MAX_ENTRIES = 20_000_000
+#: Above this many Jacobian nonzeros the row-matching dual layout is not attempted
+#: (its per-row matching is a Python loop); duals are then reported only through
+#: the scalar layout, exactly as before #1618. Until #1680 this was a cap on DENSE
+#: entries (``m * n > 20e6``) because the matcher densified both the solved
+#: matrices and the Jacobian -- which on a bulk-row model was the HiGHS route's
+#: peak-memory term, and silently dropped every dual above ~4.5k x 4.5k. The
+#: matcher is sparse now, so the cap bounds work, not memory.
+_ROW_MATCH_MAX_NNZ = 5_000_000
+
+
+def _csr_rows(A: Any, n_cols: int) -> Any:
+    """``A[:, :n_cols]`` as canonical CSR (sorted, duplicates summed), never dense.
+
+    Sparse input stays sparse. Dense input goes through :func:`_dense_A` first,
+    which raises on an object / non-2-D array instead of letting a 0-d object
+    array through (CLAUDE.md: ``np.asarray`` on a scipy matrix does not raise).
+    """
+    import scipy.sparse as sp
+
+    if sp.issparse(A):
+        M = sp.csr_matrix(A, dtype=np.float64)
+    else:
+        M = sp.csr_matrix(_dense_A(A))
+    if M.shape[1] > n_cols:
+        M = M[:, :n_cols].tocsr()
+    M.sum_duplicates()
+    M.sort_indices()
+    if not sp.issparse(M):  # pragma: no cover - guards the contract above
+        raise TypeError("_csr_rows must return a scipy sparse matrix")
+    return M
+
+
+def _sparse_constraint_jacobian(ev: Any, x: np.ndarray) -> Any:
+    """The constraint Jacobian at ``x`` without a dense ``(m, n)`` scatter.
+
+    Both evaluators expose ``evaluate_sparse_jacobian`` (the tape returns CSR from
+    its native COO; the numpy evaluator may return CSC or, as its own fallback, a
+    dense array -- ``_csr_rows`` accepts either).
+    """
+    fn = getattr(ev, "evaluate_sparse_jacobian", None)
+    return fn(x) if fn is not None else ev.evaluate_jacobian(x)
 
 
 def _matched_row_constraint_duals(
@@ -26495,24 +26532,28 @@ def _matched_row_constraint_duals(
     whatever orientation the extractor chose; an equality's multiplier is
     ``λ = -s·rd``, ``s`` mapping the solved row onto ``body = 0``.
     """
-    # Dense, 2-D, validated (CLAUDE.md: never ``np.asarray`` a scipy matrix).
-    A_ub = None if A_ub is None else _dense_A(A_ub)
-    A_eq = None if A_eq is None else _dense_A(A_eq)
-    n_ub = 0 if A_ub is None else int(A_ub.shape[0])
-    n_eq = 0 if A_eq is None else int(A_eq.shape[0])
+    # Sparse end to end (#1680). This used to ``_dense_A`` both solved matrices and
+    # scatter the Jacobian densely, which on a bulk-row model was the HiGHS route's
+    # peak memory. ``_csr_rows`` validates its input like ``_dense_A`` does
+    # (CLAUDE.md: ``np.asarray`` on a scipy matrix returns a 0-d object array).
+    A_ub_s = None if A_ub is None else _csr_rows(A_ub, n_orig)
+    A_eq_s = None if A_eq is None else _csr_rows(A_eq, n_orig)
+    n_ub = 0 if A_ub_s is None else int(A_ub_s.shape[0])
+    n_eq = 0 if A_eq_s is None else int(A_eq_s.shape[0])
     if (n_ub and b_ub is None) or (n_eq and b_eq is None):
         return None
     if row_dual.size != n_ub + n_eq or n_ub + n_eq == 0:
         return None
     ev = _make_evaluator(model)
     m_ev = int(ev.n_constraints)
-    if m_ev == 0 or m_ev * n_orig > _ROW_MATCH_MAX_ENTRIES:
+    if m_ev == 0:
         return None
     if int(ev.n_variables) != n_orig:
         return None
     x0 = np.zeros(n_orig, dtype=np.float64)
-    J = ev.evaluate_jacobian(x0)
-    J = np.asarray(J.toarray() if hasattr(J, "toarray") else J, dtype=np.float64)
+    J = _csr_rows(_sparse_constraint_jacobian(ev, x0), n_orig)
+    if J.nnz > _ROW_MATCH_MAX_NNZ:
+        return None
     g0 = np.asarray(ev.evaluate_constraints(x0), dtype=np.float64).reshape(-1)
     # Row bounds from the row map itself: ``_infer_constraint_bounds`` covers only
     # ``model._constraints``, not the builder rows the evaluator appends (#840).
@@ -26529,31 +26570,45 @@ def _matched_row_constraint_duals(
     def _close(a: np.ndarray, b: np.ndarray) -> bool:
         return bool(np.allclose(a, b, rtol=1e-9, atol=1e-12))
 
-    # Candidates by sparsity pattern, so the match is not O(rows^2) dense compares.
+    def _row(M, k: int) -> tuple[tuple, np.ndarray]:
+        # (support, values) of row k with explicit zeros dropped -- the dense
+        # ``flatnonzero(row != 0)`` support and the row's values on it. Two rows
+        # with the same support are ``allclose`` iff their values on it are
+        # (both are exactly zero everywhere else).
+        lo_, hi_ = int(M.indptr[k]), int(M.indptr[k + 1])
+        vals = M.data[lo_:hi_]
+        nz = vals != 0.0
+        return tuple(M.indices[lo_:hi_][nz].tolist()), vals[nz]
+
+    # Candidates by sparsity pattern, so the match is not O(rows^2) compares.
     by_support: dict[tuple, list[int]] = {}
+    j_vals: list[np.ndarray] = []
     for k in range(m_ev):
-        by_support.setdefault(tuple(np.flatnonzero(J[k] != 0.0)), []).append(k)
+        sup, vals = _row(J, k)
+        by_support.setdefault(sup, []).append(k)
+        j_vals.append(vals)
 
     # Non-None whenever the matching count is nonzero (checked above).
     b_ub_v = np.zeros(0) if b_ub is None else np.asarray(b_ub, dtype=np.float64).reshape(-1)
     b_eq_v = np.zeros(0) if b_eq is None else np.asarray(b_eq, dtype=np.float64).reshape(-1)
     if b_ub_v.size != n_ub or b_eq_v.size != n_eq:
         return None
-    solved: list[tuple[np.ndarray, float, bool]] = []  # (a, b, is_eq)
-    if A_ub is not None:
+    solved: list[tuple[Any, int, float, bool]] = []  # (matrix, row, b, is_eq)
+    if A_ub_s is not None:
         for j in range(n_ub):
-            solved.append((np.asarray(A_ub[j, :n_orig], np.float64), float(b_ub_v[j]), False))
-    if A_eq is not None:
+            solved.append((A_ub_s, j, float(b_ub_v[j]), False))
+    if A_eq_s is not None:
         for i in range(n_eq):
-            solved.append((np.asarray(A_eq[i, :n_orig], np.float64), float(b_eq_v[i]), True))
+            solved.append((A_eq_s, i, float(b_eq_v[i]), True))
 
     row_value: dict[int, float] = {}
     bad_rows: set[int] = set()
-    for r, (a, b, is_eq) in enumerate(solved):
+    for r, (M, j, b, is_eq) in enumerate(solved):
+        sup, a = _row(M, j)
         hits: list[tuple[int, float]] = []
-        for k in by_support.get(tuple(np.flatnonzero(a != 0.0)), []):
+        for k in by_support.get(sup, []):
             for s in (1.0, -1.0):
-                if not _close(a, s * J[k]):
+                if not _close(a, s * j_vals[k]):
                     continue
                 if is_eq:
                     ok = cl[k] == cu[k] and _close(np.array(b), np.array(s * (cl[k] - g0[k])))
@@ -31997,10 +32052,16 @@ def _highs_std_form(model: Model):
     form, integers marked, so every certificate is about exactly what was solved."""
     import scipy.sparse as _sp
 
-    from discopt._relax.problem_classifier import extract_lp_data
+    from discopt._relax.problem_classifier import extract_lp_data, sparse_constraint_matrices
     from discopt.solvers.lp_milp_highs import StdForm
 
-    lp_data = extract_lp_data(model)
+    # #1680: CSR at any size. Every consumer here is sparse-aware -- ``StdForm``
+    # converts to CSC regardless, and the dual recovery / slack decomposition below
+    # already receive CSR above ``_DENSE_A_MAX_BYTES`` -- so under that budget the
+    # dense ``A_eq`` was pure cost: 256 MB on a 4000-row bulk LP (traced with
+    # tracemalloc to ``_materialise_A``), the HiGHS route's peak the issue measured.
+    with sparse_constraint_matrices():
+        lp_data = extract_lp_data(model)
     n_orig = sum(v.size for v in model._variables)
     _, _, _, int_offsets, int_sizes = _extract_variable_info(model)
     int_idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
