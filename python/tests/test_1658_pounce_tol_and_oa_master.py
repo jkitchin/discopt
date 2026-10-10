@@ -473,7 +473,16 @@ def test_lazy_master_separates_a_final_solution_no_callback_judged(monkeypatch):
     scaled by 10^U(-6,6), under #1667's presolve rules: the master finished at
     4.3 with the separator's only accepted point at 5.3 (optimum 5.3), and
     LP/NLP-BB returned ``feasible``. The final solution is now separated when it
-    beats the best accepted point."""
+    beats the best accepted point.
+
+    Whether HiGHS withholds the final solution is platform-dependent: on the
+    Linux x86 CI runners it does (``final_offers >= 1``); on macOS arm64, with
+    highspy 1.12.0 and 1.15.1 alike, every tree solution reaches the callback
+    (8 ``mipsol_calls``, ``final_offers == 0``, 3/3 runs) and the guard has nothing
+    to do. The status assertions here catch the defect where it shows; that the
+    guard fires and certifies is asserted on every platform by
+    ``test_lazy_master_separates_final_solutions_highs_never_offered``, which
+    forces the condition instead of depending on HiGHS to produce it."""
     import pathlib
     import sys
 
@@ -501,4 +510,61 @@ def test_lazy_master_separates_a_final_solution_no_callback_judged(monkeypatch):
     assert r.status == "optimal" and r.gap_certified, (r.status, r.objective, r.bound)
     assert r.objective == pytest.approx(5.3, rel=1e-6)
     assert r.bound <= r.objective + 1e-9
-    assert seen and sum(int(s.get("final_offers", 0)) for s in seen) >= 1, seen
+    assert seen, "the lazy master never ran"
+
+
+def test_lazy_master_separates_final_solutions_highs_never_offered(monkeypatch):
+    """The condition above, forced: HiGHS's improving-solution callback is
+    withheld for every tree solution, so the separator sees a point ONLY through
+    the post-tree separation of the final solution. LP/NLP-BB must still certify
+    the optimum, and the ``final_offers`` counter is the probe that the path
+    fired (CLAUDE.md §6). Without the final separation the master finishes on
+    points no separator judged, and no incumbent is ever accepted."""
+    import pathlib
+    import sys
+
+    import highspy
+
+    sys.path.insert(0, str(pathlib.Path(__file__).parent))
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+    from test_1537_row_scaling import _per_row_scaled
+
+    improving = highspy.cb.HighsCallbackType.kCallbackMipImprovingSolution
+    withheld = [0]
+    real_set = highspy.Highs.setCallback
+
+    def _set_callback(self, fn, user_data):
+        def _withholding(callback_type, *rest):
+            if callback_type == improving:
+                withheld[0] += 1
+                return None
+            return fn(callback_type, *rest)
+
+        return real_set(self, _withholding, user_data)
+
+    monkeypatch.setattr(highspy.Highs, "setCallback", _set_callback)
+
+    seen = []
+    real = milp_highs.solve_milp_with_lazy_cuts
+
+    def _spy(*a, **kw):
+        r = real(*a, **kw)
+        seen.append(dict(r.callback_stats or {}))
+        return r
+
+    monkeypatch.setattr(milp_highs, "solve_milp_with_lazy_cuts", _spy)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = solve_mip_nlp(
+            _per_row_scaled("tls2.nl", 6.0),
+            method="lp_nlp_bb",
+            milp_solver="highs",
+            time_limit=60,
+        )
+    assert withheld[0] >= 1, "no improving-solution callback was withheld"
+    assert seen, "the lazy master never ran"
+    assert sum(int(s.get("mipsol_calls", 0)) for s in seen) == 0, seen
+    assert sum(int(s.get("final_offers", 0)) for s in seen) >= 1, seen
+    assert r.status == "optimal" and r.gap_certified, (r.status, r.objective, r.bound)
+    assert r.objective == pytest.approx(5.3, rel=1e-6)
+    assert r.bound <= r.objective + 1e-9
