@@ -46,14 +46,56 @@
 //! choice that handles wide dynamic ranges; richer iterative schemes
 //! (Sinkhorn, Knight–Ruiz) are a future replacement.
 //!
+//! ## Work budget (#1686)
+//!
+//! Each row is expanded with [`try_polynomial_budgeted`], not the unbounded
+//! [`super::polynomial::try_polynomial`]. This runs before the solve's time
+//! limit (from `solver.py`'s `_check_model_scaling`), and a row that is a
+//! product of `k` width-`w` sums expands to `w^k` monomials only to be
+//! discarded for having degree > 1: measured, a 9 x 7 product held a
+//! `time_limit=5` solve for ~115 s before branch and bound started. The
+//! budget is an operation count (never a clock, #912), in two currencies
+//! (see [`PolyBudget`]):
+//!
+//! - *expansion* (cross-products of non-constant polynomials):
+//!   [`ROW_EXPANSION_BUDGET`] per row and [`MODEL_EXPANSION_BUDGET`] for the
+//!   whole pass, so many individually-affordable rows cannot add up to an
+//!   unbounded total;
+//! - *linear* (node visits, leaf monomials, constant-factor copies):
+//!   proportional to the arena size, per row and per pass. An unshared
+//!   linear row spends roughly its own node count, so this only bites on
+//!   shared subtrees re-walked as a tree.
+//!
+//! A row that exhausts either is **abstained on** exactly like a
+//! non-polynomial row: it contributes nothing and keeps identity scale. It
+//! is counted in [`ScalingStats::rows_over_budget`] so the diagnostic says
+//! it did not look, rather than reading as "this row is fine". Within budget
+//! the result is bit-identical to the unbudgeted expansion.
+//!
 //! ## Determinism
 //!
 //! Constraints and variables are scanned in their natural order; min
 //! / max are taken over `f64` with explicit handling of zeros. No
 //! `HashMap` iteration on the hot path.
 
-use super::polynomial::try_polynomial;
+use super::polynomial::{try_polynomial_budgeted, PolyBudget, PolyBudgetedError};
 use crate::expr::ModelRepr;
+
+/// Expansion units (monomials created by multiplying two non-constant
+/// polynomials) one row may spend before it is abstained on. A row that can
+/// contribute to equilibration has degree ≤ 1, which needs no genuine
+/// expansion unless products cancel; this leaves ample room for that.
+pub const ROW_EXPANSION_BUDGET: u64 = 200_000;
+
+/// Expansion units the whole pass may spend across all rows (#1456's lesson:
+/// a per-row limit alone bounds nothing over many rows).
+pub const MODEL_EXPANSION_BUDGET: u64 = 2_000_000;
+
+/// Linear allowance per row is `LINEAR_ARENA_FACTOR * arena.len() +
+/// LINEAR_BASE`; for the pass it is four times that.
+pub const LINEAR_ARENA_FACTOR: u64 = 4;
+/// See [`LINEAR_ARENA_FACTOR`].
+pub const LINEAR_BASE: u64 = 100_000;
 
 /// Per-pass scaling diagnostics.
 #[derive(Debug, Clone, Default)]
@@ -79,6 +121,10 @@ pub struct ScalingStats {
     pub worst_row_index: Option<usize>,
     /// See [`Self::worst_row_index`].
     pub worst_col_index: Option<usize>,
+    /// Rows whose polynomial expansion exceeded the work budget and were
+    /// therefore not examined (#1686). Nonzero means the reported ranges
+    /// cover only the rows that were.
+    pub rows_over_budget: usize,
 }
 
 /// Scale-factor result of running [`compute_equilibration`].
@@ -105,10 +151,28 @@ pub fn compute_equilibration(model: &ModelRepr) -> (ScalingFactors, ScalingStats
     let mut col_has_entry = vec![false; n_cols];
     let mut stats = ScalingStats::default();
 
+    let arena_len = model.arena.len() as u64;
+    let row_linear = LINEAR_ARENA_FACTOR
+        .saturating_mul(arena_len)
+        .saturating_add(LINEAR_BASE);
+    let mut pass_linear = row_linear.saturating_mul(4);
+    let mut pass_expansion = MODEL_EXPANSION_BUDGET;
+
     for (i, c) in model.constraints.iter().enumerate() {
-        let poly = match try_polynomial(&model.arena, c.body) {
-            Some(p) => p,
-            None => continue,
+        let budget = PolyBudget {
+            linear: row_linear.min(pass_linear),
+            expansion: ROW_EXPANSION_BUDGET.min(pass_expansion),
+        };
+        let (res, spent) = try_polynomial_budgeted(&model.arena, c.body, budget);
+        pass_linear -= spent.linear;
+        pass_expansion -= spent.expansion;
+        let poly = match res {
+            Ok(p) => p,
+            Err(PolyBudgetedError::NotPolynomial) => continue,
+            Err(PolyBudgetedError::BudgetExhausted) => {
+                stats.rows_over_budget += 1;
+                continue;
+            }
         };
         if poly.max_total_degree() > 1 {
             continue;
@@ -431,5 +495,227 @@ mod tests {
         assert_eq!(s.linear_rows_sampled, 0);
         assert_eq!(s.worst_row_index, None);
         assert_eq!(s.worst_col_index, None);
+    }
+
+    /// Build `prod_{k<n_factors} (x_{k,0} + 1*x_{k,1} + ... + (w-1)*x_{k,w-1})`:
+    /// a product of sums whose full expansion has `w^n_factors` monomials.
+    /// Returns (arena, body, variables).
+    fn product_of_sums(
+        arena: &mut ExprArena,
+        n_factors: usize,
+        width: usize,
+        first_var: usize,
+    ) -> (ExprId, Vec<VarInfo>) {
+        let mut vars = Vec::new();
+        let mut body: Option<ExprId> = None;
+        for k in 0..n_factors {
+            let mut s: Option<ExprId> = None;
+            for j in 0..width {
+                let idx = first_var + k * width + j;
+                let name = format!("x{idx}");
+                let v = scalar_var(arena, &name, idx);
+                vars.push(vinfo(&name, idx));
+                let t = lin(arena, (j + 1) as f64, v);
+                s = Some(match s {
+                    None => t,
+                    Some(acc) => add(arena, acc, t),
+                });
+            }
+            let s = s.unwrap();
+            body = Some(match body {
+                None => s,
+                Some(acc) => arena.add(ExprNode::BinaryOp {
+                    op: BinOp::Mul,
+                    left: acc,
+                    right: s,
+                }),
+            });
+        }
+        (body.unwrap(), vars)
+    }
+
+    /// #1686 THE REGRESSION. A 12-factor product of 7-term sums expands to
+    /// 7^12 ≈ 1.4e10 monomials; unbudgeted this does not return in any useful
+    /// time (the 9 x 7 case took ~115 s). Budgeted, the row is abstained on
+    /// and counted, and a linear row in the same model is still sampled
+    /// exactly as before.
+    #[test]
+    fn product_of_sums_row_is_abstained_on_not_expanded() {
+        let mut arena = ExprArena::new();
+        let (blowup, mut vars) = product_of_sums(&mut arena, 12, 7, 0);
+        let n = vars.len();
+        let a = scalar_var(&mut arena, "a", n);
+        let b = scalar_var(&mut arena, "b", n + 1);
+        vars.push(vinfo("a", n));
+        vars.push(vinfo("b", n + 1));
+        let linear = {
+            let l = lin(&mut arena, 1e3, a);
+            let r = lin(&mut arena, 1e-3, b);
+            add(&mut arena, l, r)
+        };
+        let n_vars = vars.len();
+        let model = ModelRepr {
+            arena,
+            objective: a,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![
+                ConstraintRepr {
+                    body: blowup,
+                    sense: ConstraintSense::Le,
+                    rhs: 1.0,
+                    name: None,
+                },
+                ConstraintRepr {
+                    body: linear,
+                    sense: ConstraintSense::Le,
+                    rhs: 1.0,
+                    name: None,
+                },
+            ],
+            variables: vars,
+            n_vars,
+        };
+        let (f, s) = compute_equilibration(&model);
+        assert_eq!(
+            s.rows_over_budget, 1,
+            "the product row must be abstained on"
+        );
+        assert_eq!(
+            s.linear_rows_sampled, 1,
+            "the linear row must still be sampled"
+        );
+        assert_eq!(f.row_scales[0], 1.0, "abstained row keeps identity scale");
+        assert!((s.worst_row_dynamic_range - 1e6).abs() / 1e6 < 1e-9);
+        assert_eq!(s.worst_row_index, Some(1));
+    }
+
+    /// The per-PASS cap: many rows, each individually inside the per-row
+    /// budget, must not add up to more than `MODEL_EXPANSION_BUDGET` of
+    /// expansion. 7^6 = 117,649 monomials per row (< ROW_EXPANSION_BUDGET);
+    /// forty of them would be ~4.7e6 (> MODEL_EXPANSION_BUDGET).
+    #[test]
+    fn expansion_budget_is_a_running_total() {
+        let mut arena = ExprArena::new();
+        let mut vars = Vec::new();
+        let mut cons = Vec::new();
+        for r in 0..40 {
+            let (body, v) = product_of_sums(&mut arena, 6, 7, r * 42);
+            vars.extend(v);
+            cons.push(ConstraintRepr {
+                body,
+                sense: ConstraintSense::Le,
+                rhs: 1.0,
+                name: None,
+            });
+        }
+        let n_vars = vars.len();
+        let model = ModelRepr {
+            arena,
+            objective: cons[0].body,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: cons,
+            variables: vars,
+            n_vars,
+        };
+        // Each row alone fits the per-row budget...
+        let (one, spent) = try_polynomial_budgeted(
+            &model.arena,
+            model.constraints[0].body,
+            PolyBudget {
+                linear: u64::MAX,
+                expansion: ROW_EXPANSION_BUDGET,
+            },
+        );
+        assert!(
+            one.is_ok(),
+            "fixture: a single row must fit the per-row budget"
+        );
+        assert!(
+            spent.expansion * 40 > MODEL_EXPANSION_BUDGET,
+            "fixture too small"
+        );
+        // ...but the pass stops paying once the running total is spent.
+        let (_f, s) = compute_equilibration(&model);
+        let paid = 40 - s.rows_over_budget;
+        assert!(s.rows_over_budget > 0, "running total was not enforced");
+        assert!(
+            (paid as u64) * spent.expansion <= MODEL_EXPANSION_BUDGET,
+            "{paid} rows x {} units exceeds the pass budget",
+            spent.expansion
+        );
+    }
+
+    /// Within budget the budgeted expansion is identical to the unbudgeted
+    /// one (bound-neutral by construction): a row that cancels to linear,
+    /// `(x + y) * (x - y) - x*x + y*y + 3 z`, is sampled exactly as before.
+    #[test]
+    fn budgeted_matches_unbudgeted_on_cancelling_row() {
+        use super::super::polynomial::try_polynomial;
+        let mut arena = ExprArena::new();
+        let x = scalar_var(&mut arena, "x", 0);
+        let y = scalar_var(&mut arena, "y", 1);
+        let z = scalar_var(&mut arena, "z", 2);
+        let s = add(&mut arena, x, y);
+        let d = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Sub,
+            left: x,
+            right: y,
+        });
+        let p = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: s,
+            right: d,
+        });
+        let xx = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: x,
+            right: x,
+        });
+        let yy = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: y,
+            right: y,
+        });
+        let t = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Sub,
+            left: p,
+            right: xx,
+        });
+        let t = add(&mut arena, t, yy);
+        let z3 = lin(&mut arena, 3.0, z);
+        let body = add(&mut arena, t, z3);
+        let full = try_polynomial(&arena, body).unwrap();
+        let (b, _) = try_polynomial_budgeted(
+            &arena,
+            body,
+            PolyBudget {
+                linear: 1_000,
+                expansion: 1_000,
+            },
+        );
+        let b = b.unwrap();
+        assert_eq!(full.max_total_degree(), 1);
+        assert_eq!(b.monomials.len(), full.monomials.len());
+        for (m1, m2) in b.monomials.iter().zip(full.monomials.iter()) {
+            assert_eq!(m1.coeff.to_bits(), m2.coeff.to_bits());
+            assert_eq!(m1.factors, m2.factors);
+        }
+        let model = ModelRepr {
+            arena,
+            objective: x,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![ConstraintRepr {
+                body,
+                sense: ConstraintSense::Le,
+                rhs: 1.0,
+                name: None,
+            }],
+            variables: vec![vinfo("x", 0), vinfo("y", 1), vinfo("z", 2)],
+            n_vars: 3,
+        };
+        let (f, st) = compute_equilibration(&model);
+        assert_eq!(st.rows_over_budget, 0);
+        assert_eq!(st.linear_rows_sampled, 1);
+        assert!((f.row_scales[0] - 1.0 / 3.0).abs() < 1e-12);
     }
 }

@@ -822,6 +822,10 @@ impl PyModelRepr {
     /// saw them. This accessor is the cheap read-only route for the
     /// once-per-solve model-health check, which wants the numbers and not
     /// the scale factors.
+    ///
+    /// `rows_over_budget` (#1686) counts rows whose polynomial expansion
+    /// exceeded `compute_equilibration`'s operation-count budget and were
+    /// skipped like non-polynomial rows; the ranges cover the others.
     fn scaling_diagnostics(&self, py: Python<'_>) -> PyResult<PyObject> {
         use discopt_core::presolve::scaling::compute_equilibration;
         let (_factors, stats) = compute_equilibration(&self.inner);
@@ -831,6 +835,8 @@ impl PyModelRepr {
         dict.set_item("worst_col_dynamic_range", stats.worst_col_dynamic_range)?;
         dict.set_item("worst_row_index", stats.worst_row_index)?;
         dict.set_item("worst_col_index", stats.worst_col_index)?;
+        // #1686: rows the deterministic expansion budget declined to examine.
+        dict.set_item("rows_over_budget", stats.rows_over_budget)?;
         let row_name = stats
             .worst_row_index
             .and_then(|i| self.inner.constraints.get(i))
