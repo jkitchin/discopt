@@ -26,9 +26,10 @@ forces ``O(n²)`` work (allocation + arithmetic) at every one of the
 ``N`` nodes, i.e. ``O(N · n²)`` overall. Instead each node carries
 
 * ``grad`` as ``dict[int, Interval]`` — only the non-zero partials,
-* ``hess`` as ``dict[(int, int), Interval]`` — only the non-zero
-  entries of the *upper triangle* (the Hessian is symmetric), keyed by
-  ``(i, j)`` with ``i ≤ j``.
+* ``hess`` as an :class:`_HMap` — only the non-zero entries of the
+  *upper triangle* (the Hessian is symmetric), ``(i, j)`` with ``i ≤ j``,
+  held as parallel key / ``lo`` / ``hi`` arrays so a dense outer product
+  ``∇g ∇gᵀ`` costs numpy calls, not one Python interval op per entry.
 
 The chain-rule arithmetic then touches only the live entries, so the
 walk is ``O(N + nnz)``. The single ``n × n`` allocation happens once,
@@ -238,8 +239,8 @@ class _SparseAD:
     * ``value`` — scalar :class:`Interval`.
     * ``grad`` — ``{flat_index: Interval}``; absent key ⇒ exact-zero
       partial.
-    * ``hess`` — ``{(i, j): Interval}`` for ``i ≤ j`` (upper triangle of
-      the symmetric Hessian); absent key ⇒ exact-zero entry.
+    * ``hess`` — :class:`_HMap` of entries ``(i, j)``, ``i ≤ j`` (upper
+      triangle of the symmetric Hessian); absent key ⇒ exact-zero entry.
     * ``n`` — flat variable count (for densification).
     * ``unbounded`` — ``True`` when an unsupported / non-smooth atom
       forced an abstention; densifies to a ``±inf`` Hessian so the
@@ -249,7 +250,7 @@ class _SparseAD:
 
     value: Interval
     grad: "dict[int, Interval]"
-    hess: "dict[tuple[int, int], Interval]"
+    hess: "_HMap"
     n: int
     unbounded: bool = False
     rank1: Optional[_SparseRank1] = field(default=None)
@@ -294,17 +295,29 @@ def _flat_size(model: Model) -> int:
 # Sparse arithmetic helpers
 # ──────────────────────────────────────────────────────────────────────
 #
-# All multiplications below feed scalar :class:`Interval` operators,
-# which outward-round (toward ∓inf) on every op — so the maps these
-# helpers build are sound enclosures, entry by entry. The whole walk
-# runs under a single ``np.errstate`` (see :func:`interval_hessian`) so
-# that intentional overflow / ``0 * inf`` on wide boxes — which produce
-# the ``±inf`` sentinels the certificate reads as "abstain" — do not
-# emit benchmark-visible warnings.
+# Gradient maps are ``{slot: Interval}`` dicts of scalar intervals and go
+# through the scalar :class:`Interval` operators. Hessian maps are
+# :class:`_HMap` — the same sparse upper triangle held as parallel arrays — and
+# go through the element-wise kernels ``_v_*`` below, which reproduce the
+# scalar :class:`Interval` operators **bit for bit, entry by entry** (same
+# corner products, same NaN-corner convention, same per-entry #957 exact-zero
+# rule). Both are outward-rounded, so the maps are sound enclosures entry by
+# entry. The whole walk runs under a single ``np.errstate`` (see
+# :func:`interval_hessian`) so that intentional overflow / ``0 * inf`` on wide
+# boxes — which produce the ``±inf`` sentinels the certificate reads as
+# "abstain" — do not emit benchmark-visible warnings.
+#
+# Why the Hessian is vectorised (#1544 follow-up): a chain-rule step through a
+# nonlinear atom adds the outer product ``∇g ∇gᵀ``, so ``sin(sum(x))`` over
+# ``n`` variables carries ``n(n+1)/2`` Hessian entries. As a dict of scalar
+# intervals that was one Python-level interval multiply (~17 µs) per entry per
+# chain-rule step — ~1.1 M of them, ~19 s, for a 600-term sum, which put
+# ``test_shallow_model_with_wide_sum_certifies`` at the edge of its time limit
+# on CI. As arrays it is a handful of numpy calls.
 
 
 def _dadd(a: dict, b: dict) -> dict:
-    """Entry-wise sum of two sparse maps (grad or hess)."""
+    """Entry-wise sum of two sparse gradient maps."""
     if not a:
         return dict(b)
     if not b:
@@ -317,7 +330,7 @@ def _dadd(a: dict, b: dict) -> dict:
 
 
 def _dsub(a: dict, b: dict) -> dict:
-    """Entry-wise difference ``a - b`` of two sparse maps."""
+    """Entry-wise difference ``a - b`` of two sparse gradient maps."""
     if not b:
         return dict(a)
     out = dict(a)
@@ -333,13 +346,188 @@ def _dneg(a: dict) -> dict:
 
 
 def _dscale(s: Interval, a: dict) -> dict:
-    """Scale every entry of a sparse map by the scalar interval ``s``."""
+    """Scale every entry of a sparse gradient map by the scalar interval ``s``."""
     if not a:
         return {}
     return {k: s * v for k, v in a.items()}
 
 
-def _self_outer(g: dict) -> dict:
+# -- element-wise interval kernels (bit-identical to the scalar operators) ----
+
+
+def _v_add(alo, ahi, blo, bhi):
+    """Element-wise :meth:`Interval.__add__`."""
+    return iv._round_down_exact0(alo + blo), iv._round_up_exact0(ahi + bhi)
+
+
+def _v_sub(alo, ahi, blo, bhi):
+    """Element-wise :meth:`Interval.__sub__`."""
+    return iv._round_down_exact0(alo - bhi), iv._round_up_exact0(ahi - blo)
+
+
+def _v_mul(alo, ahi, blo, bhi):
+    """Element-wise :meth:`Interval.__mul__`, deciding the #957 rule per entry.
+
+    ``Interval.__mul__`` on an *array* takes its exact-zero decision once for the
+    whole array (one underflowed entry nudges every exact-zero endpoint). Each
+    scalar entry of a sparse map was multiplied on its own, so this kernel
+    decides per entry — which is what makes it bit-identical to the scalar path.
+    """
+    with np.errstate(invalid="ignore"):
+        a = alo * blo
+        b = alo * bhi
+        c = ahi * blo
+        d = ahi * bhi
+        lo = np.minimum(np.minimum(a, b), np.minimum(c, d))
+        hi = np.maximum(np.maximum(a, b), np.maximum(c, d))
+        if bool(np.isnan(lo).any()) or bool(np.isnan(hi).any()):
+            # ``0 * ±inf -> 0`` (C-36). The map is the identity on every non-NaN
+            # corner, so applying it to all entries changes only the NaN ones.
+            a = iv._nan_corner_to_zero(a)
+            b = iv._nan_corner_to_zero(b)
+            c = iv._nan_corner_to_zero(c)
+            d = iv._nan_corner_to_zero(d)
+            lo = np.minimum(np.minimum(a, b), np.minimum(c, d))
+            hi = np.maximum(np.maximum(a, b), np.maximum(c, d))
+    underflowed = ((lo == 0.0) | (hi == 0.0)) & (
+        ((a == 0.0) & (alo != 0.0) & (blo != 0.0))
+        | ((b == 0.0) & (alo != 0.0) & (bhi != 0.0))
+        | ((c == 0.0) & (ahi != 0.0) & (blo != 0.0))
+        | ((d == 0.0) & (ahi != 0.0) & (bhi != 0.0))
+    )
+    # Without a zero endpoint the exact0 and plain roundings coincide, so the
+    # only entries that take the plain (always-nudge) rounding are underflows.
+    out_lo = np.where(underflowed, iv._round_down(lo), iv._round_down_exact0(lo))
+    out_hi = np.where(underflowed, iv._round_up(hi), iv._round_up_exact0(hi))
+    return out_lo, out_hi
+
+
+def _v_sq(lo, hi):
+    """Element-wise :meth:`Interval.__pow__` with ``n == 2`` (per-entry #957 rule)."""
+    zero_in = (lo <= 0) & (hi >= 0)
+    lo_sq = lo * lo
+    hi_sq = hi * hi
+    s_lo = np.where(zero_in, 0.0, np.minimum(lo_sq, hi_sq))
+    s_hi = np.maximum(lo_sq, hi_sq)
+    underflowed = ((s_lo == 0.0) | (s_hi == 0.0)) & (
+        ((lo_sq == 0.0) & (lo != 0.0)) | ((hi_sq == 0.0) & (hi != 0.0))
+    )
+    out_lo = np.where(underflowed, iv._round_down(s_lo), iv._round_down_exact0(s_lo))
+    out_hi = np.where(underflowed, iv._round_up(s_hi), iv._round_up_exact0(s_hi))
+    return out_lo, out_hi
+
+
+# -- sparse Hessian maps --------------------------------------------------------
+
+# Entry ``(i, j)`` (``i <= j``) is stored under the int64 key ``i * _KEY_SHIFT + j``,
+# so sorting the keys orders entries row-major and a key round-trips exactly.
+_KEY_SHIFT = np.int64(1 << 32)
+
+
+@dataclass(frozen=True, slots=True)
+class _HMap:
+    """Sparse upper-triangle Hessian: sorted unique ``keys`` with ``[lo, hi]``.
+
+    An absent key is a structural (exact) zero, exactly as an absent dict key
+    was. Instances are never mutated, so they may be shared between nodes.
+    """
+
+    keys: np.ndarray  # int64, sorted, unique
+    lo: np.ndarray  # float64
+    hi: np.ndarray  # float64
+
+    def __len__(self) -> int:
+        return int(self.keys.shape[0])
+
+    def rows_cols(self) -> tuple[np.ndarray, np.ndarray]:
+        return self.keys // _KEY_SHIFT, self.keys % _KEY_SHIFT
+
+
+_H0 = _HMap(
+    np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.float64), np.zeros(0, dtype=np.float64)
+)
+
+
+def _hmerge(a: _HMap, b: _HMap, op, only_b) -> _HMap:
+    """Union of two maps: ``op`` on shared keys, ``a`` / ``only_b(b)`` elsewhere.
+
+    Entries present in only one operand are carried over untouched, as the dict
+    helpers did (combining with an implicit zero would add a rounding step).
+    """
+    keys = np.union1d(a.keys, b.keys)
+    ia = np.searchsorted(keys, a.keys)
+    ib = np.searchsorted(keys, b.keys)
+    in_a = np.zeros(keys.shape[0], dtype=bool)
+    in_a[ia] = True
+    in_b = np.zeros(keys.shape[0], dtype=bool)
+    in_b[ib] = True
+    lo = np.empty(keys.shape[0], dtype=np.float64)
+    hi = np.empty(keys.shape[0], dtype=np.float64)
+    lo[ia] = a.lo
+    hi[ia] = a.hi
+    b_lo, b_hi = only_b(b.lo, b.hi)
+    b_only = ~in_a[ib]
+    lo[ib[b_only]] = b_lo[b_only]
+    hi[ib[b_only]] = b_hi[b_only]
+    shared_b = ~b_only
+    if bool(shared_b.any()):
+        pos = ib[shared_b]
+        s_lo, s_hi = op(lo[pos], hi[pos], b.lo[shared_b], b.hi[shared_b])
+        lo[pos] = s_lo
+        hi[pos] = s_hi
+    return _HMap(keys, lo, hi)
+
+
+def _hadd(a: _HMap, b: _HMap) -> _HMap:
+    """Entry-wise sum of two sparse Hessian maps."""
+    if not len(a):
+        return b
+    if not len(b):
+        return a
+    return _hmerge(a, b, _v_add, lambda lo, hi: (lo, hi))
+
+
+def _hsub(a: _HMap, b: _HMap) -> _HMap:
+    """Entry-wise difference ``a - b`` of two sparse Hessian maps."""
+    if not len(b):
+        return a
+    if not len(a):
+        return _hneg(b)
+    return _hmerge(a, b, _v_sub, lambda lo, hi: (-hi, -lo))
+
+
+def _hneg(a: _HMap) -> _HMap:
+    """Entry-wise negation (exact — sign flip carries no roundoff)."""
+    if not len(a):
+        return a
+    return _HMap(a.keys, -a.hi, -a.lo)
+
+
+def _hscale(s: Interval, a: _HMap) -> _HMap:
+    """Scale every entry of a sparse Hessian map by the scalar interval ``s``."""
+    if not len(a):
+        return _H0
+    lo, hi = _v_mul(s.lo, s.hi, a.lo, a.hi)
+    return _HMap(a.keys, lo, hi)
+
+
+def _grad_arrays(g: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """``(slots, lo, hi)`` of a sparse gradient map, in insertion order."""
+    m = len(g)
+    idx = np.fromiter(g.keys(), dtype=np.int64, count=m)
+    lo = np.fromiter((float(v.lo) for v in g.values()), dtype=np.float64, count=m)
+    hi = np.fromiter((float(v.hi) for v in g.values()), dtype=np.float64, count=m)
+    return idx, lo, hi
+
+
+def _from_pairs(i: np.ndarray, j: np.ndarray, lo: np.ndarray, hi: np.ndarray) -> _HMap:
+    """Build an :class:`_HMap` from (unsorted, duplicate-free) entry coordinates."""
+    keys = np.minimum(i, j) * _KEY_SHIFT + np.maximum(i, j)
+    order = np.argsort(keys, kind="stable")
+    return _HMap(keys[order], lo[order], hi[order])
+
+
+def _self_outer(g: dict) -> _HMap:
     """Upper-triangle of ``g gᵀ`` with dependency-aware tightening.
 
     The diagonal uses the squaring rule (``gᵢ²`` is nonneg and bracketed
@@ -348,18 +536,19 @@ def _self_outer(g: dict) -> dict:
     Gershgorin to certify compositions like ``exp(x²)``. Off-diagonal
     entries are the general corner products ``gᵢ · gⱼ``.
     """
-    items = list(g.items())
-    out: dict = {}
-    for a in range(len(items)):
-        i, gi = items[a]
-        out[(i, i)] = gi**2  # nonneg squaring special-case in Interval.__pow__
-        for b in range(a + 1, len(items)):
-            j, gj = items[b]
-            out[(i, j) if i < j else (j, i)] = gi * gj
-    return out
+    if not g:
+        return _H0
+    idx, glo, ghi = _grad_arrays(g)
+    pa, pb = np.triu_indices(idx.shape[0])
+    lo, hi = _v_mul(glo[pa], ghi[pa], glo[pb], ghi[pb])
+    diag = pa == pb
+    d_lo, d_hi = _v_sq(glo, ghi)
+    lo[diag] = d_lo
+    hi[diag] = d_hi
+    return _from_pairs(idx[pa], idx[pb], lo, hi)
 
 
-def _sym_cross(a: dict, b: dict) -> dict:
+def _sym_cross(a: dict, b: dict) -> _HMap:
     """Upper-triangle of the symmetric matrix ``a bᵀ + b aᵀ``.
 
     Mirrors the dense ``_outer(a, b) + _outer(b, a)`` term: entry
@@ -368,34 +557,44 @@ def _sym_cross(a: dict, b: dict) -> dict:
     :func:`_self_outer` so the diagonal keeps the squaring tightening.
     """
     if a is b:
-        return _dscale(_TWO, _self_outer(a))
+        return _hscale(_TWO, _self_outer(a))
     if not a or not b:
-        return {}
-    keys = sorted(set(a) | set(b))
-    out: dict = {}
-    for ix in range(len(keys)):
-        i = keys[ix]
-        ai = a.get(i)
-        bi = b.get(i)
-        for jx in range(ix, len(keys)):
-            j = keys[jx]
-            aj = a.get(j)
-            bj = b.get(j)
-            term: Optional[Interval] = None
-            if ai is not None and bj is not None:
-                term = ai * bj
-            if aj is not None and bi is not None:
-                t2 = aj * bi
-                term = t2 if term is None else term + t2
-            if term is not None:
-                out[(i, j)] = term
-    return out
+        return _H0
+    keys = np.array(sorted(set(a) | set(b)), dtype=np.int64)
+    k = keys.shape[0]
+
+    def _dense(d: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        present = np.zeros(k, dtype=bool)
+        lo = np.zeros(k, dtype=np.float64)
+        hi = np.zeros(k, dtype=np.float64)
+        idx, d_lo, d_hi = _grad_arrays(d)
+        pos = np.searchsorted(keys, idx)
+        present[pos] = True
+        lo[pos] = d_lo
+        hi[pos] = d_hi
+        return present, lo, hi
+
+    pa_, alo, ahi = _dense(a)
+    pb_, blo, bhi = _dense(b)
+    ix, jx = np.triu_indices(k)
+    has1 = pa_[ix] & pb_[jx]  # aᵢ bⱼ
+    has2 = pa_[jx] & pb_[ix]  # aⱼ bᵢ
+    keep = has1 | has2
+    ix, jx, has1, has2 = ix[keep], jx[keep], has1[keep], has2[keep]
+    t1_lo, t1_hi = _v_mul(alo[ix], ahi[ix], blo[jx], bhi[jx])
+    t2_lo, t2_hi = _v_mul(alo[jx], ahi[jx], blo[ix], bhi[ix])
+    s_lo, s_hi = _v_add(t1_lo, t1_hi, t2_lo, t2_hi)
+    both = has1 & has2
+    lo = np.where(both, s_lo, np.where(has1, t1_lo, t2_lo))
+    hi = np.where(both, s_hi, np.where(has1, t1_hi, t2_hi))
+    # ``keys`` is sorted and ix <= jx, so these keys are already sorted & unique.
+    return _HMap(keys[ix] * _KEY_SHIFT + keys[jx], lo, hi)
 
 
 _AFFINE_HESS_TOL = 1e-300
 
 
-def _hess_is_exactly_zero(hess: dict) -> bool:
+def _hess_is_exactly_zero(hess: _HMap) -> bool:
     """``True`` iff the sparse Hessian has no curvature above ``_AFFINE_HESS_TOL``.
 
     An empty map is the common affine case (no second-order entry was
@@ -409,10 +608,7 @@ def _hess_is_exactly_zero(hess: dict) -> bool:
     and falls through to Gershgorin.
     """
     tol = _AFFINE_HESS_TOL
-    for entry in hess.values():
-        if abs(float(entry.lo)) > tol or abs(float(entry.hi)) > tol:
-            return False
-    return True
+    return not bool(np.any((np.abs(hess.lo) > tol) | (np.abs(hess.hi) > tol)))
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -426,7 +622,7 @@ def _unbounded(n: int) -> _SparseAD:
     return _SparseAD(
         value=Interval(-inf, inf),
         grad={},
-        hess={},
+        hess=_H0,
         n=n,
         unbounded=True,
     )
@@ -464,14 +660,12 @@ def _densify(sad: _SparseAD, n: int) -> IntervalAD:
 
     hlo = np.zeros((n, n), dtype=np.float64)
     hhi = np.zeros((n, n), dtype=np.float64)
-    for (i, j), entry in sad.hess.items():
-        lo = entry.lo
-        hi = entry.hi
-        hlo[i, j] = lo
-        hhi[i, j] = hi
-        if i != j:
-            hlo[j, i] = lo
-            hhi[j, i] = hi
+    rows, cols = sad.hess.rows_cols()
+    hlo[rows, cols] = sad.hess.lo
+    hhi[rows, cols] = sad.hess.hi
+    off = rows != cols
+    hlo[cols[off], rows[off]] = sad.hess.lo[off]
+    hhi[cols[off], rows[off]] = sad.hess.hi[off]
     hess = Interval(hlo, hhi)
 
     rank1: Optional[Rank1Factor] = None
@@ -658,17 +852,17 @@ def _indexed_scalar_value(expr: IndexExpression, box: dict) -> Interval:
 def _impl(expr: Expression, model: Model, box: dict, cache: dict, n: int) -> _SparseAD:
     # --- Leaves -----------------------------------------------------
     if isinstance(expr, Constant):
-        return _SparseAD(value=_scalar_leaf_interval(expr), grad={}, hess={}, n=n)
+        return _SparseAD(value=_scalar_leaf_interval(expr), grad={}, hess=_H0, n=n)
 
     if isinstance(expr, Parameter):
-        return _SparseAD(value=_scalar_leaf_interval(expr), grad={}, hess={}, n=n)
+        return _SparseAD(value=_scalar_leaf_interval(expr), grad={}, hess=_H0, n=n)
 
     if isinstance(expr, Variable):
         if expr.size != 1:
             raise ValueError(f"Interval Hessian requires scalar variables; got shape {expr.shape}")
         slot = _var_offset(expr, model)
         val = _variable_scalar_value(expr, box)
-        return _SparseAD(value=val, grad={slot: _ONE}, hess={}, n=n)
+        return _SparseAD(value=val, grad={slot: _ONE}, hess=_H0, n=n)
 
     if isinstance(expr, IndexExpression) and isinstance(expr.base, Variable):
         v = expr.base
@@ -681,7 +875,7 @@ def _impl(expr: Expression, model: Model, box: dict, cache: dict, n: int) -> _Sp
             flat_idx = int(raw_idx)
         slot = _var_offset(v, model) + flat_idx
         val = _indexed_scalar_value(expr, box)
-        return _SparseAD(value=val, grad={slot: _ONE}, hess={}, n=n)
+        return _SparseAD(value=val, grad={slot: _ONE}, hess=_H0, n=n)
 
     # --- Unary ops --------------------------------------------------
     if isinstance(expr, UnaryOp):
@@ -692,7 +886,7 @@ def _impl(expr: Expression, model: Model, box: dict, cache: dict, n: int) -> _Sp
             return _SparseAD(
                 value=-child.value,
                 grad=_dneg(child.grad),
-                hess=_dneg(child.hess),
+                hess=_hneg(child.hess),
                 n=n,
             )
         # |x| is non-smooth at 0 — no sound Hessian.
@@ -711,20 +905,20 @@ def _impl(expr: Expression, model: Model, box: dict, cache: dict, n: int) -> _Sp
 
     if isinstance(expr, SumOverExpression):
         if not expr.terms:
-            return _SparseAD(value=Interval.point(0.0), grad={}, hess={}, n=n)
+            return _SparseAD(value=Interval.point(0.0), grad={}, hess=_H0, n=n)
         result = _walk(expr.terms[0], model, box, cache, n)
         if result.unbounded:
             return _unbounded(n)
         value = result.value
         grad = dict(result.grad)
-        hess = dict(result.hess)
+        hess = result.hess
         for t in expr.terms[1:]:
             other = _walk(t, model, box, cache, n)
             if other.unbounded:
                 return _unbounded(n)
             value = value + other.value
             grad = _dadd(grad, other.grad)
-            hess = _dadd(hess, other.hess)
+            hess = _hadd(hess, other.hess)
         return _SparseAD(value=value, grad=grad, hess=hess, n=n)
 
     return _unbounded(n)
@@ -746,7 +940,7 @@ def _binary(expr: BinaryOp, model: Model, box: dict, cache: dict, n: int) -> _Sp
         return _SparseAD(
             value=left.value + right.value,
             grad=_dadd(left.grad, right.grad),
-            hess=_dadd(left.hess, right.hess),
+            hess=_hadd(left.hess, right.hess),
             n=n,
         )
 
@@ -754,7 +948,7 @@ def _binary(expr: BinaryOp, model: Model, box: dict, cache: dict, n: int) -> _Sp
         return _SparseAD(
             value=left.value - right.value,
             grad=_dsub(left.grad, right.grad),
-            hess=_dsub(left.hess, right.hess),
+            hess=_hsub(left.hess, right.hess),
             n=n,
         )
 
@@ -763,8 +957,8 @@ def _binary(expr: BinaryOp, model: Model, box: dict, cache: dict, n: int) -> _Sp
         # (f g)'' = g f'' + f g'' + f' g'ᵀ + g' f'ᵀ
         fg = left.value * right.value
         grad = _dadd(_dscale(right.value, left.grad), _dscale(left.value, right.grad))
-        hess = _dadd(
-            _dadd(_dscale(right.value, left.hess), _dscale(left.value, right.hess)),
+        hess = _hadd(
+            _hadd(_hscale(right.value, left.hess), _hscale(left.value, right.hess)),
             _sym_cross(left.grad, right.grad),
         )
         # Rank-1 metadata for ``g * g`` (BinaryOp form of squaring) when
@@ -827,16 +1021,16 @@ def _division(expr: BinaryOp, left: _SparseAD, right: _SparseAD, n: int) -> _Spa
     inv_g3 = _ONE / g3
     recip_value = inv_g
     recip_grad = _dscale(-inv_g2, right.grad)
-    recip_hess = _dsub(
-        _dscale(_TWO * inv_g3, _self_outer(right.grad)),
-        _dscale(inv_g2, right.hess),
+    recip_hess = _hsub(
+        _hscale(_TWO * inv_g3, _self_outer(right.grad)),
+        _hscale(inv_g2, right.hess),
     )
 
     # f / g = f * (1/g) — apply product rule.
     fg_val = left.value * recip_value
     fg_grad = _dadd(_dscale(recip_value, left.grad), _dscale(left.value, recip_grad))
-    fg_hess = _dadd(
-        _dadd(_dscale(recip_value, left.hess), _dscale(left.value, recip_hess)),
+    fg_hess = _hadd(
+        _hadd(_hscale(recip_value, left.hess), _hscale(left.value, recip_hess)),
         _sym_cross(left.grad, recip_grad),
     )
     return _SparseAD(value=fg_val, grad=fg_grad, hess=fg_hess, n=n)
@@ -871,7 +1065,7 @@ def _rank1_quotient(left: _SparseAD, right: _SparseAD, n: int) -> _SparseAD:
     v_combined = _dsub(v_g, _dscale(g_over_h, v_h))
     c_combined = _TWO / h
 
-    hess = _dscale(c_combined, _self_outer(v_combined))
+    hess = _hscale(c_combined, _self_outer(v_combined))
 
     # Value and gradient via the standard reciprocal-product rule —
     # tightness on those is not required for the convexity verdict but
@@ -905,7 +1099,7 @@ def _power(expr: BinaryOp, base: _SparseAD, n_vars: int) -> _SparseAD:
     p = float(raw)
 
     if np.isclose(p, 0.0):
-        return _SparseAD(value=_ONE, grad={}, hess={}, n=n_vars)
+        return _SparseAD(value=_ONE, grad={}, hess=_H0, n=n_vars)
     if np.isclose(p, 1.0):
         return base
 
@@ -924,7 +1118,7 @@ def _power(expr: BinaryOp, base: _SparseAD, n_vars: int) -> _SparseAD:
     scaled = _SparseAD(
         value=pt * log_g.value,
         grad=_dscale(pt, log_g.grad),
-        hess=_dscale(pt, log_g.hess),
+        hess=_hscale(pt, log_g.hess),
         n=n_vars,
     )
     return _apply_exp(scaled, n_vars)
@@ -950,7 +1144,7 @@ def _integer_power(base: _SparseAD, p: int, n: int) -> _SparseAD:
     coeff2 = Interval.point(float(p * (p - 1))) * g_pm2
     value = g**p
     grad = _dscale(coeff1, base.grad)
-    hess = _dadd(_dscale(coeff1, base.hess), _dscale(coeff2, _self_outer(base.grad)))
+    hess = _hadd(_hscale(coeff1, base.hess), _hscale(coeff2, _self_outer(base.grad)))
     # Rank-1 metadata: when p == 2 and H_g is identically zero (g is
     # affine), the second-order term ``p g^{p-1} H_g`` vanishes and the
     # Hessian collapses exactly to ``2 · ∇g ∇gᵀ``. Soundness is
@@ -976,9 +1170,9 @@ def _reciprocal_power(base: _SparseAD, k: int, n: int) -> _SparseAD:
     g3 = g2 * g
     value = _ONE / g
     grad = _dscale(-(_ONE / g2), gk.grad)
-    hess = _dsub(
-        _dscale(_TWO / g3, _self_outer(gk.grad)),
-        _dscale(_ONE / g2, gk.hess),
+    hess = _hsub(
+        _hscale(_TWO / g3, _self_outer(gk.grad)),
+        _hscale(_ONE / g2, gk.hess),
     )
     return _SparseAD(value=value, grad=grad, hess=hess, n=n)
 
@@ -1015,7 +1209,7 @@ def _function_call(expr: FunctionCall, model: Model, box: dict, cache: dict, n: 
         d1 = iv.log(g) + _ONE
         inv_g = _ONE / g
         grad = _dscale(d1, arg.grad)
-        hess = _dadd(_dscale(d1, arg.hess), _dscale(inv_g, _self_outer(arg.grad)))
+        hess = _hadd(_hscale(d1, arg.hess), _hscale(inv_g, _self_outer(arg.grad)))
         return _SparseAD(value=iv.entropy(g), grad=grad, hess=hess, n=n)
     if name == "sqrt":
         # sqrt = x^0.5 on the positive domain.
@@ -1028,7 +1222,7 @@ def _function_call(expr: FunctionCall, model: Model, box: dict, cache: dict, n: 
         coeff1 = Interval.point(0.5) * inv_sqrt_g
         coeff2 = Interval.point(-0.25) * inv_sqrt_g3
         grad = _dscale(coeff1, arg.grad)
-        hess = _dadd(_dscale(coeff1, arg.hess), _dscale(coeff2, _self_outer(arg.grad)))
+        hess = _hadd(_hscale(coeff1, arg.hess), _hscale(coeff2, _self_outer(arg.grad)))
         return _SparseAD(value=sqrt_g, grad=grad, hess=hess, n=n)
     # Other atoms (trig, abs, cosh, ...) are unsupported by the v1
     # certificate; return unbounded to force abstention.
@@ -1046,7 +1240,7 @@ def _apply_exp(arg: _SparseAD, n: int) -> _SparseAD:
         return _unbounded(n)
     e = iv.exp(arg.value)
     grad = _dscale(e, arg.grad)
-    hess = _dscale(e, _dadd(arg.hess, _self_outer(arg.grad)))
+    hess = _hscale(e, _hadd(arg.hess, _self_outer(arg.grad)))
     return _SparseAD(value=e, grad=grad, hess=hess, n=n)
 
 
@@ -1066,7 +1260,7 @@ def _apply_log(arg: _SparseAD, n: int) -> _SparseAD:
     inv_g2 = inv_g * inv_g
     value = iv.log(g)
     grad = _dscale(inv_g, arg.grad)
-    hess = _dsub(_dscale(inv_g, arg.hess), _dscale(inv_g2, _self_outer(arg.grad)))
+    hess = _hsub(_hscale(inv_g, arg.hess), _hscale(inv_g2, _self_outer(arg.grad)))
     return _SparseAD(value=value, grad=grad, hess=hess, n=n)
 
 
@@ -1088,7 +1282,7 @@ def _apply_sin(arg: _SparseAD, n: int) -> _SparseAD:
     sin_g = iv.sin(g)
     cos_g = iv.cos(g)
     grad = _dscale(cos_g, arg.grad)
-    hess = _dsub(_dscale(cos_g, arg.hess), _dscale(sin_g, _self_outer(arg.grad)))
+    hess = _hsub(_hscale(cos_g, arg.hess), _hscale(sin_g, _self_outer(arg.grad)))
     return _SparseAD(value=sin_g, grad=grad, hess=hess, n=n)
 
 
@@ -1106,7 +1300,7 @@ def _apply_cos(arg: _SparseAD, n: int) -> _SparseAD:
     cos_g = iv.cos(g)
     neg_sin_g = Interval.point(-1.0) * sin_g
     grad = _dscale(neg_sin_g, arg.grad)
-    hess = _dsub(_dscale(neg_sin_g, arg.hess), _dscale(cos_g, _self_outer(arg.grad)))
+    hess = _hsub(_hscale(neg_sin_g, arg.hess), _hscale(cos_g, _self_outer(arg.grad)))
     return _SparseAD(value=cos_g, grad=grad, hess=hess, n=n)
 
 
@@ -1126,9 +1320,9 @@ def _apply_tan(arg: _SparseAD, n: int) -> _SparseAD:
     tan_g = iv.tan(g)
     sec2 = Interval.point(1.0) + tan_g * tan_g
     grad = _dscale(sec2, arg.grad)
-    hess = _dadd(
-        _dscale(sec2, arg.hess),
-        _dscale(Interval.point(2.0) * tan_g * sec2, _self_outer(arg.grad)),
+    hess = _hadd(
+        _hscale(sec2, arg.hess),
+        _hscale(Interval.point(2.0) * tan_g * sec2, _self_outer(arg.grad)),
     )
     return _SparseAD(value=tan_g, grad=grad, hess=hess, n=n)
 
