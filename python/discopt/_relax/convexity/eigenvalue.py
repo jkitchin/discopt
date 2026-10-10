@@ -313,6 +313,103 @@ def psd_certified(Q) -> bool:
     return bool(exact_psd(S, budget=PSD_PROVED_EXACT_BUDGET))
 
 
+def _gamma(k: int) -> float:
+    """Higham's ``gamma_k = k u / (1 - k u)``; ``inf`` once ``k u >= 1/2``."""
+    ku = float(k) * _UNIT_ROUNDOFF
+    return ku / (1.0 - ku) if ku < 0.5 else float("inf")
+
+
+def rigorous_psd_shift(Q, *, max_attempts: int = 40) -> Optional[float]:
+    """A rigorous ``delta >= 0`` with ``lambda_min(S) >= -delta``, or ``None`` (#1682).
+
+    ``S = (Q + Q')/2`` is the exact symmetric part of the float matrix ``Q``. The
+    computed spectrum is used only to *choose* a shift; the proof does not rest on
+    any LAPACK accuracy constant. For a float shift ``s``:
+
+    1. ``B = fl(S_c + s I)`` with ``S_c = fl((Q + Q')/2)``, and ``L =
+       cholesky(B)``. ``L L'`` is exactly PSD -- it is the Gram matrix of the
+       float matrix ``L`` -- whatever accuracy the factorization had.
+    2. ``S + s I = L L' + E`` with ``E = (S - S_c) + (S_c + s I - B) + (B - P) +
+       (P - L L')`` and ``P = fl(L L')``. Weyl gives ``lambda_min(S) >= -s -
+       ||E||_2`` and ``||E||_2 <= ||E||_F``, bounded term by term:
+
+       * ``|S - S_c| <= u |S_c| (1+u)`` (one rounded addition; halving is exact);
+       * ``S_c + s I - B`` is diagonal, ``<= u max|B_ii| (1+u)``;
+       * ``B - P = E_c (1 + theta)``, ``|theta| <= u``, with ``E_c = fl(B - P)``,
+         so ``||B - P||_F <= ||E_c||_F / (1 - u)``;
+       * ``|P - L L'| <= gamma_n |L| |L'|`` entrywise -- Higham, *Accuracy and
+         Stability of Numerical Algorithms* (2002) eq. (3.13), valid for ANY
+         summation order (blocked BLAS, FMA), so it does not depend on how numpy
+         multiplied. ``|L||L'|`` is itself computed in float from nonnegative
+         terms, so its true value is at most ``fl(.) / (1 - gamma_n)``.
+
+       Every Frobenius norm is a nonnegative sum of ``N = n**2`` squares plus a
+       square root; it is inflated by ``1/(1 - gamma_{N+2})``, and the final sum
+       by a further relative ``8u`` plus a ``1e-290`` floor for underflow.
+
+    Shifts ``s = max(-lambda_min_c, 0) + t`` are tried with ``t = u ||S_c||_F``
+    doubling until the factorization succeeds; the first success is returned. The
+    proof's own error term is ``~ n u ||S||`` (the a-priori ``gamma_n`` bound
+    dominates the measured residual by ~40x on the #1682 matrices), so a larger
+    starting ``t`` only adds to ``delta``.
+    ``None`` -- no proof -- on non-finite input or when no attempt factors.
+    """
+    import scipy.sparse as sp
+
+    if sp.issparse(Q):
+        Qa = sp.csr_matrix(Q, dtype=np.float64).toarray()
+    else:
+        Qa = np.asarray(Q, dtype=np.float64)
+    if Qa.ndim != 2 or Qa.shape[0] != Qa.shape[1] or not np.all(np.isfinite(Qa)):
+        return None
+    n = Qa.shape[0]
+    if n == 0:
+        return 0.0
+    S = 0.5 * (Qa + Qa.T)
+    u = _UNIT_ROUNDOFF
+    N = n * n
+    g_norm = _gamma(N + 2)
+    g_n = _gamma(n)
+    if not (np.isfinite(g_norm) and np.isfinite(g_n)):
+        return None
+    inflate = 1.0 / (1.0 - g_norm)
+    nrm_S = float(np.linalg.norm(S, "fro")) * inflate
+    if not np.isfinite(nrm_S):
+        return None
+    if nrm_S == 0.0:
+        return 0.0
+    lam = float(np.linalg.eigvalsh(S)[0])
+    base = max(-lam, 0.0)
+    t = u * nrm_S
+    for _ in range(max_attempts):
+        s = base + t
+        B = S.copy()
+        B[np.diag_indices(n)] += s
+        try:
+            L = np.linalg.cholesky(B)
+        except np.linalg.LinAlgError:
+            t *= 2.0
+            continue
+        if not np.all(np.isfinite(L)):
+            t *= 2.0
+            continue
+        P = L @ L.T
+        E_c = B - P
+        absL = np.abs(L)
+        M = absL @ absL.T
+        r = (
+            u * (1.0 + u) * nrm_S
+            + u * (1.0 + u) * float(np.max(np.abs(np.diag(B))))
+            + float(np.linalg.norm(E_c, "fro")) * inflate / (1.0 - u)
+            + g_n / (1.0 - g_n) * float(np.linalg.norm(M, "fro")) * inflate
+        )
+        delta = (s + r) * (1.0 + 8.0 * u) + 1e-290
+        if np.isfinite(delta):
+            return float(delta)
+        return None
+    return None
+
+
 def interval_magnitude(H: Interval) -> float:
     """Frobenius norm of the entry-wise absolute supremum of an interval matrix.
 
@@ -580,5 +677,6 @@ __all__ = [
     "gershgorin_certifies_nsd",
     "psd_2x2_sufficient",
     "psd_decision_slack",
+    "rigorous_psd_shift",
     "interval_magnitude",
 ]
