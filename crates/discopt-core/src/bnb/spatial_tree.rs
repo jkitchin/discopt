@@ -119,7 +119,22 @@ pub enum TreeStatus {
 /// — which is exactly how a fathom looser than the certificate becomes a false
 /// `Optimal`.
 ///
-/// Purely ABSOLUTE, as this kernel has always been. #1243 briefly gave it a
+/// The test is three clauses, all of which must hold:
+/// `inc - bound <= gap_tol` AND (`inc - bound <= abs_gap_tol` OR
+/// `inc - bound <= rel_gap_tol * max(|inc_pub|, |bound_pub|)`). What a caller's
+/// `gap_tolerance` means therefore depends on how `solver.py` fills the fields
+/// (#1615 D-12, #1678):
+///
+/// - `gap_tolerance <= 1e-4` (the default or tighter): `gap_tol = gap_tolerance`
+///   (or `min` with `abs_gap_tolerance`), so the stop is ABSOLUTE at
+///   `gap_tolerance`, further conjoined with the relative clause below unit
+///   objective magnitude (#1263).
+/// - `gap_tolerance > 1e-4` (an explicit loosening): `gap_tol = 1e300`, so the
+///   first clause is vacuous for any finite bound and the stop is the Python
+///   tree's disjunction — absolute `abs_gap_tol` OR RELATIVE `gap_tolerance`.
+///
+/// History of the absolute clause below. The kernel was purely absolute
+/// before #1263/#1615; #1243 briefly gave it a
 /// relative second arm so it would match the Python tree's disjunction; that was
 /// reverted, because the relative arm never existed here and adding one can only
 /// LOOSEN the fathom — a caller tightening `abs_gap_tolerance` would have

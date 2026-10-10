@@ -455,6 +455,11 @@ def _assert_convex_le(d: _Decomp, lb, ub) -> None:
                 raise NotConvexKernel(f"perspective log1p argument out of domain ({lo:.3g})")
 
 
+#: #1678: this route returns from ``Model.solve`` before ``solve_model``, so it
+#: names itself; it used to publish ``algorithm_route=None``.
+_ROUTE = "convex-kernel: discopt Rust convex LP-OA branch-and-cut kernel (big-M)"
+
+
 def build_convex_spec(model, bounds=None) -> Optional[dict]:
     """Marshal `model` into the flat arrays for `solve_convex_tree_py`, or `None`.
 
@@ -473,6 +478,11 @@ def _build(model, bounds) -> dict:
     from discopt.modeling.core import VarType
     from discopt.transformations import get as _get_transformation
 
+    # Big-M is not a hard-coded override of the caller's choice (#1678): the one
+    # caller, ``Model.solve``, enters this kernel only when ``gdp_method`` is
+    # ``"big-m"`` (its default), so this IS the requested lowering. Per-disjunction
+    # ``method=`` overrides are still honoured (``respect_disjunction_methods``
+    # defaults to True). ``gdp_method="hull"``/``"loa"``/... never reach here.
     m = _get_transformation("gdp").apply(model, method="big-m")
     lb, ub = flat_variable_bounds(m)
     n = len(lb)
@@ -1334,7 +1344,13 @@ def _attempt_convex_solve(
     inc_x = np.asarray(r["incumbent_x"], float)
 
     if r["status"] == "infeasible":
-        return SolveResult(status="infeasible", bound=r["bound"], wall_time=wall, nlp_bb=False)
+        return SolveResult(
+            status="infeasible",
+            bound=r["bound"],
+            wall_time=wall,
+            nlp_bb=False,
+            algorithm_route=_ROUTE,
+        )
     # Use the kernel result ONLY when it CERTIFIED optimality within budget; any
     # limit / feasible-only / no-incumbent outcome defers to the default path, which
     # then gets the caller's budget MINUS what this attempt just spent (#911).
@@ -1403,6 +1419,7 @@ def _attempt_convex_solve(
         node_count=int(r["node_count"]),
         gap_certified=(status == "optimal"),
         nlp_bb=False,
+        algorithm_route=_ROUTE,
     )
 
 

@@ -55,7 +55,9 @@ def solve_gdpopt_loa(
         NLP solver backend for subproblems (``"ipm"``, ``"pounce"``, ``"ipopt"``).
     milp_solver : str
         MILP backend for LOA master problems: ``"auto"``, ``"pounce"``,
-        ``"simplex"``, or ``"gurobi"`` (HiGHS was removed, issue #356).
+        ``"simplex"``, ``"highs"`` or ``"gurobi"``. ``"highs"`` is an explicit
+        opt-in only (#356 took HiGHS off the default MILP path; #1060 restored
+        it as a named master engine); ``"auto"`` never selects it.
 
     Returns
     -------
@@ -296,6 +298,7 @@ def solve_gdpopt_loa(
 
         if x_nlp is not None:
             solved_int_configs.add(master_config)
+            x_nlp = _repair_incumbent(reformulated, evaluator, x_nlp)
             obj_nlp = float(evaluator.evaluate_objective(x_nlp))
             if obj_nlp < UB:
                 UB = obj_nlp
@@ -443,6 +446,40 @@ def solve_gdpopt_loa(
         wall_time=wall_time,
         gap_certified=False,
     )
+
+
+def _repair_incumbent(reformulated: Model, evaluator, x: np.ndarray) -> np.ndarray:
+    """The NLP subproblem point, repaired onto its rows when that verifies (#1678).
+
+    The fixed-integer NLP converges to its working accuracy, and on the big-M
+    reformulation a residual of ~1e-8 relative to a row's term scale is enough to
+    buy an objective BELOW the master's valid dual bound (measured: a convex
+    process-selection GDP with unit capacity 100 returned an incumbent 1.2e-5 under
+    the bound, which :func:`optimality_gap` correctly reads as a crossed, unclosed
+    gap, so LOA reported ``feasible``; ``Model.solve`` then repaired the point onto
+    an objective that closes the gap but, being downgrade-only, never restored
+    ``optimal``; at capacity 1e4 the published point also failed the declared
+    disjunction and logged UNVERIFIED CERTIFICATE).
+
+    :func:`~discopt.validation.feasibility.repair_point` takes minimum-norm Newton
+    steps onto the violated rows with integer columns frozen, so the disjunct rows
+    the master's assignment activates are met to float noise. The repaired point is
+    adopted only if :func:`~discopt.validation.feasibility.verify_point` accepts it
+    on the reformulated model; otherwise the raw point is kept and judged exactly as
+    before. Only the incumbent moves -- the dual bound is untouched -- and its
+    objective is re-evaluated at the repaired point, so ``UB`` can only become more
+    honest (it rises by what the residual had bought).
+    """
+    from discopt.validation.feasibility import repair_point, verify_point
+
+    rep = repair_point(reformulated, x, evaluator=evaluator)
+    if rep.x is None:
+        logger.debug("LOA: incumbent repair declined (%s)", rep.reason)
+        return x
+    if not verify_point(reformulated, rep.x, evaluator=evaluator).ok:
+        logger.debug("LOA: repaired incumbent did not verify; keeping the raw point")
+        return x
+    return np.asarray(rep.x, dtype=np.float64)
 
 
 def _compute_gap(lb: float, ub: float) -> float:

@@ -7010,6 +7010,36 @@ def _warn_abs_gap_not_loosened(abs_gap_tolerance: Optional[float], gap_tolerance
     )
 
 
+def _warn_native_kernel_bypassed(options: list[str]) -> None:
+    """Say so when a search option moves a spatial solve off the native kernel (#1678).
+
+    The native Rust kernel (default ON) runs its own fixed best-first search and calls
+    no node callback, so ``_native_kernel_feature_safe`` routes a solve that sets
+    ``strategy``, ``rlt``, ``partitions``, ``presolve=False``,
+    ``in_tree_presolve_stride``, ``obbt_at_root=False`` or ``node_callback`` to the
+    Python tree, which honours them. That is sound -- the Python tree is the trusted
+    path -- but it changes the engine, its node counts, its gap-tolerance semantics
+    (the kernel stops absolutely at ``gap_tolerance <= 1e-4``; the Python tree uses
+    absolute-OR-relative) and usually its wall time, and the caller was told nothing.
+    Silent when the kernel is opted out (``DISCOPT_NATIVE_SPATIAL_KERNEL=0``), since
+    then nothing moved.
+    """
+    if not options or not _native_spatial_kernel_enabled():
+        return
+    import warnings
+
+    warnings.warn(
+        "Option(s) "
+        + ", ".join(options)
+        + " are not supported by the native spatial branch-and-bound kernel, so this "
+        "solve runs on the Python spatial tree instead (algorithm_route "
+        "'spatial-bb: ... (Python tree)'). Node counts, wall time and the gap-tolerance "
+        "test (absolute-or-relative rather than the kernel's absolute stop) can differ "
+        "from a solve without these options.",
+        stacklevel=3,
+    )
+
+
 #: ``solve_model``'s ``gap_tolerance`` default; a larger value is an explicit request
 #: to stop earlier on the relative gap.
 _DEFAULT_REL_GAP_TOL = 1e-4
@@ -12778,6 +12808,10 @@ def solve_model(
         if _amp_x0 is not None:
             amp_kwargs["initial_point"] = _amp_x0
 
+        # #1678: every route names itself (#1614); AMP returned
+        # ``algorithm_route=None``. ``_stamp_layer_timing`` only fills a gap, so a
+        # more specific string set inside AMP still wins.
+        _declare_route("amp: adaptive multivariate partitioning (MILP relaxation + local NLP)")
         return solve_amp(
             model,
             time_limit=time_limit,
@@ -13133,6 +13167,7 @@ def solve_model(
         if "milp_solver" in kwargs:
             loa_kwargs["milp_solver"] = kwargs.pop("milp_solver")
 
+        _declare_route("gdpopt-loa: logic-based outer approximation (MILP master + NLP)")
         return solve_gdpopt_loa(
             model,
             time_limit=time_limit,
@@ -15333,6 +15368,17 @@ def solve_model(
     _native_budget_spent = (
         _native_setup_deadline is not None and time.perf_counter() >= _native_setup_deadline
     )
+    _native_search_levers = _native_kernel_ignored_levers(
+        strategy=strategy,
+        rlt=rlt,
+        partitions=partitions,
+        presolve=presolve,
+        in_tree_presolve_stride=in_tree_presolve_stride,
+        kwargs=kwargs,
+    )
+    _warn_native_kernel_bypassed(
+        _native_search_levers + (["node_callback"] if node_callback is not None else [])
+    )
     if not _native_budget_spent and _native_kernel_feature_safe(
         mccormick_bounds=mccormick_bounds,
         initial_point=initial_point,
@@ -15340,14 +15386,7 @@ def solve_model(
         incumbent_callback=incumbent_callback,
         node_callback=node_callback,
         kwargs=kwargs,
-        search_levers=_native_kernel_ignored_levers(
-            strategy=strategy,
-            rlt=rlt,
-            partitions=partitions,
-            presolve=presolve,
-            in_tree_presolve_stride=in_tree_presolve_stride,
-            kwargs=kwargs,
-        ),
+        search_levers=_native_search_levers,
     ):
         _native_result = _try_native_spatial_kernel(
             model,
@@ -23048,7 +23087,11 @@ def _solve_continuous(
         if not passes_false_primal_screen(evaluator, np.asarray(nlp_result.x, dtype=np.float64)):
             logger.warning(
                 "continuous NLP returned an infeasible point (status=%s, obj=%s); "
-                "withholding the incumbent — no feasible solution was found.",
+                "withholding the incumbent — no feasible solution was found. "
+                "result.x is None; the final iterate is in result.last_iterate "
+                "(max violation in result.last_iterate_violation). It is a primal "
+                "point only (no multipliers or barrier state), so restarting from "
+                "it is a cold primal start, not a warm restart.",
                 status,
                 obj_val,
             )

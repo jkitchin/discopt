@@ -4558,6 +4558,16 @@ class SolveResult:
     # certificate) is derived from it. ``last_iterate_violation`` is its max
     # constraint/bound violation in the declared model. ``None`` when ``x`` was
     # reported, or the route keeps no iterate.
+    #
+    # #1678 (contract decided): ``x`` is NEVER the withheld iterate. ``x`` is the
+    # incumbent -- a point that passed the feasibility screen -- and a caller who
+    # reads ``res.x`` after a ``max_iter``/time stop must not be handed an
+    # infeasible point as a solution. ``last_iterate`` carries primal values only:
+    # no multipliers, slacks or barrier parameter, so ``initial_point=
+    # res.last_iterate`` is a cold primal start from an infeasible point and can
+    # fail on a hard NLP where a true warm restart (shifted bounds plus
+    # multipliers) would not. The solver logs a warning naming this field when it
+    # withholds ``x``.
     last_iterate: Optional[dict[str, np.ndarray]] = None
     last_iterate_violation: Optional[float] = None
 
