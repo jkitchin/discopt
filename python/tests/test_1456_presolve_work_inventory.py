@@ -299,6 +299,10 @@ _BUDGET_HOME = {
     "_MAX_EXPAND_OPS": "discopt._relax.binary_multilinear_reform",
     "_MAX_MONOMIALS": "discopt._relax.binary_multilinear_reform",
     "_DISTRIBUTE_TERM_BUDGET": "discopt._relax.term_classifier",
+    # The per-PASS distribution budget: what a pass that distributes every body
+    # of the model may spend in total (#1456, johnall: 191 bodies x the per-call
+    # budget each).
+    "_MODEL_DISTRIBUTE_TERM_BUDGET": "discopt._relax.term_classifier",
     "_FBBT_MAX_ITER": "discopt._relax.disjunctive_config_bound",
     # Not a work count: the #1456 outer-loop deadline. A row may name it
     # ALONGSIDE a work budget (never instead of one) when the budget bounds
@@ -368,11 +372,43 @@ INVENTORY: tuple[tuple[str, str, str, str], ...] = (
         "bounded",
         "_DISTRIBUTE_TERM_BUDGET, PresolveDeadline",
     ),
+    # Bounded per call AND per pass: ``_DISTRIBUTE_TERM_BUDGET`` alone let the
+    # Python route spend 191 x 1 M terms on johnall's unreformed model (the hang
+    # #1456 moved to once the integer detectors were gated); it now distributes
+    # through ``distribute_bodies``.
     (
         "discopt._relax.term_classifier",
         "classify_nonlinear_terms",
         "bounded",
-        "_DISTRIBUTE_TERM_BUDGET",
+        "_DISTRIBUTE_TERM_BUDGET,_MODEL_DISTRIBUTE_TERM_BUDGET",
+    ),
+    # The integer-product detectors distribute and walk every body of the model;
+    # that whole-model distribution is their cost, and each entry point abstains
+    # ("nothing to do", model unchanged) when it exceeds the per-pass budget
+    # (johnall: ``has_nonconvex_integer_bilinear`` never returned at T=10).
+    (
+        "discopt._relax.integer_product_reform",
+        "has_integer_multilinear_reformulation_work",
+        "bounded",
+        "_MODEL_DISTRIBUTE_TERM_BUDGET",
+    ),
+    (
+        "discopt._relax.integer_product_reform",
+        "has_nonconvex_integer_bilinear",
+        "bounded",
+        "_MODEL_DISTRIBUTE_TERM_BUDGET",
+    ),
+    (
+        "discopt._relax.integer_product_reform",
+        "reformulate_integer_bilinear",
+        "bounded",
+        "_MODEL_DISTRIBUTE_TERM_BUDGET",
+    ),
+    (
+        "discopt._relax.integer_product_reform",
+        "reformulate_integer_multilinear",
+        "bounded",
+        "_MODEL_DISTRIBUTE_TERM_BUDGET",
     ),
     # --- wall: role 2, recorded in the #912 inventory -------------------------
     ("discopt._relax.nonlinear_bound_tightening", "tighten_nonlinear_bounds", "wall", "NBT"),
@@ -442,20 +478,6 @@ INVENTORY: tuple[tuple[str, str, str, str], ...] = (
     ("discopt._relax.convexity.signomial_global", "classify_signomial_global", "residual", ""),
     ("discopt._relax.factorable_reform", "canonicalize_entropy", "residual", "entry-gated #1456"),
     ("discopt._relax.gdp_reformulate", "reformulate_gdp", "residual", ""),
-    (
-        "discopt._relax.integer_product_reform",
-        "has_integer_multilinear_reformulation_work",
-        "residual",
-        "",
-    ),
-    (
-        "discopt._relax.integer_product_reform",
-        "has_nonconvex_integer_bilinear",
-        "residual",
-        "entry-gated #1456",
-    ),
-    ("discopt._relax.integer_product_reform", "reformulate_integer_bilinear", "residual", ""),
-    ("discopt._relax.integer_product_reform", "reformulate_integer_multilinear", "residual", ""),
     ("discopt._relax.objective_epigraph", "relax_objective_defining_equality", "residual", ""),
     ("discopt._relax.presolve_pipeline", "propagate_bounds_to_model", "residual", ""),
     ("discopt._relax.problem_classifier", "classify_problem", "residual", ""),
@@ -698,19 +720,22 @@ def test_residual_count_is_visible():
     pass, never by reclassifying one without a measurement.
     """
     residual = sorted(k for k, c in _CATEGORY.items() if c == "residual")
-    assert len(residual) == 17, (
-        f"the #1456 role-3 backlog changed ({len(residual)} entries, expected 17).\n"
+    assert len(residual) == 13, (
+        f"the #1456 role-3 backlog changed ({len(residual)} entries, expected 13).\n"
         "Bounding one: drop this number and re-categorise the row `bounded` with "
         "its budget symbol.\nAdding one: bound it instead.\n"
         + "\n".join(f"  {m}.{n}" for m, n in residual)
     )
 
 
-def test_the_four_budget_free_modules_are_all_recorded_residual():
-    """The four modules measured to contain no bound of any kind must not be
-    sitting in the inventory under a category that excuses them."""
+def test_the_budget_free_modules_are_all_recorded_residual():
+    """The modules measured to contain no bound of any kind must not be
+    sitting in the inventory under a category that excuses them.
+
+    ``integer_product_reform`` was the fourth until #1456 gated its detectors on
+    ``_MODEL_DISTRIBUTE_TERM_BUDGET``; its rows are ``bounded`` on that symbol
+    now, which ``test_bounded_rows_name_a_live_budget`` verifies."""
     budget_free = {
-        "discopt._relax.integer_product_reform",
         "discopt._relax.gdp_reformulate",
         "discopt._relax.symbolic.cut_recognizer",
         "discopt._relax.convexity.signomial_global",
@@ -726,4 +751,4 @@ def test_the_four_budget_free_modules_are_all_recorded_residual():
         if cat == "bounded":  # pragma: no cover - guarded by the assert above
             pytest.fail("unreachable")
         checked += 1
-    assert checked >= 6, f"only checked {checked} rows from the budget-free modules"
+    assert checked >= 4, f"only checked {checked} rows from the budget-free modules"

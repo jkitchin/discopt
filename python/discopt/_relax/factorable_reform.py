@@ -753,10 +753,22 @@ def _is_integer_valued_affine(expr: Expression) -> bool:
 
 
 def _collect_mul_factors(expr: Expression) -> list[Expression]:
-    """Flatten a left/right-nested ``*`` chain into its factor list."""
-    if isinstance(expr, BinaryOp) and expr.op == "*":
-        return _collect_mul_factors(expr.left) + _collect_mul_factors(expr.right)
-    return [expr]
+    """Flatten a left/right-nested ``*`` chain into its factor list.
+
+    Left-to-right order, iterative and linear in the chain length (#1456): the
+    recursive ``left + right`` list concatenation was quadratic in it, and the
+    walkers that call this at every ``*`` node of a chain made it cubic.
+    """
+    out: list[Expression] = []
+    stack = [expr]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, BinaryOp) and node.op == "*":
+            stack.append(node.right)
+            stack.append(node.left)
+        else:
+            out.append(node)
+    return out
 
 
 def _lift_affine_monomials_enabled() -> bool:
