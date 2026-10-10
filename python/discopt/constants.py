@@ -29,13 +29,14 @@ CONSTRAINT_INF: float = 1e20
 # ---------------------------------------------------------------------------
 # Default box for a variable declared with no bounds.
 #
-# Deliberately just BELOW ``CONSTRAINT_INF`` (#850): the exact simplex, whose
-# infinity threshold is 1e20, honours a bound of this magnitude as FINITE and
-# certifies ``optimal`` at the corner, where a bound at or beyond 1e20 is read
-# as a true infinity and yields ``unbounded``. The two values therefore sit on
-# opposite sides of the single threshold that decides which certificate a
-# caller gets, and must never be conflated when reporting a bound back to them
-# (#1387).
+# Deliberately just BELOW ``CONSTRAINT_INF`` (#850), so the box is a finite
+# number every engine can carry. It is *read* as "no bound" (#1678 b): the
+# LP/MILP routes hand a side of this magnitude to their engines as the 1e20
+# infinity (so ``min -x`` is proved ``unbounded``), and
+# ``Model._withhold_default_box_certificate`` refuses any certificate whose
+# point sits on it. A declared bound below it, however large, is finite as
+# posed. Reports still distinguish it from ``CONSTRAINT_INF`` (#1387): it tells
+# the user they declared no bound, not that they wrote 1e20.
 # ---------------------------------------------------------------------------
 DEFAULT_VARIABLE_BOUND: float = 9.999e19
 

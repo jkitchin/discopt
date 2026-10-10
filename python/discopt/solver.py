@@ -7466,10 +7466,10 @@ def _check_finite_bounds(model: Model, tightening=None) -> None:
         if any("[default]" in entry for entry in bad_vars):
             default_note = (
                 f"A bound marked [default] is the box applied to a column you declared "
-                f"with no bounds: {DEFAULT_VARIABLE_BOUND:.6g}, which is FINITE (it sits "
-                f"just below the {_CONSTRAINT_INF:.6g} infinity sentinel), so the solve "
-                f"can return a certified 'optimal' sitting on that corner rather than "
-                f"'unbounded'."
+                f"with no bounds ({DEFAULT_VARIABLE_BOUND:.6g}). discopt reads it as 'no "
+                f"bound' (#1678): an LP/MILP that runs off along it is proved 'unbounded', "
+                f"and any other result whose point sits on it is reported 'feasible' with "
+                f"no dual bound, never a certified 'optimal' at that corner."
             )
         parts = [
             f"Variables with very large or infinite declared bounds: {', '.join(bad_vars[:5])}.",
@@ -23652,11 +23652,10 @@ def _solve_pounce_route(
                     wall_time=wall,
                     error=(
                         "POUNCE reported the problem unbounded, but it treats a declared "
-                        "bound of magnitude >= 1e15 (including the 9.999e19 default box "
-                        "of a variable declared without bounds) as infinite, so over the "
-                        "box as declared the optimum may sit at that corner instead. "
-                        "Give the unbounded variables explicit infinite bounds "
-                        "(lb=-numpy.inf / ub=numpy.inf) or realistic finite ones."
+                        "bound of magnitude in [1e15, 1e20) as infinite, so over the box "
+                        "as declared the optimum may sit at that corner instead. Give "
+                        "the unbounded variables no bound (or lb=-numpy.inf / "
+                        "ub=numpy.inf) or realistic finite ones."
                     ),
                 )
             elif outcome is None:
@@ -27702,12 +27701,15 @@ def _solve_lp_matrix(
         lp_data = extract_lp_data(model)
     n_orig = sum(v.size for v in model._variables)
 
-    bounds = list(
-        zip(
-            np.asarray(lp_data.x_l[:n_orig]).tolist(),
-            np.asarray(lp_data.x_u[:n_orig]).tolist(),
-        )
-    )
+    # #1678 (b): a side at the default box magnitude means "no bound" -- handed on
+    # as the 1e20 infinity, as ``_highs_std_form`` does for the default route, so
+    # the engines here prove ``unbounded`` instead of certifying the corner.
+    _default_side = DEFAULT_VARIABLE_BOUND * (1.0 - 1e-12)
+    _xl = np.array(lp_data.x_l[:n_orig], dtype=np.float64)
+    _xu = np.array(lp_data.x_u[:n_orig], dtype=np.float64)
+    _xl[_xl <= -_default_side] = -_CONSTRAINT_INF
+    _xu[_xu >= _default_side] = _CONSTRAINT_INF
+    bounds = list(zip(_xl.tolist(), _xu.tolist()))
 
     # A rung that cannot emit COO (the tape / autodiff fallbacks) still returns a
     # dense array; ``_dense_A`` validates it and CSR keeps the rest of this
@@ -32231,9 +32233,19 @@ def _highs_std_form(model: Model):
         A = _sp.csc_matrix((0, c.shape[0]))
     elif not _sp.issparse(A):
         A = _dense_A(A)
-    sf = StdForm.from_arrays(
-        c, A, lp_data.b_eq, lp_data.x_l, lp_data.x_u, float(lp_data.obj_const), int_idx
-    )
+    # #1678 (b): a structural side at the default box magnitude is the model's
+    # stand-in for "no bound" (see ``Model._withhold_default_box_certificate``), so
+    # HiGHS gets it as open. ``min -x`` over ``x >= 0`` is then proved ``unbounded``
+    # by a verified ray, not certified ``optimal`` at the invented 9.999e19 corner.
+    # An explicit finite side below the default, however large, passes through.
+    from discopt.solvers.lp_milp_highs import INF as _HIGHS_INF
+
+    x_l = np.array(lp_data.x_l, dtype=np.float64).ravel()
+    x_u = np.array(lp_data.x_u, dtype=np.float64).ravel()
+    _default_side = DEFAULT_VARIABLE_BOUND * (1.0 - 1e-12)
+    x_l[:n_orig][x_l[:n_orig] <= -_default_side] = -_HIGHS_INF
+    x_u[:n_orig][x_u[:n_orig] >= _default_side] = _HIGHS_INF
+    sf = StdForm.from_arrays(c, A, lp_data.b_eq, x_l, x_u, float(lp_data.obj_const), int_idx)
     if sf.n < n_orig:
         raise ValueError(f"standard form has {sf.n} columns for {n_orig} model variables")
     return lp_data, n_orig, sf

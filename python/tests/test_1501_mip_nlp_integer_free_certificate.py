@@ -270,18 +270,17 @@ def test_warm_start_is_completed_for_the_lifted_columns(monkeypatch):
 @pytest.mark.parametrize("method, profile", _ALL_METHODS)
 @pytest.mark.parametrize("build", [_unbounded_min, _unbounded_max], ids=lambda f: f.__name__)
 def test_default_box_lp_matches_the_default_route(build, method, profile):
-    """A column declared with no bounds lives in the documented default box
-    (+-9.999e19, #850): the certified answer is ``optimal`` at the corner, which is
-    what the default route reports -- ``unbounded`` there would be a false
-    certificate (#937). mip-nlp returned ``no_feasible_point`` (``infeasible``
-    before b0dd7bb)."""
+    """A column declared with no bounds lives in the default box (+-9.999e19),
+    which since #1678 (b) means "no bound": the LP is ``unbounded``, as on the
+    default route (#850 had certified ``optimal`` at the corner). mip-nlp returned
+    ``no_feasible_point`` (``infeasible`` before b0dd7bb)."""
     m, _ = build()
     ref = m.solve(time_limit=15)
     m2, _ = build()
     r = _solve(m2, method, profile)
     assert (r.status, r.gap_certified) == (ref.status, ref.gap_certified)
-    assert r.status == "optimal"
-    assert r.objective == pytest.approx(ref.objective, rel=1e-12)
+    assert r.status == "unbounded"
+    assert r.objective is None and r.x is None
 
 
 @pytest.mark.parametrize("method, profile", _ALL_METHODS)

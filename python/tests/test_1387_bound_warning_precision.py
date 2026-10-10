@@ -3,11 +3,11 @@
 ``_format_bad_bound_entries`` formatted with ``%.2g``, so the default continuous
 box ``-9.999e19`` printed as ``-1e+20`` -- the ``CONSTRAINT_INF`` sentinel. Those
 two magnitudes sit on opposite sides of the one threshold that decides which
-certificate a caller gets (#850): a bound below 1e20 is honoured as finite and
-yields ``optimal`` at the corner, a bound at or beyond it is a true infinity and
-yields ``unbounded``. A caller who gets ``optimal`` at ``-9.999e+19`` from an
-unbounded-looking column reads this warning to find out why, and was told the
-bound was the sentinel.
+certificate a caller gets (#850): an explicit bound below 1e20 is honoured as
+finite and yields ``optimal`` at the corner. The default box itself has been read
+as "no bound" since #1678 (b), so it yields ``unbounded`` (or an uncertified
+``feasible``). A caller reads this warning to find out which of the two their
+column got, and was told the bound was the sentinel.
 
 These tests assert the *distinguishability* -- that three materially different
 bound magnitudes produce three different strings -- rather than pinning the
@@ -104,11 +104,13 @@ def test_an_explicit_bound_is_not_labelled_default():
 
 
 @pytest.mark.smoke
-def test_the_certificate_this_warning_explains_is_unchanged():
-    """#1387 is a diagnostics fix; the #850 certificate it describes still stands."""
+def test_the_certificate_this_warning_explains():
+    """The certificate the warning describes: since #1678 (b) the default box is
+    read as "no bound", so ``min x`` over a free column is proved ``unbounded``
+    rather than certified ``optimal`` at ``-9.999e19`` (the #850 reading)."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         r = _default_box_model().solve(time_limit=10)
 
-    assert r.status == "optimal"
-    assert r.objective == pytest.approx(-DEFAULT_VARIABLE_BOUND, rel=1e-9)
+    assert r.status == "unbounded"
+    assert r.objective is None and r.x is None
