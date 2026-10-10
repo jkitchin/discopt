@@ -437,6 +437,12 @@ INVENTORY: tuple[tuple[str, str, str, str], ...] = (
         "env read (#1619)",
     ),
     ("discopt._relax.convexity.patterns", "clear_declared_box_cache", "trivial", "cache clear"),
+    (
+        "discopt._relax.convexity.certificate",
+        "set_charge_scope_abs_gap_tol",
+        "trivial",
+        "ContextVar read + float store (#1682)",
+    ),
     ("discopt._relax.integer_product_reform", "_iml_extend", "trivial", "one pass over x0"),
     ("discopt._relax.integer_product_reform", "_ipx_extend", "trivial", "one pass over x0"),
     ("discopt._relax.learned_relaxations", "load_pretrained_registry", "trivial", "file load"),

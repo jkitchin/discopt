@@ -157,7 +157,7 @@ def test_charged_solve_certifies_with_a_valid_bound(monkeypatch, maximize, box):
     monkeypatch.setenv("DISCOPT_CONVEX_CHARGE", "1")
     m, K, b = _ls_model(*box, maximize=maximize)
     r = m.solve(time_limit=60)
-    assert r.status == "optimal" and r.gap_certified
+    assert r.status == "optimal" and r.gap_certified and r.bound_valid
     charge = r.solver_stats["convexity/charge"]
     assert 0.0 < charge <= 1e-7
     ref = lsq_linear(K, b, bounds=box, tol=1e-14, max_iter=10000)

@@ -6774,7 +6774,13 @@ def _apply_convexity_charge(result: Any, charge: float, args: tuple, kwargs: dic
         is_max = model._objective.sense == ObjectiveSense.MAXIMIZE
     shift = float(charge) if is_max else -float(charge)
     if result.bound is not None and np.isfinite(result.bound):
-        result.bound = float(result.bound) + shift
+        # Moving a bound AWAY from the incumbent keeps whatever validity claim
+        # it carried (#1244: the triple moves together through ``_set_bound``).
+        result._set_bound(
+            float(result.bound) + shift,
+            valid=bool(result.bound_valid),
+            source=result.bound_source,
+        )
         if result.objective is not None and np.isfinite(result.objective):
             result.gap = _gap_mod.reported_gap(float(result.objective), result.bound)
     if result.root_bound is not None and np.isfinite(result.root_bound):
