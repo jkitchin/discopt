@@ -132,7 +132,7 @@ class LinearTreeDefinition:
         """Tree prediction at a single input, shape ``(n_outputs,)``."""
         x = np.asarray(x, dtype=np.float64).reshape(-1)
         leaf = self.leaves[self.leaf_of(x)]
-        return leaf.A @ x + leaf.b
+        return np.asarray(leaf.A @ x + leaf.b, dtype=np.float64)
 
     # ------------------------------------------------------------------
     # Readers
@@ -160,24 +160,28 @@ class LinearTreeDefinition:
             ``(lower, upper)``. Overrides the bounds stored in the spec
             (``spec["difftree"]["bounds"]``); one of the two is required.
         """
-        if isinstance(spec, Path) or (isinstance(spec, str) and not spec.lstrip().startswith("{")):
-            spec = json.loads(Path(spec).read_text())
-        elif isinstance(spec, str):
-            spec = json.loads(spec)
-        if spec.get("version") != 1 or spec.get("kind") != "hyperplane_tree":
+        data: dict
+        if isinstance(spec, dict):
+            data = spec
+        elif isinstance(spec, str) and spec.lstrip().startswith("{"):
+            data = json.loads(spec)
+        else:
+            data = json.loads(Path(spec).read_text())
+        spec_d = data
+        if spec_d.get("version") != 1 or spec_d.get("kind") != "hyperplane_tree":
             raise ValueError(
-                f"expected a v1 'hyperplane_tree' spec, got version={spec.get('version')!r} "
-                f"kind={spec.get('kind')!r}"
+                f"expected a v1 'hyperplane_tree' spec, got version={spec_d.get('version')!r} "
+                f"kind={spec_d.get('kind')!r}"
             )
-        if spec.get("categorical_features"):
+        if spec_d.get("categorical_features"):
             raise NotImplementedError(
                 "categorical features in a linear tree spec are not supported yet"
             )
 
-        p = int(spec["n_features_in"])
-        d_y = int(spec["n_targets"])
-        T = np.asarray(spec["transform_matrix"], dtype=np.float64).reshape(p, -1)
-        tree = spec["tree"]
+        p = int(spec_d["n_features_in"])
+        d_y = int(spec_d["n_targets"])
+        T = np.asarray(spec_d["transform_matrix"], dtype=np.float64).reshape(p, -1)
+        tree = spec_d["tree"]
         is_leaf = [bool(v) for v in tree["is_leaf"]]
         feature = [int(v) for v in tree["feature"]]
         threshold = tree["threshold"]
@@ -186,11 +190,11 @@ class LinearTreeDefinition:
         params = np.asarray(tree["leaf_params"], dtype=np.float64)
 
         if input_bounds is None:
-            stored = spec.get("difftree", {}).get("bounds")
+            stored = spec_d.get("difftree", {}).get("bounds")
             if stored is None:
                 raise ValueError(
                     "input_bounds is required: the spec carries no bounds "
-                    "(spec['difftree']['bounds'])"
+                    "(spec_d['difftree']['bounds'])"
                 )
             input_bounds = (np.asarray(stored[0], float), np.asarray(stored[1], float))
         lb = np.asarray(input_bounds[0], dtype=np.float64).reshape(-1)
