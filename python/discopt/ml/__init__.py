@@ -46,6 +46,8 @@ Example (frozen)
 
 from discopt.ml.bounds import LayerBounds, propagate_bounds
 from discopt.ml.formulations.base import NNFormulation, TreeFormulation
+from discopt.ml.formulations.linear_tree import LinearTreeFormulation
+from discopt.ml.linear_tree import LinearLeaf, LinearTreeDefinition
 from discopt.ml.network import Activation, DenseLayer, NetworkDefinition
 from discopt.ml.presolve import (
     DeadReluLayer,
@@ -70,6 +72,9 @@ __all__ = [
     "DecisionTree",
     "DenseLayer",
     "LayerBounds",
+    "LinearLeaf",
+    "LinearTreeDefinition",
+    "LinearTreeFormulation",
     "NNFormulation",
     "NNPresolvePass",
     "NNPresolveResult",

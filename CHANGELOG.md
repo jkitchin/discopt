@@ -12,6 +12,18 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **Linear model decision trees in `discopt.ml`: `LinearTreeDefinition` and
+  `LinearTreeFormulation`.** Trees with oblique (hyperplane) splits and affine
+  leaves are read from the solver-neutral v1 `hyperplane_tree` spec written by
+  jax-ldt and `difftree.export.to_spec`, with no dependency on either package,
+  and embedded as a MILP with either the hull (disaggregated, no big-M) or the
+  big-M encoding. Splits are separated by `split_eps * ||a||` on both sides,
+  following `TreeEnsembleFormulation` (#1447). `add_predictor` accepts a
+  `LinearTreeDefinition`, a spec dict, or a spec `.json` path
+  (`method="hull"` by default, or `"bigm"`). Tests compare both encodings with
+  an exact per-leaf LP enumeration and check that the tree evaluated at the
+  returned point reproduces the returned outputs.
+
 - **POUNCE Gate-1 phase-changing flash feasibility check** (#1526). A reusable
   ethane/n-butane benchmark rebuilds POUNCE's MPCC fixture with algebraic
   Peng--Robinson root identities, explicit root-count and nontrivial-stationary-
