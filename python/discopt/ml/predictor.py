@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Union
 import numpy as np
 
 from discopt.ml.formulations.base import NNFormulation, TreeFormulation
+from discopt.ml.formulations.linear_tree import LinearTreeFormulation
+from discopt.ml.linear_tree import LinearTreeDefinition
 from discopt.ml.network import Activation, NetworkDefinition
 from discopt.ml.tree import TreeEnsembleDefinition
 
@@ -29,7 +31,7 @@ def add_predictor(
     method: str = "auto",
     prefix: str = "pred",
     input_bounds: tuple[np.ndarray, np.ndarray] | None = None,
-) -> tuple[Variable, Union[NNFormulation, TreeFormulation]]:
+) -> tuple[Variable, Union[NNFormulation, TreeFormulation, LinearTreeFormulation]]:
     """Embed a trained ML model as constraints in a discopt Model.
 
     Auto-detects the predictor type and converts it to the appropriate
@@ -48,6 +50,9 @@ def add_predictor(
         A trained ML model. Supported types:
 
         - :class:`NetworkDefinition` or :class:`TreeEnsembleDefinition`
+        - :class:`LinearTreeDefinition`, or a v1 ``hyperplane_tree`` spec
+          (dict, or a path to its ``.json`` file) as written by jax-ldt and
+          ``difftree.export.to_spec``: a linear model decision tree
         - ``sklearn.neural_network.MLPRegressor`` / ``MLPClassifier``
         - ``sklearn.tree.DecisionTreeRegressor`` / ``DecisionTreeClassifier``
         - ``sklearn.ensemble.GradientBoostingRegressor`` / ``RandomForestRegressor``
@@ -57,6 +62,7 @@ def add_predictor(
         Formulation method. ``"auto"`` selects based on the model type.
         For neural networks: ``"relu_bigm"``, ``"full_space"``, or
         ``"reduced_space"``. Tree ensembles always use MILP encoding.
+        Linear model decision trees: ``"hull"`` (default) or ``"bigm"``.
     prefix : str
         Name prefix for created variables and constraints.
     input_bounds : tuple of np.ndarray, optional
@@ -69,7 +75,7 @@ def add_predictor(
     -------
     outputs : Variable
         Output variable(s) of the embedded predictor.
-    formulation : NNFormulation or TreeFormulation
+    formulation : NNFormulation, TreeFormulation, or LinearTreeFormulation
         The formulation object (for inspection or further use).
 
     Notes
@@ -108,6 +114,21 @@ def add_predictor(
         _link_inputs(model, inputs, form.inputs, prefix)
         return form.outputs, form
 
+    if isinstance(definition, LinearTreeDefinition):
+        if input_bounds is not None:
+            definition = LinearTreeDefinition(
+                leaves=definition.leaves,
+                n_features=definition.n_features,
+                n_outputs=definition.n_outputs,
+                input_bounds=input_bounds,
+            )
+        if method == "auto":
+            method = "hull"
+        form_l = LinearTreeFormulation(model, definition, prefix=prefix, encoding=method)
+        form_l.formulate()
+        _link_inputs(model, inputs, form_l.inputs, prefix)
+        return form_l.outputs, form_l
+
     # TreeEnsembleDefinition
     if input_bounds is not None:
         definition = TreeEnsembleDefinition(
@@ -123,7 +144,7 @@ def add_predictor(
 
 
 def _expected_features(
-    definition: NetworkDefinition | TreeEnsembleDefinition,
+    definition: NetworkDefinition | TreeEnsembleDefinition | LinearTreeDefinition,
 ) -> int:
     """Expected input feature count of a converted definition."""
     if isinstance(definition, NetworkDefinition):
@@ -179,15 +200,20 @@ def _link_inputs(model: Model, user_inputs: Variable, form_inputs: Variable, pre
 def _convert(
     predictor: object,
     input_bounds: tuple[np.ndarray, np.ndarray] | None,
-) -> NetworkDefinition | TreeEnsembleDefinition:
+) -> NetworkDefinition | TreeEnsembleDefinition | LinearTreeDefinition:
     """Convert a predictor object to a discopt definition."""
-    if isinstance(predictor, (NetworkDefinition, TreeEnsembleDefinition)):
+    if isinstance(predictor, (NetworkDefinition, TreeEnsembleDefinition, LinearTreeDefinition)):
         return predictor
+
+    if isinstance(predictor, dict) and predictor.get("kind") == "hyperplane_tree":
+        return LinearTreeDefinition.from_spec(predictor, input_bounds=input_bounds)
 
     if isinstance(predictor, (str, Path)):
         p = Path(predictor)
         if not p.exists():
             raise FileNotFoundError(f"Predictor file not found: {predictor}")
+        if p.suffix == ".json":
+            return LinearTreeDefinition.from_spec(p, input_bounds=input_bounds)
         if p.suffix == ".onnx":
             from discopt.ml.readers.onnx_reader import load_onnx
 
