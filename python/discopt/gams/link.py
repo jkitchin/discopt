@@ -23,6 +23,7 @@ import logging
 import math
 import os
 import sys
+import time
 from typing import TYPE_CHECKING
 
 from discopt.modeling.core import Model, SolveResult, VarType
@@ -240,13 +241,15 @@ def solve_from_control_file(
         gmo.gmoIndexBaseSet(gmo_h, 0)
 
         view = _GmoAdapter(gmo_h, gmo)
+        t0 = time.perf_counter()
         model, result = solve_view(view, **_read_gams_options(gev, gev_h))
+        resused = time.perf_counter() - t0
 
         # GAMS requires the solver to open, write, and finalize a status file via
         # the environment object; otherwise it reports solveStat=13 ("SOLVER DID
         # NOT WRITE A STATUS FILE") regardless of the GMO solution we unload.
         gev.gevStatCon(gev_h)
-        _write_solution(gmo_h, gmo, model, result)
+        _write_solution(gmo_h, gmo, model, result, resused=resused)
         gev.gevStatEOF(gev_h)
         return 0
     finally:
@@ -278,8 +281,14 @@ def _free_handle(mod, handle, created: bool, free_name: str, delete_name: str) -
             logger.debug("%s failed: %s: %s", delete_name, type(exc).__name__, exc)
 
 
-def _write_solution(gmo_h, gmo, model: Model, result: SolveResult) -> None:  # pragma: no cover
-    """Write primal levels and the GAMS model/solve status back into GMO."""
+def _write_solution(
+    gmo_h, gmo, model: Model, result: SolveResult, *, resused: float | None = None
+) -> None:  # pragma: no cover
+    """Write primal levels and the GAMS model/solve status back into GMO.
+
+    resused is the seconds the link spent translating and solving; it is
+    reported as the model's resusd (result.wall_time when not given).
+    """
     model_stat, solve_stat = status_to_gams(result, _has_discrete(model))
     gmo.gmoModelStatSet(gmo_h, model_stat)
     gmo.gmoSolveStatSet(gmo_h, solve_stat)
@@ -296,6 +305,9 @@ def _write_solution(gmo_h, gmo, model: Model, result: SolveResult) -> None:  # p
     bound = getattr(result, "bound", None)
     if getattr(result, "bound_valid", False) and bound is not None and math.isfinite(bound):
         gmo.gmoSetHeadnTail(gmo_h, gmo.gmoTmipbest, float(bound))
+    gmo.gmoSetHeadnTail(
+        gmo_h, gmo.gmoHresused, float(result.wall_time if resused is None else resused)
+    )
     gmo.gmoUnloadSolutionLegacy(gmo_h)
 
 

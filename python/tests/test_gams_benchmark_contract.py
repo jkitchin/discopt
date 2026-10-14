@@ -45,7 +45,7 @@ def _fake_gams(monkeypatch, options):
     ):
         monkeypatch.setitem(sys.modules, n, m)
     monkeypatch.setattr(link, "_GmoAdapter", lambda *a: object())
-    monkeypatch.setattr(link, "_write_solution", lambda *a: None)
+    monkeypatch.setattr(link, "_write_solution", lambda *a, **k: None)
 
 
 def _install_gev_options(gev, options):
@@ -97,18 +97,19 @@ def test_unsupported_options_rejected(vals):
         link._read_gams_options(gev, None)
 
 
-def _export(model, result):
+def _export(model, result, **kwargs):
     exported = {}
     gmo = SimpleNamespace(
         gmoHobjval="objval",
         gmoTmipbest="objest",  # the real tail GAMS reports as objest
+        gmoHresused="resused",
         gmoModelStatSet=lambda *a: None,
         gmoSolveStatSet=lambda *a: None,
         gmoSetVarLOne=lambda *a: None,
         gmoSetHeadnTail=lambda h, f, v: exported.__setitem__(f, v),
         gmoUnloadSolutionLegacy=lambda *a: None,
     )
-    link._write_solution(object(), gmo, model, result)
+    link._write_solution(object(), gmo, model, result, **kwargs)
     return exported
 
 
@@ -160,4 +161,14 @@ def test_valid_bound_without_incumbent_is_exported():
         x=None,
     )
     exported = _export(model, result)
-    assert exported == {"objest": 1.5}
+    assert exported == {"objest": 1.5, "resused": 0.0}
+
+
+@pytest.mark.parametrize("kwargs,expected", [({"resused": 4.25}, 4.25), ({}, 3.5)])
+def test_resource_usage_is_exported(kwargs, expected):
+    # The link's own timing wins; without it, the solver's wall_time is reported.
+    model = dm.Model("gams-resused")
+    x = model.continuous("x", lb=0, ub=10)
+    model.minimize(x)
+    result = dm.SolveResult(status="time_limit", objective=None, x=None, wall_time=3.5)
+    assert _export(model, result, **kwargs)["resused"] == expected
