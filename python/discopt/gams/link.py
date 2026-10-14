@@ -115,26 +115,28 @@ def _read_gams_options(gev, gev_h) -> dict:
     * ``optca == 0`` means "no absolute criterion" in GAMS.  discopt's absolute
       tolerance must be strictly positive, so ``0`` maps to ``None`` (the solver's
       established default, ``1e-6``); a positive ``optca`` is forwarded as is.
-    * ``threads``: ``0`` means all cores in GAMS and maps to ``os.cpu_count()``;
-      negative values (GAMS "leave N cores free") are rejected.
+    * ``threads`` comes from ``gevThreads(gev_h)``, which GEV has already
+      resolved from the raw option (``0`` = all cores, ``-N`` = all but ``N``),
+      so it is forwarded as is; a non-positive resolved count is rejected.
     """
     reslim = float(gev.gevGetDblOpt(gev_h, gev.gevResLim))
     optcr = float(gev.gevGetDblOpt(gev_h, gev.gevOptCR))
     optca = float(gev.gevGetDblOpt(gev_h, gev.gevOptCA))
-    threads = int(gev.gevGetIntOpt(gev_h, gev.gevThreads))
+    # ``gevThreads`` is a function, not an option-name constant like ``gevResLim``.
+    threads = int(gev.gevThreads(gev_h))
     if math.isnan(reslim) or reslim <= 0.0:
         raise ValueError(f"unsupported GAMS reslim={reslim!r}: must be positive")
     if not math.isfinite(optcr) or optcr < 0.0:
         raise ValueError(f"unsupported GAMS optcr={optcr!r}: must be finite and >= 0")
     if not math.isfinite(optca) or optca < 0.0:
         raise ValueError(f"unsupported GAMS optca={optca!r}: must be finite and >= 0")
-    if threads < 0:
-        raise ValueError(f"unsupported GAMS threads={threads}: negative values are not supported")
+    if threads < 1:
+        raise ValueError(f"unsupported resolved GAMS threads={threads}: must be >= 1")
     return {
         "time_limit": reslim,
         "gap": optcr,
         "abs_gap": optca if optca > 0.0 else None,
-        "threads": threads if threads > 0 else (os.cpu_count() or 1),
+        "threads": threads,
     }
 
 
@@ -288,11 +290,12 @@ def _write_solution(gmo_h, gmo, model: Model, result: SolveResult) -> None:  # p
             gmo.gmoSetVarLOne(gmo_h, j, val)
         if result.objective is not None:
             gmo.gmoSetHeadnTail(gmo_h, gmo.gmoHobjval, float(result.objective))
-    # Export a valid global dual bound (objest) even when the gap is open and
-    # even with no incumbent; an invalid/unavailable bound stays unexported.
+    # Export a valid global dual bound even when the gap is open and even with no
+    # incumbent; an invalid/unavailable bound stays unexported.  GAMS reports the
+    # gmoTmipbest tail as the model's objest (there is no gmoHobjest).
     bound = getattr(result, "bound", None)
     if getattr(result, "bound_valid", False) and bound is not None and math.isfinite(bound):
-        gmo.gmoSetHeadnTail(gmo_h, gmo.gmoHobjest, float(bound))
+        gmo.gmoSetHeadnTail(gmo_h, gmo.gmoTmipbest, float(bound))
     gmo.gmoUnloadSolutionLegacy(gmo_h)
 
 

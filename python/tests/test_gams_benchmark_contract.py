@@ -1,6 +1,9 @@
 """GAMS link contracts: option forwarding (#1704) and dual-bound export (#1705).
 
-No GAMS installation is needed; GEV/GMO are faked.
+No GAMS installation is needed; GEV/GMO are faked.  The fakes mirror the real
+gamsapi shapes: ``gevResLim``/``gevOptCR``/``gevOptCA`` are option-name strings
+read via ``gevGetDblOpt``, while ``gevThreads`` is a *function* of the handle
+returning the resolved thread count (a constant-style fake hid exactly that).
 """
 
 import sys
@@ -14,15 +17,7 @@ from discopt.gams import link
 def _fake_gams(monkeypatch, options):
     gev = ModuleType("gams.core.gev")
     gmo = ModuleType("gams.core.gmo")
-    gev.gevResLim, gev.gevOptCR, gev.gevOptCA, gev.gevThreads = range(4)
-    opts = {
-        gev.gevResLim: options[0],
-        gev.gevOptCR: options[1],
-        gev.gevOptCA: options[2],
-        gev.gevThreads: options[3],
-    }
-    gev.gevGetDblOpt = lambda handle, key: opts[key]
-    gev.gevGetIntOpt = lambda handle, key: opts[key]
+    _install_gev_options(gev, options)
     gev.new_gevHandle_tp = lambda: object()
     gev.gevCreateD = lambda *a: (True, "")
     gev.gevInitEnvironmentLegacy = lambda *a: None
@@ -53,6 +48,13 @@ def _fake_gams(monkeypatch, options):
     monkeypatch.setattr(link, "_write_solution", lambda *a: None)
 
 
+def _install_gev_options(gev, options):
+    gev.gevResLim, gev.gevOptCR, gev.gevOptCA = "ResLim", "OptCR", "OptCA"
+    dbl = dict(zip(("ResLim", "OptCR", "OptCA"), options[:3]))
+    gev.gevGetDblOpt = lambda handle, name: dbl[name]
+    gev.gevThreads = lambda handle: options[3]
+
+
 def test_control_file_forwards_gams_resource_limit_and_relative_gap(monkeypatch, tmp_path):
     _fake_gams(monkeypatch, (0.25, 1e-6, 0, 1))
     observed = {}
@@ -68,10 +70,8 @@ def test_control_file_forwards_gams_resource_limit_and_relative_gap(monkeypatch,
 
 
 def test_positive_optca_and_threads_forwarded():
-    gev = SimpleNamespace(gevResLim=0, gevOptCR=1, gevOptCA=2, gevThreads=3)
-    vals = {0: 5.0, 1: 1e-3, 2: 1e-5, 3: 4}
-    gev.gevGetDblOpt = lambda h, k: vals[k]
-    gev.gevGetIntOpt = lambda h, k: vals[k]
+    gev = SimpleNamespace()
+    _install_gev_options(gev, (5.0, 1e-3, 1e-5, 4))
     assert link._read_gams_options(gev, None) == {
         "time_limit": 5.0,
         "gap": 1e-3,
@@ -86,15 +86,13 @@ def test_positive_optca_and_threads_forwarded():
         (0.0, 1e-4, 0, 1),
         (10, -1.0, 0, 1),
         (10, 1e-4, -1.0, 1),
-        (10, 1e-4, 0, -2),
+        (10, 1e-4, 0, 0),
         (10, float("nan"), 0, 1),
     ],
 )
 def test_unsupported_options_rejected(vals):
-    gev = SimpleNamespace(gevResLim=0, gevOptCR=1, gevOptCA=2, gevThreads=3)
-    d = dict(enumerate(vals))
-    gev.gevGetDblOpt = lambda h, k: d[k]
-    gev.gevGetIntOpt = lambda h, k: d[k]
+    gev = SimpleNamespace()
+    _install_gev_options(gev, vals)
     with pytest.raises(ValueError):
         link._read_gams_options(gev, None)
 
@@ -103,7 +101,7 @@ def _export(model, result):
     exported = {}
     gmo = SimpleNamespace(
         gmoHobjval="objval",
-        gmoHobjest="objest",
+        gmoTmipbest="objest",  # the real tail GAMS reports as objest
         gmoModelStatSet=lambda *a: None,
         gmoSolveStatSet=lambda *a: None,
         gmoSetVarLOne=lambda *a: None,
