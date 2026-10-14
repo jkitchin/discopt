@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import math
 import os
 import sys
 from typing import TYPE_CHECKING
@@ -104,7 +105,47 @@ def _has_discrete(model: Model) -> bool:
     return any(v.var_type in (VarType.BINARY, VarType.INTEGER) for v in model._variables)
 
 
-def solve_view(view: "GmoView", *, time_limit: float = 1e10, gap: float = 1e-4):
+def _read_gams_options(gev, gev_h) -> dict:
+    """Read the job's ``reslim`` / ``optcr`` / ``optca`` / ``threads`` from GEV.
+
+    Returns keyword arguments for :func:`solve_view`.  Unsupported values are
+    rejected loudly rather than silently replaced by defaults:
+
+    * ``reslim`` must be a positive number; ``optcr`` must be finite and ``>= 0``.
+    * ``optca == 0`` means "no absolute criterion" in GAMS.  discopt's absolute
+      tolerance must be strictly positive, so ``0`` maps to ``None`` (the solver's
+      established default, ``1e-6``); a positive ``optca`` is forwarded as is.
+    * ``threads``: ``0`` means all cores in GAMS and maps to ``os.cpu_count()``;
+      negative values (GAMS "leave N cores free") are rejected.
+    """
+    reslim = float(gev.gevGetDblOpt(gev_h, gev.gevResLim))
+    optcr = float(gev.gevGetDblOpt(gev_h, gev.gevOptCR))
+    optca = float(gev.gevGetDblOpt(gev_h, gev.gevOptCA))
+    threads = int(gev.gevGetIntOpt(gev_h, gev.gevThreads))
+    if math.isnan(reslim) or reslim <= 0.0:
+        raise ValueError(f"unsupported GAMS reslim={reslim!r}: must be positive")
+    if not math.isfinite(optcr) or optcr < 0.0:
+        raise ValueError(f"unsupported GAMS optcr={optcr!r}: must be finite and >= 0")
+    if not math.isfinite(optca) or optca < 0.0:
+        raise ValueError(f"unsupported GAMS optca={optca!r}: must be finite and >= 0")
+    if threads < 0:
+        raise ValueError(f"unsupported GAMS threads={threads}: negative values are not supported")
+    return {
+        "time_limit": reslim,
+        "gap": optcr,
+        "abs_gap": optca if optca > 0.0 else None,
+        "threads": threads if threads > 0 else (os.cpu_count() or 1),
+    }
+
+
+def solve_view(
+    view: "GmoView",
+    *,
+    time_limit: float = 1e10,
+    gap: float = 1e-4,
+    abs_gap: float | None = None,
+    threads: int = 1,
+):
     """Translate a GMO view, solve with discopt, and return ``(model, result)``.
 
     This is the GAMS-library-free core of the link: given anything implementing
@@ -112,7 +153,9 @@ def solve_view(view: "GmoView", *, time_limit: float = 1e10, gap: float = 1e-4):
     model, so it can be exercised in tests with an in-memory fake.
     """
     model = model_from_gmo(view)
-    result = model.solve(time_limit=time_limit, gap_tolerance=gap)
+    result = model.solve(
+        time_limit=time_limit, gap_tolerance=gap, abs_gap_tolerance=abs_gap, threads=threads
+    )
     return model, result
 
 
@@ -195,7 +238,7 @@ def solve_from_control_file(
         gmo.gmoIndexBaseSet(gmo_h, 0)
 
         view = _GmoAdapter(gmo_h, gmo)
-        model, result = solve_view(view)
+        model, result = solve_view(view, **_read_gams_options(gev, gev_h))
 
         # GAMS requires the solver to open, write, and finalize a status file via
         # the environment object; otherwise it reports solveStat=13 ("SOLVER DID
@@ -245,6 +288,11 @@ def _write_solution(gmo_h, gmo, model: Model, result: SolveResult) -> None:  # p
             gmo.gmoSetVarLOne(gmo_h, j, val)
         if result.objective is not None:
             gmo.gmoSetHeadnTail(gmo_h, gmo.gmoHobjval, float(result.objective))
+    # Export a valid global dual bound (objest) even when the gap is open and
+    # even with no incumbent; an invalid/unavailable bound stays unexported.
+    bound = getattr(result, "bound", None)
+    if getattr(result, "bound_valid", False) and bound is not None and math.isfinite(bound):
+        gmo.gmoSetHeadnTail(gmo_h, gmo.gmoHobjest, float(bound))
     gmo.gmoUnloadSolutionLegacy(gmo_h)
 
 
