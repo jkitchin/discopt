@@ -54,7 +54,7 @@ either leaf gives the same prediction on the facet.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -128,7 +128,7 @@ class LinearTreeFormulation:
         if active is False:
             raise ValueError("active=False is not meaningful; pass None for an always-on tree")
         self._active_arg = active
-        self._active = None
+        self._active: Any = None
         self._inputs: Variable | None = None
         self._outputs: Variable | None = None
         self._leaf: Variable | None = None
