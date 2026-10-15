@@ -21,13 +21,13 @@ LB = np.array([0.0, -1.0])
 UB = np.array([2.0, 1.0])
 
 
-def _spec(seed: int = 0, depth: int = 2, n_targets: int = 2, bounds=True) -> dict:
+def _spec(seed: int = 0, depth: int = 2, n_targets: int = 2, bounds=True, lb=LB, ub=UB) -> dict:
     """A random complete oblique tree in the v1 hyperplane-tree spec layout."""
     rng = np.random.default_rng(seed)
     p = 2
     n_int = 2**depth - 1
     a = rng.normal(size=(n_int, p))
-    centre = (LB + UB) / 2
+    centre = (lb + ub) / 2
     t = a @ centre + rng.normal(scale=0.3, size=n_int)
     T = np.hstack([np.eye(p), a.T])
     n_t = T.shape[1]
@@ -77,7 +77,7 @@ def _spec(seed: int = 0, depth: int = 2, n_targets: int = 2, bounds=True) -> dic
         },
     }
     if bounds:
-        spec["difftree"] = {"bounds": [LB.tolist(), UB.tolist()]}
+        spec["difftree"] = {"bounds": [np.asarray(lb).tolist(), np.asarray(ub).tolist()]}
     return spec
 
 
@@ -252,3 +252,125 @@ def test_add_predictor_accepts_spec_dict_and_json(tmp_path):
         assert float(r.objective) == pytest.approx(
             _brute_force(d, np.array([1.0, 0.0]), 1e-5), abs=1e-6
         )
+
+
+# ─────────────────────────────────────────────────────────────
+# On/off (``active``)
+# ─────────────────────────────────────────────────────────────
+
+# A box that excludes the origin, like a unit with a minimum turndown.
+LB_ON = np.array([2.0, 6.0])
+UB_ON = np.array([5.0, 12.0])
+
+
+def _solve_with_fixed_cost(d, c, fixed, encoding, active=True):
+    """max c . y - fixed * a over an on/off tree; returns (obj, a, x, y, z)."""
+    m = dm.Model("onoff")
+    form = LinearTreeFormulation(m, d, encoding=encoding, active=active)
+    form.formulate()
+    a = form.active
+    obj = sum(float(c[k]) * form.outputs[k] for k in range(d.n_outputs)) - fixed * a
+    m.maximize(obj)
+    r = m.solve(time_limit=60)
+    assert r.status == "optimal", r.status
+    av = float(np.asarray(r.x["ltree_active"]).ravel()[0])
+    x = np.asarray(r.x["ltree_input"]).ravel()
+    y = np.asarray(r.x["ltree_output"]).ravel()
+    z = np.asarray(r.x["ltree_leaf"]).ravel()
+    return float(r.objective), av, x, y, z
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("encoding", ["hull", "bigm"])
+def test_smoke_active(encoding):
+    d = LinearTreeDefinition.from_spec(_spec(seed=1, lb=LB_ON, ub=UB_ON))
+    obj, a, x, y, z = _solve_with_fixed_cost(d, np.array([1.0, 0.0]), 0.0, encoding)
+    assert obj >= 0.0 - 1e-9
+
+
+@pytest.mark.parametrize("encoding", ["hull", "bigm"])
+@pytest.mark.parametrize("seed", range(4))
+def test_active_matches_brute_force_on_and_off(encoding, seed):
+    """With a fixed cost F for running, the optimum is max(best_on - F, 0).
+
+    F is placed just below and just above best_on so both branches are
+    exercised. Off must give x = 0, y = 0 and no leaf, although 0 is outside
+    the input box; on must stay in the box and reproduce the tree.
+    """
+    spec = _spec(seed=seed, depth=2 + seed % 2, lb=LB_ON, ub=UB_ON)
+    d = LinearTreeDefinition.from_spec(spec)
+    c = np.random.default_rng(200 + seed).normal(size=d.n_outputs)
+    best_on = _brute_force(d, c, 1e-5)
+    branches = 0
+    for fixed, want_on in ((best_on - 1.0, True), (best_on + 1.0, False)):
+        obj, a, x, y, z = _solve_with_fixed_cost(d, c, fixed, encoding)
+        assert obj == pytest.approx(max(best_on - fixed, 0.0), abs=1e-6)
+        if want_on:
+            assert a == pytest.approx(1.0)
+            assert np.all(x >= LB_ON - 1e-7) and np.all(x <= UB_ON + 1e-7)
+            np.testing.assert_allclose(y, _spec_predict(spec, x), atol=1e-6)
+            assert z.sum() == pytest.approx(1.0)
+        else:
+            assert a == pytest.approx(0.0)
+            np.testing.assert_allclose(x, 0.0, atol=1e-7)
+            np.testing.assert_allclose(y, 0.0, atol=1e-7)
+            assert z.sum() == pytest.approx(0.0)
+        branches += 1
+    assert branches == 2
+
+
+@pytest.mark.parametrize("encoding", ["hull", "bigm"])
+def test_active_accepts_an_existing_binary_element(encoding):
+    """``active=on[t]`` links the tree to the caller's on/off variable."""
+    d = LinearTreeDefinition.from_spec(_spec(seed=3, lb=LB_ON, ub=UB_ON))
+    for forced in (0, 1):
+        m = dm.Model("link")
+        on = m.binary("on", shape=(2,))
+        f = LinearTreeFormulation(m, d, encoding=encoding, active=on[1])
+        f.formulate()
+        m.subject_to(on[1] == forced)
+        m.maximize(f.outputs[0])
+        r = m.solve(time_limit=60)
+        assert r.status == "optimal"
+        x = np.asarray(r.x["ltree_input"]).ravel()
+        if forced == 0:
+            np.testing.assert_allclose(x, 0.0, atol=1e-7)
+        else:
+            assert np.all(x >= LB_ON - 1e-7)
+            assert float(r.objective) == pytest.approx(
+                _brute_force(d, np.array([1.0, 0.0]), 1e-5), abs=1e-6
+            )
+
+
+@pytest.mark.parametrize("bad", [False, 0, 1, np.False_, np.True_, 0.0])
+def test_active_constants_rejected(bad):
+    """Only ``True`` and ``None`` are accepted as non-expressions; ``0`` used to
+    slip past an ``is False`` check and fix the unit off."""
+    d = LinearTreeDefinition.from_spec(_spec())
+    with pytest.raises((ValueError, TypeError), match="active"):
+        LinearTreeFormulation(dm.Model("x"), d, active=bad)
+
+
+def test_active_rejects_non_binary_and_foreign_indicators():
+    d = LinearTreeDefinition.from_spec(_spec())
+    m = dm.Model("x")
+    c = m.continuous("c", lb=0, ub=1)
+    n = m.integer("n", lb=0, ub=1, shape=(2,))
+    on = m.binary("on", shape=(2,))
+    for bad in (c, n[0], on, on + 0):
+        with pytest.raises((ValueError, TypeError), match="active"):
+            LinearTreeFormulation(m, d, active=bad)
+    other = dm.Model("other").binary("on")
+    with pytest.raises(ValueError, match="different model"):
+        LinearTreeFormulation(m, d, active=other)
+
+
+def test_active_accepts_scalar_and_2d_element():
+    d = LinearTreeDefinition.from_spec(_spec())
+    m = dm.Model("x")
+    s = m.binary("s")
+    g = m.binary("g", shape=(2, 3))
+    for ok in (s, g[1, 2]):
+        f = LinearTreeFormulation(m, d, active=ok, prefix=f"t{id(ok)}")
+        f.formulate()
+        assert f.active is ok

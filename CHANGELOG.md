@@ -12,6 +12,15 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **On/off (semicontinuous) units in `LinearTreeFormulation`.** The new
+  `active=` argument takes `True` (a `{prefix}_active` binary is created) or an
+  existing binary expression such as `on[t]`. When the unit is off, the inputs
+  and outputs are forced to zero and no leaf is selected; when it is on, the
+  tree applies as before. Both the hull and big-M encodings support it, with
+  big-M constants computed over the input box extended to include the origin.
+  Tests compare the on/off MILP with brute-force enumeration including a fixed
+  cost on the binary.
+
 - **Linear model decision trees in `discopt.ml`: `LinearTreeDefinition` and
   `LinearTreeFormulation`.** Trees with oblique (hyperplane) splits and affine
   leaves are read from the solver-neutral v1 `hyperplane_tree` spec written by
