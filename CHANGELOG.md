@@ -145,6 +145,17 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **`dm.external` callbacks are called once per distinct point (#1708).** On a
+  2-variable MINLP under `solver="mip-nlp"`, `fn`/`jac`/`hess` ran 2236/1872/1769
+  times at only 85/71/69 distinct inputs: outer approximation re-solves the same
+  fixed-integer NLP from the same warm start, and each solve walks the same
+  ~43-iterate path, so every repeat fell outside the 8-point memo. The per-solve
+  memo now holds 1024 points per callable (LRU, bounded at 256 MiB of stored
+  output), which brings the counts to 85/71/69 with the same answer. New
+  `dm.external(..., memoize=True|False|int)` sets the size or turns it off. The
+  refusal for an opaque `dm.custom` with integer variables now points to
+  `solver="mip-nlp"` for an uncertified local solution.
+
 - **The convex kernel no longer starves the convex-MINLP route** (`fix`, #1624).
   `Model.solve` ran the native convex kernel first with the whole of any
   `time_limit <= 120`; on a kernel-eligible model the #1059 router would divert,

@@ -109,10 +109,20 @@ __all__ = [
     "external_spec",
 ]
 
-#: Points each external callable remembers (#1619 B-13). A handful covers the
-#: real access pattern -- every use of one point, then its Jacobian and Hessian,
-#: before the solver moves on -- without holding a long history of large outputs.
-_MEMO_SIZE = 8
+#: Points each external callable remembers by default (#1619 B-13, #1708).
+#: The first sizing, 8, assumed the solver visits a point, asks for its value,
+#: Jacobian and Hessian, and moves on. Measured on #1708's 2-variable MINLP under
+#: ``solver="mip-nlp"``: outer approximation re-solves the same fixed-integer NLP
+#: from the same warm start ~50 times, and each solve walks the same ~43-iterate
+#: path, so every repeat sits >= 40 distinct points back -- an 8-point memo never
+#: hit and ``fn`` ran 2236 times for 85 distinct inputs. 1024 points hold that
+#: whole history; :data:`_MEMO_MAX_BYTES` bounds the memory a large block can pin.
+_MEMO_SIZE = 1024
+
+#: Byte budget for one callable's memo. Entries are evicted least-recently-used
+#: until the stored outputs fit, so a block whose Hessian is large keeps fewer
+#: points rather than unbounded memory. The newest entry is always kept.
+_MEMO_MAX_BYTES = 256 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -160,6 +170,7 @@ def _checked(
     label: str,
     want: Callable[[tuple[int, ...]], tuple[int, ...]],
     failures: Optional[list] = None,
+    memo_size: int = _MEMO_SIZE,
 ) -> Callable:
     """Wrap an external callable so a wrong return is a *named* error.
 
@@ -198,8 +209,10 @@ def _checked(
     cost one simulator call *per use* (measured: 400 calls for 199 points). The
     key is the input's dtype, shape and raw bytes, so only a bit-identical point
     is a hit; a hit returns a copy, so a consumer that mutates its array cannot
-    corrupt the cache. The memo is per callable and keeps the most recent
-    :data:`_MEMO_SIZE` points. A raised error is never cached. This assumes the
+    corrupt the cache. The memo is per callable and keeps the most recently
+    used *memo_size* points (default :data:`_MEMO_SIZE`), within
+    :data:`_MEMO_MAX_BYTES` of stored output; ``memo_size=0`` disables it. A
+    raised error is never cached. This assumes the
     callable is a function of its input -- which every consumer (derivatives,
     the NLP solver, the screen) already assumes -- but only *within one solve*:
     a callable that reads state the caller changes between solves (a parameter
@@ -210,8 +223,14 @@ def _checked(
     sweep whose true optima are 1, 10, 100).
     """
     memo: OrderedDict[tuple, np.ndarray] = OrderedDict()
+    memo_bytes = [0]
+    memo_size = int(memo_size)
+    if memo_size < 0:
+        raise ValueError(f"memo_size must be >= 0, got {memo_size}")
 
     def call(x_np):
+        if memo_size == 0:
+            return _evaluate(x_np)
         x_arr = np.asarray(x_np)
         key = (x_arr.dtype.str, x_arr.shape, x_arr.tobytes())
         hit = memo.get(key)
@@ -220,9 +239,15 @@ def _checked(
             return hit.copy()
         arr = _evaluate(x_np)
         memo[key] = arr.copy()
-        if len(memo) > _MEMO_SIZE:
-            memo.popitem(last=False)
+        memo_bytes[0] += arr.nbytes
+        while len(memo) > 1 and (len(memo) > memo_size or memo_bytes[0] > _MEMO_MAX_BYTES):
+            _, old = memo.popitem(last=False)
+            memo_bytes[0] -= old.nbytes
         return arr
+
+    def clear() -> None:
+        memo.clear()
+        memo_bytes[0] = 0
 
     def _evaluate(x_np):
         try:
@@ -261,7 +286,7 @@ def _checked(
             raise
 
     call.__name__ = f"{label}_{role}"
-    call._discopt_memo_clear = memo.clear  # type: ignore[attr-defined]
+    call._discopt_memo_clear = clear  # type: ignore[attr-defined]
     return call
 
 
@@ -272,6 +297,7 @@ def external(
     hess: Optional[Callable] = None,
     shape: Union[None, int, Sequence[int]] = (),
     name: Optional[str] = None,
+    memoize: Union[bool, int] = True,
 ) -> Callable:
     """Embed an external function whose derivatives *you* supply.
 
@@ -303,6 +329,15 @@ def external(
     name : str, optional
         Display name used in reprs and in every error message above. Defaults to
         ``fn.__name__``.
+    memoize : bool or int, default ``True``
+        Cache each of *fn*, *jac* and *hess* on the exact input bytes, so a point
+        the solver revisits is not recomputed. ``True`` keeps up to 1024 points
+        per callable (least-recently-used eviction, also bounded by 256 MiB of
+        stored output); an int sets the point count; ``False`` or ``0`` calls
+        through every time. The cache is cleared at the start of every
+        ``Model.solve``, so a callable that reads state you change *between*
+        solves is safe. Turn it off only for a callable whose result for one
+        input can change *during* a solve.
 
     Returns
     -------
@@ -338,15 +373,38 @@ def external(
     if hess is not None and not callable(hess):
         raise TypeError(f"external(hess=...) expects a callable, got {type(hess).__name__}")
 
+    if isinstance(memoize, (bool, np.bool_)):
+        memo_size = _MEMO_SIZE if memoize else 0
+    elif isinstance(memoize, (int, np.integer)):
+        if memoize < 0:
+            raise ValueError(f"external({label!r}, memoize=...) must be >= 0, got {memoize}")
+        memo_size = int(memoize)
+    else:
+        raise TypeError(
+            f"external(memoize=...) expects a bool or an int, got {type(memoize).__name__}"
+        )
+
     out_shape = _as_shape(shape)
 
     # One list per block, shared by its three wrappers: the first error any of
     # them raises lands here so the solver can re-raise it if POUNCE swallowed it.
     failures: list = []
 
-    f_call = _checked(fn, role="fn", label=label, want=lambda xs: out_shape, failures=failures)
+    f_call = _checked(
+        fn,
+        role="fn",
+        label=label,
+        want=lambda xs: out_shape,
+        failures=failures,
+        memo_size=memo_size,
+    )
     j_call = _checked(
-        jac, role="jac", label=label, want=lambda xs: out_shape + xs, failures=failures
+        jac,
+        role="jac",
+        label=label,
+        want=lambda xs: out_shape + xs,
+        failures=failures,
+        memo_size=memo_size,
     )
     h_call = (
         None
@@ -357,6 +415,7 @@ def external(
             label=label,
             want=lambda xs: out_shape + xs + xs,
             failures=failures,
+            memo_size=memo_size,
         )
     )
 
