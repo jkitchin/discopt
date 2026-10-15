@@ -14338,7 +14338,11 @@ def solve_model(
                     "node relaxation, which a non-MCBox-relaxable opaque callable cannot "
                     "provide. Express the body with MCBox-compatible ops (arithmetic + "
                     "the discopt._relax.mcbox intrinsic namespace), rebuild it from dm.* "
-                    "primitives (see dm.udf), or remove the integer/binary variables."
+                    "primitives (see dm.udf), or remove the integer/binary variables. "
+                    "If a local solution without a global certificate is acceptable, "
+                    "Model.solve(solver='mip-nlp') accepts this model (outer "
+                    "approximation over local NLP subproblems; status='feasible', "
+                    "no bound/gap)."
                 )
             # A dm.external block whose caller supplied no Hessian cannot answer
             # the NLP path's second-derivative request. Refuse here, naming both
