@@ -342,7 +342,35 @@ def test_active_accepts_an_existing_binary_element(encoding):
             )
 
 
-def test_active_false_rejected():
+@pytest.mark.parametrize("bad", [False, 0, 1, np.False_, np.True_, 0.0])
+def test_active_constants_rejected(bad):
+    """Only ``True`` and ``None`` are accepted as non-expressions; ``0`` used to
+    slip past an ``is False`` check and fix the unit off."""
     d = LinearTreeDefinition.from_spec(_spec())
-    with pytest.raises(ValueError, match="active=False"):
-        LinearTreeFormulation(dm.Model("x"), d, active=False)
+    with pytest.raises((ValueError, TypeError), match="active"):
+        LinearTreeFormulation(dm.Model("x"), d, active=bad)
+
+
+def test_active_rejects_non_binary_and_foreign_indicators():
+    d = LinearTreeDefinition.from_spec(_spec())
+    m = dm.Model("x")
+    c = m.continuous("c", lb=0, ub=1)
+    n = m.integer("n", lb=0, ub=1, shape=(2,))
+    on = m.binary("on", shape=(2,))
+    for bad in (c, n[0], on, on + 0):
+        with pytest.raises((ValueError, TypeError), match="active"):
+            LinearTreeFormulation(m, d, active=bad)
+    other = dm.Model("other").binary("on")
+    with pytest.raises(ValueError, match="different model"):
+        LinearTreeFormulation(m, d, active=other)
+
+
+def test_active_accepts_scalar_and_2d_element():
+    d = LinearTreeDefinition.from_spec(_spec())
+    m = dm.Model("x")
+    s = m.binary("s")
+    g = m.binary("g", shape=(2, 3))
+    for ok in (s, g[1, 2]):
+        f = LinearTreeFormulation(m, d, active=ok, prefix=f"t{id(ok)}")
+        f.formulate()
+        assert f.active is ok

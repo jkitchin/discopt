@@ -54,7 +54,7 @@ either leaf gives the same prediction on the facet.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 
@@ -65,6 +65,42 @@ if TYPE_CHECKING:
     from discopt.modeling.core import Model, Variable
 
 _ENCODINGS = ("hull", "bigm")
+
+
+class _Box(NamedTuple):
+    """Input box and output bounds, each as ``(lower, upper)`` arrays."""
+
+    x_lo: np.ndarray
+    x_hi: np.ndarray
+    y_lo: np.ndarray
+    y_hi: np.ndarray
+
+
+def _check_active(active, model) -> None:
+    """Accept ``None``, ``True``, or a scalar binary of ``model`` (``on`` or ``on[t]``).
+
+    Anything else would silently weaken the formulation: a continuous or
+    general-integer indicator makes the leaf sum fractional or larger than 1,
+    and a constant (``0``, ``np.False_``) fixes the unit off.
+    """
+    from discopt.modeling.core import IndexExpression, Variable, VarType
+
+    if active is None or active is True:
+        return
+    if isinstance(active, (bool, np.bool_)):
+        raise ValueError(f"active={active!r} is not meaningful; pass None for an always-on tree")
+    base = active.base if isinstance(active, IndexExpression) else active
+    if not isinstance(base, Variable) or base.var_type is not VarType.BINARY:
+        raise TypeError(
+            "active must be None, True, or a binary variable (or an element of one); "
+            f"got {type(active).__name__}"
+        )
+    if base.model is not model:
+        raise ValueError("active belongs to a different model than the formulation")
+    if active is base and base.size != 1:
+        raise ValueError(f"active must be a scalar binary; '{base.name}' has shape {base.shape}")
+    if isinstance(active, IndexExpression) and getattr(active, "_shape", None) != ():
+        raise ValueError("active must index a single element of the binary variable")
 
 
 def _shifted_rows(leaf, split_eps: float) -> tuple[np.ndarray, np.ndarray]:
@@ -125,8 +161,7 @@ class LinearTreeFormulation:
         self._prefix = prefix
         self._encoding = encoding
         self._split_eps = float(split_eps)
-        if active is False:
-            raise ValueError("active=False is not meaningful; pass None for an always-on tree")
+        _check_active(active, model)
         self._active_arg = active
         self._active: Any = None
         self._inputs: Variable | None = None
@@ -190,26 +225,24 @@ class LinearTreeFormulation:
 
     # ------------------------------------------------------------------
 
-    def _boxes(self):
-        """Input box, output bounds, and the versions that contain the origin.
+    def _boxes(self) -> tuple[_Box, _Box]:
+        """``(box, ext)``: the box and output bounds, and their extension to the origin.
 
-        Without ``active`` the extended versions equal the plain ones, so the
-        always-on formulation is unchanged.
+        Without ``active`` ``ext`` is ``box``, so the always-on formulation is
+        unchanged.
         """
         lb, ub = self._def.input_bounds
         y_lo, y_hi = self.output_bounds()
+        box = _Box(lb, ub, y_lo, y_hi)
         if self._active is None:
-            return lb, ub, y_lo, y_hi, lb, ub, y_lo, y_hi
-        return (
-            lb,
-            ub,
-            y_lo,
-            y_hi,
+            return box, box
+        ext = _Box(
             np.minimum(lb, 0.0),
             np.maximum(ub, 0.0),
             np.minimum(y_lo, 0.0),
             np.maximum(y_hi, 0.0),
         )
+        return box, ext
 
     def _one_leaf(self, z) -> None:
         rhs = 1 if self._active is None else self._active
@@ -217,13 +250,14 @@ class LinearTreeFormulation:
 
     def _build_hull(self) -> None:
         m, d, pfx = self._model, self._def, self._prefix
-        lb, ub, _, _, x_lo, x_hi, yv_lo, yv_hi = self._boxes()
+        box, ext = self._boxes()
+        lb, ub = box.x_lo, box.x_hi
         L, p, q = d.n_leaves, d.n_features, d.n_outputs
 
         # With ``active`` the variable bounds include 0; the leaf polytopes
         # (which contain the box rows) still confine an active unit to the box.
-        x = m.continuous(f"{pfx}_input", shape=(p,), lb=x_lo, ub=x_hi)
-        y = m.continuous(f"{pfx}_output", shape=(q,), lb=yv_lo, ub=yv_hi)
+        x = m.continuous(f"{pfx}_input", shape=(p,), lb=ext.x_lo, ub=ext.x_hi)
+        y = m.continuous(f"{pfx}_output", shape=(q,), lb=ext.y_lo, ub=ext.y_hi)
         z = m.binary(f"{pfx}_leaf", shape=(L,))
         # x_l lies in [min(lb,0), max(ub,0)] because it is either x or 0.
         xl = m.continuous(
@@ -255,11 +289,12 @@ class LinearTreeFormulation:
 
     def _build_bigm(self) -> None:
         m, d, pfx = self._model, self._def, self._prefix
-        lb, ub, y_lo, y_hi, lbe, ube, y_loe, y_hie = self._boxes()
+        box, ext = self._boxes()
+        lb, ub, y_lo, y_hi = box
         L, p, q = d.n_leaves, d.n_features, d.n_outputs
 
-        x = m.continuous(f"{pfx}_input", shape=(p,), lb=lbe, ub=ube)
-        y = m.continuous(f"{pfx}_output", shape=(q,), lb=y_loe, ub=y_hie)
+        x = m.continuous(f"{pfx}_input", shape=(p,), lb=ext.x_lo, ub=ext.x_hi)
+        y = m.continuous(f"{pfx}_output", shape=(q,), lb=ext.y_lo, ub=ext.y_hi)
         z = m.binary(f"{pfx}_leaf", shape=(L,))
         self._one_leaf(z)
         a = self._active
@@ -281,18 +316,20 @@ class LinearTreeFormulation:
             # ``active``.
             ns = leaf.n_split_rows
             if ns:
-                M = np.array([max(_box_range(G[r], lbe, ube)[1] - h[r], 0.0) for r in range(ns)])
+                M = np.array(
+                    [max(_box_range(G[r], ext.x_lo, ext.x_hi)[1] - h[r], 0.0) for r in range(ns)]
+                )
                 m.subject_to(
                     G[:ns] @ x <= h[:ns] + M * (1 - z[l_idx]),
                     name=f"{pfx}_split_{l_idx}",
                 )
             for k in range(q):
-                f_lo, f_hi = _box_range(leaf.A[k], lbe, ube)
+                f_lo, f_hi = _box_range(leaf.A[k], ext.x_lo, ext.x_hi)
                 f_lo += float(leaf.b[k])
                 f_hi += float(leaf.b[k])
                 # y - f <= y_hi - f_lo and f - y <= f_hi - y_lo when deselected.
-                M_up = max(float(y_hie[k]) - f_lo, 0.0)
-                M_dn = max(f_hi - float(y_loe[k]), 0.0)
+                M_up = max(float(ext.y_hi[k]) - f_lo, 0.0)
+                M_dn = max(f_hi - float(ext.y_lo[k]), 0.0)
                 f = leaf.A[k] @ x + float(leaf.b[k])
                 m.subject_to(y[k] - f <= M_up * (1 - z[l_idx]), name=f"{pfx}_oup_{l_idx}_{k}")
                 m.subject_to(f - y[k] <= M_dn * (1 - z[l_idx]), name=f"{pfx}_odn_{l_idx}_{k}")
