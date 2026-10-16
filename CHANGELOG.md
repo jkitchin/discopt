@@ -12,20 +12,19 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
-- **`DISCOPT_SUM_CANONICAL=1` folds per-element linear sums (#1712, default
-  OFF).** `dm.sum(c[i] * x[i] for i ...)` builds one Python node per term, and
-  every solver pass walks each one. With the flag on, the terms that name every
-  entry of a variable exactly once, each as `x[i]`, `-x[i]` or a scalar constant
-  times `x[i]`, become `dm.sum(C * x)`, the vectorized form. A `Parameter`
-  coefficient is never folded, so re-valuing it after the build still takes
-  effect. Sums under 32 terms and partial or repeated coverage are left as
-  written. The folded sum holds the same products in a different summation
-  order, so values can differ in the last bits. On the issue's 90,000-variable
-  transport LP, `solve()` takes 7.52 s (sd 0.40) against 18.21 s (sd 0.59). A
-  panel of 18 per-element instances in 9 families showed no status, certificate
-  or bound regression, and largest objective drift 2.1e-11
-  (`docs/dev/performance-plan.md` §77.3). Default OFF until the owner decides
-  whether that panel is broad enough to graduate it.
+- **Per-element linear sums are folded into the vectorized form (#1712).**
+  `dm.sum(c[i] * x[i] for i ...)` builds one Python node per term, and every
+  solver pass walks each one. Now the terms that name every entry of a variable
+  exactly once, each as `x[i]`, `-x[i]` or a scalar constant times `x[i]`,
+  become `dm.sum(C * x)`. A `Parameter` coefficient is never folded, so
+  re-valuing it after the build still takes effect. Sums under 32 terms and
+  partial or repeated coverage are left as written. The folded sum holds the
+  same products in a different summation order, so values can differ in the
+  last bits. On the issue's 90,000-variable transport LP, `solve()` takes 3.9 s
+  (it was 54.5 s before #1712). A panel of 18 per-element instances in 9
+  families showed no status, certificate or bound regression, and largest
+  objective drift 2.1e-11 (`docs/dev/performance-plan.md` §77.3). On by
+  default; `DISCOPT_SUM_CANONICAL=0` keeps sums as written.
 
 - **On/off (semicontinuous) units in `LinearTreeFormulation`.** The new
   `active=` argument takes `True` (a `{prefix}_active` binary is created) or an

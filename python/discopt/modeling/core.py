@@ -3387,22 +3387,25 @@ _SUM_CANONICAL_MIN_TERMS = 32
 
 
 def _sum_canonical_enabled() -> bool:
-    """``DISCOPT_SUM_CANONICAL`` (default OFF): fold per-element linear sums.
+    """``DISCOPT_SUM_CANONICAL`` (default ON; ``=0`` opts out): fold per-element sums.
 
     #1712. ``dm.sum(c[i] * x[i] for i ...)`` builds one Python node per term, and
     every solver pass that walks the model pays for each one: a 90,000-term
     objective cost seconds per pass where ``dm.sum(c * x)`` costs microseconds.
-    With the flag on, :func:`_canonical_affine_sum` rewrites the terms that are
-    exactly a whole variable, each entry once, into that vectorized form.
+    :func:`_canonical_affine_sum` rewrites the terms that are exactly a whole
+    variable, each entry once, into that vectorized form.
 
-    Default OFF because the result is not bit-identical: the same products are
-    summed in a different order (numpy's, not the generator's), so values can
-    differ in the last bits, and CLAUDE.md §5 makes such a change earn its default
-    with a panel. Row in ``docs/dev/flag-retirement-audit.md``.
+    Not bit-identical: the same products are summed in a different order
+    (numpy's, not the generator's), so values can differ in the last bits. That
+    is why it went through the CLAUDE.md §5 panel before becoming the default
+    (``docs/dev/performance-plan.md`` §77.3): 18 per-element instances in 9
+    families, no status, certificate or bound regression, every incumbent
+    verified on the unfolded model, drift <= 2.1e-11, faster overall. Graduated
+    2026-10-16. ``DISCOPT_SUM_CANONICAL=0`` restores the as-written sums.
     """
     import os as _os
 
-    return _os.environ.get("DISCOPT_SUM_CANONICAL", "0") == "1"
+    return _os.environ.get("DISCOPT_SUM_CANONICAL", "1") != "0"
 
 
 def _sum_of_terms(terms: list[Expression]) -> Expression:

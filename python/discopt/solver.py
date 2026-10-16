@@ -10094,11 +10094,15 @@ def _root_relaxation_lower_bound(
             )
             _sep_relaxer = None
         if _sep_relaxer is not None:
+            # ``rigorous_only``: this function's contract is a rigorous bound, and on
+            # a declared box with free columns the relaxer would otherwise take the
+            # vertex on trust (bchoco08 at time_limit 3-4 s, #1712).
             node_res = _sep_relaxer.solve_at_node(
                 root_lb,
                 root_ub,
                 time_limit=_role2_budget(_sep_budget),
                 build_deadline=_build_deadline,
+                rigorous_only=True,
             )
             if node_res.lower_bound is not None and np.isfinite(node_res.lower_bound):
                 sep_bound = float(node_res.lower_bound)
