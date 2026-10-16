@@ -344,9 +344,10 @@ _LAZY_RESEP_STRIDE = 64
 #:   ``milp_dual``       the engine's own B&B dual bound (``node_bound_mode="milp"``);
 #:   ``trusted_backend`` the ``auto`` backend's optimum (HiGHS / POUNCE), taken on
 #:                       trust -- no certificate is produced on that path;
-#:   ``trusted_vertex``  the in-house simplex's vertex objective with no computable
-#:                       safe bound (a free nonlinear column), accepted only when
-#:                       the relaxation is well-conditioned;
+#:   ``trusted_vertex``  RETIRED (#1712): the in-house simplex's vertex objective
+#:                       with no computable safe bound, once accepted on trust when
+#:                       well-conditioned. Such a node now declines. The key is kept
+#:                       so a tally that ever shows it is visibly a regression;
 #:   ``declined``        no bound this node could certify -- the driver branches.
 #:
 #: Diagnostic only: nothing reads it back and no bound depends on it, so the
@@ -1102,14 +1103,11 @@ class MccormickLPRelaxer:
         """Solve the McCormick LP relaxation restricted to the given bound box.
 
         ``rigorous_only=True`` asks for a bound only a certificate stands behind:
-        the two trust arms of the node certificate (``trusted_backend`` and
-        ``trusted_vertex``, see :data:`BOUND_PROVENANCE`) decline instead of
-        accepting the LP optimum, and the tally records ``declined``. For a caller
-        whose contract is a *rigorous* bound, such as the root-relaxation fallback.
-        #1712's investigation measured that fallback publishing a ``trusted_vertex``
-        value on ``bchoco08`` when the time limit ran out before root tightening, so
-        the declared box still held free columns and no safe bound existed. The node
-        loop keeps the default.
+        the ``trusted_backend`` arm of the node certificate (the ``auto`` backend's
+        optimum, see :data:`BOUND_PROVENANCE`) declines instead of accepting the LP
+        optimum, and the tally records ``declined``. For a caller whose contract is
+        a *rigorous* bound, such as the root-relaxation fallback. The other trust
+        arm, ``trusted_vertex``, is retired for every caller (#1712).
 
         Every other argument goes to :meth:`_solve_at_node_checked` unchanged.
         """
@@ -2080,23 +2078,16 @@ class MccormickLPRelaxer:
                 # HiGHS unbounded-relaxation cross-check.)
                 b = None
                 tag = "declined"
-            elif self._rigorous_only:
-                # No computable safe bound and the caller wants only a certified
-                # one: decline rather than take the vertex on trust (below).
-                b = None
-                tag = "declined"
-            elif self._max_finite_magnitude(milp) <= _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE:
-                # Pure-LP with a free variable but a bounded relaxation: trust the
-                # internally-equilibrated, dual-feasibility-verified vertex objective
-                # only when well-conditioned (mirrors the old guard's conditioning
-                # gate — below it the vertex carries no meaningful drift).
-                b = r.objective
-                tag = "trusted_vertex"
             else:
-                # Free variable AND ill-conditioned beyond where the fast simplex is
-                # reliable, with no computable safe bound: decline (branch) rather
-                # than risk a too-high vertex value (pure-Rust replacement of the old
-                # too-high-optimal HiGHS cross-check).
+                # No computable safe bound (a free column on an uncertified solve):
+                # decline, and let the driver branch. This used to take the vertex
+                # objective on trust when the LP was well-conditioned
+                # (``trusted_vertex``). Retired in #1712: over the 66-instance corpus
+                # at 30 s that arm was taken 0 times. Under CPU load it was taken
+                # whenever a deadline pushed a node onto the uncertified path
+                # (bchoco08: root fallback and root probe), so it was a soundness
+                # hole reached only when time was short. A short budget may cost a
+                # bound, never its rigor. See performance-plan §77.5.
                 b = None
                 tag = "declined"
             ok = b is not None and np.isfinite(b)
@@ -2210,38 +2201,6 @@ class MccormickLPRelaxer:
             if not (np.isfinite(lo) and np.isfinite(hi)):
                 return True
         return False
-
-    @staticmethod
-    def _max_finite_magnitude(milp) -> float:
-        """Largest finite magnitude across the LP's data (cost, rows, RHS, bounds).
-
-        A cheap conditioning proxy used only on the rare free-variable LPs where
-        the Neumaier–Shcherbina safe bound is not computable: below the threshold a
-        dual-feasible optimal vertex carries no meaningful drift and is trusted;
-        above it the bound is declined. Non-finite entries (the +/-inf bounds left
-        by the clamp) are ignored.
-        """
-        import scipy.sparse as sp
-
-        worst = 0.0
-        A = milp._A_ub
-        if A is not None:
-            data = A.data if sp.issparse(A) else np.asarray(A).ravel()
-            if np.size(data):
-                fin = np.abs(data[np.isfinite(data)])
-                if fin.size:
-                    worst = max(worst, float(fin.max()))
-        for arr in (milp._b_ub, milp._c):
-            if arr is not None and np.size(arr):
-                a = np.abs(np.asarray(arr, dtype=np.float64).ravel())
-                fin = a[np.isfinite(a)]
-                if fin.size:
-                    worst = max(worst, float(fin.max()))
-        for lo, hi in milp._bounds:
-            for v in (lo, hi):
-                if np.isfinite(v):
-                    worst = max(worst, abs(float(v)))
-        return worst
 
     def _separate_multilinear(self, milp, varmap, res, deadline):
         """Tighten products beyond the dense RLT cap by on-demand hull separation.

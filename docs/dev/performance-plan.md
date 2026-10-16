@@ -10765,3 +10765,27 @@ branch it fails or passes with the timing of the run, while the tapes are
 identical. Whether the gate should exist is tracked separately; changing timings
 does not fix it.
 
+### 77.5 The `trusted_vertex` arm is retired
+
+Chasing the load-sensitive 1278 failure found it, and the fix is a soundness fix,
+not a timing adjustment. `mccormick_lp._certify` had a trust arm: an optimal node
+LP with no Neumaier-Shcherbina certificate (a free column on an uncertified solve)
+took the vertex objective as its bound when the LP was well-conditioned. It had
+already certified a false bound once (`test_1492`, `milp_simplex.py` §756).
+
+- **Where it fired.** Only when a deadline pushed a node onto the uncertified
+  path. `bchoco08` at `time_limit` 3-4 s (deterministically), or at 10 s under
+  4-way load: once in the #654 root fallback, whose contract is a *rigorous*
+  bound, and once in the root LP probe, whose bound feeds the #930 fallback and
+  the #933 root seed.
+- **How often at normal load.** 0 of 66 corpus instances at 30 s
+  (`BOUND_PROVENANCE` per instance).
+- **What depends on it.** Nothing: the smoke suite with the arm retired fails
+  only the test written to pin the arm.
+
+Retired: such a node declines and the driver branches. A short budget can cost a
+bound, never its rigor. `solve_at_node(rigorous_only=True)` remains for the other
+trust arm (`trusted_backend`, the `auto` backend's optimum) and is what the root
+fallback asks for. Result: the 1278 corpus test, which failed 4/4 under 4-way load
+on `1eab4f4`, passes 8/8 (two loaded rounds).
+

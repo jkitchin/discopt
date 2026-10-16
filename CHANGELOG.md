@@ -159,6 +159,21 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **A node LP with no certificate no longer supplies a bound on trust.** When
+  the in-house simplex returned an optimal vertex but no Neumaier-Shcherbina
+  safe bound (a free column on an uncertified solve), `_certify` took the vertex
+  objective as the node's lower bound if the LP looked well-conditioned
+  (`trusted_vertex`). That arm had certified a false bound before (#1492). It
+  fired only when a deadline pushed a node onto the uncertified path: on the
+  in-repo corpus at 30 s it was taken 0 times in 66 instances. Under CPU load it
+  was taken by the root-relaxation fallback, whose contract is a rigorous bound,
+  and by the root LP probe on `bchoco08`, and
+  `test_1278_bound_provenance::test_the_corpus_certifies_from_proof_not_trust`
+  failed 4/4 under 4-way load on main. Such a node now declines and the solver
+  branches. The root fallback also asks `solve_at_node(rigorous_only=True)`,
+  which declines the other trust arm, `trusted_backend`. The 1278 test passes
+  8/8 under the same load (#1712 investigation).
+
 - **A `dm.sum(c * x)` objective beside a bilinear row no longer crashes the
   solve.** The polynomial and product walkers in `_relax/milp_relaxation.py`
   called `float()` on every constant, and an array constant (the `c` in
