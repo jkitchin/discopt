@@ -14425,11 +14425,29 @@ def solve_model(
     # solver-family dispatch; see "#1059: check the declared box BEFORE" above.
     # It still runs exactly once per solve (#863) -- it was moved, not added.
 
+    # --- Problem classification: dispatch LP/QP to specialized solvers ---
+    # #1520: no ``except``. ``classify_problem`` falls back to the always-valid
+    # NLP/MINLP class internally; a raise is a defect, not "general MINLP".
+    # Classified here, ahead of the convexity walk, so that walk can be skipped
+    # for an LP (#1712); nothing between the two reads or changes the model.
+    from discopt._relax.problem_classifier import ProblemClass, classify_problem
+
+    problem_class = classify_problem(model)
+
     _pure_continuous = _is_pure_continuous(model)
     _pure_continuous_convexity_known = False
     _pure_continuous_is_convex = False
     _pure_continuous_constraint_mask = None
-    if _pure_continuous and not skip_convex_check:
+    # #1712: an LP leaves on the LP branch below (HiGHS, gurobi or the native
+    # simplex), none of which reads these three values -- only a callback solve
+    # (#1500) carries an LP on to the spatial B&B that does. The walk cost 14 s of
+    # a 90k-term per-element objective's solve to prove what linearity already
+    # says. ``nlp_bb=True`` cannot intervene: its branch below needs a model that
+    # is not pure continuous, and an LP is.
+    _lp_leaves_before_convexity_use = (
+        problem_class == ProblemClass.LP and not _feasibility_callbacks
+    )
+    if _pure_continuous and not skip_convex_check and not _lp_leaves_before_convexity_use:
         # For QPs this must run before QP dispatch so indefinite
         # pure-continuous QPs do not use the convex QP solver.
         (
@@ -14493,13 +14511,7 @@ def solve_model(
             abs_gap_tol=abs_gap_tol,
         )
 
-    # --- Problem classification: dispatch LP/QP to specialized solvers ---
-    # #1520: no ``except``. ``classify_problem`` falls back to the always-valid
-    # NLP/MINLP class internally; a raise is a defect, not "general MINLP".
-    from discopt._relax.problem_classifier import ProblemClass, classify_problem
-
-    problem_class = classify_problem(model)
-
+    # ``problem_class`` was computed above, before the convexity walk (#1712).
     if _solver == "gurobi":
         if problem_class is None:
             raise NotImplementedError(

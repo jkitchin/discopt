@@ -235,6 +235,9 @@ def _eval_impl(expr: Expression, model: Optional[Model], box: dict, cache: dict)
     if isinstance(expr, SumOverExpression):
         if not expr.terms:
             return Interval(np.zeros(()), np.zeros(()))
+        fast = _scalar_affine_sum(expr.terms, box)
+        if fast is not None:
+            return fast
         total = _eval(expr.terms[0], model, box, cache)
         for t in expr.terms[1:]:
             total = total + _eval(t, model, box, cache)
@@ -244,6 +247,183 @@ def _eval_impl(expr: Expression, model: Optional[Model], box: dict, cache: dict)
         return _eval_matmul(expr, model, box, cache)
 
     return _unbounded(())
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Per-element linear sums (#1712)
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _scalar_leaf_bounds(expr: Expression, box: dict, bases: dict) -> Optional[tuple[float, float]]:
+    """``(lo, hi)`` of a scalar variable or ``var[idx]`` leaf, else ``None``.
+
+    The values :func:`_variable_interval` / :func:`_indexed_interval` would wrap,
+    read without building an :class:`Interval` per leaf. ``bases`` memoizes each
+    variable's enclosure for the duration of one sum. ``None`` -- the generic walk
+    decides -- also for an inverted pair, so that walk's ``Interval`` validation
+    still raises on it exactly as before.
+    """
+    if isinstance(expr, IndexExpression):
+        var = expr.base
+        if not isinstance(var, Variable):
+            return None
+        index = expr.index
+    elif isinstance(expr, Variable):
+        if expr.shape != ():
+            return None
+        var, index = expr, None
+    else:
+        return None
+    pair = bases.get(id(var))
+    if pair is None:
+        whole = _variable_interval(var, box)
+        pair = (whole.lo, whole.hi)
+        bases[id(var)] = pair
+    if index is None:
+        lo, hi = pair
+    else:
+        try:
+            lo = pair[0][index]
+            hi = pair[1][index]
+        except (IndexError, TypeError):
+            return None
+    if np.ndim(lo) != 0 or np.ndim(hi) != 0:
+        return None
+    flo, fhi = float(lo), float(hi)
+    if flo > fhi:
+        return None
+    return flo, fhi
+
+
+def _scalar_coefficient(expr: Expression) -> Optional[float]:
+    """The value of a 0-d ``Constant``/``Parameter``, else ``None``."""
+    if not isinstance(expr, (Constant, Parameter)):
+        return None
+    v = np.asarray(expr.value, dtype=np.float64)
+    return float(v) if v.ndim == 0 else None
+
+
+def _scalar_affine_sum(terms: list, box: dict) -> Optional[Interval]:
+    """Enclose ``Σ terms`` when every term is ``leaf`` or ``coef * leaf``; else ``None``.
+
+    #1712: ``dm.sum(c[i, j] * x[i, j] for ...)`` -- the per-element idiom a Pyomo
+    port writes -- is a ``SumOverExpression`` with one Python node per term, and
+    the generic walk paid four ``Interval`` constructions per term (90k terms:
+    ~6 s per call, twice per solve via the #1551 certificate guard).
+
+    This is the generic walk's arithmetic, not an approximation of it, so the
+    result is **bit-identical** (``test_interval_eval_affine_sum_fast_path``):
+
+    * each product is :meth:`Interval.__mul__`, applied elementwise -- every step
+      of it (corners, ``min``/``max``, the ``0 * ±inf`` NaN cleanup, the #957
+      underflow test choosing between ``_round_*`` and ``_round_*_exact0``) is
+      elementwise, so a vector of terms gets exactly what each term got alone;
+    * the sum is :meth:`Interval.__add__` folded left to right, in the same order
+      as the generic ``SumOverExpression`` branch, on Python floats (IEEE-754
+      double, so ``+`` and :func:`math.nextafter` match numpy's exactly).
+
+    Any term outside the pattern returns ``None`` and the caller walks generically.
+    """
+    n = len(terms)
+    lo_t: list = [None] * n
+    hi_t: list = [None] * n
+    prod_pos: list[int] = []
+    l_lo: list[float] = []
+    l_hi: list[float] = []
+    r_lo: list[float] = []
+    r_hi: list[float] = []
+    bases: dict = {}
+    for k, t in enumerate(terms):
+        leaf = _scalar_leaf_bounds(t, box, bases)
+        if leaf is not None:
+            lo_t[k], hi_t[k] = leaf
+            continue
+        if not (isinstance(t, BinaryOp) and t.op == "*"):
+            return None
+        # Keep the operand order of ``left * right``: ``__mul__``'s corners are
+        # formed from (self, other), and although IEEE products commute, matching
+        # the order keeps the equivalence argument trivially line-by-line.
+        cl = _scalar_coefficient(t.left)
+        if cl is not None:
+            leaf = _scalar_leaf_bounds(t.right, box, bases)
+            if leaf is None:
+                return None
+            ll, lh, (rl, rh) = cl, cl, leaf
+        else:
+            cr = _scalar_coefficient(t.right)
+            if cr is None:
+                return None
+            leaf = _scalar_leaf_bounds(t.left, box, bases)
+            if leaf is None:
+                return None
+            (ll, lh), rl, rh = leaf, cr, cr
+        prod_pos.append(k)
+        l_lo.append(ll)
+        l_hi.append(lh)
+        r_lo.append(rl)
+        r_hi.append(rh)
+
+    if prod_pos:
+        p_lo, p_hi = _elementwise_interval_mul(
+            np.asarray(l_lo), np.asarray(l_hi), np.asarray(r_lo), np.asarray(r_hi)
+        )
+        for k, a, b in zip(prod_pos, p_lo.tolist(), p_hi.tolist()):
+            lo_t[k] = a
+            hi_t[k] = b
+
+    # ``Interval.__add__``: ``_round_down_exact0(lo + lo')``, ``_round_up_exact0(hi + hi')``.
+    nxt = math.nextafter
+    ninf, pinf = -math.inf, math.inf
+    lo = lo_t[0]
+    hi = hi_t[0]
+    for a, b in zip(lo_t[1:], hi_t[1:]):
+        s = lo + a
+        lo = 0.0 if s == 0.0 else nxt(s, ninf)
+        s = hi + b
+        hi = 0.0 if s == 0.0 else nxt(s, pinf)
+    return Interval(np.asarray(lo, dtype=np.float64), np.asarray(hi, dtype=np.float64))
+
+
+def _elementwise_interval_mul(
+    s_lo: np.ndarray, s_hi: np.ndarray, o_lo: np.ndarray, o_hi: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """:meth:`Interval.__mul__` with each element treated as its own scalar interval.
+
+    ``__mul__`` decides its NaN cleanup and its #957 rounding mode with ``any``
+    over the whole array; for a 0-d interval that ``any`` is the element itself,
+    so here both decisions are taken per element. Kept beside its one caller;
+    see :func:`_scalar_affine_sum` for why it must stay line-for-line with
+    ``Interval.__mul__``.
+    """
+    with np.errstate(invalid="ignore"):
+        a = s_lo * o_lo
+        b = s_lo * o_hi
+        c = s_hi * o_lo
+        d = s_hi * o_hi
+        lo = np.minimum(np.minimum(a, b), np.minimum(c, d))
+        hi = np.maximum(np.maximum(a, b), np.maximum(c, d))
+        if bool(np.isnan(lo).any()) or bool(np.isnan(hi).any()):
+            # A NaN corner can only be ``0 * ±inf``; ``nan_to_num`` is the identity
+            # on every other corner, so cleaning all elements equals cleaning the
+            # NaN ones.
+            a = iv._nan_corner_to_zero(a)
+            b = iv._nan_corner_to_zero(b)
+            c = iv._nan_corner_to_zero(c)
+            d = iv._nan_corner_to_zero(d)
+            lo = np.minimum(np.minimum(a, b), np.minimum(c, d))
+            hi = np.maximum(np.maximum(a, b), np.maximum(c, d))
+    underflowed = (
+        ((a == 0.0) & (s_lo != 0.0) & (o_lo != 0.0))
+        | ((b == 0.0) & (s_lo != 0.0) & (o_hi != 0.0))
+        | ((c == 0.0) & (s_hi != 0.0) & (o_lo != 0.0))
+        | ((d == 0.0) & (s_hi != 0.0) & (o_hi != 0.0))
+    )
+    # Per element: ``exact0`` rounding iff an endpoint is zero and nothing
+    # underflowed. Where no endpoint is zero the two roundings coincide.
+    exact0 = ((lo == 0.0) | (hi == 0.0)) & ~underflowed
+    out_lo = np.where(exact0, iv._round_down_exact0(lo), iv._round_down(lo))
+    out_hi = np.where(exact0, iv._round_up_exact0(hi), iv._round_up(hi))
+    return np.asarray(out_lo, dtype=np.float64), np.asarray(out_hi, dtype=np.float64)
 
 
 # ──────────────────────────────────────────────────────────────────────
