@@ -145,6 +145,33 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **Per-element LPs spend less time in preprocessing before HiGHS (#1712).** An
+  LP written per element (`m.continuous("x", over=P * K)`, `dm.sum(c * x[p, k]
+  for ...)`, `m.constraint(P, lambda p: ...)`) spent most of `solve()` walking
+  its expression DAG in Python, node by node, before HiGHS got the same matrix
+  the vectorized form produces. On the issue's 300x300 transport LP (90,000
+  variables), measured as 3 interleaved runs per arm: 54.45 s (sd 2.01) before
+  and 18.91 s (sd 0.18) after. Objective, bound, certificate and route are
+  identical. Every change produces exactly the same result as before:
+  - the interval enclosure behind the #1551 certificate guard handles a sum of
+    `x[i]` / `c * x[i]` terms in one vectorised pass, bit-identical to the
+    per-node walk;
+  - the NL tape compiler lowers the same sums, and the `c*x[i] + ...` chains
+    that `Model.constraint` rows become, without its per-node traversal. The
+    tape it builds is the same, so this speeds up every per-element model that
+    builds an NLP tape, not only LPs;
+  - the convex-MINLP kernel refuses a continuous or linear model before building
+    an NLP tape. It always refused these models, but only after building one;
+  - an LP no longer runs convexity classification, since the LP route never
+    reads the result;
+  - the Rust `ExprArena::quadratic_form` no longer rescans the whole arena for
+    every row it extracts. That scan made LP extraction O(rows x arena size).
+
+  A per-element LP is still about 9x slower than its vectorized form (19 s against
+  2 s). The remaining time is spread over passes that each walk the model once,
+  such as entropy canonicalisation, the factorable scan and repeated
+  `classify_problem` calls.
+
 - **`dm.external` callbacks are called once per distinct point (#1708).** On a
   2-variable MINLP under `solver="mip-nlp"`, `fn`/`jac`/`hess` ran 2236/1872/1769
   times at only 85/71/69 distinct inputs: outer approximation re-solves the same
