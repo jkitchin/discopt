@@ -10733,3 +10733,35 @@ per run: at least 1 on every ON run, 0 on every OFF run.
   is a pre-existing defect that the flag made reachable. Fixed (the walkers decline
   an array constant) and pinned by
   `test_array_constant_objective_with_bilinear_rows_solves`.
+
+### 77.4 Builder rows reach the tape without Python expressions
+
+§77.2 found the folded model's remaining cost in the 600 builder rows: 1.0 s to
+build their `Constraint` bodies and as much again to compile them, only for the
+tape evaluator to lower them. Now `Model._builder_linear_constraints(lazy=True)`
+gives the evaluator constraints whose body is built on first read, and
+`compile_builder_row` lowers each row from its coefficients. It makes the same
+`NlExpr` calls in the same order as compiling the built body: constant nodes
+shared through the same interned `Constant` identities, variable nodes shared per
+element, and the same budget charges. Rows of 1-2 terms keep the generic compile.
+Every other caller of `_builder_linear_constraints` still gets eager rows. A probe
+over a full solve of the issue's model counted **0** builder-row bodies built.
+
+Measured, 3 interleaved runs per arm, N=300:
+
+| arm | before | after |
+|---|---|---|
+| default | 18.21 s (sd 0.59) | 13.99 s (sd 0.61) |
+| `DISCOPT_SUM_CANONICAL=1` | 7.52 s (sd 0.40) | 3.87 s (sd 0.09) |
+| vectorized form, for reference | 2.5 s | 2.5 s |
+
+**`test_1278_bound_provenance::test_the_corpus_certifies_from_proof_not_trust` is
+load-sensitive on main.** It asserts that no corpus node is certified through
+`trusted_vertex`, the documented trust gate in `mccormick_lp._certify` for a free
+variable on a well-conditioned relaxation. The corpus solves run under a 10 s wall
+clock, so which nodes are reached depends on CPU load. With 4 concurrent copies it
+fails on `1eab4f4` (main) 4/4 with one `trusted_vertex` node out of 37-38. On this
+branch it fails or passes with the timing of the run, while the tapes are
+identical. Whether the gate should exist is tracked separately; changing timings
+does not fix it.
+

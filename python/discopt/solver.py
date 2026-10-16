@@ -69,6 +69,7 @@ from discopt.modeling.core import (
     SolveResult,
     VarType,
     _solve_leaves_model_unchanged,
+    builder_row_of,
     objective_sense_sign,
 )
 from discopt.modeling.core import repr_space_cutoff as _repr_space_cutoff
@@ -26799,7 +26800,11 @@ def _matched_row_constraint_duals(
         if any(k in bad_rows or k not in row_value for k in rows):
             continue
         vals = np.array([row_value[k] for k in rows], dtype=np.float64)
-        shape = tuple(getattr(con.body, "shape", ()) or ())
+        # A builder row is scalar; reading its shape off ``body`` would build the
+        # body the tape evaluator deliberately left unbuilt (#1712).
+        shape = (
+            () if builder_row_of(con) is not None else tuple(getattr(con.body, "shape", ()) or ())
+        )
         if int(np.prod(shape)) != vals.size or (shape == (1,) and vals.size == 1):
             shape = () if vals.size == 1 else (vals.size,)
         out[name] = vals.reshape(shape)

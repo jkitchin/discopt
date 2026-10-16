@@ -3831,6 +3831,70 @@ def _constraint_name_set(self, value: Optional[str]) -> None:
 Constraint.name = property(_constraint_name_get, _constraint_name_set)  # type: ignore[assignment]
 
 
+def _builder_row_constraint(row) -> "Constraint":
+    """A builder-resident linear row as a :class:`Constraint` (#840).
+
+    The one row->Constraint translation, shared by the eager and the lazy paths
+    so the expression a lazy row builds on demand is this one exactly.
+    """
+    body: Optional[Expression] = None
+    for v, local, coeff in row.terms:
+        if v.shape == ():
+            comp: Expression = v
+        elif len(v.shape) <= 1:
+            comp = v[local]
+        else:
+            comp = v[tuple(int(i) for i in np.unravel_index(local, v.shape))]
+        term = coeff * comp
+        body = term if body is None else body + term
+    if body is None:
+        body = Constant(np.float64(0.0))
+    if row.sense == "<=":
+        c = body <= row.rhs
+    elif row.sense == ">=":
+        c = body >= row.rhs
+    else:
+        c = body == row.rhs
+    c.name = row.name
+    return c
+
+
+#: The sense each comparison operator gives a builder row: ``__ge__`` writes
+#: ``body >= rhs`` as ``rhs - body <= 0``.
+_BUILDER_ROW_SENSE = {"<=": "<=", ">=": "<=", "==": "=="}
+
+
+def _lazy_builder_row_constraint(row) -> "Constraint":
+    """:func:`_builder_row_constraint` with the body deferred to its first read."""
+    c = object.__new__(Constraint)
+    c.sense = _BUILDER_ROW_SENSE[row.sense]
+    c.rhs = 0.0
+    c.name = row.name
+    c.__dict__["_builder_row"] = row
+    return c
+
+
+def builder_row_of(constraint: "Constraint"):
+    """The pending builder row of a lazy constraint whose body is unbuilt, else ``None``."""
+    d = constraint.__dict__
+    return d.get("_builder_row") if "body" not in d else None
+
+
+def _constraint_getattr(self, name: str):
+    # Only reached when ordinary lookup fails, so a constraint with a body pays
+    # nothing. A lazy builder row builds its body once, here, on first read.
+    if name == "body":
+        row = self.__dict__.get("_builder_row")
+        if row is not None:
+            body = _builder_row_constraint(row).body
+            self.__dict__["body"] = body
+            return body
+    raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
+
+
+Constraint.__getattr__ = _constraint_getattr  # type: ignore[attr-defined]
+
+
 def _reject_unnormalized_rhs(constraint: "Constraint", *, where: str, index: int = -1) -> None:
     """Refuse a constraint whose ``rhs`` the solve path cannot represent.
 
@@ -11265,7 +11329,7 @@ class Model:
                 expr = expr + sum((0.5 * vals) * gather(rows) * gather(cols))
         return expr
 
-    def _builder_linear_constraints(self) -> list[Constraint]:
+    def _builder_linear_constraints(self, *, lazy: bool = False) -> list[Constraint]:
         """Materialize the builder-resident linear rows as fresh :class:`Constraint`
         objects **without mutating the model**.
 
@@ -11280,32 +11344,18 @@ class Model:
         ``_materialize_builder_linear_rows`` (which relocates the rows in place); both
         share the row→Constraint translation so the two stay identical. Returns an
         empty list once the blocks have been materialized/cleared.
+
+        ``lazy=True`` (#1712) defers each row's ``body``: the constraint's name and
+        sense are set, and the body expression is built from the row on its first
+        read (:func:`_constraint_getattr`), identical to the eager one. A tape
+        evaluator lowers such a row straight from its coefficients and never reads
+        the body, which on a 600-row, 90,000-term model saved the 1.0 s that
+        building the expressions cost. Every other caller keeps ``lazy=False``.
         """
         from discopt.export._common import iter_builder_linear_rows
 
-        out: list[Constraint] = []
-        for row in iter_builder_linear_rows(self):
-            body: Optional[Expression] = None
-            for v, local, coeff in row.terms:
-                if v.shape == ():
-                    comp: Expression = v
-                elif len(v.shape) <= 1:
-                    comp = v[local]
-                else:
-                    comp = v[tuple(int(i) for i in np.unravel_index(local, v.shape))]
-                term = coeff * comp
-                body = term if body is None else body + term
-            if body is None:
-                body = Constant(np.float64(0.0))
-            if row.sense == "<=":
-                c = body <= row.rhs
-            elif row.sense == ">=":
-                c = body >= row.rhs
-            else:
-                c = body == row.rhs
-            c.name = row.name
-            out.append(c)
-        return out
+        make = _lazy_builder_row_constraint if lazy else _builder_row_constraint
+        return [make(row) for row in iter_builder_linear_rows(self)]
 
     def _materialize_builder_linear_rows(self) -> int:
         """Rewrite builder-resident linear constraint rows as expression constraints.

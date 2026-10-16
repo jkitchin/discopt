@@ -793,6 +793,84 @@ def _affine_coef(coef: Expression, E: Any, memo: dict[int, Any], budget: _Budget
     return cast(np.ndarray, arr)
 
 
+def compile_builder_row(row: Any, model: Model) -> np.ndarray | None:
+    """Lower a builder-resident linear row straight from its coefficients (#1712).
+
+    Returns the 1-row object array that ``compile_to_nl_array`` builds for the
+    row's materialized body (``Model._builder_linear_constraints``), WITHOUT
+    building that body: on a 600-row, 90,000-term model the expressions cost
+    1.0 s to build and as much again to walk.
+
+    The body of a ``k``-term row is ``c1*x1 + ... + ck*xk`` with the right-hand
+    side subtracted (``<=``/``==``) or subtracted from (``>=``), so its tape is
+    the :func:`_additive_chain` of ``k + 1`` leaves lowered by
+    :func:`_lower_scalar_affine_sum`. This reproduces that lowering call for call:
+
+    * the leaves in chain order -- ``[t1..tk, rhs]`` signed ``+``/``-`` for
+      ``<=``/``==``, ``[rhs, t1..tk]`` signed ``+``/``-`` for ``>=``;
+    * each coefficient through :func:`_const_array`, its node shared by the
+      identity of the interned :class:`Constant` the materialization would hold
+      (``_wrap`` interns scalars), so an equal coefficient or right-hand side
+      reuses one ``const_`` node exactly as the memo does;
+    * each ``x[i]`` as ``E.var(slot)``, shared per element (``Variable.__getitem__``
+      returns one cached node per element, so the memo shares per element);
+    * products, then negation, then one ``E.sum``, with the same budget charges.
+
+    ``test_builder_row_tape_matches_materialized`` holds the two to identical
+    tapes, values and gradients. ``None`` for a row of fewer than three terms:
+    its chain is too short to flatten, so it takes the generic path.
+    """
+    from discopt.modeling.core import _wrap
+
+    terms = row.terms
+    if len(terms) + 1 < _FLATTEN_MIN_TERMS:
+        return None
+    import pounce
+
+    E = pounce.NlExpr
+    budget = _Budget()
+    const_nodes: dict[int, Any] = {}
+    keep_alive: list[Any] = []  # the interned constants must outlive this lowering
+    var_nodes: dict[tuple[int, int], Any] = {}
+    offsets: dict[int, int] = {}
+
+    def const_node(value: float) -> Any:
+        c = _wrap(value)
+        keep_alive.append(c)
+        node = const_nodes.get(id(c))
+        if node is None:
+            node = _const_array(c.value, E, budget)[()]
+            const_nodes[id(c)] = node
+        return node
+
+    def var_node(v: Variable, local: int) -> Any:
+        key = (id(v), local)
+        node = var_nodes.get(key)
+        if node is None:
+            off = offsets.get(id(v))
+            if off is None:
+                off = offsets[id(v)] = _compute_var_offset(v, model)
+            node = var_nodes[key] = E.var(off + local)
+        return node
+
+    def products() -> list[Any]:
+        out = []
+        for v, local, coeff in terms:
+            c = const_node(coeff)  # ``coeff * x`` is ``BinaryOp("*", _wrap(coeff), x)``
+            x = var_node(v, int(local))
+            budget.charge(1, "a '*' over arrays")
+            out.append(c * x)
+        return out
+
+    if row.sense == ">=":
+        nodes = [const_node(row.rhs)] + [-n for n in products()]
+    else:
+        prods = products()
+        nodes = prods + [-const_node(row.rhs)]
+    budget.charge(len(nodes), "an additive chain")
+    return _wrap_scalar(E.sum(nodes)).reshape(-1)
+
+
 def _matmul(left: np.ndarray, right: np.ndarray, E: Any, budget: _Budget) -> np.ndarray:
     """``left @ right`` for 1-D/2-D operands, one n-ary ``E.sum`` per output entry.
 

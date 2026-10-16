@@ -199,10 +199,19 @@ The release procedure that produces these entries is documented in
     model, 3 interleaved runs per arm: 20.19 s (sd 0.73) before and 18.47 s
     (sd 0.35) after.
 
-  A per-element LP is still about 7x slower than its vectorized form (18.5 s
-  against 2.5 s). The remaining time is spread over about a dozen passes that
-  each walk the 90,000 Python expression nodes once. The largest is the NLP tape
-  that the #1561 certificate check builds to verify the published point.
+  - builder rows (`add_linear_constraints`, `Model.constraint` families) reach
+    the NLP tape without being built as Python expressions. The tape evaluator
+    asks for them lazily: name and sense are set, and the body expression is
+    built only if something reads it. The rows are lowered straight from their
+    coefficients, making the same `NlExpr` calls as compiling the built
+    expression would; tests compare tapes, values and gradients bit for bit. On
+    the issue's model no consumer reads a builder row's body during the solve.
+    Measured, 3 interleaved runs per arm: 18.21 s -> 13.99 s (sd 0.61) by
+    default, and 7.52 s -> 3.87 s (sd 0.09) with `DISCOPT_SUM_CANONICAL=1`.
+
+  A per-element LP is still about 5.5x slower than its vectorized form by
+  default (14.0 s against 2.5 s), and about 1.5x slower with
+  `DISCOPT_SUM_CANONICAL=1` (3.9 s).
 
 - **`dm.external` callbacks are called once per distinct point (#1708).** On a
   2-variable MINLP under `solver="mip-nlp"`, `fn`/`jac`/`hess` ran 2236/1872/1769
