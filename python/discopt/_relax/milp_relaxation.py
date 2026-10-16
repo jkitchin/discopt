@@ -1345,7 +1345,7 @@ _AffineSquare = tuple[float, list[tuple[float, _Monomial]]]
 
 
 def _scalar_constant(e: Constant) -> float | None:
-    """The value of a 0-d numeric :class:`Constant`, else ``None``.
+    """The value of a single-element numeric :class:`Constant`, else ``None``.
 
     The walkers in this module fold *scalar* products, powers and quotients. An
     array constant -- the ``C`` in ``dm.sum(C * x)`` -- is not a scalar factor;
@@ -1354,9 +1354,12 @@ def _scalar_constant(e: Constant) -> float | None:
     bilinear row). Declining is each walker's answer for anything it cannot fold.
     """
     value = np.asarray(e.value)
-    if value.ndim != 0 or value.dtype.kind not in "biuf":
+    # ``size == 1``, not ``ndim == 0``: exactly what ``float()`` accepted before, so
+    # only the inputs that used to raise are declined. A shape-(1,) constant folded
+    # before and must keep folding (declining it re-routed corpus solves).
+    if value.size != 1 or value.dtype.kind not in "biuf":
         return None
-    return float(value)
+    return float(value.reshape(()))
 
 
 def _is_zero_constant(e: Expression) -> bool:
