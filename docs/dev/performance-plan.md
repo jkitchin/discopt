@@ -10730,9 +10730,10 @@ per run: at least 1 on every ON run, 0 on every OFF run.
 - **Defect found:** the first run crashed both bilinear instances in
   `milp_relaxation` (`float()` of an array constant). The crash reproduces with the
   flag off on a hand-written `dm.sum(c * x)` objective beside a bilinear row, so it
-  is a pre-existing defect that the flag made reachable. Fixed (the walkers decline
-  an array constant) and pinned by
-  `test_array_constant_objective_with_bilinear_rows_solves`.
+  is a pre-existing defect that the flag made reachable. Fixed independently on
+  main by #1717 (the walkers decline an array-valued constant), which this branch
+  adopted in its merge. `test_array_constant_objective_with_bilinear_rows_solves`
+  pins the flag's path through it.
 
 ### 77.4 Builder rows reach the tape without Python expressions
 

@@ -174,14 +174,6 @@ The release procedure that produces these entries is documented in
   which declines the other trust arm, `trusted_backend`. The 1278 test passes
   8/8 under the same load (#1712 investigation).
 
-- **A `dm.sum(c * x)` objective beside a bilinear row no longer crashes the
-  solve.** The polynomial and product walkers in `_relax/milp_relaxation.py`
-  called `float()` on every constant, and an array constant (the `c` in
-  `dm.sum(c * x)`) raised `TypeError` from inside `solve()`. They now decline a
-  term they cannot fold, as they already did for any other unsupported form.
-  Found by the `DISCOPT_SUM_CANONICAL` panel; the crash also reproduces with the
-  flag off on a hand-written vectorized objective (#1712).
-
 - **Per-element LPs spend less time in preprocessing before HiGHS (#1712).** An
   LP written per element (`m.continuous("x", over=P * K)`, `dm.sum(c * x[p, k]
   for ...)`, `m.constraint(P, lambda p: ...)`) spent most of `solve()` walking
@@ -223,9 +215,20 @@ The release procedure that produces these entries is documented in
     Measured, 3 interleaved runs per arm: 18.21 s -> 13.99 s (sd 0.61) by
     default, and 7.52 s -> 3.87 s (sd 0.09) with `DISCOPT_SUM_CANONICAL=1`.
 
-  A per-element LP is still about 5.5x slower than its vectorized form by
-  default (14.0 s against 2.5 s), and about 1.5x slower with
-  `DISCOPT_SUM_CANONICAL=1` (3.9 s).
+  With the per-element sum folding above (default ON), the issue's model
+  solves in 3.9 s against 2.5 s for its vectorized form; with
+  `DISCOPT_SUM_CANONICAL=0` it takes 14.0 s.
+
+- **OA stops at a fixed point instead of repeating it (#1710).** When an OA
+  iteration added no cuts, the next master was the same problem, so OA re-solved
+  the same fixed-integer NLP from the same warm start until the 50-iteration
+  no-progress exit fired: on #1708's model, 51 identical fixed-NLP solves and 51
+  master solves for one answer. OA now digests the loop state at each master
+  solve (every master input except its wall budget, plus the bounds, incumbent
+  and candidate queue) and stops with the same `"stalling"` reason as soon as
+  it repeats the previous iteration's state. A converged fixed-NLP solve is
+  also reused for a bit-identical later request (32-entry LRU). On the #1708
+  model: 1 fixed-NLP solve, 2 masters, same objective and bound.
 
 - **`dm.external` callbacks are called once per distinct point (#1708).** On a
   2-variable MINLP under `solver="mip-nlp"`, `fn`/`jac`/`hess` ran 2236/1872/1769

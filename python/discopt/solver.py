@@ -22723,8 +22723,27 @@ def _lagrangian_grad(evaluator, x, grad, lam_r, m: int, n: int) -> np.ndarray:
 def _cert_jacobian(evaluator, x: np.ndarray, m: int, n: int):
     """The constraint Jacobian at ``x`` as a dense ``(m, n)`` array, or as CSR when
     the evaluator returns a sparse matrix (the QP route's adapter, #1596) --
-    ``np.asarray`` on a sparse matrix would silently yield a 0-d object array."""
-    jac = evaluator.evaluate_jacobian(x)
+    ``np.asarray`` on a sparse matrix would silently yield a 0-d object array.
+
+    Above ``_MAX_DENSE_JACOBIAN_ELEMS`` entries the evaluator's
+    ``evaluate_sparse_jacobian`` is used instead (#1711): the dense ``(m, n)`` form
+    of a 10k-link chain NLP is 1.6 GB to carry ~40k nonzeros, the certificate makes
+    several copies of it, and :func:`_lagrangian_slope`'s dense refinement walks it
+    column by column -- 100k constraints were OS-killed at 32 GB. Every consumer
+    already takes CSR, and the sparse matrix is the dense one exactly (the tape's
+    ``coo_matrix`` sums duplicates as its dense scatter does). Small problems keep
+    the dense form so their certificate arithmetic is unchanged."""
+    jac = None
+    sparse_fn = getattr(evaluator, "evaluate_sparse_jacobian", None)
+    if sparse_fn is not None and m * n > _MAX_DENSE_JACOBIAN_ELEMS:
+        jac = sparse_fn(x)
+        if not _sp_issparse(jac):
+            # The numpy evaluator's own dense fallback, or a COO-tuple convention
+            # (CUTEst) whose field order is not uniform: take the documented dense
+            # contract rather than guess at a layout.
+            jac = None
+    if jac is None:
+        jac = evaluator.evaluate_jacobian(x)
     if _sp_issparse(jac):
         import scipy.sparse as _sps
 

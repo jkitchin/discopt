@@ -1344,32 +1344,6 @@ _Monomial = tuple[int, ...]
 _AffineSquare = tuple[float, list[tuple[float, _Monomial]]]
 
 
-def _scalar_constant(e: Constant) -> float | None:
-    """The value of a single-element numeric :class:`Constant`, else ``None``.
-
-    The walkers in this module fold *scalar* products, powers and quotients. An
-    array constant -- the ``C`` in ``dm.sum(C * x)`` -- is not a scalar factor;
-    ``float()`` on it raised ``TypeError`` and took the whole solve down (#1712,
-    reachable from any hand-written ``dm.sum(c * x)`` objective in a model with a
-    bilinear row). Declining is each walker's answer for anything it cannot fold.
-    """
-    value = np.asarray(e.value)
-    # ``size == 1``, not ``ndim == 0``: exactly what ``float()`` accepted before, so
-    # only the inputs that used to raise are declined. A shape-(1,) constant folded
-    # before and must keep folding (declining it re-routed corpus solves).
-    if value.size != 1 or value.dtype.kind not in "biuf":
-        return None
-    return float(value.reshape(()))
-
-
-def _is_zero_constant(e: Expression) -> bool:
-    """``e`` is a scalar :class:`Constant` within 1e-12 of zero."""
-    if not isinstance(e, Constant):
-        return False
-    value = _scalar_constant(e)
-    return value is not None and abs(value) <= 1e-12
-
-
 def _product_to_monomial(expr: Expression, model: Model) -> tuple[float, _Monomial] | None:
     """Fold a pure product of original variables / integer powers / constants.
 
@@ -1388,10 +1362,14 @@ def _product_to_monomial(expr: Expression, model: Model) -> tuple[float, _Monomi
             scalar[0] *= -1.0
             return visit(e.operand)
         if isinstance(e, Constant):
-            value = _scalar_constant(e)
-            if value is None:
+            # A non-scalar coefficient array (``C[1:, :] * (...)**2``) is not a
+            # scalar monomial factor: decline rather than pick an element, so the
+            # caller falls back to its other relaxation paths. Declining only
+            # drops a candidate cut, so it is sound.
+            c = _constant_value(e)
+            if c is None:
                 return False
-            scalar[0] *= value
+            scalar[0] *= c
             return True
         flat = _get_flat_index(e, model)
         if flat is not None:
@@ -1399,8 +1377,9 @@ def _product_to_monomial(expr: Expression, model: Model) -> tuple[float, _Monomi
             return True
         if isinstance(e, BinaryOp) and e.op == "**" and isinstance(e.right, Constant):
             base_flat = _get_flat_index(e.left, model)
-            exp_val = _scalar_constant(e.right)
-            if base_flat is not None and exp_val is not None:
+            exp_c = _constant_value(e.right)
+            if base_flat is not None and exp_c is not None:
+                exp_val = exp_c
                 n = int(exp_val)
                 if exp_val == n and n >= 1:
                     idxs.extend([base_flat] * n)
@@ -1424,10 +1403,10 @@ def _expr_to_polynomial(expr: Expression, model: Model) -> _AffineSquare | None:
 
     def visit(e: Expression, scale: float) -> bool:
         if isinstance(e, Constant):
-            value = _scalar_constant(e)
-            if value is None:
-                return False
-            const[0] += scale * value
+            c = _constant_value(e)
+            if c is None:
+                return False  # array-valued constant: not one scalar polynomial
+            const[0] += scale * c
             return True
         flat = _get_flat_index(e, model)
         if flat is not None:
@@ -1467,7 +1446,7 @@ def _expr_to_polynomial(expr: Expression, model: Model) -> _AffineSquare | None:
                 return visit(e.left, scale) and visit(e.right, -scale)
             if e.op == "/":
                 if isinstance(e.right, Constant):
-                    denom = _scalar_constant(e.right)
+                    denom = _constant_value(e.right)
                     if denom is None or denom == 0.0:
                         return False
                     return visit(e.left, scale / denom)
@@ -1510,12 +1489,10 @@ def _collect_affine_powers(
     def visit(e: Expression) -> None:
         if id(e) in already_lifted:
             return
-        exp_f = (
-            _scalar_constant(e.right)
-            if isinstance(e, BinaryOp) and e.op == "**" and isinstance(e.right, Constant)
-            else None
-        )
-        if exp_f is not None:
+        if isinstance(e, BinaryOp) and e.op == "**" and isinstance(e.right, Constant):
+            # An array-valued exponent is not a scalar power: 0.0 never lifts.
+            exp_c = _constant_value(e.right)
+            exp_f = exp_c if exp_c is not None else 0.0
             n = int(exp_f)
             # Only a genuinely scaled base benefits: a bare variable base lifts
             # identically in raw space, so leave it to the monomial path.
@@ -1624,10 +1601,14 @@ def _decompose_product(
             scalar[0] *= -1.0
             return visit(e.operand)
         if isinstance(e, Constant):
-            value = _scalar_constant(e)
-            if value is None:
+            # A non-scalar coefficient array (``C[1:, :] * (...)**2``) is not a
+            # scalar monomial factor: decline rather than pick an element, so the
+            # caller falls back to its other relaxation paths. Declining only
+            # drops a candidate cut, so it is sound.
+            c = _constant_value(e)
+            if c is None:
                 return False
-            scalar[0] *= value
+            scalar[0] *= c
             return True
         flat = _get_flat_index(e, model)
         if flat is not None:
@@ -1659,8 +1640,9 @@ def _decompose_product(
         # pinned power is variable-free and exact, so it only ever tightens.
         if isinstance(e, BinaryOp) and e.op == "**" and isinstance(e.right, Constant):
             base_flat = _get_flat_index(e.left, model)
-            exp_val = _scalar_constant(e.right)
-            if base_flat is not None and exp_val is not None:
+            exp_c = _constant_value(e.right)
+            if base_flat is not None and exp_c is not None:
+                exp_val = exp_c
                 key = (base_flat, exp_val)
                 if fractional_power_var_map and key in fractional_power_var_map:
                     var_indices.append(fractional_power_var_map[key])
@@ -2160,8 +2142,10 @@ def _extract_positive_product(
 
     def visit(e: Expression, power: float) -> bool:
         if isinstance(e, Constant):
-            v = _scalar_constant(e)
-            if v is None or v <= 0.0:
+            v = _constant_value(e)
+            if v is None:
+                return False  # array-valued constant: not a scalar monomial factor
+            if v <= 0.0:
                 return False  # a non-positive constant factor breaks the log lift
             coef[0] *= v**power
             return True
@@ -2180,18 +2164,20 @@ def _extract_positive_product(
             if e.op == "/":
                 return visit(e.left, power) and visit(e.right, -power)
             if e.op == "**" and isinstance(e.right, Constant):
-                exponent = _scalar_constant(e.right)
-                if exponent is None:
+                exp_c = _constant_value(e.right)
+                if exp_c is None:
                     return False
-                return visit(e.left, power * exponent)
+                return visit(e.left, power * exp_c)
             if e.op in ("+", "-"):
                 # Additive-identity passthrough: canonical reconstruct wraps a
                 # monomial factor as ``0 + m`` / ``m + 0`` / ``m - 0``. Strip a zero
                 # constant operand and recurse into the real factor.
-                if _is_zero_constant(e.left):
+                left_c = _constant_value(e.left)
+                right_c = _constant_value(e.right)
+                if left_c is not None and abs(left_c) <= 1e-12:
                     if e.op == "+":
                         return visit(e.right, power)
-                elif _is_zero_constant(e.right):
+                elif right_c is not None and abs(right_c) <= 1e-12:
                     return visit(e.left, power)
         # Fallback: a factor that is an affine multiple of a SINGLE positive
         # variable, ``c·x`` with ``c>0`` and zero constant (e.g. ``(30000·x)^-0.48``
@@ -3101,7 +3087,9 @@ def _monomial_power_term(expr: Expression, model: Model) -> Optional[tuple[int, 
         base = _get_flat_index(expr.left, model)
         if base is None:
             return None
-        exp_val = float(expr.right.value)
+        exp_val = _constant_value(expr.right)
+        if exp_val is None:
+            return None
         n_int = int(exp_val)
         if exp_val == n_int and n_int >= 1:
             return base, n_int
@@ -3384,7 +3372,10 @@ def _match_scaled_even_power(
             and factor.op == "**"
             and isinstance(factor.right, Constant)
         ):
-            exp_val = float(factor.right.value)
+            exp_c = _constant_value(factor.right)
+            if exp_c is None:
+                return None
+            exp_val = exp_c
             n_int = int(round(exp_val))
             if abs(exp_val - n_int) < 1e-12 and n_int >= 2 and n_int % 2 == 0:
                 if base is not None:

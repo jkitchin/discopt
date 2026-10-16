@@ -21,12 +21,14 @@ References:
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 import logging
 import math
 import os
 import time
 import warnings
-from collections import Counter
+from collections import Counter, OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Optional, Union, cast
@@ -5202,6 +5204,89 @@ def _bounds_moved(
     return False
 
 
+def _state_fingerprint(*parts: object) -> bytes:
+    """Exact digest of OA loop state, for detecting a repeated iteration (#1710).
+
+    Arrays hash by dtype, shape and raw bytes, floats by their IEEE bytes, so two
+    values collide only when they are bit-identical (``-0.0`` and ``0.0`` differ,
+    which can only make a repeat look *new*, never the reverse). An unsupported
+    type raises: silently skipping a component would let a changed state compare
+    equal and stop the loop on a state that was in fact moving.
+    """
+    h = hashlib.blake2b(digest_size=24)
+
+    def feed(obj: object) -> None:
+        if obj is None:
+            h.update(b"N")
+        elif isinstance(obj, (bool, np.bool_)):
+            h.update(b"B1" if obj else b"B0")
+        elif isinstance(obj, (int, np.integer)):
+            h.update(b"I" + str(int(obj)).encode() + b";")
+        elif isinstance(obj, (float, np.floating)):
+            h.update(b"F" + np.float64(obj).tobytes())
+        elif isinstance(obj, str):
+            data = obj.encode()
+            h.update(b"S" + str(len(data)).encode() + b":" + data)
+        elif isinstance(obj, np.ndarray):
+            arr = np.ascontiguousarray(obj)
+            if arr.dtype == object:
+                raise TypeError("_state_fingerprint: object-dtype arrays are not hashable exactly")
+            h.update(b"A" + arr.dtype.str.encode() + repr(arr.shape).encode())
+            h.update(arr.tobytes())
+        elif isinstance(obj, (list, tuple)):
+            h.update(b"L" + str(len(obj)).encode() + b"[")
+            for item in obj:
+                feed(item)
+            h.update(b"]")
+        elif isinstance(obj, (set, frozenset)):
+            h.update(b"T" + str(len(obj)).encode() + b"{")
+            for digest in sorted(_state_fingerprint(item) for item in obj):
+                h.update(digest)
+            h.update(b"}")
+        else:
+            raise TypeError(f"_state_fingerprint: unsupported type {type(obj).__name__}")
+
+    for part in parts:
+        feed(part)
+    return h.digest()
+
+
+#: How many fixed-NLP results ``solve_oa`` keeps for exact-repeat reuse (#1710).
+#: A repeat is almost always of a recent call (the master re-proposing the
+#: assignment it just proposed), and each entry holds a few ``n_vars`` vectors,
+#: so a small LRU bounds memory on large models without losing the hits.
+_FIXED_NLP_CACHE_SIZE = 32
+
+
+def _fixed_nlp_attempt_cacheable(attempt: _NLPAttempt) -> bool:
+    """May this fixed-NLP attempt be reused for a bit-identical later request?
+
+    Only a solve that *converged* is a property of the subproblem alone. A
+    failure, or a point accepted at a resource limit, can depend on the shrinking
+    ``max_wall_time`` budget, so re-solving might answer differently; those are
+    never cached (#1710).
+    """
+    if attempt.x is None or attempt.status is None:
+        return False
+    from discopt.solvers import SolveStatus
+
+    return attempt.status == SolveStatus.OPTIMAL
+
+
+def _copy_nlp_attempt(attempt: _NLPAttempt) -> _NLPAttempt:
+    """Deep-enough copy so a cached attempt cannot be mutated through a consumer."""
+
+    def _copy(arr: Optional[np.ndarray]) -> Optional[np.ndarray]:
+        return None if arr is None else np.array(arr, copy=True)
+
+    return dataclasses.replace(
+        attempt,
+        x=_copy(attempt.x),
+        multipliers=_copy(attempt.multipliers),
+        raw_x=_copy(attempt.raw_x),
+    )
+
+
 def _compute_gap(lb: float, ub: float) -> float:
     """OA's optimality gap — see :mod:`discopt.solvers._gap` for the semantics.
 
@@ -7256,6 +7341,36 @@ def solve_oa(
     # untouched.
     _last_progress_bounds: Optional[tuple[Optional[float], Optional[float]]] = None
     no_progress_iterations = 0
+    # Fixed-point exit (#1710): the digest of the loop state at the previous
+    # iteration's master solve, set only when that iteration was one whose replay
+    # from the same state is guaranteed to reproduce it (see
+    # ``_iteration_replayable`` below). ``None`` means "no comparable predecessor".
+    _fixed_point_prev_key: Optional[bytes] = None
+    _rows_at_previous_master: Optional[tuple[int, int]] = None
+    # The exit is restricted to configurations where an iteration is a pure
+    # function of the state digested at its master solve. Each excluded feature
+    # carries state the digest does not see, or varies with the iteration index
+    # or the clock: ECP adds a cut every pass and has its own ``ecp_feasible``
+    # exit; the SHOT profile has periodic relaxation phases, a solution-limit
+    # schedule, convex bounding, reduction cuts and a deduplicating scheduler;
+    # regularization solves a second, time-budgeted MILP and reads derivative
+    # data; the external hooks are user callbacks that may keep their own state;
+    # and ``cycling_check`` already stops on a repeated assignment with its own
+    # termination reason, which this exit must not pre-empt.
+    _fixed_point_exit_applicable = bool(
+        not ecp_mode
+        and mip_nlp_profile != "shot"
+        and add_regularization is None
+        and not cycling_check
+        and termination_hook is None
+        and external_dual_bound_hook is None
+        and external_hyperplane_hook is None
+        and external_primal_candidate_hook is None
+    )
+    # Exact-repeat reuse of converged fixed-NLP solves (#1710), keyed on every
+    # input the subproblem reads; see ``_fixed_nlp_attempt_cacheable``.
+    fixed_nlp_cache: OrderedDict[bytes, _NLPAttempt] = OrderedDict()
+    fixed_nlp_cache_hits = 0
     termination_reason = None
     incumbent_derivative_data: Optional[_DerivativeRegularizationData] = None
 
@@ -7709,6 +7824,7 @@ def solve_oa(
             for source, count in sorted(fixed_nlp_manager.added_source_counts.items())
         }
         summary["fixed_nlp_call_count"] = int(fixed_nlp_call_count)
+        summary["fixed_nlp_cache_hit_count"] = int(fixed_nlp_cache_hits)
         summary["fixed_nlp_call_source_counts"] = {
             str(source): int(count)
             for source, count in sorted(fixed_nlp_call_source_counts.items())
@@ -8940,6 +9056,97 @@ def solve_oa(
             master_solution_limit,
             master_mip_start_objective,
         ) = _shot_master_controls()
+
+        # Fixed-point exit (#1710). ``iteration_state_key`` digests every input of
+        # the master solve below (all but its wall budget) and every piece of loop
+        # state the rest of the iteration reads. If it equals the key of the
+        # previous iteration, and that iteration was replayable (deterministic
+        # given its start state; see ``_iteration_replayable``), then this
+        # iteration -- and every later one -- would repeat it exactly: same
+        # master, same candidates, same fixed NLPs, same (zero) new cuts. The
+        # bounds and incumbent held now are the ones the loop would hold forever,
+        # so stopping returns exactly what the
+        # ``_OA_NO_PROGRESS_ITERATIONS`` exit would have returned 50 iterations
+        # later, with the same ``termination_reason``.
+        iteration_state_key: Optional[bytes] = None
+        # Digesting every OA row costs O(rows * n_vars) per iteration, so it is
+        # done only when it can match: an iteration that changed the row count
+        # (the ordinary OA pass, which adds cuts) cannot be a repeat of its
+        # predecessor's start state.
+        rows_now = (len(oa_A_rows), len(cut_provenance.records))
+        rows_unchanged = rows_now == _rows_at_previous_master
+        _rows_at_previous_master = rows_now
+        if _fixed_point_exit_applicable and rows_unchanged:
+            iteration_state_key = _state_fingerprint(
+                decomp.linear_A_rows,
+                decomp.linear_b_rows,
+                decomp.linear_senses,
+                oa_A_rows,
+                oa_b_rows,
+                oa_cut_relaxable,
+                decomp.integrality,
+                decomp.lb,
+                decomp.ub,
+                decomp.obj_coeffs,
+                bool(decomp.obj_is_linear),
+                bool(master_bound_valid),
+                master_mip_start,
+                master_mip_start_objective,
+                master_objective_cutoff,
+                master_solution_limit,
+                LB,
+                certified_LB,
+                heuristic_LB,
+                UB,
+                incumbent,
+                incumbent_obj,
+                bool(local_cut_added),
+                frozenset(unresolved_int_configs),
+                len(cut_provenance.records),
+                fixed_nlp_manager.state_signature(),
+            )
+        previous_state_key = _fixed_point_prev_key
+        _fixed_point_prev_key = None
+        if iteration_state_key is not None and iteration_state_key == previous_state_key:
+            logger.info(
+                "OA: iteration %d would repeat iteration %d exactly (same master, "
+                "same loop state, no cuts added); stopping at the fixed point "
+                "(LB=%s UB=%s)",
+                iteration,
+                iteration - 1,
+                _trace_value(LB),
+                _trace_value(UB),
+            )
+            termination_reason = "stalling"
+            trace_iterations.append(
+                {
+                    "index": int(iteration),
+                    "master_status": "not_run",
+                    "lb_before": lb_before,
+                    "ub_before": ub_before,
+                    "lb": _trace_value(LB),
+                    "ub": _trace_value(UB),
+                    "gap": _trace_value(_compute_gap(LB, UB)),
+                    "cuts_added": int(len(oa_A_rows) - cuts_before),
+                    "cuts_total": int(len(oa_A_rows)),
+                    "provenance_cuts_added": int(len(cut_provenance.records) - provenance_before),
+                    "provenance_cuts_total": int(len(cut_provenance.records)),
+                    "cuts_added_by_source": _cut_source_delta(cut_source_counts_before),
+                    "nlp_subproblem_count": 0,
+                    "feasibility_subproblem_count": 0,
+                    "solution_pool_candidates": 0,
+                    "node_count": 0,
+                    "repair_actions": [],
+                    "reduction_cuts": reduction_cut_events,
+                    "relaxation_phase": relaxation_phase_record,
+                    "master_controls": master_control_trace,
+                    "external_hooks": external_hook_events,
+                    "fixed_point": True,
+                    "termination_reason": termination_reason,
+                }
+            )
+            break
+
         master_result = _solve_master_milp(
             decomp.linear_A_rows,
             decomp.linear_b_rows,
@@ -9315,6 +9522,10 @@ def solve_oa(
         }
         stop_after_master_pool = False
         pool_integer_assignments_seen: set[tuple[float, ...]] = set()
+        # #1710 replayability bookkeeping: did every fixed NLP of this iteration
+        # converge (so a re-solve from the same inputs gives the same answer)?
+        iteration_nlp_count = 0
+        iteration_nlp_all_converged = True
 
         if not ecp_mode and not fixed_nlp_candidates:
             x_master = np.asarray(master_result.x, dtype=np.float64).reshape(-1)[:n_vars].copy()
@@ -9460,22 +9671,50 @@ def solve_oa(
 
             # c. Fix integers, solve NLP subproblem
             warm_start, warm_start_source = _fixed_nlp_warm_start(candidate, nlp_initial_point)
-            nlp_subproblem_count += 1
-            fixed_nlp_call_count += 1
-            fixed_nlp_call_source_counts[candidate.source] += 1
-            nlp_attempt = _solve_fixed_nlp_subproblem_attempt(
-                evaluator,
+            # #1710: the subproblem reads the bounds, the integer values it fixes
+            # (rounded exactly as ``_solve_nlp_subproblem`` rounds them) and the
+            # warm start -- nothing else that varies within one ``solve_oa``. A
+            # bit-identical request for a subproblem that already converged is
+            # answered from the earlier solve instead of re-running it.
+            fixed_nlp_key = _state_fingerprint(
                 decomp.lb,
                 decomp.ub,
-                decomp.int_indices,
-                x_master,
-                nlp_solver,
-                initial_point=warm_start,
-                max_wall_time=_remaining_wall(t_start, time_limit),
+                tuple(
+                    _round_integral_to_bounds(x_master[idx], decomp.lb[idx], decomp.ub[idx])
+                    for idx in decomp.int_indices
+                ),
+                np.asarray(warm_start, dtype=np.float64),
             )
+            cached_attempt = fixed_nlp_cache.get(fixed_nlp_key)
+            if cached_attempt is not None:
+                fixed_nlp_cache.move_to_end(fixed_nlp_key)
+                fixed_nlp_cache_hits += 1
+                nlp_attempt = _copy_nlp_attempt(cached_attempt)
+                nlp_status_name = _fixed_nlp_status_name(nlp_attempt)
+            else:
+                nlp_subproblem_count += 1
+                fixed_nlp_call_count += 1
+                fixed_nlp_call_source_counts[candidate.source] += 1
+                nlp_attempt = _solve_fixed_nlp_subproblem_attempt(
+                    evaluator,
+                    decomp.lb,
+                    decomp.ub,
+                    decomp.int_indices,
+                    x_master,
+                    nlp_solver,
+                    initial_point=warm_start,
+                    max_wall_time=_remaining_wall(t_start, time_limit),
+                )
+                nlp_status_name = _fixed_nlp_status_name(nlp_attempt)
+                fixed_nlp_call_status_counts[nlp_status_name] += 1
+                if _fixed_nlp_attempt_cacheable(nlp_attempt):
+                    fixed_nlp_cache[fixed_nlp_key] = _copy_nlp_attempt(nlp_attempt)
+                    while len(fixed_nlp_cache) > _FIXED_NLP_CACHE_SIZE:
+                        fixed_nlp_cache.popitem(last=False)
             x_nlp, obj_nlp = nlp_attempt.x, nlp_attempt.objective
-            nlp_status_name = _fixed_nlp_status_name(nlp_attempt)
-            fixed_nlp_call_status_counts[nlp_status_name] += 1
+            if not _fixed_nlp_attempt_cacheable(nlp_attempt):
+                iteration_nlp_all_converged = False
+            iteration_nlp_count += 1
             incumbent_update = "not_feasible"
 
             if x_nlp is not None:
@@ -9736,6 +9975,25 @@ def solve_oa(
         trace_iterations.append(iteration_record)
         if stop_after_master_pool:
             break
+        # ``_iteration_replayable`` (#1710): would running this iteration again
+        # from the same start state reproduce it bit for bit? The master must
+        # have been solved to optimality without repair (a limit-terminated
+        # master depends on its shrinking budget), every fixed NLP must have
+        # converged (the same argument for the subproblem), at least one must
+        # have run (an iteration with none took the ECP-cut branch), and no
+        # hook, reduction cut or relaxation phase may have acted.
+        _iteration_replayable = bool(
+            iteration_state_key is not None
+            and master_result.status == SolveStatus.OPTIMAL
+            and not repair_actions
+            and not external_hook_events
+            and not reduction_cut_events
+            and nlp_initial_point is None
+            and iteration_nlp_count > 0
+            and iteration_nlp_all_converged
+        )
+        if _iteration_replayable:
+            _fixed_point_prev_key = iteration_state_key
 
     # 4. Build result
     wall_time = time.perf_counter() - t_start
