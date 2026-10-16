@@ -1193,6 +1193,36 @@ class SqrtSumOfSquaresUpperBoundRule(NonlinearBoundTighteningRule):
         return tightened_lb, tightened_ub
 
 
+_EQ_MIRROR_ENV = "DISCOPT_EQ_MIRROR_BOUNDS"
+
+
+def _eq_mirror_bounds_enabled() -> bool:
+    """True when :class:`SeparableQuadraticUpperBoundRule` also reads the ``>=`` side of
+    an affine ``==`` row (#1714).
+
+    Bound-changing (CLAUDE.md 5): it tightens the box that seeds the NLP start point and
+    every downstream relaxation, so it ships default-OFF until the corpus-wide
+    differential panel passes. The box it produces is the one Rust FBBT already derives
+    for the same row (``fbbt_box``), so the inference is not new to the solver -- only
+    to this pass. Read per call so a test can flip it without reloading the module.
+
+    **Measured (2026-10-16).** Target class, the #1711 chain NLP at N = 10,000: the
+    start point's end columns go from -5 to their fixed values, POUNCE 101 -> 53
+    iterations, wall 19.0 s -> 8.5 s (2 interleaved reps each, both
+    ``gap_certified``). In-repo corpus panel, 122 vendored MINLPLib instances at
+    30 s, arms interleaved: **cert-clean** -- 0 bounds above a reference, 92/92
+    certified in both arms, 0 certified-objective drift, 0 unverified incumbents --
+    but **neutral**: paired wall -0.012 s/run (sd 0.744), node geomean 1.0047, dual
+    bound 3 tighter / 4 looser, all seven on time-limited runs. The root box is
+    tighter on 27/122 instances, so the inference fires on the corpus; the solves
+    it feeds there are already started by Rust FBBT's exact box. It therefore stays
+    OFF under the ``DISCOPT_CUT_INHERIT`` rule (sound is not helpful). What would
+    change that: a panel over a continuous-NLP corpus that includes fixed and
+    affine-equality columns, the class where the measured gain is.
+    """
+    return os.environ.get(_EQ_MIRROR_ENV, "0").strip().lower() in ("1", "true", "yes", "on")
+
+
 class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
     """Tighten bounds from separable convex quadratic constraints like x + y^2 <= c."""
 
@@ -1272,6 +1302,108 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
             return None
         return constant_term, coeffs, constant_absum
 
+    def _tighten_le_side(
+        self,
+        constraint,
+        constant_term: float,
+        coeffs: dict[int, tuple[float, float]],
+        constant_absum: float,
+        tightened_lb: np.ndarray,
+        tightened_ub: np.ndarray,
+        metadata: FlatVariableMetadata,
+    ) -> None:
+        """Intersect the box, in place, with ``constant + sum_j (a_j x_j^2 + b_j x_j) <= 0``.
+
+        Every ``a_j`` must be ``>= 0`` (up to ``_decompose_row``'s 1e-12 slack).
+        """
+        min_contribs: dict[int, float] = {}
+        for flat_idx, (a, b) in coeffs.items():
+            min_contribs[flat_idx] = _min_univariate_quadratic(
+                a,
+                b,
+                float(tightened_lb[flat_idx]),
+                float(tightened_ub[flat_idx]),
+            )
+
+        total_min = float(sum(min_contribs.values()))
+        # A bound on the floating-point error of ``total_min`` and of every
+        # leave-one-out ``total_min - min_contribs[j]`` below. Without it a huge
+        # contribution absorbs the small ones: on x1 in the default ±9.999e19 box,
+        # -5·x1 + x2 <= 2 with x2 = -1 summed to -4.9995e20 + -1 == -4.9995e20, the
+        # leave-one-out rest for x1 came out 0 instead of -1, x1 >= -0.4 replaced
+        # x1 >= -0.6, and a feasible LP at x1 = -0.5 was certified infeasible.
+        # Widening outward by it keeps every inference valid in exact arithmetic.
+        #
+        # #1397: the constant's share of this bound is ``constant_absum``, the
+        # magnitude of the constant leaves, NOT ``abs(constant_term)`` as it was
+        # written. The two differ exactly when the constant is itself a cancelled
+        # sum, which is the case this bound exists to cover: with a single square
+        # over a box straddling zero every ``min_contribs`` value is 0, so
+        # ``abs(constant_term)`` was the ONLY scale in the product, and a constant
+        # that cancelled from 1e16 down to 0.6 contributed a float_err of 1e-16
+        # instead of 35. Measured on this tree: ``x**2 - 0.4e + M - M + 0.3e <= 0``
+        # (exact row ``x**2 <= 0.1*spacing(M)``, feasible at x = 0) was proved
+        # infeasible at every M from 1e11 to 1e16.
+        float_err = (
+            (len(min_contribs) + 4.0)
+            * _FLOAT_EPS
+            * (sum(abs(v) for v in min_contribs.values()) + constant_absum)
+        )
+        # Declare infeasibility only when the minimum separable activity
+        # exceeds the upper bound by more than the feasibility tolerance;
+        # a sub-tolerance excess is feasible within tolerance (e.g. the
+        # eps-scale residual of an approximate GDP hull perspective) and
+        # must not be pruned (issue #27a).
+        if constant_term + total_min > _EMPTY_INTERVAL_FEAS_TOL + float_err:
+            _prove_infeasible(
+                self.name,
+                constraint,
+                "minimum separable quadratic activity exceeds the upper bound",
+            )
+
+        for flat_idx, (a, b) in coeffs.items():
+            rhs = -constant_term - (total_min - min_contribs[flat_idx]) + float_err
+            if not np.isfinite(rhs):
+                continue
+
+            interval = _tighten_univariate_quadratic_interval(
+                a,
+                b,
+                rhs,
+                float(tightened_lb[flat_idx]),
+                float(tightened_ub[flat_idx]),
+            )
+            if interval is None:
+                _prove_infeasible(
+                    self.name,
+                    constraint,
+                    f"required interval for flat variable {flat_idx} is empty",
+                )
+
+            new_lb, new_ub = interval
+            var_type = metadata.flat_var_types[flat_idx]
+            if var_type == VarType.BINARY:
+                new_lb = max(new_lb, 0.0)
+                new_ub = min(new_ub, 1.0)
+            elif var_type == VarType.INTEGER:
+                new_lb = float(np.ceil(new_lb - 1e-9))
+                new_ub = float(np.floor(new_ub + 1e-9))
+
+            if new_lb <= new_ub:
+                tightened_lb[flat_idx] = new_lb
+                tightened_ub[flat_idx] = new_ub
+            elif new_lb <= new_ub + _EMPTY_INTERVAL_FEAS_TOL + _roundoff_slack(new_lb, new_ub):
+                # Sub-tolerance crossover: snap to a degenerate box instead
+                # of pruning, leaving validation to the node NLP.
+                tightened_lb[flat_idx] = new_ub
+                tightened_ub[flat_idx] = new_ub
+            else:
+                _prove_infeasible(
+                    self.name,
+                    constraint,
+                    f"required interval for flat variable {flat_idx} is empty",
+                )
+
     def tighten(
         self,
         model: Model,
@@ -1298,93 +1430,38 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
                 continue
             constant_term, coeffs, constant_absum = structure
 
-            min_contribs: dict[int, float] = {}
-            for flat_idx, (a, b) in coeffs.items():
-                min_contribs[flat_idx] = _min_univariate_quadratic(
-                    a,
-                    b,
-                    float(tightened_lb[flat_idx]),
-                    float(tightened_ub[flat_idx]),
-                )
-
-            total_min = float(sum(min_contribs.values()))
-            # A bound on the floating-point error of ``total_min`` and of every
-            # leave-one-out ``total_min - min_contribs[j]`` below. Without it a huge
-            # contribution absorbs the small ones: on x1 in the default ±9.999e19 box,
-            # -5·x1 + x2 <= 2 with x2 = -1 summed to -4.9995e20 + -1 == -4.9995e20, the
-            # leave-one-out rest for x1 came out 0 instead of -1, x1 >= -0.4 replaced
-            # x1 >= -0.6, and a feasible LP at x1 = -0.5 was certified infeasible.
-            # Widening outward by it keeps every inference valid in exact arithmetic.
-            #
-            # #1397: the constant's share of this bound is ``constant_absum``, the
-            # magnitude of the constant leaves, NOT ``abs(constant_term)`` as it was
-            # written. The two differ exactly when the constant is itself a cancelled
-            # sum, which is the case this bound exists to cover: with a single square
-            # over a box straddling zero every ``min_contribs`` value is 0, so
-            # ``abs(constant_term)`` was the ONLY scale in the product, and a constant
-            # that cancelled from 1e16 down to 0.6 contributed a float_err of 1e-16
-            # instead of 35. Measured on this tree: ``x**2 - 0.4e + M - M + 0.3e <= 0``
-            # (exact row ``x**2 <= 0.1*spacing(M)``, feasible at x = 0) was proved
-            # infeasible at every M from 1e11 to 1e16.
-            float_err = (
-                (len(min_contribs) + 4.0)
-                * _FLOAT_EPS
-                * (sum(abs(v) for v in min_contribs.values()) + constant_absum)
+            self._tighten_le_side(
+                constraint,
+                constant_term,
+                coeffs,
+                constant_absum,
+                tightened_lb,
+                tightened_ub,
+                metadata,
             )
-            # Declare infeasibility only when the minimum separable activity
-            # exceeds the upper bound by more than the feasibility tolerance;
-            # a sub-tolerance excess is feasible within tolerance (e.g. the
-            # eps-scale residual of an approximate GDP hull perspective) and
-            # must not be pruned (issue #27a).
-            if constant_term + total_min > _EMPTY_INTERVAL_FEAS_TOL + float_err:
-                _prove_infeasible(
-                    self.name,
+            # #1714: an ``==`` row also states ``-body <= 0``. The ``<=`` inference
+            # above reads only ``body <= 0``, so ``z == 1`` on [-10, 10] came out as
+            # [-10, 1]. Negating an AFFINE row keeps it in this rule's convex class
+            # (every ``a`` stays 0), so the same inference applies verbatim to the
+            # mirrored side. A row with any square term is not mirrored: its negation
+            # is reverse-convex, which ``_tighten_univariate_quadratic_interval``
+            # cannot represent. The test is ``a == 0.0`` exactly -- ``_decompose_row``
+            # admits ``a`` down to -1e-12, and dropping a tiny ``-a*x**2`` from the
+            # mirrored row would be a strengthening, not a relaxation.
+            if (
+                constraint.sense == "=="
+                and _eq_mirror_bounds_enabled()
+                and all(a == 0.0 for a, _ in coeffs.values())
+            ):
+                self._tighten_le_side(
                     constraint,
-                    "minimum separable quadratic activity exceeds the upper bound",
+                    -constant_term,
+                    {j: (0.0, -b) for j, (_, b) in coeffs.items()},
+                    constant_absum,
+                    tightened_lb,
+                    tightened_ub,
+                    metadata,
                 )
-
-            for flat_idx, (a, b) in coeffs.items():
-                rhs = -constant_term - (total_min - min_contribs[flat_idx]) + float_err
-                if not np.isfinite(rhs):
-                    continue
-
-                interval = _tighten_univariate_quadratic_interval(
-                    a,
-                    b,
-                    rhs,
-                    float(tightened_lb[flat_idx]),
-                    float(tightened_ub[flat_idx]),
-                )
-                if interval is None:
-                    _prove_infeasible(
-                        self.name,
-                        constraint,
-                        f"required interval for flat variable {flat_idx} is empty",
-                    )
-
-                new_lb, new_ub = interval
-                var_type = metadata.flat_var_types[flat_idx]
-                if var_type == VarType.BINARY:
-                    new_lb = max(new_lb, 0.0)
-                    new_ub = min(new_ub, 1.0)
-                elif var_type == VarType.INTEGER:
-                    new_lb = float(np.ceil(new_lb - 1e-9))
-                    new_ub = float(np.floor(new_ub + 1e-9))
-
-                if new_lb <= new_ub:
-                    tightened_lb[flat_idx] = new_lb
-                    tightened_ub[flat_idx] = new_ub
-                elif new_lb <= new_ub + _EMPTY_INTERVAL_FEAS_TOL + _roundoff_slack(new_lb, new_ub):
-                    # Sub-tolerance crossover: snap to a degenerate box instead
-                    # of pruning, leaving validation to the node NLP.
-                    tightened_lb[flat_idx] = new_ub
-                    tightened_ub[flat_idx] = new_ub
-                else:
-                    _prove_infeasible(
-                        self.name,
-                        constraint,
-                        f"required interval for flat variable {flat_idx} is empty",
-                    )
 
         return tightened_lb, tightened_ub
 
