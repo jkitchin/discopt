@@ -316,6 +316,32 @@ class FixedNLPCandidateManager:
         self._last_call_time = time.perf_counter() if elapsed is None else float(elapsed)
         self._last_success = bool(success)
 
+    def state_signature(self) -> tuple[object, ...]:
+        """Everything that decides what a later ``take_ready`` returns.
+
+        Used by OA's fixed-point exit (#1710) to tell whether the scheduler would
+        behave identically on a repeated iteration. The call clock and iteration
+        are excluded deliberately: the exit applies only under the ``always``
+        strategy, whose ``should_call`` reads neither.
+        """
+        pending = tuple(
+            (
+                cand.source,
+                cand.integer_assignment,
+                cand.point,
+                cand.objective,
+                cand.nlp_source,
+                cand.provider,
+            )
+            for cand in sorted(self._pending, key=self._sort_key)
+        )
+        return (
+            self.strategy,
+            pending,
+            frozenset(self._used_keys) if self.deduplicate_used_assignments else None,
+            self._last_success,
+        )
+
     def scheduler_trace(self) -> dict[str, object]:
         return {
             "strategy": self.strategy,
