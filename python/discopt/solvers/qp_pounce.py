@@ -68,11 +68,16 @@ class _QPCallbacks:
         self._c = c
         self._A = A
         self._m, self._n = A.shape
-        self._jac_flat = A.ravel().astype(np.float64)
-        _rows, _cols = np.meshgrid(np.arange(self._m), np.arange(self._n), indexing="ij")
-        self._jac_rows = _rows.ravel()
-        self._jac_cols = _cols.ravel()
-        self._hess_rows, self._hess_cols = np.tril_indices(self._n)
+        # Only the exact structural nonzeros are declared (row-major, as before).
+        # Declaring every ``m*n`` Jacobian entry and the whole lower triangle of
+        # ``Q`` made POUNCE factor a dense KKT system: on COPS ``torsion`` (a
+        # convex QP with two single-variable rows per cell) peak RSS went 0.22 GB
+        # -> 2.13 GB from 144 to 484 variables and 1,024 variables were OOM-killed
+        # at 15 GB. An exact zero contributes nothing to the Jacobian or the
+        # Hessian, so omitting it changes no value the solver sees.
+        self._jac_rows, self._jac_cols = np.nonzero(A)
+        self._jac_flat = A[self._jac_rows, self._jac_cols].astype(np.float64)
+        self._hess_rows, self._hess_cols = np.nonzero(np.tril(Q))
         self._hess_vals = Q[self._hess_rows, self._hess_cols].astype(np.float64)
 
     def objective(self, x: np.ndarray) -> float:
