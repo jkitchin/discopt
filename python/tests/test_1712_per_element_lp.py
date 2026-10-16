@@ -212,3 +212,50 @@ def test_lp_solve_skips_convexity_classification(monkeypatch):
     assert r.algorithm_route is not None and r.algorithm_route.startswith("highs-lp")
     # #1551 guard ran on the fast path and measured the error (not skipped).
     assert "certificate/objective_eval_error" in (r.solver_stats or {})
+
+
+def _record_linear_skips(monkeypatch):
+    """Record calls to the entropy rewrite and the rules handed to the domain pass."""
+    import discopt._relax.factorable_reform as fr
+    import discopt._relax.nonlinear_bound_tightening as nbt
+
+    seen = {"entropy": 0, "rules": []}
+    real_entropy, real_tighten = fr.canonicalize_entropy, nbt.tighten_nonlinear_bounds
+
+    def entropy(model):
+        seen["entropy"] += 1
+        return real_entropy(model)
+
+    def tighten(*a, **k):
+        if "rules" in k:  # the solve's domain pass; the declared-box pass uses defaults
+            seen["rules"].append(tuple(type(r).__name__ for r in k["rules"]))
+        return real_tighten(*a, **k)
+
+    monkeypatch.setattr(fr, "canonicalize_entropy", entropy)
+    monkeypatch.setattr(nbt, "tighten_nonlinear_bounds", tighten)
+    return seen
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("integer", [False, True])
+def test_linear_model_skips_entropy_and_domain_rules(integer, monkeypatch):
+    """LP/MILP: no entropy rewrite, and the domain pass runs with no rules -- the
+    pass itself (box checks, crossover snapping) still runs."""
+    seen = _record_linear_skips(monkeypatch)
+    r = _per_element_lp(5, integer=integer).solve()
+    assert r.status == "optimal"
+    assert seen["entropy"] == 0
+    assert seen["rules"] == [()]
+
+
+def test_nonlinear_model_keeps_entropy_and_domain_rules(monkeypatch):
+    """The skips are linear-only: an entropy objective still gets both."""
+    seen = _record_linear_skips(monkeypatch)
+    m = Model("ent")
+    x = m.continuous("x", shape=(3,), lb=0.1, ub=2.0)
+    m.minimize(dm.sum(x[i] * dm.log(x[i]) for i in range(3)))
+    m.subject_to(dm.sum(x[i] for i in range(3)) >= 1.5)
+    m.solve(time_limit=20)
+    assert seen["entropy"] >= 1
+    assert seen["rules"] and all(r for r in seen["rules"])
+

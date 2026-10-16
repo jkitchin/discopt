@@ -151,8 +151,9 @@ The release procedure that produces these entries is documented in
   its expression DAG in Python, node by node, before HiGHS got the same matrix
   the vectorized form produces. On the issue's 300x300 transport LP (90,000
   variables), measured as 3 interleaved runs per arm: 54.45 s (sd 2.01) before
-  and 18.91 s (sd 0.18) after. Objective, bound, certificate and route are
-  identical. Every change produces exactly the same result as before:
+  and 18.91 s (sd 0.18) after the first five changes below. Objective, bound,
+  certificate and route are identical. Every change produces exactly the same
+  result as before:
   - the interval enclosure behind the #1551 certificate guard handles a sum of
     `x[i]` / `c * x[i]` terms in one vectorised pass, bit-identical to the
     per-node walk;
@@ -165,12 +166,20 @@ The release procedure that produces these entries is documented in
   - an LP no longer runs convexity classification, since the LP route never
     reads the result;
   - the Rust `ExprArena::quadratic_form` no longer rescans the whole arena for
-    every row it extracts. That scan made LP extraction O(rows x arena size).
+    every row it extracts. That scan made LP extraction O(rows x arena size);
+  - on an LP or MILP, `solve_model` skips the entropy rewrite and the
+    `sin`/`cos`/`log`/`sqrt` domain-tightening rules. The Rust degree analysis
+    gives every transcendental call unbounded degree, so a linear model has
+    nothing for either to act on. The domain pass still runs with no rules, so
+    its box checks and crossover snapping are kept. The model is classified once
+    for this, before the rewrites, instead of after them. Measured on the same
+    model, 3 interleaved runs per arm: 20.19 s (sd 0.73) before and 18.47 s
+    (sd 0.35) after.
 
-  A per-element LP is still about 9x slower than its vectorized form (19 s against
-  2 s). The remaining time is spread over passes that each walk the model once,
-  such as entropy canonicalisation, the factorable scan and repeated
-  `classify_problem` calls.
+  A per-element LP is still about 7x slower than its vectorized form (18.5 s
+  against 2.5 s). The remaining time is spread over about a dozen passes that
+  each walk the 90,000 Python expression nodes once. The largest is the NLP tape
+  that the #1561 certificate check builds to verify the published point.
 
 - **`dm.external` callbacks are called once per distinct point (#1708).** On a
   2-variable MINLP under `solver="mip-nlp"`, `fn`/`jac`/`hess` ran 2236/1872/1769

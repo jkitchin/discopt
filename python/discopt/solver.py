@@ -13315,8 +13315,23 @@ def solve_model(
     # Both rewrites live in :func:`_convexity_rewrites`, which ``Model.convexity()``
     # also calls, so the public verdict and the one dispatch uses cannot drift
     # apart (#1616 A-01).
+    #
+    # #1712: ``_already_linear`` is classified HERE, once, and reused by the product
+    # reforms below (it used to be computed after the rewrites and the domain
+    # tightening). An LP/MILP class means every row and the objective are linear by
+    # degree (or have an exactly empty Q), and the Rust degree analysis gives every
+    # transcendental call -- ``log(2)`` included -- unbounded degree. So a linear
+    # model has no ``x*log(x)`` for the entropy rewrite to find and no
+    # ``sin``/``cos``/``log``/``sqrt`` argument for the domain rules below to clamp:
+    # both passes are no-ops on it, and skipping them changes nothing. Classifying
+    # before the rewrites gives the same answer as after them: neither can make a
+    # linear model nonlinear or the reverse.
+    from discopt._relax.problem_classifier import ProblemClass, classify_problem
+
+    _already_linear = classify_problem(model) in (ProblemClass.LP, ProblemClass.MILP)
+
     model, _rewrites = _convexity_rewrites(
-        model, entropy=_entropy_ok, epigraph=not _has_bb_callbacks
+        model, entropy=_entropy_ok and not _already_linear, epigraph=not _has_bb_callbacks
     )
     if "objective_epigraph" in _rewrites:
         logger.debug("relaxed objective-defining equality to binding inequality")
@@ -13387,12 +13402,17 @@ def solve_model(
     # ``PeriodicVariableBoundRule`` is not row-anytime (its conclusion rests on a
     # variable being absent elsewhere), so the budget can only decline to start
     # it — never truncate it — which is exactly what keeps the reduction sound.
+    # #1712: on a linear model both rules are no-ops -- there is no function
+    # argument for them to act on (see ``_already_linear`` above) -- so they are not
+    # run. The pass itself still runs: its box checks and its snapping of
+    # sub-tolerance ``lb > ub`` crossovers do not depend on the rules.
+    _per_rules = () if _already_linear else (PeriodicVariableBoundRule(), FunctionDomainBoundRule())
     _per_budget_s = min(min(max(0.05 * float(time_limit), 1.0), 10.0), _remaining_budget())
     _per_lb, _per_ub, _per_stats = tighten_nonlinear_bounds(
         model,
         _origin_lb_chk,
         _origin_ub_chk,
-        rules=(PeriodicVariableBoundRule(), FunctionDomainBoundRule()),
+        rules=_per_rules,
         deadline=_role2_deadline(time.perf_counter() + _per_budget_s),
     )
     if _per_stats.n_tightened > 0:
@@ -13465,14 +13485,13 @@ def solve_model(
         binary_quadratic_milp_enabled,
         has_binary_multilinear_work,
     )
-    from discopt._relax.problem_classifier import ProblemClass, classify_problem
     from discopt.transformations import get as _get_transformation
 
     # #1614 A-21: a product whose exact arena coefficient is zero (``0*x*y``) is
     # still a syntactic product, and the three product reforms below would lift
     # it into a big-M MILP and divert an already-linear model off the MILP route.
     # ``classify_problem`` reads the exact quadratic form, so it is the gate.
-    _already_linear = classify_problem(model) in (ProblemClass.LP, ProblemClass.MILP)
+    # (``_already_linear`` is computed before the convexity rewrites; #1712.)
 
     if (
         not _already_linear
