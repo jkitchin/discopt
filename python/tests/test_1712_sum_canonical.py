@@ -121,13 +121,11 @@ def test_parameter_coefficient_stays_live(canonical_on):
 
 
 @pytest.mark.smoke
-def test_default_is_on_and_zero_opts_out(monkeypatch):
-    """Graduated (#1712): folding is the default; ``=0`` keeps the sum as written."""
+def test_default_is_off(monkeypatch):
+    """Opt-in (#1712): without the flag a per-element sum stays as written."""
     monkeypatch.delenv("DISCOPT_SUM_CANONICAL", raising=False)
     m = Model("default")
     x = m.continuous("x", shape=(N,))
-    assert isinstance(dm.sum(2.0 * x[i] for i in range(N)), SumExpression)
-    monkeypatch.setenv("DISCOPT_SUM_CANONICAL", "0")
     e = dm.sum(2.0 * x[i] for i in range(N))
     assert isinstance(e, SumOverExpression) and len(e.terms) == N
 

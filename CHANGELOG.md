@@ -12,19 +12,17 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
-- **Per-element linear sums are folded into the vectorized form (#1712).**
+- **`DISCOPT_SUM_CANONICAL=1` folds per-element linear sums (#1712, opt-in).**
   `dm.sum(c[i] * x[i] for i ...)` builds one Python node per term, and every
-  solver pass walks each one. Now the terms that name every entry of a variable
-  exactly once, each as `x[i]`, `-x[i]` or a scalar constant times `x[i]`,
-  become `dm.sum(C * x)`. A `Parameter` coefficient is never folded, so
-  re-valuing it after the build still takes effect. Sums under 32 terms and
-  partial or repeated coverage are left as written. The folded sum holds the
-  same products in a different summation order, so values can differ in the
-  last bits. On the issue's 90,000-variable transport LP, `solve()` takes 3.9 s
-  (it was 54.5 s before #1712). A panel of 18 per-element instances in 9
-  families showed no status, certificate or bound regression, and largest
-  objective drift 2.1e-11 (`docs/dev/performance-plan.md` §77.3). On by
-  default; `DISCOPT_SUM_CANONICAL=0` keeps sums as written.
+  solver pass walks each one. With the flag on, the terms that name every entry
+  of a variable exactly once, each as `x[i]`, `-x[i]` or a scalar constant times
+  `x[i]`, become `dm.sum(C * x)`. A `Parameter` coefficient is never folded.
+  Sums under 32 terms and partial or repeated coverage are left as written. On
+  the issue's 90,000-variable transport LP, `solve()` takes 3.9 s with the flag
+  on and 14.0 s without (54.5 s before #1712). Default OFF: the folded form
+  changes what some downstream passes accept (interval-Hessian walker, POUNCE
+  QP routing, binary-multilinear expansion), so it stays opt-in until they
+  handle it (`docs/dev/performance-plan.md` §77.6).
 
 - **On/off (semicontinuous) units in `LinearTreeFormulation`.** The new
   `active=` argument takes `True` (a `{prefix}_active` binary is created) or an
@@ -159,21 +157,6 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
-- **A node LP with no certificate no longer supplies a bound on trust.** When
-  the in-house simplex returned an optimal vertex but no Neumaier-Shcherbina
-  safe bound (a free column on an uncertified solve), `_certify` took the vertex
-  objective as the node's lower bound if the LP looked well-conditioned
-  (`trusted_vertex`). That arm had certified a false bound before (#1492). It
-  fired only when a deadline pushed a node onto the uncertified path: on the
-  in-repo corpus at 30 s it was taken 0 times in 66 instances. Under CPU load it
-  was taken by the root-relaxation fallback, whose contract is a rigorous bound,
-  and by the root LP probe on `bchoco08`, and
-  `test_1278_bound_provenance::test_the_corpus_certifies_from_proof_not_trust`
-  failed 4/4 under 4-way load on main. Such a node now declines and the solver
-  branches. The root fallback also asks `solve_at_node(rigorous_only=True)`,
-  which declines the other trust arm, `trusted_backend`. The 1278 test passes
-  8/8 under the same load (#1712 investigation).
-
 - **Per-element LPs spend less time in preprocessing before HiGHS (#1712).** An
   LP written per element (`m.continuous("x", over=P * K)`, `dm.sum(c * x[p, k]
   for ...)`, `m.constraint(P, lambda p: ...)`) spent most of `solve()` walking
@@ -215,9 +198,9 @@ The release procedure that produces these entries is documented in
     Measured, 3 interleaved runs per arm: 18.21 s -> 13.99 s (sd 0.61) by
     default, and 7.52 s -> 3.87 s (sd 0.09) with `DISCOPT_SUM_CANONICAL=1`.
 
-  With the per-element sum folding above (default ON), the issue's model
-  solves in 3.9 s against 2.5 s for its vectorized form; with
-  `DISCOPT_SUM_CANONICAL=0` it takes 14.0 s.
+  By default the issue's model now solves in 14.0 s (54.5 s before); with
+  `DISCOPT_SUM_CANONICAL=1` (above) it takes 3.9 s, against 2.5 s for its
+  vectorized form.
 
 - **OA stops at a fixed point instead of repeating it (#1710).** When an OA
   iteration added no cuts, the next master was the same problem, so OA re-solved

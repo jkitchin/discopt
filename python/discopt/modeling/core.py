@@ -3387,25 +3387,26 @@ _SUM_CANONICAL_MIN_TERMS = 32
 
 
 def _sum_canonical_enabled() -> bool:
-    """``DISCOPT_SUM_CANONICAL`` (default ON; ``=0`` opts out): fold per-element sums.
+    """``DISCOPT_SUM_CANONICAL`` (default OFF): fold per-element linear sums.
 
     #1712. ``dm.sum(c[i] * x[i] for i ...)`` builds one Python node per term, and
     every solver pass that walks the model pays for each one: a 90,000-term
     objective cost seconds per pass where ``dm.sum(c * x)`` costs microseconds.
-    :func:`_canonical_affine_sum` rewrites the terms that are exactly a whole
-    variable, each entry once, into that vectorized form.
+    With the flag on, :func:`_canonical_affine_sum` rewrites the terms that are
+    exactly a whole variable, each entry once, into that vectorized form.
 
-    Not bit-identical: the same products are summed in a different order
-    (numpy's, not the generator's), so values can differ in the last bits. That
-    is why it went through the CLAUDE.md §5 panel before becoming the default
-    (``docs/dev/performance-plan.md`` §77.3): 18 per-element instances in 9
-    families, no status, certificate or bound regression, every incumbent
-    verified on the unfolded model, drift <= 2.1e-11, faster overall. Graduated
-    2026-10-16. ``DISCOPT_SUM_CANONICAL=0`` restores the as-written sums.
+    Default OFF, as a documented opt-in. It passed an 18-instance per-element
+    panel (``docs/dev/performance-plan.md`` §77.3) and was briefly graduated, but
+    the full test suite then showed the folded form changing downstream
+    behaviour the panel did not cover: the interval-Hessian walker refuses the
+    array constant, a sum-of-squares model stops routing to POUNCE's QP IPM,
+    and the binary-multilinear expansion declines (§77.6). What would make it
+    the default: those consumers handling ``dm.sum(C * x)`` as they handle the
+    per-element sum, then a panel over models that reach them.
     """
     import os as _os
 
-    return _os.environ.get("DISCOPT_SUM_CANONICAL", "1") != "0"
+    return _os.environ.get("DISCOPT_SUM_CANONICAL", "0") == "1"
 
 
 def _sum_of_terms(terms: list[Expression]) -> Expression:

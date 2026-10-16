@@ -5,9 +5,8 @@ Found while investigating #1712: under CPU load, ``bchoco08`` reached the #654
 *rigorous* root-relaxation bound. Its separated candidate came from a node LP with
 no Neumaier-Shcherbina certificate, and ``_certify`` accepted the vertex on trust
 (``trusted_vertex``). That failed ``test_1278_bound_provenance`` under load on main
-too, and the root LP probe reached the same arm. The ``trusted_vertex`` arm is
-retired for every caller; ``solve_at_node(rigorous_only=True)``, which the fallback
-asks for, also declines the ``trusted_backend`` arm.
+too. ``solve_at_node(rigorous_only=True)`` declines both trust arms, and the
+fallback asks for it.
 
 The LP is stubbed to return no certificate (``safe_bound=None``), which is the
 state the timing-dependent path produced, so the test does not depend on load.
@@ -51,17 +50,19 @@ def _bilinear() -> Model:
 
 
 @pytest.mark.smoke
-@pytest.mark.parametrize("rigorous_only", [False, True])
-def test_uncertified_vertex_is_never_trusted(uncertified_lp, rigorous_only):
-    """An optimal node LP with no certificate yields no bound, for every caller.
-
-    Before #1712 the default took it as ``trusted_vertex``; the arm is retired."""
+def test_rigorous_only_declines_the_trusted_vertex(uncertified_lp):
     m = _bilinear()
     lb, ub = (b.astype(float) for b in flat_variable_bounds(m))
+
     reset_bound_provenance()
-    res = MccormickLPRelaxer(m).solve_at_node(lb, ub, rigorous_only=rigorous_only)
-    assert dict(BOUND_PROVENANCE) == {"declined": 1}  # the probe reached the decision
-    assert res.lower_bound is None
+    default = MccormickLPRelaxer(m).solve_at_node(lb, ub)
+    assert dict(BOUND_PROVENANCE) == {"trusted_vertex": 1}  # the probe reached the arm
+    assert default.lower_bound is not None
+
+    reset_bound_provenance()
+    strict = MccormickLPRelaxer(m).solve_at_node(lb, ub, rigorous_only=True)
+    assert dict(BOUND_PROVENANCE) == {"declined": 1}
+    assert strict.lower_bound is None
 
 
 @pytest.mark.smoke

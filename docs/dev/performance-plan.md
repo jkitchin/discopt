@@ -10766,27 +10766,31 @@ branch it fails or passes with the timing of the run, while the tapes are
 identical. Whether the gate should exist is tracked separately; changing timings
 does not fix it.
 
-### 77.5 The `trusted_vertex` arm is retired
+### 77.6 Retracted: the fold's graduation, and the `trusted_vertex` retirement
 
-Chasing the load-sensitive 1278 failure found it, and the fix is a soundness fix,
-not a timing adjustment. `mccormick_lp._certify` had a trust arm: an optimal node
-LP with no Neumaier-Shcherbina certificate (a free column on an uncertified solve)
-took the vertex objective as its bound when the LP was well-conditioned. It had
-already certified a false bound once (`test_1492`, `milp_simplex.py` §756).
+Both were made on evidence presented as complete. The first full CI run of the PR
+showed it was not: `Python fast` failed 11 of 15,246 tests.
 
-- **Where it fired.** Only when a deadline pushed a node onto the uncertified
-  path. `bchoco08` at `time_limit` 3-4 s (deterministically), or at 10 s under
-  4-way load: once in the #654 root fallback, whose contract is a *rigorous*
-  bound, and once in the root LP probe, whose bound feeds the #930 fallback and
-  the #933 root seed.
-- **How often at normal load.** 0 of 66 corpus instances at 30 s
-  (`BOUND_PROVENANCE` per instance).
-- **What depends on it.** Nothing: the smoke suite with the arm retired fails
-  only the test written to pin the arm.
-
-Retired: such a node declines and the driver branches. A short budget can cost a
-bound, never its rigor. `solve_at_node(rigorous_only=True)` remains for the other
-trust arm (`trusted_backend`, the `auto` backend's optimum) and is what the root
-fallback asks for. Result: the 1278 corpus test, which failed 4/4 under 4-way load
-on `1eab4f4`, passes 8/8 (two loaded rounds).
+- **`DISCOPT_SUM_CANONICAL` default ON** caused 7 failures. Each fails with the fold
+  on and passes with `=0`. The interval-Hessian walker refuses the folded array
+  `Constant` (`test_interval_ad_vectorized_hessian` ×2). A sum-of-squares model
+  routes to `pounce:nlp` instead of `pounce:qp-ipm`
+  (`test_1679_pounce_routing[scalar]`). The binary-multilinear expansion declines
+  with "non-scalar constant" and its budget instruments never fire
+  (`test_binary_multilinear_work_budget` ×3). A deep-recursion fixture is
+  flattened (`test_issue_1617`). The §77.3 panel was cert-clean on its 18
+  instances, but none of them reached these consumers. Measured, the smoke suite
+  folded in only 5 tests, all written for the flag, and that was the warning. Set
+  back to default OFF and kept as a documented opt-in.
+- **Retiring `trusted_vertex`** caused the other 4 failures (asin/acos in
+  `test_relaxation_coverage`). On `main` they certify only through that arm
+  (provenance `{'trusted_vertex': 2}`). Both node-LP columns are bounded: the
+  generic (non-incremental) relaxation path computes no Neumaier-Shcherbina bound
+  on a successful solve. The claim in the reverted commit (c057932), "0 of 66
+  instances, nothing depends on it", came from the `.nl` corpus and the smoke suite, and neither holds these
+  `relaxation`-marked tests. The retirement is reverted. What remains is the
+  narrower sound change: the #654 root fallback asks `rigorous_only=True`. The
+  real fix, an NS bound on the generic path's successful solves, is separate
+  work. Until then, `test_1278_bound_provenance`'s corpus test stays
+  load-sensitive, as on `main`, through the root LP probe.
 
