@@ -176,7 +176,7 @@ forty-five. "Panel owed, never run" is therefore the honest state for most rows 
 this document has said since its first pass that **that is itself the finding**, not a gap
 in the audit.
 
-<!-- live-solver-math-gates: 48 -->
+<!-- live-solver-math-gates: 49 -->
 
 **The finding that matters more than the count.** This audit's first pass triaged flags
 from their *gate docstrings*, and for **four of the nine** that was wrong — the evidence
