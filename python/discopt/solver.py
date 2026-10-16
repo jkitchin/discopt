@@ -22884,6 +22884,27 @@ def _solve_continuous(
         # respecting actual bounds.
         _X0_CLIP = 10.0
         x0 = np.clip(x0, np.maximum(lb, -_X0_CLIP), np.minimum(ub, _X0_CLIP))
+        # #1714: on a PROVED-convex model, a column that an ``==`` row pins on its
+        # own (``z == 1``, ``x[0] == 0``) starts at that value instead of the box
+        # midpoint. The midpoint ignores the equality: on the #1711 chain the
+        # nonlinear tightening leaves the four end columns at [-10, 0] / [-10, 1],
+        # their midpoints are -5, and the first iterate has inf_pr = 50. Measured at
+        # N = 10,000: POUNCE 101 -> 47 iterations, 24.1 -> 10.5 s, certified in both
+        # arms. Only the START moves -- lb/ub reach the NLP unchanged -- so no bound
+        # or certificate depends on it.
+        #
+        # Convex only, on purpose. There every start reaches the same optimal value,
+        # so this can only shorten the path. On a nonconvex model the start picks the
+        # basin: across the COPS 3.0 ports it helped rocket (1113 -> 329 iterations)
+        # and robot, but sent polygon to a worse local optimum (-0.71974 ->
+        # -0.67498). What would change that: a start rule measured to be net-positive
+        # on nonconvex local solves, which this is not.
+        if certify_convex:
+            from discopt._relax.nonlinear_bound_tightening import affine_implied_values
+
+            for _idx, _val in affine_implied_values(model).items():
+                x0[_idx] = _val
+            x0 = np.clip(x0, lb, ub)
 
     # The model-level NLP seam: this point IS the user's solution, so it takes the
     # incumbent options (#945) — the same reasoning as _solve_lp_pounce and
