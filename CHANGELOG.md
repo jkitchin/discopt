@@ -145,6 +145,17 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **OA stops at a fixed point instead of repeating it (#1710).** When an OA
+  iteration added no cuts, the next master was the same problem, so OA re-solved
+  the same fixed-integer NLP from the same warm start until the 50-iteration
+  no-progress exit fired: on #1708's model, 51 identical fixed-NLP solves and 51
+  master solves for one answer. OA now digests the loop state at each master
+  solve (every master input except its wall budget, plus the bounds, incumbent
+  and candidate queue) and stops with the same `"stalling"` reason as soon as
+  it repeats the previous iteration's state. A converged fixed-NLP solve is
+  also reused for a bit-identical later request (32-entry LRU). On the #1708
+  model: 1 fixed-NLP solve, 2 masters, same objective and bound.
+
 - **`dm.external` callbacks are called once per distinct point (#1708).** On a
   2-variable MINLP under `solver="mip-nlp"`, `fn`/`jac`/`hess` ran 2236/1872/1769
   times at only 85/71/69 distinct inputs: outer approximation re-solves the same
