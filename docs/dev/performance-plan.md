@@ -10666,3 +10666,70 @@ fail-before separately: 5 failures with both reverted, 2 with only the
 exit-status change reverted. On the explicit `simplex`-master path, a model the
 certificate wrongly calls convex can still end `infeasible` with no incumbent.
 That status rests on the certificate, which is the fix for this case.
+
+## 77. #1712: per-element LPs, and what folding `dm.sum` buys (2026-10-16)
+
+A pure LP written per element (`m.continuous("x", over=P * K)`,
+`dm.sum(c * x[p, k] for ...)`, `m.constraint(P, lambda p: ...)`) builds one Python
+node per term, and every pass that walks the model pays for each one. On the issue's
+300x300 transport LP (90,000 variables, 600 rows) HiGHS gets the same matrix as the
+vectorized form and solves it in ~0.1 s; `solve()` took 54.5 s on `1eab4f4`.
+
+### 77.1 Exact changes (no flag)
+
+Each one leaves results unchanged; the panels and tests are in the PR.
+
+| change | measured effect (N=300, 3 interleaved runs per arm) |
+|---|---|
+| bulk interval enclosure and bulk tape lowering of `c*x[i]` sums, convex-kernel early refusal, no convexity walk for an LP, Rust `var_offset_map` memo | 54.45 s (sd 2.01) -> 18.91 s (sd 0.18) |
+| no entropy rewrite / domain rules on an LP or MILP | 20.19 s (sd 0.73) -> 18.47 s (sd 0.35) |
+
+Two attempts were measured and dropped because they moved a cost instead of
+removing it. The NLP tape is built once per solve and cached by fingerprint, so
+whichever consumer asks first pays for it. Removing the convex kernel's build moved
+the cost to the dual matcher. A builder-row view for the dual matcher then moved it
+to the #1561 certificate check. The second change was reverted. Only making the
+tape itself cheaper reduces the total.
+
+### 77.2 Hypothesis: folding the objective reaches vectorized speed — falsified in part
+
+*Hypothesis.* The remaining gap is the per-element objective. Folding it into
+`dm.sum(C * x)` brings the solve near the vectorized one (kill criterion: within
+2x of it).
+
+*Entry experiment* (the objective folded by hand, same machine, one run each):
+per-element 25.4 s, **folded 7.6 s**, vectorized 2.5 s. Folding gives 3.3x but
+stays 3x off vectorized, so it misses the kill criterion. Profile of the folded
+model: 3.3 s of its 5.9 s is the tape for the 600 builder rows (1.3 s
+materializing them as Python `Constraint` objects, the rest compiling them). Those
+rows are already compact in the builder; the evaluator expands them.
+**Re-scoped:** the fold ships behind `DISCOPT_SUM_CANONICAL` for what it does buy,
+and the builder-row tape is the next cost to remove.
+
+### 77.3 `DISCOPT_SUM_CANONICAL` panel
+
+The fold fires only when a variable's terms name every entry once, so the folded
+sum holds exactly the written products, in a different summation order. The in-repo
+`.nl` corpus never calls `dm.sum`, so a panel over it would measure nothing. With
+the flag on, the smoke suite folded in **5 tests, all written for the flag**, so
+"smoke passes" is not evidence either.
+
+The panel is therefore the class the flag targets: 18 per-element instances (seeds
+1 and 2) in 9 families. Families: transport LP (12x12, 40x40), integer transport
+(7x7), knapsack (60), facility location (6x8, linear and with quadratic flow cost),
+QP (80), portfolio (50, quadratic risk row), and nonconvex bilinear (32). Settings:
+60 s limit, arms in separate processes, interleaved. The fold count was recorded
+per run: at least 1 on every ON run, 0 on every OFF run.
+
+- **Cert-clean:** 0 status differences, 0 certification regressions, 0 ON bounds
+  crossing the OFF arm's certified optimum, and 18/18 ON incumbents pass
+  `verify_point` on the *unfolded* model. Largest relative objective drift
+  2.1e-11. Node counts identical.
+- **Net-positive:** total wall 11.04 s -> 10.23 s at these sizes. On the issue's
+  model: 18.21 s (sd 0.59) -> 7.52 s (sd 0.40).
+- **Defect found:** the first run crashed both bilinear instances in
+  `milp_relaxation` (`float()` of an array constant). The crash reproduces with the
+  flag off on a hand-written `dm.sum(c * x)` objective beside a bilinear row, so it
+  is a pre-existing defect that the flag made reachable. Fixed (the walkers decline
+  an array constant) and pinned by
+  `test_array_constant_objective_with_bilinear_rows_solves`.

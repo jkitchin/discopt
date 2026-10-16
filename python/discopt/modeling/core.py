@@ -3372,12 +3372,143 @@ def sum(
         # Indexed summation: dm.sum(lambda i: expr(i), over=index_set). Tuple
         # members of dimen>1 named sets are unpacked: ``lambda i, j: ...``.
         terms = [_wrap(_call_over(x, i, over)) for i in over]
-        return SumOverExpression(terms)
+        return _sum_of_terms(terms)
     if isinstance(x, list) or _is_term_iterable(x):
         # list/tuple/generator of terms: dm.sum(x[i] for i in S)
         terms = [_wrap(t) for t in x]
-        return SumOverExpression(terms)
+        return _sum_of_terms(terms)
     return SumExpression(_wrap(x), axis=axis)
+
+
+#: Below this many terms a per-element sum is left exactly as written: the
+#: per-node passes cost microseconds there, and the user's own structure keeps
+#: printing, LaTeX and export output unchanged. A cost cutoff, not a tolerance.
+_SUM_CANONICAL_MIN_TERMS = 32
+
+
+def _sum_canonical_enabled() -> bool:
+    """``DISCOPT_SUM_CANONICAL`` (default OFF): fold per-element linear sums.
+
+    #1712. ``dm.sum(c[i] * x[i] for i ...)`` builds one Python node per term, and
+    every solver pass that walks the model pays for each one: a 90,000-term
+    objective cost seconds per pass where ``dm.sum(c * x)`` costs microseconds.
+    With the flag on, :func:`_canonical_affine_sum` rewrites the terms that are
+    exactly a whole variable, each entry once, into that vectorized form.
+
+    Default OFF because the result is not bit-identical: the same products are
+    summed in a different order (numpy's, not the generator's), so values can
+    differ in the last bits, and CLAUDE.md §5 makes such a change earn its default
+    with a panel. Row in ``docs/dev/flag-retirement-audit.md``.
+    """
+    import os as _os
+
+    return _os.environ.get("DISCOPT_SUM_CANONICAL", "0") == "1"
+
+
+def _sum_of_terms(terms: list[Expression]) -> Expression:
+    if len(terms) >= _SUM_CANONICAL_MIN_TERMS and _sum_canonical_enabled():
+        folded = _canonical_affine_sum(terms)
+        if folded is not None:
+            return folded
+    return SumOverExpression(terms)
+
+
+def _affine_leaf_position(expr: Expression) -> Optional[tuple["Variable", int]]:
+    """``(variable, flat C-order position)`` of ``x[i]`` / ``x[i, j]`` on a shaped
+    variable, or ``None`` for anything else (a slice, a partial or exotic index)."""
+    if not isinstance(expr, IndexExpression):
+        return None
+    base = expr.base
+    if not isinstance(base, Variable):
+        return None
+    shape = tuple(base.shape or ())
+    if not shape:
+        return None
+    idx = expr.index if isinstance(expr.index, tuple) else (expr.index,)
+    if len(idx) != len(shape):
+        return None
+    flat = 0
+    for i, dim in zip(idx, shape):
+        if isinstance(i, bool) or not isinstance(i, (int, np.integer)):
+            return None
+        i = int(i)
+        if i < 0:
+            i += dim
+        if not 0 <= i < dim:
+            return None
+        flat = flat * dim + i
+    return base, flat
+
+
+def _affine_term_parts(term: Expression) -> Optional[tuple["Variable", int, float]]:
+    """``(variable, position, coefficient)`` of ``x[i]``, ``-x[i]``, ``c * x[i]`` or
+    ``x[i] * c`` with ``c`` a scalar :class:`Constant`, else ``None``.
+
+    A :class:`Parameter` coefficient is deliberately NOT folded: it can be
+    re-valued after the model is built, and copying its value into a constant
+    array would freeze it.
+    """
+    coef = 1.0
+    leaf = term
+    if isinstance(term, UnaryOp) and term.op == "neg":
+        coef, leaf = -1.0, term.operand
+    elif isinstance(term, BinaryOp) and term.op == "*":
+        for c_node, other in ((term.left, term.right), (term.right, term.left)):
+            if type(c_node) is Constant:
+                value = np.asarray(c_node.value)
+                if value.ndim == 0 and value.dtype.kind in "biuf":
+                    coef, leaf = float(value), other
+                    break
+        else:
+            return None
+    found = _affine_leaf_position(leaf)
+    if found is None:
+        return None
+    return found[0], found[1], coef
+
+
+def _canonical_affine_sum(terms: list[Expression]) -> Optional[Expression]:
+    """Fold the terms that cover a whole variable into ``dm.sum(C * x)``.
+
+    A variable's terms are folded only when they name every entry of it exactly
+    once, so the folded sum holds exactly the products that were written --
+    ``C[i] * x[i]`` for each term, no invented zero-coefficient entries, no
+    merged duplicates -- just summed in another order. Every other term is kept
+    as written, after the folded ones. ``None`` when nothing qualifies.
+    """
+    groups: dict[int, tuple[Variable, list[tuple[int, float]]]] = {}
+    parsed: list[Optional[tuple[Variable, int, float]]] = []
+    for t in terms:
+        parts = _affine_term_parts(t)
+        parsed.append(parts)
+        if parts is not None:
+            var, pos, coef = parts
+            groups.setdefault(id(var), (var, []))[1].append((pos, coef))
+
+    folded: dict[int, Expression] = {}
+    for key, (var, entries) in groups.items():
+        size = int(var.size)
+        if size < 2 or len(entries) != size:
+            continue
+        seen = np.zeros(size, dtype=bool)
+        coefs = np.empty(size, dtype=np.float64)
+        for pos, coef in entries:
+            if seen[pos]:
+                break
+            seen[pos] = True
+            coefs[pos] = coef
+        else:
+            # ``len == size`` and no repeat means every entry is covered once.
+            C = _wrap(coefs.reshape(var.shape))
+            folded[key] = SumExpression(BinaryOp("*", C, var), axis=None)
+
+    if not folded:
+        return None
+    rest = [t for t, p in zip(terms, parsed) if p is None or id(p[0]) not in folded]
+    parts_out = list(folded.values()) + rest
+    if len(parts_out) == 1:
+        return parts_out[0]
+    return SumOverExpression(parts_out)
 
 
 def prod(x: Union[Expression, list, Callable], *, over: Optional[Sequence] = None) -> Expression:

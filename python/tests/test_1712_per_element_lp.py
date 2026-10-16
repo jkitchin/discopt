@@ -258,4 +258,3 @@ def test_nonlinear_model_keeps_entropy_and_domain_rules(monkeypatch):
     m.solve(time_limit=20)
     assert seen["entropy"] >= 1
     assert seen["rules"] and all(r for r in seen["rules"])
-
