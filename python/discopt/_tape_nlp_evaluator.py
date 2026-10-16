@@ -403,8 +403,10 @@ class TapeNLPEvaluator:
 
         for c in self._source_constraints:
             pending = builder_row_of(c)
-            built = compile_builder_row(pending, model) if pending is not None else None
-            rows = (built if built is not None else compile_to_nl_array(c.body, model)).reshape(-1)
+            direct = compile_builder_row(pending, model) if pending is not None else None
+            if direct is None:
+                direct = compile_to_nl_array(c.body, model)
+            rows = direct.reshape(-1)
             sizes.append(int(rows.size))
             cons.extend(rows.tolist())
         return obj, cons, sizes

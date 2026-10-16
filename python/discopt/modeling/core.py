@@ -3852,6 +3852,7 @@ def _builder_row_constraint(row) -> "Constraint":
         body = term if body is None else body + term
     if body is None:
         body = Constant(np.float64(0.0))
+    c: Constraint
     if row.sense == "<=":
         c = body <= row.rhs
     elif row.sense == ">=":

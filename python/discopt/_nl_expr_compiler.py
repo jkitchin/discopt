@@ -835,7 +835,7 @@ def compile_builder_row(row: Any, model: Model) -> np.ndarray | None:
     offsets: dict[int, int] = {}
 
     def const_node(value: float) -> Any:
-        c = _wrap(value)
+        c = cast(Constant, _wrap(value))  # a float always wraps to a Constant
         keep_alive.append(c)
         node = const_nodes.get(id(c))
         if node is None:
