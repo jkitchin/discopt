@@ -472,6 +472,26 @@ def build_convex_spec(model, bounds=None) -> Optional[dict]:
         return None
 
 
+def _degree_linear(m) -> bool:
+    """Whether the Rust degree analysis proves *m*'s objective and every row linear.
+
+    The early-refusal test of #1712. ``False`` only means "not proven", which sends
+    the model on to the tape-based checks exactly as before -- so a model the repr
+    cannot be built for is not an error here; it is the pre-#1712 path. The reason
+    is logged rather than raised or reported as a fallback: nothing falls back.
+    """
+    from discopt._rust import model_to_repr
+
+    try:
+        rep = model_to_repr(m, getattr(m, "_builder", None))
+    except Exception as exc:  # noqa: BLE001 - "not proven linear": the tape decides
+        logger.debug("convex kernel: no Rust repr for the linearity pre-check (%s)", exc)
+        return False
+    if not rep.is_objective_linear():
+        return False
+    return all(rep.is_constraint_linear(i) for i in range(rep.n_constraints))
+
+
 def _build(model, bounds) -> dict:
     from discopt._relax.model_utils import flat_variable_bounds
     from discopt._tape_nlp_evaluator import make_evaluator
@@ -496,6 +516,20 @@ def _build(model, bounds) -> dict:
             if v.var_type in (VarType.BINARY, VarType.INTEGER):
                 is_int[k] = True
             k += 1
+
+    # #1712: both refusals below that need no evaluator are asked BEFORE building
+    # one. The tape build walks every expression node in Python -- 17 s on a
+    # 90k-term per-element LP -- only to reach a refusal these two facts decide:
+    # * no integer variable -> the ``not is_int.any()`` refusal further down;
+    # * linear objective and rows by degree -> constant gradient and Jacobian on
+    #   the tape, so the ``lin_rows.all()`` "no nonlinear row" refusal (or an
+    #   earlier one) always fires.
+    # Every refusal returns ``None`` from :func:`build_convex_spec`, so asking them
+    # in a different order changes no outcome.
+    if not is_int.any():
+        raise NotConvexKernel("no integer variable: a continuous convex NLP keeps the NLP path")
+    if _degree_linear(m):
+        raise NotConvexKernel("no nonlinear row: an LP/MILP belongs to the LP/MILP route")
 
     ev = make_evaluator(m)  # #1063: canonical funnel, not the JAX ctor
     senses = [c.sense if isinstance(c.sense, str) else c.sense.value for c in m._constraints]

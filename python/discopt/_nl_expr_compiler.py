@@ -379,7 +379,11 @@ def _additive_chain(expr: Expression) -> Optional[list[tuple[int, Expression]]]:
     return out
 
 
-def _children(expr: Expression, model: Model) -> tuple[Expression, ...]:
+def _children(
+    expr: Expression,
+    model: Model,
+    chain: Optional[list[tuple[int, Expression]]] = None,
+) -> tuple[Expression, ...]:
     """The sub-expressions :func:`_lower_uncached` will ``rec()`` into, in order.
 
     Kept deliberately in lockstep with the ``rec`` calls below — including
@@ -393,7 +397,8 @@ def _children(expr: Expression, model: Model) -> tuple[Expression, ...]:
     robustness for that shape, nothing else.
     """
     if isinstance(expr, BinaryOp):
-        chain = _additive_chain(expr)
+        if chain is None:
+            chain = _additive_chain(expr)
         if chain is not None:
             # Descend straight to the chain's leaves: the intermediate `+`/`-`
             # nodes must never be lowered, because each one would build a binary
@@ -452,10 +457,20 @@ def _lower(
         if node_key in memo:
             continue
         if not expanded:
+            chain = None
+            if isinstance(node, (SumOverExpression, BinaryOp)):
+                # #1712: a per-element linear sum is lowered in bulk, never
+                # expanded into its terms; see :func:`_scalar_affine_plan`.
+                if isinstance(node, BinaryOp):
+                    chain = _additive_chain(node)
+                plan = _scalar_affine_plan(node, model, chain)
+                if plan is not None:
+                    memo[node_key] = _lower_scalar_affine_sum(node, plan, E, memo, budget)
+                    continue
             # Push the node back under its children so it is built after them;
             # `reversed` so siblings pop left-to-right, as `rec` visits them.
             stack.append((node, True))
-            for child in reversed(_children(node, model)):
+            for child in reversed(_children(node, model, chain)):
                 if id(child) not in memo:
                     stack.append((child, False))
             continue
@@ -624,6 +639,236 @@ def _lower_uncached(
         raise UnsupportedForTape("CustomCall (dm.custom) has no tape equivalent")
 
     raise UnsupportedForTape(f"expression node {type(expr).__name__}")
+
+
+#: One term of a per-element linear sum, as :func:`_affine_term` classifies it:
+#: ``(term, sign, coef, coef_is_left, leaf, slot)``. ``coef`` is ``None`` for a bare
+#: leaf; ``leaf`` is ``None`` (and ``slot`` -1) for a bare coefficient.
+_AffineTerm = tuple[Expression, int, Optional[Expression], bool, Optional[Expression], int]
+
+
+def _scalar_leaf_slot(expr: Expression, model: Model) -> int | None:
+    """Flat slot of a leaf the generic lowering turns into one bare ``E.var``."""
+    if isinstance(expr, IndexExpression):
+        return _static_scalar_slot(expr, model)
+    if isinstance(expr, Variable) and tuple(expr.shape or ()) == ():
+        return _compute_var_offset(expr, model)
+    return None
+
+
+def _is_scalar_coefficient(expr: Expression) -> bool:
+    """A ``Constant``/``Parameter`` that ``_const_array`` lowers to one ``const_``."""
+    if not isinstance(expr, (Constant, Parameter)):
+        return False
+    try:
+        return bool(np.asarray(expr.value, dtype=np.float64).ndim == 0)
+    except (TypeError, ValueError):
+        return False  # the generic path raises UnsupportedForTape for it
+
+
+def _affine_term(term: Expression, sign: int, model: Model) -> Optional[_AffineTerm]:
+    """Classify *term* as ``leaf``, ``coef``, or ``coef * leaf`` (either order)."""
+    slot = _scalar_leaf_slot(term, model)
+    if slot is not None:
+        return (term, sign, None, False, term, slot)
+    if _is_scalar_coefficient(term):
+        return (term, sign, term, True, None, -1)
+    if not (isinstance(term, BinaryOp) and term.op == "*"):
+        return None
+    if _is_scalar_coefficient(term.left):
+        coef, leaf, coef_is_left = term.left, term.right, True
+    elif _is_scalar_coefficient(term.right):
+        coef, leaf, coef_is_left = term.right, term.left, False
+    else:
+        return None
+    slot = _scalar_leaf_slot(leaf, model)
+    if slot is None:
+        return None
+    return (term, sign, coef, coef_is_left, leaf, slot)
+
+
+def _scalar_affine_plan(
+    expr: Expression,
+    model: Model,
+    chain: Optional[list[tuple[int, Expression]]] = None,
+) -> Optional[list[_AffineTerm]]:
+    """The terms of a per-element linear sum, or ``None`` when *expr* is not one.
+
+    #1712: ``dm.sum(c * x[i] for ...)`` -- and the ``c*x[i] + ...`` chain a
+    ``Model.constraint`` fast family materializes into -- is the per-element
+    idiom, one Python node per term, and the generic post-order traversal costs
+    ~100x the tape nodes it builds (a 90k-term LP: 11 s against 0.11 s for the
+    same ``NlExpr`` calls made directly).
+
+    Two shapes, the two the generic lowering turns into one n-ary ``E.sum``:
+
+    * a :class:`SumOverExpression` of two or more terms (one term is left to the
+      generic path, which returns it without an ``E.sum``);
+    * a ``+``/``-`` chain of at least ``_FLATTEN_MIN_TERMS`` leaves
+      (:func:`_additive_chain`), signs and order exactly as it reports them.
+
+    Every term must be a scalar leaf, a scalar coefficient, or ``coef * leaf``;
+    anything else returns ``None`` and the whole expression lowers generically.
+    ``chain`` is *expr*'s :func:`_additive_chain` when the caller already has it.
+    """
+    if isinstance(expr, SumOverExpression):
+        if len(expr.terms) < 2:
+            return None
+        signed: list[tuple[int, Expression]] = [(1, t) for t in expr.terms]
+    elif isinstance(expr, BinaryOp):
+        if chain is None:
+            chain = _additive_chain(expr)
+        if chain is None:
+            return None
+        signed = chain
+    else:
+        return None
+    plan: list[_AffineTerm] = []
+    for sign, t in signed:
+        item = _affine_term(t, sign, model)
+        if item is None:
+            return None
+        plan.append(item)
+    return plan
+
+
+def _lower_scalar_affine_sum(
+    expr: Expression, plan: list[_AffineTerm], E: Any, memo: dict[int, Any], budget: _Budget
+) -> np.ndarray:
+    """Lower a :func:`_scalar_affine_plan` exactly as the generic traversal would.
+
+    Same ``NlExpr`` calls on the same operands in the same order -- ``E.var(slot)``
+    for a leaf, ``_const_array`` for a coefficient, ``left * right`` in the term's
+    own operand order, unary ``-`` for a subtracted chain leaf, one ``E.sum`` over
+    the terms -- the same memo entries (``id(node)`` -> 0-d object array, so a node
+    shared with the rest of the DAG is built once, as before; the chain's interior
+    ``+``/``-`` nodes are never memoized, as before), and the same budget charges
+    in the same order. Only the per-node stack and dispatch are gone.
+    ``test_tape_affine_sum_fast_path_matches_generic`` holds the two to identical
+    tapes, values and gradients.
+    """
+    nodes: list[Any] = []
+    for term, sign, coef, coef_is_left, leaf, slot in plan:
+        hit = memo.get(id(term))
+        if hit is not None:
+            node = hit[()]
+        elif leaf is None:
+            node = _affine_coef(term, E, memo, budget)[()]
+        elif coef is None:
+            node = _affine_leaf(leaf, slot, E, memo)[()]
+        else:
+            # Operands built left first, as the post-order traversal visits them.
+            if coef_is_left:
+                left = _affine_coef(coef, E, memo, budget)
+                right = _affine_leaf(leaf, slot, E, memo)
+            else:
+                left = _affine_leaf(leaf, slot, E, memo)
+                right = _affine_coef(coef, E, memo, budget)
+            budget.charge(1, "a '*' over arrays")  # ``_broadcast_size`` of 0-d operands
+            node = left[()] * right[()]
+            memo[id(term)] = _wrap_scalar(node)
+        nodes.append(node)
+    if isinstance(expr, SumOverExpression):
+        budget.charge(len(nodes), "a SumOverExpression")
+    else:
+        # The chain negates as it collects, then charges, as the generic branch does.
+        nodes = [-n if s < 0 else n for n, (_, s, *_rest) in zip(nodes, plan)]
+        budget.charge(len(nodes), "an additive chain")
+    return _wrap_scalar(E.sum(nodes))
+
+
+def _affine_leaf(leaf: Expression, slot: int, E: Any, memo: dict[int, Any]) -> np.ndarray:
+    arr = memo.get(id(leaf))
+    if arr is None:
+        arr = _wrap_scalar(E.var(slot))
+        memo[id(leaf)] = arr
+    return cast(np.ndarray, arr)
+
+
+def _affine_coef(coef: Expression, E: Any, memo: dict[int, Any], budget: _Budget) -> np.ndarray:
+    arr = memo.get(id(coef))
+    if arr is None:
+        arr = _const_array(coef.value, E, budget)  # type: ignore[attr-defined]
+        memo[id(coef)] = arr
+    return cast(np.ndarray, arr)
+
+
+def compile_builder_row(row: Any, model: Model) -> np.ndarray | None:
+    """Lower a builder-resident linear row straight from its coefficients (#1712).
+
+    Returns the 1-row object array that ``compile_to_nl_array`` builds for the
+    row's materialized body (``Model._builder_linear_constraints``), WITHOUT
+    building that body: on a 600-row, 90,000-term model the expressions cost
+    1.0 s to build and as much again to walk.
+
+    The body of a ``k``-term row is ``c1*x1 + ... + ck*xk`` with the right-hand
+    side subtracted (``<=``/``==``) or subtracted from (``>=``), so its tape is
+    the :func:`_additive_chain` of ``k + 1`` leaves lowered by
+    :func:`_lower_scalar_affine_sum`. This reproduces that lowering call for call:
+
+    * the leaves in chain order -- ``[t1..tk, rhs]`` signed ``+``/``-`` for
+      ``<=``/``==``, ``[rhs, t1..tk]`` signed ``+``/``-`` for ``>=``;
+    * each coefficient through :func:`_const_array`, its node shared by the
+      identity of the interned :class:`Constant` the materialization would hold
+      (``_wrap`` interns scalars), so an equal coefficient or right-hand side
+      reuses one ``const_`` node exactly as the memo does;
+    * each ``x[i]`` as ``E.var(slot)``, shared per element (``Variable.__getitem__``
+      returns one cached node per element, so the memo shares per element);
+    * products, then negation, then one ``E.sum``, with the same budget charges.
+
+    ``test_builder_row_tape_matches_materialized`` holds the two to identical
+    tapes, values and gradients. ``None`` for a row of fewer than three terms:
+    its chain is too short to flatten, so it takes the generic path.
+    """
+    from discopt.modeling.core import _wrap
+
+    terms = row.terms
+    if len(terms) + 1 < _FLATTEN_MIN_TERMS:
+        return None
+    import pounce
+
+    E = pounce.NlExpr
+    budget = _Budget()
+    const_nodes: dict[int, Any] = {}
+    keep_alive: list[Any] = []  # the interned constants must outlive this lowering
+    var_nodes: dict[tuple[int, int], Any] = {}
+    offsets: dict[int, int] = {}
+
+    def const_node(value: float) -> Any:
+        c = cast(Constant, _wrap(value))  # a float always wraps to a Constant
+        keep_alive.append(c)
+        node = const_nodes.get(id(c))
+        if node is None:
+            node = _const_array(c.value, E, budget)[()]
+            const_nodes[id(c)] = node
+        return node
+
+    def var_node(v: Variable, local: int) -> Any:
+        key = (id(v), local)
+        node = var_nodes.get(key)
+        if node is None:
+            off = offsets.get(id(v))
+            if off is None:
+                off = offsets[id(v)] = _compute_var_offset(v, model)
+            node = var_nodes[key] = E.var(off + local)
+        return node
+
+    def products() -> list[Any]:
+        out = []
+        for v, local, coeff in terms:
+            c = const_node(coeff)  # ``coeff * x`` is ``BinaryOp("*", _wrap(coeff), x)``
+            x = var_node(v, int(local))
+            budget.charge(1, "a '*' over arrays")
+            out.append(c * x)
+        return out
+
+    if row.sense == ">=":
+        nodes = [const_node(row.rhs)] + [-n for n in products()]
+    else:
+        prods = products()
+        nodes = prods + [-const_node(row.rhs)]
+    budget.charge(len(nodes), "an additive chain")
+    return _wrap_scalar(E.sum(nodes)).reshape(-1)
 
 
 def _matmul(left: np.ndarray, right: np.ndarray, E: Any, budget: _Budget) -> np.ndarray:

@@ -56,6 +56,7 @@ import numpy as np
 from discopt._arena_tape import arena_tape_enabled, try_build_arena_tape
 from discopt._nl_expr_compiler import (
     UnsupportedForTape,
+    compile_builder_row,
     compile_to_nl_array,
     compile_to_nl_expr,
 )
@@ -221,9 +222,11 @@ class TapeNLPEvaluator:
         # Same source list as the JAX evaluator, including the #840 fast-path
         # builder rows. Reading only ``model._constraints`` both misses those and
         # mis-indexes the ones it does read.
+        # ``lazy=True`` (#1712): a builder row's body is built only if something
+        # reads it; ``_build_tape_nodes`` lowers it from its coefficients instead.
         self._source_constraints: list[Constraint] = [
             c
-            for c in (*model._constraints, *model._builder_linear_constraints())
+            for c in (*model._constraints, *model._builder_linear_constraints(lazy=True))
             if isinstance(c, Constraint)
         ]
 
@@ -396,8 +399,14 @@ class TapeNLPEvaluator:
         # compiler refused every array form; it no longer does.
         cons: list[Any] = []
         sizes: list[int] = []
+        from discopt.modeling.core import builder_row_of
+
         for c in self._source_constraints:
-            rows = compile_to_nl_array(c.body, model).reshape(-1)
+            pending = builder_row_of(c)
+            direct = compile_builder_row(pending, model) if pending is not None else None
+            if direct is None:
+                direct = compile_to_nl_array(c.body, model)
+            rows = direct.reshape(-1)
             sizes.append(int(rows.size))
             cons.extend(rows.tolist())
         return obj, cons, sizes
