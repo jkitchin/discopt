@@ -13810,6 +13810,10 @@ def solve_model(
     # variables. ``None`` means no lift happened, so the live model IS original.
     _prereform_model = None
     _prereform_nvars = 0
+    # The model object the factorable lift returned, so a later route can tell
+    # whether the live ``model`` is still exactly that lift of ``_prereform_model``
+    # (no other pass rewrote it since). ``None`` when no lift happened.
+    _factorable_lift_output = None
 
     # #1456 item 2. The entry gate alone leaves the *first* heavy pass unbounded,
     # and factorable reform is the pass that was measured overrunning: ``truck``
@@ -13893,6 +13897,7 @@ def solve_model(
                 clear_declared_box_cache(model)
                 model._convexity_time_budget = _convexity_time_budget
                 model._solve_deadline = _solve_t0 + float(time_limit)  # #654 (above)
+                _factorable_lift_output = model
         # A *convex* model with a clearable denominator is deliberately left
         # untouched here: many such divisions (e.g. the rotated-SOC ``x**2/z``)
         # are solved exactly by the convex NLP fast path, and clearing would
@@ -15353,8 +15358,22 @@ def solve_model(
         and not _pure_continuous_force_spatial
         and (skip_convex_check or not _pure_continuous_convexity_known)
     ):
+        # #1721: the local NLP runs on the model the user posed, not on its
+        # factorable lift. The lift is a relaxation device, and as an NLP it can
+        # carry KKT points the source does not have: Rosenbrock's ``w = x0**2``
+        # aux, boxed ``w >= 0``, makes (0, 0, w=0) a degenerate KKT point of the
+        # lifted NLP (the multiplier of ``w - x0**2 == 0`` grows like 1/x0), and
+        # POUNCE converged there and reported f = 1 at a point where the source
+        # gradient is (-2, 0). The user's start is also flattened against the
+        # source's columns. Only when the live model is still exactly that lift;
+        # any later rewrite (the cleared-denominator retry) keeps ``model``.
+        _local_nlp_model = (
+            _prereform_model
+            if _prereform_model is not None and model is _factorable_lift_output
+            else model
+        )
         _cont_result = _solve_continuous(
-            model,
+            _local_nlp_model,
             time_limit,
             ipopt_options,
             t_start,
@@ -23213,6 +23232,16 @@ def _solve_continuous(
         )
     lb, ub = tightened_lb, tightened_ub
     lb_clipped, ub_clipped = _clip_start_box(lb, ub)
+    if initial_point is not None:
+        # #1721: the start was flattened against the user's columns; a
+        # solve-time reformulation may have appended more. Complete it (aux
+        # columns from their defining rows) or drop it -- a warm start is a hint
+        # and must never fail the solve (#1324).
+        from discopt.warm_start import prepare_warm_start
+
+        initial_point = prepare_warm_start(
+            model, initial_point, route="continuous NLP", evaluator=evaluator
+        )
     if initial_point is not None:
         x0 = np.clip(initial_point, lb, ub)
         logger.info("Using warm-start point for continuous NLP")
