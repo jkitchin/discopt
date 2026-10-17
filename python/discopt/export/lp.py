@@ -203,12 +203,60 @@ def to_lp(model: Model, path: str | Path | None = None) -> str | None:
 
     lines.append("End")
 
-    lp_str = "\n".join(lines) + "\n"
+    lp_str = "\n".join(piece for line in lines for piece in _wrap_line(line)) + "\n"
 
     if path is not None:
         Path(path).write_text(lp_str)
         return None
     return lp_str
+
+
+# Width at which a row is continued on the next line (#1739). LP readers cap
+# the physical line, not the row: CPLEX at 560 characters, lp_solve at 510
+# (255 in 5.0/5.1). A row, an objective or a `Generals`/`Binaries` list was one
+# line, so a dense model wrote lines of 100k+ characters (a 10,000-term row:
+# 102,234) that those readers reject or truncate. HiGHS does not care, which is
+# why the in-repo round trips never saw it. 255 is inside every limit above.
+_MAX_LINE = 255
+
+
+def _wrap_line(line: str, width: int = _MAX_LINE) -> list[str]:
+    """Continue ``line`` on further lines so no piece exceeds ``width``.
+
+    Breaks go only where the reader cannot misread them: before a ``+``/``-``
+    term sign in an expression row, and between names in a ``Generals`` /
+    ``Binaries`` list (a line of names only). A coefficient is never split from
+    its variable, nor ``x * y`` / ``x ^ 2`` apart. Continuations are indented.
+    A backslash comment line is continued as further comment lines.
+    """
+    if len(line) <= width:
+        return [line]
+    indent = line[: len(line) - len(line.lstrip())] or " "
+    if line.lstrip().startswith("\\"):
+        text = line.lstrip()[1:].strip()
+        step = width - 2
+        return [f"\\ {text[k : k + step]}" for k in range(0, len(text), step)]
+
+    # Group tokens into unbreakable chunks (one term, or one name), then pack
+    # chunks greedily.
+    tokens = line.split()
+    name_list = not any(t in ("+", "-", ":", "<=", ">=", "=", "<", ">") for t in tokens)
+    chunks: list[str] = []
+    for tok in tokens:
+        if chunks and not (name_list or tok in ("+", "-")):
+            chunks[-1] += " " + tok
+        else:
+            chunks.append(tok)
+    out: list[str] = []
+    cur = line[: len(line) - len(line.lstrip())] + chunks[0]
+    for chunk in chunks[1:]:
+        if len(cur) + 1 + len(chunk) > width:
+            out.append(cur)
+            cur = indent + "  " + chunk
+        else:
+            cur += " " + chunk
+    out.append(cur)
+    return out
 
 
 def _format_linear_expr(
