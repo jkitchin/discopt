@@ -76,13 +76,26 @@ def test_portfolio_with_norm_row_takes_convex_route():
     mu = 0.05 + 0.1 * rng.random(n)
     L = rng.normal(scale=0.05, size=(n, n))
     Sigma = L @ L.T + 1e-3 * np.eye(n)
-    m = dm.Model("p")
-    w = m.continuous("w", shape=(n,), lb=0, ub=1)
-    m.subject_to(dm.sum(w) == 1)
-    m.subject_to(mu @ w >= 0.08)
-    m.subject_to(dm.norm(w) <= 0.6)
-    m.minimize(w @ Sigma @ w)
-    r = m.solve(time_limit=60)
-    assert r.status == "optimal"
-    assert "convex" in (r.algorithm_route or "")
-    assert r.objective == pytest.approx(0.0010307078, rel=1e-6)
+    Lc = np.linalg.cholesky(Sigma)
+
+    def solve(objective):
+        m = dm.Model("p")
+        w = m.continuous("w", shape=(n,), lb=0, ub=1)
+        m.subject_to(dm.sum(w) == 1)
+        m.subject_to(mu @ w >= 0.08)
+        m.subject_to(dm.norm(w) <= 0.6)
+        m.minimize(objective(w))
+        return m.solve(time_limit=60)
+
+    quad = solve(lambda w: w @ Sigma @ w)
+    sos = solve(lambda w: dm.sum((Lc.T @ w) ** 2))  # the spelling #1728 already certified
+    for r in (quad, sos):
+        assert r.status == "optimal"
+        assert "convex" in (r.algorithm_route or "")
+        assert r.bound is not None and r.bound <= r.objective
+    # Same certified optimum, judged by each solve's own certificate rather than a
+    # constant copied from one machine: the last digits of a converged NLP
+    # objective move with the platform (CI and a local run differed by 2.5e-6
+    # relative, both inside their certified gaps).
+    assert quad.objective >= sos.bound
+    assert sos.objective >= quad.bound
