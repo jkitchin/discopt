@@ -64,6 +64,90 @@ def _starting_level(lb: float, ub: float) -> float:
     return 0.0
 
 
+# Width at which the writer breaks a statement across lines (#1739). GAMS
+# rejects any input line longer than 80000 characters
+#
+#     ****  98  Non-blank character(s) beyond max input line length (80000)
+#
+# and a declaration list or a dense equation is ONE line per statement, so a
+# model with a few thousand rows (a 52-period planning MILP: a 131,440-char
+# `Equations` line) produced a `.gms` file that does not compile. GAMS is free
+# format -- a statement runs to its `;` across any number of lines -- so the
+# fix is to wrap. 255 is far inside the limit and keeps the file readable.
+_MAX_LINE = 255
+_CONT_INDENT = "    "
+
+
+def _declaration(keyword: str, names: list[str]) -> list[str]:
+    """``keyword a, b, c;`` -- or, when that is too long, one name per line.
+
+    A declaration is wrapped only between names, never inside a domain such as
+    ``x(s1, s2)``: GAMS reads unquoted text after a declared name as its
+    explanatory text, so a break in the wrong place changes what is declared.
+    """
+    one_line = f"{keyword} {', '.join(names)};"
+    if len(one_line) <= _MAX_LINE:
+        return [one_line]
+    body = [f"{_CONT_INDENT}{nm}," for nm in names]
+    body[-1] = body[-1][:-1] + ";"
+    return [keyword, *body]
+
+
+def _wrap_line(line: str, width: int = _MAX_LINE) -> list[str]:
+    """Split one emitted line outside quotes so no piece exceeds ``width``.
+
+    Continuation lines are indented, which matters for correctness and not
+    only looks: GAMS reads a ``*`` in column 1 as a comment and a ``$`` as a
+    dollar-control line, and a break before ``* x`` in ``a * x`` would otherwise
+    comment out the rest of the equation. A comment line is wrapped as further
+    comment lines. A single token longer than ``width`` (none exists: GAMS
+    identifiers are at most 63 characters) is left whole rather than split.
+    """
+    if len(line) <= width:
+        return [line]
+    if line.startswith("*"):
+        text = line[1:].strip()
+        step = width - 2
+        return [f"* {text[k : k + step]}" for k in range(0, len(text), step)]
+
+    # (separator-before, text) pieces. A break may fall at a space or right
+    # after an opening parenthesis: the left-deep fold `dm.sum` scalarizes to
+    # writes a run of one `(` per term with no whitespace in it.
+    pieces: list[tuple[str, str]] = []
+    start = 0
+    sep = ""
+    quote: str | None = None
+    for k, ch in enumerate(line):
+        if quote is not None:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+        elif ch == " ":
+            if k > start:
+                pieces.append((sep, line[start:k]))
+            start, sep = k + 1, " "
+        elif ch == "(":
+            pieces.append((sep, line[start : k + 1]))
+            start, sep = k + 1, ""
+    if start < len(line):
+        pieces.append((sep, line[start:]))
+
+    out: list[str] = []
+    cur = ""
+    for sep, tok in pieces:
+        if not cur:
+            cur = (_CONT_INDENT if out else "") + tok
+        elif len(cur) + len(sep) + len(tok) <= width:
+            cur += sep + tok
+        else:
+            out.append(cur)
+            cur = _CONT_INDENT + tok
+    if cur:
+        out.append(cur)
+    return out
+
+
 def to_gams(
     model: Model,
     path: str | Path | None = None,
@@ -165,7 +249,7 @@ class _GamsWriter:
         self._write_model_solve(lines)
 
         lines.append("")
-        return "\n".join(lines)
+        return "\n".join(piece for line in lines for piece in _wrap_line(line))
 
     def _generate_sets(self, lines: list[str]):
         """Generate GAMS Set declarations from variable shapes."""
@@ -233,7 +317,7 @@ class _GamsWriter:
                 else:
                     names.append(var.name)
             if names:
-                lines.append(f"{type_kw[gtype]} {', '.join(names)};")
+                lines.extend(_declaration(type_kw[gtype], names))
 
         lines.append("")
 
@@ -396,7 +480,7 @@ class _GamsWriter:
             eq_names.append(nm)
         for j, brow in enumerate(builder_rows):
             eq_names.append(self._sanitize_eq_name(brow.name) or f"blk{j + 1}")
-        lines.append(f"Equations {', '.join(eq_names)};")
+        lines.extend(_declaration("Equations", eq_names))
         lines.append("")
 
         # Objective equation: obj_var =e= expr. A builder-resident objective
