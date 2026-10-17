@@ -3128,25 +3128,44 @@ def _evaluator_fingerprint(model: Model) -> "_EvaluatorFingerprint":
 def _objective_lattice(model: Model) -> Optional[tuple[float, float]]:
     """``(g, c0)`` when every attainable objective value is ``c0 + k*g``, else ``None``.
 
-    #1731. Proven, never estimated: the objective must be affine, every column
-    with a nonzero coefficient integer or binary, and every such coefficient an
-    exact integer (``float.is_integer`` below ``2**53``), so ``g`` is their gcd
-    and ``c0`` the constant. Stricter than the Rust MILP detector, which
-    rationalizes to a tolerance; a too-large ``g`` would prune the optimum, so
-    anything short of exact refuses.
+    #1731. Proven, never estimated: the objective must be a polynomial of degree
+    at most 2, every column in a nonzero term integer or binary, and every
+    monomial coefficient an exact integer (``float.is_integer`` below ``2**53``),
+    so ``g`` is their gcd and ``c0`` the constant -- a product of integers is an
+    integer, so a quadratic qualifies exactly as an affine objective does (QPLIB
+    holds 81 such instances with an integral oracle, MINLPLib 10). Stricter than
+    the Rust MILP detector, which rationalizes to a tolerance; a too-large ``g``
+    would prune the optimum, so anything short of exact refuses.
     """
     from discopt._relax.problem_classifier import (
         _EXTRACTION_DECLINES,
         _extract_linear_coefficients_sparse,
+        _extract_quadratic_terms,
     )
 
     if model._objective is None:
         return None
     n = sum(v.size for v in model._variables)
+    expr = model._objective.expression
+    # ``(columns, coefficient)`` for every monomial of the objective.
+    monomials: list[tuple[tuple[int, ...], float]]
     try:
-        terms, c0 = _extract_linear_coefficients_sparse(model._objective.expression, model, n)
+        lin, c0 = _extract_linear_coefficients_sparse(expr, model, n)
+        monomials = [((j,), float(cj)) for j, cj in lin.items()]
     except _EXTRACTION_DECLINES:
-        return None
+        try:
+            q, c, c0 = _extract_quadratic_terms(expr, model, n)
+        except _EXTRACTION_DECLINES:
+            return None
+        # ``f = 0.5 x'Qx + c'x + c0`` with ``Q`` not necessarily symmetric: the
+        # coefficient of the monomial ``x_i x_j`` is half the sum of the cells
+        # that multiply it. Halving is exact in binary floating point and the
+        # cells are exactly-rounded ``fsum``s (#1397), summed here by ``fsum`` too.
+        cells: dict[tuple[int, int], list[float]] = {}
+        for (i, j), v in q.items():
+            cells.setdefault((min(i, j), max(i, j)), []).append(float(v))
+        monomials = [((j,), float(cj)) for j, cj in enumerate(c) if cj != 0.0]
+        monomials += [(ij, 0.5 * math.fsum(vs)) for ij, vs in cells.items()]
     integral = np.zeros(n, dtype=bool)
     off = 0
     for v in model._variables:
@@ -3154,10 +3173,12 @@ def _objective_lattice(model: Model) -> Optional[tuple[float, float]]:
             integral[off : off + v.size] = True
         off += v.size
     g = 0
-    for j, cj in terms.items():
+    for cols, cj in monomials:
         if cj == 0.0:
             continue
-        if not integral[j] or not float(cj).is_integer() or abs(cj) >= 2.0**53:
+        if not all(integral[k] for k in cols):
+            return None
+        if not cj.is_integer() or abs(cj) >= 2.0**53:
             return None
         g = math.gcd(g, int(abs(cj)))
     if g == 0 or not math.isfinite(float(c0)):

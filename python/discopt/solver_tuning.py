@@ -1147,8 +1147,8 @@ class SolverTuning:
     """Round spatial-B&B node bounds onto the objective's lattice
     (``DISCOPT_SPATIAL_OBJ_LATTICE``, #1731).
 
-    When the objective is an affine function of integer/binary columns with
-    exactly-integer coefficients, every attainable value is ``c0 + k*g``
+    When the objective is an affine or quadratic function of integer/binary
+    columns with exactly-integer monomial coefficients, every attainable value is ``c0 + k*g``
     (``g`` the gcd), so a node bound may be rounded UP onto that lattice: on
     subset-sum the spatial tree stalled at bound 834.5 against an incumbent of
     834 for 60 s, a gap the Rust MILP driver's ``DISCOPT_OBJ_INTEGRALITY`` closes

@@ -104,8 +104,71 @@ def test_detector_refuses_anything_inexact():
     assert _objective_lattice(m) is None
     m.minimize(4 * x[0] + 0.5 * x[1])  # non-integer coefficient
     assert _objective_lattice(m) is None
-    m.minimize(x[0] * x[1])  # nonlinear
+    m.minimize(x[0] * x[1] * x[2])  # cubic: beyond the degree-2 extractor
     assert _objective_lattice(m) is None
+    m.minimize(dm.exp(k))  # nonpolynomial
+    assert _objective_lattice(m) is None
+    m.minimize(0.5 * x[0] * x[1])  # non-integer monomial coefficient
+    assert _objective_lattice(m) is None
+    m.minimize(x[0] * y + 2 * x[1])  # bilinear term on a continuous column
+    assert _objective_lattice(m) is None
+
+
+def test_detector_accepts_integer_quadratics():
+    m = dm.Model()
+    x = m.binary("x", shape=(3,))
+    k = m.integer("k", lb=-3, ub=3)
+    m.minimize(3 * x[0] * x[1] + 6 * k * k - 9 * x[2] + 1)
+    assert _objective_lattice(m) == (3.0, 1.0)
+    # Two half-coefficients on the same monomial sum to an integer one.
+    m.minimize(0.5 * x[0] * x[1] + 0.5 * x[1] * x[0] + 2 * x[2])
+    assert _objective_lattice(m) == (1.0, 0.0)
+
+
+def _bqp(Q, c, *, maximize: bool):
+    n = len(c)
+    m = dm.Model("bqp")
+    x = m.binary("x", shape=(n,))
+    obj = sum(int(Q[i, j]) * x[i] * x[j] for i in range(n) for j in range(i, n) if Q[i, j])
+    obj = obj + c @ x
+    m.subject_to(x[0] * x[1] <= 1)  # redundant bilinear row -> spatial B&B
+    m.subject_to(dm.sum(x) <= n - 2)
+    (m.maximize if maximize else m.minimize)(obj)
+    return m
+
+
+def _bqp_brute(Q, c, *, maximize: bool):
+    n = len(c)
+    vals = [
+        float(np.asarray(b) @ np.triu(Q) @ np.asarray(b) + c @ np.asarray(b))
+        for b in itertools.product((0, 1), repeat=n)
+        if sum(b) <= n - 2
+    ]
+    return max(vals) if maximize else min(vals)
+
+
+QCASES = []
+for _k in range(4):
+    _Q = np.triu(_rng.integers(-6, 7, size=(7, 7))).astype(float) * 2.0
+    QCASES.append((_Q, _rng.integers(-9, 10, size=7).astype(float) * 2.0, bool(_k % 2)))
+
+
+@pytest.mark.parametrize("Q, c, maximize", QCASES)
+def test_quadratic_differential_bound_against_enumeration(monkeypatch, Q, c, maximize):
+    opt = _bqp_brute(Q, c, maximize=maximize)
+    assert _objective_lattice(_bqp(Q, c, maximize=maximize)) is not None
+    monkeypatch.delenv("DISCOPT_SPATIAL_OBJ_LATTICE", raising=False)
+    off = _bqp(Q, c, maximize=maximize).solve(time_limit=30)
+    monkeypatch.setenv("DISCOPT_SPATIAL_OBJ_LATTICE", "1")
+    on = _bqp(Q, c, maximize=maximize).solve(time_limit=30)
+    for r in (off, on):
+        assert r.objective == pytest.approx(opt, abs=1e-6)
+    assert on.bound is not None
+    tol = 1e-6 * max(1.0, abs(opt))
+    if maximize:
+        assert on.bound >= opt - tol
+    else:
+        assert on.bound <= opt + tol
 
 
 def test_rounding_slack_never_jumps_a_step_on_noise():
