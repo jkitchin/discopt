@@ -34,6 +34,7 @@ import time  # noqa: E402
 import discopt.modeling as dm  # noqa: E402
 import pytest  # noqa: E402
 from discopt._relax import binary_multilinear_reform as bml  # noqa: E402
+from discopt.modeling.core import SumOverExpression  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
@@ -60,7 +61,10 @@ def _accumulate_model(n_addends: int, n_factors: int = 3, width: int = 8):
             prod = s if prod is None else prod * s
         body = prod if body is None else body + prod
     m.subject_to(body <= float(n_addends))
-    m.minimize(dm.sum([b[i] for i in range(n_addends * per)]))
+    # Built as a term-by-term sum on purpose: it is the many-small-adds accumulate
+    # these tests measure. ``dm.sum`` may fold it into ``dm.sum(C * b)`` (#1712),
+    # which the pass reads in one O(n) step -- no accumulate left to measure.
+    m.minimize(SumOverExpression([b[i] for i in range(n_addends * per)]))
     return m
 
 

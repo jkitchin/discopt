@@ -3387,26 +3387,26 @@ _SUM_CANONICAL_MIN_TERMS = 32
 
 
 def _sum_canonical_enabled() -> bool:
-    """``DISCOPT_SUM_CANONICAL`` (default OFF): fold per-element linear sums.
+    """``DISCOPT_SUM_CANONICAL`` (default ON, ``=0`` opts out): fold per-element sums.
 
     #1712. ``dm.sum(c[i] * x[i] for i ...)`` builds one Python node per term, and
     every solver pass that walks the model pays for each one: a 90,000-term
     objective cost seconds per pass where ``dm.sum(c * x)`` costs microseconds.
-    With the flag on, :func:`_canonical_affine_sum` rewrites the terms that are
-    exactly a whole variable, each entry once, into that vectorized form.
+    :func:`_canonical_affine_sum` rewrites the terms that are exactly a whole
+    variable, each entry once, into that vectorized form.
 
-    Default OFF, as a documented opt-in. It passed an 18-instance per-element
-    panel (``docs/dev/performance-plan.md`` §77.3) and was briefly graduated, but
-    the full test suite then showed the folded form changing downstream
-    behaviour the panel did not cover: the interval-Hessian walker refuses the
-    array constant, a sum-of-squares model stops routing to POUNCE's QP IPM,
-    and the binary-multilinear expansion declines (§77.6). What would make it
-    the default: those consumers handling ``dm.sum(C * x)`` as they handle the
-    per-element sum, then a panel over models that reach them.
+    Graduated 2026-10-17 (``docs/dev/performance-plan.md`` §78). A first
+    graduation was reverted because the interval Hessian, the sparse linear
+    extractors (the affine-square proof behind POUNCE's QP route) and the
+    binary-multilinear expansion refused the folded form (§77.6). They now read
+    it through :func:`affine_array_sum`. The full fast suite passed with the flag
+    on, and a 26-instance OFF/ON panel, including families that reach those
+    passes, was cert-clean. On the issue's model, solve time went from 9.01 s to
+    2.72 s. ``=0`` restores the term-by-term sum.
     """
     import os as _os
 
-    return _os.environ.get("DISCOPT_SUM_CANONICAL", "0") == "1"
+    return _os.environ.get("DISCOPT_SUM_CANONICAL", "1") != "0"
 
 
 def _sum_of_terms(terms: list[Expression]) -> Expression:
@@ -3513,6 +3513,38 @@ def _canonical_affine_sum(terms: list[Expression]) -> Optional[Expression]:
     if len(parts_out) == 1:
         return parts_out[0]
     return SumOverExpression(parts_out)
+
+
+def affine_array_sum(expr: Expression) -> Optional[tuple["Variable", np.ndarray]]:
+    """``(x, C)`` when *expr* is the full reduction ``dm.sum(x)`` or ``dm.sum(C * x)``.
+
+    ``C`` comes back as a flat C-order float array with one coefficient per entry
+    of ``x`` (all ones for ``dm.sum(x)``), so ``expr == sum_i C[i] * x.flat[i]``.
+    Only an exact shape match qualifies -- no broadcasting -- so each coefficient
+    belongs to exactly one entry. This is the form :func:`_canonical_affine_sum`
+    emits and the vectorized API writes by hand; scalar-term passes use it to read
+    the sum as its coefficients instead of refusing the array :class:`Constant`.
+    ``None`` for anything else, including a :class:`Parameter` coefficient.
+    """
+    if not isinstance(expr, SumExpression) or expr.axis is not None:
+        return None
+    op = expr.operand
+    if isinstance(op, Variable):
+        if op.size < 2:
+            return None
+        return op, np.ones(int(op.size), dtype=np.float64)
+    if not (isinstance(op, BinaryOp) and op.op == "*"):
+        return None
+    if isinstance(op.left, Constant) and isinstance(op.right, Variable):
+        const, var = op.left, op.right
+    elif isinstance(op.right, Constant) and isinstance(op.left, Variable):
+        const, var = op.right, op.left
+    else:
+        return None
+    coefs = np.asarray(const.value, dtype=np.float64)
+    if var.size < 2 or coefs.shape != tuple(var.shape):
+        return None
+    return var, coefs.reshape(-1)
 
 
 def prod(x: Union[Expression, list, Callable], *, over: Optional[Sequence] = None) -> Expression:

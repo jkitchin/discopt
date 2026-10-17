@@ -78,6 +78,7 @@ from discopt.modeling.core import (
     SumOverExpression,
     UnaryOp,
     Variable,
+    affine_array_sum,
 )
 
 from . import interval as iv
@@ -901,6 +902,9 @@ def _impl(expr: Expression, model: Model, box: dict, cache: dict, n: int) -> _Sp
         return _function_call(expr, model, box, cache, n)
 
     if isinstance(expr, SumExpression):
+        affine = affine_array_sum(expr)
+        if affine is not None:
+            return _affine_array_sum_ad(expr, affine, model, box, n)
         return _walk(expr.operand, model, box, cache, n)
 
     if isinstance(expr, SumOverExpression):
@@ -922,6 +926,42 @@ def _impl(expr: Expression, model: Model, box: dict, cache: dict, n: int) -> _Sp
         return _SparseAD(value=value, grad=grad, hess=hess, n=n)
 
     return _unbounded(n)
+
+
+def _affine_array_sum_ad(
+    expr: SumExpression, affine: tuple, model: Model, box: dict, n: int
+) -> _SparseAD:
+    """``dm.sum(x)`` / ``dm.sum(C * x)`` read as ``sum_i C[i] * x[i]``.
+
+    The array operand is otherwise refused (array leaves are out of scope for this
+    scalar walker), which made the vectorized form -- and the ``dm.sum`` fold of
+    #1712 that produces it -- abstain where the same sum written term by term
+    walks. The value is the term walk's own interval arithmetic, entry by entry
+    in flat order; each gradient entry is the exact coefficient (a point
+    interval) and the Hessian is zero, since the sum is linear.
+    """
+    var, coefs = affine
+    slot = _var_offset(var, model)
+    if var in box:
+        lo = np.asarray(box[var].lo, dtype=np.float64).ravel()
+        hi = np.asarray(box[var].hi, dtype=np.float64).ravel()
+    else:
+        lo = np.asarray(var.lb, dtype=np.float64).ravel()
+        hi = np.asarray(var.ub, dtype=np.float64).ravel()
+    scaled = not isinstance(expr.operand, Variable)
+    value: Optional[Interval] = None
+    grad: dict = {}
+    for i in range(coefs.size):
+        term = Interval(np.float64(lo[i]), np.float64(hi[i]))
+        if scaled:
+            c = float(coefs[i])
+            term = Interval.point(c) * term
+            grad[slot + i] = Interval.point(c)
+        else:
+            grad[slot + i] = _ONE
+        value = term if value is None else value + term
+    assert value is not None  # ``affine_array_sum`` requires at least two entries
+    return _SparseAD(value=value, grad=grad, hess=_H0, n=n)
 
 
 # ──────────────────────────────────────────────────────────────────────

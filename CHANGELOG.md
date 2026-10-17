@@ -12,17 +12,15 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
-- **`DISCOPT_SUM_CANONICAL=1` folds per-element linear sums (#1712, opt-in).**
+- **`dm.sum` folds per-element linear sums (#1712; `DISCOPT_SUM_CANONICAL=0` opts out).**
   `dm.sum(c[i] * x[i] for i ...)` builds one Python node per term, and every
-  solver pass walks each one. With the flag on, the terms that name every entry
-  of a variable exactly once, each as `x[i]`, `-x[i]` or a scalar constant times
-  `x[i]`, become `dm.sum(C * x)`. A `Parameter` coefficient is never folded.
-  Sums under 32 terms and partial or repeated coverage are left as written. On
-  the issue's 90,000-variable transport LP, `solve()` takes 3.9 s with the flag
-  on and 14.0 s without (54.5 s before #1712). Default OFF: the folded form
-  changes what some downstream passes accept (interval-Hessian walker, POUNCE
-  QP routing, binary-multilinear expansion), so it stays opt-in until they
-  handle it (`docs/dev/performance-plan.md` §77.6).
+  solver pass walks each one. Now the terms that name every entry of a variable
+  exactly once, each as `x[i]`, `-x[i]` or a scalar constant times `x[i]`,
+  become `dm.sum(C * x)`. A `Parameter` coefficient is never folded. Sums under
+  32 terms and partial or repeated coverage are left as written. On the issue's
+  90,000-variable transport LP, `solve()` takes 2.7 s with the fold and 9.0 s
+  without (54.5 s before #1712). Results are unchanged on a 26-instance OFF/ON
+  panel (`docs/dev/performance-plan.md` §78.2).
 
 - **On/off (semicontinuous) units in `LinearTreeFormulation`.** The new
   `active=` argument takes `True` (a `{prefix}_active` binary is created) or an
@@ -156,6 +154,17 @@ The release procedure that produces these entries is documented in
   deep inside POUNCE.
 
 ### Fixed
+
+- **Hand-written `dm.sum(C * x)` is read by three passes that used to refuse it.**
+  The interval Hessian abstained on it. The sparse linear/quadratic extractors
+  declined it, which sent a scalar-form sum of squares to `pounce:nlp` instead
+  of `pounce:qp-ipm`. The binary-multilinear reformulation aborted with
+  "non-scalar constant". All three now read the sum as its coefficients
+  (`affine_array_sum`).
+- **A node LP with no rows certifies from a rigorous bound.** The relaxation of
+  `min asin(x)` is a cost over a box; with no rows it skipped the warm simplex
+  and certified on trust (`trusted_vertex`). Its exact box optimum, rounded
+  down, is now its safe bound (`docs/dev/performance-plan.md` §78.1).
 
 - **Per-element LPs spend less time in preprocessing before HiGHS (#1712).** An
   LP written per element (`m.continuous("x", over=P * K)`, `dm.sum(c * x[p, k]
