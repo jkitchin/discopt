@@ -1141,21 +1141,6 @@ class SolverTuning:
     )
     """Warm-start the node LP from the parent basis (``DISCOPT_LP_WARMSTART``)."""
 
-    spatial_obj_lattice: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_SPATIAL_OBJ_LATTICE", default=False)
-    )
-    """Round spatial-B&B node bounds onto the objective's lattice
-    (``DISCOPT_SPATIAL_OBJ_LATTICE``, #1731).
-
-    When the objective is an affine function of integer/binary columns with
-    exactly-integer coefficients, every attainable value is ``c0 + k*g``
-    (``g`` the gcd), so a node bound may be rounded UP onto that lattice: on
-    subset-sum the spatial tree stalled at bound 834.5 against an incumbent of
-    834 for 60 s, a gap the Rust MILP driver's ``DISCOPT_OBJ_INTEGRALITY`` closes
-    at the root. Bound-changing, so default OFF until the CLAUDE.md §5 panel
-    passes; ``docs/dev/flag-retirement-audit.md`` carries its row.
-    """
-
     lp_row_logicals: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_LP_ROW_LOGICALS", default=False)
     )
