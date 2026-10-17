@@ -143,29 +143,44 @@ def test_fallback_keeps_its_reserve_after_a_primary_that_spent_its_budget(monkey
     from discopt.modeling.core import SolveResult
 
     budgets = []
-    monkeypatch.setattr(
-        L, "solve_lp_spatial_bb", lambda model, *, time_limit, **kw: budgets.append(time_limit)
-    )
+    primary_tl = []
+
+    def spy(model, *, time_limit, **kw):
+        budgets.append((time_limit, time.perf_counter()))
+
+    monkeypatch.setattr(L, "solve_lp_spatial_bb", spy)
 
     def spent_primary(model, *, time_limit, **kw):
+        primary_tl.append(time_limit)
         time.sleep(time_limit + 0.2)
         return SolveResult(status="time_limit", wall_time=time_limit + 0.2)
 
     monkeypatch.setattr(S, "solve_model", spent_primary)
     m = from_nl(os.path.join(DATA, "nvs17.nl"))
+    t0 = time.perf_counter()
     m.solve(time_limit=6.0)
 
-    # #1346: the reserve is 35% of what the DEFAULT PATH received, which is the
-    # caller's limit MINUS the convex-kernel attempt (#911 deducts it, deliberately
-    # — the spec build is the convexity classification and on the instances that
-    # hazard bites it is ~1 s of wall). nvs17 is not kernel-eligible, so the attempt
-    # only classifies and declines; it is charged all the same.
+    # #1346: the split is of what the DEFAULT PATH received, which is the caller's
+    # limit MINUS the convex-kernel attempt (#911 deducts it, deliberately -- the
+    # spec build is the convexity classification and on the instances that hazard
+    # bites it is ~1 s of wall). nvs17 is not kernel-eligible, so the attempt only
+    # classifies and declines; it is charged all the same.
     #
-    # This asserted a flat ``0.35 * 6.0`` while DISCOPT_CONVEX_KERNEL was opt-in, when
-    # nothing ran ahead of the reserve. Reading the deduction rather than widening the
-    # tolerance keeps the #917 proportion pinned EXACTLY; the separate bound below is
-    # what would still fail if a declined attempt ever became expensive, so relaxing
-    # the arithmetic does not cost the signal.
+    # Reading the deduction rather than widening the tolerance keeps the #917
+    # proportion pinned EXACTLY -- now on the primary's 65% share, since the
+    # fallback's grant is no longer the bare reserve (below). The separate bound is
+    # what would still fail if a declined attempt ever became expensive.
     spent = last_attempt_seconds()
     assert spent < 0.10 * 6.0, f"a DECLINED kernel attempt cost {spent:.3f}s of a 6 s budget"
-    assert budgets == [pytest.approx(0.35 * (6.0 - spent), rel=1e-6)], (budgets, spent)
+    assert primary_tl == [pytest.approx(0.65 * (6.0 - spent), rel=1e-6)], (primary_tl, spent)
+
+    # The fallback gets what is LEFT, capped at the caller's limit. This primary
+    # overran its share by 0.2 s, and the reserve used to be granted in full
+    # regardless (a ``max(reserve, remaining)`` floor), putting the fallback's
+    # deadline 0.2 s+ past ``time_limit`` -- the QPLIB_3361/3709 overrun in
+    # miniature. It is now the reserve less that overrun.
+    assert len(budgets) == 1, "the #844 fallback did not run"
+    budget, at = budgets[0]
+    reserve = 0.35 * (6.0 - spent)
+    assert reserve - 0.2 - 0.5 < budget <= reserve - 0.2 + 1e-6, (budget, reserve)
+    assert at + budget <= t0 + 6.0 + 1e-3, at + budget - t0
