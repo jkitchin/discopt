@@ -430,8 +430,11 @@ master.
   used to name has been retired.
 - `milp_solver` controls MILP masters where a method exposes that option.
   The accepted values are `auto` (simplex-first, then POUNCE), `pounce`,
-  `simplex`, and `gurobi`; anything else raises `ValueError`. HiGHS was removed
-  from the MILP path in issue #356. Some methods narrow this further —
+  `simplex`, `gurobi` and `highs`; anything else raises `ValueError`. `highs`
+  is an explicit opt-in master engine (#1060): no default reaches it, and it has
+  no fallback order. (This is separate from a *pure* LP or MILP model, which
+  `Model.solve()` sends to HiGHS by default — see `milp_backend`.) Some methods
+  narrow this further —
   `lp_nlp_bb` and `solution_pool` require `gurobi`.
 - `solution_pool=True` currently requires `milp_solver="gurobi"`.
 - `lp_nlp_bb` requires `milp_solver="gurobi"` for lazy callbacks.

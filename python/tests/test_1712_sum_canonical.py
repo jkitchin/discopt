@@ -18,6 +18,7 @@ from discopt.modeling.core import (
     SumExpression,
     SumOverExpression,
     Variable,
+    affine_array_sum,
 )
 
 N = _SUM_CANONICAL_MIN_TERMS + 8
@@ -121,11 +122,13 @@ def test_parameter_coefficient_stays_live(canonical_on):
 
 
 @pytest.mark.smoke
-def test_default_is_off(monkeypatch):
-    """Opt-in (#1712): without the flag a per-element sum stays as written."""
+def test_default_is_on_and_zero_opts_out(monkeypatch):
+    """Graduated (#1712): the per-element sum folds by default; ``=0`` keeps it."""
     monkeypatch.delenv("DISCOPT_SUM_CANONICAL", raising=False)
     m = Model("default")
     x = m.continuous("x", shape=(N,))
+    assert affine_array_sum(dm.sum(2.0 * x[i] for i in range(N))) is not None
+    monkeypatch.setenv("DISCOPT_SUM_CANONICAL", "0")
     e = dm.sum(2.0 * x[i] for i in range(N))
     assert isinstance(e, SumOverExpression) and len(e.terms) == N
 

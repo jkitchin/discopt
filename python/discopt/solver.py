@@ -22,7 +22,7 @@ import sys
 import threading
 import time
 import weakref
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -5046,6 +5046,7 @@ def _solve_root_node_multistart(
     convex=False,
     deadline=None,
     observe_cost=None,
+    initial_point=None,
 ):
     """Solve root NLP relaxation from multiple starting points.
 
@@ -5060,8 +5061,21 @@ def _solve_root_node_multistart(
     still falling through to additional starts when a start fails to converge or
     lands constraint-infeasible — so robustness is preserved and only the
     redundant convex re-solves are skipped.
+
+    ``initial_point``, the user's warm start (``initial_solution``), is the first
+    start, clipped into the node box. A warm start that is not feasible is not
+    injected as an incumbent, and the solve logs that it is used "as an NLP
+    starting point only" -- but no root NLP was ever started from it: on COPS
+    ``pinene`` (5,005 columns) with the published start the multistart's generic
+    starts reached 27,101 at best in 120 s, where a local solve from that start
+    reaches 19.87 in 0.8 s. A point of the wrong length (a reform appended
+    columns the start does not cover) is skipped, not padded.
     """
     starting_points = _generate_starting_points(node_lb, node_ub, n_random=n_random)
+    if initial_point is not None and np.size(initial_point) == np.size(node_lb):
+        ip = np.asarray(initial_point, dtype=np.float64).ravel()
+        if np.all(np.isfinite(ip)):
+            starting_points.insert(0, np.clip(ip, node_lb, node_ub))
 
     cl = cu = None
     if constraint_bounds:
@@ -7332,6 +7346,33 @@ def _validate_solve_budgets(gap_tolerance: float, time_limit: float) -> None:
 _GAP_TOLERANCES: list[tuple[float, float]] = []
 
 
+#: ``(model, {(var_index, flat_element, "lower"|"upper"), ...})`` while an internal
+#: probe solves ``model`` with those bounds relaxed to the ``±1e20`` sentinel, or
+#: ``None``. Set by :func:`probe_relaxed_bounds`; read by
+#: :func:`_format_bad_bound_entries` so the large-bound warning names only bounds
+#: the user declared (#1723).
+_PROBE_RELAXED_BOUNDS: contextvars.ContextVar[Optional[tuple[Any, frozenset]]] = (
+    contextvars.ContextVar("discopt_probe_relaxed_bounds", default=None)
+)
+
+
+@contextlib.contextmanager
+def probe_relaxed_bounds(model: Model, relaxed: Iterable[tuple[int, int, str]]):
+    """Mark bounds an internal probe relaxed, for the duration of its solve (#1723).
+
+    ``relaxed`` holds ``(var_index, flat_element, side)`` triples. ``compute_iis``
+    drops a candidate bound by setting it to ``±1e20``; without this marker each
+    probe solve warned "Variables with very large or infinite declared bounds" about
+    a bound the user had declared finite. Only the marked bound sides are excused:
+    an infinite bound the user did declare is still reported.
+    """
+    token = _PROBE_RELAXED_BOUNDS.set((model, frozenset(relaxed)))
+    try:
+        yield
+    finally:
+        _PROBE_RELAXED_BOUNDS.reset(token)
+
+
 def _format_bad_bound_entries(
     model: Model,
     flat_lb: np.ndarray,
@@ -7355,7 +7396,11 @@ def _format_bad_bound_entries(
     bad_vars: list[str] = []
     offset = 0
     free_by_construction: set[str] = getattr(model, "_free_by_construction", set())
-    for v in model._variables:
+    _probe = _PROBE_RELAXED_BOUNDS.get()
+    probe_relaxed: frozenset = (
+        _probe[1] if _probe is not None and _probe[0] is model else frozenset()
+    )
+    for vi, v in enumerate(model._variables):
         if v.name in free_by_construction:
             # Created free by discopt (e.g. CVaR's eta), not declared by the
             # user; "declare tighter bounds" is not an action they can take.
@@ -7366,12 +7411,17 @@ def _format_bad_bound_entries(
         ub_flat = np.asarray(flat_ub[offset : offset + v.size], dtype=np.float64)
         for j in range(v.size):
             lo, hi = float(lb_flat[j]), float(ub_flat[j])
-            if (
-                not np.isfinite(lo)
-                or not np.isfinite(hi)
-                or abs(lo) > _BOUND_WARN_THRESHOLD
-                or abs(hi) > _BOUND_WARN_THRESHOLD
-            ):
+            lo_bad = (not np.isfinite(lo) or abs(lo) > _BOUND_WARN_THRESHOLD) and (
+                vi,
+                j,
+                "lower",
+            ) not in probe_relaxed
+            hi_bad = (not np.isfinite(hi) or abs(hi) > _BOUND_WARN_THRESHOLD) and (
+                vi,
+                j,
+                "upper",
+            ) not in probe_relaxed
+            if lo_bad or hi_bad:
                 name = v.name if v.size == 1 else f"{v.name}[{j}]"
                 lo_txt = f"{lo:.6g}" + (" [default]" if lo == -DEFAULT_VARIABLE_BOUND else "")
                 hi_txt = f"{hi:.6g}" + (" [default]" if hi == DEFAULT_VARIABLE_BOUND else "")
@@ -10431,6 +10481,102 @@ def _highs_route_options():
         yield
 
 
+#: Values of ``solve_model(strategy=...)``: the node-selection rules
+#: ``PyTreeManager`` implements (``crates/discopt-python/src/bnb_bindings.rs``).
+_NODE_SELECTION_STRATEGIES = ("best_first", "depth_first", "best_estimate")
+
+#: ``{"used": bool, "declared": bool}`` for the innermost ``solve_model`` call that
+#: passed a non-default ``strategy``, or ``None``. Set by :func:`_scoped_strategy`;
+#: ``used`` is set by :func:`_tree_manager` (a discopt B&B tree selected nodes by
+#: it), ``declared`` by :func:`_declare_strategy_ignored` (a route already warned
+#: that it ignores it).
+_STRATEGY_REQUEST: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar(
+    "discopt_strategy_request", default=None
+)
+
+
+def _scoped_strategy(fn: _F) -> _F:
+    """Validate ``strategy`` up front and warn when no B&B tree used it (#1722).
+
+    ``strategy`` selects nodes in discopt's own branch-and-bound trees only. An
+    unknown value used to be refused only by ``PyTreeManager``, so a route that
+    builds no tree -- the HiGHS LP/MILP route, the LP/QP entry solves, the
+    monolithic Rust MILP engine -- accepted ``strategy="nonsense_xyz"`` and
+    returned as if it had been applied. The value is now checked before any work,
+    and a non-default value that no tree consumed warns (CLAUDE.md §3), unless the
+    route already said it ignores it. A nested solve that passes the same value
+    shares the caller's scope; one that passes another value gets its own.
+    """
+    sig: list[inspect.Signature] = []
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if "strategy" in kwargs:
+            value = kwargs["strategy"]
+        else:
+            if not sig:
+                sig.append(inspect.signature(fn))
+            bound = sig[0].bind_partial(*args, **kwargs)
+            value = bound.arguments.get("strategy", "best_first")
+        if value not in _NODE_SELECTION_STRATEGIES:
+            raise ValueError(
+                f"strategy={value!r}: expected one of "
+                f"{', '.join(repr(s) for s in _NODE_SELECTION_STRATEGIES)}."
+            )
+        outer = _STRATEGY_REQUEST.get()
+        if value == "best_first":
+            if outer is None:
+                return fn(*args, **kwargs)
+            token = _STRATEGY_REQUEST.set(None)
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                _STRATEGY_REQUEST.reset(token)
+        if outer is not None and outer["strategy"] == value:
+            return fn(*args, **kwargs)
+        state = {"strategy": value, "used": False, "declared": False}
+        token = _STRATEGY_REQUEST.set(state)
+        try:
+            result = fn(*args, **kwargs)
+        finally:
+            _STRATEGY_REQUEST.reset(token)
+        if not state["used"] and not state["declared"]:
+            import warnings
+
+            route = getattr(result, "algorithm_route", None)
+            warnings.warn(
+                f"strategy={value!r} was not used: it selects nodes in discopt's own "
+                "branch-and-bound tree, and this solve ran none"
+                + (f" (route: {route})" if route else "")
+                + ". A pure MILP is solved by HiGHS by default; pass "
+                "milp_backend='native' to search it with discopt's MILP tree. An LP "
+                "or convex QP is solved without branching.",
+                UserWarning,
+                # Attribute it to the caller's ``solve()`` line, not to the
+                # decorator stack inside discopt.
+                skip_file_prefixes=(os.path.dirname(__file__) + os.sep,),
+            )
+        return result
+
+    return cast(_F, wrapper)
+
+
+def _declare_strategy_ignored(ignored: Sequence[str]) -> None:
+    """Record that a route's own warning already named ``strategy`` as ignored."""
+    state = _STRATEGY_REQUEST.get()
+    if state is not None and "strategy" in ignored:
+        state["declared"] = True
+
+
+def _tree_manager(n_vars, lb, ub, int_offsets, int_sizes, strategy):
+    """Build the Rust B&B tree, recording that ``strategy`` now selects its nodes."""
+    tree = PyTreeManager(n_vars, lb, ub, int_offsets, int_sizes, strategy)
+    state = _STRATEGY_REQUEST.get()
+    if state is not None and state["strategy"] == strategy:
+        state["used"] = True
+    return tree
+
+
 def _scoped_role1_deadline(fn: _F) -> _F:
     """Scope :data:`_ROLE1_DEADLINE` to one ``solve_model`` call (#1371).
 
@@ -11156,6 +11302,7 @@ def _refusing_on_callback_failure(fn: _F) -> _F:
 @_scoped_determinism
 @_scoped_role1_deadline
 @_scoped_highs_options
+@_scoped_strategy
 @_debug_outermost_solve
 def solve_model(
     model: Model,
@@ -11305,7 +11452,13 @@ def solve_model(
         Node selection strategy: ``"best_first"`` (lowest dual bound),
         ``"depth_first"``, or ``"best_estimate"`` (lowest pseudocost-based
         estimate of the subtree optimum — finds good incumbents earlier while
-        ``best_first`` still drives the proof of optimality).
+        ``best_first`` still drives the proof of optimality). Any other value
+        raises ``ValueError`` (#1722). It steers discopt's own branch-and-bound
+        trees only: a pure MILP goes to HiGHS by default (or to the monolithic
+        Rust MILP engine under ``DISCOPT_LP_MILP_BACKEND=rust``), and an LP or
+        convex QP is solved without branching, so on those routes a
+        non-default value is not used and a ``UserWarning`` says so. Pass
+        ``milp_backend="native"`` to have it select nodes on a MILP.
     max_nodes : int, default 100_000
         Maximum number of B&B nodes before stopping.
     milp_backend : {"highs", "native"}, optional
@@ -11384,15 +11537,26 @@ def solve_model(
         ``max_wall_time``, ``print_level``, ``tau`` and ``tau_max``; any other key
         raises ``ValueError`` there rather than being ignored.
     nlp_solver : str, default "pounce"
-        Numerical engine for every problem class. The default ``"pounce"``
-        (POUNCE — pure-Rust Ipopt port) is now the universal default: it
-        routes LP/QP/MILP/MIQP/NLP/MINLP through POUNCE (and the self-hosted
-        B&B for the integer classes). HiGHS has been removed entirely from the
-        LP/MILP path (issue #356). Other values: ``"ipopt"`` (cyipopt for the
-        NLP node/continuous solves), or ``"ipm"`` / ``"sparse_ipm"`` (back-compat
-        aliases — these select the simplex-first matrix routing for LP/MILP
-        and resolve to POUNCE for NLP/MINLP). ``"simplex"`` selects the
-        pure-Rust warm-started-simplex MILP B&B.
+        Engine for the nonlinear and quadratic solves. The default ``"pounce"``
+        (POUNCE — pure-Rust Ipopt port) solves an NLP, a convex QP, the node
+        QPs of the convex MIQP branch and bound, and the NLP subproblems of
+        spatial branch and bound. It does not decide where a model with only
+        linear rows goes (#1724):
+
+        * a pure **LP or MILP** goes to HiGHS by default, every certificate
+          verified by discopt (#1229). ``milp_backend="native"`` (or the
+          ``DISCOPT_LP_MILP_BACKEND`` env var) overrides that: ``"native"``
+          runs discopt's own LP solve / MILP branch and bound, and the
+          env-var-only ``"rust"`` runs the monolithic Rust MILP engine;
+        * the **node LP relaxations** of spatial branch and bound (MINLP,
+          nonconvex QP/MIQP) are solved by the in-house Rust simplex, not by
+          HiGHS and not by POUNCE.
+
+        Other values: ``"ipopt"`` (cyipopt for the NLP node/continuous solves),
+        ``"ipm"`` / ``"sparse_ipm"`` (back-compat aliases that resolve to
+        POUNCE; the JAX IPM they named is retired), and ``"simplex"``, which
+        sends a pure MILP to the monolithic Rust warm-started-simplex MILP
+        engine instead of HiGHS.
     sparse : bool or None, default None
         Force sparse (True) or dense (False) Jacobian evaluation.
         If None, auto-selects based on problem size and density.
@@ -12429,6 +12593,7 @@ def solve_model(
         ignored_mip_nlp_options = _mip_nlp_ignored_options(_mip_nlp_option_values)
         if kwargs:
             ignored_mip_nlp_options.extend(sorted(kwargs))
+        _declare_strategy_ignored(ignored_mip_nlp_options)
         if ignored_mip_nlp_options:
             warnings.warn(
                 "MIP-NLP solver ignores solve_model options: "
@@ -12708,6 +12873,7 @@ def solve_model(
             )
             if differs
         ]
+        _declare_strategy_ignored(_ignored_surrogate)
         if _ignored_surrogate:
             warnings.warn(
                 "solver='surrogate' ignores "
@@ -12781,6 +12947,7 @@ def solve_model(
             )
             if differs
         ]
+        _declare_strategy_ignored(_ignored_direct)
         if _ignored_direct:
             warnings.warn(
                 "solver='direct' ignores "
@@ -12894,6 +13061,7 @@ def solve_model(
         _note_ignored("gdp_method", gdp_method not in amp_gdp_methods)
         if kwargs:
             ignored_amp_options.extend(sorted(kwargs))
+        _declare_strategy_ignored(ignored_amp_options)
         if ignored_amp_options:
             warnings.warn(
                 "AMP ignores solve_model options: "
@@ -12984,6 +13152,7 @@ def solve_model(
         _note_ignored_gp("abs_gap_tolerance", abs_gap_tolerance is not None)
         if kwargs:
             ignored_gp_options.extend(sorted(kwargs))
+        _declare_strategy_ignored(ignored_gp_options)
         if ignored_gp_options:
             warnings.warn(
                 "GP fast path ignores solve_model options: "
@@ -13077,6 +13246,7 @@ def solve_model(
         _note_ignored_gp_minlp("abs_gap_tolerance", abs_gap_tolerance is not None)
         if kwargs:
             ignored_gp_minlp_options.extend(sorted(kwargs))
+        _declare_strategy_ignored(ignored_gp_minlp_options)
         if ignored_gp_minlp_options:
             warnings.warn(
                 "GP-MINLP fast path ignores solve_model options: "
@@ -15687,7 +15857,7 @@ def solve_model(
 
     # --- Create PyTreeManager (Rust) ---
     t_rust_start = time.perf_counter()
-    tree = PyTreeManager(
+    tree = _tree_manager(
         n_vars,
         lb.tolist(),
         ub.tolist(),
@@ -16778,6 +16948,10 @@ def solve_model(
         initial_point = prepare_warm_start(
             model, initial_point, route="Spatial B&B", evaluator=evaluator
         )
+    # Whether a root NLP has been started from ``initial_point`` (the root
+    # multistart's first start). If none has by the root SubNLP, that heuristic
+    # seeds from it instead, so a warm start is never left unused.
+    _ws_root_nlp_started = False
     if initial_point is not None:
         ws_obj = float(evaluator.evaluate_objective(initial_point))
         # Check integer feasibility of the warm-start point
@@ -18278,6 +18452,8 @@ def solve_model(
                     # When the LP relaxer is active, skip it: the LP block below
                     # supplies the bound + primal and SubNLP turns that into
                     # the incumbent — running multistart NLP here is wasted work.
+                    if initial_point is not None and np.size(initial_point) == np.size(node_lb):
+                        _ws_root_nlp_started = True
                     nlp_result = _solve_root_node_multistart(
                         _active_evaluator,
                         node_lb,
@@ -18287,6 +18463,7 @@ def solve_model(
                         nlp_solver,
                         deadline=_deadline,
                         observe_cost=_observe_heur_nlp,
+                        initial_point=initial_point,
                     )
                 elif iteration > 0 and _node_nlp_due and not _hess_gate_blocks:
                     if _gate_node_nlp:
@@ -19266,12 +19443,22 @@ def solve_model(
             # relaxation/midpoint seeds miss (prob07: 162070 -> 154990). No-op
             # when the model carries no initial values. Sound: subnlp re-verifies
             # feasibility and inject_incumbent enforces strict improvement.
+            # The user's ``initial_solution`` is the same kind of start, and is
+            # used here when the root multistart did not already start from it
+            # (it does not run when the LP relaxer supplies the root bound).
             if (
                 iteration == 0
                 and _subnlp_calls < subnlp_max_calls
                 and _root_heur_nlp_entry_ok(evaluator)
             ):
                 _gseed = _gams_initial_seed(model, lb, ub)
+                if (
+                    _gseed is None
+                    and initial_point is not None
+                    and not _ws_root_nlp_started
+                    and np.size(initial_point) == np.size(lb)
+                ):
+                    _gseed = np.clip(np.asarray(initial_point, dtype=np.float64), lb, ub)
                 if _gseed is not None:
                     _subnlp_calls += 1
                     _t_sn_g = time.perf_counter()
@@ -21804,6 +21991,66 @@ def _fbbt_implied_box(model: Model, n: int) -> Optional[tuple[np.ndarray, np.nda
     return box.lb, box.ub
 
 
+def _singleton_row_box(
+    A,  # noqa: N803
+    cl: np.ndarray,
+    cu: np.ndarray,
+    n: int,
+) -> Optional[tuple[np.ndarray, np.ndarray]]:
+    """The box implied by the single-variable rows of ``cl <= A x <= cu``, or ``None``.
+
+    A row with one nonzero ``a`` in column ``j`` bounds ``x_j`` by ``cl/a`` and
+    ``cu/a`` (swapped when ``a < 0``), so every feasible point lies in this box and
+    :func:`_certificate_box` may intersect the declared box with it. It exists for
+    bounds written as rows on the elements of an array variable: Rust FBBT tightens
+    a variable BLOCK, and an element row cannot tighten the whole block, so FBBT
+    leaves such a variable free. On COPS ``torsion`` (``v[i, j] >= -D_ij`` and
+    ``v[i, j] <= D_ij`` on a free ``v``) the tangent bound was then taken over an
+    infinite box and came out ``-inf`` at a converged point. Each quotient is
+    widened outward by one ulp, so a correctly rounded division cannot place the
+    box inside the exact one. ``None`` when no row is single-variable.
+    """
+    import scipy.sparse as _sps
+
+    if A is None or A.shape[0] == 0:
+        return None
+    M = _sps.csr_matrix(A)
+    M.eliminate_zeros()
+    counts = np.diff(M.indptr)
+    rows = np.flatnonzero(counts == 1)
+    if rows.size == 0:
+        return None
+    cols = M.indices[M.indptr[rows]]
+    a = M.data[M.indptr[rows]]
+    lo_r = np.asarray(cl, dtype=np.float64)[rows]
+    hi_r = np.asarray(cu, dtype=np.float64)[rows]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        q_lo = np.where(a > 0, lo_r / a, hi_r / a)
+        q_hi = np.where(a > 0, hi_r / a, lo_r / a)
+    q_lo = np.where(np.isnan(q_lo), -np.inf, np.nextafter(q_lo, -np.inf))
+    q_hi = np.where(np.isnan(q_hi), np.inf, np.nextafter(q_hi, np.inf))
+    lb = np.full(n, -np.inf)
+    ub = np.full(n, np.inf)
+    np.maximum.at(lb, cols, q_lo)
+    np.minimum.at(ub, cols, q_hi)
+    return lb, ub
+
+
+def _intersect_implied_boxes(
+    *boxes: Optional[tuple[np.ndarray, np.ndarray]],
+) -> Optional[tuple[np.ndarray, np.ndarray]]:
+    """The elementwise intersection of the non-``None`` implied boxes, or ``None``."""
+    present = [b for b in boxes if b is not None]
+    if not present:
+        return None
+    lb = np.asarray(present[0][0], dtype=np.float64).copy()
+    ub = np.asarray(present[0][1], dtype=np.float64).copy()
+    for blo, bhi in present[1:]:
+        lb = np.maximum(lb, np.asarray(blo, dtype=np.float64))
+        ub = np.minimum(ub, np.asarray(bhi, dtype=np.float64))
+    return lb, ub
+
+
 def _convex_nlp_certificate(
     evaluator: "NLPEvaluator",
     x: np.ndarray,
@@ -24089,7 +24336,7 @@ def _solve_nlp_bb(
             _root_cut_bound = None
 
     t_rust_start = time.perf_counter()
-    tree = PyTreeManager(
+    tree = _tree_manager(
         n_vars,
         lb.tolist(),
         ub.tolist(),
@@ -24540,6 +24787,7 @@ def _solve_nlp_bb(
                         nlp_solver,
                         convex=_model_is_convex,
                         deadline=t_start + time_limit,
+                        initial_point=initial_point,
                     )
                 else:
                     psol_i = np.array(batch_psols[i])
@@ -29123,7 +29371,9 @@ def _qp_convex_certificate(
         cu,
         evaluator.evaluate_objective(xs),
         gap_tolerance=gap_tolerance,
-        implied_box=_fbbt_implied_box(model, n),
+        implied_box=_intersect_implied_boxes(
+            _fbbt_implied_box(model, n), _singleton_row_box(A, cl, cu, n)
+        ),
     )
     # No ``stationarity_rel`` gate here, unlike the NLP route. This route's
     # stationarity guard is the backend KKT-residual test in ``_solve_qp_matrix``
@@ -29224,6 +29474,145 @@ def _pounce_sos_lift(model: Model) -> Optional[tuple]:
         return None
     sign = -1.0 if model._objective.sense == ObjectiveSense.MAXIMIZE else 1.0
     return weighted_affine_square_decomposition(model._objective.expression, model, sign)
+
+
+class _SingletonRowFold(NamedTuple):
+    """Where :func:`_fold_singleton_rows` moved each single-variable row (#1714).
+
+    ``keep_ub``/``keep_eq`` are the row indices still passed to the backend;
+    ``lo_row``/``hi_row`` give, per column, the stacked (``A_ub`` then ``A_eq``)
+    index of the folded row that set a strictly tighter lower/upper bound (``-1``
+    where the declared bound stands), and ``lo_a``/``hi_a`` its coefficient.
+    """
+
+    keep_ub: np.ndarray
+    keep_eq: np.ndarray
+    n_ub: int
+    n_eq: int
+    lo_row: np.ndarray
+    hi_row: np.ndarray
+    lo_a: np.ndarray
+    hi_a: np.ndarray
+
+
+def _fold_singleton_rows(A_ub, b_ub, A_eq, b_eq, bounds):  # noqa: N803
+    """Move the single-variable rows of a continuous QP into its column bounds.
+
+    A row ``a x_j <= b`` is the bound ``x_j <= b/a`` (``>=`` when ``a < 0``), and
+    ``a x_j == b`` fixes ``x_j``. Passing it to the interior-point backend as a row
+    instead costs a slack and a multiplier, and a cell whose two rows pin it
+    (``-D <= v <= D`` with ``D = 0``) leaves the IPM no interior at all. On COPS
+    ``torsion`` 50x50 (two rows per cell, a free ``v``) the row form returned an
+    uncertified -0.4178480 after 13.6 s against the reference -0.418087; the same
+    model with the rows declared as bounds certified -0.4180857 (bound
+    -0.4180918) in 0.9 s.
+
+    The fold only changes what the BACKEND solves. Every check after the solve
+    (feasibility guard, #1596 certificate, named duals) runs on the ORIGINAL rows,
+    with the folded rows' duals restored by :func:`_unfold_singleton_duals`, and
+    the certificate takes its box from :func:`_singleton_row_box`, which rounds
+    outward on its own. So the bound here is the plain quotient ``b/a``: widening
+    it by an ulp, as a first version did, turned a pinned column (``a x == b``
+    with ``|a| != 1``) into a box two ulps wide, an interior-point trap of the
+    same kind as the rows themselves, and the backend's KKT residual then failed
+    the #145 guard on 3 of 30 random QPs that the row form certified.
+
+    Returns ``(A_ub, b_ub, A_eq, b_eq, bounds, fold)``, or ``None`` when no row is
+    single-variable or a folded box would be empty (left for the backend to
+    report infeasible, as before).
+    """
+    import scipy.sparse as _sps
+
+    n = len(bounds)
+    lb = np.array([float(b[0]) for b in bounds], dtype=np.float64)
+    ub = np.array([float(b[1]) for b in bounds], dtype=np.float64)
+    lb0, ub0 = lb.copy(), ub.copy()
+    lo_row = np.full(n, -1, dtype=np.int64)
+    hi_row = np.full(n, -1, dtype=np.int64)
+    lo_a = np.zeros(n)
+    hi_a = np.zeros(n)
+    keeps: list[np.ndarray] = []
+    sizes: list[int] = []
+    folded_any = False
+    offset = 0
+    for A, b, is_eq in ((A_ub, b_ub, False), (A_eq, b_eq, True)):
+        if A is None or b is None or A.shape[0] == 0:
+            keeps.append(np.zeros(0, dtype=np.int64))
+            sizes.append(0)
+            continue
+        M = _sps.csr_matrix(A)
+        M.eliminate_zeros()
+        bb = np.asarray(b, dtype=np.float64).ravel()
+        single = np.diff(M.indptr) == 1
+        keeps.append(np.flatnonzero(~single))
+        sizes.append(M.shape[0])
+        for r in np.flatnonzero(single):
+            j = int(M.indices[M.indptr[r]])
+            a = float(M.data[M.indptr[r]])
+            q = bb[r] / a
+            # A column bound at or beyond 1e15 is dropped by the IPM (#1319; the
+            # legacy ``finite_bound_threshold``), so such a row stays a row.
+            if not np.isfinite(q) or abs(q) >= 1e15:
+                keeps[-1] = np.append(keeps[-1], r)
+                continue
+            folded_any = True
+            if is_eq or a < 0:  # a lower bound on x_j
+                if q > lb[j]:
+                    lb[j], lo_row[j], lo_a[j] = q, offset + r, a
+            if is_eq or a > 0:  # an upper bound on x_j
+                if q < ub[j]:
+                    ub[j], hi_row[j], hi_a[j] = q, offset + r, a
+        keeps[-1] = np.sort(keeps[-1])
+        offset += M.shape[0]
+    if not folded_any or np.any(lb > ub):
+        return None
+    # Where the declared bound is the tighter one, the column keeps its multiplier.
+    lo_row[lb <= lb0] = -1
+    hi_row[ub >= ub0] = -1
+
+    def _rows(A, keep):
+        if A is None or keep.size == 0:
+            return None
+        return A[keep] if not _sp_issparse(A) else _sps.csr_matrix(A)[keep]
+
+    keep_ub, keep_eq = keeps
+    A_ub_f = _rows(A_ub, keep_ub)
+    A_eq_f = _rows(A_eq, keep_eq)
+    b_ub_f = None if A_ub_f is None else np.asarray(b_ub, dtype=np.float64).ravel()[keep_ub]
+    b_eq_f = None if A_eq_f is None else np.asarray(b_eq, dtype=np.float64).ravel()[keep_eq]
+    fold = _SingletonRowFold(keep_ub, keep_eq, sizes[0], sizes[1], lo_row, hi_row, lo_a, hi_a)
+    return A_ub_f, b_ub_f, A_eq_f, b_eq_f, list(zip(lb.tolist(), ub.tolist())), fold
+
+
+def _unfold_singleton_duals(
+    fold: _SingletonRowFold,
+    dual_values: Optional[np.ndarray],
+    reduced_costs: Optional[np.ndarray],
+) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """Row duals and reduced costs of the original QP from the folded one's.
+
+    HiGHS convention, ``rc = Qx + c - A' y``: a column multiplier held by a bound
+    that a folded row ``a x_j (<= | ==) b`` set is that row's, ``y_r = rc_j / a``,
+    and leaves ``rc_j = 0`` -- the same stationarity, now written on the row. The
+    sign of ``rc_j`` says which side is active (``> 0`` lower, ``< 0`` upper), and
+    a ``<=`` row's ``y_r`` comes out ``<= 0`` on either side. Without reduced
+    costs nothing can be restored, and the row duals are reported missing (the
+    certificate estimates them, #1605) rather than with the folded rows at zero.
+    """
+    n_kept = fold.keep_ub.size + fold.keep_eq.size
+    if reduced_costs is None or (dual_values is None and n_kept > 0):
+        return None, reduced_costs
+    rc = np.asarray(reduced_costs, dtype=np.float64).copy()
+    y = np.zeros(fold.n_ub + fold.n_eq, dtype=np.float64)
+    if n_kept:
+        d = np.asarray(dual_values, dtype=np.float64).ravel()
+        y[fold.keep_ub] = d[: fold.keep_ub.size]
+        y[fold.n_ub + fold.keep_eq] = d[fold.keep_ub.size :]
+    for side, rows, coef in ((rc > 0, fold.lo_row, fold.lo_a), (rc < 0, fold.hi_row, fold.hi_a)):
+        cols = np.flatnonzero(side & (rows >= 0))
+        y[rows[cols]] += rc[cols] / coef[cols]
+        rc[cols] = 0.0
+    return y, rc
 
 
 def _solve_qp_matrix(
@@ -29351,7 +29740,15 @@ def _solve_qp_matrix(
     start_kw: dict[str, Any] = {}
     if x0 is not None:
         start_kw["warm_start"] = np.asarray(x0, dtype=np.float64).ravel()[:n_orig]
-    Q_s, c_s, A_ub_s, A_eq_s, b_eq_s, bounds_s = Q_orig, c_orig, A_ub, A_eq, b_eq, bounds
+    # The backend's rows and box: the model's, less the single-variable rows of a
+    # continuous QP, which become column bounds (#1714). Everything after the solve
+    # reads the original ``A_ub``/``A_eq``/``bounds``.
+    fold = _fold_singleton_rows(A_ub, b_ub, A_eq, b_eq, bounds) if integrality is None else None
+    if fold is not None:
+        A_ub_b, b_ub_b, A_eq_b, b_eq_b, bounds_b, row_fold = fold
+    else:
+        A_ub_b, b_ub_b, A_eq_b, b_eq_b, bounds_b, row_fold = A_ub, b_ub, A_eq, b_eq, bounds, None
+    Q_s, c_s, A_ub_s, A_eq_s, b_eq_s, bounds_s = Q_orig, c_orig, A_ub_b, A_eq_b, b_eq_b, bounds_b
     obj_const_s = float(qp_data.obj_const)
     n_lift = 0
     if sos_lift is not None:
@@ -29365,17 +29762,17 @@ def _solve_qp_matrix(
         Q_s[n_orig:, n_orig:] = np.diag(2.0 * np.asarray(w_l, dtype=np.float64))
         c_s = np.concatenate([np.asarray(l_l, dtype=np.float64)[:n_orig], np.zeros(n_lift)])
         obj_const_s = float(c0_l)
-        if A_ub is not None and A_ub.shape[0] > 0:
-            A_ub_s = np.hstack([_dense_A(A_ub), np.zeros((A_ub.shape[0], n_lift))])
+        if A_ub_b is not None and A_ub_b.shape[0] > 0:
+            A_ub_s = np.hstack([_dense_A(A_ub_b), np.zeros((A_ub_b.shape[0], n_lift))])
         lift_rows = np.hstack([A_l, -np.eye(n_lift)])
-        if A_eq is not None and A_eq.shape[0] > 0:
+        if A_eq_b is not None and A_eq_b.shape[0] > 0:
             A_eq_s = np.vstack(
-                [np.hstack([_dense_A(A_eq), np.zeros((A_eq.shape[0], n_lift))]), lift_rows]
+                [np.hstack([_dense_A(A_eq_b), np.zeros((A_eq_b.shape[0], n_lift))]), lift_rows]
             )
-            b_eq_s = np.concatenate([np.asarray(b_eq, dtype=np.float64).ravel(), -b_l])
+            b_eq_s = np.concatenate([np.asarray(b_eq_b, dtype=np.float64).ravel(), -b_l])
         else:
             A_eq_s, b_eq_s = lift_rows, -np.asarray(b_l, dtype=np.float64)
-        bounds_s = bounds + [(-np.inf, np.inf)] * n_lift
+        bounds_s = bounds_b + [(-np.inf, np.inf)] * n_lift
         if "warm_start" in start_kw:
             ws = start_kw["warm_start"]
             start_kw["warm_start"] = np.concatenate([ws, A_l @ ws + b_l])
@@ -29383,7 +29780,7 @@ def _solve_qp_matrix(
         n_s_cols = len(c_s)
         want = {
             "y": 0 if A_eq_s is None or b_eq_s is None else int(A_eq_s.shape[0]),
-            "z": 0 if A_ub_s is None or b_ub is None else int(A_ub_s.shape[0]),
+            "z": 0 if A_ub_s is None or b_ub_b is None else int(A_ub_s.shape[0]),
             "z_lb": n_s_cols,
             "z_ub": n_s_cols,
         }
@@ -29401,7 +29798,7 @@ def _solve_qp_matrix(
             Q=Q_s,
             c=c_s,
             A_ub=A_ub_s,
-            b_ub=b_ub,
+            b_ub=b_ub_b,
             A_eq=A_eq_s,
             b_eq=b_eq_s,
             bounds=bounds_s,
@@ -29452,8 +29849,8 @@ def _solve_qp_matrix(
                 reject_reason.append(reason)
             return None
         x_o = np.asarray(result.x, dtype=np.float64)[:n_orig]
-        n_rows_o = (A_ub.shape[0] if A_ub is not None else 0) + (
-            A_eq.shape[0] if A_eq is not None else 0
+        n_rows_o = (A_ub_b.shape[0] if A_ub_b is not None else 0) + (
+            A_eq_b.shape[0] if A_eq_b is not None else 0
         )
         f_o = float(0.5 * x_o @ (Q_orig @ x_o) + np.asarray(c_orig) @ x_o)
         result = dataclasses.replace(
@@ -29471,6 +29868,17 @@ def _solve_qp_matrix(
         objective = f_o + float(qp_data.obj_const)
         if sense == ObjectiveSense.MAXIMIZE:
             objective = -objective
+
+    if result.status == SolveStatus.OPTIMAL and row_fold is not None:
+        # The folded rows' multipliers sit on the columns they bounded; put them
+        # back on the rows, so the checks below and the named duals see the
+        # model's own rows (#1714).
+        y_o, rc_o = _unfold_singleton_duals(
+            row_fold,
+            result.dual_values,
+            None if result.reduced_costs is None else np.asarray(result.reduced_costs)[:n_orig],
+        )
+        result = dataclasses.replace(result, dual_values=y_o, reduced_costs=rc_o)
 
     if result.status == SolveStatus.OPTIMAL:
         assert result.x is not None and result.objective is not None
@@ -33767,8 +34175,11 @@ def _solve_milp_bb(
     """Solve a MILP via B&B with LP relaxation solves at each node.
 
     ``prefer_pounce`` (POUNCE-only mode) routes the incumbent dual recovery
-    through POUNCE instead of the Rust simplex; either way the solve is
-    HiGHS-free (HiGHS was removed, issue #356).
+    through POUNCE instead of the Rust simplex; either way this tree makes no
+    HiGHS call (#356). It is not the default engine for a pure MILP, which
+    ``solve_model`` sends to HiGHS (#1229); this tree runs under
+    ``milp_backend="native"``, a ``node_callback``, ``lagrangian_bound=True``,
+    or when the HiGHS route or the monolithic Rust engine declines (#1724).
 
     ``node_engine`` selects the per-node LP relaxation engine in POUNCE-only
     mode: ``"simplex"`` (the default for pure MILP — exact-vertex warm-started
@@ -33927,7 +34338,7 @@ def _solve_milp_bb(
             _root_lp_bound = float(_root_out[0])
 
     t_rust_start = time.perf_counter()
-    tree = PyTreeManager(n_vars, lb.tolist(), ub.tolist(), int_offsets, int_sizes, strategy)
+    tree = _tree_manager(n_vars, lb.tolist(), ub.tolist(), int_offsets, int_sizes, strategy)
     tree.initialize()
     # #1535: integer columns and probe count for a caller-chosen branching rule.
     _branch_int_cols = np.array(
@@ -34923,8 +35334,9 @@ def _solve_miqp_bb(
     """Solve a MIQP via B&B with QP relaxation solves at each node.
 
     ``prefer_pounce`` (POUNCE-only mode) routes the incumbent dual recovery
-    through POUNCE instead of the Rust simplex; either way the solve is
-    HiGHS-free (HiGHS was removed, issue #356).
+    through POUNCE instead of the Rust simplex; either way this tree makes no
+    HiGHS call (#356). HiGHS solves only a pure LP or MILP (#1229), never a
+    model with a quadratic term (#1724).
     """
     from discopt._relax.problem_classifier import extract_qp_data
 
@@ -34974,7 +35386,7 @@ def _solve_miqp_bb(
         )
 
     t_rust_start = time.perf_counter()
-    tree = PyTreeManager(n_vars, lb.tolist(), ub.tolist(), int_offsets, int_sizes, strategy)
+    tree = _tree_manager(n_vars, lb.tolist(), ub.tolist(), int_offsets, int_sizes, strategy)
     tree.initialize()
     rust_time += time.perf_counter() - t_rust_start
 

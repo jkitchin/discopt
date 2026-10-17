@@ -121,6 +121,7 @@ from discopt.modeling.core import (
     UnaryOp,
     Variable,
     VarType,
+    affine_array_sum,
     carry_validation_guards,
 )
 from discopt.mpec import carry_complementarities
@@ -243,6 +244,17 @@ def _leaf_ref(node: Expression) -> Optional[tuple[Variable, int, Expression]]:
     return None
 
 
+def _affine_entries(var: Variable, coefs: np.ndarray):
+    """``(variable, flat_element, reference_expression, coefficient)`` for each
+    nonzero entry of ``dm.sum(C * x)`` (see :func:`affine_array_sum`): the same
+    leaves the term-by-term sum ``C[0] * x[0] + ...`` would have registered, read
+    off the coefficient array instead of refused as a non-scalar constant."""
+    shape = tuple(var.shape)
+    for e in np.flatnonzero(coefs):
+        idx = int(e) if len(shape) == 1 else tuple(int(i) for i in np.unravel_index(e, shape))
+        yield var, int(e), var[idx], float(coefs[e])
+
+
 # ---------------------------------------------------------------------------
 # Cheap syntactic gate
 # ---------------------------------------------------------------------------
@@ -266,6 +278,8 @@ def has_binary_multilinear_work(model: Model) -> bool:
 
 
 def _gate_children(node: Expression) -> Optional[list[Expression]]:
+    if affine_array_sum(node) is not None:
+        return []  # read as its coefficients (``_affine_entries``)
     if isinstance(node, BinaryOp):
         return [node.left, node.right]
     if isinstance(node, UnaryOp):
@@ -320,6 +334,11 @@ def _witness_scan(root: Expression) -> bool:
 def _gate_eval(node: Expression, memo: dict[int, tuple[int, bool, bool]]) -> tuple[int, bool, bool]:
     if isinstance(node, (Constant, Parameter)):
         return (0, True, True)
+    affine = affine_array_sum(node)
+    if affine is not None:
+        var, coefs = affine
+        live = np.flatnonzero(coefs)
+        return (1 if live.size else 0, all(_binary_like(var, int(e)) for e in live), True)
     ref = _leaf_ref(node)
     if ref is not None:
         return (1, _binary_like(ref[0], ref[1]), True)
@@ -461,6 +480,8 @@ def _poly_pow(p: dict, k: int, ctx: _ExpandCtx) -> dict:
 
 
 def _expand_children(node: Expression) -> list[Expression]:
+    if affine_array_sum(node) is not None:
+        return []
     if isinstance(node, BinaryOp):
         return [node.left, node.right]
     if isinstance(node, UnaryOp):
@@ -515,6 +536,12 @@ def _expand_eval(node: Expression, memo: dict[int, dict], ctx: _ExpandCtx) -> di
         var, elem, ref_expr = ref
         key = ctx.register(var, elem, ref_expr)
         return {_Mono((key,)): 1.0}
+    affine = affine_array_sum(node)
+    if affine is not None:
+        poly: dict = {}
+        for var, elem, ref_expr, coef in _affine_entries(*affine):
+            poly[_Mono((ctx.register(var, elem, ref_expr),))] = coef
+        return poly
     if isinstance(node, UnaryOp):  # only "neg" reaches here
         return _poly_scale(memo[id(node.operand)], -1.0)
     if isinstance(node, SumExpression):
@@ -572,7 +599,7 @@ def _collect_addends(root: Expression) -> tuple[float, list[tuple[float, Express
         if isinstance(node, UnaryOp) and node.op == "neg":
             stack.append((-coef, node.operand))
             continue
-        if isinstance(node, SumExpression):
+        if isinstance(node, SumExpression) and affine_array_sum(node) is None:
             stack.append((coef, node.operand))
             continue
         if isinstance(node, SumOverExpression):
@@ -755,6 +782,16 @@ def _interval_eval(node: Expression, memo: dict[int, tuple[float, float]]) -> tu
         var, elem, _ = ref
         lo = float(np.asarray(var.lb).flat[elem])
         hi = float(np.asarray(var.ub).flat[elem])
+        return (lo, hi)
+    affine = affine_array_sum(node)
+    if affine is not None:
+        lo = hi = 0.0
+        for var, elem, _, coef in _affine_entries(*affine):
+            tl, th = _interval_mul(
+                (coef, coef),
+                (float(np.asarray(var.lb).flat[elem]), float(np.asarray(var.ub).flat[elem])),
+            )
+            lo, hi = lo + tl, hi + th
         return (lo, hi)
     if isinstance(node, UnaryOp):
         lo, hi = memo[id(node.operand)]
