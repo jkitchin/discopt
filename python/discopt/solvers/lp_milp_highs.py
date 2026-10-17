@@ -381,6 +381,87 @@ def ns_bound(y: np.ndarray, sf: StdForm) -> Optional[float]:
     return None if g is None else float(g) + sf.obj_const
 
 
+def scaled_dual_for_open_columns(y: np.ndarray, sf: StdForm) -> Optional[np.ndarray]:
+    """A repair of ``y`` whose reduced costs are safely signed on every open
+    column, or ``None`` when sign projection plus scaling cannot reach one (#1729).
+
+    Two sign-safe moves: a wrong-signed row multiplier is projected to zero (see
+    below), then the result is scaled by the largest ``t in (0, 1]`` that clears
+    every open column.
+
+    The NS bound is ``-inf`` as soon as a column open above has a reduced cost
+    ``r_j = c_j - (Aᵀy)_j`` that is negative -- by one rounding error is enough, and
+    HiGHS's ``kOptimal`` dual routinely carries such errors. On a covering LP with
+    no explicit upper bounds every structural column is open above, FBBT cannot
+    close them (every row is ``>=`` with nonnegative coefficients), and the
+    certificate was lost although the same LP with a redundant ``ub=10`` certified.
+
+    Scaling the dual moves every reduced cost along ``r(t) = c - t Aᵀy``, linearly
+    in ``t``, and keeps the sign of every component of ``y`` -- so the implied sign
+    of every row multiplier (carried by its logical column's reduced cost
+    ``-t (Aᵀy)_j``) is preserved. Each open column then confines ``t`` to a
+    half-line; the intersection with ``(0, 1]`` is taken at its top, which costs
+    ``(1 - t) bᵀy`` of bound -- one rounding error's worth on the issue's LPs.
+
+    Only a candidate: :func:`ns_bound` computes the bound from ``t * y`` rigorously,
+    as it does from any ``y``, so this cannot produce an invalid bound -- at worst a
+    weak or ``-inf`` one. The margin keeps ``r_j(t)`` clear of the reduced-cost
+    error the safe bound charges, so the candidate is not refused for being exact.
+    """
+    A = sf.A
+    y = np.array(y, dtype=np.float64, copy=True)
+    # A row multiplier a rounding error the wrong side of zero shows up on the
+    # row's logical column (``c_j = 0``, one nonzero ``a``: ``r_j = -a y_i``), and
+    # scaling cannot fix a sign. Project it: ``y_i = 0`` puts ``r_j`` exactly at
+    # zero, and moves every other reduced cost by ``|y_i A_ik|`` -- the same
+    # rounding-error size, absorbed by the scaling below.
+    nnz_col = np.diff(A.indptr)
+    for j in np.flatnonzero((nnz_col == 1) & (sf.c == 0.0)):
+        hi_open, lo_open = sf.xu[j] >= INF, sf.xl[j] <= -INF
+        if hi_open == lo_open:
+            continue  # bounded both sides (no condition) or free (needs y_i == 0 anyway)
+        k = A.indptr[j]
+        i, a = int(A.indices[k]), float(A.data[k])
+        r_j = -a * y[i]
+        if (hi_open and r_j < 0.0) or (lo_open and r_j > 0.0):
+            y[i] = 0.0
+    g = np.asarray(A.T @ y, dtype=np.float64)
+    absg = np.asarray(abs(A).T @ np.abs(y), dtype=np.float64)
+    nnz = np.diff(A.indptr).astype(np.float64)
+    eps = np.finfo(np.float64).eps
+    margin = 8.0 * (nnz + 2.0) * eps * (absg + np.abs(sf.c))
+    open_hi = sf.xu >= INF
+    open_lo = sf.xl <= -INF
+    if not (open_hi.any() or open_lo.any()):
+        return None
+    t_lo, t_hi = 0.0, 1.0
+    for j in np.flatnonzero(open_hi | open_lo):
+        c_j, g_j, m_j = float(sf.c[j]), float(g[j]), float(margin[j])
+        if open_hi[j] and open_lo[j]:
+            # A free column needs r_j == 0 exactly; scaling cannot arrange that
+            # unless both terms already vanish.
+            if c_j == 0.0 and g_j == 0.0:
+                continue
+            return None
+        if open_hi[j]:  # need c_j - t g_j >= m_j
+            if g_j > 0.0:
+                t_hi = min(t_hi, (c_j - m_j) / g_j)
+            elif g_j < 0.0:
+                t_lo = max(t_lo, (c_j - m_j) / g_j)
+            elif c_j < m_j:
+                return None
+        else:  # open below: need c_j - t g_j <= -m_j
+            if g_j > 0.0:
+                t_lo = max(t_lo, (c_j + m_j) / g_j)
+            elif g_j < 0.0:
+                t_hi = min(t_hi, (c_j + m_j) / g_j)
+            elif c_j > -m_j:
+                return None
+    if not (t_hi > 0.0 and t_lo <= t_hi):
+        return None
+    return min(t_hi, 1.0) * y
+
+
 def _box_prod(t: np.ndarray, x: np.ndarray) -> np.ndarray:
     """``t * x`` with the convention ``0 * inf = 0``: a coefficient that is exactly zero
     cannot ride an open bound side, and numpy would make that product ``nan``."""
@@ -1501,6 +1582,16 @@ def solve_lp_std(sf: StdForm, *, time_limit: Optional[float] = None) -> HighsOut
                 g = ns_bound(y, box)
                 if g is not None and (ns is None or g > ns):
                     ns, provenance = g, "ns-fbbt-box"
+                if ns is None or obj - ns > thr:
+                    # #1729: a reduced cost a rounding error the wrong side of zero
+                    # on an open column; a sign-preserving scale of ``y`` fixes it.
+                    for _sf_try in (sf, box):
+                        y_s = scaled_dual_for_open_columns(y, _sf_try)
+                        if y_s is None:
+                            continue
+                        g = ns_bound(y_s, _sf_try)
+                        if g is not None and (ns is None or g > ns):
+                            ns, provenance = g, "ns-scaled-dual"
                 if ns is None or obj - ns > thr:
                     # The caller's own time_limit only; the work is capped by count.
                     deadline = None if time_limit is None else t0 + float(time_limit)
