@@ -116,6 +116,9 @@ def test_tolerance_level_gain_is_not_adopted(monkeypatch):
     """A gain within the equality yardstick is verifier tolerance, not a better point:
     on the #1640 piecewise case the cross point verifies at -7.3e-7 against the exact
     optimum 0, and adopting it published a super-optimal incumbent."""
+    # #1733: the route now folds its slack columns into row bounds, where HiGHS gets
+    # this model right; the falsifier under test only fires on the slack form.
+    monkeypatch.setenv("DISCOPT_MILP_ROW_FORM", "0")
     from test_1640_cross_check_tolerance_bound import _log_max
 
     seen: list = []

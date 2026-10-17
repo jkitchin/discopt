@@ -180,6 +180,9 @@ def test_blend_bigm_logicals_are_not_rescaled():
 def test_cross_check_refutes_a_rescaled_certificate(monkeypatch, M):  # noqa: N803
     """With the rescaling forced exactly as before #1621, the rescaled form certifies
     the issue's false answers; the cross-check must refute and discard them."""
+    # #1733: the route now folds its slack columns into row bounds, where HiGHS gets
+    # this model right; the falsifier under test only fires on the slack form.
+    monkeypatch.setenv("DISCOPT_MILP_ROW_FORM", "0")
     monkeypatch.setattr(L, "logical_column_scales", _legacy_scales)
     # #1634 switched HiGHS's parallel-column presolve rule off, which changes which of
     # the route's falsifiers catches M = 1e10 (the #1634 presolve cross-check does,
@@ -242,6 +245,9 @@ def test_rescaled_point_is_still_reverified_on_the_callers_form(monkeypatch):
     ``test_1537_...::test_rescaled_logical_point_is_reverified_on_the_callers_form``
     used to reach unforced): ``x = 10, z = 0`` passes the scaled slack's tolerance and
     must be refused on the original form."""
+    # #1733: the route now folds its slack columns into row bounds, where HiGHS gets
+    # this model right; the falsifier under test only fires on the slack form.
+    monkeypatch.setenv("DISCOPT_MILP_ROW_FORM", "0")
     monkeypatch.setattr(L, "logical_column_scales", _legacy_scales)
     m = dm.Model("bigm")
     x = m.continuous("x", lb=0, ub=10)
