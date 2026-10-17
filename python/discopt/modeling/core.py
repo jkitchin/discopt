@@ -8852,6 +8852,9 @@ class Model:
         TypeError
             If *initial_solution* contains non-Variable keys.
         """
+        # Entry clock: the #844 fallback below caps its budget at what is left of
+        # ``time_limit`` measured from HERE, not from the primary's start.
+        _t_solve0 = _time.perf_counter()
         self.validate()
 
         # --- #1537 C: exact recentring of large-offset variables (default ON; =0 opts out) ---
@@ -9896,7 +9899,16 @@ class Model:
             # limit as the solve's ``time_limit`` at 7.4 s. A primary that spent its
             # budget leaves at most the reserve, so the #917 sizing above is
             # unchanged for it, and the ``> 1.0`` floor still reads the reserve.
-            _fb_budget = max(_fb_reserve, _remaining_tl - (_time.perf_counter() - _t_primary0))
+            #
+            # And the caller's remaining time is the CAP: the reserve used to be a
+            # floor here too (``max(reserve, remaining)``), which differs from the
+            # remaining time only when the primary overran its own share -- and then
+            # it granted the fallback a full reserve past the caller's ``time_limit``
+            # (QPLIB_3361/3709: primary out at T+44 of 60 s, fallback deadline T+64).
+            # Measured from solve entry, not ``_t_primary0``: the setup before the
+            # primary (1.6 s on QPLIB_3709 at load ~40, more under contention) is
+            # spent too. A shorter fallback can only weaken its bound, never falsify one.
+            _fb_budget = max(0.0, time_limit - (_time.perf_counter() - _t_solve0))
             _t_fb0 = _time.perf_counter()
             try:
                 from discopt._relax.lp_spatial_bb import solve_lp_spatial_bb

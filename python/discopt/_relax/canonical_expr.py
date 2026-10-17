@@ -42,6 +42,7 @@ import dataclasses
 import itertools
 import math
 import operator
+import time
 from typing import Any, Callable, Optional
 
 import numpy as np
@@ -74,12 +75,30 @@ __all__ = [
     "canonicalize",
     "reconstruct",
     "UnsupportedCanonicalization",
+    "RelaxationBuildAborted",
     "Atom",
     "AtomPartition",
     "atomize",
     "var_support",
     "is_affine",
 ]
+
+
+class RelaxationBuildAborted(Exception):
+    """A relaxation build (or the canonicalization under it) ran out of time.
+
+    Raised only for a caller that passed an abort deadline -- i.e. one with a
+    sound way to go without this relaxation (decline a structure, report a node
+    as bound-less). Nothing built so far is returned or cached: an aborted build
+    is discarded whole, never used truncated, so a bound cannot come from it.
+    Defined here, the lowest layer that polls; re-exported by ``uniform_relax``.
+    """
+
+
+#: Recursive steps between deadline polls under an abort deadline. One poll is a
+#: ``time.perf_counter()`` call; one step of a product costs ~70-170 us (QPLIB_3709),
+#: so a 256-call stride bounds the overshoot to tens of milliseconds.
+ABORT_POLL_STRIDE = 256
 
 
 class UnsupportedCanonicalization(Exception):
@@ -179,9 +198,11 @@ def _fold_const_call(name: str, values: tuple[float, ...]) -> Optional[float]:
 class _Canonicalizer:
     """Builds interned CNodes for one model (one build's lifetime)."""
 
-    def __init__(self, model: Model):
+    def __init__(self, model: Model, abort_deadline: Optional[float] = None):
         self.model = model
         self.n_vars = sum(v.size for v in model._variables)
+        self._abort_deadline = abort_deadline
+        self._abort_polls = 0
         self._intern: dict[tuple, CNode] = {}
         # id(expr) -> (expr, CNode). Each entry PINS its source Expression, so an
         # id() in the memo can never be recycled by a different expression while
@@ -406,6 +427,16 @@ class _Canonicalizer:
         if cached is not None:
             assert cached[0] is expr, "canonical memo id() collision (#1283)"
             return cached[1]
+        if self._abort_deadline is not None:
+            self._abort_polls += 1
+            if (
+                self._abort_polls % ABORT_POLL_STRIDE == 0
+                and time.perf_counter() >= self._abort_deadline
+            ):
+                raise RelaxationBuildAborted(
+                    f"canonicalization passed its abort deadline after "
+                    f"{self._abort_polls} expressions"
+                )
         try:
             node = self._canon_dispatch(expr)
         except UnsupportedCanonicalization:
@@ -725,7 +756,7 @@ class CanonicalDAG:
         return tuple(self._intern.values())
 
 
-def canonicalize(model: Model) -> CanonicalDAG:
+def canonicalize(model: Model, abort_deadline: Optional[float] = None) -> CanonicalDAG:
     """Hash-cons ``model``'s objective + constraint bodies into a canonical DAG.
 
     Pure and box-independent. Unsupported nodes become ``opaque`` CNodes wrapping
@@ -739,8 +770,13 @@ def canonicalize(model: Model) -> CanonicalDAG:
     cost the model its entire relaxation, collapsing the dual bound to the trivial
     objective floor. An element that cannot be scalarized statically keeps the
     whole constraint unexpanded, exactly as before.
+
+    ``abort_deadline`` (absolute ``time.perf_counter()``): past it, raise
+    :class:`RelaxationBuildAborted` instead of finishing. On a dense quadratic this
+    walk alone is ~12 s (QPLIB_3709, 165,300 products) and runs before any of the
+    relaxation builder's own polls.
     """
-    canon = _Canonicalizer(model)
+    canon = _Canonicalizer(model, abort_deadline=abort_deadline)
     obj_node: Optional[CNode] = None
     if model._objective is not None:
         obj_node = canon.canon(model._objective.expression)

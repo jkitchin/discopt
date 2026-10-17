@@ -240,16 +240,25 @@ def _relax_bound(model, terms, lb, ub, deadline=None):
         _remaining = deadline - time.perf_counter()
         if _remaining <= 0.0:
             return None
-    # #1520: no except. ``build_milp_relaxation`` has no documented decline and ``relax.solve``
-    # declines by status (no bound -> ``None`` below -> "unresolved", never a fathom); a raise is a
-    # defect.
-    relax, info = build_milp_relaxation(
-        model,
-        terms,
-        DiscretizationState(),
-        bound_override=(lb, ub),
-        build_deadline=deadline,
-    )
+    from discopt._relax.uniform_relax import RelaxationBuildAborted
+
+    # #1520: one except, for the one documented decline. ``build_deadline`` only
+    # truncates the CONSTRAINT rows; the objective walk runs whole, and on a dense
+    # quadratic objective it is the whole build (QPLIB_3709: ~28 s). ``abort_deadline``
+    # bounds it too, and an aborted build is "no bound from this node" -- ``None``,
+    # "unresolved", never a fathom -- exactly like the spent-budget returns around
+    # it. ``relax.solve`` declines by status; any other raise is a defect.
+    try:
+        relax, info = build_milp_relaxation(
+            model,
+            terms,
+            DiscretizationState(),
+            bound_override=(lb, ub),
+            build_deadline=deadline,
+            abort_deadline=deadline,
+        )
+    except RelaxationBuildAborted:
+        return None
     if not relax._objective_bound_valid:
         return None
     # Solve the LP RELAXATION, not the MILP. ``build_milp_relaxation`` hands back

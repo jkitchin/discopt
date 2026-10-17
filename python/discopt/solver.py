@@ -1882,6 +1882,14 @@ def _try_native_spatial_kernel(
     from discopt import _rust
     from discopt._relax.spatial_producer import build_spatial_kernel_spec
 
+    # A non-finite budget means "no wall-clock cap": carry it as ``None`` rather
+    # than an infinite deadline, so the kernel is asked for an uncapped search
+    # instead of rejecting a non-finite ``time_limit_s`` (which the defensive
+    # ``except`` below would swallow, silently disabling the kernel outright).
+    # Computed before the spec build, which polls it too: on a dense quadratic the
+    # spec's two relaxation builds alone outlast the solve.
+    _outer_budget = float(time_limit)
+    outer_deadline = t_start + _outer_budget if math.isfinite(_outer_budget) else None
     _t_phase = time.perf_counter()
     spec = build_spatial_kernel_spec(
         model,
@@ -1889,6 +1897,7 @@ def _try_native_spatial_kernel(
             np.asarray(lb, dtype=np.float64)[:n_vars],
             np.asarray(ub, dtype=np.float64)[:n_vars],
         ),
+        deadline=outer_deadline,
     )
     _native_jax_s += time.perf_counter() - _t_phase
     if spec is None:
@@ -1899,12 +1908,6 @@ def _try_native_spatial_kernel(
     n_orig = int(spec["n_orig"])
 
     # Task 1: obtain a cheap, rigorously-verified feasible seed for the cutoff.
-    # A non-finite budget means "no wall-clock cap": carry it as ``None`` rather
-    # than an infinite deadline, so the kernel is asked for an uncapped search
-    # instead of rejecting a non-finite ``time_limit_s`` (which the defensive
-    # ``except`` below would swallow, silently disabling the kernel outright).
-    _outer_budget = float(time_limit)
-    outer_deadline = t_start + _outer_budget if math.isfinite(_outer_budget) else None
     _t_phase = time.perf_counter()
     initial_incumbent, seed_point = _native_kernel_seed(
         model,
