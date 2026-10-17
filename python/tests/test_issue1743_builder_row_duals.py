@@ -136,3 +136,100 @@ def test_highs_duals_unchanged_and_no_evaluator_built(monkeypatch):
     assert {f"{f}_{i}" for f in ("sup", "dem") for i in range(5)} <= set(got)
     for name in want:
         np.testing.assert_allclose(got[name], want[name], rtol=1e-12, atol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# The post-solve consumers: AffineEvaluator instead of a tape/JAX build.
+# ---------------------------------------------------------------------------
+
+
+def _assert_matches_tape(m: Model) -> None:
+    from discopt._affine_evaluator import AffineEvaluator
+    from discopt._tape_nlp_evaluator import make_evaluator
+
+    aff = AffineEvaluator.try_build(m)
+    assert aff is not None
+    ev = make_evaluator(m)
+    assert type(ev).__name__ == "TapeNLPEvaluator"  # the reference is the tape
+    n = sum(v.size for v in m._variables)
+    assert aff.n_variables == ev.n_variables == n
+    assert aff.n_constraints == ev.n_constraints
+    rng = np.random.default_rng(11)
+    for _ in range(3):
+        x = rng.uniform(-3, 3, n)
+        np.testing.assert_allclose(
+            aff.evaluate_objective(x), ev.evaluate_objective(x), rtol=1e-12, atol=1e-12
+        )
+        np.testing.assert_allclose(
+            aff.evaluate_gradient(x), ev.evaluate_gradient(x), rtol=1e-12, atol=1e-12
+        )
+        np.testing.assert_allclose(
+            aff.evaluate_constraints(x), ev.evaluate_constraints(x), rtol=1e-12, atol=1e-12
+        )
+        np.testing.assert_allclose(
+            aff.evaluate_sparse_jacobian(x).toarray(), ev.evaluate_jacobian(x), rtol=0, atol=0
+        )
+    assert [(a, b, c.name, c.sense) for a, b, c in aff.constraint_row_map()] == [
+        (a, b, c.name, c.sense) for a, b, c in ev.constraint_row_map()
+    ]
+    np.testing.assert_array_equal(aff.variable_bounds[0], ev.variable_bounds[0])
+    np.testing.assert_array_equal(aff.variable_bounds[1], ev.variable_bounds[1])
+
+
+def test_affine_evaluator_matches_tape_min():
+    _assert_matches_tape(_mixed_with_builder_rows())
+
+
+def test_affine_evaluator_matches_tape_max_and_canonical_sum():
+    m = _per_element_transport(6)
+    x = m._variables[0]
+    m.maximize(-2.0 * dm.sum(x) + 7.0)
+    _assert_matches_tape(m)
+    assert m._builder_linear_blocks
+
+
+def test_affine_evaluator_declines_non_affine():
+    from discopt._affine_evaluator import AffineEvaluator
+
+    m = _mixed_with_builder_rows()
+    y = m._variables[1]
+    m.minimize(dm.sum(y * y))  # a QP objective: rows are affine, the objective not
+    assert AffineEvaluator.try_build(m) is None
+    m2 = _mixed_with_builder_rows()
+    m2.subject_to(dm.exp(m2._variables[0][0]) <= 3.0)
+    assert AffineEvaluator.try_build(m2) is None
+
+
+def test_verify_point_rejects_infeasible_point_on_affine_evaluator():
+    from discopt._affine_evaluator import AffineEvaluator
+    from discopt.validation.feasibility import verify_point
+
+    m = _per_element_transport(4)
+    r = m.solve(time_limit=60)
+    assert r.status == "optimal"
+    x = np.concatenate([np.ravel(np.asarray(r.x[v.name], float)) for v in m._variables])
+    aff = AffineEvaluator.try_build(m)
+    assert verify_point(m, x, evaluator=aff).ok
+    assert not verify_point(m, np.zeros_like(x), evaluator=aff).ok  # demand rows violated
+    bumped = x.copy()
+    bumped[0] += 200.0  # supply row 0 violated (a_0 <= 100)
+    assert not verify_point(m, bumped, evaluator=aff).ok
+
+
+def test_lp_solve_builds_no_evaluator(monkeypatch):
+    """The whole HiGHS LP solve -- duals, backstop, repair, reconciliation -- on the
+    #1743 shape builds neither a tape nor a JAX evaluator, and still certifies."""
+    import discopt._tape_nlp_evaluator as tne
+
+    calls = []
+    real = tne.build_evaluator
+
+    def _count(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+
+    monkeypatch.setattr(tne, "build_evaluator", _count)
+    r = _per_element_transport(5).solve(time_limit=60)
+    assert r.status == "optimal" and r.gap_certified
+    assert r.constraint_duals
+    assert calls == []

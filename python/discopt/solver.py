@@ -26973,72 +26973,10 @@ def _sparse_constraint_jacobian(ev: Any, x: np.ndarray) -> Any:
 def _affine_constraint_rows(
     model: Model, n_orig: int
 ) -> Optional[tuple[Any, np.ndarray, list[tuple[int, int, Any]]]]:
-    """``(J, g(0), row_map)`` of an all-affine constraint set, or ``None`` (#1720).
+    """:func:`discopt._affine_evaluator.affine_constraint_rows` (#1720, #1743)."""
+    from discopt._affine_evaluator import affine_constraint_rows
 
-    Read off :func:`discopt._relax.affine_array.affine_of`: exact, sparse, O(nnz),
-    and in the evaluator's row layout -- one row per element of each body in C
-    order, constraints in ``model._constraints`` order -- so ``row_map`` has the
-    shape :meth:`constraint_row_map` returns. ``None`` when any body is not affine;
-    the caller then uses an evaluator.
-
-    Builder-resident rows (#840: ``add_linear_constraints`` and the
-    ``Model.constraint`` linear fast path) follow, one scalar row each, read off
-    their retained CSR blocks (#1743). Before, any such row declined the whole
-    walk, and a per-element 1000x1000 transport LP -- past the tape's node cap --
-    fell through to a JAX evaluator trace over 1M terms after HiGHS had solved it.
-    The rows are named by the same lazy constraints both evaluators list after
-    ``model._constraints``, and each body is the one
-    :func:`discopt.modeling.core._builder_row_constraint` builds: ``a x - b`` for
-    ``<=``/``==``, ``b - a x`` (sense ``<=``) for ``>=``.
-    """
-    import scipy.sparse as sp
-
-    from discopt._relax.affine_array import NotAffineError, affine_of
-
-    blocks = []
-    row_map: list[tuple[int, int, Any]] = []
-    start = 0
-    try:
-        for con in model._constraints:
-            if not isinstance(con, Constraint):
-                continue
-            aff = affine_of(con.body, model._flat_var_offset, n_orig)
-            M = aff.M if aff.M is not None else sp.csr_matrix((aff.size, n_orig))
-            blocks.append((M, aff.b))
-            row_map.append((start, start + aff.size, con))
-            start += aff.size
-    except NotAffineError:
-        return None
-    builder_blocks = getattr(model, "_builder_linear_blocks", None)
-    if builder_blocks:
-        lazy_rows = [
-            c for c in model._builder_linear_constraints(lazy=True) if isinstance(c, Constraint)
-        ]
-        r = 0
-        for A, x, sense, b, _name in builder_blocks:
-            A = sp.csr_matrix(A, dtype=np.float64)
-            k, n_local = int(A.shape[0]), int(A.shape[1])
-            off = int(model._flat_var_offset(x))
-            if off < 0 or off + n_local > n_orig or sense not in ("<=", ">=", "=="):
-                return None
-            M = sp.csr_matrix((A.data, A.indices + off, A.indptr), shape=(k, n_orig))
-            rhs = np.broadcast_to(np.asarray(b, dtype=np.float64), (k,)).copy()
-            if sense == ">=":
-                M, g = -M, rhs
-            else:
-                g = -rhs
-            blocks.append((M.tocsr(), g))
-            for con in lazy_rows[r : r + k]:
-                row_map.append((start, start + 1, con))
-                start += 1
-            r += k
-        if r != len(lazy_rows):
-            return None
-    if not blocks:
-        return _csr_rows(sp.csr_matrix((0, n_orig)), n_orig), np.zeros(0), row_map
-    J = _csr_rows(sp.vstack([M for M, _ in blocks], format="csr"), n_orig)
-    g0 = np.concatenate([b for _, b in blocks]).astype(np.float64)
-    return J, g0, row_map
+    return affine_constraint_rows(model, n_orig)
 
 
 def _matched_row_constraint_duals(

@@ -9216,9 +9216,11 @@ class Model:
 
             try:
                 if evaluator is None and _model_unchanged_since_entry():
-                    from discopt._tape_nlp_evaluator import make_evaluator
+                    # #1743: an all-affine model's rows are read off the affine
+                    # walk, not a tape/JAX evaluator built after the solve.
+                    from discopt._affine_evaluator import post_solve_evaluator
 
-                    evaluator = make_evaluator(self)
+                    evaluator = post_solve_evaluator(self)
                     declared = _declared_vars_entry
                     logic = _declared_logic_now()
                 if evaluator is not None:
@@ -9314,9 +9316,9 @@ class Model:
                 if not _model_unchanged_since_entry():
                     stats["certificate/repair_skipped"] = "model changed during the solve"
                     return
-                from discopt._tape_nlp_evaluator import make_evaluator
+                from discopt._affine_evaluator import post_solve_evaluator
 
-                evaluator = make_evaluator(self)
+                evaluator = post_solve_evaluator(self)  # #1743
                 declared = _declared_vars_entry
                 logic = _declared_logic_now()
             if declared is None:
@@ -10824,9 +10826,9 @@ class Model:
                     )
                     return
                 flat.extend(_np.atleast_1d(_np.asarray(point[v.name], float)).ravel().tolist())
-            from discopt._tape_nlp_evaluator import make_evaluator
+            from discopt._affine_evaluator import post_solve_evaluator
 
-            ev = make_evaluator(self)
+            ev = post_solve_evaluator(self)  # #1743
             f_internal = float(ev.evaluate_objective(_np.asarray(flat, float)))
         except Exception as exc:  # pragma: no cover - evaluator robustness
             _log.warning(
