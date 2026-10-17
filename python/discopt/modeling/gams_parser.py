@@ -1333,57 +1333,109 @@ class _Parser:
             return expr
         return self._parse_atom()
 
-    # ── Expression parser (precedence climbing) ──
+    # ── Expression parser (operator precedence, explicit stack) ──
+    #
+    # Grammar (unchanged from the recursive-descent version this replaces):
+    #
+    #     expr  := add [cmp add]           cmp: < > <= >= = <>
+    #     add   := mul (('+'|'-') mul)*
+    #     mul   := unary (('*'|'/') unary)*
+    #     unary := ('-'|'+') power | power
+    #     power := atom ['**' unary]
+    #     atom  := number | '(' expr ')' | name | name(...) | func(...) | sum(...)
+    #
+    # It was written as one Python function per level, so every parenthesis
+    # cost ~6 frames and nesting ~170 deep raised RecursionError. ``to_gams``
+    # writes exactly that: ``dm.sum`` over n terms scalarizes to a left-deep
+    # fold that prints as n opening parentheses, so the reader could not read
+    # the writer's output back for n in the low hundreds (#1739). Here
+    # parentheses, operators and signs live on explicit stacks; only function
+    # arguments, index lists and ``sum``-style bodies still recurse, and their
+    # depth is the nesting of calls in the source, not the number of terms.
+
+    _CMP_OPS = frozenset(("<", ">", "<=", ">=", "=", "<>"))
+    # Binary precedence; ``**`` is right-associative. A prefix sign binds
+    # tighter than ``*`` and looser than ``**`` (``-a**b`` is ``-(a**b)``,
+    # ``-a*b`` is ``(-a)*b``).
+    _BIN_PREC = {"+": 2, "-": 2, "*": 3, "/": 3, "**": 5, **{op: 1 for op in _CMP_OPS}}
+    _NEG_PREC = 4
 
     def _parse_expr(self):
-        return self._parse_comparison()
+        vals: list = []
+        # ("(", "") | ("neg", "") | ("bin", op)
+        ops: list[tuple[str, str]] = []
+        cmp_seen = [False]  # one entry per open parenthesis, plus the outer level
 
-    def _parse_comparison(self):
-        left = self._parse_add()
-        # Handle comparison operators: <, >, <=, >=, =, <>
-        _COMP_OPS = ("<", ">", "<=", ">=", "=", "<>")
-        if self._cur().kind == _Tok.SYMBOL and self._cur().value in _COMP_OPS:
-            op = self._advance().value
-            right = self._parse_add()
-            return ExprBinOp(op, left, right)
-        return left
+        def prec(entry) -> int:
+            kind, op = entry
+            return self._NEG_PREC if kind == "neg" else self._BIN_PREC[op]
 
-    def _parse_add(self):
-        left = self._parse_mul()
-        while self._match_sym("+") or self._match_sym("-"):
-            op = self._advance().value
-            right = self._parse_mul()
-            left = ExprBinOp(op, left, right)
-        return left
+        def reduce_top() -> None:
+            kind, op = ops.pop()
+            if kind == "neg":
+                vals.append(ExprUnaryMinus(vals.pop()))
+            else:
+                right = vals.pop()
+                vals.append(ExprBinOp(op, vals.pop(), right))
 
-    def _parse_mul(self):
-        left = self._parse_unary()
-        while self._match_sym("*") or self._match_sym("/"):
-            # don't consume ** here
-            if self._match_sym("*") and self._peek(1).value == "*":
+        def push_binary(op: str) -> None:
+            p = self._BIN_PREC[op]
+            right_assoc = op == "**"
+            while ops and ops[-1][0] != "(":
+                q = prec(ops[-1])
+                if q > p or (q == p and not right_assoc):
+                    reduce_top()
+                else:
+                    break
+            ops.append(("bin", op))
+
+        while True:
+            # Operand position: optional sign (not two in a row), then '(' or an atom.
+            sign_ok = True
+            while True:
+                t = self._cur()
+                if t.kind == _Tok.SYMBOL and t.value in ("-", "+") and sign_ok:
+                    self._advance()
+                    if t.value == "-":
+                        ops.append(("neg", ""))
+                    sign_ok = False
+                elif t.kind == _Tok.SYMBOL and t.value == "(":
+                    self._advance()
+                    ops.append(("(", ""))
+                    cmp_seen.append(False)
+                    sign_ok = True
+                else:
+                    vals.append(self._parse_atom())
+                    break
+
+            # Operator position: close parentheses, then a binary operator or stop.
+            while True:
+                t = self._cur()
+                v = t.value if t.kind == _Tok.SYMBOL else None
+                if v == ")" and len(cmp_seen) > 1:
+                    self._advance()
+                    while ops[-1][0] != "(":
+                        reduce_top()
+                    ops.pop()
+                    cmp_seen.pop()
+                    continue
+                if v == "**":
+                    push_binary("**")
+                elif v in ("*", "/") and not (v == "*" and self._peek(1).value == "*"):
+                    push_binary(v)
+                elif v in ("+", "-"):
+                    push_binary(v)
+                elif v in self._CMP_OPS and not cmp_seen[-1]:
+                    cmp_seen[-1] = True
+                    push_binary(v)
+                else:
+                    if len(cmp_seen) > 1:
+                        self._expect(_Tok.SYMBOL, ")")  # raises: unclosed '('
+                    while ops:
+                        reduce_top()
+                    return vals[0]
+                self._advance()
                 break
-            op = self._advance().value
-            right = self._parse_unary()
-            left = ExprBinOp(op, left, right)
-        return left
-
-    def _parse_unary(self):
-        if self._match_sym("-"):
-            self._advance()
-            operand = self._parse_power()
-            return ExprUnaryMinus(operand)
-        if self._match_sym("+"):
-            self._advance()
-            return self._parse_power()
-        return self._parse_power()
-
-    def _parse_power(self):
-        base = self._parse_atom()
-        if self._match_sym("**"):
-            self._advance()
-            exp = self._parse_unary()
-            return ExprBinOp("**", base, exp)
-        return base
 
     # GAMS built-in functions
     _GAMS_FUNCS = {

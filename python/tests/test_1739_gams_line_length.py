@@ -97,19 +97,51 @@ def test_dense_row_is_wrapped_and_value_faithful():
     assert compared == 6
 
 
-def test_deep_fold_is_wrapped():
+def test_deep_fold_is_wrapped_and_value_faithful():
     # `dm.sum(list)` scalarizes to a left-deep fold whose text opens with one
-    # `(` per term and no whitespace, so the wrapper must also break after `(`.
-    # (Not round-tripped: `parse_gams` recurses per nesting level and hits the
-    # recursion limit at this depth, independently of line wrapping.)
+    # `(` per term and no whitespace, so the wrapper must also break after `(`,
+    # and the reader must take that nesting depth without recursing per level.
     n = 3000
     m = dm.Model("deep_fold")
     x = m.continuous("x", shape=(n,), lb=0.0, ub=1.0)
     m.subject_to(dm.sum([x[i] for i in range(n)]) <= 5.0)
+    m.subject_to(dm.sum([(i % 7 - 3) * x[i] for i in range(n)]) >= -40.0)
     m.minimize(x[0])
     text = m.to_gams()
     _assert_lines_short(text)
     assert "(" * 200 in text.replace("\n", "").replace(" ", "")
+
+    r = parse_gams(text)
+    assert [v.name for v in r._variables] == ["obj_var", "x"]
+    rng = np.random.default_rng(1)
+    compared = 0
+    for _ in range(3):
+        xv = rng.random(n)
+        dst = np.concatenate([[0.0], xv])
+        want, got = _row_values(m, xv), _row_values(r, dst)
+        np.testing.assert_allclose(got, want, rtol=1e-10, atol=1e-10)
+        compared += want.size
+    assert compared == 6
+
+
+def test_reader_takes_deep_parenthesis_nesting():
+    # The reader's expression parser used one Python frame per grammar level,
+    # so ~170 nested parentheses raised RecursionError. Depth is now bounded by
+    # memory, not the recursion limit.
+    depth = 20_000
+    src = (
+        "Variables x, obj;\n"
+        "Equations e, o;\n"
+        f"e.. {'(' * depth}-x{')' * depth} =l= 1;\n"
+        "o.. obj =e= x;\n"
+        "Model mm / all /;\n"
+        "Solve mm using lp minimizing obj;\n"
+    )
+    r = parse_gams(src)
+    (row,) = [c for c in r._constraints if "e" == c.name]
+    assert row.sense == "<="
+    # body is `-x - 1`; both variables at 2 so the order of `_variables` is moot.
+    assert compile_expression(row.body, r)(np.full(2, 2.0)) == pytest.approx(-3.0)
 
 
 def test_wrap_line_breaks_only_outside_quotes():
