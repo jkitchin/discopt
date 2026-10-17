@@ -1,8 +1,12 @@
-"""#1731: objective-lattice rounding in the spatial B&B tree (default OFF).
+"""#1731: integer-valued objectives in the spatial B&B tree.
 
-CLAUDE.md §5 bound-changing regime: the flag-ON bound must never cross the true
-optimum (checked against brute-force enumeration), must be at least as tight as
-flag OFF, and both arms must return the same certified objective.
+``DISCOPT_SPATIAL_OBJ_LATTICE`` rounded spatial-tree node bounds up onto the
+objective's lattice ``c0 + k*g``. It was RETIRED (CLAUDE.md §5): the graduation
+panel over the 108 MINLPLib/QPLIB instances its detector accepted was cert-clean
+but not net-positive (``docs/dev/flag-retirement-audit.md``). These fixtures
+stay: the spatial tree on integer-valued objectives, judged against brute-force
+enumeration, plus a soundness pin on the issue's repro, which on main stalls at
+a fractional bound rather than certifying.
 """
 
 from __future__ import annotations
@@ -12,7 +16,7 @@ import itertools
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt.solver import _objective_lattice, _round_bounds_to_lattice
+from discopt.solver_tuning import SolverTuning
 
 
 def _knapsack(w, cap, *, maximize: bool, offset: float = 0.0, nl: bool = True):
@@ -44,6 +48,15 @@ def _brute(w, cap, *, maximize: bool, offset: float = 0.0):
     return best
 
 
+def _assert_valid_bound(r, opt, *, maximize: bool):
+    assert r.bound is not None
+    tol = 1e-6 * max(1.0, abs(opt))
+    if maximize:
+        assert r.bound >= opt - tol  # never below the true maximum
+    else:
+        assert r.bound <= opt + tol  # never above the true minimum
+
+
 CASES = []
 _rng = np.random.default_rng(1731)
 for _k in range(6):
@@ -54,75 +67,12 @@ for _k in range(6):
 
 
 @pytest.mark.parametrize("w, cap, maximize, offset", CASES)
-def test_differential_bound_against_enumeration(monkeypatch, w, cap, maximize, offset):
+def test_knapsack_against_enumeration(w, cap, maximize, offset):
     opt = _brute(w, cap, maximize=maximize, offset=offset)
     assert opt is not None
-    monkeypatch.delenv("DISCOPT_SPATIAL_OBJ_LATTICE", raising=False)
-    off = _knapsack(w, cap, maximize=maximize, offset=offset).solve(time_limit=30)
-    monkeypatch.setenv("DISCOPT_SPATIAL_OBJ_LATTICE", "1")
-    on = _knapsack(w, cap, maximize=maximize, offset=offset).solve(time_limit=30)
-    for r in (off, on):
-        assert r.objective == pytest.approx(opt, abs=1e-6)
-    assert on.status == "optimal"
-    assert on.bound is not None
-    tol = 1e-6 * max(1.0, abs(opt))
-    if maximize:
-        assert on.bound >= opt - tol  # never below the true maximum
-        if off.bound is not None:
-            assert on.bound <= off.bound + tol
-    else:
-        assert on.bound <= opt + tol  # never above the true minimum
-        if off.bound is not None:
-            assert on.bound >= off.bound - tol
-
-
-def test_issue_repro_certifies_with_flag(monkeypatch):
-    monkeypatch.setenv("DISCOPT_SPATIAL_OBJ_LATTICE", "1")
-    rng = np.random.default_rng(1)
-    n = 30
-    w = rng.integers(10, 100, size=n).astype(float)
-    W = int(w.sum() / 2) + 0.5
-    m = dm.Model("ss")
-    x = m.binary("x", shape=(n,))
-    m.subject_to(w @ x <= W)
-    m.maximize(w @ x)
-    m.subject_to(x[0] * x[1] <= 1)
-    r = m.solve(time_limit=60)
-    assert r.status == "optimal"
-    assert r.objective == pytest.approx(834.0)
-    assert r.bound == pytest.approx(834.0)
-
-
-def test_detector_refuses_anything_inexact():
-    m = dm.Model()
-    x = m.binary("x", shape=(3,))
-    y = m.continuous("y", lb=0, ub=1)
-    k = m.integer("k", lb=0, ub=5)
-    m.minimize(4 * x[0] + 6 * x[1] - 10 * k + 0.5)
-    assert _objective_lattice(m) == (2.0, 0.5)
-    m.minimize(4 * x[0] + y)  # costed continuous column
-    assert _objective_lattice(m) is None
-    m.minimize(4 * x[0] + 0.5 * x[1])  # non-integer coefficient
-    assert _objective_lattice(m) is None
-    m.minimize(x[0] * x[1] * x[2])  # cubic: beyond the degree-2 extractor
-    assert _objective_lattice(m) is None
-    m.minimize(dm.exp(k))  # nonpolynomial
-    assert _objective_lattice(m) is None
-    m.minimize(0.5 * x[0] * x[1])  # non-integer monomial coefficient
-    assert _objective_lattice(m) is None
-    m.minimize(x[0] * y + 2 * x[1])  # bilinear term on a continuous column
-    assert _objective_lattice(m) is None
-
-
-def test_detector_accepts_integer_quadratics():
-    m = dm.Model()
-    x = m.binary("x", shape=(3,))
-    k = m.integer("k", lb=-3, ub=3)
-    m.minimize(3 * x[0] * x[1] + 6 * k * k - 9 * x[2] + 1)
-    assert _objective_lattice(m) == (3.0, 1.0)
-    # Two half-coefficients on the same monomial sum to an integer one.
-    m.minimize(0.5 * x[0] * x[1] + 0.5 * x[1] * x[0] + 2 * x[2])
-    assert _objective_lattice(m) == (1.0, 0.0)
+    r = _knapsack(w, cap, maximize=maximize, offset=offset).solve(time_limit=30)
+    assert r.objective == pytest.approx(opt, abs=1e-6)
+    _assert_valid_bound(r, opt, maximize=maximize)
 
 
 def _bqp(Q, c, *, maximize: bool):
@@ -154,27 +104,30 @@ for _k in range(4):
 
 
 @pytest.mark.parametrize("Q, c, maximize", QCASES)
-def test_quadratic_differential_bound_against_enumeration(monkeypatch, Q, c, maximize):
+def test_binary_quadratic_against_enumeration(Q, c, maximize):
     opt = _bqp_brute(Q, c, maximize=maximize)
-    assert _objective_lattice(_bqp(Q, c, maximize=maximize)) is not None
-    monkeypatch.delenv("DISCOPT_SPATIAL_OBJ_LATTICE", raising=False)
-    off = _bqp(Q, c, maximize=maximize).solve(time_limit=30)
-    monkeypatch.setenv("DISCOPT_SPATIAL_OBJ_LATTICE", "1")
-    on = _bqp(Q, c, maximize=maximize).solve(time_limit=30)
-    for r in (off, on):
-        assert r.objective == pytest.approx(opt, abs=1e-6)
-    assert on.bound is not None
-    tol = 1e-6 * max(1.0, abs(opt))
-    if maximize:
-        assert on.bound >= opt - tol
-    else:
-        assert on.bound <= opt + tol
+    r = _bqp(Q, c, maximize=maximize).solve(time_limit=30)
+    assert r.objective == pytest.approx(opt, abs=1e-6)
+    _assert_valid_bound(r, opt, maximize=maximize)
 
 
-def test_rounding_slack_never_jumps_a_step_on_noise():
-    lbs = np.array([834.0 + 1e-9, 834.5, -834.5, 1e30, -np.inf, 833.9999999])
-    out = _round_bounds_to_lattice(lbs, 1.0, 0.0)
-    np.testing.assert_array_equal(out[:3], [834.0, 835.0, -834.0])
-    assert out[3] == 1e30 and out[4] == -np.inf
-    assert out[5] == 834.0
-    np.testing.assert_array_equal(_round_bounds_to_lattice(np.array([1.3]), 2.0, 0.5), [2.5])
+def test_flag_is_retired():
+    assert not hasattr(SolverTuning(), "spatial_obj_lattice")
+
+
+def test_issue_repro_bound_stays_valid():
+    rng = np.random.default_rng(1)
+    n = 30
+    w = rng.integers(10, 100, size=n).astype(float)
+    W = int(w.sum() / 2) + 0.5
+    m = dm.Model("ss")
+    x = m.binary("x", shape=(n,))
+    m.subject_to(w @ x <= W)
+    m.maximize(w @ x)
+    m.subject_to(x[0] * x[1] <= 1)
+    r = m.solve(time_limit=10)
+    if r.status == "optimal":
+        assert r.objective == pytest.approx(834.0)
+    if r.objective is not None:
+        assert r.objective <= 834.0 + 1e-6
+    _assert_valid_bound(r, 834.0, maximize=True)

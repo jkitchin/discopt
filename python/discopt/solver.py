@@ -3125,85 +3125,6 @@ def _evaluator_fingerprint(model: Model) -> "_EvaluatorFingerprint":
     return evaluator_fingerprint(model)
 
 
-def _objective_lattice(model: Model) -> Optional[tuple[float, float]]:
-    """``(g, c0)`` when every attainable objective value is ``c0 + k*g``, else ``None``.
-
-    #1731. Proven, never estimated: the objective must be a polynomial of degree
-    at most 2, every column in a nonzero term integer or binary, and every
-    monomial coefficient an exact integer (``float.is_integer`` below ``2**53``),
-    so ``g`` is their gcd and ``c0`` the constant -- a product of integers is an
-    integer, so a quadratic qualifies exactly as an affine objective does (QPLIB
-    holds 81 such instances with an integral oracle, MINLPLib 10). Stricter than
-    the Rust MILP detector, which rationalizes to a tolerance; a too-large ``g``
-    would prune the optimum, so anything short of exact refuses.
-    """
-    from discopt._relax.problem_classifier import (
-        _EXTRACTION_DECLINES,
-        _extract_linear_coefficients_sparse,
-        _extract_quadratic_terms,
-    )
-
-    if model._objective is None:
-        return None
-    n = sum(v.size for v in model._variables)
-    expr = model._objective.expression
-    # ``(columns, coefficient)`` for every monomial of the objective.
-    monomials: list[tuple[tuple[int, ...], float]]
-    try:
-        lin, c0 = _extract_linear_coefficients_sparse(expr, model, n)
-        monomials = [((j,), float(cj)) for j, cj in lin.items()]
-    except _EXTRACTION_DECLINES:
-        try:
-            q, c, c0 = _extract_quadratic_terms(expr, model, n)
-        except _EXTRACTION_DECLINES:
-            return None
-        # ``f = 0.5 x'Qx + c'x + c0`` with ``Q`` not necessarily symmetric: the
-        # coefficient of the monomial ``x_i x_j`` is half the sum of the cells
-        # that multiply it. Halving is exact in binary floating point and the
-        # cells are exactly-rounded ``fsum``s (#1397), summed here by ``fsum`` too.
-        cells: dict[tuple[int, int], list[float]] = {}
-        for (i, j), v in q.items():
-            cells.setdefault((min(i, j), max(i, j)), []).append(float(v))
-        monomials = [((j,), float(cj)) for j, cj in enumerate(c) if cj != 0.0]
-        monomials += [(ij, 0.5 * math.fsum(vs)) for ij, vs in cells.items()]
-    integral = np.zeros(n, dtype=bool)
-    off = 0
-    for v in model._variables:
-        if v.var_type in (VarType.BINARY, VarType.INTEGER):
-            integral[off : off + v.size] = True
-        off += v.size
-    g = 0
-    for cols, cj in monomials:
-        if cj == 0.0:
-            continue
-        if not all(integral[k] for k in cols):
-            return None
-        if not cj.is_integer() or abs(cj) >= 2.0**53:
-            return None
-        g = math.gcd(g, int(abs(cj)))
-    if g == 0 or not math.isfinite(float(c0)):
-        return None
-    return float(g), float(c0)
-
-
-def _round_bounds_to_lattice(lbs: np.ndarray, g: float, offset: float) -> np.ndarray:
-    """Round finite node lower bounds UP onto ``offset + k*g`` (#1731).
-
-    Every attainable objective value is on the lattice, so the smallest lattice
-    point ``>= lb`` is a valid bound wherever ``lb`` is. The ``1e-6`` slack (in
-    lattice units, plus ``1e-9`` relative) keeps a bound that overshoots a
-    lattice point by float noise from jumping a whole step -- which is the one
-    way this could cut off the optimum. Infinite and sentinel bounds (``>= 1e29``)
-    pass through unchanged.
-    """
-    out = np.array(lbs, dtype=np.float64, copy=True)
-    ok = np.isfinite(out) & (np.abs(out) < 1e29)
-    if ok.any():
-        z = (out[ok] - offset) / g
-        out[ok] = offset + g * np.ceil(z - (1e-6 + 1e-9 * np.abs(z)))
-    return out
-
-
 def _make_evaluator(model: Model):
     """Create or reuse a cached NLP evaluator for the model.
 
@@ -16120,12 +16041,6 @@ def solve_model(
     _obj_negate = (
         model._objective is not None and model._objective.sense == _ObjectiveSense.MAXIMIZE
     )
-    # #1731: the objective's lattice in the tree's internal (minimization) sense.
-    _obj_lattice: Optional[tuple[float, float]] = None
-    if _tuning().spatial_obj_lattice:
-        _lat = _objective_lattice(model)
-        if _lat is not None:
-            _obj_lattice = (_lat[0], -_lat[1] if _obj_negate else _lat[1])
 
     # --- Default Ipopt options ---
     opts = dict(ipopt_options) if ipopt_options else {}
@@ -20272,8 +20187,6 @@ def solve_model(
         # here keeps the two flags consistent rather than relying on the order the
         # tree happens to apply them in.
         _exclusion_mask |= node_infeasible_mask
-        if _obj_lattice is not None:
-            result_lbs = _round_bounds_to_lattice(result_lbs, *_obj_lattice)
         t_rust_start = time.perf_counter()
         if _requeue_mask is not None and _requeue_mask.any():
             # A requeued node is OPEN again, so no result may be imported for it

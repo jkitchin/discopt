@@ -1,0 +1,38 @@
+records 216  paired instances 108
+executed soundness checks 213
+problems:
+   ('QPLIB_3361', 'on', 'crash', 1, 'hon/discopt/modeling/core.py", line 5471 in wrapper\n  File "/private/tmp/claude-501/-Users-jkitchin-projects-discopt/3881ef3a-e396-451a-a693-a88367917db3/scratchpad/panel/one.py", line 45 in <module>\n')
+   ('QPLIB_3709', 'off', 'crash', 1, 'hon/discopt/modeling/core.py", line 5471 in wrapper\n  File "/private/tmp/claude-501/-Users-jkitchin-projects-discopt/3881ef3a-e396-451a-a693-a88367917db3/scratchpad/panel/one.py", line 45 in <module>\n')
+   ('QPLIB_3709', 'on', 'crash', 1, 'hon/discopt/modeling/core.py", line 5471 in wrapper\n  File "/private/tmp/claude-501/-Users-jkitchin-projects-discopt/3881ef3a-e396-451a-a693-a88367917db3/scratchpad/panel/one.py", line 45 in <module>\n')
+
+lattice rounding called (ON) on 21; changed a bound on 10; called with flag OFF on 0 (must be 0)
+routes (OFF): {'native-milp: discopt mon': 1, 'mip-nlp/lp_nlp_bb: miqp ': 4, 'highs-milp: verified HiG': 19, 'native-spatial: discopt ': 47, 'spatial-bb: discopt spat': 35, '': 1, 'highs-milp: unverified H': 1}
+
+per-instance where rounding fired:
+name             off st    on st off nodes  on nodes off wall  on wall  off bnd / on bnd / ref
+QPLIB_2166    time_limittime_limit         3         3     60.2     61.4  0.0 / 0.0 / 83.0
+QPLIB_2167     feasible feasible       569       633     60.2     60.2  0.0 / 0.0 / 6.0
+QPLIB_2168     feasible feasible        31        15     60.5     60.7  0.0 / 0.0 / 36.0
+QPLIB_2169     feasible feasible        31        31     60.6     60.9  0.0 / 0.0 / 29.0
+QPLIB_2170    time_limittime_limit         3         3     60.1     60.3  0.0 / 0.0 / 6.0
+QPLIB_2171     feasible feasible       125       189     60.3     60.5  0.0 / 0.0 / 25.0
+QPLIB_2173     feasible feasible        57        15     63.4     60.9  0.0 / 0.0 / 11.0
+QPLIB_2181     feasible feasible       159       159     60.1     60.9  0.0 / 0.0 / 22.0
+QPLIB_2187     feasible feasible       191       223     60.4     60.5  0.0 / 0.0 / 13.0
+QPLIB_2192     feasible feasible       159        63     60.3     60.5  0.0 / 0.0 / 10.0
+QPLIB_2195     feasible feasible        95       159     60.3     60.4  0.0 / 0.0 / 9.0
+QPLIB_2202     feasible feasible       169        17     60.4     60.3  0.0 / 0.0 / 30.0
+QPLIB_2203     feasible feasible       201       169     60.3     60.8  0.0 / 0.0 / 33.0
+QPLIB_2204     feasible feasible         3         3     60.2     60.1  0.0 / 0.0 / 38.0
+QPLIB_2206     feasibletime_limit        15         3     60.8     60.1  0.0 / 0.0 / 13.0
+QPLIB_3693     feasible feasible        31        31     62.8     60.1  3172.0000000006276 / 3172.0 / 1154.0
+QPLIB_3850     feasible feasible        15         7     60.4     60.6  3368.000000000689 / 3368.0 / 1198.0
+QPLIB_5881     feasible feasible        31        31     64.1     63.6  26715.00000003205 / 26715.0 / 13067.0
+QPLIB_5882     feasible feasible         1         3     81.6     61.6  None / 225274.0 / 25388.0
+QPLIB_5909     feasible feasible       159       159     63.0     63.3  145384.00000003583 / 145384.0 / 35726.0
+sonet25v6     time_limit feasible         1        63     83.5     61.3  None / -1337280.0 / -30660.0
+
+wall ON/OFF geomean over fired: 0.971 (log sd 0.088, n=21)
+off: gap_certified 5/108
+on: gap_certified 6/108
+non-fired instances whose nodes/status differ ON vs OFF (timing noise expected only on time-limited runs): 33 ['sonetgr17', 'sonet24v5', 'QPLIB_0752', 'QPLIB_2055', 'QPLIB_2357', 'QPLIB_2512', 'QPLIB_3307', 'QPLIB_3506', 'QPLIB_3565', 'QPLIB_3587']
