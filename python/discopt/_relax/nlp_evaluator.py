@@ -801,7 +801,13 @@ class NLPEvaluator:
             )
 
             pattern = self.sparsity_pattern
-            if pattern is not None and should_use_sparse(pattern):
+            affine_J = getattr(self, "_affine_jacobian", None)
+            if pattern is not None and affine_J is not None:
+                # #1720: every body is affine (see ``_affine_jacobian_mask``), so
+                # the Jacobian is this constant. Coloring would form ``J^T J`` --
+                # ~2e9 entries for a 1000x1000 transport LP -- to recover it.
+                self._sparse_jac_fn = lambda _x, _J=affine_J: _J.copy()
+            elif pattern is not None and should_use_sparse(pattern):
                 colors, n_colors = compute_coloring(pattern)
                 seed = make_seed_matrix(colors, n_colors, pattern.n_vars)
                 # make_sparse_jac_fn expects fn(x); the legacy single-arg
@@ -916,9 +922,8 @@ class NLPEvaluator:
         finds nonlinear variable pairs from expression structure alone and
         therefore remains correct for vector-body constraints.
         """
-        import scipy.sparse as sp
 
-        from discopt._relax.sparsity import SparsityPattern, detect_sparsity_dag
+        from discopt._relax.sparsity import detect_sparsity_dag
 
         n = self._n_variables
         m = self._n_constraints
@@ -928,6 +933,18 @@ class NLPEvaluator:
         dag_pattern = detect_sparsity_dag(self._model)
         if dag_pattern is None:
             return None
+
+        # #1720: the probe below materialises a dense ``(m, n)`` Jacobian per probe
+        # and, inside ``jacfwd``, an ``(n, n)`` tangent basis -- 8 TB for a
+        # 1000x1000 array variable, which killed a solve *after* HiGHS had solved
+        # it. When every body is affine its Jacobian is constant and the
+        # array-affine walk reads it exactly in O(nnz); that nonzero mask is the
+        # one every probe would return. Only above the dense-compile limit, so
+        # small and medium models keep the probe exactly as before.
+        if m * n > _DENSE_JACOBIAN_COMPILE_LIMIT:
+            affine_mask = self._affine_jacobian_mask()
+            if affine_mask is not None:
+                return self._pattern_from_mask(affine_mask, dag_pattern)
 
         lb, ub = self.variable_bounds
         lb_f = np.where(np.isfinite(lb), lb, -1.0).astype(np.float64)
@@ -958,6 +975,47 @@ class NLPEvaluator:
             mask |= jac_dense != 0.0
 
         rows, cols = np.nonzero(mask)
+        return self._pattern_from_mask((rows, cols), dag_pattern)
+
+    def _affine_jacobian_mask(self):
+        """``(rows, cols)`` of the nonzero constant Jacobian entries when every
+        source constraint body is affine, else ``None`` (#1720).
+
+        Also records that constant Jacobian (CSC, the type
+        ``evaluate_sparse_jacobian`` documents) as ``_affine_jacobian``. A
+        ``Parameter`` makes the walk decline: this evaluator reads parameters
+        at call time, and a cached constant would go stale on an update."""
+        import scipy.sparse as sp
+
+        from discopt._relax.affine_array import NotAffineError, affine_of
+
+        n = self._n_variables
+        blocks = []
+        try:
+            for con in self._source_constraints:
+                aff = affine_of(con.body, self._model._flat_var_offset, n, allow_parameters=False)
+                blocks.append(aff.M if aff.M is not None else sp.csr_matrix((aff.size, n)))
+        except NotAffineError:
+            return None
+        if not blocks:
+            return None
+        J = sp.vstack(blocks, format="coo")
+        if J.shape != (self._n_constraints, n):
+            return None
+        keep = J.data != 0.0
+        self._affine_jacobian = sp.csc_matrix(
+            (J.data[keep], (J.row[keep], J.col[keep])), shape=J.shape, dtype=np.float64
+        )
+        return J.row[keep], J.col[keep]
+
+    def _pattern_from_mask(self, mask_rc, dag_pattern):
+        import scipy.sparse as sp
+
+        from discopt._relax.sparsity import SparsityPattern
+
+        n = self._n_variables
+        m = self._n_constraints
+        rows, cols = mask_rc
         nnz = len(rows)
         if nnz == 0:
             return None
@@ -966,6 +1024,7 @@ class NLPEvaluator:
             (np.ones(nnz, dtype=bool), (rows, cols)),
             shape=(m, n),
         )
+        nnz = int(jac_csr.nnz)
         hess_csr = dag_pattern.hessian_sparsity
         hess_nnz = int(hess_csr.nnz) if hess_csr is not None else 0
 
