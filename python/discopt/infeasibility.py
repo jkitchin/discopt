@@ -146,10 +146,17 @@ def _solve_is_infeasible(
     proven ``"infeasible"`` status; ``conclusive`` is False when the solver could
     neither prove infeasibility nor find a feasible point.
     """
+    # Deferred: ``import discopt`` loads this module eagerly and must not pull in
+    # the solver with it.
+    from discopt.solver import probe_relaxed_bounds
+
     saved_cons = model._constraints
     saved_obj = model._objective
     model._constraints = active_constraints
     model._objective = Objective(Constant(0.0), ObjectiveSense.MINIMIZE)
+    # Every (var, element, side) this probe sets to the ±_INF sentinel, so the
+    # solve's large-bound warning does not blame the user for them (#1723).
+    marked: set[tuple[int, int, str]] = set()
     for item in relaxed_bounds:
         # ``(vi, side)`` relaxes the whole variable; ``(vi, side, flat_j)`` one element.
         vi, side = item[0], item[1]
@@ -157,9 +164,11 @@ def _solve_is_infeasible(
         cur = np.array(v.lb if side == "lower" else v.ub, dtype=np.float64)
         if len(item) == 2:
             cur = np.full_like(cur, -_INF if side == "lower" else _INF)
+            marked.update((vi, j, side) for j in range(v.size))
         else:
             cur = np.array(np.broadcast_to(cur, v.shape), dtype=np.float64)
             cur.reshape(-1)[item[2]] = -_INF if side == "lower" else _INF
+            marked.add((vi, item[2], side))
         if side == "lower":
             v.lb = cur
         else:
@@ -167,7 +176,8 @@ def _solve_is_infeasible(
     try:
         # ``solve`` is typed ``SolveResult | Iterator`` (streaming overload); the
         # non-streaming call returns a SolveResult with ``.status``.
-        status = getattr(model.solve(time_limit=time_limit), "status", "error")
+        with probe_relaxed_bounds(model, marked):
+            status = getattr(model.solve(time_limit=time_limit), "status", "error")
     except Exception as exc:  # noqa: BLE001 - a crashed feasibility probe is inconclusive
         logger.debug("IIS feasibility probe raised: %s", exc)
         status = "error"
