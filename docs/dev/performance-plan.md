@@ -10794,3 +10794,95 @@ showed it was not: `Python fast` failed 11 of 15,246 tests.
   work. Until then, `test_1278_bound_provenance`'s corpus test stays
   load-sensitive, as on `main`, through the root LP probe.
 
+
+## 78. #1712 follow-ups: the row-less node LP, and the fold's second graduation (2026-10-17)
+
+### 78.1 `trusted_vertex` on asin/acos: the LP has no rows
+
+§77.6 said the asin/acos nodes certify only through `trusted_vertex` because "the
+generic relaxation path computes no Neumaier-Shcherbina bound on a successful
+solve". That is true but does not explain why those nodes reach the generic path.
+Instrumenting `MilpRelaxationModel.solve` on `min`/`max` of `asin(x)` and `acos(x)`
+showed the reason: every trusted node's LP has **no rows** (`_A_ub is None`). The
+relaxation is a cost over a box (`c = [0, -1]`, the epigraph column bounded by the
+function's range). The warm simplex, which is the path that computes the NS bound,
+requires rows, so the solve fell through to `solve_milp` and `_certify` found
+`safe_bound=None`.
+
+Over a box the LP optimum is closed form: `sum_j min(c_j lo_j, c_j hi_j)`. This is
+also the NS bound for the zero dual, so for a row-less LP it is exact.
+`_rowless_lp_safe_bound` computes it with each product, the `fsum` and the offset
+rounded one ulp down. It returns `None` when a nonzero cost has no finite bound on
+its improving side. The generic path attaches it as `safe_bound` on an optimal
+row-less pure LP. Tests: never above the exact rational optimum on 2,000 random
+boxes and always within 1e-9 relative of it; all four asin/acos solves certify
+with `{'ns_safe_bound': n}` and no `trusted_vertex`.
+
+Reach of the remaining arm. The smoke suite (2,282 passed) and the full fast suite
+(15,146 passed, flag ON) were each run with a recorder on `BOUND_PROVENANCE`.
+`trusted_vertex` fired once in each run: in
+`test_1712_rigorous_root_bound.py::test_rigorous_only_declines_the_trusted_vertex`,
+whose 5-row free-column LP is built to reach it. Nothing else in the suite
+reaches the arm. It is kept: it is a free-variable conditioning path, and this
+measurement alone does not justify a behaviour change for models outside the
+suite.
+
+**Retraction (§77.6, CLAUDE.md §11).** "`test_1278_bound_provenance`'s corpus
+test stays load-sensitive, as on `main`" was measured on `main` *before* #1719
+merged. #1719's root-fallback change (`rigorous_only=True`) is now on `main`. A
+25-instance probe of that `main` under 4-way CPU load recorded 32 certified
+nodes, all `ns_safe_bound`. With this section's change, the test passed 2/2
+under 4-way load (159 s, 163 s). The load sensitivity was the #654 fallback,
+and #1719 closed it.
+
+### 78.2 `DISCOPT_SUM_CANONICAL` graduated
+
+§77.6 named the exit: the three passes that refuse `dm.sum(C * x)` must read it as
+they read the per-element sum, and then a panel must reach them.
+`modeling.core.affine_array_sum` recognizes the full reduction `dm.sum(x)` or
+`dm.sum(C * x)` with `C.shape == x.shape`; it rejects broadcasting, axis
+reductions and `Parameter` coefficients. The three passes now use it:
+
+- **Interval Hessian** (`interval_ad._affine_array_sum_ad`): the value uses the
+  term walk's interval arithmetic entry by entry, the gradient entries are the
+  exact coefficients, and the Hessian is zero. Before, it raised on the array
+  leaf.
+- **Sparse linear and quadratic extractors** (`problem_classifier`): one
+  coefficient per entry. This puts the scalar-form sum of squares back into the
+  affine-square proof, and so back onto `pounce:qp-ipm`.
+- **Binary-multilinear expansion**: the sum is read as one linear polynomial in
+  each walker (gate, expand, addends, interval). This also removes a quadratic
+  accumulate. On `test_binary_multilinear_work_budget`'s 200-addend fixture the
+  4,800-term *linear objective* alone exhausted the 1e7 work budget (4,472 adds,
+  1+2+...+4,472). The fixture now builds that objective with
+  `SumOverExpression` directly so it keeps measuring the accumulate.
+
+Two fixtures relied on `dm.sum` staying term by term; both now build that shape
+explicitly. `test_issue_1617`'s deep model uses Python's `sum`.
+
+Each pass is tested on the hand-written vectorized form against the term-by-term
+form (`test_1712_affine_array_sum.py`), independent of the flag.
+
+**Full suite.** The fast suite with `DISCOPT_SUM_CANONICAL=1`: 15,146 passed,
+7 failed. All 7 are missing packages in the measuring container (3 `cyipopt`,
+4 `sympy`), the same 7 that fail with the flag off.
+
+**Panel** (26 instances, separate processes, OFF/ON interleaved, 60 s). The §77.3
+families are joined by four that reach the passes above: least squares 40x35 in
+scalar form, binary cubic (48), `sin` of a wide sum times `y` (40), and a convex
+`exp` row over a wide sum (40), each with seeds 1 and 2. Every ON run folded at
+least once; every OFF run folded nothing.
+
+- **Cert-clean:** 0 status or certificate differences, objective drift exactly
+  0, all 26 ON incumbents verified on the *unfolded* model, and no ON bound
+  crossing the OFF objective. Node counts are identical except on the two
+  `trig_wide` runs, which hit the time limit uncertified in both arms. There ON
+  explored 1.5% and 5.0% more nodes and finished with a slightly tighter bound
+  (-0.848394 vs -0.848418; -0.844697 vs -0.844809).
+- **Net-positive:** panel wall 130.6 s -> 129.5 s (flat: dominated by the four
+  60 s time-limited runs). On the issue's 300x300 model, 3 interleaved runs per
+  arm, load average ~1: `solve()` 9.01 s (sd 0.15) -> 2.72 s (sd 0.15). The
+  build costs 1.07 s -> 1.57 s, so the total is 10.08 s -> 4.29 s. Objective,
+  certificate and route (`highs-lp`) are identical.
+
+Default ON; `=0` restores the term-by-term sum.
