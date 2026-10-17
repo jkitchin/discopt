@@ -440,6 +440,19 @@ def _compute_var_offset(var: Variable, model: Model) -> int:
     return model._flat_var_offset(var)
 
 
+# #1720: the dense autodiff LP extractor builds a dense ``(rows, n)`` Jacobian and
+# then dense ``A`` rows of the same size; peak memory is a small multiple of this.
+# A 1000x1000 transport LP is 2000 x 1,000,000 float64 = 16 GB of Jacobian, and it
+# was SIGKILLed at ~38 GB. Beyond this budget the extractor refuses loudly. Not a
+# tuning knob: a model this size is never meant to reach a dense extractor, and the
+# refusal is the signal that a sparse rung is missing a construct.
+_AUTODIFF_DENSE_MAX_BYTES = 2 * 1024**3
+
+
+class LPExtractionTooLargeError(RuntimeError):
+    """The only extractor that accepts the model would need a dense matrix too large to build."""
+
+
 class _NotLinearError(Exception):
     """Raised when an expression is not linear."""
 
@@ -2121,7 +2134,149 @@ def extract_lp_data(model: Model, *, for_qp: bool = False) -> LPData:
     if _tape_lp is not None:
         return _tape_lp
 
+    # #1720: the tape declines a body too dense for its node budget
+    # (``_MAX_TAPE_NODES``) -- exactly the array-native form (``sum(C * x)``,
+    # ``sum(x, axis=k) <= v``) that is cheapest to read sparsely. The array-affine
+    # walk reads it as sparse matrices in O(nnz). It sits *after* the tape so that
+    # every model an earlier rung already handled is extracted exactly as before.
+    _vec_lp = _extract_lp_data_vectorized(model, for_qp=for_qp)
+    if _vec_lp is not None:
+        return _vec_lp
+
     return _extract_lp_data_autodiff(model, for_qp=for_qp)
+
+
+def _extract_lp_data_vectorized(model: Model, *, for_qp: bool = False) -> LPData | None:
+    """Extract LP standard form with the array-native affine walk, or ``None`` (#1720).
+
+    :func:`discopt._relax.affine_array.affine_of` maps each constraint body and
+    the objective to its exact affine map ``M @ x + b`` with ``M`` a scipy CSR
+    matrix, so ``sum(C * x)`` with an ndarray ``C`` and ``sum(x, axis=k) <= v``
+    become sparse-matrix products on their nonzeros -- no per-element expansion
+    (the tape's node budget) and no dense Jacobian (the JAX rung, which needed
+    16 GB for the 1000x1000 transport LP of #1720 and was SIGKILLed).
+
+    An array-valued body fans out into one row per element in C order, rows
+    ordered equalities first and then inequalities, each in constraint order --
+    the layout :func:`_extract_lp_data_tape` produces, so the two rungs agree row
+    for row on any model both accept.
+
+    Exact by construction: the walk evaluates nothing numerically and refuses
+    (``NotAffineError``) on any construct it cannot represent, including a
+    product of two variable-carrying operands, so a non-affine body is a decline,
+    never a linearisation. Returns ``None`` on any decline; the caller falls back.
+    """
+    from discopt._relax.affine_array import NotAffineError, affine_of
+    from discopt.modeling.core import ObjectiveSense
+
+    n_orig = sum(v.size for v in model._variables)
+    assert model._objective is not None
+    if getattr(model, "_builder_linear_blocks", None):
+        # Builder-resident rows (#840) are not in ``model._constraints``; walking
+        # only that list would silently drop them -- a larger feasible set.
+        logger.debug("LP vectorized extraction declined: model has builder-resident rows")
+        return None
+
+    def _offset(var: Variable) -> int:
+        return _compute_var_offset(var, model)
+
+    try:
+        obj = affine_of(model._objective.expression, _offset, n_orig)
+        if obj.size != 1:
+            logger.debug("LP vectorized extraction declined: objective has shape %s", obj.shape)
+            return None
+        eq_blocks: list[tuple[Any, str]] = []
+        ineq_blocks: list[tuple[Any, str]] = []
+        for con in model._constraints:
+            if not isinstance(con, Constraint):
+                continue
+            if con.sense not in ("==", "<=", ">="):
+                logger.debug("LP vectorized extraction declined: unsupported sense %r", con.sense)
+                return None
+            aff = affine_of(con.body, _offset, n_orig)
+            (eq_blocks if con.sense == "==" else ineq_blocks).append((aff, con.sense))
+    except NotAffineError as exc:
+        logger.debug("LP vectorized extraction declined: %s", exc)
+        return None
+
+    import scipy.sparse as _sp
+
+    def _rows(aff) -> Any:
+        if aff.M is None:
+            return _sp.csr_matrix((aff.size, n_orig), dtype=np.float64)
+        return aff.M
+
+    blocks = eq_blocks + ineq_blocks
+    if blocks:
+        A_orig = _sp.vstack([_rows(aff) for aff, _ in blocks], format="csr")
+        body0 = np.concatenate([aff.b for aff, _ in blocks])
+    else:
+        A_orig = _sp.csr_matrix((0, n_orig), dtype=np.float64)
+        body0 = np.zeros(0, dtype=np.float64)
+    c_vec = (
+        np.zeros(n_orig, dtype=np.float64)
+        if obj.M is None
+        else np.asarray(obj.M.toarray(), dtype=np.float64).reshape(-1)
+    )
+    obj_const = float(obj.b[0])
+
+    # NaN/inf coefficients are a defect in the data, not something to hand an LP
+    # solver; decline so the fallback (and its own checks) sees the model.
+    if not (
+        np.all(np.isfinite(A_orig.data))
+        and np.all(np.isfinite(body0))
+        and np.all(np.isfinite(c_vec))
+        and math.isfinite(obj_const)
+    ):
+        logger.debug("LP vectorized extraction declined: non-finite coefficient")
+        return None
+
+    n_eq = sum(aff.size for aff, _ in eq_blocks)
+    senses = ["eq"] * n_eq + [
+        "le" if sense == "<=" else "ge" for aff, sense in ineq_blocks for _ in range(aff.size)
+    ]
+    m_rows = len(senses)
+    block = _logical_block(
+        senses,
+        n_orig,
+        eq_logicals=False if for_qp else None,
+        inf_value=np.inf,
+    )
+    n_slack = block.n_logical
+    n_total = n_orig + n_slack
+
+    # body <= 0 becomes body + s = 0; body >= 0 becomes body - s = 0; s >= 0.
+    # An equality's logical (row-logical layout only) is fixed at 0 by its box.
+    coo = A_orig.tocoo()
+    slack_rows, slack_cols, slack_vals = block.entries()
+    A_eq = _materialise_A(
+        np.concatenate([coo.row, slack_rows]),  # type: ignore[arg-type]
+        np.concatenate([coo.col, slack_cols]),  # type: ignore[arg-type]
+        np.concatenate([coo.data, slack_vals]),  # type: ignore[arg-type]
+        m_rows,
+        n_total,
+    )
+    b_eq = -body0
+
+    x_l_orig, x_u_orig = _get_variable_bounds(model)
+    c_full = np.concatenate([c_vec, np.zeros(n_slack, dtype=np.float64)])
+    x_l = np.concatenate([x_l_orig, block.lb])
+    x_u = np.concatenate([x_u_orig, block.ub])
+
+    # Handle objective sense: negate for maximization (solvers always minimize).
+    if model._objective.sense == ObjectiveSense.MAXIMIZE:
+        c_full = -c_full
+        obj_const = -obj_const
+
+    return LPData(
+        c=c_full,  # type: ignore[arg-type]
+        A_eq=A_eq,  # type: ignore[arg-type]
+        b_eq=b_eq,  # type: ignore[arg-type]
+        x_l=x_l,  # type: ignore[arg-type]
+        x_u=x_u,  # type: ignore[arg-type]
+        obj_const=obj_const,
+        row_sense=block.row_sense,
+    )
 
 
 def _extract_lp_data_tape(model: Model, *, for_qp: bool = False) -> LPData | None:
@@ -2348,11 +2503,24 @@ def _extract_lp_data_autodiff(model: Model, *, for_qp: bool = False) -> LPData:
     eq_blocks: list[tuple[jnp.ndarray, jnp.ndarray]] = []  # (J, body0)
     ineq_blocks: list[tuple[jnp.ndarray, jnp.ndarray, str]] = []  # (J, body0, sense)
 
+    dense_rows = 0
     for con in constraints:
         con_fn = compile_constraint(con, model)
         # Flatten any vector / matrix constraint body into a length-k vector;
         # each component becomes its own LP row.
         body0 = jnp.asarray(con_fn(x_zero), dtype=jnp.float64).reshape(-1)
+        # #1720: refuse before the dense Jacobian exists, not after the kernel
+        # kills the process for it. Checked per constraint, before its
+        # ``jax.jacobian``, so the refusal costs one body evaluation.
+        dense_rows += int(body0.shape[0])
+        if dense_rows * n_orig * 8 > _AUTODIFF_DENSE_MAX_BYTES:
+            raise LPExtractionTooLargeError(
+                f"LP extraction fell through to the dense autodiff extractor, which "
+                f"would build a dense Jacobian of at least {dense_rows} x {n_orig} "
+                f"float64 (> {_AUTODIFF_DENSE_MAX_BYTES / 2**30:.0f} GiB). Every sparse "
+                f"extractor declined this model; run with logging at DEBUG for "
+                f"'discopt._relax.problem_classifier' to see why each one did."
+            )
         jac_raw = jax.jacobian(lambda x, _f=con_fn: jnp.asarray(_f(x)).reshape(-1))(x_zero)
         jac = jnp.asarray(jac_raw, dtype=jnp.float64).reshape(body0.shape[0], n_orig)
         if con.sense == "==":

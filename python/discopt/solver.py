@@ -26693,6 +26693,45 @@ def _sparse_constraint_jacobian(ev: Any, x: np.ndarray) -> Any:
     return fn(x) if fn is not None else ev.evaluate_jacobian(x)
 
 
+def _affine_constraint_rows(
+    model: Model, n_orig: int
+) -> Optional[tuple[Any, np.ndarray, list[tuple[int, int, Any]]]]:
+    """``(J, g(0), row_map)`` of an all-affine constraint set, or ``None`` (#1720).
+
+    Read off :func:`discopt._relax.affine_array.affine_of`: exact, sparse, O(nnz),
+    and in the evaluator's row layout -- one row per element of each body in C
+    order, constraints in ``model._constraints`` order -- so ``row_map`` has the
+    shape :meth:`constraint_row_map` returns. ``None`` when any body is not affine
+    or the model carries builder-resident rows (#840), which the walk does not
+    see; the caller then uses an evaluator.
+    """
+    import scipy.sparse as sp
+
+    from discopt._relax.affine_array import NotAffineError, affine_of
+
+    if getattr(model, "_builder_linear_blocks", None):
+        return None
+    blocks = []
+    row_map: list[tuple[int, int, Any]] = []
+    start = 0
+    try:
+        for con in model._constraints:
+            if not isinstance(con, Constraint):
+                continue
+            aff = affine_of(con.body, model._flat_var_offset, n_orig)
+            M = aff.M if aff.M is not None else sp.csr_matrix((aff.size, n_orig))
+            blocks.append((M, aff.b))
+            row_map.append((start, start + aff.size, con))
+            start += aff.size
+    except NotAffineError:
+        return None
+    if not blocks:
+        return _csr_rows(sp.csr_matrix((0, n_orig)), n_orig), np.zeros(0), row_map
+    J = _csr_rows(sp.vstack([M for M, _ in blocks], format="csr"), n_orig)
+    g0 = np.concatenate([b for _, b in blocks]).astype(np.float64)
+    return J, g0, row_map
+
+
 def _matched_row_constraint_duals(
     model: Model,
     *,
@@ -26745,20 +26784,37 @@ def _matched_row_constraint_duals(
         return None
     if row_dual.size != n_ub + n_eq or n_ub + n_eq == 0:
         return None
-    ev = _make_evaluator(model)
-    m_ev = int(ev.n_constraints)
-    if m_ev == 0:
-        return None
-    if int(ev.n_variables) != n_orig:
-        return None
-    x0 = np.zeros(n_orig, dtype=np.float64)
-    J = _csr_rows(_sparse_constraint_jacobian(ev, x0), n_orig)
-    if J.nnz > _ROW_MATCH_MAX_NNZ:
-        return None
-    g0 = np.asarray(ev.evaluate_constraints(x0), dtype=np.float64).reshape(-1)
-    # Row bounds from the row map itself: ``_infer_constraint_bounds`` covers only
-    # ``model._constraints``, not the builder rows the evaluator appends (#840).
-    row_map = ev.constraint_row_map()
+    from discopt._tape_nlp_evaluator import build_evaluator
+
+    # The tape evaluator when it represents the model. When it does not, the JAX
+    # evaluator's Jacobian of an array-valued body goes through a dense ``jacfwd``
+    # sparsity trace -- an ``(n, n)`` tangent basis, 8 TB on the 1000x1000
+    # transport LP of #1720, after HiGHS had already solved it. The constraints of
+    # an LP/QP are affine, so read ``J`` and ``g(0)`` exactly off the array-affine
+    # walk instead, and build the JAX evaluator only if that declines too.
+    ev = build_evaluator(model, lambda: None)
+    affine_rows = _affine_constraint_rows(model, n_orig) if ev is None else None
+    if affine_rows is not None:
+        J, g0, row_map = affine_rows
+        m_ev = int(J.shape[0])
+        if m_ev == 0 or J.nnz > _ROW_MATCH_MAX_NNZ:
+            return None
+    else:
+        if ev is None:
+            ev = _make_evaluator(model)
+        m_ev = int(ev.n_constraints)
+        if m_ev == 0:
+            return None
+        if int(ev.n_variables) != n_orig:
+            return None
+        x0 = np.zeros(n_orig, dtype=np.float64)
+        J = _csr_rows(_sparse_constraint_jacobian(ev, x0), n_orig)
+        if J.nnz > _ROW_MATCH_MAX_NNZ:
+            return None
+        g0 = np.asarray(ev.evaluate_constraints(x0), dtype=np.float64).reshape(-1)
+        # Row bounds from the row map itself: ``_infer_constraint_bounds`` covers only
+        # ``model._constraints``, not the builder rows the evaluator appends (#840).
+        row_map = ev.constraint_row_map()
     cl = np.full(m_ev, np.nan)
     cu = np.full(m_ev, np.nan)
     for start, stop, con in row_map:
