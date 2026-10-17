@@ -463,6 +463,18 @@ def _has_bilinear_param_var(expr, param_names: set[str]) -> bool:
             expr.right, param_names
         )
     if isinstance(expr, (MatMulExpression,)):
+        # #1726: RO-1 for ``p @ x`` / ``x @ p``. It is the same coefficient-times-
+        # variable product as ``p * x`` and carries the same hazard: sign-tracking
+        # replaces ``p`` by ONE corner of its box, which protects the row only when
+        # ``x >= 0``. Without this test ``a @ x >= 10`` with a sign-indefinite ``x``
+        # got a non-counterpart (worst case 0 against a required 10) while the
+        # equivalent ``sum(a * x)`` was routed correctly.
+        if isinstance(expr.left, Parameter) and expr.left.name in param_names:
+            if _contains_variable(expr.right) and not _var_provably_nonneg(expr.right):
+                return True
+        if isinstance(expr.right, Parameter) and expr.right.name in param_names:
+            if _contains_variable(expr.left) and not _var_provably_nonneg(expr.left):
+                return True
         return _has_bilinear_param_var(expr.left, param_names) or _has_bilinear_param_var(
             expr.right, param_names
         )
