@@ -213,7 +213,8 @@ class AffineEvaluator:
         return -grad if self._negate else grad
 
     def evaluate_constraints(self, x: np.ndarray) -> np.ndarray:
-        return np.asarray(self._J @ self._x(x), dtype=np.float64) + self._g0
+        g: np.ndarray = np.asarray(self._J @ self._x(x), dtype=np.float64) + self._g0
+        return g
 
     def evaluate_sparse_jacobian(self, x: np.ndarray) -> Any:
         self._x(x)
