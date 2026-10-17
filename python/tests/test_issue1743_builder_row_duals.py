@@ -104,13 +104,35 @@ def test_highs_duals_unchanged_and_no_evaluator_built(monkeypatch):
 
     import discopt._tape_nlp_evaluator as tne
 
-    def _boom(*_a, **_k):
-        raise AssertionError("an evaluator was built for post-solve dual recovery")
+    # Only dual recovery is guarded: incumbent verification builds its own
+    # evaluator and is not what this issue is about.
+    inside = {"depth": 0, "calls": 0}
+    real_matched = solver_mod._matched_row_constraint_duals
+    real_build, real_make = tne.build_evaluator, solver_mod._make_evaluator
 
-    monkeypatch.setattr(tne, "build_evaluator", _boom)
-    monkeypatch.setattr(solver_mod, "_make_evaluator", _boom)
+    def _matched(*a, **k):
+        inside["depth"] += 1
+        inside["calls"] += 1
+        try:
+            return real_matched(*a, **k)
+        finally:
+            inside["depth"] -= 1
+
+    def _guard(real):
+        def _wrapped(*a, **k):
+            if inside["depth"]:
+                raise AssertionError("an evaluator was built for post-solve dual recovery")
+            return real(*a, **k)
+
+        return _wrapped
+
+    monkeypatch.setattr(solver_mod, "_matched_row_constraint_duals", _matched)
+    monkeypatch.setattr(tne, "build_evaluator", _guard(real_build))
+    monkeypatch.setattr(solver_mod, "_make_evaluator", _guard(real_make))
     got = _solve_duals(_per_element_transport(5)).constraint_duals
 
-    assert set(got) == set(want) and len(got) == 10
+    assert inside["calls"] >= 1  # the probe fired: duals came through the matcher
+    assert set(got) == set(want)
+    assert {f"{f}_{i}" for f in ("sup", "dem") for i in range(5)} <= set(got)
     for name in want:
         np.testing.assert_allclose(got[name], want[name], rtol=1e-12, atol=1e-12)
