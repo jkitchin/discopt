@@ -197,6 +197,9 @@ def test_six_column_seed_965_is_not_certified_false():
 def test_cross_check_alone_refutes_the_witness(name, monkeypatch):
     """With the rule-13 switch removed, the presolve-free cross-solve on its own must
     catch the witness: its verified point sits far below the false bound."""
+    # #1733: the route now folds its slack columns into row bounds, where HiGHS gets
+    # this model right; the falsifier under test only fires on the slack form.
+    monkeypatch.setenv("DISCOPT_MILP_ROW_FORM", "0")
     monkeypatch.setattr(lp_milp_highs, "MILP_PRESOLVE_RULE_OFF", 0)
     c, A, b, ub, truth = WITNESSES[name]  # noqa: N806
     r = _model(c, A, b, ub).solve()

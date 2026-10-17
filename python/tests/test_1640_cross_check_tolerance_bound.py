@@ -43,6 +43,9 @@ def _spy(monkeypatch):
 
 
 def test_tight_cross_solve_restores_the_certificate(monkeypatch):
+    # #1733: the route now folds its slack columns into row bounds, where HiGHS gets
+    # this model right; the falsifier under test only fires on the slack form.
+    monkeypatch.setenv("DISCOPT_MILP_ROW_FORM", "0")
     seen = _spy(monkeypatch)
     m, truth = _log_max()
     r = m.solve(time_limit=30)
@@ -61,6 +64,9 @@ def test_tight_cross_solve_restores_the_certificate(monkeypatch):
 def test_untightened_cross_solve_still_declines(monkeypatch):
     """Mechanism pin: with the re-run at the original 1e-6 tolerance the cross bound
     is unchanged, the gap stays open, and the result is declined -- never certified."""
+    # #1733: the route now folds its slack columns into row bounds, where HiGHS gets
+    # this model right; the falsifier under test only fires on the slack form.
+    monkeypatch.setenv("DISCOPT_MILP_ROW_FORM", "0")
     monkeypatch.setattr(L, "CROSS_TIGHT_FEAS_TOL", 1e-6)
     seen = _spy(monkeypatch)
     m, truth = _log_max()
@@ -74,6 +80,9 @@ def test_untightened_cross_solve_still_declines(monkeypatch):
 def test_tight_cross_without_a_verdict_keeps_the_decline(monkeypatch):
     """The tight solve must earn the confirmation: one with no certified verdict leaves
     the certificate declined (the #1309 rule)."""
+    # #1733: the route now folds its slack columns into row bounds, where HiGHS gets
+    # this model right; the falsifier under test only fires on the slack form.
+    monkeypatch.setenv("DISCOPT_MILP_ROW_FORM", "0")
     real = L._solve_milp_scaled
 
     def no_verdict(sf, *, presolve=True, **kw):
@@ -92,6 +101,9 @@ def test_tight_cross_without_a_verdict_keeps_the_decline(monkeypatch):
 def test_tight_cross_point_refutes_the_claim(monkeypatch):
     """A verified point of the tight solve below the primary's bound by more than the
     equality yardstick refutes it, exactly as the first cross-solve's point would."""
+    # #1733: the route now folds its slack columns into row bounds, where HiGHS gets
+    # this model right; the falsifier under test only fires on the slack form.
+    monkeypatch.setenv("DISCOPT_MILP_ROW_FORM", "0")
     real = L._solve_milp_scaled
 
     def lifted(sf, *, presolve=True, **kw):
@@ -123,6 +135,9 @@ def test_tight_bound_far_above_the_cross_bound_keeps_the_decline(monkeypatch):
     """Confirming drops the cross bound, so the tight solve may only explain it as
     tolerance error: a tight bound above it by more than the tolerance-scaled slack is
     two certified solves disagreeing, and the decline stands (review of #1649)."""
+    # #1733: the route now folds its slack columns into row bounds, where HiGHS gets
+    # this model right; the falsifier under test only fires on the slack form.
+    monkeypatch.setenv("DISCOPT_MILP_ROW_FORM", "0")
     real = L._solve_milp_scaled
 
     def jumped(sf, *, presolve=True, **kw):

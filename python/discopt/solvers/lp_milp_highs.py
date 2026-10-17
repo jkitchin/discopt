@@ -1279,6 +1279,112 @@ def _absorb_tiny_entries(sf: StdForm) -> tuple[StdForm, np.ndarray, np.ndarray, 
     return dataclasses.replace(sf, A=A2), row_lower, row_upper, n_drop
 
 
+def _row_form_enabled() -> bool:
+    """``DISCOPT_MILP_ROW_FORM`` (#1733, default ON; ``=0`` hands HiGHS the explicit
+    slack columns again).
+
+    Graduated on introduction by the panel recorded in
+    ``docs/dev/issue-1733-row-form-panel-2026-10-17.md``; the opt-out keeps the
+    slack-column route reachable for A/B measurement.
+    """
+    return os.environ.get("DISCOPT_MILP_ROW_FORM", "1") != "0"
+
+
+@dataclass(frozen=True)
+class _RowForm:
+    """The logical columns :func:`_eliminate_logicals` folded into row bounds."""
+
+    keep: np.ndarray  # mask over ``sf``'s columns that HiGHS still sees
+    cols: np.ndarray  # eliminated logical columns
+    rows: np.ndarray  # the single row each one sits in
+    coef: np.ndarray  # its entry in that row
+
+
+def _eliminate_logicals(
+    sf: StdForm, row_lo: np.ndarray, row_hi: np.ndarray, n_struct: Optional[int]
+) -> tuple[StdForm, np.ndarray, np.ndarray, Optional[_RowForm]]:
+    """Fold the route's logical (slack) columns into ranged rows for HiGHS (#1733).
+
+    HiGHS's MIP solver was measured unreliable on the explicit slack form this route
+    builds: on #1733's epsilon-constraint facility-location family (an ``em <= e* +
+    1e-6`` row over binaries), 25 of 100 instances came back wrong with presolve on
+    and 8 of 100 with it off -- false ``kInfeasible`` labels and ``kOptimal`` at a
+    point above the optimum, which a user warm start then turned into a certified
+    false bound. The same models passed with the slack as row bounds were solved
+    correctly in all 600 runs (three right-hand-side shifts, both presolve settings).
+
+    The elimination is exact, not a relaxation: a logical ``s_j`` (continuous, zero
+    cost, one row, :func:`_logical_columns`) with ``a s_j + r_i(x) in [lo_i, hi_i]``
+    and ``s_j in [l_j, u_j]`` exists iff ``r_i(x) in [lo_i - max(a l, a u), hi_i -
+    min(a l, a u)]``. Those ends are rounded outward whenever the subtracted term is
+    nonzero, so the passed model stays a relaxation of ``sf`` in floating point too.
+    A side of ``s_j`` at the ``INF`` sentinel opens the matching row end. Columns
+    before ``n_struct`` are the model's own and are never eliminated, and a row with
+    more than one candidate keeps them all. :func:`_lift_logicals` rebuilds the
+    eliminated values from the rows, and every point is still verified against ``sf``.
+    """
+    lg = _logical_columns(sf)
+    if n_struct is not None:
+        lg[: int(n_struct)] = False
+    cols = np.flatnonzero(lg)
+    if cols.size == 0:
+        return sf, row_lo, row_hi, None
+    A = sf.A
+    rows = A.indices[A.indptr[cols]]
+    # Only a row's SOLE candidate is folded: with two, neither value is determined by
+    # the row alone, and picking one is arbitrary -- picking a model column over the
+    # slack left the slack free and put the model column at the 1e20 sentinel.
+    sole = np.bincount(rows, minlength=sf.m)[rows] == 1
+    cols, rows = cols[sole], rows[sole]
+    if cols.size == 0:
+        return sf, row_lo, row_hi, None
+    coef = A.data[A.indptr[cols]]
+    xl, xu = sf.xl[cols], sf.xu[cols]
+    # Openness is read off the BOUND, never the product: the sentinel is the finite
+    # 1e20, and ``0.5 * 1e20`` would pass as a finite (binding) row end (CLAUDE.md).
+    l_open, u_open = xl <= -INF, xu >= INF
+    pos = coef > 0
+    with np.errstate(invalid="ignore", over="ignore"):
+        t_lo = np.where(pos, coef * xl, coef * xu)
+        t_hi = np.where(pos, coef * xu, coef * xl)
+    lo_open = np.where(pos, l_open, u_open)  # t_lo is -inf
+    hi_open = np.where(pos, u_open, l_open)  # t_hi is +inf
+    lo = np.array(row_lo, dtype=np.float64, copy=True)
+    hi = np.array(row_hi, dtype=np.float64, copy=True)
+    with np.errstate(invalid="ignore"):
+        new_lo = lo[rows] - np.where(hi_open, 0.0, t_hi)
+        new_hi = hi[rows] - np.where(lo_open, 0.0, t_lo)
+    new_lo = np.where(t_hi == 0.0, new_lo, np.nextafter(new_lo, -np.inf))
+    new_hi = np.where(t_lo == 0.0, new_hi, np.nextafter(new_hi, np.inf))
+    lo[rows] = np.where(hi_open, -np.inf, new_lo)
+    hi[rows] = np.where(lo_open, np.inf, new_hi)
+    keep = np.ones(sf.n, dtype=bool)
+    keep[cols] = False
+    new_idx = np.cumsum(keep) - 1
+    reduced = dataclasses.replace(
+        sf,
+        c=sf.c[keep],
+        A=sp.csc_matrix(sf.A[:, keep]),
+        xl=sf.xl[keep],
+        xu=sf.xu[keep],
+        int_idx=new_idx[sf.int_idx],
+    )
+    return reduced, lo, hi, _RowForm(keep, cols, rows, coef)
+
+
+def _lift_logicals(x_kept: np.ndarray, sf: StdForm, rf: _RowForm) -> np.ndarray:
+    """The full point of ``sf`` from a :func:`_eliminate_logicals` solution: each
+    eliminated logical takes the value its row determines, clipped to its box, so
+    any residual HiGHS left lands on the row, where :func:`feasibility_problem`
+    judges it on the row's own scale."""
+    x = np.zeros(sf.n, dtype=np.float64)
+    x[rf.keep] = np.asarray(x_kept, dtype=np.float64)
+    r = sf.A @ x
+    s = (sf.b[rf.rows] - r[rf.rows]) / rf.coef
+    x[rf.cols] = np.clip(s, sf.xl[rf.cols], sf.xu[rf.cols])
+    return x
+
+
 def _pass_model(
     h,
     highspy,
@@ -1832,6 +1938,37 @@ def _fixed_integer_lp(sf: "StdForm", x: np.ndarray, time_limit: Optional[float])
     xl[sf.int_idx] = xi
     xu[sf.int_idx] = xi
     return solve_lp_std(dataclasses.replace(sf, xl=xl, xu=xu), time_limit=time_limit)
+
+
+def _rederived_point(
+    sf: "StdForm", x: Optional[np.ndarray], time_limit: Optional[float], stats: dict
+) -> Optional[tuple[np.ndarray, float]]:
+    """A verified point carrying ``x``'s integers, re-derived by the fixed-integer LP.
+
+    #1733: a falsifier's point is evidence against a bound only if it is a point, not
+    a tolerance. :func:`feasibility_problem` admits a row violated by ``FEAS_TOL``, the
+    same 1e-6 as the refutation yardstick ``CERT_ABS``. So a HiGHS incumbent that
+    spends HiGHS's 1e-6 MIP row tolerance on the objective row refutes an exact bound
+    by exactly that much. Measured on the #1494 piecewise models: the presolve-free
+    cross-solve verified at -1e-6 against an exact optimum of 0 and withdrew a
+    correct certificate. :func:`_fixed_integer_lp` re-optimises the continuous part
+    over ``x``'s own integers at the LP's 1e-7 primal tolerance. Its verified point is
+    the best one those integers admit, and it replaces ``x``'s. When the LP gives no
+    verified point, ``x``'s own point is kept, so the falsifier never has less
+    evidence than before.
+    """
+    pt = _verified_mip_point(sf, x)
+    if pt is None or not sf.int_idx.size:
+        return pt
+    if time_limit is not None and time_limit <= 0.0:
+        return pt
+    fx = _fixed_integer_lp(sf, pt[0], time_limit)
+    lp_pt = _verified_mip_point(sf, fx.x) if fx.status == "optimal" else None
+    if lp_pt is None:
+        stats["milp/cross_point_rederive_failed"] = 1.0
+        return pt
+    stats["milp/cross_point_rederived_shift"] = float(lp_pt[1] - pt[1])
+    return lp_pt
 
 
 def _repair_refused_incumbent(
@@ -2541,10 +2678,15 @@ def _cross_check_presolve(sf: StdForm, out: HighsOutcome, kw: dict[str, Any]) ->
     if kw["time_limit"] is None or kw["time_limit"] > cap:
         kw["time_limit"] = cap
         out.stats["milp/presolve_cross_check_budget"] = cap
+    # #1733: the cross-solve is a falsifier only if it is independent of the primary's
+    # claim. Handed the user's warm start, it took that point too and confirmed the
+    # primary's false kOptimal at it (433.40 certified against a true 363.40); cold, it
+    # reached no verdict and the certificate was withdrawn.
+    kw["initial_point"] = None
     cross = _solve_milp_scaled(sf, presolve=False, **kw)
     out.stats["milp/presolve_cross_check_ran"] = 1.0
     out.stats["milp/presolve_cross_check_time"] = float(cross.wall_time)
-    pt = _verified_mip_point(sf, cross.x)
+    pt = _rederived_point(sf, cross.x, kw["time_limit"], out.stats)
     refuted = None
     if pt is not None:
         if out.status == "infeasible":
@@ -2919,13 +3061,19 @@ def _solve_milp_std(
     sf_pass, row_lo, row_hi, n_tiny = _absorb_tiny_entries(_relax_huge_box(sf, huge_lo, huge_hi))
     if n_tiny:
         stats["milp/tiny_entries_absorbed"] = float(n_tiny)
+    # #1733: HiGHS sees the logical columns as row bounds; see _eliminate_logicals.
+    rf: Optional[_RowForm] = None
+    if _row_form_enabled():
+        sf_pass, row_lo, row_hi, rf = _eliminate_logicals(sf_pass, row_lo, row_hi, n_struct)
+        if rf is not None:
+            stats["milp/logicals_as_row_bounds"] = float(rf.cols.size)
     pass_st, pass_why = _pass_model(
         h,
         highspy,
         sf_pass,
         integer=True,
         offset=sf.obj_const,
-        row_bounds=(row_lo, row_hi) if n_tiny else None,
+        row_bounds=(row_lo, row_hi) if n_tiny or rf is not None else None,
     )
     if pass_why:
         # No MILP certificate is re-derivable from ``sf`` (HiGHS's infeasible label and
@@ -2939,7 +3087,7 @@ def _solve_milp_std(
             stats["milp/seed_unusable"] = 1.0
         else:
             sol = highspy.HighsSolution()
-            sol.col_value = seed
+            sol.col_value = seed if rf is None else seed[rf.keep]
             if h.setSolution(sol) != highspy.HighsStatus.kOk:
                 logger.warning("HiGHS rejected the MILP start; solving without it")
                 stats["milp/seed_rejected"] = 1.0
@@ -2962,6 +3110,8 @@ def _solve_milp_std(
     repaired_why: Optional[str] = None
     if info.primal_solution_status == highspy.SolutionStatus.kSolutionStatusFeasible:
         x = np.asarray(h.getSolution().col_value, dtype=np.float64)
+        if rf is not None:
+            x = _lift_logicals(x, sf, rf)
         why = readback_problem(x, sf) or feasibility_problem(x, sf, check_integrality=True)
         if why:
             # The point is unusable, but the question may still be decidable: a
