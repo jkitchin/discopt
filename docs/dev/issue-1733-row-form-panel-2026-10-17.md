@@ -121,6 +121,21 @@ integer column.
    uncertified, instead of `infeasible`. The route, #1229 and #1733 test files pass
    on 1.10.0, 1.11.0, 1.12.0 and 1.15.1.
 
+6. **Re-derived incumbent.** CI's "Python fast" job on the PR's first head failed
+   `test_piecewise::test_graph_is_exact_at_and_between_breakpoints[incremental]`. It
+   published y = f(x) + 1.0e-6, an honest certificate within the 1e-6 feasibility
+   tolerance and the 1e-4 gap, but no longer exact.
+
+   It does not reproduce locally on HiGHS's default seed; the search path is
+   CPU-dependent. Sweeping `random_seed` 0–29 over the incremental graph's 30 probes
+   (900 solves) reproduced it once on the row form (seed 16) and never on the slack
+   form. HiGHS's objective beat the #1509 fixed-integer LP over the same integers by
+   exactly 1e-6, row tolerance spent on the objective.
+
+   When that difference is within the equality yardstick and the gap still closes
+   with it charged twice (the case #1612 leaves alone), the route now publishes the
+   LP's verified point (`milp/incumbent_rederived`). The sweep is 0/900 after.
+
 **Tests that pin a falsifier.** Twelve tests exercise a falsifier on a witness where
 HiGHS is wrong first:
 

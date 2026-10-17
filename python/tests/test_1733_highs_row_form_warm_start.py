@@ -261,3 +261,30 @@ def test_infeasible_label_is_refuted_by_the_other_form(monkeypatch):
     assert r.status in ("optimal", "feasible") and r.objective is not None
     assert r.objective >= OPT - 1e-6 * OPT
     assert r.bound is None or r.bound <= OPT + 1e-6 * OPT
+
+
+def test_tolerance_shaded_incumbent_is_rederived(monkeypatch):
+    """HiGHS (random_seed 16) published y = f(x) + 1.0e-6 on test_piecewise's incremental
+    graph: its objective beat the LP over its own integers by row tolerance alone. The
+    route now publishes the LP's verified point, which is exact (CI saw the same point
+    on the default seed, a CPU-dependent search path)."""
+    import discopt.modeling as dm
+
+    real = L._new_highs
+
+    def seeded(highspy, opts):
+        h = real(highspy, opts)
+        h.setOptionValue("random_seed", 16)
+        return h
+
+    monkeypatch.setattr(L, "_new_highs", seeded)
+    b = [0.0, 1.0, 2.5, 3.0, 4.0, 6.0]
+    v = [1.0, 3.0, -0.5, 2.0, 2.0, -1.0]
+    t = 1.83822
+    m = dm.Model()
+    x = m.continuous("x", lb=t, ub=t)
+    y = m.piecewise(x, b, v, method="incremental")
+    m.maximize(y)
+    r = m.solve(time_limit=30)
+    assert r.status == "optimal"
+    assert float(r.value(y)) == pytest.approx(float(np.interp(t, b, v)), abs=1e-8)
