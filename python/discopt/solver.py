@@ -22,7 +22,7 @@ import sys
 import threading
 import time
 import weakref
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -7274,6 +7274,33 @@ def _validate_solve_budgets(gap_tolerance: float, time_limit: float) -> None:
 _GAP_TOLERANCES: list[tuple[float, float]] = []
 
 
+#: ``(model, {(var_index, flat_element, "lower"|"upper"), ...})`` while an internal
+#: probe solves ``model`` with those bounds relaxed to the ``±1e20`` sentinel, or
+#: ``None``. Set by :func:`probe_relaxed_bounds`; read by
+#: :func:`_format_bad_bound_entries` so the large-bound warning names only bounds
+#: the user declared (#1723).
+_PROBE_RELAXED_BOUNDS: contextvars.ContextVar[Optional[tuple[Any, frozenset]]] = (
+    contextvars.ContextVar("discopt_probe_relaxed_bounds", default=None)
+)
+
+
+@contextlib.contextmanager
+def probe_relaxed_bounds(model: Model, relaxed: Iterable[tuple[int, int, str]]):
+    """Mark bounds an internal probe relaxed, for the duration of its solve (#1723).
+
+    ``relaxed`` holds ``(var_index, flat_element, side)`` triples. ``compute_iis``
+    drops a candidate bound by setting it to ``±1e20``; without this marker each
+    probe solve warned "Variables with very large or infinite declared bounds" about
+    a bound the user had declared finite. Only the marked bound sides are excused:
+    an infinite bound the user did declare is still reported.
+    """
+    token = _PROBE_RELAXED_BOUNDS.set((model, frozenset(relaxed)))
+    try:
+        yield
+    finally:
+        _PROBE_RELAXED_BOUNDS.reset(token)
+
+
 def _format_bad_bound_entries(
     model: Model,
     flat_lb: np.ndarray,
@@ -7297,7 +7324,11 @@ def _format_bad_bound_entries(
     bad_vars: list[str] = []
     offset = 0
     free_by_construction: set[str] = getattr(model, "_free_by_construction", set())
-    for v in model._variables:
+    _probe = _PROBE_RELAXED_BOUNDS.get()
+    probe_relaxed: frozenset = (
+        _probe[1] if _probe is not None and _probe[0] is model else frozenset()
+    )
+    for vi, v in enumerate(model._variables):
         if v.name in free_by_construction:
             # Created free by discopt (e.g. CVaR's eta), not declared by the
             # user; "declare tighter bounds" is not an action they can take.
@@ -7308,12 +7339,17 @@ def _format_bad_bound_entries(
         ub_flat = np.asarray(flat_ub[offset : offset + v.size], dtype=np.float64)
         for j in range(v.size):
             lo, hi = float(lb_flat[j]), float(ub_flat[j])
-            if (
-                not np.isfinite(lo)
-                or not np.isfinite(hi)
-                or abs(lo) > _BOUND_WARN_THRESHOLD
-                or abs(hi) > _BOUND_WARN_THRESHOLD
-            ):
+            lo_bad = (not np.isfinite(lo) or abs(lo) > _BOUND_WARN_THRESHOLD) and (
+                vi,
+                j,
+                "lower",
+            ) not in probe_relaxed
+            hi_bad = (not np.isfinite(hi) or abs(hi) > _BOUND_WARN_THRESHOLD) and (
+                vi,
+                j,
+                "upper",
+            ) not in probe_relaxed
+            if lo_bad or hi_bad:
                 name = v.name if v.size == 1 else f"{v.name}[{j}]"
                 lo_txt = f"{lo:.6g}" + (" [default]" if lo == -DEFAULT_VARIABLE_BOUND else "")
                 hi_txt = f"{hi:.6g}" + (" [default]" if hi == DEFAULT_VARIABLE_BOUND else "")
@@ -10373,6 +10409,102 @@ def _highs_route_options():
         yield
 
 
+#: Values of ``solve_model(strategy=...)``: the node-selection rules
+#: ``PyTreeManager`` implements (``crates/discopt-python/src/bnb_bindings.rs``).
+_NODE_SELECTION_STRATEGIES = ("best_first", "depth_first", "best_estimate")
+
+#: ``{"used": bool, "declared": bool}`` for the innermost ``solve_model`` call that
+#: passed a non-default ``strategy``, or ``None``. Set by :func:`_scoped_strategy`;
+#: ``used`` is set by :func:`_tree_manager` (a discopt B&B tree selected nodes by
+#: it), ``declared`` by :func:`_declare_strategy_ignored` (a route already warned
+#: that it ignores it).
+_STRATEGY_REQUEST: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar(
+    "discopt_strategy_request", default=None
+)
+
+
+def _scoped_strategy(fn: _F) -> _F:
+    """Validate ``strategy`` up front and warn when no B&B tree used it (#1722).
+
+    ``strategy`` selects nodes in discopt's own branch-and-bound trees only. An
+    unknown value used to be refused only by ``PyTreeManager``, so a route that
+    builds no tree -- the HiGHS LP/MILP route, the LP/QP entry solves, the
+    monolithic Rust MILP engine -- accepted ``strategy="nonsense_xyz"`` and
+    returned as if it had been applied. The value is now checked before any work,
+    and a non-default value that no tree consumed warns (CLAUDE.md §3), unless the
+    route already said it ignores it. A nested solve that passes the same value
+    shares the caller's scope; one that passes another value gets its own.
+    """
+    sig: list[inspect.Signature] = []
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if "strategy" in kwargs:
+            value = kwargs["strategy"]
+        else:
+            if not sig:
+                sig.append(inspect.signature(fn))
+            bound = sig[0].bind_partial(*args, **kwargs)
+            value = bound.arguments.get("strategy", "best_first")
+        if value not in _NODE_SELECTION_STRATEGIES:
+            raise ValueError(
+                f"strategy={value!r}: expected one of "
+                f"{', '.join(repr(s) for s in _NODE_SELECTION_STRATEGIES)}."
+            )
+        outer = _STRATEGY_REQUEST.get()
+        if value == "best_first":
+            if outer is None:
+                return fn(*args, **kwargs)
+            token = _STRATEGY_REQUEST.set(None)
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                _STRATEGY_REQUEST.reset(token)
+        if outer is not None and outer["strategy"] == value:
+            return fn(*args, **kwargs)
+        state = {"strategy": value, "used": False, "declared": False}
+        token = _STRATEGY_REQUEST.set(state)
+        try:
+            result = fn(*args, **kwargs)
+        finally:
+            _STRATEGY_REQUEST.reset(token)
+        if not state["used"] and not state["declared"]:
+            import warnings
+
+            route = getattr(result, "algorithm_route", None)
+            warnings.warn(
+                f"strategy={value!r} was not used: it selects nodes in discopt's own "
+                "branch-and-bound tree, and this solve ran none"
+                + (f" (route: {route})" if route else "")
+                + ". A pure MILP is solved by HiGHS by default; pass "
+                "milp_backend='native' to search it with discopt's MILP tree. An LP "
+                "or convex QP is solved without branching.",
+                UserWarning,
+                # Attribute it to the caller's ``solve()`` line, not to the
+                # decorator stack inside discopt.
+                skip_file_prefixes=(os.path.dirname(__file__) + os.sep,),
+            )
+        return result
+
+    return cast(_F, wrapper)
+
+
+def _declare_strategy_ignored(ignored: Sequence[str]) -> None:
+    """Record that a route's own warning already named ``strategy`` as ignored."""
+    state = _STRATEGY_REQUEST.get()
+    if state is not None and "strategy" in ignored:
+        state["declared"] = True
+
+
+def _tree_manager(n_vars, lb, ub, int_offsets, int_sizes, strategy):
+    """Build the Rust B&B tree, recording that ``strategy`` now selects its nodes."""
+    tree = PyTreeManager(n_vars, lb, ub, int_offsets, int_sizes, strategy)
+    state = _STRATEGY_REQUEST.get()
+    if state is not None and state["strategy"] == strategy:
+        state["used"] = True
+    return tree
+
+
 def _scoped_role1_deadline(fn: _F) -> _F:
     """Scope :data:`_ROLE1_DEADLINE` to one ``solve_model`` call (#1371).
 
@@ -11098,6 +11230,7 @@ def _refusing_on_callback_failure(fn: _F) -> _F:
 @_scoped_determinism
 @_scoped_role1_deadline
 @_scoped_highs_options
+@_scoped_strategy
 @_debug_outermost_solve
 def solve_model(
     model: Model,
@@ -11247,7 +11380,13 @@ def solve_model(
         Node selection strategy: ``"best_first"`` (lowest dual bound),
         ``"depth_first"``, or ``"best_estimate"`` (lowest pseudocost-based
         estimate of the subtree optimum — finds good incumbents earlier while
-        ``best_first`` still drives the proof of optimality).
+        ``best_first`` still drives the proof of optimality). Any other value
+        raises ``ValueError`` (#1722). It steers discopt's own branch-and-bound
+        trees only: a pure MILP goes to HiGHS by default (or to the monolithic
+        Rust MILP engine under ``DISCOPT_LP_MILP_BACKEND=rust``), and an LP or
+        convex QP is solved without branching, so on those routes a
+        non-default value is not used and a ``UserWarning`` says so. Pass
+        ``milp_backend="native"`` to have it select nodes on a MILP.
     max_nodes : int, default 100_000
         Maximum number of B&B nodes before stopping.
     milp_backend : {"highs", "native"}, optional
@@ -11326,15 +11465,26 @@ def solve_model(
         ``max_wall_time``, ``print_level``, ``tau`` and ``tau_max``; any other key
         raises ``ValueError`` there rather than being ignored.
     nlp_solver : str, default "pounce"
-        Numerical engine for every problem class. The default ``"pounce"``
-        (POUNCE — pure-Rust Ipopt port) is now the universal default: it
-        routes LP/QP/MILP/MIQP/NLP/MINLP through POUNCE (and the self-hosted
-        B&B for the integer classes). HiGHS has been removed entirely from the
-        LP/MILP path (issue #356). Other values: ``"ipopt"`` (cyipopt for the
-        NLP node/continuous solves), or ``"ipm"`` / ``"sparse_ipm"`` (back-compat
-        aliases — these select the simplex-first matrix routing for LP/MILP
-        and resolve to POUNCE for NLP/MINLP). ``"simplex"`` selects the
-        pure-Rust warm-started-simplex MILP B&B.
+        Engine for the nonlinear and quadratic solves. The default ``"pounce"``
+        (POUNCE — pure-Rust Ipopt port) solves an NLP, a convex QP, the node
+        QPs of the convex MIQP branch and bound, and the NLP subproblems of
+        spatial branch and bound. It does not decide where a model with only
+        linear rows goes (#1724):
+
+        * a pure **LP or MILP** goes to HiGHS by default, every certificate
+          verified by discopt (#1229). ``milp_backend="native"`` (or the
+          ``DISCOPT_LP_MILP_BACKEND`` env var) overrides that: ``"native"``
+          runs discopt's own LP solve / MILP branch and bound, and the
+          env-var-only ``"rust"`` runs the monolithic Rust MILP engine;
+        * the **node LP relaxations** of spatial branch and bound (MINLP,
+          nonconvex QP/MIQP) are solved by the in-house Rust simplex, not by
+          HiGHS and not by POUNCE.
+
+        Other values: ``"ipopt"`` (cyipopt for the NLP node/continuous solves),
+        ``"ipm"`` / ``"sparse_ipm"`` (back-compat aliases that resolve to
+        POUNCE; the JAX IPM they named is retired), and ``"simplex"``, which
+        sends a pure MILP to the monolithic Rust warm-started-simplex MILP
+        engine instead of HiGHS.
     sparse : bool or None, default None
         Force sparse (True) or dense (False) Jacobian evaluation.
         If None, auto-selects based on problem size and density.
@@ -12371,6 +12521,7 @@ def solve_model(
         ignored_mip_nlp_options = _mip_nlp_ignored_options(_mip_nlp_option_values)
         if kwargs:
             ignored_mip_nlp_options.extend(sorted(kwargs))
+        _declare_strategy_ignored(ignored_mip_nlp_options)
         if ignored_mip_nlp_options:
             warnings.warn(
                 "MIP-NLP solver ignores solve_model options: "
@@ -12650,6 +12801,7 @@ def solve_model(
             )
             if differs
         ]
+        _declare_strategy_ignored(_ignored_surrogate)
         if _ignored_surrogate:
             warnings.warn(
                 "solver='surrogate' ignores "
@@ -12723,6 +12875,7 @@ def solve_model(
             )
             if differs
         ]
+        _declare_strategy_ignored(_ignored_direct)
         if _ignored_direct:
             warnings.warn(
                 "solver='direct' ignores "
@@ -12836,6 +12989,7 @@ def solve_model(
         _note_ignored("gdp_method", gdp_method not in amp_gdp_methods)
         if kwargs:
             ignored_amp_options.extend(sorted(kwargs))
+        _declare_strategy_ignored(ignored_amp_options)
         if ignored_amp_options:
             warnings.warn(
                 "AMP ignores solve_model options: "
@@ -12926,6 +13080,7 @@ def solve_model(
         _note_ignored_gp("abs_gap_tolerance", abs_gap_tolerance is not None)
         if kwargs:
             ignored_gp_options.extend(sorted(kwargs))
+        _declare_strategy_ignored(ignored_gp_options)
         if ignored_gp_options:
             warnings.warn(
                 "GP fast path ignores solve_model options: "
@@ -13019,6 +13174,7 @@ def solve_model(
         _note_ignored_gp_minlp("abs_gap_tolerance", abs_gap_tolerance is not None)
         if kwargs:
             ignored_gp_minlp_options.extend(sorted(kwargs))
+        _declare_strategy_ignored(ignored_gp_minlp_options)
         if ignored_gp_minlp_options:
             warnings.warn(
                 "GP-MINLP fast path ignores solve_model options: "
@@ -15629,7 +15785,7 @@ def solve_model(
 
     # --- Create PyTreeManager (Rust) ---
     t_rust_start = time.perf_counter()
-    tree = PyTreeManager(
+    tree = _tree_manager(
         n_vars,
         lb.tolist(),
         ub.tolist(),
@@ -24023,7 +24179,7 @@ def _solve_nlp_bb(
             _root_cut_bound = None
 
     t_rust_start = time.perf_counter()
-    tree = PyTreeManager(
+    tree = _tree_manager(
         n_vars,
         lb.tolist(),
         ub.tolist(),
@@ -33606,8 +33762,11 @@ def _solve_milp_bb(
     """Solve a MILP via B&B with LP relaxation solves at each node.
 
     ``prefer_pounce`` (POUNCE-only mode) routes the incumbent dual recovery
-    through POUNCE instead of the Rust simplex; either way the solve is
-    HiGHS-free (HiGHS was removed, issue #356).
+    through POUNCE instead of the Rust simplex; either way this tree makes no
+    HiGHS call (#356). It is not the default engine for a pure MILP, which
+    ``solve_model`` sends to HiGHS (#1229); this tree runs under
+    ``milp_backend="native"``, a ``node_callback``, ``lagrangian_bound=True``,
+    or when the HiGHS route or the monolithic Rust engine declines (#1724).
 
     ``node_engine`` selects the per-node LP relaxation engine in POUNCE-only
     mode: ``"simplex"`` (the default for pure MILP — exact-vertex warm-started
@@ -33766,7 +33925,7 @@ def _solve_milp_bb(
             _root_lp_bound = float(_root_out[0])
 
     t_rust_start = time.perf_counter()
-    tree = PyTreeManager(n_vars, lb.tolist(), ub.tolist(), int_offsets, int_sizes, strategy)
+    tree = _tree_manager(n_vars, lb.tolist(), ub.tolist(), int_offsets, int_sizes, strategy)
     tree.initialize()
     # #1535: integer columns and probe count for a caller-chosen branching rule.
     _branch_int_cols = np.array(
@@ -34762,8 +34921,9 @@ def _solve_miqp_bb(
     """Solve a MIQP via B&B with QP relaxation solves at each node.
 
     ``prefer_pounce`` (POUNCE-only mode) routes the incumbent dual recovery
-    through POUNCE instead of the Rust simplex; either way the solve is
-    HiGHS-free (HiGHS was removed, issue #356).
+    through POUNCE instead of the Rust simplex; either way this tree makes no
+    HiGHS call (#356). HiGHS solves only a pure LP or MILP (#1229), never a
+    model with a quadratic term (#1724).
     """
     from discopt._relax.problem_classifier import extract_qp_data
 
@@ -34813,7 +34973,7 @@ def _solve_miqp_bb(
         )
 
     t_rust_start = time.perf_counter()
-    tree = PyTreeManager(n_vars, lb.tolist(), ub.tolist(), int_offsets, int_sizes, strategy)
+    tree = _tree_manager(n_vars, lb.tolist(), ub.tolist(), int_offsets, int_sizes, strategy)
     tree.initialize()
     rust_time += time.perf_counter() - t_rust_start
 

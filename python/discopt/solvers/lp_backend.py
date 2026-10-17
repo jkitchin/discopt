@@ -12,7 +12,10 @@ first (issue #356) — HiGHS-free, exact, and fast on the ill-conditioned lifted
 relaxations — with POUNCE as the fallback. HiGHS is off the LP path entirely and
 off every MILP *fallback* order (issue #356); it returned in #1060 only as an
 explicit ``backend="highs"`` opt-in for the MIP-NLP master, which no default
-reaches. The Rust LP simplex surfaces
+reaches. This seam is the *internal* matrix-solve one: a whole pure LP or MILP
+model given to ``Model.solve()`` does not come through here and goes to HiGHS by
+default (``solvers/lp_milp_highs.py``, #1229; opt out with ``milp_backend`` or
+``DISCOPT_LP_MILP_BACKEND``). The Rust LP simplex surfaces
 ``dual_values``/``reduced_costs`` in HiGHS's convention, so the dual-consuming
 seams (Benders subproblem, DBBT) run on it too. ``prefer_pounce`` flips the
 preference to POUNCE-first (the POUNCE-only mode, ``nlp_solver="pounce"``).
