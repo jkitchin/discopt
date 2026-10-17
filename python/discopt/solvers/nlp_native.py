@@ -182,6 +182,20 @@ def _validate(base, evaluator, perm: Optional[np.ndarray]) -> bool:
     return bool(o_ok and g_ok)
 
 
+def _source_still_matches(model, path: str) -> bool:
+    """True when *path*'s bytes still hash to the digest ``from_nl`` recorded."""
+    from discopt.modeling.core import nl_file_sha256
+
+    expected = getattr(model, "_source_nl_sha256", None)
+    if expected is None:
+        logger.debug("source .nl %s has no recorded digest; emitting the model instead", path)
+        return False
+    if nl_file_sha256(path) != expected:
+        logger.debug("source .nl %s changed since it was read; emitting the model instead", path)
+        return False
+    return True
+
+
 def build_native_base(evaluator, *, validate: bool = True) -> Optional[NativeNlpBase]:
     """Construct a POUNCE-native problem aligned to ``evaluator``, or ``None``.
 
@@ -200,9 +214,14 @@ def build_native_base(evaluator, *, validate: bool = True) -> Optional[NativeNlp
     perm: Optional[np.ndarray] = None
     source = ""
 
-    # Preferred: the original .nl this model was loaded from (identity order).
+    # Preferred: the original .nl this model was loaded from (identity order) --
+    # but only while the file is still the one ``from_nl`` read. The path alone
+    # names a location, not content: a model that was pickled or saved and loaded
+    # elsewhere, or a file edited since, would otherwise hand POUNCE a different
+    # problem, and ``_validate`` below compares only the objective and gradient,
+    # so differing constraints would pass it.
     src = getattr(model, "_source_nl_path", None)
-    if src and os.path.exists(src):
+    if src and os.path.exists(src) and _source_still_matches(model, src):
         try:
             base = pounce.read_nl(src)
             perm = None

@@ -15,8 +15,8 @@ carries nothing a worker should not start with: no solve caches, no previous res
 no parsed ``.nl`` source. Reading it back runs the same validation a model loaded
 from disk gets, including the registered-atom check below. And a model that cannot
 be written faithfully (a ``dm.custom`` callable, a propositional logic constraint,
-an unattached disjunction) is refused by name in the parent before any process
-starts.
+an unattached disjunction, the output of a reformulation pass that points back at
+its source model) is refused by name in the parent before any process starts.
 
 **Why results come back with their model detached.** :class:`SolveResult` carries
 a back-reference to its model for ``result.value(var)`` and ``result.sensitivity``.

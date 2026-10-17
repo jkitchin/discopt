@@ -111,8 +111,13 @@ def test_schema_minor_is_bumped_for_the_non_additive_change():
     no registered atoms" (1.3) versus "the writer could not record them" (≤1.2).
     A 1.2 reader that reloads and re-saves a 1.3 document drops the tags
     permanently, and the minor is what lets that be detected rather than guessed.
+
+    1.4 moves it again for the same reason: the ``nl_source``,
+    ``_gams_initial_values`` and ``_recentre_inner`` state keys are additive, but
+    their absence means "not present" only in a document that could have
+    recorded them.
     """
-    assert S.SCHEMA == "discopt.model/1.3"
+    assert S.SCHEMA == "discopt.model/1.4"
 
 
 def test_legacy_11_document_restores_a_tagged_float_in_the_trace():

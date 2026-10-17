@@ -156,6 +156,25 @@ class RegisteredFunction:
             )
         return body
 
+    # -- copying and pickling ---------------------------------------------- #
+    #
+    # A registration is a process-wide identity -- the thing ``atom_of`` compares a
+    # tag against -- not data a copy of a model owns. A deep copy that duplicated it
+    # left every copied tag pointing at an object the registry does not hold, so the
+    # copy silently relaxed each atom term by term: a looser bound than the model
+    # it was copied from. Copies therefore share it, as they share a function.
+    def __copy__(self) -> "RegisteredFunction":
+        return self
+
+    def __deepcopy__(self, memo: dict) -> "RegisteredFunction":
+        return self
+
+    # Across a pickle there is no identity to share, and the lazily derived pieces
+    # hold local closures that cannot be pickled. The registration travels as its
+    # name only, and ``atom_of`` re-derives it in the process that reads it.
+    def __reduce__(self):
+        return (_PickledAtomRef, (self.name,))
+
     # -- derived numerics -------------------------------------------------- #
     def _derived(self):
         """``(f, f_prime, curvature(lo, hi))``, all derived from the lowering.
@@ -439,6 +458,52 @@ def registry_snapshot() -> "Iterator[None]":
             _REGISTRY.update(saved)
 
 
+class _PickledAtomRef:
+    """What a :class:`RegisteredFunction` in a tag becomes after a pickle round trip.
+
+    Only the name crosses, and a name is not an identity: the reading process may
+    have registered something else under it, or nothing. :func:`atom_of` resolves
+    it on first use with the check a loaded document gets
+    (:func:`discopt.serialize.lowering_reproduces`) -- re-lowering the current
+    registration on the tag's own argument must rebuild the tagged body exactly --
+    and records the outcome on the tag, so the check runs once per node.
+    """
+
+    __slots__ = ("name",)
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __reduce__(self):
+        return (_PickledAtomRef, (self.name,))
+
+    def __repr__(self) -> str:
+        return f"<registered atom {self.name!r}, pending re-derivation>"
+
+
+#: Marks a pickled tag whose re-derivation failed, so it is not retried.
+_UNRESOLVED = object()
+
+
+def _resolve_pickled_tag(expr: object, tag: tuple) -> tuple:
+    name, arg = str(tag[0]), tag[1]
+    from discopt.serialize import lowering_reproduces
+
+    unresolved = (name, arg, _UNRESOLVED)
+    try:
+        # Marked unresolved BEFORE checking: the check encodes this very node, and
+        # the encoder asks ``atom_of`` about it, which must not recurse back here.
+        setattr(expr, ATOM_ATTR, unresolved)
+    except AttributeError:  # pragma: no cover - slotted node types are never tagged
+        return unresolved
+    fn = get_registered(name)
+    if fn is not None and lowering_reproduces(fn, arg, expr):
+        resolved = (name, arg, fn)
+        setattr(expr, ATOM_ATTR, resolved)
+        return resolved
+    return unresolved
+
+
 def atom_of(expr: object) -> Optional[tuple]:
     """``(name, arg)`` if ``expr`` is a tagged registered lowering, else ``None``.
 
@@ -449,10 +514,15 @@ def atom_of(expr: object) -> Optional[tuple]:
     different functions, and the new envelope would cut the old body's true
     points — a false bound. A stale tag therefore degrades to term-by-term
     relaxation of the body the model actually carries, which is sound.
+
+    A tag that crossed a pickle carries only the registration's name; it is
+    resolved here on first use (see :class:`_PickledAtomRef`).
     """
     tag = getattr(expr, ATOM_ATTR, None)
     if tag is None:
         return None
+    if isinstance(tag[2], _PickledAtomRef):
+        tag = _resolve_pickled_tag(expr, tag)
     name = str(tag[0])
     with _LOCK:
         if _REGISTRY.get(name) is not tag[2]:
