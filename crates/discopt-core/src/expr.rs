@@ -410,6 +410,36 @@ pub struct ExprArena {
     /// Keyed lookup only (never iterated on an ordering-sensitive path), so
     /// node-id assignment stays deterministic and byte-reproducible.
     intern: Option<std::collections::HashMap<StructuralKey, ExprId>>,
+    /// Memo of [`ExprArena::var_offset_map`] (#1712).
+    var_offsets: VarOffsetCache,
+}
+
+/// [`ExprArena::var_offset_map`], memoized against the arena length (#1712).
+///
+/// The map is a pure function of the arena's `Variable` nodes, and the arena is
+/// append-only (`add` is its only mutator; no node is ever rewritten in place),
+/// so an unchanged `len()` means an unchanged map. Without it every
+/// `quadratic_form` call rescanned the WHOLE arena: extracting a 600-row LP whose
+/// arena holds ~800k nodes cost 2.6 s in that scan alone, O(rows x arena).
+///
+/// A clone starts empty rather than sharing: correctness never depends on the
+/// memo, which is rebuilt on first use.
+#[derive(Default)]
+struct VarOffsetCache(std::sync::Mutex<Option<(usize, VarOffsets)>>);
+
+/// Variable index -> flat column offset, as [`ExprArena::var_offset_map`] returns it.
+type VarOffsets = std::sync::Arc<std::collections::HashMap<usize, usize>>;
+
+impl Clone for VarOffsetCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl std::fmt::Debug for VarOffsetCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VarOffsetCache")
+    }
 }
 
 impl Default for ExprArena {
@@ -424,6 +454,7 @@ impl ExprArena {
         Self {
             nodes: Vec::new(),
             intern: None,
+            var_offsets: VarOffsetCache::default(),
         }
     }
 
@@ -432,6 +463,7 @@ impl ExprArena {
         Self {
             nodes: Vec::with_capacity(cap),
             intern: None,
+            var_offsets: VarOffsetCache::default(),
         }
     }
 
@@ -1057,7 +1089,24 @@ impl ExprArena {
     /// prefix-summed `size`), but computes it once instead of re-scanning
     /// every node per variable occurrence -- which would itself be quadratic
     /// on a model with many variables.
-    fn var_offset_map(&self) -> std::collections::HashMap<usize, usize> {
+    fn var_offset_map(&self) -> VarOffsets {
+        let mut slot = self
+            .var_offsets
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((len, map)) = slot.as_ref() {
+            if *len == self.nodes.len() {
+                return std::sync::Arc::clone(map);
+            }
+        }
+        let map = std::sync::Arc::new(self.compute_var_offset_map());
+        *slot = Some((self.nodes.len(), std::sync::Arc::clone(&map)));
+        map
+    }
+
+    /// The uncached scan behind [`ExprArena::var_offset_map`].
+    fn compute_var_offset_map(&self) -> std::collections::HashMap<usize, usize> {
         let mut vars: Vec<(usize, usize)> = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for node in &self.nodes {
@@ -2323,6 +2372,33 @@ mod tests {
         assert_eq!(q.quadratic[&(0, 1)], 3.0);
         // The (i, j) key carries the FULL cross coefficient, not a half.
         assert!(!q.quadratic.contains_key(&(1, 0)));
+    }
+
+    #[test]
+    fn test_quadratic_form_offset_memo_follows_appended_variables() {
+        // #1712: the var-offset memo must not survive an append that moves an
+        // offset. `y` (index 1) sits at column 0 until `x` (index 0, size 2)
+        // joins the arena, after which it sits at column 2.
+        let mut a = ExprArena::new();
+        let y = var(&mut a, "y", 1, 1);
+        let c3 = a.add(ExprNode::Constant(3.0));
+        let ty = bin(&mut a, BinOp::Mul, c3, y);
+        let before = a.quadratic_form(ty, 1_000).expect("linear");
+        assert_eq!(before.linear[&0], 3.0);
+        // Repeated calls on an unchanged arena hit the memo and agree.
+        let again = a.quadratic_form(ty, 1_000).expect("linear");
+        assert_eq!(again.to_coo(), before.to_coo());
+
+        let _x = var(&mut a, "x", 0, 2);
+        let after = a.quadratic_form(ty, 1_000).expect("linear");
+        assert_eq!(after.linear.len(), 1);
+        assert_eq!(after.linear[&2], 3.0);
+        // A clone starts with an empty memo and computes the same map.
+        let b = a.clone();
+        assert_eq!(
+            b.quadratic_form(ty, 1_000).expect("linear").to_coo(),
+            after.to_coo()
+        );
     }
 
     #[test]

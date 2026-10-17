@@ -69,6 +69,7 @@ from discopt.modeling.core import (
     SolveResult,
     VarType,
     _solve_leaves_model_unchanged,
+    builder_row_of,
     objective_sense_sign,
 )
 from discopt.modeling.core import repr_space_cutoff as _repr_space_cutoff
@@ -10093,11 +10094,15 @@ def _root_relaxation_lower_bound(
             )
             _sep_relaxer = None
         if _sep_relaxer is not None:
+            # ``rigorous_only``: this function's contract is a rigorous bound, and on
+            # a declared box with free columns the relaxer would otherwise take the
+            # vertex on trust (bchoco08 at time_limit 3-4 s, #1712).
             node_res = _sep_relaxer.solve_at_node(
                 root_lb,
                 root_ub,
                 time_limit=_role2_budget(_sep_budget),
                 build_deadline=_build_deadline,
+                rigorous_only=True,
             )
             if node_res.lower_bound is not None and np.isfinite(node_res.lower_bound):
                 sep_bound = float(node_res.lower_bound)
@@ -13315,8 +13320,23 @@ def solve_model(
     # Both rewrites live in :func:`_convexity_rewrites`, which ``Model.convexity()``
     # also calls, so the public verdict and the one dispatch uses cannot drift
     # apart (#1616 A-01).
+    #
+    # #1712: ``_already_linear`` is classified HERE, once, and reused by the product
+    # reforms below (it used to be computed after the rewrites and the domain
+    # tightening). An LP/MILP class means every row and the objective are linear by
+    # degree (or have an exactly empty Q), and the Rust degree analysis gives every
+    # transcendental call -- ``log(2)`` included -- unbounded degree. So a linear
+    # model has no ``x*log(x)`` for the entropy rewrite to find and no
+    # ``sin``/``cos``/``log``/``sqrt`` argument for the domain rules below to clamp:
+    # both passes are no-ops on it, and skipping them changes nothing. Classifying
+    # before the rewrites gives the same answer as after them: neither can make a
+    # linear model nonlinear or the reverse.
+    from discopt._relax.problem_classifier import ProblemClass, classify_problem
+
+    _already_linear = classify_problem(model) in (ProblemClass.LP, ProblemClass.MILP)
+
     model, _rewrites = _convexity_rewrites(
-        model, entropy=_entropy_ok, epigraph=not _has_bb_callbacks
+        model, entropy=_entropy_ok and not _already_linear, epigraph=not _has_bb_callbacks
     )
     if "objective_epigraph" in _rewrites:
         logger.debug("relaxed objective-defining equality to binding inequality")
@@ -13387,12 +13407,17 @@ def solve_model(
     # ``PeriodicVariableBoundRule`` is not row-anytime (its conclusion rests on a
     # variable being absent elsewhere), so the budget can only decline to start
     # it — never truncate it — which is exactly what keeps the reduction sound.
+    # #1712: on a linear model both rules are no-ops -- there is no function
+    # argument for them to act on (see ``_already_linear`` above) -- so they are not
+    # run. The pass itself still runs: its box checks and its snapping of
+    # sub-tolerance ``lb > ub`` crossovers do not depend on the rules.
+    _per_rules = () if _already_linear else (PeriodicVariableBoundRule(), FunctionDomainBoundRule())
     _per_budget_s = min(min(max(0.05 * float(time_limit), 1.0), 10.0), _remaining_budget())
     _per_lb, _per_ub, _per_stats = tighten_nonlinear_bounds(
         model,
         _origin_lb_chk,
         _origin_ub_chk,
-        rules=(PeriodicVariableBoundRule(), FunctionDomainBoundRule()),
+        rules=_per_rules,
         deadline=_role2_deadline(time.perf_counter() + _per_budget_s),
     )
     if _per_stats.n_tightened > 0:
@@ -13465,14 +13490,13 @@ def solve_model(
         binary_quadratic_milp_enabled,
         has_binary_multilinear_work,
     )
-    from discopt._relax.problem_classifier import ProblemClass, classify_problem
     from discopt.transformations import get as _get_transformation
 
     # #1614 A-21: a product whose exact arena coefficient is zero (``0*x*y``) is
     # still a syntactic product, and the three product reforms below would lift
     # it into a big-M MILP and divert an already-linear model off the MILP route.
     # ``classify_problem`` reads the exact quadratic form, so it is the gate.
-    _already_linear = classify_problem(model) in (ProblemClass.LP, ProblemClass.MILP)
+    # (``_already_linear`` is computed before the convexity rewrites; #1712.)
 
     if (
         not _already_linear
@@ -14425,11 +14449,29 @@ def solve_model(
     # solver-family dispatch; see "#1059: check the declared box BEFORE" above.
     # It still runs exactly once per solve (#863) -- it was moved, not added.
 
+    # --- Problem classification: dispatch LP/QP to specialized solvers ---
+    # #1520: no ``except``. ``classify_problem`` falls back to the always-valid
+    # NLP/MINLP class internally; a raise is a defect, not "general MINLP".
+    # Classified here, ahead of the convexity walk, so that walk can be skipped
+    # for an LP (#1712); nothing between the two reads or changes the model.
+    from discopt._relax.problem_classifier import ProblemClass, classify_problem
+
+    problem_class = classify_problem(model)
+
     _pure_continuous = _is_pure_continuous(model)
     _pure_continuous_convexity_known = False
     _pure_continuous_is_convex = False
     _pure_continuous_constraint_mask = None
-    if _pure_continuous and not skip_convex_check:
+    # #1712: an LP leaves on the LP branch below (HiGHS, gurobi or the native
+    # simplex), none of which reads these three values -- only a callback solve
+    # (#1500) carries an LP on to the spatial B&B that does. The walk cost 14 s of
+    # a 90k-term per-element objective's solve to prove what linearity already
+    # says. ``nlp_bb=True`` cannot intervene: its branch below needs a model that
+    # is not pure continuous, and an LP is.
+    _lp_leaves_before_convexity_use = (
+        problem_class == ProblemClass.LP and not _feasibility_callbacks
+    )
+    if _pure_continuous and not skip_convex_check and not _lp_leaves_before_convexity_use:
         # For QPs this must run before QP dispatch so indefinite
         # pure-continuous QPs do not use the convex QP solver.
         (
@@ -14493,13 +14535,7 @@ def solve_model(
             abs_gap_tol=abs_gap_tol,
         )
 
-    # --- Problem classification: dispatch LP/QP to specialized solvers ---
-    # #1520: no ``except``. ``classify_problem`` falls back to the always-valid
-    # NLP/MINLP class internally; a raise is a defect, not "general MINLP".
-    from discopt._relax.problem_classifier import ProblemClass, classify_problem
-
-    problem_class = classify_problem(model)
-
+    # ``problem_class`` was computed above, before the convexity walk (#1712).
     if _solver == "gurobi":
         if problem_class is None:
             raise NotImplementedError(
@@ -26808,7 +26844,11 @@ def _matched_row_constraint_duals(
         if any(k in bad_rows or k not in row_value for k in rows):
             continue
         vals = np.array([row_value[k] for k in rows], dtype=np.float64)
-        shape = tuple(getattr(con.body, "shape", ()) or ())
+        # A builder row is scalar; reading its shape off ``body`` would build the
+        # body the tape evaluator deliberately left unbuilt (#1712).
+        shape = (
+            () if builder_row_of(con) is not None else tuple(getattr(con.body, "shape", ()) or ())
+        )
         if int(np.prod(shape)) != vals.size or (shape == (1,) and vals.size == 1):
             shape = () if vals.size == 1 else (vals.size,)
         out[name] = vals.reshape(shape)

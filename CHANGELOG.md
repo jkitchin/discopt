@@ -12,6 +12,18 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **`DISCOPT_SUM_CANONICAL=1` folds per-element linear sums (#1712, opt-in).**
+  `dm.sum(c[i] * x[i] for i ...)` builds one Python node per term, and every
+  solver pass walks each one. With the flag on, the terms that name every entry
+  of a variable exactly once, each as `x[i]`, `-x[i]` or a scalar constant times
+  `x[i]`, become `dm.sum(C * x)`. A `Parameter` coefficient is never folded.
+  Sums under 32 terms and partial or repeated coverage are left as written. On
+  the issue's 90,000-variable transport LP, `solve()` takes 3.9 s with the flag
+  on and 14.0 s without (54.5 s before #1712). Default OFF: the folded form
+  changes what some downstream passes accept (interval-Hessian walker, POUNCE
+  QP routing, binary-multilinear expansion), so it stays opt-in until they
+  handle it (`docs/dev/performance-plan.md` §77.6).
+
 - **On/off (semicontinuous) units in `LinearTreeFormulation`.** The new
   `active=` argument takes `True` (a `{prefix}_active` binary is created) or an
   existing binary expression such as `on[t]`. When the unit is off, the inputs
@@ -144,6 +156,51 @@ The release procedure that produces these entries is documented in
   deep inside POUNCE.
 
 ### Fixed
+
+- **Per-element LPs spend less time in preprocessing before HiGHS (#1712).** An
+  LP written per element (`m.continuous("x", over=P * K)`, `dm.sum(c * x[p, k]
+  for ...)`, `m.constraint(P, lambda p: ...)`) spent most of `solve()` walking
+  its expression DAG in Python, node by node, before HiGHS got the same matrix
+  the vectorized form produces. On the issue's 300x300 transport LP (90,000
+  variables), measured as 3 interleaved runs per arm: 54.45 s (sd 2.01) before
+  and 18.91 s (sd 0.18) after the first five changes below. Objective, bound,
+  certificate and route are identical. Every change produces exactly the same
+  result as before:
+  - the interval enclosure behind the #1551 certificate guard handles a sum of
+    `x[i]` / `c * x[i]` terms in one vectorised pass, bit-identical to the
+    per-node walk;
+  - the NL tape compiler lowers the same sums, and the `c*x[i] + ...` chains
+    that `Model.constraint` rows become, without its per-node traversal. The
+    tape it builds is the same, so this speeds up every per-element model that
+    builds an NLP tape, not only LPs;
+  - the convex-MINLP kernel refuses a continuous or linear model before building
+    an NLP tape. It always refused these models, but only after building one;
+  - an LP no longer runs convexity classification, since the LP route never
+    reads the result;
+  - the Rust `ExprArena::quadratic_form` no longer rescans the whole arena for
+    every row it extracts. That scan made LP extraction O(rows x arena size);
+  - on an LP or MILP, `solve_model` skips the entropy rewrite and the
+    `sin`/`cos`/`log`/`sqrt` domain-tightening rules. The Rust degree analysis
+    gives every transcendental call unbounded degree, so a linear model has
+    nothing for either to act on. The domain pass still runs with no rules, so
+    its box checks and crossover snapping are kept. The model is classified once
+    for this, before the rewrites, instead of after them. Measured on the same
+    model, 3 interleaved runs per arm: 20.19 s (sd 0.73) before and 18.47 s
+    (sd 0.35) after.
+
+  - builder rows (`add_linear_constraints`, `Model.constraint` families) reach
+    the NLP tape without being built as Python expressions. The tape evaluator
+    asks for them lazily: name and sense are set, and the body expression is
+    built only if something reads it. The rows are lowered straight from their
+    coefficients, making the same `NlExpr` calls as compiling the built
+    expression would; tests compare tapes, values and gradients bit for bit. On
+    the issue's model no consumer reads a builder row's body during the solve.
+    Measured, 3 interleaved runs per arm: 18.21 s -> 13.99 s (sd 0.61) by
+    default, and 7.52 s -> 3.87 s (sd 0.09) with `DISCOPT_SUM_CANONICAL=1`.
+
+  By default the issue's model now solves in 14.0 s (54.5 s before); with
+  `DISCOPT_SUM_CANONICAL=1` (above) it takes 3.9 s, against 2.5 s for its
+  vectorized form.
 
 - **OA stops at a fixed point instead of repeating it (#1710).** When an OA
   iteration added no cuts, the next master was the same problem, so OA re-solved

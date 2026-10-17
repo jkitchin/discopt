@@ -3372,12 +3372,147 @@ def sum(
         # Indexed summation: dm.sum(lambda i: expr(i), over=index_set). Tuple
         # members of dimen>1 named sets are unpacked: ``lambda i, j: ...``.
         terms = [_wrap(_call_over(x, i, over)) for i in over]
-        return SumOverExpression(terms)
+        return _sum_of_terms(terms)
     if isinstance(x, list) or _is_term_iterable(x):
         # list/tuple/generator of terms: dm.sum(x[i] for i in S)
         terms = [_wrap(t) for t in x]
-        return SumOverExpression(terms)
+        return _sum_of_terms(terms)
     return SumExpression(_wrap(x), axis=axis)
+
+
+#: Below this many terms a per-element sum is left exactly as written: the
+#: per-node passes cost microseconds there, and the user's own structure keeps
+#: printing, LaTeX and export output unchanged. A cost cutoff, not a tolerance.
+_SUM_CANONICAL_MIN_TERMS = 32
+
+
+def _sum_canonical_enabled() -> bool:
+    """``DISCOPT_SUM_CANONICAL`` (default OFF): fold per-element linear sums.
+
+    #1712. ``dm.sum(c[i] * x[i] for i ...)`` builds one Python node per term, and
+    every solver pass that walks the model pays for each one: a 90,000-term
+    objective cost seconds per pass where ``dm.sum(c * x)`` costs microseconds.
+    With the flag on, :func:`_canonical_affine_sum` rewrites the terms that are
+    exactly a whole variable, each entry once, into that vectorized form.
+
+    Default OFF, as a documented opt-in. It passed an 18-instance per-element
+    panel (``docs/dev/performance-plan.md`` §77.3) and was briefly graduated, but
+    the full test suite then showed the folded form changing downstream
+    behaviour the panel did not cover: the interval-Hessian walker refuses the
+    array constant, a sum-of-squares model stops routing to POUNCE's QP IPM,
+    and the binary-multilinear expansion declines (§77.6). What would make it
+    the default: those consumers handling ``dm.sum(C * x)`` as they handle the
+    per-element sum, then a panel over models that reach them.
+    """
+    import os as _os
+
+    return _os.environ.get("DISCOPT_SUM_CANONICAL", "0") == "1"
+
+
+def _sum_of_terms(terms: list[Expression]) -> Expression:
+    if len(terms) >= _SUM_CANONICAL_MIN_TERMS and _sum_canonical_enabled():
+        folded = _canonical_affine_sum(terms)
+        if folded is not None:
+            return folded
+    return SumOverExpression(terms)
+
+
+def _affine_leaf_position(expr: Expression) -> Optional[tuple["Variable", int]]:
+    """``(variable, flat C-order position)`` of ``x[i]`` / ``x[i, j]`` on a shaped
+    variable, or ``None`` for anything else (a slice, a partial or exotic index)."""
+    if not isinstance(expr, IndexExpression):
+        return None
+    base = expr.base
+    if not isinstance(base, Variable):
+        return None
+    shape = tuple(base.shape or ())
+    if not shape:
+        return None
+    idx = expr.index if isinstance(expr.index, tuple) else (expr.index,)
+    if len(idx) != len(shape):
+        return None
+    flat = 0
+    for i, dim in zip(idx, shape):
+        if isinstance(i, bool) or not isinstance(i, (int, np.integer)):
+            return None
+        i = int(i)
+        if i < 0:
+            i += dim
+        if not 0 <= i < dim:
+            return None
+        flat = flat * dim + i
+    return base, flat
+
+
+def _affine_term_parts(term: Expression) -> Optional[tuple["Variable", int, float]]:
+    """``(variable, position, coefficient)`` of ``x[i]``, ``-x[i]``, ``c * x[i]`` or
+    ``x[i] * c`` with ``c`` a scalar :class:`Constant`, else ``None``.
+
+    A :class:`Parameter` coefficient is deliberately NOT folded: it can be
+    re-valued after the model is built, and copying its value into a constant
+    array would freeze it.
+    """
+    coef = 1.0
+    leaf = term
+    if isinstance(term, UnaryOp) and term.op == "neg":
+        coef, leaf = -1.0, term.operand
+    elif isinstance(term, BinaryOp) and term.op == "*":
+        for c_node, other in ((term.left, term.right), (term.right, term.left)):
+            if type(c_node) is Constant:
+                value = np.asarray(c_node.value)
+                if value.ndim == 0 and value.dtype.kind in "biuf":
+                    coef, leaf = float(value), other
+                    break
+        else:
+            return None
+    found = _affine_leaf_position(leaf)
+    if found is None:
+        return None
+    return found[0], found[1], coef
+
+
+def _canonical_affine_sum(terms: list[Expression]) -> Optional[Expression]:
+    """Fold the terms that cover a whole variable into ``dm.sum(C * x)``.
+
+    A variable's terms are folded only when they name every entry of it exactly
+    once, so the folded sum holds exactly the products that were written --
+    ``C[i] * x[i]`` for each term, no invented zero-coefficient entries, no
+    merged duplicates -- just summed in another order. Every other term is kept
+    as written, after the folded ones. ``None`` when nothing qualifies.
+    """
+    groups: dict[int, tuple[Variable, list[tuple[int, float]]]] = {}
+    parsed: list[Optional[tuple[Variable, int, float]]] = []
+    for t in terms:
+        parts = _affine_term_parts(t)
+        parsed.append(parts)
+        if parts is not None:
+            var, pos, coef = parts
+            groups.setdefault(id(var), (var, []))[1].append((pos, coef))
+
+    folded: dict[int, Expression] = {}
+    for key, (var, entries) in groups.items():
+        size = int(var.size)
+        if size < 2 or len(entries) != size:
+            continue
+        seen = np.zeros(size, dtype=bool)
+        coefs = np.empty(size, dtype=np.float64)
+        for pos, coef in entries:
+            if seen[pos]:
+                break
+            seen[pos] = True
+            coefs[pos] = coef
+        else:
+            # ``len == size`` and no repeat means every entry is covered once.
+            C = _wrap(coefs.reshape(var.shape))
+            folded[key] = SumExpression(BinaryOp("*", C, var), axis=None)
+
+    if not folded:
+        return None
+    rest = [t for t, p in zip(terms, parsed) if p is None or id(p[0]) not in folded]
+    parts_out = list(folded.values()) + rest
+    if len(parts_out) == 1:
+        return parts_out[0]
+    return SumOverExpression(parts_out)
 
 
 def prod(x: Union[Expression, list, Callable], *, over: Optional[Sequence] = None) -> Expression:
@@ -3698,6 +3833,71 @@ def _constraint_name_set(self, value: Optional[str]) -> None:
 
 
 Constraint.name = property(_constraint_name_get, _constraint_name_set)  # type: ignore[assignment]
+
+
+def _builder_row_constraint(row) -> "Constraint":
+    """A builder-resident linear row as a :class:`Constraint` (#840).
+
+    The one row->Constraint translation, shared by the eager and the lazy paths
+    so the expression a lazy row builds on demand is this one exactly.
+    """
+    body: Optional[Expression] = None
+    for v, local, coeff in row.terms:
+        if v.shape == ():
+            comp: Expression = v
+        elif len(v.shape) <= 1:
+            comp = v[local]
+        else:
+            comp = v[tuple(int(i) for i in np.unravel_index(local, v.shape))]
+        term = coeff * comp
+        body = term if body is None else body + term
+    if body is None:
+        body = Constant(np.float64(0.0))
+    c: Constraint
+    if row.sense == "<=":
+        c = body <= row.rhs
+    elif row.sense == ">=":
+        c = body >= row.rhs
+    else:
+        c = body == row.rhs
+    c.name = row.name
+    return c
+
+
+#: The sense each comparison operator gives a builder row: ``__ge__`` writes
+#: ``body >= rhs`` as ``rhs - body <= 0``.
+_BUILDER_ROW_SENSE = {"<=": "<=", ">=": "<=", "==": "=="}
+
+
+def _lazy_builder_row_constraint(row) -> "Constraint":
+    """:func:`_builder_row_constraint` with the body deferred to its first read."""
+    c = object.__new__(Constraint)
+    c.sense = _BUILDER_ROW_SENSE[row.sense]
+    c.rhs = 0.0
+    c.name = row.name
+    c.__dict__["_builder_row"] = row
+    return c
+
+
+def builder_row_of(constraint: "Constraint"):
+    """The pending builder row of a lazy constraint whose body is unbuilt, else ``None``."""
+    d = constraint.__dict__
+    return d.get("_builder_row") if "body" not in d else None
+
+
+def _constraint_getattr(self, name: str):
+    # Only reached when ordinary lookup fails, so a constraint with a body pays
+    # nothing. A lazy builder row builds its body once, here, on first read.
+    if name == "body":
+        row = self.__dict__.get("_builder_row")
+        if row is not None:
+            body = _builder_row_constraint(row).body
+            self.__dict__["body"] = body
+            return body
+    raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
+
+
+Constraint.__getattr__ = _constraint_getattr  # type: ignore[attr-defined]
 
 
 def _reject_unnormalized_rhs(constraint: "Constraint", *, where: str, index: int = -1) -> None:
@@ -11134,7 +11334,7 @@ class Model:
                 expr = expr + sum((0.5 * vals) * gather(rows) * gather(cols))
         return expr
 
-    def _builder_linear_constraints(self) -> list[Constraint]:
+    def _builder_linear_constraints(self, *, lazy: bool = False) -> list[Constraint]:
         """Materialize the builder-resident linear rows as fresh :class:`Constraint`
         objects **without mutating the model**.
 
@@ -11149,32 +11349,18 @@ class Model:
         ``_materialize_builder_linear_rows`` (which relocates the rows in place); both
         share the row→Constraint translation so the two stay identical. Returns an
         empty list once the blocks have been materialized/cleared.
+
+        ``lazy=True`` (#1712) defers each row's ``body``: the constraint's name and
+        sense are set, and the body expression is built from the row on its first
+        read (:func:`_constraint_getattr`), identical to the eager one. A tape
+        evaluator lowers such a row straight from its coefficients and never reads
+        the body, which on a 600-row, 90,000-term model saved the 1.0 s that
+        building the expressions cost. Every other caller keeps ``lazy=False``.
         """
         from discopt.export._common import iter_builder_linear_rows
 
-        out: list[Constraint] = []
-        for row in iter_builder_linear_rows(self):
-            body: Optional[Expression] = None
-            for v, local, coeff in row.terms:
-                if v.shape == ():
-                    comp: Expression = v
-                elif len(v.shape) <= 1:
-                    comp = v[local]
-                else:
-                    comp = v[tuple(int(i) for i in np.unravel_index(local, v.shape))]
-                term = coeff * comp
-                body = term if body is None else body + term
-            if body is None:
-                body = Constant(np.float64(0.0))
-            if row.sense == "<=":
-                c = body <= row.rhs
-            elif row.sense == ">=":
-                c = body >= row.rhs
-            else:
-                c = body == row.rhs
-            c.name = row.name
-            out.append(c)
-        return out
+        make = _lazy_builder_row_constraint if lazy else _builder_row_constraint
+        return [make(row) for row in iter_builder_linear_rows(self)]
 
     def _materialize_builder_linear_rows(self) -> int:
         """Rewrite builder-resident linear constraint rows as expression constraints.

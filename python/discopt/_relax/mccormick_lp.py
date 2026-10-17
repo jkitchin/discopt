@@ -1079,6 +1079,9 @@ class MccormickLPRelaxer:
         """
         return self._build_wall_ema
 
+    #: Set for the duration of a ``solve_at_node(..., rigorous_only=True)`` call.
+    _rigorous_only = False
+
     def solve_at_node(
         self,
         node_lb: np.ndarray,
@@ -1094,8 +1097,59 @@ class MccormickLPRelaxer:
         build_deadline: Optional[float] = None,
         round_deadline: Optional[float] = None,
         yield_round: bool = False,
+        rigorous_only: bool = False,
     ) -> MccormickLPResult:
         """Solve the McCormick LP relaxation restricted to the given bound box.
+
+        ``rigorous_only=True`` asks for a bound only a certificate stands behind:
+        the two trust arms of the node certificate (``trusted_backend`` and
+        ``trusted_vertex``, see :data:`BOUND_PROVENANCE`) decline instead of
+        accepting the LP optimum, and the tally records ``declined``. For a caller
+        whose contract is a *rigorous* bound, such as the root-relaxation fallback.
+        #1712's investigation measured that fallback publishing a ``trusted_vertex``
+        value on ``bchoco08`` when the time limit ran out before root tightening, so
+        the declared box still held free columns and no safe bound existed. The node
+        loop keeps the default.
+
+        Every other argument goes to :meth:`_solve_at_node_checked` unchanged.
+        """
+        previous = self._rigorous_only
+        self._rigorous_only = rigorous_only
+        try:
+            return self._solve_at_node_checked(
+                node_lb,
+                node_ub,
+                time_limit,
+                inherited_cuts=inherited_cuts,
+                separate=separate,
+                out_cuts=out_cuts,
+                psd_max_rounds=psd_max_rounds,
+                want_marginals=want_marginals,
+                skip_pool_separators=skip_pool_separators,
+                build_deadline=build_deadline,
+                round_deadline=round_deadline,
+                yield_round=yield_round,
+            )
+        finally:
+            self._rigorous_only = previous
+
+    def _solve_at_node_checked(
+        self,
+        node_lb: np.ndarray,
+        node_ub: np.ndarray,
+        time_limit: Optional[float] = None,
+        *,
+        inherited_cuts: Optional[tuple] = None,
+        separate: bool = True,
+        out_cuts: Optional[list] = None,
+        psd_max_rounds: int = 8,
+        want_marginals: bool = False,
+        skip_pool_separators: bool = False,
+        build_deadline: Optional[float] = None,
+        round_deadline: Optional[float] = None,
+        yield_round: bool = False,
+    ) -> MccormickLPResult:
+        """:meth:`solve_at_node`'s body: the solve plus the C-43 pool re-verification.
 
         Thin wrapper around :meth:`_solve_at_node_impl` that enforces the C-43
         pool-soundness invariant: **an inherited pool row may only accelerate the
@@ -2003,8 +2057,9 @@ class MccormickLPRelaxer:
             if self._backend == "auto":
                 # HiGHS/POUNCE already returns a trustworthy optimum; keep the
                 # legacy behaviour (no certificate is produced on that path).
-                b: Optional[float] = r.objective
-                tag = "trusted_backend"
+                # A ``rigorous_only`` caller does not accept it.
+                b: Optional[float] = None if self._rigorous_only else r.objective
+                tag = "declined" if self._rigorous_only else "trusted_backend"
             elif r.safe_bound is not None:
                 # The common pure-LP warm-simplex path: rigorous safe bound.
                 b = r.safe_bound
@@ -2023,6 +2078,11 @@ class MccormickLPRelaxer:
                 # let the driver branch, rather than trust a fabricated value that
                 # would fathom the optimal region. (Pure-Rust replacement of the old
                 # HiGHS unbounded-relaxation cross-check.)
+                b = None
+                tag = "declined"
+            elif self._rigorous_only:
+                # No computable safe bound and the caller wants only a certified
+                # one: decline rather than take the vertex on trust (below).
                 b = None
                 tag = "declined"
             elif self._max_finite_magnitude(milp) <= _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE:
