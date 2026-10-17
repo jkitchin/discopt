@@ -79,7 +79,7 @@ warnings.simplefilter("ignore")
 sys.path.insert(0, HERE)
 import numpy as np
 import discopt, discopt.solvers.lp_milp_highs as L
-assert hasattr(L, "_eliminate_logicals"), "branch marker missing"
+assert hasattr(L, "_cross_form_infeasible_check"), "branch marker missing"
 assert discopt.__file__.startswith(ROOT), discopt.__file__
 from panel_1733_row_form import eps_data, N_SITES, N_CUST
 seed, shift, mode = int(sys.argv[1]), float(sys.argv[2]), sys.argv[3]
@@ -119,7 +119,7 @@ print(json.dumps(dict(status=r.status, obj=r.objective, bound=r.bound, cert=bool
 
 def _run(args, src, flag):
     env = dict(os.environ, DISCOPT_MILP_ROW_FORM=flag, PYTHONUNBUFFERED="1")
-    src = p1678._child(src).replace("_implied_bounds_enabled", "_eliminate_logicals")
+    src = p1678._child(src).replace("_implied_bounds_enabled", "_cross_form_infeasible_check")
     p = subprocess.run(
         [sys.executable, "-c", src, *args], env=env, capture_output=True, text=True, timeout=600
     )

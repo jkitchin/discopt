@@ -95,6 +95,32 @@ integer column.
    own point is kept, so the falsifier never has less evidence than before. Also not
    behind the flag.
 
+4. **HiGHS-version gate** (`ROW_FORM_MIN_HIGHS = 1.12.0`). CI's `highspy==1.10.0` job
+   failed on the PR's first push: the #1229 instance came back certified
+   `infeasible`.
+
+   Replaying it: HiGHS 1.10.0 and 1.11.0 label the row form of that (feasible)
+   instance `kInfeasible`, with presolve on and off. The optimal point satisfies
+   every folded row range, so the reduced model is correct; HiGHS is wrong. The
+   minimal trigger is eight folded rows, among them a parallel pair and rows over a
+   fixed integer column. 1.12.0, 1.13.0, 1.14.0 and 1.15.1 solve it. Older HiGHS
+   keeps the slack form (`milp/row_form_skipped_old_highs`).
+5. **`_cross_form_infeasible_check`.** The gate alone does not close the hole it
+   exposed: the route trusts a HiGHS `kInfeasible` label once the presolve-free
+   cross-solve agrees, and that cross-solve uses the same form. HiGHS 1.11.0 labels
+   *this issue's* model infeasible on the slack form; main certifies that false
+   `infeasible` on 1.11 today, and it fails the #1229 test there too.
+
+   So a HiGHS-only infeasible label (provenance `highs`, not a Farkas proof) is now
+   held against one solve of the other form. A verified point there refutes it. The
+   point is published with the NS-safe root bound, and certified only if that bound
+   closes the gap (the #1509 rule). With no verified point the label stands
+   unchanged, so this check can withdraw a certificate but never add one.
+
+   On 1.11 the issue model now comes back `feasible` at the optimum 363.3962,
+   uncertified, instead of `infeasible`. The route, #1229 and #1733 test files pass
+   on 1.10.0, 1.11.0, 1.12.0 and 1.15.1.
+
 **Tests that pin a falsifier.** Twelve tests exercise a falsifier on a witness where
 HiGHS is wrong first:
 

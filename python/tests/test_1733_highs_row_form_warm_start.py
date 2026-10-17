@@ -91,6 +91,16 @@ def test_oracle_is_the_pinned_optimum():
 def test_issue_repro_certifies_the_true_optimum(warm):
     m, ws = _model()
     r = m.solve(initial_solution=ws) if warm else m.solve()
+    if r.solver_stats["highs/version"] < L.ROW_FORM_MIN_HIGHS:
+        # HiGHS 1.10/1.11 keep the slack form (see ROW_FORM_MIN_HIGHS); there the
+        # contract is no false certificate, not a certificate. Measured: 1.10 certifies
+        # 363.3962; 1.11 labels the model infeasible, which the cross-form check
+        # refutes, so the optimum is reported uncertified.
+        assert r.bound is None or r.bound <= OPT + 1e-6 * OPT, (r.status, r.bound)
+        if r.status == "optimal":
+            assert abs(r.objective - OPT) <= 1e-6 * OPT
+        assert r.solver_stats.get("milp/row_form_skipped_old_highs") == 1.0
+        return
     assert r.status == "optimal", (r.status, r.objective, r.bound, r.algorithm_route)
     assert abs(r.objective - OPT) <= 1e-6 * OPT
     assert r.bound <= OPT + 1e-6 * OPT
@@ -210,3 +220,44 @@ def test_sentinel_side_opens_the_row_end(coef):
         assert lo[0] == -np.inf and hi[0] == 3.0
     else:
         assert lo[0] == 3.0 and hi[0] == np.inf
+
+
+def test_old_highs_keeps_the_slack_form(monkeypatch):
+    """HiGHS 1.10/1.11 return a false kInfeasible on the #1229 row form (fixed in
+    1.12), so older versions are handed the slack form."""
+    monkeypatch.setattr(L, "_version_number", lambda h: 11100.0)
+    m, _ = _model()
+    r = m.solve()
+    st = r.solver_stats
+    assert st.get("milp/row_form_skipped_old_highs") == 1.0
+    assert "milp/logicals_as_row_bounds" not in st
+    assert r.bound is None or r.bound <= OPT + 1e-6 * OPT
+
+
+def test_infeasible_label_is_refuted_by_the_other_form(monkeypatch):
+    """A HiGHS-only infeasible label is held against the other form: a verified point
+    there refutes it (#1733; measured on HiGHS 1.10/1.11, forced here on any version
+    by making the row-form solve report kInfeasible with no point)."""
+    real = L._solve_milp_std
+    calls = []
+
+    def lying(sf, **kw):
+        out = real(sf, **kw)
+        calls.append(kw.get("row_form"))
+        if kw.get("row_form") is None and out.status == "optimal":
+            out = L.HighsOutcome(
+                "infeasible", gap_certified=True, highs_status="kInfeasible",
+                root_bound=out.root_bound, stats=dict(out.stats),
+                labels={**out.labels, "milp/infeasible_provenance": "highs"},
+            )  # fmt: skip
+        return out
+
+    monkeypatch.setattr(L, "_solve_milp_std", lying)
+    m, _ = _model()
+    r = m.solve()
+    assert {True, False} & set(calls), calls  # the other form was solved as the falsifier
+    st = r.solver_stats
+    assert st.get("milp/infeasible_label_refuted") == 1.0
+    assert r.status in ("optimal", "feasible") and r.objective is not None
+    assert r.objective >= OPT - 1e-6 * OPT
+    assert r.bound is None or r.bound <= OPT + 1e-6 * OPT
