@@ -37,6 +37,20 @@ import numpy as np
 from discopt._tape_nlp_evaluator import make_evaluator
 
 
+class DegenerateSensitivityError(np.linalg.LinAlgError):
+    """The solution map has no (unique) derivative at this KKT point (#1749).
+
+    Raised when the active-set KKT matrix is singular *and* the singularity reaches
+    the primal block: either no ``dx*/dp`` satisfies the linearised system (the
+    active set changes under any perturbation of ``p``, so the one-sided derivatives
+    differ) or many do.  A singular matrix whose null space touches only the
+    multipliers -- the ordinary degenerate LP vertex -- is not an error: ``dx*/dp``
+    is unique there and is returned (see :func:`_solve_kkt`).
+
+    Subclasses :class:`numpy.linalg.LinAlgError`, what this case raised before.
+    """
+
+
 @dataclass
 class SensitivityResult:
     """Result of a parametric sensitivity solve.
@@ -309,10 +323,21 @@ def pounce_sensitivity(
             d_res = np.asarray(
                 jax.jacfwd(lambda pp: phi.kkt_residual(z0, pp, x_j0, act_j, bnd_j))(jnp.asarray(p0))
             ).reshape(n + m_cons, len(params))
-            sol = np.linalg.solve(kkt, -d_res)
+            sol = _solve_kkt(kkt, -d_res, n)
             dx_dp = sol[:n]
             dlambda_dp = sol[n:] if m_cons else np.zeros((0, len(params)))
         else:
+            # ``phi``'s ``custom_root`` solves the same matrix with
+            # ``jnp.linalg.solve``, which does not raise on a singular one: it
+            # returns inf/nan or garbage. Refuse a degenerate point up front (#1749).
+            kkt = _kkt_matrix(model, n, m_cons, x_star, lambda_star, active, at_bound)
+            if np.linalg.matrix_rank(kkt) < kkt.shape[0]:
+                raise DegenerateSensitivityError(
+                    "order=2 sensitivity is not available at a degenerate KKT point "
+                    "(the active-set KKT matrix is singular: more constraints are "
+                    "active than the point needs, as at a degenerate LP vertex). "
+                    "First-order derivatives (order=1) handle this case."
+                )
             jac = np.asarray(jax.jacobian(phi)(jnp.asarray(p0)))
             dx_dp = jac[:n]
             dlambda_dp = jac[n:] if m_cons else np.zeros((0, len(params)))
@@ -374,6 +399,59 @@ def _kkt_matrix(model, n, m_cons, x_star, lambda_star, active, at_bound):
     return np.vstack([top, bottom])
 
 
+#: Relative singular-value cutoff for the rank of a singular KKT matrix, and the
+#: relative residual / null-space size below which a component counts as zero.
+_KKT_RANK_RTOL = 1e-10
+_KKT_CONSISTENT_RTOL = 1e-8
+
+
+def _solve_kkt(kkt: np.ndarray, rhs: np.ndarray, n: int) -> np.ndarray:
+    """Solve the active-set KKT system, handling a degenerate (singular) one.
+
+    A nonsingular matrix goes through :func:`numpy.linalg.solve` unchanged.  A
+    singular one is the normal case at a degenerate point -- at an LP vertex with
+    more active constraints than variables (``x0 + x1 = 1`` with ``x = (1, 0)`` on
+    ``[0, 1]^2``) both variables are frozen at bounds, so the equality's row and
+    column vanish (#1749).  There the system is solved by SVD and judged:
+
+    * inconsistent (no solution), or a null space with a primal component (``dx``
+      not unique): :class:`DegenerateSensitivityError` -- there is no derivative to
+      report, and returning a least-squares one would be a silent approximation;
+    * otherwise ``dx*/dp`` is unique and exact.  The multiplier derivatives along
+      the null space are not determined; those rows of ``dλ*/dp`` are ``nan``
+      rather than one arbitrary choice among infinitely many.
+    """
+    try:
+        return np.linalg.solve(kkt, rhs)
+    except np.linalg.LinAlgError:
+        pass
+    U, s, Vt = np.linalg.svd(kkt)
+    smax = float(s[0]) if s.size else 0.0
+    rank = int(np.sum(s > _KKT_RANK_RTOL * smax)) if smax > 0.0 else 0
+    rhs2 = rhs.reshape(kkt.shape[0], -1)
+    sol = Vt[:rank].T @ ((U[:, :rank].T @ rhs2) / s[:rank, None])
+    resid = np.linalg.norm(kkt @ sol - rhs2, axis=0)
+    scale = smax * np.linalg.norm(sol, axis=0) + np.linalg.norm(rhs2, axis=0)
+    if np.any(resid > _KKT_CONSISTENT_RTOL * np.maximum(scale, 1.0)):
+        raise DegenerateSensitivityError(
+            "the solution is not differentiable in the parameters at this point: "
+            "the active-set KKT matrix is singular (a degenerate point, e.g. an LP "
+            "vertex with more active constraints than variables) and the linearised "
+            "system has no solution, so the active set changes under any parameter "
+            "perturbation and the one-sided derivatives differ"
+        )
+    null = Vt[rank:]
+    if null.size and np.max(np.abs(null[:, :n])) > _KKT_CONSISTENT_RTOL:
+        raise DegenerateSensitivityError(
+            "dx*/dp is not unique at this point: the active-set KKT matrix is "
+            "singular and its null space moves the primal solution"
+        )
+    undetermined = np.max(np.abs(null), axis=0) > _KKT_CONSISTENT_RTOL if null.size else None
+    if undetermined is not None:
+        sol[undetermined] = np.nan
+    return sol.reshape(rhs.shape)
+
+
 def _fd_sensitivity(model, params, phi, p0, x_star, lambda_star, active, at_bound, eps):
     """Central-difference right-hand side on the SAME active-set system.
 
@@ -420,7 +498,7 @@ def _fd_sensitivity(model, params, phi, p0, x_star, lambda_star, active, at_boun
         else:
             rhs = -d_lag
 
-        sol = np.linalg.solve(kkt, rhs)
+        sol = _solve_kkt(kkt, rhs, n)
         dx_dp[:, k] = sol[:n]
         if m_cons:
             dlambda_dp[:, k] = sol[n:]

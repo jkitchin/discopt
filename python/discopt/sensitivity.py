@@ -220,7 +220,10 @@ class Sensitivity:
     dlambda_dp : ndarray, shape (m, n_params)
         ``dλ*/dp``, from the same system rather than a separately assembled one.
         Carries the same internal-minimization sign convention as
-        :attr:`multipliers` -- see there.
+        :attr:`multipliers` -- see there.  At a degenerate point (more constraints
+        active than the point needs, e.g. a degenerate LP vertex) the multipliers
+        are not unique and neither are their derivatives: those rows are ``nan``,
+        while :attr:`dx_dp` -- unique there -- is still exact (#1749).
     d2x_dp2 : ndarray, shape (n, n_params, n_params), or None
         ``∂²x*/∂p_j∂p_k``; ``None`` unless ``order=2`` was requested.
     active : ndarray of bool, shape (m,)
@@ -764,6 +767,13 @@ def sensitivity(
         foreign parameter, or if the model has integer/binary variables.
     RuntimeError
         If the solve fails or its KKT point does not check out.
+    discopt.solvers.sipopt.DegenerateSensitivityError
+        At a degenerate KKT point where ``dx*/dp`` does not exist or is not unique
+        (the active set changes under any perturbation of the parameters), and for
+        ``order=2`` at any degenerate point.  A degenerate point whose ``dx*/dp`` is
+        unique -- the usual degenerate LP vertex -- returns normally, with ``nan``
+        in the undetermined rows of :attr:`Sensitivity.dlambda_dp` (#1749).
+        Subclasses :class:`numpy.linalg.LinAlgError`.
 
     Warns
     -----

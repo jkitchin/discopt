@@ -3245,6 +3245,15 @@ def _solve_milp_std(
             repaired_why = why
             labels["milp/incumbent_repaired"] = why
         else:
+            # #1750: publish the point the verifier just tested -- its integral
+            # realisation (#1380) -- and the objective AT it. HiGHS's tree accepts a
+            # binary within ``mip_feasibility_tolerance`` of integral, so its raw
+            # ``col_value`` (1 - 8e-8) priced the objective at 136.99999884 where the
+            # claimed assignment is worth exactly 137; fed back as an epsilon-constraint
+            # bound, that 1e-6 is a row violation of the next sub-MILP.
+            from discopt.validation.feasibility import snap_integer_columns
+
+            x = snap_integer_columns(x, sf.int_idx)
             obj = float(sf.c @ x) + sf.obj_const
             h_obj = float(info.objective_function_value)  # includes the passed offset
             mismatch = abs(obj - h_obj)
