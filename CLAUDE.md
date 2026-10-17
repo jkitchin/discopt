@@ -120,7 +120,9 @@ was believed.
    `TypeError: cannot pickle 'builtins.PyModelRepr'`; a bare `except` hid it and an
    entire fallback was an invisible no-op while reported as working. Let probes
    crash. (The `TypeError` itself is gone since #1479 — `Model.__deepcopy__`
-   now copies fresh, solved, `from_nl` and fast-API models — but the lesson stands.) This is §3 applied to the thing you are using to judge §3.
+   now copies fresh, solved, `from_nl` and fast-API models, and `Model.__getstate__`
+   does the same for `pickle`, where a `from_nl` parse is replaced by a marker that
+   refuses use — but the lesson stands.) This is §3 applied to the thing you are using to judge §3.
 8. **Verify which code you actually loaded.** Before any measurement in a worktree
    or against a branch, assert both `module.__file__` *and* a marker string unique
    to the version under test (and, for a baseline run, assert that marker

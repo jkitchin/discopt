@@ -5369,6 +5369,32 @@ def _is_fast_linear_quadratic_family(model) -> bool:
 # these to ``None`` on the copy and omits every other ``*_cache`` attribute (#1479).
 _MODEL_INIT_CACHES = frozenset({"_flat_var_offsets_cache"})
 
+
+class _UnpickledNlRepr:
+    """Stands in for a ``from_nl`` model's ``_nl_repr`` after a pickle round trip.
+
+    The Rust ``PyModelRepr`` has no pickle support, so ``Model.__getstate__`` cannot
+    carry it. Dropping the attribute outright would not be neutral: its *presence*
+    is what tells :meth:`Model._referenced_variable_names` to answer "could not
+    tell", and an unpickled model that started walking its expressions instead
+    would make that guard fire less, not more. This marker keeps the attribute
+    non-``None`` so the guard behaves exactly as on the original, and refuses any
+    other use loudly rather than handing back something that is not the parse.
+    """
+
+    __slots__ = ()
+
+    def __getattr__(self, name: str):
+        raise AttributeError(
+            f"_nl_repr.{name}: this model was unpickled, and the parsed .nl representation "
+            "(a Rust PyModelRepr) does not survive pickling. Re-read the source with "
+            "discopt.from_nl() if the parse itself is needed."
+        )
+
+    def __repr__(self) -> str:
+        return "<_nl_repr dropped by pickle>"
+
+
 #: Model-level *validation guards*: lists of assumptions a construction-time
 #: rewrite relied on, re-checked by :meth:`Model.validate` before every solve
 #: because variable bounds are mutable afterwards. ``_atan2_preconditions`` holds
@@ -6091,6 +6117,52 @@ class Model:
         # The objective entry points install a fresh placeholder; keep the
         # copied one so the copy's objective object graph matches the original's.
         self._objective = objective
+
+    # ── Pickling ─────────────────────────────────────────────────────
+    #
+    # The same three obstacles ``__deepcopy__`` handles, and the same treatment:
+    # solve caches are dropped (an unpickled model starts cold), the Rust builder
+    # is replayed from its Python-side record, and everything else -- including
+    # ``_last_solve_result`` and ``_source_nl_path`` -- travels as the default
+    # pickle would carry it. The one difference is ``_nl_repr``: a deep copy can
+    # share it, but a pickle has to leave the process, so it becomes a
+    # ``_UnpickledNlRepr`` marker (see that class for why it is not just dropped).
+    #
+    # ``pickle`` is for moving a model between processes running the same
+    # discopt; it carries no format version. To keep a model on disk, use
+    # ``Model.save`` / ``discopt.modeling.dumps`` (``discopt.serialize``).
+
+    def __getstate__(self) -> tuple[dict, bool]:
+        state: dict = {}
+        for key, value in self.__dict__.items():
+            if key.endswith("_cache"):
+                if key in _MODEL_INIT_CACHES:
+                    state[key] = None
+                continue
+            if key == "_builder":
+                state[key] = None
+                continue
+            if key == "_nl_repr" and value is not None:
+                state[key] = _UnpickledNlRepr()
+                continue
+            state[key] = value
+        return state, self._builder is not None
+
+    def __setstate__(self, state: tuple[dict, bool]) -> None:
+        attrs, had_builder = state
+        self.__dict__.update(attrs)
+        if had_builder:
+            self._replay_builder()
+
+    # ``copy.copy`` also goes through ``__getstate__``/``__setstate__`` once they
+    # exist. Keep it what it was before they did -- a plain shallow copy sharing
+    # every attribute -- since callers (``relax_objective_defining_equality``)
+    # rely on it being cheap and on it changing nothing but what they reassign.
+    def __copy__(self) -> "Model":
+        cls = type(self)
+        new = cls.__new__(cls)
+        new.__dict__.update(self.__dict__)
+        return new
 
     def clone(self) -> "Model":
         """Return an independent deep copy of this model.
