@@ -422,7 +422,8 @@ def _solve_kkt(kkt: np.ndarray, rhs: np.ndarray, n: int) -> np.ndarray:
       rather than one arbitrary choice among infinitely many.
     """
     try:
-        return np.linalg.solve(kkt, rhs)
+        direct: np.ndarray = np.linalg.solve(kkt, rhs)
+        return direct
     except np.linalg.LinAlgError:
         pass
     U, s, Vt = np.linalg.svd(kkt)
@@ -449,7 +450,8 @@ def _solve_kkt(kkt: np.ndarray, rhs: np.ndarray, n: int) -> np.ndarray:
     undetermined = np.max(np.abs(null), axis=0) > _KKT_CONSISTENT_RTOL if null.size else None
     if undetermined is not None:
         sol[undetermined] = np.nan
-    return sol.reshape(rhs.shape)
+    out: np.ndarray = sol.reshape(rhs.shape)
+    return out
 
 
 def _fd_sensitivity(model, params, phi, p0, x_star, lambda_star, active, at_bound, eps):
