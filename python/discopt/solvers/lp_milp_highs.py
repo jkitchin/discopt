@@ -1933,6 +1933,26 @@ def _verified_mip_point(
     return x, float(sf.c @ x) + sf.obj_const
 
 
+def _snapped_incumbent(x: np.ndarray, sf: "StdForm", rf: Optional["_RowForm"]) -> np.ndarray:
+    """A verified incumbent ``x`` at its integral realisation (#1750).
+
+    ``x`` has passed :func:`feasibility_problem` with integrality, which tested the
+    rows at exactly ``snap_integer_columns(x)`` -- so that point is already verified.
+    On the row form (``rf``), the logicals were lifted from the unsnapped columns;
+    re-lifting them from the snapped ones makes each row hold at its own value, and
+    that point replaces the plain snap only when it passes the same gates.
+    """
+    from discopt.validation.feasibility import snap_integer_columns
+
+    snapped = snap_integer_columns(x, sf.int_idx)
+    if rf is None or not sf.int_idx.size:
+        return snapped
+    relifted = _lift_logicals(snapped[rf.keep], sf, rf)
+    if readback_problem(relifted, sf) or feasibility_problem(relifted, sf, check_integrality=True):
+        return snapped
+    return relifted
+
+
 def _fixed_integer_lp(sf: "StdForm", x: np.ndarray, time_limit: Optional[float]) -> HighsOutcome:
     """The NS-safe LP of ``sf`` with every integer column fixed at ``round(x_j)``.
 
@@ -3245,6 +3265,15 @@ def _solve_milp_std(
             repaired_why = why
             labels["milp/incumbent_repaired"] = why
         else:
+            # #1750: publish the point the verifier tested -- its integral
+            # realisation (#1380) -- and its objective. HiGHS reads a binary back
+            # within its MIP feasibility tolerance of integral (8e-8 on the issue's
+            # facility location), and the objective of that fractional point
+            # (136.99999884 for an all-integer 137) leaked into the published
+            # objective and from there into epsilon-constraint bounds. On the row
+            # form the eliminated logicals are re-derived from the snapped columns,
+            # so the rows hold exactly; that point is adopted only if it verifies.
+            x = _snapped_incumbent(x, sf, rf)
             obj = float(sf.c @ x) + sf.obj_const
             h_obj = float(info.objective_function_value)  # includes the passed offset
             mismatch = abs(obj - h_obj)
