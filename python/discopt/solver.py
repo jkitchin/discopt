@@ -3125,6 +3125,64 @@ def _evaluator_fingerprint(model: Model) -> "_EvaluatorFingerprint":
     return evaluator_fingerprint(model)
 
 
+def _objective_lattice(model: Model) -> Optional[tuple[float, float]]:
+    """``(g, c0)`` when every attainable objective value is ``c0 + k*g``, else ``None``.
+
+    #1731. Proven, never estimated: the objective must be affine, every column
+    with a nonzero coefficient integer or binary, and every such coefficient an
+    exact integer (``float.is_integer`` below ``2**53``), so ``g`` is their gcd
+    and ``c0`` the constant. Stricter than the Rust MILP detector, which
+    rationalizes to a tolerance; a too-large ``g`` would prune the optimum, so
+    anything short of exact refuses.
+    """
+    from discopt._relax.problem_classifier import (
+        _EXTRACTION_DECLINES,
+        _extract_linear_coefficients_sparse,
+    )
+
+    if model._objective is None:
+        return None
+    n = sum(v.size for v in model._variables)
+    try:
+        terms, c0 = _extract_linear_coefficients_sparse(model._objective.expression, model, n)
+    except _EXTRACTION_DECLINES:
+        return None
+    integral = np.zeros(n, dtype=bool)
+    off = 0
+    for v in model._variables:
+        if v.var_type in (VarType.BINARY, VarType.INTEGER):
+            integral[off : off + v.size] = True
+        off += v.size
+    g = 0
+    for j, cj in terms.items():
+        if cj == 0.0:
+            continue
+        if not integral[j] or not float(cj).is_integer() or abs(cj) >= 2.0**53:
+            return None
+        g = math.gcd(g, int(abs(cj)))
+    if g == 0 or not math.isfinite(float(c0)):
+        return None
+    return float(g), float(c0)
+
+
+def _round_bounds_to_lattice(lbs: np.ndarray, g: float, offset: float) -> np.ndarray:
+    """Round finite node lower bounds UP onto ``offset + k*g`` (#1731).
+
+    Every attainable objective value is on the lattice, so the smallest lattice
+    point ``>= lb`` is a valid bound wherever ``lb`` is. The ``1e-6`` slack (in
+    lattice units, plus ``1e-9`` relative) keeps a bound that overshoots a
+    lattice point by float noise from jumping a whole step -- which is the one
+    way this could cut off the optimum. Infinite and sentinel bounds (``>= 1e29``)
+    pass through unchanged.
+    """
+    out = np.array(lbs, dtype=np.float64, copy=True)
+    ok = np.isfinite(out) & (np.abs(out) < 1e29)
+    if ok.any():
+        z = (out[ok] - offset) / g
+        out[ok] = offset + g * np.ceil(z - (1e-6 + 1e-9 * np.abs(z)))
+    return out
+
+
 def _make_evaluator(model: Model):
     """Create or reuse a cached NLP evaluator for the model.
 
@@ -16041,6 +16099,12 @@ def solve_model(
     _obj_negate = (
         model._objective is not None and model._objective.sense == _ObjectiveSense.MAXIMIZE
     )
+    # #1731: the objective's lattice in the tree's internal (minimization) sense.
+    _obj_lattice: Optional[tuple[float, float]] = None
+    if _tuning().spatial_obj_lattice:
+        _lat = _objective_lattice(model)
+        if _lat is not None:
+            _obj_lattice = (_lat[0], -_lat[1] if _obj_negate else _lat[1])
 
     # --- Default Ipopt options ---
     opts = dict(ipopt_options) if ipopt_options else {}
@@ -20187,6 +20251,8 @@ def solve_model(
         # here keeps the two flags consistent rather than relying on the order the
         # tree happens to apply them in.
         _exclusion_mask |= node_infeasible_mask
+        if _obj_lattice is not None:
+            result_lbs = _round_bounds_to_lattice(result_lbs, *_obj_lattice)
         t_rust_start = time.perf_counter()
         if _requeue_mask is not None and _requeue_mask.any():
             # A requeued node is OPEN again, so no result may be imported for it
@@ -27093,6 +27159,42 @@ def _matched_row_constraint_duals(
         by_support.setdefault(sup, []).append(k)
         j_vals.append(vals)
 
+    # #1730: support alone does not separate the rows of a DENSE matrix -- every
+    # row shares the full support, so 1000 rows were one bucket and matching made
+    # 2.0M Python-level ``allclose`` calls (~30 s after a 0.5 s LP solve). Within a
+    # bucket, sort candidates by a projection key ``w . v`` and visit only those
+    # inside a window that ``allclose(a, s*v)`` provably implies:
+    # ``|a_i - s v_i| <= atol + rtol |v_i|`` gives ``|v_i| <= (|a_i| + atol)/(1 - rtol)``
+    # and so ``|w.a - s w.v| <= sum_i |w_i| (atol + rtol (|a_i| + atol)/(1 - rtol))``.
+    # A necessary condition only: every candidate the exact test would accept is
+    # in the window, and ``_close`` still decides each one, so the matches -- and
+    # hence the duals -- are exactly what the full scan produced.
+    _rtol, _atol = 1e-9, 1e-12
+    _w_all = np.random.default_rng(0x1730).uniform(0.5, 1.5, size=n_orig)
+    bucket_keys: dict[tuple, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    for sup, ks in by_support.items():
+        w = _w_all[list(sup)] if sup else np.zeros(0)
+        keys = np.array([float(w @ j_vals[k]) for k in ks], dtype=np.float64)
+        order = np.argsort(keys, kind="stable")
+        bucket_keys[sup] = (keys[order], np.asarray(ks, dtype=np.intp)[order], w)
+
+    def _candidates(sup: tuple, a: np.ndarray, s: float) -> list[int]:
+        entry = bucket_keys.get(sup)
+        if entry is None:
+            return []
+        keys, ks, w = entry
+        if len(ks) <= 8:
+            return [int(k) for k in ks]
+        aw = np.abs(w)
+        vmax = (np.abs(a) + _atol) / (1.0 - _rtol)
+        tol = float(aw @ (_atol + _rtol * vmax))
+        # Float slack for evaluating the two dot products themselves.
+        tol += 8.0 * (len(a) + 1) * np.finfo(np.float64).eps * float(aw @ (np.abs(a) + vmax))
+        centre = s * float(w @ a)
+        lo = int(np.searchsorted(keys, centre - tol, side="left"))
+        hi = int(np.searchsorted(keys, centre + tol, side="right"))
+        return [int(k) for k in ks[lo:hi]]
+
     # Non-None whenever the matching count is nonzero (checked above).
     b_ub_v = np.zeros(0) if b_ub is None else np.asarray(b_ub, dtype=np.float64).reshape(-1)
     b_eq_v = np.zeros(0) if b_eq is None else np.asarray(b_eq, dtype=np.float64).reshape(-1)
@@ -27111,8 +27213,8 @@ def _matched_row_constraint_duals(
     for r, (M, j, b, is_eq) in enumerate(solved):
         sup, a = _row(M, j)
         hits: list[tuple[int, float]] = []
-        for k in by_support.get(sup, []):
-            for s in (1.0, -1.0):
+        for s in (1.0, -1.0):
+            for k in _candidates(sup, a, s):
                 if not _close(a, s * j_vals[k]):
                     continue
                 if is_eq:
@@ -33026,6 +33128,9 @@ def _solve_lp_highs(model: Model, t_start: float, time_limit: float | None = Non
         else:
             gap = _gap_mod.reported_gap(obj, bound)
         cd, bdl, bdu = _highs_decomposed_duals(model, n_orig, sf, out.row_dual, out.col_dual)
+        # #1730: dual recovery is part of the solve the caller waited for; measuring
+        # before it hid ~30 s on a dense LP behind a 0.46 s ``wall_time``.
+        wall = time.perf_counter() - t_start
         sr = SolveResult(
             status=out.status,
             objective=obj,
