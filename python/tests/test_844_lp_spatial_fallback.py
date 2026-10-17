@@ -160,3 +160,39 @@ def test_fallback_never_breaks_a_solve(fb):
     fb("1")
     r = _pure_integer_min().solve(time_limit=60)
     assert r.objective is not None
+
+
+def test_fallback_budget_never_runs_past_the_callers_time_limit(fb, monkeypatch):
+    """A primary that overran its 65% share used to leave the fallback a full 35%
+    reserve anyway -- past the caller's ``time_limit`` (QPLIB_3361/3709: primary out
+    at T+44 of 60 s, fallback deadline T+64). What is left of ``time_limit``,
+    measured from solve entry (setup before the primary included), is now the cap."""
+    import dataclasses
+    import time
+
+    import discopt._relax.lp_spatial_bb as lsb
+    import discopt.solver as solver_mod
+
+    fb("1")
+    real_solve_model = solver_mod.solve_model
+    t_limit = 6.0  # reserve 2.1 s (> the 1.0 s gate), primary share 3.9 s
+    t_start = [0.0]
+
+    def overrunning_primary(*args, **kwargs):
+        r = real_solve_model(*args, **kwargs)
+        time.sleep(max(0.0, t_start[0] + 5.0 - time.perf_counter()))  # 1.1 s past share
+        return dataclasses.replace(r, objective=None, x=None, status="time_limit")
+
+    granted = []
+
+    def recording_engine(model, time_limit, **kwargs):
+        granted.append((time_limit, time.perf_counter()))
+        return None
+
+    monkeypatch.setattr(solver_mod, "solve_model", overrunning_primary)
+    monkeypatch.setattr(lsb, "solve_lp_spatial_bb", recording_engine)
+    t_start[0] = time.perf_counter()
+    _pure_integer_min().solve(time_limit=t_limit)
+    assert len(granted) == 1, "the fallback never ran: the probe measured nothing"
+    budget, at = granted[0]
+    assert at + budget <= t_start[0] + t_limit + 1e-3

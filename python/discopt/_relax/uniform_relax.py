@@ -56,8 +56,10 @@ from typing import Callable, Optional, cast
 import numpy as np
 
 from discopt._relax.canonical_expr import (
+    ABORT_POLL_STRIDE,
     CanonicalDAG,
     CNode,
+    RelaxationBuildAborted,
     canonicalize,
     is_affine,
     reconstruct,
@@ -103,9 +105,15 @@ __all__ = [
     "Envelope",
     "UniformRelaxation",
     "ENVELOPE_LIBRARY",
+    "RelaxationBuildAborted",
     "build_uniform_relaxation",
     "relaxation_report",
 ]
+
+
+# Defined beside the canonicalizer (the lowest layer that polls an abort
+# deadline) and re-exported: one exception type for the whole build.
+_ABORT_POLL_STRIDE = ABORT_POLL_STRIDE
 
 # A finite endpoint magnitude beyond which we treat a bound as "not usable" for a
 # tangent/secant/McCormick row (an infinite or astronomically large coefficient
@@ -879,12 +887,17 @@ class _ModelAnalysisCache:
         self.hessian_abstain: dict[int, list[tuple[np.ndarray, np.ndarray]]] = {}
 
 
-def _get_analysis_cache(model: Model) -> _ModelAnalysisCache:
-    """Fetch (or rebuild if stale) the model's box-independent analysis cache."""
+def _get_analysis_cache(
+    model: Model, abort_deadline: Optional[float] = None
+) -> _ModelAnalysisCache:
+    """Fetch (or rebuild if stale) the model's box-independent analysis cache.
+
+    ``abort_deadline`` bounds a cold rebuild (:func:`canonicalize`); an aborted one
+    raises :class:`RelaxationBuildAborted` and caches nothing."""
     token = _analysis_token(model)
     cache = model.__dict__.get(_ANALYSIS_ATTR)
     if cache is None or cache.token != token:
-        cache = _ModelAnalysisCache(model, canonicalize(model))
+        cache = _ModelAnalysisCache(model, canonicalize(model, abort_deadline=abort_deadline))
         model.__dict__[_ANALYSIS_ATTR] = cache
     return cache
 
@@ -953,8 +966,13 @@ class _Builder:
         analysis: "Optional[_ModelAnalysisCache]" = None,
         track_aux_exprs: bool = False,
         skip_convex_lift: bool = False,
+        abort_deadline: Optional[float] = None,
     ):
         self.model = model
+        # Absolute ``time.perf_counter()`` past which ``rep`` raises
+        # ``RelaxationBuildAborted`` (polled every ``_ABORT_POLL_STRIDE`` calls).
+        self._abort_deadline = abort_deadline
+        self._abort_polls = 0
         # Skip the composite convex/concave OA lift (#640 Bucket 3): it lifts the
         # whole convex node to a box-dependent epigraph aux the incremental McCormick
         # patch cannot regenerate. Skipping it keeps the objective as the plain sum
@@ -1599,6 +1617,16 @@ class _Builder:
         cached = self._rep.get(id(node))
         if cached is not None:
             return cached
+        if self._abort_deadline is not None:
+            self._abort_polls += 1
+            if (
+                self._abort_polls % _ABORT_POLL_STRIDE == 0
+                and time.perf_counter() >= self._abort_deadline
+            ):
+                raise RelaxationBuildAborted(
+                    f"relaxation build passed its abort deadline after "
+                    f"{self._abort_polls} node relaxations"
+                )
         out = None if self.skip_convex_lift else self._try_convex_lift(node)
         if out is None:
             out = self._rep_impl(node)
@@ -1639,8 +1667,24 @@ class _Builder:
             return not is_affine(child)
         if kind == "prod" and _perspective_oa_active():
             # #1662: a perspective ``L * g(A/L)`` (the GDP hull row) is a product
-            # the rules can prove convex inside the proof scope; a bilinear
-            # product stays UNKNOWN there and is declined by ``_try_convex_lift``.
+            # the rules can prove convex inside the proof scope.
+            #
+            # A bare bilinear ``x_i * x_j`` (two distinct variables, unit exponents)
+            # is excluded HERE rather than declined by ``_try_convex_lift``: its
+            # Hessian is the constant ``[[0, 1], [1, 0]]`` (eigenvalues -1, +1) on
+            # every box, so neither DCP nor the interval-Hessian certificate can
+            # ever prove it, and the decline is the only possible outcome. Paying
+            # for it is not free: a DCP walk plus one-to-64 interval-Hessian walks
+            # per product, which on a dense QP (QPLIB_3709: 165,300 products) is
+            # ~7 ms each and ran the root relaxation build to many minutes past
+            # the time limit. Bound-neutral: the node falls through to McCormick
+            # exactly as it did after the failed certificate.
+            if (
+                len(node.children) == 2
+                and all(c.kind == "var" for c in node.children)
+                and tuple(node.payload[0]) == (1, 1)
+            ):
+                return False
             return True
         return False  # prod (bilinear) / opaque
 
@@ -4438,6 +4482,7 @@ def build_uniform_relaxation(
     skip_convex_lift: bool = False,
     disc_state: object = None,
     build_deadline: Optional[float] = None,
+    abort_deadline: Optional[float] = None,
 ) -> UniformRelaxation:
     """Build the uniform factorable relaxation of ``model`` over ``box``.
 
@@ -4463,6 +4508,14 @@ def build_uniform_relaxation(
         ``_build_constraints_total``. Gated default-off via
         ``SolverTuning.anytime_root_build``; only ``_root_relaxation_lower_bound``
         passes a non-``None`` value today.
+    abort_deadline : float, optional
+        A ``time.perf_counter`` absolute time past which the build raises
+        :class:`RelaxationBuildAborted` instead of finishing. Unlike
+        ``build_deadline`` it also bounds the OBJECTIVE walk, which on a dense
+        quadratic is the whole cost (QPLIB_3709: 165,300 products, ~28 s per
+        build) and which ``build_deadline`` cannot truncate without losing the
+        bound. For callers that can do without the relaxation; default ``None``
+        never raises and is byte-identical to before.
     rlt_quad : bool, default False
         Enable the quadratic constraint-factor RLT pass (issue #640 Bucket 2):
         multiply each degree-2 polynomial constraint by variable bound factors,
@@ -4506,9 +4559,16 @@ def build_uniform_relaxation(
     # Box-independent analysis, computed once per model and pinned on it (issue #632
     # EP1): the canonical DAG (which pins CNodes -> stable id() keys), reconstructed
     # expressions, DCP verdicts, compiled value/grad fns, and curvature certificates.
-    analysis = _get_analysis_cache(model)
+    analysis = _get_analysis_cache(model, abort_deadline=abort_deadline)
     dag: CanonicalDAG = analysis.dag
-    ctx = _Builder(model, flat_lb, flat_ub, analysis, skip_convex_lift=skip_convex_lift)
+    ctx = _Builder(
+        model,
+        flat_lb,
+        flat_ub,
+        analysis,
+        skip_convex_lift=skip_convex_lift,
+        abort_deadline=abort_deadline,
+    )
 
     # Objective -> c, obj_offset (minimize convention; maximize is negated so the
     # reported LP bound is a valid lower bound on the minimize-equivalent, matching
@@ -4564,6 +4624,10 @@ def build_uniform_relaxation(
     # anytime build (#694): it only *adds* rows (tightening), so skipping it when
     # the build deadline is already spent is sound (weaker, never falsified) and
     # keeps the truncation honoring the deadline.
+    # The RLT passes add rows outside ``rep``, so the abort poll there cannot see
+    # them; check once before they start.
+    if abort_deadline is not None and time.perf_counter() >= abort_deadline:
+        raise RelaxationBuildAborted("relaxation build passed its abort deadline before RLT")
     if rlt_quad and not build_truncated:
         _emit_quadratic_rlt(ctx, model, flat_lb, flat_ub)
     # Linear-equality constraint-factor RLT, gated the same way and for the same

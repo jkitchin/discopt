@@ -2435,6 +2435,7 @@ def _uniform_relaxation_delegate(
     skip_convex_lift: bool = False,
     disc_state: object = None,
     build_deadline: Optional[float] = None,
+    abort_deadline: Optional[float] = None,
 ) -> tuple["MilpRelaxationModel", dict]:
     """Build the default relaxation through the uniform factorable engine (#632).
 
@@ -2468,6 +2469,7 @@ def _uniform_relaxation_delegate(
         skip_convex_lift=skip_convex_lift,
         disc_state=disc_state,
         build_deadline=build_deadline,
+        abort_deadline=abort_deadline,
     )
     milp = rel.model
     n_total = int(np.size(milp._c))
@@ -2609,6 +2611,7 @@ def build_milp_relaxation(
     skip_separable_floor: bool = False,
     skip_convex_lift: bool = False,
     build_deadline: Optional[float] = None,
+    abort_deadline: Optional[float] = None,
 ) -> tuple["MilpRelaxationModel", dict]:
     """Build a MILP relaxation with piecewise McCormick for bilinear/monomial terms.
 
@@ -2664,6 +2667,9 @@ def build_milp_relaxation(
         Embedded encoding scheme. ``"gray"`` is the Alpine-style default and
         the only option that remains SOS2-compatible for arbitrary partition
         counts. ``"binary"`` is only valid for two partitions.
+    abort_deadline : float, optional
+        Forwarded to ``build_uniform_relaxation``: past this ``perf_counter``
+        time the build raises ``RelaxationBuildAborted`` rather than finishing.
 
     Returns
     -------
@@ -2707,6 +2713,7 @@ def build_milp_relaxation(
         skip_convex_lift=skip_convex_lift,
         disc_state=disc_state,
         build_deadline=build_deadline,
+        abort_deadline=abort_deadline,
     )
 
 

@@ -409,13 +409,19 @@ class IncrementalMcCormickLP:
         if self._deadline is not None and time.perf_counter() > self._deadline:
             self.decline_reason = "deadline already spent before construction"
             return
+        from discopt._relax.uniform_relax import RelaxationBuildAborted
+
         try:
             self._build_structure()
             self._validate()
-        except (ValueError, _IncrementalStructureTooLarge) as exc:
+        except (ValueError, _IncrementalStructureTooLarge, RelaxationBuildAborted) as exc:
             # #1520: narrowed. ``_full_build``/``_build_structure``/``_validate`` decline
             # with a ``ValueError`` (no valid bound, unmatched row pattern, row-set or
             # offset mismatch against the cold build) or ``_IncrementalStructureTooLarge``;
+            # ``RelaxationBuildAborted`` is the deadline reaching INTO a build: a cold
+            # build of a dense quadratic is one uninterruptible ~30-70 s walk, which the
+            # between-box check in ``_validate`` cannot bound (QPLIB_3361/3709 ran
+            # 114-119 s on a 30 s limit inside the first one).
             # anything else is a defect and propagates instead of reading as "declined".
             # Declining is always SOUND (the caller falls back to the per-node cold
             # build) but it is never free: it costs the fast path, the cuts and the
@@ -446,6 +452,7 @@ class IncrementalMcCormickLP:
             bound_override=(lb, ub),
             skip_separable_floor=True,
             skip_convex_lift=True,
+            abort_deadline=self._deadline,
         )
         if not relax._objective_bound_valid or relax._A_ub is None:
             raise ValueError("relaxation has no valid bound / no rows")
@@ -623,6 +630,10 @@ class IncrementalMcCormickLP:
             lo, hi = indptr[k], indptr[k + 1]
             return {int(indices[t]): float(data[t]) for t in range(lo, hi)}
 
+        from discopt._relax.uniform_relax import RelaxationBuildAborted
+
+        _select_calls = [0]
+
         def _select(cand, expected, label):
             """The subset of ``cand`` that IS this term's box-dependent envelope.
 
@@ -657,6 +668,17 @@ class IncrementalMcCormickLP:
             same polytope (:meth:`_rowset` is order-free); this one is byte-identical
             to the pre-#861 behaviour wherever the term already had exactly 4 rows.
             """
+            # One call per lifted term, so on a dense quadratic this loop is ~15 s
+            # after the probe build (QPLIB_3361/3709) -- poll the same deadline.
+            _select_calls[0] += 1
+            if (
+                self._deadline is not None
+                and _select_calls[0] % 256 == 0
+                and time.perf_counter() >= self._deadline
+            ):
+                raise RelaxationBuildAborted(
+                    f"deadline spent matching envelope rows ({_select_calls[0]} terms)"
+                )
             chosen: list[int] = []
             used: set[int] = set()
             for coeffs, rhs in expected:

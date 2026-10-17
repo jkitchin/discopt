@@ -38,7 +38,9 @@ import scipy.sparse as sp
 _TOL = 1e-12
 
 
-def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional[dict]:
+def build_spatial_kernel_spec(
+    model, bounds: Optional[tuple] = None, deadline: Optional[float] = None
+) -> Optional[dict]:
     """Return the flat-array ``SpatialKernelSpec`` kwargs for
     ``discopt._rust.solve_spatial_tree_py``, or ``None`` if the model uses a lifted
     term family the native kernel does not implement (caller falls back to Python).
@@ -48,13 +50,18 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
     ``.nl`` box is unbounded (e.g. tanksize), where the McCormick relaxation is only
     valid after the solver's FBBT/OBBT presolve.
 
+    ``deadline`` (absolute ``time.perf_counter()``) bounds the two relaxation
+    builds: past it the spec is declined (``None``) instead of finished. Each build
+    is one walk of the objective, so on a dense quadratic it alone can outlast the
+    solve (QPLIB_3361, 163,680 products, ran past 590 s on a 30 s limit here).
+
     The returned dict also carries two ``meta_``-prefixed keys —
     ``meta_obj_sense_sign`` and ``meta_obj_offset`` — for mapping the kernel's
     internal (minimize-convention) objective/bound back to model units:
     ``model_value = sign * (internal + offset)``. Callers pass the non-``meta_`` keys
     to the kernel; :func:`solve_with_native_kernel` strips them automatically."""
     from discopt._relax.incremental_mccormick import row_support_within
-    from discopt._relax.uniform_relax import build_uniform_relaxation
+    from discopt._relax.uniform_relax import RelaxationBuildAborted, build_uniform_relaxation
     from discopt.modeling.core import VarType
     from discopt.solver_tuning import current as _tuning
 
@@ -93,6 +100,7 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
             rlt_lineq=bool(_tuning().rlt_lineq),
             skip_separable_floor=True,
             skip_convex_lift=True,
+            abort_deadline=deadline,
         )
 
     # STRUCTURE is identified on a PROBE box with distinct, strictly sign-matched
@@ -112,11 +120,16 @@ def build_spatial_kernel_spec(model, bounds: Optional[tuple] = None) -> Optional
         else:
             lb_p[k], ub_p[k] = 1.0, 7.0 + k
 
-    rel = _build(lb_p, ub_p)
-    milp = rel.model
-    if milp._A_ub is None or not getattr(milp, "_objective_bound_valid", True):
+    # Out of time is the same decline as out of scope: the caller keeps the
+    # Python path, which polls the same deadline.
+    try:
+        rel = _build(lb_p, ub_p)
+        milp = rel.model
+        if milp._A_ub is None or not getattr(milp, "_objective_bound_valid", True):
+            return None
+        rel_real = _build(lb, ub)
+    except RelaxationBuildAborted:
         return None
-    rel_real = _build(lb, ub)
     if rel_real.model._A_ub is None:
         return None
     # Soundness guard: if the relaxation has no valid objective bound at the real box
