@@ -70,9 +70,10 @@ Scope and soundness rules:
 - Every monomial of degree >= 2 must consist exclusively of binary-valued
   factors; a continuous or general-integer variable may appear **linearly**
   only. Anything else (transcendentals, fractional/negative powers, divisions
-  by non-constants, vector expressions) aborts the pass, which then returns
-  the model **unchanged** — the solver keeps its existing paths, so the pass
-  never regresses a model it cannot handle exactly.
+  by non-constants, array-valued expressions) aborts the pass, which then
+  returns the model **unchanged** — the solver keeps its existing paths, so the
+  pass never regresses a model it cannot handle exactly. A *scalar-valued*
+  ``@`` (``c @ x``, ``x @ Q @ x``) is read as its explicit contraction (#1744).
 - The rewrite fires when a term of total degree >= 2 is present (#1619 C-01b,
   ``DISCOPT_BINARY_QUADRATIC_MILP``, default ON). Before that it required degree
   >= ``_MIN_DEGREE`` (3), on the argument that McCormick is already exact per
@@ -106,12 +107,14 @@ from typing import Optional
 
 import numpy as np
 
+from discopt._relax.scalarize import scalar_matmul_contraction
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
     Constraint,
     Expression,
     IndexExpression,
+    MatMulExpression,
     Model,
     Objective,
     ObjectiveSense,
@@ -255,6 +258,30 @@ def _affine_entries(var: Variable, coefs: np.ndarray):
         yield var, int(e), var[idx], float(coefs[e])
 
 
+#: ``id(MatMulExpression) -> (node, contraction or None)``. Holding the node
+#: keeps its ``id`` from being reused while the walk's memo is keyed on it.
+_MatMulCache = dict[int, tuple[Expression, Optional[Expression]]]
+
+
+def _matmul_contraction(node: MatMulExpression, cache: _MatMulCache) -> Optional[Expression]:
+    """The explicit ``sum_k left[k] * right[k]`` of a scalar-valued ``@`` (#1744).
+
+    ``c @ x`` and ``x @ Q @ x`` are the same polynomials as ``dm.sum(c * x)`` and
+    ``sum_ij Q[i,j] * x[i] * x[j]``, but the walks below only understand scalar
+    operators, so one ``@`` anywhere aborted the pass for the whole model and left
+    a binary QP on spatial B&B. The contraction is built by
+    :func:`~discopt._relax.scalarize.scalar_matmul_contraction`, which is
+    value-preserving by construction; ``None`` (an array-valued or unexpandable
+    ``@``) keeps the old refusal. Cached so every visit of *node* in one walk sees
+    the same contraction object -- the walks memoize on ``id``.
+    """
+    hit = cache.get(id(node))
+    if hit is None:
+        hit = (node, scalar_matmul_contraction(node))
+        cache[id(node)] = hit
+    return hit[1]
+
+
 # ---------------------------------------------------------------------------
 # Cheap syntactic gate
 # ---------------------------------------------------------------------------
@@ -277,7 +304,10 @@ def has_binary_multilinear_work(model: Model) -> bool:
     return any(_witness_scan(b) for b in bodies)
 
 
-def _gate_children(node: Expression) -> Optional[list[Expression]]:
+def _gate_children(node: Expression, mm: _MatMulCache) -> Optional[list[Expression]]:
+    if isinstance(node, MatMulExpression):
+        contraction = _matmul_contraction(node, mm)
+        return None if contraction is None else [contraction]
     if affine_array_sum(node) is not None:
         return []  # read as its coefficients (``_affine_entries``)
     if isinstance(node, BinaryOp):
@@ -302,13 +332,14 @@ def _witness_scan(root: Expression) -> bool:
     min_degree = _min_degree()
     # memo: id(node) -> (deg, all_bin, ok)
     memo: dict[int, tuple[int, bool, bool]] = {}
+    mm: _MatMulCache = {}
     stack: list[Expression] = [root]
     while stack:
         node = stack[-1]
         if id(node) in memo:
             stack.pop()
             continue
-        children = _gate_children(node)
+        children = _gate_children(node, mm)
         if children is None:
             memo[id(node)] = (0, True, False)
             stack.pop()
@@ -318,7 +349,7 @@ def _witness_scan(root: Expression) -> bool:
             stack.extend(pending)
             continue
         stack.pop()
-        memo[id(node)] = _gate_eval(node, memo)
+        memo[id(node)] = _gate_eval(node, memo, mm)
         deg, all_bin, ok = memo[id(node)]
         if (
             ok
@@ -331,9 +362,14 @@ def _witness_scan(root: Expression) -> bool:
     return False
 
 
-def _gate_eval(node: Expression, memo: dict[int, tuple[int, bool, bool]]) -> tuple[int, bool, bool]:
+def _gate_eval(
+    node: Expression, memo: dict[int, tuple[int, bool, bool]], mm: _MatMulCache
+) -> tuple[int, bool, bool]:
     if isinstance(node, (Constant, Parameter)):
         return (0, True, True)
+    if isinstance(node, MatMulExpression):
+        contraction = _matmul_contraction(node, mm)
+        return (0, True, False) if contraction is None else memo[id(contraction)]
     affine = affine_array_sum(node)
     if affine is not None:
         var, coefs = affine
@@ -348,7 +384,7 @@ def _gate_eval(node: Expression, memo: dict[int, tuple[int, bool, bool]]) -> tup
         d, b, ok = memo[id(node.operand)]
         return (d, b, ok and node.op == "neg")
     if isinstance(node, (SumExpression, SumOverExpression)):
-        children = _gate_children(node) or []
+        children = _gate_children(node, mm) or []
         deg, all_bin, ok = 0, True, True
         for c in children:
             d, b, o = memo[id(c)]
@@ -393,6 +429,7 @@ class _ExpandCtx:
         self.is_bin: dict[tuple[int, int], bool] = {}
         self.is_int: dict[tuple[int, int], bool] = {}
         self.ops = 0
+        self.matmul: _MatMulCache = {}
 
     def register(self, var: Variable, elem: int, ref: Expression) -> tuple[int, int]:
         key = (var._index, elem)
@@ -479,7 +516,12 @@ def _poly_pow(p: dict, k: int, ctx: _ExpandCtx) -> dict:
     return out
 
 
-def _expand_children(node: Expression) -> list[Expression]:
+def _expand_children(node: Expression, ctx: _ExpandCtx) -> list[Expression]:
+    if isinstance(node, MatMulExpression):
+        contraction = _matmul_contraction(node, ctx.matmul)
+        if contraction is None:
+            raise _Unsupported("array-valued or unexpandable matmul")
+        return [contraction]
     if affine_array_sum(node) is not None:
         return []
     if isinstance(node, BinaryOp):
@@ -511,7 +553,7 @@ def _expand_to_multilinear(root: Expression, ctx: _ExpandCtx) -> dict:
         if id(node) in memo:
             stack.pop()
             continue
-        children = _expand_children(node)
+        children = _expand_children(node, ctx)
         pending = [c for c in children if id(c) not in memo]
         if pending:
             stack.extend(pending)
@@ -531,6 +573,9 @@ def _expand_eval(node: Expression, memo: dict[int, dict], ctx: _ExpandCtx) -> di
             raise _Unsupported("non-scalar parameter")
         v = float(pv.reshape(()))
         return {_EMPTY: v} if v != 0.0 else {}
+    if isinstance(node, MatMulExpression):
+        # The contraction is cached and was expanded as this node's only child.
+        return memo[id(_matmul_contraction(node, ctx.matmul))]
     ref = _leaf_ref(node)
     if ref is not None:
         var, elem, ref_expr = ref
@@ -734,13 +779,14 @@ def _interval_of_dag(root: Expression) -> tuple[float, float]:
     so this is only ever a refinement."""
     inf = float("inf")
     memo: dict[int, tuple[float, float]] = {}
+    mm: _MatMulCache = {}
     stack: list[Expression] = [root]
     while stack:
         node = stack[-1]
         if id(node) in memo:
             stack.pop()
             continue
-        children = _gate_children(node)
+        children = _gate_children(node, mm)
         if children is None:
             memo[id(node)] = (-inf, inf)
             stack.pop()
@@ -750,7 +796,7 @@ def _interval_of_dag(root: Expression) -> tuple[float, float]:
             stack.extend(pending)
             continue
         stack.pop()
-        memo[id(node)] = _interval_eval(node, memo)
+        memo[id(node)] = _interval_eval(node, memo, mm)
     return memo[id(root)]
 
 
@@ -762,9 +808,14 @@ def _interval_mul(a: tuple[float, float], b: tuple[float, float]) -> tuple[float
     return (min(products), max(products))
 
 
-def _interval_eval(node: Expression, memo: dict[int, tuple[float, float]]) -> tuple[float, float]:
+def _interval_eval(
+    node: Expression, memo: dict[int, tuple[float, float]], mm: _MatMulCache
+) -> tuple[float, float]:
     inf = float("inf")
     top = (-inf, inf)
+    if isinstance(node, MatMulExpression):
+        contraction = _matmul_contraction(node, mm)
+        return top if contraction is None else memo[id(contraction)]
     if isinstance(node, Constant):
         try:
             v = _scalar_constant(node)
