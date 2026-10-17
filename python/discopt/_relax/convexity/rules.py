@@ -1560,13 +1560,85 @@ def _sign_join(a: Sign, b: Sign) -> Sign:
 # ──────────────────────────────────────────────────────────────────────
 
 
+def _const_weighted_curvature(weights: np.ndarray, curv: Curvature) -> Curvature:
+    """Curvature of a constant-weighted combination of ``curv`` expressions.
+
+    Each output of ``A @ f`` (or ``f @ A``) is ``sum_j a_j f_j``. That keeps
+    ``f``'s curvature when every weight is ``>= 0``, flips it when every weight is
+    ``<= 0``, and is UNKNOWN for mixed signs unless ``f`` is affine -- an affine
+    combination of affine terms is affine whatever the weights.
+    """
+    if curv == Curvature.AFFINE:
+        return Curvature.AFFINE
+    if not np.all(np.isfinite(weights)):
+        return Curvature.UNKNOWN
+    if np.all(weights >= 0.0):
+        return curv
+    if np.all(weights <= 0.0):
+        return negate(curv)
+    return Curvature.UNKNOWN
+
+
+def _quadratic_form_info(
+    expr: MatMulExpression, model: Optional[Model], cache: dict
+) -> Optional[ExprInfo]:
+    """``u @ Q @ u`` for one affine vector ``u`` and a constant square ``Q`` (#1728).
+
+    ``u' Q u = u' S u`` with ``S = (Q + Q')/2``, convex when ``S`` is PSD and
+    concave when it is NSD. Both parse orders are recognised:
+    ``(u @ Q) @ u`` and ``u @ (Q @ u)``. Semidefiniteness is decided by
+    :func:`~.eigenvalue.psd_proved`, which proves or refuses -- never guesses.
+    ``None`` when the pattern does not apply.
+    """
+    if isinstance(expr.left, MatMulExpression):
+        u, q_expr, v = expr.left.left, expr.left.right, expr.right
+    elif isinstance(expr.right, MatMulExpression):
+        u, q_expr, v = expr.left, expr.right.left, expr.right.right
+    else:
+        return None
+    if u is not v:
+        return None
+    Q = _const_leaf_value(q_expr)
+    if Q is None or Q.ndim != 2 or Q.shape[0] != Q.shape[1] or Q.shape[0] == 0:
+        return None
+    if Q.shape[0] > _QUADFORM_EIG_MAX_N or not np.all(np.isfinite(Q)):
+        return None
+    shape = getattr(u, "shape", None)
+    if shape is None or tuple(shape) != (Q.shape[0],):
+        return None
+    if classify_expr_info(u, model, cache).curvature != Curvature.AFFINE:
+        return None
+    from .eigenvalue import psd_proved
+
+    S = 0.5 * (Q + Q.T)
+    if psd_proved(S):
+        return ExprInfo(Curvature.CONVEX, Sign.NONNEG)
+    if psd_proved(-S):
+        return ExprInfo(Curvature.CONCAVE, Sign.NONPOS)
+    return None
+
+
+#: Largest ``Q`` the quadratic-form rule runs a dense eigenvalue test on.
+_QUADFORM_EIG_MAX_N = 4000
+
+
 def _classify_matmul(expr: MatMulExpression, model: Optional[Model], cache: dict) -> ExprInfo:
+    quad = _quadratic_form_info(expr, model, cache)
+    if quad is not None:
+        return quad
     left = classify_expr_info(expr.left, model, cache)
     right = classify_expr_info(expr.right, model, cache)
-    if isinstance(expr.left, (Constant, Parameter)) or _const_leaf_value(expr.left) is not None:
-        return ExprInfo(right.curvature, Sign.UNKNOWN)
-    if isinstance(expr.right, (Constant, Parameter)) or _const_leaf_value(expr.right) is not None:
-        return ExprInfo(left.curvature, Sign.UNKNOWN)
+    # A constant operand is a weight matrix on the other operand's entries. The
+    # curvature survives only for same-signed weights: this used to return the
+    # other side's curvature unconditionally, so ``[-1, -1] @ (x**2)`` (concave)
+    # was classified CONVEX -- a false convexity proof, which routes a nonconvex
+    # model to the convex fast path (#1728 review).
+    lval = _const_leaf_value(expr.left)
+    if lval is not None:
+        return ExprInfo(_const_weighted_curvature(lval, right.curvature), Sign.UNKNOWN)
+    rval = _const_leaf_value(expr.right)
+    if rval is not None:
+        return ExprInfo(_const_weighted_curvature(rval, left.curvature), Sign.UNKNOWN)
     return ExprInfo(Curvature.UNKNOWN, Sign.UNKNOWN)
 
 
