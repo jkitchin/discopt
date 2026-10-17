@@ -146,13 +146,17 @@ in-process run of the same model and oracle as panel 2's `eps` arm
 
 | shift | flag | mode | certified | optimum found | **incorrect** | mean wall (sd) |
 |---|---|---|---|---|---|---|
-| 1e-6 | 0 | cold | 71 | 91 | **2** | 0.061 (0.026) s |
+| 1e-6 | 0 | cold | 71 | 95 | **2** | 0.060 (0.028) s |
 | 1e-6 | 0 | warm | 61 | 90 | **1** | 0.059 (0.024) s |
 | 1e-6 | 1 | cold | **100** | 100 | 0 | 0.061 (0.009) s |
 | 1e-6 | 1 | warm | **100** | 100 | 0 | 0.060 (0.009) s |
 | 0 | 0 / 1 | cold, warm | 100 each | 100 each | 0 | 0.061 s |
 | 1e-4 | 0 | cold / warm | 99 / 98 | 100 / 100 | 0 | 0.060 / 0.061 s |
 | 1e-4 | 1 | cold / warm | 100 / 100 | 100 / 100 | 0 | 0.061 s |
+
+Rerun after change 5 (cross-form infeasible check): the ON arm is unchanged. In the OFF arm
+the optimum is now found on 95 of the 1e-6 cold instances (was 91), because refuted
+`infeasible` labels now publish the other form's point.
 
 The three flag-OFF false certificates are seed 44 (cold, 400.30 against 381.20) and
 seed 70 (cold and warm, 277.12 against 276.86). Both HiGHS configurations agree on
