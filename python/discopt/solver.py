@@ -26845,6 +26845,42 @@ def _matched_row_constraint_duals(
         by_support.setdefault(sup, []).append(k)
         j_vals.append(vals)
 
+    # #1730: support alone does not separate the rows of a DENSE matrix -- every
+    # row shares the full support, so 1000 rows were one bucket and matching made
+    # 2.0M Python-level ``allclose`` calls (~30 s after a 0.5 s LP solve). Within a
+    # bucket, sort candidates by a projection key ``w . v`` and visit only those
+    # inside a window that ``allclose(a, s*v)`` provably implies:
+    # ``|a_i - s v_i| <= atol + rtol |v_i|`` gives ``|v_i| <= (|a_i| + atol)/(1 - rtol)``
+    # and so ``|w.a - s w.v| <= sum_i |w_i| (atol + rtol (|a_i| + atol)/(1 - rtol))``.
+    # A necessary condition only: every candidate the exact test would accept is
+    # in the window, and ``_close`` still decides each one, so the matches -- and
+    # hence the duals -- are exactly what the full scan produced.
+    _rtol, _atol = 1e-9, 1e-12
+    _w_all = np.random.default_rng(0x1730).uniform(0.5, 1.5, size=n_orig)
+    bucket_keys: dict[tuple, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    for sup, ks in by_support.items():
+        w = _w_all[list(sup)] if sup else np.zeros(0)
+        keys = np.array([float(w @ j_vals[k]) for k in ks], dtype=np.float64)
+        order = np.argsort(keys, kind="stable")
+        bucket_keys[sup] = (keys[order], np.asarray(ks, dtype=np.intp)[order], w)
+
+    def _candidates(sup: tuple, a: np.ndarray, s: float) -> list[int]:
+        entry = bucket_keys.get(sup)
+        if entry is None:
+            return []
+        keys, ks, w = entry
+        if len(ks) <= 8:
+            return [int(k) for k in ks]
+        aw = np.abs(w)
+        vmax = (np.abs(a) + _atol) / (1.0 - _rtol)
+        tol = float(aw @ (_atol + _rtol * vmax))
+        # Float slack for evaluating the two dot products themselves.
+        tol += 8.0 * (len(a) + 1) * np.finfo(np.float64).eps * float(aw @ (np.abs(a) + vmax))
+        centre = s * float(w @ a)
+        lo = int(np.searchsorted(keys, centre - tol, side="left"))
+        hi = int(np.searchsorted(keys, centre + tol, side="right"))
+        return [int(k) for k in ks[lo:hi]]
+
     # Non-None whenever the matching count is nonzero (checked above).
     b_ub_v = np.zeros(0) if b_ub is None else np.asarray(b_ub, dtype=np.float64).reshape(-1)
     b_eq_v = np.zeros(0) if b_eq is None else np.asarray(b_eq, dtype=np.float64).reshape(-1)
@@ -26863,8 +26899,8 @@ def _matched_row_constraint_duals(
     for r, (M, j, b, is_eq) in enumerate(solved):
         sup, a = _row(M, j)
         hits: list[tuple[int, float]] = []
-        for k in by_support.get(sup, []):
-            for s in (1.0, -1.0):
+        for s in (1.0, -1.0):
+            for k in _candidates(sup, a, s):
                 if not _close(a, s * j_vals[k]):
                     continue
                 if is_eq:
@@ -32618,6 +32654,9 @@ def _solve_lp_highs(model: Model, t_start: float, time_limit: float | None = Non
         else:
             gap = _gap_mod.reported_gap(obj, bound)
         cd, bdl, bdu = _highs_decomposed_duals(model, n_orig, sf, out.row_dual, out.col_dual)
+        # #1730: dual recovery is part of the solve the caller waited for; measuring
+        # before it hid ~30 s on a dense LP behind a 0.46 s ``wall_time``.
+        wall = time.perf_counter() - t_start
         sr = SolveResult(
             status=out.status,
             objective=obj,
