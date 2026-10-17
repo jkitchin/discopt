@@ -30,7 +30,17 @@ Carried: variables (name, type, shape, element-wise bounds), parameters, the
 objective, algebraic constraints, the fast-construction (Rust builder) linear
 blocks and builder objective, indicator / SOS / disjunctive relations,
 complementarity relations together with this model's lowering marks, the starting
-point, and -- optionally -- the solve result.
+point (and a GAMS model's declared ``x.l`` start), and -- optionally -- the solve
+result. A ``from_nl`` model also carries the fact that it was parsed from a file
+(so a certificate guard stays as conservative as on the original) and its source
+path together with a SHA-256 of the file's bytes; the solver reads that file only
+while it still hashes to the digest, so a document opened on another machine, or
+after the file changed, can never hand it a different problem.
+
+Attributes discopt attaches to a model after ``__init__`` are each classified
+(carried, deliberately not carried, or refused); per-solve stashes -- budgets, a
+``perf_counter`` deadline, the Gauss-Newton switch, a root bound -- are not
+carried, exactly as the last solve result is not.
 
 Also carried, as descriptive metadata rather than model content: a ``provenance``
 block recording what wrote the document and when (:mod:`discopt.provenance`). It
@@ -47,10 +57,25 @@ index, ``None`` or ``Ellipsis`` is refused rather than approximated.
 Refused loudly (never silently dropped, per the repo's no-silent-approximation
 rule): :class:`~discopt.modeling.core.CustomCall` (an arbitrary Python callable;
 there is nothing faithful to write, and writing its *name* would reload into a
-different model), propositional ``_LogicalConstraint``, and any expression node
-this version does not know. On read, an unknown ``op`` is a hard error -- a reader
-that skips what it does not understand silently drops a constraint and returns a
-model that solves to the wrong answer.
+different model), propositional ``_LogicalConstraint``, the output of a
+reformulation pass that carries records pointing back at its source model
+(``binary.multilinear``, ``integer.*``, ``nonsmooth.epigraph`` -- save the source
+and re-apply the transformation), any other private model attribute this version
+does not classify, and any expression node this version does not know. On read,
+an unknown ``op`` is a hard error -- a reader that skips what it does not
+understand silently drops a constraint and returns a model that solves to the
+wrong answer.
+
+Reading is strict for the same reason. Every reference into the node table, the
+variables, the parameters or the rows must be an in-range integer (a negative
+one or a ``true`` used to resolve, through Python indexing, to a different
+object), an index must fit its base's shape, and senses, SOS types, indicator
+activation values and disjunction methods must be ones the modeling API can
+produce -- an ``active_value`` of 7 once dropped its row and certified a false
+optimum. A malformed field these checks do not name raises
+:class:`SerializationError` too, chained to the low-level error. Unknown
+top-level keys are ignored: that is how an additive minor (``provenance`` in 1.1)
+stays readable by an older reader.
 
 Examples
 --------
@@ -121,7 +146,14 @@ logger = logging.getLogger(__name__)
 #: "invalid sum axis". That is a clean refusal rather than a mis-build, and it is
 #: the best that can be done for readers already shipped: they never looked at
 #: the minor. Forward compatibility is not claimed.
-SCHEMA = "discopt.model/1.3"
+#:
+#: 1.3 added the registered-atom tag (#1248 A). 1.4 adds three "state" keys for
+#: attributes attached after ``Model.__init__``: ``nl_source`` (a ``from_nl``
+#: model's parse marker and digest-checked source path), ``_gams_initial_values``
+#: and ``_recentre_inner``. All additive -- an older reader ignores them -- but,
+#: as with 1.3, absence has two meanings that only the minor separates: "not read
+#: from a file" (1.4) versus "the writer did not record it" (<= 1.3).
+SCHEMA = "discopt.model/1.4"
 
 #: Major version this reader accepts. A document whose major differs is refused
 #: rather than best-effort parsed.
@@ -193,7 +225,62 @@ def _dec_float(x: Any) -> float:
         if x == "-inf":
             return -math.inf
         raise SerializationError(f"unknown float token {x!r}")
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        # JSON `true` is a Python bool, which `float()` reads as 1.0.
+        raise SerializationError(f"expected a number, got {type(x).__name__} ({x!r})")
     return float(x)
+
+
+def _dec_index_int(x: Any, what: str) -> int:
+    """An integer the document carries, refused unless it is one.
+
+    JSON ``true`` is a Python ``bool`` -- an ``int`` subclass -- and ``1.0`` or
+    ``"1"`` would coerce, so a bare ``int(...)`` accepts all three as something
+    else. Every reference and index goes through here instead.
+    """
+    if type(x) is not int:
+        raise SerializationError(f"{what} must be an integer, got {type(x).__name__} ({x!r})")
+    return x
+
+
+class _StrictRefs:
+    """A list the document refers into, by position, with every reference checked.
+
+    A bare ``items[d["ref"]]`` resolves a negative reference to an element counted
+    from the END and a ``true`` to element 1, so a corrupt document silently
+    rebuilt rows on the wrong variable or node, and an out-of-range one raised a
+    bare ``IndexError`` that does not name the document. For the node table the
+    list grows as nodes are decoded, so a forward reference -- and with it any
+    cycle -- is out of range by construction.
+    """
+
+    def __init__(self, items: list, what: str) -> None:
+        self._items = items
+        self._what = what
+
+    def __getitem__(self, ref: Any) -> Any:
+        i = _dec_index_int(ref, f"a {self._what} reference")
+        if not 0 <= i < len(self._items):
+            raise SerializationError(
+                f"{self._what} reference {i} is out of range (the document has "
+                f"{len(self._items)} so far)"
+            )
+        return self._items[i]
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __iter__(self):
+        return iter(self._items)
+
+
+#: Senses ``Model.subject_to`` produces; anything else used to load and fail only
+#: inside a solve ("Unknown constraint sense").
+_KNOWN_SENSES = frozenset({"<=", "==", ">="})
+
+#: Per-disjunction methods the GDP lowering dispatches on. An unknown one fell
+#: through to big-M without a word.
+_KNOWN_DISJUNCTION_METHODS = frozenset({None, "hull", "big-m", "mbigm", "simplex"})
 
 
 def _enc_array(arr: np.ndarray) -> Any:
@@ -244,13 +331,19 @@ def _enc_index(index: Any) -> Any:
 def _dec_index(obj: Any) -> Any:
     kind = obj["k"]
     if kind == "int":
-        return int(obj["v"])
+        return _dec_index_int(obj["v"], "an integer index")
     if kind == "bool":
         if not isinstance(obj["v"], bool):
             raise SerializationError(f"bool index holds {obj['v']!r}")
         return obj["v"]
     if kind == "slice":
-        return slice(obj["start"], obj["stop"], obj["step"])
+        parts = [
+            None if obj[k] is None else _dec_index_int(obj[k], f"a slice {k}")
+            for k in ("start", "stop", "step")
+        ]
+        if parts[2] == 0:
+            raise SerializationError("a slice step cannot be zero")
+        return slice(*parts)
     if kind == "tuple":
         return tuple(_dec_index(i) for i in obj["v"])
     raise SerializationError(f"unknown index kind {kind!r}")
@@ -489,7 +582,7 @@ def _known_funcs() -> frozenset:
     return frozenset(_core._ELEMENTWISE_FUNCS) | _EXTRA_FUNCS
 
 
-def _decode_nodes(table: list[dict], variables: list[Variable], params: list[Parameter]):
+def _decode_nodes(table: list[dict], variables: Any, params: list[Parameter]):
     """Rebuild expression objects from the node table.
 
     A node's children always precede it (the writer emits post-order), so a single
@@ -498,6 +591,10 @@ def _decode_nodes(table: list[dict], variables: list[Variable], params: list[Par
     """
     known_funcs = _known_funcs()
     built: list[Any] = []
+    # Children are read through `refs`, which only reaches nodes already decoded.
+    refs = _StrictRefs(built, "node")
+    var_refs = _StrictRefs(variables, "variable")
+    param_refs = _StrictRefs(params, "parameter")
     for i, nd in enumerate(table):
         op = nd.get("op")
         if op not in _KNOWN_OPS:
@@ -525,27 +622,66 @@ def _decode_nodes(table: list[dict], variables: list[Variable], params: list[Par
             if shape is None:
                 built.append(Constant(_dec_float(nd["v"])))
             else:
-                built.append(Constant(_dec_array(nd["v"], tuple(shape))))
+                dims = tuple(_dec_index_int(n, f"a dimension of constant node {i}") for n in shape)
+                if any(n < 0 for n in dims):
+                    raise SerializationError(f"constant node {i} has a negative dimension: {dims}")
+                built.append(Constant(_dec_array(nd["v"], dims)))
         elif op == "var":
-            built.append(variables[nd["ref"]])
+            built.append(var_refs[nd["ref"]])
         elif op == "param":
-            built.append(params[nd["ref"]])
+            built.append(param_refs[nd["ref"]])
         elif op == "index":
-            built.append(IndexExpression(built[nd["base"]], _dec_index(nd["index"])))
+            base, index = refs[nd["base"]], _dec_index(nd["index"])
+            _check_index_in_range(base, index, i)
+            built.append(IndexExpression(base, index))
         elif op == "binop":
-            built.append(BinaryOp(nd["o"], built[nd["a"]], built[nd["b"]]))
+            built.append(BinaryOp(nd["o"], refs[nd["a"]], refs[nd["b"]]))
         elif op == "unop":
-            built.append(UnaryOp(nd["o"], built[nd["a"]]))
+            built.append(UnaryOp(nd["o"], refs[nd["a"]]))
         elif op == "call":
-            built.append(FunctionCall(nd["f"], *[built[a] for a in nd["args"]]))
+            built.append(FunctionCall(nd["f"], *[refs[a] for a in nd["args"]]))
         elif op == "matmul":
-            built.append(MatMulExpression(built[nd["a"]], built[nd["b"]]))
+            built.append(MatMulExpression(refs[nd["a"]], refs[nd["b"]]))
         elif op == "sum":
-            built.append(SumExpression(built[nd["a"]], _dec_axis(nd["axis"])))
+            base, axis = refs[nd["a"]], _dec_axis(nd["axis"])
+            _check_axis_in_range(base, axis, i)
+            built.append(SumExpression(base, axis))
         elif op == "sum_over":
-            built.append(SumOverExpression([built[a] for a in nd["args"]]))
+            built.append(SumOverExpression([refs[a] for a in nd["args"]]))
     _retag_atoms(table, built, variables, params)
-    return built
+    return _StrictRefs(built, "node")
+
+
+def _check_axis_in_range(base: Any, axis: Any, node: int) -> None:
+    """Refuse a sum axis the base does not have (``dm.sum`` refuses it at build)."""
+    shape = getattr(base, "shape", None)
+    if shape is None or axis is None:
+        return
+    try:
+        np.empty(tuple(shape), dtype=np.int8).sum(axis=axis)
+    except (ValueError, TypeError) as exc:  # numpy's AxisError is a ValueError
+        raise SerializationError(
+            f"node {node} sums a {tuple(shape)}-shaped expression over axis {axis!r}: {exc}"
+        ) from exc
+
+
+def _check_index_in_range(base: Any, index: Any, node: int) -> None:
+    """Refuse an index the modeling API would refuse.
+
+    ``IndexExpression`` does not check its index against the base's shape -- the
+    API's ``__getitem__`` does, before building one -- so a document indexing
+    ``x[7]`` on a length-2 ``x`` loaded, and the solve then evaluated whatever
+    the out-of-range read produced.
+    """
+    shape = getattr(base, "shape", None)
+    if shape is None:
+        return
+    try:
+        np.empty(tuple(shape), dtype=np.int8)[index]
+    except (IndexError, TypeError, ValueError) as exc:
+        raise SerializationError(
+            f"node {node} indexes a {tuple(shape)}-shaped expression with {index!r}: {exc}"
+        ) from exc
 
 
 def _same_structure(a: Any, b: Any, var_ids: dict, param_ids: dict) -> bool:
@@ -568,6 +704,40 @@ def _same_structure(a: Any, b: Any, var_ids: dict, param_ids: dict) -> bool:
         logger.debug("atom re-derivation could not encode a body (%s: %s)", type(exc).__name__, exc)
         return False
     return tables[0] == tables[1]
+
+
+class _IdsOnFirstSight(dict):
+    """An id -> index map that numbers each object the first time it is asked for.
+
+    Lets :func:`_same_structure` compare two bodies that reference the same live
+    variables and parameters without a model-wide index: equal objects get equal
+    numbers because both encodings share this one map.
+    """
+
+    def get(self, key, default=None):  # type: ignore[override]
+        if key not in self:
+            self[key] = len(self)
+        return dict.__getitem__(self, key)
+
+
+def lowering_reproduces(fn: Any, arg: Any, body: Any) -> bool:
+    """Does re-lowering registration *fn* on *arg* rebuild *body* exactly?
+
+    The check :func:`_retag_atoms` applies to a loaded document, for a tag whose
+    registration cannot be identified by object identity -- one that crossed a
+    process boundary by pickle (:func:`discopt.operators.atom_of`).
+    """
+    try:
+        rebuilt = fn.lower(arg)
+    except Exception as exc:  # noqa: BLE001 - arbitrary user code; abstain, but say so
+        logger.debug(
+            "atom %r: re-lowering the current registration raised %s: %s",
+            getattr(fn, "name", "?"),
+            type(exc).__name__,
+            exc,
+        )
+        return False
+    return _same_structure(body, rebuilt, _IdsOnFirstSight(), _IdsOnFirstSight())
 
 
 def _retag_atoms(table: list[dict], built: list[Any], variables: list, params: list) -> None:
@@ -668,6 +838,51 @@ def _refuse_unsupported(model: Model) -> None:
     # silently dropped at ``workers=3`` -- the worker-count equivalence that module
     # documents, broken by a guard that only ran on one arm.
     model._reject_unattached_gdp_blocks()
+    _refuse_unclassified_attributes(model)
+
+
+def _refuse_unclassified_attributes(model: Model) -> None:
+    """Refuse a model carrying a private attribute this format does not classify.
+
+    ``loads`` rebuilds a fresh ``Model``, so anything not written is reset to its
+    default with no error. Solve caches are derived and rebuilt on
+    demand; public attributes a user hangs on the object are theirs and are never
+    read by discopt. Everything else private is discopt's own state, and must be
+    in ``_MODEL_STATE`` / ``_LAZY_STATE`` to be saved. (The few caches not named
+    ``*_cache`` are listed in ``discopt.modeling.core._MODEL_UNNAMED_CACHES``.)
+    """
+    from discopt.modeling.core import _is_model_cache
+
+    unknown = sorted(
+        k
+        for k in vars(model)
+        if k.startswith("_")
+        and not _is_model_cache(k)
+        and k not in _MODEL_STATE
+        and k not in _LAZY_STATE
+    )
+    if not unknown:
+        return
+    passes = sorted(
+        {
+            label
+            for k in unknown
+            for prefix, label in _REFORMULATION_RECORD_PREFIXES.items()
+            if k.startswith(prefix)
+        }
+    )
+    if passes:
+        raise SerializationError(
+            f"cannot serialize: the model carries records of the {', '.join(passes)} "
+            f"transformation ({', '.join(unknown)}), which point back at the model it was "
+            "built from and cannot be written. Save the source model instead, and re-apply "
+            "the transformation after loading it."
+        )
+    raise SerializationError(
+        f"cannot serialize: the model carries attribute(s) {unknown} that this format "
+        "does not know how to write, and dropping them would reload a different model. "
+        "Classify each in discopt.serialize (_MODEL_STATE or _LAZY_STATE)."
+    )
 
 
 # ── variables / parameters ─────────────────────────────────────────────────
@@ -725,7 +940,9 @@ def _dec_variable(d: dict, model: Model) -> Variable:
     # already carry that prefix and must still round-trip).
     if name in model._names:
         raise SerializationError(f"duplicate variable/parameter name {name!r}")
-    shape = tuple(d["shape"])
+    shape = tuple(_dec_index_int(n, f"a dimension of variable {name!r}") for n in d["shape"])
+    if any(n < 0 for n in shape):
+        raise SerializationError(f"variable {name!r} has a negative dimension: {shape}")
     lb = _dec_array(d["lb"], shape)
     ub = _dec_array(d["ub"], shape)
     # Built through the low-level constructor rather than `model.continuous/
@@ -747,6 +964,16 @@ def _dec_variable(d: dict, model: Model) -> Variable:
         _dec_bound_stack_entry(entry, i, shape, name, var.var_type)
         for i, entry in enumerate(d.get("bound_stack", []))
     ]
+    if var._bound_stack:
+        # Inside a fix scope the live box is a pin, and `fix()` refuses a pin
+        # outside the declared domain (`_bound_stack[0]`). A document with one
+        # outside it describes a model the API cannot produce, and `unfix()` would
+        # then restore a domain the live box was never inside.
+        dlo, dhi = (np.asarray(b) for b in var._bound_stack[0])
+        if np.any(np.asarray(var.lb) < dlo) or np.any(np.asarray(var.ub) > dhi):
+            raise SerializationError(
+                f"variable {name!r}: its box lies outside its declared domain (bound_stack[0])"
+            )
     return model._register_variable(var)
 
 
@@ -953,25 +1180,38 @@ def _dec_rows(docs: list[dict], nodes: list) -> list:
         if kind == "algebraic":
             out.append(_dec_constraint(d, nodes))
         elif kind == "indicator":
+            active_value = d["active_value"]
+            if type(active_value) is not int or active_value not in (0, 1):
+                # Anything but 0/1 made the lowering activate the row for an
+                # indicator value the variable can never take, so the row was
+                # silently dropped and a false optimum came back certified.
+                raise SerializationError(
+                    f"indicator row {d.get('name')!r} has active_value {active_value!r}; "
+                    "it must be 0 or 1"
+                )
             out.append(
                 _IndicatorConstraint(
                     indicator=nodes[d["indicator"]],
                     constraint=_dec_constraint(d["constraint"], nodes),
-                    active_value=d["active_value"],
+                    active_value=active_value,
                     name=d["name"],
                     # Absent in files written before #1615 C-10a.
                     disjunction=(
                         None
                         if d.get("disjunction") is None
                         else (
-                            str(d["disjunction"][0]),
-                            int(d["disjunction"][1]),
-                            int(d["disjunction"][2]),
+                            _dec_name(d["disjunction"][0], "indicator disjunction"),
+                            _dec_index_int(d["disjunction"][1], "an indicator disjunct index"),
+                            _dec_index_int(d["disjunction"][2], "an indicator disjunct count"),
                         )
                     ),
                 )
             )
         elif kind == "sos":
+            if type(d["sos_type"]) is not int or d["sos_type"] not in (1, 2):
+                raise SerializationError(
+                    f"SOS row {d.get('name')!r} has sos_type {d['sos_type']!r}; it must be 1 or 2"
+                )
             out.append(
                 _SOSConstraint(
                     sos_type=d["sos_type"],
@@ -980,6 +1220,10 @@ def _dec_rows(docs: list[dict], nodes: list) -> list:
                 )
             )
         elif kind == "disjunction":
+            if d["method"] not in _KNOWN_DISJUNCTION_METHODS:
+                raise SerializationError(
+                    f"disjunction {d.get('name')!r} names unknown method {d['method']!r}"
+                )
             out.append(
                 _DisjunctiveConstraint(
                     disjuncts=[[_dec_constraint(c, nodes) for c in dd] for dd in d["disjuncts"]],
@@ -1009,6 +1253,11 @@ def _enc_constraint(c: Constraint, table: _NodeTable) -> dict:
 
 
 def _dec_constraint(d: dict, nodes: list) -> Constraint:
+    if d["sense"] not in _KNOWN_SENSES:
+        raise SerializationError(
+            f"constraint {d.get('name')!r} has unknown sense {d['sense']!r}; "
+            f"expected one of {sorted(_KNOWN_SENSES)}"
+        )
     return Constraint(body=nodes[d["body"]], sense=d["sense"], rhs=0.0, name=d["name"])
 
 
@@ -1102,7 +1351,9 @@ def _dec_complementarities(doc: Optional[dict], model: Model, nodes: list) -> No
     rebuilt: list[Any] = []
     for d in doc["relations"]:
         src_idx = d["source"]
-        if src_idx is not None and src_idx >= len(rebuilt):
+        if src_idx is not None:
+            src_idx = _dec_index_int(src_idx, "a complementarity source")
+        if src_idx is not None and not 0 <= src_idx < len(rebuilt):
             raise SerializationError(
                 f"complementarity relation refers to a source at index {src_idx} that "
                 "has not been read yet; the document's relation order is invalid."
@@ -1124,9 +1375,10 @@ def _dec_complementarities(doc: Optional[dict], model: Model, nodes: list) -> No
             )
         )
 
-    model._complementarities = [rebuilt[i] for i in doc["declared"]]
+    relations = _StrictRefs(rebuilt, "complementarity relation")
+    model._complementarities = [relations[i] for i in doc["declared"]]
     model._lowered_complementarities = {
-        rebuilt[i]: LoweringRecord(method=method, rows=None) for i, method in doc["lowered"]
+        relations[i]: LoweringRecord(method=method, rows=None) for i, method in doc["lowered"]
     }
 
 
@@ -1142,6 +1394,13 @@ def _dec_complementarities(doc: Optional[dict], model: Model, nodes: list) -> No
 # format handles it. `test_every_model_attribute_is_accounted_for` compares it
 # against a live `Model`, so a field added to `Model` in future cannot slip through
 # unhandled -- it fails the test until someone decides which bucket it belongs in.
+#
+# That test sees only what `__init__` creates. discopt also attaches private
+# attributes to a model *later* -- `from_nl`, a solve, a reformulation pass -- and
+# those used to be dropped on save with no error. `_LAZY_STATE` classifies the ones
+# known today, and `_refuse_unsupported` refuses any other private attribute by
+# name, so one added in future fails loudly on its first save rather than quietly
+# reloading as a different model.
 
 #: Attributes carried by a dedicated section elsewhere in the document.
 _STATE_IN_OWN_SECTION = frozenset(
@@ -1189,6 +1448,67 @@ _STATE_DERIVED = frozenset({"_names", "_builder", "_flat_var_offsets_cache"})
 _STATE_NOT_CARRIED = frozenset(
     {"_last_solve_result", "_gdp_factory_disjunctions", "_gdp_factory_disjuncts"}
 )
+
+#: Attached after ``__init__`` by a solve, and deliberately not carried for the
+#: same reason as ``_last_solve_result``: each records the *last* solve in this
+#: process, and every solve rewrites it before anything reads it.
+#: ``_gauss_newton_hessian`` is ``solve(gauss_newton=...)``'s argument, set at the
+#: top of every solve (and by ``discopt.ml.train`` before its own); the other two
+#: are budgets ``solve_model`` stamps at the start of each solve.
+#: ``_solve_deadline`` is moreover an absolute ``time.perf_counter()`` reading,
+#: whose origin is per-process, so a saved value would mean nothing on reload.
+#: ``_disjunctive_config_floor`` is a root bound a solve computed and stashed for
+#: its own node LPs (#732 Stage 2); it describes that solve's root box.
+_LAZY_NOT_CARRIED = frozenset(
+    {
+        "_gauss_newton_hessian",
+        "_convexity_time_budget",
+        "_solve_deadline",
+        "_disjunctive_config_floor",
+    }
+)
+
+#: Attached after ``__init__`` and carried in "state" as a plain value, only when
+#: present. ``_recentre_inner`` marks the inner model of a recentred solve, so
+#: solving it does not recentre a second time.
+_LAZY_PLAIN = ("_recentre_inner",)
+
+#: ``from_nl``'s parse (a Rust ``PyModelRepr``) and the path of the file it came
+#: from. Neither travels as itself:
+#:
+#: * ``_nl_repr`` cannot be written. What is carried is the fact that the model
+#:   has one -- a ``from_nl`` model answers "could not tell" in
+#:   ``Model._referenced_variable_names`` -- and ``loads`` attaches a
+#:   ``_DetachedNlRepr`` marker so the reloaded model answers the same way
+#:   instead of switching to the less conservative expression walk.
+#: * ``_source_nl_path`` is carried together with a digest of the file's bytes
+#:   (``_source_nl_sha256``, taken by ``from_nl``). The native-AD NLP path reads
+#:   the file at that path whenever it exists, so a bare path would hand the
+#:   solver whatever file sits there on the machine that loads the document --
+#:   another machine's file of the same name, or this one edited since. The
+#:   solver uses the path only while the digest still matches; otherwise it falls
+#:   back to emitting the in-memory model, as for any model not read from a file.
+_LAZY_NL_SOURCE = frozenset({"_nl_repr", "_source_nl_path", "_source_nl_sha256"})
+
+#: Records a reformulation pass attaches to the model it returns, keyed by the
+#: pass's prefix. They are refused rather than dropped or carried: the
+#: ``_ipx_*`` and ``_nsl_*`` sets hold the whole pre-pass source model, which a
+#: document cannot hold, and ``_ipx_config_*`` feeds the disjunctive configuration
+#: *bound*, so a reload without them would search differently from the model that
+#: was saved. The remedy is lossless: save the source model and re-apply the
+#: (deterministic) transformation after loading.
+_REFORMULATION_RECORD_PREFIXES = {
+    "_bml_": "binary.multilinear",
+    "_ipx_": "integer.bilinear / integer.multilinear",
+    "_nsl_": "nonsmooth.epigraph",
+}
+
+#: ``_gams_initial_values``: the starting point a GAMS model declares (``x.l``),
+#: which ``from_gams`` / the GMO link attach and the solver seeds its primal
+#: search from. Model content, so carried (see ``_enc_gams_initial_values``).
+_LAZY_BESPOKE = frozenset({"_gams_initial_values"})
+
+_LAZY_STATE = _LAZY_NOT_CARRIED | frozenset(_LAZY_PLAIN) | _LAZY_NL_SOURCE | _LAZY_BESPOKE
 
 #: Attributes carried verbatim in the "state" section (plain JSON-safe values).
 _STATE_PLAIN = ("_aux_counter", "_decomp_stages", "_decomp_blocks")
@@ -1294,13 +1614,10 @@ def _enc_coupling_keys(model: Model, rows: list) -> dict:
 def _dec_coupling_keys(d: Optional[dict], rows: list) -> set:
     if not d:
         return set()
-    out: set = set(d.get("names", []))
+    out: set = {_dec_name(n, "coupling mark") for n in d.get("names", [])}
+    row_refs = _StrictRefs(rows, "coupling-mark row")
     for idx in d.get("row_indices", []):
-        if idx >= len(rows):
-            raise SerializationError(
-                f"a coupling mark refers to row {idx}, but the model has {len(rows)} rows."
-            )
-        out.add(id(rows[idx]))
+        out.add(id(row_refs[idx]))
     return out
 
 
@@ -1364,15 +1681,12 @@ def _dec_block_labels_con(d: Optional[dict], rows: list) -> dict:
     out: dict = {}
     for name, vals in (d.get("names") or {}).items():
         out[str(name)] = np.asarray(vals, dtype=np.int64)
+    row_refs = _StrictRefs(rows, "block-label row")
     for entry in d.get("rows", []):
-        idx = int(entry["row"])
-        if idx >= len(rows):
-            raise SerializationError(
-                f"a constraint block label refers to row {idx}, but the model has {len(rows)} rows."
-            )
+        row = row_refs[entry["row"]]
         labels = np.asarray(entry["labels"], dtype=np.int64)
-        out[id(rows[idx])] = labels
-        cname = getattr(rows[idx], "name", None)
+        out[id(row)] = labels
+        cname = getattr(row, "name", None)
         if cname:
             out[cname] = labels
     return out
@@ -1433,7 +1747,14 @@ def _enc_atan2_preconditions(model: Model, table) -> list[dict]:
 
 def _dec_atan2_preconditions(docs: Optional[list], nodes: list) -> list:
     """Rebuild the guard list. A document predating it simply has none."""
-    return [(nodes[d["denominator"]], d["sign"], d["label"]) for d in docs or []]
+    out = []
+    for d in docs or []:
+        if d["sign"] not in ("positive", "negative"):
+            # The guard reads anything but "positive" as "negative", so a corrupt
+            # value would re-check the opposite sign of the one the rewrite assumed.
+            raise SerializationError(f"atan2 precondition has unknown sign {d['sign']!r}")
+        out.append((nodes[d["denominator"]], d["sign"], d["label"]))
+    return out
 
 
 def _enc_piecewise_domains(model: Model, table) -> list[dict]:
@@ -1453,7 +1774,13 @@ def _enc_piecewise_domains(model: Model, table) -> list[dict]:
 
 def _dec_piecewise_domains(docs: Optional[list], nodes: list) -> list:
     """Rebuild the domain guard list. A document predating it simply has none."""
-    return [(nodes[d["input"]], float(d["lo"]), float(d["hi"]), d["label"]) for d in docs or []]
+    out = []
+    for d in docs or []:
+        lo, hi = _dec_float(d["lo"]), _dec_float(d["hi"])
+        if not (lo <= hi):
+            raise SerializationError(f"piecewise domain [{lo}, {hi}] is empty or NaN")
+        out.append((nodes[d["input"]], lo, hi, d["label"]))
+    return out
 
 
 def _enc_state(model: Model, rows: list, table) -> dict:
@@ -1467,15 +1794,117 @@ def _enc_state(model: Model, rows: list, table) -> dict:
     state["_simplex_lowerings"] = _enc_simplex_lowerings(model)
     state["_block_labels_var"] = _enc_block_labels_var(model)
     state["_block_labels_con"] = _enc_block_labels_con(model, rows)
+    for name in _LAZY_PLAIN:
+        if name in vars(model):
+            state[name] = getattr(model, name)
+    nl_source = _enc_nl_source(model)
+    if nl_source is not None:
+        state["nl_source"] = nl_source
+    gams_iv = getattr(model, "_gams_initial_values", None)
+    if gams_iv:
+        state["_gams_initial_values"] = _enc_gams_initial_values(gams_iv)
     return state
+
+
+def _enc_gams_initial_values(iv: dict) -> list:
+    """``{name: value}`` (scalar) / ``{name: {flat_idx: value}}`` as JSON rows."""
+    out: list = []
+    for name in sorted(iv):
+        entry = iv[name]
+        if isinstance(entry, dict):
+            out.append([name, [[int(k), _enc_float(float(v))] for k, v in sorted(entry.items())]])
+        else:
+            out.append([name, _enc_float(float(entry))])
+    return out
+
+
+def _dec_gams_initial_values(rows: Any, model: Model) -> None:
+    if rows is None:
+        return
+    if not isinstance(rows, list):
+        raise SerializationError("the '_gams_initial_values' entry must be a list")
+    sizes = {v.name: v.size for v in model._variables}
+    iv: dict = {}
+    for row in rows:
+        if not (isinstance(row, list) and len(row) == 2):
+            raise SerializationError(f"invalid _gams_initial_values row: {row!r}")
+        name = _dec_name(row[0], "_gams_initial_values")
+        if name not in sizes:
+            raise SerializationError(
+                f"_gams_initial_values names variable {name!r}, which this document "
+                "does not declare"
+            )
+        if name in iv:
+            raise SerializationError(f"_gams_initial_values lists {name!r} twice")
+        if isinstance(row[1], list):
+            elems: dict = {}
+            for pair in row[1]:
+                if not (isinstance(pair, list) and len(pair) == 2):
+                    raise SerializationError(f"invalid _gams_initial_values entry: {pair!r}")
+                idx = _dec_index_int(pair[0], f"_gams_initial_values[{name!r}]")
+                if not 0 <= idx < sizes[name] or idx in elems:
+                    raise SerializationError(
+                        f"_gams_initial_values entry {name!r}[{idx}] is out of range or repeated"
+                    )
+                elems[idx] = _dec_float(pair[1])
+            iv[name] = elems
+        else:
+            iv[name] = _dec_float(row[1])
+    setattr(model, "_gams_initial_values", iv)  # noqa: B010 - attached after __init__
+
+
+def _enc_nl_source(model: Model) -> Optional[dict]:
+    """What a ``from_nl`` model carries about its source file (see ``_LAZY_NL_SOURCE``)."""
+    has_repr = getattr(model, "_nl_repr", None) is not None
+    path = getattr(model, "_source_nl_path", None)
+    if not has_repr and path is None:
+        return None
+    out: dict[str, Any] = {"parsed": has_repr}
+    if path is not None:
+        digest = getattr(model, "_source_nl_sha256", None)
+        if digest is None:
+            # A path with no digest cannot be checked on reload, so it is not written:
+            # the reloaded model emits its own `.nl` instead, which is always correct.
+            return out
+        out["path"] = str(path)
+        out["sha256"] = str(digest)
+    return out
+
+
+def _dec_nl_source(doc: Any, model: Model) -> None:
+    if doc is None:
+        return
+    if not isinstance(doc, dict) or not isinstance(doc.get("parsed"), bool):
+        raise SerializationError(f"invalid nl_source entry: {doc!r}")
+    if doc["parsed"]:
+        from discopt.modeling.core import _DetachedNlRepr
+
+        setattr(model, "_nl_repr", _DetachedNlRepr())  # noqa: B010 - attached after __init__
+    if "path" in doc or "sha256" in doc:
+        path, digest = doc.get("path"), doc.get("sha256")
+        if not isinstance(path, str) or not isinstance(digest, str):
+            raise SerializationError(f"invalid nl_source entry: {doc!r}")
+        setattr(model, "_source_nl_path", path)  # noqa: B010 - attached after __init__
+        setattr(model, "_source_nl_sha256", digest)  # noqa: B010
 
 
 def _dec_state(state: Optional[dict], model: Model, rows: list, nodes: list) -> None:
     if not state:
         return
-    for name in _STATE_PLAIN:
+    if "_aux_counter" in state:
+        model._aux_counter = _dec_index_int(state["_aux_counter"], "_aux_counter")
+        if model._aux_counter < 0:
+            raise SerializationError(f"_aux_counter is negative ({model._aux_counter})")
+    for name in ("_decomp_stages", "_decomp_blocks"):
         if name in state:
-            setattr(model, name, state[name])
+            raw = state[name]
+            if not isinstance(raw, dict):
+                raise SerializationError(f"{name} must be an object, got {type(raw).__name__}")
+            setattr(
+                model,
+                name,
+                {_dec_name(k, name): _dec_index_int(v, f"{name}[{k!r}]") for k, v in raw.items()},
+            )
     for name in _STATE_AS_SORTED_LIST:
         if name in state:
             setattr(model, name, set(state[name]))
@@ -1486,6 +1915,11 @@ def _dec_state(state: Optional[dict], model: Model, rows: list, nodes: list) -> 
     model._block_labels_con = _dec_block_labels_con(state.get("_block_labels_con"), rows)
     model._sets = _dec_sets(state.get("_sets", []))
     model._simplex_lowerings = _dec_simplex_lowerings(state.get("_simplex_lowerings", []))
+    for name in _LAZY_PLAIN:
+        if name in state:
+            setattr(model, name, state[name])
+    _dec_nl_source(state.get("nl_source"), model)
+    _dec_gams_initial_values(state.get("_gams_initial_values"), model)
 
 
 # ── JSON tree sanitising (for the embedded result payload) ─────────────────
@@ -1707,12 +2141,35 @@ def loads(text: Union[str, bytes]) -> Model:
 
     The reloaded model carries the embedded solve result (if one was saved) on its
     ``saved_result`` attribute.
+
+    Raises
+    ------
+    SerializationError
+        If the text is not a well-formed discopt document. A malformed field the
+        decoders below do not check by name -- a missing key, a value of the
+        wrong type -- surfaces as this too, chained to the low-level error, so a
+        caller can tell "this file is bad" from a defect in discopt.
     """
     # `dumps` never writes bare NaN/Infinity (non-finite floats are tagged strings),
     # so one here is not a discopt document; refuse it on read rather than accept
     # it and fail the next save (#1291).
-    doc = json.loads(text, parse_constant=_refuse_json_constant)
+    try:
+        doc = json.loads(text, parse_constant=_refuse_json_constant)
+    except json.JSONDecodeError as exc:
+        raise SerializationError(f"not valid JSON: {exc}") from exc
+    if not isinstance(doc, dict):
+        raise SerializationError(f"a discopt document is a JSON object, got {type(doc).__name__}")
+    try:
+        return _loads_document(doc)
+    except SerializationError:
+        raise
+    except (KeyError, TypeError, ValueError, IndexError, AttributeError) as exc:
+        raise SerializationError(
+            f"malformed discopt document: {type(exc).__name__}: {exc}"
+        ) from exc
 
+
+def _loads_document(doc: dict) -> Model:
     schema = doc.get("schema")
     if not isinstance(schema, str) or not schema.startswith("discopt.model/"):
         raise SerializationError(f"not a discopt model document (schema={schema!r}).")
@@ -1742,7 +2199,7 @@ def loads(text: Union[str, bytes]) -> Model:
         )
 
     model = Model(doc["name"])
-    variables = [_dec_variable(d, model) for d in doc["variables"]]
+    variables = _StrictRefs([_dec_variable(d, model) for d in doc["variables"]], "variable")
     params = [_dec_parameter(d, model) for d in doc["parameters"]]
     nodes = _decode_nodes(doc["nodes"], variables, params)
 
@@ -1795,13 +2252,19 @@ def loads(text: Union[str, bytes]) -> Model:
             raise SerializationError(
                 f"initial_point names variable {name!r}, which this document does not declare"
             )
-        idx = int(elem)
+        idx = _dec_index_int(elem, f"initial_point element of {name!r}")
         if not 0 <= idx < declared[name]:
             raise SerializationError(
                 f"initial_point entry {name!r}[{idx}] is out of range for a variable "
                 f"of size {declared[name]}"
             )
-        initial_point[(name, idx)] = _dec_float(val)
+        if (name, idx) in initial_point:
+            raise SerializationError(f"initial_point lists {name!r}[{idx}] twice")
+        value = _dec_float(val)
+        if math.isnan(value):
+            # `set_initial_point` refuses NaN; the `.nl` writer would emit it as is.
+            raise SerializationError(f"initial_point entry {name!r}[{idx}] is NaN")
+        initial_point[(name, idx)] = value
     model._initial_point = initial_point
 
     if doc.get("solution") is not None:
@@ -1841,7 +2304,8 @@ def loads(text: Union[str, bytes]) -> Model:
 
     message = skew_warning(prov)
     if message is not None:
-        warnings.warn(message, ProvenanceSkewWarning, stacklevel=2)
+        # 3: past this function and `loads`, to the caller's line.
+        warnings.warn(message, ProvenanceSkewWarning, stacklevel=3)
 
     return model
 

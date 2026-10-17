@@ -1210,7 +1210,12 @@ def _bound_is_owned_frozen(arr) -> bool:
     # frozen``. Checking ``arr.flags`` as well would double the cost of the
     # hot path -- `.flags` builds a new flagsobj on every access -- for an
     # answer already implied.
-    return base is not None and not base.flags.writeable
+    #
+    # The base must be an ndarray: an array numpy rebuilt from a pickle can be a
+    # view over the raw ``bytes`` it was read from, which has no ``.flags`` --
+    # unpickling a model then raised ``AttributeError`` here. Such a box is not
+    # one this module froze, so it takes the copying path like any foreign array.
+    return type(base) is np.ndarray and not base.flags.writeable
 
 
 def _bound_context(what: Optional[str], name: Optional[str], side: str) -> str:
@@ -5369,6 +5374,48 @@ def _is_fast_linear_quadratic_family(model) -> bool:
 # these to ``None`` on the copy and omits every other ``*_cache`` attribute (#1479).
 _MODEL_INIT_CACHES = frozenset({"_flat_var_offsets_cache"})
 
+#: Solve-time caches whose names do not end in ``_cache``, so the suffix test the
+#: copy and pickle paths use would miss them. ``_uniform_relax_analysis`` is the
+#: per-model relaxation analysis (``discopt._relax.uniform_relax``): keyed by
+#: ``id()`` of the original's DAG nodes, holding locally defined compiled closures
+#: that cannot be pickled, and cleared at the start of every solve anyway.
+_MODEL_UNNAMED_CACHES = frozenset({"_uniform_relax_analysis"})
+
+
+def _is_model_cache(key: str) -> bool:
+    return key.endswith("_cache") or key in _MODEL_UNNAMED_CACHES
+
+
+class _DetachedNlRepr:
+    """Stands in for a ``from_nl`` model's ``_nl_repr`` once the model has left the
+    process that parsed it -- by ``pickle`` or by a :mod:`discopt.serialize` document.
+
+    The Rust ``PyModelRepr`` cannot be pickled or written, so neither route can
+    carry it. Dropping the attribute outright would not be neutral: its *presence*
+    is what tells :meth:`Model._referenced_variable_names` to answer "could not
+    tell", and a copy that started walking its expressions instead would make that
+    guard fire less, not more. This marker keeps the attribute non-``None`` so the
+    guard behaves exactly as on the original, and refuses any other use loudly
+    rather than handing back something that is not the parse.
+    """
+
+    __slots__ = ()
+
+    def __getattr__(self, name: str):
+        raise AttributeError(
+            f"_nl_repr.{name}: this model was unpickled or loaded from a saved document, "
+            "and the parsed .nl representation (a Rust PyModelRepr) does not survive "
+            "either. Re-read the source with discopt.from_nl() if the parse itself is "
+            "needed."
+        )
+
+    def __repr__(self) -> str:
+        return "<_nl_repr detached from its .nl parse>"
+
+    def __reduce__(self):
+        return (_DetachedNlRepr, ())
+
+
 #: Model-level *validation guards*: lists of assumptions a construction-time
 #: rewrite relied on, re-checked by :meth:`Model.validate` before every solve
 #: because variable bounds are mutable afterwards. ``_atan2_preconditions`` holds
@@ -6028,8 +6075,13 @@ class Model:
         cls = type(self)
         new = cls.__new__(cls)
         memo[id(self)] = new
+        # Copy every expression node children-first into the shared memo, so the
+        # attribute loop below meets each one as a memo hit (see
+        # ``_expressions_children_first``).
+        for node in self._expressions_children_first():
+            _copy.deepcopy(node, memo)
         for key, value in self.__dict__.items():
-            if key.endswith("_cache"):
+            if _is_model_cache(key):
                 # Solve-time memoisation (evaluators, convexity, FBBT structure,
                 # the native NLP base, flat offsets). Keyed by object identity
                 # and rebuilt on demand, so a copy starts cold rather than
@@ -6059,9 +6111,82 @@ class Model:
                     "a new uncopyable attribute must be taught to it here rather "
                     "than silently dropped."
                 ) from exc
+        new._restore_row_marks(self._row_marks_by_position())
         if self._builder is not None:
             new._replay_builder()
         return new
+
+    # ``copy.deepcopy`` and ``pickle`` both walk an object graph recursively, a few
+    # interpreter frames per level, so an expression built by a loop
+    # (``e = e + x[i]``) is a chain as deep as the loop is long: ``clone()``
+    # raised ``RecursionError`` on a 500-term sum, pickle on a few thousand. Both
+    # memoise, so visiting the nodes children-first first means every later visit
+    # of a child is a memo hit and the nesting never exceeds one level -- the
+    # object graph produced is the same, only the order it is built in changes.
+    # A root this walk does not know is merely copied the old, recursive way.
+    def _expression_roots(self) -> list:
+        roots: list = []
+        if self._objective is not None:
+            roots.append(self._objective.expression)
+        for c in self._constraints:
+            if isinstance(c, Constraint):
+                roots.append(c.body)
+            elif isinstance(c, _IndicatorConstraint):
+                roots += [c.indicator, c.constraint.body]
+            elif isinstance(c, _DisjunctiveConstraint):
+                roots += [r.body for dd in c.disjuncts for r in dd]
+            elif isinstance(c, _SOSConstraint):
+                roots += list(c.variables)
+        for rel in self._complementarities:
+            roots += [getattr(rel, "f", None), getattr(rel, "g", None)]
+        return roots
+
+    def _expressions_children_first(self) -> list:
+        from discopt.serialize import _children
+
+        order: list = []
+        seen: set[int] = set()
+        stack: list = [(r, False) for r in reversed(self._expression_roots())]
+        while stack:
+            node, expanded = stack.pop()
+            if expanded:
+                order.append(node)
+                continue
+            if not isinstance(node, Expression) or id(node) in seen:
+                continue
+            seen.add(id(node))
+            stack.append((node, True))
+            stack.extend((ch, False) for ch in reversed(_children(node)))
+        return order
+
+    # ``mark_coupling`` and ``set_constraint_block`` key an unnamed row by
+    # ``id(constraint)``. A copy owns new constraint objects, so carrying those
+    # integers over verbatim left every such mark pointing at the ORIGINAL's rows:
+    # on the copy the coupling set and block labels silently came back empty, and
+    # ``discopt.serialize`` then refused to save it. The marks are moved by row
+    # position instead -- the one thing original and copy agree on. A key naming
+    # no current row (the row was removed) is dropped: it marks nothing here, and
+    # an integer outliving its object can only ever alias an unrelated one.
+    def _row_marks_by_position(self) -> tuple[list[int], list[tuple[int, Any]]]:
+        pos = {id(c): i for i, c in enumerate(self._constraints)}
+        coupling = sorted(pos[k] for k in self._coupling_keys if isinstance(k, int) and k in pos)
+        labels = [
+            (pos[k], v)
+            for k, v in self._block_labels_con.items()
+            if isinstance(k, int) and k in pos
+        ]
+        return coupling, labels
+
+    def _restore_row_marks(self, marks: tuple[list[int], list[tuple[int, Any]]]) -> None:
+        coupling, labels = marks
+        rows = self._constraints
+        self._coupling_keys = {k for k in self._coupling_keys if not isinstance(k, int)}
+        self._coupling_keys.update(id(rows[i]) for i in coupling)
+        self._block_labels_con = {
+            k: v for k, v in self._block_labels_con.items() if not isinstance(k, int)
+        }
+        for i, v in labels:
+            self._block_labels_con[id(rows[i])] = v
 
     def _replay_builder(self) -> None:
         """Rebuild the Rust builder of a copy from its retained Python-side blocks.
@@ -6091,6 +6216,61 @@ class Model:
         # The objective entry points install a fresh placeholder; keep the
         # copied one so the copy's objective object graph matches the original's.
         self._objective = objective
+
+    # ── Pickling ─────────────────────────────────────────────────────
+    #
+    # The same three obstacles ``__deepcopy__`` handles, and the same treatment:
+    # solve caches are dropped (an unpickled model starts cold), the Rust builder
+    # is replayed from its Python-side record, and everything else -- including
+    # ``_last_solve_result`` and ``_source_nl_path`` -- travels as the default
+    # pickle would carry it. Two things differ, both because a pickle leaves the
+    # process: ``_nl_repr`` becomes a ``_DetachedNlRepr`` marker (see that class for
+    # why it is not just dropped), and ``_solve_deadline`` is dropped -- it is an
+    # absolute ``time.perf_counter()`` reading, and that clock's origin is
+    # per-process, so the number means nothing in the process that unpickles it.
+    #
+    # ``pickle`` is for moving a model between processes running the same
+    # discopt; it carries no format version. To keep a model on disk, use
+    # ``Model.save`` / ``discopt.modeling.dumps`` (``discopt.serialize``).
+
+    def __getstate__(self) -> tuple:
+        # First in the dict, so the pickler writes the nodes children-first before
+        # anything that refers to them (see ``_expressions_children_first``).
+        state: dict = {"_pickle_expressions": self._expressions_children_first()}
+        for key, value in self.__dict__.items():
+            if _is_model_cache(key):
+                if key in _MODEL_INIT_CACHES:
+                    state[key] = None
+                continue
+            if key == "_builder":
+                state[key] = None
+                continue
+            if key == "_nl_repr" and value is not None:
+                state[key] = _DetachedNlRepr()
+                continue
+            if key == "_solve_deadline":
+                continue
+            state[key] = value
+        # The id-keyed row marks travel by position (see ``_row_marks_by_position``).
+        return state, self._builder is not None, self._row_marks_by_position()
+
+    def __setstate__(self, state: tuple) -> None:
+        attrs, had_builder, row_marks = state
+        attrs.pop("_pickle_expressions", None)
+        self.__dict__.update(attrs)
+        self._restore_row_marks(row_marks)
+        if had_builder:
+            self._replay_builder()
+
+    # ``copy.copy`` also goes through ``__getstate__``/``__setstate__`` once they
+    # exist. Keep it what it was before they did -- a plain shallow copy sharing
+    # every attribute -- since callers (``relax_objective_defining_equality``)
+    # rely on it being cheap and on it changing nothing but what they reassign.
+    def __copy__(self) -> "Model":
+        cls = type(self)
+        new = cls.__new__(cls)
+        new.__dict__.update(self.__dict__)
+        return new
 
     def clone(self) -> "Model":
         """Return an independent deep copy of this model.
@@ -12330,6 +12510,10 @@ def from_nl(path: str) -> Model:
     from discopt._relax.nl_reconstruction import reconstruct_complementarities
     from discopt._rust import parse_nl_file
 
+    # Digest the bytes BEFORE parsing: if the file changes in between, the digest
+    # describes the old content, and the solver's check below then refuses the file
+    # rather than accepting a parse of something else.
+    source_digest = nl_file_sha256(path)
     nl_repr = parse_nl_file(path)
 
     model_name = os.path.splitext(os.path.basename(path))[0]
@@ -12357,10 +12541,27 @@ def from_nl(path: str) -> Model:
     # .nl would solve a structurally different (under-constrained) problem. The
     # ``to_nl`` fallback emits the reformulated model instead, staying consistent
     # with the JAX evaluator.
+    #
+    # The digest goes with the path because the path alone says nothing about what
+    # is there now: ``nlp_native`` reads the file only while its bytes still hash to
+    # this, so a copy of the model that moved (pickle, ``Model.save``) or a file
+    # edited since cannot hand POUNCE a different problem.
     if not compl_pairs:
         m._source_nl_path = os.path.abspath(path)
+        m._source_nl_sha256 = source_digest
 
     return m
+
+
+def nl_file_sha256(path: str) -> str:
+    """SHA-256 hex digest of a file's bytes (the ``_source_nl_sha256`` record)."""
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _add_nl_complementarity(

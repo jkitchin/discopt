@@ -7,18 +7,24 @@ independent global solves. Before this module every such caller had to write its
 own process pool, and each one had to rediscover the two facts below.
 
 **Why models are shipped as text, not pickled.** A :class:`~discopt.modeling.core.Model`
-that has been solved is not picklable: the solve leaves a live Rust ``PyModelRepr``
-and module references on the model and on its variables, so ``pickle.dumps``
-raises ``TypeError: cannot pickle 'module' object`` (the same obstacle CLAUDE.md
-records for ``copy.deepcopy``). The native round-trippable format (#1240,
-:func:`discopt.modeling.dumps` / :func:`discopt.modeling.loads`) has no such
-problem, so a worker receives the model's serialized text and rebuilds it.
+pickles (``Model.__getstate__`` drops the solve caches, replays the Rust builder and
+leaves a marker for a ``from_nl`` parse, the same treatment ``Model.__deepcopy__``
+gives them), but a worker receives the model's native serialized text instead
+(#1240, :func:`discopt.modeling.dumps` / :func:`discopt.modeling.loads`). The text
+carries nothing a worker should not start with: no solve caches, no previous result,
+no parsed ``.nl`` source. Reading it back runs the same validation a model loaded
+from disk gets, including the registered-atom check below. And a model that cannot
+be written faithfully (a ``dm.custom`` callable, a propositional logic constraint,
+an unattached disjunction, the output of a reformulation pass that points back at
+its source model) is refused by name in the parent before any process starts.
 
 **Why results come back with their model detached.** :class:`SolveResult` carries
-a back-reference to its model for ``result.value(var)`` and ``result.sensitivity``,
-which would drag the unpicklable model back into the pipe. The worker clears it
-and this module re-attaches the caller's *own* model object on the way out, so a
-returned result behaves like one from a local solve.
+a back-reference to its model for ``result.value(var)`` and ``result.sensitivity``.
+Pickled whole, that would send a full *copy* of the worker's model back down the
+pipe, and the parent would get a result whose ``value(var)`` answers for the
+copy's variables, not the caller's. The worker clears it and this module
+re-attaches the caller's *own* model object on the way out, so a returned result
+behaves like one from a local solve.
 
 **Registered atoms need to be registered in the worker too.** The document a
 worker receives records which nodes are registered composites (#1248 A), and
@@ -66,12 +72,15 @@ __all__ = ["solve_batch"]
 #: over the caller's objects, so a worker could not run them even if the pickle
 #: succeeded; refusing names the fix instead of failing inside the pool.
 #:
-#: ``warm_start`` is here for the reason this module's docstring gives for a
-#: solved ``Model``: a ``SolveResult`` returned by ``Model.solve()`` carries a
-#: live back-reference to that model (``result._model``), whose solve left a Rust
-#: ``PyModelRepr`` behind, so pickling it raises ``TypeError: cannot pickle
-#: 'module' object`` from inside ``concurrent.futures`` — aborting the WHOLE batch
-#: with no mention of ``warm_start`` and no guidance (#1316).
+#: ``warm_start`` was added here by #1316, when a ``SolveResult`` could not be
+#: pickled at all: its back-reference to a solved ``Model`` raised ``TypeError:
+#: cannot pickle 'module' object`` from inside ``concurrent.futures``, aborting the
+#: WHOLE batch with no mention of ``warm_start``. Since ``Model.__getstate__`` it
+#: pickles. It stays refused because one ``warm_start`` would be forwarded to every
+#: model in the batch, and it describes only the one model it came from. A model
+#: whose variable names or shapes differ would fail ``primal_point_from_result``'s
+#: check inside its worker, after the pool had started. Supporting it properly means
+#: a per-model warm start, which is a separate feature, not a pickling fix.
 _UNSENDABLE_KWARGS = frozenset(
     {"lazy_constraints", "incumbent_callback", "node_callback", "debug", "tuning", "warm_start"}
 )
@@ -110,7 +119,7 @@ def _solve_serialized(payload: tuple) -> tuple:
         model = dm.loads(text)
         result = model.solve(**kwargs)
         assert not isinstance(result, Iterator), "solve_batch refuses stream=True"
-        result._model = None  # the model cannot cross the pipe; the parent re-attaches
+        result._model = None  # the parent re-attaches the caller's own model
         blob, dropped = _pickle_result(result)
         return ("ok", blob, dropped, index)
     except (KeyboardInterrupt, SystemExit):  # pragma: no cover - propagate control flow
@@ -260,8 +269,8 @@ def solve_batch(
     )
     if unsendable:
         detail = (
-            " A warm_start SolveResult holds a live reference to the model it came from, "
-            "whose solve left a Rust handle behind, so it cannot be pickled."
+            " A warm_start SolveResult describes the one model it came from, and solve_batch "
+            "would forward the same one to every model in the batch."
             if "warm_start" in unsendable
             else ""
         )

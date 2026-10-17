@@ -249,6 +249,7 @@ def _unknown_referrers(result: Model, owned: dict, owned_dicts: set) -> list[str
 
 def _invalidate_source_records(model: Model) -> None:
     model.__dict__.pop("_source_nl_path", None)
+    model.__dict__.pop("_source_nl_sha256", None)
     if "_last_solve_result" in model.__dict__:
         model._last_solve_result = None
 
