@@ -161,8 +161,8 @@ in-process run of the same model and oracle as panel 2's `eps` arm
 
 | shift | flag | mode | certified | optimum found | **incorrect** | mean wall (sd) |
 |---|---|---|---|---|---|---|
-| 1e-6 | 0 | cold | 71 | 95 | **2** | 0.060 (0.028) s |
-| 1e-6 | 0 | warm | 61 | 90 | **1** | 0.059 (0.024) s |
+| 1e-6 | 0 | cold | 70 | 94 | **2** | 0.060 (0.026) s |
+| 1e-6 | 0 | warm | 61 | 89 | **1** | 0.057 (0.028) s |
 | 1e-6 | 1 | cold | **100** | 100 | 0 | 0.061 (0.009) s |
 | 1e-6 | 1 | warm | **100** | 100 | 0 | 0.060 (0.009) s |
 | 0 | 0 / 1 | cold, warm | 100 each | 100 each | 0 | 0.061 s |
@@ -170,7 +170,7 @@ in-process run of the same model and oracle as panel 2's `eps` arm
 | 1e-4 | 1 | cold / warm | 100 / 100 | 100 / 100 | 0 | 0.061 s |
 
 Rerun after change 5 (cross-form infeasible check): the ON arm is unchanged. In the OFF arm
-the optimum is now found on 95 of the 1e-6 cold instances (was 91), because refuted
+the optimum is now found on 94 of the 1e-6 cold instances (was 91), because refuted
 `infeasible` labels now publish the other form's point.
 
 The three flag-OFF false certificates are seed 44 (cold, 400.30 against 381.20) and
@@ -214,7 +214,7 @@ Load average was 5.1 at the start, right after a test run, and 1.9 at the end.
   OFF 8966406.49 and ON 8966635.63, against an oracle of 8966413.71. Both bounds are
   at or below the oracle.
 * **Net-positive: yes**, on the class the fix targets: 2 certifications gained in
-  panel 2, and in panel 1, 600/600 certified against 529/600, with 3 false
+  panel 2, and in panel 1, 600/600 certified against 528/600, with 3 false
   certificates removed. The open-box `sequencing_open` arm gains 8 answers where OFF
   returned `error`. No arm loses anything. Total wall time is within noise: check
   set 29.6 → 28.6 s, #1654 families 29.9 → 28.1 s, open-box 32.5 → 33.3 s.
