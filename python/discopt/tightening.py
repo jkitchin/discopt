@@ -72,7 +72,8 @@ def fbbt_box(
     constraints and returns the tightened flat bounds. The per-block bounds from
     the Rust FBBT engine are expanded to per-scalar bounds and intersected with
     the model's current bounds, so the result is always a sound subset of the
-    input box.
+    input box. A model with array variables is also propagated per element
+    (#1752), so ``x[0] <= 2`` tightens ``x[0]`` alone.
 
     Parameters
     ----------
@@ -134,6 +135,27 @@ def fbbt_box(
         new_lb[sl] = np.maximum(new_lb[sl], lo)
         new_ub[sl] = np.minimum(new_ub[sl], hi)
         offset += size
+
+    # #1752: the block engine keeps ONE interval per block, so a row on one element
+    # of an array (``x[0] <= 2``) cannot tighten the block and the array model came
+    # back untouched. Propagate per SCALAR through the in-tree kernel (#1513, the
+    # one ``probe_box`` uses; probing off, so this is FBBT only) and intersect: both
+    # boxes contain every feasible point, so the intersection does too. An all-scalar
+    # model is already per-scalar above (the kernel is the block engine there).
+    if any(s != 1 for s in sizes) and not bool(np.any(new_lb > new_ub + tol)):
+        delta = repr_.in_tree_presolve(
+            orig_lb_arr,
+            orig_ub_arr,
+            node_depth=0,
+            depth_stride=1,
+            max_iter=max_iter,
+            tol=tol,
+            probing=False,
+        )
+        if delta["infeasible"]:
+            return BoundTightening(lb=new_lb, ub=new_ub, infeasible=True, n_tightened=0)
+        new_lb = np.maximum(new_lb, np.asarray(delta["lb"], dtype=np.float64))
+        new_ub = np.minimum(new_ub, np.asarray(delta["ub"], dtype=np.float64))
 
     infeasible = bool(np.any(new_lb > new_ub + tol))
     tightened = int(np.count_nonzero((new_lb > orig_lb_arr + tol) | (new_ub < orig_ub_arr - tol)))

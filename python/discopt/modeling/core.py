@@ -10626,8 +10626,15 @@ class Model:
         # #1551: a bound withdrawn because the objective is unresolvable at the
         # incumbent was produced and then refused, with its own WARNING; "could not
         # bound this objective" would misdescribe that too.
+        # #1753: a deliberate local solve (skip_convex_check=True) builds no
+        # relaxation either; the abstained-classifier local route gets its own
+        # warning below instead of the envelope advice.
+        _local_nlp_route = isinstance(result, SolveResult) and (
+            result.algorithm_route or ""
+        ).startswith("local-nlp:")
         _no_bound_by_design = isinstance(result, SolveResult) and (
             (result.algorithm_route or "").startswith("pounce:")
+            or (_local_nlp_route and "skip_convex_check=True" in (result.algorithm_route or ""))
             or bool((result.solver_stats or {}).get("certificate/objective_unresolved"))
             # #1678 (b): withdrawn because it rested on the default box, with its
             # own warning naming the variables.
@@ -10693,6 +10700,23 @@ class Model:
                     result.status,
                     describe_poles(_poles),
                 )
+        elif (
+            isinstance(result, SolveResult)
+            and result.bound is None
+            and result.status not in ("infeasible", "unbounded")
+            and not _no_bound_by_design
+            and _local_nlp_route
+        ):
+            # #1753: the convexity classifier abstained, so the solve ran one local
+            # NLP and built no relaxation; the envelope advice would misdescribe it.
+            _logging.getLogger("discopt.solver").warning(
+                "No valid dual bound was produced for model %r (status=%s): "
+                "convexity could not be established, so the model was solved by a "
+                "single local NLP and no relaxation was built. The result is a "
+                "feasible point with no global optimality claim.",
+                self.name,
+                result.status,
+            )
         elif (
             isinstance(result, SolveResult)
             and result.bound is None
