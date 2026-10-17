@@ -40,7 +40,10 @@ unconditional once invoked.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import logging
+from collections.abc import Iterator
 from typing import Callable, Optional, TypeVar
 
 import numpy as np
@@ -447,6 +450,28 @@ def _structural_key(expr: Expression, pins: list) -> tuple:
     return walk(expr)
 
 
+#: #1727: the names of every auxiliary column the lift creates while a
+#: :func:`collect_lift_aux_names` block is active. ``Model.solve`` uses it to keep
+#: these internal columns out of ``SolveResult.x``: each is the value of a product
+#: of declared variables, which the caller can compute and never asked for. The
+#: record comes from the pass that made the columns, not from a name pattern, so a
+#: declared variable that happens to be called ``_fr_aux_0`` is never affected.
+_LIFT_AUX_SINK: contextvars.ContextVar[Optional[set[str]]] = contextvars.ContextVar(
+    "discopt_lift_aux_sink", default=None
+)
+
+
+@contextlib.contextmanager
+def collect_lift_aux_names() -> Iterator[set[str]]:
+    """Within this block, record the name of every factorable-lift auxiliary."""
+    names: set[str] = set()
+    token = _LIFT_AUX_SINK.set(names)
+    try:
+        yield names
+    finally:
+        _LIFT_AUX_SINK.reset(token)
+
+
 class _LiftAbandoned(Exception):
     """The solve clock ran out inside one constraint's lift (#1565).
 
@@ -521,6 +546,16 @@ class _Lifter:
         # ``primal_heuristics._is_free_integer``.
         self.implied_integer_auxes: set[str] = set()
 
+    def _new_aux_name(self) -> str:
+        """The next ``_fr_aux_*`` name, recorded in the active
+        :func:`collect_lift_aux_names` sink (#1727)."""
+        name = f"_fr_aux_{self._counter}"
+        self._counter += 1
+        sink = _LIFT_AUX_SINK.get()
+        if sink is not None:
+            sink.add(name)
+        return name
+
     def tick(self, *, force: bool = False) -> None:
         """Charge one walker visit; raise :class:`_LiftAbandoned` once the clock
         is spent. ``force`` consults the deadline now (before an expensive step)
@@ -557,8 +592,7 @@ class _Lifter:
             # interval would make the nonlinear bound-tightening wrongly prove
             # infeasibility.
             return None
-        name = f"_fr_aux_{self._counter}"
-        self._counter += 1
+        name = self._new_aux_name()
         w = Variable(name, VarType.CONTINUOUS, (), lo, hi, self.model)
         self.model._variables.append(w)
         self._cache[key] = w
@@ -604,8 +638,7 @@ class _Lifter:
             return None
         if lo > hi:
             return None
-        name = f"_fr_aux_{self._counter}"
-        self._counter += 1
+        name = self._new_aux_name()
         vtype = VarType.INTEGER if integer else VarType.CONTINUOUS
         w = Variable(name, vtype, (), lo, hi, self.model)
         if integer and _lift_affine_monomials_enabled():
@@ -649,8 +682,7 @@ class _Lifter:
             d_lo, d_hi = d_hi, d_lo
         if not (np.isfinite(d_lo) and np.isfinite(d_hi)) or max(d_lo, d_hi) >= _INF_THRESH:
             return None
-        name = f"_fr_aux_{self._counter}"
-        self._counter += 1
+        name = self._new_aux_name()
         d = Variable(name, VarType.CONTINUOUS, (), d_lo, d_hi, self.model)
         self.model._variables.append(d)
         pow_expr = BinaryOp("**", base_var, Constant(float(p)))

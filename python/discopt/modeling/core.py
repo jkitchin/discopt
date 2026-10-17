@@ -4313,13 +4313,14 @@ class SolveResult:
         Variable values keyed by name. None if no feasible solution found.
 
         Keyed by the columns the SOLVER solved, which on a model that needed a
-        solve-time reformulation is a superset of the variables the caller
+        solve-time reformulation can be a superset of the variables the caller
         declared: the GDP lowering appends a selector binary per disjunct
-        (``_gdp_aux_*``) and the factorable lift a monomial auxiliary per lifted
-        product (``_fr_aux_*``). They are reported rather than hidden because a
+        (``_gdp_aux_*``). Those are reported rather than hidden because a
         disjunctive model's selector is the only record of which disjunct the
         solver chose. Use :meth:`declared_x` for the caller's variables alone
-        (#1334).
+        (#1334). The factorable lift's monomial auxiliaries (``_fr_aux_*``) are
+        NOT reported (#1727): each is the value of a product of declared
+        variables, so it carries nothing the caller cannot compute.
     wall_time : float
         Total wall-clock solve time in seconds.
     node_count : int
@@ -4798,11 +4799,11 @@ class SolveResult:
         """``x`` restricted to the variables *model* declares.
 
         #1334: ``x`` is keyed by the columns the SOLVER solved, and a solve-time
-        reformulation appends its own — the GDP lowering adds a selector binary
-        per disjunct, the factorable lift a monomial auxiliary per lifted product
-        — so a plain ``print(result.x)`` on a disjunctive or factorable model
-        shows names like ``_gdp_aux_disj_anon_1_1`` and ``_fr_aux_0`` that the
-        caller never wrote. This returns just the caller's own.
+        reformulation can append its own — the GDP lowering adds a selector
+        binary per disjunct — so a plain ``print(result.x)`` on a disjunctive
+        model shows names like ``_gdp_aux_disj_anon_1_1`` that the caller never
+        wrote. This returns just the caller's own. (The factorable lift's
+        ``_fr_aux_*`` columns are already left out of ``x``, #1727.)
 
         The split is taken from *model*'s variable list, not from a name pattern:
         every pass that generates columns would have to be enumerated for a
@@ -9732,9 +9733,12 @@ class Model:
             _fb_reserve if (_fb_reserve > 0.0 and _lp_spatial_reserve_extension_enabled()) else 0.0
         )
 
+        from discopt._relax.factorable_reform import collect_lift_aux_names
+
+        _lift_aux_names: set[str] = set()
         _t_primary0 = _time.perf_counter()
         try:
-            with deadline_scope(_primary_tl):
+            with deadline_scope(_primary_tl), collect_lift_aux_names() as _lift_aux_names:
                 result = solve_model(
                     self,
                     time_limit=_primary_tl,
@@ -10319,6 +10323,13 @@ class Model:
             _guard_unresolved_objective(result)
             # #1678 (b): after every other guard, so nothing re-grants it.
             self._withhold_default_box_certificate(result)
+            # #1727: drop the factorable lift's auxiliary columns from ``x``. After
+            # the guards above, which judge the point as the route left it. Only
+            # names the lift recorded AND the caller did not declare.
+            if _lift_aux_names and result.x:
+                _declared_names = {v.name for v in self._variables}
+                for _aux_name in _lift_aux_names - _declared_names:
+                    result.x.pop(_aux_name, None)
 
         if llm:
             try:
