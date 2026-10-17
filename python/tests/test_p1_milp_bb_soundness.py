@@ -12,6 +12,8 @@ stalled relaxation, while normal (converged) solves still certify.
 
 from __future__ import annotations
 
+import time
+
 import discopt.modeling as dm
 import discopt.solver as S
 import numpy as np
@@ -158,7 +160,7 @@ class TestSnapFixResolvePurification:
             b_ub,
             None,
             None,
-            0.0,
+            time.perf_counter(),  # t_start is a perf_counter timestamp
             30.0,
         )
         assert inc is not None

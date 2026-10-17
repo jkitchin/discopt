@@ -22920,6 +22920,27 @@ def _solve_continuous(
         # respecting actual bounds.
         _X0_CLIP = 10.0
         x0 = np.clip(x0, np.maximum(lb, -_X0_CLIP), np.minimum(ub, _X0_CLIP))
+        # #1714: on a PROVED-convex model, a column that an ``==`` row pins on its
+        # own (``z == 1``, ``x[0] == 0``) starts at that value instead of the box
+        # midpoint. The midpoint ignores the equality: on the #1711 chain the
+        # nonlinear tightening leaves the four end columns at [-10, 0] / [-10, 1],
+        # their midpoints are -5, and the first iterate has inf_pr = 50. Measured at
+        # N = 10,000: POUNCE 101 -> 47 iterations, 24.1 -> 10.5 s, certified in both
+        # arms. Only the START moves -- lb/ub reach the NLP unchanged -- so no bound
+        # or certificate depends on it.
+        #
+        # Convex only, on purpose. There every start reaches the same optimal value,
+        # so this can only shorten the path. On a nonconvex model the start picks the
+        # basin: across the COPS 3.0 ports it helped rocket (1113 -> 329 iterations)
+        # and robot, but sent polygon to a worse local optimum (-0.71974 ->
+        # -0.67498). What would change that: a start rule measured to be net-positive
+        # on nonconvex local solves, which this is not.
+        if certify_convex:
+            from discopt._relax.nonlinear_bound_tightening import affine_implied_values
+
+            for _idx, _val in affine_implied_values(model).items():
+                x0[_idx] = _val
+            x0 = np.clip(x0, lb, ub)
 
     # The model-level NLP seam: this point IS the user's solution, so it takes the
     # incumbent options (#945) — the same reasoning as _solve_lp_pounce and
@@ -29923,6 +29944,54 @@ def _linear_node_verified_empty(A_ub, b_ub, A_eq, b_eq, node_lb, node_ub) -> boo
     return bool(res.status == SolveStatus.INFEASIBLE)
 
 
+def _recovered_point_passes_exit_gate(x, A_ub, b_ub, A_eq, b_eq, lb, ub) -> bool:
+    """True when a recovered node point passes the B&B exit gate's own test.
+
+    A recovered point the tree can adopt must pass the SAME check as the MILP-BB
+    and MIQP-BB exit gates (:func:`_matrix_solution_feasible`), or an integral
+    one becomes an incumbent that gate refuses with a RuntimeError. Measured on
+    test_1236's fac2 OA master: a short-budget callback recovery stopped at
+    Ipopt's "acceptable" level, which ``_LP_STATUS_MAP`` reports as OPTIMAL, and
+    returned a point violating A_ub row 176 by 29.2 (12 s budget) and row 341 by
+    5.57 (10 s). The relative-tolerance box/rows gate on the structured path
+    lets such points through when the rows' right-hand sides are large.
+    """
+    lb = np.asarray(lb, dtype=np.float64)
+    ub = np.asarray(ub, dtype=np.float64)
+    x = np.asarray(x, dtype=np.float64)[: lb.shape[0]]
+    return bool(_matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, np.stack([lb, ub], axis=1)))
+
+
+def _recovered_point_respects_node(
+    who: str, x, lb, ub, A_ub, b_ub, A_eq, b_eq, tol: float = 1e-5
+) -> bool:
+    """Soundness gate for a recovered node point, mirroring _solve_node_lp_pounce.
+
+    An optimum must respect its own box and rows. An off-bound or row-violating
+    point can still be integral (a binary at -1) and would otherwise pass as an
+    incumbent, which the B&B exit gate then refuses with a RuntimeError.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    lb = np.asarray(lb, dtype=np.float64)
+    ub = np.asarray(ub, dtype=np.float64)
+    if x.shape[0] != lb.shape[0]:
+        return False
+    if np.any(x < lb - tol) or np.any(x > ub + tol):
+        logger.debug("%s violates variable bounds; rejecting", who)
+        return False
+    if A_ub is not None and b_ub is not None and A_ub.shape[0]:
+        b = np.asarray(b_ub, dtype=np.float64)
+        if not bool(np.all(A_ub @ x <= b + tol * (1.0 + np.abs(b)))):
+            logger.debug("%s violates inequality rows; rejecting", who)
+            return False
+    if A_eq is not None and b_eq is not None and A_eq.shape[0]:
+        b = np.asarray(b_eq, dtype=np.float64)
+        if not bool(np.all(np.abs(A_eq @ x - b) <= tol * (1.0 + np.abs(b)))):
+            logger.debug("%s violates equality rows; rejecting", who)
+            return False
+    return True
+
+
 def _structured_node_recovery(
     node_lb: np.ndarray,
     node_ub: np.ndarray,
@@ -29933,6 +30002,7 @@ def _structured_node_recovery(
     A_eq,
     b_eq,
     Q: Optional[np.ndarray] = None,
+    time_limit: Optional[float] = None,
 ):
     """Re-solve a node relaxation with POUNCE's structured convex LP/QP engine.
 
@@ -29982,6 +30052,7 @@ def _structured_node_recovery(
             b=b_eq_m,
             lb=lb_n,
             ub=ub_n,
+            time_limit=time_limit,
         )
     except Exception as e:  # noqa: BLE001 - external backend; see comment
         # #1514: kept as a sound fallback. POUNCE is an external IPM whose native
@@ -30001,23 +30072,10 @@ def _structured_node_recovery(
         return None
 
     x_sol = np.asarray(res.x, dtype=np.float64)
-    # Soundness gate, mirroring _solve_node_lp_pounce: an optimum must respect
-    # its own box and rows. An off-bound point can still be integral (a binary
-    # at -1) and would otherwise pass as an incumbent.
-    tol = 1e-5
-    if x_sol.shape[0] != lb_n.shape[0]:
+    if not _recovered_point_respects_node(
+        "structured node recovery", x_sol, lb_n, ub_n, A_ub_m, b_ub_m, A_eq_m, b_eq_m
+    ):
         return None
-    if np.any(x_sol < lb_n - tol) or np.any(x_sol > ub_n + tol):
-        logger.debug("structured node recovery violates variable bounds; rejecting")
-        return None
-    if A_ub_m is not None and b_ub_m is not None and A_ub_m.shape[0]:
-        if not bool(np.all(A_ub_m @ x_sol <= b_ub_m + tol * (1.0 + np.abs(b_ub_m)))):
-            logger.debug("structured node recovery violates inequality rows; rejecting")
-            return None
-    if A_eq_m is not None and b_eq_m is not None and A_eq_m.shape[0]:
-        if not bool(np.all(np.abs(A_eq_m @ x_sol - b_eq_m) <= tol * (1.0 + np.abs(b_eq_m)))):
-            logger.debug("structured node recovery violates equality rows; rejecting")
-            return None
     bound = _convex_qp_node_lower_bound(
         None if Q is None else np.asarray(Q, dtype=np.float64),
         c,
@@ -30080,12 +30138,32 @@ def _pounce_recover_node_bound(
     # behind, which is why re-solving a node costs 8-33 s while *solving* it in
     # the batch path costs ~8 ms. Structured first, callback as the fallback, so
     # a structured decline still gets the legacy answer (§3: legacy path intact).
-    if _tuning().structured_node_recovery:
-        rec = _structured_node_recovery(node_lb, node_ub, c, obj_const, A_ub, b_ub, A_eq, b_eq, Q=Q)
+    # The structured attempt is bounded by the solve's remaining time and skipped
+    # once there is none. It used to run unbounded: a recovery solve that started
+    # near the deadline ran on past it, by 12.8 s on test_1236's captured fac2
+    # master (POUNCE main, 100 s budget, 31 nodes). A solve stopped at its budget
+    # returns ``time_limit``, which settles nothing, and a skipped one returns
+    # ``None`` -- either way the node stays open on its parent bound, the answer
+    # the deadline gives it anyway. The callback fallback keeps its 0.5 s floor.
+    remaining = time_limit - (time.perf_counter() - t_start)
+    if _tuning().structured_node_recovery and remaining > 0.0:
+        rec = _structured_node_recovery(
+            node_lb, node_ub, c, obj_const, A_ub, b_ub, A_eq, b_eq, Q=Q, time_limit=remaining
+        )
         if rec is not None:
             return rec
 
-    time_left = max(0.5, time_limit - (time.perf_counter() - t_start))
+    # Not started once the deadline has passed. It used to get a 0.5 s floor
+    # instead, and a callback solve cut off that short can stop at Ipopt's
+    # "acceptable" level, which maps to OPTIMAL: on the fac2 OA master (10 s
+    # budget) one such 0.516 s solve returned a point violating an A_ub row by
+    # 5.57 that passed the relative-tolerance gate, became the incumbent, and was
+    # refused by the MILP-BB exit gate as a RuntimeError. Past the deadline the
+    # node's answer cannot change the result, so ``None`` -- node open, gap
+    # decertified -- is the honest one.
+    time_left = time_limit - (time.perf_counter() - t_start)
+    if time_left <= 0.0:
+        return None
     kwargs = dict(
         c=c,
         A_ub=A_ub,
@@ -30495,7 +30573,9 @@ def _pounce_qp_relaxation_nodes(qp_data, batch_lb, batch_ub, n_orig, t_start, ti
     return clean, infeasible, obj_vals, lb_vals, x_vals
 
 
-def _solve_node_lp_pounce(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, time_limit):
+def _solve_node_lp_pounce(
+    lp_data, node_lb, node_ub, n_vars, n_orig, t_start, time_limit, is_root=False
+):
     """Solve one MILP-B&B node relaxation with POUNCE on the augmented
     standard-form LP (Path B: POUNCE as the *primary* node engine in POUNCE
     mode, not just recovery).
@@ -30543,6 +30623,17 @@ def _solve_node_lp_pounce(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, ti
     lb_n = np.asarray(node_lb, dtype=np.float64)
     ub_n = np.asarray(node_ub, dtype=np.float64)
     lb_n, ub_n = _snap_inverted_bounds(lb_n, ub_n)
+    # A tree node is bounded by the solve's remaining time and not started once
+    # there is none: unbounded, a node solve could run any distance past the
+    # caller's deadline. ``None`` leaves the node unsettled, the same as a solve
+    # stopped at its budget. The ROOT is exempt and runs to completion as before:
+    # its relaxation seeds the dual bound, which even a ``time_limit=1e-6`` solve
+    # must report.
+    time_left: Optional[float] = None
+    if not is_root:
+        time_left = time_limit - (time.perf_counter() - t_start)
+        if time_left <= 0.0:
+            return None
     try:
         res = pounce.solve_qp(
             P=None,  # P=0 -> LP
@@ -30553,6 +30644,7 @@ def _solve_node_lp_pounce(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, ti
             b=b_eq_m,
             lb=lb_n,
             ub=ub_n,
+            time_limit=time_left,
         )
     except Exception as e:  # noqa: BLE001 - external backend; see comment
         # #1514: kept as a sound fallback. POUNCE's native layer can raise rather
@@ -30603,7 +30695,9 @@ def _solve_node_lp_pounce(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, ti
     return None
 
 
-def _solve_node_lp_simplex(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, time_limit):
+def _solve_node_lp_simplex(
+    lp_data, node_lb, node_ub, n_vars, n_orig, t_start, time_limit, is_root=False
+):
     """Solve one MILP-B&B node relaxation with the pure-Rust warm-started
     simplex (exact vertex) — the default node engine for pure MILP.
 
@@ -33667,7 +33761,7 @@ def _solve_milp_bb(
     if _use_structured_nodes:
         # #1514: no ``except``. ``_node_solve`` returns ``None`` when it cannot
         # settle the root; a raise is a defect.
-        _root_out = _node_solve(lp_data, lb, ub, n_vars, n_orig, t_start, time_limit)
+        _root_out = _node_solve(lp_data, lb, ub, n_vars, n_orig, t_start, time_limit, is_root=True)
         if _root_out is not None and _root_out[2] == "optimal" and np.isfinite(_root_out[0]):
             _root_lp_bound = float(_root_out[0])
 
@@ -33806,6 +33900,18 @@ def _solve_milp_bb(
             # The caller's sentinel stays, but NOTHING proved this region empty --
             # so it is not a justified exclusion (C-47) and `excl` stays False.
             # Decertifying is the compensation the tree used to depend on.
+            _gap_certified = False
+        elif rec[0] == "optimal" and not _recovered_point_passes_exit_gate(
+            rec[2],
+            _A_ub_m,
+            _b_ub_m,
+            _A_eq_m,
+            _b_eq_m,
+            np.asarray(node_lb_i)[:n_orig],
+            np.asarray(node_ub_i)[:n_orig],
+        ):
+            # Treated as unrecovered: the sentinel stays and the gap is
+            # decertified, exactly as for None (see the helper for the measurement).
             _gap_certified = False
         elif rec[0] == "optimal":
             lbs[i] = rec[1]
@@ -34921,7 +35027,19 @@ def _solve_miqp_bb(
                 time_limit,
                 Q=_Q_m,
             )
-            if rec is not None and rec[0] == "optimal":
+            if (
+                rec is not None
+                and rec[0] == "optimal"
+                and _recovered_point_passes_exit_gate(
+                    rec[2],
+                    _A_ub_q,
+                    _b_ub_q,
+                    _A_eq_q,
+                    _b_eq_q,
+                    np.asarray(node_lb_i, dtype=np.float64) - _s,
+                    np.asarray(node_ub_i, dtype=np.float64) - _s,
+                )
+            ):
                 lbs[i] = rec[1]
                 sols[i] = np.asarray(rec[2][:n_vars], dtype=np.float64) + _s
             else:
@@ -34947,10 +35065,22 @@ def _solve_miqp_bb(
             Q=_Q_m,
         )
         if rec is not None and rec[0] == "optimal":
-            lbs[i] = rec[1]
-            sols[i] = np.asarray(rec[2][:n_vars], dtype=np.float64) + _s
-            if lbs[i] < _SENTINEL_THRESHOLD:
-                _maybe_inject_snapped_or_rounded(sols[i], node_lb_i, node_ub_i)
+            if _recovered_point_passes_exit_gate(
+                rec[2],
+                _A_ub_q,
+                _b_ub_q,
+                _A_eq_q,
+                _b_eq_q,
+                np.asarray(node_lb_i, dtype=np.float64) - _s,
+                np.asarray(node_ub_i, dtype=np.float64) - _s,
+            ):
+                lbs[i] = rec[1]
+                sols[i] = np.asarray(rec[2][:n_vars], dtype=np.float64) + _s
+                if lbs[i] < _SENTINEL_THRESHOLD:
+                    _maybe_inject_snapped_or_rounded(sols[i], node_lb_i, node_ub_i)
+            else:  # a mislabelled point: inconclusive, same as no answer.
+                lbs[i] = -np.inf
+                _gap_certified = False
         elif rec is not None:  # Phase-1-certified infeasible: rigorous prune.
             lbs[i] = _INFEASIBILITY_SENTINEL
             excl[i] = True

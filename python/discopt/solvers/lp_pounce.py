@@ -492,11 +492,11 @@ class _LPCallbacks:
         self._c = c
         self._A = A
         self._m, self._n = A.shape
-        # Constant dense Jacobian, flattened row-major to match jacobianstructure.
-        self._jac_flat = A.ravel().astype(np.float64)
-        _rows, _cols = np.meshgrid(np.arange(self._m), np.arange(self._n), indexing="ij")
-        self._jac_rows = _rows.ravel()
-        self._jac_cols = _cols.ravel()
+        # Constant Jacobian: only its exact structural nonzeros, row-major. The
+        # dense ``m x n`` structure this used to declare made POUNCE factor a dense
+        # KKT system (the qp_pounce._QPCallbacks note has the measurement).
+        self._jac_rows, self._jac_cols = np.nonzero(A)
+        self._jac_flat = A[self._jac_rows, self._jac_cols].astype(np.float64)
 
     def objective(self, x: np.ndarray) -> float:
         return float(self._c @ x)
