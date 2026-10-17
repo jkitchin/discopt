@@ -61,7 +61,7 @@ def _call(x_relax, *, int_offsets=(0,), int_sizes=(1,)):
         b_ub,
         A_eq,
         b_eq,
-        0.0,
+        time.perf_counter(),  # t_start is a perf_counter timestamp
         30.0,
         Q=Q,
     )
@@ -74,7 +74,9 @@ def test_rounds_a_fractional_point_into_a_feasible_incumbent():
     # would be exercising purification rather than rounding.
     lb, ub, c, k, A_ub, b_ub, A_eq, b_eq, Q = _fix_or_free_qp()
     assert (
-        S._pounce_snap_incumbent(x, [0], [1], lb, ub, c, k, A_ub, b_ub, A_eq, b_eq, 0.0, 30.0, Q=Q)
+        S._pounce_snap_incumbent(
+            x, [0], [1], lb, ub, c, k, A_ub, b_ub, A_eq, b_eq, time.perf_counter(), 30.0, Q=Q
+        )
         is None
     ), "the snap gate accepted this point, so it is not a rounding probe"
 

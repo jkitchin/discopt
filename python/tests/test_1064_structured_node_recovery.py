@@ -21,6 +21,8 @@ These tests pin the routing and the soundness gates, not the timing -- a wall
 spread for it to mean anything.
 """
 
+import time
+
 import numpy as np
 import pytest
 from discopt import solver as S
@@ -79,7 +81,9 @@ def test_flag_on_routes_through_structured_engine(monkeypatch):
 
     tok = _flag(True)
     try:
-        rec = S._pounce_recover_node_bound(lb, ub, c, k, A_ub, b_ub, A_eq, b_eq, 0.0, 30.0, Q=Q)
+        rec = S._pounce_recover_node_bound(
+            lb, ub, c, k, A_ub, b_ub, A_eq, b_eq, time.perf_counter(), 30.0, Q=Q
+        )
     finally:
         reset_current(tok)
 
@@ -100,13 +104,17 @@ def test_both_engines_agree_on_the_optimum():
 
     tok = _flag(True)
     try:
-        on = S._pounce_recover_node_bound(lb, ub, c, k, A_ub, b_ub, A_eq, b_eq, 0.0, 30.0, Q=Q)
+        on = S._pounce_recover_node_bound(
+            lb, ub, c, k, A_ub, b_ub, A_eq, b_eq, time.perf_counter(), 30.0, Q=Q
+        )
     finally:
         reset_current(tok)
 
     tok = _flag(False)
     try:
-        off = S._pounce_recover_node_bound(lb, ub, c, k, A_ub, b_ub, A_eq, b_eq, 0.0, 30.0, Q=Q)
+        off = S._pounce_recover_node_bound(
+            lb, ub, c, k, A_ub, b_ub, A_eq, b_eq, time.perf_counter(), 30.0, Q=Q
+        )
     finally:
         reset_current(tok)
 
@@ -138,7 +146,9 @@ def test_infeasible_box_is_certified_by_both_engines():
     for on in (True, False):
         tok = _flag(on)
         try:
-            rec = S._pounce_recover_node_bound(lb, ub, c, k, A_ub, b_ub, A_eq, b_eq, 0.0, 30.0, Q=Q)
+            rec = S._pounce_recover_node_bound(
+                lb, ub, c, k, A_ub, b_ub, A_eq, b_eq, time.perf_counter(), 30.0, Q=Q
+            )
         finally:
             reset_current(tok)
         verdicts.append(None if rec is None else rec[0])
