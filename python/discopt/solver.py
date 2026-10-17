@@ -26978,16 +26978,23 @@ def _affine_constraint_rows(
     Read off :func:`discopt._relax.affine_array.affine_of`: exact, sparse, O(nnz),
     and in the evaluator's row layout -- one row per element of each body in C
     order, constraints in ``model._constraints`` order -- so ``row_map`` has the
-    shape :meth:`constraint_row_map` returns. ``None`` when any body is not affine
-    or the model carries builder-resident rows (#840), which the walk does not
-    see; the caller then uses an evaluator.
+    shape :meth:`constraint_row_map` returns. ``None`` when any body is not affine;
+    the caller then uses an evaluator.
+
+    Builder-resident rows (#840: ``add_linear_constraints`` and the
+    ``Model.constraint`` linear fast path) follow, one scalar row each, read off
+    their retained CSR blocks (#1743). Before, any such row declined the whole
+    walk, and a per-element 1000x1000 transport LP -- past the tape's node cap --
+    fell through to a JAX evaluator trace over 1M terms after HiGHS had solved it.
+    The rows are named by the same lazy constraints both evaluators list after
+    ``model._constraints``, and each body is the one
+    :func:`discopt.modeling.core._builder_row_constraint` builds: ``a x - b`` for
+    ``<=``/``==``, ``b - a x`` (sense ``<=``) for ``>=``.
     """
     import scipy.sparse as sp
 
     from discopt._relax.affine_array import NotAffineError, affine_of
 
-    if getattr(model, "_builder_linear_blocks", None):
-        return None
     blocks = []
     row_map: list[tuple[int, int, Any]] = []
     start = 0
@@ -27002,6 +27009,31 @@ def _affine_constraint_rows(
             start += aff.size
     except NotAffineError:
         return None
+    builder_blocks = getattr(model, "_builder_linear_blocks", None)
+    if builder_blocks:
+        lazy_rows = [
+            c for c in model._builder_linear_constraints(lazy=True) if isinstance(c, Constraint)
+        ]
+        r = 0
+        for A, x, sense, b, _name in builder_blocks:
+            A = sp.csr_matrix(A, dtype=np.float64)
+            k, n_local = int(A.shape[0]), int(A.shape[1])
+            off = int(model._flat_var_offset(x))
+            if off < 0 or off + n_local > n_orig or sense not in ("<=", ">=", "=="):
+                return None
+            M = sp.csr_matrix((A.data, A.indices + off, A.indptr), shape=(k, n_orig))
+            rhs = np.broadcast_to(np.asarray(b, dtype=np.float64), (k,)).copy()
+            if sense == ">=":
+                M, g = -M, rhs
+            else:
+                g = -rhs
+            blocks.append((M.tocsr(), g))
+            for con in lazy_rows[r : r + k]:
+                row_map.append((start, start + 1, con))
+                start += 1
+            r += k
+        if r != len(lazy_rows):
+            return None
     if not blocks:
         return _csr_rows(sp.csr_matrix((0, n_orig)), n_orig), np.zeros(0), row_map
     J = _csr_rows(sp.vstack([M for M, _ in blocks], format="csr"), n_orig)
@@ -27068,9 +27100,11 @@ def _matched_row_constraint_duals(
     # sparsity trace -- an ``(n, n)`` tangent basis, 8 TB on the 1000x1000
     # transport LP of #1720, after HiGHS had already solved it. The constraints of
     # an LP/QP are affine, so read ``J`` and ``g(0)`` exactly off the array-affine
-    # walk instead, and build the JAX evaluator only if that declines too.
-    ev = build_evaluator(model, lambda: None)
-    affine_rows = _affine_constraint_rows(model, n_orig) if ev is None else None
+    # walk, which is O(nnz) and needs no evaluator. It goes first (#1743): the tape
+    # build it used to wait behind took 4.4 s only to decline a 1M-term model past
+    # its node cap. The tape, then the JAX evaluator, are used only if it declines.
+    affine_rows = _affine_constraint_rows(model, n_orig)
+    ev = None if affine_rows is not None else build_evaluator(model, lambda: None)
     if affine_rows is not None:
         J, g0, row_map = affine_rows
         m_ev = int(J.shape[0])
