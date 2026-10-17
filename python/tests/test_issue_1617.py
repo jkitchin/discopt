@@ -279,8 +279,10 @@ def _deep_lazy_model(n=900):
     m = dm.Model("deep_lazy")
     x = m.binary("x", shape=(n,))
     w = np.linspace(1.0, 2.0, n)
-    # One long objective expression: deeper than _DEEP_SOLVE_DEPTH_GATE.
-    m.minimize(dm.sum(lambda k: float(w[k]) * x[k], over=range(n)))
+    # One long objective expression: deeper than _DEEP_SOLVE_DEPTH_GATE. Python's
+    # ``sum`` builds the ``+`` chain itself; ``dm.sum`` may fold these terms into
+    # one shallow ``dm.sum(w * x)`` (#1712), which would not engage the worker.
+    m.minimize(sum(float(w[k]) * x[k] for k in range(n)))
     m.subject_to(dm.sum(lambda k: x[k], over=range(n)) >= 2)
     return m, x
 

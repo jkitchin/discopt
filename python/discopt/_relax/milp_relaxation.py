@@ -307,6 +307,33 @@ class MilpRelaxationResult:
     partition_refinable_atoms: Optional[int] = None
 
 
+def _rowless_lp_safe_bound(
+    c: np.ndarray, bounds: list[tuple[float, float]], offset: float
+) -> Optional[float]:
+    """Rigorous lower bound of ``min c.x + offset`` over a box with no rows.
+
+    A relaxation of a one-term objective (``min asin(x)``) can lift to a bare box:
+    no rows, so the warm simplex -- the path that computes a Neumaier-Shcherbina
+    bound -- does not apply, and the generic path returns its vertex objective with
+    no certificate. Over a box the LP optimum is closed form, ``sum_j min(c_j lo_j,
+    c_j hi_j)``; each product, the sum and the offset are rounded one ulp down, so
+    the result never exceeds the exact optimum. ``None`` when a column with a
+    nonzero cost has no finite bound on its improving side (no finite bound exists).
+    """
+    terms = []
+    for cj, (lo, hi) in zip(np.asarray(c, dtype=np.float64).ravel(), bounds):
+        cj = float(cj)
+        if cj == 0.0:
+            continue
+        side = float(lo) if cj > 0.0 else float(hi)
+        if not _is_effectively_finite(side):
+            return None
+        terms.append(math.nextafter(cj * side, -math.inf))
+    total = math.nextafter(math.fsum(terms), -math.inf) if terms else 0.0
+    out = math.nextafter(total + float(offset), -math.inf)
+    return out if math.isfinite(out) else None
+
+
 def _lp_warm_deadline_enabled() -> bool:
     """Honour the caller's ``time_limit`` on the warm pure-LP node path.
 
@@ -889,6 +916,20 @@ class MilpRelaxationModel:
             and self._pending_numerical_bound is not None
         ):
             safe_bound = self._pending_numerical_bound
+        # A row-less pure LP never reaches the warm simplex (it needs rows), so the
+        # bound above is never computed for it; its exact box optimum is a rigorous
+        # bound in its own right (``_rowless_lp_safe_bound``). Without this the
+        # asin/acos relaxations certified only through ``_certify``'s
+        # ``trusted_vertex`` arm (#1712 follow-up).
+        if (
+            status_str == "optimal"
+            and self._integrality is None
+            and self._objective_bound_valid
+            and (self._A_ub is None or self._A_ub.shape[0] == 0)
+        ):
+            box = _rowless_lp_safe_bound(self._c, self._bounds, self._obj_offset)
+            if box is not None:
+                safe_bound = box if safe_bound is None else max(safe_bound, box)
 
         return MilpRelaxationResult(
             status=status_str, objective=obj, bound=bound, x=result.x, safe_bound=safe_bound

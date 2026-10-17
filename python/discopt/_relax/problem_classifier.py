@@ -45,6 +45,7 @@ from discopt.modeling.core import (
     UnaryOp,
     Variable,
     VarType,
+    affine_array_sum,
 )
 
 logger = logging.getLogger(__name__)
@@ -668,6 +669,17 @@ def _extract_linear_coefficients_sparse(expr, model: Model, n: int):
                         "axis-reduced sum in scalar position (vector-valued body); "
                         "routing to the per-component extractor"
                     )
+                # ``dm.sum(C * x)``: one coefficient per entry. The generic descent
+                # below refuses the array ``C`` (a non-uniform scale), which sent
+                # the vectorized form -- and #1712's ``dm.sum`` fold -- to the
+                # per-component extractor, or out of the affine-square proof.
+                affine = affine_array_sum(node)
+                if affine is not None:
+                    var, coefs = affine
+                    offset = _compute_var_offset(var, model)
+                    for j in range(coefs.size):
+                        _add(offset + j, scale * float(coefs[j]))
+                    continue
                 stack.append((node.operand, scale, True))
                 continue
 
@@ -981,6 +993,14 @@ def _extract_quadratic_terms(expr, model: Model, n: int):
                         "axis-reduced sum in scalar position (vector-valued body); "
                         "routing to the per-component extractor"
                     )
+                # ``dm.sum(C * x)``: see ``_extract_linear_coefficients_sparse``.
+                affine = affine_array_sum(node)
+                if affine is not None:
+                    var, coefs = affine
+                    offset = _compute_var_offset(var, model)
+                    for j in range(coefs.size):
+                        c[offset + j] += scale * float(coefs[j])
+                    continue
                 stack.append((node.operand, scale, True))
                 continue
 

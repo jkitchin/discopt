@@ -3515,6 +3515,38 @@ def _canonical_affine_sum(terms: list[Expression]) -> Optional[Expression]:
     return SumOverExpression(parts_out)
 
 
+def affine_array_sum(expr: Expression) -> Optional[tuple["Variable", np.ndarray]]:
+    """``(x, C)`` when *expr* is the full reduction ``dm.sum(x)`` or ``dm.sum(C * x)``.
+
+    ``C`` comes back as a flat C-order float array with one coefficient per entry
+    of ``x`` (all ones for ``dm.sum(x)``), so ``expr == sum_i C[i] * x.flat[i]``.
+    Only an exact shape match qualifies -- no broadcasting -- so each coefficient
+    belongs to exactly one entry. This is the form :func:`_canonical_affine_sum`
+    emits and the vectorized API writes by hand; scalar-term passes use it to read
+    the sum as its coefficients instead of refusing the array :class:`Constant`.
+    ``None`` for anything else, including a :class:`Parameter` coefficient.
+    """
+    if not isinstance(expr, SumExpression) or expr.axis is not None:
+        return None
+    op = expr.operand
+    if isinstance(op, Variable):
+        if op.size < 2:
+            return None
+        return op, np.ones(int(op.size), dtype=np.float64)
+    if not (isinstance(op, BinaryOp) and op.op == "*"):
+        return None
+    if isinstance(op.left, Constant) and isinstance(op.right, Variable):
+        const, var = op.left, op.right
+    elif isinstance(op.right, Constant) and isinstance(op.left, Variable):
+        const, var = op.right, op.left
+    else:
+        return None
+    coefs = np.asarray(const.value, dtype=np.float64)
+    if var.size < 2 or coefs.shape != tuple(var.shape):
+        return None
+    return var, coefs.reshape(-1)
+
+
 def prod(x: Union[Expression, list, Callable], *, over: Optional[Sequence] = None) -> Expression:
     """
     Product over expressions, analogous to :func:`sum`.
