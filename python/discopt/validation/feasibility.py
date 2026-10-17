@@ -737,9 +737,11 @@ def screen_jacobian(evaluator, x_flat: np.ndarray):
     not guaranteed to cover an entry that vanishes there; the screen keeps that
     evaluator on its dense Jacobian rather than inherit the assumption.
     """
+    from discopt._affine_evaluator import AffineEvaluator
     from discopt._tape_nlp_evaluator import TapeNLPEvaluator
 
-    if isinstance(evaluator, TapeNLPEvaluator):
+    # #1743: an AffineEvaluator's Jacobian is the exact constant matrix, held CSR.
+    if isinstance(evaluator, (TapeNLPEvaluator, AffineEvaluator)):
         return evaluator.evaluate_sparse_jacobian(x_flat)
     return np.asarray(evaluator.evaluate_jacobian(x_flat), dtype=np.float64)
 
