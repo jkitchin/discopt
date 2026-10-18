@@ -107,6 +107,7 @@ from discopt.serialize import (
     _enc_float,
     _enc_json_tree,
     _enc_tree,
+    _plain,
 )
 
 #: Bumped to 2 by #1266 (``provenance``, ``solve_options``, ``validation_report``).
@@ -457,7 +458,9 @@ def deserialize_result(d: dict) -> SolveResult:
     if d.get("explanation"):
         r._explanation = d["explanation"]
     if d.get("provenance") is not None:
-        r._provenance = d["provenance"]
+        # Kept verbatim: `_plain` hands back ordinary dicts and counts every key
+        # read, so the document reader's unread-key check (#1780) passes it.
+        r._provenance = _plain(d["provenance"])
     if d.get("solve_options") is not None:
         opts = d["solve_options"]
         r._solve_options = _dec_json_tree(opts) if version >= 3 else _dec_tree(opts)

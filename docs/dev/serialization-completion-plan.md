@@ -1,6 +1,6 @@
 # Model serialization — completion plan
 
-> **Plan v1.4 — 2026-10-18 — author: Claude (planning session for jkitchin).**
+> **Plan v1.5 — 2026-10-18 — author: Claude (planning session for jkitchin).**
 > Status: proposed; no work package started. Every claim about the code below was
 > read from the tree at `3191cc65` (schema `discopt.model/1.4`, `discopt 0.9.1.dev0`,
 > after PRs #1748 and #1764). Agents executing a package **re-verify** the lines they
@@ -210,11 +210,14 @@ unknown-key refusal. The old behaviour ("ignore unknown keys so 1.0 reads 1.1") 
 exactly the silent-drop §0.1 forbids once a key can carry model content; the
 `provenance` precedent was metadata and is grandfathered by being in `_TOP_LEVEL_KEYS`.
 
-**Known gap (#1780).** This policy covers the top level and `state` only. A key
-inside a nested record -- a variable, node, row or builder block -- that the reader
-does not know is still ignored on read, at every minor, with no error and no
-warning (probe: `"zzz"` added to `nodes[0]` or `variables[0]` of a 1.0 document
-loads cleanly). Per-record key tables are tracked in #1780, not done by WP-2.
+**Nested records (#1780, closed after WP-2).** WP-2 covered the top level and
+`state` only; a key inside a variable, node, row or builder block was still
+ignored (probe: `"zzz"` added to `nodes[0]` or `variables[0]` of a 1.0 document
+loaded cleanly). Now every nested record follows the same policy: node records and
+their index objects against `_NODE_KEYS` / `_INDEX_KEYS`, everything else by
+recording which keys the decoder reads (`serialize._Record`) and refusing the
+rest; a key repeated within one JSON object is refused as well. See the v1.5
+change log for the measurements.
 
 `result_io.SCHEMA_VERSION` (currently 3, integer) stays its own counter: the
 solution subtree is `deserialize_result`'s to version, and `_SCHEMA_MINOR_UNTAGGED_SOLUTION`
@@ -741,6 +744,25 @@ a documented hole ("untested before 1.N"). O5 — encode logical constraints at 
 ---
 
 ## 9. Change log
+
+- **v1.5 (2026-10-18, #1780)** — Nested-record keys. A per-record table for every
+  record kind would have had to mirror every decoder branch, so the reader instead
+  records which keys it reads (`_Record`, built from the parsed document outside
+  the node table) and refuses any key left unread. That is derived from the
+  decoder, so it cannot drift; `_keys_lost` in `upgrade-model` is now a backstop.
+  Tracking the node table too measured **+130 %** on `loads` of a 24k-node / 1.4 MB
+  document (5 interleaved pairs, load < 2: 0.060 s → 0.141 s min), so nodes and
+  index objects use explicit `_NODE_KEYS` / `_INDEX_KEYS` tables, and a test decodes
+  every fixture with *tracked* nodes to prove the tables are exactly what the
+  decoder reads. Final cost: 24k-node document 0.061 → 0.088 s (min of 7, 5
+  interleaved pairs); `loads(dumps(from_nl(f))) / from_nl(f)` over the 8 largest
+  in-repo corpus files 0.99× → 1.37× (3 interleaved runs, load < 1), inside WP-7's
+  5× budget. Two real holes found on the way: (a) beside a builder objective the
+  writer records the zero placeholder `objective`, which the reader never read — a
+  document with a real objective there would have lost it; it is now checked
+  (`placeholder` true, sense agreeing); (b) a result's own `provenance` block
+  (daemon-stamped) was stored as the parsed object — now a plain copy. A JSON key
+  repeated in one object (kept-last by `json`) is refused too.
 
 - **v1.4 (2026-10-18, WP-2 done)** — Implemented §3.2/§3.4/§3.5 with three
   measured additions. (a) The unknown-key rule covers the `state` section too
