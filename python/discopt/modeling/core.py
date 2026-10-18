@@ -12119,6 +12119,16 @@ class _DisjunctiveConstraint:
     )
     _indicator_vars: Optional[tuple[Variable, ...]] = field(default=None, compare=False, repr=False)
 
+    def __repr__(self) -> str:
+        # Short on purpose: ``Model.either_or`` returns this object, so a bare call
+        # in a notebook cell echoes it, and the dataclass default prints every row.
+        rows = [len(d) for d in self.disjuncts]
+        return (
+            f"_DisjunctiveConstraint(name={self.name!r}, rows per disjunct={rows}, "
+            f"semantics={self.semantics.name}, method={self.method!r}, "
+            f"indicators={'read' if self._indicator_vars is not None else 'unread'})"
+        )
+
     @property
     def indicators(self) -> tuple["BooleanVar", ...]:
         """One ``BooleanVar`` per disjunct: true exactly when that disjunct is selected.
@@ -12153,8 +12163,14 @@ class _DisjunctiveConstraint:
             names = [f"{base}_{k}_active" for k in range(len(self.disjuncts))]
             for nm in names:
                 model._check_name(nm)
+            # ``_eo_`` rather than ``add_disjunction``'s ``_disj_``: an
+            # ``add_disjunction(name=base)`` in the same model would otherwise
+            # share the row name, and name-keyed lookups become ambiguous.
+            row_name = f"_eo_{base}_select"
+            if any(getattr(c, "name", None) == row_name for c in model._constraints):
+                raise ValueError(f"Name {row_name!r} already used by a row in the model")
             cols = tuple(model.binary(nm) for nm in names)
-            model.exactly(1, list(cols), name=f"_disj_{base}_select")
+            model.exactly(1, list(cols), name=row_name)
             self._indicator_vars = cols
         return tuple(BooleanVar(v) for v in self._indicator_vars)
 

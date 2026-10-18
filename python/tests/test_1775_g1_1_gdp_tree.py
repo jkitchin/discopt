@@ -330,3 +330,54 @@ def test_clone_keeps_the_indicator_link():
     d2 = next(k for k in c._constraints if isinstance(k, _DisjunctiveConstraint))
     assert d2._model is c
     assert all(any(v is w for w in c._variables) for v in d2._indicator_vars)
+
+
+def test_select_row_name_does_not_collide_with_add_disjunction():
+    """Review of #1782: both used ``_disj_{name}_select``; name-keyed lookups were ambiguous."""
+    m, x, y = _two()
+    a = m.make_disjunct("A")
+    a.subject_to(y <= 1)
+    b = m.make_disjunct("B")
+    b.subject_to(y >= 8)
+    m.add_disjunction([a, b], name="d")
+    m.either_or([[x <= 2], [x >= 5]], name="d").indicators
+    names = [c.name for c in m._constraints if getattr(c, "name", None)]
+    assert names.count("_disj_d_select") == 1 and names.count("_eo_d_select") == 1
+
+
+def test_short_repr():
+    """``either_or`` returns the disjunction, so a notebook echoes it: keep it short."""
+    m, x, _ = _two()
+    d = m.either_or([[x <= 2, x >= 1], [x >= 5]], name="d")
+    assert repr(d) == (
+        "_DisjunctiveConstraint(name='d', rows per disjunct=[2, 1], semantics=SELECT_ONE, "
+        "method=None, indicators=unread)"
+    )
+
+
+def test_tree_merges_back_to_back_if_then_on_one_indicator():
+    """Pins the run rule: consecutive rows under one (indicator, active value) are one
+    implication node. Two back-to-back ``if_then`` calls on the same indicator are
+    merged -- equivalent, since (y => A) and (y => B) is y => (A and B). A different
+    indicator, a complemented one, or any row in between starts a new node.
+    """
+    m, x, y = _two()
+    z = m.binary("z")
+    w = m.binary("w")
+    m.if_then(z, [x <= 4])
+    m.if_then(z, [y <= 4])  # merged into the previous node
+    m.if_then(1 - z, [x >= 6])  # active value 0: new node
+    m.if_then(w, [x <= 3])  # other indicator: new node
+    m.subject_to(x + y <= 15)
+    m.if_then(w, [y <= 3])  # an algebraic row in between: new node
+    nodes = gdp_tree(m).disjunctions
+    assert [n.kind for n in nodes] == ["implication"] * 4
+    shapes = [
+        (
+            n.disjuncts[0].indicator.variable.name,
+            n.disjuncts[0].active_value,
+            len(n.disjuncts[0].rows),
+        )
+        for n in nodes
+    ]
+    assert shapes == [("z", 1, 2), ("z", 0, 1), ("w", 1, 1), ("w", 1, 1)]

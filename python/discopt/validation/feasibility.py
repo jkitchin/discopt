@@ -1090,7 +1090,14 @@ class DeclaredLogic:
 
     * a disjunction holds when at least one disjunct has every item holding
       (``SELECT_ONE`` projects to the union of its disjuncts; nested
-      disjunctions recurse);
+      disjunctions recurse) -- the ``"any"`` reading, used when the disjunction
+      has no indicator columns, i.e. an ``either_or`` whose ``indicators`` were
+      never read. Once they are read (#1775 G1.1) the point carries its own
+      selection and the ``"sel"`` reading applies instead: every *selected*
+      disjunct must hold. The two are deliberately different -- an unread
+      disjunction has no declared selection to check -- so do not unify them.
+      (``add_disjunction`` blocks are judged row by row on the indicator rule
+      below, which is the ``"sel"`` reading per row);
     * an indicator row must hold when the indicator equals its active value;
     * SOS1 allows one nonzero member, SOS2 two that are adjacent;
     * a logical constraint is evaluated on the booleans' integral values.
