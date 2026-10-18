@@ -391,6 +391,19 @@ def _dec_index_int(x: Any, what: str) -> int:
     return x
 
 
+def _seq(value: Any, what: str) -> list:
+    """*value*, which must be a JSON array.
+
+    Iterating whatever came accepted ``{}`` or ``""`` where a list belongs as an
+    empty one -- a whole ``variables`` list, a call's arguments or a variable's fix
+    stack dropped without a word (WP-4 fuzzing). Every list the decoders iterate
+    goes through here.
+    """
+    if not isinstance(value, list):
+        raise SerializationError(f"{what} must be a list, got {type(value).__name__}")
+    return value
+
+
 class _StrictRefs:
     """A list the document refers into, by position, with every reference checked.
 
@@ -855,7 +868,10 @@ def _decode_nodes(table: list[dict], variables: Any, params: list[Parameter]):
             if shape is None:
                 built.append(Constant(_dec_float(nd["v"])))
             else:
-                dims = tuple(_dec_index_int(n, f"a dimension of constant node {i}") for n in shape)
+                dims = tuple(
+                    _dec_index_int(n, f"a dimension of constant node {i}")
+                    for n in _seq(shape, f"the shape of constant node {i}")
+                )
                 if any(n < 0 for n in dims):
                     raise SerializationError(f"constant node {i} has a negative dimension: {dims}")
                 built.append(Constant(_dec_array(nd["v"], dims)))
@@ -872,7 +888,9 @@ def _decode_nodes(table: list[dict], variables: Any, params: list[Parameter]):
         elif op == "unop":
             built.append(UnaryOp(nd["o"], refs[nd["a"]]))
         elif op == "call":
-            built.append(FunctionCall(nd["f"], *[refs[a] for a in nd["args"]]))
+            built.append(
+                FunctionCall(nd["f"], *[refs[a] for a in _seq(nd["args"], f"node {i} args")])
+            )
         elif op == "matmul":
             built.append(MatMulExpression(refs[nd["a"]], refs[nd["b"]]))
         elif op == "sum":
@@ -880,7 +898,7 @@ def _decode_nodes(table: list[dict], variables: Any, params: list[Parameter]):
             _check_axis_in_range(base, axis, i)
             built.append(SumExpression(base, axis))
         elif op == "sum_over":
-            built.append(SumOverExpression([refs[a] for a in nd["args"]]))
+            built.append(SumOverExpression([refs[a] for a in _seq(nd["args"], f"node {i} args")]))
     _retag_atoms(table, built, variables, params)
     return _StrictRefs(built, "node")
 
@@ -1170,7 +1188,10 @@ def _dec_variable(d: dict, model: Model) -> Variable:
     # already carry that prefix and must still round-trip).
     if name in model._names:
         raise SerializationError(f"duplicate variable/parameter name {name!r}")
-    shape = tuple(_dec_index_int(n, f"a dimension of variable {name!r}") for n in d["shape"])
+    shape = tuple(
+        _dec_index_int(n, f"a dimension of variable {name!r}")
+        for n in _seq(d["shape"], f"the shape of variable {name!r}")
+    )
     if any(n < 0 for n in shape):
         raise SerializationError(f"variable {name!r} has a negative dimension: {shape}")
     lb = _dec_array(d["lb"], shape)
@@ -1192,7 +1213,7 @@ def _dec_variable(d: dict, model: Model) -> Variable:
     # snapshot and changed the solve's answer (#1321).
     var._bound_stack = [
         _dec_bound_stack_entry(entry, i, shape, name, var.var_type)
-        for i, entry in enumerate(d.get("bound_stack", []))
+        for i, entry in enumerate(_seq(d.get("bound_stack", []), f"bound_stack of {name!r}"))
     ]
     if var._bound_stack:
         # Inside a fix scope the live box is a pin, and `fix()` refuses a pin
@@ -1314,9 +1335,11 @@ def _dec_csr(d: dict):
     rows, cols = (_dec_index_int(n, "a sparse matrix dimension") for n in shape)
     if rows < 0 or cols < 0:
         raise SerializationError(f"sparse matrix has a negative dimension: {shape!r}")
-    indptr = [_dec_index_int(i, "a sparse matrix row pointer") for i in d["indptr"]]
-    indices = [_dec_index_int(i, "a sparse matrix column index") for i in d["indices"]]
-    data = [_dec_float(x) for x in d["data"]]
+    indptr = [_dec_index_int(i, "a sparse matrix row pointer") for i in _seq(d["indptr"], "indptr")]
+    indices = [
+        _dec_index_int(i, "a sparse matrix column index") for i in _seq(d["indices"], "indices")
+    ]
+    data = [_dec_float(x) for x in _seq(d["data"], "sparse matrix data")]
     if len(indptr) != rows + 1 or indptr[0] != 0 or indptr[-1] != len(indices):
         raise SerializationError(
             f"sparse matrix row pointers do not describe {rows} rows over "
@@ -1565,7 +1588,7 @@ def _dec_logic(entries: Any, nodes: list, name: Any) -> Any:
             card = {"atleast": LogicalAtLeast, "atmost": LogicalAtMost, "exactly": LogicalExactly}[
                 c
             ]
-            built.append(card(k, [refs[a] for a in e["args"]]))
+            built.append(card(k, [refs[a] for a in _seq(e["args"], "logic args")]))
     return built[-1]
 
 
@@ -1645,7 +1668,7 @@ def _dec_rows(docs: list[dict], nodes: list, minor: int) -> list:
             out.append(
                 _SOSConstraint(
                     sos_type=d["sos_type"],
-                    variables=[nodes[i] for i in d["variables"]],
+                    variables=[nodes[i] for i in _seq(d["variables"], "SOS members")],
                     name=d["name"],
                 )
             )
@@ -1656,7 +1679,10 @@ def _dec_rows(docs: list[dict], nodes: list, minor: int) -> list:
                 )
             out.append(
                 _DisjunctiveConstraint(
-                    disjuncts=[[_dec_constraint(c, nodes) for c in dd] for dd in d["disjuncts"]],
+                    disjuncts=[
+                        [_dec_constraint(c, nodes) for c in _seq(dd, "a disjunct")]
+                        for dd in _seq(d["disjuncts"], "disjuncts")
+                    ],
                     name=d["name"],
                     method=d["method"],
                     semantics=DisjunctionSemantics[d["semantics"]],
@@ -1819,7 +1845,7 @@ def _dec_complementarities(doc: Optional[dict], model: Model, nodes: list, minor
         return None if v is None else tuple(int(x) for x in v)
 
     rebuilt: list[Any] = []
-    for d in doc["relations"]:
+    for d in _seq(doc["relations"], "complementarity relations"):
         src_idx = d["source"]
         if src_idx is not None:
             src_idx = _dec_index_int(src_idx, "a complementarity source")
@@ -1846,10 +1872,12 @@ def _dec_complementarities(doc: Optional[dict], model: Model, nodes: list, minor
         )
 
     relations = _StrictRefs(rebuilt, "complementarity relation")
-    model._complementarities = [relations[i] for i in doc["declared"]]
+    model._complementarities = [
+        relations[i] for i in _seq(doc["declared"], "declared complementarities")
+    ]
     rows = _StrictRefs(list(model._constraints), "row")
     lowered: dict = {}
-    for entry in doc["lowered"]:
+    for entry in _seq(doc["lowered"], "lowered complementarities"):
         # Two elements: untracked rows (`None`) -- all a writer before 1.5 could
         # say. Three, from 1.5 only: the tracked rows' positions.
         if not isinstance(entry, list) or len(entry) not in (
@@ -2062,7 +2090,10 @@ def _dec_sets(docs: list[dict]) -> list:
         out.append(
             Set(
                 name,
-                [tuple(mem) if isinstance(mem, list) else mem for mem in d["members"]],
+                [
+                    tuple(mem) if isinstance(mem, list) else mem
+                    for mem in _seq(d["members"], "set members")
+                ],
                 dimen=d["dimen"],
             )
         )
@@ -2106,9 +2137,9 @@ def _enc_coupling_keys(model: Model, rows: list) -> dict:
 def _dec_coupling_keys(d: Optional[dict], rows: list) -> set:
     if not d:
         return set()
-    out: set = {_dec_name(n, "coupling mark") for n in d.get("names", [])}
+    out: set = {_dec_name(n, "coupling mark") for n in _seq(d.get("names", []), "coupling names")}
     row_refs = _StrictRefs(rows, "coupling-mark row")
-    for idx in d.get("row_indices", []):
+    for idx in _seq(d.get("row_indices", []), "coupling rows"):
         out.add(id(row_refs[idx]))
     return out
 
@@ -2174,7 +2205,7 @@ def _dec_block_labels_con(d: Optional[dict], rows: list) -> dict:
     for name, vals in (d.get("names") or {}).items():
         out[str(name)] = np.asarray(vals, dtype=np.int64)
     row_refs = _StrictRefs(rows, "block-label row")
-    for entry in d.get("rows", []):
+    for entry in _seq(d.get("rows", []), "block label rows"):
         row = row_refs[entry["row"]]
         labels = np.asarray(entry["labels"], dtype=np.int64)
         out[id(row)] = labels
@@ -2240,7 +2271,7 @@ def _enc_atan2_preconditions(model: Model, table) -> list[dict]:
 def _dec_atan2_preconditions(docs: Optional[list], nodes: list) -> list:
     """Rebuild the guard list. A document predating it simply has none."""
     out = []
-    for d in docs or []:
+    for d in [] if docs is None else _seq(docs, "_atan2_preconditions"):
         if d["sign"] not in ("positive", "negative"):
             # The guard reads anything but "positive" as "negative", so a corrupt
             # value would re-check the opposite sign of the one the rewrite assumed.
@@ -2267,7 +2298,7 @@ def _enc_piecewise_domains(model: Model, table) -> list[dict]:
 def _dec_piecewise_domains(docs: Optional[list], nodes: list) -> list:
     """Rebuild the domain guard list. A document predating it simply has none."""
     out = []
-    for d in docs or []:
+    for d in [] if docs is None else _seq(docs, "_piecewise_domains"):
         lo, hi = _dec_float(d["lo"]), _dec_float(d["hi"])
         if not (lo <= hi):
             raise SerializationError(f"piecewise domain [{lo}, {hi}] is empty or NaN")
@@ -2405,8 +2436,10 @@ def _dec_state(state: Optional[dict], model: Model, rows: list, nodes: list) -> 
     model._coupling_keys = _dec_coupling_keys(state.get("_coupling_keys"), rows)
     model._block_labels_var = _dec_block_labels_var(state.get("_block_labels_var"))
     model._block_labels_con = _dec_block_labels_con(state.get("_block_labels_con"), rows)
-    model._sets = _dec_sets(state.get("_sets", []))
-    model._simplex_lowerings = _dec_simplex_lowerings(state.get("_simplex_lowerings", []))
+    model._sets = _dec_sets(_seq(state.get("_sets", []), "_sets"))
+    model._simplex_lowerings = _dec_simplex_lowerings(
+        _seq(state.get("_simplex_lowerings", []), "_simplex_lowerings")
+    )
     for name in _LAZY_PLAIN:
         if name in state:
             setattr(model, name, state[name])
@@ -2891,16 +2924,18 @@ def _check_keys(
 
 def _decode_document(doc: dict, minor: int) -> Model:
     model = Model(doc["name"])
-    variables = _StrictRefs([_dec_variable(d, model) for d in doc["variables"]], "variable")
-    params = [_dec_parameter(d, model) for d in doc["parameters"]]
-    nodes = _decode_nodes(doc["nodes"], variables, params)
+    variables = _StrictRefs(
+        [_dec_variable(d, model) for d in _seq(doc["variables"], "variables")], "variable"
+    )
+    params = [_dec_parameter(d, model) for d in _seq(doc["parameters"], "parameters")]
+    nodes = _decode_nodes(_seq(doc["nodes"], "nodes"), variables, params)
 
-    model._constraints.extend(_dec_rows(doc["rows"], nodes, minor))
+    model._constraints.extend(_dec_rows(_seq(doc["rows"], "rows"), nodes, minor))
     for row in model._constraints:
         if type(row) is _DisjunctiveConstraint:
             row._model = model  # #1775 G1.1: so ``indicators`` can be read
 
-    for d in doc.get("builder_blocks", []):
+    for d in _seq(doc.get("builder_blocks", []), "builder_blocks"):
         model.add_linear_constraints(
             _dec_csr(d["A"]),
             variables[d["x"]],
@@ -2958,7 +2993,7 @@ def _decode_document(doc: dict, minor: int) -> Model:
     # without a word, and the user's warm start is quietly gone (#1321).
     declared = {v.name: v.size for v in model._variables}
     initial_point = {}
-    for name, elem, val in doc.get("initial_point", []):
+    for name, elem, val in _seq(doc.get("initial_point", []), "initial_point"):
         name = _dec_name(name, "initial_point")
         if name not in declared:
             raise SerializationError(

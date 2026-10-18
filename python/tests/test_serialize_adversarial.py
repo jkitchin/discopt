@@ -309,6 +309,13 @@ def _fast_doc():
     return json.loads(dumps(m))
 
 
+def _every_node_doc():
+    m = dm.Model("sum_over")
+    x = m.continuous("x", shape=(3,), lb=0.0, ub=1.0)
+    m.minimize(dm.sum([x[0], x[1], x[2]]))
+    return json.loads(dumps(m))
+
+
 def _atom_doc():
     return json.loads((DATA / "serialize_fixtures" / "v1.5" / "registered_atom.json").read_text())
 
@@ -382,6 +389,18 @@ FUZZ_FOUND = {
     "atom tag argument a later node": (
         _atom_doc,
         lambda d: _atom_node(d)["atom"].update(arg=len(d["nodes"])),
+    ),
+    # `{}` (or `""`) where a list belongs iterated as an empty list: a fix stack, a
+    # whole variable list or a call's arguments dropped without a word.
+    "bound_stack an empty object": (
+        _doc,
+        lambda d: d["variables"][0].update(bound_stack={}),
+    ),
+    "variables an empty object": (_doc, lambda d: d.update(variables={})),
+    "initial_point an empty object": (_doc, lambda d: d.update(initial_point={})),
+    "sum_over args an empty object": (
+        _every_node_doc,
+        lambda d: next(n for n in d["nodes"] if n["op"] == "sum_over").update(args={}),
     ),
     "array bound ragged": (
         _doc,
