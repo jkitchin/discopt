@@ -467,6 +467,120 @@ def _cmd_solve(args):
     sys.exit(0 if result.status in ("optimal", "feasible") else 1)
 
 
+def _keys_lost(old, new, path: str = "") -> list:
+    """Paths of object keys present in *old* and absent from *new* (lists by position)."""
+    if isinstance(old, dict) and isinstance(new, dict):
+        out = []
+        for key, value in old.items():
+            if path == "" and key in ("schema", "discopt", "provenance"):
+                continue
+            if key not in new:
+                out.append(f"{path}/{key}")
+            else:
+                out += _keys_lost(value, new[key], f"{path}/{key}")
+        return out
+    if isinstance(old, list) and isinstance(new, list):
+        if len(old) != len(new):
+            return [f"{path} (length {len(old)} -> {len(new)})"]
+        return [
+            p for i, (a, b) in enumerate(zip(old, new)) for p in _keys_lost(a, b, f"{path}[{i}]")
+        ]
+    return []
+
+
+def _cmd_upgrade_model(args):
+    """Rewrite a native model document at the current schema (plan §3.5).
+
+    Exit 0 on success (or, with ``--check``, when the document loads), 1 when it is
+    refused -- unreadable, malformed, or written by a NEWER format, which a rewrite
+    would downgrade -- and 2 for usage errors (argparse).
+    """
+    import gzip
+    import json
+    import warnings
+
+    from discopt.serialize import (
+        _GZIP_MAGIC,
+        SCHEMA,
+        SchemaVersionWarning,
+        SerializationError,
+        dumps,
+        loads,
+    )
+
+    src = Path(args.input)
+    dst = Path(args.output) if args.output else src
+    for module in args.imports:
+        # Registered atoms are re-tagged on load only for names this process has
+        # registered, as a program registers them at import before it loads.
+        importlib.import_module(module)
+    try:
+        raw = src.read_bytes()
+        was_gzip = raw[:2] == _GZIP_MAGIC
+        text = (gzip.decompress(raw) if was_gzip else raw).decode("utf-8")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", SchemaVersionWarning)
+            model = loads(text)
+        old_doc = json.loads(text)  # `loads` accepted it, so this parses
+        schema_in = old_doc["schema"]
+        result = model.saved_result
+        # `dumps` records the document's own provenance block under `derived_from`.
+        # The model's author is unchanged by an upgrade, so it is carried forward.
+        prov = model.provenance if isinstance(model.provenance, dict) else {}
+        new_text = dumps(model, result=result, author=prov.get("author"))
+        # Prove the rewrite before writing it: what comes back must be the model
+        # that went in.
+        reread = loads(new_text)
+        if dumps(reread, result=reread.saved_result, provenance=False) != dumps(
+            model, result=result, provenance=False
+        ):
+            raise SerializationError("the rewritten document does not reload to the same model")
+        # A newer format only ever adds, so anything the old document said that the
+        # new one does not is content this process could not carry -- above all a
+        # registered-atom tag for an atom it has not registered.
+        lost = _keys_lost(old_doc, json.loads(new_text))
+        if lost:
+            shown = ", ".join(lost[:5]) + (f" and {len(lost) - 5} more" if len(lost) > 5 else "")
+            hint = (
+                "; register the atoms first with --import <module>"
+                if any(p.endswith("/atom") for p in lost)
+                else ""
+            )
+            raise SerializationError(
+                f"rewriting would drop content the document carries ({shown}){hint}"
+            )
+    except SchemaVersionWarning as exc:
+        print(f"Error: {src}: refused; {exc}", file=sys.stderr)
+        sys.exit(1)
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        # SerializationError and json.JSONDecodeError are ValueErrors.
+        print(f"Error: {src}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    def _content(doc: dict) -> dict:
+        doc = dict(doc)
+        for key in ("schema", "discopt", "provenance"):
+            doc.pop(key, None)
+        return doc
+
+    changed = _content(old_doc) != _content(json.loads(new_text))
+    print(
+        f"{src}: {schema_in} -> {SCHEMA}; content "
+        f"{'changes' if changed else 'unchanged'} (schema, version and provenance are restamped)"
+    )
+    if args.check:
+        return
+    try:
+        if dst.suffix == ".gz" or (dst == src and was_gzip):
+            dst.write_bytes(gzip.compress(new_text.encode("utf-8")))
+        else:
+            dst.write_text(new_text, encoding="utf-8")
+    except OSError as exc:
+        print(f"Error: {dst}: {exc}", file=sys.stderr)
+        sys.exit(1)
+    print(f"-> wrote {dst}", file=sys.stderr)
+
+
 _BUILTIN_COMMANDS = frozenset(
     {
         "about",
@@ -477,6 +591,7 @@ _BUILTIN_COMMANDS = frozenset(
         "daemon",
         "gams-daemon",
         "gams-verify",
+        "upgrade-model",
         "install-skills",
         "help",
     }
@@ -597,6 +712,27 @@ def main():
     p_gamsv.add_argument("--solver", default="discopt", help="GAMS solver name to force.")
     p_gamsv.add_argument("--keep", action="store_true", help="Keep the scratch directory.")
     p_gamsv.set_defaults(func=_cmd_gams_verify)
+
+    p_upg = subparsers.add_parser(
+        "upgrade-model",
+        help="Rewrite a saved model document (.dopt/.json[.gz]) at the current schema",
+    )
+    p_upg.add_argument("input", help="Document written by Model.save / discopt.modeling.dumps.")
+    p_upg.add_argument(
+        "output", nargs="?", default=None, help="Where to write it (default: rewrite in place)."
+    )
+    p_upg.add_argument(
+        "--check", action="store_true", help="Load and report schema in -> out; write nothing."
+    )
+    p_upg.add_argument(
+        "--import",
+        dest="imports",
+        action="append",
+        default=[],
+        metavar="MODULE",
+        help="Import MODULE first (repeatable), e.g. the one that registers the model's atoms.",
+    )
+    p_upg.set_defaults(func=_cmd_upgrade_model)
 
     p_skills = subparsers.add_parser(
         "install-skills",

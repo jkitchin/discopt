@@ -25,7 +25,8 @@ import numpy as np
 import pytest
 from discopt.modeling.core import _DetachedNlRepr, from_nl
 
-CORPUS = sorted((pathlib.Path(__file__).parent / "data" / "minlplib_nl").glob("*.nl"))
+DATA = pathlib.Path(__file__).parent / "data"
+CORPUS = sorted((DATA / "minlplib_nl").glob("*.nl"))
 
 
 def _roundtrip(m):
@@ -282,3 +283,111 @@ def test_array_bounds_rebuilt_by_numpy_unpickling_are_refrozen():
         v = c._variables[0]
         np.testing.assert_array_equal(v.ub, x.ub)
         assert not v.lb.flags.writeable and not v.ub.flags.writeable
+
+
+# ── the format stamp (WP-2, plan §3.4, owner decision O1) ─────────────────
+#
+# Before the stamp, a model pickled by the 1.3-era tree -- whose ``__getstate__``
+# returned ``(attrs, had_builder)`` -- raised ``ValueError: not enough values to
+# unpack (expected 3, got 2)`` here (measured), and both trees reported the same
+# ``discopt.__version__``, so no version check could have told them apart. A layout
+# that happened to unpack would have been installed by ``__dict__.update`` as is.
+
+
+def _stamp_of(m):
+    attrs, _, _ = m.__getstate__()
+    return attrs["_pickle_format"]
+
+
+def test_pickle_carries_a_format_stamp():
+    import discopt
+    from discopt.modeling.core import _MODEL_PICKLE_FORMAT
+    from discopt.serialize import SCHEMA
+
+    m = _minlp()
+    assert _stamp_of(m) == (_MODEL_PICKLE_FORMAT, discopt.__version__, SCHEMA)
+    # Read and dropped on the way in: it is not model state.
+    assert "_pickle_format" not in vars(_roundtrip(m))
+
+
+def _repickled(m, edit):
+    """Pickle *m* with its ``__getstate__`` output passed through *edit*."""
+    cls = type(m)
+    original = cls.__getstate__
+
+    def patched(self):
+        return edit(original(self))
+
+    cls.__getstate__ = patched
+    try:
+        return pickle.dumps(m)
+    finally:
+        cls.__getstate__ = original
+
+
+def test_mismatched_pickle_format_is_refused():
+    def bump(state):
+        attrs, had_builder, marks = state
+        fmt, version, schema = attrs["_pickle_format"]
+        attrs["_pickle_format"] = (fmt + 1, version, schema)
+        return attrs, had_builder, marks
+
+    blob = _repickled(_minlp(), bump)
+    with pytest.raises(TypeError, match=r"different discopt pickle layout \(format 2.*Model.save"):
+        pickle.loads(blob)
+
+
+def test_an_unstamped_pickle_is_refused():
+    """The pre-stamp layouts: today's without the stamp, and the 1.3-era 2-tuple."""
+
+    def strip(state):
+        attrs, had_builder, marks = state
+        del attrs["_pickle_format"]
+        return attrs, had_builder, marks
+
+    def legacy(state):
+        attrs, had_builder, _ = state
+        del attrs["_pickle_format"]
+        return attrs, had_builder
+
+    for edit in (strip, legacy):
+        with pytest.raises(TypeError, match="no format stamp"):
+            pickle.loads(_repickled(_minlp(), edit))
+
+
+def test_pickle_version_skew_warns():
+    from discopt.serialize import ProvenanceSkewWarning
+
+    def older(state):
+        attrs, had_builder, marks = state
+        fmt, _, schema = attrs["_pickle_format"]
+        attrs["_pickle_format"] = (fmt, "0.0.1", schema)
+        return attrs, had_builder, marks
+
+    m = _minlp()
+    with pytest.warns(ProvenanceSkewWarning, match=r"pickled by discopt 0\.0\.1"):
+        m2 = pickle.loads(_repickled(m, older))
+    assert m2.num_variables == m.num_variables
+
+
+def test_the_stamp_is_per_model_not_per_node():
+    """A lone expression is not stamped itself (a per-node stamp is a per-node cost,
+    #1764); it carries its model through its variables, and that model's stamp."""
+    m = dm.Model("deep")
+    x = m.continuous("x", shape=(50,), lb=0, ub=1)
+    e = x[0]
+    for i in range(1, 2000):
+        e = e + x[i % 50] * 0.5
+    m.minimize(e)
+    assert pickle.dumps(e).count(b"_pickle_format") == 1
+    assert pickle.dumps(m).count(b"_pickle_format") == 1
+    assert pickle.loads(pickle.dumps(e)) is not None
+
+
+def test_a_pickle_from_before_the_stamp_is_refused():
+    """A real one: written by the tree at ``8a4880f7c`` (the last schema-1.3 writer,
+    built with its own Rust extension), whose layout was ``(attrs, had_builder)``.
+    Before the stamp this raised a bare ``ValueError`` from tuple unpacking."""
+    blob = (DATA / "pickle_fixtures" / "model_pickled_by_8a4880f7c.pkl").read_bytes()
+    with pytest.raises(TypeError, match="no format stamp.*Model.save"):
+        pickle.loads(blob)

@@ -100,6 +100,7 @@ from discopt.modeling.core import SolveResult
 # `NaN`/`Infinity` tokens. Imported rather than re-implemented so the standalone
 # result file and the same result embedded in a `.dopt` use one encoding.
 from discopt.serialize import (
+    SerializationError,
     _dec_float,
     _dec_json_tree,
     _dec_tree,
@@ -177,6 +178,24 @@ _DICT_ARRAY_FIELDS = (
 #: ``_SCALAR_FIELDS`` cannot repeat it.
 _STRING_SCALAR_FIELDS = frozenset(
     {"status", "algorithm_route", "bound_source", "error", "termination"}
+)
+
+
+#: Every key :func:`serialize_result` has ever written (no field has been removed
+#: since the module was added). :func:`deserialize_result` refuses any other.
+_RESULT_KEYS = frozenset(
+    {"schema_version"}
+    | set(_SCALAR_FIELDS)
+    | set(_FLOAT_DICT_FIELDS)
+    | set(_DICT_ARRAY_FIELDS)
+    | {
+        "mip_nlp_trace",
+        "explanation",
+        "validation_report",
+        "infeasibility_certificate",
+        "solve_options",
+        "provenance",
+    }
 )
 
 
@@ -372,15 +391,31 @@ def serialize_result(
 def deserialize_result(d: dict) -> SolveResult:
     """Rebuild a :class:`SolveResult` from :func:`serialize_result` output.
 
-    Version-tolerant in both directions: a document written before #1266 simply
-    has no ``provenance`` / ``solve_options`` / ``validation_report`` keys and
-    reads unchanged, and the keys are restored here so a result that crosses the
-    daemon socket arrives at the writer with them intact.
+    An older result reads unchanged: one written before #1266 simply has no
+    ``provenance`` / ``solve_options`` / ``validation_report`` keys, and the keys
+    are restored here so a result that crosses the daemon socket arrives at the
+    writer with them intact. A key outside ``_RESULT_KEYS`` is refused with
+    :class:`~discopt.serialize.SerializationError` -- naming the upgrade when
+    ``schema_version`` is newer than this reader's -- rather than dropped.
     """
     kwargs: dict[str, Any] = {}
     version = d.get("schema_version", 1)
     if not isinstance(version, int) or isinstance(version, bool):
         raise TypeError(f"schema_version must be an integer, got {version!r}.")
+    unknown = sorted(set(d) - _RESULT_KEYS)
+    if unknown:
+        # Skipping a key is how a result loses a field without a word -- the next
+        # one added could be a claim (#1244 was a claim lost on a round trip).
+        if version > SCHEMA_VERSION:
+            raise SerializationError(
+                f"result schema_version {version} is newer than this reader's "
+                f"({SCHEMA_VERSION}) and has key(s) {unknown} it does not know; "
+                "upgrade discopt to read it."
+            )
+        raise SerializationError(
+            f"result has key(s) {unknown} that no writer of schema_version {version} "
+            "produces; refusing rather than dropping them."
+        )
     for name in _SCALAR_FIELDS:
         if name in d:
             val = d[name]
