@@ -29,11 +29,12 @@ import discopt.modeling as dm
 import discopt.transformations as dt
 import numpy as np
 import pytest
-from discopt.modeling.core import _DetachedNlRepr, from_nl
+from discopt.modeling.core import Constant, _DetachedNlRepr, from_nl
 from discopt.serialize import SerializationError, dumps, loads
 from discopt.solvers.nlp_native import _source_still_matches
 
-CORPUS = sorted((pathlib.Path(__file__).parent / "data" / "minlplib_nl").glob("*.nl"))
+DATA = pathlib.Path(__file__).parent / "data"
+CORPUS = sorted((DATA / "minlplib_nl").glob("*.nl"))
 
 
 def _small():
@@ -293,6 +294,187 @@ MALFORMED = {
     "missing rows": lambda d: d.pop("rows"),
     "variables not a list": lambda d: d.update(variables=5),
 }
+
+
+def _fast_doc():
+    """A fast-API model: a CSR constraint block and a quadratic builder objective."""
+    import scipy.sparse as sp
+
+    m = dm.Model("fast")
+    x = m.continuous("x", shape=(3,), lb=0.0, ub=4.0)
+    m.add_linear_constraints(
+        sp.csr_matrix(np.array([[1.0, 2.0, 0.0], [0.0, 1.0, -1.0]])), x, "<=", np.array([3.0, 1.0])
+    )
+    m.add_quadratic_objective(sp.csr_matrix(np.eye(3)), np.array([1.0, 0.0, -1.0]), x)
+    return json.loads(dumps(m))
+
+
+def _every_node_doc():
+    m = dm.Model("sum_over")
+    x = m.continuous("x", shape=(3,), lb=0.0, ub=1.0)
+    m.minimize(dm.sum([x[0], x[1], x[2]]))
+    return json.loads(dumps(m))
+
+
+def _atom_doc():
+    return json.loads((DATA / "serialize_fixtures" / "v1.5" / "registered_atom.json").read_text())
+
+
+def _atom_node(d):
+    return next(n for n in d["nodes"] if "atom" in n)
+
+
+def _block_A(d):
+    return d["builder_blocks"][0]["A"]
+
+
+def _Q(d):
+    return d["builder_objective"]["Q"]
+
+
+#: Cases the WP-4 fuzzer found (``test_serialize_fuzz.py``, ``slow`` profile), one per
+#: falsifying example. Before the fix: an out-of-range or negative CSR column index
+#: LOADED, the negative one wrapping onto another column; a broken ``indptr`` made the
+#: Rust builder PANIC (``pyo3_runtime.PanicException``, not even an ``Exception``); a
+#: scalar bound written as ``[0.0]`` loaded as if it were ``0.0``.
+FUZZ_FOUND = {
+    "A column index past the last column": (
+        _fast_doc,
+        lambda d: _block_A(d)["indices"].__setitem__(0, 3),
+    ),
+    "A column index negative (wraps)": (
+        _fast_doc,
+        lambda d: _block_A(d)["indices"].__setitem__(0, -1),
+    ),
+    "A indptr past the entries (Rust panic)": (
+        _fast_doc,
+        lambda d: _block_A(d)["indptr"].__setitem__(1, 99),
+    ),
+    "Q indptr past the entries (Rust panic)": (
+        _fast_doc,
+        lambda d: _Q(d)["indptr"].__setitem__(1, 99),
+    ),
+    "Q column index past the last column": (
+        _fast_doc,
+        lambda d: _Q(d)["indices"].__setitem__(0, 3),
+    ),
+    "A column index overflows int32": (
+        _fast_doc,
+        lambda d: _block_A(d)["indices"].__setitem__(0, 10**12),
+    ),
+    "A values and indices differ in length": (
+        _fast_doc,
+        lambda d: _block_A(d)["data"].append(1.0),
+    ),
+    "A shape not a pair": (_fast_doc, lambda d: _block_A(d).update(shape=[2])),
+    # Beside a builder objective the placeholder objective's node was never read,
+    # so changing its value loaded as if nothing had changed.
+    "placeholder objective node not the constant 0.0": (
+        _fast_doc,
+        lambda d: d["nodes"][d["objective"]["expr"]].update(v=1.0),
+    ),
+    "scalar bound written as a list": (
+        _doc,
+        lambda d: next(v for v in d["variables"] if v["shape"] == []).update(lb=[0.0]),
+    ),
+    "array bound nested one level too deep": (
+        _doc,
+        lambda d: next(v for v in d["variables"] if v["shape"] == [2]).update(lb=[[0.0], [0.0]]),
+    ),
+    # The atom tag of a registered composite (#1248 A): a malformed one was skipped
+    # as if it were an unregistered (dropped-by-design) tag.
+    "atom tag not an object": (_atom_doc, lambda d: _atom_node(d).update(atom=5)),
+    "atom tag name not a string": (
+        _atom_doc,
+        lambda d: _atom_node(d)["atom"].update(n=3),
+    ),
+    "atom tag argument a bool": (
+        _atom_doc,
+        lambda d: _atom_node(d)["atom"].update(arg=True),
+    ),
+    "atom tag argument past the end of the table": (
+        _atom_doc,
+        lambda d: _atom_node(d)["atom"].update(arg=len(d["nodes"])),
+    ),
+    # `{}` (or `""`) where a list belongs iterated as an empty list: a fix stack, a
+    # whole variable list or a call's arguments dropped without a word.
+    "bound_stack an empty object": (
+        _doc,
+        lambda d: d["variables"][0].update(bound_stack={}),
+    ),
+    "variables an empty object": (_doc, lambda d: d.update(variables={})),
+    "initial_point an empty object": (_doc, lambda d: d.update(initial_point={})),
+    "sum_over args an empty object": (
+        _every_node_doc,
+        lambda d: next(n for n in d["nodes"] if n["op"] == "sum_over").update(args={}),
+    ),
+    "array bound ragged": (
+        _doc,
+        lambda d: next(v for v in d["variables"] if v["shape"] == [2]).update(lb=[0.0]),
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(FUZZ_FOUND))
+def test_a_fuzzer_found_document_is_refused(case):
+    make, corrupt = FUZZ_FOUND[case]
+    doc = make()
+    loads(json.dumps(doc))  # the base loads
+    corrupt(doc)
+    with pytest.raises(SerializationError):
+        loads(json.dumps(doc))
+
+
+#: Lowerings whose tag the WRITER records at or after the tagged node: it appends
+#: the node before it ``add``s the argument, so an identity tags itself and a body
+#: without its argument points past itself. A reader bound of ``arg < i`` refused
+#: both (review of #1788, B1); they are tags, not corruption.
+WRITER_LATE_ATOMS = {
+    "identity": ("wp4_adv_identity", lambda t: t, lambda a, i: a == i),
+    "ignores its argument": (
+        "wp4_adv_ignores_arg",
+        lambda t: dm.exp(Constant(1.0)),
+        lambda a, i: a > i,
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(WRITER_LATE_ATOMS))
+def test_a_writer_emitted_atom_tag_at_or_after_its_node_loads(case):
+    from discopt.operators import atom_of, get_registered, register_function
+
+    name, lower, where = WRITER_LATE_ATOMS[case]
+    fn = get_registered(name) or register_function(name, lower)
+    m = dm.Model("late_atom")
+    x = m.continuous("x", lb=0.0, ub=2.0)
+    y = m.continuous("y", lb=0.0, ub=2.0)
+    m.minimize(fn(x * 3.0 + 1.0) + y)
+    text = dumps(m, provenance=False)
+    tags = [(i, nd["atom"]) for i, nd in enumerate(json.loads(text)["nodes"]) if "atom" in nd]
+    assert len(tags) == 1 and where(tags[0][1]["arg"], tags[0][0]), tags
+    reloaded = loads(text)
+    assert dumps(reloaded, provenance=False) == text  # the tag was re-derived, not dropped
+    body = reloaded._objective.expression.left
+    assert atom_of(body) is not None and atom_of(body)[0] == name
+
+
+def test_a_nested_atom_keeps_both_tags():
+    """``sq(sq(x))``: the reload shares the inner body's interned ``1.0`` with the
+    outer body, re-lowering does not; the outer tag must still be re-derived, as
+    sharing does not change the tree (found by the WP-4 deep run)."""
+    from discopt.operators import atom_of, get_registered, register_function
+
+    name = "wp4_adv_square_plus_one"
+    sq = get_registered(name) or register_function(name, lambda t: t * t + 1.0)
+    m = dm.Model("nested_atom")
+    x = m.continuous("x", lb=0.0, ub=2.0)
+    m.minimize(sq(sq(x)))
+    text = dumps(m, provenance=False)
+    assert sum("atom" in nd for nd in json.loads(text)["nodes"]) == 2
+    reloaded = loads(text)
+    assert dumps(reloaded, provenance=False) == text
+    outer = reloaded._objective.expression
+    assert atom_of(outer) is not None and atom_of(outer.left.left) is not None
 
 
 @pytest.mark.parametrize("case", sorted(MALFORMED))

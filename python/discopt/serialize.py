@@ -391,6 +391,19 @@ def _dec_index_int(x: Any, what: str) -> int:
     return x
 
 
+def _seq(value: Any, what: str) -> list:
+    """*value*, which must be a JSON array.
+
+    Iterating whatever came accepted ``{}`` or ``""`` where a list belongs as an
+    empty one -- a whole ``variables`` list, a call's arguments or a variable's fix
+    stack dropped without a word (WP-4 fuzzing). Every list the decoders iterate
+    goes through here.
+    """
+    if not isinstance(value, list):
+        raise SerializationError(f"{what} must be a list, got {type(value).__name__}")
+    return value
+
+
 class _StrictRefs:
     """A list the document refers into, by position, with every reference checked.
 
@@ -440,16 +453,31 @@ def _enc_array(arr: np.ndarray) -> Any:
 
 
 def _dec_array(obj: Any, shape: tuple[int, ...]) -> np.ndarray:
-    flat = []
+    """Inverse of :func:`_enc_array`: nesting must match *shape* exactly.
 
-    def walk(o):
-        if isinstance(o, list):
-            for item in o:
-                walk(item)
-        else:
+    Flattening whatever came and reshaping accepted ``[0.0]`` for a scalar bound,
+    or ``[[1, 2], [3]]`` padded out by a lucky total -- documents no writer
+    produces, read as if they were fine (WP-4 fuzzing). Each level must be a list
+    of exactly the declared length, and a scalar position a scalar.
+    """
+    flat: list[float] = []
+    stack: list = [(obj, 0)]
+    while stack:
+        o, depth = stack.pop()
+        if depth == len(shape):
+            if isinstance(o, (list, dict)):
+                raise SerializationError(
+                    f"array of shape {shape} holds a nested value where a number belongs"
+                )
             flat.append(_dec_float(o))
-
-    walk(obj)
+        else:
+            if not isinstance(o, list) or len(o) != shape[depth]:
+                got = len(o) if isinstance(o, list) else type(o).__name__
+                raise SerializationError(
+                    f"array of shape {shape}: axis {depth} should have {shape[depth]} "
+                    f"entries, got {got}"
+                )
+            stack.extend((item, depth + 1) for item in reversed(o))
     return np.array(flat, dtype=np.float64).reshape(shape)
 
 
@@ -800,6 +828,29 @@ def _decode_nodes(table: list[dict], variables: Any, params: list[Parameter]):
                 f"{op} node has key(s) no writer of that format produces "
                 f"({', '.join(sorted(extra))}); refusing rather than dropping them."
             )
+        if "atom" in nd:
+            # A well-formed tag whose atom this process has not registered is
+            # dropped by design (`_retag_atoms`: abstaining only loosens a bound).
+            # A malformed one is a malformed document, not an abstention (WP-4).
+            name, arg = (
+                (dict.get(atom, k) for k in ("n", "arg"))
+                if isinstance(atom, dict)
+                else (None, None)
+            )
+            if not (
+                isinstance(atom, dict)
+                and isinstance(name, str)
+                and name
+                and type(arg) is int
+                # Not `arg < i`: the writer appends the node BEFORE it `add`s the
+                # argument, so an identity lowering tags itself (`arg == i`) and one
+                # that ignores its argument points at a later node (`arg > i`).
+                and 0 <= arg < len(table)
+            ):
+                raise SerializationError(
+                    f"node {i} has a malformed atom tag {atom!r}: it must be "
+                    '{"n": <registered name>, "arg": <a node of this table>}'
+                )
         if op == "binop" and nd.get("o") not in _KNOWN_BINARY_OPS:
             raise SerializationError(
                 f"node {i} names unknown binary operator {nd.get('o')!r}. Refusing on "
@@ -820,7 +871,10 @@ def _decode_nodes(table: list[dict], variables: Any, params: list[Parameter]):
             if shape is None:
                 built.append(Constant(_dec_float(nd["v"])))
             else:
-                dims = tuple(_dec_index_int(n, f"a dimension of constant node {i}") for n in shape)
+                dims = tuple(
+                    _dec_index_int(n, f"a dimension of constant node {i}")
+                    for n in _seq(shape, f"the shape of constant node {i}")
+                )
                 if any(n < 0 for n in dims):
                     raise SerializationError(f"constant node {i} has a negative dimension: {dims}")
                 built.append(Constant(_dec_array(nd["v"], dims)))
@@ -837,7 +891,9 @@ def _decode_nodes(table: list[dict], variables: Any, params: list[Parameter]):
         elif op == "unop":
             built.append(UnaryOp(nd["o"], refs[nd["a"]]))
         elif op == "call":
-            built.append(FunctionCall(nd["f"], *[refs[a] for a in nd["args"]]))
+            built.append(
+                FunctionCall(nd["f"], *[refs[a] for a in _seq(nd["args"], f"node {i} args")])
+            )
         elif op == "matmul":
             built.append(MatMulExpression(refs[nd["a"]], refs[nd["b"]]))
         elif op == "sum":
@@ -845,7 +901,7 @@ def _decode_nodes(table: list[dict], variables: Any, params: list[Parameter]):
             _check_axis_in_range(base, axis, i)
             built.append(SumExpression(base, axis))
         elif op == "sum_over":
-            built.append(SumOverExpression([refs[a] for a in nd["args"]]))
+            built.append(SumOverExpression([refs[a] for a in _seq(nd["args"], f"node {i} args")]))
     _retag_atoms(table, built, variables, params)
     return _StrictRefs(built, "node")
 
@@ -883,7 +939,7 @@ def _check_index_in_range(base: Any, index: Any, node: int) -> None:
 
 
 def _same_structure(a: Any, b: Any, var_ids: dict, param_ids: dict) -> bool:
-    """Do *a* and *b* encode to byte-identical node tables?
+    """Do *a* and *b* encode the same expression tree?
 
     Reuses the writer rather than hand-rolling a second notion of expression
     equality -- ``Expression.__eq__`` builds a ``Constraint`` rather than
@@ -891,17 +947,51 @@ def _same_structure(a: Any, b: Any, var_ids: dict, param_ids: dict) -> bool:
     would be a second implementation to keep in sync with ``_encode``.  The
     ``atom`` key is dropped before comparing: it is what this comparison is
     being used to decide, so leaving it in would make the test circular.
+
+    The comparison is of the two expression *trees*, not of their sharing: the
+    tables are hash-consed first. The writer shares by object identity, and the
+    same tree can be shared differently -- a reloaded document holds one
+    ``Constant`` per constant node, while re-lowering builds its literals through
+    ``_wrap``'s interning, so ``sq(sq(x))`` with ``sq = t*t + 1.0`` reloads with
+    the outer body's ``1.0`` shared with the inner one and re-lowers with it not.
+    Sharing never changes the function, so it must not decide the tag (WP-4).
     """
     try:
-        tables = []
+        canon: dict[str, int] = {}  # shared, so equal subtrees get equal ids across both
+        roots = []
         for expr in (a, b):
             t = _NodeTable(var_ids, param_ids)
-            t.add(expr)
-            tables.append([{k: v for k, v in nd.items() if k != "atom"} for nd in t.nodes])
+            root = t.add(expr)
+            roots.append(_tree_ids(t.nodes, canon)[root])
     except Exception as exc:  # noqa: BLE001 - any failure to encode means "cannot verify"
         logger.debug("atom re-derivation could not encode a body (%s: %s)", type(exc).__name__, exc)
         return False
-    return tables[0] == tables[1]
+    return roots[0] == roots[1]
+
+
+#: The keys of an encoded node that hold references to other nodes.
+_CHILD_REF_KEYS = ("a", "b", "base")
+_CHILD_LIST_KEYS = ("args",)
+
+
+def _tree_ids(nodes: list[dict], canon: dict[str, int]) -> list[int]:
+    """Hash-cons a node table: each node's id in *canon*, equal iff equal trees.
+
+    Each node's children are replaced by their subtrees' ids before it is keyed,
+    so structurally identical subtrees share an id however the table shared them.
+    ``atom`` tags are not part of the tree.
+    """
+    ids: list[int] = []
+    for nd in nodes:
+        out = {k: v for k, v in nd.items() if k != "atom"}
+        for k in _CHILD_REF_KEYS:
+            if k in out:
+                out[k] = ids[out[k]]
+        for k in _CHILD_LIST_KEYS:
+            if k in out:
+                out[k] = [ids[c] for c in out[k]]
+        ids.append(canon.setdefault(json.dumps(out, sort_keys=True), len(canon)))
+    return ids
 
 
 class _IdsOnFirstSight(dict):
@@ -1135,7 +1225,10 @@ def _dec_variable(d: dict, model: Model) -> Variable:
     # already carry that prefix and must still round-trip).
     if name in model._names:
         raise SerializationError(f"duplicate variable/parameter name {name!r}")
-    shape = tuple(_dec_index_int(n, f"a dimension of variable {name!r}") for n in d["shape"])
+    shape = tuple(
+        _dec_index_int(n, f"a dimension of variable {name!r}")
+        for n in _seq(d["shape"], f"the shape of variable {name!r}")
+    )
     if any(n < 0 for n in shape):
         raise SerializationError(f"variable {name!r} has a negative dimension: {shape}")
     lb = _dec_array(d["lb"], shape)
@@ -1157,7 +1250,7 @@ def _dec_variable(d: dict, model: Model) -> Variable:
     # snapshot and changed the solve's answer (#1321).
     var._bound_stack = [
         _dec_bound_stack_entry(entry, i, shape, name, var.var_type)
-        for i, entry in enumerate(d.get("bound_stack", []))
+        for i, entry in enumerate(_seq(d.get("bound_stack", []), f"bound_stack of {name!r}"))
     ]
     if var._bound_stack:
         # Inside a fix scope the live box is a pin, and `fix()` refuses a pin
@@ -1262,15 +1355,51 @@ def _enc_csr(A) -> dict:
 
 
 def _dec_csr(d: dict):
+    """Rebuild a CSR matrix, checking its structure before anything indexes with it.
+
+    scipy validates CSR arrays lazily, if at all: a column index past the last
+    column, or a negative one (which wraps), loaded into a matrix holding a
+    coefficient on the wrong variable, and an ``indptr`` running past ``indices``
+    reached the Rust builder and panicked there (WP-4 fuzzing). Duplicate or
+    unsorted column indices stay legal -- a CSR array the writer took from scipy
+    may hold them.
+    """
     import scipy.sparse as sp
 
+    shape = d["shape"]
+    if not (isinstance(shape, list) and len(shape) == 2):
+        raise SerializationError(f"sparse matrix shape must be [rows, cols], got {shape!r}")
+    rows, cols = (_dec_index_int(n, "a sparse matrix dimension") for n in shape)
+    if rows < 0 or cols < 0:
+        raise SerializationError(f"sparse matrix has a negative dimension: {shape!r}")
+    indptr = [_dec_index_int(i, "a sparse matrix row pointer") for i in _seq(d["indptr"], "indptr")]
+    indices = [
+        _dec_index_int(i, "a sparse matrix column index") for i in _seq(d["indices"], "indices")
+    ]
+    data = [_dec_float(x) for x in _seq(d["data"], "sparse matrix data")]
+    if len(indptr) != rows + 1 or indptr[0] != 0 or indptr[-1] != len(indices):
+        raise SerializationError(
+            f"sparse matrix row pointers do not describe {rows} rows over "
+            f"{len(indices)} entries: {indptr!r}"
+        )
+    if any(a > b for a, b in zip(indptr, indptr[1:])):
+        raise SerializationError(f"sparse matrix row pointers decrease: {indptr!r}")
+    if len(data) != len(indices):
+        raise SerializationError(
+            f"sparse matrix has {len(data)} values for {len(indices)} column indices"
+        )
+    bad = [j for j in indices if not 0 <= j < cols]
+    if bad:
+        raise SerializationError(
+            f"sparse matrix column index {bad[0]} is out of range for {cols} columns"
+        )
     return sp.csr_matrix(
         (
-            np.array([_dec_float(x) for x in d["data"]], dtype=np.float64),
-            np.array(d["indices"], dtype=np.int32),
-            np.array(d["indptr"], dtype=np.int32),
+            np.array(data, dtype=np.float64),
+            np.array(indices, dtype=np.int64),
+            np.array(indptr, dtype=np.int64),
         ),
-        shape=tuple(d["shape"]),
+        shape=(rows, cols),
     )
 
 
@@ -1496,7 +1625,7 @@ def _dec_logic(entries: Any, nodes: list, name: Any) -> Any:
             card = {"atleast": LogicalAtLeast, "atmost": LogicalAtMost, "exactly": LogicalExactly}[
                 c
             ]
-            built.append(card(k, [refs[a] for a in e["args"]]))
+            built.append(card(k, [refs[a] for a in _seq(e["args"], "logic args")]))
     return built[-1]
 
 
@@ -1576,7 +1705,7 @@ def _dec_rows(docs: list[dict], nodes: list, minor: int) -> list:
             out.append(
                 _SOSConstraint(
                     sos_type=d["sos_type"],
-                    variables=[nodes[i] for i in d["variables"]],
+                    variables=[nodes[i] for i in _seq(d["variables"], "SOS members")],
                     name=d["name"],
                 )
             )
@@ -1587,7 +1716,10 @@ def _dec_rows(docs: list[dict], nodes: list, minor: int) -> list:
                 )
             out.append(
                 _DisjunctiveConstraint(
-                    disjuncts=[[_dec_constraint(c, nodes) for c in dd] for dd in d["disjuncts"]],
+                    disjuncts=[
+                        [_dec_constraint(c, nodes) for c in _seq(dd, "a disjunct")]
+                        for dd in _seq(d["disjuncts"], "disjuncts")
+                    ],
                     name=d["name"],
                     method=d["method"],
                     semantics=DisjunctionSemantics[d["semantics"]],
@@ -1750,7 +1882,7 @@ def _dec_complementarities(doc: Optional[dict], model: Model, nodes: list, minor
         return None if v is None else tuple(int(x) for x in v)
 
     rebuilt: list[Any] = []
-    for d in doc["relations"]:
+    for d in _seq(doc["relations"], "complementarity relations"):
         src_idx = d["source"]
         if src_idx is not None:
             src_idx = _dec_index_int(src_idx, "a complementarity source")
@@ -1777,10 +1909,12 @@ def _dec_complementarities(doc: Optional[dict], model: Model, nodes: list, minor
         )
 
     relations = _StrictRefs(rebuilt, "complementarity relation")
-    model._complementarities = [relations[i] for i in doc["declared"]]
+    model._complementarities = [
+        relations[i] for i in _seq(doc["declared"], "declared complementarities")
+    ]
     rows = _StrictRefs(list(model._constraints), "row")
     lowered: dict = {}
-    for entry in doc["lowered"]:
+    for entry in _seq(doc["lowered"], "lowered complementarities"):
         # Two elements: untracked rows (`None`) -- all a writer before 1.5 could
         # say. Three, from 1.5 only: the tracked rows' positions.
         if not isinstance(entry, list) or len(entry) not in (
@@ -1993,7 +2127,10 @@ def _dec_sets(docs: list[dict]) -> list:
         out.append(
             Set(
                 name,
-                [tuple(mem) if isinstance(mem, list) else mem for mem in d["members"]],
+                [
+                    tuple(mem) if isinstance(mem, list) else mem
+                    for mem in _seq(d["members"], "set members")
+                ],
                 dimen=d["dimen"],
             )
         )
@@ -2037,9 +2174,9 @@ def _enc_coupling_keys(model: Model, rows: list) -> dict:
 def _dec_coupling_keys(d: Optional[dict], rows: list) -> set:
     if not d:
         return set()
-    out: set = {_dec_name(n, "coupling mark") for n in d.get("names", [])}
+    out: set = {_dec_name(n, "coupling mark") for n in _seq(d.get("names", []), "coupling names")}
     row_refs = _StrictRefs(rows, "coupling-mark row")
-    for idx in d.get("row_indices", []):
+    for idx in _seq(d.get("row_indices", []), "coupling rows"):
         out.add(id(row_refs[idx]))
     return out
 
@@ -2105,7 +2242,7 @@ def _dec_block_labels_con(d: Optional[dict], rows: list) -> dict:
     for name, vals in (d.get("names") or {}).items():
         out[str(name)] = np.asarray(vals, dtype=np.int64)
     row_refs = _StrictRefs(rows, "block-label row")
-    for entry in d.get("rows", []):
+    for entry in _seq(d.get("rows", []), "block label rows"):
         row = row_refs[entry["row"]]
         labels = np.asarray(entry["labels"], dtype=np.int64)
         out[id(row)] = labels
@@ -2171,7 +2308,7 @@ def _enc_atan2_preconditions(model: Model, table) -> list[dict]:
 def _dec_atan2_preconditions(docs: Optional[list], nodes: list) -> list:
     """Rebuild the guard list. A document predating it simply has none."""
     out = []
-    for d in docs or []:
+    for d in [] if docs is None else _seq(docs, "_atan2_preconditions"):
         if d["sign"] not in ("positive", "negative"):
             # The guard reads anything but "positive" as "negative", so a corrupt
             # value would re-check the opposite sign of the one the rewrite assumed.
@@ -2198,7 +2335,7 @@ def _enc_piecewise_domains(model: Model, table) -> list[dict]:
 def _dec_piecewise_domains(docs: Optional[list], nodes: list) -> list:
     """Rebuild the domain guard list. A document predating it simply has none."""
     out = []
-    for d in docs or []:
+    for d in [] if docs is None else _seq(docs, "_piecewise_domains"):
         lo, hi = _dec_float(d["lo"]), _dec_float(d["hi"])
         if not (lo <= hi):
             raise SerializationError(f"piecewise domain [{lo}, {hi}] is empty or NaN")
@@ -2336,8 +2473,10 @@ def _dec_state(state: Optional[dict], model: Model, rows: list, nodes: list) -> 
     model._coupling_keys = _dec_coupling_keys(state.get("_coupling_keys"), rows)
     model._block_labels_var = _dec_block_labels_var(state.get("_block_labels_var"))
     model._block_labels_con = _dec_block_labels_con(state.get("_block_labels_con"), rows)
-    model._sets = _dec_sets(state.get("_sets", []))
-    model._simplex_lowerings = _dec_simplex_lowerings(state.get("_simplex_lowerings", []))
+    model._sets = _dec_sets(_seq(state.get("_sets", []), "_sets"))
+    model._simplex_lowerings = _dec_simplex_lowerings(
+        _seq(state.get("_simplex_lowerings", []), "_simplex_lowerings")
+    )
     for name in _LAZY_PLAIN:
         if name in state:
             setattr(model, name, state[name])
@@ -2822,16 +2961,18 @@ def _check_keys(
 
 def _decode_document(doc: dict, minor: int) -> Model:
     model = Model(doc["name"])
-    variables = _StrictRefs([_dec_variable(d, model) for d in doc["variables"]], "variable")
-    params = [_dec_parameter(d, model) for d in doc["parameters"]]
-    nodes = _decode_nodes(doc["nodes"], variables, params)
+    variables = _StrictRefs(
+        [_dec_variable(d, model) for d in _seq(doc["variables"], "variables")], "variable"
+    )
+    params = [_dec_parameter(d, model) for d in _seq(doc["parameters"], "parameters")]
+    nodes = _decode_nodes(_seq(doc["nodes"], "nodes"), variables, params)
 
-    model._constraints.extend(_dec_rows(doc["rows"], nodes, minor))
+    model._constraints.extend(_dec_rows(_seq(doc["rows"], "rows"), nodes, minor))
     for row in model._constraints:
         if type(row) is _DisjunctiveConstraint:
             row._model = model  # #1775 G1.1: so ``indicators`` can be read
 
-    for d in doc.get("builder_blocks", []):
+    for d in _seq(doc.get("builder_blocks", []), "builder_blocks"):
         model.add_linear_constraints(
             _dec_csr(d["A"]),
             variables[d["x"]],
@@ -2858,7 +2999,16 @@ def _decode_document(doc: dict, minor: int) -> Model:
                     f"the placeholder objective's sense {od.get('sense')!r} disagrees with "
                     f"the builder objective's {bobj['sense']!r}"
                 )
-            _dec_index_int(od.get("expr"), "the placeholder objective's node")
+            # The placeholder's node is not used -- the builder installs its own --
+            # so it must be exactly what the writer records, `Constant(0.0)`, or a
+            # changed value would load unread (WP-4 fuzzing).
+            placeholder = nodes[od.get("expr")]
+            ph = np.asarray(placeholder.value) if isinstance(placeholder, Constant) else None
+            if not (ph is not None and ph.ndim == 0 and float(ph) == 0.0 and not np.signbit(ph)):
+                raise SerializationError(
+                    "the placeholder objective beside a builder objective must be the "
+                    f"constant 0.0, got {placeholder!r}"
+                )
         x = variables[bobj["x"]]
         c = _dec_array(bobj["c"], (np.asarray(bobj["c"]).size,))
         if bobj["kind"] == "linear":
@@ -2889,7 +3039,7 @@ def _decode_document(doc: dict, minor: int) -> Model:
     # without a word, and the user's warm start is quietly gone (#1321).
     declared = {v.name: v.size for v in model._variables}
     initial_point = {}
-    for name, elem, val in doc.get("initial_point", []):
+    for name, elem, val in _seq(doc.get("initial_point", []), "initial_point"):
         name = _dec_name(name, "initial_point")
         if name not in declared:
             raise SerializationError(

@@ -114,6 +114,9 @@ dev = [
     # (Also in the `gams` extra, for gamsconfig.yaml merging.)
     "pyyaml>=6",
     "pytest-xdist",
+    # Property-based round trip and fuzzing of the native model format
+    # (test_serialize_property.py / test_serialize_fuzz.py, serialization plan WP-4).
+    "hypothesis>=6.100",
     # Pin the lint/typecheck toolchain to the exact versions in
     # .pre-commit-config.yaml (the single source of truth CI also runs), so a
     # local `pip install -e .[dev]` cannot drift from CI.
