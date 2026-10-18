@@ -881,7 +881,6 @@ def _bound_expression(
                 return memo.put_bound(expr, (min(quotients), max(quotients)))
             return memo.put_bound(expr, (-np.inf, np.inf))
         elif expr.op == "**":
-            # Conservative: could be tightened for integer exponents
             if isinstance(expr.right, Constant):
                 p = float(expr.right.value)
                 if p == int(p) and p > 0:
@@ -908,6 +907,9 @@ def _bound_expression(
                     # power (monotone on that interval): the range is spanned
                     # by the endpoints.
                     return memo.put_bound(expr, (min(vals), max(vals)))
+                frac = _fractional_power_bounds(left_lo, left_hi, p)
+                if frac is not None:
+                    return memo.put_bound(expr, frac)
             return memo.put_bound(expr, (-np.inf, np.inf))
 
     if isinstance(expr, UnaryOp):
@@ -950,6 +952,46 @@ def _bound_expression(
     return memo.put_bound(expr, (-np.inf, np.inf))
 
 
+def _fractional_power_bounds(lo: float, hi: float, p: float) -> tuple[float, float] | None:
+    """#1767: enclosure of ``x**p`` for a constant non-integer exponent *p* over a
+    base enclosure ``[lo, hi]``, or ``None`` to decline.
+
+    A real power with a non-integer exponent is defined only for ``x >= 0``, so a
+    base enclosure that reaches below 0 is declined (the caller answers
+    ``(-inf, inf)`` and the big-M refuses loudly). On ``[lo, hi]`` with ``lo >= 0``
+    the function is monotone -- increasing for ``p > 0``, decreasing for ``p < 0``
+    -- so the range is spanned by the endpoint powers. ``0**p`` for ``p < 0`` and
+    ``inf**p`` for ``p > 0`` evaluate to ``inf``, so those endpoints stay unbounded.
+    Integer exponents are not handled here (the ``**`` branch owns them).
+    """
+    if not np.isfinite(p) or p == int(p):
+        return None
+    if not (lo >= 0.0 and lo <= hi) or np.isnan(hi):
+        return None
+    with np.errstate(over="ignore", divide="ignore"):
+        a = float(np.float64(lo) ** p)
+        b = float(np.float64(hi) ** p)
+    return (min(a, b), max(a, b))
+
+
+def _fractional_power_slope(v: float, err: float, p: float) -> float:
+    """Largest ``|d/dx x**p| = |p| x**(p-1)`` over ``[v - err, v + err]``.
+
+    The slope is monotone in ``x`` on ``x > 0``, so its maximum is at one end of the
+    ball. If the ball reaches ``x <= 0`` (where the slope is unbounded for
+    ``p < 1`` and the power undefined below 0) or ``v`` is infinite, the slope is
+    ``inf``; :func:`_mul0` still turns a zero *err* into zero propagated error.
+    """
+    if err == 0.0:
+        return 0.0
+    left = v - err
+    if not (np.isfinite(v) and left > 0.0):
+        return np.inf
+    with np.errstate(over="ignore"):
+        s = abs(p) * max(np.float64(left) ** (p - 1.0), np.float64(v + err) ** (p - 1.0))
+    return float(s)
+
+
 def bound_expression_error(
     expr: Expression, model: Model, memo: _BoundMemo | None = None
 ) -> tuple[float, float]:
@@ -970,7 +1012,9 @@ def bound_expression_error(
     first-order bound: each node contributes a few ulps of its own endpoint, plus
     its operands' errors scaled by the node's local sensitivity -- ``|b|`` and
     ``|a|`` for a product ``a*b``, ``1/|b|`` and ``|a|/b^2`` for ``a/b``,
-    ``p|v|^(p-1)`` for an integer power, ``|f'|`` for a monotone unary function.
+    ``p|v|^(p-1)`` for an integer power (the largest slope over the base's error
+    ball for a non-integer power on a nonnegative base, #1767), ``|f'|`` for a
+    monotone unary function.
     Because ``_bound_expression`` picks each endpoint from a specific operand
     corner, the error is tracked **per endpoint** rather than as one scalar: a
     denominator ``0.01 + x`` with ``x.ub = +inf`` has an exact lower endpoint and an
@@ -979,9 +1023,9 @@ def bound_expression_error(
     in-repo corpus, three ``heatexch_gen*`` instances going to zero.)
 
     A node whose sensitivity this cannot bound -- an unknown call, a non-integer
-    power, a non-sign-definite quotient -- yields ``inf`` for the affected
-    endpoint, which makes a caller's sign test on that endpoint fail: the
-    inference is refused rather than guessed at (CLAUDE.md §3).
+    power on a base that can be negative, a non-sign-definite quotient -- yields
+    ``inf`` for the affected endpoint, which makes a caller's sign test on that
+    endpoint fail: the inference is refused rather than guessed at (CLAUDE.md §3).
 
     The bound is deliberately loose. Every caller uses it to *widen* a refusal
     threshold, so an over-estimate costs only the strength of an optional rewrite
@@ -1113,6 +1157,31 @@ def _bound_error(
                             _corner_err(lo, _pick_err(lo, vals)),
                             _corner_err(hi, _pick_err(hi, vals)),
                         )
+                    ),
+                )
+            if _fractional_power_bounds(l_lo, l_hi, p) is not None:
+                # #1767: ``x**p`` is monotone on the nonnegative base enclosure, so
+                # each result endpoint is the power of one base endpoint. Its error
+                # is that base endpoint's error times the *largest* slope over the
+                # base's error ball (mean value theorem), not the slope at the
+                # endpoint: for 0 < p < 1 the slope grows toward 0, so the
+                # first-order slope at the endpoint would under-count.
+                with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+                    vals = (
+                        (
+                            float(np.float64(l_lo) ** p),
+                            _mul0(_fractional_power_slope(l_lo, el_lo, p), el_lo),
+                        ),
+                        (
+                            float(np.float64(l_hi) ** p),
+                            _mul0(_fractional_power_slope(l_hi, el_hi, p), el_hi),
+                        ),
+                    )
+                return memo.put_error(
+                    expr,
+                    (
+                        _corner_err(lo, _pick_err(lo, vals)),
+                        _corner_err(hi, _pick_err(hi, vals)),
                     ),
                 )
         return memo.put_error(expr, (np.inf, np.inf))
