@@ -19,7 +19,7 @@ import warnings
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt.solver import _highs_std_form, _project_onto_equality_rows
+from discopt.solver import _highs_std_form, _project_onto_rows
 from discopt.solvers import lp_milp_highs as L
 
 
@@ -63,12 +63,12 @@ def test_projection_repairs_equality_rows_and_never_worsens():
     cl = cu = np.array([1.0, 0.0])
     lb, ub = np.array([0.0, 0.0, -np.inf]), np.array([1.0, 1.0, np.inf])
     x = np.array([0.3, 0.7 + 5e-11, 150.0])
-    z = _project_onto_equality_rows(x, A, cl, cu, lb, ub)
+    z = _project_onto_rows(x, A, cl, cu, lb, ub)
     assert z is not None
     assert np.max(np.abs(A @ z - cl)) < np.max(np.abs(A @ x - cl))
     assert np.all(z >= lb) and np.all(z <= ub)
     # an exactly feasible point needs no repair
-    assert _project_onto_equality_rows(np.array([0.3, 0.7, 150.0]), A, cl, cu, lb, ub) is None
+    assert _project_onto_rows(np.array([0.3, 0.7, 150.0]), A, cl, cu, lb, ub) is None
 
 
 def _robust_blend(gamma: float) -> dm.Model:
