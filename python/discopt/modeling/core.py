@@ -34,6 +34,7 @@ import functools as _functools
 import gc
 import math
 import re
+import threading as _threading
 import time as _time
 import warnings
 import warnings as _warnings
@@ -513,6 +514,70 @@ _INTEGER_DEFAULT_UB = 1e6
 _UNSET_SHAPE: Any = object()
 
 
+#: Key under which a pickled expression carries its descendants, children first.
+_CHILDREN_FIRST_KEY = "_pickle_children_first"
+
+#: Per-thread count of open children-first pickling scopes. A scope opens when a
+#: model (``Model.__getstate__``) or a top-level expression starts listing its nodes
+#: children-first, and closes when the pickler reaches the ``_ChildrenFirstEnd``
+#: sentinel at the end of that list -- by then every listed node has been written.
+#: While one is open, nodes reduce plainly: their children are already memoised.
+#:
+#: A pickle that raises partway leaves its scope open on that thread. That costs
+#: nothing in correctness -- an expression then simply pickles the plain recursive
+#: way it did before this mechanism existed -- and a per-node record (tried first:
+#: a weakref per node) made every model pickle about 50% slower to avoid it.
+_PICKLE_SCOPES = _threading.local()
+
+
+def _children_first_scope_open() -> bool:
+    return bool(getattr(_PICKLE_SCOPES, "open", 0))
+
+
+def _open_children_first_scope() -> "_ChildrenFirstEnd":
+    _PICKLE_SCOPES.open = getattr(_PICKLE_SCOPES, "open", 0) + 1
+    return _ChildrenFirstEnd()
+
+
+def _unpickled_scope_end() -> None:
+    return None
+
+
+class _ChildrenFirstEnd:
+    """Last item of a children-first node list; closes its scope when pickled."""
+
+    __slots__ = ()
+
+    def __reduce__(self):
+        _PICKLE_SCOPES.open = max(0, getattr(_PICKLE_SCOPES, "open", 0) - 1)
+        return (_unpickled_scope_end, ())
+
+
+def _descendants_children_first(root: "Expression", skip: "Optional[dict]" = None) -> list:
+    """Every expression node below *root* (and *root* last), children before parents.
+
+    A node whose ``id`` is in *skip* (a deepcopy memo) is left out with its subtree.
+    """
+    from discopt.serialize import _children  # serialize imports this module
+
+    order: list = []
+    pending: set[int] = set()
+    stack: list = [(root, False)]
+    while stack:
+        node, expanded = stack.pop()
+        if expanded:
+            order.append(node)
+            continue
+        if not isinstance(node, Expression) or id(node) in pending:
+            continue
+        if skip is not None and id(node) in skip:
+            continue
+        pending.add(id(node))
+        stack.append((node, True))
+        stack.extend((ch, False) for ch in reversed(_children(node)))
+    return order
+
+
 class Expression:
     """
     Base class for all mathematical expressions in a discopt model.
@@ -541,38 +606,61 @@ class Expression:
     # ``ValueError: Input operand 1 does not have enough dimensions``.
     __array_ufunc__ = None
 
-    # ``copy.deepcopy`` walks an object graph recursively, a few interpreter frames
-    # per level, so an expression a loop built (``e = e + x[i]``) -- a chain as deep
-    # as the loop is long -- raised ``RecursionError`` at a few thousand terms when
-    # copied on its own. ``Model.__deepcopy__`` already pre-copies a model's
-    # expressions children-first; this does the same for any expression, so every
-    # node meets its children as memo hits. Each node is still copied by the
-    # default mechanism (``__reduce_ex__`` + ``copy._reconstruct``), so the copy is
+    # ``copy.deepcopy`` and ``pickle`` walk an object graph recursively, a few
+    # interpreter frames per level, so an expression a loop built (``e = e + x[i]``)
+    # -- a chain as deep as the loop is long -- raised ``RecursionError`` at a few
+    # thousand terms when copied or pickled on its own. Both memoise, so the fix is
+    # to visit the nodes children-first: every node then meets its children as memo
+    # hits and the nesting never exceeds one level. Each node is still copied or
+    # pickled by the default mechanism (``object.__reduce_ex__``), so the result is
     # the same object graph the default produced -- only the order differs.
-    def __deepcopy__(self, memo: dict) -> "Expression":
-        from discopt.serialize import _children  # serialize imports this module
+    # ``Model.__deepcopy__`` / ``Model.__getstate__`` do the same for a whole model.
 
-        order: list = []
-        pending: set[int] = set()
-        stack: list = [(self, False)]
-        while stack:
-            node, expanded = stack.pop()
-            if expanded:
-                order.append(node)
-                continue
-            if not isinstance(node, Expression) or id(node) in memo or id(node) in pending:
-                continue
-            pending.add(id(node))
-            stack.append((node, True))
-            stack.extend((ch, False) for ch in reversed(_children(node)))
-        for node in order:
+    def __deepcopy__(self, memo: dict) -> "Expression":
+        for node in _descendants_children_first(self, skip=memo):
             if id(node) not in memo:
-                rv = node.__reduce_ex__(4)
+                rv = object.__reduce_ex__(node, 4)
                 y = _copy._reconstruct(node, memo, *rv)
                 if y is not node:
                     memo[id(node)] = y
                     _copy._keep_alive(node, memo)
         return cast("Expression", memo[id(self)])
+
+    # The default shallow copy, spelled out so it does not go through the
+    # children-first ``__reduce_ex__`` below (which walks the whole subtree).
+    def __copy__(self) -> "Expression":
+        rv = object.__reduce_ex__(self, 4)
+        return cast("Expression", _copy._reconstruct(self, None, *rv))
+
+    # Pickling: the pickler has no memo to pre-fill, so the outermost expression
+    # carries its descendants, children first, at the front of its own state; they
+    # are written before anything that refers to them. Inside such a scope -- this
+    # one, or a model's (``Model.__getstate__``) -- nodes reduce plainly, so the walk
+    # happens once per pickle, not once per node.
+    def __reduce_ex__(self, protocol: int):  # type: ignore[override]
+        rv = object.__reduce_ex__(self, protocol)
+        if _children_first_scope_open():
+            return rv
+        if not isinstance(rv, tuple) or len(rv) < 3 or not isinstance(rv[2], dict):
+            return rv
+        below = _descendants_children_first(self)[:-1]
+        if not below:
+            return rv
+        state = {_CHILDREN_FIRST_KEY: [*below, _open_children_first_scope()]}
+        state.update(rv[2])
+        return (rv[0], rv[1], state, *rv[3:])
+
+    def __setstate__(self, state) -> None:
+        slots = None
+        if isinstance(state, tuple) and len(state) == 2:
+            state, slots = state
+        if state:
+            if _CHILDREN_FIRST_KEY in state:
+                state = {k: v for k, v in state.items() if k != _CHILDREN_FIRST_KEY}
+            self.__dict__.update(state)
+        if slots:
+            for key, value in slots.items():
+                setattr(self, key, value)
 
     # Cached static shape for composite nodes (populated at construction by
     # ``BinaryOp``/``UnaryOp`` where inferable; see M8). Class default of the
@@ -6269,7 +6357,8 @@ class Model:
     def __getstate__(self) -> tuple:
         # First in the dict, so the pickler writes the nodes children-first before
         # anything that refers to them (see ``_expressions_children_first``).
-        state: dict = {"_pickle_expressions": self._expressions_children_first()}
+        nodes = self._expressions_children_first()
+        state: dict = {"_pickle_expressions": [*nodes, _open_children_first_scope()]}
         for key, value in self.__dict__.items():
             if _is_model_cache(key):
                 if key in _MODEL_INIT_CACHES:
