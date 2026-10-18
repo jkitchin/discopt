@@ -21,8 +21,14 @@ Three modeling APIs produce GDP, and before this module each consumer walked
 An ``if_then`` becomes a one-disjunct ``"implication"`` node, read as
 ``[y => rows] v [not y]``. The tree never changes the model and allocates nothing:
 an ``either_or`` disjunct whose indicators were never read has ``indicator=None``
-(reading :attr:`_DisjunctiveConstraint.indicators` is what allocates them). Nested
-disjunctions always have ``indicator=None`` until #1775 G1.2.
+(reading :attr:`_DisjunctiveConstraint.indicators` is what allocates them).
+
+Nesting (#1775 G1.2): a disjunction nested in an ``either_or`` disjunct is a child
+of that disjunct (its disjuncts have ``indicator=None``). A block disjunction or a
+``Model.disjunction`` nested in a ``Disjunct`` block (``Disjunct.add_disjunction``,
+``Disjunct.subject_to``) is lowered at model level carrying its parent's indicator
+column; the tree attaches it as a child of the disjunct that owns that column.
+``local_vars`` lists the variables declared with ``Disjunct.variable``.
 """
 
 from __future__ import annotations
@@ -108,11 +114,15 @@ class GDPTree:
             yield from rec(root)
 
     def node_for(self, source: object) -> DisjunctionNode:
-        """The root built from ``source`` (a ``_DisjunctiveConstraint`` or a key)."""
-        for root in self.disjunctions:
-            if root.origin is not None and root.origin.source is source:
-                return root
-        raise KeyError(f"no root disjunction was built from {source!r}")
+        """The node built from ``source`` (a ``_DisjunctiveConstraint`` or a key).
+
+        Searches every node that came from a model row, roots and the children
+        attached under a ``Disjunct`` block (#1775 G1.2) alike.
+        """
+        for node in self.walk():
+            if node.origin is not None and node.origin.source is source:
+                return node
+        raise KeyError(f"no disjunction was built from {source!r}")
 
 
 def gdp_tree(model: Model) -> GDPTree:
@@ -154,9 +164,13 @@ def gdp_tree(model: Model) -> GDPTree:
     logic: list[_LogicalConstraint] = []
     groups: dict[str, DisjunctionNode] = {}
     last_implication: Optional[tuple[int, int, DisjunctionNode]] = None
+    parents: dict[DisjunctionNode, Variable] = {}
     for ci, c in enumerate(model._constraints):
         if isinstance(c, _DisjunctiveConstraint):
-            roots.append(from_either_or(c, None, Origin(ci, c)))
+            node = from_either_or(c, None, Origin(ci, c))
+            roots.append(node)
+            if c.parent_indicator is not None:
+                parents[node] = c.parent_indicator
             last_implication = None
         elif isinstance(c, _IndicatorConstraint) and c.disjunction is not None:
             key, k, n = c.disjunction
@@ -177,6 +191,8 @@ def gdp_tree(model: Model) -> GDPTree:
                 ]
                 groups[key] = node
                 roots.append(node)
+                if c.parent is not None:
+                    parents[node] = c.parent
             d = node.disjuncts[k]
             ind = BooleanVar(c.indicator)
             if d.indicator is None:
@@ -221,6 +237,34 @@ def gdp_tree(model: Model) -> GDPTree:
             last_implication = None
         else:
             last_implication = None
+
+    # #1775 G1.2: fill the indicators of block disjuncts that emitted no row, then
+    # move every root that names a parent indicator under the disjunct owning it.
+    members = getattr(model, "_gdp_block_members", {})
+    for key, node in groups.items():
+        for d, v in zip(node.disjuncts, members.get(key, ())):
+            if d.indicator is None:
+                d.indicator, d.name = BooleanVar(v), v.name
+    owner: dict[int, DisjunctNode] = {}
+    for node in roots:
+        for d in node.disjuncts:
+            if d.indicator is not None:
+                owner.setdefault(id(d.indicator.variable), d)
+    for d0 in getattr(model, "_gdp_factory_disjuncts", ()):
+        if d0._local_vars and id(d0.indicator.variable) in owner:
+            owner[id(d0.indicator.variable)].local_vars = list(d0._local_vars)
+    attached: list[DisjunctionNode] = []
+    for node, p in parents.items():
+        d = owner.get(id(p))
+        if d is None:
+            raise ValueError(
+                f"disjunction {node.name!r} is nested in a disjunct whose indicator "
+                f"{p.name!r} belongs to no disjunction of this model"
+            )
+        node.parent = d
+        d.children.append(node)
+        attached.append(node)
+    roots = [r for r in roots if not any(r is a for a in attached)]
 
     tree = GDPTree(roots, logic, {})
     for node in tree.walk():

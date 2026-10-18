@@ -239,13 +239,17 @@ def reformulate_gdp(
         _n_ind = sum(
             1
             for c in model._constraints
-            if isinstance(c, _IndicatorConstraint)
-            and (c.disjunction is None or c.disjunction[0] not in _hull_groups)
+            if (
+                isinstance(c, _IndicatorConstraint)
+                and (c.disjunction is None or c.disjunction[0] not in _hull_groups)
+            )
+            or (isinstance(c, _DisjunctiveConstraint) and c.parent_indicator is not None)
         )
         if _n_ind:
             _which = (
-                "Model.if_then rows, and add_disjunction blocks the hull cannot "
-                "take (an empty disjunct or a shared indicator)"
+                "Model.if_then rows, add_disjunction blocks the hull cannot take "
+                "(an empty disjunct, a shared indicator, or a block nested in a "
+                "Disjunct -- hull + nesting is #1775 G2.1)"
                 if method == "hull"
                 else "Model.if_then, and the Disjunct blocks of Model.add_disjunction"
             )
@@ -291,6 +295,15 @@ def reformulate_gdp(
                 new_model._constraints.extend(new_cons)
         elif isinstance(c, _IndicatorConstraint):
             new_cons = _reformulate_indicator(c, new_model, lp_data=lp_data)
+            new_model._constraints.extend(new_cons)
+        elif isinstance(c, _DisjunctiveConstraint) and c.parent_indicator is not None:
+            # #1775 G1.2: nested in a Disjunct block. The nested big-M lowering ties
+            # its selectors to the block's indicator (they sum to it), whatever the
+            # method: hull + nesting is #1775 G2.1 and the simplex lowering has no
+            # selectors. Counted in the warning above for those two methods.
+            new_vars, new_cons = _reformulate_disjunction_nested(
+                c, new_model, _add_aux_binary, parent_selector=c.parent_indicator
+            )
             new_model._constraints.extend(new_cons)
         elif isinstance(c, _DisjunctiveConstraint):
             # A per-disjunction ``method`` override (set e.g. by Model.if_else)
@@ -366,14 +379,23 @@ def _collect_indicator_hull_groups(
     """
     rows: dict[str, dict[int, list[_IndicatorConstraint]]] = {}
     sizes: dict[str, int] = {}
+    nested: set[str] = set()
     for c in model._constraints:
         if isinstance(c, _IndicatorConstraint) and c.disjunction is not None:
             key, k, n = c.disjunction
             rows.setdefault(key, {}).setdefault(k, []).append(c)
+            # #1775 G1.2: a block nested in a Disjunct sums its indicators to the
+            # parent's, not to 1. The hull below assumes exactly one is selected:
+            # with the parent off, it would force every disaggregated copy -- and
+            # so every shared variable -- to 0. Its rows stay on big-M.
+            if c.parent is not None:
+                nested.add(key)
             if sizes.setdefault(key, n) != n:
                 sizes[key] = -1  # inconsistent tag: leave the group on big-M
     groups: dict[str, tuple[_DisjunctiveConstraint, list[Variable]]] = {}
     for key, by_k in rows.items():
+        if key in nested:
+            continue
         n = sizes[key]
         if n < 1 or sorted(by_k) != list(range(n)):
             continue

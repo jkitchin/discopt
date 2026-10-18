@@ -1023,6 +1023,19 @@ def _refuse_unsupported(model: Model) -> None:
             name = getattr(con, "name", None)
             where = f" named {name!r}" if name else ""
             raise SerializationError(f"cannot serialize: the model carries {what}{where}. {remedy}")
+        # #1775 G1.2: nesting in a Disjunct block is carried by a parent link this
+        # format does not record. Dropping it would turn a nested disjunction into a
+        # top-level one -- a different feasible set -- so refuse instead.
+        nested = (type(con) is _IndicatorConstraint and con.parent is not None) or (
+            type(con) is _DisjunctiveConstraint and con.parent_indicator is not None
+        )
+        if nested:
+            raise SerializationError(
+                "cannot serialize: the model nests a disjunction in a Disjunct block "
+                "(Disjunct.add_disjunction / Disjunct.subject_to), which this format "
+                "version does not record (#1775 G1.2). Use pickle or Model.clone() "
+                "for same-version transport."
+            )
     # #1430: a disjunction built by ``Model.disjunction()``/``make_disjunct()`` and
     # never attached is not IN the model, so a document faithfully records a model
     # without it -- and the reloaded model carries no record that anything was

@@ -1170,7 +1170,15 @@ class DeclaredLogic:
                 continue
             if isinstance(c, _DisjunctiveConstraint):
                 assert tree is not None
-                self._nodes.append(disjunction(tree.node_for(c)))
+                node = disjunction(tree.node_for(c))
+                if c.parent_indicator is not None:
+                    # #1775 G1.2: nested in a Disjunct block -- it must hold only
+                    # where that block is selected, exactly like the block's rows.
+                    cols = _column_indices(c.parent_indicator, model)
+                    if cols.size != 1:
+                        raise ValueError(f"parent indicator of {c.name!r} is not a scalar")
+                    node = ("ind", int(cols[0]), 1.0, node, c.name)
+                self._nodes.append(node)
             elif isinstance(c, _IndicatorConstraint):
                 cols = _column_indices(c.indicator, model)
                 if cols.size != 1:
