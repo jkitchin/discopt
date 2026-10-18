@@ -939,7 +939,7 @@ def _check_index_in_range(base: Any, index: Any, node: int) -> None:
 
 
 def _same_structure(a: Any, b: Any, var_ids: dict, param_ids: dict) -> bool:
-    """Do *a* and *b* encode to byte-identical node tables?
+    """Do *a* and *b* encode the same expression tree?
 
     Reuses the writer rather than hand-rolling a second notion of expression
     equality -- ``Expression.__eq__`` builds a ``Constraint`` rather than
@@ -947,17 +947,51 @@ def _same_structure(a: Any, b: Any, var_ids: dict, param_ids: dict) -> bool:
     would be a second implementation to keep in sync with ``_encode``.  The
     ``atom`` key is dropped before comparing: it is what this comparison is
     being used to decide, so leaving it in would make the test circular.
+
+    The comparison is of the two expression *trees*, not of their sharing: the
+    tables are hash-consed first. The writer shares by object identity, and the
+    same tree can be shared differently -- a reloaded document holds one
+    ``Constant`` per constant node, while re-lowering builds its literals through
+    ``_wrap``'s interning, so ``sq(sq(x))`` with ``sq = t*t + 1.0`` reloads with
+    the outer body's ``1.0`` shared with the inner one and re-lowers with it not.
+    Sharing never changes the function, so it must not decide the tag (WP-4).
     """
     try:
-        tables = []
+        canon: dict[str, int] = {}  # shared, so equal subtrees get equal ids across both
+        roots = []
         for expr in (a, b):
             t = _NodeTable(var_ids, param_ids)
-            t.add(expr)
-            tables.append([{k: v for k, v in nd.items() if k != "atom"} for nd in t.nodes])
+            root = t.add(expr)
+            roots.append(_tree_ids(t.nodes, canon)[root])
     except Exception as exc:  # noqa: BLE001 - any failure to encode means "cannot verify"
         logger.debug("atom re-derivation could not encode a body (%s: %s)", type(exc).__name__, exc)
         return False
-    return tables[0] == tables[1]
+    return roots[0] == roots[1]
+
+
+#: The keys of an encoded node that hold references to other nodes.
+_CHILD_REF_KEYS = ("a", "b", "base")
+_CHILD_LIST_KEYS = ("args",)
+
+
+def _tree_ids(nodes: list[dict], canon: dict[str, int]) -> list[int]:
+    """Hash-cons a node table: each node's id in *canon*, equal iff equal trees.
+
+    Each node's children are replaced by their subtrees' ids before it is keyed,
+    so structurally identical subtrees share an id however the table shared them.
+    ``atom`` tags are not part of the tree.
+    """
+    ids: list[int] = []
+    for nd in nodes:
+        out = {k: v for k, v in nd.items() if k != "atom"}
+        for k in _CHILD_REF_KEYS:
+            if k in out:
+                out[k] = ids[out[k]]
+        for k in _CHILD_LIST_KEYS:
+            if k in out:
+                out[k] = [ids[c] for c in out[k]]
+        ids.append(canon.setdefault(json.dumps(out, sort_keys=True), len(canon)))
+    return ids
 
 
 class _IdsOnFirstSight(dict):

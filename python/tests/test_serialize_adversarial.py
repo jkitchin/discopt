@@ -458,6 +458,25 @@ def test_a_writer_emitted_atom_tag_at_or_after_its_node_loads(case):
     assert atom_of(body) is not None and atom_of(body)[0] == name
 
 
+def test_a_nested_atom_keeps_both_tags():
+    """``sq(sq(x))``: the reload shares the inner body's interned ``1.0`` with the
+    outer body, re-lowering does not; the outer tag must still be re-derived, as
+    sharing does not change the tree (found by the WP-4 deep run)."""
+    from discopt.operators import atom_of, get_registered, register_function
+
+    name = "wp4_adv_square_plus_one"
+    sq = get_registered(name) or register_function(name, lambda t: t * t + 1.0)
+    m = dm.Model("nested_atom")
+    x = m.continuous("x", lb=0.0, ub=2.0)
+    m.minimize(sq(sq(x)))
+    text = dumps(m, provenance=False)
+    assert sum("atom" in nd for nd in json.loads(text)["nodes"]) == 2
+    reloaded = loads(text)
+    assert dumps(reloaded, provenance=False) == text
+    outer = reloaded._objective.expression
+    assert atom_of(outer) is not None and atom_of(outer.left.left) is not None
+
+
 @pytest.mark.parametrize("case", sorted(MALFORMED))
 def test_a_malformed_document_is_refused(case):
     doc = _doc()
