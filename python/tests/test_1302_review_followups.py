@@ -116,8 +116,11 @@ def test_schema_minor_is_bumped_for_the_non_additive_change():
     ``_gams_initial_values`` and ``_recentre_inner`` state keys are additive, but
     their absence means "not present" only in a document that could have
     recorded them.
+
+    1.5 (#1782) adds the ``indicators`` link on disjunction rows; it is read only
+    from a >=1.5 document, so the minor is what says a document may hold it.
     """
-    assert S.SCHEMA == "discopt.model/1.4"
+    assert S.SCHEMA == "discopt.model/1.5"
 
 
 def test_legacy_11_document_restores_a_tagged_float_in_the_trace():
