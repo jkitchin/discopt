@@ -9,6 +9,27 @@ os.environ["JAX_ENABLE_X64"] = "1"
 
 import pytest
 
+# Hypothesis profiles for the WP-4 property and fuzz tests (serialization plan).
+# `ci` (the default) keeps them inside the fast lane; `slow` is the deep run:
+# HYPOTHESIS_PROFILE=slow pytest python/tests/test_serialize_property.py ...
+# Registered only where hypothesis is installed -- the jobs that run a single file
+# (test_amp.py, the HiGHS route) do not install it, and the test modules that use
+# it import it directly, so a lane that needs it fails loudly without it.
+try:
+    from hypothesis import HealthCheck as _HealthCheck
+    from hypothesis import settings as _hyp_settings
+except ImportError:
+    pass
+else:
+    for _name, _examples in (("ci", 50), ("slow", 2000)):
+        _hyp_settings.register_profile(
+            _name,
+            max_examples=_examples,
+            deadline=None,
+            suppress_health_check=[_HealthCheck.too_slow, _HealthCheck.data_too_large],
+        )
+    _hyp_settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "ci"))
+
 
 @pytest.fixture
 def heterogeneous_array_bounds():

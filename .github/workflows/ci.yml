@@ -296,7 +296,7 @@ jobs:
           uv pip install \
             jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml sympy \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
-            pytest pytest-timeout pytest-xdist
+            pytest pytest-timeout pytest-xdist hypothesis
           maturin develop --release
       - name: Run pytest (PR-fast, parallel)
         run: |
@@ -396,7 +396,7 @@ jobs:
           uv pip install \
             jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml sympy \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
-            pytest pytest-timeout pytest-xdist
+            pytest pytest-timeout pytest-xdist hypothesis
           maturin develop --release
       - name: Run pytest (fast correctness, serial)
         run: |
@@ -499,7 +499,7 @@ jobs:
           uv pip install \
             jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml sympy \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
-            pytest pytest-timeout pytest-xdist
+            pytest pytest-timeout pytest-xdist hypothesis
           maturin develop --release
       - name: Run pytest (slow correctness, serial)
         run: |
@@ -600,7 +600,7 @@ jobs:
           uv pip install \
             jax jaxlib numpy scipy highspy openpyxl scikit-learn pyyaml sympy \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
-            pytest pytest-timeout pytest-xdist
+            pytest pytest-timeout pytest-xdist hypothesis
           maturin develop --release
       - name: Run pytest (claim-boundary, serial)
         run: |
@@ -728,7 +728,7 @@ jobs:
             jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
             sympy pyomo litellm equinox optax onnx onnxruntime xgboost lightgbm \
-            pytest pytest-timeout pytest-xdist pytest-cov
+            pytest pytest-timeout pytest-xdist pytest-cov hypothesis
           maturin develop --release
       # --cov-fail-under restored to 85 (#87) after the post-AMP-merge
       # 85 -> 70 -> 65 lowering: the optional-dep unlock plus the

@@ -170,3 +170,6 @@ scratchpad/**/*_DONE
 # for. The committed input is data/cstr_campaign1.csv; these are regenerated.
 docs/notebooks/*.dopt
 docs/notebooks/data/cstr_run*.csv
+
+# hypothesis example database (WP-4 property tests)
+.hypothesis/
