@@ -368,6 +368,7 @@ discopt about            # Version and installation info
 discopt test             # Smoke-test the install
 discopt solve model.nl   # Solve a .nl model (warm-routed through the solve daemon)
 discopt convert in.gms out.nl
+discopt upgrade-model m.dopt   # Rewrite a saved model at the current format (--check: dry run)
 discopt daemon status    # Control the warm solve daemon (serve/stop/kill/status)
 discopt gams-register    # Register discopt as a GAMS solver
 discopt gams-daemon      # Control the warm GAMS solver daemon
