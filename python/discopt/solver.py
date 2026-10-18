@@ -787,8 +787,24 @@ def _gdp_config_first_enabled() -> bool:
     II.B process-synthesis GDP (30 s): those four spent 2.0 -> 16.9 s and found
     nothing, then the constructor found an incumbent on its second sub-NLP, 0.2 s
     after it started.
+
+    **Default ON** since the #1760 graduation panel (2026-10-18; the 12 GDPlib
+    models of the #993 panel, ``gdp.bigm``, 15 s and 60 s, ON/OFF interleaved per
+    model in isolated subprocesses, arm order alternating; 24 pairs):
+
+    * *cert-clean*: every pair ends in the same status, certified objectives are
+      identical, no incumbent beats its reference beyond tolerance, and every
+      incumbent the runner can evaluate is feasible (26/32, max scaled violation
+      2.5e-11; ``batch_processing`` and ``gdp_col`` are unevaluable there, equal
+      across arms).
+    * *net-positive*: no regression; at 60 s ``spectralog`` 17.263 -> 15.541 (ref
+      12.089) and ``methanol`` -1574.57 -> -1793.43; equal at 15 s. On II.B the 8 s
+      run gains an incumbent (2791.67) it did not have.
+
+    ``DISCOPT_GDP_CONFIG_FIRST=0`` restores the legacy order. Empty is not an
+    off-value (same shape as :func:`_gdp_config_primal_enabled`).
     """
-    return os.environ.get("DISCOPT_GDP_CONFIG_FIRST", "0").strip().lower() not in (
+    return os.environ.get("DISCOPT_GDP_CONFIG_FIRST", "").strip().lower() not in (
         "0",
         "false",
         "no",

@@ -142,6 +142,16 @@ def test_gdp_config_constructor_runs_before_the_pump(monkeypatch):
     assert order.count("one_hot_config_subnlp") == 1, "the constructor ran twice"
 
 
+def test_gdp_config_first_is_on_by_default(monkeypatch):
+    """Graduated by the #1760 panel: unset (or empty) means constructor first."""
+    monkeypatch.delenv("DISCOPT_GDP_CONFIG_FIRST", raising=False)
+    assert S._gdp_config_first_enabled()
+    monkeypatch.setenv("DISCOPT_GDP_CONFIG_FIRST", "")
+    assert S._gdp_config_first_enabled()
+    monkeypatch.setenv("DISCOPT_GDP_CONFIG_FIRST", "0")
+    assert not S._gdp_config_first_enabled()
+
+
 def test_gdp_config_first_opt_out_keeps_the_legacy_order(monkeypatch):
     order = _heuristic_order(monkeypatch, "0")
     assert order and order[0] == "feasibility_pump", order
