@@ -23243,6 +23243,62 @@ def _build_pounce_warm_start(evaluator, state: dict):
     return pounce.WarmStart(x=x, lagrange=lagrange, zl=zl, zu=zu, mu=mu)
 
 
+def _pounce_row_equilibration_enabled() -> bool:
+    """``DISCOPT_POUNCE_ROW_EQUILIBRATE``: row-equilibrate ``solver="pounce"``'s NLP arm.
+
+    Default-ON; ``=0`` restores the unscaled rows. An opt-out for a shipped
+    default (CLAUDE.md §5 "out of scope"), kept so the two can be A/B'd. See
+    :func:`_pounce_row_equilibration` for the measurement.
+    """
+    return os.environ.get("DISCOPT_POUNCE_ROW_EQUILIBRATE", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _pounce_row_equilibration(evaluator, x0: np.ndarray, options: Optional[dict]):
+    """The rows ``solver="pounce"`` hands its NLP solve, scaled up to unit gradient.
+
+    Returns a :class:`discopt.solvers.oa._RowEquilibratedEvaluator` (row ``i``
+    becomes ``s_i g_i`` with ``s_i = 1 / max_j |dg_i/dx_j(x0)|`` clamped to
+    ``[1, 1e8]``), or ``None`` when no row needs it, the caller chose an
+    ``nlp_scaling_method`` of their own, or ``DISCOPT_POUNCE_ROW_EQUILIBRATE=0``.
+
+    Why (#1768). POUNCE's gradient-based scaling only scales a row DOWN, so a row
+    whose gradient is tiny reaches the interior-point method as written, and the
+    multiplier it needs is huge. On the COPS hanging chain with ``n = 100,000``
+    links the link rows ``dx**2 + dy**2 <= L**2`` have gradients ``2e-5`` at the
+    straight-line start (scale ``5e4``) and multipliers up to ``1.8e9``, which
+    inflate POUNCE's dual scaling factor until its scaled test passes with the
+    barrier parameter still at ``1.8e-6`` (unscaled dual infeasibility 9.8e-4,
+    inside ``dual_inf_tol = 1``). It returned ``Solve_Succeeded`` -- reported
+    ``local_optimal`` -- at -30268.7531, 0.18 above the optimum, with every link
+    slack by 2e-6..6e-6 of its length, after 318 s (Linux, 4 cores).
+    Equilibrated, the same solve ends at barrier ``2.5e-9`` and -30268.937325
+    with every link within 1e-8 of ``L``, in 31.6 s.
+
+    The scales come from the gradient at the start point, so a row whose
+    gradient vanishes there is left as it is: the same chain started at the
+    box midpoint ``x = y = 0`` is unchanged by this. Scaling is up only, so a
+    row's tolerance in its own units only tightens; the point, the duals and the
+    status are still judged on the original rows (the multipliers are unscaled
+    on the way back).
+
+    The same wrapper serves OA's fixed-integer NLP (#1537), where it was
+    measured first. A caller's explicit ``nlp_scaling_method`` is a request to
+    see POUNCE's own treatment of the rows as written, so it is respected.
+    """
+    if not _pounce_row_equilibration_enabled():
+        return None
+    if options and "nlp_scaling_method" in options:
+        return None
+    from discopt.solvers.oa import _RowEquilibratedEvaluator
+
+    return _RowEquilibratedEvaluator.wrap(evaluator, np.asarray(x0, dtype=np.float64))
+
+
 def _solve_continuous(
     model: Model,
     time_limit: float,
@@ -23256,6 +23312,7 @@ def _solve_continuous(
     tighten_bounds: bool = True,
     raw_status_out: Optional[list] = None,
     pounce_scaling: Optional[tuple[float, Optional[np.ndarray]]] = None,
+    equilibrate_rows: bool = False,
 ) -> SolveResult:
     """Solve a purely continuous model directly with NLP solver (no B&B).
 
@@ -23267,6 +23324,9 @@ def _solve_continuous(
     is passed, receives the NLP backend's own return code (Ipopt numbering).
     ``pounce_scaling`` is the ``solver="pounce"`` user scaling (#1620 B-04),
     already resolved to ``(obj_scaling, x_scaling)`` over the flat columns.
+    ``equilibrate_rows`` hands POUNCE the constraint rows scaled up to unit
+    gradient at the start point (#1768, see :func:`_pounce_row_equilibration`);
+    only ``solver="pounce"`` passes it.
 
     ``warm_start`` is the dual half of ``Model.solve(warm_start=...)`` (#1247):
     ``{"x", "constraint_duals", "bound_duals_lower", "bound_duals_upper",
@@ -23420,6 +23480,18 @@ def _solve_continuous(
                 nlp_solver,
             )
 
+    row_scaled = None
+    if equilibrate_rows and nlp_solver == "pounce":
+        row_scaled = _pounce_row_equilibration(backend_evaluator, x0, ipopt_options)
+        if row_scaled is not None:
+            backend_evaluator = cast("NLPEvaluator", row_scaled)
+            if pounce_warm_start is not None and pounce_warm_start.lagrange is not None:
+                # Row ``s_i g_i`` carries multiplier ``lam_i / s_i``.
+                pounce_warm_start = dataclasses.replace(
+                    pounce_warm_start,
+                    lagrange=np.asarray(pounce_warm_start.lagrange) / row_scaled._s,
+                )
+
     t_jax_start = time.perf_counter()
     if nlp_solver == "pounce":
         from discopt.solvers.nlp_pounce import solve_nlp as solve_nlp_pounce
@@ -23443,6 +23515,10 @@ def _solve_continuous(
             backend_evaluator, x0, constraint_bounds=constraint_bounds, options=opts
         )
     jax_time += time.perf_counter() - t_jax_start
+    if row_scaled is not None:
+        # Every judgement of the point below (duals, certificate, verify) is made
+        # on the original rows, in the model's units.
+        nlp_result.multipliers = row_scaled.unscale_multipliers(nlp_result.multipliers)
     if raw_status_out is not None:
         raw_status_out.append(nlp_result.raw_status)
 
@@ -24200,6 +24276,7 @@ def _solve_pounce_route(
         tighten_bounds=False,
         raw_status_out=raw_status,
         pounce_scaling=resolved_scaling,
+        equilibrate_rows=True,
     )
     result.wall_time = time.perf_counter() - t_start
     if result.status == "optimal" and raw_status and raw_status[0] == _IPOPT_SOLVED_TO_ACCEPTABLE:
