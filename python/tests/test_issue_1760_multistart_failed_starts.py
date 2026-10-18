@@ -155,3 +155,71 @@ def test_gdp_config_first_is_on_by_default(monkeypatch):
 def test_gdp_config_first_opt_out_keeps_the_legacy_order(monkeypatch):
     order = _heuristic_order(monkeypatch, "0")
     assert order and order[0] == "feasibility_pump", order
+
+
+# ---------------------------------------------------------------------------
+# #1760, reopened: under POUNCE b27bdbdd the first disjunct-configuration sub-NLP
+# on II.B reaches 2791.6686 (4ccf1487: OPTIMAL at 2791.6684) and then exits
+# "Error in step computation" -- its optimum sits where V**0.6 has an infinite
+# derivative. subnlp's status gate discarded the point, so the reporter's setup
+# had no incumbent at 8 s or 30 s. subnlp now lets its own verification decide.
+
+
+def _subnlp_model():
+    m = dm.Model("subnlp1760")
+    x = m.continuous("x", lb=0.0, ub=4.0)
+    z = m.binary("z")
+    m.subject_to(x >= 1.0 + z)
+    m.minimize((x - 2.0) ** 2 + z)
+    return m
+
+
+def _fake_backend(x_out, status):
+    def backend(ev, x0, options=None):
+        return NLPResult(status=status, x=np.asarray(x_out, dtype=float), objective=None)
+
+    return backend
+
+
+def test_subnlp_accepts_a_verified_point_from_an_errored_solve(monkeypatch):
+    import discopt._relax.primal_heuristics as PH
+
+    monkeypatch.setenv("DISCOPT_SUBNLP_VERIFY_ANY_STATUS", "1")
+    m = _subnlp_model()
+    out = PH.subnlp(m, np.array([2.0, 0.0]), backend=_fake_backend([2.0, 0.0], SolveStatus.ERROR))
+    assert out is not None, "a feasible point was discarded on the solver's status alone"
+    x, obj = out
+    np.testing.assert_allclose(x, [2.0, 0.0])
+    assert obj == 0.0  # recomputed from the model, not taken from the solver
+
+
+def test_subnlp_still_rejects_an_infeasible_point_from_an_errored_solve(monkeypatch):
+    import discopt._relax.primal_heuristics as PH
+
+    monkeypatch.setenv("DISCOPT_SUBNLP_VERIFY_ANY_STATUS", "1")
+    m = _subnlp_model()
+    # x = 0.5 violates x >= 1 + z.
+    bad = PH.subnlp(m, np.array([0.5, 0.0]), backend=_fake_backend([0.5, 0.0], SolveStatus.ERROR))
+    assert bad is None
+    nan = PH.subnlp(
+        m, np.array([2.0, 0.0]), backend=_fake_backend([np.nan, 0.0], SolveStatus.ERROR)
+    )
+    assert nan is None
+
+
+def test_subnlp_status_gate_opt_out(monkeypatch):
+    import discopt._relax.primal_heuristics as PH
+
+    monkeypatch.setenv("DISCOPT_SUBNLP_VERIFY_ANY_STATUS", "0")
+    m = _subnlp_model()
+    out = PH.subnlp(m, np.array([2.0, 0.0]), backend=_fake_backend([2.0, 0.0], SolveStatus.ERROR))
+    assert out is None
+
+
+def test_subnlp_verify_any_status_is_on_by_default(monkeypatch):
+    import discopt._relax.primal_heuristics as PH
+
+    monkeypatch.delenv("DISCOPT_SUBNLP_VERIFY_ANY_STATUS", raising=False)
+    assert PH._subnlp_verify_any_status()
+    monkeypatch.setenv("DISCOPT_SUBNLP_VERIFY_ANY_STATUS", "0")
+    assert not PH._subnlp_verify_any_status()

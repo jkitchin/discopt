@@ -642,6 +642,37 @@ _PUMP_REPAIR_OUTER_ITERS = 10
 _PUMP_REPAIR_TOL = 1e-6
 
 
+def _subnlp_verify_any_status() -> bool:
+    """Whether :func:`subnlp` accepts a verified point whatever the NLP status (#1760).
+
+    **Default ON** since the #1760 panel (2026-10-18), graduated by the owner's
+    decision on the evidence below: cert-clean everywhere, neutral broadly, positive
+    on the class it targets.
+
+    * In-repo corpus (66 ``.nl``, 30 s, ON/OFF interleaved, POUNCE PyPI 0.12.0 and
+      b27bdbdd): 0 certification regressions, 0 crashes, 229 incumbents verified
+      (max constraint violation 7.9e-12). Every difference (``casctanks``,
+      ``cvxnonsep_*``, ``tanksize``) re-ran as timing noise within one arm.
+    * GDPlib (12 models of the #993 panel, ``gdp.bigm``, 15 s / 60 s, b27bdbdd):
+      23/24 pairs identical, the 24th (``methanol`` @15 s) noise on re-run; 28
+      incumbents verified (max 1.2e-11).
+    * The targeted class -- an NLP that reaches a feasible point and then reports
+      an error: optimization-book II.B on b27bdbdd goes from no incumbent at 8 s and
+      30 s to 2791.67 at both.
+
+    ``0`` restores the legacy gate, which accepted
+    only ``OPTIMAL``/``ITERATION_LIMIT`` returns before verifying. Sound either way:
+    a point is accepted only if it passes ``subnlp``'s own integrality and
+    constraint-feasibility checks, and ``inject_incumbent`` re-verifies it.
+    """
+    return os.environ.get("DISCOPT_SUBNLP_VERIFY_ANY_STATUS", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
 def _pump_repair_enabled() -> bool:
     """Whether the pump's feasibility repair runs (#1435). Default ON.
 
@@ -1145,12 +1176,25 @@ def subnlp(
     # below (``_check_constraint_feasibility`` / ``_is_integer_feasible``), and
     # ``inject_incumbent`` enforces strict improvement -- this mirrors the
     # acceptance set ``_solve_root_node_multistart`` already uses.
-    if nlp_result.status not in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
+    #
+    # #1760: with ``_subnlp_verify_any_status()`` the solver's status
+    # is not consulted at all -- the verification below is the acceptance test, and
+    # it does not care how the point was reached. Measured on the optimization-book
+    # II.B GDP: under POUNCE b27bdbdd the first disjunct-configuration sub-NLP
+    # reaches 2791.6686 (the 4ccf1487 / PyPI-0.12.0 optimum is 2791.6684) and then
+    # exits "Error in step computation"; the status gate threw the point away and
+    # the solve ended with no incumbent at 8 s and at 30 s.
+    if nlp_result.x is None:
         return None
-    if nlp_result.x is None or nlp_result.objective is None:
+    if not _subnlp_verify_any_status() and (
+        nlp_result.status not in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT)
+        or nlp_result.objective is None
+    ):
         return None
 
-    x_out = np.asarray(nlp_result.x)
+    x_out = np.asarray(nlp_result.x, dtype=np.float64)
+    if x_out.shape != x0.shape or not np.all(np.isfinite(x_out)):
+        return None
 
     # Clip integer slots back to the rounded value (the fixed-bounds solve
     # should already yield this, but guard against tiny drifts).
