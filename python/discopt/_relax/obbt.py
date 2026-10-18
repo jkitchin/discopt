@@ -601,11 +601,41 @@ def _internal_cutoff_row(model: Model, obj_coeffs: np.ndarray) -> np.ndarray:
     return sign * np.asarray(obj_coeffs, dtype=np.float64).reshape(1, -1)
 
 
+def _internal_cutoff_rhs(model: Model, incumbent_cutoff: float, obj_offset: float) -> float:
+    """The right-hand side pairing :func:`_internal_cutoff_row`.
+
+    The internal objective of ``f(x) = c'x + k`` is ``sign * (c'x + k)``, so
+    "no worse than the incumbent" is ``sign * c'x <= z - sign * k``. The row
+    carries no constant column, so ``k`` must move to the right-hand side.
+    Dropping it (the cutoff used to be ``z`` verbatim) is valid only for
+    ``k = 0``: with ``sign * k < 0`` the row is strictly tighter than valid and
+    excludes the optimum -- measured on ``min x - 2`` s.t. ``x**2 >= 9``, ``x >= 0``
+    with the optimum as incumbent, ``obbt_tighten_root`` on ``x <= inf`` returned
+    ``x <= 1`` against the optimum ``x = 3``.
+    """
+    from discopt.modeling.core import objective_sense_sign
+
+    return float(incumbent_cutoff) - objective_sense_sign(model) * float(obj_offset)
+
+
 def _extract_linear_objective(
     model: Model,
     n_vars: int,
 ) -> Optional[np.ndarray]:
-    """Extract linear objective coefficients, or None if nonlinear."""
+    """Extract linear objective coefficients, or None if nonlinear.
+
+    The objective constant is discarded; a caller that compares ``c'x`` with an
+    objective *value* needs :func:`_extract_linear_objective_with_offset`.
+    """
+    res = _extract_linear_objective_with_offset(model, n_vars)
+    return None if res is None else res[0]
+
+
+def _extract_linear_objective_with_offset(
+    model: Model,
+    n_vars: int,
+) -> Optional[tuple[np.ndarray, float]]:
+    """``(c, k)`` with ``f(x) = c'x + k``, or None if the objective is nonlinear."""
     if model._objective is None:
         return None
     from discopt.modeling.core import (
@@ -697,12 +727,12 @@ def _extract_linear_objective(
     result = _extract(model._objective.expression)
     if result is None:
         return None
-    coeffs, _offset = result
+    coeffs, offset = result
     c = np.zeros(n_vars, dtype=np.float64)
     for idx, coeff in coeffs.items():
         if idx < n_vars:
             c[idx] = coeff
-    return c
+    return c, float(offset)
 
 
 def _get_var_bounds(
@@ -798,13 +828,15 @@ def run_obbt(
 
     # --- Add incumbent cutoff constraint: c'x <= z* ---
     if incumbent_cutoff is not None and model._objective is not None:
-        obj_coeffs = _extract_linear_objective(model, n_vars)
-        if obj_coeffs is not None:
+        obj_lin = _extract_linear_objective_with_offset(model, n_vars)
+        if obj_lin is not None:
+            obj_coeffs, obj_offset = obj_lin
             # ``incumbent_cutoff`` is in the INTERNAL minimization space, and the
-            # rhs is that value verbatim in BOTH senses (#1373 -- the maximize arm
-            # used to negate it, cutting at the reflected incumbent).
+            # rhs is that value in BOTH senses (#1373 -- the maximize arm used to
+            # negate it, cutting at the reflected incumbent), less the objective
+            # constant the row cannot carry (``_internal_cutoff_rhs``).
             cutoff_row = _internal_cutoff_row(model, obj_coeffs)
-            cutoff_rhs = np.array([float(incumbent_cutoff)])
+            cutoff_rhs = np.array([_internal_cutoff_rhs(model, incumbent_cutoff, obj_offset)])
             if A_ub is not None and b_ub is not None:
                 A_ub = np.vstack([A_ub, cutoff_row])
                 b_ub = np.concatenate([b_ub, cutoff_rhs])
@@ -1750,11 +1782,12 @@ def bootstrap_finite_bounds(
     # polytope so an open variable that can only grow by worsening the
     # objective gets a finite bound from the cutoff alone.
     if incumbent_cutoff is not None and model._objective is not None:
-        obj_coeffs = _extract_linear_objective(model, n_vars)
-        if obj_coeffs is not None and np.any(obj_coeffs):
+        obj_lin = _extract_linear_objective_with_offset(model, n_vars)
+        if obj_lin is not None and np.any(obj_lin[0]):
+            obj_coeffs, obj_offset = obj_lin
             # Internal minimization space, exactly as in ``run_obbt`` (#1373).
             cutoff_row = _internal_cutoff_row(model, obj_coeffs)
-            cutoff_rhs = np.array([float(incumbent_cutoff)])
+            cutoff_rhs = np.array([_internal_cutoff_rhs(model, incumbent_cutoff, obj_offset)])
             if A_ub is not None and b_ub is not None:
                 A_ub = np.vstack([A_ub, cutoff_row])
                 b_ub = np.concatenate([b_ub, cutoff_rhs])

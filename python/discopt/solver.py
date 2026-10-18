@@ -11334,6 +11334,27 @@ def _refusing_on_callback_failure(fn: _F) -> _F:
     return cast(_F, wrapper)
 
 
+#: Native logic-based GDP methods: they solve the disjunctive form directly and
+#: are not reformulations (solve-routing.md §4).
+NATIVE_GDP_METHODS: frozenset[str] = frozenset({"loa"})
+
+
+def _validate_gdp_method(gdp_method: object) -> None:
+    """Refuse a ``gdp_method`` no route implements, before any work is done.
+
+    Every route below maps a name it does not handle to big-M (the default
+    lowering, AMP, the presolve relaxation), so an unknown name -- a typo, or the
+    reserved-but-unimplemented ``"gloa"`` -- used to solve as big-M and report
+    ``optimal`` with no warning. ``"oa"`` stays accepted as the deprecated alias.
+    """
+    from discopt._relax.gdp_reformulate import GDP_REFORMULATION_METHODS
+
+    valid = GDP_REFORMULATION_METHODS | NATIVE_GDP_METHODS | {"oa"}
+    if gdp_method not in valid:
+        allowed = ", ".join(sorted(repr(m) for m in valid))
+        raise ValueError(f"Unknown gdp_method={gdp_method!r}. Choose one of: {allowed}.")
+
+
 @_solve_leaves_model_unchanged
 @_refusing_on_callback_failure
 @_scoped_fallback_warnings
@@ -11701,7 +11722,9 @@ def solve_model(
         contradictory (one asks to solve the disjunctions natively, the other
         to reformulate and decompose) and raises ``ValueError``. Likewise
         ``"gloa"`` (global logic-based OA) is reserved for this native axis and
-        is distinct from the algebraic ``mip_nlp_method="goa"``. See
+        is distinct from the algebraic ``mip_nlp_method="goa"``; it is not yet
+        implemented, so -- like any other name not listed above -- it raises
+        ``ValueError`` rather than silently solving as big-M. See
         ``docs/dev/solve-routing.md`` §4 for the locked contract (#323).
     solver : str or None, default None
         Optional global-solver selector. Use ``"pounce"`` for exactly one POUNCE
@@ -11868,6 +11891,7 @@ def solve_model(
     # without threading a field through ~18 SolveResult construction sites.
     abs_gap_tol = _resolve_abs_gap_tolerance(abs_gap_tolerance)
     _validate_solve_budgets(gap_tolerance, time_limit)
+    _validate_gdp_method(gdp_method)
     # #1533: ``pounce_options`` names the same POUNCE options as ``ipopt_options``.
     ipopt_options = _resolve_pounce_options(ipopt_options, pounce_options)
     _GAP_TOLERANCES.append((float(gap_tolerance), abs_gap_tol))
@@ -12605,7 +12629,7 @@ def solve_model(
                     mip_nlp_kwargs[key] = kwargs.pop(key)
 
         gdp_methods = {"big-m", "hull", "mbigm", "auto"}
-        native_gdp_methods = {"loa"}
+        native_gdp_methods = NATIVE_GDP_METHODS
         if gdp_method == "simplex":
             raise ValueError(
                 "gdp_method='simplex' lowers every disjunction to continuous "

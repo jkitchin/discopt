@@ -102,6 +102,19 @@ def _require_supported_semantics(dc: _DisjunctiveConstraint) -> None:
     )
 
 
+#: Every ``method`` :func:`reformulate_gdp` implements. Anything else is refused:
+#: the dispatch below routes an unrecognised name to big-M, so before this check a
+#: typo (or a not-yet-implemented native name such as ``"gloa"``) solved as big-M
+#: and reported ``optimal`` with no warning.
+GDP_REFORMULATION_METHODS: frozenset[str] = frozenset({"big-m", "hull", "mbigm", "auto", "simplex"})
+
+
+def _require_reformulation_method(method: object, what: str) -> None:
+    if method not in GDP_REFORMULATION_METHODS:
+        allowed = ", ".join(sorted(repr(m) for m in GDP_REFORMULATION_METHODS))
+        raise ValueError(f"Unknown {what} {method!r}. Choose one of: {allowed}.")
+
+
 def reformulate_gdp(
     model: Model,
     method: str = "big-m",
@@ -142,6 +155,7 @@ def reformulate_gdp(
         constraints. If no GDP constraints exist, returns the original
         model unchanged.
     """
+    _require_reformulation_method(method, "GDP reformulation method")
     has_gdp = any(
         isinstance(
             c,
@@ -283,6 +297,9 @@ def reformulate_gdp(
             # takes precedence over the solver-wide method / auto advice.
             override = getattr(c, "method", None) if respect_disjunction_methods else None
             if override is not None:
+                _require_reformulation_method(
+                    override, f"method on disjunction {c.name or '<anon>'!r}"
+                )
                 chosen = override
             else:
                 chosen = auto_advice.get(ci, method) if method == "auto" else method
