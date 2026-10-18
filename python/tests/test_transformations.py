@@ -29,6 +29,7 @@ from discopt._relax import (
     integer_product_reform,
     nonsmooth_lift,
 )
+from discopt.gdp import state as gdp_state
 from discopt.modeling import _relax_integrality
 from discopt.modeling.core import from_nl
 
@@ -133,6 +134,11 @@ EXPECTED = {
     "gdp.mbigm": gdp_reformulate.reformulate_gdp,
     "gdp.auto": gdp_reformulate.reformulate_gdp,
     "gdp.simplex": gdp_reformulate.reformulate_gdp,
+    # #1775 G1.3: not lowerings -- they fix a disjunct selection.
+    "gdp.fix_disjuncts": gdp_state.reduced_subproblem,
+    "gdp.transform_current_disjunctive_state": (
+        gdp_state._transform_current_disjunctive_state_in_place
+    ),
     "integer.bilinear": integer_product_reform.reformulate_integer_bilinear,
     "integer.multilinear": integer_product_reform.reformulate_integer_multilinear,
     "binary.multilinear": binary_multilinear_reform.reformulate_binary_multilinear,
