@@ -43,6 +43,8 @@ def test_single_point_qp_is_certified_optimal(solver):
     assert r.status == "optimal" and r.gap_certified, (r.status, r.algorithm_route)
     assert r.objective == pytest.approx(0.19, rel=1e-9)
     assert r.bound is not None and r.bound <= r.objective
+    # the published bound never crosses the known optimum 0.19
+    assert r.bound <= 0.19 + 1e-9
     xv = np.array([float(r.x[f"x{i + 1}"]) for i in range(5)])
     # the reported point satisfies every row and bound exactly enough to be feasible
     assert np.all(xv >= 0.0) and np.all(xv <= np.array([0, 1, 0, 0, 0]) + 1e-12)
@@ -73,3 +75,44 @@ def test_projection_refuses_a_repair_that_worsens_another_row():
     cu = np.array([1.0, -0.5])
     lb, ub = np.zeros(2), np.ones(2)
     assert _project_onto_rows(np.array([0.5, 0.5 + 2e-9]), A, cl, cu, lb, ub) is None
+
+
+def test_projection_treats_a_near_bound_coordinate_as_fixed():
+    # Documented limit: a column within ``1e-9 * (1 + min(|x|, span))`` of a bound is
+    # not free, so a violated row whose only columns sit that close to their bounds
+    # is not repaired. Here x0 is 1e-10 above lb and x1 is 1e-9 below ub.
+    A = np.array([[1.0, 1.0]])  # noqa: N806
+    cl = np.array([-np.inf])
+    cu = np.array([1.0])
+    lb, ub = np.zeros(2), np.array([1.0, 1.0 + 4e-9])
+    x = np.array([1e-10, 1.0 + 3e-9])
+    assert (A @ x)[0] > 1.0  # the row is violated
+    assert _project_onto_rows(x, A, cl, cu, lb, ub) is None
+
+
+def test_near_bound_refusal_stays_sound():
+    # The #1774 QP with x2's lower bound 5e-9 below its pinned value 1: POUNCE's
+    # point (x2 = 1 - 4.7e-9) then sits within the free-column margin of lb, the
+    # repair is refused, and the certificate may not certify. Whatever it reports
+    # must be sound: no false bound above the oracle optimum 0.19, and a
+    # certified status only with bound <= objective.
+    beta = np.array([1.2, 0.9, 1.5, 0.8, 1.1])
+    v = np.array([0.5, 0.3, 0.6, 0.2, 0.4])
+    tau = np.array([0.30, 0.10, 0.60, 0.05, 0.25])
+    z = np.array([0, 1, 0, 0, 0.0])
+    m = dm.Model("drug2_near_bound")
+    x = [m.continuous(f"x{i + 1}", lb=(1.0 - 5e-9 if i == 1 else 0.0), ub=1) for i in range(5)]
+    m.minimize(sum(v[i] * x[i] for i in range(5)) ** 2 + sum(tau[i] * x[i] ** 2 for i in range(5)))
+    for i in range(5):
+        m.subject_to(x[i] <= z[i])
+        m.subject_to(-x[i] + 0.3 * z[i] <= 0)
+    m.subject_to(-sum(beta[i] * x[i] for i in range(5)) <= -0.9)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = m.solve(solver="pounce")
+    assert r.status in ("optimal", "feasible"), r.status
+    assert r.objective == pytest.approx(0.19, abs=1e-8)
+    if r.bound is not None:
+        assert r.bound <= 0.19 + 1e-9
+    if r.gap_certified:
+        assert r.bound is not None and r.bound <= r.objective + 1e-12

@@ -29681,6 +29681,16 @@ def _project_onto_rows(
         return None
     if not float(v1[rows].max()) < float(v0[rows].max()):
         return None
+    # A tolerance-level repair moves the point by round-off; a large move means the
+    # backend returned a point far off its rows, which should be visible.
+    rel_move = float(np.max(np.abs(z - x) / (1.0 + ax)))
+    if rel_move > 1e-6:
+        logger.debug(
+            "certificate row repair moved the point by %.3e (max |z-x|/(1+|x|)) "
+            "over %d row(s); the backend point was far off its rows",
+            rel_move,
+            int(rows.size),
+        )
     return z
 
 
