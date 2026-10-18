@@ -29675,7 +29675,7 @@ def _project_onto_rows(
     box_noise = 8.0 * np.finfo(float).eps * (1.0 + np.abs(z))
     if np.any(z < lb - box_noise) or np.any(z > ub + box_noise):
         return None
-    z = np.clip(z, lb, ub)
+    z = np.asarray(np.clip(z, lb, ub), dtype=np.float64)
     _, v1 = residuals(z)
     if np.any(v1 > np.maximum(v0, noise)):
         return None
