@@ -174,9 +174,9 @@ def gdp_tree(model: Model) -> GDPTree:
             last_implication = None
         elif isinstance(c, _IndicatorConstraint) and c.disjunction is not None:
             key, k, n = c.disjunction
-            node = groups.get(key)
-            if node is None:
-                node = DisjunctionNode(
+            group = groups.get(key)
+            if group is None:
+                group = DisjunctionNode(
                     next_id(),
                     key,
                     "add_disjunction",
@@ -186,14 +186,14 @@ def gdp_tree(model: Model) -> GDPTree:
                     Origin(ci, key),
                 )
                 # An empty disjunct carries no row, so its indicator is unknown here.
-                node.disjuncts = [
-                    DisjunctNode(next_id(), None, None, 1, [], parent=node) for _ in range(n)
+                group.disjuncts = [
+                    DisjunctNode(next_id(), None, None, 1, [], parent=group) for _ in range(n)
                 ]
-                groups[key] = node
-                roots.append(node)
+                groups[key] = group
+                roots.append(group)
                 if c.parent is not None:
-                    parents[node] = c.parent
-            d = node.disjuncts[k]
+                    parents[group] = c.parent
+            d = group.disjuncts[k]
             ind = BooleanVar(c.indicator)
             if d.indicator is None:
                 d.indicator, d.active_value, d.name = ind, int(c.active_value), c.indicator.name
@@ -255,14 +255,14 @@ def gdp_tree(model: Model) -> GDPTree:
             owner[id(d0.indicator.variable)].local_vars = list(d0._local_vars)
     attached: list[DisjunctionNode] = []
     for node, p in parents.items():
-        d = owner.get(id(p))
-        if d is None:
+        found = owner.get(id(p))
+        if found is None:
             raise ValueError(
                 f"disjunction {node.name!r} is nested in a disjunct whose indicator "
                 f"{p.name!r} belongs to no disjunction of this model"
             )
-        node.parent = d
-        d.children.append(node)
+        node.parent = found
+        found.children.append(node)
         attached.append(node)
     roots = [r for r in roots if not any(r is a for a in attached)]
 

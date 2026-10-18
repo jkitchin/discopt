@@ -12716,16 +12716,16 @@ class Disjunct:
         value means nothing when the disjunct is not selected.
         """
         self._require_open("declare a variable on")
-        makers = {
-            "continuous": self._model.continuous,
-            "binary": self._model.binary,
-            "integer": self._model.integer,
-        }
-        if kind not in makers:
-            raise ValueError(f"kind must be one of {sorted(makers)}, not {kind!r}")
-        v = makers[kind](name, **kwargs)
+        if kind == "continuous":
+            v = self._model.continuous(name, **kwargs)
+        elif kind == "binary":
+            v = self._model.binary(name, **kwargs)
+        elif kind == "integer":
+            v = self._model.integer(name, **kwargs)
+        else:
+            raise ValueError(f"kind must be 'continuous', 'binary' or 'integer', not {kind!r}")
         self._local_vars.append(v)
-        return v
+        return cast(Variable, v)
 
     @property
     def active(self) -> "BooleanVar":
