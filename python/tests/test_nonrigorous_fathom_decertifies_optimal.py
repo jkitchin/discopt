@@ -166,7 +166,15 @@ class _IncumbentThenExhaustTree:
 
 
 def _nonrigorous_failing_node_nlp(
-    evaluator, x0, node_lb, node_ub, constraint_bounds, options, nlp_solver="ipopt", convex=False
+    evaluator,
+    x0,
+    node_lb,
+    node_ub,
+    constraint_bounds,
+    options,
+    nlp_solver="ipopt",
+    convex=False,
+    failed_starts=None,
 ):
     """Non-rigorous failure: return an 'optimal'-status point at the lower corner
     that violates the model's x*y>=1 constraint (lower corner has x*y=0). The node
