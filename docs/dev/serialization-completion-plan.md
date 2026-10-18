@@ -1,6 +1,6 @@
 # Model serialization — completion plan
 
-> **Plan v1.6 — 2026-10-18 — author: Claude (planning session for jkitchin).**
+> **Plan v1.7 — 2026-10-18 — author: Claude (planning session for jkitchin).**
 > Status: proposed; no work package started. Every claim about the code below was
 > read from the tree at `3191cc65` (schema `discopt.model/1.4`, `discopt 0.9.1.dev0`,
 > after PRs #1748 and #1764). Agents executing a package **re-verify** the lines they
@@ -727,7 +727,7 @@ sets the test count); WP-7 one session; WP-8 one session.
 | WP-1 fixtures + matrix | **done** | #1769 | 2026-10-18 | writers: 1.0 `0a655f244`, 1.1 `f31547172`, 1.2 `a82f89b0f`, 1.3 `8a4880f7c`, 1.4 HEAD at generation (serializer = `ca63cb2e7`'s); 69 fixtures (14 cases × 5 versions − `registered_atom`@1.0, unbuildable: no `discopt.operators` before 1.1); backward: 69/69 load and equal today's build minus content not yet written (`_WRITTEN_FROM`: atom tags < 1.3, `state.nl_source` < 1.4); forward: 136 `loads_identical`, 4 `loaded` (1.0 reading `registered_atom`, nothing to compare), **0 `loads_different`, 0 `refused`**; test file 216 tests in 1.5 s (2.6 s under `-n 4`); two reader mutations caught (15 and 10 failures); the live test builds each case before loading its fixture, for the same registry reason as (d) below — found when `-n 4` ordering failed `v1.3-registered_atom` once. No hole: all five writers built (O4 not needed). |
 | WP-2 policy, stamp, upgrade-model | **done** | #1776 | 2026-10-18 | entry probe 1: 135 documents (69 fixtures + 66 corpus round-trips) carry exactly the 15 listed top-level keys, 0 unknown; a scan of every revision of `serialize.py` finds no top-level or `state` key ever written that the tables lack. Entry probe 2 (fail-before for the stamp): a model pickled by the `8a4880f7c` tree (layout `(attrs, had_builder)`) raised a bare `ValueError` (unpack 3, got 2) at HEAD, **with the same `__version__` `0.9.1.dev0`** — only a layout stamp tells them apart; the pickle is committed as a fixture. Pre-WP-2 reader loaded all five probe documents (unknown top key at known/future minor, unknown `state` key, future minor, unknown result key) silently with 0 warnings. `upgrade-model`: 67/69 fixtures upgrade; the 2 `registered_atom` documents are refused without `--import` — measured, a bare process strips their atom tags (see v1.4). |
 | WP-3 schema 1.5 | **done** | #1785 (+ #1782) | 2026-10-18 | entry experiment: 6 logical models (+1 xor/exactly), lowered twice and from a rebuild → identical rows; model vs rebuild solve: same status/objective/node count (24 checks) — kill criterion not fired. Logic written as a flat per-row table (`logic`), leaves = node ids of the binary variable behind each `BooleanVar`; lowering rows as positions in a third `lowered` element (absent when untracked, so 1.4 still reads those). Combined with #1782 (G1.1 `indicators` on disjunction rows) into one 1.5. Fixtures: v1.5 18 cases (written by `6420787e`); `logical_constraints`, `complementarity_vector_lowered`, `gdp_indicators`, `gdp_indicators_logic` recorded for 1.0–1.4 via `--cases` (logic and indicator cases unbuildable, each version's own error). Forward matrix: 240 cells — 205 `loads_identical`, 10 `loaded`, 25 `refused` (each older reader refuses exactly the 5 documents with a logical row or tracked lowering rows), **0 `loads_different`**; the 150 cells not involving 1.5 are unchanged. Logic over `either_or` indicators round-trips (same status/objective/node count; optima 10/45/50 hand-computed). |
-| WP-4 property + fuzz | not started | — | — | op-coverage %: — |
+| WP-4 property + fuzz | **done** | (this PR) | 2026-10-18 | op-coverage: 33/41 (80 %, at the kill line) before tuning → 39/41 (95 %) after weighting toward function calls; every node op, index kind and row kind reached (200 derandomized examples). `slow` profile (2000 examples per test): 13 passed in 110 s, load 0.2. Fuzzing found four reader bug classes, all fixed with named `FUZZ_FOUND` cases (19; each falsifying example fails before its fix): CSR structure (out-of-range / negative column loaded — a negative one onto another column; broken `indptr` → Rust **panic**; int32 overflow escaped as `OverflowError`), array nesting (`[0.0]` for a scalar), malformed atom tags (skipped like an unregistered one), and `{}`/`""` where a list belongs (~25 sites read it as empty). |
 | WP-5 corpus harness | not started | — | — | in-repo: —/75; full MINLPLib: —/1610; QPLIB: —/421 |
 | WP-6 builder sweep | not started | — | — | rows round-trip: —, refused: —, crashed: — |
 | WP-7 perf | not started | — | — | pickle A/B: HEAD — ± —, base — ± — ; O2 decided (≤ +20 %) |
@@ -744,6 +744,20 @@ a documented hole ("untested before 1.N"). O5 — encode logical constraints at 
 ---
 
 ## 9. Change log
+
+- **v1.7 (2026-10-18, WP-4 done)** — Property tests (`test_serialize_property.py`:
+  fixed point, fingerprint, pickle, `.nl` agreement; the coverage floor is a test)
+  and fuzzing (`test_serialize_fuzz.py`: structure-aware mutations of every golden
+  fixture, random bytes, arbitrary JSON; outcome is a `Model` or a
+  `SerializationError` within 2 s, and a value mutation of model content that loads
+  must load into a different model). Two corrections: (a) the coverage universe is
+  the 41 node ops + function names; the strategy also reaches every index and row
+  kind, asserted separately. (b) The silent-acceptance property applies to *value*
+  mutations only: deleting an optional key legitimately means its default. The
+  fuzzer's process registers the fixtures' atoms first (as a program does), else a
+  moved atom `arg` is dropped in both original and mutant by design. A Rust
+  `PanicException` is a `BaseException`, so hypothesis did not print its
+  falsifying example; it was reproduced by hand from the traceback.
 
 - **v1.6 (2026-10-18, WP-3 done; #1785 carrying #1782)** — Schema 1.5 is one
   format with three additions, each read only from a document of minor ≥ 5

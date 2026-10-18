@@ -367,6 +367,12 @@ FUZZ_FOUND = {
         lambda d: _block_A(d)["data"].append(1.0),
     ),
     "A shape not a pair": (_fast_doc, lambda d: _block_A(d).update(shape=[2])),
+    # Beside a builder objective the placeholder objective's node was never read,
+    # so changing its value loaded as if nothing had changed.
+    "placeholder objective node not the constant 0.0": (
+        _fast_doc,
+        lambda d: d["nodes"][d["objective"]["expr"]].update(v=1.0),
+    ),
     "scalar bound written as a list": (
         _doc,
         lambda d: next(v for v in d["variables"] if v["shape"] == []).update(lb=[0.0]),

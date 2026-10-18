@@ -20,11 +20,19 @@ import warnings
 
 import discopt.modeling as dm
 import pytest
+import serialize_fixture_models as reg
 from discopt.serialize import SerializationError, dumps, loads
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
 FIXTURES = pathlib.Path(__file__).parent / "data" / "serialize_fixtures"
+
+# Register the fixtures' atoms first, as a program does at import before it loads
+# anything (and as test_serialize_compat_matrix does): a registered-atom tag is
+# re-derived on load only for a name this process has registered, and without the
+# registration a tag whose ``arg`` was moved to another node is dropped in BOTH the
+# original and the mutant -- identical reloads that are not the reader's fault.
+reg.build("registered_atom")
 BASES = sorted(FIXTURES.glob("v*/*.json"))
 TEXTS = {p: p.read_text(encoding="utf-8") for p in BASES}
 
