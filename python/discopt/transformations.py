@@ -302,8 +302,56 @@ def _canon_callable(fn: Any) -> str:
     return f"fn<{qual}#{id(code if code is not None else fn):x}>"
 
 
+class _Lit:
+    """A literal piece of ``_canon`` output, as opposed to a datum still to render.
+
+    A plain ``str`` cannot mark it: a string *datum* renders as its ``repr``.
+    """
+
+    __slots__ = ("text",)
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+def _joined(items: Any, sep: str) -> list:
+    """``items`` with a ``_Lit(sep)`` between consecutive ones."""
+    out: list = []
+    for i, item in enumerate(items):
+        if i:
+            out.append(_Lit(sep))
+        out.append(item)
+    return out
+
+
 def _canon(obj: Any) -> str:
-    """Exact, deterministic text of a model datum (expression, row, record)."""
+    """Exact, deterministic text of a model datum (expression, row, record).
+
+    Rendered from an explicit stack rather than by recursion: an expression a
+    loop built (``e = e + x[i]``) is a chain as deep as the loop is long, and a
+    recursive renderer raised ``RecursionError`` on a few thousand terms -- so
+    ``model_fingerprint``, and with it ``check()``, failed on an ordinary model.
+    Each datum expands to either its final text or a list of literal pieces and
+    sub-data; the pieces are emitted left to right and joined once, so the text
+    is exactly what the recursive renderer produced.
+    """
+    out: list[str] = []
+    stack: list = [obj]
+    while stack:
+        item = stack.pop()
+        if type(item) is _Lit:
+            out.append(item.text)
+            continue
+        step = _canon_step(item)
+        if type(step) is str:
+            out.append(step)
+        else:
+            stack.extend(reversed(step))
+    return "".join(out)
+
+
+def _canon_step(obj: Any) -> "str | list":
+    """One datum: its final text, or the pieces and sub-data it renders as."""
     from discopt.modeling import core as _c
 
     t = type(obj)
@@ -320,11 +368,15 @@ def _canon(obj: Any) -> str:
     if isinstance(obj, np.ndarray):
         return _canon_array(obj)
     if t is tuple:
-        return "(" + ", ".join(_canon(v) for v in obj) + ",)"
+        return [_Lit("("), *_joined(obj, ", "), _Lit(",)")]
     if t is list:
-        return "[" + ", ".join(_canon(v) for v in obj) + "]"
+        return [_Lit("["), *_joined(obj, ", "), _Lit("]")]
     if t is slice:
-        return f"slice({_canon(obj.start)}, {_canon(obj.stop)}, {_canon(obj.step)})"
+        return [
+            _Lit("slice("),
+            *_joined((obj.start, obj.stop, obj.step), ", "),
+            _Lit(")"),
+        ]
     if obj is Ellipsis:
         return "..."
     # Expression nodes. Variable before Parameter/Constant: leaves by name
@@ -339,38 +391,43 @@ def _canon(obj: Any) -> str:
         v = obj.value
         return repr(float(v)) if v.ndim == 0 else _canon_array(v)
     if isinstance(obj, _c.IndexExpression):
-        return f"{_canon(obj.base)}[{_canon(obj.index)}]"
+        return [obj.base, _Lit("["), obj.index, _Lit("]")]
     if isinstance(obj, _c.BinaryOp):
-        return f"({_canon(obj.left)} {obj.op} {_canon(obj.right)})"
+        return [_Lit("("), obj.left, _Lit(f" {obj.op} "), obj.right, _Lit(")")]
     if isinstance(obj, _c.UnaryOp):
-        return f"{obj.op}({_canon(obj.operand)})"
+        return [_Lit(f"{obj.op}("), obj.operand, _Lit(")")]
     if isinstance(obj, _c.FunctionCall):
-        return f"{obj.func_name}({', '.join(_canon(a) for a in obj.args)})"
+        return [_Lit(f"{obj.func_name}("), *_joined(obj.args, ", "), _Lit(")")]
     if isinstance(obj, _c.CustomCall):
-        args = ", ".join(_canon(a) for a in obj.args)
-        return f"custom:{obj.name}<{_canon_callable(obj.fn)}>({args})"
+        return [
+            _Lit(f"custom:{obj.name}<{_canon_callable(obj.fn)}>("),
+            *_joined(obj.args, ", "),
+            _Lit(")"),
+        ]
     if isinstance(obj, _c.MatMulExpression):
-        return f"({_canon(obj.left)} @ {_canon(obj.right)})"
+        return [_Lit("("), obj.left, _Lit(" @ "), obj.right, _Lit(")")]
     if isinstance(obj, _c.SumExpression):
-        return f"sum({_canon(obj.operand)}, axis={_canon(obj.axis)})"
+        return [_Lit("sum("), obj.operand, _Lit(", axis="), obj.axis, _Lit(")")]
     if isinstance(obj, _c.SumOverExpression):
-        return "sumover[" + ", ".join(_canon(v) for v in obj.terms) + "]"
+        return [_Lit("sumover["), *_joined(obj.terms, ", "), _Lit("]")]
     if isinstance(obj, _c.Expression):
         raise TypeError(
             f"discopt.transformations cannot fingerprint expression node "
             f"{t.__qualname__}; add it to transformations._canon"
         )
     if isinstance(obj, _c.Constraint):
-        return f"{_canon(obj.body)} {obj.sense} {_canon(obj.rhs)}"
+        return [obj.body, _Lit(f" {obj.sense} "), obj.rhs]
     if isinstance(obj, _c.BooleanVar):
-        return f"bool({_canon(obj.variable)})"
+        return [_Lit("bool("), obj.variable, _Lit(")")]
     if hasattr(obj, "tocoo") and hasattr(obj, "nnz"):
         return _canon_sparse(obj)
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
-        parts = ", ".join(
-            f"{f.name}={_canon(getattr(obj, f.name))}" for f in dataclasses.fields(obj)
-        )
-        return f"{t.__name__}({parts})"
+        parts: list = [_Lit(f"{t.__name__}(")]
+        for i, f in enumerate(dataclasses.fields(obj)):
+            parts.append(_Lit(f"{', ' if i else ''}{f.name}="))
+            parts.append(getattr(obj, f.name))
+        parts.append(_Lit(")"))
+        return parts
     if isinstance(obj, (types.FunctionType, types.BuiltinFunctionType, types.MethodType)):
         return _canon_callable(obj)
     raise TypeError(
