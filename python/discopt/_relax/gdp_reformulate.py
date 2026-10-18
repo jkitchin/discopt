@@ -446,7 +446,10 @@ def _domain_gap(expr: Expression, model: Model) -> Optional[str]:
     Node types with no known domain (``CustomCall``, unlisted functions) are not
     judged here; their enclosure is ``(-inf, inf)`` unless proven otherwise.
     """
+    from discopt.modeling.core import Parameter
+
     memo = _BoundMemo()
+    _seed_self_products(expr, model, memo)
     seen: set[int] = set()
     stack: list = [expr]
     while stack:
@@ -469,26 +472,72 @@ def _domain_gap(expr: Expression, model: Model) -> Optional[str]:
             if node.op == "**":
                 lo, hi = _bound_expression(node.left, model, memo)
                 if lo < 0.0:
-                    if not isinstance(node.right, Constant):
+                    # A Parameter exponent is judged at its current value: the
+                    # lowering runs again on every solve, after any change to it.
+                    if isinstance(node.right, (Constant, Parameter)):
+                        exps = np.ravel(np.asarray(node.right.value, dtype=np.float64))
+                    else:
                         return (
                             "a power with a variable exponent needs a nonnegative "
                             f"base, but its base ranges over [{lo:.6g}, {hi:.6g}]"
                         )
-                    if np.size(node.right.value) == 1:
-                        p = float(np.ravel(node.right.value)[0])
-                        if p != int(p):
-                            return (
-                                f"x**{p:g} is real only for x >= 0, but its base "
-                                f"ranges over [{lo:.6g}, {hi:.6g}]"
-                            )
+                    frac = [p for p in exps if not (np.isfinite(p) and p == int(p))]
+                    if frac:
+                        return (
+                            f"x**{frac[0]:g} is real only for x >= 0, but its base "
+                            f"ranges over [{lo:.6g}, {hi:.6g}]"
+                        )
         else:
-            for attr in ("operand", "base", "left", "right"):
-                child = getattr(node, attr, None)
-                if child is not None:
-                    stack.append(child)
-            for attr in ("args", "terms"):
-                stack.extend(getattr(node, attr, None) or ())
+            stack.extend(_expr_children(node))
     return None
+
+
+def _expr_children(node) -> list:
+    """The operands of an expression node, for the generic walks below."""
+    out: list = []
+    for attr in ("operand", "base", "left", "right"):
+        child = getattr(node, attr, None)
+        if child is not None:
+            out.append(child)
+    for attr in ("args", "terms"):
+        out.extend(getattr(node, attr, None) or ())
+    return out
+
+
+def _seed_self_products(expr: Expression, model: Model, memo: _BoundMemo) -> None:
+    """Enclose every ``a * a`` in ``expr`` as a square, in ``memo``, bottom-up.
+
+    Plain interval multiplication treats the two factors as independent, so
+    ``x * x`` on ``x in [-1, 10]`` encloses as ``[-10, 100]``; that made
+    :func:`_domain_gap` refuse ``sqrt(x*x + 1)`` and the product-written distance
+    rows of layout models, which are defined on the whole box (review of #1787).
+    A product of two structurally equal operands -- the same object, or the same
+    printed expression, which names every leaf -- is a square, so ``[0, max^2]``
+    when the operand's enclosure straddles 0. Seeded only into this check's memo:
+    the big-M enclosure itself is unchanged, so no M moves.
+    """
+    order: list = []
+    seen: set[int] = set()
+    stack: list = [(expr, False)]
+    while stack:
+        node, done = stack.pop()
+        if done:
+            order.append(node)
+            continue
+        if id(node) in seen or not isinstance(node, Expression):
+            continue
+        seen.add(id(node))
+        stack.append((node, True))
+        stack.extend((c, False) for c in _expr_children(node))
+    for node in order:  # children before parents
+        if (
+            isinstance(node, BinaryOp)
+            and node.op == "*"
+            and (node.left is node.right or str(node.left) == str(node.right))
+        ):
+            lo, hi = _bound_expression(node.left, model, memo)
+            sq = sorted((lo * lo, hi * hi))
+            memo.put_bound(node, (0.0 if lo <= 0.0 <= hi else sq[0], sq[1]))
 
 
 def _domain_gap_error(constraint: Constraint, gap: str, how: str) -> ValueError:

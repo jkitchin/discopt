@@ -124,6 +124,12 @@ def test_verifier_judges_an_undefined_inactive_disjunct_as_not_holding():
         (lambda x: x**-2, -1, 1, False),
         (lambda x: x**2, -1, 1, False),
         (lambda x: dm.exp(-abs(x**0.5)), -1, 1, True),
+        # Review of #1787: a self-product is a square, not an independent product.
+        (lambda x: dm.sqrt(x * x + 1), -1, 10, False),
+        (lambda x: dm.log(1 + x * x), -1, 10, False),
+        (lambda x: dm.log1p(x * x), -1, 10, False),
+        (lambda x: dm.sqrt((x - 2) * (x - 2)), -1, 10, False),
+        (lambda x: dm.sqrt(x * x - 1), -1, 10, True),  # really undefined on (-1, 1)
     ],
 )
 def test_domain_gap_per_node(make, lo, hi, gap):
@@ -148,3 +154,26 @@ def test_simplex_keeps_its_point_gap_capability():
     m.minimize(c)
     r = m.solve(gdp_method="simplex", time_limit=60)
     assert r.status == "optimal" and r.objective == pytest.approx(0.0, abs=1e-6)
+
+
+@pytest.mark.parametrize("method", ["big-m", "mbigm", "simplex", "auto"])
+def test_a_product_written_distance_row_is_not_refused(method):
+    """Review of #1787: ``main`` solved this; the first #1779 check refused it,
+    because interval multiplication saw ``x*x`` on ``[-1, 10]`` as ``[-10, 100]``."""
+    m = dm.Model("dist")
+    x = m.continuous("x", lb=-1, ub=10)
+    y = m.continuous("y", lb=-3, ub=4)
+    m.either_or([[x <= -0.5], [dm.sqrt((x - y) * (x - y) + 1) >= 2, x >= 0]], name="d")
+    m.minimize(x + 0 * y)
+    r = m.solve(gdp_method=method, time_limit=60)
+    assert r.status == "optimal" and r.objective == pytest.approx(-1.0, abs=1e-6)
+
+
+def test_an_integer_valued_parameter_exponent_is_an_integer_power():
+    """Review of #1787: ``x**p`` with ``p = 2`` was judged as a variable exponent."""
+    m = dm.Model("par")
+    x = m.continuous("x", lb=-1, ub=10)
+    p = m.parameter("p", 2.0)
+    assert _domain_gap(x**p, m) is None
+    p.value = 0.5
+    assert _domain_gap(x**p, m) is not None
