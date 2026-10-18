@@ -1501,6 +1501,42 @@ class SolverTuning:
     becomes timing-dependent (an anytime algorithm), so it is not bit-reproducible
     run-to-run; the ``=0`` opt-out path stays deterministic."""
 
+    root_build_abort: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_ROOT_BUILD_ABORT", default=True)
+    )
+    """Abort the **base** root-relaxation fallback build past the fallback's grant
+    (``DISCOPT_ROOT_BUILD_ABORT``, default **on**, opt-out ``=0``; §5 bound-changing;
+    issue #1757). Only read while ``root_build_deadline`` is on.
+
+    ``root_build_deadline`` truncates the base build's constraint rows, but the
+    objective walk that precedes them is not interruptible by it. On a dense
+    nonconvex quadratic objective that walk is nearly the whole build: measured on
+    QPLIB_3709 (600 vars, 165,300 products) at ``time_limit=30``, the #654 arm
+    granted the fallback its last few seconds and the base build ran 36.7-40.1 s, so
+    the solve returned at 57-60 s. When on, ``abort_deadline`` = grant + one fallback
+    reserve (``solver._ROOT_BUILD_ABORT_GRACE_S``, 3 s) is also passed: past it the
+    build raises ``RelaxationBuildAborted``, is discarded whole (never used
+    truncated), and the fallback returns ``None``. The grace is measured, not
+    defensive: an abort AT the grant dropped casctanks' and hda's bounds at
+    ``time_limit=5`` (1.258 and -141697, built 0.1-0.2 s past a spent grant).
+
+    Sound: no relaxation is ever used partially, so a reported bound is unchanged or
+    absent, never weaker-than-claimed. Bound-changing because an aborted build loses
+    a bound the overrunning build would have produced. It can only fire where the
+    base build alone outlives its grant by more than the grace.
+
+    Graduated on introduction (§5 panel, 2026-10-17, interleaved, 3-4 workers):
+    66 in-repo instances x {5, 20} s, 595 checks, 0 violations, never fired (the one
+    certificate the ON arm lost, ``tspn05`` at 20 s, re-certified 3/3 at 23 nodes in
+    a control: load noise at load average ~20-60); 24 dense QPLIB instances
+    (``obj_quad_nnz >= 50000``) x 30 s, 28 checks, 0 violations, 0 certificates lost,
+    total wall 916.3 s -> 786.1 s. It fired decisively on four, which OFF ran to
+    58.9-68.0 s and ON returned at 30.3 s: QPLIB_2880, 3347, 3709 and 6597. Each of
+    those OFF arms reports the bound ``0.0`` that ON does not — a bound obtained 96-127%
+    past the caller's ``time_limit``, which is the defect, not a result the limit
+    bought. The abort is only prompt because a DCP check inside the build polls it
+    too (``uniform_relax._Builder._dcp``): before that, QPLIB_2880 raised 20 s late."""
+
     root_setup_build_deadline: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_ROOT_SETUP_BUILD_DEADLINE", default=True)
     )

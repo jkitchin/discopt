@@ -2883,6 +2883,11 @@ _LAZY_RESEP_GLB_EPS = 1e-9
 # 2 s -> -64473 (the full bound) — so a smaller pre-deadline slice buys a weaker
 # but still rigorous bound rather than no bound at all.
 _ROOT_FALLBACK_RESERVE_S = 3.0
+# #1757: how far past its grant the root fallback's base build may run before
+# ``root_build_abort`` discards it. One reserve, so a build that finishes a little
+# late keeps its bound while the overrun stays bounded by the same slice the
+# search already withholds for this fallback.
+_ROOT_BUILD_ABORT_GRACE_S = _ROOT_FALLBACK_RESERVE_S
 # Multistart runs 3 starts per nonconvex node (warm/midpoint/random) and keeps
 # the best — better incumbents on nonconvex models, but ~3x the node-solve cost.
 # Off by default; flip to opt in (or pass multistart=True to _solve_batch_pounce).
@@ -9872,6 +9877,7 @@ def _root_relaxation_lower_bound(
         sanitize_relaxation_for_conditioning,
     )
     from discopt._relax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.uniform_relax import RelaxationBuildAborted
 
     # Issue #654 checkpoint poll. This routine computes several INDEPENDENT bound
     # candidates (plain / separated / PSD / RLT) and returns the tightest; each is
@@ -9974,13 +9980,37 @@ def _root_relaxation_lower_bound(
     # e.g. an expression type the builder mishandles -- and must fail the solve
     # rather than quietly cost it its last-ditch dual bound.
     terms = classify_nonlinear_terms(model)
-    relax, _relax_info = build_milp_relaxation(
-        model,
-        terms,
-        DiscretizationState(),
-        bound_override=(root_lb, root_ub),
-        build_deadline=_base_build_deadline,
-    )
+    # #1757: ``build_deadline`` truncates constraint ROWS only; the objective walk
+    # before them is not interruptible by it, and on a dense quadratic objective
+    # that walk IS the build (QPLIB_3709 at ``time_limit=30``: a 36.7-40.1 s base
+    # build against a grant of a few seconds, so the solve returned at 57-60 s).
+    # ``root_build_abort`` (``DISCOPT_ROOT_BUILD_ABORT``) additionally passes an
+    # ``abort_deadline``: past it the build raises and is discarded whole — never
+    # used truncated — and the fallback reports no bound. The abort sits one
+    # fallback reserve PAST the grant, not at it: aborting at the grant itself was
+    # measured to throw away bounds that cost a fraction of a second over it
+    # (casctanks and hda at ``time_limit=5``: 1.258 and -141697 flag-off at
+    # 5.1-5.2 s, ``None`` at 5.0 s). The grace bounds the overrun to one reserve
+    # while keeping every bound that was merely late.
+    _base_abort_deadline: Optional[float] = None
+    if _base_deadline_on and _tuning().root_build_abort:
+        _base_abort_deadline = _fb_deadline + _ROOT_BUILD_ABORT_GRACE_S
+    try:
+        relax, _relax_info = build_milp_relaxation(
+            model,
+            terms,
+            DiscretizationState(),
+            bound_override=(root_lb, root_ub),
+            build_deadline=_base_build_deadline,
+            abort_deadline=_base_abort_deadline,
+        )
+    except RelaxationBuildAborted:
+        logger.info(
+            "root relaxation fallback: base build passed its %.2fs grant + %.1fs grace; no bound",
+            float(time_limit),
+            _ROOT_BUILD_ABORT_GRACE_S,
+        )
+        return None
     if not relax._objective_bound_valid:
         return None
     relax = sanitize_relaxation_for_conditioning(relax)
