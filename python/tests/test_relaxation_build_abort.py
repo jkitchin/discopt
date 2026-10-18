@@ -66,7 +66,8 @@ def test_past_abort_deadline_raises_inside_canonicalization_and_caches_nothing()
 def test_past_abort_deadline_raises_inside_the_walk():
     m = _dense_qp()
     U._get_analysis_cache(m)  # warm: the abort must come from the relaxation walk
-    with pytest.raises(U.RelaxationBuildAborted, match="node relaxations"):
+    # The walk's first poll is either its own stride or the objective's DCP check (#1757).
+    with pytest.raises(U.RelaxationBuildAborted, match="node relaxations|DCP check"):
         U.build_uniform_relaxation(m, abort_deadline=time.perf_counter() - 1.0)
 
 
@@ -137,3 +138,51 @@ def test_bilinear_skip_is_bound_neutral(monkeypatch):
     assert len(skipped) == len(legacy_arrays) == 3
     for a, b in zip(skipped, legacy_arrays):
         assert np.array_equal(a, b)
+
+
+def test_armed_classification_polls_through_its_warm_walks(monkeypatch):
+    """#1757: before classifying, ``_classify_subtree`` warms two memo walks over the
+    whole DAG, which never ticked the deadline; on QPLIB_2880's 176,410-product
+    objective sum the stack sat in them 20 s past an armed abort. A deadline already
+    past must surface in the warm walks, before the first node is classified."""
+    import discopt._relax.convexity.rules as R
+    from discopt._relax.convexity import classify_expr
+
+    classified = []
+    orig = R._classify_node
+    monkeypatch.setattr(R, "_classify_node", lambda *a, **k: classified.append(1) or orig(*a, **k))
+    m = _dense_qp(n=80)  # 3,160 products: well over one check stride of nodes
+    obj = m._objective.expression
+    counter = [0]
+    armed = {R._DEADLINE_KEY: time.perf_counter() - 1.0, R._VISIT_COUNT_KEY: counter}
+    with pytest.raises(R.ConvexityBudgetExceeded):
+        classify_expr(obj, m, armed)
+    assert counter[0] >= R._DEADLINE_CHECK_STRIDE  # §6: the poll fired
+    assert classified == []  # ... inside the warm walks, not the classification after
+    classify_expr(obj, m)  # unarmed: the same expression still classifies
+    assert classified  # and that path does reach the per-node classifier
+
+
+def test_dcp_expiry_is_the_build_abort(monkeypatch):
+    """The builder arms ``classify_expr`` with its own abort deadline and reports the
+    expiry as ``RelaxationBuildAborted``; unarmed, it passes no deadline at all."""
+    import discopt._relax.convexity as C
+    from discopt._relax.convexity.rules import _DEADLINE_KEY, ConvexityBudgetExceeded
+
+    seen = []
+
+    def expiring(expr, model, _cache=None):
+        seen.append(None if _cache is None else _cache.get(_DEADLINE_KEY))
+        if _cache is not None:
+            raise ConvexityBudgetExceeded("test expiry")
+        return orig(expr, model, _cache)
+
+    orig = C.classify_expr
+    monkeypatch.setattr(C, "classify_expr", expiring)
+    U.build_uniform_relaxation(_dense_qp())
+    assert seen and all(d is None for d in seen)  # §6: the DCP check ran, unarmed
+    seen.clear()
+    dl = time.perf_counter() + 3600.0
+    with pytest.raises(U.RelaxationBuildAborted, match="DCP check"):
+        U.build_uniform_relaxation(_dense_qp(), abort_deadline=dl)
+    assert seen == [dl]

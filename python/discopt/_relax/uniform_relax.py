@@ -1196,13 +1196,29 @@ class _Builder:
         if v is not _UNSET:
             return v
         from discopt._relax.convexity import classify_expr
-        from discopt._relax.convexity.rules import perspective_proof_scope
+        from discopt._relax.convexity.rules import (
+            _DEADLINE_KEY,
+            _VISIT_COUNT_KEY,
+            ConvexityBudgetExceeded,
+            perspective_proof_scope,
+        )
 
-        # #1520: no except. ``classify_expr`` answers ``Curvature.UNKNOWN`` for
-        # anything it cannot prove; its only raise is the deadline abort, which
-        # needs a caller-armed cache (none here). An exception is a defect.
-        with perspective_proof_scope(persp):
-            v = classify_expr(self._expr(node), self.model)
+        # #1520: no broad except. ``classify_expr`` answers ``Curvature.UNKNOWN`` for
+        # anything it cannot prove; its only raise is the deadline abort, armed here
+        # only when this build has an abort deadline. #1757: one classification of a
+        # dense objective sum is a single long walk (20 s on QPLIB_2880), so the
+        # build's own per-``rep`` poll cannot see the deadline pass inside it. The
+        # expiry is the build's abort, and is reported as one; no verdict is cached.
+        armed: Optional[dict] = None
+        if self._abort_deadline is not None:
+            armed = {_DEADLINE_KEY: self._abort_deadline, _VISIT_COUNT_KEY: [0]}
+        try:
+            with perspective_proof_scope(persp):
+                v = classify_expr(self._expr(node), self.model, armed)
+        except ConvexityBudgetExceeded as exc:
+            raise RelaxationBuildAborted(
+                f"relaxation build passed its abort deadline in a DCP check: {exc}"
+            ) from exc
         cache[key] = v
         return v
 

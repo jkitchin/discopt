@@ -427,7 +427,12 @@ def _classify_children(expr: Expression) -> tuple[Expression, ...]:
     return ()
 
 
-def _warm_bottom_up(root: Expression, memo: dict, compute: Callable[[Expression], object]) -> None:
+def _warm_bottom_up(
+    root: Expression,
+    memo: dict,
+    compute: Callable[[Expression], object],
+    tick: Optional[Callable[[], None]] = None,
+) -> None:
     """Fill ``memo`` for every node under ``root``, deepest first.
 
     ``_is_polynomial_impl`` and ``_struct_hash`` are self-recursive over this
@@ -435,6 +440,11 @@ def _warm_bottom_up(root: Expression, memo: dict, compute: Callable[[Expression]
     child lookup a hit, so each call returns after one level instead of holding
     a frame per level — the rules themselves are reused verbatim rather than
     re-implemented iteratively, so there is one definition of each.
+
+    ``tick`` charges each computed node against the classification deadline. These
+    walks visit the whole DAG before the first ``classify_expr_info`` tick, so
+    without it an armed deadline was not polled through them at all (#1757: 20 s
+    on QPLIB_2880's 176,410-product objective sum).
     """
     stack: list[tuple[Expression, bool]] = [(root, False)]
     while stack:
@@ -447,6 +457,8 @@ def _warm_bottom_up(root: Expression, memo: dict, compute: Callable[[Expression]
                 if id(child) not in memo:
                     stack.append((child, False))
             continue
+        if tick is not None:
+            tick()
         compute(node)
 
 
@@ -545,8 +557,9 @@ def _classify_subtree(root: Expression, model: Optional[Model], cache: dict) -> 
     # Warm the two self-recursive predicates first: the driver calls both at
     # *expand* time, when descendants are not yet classified, so they would
     # otherwise recurse the full depth on their own.
-    _warm_bottom_up(root, poly_memo, lambda n: _is_polynomial_impl(n, poly_memo))
-    _warm_bottom_up(root, hash_cache, lambda n: _struct_hash(n, hash_cache))
+    tick = (lambda: _tick_deadline(cache)) if cache.get(_DEADLINE_KEY) is not None else None
+    _warm_bottom_up(root, poly_memo, lambda n: _is_polynomial_impl(n, poly_memo), tick)
+    _warm_bottom_up(root, hash_cache, lambda n: _struct_hash(n, hash_cache), tick)
 
     # (node, ancestor under_poly context, children already pushed)
     stack: list[tuple[Expression, bool, bool]] = [(root, cache.get(_UNDER_POLY_KEY, False), False)]
