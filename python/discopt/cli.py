@@ -488,18 +488,25 @@ def _keys_lost(old, new, path: str = "") -> list:
     return []
 
 
+def _write_upgraded(fh, payload: bytes) -> None:
+    """Write the rewritten document to the temporary file (a seam for tests)."""
+    fh.write(payload)
+
+
 def _cmd_upgrade_model(args):
     """Rewrite a native model document at the current schema (plan §3.5).
 
     Exit 0 on success (or, with ``--check``, when the document loads), 1 when it is
     refused -- unreadable, malformed, or written by a NEWER format, which a rewrite
-    would downgrade -- and 2 for usage errors (argparse).
+    would downgrade -- and 2 for usage errors
+    (argparse, or a ``--import`` module that fails to import).
     """
     import gzip
     import json
     import warnings
 
     from discopt.serialize import (
+        _EXTENSION_PREFIX,
         _GZIP_MAGIC,
         SCHEMA,
         SchemaVersionWarning,
@@ -513,7 +520,11 @@ def _cmd_upgrade_model(args):
     for module in args.imports:
         # Registered atoms are re-tagged on load only for names this process has
         # registered, as a program registers them at import before it loads.
-        importlib.import_module(module)
+        try:
+            importlib.import_module(module)
+        except Exception as exc:  # any failure of the user's module is a usage error
+            print(f"Error: cannot import {module}: {type(exc).__name__}: {exc}", file=sys.stderr)
+            sys.exit(2)
     try:
         raw = src.read_bytes()
         was_gzip = raw[:2] == _GZIP_MAGIC
@@ -528,6 +539,13 @@ def _cmd_upgrade_model(args):
         # The model's author is unchanged by an upgrade, so it is carried forward.
         prov = model.provenance if isinstance(model.provenance, dict) else {}
         new_text = dumps(model, result=result, author=prov.get("author"))
+        # A top-level ``x-`` annotation is never read, so `dumps` cannot reproduce
+        # it; it is carried through verbatim, since it is never refused either.
+        extensions = {k: v for k, v in old_doc.items() if k.startswith(_EXTENSION_PREFIX)}
+        if extensions:
+            new_doc = json.loads(new_text)
+            new_doc.update(extensions)
+            new_text = json.dumps(new_doc, allow_nan=False)
         # Prove the rewrite before writing it: what comes back must be the model
         # that went in.
         reread = loads(new_text)
@@ -570,14 +588,35 @@ def _cmd_upgrade_model(args):
     )
     if args.check:
         return
+    if dst.suffix == ".gz" or (dst == src and was_gzip):
+        payload = gzip.compress(new_text.encode("utf-8"))
+    else:
+        payload = new_text.encode("utf-8")
+    # Write beside the target and rename over it: an in-place rewrite must never
+    # leave a truncated file where the only copy of the model was.
+    import tempfile
+
+    tmp_name = None
     try:
-        if dst.suffix == ".gz" or (dst == src and was_gzip):
-            dst.write_bytes(gzip.compress(new_text.encode("utf-8")))
-        else:
-            dst.write_text(new_text, encoding="utf-8")
+        fd, tmp_name = tempfile.mkstemp(dir=dst.parent, prefix=f".{dst.name}.", suffix=".tmp")
+        with os.fdopen(fd, "wb") as fh:
+            _write_upgraded(fh, payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if dst.exists():
+            shutil.copymode(dst, tmp_name)
+        else:  # `mkstemp` creates 0600; a new file gets the usual umask mode
+            umask = os.umask(0)
+            os.umask(umask)
+            os.chmod(tmp_name, 0o666 & ~umask)
+        os.replace(tmp_name, dst)
+        tmp_name = None
     except OSError as exc:
         print(f"Error: {dst}: {exc}", file=sys.stderr)
         sys.exit(1)
+    finally:
+        if tmp_name is not None and os.path.exists(tmp_name):
+            os.unlink(tmp_name)
     print(f"-> wrote {dst}", file=sys.stderr)
 
 

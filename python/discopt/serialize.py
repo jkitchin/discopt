@@ -73,7 +73,7 @@ object), an index must fit its base's shape, and senses, SOS types, indicator
 activation values and disjunction methods must be ones the modeling API can
 produce -- an ``active_value`` of 7 once dropped its row and certified a false
 optimum. A malformed field these checks do not name raises
-:class:`SerializationError` too, chained to the low-level error. Unknown
+:class:`SerializationError` too, chained to the low-level error. An unknown
 top-level key is refused too: see *Versioning* below.
 
 Versioning
@@ -95,7 +95,13 @@ listed, with the minor that first wrote it, in ``_TOP_LEVEL_KEYS`` and
 
 A top-level key starting with ``x-`` is never read and never refused: it is the
 one place a tool may annotate a document without forking the format. It does not
-survive a re-save -- the reader does not keep what it does not read.
+survive a load and re-save -- the reader does not keep what it does not read --
+but ``discopt upgrade-model`` carries every top-level ``x-`` key through verbatim.
+
+The key policy covers the top level and ``state`` only. A key inside a nested
+record -- a variable, a node, a row, a builder block -- that this version does not
+know is still ignored on read, with no error and no warning, at every minor (see
+#1780).
 
 ``discopt upgrade-model`` rewrites a document at the current ``SCHEMA``. Through
 1.1 an unknown top-level key was ignored; that is how ``provenance`` (1.1) stayed

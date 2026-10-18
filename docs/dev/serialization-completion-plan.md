@@ -210,6 +210,12 @@ unknown-key refusal. The old behaviour ("ignore unknown keys so 1.0 reads 1.1") 
 exactly the silent-drop §0.1 forbids once a key can carry model content; the
 `provenance` precedent was metadata and is grandfathered by being in `_TOP_LEVEL_KEYS`.
 
+**Known gap (#1780).** This policy covers the top level and `state` only. A key
+inside a nested record -- a variable, node, row or builder block -- that the reader
+does not know is still ignored on read, at every minor, with no error and no
+warning (probe: `"zzz"` added to `nodes[0]` or `variables[0]` of a 1.0 document
+loads cleanly). Per-record key tables are tracked in #1780, not done by WP-2.
+
 `result_io.SCHEMA_VERSION` (currently 3, integer) stays its own counter: the
 solution subtree is `deserialize_result`'s to version, and `_SCHEMA_MINOR_UNTAGGED_SOLUTION`
 already ties the model minor to the one non-additive change there. WP-2 adds the
