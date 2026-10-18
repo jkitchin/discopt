@@ -19,10 +19,12 @@ The release procedure that produces these entries is documented in
   constraints, fast-API rows and disjunctions are supported; disjunctions are
   lowered with `gdp_method` first. A function SCIP cannot express exactly
   (`atan`, `erf`, `min`/`max`, `dm.custom`) raises `ScipUnsupportedError`; it
-  is never approximated. SCIP's point is re-verified by discopt before it is
-  reported certified. On the 66-instance in-repo MINLPLib corpus at 10 s, every
-  instance SCIP solved through both ingest paths reached the same optimum
-  through the translation as through SCIP's own `.nl` reader.
+  is never approximated. **Nothing the route returns is certified**: a SCIP
+  `optimal` is reported as `status="feasible"`, `gap_certified=False`, with
+  SCIP's bound tagged `bound_source="external_solver"` (new). On MINLPLib
+  `ex1252a`, SCIP's presolve certified a bound past the true optimum. SCIP's
+  point is re-verified by discopt. An answer resting on SCIP's numerical limits
+  (a pole, a value past `numerics/hugeval`) carries no bound.
 
 - **`dm.sum` folds per-element linear sums (#1712; `DISCOPT_SUM_CANONICAL=0` opts out).**
   `dm.sum(c[i] * x[i] for i ...)` builds one Python node per term, and every

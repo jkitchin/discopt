@@ -11761,8 +11761,11 @@ def solve_model(
         :class:`~discopt.solvers.scip.ScipUnsupportedError`. SCIP parameters go
         in ``scip_options={...}``; ``time_limit``, ``gap_tolerance``,
         ``abs_gap_tolerance``, an explicit ``max_nodes`` and ``initial_point``
-        are forwarded. SCIP's point is re-verified by discopt before it is
-        reported certified.
+        are forwarded. SCIP's point is re-verified by discopt, and SCIP's
+        optimality claim is never certified: the result is ``"feasible"`` with
+        ``gap_certified=False`` and SCIP's bound tagged
+        ``bound_source="external_solver"`` (#1784 review: SCIP's presolve was
+        measured certifying a bound past the true optimum of ``ex1252a``).
         Use ``"mip-nlp"`` to dispatch to the MIP-NLP decomposition family
         (OA/ECP/FP/GOA/LP-NLP-BB now; ROA is a reserved method selector).
         Use ``"gp"`` to dispatch to the geometric-programming fast path:
@@ -12599,9 +12602,10 @@ def solve_model(
             time_limit=_remaining_budget(),
             gap_tolerance=gap_tolerance,
             abs_gap_tolerance=abs_gap_tolerance,
-            # discopt's default cap is a property of discopt's tree; only an
-            # explicit one is forwarded to SCIP.
-            max_nodes=max_nodes if max_nodes != 100_000 else None,
+            # Forwarded as SCIP's ``limits/totalnodes`` whether or not the caller
+            # wrote it: an explicit 100_000 cannot be told from the default, and
+            # silently dropping one would be the worse surprise.
+            max_nodes=max_nodes,
             initial_point=initial_point,
             gdp_method=gdp_method,
             options=scip_options,
@@ -29294,9 +29298,24 @@ def _solve_scip(
     :func:`~discopt.validation.feasibility.verify_point` on the *declared* model
     and its objective recomputed by discopt's evaluator: a point discopt rejects is
     reported ``feasible`` and uncertified (the #1561 policy), and an objective or
-    dual bound that contradicts discopt's own evaluation of the point -- which can
-    only mean the translation is wrong -- raises rather than publishing it.
+    dual bound that contradicts discopt's own evaluation of the point raises
+    rather than publishing it.
+
+    Nothing this route returns is certified (#1784 review, B2). SCIP's
+    ``optimal``/``gaplimit`` is reported as ``status="feasible"`` with
+    ``gap_certified=False``; SCIP's dual bound is kept as information under
+    ``bound_source="external_solver"``, and ``termination`` carries SCIP's own
+    status. SCIP's presolve was measured certifying a bound past the true optimum
+    of MINLPLib ``ex1252a`` on a faithfully translated model, and discopt has no
+    way to check a bound it did not prove.
+
+    An answer that rests on SCIP's numerical limits (``raw["numerics"]``: a point
+    at a singularity the box admits, or a value past SCIP's ``numerics/hugeval``)
+    is never certified and carries no bound. ``min 1/x`` on ``[-2, 2]`` is
+    unbounded; SCIP stops at ``x = -1e-9`` and calls ``-1e9`` optimal with a
+    matching dual bound, which is not a bound on the problem at all.
     """
+    from discopt.export._common import refuse_non_algebraic_relations
     from discopt.modeling.core import ObjectiveSense
     from discopt.solvers.scip import limit_status, solve_scip
     from discopt.transformations import get as _get_transformation
@@ -29310,6 +29329,9 @@ def _solve_scip(
         )
     assert model._objective is not None
     work = _get_transformation("gdp").apply(model, method=gdp_method)
+    # The lowering should leave only algebraic rows; a relation that survived it
+    # would be silently dropped by the row iteration (a relaxed model), so assert.
+    refuse_non_algebraic_relations(work, "SCIP")
     n_decl = sum(int(v.size) for v in model._variables)
     n_work = sum(int(v.size) for v in work._variables)
     # The lowering appends its selector columns after the declared ones, so the
@@ -29366,7 +29388,7 @@ def _solve_scip(
         )
 
     proved = scip_status in ("optimal", "gaplimit")
-    limit = limit_status(scip_status)
+    limit = limit_status(scip_status, raw["x"] is not None)
     if not proved and limit is None:
         return SolveResult(
             status="error",
@@ -29376,9 +29398,11 @@ def _solve_scip(
         )
 
     bound = raw["dual_bound"]
+    numerics = list(raw["numerics"])
     objective: Optional[float] = None
     x_out = None
     verified = False
+    contradiction: Optional[str] = None
     if raw["x"] is not None:
         x_decl = np.asarray(raw["x"][:n_decl], dtype=np.float64)
         verdict = verify_point(model, x_decl, with_objective=True)
@@ -29389,12 +29413,21 @@ def _solve_scip(
             objective = float(verdict.objective)  # type: ignore[arg-type]
             tol = 1e-5 * (1.0 + abs(objective))
             if scip_obj is not None and abs(scip_obj - objective) > tol:
-                raise RuntimeError(
+                contradiction = (
                     f"SCIP reports objective {scip_obj!r} at its point, discopt "
-                    f"evaluates {objective!r} there: the SCIP translation of this "
-                    "model is not faithful. Refusing to report it (please file an "
-                    "issue with the model)."
+                    f"evaluates {objective!r} there"
                 )
+            elif bound is not None:
+                # A dual bound past a verified feasible point, beyond SCIP's own
+                # tolerance, is not a bound on this model.
+                excess = (bound - objective) if not maximize else (objective - bound)
+                if excess > tol:
+                    contradiction = (
+                        f"SCIP's dual bound {bound!r} lies past the objective "
+                        f"{objective!r} discopt verified at SCIP's own point"
+                    )
+                elif excess > 0.0:
+                    bound = objective  # within tolerance: weaken, never tighten
         else:
             objective = scip_obj
             stats["certificate/incumbent_unverified"] = 1.0
@@ -29405,30 +29438,46 @@ def _solve_scip(
                 verdict.reason,
             )
 
-    if bound is not None and objective is not None and verified:
-        # A dual bound past a verified feasible point is a contradiction beyond
-        # SCIP's own tolerance -- a wrong model, not noise.
-        excess = (bound - objective) if not maximize else (objective - bound)
-        if excess > 1e-5 * (1.0 + abs(objective)):
+    if contradiction is not None:
+        if not raw["singular_sites"] and not numerics:
+            # No singularity in the box and nothing past numerics/hugeval, so
+            # SCIP's numerics have nothing to break on: the model SCIP solved is
+            # not this one.
             raise RuntimeError(
-                f"SCIP's dual bound {bound!r} lies past the verified objective "
-                f"{objective!r}: the SCIP translation of this model is not "
-                "faithful. Refusing to report it."
+                f"{contradiction}, and the point is neither past SCIP's "
+                "numerics/hugeval nor on a box that admits a singularity: the model "
+                "SCIP solved does not match this one. Refusing to report it (please "
+                "file an issue with the model)."
             )
-        if excess > 0.0:
-            bound = objective  # within tolerance: weaken to the incumbent, never tighten
-
-    if proved and verified:
-        return SolveResult(
-            status="optimal",
-            objective=objective,
-            bound=bound,
-            gap=_relative_gap_from_objective_bound(objective, bound),
-            x=x_out,
-            gap_certified=True,
-            bound_source="bnb_tree",  # SCIP's B&B dual bound
-            **common,
+        # Explained by SCIP's numerics: a box that admits a singularity
+        # (``min log(x)`` on ``[0, 1]``: SCIP calls 1e5 optimal at x = 1), or
+        # values past hugeval (``min x*y`` free). The problem is typically unbounded.
+        numerics.append(
+            f"{contradiction}, on a box that admits " + "; ".join(raw["singular_sites"][:3])
         )
+    if numerics:
+        # Not an optimum of the problem: SCIP stopped against its own numerical
+        # limits. No bound survives and nothing is certified.
+        stats["scip/numerical_limit"] = "; ".join(numerics)
+        logger.warning(
+            "solver='scip': SCIP's answer rests on its numerical limits (%s). The "
+            "problem may be unbounded; reporting the point with no bound and no "
+            "certificate.",
+            "; ".join(numerics),
+        )
+        bound = None
+        proved = False
+        limit = limit or "feasible"
+
+    # #1784 review B2: SCIP's proof is reported, never certified. SCIP's presolve
+    # certified 131452.97 on MINLPLib ex1252a (true optimum 128893.74) on a
+    # faithfully translated model -- the reference point is feasible in it -- so a
+    # SCIP "optimal" is SCIP's claim, not discopt's. The point is verified above;
+    # the bound is kept as information under its own provenance tag.
+    if proved and verified:
+        stats["scip/claimed_optimal"] = 1.0
+    stats["scip/bound_source"] = "external_solver"
+    source = "external_solver" if bound is not None else None
     if x_out is not None:
         return SolveResult(
             status="feasible" if proved else str(limit),
@@ -29436,16 +29485,15 @@ def _solve_scip(
             bound=bound,
             gap=_relative_gap_from_objective_bound(objective, bound),
             x=x_out,
-            # A budget stop closed no gap, and an unverified point carries none.
             gap_certified=False,
-            bound_source="bnb_tree" if bound is not None else None,
+            bound_source=source,
             **common,
         )
     return SolveResult(
         status=str(limit) if limit is not None else "error",
         bound=bound,
         gap_certified=False,
-        bound_source="bnb_tree" if bound is not None else None,
+        bound_source=source,
         **common,
     )
 

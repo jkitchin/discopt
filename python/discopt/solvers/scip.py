@@ -26,9 +26,24 @@ Every node either has an exact SCIP spelling or is refused by name
   defines it as 0 while SCIP's ``log`` is undefined, so it is translated only when
   the argument is proven positive.
 
+* A fractional power or ``sqrt`` of a base not proven nonnegative gets the row
+  ``base >= 0``. discopt evaluates both to NaN on a negative base, so no point
+  there is feasible, and the row is exact; without it SCIP returns such points.
+
+SCIP's optimality claim is never certified (``solver._solve_scip``): its bound is
+reported as information under ``bound_source="external_solver"``, because SCIP's
+presolve was measured certifying a bound past the true optimum of MINLPLib
+``ex1252a`` on a faithfully translated model.
+
 SCIP's answer is not taken on trust: the returned point is re-checked against
 the model with discopt's own evaluator (constraint rows, bounds, integrality) and
-its objective is recomputed there, before ``solver.py`` reports it.
+its objective is recomputed there, before ``solver.py`` reports it. A point that
+sits on SCIP's own numerical limits -- within :data:`_SINGULAR_DISTANCE` of a
+singularity the declared box admits (a denominator, the base of a negative power,
+``cos`` under ``tan``, a ``log`` argument), or with a value past SCIP's
+``numerics/hugeval`` -- is reported as such (``raw["numerics"]``) and is never
+certified: on ``min 1/x`` over ``[-2, 2]`` SCIP stops at ``x = -1e-9`` and calls
+``-1e9`` optimal, but the problem is unbounded.
 """
 
 from __future__ import annotations
@@ -67,6 +82,13 @@ from discopt.modeling.core import (
 _UNBOUNDED_SENTINEL = 0.9999 * CONSTRAINT_INF
 
 
+#: A returned point this close to a singularity the box admits is SCIP stopping at
+#: its feasibility tolerance in front of a pole, not an optimum (``min 1/x`` on
+#: ``[-2, 2]`` returns ``x = -1e-9``). Distances are absolute, in the units of the
+#: singular expression (denominator, ``cos`` under ``tan``, ``log`` argument).
+_SINGULAR_DISTANCE = 1e-6
+
+
 class ScipUnsupportedError(NotImplementedError):
     """The model contains something with no exact SCIP spelling."""
 
@@ -92,16 +114,32 @@ def _is_number(v: Any) -> bool:
     return isinstance(v, (int, float))
 
 
-def _proven_positive(expr: Expression) -> bool:
-    """True when ``expr > 0`` holds on the whole declared box.
+def _enclosure(expr: Expression) -> tuple[float, float]:
+    """Sound interval enclosure of ``expr`` over the declared box.
 
-    Uses the sound DAG interval enclosure (``(-inf, inf)`` on anything it does
-    not understand), so a ``False`` only ever costs a refusal, never a wrong model.
+    ``(-inf, inf)`` on anything the enclosure does not understand, so every test
+    below errs towards a refusal, a domain row or a singular site -- never towards
+    a wrong model or an unearned certificate.
     """
     from discopt._relax.binary_multilinear_reform import _interval_of_dag
 
-    lo, _ = _interval_of_dag(expr)
+    lo, hi = _interval_of_dag(expr)
+    return float(lo), float(hi)
+
+
+def _proven_positive(expr: Expression) -> bool:
+    """True when ``expr > 0`` holds on the whole declared box."""
+    lo, _ = _enclosure(expr)
     return bool(np.isfinite(lo) and lo > 0.0)
+
+
+def _tan_pole_possible(arg: Expression) -> bool:
+    """Whether ``tan(arg)`` can meet a pole ``pi/2 + k*pi`` on the declared box."""
+    lo, hi = _enclosure(arg)
+    if not (np.isfinite(lo) and np.isfinite(hi)):
+        return True
+    k = math.ceil((lo - math.pi / 2) / math.pi)
+    return math.pi / 2 + k * math.pi <= hi
 
 
 class _ScipBuilder:
@@ -119,6 +157,10 @@ class _ScipBuilder:
         self.cols: list = []
         self._offset: dict[int, int] = {}
         self.epigraph = None
+        #: ``(description, scip_expr)`` for every singularity the declared box
+        #: admits; evaluated at SCIP's point by :func:`solve_scip`.
+        self.singular_sites: list[tuple[str, Any]] = []
+        self._n_domain_rows = 0
 
     # ---- model ------------------------------------------------------------
     def build(self):
@@ -151,14 +193,11 @@ class _ScipBuilder:
 
     def _add_row(self, lhs, sense: str, rhs: float, name: str) -> None:
         if _is_number(lhs):
-            # A row with no variable left in it (every term folded to a constant):
-            # SCIP's addCons wants an expression, and dropping the row would hide
-            # an infeasible model, so the constant relation is checked here.
-            ok = {"<=": lhs <= rhs + 1e-9, ">=": lhs >= rhs - 1e-9, "==": abs(lhs - rhs) <= 1e-9}
-            if not ok[sense]:
-                lhs = self.ps.Expr() + float(lhs)  # let SCIP prove infeasibility
-            else:
-                return
+            # A row with no variable left in it (every term folded to a constant).
+            # SCIP's addCons wants an expression; handing it the constant row keeps
+            # the judgement on SCIP's own feasibility tolerance instead of a second
+            # one here, and an infeasible constant row is SCIP's to prove.
+            lhs = self.ps.Expr() + float(lhs)
         if sense == "<=":
             self.scip.addCons(lhs <= rhs, name=name)
         elif sense == ">=":
@@ -194,6 +233,18 @@ class _ScipBuilder:
             self.epigraph = t
             obj = t
         self.scip.setObjective(obj, "maximize" if maximize else "minimize")
+
+    def _nonnegative_domain(self, base: Expression, base_expr) -> None:
+        """Add ``base >= 0`` unless the box already proves it (see module docstring)."""
+        lo, _ = _enclosure(base)
+        if np.isfinite(lo) and lo >= 0.0:
+            return
+        self._n_domain_rows += 1
+        self.scip.addCons(base_expr >= 0.0, name=f"_discopt_domain_{self._n_domain_rows}")
+
+    def _singular_if(self, possible: bool, what: str, node: Expression, site_expr) -> None:
+        if possible and not _is_number(site_expr):
+            self.singular_sites.append((f"{what} in {node!r}", site_expr))
 
     def _resolve(self, ie: IndexExpression) -> Optional[int]:
         """Flat slot of ``x[i]``/``x[i, j]`` within its variable, else ``None``."""
@@ -284,12 +335,26 @@ class _ScipBuilder:
         if n.op == "/":
             if _is_number(b) and b == 0.0:
                 raise ValueError(f"Division by the constant 0 in {n!r}.")
+            lo, hi = _enclosure(n.right)
+            self._singular_if(lo <= 0.0 <= hi, "the denominator", n, b)
             return a / b
         if n.op == "**":
             if _is_number(b):
+                p = float(b)
+                fractional = p != math.floor(p)
                 if _is_number(a):
-                    return float(a) ** float(b)
-                return a ** float(b)
+                    if fractional and a < 0:
+                        raise ValueError(
+                            f"{n!r} folds to the constant {a!r} ** {p!r}, which is not a "
+                            "real number (discopt evaluates it to NaN)."
+                        )
+                    return float(a) ** p
+                if fractional:
+                    self._nonnegative_domain(n.left, a)
+                if p < 0:
+                    lo, hi = _enclosure(n.left)
+                    self._singular_if(lo <= 0.0 <= hi, "the base of a negative power", n, a)
+                return a**p
             # Non-constant exponent: exp(b*log(a)) is discopt's own definition,
             # and is the same function only where a > 0.
             if _is_number(a) and a > 0:
@@ -356,9 +421,18 @@ class _ScipBuilder:
             x = self.expr(arg)
             return x * math.log(x) if _is_number(x) else x * self.ps.log(x)
         if fn in self._UNARY and len(n.args) == 1:
-            x = self.expr(n.args[0])
+            (arg,) = n.args
+            x = self.expr(arg)
             if _is_number(x):
                 return float(self._UNARY_NUM[fn](float(x)))
+            if fn == "sqrt":
+                self._nonnegative_domain(arg, x)
+            elif fn in ("log", "log2", "log10"):
+                self._singular_if(_enclosure(arg)[0] <= 0.0, "the log argument", n, x)
+            elif fn == "log1p":
+                self._singular_if(_enclosure(arg)[0] <= -1.0, "the log1p argument", n, 1.0 + x)
+            elif fn == "tan":
+                self._singular_if(_tan_pole_possible(arg), "cos under tan", n, self.ps.cos(x))
             return self._UNARY[fn](self.ps, x)
         raise ScipUnsupportedError(
             f"Function {n.func_name!r} has no exact SCIP expression (SCIP supports "
@@ -369,7 +443,7 @@ class _ScipBuilder:
 
 
 def build_scip_model(model: Model):
-    """Translate ``model`` into ``(pyscipopt.Model, cols, epigraph_var)``.
+    """Translate ``model`` into ``(pyscipopt.Model, cols, epigraph_var, singular_sites)``.
 
     ``model`` must already be algebraic (GDP/indicator/SOS/logical relations
     lowered); :func:`discopt.solver` does that before calling here.
@@ -377,22 +451,24 @@ def build_scip_model(model: Model):
     ps = _load_scip()
     b = _ScipBuilder(model, ps)
     scip = b.build()
-    return scip, b.cols, b.epigraph
+    return scip, b.cols, b.epigraph, b.singular_sites
 
 
-# SCIP status string -> discopt status, for the exits that carry no proof.
+# SCIP status string -> (discopt status with a point, discopt status without one),
+# for the exits that carry no proof. "feasible" claims a point, so an exit that
+# has none never maps to it.
 _LIMIT_STATUS = {
-    "timelimit": "time_limit",
-    "nodelimit": "iteration_limit",
-    "totalnodelimit": "iteration_limit",
-    "stallnodelimit": "iteration_limit",
-    "memlimit": "error",
-    "userinterrupt": "error",
-    "sollimit": "feasible",
-    "bestsollimit": "feasible",
-    "restartlimit": "iteration_limit",
-    "primallimit": "feasible",
-    "duallimit": "feasible",
+    "timelimit": ("time_limit", "time_limit"),
+    "nodelimit": ("node_limit", "node_limit"),
+    "totalnodelimit": ("node_limit", "node_limit"),
+    "stallnodelimit": ("node_limit", "node_limit"),
+    "restartlimit": ("iteration_limit", "iteration_limit"),
+    "memlimit": ("feasible", "error"),
+    "userinterrupt": ("feasible", "error"),
+    "sollimit": ("feasible", "unknown"),
+    "bestsollimit": ("feasible", "unknown"),
+    "primallimit": ("feasible", "unknown"),
+    "duallimit": ("feasible", "unknown"),
 }
 
 
@@ -404,18 +480,21 @@ def solve_scip(
     abs_gap_tolerance: Optional[float],
     initial_point: Optional[np.ndarray],
     options: Optional[dict],
-    verbose: bool = False,
 ) -> dict[str, Any]:
     """Run SCIP on ``model`` and return its raw outcome.
 
     Returns a dict with ``scip_status``, ``x`` (flat, discopt layout, or
     ``None``), ``scip_objective``, ``dual_bound`` (model sense), ``gap``,
-    ``node_count`` and ``version``. Interpreting and verifying it is the
-    caller's job (``solver._solve_scip``).
+    ``node_count``, ``version`` and ``numerics`` -- the reasons, if any, that the
+    answer rests on SCIP's numerical limits rather than on the problem (see the
+    module docstring). Interpreting and verifying it is the caller's job
+    (``solver._solve_scip``).
+
+    SCIP's log is hidden; ``options={"display/verblevel": 4}`` shows it, since the
+    options are applied after the default is set.
     """
-    scip, cols, _ = build_scip_model(model)
-    if not verbose:
-        scip.hideOutput()
+    scip, cols, _, sites = build_scip_model(model)
+    scip.hideOutput()
     if time_limit is not None and np.isfinite(time_limit):
         scip.setParam("limits/time", max(float(time_limit), 0.0))
     scip.setParam("limits/gap", float(gap_tolerance))
@@ -442,11 +521,24 @@ def solve_scip(
     status = scip.getStatus()
     x = None
     scip_obj = None
+    numerics: list[str] = []
+    hugeval = float(scip.getParam("numerics/hugeval"))
     if scip.getNSols() > 0:
         best = scip.getBestSol()
         x = np.array([scip.getSolVal(best, v) for v in cols], dtype=np.float64)
         scip_obj = float(scip.getObjVal())
+        for what, site in sites:
+            val = float(scip.getSolVal(best, site))
+            if abs(val) <= _SINGULAR_DISTANCE:
+                numerics.append(f"the point sits at {what} = {val:.3g}, at a singularity")
+        if np.any(np.abs(x) >= hugeval):
+            k = int(np.argmax(np.abs(x)))
+            numerics.append(f"variable slot {k} = {x[k]:.3g} is past numerics/hugeval")
+        if abs(scip_obj) >= hugeval:
+            numerics.append(f"the objective {scip_obj:.3g} is past numerics/hugeval")
     dual = float(scip.getDualbound())
+    if abs(dual) < _UNBOUNDED_SENTINEL and abs(dual) >= hugeval:
+        numerics.append(f"the dual bound {dual:.3g} is past numerics/hugeval")
     return {
         "scip_status": status,
         "x": x,
@@ -457,9 +549,14 @@ def solve_scip(
         "n_scip_vars": int(scip.getNVars()),
         "n_scip_conss": int(scip.getNConss()),
         "version": f"SCIP {scip.version()}",
+        "numerics": numerics,
+        "singular_sites": [what for what, _ in sites],
     }
 
 
-def limit_status(scip_status: str) -> Optional[str]:
+def limit_status(scip_status: str, has_point: bool) -> Optional[str]:
     """discopt status for a SCIP limit exit, or ``None`` if not a limit exit."""
-    return _LIMIT_STATUS.get(scip_status)
+    pair = _LIMIT_STATUS.get(scip_status)
+    if pair is None:
+        return None
+    return pair[0] if has_point else pair[1]

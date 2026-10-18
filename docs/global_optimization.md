@@ -247,7 +247,7 @@ If all five are "yes," `solve()` should return `status="optimal"` with
 | Convex, or bounded factorable nonconvex (default) | `model.solve()` |
 | Hard nonconvex MINLP, default B&B stalls | `model.solve(solver="amp")` |
 | Hard nonconvex MINLP with Gurobi available for MILP masters | `model.solve(solver="amp", milp_solver="gurobi")` |
-| Cross-check against, or hand the whole model to, SCIP | `model.solve(solver="scip")` (`pip install discopt[scip]`) |
+| Cross-check against, or hand the whole model to, SCIP (reported, not certified) | `model.solve(solver="scip")` (`pip install discopt[scip]`) |
 | Stubborn bilinear/QCQP gap | `model.solve(rlt_cuts=True)` (+ PSD/SOC cuts) |
 | Only a feasible/local point is needed quickly | `model.solve(time_limit=...)`, read the incumbent |
 
@@ -261,12 +261,28 @@ algorithms and select Gurobi only where it is a matrix subsolver, for example
 open-source global solver SCIP through PySCIPOpt, whose wheel bundles SCIP, so
 no license or separate install is needed. The expression DAG is translated in
 memory, not through an `.nl` file. Every node is either translated exactly or
-refused by name: SCIP has no `atan`, `erf`, `min`/`max` or opaque `dm.custom`,
-and `x**y` and `xlogx` are only translated where their argument is provably
-positive. SCIP's answer is not taken on trust. discopt re-verifies the returned
-point on the declared model and recomputes its objective, so a point it rejects
-is reported `feasible` and uncertified. Pass SCIP parameters as
-`scip_options={"limits/nodes": 1000, ...}`. The route bypasses discopt's own
+refused by name: SCIP has no `atan`, `erf`, `min`/`max` or opaque `dm.custom`;
+`x**y` and `xlogx` are only translated where their argument is provably
+positive; and a fractional power or `sqrt` whose base may be negative gets the
+row `base >= 0`, because discopt evaluates those to NaN there.
+
+**SCIP's optimality claim is reported, never certified.** A SCIP `optimal` comes
+back as `status="feasible"` with `gap_certified=False`. SCIP's own status is in
+`result.termination`, and its dual bound is kept as information with
+`bound_source="external_solver"` and `bound_valid=False`. This is measured, not
+cautious: on MINLPLib `ex1252a`, SCIP's presolve certified 131452.97 with a bound
+above the true optimum 128893.74, on a model whose reference solution is
+feasible. discopt cannot check a bound it did not prove.
+
+The point is checked: discopt re-verifies it on the declared model and recomputes
+its objective. An answer that rests on SCIP's numerical limits is reported
+without a bound. That means a point at a singularity the box admits (`1/x` near
+0, `tan` near a pole, `log` near 0), or a value past SCIP's `numerics/hugeval`.
+The usual cause is an unbounded problem: SCIP stops at `x = -1e-9` on `min 1/x`
+and calls `-1e9` optimal.
+
+Pass SCIP parameters as `scip_options={"limits/nodes": 1000, ...}`, and use
+`{"display/verblevel": 4}` to see SCIP's log. The route bypasses discopt's own
 search, so options that steer it (`threads`, `partitions`, `strategy`, ...) are
 reported as ignored.
 
