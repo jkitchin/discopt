@@ -176,20 +176,21 @@ def _forward_cell(ser, path, own_dir):
 
 
 def _comparable(text: str) -> str:
-    """*text* with what is not model content normalised away, as the matrix test does.
+    """*text* without what is not model content, for a forward comparison.
 
-    The embedded result is checked live. A ``from_nl`` model's source path is a
-    fact about the machine (and checkout) that wrote the document; its file name
-    and SHA-256 stay compared.
+    The embedded result is checked live (and holds a wall time). Where a
+    ``from_nl`` model's ``.nl`` was read from is a fact about the machine that
+    wrote the document -- the digest identifies the content and stays compared --
+    so the path is reduced to its file name, as ``test_serialize_compat_matrix``
+    does; otherwise a reader that knows ``nl_source`` reports every newer
+    ``from_nl`` document written on another machine as ``loads_different``.
     """
-    import json as _json
-
-    doc = _json.loads(text)
+    doc = json.loads(text)
     doc.pop("solution", None)
     source = doc.get("state", {}).get("nl_source")
-    if source and "path" in source:
+    if isinstance(source, dict) and "path" in source:
         source["path"] = os.path.basename(source["path"])
-    return _json.dumps(doc, indent=1)
+    return json.dumps(doc, indent=1)
 
 
 def _first_difference(a: str, b: str) -> str:
@@ -212,7 +213,18 @@ def _merge_manifest(path: str, label: str, report: dict, forward_dir, add_only: 
         with open(path, encoding="utf-8") as fh:
             manifest = json.load(fh)
     entry = manifest["versions"].setdefault(label, {})
-    for key in ("schema", "commit", "discopt_version", "python"):
+    # ``python`` is the WRITER's interpreter: it is checked only by a run that
+    # (re)writes this version's fixtures. A forward-only run is a reader run --
+    # the same commit, possibly another interpreter -- and records its own under
+    # ``forward_python``.
+    # An add-only ``--cases`` run is a writer run for those cases alone: its
+    # interpreter is checked against nothing and, when it differs from the one
+    # that wrote the version's other fixtures, recorded per case under
+    # ``cases_python``.
+    writer_keys = ("schema", "commit", "discopt_version") + (
+        ("python",) if ("cases" in report and not add_only) or "python" not in entry else ()
+    )
+    for key in writer_keys:
         if entry.get(key) not in (None, report[key]):
             sys.exit(f"refusing: manifest {label}.{key}={entry[key]!r}, this run {report[key]!r}")
         entry[key] = report[key]
@@ -222,6 +234,9 @@ def _merge_manifest(path: str, label: str, report: dict, forward_dir, add_only: 
         if clash:
             sys.exit(f"refusing: {label} already records {clash}; shipped records are immutable")
         existing.update(report["cases"])
+        if report["python"] != entry["python"]:
+            for case in report["cases"]:
+                entry.setdefault("cases_python", {})[case] = report["python"]
     elif "cases" in report:
         entry["cases"] = report["cases"]
     if forward_dir:
@@ -229,6 +244,7 @@ def _merge_manifest(path: str, label: str, report: dict, forward_dir, add_only: 
         if not writer.startswith("v"):
             sys.exit(f"--forward directory must be named v<version>, got {writer!r}")
         entry.setdefault("forward", {})[writer[1:]] = report["forward"]
+        entry.setdefault("forward_python", {})[writer[1:]] = report["python"]
     manifest["versions"] = dict(sorted(manifest["versions"].items(), key=lambda kv: _key(kv[0])))
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=1, sort_keys=False)

@@ -1090,7 +1090,14 @@ class DeclaredLogic:
 
     * a disjunction holds when at least one disjunct has every item holding
       (``SELECT_ONE`` projects to the union of its disjuncts; nested
-      disjunctions recurse);
+      disjunctions recurse) -- the ``"any"`` reading, used when the disjunction
+      has no indicator columns, i.e. an ``either_or`` whose ``indicators`` were
+      never read. Once they are read (#1775 G1.1) the point carries its own
+      selection and the ``"sel"`` reading applies instead: every *selected*
+      disjunct must hold. The two are deliberately different -- an unread
+      disjunction has no declared selection to check -- so do not unify them.
+      (``add_disjunction`` blocks are judged row by row on the indicator rule
+      below, which is the ``"sel"`` reading per row);
     * an indicator row must hold when the indicator equals its active value;
     * SOS1 allows one nonzero member, SOS2 two that are adjacent;
     * a logical constraint is evaluated on the booleans' integral values.
@@ -1114,27 +1121,40 @@ class DeclaredLogic:
             self._leaves.append(c)
             return ("leaf", len(self._leaves) - 1)
 
-        def disjunction(c):
-            arms = []
-            for disjunct in c.disjuncts:
-                items = []
-                for item in disjunct:
-                    if type(item) is Constraint:
-                        items.append(leaf(item))
-                    elif isinstance(item, _DisjunctiveConstraint):
-                        items.append(disjunction(item))
-                    else:
-                        raise TypeError(
-                            f"disjunct item of type {type(item).__name__} is not checkable"
-                        )
-                arms.append(("all", items))
-            return ("any", arms, c.name)
+        def arm(d):
+            items = []
+            for row in d.rows:
+                if type(row) is not Constraint:
+                    raise TypeError(f"disjunct item of type {type(row).__name__} is not checkable")
+                items.append(leaf(row))
+            items.extend(disjunction(child) for child in d.children)
+            return ("all", items)
 
+        def disjunction(node):
+            # #1775 G1.1: read through the GDP tree. When the disjunction's
+            # indicators were read they are model columns, and the point's own
+            # selection is what must hold ("sel"); otherwise any one disjunct
+            # holding suffices ("any"), the projection onto the model variables.
+            if node.disjuncts and all(d.indicator is not None for d in node.disjuncts):
+                sel = []
+                for d in node.disjuncts:
+                    cols = _column_indices(d.indicator.variable, model)
+                    if cols.size != 1:
+                        raise ValueError(f"indicator of {node.name!r} is not a scalar")
+                    sel.append((int(cols[0]), float(d.active_value), arm(d)))
+                return ("sel", sel, node.name)
+            return ("any", [arm(d) for d in node.disjuncts], node.name)
+
+        from discopt.gdp.tree import gdp_tree
+
+        has_disj = any(isinstance(c, _DisjunctiveConstraint) for c in model._constraints)
+        tree = gdp_tree(model) if has_disj else None
         for c in model._constraints:
             if type(c) is Constraint:
                 continue
             if isinstance(c, _DisjunctiveConstraint):
-                self._nodes.append(disjunction(c))
+                assert tree is not None
+                self._nodes.append(disjunction(tree.node_for(c)))
             elif isinstance(c, _IndicatorConstraint):
                 cols = _column_indices(c.indicator, model)
                 if cols.size != 1:
@@ -1263,6 +1283,13 @@ class DeclaredLogic:
         if kind == "ind":
             _k, col, active, sub, _name = node
             return self._score(sub, scores, x) if float(x[col]) == active else 0.0
+        if kind == "sel":
+            # Every selected disjunct must hold; how many are selected is the
+            # model's own exactly(1) row, judged with the algebraic rows.
+            return max(
+                (self._score(a, scores, x) for col, act, a in node[1] if float(x[col]) == act),
+                default=0.0,
+            )
         raise AssertionError(kind)
 
     def _realise(self, node, scores, x, out: list[int]) -> None:
@@ -1279,6 +1306,10 @@ class DeclaredLogic:
             _k, col, active, sub, _name = node
             if float(x[col]) == active:
                 self._realise(sub, scores, x, out)
+        elif kind == "sel":
+            for col, act, a in node[1]:
+                if float(x[col]) == act:
+                    self._realise(a, scores, x, out)
 
     def check(self, model, x_snapped) -> VerifyResult:
         """Verdict on the point's integral realisation (see the class docstring)."""
@@ -1287,10 +1318,10 @@ class DeclaredLogic:
         for pos, node in enumerate(self._nodes):
             kind = node[0]
             label = node[-1] if node[-1] is not None else f"#{pos}"
-            if kind in ("any", "ind"):
+            if kind in ("any", "ind", "sel"):
                 worst = self._score(node, scores, x)
                 if worst > 1.0:
-                    what = "disjunction" if kind == "any" else "indicator constraint"
+                    what = "indicator constraint" if kind == "ind" else "disjunction"
                     return VerifyResult(
                         False,
                         None,
@@ -1322,7 +1353,7 @@ class DeclaredLogic:
         scores = self._leaf_scores(model, x)
         chosen: list[int] = []
         for node in self._nodes:
-            if node[0] in ("any", "ind"):
+            if node[0] in ("any", "ind", "sel"):
                 self._realise(node, scores, x, chosen)
         if not chosen:
             return base_evaluator

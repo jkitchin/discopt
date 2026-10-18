@@ -745,27 +745,63 @@ a documented hole ("untested before 1.N"). O5 — encode logical constraints at 
 
 ## 9. Change log
 
-- **v1.6 (2026-10-18, WP-3 done)** — Three corrections to WP-3 as planned. (a) The
-  plan said to refuse a cardinality `k` outside `[0, len(operands)]`; the API
-  builds such a constraint (an infeasible or vacuous one), and a reader must not
-  refuse a model the writer can produce, so `k` is required to be an `int` (not
-  `bool`) and nothing more. (b) "`rows` pointing at a non-`Constraint`": a
-  lowering's rows are a slice of `_constraints` and may be any row kind, so
-  positions are checked for range and uniqueness only; a row no longer in the
-  model is refused **on write**. (c) The lowering-rows element is written only when
-  the rows are tracked: an untracked record keeps the two-element 1.4 form, so a
-  1.4 reader still reads it (the three-element form is refused by every older
-  reader — recorded in the forward cells). The logic is a flat table, not nested
-  JSON: `land(...)` builds a left-deep chain (a 3000-link chain is tested). Leaves
-  must be a binary variable of size 1 or an element of a binary array — what
-  `Model.boolean` builds — refused both ways otherwise. Two fixture cases were
-  added to the registry with the generator's new `--cases` mode, which records a
-  case for an already-shipped version without touching its fixtures (an existing
-  record is refused, not replaced). The forward check now compares a `from_nl`
-  source by file name, as the matrix test does (a 1.5 document written from a
-  different checkout path read as `loads_different` before). `_REFUSED_RELATIONS`
-  is empty but kept; the `CustomCall` and reformulation-output refusals are
-  documented as permanent.
+- **v1.6 (2026-10-18, WP-3 done; #1785 carrying #1782)** — Schema 1.5 is one
+  format with three additions, each read only from a document of minor ≥ 5
+  (`_SCHEMA_MINOR_LOGIC_LOWERING_INDICATORS`) and refused as malformed in an older
+  one: the `logical` row kind (WP-3), tracked complementarity lowering rows (WP-3),
+  and `indicators` on a disjunction row (#1775 G1.1, #1782). The two PRs had each
+  claimed 1.5 for their own half; neither was released, so they were combined into
+  one 1.5 rather than one taking 1.6.
+
+  *WP-3.* Three corrections to WP-3 as planned. (a) The plan said to refuse a
+  cardinality `k` outside `[0, len(operands)]`; the API builds such a constraint
+  (an infeasible or vacuous one), and a reader must not refuse a model the writer
+  can produce, so `k` is required to be an `int` (not `bool`) and nothing more.
+  (b) "`rows` pointing at a non-`Constraint`": a lowering's rows are a slice of
+  `_constraints` and may be any row kind, so positions are checked for range and
+  uniqueness only; a row no longer in the model is refused **on write**. (c) The
+  lowering-rows element is written only when the rows are tracked: an untracked
+  record keeps the two-element 1.4 form, so a 1.4 reader still reads it (the
+  three-element form is refused by every older reader — recorded in the forward
+  cells). The logic is a flat table, not nested JSON: `land(...)` builds a
+  left-deep chain (a 3000-link chain is tested). Leaves must be a binary variable
+  of size 1 or an element of a binary array — what `Model.boolean` builds, and
+  what `either_or(...).indicators` allocates (a scalar binary per disjunct) —
+  refused both ways otherwise. `_REFUSED_RELATIONS` is empty but kept; the
+  `CustomCall` and reformulation-output refusals are documented as permanent.
+
+  *G1.1.* (d) `indicators` is written only once the indicators were read, so a
+  model that never reads them writes the 1.4 content under the 1.5 identifier
+  (`v1.5/mip_indicator_sos_disjunction.json` equals its v1.4 fixture but for the
+  schema string — tested). (e) On read it must be one distinct scalar binary column
+  per disjunct — the GDP lowering uses the columns as selectors, so a reference to
+  anything else would lower to a different model. (f) Logic over the indicators —
+  the case G1.1 exists for, refused on save while the format had no logical rows —
+  now round-trips: `test_logic_over_indicators_round_trips` saves, reloads and
+  solves to the same status, objective and node count, with the reloaded leaves
+  resolving to the reloaded indicator columns, against hand-computed optima (10
+  unconstrained, 45 under `mode_1 → pump_1`, 50 with `mode_0 ∧ ¬pump_1` forced).
+  No decoder change was needed: an indicator column is a scalar binary, which the
+  leaf check already accepts.
+
+  *Fixtures.* (g) One mechanism for a case added after a version shipped: the
+  generator's `--cases` mode records it for every already-shipped version
+  (#1782's `INTRODUCED` table, which declared absence instead, was removed). Each
+  record is what that version's writer did: `logical_constraints`,
+  `gdp_indicators` and `gdp_indicators_logic` are unbuildable at 1.0–1.4, each with
+  its own error; `complementarity_vector_lowered` is written by each. An existing
+  record is refused, not replaced, and no shipped fixture file changed. An add-only
+  run under a different interpreter records it per case in `cases_python`.
+  {FIXTURES}
+  (h) The generator compares a `from_nl` source by file name, as the matrix test
+  does (a 1.5 document written from a different checkout path read as
+  `loads_different` before), and records a forward-only reader run's interpreter
+  under `forward_python`. (i) Known hole in shipped readers, not fixable in place:
+  the pre-#1780 readers (1.0–1.4 at their manifest commits) do not track nested
+  keys and load `gdp_indicators.json` *without* the link — under the 1.4 reader
+  (`0ff5cb53`) it solves to **10.0** instead of **45.0**, with no warning — recorded
+  as `loaded` (nothing to compare: unbuildable there). The post-#1780 1.4 reader
+  (`ee504c66`) refuses it with "newer than this reader … Upgrade discopt".
 
 - **v1.5 (2026-10-18, #1780)** — Nested-record keys. A per-record table for every
   record kind would have had to mirror every decoder branch, so the reader instead

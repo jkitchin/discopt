@@ -28,7 +28,8 @@ Scope
 -----
 Carried: variables (name, type, shape, element-wise bounds), parameters, the
 objective, algebraic constraints, the fast-construction (Rust builder) linear
-blocks and builder objective, indicator / SOS / disjunctive relations,
+blocks and builder objective, indicator / SOS / disjunctive relations (with an
+``either_or`` disjunction's indicator columns once they were read, from 1.5),
 propositional logic constraints (``Model.logical``, from 1.5), complementarity
 relations together with this model's lowering marks and the rows each lowering
 emitted (from 1.5; earlier documents reload them as untracked), the starting
@@ -113,6 +114,11 @@ checked against ``_NODE_KEYS`` (per ``op``) and ``_INDEX_KEYS``; everything else
 by recording which keys the decoder reads and refusing the rest
 (:class:`_Record`), so no hand-kept list can fall behind the decoder. The ``x-``
 escape is top-level only: an ``x-`` key inside a record is refused like any other.
+A nested key a new minor adds is read only from documents of that minor or later
+(``indicators`` on a disjunction row, 1.5), so in an older document it is
+refused like any other key no writer of that minor produced. The same holds for
+the other two 1.5 additions, a ``"logical"`` row and a three-element ``lowered``
+entry: in a document of minor < 5 each is refused as malformed.
 
 ``discopt upgrade-model`` rewrites a document at the current ``SCHEMA``. Through
 1.1 an unknown top-level key was ignored; that is how ``provenance`` (1.1) stayed
@@ -206,11 +212,26 @@ logger = logging.getLogger(__name__)
 #: as with 1.3, absence has two meanings that only the minor separates: "not read
 #: from a file" (1.4) versus "the writer did not record it" (<= 1.3).
 #:
-#: 1.5 encodes propositional logic constraints (a ``"logical"`` row with a
-#: ``logic`` table) and the rows each complementarity lowering emitted (a third
-#: element of every ``lowered`` entry). Neither is additive for a 1.4 reader: it
-#: refuses the unknown row kind and the three-element entry (measured, see the
-#: fixture manifest's forward cells), which is the clean outcome.
+#: 1.5 (#1785 serialize WP-3 together with #1775 G1.1) adds three things, none
+#: of them additive for a 1.4 reader:
+#:
+#: * propositional logic constraints -- a ``"logical"`` row with a ``logic``
+#:   table;
+#: * the rows each complementarity lowering emitted -- a third element of a
+#:   ``lowered`` entry, written only when the rows are tracked;
+#: * ``indicators`` on a ``disjunction`` row: the node references of the binary
+#:   columns that ``_DisjunctiveConstraint.indicators`` allocated, written only
+#:   once they were read. A disjunction whose indicators were never read is
+#:   written exactly as at 1.4.
+#:
+#: All three are read only from a document of minor >= 5
+#: (``_SCHEMA_MINOR_LOGIC_LOWERING_INDICATORS``); in an older document each is
+#: refused as content no writer of that minor produced. A 1.4 reader refuses
+#: the unknown row kind and the three-element entry, and (with #1783's
+#: nested-key strictness) the ``indicators`` key as newer content ("upgrade
+#: discopt") rather than dropping it -- which would leave the columns in the
+#: model with nothing tying them to the disjunction. Readers shipped before
+#: #1783 drop ``indicators`` silently; see the fixture manifest's forward cells.
 SCHEMA = "discopt.model/1.5"
 
 #: Major version this reader accepts. A document whose major differs is refused
@@ -220,6 +241,12 @@ SCHEMA_MAJOR = 1
 #: Minor at which the blanket ``_enc_tree`` over the solution subtree was dropped
 #: (#1292). Documents below it need that encoding undone on read.
 _SCHEMA_MINOR_UNTAGGED_SOLUTION = 2
+
+#: Minor that first wrote the three 1.5 additions: a ``"logical"`` row, the
+#: tracked rows of a complementarity lowering (a three-element ``lowered`` entry)
+#: and ``indicators`` on a disjunction row (#1775 G1.1). Each is read only from a
+#: document of this minor or later.
+_SCHEMA_MINOR_LOGIC_LOWERING_INDICATORS = 5
 
 #: This reader's minor, the one ``SCHEMA`` names.
 SCHEMA_MINOR = int(SCHEMA.rsplit(".", 1)[1])
@@ -1329,6 +1356,12 @@ def _enc_rows(model: Model, table: _NodeTable) -> list[dict]:
                     "semantics": con.semantics.name,
                 }
             )
+            if con._indicator_vars is not None:
+                # #1775 G1.1 (schema 1.5): the indicator columns, once read.
+                # Dropping them would leave those binaries in the model with
+                # nothing tying them to the disjunction. Omitted while unread, so
+                # such a row is written exactly as at 1.4.
+                rows[-1]["indicators"] = [table.add(v) for v in con._indicator_vars]
         elif t is _LogicalConstraint:
             rows.append({"kind": "logical", "logic": _enc_logic(con, table), "name": con.name})
         else:
@@ -1467,7 +1500,38 @@ def _dec_logic(entries: Any, nodes: list, name: Any) -> Any:
     return built[-1]
 
 
-def _dec_rows(docs: list[dict], nodes: list) -> list:
+def _dec_indicators(d: dict, nodes: list) -> tuple:
+    """The ``indicators`` of a 1.5+ disjunction row: one scalar binary per disjunct.
+
+    Checked by kind as well as by reference: the GDP lowering uses these columns
+    as the disjunction's selectors (``reformulate_gdp``), so a reference to a
+    continuous column or a constant would lower without complaint to a different
+    model.
+    """
+    refs = d["indicators"]
+    name = d.get("name")
+    if not isinstance(refs, list):
+        raise SerializationError(
+            f"disjunction {name!r} has indicators {refs!r}; it must be a list of node "
+            "references (the key is omitted while the indicators are unread)"
+        )
+    if len(refs) != len(d["disjuncts"]):
+        raise SerializationError(
+            f"disjunction {name!r} has {len(refs)} indicators for {len(d['disjuncts'])} disjuncts"
+        )
+    cols = tuple(nodes[i] for i in refs)
+    for col in cols:
+        if not (type(col) is Variable and col.var_type == VarType.BINARY and col.shape == ()):
+            raise SerializationError(
+                f"disjunction {name!r} has an indicator that is not a scalar binary "
+                f"variable ({col!r})"
+            )
+    if len({id(c) for c in cols}) != len(cols):
+        raise SerializationError(f"disjunction {name!r} repeats an indicator column")
+    return cols
+
+
+def _dec_rows(docs: list[dict], nodes: list, minor: int) -> list:
     """Rebuild the ordered, heterogeneous ``_constraints`` list."""
     from discopt.modeling.core import DisjunctionSemantics
 
@@ -1527,9 +1591,24 @@ def _dec_rows(docs: list[dict], nodes: list) -> list:
                     name=d["name"],
                     method=d["method"],
                     semantics=DisjunctionSemantics[d["semantics"]],
+                    # Schema 1.5 (#1775 G1.1), and only once read. Not looked at
+                    # in an older document, so there it is refused as unread.
+                    _indicator_vars=(
+                        _dec_indicators(d, nodes)
+                        if minor >= _SCHEMA_MINOR_LOGIC_LOWERING_INDICATORS and "indicators" in d
+                        else None
+                    ),
                 )
             )
         elif kind == "logical":
+            if minor < _SCHEMA_MINOR_LOGIC_LOWERING_INDICATORS:
+                # No writer before 1.5 wrote a logical row (they refused the
+                # model), so an older document carrying one is malformed.
+                raise SerializationError(
+                    f"a schema 1.{minor} document carries a 'logical' row, which no "
+                    "writer of that version produced; the document is malformed or "
+                    "was edited by hand"
+                )
             name = d["name"]
             if name is not None and not isinstance(name, str):
                 raise SerializationError(f"logical row name must be a string, got {name!r}")
@@ -1704,7 +1783,9 @@ def _dec_complementarities(doc: Optional[dict], model: Model, nodes: list, minor
     for entry in doc["lowered"]:
         # Two elements: untracked rows (`None`) -- all a writer before 1.5 could
         # say. Three, from 1.5 only: the tracked rows' positions.
-        if not isinstance(entry, list) or len(entry) not in ((2, 3) if minor >= 5 else (2,)):
+        if not isinstance(entry, list) or len(entry) not in (
+            (2, 3) if minor >= _SCHEMA_MINOR_LOGIC_LOWERING_INDICATORS else (2,)
+        ):
             raise SerializationError(f"invalid complementarity lowering entry {entry!r}")
         rel, method = relations[entry[0]], entry[1]
         positions = entry[2] if len(entry) == 3 else None
@@ -2745,7 +2826,10 @@ def _decode_document(doc: dict, minor: int) -> Model:
     params = [_dec_parameter(d, model) for d in doc["parameters"]]
     nodes = _decode_nodes(doc["nodes"], variables, params)
 
-    model._constraints.extend(_dec_rows(doc["rows"], nodes))
+    model._constraints.extend(_dec_rows(doc["rows"], nodes, minor))
+    for row in model._constraints:
+        if type(row) is _DisjunctiveConstraint:
+            row._model = model  # #1775 G1.1: so ``indicators`` can be read
 
     for d in doc.get("builder_blocks", []):
         model.add_linear_constraints(

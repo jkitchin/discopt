@@ -423,7 +423,10 @@ def _canon_step(obj: Any) -> "str | list":
         return _canon_sparse(obj)
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         parts: list = [_Lit(f"{t.__name__}(")]
-        for i, f in enumerate(dataclasses.fields(obj)):
+        # A field marked ``metadata={"canon": False}`` is a back-reference (e.g.
+        # ``_DisjunctiveConstraint._model``), not part of what the datum says.
+        fields = [f for f in dataclasses.fields(obj) if f.metadata.get("canon", True)]
+        for i, f in enumerate(fields):
             parts.append(_Lit(f"{', ' if i else ''}{f.name}="))
             parts.append(getattr(obj, f.name))
         parts.append(_Lit(")"))

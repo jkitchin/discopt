@@ -338,6 +338,7 @@ def test_older_readers_refuse_1_5_logic_and_tracked_rows():
         "complementarity_lowered.json",  # tracked lowering rows: a 3-element entry
         "complementarity_vector_lowered.json",
         "from_nl_mpcc.json",
+        "gdp_indicators_logic.json",  # a "logical" row over either_or indicators
     }
     checked = 0
     for reader in ("1.0", "1.1", "1.2", "1.3", "1.4"):

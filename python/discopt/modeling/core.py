@@ -39,7 +39,7 @@ import time as _time
 import warnings
 import warnings as _warnings
 import weakref
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from dataclasses import replace as _dc_replace
 from enum import Enum
 from typing import (
@@ -8028,7 +8028,7 @@ class Model:
         name: Optional[str] = None,
         *,
         semantics: Union[DisjunctionSemantics, str] = DisjunctionSemantics.SELECT_ONE,
-    ):
+    ) -> "_DisjunctiveConstraint":
         """
         Add disjunctive constraint (Generalized Disjunctive Programming).
 
@@ -8064,14 +8064,21 @@ class Model:
         ...     [x[0] <= 5, x[1] >= 10],   # mode A
         ...     [x[0] >= 15, x[1] <= 3],   # mode B
         ... ], name="operating_mode")
+
+        The returned disjunction's :attr:`~_DisjunctiveConstraint.indicators` are
+        its per-disjunct selection booleans, usable in :meth:`logical`:
+
+        >>> d = m.either_or([[x[0] <= 5], [x[0] >= 15]], name="mode")
+        >>> m.logical(d.indicators[0].implies(other_disjunct_indicator))
         """
-        self._constraints.append(
-            _DisjunctiveConstraint(
-                disjuncts=disjuncts,
-                name=name,
-                semantics=_coerce_disjunction_semantics(semantics),
-            )
+        dc = _DisjunctiveConstraint(
+            disjuncts=disjuncts,
+            name=name,
+            semantics=_coerce_disjunction_semantics(semantics),
+            _model=self,
         )
+        self._constraints.append(dc)
+        return dc
 
     def complementarity(
         self,
@@ -12145,6 +12152,73 @@ class _DisjunctiveConstraint:
     # happens to emit. Only SELECT_ONE is implemented; the GDP pass refuses any
     # other value loudly rather than approximating it with one-way activation.
     semantics: DisjunctionSemantics = DisjunctionSemantics.SELECT_ONE
+    # #1775 G1.1: the model this disjunction was added to by ``Model.either_or``
+    # (``None`` for one built by ``Model.disjunction`` for nesting), and the
+    # indicator binaries, allocated on the first read of :attr:`indicators`. Until
+    # then the GDP pass creates its own selectors exactly as before, so a model that
+    # never reads them lowers bit-identically. Neither field takes part in equality.
+    # ``canon=False``: a back-reference, not data -- ``transformations``'
+    # structural fingerprint skips it (the indicator columns it allocated are
+    # fingerprinted through ``_indicator_vars``).
+    _model: Optional["Model"] = field(
+        default=None, compare=False, repr=False, metadata={"canon": False}
+    )
+    _indicator_vars: Optional[tuple[Variable, ...]] = field(default=None, compare=False, repr=False)
+
+    def __repr__(self) -> str:
+        # Short on purpose: ``Model.either_or`` returns this object, so a bare call
+        # in a notebook cell echoes it, and the dataclass default prints every row.
+        rows = [len(d) for d in self.disjuncts]
+        return (
+            f"_DisjunctiveConstraint(name={self.name!r}, rows per disjunct={rows}, "
+            f"semantics={self.semantics.name}, method={self.method!r}, "
+            f"indicators={'read' if self._indicator_vars is not None else 'unread'})"
+        )
+
+    @property
+    def indicators(self) -> tuple["BooleanVar", ...]:
+        """One ``BooleanVar`` per disjunct: true exactly when that disjunct is selected.
+
+        Allocated on first read: a binary column ``{name}_{k}_active`` per disjunct
+        is added to the model together with an ``exactly(1, ...)`` row, and the GDP
+        pass then uses these columns as the disjunction's selectors instead of
+        generating its own. So they can be referenced in :meth:`Model.logical`,
+        fixed, or priced in the objective (#1775 G1.1, spec M4).
+
+        Same select-one reading as :meth:`Model.add_disjunction`: an indicator at 0
+        means "not selected", not "this disjunct's predicate is false".
+
+        Only a disjunction added by :meth:`Model.either_or` has indicators. A nested
+        disjunction (built with :meth:`Model.disjunction`) is not on the model and
+        raises; its indicators are #1775 G1.2.
+        """
+        if self._indicator_vars is None:
+            model = self._model
+            if model is None or not any(c is self for c in model._constraints):
+                raise ValueError(
+                    f"disjunction {self.name or '<anon>'!r} is not a top-level "
+                    "Model.either_or disjunction of a model, so it has no indicators. "
+                    "Indicators of a nested disjunction are not implemented yet "
+                    "(#1775 G1.2)."
+                )
+            if self.name is not None:
+                base = self.name
+            else:  # by identity: dataclass ``==`` would compare the disjuncts
+                pos = next(i for i, c in enumerate(model._constraints) if c is self)
+                base = f"disjunction{pos}"
+            names = [f"{base}_{k}_active" for k in range(len(self.disjuncts))]
+            for nm in names:
+                model._check_name(nm)
+            # ``_eo_`` rather than ``add_disjunction``'s ``_disj_``: an
+            # ``add_disjunction(name=base)`` in the same model would otherwise
+            # share the row name, and name-keyed lookups become ambiguous.
+            row_name = f"_eo_{base}_select"
+            if any(getattr(c, "name", None) == row_name for c in model._constraints):
+                raise ValueError(f"Name {row_name!r} already used by a row in the model")
+            cols = tuple(model.binary(nm) for nm in names)
+            model.exactly(1, list(cols), name=row_name)
+            self._indicator_vars = cols
+        return tuple(BooleanVar(v) for v in self._indicator_vars)
 
 
 @dataclass

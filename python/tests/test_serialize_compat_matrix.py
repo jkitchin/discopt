@@ -48,11 +48,14 @@ def _key(label: str) -> tuple:
 #: Content a version did not write yet, keyed by the first version that writes it.
 #: Comparing an older document with today's build drops exactly these, nothing else.
 #: 1.3 added the registered-atom tag on nodes (#1248 A); 1.4 added ``state.nl_source``
-#: (a ``from_nl`` model's parse marker and digest-checked source path).
+#: (a ``from_nl`` model's parse marker and digest-checked source path); 1.5 added
+#: the rows a complementarity lowering emitted (dropped below) and ``indicators``
+#: on a disjunction row, written only once read -- which no case an older version
+#: could build does, so nothing is dropped for it.
 _WRITTEN_FROM = {
     (1, 3): "node atom tags",
     (1, 4): "state.nl_source",
-    (1, 5): "complementarity lowering rows",
+    (1, 5): "complementarity lowering rows; disjunction-row indicators",
 }
 
 
@@ -156,6 +159,8 @@ def test_unbuildable_cases_are_recorded_not_skipped():
     """Every registry case is either a fixture or an explicit ``unbuildable`` entry."""
     unbuildable = set()
     for version, entry in MANIFEST["versions"].items():
+        # A case added later is recorded for every shipped version (the
+        # generator's ``--cases`` mode), so every version lists every case.
         assert set(entry["cases"]) == set(reg.CASES), version
         for case, record in entry["cases"].items():
             assert ("file" in record) != ("unbuildable" in record), (version, case)
@@ -163,9 +168,13 @@ def test_unbuildable_cases_are_recorded_not_skipped():
                 unbuildable.add((version, case))
     # The generator records any exception as unbuildable, so a builder bug would
     # pass as a legitimate gap; pin the exact set.
-    # Logic is encoded from 1.5; every earlier writer refused it.
+    # Logic is encoded from 1.5, and `either_or` returns its indicators from 1.5;
+    # every earlier writer refused the first and could not build the second.
     expected = {("1.0", "registered_atom")} | {
-        (v, "logical_constraints") for v in VERSIONS if _key(v) < (1, 5)
+        (v, case)
+        for v in VERSIONS
+        if _key(v) < (1, 5)
+        for case in ("logical_constraints", "gdp_indicators", "gdp_indicators_logic")
     }
     assert unbuildable == expected, sorted(unbuildable ^ expected)
     # register_function arrived in 1.1, so 1.0 cannot build the atom case.
@@ -252,5 +261,7 @@ def test_forward_matrix_has_no_silent_misread():
                 assert outcome in {"loads_identical", "refused", "loaded"}, outcome
                 if outcome == "loaded":
                     case = fname.removesuffix(".json")
+                    # Nothing to compare: the case could not be built at the
+                    # reader's version.
                     assert "unbuildable" in own[case], (reader, writer, fname)
     assert seen > 0
