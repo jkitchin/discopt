@@ -435,6 +435,10 @@ def solve_lp_spatial_bb(
     ``False`` also means a *new* call site inherits the conservative gate instead of
     silently shipping the widening, which is the same reason ``row_scan_is_anytime``
     defaults to ``False`` in the tightening rules."""
+    # The budget clock starts at ENTRY (#1757): ``classify_nonlinear_terms`` below
+    # is not free (~1.6 s on QPLIB_3709's 165,300 products), and starting the clock
+    # after it let a caller's grant overrun by exactly that much.
+    t0 = time.perf_counter()
     if not _is_in_scope(model, mixed=mixed):
         return None
 
@@ -460,8 +464,6 @@ def solve_lp_spatial_bb(
     # here — ``_is_in_scope`` above rejects a model without one.)
     _obj = model._objective
     sgn = -1.0 if (_obj is not None and _obj.sense == ObjectiveSense.MAXIMIZE) else 1.0
-
-    t0 = time.perf_counter()
 
     # Ground-truth point evaluator for exact incumbent verification. An incumbent's
     # objective MUST be the true objective at a verified-feasible integer point,
