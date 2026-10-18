@@ -20,7 +20,8 @@ The release procedure that produces these entries is documented in
   lowered with `gdp_method` first. A function SCIP cannot express exactly
   (`atan`, `erf`, `min`/`max`, `dm.custom`) raises `ScipUnsupportedError`; it
   is never approximated. **Nothing the route returns is certified**: a SCIP
-  `optimal` is reported as `status="feasible"`, `gap_certified=False`, with
+  `optimal` is reported as `status="feasible"`, and a SCIP `infeasible` or
+  `unbounded` as `status="unknown"`, all with `gap_certified=False` and
   SCIP's bound tagged `bound_source="external_solver"` (new). On MINLPLib
   `ex1252a`, SCIP's presolve certified a bound past the true optimum. SCIP's
   point is re-verified by discopt. An answer resting on SCIP's numerical limits

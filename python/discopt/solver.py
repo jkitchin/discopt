@@ -11761,9 +11761,10 @@ def solve_model(
         :class:`~discopt.solvers.scip.ScipUnsupportedError`. SCIP parameters go
         in ``scip_options={...}``; ``time_limit``, ``gap_tolerance``,
         ``abs_gap_tolerance``, an explicit ``max_nodes`` and ``initial_point``
-        are forwarded. SCIP's point is re-verified by discopt, and SCIP's
-        optimality claim is never certified: the result is ``"feasible"`` with
-        ``gap_certified=False`` and SCIP's bound tagged
+        are forwarded. SCIP's point is re-verified by discopt, and no SCIP
+        claim is certified: an optimum is ``"feasible"`` and an infeasibility
+        or unboundedness claim ``"unknown"``, with ``gap_certified=False`` and
+        SCIP's bound tagged
         ``bound_source="external_solver"`` (#1784 review: SCIP's presolve was
         measured certifying a bound past the true optimum of ``ex1252a``).
         Use ``"mip-nlp"`` to dispatch to the MIP-NLP decomposition family
@@ -29301,13 +29302,15 @@ def _solve_scip(
     dual bound that contradicts discopt's own evaluation of the point raises
     rather than publishing it.
 
-    Nothing this route returns is certified (#1784 review, B2). SCIP's
-    ``optimal``/``gaplimit`` is reported as ``status="feasible"`` with
-    ``gap_certified=False``; SCIP's dual bound is kept as information under
-    ``bound_source="external_solver"``, and ``termination`` carries SCIP's own
-    status. SCIP's presolve was measured certifying a bound past the true optimum
-    of MINLPLib ``ex1252a`` on a faithfully translated model, and discopt has no
-    way to check a bound it did not prove.
+    Nothing this route returns is certified (#1784 review, B2/B3). SCIP's
+    ``infeasible``/``unbounded``/``inforunbd`` claims are reported as
+    ``status="unknown"``, and its ``optimal``/``gaplimit`` as
+    ``status="feasible"``, both with ``gap_certified=False``; SCIP's dual bound
+    is kept as information under ``bound_source="external_solver"``, and
+    ``termination`` carries SCIP's own status. SCIP's presolve was measured
+    certifying a bound past the true optimum of MINLPLib ``ex1252a`` on a
+    faithfully translated model, and discopt has no way to check a bound -- or an
+    infeasibility proof -- it did not prove.
 
     An answer that rests on SCIP's numerical limits (``raw["numerics"]``: a point
     at a singularity the box admits, or a value past SCIP's ``numerics/hugeval``)
@@ -29375,15 +29378,27 @@ def _solve_scip(
         solver_stats=stats,
     )
 
-    if scip_status == "infeasible":
-        return SolveResult(status="infeasible", gap_certified=True, **common)
-    if scip_status == "unbounded":
-        return SolveResult(status="unbounded", gap_certified=True, **common)
-    if scip_status == "inforunbd":
+    # #1784 review B3: an infeasibility or unboundedness claim is a certificate
+    # too, and comes from the same presolve that certified a bound past the
+    # optimum of ex1252a -- a presolve that can cut off the optimum can cut off
+    # every feasible point. ``"infeasible"``/``"unbounded"`` are proofs in
+    # discopt's vocabulary (``discopt.status``), so SCIP's claim is reported as
+    # ``"unknown"`` with SCIP's status in ``termination``.
+    _scip_claims = {
+        "infeasible": "SCIP claimed the model infeasible",
+        "unbounded": "SCIP claimed the model unbounded",
+        "inforunbd": "SCIP claimed the model infeasible or unbounded (not which)",
+    }
+    if scip_status in _scip_claims:
+        stats[f"scip/claimed_{scip_status}"] = 1.0
         return SolveResult(
             status="unknown",
             gap_certified=False,
-            error="SCIP proved the model infeasible or unbounded but not which.",
+            error=(
+                f"{_scip_claims[scip_status]}; discopt does not certify SCIP's proofs "
+                "(solver='scip' reports, never certifies). Solve with discopt's own "
+                "route for a certified answer."
+            ),
             **common,
         )
 

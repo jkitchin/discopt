@@ -126,7 +126,9 @@ def test_disjunction_is_lowered_and_solved():
 
 
 @pytest.mark.smoke
-def test_integer_infeasibility_is_scips_proof():
+def test_integer_infeasibility_is_scips_claim_not_a_certificate():
+    """Review B3: SCIP's ``infeasible`` comes from the presolve that certified a
+    bound past the optimum of ex1252a, so it is reported, not certified."""
     _require_scip()
     m = Model("inf")
     x = m.integer("x", lb=0, ub=5)
@@ -134,7 +136,9 @@ def test_integer_infeasibility_is_scips_proof():
     m.subject_to(x + y == 1.5)
     m.minimize(x + y)
     res = m.solve(solver="scip", time_limit=30)
-    assert res.status == "infeasible"
+    assert res.status == "unknown" and res.termination == "infeasible"
+    assert not res.gap_certified
+    assert res.solver_stats["scip/claimed_infeasible"] == 1.0
     assert res.algorithm_route.startswith("scip:")
 
 
@@ -147,8 +151,9 @@ def test_unbounded():
     m.subject_to(x >= y)
     m.maximize(x + y)
     res = m.solve(solver="scip", time_limit=30)
-    assert res.status in ("unbounded", "unknown")
-    assert not res.gap_certified or res.status == "unbounded"
+    assert res.status == "unknown"
+    assert res.termination in ("unbounded", "inforunbd")
+    assert not res.gap_certified
 
 
 @pytest.mark.smoke
@@ -196,7 +201,7 @@ def test_node_limit_is_uncertified_with_incumbent():
 
 
 @pytest.mark.smoke
-@pytest.mark.parametrize("rhs, status", [(1.0, "feasible"), (5.0, "infeasible")])
+@pytest.mark.parametrize("rhs, status", [(1.0, "feasible"), (5.0, "unknown")])
 def test_constant_only_row_is_kept_honest(rhs, status):
     """A row whose terms all fold to constants is checked, never dropped blindly."""
     _require_scip()
@@ -606,3 +611,40 @@ def test_a_relation_the_lowering_left_behind_is_refused(monkeypatch):
     monkeypatch.setattr(transformations, "get", lambda name: _Identity())
     with pytest.raises(ValueError, match="disjunctive"):
         m.solve(solver="scip")
+
+
+_SCIP_EXITS = [
+    "optimal",
+    "gaplimit",
+    "infeasible",
+    "unbounded",
+    "inforunbd",
+    "timelimit",
+    "nodelimit",
+    "totalnodelimit",
+    "stallnodelimit",
+    "restartlimit",
+    "memlimit",
+    "userinterrupt",
+    "sollimit",
+    "bestsollimit",
+    "primallimit",
+    "duallimit",
+    "unknown",
+]
+
+
+@pytest.mark.parametrize("with_point", [True, False], ids=["point", "no-point"])
+@pytest.mark.parametrize("scip_status", _SCIP_EXITS)
+def test_no_scip_exit_is_ever_certified(monkeypatch, scip_status, with_point):
+    """Review B3: pin ``gap_certified is False`` (and no proof status) for every
+    SCIP exit, with and without a point -- the route reports, never certifies."""
+    import discopt.solvers.scip as scip_backend
+
+    raw = _fake_raw([2.0] if with_point else None, 0.0 if with_point else None, 0.0, scip_status)
+    monkeypatch.setattr(scip_backend, "solve_scip", lambda *a, **k: raw)
+    res = _box_model().solve(solver="scip")
+    assert res.gap_certified is False
+    assert res.bound_valid is False
+    assert res.status not in ("optimal", "infeasible", "unbounded")
+    assert res.termination == scip_status

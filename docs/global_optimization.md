@@ -266,8 +266,9 @@ refused by name: SCIP has no `atan`, `erf`, `min`/`max` or opaque `dm.custom`;
 positive; and a fractional power or `sqrt` whose base may be negative gets the
 row `base >= 0`, because discopt evaluates those to NaN there.
 
-**SCIP's optimality claim is reported, never certified.** A SCIP `optimal` comes
-back as `status="feasible"` with `gap_certified=False`. SCIP's own status is in
+**SCIP's claims are reported, never certified.** A SCIP `optimal` comes back as
+`status="feasible"`, and a SCIP `infeasible` or `unbounded` comes back as
+`status="unknown"`, all with `gap_certified=False`. SCIP's own status is in
 `result.termination`, and its dual bound is kept as information with
 `bound_source="external_solver"` and `bound_valid=False`. This is measured, not
 cautious: on MINLPLib `ex1252a`, SCIP's presolve certified 131452.97 with a bound

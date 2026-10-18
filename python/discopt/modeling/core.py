@@ -9117,8 +9117,9 @@ class Model:
             not provably positive) raises ``ScipUnsupportedError`` instead of
             being approximated. Pass SCIP parameters through
             ``scip_options={...}``, e.g. ``{"limits/nodes": 1000}``.
-            SCIP's optimality claim is reported but **never certified**: the
-            result is ``status="feasible"``, ``gap_certified=False``, with
+            SCIP's claims are reported but **never certified**: an optimum is
+            ``status="feasible"`` and an infeasibility or unboundedness claim
+            is ``status="unknown"``, both with ``gap_certified=False``, with
             SCIP's dual bound kept as information
             (``bound_source="external_solver"``) and SCIP's own status in
             ``termination``.
