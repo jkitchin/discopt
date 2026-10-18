@@ -151,6 +151,13 @@ def solve_gdpopt_loa(
     if maximize and obj_coeffs is not None:
         _c_vec, _c_off = obj_coeffs
         obj_coeffs = (-_c_vec, -_c_off)
+    # The linear master minimizes ``c_vec @ x`` only: its objective constant is not
+    # a column, so the master's ``bound`` is offset-free and must have the constant
+    # added back before it becomes LB (and the incumbent handed to the master's gap
+    # tolerance must have it removed), exactly as ``oa.py`` does with
+    # ``decomp.obj_coeffs[1]``. Dropping it reported ``bound = 0`` on ``min x - 10``
+    # with incumbent ``-10``: a dual bound above the incumbent.
+    master_obj_offset = float(obj_coeffs[1]) if obj_coeffs is not None else 0.0
 
     if n_cons > 0 and not all(oa_rows.convex_mask):
         logger.warning(
@@ -245,7 +252,9 @@ def solve_gdpopt_loa(
             obj_is_linear,
             master_bound_valid,
             time_limit=time_limit - elapsed,
-            gap_tolerance=master_gap_tolerance(gap_tolerance, UB),
+            gap_tolerance=master_gap_tolerance(
+                gap_tolerance, UB - master_obj_offset if UB < 1e20 else None
+            ),
             milp_solver=milp_solver,
             no_good_configs=no_good_configs,
             int_indices=int_indices,
@@ -273,7 +282,7 @@ def solve_gdpopt_loa(
         master_config = _int_config_key(x_master, int_indices)
         if master_config in solved_int_configs:
             if master_bound_valid and master_result.bound is not None:
-                LB = max(LB, master_result.bound)
+                LB = max(LB, master_result.bound + master_obj_offset)
             logger.info(
                 "LOA: master re-proposed the already-solved integer configuration %s "
                 "at iteration %d; no new cuts can be generated, stopping",
@@ -284,7 +293,7 @@ def solve_gdpopt_loa(
         # Valid LB comes from the master's dual ``bound`` only, never the
         # incumbent ``objective`` (an upper bound on a limited master solve).
         if master_bound_valid and master_result.bound is not None:
-            LB = max(LB, master_result.bound)
+            LB = max(LB, master_result.bound + master_obj_offset)
 
         # b. Fix integers to master values, solve NLP subproblem
         sub_lb = lb.copy()
@@ -928,7 +937,9 @@ def _solve_master_milp(
 
     # Objective
     if obj_is_linear:
-        c_vec, off = obj_coeffs
+        # The constant is not representable in the master; the caller adds it back
+        # to the master's bound (``master_obj_offset``).
+        c_vec, _off = obj_coeffs
         c = c_vec.copy()
     elif use_objective_epigraph:
         # min eta, with OA cuts: eta >= f(x*) + grad(x*) . (x - x*)
