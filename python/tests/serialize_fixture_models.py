@@ -194,6 +194,92 @@ def registered_atom():
     return m, {}
 
 
+def logical_constraints():
+    """Propositional logic: every connective, a shared subformula, a cardinality.
+
+    Encoded from 1.5; every earlier writer refuses it (recorded as unbuildable).
+    """
+    import discopt.modeling as dm
+    from discopt.modeling.core import atmost, exactly, land, lnot, lor
+
+    m = dm.Model("logical_constraints")
+    Y = m.boolean("Y", shape=(4,))
+    z = m.boolean("z")
+    x = m.continuous("x", shape=(4,), lb=0.0, ub=10.0)
+    m.minimize(dm.sum(x) + 3 * Y.variable[0] - 2 * Y.variable[3] + z.variable)
+    for i in range(4):
+        m.subject_to(x[i] >= 2 * Y.variable[i], name=f"link{i}")
+    shared = Y[1] | ~Y[3]
+    m.logical(Y[0].implies(shared), name="imp")
+    m.logical(land(atmost(1, Y[0], Y[3]), lor(shared, Y[2])), name="card")
+    m.logical(Y[1].equivalent_to(lnot(Y[2]) & z), name="iff")
+    m.logical(exactly(1, [Y[1], Y[2]]))
+    return m, {}
+
+
+def complementarity_vector_lowered():
+    """A vector complementarity, lowered (GDP) on declaration, element by element.
+
+    The lowering records the rows it emitted; 1.5 writes their positions, and
+    earlier writers drop them (a reload reads ``rows=None``, "untracked").
+    """
+    import discopt.modeling as dm
+
+    m = dm.Model("complementarity_vector_lowered")
+    p = m.continuous("p", shape=(2,), lb=0.0, ub=10.0)
+    q = m.continuous("q", shape=(2,), lb=0.0, ub=10.0)
+    m.minimize(dm.sum((p - 1) ** 2) + dm.sum((q - 1) ** 2))
+    m.subject_to(p[0] + q[1] >= 0.5, name="mix")
+    m.complementarity(p, q, name="pq")
+    return m, {}
+
+
+def gdp_indicators():
+    """Disjunctions whose indicators were read (1.5+, #1775 G1.1).
+
+    ``Model.either_or`` returns nothing before 1.5, so every earlier version
+    records this case as unbuildable (its own error, via ``--cases``). The
+    indicators are tied together by an algebraic row on their binary columns and
+    priced in the objective; ``gdp_indicators_logic`` ties them with
+    ``Model.logical`` instead. A third disjunction leaves its indicators unread,
+    so its row is written exactly as at 1.4.
+    """
+    import discopt.modeling as dm
+
+    m = dm.Model("gdp_indicators")
+    x = m.continuous("x", lb=0.0, ub=20.0)
+    w = m.continuous("w", lb=0.0, ub=20.0)
+    mode = m.either_or([[x <= 5.0], [x >= 15.0]], name="mode")
+    pump = m.either_or([[w <= 3.0], [w >= 10.0], [w >= 6.0, w <= 7.0]], name="pump")
+    m.either_or([[x + w <= 30.0], [x - w >= 0.0]], name="unread")
+    hi_mode = mode.indicators[1].variable
+    hi_pump = pump.indicators[1].variable
+    # "high mode implies high pump", as algebra on the indicator columns.
+    m.subject_to(hi_mode <= hi_pump, name="mode_implies_pump")
+    m.minimize((x - 12.0) ** 2 + (w - 4.0) ** 2 + 3.0 * pump.indicators[2].variable)
+    return m, {}
+
+
+def gdp_indicators_logic():
+    """Propositional logic over ``either_or`` indicators (1.5+, #1775 G1.1 + WP-3).
+
+    The case G1.1 exists for: a ``logical`` row whose leaves are the indicator
+    columns of two read disjunctions. "High mode implies high pump" moves the
+    optimum from 10 (x=15, w=3) to 45 (x=15, w=10). Unbuildable before 1.5.
+    """
+    import discopt.modeling as dm
+
+    m = dm.Model("gdp_indicators_logic")
+    x = m.continuous("x", lb=0.0, ub=20.0)
+    w = m.continuous("w", lb=0.0, ub=20.0)
+    mode = m.either_or([[x <= 5.0], [x >= 15.0]], name="mode")
+    pump = m.either_or([[w <= 3.0], [w >= 10.0]], name="pump")
+    m.logical(mode.indicators[1].implies(pump.indicators[1]), name="mode_implies_pump")
+    m.logical(mode.indicators[0] | pump.indicators[0] | mode.indicators[1], name="cover")
+    m.minimize((x - 12.0) ** 2 + (w - 4.0) ** 2)
+    return m, {}
+
+
 #: name -> builder. Order is the manifest's order; never reorder or rename a case
 #: once a shipped version's fixtures exist for it (fixtures are immutable, §0.3.11).
 CASES = {
@@ -213,6 +299,13 @@ CASES = {
         parameters_and_start,
         decomposition_marks,
         registered_atom,
+        # Added with schema 1.5 (WP-3 and G1.1). Each is recorded for every
+        # earlier version too (``--cases``): what that version's writer did with
+        # it, an unbuildable record carrying its own error where it could not.
+        logical_constraints,
+        complementarity_vector_lowered,
+        gdp_indicators,
+        gdp_indicators_logic,
     )
 }
 

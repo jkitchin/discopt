@@ -1,6 +1,6 @@
 # Model serialization — completion plan
 
-> **Plan v1.5 — 2026-10-18 — author: Claude (planning session for jkitchin).**
+> **Plan v1.6 — 2026-10-18 — author: Claude (planning session for jkitchin).**
 > Status: proposed; no work package started. Every claim about the code below was
 > read from the tree at `3191cc65` (schema `discopt.model/1.4`, `discopt 0.9.1.dev0`,
 > after PRs #1748 and #1764). Agents executing a package **re-verify** the lines they
@@ -726,7 +726,7 @@ sets the test count); WP-7 one session; WP-8 one session.
 |---|---|---|---|---|
 | WP-1 fixtures + matrix | **done** | #1769 | 2026-10-18 | writers: 1.0 `0a655f244`, 1.1 `f31547172`, 1.2 `a82f89b0f`, 1.3 `8a4880f7c`, 1.4 HEAD at generation (serializer = `ca63cb2e7`'s); 69 fixtures (14 cases × 5 versions − `registered_atom`@1.0, unbuildable: no `discopt.operators` before 1.1); backward: 69/69 load and equal today's build minus content not yet written (`_WRITTEN_FROM`: atom tags < 1.3, `state.nl_source` < 1.4); forward: 136 `loads_identical`, 4 `loaded` (1.0 reading `registered_atom`, nothing to compare), **0 `loads_different`, 0 `refused`**; test file 216 tests in 1.5 s (2.6 s under `-n 4`); two reader mutations caught (15 and 10 failures); the live test builds each case before loading its fixture, for the same registry reason as (d) below — found when `-n 4` ordering failed `v1.3-registered_atom` once. No hole: all five writers built (O4 not needed). |
 | WP-2 policy, stamp, upgrade-model | **done** | #1776 | 2026-10-18 | entry probe 1: 135 documents (69 fixtures + 66 corpus round-trips) carry exactly the 15 listed top-level keys, 0 unknown; a scan of every revision of `serialize.py` finds no top-level or `state` key ever written that the tables lack. Entry probe 2 (fail-before for the stamp): a model pickled by the `8a4880f7c` tree (layout `(attrs, had_builder)`) raised a bare `ValueError` (unpack 3, got 2) at HEAD, **with the same `__version__` `0.9.1.dev0`** — only a layout stamp tells them apart; the pickle is committed as a fixture. Pre-WP-2 reader loaded all five probe documents (unknown top key at known/future minor, unknown `state` key, future minor, unknown result key) silently with 0 warnings. `upgrade-model`: 67/69 fixtures upgrade; the 2 `registered_atom` documents are refused without `--import` — measured, a bare process strips their atom tags (see v1.4). |
-| WP-3 schema 1.5 | not started | — | — | O5 decided |
+| WP-3 schema 1.5 | **done** | #1785 (+ #1782) | 2026-10-18 | entry experiment: 6 logical models (+1 xor/exactly), lowered twice and from a rebuild → identical rows; model vs rebuild solve: same status/objective/node count (24 checks) — kill criterion not fired. Logic written as a flat per-row table (`logic`), leaves = node ids of the binary variable behind each `BooleanVar`; lowering rows as positions in a third `lowered` element (absent when untracked, so 1.4 still reads those). Combined with #1782 (G1.1 `indicators` on disjunction rows) into one 1.5. Fixtures: v1.5 18 cases (written by `6420787e`); `logical_constraints`, `complementarity_vector_lowered`, `gdp_indicators`, `gdp_indicators_logic` recorded for 1.0–1.4 via `--cases` (logic and indicator cases unbuildable, each version's own error). Forward matrix: 240 cells — 205 `loads_identical`, 10 `loaded`, 25 `refused` (each older reader refuses exactly the 5 documents with a logical row or tracked lowering rows), **0 `loads_different`**; the 150 cells not involving 1.5 are unchanged. Logic over `either_or` indicators round-trips (same status/objective/node count; optima 10/45/50 hand-computed). |
 | WP-4 property + fuzz | not started | — | — | op-coverage %: — |
 | WP-5 corpus harness | not started | — | — | in-repo: —/75; full MINLPLib: —/1610; QPLIB: —/421 |
 | WP-6 builder sweep | not started | — | — | rows round-trip: —, refused: —, crashed: — |
@@ -744,6 +744,69 @@ a documented hole ("untested before 1.N"). O5 — encode logical constraints at 
 ---
 
 ## 9. Change log
+
+- **v1.6 (2026-10-18, WP-3 done; #1785 carrying #1782)** — Schema 1.5 is one
+  format with three additions, each read only from a document of minor ≥ 5
+  (`_SCHEMA_MINOR_LOGIC_LOWERING_INDICATORS`) and refused as malformed in an older
+  one: the `logical` row kind (WP-3), tracked complementarity lowering rows (WP-3),
+  and `indicators` on a disjunction row (#1775 G1.1, #1782). The two PRs had each
+  claimed 1.5 for their own half; neither was released, so they were combined into
+  one 1.5 rather than one taking 1.6.
+
+  *WP-3.* Three corrections to WP-3 as planned. (a) The plan said to refuse a
+  cardinality `k` outside `[0, len(operands)]`; the API builds such a constraint
+  (an infeasible or vacuous one), and a reader must not refuse a model the writer
+  can produce, so `k` is required to be an `int` (not `bool`) and nothing more.
+  (b) "`rows` pointing at a non-`Constraint`": a lowering's rows are a slice of
+  `_constraints` and may be any row kind, so positions are checked for range and
+  uniqueness only; a row no longer in the model is refused **on write**. (c) The
+  lowering-rows element is written only when the rows are tracked: an untracked
+  record keeps the two-element 1.4 form, so a 1.4 reader still reads it (the
+  three-element form is refused by every older reader — recorded in the forward
+  cells). The logic is a flat table, not nested JSON: `land(...)` builds a
+  left-deep chain (a 3000-link chain is tested). Leaves must be a binary variable
+  of size 1 or an element of a binary array — what `Model.boolean` builds, and
+  what `either_or(...).indicators` allocates (a scalar binary per disjunct) —
+  refused both ways otherwise. `_REFUSED_RELATIONS` is empty but kept; the
+  `CustomCall` and reformulation-output refusals are documented as permanent.
+
+  *G1.1.* (d) `indicators` is written only once the indicators were read, so a
+  model that never reads them writes the 1.4 content under the 1.5 identifier
+  (`v1.5/mip_indicator_sos_disjunction.json` equals its v1.4 fixture but for the
+  schema string — tested). (e) On read it must be one distinct scalar binary column
+  per disjunct — the GDP lowering uses the columns as selectors, so a reference to
+  anything else would lower to a different model. (f) Logic over the indicators —
+  the case G1.1 exists for, refused on save while the format had no logical rows —
+  now round-trips: `test_logic_over_indicators_round_trips` saves, reloads and
+  solves to the same status, objective and node count, with the reloaded leaves
+  resolving to the reloaded indicator columns, against hand-computed optima (10
+  unconstrained, 45 under `mode_1 → pump_1`, 50 with `mode_0 ∧ ¬pump_1` forced).
+  No decoder change was needed: an indicator column is a scalar binary, which the
+  leaf check already accepts.
+
+  *Fixtures.* (g) One mechanism for a case added after a version shipped: the
+  generator's `--cases` mode records it for every already-shipped version
+  (#1782's `INTRODUCED` table, which declared absence instead, was removed). Each
+  record is what that version's writer did: `logical_constraints`,
+  `gdp_indicators` and `gdp_indicators_logic` are unbuildable at 1.0–1.4, each with
+  its own error; `complementarity_vector_lowered` is written by each. An existing
+  record is refused, not replaced, and no shipped fixture file changed. An add-only
+  run under a different interpreter records it per case in `cases_python`.
+  `v1.5/` holds 18 cases, written by the combining merge `6420787e`. Forward
+  matrix: 240 cells — 205 `loads_identical`, 10 `loaded`, 25 `refused`, **0
+  `loads_different`**; the 150 cells not involving 1.5 are unchanged. Each older
+  reader (1.0–1.4 at their manifest commits, rebuilt for this run under 3.12.11)
+  refuses exactly the five 1.5 documents with a logical row or tracked lowering
+  rows, and loads `gdp_indicators.json` without the link (see (i)).
+  (h) The generator compares a `from_nl` source by file name, as the matrix test
+  does (a 1.5 document written from a different checkout path read as
+  `loads_different` before), and records a forward-only reader run's interpreter
+  under `forward_python`. (i) Known hole in shipped readers, not fixable in place:
+  the pre-#1780 readers (1.0–1.4 at their manifest commits) do not track nested
+  keys and load `gdp_indicators.json` *without* the link — under the 1.4 reader
+  (`0ff5cb53`) it solves to **10.0** instead of **45.0**, with no warning — recorded
+  as `loaded` (nothing to compare: unbuildable there). The post-#1780 1.4 reader
+  (`ee504c66`) refuses it with "newer than this reader … Upgrade discopt".
 
 - **v1.5 (2026-10-18, #1780)** — Nested-record keys. A per-record table for every
   record kind would have had to mirror every decoder branch, so the reader instead

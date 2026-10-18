@@ -116,8 +116,14 @@ def test_schema_minor_is_bumped_for_the_non_additive_change():
     ``_gams_initial_values`` and ``_recentre_inner`` state keys are additive, but
     their absence means "not present" only in a document that could have
     recorded them.
+
+    1.5 adds three things, read only from a >=1.5 document: the ``logical`` row
+    kind (#1785 WP-3), tracked complementarity lowering rows (a three-element
+    ``lowered`` entry, #1785 WP-3) and the ``indicators`` link on disjunction rows
+    (#1782, #1775 G1.1). A 1.4 reader refuses each, so the minor is what says a
+    document may hold them.
     """
-    assert S.SCHEMA == "discopt.model/1.4"
+    assert S.SCHEMA == "discopt.model/1.5"
 
 
 def test_legacy_11_document_restores_a_tagged_float_in_the_trace():

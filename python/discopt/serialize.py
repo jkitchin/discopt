@@ -28,8 +28,11 @@ Scope
 -----
 Carried: variables (name, type, shape, element-wise bounds), parameters, the
 objective, algebraic constraints, the fast-construction (Rust builder) linear
-blocks and builder objective, indicator / SOS / disjunctive relations,
-complementarity relations together with this model's lowering marks, the starting
+blocks and builder objective, indicator / SOS / disjunctive relations (with an
+``either_or`` disjunction's indicator columns once they were read, from 1.5),
+propositional logic constraints (``Model.logical``, from 1.5), complementarity
+relations together with this model's lowering marks and the rows each lowering
+emitted (from 1.5; earlier documents reload them as untracked), the starting
 point (and a GAMS model's declared ``x.l`` start), and -- optionally -- the solve
 result. A ``from_nl`` model also carries the fact that it was parsed from a file
 (so a certificate guard stays as conservative as on the original) and its source
@@ -55,13 +58,19 @@ Index expressions carry integers, slices and tuples of them; a fancy (array/list
 index, ``None`` or ``Ellipsis`` is refused rather than approximated.
 
 Refused loudly (never silently dropped, per the repo's no-silent-approximation
-rule): :class:`~discopt.modeling.core.CustomCall` (an arbitrary Python callable;
-there is nothing faithful to write, and writing its *name* would reload into a
-different model), propositional ``_LogicalConstraint``, the output of a
-reformulation pass that carries records pointing back at its source model
-(``binary.multilinear``, ``integer.*``, ``nonsmooth.epigraph`` -- save the source
-and re-apply the transformation), any other private model attribute this version
-does not classify, and any expression node this version does not know. On read,
+rule), and **permanently** -- these are not formats waiting for a section:
+
+* :class:`~discopt.modeling.core.CustomCall`: it wraps an arbitrary Python
+  callable. Writing its *name* would reload into a different model, and writing
+  its code would make ``loads`` execute it, which a reader of untrusted input must
+  never do. Rewrite it with ``dm.*`` primitives or a registered function.
+* the output of a reformulation pass that carries records pointing back at its
+  source model (``binary.multilinear``, ``integer.*``, ``nonsmooth.epigraph``): a
+  document cannot hold the source model. Lossless remedy: save the source and
+  re-apply the (deterministic) transformation after loading.
+
+Also refused: any other private model attribute this version does not classify,
+and any expression node this version does not know. On read,
 an unknown ``op`` is a hard error -- a reader that skips what it does not
 understand silently drops a constraint and returns a model that solves to the
 wrong answer.
@@ -105,6 +114,11 @@ checked against ``_NODE_KEYS`` (per ``op``) and ``_INDEX_KEYS``; everything else
 by recording which keys the decoder reads and refusing the rest
 (:class:`_Record`), so no hand-kept list can fall behind the decoder. The ``x-``
 escape is top-level only: an ``x-`` key inside a record is refused like any other.
+A nested key a new minor adds is read only from documents of that minor or later
+(``indicators`` on a disjunction row, 1.5), so in an older document it is
+refused like any other key no writer of that minor produced. The same holds for
+the other two 1.5 additions, a ``"logical"`` row and a three-element ``lowered``
+entry: in a document of minor < 5 each is refused as malformed.
 
 ``discopt upgrade-model`` rewrites a document at the current ``SCHEMA``. Through
 1.1 an unknown top-level key was ignored; that is how ``provenance`` (1.1) stayed
@@ -137,12 +151,21 @@ import numpy as np
 
 from discopt.modeling.core import (
     BinaryOp,
+    BooleanVar,
     Constant,
     Constraint,
     CustomCall,
     Expression,
     FunctionCall,
     IndexExpression,
+    LogicalAnd,
+    LogicalAtLeast,
+    LogicalAtMost,
+    LogicalEquivalent,
+    LogicalExactly,
+    LogicalImplies,
+    LogicalNot,
+    LogicalOr,
     MatMulExpression,
     Model,
     Objective,
@@ -155,6 +178,7 @@ from discopt.modeling.core import (
     VarType,
     _DisjunctiveConstraint,
     _IndicatorConstraint,
+    _LogicalConstraint,
     _readonly_bound,
     _SOSConstraint,
 )
@@ -187,7 +211,28 @@ logger = logging.getLogger(__name__)
 #: and ``_recentre_inner``. All additive -- an older reader ignores them -- but,
 #: as with 1.3, absence has two meanings that only the minor separates: "not read
 #: from a file" (1.4) versus "the writer did not record it" (<= 1.3).
-SCHEMA = "discopt.model/1.4"
+#:
+#: 1.5 (#1785 serialize WP-3 together with #1775 G1.1) adds three things, none
+#: of them additive for a 1.4 reader:
+#:
+#: * propositional logic constraints -- a ``"logical"`` row with a ``logic``
+#:   table;
+#: * the rows each complementarity lowering emitted -- a third element of a
+#:   ``lowered`` entry, written only when the rows are tracked;
+#: * ``indicators`` on a ``disjunction`` row: the node references of the binary
+#:   columns that ``_DisjunctiveConstraint.indicators`` allocated, written only
+#:   once they were read. A disjunction whose indicators were never read is
+#:   written exactly as at 1.4.
+#:
+#: All three are read only from a document of minor >= 5
+#: (``_SCHEMA_MINOR_LOGIC_LOWERING_INDICATORS``); in an older document each is
+#: refused as content no writer of that minor produced. A 1.4 reader refuses
+#: the unknown row kind and the three-element entry, and (with #1783's
+#: nested-key strictness) the ``indicators`` key as newer content ("upgrade
+#: discopt") rather than dropping it -- which would leave the columns in the
+#: model with nothing tying them to the disjunction. Readers shipped before
+#: #1783 drop ``indicators`` silently; see the fixture manifest's forward cells.
+SCHEMA = "discopt.model/1.5"
 
 #: Major version this reader accepts. A document whose major differs is refused
 #: rather than best-effort parsed.
@@ -196,6 +241,12 @@ SCHEMA_MAJOR = 1
 #: Minor at which the blanket ``_enc_tree`` over the solution subtree was dropped
 #: (#1292). Documents below it need that encoding undone on read.
 _SCHEMA_MINOR_UNTAGGED_SOLUTION = 2
+
+#: Minor that first wrote the three 1.5 additions: a ``"logical"`` row, the
+#: tracked rows of a complementarity lowering (a three-element ``lowered`` entry)
+#: and ``indicators`` on a disjunction row (#1775 G1.1). Each is read only from a
+#: document of this minor or later.
+_SCHEMA_MINOR_LOGIC_LOWERING_INDICATORS = 5
 
 #: This reader's minor, the one ``SCHEMA`` names.
 SCHEMA_MINOR = int(SCHEMA.rsplit(".", 1)[1])
@@ -611,6 +662,8 @@ class _NodeTable:
         if t is SumOverExpression:
             return {"op": "sum_over", "args": [self._ref(a) for a in node.terms]}
         if t is CustomCall:
+            # Permanent (plan §3.6): the only faithful encoding of a callable is its
+            # code, and `loads` must never execute what it reads.
             raise SerializationError(
                 f"cannot serialize the custom function {node.name!r}: a CustomCall wraps "
                 "an arbitrary Python callable, so there is nothing faithful to write "
@@ -955,13 +1008,10 @@ def _retag_atoms(table: list[dict], built: list[Any], variables: list, params: l
 
 # ── relations we refuse, by name ───────────────────────────────────────────
 
-_REFUSED_RELATIONS = {
-    "_LogicalConstraint": (
-        "a propositional logic constraint",
-        "This format version carries algebraic rows, indicator, SOS and disjunctive "
-        "relations. Reformulate the logic into those before saving.",
-    ),
-}
+#: ``{type name: (what, remedy)}``. Empty since 1.5 encodes propositional logic;
+#: kept so a relation type a later release adds before it has an encoding is
+#: refused by name rather than by the generic unknown-row error.
+_REFUSED_RELATIONS: dict[str, tuple[str, str]] = {}
 
 
 def _refuse_unsupported(model: Model) -> None:
@@ -1306,16 +1356,182 @@ def _enc_rows(model: Model, table: _NodeTable) -> list[dict]:
                     "semantics": con.semantics.name,
                 }
             )
+            if con._indicator_vars is not None:
+                # #1775 G1.1 (schema 1.5): the indicator columns, once read.
+                # Dropping them would leave those binaries in the model with
+                # nothing tying them to the disjunction. Omitted while unread, so
+                # such a row is written exactly as at 1.4.
+                rows[-1]["indicators"] = [table.add(v) for v in con._indicator_vars]
+        elif t is _LogicalConstraint:
+            rows.append({"kind": "logical", "logic": _enc_logic(con, table), "name": con.name})
         else:
             raise SerializationError(
                 f"cannot serialize a row of type {t.__name__}; this format version "
-                "carries algebraic constraints and indicator / SOS / disjunctive "
-                "relations."
+                "carries algebraic constraints and indicator / SOS / disjunctive / "
+                "logical relations."
             )
     return rows
 
 
-def _dec_rows(docs: list[dict], nodes: list) -> list:
+# ── propositional logic (1.5) ──────────────────────────────────────────────
+#
+# A `_LogicalConstraint` holds a tree of `Logical*` dataclasses over `BooleanVar`
+# leaves. It is written as a flat table, children before parents and the root
+# last -- the node table's layout, for the node table's reasons: `land(...)` builds
+# a left-deep chain as long as its argument list, which nested JSON would turn
+# into nesting that deep, and a subformula used twice stays one entry. A leaf
+# points into the node table at the binary variable (or element of one) behind
+# the `BooleanVar`; the wrapper itself carries nothing else.
+#
+# The lowering (`gdp_reformulate._logical_to_linear`) is a function of the tree
+# alone -- no identity cache -- so a reloaded tree lowers to the same rows (WP-3
+# entry experiment: 6 models, lowered twice and from a rebuild, identical rows;
+# identical objective and node count on solve).
+
+_LOGIC_BINARY = {LogicalAnd: "and", LogicalOr: "or", LogicalEquivalent: "iff"}
+_LOGIC_CARDINALITY = {LogicalAtLeast: "atleast", LogicalAtMost: "atmost", LogicalExactly: "exactly"}
+_LOGIC_CONNECTIVES = frozenset(
+    {"var", "not", "implies", *_LOGIC_BINARY.values(), *_LOGIC_CARDINALITY.values()}
+)
+
+
+def _boolean_leaf_problem(expr: Any) -> Optional[str]:
+    """Why *expr* cannot be a ``BooleanVar``'s variable, or ``None`` if it can.
+
+    ``Model.boolean`` backs a ``BooleanVar`` with a binary variable of size 1, or
+    an element of a binary array; the lowering reads it as a 0/1 term. Anything
+    else is not a model the API builds, and is refused both ways.
+    """
+    base = expr.base if isinstance(expr, IndexExpression) else expr
+    if not isinstance(base, Variable):
+        return f"{type(expr).__name__} is not a variable or an element of one"
+    if base.var_type is not VarType.BINARY:
+        return f"variable {base.name!r} is {base.var_type.value}, not binary"
+    if isinstance(expr, Variable) and expr.size != 1:
+        return f"variable {base.name!r} has {expr.size} elements, not one"
+    return None
+
+
+def _enc_logic(con: Any, table: _NodeTable) -> list[dict]:
+    entries: list[dict] = []
+    index: dict[int, int] = {}
+    stack: list = [(con.expression, False)]
+    while stack:
+        node, expanded = stack.pop()
+        if id(node) in index:
+            continue
+        t = type(node)
+        if t is BooleanVar:
+            problem = _boolean_leaf_problem(node.variable)
+            if problem is not None:
+                raise SerializationError(
+                    f"logical constraint {con.name!r}: a BooleanVar's {problem}"
+                )
+            entry = {"c": "var", "x": table.add(node.variable)}
+        else:
+            if t in _LOGIC_BINARY:
+                kids = [node.left, node.right]
+            elif t is LogicalImplies:
+                kids = [node.antecedent, node.consequent]
+            elif t is LogicalNot:
+                kids = [node.operand]
+            elif t in _LOGIC_CARDINALITY:
+                kids = list(node.operands)
+            else:
+                raise SerializationError(
+                    f"logical constraint {con.name!r} holds a {t.__name__}, which is not "
+                    "a propositional connective this format knows"
+                )
+            if not expanded:
+                stack.append((node, True))
+                stack.extend((k, False) for k in reversed(kids) if id(k) not in index)
+                continue
+            refs = [index[id(k)] for k in kids]
+            if t in _LOGIC_BINARY:
+                entry = {"c": _LOGIC_BINARY[t], "a": refs[0], "b": refs[1]}
+            elif t is LogicalImplies:
+                entry = {"c": "implies", "a": refs[0], "b": refs[1]}
+            elif t is LogicalNot:
+                entry = {"c": "not", "a": refs[0]}
+            else:
+                k = node.k
+                if type(k) is not int:
+                    raise SerializationError(
+                        f"logical constraint {con.name!r}: cardinality k={k!r} is not an int"
+                    )
+                entry = {"c": _LOGIC_CARDINALITY[t], "k": k, "args": refs}
+        index[id(node)] = len(entries)
+        entries.append(entry)
+    return entries
+
+
+def _dec_logic(entries: Any, nodes: list, name: Any) -> Any:
+    if not isinstance(entries, list) or not entries:
+        raise SerializationError(f"logical row {name!r} has no logic table")
+    built: list = []
+    refs = _StrictRefs(built, f"logic entry of {name!r}")
+    for i, e in enumerate(entries):
+        c = e["c"]
+        if c not in _LOGIC_CONNECTIVES:
+            raise SerializationError(f"logical row {name!r}: unknown connective {c!r}")
+        if c == "var":
+            leaf = nodes[e["x"]]
+            problem = _boolean_leaf_problem(leaf)
+            if problem is not None:
+                raise SerializationError(f"logical row {name!r}, entry {i}: {problem}")
+            built.append(BooleanVar(leaf))
+        elif c == "not":
+            built.append(LogicalNot(refs[e["a"]]))
+        elif c == "implies":
+            built.append(LogicalImplies(refs[e["a"]], refs[e["b"]]))
+        elif c in ("and", "or", "iff"):
+            pair = {"and": LogicalAnd, "or": LogicalOr, "iff": LogicalEquivalent}[c]
+            built.append(pair(refs[e["a"]], refs[e["b"]]))
+        else:
+            k = e["k"]
+            if type(k) is not int:
+                raise SerializationError(f"logical row {name!r}: cardinality k={k!r} is not an int")
+            if not isinstance(e["args"], list):
+                raise SerializationError(f"logical row {name!r}: args must be a list")
+            card = {"atleast": LogicalAtLeast, "atmost": LogicalAtMost, "exactly": LogicalExactly}[
+                c
+            ]
+            built.append(card(k, [refs[a] for a in e["args"]]))
+    return built[-1]
+
+
+def _dec_indicators(d: dict, nodes: list) -> tuple:
+    """The ``indicators`` of a 1.5+ disjunction row: one scalar binary per disjunct.
+
+    Checked by kind as well as by reference: the GDP lowering uses these columns
+    as the disjunction's selectors (``reformulate_gdp``), so a reference to a
+    continuous column or a constant would lower without complaint to a different
+    model.
+    """
+    refs = d["indicators"]
+    name = d.get("name")
+    if not isinstance(refs, list):
+        raise SerializationError(
+            f"disjunction {name!r} has indicators {refs!r}; it must be a list of node "
+            "references (the key is omitted while the indicators are unread)"
+        )
+    if len(refs) != len(d["disjuncts"]):
+        raise SerializationError(
+            f"disjunction {name!r} has {len(refs)} indicators for {len(d['disjuncts'])} disjuncts"
+        )
+    cols = tuple(nodes[i] for i in refs)
+    for col in cols:
+        if not (type(col) is Variable and col.var_type == VarType.BINARY and col.shape == ()):
+            raise SerializationError(
+                f"disjunction {name!r} has an indicator that is not a scalar binary "
+                f"variable ({col!r})"
+            )
+    if len({id(c) for c in cols}) != len(cols):
+        raise SerializationError(f"disjunction {name!r} repeats an indicator column")
+    return cols
+
+
+def _dec_rows(docs: list[dict], nodes: list, minor: int) -> list:
     """Rebuild the ordered, heterogeneous ``_constraints`` list."""
     from discopt.modeling.core import DisjunctionSemantics
 
@@ -1375,8 +1591,28 @@ def _dec_rows(docs: list[dict], nodes: list) -> list:
                     name=d["name"],
                     method=d["method"],
                     semantics=DisjunctionSemantics[d["semantics"]],
+                    # Schema 1.5 (#1775 G1.1), and only once read. Not looked at
+                    # in an older document, so there it is refused as unread.
+                    _indicator_vars=(
+                        _dec_indicators(d, nodes)
+                        if minor >= _SCHEMA_MINOR_LOGIC_LOWERING_INDICATORS and "indicators" in d
+                        else None
+                    ),
                 )
             )
+        elif kind == "logical":
+            if minor < _SCHEMA_MINOR_LOGIC_LOWERING_INDICATORS:
+                # No writer before 1.5 wrote a logical row (they refused the
+                # model), so an older document carrying one is malformed.
+                raise SerializationError(
+                    f"a schema 1.{minor} document carries a 'logical' row, which no "
+                    "writer of that version produced; the document is malformed or "
+                    "was edited by hand"
+                )
+            name = d["name"]
+            if name is not None and not isinstance(name, str):
+                raise SerializationError(f"logical row name must be a string, got {name!r}")
+            out.append(_LogicalConstraint(_dec_logic(d["logic"], nodes, name), name))
         else:
             raise SerializationError(
                 f"row has unknown kind {kind!r}. This file was written by a newer "
@@ -1477,14 +1713,34 @@ def _enc_complementarities(model: Model, table: _NodeTable) -> Optional[dict]:
         # `_complementarities` is the durable declared record and its order is part
         # of the model; the closure above may hold relations that are not in it.
         "declared": [index_of[id(rel)] for rel in declared],
-        # `rows` is deliberately not encoded: it holds Constraint objects of THIS
-        # model, and `LoweringRecord` documents `None` ("not tracked for this
-        # model") as what a rebuilding pass must record, which is what a reload is.
-        "lowered": [[index_of[id(rel)], record.method] for rel, record in lowered_map.items()],
+        # Since 1.5, with the rows each lowering emitted, by position in
+        # `_constraints` -- the one thing original and reload agree on (the rows
+        # are this model's objects). `None` stays `None`: "not tracked" is a
+        # different answer from `[]`, "emitted no rows" (`rows_in`).
+        # Untracked (`None`) keeps the two-element form a 1.4 reader reads; only a
+        # tracked lowering, whose rows that reader would drop, carries the third.
+        "lowered": [
+            [index_of[id(rel)], record.method]
+            + ([] if record.rows is None else [_enc_lowering_rows(model, rel, record)])
+            for rel, record in lowered_map.items()
+        ],
     }
 
 
-def _dec_complementarities(doc: Optional[dict], model: Model, nodes: list) -> None:
+def _enc_lowering_rows(model: Model, rel: Any, record: Any) -> list[int]:
+    pos = {id(c): i for i, c in enumerate(model._constraints)}
+    out = []
+    for row in record.rows:
+        if id(row) not in pos:
+            raise SerializationError(
+                f"the lowering of {rel.describe()} records a row that is no longer in the "
+                "model; the record would point at nothing after a reload"
+            )
+        out.append(pos[id(row)])
+    return out
+
+
+def _dec_complementarities(doc: Optional[dict], model: Model, nodes: list, minor: int) -> None:
     """Rebuild the relation set and re-apply this model's lowering marks."""
     if not doc:
         return
@@ -1522,9 +1778,28 @@ def _dec_complementarities(doc: Optional[dict], model: Model, nodes: list) -> No
 
     relations = _StrictRefs(rebuilt, "complementarity relation")
     model._complementarities = [relations[i] for i in doc["declared"]]
-    model._lowered_complementarities = {
-        relations[i]: LoweringRecord(method=method, rows=None) for i, method in doc["lowered"]
-    }
+    rows = _StrictRefs(list(model._constraints), "row")
+    lowered: dict = {}
+    for entry in doc["lowered"]:
+        # Two elements: untracked rows (`None`) -- all a writer before 1.5 could
+        # say. Three, from 1.5 only: the tracked rows' positions.
+        if not isinstance(entry, list) or len(entry) not in (
+            (2, 3) if minor >= _SCHEMA_MINOR_LOGIC_LOWERING_INDICATORS else (2,)
+        ):
+            raise SerializationError(f"invalid complementarity lowering entry {entry!r}")
+        rel, method = relations[entry[0]], entry[1]
+        positions = entry[2] if len(entry) == 3 else None
+        if len(entry) == 3:
+            if not isinstance(positions, list):
+                raise SerializationError(f"lowering rows must be a list, got {positions!r}")
+            picked = [rows[p] for p in positions]
+            if len({id(r) for r in picked}) != len(picked):
+                raise SerializationError(f"lowering rows list a row twice: {positions!r}")
+            positions = picked
+        if rel in lowered:
+            raise SerializationError(f"{rel.describe()} is marked lowered twice")
+        lowered[rel] = LoweringRecord(method=method, rows=positions)
+    model._lowered_complementarities = lowered
 
 
 # ── the rest of the model's state ──────────────────────────────────────────
@@ -1639,7 +1914,7 @@ _LAZY_PLAIN = ("_recentre_inner",)
 _LAZY_NL_SOURCE = frozenset({"_nl_repr", "_source_nl_path", "_source_nl_sha256"})
 
 #: Records a reformulation pass attaches to the model it returns, keyed by the
-#: pass's prefix. They are refused rather than dropped or carried: the
+#: pass's prefix. The refusal is permanent (plan §3.6), not a missing section: the
 #: ``_ipx_*`` and ``_nsl_*`` sets hold the whole pre-pass source model, which a
 #: document cannot hold, and ``_ipx_config_*`` feeds the disjunctive configuration
 #: *bound*, so a reload without them would search differently from the model that
@@ -2551,7 +2826,10 @@ def _decode_document(doc: dict, minor: int) -> Model:
     params = [_dec_parameter(d, model) for d in doc["parameters"]]
     nodes = _decode_nodes(doc["nodes"], variables, params)
 
-    model._constraints.extend(_dec_rows(doc["rows"], nodes))
+    model._constraints.extend(_dec_rows(doc["rows"], nodes, minor))
+    for row in model._constraints:
+        if type(row) is _DisjunctiveConstraint:
+            row._model = model  # #1775 G1.1: so ``indicators`` can be read
 
     for d in doc.get("builder_blocks", []):
         model.add_linear_constraints(
@@ -2603,7 +2881,7 @@ def _decode_document(doc: dict, minor: int) -> Model:
             # builder-objective setters, not declared on the dataclass.
             setattr(model._objective, "_is_placeholder", True)
 
-    _dec_complementarities(doc.get("complementarities"), model, nodes)
+    _dec_complementarities(doc.get("complementarities"), model, nodes, minor)
     _dec_state(doc.get("state"), model, list(model._constraints), nodes)
 
     # An entry naming a variable this document does not declare is dead weight

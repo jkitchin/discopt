@@ -195,13 +195,23 @@ def _logic_over_either_or():
     m = dm.Model("logic_over_either_or")
     x = m.continuous("x", lb=0, ub=10)
     y = m.continuous("y", lb=0, ub=10)
-    m.either_or([[x <= 2], [x >= 5]], name="dx")
-    m.either_or([[y <= 2], [y >= 5]], name="dy")
-    dx, dy = m._constraints[-2], m._constraints[-1]
+    dx = m.either_or([[x <= 2], [x >= 5]], name="dx")
+    dy = m.either_or([[y <= 2], [y >= 5]], name="dy")
     # x in its low mode forces y into its high mode.
     m.logical(dx.indicators[0].implies(dy.indicators[1]))
     m.minimize(x + y)
     return m
+
+
+def _logic_member(v, t):
+    """The indicators are model columns now: the point carries its selection."""
+    sx = (round(v["dx_0_active"]), round(v["dx_1_active"]))
+    sy = (round(v["dy_0_active"]), round(v["dy_1_active"]))
+    if sum(sx) != 1 or sum(sy) != 1:
+        return False
+    x_ok = v["x"] <= 2 + t if sx[0] else v["x"] >= 5 - t
+    y_ok = v["y"] <= 2 + t if sy[0] else v["y"] >= 5 - t
+    return x_ok and y_ok and (not sx[0] or sy[1])
 
 
 _UNBOUNDED_REFUSAL = (ValueError, r"(?i)bound")
@@ -324,11 +334,45 @@ SHAPES: list[Shape] = [
     Shape(
         "logic_over_either_or",
         _logic_over_either_or,
-        lambda v, t: (
-            (v["x"] >= 5 - t or v["y"] >= 5 - t)
-            and (v["x"] <= 2 + t or v["x"] >= 5 - t)
-            and (v["y"] <= 2 + t or v["y"] >= 5 - t)
-        ),
+        _logic_member,
+        points=[
+            {
+                "x": 1.0,
+                "y": 6.0,
+                "dx_0_active": 1,
+                "dx_1_active": 0,
+                "dy_0_active": 0,
+                "dy_1_active": 1,
+            },
+            {
+                "x": 6.0,
+                "y": 1.0,
+                "dx_0_active": 0,
+                "dx_1_active": 1,
+                "dy_0_active": 1,
+                "dy_1_active": 0,
+            },
+            # x is in its low mode but y is not in its high one: the logic is violated.
+            {
+                "x": 1.0,
+                "y": 1.0,
+                "dx_0_active": 1,
+                "dx_1_active": 0,
+                "dy_0_active": 1,
+                "dy_1_active": 0,
+            },
+            # The selection disagrees with x: dx_0 is selected but x is in disjunct 1.
+            {
+                "x": 6.0,
+                "y": 6.0,
+                "dx_0_active": 1,
+                "dx_1_active": 0,
+                "dy_0_active": 0,
+                "dy_1_active": 1,
+            },
+        ],
+        # Simplex has no selector binaries to bind indicators to (#1775 G1.1).
+        refuses={"simplex": (ValueError, r"indicators were read")},
     ),
 ]
 
@@ -359,14 +403,6 @@ XFAIL: dict[tuple[str, str], tuple[str, type[BaseException]]] = {
         for m in METHODS
         if m != "hull"
     },
-    **{
-        ("logic_over_either_or", m): (
-            "either_or has no indicators to reference yet: #1775 G1.1 (M4); "
-            "see test_either_or_indicators_absent_until_g1_1",
-            AttributeError,
-        )
-        for m in METHODS
-    },
 }
 
 
@@ -376,24 +412,6 @@ def _params():
             xf = XFAIL.get((shape.name, method))
             marks = [pytest.mark.xfail(strict=True, reason=xf[0], raises=xf[1])] if xf else []
             yield pytest.param(shape, method, id=f"{shape.name}-{method}", marks=marks)
-
-
-def test_either_or_indicators_absent_until_g1_1():
-    """Flips when G1.1 gives ``either_or`` its indicators, under whatever name.
-
-    The ``logic_over_either_or`` xfails fail in the shape's own build (the
-    attribute does not exist), so they would stay xfailed if G1.1 chose another
-    name. This guard fails instead: when it does, update the shape to the real
-    API and drop both it and the xfails.
-    """
-    m = _two_way()
-    dc = m._constraints[-1]
-    assert isinstance(dc, _DisjunctiveConstraint)
-    public = {a for a in vars(dc) if not a.startswith("_")}
-    assert not hasattr(dc, "indicators"), "G1.1 landed: update logic_over_either_or"
-    assert public <= {"disjuncts", "name", "semantics", "method"}, (
-        f"new public attributes {public}: if G1.1 landed, update logic_over_either_or"
-    )
 
 
 def test_battery_covers_every_method():
@@ -463,8 +481,8 @@ def test_harness_catches_a_dropped_row(monkeypatch):
 
     real = gr._reformulate_disjunction
 
-    def drop_last_row(dc, model, add_aux_binary, lp_data=None):
-        new_vars, new_cons = real(dc, model, add_aux_binary, lp_data=lp_data)
+    def drop_last_row(dc, model, add_aux_binary, **kw):
+        new_vars, new_cons = real(dc, model, add_aux_binary, **kw)
         return new_vars, new_cons[:-1]
 
     monkeypatch.setattr(gr, "_reformulate_disjunction", drop_last_row)

@@ -168,17 +168,29 @@ def _forward_cell(ser, path, own_dir):
         return {"outcome": "loaded", "note": "no own-version fixture to compare (unbuildable here)"}
     with open(own, encoding="utf-8") as fh:
         own_text = fh.read()
-    redump = _dumps(ser, loaded, {})
-    if '"solution"' in own_text:  # compare model content; the embedded result is checked live
-        import json as _json
-
-        own_doc = _json.loads(own_text)
-        own_doc.pop("solution", None)
-        own_text = _json.dumps(own_doc, indent=1)
-        redump = _json.dumps(_json.loads(redump), indent=1)
+    own_text = _comparable(own_text)
+    redump = _comparable(_dumps(ser, loaded, {}))
     if redump == own_text:
         return {"outcome": "loads_identical"}
     return {"outcome": "loads_different", "diff_hint": _first_difference(own_text, redump)}
+
+
+def _comparable(text: str) -> str:
+    """*text* without what is not model content, for a forward comparison.
+
+    The embedded result is checked live (and holds a wall time). Where a
+    ``from_nl`` model's ``.nl`` was read from is a fact about the machine that
+    wrote the document -- the digest identifies the content and stays compared --
+    so the path is reduced to its file name, as ``test_serialize_compat_matrix``
+    does; otherwise a reader that knows ``nl_source`` reports every newer
+    ``from_nl`` document written on another machine as ``loads_different``.
+    """
+    doc = json.loads(text)
+    doc.pop("solution", None)
+    source = doc.get("state", {}).get("nl_source")
+    if isinstance(source, dict) and "path" in source:
+        source["path"] = os.path.basename(source["path"])
+    return json.dumps(doc, indent=1)
 
 
 def _first_difference(a: str, b: str) -> str:
@@ -188,7 +200,7 @@ def _first_difference(a: str, b: str) -> str:
     return f"length differs: own={len(a)} reloaded={len(b)}"
 
 
-def _merge_manifest(path: str, label: str, report: dict, forward_dir) -> None:
+def _merge_manifest(path: str, label: str, report: dict, forward_dir, add_only: bool) -> None:
     """Merge one run into ``MANIFEST.json``.
 
     ``versions[label]`` holds the writer facts and per-case hashes;
@@ -201,17 +213,38 @@ def _merge_manifest(path: str, label: str, report: dict, forward_dir) -> None:
         with open(path, encoding="utf-8") as fh:
             manifest = json.load(fh)
     entry = manifest["versions"].setdefault(label, {})
-    for key in ("schema", "commit", "discopt_version", "python"):
+    # ``python`` is the WRITER's interpreter: it is checked only by a run that
+    # (re)writes this version's fixtures. A forward-only run is a reader run --
+    # the same commit, possibly another interpreter -- and records its own under
+    # ``forward_python``.
+    # An add-only ``--cases`` run is a writer run for those cases alone: its
+    # interpreter is checked against nothing and, when it differs from the one
+    # that wrote the version's other fixtures, recorded per case under
+    # ``cases_python``.
+    writer_keys = ("schema", "commit", "discopt_version") + (
+        ("python",) if ("cases" in report and not add_only) or "python" not in entry else ()
+    )
+    for key in writer_keys:
         if entry.get(key) not in (None, report[key]):
             sys.exit(f"refusing: manifest {label}.{key}={entry[key]!r}, this run {report[key]!r}")
         entry[key] = report[key]
-    if "cases" in report:
+    if "cases" in report and add_only:
+        existing = entry.setdefault("cases", {})
+        clash = sorted(set(report["cases"]) & set(existing))
+        if clash:
+            sys.exit(f"refusing: {label} already records {clash}; shipped records are immutable")
+        existing.update(report["cases"])
+        if report["python"] != entry["python"]:
+            for case in report["cases"]:
+                entry.setdefault("cases_python", {})[case] = report["python"]
+    elif "cases" in report:
         entry["cases"] = report["cases"]
     if forward_dir:
         writer = os.path.basename(os.path.normpath(forward_dir))
         if not writer.startswith("v"):
             sys.exit(f"--forward directory must be named v<version>, got {writer!r}")
         entry.setdefault("forward", {})[writer[1:]] = report["forward"]
+        entry.setdefault("forward_python", {})[writer[1:]] = report["python"]
     manifest["versions"] = dict(sorted(manifest["versions"].items(), key=lambda kv: _key(kv[0])))
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=1, sort_keys=False)
@@ -231,10 +264,23 @@ def main() -> int:
     ap.add_argument("--own", help="this version's fixtures, compared against (with --forward)")
     ap.add_argument("--label", help='this version\'s label in the manifest, e.g. "1.0"')
     ap.add_argument("--manifest", help="MANIFEST.json to merge this run's results into")
+    ap.add_argument(
+        "--cases",
+        help="comma-separated registry cases to build (default: all). With --manifest, "
+        "only these records are added to the version's entry, and an existing record "
+        "is refused rather than replaced: how a case added later is recorded for an "
+        "already-shipped version without touching its fixtures.",
+    )
     args = ap.parse_args()
 
     discopt, ser = _check_loaded_code(args.tree, args.expect_schema)
     reg = _load_registry()
+    selected = list(reg.CASES)
+    if args.cases:
+        selected = args.cases.split(",")
+        unknown = set(selected) - set(reg.CASES)
+        if unknown:
+            sys.exit(f"unknown case(s): {sorted(unknown)}")
     commit = subprocess.run(
         ["git", "-C", args.tree, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
     ).stdout.strip()
@@ -249,7 +295,7 @@ def main() -> int:
     if args.out:
         os.makedirs(args.out, exist_ok=True)
         cases: dict = {}
-        for name in reg.CASES:
+        for name in selected:
             try:
                 cases[name] = _write_case(ser, reg, name, args.out)
                 written += 1
@@ -295,7 +341,7 @@ def main() -> int:
     if args.manifest:
         if not args.label:
             sys.exit("--manifest needs --label")
-        _merge_manifest(args.manifest, args.label, report, args.forward)
+        _merge_manifest(args.manifest, args.label, report, args.forward, add_only=bool(args.cases))
     print(json.dumps(report, indent=1, sort_keys=True))
     print(f"cases written: {written}, unbuildable: {unbuildable}, forward cells: {forward}")
     return 0 if (written or forward) else 1
