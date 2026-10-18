@@ -829,7 +829,15 @@ class _RowVerdicts:
     error: Optional[str] = None
 
 
-def _row_verdicts(model, x_flat: np.ndarray, evaluator) -> _RowVerdicts:
+def _row_verdicts(
+    model, x_flat: np.ndarray, evaluator, *, undefined_is_violated: bool = False
+) -> _RowVerdicts:
+    """Per-row verdicts. A non-finite residual refuses the whole judgement, unless
+    ``undefined_is_violated`` (#1779): then that row alone is failed, with infinite
+    violation -- a row undefined at the point does not hold there. Only
+    :class:`DeclaredLogic` asks for it, whose rows may sit in an inactive disjunct
+    where being undefined is no evidence against the point.
+    """
     empty = np.zeros(0, dtype=np.float64)
 
     def refuse(reason: str) -> _RowVerdicts:
@@ -852,6 +860,7 @@ def _row_verdicts(model, x_flat: np.ndarray, evaluator) -> _RowVerdicts:
     viol = np.zeros(n_rows, dtype=np.float64)
     direction = np.zeros(n_rows, dtype=np.float64)
     anchor = np.ones(n_rows, dtype=np.float64)
+    undefined = np.zeros(n_rows, dtype=bool)
     for start, stop, con in row_map:
         sense = _sense_str(con)
         if sense is None:
@@ -863,7 +872,10 @@ def _row_verdicts(model, x_flat: np.ndarray, evaluator) -> _RowVerdicts:
         for i in range(start, stop):
             val = float(g[i]) - rhs
             if not math.isfinite(val):
-                return refuse(f"non-finite residual in row {i}")
+                if not undefined_is_violated:
+                    return refuse(f"non-finite residual in row {i}")
+                undefined[i] = True
+                continue
             viol[i] = _row_violation(val, sense)
             if viol[i] > 0.0:
                 direction[i] = -1.0 if sense == ">=" else float(np.sign(val))
@@ -878,7 +890,13 @@ def _row_verdicts(model, x_flat: np.ndarray, evaluator) -> _RowVerdicts:
     # to "feasible" here and the cap would be a no-op on the very rows it exists
     # for. The Jacobian is still computed only when some row is actually near or
     # over a line, and an exactly-satisfied row (violation 0) never is.
-    suspect = np.nonzero((viol > ABS_TOL * anchor) | (viol > SMALL_ROW_ABS_FLOOR))[0]
+    # An undefined row is failed outright and kept out of the scale-aware pass,
+    # which would evaluate its (non-finite) Jacobian.
+    failed[undefined] = True
+    viol[undefined] = np.inf
+    suspect = np.nonzero(
+        ~undefined & ((viol > ABS_TOL * anchor) | (viol > SMALL_ROW_ABS_FLOOR))
+    )[0]
     if suspect.size == 0:
         return _RowVerdicts(failed, viol, allowed)
 
@@ -1260,7 +1278,11 @@ class DeclaredLogic:
         """Per leaf: worst ``violation / allowance`` over its rows (``<= 1`` holds)."""
         if self._evaluator is None:
             return np.zeros(0, dtype=np.float64)
-        v = _row_verdicts(model, x, self._evaluator)
+        # #1779: a row undefined at the point (sqrt of a negative, log of 0) fails
+        # its own leaf only. It may sit in a disjunct the point does not select;
+        # refusing the whole judgement made verify_point reject valid points, and
+        # Model.solve raise, whenever an inactive disjunct was undefined there.
+        v = _row_verdicts(model, x, self._evaluator, undefined_is_violated=True)
         if v.error is not None:
             raise ValueError(f"declared-logic rows: {v.error}")
         # ``allowed`` is positive on every row (``ABS_TOL * anchor`` at least), and a

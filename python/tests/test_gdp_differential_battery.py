@@ -166,6 +166,19 @@ def _domain_restricted():
     return m
 
 
+def _domain_restricted_wrapped():
+    """An undefined power folded to a finite enclosure: ``exp(-abs(x**0.5))`` in (0, 1].
+
+    The row's own enclosure is finite, so only a per-node domain check sees that
+    it is undefined for ``x < 0`` (#1779).
+    """
+    m = dm.Model("domain_restricted_wrapped")
+    x = m.continuous("x", lb=-1, ub=10)
+    m.either_or([[x <= -0.5], [dm.exp(-abs(x**0.5)) <= 0.5]], name="d")
+    m.minimize(x)
+    return m
+
+
 def _block_disjunction():
     """``add_disjunction`` blocks: the indicators are user-visible model columns."""
     m = dm.Model("block_disjunction")
@@ -215,6 +228,7 @@ def _logic_member(v, t):
 
 
 _UNBOUNDED_REFUSAL = (ValueError, r"(?i)bound")
+_DOMAIN_REFUSAL = (ValueError, r"undefined on part of the variable box")
 
 SHAPES: list[Shape] = [
     Shape("two_way", _two_way, lambda v, t: v["x"] <= 2 + t or v["x"] >= 5 - t),
@@ -311,15 +325,19 @@ SHAPES: list[Shape] = [
         _domain_restricted,
         lambda v, t: v["x"] <= -0.5 + t or (v["x"] >= 0 and math.sqrt(v["x"]) >= 2 - t),
         points=[{"x": -0.8}, {"x": -1.0}, {"x": 4.0}, {"x": 9.0}, {"x": 1.0}],
+        # #1779: big-M, mbigm and simplex keep the sqrt row where its disjunct is
+        # inactive, which imposed x >= 0 on the first disjunct (a false optimal);
+        # they refuse it. Hull, and auto (routed to hull), lower it soundly.
+        refuses={m: _DOMAIN_REFUSAL for m in ("big-m", "mbigm", "simplex")},
     ),
     Shape(
-        "domain_restricted_lowering",
-        _domain_restricted,
-        lambda v, t: v["x"] <= -0.5 + t or (v["x"] >= 0 and math.sqrt(v["x"]) >= 2 - t),
-        points=[{"x": -0.8}, {"x": -1.0}, {"x": 4.0}, {"x": 9.0}, {"x": 1.0}],
-        # The declared-model verifier is itself broken on this shape (#1779), so
-        # it is bypassed here to judge the lowerings on their own.
-        crosscheck=False,
+        "domain_restricted_wrapped",
+        _domain_restricted_wrapped,
+        lambda v, t: (
+            v["x"] <= -0.5 + t or (v["x"] >= 0 and math.exp(-math.sqrt(v["x"])) <= 0.5 + t)
+        ),
+        points=[{"x": -0.8}, {"x": -1.0}, {"x": 1.0}, {"x": 9.0}],
+        refuses={m: _DOMAIN_REFUSAL for m in ("big-m", "mbigm", "simplex")},
     ),
     Shape(
         "block_disjunction",
@@ -386,23 +404,6 @@ XFAIL: dict[tuple[str, str], tuple[str, type[BaseException]]] = {
         "big-M refuses OR (AT_LEAST_ONE) semantics: #1775 G1.4",
         NotImplementedError,
     ),
-    **{
-        ("domain_restricted", m): (
-            "#1779 verifier half: verify_point on the DECLARED model rejects x=-0.51 (in the "
-            "first disjunct) because the inactive sqrt row is NaN; fails at the predicate "
-            "cross-check before any lowering is judged",
-            AssertionError,
-        )
-        for m in METHODS
-    },
-    **{
-        ("domain_restricted_lowering", m): (
-            "#1779 lowering half: the inactive sqrt row imposes x >= 0, cutting the first disjunct",
-            AssertionError,
-        )
-        for m in METHODS
-        if m != "hull"
-    },
 }
 
 
@@ -434,7 +435,7 @@ def test_battery(shape: Shape, method: str):
     # Prove the probe fired (CLAUDE.md §6): both directions were exercised.
     assert rep.feasible_checked > 0, rep
     assert rep.infeasible_checked > 0, rep
-    assert rep.oracle_crosschecks == (rep.comparisons if shape.crosscheck else 0), rep
+    assert rep.oracle_crosschecks == rep.comparisons, rep
     rep.assert_sound()
 
 
