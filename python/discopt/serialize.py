@@ -2966,13 +2966,8 @@ def _decode_document(doc: dict, minor: int) -> Model:
             # so it must be exactly what the writer records, `Constant(0.0)`, or a
             # changed value would load unread (WP-4 fuzzing).
             placeholder = nodes[od.get("expr")]
-            value = getattr(placeholder, "value", None)
-            if not (
-                isinstance(placeholder, Constant)
-                and np.ndim(value) == 0
-                and float(value) == 0.0
-                and not np.signbit(value)
-            ):
+            ph = np.asarray(placeholder.value) if isinstance(placeholder, Constant) else None
+            if not (ph is not None and ph.ndim == 0 and float(ph) == 0.0 and not np.signbit(ph)):
                 raise SerializationError(
                     "the placeholder objective beside a builder objective must be the "
                     f"constant 0.0, got {placeholder!r}"
