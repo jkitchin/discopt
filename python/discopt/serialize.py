@@ -105,6 +105,9 @@ checked against ``_NODE_KEYS`` (per ``op``) and ``_INDEX_KEYS``; everything else
 by recording which keys the decoder reads and refusing the rest
 (:class:`_Record`), so no hand-kept list can fall behind the decoder. The ``x-``
 escape is top-level only: an ``x-`` key inside a record is refused like any other.
+A nested key a new minor adds is read only from documents of that minor or later
+(``indicators`` on a disjunction row, 1.5), so in an older document it is
+refused like any other key no writer of that minor produced.
 
 ``discopt upgrade-model`` rewrites a document at the current ``SCHEMA``. Through
 1.1 an unknown top-level key was ignored; that is how ``provenance`` (1.1) stayed
@@ -187,7 +190,17 @@ logger = logging.getLogger(__name__)
 #: and ``_recentre_inner``. All additive -- an older reader ignores them -- but,
 #: as with 1.3, absence has two meanings that only the minor separates: "not read
 #: from a file" (1.4) versus "the writer did not record it" (<= 1.3).
-SCHEMA = "discopt.model/1.4"
+#:
+#: 1.5 adds one nested key, ``indicators`` on a ``disjunction`` row (#1775 G1.1):
+#: the node references of the binary columns that ``_DisjunctiveConstraint
+#: .indicators`` allocated, written only once they were read. A disjunction whose
+#: indicators were never read is written exactly as at 1.4. The key is read only
+#: from a document of minor >= 5 (``_SCHEMA_MINOR_DISJUNCTION_INDICATORS``), so in an
+#: older document it is refused as a key no writer of that minor produced, and a
+#: 1.4 reader refuses it in a 1.5 document as newer content ("upgrade discopt")
+#: rather than dropping it -- which would leave the columns in the model with
+#: nothing tying them to the disjunction.
+SCHEMA = "discopt.model/1.5"
 
 #: Major version this reader accepts. A document whose major differs is refused
 #: rather than best-effort parsed.
@@ -196,6 +209,9 @@ SCHEMA_MAJOR = 1
 #: Minor at which the blanket ``_enc_tree`` over the solution subtree was dropped
 #: (#1292). Documents below it need that encoding undone on read.
 _SCHEMA_MINOR_UNTAGGED_SOLUTION = 2
+
+#: Minor that first wrote ``indicators`` on a disjunction row (#1775 G1.1).
+_SCHEMA_MINOR_DISJUNCTION_INDICATORS = 5
 
 #: This reader's minor, the one ``SCHEMA`` names.
 SCHEMA_MINOR = int(SCHEMA.rsplit(".", 1)[1])
@@ -1304,16 +1320,14 @@ def _enc_rows(model: Model, table: _NodeTable) -> list[dict]:
                     # cardinality) pair of enums, not a string, so `.value` is
                     # neither JSON-safe nor a stable identity to read back.
                     "semantics": con.semantics.name,
-                    # #1775 G1.1: the indicator columns, once read. Dropping them
-                    # would leave those binaries in the model with nothing tying
-                    # them to the disjunction.
-                    "indicators": (
-                        None
-                        if con._indicator_vars is None
-                        else [table.add(v) for v in con._indicator_vars]
-                    ),
                 }
             )
+            if con._indicator_vars is not None:
+                # #1775 G1.1 (schema 1.5): the indicator columns, once read.
+                # Dropping them would leave those binaries in the model with
+                # nothing tying them to the disjunction. Omitted while unread, so
+                # such a row is written exactly as at 1.4.
+                rows[-1]["indicators"] = [table.add(v) for v in con._indicator_vars]
         else:
             raise SerializationError(
                 f"cannot serialize a row of type {t.__name__}; this format version "
@@ -1323,7 +1337,38 @@ def _enc_rows(model: Model, table: _NodeTable) -> list[dict]:
     return rows
 
 
-def _dec_rows(docs: list[dict], nodes: list) -> list:
+def _dec_indicators(d: dict, nodes: list) -> tuple:
+    """The ``indicators`` of a 1.5+ disjunction row: one scalar binary per disjunct.
+
+    Checked by kind as well as by reference: the GDP lowering uses these columns
+    as the disjunction's selectors (``reformulate_gdp``), so a reference to a
+    continuous column or a constant would lower without complaint to a different
+    model.
+    """
+    refs = d["indicators"]
+    name = d.get("name")
+    if not isinstance(refs, list):
+        raise SerializationError(
+            f"disjunction {name!r} has indicators {refs!r}; it must be a list of node "
+            "references (the key is omitted while the indicators are unread)"
+        )
+    if len(refs) != len(d["disjuncts"]):
+        raise SerializationError(
+            f"disjunction {name!r} has {len(refs)} indicators for {len(d['disjuncts'])} disjuncts"
+        )
+    cols = tuple(nodes[i] for i in refs)
+    for col in cols:
+        if not (type(col) is Variable and col.var_type == VarType.BINARY and col.shape == ()):
+            raise SerializationError(
+                f"disjunction {name!r} has an indicator that is not a scalar binary "
+                f"variable ({col!r})"
+            )
+    if len({id(c) for c in cols}) != len(cols):
+        raise SerializationError(f"disjunction {name!r} repeats an indicator column")
+    return cols
+
+
+def _dec_rows(docs: list[dict], nodes: list, minor: int) -> list:
     """Rebuild the ordered, heterogeneous ``_constraints`` list."""
     from discopt.modeling.core import DisjunctionSemantics
 
@@ -1383,11 +1428,12 @@ def _dec_rows(docs: list[dict], nodes: list) -> list:
                     name=d["name"],
                     method=d["method"],
                     semantics=DisjunctionSemantics[d["semantics"]],
-                    # Absent in files written before #1775 G1.1.
+                    # Schema 1.5 (#1775 G1.1), and only once read. Not looked at
+                    # in an older document, so there it is refused as unread.
                     _indicator_vars=(
-                        None
-                        if d.get("indicators") is None
-                        else tuple(nodes[i] for i in d["indicators"])
+                        _dec_indicators(d, nodes)
+                        if minor >= _SCHEMA_MINOR_DISJUNCTION_INDICATORS and "indicators" in d
+                        else None
                     ),
                 )
             )
@@ -2565,7 +2611,7 @@ def _decode_document(doc: dict, minor: int) -> Model:
     params = [_dec_parameter(d, model) for d in doc["parameters"]]
     nodes = _decode_nodes(doc["nodes"], variables, params)
 
-    model._constraints.extend(_dec_rows(doc["rows"], nodes))
+    model._constraints.extend(_dec_rows(doc["rows"], nodes, minor))
     for row in model._constraints:
         if type(row) is _DisjunctiveConstraint:
             row._model = model  # #1775 G1.1: so ``indicators`` can be read

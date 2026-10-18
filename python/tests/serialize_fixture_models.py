@@ -194,6 +194,32 @@ def registered_atom():
     return m, {}
 
 
+def gdp_indicators():
+    """Disjunctions whose indicators were read (1.5+, #1775 G1.1).
+
+    ``Model.either_or`` returns nothing before 1.5, so this case is introduced at
+    1.5 (``INTRODUCED``). The indicators are tied together by an algebraic row (on
+    their binary columns) and priced in the objective: ``Model.logical`` over them
+    would be the natural spelling, but a propositional ``_LogicalConstraint`` is
+    refused by the writer at every version. A third disjunction leaves its
+    indicators unread, so its row is written exactly as at 1.4.
+    """
+    import discopt.modeling as dm
+
+    m = dm.Model("gdp_indicators")
+    x = m.continuous("x", lb=0.0, ub=20.0)
+    w = m.continuous("w", lb=0.0, ub=20.0)
+    mode = m.either_or([[x <= 5.0], [x >= 15.0]], name="mode")
+    pump = m.either_or([[w <= 3.0], [w >= 10.0], [w >= 6.0, w <= 7.0]], name="pump")
+    m.either_or([[x + w <= 30.0], [x - w >= 0.0]], name="unread")
+    hi_mode = mode.indicators[1].variable
+    hi_pump = pump.indicators[1].variable
+    # "high mode implies high pump", as algebra on the indicator columns.
+    m.subject_to(hi_mode <= hi_pump, name="mode_implies_pump")
+    m.minimize((x - 12.0) ** 2 + (w - 4.0) ** 2 + 3.0 * pump.indicators[2].variable)
+    return m, {}
+
+
 #: name -> builder. Order is the manifest's order; never reorder or rename a case
 #: once a shipped version's fixtures exist for it (fixtures are immutable, §0.3.11).
 CASES = {
@@ -213,8 +239,15 @@ CASES = {
         parameters_and_start,
         decomposition_marks,
         registered_atom,
+        gdp_indicators,
     )
 }
+
+#: The schema version a case first exists at, for a case added after 1.0. A
+#: version older than this has no entry for the case in the manifest at all --
+#: not ``unbuildable``: its fixtures were written before the case did -- and an
+#: older reader's forward cell for it is ``loaded``, with nothing to compare.
+INTRODUCED = {"gdp_indicators": "1.5"}
 
 
 def build(name: str):

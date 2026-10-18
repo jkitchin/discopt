@@ -48,11 +48,24 @@ def _key(label: str) -> tuple:
 #: Content a version did not write yet, keyed by the first version that writes it.
 #: Comparing an older document with today's build drops exactly these, nothing else.
 #: 1.3 added the registered-atom tag on nodes (#1248 A); 1.4 added ``state.nl_source``
-#: (a ``from_nl`` model's parse marker and digest-checked source path).
+#: (a ``from_nl`` model's parse marker and digest-checked source path); 1.5 added
+#: ``indicators`` on a disjunction row, written only once read -- which no case
+#: older than ``gdp_indicators`` (itself introduced at 1.5) does, so nothing is
+#: dropped for it.
 _WRITTEN_FROM = {
     (1, 3): "node atom tags",
     (1, 4): "state.nl_source",
+    (1, 5): "disjunction-row indicators",
 }
+
+
+def _introduced(case: str) -> tuple:
+    return _key(reg.INTRODUCED.get(case, "1.0"))
+
+
+def _cases_at(version: str) -> set:
+    """The registry cases that exist at *version* (``reg.INTRODUCED``)."""
+    return {c for c in reg.CASES if _introduced(c) <= _key(version)}
 
 
 def _normalize(doc: dict, written_by: str) -> dict:
@@ -151,7 +164,7 @@ def test_unbuildable_cases_are_recorded_not_skipped():
     """Every registry case is either a fixture or an explicit ``unbuildable`` entry."""
     unbuildable = set()
     for version, entry in MANIFEST["versions"].items():
-        assert set(entry["cases"]) == set(reg.CASES), version
+        assert set(entry["cases"]) == _cases_at(version), version
         for case, record in entry["cases"].items():
             assert ("file" in record) != ("unbuildable" in record), (version, case)
             if "unbuildable" in record:
@@ -239,5 +252,8 @@ def test_forward_matrix_has_no_silent_misread():
                 assert outcome in {"loads_identical", "refused", "loaded"}, outcome
                 if outcome == "loaded":
                     case = fname.removesuffix(".json")
-                    assert "unbuildable" in own[case], (reader, writer, fname)
+                    # Nothing to compare: the case could not be built at the
+                    # reader's version, or did not exist yet there.
+                    assert case not in own or "unbuildable" in own[case], (reader, writer, fname)
+                    assert case in own or _introduced(case) > _key(reader), (reader, case)
     assert seen > 0

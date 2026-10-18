@@ -169,16 +169,29 @@ def _forward_cell(ser, path, own_dir):
     with open(own, encoding="utf-8") as fh:
         own_text = fh.read()
     redump = _dumps(ser, loaded, {})
-    if '"solution"' in own_text:  # compare model content; the embedded result is checked live
-        import json as _json
-
-        own_doc = _json.loads(own_text)
-        own_doc.pop("solution", None)
-        own_text = _json.dumps(own_doc, indent=1)
-        redump = _json.dumps(_json.loads(redump), indent=1)
+    if '"solution"' in own_text or '"nl_source"' in own_text:
+        own_text, redump = _comparable(own_text), _comparable(redump)
     if redump == own_text:
         return {"outcome": "loads_identical"}
     return {"outcome": "loads_different", "diff_hint": _first_difference(own_text, redump)}
+
+
+def _comparable(text: str) -> str:
+    """*text* without what is not model content, for a forward comparison.
+
+    The embedded result is checked live (and holds a wall time). Where a
+    ``from_nl`` model's ``.nl`` was read from is a fact about the machine that
+    wrote the document -- the digest identifies the content and stays compared --
+    so the path is reduced to its file name, as ``test_serialize_compat_matrix``
+    does; otherwise a reader that knows ``nl_source`` reports every newer
+    ``from_nl`` document written on another machine as ``loads_different``.
+    """
+    doc = json.loads(text)
+    doc.pop("solution", None)
+    source = doc.get("state", {}).get("nl_source")
+    if isinstance(source, dict) and "path" in source:
+        source["path"] = os.path.basename(source["path"])
+    return json.dumps(doc, indent=1)
 
 
 def _first_difference(a: str, b: str) -> str:
@@ -201,7 +214,14 @@ def _merge_manifest(path: str, label: str, report: dict, forward_dir) -> None:
         with open(path, encoding="utf-8") as fh:
             manifest = json.load(fh)
     entry = manifest["versions"].setdefault(label, {})
-    for key in ("schema", "commit", "discopt_version", "python"):
+    # ``python`` is the WRITER's interpreter: it is checked only by a run that
+    # (re)writes this version's fixtures. A forward-only run is a reader run --
+    # the same commit, possibly another interpreter -- and records its own under
+    # ``forward_python``.
+    writer_keys = ("schema", "commit", "discopt_version") + (
+        ("python",) if "cases" in report or "python" not in entry else ()
+    )
+    for key in writer_keys:
         if entry.get(key) not in (None, report[key]):
             sys.exit(f"refusing: manifest {label}.{key}={entry[key]!r}, this run {report[key]!r}")
         entry[key] = report[key]
@@ -212,6 +232,7 @@ def _merge_manifest(path: str, label: str, report: dict, forward_dir) -> None:
         if not writer.startswith("v"):
             sys.exit(f"--forward directory must be named v<version>, got {writer!r}")
         entry.setdefault("forward", {})[writer[1:]] = report["forward"]
+        entry.setdefault("forward_python", {})[writer[1:]] = report["python"]
     manifest["versions"] = dict(sorted(manifest["versions"].items(), key=lambda kv: _key(kv[0])))
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(manifest, fh, indent=1, sort_keys=False)
