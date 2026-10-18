@@ -29553,9 +29553,10 @@ def _qp_convex_certificate(
     # ``sum e_k**2`` (``e_k`` defined by rows scaled by ``1/d_k`` up to 500) 3.3e-8
     # BELOW the optimum, the rigorous bound then sat above it, and the certificate
     # was refused as a failed premise. The point is moved onto its equality rows
-    # first; the bound is valid for any sign-consistent multipliers, so the duals
-    # from ``x`` still apply, and the projected point is the one reported.
-    xp = _project_onto_equality_rows(xs, A, cl, cu, lb, ub)
+    # first, and onto any inequality side it violates (#1774); the bound is valid
+    # for any sign-consistent multipliers, so the duals from ``x`` still apply, and
+    # the projected point is the one reported.
+    xp = _project_onto_rows(xs, A, cl, cu, lb, ub)
     projected = xp is not None
     if xp is not None:
         xs = xp
@@ -29597,7 +29598,7 @@ def _qp_convex_certificate(
     return cert
 
 
-def _project_onto_equality_rows(
+def _project_onto_rows(
     x: np.ndarray,
     A,  # noqa: N803
     cl: np.ndarray,
@@ -29605,19 +29606,29 @@ def _project_onto_equality_rows(
     lb: np.ndarray,
     ub: np.ndarray,
 ) -> Optional[np.ndarray]:
-    """``x`` moved onto its equality rows ``A_E x = b_E`` by a minimum-norm step over
-    the columns strictly inside their box, or ``None`` (#1655).
+    """``x`` moved onto its equality rows and the inequality sides it violates, by a
+    minimum-norm step over the columns strictly inside their box, or ``None``
+    (#1655, #1774).
 
-    ``None`` when there is nothing to repair (no equality row is off by more than
-    round-off at its own term scale), when the step would leave the box, or when it
-    does not leave every row -- equalities and inequalities alike -- at least as
-    satisfied as ``x`` left it. So a returned point is never less feasible than ``x``.
+    An interior-point backend meets a row only to its own tolerance, and the
+    certificate's "feasible value" is the objective at ``x``. On an equality row
+    that value can sit below the optimum (#1655); on a violated inequality side
+    just the same (#1774: a QP whose rows pin ``x2 >= 1`` came back at
+    ``x2 = 1 - 4.7e-9`` with ``f`` 1.8e-9 below the optimum 0.19, the tangent bound
+    over the singleton implied box was 0.19, and the certificate refused it as a
+    failed premise). The repaired rows are every equality row plus every
+    inequality row violated by more than round-off, each aimed at the side it
+    violates.
+
+    ``None`` when there is nothing to repair (no such row is off by more than
+    round-off at its own term scale), when the step would leave the box by more
+    than round-off (an excursion of round-off size is clipped back onto it), or
+    when it does not leave every row -- equalities and inequalities alike -- at
+    least as satisfied as ``x`` left it. So a returned point is never less
+    feasible than ``x``.
     """
     m = int(A.shape[0])
     if m == 0:
-        return None
-    eq = np.flatnonzero(np.isfinite(cl) & (cl == cu))
-    if eq.size == 0:
         return None
     import scipy.sparse as _sps
     from scipy.sparse.linalg import lsmr
@@ -29625,7 +29636,11 @@ def _project_onto_equality_rows(
     As = _sps.csr_matrix(A, dtype=np.float64)
     x = np.asarray(x, dtype=np.float64)
     ax = np.abs(x)
-    scale_rows = np.asarray(abs(As) @ ax, dtype=np.float64).ravel() + np.abs(cl)
+    with np.errstate(invalid="ignore"):
+        side_mag = np.where(np.isfinite(cl), np.abs(cl), 0.0) + np.where(
+            np.isfinite(cu), np.abs(cu), 0.0
+        )
+    scale_rows = np.asarray(abs(As) @ ax, dtype=np.float64).ravel() + side_mag
 
     def residuals(z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         g = np.asarray(As @ z, dtype=np.float64).ravel()
@@ -29636,29 +29651,35 @@ def _project_onto_equality_rows(
 
     g0, v0 = residuals(x)
     noise = 8.0 * np.finfo(float).eps * (1.0 + scale_rows)
-    if not np.any(v0[eq] > noise[eq]):
+    is_eq = np.isfinite(cl) & (cl == cu)
+    rows = np.flatnonzero(is_eq | (v0 > noise))
+    if rows.size == 0 or not np.any(v0[rows] > noise[rows]):
         return None
+    # Each repaired row aims at its equality value or at the side it violates.
+    target = np.where(is_eq[rows] | (g0[rows] < cl[rows]), cl[rows], cu[rows])
     span = np.where(np.isfinite(ub - lb), ub - lb, np.inf)
     margin = 1e-9 * (1.0 + np.minimum(ax, span))
     free = np.flatnonzero((x - lb > margin) & (ub - x > margin))
     if free.size == 0:
         return None
-    AE = As[eq][:, free]  # noqa: N806
+    AR = As[rows][:, free]  # noqa: N806
     z = x.copy()
     for _ in range(2):  # one refinement pass recovers the digits lsmr leaves
-        r = cl[eq] - np.asarray(As[eq] @ z, dtype=np.float64).ravel()
-        if not np.any(np.abs(r) > noise[eq]):
+        r = target - np.asarray(As[rows] @ z, dtype=np.float64).ravel()
+        if not np.any(np.abs(r) > noise[rows]):
             break
-        dx = lsmr(AE, r, atol=1e-15, btol=1e-15, maxiter=10 * (AE.shape[0] + AE.shape[1]))[0]
+        dx = lsmr(AR, r, atol=1e-15, btol=1e-15, maxiter=10 * (AR.shape[0] + AR.shape[1]))[0]
         if not np.all(np.isfinite(dx)):
             return None
         z[free] += dx
-    if np.any(z < lb) or np.any(z > ub):
+    box_noise = 8.0 * np.finfo(float).eps * (1.0 + np.abs(z))
+    if np.any(z < lb - box_noise) or np.any(z > ub + box_noise):
         return None
+    z = np.clip(z, lb, ub)
     _, v1 = residuals(z)
     if np.any(v1 > np.maximum(v0, noise)):
         return None
-    if not float(v1[eq].max()) < float(v0[eq].max()):
+    if not float(v1[rows].max()) < float(v0[rows].max()):
         return None
     return z
 
