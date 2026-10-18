@@ -14052,6 +14052,15 @@ def solve_model(
                                 max_leaf_solves=1000,
                             )
                             if _dcb.bound is not None and np.isfinite(_dcb.bound):
+                                # Stashed on ``model``, which here is ``_iml`` --
+                                # the reformulated model THIS solve built and
+                                # adopted above, never the caller's (results carry
+                                # the caller's model). The floor is valid for the
+                                # root box of that object, and no later solve can
+                                # reach it, so it cannot go stale across solves.
+                                # Stashing it on a model that outlives this solve
+                                # would break that: a re-solve after a bound change
+                                # would max-combine a floor computed for the old box.
                                 model._disjunctive_config_floor = float(_dcb.bound)
                                 logger.info(
                                     "disjunctive config bound: floor %.6g "
