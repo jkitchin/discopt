@@ -1452,16 +1452,18 @@ def _dec_logic(entries: Any, nodes: list, name: Any) -> Any:
         elif c == "implies":
             built.append(LogicalImplies(refs[e["a"]], refs[e["b"]]))
         elif c in ("and", "or", "iff"):
-            cls = {"and": LogicalAnd, "or": LogicalOr, "iff": LogicalEquivalent}[c]
-            built.append(cls(refs[e["a"]], refs[e["b"]]))
+            pair = {"and": LogicalAnd, "or": LogicalOr, "iff": LogicalEquivalent}[c]
+            built.append(pair(refs[e["a"]], refs[e["b"]]))
         else:
             k = e["k"]
             if type(k) is not int:
                 raise SerializationError(f"logical row {name!r}: cardinality k={k!r} is not an int")
             if not isinstance(e["args"], list):
                 raise SerializationError(f"logical row {name!r}: args must be a list")
-            cls = {"atleast": LogicalAtLeast, "atmost": LogicalAtMost, "exactly": LogicalExactly}[c]
-            built.append(cls(k, [refs[a] for a in e["args"]]))
+            card = {"atleast": LogicalAtLeast, "atmost": LogicalAtMost, "exactly": LogicalExactly}[
+                c
+            ]
+            built.append(card(k, [refs[a] for a in e["args"]]))
     return built[-1]
 
 
