@@ -99,15 +99,19 @@ def test_ro2_scalar_ellipsoidal_refuses_loudly():
         RobustCounterpart(m, EllipsoidalUncertaintySet(p, rho=0.5)).formulate()
 
 
-def test_ro2_elementwise_sum_ellipsoidal_refuses_loudly():
-    """dm.sum(p * x) (elementwise, not MatMul) must raise, not silently no-op."""
+def test_ro2_elementwise_sum_ellipsoidal_is_robustified():
+    """dm.sum(p * x) is p @ x (#1756): robustified, never silently left nominal.
+
+    It used to raise here (RO-2's guard against a silent no-op); it now gets the
+    same SOC counterpart as the matmul spelling: max p_hat @ x - 0.5 ||x|| = 2.5.
+    """
     m = dm.Model("ro2e")
     x = m.continuous("x", shape=(3,), lb=0, ub=1)
     p = m.parameter("p", value=np.array([1.0, 2.0, 3.0]))
     m.maximize(dm.sum(p * x))
     m.subject_to(dm.sum(x) <= 1, name="budget")
-    with pytest.raises(NotImplementedError, match="silently non-robust|could not robustify"):
-        RobustCounterpart(m, EllipsoidalUncertaintySet(p, rho=0.5)).formulate()
+    RobustCounterpart(m, EllipsoidalUncertaintySet(p, rho=0.5)).formulate()
+    assert m.solve().objective == pytest.approx(2.5, abs=1e-5)
 
 
 def test_ro2_blessed_matmul_still_formulates():
