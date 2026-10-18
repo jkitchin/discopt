@@ -798,17 +798,24 @@ def test_unknown_operator_name_is_refused_on_read(field, bad):
 
 @pytest.mark.smoke
 def test_a_future_minor_schema_is_readable_but_a_future_major_is_not():
-    """Only the major gates readability; the minor selects a decoder.
+    """The major gates readability; the minor selects a decoder.
 
     The minor stopped being additive at 1.2 (the bool index kind, the list sum
     axis, and the untagged solution subtree), so it is read now rather than
-    skipped -- but a document one minor ahead still loads, and only a major bump
-    is refused.
+    skipped. A document a minor ahead still loads *when every key it carries is
+    one this reader knows*, with a ``SchemaVersionWarning`` (plan §3.2; an unknown
+    key is refused -- ``test_serialize_versioning.py``); a major bump is refused.
     """
+    from discopt.serialize import SchemaVersionWarning
+
     doc = json.loads(dumps(_kinetics_model()))
-    for minor in ("discopt.model/1.1", "discopt.model/1.9", "discopt.model/1"):
+    for minor in ("discopt.model/1.1", "discopt.model/1"):
         doc["schema"] = minor
         assert loads(json.dumps(doc)) is not None, minor
+
+    doc["schema"] = "discopt.model/1.9"
+    with pytest.warns(SchemaVersionWarning, match="newer format"):
+        assert loads(json.dumps(doc)) is not None
 
     doc["schema"] = "discopt.model/2.0"
     with pytest.raises(SerializationError, match="major version 2"):

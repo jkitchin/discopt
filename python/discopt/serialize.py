@@ -73,9 +73,40 @@ object), an index must fit its base's shape, and senses, SOS types, indicator
 activation values and disjunction methods must be ones the modeling API can
 produce -- an ``active_value`` of 7 once dropped its row and certified a false
 optimum. A malformed field these checks do not name raises
-:class:`SerializationError` too, chained to the low-level error. Unknown
-top-level keys are ignored: that is how an additive minor (``provenance`` in 1.1)
-stays readable by an older reader.
+:class:`SerializationError` too, chained to the low-level error. An unknown
+top-level key is refused too: see *Versioning* below.
+
+Versioning
+----------
+``SCHEMA`` is ``discopt.model/<major>.<minor>``. A reader refuses any other major.
+Every key a document may carry at its top level and in its ``state`` section is
+listed, with the minor that first wrote it, in ``_TOP_LEVEL_KEYS`` and
+``_STATE_KEYS``, and a reader acts on a document's minor as follows:
+
+* **minor at or below the reader's, only listed keys** -- loaded strictly;
+* **minor at or below the reader's, an unlisted key** -- refused: no writer of
+  that minor wrote it, so the document is malformed or was edited by hand, and
+  dropping it could drop model content;
+* **newer minor, only listed keys** -- loaded strictly, with a
+  :class:`SchemaVersionWarning`: everything the reader understood was decoded, but
+  a newer writer may say more than it knows how to check;
+* **newer minor, an unlisted key, or a node, row or index kind the reader does not
+  know** -- refused, with a message saying to upgrade discopt.
+
+A top-level key starting with ``x-`` is never read and never refused: it is the
+one place a tool may annotate a document without forking the format. It does not
+survive a load and re-save -- the reader does not keep what it does not read --
+but ``discopt upgrade-model`` carries every top-level ``x-`` key through verbatim.
+
+The key policy covers the top level and ``state`` only. A key inside a nested
+record -- a variable, a node, a row, a builder block -- that this version does not
+know is still ignored on read, with no error and no warning, at every minor (see
+#1780).
+
+``discopt upgrade-model`` rewrites a document at the current ``SCHEMA``. Through
+1.1 an unknown top-level key was ignored; that is how ``provenance`` (1.1) stayed
+readable by a 1.0 reader, and the reason no newer document can rely on an older
+reader to ignore anything.
 
 Examples
 --------
@@ -163,6 +194,58 @@ SCHEMA_MAJOR = 1
 #: (#1292). Documents below it need that encoding undone on read.
 _SCHEMA_MINOR_UNTAGGED_SOLUTION = 2
 
+#: This reader's minor, the one ``SCHEMA`` names.
+SCHEMA_MINOR = int(SCHEMA.rsplit(".", 1)[1])
+
+#: Every top-level key a writer has produced, with the minor that first wrote it.
+#: A key absent here is refused (see *Versioning* in the module docstring); a key
+#: a new minor adds is added here in the PR that bumps ``SCHEMA``.
+_TOP_LEVEL_KEYS: dict[str, int] = {
+    "schema": 0,
+    "discopt": 0,
+    "name": 0,
+    "variables": 0,
+    "parameters": 0,
+    "nodes": 0,
+    "objective": 0,
+    "builder_objective": 0,
+    "rows": 0,
+    "builder_blocks": 0,
+    "complementarities": 0,
+    "state": 0,
+    "initial_point": 0,
+    "solution": 0,
+    "provenance": 1,
+}
+
+#: Every key a writer has produced in the "state" section, likewise. Derived from
+#: every revision of this module, not only the last writer of each minor: a key
+#: written in between and later dropped would still be on disk.
+_STATE_KEYS: dict[str, int] = {
+    "_aux_counter": 0,
+    "_decomp_stages": 0,
+    "_decomp_blocks": 0,
+    "_zero_spanning_factor_auxes": 0,
+    "_coupling_keys": 0,
+    "_sets": 0,
+    "_simplex_lowerings": 0,
+    "_atan2_preconditions": 2,
+    "_block_labels_var": 2,
+    "_block_labels_con": 2,
+    "_implied_integer_auxes": 3,
+    "_free_by_construction": 3,
+    "_piecewise_domains": 3,
+    "_recentre_inner": 4,
+    "_gams_initial_values": 4,
+    "nl_source": 4,
+}
+
+#: A top-level key with this prefix is an annotation: never read, never refused.
+_EXTENSION_PREFIX = "x-"
+
+#: ``{key: (deprecated_since_minor, replacement)}``. Nothing is deprecated.
+_DEPRECATED_KEYS: dict[str, tuple[int, str]] = {}
+
 _GZIP_MAGIC = b"\x1f\x8b"
 
 __all__ = [
@@ -172,12 +255,23 @@ __all__ = [
     "save",
     "load",
     "SerializationError",
+    "SchemaVersionWarning",
     "ProvenanceSkewWarning",
 ]
 
 
 class SerializationError(ValueError):
     """Raised when a model cannot be written faithfully, or a document cannot be read."""
+
+
+class SchemaVersionWarning(UserWarning):
+    """A document was written by a newer minor of the format than this reader's.
+
+    It loaded -- every key it carries is one this reader knows -- but a newer writer
+    can say things inside those keys that this reader cannot check. ``warnings.
+    simplefilter("error", SchemaVersionWarning)`` turns it into a refusal, which is
+    what ``discopt upgrade-model`` does: rewriting such a document would downgrade it.
+    """
 
 
 class ProvenanceSkewWarning(UserWarning):
@@ -2201,6 +2295,65 @@ def _loads_document(doc: dict) -> Model:
             f"{minor_field!r}; refusing rather than guessing which format it is."
         )
 
+    newer = minor > SCHEMA_MINOR
+    _check_keys(doc, _TOP_LEVEL_KEYS, "top-level", schema, newer, extensions=True)
+    if isinstance(doc.get("state"), dict):
+        _check_keys(doc["state"], _STATE_KEYS, "'state'", schema, newer, extensions=False)
+
+    if not newer:
+        return _decode_document(doc, minor)
+    try:
+        model = _decode_document(doc, minor)
+    except (SerializationError, KeyError, TypeError, ValueError, IndexError, AttributeError) as exc:
+        # A newer writer may use a node, row or index kind this reader has never
+        # seen; the low-level refusal is right, but the remedy is not in it.
+        raise SerializationError(
+            f"document schema {schema!r} is newer than this reader ({SCHEMA}) and "
+            f"holds content it cannot decode ({type(exc).__name__}: {exc}); upgrade "
+            "discopt to read it."
+        ) from exc
+    # 3: past this function and `loads`, to the caller's line.
+    warnings.warn(
+        f"document schema {schema!r} was written by a newer format than this reader's "
+        f"({SCHEMA}). Everything in it is a key this reader knows and was loaded, but "
+        "a newer writer may say more inside those keys than this reader can check; "
+        "upgrade discopt to be sure.",
+        SchemaVersionWarning,
+        stacklevel=3,
+    )
+    return model
+
+
+def _check_keys(
+    section: dict, known: dict, where: str, schema: str, newer: bool, *, extensions: bool
+) -> None:
+    """Refuse a key no writer produced (see *Versioning* in the module docstring)."""
+    unknown = sorted(
+        k
+        for k in section
+        if k not in known and not (extensions and k.startswith(_EXTENSION_PREFIX))
+    )
+    if not unknown:
+        return
+    if newer:
+        raise SerializationError(
+            f"document schema {schema!r} is newer than this reader ({SCHEMA}) and has "
+            f"{where} key(s) {unknown} it does not know; refusing rather than dropping "
+            "them. Upgrade discopt to read it."
+        )
+    hint = (
+        f" (a key starting with {_EXTENSION_PREFIX!r} is an annotation and is ignored)"
+        if extensions
+        else ""
+    )
+    raise SerializationError(
+        f"document schema {schema!r} has {where} key(s) {unknown} that no writer of that "
+        f"format produces; the document is malformed or was edited by hand, and "
+        f"ignoring them could drop part of the model{hint}."
+    )
+
+
+def _decode_document(doc: dict, minor: int) -> Model:
     model = Model(doc["name"])
     variables = _StrictRefs([_dec_variable(d, model) for d in doc["variables"]], "variable")
     params = [_dec_parameter(d, model) for d in doc["parameters"]]
@@ -2307,8 +2460,8 @@ def _loads_document(doc: dict) -> Model:
 
     message = skew_warning(prov)
     if message is not None:
-        # 3: past this function and `loads`, to the caller's line.
-        warnings.warn(message, ProvenanceSkewWarning, stacklevel=3)
+        # 4: past this function, `_loads_document` and `loads`, to the caller's line.
+        warnings.warn(message, ProvenanceSkewWarning, stacklevel=4)
 
     return model
 

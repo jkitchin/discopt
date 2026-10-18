@@ -529,6 +529,11 @@ _CHILDREN_FIRST_KEY = "_pickle_children_first"
 #: a weakref per node) made every model pickle about 50% slower to avoid it.
 _PICKLE_SCOPES = _threading.local()
 
+#: Layout of what ``Model.__getstate__`` writes and ``Model.__setstate__`` reads.
+#: Bump it with any change to either; an unpickle across a different value is
+#: refused (see the pickling notes on ``Model``).
+_MODEL_PICKLE_FORMAT = 1
+
 
 def _children_first_scope_open() -> bool:
     return bool(getattr(_PICKLE_SCOPES, "open", 0))
@@ -6352,14 +6357,27 @@ class Model:
     # per-process, so the number means nothing in the process that unpickles it.
     #
     # ``pickle`` is for moving a model between processes running the same
-    # discopt; it carries no format version. To keep a model on disk, use
-    # ``Model.save`` / ``discopt.modeling.dumps`` (``discopt.serialize``).
+    # discopt. It carries a stamp, ``(_MODEL_PICKLE_FORMAT, discopt.__version__,
+    # SCHEMA)``: a pickle of another layout -- or of none, from before the stamp --
+    # is refused, since ``__dict__.update`` would install attributes this code does
+    # not expect, or leave out ones it does; the same layout from another discopt
+    # version loads with a ``ProvenanceSkewWarning``. Nodes are not stamped (a
+    # per-node stamp is a per-node cost): a lone ``Expression`` pickle carries its
+    # model through its variables, and with it that model's one stamp. To keep a
+    # model on disk, use ``Model.save`` /
+    # ``discopt.modeling.dumps`` (``discopt.serialize``).
 
     def __getstate__(self) -> tuple:
+        import discopt
+        from discopt.serialize import SCHEMA
+
         # First in the dict, so the pickler writes the nodes children-first before
         # anything that refers to them (see ``_expressions_children_first``).
         nodes = self._expressions_children_first()
-        state: dict = {"_pickle_expressions": [*nodes, _open_children_first_scope()]}
+        state: dict = {
+            "_pickle_expressions": [*nodes, _open_children_first_scope()],
+            "_pickle_format": (_MODEL_PICKLE_FORMAT, discopt.__version__, SCHEMA),
+        }
         for key, value in self.__dict__.items():
             if _is_model_cache(key):
                 if key in _MODEL_INIT_CACHES:
@@ -6378,6 +6396,32 @@ class Model:
         return state, self._builder is not None, self._row_marks_by_position()
 
     def __setstate__(self, state: tuple) -> None:
+        stamp = None
+        if isinstance(state, tuple) and len(state) == 3 and isinstance(state[0], dict):
+            stamp = state[0].pop("_pickle_format", None)
+        if not (isinstance(stamp, tuple) and len(stamp) == 3) or stamp[0] != _MODEL_PICKLE_FORMAT:
+            if stamp is None:
+                found = "no format stamp"
+            else:
+                found = f"format {stamp[0] if isinstance(stamp, tuple) and stamp else stamp!r}"
+            raise TypeError(
+                f"this Model was pickled by a different discopt pickle layout ({found}; "
+                f"this discopt reads format {_MODEL_PICKLE_FORMAT}). pickle is for "
+                "same-version transport -- use Model.save()/discopt.modeling.load() to "
+                "keep a model, or re-pickle it with the discopt that wrote it."
+            )
+        import discopt
+
+        if stamp[1] != discopt.__version__:
+            from discopt.serialize import ProvenanceSkewWarning
+
+            warnings.warn(
+                f"this Model was pickled by discopt {stamp[1]} and is being unpickled "
+                f"by discopt {discopt.__version__}; the pickle layout matches, but a "
+                "model's meaning can still differ between versions.",
+                ProvenanceSkewWarning,
+                stacklevel=2,
+            )
         attrs, had_builder, row_marks = state
         attrs.pop("_pickle_expressions", None)
         self.__dict__.update(attrs)
