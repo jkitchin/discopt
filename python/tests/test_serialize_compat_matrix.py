@@ -58,6 +58,12 @@ _WRITTEN_FROM = {
 def _normalize(doc: dict, written_by: str) -> dict:
     doc = json.loads(json.dumps(doc))
     doc.pop("solution", None)  # the embedded result is checked on its own
+    source = doc.get("state", {}).get("nl_source")
+    if source and "path" in source:
+        # Where the .nl was read from is a fact about the machine that wrote the
+        # document (CI checks the tree out elsewhere); the digest identifies the
+        # content and stays compared, as does the file name.
+        source["path"] = pathlib.PurePath(source["path"]).name
     if _key(written_by) < (1, 4):
         doc.get("state", {}).pop("nl_source", None)
     if _key(written_by) < (1, 3):
