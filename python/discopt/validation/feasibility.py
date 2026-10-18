@@ -894,9 +894,7 @@ def _row_verdicts(
     # which would evaluate its (non-finite) Jacobian.
     failed[undefined] = True
     viol[undefined] = np.inf
-    suspect = np.nonzero(
-        ~undefined & ((viol > ABS_TOL * anchor) | (viol > SMALL_ROW_ABS_FLOOR))
-    )[0]
+    suspect = np.nonzero(~undefined & ((viol > ABS_TOL * anchor) | (viol > SMALL_ROW_ABS_FLOOR)))[0]
     if suspect.size == 0:
         return _RowVerdicts(failed, viol, allowed)
 
