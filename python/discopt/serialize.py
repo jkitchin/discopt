@@ -440,16 +440,31 @@ def _enc_array(arr: np.ndarray) -> Any:
 
 
 def _dec_array(obj: Any, shape: tuple[int, ...]) -> np.ndarray:
-    flat = []
+    """Inverse of :func:`_enc_array`: nesting must match *shape* exactly.
 
-    def walk(o):
-        if isinstance(o, list):
-            for item in o:
-                walk(item)
-        else:
+    Flattening whatever came and reshaping accepted ``[0.0]`` for a scalar bound,
+    or ``[[1, 2], [3]]`` padded out by a lucky total -- documents no writer
+    produces, read as if they were fine (WP-4 fuzzing). Each level must be a list
+    of exactly the declared length, and a scalar position a scalar.
+    """
+    flat: list[float] = []
+    stack: list = [(obj, 0)]
+    while stack:
+        o, depth = stack.pop()
+        if depth == len(shape):
+            if isinstance(o, (list, dict)):
+                raise SerializationError(
+                    f"array of shape {shape} holds a nested value where a number belongs"
+                )
             flat.append(_dec_float(o))
-
-    walk(obj)
+        else:
+            if not isinstance(o, list) or len(o) != shape[depth]:
+                got = len(o) if isinstance(o, list) else type(o).__name__
+                raise SerializationError(
+                    f"array of shape {shape}: axis {depth} should have {shape[depth]} "
+                    f"entries, got {got}"
+                )
+            stack.extend((item, depth + 1) for item in reversed(o))
     return np.array(flat, dtype=np.float64).reshape(shape)
 
 
@@ -1262,15 +1277,49 @@ def _enc_csr(A) -> dict:
 
 
 def _dec_csr(d: dict):
+    """Rebuild a CSR matrix, checking its structure before anything indexes with it.
+
+    scipy validates CSR arrays lazily, if at all: a column index past the last
+    column, or a negative one (which wraps), loaded into a matrix holding a
+    coefficient on the wrong variable, and an ``indptr`` running past ``indices``
+    reached the Rust builder and panicked there (WP-4 fuzzing). Duplicate or
+    unsorted column indices stay legal -- a CSR array the writer took from scipy
+    may hold them.
+    """
     import scipy.sparse as sp
 
+    shape = d["shape"]
+    if not (isinstance(shape, list) and len(shape) == 2):
+        raise SerializationError(f"sparse matrix shape must be [rows, cols], got {shape!r}")
+    rows, cols = (_dec_index_int(n, "a sparse matrix dimension") for n in shape)
+    if rows < 0 or cols < 0:
+        raise SerializationError(f"sparse matrix has a negative dimension: {shape!r}")
+    indptr = [_dec_index_int(i, "a sparse matrix row pointer") for i in d["indptr"]]
+    indices = [_dec_index_int(i, "a sparse matrix column index") for i in d["indices"]]
+    data = [_dec_float(x) for x in d["data"]]
+    if len(indptr) != rows + 1 or indptr[0] != 0 or indptr[-1] != len(indices):
+        raise SerializationError(
+            f"sparse matrix row pointers do not describe {rows} rows over "
+            f"{len(indices)} entries: {indptr!r}"
+        )
+    if any(a > b for a, b in zip(indptr, indptr[1:])):
+        raise SerializationError(f"sparse matrix row pointers decrease: {indptr!r}")
+    if len(data) != len(indices):
+        raise SerializationError(
+            f"sparse matrix has {len(data)} values for {len(indices)} column indices"
+        )
+    bad = [j for j in indices if not 0 <= j < cols]
+    if bad:
+        raise SerializationError(
+            f"sparse matrix column index {bad[0]} is out of range for {cols} columns"
+        )
     return sp.csr_matrix(
         (
-            np.array([_dec_float(x) for x in d["data"]], dtype=np.float64),
-            np.array(d["indices"], dtype=np.int32),
-            np.array(d["indptr"], dtype=np.int32),
+            np.array(data, dtype=np.float64),
+            np.array(indices, dtype=np.int64),
+            np.array(indptr, dtype=np.int64),
         ),
-        shape=tuple(d["shape"]),
+        shape=(rows, cols),
     )
 
 

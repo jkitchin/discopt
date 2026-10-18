@@ -161,7 +161,13 @@ def test_random_bytes_are_refused(raw):
 
 
 @FUZZ
-@given(st.recursive(st.none() | st.booleans() | st.integers() | st.text(), lambda c: st.lists(c) | st.dictionaries(st.text(), c), max_leaves=30))
+@given(
+    st.recursive(
+        st.none() | st.booleans() | st.integers() | st.text(),
+        lambda c: st.lists(c) | st.dictionaries(st.text(), c),
+        max_leaves=30,
+    )
+)
 def test_arbitrary_json_is_refused_or_loads(value):
     """Any JSON value at all: never an exception other than SerializationError."""
     outcome = _outcome(json.dumps(value))

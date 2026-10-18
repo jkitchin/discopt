@@ -295,6 +295,87 @@ MALFORMED = {
 }
 
 
+def _fast_doc():
+    """A fast-API model: a CSR constraint block and a quadratic builder objective."""
+    import scipy.sparse as sp
+
+    m = dm.Model("fast")
+    x = m.continuous("x", shape=(3,), lb=0.0, ub=4.0)
+    m.add_linear_constraints(
+        sp.csr_matrix(np.array([[1.0, 2.0, 0.0], [0.0, 1.0, -1.0]])), x, "<=", np.array([3.0, 1.0])
+    )
+    m.add_quadratic_objective(sp.csr_matrix(np.eye(3)), np.array([1.0, 0.0, -1.0]), x)
+    return json.loads(dumps(m))
+
+
+def _block_A(d):
+    return d["builder_blocks"][0]["A"]
+
+
+def _Q(d):
+    return d["builder_objective"]["Q"]
+
+
+#: Cases the WP-4 fuzzer found (``test_serialize_fuzz.py``, ``slow`` profile), one per
+#: falsifying example. Before the fix: an out-of-range or negative CSR column index
+#: LOADED, the negative one wrapping onto another column; a broken ``indptr`` made the
+#: Rust builder PANIC (``pyo3_runtime.PanicException``, not even an ``Exception``); a
+#: scalar bound written as ``[0.0]`` loaded as if it were ``0.0``.
+FUZZ_FOUND = {
+    "A column index past the last column": (
+        _fast_doc,
+        lambda d: _block_A(d)["indices"].__setitem__(0, 3),
+    ),
+    "A column index negative (wraps)": (
+        _fast_doc,
+        lambda d: _block_A(d)["indices"].__setitem__(0, -1),
+    ),
+    "A indptr past the entries (Rust panic)": (
+        _fast_doc,
+        lambda d: _block_A(d)["indptr"].__setitem__(1, 99),
+    ),
+    "Q indptr past the entries (Rust panic)": (
+        _fast_doc,
+        lambda d: _Q(d)["indptr"].__setitem__(1, 99),
+    ),
+    "Q column index past the last column": (
+        _fast_doc,
+        lambda d: _Q(d)["indices"].__setitem__(0, 3),
+    ),
+    "A column index overflows int32": (
+        _fast_doc,
+        lambda d: _block_A(d)["indices"].__setitem__(0, 10**12),
+    ),
+    "A values and indices differ in length": (
+        _fast_doc,
+        lambda d: _block_A(d)["data"].append(1.0),
+    ),
+    "A shape not a pair": (_fast_doc, lambda d: _block_A(d).update(shape=[2])),
+    "scalar bound written as a list": (
+        _doc,
+        lambda d: next(v for v in d["variables"] if v["shape"] == []).update(lb=[0.0]),
+    ),
+    "array bound nested one level too deep": (
+        _doc,
+        lambda d: next(v for v in d["variables"] if v["shape"] == [2]).update(lb=[[0.0], [0.0]]),
+    ),
+    "array bound ragged": (
+        _doc,
+        lambda d: next(v for v in d["variables"] if v["shape"] == [2]).update(lb=[0.0]),
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(FUZZ_FOUND))
+def test_a_fuzzer_found_document_is_refused(case):
+    make, corrupt = FUZZ_FOUND[case]
+    doc = make()
+    loads(json.dumps(doc))  # the base loads
+    corrupt(doc)
+    with pytest.raises(SerializationError):
+        loads(json.dumps(doc))
+
+
 @pytest.mark.parametrize("case", sorted(MALFORMED))
 def test_a_malformed_document_is_refused(case):
     doc = _doc()
