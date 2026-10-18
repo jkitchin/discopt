@@ -95,6 +95,30 @@ def test_harness_reports_a_failed_instance(monkeypatch, capsys):
     assert "FAIL planted failure" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("inst", [NL_INSTANCES[0], QPLIB_INSTANCES[0]], ids=_id)
+def test_harness_detects_a_lossy_reader(monkeypatch, inst):
+    """§6: the checks must catch a reader that loses something. Plant one -- a
+    ``loads`` that moves the first variable's upper bound -- and every model-level
+    check has to report it. (Set, not shifted: ``inf + 1`` is ``inf``, and a first
+    draft of this probe planted nothing on an unbounded variable.)"""
+    import discopt.serialize as ser
+    import numpy as np
+
+    real = ser.loads
+
+    def lossy(text, *a, **k):
+        m = real(text, *a, **k)
+        v = m._variables[0]
+        v.ub = np.full(np.shape(v.ub), 12345.678)
+        return m
+
+    monkeypatch.setattr(ser, "loads", lossy)
+    status = harness.check_instance(inst)["status"]
+    assert "dumps not stable under reload" in status, status
+    assert "fingerprint differs after loads(dumps())" in status, status
+    assert ".nl differs after round trip" in status, status
+
+
 # ── moved unchanged from test_serialize_roundtrip.py ───────────────────────
 
 
@@ -118,8 +142,29 @@ def test_corpus_probe_actually_fired():
 
 # ── the solve is bound-neutral across the round trip (CLAUDE.md §5) ────────
 
-#: PANEL_PLACEHOLDER
-PANEL: list[str] = []
+#: Selection rule: the ``known_optima.toml`` entries with an in-repo ``.nl`` that
+#: solve to ``optimal`` in under 20 s, the 12 largest by ``n_vars + n_rows`` (ties by
+#: name). Measured at WP-5 entry (wall of one solve; each also gave the identical
+#: ``(status, node_count, objective)`` on a fresh re-parse, so the comparison below
+#: is not at the mercy of solver nondeterminism): clay0303hfsg 249 vars+rows 5.3 s,
+#: st_testgr3 40 0.5 s, mathopt3 13 0.7 s, nvs09 10 9.5 s, nvs13 10 1.7 s,
+#: nvs12 8 0.4 s, st_miqp2 7 0.1 s, nvs11 6 0.4 s, st_miqp1 6 0.1 s, st_test1 6
+#: 0.1 s, nvs07 5 0.1 s, gear 4 0.2 s. Excluded by the 20 s rule: nvs17 (50 s, and
+#: its node count drifts by 2 across fresh parses), nvs19 and nvs24 (time limit).
+PANEL: list[str] = [
+    "clay0303hfsg",
+    "st_testgr3",
+    "mathopt3",
+    "nvs09",
+    "nvs13",
+    "nvs12",
+    "st_miqp2",
+    "nvs11",
+    "st_miqp1",
+    "st_test1",
+    "nvs07",
+    "gear",
+]
 
 
 @pytest.mark.slow
@@ -141,5 +186,9 @@ def test_round_trip_panel_is_bound_neutral(name):
     assert (r1.status, r1.node_count, r1.objective) == (r2.status, r2.node_count, r2.objective)
 
 
-def test_panel_is_twelve_instances():
+def test_panel_is_twelve_known_optima():
+    from _optima import optima_registry
+
+    registry = optima_registry()
     assert len(PANEL) == 12 and len(set(PANEL)) == 12
+    assert set(PANEL) <= set(registry), sorted(set(PANEL) - set(registry))
