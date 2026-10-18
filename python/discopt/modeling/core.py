@@ -8697,6 +8697,20 @@ class Model:
         # same predicate that pass uses, not on which member it was handed.
         resolved = _coerce_disjunction_semantics(semantics)
         _require_semantics_supported(resolved, _SELECT_ONE_ROWS, "add_disjunction()")
+        self._emit_block_disjunction(list(disjuncts), name, parent=None)
+
+    def _emit_block_disjunction(
+        self, disjuncts: list["Disjunct"], name: Optional[str], parent: Optional[Variable]
+    ) -> None:
+        """Lower one block disjunction, then the disjunctions nested in its blocks.
+
+        ``parent`` (#1775 G1.2) is the indicator column of the Disjunct this block
+        disjunction is nested in, or ``None`` at top level. A nested block's
+        indicators sum to ``parent`` instead of 1 -- all 0 when the enclosing
+        disjunct is not selected -- and its rows carry ``parent`` so the GDP pass
+        and the GDP tree can find the nesting. A top-level call emits exactly the
+        rows it emitted before nesting existed.
+        """
         # #1615 C-10a: a per-call key tags each emitted indicator row with its
         # disjunction and disjunct index, so ``gdp_method="hull"`` can find the
         # block again. Counted over keys already present so a cloned or
@@ -8716,16 +8730,37 @@ class Model:
             self.if_then(d.indicator.variable, d._constraints, name=d.name)
             for row in self._constraints[n_before:]:
                 row.disjunction = (key, k, len(disjuncts))
+                row.parent = parent
             # #1430: the block's rows are now in ``_constraints``; record that so
             # ``validate`` does not report it as forgotten. Set per disjunct rather
             # than for the call, so a list that raises part-way through leaves an
             # honest record of which blocks actually made it in.
             d._attached = True
+        if parent is not None or any(d._nested for d in disjuncts):
+            # A block whose only content is a nested disjunction emits no row, so
+            # nothing tags its indicator; the GDP tree needs it to attach the child.
+            # Recorded only when nesting is involved: a model without nesting gains
+            # no state. Read with ``getattr(model, "_gdp_block_members", {})``.
+            members = self.__dict__.setdefault("_gdp_block_members", {})
+            members[key] = [d.indicator.variable for d in disjuncts]
+        for d in disjuncts:
+            for kind, item, inner_name in d._nested:
+                if kind == "block":
+                    self._emit_block_disjunction(item, inner_name, parent=d.indicator.variable)
+                else:
+                    item.parent_indicator = d.indicator.variable
+                    item._model = self
+                    self._constraints.append(item)
         indicators = [d.indicator.variable for d in disjuncts]
         # Named ``_select``, not ``_xor``: this row is the select-one selector
         # cardinality (exactly one indicator active), not a truth-XOR over the
         # disjunct predicates.
-        self.exactly(1, indicators, name=f"_disj_{name}_select" if name else None)
+        row_name = f"_disj_{name}_select" if name else None
+        if parent is None:
+            self.exactly(1, indicators, name=row_name)
+        else:
+            self._validate_binaries(indicators, "add_disjunction")
+            self.subject_to(sum(indicators) == parent, name=row_name)
 
     # ── Boolean logic (GDP) ──
 
@@ -11579,8 +11614,81 @@ class Model:
             for dc in self._gdp_factory_disjunctions
             if id(dc) not in attached and id(dc) not in nested
         ]
-        orphans = [d for d in self._gdp_factory_disjuncts if not d._attached and d._constraints]
+        # #1775 G1.2: a block holding only nested disjunctions or local variables
+        # carries structure too, and is just as silently lost.
+        orphans = [
+            d
+            for d in self._gdp_factory_disjuncts
+            if not d._attached and (d._constraints or d._nested)
+        ]
         return floating, orphans
+
+    def _reject_escaped_local_vars(self) -> None:
+        """Refuse a variable declared on a Disjunct but used outside it (#1775 G1.2).
+
+        ``Disjunct.variable`` promises the column appears only in that block's rows
+        and the disjunctions nested in it, so a consumer may treat it as
+        meaningless when the block is not selected (a hull need not disaggregate
+        it; a reduced subproblem may drop it). A use anywhere else breaks that
+        promise, so refuse rather than let a later consumer act on it.
+        """
+        blocks = [d for d in self._gdp_factory_disjuncts if d._attached and d._local_vars]
+        if not blocks:
+            return
+        from discopt._relax.gdp_reformulate import _collect_variables
+
+        def subtree_rows(d: "Disjunct", out: set[int]) -> None:
+            out.update(id(c) for c in d._constraints)
+            for kind, item, _ in d._nested:
+                if kind == "block":
+                    for inner in item:
+                        subtree_rows(inner, out)
+                else:
+                    stack = [item]
+                    while stack:
+                        dc = stack.pop()
+                        for group in dc.disjuncts:
+                            for it in group:
+                                if isinstance(it, _DisjunctiveConstraint):
+                                    stack.append(it)
+                                else:
+                                    out.add(id(it))
+
+        uses: list[tuple[Optional[int], Expression]] = []
+        for c in self._constraints:
+            if isinstance(c, Constraint):
+                uses.append((id(c), c.body))
+            elif isinstance(c, _IndicatorConstraint):
+                uses.append((id(c.constraint), c.constraint.body))
+            elif isinstance(c, _DisjunctiveConstraint):
+                stack = [c]
+                while stack:
+                    dc = stack.pop()
+                    for group in dc.disjuncts:
+                        for it in group:
+                            if isinstance(it, _DisjunctiveConstraint):
+                                stack.append(it)
+                            else:
+                                uses.append((id(it), it.body))
+        if self._objective is not None:
+            uses.append((None, self._objective.expression))
+        for d in blocks:
+            own: set[int] = set()
+            subtree_rows(d, own)
+            local = {v.name for v in d._local_vars}
+            for row_id, body in uses:
+                if row_id in own:
+                    continue
+                hit = local & set(_collect_variables(body))
+                if hit:
+                    where = "the objective" if row_id is None else "a row outside the block"
+                    raise ValueError(
+                        f"variable {sorted(hit)[0]!r} is declared local to disjunct "
+                        f"{d.name!r} (Disjunct.variable) but is used in {where}. A "
+                        "local variable may appear only in that disjunct's rows and the "
+                        "disjunctions nested in it; declare it with Model.continuous "
+                        "(or binary/integer) if it is shared."
+                    )
 
     def _reject_unattached_gdp_blocks(self) -> None:
         """Refuse a model whose disjunctive structure was built but never added.
@@ -11701,6 +11809,7 @@ class Model:
             con_names.add(cname)
 
         self._reject_unattached_gdp_blocks()
+        self._reject_escaped_local_vars()
         self._check_ownership()
 
     # ── Model statistics ──
@@ -12158,6 +12267,10 @@ class _IndicatorConstraint:
     # pass can lower the block by hull with the user's indicators as selectors
     # when ``gdp_method="hull"``. ``None`` for a plain ``if_then`` row.
     disjunction: Optional[tuple[str, int, int]] = None
+    # #1775 G1.2: set on the rows of a block disjunction nested in a Disjunct
+    # (``Disjunct.add_disjunction``) to that Disjunct's indicator column: the
+    # block is active only when it is, and its indicators sum to it instead of 1.
+    parent: Optional[Variable] = field(default=None, compare=False)
 
 
 @dataclass
@@ -12186,6 +12299,10 @@ class _DisjunctiveConstraint:
     _model: Optional["Model"] = field(
         default=None, compare=False, repr=False, metadata={"canon": False}
     )
+    # #1775 G1.2: the indicator column of the Disjunct this disjunction is nested
+    # in (``Disjunct.subject_to(m.disjunction(...))``), or ``None`` at top level.
+    # It applies only when that indicator is 1: its selectors sum to it.
+    parent_indicator: Optional[Variable] = field(default=None, compare=False, repr=False)
     _indicator_vars: Optional[tuple[Variable, ...]] = field(default=None, compare=False, repr=False)
 
     def __repr__(self) -> str:
@@ -12217,12 +12334,20 @@ class _DisjunctiveConstraint:
         """
         if self._indicator_vars is None:
             model = self._model
+            if self.parent_indicator is not None:
+                raise ValueError(
+                    f"disjunction {self.name or '<anon>'!r} is nested in a Disjunct, "
+                    "so it has no indicators of its own here. Nest a block "
+                    "disjunction instead (Disjunct.add_disjunction over make_disjunct "
+                    "blocks), whose indicators are always model columns."
+                )
             if model is None or not any(c is self for c in model._constraints):
                 raise ValueError(
                     f"disjunction {self.name or '<anon>'!r} is not a top-level "
                     "Model.either_or disjunction of a model, so it has no indicators. "
-                    "Indicators of a nested disjunction are not implemented yet "
-                    "(#1775 G1.2)."
+                    "For a nested disjunction with indicators, nest Disjunct blocks "
+                    "(Disjunct.add_disjunction over make_disjunct blocks), whose "
+                    "indicators are always model columns (#1775 G1.2)."
                 )
             if self.name is not None:
                 base = self.name
@@ -12501,20 +12626,106 @@ class Disjunct:
         assert isinstance(bv, BooleanVar)
         self.indicator: "BooleanVar" = bv
         self._constraints: list[Constraint] = []
+        # #1775 G1.2: disjunctions nested in this block, in the order added, as
+        # ``("block", [Disjunct, ...], name)`` (``add_disjunction``) or
+        # ``("dc", _DisjunctiveConstraint, None)`` (``subject_to(m.disjunction(..))``),
+        # and the variables declared on it (``variable``).
+        self._nested: list[tuple[str, Any, Optional[str]]] = []
+        self._local_vars: list[Variable] = []
         # #1430: set by ``Model.add_disjunction``. False means this block's
         # constraints live nowhere but here, so a solve would silently omit them.
         self._attached = False
 
+    def _require_open(self, what: str) -> None:
+        # Model.add_disjunction lowers a block when it is called; anything added to
+        # the block afterwards would live nowhere but here and be silently dropped.
+        if self._attached:
+            raise ValueError(
+                f"cannot {what} disjunct {self.name!r}: it was already passed to "
+                "add_disjunction, which lowered its contents at that call. Build the "
+                "block completely first."
+            )
+
     def subject_to(
         self,
-        constraint: Union[Constraint, list[Constraint]],
+        constraint: Union[Constraint, "_DisjunctiveConstraint", list],
         name: Optional[str] = None,
     ) -> None:
-        """Add constraint(s) to this disjunct."""
-        if isinstance(constraint, list):
-            self._constraints.extend(constraint)
+        """Add constraint(s) -- or a nested disjunction -- to this disjunct.
+
+        A disjunction built with :meth:`Model.disjunction` is nested here (#1775
+        G1.2): it applies only when this disjunct is selected. For a nested
+        disjunction whose disjuncts carry their own indicators, nest Disjunct
+        blocks with :meth:`add_disjunction` instead.
+        """
+        self._require_open("add a constraint to")
+        for item in constraint if isinstance(constraint, list) else [constraint]:
+            if isinstance(item, _DisjunctiveConstraint):
+                if item._model is not None or item.parent_indicator is not None:
+                    raise ValueError(
+                        f"disjunction {item.name or '<anon>'!r} is already on the model "
+                        "or nested elsewhere; build a fresh one with Model.disjunction"
+                    )
+                if any(kind == "dc" and obj is item for kind, obj, _ in self._nested):
+                    raise ValueError(f"disjunction {item.name or '<anon>'!r} is nested twice")
+                self._nested.append(("dc", item, None))
+            else:
+                self._constraints.append(item)
+
+    def add_disjunction(
+        self,
+        disjuncts: list["Disjunct"],
+        name: Optional[str] = None,
+        *,
+        semantics: Union[DisjunctionSemantics, str] = DisjunctionSemantics.SELECT_ONE,
+    ) -> None:
+        """Nest a disjunction over Disjunct blocks inside this one (#1775 G1.2).
+
+        When this disjunct is selected, exactly one of ``disjuncts`` is selected;
+        when it is not, none is (their indicators sum to this one's). The nested
+        blocks are lowered together with this one, when it is passed to
+        :meth:`Model.add_disjunction`.
+        """
+        self._require_open("nest a disjunction in")
+        resolved = _coerce_disjunction_semantics(semantics)
+        _require_semantics_supported(resolved, _SELECT_ONE_ROWS, "Disjunct.add_disjunction()")
+        blocks = list(disjuncts)
+        for d in blocks:
+            if not isinstance(d, Disjunct) or d._model is not self._model:
+                raise TypeError("Disjunct.add_disjunction takes Disjunct blocks of the same model")
+            if d is self or d._attached or self._encloses(d):
+                raise ValueError(
+                    f"disjunct {d.name!r} cannot be nested in {self.name!r}: it is this "
+                    "block, already lowered, or already nested here"
+                )
+        self._nested.append(("block", blocks, name))
+
+    def _encloses(self, other: "Disjunct") -> bool:
+        for kind, item, _ in self._nested:
+            if kind == "block" and any(d is other or d._encloses(other) for d in item):
+                return True
+        return False
+
+    def variable(self, name: str, *, kind: str = "continuous", **kwargs) -> "Variable":
+        """Declare a variable local to this disjunct (#1775 G1.2, spec M3).
+
+        It is an ordinary model column (``kind`` is ``"continuous"``, ``"binary"``
+        or ``"integer"``; ``kwargs`` go to the matching ``Model`` method), and it
+        may appear only in this disjunct's rows and the disjunctions nested in it
+        -- :meth:`Model.validate` refuses a model that uses it anywhere else. Its
+        value means nothing when the disjunct is not selected.
+        """
+        self._require_open("declare a variable on")
+        if kind == "continuous":
+            v = self._model.continuous(name, **kwargs)
+        elif kind == "binary":
+            v = self._model.binary(name, **kwargs)
+        elif kind == "integer":
+            v = self._model.integer(name, **kwargs)
         else:
-            self._constraints.append(constraint)
+            raise ValueError(f"kind must be 'continuous', 'binary' or 'integer', not {kind!r}")
+        self._local_vars.append(v)
+        return cast(Variable, v)
 
     @property
     def active(self) -> "BooleanVar":
@@ -12526,8 +12737,14 @@ class Disjunct:
         """Constraints in this disjunct."""
         return list(self._constraints)
 
+    @property
+    def local_vars(self) -> list["Variable"]:
+        """Variables declared on this disjunct with :meth:`variable`."""
+        return list(self._local_vars)
+
     def __repr__(self) -> str:
-        return f"Disjunct({self.name!r}, {len(self._constraints)} constraints)"
+        extra = f", {len(self._nested)} nested" if self._nested else ""
+        return f"Disjunct({self.name!r}, {len(self._constraints)} constraints{extra})"
 
 
 # ─────────────────────────────────────────────────────────────

@@ -194,6 +194,83 @@ def _block_disjunction():
     return m
 
 
+def _nested_blocks():
+    """#1775 G1.2: a block disjunction nested in a Disjunct, plus a local variable.
+
+    outer: A [x <= 3, inner: A1 [y >= 6] v A2 [y >= 8, x >= 2]] v B [x >= 7, z <= x - 5]
+    with ``z`` local to B.
+    """
+    m = dm.Model("nested_blocks")
+    x = m.continuous("x", lb=0, ub=10)
+    y = m.continuous("y", lb=0, ub=10)
+    a = m.make_disjunct("A")
+    a.subject_to(x <= 3)
+    a1 = m.make_disjunct("A1")
+    a1.subject_to(y >= 6)
+    a2 = m.make_disjunct("A2")
+    a2.subject_to([y >= 8, x >= 2])
+    a.add_disjunction([a1, a2], name="inner")
+    b = m.make_disjunct("B")
+    z = b.variable("z", lb=0, ub=10)
+    b.subject_to([x >= 7, z <= x - 5])
+    m.add_disjunction([a, b], name="outer")
+    m.minimize(x + y)
+    return m
+
+
+def _nested_blocks_member(v, t):
+    a, b = round(v["A_active"]), round(v["B_active"])
+    a1, a2 = round(v["A1_active"]), round(v["A2_active"])
+    if a + b != 1 or a1 + a2 != a:
+        return False
+    ok = True
+    if a:
+        ok = ok and v["x"] <= 3 + t
+    if a1:
+        ok = ok and v["y"] >= 6 - t
+    if a2:
+        ok = ok and v["y"] >= 8 - t and v["x"] >= 2 - t
+    if b:
+        ok = ok and v["x"] >= 7 - t and v["z"] <= v["x"] - 5 + t
+    return ok
+
+
+#: Every valid selection of ``_nested_blocks`` (A with A1, A with A2, B) crossed
+#: with a grid through its boundaries, so both directions are exercised on each.
+_NESTED_GRID = [
+    {"x": x, "y": y, "z": z, "A_active": a, "A1_active": a1, "A2_active": a2, "B_active": b}
+    for a, a1, a2, b in ((1, 1, 0, 0), (1, 0, 1, 0), (0, 0, 0, 1))
+    for x in (0.0, 2.0, 3.0, 3.5, 7.0, 8.0)
+    for y in (0.0, 6.0, 7.0, 8.0)
+    for z in (0.0, 3.0)
+]
+
+
+def _nested_in_block():
+    """#1775 G1.2: a ``Model.disjunction`` nested in a Disjunct block."""
+    m = dm.Model("nested_in_block")
+    x = m.continuous("x", lb=0, ub=10)
+    y = m.continuous("y", lb=0, ub=10)
+    a = m.make_disjunct("A")
+    a.subject_to(x <= 3)
+    a.subject_to(m.disjunction([[y >= 6], [y >= 8, x >= 2]], name="in"))
+    b = m.make_disjunct("B")
+    b.subject_to(x >= 7)
+    m.add_disjunction([a, b], name="outer")
+    m.minimize(x + y)
+    return m
+
+
+def _nested_in_block_member(v, t):
+    a, b = round(v["A_active"]), round(v["B_active"])
+    if a + b != 1:
+        return False
+    if b:
+        return v["x"] >= 7 - t
+    inner = v["y"] >= 6 - t or (v["y"] >= 8 - t and v["x"] >= 2 - t)
+    return v["x"] <= 3 + t and inner
+
+
 def _block_member(v, t):
     a, b = round(v["d1_active"]), round(v["d2_active"])
     if a + b != 1:
@@ -338,6 +415,75 @@ SHAPES: list[Shape] = [
         ),
         points=[{"x": -0.8}, {"x": -1.0}, {"x": 1.0}, {"x": 9.0}],
         refuses={m: _DOMAIN_REFUSAL for m in ("big-m", "mbigm", "simplex")},
+    ),
+    Shape(
+        "nested_blocks",
+        _nested_blocks,
+        _nested_blocks_member,
+        n_samples=200,
+        points=[
+            {
+                "x": 1.0,
+                "y": 7.0,
+                "z": 0.0,
+                "A_active": 1,
+                "A1_active": 1,
+                "A2_active": 0,
+                "B_active": 0,
+            },
+            {
+                "x": 2.5,
+                "y": 9.0,
+                "z": 9.0,
+                "A_active": 1,
+                "A1_active": 0,
+                "A2_active": 1,
+                "B_active": 0,
+            },
+            # B selected: the inner block is off, so y is free.
+            {
+                "x": 8.0,
+                "y": 0.0,
+                "z": 2.0,
+                "A_active": 0,
+                "A1_active": 0,
+                "A2_active": 0,
+                "B_active": 1,
+            },
+            # B selected but an inner indicator on: violates sum(inner) == A.
+            {
+                "x": 8.0,
+                "y": 7.0,
+                "z": 2.0,
+                "A_active": 0,
+                "A1_active": 1,
+                "A2_active": 0,
+                "B_active": 1,
+            },
+            # A selected with no inner choice.
+            {
+                "x": 1.0,
+                "y": 7.0,
+                "z": 0.0,
+                "A_active": 1,
+                "A1_active": 0,
+                "A2_active": 0,
+                "B_active": 0,
+            },
+            *_NESTED_GRID,
+        ],
+    ),
+    Shape(
+        "nested_in_block",
+        _nested_in_block,
+        _nested_in_block_member,
+        n_samples=120,
+        points=[
+            {"x": 1.0, "y": 7.0, "A_active": 1, "B_active": 0},
+            {"x": 2.5, "y": 9.0, "A_active": 1, "B_active": 0},
+            {"x": 8.0, "y": 0.0, "A_active": 0, "B_active": 1},
+            {"x": 1.0, "y": 1.0, "A_active": 1, "B_active": 0},
+        ],
     ),
     Shape(
         "block_disjunction",
