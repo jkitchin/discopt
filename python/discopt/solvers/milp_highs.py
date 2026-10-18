@@ -67,6 +67,25 @@ logger = logging.getLogger(__name__)
 _VERIFY_REL = 1e-6
 #: Integrality slack for the same check (CLAUDE.md: integrality 1e-5).
 _VERIFY_INT = 1e-5
+#: #1759: a cut term whose largest magnitude over its finite column box is at most
+#: this fraction of the row's largest term is dropped (on its valid side) rather
+#: than allowed to scale the row toward ``large_matrix_value``. Dropping it loosens
+#: the row by at most this fraction of its largest term -- five orders below
+#: HiGHS's default ``primal_feasibility_tolerance`` (1e-7) -- so no master point it
+#: admits is one HiGHS would not already have accepted within tolerance.
+_NEGLIGIBLE_REL = 1e-12
+#: Opt-out for the #1759 rule (``=0`` restores the pre-#1759 scale choice, in
+#: which every liftable term may set the row's scale). Default ON: measured on the
+#: #1759 panel (portfolio, squfl-class and the in-repo MINLPLib corpus, both
+#: HiGHS-master routes) with no certification regression; kept so the shipped
+#: default can be A/B'd.
+DROP_NEGLIGIBLE_ENV = "DISCOPT_HIGHS_DROP_NEGLIGIBLE"
+
+
+def _drop_negligible_enabled() -> bool:
+    from discopt.solver_tuning import _env_flag
+
+    return _env_flag(DROP_NEGLIGIBLE_ENV, default=True)
 
 
 class HighsBackendUnavailable(ImportError):
@@ -138,8 +157,14 @@ def _prepare_cut_row(
     large_tol: float,
     *,
     lift_to_unit: bool = False,
+    drop_negligible: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Make ``coeffs @ x <= rhs`` safe to hand :meth:`highspy.Highs.addRow`.
+
+    ``drop_negligible`` (#1759) keeps a term from setting the row's scale when its
+    largest magnitude over the (finite) column box is at most ``_NEGLIGIBLE_REL``
+    of the row's largest term; such a term is dropped on its valid side in step 2
+    rather than rescued by scaling the whole row toward ``large_matrix_value``.
 
     ``lift_to_unit`` (#1658) additionally lifts a row whose largest coefficient is
     below 1 into [1, 2) by a power of two. Only the LP/NLP-BB lazy rows ask for it
@@ -201,9 +226,31 @@ def _prepare_cut_row(
         coeffs = coeffs * scale
         rhs *= scale
     else:
-        liftable = a_abs[a_abs * scale_cap > small_tol]
+        can_lift = a_abs * scale_cap > small_tol
+        if drop_negligible and _drop_negligible_enabled():
+            # #1759: a term that cannot move the row anywhere in the column box gets
+            # no say in the scale either. Measured on a big-M portfolio OA master:
+            # cuts linearized at x_i ~ 1e-22 carried a 2*d_i*x_i ~ 1e-22 gradient
+            # entry next to a -1 on the epigraph column; rescuing it scaled the row
+            # by 2**44, entries reached -1.76e13, and HiGHS answered "Solve error"
+            # on a master that solves to optimality unscaled -- every master from
+            # OA iteration 26 on, so OA looped to the time limit. The rescued term
+            # was worth at most 4e-23 on a row whose terms reach 0.4. It is dropped
+            # below on its valid side instead (rhs loosened by its worst case,
+            # under ``_NEGLIGIBLE_REL`` of the row), and the row keeps its scale.
+            # Only terms with a FINITE box on both sides qualify: their effect has
+            # a bound to compare. Equality rows pass ``drop_negligible=False``,
+            # since they have no valid side to drop on.
+            reach = np.maximum(np.abs(lb[nz]), np.abs(ub[nz]))
+            bounded = reach < _INF
+            term = np.where(bounded, a_abs * np.where(bounded, reach, 0.0), np.inf)
+            ref = float(np.max(term[bounded])) if bounded.any() else a_max
+            negligible = bounded & (term <= _NEGLIGIBLE_REL * max(ref, a_max))
+            can_lift &= ~negligible
         # ``a_max`` itself always qualifies (``a_max * scale_cap`` is
         # ``large_tol/10``, far above ``small_tol``), so this is never empty.
+        can_lift |= a_abs == a_max
+        liftable = a_abs[can_lift]
         a_min = float(np.min(liftable))
         room = min(10.0 * small_tol / a_min, scale_cap)
         headroom = math.floor(math.log2(room))
@@ -297,7 +344,9 @@ def _fit_rows_to_window(
     for i in np.flatnonzero(misfit_row):
         dense = a.getrow(i).toarray().ravel()
         nnz_before = int(np.count_nonzero(dense))
-        idx, vals, new_rhs = _prepare_cut_row(dense, float(rhs[i]), lb, ub, small_tol, large_tol)
+        idx, vals, new_rhs = _prepare_cut_row(
+            dense, float(rhs[i]), lb, ub, small_tol, large_tol, drop_negligible=not equality
+        )
         if equality and idx.size != nnz_before:
             raise ValueError(
                 f"equality row {i} of the HiGHS master has coefficients at or below "

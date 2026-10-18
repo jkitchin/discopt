@@ -79,7 +79,9 @@ def test_scale_still_lifts_a_term_that_can_be_rescued():
     coeffs[0] = 2.05e-19
     coeffs[1] = 114.0
     lb = np.array([0.0, 0.0, 0.0])
-    ub = np.array([10.0, 10.0, 10.0])
+    # Open above: on a finite box the 2.05e-19 term moves the row by at most
+    # 2e-18 against 1140 and #1759 drops it instead of scaling the row by 2**33.
+    ub = np.array([_INF, 10.0, 10.0])
 
     _idx, vals, _rhs = _prepare_cut_row(coeffs.copy(), 1.0, lb, ub, SMALL, LARGE)
 
