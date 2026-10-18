@@ -98,10 +98,13 @@ one place a tool may annotate a document without forking the format. It does not
 survive a load and re-save -- the reader does not keep what it does not read --
 but ``discopt upgrade-model`` carries every top-level ``x-`` key through verbatim.
 
-The key policy covers the top level and ``state`` only. A key inside a nested
-record -- a variable, a node, a row, a builder block -- that this version does not
-know is still ignored on read, with no error and no warning, at every minor (see
-#1780).
+The same policy holds inside every nested record (#1780) -- a variable, node,
+row, builder block, relation, the embedded result -- and a key repeated within
+one JSON object is refused too (``json`` would keep the last). Node records are
+checked against ``_NODE_KEYS`` (per ``op``) and ``_INDEX_KEYS``; everything else
+by recording which keys the decoder reads and refusing the rest
+(:class:`_Record`), so no hand-kept list can fall behind the decoder. The ``x-``
+escape is top-level only: an ``x-`` key inside a record is refused like any other.
 
 ``discopt upgrade-model`` rewrites a document at the current ``SCHEMA``. Through
 1.1 an unknown top-level key was ignored; that is how ``provenance`` (1.1) stayed
@@ -424,6 +427,9 @@ def _enc_index(index: Any) -> Any:
 
 def _dec_index(obj: Any) -> Any:
     kind = obj["k"]
+    extra = dict.keys(obj) - _INDEX_KEYS.get(kind, dict.keys(obj))
+    if extra:
+        raise SerializationError(f"{kind} index has unknown key(s) {sorted(extra)}")
     if kind == "int":
         return _dec_index_int(obj["v"], "an integer index")
     if kind == "bool":
@@ -658,6 +664,37 @@ _EXTRA_FUNCS = frozenset({"atan2", "centropy", "entropy", "prod", "signpower", "
 _KNOWN_BINARY_OPS = frozenset({"+", "-", "*", "/", "**"})
 _KNOWN_UNARY_OPS = frozenset({"neg", "abs"})
 
+#: Keys of a node record, per ``op``; any node may also carry an ``atom`` tag
+#: (#1248 A, from 1.3). A node key outside its op's set is refused (#1780). Checked
+#: against what ``_decode_nodes`` actually reads by
+#: ``test_serialize_versioning::test_node_key_tables_are_what_the_decoder_reads``.
+_NODE_KEYS: dict[str, frozenset] = {
+    op: frozenset(keys) | {"op", "atom"}
+    for op, keys in {
+        "const": {"v", "shape"},
+        "var": {"ref"},
+        "param": {"ref"},
+        "index": {"base", "index"},
+        "binop": {"o", "a", "b"},
+        "unop": {"o", "a"},
+        "call": {"f", "args"},
+        "matmul": {"a", "b"},
+        "sum": {"a", "axis"},
+        "sum_over": {"args"},
+    }.items()
+}
+
+#: Keys of an index object (a node's ``index``), per kind ``k``.
+_INDEX_KEYS: dict[str, frozenset] = {
+    "int": frozenset({"k", "v"}),
+    "bool": frozenset({"k", "v"}),
+    "slice": frozenset({"k", "start", "stop", "step"}),
+    "tuple": frozenset({"k", "v"}),
+}
+
+#: Keys of a node's ``atom`` tag.
+_ATOM_KEYS = frozenset({"n", "arg"})
+
 
 def _known_funcs() -> frozenset:
     """Function names a ``FunctionCall`` node may carry.
@@ -695,6 +732,20 @@ def _decode_nodes(table: list[dict], variables: Any, params: list[Parameter]):
             raise SerializationError(
                 f"node {i} has unknown op {op!r}. This file was written by a newer "
                 "discopt than the one reading it; refusing rather than dropping the node."
+            )
+        # `dict.keys`, not `nd.keys()`: checking a key is not reading it, which
+        # matters when the tests decode with tracked nodes to verify the tables.
+        allowed = _NODE_KEYS[op]
+        atom = dict.get(nd, "atom")
+        if not dict.keys(nd) <= allowed or (
+            isinstance(atom, dict) and not dict.keys(atom) <= _ATOM_KEYS
+        ):
+            extra = [f"/nodes[{i}]/{k}" for k in dict.keys(nd) - allowed]
+            if isinstance(atom, dict):
+                extra += [f"/nodes[{i}]/atom/{k}" for k in dict.keys(atom) - _ATOM_KEYS]
+            raise SerializationError(
+                f"{op} node has key(s) no writer of that format produces "
+                f"({', '.join(sorted(extra))}); refusing rather than dropping them."
             )
         if op == "binop" and nd.get("o") not in _KNOWN_BINARY_OPS:
             raise SerializationError(
@@ -2233,6 +2284,120 @@ def _refuse_json_constant(token: str) -> Any:
     )
 
 
+def _unique_pairs(pairs: list) -> dict:
+    """``json`` object hook: a plain dict, refusing a key repeated in one object."""
+    d = dict(pairs)
+    if len(d) != len(pairs):
+        # `json` keeps the last of a repeated key: the others vanish unread.
+        counts: dict = {}
+        for k, _ in pairs:
+            counts[k] = counts.get(k, 0) + 1
+        dup = sorted(k for k, n in counts.items() if n > 1)
+        raise SerializationError(
+            f"the document repeats key(s) {dup} in one object; JSON keeps only the "
+            "last, so the others would be dropped without a word."
+        )
+    return d
+
+
+class _Record(dict):
+    """A JSON object of a document being read, recording which keys were read.
+
+    Every object outside the node table is turned into one of these before
+    decoding (:func:`_track`), so afterwards a key the decoder never read is one
+    it would have silently dropped (#1780). That is derived from the decoder
+    itself -- per row ``kind``, per record -- so it cannot drift from it, and a
+    field a new writer adds to a record is refused by an older reader instead of
+    vanishing. Reading means ``[]``, ``get``, ``pop`` or iterating; ``in`` alone
+    does not count.
+
+    The node table -- most of any document -- is checked against
+    ``_NODE_KEYS`` / ``_INDEX_KEYS`` instead: tracking every node cost +130 % on
+    ``loads`` of a 24k-node document (measured); the tables cost a set difference
+    per node, and ``test_serialize_versioning`` checks them against exactly what
+    this decoder reads in tracking mode.
+    """
+
+    __slots__ = ("_read",)
+
+    def __init__(self, pairs=()):
+        super().__init__(pairs)
+        self._read: set = set()
+
+    def __getitem__(self, key):
+        self._read.add(key)
+        return dict.__getitem__(self, key)
+
+    def get(self, key, default=None):
+        self._read.add(key)
+        return dict.get(self, key, default)
+
+    def pop(self, key, *default):
+        self._read.add(key)
+        return dict.pop(self, key, *default)
+
+    def _all(self) -> None:
+        self._read.update(dict.keys(self))
+
+    def __iter__(self):
+        self._all()
+        return dict.__iter__(self)
+
+    def keys(self):
+        self._all()
+        return dict.keys(self)
+
+    def values(self):
+        self._all()
+        return dict.values(self)
+
+    def items(self):
+        self._all()
+        return dict.items(self)
+
+
+def _track(obj: Any) -> Any:
+    """*obj* with every JSON object below it turned into a :class:`_Record`."""
+    if isinstance(obj, dict):
+        return _Record({k: _track(v) if isinstance(v, (dict, list)) else v for k, v in obj.items()})
+    if isinstance(obj, list):
+        return [_track(v) if isinstance(v, (dict, list)) else v for v in obj]
+    return obj
+
+
+def _plain(obj: Any) -> Any:
+    """*obj* as plain dicts and lists, every key counted as read.
+
+    For a subtree the decoder keeps verbatim (provenance): it is carried, so
+    nothing in it is dropped, and the caller gets ordinary dicts back.
+    """
+    if isinstance(obj, dict):
+        return {k: _plain(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_plain(v) for v in obj]
+    return obj
+
+
+def _unread_keys(doc: dict) -> list[str]:
+    """Paths of nested keys the decoder never read (top level: ``_check_keys``)."""
+    out: list[str] = []
+    # The node table is checked by `_NODE_KEYS` while it is decoded.
+    stack: list = [(v, f"/{k}") for k, v in dict.items(doc) if isinstance(v, (_Record, list))]
+    while stack:
+        obj, path = stack.pop()
+        if isinstance(obj, _Record):
+            for k, v in dict.items(obj):
+                if k not in obj._read:
+                    out.append(f"{path}/{k}")
+                elif isinstance(v, (_Record, list)):
+                    stack.append((v, f"{path}/{k}"))
+        else:
+            stack.extend(
+                (v, f"{path}[{i}]") for i, v in enumerate(obj) if isinstance(v, (_Record, list))
+            )
+    return sorted(out)
+
+
 def loads(text: Union[str, bytes]) -> Model:
     """Rebuild a :class:`Model` from a JSON string produced by :func:`dumps`.
 
@@ -2251,7 +2416,9 @@ def loads(text: Union[str, bytes]) -> Model:
     # so one here is not a discopt document; refuse it on read rather than accept
     # it and fail the next save (#1291).
     try:
-        doc = json.loads(text, parse_constant=_refuse_json_constant)
+        doc = json.loads(
+            text, parse_constant=_refuse_json_constant, object_pairs_hook=_unique_pairs
+        )
     except json.JSONDecodeError as exc:
         raise SerializationError(f"not valid JSON: {exc}") from exc
     if not isinstance(doc, dict):
@@ -2296,12 +2463,17 @@ def _loads_document(doc: dict) -> Model:
         )
 
     newer = minor > SCHEMA_MINOR
+    for key, value in list(dict.items(doc)):
+        if key not in ("nodes", "provenance") and not key.startswith(_EXTENSION_PREFIX):
+            doc[key] = _track(value)
     _check_keys(doc, _TOP_LEVEL_KEYS, "top-level", schema, newer, extensions=True)
     if isinstance(doc.get("state"), dict):
         _check_keys(doc["state"], _STATE_KEYS, "'state'", schema, newer, extensions=False)
 
     if not newer:
-        return _decode_document(doc, minor)
+        model = _decode_document(doc, minor)
+        _refuse_unread(doc, schema, newer)
+        return model
     try:
         model = _decode_document(doc, minor)
     except (SerializationError, KeyError, TypeError, ValueError, IndexError, AttributeError) as exc:
@@ -2312,6 +2484,7 @@ def _loads_document(doc: dict) -> Model:
             f"holds content it cannot decode ({type(exc).__name__}: {exc}); upgrade "
             "discopt to read it."
         ) from exc
+    _refuse_unread(doc, schema, newer)
     # 3: past this function and `loads`, to the caller's line.
     warnings.warn(
         f"document schema {schema!r} was written by a newer format than this reader's "
@@ -2322,6 +2495,25 @@ def _loads_document(doc: dict) -> Model:
         stacklevel=3,
     )
     return model
+
+
+def _refuse_unread(doc: dict, schema: str, newer: bool) -> None:
+    """Refuse a nested key the decoder did not read (#1780; see :class:`_Record`)."""
+    unread = _unread_keys(doc)
+    if not unread:
+        return
+    shown = ", ".join(unread[:5]) + (f" and {len(unread) - 5} more" if len(unread) > 5 else "")
+    if newer:
+        raise SerializationError(
+            f"document schema {schema!r} is newer than this reader ({SCHEMA}) and has "
+            f"key(s) this reader does not read ({shown}); refusing rather than dropping "
+            "them. Upgrade discopt to read it."
+        )
+    raise SerializationError(
+        f"document schema {schema!r} has key(s) no writer of that format produces "
+        f"({shown}); the document is malformed or was edited by hand, and ignoring "
+        "them could drop part of the model."
+    )
 
 
 def _check_keys(
@@ -2372,6 +2564,23 @@ def _decode_document(doc: dict, minor: int) -> Model:
 
     bobj = doc.get("builder_objective")
     if bobj is not None:
+        # The builder objective lives in the Rust builder; `_objective` holds the
+        # zero placeholder its setter installs, which the writer records too. Read
+        # it to confirm it is exactly that: a real objective beside a builder one
+        # would otherwise be dropped unread (#1780).
+        od = doc.get("objective")
+        if od is not None:
+            if od.get("placeholder") is not True:
+                raise SerializationError(
+                    "the document has both a builder objective and a non-placeholder "
+                    "'objective'; a model has one objective"
+                )
+            if od.get("sense") != ("minimize" if bobj["sense"] == "minimize" else "maximize"):
+                raise SerializationError(
+                    f"the placeholder objective's sense {od.get('sense')!r} disagrees with "
+                    f"the builder objective's {bobj['sense']!r}"
+                )
+            _dec_index_int(od.get("expr"), "the placeholder objective's node")
         x = variables[bobj["x"]]
         c = _dec_array(bobj["c"], (np.asarray(bobj["c"]).size,))
         if bobj["kind"] == "linear":
@@ -2444,6 +2653,10 @@ def _decode_document(doc: dict, minor: int) -> Model:
             # readings are one string. 1.2 documents have no blanket pass and so no
             # ambiguity; this branch exists only for what is already on disk.
             solution = _dec_tree(solution)
+            # `_dec_tree` rebuilds the subtree as plain dicts by iterating it, which
+            # counts every key read; re-track it so the unread-key check (#1780)
+            # still sees what `deserialize_result` leaves unread below.
+            doc["solution"] = solution = _track(solution)
         model.saved_result = deserialize_result(solution)
     else:
         model.saved_result = None
@@ -2456,7 +2669,7 @@ def _decode_document(doc: dict, minor: int) -> Model:
         raise SerializationError(
             f"the 'provenance' section must be an object, got {type(prov).__name__}."
         )
-    model.provenance = prov
+    model.provenance = None if prov is None else _plain(prov)
 
     message = skew_warning(prov)
     if message is not None:

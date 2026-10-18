@@ -555,7 +555,8 @@ def _cmd_upgrade_model(args):
             raise SerializationError("the rewritten document does not reload to the same model")
         # A newer format only ever adds, so anything the old document said that the
         # new one does not is content this process could not carry -- above all a
-        # registered-atom tag for an atom it has not registered.
+        # registered-atom tag for an atom it has not registered (the one thing the
+        # reader may legitimately leave behind; an unknown key it refuses, #1780).
         lost = _keys_lost(old_doc, json.loads(new_text))
         if lost:
             shown = ", ".join(lost[:5]) + (f" and {len(lost) - 5} more" if len(lost) > 5 else "")
