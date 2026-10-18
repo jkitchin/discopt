@@ -100,7 +100,8 @@ def _read(version: str, entry: dict) -> str:
 
 
 def test_manifest_lists_every_version_directory():
-    dirs = sorted(p.name for p in FIXTURES.iterdir() if p.is_dir())
+    # Numeric order, so ``v1.10`` sorts after ``v1.2``.
+    dirs = sorted((p.name for p in FIXTURES.iterdir() if p.is_dir()), key=lambda n: _key(n[1:]))
     assert dirs == [f"v{v}" for v in VERSIONS]
     assert VERSIONS == sorted(VERSIONS, key=_key)
 
@@ -120,6 +121,8 @@ def test_current_schema_has_fixtures():
     """A ``SCHEMA`` bump must ship its own fixtures in the same PR (plan §0.3.10)."""
     current = SCHEMA.split("/", 1)[1]
     assert current in VERSIONS, f"no golden fixtures for the current schema {SCHEMA}"
+    # A stale editable install reports an older schema and would otherwise pass.
+    assert current == VERSIONS[-1], (current, VERSIONS[-1])
 
 
 @pytest.mark.parametrize("version, case, entry", FIXTURE_PARAMS)
@@ -146,10 +149,16 @@ def test_corpus_inputs_are_unchanged():
 
 def test_unbuildable_cases_are_recorded_not_skipped():
     """Every registry case is either a fixture or an explicit ``unbuildable`` entry."""
+    unbuildable = set()
     for version, entry in MANIFEST["versions"].items():
         assert set(entry["cases"]) == set(reg.CASES), version
         for case, record in entry["cases"].items():
             assert ("file" in record) != ("unbuildable" in record), (version, case)
+            if "unbuildable" in record:
+                unbuildable.add((version, case))
+    # The generator records any exception as unbuildable, so a builder bug would
+    # pass as a legitimate gap; pin the exact set.
+    assert unbuildable == {("1.0", "registered_atom")}, sorted(unbuildable)
     # register_function arrived in 1.1, so 1.0 cannot build the atom case.
     assert (
         "No module named 'discopt.operators'"

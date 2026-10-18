@@ -286,6 +286,11 @@ def main() -> int:
     if foreign:
         # Written files are from a mixed import; say so and fail rather than keep them.
         print("REFUSING: discopt modules imported from outside --tree:", *foreign, sep="\n  ")
+        if args.out:
+            for record in report.get("cases", {}).values():
+                if "file" in record:
+                    os.remove(os.path.join(args.out, record["file"]))
+                    print(f"  removed {record['file']}", flush=True)
         return 3
     if args.manifest:
         if not args.label:
