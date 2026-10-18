@@ -113,17 +113,15 @@ def test_verifier_judges_an_undefined_inactive_disjunct_as_not_holding():
     [
         (lambda x: dm.sqrt(x), -1, 1, True),
         (lambda x: dm.sqrt(x), 0, 1, False),
-        (lambda x: dm.log(x), 0, 1, True),
-        (lambda x: dm.log(x), 1e-3, 1, False),
+        (lambda x: dm.log(x), -1, 1, True),
+        (lambda x: dm.log(x), 0, 1, False),  # a point gap: left to the lowering
         (lambda x: dm.acos(x), -2, 0, True),
         (lambda x: dm.acos(x), -1, 1, False),
-        (lambda x: dm.tan(x), 0, 2, True),  # contains pi/2
-        (lambda x: dm.tan(x), -1, 1, False),
-        (lambda x: 1 / x, -1, 1, True),
-        (lambda x: 1 / x, 0.5, 1, False),
+        (lambda x: dm.tan(x), 0, 2, False),  # poles are points
+        (lambda x: 1 / x, -1, 1, False),  # so is a zero divisor
         (lambda x: x**0.5, -1, 1, True),
-        (lambda x: x**-0.5, 0, 1, True),
-        (lambda x: x**-2, -1, 1, True),
+        (lambda x: x**-0.5, 0, 1, False),
+        (lambda x: x**-2, -1, 1, False),
         (lambda x: x**2, -1, 1, False),
         (lambda x: dm.exp(-abs(x**0.5)), -1, 1, True),
     ],
@@ -132,3 +130,21 @@ def test_domain_gap_per_node(make, lo, hi, gap):
     m = dm.Model("g")
     x = m.continuous("x", lb=lo, ub=hi)
     assert (_domain_gap(make(x), m) is not None) is gap
+
+
+def test_simplex_keeps_its_point_gap_capability():
+    """#1182's reason to exist: ``1/x <= 1`` with ``x`` straddling 0, and an "off"
+    disjunct sitting on the point where ``log`` is undefined. Both stay lowered."""
+    m = dm.Model("recip")
+    x = m.continuous("x", lb=-10.0, ub=10.0)
+    m.minimize((x - 5.0) * (x - 5.0))
+    m.either_or([[1.0 / x <= 1.0], [x >= 3.0]], name="recip")
+    r = m.solve(gdp_method="simplex", time_limit=60)
+    assert r.status == "optimal" and r.objective == pytest.approx(0.0, abs=1e-6)
+
+    m = dm.Model("off_at_zero")
+    c = m.continuous("c", lb=0, ub=10)
+    m.either_or([[c <= 0], [dm.log(c) >= 1]], name="d")
+    m.minimize(c)
+    r = m.solve(gdp_method="simplex", time_limit=60)
+    assert r.status == "optimal" and r.objective == pytest.approx(0.0, abs=1e-6)
