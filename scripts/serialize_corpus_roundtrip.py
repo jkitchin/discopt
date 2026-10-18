@@ -82,15 +82,15 @@ def in_repo_instances() -> list[Instance]:
 def minlplib_instances() -> tuple[list[Instance], str | None]:
     root = Path(os.environ.get("DISCOPT_MINLPLIB_NL_DIR", BENCH / "minlplib" / "nl"))
     if not root.is_dir():
-        return [], f"corpus minlplib not present at {root}; skipping"
-    return [Instance("minlplib", p.stem, p, "nl") for p in sorted(root.glob("*.nl"))], None
+        return [], f"corpus minlplib_full not present at {root}; skipping"
+    return [Instance("minlplib_full", p.stem, p, "nl") for p in sorted(root.glob("*.nl"))], None
 
 
 def qplib_instances() -> tuple[list[Instance], str | None]:
     root = Path(os.environ.get("DISCOPT_QPLIB_DIR", BENCH / "qplib"))
     manifest = root / "qplib_manifest.csv"
     if not (root / "qplib").is_dir() or not manifest.is_file():
-        return [], f"corpus qplib not present at {root}; skipping"
+        return [], f"corpus qplib_full not present at {root}; skipping"
     with open(manifest, encoding="utf-8") as fh:
         rows = list(csv.DictReader(fh))
     if not rows or "usable_oracle" not in rows[0]:
@@ -100,7 +100,7 @@ def qplib_instances() -> tuple[list[Instance], str | None]:
     for name in sorted(usable):
         path = root / "qplib" / f"{name}.qplib"
         if path.is_file():
-            out.append(Instance("qplib", name, path, "qplib"))
+            out.append(Instance("qplib_full", name, path, "qplib"))
     return out, None
 
 
