@@ -171,6 +171,12 @@ class PolyhedralRobustFormulation:
                             f"{self._prefix}_lam{dual_idx}_{i}",
                             lb=0,
                         )
+                        # #1755: unbounded above by construction (see above), so
+                        # the large-bounds warning -- whose remedy is "declare
+                        # tighter bounds" -- does not name it (#1618 X-29b).
+                        if not hasattr(m, "_free_by_construction"):
+                            m._free_by_construction = set()
+                        m._free_by_construction.add(lv.name)
                         lam_vars.append(lv)
 
                     # Duality constraints: A^T lam = coeff(z), over the full

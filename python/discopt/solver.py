@@ -10412,16 +10412,34 @@ def _scoped_highs_options(fn: _F) -> _F:
 
 
 @contextlib.contextmanager
-def _highs_route_options():
-    """Apply the active ``highs_options`` to the HiGHS LP/MILP route and mark it used."""
+def _highs_route_options(presolve: bool = True):
+    """Apply the active ``highs_options`` to the HiGHS LP/MILP route and mark it used.
+
+    #1751: ``solve(presolve=False)`` reaches HiGHS as ``presolve="off"`` -- on this
+    route HiGHS's presolve is the only one that runs, so leaving it on made the
+    argument a silent no-op. An explicit ``highs_options["presolve"]`` that
+    contradicts it is refused rather than silently picking one.
+    """
     req = _HIGHS_OPTIONS_REQUEST.get()
-    if req is None:
+    pairs: tuple[tuple[str, Any], ...] = ()
+    if req is not None:
+        pairs, state = req
+        state["used"] = True
+    if not presolve:
+        given = [v for k, v in pairs if k == "presolve"]
+        if any(v != "off" for v in given):
+            raise ValueError(
+                f"presolve=False and highs_options['presolve']={given[0]!r} contradict "
+                "each other: on the HiGHS route presolve=False switches HiGHS's "
+                "presolve off. Pass one or the other."
+            )
+        if not given:
+            pairs = (*pairs, ("presolve", "off"))
+    if not pairs:
         yield
         return
     from discopt.solvers.lp_milp_highs import user_options
 
-    pairs, state = req
-    state["used"] = True
     with user_options(pairs):
         yield
 
@@ -11438,6 +11456,14 @@ def solve_model(
         probe LPs are counted in ``solver_stats["branching/strong_probe_lps"]``,
         not in ``node_count``). Changes only the order of the search, never a
         bound.
+    presolve : bool, default True
+        Run presolve. ``False`` switches off discopt's root presolve (FBBT,
+        variable elimination, probing) and, on a pure LP or MILP solved on the
+        HiGHS route, HiGHS's own presolve (``presolve="off"``, #1751) -- there
+        HiGHS's presolve is the one that runs. Combining it with a contradicting
+        ``highs_options["presolve"]`` raises ``ValueError``. Certificates are
+        verified either way, so this changes speed and node counts, not a
+        reported bound's validity.
     highs_options : dict, optional
         HiGHS options (name -> value, HiGHS's own option names) for a pure LP or
         MILP solved on the HiGHS route (#1620). ``{"output_flag": True}`` prints
@@ -12218,6 +12244,9 @@ def solve_model(
     # engine; every combination that would quietly run a different one is refused
     # rather than ignored (CLAUDE.md §3).
     _lpm_backend = _resolve_lp_milp_backend(milp_backend)
+    # #1751: the caller's ``presolve``, read before the dispatch below reassigns the
+    # local (several routes switch discopt's own root presolve off for themselves).
+    _caller_presolve = bool(presolve)
     _tree_opts = [
         n
         for n, v in (("milp_cuts", milp_cuts), ("branching_rule", branching_rule))
@@ -14856,7 +14885,7 @@ def solve_model(
                     stacklevel=2,
                 )
             if _lpm_backend == "highs":
-                with _highs_route_options():
+                with _highs_route_options(presolve=_caller_presolve):
                     return _solve_lp_highs(model, t_start, time_limit)
             _lp_res = _solve_lp(model, t_start, time_limit)
             if _lpm_backend == "native" and _lp_res.algorithm_route is None:
@@ -14912,7 +14941,7 @@ def solve_model(
                     and not lagrangian_bound
                     and not _observe_tree
                 ):
-                    with _highs_route_options():
+                    with _highs_route_options(presolve=_caller_presolve):
                         _highs_res = _solve_milp_highs(
                             model,
                             time_limit,
@@ -15349,6 +15378,18 @@ def solve_model(
             # weaken this into "trust the NLP" — refuse to certify (CLAUDE.md §1,
             # §3). Genuine infeasibility from _solve_continuous is a rigorous
             # nonlinear-tightening / NLP-infeasibility claim, not a gap, so leave it.
+            # #1753: name the route, and say why there is no bound -- no relaxation
+            # was built, so the "relaxation layer could not bound" diagnostic would
+            # misdescribe it (``Model.solve`` reads the prefix).
+            _declare_route(
+                f"local-nlp: single {nlp_solver} local NLP solve ("
+                + (
+                    "skip_convex_check=True"
+                    if skip_convex_check
+                    else "convexity could not be established"
+                )
+                + "; no dual bound by design)"
+            )
             return _withhold_local_optimality_certificate(_cont_result)
         logger.info(
             "Local NLP on convexity-unknown continuous model returned error; "
@@ -28236,6 +28277,9 @@ def _solve_lp_matrix(
             bound_duals_upper=bdu,
         )
         sr.convex_fast_path = True
+        # #1754: the engine's iteration count, under the HiGHS route's key, so the
+        # two routes can be compared.
+        sr.solver_stats = {**(sr.solver_stats or {}), "lp/iters": float(result.iterations)}
         return sr
     if result.status == SolveStatus.INFEASIBLE:
         return SolveResult(

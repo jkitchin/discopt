@@ -101,6 +101,12 @@ def build_kkt(
             raise ValueError(
                 f"lower constraint {i} has unsupported sense {con.sense!r}; expected '<=' or '=='."
             )
+        # #1755: a multiplier has no a-priori bound, so the large-bounds warning,
+        # whose remedy is "declare tighter bounds", does not name it (#1618 X-29b);
+        # ``BilevelProblem(multiplier_ub=...)`` is the way to bound it.
+        if not hasattr(model, "_free_by_construction"):
+            model._free_by_construction = set()
+        model._free_by_construction.add(mu.name)
         multipliers.append(mu)
         lagrangian = lagrangian + mu * body
 
