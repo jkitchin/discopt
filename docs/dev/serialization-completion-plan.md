@@ -1,6 +1,6 @@
 # Model serialization — completion plan
 
-> **Plan v1.5 — 2026-10-18 — author: Claude (planning session for jkitchin).**
+> **Plan v1.6 — 2026-10-18 — author: Claude (planning session for jkitchin).**
 > Status: proposed; no work package started. Every claim about the code below was
 > read from the tree at `3191cc65` (schema `discopt.model/1.4`, `discopt 0.9.1.dev0`,
 > after PRs #1748 and #1764). Agents executing a package **re-verify** the lines they
@@ -744,6 +744,35 @@ a documented hole ("untested before 1.N"). O5 — encode logical constraints at 
 ---
 
 ## 9. Change log
+
+- **v1.6 (2026-10-18, #1782; schema 1.5)** — #1775 G1.1 (`either_or(...).indicators`) added
+  a nested key, `indicators` on a disjunction row, while the identifier still said
+  1.4: a pre-#1780 1.4 reader dropped it, a post-#1780 one refused the document as
+  *malformed*. Bumped to 1.5. (a) The key is written only once the indicators were
+  read, so a model that never reads them writes the 1.4 content under the 1.5
+  identifier (`v1.5/mip_indicator_sos_disjunction.json` equals its v1.4 fixture but
+  for the schema string — tested). (b) Unlike a known top-level/state key (v1.4 (a)),
+  this one is read only from a document of minor ≥ 5, so in an older document it is
+  refused as unread: no writer of that minor produced it, and the only documents
+  that carry it under 1.4 came from the unmerged #1782 branch. (c) On read it must be
+  one distinct scalar binary column per disjunct — the GDP lowering uses the columns
+  as selectors, so a reference to anything else would lower to a different model.
+  (d) Forward cells measured with the five historical readers: every other 1.5
+  document loads identically (1.0's `registered_atom` aside, unbuildable there);
+  `gdp_indicators.json` is `loaded` (no own fixture to compare) by all five. Those
+  readers (their manifest commits, all pre-#1780) do not track nested keys, so they
+  drop `indicators`: under the 1.4 reader (`0ff5cb53`) the reloaded model solves to
+  **10.0** instead of **45.0**, with no warning. Not fixable in a shipped reader; the
+  post-#1780 1.4 reader (`ee504c66`) refuses it with "newer than this reader …
+  Upgrade discopt". (e) A case added after 1.0 is declared in
+  `serialize_fixture_models.INTRODUCED` and has no entry in older versions'
+  manifests (their fixtures were written before it existed; re-running them is not
+  byte-reproducible — `with_result` holds a wall time, `from_nl_*` a machine path).
+  (f) The generator records a forward-only reader run's interpreter under
+  `forward_python` (the historical cells were generated under 3.13.16, unavailable
+  here; these under 3.12.11), and compares `nl_source.path` by file name, as the
+  matrix test does — otherwise the 1.4 reader reported every `from_nl` document
+  written on another machine as `loads_different`.
 
 - **v1.5 (2026-10-18, #1780)** — Nested-record keys. A per-record table for every
   record kind would have had to mirror every decoder branch, so the reader instead

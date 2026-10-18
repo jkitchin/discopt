@@ -1,0 +1,267 @@
+{
+ "schema": "discopt.model/1.5",
+ "discopt": "0.9.1.dev0",
+ "name": "nvs01",
+ "variables": [
+  {
+   "name": "x0",
+   "type": "integer",
+   "shape": [],
+   "lb": 0.0,
+   "ub": 200.0,
+   "bound_stack": []
+  },
+  {
+   "name": "x1",
+   "type": "integer",
+   "shape": [],
+   "lb": 0.0,
+   "ub": 200.0,
+   "bound_stack": []
+  },
+  {
+   "name": "x2",
+   "type": "continuous",
+   "shape": [],
+   "lb": 0.0,
+   "ub": 100.0,
+   "bound_stack": []
+  }
+ ],
+ "parameters": [],
+ "nodes": [
+  {
+   "op": "const",
+   "v": 420.169404664517
+  },
+  {
+   "op": "var",
+   "ref": 0
+  },
+  {
+   "op": "const",
+   "v": 2.0
+  },
+  {
+   "op": "binop",
+   "o": "**",
+   "a": 1,
+   "b": 2
+  },
+  {
+   "op": "const",
+   "v": 900.0
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 3,
+   "b": 4
+  },
+  {
+   "op": "call",
+   "f": "sqrt",
+   "args": [
+    5
+   ]
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 0,
+   "b": 6
+  },
+  {
+   "op": "var",
+   "ref": 2
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 8,
+   "b": 1
+  },
+  {
+   "op": "var",
+   "ref": 1
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 9,
+   "b": 10
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 7,
+   "b": 11
+  },
+  {
+   "op": "const",
+   "v": 0.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 12,
+   "b": 13
+  },
+  {
+   "op": "const",
+   "v": 18505.4769901875
+  },
+  {
+   "op": "binop",
+   "o": "**",
+   "a": 10,
+   "b": 2
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 15,
+   "b": 16
+  },
+  {
+   "op": "const",
+   "v": 2960.87631843
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 17,
+   "b": 18
+  },
+  {
+   "op": "const",
+   "v": 7200.0
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 3,
+   "b": 20
+  },
+  {
+   "op": "binop",
+   "o": "/",
+   "a": 19,
+   "b": 21
+  },
+  {
+   "op": "unop",
+   "o": "neg",
+   "a": 8
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 22,
+   "b": 23
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 13,
+   "b": 24
+  },
+  {
+   "op": "const",
+   "v": -100.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 26,
+   "b": 23
+  },
+  {
+   "op": "const",
+   "v": 0.04712385
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 28,
+   "b": 6
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 29,
+   "b": 10
+  }
+ ],
+ "objective": {
+  "sense": "minimize",
+  "expr": 30,
+  "placeholder": false
+ },
+ "builder_objective": null,
+ "rows": [
+  {
+   "kind": "algebraic",
+   "body": 14,
+   "sense": "==",
+   "name": null
+  },
+  {
+   "kind": "algebraic",
+   "body": 25,
+   "sense": "<=",
+   "name": null
+  },
+  {
+   "kind": "algebraic",
+   "body": 27,
+   "sense": "<=",
+   "name": null
+  }
+ ],
+ "builder_blocks": [],
+ "complementarities": null,
+ "state": {
+  "_aux_counter": 0,
+  "_decomp_stages": {},
+  "_decomp_blocks": {},
+  "_zero_spanning_factor_auxes": [],
+  "_implied_integer_auxes": [],
+  "_free_by_construction": [],
+  "_atan2_preconditions": [],
+  "_piecewise_domains": [],
+  "_coupling_keys": {
+   "names": [],
+   "row_indices": []
+  },
+  "_sets": [],
+  "_simplex_lowerings": [],
+  "_block_labels_var": {},
+  "_block_labels_con": {
+   "names": {},
+   "rows": []
+  },
+  "nl_source": {
+   "parsed": true,
+   "path": "/Users/jkitchin/projects/discopt-fix-1782/python/tests/data/minlplib_nl/nvs01.nl",
+   "sha256": "a754d8f98b200bc914e0be867df2ae0cfe6a4c4f5f9d023b7d09a3c2fd934de7"
+  }
+ },
+ "initial_point": [
+  [
+   "x0",
+   0,
+   100.0
+  ],
+  [
+   "x1",
+   0,
+   100.0
+  ],
+  [
+   "x2",
+   0,
+   100.0
+  ]
+ ]
+}

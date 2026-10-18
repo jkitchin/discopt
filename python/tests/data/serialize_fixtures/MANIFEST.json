@@ -276,7 +276,59 @@
      "with_result.json": {
       "outcome": "loads_identical"
      }
+    },
+    "1.5": {
+     "array_bounds_inf.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_lowered.json": {
+      "outcome": "loads_identical"
+     },
+     "decomposition_marks.json": {
+      "outcome": "loads_identical"
+     },
+     "fast_api_blocks.json": {
+      "outcome": "loads_identical"
+     },
+     "fixed_scope.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_mpcc.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_nvs01.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_st_e13.json": {
+      "outcome": "loads_identical"
+     },
+     "gdp_indicators.json": {
+      "outcome": "loaded",
+      "note": "no own-version fixture to compare (unbuildable here)"
+     },
+     "mip_indicator_sos_disjunction.json": {
+      "outcome": "loads_identical"
+     },
+     "parameters_and_start.json": {
+      "outcome": "loads_identical"
+     },
+     "registered_atom.json": {
+      "outcome": "loaded",
+      "note": "no own-version fixture to compare (unbuildable here)"
+     },
+     "scalar_nlp.json": {
+      "outcome": "loads_identical"
+     },
+     "shared_dag.json": {
+      "outcome": "loads_identical"
+     },
+     "with_result.json": {
+      "outcome": "loads_identical"
+     }
     }
+   },
+   "forward_python": {
+    "1.5": "3.12.11"
    }
   },
   "1.1": {
@@ -505,7 +557,58 @@
      "with_result.json": {
       "outcome": "loads_identical"
      }
+    },
+    "1.5": {
+     "array_bounds_inf.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_lowered.json": {
+      "outcome": "loads_identical"
+     },
+     "decomposition_marks.json": {
+      "outcome": "loads_identical"
+     },
+     "fast_api_blocks.json": {
+      "outcome": "loads_identical"
+     },
+     "fixed_scope.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_mpcc.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_nvs01.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_st_e13.json": {
+      "outcome": "loads_identical"
+     },
+     "gdp_indicators.json": {
+      "outcome": "loaded",
+      "note": "no own-version fixture to compare (unbuildable here)"
+     },
+     "mip_indicator_sos_disjunction.json": {
+      "outcome": "loads_identical"
+     },
+     "parameters_and_start.json": {
+      "outcome": "loads_identical"
+     },
+     "registered_atom.json": {
+      "outcome": "loads_identical"
+     },
+     "scalar_nlp.json": {
+      "outcome": "loads_identical"
+     },
+     "shared_dag.json": {
+      "outcome": "loads_identical"
+     },
+     "with_result.json": {
+      "outcome": "loads_identical"
+     }
     }
+   },
+   "forward_python": {
+    "1.5": "3.12.11"
    }
   },
   "1.2": {
@@ -690,7 +793,58 @@
      "with_result.json": {
       "outcome": "loads_identical"
      }
+    },
+    "1.5": {
+     "array_bounds_inf.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_lowered.json": {
+      "outcome": "loads_identical"
+     },
+     "decomposition_marks.json": {
+      "outcome": "loads_identical"
+     },
+     "fast_api_blocks.json": {
+      "outcome": "loads_identical"
+     },
+     "fixed_scope.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_mpcc.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_nvs01.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_st_e13.json": {
+      "outcome": "loads_identical"
+     },
+     "gdp_indicators.json": {
+      "outcome": "loaded",
+      "note": "no own-version fixture to compare (unbuildable here)"
+     },
+     "mip_indicator_sos_disjunction.json": {
+      "outcome": "loads_identical"
+     },
+     "parameters_and_start.json": {
+      "outcome": "loads_identical"
+     },
+     "registered_atom.json": {
+      "outcome": "loads_identical"
+     },
+     "scalar_nlp.json": {
+      "outcome": "loads_identical"
+     },
+     "shared_dag.json": {
+      "outcome": "loads_identical"
+     },
+     "with_result.json": {
+      "outcome": "loads_identical"
+     }
     }
+   },
+   "forward_python": {
+    "1.5": "3.12.11"
    }
   },
   "1.3": {
@@ -831,7 +985,58 @@
      "with_result.json": {
       "outcome": "loads_identical"
      }
+    },
+    "1.5": {
+     "array_bounds_inf.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_lowered.json": {
+      "outcome": "loads_identical"
+     },
+     "decomposition_marks.json": {
+      "outcome": "loads_identical"
+     },
+     "fast_api_blocks.json": {
+      "outcome": "loads_identical"
+     },
+     "fixed_scope.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_mpcc.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_nvs01.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_st_e13.json": {
+      "outcome": "loads_identical"
+     },
+     "gdp_indicators.json": {
+      "outcome": "loaded",
+      "note": "no own-version fixture to compare (unbuildable here)"
+     },
+     "mip_indicator_sos_disjunction.json": {
+      "outcome": "loads_identical"
+     },
+     "parameters_and_start.json": {
+      "outcome": "loads_identical"
+     },
+     "registered_atom.json": {
+      "outcome": "loads_identical"
+     },
+     "scalar_nlp.json": {
+      "outcome": "loads_identical"
+     },
+     "shared_dag.json": {
+      "outcome": "loads_identical"
+     },
+     "with_result.json": {
+      "outcome": "loads_identical"
+     }
     }
+   },
+   "forward_python": {
+    "1.5": "3.12.11"
    }
   },
   "1.4": {
@@ -926,6 +1131,160 @@
      "sha256": "2e04ad7d8d06653951d094a5db1f30add689af7f56c50b8985985335cbbac270",
      "to_nl_sha256": "0f2e2a6671eeeea0efba04a6b745bf0478e93b0b2d76fad2e0d5ead0106c3d50",
      "to_nl_refused": null
+    }
+   },
+   "forward": {
+    "1.5": {
+     "array_bounds_inf.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_lowered.json": {
+      "outcome": "loads_identical"
+     },
+     "decomposition_marks.json": {
+      "outcome": "loads_identical"
+     },
+     "fast_api_blocks.json": {
+      "outcome": "loads_identical"
+     },
+     "fixed_scope.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_mpcc.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_nvs01.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_st_e13.json": {
+      "outcome": "loads_identical"
+     },
+     "gdp_indicators.json": {
+      "outcome": "loaded",
+      "note": "no own-version fixture to compare (unbuildable here)"
+     },
+     "mip_indicator_sos_disjunction.json": {
+      "outcome": "loads_identical"
+     },
+     "parameters_and_start.json": {
+      "outcome": "loads_identical"
+     },
+     "registered_atom.json": {
+      "outcome": "loads_identical"
+     },
+     "scalar_nlp.json": {
+      "outcome": "loads_identical"
+     },
+     "shared_dag.json": {
+      "outcome": "loads_identical"
+     },
+     "with_result.json": {
+      "outcome": "loads_identical"
+     }
+    }
+   },
+   "forward_python": {
+    "1.5": "3.12.11"
+   }
+  },
+  "1.5": {
+   "schema": "discopt.model/1.5",
+   "commit": "6486a22ad175d0bfa0580ce28af7cfdcdd04333f",
+   "discopt_version": "0.9.1.dev0",
+   "python": "3.12.11",
+   "cases": {
+    "scalar_nlp": {
+     "file": "scalar_nlp.json",
+     "sha256": "e8e02b93b8be82d68912fc7620218c8ce0f47fcaabb3044b3634e38f173455b6",
+     "to_nl_sha256": "99787845c11051508641270c744c626a66db2c3f336d802cdc525d7d7e1984c5",
+     "to_nl_refused": null
+    },
+    "array_bounds_inf": {
+     "file": "array_bounds_inf.json",
+     "sha256": "95bee63fe7b4eee51daea0ccdba84752319322d529f4eeb6cfb801ae172e0802",
+     "to_nl_sha256": "d3b082468b17f96b7f2524e8fab16860c8f8e46407954e16bacfff8eebbd5108",
+     "to_nl_refused": null
+    },
+    "mip_indicator_sos_disjunction": {
+     "file": "mip_indicator_sos_disjunction.json",
+     "sha256": "662d052b6275b87722e5021d3b12cd01793264eb41624aaccc5a589916c24719",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries an indicator constraint (Model.if_then). This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
+    },
+    "shared_dag": {
+     "file": "shared_dag.json",
+     "sha256": "0469d08ad3fbea0354754f82f9741b9dce8e6c7e3cacf3ac707124d834b1c1c8",
+     "to_nl_sha256": "1f0ae6f560240865384e792d847ec84c0e0aefc8600060137d2dc4b000ada9e3",
+     "to_nl_refused": null
+    },
+    "fixed_scope": {
+     "file": "fixed_scope.json",
+     "sha256": "cfa7eaccacea9c52c8abff8bbe22dd08bd7d45acda59b702d99599597c930714",
+     "to_nl_sha256": "4085a021806538699f80cb58952aad8ccbdadbce9a2b503075d3cc2d64c11aef",
+     "to_nl_refused": null
+    },
+    "complementarity_lowered": {
+     "file": "complementarity_lowered.json",
+     "sha256": "717b32e8bbc27f719bceaf5168e8bb18b73be27f82ad5d475abdc2a25aa6bf09",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries a disjunctive constraint (Model.either_or / Model.if_else, GDP) named 'pq'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
+    },
+    "with_result": {
+     "file": "with_result.json",
+     "sha256": "3b255f57249b777eee533331123665aa101b54b7504a11ed525b7aef9a674c97",
+     "to_nl_sha256": "6e08b0bdec6e132c87a21893404fa0b8af30ab54acce1b2df8af222a8f2aa52b",
+     "to_nl_refused": null
+    },
+    "from_nl_nvs01": {
+     "file": "from_nl_nvs01.json",
+     "sha256": "1cf86da69fa8e47c359d84a7116dd11292bef800aca1eb672db9f4eec66dcb9c",
+     "to_nl_sha256": "ad1fbb03c9c1c4202f2a0f0e8f857ffb1af948c4ce5981bf4c08f0c15238d3e7",
+     "to_nl_refused": null,
+     "input_sha256": "a754d8f98b200bc914e0be867df2ae0cfe6a4c4f5f9d023b7d09a3c2fd934de7"
+    },
+    "from_nl_st_e13": {
+     "file": "from_nl_st_e13.json",
+     "sha256": "75438e4cc8875b199b6db93a1b3b9ef37ab2daf564bae5d4e7efe413ca900d68",
+     "to_nl_sha256": "f76aebc77035c50aeed080f835b5e65ef16da3586cd3acb8ee46c63f8cb2768b",
+     "to_nl_refused": null,
+     "input_sha256": "f568f2bec83e905a8741c518e3f350c65bbd4ae2b96643514b50458ce3eb7559"
+    },
+    "from_nl_mpcc": {
+     "file": "from_nl_mpcc.json",
+     "sha256": "6e9ed2ae18d08fb638fc6ca7da203dac150a64b47291e959c639ee889b2366b2",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries a disjunctive constraint (Model.either_or / Model.if_else, GDP) named 'nl_compl0'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct).",
+     "input_sha256": "b9d827c3efbbc40f5e675a7b605efc747c97d7f4e220cb2e46aa3a9f0e81f4e1"
+    },
+    "fast_api_blocks": {
+     "file": "fast_api_blocks.json",
+     "sha256": "344484f8d2e6e75083c236da9d5b21c1ef1521325e27b1e84e3b0c703ac182ab",
+     "to_nl_sha256": "59a4f2f3ff20f1b633dbd5450ed0029217e208db98900834f3f959f74e4b9f78",
+     "to_nl_refused": null
+    },
+    "parameters_and_start": {
+     "file": "parameters_and_start.json",
+     "sha256": "10b69323019629c801ee4701c8c3b51dbc1e20ac120c379c15d5a54fd738dbb5",
+     "to_nl_sha256": "ffe61bc724c936887a884cbc7b5440d9df3c6af24bad8e987eeeb0023af7ce87",
+     "to_nl_refused": null
+    },
+    "decomposition_marks": {
+     "file": "decomposition_marks.json",
+     "sha256": "1257fe57dd5d52100bf65d6f021b24349b130358138d8ef22fdd1c1c163f7c13",
+     "to_nl_sha256": "12889d0402cf36f6992650c79b6bbbdc58e88692eeb0baea8aff5633989f4741",
+     "to_nl_refused": null
+    },
+    "registered_atom": {
+     "file": "registered_atom.json",
+     "sha256": "cfcc805bb1620a231bcd077436fa07a08a2bd152ceb31aeeabd2704567565393",
+     "to_nl_sha256": "0f2e2a6671eeeea0efba04a6b745bf0478e93b0b2d76fad2e0d5ead0106c3d50",
+     "to_nl_refused": null
+    },
+    "gdp_indicators": {
+     "file": "gdp_indicators.json",
+     "sha256": "e89c8ccc4aaca86df1a84f73bf2d9ef3b17e55c9ca1692ec11d0947601516a96",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries a disjunctive constraint (Model.either_or / Model.if_else, GDP) named 'mode'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
     }
    }
   }

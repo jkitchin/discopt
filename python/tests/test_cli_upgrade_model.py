@@ -265,3 +265,21 @@ def test_upgrade_model_import_failure_is_a_usage_error(tmp_path):
     assert proc.returncode == 2
     assert "Error: cannot import broken_atoms: RuntimeError: boom at import" in proc.stderr
     assert "Traceback" not in proc.stderr
+
+
+def test_upgrade_model_takes_a_1_4_disjunction_to_1_5_unchanged(tmp_path):
+    """1.4 -> 1.5 only adds ``indicators``, written once read; a 1.4 document has
+    none read, so its upgrade differs from it in the schema string alone (#1782)."""
+    src = FIXTURES / "v1.4" / "mip_indicator_sos_disjunction.json"
+    out = tmp_path / "x.json"
+    proc = _cli(src, out)
+    assert proc.returncode == 0, proc.stderr
+    new = json.loads(out.read_text())
+    old = json.loads(src.read_text())
+    assert new["schema"] == SCHEMA == "discopt.model/1.5"
+    disj = [r for r in new["rows"] if r["kind"] == "disjunction"]
+    assert disj and all("indicators" not in r for r in disj)
+    for doc in (new, old):
+        doc.pop("schema")
+        doc.pop("provenance", None)
+    assert new == old
