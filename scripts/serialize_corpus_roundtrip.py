@@ -101,6 +101,7 @@ def qplib_instances() -> tuple[list[Instance], str | None]:
         path = root / "qplib" / f"{name}.qplib"
         if path.is_file():
             out.append(Instance("qplib_full", name, path, "qplib"))
+    print(f"qplib_full: found {len(out)} of {len(usable)} usable", flush=True)
     return out, None
 
 
@@ -108,13 +109,14 @@ def qplib_instances() -> tuple[list[Instance], str | None]:
 
 
 def _to_nl(model):
-    """``.nl`` text, or the refusal's exception type: both models must agree."""
+    """``.nl`` text, or the refusal's exception type *and message*: both models must
+    agree on which, so a round trip that turns one refusal into another is caught."""
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             return ("text", model.to_nl())
     except Exception as exc:  # noqa: BLE001 - the outcome is what is compared
-        return ("refused", type(exc).__name__)
+        return ("refused", f"{type(exc).__name__}: {exc}")
 
 
 def _build(inst: Instance):
@@ -169,7 +171,13 @@ def check_instance(inst: Instance) -> dict:
         failures.append("fingerprint differs after loads(dumps())")
     if model_fingerprint(copied) != fp:
         failures.append("fingerprint differs after pickle")
-    if _to_nl(reloaded) != _to_nl(model):
+    # The fingerprint does not cover the ``state`` section (bounds overrides,
+    # fitted values, results); the serialized text does, so compare that too.
+    if dumps(copied, provenance=False) != text:
+        failures.append("dumps differs after pickle")
+    nl = _to_nl(model)
+    row["nl"] = nl[0] if nl[0] == "text" else f"refused: {nl[1]}"
+    if _to_nl(reloaded) != nl:
         failures.append(".nl differs after round trip")
     # Preserved, absence included: `from_nl` records no digest for a model whose
     # complementarities it lowered (the in-memory model is no longer the file's).

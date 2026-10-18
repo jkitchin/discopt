@@ -184,6 +184,12 @@ def test_round_trip_panel_is_bound_neutral(name):
     r1 = original.solve(time_limit=60)
     r2 = reloaded.solve(time_limit=60)
     assert (r1.status, r1.node_count, r1.objective) == (r2.status, r2.node_count, r2.objective)
+    # Equal is not enough: both could time out identically. Each panel member is a
+    # known optimum solved well inside the limit, so demand the certified answer.
+    from _optima import known_optimum
+
+    assert r1.status == "optimal", r1.status
+    assert r1.objective == pytest.approx(known_optimum(name), rel=1e-4, abs=1e-6)
 
 
 def test_panel_is_twelve_known_optima():
