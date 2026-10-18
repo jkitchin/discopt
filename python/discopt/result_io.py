@@ -100,12 +100,14 @@ from discopt.modeling.core import SolveResult
 # `NaN`/`Infinity` tokens. Imported rather than re-implemented so the standalone
 # result file and the same result embedded in a `.dopt` use one encoding.
 from discopt.serialize import (
+    SerializationError,
     _dec_float,
     _dec_json_tree,
     _dec_tree,
     _enc_float,
     _enc_json_tree,
     _enc_tree,
+    _plain,
 )
 
 #: Bumped to 2 by #1266 (``provenance``, ``solve_options``, ``validation_report``).
@@ -177,6 +179,24 @@ _DICT_ARRAY_FIELDS = (
 #: ``_SCALAR_FIELDS`` cannot repeat it.
 _STRING_SCALAR_FIELDS = frozenset(
     {"status", "algorithm_route", "bound_source", "error", "termination"}
+)
+
+
+#: Every key :func:`serialize_result` has ever written (no field has been removed
+#: since the module was added). :func:`deserialize_result` refuses any other.
+_RESULT_KEYS = frozenset(
+    {"schema_version"}
+    | set(_SCALAR_FIELDS)
+    | set(_FLOAT_DICT_FIELDS)
+    | set(_DICT_ARRAY_FIELDS)
+    | {
+        "mip_nlp_trace",
+        "explanation",
+        "validation_report",
+        "infeasibility_certificate",
+        "solve_options",
+        "provenance",
+    }
 )
 
 
@@ -274,7 +294,10 @@ def _dec_validation_report(d: Any) -> Any:
     report_fields = {f.name for f in fields(ExaminerReport)}
     check_fields = {f.name for f in fields(CheckResult)}
     # `passed` is a property, so it is not in `fields(ExaminerReport)` and is
-    # filtered out here -- passing it to the constructor would raise.
+    # filtered out here -- passing it to the constructor would raise. It is the ONE
+    # key skipped: anything else outside the dataclass fields is refused, since the
+    # filters below would otherwise drop it unread (#1780 review).
+    _refuse_unknown_keys(d, report_fields | {"passed", "checks"}, "validation_report")
     kwargs: dict[str, Any] = {
         k: _dec_float(v) if k in report_floats else v
         for k, v in d.items()
@@ -282,6 +305,7 @@ def _dec_validation_report(d: Any) -> Any:
     }
     checks = []
     for c in d.get("checks", []):
+        _refuse_unknown_keys(c, check_fields, "validation_report check")
         cd: dict[str, Any] = {
             k: _dec_float(v) if k in check_floats else v for k, v in c.items() if k in check_fields
         }
@@ -289,6 +313,17 @@ def _dec_validation_report(d: Any) -> Any:
         cd["violators"] = [(label, _dec_float(val)) for label, val in cd.get("violators", [])]
         checks.append(CheckResult(**cd))
     return ExaminerReport(checks=checks, **kwargs)
+
+
+def _refuse_unknown_keys(d: Any, known: set, where: str) -> None:
+    if not isinstance(d, dict):
+        raise TypeError(f"{where} must be an object, got {type(d).__name__}.")
+    unknown = sorted(set(d) - known)
+    if unknown:
+        raise SerializationError(
+            f"{where} has key(s) {unknown} this reader does not know; refusing rather "
+            "than dropping them."
+        )
 
 
 def _float_fields(cls: type) -> frozenset[str]:
@@ -372,15 +407,31 @@ def serialize_result(
 def deserialize_result(d: dict) -> SolveResult:
     """Rebuild a :class:`SolveResult` from :func:`serialize_result` output.
 
-    Version-tolerant in both directions: a document written before #1266 simply
-    has no ``provenance`` / ``solve_options`` / ``validation_report`` keys and
-    reads unchanged, and the keys are restored here so a result that crosses the
-    daemon socket arrives at the writer with them intact.
+    An older result reads unchanged: one written before #1266 simply has no
+    ``provenance`` / ``solve_options`` / ``validation_report`` keys, and the keys
+    are restored here so a result that crosses the daemon socket arrives at the
+    writer with them intact. A key outside ``_RESULT_KEYS`` is refused with
+    :class:`~discopt.serialize.SerializationError` -- naming the upgrade when
+    ``schema_version`` is newer than this reader's -- rather than dropped.
     """
     kwargs: dict[str, Any] = {}
     version = d.get("schema_version", 1)
     if not isinstance(version, int) or isinstance(version, bool):
         raise TypeError(f"schema_version must be an integer, got {version!r}.")
+    unknown = sorted(set(d) - _RESULT_KEYS)
+    if unknown:
+        # Skipping a key is how a result loses a field without a word -- the next
+        # one added could be a claim (#1244 was a claim lost on a round trip).
+        if version > SCHEMA_VERSION:
+            raise SerializationError(
+                f"result schema_version {version} is newer than this reader's "
+                f"({SCHEMA_VERSION}) and has key(s) {unknown} it does not know; "
+                "upgrade discopt to read it."
+            )
+        raise SerializationError(
+            f"result has key(s) {unknown} that no writer of schema_version {version} "
+            "produces; refusing rather than dropping them."
+        )
     for name in _SCALAR_FIELDS:
         if name in d:
             val = d[name]
@@ -398,7 +449,9 @@ def deserialize_result(d: dict) -> SolveResult:
     if d.get("mip_nlp_trace") is not None:
         trace = d["mip_nlp_trace"]
         # Before version 3 the trace was written untagged.
-        kwargs["mip_nlp_trace"] = _dec_json_tree(trace) if version >= 3 else trace
+        # Kept verbatim before version 3: as a plain copy (`_plain`), so it carries
+        # no reader bookkeeping and every key counts as read (#1780).
+        kwargs["mip_nlp_trace"] = _dec_json_tree(trace) if version >= 3 else _plain(trace)
     if d.get("validation_report") is not None:
         kwargs["validation_report"] = _dec_validation_report(d["validation_report"])
     if d.get("infeasibility_certificate") is not None:
@@ -422,7 +475,9 @@ def deserialize_result(d: dict) -> SolveResult:
     if d.get("explanation"):
         r._explanation = d["explanation"]
     if d.get("provenance") is not None:
-        r._provenance = d["provenance"]
+        # Kept verbatim: `_plain` hands back ordinary dicts and counts every key
+        # read, so the document reader's unread-key check (#1780) passes it.
+        r._provenance = _plain(d["provenance"])
     if d.get("solve_options") is not None:
         opts = d["solve_options"]
         r._solve_options = _dec_json_tree(opts) if version >= 3 else _dec_tree(opts)

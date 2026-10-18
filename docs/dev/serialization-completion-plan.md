@@ -1,6 +1,6 @@
 # Model serialization — completion plan
 
-> **Plan v1.3 — 2026-10-18 — author: Claude (planning session for jkitchin).**
+> **Plan v1.5 — 2026-10-18 — author: Claude (planning session for jkitchin).**
 > Status: proposed; no work package started. Every claim about the code below was
 > read from the tree at `3191cc65` (schema `discopt.model/1.4`, `discopt 0.9.1.dev0`,
 > after PRs #1748 and #1764). Agents executing a package **re-verify** the lines they
@@ -209,6 +209,15 @@ minor stays readable *when it carries only known keys*; a new assertion covers t
 unknown-key refusal. The old behaviour ("ignore unknown keys so 1.0 reads 1.1") is
 exactly the silent-drop §0.1 forbids once a key can carry model content; the
 `provenance` precedent was metadata and is grandfathered by being in `_TOP_LEVEL_KEYS`.
+
+**Nested records (#1780, closed after WP-2).** WP-2 covered the top level and
+`state` only; a key inside a variable, node, row or builder block was still
+ignored (probe: `"zzz"` added to `nodes[0]` or `variables[0]` of a 1.0 document
+loaded cleanly). Now every nested record follows the same policy: node records and
+their index objects against `_NODE_KEYS` / `_INDEX_KEYS`, everything else by
+recording which keys the decoder reads (`serialize._Record`) and refusing the
+rest; a key repeated within one JSON object is refused as well. See the v1.5
+change log for the measurements.
 
 `result_io.SCHEMA_VERSION` (currently 3, integer) stays its own counter: the
 solution subtree is `deserialize_result`'s to version, and `_SCHEMA_MINOR_UNTAGGED_SOLUTION`
@@ -716,7 +725,7 @@ sets the test count); WP-7 one session; WP-8 one session.
 | WP | Status | PR | Date | Notes / measurements |
 |---|---|---|---|---|
 | WP-1 fixtures + matrix | **done** | #1769 | 2026-10-18 | writers: 1.0 `0a655f244`, 1.1 `f31547172`, 1.2 `a82f89b0f`, 1.3 `8a4880f7c`, 1.4 HEAD at generation (serializer = `ca63cb2e7`'s); 69 fixtures (14 cases × 5 versions − `registered_atom`@1.0, unbuildable: no `discopt.operators` before 1.1); backward: 69/69 load and equal today's build minus content not yet written (`_WRITTEN_FROM`: atom tags < 1.3, `state.nl_source` < 1.4); forward: 136 `loads_identical`, 4 `loaded` (1.0 reading `registered_atom`, nothing to compare), **0 `loads_different`, 0 `refused`**; test file 216 tests in 1.5 s (2.6 s under `-n 4`); two reader mutations caught (15 and 10 failures); the live test builds each case before loading its fixture, for the same registry reason as (d) below — found when `-n 4` ordering failed `v1.3-registered_atom` once. No hole: all five writers built (O4 not needed). |
-| WP-2 policy, stamp, upgrade-model | not started | — | — | O1, O3 decided |
+| WP-2 policy, stamp, upgrade-model | **done** | #1776 | 2026-10-18 | entry probe 1: 135 documents (69 fixtures + 66 corpus round-trips) carry exactly the 15 listed top-level keys, 0 unknown; a scan of every revision of `serialize.py` finds no top-level or `state` key ever written that the tables lack. Entry probe 2 (fail-before for the stamp): a model pickled by the `8a4880f7c` tree (layout `(attrs, had_builder)`) raised a bare `ValueError` (unpack 3, got 2) at HEAD, **with the same `__version__` `0.9.1.dev0`** — only a layout stamp tells them apart; the pickle is committed as a fixture. Pre-WP-2 reader loaded all five probe documents (unknown top key at known/future minor, unknown `state` key, future minor, unknown result key) silently with 0 warnings. `upgrade-model`: 67/69 fixtures upgrade; the 2 `registered_atom` documents are refused without `--import` — measured, a bare process strips their atom tags (see v1.4). |
 | WP-3 schema 1.5 | not started | — | — | O5 decided |
 | WP-4 property + fuzz | not started | — | — | op-coverage %: — |
 | WP-5 corpus harness | not started | — | — | in-repo: —/75; full MINLPLib: —/1610; QPLIB: —/421 |
@@ -735,6 +744,45 @@ a documented hole ("untested before 1.N"). O5 — encode logical constraints at 
 ---
 
 ## 9. Change log
+
+- **v1.5 (2026-10-18, #1780)** — Nested-record keys. A per-record table for every
+  record kind would have had to mirror every decoder branch, so the reader instead
+  records which keys it reads (`_Record`, built from the parsed document outside
+  the node table) and refuses any key left unread. That is derived from the
+  decoder, so it cannot drift; `_keys_lost` in `upgrade-model` is now a backstop.
+  Tracking the node table too measured **+130 %** on `loads` of a 24k-node / 1.4 MB
+  document (5 interleaved pairs, load < 2: 0.060 s → 0.141 s min), so nodes and
+  index objects use explicit `_NODE_KEYS` / `_INDEX_KEYS` tables, and a test decodes
+  every fixture with *tracked* nodes to prove the tables are exactly what the
+  decoder reads. Final cost: 24k-node document 0.061 → 0.088 s (min of 7, 5
+  interleaved pairs); `loads(dumps(from_nl(f))) / from_nl(f)` over the 8 largest
+  in-repo corpus files 0.99× → 1.37× (3 interleaved runs, load < 1), inside WP-7's
+  5× budget. Two real holes found on the way: (a) beside a builder objective the
+  writer records the zero placeholder `objective`, which the reader never read — a
+  document with a real objective there would have lost it; it is now checked
+  (`placeholder` true, sense agreeing); (b) a result's own `provenance` block
+  (daemon-stamped) was stored as the parsed object — now a plain copy. A JSON key
+  repeated in one object (kept-last by `json`) is refused too.
+
+- **v1.4 (2026-10-18, WP-2 done)** — Implemented §3.2/§3.4/§3.5 with three
+  measured additions. (a) The unknown-key rule covers the `state` section too
+  (`_STATE_KEYS`), not only the top level: a 1.4 key there (`nl_source`) is model
+  content, and the same silent drop applies; the `x-` escape is top-level only.
+  The tables' minors are derived from the first revision of `serialize.py` that
+  wrote each key, not from the last writer of each minor (a key added between two
+  bumps is written under the earlier one). A *known* key in a document older than
+  the key is not refused — it decodes correctly, so refusing it buys nothing.
+  (b) §3.4's "a lone expression pickle stays unstamped" is true per node but not
+  per pickle: a variable references its model, so a lone expression pickle carries
+  the model and its one stamp (tested: one stamp in a 2000-node expression).
+  (c) `upgrade-model` refuses any rewrite that would drop a key the old document
+  carried. Found by running it on the fixtures: atom tags are re-derived only for
+  atoms the process has registered (v1.3 (d)), so a bare CLI process silently
+  stripped them; `--import MODULE` registers them first. It also carries the old
+  block's `author` forward (an upgrade does not change who made the model) and
+  verifies the rewrite reloads to the same model before writing. `result_io`
+  unknown keys were silently *skipped*, not passed to `SolveResult(**kwargs)` as
+  §3.2 said; now refused either way.
 
 - **v1.3 (2026-10-18, WP-1 done)** — §3.3/WP-1 corrected by measurement:
   (a) the bump search needs `git log -G`, not `-S` (`-S` found only the file's
