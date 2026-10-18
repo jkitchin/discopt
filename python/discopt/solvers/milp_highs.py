@@ -67,6 +67,25 @@ logger = logging.getLogger(__name__)
 _VERIFY_REL = 1e-6
 #: Integrality slack for the same check (CLAUDE.md: integrality 1e-5).
 _VERIFY_INT = 1e-5
+#: #1759: a cut term whose largest magnitude over its finite column box is at most
+#: this fraction of the row's largest term is dropped (on its valid side) rather
+#: than allowed to scale the row toward ``large_matrix_value``. Dropping it loosens
+#: the row by at most this fraction of its largest term -- five orders below
+#: HiGHS's default ``primal_feasibility_tolerance`` (1e-7) -- so no master point it
+#: admits is one HiGHS would not already have accepted within tolerance.
+_NEGLIGIBLE_REL = 1e-12
+#: Opt-out for the #1759 rule (``=0`` restores the pre-#1759 scale choice, in
+#: which every liftable term may set the row's scale). Default ON: measured on the
+#: #1759 panel (portfolio, squfl-class and the in-repo MINLPLib corpus, both
+#: HiGHS-master routes) with no certification regression; kept so the shipped
+#: default can be A/B'd.
+DROP_NEGLIGIBLE_ENV = "DISCOPT_HIGHS_DROP_NEGLIGIBLE"
+
+
+def _drop_negligible_enabled() -> bool:
+    from discopt.solver_tuning import _env_flag
+
+    return _env_flag(DROP_NEGLIGIBLE_ENV, default=True)
 
 
 class HighsBackendUnavailable(ImportError):
@@ -138,8 +157,14 @@ def _prepare_cut_row(
     large_tol: float,
     *,
     lift_to_unit: bool = False,
+    drop_negligible: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Make ``coeffs @ x <= rhs`` safe to hand :meth:`highspy.Highs.addRow`.
+
+    ``drop_negligible`` (#1759) keeps a term from setting the row's scale when its
+    largest magnitude over the (finite) column box is at most ``_NEGLIGIBLE_REL``
+    of the row's largest term; such a term is dropped on its valid side in step 2
+    rather than rescued by scaling the whole row toward ``large_matrix_value``.
 
     ``lift_to_unit`` (#1658) additionally lifts a row whose largest coefficient is
     below 1 into [1, 2) by a power of two. Only the LP/NLP-BB lazy rows ask for it
@@ -201,9 +226,31 @@ def _prepare_cut_row(
         coeffs = coeffs * scale
         rhs *= scale
     else:
-        liftable = a_abs[a_abs * scale_cap > small_tol]
+        can_lift = a_abs * scale_cap > small_tol
+        if drop_negligible and _drop_negligible_enabled():
+            # #1759: a term that cannot move the row anywhere in the column box gets
+            # no say in the scale either. Measured on a big-M portfolio OA master:
+            # cuts linearized at x_i ~ 1e-22 carried a 2*d_i*x_i ~ 1e-22 gradient
+            # entry next to a -1 on the epigraph column; rescuing it scaled the row
+            # by 2**44, entries reached -1.76e13, and HiGHS answered "Solve error"
+            # on a master that solves to optimality unscaled -- every master from
+            # OA iteration 26 on, so OA looped to the time limit. The rescued term
+            # was worth at most 4e-23 on a row whose terms reach 0.4. It is dropped
+            # below on its valid side instead (rhs loosened by its worst case,
+            # under ``_NEGLIGIBLE_REL`` of the row), and the row keeps its scale.
+            # Only terms with a FINITE box on both sides qualify: their effect has
+            # a bound to compare. Equality rows pass ``drop_negligible=False``,
+            # since they have no valid side to drop on.
+            reach = np.maximum(np.abs(lb[nz]), np.abs(ub[nz]))
+            bounded = reach < _INF
+            term = np.where(bounded, a_abs * np.where(bounded, reach, 0.0), np.inf)
+            ref = float(np.max(term[bounded])) if bounded.any() else a_max
+            negligible = bounded & (term <= _NEGLIGIBLE_REL * max(ref, a_max))
+            can_lift &= ~negligible
         # ``a_max`` itself always qualifies (``a_max * scale_cap`` is
         # ``large_tol/10``, far above ``small_tol``), so this is never empty.
+        can_lift |= a_abs == a_max
+        liftable = a_abs[can_lift]
         a_min = float(np.min(liftable))
         room = min(10.0 * small_tol / a_min, scale_cap)
         headroom = math.floor(math.log2(room))
@@ -297,7 +344,9 @@ def _fit_rows_to_window(
     for i in np.flatnonzero(misfit_row):
         dense = a.getrow(i).toarray().ravel()
         nnz_before = int(np.count_nonzero(dense))
-        idx, vals, new_rhs = _prepare_cut_row(dense, float(rhs[i]), lb, ub, small_tol, large_tol)
+        idx, vals, new_rhs = _prepare_cut_row(
+            dense, float(rhs[i]), lb, ub, small_tol, large_tol, drop_negligible=not equality
+        )
         if equality and idx.size != nnz_before:
             raise ValueError(
                 f"equality row {i} of the HiGHS master has coefficients at or below "
@@ -415,6 +464,8 @@ def solve_milp(
         mip_start=mip_start,
     )
     primary = _solve_milp_once(time_limit=time_limit, presolve=True, **kw)
+    if primary.status == SolveStatus.ERROR:
+        return _recover_from_error(primary, kw, time_limit, t0)
     if (
         confirm_bound_from is not None
         and primary.status != SolveStatus.INFEASIBLE
@@ -436,6 +487,62 @@ def solve_milp(
     if isinstance(diag, dict):
         diag["confirmed"] = True
     return res
+
+
+def _recover_from_error(
+    primary: MILPResult, kw: dict, time_limit: Optional[float], t0: float
+) -> MILPResult:
+    """#1759: a primary HiGHS solve that errored is re-solved with presolve off.
+
+    Measured on the optimization-book II.22 portfolio masters: HiGHS answered
+    "Solve error" with presolve on and "Optimal" with it off, on the same rows. How
+    often that holds is machine-dependent: under the legacy row scaling
+    (``DISCOPT_HIGHS_DROP_NEGLIGIBLE=0``) one macOS run had 17 errored masters and
+    the re-solve recovered 1 of them (single-option retries -- scale strategy, ipm,
+    random seed -- reached at most 4/17). The cure for those rows is the
+    drop-negligible rule; this re-solve is a second chance, not the fix. OA
+    reads a master with no point as "add cuts at the box midpoint", which on a
+    repeat error adds the same cuts every iteration, so an error is a loop until
+    the time limit rather than one lost iteration.
+
+    The re-solve is ONE HiGHS configuration, which the #1634 rule does not let
+    certify a bound on its own, and the primary that would cross-check it is the
+    one that errored. So the result carries the re-solve's point -- only if it
+    verifies against the caller's own arrays (:func:`_verified_objective`) -- and
+    no bound at all; ``OPTIMAL`` becomes ``ITERATION_LIMIT``. A re-solve that
+    also errors, or has no verified point, returns the primary's ERROR unchanged.
+    """
+    diag: dict[str, object] = {"ran": False, "primary_status": primary.status.value}
+    primary.callback_stats = {**(primary.callback_stats or {}), "presolve_cross_check": diag}
+    remaining = None
+    if time_limit is not None:
+        remaining = float(time_limit) - (time.time() - t0)
+        if remaining <= 0.0:
+            diag["recovery"] = "no time budget left"
+            return primary
+    retry = _solve_milp_once(time_limit=remaining, presolve=False, **kw)
+    diag.update(ran=True, cross_status=retry.status.value, recovery="presolve_off")
+    # HiGHS can error after it has an incumbent; keep the better verified point.
+    points = [(o, r.x) for r in (primary, retry) if (o := _verified_objective(kw, r.x)) is not None]
+    if not points:
+        diag["recovery"] = "presolve_off: no verified point"
+        return primary
+    obj, x_best = min(points, key=lambda p: p[0])
+    logger.warning(
+        "HiGHS master: primary solve errored; presolve-free re-solve gave a verified "
+        "point (objective %.12g) and no bound claim (#1759)",
+        obj,
+    )
+    retry.objective, retry.x = obj, np.asarray(x_best, dtype=np.float64)
+    retry.bound = retry.gap = None
+    if retry.status == SolveStatus.OPTIMAL:
+        retry.status = SolveStatus.ITERATION_LIMIT
+    retry.node_count += max(primary.node_count, 0)
+    retry.wall_time = time.time() - t0
+    # Nothing is left to confirm: the result makes no bound claim.
+    diag["confirmed"] = True
+    retry.callback_stats = {**(retry.callback_stats or {}), "presolve_cross_check": diag}
+    return retry
 
 
 def is_unconfirmed(res: MILPResult) -> bool:
@@ -595,7 +702,10 @@ def _solve_milp_once(
     # bound on an LP whose optimum is below it. An LP's bound is its optimum,
     # which the OPTIMAL arm below supplies; otherwise there is none.
     has_integer = integrality is not None and bool(np.any(np.asarray(integrality).ravel()))
-    if has_integer and np.isfinite(raw_bound):
+    # #1759: an errored solve claims nothing. HiGHS leaves ``mip_dual_bound`` at
+    # whatever it last held (a stale finite 0.0 on the measured "Solve error"
+    # masters), which is not a bound on the model it gave up on.
+    if has_integer and np.isfinite(raw_bound) and status != SolveStatus.ERROR:
         bound = raw_bound
     if status == SolveStatus.OPTIMAL and objective is not None:
         # HiGHS may report a dual bound a hair above the incumbent at its own

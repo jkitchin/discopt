@@ -68,9 +68,15 @@ def test_the_window_is_read_from_the_solver_not_hardcoded():
 
 @pytest.mark.smoke
 def test_a_row_that_fits_after_rescaling_keeps_every_entry_exactly():
-    """The squfl case: 21 orders of magnitude, a 24-order window. Nothing is dropped."""
+    """The squfl case: 21 orders of magnitude, a 24-order window. Nothing is dropped.
+
+    The tiny term's column is open above, so its effect on the row has no bound
+    and #1759's negligible-term rule (which needs a finite box) does not apply.
+    """
     coeffs = np.array([114.0, 2.05e-19, -3.0])
-    idx, vals, rhs = _prepare_cut_row(coeffs, -8.74856e-14, *_box(3), _SMALL, _LARGE)
+    lb, ub = _box(3)
+    ub[1] = np.inf
+    idx, vals, rhs = _prepare_cut_row(coeffs, -8.74856e-14, lb, ub, _SMALL, _LARGE)
 
     assert idx.tolist() == [0, 1, 2], "an entry was dropped that rescaling could save"
     assert np.min(np.abs(vals)) > _SMALL, "an entry HiGHS will drop was handed to it"

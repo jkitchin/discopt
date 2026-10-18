@@ -775,6 +775,43 @@ _GDP_CONFIG_BUDGET_FRACTION = 0.15
 _GDP_CONFIG_BUDGET_CAP_S = 15.0
 
 
+def _gdp_config_first_enabled() -> bool:
+    """Whether the root disjunct-configuration constructor runs BEFORE the generic
+    root primal heuristics (#1760; ``DISCOPT_GDP_CONFIG_FIRST``).
+
+    The constructor (:func:`_gdp_config_primal_enabled`) only runs while no
+    incumbent exists, but it was scheduled after the feasibility pump, its
+    NLP-relaxation seed, integer local search and diving -- generic heuristics that
+    round each indicator independently and so can fix a disjunction to zero or two
+    active disjuncts, which the model forbids. Measured on the optimization-book
+    II.B process-synthesis GDP (30 s): those four spent 2.0 -> 16.9 s and found
+    nothing, then the constructor found an incumbent on its second sub-NLP, 0.2 s
+    after it started.
+
+    **Default ON** since the #1760 graduation panel (2026-10-18; the 12 GDPlib
+    models of the #993 panel, ``gdp.bigm``, 15 s and 60 s, ON/OFF interleaved per
+    model in isolated subprocesses, arm order alternating; 24 pairs):
+
+    * *cert-clean*: every pair ends in the same status, certified objectives are
+      identical, no incumbent beats its reference beyond tolerance, and every
+      incumbent the runner can evaluate is feasible (26/32, max scaled violation
+      2.5e-11; ``batch_processing`` and ``gdp_col`` are unevaluable there, equal
+      across arms).
+    * *net-positive*: no regression; at 60 s ``spectralog`` 17.263 -> 15.541 (ref
+      12.089) and ``methanol`` -1574.57 -> -1793.43; equal at 15 s. On II.B the 8 s
+      run gains an incumbent (2791.67) it did not have.
+
+    ``DISCOPT_GDP_CONFIG_FIRST=0`` restores the legacy order. Empty is not an
+    off-value (same shape as :func:`_gdp_config_primal_enabled`).
+    """
+    return os.environ.get("DISCOPT_GDP_CONFIG_FIRST", "").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
 def _gdp_config_deadline(outer_deadline: float, now: float) -> float:
     """Deadline for the #823 constructor: a bounded share of what is left.
 
@@ -5047,8 +5084,18 @@ def _solve_root_node_multistart(
     # better local optimum of the SAME relaxation) are capped. Sound: capping extra
     # starts never changes the dual bound.
     _max_start_wall = 0.0
+    # #1760: every start solves the same node problem, so a start (or a retry
+    # start inside ``_solve_node_nlp_pounce``) that already failed is not re-run.
+    _failed_starts: list = []
 
     for _start_idx, x0 in enumerate(starting_points):
+        if any(
+            seen.shape == np.shape(x0) and np.allclose(seen, x0, rtol=0.0, atol=1e-12)
+            for seen, _ in _failed_starts
+        ):
+            # Already solved (as an earlier start's retry) and failed. Skipped
+            # before the cost hook, which must only ever see real solves.
+            continue
         # Deadline enforcement: each NLP start is a full local solve (seconds on
         # large models). Always run the first start (we must return some iterate),
         # then stop launching new starts once the deadline has passed OR the time
@@ -5074,6 +5121,7 @@ def _solve_root_node_multistart(
             constraint_bounds,
             options,
             nlp_solver=nlp_solver,
+            failed_starts=_failed_starts,
         )
         _start_wall = time.perf_counter() - _t_start_nlp
         _max_start_wall = max(_max_start_wall, _start_wall)
@@ -17081,6 +17129,7 @@ def solve_model(
     # --- Feasibility pump at root ---
     # Try to find an integer-feasible incumbent before B&B starts.
     _fp_ran = False
+    _gdp_cfg_ran = False  # #1760: the root disjunct-configuration constructor runs once
 
     # Re-attach the captured modeler start (by name) to the post-reform working
     # model so ``_gams_initial_seed`` can build a root subnlp seed from it. Only
@@ -19177,6 +19226,84 @@ def solve_model(
             _denom = max(abs(_ub), abs(_batch_relax_lb), 1e-10)
             return bool(_abs_gap / _denom <= gap_tolerance)
 
+        # --- Root disjunct-configuration primal (#823/#993; #1760 schedules it) ---
+        # The enumeration below self-gates off above 4 binaries, so on a big-M GDP
+        # (6..138 indicators across the GDPlib small set) the root disjunct cover
+        # never runs there; and plain rounding can fix a disjunction to zero-or-two
+        # active disjuncts, which the model forbids, so its sub-NLP is infeasible.
+        # This selects one disjunct per ``sum_k y_k == 1`` row instead. Runs only
+        # while NO incumbent exists -- it is a constructor, not an improver -- and at
+        # most once per solve. Where it runs is ``_gdp_config_first_enabled()``.
+        def _root_gdp_config_primal() -> None:
+            nonlocal _gdp_cfg_ran, _subnlp_calls, _subnlp_feasible, _subnlp_incumbent_updates
+            if not (
+                iteration == 0
+                and not _gdp_cfg_ran
+                and _gdp_config_primal_enabled()
+                and _subnlp_backend_fn is not None
+                and tree.incumbent() is None
+                and not _root_optimum_proven()
+                and _root_heur_nlp_entry_ok(evaluator)
+            ):
+                return
+            _gdp_cfg_ran = True
+            from discopt._relax.primal_heuristics import one_hot_config_subnlp
+
+            logger.info("GDP config subNLP (root): entering disjunct selection")
+
+            # Seed from the best root relaxation point when one produced a usable
+            # bound, else the bound midpoint. Computed here rather than reused from
+            # the enumeration above, which may not have run at all.
+            _cfg_cands = [
+                (i, float(result_lbs[i]))
+                for i in range(n_batch)
+                if result_lbs[i] < _SENTINEL_THRESHOLD and np.isfinite(result_lbs[i])
+            ]
+            _cfg_cands.sort(key=lambda t: t[1])
+            _cfg_seed = (
+                result_sols[_cfg_cands[0][0]]
+                if _cfg_cands
+                else 0.5 * np.add(*_clip_start_box(lb, ub))
+            )
+            _cfg_stats: dict = {}
+            try:
+                _cfg_results = one_hot_config_subnlp(
+                    model,
+                    _cfg_seed,
+                    backend=_subnlp_backend_fn,
+                    nlp_options=subnlp_options,
+                    evaluator=evaluator,
+                    deadline=_gdp_config_deadline(_deadline, time.perf_counter()),
+                    stats=_cfg_stats,
+                )
+            except Exception as _e:
+                logger.debug("one_hot_config_subnlp raised: %s", _e)
+                _cfg_results = []
+            # Log unconditionally, including the zero case. Without this, a run
+            # showing no change is ambiguous between "the constructor ran and
+            # found nothing" and "the gate never opened" — the §6 vacuity trap,
+            # where an instrument that measured nothing reads as a clean result.
+            logger.info(
+                "GDP config subNLP: %d sub-NLP solve(s), %d feasible point(s)",
+                int(_cfg_stats.get("attempted", 0)),
+                len(_cfg_results),
+            )
+            # #1062: count the sub-NLPs the constructor SOLVED, not the ones that
+            # came back feasible. ``len(_cfg_results)`` conflated the two, so a
+            # model where every configuration is infeasible reported
+            # ``subnlp_calls=0`` -- indistinguishable from the heuristic never
+            # running, which is the exact reading that named this issue.
+            _subnlp_calls += int(_cfg_stats.get("attempted", 0))
+            for _x_cf, _obj_cf in _cfg_results:
+                _subnlp_feasible += 1
+                if np.isfinite(_obj_cf) and _obj_cf < _SENTINEL_THRESHOLD:
+                    if _inject_incumbent(np.asarray(_x_cf).copy(), float(_obj_cf)):
+                        _subnlp_incumbent_updates += 1
+                        logger.info("GDP config subNLP incumbent: obj=%.6g", _obj_cf)
+
+        if _gdp_config_first_enabled():
+            _root_gdp_config_primal()
+
         # --- Feasibility pump after root node ---
         if iteration == 0 and not _fp_ran:
             _fp_ran = True
@@ -19689,74 +19816,8 @@ def solve_model(
                 _enum_improved = _enum_inc1 is not None and float(_enum_inc1[1]) < _enum_obj0 - 1e-9
                 _record_improver(_HEUR_COST["enumerate"], _enum_improved)
 
-        # --- Root disjunct-configuration primal (#823, flag-gated, default OFF) ---
-        # The enumeration above self-gates off above 4 binaries, so on a big-M GDP
-        # (6..138 indicators across the GDPlib small set) the root disjunct cover
-        # never runs; and plain rounding can fix a disjunction to zero-or-two
-        # active disjuncts, which the model forbids, so its sub-NLP is infeasible.
-        # This selects one disjunct per ``sum_k y_k == 1`` row instead. Runs only
-        # while NO incumbent exists — it is a constructor, not an improver.
-        if (
-            iteration == 0
-            and _gdp_config_primal_enabled()
-            and _subnlp_backend_fn is not None
-            and tree.incumbent() is None
-            and not _root_optimum_proven()
-            and _root_heur_nlp_entry_ok(evaluator)
-        ):
-            from discopt._relax.primal_heuristics import one_hot_config_subnlp
-
-            logger.info("GDP config subNLP (root): entering disjunct selection")
-
-            # Seed from the best root relaxation point when one produced a usable
-            # bound, else the bound midpoint. Computed here rather than reused from
-            # the enumeration above, which may not have run at all.
-            _cfg_cands = [
-                (i, float(result_lbs[i]))
-                for i in range(n_batch)
-                if result_lbs[i] < _SENTINEL_THRESHOLD and np.isfinite(result_lbs[i])
-            ]
-            _cfg_cands.sort(key=lambda t: t[1])
-            _cfg_seed = (
-                result_sols[_cfg_cands[0][0]]
-                if _cfg_cands
-                else 0.5 * np.add(*_clip_start_box(lb, ub))
-            )
-            _cfg_stats: dict = {}
-            try:
-                _cfg_results = one_hot_config_subnlp(
-                    model,
-                    _cfg_seed,
-                    backend=_subnlp_backend_fn,
-                    nlp_options=subnlp_options,
-                    evaluator=evaluator,
-                    deadline=_gdp_config_deadline(_deadline, time.perf_counter()),
-                    stats=_cfg_stats,
-                )
-            except Exception as _e:
-                logger.debug("one_hot_config_subnlp raised: %s", _e)
-                _cfg_results = []
-            # Log unconditionally, including the zero case. Without this, a run
-            # showing no change is ambiguous between "the constructor ran and
-            # found nothing" and "the gate never opened" — the §6 vacuity trap,
-            # where an instrument that measured nothing reads as a clean result.
-            logger.info(
-                "GDP config subNLP: %d sub-NLP solve(s), %d feasible point(s)",
-                int(_cfg_stats.get("attempted", 0)),
-                len(_cfg_results),
-            )
-            # #1062: count the sub-NLPs the constructor SOLVED, not the ones that
-            # came back feasible. ``len(_cfg_results)`` conflated the two, so a
-            # model where every configuration is infeasible reported
-            # ``subnlp_calls=0`` -- indistinguishable from the heuristic never
-            # running, which is the exact reading that named this issue.
-            _subnlp_calls += int(_cfg_stats.get("attempted", 0))
-            for _x_cf, _obj_cf in _cfg_results:
-                _subnlp_feasible += 1
-                if np.isfinite(_obj_cf) and _obj_cf < _SENTINEL_THRESHOLD:
-                    if _inject_incumbent(np.asarray(_x_cf).copy(), float(_obj_cf)):
-                        _subnlp_incumbent_updates += 1
-                        logger.info("GDP config subNLP incumbent: obj=%.6g", _obj_cf)
+        if not _gdp_config_first_enabled():
+            _root_gdp_config_primal()
 
         # --- Incumbent integer-neighbourhood search (general-integer LB) ---
         # A feasible incumbent of a nonconvex general-integer model can sit next
@@ -26254,11 +26315,16 @@ def _solve_node_nlp(
     options: dict,
     nlp_solver: str = "ipopt",
     convex: bool = False,
+    failed_starts: Optional[list] = None,
 ):
     """Solve the NLP relaxation at a single B&B node with tightened bounds.
 
     We override variable bounds to use the node-specific bounds
     rather than the global bounds.
+
+    ``failed_starts`` (#1760) is forwarded to :func:`_solve_node_nlp_pounce`; see
+    there. Only a caller that solves the SAME node problem repeatedly (the root
+    multistart) passes it.
     """
     # Pre-screen: a node whose box is a single point needs no NLP -- the point is
     # the whole box, so evaluating the rows there IS the feasibility question.
@@ -26348,7 +26414,14 @@ def _solve_node_nlp(
                 if res.status in (_SS.OPTIMAL, _SS.ITERATION_LIMIT):
                     return res
         return _solve_node_nlp_pounce(
-            evaluator, x0, node_lb, node_ub, constraint_bounds, options, convex=convex
+            evaluator,
+            x0,
+            node_lb,
+            node_ub,
+            constraint_bounds,
+            options,
+            convex=convex,
+            failed_starts=failed_starts,
         )
     return _solve_node_nlp_ipopt(evaluator, x0, node_lb, node_ub, constraint_bounds, options)
 
@@ -26361,6 +26434,7 @@ def _solve_node_nlp_pounce(
     constraint_bounds: Optional[list[tuple[float, float]]],
     options: dict,
     convex: bool = False,
+    failed_starts: Optional[list] = None,
 ):
     """Solve node NLP with POUNCE (pure-Rust Ipopt port).
 
@@ -26375,6 +26449,15 @@ def _solve_node_nlp_pounce(
       objective is not a valid lower bound), one polish re-solve at a boosted
       iteration budget is attempted from the stalled iterate; only an OPTIMAL
       polish restores trust in the bound.
+    - ``failed_starts`` (#1760), when given, is a list of ``(start, result)``
+      failures already observed on THIS node problem (same evaluator, box,
+      constraint bounds and options) by an earlier call. A start found there is
+      not solved again -- POUNCE is deterministic, so it would fail the same way
+      -- and every new failure is appended. Measured on the optimization-book
+      process-synthesis GDP: the root multistart's four starts each failed and
+      each re-ran the SAME midpoint and off-center retries, so 6 of its 11
+      POUNCE solves (~2.4 s of an 8 s budget) repeated a known failure. A
+      ``TIME_LIMIT`` failure is not recorded: a later call may have more time.
     """
     from discopt.solvers import NLPResult
     from discopt.solvers.nlp_pounce import solve_nlp as solve_nlp_pounce
@@ -26426,14 +26509,38 @@ def _solve_node_nlp_pounce(
     # parent bound — a valid global lower bound — so the dual bound is untouched.
     _t_node_entry = time.perf_counter()
     _retry_deadline = _t_node_entry + max(_DEADLINE_NODE_FLOOR_S, float(caller_limit))
-    result = _attempt(np.asarray(x0, dtype=np.float64), opts)
+
+    def _known_failure(start: np.ndarray):
+        if failed_starts is None:
+            return None
+        for seen, seen_result in failed_starts:
+            if seen.shape == start.shape and np.allclose(seen, start, rtol=0.0, atol=1e-12):
+                return seen_result
+        return None
+
+    def _attempt_once(start: np.ndarray):
+        known = _known_failure(start)
+        if known is not None:
+            return known
+        res = _attempt(start, opts)
+        if failed_starts is not None and res.status not in (
+            SolveStatus.OPTIMAL,
+            SolveStatus.ITERATION_LIMIT,
+            SolveStatus.TIME_LIMIT,
+        ):
+            failed_starts.append((np.array(start, dtype=np.float64), res))
+        return res
+
+    result = _attempt_once(np.asarray(x0, dtype=np.float64))
     if result.status not in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
         for alt in (midpoint, off_center):
             if np.allclose(alt, x0, atol=1e-12):
                 continue
+            if _known_failure(alt) is not None:
+                continue
             if time.perf_counter() >= _retry_deadline:
                 break
-            retry = _attempt(alt, opts)
+            retry = _attempt_once(alt)
             if retry.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
                 result = retry
                 break
