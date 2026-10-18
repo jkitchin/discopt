@@ -495,7 +495,12 @@ def _recover_from_error(
     """#1759: a primary HiGHS solve that errored is re-solved with presolve off.
 
     Measured on the optimization-book II.22 portfolio masters: HiGHS answered
-    "Solve error" with presolve on and "Optimal" with it off, on the same rows. OA
+    "Solve error" with presolve on and "Optimal" with it off, on the same rows. How
+    often that holds is machine-dependent: under the legacy row scaling
+    (``DISCOPT_HIGHS_DROP_NEGLIGIBLE=0``) one macOS run had 17 errored masters and
+    the re-solve recovered 1 of them (single-option retries -- scale strategy, ipm,
+    random seed -- reached at most 4/17). The cure for those rows is the
+    drop-negligible rule; this re-solve is a second chance, not the fix. OA
     reads a master with no point as "add cuts at the box midpoint", which on a
     repeat error adds the same cuts every iteration, so an error is a loop until
     the time limit rather than one lost iteration.
