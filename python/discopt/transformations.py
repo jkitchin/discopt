@@ -682,6 +682,19 @@ for _alias, _method in (
         fixed_options={"method": _method},
     )
 register(
+    "gdp.fix_disjuncts",
+    "discopt.gdp.state:reduced_subproblem",
+    style="functional",
+    summary="Fix every disjunction to a selected disjunct; drop inactive rows (#1775 G1.3)",
+)
+register(
+    "gdp.transform_current_disjunctive_state",
+    "discopt.gdp.state:_transform_current_disjunctive_state_in_place",
+    style="in_place",
+    summary="Apply a partial disjunct selection in place; undo with "
+    "discopt.gdp.state.reverse_current_disjunctive_state (#1775 G1.3)",
+)
+register(
     "integer.bilinear",
     "discopt._relax.integer_product_reform:reformulate_integer_bilinear",
     style="functional",
