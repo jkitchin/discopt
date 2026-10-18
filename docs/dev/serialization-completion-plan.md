@@ -1,6 +1,6 @@
 # Model serialization — completion plan
 
-> **Plan v1.5 — 2026-10-18 — author: Claude (planning session for jkitchin).**
+> **Plan v1.6 — 2026-10-18 — author: Claude (planning session for jkitchin).**
 > Status: proposed; no work package started. Every claim about the code below was
 > read from the tree at `3191cc65` (schema `discopt.model/1.4`, `discopt 0.9.1.dev0`,
 > after PRs #1748 and #1764). Agents executing a package **re-verify** the lines they
@@ -726,7 +726,7 @@ sets the test count); WP-7 one session; WP-8 one session.
 |---|---|---|---|---|
 | WP-1 fixtures + matrix | **done** | #1769 | 2026-10-18 | writers: 1.0 `0a655f244`, 1.1 `f31547172`, 1.2 `a82f89b0f`, 1.3 `8a4880f7c`, 1.4 HEAD at generation (serializer = `ca63cb2e7`'s); 69 fixtures (14 cases × 5 versions − `registered_atom`@1.0, unbuildable: no `discopt.operators` before 1.1); backward: 69/69 load and equal today's build minus content not yet written (`_WRITTEN_FROM`: atom tags < 1.3, `state.nl_source` < 1.4); forward: 136 `loads_identical`, 4 `loaded` (1.0 reading `registered_atom`, nothing to compare), **0 `loads_different`, 0 `refused`**; test file 216 tests in 1.5 s (2.6 s under `-n 4`); two reader mutations caught (15 and 10 failures); the live test builds each case before loading its fixture, for the same registry reason as (d) below — found when `-n 4` ordering failed `v1.3-registered_atom` once. No hole: all five writers built (O4 not needed). |
 | WP-2 policy, stamp, upgrade-model | **done** | #1776 | 2026-10-18 | entry probe 1: 135 documents (69 fixtures + 66 corpus round-trips) carry exactly the 15 listed top-level keys, 0 unknown; a scan of every revision of `serialize.py` finds no top-level or `state` key ever written that the tables lack. Entry probe 2 (fail-before for the stamp): a model pickled by the `8a4880f7c` tree (layout `(attrs, had_builder)`) raised a bare `ValueError` (unpack 3, got 2) at HEAD, **with the same `__version__` `0.9.1.dev0`** — only a layout stamp tells them apart; the pickle is committed as a fixture. Pre-WP-2 reader loaded all five probe documents (unknown top key at known/future minor, unknown `state` key, future minor, unknown result key) silently with 0 warnings. `upgrade-model`: 67/69 fixtures upgrade; the 2 `registered_atom` documents are refused without `--import` — measured, a bare process strips their atom tags (see v1.4). |
-| WP-3 schema 1.5 | not started | — | — | O5 decided |
+| WP-3 schema 1.5 | **done** | (this PR) | 2026-10-18 | entry experiment: 6 logical models (+1 xor/exactly), lowered twice and from a rebuild → identical rows; model vs rebuild solve: same status/objective/node count (24 checks) — kill criterion not fired. Logic written as a flat per-row table (`logic`), leaves = node ids of the binary variable behind each `BooleanVar`; lowering rows as positions in a third `lowered` element (absent when untracked, so 1.4 still reads those). Fixtures: v1.5 16 cases; `logical_constraints` + `complementarity_vector_lowered` recorded for 1.0–1.4 (logic unbuildable, each version's own refusal). Forward matrix: 230 cells — 205 `loads_identical`, 5 `loaded`, 20 `refused` (each older reader refuses exactly the 4 documents with 1.5-only content), **0 `loads_different`**; the 140 cells recorded before are unchanged. GDP/gdpopt suites: 370 passed. |
 | WP-4 property + fuzz | not started | — | — | op-coverage %: — |
 | WP-5 corpus harness | not started | — | — | in-repo: —/75; full MINLPLib: —/1610; QPLIB: —/421 |
 | WP-6 builder sweep | not started | — | — | rows round-trip: —, refused: —, crashed: — |
@@ -744,6 +744,28 @@ a documented hole ("untested before 1.N"). O5 — encode logical constraints at 
 ---
 
 ## 9. Change log
+
+- **v1.6 (2026-10-18, WP-3 done)** — Three corrections to WP-3 as planned. (a) The
+  plan said to refuse a cardinality `k` outside `[0, len(operands)]`; the API
+  builds such a constraint (an infeasible or vacuous one), and a reader must not
+  refuse a model the writer can produce, so `k` is required to be an `int` (not
+  `bool`) and nothing more. (b) "`rows` pointing at a non-`Constraint`": a
+  lowering's rows are a slice of `_constraints` and may be any row kind, so
+  positions are checked for range and uniqueness only; a row no longer in the
+  model is refused **on write**. (c) The lowering-rows element is written only when
+  the rows are tracked: an untracked record keeps the two-element 1.4 form, so a
+  1.4 reader still reads it (the three-element form is refused by every older
+  reader — recorded in the forward cells). The logic is a flat table, not nested
+  JSON: `land(...)` builds a left-deep chain (a 3000-link chain is tested). Leaves
+  must be a binary variable of size 1 or an element of a binary array — what
+  `Model.boolean` builds — refused both ways otherwise. Two fixture cases were
+  added to the registry with the generator's new `--cases` mode, which records a
+  case for an already-shipped version without touching its fixtures (an existing
+  record is refused, not replaced). The forward check now compares a `from_nl`
+  source by file name, as the matrix test does (a 1.5 document written from a
+  different checkout path read as `loads_different` before). `_REFUSED_RELATIONS`
+  is empty but kept; the `CustomCall` and reformulation-output refusals are
+  documented as permanent.
 
 - **v1.5 (2026-10-18, #1780)** — Nested-record keys. A per-record table for every
   record kind would have had to mirror every decoder branch, so the reader instead

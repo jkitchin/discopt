@@ -168,17 +168,28 @@ def _forward_cell(ser, path, own_dir):
         return {"outcome": "loaded", "note": "no own-version fixture to compare (unbuildable here)"}
     with open(own, encoding="utf-8") as fh:
         own_text = fh.read()
-    redump = _dumps(ser, loaded, {})
-    if '"solution"' in own_text:  # compare model content; the embedded result is checked live
-        import json as _json
-
-        own_doc = _json.loads(own_text)
-        own_doc.pop("solution", None)
-        own_text = _json.dumps(own_doc, indent=1)
-        redump = _json.dumps(_json.loads(redump), indent=1)
+    own_text = _comparable(own_text)
+    redump = _comparable(_dumps(ser, loaded, {}))
     if redump == own_text:
         return {"outcome": "loads_identical"}
     return {"outcome": "loads_different", "diff_hint": _first_difference(own_text, redump)}
+
+
+def _comparable(text: str) -> str:
+    """*text* with what is not model content normalised away, as the matrix test does.
+
+    The embedded result is checked live. A ``from_nl`` model's source path is a
+    fact about the machine (and checkout) that wrote the document; its file name
+    and SHA-256 stay compared.
+    """
+    import json as _json
+
+    doc = _json.loads(text)
+    doc.pop("solution", None)
+    source = doc.get("state", {}).get("nl_source")
+    if source and "path" in source:
+        source["path"] = os.path.basename(source["path"])
+    return _json.dumps(doc, indent=1)
 
 
 def _first_difference(a: str, b: str) -> str:
@@ -188,7 +199,7 @@ def _first_difference(a: str, b: str) -> str:
     return f"length differs: own={len(a)} reloaded={len(b)}"
 
 
-def _merge_manifest(path: str, label: str, report: dict, forward_dir) -> None:
+def _merge_manifest(path: str, label: str, report: dict, forward_dir, add_only: bool) -> None:
     """Merge one run into ``MANIFEST.json``.
 
     ``versions[label]`` holds the writer facts and per-case hashes;
@@ -205,7 +216,13 @@ def _merge_manifest(path: str, label: str, report: dict, forward_dir) -> None:
         if entry.get(key) not in (None, report[key]):
             sys.exit(f"refusing: manifest {label}.{key}={entry[key]!r}, this run {report[key]!r}")
         entry[key] = report[key]
-    if "cases" in report:
+    if "cases" in report and add_only:
+        existing = entry.setdefault("cases", {})
+        clash = sorted(set(report["cases"]) & set(existing))
+        if clash:
+            sys.exit(f"refusing: {label} already records {clash}; shipped records are immutable")
+        existing.update(report["cases"])
+    elif "cases" in report:
         entry["cases"] = report["cases"]
     if forward_dir:
         writer = os.path.basename(os.path.normpath(forward_dir))
@@ -231,10 +248,23 @@ def main() -> int:
     ap.add_argument("--own", help="this version's fixtures, compared against (with --forward)")
     ap.add_argument("--label", help='this version\'s label in the manifest, e.g. "1.0"')
     ap.add_argument("--manifest", help="MANIFEST.json to merge this run's results into")
+    ap.add_argument(
+        "--cases",
+        help="comma-separated registry cases to build (default: all). With --manifest, "
+        "only these records are added to the version's entry, and an existing record "
+        "is refused rather than replaced: how a case added later is recorded for an "
+        "already-shipped version without touching its fixtures.",
+    )
     args = ap.parse_args()
 
     discopt, ser = _check_loaded_code(args.tree, args.expect_schema)
     reg = _load_registry()
+    selected = list(reg.CASES)
+    if args.cases:
+        selected = args.cases.split(",")
+        unknown = set(selected) - set(reg.CASES)
+        if unknown:
+            sys.exit(f"unknown case(s): {sorted(unknown)}")
     commit = subprocess.run(
         ["git", "-C", args.tree, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
     ).stdout.strip()
@@ -249,7 +279,7 @@ def main() -> int:
     if args.out:
         os.makedirs(args.out, exist_ok=True)
         cases: dict = {}
-        for name in reg.CASES:
+        for name in selected:
             try:
                 cases[name] = _write_case(ser, reg, name, args.out)
                 written += 1
@@ -295,7 +325,7 @@ def main() -> int:
     if args.manifest:
         if not args.label:
             sys.exit("--manifest needs --label")
-        _merge_manifest(args.manifest, args.label, report, args.forward)
+        _merge_manifest(args.manifest, args.label, report, args.forward, add_only=bool(args.cases))
     print(json.dumps(report, indent=1, sort_keys=True))
     print(f"cases written: {written}, unbuildable: {unbuildable}, forward cells: {forward}")
     return 0 if (written or forward) else 1

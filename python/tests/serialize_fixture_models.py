@@ -194,6 +194,46 @@ def registered_atom():
     return m, {}
 
 
+def logical_constraints():
+    """Propositional logic: every connective, a shared subformula, a cardinality.
+
+    Encoded from 1.5; every earlier writer refuses it (recorded as unbuildable).
+    """
+    import discopt.modeling as dm
+    from discopt.modeling.core import atmost, exactly, land, lnot, lor
+
+    m = dm.Model("logical_constraints")
+    Y = m.boolean("Y", shape=(4,))
+    z = m.boolean("z")
+    x = m.continuous("x", shape=(4,), lb=0.0, ub=10.0)
+    m.minimize(dm.sum(x) + 3 * Y.variable[0] - 2 * Y.variable[3] + z.variable)
+    for i in range(4):
+        m.subject_to(x[i] >= 2 * Y.variable[i], name=f"link{i}")
+    shared = Y[1] | ~Y[3]
+    m.logical(Y[0].implies(shared), name="imp")
+    m.logical(land(atmost(1, Y[0], Y[3]), lor(shared, Y[2])), name="card")
+    m.logical(Y[1].equivalent_to(lnot(Y[2]) & z), name="iff")
+    m.logical(exactly(1, [Y[1], Y[2]]))
+    return m, {}
+
+
+def complementarity_vector_lowered():
+    """A vector complementarity, lowered (GDP) on declaration, element by element.
+
+    The lowering records the rows it emitted; 1.5 writes their positions, and
+    earlier writers drop them (a reload reads ``rows=None``, "untracked").
+    """
+    import discopt.modeling as dm
+
+    m = dm.Model("complementarity_vector_lowered")
+    p = m.continuous("p", shape=(2,), lb=0.0, ub=10.0)
+    q = m.continuous("q", shape=(2,), lb=0.0, ub=10.0)
+    m.minimize(dm.sum((p - 1) ** 2) + dm.sum((q - 1) ** 2))
+    m.subject_to(p[0] + q[1] >= 0.5, name="mix")
+    m.complementarity(p, q, name="pq")
+    return m, {}
+
+
 #: name -> builder. Order is the manifest's order; never reorder or rename a case
 #: once a shipped version's fixtures exist for it (fixtures are immutable, §0.3.11).
 CASES = {
@@ -213,6 +253,9 @@ CASES = {
         parameters_and_start,
         decomposition_marks,
         registered_atom,
+        # Added with schema 1.5 (WP-3); recorded for every earlier version too.
+        logical_constraints,
+        complementarity_vector_lowered,
     )
 }
 

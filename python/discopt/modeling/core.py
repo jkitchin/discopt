@@ -6264,6 +6264,8 @@ class Model:
                 roots += [r.body for dd in c.disjuncts for r in dd]
             elif isinstance(c, _SOSConstraint):
                 roots += list(c.variables)
+            elif isinstance(c, _LogicalConstraint):
+                roots += _logical_leaves(c.expression)
         for rel in self._complementarities:
             roots += [getattr(rel, "f", None), getattr(rel, "g", None)]
         return roots
@@ -12279,6 +12281,32 @@ class LogicalExactly(LogicalExpression):
 class _LogicalConstraint:
     expression: LogicalExpression
     name: Optional[str] = None
+
+
+def _logical_leaves(expr: LogicalExpression) -> list:
+    """The variable expressions behind the ``BooleanVar`` leaves of *expr*.
+
+    Iterative: ``land(...)`` over many arguments is a left-deep chain.
+    """
+    leaves: list = []
+    stack: list = [expr]
+    seen: set[int] = set()
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, BooleanVar):
+            leaves.append(node.variable)
+        elif isinstance(node, (LogicalAnd, LogicalOr, LogicalEquivalent)):
+            stack += [node.left, node.right]
+        elif isinstance(node, LogicalImplies):
+            stack += [node.antecedent, node.consequent]
+        elif isinstance(node, LogicalNot):
+            stack.append(node.operand)
+        elif isinstance(node, (LogicalAtLeast, LogicalAtMost, LogicalExactly)):
+            stack += list(node.operands)
+    return leaves
 
 
 # Functional-style constructors for logical expressions

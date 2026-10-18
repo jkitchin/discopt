@@ -52,6 +52,7 @@ def _key(label: str) -> tuple:
 _WRITTEN_FROM = {
     (1, 3): "node atom tags",
     (1, 4): "state.nl_source",
+    (1, 5): "complementarity lowering rows",
 }
 
 
@@ -64,6 +65,10 @@ def _normalize(doc: dict, written_by: str) -> dict:
         # document (CI checks the tree out elsewhere); the digest identifies the
         # content and stays compared, as does the file name.
         source["path"] = pathlib.PurePath(source["path"]).name
+    if _key(written_by) < (1, 5) and doc.get("complementarities"):
+        # Before 1.5 a lowering's rows were not written; a reload reads them as
+        # untracked, which 1.5 writes as the two-element entry.
+        doc["complementarities"]["lowered"] = [e[:2] for e in doc["complementarities"]["lowered"]]
     if _key(written_by) < (1, 4):
         doc.get("state", {}).pop("nl_source", None)
     if _key(written_by) < (1, 3):
@@ -158,12 +163,20 @@ def test_unbuildable_cases_are_recorded_not_skipped():
                 unbuildable.add((version, case))
     # The generator records any exception as unbuildable, so a builder bug would
     # pass as a legitimate gap; pin the exact set.
-    assert unbuildable == {("1.0", "registered_atom")}, sorted(unbuildable)
+    # Logic is encoded from 1.5; every earlier writer refused it.
+    expected = {("1.0", "registered_atom")} | {
+        (v, "logical_constraints") for v in VERSIONS if _key(v) < (1, 5)
+    }
+    assert unbuildable == expected, sorted(unbuildable ^ expected)
     # register_function arrived in 1.1, so 1.0 cannot build the atom case.
     assert (
         "No module named 'discopt.operators'"
         in (MANIFEST["versions"]["1.0"]["cases"]["registered_atom"]["unbuildable"])
     )
+    for v in VERSIONS:
+        if _key(v) < (1, 5):
+            why = MANIFEST["versions"][v]["cases"]["logical_constraints"]["unbuildable"]
+            assert "propositional logic constraint" in why, (v, why)
 
 
 # ── backward: every old document loads into the model it describes ────────

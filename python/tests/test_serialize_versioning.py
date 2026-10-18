@@ -193,7 +193,7 @@ def test_unknown_node_kind_at_future_minor_names_the_upgrade():
 
 def test_unknown_row_kind_at_future_minor_names_the_upgrade():
     doc = _doc(FUTURE)
-    doc["rows"].append({"kind": "logical", "name": "l0"})
+    doc["rows"].append({"kind": "quantified", "name": "l0"})
     with pytest.raises(SerializationError, match=r"newer than this reader.*upgrade discopt"):
         loads(json.dumps(doc))
 
