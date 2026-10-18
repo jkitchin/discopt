@@ -1104,6 +1104,14 @@ def _retag_atoms(table: list[dict], built: list[Any], variables: list, params: l
 _REFUSED_RELATIONS: dict[str, tuple[str, str]] = {}
 
 
+_NESTING_REFUSAL = (
+    "cannot serialize: the model nests a disjunction in a Disjunct block "
+    "(Disjunct.add_disjunction / Disjunct.subject_to), which this format "
+    "version does not record (#1775 G1.2). Use pickle or Model.clone() "
+    "for same-version transport."
+)
+
+
 def _refuse_unsupported(model: Model) -> None:
     """Refuse, by name, anything this version cannot write faithfully."""
     for con in list(model._constraints):
@@ -1120,12 +1128,7 @@ def _refuse_unsupported(model: Model) -> None:
             type(con) is _DisjunctiveConstraint and con.parent_indicator is not None
         )
         if nested:
-            raise SerializationError(
-                "cannot serialize: the model nests a disjunction in a Disjunct block "
-                "(Disjunct.add_disjunction / Disjunct.subject_to), which this format "
-                "version does not record (#1775 G1.2). Use pickle or Model.clone() "
-                "for same-version transport."
-            )
+            raise SerializationError(_NESTING_REFUSAL)
     # #1430: a disjunction built by ``Model.disjunction()``/``make_disjunct()`` and
     # never attached is not IN the model, so a document faithfully records a model
     # without it -- and the reloaded model carries no record that anything was
@@ -1135,7 +1138,26 @@ def _refuse_unsupported(model: Model) -> None:
     # for a worker, so a forgotten disjunction would be refused at ``workers=1`` and
     # silently dropped at ``workers=3`` -- the worker-count equivalence that module
     # documents, broken by a guard that only ran on one arm.
+    # #1790: a nesting whose inner disjuncts are all empty tags no row with a
+    # parent, so the row scan above misses it; the block-disjunction record exists
+    # exactly when nesting is involved, so refuse on it with the same message.
+    if model.__dict__.get("_gdp_block_members"):
+        raise SerializationError(_NESTING_REFUSAL)
     model._reject_unattached_gdp_blocks()
+    # #1790: ``Disjunct.variable`` marks a column local to its block, a fact kept
+    # only on the Disjunct object, which this format does not record. Written as
+    # an ordinary column it would reload without the mark, and ``validate`` would
+    # stop refusing a use of it outside the block -- refuse instead.
+    local = [
+        d for d in model._gdp_factory_disjuncts if getattr(d, "_attached", False) and d._local_vars
+    ]
+    if local:
+        raise SerializationError(
+            f"cannot serialize: disjunct {local[0].name!r} declares local variables "
+            "(Disjunct.variable), which this format version does not record (#1775 "
+            "G1.2). Declare them with Model.continuous (or binary/integer) to "
+            "serialize, or use pickle or Model.clone() for same-version transport."
+        )
     _refuse_unclassified_attributes(model)
 
 
