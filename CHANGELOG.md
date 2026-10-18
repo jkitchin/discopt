@@ -12,6 +12,21 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **`solver="scip"`: hand the whole model to SCIP (#1784; `pip install discopt[scip]`).**
+  Like `solver="gurobi"`, this bypasses discopt's own solvers. Unlike it, it
+  accepts general MINLP models. The expression DAG is translated in memory into
+  PySCIPOpt expressions, with no `.nl` file and no subprocess. Vectorised
+  constraints, fast-API rows and disjunctions are supported; disjunctions are
+  lowered with `gdp_method` first. A function SCIP cannot express exactly
+  (`atan`, `erf`, `min`/`max`, `dm.custom`) raises `ScipUnsupportedError`; it
+  is never approximated. **Nothing the route returns is certified**: a SCIP
+  `optimal` is reported as `status="feasible"`, and a SCIP `infeasible` or
+  `unbounded` as `status="unknown"`, all with `gap_certified=False` and
+  SCIP's bound tagged `bound_source="external_solver"` (new). On MINLPLib
+  `ex1252a`, SCIP's presolve certified a bound past the true optimum. SCIP's
+  point is re-verified by discopt. An answer resting on SCIP's numerical limits
+  (a pole, a value past `numerics/hugeval`) carries no bound.
+
 - **`dm.sum` folds per-element linear sums (#1712; `DISCOPT_SUM_CANONICAL=0` opts out).**
   `dm.sum(c[i] * x[i] for i ...)` builds one Python node per term, and every
   solver pass walks each one. Now the terms that name every entry of a variable
