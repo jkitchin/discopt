@@ -23323,6 +23323,135 @@ def _pounce_row_equilibration(evaluator, x0: np.ndarray, options: Optional[dict]
     return _RowEquilibratedEvaluator.wrap(evaluator, np.asarray(x0, dtype=np.float64))
 
 
+#: A POUNCE ``Solve_Succeeded`` whose final barrier parameter AND unscaled
+#: complementarity both exceed this multiple of ``tol`` stopped part-way along the
+#: barrier path (#1768). Converged solves end at POUNCE's barrier floor: across the
+#: 34 COPS 3.0 runs (17 models, COPS and cold start) the final barrier parameter
+#: was 9.09e-10 or 2.51e-9 at ``tol = 1e-8``. The failing chain ended at 1.84e-6,
+#: the barrier value one update before 2.51e-9 (``1.84e-6 ** 1.5``).
+_POUNCE_MIDPATH_FACTOR = 10.0
+
+#: The least time budget (s) worth a mid-path continuation (#1768). With less left
+#: the first point is kept and reported ``local_limit``.
+_POUNCE_MIDPATH_MIN_CONTINUATION_TIME = 0.05
+
+
+def _pounce_midpath(nlp_result, tol: float) -> bool:
+    """POUNCE reported success with a live barrier term (#1768).
+
+    Its scaled convergence test divides the complementarity by the mean multiplier
+    over 100 (Ipopt's ``s_c``); multipliers of ``1e9`` let it pass one barrier
+    update early, leaving every inequality slack by ``mu / lambda``. A model with
+    no active inequality has complementarity 0, so a large final barrier
+    parameter alone is not the signature: COPS ``channel`` (equalities only)
+    ends at 1.84e-6 with complementarity 0 and is converged.
+    """
+    if nlp_result.raw_status != 0 or not nlp_result.kkt:
+        return False
+    mu = nlp_result.kkt.get("barrier_parameter")
+    compl = nlp_result.kkt.get("complementarity_unscaled")
+    if mu is None or compl is None:
+        return False
+    limit = _POUNCE_MIDPATH_FACTOR * tol
+    return float(mu) > limit and float(compl) > limit
+
+
+def _pounce_point_quality(evaluator, x: np.ndarray) -> tuple[float, float]:
+    """``(max violation, objective)`` of ``x`` on ``evaluator``'s original rows.
+
+    The violation is the largest amount by which a constraint row leaves
+    ``[cl, cu]`` or a column leaves its box, in the model's units (``evaluator``
+    must be the pre-row-scaling one). The objective is the evaluator's, which is
+    always minimized.
+    """
+    from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
+
+    x = np.asarray(x, dtype=np.float64)
+    viol = 0.0
+    if evaluator.n_constraints > 0:
+        g = np.asarray(evaluator.evaluate_constraints(x), dtype=np.float64)
+        cl, cu = _infer_constraint_bounds(evaluator)
+        viol = float(np.max(np.maximum(cl - g, 0.0) + np.maximum(g - cu, 0.0)))
+    lb, ub = evaluator.variable_bounds
+    box = np.maximum(np.asarray(lb, dtype=np.float64) - x, 0.0) + np.maximum(
+        x - np.asarray(ub, dtype=np.float64), 0.0
+    )
+    if box.size:
+        viol = max(viol, float(np.max(box)))
+    return viol, float(evaluator.evaluate_objective(x))
+
+
+def _pounce_midpath_continuation(
+    evaluator, first, solve_nlp_pounce, opts: dict, solve_kwargs: dict, options: Optional[dict]
+):
+    """Continue a mid-path POUNCE solve from its own point, rows rescaled there.
+
+    Returns ``(result, converged)``. The rows are equilibrated at the returned
+    point, where their gradients are informative (at the box-midpoint start of
+    the chain every link gradient is 0, so :func:`_pounce_row_equilibration`
+    could not scale them), and POUNCE restarts from the point, its multipliers
+    and its barrier parameter. Measured on the chain, ``n = 20,000``, cold start:
+    the first solve stopped at barrier 1.84e-6 and -6053.750612; the continuation
+    took 2 iterations (1.5 s) to -6053.787460 with every link within 1e-8 of
+    ``L``, the point the straight-line start reaches directly.
+
+    The continuation is adopted when POUNCE returns a point from it with code 0,
+    or with code 1 (acceptable level) only when that point is no less feasible on
+    the original rows and no worse in objective than the first
+    (:func:`_pounce_point_quality`); ``converged`` is True only when it ends with
+    code 0 off the mid-path signature. When the
+    rows cannot be rescaled (no row has a gradient below 1 at the point, the
+    caller fixed ``nlp_scaling_method``, or ``DISCOPT_POUNCE_ROW_EQUILIBRATE=0``)
+    or the continuation fails, the first result is returned unconverged.
+    """
+    import pounce
+
+    x = np.asarray(first.x, dtype=np.float64)
+    scaled = _pounce_row_equilibration(evaluator, x, options)
+    if scaled is None or first.multipliers is None:
+        return first, False
+    warm = pounce.WarmStart(
+        x=x,
+        lagrange=np.asarray(first.multipliers, dtype=np.float64) / scaled._s,
+        zl=first.bound_multipliers_lower,
+        zu=first.bound_multipliers_upper,
+        mu=float((first.kkt or {})["barrier_parameter"]),
+    )
+    second = solve_nlp_pounce(scaled, x, options=opts, warm_start=warm, **solve_kwargs)
+    if second.raw_status not in (0, _IPOPT_SOLVED_TO_ACCEPTABLE) or second.x is None:
+        logger.info(
+            "solver='pounce': the mid-path continuation returned code %s; keeping the "
+            "first point (#1768).",
+            second.raw_status,
+        )
+        return first, False
+    if second.raw_status == _IPOPT_SOLVED_TO_ACCEPTABLE:
+        # Code 1 met only the *acceptable* tolerances (constraint violation 1e-2 by
+        # default), so it can trade a nearly-feasible first point for a worse one.
+        # Adopt it only when it is no less feasible on the original rows and no
+        # worse in objective (the evaluator always minimizes; a MAXIMIZE objective
+        # is negated); either way the result stays unconverged -> local_limit.
+        x2 = np.asarray(second.x, dtype=np.float64)
+        v1, f1 = _pounce_point_quality(evaluator, x)
+        v2, f2 = _pounce_point_quality(evaluator, x2)
+        if not (np.isfinite(v2) and np.isfinite(f2) and v2 <= v1 and f2 <= f1):
+            logger.info(
+                "solver='pounce': the mid-path continuation ended at the acceptable "
+                "level (code 1) with max violation %.3g vs %.3g and objective %.10g vs "
+                "%.10g; keeping the first point (#1768).",
+                v2,
+                v1,
+                f2,
+                f1,
+            )
+            return first, False
+    second.multipliers = scaled.unscale_multipliers(second.multipliers)
+    second.iterations += first.iterations
+    second.wall_time += first.wall_time
+    tol = float(opts.get("tol", 1e-8))
+    return second, second.raw_status == 0 and not _pounce_midpath(second, tol)
+
+
 def _solve_continuous(
     model: Model,
     time_limit: float,
@@ -23337,6 +23466,7 @@ def _solve_continuous(
     raw_status_out: Optional[list] = None,
     pounce_scaling: Optional[tuple[float, Optional[np.ndarray]]] = None,
     equilibrate_rows: bool = False,
+    midpath_out: Optional[list] = None,
 ) -> SolveResult:
     """Solve a purely continuous model directly with NLP solver (no B&B).
 
@@ -23350,7 +23480,11 @@ def _solve_continuous(
     already resolved to ``(obj_scaling, x_scaling)`` over the flat columns.
     ``equilibrate_rows`` hands POUNCE the constraint rows scaled up to unit
     gradient at the start point (#1768, see :func:`_pounce_row_equilibration`);
-    only ``solver="pounce"`` passes it.
+    only ``solver="pounce"`` passes it. With it, a POUNCE success that stopped
+    part-way along the barrier path (:func:`_pounce_midpath`) is continued once
+    from its own point (:func:`_pounce_midpath_continuation`); ``midpath_out``,
+    when a list is passed, receives ``True`` when the returned point still
+    carries that signature, i.e. it is not an established stationary point.
 
     ``warm_start`` is the dual half of ``Model.solve(warm_start=...)`` (#1247):
     ``{"x", "constraint_duals", "bound_duals_lower", "bound_duals_upper",
@@ -23505,6 +23639,7 @@ def _solve_continuous(
             )
 
     row_scaled = None
+    unscaled_evaluator = backend_evaluator
     if equilibrate_rows and nlp_solver == "pounce":
         row_scaled = _pounce_row_equilibration(backend_evaluator, x0, ipopt_options)
         if row_scaled is not None:
@@ -23543,6 +23678,42 @@ def _solve_continuous(
         # Every judgement of the point below (duals, certificate, verify) is made
         # on the original rows, in the model's units.
         nlp_result.multipliers = row_scaled.unscale_multipliers(nlp_result.multipliers)
+    if (
+        equilibrate_rows
+        and nlp_solver == "pounce"
+        and _pounce_midpath(nlp_result, float(opts.get("tol", 1e-8)))
+    ):
+        logger.info(
+            "solver='pounce': POUNCE reported success with barrier parameter %.3g and "
+            "complementarity %.3g, both above %g x tol; continuing from that point with "
+            "the rows rescaled there (#1768).",
+            (nlp_result.kkt or {})["barrier_parameter"],
+            (nlp_result.kkt or {})["complementarity_unscaled"],
+            _POUNCE_MIDPATH_FACTOR,
+        )
+        converged = False
+        remaining = time_limit - (time.perf_counter() - t_start)
+        # Below the floor there is no budget for a meaningful continuation; the
+        # first point stands, unconverged (local_limit). The continuation gets
+        # exactly ``remaining`` -- no padding past the caller's deadline.
+        if remaining >= _POUNCE_MIDPATH_MIN_CONTINUATION_TIME:
+            t_cont = time.perf_counter()
+            nlp_result, converged = _pounce_midpath_continuation(
+                unscaled_evaluator,
+                nlp_result,
+                solve_nlp_pounce,
+                {**opts, "max_wall_time": remaining},
+                {
+                    "constraint_bounds": constraint_bounds,
+                    "block_structure": pounce_block_structure,
+                    "solve_report": True,
+                    "problem_scaling": pounce_scaling,
+                },
+                ipopt_options,
+            )
+            jax_time += time.perf_counter() - t_cont
+        if midpath_out is not None:
+            midpath_out.append(not converged)
     if raw_status_out is not None:
         raw_status_out.append(nlp_result.raw_status)
 
@@ -24027,7 +24198,10 @@ def _solve_pounce_route(
     * **QP** whose Hessian :func:`convex_ipm_pounce.certify_psd` proves PSD ->
       the same engine's ``qp-ipm``;
     * everything else continuous -- a QP not proved PSD, a QCQP, an NLP -> the
-      filter line-search NLP interior-point method, once.
+      filter line-search NLP interior-point method, once. When POUNCE reports
+      success one barrier update early (:func:`_pounce_midpath`), it is continued
+      once from its own point with the rows rescaled there (#1768); a
+      continuation that does not finish the path reports ``local_limit``.
 
     Convexity of a QP is proved by discopt, not taken from POUNCE's own PSD check:
     that check scales its tolerance by ``max|Q_ij|`` and ignores the box, so it
@@ -24287,8 +24461,10 @@ def _solve_pounce_route(
             result.solver_stats = stats
             return result
 
-    # NLP arm: the filter line-search IPM, once, over the declared box.
+    # NLP arm: the filter line-search IPM over the declared box -- once, plus at
+    # most one continuation from its own point when it stopped mid-path (#1768).
     raw_status: list = []
+    midpath: list = []
     result = _solve_continuous(
         model,
         _remaining(),
@@ -24301,9 +24477,16 @@ def _solve_pounce_route(
         raw_status_out=raw_status,
         pounce_scaling=resolved_scaling,
         equilibrate_rows=True,
+        midpath_out=midpath,
     )
     result.wall_time = time.perf_counter() - t_start
-    if result.status == "optimal" and raw_status and raw_status[0] == _IPOPT_SOLVED_TO_ACCEPTABLE:
+    if result.status == "optimal" and midpath and midpath[0]:
+        # #1768: POUNCE's scaled test passed one barrier update early (the
+        # multipliers inflate its complementarity scaling), and the continuation
+        # did not finish the path. Every inequality is slack by ``mu / lambda``:
+        # not an established stationary point, so not ``local_optimal``.
+        result.status = "local_limit"
+    elif result.status == "optimal" and raw_status and raw_status[0] == _IPOPT_SOLVED_TO_ACCEPTABLE:
         # #1618 B-05b: Ipopt/POUNCE code 1 (``Solved_To_Acceptable_Level``) met only
         # the *acceptable* tolerances, whose dual-infeasibility default is 1e10 -- a
         # point with an unscaled dual infeasibility of 1.6e4 passed. That is not an
