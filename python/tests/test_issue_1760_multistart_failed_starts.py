@@ -214,3 +214,12 @@ def test_subnlp_status_gate_opt_out(monkeypatch):
     m = _subnlp_model()
     out = PH.subnlp(m, np.array([2.0, 0.0]), backend=_fake_backend([2.0, 0.0], SolveStatus.ERROR))
     assert out is None
+
+
+def test_subnlp_verify_any_status_is_on_by_default(monkeypatch):
+    import discopt._relax.primal_heuristics as PH
+
+    monkeypatch.delenv("DISCOPT_SUBNLP_VERIFY_ANY_STATUS", raising=False)
+    assert PH._subnlp_verify_any_status()
+    monkeypatch.setenv("DISCOPT_SUBNLP_VERIFY_ANY_STATUS", "0")
+    assert not PH._subnlp_verify_any_status()
