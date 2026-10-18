@@ -1,0 +1,161 @@
+{
+ "schema": "discopt.model/1.5",
+ "discopt": "0.9.1.dev0",
+ "name": "with_result",
+ "variables": [
+  {
+   "name": "a",
+   "type": "continuous",
+   "shape": [],
+   "lb": 0.1,
+   "ub": 10.0,
+   "bound_stack": []
+  },
+  {
+   "name": "b",
+   "type": "continuous",
+   "shape": [],
+   "lb": 0.1,
+   "ub": 5.0,
+   "bound_stack": []
+  }
+ ],
+ "parameters": [],
+ "nodes": [
+  {
+   "op": "var",
+   "ref": 0
+  },
+  {
+   "op": "const",
+   "v": 2.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 0,
+   "b": 1
+  },
+  {
+   "op": "binop",
+   "o": "**",
+   "a": 2,
+   "b": 1
+  },
+  {
+   "op": "var",
+   "ref": 1
+  },
+  {
+   "op": "const",
+   "v": 1.5
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 4,
+   "b": 5
+  },
+  {
+   "op": "binop",
+   "o": "**",
+   "a": 6,
+   "b": 1
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 3,
+   "b": 7
+  },
+  {
+   "op": "const",
+   "v": 0.1
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 9,
+   "b": 0
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 10,
+   "b": 4
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 8,
+   "b": 11
+  }
+ ],
+ "objective": {
+  "sense": "minimize",
+  "expr": 12,
+  "placeholder": false
+ },
+ "builder_objective": null,
+ "rows": [],
+ "builder_blocks": [],
+ "complementarities": null,
+ "state": {
+  "_aux_counter": 0,
+  "_decomp_stages": {},
+  "_decomp_blocks": {},
+  "_zero_spanning_factor_auxes": [],
+  "_implied_integer_auxes": [],
+  "_free_by_construction": [],
+  "_atan2_preconditions": [],
+  "_piecewise_domains": [],
+  "_coupling_keys": {
+   "names": [],
+   "row_indices": []
+  },
+  "_sets": [],
+  "_simplex_lowerings": [],
+  "_block_labels_var": {},
+  "_block_labels_con": {
+   "names": {},
+   "rows": []
+  }
+ },
+ "initial_point": [],
+ "solution": {
+  "schema_version": 3,
+  "status": "optimal",
+  "objective": 0.28508771929824567,
+  "bound": 0.2850877157617536,
+  "gap": 0.0,
+  "wall_time": 0.08497441653162241,
+  "node_count": 0,
+  "mip_count": 0,
+  "rust_time": 0.011233999859541655,
+  "jax_time": 0.0,
+  "python_time": 0.07374041667208076,
+  "convex_fast_path": true,
+  "nlp_bb": false,
+  "gap_certified": true,
+  "bound_valid": true,
+  "bound_source": "convex_proof",
+  "subnlp_calls": 0,
+  "subnlp_feasible": 0,
+  "subnlp_incumbent_updates": 0,
+  "algorithm_route": "convex-qp: discopt convex QP solve",
+  "error": null,
+  "termination": null,
+  "x": {
+   "a": 1.9298245619036931,
+   "b": 1.4035087725179218
+  },
+  "bound_duals_lower": {
+   "a": 1.0591781054859035e-09,
+   "b": 1.2262127722508323e-09
+  },
+  "bound_duals_upper": {
+   "a": 0.0,
+   "b": 0.0
+  }
+ }
+}
