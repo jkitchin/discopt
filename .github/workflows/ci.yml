@@ -296,6 +296,7 @@ jobs:
           uv pip install \
             jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml sympy \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
+            pyscipopt \
             pytest pytest-timeout pytest-xdist hypothesis
           maturin develop --release
       - name: Run pytest (PR-fast, parallel)
@@ -727,7 +728,7 @@ jobs:
           uv pip install \
             jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
-            sympy pyomo litellm equinox optax onnx onnxruntime xgboost lightgbm \
+            sympy pyomo litellm equinox optax onnx onnxruntime xgboost lightgbm pyscipopt \
             pytest pytest-timeout pytest-xdist pytest-cov hypothesis
           maturin develop --release
       # --cov-fail-under restored to 85 (#87) after the post-AMP-merge

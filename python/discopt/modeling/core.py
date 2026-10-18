@@ -4365,7 +4365,14 @@ _NON_GAP_CERTIFICATE_STATUSES = frozenset({"infeasible"})
 #: * ``"root_relaxation"`` -- a rigorous bound proved on the root box alone,
 #:   used when the tree's own bound had to be discarded as tainted.
 #: * ``"lp_dual"`` -- a dual-feasible point of an LP relaxation (weak duality).
-BOUND_SOURCES = frozenset({"bnb_tree", "convex_proof", "root_relaxation", "lp_dual"})
+#: * ``"external_solver"`` -- a dual bound an external solver reported and discopt
+#:   did not prove (``solver="scip"``, #1784). It never accompanies
+#:   ``bound_valid=True``: SCIP's presolve was measured certifying a bound past
+#:   the true optimum of MINLPLib ``ex1252a`` on a faithfully translated model,
+#:   so the number is information, not a certificate.
+BOUND_SOURCES = frozenset(
+    {"bnb_tree", "convex_proof", "root_relaxation", "lp_dual", "external_solver"}
+)
 
 #: Statuses that make no claim about the GLOBAL problem (#1148). Imported from
 #: ``discopt.status`` -- a leaf module with no imports of its own -- rather than
@@ -4687,7 +4694,8 @@ class SolveResult:
     bound_source : str or None
         Where a valid bound came from — one of
         :data:`~discopt.modeling.core.BOUND_SOURCES` (``"bnb_tree"``,
-        ``"convex_proof"``, ``"root_relaxation"``, ``"lp_dual"``) — or ``None``
+        ``"convex_proof"``, ``"root_relaxation"``, ``"lp_dual"``, and
+        ``"external_solver"`` for an unproved bound from ``solver="scip"``) — or ``None``
         when there is no bound, or when the producer asserted validity without
         naming a provenance. Diagnostic: ``bound_valid`` is the safety-critical
         flag; this says which machinery earned it.
@@ -9109,6 +9117,21 @@ class Model:
             classes raise ``NotImplementedError`` instead of silently falling
             back to another backend. Pass Gurobi parameters through
             ``gurobi_options={...}``.
+            Use ``solver="scip"`` (``pip install discopt[scip]``) to hand the
+            whole model to SCIP through PySCIPOpt, bypassing discopt's own
+            solvers. Unlike ``"gurobi"`` it accepts general nonlinear models:
+            the expression DAG is translated in memory into SCIP expressions,
+            and anything without an exact SCIP spelling (``atan``, ``erf``,
+            ``min``/``max``, ``dm.custom``, a variable exponent whose base is
+            not provably positive) raises ``ScipUnsupportedError`` instead of
+            being approximated. Pass SCIP parameters through
+            ``scip_options={...}``, e.g. ``{"limits/nodes": 1000}``.
+            SCIP's claims are reported but **never certified**: an optimum is
+            ``status="feasible"`` and an infeasibility or unboundedness claim
+            is ``status="unknown"``, both with ``gap_certified=False``, with
+            SCIP's dual bound kept as information
+            (``bound_source="external_solver"``) and SCIP's own status in
+            ``termination``.
             Use ``solver="mip-nlp"`` to select the MIP-NLP decomposition
             family. Current implemented ``mip_nlp_method`` values are ``"oa"``,
             ``"ecp"``, ``"fp"``, ``"goa"``, and ``"lp_nlp_bb"``; ``"roa"``
