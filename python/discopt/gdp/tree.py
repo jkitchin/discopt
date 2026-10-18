@@ -53,9 +53,11 @@ Kind = Literal["either_or", "add_disjunction", "implication"]
 
 @dataclass(frozen=True)
 class Origin:
-    """Where a root disjunction came from: the index of its first row in
+    """Where a disjunction came from: the index of its first row in
     ``model._constraints`` and the source object (the ``_DisjunctiveConstraint``,
-    or the ``add_disjunction`` key / first ``_IndicatorConstraint``)."""
+    or the ``add_disjunction`` key / first ``_IndicatorConstraint``). A
+    disjunction nested inside an ``either_or`` disjunct has no row of its own:
+    its index is ``-1`` and its source is the nested ``_DisjunctiveConstraint``."""
 
     index: int
     source: Any
@@ -149,7 +151,7 @@ def gdp_tree(model: Model) -> GDPTree:
             )
             for item in items:
                 if isinstance(item, _DisjunctiveConstraint):
-                    d.children.append(from_either_or(item, d, None))
+                    d.children.append(from_either_or(item, d, Origin(-1, item)))
                 elif isinstance(item, Constraint):
                     d.rows.append(item)
                 else:
