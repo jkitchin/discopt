@@ -87,3 +87,61 @@ def test_node_nlp_without_a_record_retries_as_before(monkeypatch):
             _evaluator(), np.full(3, 1.0), lb, ub, None, {"nlp_native": False}, "pounce"
         )
     assert len(calls) == 6
+
+
+# ---------------------------------------------------------------------------
+# #1760, part 2: the disjunct-configuration constructor runs before the generic
+# root heuristics. On the II.B flowsheet the pump, its NLP seed, integer local
+# search and diving spent 2.0 -> 16.9 s finding nothing; the constructor then
+# found an incumbent on its second sub-NLP.
+
+
+def _gdp_model():
+    m = dm.Model("gdp1760")
+    x = m.continuous("x", lb=0.1, ub=4)
+    y = m.continuous("y", lb=0.1, ub=4)
+    V = [m.continuous(f"V{k}", lb=0, ub=50) for k in range(3)]
+    Y = m.boolean("Y", shape=3)
+    m.either_or(
+        [
+            [V[0] >= 3 * x * dm.exp(0.5 * x), Y.variable[0] == 1],
+            [V[1] >= 2 * y**2 + x, Y.variable[1] == 1],
+            [V[2] >= x * y + y, Y.variable[2] == 1],
+        ],
+        name="d",
+    )
+    for k in range(3):
+        m.subject_to(V[k] <= 50 * Y.variable[k])
+    m.exactly(1, [Y.variable[i] for i in range(3)])
+    m.subject_to(x * y >= 1.5)
+    m.minimize(sum(4 * V[k] ** 0.6 for k in range(3)) + 10 * Y.variable[0] - x - y)
+    return m
+
+
+def _heuristic_order(monkeypatch, flag):
+    import discopt._relax.primal_heuristics as PH
+
+    monkeypatch.setenv("DISCOPT_GDP_CONFIG_FIRST", flag)
+    order: list[str] = []
+    for name in ("feasibility_pump", "one_hot_config_subnlp"):
+        real = getattr(PH, name)
+
+        def spy(*a, _real=real, _name=name, **k):
+            order.append(_name)
+            return _real(*a, **k)
+
+        monkeypatch.setattr(PH, name, spy)
+    r = _gdp_model().solve(time_limit=30)
+    assert r.objective is not None
+    return order
+
+
+def test_gdp_config_constructor_runs_before_the_pump(monkeypatch):
+    order = _heuristic_order(monkeypatch, "1")
+    assert order and order[0] == "one_hot_config_subnlp", order
+    assert order.count("one_hot_config_subnlp") == 1, "the constructor ran twice"
+
+
+def test_gdp_config_first_opt_out_keeps_the_legacy_order(monkeypatch):
+    order = _heuristic_order(monkeypatch, "0")
+    assert order and order[0] == "feasibility_pump", order

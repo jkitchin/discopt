@@ -775,6 +775,27 @@ _GDP_CONFIG_BUDGET_FRACTION = 0.15
 _GDP_CONFIG_BUDGET_CAP_S = 15.0
 
 
+def _gdp_config_first_enabled() -> bool:
+    """Whether the root disjunct-configuration constructor runs BEFORE the generic
+    root primal heuristics (#1760; ``DISCOPT_GDP_CONFIG_FIRST``).
+
+    The constructor (:func:`_gdp_config_primal_enabled`) only runs while no
+    incumbent exists, but it was scheduled after the feasibility pump, its
+    NLP-relaxation seed, integer local search and diving -- generic heuristics that
+    round each indicator independently and so can fix a disjunction to zero or two
+    active disjuncts, which the model forbids. Measured on the optimization-book
+    II.B process-synthesis GDP (30 s): those four spent 2.0 -> 16.9 s and found
+    nothing, then the constructor found an incumbent on its second sub-NLP, 0.2 s
+    after it started.
+    """
+    return os.environ.get("DISCOPT_GDP_CONFIG_FIRST", "0").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
 def _gdp_config_deadline(outer_deadline: float, now: float) -> float:
     """Deadline for the #823 constructor: a bounded share of what is left.
 
@@ -17053,6 +17074,7 @@ def solve_model(
     # --- Feasibility pump at root ---
     # Try to find an integer-feasible incumbent before B&B starts.
     _fp_ran = False
+    _gdp_cfg_ran = False  # #1760: the root disjunct-configuration constructor runs once
 
     # Re-attach the captured modeler start (by name) to the post-reform working
     # model so ``_gams_initial_seed`` can build a root subnlp seed from it. Only
@@ -19149,6 +19171,84 @@ def solve_model(
             _denom = max(abs(_ub), abs(_batch_relax_lb), 1e-10)
             return bool(_abs_gap / _denom <= gap_tolerance)
 
+        # --- Root disjunct-configuration primal (#823/#993; #1760 schedules it) ---
+        # The enumeration below self-gates off above 4 binaries, so on a big-M GDP
+        # (6..138 indicators across the GDPlib small set) the root disjunct cover
+        # never runs there; and plain rounding can fix a disjunction to zero-or-two
+        # active disjuncts, which the model forbids, so its sub-NLP is infeasible.
+        # This selects one disjunct per ``sum_k y_k == 1`` row instead. Runs only
+        # while NO incumbent exists -- it is a constructor, not an improver -- and at
+        # most once per solve. Where it runs is ``_gdp_config_first_enabled()``.
+        def _root_gdp_config_primal() -> None:
+            nonlocal _gdp_cfg_ran, _subnlp_calls, _subnlp_feasible, _subnlp_incumbent_updates
+            if not (
+                iteration == 0
+                and not _gdp_cfg_ran
+                and _gdp_config_primal_enabled()
+                and _subnlp_backend_fn is not None
+                and tree.incumbent() is None
+                and not _root_optimum_proven()
+                and _root_heur_nlp_entry_ok(evaluator)
+            ):
+                return
+            _gdp_cfg_ran = True
+            from discopt._relax.primal_heuristics import one_hot_config_subnlp
+
+            logger.info("GDP config subNLP (root): entering disjunct selection")
+
+            # Seed from the best root relaxation point when one produced a usable
+            # bound, else the bound midpoint. Computed here rather than reused from
+            # the enumeration above, which may not have run at all.
+            _cfg_cands = [
+                (i, float(result_lbs[i]))
+                for i in range(n_batch)
+                if result_lbs[i] < _SENTINEL_THRESHOLD and np.isfinite(result_lbs[i])
+            ]
+            _cfg_cands.sort(key=lambda t: t[1])
+            _cfg_seed = (
+                result_sols[_cfg_cands[0][0]]
+                if _cfg_cands
+                else 0.5 * np.add(*_clip_start_box(lb, ub))
+            )
+            _cfg_stats: dict = {}
+            try:
+                _cfg_results = one_hot_config_subnlp(
+                    model,
+                    _cfg_seed,
+                    backend=_subnlp_backend_fn,
+                    nlp_options=subnlp_options,
+                    evaluator=evaluator,
+                    deadline=_gdp_config_deadline(_deadline, time.perf_counter()),
+                    stats=_cfg_stats,
+                )
+            except Exception as _e:
+                logger.debug("one_hot_config_subnlp raised: %s", _e)
+                _cfg_results = []
+            # Log unconditionally, including the zero case. Without this, a run
+            # showing no change is ambiguous between "the constructor ran and
+            # found nothing" and "the gate never opened" — the §6 vacuity trap,
+            # where an instrument that measured nothing reads as a clean result.
+            logger.info(
+                "GDP config subNLP: %d sub-NLP solve(s), %d feasible point(s)",
+                int(_cfg_stats.get("attempted", 0)),
+                len(_cfg_results),
+            )
+            # #1062: count the sub-NLPs the constructor SOLVED, not the ones that
+            # came back feasible. ``len(_cfg_results)`` conflated the two, so a
+            # model where every configuration is infeasible reported
+            # ``subnlp_calls=0`` -- indistinguishable from the heuristic never
+            # running, which is the exact reading that named this issue.
+            _subnlp_calls += int(_cfg_stats.get("attempted", 0))
+            for _x_cf, _obj_cf in _cfg_results:
+                _subnlp_feasible += 1
+                if np.isfinite(_obj_cf) and _obj_cf < _SENTINEL_THRESHOLD:
+                    if _inject_incumbent(np.asarray(_x_cf).copy(), float(_obj_cf)):
+                        _subnlp_incumbent_updates += 1
+                        logger.info("GDP config subNLP incumbent: obj=%.6g", _obj_cf)
+
+        if _gdp_config_first_enabled():
+            _root_gdp_config_primal()
+
         # --- Feasibility pump after root node ---
         if iteration == 0 and not _fp_ran:
             _fp_ran = True
@@ -19661,74 +19761,8 @@ def solve_model(
                 _enum_improved = _enum_inc1 is not None and float(_enum_inc1[1]) < _enum_obj0 - 1e-9
                 _record_improver(_HEUR_COST["enumerate"], _enum_improved)
 
-        # --- Root disjunct-configuration primal (#823, flag-gated, default OFF) ---
-        # The enumeration above self-gates off above 4 binaries, so on a big-M GDP
-        # (6..138 indicators across the GDPlib small set) the root disjunct cover
-        # never runs; and plain rounding can fix a disjunction to zero-or-two
-        # active disjuncts, which the model forbids, so its sub-NLP is infeasible.
-        # This selects one disjunct per ``sum_k y_k == 1`` row instead. Runs only
-        # while NO incumbent exists — it is a constructor, not an improver.
-        if (
-            iteration == 0
-            and _gdp_config_primal_enabled()
-            and _subnlp_backend_fn is not None
-            and tree.incumbent() is None
-            and not _root_optimum_proven()
-            and _root_heur_nlp_entry_ok(evaluator)
-        ):
-            from discopt._relax.primal_heuristics import one_hot_config_subnlp
-
-            logger.info("GDP config subNLP (root): entering disjunct selection")
-
-            # Seed from the best root relaxation point when one produced a usable
-            # bound, else the bound midpoint. Computed here rather than reused from
-            # the enumeration above, which may not have run at all.
-            _cfg_cands = [
-                (i, float(result_lbs[i]))
-                for i in range(n_batch)
-                if result_lbs[i] < _SENTINEL_THRESHOLD and np.isfinite(result_lbs[i])
-            ]
-            _cfg_cands.sort(key=lambda t: t[1])
-            _cfg_seed = (
-                result_sols[_cfg_cands[0][0]]
-                if _cfg_cands
-                else 0.5 * np.add(*_clip_start_box(lb, ub))
-            )
-            _cfg_stats: dict = {}
-            try:
-                _cfg_results = one_hot_config_subnlp(
-                    model,
-                    _cfg_seed,
-                    backend=_subnlp_backend_fn,
-                    nlp_options=subnlp_options,
-                    evaluator=evaluator,
-                    deadline=_gdp_config_deadline(_deadline, time.perf_counter()),
-                    stats=_cfg_stats,
-                )
-            except Exception as _e:
-                logger.debug("one_hot_config_subnlp raised: %s", _e)
-                _cfg_results = []
-            # Log unconditionally, including the zero case. Without this, a run
-            # showing no change is ambiguous between "the constructor ran and
-            # found nothing" and "the gate never opened" — the §6 vacuity trap,
-            # where an instrument that measured nothing reads as a clean result.
-            logger.info(
-                "GDP config subNLP: %d sub-NLP solve(s), %d feasible point(s)",
-                int(_cfg_stats.get("attempted", 0)),
-                len(_cfg_results),
-            )
-            # #1062: count the sub-NLPs the constructor SOLVED, not the ones that
-            # came back feasible. ``len(_cfg_results)`` conflated the two, so a
-            # model where every configuration is infeasible reported
-            # ``subnlp_calls=0`` -- indistinguishable from the heuristic never
-            # running, which is the exact reading that named this issue.
-            _subnlp_calls += int(_cfg_stats.get("attempted", 0))
-            for _x_cf, _obj_cf in _cfg_results:
-                _subnlp_feasible += 1
-                if np.isfinite(_obj_cf) and _obj_cf < _SENTINEL_THRESHOLD:
-                    if _inject_incumbent(np.asarray(_x_cf).copy(), float(_obj_cf)):
-                        _subnlp_incumbent_updates += 1
-                        logger.info("GDP config subNLP incumbent: obj=%.6g", _obj_cf)
+        if not _gdp_config_first_enabled():
+            _root_gdp_config_primal()
 
         # --- Incumbent integer-neighbourhood search (general-integer LB) ---
         # A feasible incumbent of a nonconvex general-integer model can sit next
