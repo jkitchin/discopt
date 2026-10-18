@@ -2846,6 +2846,11 @@ _LAZY_RESEP_GLB_EPS = 1e-9
 # 2 s -> -64473 (the full bound) — so a smaller pre-deadline slice buys a weaker
 # but still rigorous bound rather than no bound at all.
 _ROOT_FALLBACK_RESERVE_S = 3.0
+# #1757: how far past its grant the root fallback's base build may run before
+# ``root_build_abort`` discards it. One reserve, so a build that finishes a little
+# late keeps its bound while the overrun stays bounded by the same slice the
+# search already withholds for this fallback.
+_ROOT_BUILD_ABORT_GRACE_S = _ROOT_FALLBACK_RESERVE_S
 # Multistart runs 3 starts per nonconvex node (warm/midpoint/random) and keeps
 # the best — better incumbents on nonconvex models, but ~3x the node-solve cost.
 # Off by default; flip to opt in (or pass multistart=True to _solve_batch_pounce).
@@ -9824,6 +9829,7 @@ def _root_relaxation_lower_bound(
         sanitize_relaxation_for_conditioning,
     )
     from discopt._relax.term_classifier import classify_nonlinear_terms
+    from discopt._relax.uniform_relax import RelaxationBuildAborted
 
     # Issue #654 checkpoint poll. This routine computes several INDEPENDENT bound
     # candidates (plain / separated / PSD / RLT) and returns the tightest; each is
@@ -9926,13 +9932,37 @@ def _root_relaxation_lower_bound(
     # e.g. an expression type the builder mishandles -- and must fail the solve
     # rather than quietly cost it its last-ditch dual bound.
     terms = classify_nonlinear_terms(model)
-    relax, _relax_info = build_milp_relaxation(
-        model,
-        terms,
-        DiscretizationState(),
-        bound_override=(root_lb, root_ub),
-        build_deadline=_base_build_deadline,
-    )
+    # #1757: ``build_deadline`` truncates constraint ROWS only; the objective walk
+    # before them is not interruptible by it, and on a dense quadratic objective
+    # that walk IS the build (QPLIB_3709 at ``time_limit=30``: a 36.7-40.1 s base
+    # build against a grant of a few seconds, so the solve returned at 57-60 s).
+    # ``root_build_abort`` (``DISCOPT_ROOT_BUILD_ABORT``) additionally passes an
+    # ``abort_deadline``: past it the build raises and is discarded whole — never
+    # used truncated — and the fallback reports no bound. The abort sits one
+    # fallback reserve PAST the grant, not at it: aborting at the grant itself was
+    # measured to throw away bounds that cost a fraction of a second over it
+    # (casctanks and hda at ``time_limit=5``: 1.258 and -141697 flag-off at
+    # 5.1-5.2 s, ``None`` at 5.0 s). The grace bounds the overrun to one reserve
+    # while keeping every bound that was merely late.
+    _base_abort_deadline: Optional[float] = None
+    if _base_deadline_on and _tuning().root_build_abort:
+        _base_abort_deadline = _fb_deadline + _ROOT_BUILD_ABORT_GRACE_S
+    try:
+        relax, _relax_info = build_milp_relaxation(
+            model,
+            terms,
+            DiscretizationState(),
+            bound_override=(root_lb, root_ub),
+            build_deadline=_base_build_deadline,
+            abort_deadline=_base_abort_deadline,
+        )
+    except RelaxationBuildAborted:
+        logger.info(
+            "root relaxation fallback: base build passed its %.2fs grant + %.1fs grace; no bound",
+            float(time_limit),
+            _ROOT_BUILD_ABORT_GRACE_S,
+        )
+        return None
     if not relax._objective_bound_valid:
         return None
     relax = sanitize_relaxation_for_conditioning(relax)
@@ -10412,16 +10442,34 @@ def _scoped_highs_options(fn: _F) -> _F:
 
 
 @contextlib.contextmanager
-def _highs_route_options():
-    """Apply the active ``highs_options`` to the HiGHS LP/MILP route and mark it used."""
+def _highs_route_options(presolve: bool = True):
+    """Apply the active ``highs_options`` to the HiGHS LP/MILP route and mark it used.
+
+    #1751: ``solve(presolve=False)`` reaches HiGHS as ``presolve="off"`` -- on this
+    route HiGHS's presolve is the only one that runs, so leaving it on made the
+    argument a silent no-op. An explicit ``highs_options["presolve"]`` that
+    contradicts it is refused rather than silently picking one.
+    """
     req = _HIGHS_OPTIONS_REQUEST.get()
-    if req is None:
+    pairs: tuple[tuple[str, Any], ...] = ()
+    if req is not None:
+        pairs, state = req
+        state["used"] = True
+    if not presolve:
+        given = [v for k, v in pairs if k == "presolve"]
+        if any(v != "off" for v in given):
+            raise ValueError(
+                f"presolve=False and highs_options['presolve']={given[0]!r} contradict "
+                "each other: on the HiGHS route presolve=False switches HiGHS's "
+                "presolve off. Pass one or the other."
+            )
+        if not given:
+            pairs = (*pairs, ("presolve", "off"))
+    if not pairs:
         yield
         return
     from discopt.solvers.lp_milp_highs import user_options
 
-    pairs, state = req
-    state["used"] = True
     with user_options(pairs):
         yield
 
@@ -11438,6 +11486,14 @@ def solve_model(
         probe LPs are counted in ``solver_stats["branching/strong_probe_lps"]``,
         not in ``node_count``). Changes only the order of the search, never a
         bound.
+    presolve : bool, default True
+        Run presolve. ``False`` switches off discopt's root presolve (FBBT,
+        variable elimination, probing) and, on a pure LP or MILP solved on the
+        HiGHS route, HiGHS's own presolve (``presolve="off"``, #1751) -- there
+        HiGHS's presolve is the one that runs. Combining it with a contradicting
+        ``highs_options["presolve"]`` raises ``ValueError``. Certificates are
+        verified either way, so this changes speed and node counts, not a
+        reported bound's validity.
     highs_options : dict, optional
         HiGHS options (name -> value, HiGHS's own option names) for a pure LP or
         MILP solved on the HiGHS route (#1620). ``{"output_flag": True}`` prints
@@ -12218,6 +12274,9 @@ def solve_model(
     # engine; every combination that would quietly run a different one is refused
     # rather than ignored (CLAUDE.md §3).
     _lpm_backend = _resolve_lp_milp_backend(milp_backend)
+    # #1751: the caller's ``presolve``, read before the dispatch below reassigns the
+    # local (several routes switch discopt's own root presolve off for themselves).
+    _caller_presolve = bool(presolve)
     _tree_opts = [
         n
         for n, v in (("milp_cuts", milp_cuts), ("branching_rule", branching_rule))
@@ -14865,7 +14924,7 @@ def solve_model(
                     stacklevel=2,
                 )
             if _lpm_backend == "highs":
-                with _highs_route_options():
+                with _highs_route_options(presolve=_caller_presolve):
                     return _solve_lp_highs(model, t_start, time_limit)
             _lp_res = _solve_lp(model, t_start, time_limit)
             if _lpm_backend == "native" and _lp_res.algorithm_route is None:
@@ -14921,7 +14980,7 @@ def solve_model(
                     and not lagrangian_bound
                     and not _observe_tree
                 ):
-                    with _highs_route_options():
+                    with _highs_route_options(presolve=_caller_presolve):
                         _highs_res = _solve_milp_highs(
                             model,
                             time_limit,
@@ -15358,6 +15417,18 @@ def solve_model(
             # weaken this into "trust the NLP" — refuse to certify (CLAUDE.md §1,
             # §3). Genuine infeasibility from _solve_continuous is a rigorous
             # nonlinear-tightening / NLP-infeasibility claim, not a gap, so leave it.
+            # #1753: name the route, and say why there is no bound -- no relaxation
+            # was built, so the "relaxation layer could not bound" diagnostic would
+            # misdescribe it (``Model.solve`` reads the prefix).
+            _declare_route(
+                f"local-nlp: single {nlp_solver} local NLP solve ("
+                + (
+                    "skip_convex_check=True"
+                    if skip_convex_check
+                    else "convexity could not be established"
+                )
+                + "; no dual bound by design)"
+            )
             return _withhold_local_optimality_certificate(_cont_result)
         logger.info(
             "Local NLP on convexity-unknown continuous model returned error; "
@@ -28245,6 +28316,9 @@ def _solve_lp_matrix(
             bound_duals_upper=bdu,
         )
         sr.convex_fast_path = True
+        # #1754: the engine's iteration count, under the HiGHS route's key, so the
+        # two routes can be compared.
+        sr.solver_stats = {**(sr.solver_stats or {}), "lp/iters": float(result.iterations)}
         return sr
     if result.status == SolveStatus.INFEASIBLE:
         return SolveResult(

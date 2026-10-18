@@ -196,3 +196,36 @@ def test_fallback_budget_never_runs_past_the_callers_time_limit(fb, monkeypatch)
     assert len(granted) == 1, "the fallback never ran: the probe measured nothing"
     budget, at = granted[0]
     assert at + budget <= t_start[0] + t_limit + 1e-3
+
+
+def test_engine_budget_clock_starts_at_entry(monkeypatch):
+    """#1757: ``solve_lp_spatial_bb`` started its clock AFTER classifying the
+    model's terms (~1.6 s on QPLIB_3709), so a fallback granted 5.60 s at T+24.40
+    built until T+31.60 -- past the caller's 30 s. Its deadline now counts from
+    entry: here a 0.5 s classification inside a 2.0 s grant must leave the
+    engine's incremental structure a deadline no later than entry + 2.0 s."""
+    import time
+
+    import discopt._relax.incremental_mccormick as im
+    import discopt._relax.lp_spatial_bb as lsb
+    import discopt._relax.term_classifier as tc
+
+    real_classify = tc.classify_nonlinear_terms
+
+    def slow_classify(*args, **kwargs):
+        time.sleep(0.5)
+        return real_classify(*args, **kwargs)
+
+    seen = []
+    real_inc = im.IncrementalMcCormickLP
+
+    def recording_inc(*args, **kwargs):
+        seen.append(kwargs.get("deadline"))
+        return real_inc(*args, **kwargs)
+
+    monkeypatch.setattr(tc, "classify_nonlinear_terms", slow_classify)
+    monkeypatch.setattr(im, "IncrementalMcCormickLP", recording_inc)
+    t_entry = time.perf_counter()
+    lsb.solve_lp_spatial_bb(_pure_integer_min(), time_limit=2.0)
+    assert len(seen) == 1 and seen[0] is not None, "the engine never built: nothing measured"
+    assert seen[0] <= t_entry + 2.0 + 1e-3

@@ -194,6 +194,10 @@ def _extract_penalties(expr, unc_map: dict):
         return IndexExpression(nb, expr.index), pb
 
     if isinstance(expr, SumExpression):
+        # #1756: ``sum(p * x)`` is the affine row ``p @ x``; classify it as one.
+        dot = _as_uncertain_dot(expr, unc_map)
+        if dot is not None:
+            return _extract_penalties(dot, unc_map)
         no, po = _extract_penalties(expr.operand, unc_map)
         return SumExpression(no, expr.axis), po
 
@@ -207,6 +211,35 @@ def _extract_penalties(expr, unc_map: dict):
         return SumOverExpression(new_terms), all_p2
 
     return expr, []
+
+
+def _as_uncertain_dot(expr, unc_map: dict):
+    """``p @ e`` for a full reduction ``sum(p * e)`` / ``sum(e * p)``, else ``None``.
+
+    #1756: the two spellings are the same affine row, but only the matmul one was
+    recognised, so ``dm.sum(a * x)`` left ``a`` in place and the RO-2 guard refused
+    the model. Rewritten only when ``p`` is an uncertain 1-D parameter and ``e`` has
+    exactly its shape -- then ``sum(p * e) == p @ e`` elementwise, with no
+    broadcasting -- so any other product keeps its existing handling.
+    """
+    from discopt.modeling.core import BinaryOp, MatMulExpression, Parameter
+
+    if expr.axis is not None or not isinstance(expr.operand, BinaryOp):
+        return None
+    prod = expr.operand
+    if prod.op != "*":
+        return None
+    for p, e in ((prod.left, prod.right), (prod.right, prod.left)):
+        if not (isinstance(p, Parameter) and p.name in unc_map):
+            continue
+        p_shape = np.shape(unc_map[p.name].parameter.value)
+        try:
+            e_shape = tuple(e.shape)
+        except AttributeError:
+            return None
+        if len(p_shape) == 1 and e_shape == p_shape:
+            return MatMulExpression(p, e)
+    return None
 
 
 def _soc_penalty(decision_expr, unc: EllipsoidalUncertaintySet):
