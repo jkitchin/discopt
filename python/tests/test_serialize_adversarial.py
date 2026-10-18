@@ -33,7 +33,8 @@ from discopt.modeling.core import _DetachedNlRepr, from_nl
 from discopt.serialize import SerializationError, dumps, loads
 from discopt.solvers.nlp_native import _source_still_matches
 
-CORPUS = sorted((pathlib.Path(__file__).parent / "data" / "minlplib_nl").glob("*.nl"))
+DATA = pathlib.Path(__file__).parent / "data"
+CORPUS = sorted((DATA / "minlplib_nl").glob("*.nl"))
 
 
 def _small():
@@ -308,6 +309,14 @@ def _fast_doc():
     return json.loads(dumps(m))
 
 
+def _atom_doc():
+    return json.loads((DATA / "serialize_fixtures" / "v1.5" / "registered_atom.json").read_text())
+
+
+def _atom_node(d):
+    return next(n for n in d["nodes"] if "atom" in n)
+
+
 def _block_A(d):
     return d["builder_blocks"][0]["A"]
 
@@ -358,6 +367,21 @@ FUZZ_FOUND = {
     "array bound nested one level too deep": (
         _doc,
         lambda d: next(v for v in d["variables"] if v["shape"] == [2]).update(lb=[[0.0], [0.0]]),
+    ),
+    # The atom tag of a registered composite (#1248 A): a malformed one was skipped
+    # as if it were an unregistered (dropped-by-design) tag.
+    "atom tag not an object": (_atom_doc, lambda d: _atom_node(d).update(atom=5)),
+    "atom tag name not a string": (
+        _atom_doc,
+        lambda d: _atom_node(d)["atom"].update(n=3),
+    ),
+    "atom tag argument a bool": (
+        _atom_doc,
+        lambda d: _atom_node(d)["atom"].update(arg=True),
+    ),
+    "atom tag argument a later node": (
+        _atom_doc,
+        lambda d: _atom_node(d)["atom"].update(arg=len(d["nodes"])),
     ),
     "array bound ragged": (
         _doc,

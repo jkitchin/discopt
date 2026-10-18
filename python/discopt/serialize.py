@@ -815,6 +815,26 @@ def _decode_nodes(table: list[dict], variables: Any, params: list[Parameter]):
                 f"{op} node has key(s) no writer of that format produces "
                 f"({', '.join(sorted(extra))}); refusing rather than dropping them."
             )
+        if "atom" in nd:
+            # A well-formed tag whose atom this process has not registered is
+            # dropped by design (`_retag_atoms`: abstaining only loosens a bound).
+            # A malformed one is a malformed document, not an abstention (WP-4).
+            name, arg = (
+                (dict.get(atom, k) for k in ("n", "arg"))
+                if isinstance(atom, dict)
+                else (None, None)
+            )
+            if not (
+                isinstance(atom, dict)
+                and isinstance(name, str)
+                and name
+                and type(arg) is int
+                and 0 <= arg < i
+            ):
+                raise SerializationError(
+                    f"node {i} has a malformed atom tag {atom!r}: it must be "
+                    '{"n": <registered name>, "arg": <an earlier node>}'
+                )
         if op == "binop" and nd.get("o") not in _KNOWN_BINARY_OPS:
             raise SerializationError(
                 f"node {i} names unknown binary operator {nd.get('o')!r}. Refusing on "
