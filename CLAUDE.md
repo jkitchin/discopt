@@ -142,7 +142,17 @@ was believed.
     launched that then timed out on the contention. Confirm with `pgrep` and a
     growing log before concluding anything. For a step that may never return,
     `faulthandler.dump_traceback_later` is the tool — a timing wrapper that prints
-    on return never fires for a call that does not return.
+    on return never fires for a call that does not return. **But the tool can hang
+    the process it observes** (#1758): its watchdog reads the running thread's
+    frames without the GIL, and on CPython 3.12 one dump of a solve spun forever in
+    `PyUnstable_InterpreterFrame_GetLine` (the dump file ends mid-frame). The solve
+    still returned, then `Py_FinalizeEx` → `cancel_dump_traceback_later` blocked on
+    the spinning watchdog: "result printed, process at ~100% CPU and never exits",
+    measured on QPLIB_3361 (exited at 76 s without dumps, still spinning at 10 min
+    with them; the spinning watchdog also steals a core *during* the solve). So: a
+    truncated dump file means the instrument wedged, not the solver; end a probe
+    that arms it with `os._exit(code)` after flushing; and confirm with macOS
+    `sample <pid>` (no root needed, unlike `py-spy`) before blaming the solver.
 11. **When a measurement contradicts a claim you already published, retract it in
     writing** — in the PR, the issue, or the plan doc — before continuing. §4
     already requires recording falsifications; this extends it to your *own* prior

@@ -226,7 +226,7 @@ def solve_lp(
     from discopt import _timing
 
     with _timing.charge("rust"):
-        status, x_full, obj, _iters, _cs, _bv, dual, _ray = solve_lp_warm_csc_py(
+        status, x_full, obj, iters, _cs, _bv, dual, _ray = solve_lp_warm_csc_py(
             np.ascontiguousarray(c_std),
             m,
             n + m,
@@ -332,6 +332,8 @@ def solve_lp(
         reduced_costs=reduced_costs,
         rc_absum=rc_absum,
         basis=None,
+        # #1754: the pivot count, so the native route reports ``lp/iters``.
+        iterations=int(iters),
     )
 
 
