@@ -303,6 +303,15 @@ SHAPES: list[Shape] = [
         points=[{"x": -0.8}, {"x": -1.0}, {"x": 4.0}, {"x": 9.0}, {"x": 1.0}],
     ),
     Shape(
+        "domain_restricted_lowering",
+        _domain_restricted,
+        lambda v, t: v["x"] <= -0.5 + t or (v["x"] >= 0 and math.sqrt(v["x"]) >= 2 - t),
+        points=[{"x": -0.8}, {"x": -1.0}, {"x": 4.0}, {"x": 9.0}, {"x": 1.0}],
+        # The declared-model verifier is itself broken on this shape (#1779), so
+        # it is bypassed here to judge the lowerings on their own.
+        crosscheck=False,
+    ),
+    Shape(
         "block_disjunction",
         _block_disjunction,
         _block_member,
@@ -323,17 +332,39 @@ SHAPES: list[Shape] = [
     ),
 ]
 
-#: (shape, method) pairs that refuse today but are planned to lower; each names the
-#: task or issue that lifts the refusal. Strict, so the marker fails when it lands.
-XFAIL: dict[tuple[str, str], str] = {
-    ("nested3", "hull"): "hull + nesting: #1124, #1775 G2.1",
-    ("or_semantics", "big-m"): "OR (AT_LEAST_ONE) semantics under big-M: #1124, #1775 G1.4",
+#: (shape, method) pairs that fail today but are planned to pass: the reason names
+#: the task or open issue, and ``raises`` pins the failure, so neither an
+#: unrelated harness error nor a silently-renamed API can keep the marker green.
+#: Strict, so the marker fails the day the case starts passing.
+XFAIL: dict[tuple[str, str], tuple[str, type[BaseException]]] = {
+    ("nested3", "hull"): ("hull refuses nesting: #1775 G2.1", NotImplementedError),
+    ("or_semantics", "big-m"): (
+        "big-M refuses OR (AT_LEAST_ONE) semantics: #1775 G1.4",
+        NotImplementedError,
+    ),
     **{
-        ("domain_restricted", m): "sqrt row in an inactive disjunct cuts it; verifier NaN: #1779"
+        ("domain_restricted", m): (
+            "#1779 verifier half: verify_point on the DECLARED model rejects x=-0.51 (in the "
+            "first disjunct) because the inactive sqrt row is NaN; fails at the predicate "
+            "cross-check before any lowering is judged",
+            AssertionError,
+        )
         for m in METHODS
     },
     **{
-        ("logic_over_either_or", m): "logical() over either_or indicators: #1775 G1.1 (M4)"
+        ("domain_restricted_lowering", m): (
+            "#1779 lowering half: the inactive sqrt row imposes x >= 0, cutting the first disjunct",
+            AssertionError,
+        )
+        for m in METHODS
+        if m != "hull"
+    },
+    **{
+        ("logic_over_either_or", m): (
+            "either_or has no indicators to reference yet: #1775 G1.1 (M4); "
+            "see test_either_or_indicators_absent_until_g1_1",
+            AttributeError,
+        )
         for m in METHODS
     },
 }
@@ -342,9 +373,27 @@ XFAIL: dict[tuple[str, str], str] = {
 def _params():
     for shape in SHAPES:
         for method in METHODS:
-            reason = XFAIL.get((shape.name, method))
-            marks = [pytest.mark.xfail(strict=True, reason=reason)] if reason else []
+            xf = XFAIL.get((shape.name, method))
+            marks = [pytest.mark.xfail(strict=True, reason=xf[0], raises=xf[1])] if xf else []
             yield pytest.param(shape, method, id=f"{shape.name}-{method}", marks=marks)
+
+
+def test_either_or_indicators_absent_until_g1_1():
+    """Flips when G1.1 gives ``either_or`` its indicators, under whatever name.
+
+    The ``logic_over_either_or`` xfails fail in the shape's own build (the
+    attribute does not exist), so they would stay xfailed if G1.1 chose another
+    name. This guard fails instead: when it does, update the shape to the real
+    API and drop both it and the xfails.
+    """
+    m = _two_way()
+    dc = m._constraints[-1]
+    assert isinstance(dc, _DisjunctiveConstraint)
+    public = {a for a in vars(dc) if not a.startswith("_")}
+    assert not hasattr(dc, "indicators"), "G1.1 landed: update logic_over_either_or"
+    assert public <= {"disjuncts", "name", "semantics", "method"}, (
+        f"new public attributes {public}: if G1.1 landed, update logic_over_either_or"
+    )
 
 
 def test_battery_covers_every_method():
@@ -367,7 +416,7 @@ def test_battery(shape: Shape, method: str):
     # Prove the probe fired (CLAUDE.md §6): both directions were exercised.
     assert rep.feasible_checked > 0, rep
     assert rep.infeasible_checked > 0, rep
-    assert rep.oracle_crosschecks == rep.comparisons, rep
+    assert rep.oracle_crosschecks == (rep.comparisons if shape.crosscheck else 0), rep
     rep.assert_sound()
 
 
@@ -375,6 +424,25 @@ def test_battery(shape: Shape, method: str):
 # The instrument detects what it claims to (CLAUDE.md §6): break a lowering on
 # purpose and require the battery to say so, in each direction.
 # ---------------------------------------------------------------------------
+
+
+def test_harness_catches_a_dropped_hull_aggregation_row(monkeypatch):
+    """The continuous (LP) path: without ``x = Σ v_k`` the hull no longer binds ``x``."""
+    import discopt._relax.gdp_reformulate as gr
+
+    real = gr._reformulate_disjunction_hull
+
+    def drop_aggregation(dc, model, add_aux_binary, **kw):
+        new_vars, new_cons = real(dc, model, add_aux_binary, **kw)
+        # cons[0] is the selector row; cons[1] is the aggregation row of x.
+        assert "_hull_" in str(new_cons[1].body) and new_cons[1].sense == "=="
+        return new_vars, new_cons[:1] + new_cons[2:]
+
+    monkeypatch.setattr(gr, "_reformulate_disjunction_hull", drop_aggregation)
+    rep = run_shape(next(s for s in SHAPES if s.name == "two_way"), "hull")
+    assert rep.admitted, rep
+    with pytest.raises(AssertionError, match="infeasible point"):
+        rep.assert_sound()
 
 
 def test_harness_catches_a_too_small_big_m(monkeypatch):

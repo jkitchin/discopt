@@ -91,7 +91,10 @@ class Shape:
     refusal of a shape the method should eventually support is not listed here;
     the pytest wrapper marks it ``xfail(strict=True)`` with its issue instead.
     ``box`` gives a finite *sampling* box for a variable declared unbounded; the
-    model itself is not changed.
+    model itself is not changed. ``crosscheck=False`` skips the ``verify_point``
+    cross-check of the predicate; it exists only for a shape on which that
+    verifier is itself known broken (so the lowering can still be judged), and
+    such a shape must name the issue in its docstring.
     """
 
     name: str
@@ -101,6 +104,7 @@ class Shape:
     refuses: Mapping[str, tuple[type[BaseException], str]] = field(default_factory=dict)
     n_samples: int = 60
     box: Mapping[str, tuple[float, float]] = field(default_factory=dict)
+    crosscheck: bool = True
 
 
 @dataclass
@@ -207,6 +211,15 @@ def sample_points(model, shape: Shape, rng: np.random.Generator) -> list[np.ndar
 # ---------------------------------------------------------------------------
 
 
+class _Undefined(Exception):
+    """A lowered row is non-finite at ``x`` for every probed auxiliary value.
+
+    The row is undefined there, so no solver can use the point: on a feasible
+    ``x`` that is a cut. It is not a proof of rejection, so on an infeasible
+    ``x`` the driver raises instead of counting it as rejected.
+    """
+
+
 class _Lowered:
     """The lowered model with the declared columns as a prefix of its columns."""
 
@@ -268,8 +281,15 @@ class _Lowered:
 
     def extends(self, x: np.ndarray, rep: Report) -> tuple[bool, str]:
         """``(True, how)`` when some auxiliary assignment satisfies every row at ``x``."""
+        # ``x`` is sampled from the box declared BEFORE lowering. A lowering that
+        # tightened a declared column's bounds excludes whatever it cut off.
+        lo_x, hi_x = self.lb[: self.n_x], self.ub[: self.n_x]
+        tol = ADMIT_TOL * np.maximum(1.0, np.abs(x))
+        if np.any(x < lo_x - tol) or np.any(x > hi_x + tol):
+            return False, "outside the lowered model's column bounds"
         lo, hi = self.lb[self.int_cols], self.ub[self.int_cols]
         ranges = [range(int(np.ceil(a)), int(np.floor(b)) + 1) for a, b in zip(lo, hi)]
+        undefined = None
         for ints in itertools.product(*ranges):
             z = np.empty(self.lb.size)
             z[: self.n_x] = x
@@ -278,9 +298,16 @@ class _Lowered:
                 if self._max_violation(z) <= ADMIT_TOL:
                     return True, f"integers={list(ints)}"
                 continue
-            ok, how = self._continuous(z, rep)
+            try:
+                ok, how = self._continuous(z, rep)
+            except _Undefined as exc:
+                undefined = f"integers={list(ints)}: {exc}"
+                continue
             if ok:
                 return True, f"integers={list(ints)} {how}"
+        if undefined is not None:
+            # Probing is not a proof, so this may only ever report a cut.
+            raise _Undefined(f"no assignment extends; {undefined}")
         return False, "no auxiliary assignment"
 
     def _continuous(self, z: np.ndarray, rep: Report) -> tuple[bool, str]:
@@ -291,6 +318,16 @@ class _Lowered:
         g0 = np.asarray(self.ev.evaluate_constraints(z0), dtype=np.float64)
         J0 = np.asarray(self.ev.evaluate_jacobian(z0), dtype=np.float64)[:, c]
         rng = np.random.default_rng(0)
+        if not np.all(np.isfinite(g0)):
+            dead = ~np.isfinite(g0)
+            for _ in range(3):
+                z1 = z0.copy()
+                z1[c] = a_lo + rng.random(len(c)) * (a_hi - a_lo)
+                dead &= ~np.isfinite(np.asarray(self.ev.evaluate_constraints(z1), dtype=float))
+            if np.any(dead):
+                raise _Undefined(
+                    f"rows {np.nonzero(dead)[0].tolist()} non-finite at every probed a"
+                )
         affine = np.all(np.isfinite(g0)) and np.all(np.isfinite(J0))
         for _ in range(3):
             if not affine:
@@ -399,6 +436,9 @@ def run_shape(shape: Shape, method: str, *, seed: int = 1775) -> Report:
 
     rep = Report(shape.name, method)
     declared = shape.build()
+    # Sample against the declared box before lowering, so an in-place bound
+    # change by the lowering cannot hide the region it cut from the sample.
+    points = sample_points(declared, shape, np.random.default_rng(seed))
     expected = shape.refuses.get(method)
     try:
         lowered = reformulate_gdp(declared, method)
@@ -417,22 +457,26 @@ def run_shape(shape: Shape, method: str, *, seed: int = 1775) -> Report:
         raise AssertionError(f"{shape.name}: the model declares no GDP; nothing was lowered")
 
     low = _Lowered(declared, lowered)
-    rng = np.random.default_rng(seed)
-    for x in sample_points(declared, shape, rng):
+    for x in points:
         vals = _values(declared, x)
         inside = shape.member(vals, 0.0)
         outside = not shape.member(vals, INFEASIBLE_MARGIN)
         if not (inside or outside):
             rep.skipped += 1
             continue
-        verdict = verify_point(declared, x).ok
-        rep.oracle_crosschecks += 1
+        verdict = verify_point(declared, x).ok if shape.crosscheck else inside
+        rep.oracle_crosschecks += shape.crosscheck
         if verdict != inside:
             raise AssertionError(
                 f"{shape.name}: the predicate says {'in' if inside else 'out'} but the declared "
                 f"model's verify_point says {verdict} at {vals}"
             )
-        ok, how = low.extends(x, rep)
+        try:
+            ok, how = low.extends(x, rep)
+        except _Undefined as exc:
+            if not inside:
+                raise RuntimeError(f"{shape.name}: no verdict at infeasible {vals}: {exc}") from exc
+            ok, how = False, f"undefined: {exc}"
         if inside:
             rep.feasible_checked += 1
             if not ok:
@@ -444,7 +488,10 @@ def run_shape(shape: Shape, method: str, *, seed: int = 1775) -> Report:
     return rep
 
 
-def main(shapes: Sequence[Shape], expected_failures: Mapping[tuple[str, str], str]) -> int:
+def main(
+    shapes: Sequence[Shape],
+    expected_failures: Mapping[tuple[str, str], tuple[str, type[BaseException]]],
+) -> int:
     """Print one line per (shape, method); exit 1 on any unexpected result or no checks."""
     total = 0
     bad = 0
@@ -454,14 +501,15 @@ def main(shapes: Sequence[Shape], expected_failures: Mapping[tuple[str, str], st
             try:
                 rep = run_shape(shape, method)
             except Exception as exc:  # noqa: BLE001 - printed and counted, never hidden
-                tag = "xfail" if xfail else "ERROR"
+                tag = "xfail" if xfail and isinstance(exc, xfail[1]) else "ERROR"
                 print(f"{shape.name:24s} {method:8s} {tag} {type(exc).__name__}: {exc}", flush=True)
-                bad += not xfail
+                bad += tag == "ERROR"
                 continue
             total += rep.comparisons
             status = "refused" if rep.refused else ("UNSOUND" if rep.cut or rep.admitted else "ok")
             if xfail:
-                status = "XPASS" if status != "UNSOUND" else "xfail"
+                pinned = issubclass(AssertionError, xfail[1])
+                status = "xfail" if status == "UNSOUND" and pinned else "XPASS"
             bad += status in ("UNSOUND", "XPASS")
             print(
                 f"{shape.name:24s} {method:8s} {status:8s} feas={rep.feasible_checked:3d} "
