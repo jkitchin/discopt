@@ -1,0 +1,174 @@
+{
+ "schema": "discopt.model/1.2",
+ "discopt": "0.9.0",
+ "name": "scalar_nlp",
+ "variables": [
+  {
+   "name": "x",
+   "type": "continuous",
+   "shape": [],
+   "lb": 0.5,
+   "ub": 4.0,
+   "bound_stack": []
+  },
+  {
+   "name": "y",
+   "type": "continuous",
+   "shape": [],
+   "lb": -1.0,
+   "ub": 2.0,
+   "bound_stack": []
+  }
+ ],
+ "parameters": [],
+ "nodes": [
+  {
+   "op": "var",
+   "ref": 0
+  },
+  {
+   "op": "var",
+   "ref": 1
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 0,
+   "b": 1
+  },
+  {
+   "op": "const",
+   "v": 3.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 2,
+   "b": 3
+  },
+  {
+   "op": "const",
+   "v": 1.0
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 0,
+   "b": 1
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 5,
+   "b": 6
+  },
+  {
+   "op": "const",
+   "v": 0.3
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 8,
+   "b": 0
+  },
+  {
+   "op": "call",
+   "f": "exp",
+   "args": [
+    9
+   ]
+  },
+  {
+   "op": "call",
+   "f": "log",
+   "args": [
+    0
+   ]
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 11,
+   "b": 1
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 10,
+   "b": 12
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 0,
+   "b": 5
+  },
+  {
+   "op": "call",
+   "f": "sqrt",
+   "args": [
+    14
+   ]
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 13,
+   "b": 15
+  },
+  {
+   "op": "binop",
+   "o": "**",
+   "a": 1,
+   "b": 3
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 16,
+   "b": 17
+  }
+ ],
+ "objective": {
+  "sense": "minimize",
+  "expr": 18,
+  "placeholder": false
+ },
+ "builder_objective": null,
+ "rows": [
+  {
+   "kind": "algebraic",
+   "body": 4,
+   "sense": "<=",
+   "name": "xy"
+  },
+  {
+   "kind": "algebraic",
+   "body": 7,
+   "sense": "<=",
+   "name": "cover"
+  }
+ ],
+ "builder_blocks": [],
+ "complementarities": null,
+ "state": {
+  "_aux_counter": 0,
+  "_decomp_stages": {},
+  "_decomp_blocks": {},
+  "_zero_spanning_factor_auxes": [],
+  "_atan2_preconditions": [],
+  "_coupling_keys": {
+   "names": [],
+   "row_indices": []
+  },
+  "_sets": [],
+  "_simplex_lowerings": [],
+  "_block_labels_var": {},
+  "_block_labels_con": {
+   "names": {},
+   "rows": []
+  }
+ },
+ "initial_point": []
+}

@@ -1,6 +1,6 @@
 # Model serialization — completion plan
 
-> **Plan v1.1 — 2026-10-18 — author: Claude (planning session for jkitchin).**
+> **Plan v1.3 — 2026-10-18 — author: Claude (planning session for jkitchin).**
 > Status: proposed; no work package started. Every claim about the code below was
 > read from the tree at `3191cc65` (schema `discopt.model/1.4`, `discopt 0.9.1.dev0`,
 > after PRs #1748 and #1764). Agents executing a package **re-verify** the lines they
@@ -239,20 +239,28 @@ at every historical commit; a builder that raises at an old commit is recorded a
 (`Model.complementarity` + one lowering mark), `with_result` (a 2-variable solve
 embedded via `save(result=…)`), `from_nl_nvs01`, `from_nl_st_e13`,
 `from_nl_mpcc` (`data/mpcc_complementarity.nl`), `fast_api_blocks`
-(`add_linear_constraints` + `add_quadratic_objective`), `registered_atom` (1.3+),
-`gams_initial_values` (1.4+), `recentre_marker` (1.4+).
+(`add_linear_constraints` + `add_quadratic_objective`), `parameters_and_start`
+(array/scalar parameters + `set_initial_point`), `decomposition_marks`
+(`mark_coupling` by name + `set_stage`), `registered_atom` (`register_function`,
+1.1+; the tag is written from 1.3). As built: see `python/tests/serialize_fixture_models.py`
+(v1.3 change log for why `gams_initial_values` / `recentre_marker` were dropped).
 
 **Generation procedure** (`scripts/serialize_fixture_gen.py --version 1.N --commit <sha> --out …`):
-1. `git fetch --unshallow` (or run on the owner's full clone); find the commit
-   that *last* wrote each minor: `git log --format=%H -S'SCHEMA = "discopt.model/1.N"' -- python/discopt/serialize.py`
-   gives the commit that introduced 1.N+1 (removed the string) and the one that
-   introduced 1.N; take the parent of the former — the last tree that wrote 1.N.
+1. `git fetch --unshallow` (or run on the owner's full clone); list the bumps with
+   `git log --format=%h -G'^SCHEMA = "discopt\.model/' -- python/discopt/serialize.py`
+   (**`-G`, not `-S`**: every bump keeps the `SCHEMA = "discopt.model/` prefix, so
+   `-S` sees only the commit that added the file — corrected in v1.3). The last tree
+   that wrote 1.N is the parent of the commit that introduced 1.N+1.
 2. `git worktree add /tmp/wt-1.N <sha>`; in it: `pip install -e . --no-deps`
    into a dedicated venv and `maturin develop --release` **from that worktree root**
    (CLAUDE.md install note; the Rust ABI must match that commit's Python side).
 3. Run the generator **inside that venv**; it asserts
    `discopt.__file__.startswith("/tmp/wt-1.N")` and `discopt.serialize.SCHEMA == "discopt.model/1.N"`
-   and exits 2 otherwise; writes the fixtures with `provenance=False` (byte-stable)
+   (**1.0 spells it `"discopt.model/1"`**, a bare major) and exits otherwise; it also
+   drops from `sys.path` every entry providing another discopt checkout and, after
+   the run, refuses if any loaded `discopt.*` module came from outside the tree
+   (see the WP-1 finding in §8: a `--system-site-packages` venv otherwise imports
+   modules missing from the old tree from the current one); writes the fixtures with `provenance=False` (byte-stable)
    plus one `*_with_provenance.json` per version so the provenance-skew path has a
    real historical block.
 4. For the forward cell (§3.3.3) the generator also *loads the current HEAD's
@@ -347,8 +355,8 @@ commands, out of scope, dependencies, schema version.
 - **Files**: new `python/tests/serialize_fixture_models.py`,
   `scripts/serialize_fixture_gen.py`, `python/tests/data/serialize_fixtures/**`,
   `python/tests/test_serialize_compat_matrix.py`; this plan §8.
-- **Entry experiment**: `git fetch --unshallow && git log --format='%h %ad %s' --date=short -S'SCHEMA = "discopt.model/' -- python/discopt/serialize.py`
-  must list ≥ 4 commits (one per bump 1.0→1.1→1.2→1.3→1.4). Then build the
+- **Entry experiment**: `git fetch --unshallow && git log --format='%h %ad %s' --date=short -G'^SCHEMA = "discopt\.model/' -- python/discopt/serialize.py`
+  must list ≥ 5 commits (the file's introduction at 1.0 plus one per bump to 1.4). Then build the
   *oldest* (1.0) worktree per §3.3 step 2 and import it with the marker check.
   **Kill criterion**: the 1.0 tree cannot be built in ≤ 2 h of effort. If it
   fires: record the exact failure in §8, generate from the oldest buildable minor,
@@ -707,21 +715,46 @@ sets the test count); WP-7 one session; WP-8 one session.
 
 | WP | Status | PR | Date | Notes / measurements |
 |---|---|---|---|---|
-| WP-1 fixtures + matrix | not started | — | — | per-version SHAs: 1.0 —, 1.1 —, 1.2 —, 1.3 —, 1.4 — |
-| WP-2 policy, stamp, upgrade-model | not started | — | — | O1, O3 pending |
-| WP-3 schema 1.5 | not started | — | — | O5 pending |
+| WP-1 fixtures + matrix | **done** | #1769 | 2026-10-18 | writers: 1.0 `0a655f244`, 1.1 `f31547172`, 1.2 `a82f89b0f`, 1.3 `8a4880f7c`, 1.4 HEAD at generation (serializer = `ca63cb2e7`'s); 69 fixtures (14 cases × 5 versions − `registered_atom`@1.0, unbuildable: no `discopt.operators` before 1.1); backward: 69/69 load and equal today's build minus content not yet written (`_WRITTEN_FROM`: atom tags < 1.3, `state.nl_source` < 1.4); forward: 136 `loads_identical`, 4 `loaded` (1.0 reading `registered_atom`, nothing to compare), **0 `loads_different`, 0 `refused`**; test file 216 tests in 1.5 s (2.6 s under `-n 4`); two reader mutations caught (15 and 10 failures); the live test builds each case before loading its fixture, for the same registry reason as (d) below — found when `-n 4` ordering failed `v1.3-registered_atom` once. No hole: all five writers built (O4 not needed). |
+| WP-2 policy, stamp, upgrade-model | not started | — | — | O1, O3 decided |
+| WP-3 schema 1.5 | not started | — | — | O5 decided |
 | WP-4 property + fuzz | not started | — | — | op-coverage %: — |
 | WP-5 corpus harness | not started | — | — | in-repo: —/75; full MINLPLib: —/1610; QPLIB: —/421 |
 | WP-6 builder sweep | not started | — | — | rows round-trip: —, refused: —, crashed: — |
-| WP-7 perf | not started | — | — | pickle A/B: HEAD — ± —, base — ± — ; O2 pending |
+| WP-7 perf | not started | — | — | pickle A/B: HEAD — ± —, base — ± — ; O2 decided (≤ +20 %) |
 | WP-8 docs + CI | not started | — | — | fast-lane delta: — s |
 
-Owner decisions: O1 —, O2 —, O3 —, O4 —, O5 —.
+Owner decisions (taken 2026-10-18 by jkitchin: "go with your recommendations"):
+O1 — refuse on `_MODEL_PICKLE_FORMAT` mismatch or missing stamp, warn on
+`discopt.__version__` skew. O2 — accept up to +20 % model-pickle overhead if WP-7's
+two optimisation variants fail (re-measured A/B still required). O3 — unknown
+top-level keys refused, with an ignored `x-`-prefixed namespace as the escape hatch.
+O4 — if the 1.0–1.2 writers cannot be rebuilt within WP-1's kill criterion, accept
+a documented hole ("untested before 1.N"). O5 — encode logical constraints at 1.5.
 
 ---
 
 ## 9. Change log
 
+- **v1.3 (2026-10-18, WP-1 done)** — §3.3/WP-1 corrected by measurement:
+  (a) the bump search needs `git log -G`, not `-S` (`-S` found only the file's
+  introduction); (b) schema 1.0 writes the identifier `"discopt.model/1"`, so the
+  1.0 marker is that string; (c) a `--system-site-packages` venv imported
+  `discopt.operators` — absent at 1.0 — from the *current* tree, because
+  `discopt/__init__.py` uses `pkgutil.extend_path`; the first 1.0 `registered_atom`
+  fixture was therefore a two-version mix and was discarded. The generator now
+  isolates `sys.path` and refuses on any foreign `discopt.*` module. (d) A forward
+  cell first read `loads_different` for 1.3←1.4 `registered_atom`: the reader's
+  process had not registered the atom, so the (sound, designed) re-derivation left
+  the tag off — process state, not a misread. Forward mode now builds every case
+  before reading, as a program registers its atoms at import. (e) The case list
+  swaps the plan's `gams_initial_values` / `recentre_marker` (internal attributes no
+  public 1.0 API sets) for `parameters_and_start` and `decomposition_marks`; the
+  internal attributes stay covered by `test_serialize_adversarial.py`. (f)
+  `with_result` fixtures are not byte-reproducible across runs (the embedded result
+  carries timings); fixtures are frozen once, so the immutability check is unaffected.
+- **v1.2 (2026-10-18)** — owner decisions O1–O5 recorded in §8 (the §7
+  recommendations, adopted as written).
 - **v1.1 (2026-10-18, review)** — claims spot-checked against `3191cc65`: shallow
   clone; `v0.9.0` writes 1.3 and `v0.8.0` has no `serialize.py`; `hypothesis` absent
   from `dev`; all cited test names, data files, `result_io.SCHEMA_VERSION = 3`,

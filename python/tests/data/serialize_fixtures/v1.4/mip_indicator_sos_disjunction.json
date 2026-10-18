@@ -1,0 +1,213 @@
+{
+ "schema": "discopt.model/1.4",
+ "discopt": "0.9.1.dev0",
+ "name": "mip_indicator_sos_disjunction",
+ "variables": [
+  {
+   "name": "x",
+   "type": "continuous",
+   "shape": [
+    3
+   ],
+   "lb": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "ub": [
+    10.0,
+    10.0,
+    10.0
+   ],
+   "bound_stack": []
+  },
+  {
+   "name": "z",
+   "type": "binary",
+   "shape": [],
+   "lb": 0.0,
+   "ub": 1.0,
+   "bound_stack": []
+  }
+ ],
+ "parameters": [],
+ "nodes": [
+  {
+   "op": "var",
+   "ref": 0
+  },
+  {
+   "op": "index",
+   "base": 0,
+   "index": {
+    "k": "int",
+    "v": 0
+   }
+  },
+  {
+   "op": "index",
+   "base": 0,
+   "index": {
+    "k": "int",
+    "v": 1
+   }
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 1,
+   "b": 2
+  },
+  {
+   "op": "const",
+   "v": 8.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 3,
+   "b": 4
+  },
+  {
+   "op": "var",
+   "ref": 1
+  },
+  {
+   "op": "const",
+   "v": 2.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 7,
+   "b": 1
+  },
+  {
+   "op": "index",
+   "base": 0,
+   "index": {
+    "k": "int",
+    "v": 2
+   }
+  },
+  {
+   "op": "const",
+   "v": 1.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 9,
+   "b": 10
+  },
+  {
+   "op": "const",
+   "v": 5.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 12,
+   "b": 9
+  },
+  {
+   "op": "sum",
+   "a": 0,
+   "axis": null
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 7,
+   "b": 6
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 14,
+   "b": 15
+  }
+ ],
+ "objective": {
+  "sense": "minimize",
+  "expr": 16,
+  "placeholder": false
+ },
+ "builder_objective": null,
+ "rows": [
+  {
+   "kind": "algebraic",
+   "body": 5,
+   "sense": "<=",
+   "name": "cap"
+  },
+  {
+   "kind": "indicator",
+   "indicator": 6,
+   "constraint": {
+    "body": 8,
+    "sense": "<=",
+    "name": "ind_then_0"
+   },
+   "active_value": 1,
+   "name": null,
+   "disjunction": null
+  },
+  {
+   "kind": "sos",
+   "sos_type": 1,
+   "variables": [
+    1,
+    2,
+    9
+   ],
+   "name": "s1"
+  },
+  {
+   "kind": "disjunction",
+   "disjuncts": [
+    [
+     {
+      "body": 11,
+      "sense": "<=",
+      "name": null
+     }
+    ],
+    [
+     {
+      "body": 13,
+      "sense": "<=",
+      "name": null
+     }
+    ]
+   ],
+   "name": "split",
+   "method": null,
+   "semantics": "SELECT_ONE"
+  }
+ ],
+ "builder_blocks": [],
+ "complementarities": null,
+ "state": {
+  "_aux_counter": 0,
+  "_decomp_stages": {},
+  "_decomp_blocks": {},
+  "_zero_spanning_factor_auxes": [],
+  "_implied_integer_auxes": [],
+  "_free_by_construction": [],
+  "_atan2_preconditions": [],
+  "_piecewise_domains": [],
+  "_coupling_keys": {
+   "names": [],
+   "row_indices": []
+  },
+  "_sets": [],
+  "_simplex_lowerings": [],
+  "_block_labels_var": {},
+  "_block_labels_con": {
+   "names": {},
+   "rows": []
+  }
+ },
+ "initial_point": []
+}
