@@ -103,7 +103,8 @@ row, builder block, relation, the embedded result -- and a key repeated within
 one JSON object is refused too (``json`` would keep the last). Node records are
 checked against ``_NODE_KEYS`` (per ``op``) and ``_INDEX_KEYS``; everything else
 by recording which keys the decoder reads and refusing the rest
-(:class:`_Record`), so no hand-kept list can fall behind the decoder.
+(:class:`_Record`), so no hand-kept list can fall behind the decoder. The ``x-``
+escape is top-level only: an ``x-`` key inside a record is refused like any other.
 
 ``discopt upgrade-model`` rewrites a document at the current ``SCHEMA``. Through
 1.1 an unknown top-level key was ignored; that is how ``provenance`` (1.1) stayed
@@ -739,12 +740,12 @@ def _decode_nodes(table: list[dict], variables: Any, params: list[Parameter]):
         if not dict.keys(nd) <= allowed or (
             isinstance(atom, dict) and not dict.keys(atom) <= _ATOM_KEYS
         ):
-            extra = set(dict.keys(nd) - allowed)
+            extra = [f"/nodes[{i}]/{k}" for k in dict.keys(nd) - allowed]
             if isinstance(atom, dict):
-                extra |= {f"atom/{k}" for k in dict.keys(atom) - _ATOM_KEYS}
+                extra += [f"/nodes[{i}]/atom/{k}" for k in dict.keys(atom) - _ATOM_KEYS]
             raise SerializationError(
-                f"{op} node {i} has key(s) {sorted(extra)} no writer of that format "
-                "produces; refusing rather than dropping them."
+                f"{op} node has key(s) no writer of that format produces "
+                f"({', '.join(sorted(extra))}); refusing rather than dropping them."
             )
         if op == "binop" and nd.get("o") not in _KNOWN_BINARY_OPS:
             raise SerializationError(
@@ -2652,6 +2653,10 @@ def _decode_document(doc: dict, minor: int) -> Model:
             # readings are one string. 1.2 documents have no blanket pass and so no
             # ambiguity; this branch exists only for what is already on disk.
             solution = _dec_tree(solution)
+            # `_dec_tree` rebuilds the subtree as plain dicts by iterating it, which
+            # counts every key read; re-track it so the unread-key check (#1780)
+            # still sees what `deserialize_result` leaves unread below.
+            doc["solution"] = solution = _track(solution)
         model.saved_result = deserialize_result(solution)
     else:
         model.saved_result = None

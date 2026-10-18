@@ -294,7 +294,10 @@ def _dec_validation_report(d: Any) -> Any:
     report_fields = {f.name for f in fields(ExaminerReport)}
     check_fields = {f.name for f in fields(CheckResult)}
     # `passed` is a property, so it is not in `fields(ExaminerReport)` and is
-    # filtered out here -- passing it to the constructor would raise.
+    # filtered out here -- passing it to the constructor would raise. It is the ONE
+    # key skipped: anything else outside the dataclass fields is refused, since the
+    # filters below would otherwise drop it unread (#1780 review).
+    _refuse_unknown_keys(d, report_fields | {"passed", "checks"}, "validation_report")
     kwargs: dict[str, Any] = {
         k: _dec_float(v) if k in report_floats else v
         for k, v in d.items()
@@ -302,6 +305,7 @@ def _dec_validation_report(d: Any) -> Any:
     }
     checks = []
     for c in d.get("checks", []):
+        _refuse_unknown_keys(c, check_fields, "validation_report check")
         cd: dict[str, Any] = {
             k: _dec_float(v) if k in check_floats else v for k, v in c.items() if k in check_fields
         }
@@ -309,6 +313,17 @@ def _dec_validation_report(d: Any) -> Any:
         cd["violators"] = [(label, _dec_float(val)) for label, val in cd.get("violators", [])]
         checks.append(CheckResult(**cd))
     return ExaminerReport(checks=checks, **kwargs)
+
+
+def _refuse_unknown_keys(d: Any, known: set, where: str) -> None:
+    if not isinstance(d, dict):
+        raise TypeError(f"{where} must be an object, got {type(d).__name__}.")
+    unknown = sorted(set(d) - known)
+    if unknown:
+        raise SerializationError(
+            f"{where} has key(s) {unknown} this reader does not know; refusing rather "
+            "than dropping them."
+        )
 
 
 def _float_fields(cls: type) -> frozenset[str]:
@@ -434,7 +449,9 @@ def deserialize_result(d: dict) -> SolveResult:
     if d.get("mip_nlp_trace") is not None:
         trace = d["mip_nlp_trace"]
         # Before version 3 the trace was written untagged.
-        kwargs["mip_nlp_trace"] = _dec_json_tree(trace) if version >= 3 else trace
+        # Kept verbatim before version 3: as a plain copy (`_plain`), so it carries
+        # no reader bookkeeping and every key counts as read (#1780).
+        kwargs["mip_nlp_trace"] = _dec_json_tree(trace) if version >= 3 else _plain(trace)
     if d.get("validation_report") is not None:
         kwargs["validation_report"] = _dec_validation_report(d["validation_report"])
     if d.get("infeasibility_certificate") is not None:

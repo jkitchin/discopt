@@ -325,4 +325,79 @@ def test_a_loaded_model_holds_no_tracking_dicts():
 
     scan(loaded, set())
     scan(loaded_every_op, set())
+    # And every golden fixture: a 1.0/1.1 result is re-tracked after `_dec_tree`,
+    # and a pre-version-3 trace is kept verbatim, so both paths must hand back
+    # plain objects.
+    for path in FIXTURE_PATHS:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            scan(loads(path.read_text(encoding="utf-8")), set())
     assert found == []
+
+
+# ── the embedded result's sub-records, at every minor (review of #1783) ────
+#
+# Two holes the first version missed, neither reachable from the fixtures (none
+# holds a validation report or an infeasibility certificate): (1) the report
+# decoder iterated its dict and FILTERED to the dataclass fields, so an unknown
+# key counted as read and was then discarded; (2) for a 1.0/1.1 document the
+# solution subtree was rebuilt by `_dec_tree` -- iterating, so every key read --
+# and the unread-key check never saw below the result's top level.
+
+
+def _result_doc(schema: str) -> dict:
+    import numpy as np
+    from discopt.solvers import InfeasibilityCertificate
+    from discopt.validation.examiner import CheckResult, ExaminerReport
+
+    m = dm.Model("vr")
+    x = m.continuous("x", lb=0.0, ub=2.0)
+    m.minimize((x - 1.0) ** 2)
+    r = m.solve(time_limit=30)
+    r.validation_report = ExaminerReport(
+        checks=[CheckResult(name="c", passed=True, tolerance=1e-6, violators=[("x", 0.0)])]
+    )
+    r.infeasibility_certificate = InfeasibilityCertificate(
+        total_violation=1.0, ineq_violations=np.array([1.0]), eq_violations=np.array([])
+    )
+    doc = json.loads(dumps(m, result=r))
+    doc["schema"] = schema
+    return doc
+
+
+RESULT_SITES = {
+    "validation_report": lambda d: d["solution"]["validation_report"],
+    "validation_report check": lambda d: d["solution"]["validation_report"]["checks"][0],
+    "infeasibility_certificate": lambda d: d["solution"]["infeasibility_certificate"],
+}
+MINORS = [
+    "discopt.model/1" if minor == 0 else f"discopt.model/{SCHEMA_MAJOR}.{minor}"
+    for minor in range(SCHEMA_MINOR + 1)
+]
+
+
+@pytest.mark.parametrize("schema", MINORS)
+@pytest.mark.parametrize("site", sorted(RESULT_SITES))
+def test_an_unknown_key_in_a_result_sub_record_is_refused_at_every_minor(site, schema):
+    doc = _result_doc(schema)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        loaded = loads(json.dumps(doc))  # unmodified: loads, with both sub-records
+    assert loaded.saved_result.validation_report.checks[0].name == "c"
+    assert loaded.saved_result.infeasibility_certificate.total_violation == 1.0
+    RESULT_SITES[site](doc)[INJECTED] = 1
+    with pytest.raises(SerializationError, match=INJECTED):
+        loads(json.dumps(doc))
+
+
+def test_the_review_probe_on_the_1_0_and_1_1_fixtures():
+    for version in ("v1.0", "v1.1"):
+        doc = json.loads((FIXTURES / version / "with_result.json").read_text())
+        doc["solution"]["infeasibility_certificate"] = {
+            "total_violation": 1.0,
+            "ineq_violations": [1.0],
+            "eq_violations": [],
+            "zzz": 1,
+        }
+        with pytest.raises(SerializationError, match="zzz"):
+            loads(json.dumps(doc))
