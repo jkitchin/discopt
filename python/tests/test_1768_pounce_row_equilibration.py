@@ -205,3 +205,159 @@ def test_midpath_signature(raw, mu, compl, expected):
         raw_status=raw, kkt={"barrier_parameter": mu, "complementarity_unscaled": compl}
     )
     assert _pounce_midpath(res, 1e-8) is expected
+
+
+# ---------------------------------------------------------------------------
+# The continuation's outcomes (#1768 review). Each test runs the real first solve
+# of ``_tiny_row`` (optimum (1, 1), objective 2, 1e-6 rows so the continuation can
+# rescale them), stamps the mid-path signature on its KKT record so the
+# continuation fires, and scripts what the second POUNCE call returns.
+# ---------------------------------------------------------------------------
+
+_MIDPATH_KKT = {"barrier_parameter": 1.84e-6, "complementarity_unscaled": 1.85e-6}
+
+
+@pytest.fixture
+def scripted(monkeypatch):
+    """Replace the second POUNCE NLP solve with ``state["second"](first, kw)``."""
+    import dataclasses
+
+    monkeypatch.delenv("DISCOPT_POUNCE_ROW_EQUILIBRATE", raising=False)
+    real = nlp_pounce.solve_nlp
+    state: dict = {"calls": [], "first": None, "second": None, "after_first": None}
+
+    def wrapped(evaluator, x0, **kw):
+        state["calls"].append(kw)
+        if len(state["calls"]) == 1:
+            res = real(evaluator, x0, **kw)
+            assert res.raw_status == 0, res.raw_status
+            res.kkt = {**(res.kkt or {}), **_MIDPATH_KKT}
+            state["first"] = dataclasses.replace(res, x=np.array(res.x, copy=True))
+            if state["after_first"] is not None:
+                state["after_first"]()
+            return res
+        return state["second"](state["first"], kw)
+
+    monkeypatch.setattr(nlp_pounce, "solve_nlp", wrapped)
+    return state
+
+
+def _continuation(first, *, raw, status, x=None, kkt=None):
+    import dataclasses
+
+    return dataclasses.replace(
+        first,
+        raw_status=raw,
+        status=status,
+        x=np.array(first.x if x is None else x, dtype=np.float64),
+        multipliers=None if first.multipliers is None else np.array(first.multipliers),
+        kkt=dict(first.kkt if kkt is None else kkt),
+        solve_report={"continuation_marker": True},
+    )
+
+
+def _assert_first_point_kept(r, x, y):
+    assert r.status == "local_limit"
+    assert r.value(x) == pytest.approx(1.0, abs=1e-6)
+    assert r.value(y) == pytest.approx(1.0, abs=1e-6)
+    assert r.objective == pytest.approx(2.0, abs=1e-6)
+    assert r.bound is None and not r.gap_certified
+    assert (r.solve_report or {}).get("continuation_marker") is None
+
+
+def test_failed_continuation_keeps_first_point_as_local_limit(scripted):
+    from discopt.solvers import SolveStatus
+
+    scripted["second"] = lambda first, kw: _continuation(
+        first, raw=-1, status=SolveStatus.ITERATION_LIMIT, x=[3.0, 3.0]
+    )
+    m, x, y = _tiny_row()
+    r = m.solve(solver="pounce", initial_solution=_start(x, y))
+    assert len(scripted["calls"]) == 2, "the continuation must have been attempted"
+    _assert_first_point_kept(r, x, y)
+
+
+def test_continuation_still_midpath_is_local_limit(scripted):
+    from discopt.solvers import SolveStatus
+
+    # Code 0, the same point, the signature still on it: adopted, but not finished.
+    scripted["second"] = lambda first, kw: _continuation(first, raw=0, status=SolveStatus.OPTIMAL)
+    m, x, y = _tiny_row()
+    r = m.solve(solver="pounce", initial_solution=_start(x, y))
+    assert len(scripted["calls"]) == 2
+    assert r.status == "local_limit"
+    assert r.solve_report.get("continuation_marker") is True  # it was adopted
+
+
+def test_no_time_left_skips_the_continuation(scripted):
+    """The first solve leaves under the continuation floor: no second POUNCE call
+    (before: it was launched with ``max_wall_time = 0.1`` past the deadline)."""
+    import time
+
+    from discopt.solver import _POUNCE_MIDPATH_MIN_CONTINUATION_TIME
+
+    T = 3.0
+    t0 = time.perf_counter()
+    # Leave at most half the floor of the caller's budget.
+    scripted["after_first"] = lambda: time.sleep(
+        max(0.0, T - 0.5 * _POUNCE_MIDPATH_MIN_CONTINUATION_TIME - (time.perf_counter() - t0))
+    )
+    scripted["second"] = lambda first, kw: pytest.fail("no continuation without time left")
+    m, x, y = _tiny_row()
+    r = m.solve(solver="pounce", initial_solution=_start(x, y), time_limit=T)
+    assert len(scripted["calls"]) == 1
+    _assert_first_point_kept(r, x, y)
+
+
+def test_continuation_budget_never_exceeds_the_deadline(scripted, monkeypatch):
+    """With the floor at 0, the continuation is given exactly what is left -- never the
+    0.1 s pad the first version added on top of it."""
+    import time
+
+    import discopt.solver as solver_mod
+    from discopt.solvers import SolveStatus
+
+    monkeypatch.setattr(solver_mod, "_POUNCE_MIDPATH_MIN_CONTINUATION_TIME", 0.0)
+    T, left = 3.0, 0.03
+    t0 = time.perf_counter()
+    scripted["after_first"] = lambda: time.sleep(max(0.0, T - left - (time.perf_counter() - t0)))
+    scripted["second"] = lambda first, kw: _continuation(first, raw=0, status=SolveStatus.OPTIMAL)
+    m, x, y = _tiny_row()
+    m.solve(solver="pounce", initial_solution=_start(x, y), time_limit=T)
+    assert len(scripted["calls"]) == 2
+    budget = scripted["calls"][1]["options"]["max_wall_time"]
+    assert 0.0 < budget <= left, budget
+
+
+@pytest.mark.parametrize(
+    "point, why",
+    [
+        ((1.1, 1.1), "less feasible"),  # objective 1.62 < 2, but the disc is violated
+        ((0.9, 0.9), "worse objective"),  # feasible, objective 2.42 > 2
+    ],
+)
+def test_acceptable_continuation_worse_than_first_point_is_rejected(scripted, point, why):
+    """Code 1 meets only the acceptable tolerances; it may not replace the first point
+    with a less feasible or a worse one. Before: adopted unconditionally."""
+    from discopt.solvers import SolveStatus
+
+    scripted["second"] = lambda first, kw: _continuation(
+        first, raw=1, status=SolveStatus.OPTIMAL, x=point
+    )
+    m, x, y = _tiny_row()
+    r = m.solve(solver="pounce", initial_solution=_start(x, y))
+    assert len(scripted["calls"]) == 2
+    _assert_first_point_kept(r, x, y)
+
+
+def test_acceptable_continuation_no_worse_is_adopted_as_local_limit(scripted):
+    """The control for the test above: a code-1 point no worse on both counts is taken,
+    and is still ``local_limit`` -- code 1 never certifies a local optimum."""
+    from discopt.solvers import SolveStatus
+
+    scripted["second"] = lambda first, kw: _continuation(first, raw=1, status=SolveStatus.OPTIMAL)
+    m, x, y = _tiny_row()
+    r = m.solve(solver="pounce", initial_solution=_start(x, y))
+    assert len(scripted["calls"]) == 2
+    assert r.status == "local_limit"
+    assert r.solve_report.get("continuation_marker") is True
