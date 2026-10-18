@@ -1,0 +1,737 @@
+# Model serialization — completion plan
+
+> **Plan v1.1 — 2026-10-18 — author: Claude (planning session for jkitchin).**
+> Status: proposed; no work package started. Every claim about the code below was
+> read from the tree at `3191cc65` (schema `discopt.model/1.4`, `discopt 0.9.1.dev0`,
+> after PRs #1748 and #1764). Agents executing a package **re-verify** the lines they
+> rely on first (§0.4) and bump the revision header + §9 change log when they change
+> this document.
+
+This plan closes the model serialization subsystem — `python/discopt/serialize.py`
+(the native JSON format), the pickle/deepcopy/clone path in
+`python/discopt/modeling/core.py`, `python/discopt/result_io.py` (the embedded
+`SolveResult`), and `python/discopt/provenance.py` — to a stated, testable
+**Definition of Done** (§2). It is written to be executed one work package per
+Opus agent session, one PR each (§4), in the order of §5.
+
+---
+
+## 0. Implementation contract (binding on the implementing agent)
+
+A PR that violates a clause is wrong even if its tests are green. These are
+CLAUDE.md's rules applied to this subsystem; CLAUDE.md wins on any conflict.
+
+### 0.1 Correctness of the *document* is the product
+
+1. **No silent drop, no silent approximation.** Every model element either
+   round-trips byte-exactly (`dumps(loads(d), provenance=False) == d`) or is refused
+   with `SerializationError` naming the element and the remedy
+   (`_refuse_unsupported`, `_refuse_unclassified_attributes`). A reader that skips an
+   unknown `op`, key-kind or relation is a defect, not a compatibility feature.
+2. **Reads are strict** (`_StrictRefs`, `_dec_index_int`, `_KNOWN_SENSES`,
+   `_KNOWN_DISJUNCTION_METHODS`, `_check_index_in_range`, `_check_axis_in_range`).
+   A new section gets the same treatment on the first PR that writes it, with
+   malformed-document cases added to `MALFORMED` in
+   `python/tests/test_serialize_adversarial.py` in the same PR.
+3. **Anything touching a solve path is bound-neutral** (CLAUDE.md §5): a reloaded,
+   unpickled or cloned model must give **exactly** the same `node_count`, `status`
+   and `objective` as the original (`test_solve_is_bound_neutral_after_round_trip`,
+   `test_pickle_of_a_solved_model_is_bound_neutral` are the pattern). "Close" is a
+   failure. This covers `_source_still_matches` in `solvers/nlp_native.py`, the
+   `_DetachedNlRepr` guard, lowering marks, `_free_by_construction`,
+   `_disjunctive_config_floor` (never carried) and the decomposition annotations.
+4. **Never weaken a refusal to make a test pass.** If a builder (§4 WP-6) produces a
+   model the format refuses, the outcomes are: an encoding (a schema minor bump,
+   §3.1), or a *documented final refusal* with its remedy. Removing the attribute
+   from `_refuse_unclassified_attributes`'s view is not an option.
+
+### 0.2 Measurement discipline (CLAUDE.md §6–§11)
+
+5. Every probe/harness/generator in this plan **prints an executed-check count and
+   exits non-zero when it is zero** (`test_corpus_probe_actually_fired`,
+   `test_the_malformed_probe_fired` are the in-tree pattern). A corpus harness that
+   finds no files prints *why* and fails, it does not pass vacuously.
+6. **No swallowed exceptions in an instrument.** A fuzzer classifies exceptions; it
+   never `except Exception: pass`.
+7. **Verify which code is loaded** before any measurement or fixture generation:
+   assert `discopt.__file__` is under the intended tree **and** a marker unique to
+   the version under test (for fixtures: `discopt.serialize.SCHEMA ==
+   "discopt.model/1.N"`; for a baseline run: the marker *absent*).
+8. **Timing claims** (WP-7) need `uptime`/load check, interleaved A/B, ≥ 5 repeats,
+   and a reported sd. Sequential A then B is not a measurement.
+9. A measurement that contradicts this plan wins; record the falsification in the
+   affected §4 package *in this file* before continuing (dated, in the style of
+   `performance-plan.md` §6).
+
+### 0.3 Versioning discipline (defined in §3, binding from WP-2 on)
+
+10. Any PR that changes the document shape bumps `SCHEMA`'s minor (or major per
+    §3.1), adds the new version's fixtures to the golden corpus (§3.3) in the same
+    PR, and extends the compatibility matrix test. A shape change without a bump is
+    a defect (the 1.2 lesson in `serialize.py`'s `SCHEMA` comment).
+11. The golden fixtures for versions **already shipped** are immutable; a test that
+    needs them changed is wrong.
+
+### 0.4 Workflow
+
+12. One package per PR on a feature branch; title names the package
+    (`serialize:WP-3 …`). Every PR runs and reports:
+    `pytest -m smoke`, `pytest -m slow python/tests/test_adversarial_recent_fixes.py`,
+    `pytest python/tests/test_serialize_roundtrip.py python/tests/test_serialize_adversarial.py python/tests/test_model_pickle.py python/tests/test_deep_expression_walks.py python/tests/test_1302_review_followups.py python/tests/test_1248_atom_survives_serialization.py python/tests/test_1290_serialize_bool_index_tuple_axis.py python/tests/test_transformations.py -m ""`,
+    plus `ruff check python/ && ruff format --check python/ && mypy python/discopt/`.
+    `cargo test -p discopt-core` when `crates/` is touched (none of the packages
+    below should need to).
+13. New behaviour ships with a regression test that **fails before / passes after**;
+    the PR description names the test and quotes the failure.
+14. Grep before naming an attribute (`model._variables`, `model._constraints`,
+    `Constraint.body`, `Model._objective`, module-level `dm.from_nl`). Guessing
+    attribute names is a documented cause of invisible no-op probes.
+15. Update §8 (progress table) and, if the plan changed, §9 in the same PR.
+    `Closes #N` only when the package finishes an issue; otherwise `Contributes to`.
+16. **Stop and escalate** (do not improvise) when: a kill criterion fires; a
+    fixture from a shipped version fails to load and the cause is not found in one
+    session; meeting a goal would require relaxing a §0.1 refusal; the owner
+    decisions in §7 are needed and not yet taken.
+
+---
+
+## 1. Current state (verified at `3191cc65`; the gaps this plan closes)
+
+**Done.** `dumps`/`loads`/`save`/`load` round-trip variables (incl. the
+`_bound_stack` of a `fix()` scope), parameters, objective, algebraic rows, fast-API
+builder blocks and builder objective, indicator/SOS/disjunction, complementarity
+relations with lowering *marks*, initial point, `_gams_initial_values`, atan2 and
+piecewise guards, `_sets`, decomposition annotations (`_decomp_*`, `_coupling_keys`,
+`_block_labels_*`), registered-atom tags (re-derived on load by `_retag_atoms` /
+`lowering_reproduces`), `from_nl` provenance (`_DetachedNlRepr` marker +
+`_source_nl_path` + `_source_nl_sha256`), provenance block with
+`ProvenanceSkewWarning`. Attributes attached after `__init__` are classified in
+`_MODEL_STATE` / `_LAZY_STATE`; unknown private ones are refused by name;
+`_bml_*/_ipx_*/_nsl_*` reformulation records are refused with the remedy.
+`pickle`/`deepcopy`/`clone` work for solved, `from_nl`, fast-API, deep (50k-node),
+id-keyed-mark and registered-atom models (`Model.__getstate__`/`__setstate__`,
+`__deepcopy__`, `_row_marks_by_position`, `_PICKLE_SCOPES`/`_ChildrenFirstEnd`,
+`RegisteredFunction.__reduce__` → `_PickledAtomRef`). `solve_batch` ships models as
+`dumps` text. 66 in-repo MINLPLib `.nl` files round-trip `.nl`-byte-identically
+(`slow`); 4 of them are solve-bound-neutral.
+
+**Gaps** (numbering reused throughout):
+
+| # | Gap | Closed by |
+|---|---|---|
+| G1 | Refused: `CustomCall` (`dm.custom`), `_LogicalConstraint`/`BooleanVar` (`Model.logical`, `Model.boolean`), reformulation outputs with back-references | WP-3 (decisions in §3.6) |
+| G2 | Lossy: `LoweringRecord.rows` reloads as `None`; per-solve state; `Variable._fix_scope_tokens`; parsed `.nl` only as marker; user public attributes | WP-3 (`rows`); rest become *documented* non-goals (§3.6) |
+| G3 | Versioning: no forward-compat policy; no golden fixtures for 1.0–1.4; pickle carries no version; no major-bump/deprecation/migration policy; provenance skew only warns | WP-1, WP-2 |
+| G4 | Testing: no property-based round trip, no fuzzing of `loads`, full MINLPLib/QPLIB never round-tripped, builders (DAE/ML/GDP factory/stochastic/RO/bilevel) never round-tripped | WP-4, WP-5, WP-6 |
+| G5 | Performance: `dumps`/`loads` never benchmarked at scale; model pickle +19.6% (stated in the #1764 session; **not recorded in-tree** — must be re-measured) | WP-7 |
+| G6 | Security: `loads` hardened but unfuzzed; pickle inherently unsafe and undocumented as such in the API reference | WP-4, WP-8 |
+
+Environment facts an agent must plan around: this clone is **shallow** (405
+commits; `git rev-parse --is-shallow-repository` → true; `git log -S'SCHEMA = "discopt.model/'`
+finds only one commit), so historical writers need `git fetch --unshallow` or the
+owner's full clone (§3.3). `hypothesis` is **not** installed and not in
+`[project.optional-dependencies] dev` (`pyproject.toml:95`). Tag `v0.9.0` writes
+`discopt.model/1.3`; `v0.8.0` has no `serialize.py`; 1.0–1.2 lie between the two tags.
+The full MINLPLib/QPLIB corpora live at `~/Dropbox/projects/discopt-minlp-benchmark/`
+only on the owner's machine (`python/tests/test_qplib_corpus.py` already uses
+`DISCOPT_QPLIB_DIR` + `skipif` with a printed reason — copy that pattern).
+
+---
+
+## 2. Definition of Done
+
+**Serialization is complete when every row below is green on `main`**, each proven
+by the named test in the named CI lane (lanes: *fast* = `python-fast` in
+`.github/workflows/ci.yml`; *slow* = `python-correctness-slow` / manual +
+weekly cron added by WP-8; *local* = owner's machine, result recorded in §8).
+
+| DoD | Criterion ("complete when …") | WP | Proof |
+|---|---|---|---|
+| D1 | Every document written by any shipped schema version 1.0–1.4 (and every later minor) loads with the current reader into a model whose `to_nl()` equals the text recorded at generation, and re-saves at the current schema without change on a second reload | WP-1 | `test_serialize_compat_matrix.py::test_every_golden_fixture_loads` (fast) |
+| D2 | The compat matrix records, for the current writer vs every shipped reader, one of {loads identical, refuses loudly}; no cell is "loads a different model" | WP-1 | `test_serialize_compat_matrix.py::test_forward_matrix_has_no_silent_misread` (fast) |
+| D3 | A reader's behaviour on an unknown minor/major and on an unknown top-level key is the one §3.2 specifies, tested per case | WP-2 | `test_serialize_versioning.py` (fast) |
+| D4 | A pickled `Model` carries a format stamp; unpickling across a different stamp behaves as §3.4 specifies (owner decision O1) | WP-2 | `test_model_pickle.py::test_pickle_carries_a_format_stamp`, `::test_mismatched_pickle_format_is_refused` (fast) |
+| D5 | `discopt upgrade-model` (load + re-save at current schema, `--check` dry run) exists and is tested | WP-2 | `test_cli_upgrade_model.py` (fast) |
+| D6 | Propositional logic constraints round-trip (schema 1.5); `CustomCall` and reformulation records are *final* refusals with the remedy in the message and the docs | WP-3 | `test_serialize_roundtrip.py::test_logical_constraints_round_trip*`, existing refusal tests (fast) |
+| D7 | `LoweringRecord.rows` round-trips by row position (1.5) | WP-3 | `test_serialize_roundtrip.py::test_lowering_record_rows_round_trip` (fast) |
+| D8 | A hypothesis-generated model (variables of every type/shape, every op in `_KNOWN_OPS`/`_known_funcs()`, every relation kind, shared subexpressions, fixed scopes) satisfies: `dumps` stable under reload; `model_fingerprint` equal; `pickle` ≡ `dumps` on fingerprint — ≥ 50 examples in fast, ≥ 2000 in slow | WP-4 | `test_serialize_property.py` (fast + slow) |
+| D9 | `loads` on mutated/random input raises only `SerializationError` (never another exception, never hangs past the deadline) and never returns a model whose re-dump equals the unmutated document when a semantic field was mutated | WP-4 | `test_serialize_fuzz.py` (fast + slow) |
+| D10 | Every in-repo corpus file (`python/tests/data/minlplib_nl/*.nl` 66, `data/qplib/qplib/*.qplib` 9, `data/binary_nl/*`, `data/mpcc_complementarity.nl`) round-trips `.nl`-byte-identically and pickle/`dumps` agree on fingerprint; a 12-instance panel is solve-bound-neutral | WP-5 | `test_serialize_corpus.py` (slow) |
+| D11 | The full MINLPLib (1,610) and QPLIB (421 usable) corpora round-trip with 0 failures when present; absent corpora skip with a printed reason and the run still asserts its executed count ≥ the in-repo floor | WP-5 | `scripts/serialize_corpus_roundtrip.py` (local; result in §8) |
+| D12 | Every model-producing builder in the package (§4 WP-6 table) is either round-trip-tested or listed with a final, tested refusal | WP-6 | `test_serialize_builders.py` (fast where the build is < 1 s, else slow) |
+| D13 | `dumps`/`loads`/`pickle`/`deepcopy` have a recorded size/time ladder and a budget test; the pickle overhead vs the pre-#1764 baseline is re-measured with sd and either cut or recorded as accepted (owner decision O2) | WP-7 | `test_serialize_perf_budget.py` (slow); `docs/dev/data/serialize-perf-2026-*.jsonl` |
+| D14 | Users can read, in one place, what is carried, what is refused, what the version policy guarantees, and why pickle is not a storage format; module docstrings match | WP-8 | notebook builds with 0 warnings; `test_serialize_docs_match.py` asserts the refused-list in the docs equals `_REFUSED_RELATIONS` ∪ the `CustomCall` check (fast) |
+| D15 | CI runs D1–D9, D12, D14 on every PR with ≤ +25 s added wall to `python-fast`; D10, D13 in the slow lane; D11 on demand | WP-8 | `ci.yml` diff; `--durations=20` output quoted in the PR |
+
+---
+
+## 3. Versioning design
+
+### 3.1 Schema version policy (`SCHEMA = "discopt.model/<major>.<minor>"`)
+
+- **Minor bump — additive or disambiguating.** Any change a *current* reader with
+  the new code must act on, including: a new top-level key or section
+  (`provenance` in 1.1, `nl_source` in 1.4), a new node `op`/index kind/axis
+  spelling (1.2), a new tag (1.3), a key whose *absence* changes meaning (1.4's
+  "not read from a file" vs "writer did not record it"). Rule of thumb from the
+  `SCHEMA` comment: if the minor is what lets the reader tell two encodings apart,
+  it must bump.
+- **Major bump — non-additive.** Renaming or removing a key the reader requires,
+  changing a value's type or unit, changing the node-table id scheme, changing the
+  meaning of an existing field. A major bump requires an upgrade path (§3.5) and a
+  deprecation window of **one minor release** during which the writer still writes
+  the old field *and* the new one, and the reader accepts both.
+- **Writer always writes the current `SCHEMA`.** There is no "write as 1.3" option;
+  a document for an older reader is produced by that older discopt (`pip install
+  discopt==X`), never by the current one pretending. (Rationale: a down-writer
+  would have to drop content, which §0.1 forbids.)
+- **Deprecation**: a deprecated key is listed in a module-level
+  `_DEPRECATED_KEYS = {key: (since_minor, replacement)}`; reading it logs at
+  `DEBUG` and migrates; writing it stops at the next major. Nothing is currently
+  deprecated.
+
+### 3.2 Reader behaviour (implemented by WP-2; today's behaviour in brackets)
+
+| Document | Reader does |
+|---|---|
+| major ≠ `SCHEMA_MAJOR` | refuse (`SerializationError`) — [same today] |
+| minor ≤ reader's, only known top-level keys | load strictly — [same] |
+| minor ≤ reader's, **unknown top-level key** | **refuse**: a writer at that minor never wrote that key, so it is malformed or hand-edited — [today: ignored] |
+| minor > reader's, only known top-level keys | load strictly and emit `SchemaVersionWarning` ("written by a newer format 1.N; this reader is 1.M; content it understands was loaded; upgrade discopt to be sure") — [today: silent] |
+| minor > reader's, unknown top-level key **or** unknown op/kind/tag | **refuse**, message names the key and says to upgrade — [today: unknown key ignored, unknown op refused] |
+| non-numeric minor, trailing components | as today (`_loads_document`): non-numeric minor refused, `1.3.1` read as minor 3 |
+
+Known top-level keys become an explicit `_TOP_LEVEL_KEYS: dict[str, int]` (key →
+minor it appeared in), which is also what WP-1's matrix test and WP-8's docs are
+generated from. **This changes one existing test**
+(`test_a_future_minor_schema_is_readable_but_a_future_major_is_not`): a future
+minor stays readable *when it carries only known keys*; a new assertion covers the
+unknown-key refusal. The old behaviour ("ignore unknown keys so 1.0 reads 1.1") is
+exactly the silent-drop §0.1 forbids once a key can carry model content; the
+`provenance` precedent was metadata and is grandfathered by being in `_TOP_LEVEL_KEYS`.
+
+`result_io.SCHEMA_VERSION` (currently 3, integer) stays its own counter: the
+solution subtree is `deserialize_result`'s to version, and `_SCHEMA_MINOR_UNTAGGED_SOLUTION`
+already ties the model minor to the one non-additive change there. WP-2 adds the
+same unknown-key rule to `deserialize_result` (it currently passes unknown keys to
+`SolveResult(**kwargs)`, which raises `TypeError` → wrapped as `SerializationError`;
+make that an explicit, named refusal).
+
+### 3.3 Golden fixture corpus (WP-1)
+
+**Location**: `python/tests/data/serialize_fixtures/v1.<minor>/<case>.json` plus one
+`python/tests/data/serialize_fixtures/MANIFEST.json`. Per version the manifest
+records: generating commit SHA, `discopt.__version__`, `SCHEMA` string asserted at
+generation (the §0.2.7 marker), date, and per case: the builder name, the
+`to_nl()` text (or `null` with a reason when `to_nl` refuses, e.g. a model with an
+indicator constraint), the `model_fingerprint` tuple canonical text where
+`transformations.model_fingerprint` existed at that commit, and the
+forward-compat cell (§3.3.3).
+
+**Cases** (`python/tests/serialize_fixture_models.py`, a fixed registry of
+zero-argument builders; **use only API that existed at 1.0** so the same code runs
+at every historical commit; a builder that raises at an old commit is recorded as
+`"unbuildable_at": "1.N: <error>"` in the manifest, never skipped silently):
+`scalar_nlp` (continuous, exp/log/sqrt, `**`), `array_bounds_inf_nan` (shape (3,2),
+±inf and sentinel bounds, integer var), `mip_indicator_sos_disjunction`
+(`Model.if_then`, `sos1`, `either_or`), `shared_dag` (one subexpression reused
+20×), `fixed_scope` (saved inside a `with x.fixed(1.0):` scope — `Variable.fix()` is not a context manager; use whichever scoped spelling exists at the generating commit and record `unbuildable_at` if neither does), `complementarity_lowered`
+(`Model.complementarity` + one lowering mark), `with_result` (a 2-variable solve
+embedded via `save(result=…)`), `from_nl_nvs01`, `from_nl_st_e13`,
+`from_nl_mpcc` (`data/mpcc_complementarity.nl`), `fast_api_blocks`
+(`add_linear_constraints` + `add_quadratic_objective`), `registered_atom` (1.3+),
+`gams_initial_values` (1.4+), `recentre_marker` (1.4+).
+
+**Generation procedure** (`scripts/serialize_fixture_gen.py --version 1.N --commit <sha> --out …`):
+1. `git fetch --unshallow` (or run on the owner's full clone); find the commit
+   that *last* wrote each minor: `git log --format=%H -S'SCHEMA = "discopt.model/1.N"' -- python/discopt/serialize.py`
+   gives the commit that introduced 1.N+1 (removed the string) and the one that
+   introduced 1.N; take the parent of the former — the last tree that wrote 1.N.
+2. `git worktree add /tmp/wt-1.N <sha>`; in it: `pip install -e . --no-deps`
+   into a dedicated venv and `maturin develop --release` **from that worktree root**
+   (CLAUDE.md install note; the Rust ABI must match that commit's Python side).
+3. Run the generator **inside that venv**; it asserts
+   `discopt.__file__.startswith("/tmp/wt-1.N")` and `discopt.serialize.SCHEMA == "discopt.model/1.N"`
+   and exits 2 otherwise; writes the fixtures with `provenance=False` (byte-stable)
+   plus one `*_with_provenance.json` per version so the provenance-skew path has a
+   real historical block.
+4. For the forward cell (§3.3.3) the generator also *loads the current HEAD's
+   fixtures* with the old reader and records the outcome.
+5. Prints `cases written: N, unbuildable: M, forward cells: K`; exit non-zero at
+   `N == 0`.
+6. The 1.4 fixtures are generated from **current HEAD before WP-3 bumps to 1.5**
+   (hence WP-1 precedes WP-3 in §5). From WP-3 on, every bump PR generates its own
+   version's fixtures from its own HEAD (trivial marker check) — §0.3.10.
+
+**Fallback if a historical commit cannot be built** (Rust toolchain mismatch,
+missing dependency): record the exact failure in the manifest and §8; the matrix
+then has a documented hole, not a silent one. Do **not** hand-write a "1.1-style"
+document from memory — `test_legacy_11_document_restores_a_tagged_float_in_the_trace`
+already embeds one such hand-made 1.1 excerpt; keep it, but it does not substitute
+for a writer-produced fixture.
+
+#### 3.3.3 Compatibility matrix
+
+Rows = writer version, columns = reader version. Backward cells (old doc → current
+reader) are **live tests** (`test_every_golden_fixture_loads`, parametrized over
+the manifest; executed-count assertion `>= 10 × number_of_versions_present`).
+Forward cells (current doc → old reader) are **recorded at generation** in the
+manifest with one of `loads_identical` (old reader's `to_nl` equals ours),
+`refused: <message prefix>`, `loads_different: <diff>`; the test asserts the
+column exists for every present version and contains **no** `loads_different`.
+If generation finds one, that is a real defect in a shipped reader — record it in
+§8 and in the user-facing compatibility statement (WP-8) as "documents written by
+≥ 1.N must not be opened with ≤ 1.M".
+
+### 3.4 Pickle format stamp (WP-2; owner decision **O1**)
+
+`Model.__getstate__` currently returns `(attrs, had_builder, row_marks)` and the
+module docstring says "pickle carries no format version". Add a module constant
+`_MODEL_PICKLE_FORMAT = 1` (bumped on any change to what `__getstate__` writes or
+`__setstate__` expects) and write `attrs["_pickle_format"] = (_MODEL_PICKLE_FORMAT, discopt.__version__, SCHEMA)`.
+In `__setstate__`:
+
+- missing stamp or `format != _MODEL_PICKLE_FORMAT` → **refuse** with
+  `TypeError("this Model was pickled by a different discopt pickle layout (…); pickle is for same-version transport — use Model.save()/load() to keep a model, or re-pickle it with the writing version")`.
+  Recommended: refuse. A layout mismatch means `__dict__.update` would install
+  attributes the new code does not expect or miss ones it does — exactly the
+  silent misbehaviour G3 names.
+- same format, different `discopt.__version__` → `ProvenanceSkewWarning` (reuse
+  the category; its docstring already describes this use) and proceed.
+  *Alternative for the owner*: refuse here too (strictest; breaks `pickle` across a
+  dev-version bump within one day). The plan recommends **warn**.
+
+The same stamp is written by `Expression.__reduce_ex__`'s outer scope? **No** — a
+lone expression pickle stays unstamped: it is an internal transport
+(`test_pickled_expression_keeps_identity_with_its_model`), and stamping every node
+would reintroduce per-node cost (#1764 measured a per-node weakref at ~+50%).
+Documented as such.
+
+### 3.5 Migration / upgrade path (WP-2)
+
+`discopt upgrade-model <in> [<out>] [--check]` in `python/discopt/cli.py`
+(`subparsers.add_parser("upgrade-model", …)`): `load` → `save` at the current
+`SCHEMA`, preserving the embedded result and carrying the old provenance block as
+`previous` into `provenance.capture(previous=…)` (the parameter exists). `--check`
+loads, reports schema in → schema out and whether a rewrite would change bytes,
+writes nothing. Exit codes: 0 ok, 1 refused (message to stderr), 2 usage. That is
+the whole migration story for minors; a future major adds a `_migrate_1_to_2(doc)`
+step in `_loads_document` *before* strict decoding, and the fixture corpus from
+§3.3 is what proves it.
+
+### 3.6 Decisions on the G1/G2 items
+
+| Item | Decision | Why |
+|---|---|---|
+| `_LogicalConstraint` / `BooleanVar` | **Encode at 1.5** (WP-3) | Finite propositional tree over nine dataclasses (`LogicalAnd/Or/Not/Implies/Equivalent/AtLeast/AtMost/Exactly`, leaf `BooleanVar.variable` = a `Variable` or `IndexExpression` → already encodable in the node table). `_relax/gdp_reformulate.py::_logical_to_linear` lowers it deterministically, so a faithful encoding exists and the current refusal is only "this version has no section", not "nothing faithful to write". |
+| `CustomCall` | **Final refusal** | Wraps an arbitrary Python callable (`CustomCall.fn`). Writing its name reloads a different model; writing its bytecode is code execution on `loads`, which `loads` on untrusted input must never be. Remedy in the message (already: `test_custom_call_refusal_names_a_working_spelling`): rewrite with `dm.udf`/`dm.*` primitives. Document as permanent in WP-8. |
+| Reformulation outputs (`_bml_*`, `_ipx_*`, `_nsl_*`) | **Final refusal** | Hold the pre-pass source model; remedy is lossless (save source, re-apply via `transformations.apply_to`). WP-6 verifies the remedy round-trips for each pass. |
+| `LoweringRecord.rows` | **Encode at 1.5** by row position (WP-3) | Rows are `Constraint` objects of this model; `_row_marks_by_position` already moves id-keyed marks by position for pickle. `rows=None` remains the encoding of "not tracked", distinct from `[]`. |
+| Per-solve state (`_LAZY_NOT_CARRIED`) | Non-goal, documented | Describes a process, not a model. |
+| `Variable._fix_scope_tokens` | Non-goal, documented | Live context-manager tokens; the *bound stack* they guard is carried. A reloaded model is outside every `with`. |
+| Parsed `.nl` (`_nl_repr`) | Non-goal, documented | Rust `PyModelRepr`; marker + digest-checked path is the faithful equivalent. |
+| User public attributes | Non-goal, documented | Not discopt state (`test_a_public_attribute_the_user_attached_is_not_discopt_state`). |
+
+---
+
+## 4. Work packages
+
+Each is one Opus session / one PR. Fields: goal, files, entry experiment (§4 of
+CLAUDE.md) with kill criterion, steps, tests (fail-before/pass-after), acceptance
+commands, out of scope, dependencies, schema version.
+
+### WP-1 — Golden fixture corpus + compatibility matrix
+
+- **Goal**: D1, D2. Writer-produced documents for every shipped minor 1.0–1.4,
+  the manifest, and the matrix test.
+- **Files**: new `python/tests/serialize_fixture_models.py`,
+  `scripts/serialize_fixture_gen.py`, `python/tests/data/serialize_fixtures/**`,
+  `python/tests/test_serialize_compat_matrix.py`; this plan §8.
+- **Entry experiment**: `git fetch --unshallow && git log --format='%h %ad %s' --date=short -S'SCHEMA = "discopt.model/' -- python/discopt/serialize.py`
+  must list ≥ 4 commits (one per bump 1.0→1.1→1.2→1.3→1.4). Then build the
+  *oldest* (1.0) worktree per §3.3 step 2 and import it with the marker check.
+  **Kill criterion**: the 1.0 tree cannot be built in ≤ 2 h of effort. If it
+  fires: record the exact failure in §8, generate from the oldest buildable minor,
+  and open the hole explicitly in the manifest + WP-8's compatibility statement
+  ("documents older than 1.N are untested"). Do not fabricate fixtures.
+- **Steps**: (1) write the builder registry (API ≤ 1.0 only); (2) generator with
+  marker check, executed count, forward cells; (3) run for 1.0–1.4 (1.4 from
+  current HEAD); (4) matrix test; (5) `MANIFEST.json` committed; (6) record the
+  per-version SHAs in §8.
+- **Tests**: `test_every_golden_fixture_loads` (parametrized; fails before because
+  the fixtures do not exist — assert the directory is non-empty as the probe),
+  `test_golden_fixture_reload_is_stable` (load → dumps → loads → dumps equal),
+  `test_forward_matrix_has_no_silent_misread`, `test_fixture_probe_fired`
+  (`>= 10 × versions`), `test_manifest_markers_match_versions` (each version's
+  recorded `SCHEMA` string equals its directory name).
+- **Acceptance**: `pytest python/tests/test_serialize_compat_matrix.py -v` (< 10 s);
+  §0.4.12 commands.
+- **Out of scope**: changing reader behaviour (WP-2); any 1.5 content.
+- **Depends on**: nothing. **Schema**: no bump.
+
+### WP-2 — Versioning policy: reader behaviour, pickle stamp, `upgrade-model`
+
+- **Goal**: D3, D4, D5; §3.2, §3.4, §3.5 implemented.
+- **Files**: `python/discopt/serialize.py` (`_TOP_LEVEL_KEYS`, `SchemaVersionWarning`,
+  `_loads_document`), `python/discopt/result_io.py` (`deserialize_result` unknown
+  keys), `python/discopt/modeling/core.py` (`_MODEL_PICKLE_FORMAT`,
+  `__getstate__`/`__setstate__`), `python/discopt/cli.py`, `python/discopt/serialize.py`
+  module docstring, `python/tests/test_serialize_versioning.py` (new),
+  `test_model_pickle.py`, `test_cli_upgrade_model.py` (new),
+  `test_serialize_roundtrip.py` (revise the future-minor test per §3.2).
+- **Entry experiment**: over the WP-1 fixtures and the 66-file corpus, count
+  documents carrying a top-level key not in the proposed `_TOP_LEVEL_KEYS`. Expected
+  0. **Kill criterion**: any legitimately written document has such a key →
+  the key list is incomplete; fix the list, not the rule. Second probe: unpickle a
+  model pickled at the parent of #1764 with HEAD (`git worktree`); record what
+  happens today (expected: loads, possibly wrong `_pickle_expressions` handling) —
+  this is the fail-before for the stamp.
+- **Steps**: (1) `_TOP_LEVEL_KEYS` + refusal paths + warning; (2) `result_io`
+  unknown-key refusal; (3) pickle stamp per §3.4 with O1's choice (default: refuse
+  on format mismatch, warn on version); (4) `upgrade-model`; (5) docstrings.
+- **Tests**: `test_unknown_key_at_known_minor_is_refused`,
+  `test_unknown_key_at_future_minor_is_refused_with_upgrade_hint`,
+  `test_future_minor_with_known_keys_warns_and_loads`,
+  `test_result_unknown_key_is_a_named_refusal`,
+  `test_pickle_carries_a_format_stamp`, `test_mismatched_pickle_format_is_refused`,
+  `test_pickle_version_skew_warns`, `test_upgrade_model_rewrites_1_0_fixture_to_current`,
+  `test_upgrade_model_check_writes_nothing`, `test_upgrade_model_carries_previous_provenance`.
+- **Acceptance**: §0.4.12; `discopt upgrade-model python/tests/data/serialize_fixtures/v1.0/scalar_nlp.json /tmp/x.json && python -c "import discopt.modeling as dm; dm.load('/tmp/x.json')"`.
+- **Out of scope**: new sections. **Depends on**: WP-1 (fixtures are the test
+  bed). **Schema**: no bump (reader-side only; the stamp is pickle-side).
+
+### WP-3 — Schema 1.5: logical constraints + `LoweringRecord.rows`; final refusals
+
+- **Goal**: D6, D7; §3.6 decisions landed.
+- **Files**: `serialize.py` (`SCHEMA = "discopt.model/1.5"`, `_enc_rows`/`_dec_rows`
+  gain a `"kind": "logical"` row with a `logic` sub-table; `_REFUSED_RELATIONS` loses
+  `_LogicalConstraint`; `_enc_complementarities`/`_dec_complementarities` gain
+  `"rows": [positions] | null`; `_TOP_LEVEL_KEYS` unchanged — the change is inside
+  `rows`/`complementarities`, but it is non-additive for a 1.4 reader
+  (`_dec_rows` would hit an unknown row kind → clean refusal; verify and record in
+  the matrix), hence the minor bump); `modeling/core.py` `_expression_roots` must
+  include logical leaves (`BooleanVar.variable`) so pickle's children-first list
+  and `_expressions_children_first` cover them; `python/tests/data/serialize_fixtures/v1.5/**`
+  from this PR's HEAD; `test_serialize_roundtrip.py`, `test_serialize_adversarial.py`
+  (`MALFORMED` gains: logical op unknown, `k` out of range for AtLeast, leaf not a
+  variable/index node, `rows` position out of range / duplicated / pointing at a
+  non-`Constraint`), notebook paragraph "Propositional logic constraints are refused
+  for a milder reason" (update in WP-8, note here).
+- **Entry experiment**: build 6 logical models (each connective once, nested, over
+  `BooleanVarArray` indices), solve each and the hand-lowered equivalent via
+  `transformations.check`-style diff; confirm `_logical_to_linear` is deterministic
+  (same CNF twice). **Kill criterion**: lowering is nondeterministic or depends on
+  state outside the model → encoding the *tree* would not be bound-neutral; stop
+  and record. (Expected: deterministic.)
+- **Steps**: (1) logic encoding: node kinds `and|or|not|implies|iff|atleast|atmost|exactly|var`,
+  `var` → node-table id of the leaf expression (must resolve to a `Variable` or an
+  `IndexExpression` of a binary `Variable`; refuse otherwise), `k` an int in
+  `[0, len(operands)]`; (2) `rows` positions; (3) bump + fixtures + matrix row;
+  (4) make the `CustomCall` and reformulation refusals' docstrings say "permanent"
+  and why (§3.6); (5) `_REFUSED_RELATIONS` may become empty — keep the mechanism.
+- **Tests** (fail-before: today's refusal): `test_logical_constraints_round_trip`
+  (each connective), `test_logical_constraint_over_boolean_array_index`,
+  `test_logical_round_trip_is_bound_neutral` (solve before/after, exact),
+  `test_lowering_record_rows_round_trip`, `test_lowering_rows_none_stays_none`,
+  `test_malformed_logic_is_refused` (via `MALFORMED`), `test_1_4_reader_refuses_a_1_5_logical_row`
+  (replay the 1.4 reader from the WP-1 worktree — recorded in the manifest's
+  forward column, asserted by the matrix test), `test_schema_minor_is_1_5`.
+- **Acceptance**: §0.4.12; `pytest python/tests/test_gdp*.py python/tests/test_logical*.py -q`
+  (whatever exists; grep first) to show the lowering path is untouched.
+- **Out of scope**: `CustomCall` encoding (never); builder sweep (WP-6).
+- **Depends on**: WP-1 (1.4 fixtures must be frozen first), WP-2 (bump protocol).
+  **Schema**: **1.5**.
+
+### WP-4 — Property-based round trip + fuzzing of `loads` (hypothesis)
+
+- **Goal**: D8, D9.
+- **Files**: `pyproject.toml` (`dev` extra gains `"hypothesis>=6.100"`; CI jobs that
+  `pip install pytest pytest-timeout pytest-xdist` by hand — `ci.yml:299,399,502,603,655,731`
+  — add `hypothesis`), `python/tests/test_serialize_property.py`,
+  `python/tests/test_serialize_fuzz.py`, `python/tests/strategies_models.py`
+  (hypothesis strategies, importable by WP-6 too), `conftest.py` hypothesis
+  profiles (`ci`: `max_examples=50, deadline=None`; `slow`: 2000).
+- **Entry experiment**: 200 generated models through `loads(dumps(m))`; count
+  distinct `_KNOWN_OPS`/funcs/relation kinds exercised (print a coverage table).
+  **Kill criterion**: the strategy exercises < 80 % of `_KNOWN_OPS ∪ _known_funcs()`
+  after one session of tuning → the generator is not a property test of the
+  format; fix the strategy before asserting anything.
+- **Steps**: (1) strategy: variables (every `VarType`, shapes `()`, `(n,)`, `(n,m)`,
+  bounds incl. ±inf/sentinel), parameters, expression trees drawing every
+  `BinaryOp`/`UnaryOp`/`FunctionCall` name in `_KNOWN_OPS`/`_EXTRA_FUNCS`/
+  `_known_funcs()`, `IndexExpression` (int/slice/tuple/bool kinds per #1290),
+  `SumExpression`/`SumOverExpression` with list axes, `MatMulExpression`, shared
+  subtrees, relations (indicator/SOS/either_or/complementarity/logical after WP-3),
+  optional `fix()` scope, optional fast-API block; (2) properties: dumps stable,
+  `model_fingerprint(loads(dumps(m))) == model_fingerprint(m)`, `pickle` round trip
+  gives the same fingerprint, `to_nl` equal when `to_nl` accepts the model
+  (otherwise assert it *refuses* both before and after — same exception type);
+  (3) fuzz: structure-aware mutators over a valid document (delete key, retype
+  value, ±1/negative/`true` on every integer ref, swap `op`, truncate `nodes`,
+  duplicate names, NaN tokens) plus `binary()` raw input; property: outcome ∈
+  {`Model`, `SerializationError`}; `deadline` per example 2 s via hypothesis
+  settings (a hang is a failure); if a mutation touched `nodes`/`rows`/`variables`
+  and a `Model` came back, `dumps(model, provenance=False) != original` (no silent
+  acceptance); (4) every example that found a bug becomes a named regression case
+  in `MALFORMED`.
+- **Tests**: `test_generated_model_round_trips`, `test_generated_model_pickle_matches_dumps`,
+  `test_strategy_covers_the_op_table` (the executed-coverage assertion),
+  `test_mutated_document_never_escapes_serialization_error`,
+  `test_mutation_of_content_is_never_silently_accepted`, `test_random_bytes_are_refused`.
+- **Acceptance**: `pytest python/tests/test_serialize_property.py python/tests/test_serialize_fuzz.py -q` ≤ 20 s in the `ci` profile; `-m slow` profile run once, output pasted in the PR.
+- **Out of scope**: fuzzing `result_io` beyond the embedded `solution` subtree;
+  fuzzing `.nl` parsing. **Depends on**: WP-3 (so logical rows are generated;
+  can start on 1.4 and extend). **Schema**: none.
+
+### WP-5 — Corpus-wide round-trip harness (in-repo + optional full MINLPLib/QPLIB)
+
+- **Goal**: D10, D11.
+- **Files**: `scripts/serialize_corpus_roundtrip.py`, `python/tests/test_serialize_corpus.py`
+  (replaces the two corpus tests in `test_serialize_roundtrip.py`, which move here
+  unchanged), `docs/dev/data/serialize-corpus-<date>.jsonl` (one row per
+  instance: name, n_vars, n_rows, n_nodes, dumps_s, loads_s, bytes, gz_bytes,
+  pickle_s, status).
+- **Entry experiment**: run the harness on the in-repo 66 + 9 QPLIB + `binary_nl`
+  + `mpcc_complementarity.nl`; expect 0 failures (the 66 already pass).
+  **Kill criterion**: none — any failure is a defect to fix in this PR (or, if it
+  is a missing encoding, a §0.4.16 escalation naming the minor it needs).
+- **Steps**: (1) harness: `-u`, per-file progress line, never `/dev/null`,
+  `faulthandler` *not* armed by default (CLAUDE.md §10 #1758), exit non-zero at
+  0 executed; corpora resolved from `DISCOPT_MINLPLIB_NL_DIR`
+  (default `~/Dropbox/projects/discopt-minlp-benchmark/minlplib/nl`) and
+  `DISCOPT_QPLIB_DIR` (as `test_qplib_corpus.py`), QPLIB filtered on
+  `qplib_manifest.csv` `usable_oracle` (never by name); absent → print
+  `"corpus X not present at <path>; skipping"` and continue with the in-repo
+  floor; (2) checks per instance: `dumps` stable, `to_nl` byte-identical for
+  `.nl`-sourced models, `from_qplib(...)` → `model_fingerprint` equal after
+  `loads(dumps())` and after `pickle`, `_source_nl_sha256` preserved; (3) pytest
+  wrapper (slow) over the in-repo set; a 12-instance solve-bound-neutral panel
+  chosen by size from `python/tests/data/known_optima.toml` entries that solve
+  < 20 s (list them in the test, with the selection rule in a comment);
+  (4) run the full corpora on the owner's machine; record the jsonl and the summary
+  in §8.
+- **Tests**: `test_in_repo_corpus_round_trips` (parametrized), `test_qplib_in_repo_round_trips`,
+  `test_corpus_probe_fired` (`>= 75`), `test_round_trip_panel_is_bound_neutral`
+  (12 instances, exact `node_count`/`objective`/`status`).
+- **Acceptance**: `python -u scripts/serialize_corpus_roundtrip.py --in-repo-only`
+  prints `executed: N ≥ 75, failed: 0`; `pytest -m slow python/tests/test_serialize_corpus.py`.
+- **Out of scope**: performance budgets (WP-7 consumes the jsonl). **Depends on**:
+  WP-3 preferred (so `.nl` complementarities with lowering rows round-trip fully);
+  can run on 1.4. **Schema**: none.
+
+### WP-6 — Builder coverage sweep
+
+- **Goal**: D12. Every model-producing builder round-trips or is a final, tested
+  refusal. Enumerated from the tree:
+
+  | Area | Entry point (grep-verified) | Expected |
+  |---|---|---|
+  | DAE | `dae.collocation.DAEBuilder` (`add_state/add_algebraic/add_control/set_ode/discretize`), `dae.finite_difference.FDBuilder`, `dae.mol.MOLBuilder`, `dae.fit.fit_trajectories` | round-trip (algebraic rows, shared subtrees) |
+  | ML frozen | `ml.predictor.add_predictor(model, inputs, predictor, method=…)` for `full_space`, `reduced_space`, `relu_bigm`, tree ensemble (`formulations/tree_ensemble.py`), `linear_tree`; readers sklearn/torch/onnx only if the optional dep is installed (skip with reason) | round-trip; `relu_bigm`/trees add binaries + big-M rows |
+  | ML trainable | `ml.trainable.TrainableNetwork` inside a model; `TrainableNetwork.freeze()` | round-trip (weights are `Variable`s) |
+  | GDP factory | `Model.disjunction`, `make_disjunct`, `either_or`, `add_disjunction(gdp_method=…)`, `Model.boolean` + `Model.logical` | round-trip (logical after WP-3); an unattached block must still be refused (`_reject_unattached_gdp_blocks`) |
+  | Stochastic | `stochastic.extensive_form.build_extensive_form`, `CVaR`/`MeanCVaR` (sets `_free_by_construction`), `chance_constraint`, `solve_lshaped` *inputs* | round-trip |
+  | RO | `ro.counterpart.RobustCounterpart(...).formulate()` for Box/Ellipsoidal/Polyhedral/budget sets, `ro.affine_policy.AffineDecisionRule` | round-trip or refusal — the entry experiment decides |
+  | Bilevel | `bilevel.problem.BilevelProblem.formulate(method="kkt"|"strong_duality", mpec_method=…)` | round-trip (complementarities + lowering marks) or refusal |
+  | GP | `gp.as_geometric_program` (if it builds a `Model`) | round-trip |
+  | Transformations | every name in `transformations` registry via `create_using` | `gdp.*`/`mpec.*` round-trip; `binary.multilinear`/`integer.*`/`nonsmooth.epigraph` refused **and** the remedy (save source, `apply_to` after load) verified fingerprint-equal |
+
+- **Entry experiment** (`scripts/serialize_builder_sweep.py`): build one small
+  instance per row, run `loads(dumps(m))` and `pickle`, classify
+  {round-trips, refused: <attr/relation>, crashed: <exc>}, print the table and the
+  executed count. **Kill criterion**: a *crash* (non-`SerializationError`) or a
+  refusal for an attribute not in §3.6's final list means a missing classification
+  or encoding; if it needs a new section, stop and add a WP-3b row to §4 with its
+  minor (1.6) before coding it — do not fold it into the sweep PR.
+- **Steps**: (1) sweep; (2) tests per row, each asserting fingerprint equality
+  and, where the solve is < 5 s, exact bound neutrality; (3) refusal rows assert
+  the message *and* the remedy path; (4) table in §8.
+- **Tests**: `test_serialize_builders.py::test_<row>_round_trips` /
+  `::test_<row>_is_refused_with_remedy`, `test_builder_sweep_probe_fired`.
+- **Acceptance**: `pytest python/tests/test_serialize_builders.py -m "not slow" -q` ≤ 15 s; slow part once, pasted.
+- **Out of scope**: fixing builder bugs unrelated to serialization (file them).
+  **Depends on**: WP-3. **Schema**: none unless the kill criterion opens WP-3b.
+
+### WP-7 — Performance ladder, budgets, and the pickle overhead
+
+- **Goal**: D13; owner decision **O2** gets its measurement.
+- **Files**: `scripts/serialize_perf_ladder.py`, `python/tests/test_serialize_perf_budget.py`
+  (slow), `docs/dev/data/serialize-perf-<date>.jsonl`, possibly
+  `modeling/core.py` (`_expressions_children_first`, `__getstate__`) and
+  `serialize.py` (`_NodeTable.add`), this file §4/WP-7 for the record.
+- **Entry experiment** (the measurement that G5 lacks): with `uptime` load < 1.0
+  and no stray `pytest`/probe processes (`pgrep -af python`), two worktrees — HEAD
+  and the **parent of the #1764 merge** (`git log --format=%P -1 20d663c6`, first
+  parent) — each built with `maturin develop --release` and marker-checked
+  (`_PICKLE_SCOPES` present / absent in `core.py`); interleaved A/B, 7 repeats, on
+  (a) the 66-file corpus pickled in one loop, (b) three synthetic deep models
+  (5k/50k/200k nodes), (c) `copy.deepcopy`; report mean ± sd per arm. **Kill
+  criterion for the optimisation half**: if HEAD's overhead vs baseline is < 5 %
+  (i.e. the +19.6% does not reproduce), record that and do not optimise; if ≥ 5 %,
+  attempt at most two variants (candidates: skip `_descendants_children_first`
+  when the deepest root is < 500 nodes and fall back to plain reduction;
+  build the children-first list once per `__getstate__` and reuse it for
+  `_row_marks_by_position`), each must keep `test_deep_expression_walks.py` and
+  `test_model_pickle.py` green and be bound-neutral; stop after two.
+- **Steps**: (1) ladder script over the WP-5 jsonl + synthetic sizes
+  (10³–10⁶ nodes) for `dumps`, `loads`, gz size, `pickle.dumps/loads`,
+  `deepcopy`; (2) budgets as *ratios* so they are machine-independent:
+  `loads(dumps(m))` wall ≤ 5 × `from_nl` wall of the same file; gz document ≤ 3 ×
+  `.nl` bytes; `pickle` ≤ 1.25 × `dumps` wall (owner may tighten after O2);
+  (3) the A/B; (4) optional optimisation under the kill criterion; (5) record
+  the numbers here and in the jsonl; a budget test (slow) that recomputes the
+  ratios on 5 fixed in-repo instances.
+- **Tests**: `test_serialize_perf_budget.py::test_round_trip_within_ratio_budget`,
+  `::test_document_size_within_ratio_budget`, `::test_budget_probe_fired`.
+- **Acceptance**: PR quotes the table (mean ± sd, both arms, `uptime`).
+- **Out of scope**: changing the document format for size (would be a major).
+  **Depends on**: WP-5 (jsonl). **Schema**: none.
+
+### WP-8 — Documentation, compatibility statement, CI wiring
+
+- **Goal**: D14, D15.
+- **Files**: `docs/notebooks/model_serialization.ipynb` (new sections:
+  "Versions and compatibility" — the §3.2 table in user words, the matrix from
+  the manifest, `upgrade-model`; update "What is refused, and why" for logical
+  constraints now carried and `CustomCall` permanent; update "`pickle` is for
+  moving a model" with the stamp behaviour), `docs/_toc.yml` unchanged,
+  `serialize.py` and `core.py` pickling-section docstrings, `docs/dev/serialization-format.md`
+  (**new, short**: top-level keys with the minor each appeared in, generated
+  from `_TOP_LEVEL_KEYS` by a test so it cannot drift), `python/tests/test_serialize_docs_match.py`,
+  `.github/workflows/ci.yml`.
+- **Entry experiment**: `jupyter-book build docs/` warning count before (must be
+  0 after); `pytest python/tests/ -m "not slow …" --durations=20 -n 2` wall before
+  vs after the new fast tests. **Kill criterion**: fast lane grows > 25 s → move
+  the heaviest new file to slow and record it.
+- **Steps**: (1) docs; (2) `test_serialize_docs_match.py` asserts the refused list
+  and key table in the docs equal the code's; (3) CI: fast lane picks up the new
+  test files automatically (unmarked); `test_serialize_corpus.py` and the perf
+  budget are `slow` (manual `python-correctness-slow`) and additionally in a new
+  weekly `serialize-corpus` job (cron, in-repo corpus only; the full corpora
+  cannot run in CI); the hypothesis `ci` profile is selected by env in `conftest.py`;
+  (4) the user-facing compatibility statement (one paragraph, in the notebook and
+  `docs/dev/serialization-format.md`): "A document written by discopt ≥ 0.9 at
+  schema 1.N loads in any later discopt with major 1. A newer document loads in an
+  older discopt only when it uses no newer section; otherwise it is refused and
+  tells you to upgrade. Pickle is same-version transport only."
+- **Tests**: `test_serialize_docs_match.py::test_docs_refused_list_matches_code`,
+  `::test_format_doc_key_table_matches_code`; `jupyter-book build docs/` 0 warnings.
+- **Acceptance**: build log + `--durations` quoted.
+- **Out of scope**: new encodings. **Depends on**: all of WP-1…WP-7 (last).
+  **Schema**: none.
+
+---
+
+## 5. Execution order and dependency graph
+
+```
+WP-1 (fixtures 1.0–1.4) ──► WP-2 (policy, stamp, upgrade-model) ──► WP-3 (1.5: logical, rows)
+                                                                        │
+                        ┌───────────────────────────┬───────────────────┼───────────────┐
+                        ▼                           ▼                   ▼               │
+                 WP-4 (property+fuzz)        WP-5 (corpus harness)   WP-6 (builders)    │
+                                                    │                                   │
+                                                    ▼                                   │
+                                             WP-7 (perf, O2)                            │
+                                                    │                                   │
+                                                    └──────────► WP-8 (docs, CI) ◄──────┘
+```
+
+Strict order for the first three (WP-1 must freeze 1.4 fixtures before WP-3 bumps;
+WP-2 defines the bump protocol WP-3 follows). WP-4/5/6 may run in parallel sessions
+after WP-3 merges. WP-7 needs WP-5's jsonl. WP-8 is last and is the only package
+allowed to touch `ci.yml` beyond adding `hypothesis` to the install lines (WP-4).
+Rough sizing: WP-1 is the largest (historical builds); WP-2, WP-3, WP-4 one session
+each; WP-5 one session + an owner-machine run; WP-6 one session (the sweep output
+sets the test count); WP-7 one session; WP-8 one session.
+
+---
+
+## 6. CI wiring summary (implemented by WP-4 install lines and WP-8)
+
+| Lane | Files | Marker | Budget |
+|---|---|---|---|
+| `python-fast` (every PR) | `test_serialize_compat_matrix.py`, `test_serialize_versioning.py`, `test_cli_upgrade_model.py`, `test_serialize_property.py` (ci profile), `test_serialize_fuzz.py` (ci profile), `test_serialize_builders.py` (`not slow`), `test_serialize_docs_match.py`, existing serialize/pickle files | unmarked / smoke | ≤ +25 s total |
+| `python-correctness-slow` (manual) + new weekly `serialize-corpus` cron | `test_serialize_corpus.py`, `test_serialize_perf_budget.py`, property/fuzz `slow` profile, builders `slow` | `slow` | ≤ 15 min |
+| owner machine (recorded in §8) | `scripts/serialize_corpus_roundtrip.py` on full MINLPLib/QPLIB; `scripts/serialize_fixture_gen.py` for historical minors | — | — |
+
+---
+
+## 7. Risks and owner decisions
+
+**Decisions the owner must take (flag in the PR that needs them):**
+
+- **O1 — pickle across versions** (§3.4; WP-2): recommended *refuse* on
+  `_MODEL_PICKLE_FORMAT` mismatch or missing stamp, *warn* on `discopt.__version__`
+  skew. Alternative: refuse on any skew. Trade-off: strictness vs. dev-loop
+  friction; `solve_batch` is unaffected either way (it ships `dumps` text).
+- **O2 — is the pickle overhead acceptable?** (WP-7): decide after the interleaved
+  A/B is in §8. The plan's default: accept up to +20 % if the two optimisation
+  variants fail, because the alternative (per-node bookkeeping) measured ≈ +50 %
+  and the recursion fix is a correctness fix (CLAUDE.md §1).
+- **O3 — unknown-key refusal at known minors** (§3.2; WP-2): the plan makes an
+  unknown top-level key a refusal. This breaks any external tool that annotates
+  documents with its own keys. Alternative: reserve a namespaced `"x-"` prefix
+  that is ignored (and never read by discopt). Recommended: adopt the `x-` escape
+  hatch *and* the refusal for everything else.
+- **O4 — the 1.0–1.2 fixtures** (WP-1): if the historical trees cannot be built
+  (kill criterion), accept a documented hole ("untested before 1.3") or fund the
+  effort to make them build (pinning an old Rust toolchain). Documents from those
+  minors exist only if someone saved with a pre-`v0.9.0` dev install.
+- **O5 — logical constraints at 1.5** (§3.6; WP-3): confirm the encoding (vs. keeping
+  the refusal and asking users to lower first). The plan recommends encoding: the
+  refusal is a missing section, not an impossibility, and `solve_batch(workers>1)`
+  cannot ship a model with `Model.logical` today.
+
+**Risks:**
+
+- Historical worktrees need the matching Rust ABI; a `_rust.abi3.so` from the
+  wrong tree gives `AttributeError` on `PyTreeManager` (CLAUDE.md install note) —
+  the marker check (§0.2.7) catches a wrong import, not a wrong `.so`; also assert
+  `discopt._rust.__file__` is under the worktree.
+- A forward-matrix cell of `loads_different` in a shipped reader is a real,
+  unfixable-in-place defect; it becomes a documented warning, not a code change.
+- Hypothesis shrinking can produce models that are legal for the modeling API but
+  that `to_nl` or `solve` refuse; properties are stated in terms of the format
+  (`dumps`/`fingerprint`), with `to_nl`/`solve` guarded by "refuses identically".
+- Adding `hypothesis` to six hand-written CI install lines: miss one and that job
+  errors at collection (the PyYAML precedent in `pyproject.toml`'s `dev` comment).
+  `test_dev_extra_declares_test_deps.py` exists — extend it to `hypothesis`.
+- Fast-lane wall: property/fuzz tests must use the `ci` profile and `deadline=None`
+  (xdist + JAX warm-up make per-example deadlines flaky); the slow profile is where
+  the deadline is a hang detector.
+
+---
+
+## 8. Progress (living table — update in the same PR as the work)
+
+| WP | Status | PR | Date | Notes / measurements |
+|---|---|---|---|---|
+| WP-1 fixtures + matrix | not started | — | — | per-version SHAs: 1.0 —, 1.1 —, 1.2 —, 1.3 —, 1.4 — |
+| WP-2 policy, stamp, upgrade-model | not started | — | — | O1, O3 pending |
+| WP-3 schema 1.5 | not started | — | — | O5 pending |
+| WP-4 property + fuzz | not started | — | — | op-coverage %: — |
+| WP-5 corpus harness | not started | — | — | in-repo: —/75; full MINLPLib: —/1610; QPLIB: —/421 |
+| WP-6 builder sweep | not started | — | — | rows round-trip: —, refused: —, crashed: — |
+| WP-7 perf | not started | — | — | pickle A/B: HEAD — ± —, base — ± — ; O2 pending |
+| WP-8 docs + CI | not started | — | — | fast-lane delta: — s |
+
+Owner decisions: O1 —, O2 —, O3 —, O4 —, O5 —.
+
+---
+
+## 9. Change log
+
+- **v1.1 (2026-10-18, review)** — claims spot-checked against `3191cc65`: shallow
+  clone; `v0.9.0` writes 1.3 and `v0.8.0` has no `serialize.py`; `hypothesis` absent
+  from `dev`; all cited test names, data files, `result_io.SCHEMA_VERSION = 3`,
+  `provenance.capture(previous=)`, the CLI subparsers, the logical classes,
+  `_logical_to_linear`, `20d663c6` = #1764 merge, the six `ci.yml` install lines and
+  the WP-6 builder entry points exist as stated. Corrected one error: the
+  `fixed_scope` fixture said `with x.fix(1.0)`; `fix()` is not a context manager.
+- **v1 (2026-10-18, Claude for jkitchin)** — initial plan from a read of
+  `serialize.py`, `result_io.py`, `provenance.py`, `batch.py`, `modeling/core.py`
+  (pickle/deepcopy section, `CustomCall`, logical classes, `from_nl`),
+  `operators.py`, `solvers/nlp_native.py`, `transformations.py`, the eight
+  serialization-related test files, the notebook, `ci.yml`, `pyproject.toml`, and
+  `git log` (shallow). No code changed.
