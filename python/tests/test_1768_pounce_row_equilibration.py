@@ -227,14 +227,18 @@ def scripted(monkeypatch):
     state: dict = {"calls": [], "first": None, "second": None, "after_first": None}
 
     def wrapped(evaluator, x0, **kw):
+        import time
+
         state["calls"].append(kw)
         if len(state["calls"]) == 1:
+            state["t_first_call"] = time.perf_counter()
             res = real(evaluator, x0, **kw)
             assert res.raw_status == 0, res.raw_status
             res.kkt = {**(res.kkt or {}), **_MIDPATH_KKT}
             state["first"] = dataclasses.replace(res, x=np.array(res.x, copy=True))
             if state["after_first"] is not None:
                 state["after_first"]()
+            state["t_first_done"] = time.perf_counter()
             return res
         return state["second"](state["first"], kw)
 
@@ -289,19 +293,16 @@ def test_continuation_still_midpath_is_local_limit(scripted):
     assert r.solve_report.get("continuation_marker") is True  # it was adopted
 
 
-def test_no_time_left_skips_the_continuation(scripted):
-    """The first solve leaves under the continuation floor: no second POUNCE call
-    (before: it was launched with ``max_wall_time = 0.1`` past the deadline)."""
-    import time
+def test_no_time_left_skips_the_continuation(scripted, monkeypatch):
+    """Less than the continuation floor is left: no second POUNCE call (before: it was
+    launched whenever any time at all was left, with ``max_wall_time = 0.1``).
 
-    from discopt.solver import _POUNCE_MIDPATH_MIN_CONTINUATION_TIME
+    The floor is raised above the whole budget instead of sleeping the budget away,
+    so the outcome does not depend on how long the model setup takes under load."""
+    import discopt.solver as solver_mod
 
     T = 3.0
-    t0 = time.perf_counter()
-    # Leave at most half the floor of the caller's budget.
-    scripted["after_first"] = lambda: time.sleep(
-        max(0.0, T - 0.5 * _POUNCE_MIDPATH_MIN_CONTINUATION_TIME - (time.perf_counter() - t0))
-    )
+    monkeypatch.setattr(solver_mod, "_POUNCE_MIDPATH_MIN_CONTINUATION_TIME", 10 * T)
     scripted["second"] = lambda first, kw: pytest.fail("no continuation without time left")
     m, x, y = _tiny_row()
     r = m.solve(solver="pounce", initial_solution=_start(x, y), time_limit=T)
@@ -311,22 +312,36 @@ def test_no_time_left_skips_the_continuation(scripted):
 
 def test_continuation_budget_never_exceeds_the_deadline(scripted, monkeypatch):
     """With the floor at 0, the continuation is given exactly what is left -- never the
-    0.1 s pad the first version added on top of it."""
+    0.1 s pad the first version added on top of it.
+
+    The deadline is the solver's own (``t_start + time_limit`` as ``_solve_continuous``
+    receives them), so neither the sleep nor the bound depends on the setup time."""
     import time
 
     import discopt.solver as solver_mod
     from discopt.solvers import SolveStatus
 
     monkeypatch.setattr(solver_mod, "_POUNCE_MIDPATH_MIN_CONTINUATION_TIME", 0.0)
-    T, left = 3.0, 0.03
-    t0 = time.perf_counter()
-    scripted["after_first"] = lambda: time.sleep(max(0.0, T - left - (time.perf_counter() - t0)))
+    real_continuous = solver_mod._solve_continuous
+    deadline: list[float] = []
+
+    def capture(model, time_limit, options, t_start, *args, **kwargs):
+        deadline.append(t_start + time_limit)
+        return real_continuous(model, time_limit, options, t_start, *args, **kwargs)
+
+    monkeypatch.setattr(solver_mod, "_solve_continuous", capture)
+    left = 0.05  # under the old 0.1 s pad
+    scripted["after_first"] = lambda: time.sleep(max(0.0, deadline[0] - left - time.perf_counter()))
     scripted["second"] = lambda first, kw: _continuation(first, raw=0, status=SolveStatus.OPTIMAL)
     m, x, y = _tiny_row()
-    m.solve(solver="pounce", initial_solution=_start(x, y), time_limit=T)
-    assert len(scripted["calls"]) == 2
+    m.solve(solver="pounce", initial_solution=_start(x, y), time_limit=3.0)
+    assert len(deadline) == 1 and len(scripted["calls"]) == 2
     budget = scripted["calls"][1]["options"]["max_wall_time"]
-    assert 0.0 < budget <= left, budget
+    # The budget is computed after the first solve returns, so it can be at most what
+    # was left then.
+    bound = deadline[0] - scripted["t_first_done"]
+    assert bound <= left  # so the old pad (0.1) fails the next line
+    assert 0.0 < budget <= bound, (budget, bound)
 
 
 @pytest.mark.parametrize(
