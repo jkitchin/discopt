@@ -464,6 +464,8 @@ def solve_milp(
         mip_start=mip_start,
     )
     primary = _solve_milp_once(time_limit=time_limit, presolve=True, **kw)
+    if primary.status == SolveStatus.ERROR:
+        return _recover_from_error(primary, kw, time_limit, t0)
     if (
         confirm_bound_from is not None
         and primary.status != SolveStatus.INFEASIBLE
@@ -485,6 +487,57 @@ def solve_milp(
     if isinstance(diag, dict):
         diag["confirmed"] = True
     return res
+
+
+def _recover_from_error(
+    primary: MILPResult, kw: dict, time_limit: Optional[float], t0: float
+) -> MILPResult:
+    """#1759: a primary HiGHS solve that errored is re-solved with presolve off.
+
+    Measured on the optimization-book II.22 portfolio masters: HiGHS answered
+    "Solve error" with presolve on and "Optimal" with it off, on the same rows. OA
+    reads a master with no point as "add cuts at the box midpoint", which on a
+    repeat error adds the same cuts every iteration, so an error is a loop until
+    the time limit rather than one lost iteration.
+
+    The re-solve is ONE HiGHS configuration, which the #1634 rule does not let
+    certify a bound on its own, and the primary that would cross-check it is the
+    one that errored. So the result carries the re-solve's point -- only if it
+    verifies against the caller's own arrays (:func:`_verified_objective`) -- and
+    no bound at all; ``OPTIMAL`` becomes ``ITERATION_LIMIT``. A re-solve that
+    also errors, or has no verified point, returns the primary's ERROR unchanged.
+    """
+    diag: dict[str, object] = {"ran": False, "primary_status": primary.status.value}
+    primary.callback_stats = {**(primary.callback_stats or {}), "presolve_cross_check": diag}
+    remaining = None
+    if time_limit is not None:
+        remaining = float(time_limit) - (time.time() - t0)
+        if remaining <= 0.0:
+            diag["recovery"] = "no time budget left"
+            return primary
+    retry = _solve_milp_once(time_limit=remaining, presolve=False, **kw)
+    diag.update(ran=True, cross_status=retry.status.value, recovery="presolve_off")
+    # HiGHS can error after it has an incumbent; keep the better verified point.
+    points = [(o, r.x) for r in (primary, retry) if (o := _verified_objective(kw, r.x)) is not None]
+    if not points:
+        diag["recovery"] = "presolve_off: no verified point"
+        return primary
+    obj, x_best = min(points, key=lambda p: p[0])
+    logger.warning(
+        "HiGHS master: primary solve errored; presolve-free re-solve gave a verified "
+        "point (objective %.12g) and no bound claim (#1759)",
+        obj,
+    )
+    retry.objective, retry.x = obj, np.asarray(x_best, dtype=np.float64)
+    retry.bound = retry.gap = None
+    if retry.status == SolveStatus.OPTIMAL:
+        retry.status = SolveStatus.ITERATION_LIMIT
+    retry.node_count += max(primary.node_count, 0)
+    retry.wall_time = time.time() - t0
+    # Nothing is left to confirm: the result makes no bound claim.
+    diag["confirmed"] = True
+    retry.callback_stats = {**(retry.callback_stats or {}), "presolve_cross_check": diag}
+    return retry
 
 
 def is_unconfirmed(res: MILPResult) -> bool:
@@ -644,7 +697,10 @@ def _solve_milp_once(
     # bound on an LP whose optimum is below it. An LP's bound is its optimum,
     # which the OPTIMAL arm below supplies; otherwise there is none.
     has_integer = integrality is not None and bool(np.any(np.asarray(integrality).ravel()))
-    if has_integer and np.isfinite(raw_bound):
+    # #1759: an errored solve claims nothing. HiGHS leaves ``mip_dual_bound`` at
+    # whatever it last held (a stale finite 0.0 on the measured "Solve error"
+    # masters), which is not a bound on the model it gave up on.
+    if has_integer and np.isfinite(raw_bound) and status != SolveStatus.ERROR:
         bound = raw_bound
     if status == SolveStatus.OPTIMAL and objective is not None:
         # HiGHS may report a dual bound a hair above the incumbent at its own

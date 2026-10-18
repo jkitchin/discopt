@@ -169,3 +169,86 @@ def test_oa_on_the_portfolio_gets_a_point_from_every_highs_master(monkeypatch, c
     assert r.status == "optimal"
     assert r.objective == pytest.approx(0.0161695584, rel=1e-6)
     assert r.bound <= r.objective + 1e-9
+
+
+# ---------------------------------------------------------------------------
+# #1759, part 2: a primary HiGHS "Solve error" is recovered, not looped on.
+# OA reads a master with no point as "add cuts at the box midpoint"; on a repeat
+# error that adds the same cuts every iteration, so one error became a loop to
+# the time limit. The reporter's masters solved with presolve off.
+
+
+def _small_milp():
+    return dict(
+        c=np.array([-1.0, -2.0]),
+        A_ub=np.array([[1.0, 1.0]]),
+        b_ub=np.array([3.5]),
+        A_eq=None,
+        b_eq=None,
+        bounds=[(0, 10), (0, 2)],
+        integrality=np.array([1, 0]),
+    )
+
+
+def _erroring_primary(monkeypatch, retry_errors=False):
+    from discopt.solvers import MILPResult, SolveStatus
+
+    real = milp_highs._solve_milp_once
+    calls = []
+
+    def once(*a, presolve, **k):
+        calls.append(presolve)
+        if presolve or retry_errors:
+            # What HiGHS returned on the II.22 masters: ERROR, no point, and a
+            # stale finite dual bound.
+            return MILPResult(status=SolveStatus.ERROR, x=None, objective=None, bound=0.0)
+        return real(*a, presolve=presolve, **k)
+
+    monkeypatch.setattr(milp_highs, "_solve_milp_once", once)
+    return calls
+
+
+@pytest.mark.parametrize("confirm_from", [None, -1e9])
+def test_an_errored_primary_is_resolved_without_presolve(monkeypatch, confirm_from):
+    from discopt.solvers import SolveStatus
+
+    calls = _erroring_primary(monkeypatch)
+    r = milp_highs.solve_milp(**_small_milp(), confirm_bound_from=confirm_from)
+    assert calls == [True, False], calls
+    assert r.x is not None, "the recovered master has no point -- OA would loop"
+    assert r.objective == pytest.approx(-5.0)  # x0 = 1 (integer), x1 = 2
+    # One HiGHS configuration alone never certifies (#1634): no bound claim.
+    assert r.bound is None
+    assert r.status == SolveStatus.ITERATION_LIMIT
+    assert not milp_highs.is_unconfirmed(r)
+
+
+def test_a_second_error_is_reported_as_the_error_it_is(monkeypatch):
+    from discopt.solvers import SolveStatus
+
+    calls = _erroring_primary(monkeypatch, retry_errors=True)
+    r = milp_highs.solve_milp(**_small_milp())
+    assert calls == [True, False]
+    assert r.status == SolveStatus.ERROR and r.x is None
+
+
+def test_oa_with_the_legacy_scaling_still_gets_a_point_from_every_master(monkeypatch):
+    """The legacy row scaling (``=0``) produced the "Solve error" masters here."""
+    monkeypatch.setenv(DROP_NEGLIGIBLE_ENV, "0")
+    solves = {"n": 0, "no_point": 0}
+    real = milp_highs.solve_milp
+
+    def spy(*a, **k):
+        r = real(*a, **k)
+        solves["n"] += 1
+        solves["no_point"] += r.x is None
+        return r
+
+    monkeypatch.setattr(milp_highs, "solve_milp", spy)
+    r = _portfolio_model().solve(
+        solver="mip-nlp", milp_solver="highs", mip_nlp_method="oa", time_limit=120
+    )
+    assert solves["n"] >= 10
+    assert solves["no_point"] == 0
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(0.0161695584, rel=1e-6)
