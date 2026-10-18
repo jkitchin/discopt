@@ -4786,8 +4786,9 @@ class SolveResult:
 
     # POUNCE's ``pounce.solve-report/v1`` document for the single POUNCE call that
     # produced this result (#1534): iteration trajectory, restoration statistics,
-    # timing. ``None`` on every route without exactly one POUNCE call. Diagnostic,
-    # never load-bearing, like ``kkt``.
+    # timing. ``None`` on every route without exactly one POUNCE call. When
+    # ``solver="pounce"`` continued a mid-path solve (#1768) it is the
+    # continuation's report. Diagnostic, never load-bearing, like ``kkt``.
     solve_report: Optional[dict[str, Any]] = None
 
     # POUNCE qp-ipm's final primal-dual iterate (``x``, ``y``, ``z``, ``z_lb``,
@@ -9007,7 +9008,9 @@ class Model:
             continuous model -- a QP not so proved, a QCQP, an NLP -- goes to the
             filter line-search NLP IPM once and reports ``"local_optimal"`` with
             no bound and ``gap_certified=False``, since nothing global was
-            proved. ``result.algorithm_route`` names the arm
+            proved. (A solve POUNCE ends one barrier update early is continued
+            once from its own point, and is ``"local_limit"`` if that does not
+            finish it, #1768.) ``result.algorithm_route`` names the arm
             (``"pounce:lp-ipm"``, ``"pounce:qp-ipm"``, ``"pounce:nlp"``) and
             ``result.solver_stats["pounce/iterations"]`` the convex engine's
             iteration count. A local infeasibility is ``"local_infeasible"``.

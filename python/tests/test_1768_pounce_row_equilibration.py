@@ -7,6 +7,12 @@ the link rows ``dx**2 + dy**2 <= L**2`` have gradients ``~2L`` and multipliers
 convergence test passes with the barrier parameter still at ``1.8e-6``. It
 reported ``Solve_Succeeded`` -- ``local_optimal`` -- with every link slack.
 Scaling each row up to unit gradient at the start point removes that.
+
+From the box-midpoint start every link gradient is 0, so there is nothing to scale
+by, and POUNCE stops one barrier update early again. That signature (success with
+the barrier parameter and the complementarity both above ``10 * tol``) is now
+continued once from the returned point, with the rows rescaled there; if the
+continuation does not finish the path the route reports ``local_limit``.
 """
 
 from __future__ import annotations
@@ -147,3 +153,55 @@ def test_sparse_row_norms_match_the_dense_jacobian():
         sparse = _jacobian_row_inf_norms(ev, x0, ev.n_constraints)
         assert sparse is not None
         np.testing.assert_array_equal(sparse, dense)
+
+
+def test_cold_start_chain_is_continued_to_convergence(spy, monkeypatch):
+    """The same chain from the box midpoint ``x = y = 0``, where every link gradient
+    is 0. Before: ``local_optimal`` at -6053.750612, barrier 1.84e-6, links 2e-6..6e-6
+    short. After: the first solve still stops there; the continuation from that point
+    (rows rescaled at it) takes 2 iterations to -6053.787460, links within 1e-8."""
+    monkeypatch.delenv("DISCOPT_POUNCE_ROW_EQUILIBRATE", raising=False)
+    n = 20_000
+    m, x, y, L = _chain(n)
+    r = m.solve(solver="pounce")
+    assert len(spy) == 2, "the first solve must still stop mid-path, or this tests nothing"
+    assert not _equilibrated(spy[0]) and spy[0]["warm_start"] is None
+    assert _equilibrated(spy[1]) and spy[1]["warm_start"] is not None
+    assert r.status == "local_optimal"
+    seg = np.hypot(np.diff(r.value(x)), np.diff(r.value(y)))
+    assert np.max(np.abs(seg / L - 1)) < 1e-7, (seg.min() / L - 1, seg.max() / L - 1)
+    assert r.objective < -6053.787
+
+
+def test_unfinished_midpath_solve_is_local_limit_not_local_optimal(spy, monkeypatch):
+    """With the rescaling opted out, nothing can continue the path; the point POUNCE
+    calls a success is reported for what it is."""
+    monkeypatch.setenv("DISCOPT_POUNCE_ROW_EQUILIBRATE", "0")
+    n = 20_000
+    m, x, y, L = _chain(n)
+    r = m.solve(solver="pounce")
+    assert len(spy) == 1
+    assert r.status == "local_limit"
+    assert r.objective > -6053.76  # the mid-path point, 0.04 above the optimum
+    assert r.bound is None and not r.gap_certified
+
+
+@pytest.mark.parametrize(
+    "raw, mu, compl, expected",
+    [
+        (0, 1.84e-6, 1.85e-6, True),  # the chain: one barrier update short
+        (0, 1.84e-6, 0.0, False),  # COPS channel: equalities only, converged
+        (0, 2.51e-9, 1.07e-6, False),  # COPS marine, cold start: at the barrier floor
+        (0, 9.09e-10, 9.09e-10, False),  # an ordinary converged solve
+        (1, 1.84e-6, 1.85e-6, False),  # acceptable level: already local_limit
+    ],
+)
+def test_midpath_signature(raw, mu, compl, expected):
+    from types import SimpleNamespace
+
+    from discopt.solver import _pounce_midpath
+
+    res = SimpleNamespace(
+        raw_status=raw, kkt={"barrier_parameter": mu, "complementarity_unscaled": compl}
+    )
+    assert _pounce_midpath(res, 1e-8) is expected
