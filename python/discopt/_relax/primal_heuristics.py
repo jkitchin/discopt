@@ -642,6 +642,23 @@ _PUMP_REPAIR_OUTER_ITERS = 10
 _PUMP_REPAIR_TOL = 1e-6
 
 
+def _subnlp_verify_any_status() -> bool:
+    """Whether :func:`subnlp` accepts a verified point whatever the NLP status (#1760).
+
+    Default OFF pending the #1760 corpus panel (CLAUDE.md §5; row in
+    ``docs/dev/flag-retirement-audit.md``). ``0`` is the legacy gate, which accepted
+    only ``OPTIMAL``/``ITERATION_LIMIT`` returns before verifying. Sound either way:
+    a point is accepted only if it passes ``subnlp``'s own integrality and
+    constraint-feasibility checks, and ``inject_incumbent`` re-verifies it.
+    """
+    return os.environ.get("DISCOPT_SUBNLP_VERIFY_ANY_STATUS", "0").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
 def _pump_repair_enabled() -> bool:
     """Whether the pump's feasibility repair runs (#1435). Default ON.
 
@@ -1145,12 +1162,25 @@ def subnlp(
     # below (``_check_constraint_feasibility`` / ``_is_integer_feasible``), and
     # ``inject_incumbent`` enforces strict improvement -- this mirrors the
     # acceptance set ``_solve_root_node_multistart`` already uses.
-    if nlp_result.status not in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
+    #
+    # #1760: with ``_subnlp_verify_any_status()`` the solver's status
+    # is not consulted at all -- the verification below is the acceptance test, and
+    # it does not care how the point was reached. Measured on the optimization-book
+    # II.B GDP: under POUNCE b27bdbdd the first disjunct-configuration sub-NLP
+    # reaches 2791.6686 (the 4ccf1487 / PyPI-0.12.0 optimum is 2791.6684) and then
+    # exits "Error in step computation"; the status gate threw the point away and
+    # the solve ended with no incumbent at 8 s and at 30 s.
+    if nlp_result.x is None:
         return None
-    if nlp_result.x is None or nlp_result.objective is None:
+    if not _subnlp_verify_any_status() and (
+        nlp_result.status not in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT)
+        or nlp_result.objective is None
+    ):
         return None
 
-    x_out = np.asarray(nlp_result.x)
+    x_out = np.asarray(nlp_result.x, dtype=np.float64)
+    if x_out.shape != x0.shape or not np.all(np.isfinite(x_out)):
+        return None
 
     # Clip integer slots back to the rounded value (the fixed-bounds solve
     # should already yield this, but guard against tiny drifts).
