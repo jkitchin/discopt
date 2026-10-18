@@ -1671,6 +1671,33 @@ def _nlp_row_equilibration_enabled() -> bool:
     )
 
 
+def _jacobian_row_inf_norms(evaluator, x0: np.ndarray, m: int) -> Optional[np.ndarray]:
+    """``max_j |dg_i/dx_j(x0)|`` per row, or ``None`` when the Jacobian has not ``m`` rows.
+
+    An evaluator with a sparse structure is read through it (#1768): the tape
+    evaluator's ``evaluate_jacobian`` is dense, and at the 100k-link COPS chain
+    (100,004 x 200,002) that is a 149 GiB allocation. The triplets are summed
+    into CSR first, so a repeated ``(row, col)`` gives the same norm the dense
+    matrix would.
+    """
+    has_sparse = getattr(evaluator, "has_sparse_structure", None)
+    if callable(has_sparse) and has_sparse():
+        import scipy.sparse as sp
+
+        rows, cols = evaluator.jacobian_structure()
+        vals = np.asarray(evaluator.evaluate_jacobian_values(x0), dtype=np.float64)
+        J = sp.coo_matrix(
+            (vals, (np.asarray(rows), np.asarray(cols))),
+            shape=(m, int(evaluator.n_variables)),
+        ).tocsr()
+        return np.asarray(abs(J).max(axis=1).todense(), dtype=np.float64).ravel()
+    Jd = evaluator.evaluate_jacobian(x0)
+    Jd = Jd.toarray() if hasattr(Jd, "toarray") else np.asarray(Jd, dtype=np.float64)
+    if Jd.shape[0] != m:
+        return None
+    return np.abs(Jd).max(axis=1) if Jd.size else np.zeros(m)
+
+
 class _RowEquilibratedEvaluator:
     """An NLP evaluator whose constraint row ``i`` is ``s_i * g_i(x)``.
 
@@ -1725,11 +1752,9 @@ class _RowEquilibratedEvaluator:
             finite = np.isfinite(b) & (np.abs(b) < _NLP_INF_BOUND)
             if np.any(b[finite] != 0.0):
                 return None
-        J = evaluator.evaluate_jacobian(np.asarray(x0, dtype=np.float64))
-        J = J.toarray() if hasattr(J, "toarray") else np.asarray(J, dtype=np.float64)
-        if J.shape[0] != m:
+        norms = _jacobian_row_inf_norms(evaluator, np.asarray(x0, dtype=np.float64), m)
+        if norms is None:
             return None
-        norms = np.abs(J).max(axis=1) if J.size else np.zeros(m)
         ok = np.isfinite(norms) & (norms > 0.0)
         scales = np.ones(m)
         scales[ok] = np.clip(1.0 / norms[ok], 1.0, _NLP_ROW_SCALE_CLAMP)
