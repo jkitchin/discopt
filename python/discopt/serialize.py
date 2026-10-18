@@ -1458,7 +1458,10 @@ _STATE_NOT_CARRIED = frozenset(
 #: ``_solve_deadline`` is moreover an absolute ``time.perf_counter()`` reading,
 #: whose origin is per-process, so a saved value would mean nothing on reload.
 #: ``_disjunctive_config_floor`` is a root bound a solve computed and stashed for
-#: its own node LPs (#732 Stage 2); it describes that solve's root box.
+#: its own node LPs (#732 Stage 2); it describes that solve's root box. The solver
+#: only ever sets it on the reformulated model a solve builds internally, so it
+#: should never reach a saved model -- classified so that, if it ever does, it is
+#: left out rather than refused.
 _LAZY_NOT_CARRIED = frozenset(
     {
         "_gauss_newton_hessian",

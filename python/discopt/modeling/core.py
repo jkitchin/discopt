@@ -541,6 +541,39 @@ class Expression:
     # ``ValueError: Input operand 1 does not have enough dimensions``.
     __array_ufunc__ = None
 
+    # ``copy.deepcopy`` walks an object graph recursively, a few interpreter frames
+    # per level, so an expression a loop built (``e = e + x[i]``) -- a chain as deep
+    # as the loop is long -- raised ``RecursionError`` at a few thousand terms when
+    # copied on its own. ``Model.__deepcopy__`` already pre-copies a model's
+    # expressions children-first; this does the same for any expression, so every
+    # node meets its children as memo hits. Each node is still copied by the
+    # default mechanism (``__reduce_ex__`` + ``copy._reconstruct``), so the copy is
+    # the same object graph the default produced -- only the order differs.
+    def __deepcopy__(self, memo: dict) -> "Expression":
+        from discopt.serialize import _children  # serialize imports this module
+
+        order: list = []
+        pending: set[int] = set()
+        stack: list = [(self, False)]
+        while stack:
+            node, expanded = stack.pop()
+            if expanded:
+                order.append(node)
+                continue
+            if not isinstance(node, Expression) or id(node) in memo or id(node) in pending:
+                continue
+            pending.add(id(node))
+            stack.append((node, True))
+            stack.extend((ch, False) for ch in reversed(_children(node)))
+        for node in order:
+            if id(node) not in memo:
+                rv = node.__reduce_ex__(4)
+                y = _copy._reconstruct(node, memo, *rv)
+                if y is not node:
+                    memo[id(node)] = y
+                    _copy._keep_alive(node, memo)
+        return cast("Expression", memo[id(self)])
+
     # Cached static shape for composite nodes (populated at construction by
     # ``BinaryOp``/``UnaryOp`` where inferable; see M8). Class default of the
     # ``_UNSET_SHAPE`` sentinel means "not computed" so a cached ``None``
