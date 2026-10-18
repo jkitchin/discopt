@@ -94,6 +94,20 @@
       "    from discopt.operators import register_function",
       "ModuleNotFoundError: No module named 'discopt.operators'"
      ]
+    },
+    "logical_constraints": {
+     "unbuildable": "SerializationError: cannot serialize: the model carries a propositional logic constraint named 'imp'. This format version carries algebraic rows, indicator, SOS and disjunctive relations. Reformulate the logic into those before saving.",
+     "trace_tail": [
+      "  File \"/tmp/wp1/wt-1.0/python/discopt/serialize.py\", line 449, in _refuse_unsupported",
+      "    raise SerializationError(f\"cannot serialize: the model carries {what}{where}. {remedy}\")",
+      "discopt.serialize.SerializationError: cannot serialize: the model carries a propositional logic constraint named 'imp'. This format version carries algebraic rows, indicator, SOS and disjunctive relations. Reformulate the logic into those before saving."
+     ]
+    },
+    "complementarity_vector_lowered": {
+     "file": "complementarity_vector_lowered.json",
+     "sha256": "4cec683cc202d19244e7083ced6ed58527c534673b16b8f672f206b90b4dd9b8",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries a disjunctive constraint (Model.either_or / Model.if_else, GDP) named 'pq_0'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
     }
    },
    "forward": {
@@ -102,6 +116,9 @@
       "outcome": "loads_identical"
      },
      "complementarity_lowered.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_vector_lowered.json": {
       "outcome": "loads_identical"
      },
      "decomposition_marks.json": {
@@ -149,6 +166,9 @@
      "complementarity_lowered.json": {
       "outcome": "loads_identical"
      },
+     "complementarity_vector_lowered.json": {
+      "outcome": "loads_identical"
+     },
      "decomposition_marks.json": {
       "outcome": "loads_identical"
      },
@@ -192,6 +212,9 @@
       "outcome": "loads_identical"
      },
      "complementarity_lowered.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_vector_lowered.json": {
       "outcome": "loads_identical"
      },
      "decomposition_marks.json": {
@@ -239,6 +262,9 @@
      "complementarity_lowered.json": {
       "outcome": "loads_identical"
      },
+     "complementarity_vector_lowered.json": {
+      "outcome": "loads_identical"
+     },
      "decomposition_marks.json": {
       "outcome": "loads_identical"
      },
@@ -256,6 +282,61 @@
      },
      "from_nl_st_e13.json": {
       "outcome": "loads_identical"
+     },
+     "mip_indicator_sos_disjunction.json": {
+      "outcome": "loads_identical"
+     },
+     "parameters_and_start.json": {
+      "outcome": "loads_identical"
+     },
+     "registered_atom.json": {
+      "outcome": "loaded",
+      "note": "no own-version fixture to compare (unbuildable here)"
+     },
+     "scalar_nlp.json": {
+      "outcome": "loads_identical"
+     },
+     "shared_dag.json": {
+      "outcome": "loads_identical"
+     },
+     "with_result.json": {
+      "outcome": "loads_identical"
+     }
+    },
+    "1.5": {
+     "array_bounds_inf.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_lowered.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "complementarity_vector_lowered.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "decomposition_marks.json": {
+      "outcome": "loads_identical"
+     },
+     "fast_api_blocks.json": {
+      "outcome": "loads_identical"
+     },
+     "fixed_scope.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_mpcc.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "from_nl_nvs01.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_st_e13.json": {
+      "outcome": "loads_identical"
+     },
+     "logical_constraints.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'logical'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
      },
      "mip_indicator_sos_disjunction.json": {
       "outcome": "loads_identical"
@@ -371,6 +452,20 @@
      "sha256": "9605c009ce38ab5d8230554dc4b9d87a2802987a5e445ef8f38f370efb9cc04c",
      "to_nl_sha256": "7afd58426f541a45d4c6c62c03836ca9499a0467a413102fc265b4ca84c23975",
      "to_nl_refused": null
+    },
+    "logical_constraints": {
+     "unbuildable": "SerializationError: cannot serialize: the model carries a propositional logic constraint named 'imp'. This format version carries algebraic rows, indicator, SOS and disjunctive relations. Reformulate the logic into those before saving.",
+     "trace_tail": [
+      "  File \"/tmp/wp1/wt-1.1/python/discopt/serialize.py\", line 516, in _refuse_unsupported",
+      "    raise SerializationError(f\"cannot serialize: the model carries {what}{where}. {remedy}\")",
+      "discopt.serialize.SerializationError: cannot serialize: the model carries a propositional logic constraint named 'imp'. This format version carries algebraic rows, indicator, SOS and disjunctive relations. Reformulate the logic into those before saving."
+     ]
+    },
+    "complementarity_vector_lowered": {
+     "file": "complementarity_vector_lowered.json",
+     "sha256": "8ccadee34e07240c17c08bad4a4738c21beed6ae105409d3e42f84ce57924ea4",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries a disjunctive constraint (Model.either_or / Model.if_else, GDP) named 'pq_0'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
     }
    },
    "forward": {
@@ -379,6 +474,9 @@
       "outcome": "loads_identical"
      },
      "complementarity_lowered.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_vector_lowered.json": {
       "outcome": "loads_identical"
      },
      "decomposition_marks.json": {
@@ -425,6 +523,9 @@
      "complementarity_lowered.json": {
       "outcome": "loads_identical"
      },
+     "complementarity_vector_lowered.json": {
+      "outcome": "loads_identical"
+     },
      "decomposition_marks.json": {
       "outcome": "loads_identical"
      },
@@ -469,6 +570,9 @@
      "complementarity_lowered.json": {
       "outcome": "loads_identical"
      },
+     "complementarity_vector_lowered.json": {
+      "outcome": "loads_identical"
+     },
      "decomposition_marks.json": {
       "outcome": "loads_identical"
      },
@@ -486,6 +590,60 @@
      },
      "from_nl_st_e13.json": {
       "outcome": "loads_identical"
+     },
+     "mip_indicator_sos_disjunction.json": {
+      "outcome": "loads_identical"
+     },
+     "parameters_and_start.json": {
+      "outcome": "loads_identical"
+     },
+     "registered_atom.json": {
+      "outcome": "loads_identical"
+     },
+     "scalar_nlp.json": {
+      "outcome": "loads_identical"
+     },
+     "shared_dag.json": {
+      "outcome": "loads_identical"
+     },
+     "with_result.json": {
+      "outcome": "loads_identical"
+     }
+    },
+    "1.5": {
+     "array_bounds_inf.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_lowered.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "complementarity_vector_lowered.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "decomposition_marks.json": {
+      "outcome": "loads_identical"
+     },
+     "fast_api_blocks.json": {
+      "outcome": "loads_identical"
+     },
+     "fixed_scope.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_mpcc.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "from_nl_nvs01.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_st_e13.json": {
+      "outcome": "loads_identical"
+     },
+     "logical_constraints.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'logical'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
      },
      "mip_indicator_sos_disjunction.json": {
       "outcome": "loads_identical"
@@ -600,6 +758,20 @@
      "sha256": "887bd5db2636b6d93319e0179838f4c15442ad1b02638231af70ea450bffdc84",
      "to_nl_sha256": "7afd58426f541a45d4c6c62c03836ca9499a0467a413102fc265b4ca84c23975",
      "to_nl_refused": null
+    },
+    "logical_constraints": {
+     "unbuildable": "SerializationError: cannot serialize: the model carries a propositional logic constraint named 'imp'. This format version carries algebraic rows, indicator, SOS and disjunctive relations. Reformulate the logic into those before saving.",
+     "trace_tail": [
+      "  File \"/tmp/wp1/wt-1.2/python/discopt/serialize.py\", line 534, in _refuse_unsupported",
+      "    raise SerializationError(f\"cannot serialize: the model carries {what}{where}. {remedy}\")",
+      "discopt.serialize.SerializationError: cannot serialize: the model carries a propositional logic constraint named 'imp'. This format version carries algebraic rows, indicator, SOS and disjunctive relations. Reformulate the logic into those before saving."
+     ]
+    },
+    "complementarity_vector_lowered": {
+     "file": "complementarity_vector_lowered.json",
+     "sha256": "39809327e61f92445494b89a1ffa08a1d01623c41b6a08effa3d48e9c6252a77",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries a disjunctive constraint (Model.either_or / Model.if_else, GDP) named 'pq_0'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
     }
    },
    "forward": {
@@ -608,6 +780,9 @@
       "outcome": "loads_identical"
      },
      "complementarity_lowered.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_vector_lowered.json": {
       "outcome": "loads_identical"
      },
      "decomposition_marks.json": {
@@ -654,6 +829,9 @@
      "complementarity_lowered.json": {
       "outcome": "loads_identical"
      },
+     "complementarity_vector_lowered.json": {
+      "outcome": "loads_identical"
+     },
      "decomposition_marks.json": {
       "outcome": "loads_identical"
      },
@@ -671,6 +849,60 @@
      },
      "from_nl_st_e13.json": {
       "outcome": "loads_identical"
+     },
+     "mip_indicator_sos_disjunction.json": {
+      "outcome": "loads_identical"
+     },
+     "parameters_and_start.json": {
+      "outcome": "loads_identical"
+     },
+     "registered_atom.json": {
+      "outcome": "loads_identical"
+     },
+     "scalar_nlp.json": {
+      "outcome": "loads_identical"
+     },
+     "shared_dag.json": {
+      "outcome": "loads_identical"
+     },
+     "with_result.json": {
+      "outcome": "loads_identical"
+     }
+    },
+    "1.5": {
+     "array_bounds_inf.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_lowered.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "complementarity_vector_lowered.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "decomposition_marks.json": {
+      "outcome": "loads_identical"
+     },
+     "fast_api_blocks.json": {
+      "outcome": "loads_identical"
+     },
+     "fixed_scope.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_mpcc.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "from_nl_nvs01.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_st_e13.json": {
+      "outcome": "loads_identical"
+     },
+     "logical_constraints.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'logical'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
      },
      "mip_indicator_sos_disjunction.json": {
       "outcome": "loads_identical"
@@ -785,6 +1017,20 @@
      "sha256": "f38241f4268dd11533d29eb420d2f3bdf01f99748544c8ec97b083662439d269",
      "to_nl_sha256": "0f2e2a6671eeeea0efba04a6b745bf0478e93b0b2d76fad2e0d5ead0106c3d50",
      "to_nl_refused": null
+    },
+    "logical_constraints": {
+     "unbuildable": "SerializationError: cannot serialize: the model carries a propositional logic constraint named 'imp'. This format version carries algebraic rows, indicator, SOS and disjunctive relations. Reformulate the logic into those before saving.",
+     "trace_tail": [
+      "  File \"/tmp/wp1/wt-1.3/python/discopt/serialize.py\", line 660, in _refuse_unsupported",
+      "    raise SerializationError(f\"cannot serialize: the model carries {what}{where}. {remedy}\")",
+      "discopt.serialize.SerializationError: cannot serialize: the model carries a propositional logic constraint named 'imp'. This format version carries algebraic rows, indicator, SOS and disjunctive relations. Reformulate the logic into those before saving."
+     ]
+    },
+    "complementarity_vector_lowered": {
+     "file": "complementarity_vector_lowered.json",
+     "sha256": "5283021a4203998373b2a736241a0260a0946991e15bce7ba2fae2985cdffcf4",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries a disjunctive constraint (Model.either_or / Model.if_else, GDP) named 'pq_0'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
     }
    },
    "forward": {
@@ -793,6 +1039,9 @@
       "outcome": "loads_identical"
      },
      "complementarity_lowered.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_vector_lowered.json": {
       "outcome": "loads_identical"
      },
      "decomposition_marks.json": {
@@ -812,6 +1061,60 @@
      },
      "from_nl_st_e13.json": {
       "outcome": "loads_identical"
+     },
+     "mip_indicator_sos_disjunction.json": {
+      "outcome": "loads_identical"
+     },
+     "parameters_and_start.json": {
+      "outcome": "loads_identical"
+     },
+     "registered_atom.json": {
+      "outcome": "loads_identical"
+     },
+     "scalar_nlp.json": {
+      "outcome": "loads_identical"
+     },
+     "shared_dag.json": {
+      "outcome": "loads_identical"
+     },
+     "with_result.json": {
+      "outcome": "loads_identical"
+     }
+    },
+    "1.5": {
+     "array_bounds_inf.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_lowered.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "complementarity_vector_lowered.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "decomposition_marks.json": {
+      "outcome": "loads_identical"
+     },
+     "fast_api_blocks.json": {
+      "outcome": "loads_identical"
+     },
+     "fixed_scope.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_mpcc.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "from_nl_nvs01.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_st_e13.json": {
+      "outcome": "loads_identical"
+     },
+     "logical_constraints.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'logical'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
      },
      "mip_indicator_sos_disjunction.json": {
       "outcome": "loads_identical"
@@ -926,6 +1229,183 @@
      "sha256": "2e04ad7d8d06653951d094a5db1f30add689af7f56c50b8985985335cbbac270",
      "to_nl_sha256": "0f2e2a6671eeeea0efba04a6b745bf0478e93b0b2d76fad2e0d5ead0106c3d50",
      "to_nl_refused": null
+    },
+    "logical_constraints": {
+     "unbuildable": "SerializationError: cannot serialize: the model carries a propositional logic constraint named 'imp'. This format version carries algebraic rows, indicator, SOS and disjunctive relations. Reformulate the logic into those before saving.",
+     "trace_tail": [
+      "  File \"/tmp/wp1/wt-1.4/python/discopt/serialize.py\", line 830, in _refuse_unsupported",
+      "    raise SerializationError(f\"cannot serialize: the model carries {what}{where}. {remedy}\")",
+      "discopt.serialize.SerializationError: cannot serialize: the model carries a propositional logic constraint named 'imp'. This format version carries algebraic rows, indicator, SOS and disjunctive relations. Reformulate the logic into those before saving."
+     ]
+    },
+    "complementarity_vector_lowered": {
+     "file": "complementarity_vector_lowered.json",
+     "sha256": "cade0e0e2f334cc047c02bf6841ce7e38fb15f002011c5d0bcb0baf43902027e",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries a disjunctive constraint (Model.either_or / Model.if_else, GDP) named 'pq_0'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
+    }
+   },
+   "forward": {
+    "1.5": {
+     "array_bounds_inf.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_lowered.json": {
+      "outcome": "refused",
+      "error": "SerializationError: malformed discopt document: ValueError: too many values to unpack (expected 2)"
+     },
+     "complementarity_vector_lowered.json": {
+      "outcome": "refused",
+      "error": "SerializationError: malformed discopt document: ValueError: too many values to unpack (expected 2)"
+     },
+     "decomposition_marks.json": {
+      "outcome": "loads_identical"
+     },
+     "fast_api_blocks.json": {
+      "outcome": "loads_identical"
+     },
+     "fixed_scope.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_mpcc.json": {
+      "outcome": "refused",
+      "error": "SerializationError: malformed discopt document: ValueError: too many values to unpack (expected 2)"
+     },
+     "from_nl_nvs01.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_st_e13.json": {
+      "outcome": "loads_identical"
+     },
+     "logical_constraints.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'logical'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "mip_indicator_sos_disjunction.json": {
+      "outcome": "loads_identical"
+     },
+     "parameters_and_start.json": {
+      "outcome": "loads_identical"
+     },
+     "registered_atom.json": {
+      "outcome": "loads_identical"
+     },
+     "scalar_nlp.json": {
+      "outcome": "loads_identical"
+     },
+     "shared_dag.json": {
+      "outcome": "loads_identical"
+     },
+     "with_result.json": {
+      "outcome": "loads_identical"
+     }
+    }
+   }
+  },
+  "1.5": {
+   "schema": "discopt.model/1.5",
+   "commit": "d7ed64af03069e73afa36e75073b077be717fe13",
+   "discopt_version": "0.9.1.dev0",
+   "python": "3.13.16",
+   "cases": {
+    "scalar_nlp": {
+     "file": "scalar_nlp.json",
+     "sha256": "e8e02b93b8be82d68912fc7620218c8ce0f47fcaabb3044b3634e38f173455b6",
+     "to_nl_sha256": "99787845c11051508641270c744c626a66db2c3f336d802cdc525d7d7e1984c5",
+     "to_nl_refused": null
+    },
+    "array_bounds_inf": {
+     "file": "array_bounds_inf.json",
+     "sha256": "95bee63fe7b4eee51daea0ccdba84752319322d529f4eeb6cfb801ae172e0802",
+     "to_nl_sha256": "d3b082468b17f96b7f2524e8fab16860c8f8e46407954e16bacfff8eebbd5108",
+     "to_nl_refused": null
+    },
+    "mip_indicator_sos_disjunction": {
+     "file": "mip_indicator_sos_disjunction.json",
+     "sha256": "662d052b6275b87722e5021d3b12cd01793264eb41624aaccc5a589916c24719",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries an indicator constraint (Model.if_then). This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
+    },
+    "shared_dag": {
+     "file": "shared_dag.json",
+     "sha256": "0469d08ad3fbea0354754f82f9741b9dce8e6c7e3cacf3ac707124d834b1c1c8",
+     "to_nl_sha256": "1f0ae6f560240865384e792d847ec84c0e0aefc8600060137d2dc4b000ada9e3",
+     "to_nl_refused": null
+    },
+    "fixed_scope": {
+     "file": "fixed_scope.json",
+     "sha256": "cfa7eaccacea9c52c8abff8bbe22dd08bd7d45acda59b702d99599597c930714",
+     "to_nl_sha256": "4085a021806538699f80cb58952aad8ccbdadbce9a2b503075d3cc2d64c11aef",
+     "to_nl_refused": null
+    },
+    "complementarity_lowered": {
+     "file": "complementarity_lowered.json",
+     "sha256": "140e4994b2b92a468db411d63f72697b966642a14b9fae5c0bc26205d9005092",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries a disjunctive constraint (Model.either_or / Model.if_else, GDP) named 'pq'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
+    },
+    "with_result": {
+     "file": "with_result.json",
+     "sha256": "e0f30769609fd107f2d3b567fc6d5756b996429187cb54a9af2e501eaf1daa48",
+     "to_nl_sha256": "6e08b0bdec6e132c87a21893404fa0b8af30ab54acce1b2df8af222a8f2aa52b",
+     "to_nl_refused": null
+    },
+    "from_nl_nvs01": {
+     "file": "from_nl_nvs01.json",
+     "sha256": "bb93288df9d203596f6e6e72538a38d66091f3090f7a6e0d95ae2a85d4c78c0a",
+     "to_nl_sha256": "ad1fbb03c9c1c4202f2a0f0e8f857ffb1af948c4ce5981bf4c08f0c15238d3e7",
+     "to_nl_refused": null,
+     "input_sha256": "a754d8f98b200bc914e0be867df2ae0cfe6a4c4f5f9d023b7d09a3c2fd934de7"
+    },
+    "from_nl_st_e13": {
+     "file": "from_nl_st_e13.json",
+     "sha256": "3eeb5e8974ec56a6f61ad57462beb635a4aa0ebcf318a6772132b2de8f84246d",
+     "to_nl_sha256": "f76aebc77035c50aeed080f835b5e65ef16da3586cd3acb8ee46c63f8cb2768b",
+     "to_nl_refused": null,
+     "input_sha256": "f568f2bec83e905a8741c518e3f350c65bbd4ae2b96643514b50458ce3eb7559"
+    },
+    "from_nl_mpcc": {
+     "file": "from_nl_mpcc.json",
+     "sha256": "0f0717d900497fa06cb7c62d64bdb37f8eb9f104a00ee65afcd2b2fb93316e2c",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries a disjunctive constraint (Model.either_or / Model.if_else, GDP) named 'nl_compl0'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct).",
+     "input_sha256": "b9d827c3efbbc40f5e675a7b605efc747c97d7f4e220cb2e46aa3a9f0e81f4e1"
+    },
+    "fast_api_blocks": {
+     "file": "fast_api_blocks.json",
+     "sha256": "344484f8d2e6e75083c236da9d5b21c1ef1521325e27b1e84e3b0c703ac182ab",
+     "to_nl_sha256": "59a4f2f3ff20f1b633dbd5450ed0029217e208db98900834f3f959f74e4b9f78",
+     "to_nl_refused": null
+    },
+    "parameters_and_start": {
+     "file": "parameters_and_start.json",
+     "sha256": "10b69323019629c801ee4701c8c3b51dbc1e20ac120c379c15d5a54fd738dbb5",
+     "to_nl_sha256": "ffe61bc724c936887a884cbc7b5440d9df3c6af24bad8e987eeeb0023af7ce87",
+     "to_nl_refused": null
+    },
+    "decomposition_marks": {
+     "file": "decomposition_marks.json",
+     "sha256": "1257fe57dd5d52100bf65d6f021b24349b130358138d8ef22fdd1c1c163f7c13",
+     "to_nl_sha256": "12889d0402cf36f6992650c79b6bbbdc58e88692eeb0baea8aff5633989f4741",
+     "to_nl_refused": null
+    },
+    "registered_atom": {
+     "file": "registered_atom.json",
+     "sha256": "cfcc805bb1620a231bcd077436fa07a08a2bd152ceb31aeeabd2704567565393",
+     "to_nl_sha256": "0f2e2a6671eeeea0efba04a6b745bf0478e93b0b2d76fad2e0d5ead0106c3d50",
+     "to_nl_refused": null
+    },
+    "logical_constraints": {
+     "file": "logical_constraints.json",
+     "sha256": "da327c8cb8bb190a467a9eabe474e28354edd42f6f00366f3d49b491841c5a32",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries a propositional-logic constraint over BooleanVars named 'imp'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
+    },
+    "complementarity_vector_lowered": {
+     "file": "complementarity_vector_lowered.json",
+     "sha256": "04337c4dbec3840be5a0d2ecd968c343432c6d1318d00390b5774c4a0492c6fa",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries a disjunctive constraint (Model.either_or / Model.if_else, GDP) named 'pq_0'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
     }
    }
   }

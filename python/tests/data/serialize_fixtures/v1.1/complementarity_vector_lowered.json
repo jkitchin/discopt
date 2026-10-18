@@ -1,0 +1,331 @@
+{
+ "schema": "discopt.model/1.1",
+ "discopt": "0.8.1.dev0",
+ "name": "complementarity_vector_lowered",
+ "variables": [
+  {
+   "name": "p",
+   "type": "continuous",
+   "shape": [
+    2
+   ],
+   "lb": [
+    0.0,
+    0.0
+   ],
+   "ub": [
+    10.0,
+    10.0
+   ],
+   "bound_stack": []
+  },
+  {
+   "name": "q",
+   "type": "continuous",
+   "shape": [
+    2
+   ],
+   "lb": [
+    0.0,
+    0.0
+   ],
+   "ub": [
+    10.0,
+    10.0
+   ],
+   "bound_stack": []
+  }
+ ],
+ "parameters": [],
+ "nodes": [
+  {
+   "op": "const",
+   "v": 0.5
+  },
+  {
+   "op": "var",
+   "ref": 0
+  },
+  {
+   "op": "index",
+   "base": 1,
+   "index": {
+    "k": "int",
+    "v": 0
+   }
+  },
+  {
+   "op": "var",
+   "ref": 1
+  },
+  {
+   "op": "index",
+   "base": 3,
+   "index": {
+    "k": "int",
+    "v": 1
+   }
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 2,
+   "b": 4
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 0,
+   "b": 5
+  },
+  {
+   "op": "const",
+   "v": 0.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 7,
+   "b": 2
+  },
+  {
+   "op": "index",
+   "base": 3,
+   "index": {
+    "k": "int",
+    "v": 0
+   }
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 7,
+   "b": 9
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 2,
+   "b": 7
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 9,
+   "b": 7
+  },
+  {
+   "op": "index",
+   "base": 1,
+   "index": {
+    "k": "int",
+    "v": 1
+   }
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 7,
+   "b": 13
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 7,
+   "b": 4
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 13,
+   "b": 7
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 4,
+   "b": 7
+  },
+  {
+   "op": "const",
+   "v": 1.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 1,
+   "b": 18
+  },
+  {
+   "op": "const",
+   "v": 2.0
+  },
+  {
+   "op": "binop",
+   "o": "**",
+   "a": 19,
+   "b": 20
+  },
+  {
+   "op": "sum",
+   "a": 21,
+   "axis": null
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 3,
+   "b": 18
+  },
+  {
+   "op": "binop",
+   "o": "**",
+   "a": 23,
+   "b": 20
+  },
+  {
+   "op": "sum",
+   "a": 24,
+   "axis": null
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 22,
+   "b": 25
+  }
+ ],
+ "objective": {
+  "sense": "minimize",
+  "expr": 26,
+  "placeholder": false
+ },
+ "builder_objective": null,
+ "rows": [
+  {
+   "kind": "algebraic",
+   "body": 6,
+   "sense": "<=",
+   "name": "mix"
+  },
+  {
+   "kind": "algebraic",
+   "body": 8,
+   "sense": "<=",
+   "name": "pq_0_f_nonneg"
+  },
+  {
+   "kind": "algebraic",
+   "body": 10,
+   "sense": "<=",
+   "name": "pq_0_g_nonneg"
+  },
+  {
+   "kind": "disjunction",
+   "disjuncts": [
+    [
+     {
+      "body": 11,
+      "sense": "==",
+      "name": null
+     }
+    ],
+    [
+     {
+      "body": 12,
+      "sense": "==",
+      "name": null
+     }
+    ]
+   ],
+   "name": "pq_0",
+   "method": null,
+   "semantics": "SELECT_ONE"
+  },
+  {
+   "kind": "algebraic",
+   "body": 14,
+   "sense": "<=",
+   "name": "pq_1_f_nonneg"
+  },
+  {
+   "kind": "algebraic",
+   "body": 15,
+   "sense": "<=",
+   "name": "pq_1_g_nonneg"
+  },
+  {
+   "kind": "disjunction",
+   "disjuncts": [
+    [
+     {
+      "body": 16,
+      "sense": "==",
+      "name": null
+     }
+    ],
+    [
+     {
+      "body": 17,
+      "sense": "==",
+      "name": null
+     }
+    ]
+   ],
+   "name": "pq_1",
+   "method": null,
+   "semantics": "SELECT_ONE"
+  }
+ ],
+ "builder_blocks": [],
+ "complementarities": {
+  "relations": [
+   {
+    "f": 1,
+    "g": 3,
+    "name": "pq",
+    "role": "ncp_pair",
+    "f_bounds": [
+     0.0,
+     "inf"
+    ],
+    "g_bounds": [
+     0.0,
+     "inf"
+    ],
+    "scale": null,
+    "parent": null,
+    "f_shape": [
+     2
+    ],
+    "g_shape": [
+     2
+    ],
+    "index": null,
+    "source": null
+   }
+  ],
+  "declared": [
+   0
+  ],
+  "lowered": [
+   [
+    0,
+    "gdp"
+   ]
+  ]
+ },
+ "state": {
+  "_aux_counter": 0,
+  "_decomp_stages": {},
+  "_decomp_blocks": {},
+  "_zero_spanning_factor_auxes": [],
+  "_coupling_keys": {
+   "names": [],
+   "row_indices": []
+  },
+  "_sets": [],
+  "_simplex_lowerings": []
+ },
+ "initial_point": []
+}
