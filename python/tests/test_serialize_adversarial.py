@@ -29,7 +29,7 @@ import discopt.modeling as dm
 import discopt.transformations as dt
 import numpy as np
 import pytest
-from discopt.modeling.core import _DetachedNlRepr, from_nl
+from discopt.modeling.core import Constant, _DetachedNlRepr, from_nl
 from discopt.serialize import SerializationError, dumps, loads
 from discopt.solvers.nlp_native import _source_still_matches
 
@@ -392,7 +392,7 @@ FUZZ_FOUND = {
         _atom_doc,
         lambda d: _atom_node(d)["atom"].update(arg=True),
     ),
-    "atom tag argument a later node": (
+    "atom tag argument past the end of the table": (
         _atom_doc,
         lambda d: _atom_node(d)["atom"].update(arg=len(d["nodes"])),
     ),
@@ -423,6 +423,39 @@ def test_a_fuzzer_found_document_is_refused(case):
     corrupt(doc)
     with pytest.raises(SerializationError):
         loads(json.dumps(doc))
+
+
+#: Lowerings whose tag the WRITER records at or after the tagged node: it appends
+#: the node before it ``add``s the argument, so an identity tags itself and a body
+#: without its argument points past itself. A reader bound of ``arg < i`` refused
+#: both (review of #1788, B1); they are tags, not corruption.
+WRITER_LATE_ATOMS = {
+    "identity": ("wp4_adv_identity", lambda t: t, lambda a, i: a == i),
+    "ignores its argument": (
+        "wp4_adv_ignores_arg",
+        lambda t: dm.exp(Constant(1.0)),
+        lambda a, i: a > i,
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(WRITER_LATE_ATOMS))
+def test_a_writer_emitted_atom_tag_at_or_after_its_node_loads(case):
+    from discopt.operators import atom_of, get_registered, register_function
+
+    name, lower, where = WRITER_LATE_ATOMS[case]
+    fn = get_registered(name) or register_function(name, lower)
+    m = dm.Model("late_atom")
+    x = m.continuous("x", lb=0.0, ub=2.0)
+    y = m.continuous("y", lb=0.0, ub=2.0)
+    m.minimize(fn(x * 3.0 + 1.0) + y)
+    text = dumps(m, provenance=False)
+    tags = [(i, nd["atom"]) for i, nd in enumerate(json.loads(text)["nodes"]) if "atom" in nd]
+    assert len(tags) == 1 and where(tags[0][1]["arg"], tags[0][0]), tags
+    reloaded = loads(text)
+    assert dumps(reloaded, provenance=False) == text  # the tag was re-derived, not dropped
+    body = reloaded._objective.expression.left
+    assert atom_of(body) is not None and atom_of(body)[0] == name
 
 
 @pytest.mark.parametrize("case", sorted(MALFORMED))

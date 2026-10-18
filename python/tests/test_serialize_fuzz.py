@@ -157,6 +157,19 @@ def test_mutation_of_content_is_never_silently_accepted(case):
 
 
 @FUZZ
+@given(mutations())
+def test_a_mutant_that_loads_round_trips(case):
+    """Whatever a mutant loads into, the reader must have read all of it: the
+    reload is a ``dumps`` fixed point. (Measured in the review of #1788: of 2000
+    derandomized mutants, 233 loaded and all 233 were fixed points.)"""
+    outcome = _outcome(case[0])
+    if isinstance(outcome, SerializationError):
+        return
+    text = dumps(outcome, provenance=False)
+    assert dumps(_outcome(text), provenance=False) == text, case[1:3]
+
+
+@FUZZ
 @given(st.binary(max_size=4096))
 def test_random_bytes_are_refused(raw):
     try:

@@ -10,6 +10,9 @@ the solver:
   ``FunctionCall`` may carry (``serialize._known_funcs()``), every index kind
   (int, slice, tuple, bool -- #1290), sums with and without an axis, sums over a
   list, matrix products, constants (scalar and array), and shared subtrees;
+* registered atoms (#1248 A), including the degenerate lowerings whose tag points
+  at the node itself (an identity) or at a node written after it (a lowering that
+  ignores its argument) -- :data:`ATOMS`;
 * algebraic rows, indicator / SOS / disjunctive relations, complementarity (lowered
   on declaration), propositional logic (schema 1.5), a fast-API linear block, and a
   scoped fix that is open while the model is written.
@@ -38,6 +41,7 @@ from discopt.modeling.core import (
     UnaryOp,
     VarType,
 )
+from discopt.operators import get_registered, register_function
 from hypothesis import strategies as st
 
 #: Function names by arity. Everything in ``serialize._known_funcs()`` must be in
@@ -73,6 +77,20 @@ UNARY_FUNCS = (
 BINARY_FUNCS = ("atan2", "centropy", "max", "min", "signpower")
 BINARY_OPS = ("+", "-", "*", "/", "**")
 UNARY_OPS = ("neg", "abs")
+
+#: Registered atoms the generator wraps subtrees in, by the shape of the tag the
+#: writer records for them: the argument buried in the body (``arg < i``), the
+#: body IS the argument (``arg == i``), and a body without the argument, which the
+#: writer appends after it (``arg > i``). Their lowerings are self-contained (no
+#: closure over a model's variables), so a reload can re-derive and keep the tag.
+ATOMS = {
+    "wp4_square_plus_one": lambda t: t * t + 1.0,
+    "wp4_identity": lambda t: t,
+    "wp4_ignores_arg": lambda t: Constant(2.0) * Constant(3.0),
+}
+for _name, _lower in ATOMS.items():
+    if get_registered(_name) is None:
+        register_function(_name, _lower)
 
 _BOUND = st.one_of(
     st.floats(-50.0, 50.0, allow_nan=False, width=64),
@@ -164,7 +182,18 @@ def _expr(draw, variables: list, params: list, shared: list, depth: int):
     # Weighted toward function calls: there are 31 names to reach and one draw each.
     kind = draw(
         st.sampled_from(
-            ["binop", "binop", "unop", "func", "func", "func", "func2", "sum_over", "matmul"]
+            [
+                "binop",
+                "binop",
+                "unop",
+                "func",
+                "func",
+                "func",
+                "func2",
+                "sum_over",
+                "matmul",
+                "atom",
+            ]
         )
     )
     sub = _expr(variables, params, shared, depth - 1)
@@ -176,6 +205,8 @@ def _expr(draw, variables: list, params: list, shared: list, depth: int):
         out = FunctionCall(draw(st.sampled_from(UNARY_FUNCS)), draw(sub))
     elif kind == "func2":
         out = FunctionCall(draw(st.sampled_from(BINARY_FUNCS)), draw(sub), draw(sub))
+    elif kind == "atom":
+        out = get_registered(draw(st.sampled_from(sorted(ATOMS))))(_scalar(draw(sub)))
     elif kind == "sum_over":
         out = SumOverExpression([draw(sub) for _ in range(draw(st.integers(2, 4)))])
     else:
@@ -285,8 +316,12 @@ def ops_of(text: str) -> set[str]:
     written document: ``op:binop``, ``bin:+``, ``fn:exp``, ``ix:slice``, ``row:sos``."""
     doc = json.loads(text)
     seen: set[str] = set()
-    for nd in doc["nodes"]:
+    for i, nd in enumerate(doc["nodes"]):
         seen.add(f"op:{nd['op']}")
+        if "atom" in nd:
+            seen.add(f"atom:{nd['atom']['n']}")
+            arg = nd["atom"]["arg"]
+            seen.add("atom_arg:" + ("before" if arg < i else "self" if arg == i else "after"))
         if nd["op"] == "binop":
             seen.add(f"bin:{nd['o']}")
         elif nd["op"] == "unop":

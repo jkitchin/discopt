@@ -128,6 +128,11 @@ def test_strategy_covers_the_op_table():
         "row:logical",
     } <= seen
     assert {"rel:complementarity", "rel:builder_block", "sum:axis"} <= seen
+    # Every registered atom, and every shape of tag the writer can record for one
+    # -- including the two (`arg == i`, `arg > i`) a reader bound of `arg < i`
+    # would have refused (review of #1788, B1).
+    assert {f"atom:{a}" for a in sm.ATOMS} <= seen
+    assert {"atom_arg:before", "atom_arg:self", "atom_arg:after"} <= seen
 
 
 def test_function_tables_cover_every_known_function():

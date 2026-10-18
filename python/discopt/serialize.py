@@ -842,11 +842,14 @@ def _decode_nodes(table: list[dict], variables: Any, params: list[Parameter]):
                 and isinstance(name, str)
                 and name
                 and type(arg) is int
-                and 0 <= arg < i
+                # Not `arg < i`: the writer appends the node BEFORE it `add`s the
+                # argument, so an identity lowering tags itself (`arg == i`) and one
+                # that ignores its argument points at a later node (`arg > i`).
+                and 0 <= arg < len(table)
             ):
                 raise SerializationError(
                     f"node {i} has a malformed atom tag {atom!r}: it must be "
-                    '{"n": <registered name>, "arg": <an earlier node>}'
+                    '{"n": <registered name>, "arg": <a node of this table>}'
                 )
         if op == "binop" and nd.get("o") not in _KNOWN_BINARY_OPS:
             raise SerializationError(
