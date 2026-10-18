@@ -1,0 +1,226 @@
+"""The fixed set of models the serialization golden fixtures are written from.
+
+Plan: ``docs/dev/serialization-completion-plan.md`` §3.3 (WP-1). Every builder here
+is run both by ``scripts/serialize_fixture_gen.py`` -- under a *historical* discopt
+checked out at the last commit that wrote each schema version -- and by
+``test_serialize_compat_matrix.py`` under the current code, so:
+
+* only API that existed when schema 1.0 shipped (commit ``0a655f244``) is used,
+  except where a case says otherwise; a builder that raises under an old version is
+  recorded in the manifest as ``unbuildable_at``, never skipped silently;
+* nothing here may depend on the current tree's helpers -- this file is imported by
+  path into an old interpreter.
+
+Each builder is zero-argument and returns ``(model, save_kwargs)``; ``save_kwargs``
+is passed to ``dumps`` (only ``result`` is ever used).
+"""
+
+from __future__ import annotations
+
+import os
+
+import numpy as np
+
+#: The corpus files the ``from_nl_*`` cases read. Resolved against this file, so the
+#: generator reads the current tree's copy whichever discopt it imports; the
+#: manifest records each file's SHA-256 so a changed input cannot pass unnoticed.
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+NL_FILES = {
+    "from_nl_nvs01": os.path.join(DATA_DIR, "minlplib_nl", "nvs01.nl"),
+    "from_nl_st_e13": os.path.join(DATA_DIR, "minlplib_nl", "st_e13.nl"),
+    "from_nl_mpcc": os.path.join(DATA_DIR, "mpcc_complementarity.nl"),
+}
+
+
+def scalar_nlp():
+    import discopt.modeling as dm
+
+    m = dm.Model("scalar_nlp")
+    x = m.continuous("x", lb=0.5, ub=4.0)
+    y = m.continuous("y", lb=-1.0, ub=2.0)
+    m.minimize(dm.exp(0.3 * x) + dm.log(x) * y + dm.sqrt(x + 1.0) - y**3)
+    m.subject_to(x * y <= 3.0, name="xy")
+    m.subject_to(x + y >= 1.0, name="cover")
+    return m, {}
+
+
+def array_bounds_inf():
+    import discopt.modeling as dm
+
+    m = dm.Model("array_bounds_inf")
+    x = m.continuous(
+        "x",
+        shape=(3, 2),
+        lb=np.array([[-np.inf, 0.0], [-1.0, -1e20], [0.0, 0.0]]),
+        ub=np.array([[1.0, np.inf], [2.0, 1e20], [0.5, 3.0]]),
+    )
+    k = m.integer("k", shape=(2,), lb=0, ub=[5, 9])
+    m.minimize(dm.sum(x**2) + k[0] - 2 * k[1])
+    m.subject_to(dm.sum(x[0:2, 1]) + k[1] <= 7.0, name="mix")
+    return m, {}
+
+
+def mip_indicator_sos_disjunction():
+    import discopt.modeling as dm
+
+    m = dm.Model("mip_indicator_sos_disjunction")
+    x = m.continuous("x", shape=(3,), lb=0.0, ub=10.0)
+    z = m.binary("z")
+    m.minimize(dm.sum(x) - 2 * z)
+    m.subject_to(x[0] + x[1] <= 8.0, name="cap")
+    m.if_then(z, [x[0] >= 2.0], name="ind")
+    m.sos1([x[0], x[1], x[2]], name="s1")
+    m.either_or([[x[2] <= 1.0], [x[2] >= 5.0]], name="split")
+    return m, {}
+
+
+def shared_dag():
+    import discopt.modeling as dm
+
+    m = dm.Model("shared_dag")
+    v = m.continuous("v", lb=0.0, ub=3.0)
+    w = m.continuous("w", shape=(4,), lb=-1.0, ub=1.0)
+    s = dm.exp(v) + dm.sin(w[0]) * w[1]  # one object, referenced 21 times
+    m.minimize(s * s)
+    for i in range(20):
+        m.subject_to(s + 0.1 * i * w[i % 4] <= 50.0, name=f"r{i}")
+    return m, {}
+
+
+def fixed_scope():
+    """Saved inside a scoped fix, so the document carries a non-trivial bound stack.
+
+    ``Variable.fix()`` is not a context manager; ``Variable.fixed()`` is (both exist
+    at 1.0). The generator writes the document while the ``with`` block is open.
+    """
+    import discopt.modeling as dm
+
+    m = dm.Model("fixed_scope")
+    x = m.continuous("x", shape=(2,), lb=0.0, ub=10.0)
+    y = m.continuous("y", lb=-5.0, ub=5.0)
+    m.minimize(dm.sum(x) + y**2)
+    m.subject_to(x[0] - y >= 1.0, name="c")
+    return m, {"_fixed": (x, [1.0, 2.0])}
+
+
+def complementarity_lowered():
+    import discopt.modeling as dm
+
+    m = dm.Model("complementarity_lowered")
+    p = m.continuous("p", lb=0.0, ub=10.0)
+    q = m.continuous("q", lb=0.0, ub=10.0)
+    m.minimize((p - 1) ** 2 + (q - 1) ** 2)
+    m.complementarity(p, q, name="pq")
+    return m, {}
+
+
+def with_result():
+    import discopt.modeling as dm
+
+    m = dm.Model("with_result")
+    a = m.continuous("a", lb=0.1, ub=10.0)
+    b = m.continuous("b", lb=0.1, ub=5.0)
+    m.minimize((a - 2.0) ** 2 + (b - 1.5) ** 2 + 0.1 * a * b)
+    result = m.solve(time_limit=60)
+    return m, {"result": result}
+
+
+def _from_nl(case):
+    import discopt.modeling as dm
+
+    return dm.from_nl(NL_FILES[case]), {}
+
+
+def from_nl_nvs01():
+    return _from_nl("from_nl_nvs01")
+
+
+def from_nl_st_e13():
+    return _from_nl("from_nl_st_e13")
+
+
+def from_nl_mpcc():
+    return _from_nl("from_nl_mpcc")
+
+
+def fast_api_blocks():
+    import discopt.modeling as dm
+    import scipy.sparse as sp
+
+    m = dm.Model("fast_api_blocks")
+    x = m.continuous("x", shape=(4,), lb=0.0, ub=3.0)
+    A = sp.csr_matrix(np.array([[1.0, 1.0, 0.0, 0.0], [0.0, 1.0, 1.0, 1.0]]))
+    m.add_linear_constraints(A, x, "<=", np.array([2.0, 4.0]), name="blk")
+    Q = sp.csr_matrix(np.diag([1.0, 2.0, 0.5, 1.0]))
+    m.add_quadratic_objective(Q, np.array([-1.0, 0.0, -2.0, 1.0]), x, constant=0.25)
+    return m, {}
+
+
+def parameters_and_start():
+    import discopt.modeling as dm
+
+    m = dm.Model("parameters_and_start")
+    x = m.continuous("x", shape=(2,), lb=-3.0, ub=3.0)
+    p = m.parameter("p", value=np.array([1.5, -0.5]))
+    c = m.parameter("c", value=2.0)
+    m.minimize(dm.sum((x - p) ** 2) + c * x[0])
+    m.set_initial_point({x: [0.25, -0.75]})
+    return m, {}
+
+
+def decomposition_marks():
+    import discopt.modeling as dm
+
+    m = dm.Model("decomposition_marks")
+    x = m.continuous("x", shape=(4,), lb=0.0, ub=1.0)
+    m.minimize(dm.sum(x))
+    m.subject_to(x[0] + x[1] <= 1.0, name="b0")
+    m.subject_to(x[2] + x[3] <= 1.0, name="b1")
+    m.subject_to(x[0] + x[3] <= 1.5, name="link")
+    m.mark_coupling("link")
+    m.set_stage(x, 1)
+    return m, {}
+
+
+def registered_atom():
+    """Needs ``register_function`` (1.1+); the tag is only written from 1.3."""
+    import discopt.modeling as dm
+    from discopt.operators import register_function
+
+    fn = register_function("wp1_fixture_cubic", lambda t: t**3 - 2 * t, replace=True)
+    m = dm.Model("registered_atom")
+    x = m.continuous("x", shape=(2,), lb=-2.0, ub=2.0)
+    m.minimize(fn(x[0]) + 2 * fn(x[1]) + dm.sum(x) ** 2)
+    return m, {}
+
+
+#: name -> builder. Order is the manifest's order; never reorder or rename a case
+#: once a shipped version's fixtures exist for it (fixtures are immutable, §0.3.11).
+CASES = {
+    f.__name__: f
+    for f in (
+        scalar_nlp,
+        array_bounds_inf,
+        mip_indicator_sos_disjunction,
+        shared_dag,
+        fixed_scope,
+        complementarity_lowered,
+        with_result,
+        from_nl_nvs01,
+        from_nl_st_e13,
+        from_nl_mpcc,
+        fast_api_blocks,
+        parameters_and_start,
+        decomposition_marks,
+        registered_atom,
+    )
+}
+
+
+def build(name: str):
+    """Build case *name*; returns ``(model, dumps_kwargs, fixed)`` where *fixed* is a
+    ``(variable, value)`` pair the caller must hold fixed while writing, or ``None``."""
+    model, kwargs = CASES[name]()
+    kwargs = dict(kwargs)
+    fixed = kwargs.pop("_fixed", None)
+    return model, kwargs, fixed

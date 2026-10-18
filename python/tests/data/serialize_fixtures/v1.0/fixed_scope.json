@@ -1,0 +1,127 @@
+{
+ "schema": "discopt.model/1",
+ "discopt": "0.8.1.dev0",
+ "name": "fixed_scope",
+ "variables": [
+  {
+   "name": "x",
+   "type": "continuous",
+   "shape": [
+    2
+   ],
+   "lb": [
+    1.0,
+    2.0
+   ],
+   "ub": [
+    1.0,
+    2.0
+   ],
+   "bound_stack": [
+    [
+     [
+      0.0,
+      0.0
+     ],
+     [
+      10.0,
+      10.0
+     ]
+    ]
+   ]
+  },
+  {
+   "name": "y",
+   "type": "continuous",
+   "shape": [],
+   "lb": -5.0,
+   "ub": 5.0,
+   "bound_stack": []
+  }
+ ],
+ "parameters": [],
+ "nodes": [
+  {
+   "op": "const",
+   "v": 1.0
+  },
+  {
+   "op": "var",
+   "ref": 0
+  },
+  {
+   "op": "index",
+   "base": 1,
+   "index": {
+    "k": "int",
+    "v": 0
+   }
+  },
+  {
+   "op": "var",
+   "ref": 1
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 2,
+   "b": 3
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 0,
+   "b": 4
+  },
+  {
+   "op": "sum",
+   "a": 1,
+   "axis": null
+  },
+  {
+   "op": "const",
+   "v": 2.0
+  },
+  {
+   "op": "binop",
+   "o": "**",
+   "a": 3,
+   "b": 7
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 6,
+   "b": 8
+  }
+ ],
+ "objective": {
+  "sense": "minimize",
+  "expr": 9,
+  "placeholder": false
+ },
+ "builder_objective": null,
+ "rows": [
+  {
+   "kind": "algebraic",
+   "body": 5,
+   "sense": "<=",
+   "name": "c"
+  }
+ ],
+ "builder_blocks": [],
+ "complementarities": null,
+ "state": {
+  "_aux_counter": 0,
+  "_decomp_stages": {},
+  "_decomp_blocks": {},
+  "_zero_spanning_factor_auxes": [],
+  "_coupling_keys": {
+   "names": [],
+   "row_indices": []
+  },
+  "_sets": [],
+  "_simplex_lowerings": []
+ },
+ "initial_point": []
+}

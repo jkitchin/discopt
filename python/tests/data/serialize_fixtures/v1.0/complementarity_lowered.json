@@ -1,0 +1,189 @@
+{
+ "schema": "discopt.model/1",
+ "discopt": "0.8.1.dev0",
+ "name": "complementarity_lowered",
+ "variables": [
+  {
+   "name": "p",
+   "type": "continuous",
+   "shape": [],
+   "lb": 0.0,
+   "ub": 10.0,
+   "bound_stack": []
+  },
+  {
+   "name": "q",
+   "type": "continuous",
+   "shape": [],
+   "lb": 0.0,
+   "ub": 10.0,
+   "bound_stack": []
+  }
+ ],
+ "parameters": [],
+ "nodes": [
+  {
+   "op": "const",
+   "v": 0.0
+  },
+  {
+   "op": "var",
+   "ref": 0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 0,
+   "b": 1
+  },
+  {
+   "op": "var",
+   "ref": 1
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 0,
+   "b": 3
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 1,
+   "b": 0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 3,
+   "b": 0
+  },
+  {
+   "op": "const",
+   "v": 1.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 1,
+   "b": 7
+  },
+  {
+   "op": "const",
+   "v": 2.0
+  },
+  {
+   "op": "binop",
+   "o": "**",
+   "a": 8,
+   "b": 9
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 3,
+   "b": 7
+  },
+  {
+   "op": "binop",
+   "o": "**",
+   "a": 11,
+   "b": 9
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 10,
+   "b": 12
+  }
+ ],
+ "objective": {
+  "sense": "minimize",
+  "expr": 13,
+  "placeholder": false
+ },
+ "builder_objective": null,
+ "rows": [
+  {
+   "kind": "algebraic",
+   "body": 2,
+   "sense": "<=",
+   "name": "pq_f_nonneg"
+  },
+  {
+   "kind": "algebraic",
+   "body": 4,
+   "sense": "<=",
+   "name": "pq_g_nonneg"
+  },
+  {
+   "kind": "disjunction",
+   "disjuncts": [
+    [
+     {
+      "body": 5,
+      "sense": "==",
+      "name": null
+     }
+    ],
+    [
+     {
+      "body": 6,
+      "sense": "==",
+      "name": null
+     }
+    ]
+   ],
+   "name": "pq",
+   "method": null,
+   "semantics": "SELECT_ONE"
+  }
+ ],
+ "builder_blocks": [],
+ "complementarities": {
+  "relations": [
+   {
+    "f": 1,
+    "g": 3,
+    "name": "pq",
+    "role": "ncp_pair",
+    "f_bounds": [
+     0.0,
+     "inf"
+    ],
+    "g_bounds": [
+     0.0,
+     "inf"
+    ],
+    "scale": null,
+    "parent": null,
+    "f_shape": [],
+    "g_shape": [],
+    "index": null,
+    "source": null
+   }
+  ],
+  "declared": [
+   0
+  ],
+  "lowered": [
+   [
+    0,
+    "gdp"
+   ]
+  ]
+ },
+ "state": {
+  "_aux_counter": 0,
+  "_decomp_stages": {},
+  "_decomp_blocks": {},
+  "_zero_spanning_factor_auxes": [],
+  "_coupling_keys": {
+   "names": [],
+   "row_indices": []
+  },
+  "_sets": [],
+  "_simplex_lowerings": []
+ },
+ "initial_point": []
+}
