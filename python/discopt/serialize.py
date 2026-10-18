@@ -1159,6 +1159,14 @@ def _enc_rows(model: Model, table: _NodeTable) -> list[dict]:
                     # cardinality) pair of enums, not a string, so `.value` is
                     # neither JSON-safe nor a stable identity to read back.
                     "semantics": con.semantics.name,
+                    # #1775 G1.1: the indicator columns, once read. Dropping them
+                    # would leave those binaries in the model with nothing tying
+                    # them to the disjunction.
+                    "indicators": (
+                        None
+                        if con._indicator_vars is None
+                        else [table.add(v) for v in con._indicator_vars]
+                    ),
                 }
             )
         else:
@@ -1230,6 +1238,12 @@ def _dec_rows(docs: list[dict], nodes: list) -> list:
                     name=d["name"],
                     method=d["method"],
                     semantics=DisjunctionSemantics[d["semantics"]],
+                    # Absent in files written before #1775 G1.1.
+                    _indicator_vars=(
+                        None
+                        if d.get("indicators") is None
+                        else tuple(nodes[i] for i in d["indicators"])
+                    ),
                 )
             )
         else:
@@ -2207,6 +2221,9 @@ def _loads_document(doc: dict) -> Model:
     nodes = _decode_nodes(doc["nodes"], variables, params)
 
     model._constraints.extend(_dec_rows(doc["rows"], nodes))
+    for row in model._constraints:
+        if type(row) is _DisjunctiveConstraint:
+            row._model = model  # #1775 G1.1: so ``indicators`` can be read
 
     for d in doc.get("builder_blocks", []):
         model.add_linear_constraints(

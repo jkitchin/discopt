@@ -231,10 +231,18 @@ def recommend_methods(
     record carries its source ``disjunction_index`` so the caller can
     align with ``model._constraints``.
     """
+    from discopt.gdp.tree import gdp_tree
+
     out: list[GdpAdvice] = []
-    for ci, c in enumerate(model._constraints):
-        if not isinstance(c, _DisjunctiveConstraint):
+    # #1775 G1.1: the roots of the GDP tree, in model order. Only the
+    # ``either_or`` roots are advised: ``add_disjunction`` blocks and ``if_then``
+    # rows take the lowering their method fixes, not a per-disjunction choice.
+    for root in gdp_tree(model).disjunctions:
+        if root.kind != "either_or":
             continue
+        assert root.origin is not None
+        ci, c = root.origin.index, root.origin.source
+        assert isinstance(c, _DisjunctiveConstraint)
         adv = recommend_method(
             c,
             model,

@@ -303,18 +303,32 @@ def reformulate_gdp(
                 chosen = override
             else:
                 chosen = auto_advice.get(ci, method) if method == "auto" else method
+            # #1775 G1.1: indicators the user read are the selectors. ``None`` (never
+            # read) is each lowering's default, so it generates its own exactly as
+            # before.
+            own_sels = list(c._indicator_vars) if c._indicator_vars is not None else None
             if chosen == "simplex":
+                if own_sels is not None:
+                    raise ValueError(
+                        f"gdp_method='simplex' cannot lower disjunction "
+                        f"{c.name or '<anon>'!r}: its indicators were read (to be "
+                        "referenced in logic, fixed or priced), and the simplex "
+                        "lowering has no selector binaries to bind them to. Use "
+                        "'big-m', 'mbigm' or 'hull'."
+                    )
                 new_vars, new_cons = _reformulate_disjunction_simplex(
                     c, new_model, _add_simplex_weight, ci
                 )
             elif chosen == "hull":
-                new_vars, new_cons = _reformulate_disjunction_hull(c, new_model, _add_aux_binary)
+                new_vars, new_cons = _reformulate_disjunction_hull(
+                    c, new_model, _add_aux_binary, selectors=own_sels
+                )
             else:
                 # big-m and mbigm both go through _reformulate_disjunction;
                 # the difference is only whether lp_data is supplied.
                 disj_lp = lp_data if chosen == "mbigm" else None
                 new_vars, new_cons = _reformulate_disjunction(
-                    c, new_model, _add_aux_binary, lp_data=disj_lp
+                    c, new_model, _add_aux_binary, lp_data=disj_lp, selectors=own_sels
                 )
             new_model._constraints.extend(new_cons)
         elif isinstance(c, _SOSConstraint):
@@ -1353,6 +1367,7 @@ def _reformulate_disjunction(
     model: Model,
     add_aux_binary,
     lp_data: tuple | None = None,
+    selectors: Optional[list[Variable]] = None,
 ) -> tuple[list[Variable], list[Constraint]]:
     """Reformulate a disjunction via big-M.
 
@@ -1361,6 +1376,11 @@ def _reformulate_disjunction(
     2. For each disjunct k and constraint j in disjunct k:
        g_j(x) <= M_j * (1 - y_k)
 
+    ``selectors`` (#1775 G1.1) are the disjunction's own indicator columns, read
+    by the user through ``_DisjunctiveConstraint.indicators``. They are used in
+    place of generated selectors, and step 1 is skipped: the model already
+    carries their ``exactly(1)`` row.
+
     Returns new variables and constraints.
     """
     _require_supported_semantics(dc)
@@ -1368,29 +1388,37 @@ def _reformulate_disjunction(
     new_vars = []
     new_cons = []
 
-    # Create selector binaries
-    selectors = []
-    for k in range(n_disjuncts):
-        y_k = add_aux_binary(f"disj_{dc.name or 'anon'}_{k}")
-        selectors.append(y_k)
-        new_vars.append(y_k)
-
-    # Sum of selectors == 1 (exactly one disjunct active)
-    if n_disjuncts == 2:
-        sum_expr = selectors[0] + selectors[1]
+    if selectors is not None:
+        if len(selectors) != n_disjuncts:
+            raise ValueError(
+                f"big-M of disjunction {dc.name or 'anon'!r}: {len(selectors)} selectors "
+                f"for {n_disjuncts} disjuncts."
+            )
+        selectors = list(selectors)
     else:
-        sum_expr = selectors[0]
-        for k in range(1, n_disjuncts):
-            sum_expr = sum_expr + selectors[k]
+        # Create selector binaries
+        selectors = []
+        for k in range(n_disjuncts):
+            y_k = add_aux_binary(f"disj_{dc.name or 'anon'}_{k}")
+            selectors.append(y_k)
+            new_vars.append(y_k)
 
-    new_cons.append(
-        Constraint(
-            body=sum_expr - _wrap(1.0),
-            sense="==",
-            rhs=0.0,
-            name=f"_gdp_select_{dc.name}" if dc.name else None,
+        # Sum of selectors == 1 (exactly one disjunct active)
+        if n_disjuncts == 2:
+            sum_expr = selectors[0] + selectors[1]
+        else:
+            sum_expr = selectors[0]
+            for k in range(1, n_disjuncts):
+                sum_expr = sum_expr + selectors[k]
+
+        new_cons.append(
+            Constraint(
+                body=sum_expr - _wrap(1.0),
+                sense="==",
+                rhs=0.0,
+                name=f"_gdp_select_{dc.name}" if dc.name else None,
+            )
         )
-    )
 
     # Big-M reformulation for each constraint in each disjunct
     for k, disjunct in enumerate(dc.disjuncts):
