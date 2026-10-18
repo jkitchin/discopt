@@ -5042,8 +5042,18 @@ def _solve_root_node_multistart(
     # better local optimum of the SAME relaxation) are capped. Sound: capping extra
     # starts never changes the dual bound.
     _max_start_wall = 0.0
+    # #1760: every start solves the same node problem, so a start (or a retry
+    # start inside ``_solve_node_nlp_pounce``) that already failed is not re-run.
+    _failed_starts: list = []
 
     for _start_idx, x0 in enumerate(starting_points):
+        if any(
+            seen.shape == np.shape(x0) and np.allclose(seen, x0, rtol=0.0, atol=1e-12)
+            for seen, _ in _failed_starts
+        ):
+            # Already solved (as an earlier start's retry) and failed. Skipped
+            # before the cost hook, which must only ever see real solves.
+            continue
         # Deadline enforcement: each NLP start is a full local solve (seconds on
         # large models). Always run the first start (we must return some iterate),
         # then stop launching new starts once the deadline has passed OR the time
@@ -5069,6 +5079,7 @@ def _solve_root_node_multistart(
             constraint_bounds,
             options,
             nlp_solver=nlp_solver,
+            failed_starts=_failed_starts,
         )
         _start_wall = time.perf_counter() - _t_start_nlp
         _max_start_wall = max(_max_start_wall, _start_wall)
@@ -26174,11 +26185,16 @@ def _solve_node_nlp(
     options: dict,
     nlp_solver: str = "ipopt",
     convex: bool = False,
+    failed_starts: Optional[list] = None,
 ):
     """Solve the NLP relaxation at a single B&B node with tightened bounds.
 
     We override variable bounds to use the node-specific bounds
     rather than the global bounds.
+
+    ``failed_starts`` (#1760) is forwarded to :func:`_solve_node_nlp_pounce`; see
+    there. Only a caller that solves the SAME node problem repeatedly (the root
+    multistart) passes it.
     """
     # Pre-screen: a node whose box is a single point needs no NLP -- the point is
     # the whole box, so evaluating the rows there IS the feasibility question.
@@ -26268,7 +26284,14 @@ def _solve_node_nlp(
                 if res.status in (_SS.OPTIMAL, _SS.ITERATION_LIMIT):
                     return res
         return _solve_node_nlp_pounce(
-            evaluator, x0, node_lb, node_ub, constraint_bounds, options, convex=convex
+            evaluator,
+            x0,
+            node_lb,
+            node_ub,
+            constraint_bounds,
+            options,
+            convex=convex,
+            failed_starts=failed_starts,
         )
     return _solve_node_nlp_ipopt(evaluator, x0, node_lb, node_ub, constraint_bounds, options)
 
@@ -26281,6 +26304,7 @@ def _solve_node_nlp_pounce(
     constraint_bounds: Optional[list[tuple[float, float]]],
     options: dict,
     convex: bool = False,
+    failed_starts: Optional[list] = None,
 ):
     """Solve node NLP with POUNCE (pure-Rust Ipopt port).
 
@@ -26295,6 +26319,15 @@ def _solve_node_nlp_pounce(
       objective is not a valid lower bound), one polish re-solve at a boosted
       iteration budget is attempted from the stalled iterate; only an OPTIMAL
       polish restores trust in the bound.
+    - ``failed_starts`` (#1760), when given, is a list of ``(start, result)``
+      failures already observed on THIS node problem (same evaluator, box,
+      constraint bounds and options) by an earlier call. A start found there is
+      not solved again -- POUNCE is deterministic, so it would fail the same way
+      -- and every new failure is appended. Measured on the optimization-book
+      process-synthesis GDP: the root multistart's four starts each failed and
+      each re-ran the SAME midpoint and off-center retries, so 6 of its 11
+      POUNCE solves (~2.4 s of an 8 s budget) repeated a known failure. A
+      ``TIME_LIMIT`` failure is not recorded: a later call may have more time.
     """
     from discopt.solvers import NLPResult
     from discopt.solvers.nlp_pounce import solve_nlp as solve_nlp_pounce
@@ -26346,14 +26379,38 @@ def _solve_node_nlp_pounce(
     # parent bound — a valid global lower bound — so the dual bound is untouched.
     _t_node_entry = time.perf_counter()
     _retry_deadline = _t_node_entry + max(_DEADLINE_NODE_FLOOR_S, float(caller_limit))
-    result = _attempt(np.asarray(x0, dtype=np.float64), opts)
+
+    def _known_failure(start: np.ndarray):
+        if failed_starts is None:
+            return None
+        for seen, seen_result in failed_starts:
+            if seen.shape == start.shape and np.allclose(seen, start, rtol=0.0, atol=1e-12):
+                return seen_result
+        return None
+
+    def _attempt_once(start: np.ndarray):
+        known = _known_failure(start)
+        if known is not None:
+            return known
+        res = _attempt(start, opts)
+        if failed_starts is not None and res.status not in (
+            SolveStatus.OPTIMAL,
+            SolveStatus.ITERATION_LIMIT,
+            SolveStatus.TIME_LIMIT,
+        ):
+            failed_starts.append((np.array(start, dtype=np.float64), res))
+        return res
+
+    result = _attempt_once(np.asarray(x0, dtype=np.float64))
     if result.status not in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
         for alt in (midpoint, off_center):
             if np.allclose(alt, x0, atol=1e-12):
                 continue
+            if _known_failure(alt) is not None:
+                continue
             if time.perf_counter() >= _retry_deadline:
                 break
-            retry = _attempt(alt, opts)
+            retry = _attempt_once(alt)
             if retry.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
                 result = retry
                 break
