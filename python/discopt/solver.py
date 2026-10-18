@@ -10769,6 +10769,8 @@ _GENERIC_PASSTHROUGH_KWARGS: frozenset[str] = frozenset(
         "lp_spatial_cut_rounds",
         # gurobi backend
         "gurobi_options",
+        # scip backend (#1784)
+        "scip_options",
         # mip-nlp (OA/ECP/LOA) backend
         "mip_nlp_method",
         "mip_nlp_options",
@@ -11750,6 +11752,17 @@ def solve_model(
         instead of falling back silently. For global MINLP through discopt's
         AMP algorithm with Gurobi as the MILP-master subsolver, use
         ``solver="amp", milp_solver="gurobi"``.
+        Use ``"scip"`` (issue #1784; ``pip install discopt[scip]``) to hand the
+        whole model -- LP through general MINLP -- to SCIP via PySCIPOpt,
+        bypassing discopt's own solvers. The model is translated in memory (no
+        ``.nl`` file); disjunctive/indicator/SOS/logical relations are lowered
+        with ``gdp_method`` first. A function without an exact SCIP spelling
+        (``atan``, ``erf``, ``min``/``max``, ``dm.custom``, ...) raises
+        :class:`~discopt.solvers.scip.ScipUnsupportedError`. SCIP parameters go
+        in ``scip_options={...}``; ``time_limit``, ``gap_tolerance``,
+        ``abs_gap_tolerance``, an explicit ``max_nodes`` and ``initial_point``
+        are forwarded. SCIP's point is re-verified by discopt before it is
+        reported certified.
         Use ``"mip-nlp"`` to dispatch to the MIP-NLP decomposition family
         (OA/ECP/FP/GOA/LP-NLP-BB now; ROA is a reserved method selector).
         Use ``"gp"`` to dispatch to the geometric-programming fast path:
@@ -12318,7 +12331,7 @@ def solve_model(
     _solver = solver if solver is not None else kwargs.pop("solver", None)
     # Recognised global-solver selectors: ``None`` (default branch-and-bound,
     # with the automatic GP fast path below), ``"amp"``, ``"gurobi"``,
-    # ``"mip-nlp"``,
+    # ``"scip"`` (whole model to SCIP via PySCIPOpt, #1784), ``"mip-nlp"``,
     # ``"gp"`` (force the GP log-space path), ``"gp-minlp"`` (force the
     # GP-structured MINLP y-space branch-and-bound), ``"sgo"`` (force the
     # signomial global engine), ``"bb"`` (force classic
@@ -12329,6 +12342,7 @@ def solve_model(
         None,
         "amp",
         "gurobi",
+        "scip",
         "mip-nlp",
         "gp",
         "gp-minlp",
@@ -12338,7 +12352,7 @@ def solve_model(
         "surrogate",
     ):
         raise ValueError(
-            f"Unknown solver={_solver!r}. Choose one of None, 'amp', 'gurobi', "
+            f"Unknown solver={_solver!r}. Choose one of None, 'amp', 'gurobi', 'scip', "
             "'mip-nlp', 'gp', 'gp-minlp', 'sgo', 'bb', 'direct', 'surrogate', 'pounce'."
         )
 
@@ -12444,6 +12458,7 @@ def solve_model(
                 "neither milp_backend nor branching_rule/milp_cuts."
             )
     gurobi_options = kwargs.pop("gurobi_options", None) if _solver == "gurobi" else None
+    scip_options = kwargs.pop("scip_options", None) if _solver == "scip" else None
 
     # --- #1500: feasibility callbacks are enforced by the spatial B&B only ---
     # Checked HERE, where the family is chosen, rather than inside each family:
@@ -12536,6 +12551,60 @@ def solve_model(
             ),
             wall_time=time.perf_counter() - _solve_t0,
             gap_certified=True,
+        )
+
+    # --- #1784: SCIP whole-model backend ---
+    # Placed after the declared-box block above (its warnings and infeasibility
+    # proof are properties of the declared model, #1059) and before every
+    # discopt-side transformation below: SCIP receives the model the user built,
+    # with only the GDP lowering applied, and does its own presolve.
+    if _solver == "scip":
+        import warnings
+
+        if node_callback is not None or cut_callback is not None:
+            raise ValueError(
+                "solver='scip' hands the whole model to SCIP, which runs its own "
+                "search; node_callback/cut_callback need discopt's branch and bound."
+            )
+        if decomposition is not None:
+            raise ValueError(
+                f"decomposition={decomposition!r} and solver='scip' name different "
+                "algorithms; pass one or the other."
+            )
+        _ignored_scip = [
+            name
+            for name, differs in (
+                ("threads", threads != 1),  # SCIP's default solve is sequential
+                ("partitions", partitions != 0),
+                ("cutting_planes", cutting_planes is not False),
+                ("mccormick_bounds", mccormick_bounds != "auto"),
+                ("nlp_bb", nlp_bb is not None),
+                ("strategy", strategy != "best_first"),
+            )
+            if differs
+        ]
+        _declare_strategy_ignored(_ignored_scip)
+        if _ignored_scip:
+            warnings.warn(
+                "solver='scip' ignores "
+                + ", ".join(sorted(_ignored_scip))
+                + ": they steer discopt's own search, which this route bypasses. "
+                "Pass SCIP parameters through scip_options={...}.",
+                UserWarning,
+                stacklevel=2,
+            )
+        return _solve_scip(
+            model,
+            t_start=_solve_t0,
+            time_limit=_remaining_budget(),
+            gap_tolerance=gap_tolerance,
+            abs_gap_tolerance=abs_gap_tolerance,
+            # discopt's default cap is a property of discopt's tree; only an
+            # explicit one is forwarded to SCIP.
+            max_nodes=max_nodes if max_nodes != 100_000 else None,
+            initial_point=initial_point,
+            gdp_method=gdp_method,
+            options=scip_options,
         )
 
     # --- #1059: auto-route a convexity-certified MINLP to the MIP-NLP family ---
@@ -29202,6 +29271,183 @@ def _solve_qcp_gurobi(
             node_count=result.node_count,
         )
     return SolveResult(status="error", wall_time=wall_time, node_count=result.node_count)
+
+
+def _solve_scip(
+    model: Model,
+    *,
+    t_start: float,
+    time_limit: float,
+    gap_tolerance: float,
+    abs_gap_tolerance: Optional[float],
+    max_nodes: Optional[int],
+    initial_point: Optional[np.ndarray],
+    gdp_method: str,
+    options: Optional[dict],
+) -> SolveResult:
+    """Solve the whole model with SCIP through PySCIPOpt (issue #1784).
+
+    The model is lowered only as far as SCIP needs (disjunctive / indicator / SOS /
+    logical relations, via the registered ``gdp`` transformation -- the same one
+    every discopt route uses), translated in memory by
+    :mod:`discopt.solvers.scip`, and solved by SCIP. SCIP's point is then judged by
+    :func:`~discopt.validation.feasibility.verify_point` on the *declared* model
+    and its objective recomputed by discopt's evaluator: a point discopt rejects is
+    reported ``feasible`` and uncertified (the #1561 policy), and an objective or
+    dual bound that contradicts discopt's own evaluation of the point -- which can
+    only mean the translation is wrong -- raises rather than publishing it.
+    """
+    from discopt.modeling.core import ObjectiveSense
+    from discopt.solvers.scip import limit_status, solve_scip
+    from discopt.transformations import get as _get_transformation
+    from discopt.validation.feasibility import verify_point
+
+    if gdp_method not in ("big-m", "hull", "mbigm", "auto"):
+        raise ValueError(
+            f"gdp_method={gdp_method!r} is a discopt decomposition; solver='scip' "
+            "lowers disjunctions algebraically -- pass 'big-m', 'hull', 'mbigm' or "
+            "'auto'."
+        )
+    assert model._objective is not None
+    work = _get_transformation("gdp").apply(model, method=gdp_method)
+    n_decl = sum(int(v.size) for v in model._variables)
+    n_work = sum(int(v.size) for v in work._variables)
+    # The lowering appends its selector columns after the declared ones, so the
+    # declared point is a prefix of the lowered one. Checked, not assumed.
+    if [id(v) for v in work._variables[: len(model._variables)]] != [
+        id(v) for v in model._variables
+    ]:
+        raise RuntimeError("GDP lowering reordered the declared variables; cannot map back.")
+
+    x0 = None
+    if initial_point is not None:
+        x0 = np.full(n_work, np.nan)
+        x0[:n_decl] = np.asarray(initial_point, dtype=np.float64).ravel()[:n_decl]
+
+    opts = dict(options or {})
+    if max_nodes is not None:
+        opts.setdefault("limits/totalnodes", int(max_nodes))
+    raw = solve_scip(
+        work,
+        time_limit=time_limit,
+        gap_tolerance=gap_tolerance,
+        abs_gap_tolerance=abs_gap_tolerance,
+        initial_point=x0,
+        options=opts,
+    )
+    wall_time = time.perf_counter() - t_start
+    sense = model._objective.sense
+    maximize = sense == ObjectiveSense.MAXIMIZE
+    scip_status = raw["scip_status"]
+    stats: dict[str, Any] = {
+        "scip/status": scip_status,
+        "scip/n_vars": raw["n_scip_vars"],
+        "scip/n_conss": raw["n_scip_conss"],
+    }
+    common: dict[str, Any] = dict(
+        wall_time=wall_time,
+        python_time=wall_time,
+        node_count=raw["node_count"],
+        algorithm_route=f"scip: {raw['version']} via PySCIPOpt (in-memory model translation)",
+        termination=scip_status,
+        solver_stats=stats,
+    )
+
+    if scip_status == "infeasible":
+        return SolveResult(status="infeasible", gap_certified=True, **common)
+    if scip_status == "unbounded":
+        return SolveResult(status="unbounded", gap_certified=True, **common)
+    if scip_status == "inforunbd":
+        return SolveResult(
+            status="unknown",
+            gap_certified=False,
+            error="SCIP proved the model infeasible or unbounded but not which.",
+            **common,
+        )
+
+    proved = scip_status in ("optimal", "gaplimit")
+    limit = limit_status(scip_status)
+    if not proved and limit is None:
+        return SolveResult(
+            status="error",
+            gap_certified=False,
+            error=f"SCIP stopped with status {scip_status!r}.",
+            **common,
+        )
+
+    bound = raw["dual_bound"]
+    objective: Optional[float] = None
+    x_out = None
+    verified = False
+    if raw["x"] is not None:
+        x_decl = np.asarray(raw["x"][:n_decl], dtype=np.float64)
+        verdict = verify_point(model, x_decl, with_objective=True)
+        x_out = _unpack_solution(model, x_decl)
+        scip_obj = raw["scip_objective"]
+        if verdict.ok:
+            verified = True
+            objective = float(verdict.objective)  # type: ignore[arg-type]
+            tol = 1e-5 * (1.0 + abs(objective))
+            if scip_obj is not None and abs(scip_obj - objective) > tol:
+                raise RuntimeError(
+                    f"SCIP reports objective {scip_obj!r} at its point, discopt "
+                    f"evaluates {objective!r} there: the SCIP translation of this "
+                    "model is not faithful. Refusing to report it (please file an "
+                    "issue with the model)."
+                )
+        else:
+            objective = scip_obj
+            stats["certificate/incumbent_unverified"] = 1.0
+            stats["scip/verify_reason"] = verdict.reason
+            logger.error(
+                "solver='scip': SCIP's point fails verify_point on the declared model "
+                "(%s); reporting it as 'feasible', uncertified.",
+                verdict.reason,
+            )
+
+    if bound is not None and objective is not None and verified:
+        # A dual bound past a verified feasible point is a contradiction beyond
+        # SCIP's own tolerance -- a wrong model, not noise.
+        excess = (bound - objective) if not maximize else (objective - bound)
+        if excess > 1e-5 * (1.0 + abs(objective)):
+            raise RuntimeError(
+                f"SCIP's dual bound {bound!r} lies past the verified objective "
+                f"{objective!r}: the SCIP translation of this model is not "
+                "faithful. Refusing to report it."
+            )
+        if excess > 0.0:
+            bound = objective  # within tolerance: weaken to the incumbent, never tighten
+
+    if proved and verified:
+        return SolveResult(
+            status="optimal",
+            objective=objective,
+            bound=bound,
+            gap=_relative_gap_from_objective_bound(objective, bound),
+            x=x_out,
+            gap_certified=True,
+            bound_source="bnb_tree",  # SCIP's B&B dual bound
+            **common,
+        )
+    if x_out is not None:
+        return SolveResult(
+            status="feasible" if proved else str(limit),
+            objective=objective,
+            bound=bound,
+            gap=_relative_gap_from_objective_bound(objective, bound),
+            x=x_out,
+            # A budget stop closed no gap, and an unverified point carries none.
+            gap_certified=False,
+            bound_source="bnb_tree" if bound is not None else None,
+            **common,
+        )
+    return SolveResult(
+        status=str(limit) if limit is not None else "error",
+        bound=bound,
+        gap_certified=False,
+        bound_source="bnb_tree" if bound is not None else None,
+        **common,
+    )
 
 
 def _feas_matrix(A):

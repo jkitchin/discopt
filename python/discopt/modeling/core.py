@@ -9100,6 +9100,15 @@ class Model:
             classes raise ``NotImplementedError`` instead of silently falling
             back to another backend. Pass Gurobi parameters through
             ``gurobi_options={...}``.
+            Use ``solver="scip"`` (``pip install discopt[scip]``) to hand the
+            whole model to SCIP through PySCIPOpt, bypassing discopt's own
+            solvers. Unlike ``"gurobi"`` it accepts general nonlinear models:
+            the expression DAG is translated in memory into SCIP expressions,
+            and anything without an exact SCIP spelling (``atan``, ``erf``,
+            ``min``/``max``, ``dm.custom``, a variable exponent whose base is
+            not provably positive) raises ``ScipUnsupportedError`` instead of
+            being approximated. Pass SCIP parameters through
+            ``scip_options={...}``, e.g. ``{"limits/nodes": 1000}``.
             Use ``solver="mip-nlp"`` to select the MIP-NLP decomposition
             family. Current implemented ``mip_nlp_method`` values are ``"oa"``,
             ``"ecp"``, ``"fp"``, ``"goa"``, and ``"lp_nlp_bb"``; ``"roa"``

@@ -247,6 +247,7 @@ If all five are "yes," `solve()` should return `status="optimal"` with
 | Convex, or bounded factorable nonconvex (default) | `model.solve()` |
 | Hard nonconvex MINLP, default B&B stalls | `model.solve(solver="amp")` |
 | Hard nonconvex MINLP with Gurobi available for MILP masters | `model.solve(solver="amp", milp_solver="gurobi")` |
+| Cross-check against, or hand the whole model to, SCIP | `model.solve(solver="scip")` (`pip install discopt[scip]`) |
 | Stubborn bilinear/QCQP gap | `model.solve(rlt_cuts=True)` (+ PSD/SOC cuts) |
 | Only a feasible/local point is needed quickly | `model.solve(time_limit=...)`, read the incumbent |
 
@@ -255,6 +256,19 @@ It intentionally does not translate arbitrary nonlinear expression DAGs into
 Gurobi nonlinear constraints. For general NLP/MINLP, use discopt's global
 algorithms and select Gurobi only where it is a matrix subsolver, for example
 `solver="amp", milp_solver="gurobi"`.
+
+`solver="scip"` hands the *whole* model, nonlinear expressions included, to the
+open-source global solver SCIP through PySCIPOpt, whose wheel bundles SCIP, so
+no license or separate install is needed. The expression DAG is translated in
+memory, not through an `.nl` file. Every node is either translated exactly or
+refused by name: SCIP has no `atan`, `erf`, `min`/`max` or opaque `dm.custom`,
+and `x**y` and `xlogx` are only translated where their argument is provably
+positive. SCIP's answer is not taken on trust. discopt re-verifies the returned
+point on the declared model and recomputes its objective, so a point it rejects
+is reported `feasible` and uncertified. Pass SCIP parameters as
+`scip_options={"limits/nodes": 1000, ...}`. The route bypasses discopt's own
+search, so options that steer it (`threads`, `partitions`, `strategy`, ...) are
+reported as ignored.
 
 The throughline: discopt gives a **sound global certificate exactly when the model
 is bounded and algebraically factorable from supported intrinsics**. Keep your

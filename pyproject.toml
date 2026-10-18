@@ -83,6 +83,10 @@ plot = ["matplotlib>=3.5"]
 # `solver="gurobi"` (discopt.solvers.gurobi). Needs a Gurobi license as well
 # as the wheel, so it stays out of `all`.
 gurobi = ["gurobipy>=10"]
+# `solver="scip"` (discopt.solvers.scip, issue #1784): the whole model handed to
+# SCIP through PySCIPOpt. The PySCIPOpt wheel bundles SCIP itself (Apache-2.0),
+# so unlike `gurobi` there is no license or separate install.
+scip = ["pyscipopt>=5.2"]
 xgboost = ["xgboost>=1.7"]
 lightgbm = ["lightgbm>=4.0"]
 gnn = ["equinox>=0.13.8", "optax>=0.1"]
@@ -122,8 +126,10 @@ dev = [
     # for `pip install -e .[dev]` and CI to exercise it.
     "onnx>=1.14",
     "onnxruntime>=1.16",
+    # solver="scip" is covered by test_scip_backend.py (#1784).
+    "pyscipopt>=5.2",
 ]
-all = ["discopt[pounce,ipopt,cutest,llm,gnn,nn,ml,plot,sympy,pyomo]"]
+all = ["discopt[pounce,ipopt,cutest,llm,gnn,nn,ml,plot,sympy,pyomo,scip]"]
 
 [project.scripts]
 discopt = "discopt.cli:main"
