@@ -102,6 +102,8 @@ def recommend_method(
     Heuristic order, mirroring the trade-offs in Grossmann & Trespalacios
     (2013) §4:
 
+    0. If a row is undefined on part of the variable box (#1779), pick
+       ``hull``: big-M and mbigm refuse such a row.
     1. If any disjunct contains a non-linear constraint, prefer
        ``big-m`` — perspective hull on non-linear bodies needs ε-clamping
        and is numerically delicate. Promote to ``mbigm`` if the body is
@@ -156,6 +158,33 @@ def recommend_method(
                 if abs(fv) > max_big_m:
                     max_big_m = abs(fv)
     effective_M = float("inf") if any_unbounded_M else max_big_m
+
+    # #1779: a row undefined on part of the box cannot be lowered by big-M or
+    # mbigm (they keep its body in the model where the disjunct is inactive and
+    # refuse it). Hull keeps it on the disjunct's own copy of the variables, so it
+    # is the only lowering that can take the disjunction -- unless it is nested,
+    # which hull does not lower either.
+    from discopt._relax.gdp_reformulate import _domain_gap
+
+    nested = any(not isinstance(c, Constraint) for d in dc.disjuncts for c in d)
+    gaps = [
+        g
+        for d in dc.disjuncts
+        for c in d
+        if isinstance(c, Constraint) and (g := _domain_gap(c.body, model)) is not None
+    ]
+    if gaps and not nested:
+        return GdpAdvice(
+            disjunction_index=-1,
+            name=name,
+            recommendation="hull",
+            rationale=f"a row is undefined on part of the box ({gaps[0]}) ⇒ hull",
+            n_disjuncts=n_disjuncts,
+            n_common_vars=n_common_vars,
+            hull_aux_cost=hull_aux_cost,
+            has_nonlinear=has_nonlinear,
+            max_big_m=effective_M,
+        )
 
     # --- Decision tree ---
     if has_nonlinear:

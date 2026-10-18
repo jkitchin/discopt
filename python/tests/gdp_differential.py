@@ -91,10 +91,7 @@ class Shape:
     refusal of a shape the method should eventually support is not listed here;
     the pytest wrapper marks it ``xfail(strict=True)`` with its issue instead.
     ``box`` gives a finite *sampling* box for a variable declared unbounded; the
-    model itself is not changed. ``crosscheck=False`` skips the ``verify_point``
-    cross-check of the predicate; it exists only for a shape on which that
-    verifier is itself known broken (so the lowering can still be judged), and
-    such a shape must name the issue in its docstring.
+    model itself is not changed.
     """
 
     name: str
@@ -104,7 +101,6 @@ class Shape:
     refuses: Mapping[str, tuple[type[BaseException], str]] = field(default_factory=dict)
     n_samples: int = 60
     box: Mapping[str, tuple[float, float]] = field(default_factory=dict)
-    crosscheck: bool = True
 
 
 @dataclass
@@ -464,8 +460,8 @@ def run_shape(shape: Shape, method: str, *, seed: int = 1775) -> Report:
         if not (inside or outside):
             rep.skipped += 1
             continue
-        verdict = verify_point(declared, x).ok if shape.crosscheck else inside
-        rep.oracle_crosschecks += shape.crosscheck
+        verdict = verify_point(declared, x).ok
+        rep.oracle_crosschecks += 1
         if verdict != inside:
             raise AssertionError(
                 f"{shape.name}: the predicate says {'in' if inside else 'out'} but the declared "

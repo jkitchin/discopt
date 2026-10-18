@@ -399,6 +399,162 @@ def _collect_indicator_hull_groups(
     return groups
 
 
+#: Real-valued functions undefined on a whole *region* of the line, as
+#: ``name -> (test(lo, hi) -> True when [lo, hi] reaches into that region, domain)``.
+#: Only a region counts: a boundary point or a pole (``log`` at exactly 0, a
+#: divisor reaching 0, ``tan``) is left alone -- see :func:`_domain_gap`.
+_RESTRICTED_DOMAINS: dict[str, tuple[Callable[[float, float], bool], str]] = {
+    "sqrt": (lambda lo, hi: lo < 0.0, "x >= 0"),
+    "log": (lambda lo, hi: lo < 0.0, "x > 0"),
+    "log2": (lambda lo, hi: lo < 0.0, "x > 0"),
+    "log10": (lambda lo, hi: lo < 0.0, "x > 0"),
+    "log1p": (lambda lo, hi: lo < -1.0, "x > -1"),
+    "entropy": (lambda lo, hi: lo < 0.0, "x >= 0"),
+    "asin": (lambda lo, hi: lo < -1.0 or hi > 1.0, "-1 <= x <= 1"),
+    "acos": (lambda lo, hi: lo < -1.0 or hi > 1.0, "-1 <= x <= 1"),
+    "acosh": (lambda lo, hi: lo < 1.0, "x >= 1"),
+    "atanh": (lambda lo, hi: lo < -1.0 or hi > 1.0, "-1 < x < 1"),
+}
+
+
+def _domain_gap(expr: Expression, model: Model) -> Optional[str]:
+    """Where ``expr`` is undefined on a region of the variable box, or ``None`` (#1779).
+
+    Every node is judged against its own domain over the interval enclosure of
+    its operands: a function from :data:`_RESTRICTED_DOMAINS`, or a power whose
+    base can go negative under a non-integer or variable exponent.
+
+    Judging each node, not the row's enclosure, is the point: an outer operation
+    can return a finite enclosure over an undefined inner one -- ``sqrt`` clips
+    its argument to ``[0, inf)``, ``log``'s upper end stays finite, and
+    ``exp(-abs(x**0.5))`` folds the ``(-inf, inf)`` of an undefined power back to
+    ``(0, 1]`` -- and a finite enclosure is exactly what lets a big-M be built.
+
+    **Regions only, not points.** A lowering that keeps the body where its
+    disjunct is inactive imposes the body's domain on every other disjunct; that
+    cuts their feasible points when the undefined set is a region (``sqrt`` of a
+    negative: the measured false optimum of #1779). An undefined *point* -- ``log``
+    or a negative power at exactly 0, a divisor reaching 0 -- is approached from
+    inside the domain to within the solver's tolerance, which is exactly the
+    capability the simplex lowering exists for (#1182: ``1/x <= 1`` with ``x``
+    straddling 0, the ``stranded_gas`` capacity rows with ``log`` of a sum that
+    may be 0). Measured on ``origin/main`` before this check: simplex is correct
+    on those point gaps -- including an "off" disjunct sitting exactly on the
+    point -- and wrong on the region gap. Big-M needs no help with point gaps:
+    their enclosures are already unbounded where it matters, and it refuses them.
+
+    Node types with no known domain (``CustomCall``, unlisted functions) are not
+    judged here; their enclosure is ``(-inf, inf)`` unless proven otherwise.
+    """
+    from discopt.modeling.core import Parameter
+
+    memo = _BoundMemo()
+    _seed_self_products(expr, model, memo)
+    seen: set[int] = set()
+    stack: list = [expr]
+    while stack:
+        node = stack.pop()
+        if id(node) in seen or not isinstance(node, Expression):
+            continue
+        seen.add(id(node))
+        if isinstance(node, FunctionCall):
+            stack.extend(node.args)
+            rule = _RESTRICTED_DOMAINS.get(node.func_name)
+            if rule is not None and node.args:
+                lo, hi = _bound_expression(node.args[0], model, memo)
+                if rule[0](lo, hi):
+                    return (
+                        f"{node.func_name}() is defined only for {rule[1]}, but its "
+                        f"argument ranges over [{lo:.6g}, {hi:.6g}]"
+                    )
+        elif isinstance(node, BinaryOp):
+            stack.extend((node.left, node.right))
+            if node.op == "**":
+                lo, hi = _bound_expression(node.left, model, memo)
+                if lo < 0.0:
+                    # A Parameter exponent is judged at its current value: the
+                    # lowering runs again on every solve, after any change to it.
+                    if isinstance(node.right, (Constant, Parameter)):
+                        exps = np.ravel(np.asarray(node.right.value, dtype=np.float64))
+                    else:
+                        return (
+                            "a power with a variable exponent needs a nonnegative "
+                            f"base, but its base ranges over [{lo:.6g}, {hi:.6g}]"
+                        )
+                    frac = [p for p in exps if not (np.isfinite(p) and p == int(p))]
+                    if frac:
+                        return (
+                            f"x**{frac[0]:g} is real only for x >= 0, but its base "
+                            f"ranges over [{lo:.6g}, {hi:.6g}]"
+                        )
+        else:
+            stack.extend(_expr_children(node))
+    return None
+
+
+def _expr_children(node) -> list:
+    """The operands of an expression node, for the generic walks below."""
+    out: list = []
+    for attr in ("operand", "base", "left", "right"):
+        child = getattr(node, attr, None)
+        if child is not None:
+            out.append(child)
+    for attr in ("args", "terms"):
+        out.extend(getattr(node, attr, None) or ())
+    return out
+
+
+def _seed_self_products(expr: Expression, model: Model, memo: _BoundMemo) -> None:
+    """Enclose every ``a * a`` in ``expr`` as a square, in ``memo``, bottom-up.
+
+    Plain interval multiplication treats the two factors as independent, so
+    ``x * x`` on ``x in [-1, 10]`` encloses as ``[-10, 100]``; that made
+    :func:`_domain_gap` refuse ``sqrt(x*x + 1)`` and the product-written distance
+    rows of layout models, which are defined on the whole box (review of #1787).
+    A product of two structurally equal operands -- the same object, or the same
+    printed expression, which names every leaf -- is a square, so ``[0, max^2]``
+    when the operand's enclosure straddles 0. Seeded only into this check's memo:
+    the big-M enclosure itself is unchanged, so no M moves.
+    """
+    order: list = []
+    seen: set[int] = set()
+    stack: list = [(expr, False)]
+    while stack:
+        node, done = stack.pop()
+        if done:
+            order.append(node)
+            continue
+        if id(node) in seen or not isinstance(node, Expression):
+            continue
+        seen.add(id(node))
+        stack.append((node, True))
+        stack.extend((c, False) for c in _expr_children(node))
+    for node in order:  # children before parents
+        if (
+            isinstance(node, BinaryOp)
+            and node.op == "*"
+            and (node.left is node.right or str(node.left) == str(node.right))
+        ):
+            lo, hi = _bound_expression(node.left, model, memo)
+            sq = sorted((lo * lo, hi * hi))
+            memo.put_bound(node, (0.0 if lo <= 0.0 <= hi else sq[0], sq[1]))
+
+
+def _domain_gap_error(constraint: Constraint, gap: str, how: str) -> ValueError:
+    """The loud refusal for a disjunct/indicator row undefined on part of the box."""
+    cname = getattr(constraint, "name", None) or "<unnamed>"
+    return ValueError(
+        f"cannot lower constraint {cname!r} by {how}: it is undefined on part of the "
+        f"variable box ({gap}). {how.capitalize()} keeps the row's body in the model "
+        "even where its disjunct (or indicator) is inactive, so the solver would "
+        "impose the body's domain on every disjunct and cut feasible points of the "
+        "others -- a false certificate (#1779). Bound the variable(s) so the body is "
+        "defined on the whole box (e.g. lb=0 for sqrt), or use gdp_method='hull' for "
+        "an either_or / add_disjunction disjunction, which keeps the body on the "
+        "disjunct's own copy of the variables."
+    )
+
+
 def _compute_big_m(
     constraint: Constraint,
     model: Model,
@@ -454,6 +610,9 @@ def _compute_big_m(
         If the constraint body is unbounded in the direction the big-M must
         cover (no valid finite M exists).
     """
+    gap = _domain_gap(constraint.body, model)
+    if gap is not None:
+        raise _domain_gap_error(constraint, gap, "big-M")
     lo, hi = _bound_expression(constraint.body, model)
 
     def _require_finite_upper() -> float:
@@ -1500,7 +1659,21 @@ def _reformulate_disjunction_simplex(
     registered on ``model`` by ``add_weight`` (as ``_add_aux_binary`` does for
     selectors), and the caller uses the returned list only for logging.
     """
-    from discopt._relax.simplex_lowering import lower_disjunction_simplex
+    from discopt._relax.simplex_lowering import (
+        SimplexLoweringRefused,
+        lower_disjunction_simplex,
+    )
+
+    # #1779: Theorem 1's row ``sum_j lam_j p_j(x) <= 0`` keeps every predicate in
+    # the model at every point, so a predicate undefined on part of the box
+    # imposes its domain on the other disjuncts exactly as a big-M row does.
+    for disjunct in dc.disjuncts:
+        for item in disjunct:
+            if isinstance(item, Constraint):
+                gap = _domain_gap(item.body, model)
+                if gap is not None:
+                    err = _domain_gap_error(item, gap, "the simplex lowering")
+                    raise SimplexLoweringRefused(str(err))
 
     record, rows = lower_disjunction_simplex(dc, add_weight, index=index)
     model._simplex_lowerings.append(record)
