@@ -33,6 +33,7 @@ import discopt.modeling as dm
 import discopt.modeling.core as core
 import pytest
 from discopt._relax.gdp_reformulate import (
+    _BIG_M_SEMANTICS,
     _SUPPORTED_SEMANTICS,
     _semantics_is_supported,
     reformulate_gdp,
@@ -266,9 +267,12 @@ class TestSemanticNotConvexityDistinction:
 
 class TestUnimplementedSemanticsRefuseLoudly:
     @pytest.mark.parametrize(
-        "semantics", [DisjunctionSemantics.OR, DisjunctionSemantics.EXACTLY_ONE_TRUE]
+        "semantics, method",
+        [(DisjunctionSemantics.EXACTLY_ONE_TRUE, m) for m in ALL_METHODS]
+        # #1775 G1.4: big-M (and auto, which routes OR there) lowers OR now;
+        # hull and mbigm still refuse it.
+        + [(DisjunctionSemantics.OR, m) for m in ("mbigm", "hull")],
     )
-    @pytest.mark.parametrize("method", ALL_METHODS)
     def test_non_select_one_is_refused_by_every_lowering(self, semantics, method):
         m = dm.Model("refuse")
         x = m.continuous("x", lb=-2.0, ub=3.0)
@@ -297,10 +301,10 @@ class TestUnimplementedSemanticsRefuseLoudly:
         z = m.continuous("z", lb=0.0, ub=10.0)
         m.minimize(z)
         inner = m.disjunction(
-            [[z >= 3.0], [z >= 7.0]], name="in", semantics=DisjunctionSemantics.OR
+            [[z >= 3.0], [z >= 7.0]], name="in", semantics=DisjunctionSemantics.EXACTLY_ONE_TRUE
         )
         m.either_or([[z >= 1.0, inner], [z >= 9.0]], name="out")
-        with pytest.raises(NotImplementedError, match="OR"):
+        with pytest.raises(NotImplementedError, match="EXACTLY_ONE_TRUE"):
             reformulate_gdp(m, method="big-m")
 
     @staticmethod
@@ -313,9 +317,7 @@ class TestUnimplementedSemanticsRefuseLoudly:
         d2.subject_to(x >= 7.0)
         return m, [d1, d2]
 
-    @pytest.mark.parametrize(
-        "semantics", [DisjunctionSemantics.OR, DisjunctionSemantics.EXACTLY_ONE_TRUE]
-    )
+    @pytest.mark.parametrize("semantics", [DisjunctionSemantics.EXACTLY_ONE_TRUE])
     def test_add_disjunction_refuses_at_call_time(self, semantics):
         """This path lowers immediately, so it must refuse when called."""
         m, ds = self._block_model()
@@ -326,7 +328,7 @@ class TestUnimplementedSemanticsRefuseLoudly:
         """Acceptance is decided by the pair, for every member — not by a name."""
         for member in DisjunctionSemantics:
             m, ds = self._block_model()
-            supported = _semantics_supported_by(member, _SELECT_ONE_ROWS)
+            supported = _semantics_supported_by(member, core._BLOCK_ROWS)
             if supported:
                 m.add_disjunction(ds, name="m", semantics=member)
             else:
@@ -334,25 +336,22 @@ class TestUnimplementedSemanticsRefuseLoudly:
                     m.add_disjunction(ds, name="m", semantics=member)
 
     def test_add_disjunction_dispatch_is_pair_based_not_member_identity(self, monkeypatch):
-        """The discriminator: widen the emitted-pair set and OR becomes servable.
+        """The discriminator: the emitted-pair set alone decides acceptance.
 
-        Under pair dispatch, declaring that this path also emits
-        ``(ONE_WAY, AT_LEAST_ONE)`` makes ``OR`` acceptable. Under the previous
-        ``semantics is SELECT_ONE`` identity check it would still be refused, so
-        this fails on the old implementation and passes on the new one.
+        Narrowing it to ``(ONE_WAY, EXACTLY_ONE)`` makes ``OR`` refused again;
+        with ``(ONE_WAY, AT_LEAST_ONE)`` in it (#1775 G1.4) ``OR`` is served. An
+        identity check on a member name would ignore the set either way.
         """
-        monkeypatch.setattr(
-            core,
-            "_SELECT_ONE_ROWS",
-            frozenset(
-                {
-                    (SelectorActivation.ONE_WAY, SelectorCardinality.EXACTLY_ONE),
-                    (SelectorActivation.ONE_WAY, SelectorCardinality.AT_LEAST_ONE),
-                }
-            ),
-        )
         m, ds = self._block_model()
         m.add_disjunction(ds, name="m", semantics=DisjunctionSemantics.OR)
+        monkeypatch.setattr(
+            core,
+            "_BLOCK_ROWS",
+            frozenset({(SelectorActivation.ONE_WAY, SelectorCardinality.EXACTLY_ONE)}),
+        )
+        m1, ds1 = self._block_model()
+        with pytest.raises(NotImplementedError, match="OR"):
+            m1.add_disjunction(ds1, name="m", semantics=DisjunctionSemantics.OR)
         # ... while a pair still outside the widened set stays refused.
         m2, ds2 = self._block_model()
         with pytest.raises(NotImplementedError, match="EXACTLY_ONE_TRUE"):
@@ -361,6 +360,8 @@ class TestUnimplementedSemanticsRefuseLoudly:
     def test_add_disjunction_and_the_gdp_pass_share_one_supported_pair_set(self):
         """One declaration, so the two gates cannot drift apart on 'supported'."""
         assert _SUPPORTED_SEMANTICS is _SELECT_ONE_ROWS
+        # #1775 G1.4: block emission and big-M serve the same pairs, OR included.
+        assert core._BLOCK_ROWS == _BIG_M_SEMANTICS
 
 
 class TestNestedUnderHullRefusesClearly:

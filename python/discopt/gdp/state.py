@@ -5,9 +5,9 @@ selected -- as :class:`~discopt.gdp.tree.DisjunctNode` objects from
 :func:`~discopt.gdp.tree.gdp_tree`. Relative to it every disjunction of the GDP
 tree is in one of four states:
 
-* **decided** -- active and a disjunct of it is selected. That disjunct's rows
-  become ordinary rows, the other disjuncts' rows are dropped, and every known
-  indicator is pinned (1 for the selected disjunct, 0 for the others).
+* **decided** -- active and a disjunct of it is selected (several, under OR
+  semantics). The selected disjuncts' rows become ordinary rows, the others'
+  rows are dropped, and every known indicator is pinned (1 selected, 0 not).
 * **inactive** -- nested under a disjunct that is not selected. All of its rows
   are dropped and its known indicators are pinned to 0.
 * **undecided** -- active, nothing selected. It stays a disjunction. A
@@ -51,6 +51,7 @@ from discopt.gdp.tree import DisjunctionNode, DisjunctNode, GDPTree, gdp_tree
 from discopt.modeling.core import (
     Constraint,
     Model,
+    SelectorCardinality,
     _DisjunctiveConstraint,
     _IndicatorConstraint,
     carry_validation_guards,
@@ -94,9 +95,13 @@ def _resolve(tree: GDPTree, address: Address) -> DisjunctNode:
         node = d.children[steps.pop(0)]
 
 
-def _chosen(tree: GDPTree, selected: Iterable[DisjunctNode]) -> dict[int, int]:
-    """``id(DisjunctionNode) -> selected disjunct index`` on ``tree``."""
-    chosen: dict[int, int] = {}
+def _chosen(tree: GDPTree, selected: Iterable[DisjunctNode]) -> dict[int, set[int]]:
+    """``id(DisjunctionNode) -> selected disjunct indices`` on ``tree``.
+
+    One index per disjunction, except under OR semantics (#1775 G1.4), where
+    several disjuncts may be selected together.
+    """
+    chosen: dict[int, set[int]] = {}
     for d in selected:
         if not isinstance(d, DisjunctNode):
             raise TypeError(
@@ -106,16 +111,17 @@ def _chosen(tree: GDPTree, selected: Iterable[DisjunctNode]) -> dict[int, int]:
         node = mine.parent
         assert node is not None
         k = next(i for i, x in enumerate(node.disjuncts) if x is mine)
-        if chosen.get(id(node), k) != k:
+        picked = chosen.setdefault(id(node), set())
+        picked.add(k)
+        if len(picked) > 1 and node.semantics.cardinality is not SelectorCardinality.AT_LEAST_ONE:
             raise ValueError(f"two disjuncts of {node.name!r} are selected")
-        chosen[id(node)] = k
     # A selected disjunct must be reachable: every enclosing disjunct selected.
     for node in tree.walk():
         if id(node) in chosen and node.parent is not None:
             outer = node.parent.parent
             assert outer is not None
-            k_outer = chosen.get(id(outer))
-            if k_outer is None or outer.disjuncts[k_outer] is not node.parent:
+            ks = chosen.get(id(outer), set())
+            if not any(outer.disjuncts[k] is node.parent for k in ks):
                 raise ValueError(
                     f"a disjunct of {node.name!r} is selected, but the disjunct it is "
                     "nested in is not; select the enclosing disjunct too"
@@ -151,9 +157,9 @@ def _plan(model: Model, selected: Iterable[DisjunctNode], *, full: bool) -> _Pla
             plan.pins.append((d.indicator.variable, float(value)))
 
     def visit(node: DisjunctionNode, active: bool) -> None:
-        k = chosen.get(id(node))
+        ks = chosen.get(id(node))
         if node.kind == "implication":
-            if k is not None:
+            if ks:
                 drop_rows(node)
                 plan.add.extend(node.disjuncts[0].rows)
                 pin(node.disjuncts[0], True)
@@ -167,7 +173,7 @@ def _plan(model: Model, selected: Iterable[DisjunctNode], *, full: bool) -> _Pla
                 for child in d.children:
                     visit(child, False)
             return
-        if k is None:
+        if not ks:
             if full:
                 raise ValueError(
                     f"no disjunct of {node.name!r} is selected; a reduced subproblem "
@@ -181,11 +187,11 @@ def _plan(model: Model, selected: Iterable[DisjunctNode], *, full: bool) -> _Pla
         if top_level:
             drop_rows(node)
         for j, d in enumerate(node.disjuncts):
-            pin(d, j == k)
-            if j == k:
+            pin(d, j in ks)
+            if j in ks:
                 plan.add.extend(d.rows)
             for child in d.children:
-                visit(child, j == k)
+                visit(child, j in ks)
 
     for root in tree.disjunctions:
         visit(root, True)

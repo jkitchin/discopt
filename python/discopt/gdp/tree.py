@@ -182,7 +182,7 @@ def gdp_tree(model: Model) -> GDPTree:
                     next_id(),
                     key,
                     "add_disjunction",
-                    DisjunctionSemantics.SELECT_ONE,
+                    c.semantics,
                     [],
                     None,
                     Origin(ci, key),

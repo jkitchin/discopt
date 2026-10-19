@@ -41,7 +41,7 @@ lowering.
 | member | pair | status |
 |---|---|---|
 | `SELECT_ONE` | `(ONE_WAY, EXACTLY_ONE)` | **implemented** — the meaning of `either_or` |
-| `OR` | `(ONE_WAY, AT_LEAST_ONE)` | declared, not implemented |
+| `OR` | `(ONE_WAY, AT_LEAST_ONE)` | **implemented** by big-M (`auto` routes OR there), simplex (indicators unread) and `add_disjunction` blocks (`at_least(1)`, nested: `sum >= parent`, `y_k <= parent`); hull and mbigm refuse an OR `either_or` (#1775 G1.4) |
 | `EXACTLY_ONE_TRUE` | `(REIFIED, EXACTLY_ONE)` | declared, not implemented — owes a boundary policy, §2 |
 
 ## 2. `either_or` is `SELECT_ONE`
@@ -76,8 +76,8 @@ objective approaches `0.25` at either boundary and never reaches it: `0.25` is a
 **infimum, not an attained optimum**, and writing "the optimum is 0.25 at
 `x in {0, 1}`" locates it at two points the semantics has just excluded.
 
-This is not a defect in `SELECT_ONE` — every lowering this repo ships is
-select-one, and the select-one optimum `0` at `x = 1/2` is attained and asserted.
+This is not a defect in `SELECT_ONE` — no lowering this repo ships is
+truth-semantics, and the select-one optimum `0` at `x = 1/2` is attained and asserted.
 It is a constraint on work not yet written: **before `EXACTLY_ONE_TRUE` is
 implemented it needs an explicit strict-complement/boundary policy**, deciding
 what a lowering does when the complement of a closed predicate is open. Candidates
