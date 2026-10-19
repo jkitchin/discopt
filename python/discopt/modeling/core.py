@@ -47,6 +47,7 @@ from typing import (
     Any,
     Callable,
     Iterator,
+    NamedTuple,
     Optional,
     Sequence,
     Union,
@@ -8706,7 +8707,9 @@ class Model:
         # same predicate that pass uses, not on which member it was handed.
         resolved = _coerce_disjunction_semantics(semantics)
         _require_semantics_supported(resolved, _SELECT_ONE_ROWS, "add_disjunction()")
-        self._emit_block_disjunction(list(disjuncts), name, parent=None)
+        blocks = list(disjuncts)
+        _claim_blocks(blocks, "the model", name)
+        self._emit_block_disjunction(blocks, name, parent=None)
 
     def _emit_block_disjunction(
         self, disjuncts: list["Disjunct"], name: Optional[str], parent: Optional[Variable]
@@ -8729,11 +8732,16 @@ class Model:
             for c in self._constraints
             if isinstance(c, _IndicatorConstraint) and c.disjunction is not None
         }
+        # A block disjunction with no row of its own tags nothing, so its key is
+        # known only from the nesting record (#1790); without this a disjunction
+        # nested in it, or the next one added, would reuse it.
+        taken.update(getattr(self, "_gdp_block_members", {}))
         n_keys = len(taken)
         key = f"add_disjunction:{name or ''}:{n_keys}"
         while key in taken:
             n_keys += 1
             key = f"add_disjunction:{name or ''}:{n_keys}"
+        n_start = len(self._constraints)
         for k, d in enumerate(disjuncts):
             n_before = len(self._constraints)
             self.if_then(d.indicator.variable, d._constraints, name=d.name)
@@ -8748,15 +8756,29 @@ class Model:
         if parent is not None or any(d._nested for d in disjuncts):
             # A block whose only content is a nested disjunction emits no row, so
             # nothing tags its indicator; the GDP tree needs it to attach the child.
+            # If no disjunct emits a row, nothing records the disjunction at all
+            # (#1790), so its parent and its place in ``_constraints`` are kept too.
             # Recorded only when nesting is involved: a model without nesting gains
             # no state. Read with ``getattr(model, "_gdp_block_members", {})``.
             members = self.__dict__.setdefault("_gdp_block_members", {})
-            members[key] = [d.indicator.variable for d in disjuncts]
+            members[key] = _BlockMembers(
+                [d.indicator.variable for d in disjuncts], parent, n_start, name
+            )
         for d in disjuncts:
             for kind, item, inner_name in d._nested:
                 if kind == "block":
                     self._emit_block_disjunction(item, inner_name, parent=d.indicator.variable)
                 else:
+                    if item._model is not None or item.parent_indicator is not None:
+                        # #1790: the same object nested in two blocks would be one
+                        # row list under two parents; the second would overwrite the
+                        # first's link and the first block would lose its nesting.
+                        raise ValueError(
+                            f"disjunction {item.name or '<anon>'!r} is nested in more than "
+                            "one Disjunct block (or is already on the model); a "
+                            "disjunction belongs to exactly one place -- build one per "
+                            "block with Model.disjunction"
+                        )
                     item.parent_indicator = d.indicator.variable
                     item._model = self
                     self._constraints.append(item)
@@ -11663,12 +11685,15 @@ class Model:
                                 else:
                                     out.add(id(it))
 
-        uses: list[tuple[Optional[int], Expression]] = []
+        # (row id or None, expression, where) -- a use with no row id is never part
+        # of a block, so it is outside every one.
+        uses: list[tuple[Optional[int], Expression, str]] = []
+        outside = "a row outside the block"
         for c in self._constraints:
             if isinstance(c, Constraint):
-                uses.append((id(c), c.body))
+                uses.append((id(c), c.body, outside))
             elif isinstance(c, _IndicatorConstraint):
-                uses.append((id(c.constraint), c.constraint.body))
+                uses.append((id(c.constraint), c.constraint.body, outside))
             elif isinstance(c, _DisjunctiveConstraint):
                 stack = [c]
                 while stack:
@@ -11678,19 +11703,24 @@ class Model:
                             if isinstance(it, _DisjunctiveConstraint):
                                 stack.append(it)
                             else:
-                                uses.append((id(it), it.body))
+                                uses.append((id(it), it.body, outside))
+            # #1790: an SOS set or a logic row names its columns directly; neither
+            # can sit in a block, so any local column in one has escaped.
+            elif isinstance(c, _SOSConstraint):
+                uses += [(None, v, "an SOS constraint") for v in c.variables]
+            elif isinstance(c, _LogicalConstraint):
+                uses += [(None, v, "a logical constraint") for v in _logical_leaves(c.expression)]
         if self._objective is not None:
-            uses.append((None, self._objective.expression))
+            uses.append((None, self._objective.expression, "the objective"))
         for d in blocks:
             own: set[int] = set()
             subtree_rows(d, own)
             local = {v.name for v in d._local_vars}
-            for row_id, body in uses:
-                if row_id in own:
+            for row_id, body, where in uses:
+                if row_id is not None and row_id in own:
                     continue
                 hit = local & set(_collect_variables(body))
                 if hit:
-                    where = "the objective" if row_id is None else "a row outside the block"
                     raise ValueError(
                         f"variable {sorted(hit)[0]!r} is declared local to disjunct "
                         f"{d.name!r} (Disjunct.variable) but is used in {where}. A "
@@ -12378,6 +12408,44 @@ class _DisjunctiveConstraint:
         return tuple(BooleanVar(v) for v in self._indicator_vars)
 
 
+def _claim_blocks(blocks: list["Disjunct"], owner: str, name: Optional[str]) -> None:
+    """Record ``owner`` as the one place ``blocks`` sit, refusing a block that is
+    already placed, already lowered, or listed twice (#1790).
+
+    Every check runs before anything is recorded, so a refused call leaves no block
+    claimed. A block placed twice would lower to the conjunction of both
+    placements: sound, but not the model the user wrote, and Pyomo.GDP (which the
+    G0.4 converter targets) forbids it.
+    """
+    what = f"disjunction {name!r}" if name else "a disjunction"
+    seen: set[int] = set()
+    for d in blocks:
+        if id(d) in seen:
+            raise ValueError(f"disjunct {d.name!r} is listed twice in {what}")
+        seen.add(id(d))
+        where = d._placed_in or ("the model" if d._attached else None)
+        if where is not None:
+            raise ValueError(
+                f"disjunct {d.name!r} cannot go into {what} of {owner}: it is already in "
+                f"a disjunction of {where}. A Disjunct block belongs to exactly one "
+                "disjunction; make a separate block for each."
+            )
+    for d in blocks:
+        d._placed_in = owner
+
+
+class _BlockMembers(NamedTuple):
+    """What ``Model._emit_block_disjunction`` records about a block disjunction
+    that takes part in nesting (#1775 G1.2): its indicators in disjunct order, the
+    enclosing disjunct's indicator (``None`` at top level), the index in
+    ``_constraints`` where its emission began, and its user-given name."""
+
+    indicators: list[Variable]
+    parent: Optional[Variable]
+    start: int
+    name: Optional[str]
+
+
 @dataclass
 class _SOSConstraint:
     sos_type: int
@@ -12644,6 +12712,10 @@ class Disjunct:
         # #1430: set by ``Model.add_disjunction``. False means this block's
         # constraints live nowhere but here, so a solve would silently omit them.
         self._attached = False
+        # #1790: where this block was placed -- "the model" for
+        # ``Model.add_disjunction``, else the enclosing block's name. A block sits in
+        # exactly one disjunction, as in Pyomo.GDP.
+        self._placed_in: Optional[str] = None
 
     def _require_open(self, what: str) -> None:
         # Model.add_disjunction lowers a block when it is called; anything added to
@@ -12702,11 +12774,14 @@ class Disjunct:
         for d in blocks:
             if not isinstance(d, Disjunct) or d._model is not self._model:
                 raise TypeError("Disjunct.add_disjunction takes Disjunct blocks of the same model")
-            if d is self or d._attached or self._encloses(d):
+            if d is self or d._encloses(self):
+                # #1790: lowering walks the nesting recursively, so a cycle would
+                # recurse without end; refuse it here, where it is built.
                 raise ValueError(
-                    f"disjunct {d.name!r} cannot be nested in {self.name!r}: it is this "
-                    "block, already lowered, or already nested here"
+                    f"disjunct {d.name!r} cannot be nested in {self.name!r}: that would "
+                    f"make a nesting cycle ({d.name!r} is {self.name!r} or encloses it)"
                 )
+        _claim_blocks(blocks, f"disjunct {self.name!r}", name)
         self._nested.append(("block", blocks, name))
 
     def _encloses(self, other: "Disjunct") -> bool:

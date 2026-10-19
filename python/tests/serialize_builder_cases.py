@@ -301,6 +301,17 @@ def gdp_nested_blocks():
     return m
 
 
+def gdp_disjunct_local_variable():
+    m, x, y = _xy("local")
+    a = m.make_disjunct("a")
+    w = a.variable("w", lb=0, ub=5)
+    a.subject_to([x >= 4, w <= x])
+    b = m.make_disjunct("b")
+    b.subject_to(y >= 6)
+    m.add_disjunction([a, b])
+    return m
+
+
 def gdp_unattached_disjunction():
     m, x, y = _xy("unattached")
     m.disjunction([[x >= 4, y >= 1], [y >= 6, x >= 1]], name="mode")
@@ -631,6 +642,7 @@ REFUSED: dict[str, Refusal] = {
         gdp_nested_disjunction, "nests a Model.disjunction", "pickle"
     ),
     "gdp:nested Disjunct blocks": Refusal(gdp_nested_blocks, "#1775 G1.2", "pickle"),
+    "gdp:Disjunct.variable": Refusal(gdp_disjunct_local_variable, "local variables", "pickle"),
     # #1430: not in the model; the remedy is to attach it.
     "gdp:unattached disjunction()": Refusal(
         gdp_unattached_disjunction, "never added", _either_or("select_one")
