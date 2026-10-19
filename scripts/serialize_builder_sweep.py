@@ -5,7 +5,8 @@ per case in ``python/tests/serialize_builder_cases.py`` and classifies it:
 
 * ``round-trips`` -- ``dumps(loads(dumps(m))) == dumps(m)``, equal
   ``model_fingerprint``, and ``pickle`` fingerprint-equal too;
-* ``refused: <message>`` -- ``dumps`` raised ``SerializationError``;
+* ``refused: <message>`` -- ``dumps`` raised ``SerializationError`` (unexpected
+  unless the message matches the case's own ``Refusal.match``);
 * ``crashed: <exc>`` -- anything else (a missing classification or encoding).
 
 With ``--solve`` it also solves each round-tripping model and its reload and
@@ -20,12 +21,20 @@ on a crash, an outcome that differs from the case's table, or nothing executed.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import pickle
+import re
 import sys
 import time
 import traceback
 import warnings
 from pathlib import Path
+
+# torch and cyipopt each link their own OpenMP runtime, and importing torch after a
+# solve has loaded cyipopt aborts the process ("OMP: Error #15"). The reader cases
+# import torch, so load it first, when it is installed.
+if importlib.util.find_spec("torch") is not None:
+    import torch  # noqa: F401
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "python" / "tests"))
@@ -97,6 +106,12 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     table = [(k, "round-trips", b) for k, b in cases.ROUND_TRIPS.items()]
+    for k, (modules, b) in cases.READERS.items():
+        missing = [mod for mod in modules if importlib.util.find_spec(mod) is None]
+        if missing:
+            print(f"{k:58s} skipped: {', '.join(missing)} not installed", flush=True)
+        else:
+            table.append((k, "round-trips", b))
     table += [(k, "refused", r.build) for k, r in cases.REFUSED.items()]
     executed = crashed = unexpected = 0
     for key, expected, build in table:
@@ -107,8 +122,13 @@ def main(argv: list[str] | None = None) -> int:
             traceback.print_exc(file=sys.stderr)
         executed += 1
         crashed += kind == "crashed"
-        unexpected += kind != expected
+        # A refusal is expected only with the case's own message: one raised for a
+        # different, unlisted reason is the failure this sweep exists to catch.
+        wrong_reason = kind == "refused" and not re.search(cases.REFUSED[key].match, detail)
+        unexpected += kind != expected or wrong_reason
         mark = "" if kind == expected else f"   <-- expected {expected}"
+        if wrong_reason:
+            mark = f"   <-- expected a refusal matching {cases.REFUSED[key].match!r}"
         line = f"{key:58s} {kind}{': ' + detail[:110] if detail else ''}{mark}"
         if args.solve and kind == "round-trips":
             wall, same, outcome = solve_pair(model)

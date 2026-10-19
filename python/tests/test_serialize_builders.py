@@ -18,8 +18,12 @@ ML, GDP, stochastic, robust, bilevel, GP and every registered transformation.
 from __future__ import annotations
 
 import copy
+import importlib.util
 import pickle
+import subprocess
+import sys
 import warnings
+from pathlib import Path
 
 import discopt.transformations as dt
 import pytest
@@ -52,6 +56,49 @@ def test_builder_round_trips(key):
     assert model_fingerprint(pickle.loads(pickle.dumps(model))) == fp
 
 
+def _round_trip_checks(model) -> int:
+    text = dumps(model, provenance=False)
+    reloaded = _loads(text)
+    assert dumps(reloaded, provenance=False) == text
+    fp = model_fingerprint(model)
+    assert model_fingerprint(reloaded) == fp
+    assert model_fingerprint(pickle.loads(pickle.dumps(model))) == fp
+    return 3
+
+
+#: torch and cyipopt each link their own OpenMP runtime; importing torch into a
+#: process that already loaded cyipopt aborts it ("OMP: Error #15", measured with
+#: torch 2.7.1 / cyipopt 1.7.0 on macOS), which takes an xdist worker down with
+#: it. A torch case therefore runs in a fresh interpreter that imports torch first.
+_FRESH_TORCH = """
+import sys, warnings
+import torch  # first: before anything that loads cyipopt's OpenMP
+sys.path.insert(0, sys.argv[1])
+import serialize_builder_cases as cases, test_serialize_builders as t
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    model = cases.READERS[sys.argv[2]][1]()
+print("checks", t._round_trip_checks(model))
+"""
+
+
+@pytest.mark.parametrize("key", sorted(cases.READERS))
+def test_reader_round_trips(key):
+    modules, build = cases.READERS[key]
+    for mod in modules:
+        if importlib.util.find_spec(mod) is None:
+            pytest.skip(f"{mod} not installed")
+    if "torch" not in modules:
+        assert _round_trip_checks(_build(build)) == 3
+        return
+    here = str(Path(__file__).resolve().parent)
+    proc = subprocess.run(
+        [sys.executable, "-c", _FRESH_TORCH, here, key], capture_output=True, text=True
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert proc.stdout.split()[-2:] == ["checks", "3"], proc.stdout
+
+
 @pytest.mark.parametrize("key", sorted(cases.REFUSED))
 def test_builder_is_refused_with_remedy(key):
     case = cases.REFUSED[key]
@@ -77,8 +124,9 @@ def test_builder_is_refused_with_remedy(key):
 
 def test_builder_sweep_probe_fired():
     """§6: the parametrized tests above measure nothing over an empty table."""
-    assert len(cases.ROUND_TRIPS) >= 40 and len(cases.REFUSED) >= 10
-    areas = {key.split(":")[0] for key in (*cases.ROUND_TRIPS, *cases.REFUSED)}
+    # Pinned, not a floor: a case that disappears must be noticed (#1797 review N3).
+    assert (len(cases.ROUND_TRIPS), len(cases.REFUSED), len(cases.READERS)) == (44, 13, 4)
+    areas = {key.split(":")[0] for key in (*cases.ROUND_TRIPS, *cases.REFUSED, *cases.READERS)}
     assert areas == {"dae", "ml", "gdp", "stochastic", "ro", "bilevel", "gp", "transform"}
 
 
@@ -189,3 +237,45 @@ def test_the_bound_neutral_panel_covers_every_area():
     assert {k.split(":")[0] for k in solved} == {
         "dae", "ml", "gdp", "stochastic", "ro", "bilevel", "gp", "transform",
     }  # fmt: skip
+
+
+# ── #1797 review follow-ups ────────────────────────────────────────────────
+
+
+def test_if_then_refuses_a_disjunction_member_when_it_is_built():
+    """S1: ``if_then(y, [m.disjunction(...)])`` stored the disjunction as the row;
+    pickle, deepcopy and clone then crashed reading its ``.body`` (the C1 crash
+    class), and solve reported the block as never added. Refused at the call."""
+    import discopt.modeling as dm
+
+    m = dm.Model("if_then_nested")
+    x = m.continuous("x", lb=0, ub=20)
+    y = m.binary("y")
+    m.maximize(x)
+    inner = m.disjunction([[x >= 1, x <= 3], [x >= 5, x <= 7]], name="inner")
+    n_before = len(m._constraints)
+    with pytest.raises(TypeError, match=r"then_constraints\[1\] is a _DisjunctiveConstraint"):
+        m.if_then(y, [x <= 10, inner])
+    assert len(m._constraints) == n_before  # nothing recorded by the refused call
+    m.either_or([[inner], [x >= 15, x <= 16]], name="outer")  # the block is still usable
+    pickle.loads(pickle.dumps(m))
+
+
+def test_a_reversed_disjunctive_state_serializes_again():
+    """N1: after the last ``reverse_current_disjunctive_state`` the model is its
+    source again, but the empty token list left behind kept ``dumps`` refusing it."""
+    from discopt.gdp.state import reverse_current_disjunctive_state
+
+    source = cases.gdp_disjunct_blocks()
+    text = dumps(source, provenance=False)
+    model = cases.gdp_disjunct_blocks()
+    dt.apply_to(
+        "gdp.transform_current_disjunctive_state",
+        model,
+        selected=cases._selected_second_disjunct(model),
+    )
+    with pytest.raises(SerializationError, match="Save the source model instead"):
+        dumps(model)
+    reverse_current_disjunctive_state(model)
+    assert "_gdp_state_tokens" not in vars(model)
+    assert dumps(model, provenance=False) == text

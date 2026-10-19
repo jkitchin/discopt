@@ -231,6 +231,62 @@ def ml_frozen_network():
 # ── GDP (test_1430_unattached_gdp_blocks.py, test_serialize_logical.py, test_1775_g1_3_state.py) ──
 
 
+# ── ML readers (test_nn_readers.py): optional dependencies, see READERS ─────
+
+
+def _reader_data():
+    X = np.random.RandomState(0).rand(40, 2)
+    return X, X @ np.array([1.0, 2.0])
+
+
+def _reader_model(name, predictor):
+    from discopt.ml.predictor import add_predictor
+
+    m = dm.Model(name)
+    x = m.continuous("x", shape=(2,), lb=0.0, ub=1.0)
+    out, _ = add_predictor(m, x, predictor, prefix="p", input_bounds=(np.zeros(2), np.ones(2)))
+    m.minimize(out[0])
+    return m
+
+
+def _torch_sequential():
+    import torch
+
+    torch.manual_seed(0)
+    return torch.nn.Sequential(torch.nn.Linear(2, 3), torch.nn.ReLU(), torch.nn.Linear(3, 1))
+
+
+def ml_reader_sklearn_mlp():
+    from sklearn.neural_network import MLPRegressor
+
+    return _reader_model(
+        "sk_mlp", MLPRegressor((3,), max_iter=50, random_state=0).fit(*_reader_data())
+    )
+
+
+def ml_reader_sklearn_gbr():
+    from sklearn.ensemble import GradientBoostingRegressor
+
+    gbr = GradientBoostingRegressor(n_estimators=3, max_depth=2, random_state=0)
+    return _reader_model("sk_gbr", gbr.fit(*_reader_data()))
+
+
+def ml_reader_torch_sequential():
+    return _reader_model("torch_seq", _torch_sequential())
+
+
+def ml_reader_onnx():
+    import os
+    import tempfile
+
+    import torch
+
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "net.onnx")
+        torch.onnx.export(_torch_sequential(), torch.zeros(1, 2), path, dynamo=False)
+        return _reader_model("onnx", path)
+
+
 def _xy(name):
     m = dm.Model(name)
     x = m.continuous("x", lb=0.0, ub=10.0)
@@ -298,6 +354,16 @@ def gdp_nested_blocks():
     b.subject_to(x >= 7)
     m.add_disjunction([a, b])
     m.minimize(x + 3 * y)
+    return m
+
+
+def gdp_or_disjunct_blocks():
+    m, x, y = _xy("blocks_or")
+    a = m.make_disjunct("a")
+    a.subject_to([x >= 4, y >= 1])
+    b = m.make_disjunct("b")
+    b.subject_to([y >= 6, x >= 1])
+    m.add_disjunction([a, b], semantics="or")
     return m
 
 
@@ -643,6 +709,8 @@ REFUSED: dict[str, Refusal] = {
     ),
     "gdp:nested Disjunct blocks": Refusal(gdp_nested_blocks, "#1775 G1.2", "pickle"),
     "gdp:Disjunct.variable": Refusal(gdp_disjunct_local_variable, "local variables", "pickle"),
+    # #1775 G1.4: an OR block's semantics are not recorded by this format version.
+    "gdp:OR Disjunct blocks": Refusal(gdp_or_disjunct_blocks, "OR add_disjunction", "pickle"),
     # #1430: not in the model; the remedy is to attach it.
     "gdp:unattached disjunction()": Refusal(
         gdp_unattached_disjunction, "never added", _either_or("select_one")
@@ -662,6 +730,17 @@ REFUSED: dict[str, Refusal] = {
         gdp_disjunct_blocks,
         lambda m: {"selected": _selected_second_disjunct(m)},
     ),
+}
+
+#: The ``discopt.ml.readers`` cases, which must round-trip like :data:`ROUND_TRIPS`
+#: but need an optional dependency: ``key -> (modules, build)``. A case whose
+#: modules are missing is skipped (pytest) or reported skipped (the sweep), never
+#: counted as executed.
+READERS: dict[str, tuple[tuple[str, ...], Callable[[], Any]]] = {
+    "ml:reader sklearn MLPRegressor": (("sklearn",), ml_reader_sklearn_mlp),
+    "ml:reader sklearn GradientBoostingRegressor": (("sklearn",), ml_reader_sklearn_gbr),
+    "ml:reader torch Sequential": (("torch",), ml_reader_torch_sequential),
+    "ml:reader onnx": (("torch", "onnx"), ml_reader_onnx),
 }
 
 #: Every registered transformation appears in a table: a pass added to the

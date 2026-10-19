@@ -325,6 +325,10 @@ def reverse_current_disjunctive_state(model: Model) -> Model:
         raise ValueError("no transform_current_disjunctive_state to reverse on this model")
     tokens[-1].reverse()
     tokens.pop()
+    if not tokens:
+        # A fully reversed model is its source again; an empty record left behind
+        # would still make ``serialize.dumps`` refuse it (#1797 review N1).
+        del model.__dict__["_gdp_state_tokens"]
     return model
 
 
