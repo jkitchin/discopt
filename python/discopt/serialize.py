@@ -500,7 +500,9 @@ def _enc_index(index: Any) -> Any:
         return {"k": "tuple", "v": [_enc_index(i) for i in index]}
     raise SerializationError(
         f"cannot serialize index {index!r} of type {type(index).__name__}; "
-        "only integers, slices, and tuples of them are supported."
+        "only integers, slices, and tuples of them are supported (None / Ellipsis "
+        "are planned for schema 1.6, plan WP-3b). Use pickle or Model.clone() for "
+        "same-version transport."
     )
 
 
@@ -1120,12 +1122,22 @@ def _refuse_unsupported(model: Model) -> None:
             type(con) is _DisjunctiveConstraint and con.parent_indicator is not None
         )
         if nested:
+            raise SerializationError(_NESTED_BLOCK_REFUSAL)
+        # A disjunct holding a whole disjunction (``Model.disjunction()`` passed as
+        # a member to ``either_or``): the row encoding has no member kind for it,
+        # and writing only its rows would flatten an OR into an AND. Planned for
+        # 1.6 (plan §4 WP-3b); until then, refuse rather than crash (WP-6 sweep).
+        if type(con) is _DisjunctiveConstraint and any(
+            type(r) is _DisjunctiveConstraint for d in con.disjuncts for r in d
+        ):
             raise SerializationError(
-                "cannot serialize: the model nests a disjunction in a Disjunct block "
-                "(Disjunct.add_disjunction / Disjunct.subject_to), which this format "
-                "version does not record (#1775 G1.2). Use pickle or Model.clone() "
+                "cannot serialize: the model nests a Model.disjunction() inside another "
+                f"disjunction's disjunct{_named(con)}, which this format version does not "
+                "record (planned for schema 1.6, plan WP-3b). Use pickle or Model.clone() "
                 "for same-version transport."
             )
+    if _has_block_members(model):
+        raise SerializationError(_NESTED_BLOCK_REFUSAL)
     # #1430: a disjunction built by ``Model.disjunction()``/``make_disjunct()`` and
     # never attached is not IN the model, so a document faithfully records a model
     # without it -- and the reloaded model carries no record that anything was
@@ -1135,8 +1147,35 @@ def _refuse_unsupported(model: Model) -> None:
     # for a worker, so a forgotten disjunction would be refused at ``workers=1`` and
     # silently dropped at ``workers=3`` -- the worker-count equivalence that module
     # documents, broken by a guard that only ran on one arm.
-    model._reject_unattached_gdp_blocks()
+    try:
+        model._reject_unattached_gdp_blocks()
+    except ValueError as exc:
+        # The #1430 guard's own message names the remedy; raise it as this module's
+        # error so a caller catching `SerializationError` sees the refusal (it is a
+        # `ValueError` subclass, so callers catching that are unaffected).
+        raise SerializationError(f"cannot serialize: {exc}") from exc
     _refuse_unclassified_attributes(model)
+
+
+#: #1775 G1.2: nesting in a Disjunct block (``Disjunct.add_disjunction`` /
+#: ``Disjunct.subject_to``) is carried by parent links, and its block membership by
+#: ``_gdp_block_members``, neither of which this format records.
+_NESTED_BLOCK_REFUSAL = (
+    "cannot serialize: the model nests a disjunction in a Disjunct block "
+    "(Disjunct.add_disjunction / Disjunct.subject_to), which this format "
+    "version does not record (#1775 G1.2). Use pickle or Model.clone() "
+    "for same-version transport."
+)
+
+
+def _has_block_members(model: Model) -> bool:
+    """``_gdp_block_members`` is recorded only when Disjunct blocks nest."""
+    return bool(model.__dict__.get("_gdp_block_members"))
+
+
+def _named(con) -> str:
+    name = getattr(con, "name", None)
+    return f" (named {name!r})" if name else ""
 
 
 def _refuse_unclassified_attributes(model: Model) -> None:
@@ -2071,6 +2110,8 @@ _REFORMULATION_RECORD_PREFIXES = {
     "_bml_": "binary.multilinear",
     "_ipx_": "integer.bilinear / integer.multilinear",
     "_nsl_": "nonsmooth.epigraph",
+    # The undo tokens hold the rows the pass replaced, i.e. the pre-pass model.
+    "_gdp_state_tokens": "gdp.transform_current_disjunctive_state",
 }
 
 #: ``_gams_initial_values``: the starting point a GAMS model declares (``x.l``),

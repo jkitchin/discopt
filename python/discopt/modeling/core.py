@@ -6269,7 +6269,16 @@ class Model:
             elif isinstance(c, _IndicatorConstraint):
                 roots += [c.indicator, c.constraint.body]
             elif isinstance(c, _DisjunctiveConstraint):
-                roots += [r.body for dd in c.disjuncts for r in dd]
+                # A disjunct may hold a whole disjunction (``Model.disjunction()``
+                # nested inside ``either_or``), not only rows: walk into it rather
+                # than reading a ``.body`` it does not have (WP-6 sweep).
+                stack = [c]
+                while stack:
+                    for r in (r for dd in stack.pop().disjuncts for r in dd):
+                        if isinstance(r, _DisjunctiveConstraint):
+                            stack.append(r)
+                        elif isinstance(r, Constraint):
+                            roots.append(r.body)
             elif isinstance(c, _SOSConstraint):
                 roots += list(c.variables)
             elif isinstance(c, _LogicalConstraint):
