@@ -132,8 +132,11 @@ def solve_gdpopt_loa(
 
     # 5. Check if objective is linear
     _raw_obj = reformulated._objective
+    # ``_objective_expression()``, not ``_objective.expression``: a fast-API
+    # objective (``add_linear_objective``) leaves a zero placeholder there, and the
+    # master then minimized 0 and reported bound 0 (#1798).
     obj_coeffs = (
-        _extract_body_coeffs(_raw_obj.expression, reformulated, n_vars)
+        _extract_body_coeffs(reformulated._objective_expression(), reformulated, n_vars)
         if _raw_obj is not None
         else None
     )

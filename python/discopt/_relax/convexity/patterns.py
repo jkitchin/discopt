@@ -370,7 +370,7 @@ def _expr_struct_eq(a: Expression, b: Expression) -> bool:
     if isinstance(a, Variable) and isinstance(b, Variable):
         return a.name == b.name
     if isinstance(a, IndexExpression) and isinstance(b, IndexExpression):
-        return _expr_struct_eq(a.base, b.base) and a.index == b.index
+        return _expr_struct_eq(a.base, b.base) and _index_eq(a.index, b.index)
     if isinstance(a, Parameter) and isinstance(b, Parameter):
         return a is b or a.name == b.name
     if isinstance(a, BinaryOp) and isinstance(b, BinaryOp):
@@ -386,6 +386,29 @@ def _expr_struct_eq(a: Expression, b: Expression) -> bool:
             _expr_struct_eq(x, y) for x, y in zip(a.terms, b.terms)
         )
     return False
+
+
+def _index_eq(ia: object, ib: object) -> bool:
+    """Exact equality of two subscripts, index arrays included.
+
+    ``a.index == b.index`` raised ``ValueError`` ("truth value of an array is
+    ambiguous") on a gather, ``x[np.array([0, 2])]`` -- the form of a builder
+    quadratic objective since #1802 -- and crashed convexity classification. An
+    array matches only an array of the same dtype kind, shape and values: a
+    boolean mask and an integer index with equal ``tolist()`` select different
+    entries.
+    """
+    if isinstance(ia, tuple) or isinstance(ib, tuple):
+        if not (isinstance(ia, tuple) and isinstance(ib, tuple)) or len(ia) != len(ib):
+            return False
+        return all(_index_eq(x, y) for x, y in zip(ia, ib))
+    if isinstance(ia, np.ndarray) or isinstance(ib, np.ndarray):
+        if not (isinstance(ia, np.ndarray) and isinstance(ib, np.ndarray)):
+            return False
+        return (
+            ia.dtype.kind == ib.dtype.kind and ia.shape == ib.shape and bool(np.array_equal(ia, ib))
+        )
+    return bool(ia == ib)
 
 
 def _split_const_mul(expr: Expression) -> tuple[float, Optional[Expression]]:

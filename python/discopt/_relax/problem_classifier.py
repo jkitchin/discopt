@@ -46,6 +46,7 @@ from discopt.modeling.core import (
     Variable,
     VarType,
     affine_array_sum,
+    quadratic_array_sum,
 )
 
 logger = logging.getLogger(__name__)
@@ -618,6 +619,12 @@ def _extract_linear_coefficients_sparse(expr, model: Model, n: int):
                             raise _NotLinearError(
                                 f"non-scalar index {idx!r} on {var.name}"
                             ) from None
+                        if np.ndim(flat_idx) != 0:
+                            # A gather (``x[np.array([0, 2])]``, the builder
+                            # objective's form): ravel_multi_index accepts index
+                            # arrays, and ``int()`` of the result raised a bare
+                            # TypeError instead of this decline (#1802).
+                            raise _NotLinearError(f"non-scalar index {idx!r} on {var.name}")
                         _add(offset + int(flat_idx), scale)
                     continue
                 raise _NotLinearError(f"IndexExpression on non-variable: {type(node.base)}")
@@ -1014,6 +1021,20 @@ def _extract_quadratic_terms(expr, model: Model, n: int):
                     for j in range(coefs.size):
                         c[offset + j] += scale * float(coefs[j])
                     continue
+                # ``dm.sum(V * x[R] * x[C])``, a builder quadratic objective
+                # (#1802): each entry is the scalar ``v * x_r * x_c`` of the
+                # var*var arm above, with the same Hessian convention.
+                quad = quadratic_array_sum(node)
+                if quad is not None:
+                    var, rows, cols, vals = quad
+                    offset = _compute_var_offset(var, model)
+                    for r, cc, v in zip(rows.tolist(), cols.tolist(), vals.tolist()):
+                        if r == cc:
+                            _qadd(offset + r, offset + r, 2.0 * scale * v)
+                        else:
+                            _qadd(offset + r, offset + cc, scale * v)
+                            _qadd(offset + cc, offset + r, scale * v)
+                    continue
                 stack.append((node.operand, scale, True))
                 continue
 
@@ -1074,6 +1095,8 @@ def _try_extract_const_var(expr, model: Model):
                 )
             except (TypeError, ValueError):
                 return None  # sliced/partial subscript: not a scalar reference
+            if np.ndim(flat_idx) != 0:
+                return None  # a gather (index arrays): not a scalar reference (#1802)
             return (1.0, offset + int(flat_idx))
         if isinstance(expr, Variable):
             return (1.0, _compute_var_offset(expr, model))

@@ -128,8 +128,46 @@ GDPLIB_SMALL: tuple[str, ...] = (
     "modprodnet",
 )
 
+#: GDPlib's own benchmark panel (``gdplib/benchmark.py:PR58_BENCHMARK_INSTANCES``),
+#: the GDPlib half of the #1775 parity panel (spec §1.2).
+GDPLIB_PR58: tuple[str, ...] = (
+    "batch_processing",
+    "biofuel",
+    "cstr",
+    "disease_model",
+    "ex1_linan_2023",
+    "gdp_col",
+    "hda",
+    "kaibel",
+    "med_term_purchasing",
+    "methanol",
+    "mod_hens",
+    "modprodnet",
+    "positioning",
+    "small_batch",
+    "spectralog",
+    "stranded_gas",
+    "syngas",
+)
+
+#: The #1775 GDP parity panel (spec §1.2): GDPlib's PR58 set plus the Pyomo GDPopt
+#: test models, vendored from Pyomo 6.10.0 (``benchmarks.pyomo_gdp_examples``):
+#: 8PP in its algebraic and logical forms, strip packing, constrained layout,
+#: ``ex_633_trespalacios``, ``nonconvex_HEN`` and jobshop (``jobshop-small.dat``, the
+#: data the example's own ``__main__`` uses). Every name has a row in
+#: :func:`panel_oracle`: a verified optimum or an explicit "unproven".
+GDP_PARITY: tuple[str, ...] = GDPLIB_PR58 + (
+    "pyomo.eight_process",
+    "pyomo.eight_process_logical",
+    "pyomo.strip_packing_concrete",
+    "pyomo.constrained_layout_clay0203",
+    "pyomo.ex_633_trespalacios",
+    "pyomo.nonconvex_hen",
+    "pyomo.jobshop_small",
+)
+
 #: Named model sets selectable with ``--suite``.
-SUITES: dict[str, tuple[str, ...]] = {"gdplib_small": GDPLIB_SMALL}
+SUITES: dict[str, tuple[str, ...]] = {"gdplib_small": GDPLIB_SMALL, "gdp_parity": GDP_PARITY}
 
 
 def is_available() -> bool:
@@ -188,6 +226,17 @@ def discover_models(
     if include is not None:
         want = set(include)
         specs = [s for s in specs if s.name in want]
+        # #1775 G0.5: the vendored Pyomo examples are named ``pyomo.<name>`` and
+        # resolved only when asked for by name, so the default sweep is unchanged.
+        # An unknown ``pyomo.`` name is dropped like any other absent name; the
+        # --suite path refuses that loudly.
+        from benchmarks import pyomo_gdp_examples as px
+
+        for name in sorted(want):
+            if name.startswith(px.PREFIX) and name[len(px.PREFIX) :] in px.CATALOG:
+                specs.append(
+                    GDPModelSpec(name=name, builder=px.builder(name), module="pyomo_gdp_examples")
+                )
     if exclude_set:
         specs = [s for s in specs if s.name not in exclude_set]
     return sorted(specs, key=lambda s: s.name)
@@ -248,6 +297,105 @@ def reference_optima() -> dict[str, float]:
         "modprodnet": 3592.924373781839,
         "batch_processing": 679365.33,  # BARON-certified (SCIP left it unproven at 60s)
     }
+
+
+@dataclass(frozen=True)
+class OracleRecord:
+    """The oracle status of one parity-panel instance (#1775 G0.5).
+
+    ``source`` says what certified ``value``:
+
+    * ``"baron+scip"`` / ``"baron"`` -- the :func:`reference_optima` entries
+      (global solvers through GAMS, ``lb == ub``, feasibility-verified point);
+    * ``"highs"`` -- a linear instance, solved by HiGHS to proven optimality on
+      **both** the ``gdp.bigm`` and the ``gdp.hull`` reformulation with the
+      incumbent feasibility-verified in Pyomo each time (:func:`_solve_with_highs`),
+      and the two values agreeing;
+    * ``"unproven"`` -- no oracle yet; ``value`` is ``None`` and ``note`` says why.
+      ``discopt_benchmarks/scripts/gdp_parity_oracle.py`` fills these from the
+      BARON+SCIP GAMS oracle where GAMS is installed.
+
+    ``pyomo_expected`` is Pyomo's own test-suite value, a cross-check and never an
+    oracle (``pyomo_gdp_examples.PYOMO_EXPECTED``).
+    """
+
+    value: float | None
+    source: str
+    note: str = ""
+    pyomo_expected: tuple[float, float] | None = None
+
+
+#: HiGHS-certified optima of the linear parity-panel instances (see
+#: :class:`OracleRecord`); measured 2026-10-19 with HiGHS through ``appsi_highs``.
+#: The value is the ``gdp.bigm`` one. Re-measured 2026-10-19 (#1802) with the oracle
+#: now judging each incumbent at its integral rounding: ``gdp.hull`` agrees to
+#: <= 3.2e-13 relative on every row (disease_model 3.1e-13, the rest <= 3.3e-16), and
+#: each value below is within 3.2e-13 of that re-measurement. (Earlier figures of
+#: "<= 4e-14" here and "<= 6e-15" in the PR text were both under the measured value.)
+_HIGHS_OPTIMA: dict[str, float] = {
+    "disease_model": 304.4162107198232,
+    "med_term_purchasing": 6797.539701513444,
+    "pyomo.jobshop_small": 11.0,
+    "pyomo.strip_packing_concrete": 11.0,  # Pyomo's test asserts 11 too
+}
+
+#: Nonlinear parity-panel instances certified by the GAMS oracle
+#: (``scripts/gdp_parity_oracle.py``): GAMS 53, ``gdp.bigm``, ``optcr=1e-9``,
+#: ``reslim=300`` s per solver, BARON on the full (Floating Network) license, run
+#: 2026-10-19 (#1802). Each value closed its gap (``lb == ub``) with the incumbent
+#: feasible in Pyomo at its integral rounding (:data:`_ORACLE_INT_TOL`). The source
+#: says who certified: ``"baron+scip"`` agreed; ``"baron"`` alone where GAMS/SCIP's
+#: point failed the rounding check -- on both 8PP forms SCIP reported 67.3236, below
+#: the optimum, on binaries at 9.5e-7 / 0.999999 (#1802 S2).
+_GAMS_OPTIMA: dict[str, tuple[float, str]] = {
+    "pyomo.eight_process": (68.00974405106514, "baron"),
+    "pyomo.eight_process_logical": (68.00973353554782, "baron"),
+    "pyomo.constrained_layout_clay0203": (41573.26252165382, "baron+scip"),
+    "pyomo.ex_633_trespalacios": (4.460367612328062, "baron+scip"),
+    "pyomo.nonconvex_hen": (114384.77758268737, "baron+scip"),
+}
+
+_GAMS_300S = "GAMS oracle (2026-10-19, gdp.bigm, 300 s per solver) did not certify it: "
+
+#: Panel instances with no oracle yet, and why (the declines the oracle script
+#: printed for that run).
+_UNPROVEN: dict[str, str] = {
+    "biofuel": _GAMS_300S + "BARON gap open (92.16 .. 4066.17); SCIP hit the limit",
+    "gdp_col": _GAMS_300S + "BARON gap open (9802.14 .. 19548.72); SCIP hit the limit",
+    "hda": _GAMS_300S + "neither solver returned bounds within the limit",
+    "kaibel": _GAMS_300S + "neither solver returned bounds within the limit; "
+    "its builder also needs an ipopt executable",
+    "methanol": _GAMS_300S + "BARON gap open (-2425.48 .. -1793.43), SCIP gap open",
+    "mod_hens": _GAMS_300S + "BARON gap open (89586.38 .. 106766.53), SCIP gap open; "
+    "its builder also needs an ipopt executable",
+    "stranded_gas": _GAMS_300S + "neither solver returned bounds within the limit",
+}
+
+
+def panel_oracle() -> dict[str, OracleRecord]:
+    """One :class:`OracleRecord` per :data:`GDP_PARITY` instance (#1775 G0.5).
+
+    Every panel name has a row: a certified value, or ``"unproven"`` with a reason.
+    A test pins that, so the panel cannot grow an instance nobody has an oracle
+    story for.
+    """
+    from benchmarks.pyomo_gdp_examples import PREFIX, PYOMO_EXPECTED
+
+    ref = reference_optima()
+    out: dict[str, OracleRecord] = {}
+    for name in GDP_PARITY:
+        expected = PYOMO_EXPECTED.get(name[len(PREFIX) :]) if name.startswith(PREFIX) else None
+        if name in ref:
+            source = "baron" if name == "batch_processing" else "baron+scip"
+            out[name] = OracleRecord(ref[name], source, pyomo_expected=expected)
+        elif name in _HIGHS_OPTIMA:
+            out[name] = OracleRecord(_HIGHS_OPTIMA[name], "highs", pyomo_expected=expected)
+        elif name in _GAMS_OPTIMA:
+            value, source = _GAMS_OPTIMA[name]
+            out[name] = OracleRecord(value, source, pyomo_expected=expected)
+        elif name in _UNPROVEN:
+            out[name] = OracleRecord(None, "unproven", _UNPROVEN[name], pyomo_expected=expected)
+    return out
 
 
 def _classify(pyomo_model) -> tuple[InstanceInfo, bool]:
@@ -497,6 +645,54 @@ def _node_count(res) -> int:
 # (scale-normalized per constraint — see :func:`_max_constraint_violation`).
 _ORACLE_FEAS_TOL = 1e-5
 
+# Integrality tolerance for an oracle's incumbent: the project integrality tolerance
+# (1e-5, CLAUDE.md "Numerical tolerances"). It only decides which points are worth
+# judging. The point actually judged is the *exactly integral* one -- each integer
+# variable rounded -- because no tolerance is safe against a big-M row on its own:
+# GAMS/SCIP returned ``67.3236`` on ``pyomo.eight_process`` (optimum ``68.00974``)
+# with binaries at ``9.5e-7`` / ``0.999999``, each inside any reasonable tolerance,
+# whose ``M * y`` slack relaxed the disjunct it was supposed to switch off.
+_ORACLE_INT_TOL = 1e-5
+
+
+def _referenced_variables(pyomo_model) -> list:
+    """The variables an active constraint or objective references, once each."""
+    import pyomo.environ as pyo
+    from pyomo.core.expr.visitor import identify_variables
+
+    referenced: dict[int, object] = {}
+    for comp in pyomo_model.component_data_objects(pyo.Constraint, active=True):
+        for v in identify_variables(comp.body, include_fixed=True):
+            referenced.setdefault(id(v), v)
+    for comp in pyomo_model.component_data_objects(pyo.Objective, active=True):
+        for v in identify_variables(comp.expr, include_fixed=True):
+            referenced.setdefault(id(v), v)
+    return list(referenced.values())
+
+
+def _snap_integers(pyomo_model) -> float | None:
+    """Round every referenced integer/binary variable of the loaded point to the
+    nearest integer **in place**; return the largest distance moved.
+
+    ``None`` when a referenced integer variable is unset (solution not loaded). The
+    oracle paths call this before :func:`_max_constraint_violation` and
+    :func:`_objective_value`, so the value they certify is the objective *of the
+    integral point they verified*, not of the fractional one the solver returned.
+    A distance above :data:`_ORACLE_INT_TOL` means the point was not mixed-integer
+    and the caller must reject it, rounded or not.
+    """
+    worst = 0.0
+    for v in _referenced_variables(pyomo_model):
+        if not v.is_integer():
+            continue
+        if v.value is None:
+            return None
+        val = float(v.value)
+        snapped = float(round(val))
+        worst = max(worst, abs(val - snapped))
+        v.set_value(snapped, skip_validation=True)
+    return worst
+
 
 def _max_constraint_violation(pyomo_model) -> float | None:
     """Largest **scale-normalized** violation of the solution currently loaded in
@@ -513,7 +709,41 @@ def _max_constraint_violation(pyomo_model) -> float | None:
 
     Per-constraint violation is normalized by ``1 + |body|`` so a large-magnitude
     balance (e.g. water_network ~3e5) is judged on relative, not absolute, slack.
+
+    Only variables an active constraint or objective references are checked
+    (#1775 G0.5). A variable nothing references cannot affect feasibility, and the
+    ``appsi`` interfaces do not load one: GDPlib's ``med_term_purchasing`` has 667,
+    all unreferenced, which made a HiGHS-proven, verified-feasible optimum read as
+    "solution not fully loaded". A *referenced* unset variable still returns ``None``.
+
+    Integrality is part of feasibility (#1802 S2). An integer/binary variable more
+    than :data:`_ORACLE_INT_TOL` from an integer makes the point infeasible
+    (``inf``); within it, the rows are evaluated at the **rounded** point, so a
+    near-integral binary cannot buy slack through a big-M row (see
+    :data:`_ORACLE_INT_TOL` for the instance that did). The rounding is undone
+    before returning; :func:`_snap_integers` is the in-place version.
     """
+    import math
+
+    referenced = _referenced_variables(pyomo_model)
+    restore: list[tuple[object, float]] = []
+    for v in referenced:
+        if not v.is_integer() or v.value is None:
+            continue
+        val = float(v.value)
+        if abs(val - round(val)) > _ORACLE_INT_TOL:
+            return math.inf
+        restore.append((v, v.value))
+        v.set_value(float(round(val)), skip_validation=True)
+    try:
+        return _max_violation_at_loaded_point(pyomo_model, referenced)
+    finally:
+        for v, val in restore:
+            v.set_value(val, skip_validation=True)
+
+
+def _max_violation_at_loaded_point(pyomo_model, referenced: list) -> float | None:
+    """The row and variable-bound part of :func:`_max_constraint_violation`."""
     import pyomo.environ as pyo
 
     worst = 0.0
@@ -529,7 +759,7 @@ def _max_constraint_violation(pyomo_model) -> float | None:
         if c.has_ub():
             hi = float(pyo.value(c.upper))
             worst = max(worst, (body - hi) / scale)
-    for v in pyomo_model.component_data_objects(pyo.Var, active=True):
+    for v in referenced:
         val = v.value
         if val is None:
             return None  # an unset variable -> solution not fully loaded
@@ -569,14 +799,17 @@ def _attach_oracle(run: ModelRun, spec: GDPModelSpec, method: str, time_limit: f
             run.oracle_source = "highs"
             return
 
-    scip = _solve_with_gams(spec, method, time_limit, "scip")
-    baron = _solve_with_gams(spec, method, time_limit, "baron")
+    why: list[str] = []
+    scip = _solve_with_gams(spec, method, time_limit, "scip", why=why)
+    baron = _solve_with_gams(spec, method, time_limit, "baron", why=why)
+    if why:
+        run.note = "; ".join([run.note, *why] if run.note else why)
     if scip is not None and baron is not None:
         tol = 1e-4 + 1e-3 * max(abs(scip), abs(baron))
         if abs(scip - baron) > tol:
             run.note = (
-                f"ORACLE INCONSISTENCY: GAMS/SCIP={scip:.8g} vs GAMS/BARON={baron:.8g} "
-                "— refusing to trust either as the certified optimum"
+                f"{run.note} ORACLE INCONSISTENCY: GAMS/SCIP={scip:.8g} vs "
+                f"GAMS/BARON={baron:.8g} — refusing to trust either as the certified optimum"
             ).strip()
             return  # two proven+verified solvers must agree; if not, trust neither
         run.oracle_objective = scip
@@ -590,6 +823,11 @@ def _attach_oracle(run: ModelRun, spec: GDPModelSpec, method: str, time_limit: f
         return
 
     ref = reference_optima().get(spec.name)
+    if ref is None:
+        # #1775 G0.5: a parity-panel instance certified offline (HiGHS on both
+        # reformulations) anchors the run the same way when no live oracle ran.
+        rec = panel_oracle().get(spec.name)
+        ref = rec.value if rec is not None else None
     if ref is not None:
         run.oracle_objective = ref
         run.oracle_source = "reference"
@@ -621,6 +859,9 @@ def _solve_with_highs(spec: GDPModelSpec, method: str, time_limit: float) -> flo
         results = solver.solve(m)
         if results.solver.termination_condition != TerminationCondition.optimal:
             return None
+        dev = _snap_integers(m)
+        if dev is None or dev > _ORACLE_INT_TOL:
+            return None  # not a mixed-integer point -> not a usable oracle
         viol = _max_constraint_violation(m)
         if viol is None or viol > _ORACLE_FEAS_TOL:
             return None  # incumbent not confirmed feasible -> not a usable oracle
@@ -630,50 +871,93 @@ def _solve_with_highs(spec: GDPModelSpec, method: str, time_limit: float) -> flo
 
 
 def _solve_with_gams(
-    spec: GDPModelSpec, method: str, time_limit: float, solver: str
+    spec: GDPModelSpec,
+    method: str,
+    time_limit: float,
+    solver: str,
+    *,
+    why: list[str] | None = None,
 ) -> float | None:
     """Solve the reformulation with a global solver via **GAMS** as a verified oracle.
 
     ``solver`` is a GAMS subsolver name (``"scip"`` / ``"baron"``). Returns its
     objective **only if** (a) the optimality gap genuinely closed (``lb == ub`` — GAMS
     can tag a time-limit incumbent ``optimal``, so we check the bounds, not the label)
-    **and** (b) the incumbent GAMS loaded back into the pyomo model is verified feasible
-    (:func:`_max_constraint_violation` ≤ tol). Otherwise ``None``.
+    **and** (b) the incumbent GAMS loaded back into the pyomo model, with its integer
+    variables rounded (:func:`_snap_integers`), is verified feasible
+    (:func:`_max_constraint_violation` ≤ tol). The value returned is the objective of
+    that rounded, verified point. Otherwise ``None``.
 
     GAMS round-trips the solution into the pyomo model — including the ``gdp.bigm``
     indicator aliases the pyscipopt-``.nl`` path mangled — so, unlike that path, the
     returned optimum is feasibility-checkable. This is the mechanism that would have
-    rejected the false cstr optimum (#823). ``None`` when GAMS is unavailable.
+    rejected the false cstr optimum (#823).
+
+    Every ``None`` has a reason, appended to *why* when given (#1802 S2): GAMS
+    unavailable, a BARON run on a demo license (it caps at 10 variables / 10
+    constraints, and its ``.lst`` says so), a failure writing or running the GAMS
+    model (Pyomo's GAMS writer raises ``OverflowError`` on the hull form of
+    ``pyomo.eight_process``), an open gap, a fractional or infeasible incumbent. The
+    old blanket ``except Exception: return None`` hid every one of them, and a
+    defect in this function's own code with them; only the GAMS call is guarded now.
     """
+    import tempfile
+    from pathlib import Path
+
     import pyomo.environ as pyo
+    from pyomo.common.errors import ApplicationError
     from pyomo.core import TransformationFactory
 
-    try:
-        gams = pyo.SolverFactory("gams")
-        if not gams.available(exception_flag=False):
-            return None
-        m = spec.builder()
-        TransformationFactory(f"gdp.{method}").apply_to(m)
-        # optcr defaults to 0.1 in GAMS — force a full gap closure, capped by reslim.
-        res = gams.solve(
-            m,
-            solver=solver,
-            add_options=[f"option reslim={float(time_limit)}; option optcr=1e-9;"],
-            tee=False,
-        )
-        prob = res.problem[0] if hasattr(res.problem, "__getitem__") else res.problem
-        lb, ub = getattr(prob, "lower_bound", None), getattr(prob, "upper_bound", None)
-        if lb is None or ub is None:
-            return None
-        lb, ub = float(lb), float(ub)
-        if abs(lb - ub) > 1e-6 + 1e-6 * abs(ub):
-            return None  # gap not closed -> incumbent only, not a certified optimum
-        viol = _max_constraint_violation(m)
-        if viol is None or viol > _ORACLE_FEAS_TOL:
-            return None  # proven "optimum" whose point isn't feasible -> reject (#823)
-        return _objective_value(m)
-    except Exception:  # noqa: BLE001
+    def _decline(reason: str) -> None:
+        if why is not None:
+            why.append(f"gams/{solver}: {reason}")
+
+    gams = pyo.SolverFactory("gams")
+    if not gams.available(exception_flag=False):
+        _decline("GAMS not available")
         return None
+    m = spec.builder()
+    TransformationFactory(f"gdp.{method}").apply_to(m)
+    with tempfile.TemporaryDirectory(prefix="gdp_oracle_") as tmp:
+        try:
+            # optcr defaults to 0.1 in GAMS — force a full gap closure, capped by reslim.
+            res = gams.solve(
+                m,
+                solver=solver,
+                add_options=[f"option reslim={float(time_limit)}; option optcr=1e-9;"],
+                tee=False,
+                keepfiles=True,
+                tmpdir=tmp,
+            )
+        except (ApplicationError, OSError, OverflowError, RuntimeError, ValueError) as exc:
+            _decline(f"GAMS solve failed: {type(exc).__name__}: {exc}")
+            return None
+        lst = Path(tmp) / "output.lst"
+        listing = lst.read_text(errors="replace") if lst.exists() else ""
+    if solver == "baron" and "demo license" in listing.lower():
+        _decline("BARON ran on a demo license (10 vars / 10 cons) -- nothing certified")
+        return None
+    prob = res.problem[0] if hasattr(res.problem, "__getitem__") else res.problem
+    lb, ub = getattr(prob, "lower_bound", None), getattr(prob, "upper_bound", None)
+    if lb is None or ub is None:
+        _decline(f"no bounds reported (lb={lb}, ub={ub})")
+        return None
+    lb, ub = float(lb), float(ub)
+    if not (abs(lb - ub) <= 1e-6 + 1e-6 * abs(ub)):
+        _decline(f"gap not closed (lb={lb!r}, ub={ub!r})")
+        return None  # incumbent only, not a certified optimum
+    dev = _snap_integers(m)
+    if dev is None or dev > _ORACLE_INT_TOL:
+        _decline(f"incumbent not integral (max integrality deviation {dev!r})")
+        return None
+    viol = _max_constraint_violation(m)
+    if viol is None or viol > _ORACLE_FEAS_TOL:
+        # A proven "optimum" whose point isn't feasible -> reject (#823). On
+        # eight_process this is the rounded big-M point: feasible only with its
+        # binaries at 9.5e-7 / 0.999999.
+        _decline(f"incumbent infeasible at its integral rounding (violation {viol!r})")
+        return None
+    return _objective_value(m)
 
 
 def _assess(run: ModelRun) -> None:
@@ -832,7 +1116,8 @@ def main(argv: list[str] | None = None) -> int:
         "--suite",
         choices=sorted(SUITES),
         default=None,
-        help="named model set, e.g. gdplib_small (the 12 models under 500 vars). "
+        help="named model set: gdplib_small (the 12 models under 500 vars) or "
+        "gdp_parity (#1775: GDPlib PR58 + Pyomo's GDPopt test models). "
         "Mutually exclusive with --models.",
     )
     parser.add_argument(
@@ -865,7 +1150,7 @@ def main(argv: list[str] | None = None) -> int:
         # `include` filtering in discover_models() drops a requested-but-absent
         # model silently. For a preset pinned by name that is the §6 vacuity trap:
         # a panel that ran 8 of 12 models and reported clean. Refuse loudly.
-        found = {s.name for s in discover_models(exclude=args.exclude)}
+        found = {s.name for s in discover_models(include=args.models, exclude=args.exclude)}
         missing = [m for m in args.models if m not in found]
         if missing:
             print(

@@ -440,7 +440,11 @@ def _try_expand_square(node: BinaryOp, exp: "_Expander") -> Optional[Expression]
     """If *node* is ``x**2`` with ``x`` an integer scalar variable, return its exact
     binary-expansion linearization, else ``None``. (Higher powers are left to the
     monomial relaxation; only the square is handled exactly here.)"""
-    if not (isinstance(node.right, Constant) and abs(float(node.right.value) - 2.0) < 1e-12):
+    if not (
+        isinstance(node.right, Constant)
+        and np.ndim(node.right.value) == 0
+        and abs(float(node.right.value) - 2.0) < 1e-12
+    ):
         return None
     ref = _scalar_var_ref(node.left)
     if ref is None:
@@ -461,6 +465,11 @@ def _try_expand_mul(node: BinaryOp, model: Model, exp: _Expander) -> Optional[Ex
     var_refs: list[tuple[Expression, Variable, int]] = []
     for f in factors:
         if isinstance(f, Constant):
+            if np.ndim(f.value) != 0:
+                # An array coefficient (``dm.sum(C * x)``, a builder objective
+                # since #1802): a vector product, not the scalar one expanded here;
+                # ``float()`` of it raised a bare TypeError.
+                return None
             const *= float(f.value)
             continue
         ref = _scalar_var_ref(f)
@@ -529,6 +538,11 @@ def _classify_multilinear_factors(node: BinaryOp, exp: _Expander):
     var_refs: list[tuple[Expression, Variable, int]] = []
     for f in factors:
         if isinstance(f, Constant):
+            if np.ndim(f.value) != 0:
+                # An array coefficient (``dm.sum(C * x)``, a builder objective
+                # since #1802): a vector product, not the scalar one expanded here;
+                # ``float()`` of it raised a bare TypeError.
+                return None
             const *= float(f.value)
             continue
         ref = _scalar_var_ref(f)

@@ -58,6 +58,7 @@ from discopt.modeling.core import (
     _semantics_supported_by,
     _SOSConstraint,
     _wrap,
+    carry_builder_objective,
     carry_validation_guards,
 )
 from discopt.mpec import carry_complementarities
@@ -189,6 +190,10 @@ def reformulate_gdp(
     new_model._parameters = list(model._parameters)
     new_model._rebuild_name_index()  # keep the name cache in sync (M7)
     new_model._objective = model._objective
+    # #1798: fast-API rows live only in the source's builder; the loop below walks
+    # ``_constraints`` and would drop them. (The fast-API objective is re-issued at
+    # the end, once every auxiliary column exists.)
+    new_model._constraints.extend(model._builder_linear_constraints())
 
     # Track auxiliary binaries added by the reformulation
     _aux_counter = [0]
@@ -383,6 +388,7 @@ def reformulate_gdp(
     # into generated identifiers as the sole surviving trace. Forward it.
     carry_complementarities(model, new_model, pass_name="gdp lowering")
     carry_validation_guards(model, new_model)  # #1498
+    carry_builder_objective(model, new_model)  # #1798; after the last new column
 
     return new_model
 

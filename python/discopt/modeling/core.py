@@ -3710,6 +3710,65 @@ def affine_array_sum(expr: Expression) -> Optional[tuple["Variable", np.ndarray]
     return var, coefs.reshape(-1)
 
 
+def _gather_flat_index(expr: Expression) -> Optional[tuple["Variable", np.ndarray]]:
+    """``(x, flat)`` when *expr* is the gather ``x[np.unravel_index(flat, x.shape)]``.
+
+    An :class:`IndexExpression` on a :class:`Variable` whose index is one 1-D
+    integer array per axis (all the same length); ``flat`` is the C-order flat
+    position of each gathered entry. ``None`` for anything else.
+    """
+    if not isinstance(expr, IndexExpression) or not isinstance(expr.base, Variable):
+        return None
+    var = expr.base
+    idx = expr.index if isinstance(expr.index, tuple) else (expr.index,)
+    if len(idx) != len(var.shape) or not idx:
+        return None
+    arrs = []
+    for a in idx:
+        if not isinstance(a, np.ndarray) or a.ndim != 1 or a.dtype.kind not in "iu":
+            return None
+        arrs.append(a)
+    if len({a.shape for a in arrs}) != 1:
+        return None
+    try:
+        flat = np.ravel_multi_index(tuple(arrs), var.shape)
+    except ValueError:  # out of range: not a gather this helper can vouch for
+        return None
+    return var, np.asarray(flat, dtype=np.int64)
+
+
+def quadratic_array_sum(
+    expr: Expression,
+) -> Optional[tuple["Variable", np.ndarray, np.ndarray, np.ndarray]]:
+    """``(x, rows, cols, vals)`` when *expr* is ``dm.sum(V * x[R] * x[C])``.
+
+    The full reduction of ``Constant(V) * gather(R) * gather(C)`` over one
+    variable, each gather as recognised by :func:`_gather_flat_index`, so
+    ``expr == sum_k vals[k] * x.flat[rows[k]] * x.flat[cols[k]]``. This is the
+    quadratic part :func:`_builder_objective_expression` emits for an
+    ``add_quadratic_objective`` objective; the scalar-term extractors read it as
+    its coefficients instead of refusing the array constant (#1802), as they read
+    :func:`affine_array_sum`. ``None`` for anything else.
+    """
+    if not isinstance(expr, SumExpression) or expr.axis is not None:
+        return None
+    op = expr.operand
+    if not (isinstance(op, BinaryOp) and op.op == "*"):
+        return None
+    left, right = op.left, op.right
+    if not (isinstance(left, BinaryOp) and left.op == "*" and isinstance(left.left, Constant)):
+        return None
+    vals = np.asarray(left.left.value, dtype=np.float64)
+    g_r = _gather_flat_index(left.right)
+    g_c = _gather_flat_index(right)
+    if g_r is None or g_c is None or g_r[0] is not g_c[0]:
+        return None
+    rows, cols = g_r[1], g_c[1]
+    if vals.ndim != 1 or vals.shape != rows.shape or rows.shape != cols.shape:
+        return None
+    return g_r[0], rows, cols, vals
+
+
 def prod(x: Union[Expression, list, Callable], *, over: Optional[Sequence] = None) -> Expression:
     """
     Product over expressions, analogous to :func:`sum`.
@@ -5615,6 +5674,90 @@ def carry_validation_guards(src: "Model", dst: "Model") -> None:
             if id(r) not in seen:
                 held.append(r)
                 seen.add(id(r))
+
+
+def _builder_objective_expression(c, x: "Variable", constant: float, Q=None) -> "Expression":
+    """The expression of a builder objective ``0.5 xᵀSx + cᵀx + constant``.
+
+    The builder's own convention: ``S = triu(Q) + triu(Q, 1)ᵀ`` (only the upper
+    triangle of ``Q`` is read), as gathered elementwise products, so the size is
+    ``O(nnz)`` and never a chain of scalar terms.
+
+    ``add_linear_objective`` / ``add_quadratic_objective`` store this on
+    ``_objective`` with ``_is_placeholder`` set. The flag tells the Rust repr to take
+    the builder's own objective (``model_to_repr`` ignores the expression then); the
+    expression is for every Python reader. It used to be a zero ``Constant``, and
+    each of the 60-odd readers of ``_objective.expression`` -- OA and LOA masters,
+    interval bounds, convexity, relaxations -- then saw the objective ``0``: OA
+    certified nothing (bound 0) and the simplex GDP lowering lost its certificate
+    (#1609, #1798, #1802). Fixing the readers one at a time left the rest wrong.
+    """
+    # Forms the scalar-term readers already understand: the linear part is
+    # ``dm.sum(C * x)`` (:func:`affine_array_sum`), the quadratic part
+    # ``dm.sum(V * x[R] * x[C])`` (:func:`quadratic_array_sum`); a scalar ``x`` is
+    # written out. Built from the node classes so the shape is exactly that.
+    c = np.asarray(c, dtype=np.float64).ravel()
+    expr: Expression = Constant(np.float64(constant))
+    if np.any(c != 0.0):
+        if x.size >= 2:
+            expr = expr + SumExpression(BinaryOp("*", _wrap(c.reshape(x.shape)), x), axis=None)
+        else:
+            expr = expr + float(c[0]) * (x if x.shape == () else x[(0,) * len(x.shape)])
+    if Q is not None:
+        import scipy.sparse as sp
+
+        S = (sp.triu(Q, 0) + sp.triu(Q, 1).T).tocoo()
+        keep = S.data != 0.0
+        if np.any(keep):
+            rows = S.row[keep].astype(np.int64)
+            cols = S.col[keep].astype(np.int64)
+            vals = 0.5 * S.data[keep]
+            if x.size < 2:
+                xs = x if x.shape == () else x[(0,) * len(x.shape)]
+                expr = expr + float(vals.sum()) * (xs * xs)
+            else:
+
+                def gather(flat_idx: np.ndarray) -> Expression:
+                    return IndexExpression(x, np.unravel_index(flat_idx, x.shape))
+
+                term = BinaryOp("*", BinaryOp("*", _wrap(vals), gather(rows)), gather(cols))
+                expr = expr + SumExpression(term, axis=None)
+    return expr
+
+
+def carry_builder_objective(src: "Model", dst: "Model") -> None:
+    """Re-issue ``src``'s fast-API objective on ``dst``, a model rebuilt from it.
+
+    ``add_linear_objective`` / ``add_quadratic_objective`` keep the real objective in
+    ``src``'s Rust builder and flag ``_objective`` as a placeholder; a pass that
+    copied ``_objective`` used to carry a zero objective (#1794 B2, #1798), and since
+    #1802 it carries the real expression but no builder. This repeats the
+    builder call on ``dst`` when ``src``'s objective is that placeholder (an
+    ``_objective_expression()`` rebuild is a gathered-index expression the Rust repr
+    refuses, which turns FBBT/presolve off). No-op otherwise.
+
+    Call it **after** every variable ``dst`` will hold exists: the call creates
+    ``dst``'s builder, which registers the variables present then, and a column
+    added later is unknown to it ("Variable not found in model" from the Rust repr).
+
+    The fast-API *rows* are carried separately, as ordinary constraints, with
+    ``src._builder_linear_constraints()``.
+    """
+    if src._objective is None or not getattr(src._objective, "_is_placeholder", False):
+        return
+    lin_blk = src._builder_linear_objective
+    quad_blk = src._builder_quadratic_objective
+    if lin_blk is not None:
+        c, x, constant, sense = lin_blk
+        dst.add_linear_objective(c, x, constant=constant, sense=sense)
+    elif quad_blk is not None:
+        Q, c, x, constant, sense = quad_blk
+        dst.add_quadratic_objective(Q, c, x, constant=constant, sense=sense)
+    else:
+        raise ValueError(
+            "objective is a builder placeholder but the model retains no builder "
+            "objective block to carry into the rebuilt model"
+        )
 
 
 def missing_validation_guards(src: "Model", dst: "Model") -> list[str]:
@@ -7935,11 +8078,12 @@ class Model:
         if not hasattr(x, "_builder_idx"):
             raise ValueError(f"Variable '{x.name}' is not registered in the builder.")
         builder.set_linear_objective(c, x._builder_idx, constant, sense)
-        # Set a placeholder objective so validate() passes
         self._objective = Objective(
-            Constant(np.float64(0.0)),
+            _builder_objective_expression(c, x, constant),
             ObjectiveSense.MINIMIZE if sense == "minimize" else ObjectiveSense.MAXIMIZE,
         )
+        # See ``_builder_objective_expression``: the Rust repr takes the builder's
+        # own objective when this flag is set; every Python reader gets the expression.
         self._objective._is_placeholder = True
         # Record the block so .nl export can recover the objective that lives
         # only in the Rust builder (``_objective`` holds a zero placeholder).
@@ -7998,11 +8142,11 @@ class Model:
             constant,
             sense,
         )
-        # Set a placeholder objective so validate() passes
         self._objective = Objective(
-            Constant(np.float64(0.0)),
+            _builder_objective_expression(c, x, constant, Q),
             ObjectiveSense.MINIMIZE if sense == "minimize" else ObjectiveSense.MAXIMIZE,
         )
+        # See ``_builder_objective_expression``.
         self._objective._is_placeholder = True
         # Record the block so .nl export can recover the quadratic objective
         # that lives only in the Rust builder.
@@ -11961,15 +12105,13 @@ class Model:
         """The expression this model minimizes or maximizes, builder objectives included.
 
         ``add_linear_objective`` / ``add_quadratic_objective`` hold the real
-        objective in the Rust builder and leave a zero placeholder in
-        ``_objective``. An evaluator that lowered the placeholder evaluated every
-        point at 0: the #1537 E incumbent repair then "refuted" a valid bound and
-        withdrew the certificate, and the ``pounce:nlp`` route minimized 0 (#1609).
-        This rebuilds the builder objective from its retained block, in the
-        builder's own convention -- ``0.5 xᵀSx`` with ``S = triu(Q) + triu(Q, 1)ᵀ``
-        (only the upper triangle of ``Q`` is read) -- as gathered elementwise
-        products, so its size is ``O(nnz)`` and never a chain of scalar terms.
-        The sense stays on ``_objective``. Raises if there is no objective.
+        objective in the Rust builder and flag ``_objective`` as a placeholder.
+        Since #1802 the placeholder's expression *is* the builder objective (see
+        :func:`_builder_objective_expression`); this rebuilds it from the retained
+        block all the same, so a placeholder ``Objective`` that reached the model by
+        another route (a decoded document, a hand-built copy) cannot hand back a
+        stale expression. The sense stays on ``_objective``. Raises if there is no
+        objective.
         """
         if self._objective is None:
             raise ValueError("Model has no objective set.")
@@ -11988,28 +12130,7 @@ class Model:
                 "objective block to rebuild it from"
             )
 
-        def gather(flat_idx: np.ndarray) -> Expression:
-            out: Expression
-            if x.shape == ():
-                out = x * np.ones(flat_idx.shape)
-            else:
-                out = x[np.unravel_index(flat_idx, x.shape)]
-            return out
-
-        c = np.asarray(c, dtype=np.float64).ravel()
-        expr: Expression = Constant(np.float64(constant))
-        nz = np.flatnonzero(c)
-        if nz.size:
-            expr = expr + sum(c[nz] * gather(nz))
-        if Q is not None:
-            import scipy.sparse as sp
-
-            S = (sp.triu(Q, 0) + sp.triu(Q, 1).T).tocoo()
-            keep = S.data != 0.0
-            if np.any(keep):
-                rows, cols, vals = S.row[keep], S.col[keep], S.data[keep]
-                expr = expr + sum((0.5 * vals) * gather(rows) * gather(cols))
-        return expr
+        return _builder_objective_expression(c, x, constant, Q)
 
     def _builder_linear_constraints(self, *, lazy: bool = False) -> list[Constraint]:
         """Materialize the builder-resident linear rows as fresh :class:`Constraint`

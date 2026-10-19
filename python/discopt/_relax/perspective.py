@@ -186,16 +186,23 @@ def _objective_hessian(model: Model):
     ``Q`` follows the classifier's ``0.5 x'Qx`` convention, so a term ``q*x^2``
     appears as ``Q[j, j] = 2q``.
     """
-    from .problem_classifier import _extract_quadratic_coefficients, _NotQuadraticError, dense_Q
+    from .problem_classifier import (
+        _EXTRACTION_DECLINES,
+        _extract_quadratic_coefficients,
+        dense_Q,
+    )
 
     if model._objective is None:
         return None
     n = sum(v.size for v in model._variables)
     try:
         Q, _c, _d = _extract_quadratic_coefficients(model._objective.expression, model, n)
-    except _NotQuadraticError as exc:
-        # #1520: narrowed to the extractor's documented decline; anything else is
+    except _EXTRACTION_DECLINES as exc:
+        # #1520: narrowed to the extractor's documented declines; anything else is
         # a defect and must not read as "not quadratic, no perspective candidates".
+        # Both of them: its constant folding raises ``_NotLinearError`` on a
+        # non-scalar array coefficient (a gathered objective, ``c[idx] * x[idx]``),
+        # which crashed OA's decomposition (#1802; ``patterns.py`` already had it).
         logger.debug("perspective reform: objective is not quadratic (%s)", exc)
         return None
     Q = dense_Q(Q)
