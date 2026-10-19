@@ -122,8 +122,12 @@ def test_schema_minor_is_bumped_for_the_non_additive_change():
     ``lowered`` entry, #1785 WP-3) and the ``indicators`` link on disjunction rows
     (#1782, #1775 G1.1). A 1.4 reader refuses each, so the minor is what says a
     document may hold them.
+
+    1.6 adds two more, again read only from a >=1.6 document (plan WP-3b-1): the
+    ``none`` / ``ellipsis`` index kinds and a disjunction nested as a disjunct
+    member. A 1.5 reader refuses both.
     """
-    assert S.SCHEMA == "discopt.model/1.5"
+    assert S.SCHEMA == "discopt.model/1.6"
 
 
 def test_legacy_11_document_restores_a_tagged_float_in_the_trace():
