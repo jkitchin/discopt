@@ -267,16 +267,17 @@ def test_upgrade_model_import_failure_is_a_usage_error(tmp_path):
     assert "Traceback" not in proc.stderr
 
 
-def test_upgrade_model_takes_a_1_4_disjunction_to_1_5_unchanged(tmp_path):
-    """1.4 -> 1.5 only adds ``indicators``, written once read; a 1.4 document has
-    none read, so its upgrade differs from it in the schema string alone (#1782)."""
+def test_upgrade_model_takes_a_1_4_disjunction_to_current_unchanged(tmp_path):
+    """1.4 -> 1.5 only adds ``indicators``, written once read, and 1.6 only new
+    index kinds and nested members; a 1.4 document has none of them, so its
+    upgrade differs from it in the schema string alone (#1782)."""
     src = FIXTURES / "v1.4" / "mip_indicator_sos_disjunction.json"
     out = tmp_path / "x.json"
     proc = _cli(src, out)
     assert proc.returncode == 0, proc.stderr
     new = json.loads(out.read_text())
     old = json.loads(src.read_text())
-    assert new["schema"] == SCHEMA == "discopt.model/1.5"
+    assert new["schema"] == SCHEMA
     disj = [r for r in new["rows"] if r["kind"] == "disjunction"]
     assert disj and all("indicators" not in r for r in disj)
     for doc in (new, old):

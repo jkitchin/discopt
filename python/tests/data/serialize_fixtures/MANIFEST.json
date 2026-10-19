@@ -124,6 +124,22 @@
       "              ^^^^^^^^^^^^^^^",
       "AttributeError: 'NoneType' object has no attribute 'indicators'"
      ]
+    },
+    "index_none_ellipsis": {
+     "unbuildable": "SerializationError: cannot serialize index None of type NoneType; only integers, slices, and tuples of them are supported.",
+     "trace_tail": [
+      "    ...<2 lines>...",
+      "    )",
+      "discopt.serialize.SerializationError: cannot serialize index None of type NoneType; only integers, slices, and tuples of them are supported."
+     ]
+    },
+    "nested_disjunction": {
+     "unbuildable": "AttributeError: '_DisjunctiveConstraint' object has no attribute 'rhs'",
+     "trace_tail": [
+      "    if float(c.rhs) != 0.0:",
+      "             ^^^^^",
+      "AttributeError: '_DisjunctiveConstraint' object has no attribute 'rhs'"
+     ]
     }
    },
    "forward": {
@@ -381,6 +397,77 @@
      "with_result.json": {
       "outcome": "loads_identical"
      }
+    },
+    "1.6": {
+     "array_bounds_inf.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_lowered.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "complementarity_vector_lowered.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "decomposition_marks.json": {
+      "outcome": "loads_identical"
+     },
+     "fast_api_blocks.json": {
+      "outcome": "loads_identical"
+     },
+     "fixed_scope.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_mpcc.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "from_nl_nvs01.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_st_e13.json": {
+      "outcome": "loads_identical"
+     },
+     "gdp_indicators.json": {
+      "outcome": "loaded",
+      "note": "no own-version fixture to compare (unbuildable here)"
+     },
+     "gdp_indicators_logic.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'logical'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "index_none_ellipsis.json": {
+      "outcome": "refused",
+      "error": "SerializationError: unknown index kind 'none'"
+     },
+     "logical_constraints.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'logical'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "mip_indicator_sos_disjunction.json": {
+      "outcome": "loads_identical"
+     },
+     "nested_disjunction.json": {
+      "outcome": "refused",
+      "error": "KeyError: 'body'"
+     },
+     "parameters_and_start.json": {
+      "outcome": "loads_identical"
+     },
+     "registered_atom.json": {
+      "outcome": "loaded",
+      "note": "no own-version fixture to compare (unbuildable here)"
+     },
+     "scalar_nlp.json": {
+      "outcome": "loads_identical"
+     },
+     "shared_dag.json": {
+      "outcome": "loads_identical"
+     },
+     "with_result.json": {
+      "outcome": "loads_identical"
+     }
     }
    },
    "cases_python": {
@@ -388,7 +475,8 @@
     "gdp_indicators_logic": "3.12.11"
    },
    "forward_python": {
-    "1.5": "3.12.11"
+    "1.5": "3.12.11",
+    "1.6": "3.13.16"
    }
   },
   "1.1": {
@@ -512,6 +600,22 @@
       "    m.logical(mode.indicators[1].implies(pump.indicators[1]), name=\"mode_implies_pump\")",
       "              ^^^^^^^^^^^^^^^",
       "AttributeError: 'NoneType' object has no attribute 'indicators'"
+     ]
+    },
+    "index_none_ellipsis": {
+     "unbuildable": "SerializationError: cannot serialize index None of type NoneType; only integers, slices, and tuples of them are supported.",
+     "trace_tail": [
+      "    ...<2 lines>...",
+      "    )",
+      "discopt.serialize.SerializationError: cannot serialize index None of type NoneType; only integers, slices, and tuples of them are supported."
+     ]
+    },
+    "nested_disjunction": {
+     "unbuildable": "AttributeError: '_DisjunctiveConstraint' object has no attribute 'rhs'",
+     "trace_tail": [
+      "    if float(c.rhs) != 0.0:",
+      "             ^^^^^",
+      "AttributeError: '_DisjunctiveConstraint' object has no attribute 'rhs'"
      ]
     }
    },
@@ -718,6 +822,76 @@
      "with_result.json": {
       "outcome": "loads_identical"
      }
+    },
+    "1.6": {
+     "array_bounds_inf.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_lowered.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "complementarity_vector_lowered.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "decomposition_marks.json": {
+      "outcome": "loads_identical"
+     },
+     "fast_api_blocks.json": {
+      "outcome": "loads_identical"
+     },
+     "fixed_scope.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_mpcc.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "from_nl_nvs01.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_st_e13.json": {
+      "outcome": "loads_identical"
+     },
+     "gdp_indicators.json": {
+      "outcome": "loaded",
+      "note": "no own-version fixture to compare (unbuildable here)"
+     },
+     "gdp_indicators_logic.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'logical'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "index_none_ellipsis.json": {
+      "outcome": "refused",
+      "error": "SerializationError: unknown index kind 'none'"
+     },
+     "logical_constraints.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'logical'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "mip_indicator_sos_disjunction.json": {
+      "outcome": "loads_identical"
+     },
+     "nested_disjunction.json": {
+      "outcome": "refused",
+      "error": "KeyError: 'body'"
+     },
+     "parameters_and_start.json": {
+      "outcome": "loads_identical"
+     },
+     "registered_atom.json": {
+      "outcome": "loads_identical"
+     },
+     "scalar_nlp.json": {
+      "outcome": "loads_identical"
+     },
+     "shared_dag.json": {
+      "outcome": "loads_identical"
+     },
+     "with_result.json": {
+      "outcome": "loads_identical"
+     }
     }
    },
    "cases_python": {
@@ -725,7 +899,8 @@
     "gdp_indicators_logic": "3.12.11"
    },
    "forward_python": {
-    "1.5": "3.12.11"
+    "1.5": "3.12.11",
+    "1.6": "3.13.16"
    }
   },
   "1.2": {
@@ -849,6 +1024,22 @@
       "    m.logical(mode.indicators[1].implies(pump.indicators[1]), name=\"mode_implies_pump\")",
       "              ^^^^^^^^^^^^^^^",
       "AttributeError: 'NoneType' object has no attribute 'indicators'"
+     ]
+    },
+    "index_none_ellipsis": {
+     "unbuildable": "SerializationError: cannot serialize index None of type NoneType; only integers, slices, and tuples of them are supported.",
+     "trace_tail": [
+      "    ...<2 lines>...",
+      "    )",
+      "discopt.serialize.SerializationError: cannot serialize index None of type NoneType; only integers, slices, and tuples of them are supported."
+     ]
+    },
+    "nested_disjunction": {
+     "unbuildable": "AttributeError: '_DisjunctiveConstraint' object has no attribute 'rhs'",
+     "trace_tail": [
+      "    if float(c.rhs) != 0.0:",
+      "             ^^^^^",
+      "AttributeError: '_DisjunctiveConstraint' object has no attribute 'rhs'"
      ]
     }
    },
@@ -1008,6 +1199,76 @@
      "with_result.json": {
       "outcome": "loads_identical"
      }
+    },
+    "1.6": {
+     "array_bounds_inf.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_lowered.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "complementarity_vector_lowered.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "decomposition_marks.json": {
+      "outcome": "loads_identical"
+     },
+     "fast_api_blocks.json": {
+      "outcome": "loads_identical"
+     },
+     "fixed_scope.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_mpcc.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "from_nl_nvs01.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_st_e13.json": {
+      "outcome": "loads_identical"
+     },
+     "gdp_indicators.json": {
+      "outcome": "loaded",
+      "note": "no own-version fixture to compare (unbuildable here)"
+     },
+     "gdp_indicators_logic.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'logical'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "index_none_ellipsis.json": {
+      "outcome": "refused",
+      "error": "SerializationError: unknown index kind 'none'"
+     },
+     "logical_constraints.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'logical'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "mip_indicator_sos_disjunction.json": {
+      "outcome": "loads_identical"
+     },
+     "nested_disjunction.json": {
+      "outcome": "refused",
+      "error": "KeyError: 'body'"
+     },
+     "parameters_and_start.json": {
+      "outcome": "loads_identical"
+     },
+     "registered_atom.json": {
+      "outcome": "loads_identical"
+     },
+     "scalar_nlp.json": {
+      "outcome": "loads_identical"
+     },
+     "shared_dag.json": {
+      "outcome": "loads_identical"
+     },
+     "with_result.json": {
+      "outcome": "loads_identical"
+     }
     }
    },
    "cases_python": {
@@ -1015,7 +1276,8 @@
     "gdp_indicators_logic": "3.12.11"
    },
    "forward_python": {
-    "1.5": "3.12.11"
+    "1.5": "3.12.11",
+    "1.6": "3.13.16"
    }
   },
   "1.3": {
@@ -1140,6 +1402,22 @@
       "              ^^^^^^^^^^^^^^^",
       "AttributeError: 'NoneType' object has no attribute 'indicators'"
      ]
+    },
+    "index_none_ellipsis": {
+     "unbuildable": "SerializationError: cannot serialize index None of type NoneType; only integers, slices, and tuples of them are supported.",
+     "trace_tail": [
+      "    ...<2 lines>...",
+      "    )",
+      "discopt.serialize.SerializationError: cannot serialize index None of type NoneType; only integers, slices, and tuples of them are supported."
+     ]
+    },
+    "nested_disjunction": {
+     "unbuildable": "AttributeError: '_DisjunctiveConstraint' object has no attribute 'rhs'",
+     "trace_tail": [
+      "    if float(c.rhs) != 0.0:",
+      "             ^^^^^",
+      "AttributeError: '_DisjunctiveConstraint' object has no attribute 'rhs'"
+     ]
     }
    },
    "forward": {
@@ -1251,6 +1529,76 @@
      "with_result.json": {
       "outcome": "loads_identical"
      }
+    },
+    "1.6": {
+     "array_bounds_inf.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_lowered.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "complementarity_vector_lowered.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "decomposition_marks.json": {
+      "outcome": "loads_identical"
+     },
+     "fast_api_blocks.json": {
+      "outcome": "loads_identical"
+     },
+     "fixed_scope.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_mpcc.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "from_nl_nvs01.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_st_e13.json": {
+      "outcome": "loads_identical"
+     },
+     "gdp_indicators.json": {
+      "outcome": "loaded",
+      "note": "no own-version fixture to compare (unbuildable here)"
+     },
+     "gdp_indicators_logic.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'logical'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "index_none_ellipsis.json": {
+      "outcome": "refused",
+      "error": "SerializationError: unknown index kind 'none'"
+     },
+     "logical_constraints.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'logical'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "mip_indicator_sos_disjunction.json": {
+      "outcome": "loads_identical"
+     },
+     "nested_disjunction.json": {
+      "outcome": "refused",
+      "error": "KeyError: 'body'"
+     },
+     "parameters_and_start.json": {
+      "outcome": "loads_identical"
+     },
+     "registered_atom.json": {
+      "outcome": "loads_identical"
+     },
+     "scalar_nlp.json": {
+      "outcome": "loads_identical"
+     },
+     "shared_dag.json": {
+      "outcome": "loads_identical"
+     },
+     "with_result.json": {
+      "outcome": "loads_identical"
+     }
     }
    },
    "cases_python": {
@@ -1258,7 +1606,8 @@
     "gdp_indicators_logic": "3.12.11"
    },
    "forward_python": {
-    "1.5": "3.12.11"
+    "1.5": "3.12.11",
+    "1.6": "3.13.16"
    }
   },
   "1.4": {
@@ -1383,6 +1732,22 @@
       "              ^^^^^^^^^^^^^^^",
       "AttributeError: 'NoneType' object has no attribute 'indicators'"
      ]
+    },
+    "index_none_ellipsis": {
+     "unbuildable": "SerializationError: cannot serialize index None of type NoneType; only integers, slices, and tuples of them are supported.",
+     "trace_tail": [
+      "    ...<2 lines>...",
+      "    )",
+      "discopt.serialize.SerializationError: cannot serialize index None of type NoneType; only integers, slices, and tuples of them are supported."
+     ]
+    },
+    "nested_disjunction": {
+     "unbuildable": "AttributeError: '_DisjunctiveConstraint' object has no attribute 'rhs'",
+     "trace_tail": [
+      "    if float(c.rhs) != 0.0:",
+      "             ^^^^^",
+      "AttributeError: '_DisjunctiveConstraint' object has no attribute 'rhs'"
+     ]
     }
    },
    "forward": {
@@ -1447,6 +1812,76 @@
      "with_result.json": {
       "outcome": "loads_identical"
      }
+    },
+    "1.6": {
+     "array_bounds_inf.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_lowered.json": {
+      "outcome": "refused",
+      "error": "SerializationError: malformed discopt document: ValueError: too many values to unpack (expected 2)"
+     },
+     "complementarity_vector_lowered.json": {
+      "outcome": "refused",
+      "error": "SerializationError: malformed discopt document: ValueError: too many values to unpack (expected 2)"
+     },
+     "decomposition_marks.json": {
+      "outcome": "loads_identical"
+     },
+     "fast_api_blocks.json": {
+      "outcome": "loads_identical"
+     },
+     "fixed_scope.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_mpcc.json": {
+      "outcome": "refused",
+      "error": "SerializationError: malformed discopt document: ValueError: too many values to unpack (expected 2)"
+     },
+     "from_nl_nvs01.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_st_e13.json": {
+      "outcome": "loads_identical"
+     },
+     "gdp_indicators.json": {
+      "outcome": "loaded",
+      "note": "no own-version fixture to compare (unbuildable here)"
+     },
+     "gdp_indicators_logic.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'logical'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "index_none_ellipsis.json": {
+      "outcome": "refused",
+      "error": "SerializationError: unknown index kind 'none'"
+     },
+     "logical_constraints.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'logical'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "mip_indicator_sos_disjunction.json": {
+      "outcome": "loads_identical"
+     },
+     "nested_disjunction.json": {
+      "outcome": "refused",
+      "error": "SerializationError: malformed discopt document: KeyError: 'sense'"
+     },
+     "parameters_and_start.json": {
+      "outcome": "loads_identical"
+     },
+     "registered_atom.json": {
+      "outcome": "loads_identical"
+     },
+     "scalar_nlp.json": {
+      "outcome": "loads_identical"
+     },
+     "shared_dag.json": {
+      "outcome": "loads_identical"
+     },
+     "with_result.json": {
+      "outcome": "loads_identical"
+     }
     }
    },
    "cases_python": {
@@ -1454,7 +1889,8 @@
     "gdp_indicators_logic": "3.12.11"
    },
    "forward_python": {
-    "1.5": "3.12.11"
+    "1.5": "3.12.11",
+    "1.6": "3.13.16"
    }
   },
   "1.5": {
@@ -1573,6 +2009,226 @@
      "sha256": "cfefe5544e1e5cc00834a33b8b3c59b565c60aea6632afcc7aeca43b40063067",
      "to_nl_sha256": null,
      "to_nl_refused": "ValueError: .nl export: the model carries a disjunctive constraint (Model.either_or / Model.if_else, GDP) named 'mode'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
+    },
+    "index_none_ellipsis": {
+     "unbuildable": "SerializationError: cannot serialize index None of type NoneType; only integers, slices, and tuples of them are supported.",
+     "trace_tail": [
+      "    ...<2 lines>...",
+      "    )",
+      "discopt.serialize.SerializationError: cannot serialize index None of type NoneType; only integers, slices, and tuples of them are supported."
+     ]
+    },
+    "nested_disjunction": {
+     "unbuildable": "AttributeError: '_DisjunctiveConstraint' object has no attribute 'rhs'",
+     "trace_tail": [
+      "    if float(c.rhs) != 0.0:",
+      "             ^^^^^",
+      "AttributeError: '_DisjunctiveConstraint' object has no attribute 'rhs'"
+     ]
+    }
+   },
+   "cases_python": {
+    "index_none_ellipsis": "3.13.16",
+    "nested_disjunction": "3.13.16"
+   },
+   "forward": {
+    "1.6": {
+     "array_bounds_inf.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_lowered.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_vector_lowered.json": {
+      "outcome": "loads_identical"
+     },
+     "decomposition_marks.json": {
+      "outcome": "loads_identical"
+     },
+     "fast_api_blocks.json": {
+      "outcome": "loads_identical"
+     },
+     "fixed_scope.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_mpcc.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_nvs01.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_st_e13.json": {
+      "outcome": "loads_identical"
+     },
+     "gdp_indicators.json": {
+      "outcome": "loads_identical"
+     },
+     "gdp_indicators_logic.json": {
+      "outcome": "loads_identical"
+     },
+     "index_none_ellipsis.json": {
+      "outcome": "refused",
+      "error": "SerializationError: document schema 'discopt.model/1.6' is newer than this reader (discopt.model/1.5) and holds content it cannot decode (SerializationError: unknown index kind 'none'); upgrade discopt to read it."
+     },
+     "logical_constraints.json": {
+      "outcome": "loads_identical"
+     },
+     "mip_indicator_sos_disjunction.json": {
+      "outcome": "loads_identical"
+     },
+     "nested_disjunction.json": {
+      "outcome": "refused",
+      "error": "SerializationError: document schema 'discopt.model/1.6' is newer than this reader (discopt.model/1.5) and holds content it cannot decode (KeyError: 'sense'); upgrade discopt to read it."
+     },
+     "parameters_and_start.json": {
+      "outcome": "loads_identical"
+     },
+     "registered_atom.json": {
+      "outcome": "loads_identical"
+     },
+     "scalar_nlp.json": {
+      "outcome": "loads_identical"
+     },
+     "shared_dag.json": {
+      "outcome": "loads_identical"
+     },
+     "with_result.json": {
+      "outcome": "loads_identical"
+     }
+    }
+   },
+   "forward_python": {
+    "1.6": "3.13.16"
+   }
+  },
+  "1.6": {
+   "schema": "discopt.model/1.6",
+   "commit": "eca6abfb1dab7e2dc8c82640ad4507abb763101c",
+   "discopt_version": "0.9.1.dev0",
+   "python": "3.13.16",
+   "cases": {
+    "scalar_nlp": {
+     "file": "scalar_nlp.json",
+     "sha256": "8e798a5a57fa34b222ea8cd42ba4f609cdac2eeacbf4372aaefc1f6377855e9d",
+     "to_nl_sha256": "99787845c11051508641270c744c626a66db2c3f336d802cdc525d7d7e1984c5",
+     "to_nl_refused": null
+    },
+    "array_bounds_inf": {
+     "file": "array_bounds_inf.json",
+     "sha256": "39bb00c0714a04debd04f3feb4dce2b7049f701ff96b526f8d4bedc0da1f645b",
+     "to_nl_sha256": "d3b082468b17f96b7f2524e8fab16860c8f8e46407954e16bacfff8eebbd5108",
+     "to_nl_refused": null
+    },
+    "mip_indicator_sos_disjunction": {
+     "file": "mip_indicator_sos_disjunction.json",
+     "sha256": "ad49b89c8c70fbcc321ea67d59800dac86a420dc7b67242975669cdaee9a2483",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries an indicator constraint (Model.if_then). This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
+    },
+    "shared_dag": {
+     "file": "shared_dag.json",
+     "sha256": "f79b2c58daa75bc479337b400ad67449fad42913b2b69182b0d3263aa8bf1b94",
+     "to_nl_sha256": "1f0ae6f560240865384e792d847ec84c0e0aefc8600060137d2dc4b000ada9e3",
+     "to_nl_refused": null
+    },
+    "fixed_scope": {
+     "file": "fixed_scope.json",
+     "sha256": "156f9debee41d66889875dc3d41162d934ce952c96570e34ca6f7764fc76b2ad",
+     "to_nl_sha256": "4085a021806538699f80cb58952aad8ccbdadbce9a2b503075d3cc2d64c11aef",
+     "to_nl_refused": null
+    },
+    "complementarity_lowered": {
+     "file": "complementarity_lowered.json",
+     "sha256": "d7e9c9032b756863fe74ed5959462c33201a323f14f553741ad72aaeb1306499",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries a disjunctive constraint (Model.either_or / Model.if_else, GDP) named 'pq'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
+    },
+    "with_result": {
+     "file": "with_result.json",
+     "sha256": "a36ee6f93c2da1b4a139fe2260edc9cdfd72017cab8cb5ab97cc9343a2239134",
+     "to_nl_sha256": "6e08b0bdec6e132c87a21893404fa0b8af30ab54acce1b2df8af222a8f2aa52b",
+     "to_nl_refused": null
+    },
+    "from_nl_nvs01": {
+     "file": "from_nl_nvs01.json",
+     "sha256": "ee79ddd7d8aa8fc0b68f7cc423041644ee352eb838543745df06affc46fc29b8",
+     "to_nl_sha256": "ad1fbb03c9c1c4202f2a0f0e8f857ffb1af948c4ce5981bf4c08f0c15238d3e7",
+     "to_nl_refused": null,
+     "input_sha256": "a754d8f98b200bc914e0be867df2ae0cfe6a4c4f5f9d023b7d09a3c2fd934de7"
+    },
+    "from_nl_st_e13": {
+     "file": "from_nl_st_e13.json",
+     "sha256": "77a4a8c2196f372af901efc7c62470fd4dda78067dab7a926c4be96843f4b88a",
+     "to_nl_sha256": "f76aebc77035c50aeed080f835b5e65ef16da3586cd3acb8ee46c63f8cb2768b",
+     "to_nl_refused": null,
+     "input_sha256": "f568f2bec83e905a8741c518e3f350c65bbd4ae2b96643514b50458ce3eb7559"
+    },
+    "from_nl_mpcc": {
+     "file": "from_nl_mpcc.json",
+     "sha256": "144298050c665c30d56a4c2bcb4e276c17ecfddc0e4898b7cc24da71117638e6",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries a disjunctive constraint (Model.either_or / Model.if_else, GDP) named 'nl_compl0'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct).",
+     "input_sha256": "b9d827c3efbbc40f5e675a7b605efc747c97d7f4e220cb2e46aa3a9f0e81f4e1"
+    },
+    "fast_api_blocks": {
+     "file": "fast_api_blocks.json",
+     "sha256": "9aef98a67accb2da4ce4022246f18bd1fe944c3dc5586e7f3b68030f90da6669",
+     "to_nl_sha256": "59a4f2f3ff20f1b633dbd5450ed0029217e208db98900834f3f959f74e4b9f78",
+     "to_nl_refused": null
+    },
+    "parameters_and_start": {
+     "file": "parameters_and_start.json",
+     "sha256": "2c0f3a18871e5733b787c5d59c5dd7f30805d4a5069e842bb995f4f453aa0a0d",
+     "to_nl_sha256": "ffe61bc724c936887a884cbc7b5440d9df3c6af24bad8e987eeeb0023af7ce87",
+     "to_nl_refused": null
+    },
+    "decomposition_marks": {
+     "file": "decomposition_marks.json",
+     "sha256": "9d366b47b9974e60bee1e630e85a402b543aa9f60b5f6834efeb471f95d8d2bf",
+     "to_nl_sha256": "12889d0402cf36f6992650c79b6bbbdc58e88692eeb0baea8aff5633989f4741",
+     "to_nl_refused": null
+    },
+    "registered_atom": {
+     "file": "registered_atom.json",
+     "sha256": "a009a26cb84ea8cfae34bb0c233d130f9f52a242fdab8b6abbb554b7bc687b6e",
+     "to_nl_sha256": "0f2e2a6671eeeea0efba04a6b745bf0478e93b0b2d76fad2e0d5ead0106c3d50",
+     "to_nl_refused": null
+    },
+    "logical_constraints": {
+     "file": "logical_constraints.json",
+     "sha256": "9e1951e47e8537ec9edf51853a25db8d336d6bc807dce2893c824fff7e61879f",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries a propositional-logic constraint over BooleanVars named 'imp'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
+    },
+    "complementarity_vector_lowered": {
+     "file": "complementarity_vector_lowered.json",
+     "sha256": "e1c9d7d17ab4219d01aaa2a11f904e2dbbdfd2b14a4950de082e92dc622c6af8",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries a disjunctive constraint (Model.either_or / Model.if_else, GDP) named 'pq_0'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
+    },
+    "gdp_indicators": {
+     "file": "gdp_indicators.json",
+     "sha256": "a9eba4f6e8e43522390c25e696a8842ada7210e0f559475fd47777940b2fa652",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries a disjunctive constraint (Model.either_or / Model.if_else, GDP) named 'mode'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
+    },
+    "gdp_indicators_logic": {
+     "file": "gdp_indicators_logic.json",
+     "sha256": "5d7f78888e8319a6a7f4e395c93f8e1a32b2766493f4eb33f5cca03300e07860",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries a disjunctive constraint (Model.either_or / Model.if_else, GDP) named 'mode'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
+    },
+    "index_none_ellipsis": {
+     "file": "index_none_ellipsis.json",
+     "sha256": "e1715644ebea83af5c3ad83708df6a79cc31ecac39f719c6e2e1f1073c7dd09b",
+     "to_nl_sha256": "c98e6adc58d95907e6d81328f6816df272758b1a0dbfba5a67da1ac70f537aa8",
+     "to_nl_refused": null
+    },
+    "nested_disjunction": {
+     "file": "nested_disjunction.json",
+     "sha256": "4c088e6169927dd47240063934db6bb0f408a6e415ee324857b0db3e291d4160",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries a disjunctive constraint (Model.either_or / Model.if_else, GDP) named 'outer'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
     }
    }
   }

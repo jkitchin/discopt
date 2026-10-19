@@ -280,6 +280,42 @@ def gdp_indicators_logic():
     return m, {}
 
 
+def index_none_ellipsis():
+    """``None`` (``numpy.newaxis``) and ``Ellipsis`` indices (1.6+, WP-3b).
+
+    The spellings ``DAEBuilder.add_control`` and ``TrainableNetwork`` emit. Every
+    earlier writer refuses the index, so it is recorded as unbuildable there.
+    """
+    import discopt.modeling as dm
+    import numpy as np
+
+    m = dm.Model("index_none_ellipsis")
+    x = m.continuous("x", shape=(3,), lb=-2.0, ub=2.0)
+    u = m.continuous("u", shape=(2, 3), lb=-2.0, ub=2.0)
+    target = np.array([0.5, -1.0, 1.5])
+    # `x[None, :]` broadcasts x across u's rows; `u[..., 0]` is u's first column.
+    m.minimize(dm.sum((u - x[None, :]) ** 2) + dm.sum((x - target) ** 2) + dm.sum(u[..., 0]))
+    m.subject_to(dm.sum(u[:, None, 1]) >= -1.0, name="col1")
+    return m, {}
+
+
+def nested_disjunction():
+    """A ``Model.disjunction()`` as a disjunct member of ``either_or`` (1.6+, WP-3b).
+
+    The outer alternative is infeasible, so the optimum is the inner OR's best
+    arm, x = 7; flattening the member into an AND of its rows would make the
+    model infeasible. Earlier writers refuse (or crash on) the member.
+    """
+    import discopt.modeling as dm
+
+    m = dm.Model("nested_disjunction")
+    x = m.continuous("x", lb=0.0, ub=20.0)
+    m.maximize(x)
+    inner = m.disjunction([[x >= 1.0, x <= 3.0], [x >= 5.0, x <= 7.0]], name="inner")
+    m.either_or([[inner], [x >= 30.0]], name="outer")
+    return m, {}
+
+
 #: name -> builder. Order is the manifest's order; never reorder or rename a case
 #: once a shipped version's fixtures exist for it (fixtures are immutable, §0.3.11).
 CASES = {
@@ -306,6 +342,9 @@ CASES = {
         complementarity_vector_lowered,
         gdp_indicators,
         gdp_indicators_logic,
+        # Added with schema 1.6 (WP-3b), recorded for every earlier version too.
+        index_none_ellipsis,
+        nested_disjunction,
     )
 }
 
