@@ -2691,10 +2691,20 @@ def dumps(
     obj = model._objective
     objective = None
     if obj is not None:
+        placeholder = bool(getattr(obj, "_is_placeholder", False))
+        has_builder_obj = (
+            getattr(model, "_builder_linear_objective", None) is not None
+            or getattr(model, "_builder_quadratic_objective", None) is not None
+        )
+        # A builder objective's placeholder carries the builder objective's own
+        # expression since #1802, rebuilt from the block on load; the document
+        # keeps recording it as the ``Constant(0.0)`` the reader checks for, so the
+        # format is unchanged and the coefficients are written once.
+        expr = Constant(np.float64(0.0)) if placeholder and has_builder_obj else obj.expression
         objective = {
             "sense": obj.sense.value,
-            "expr": table.add(obj.expression),
-            "placeholder": bool(getattr(obj, "_is_placeholder", False)),
+            "expr": table.add(expr),
+            "placeholder": placeholder,
         }
 
     builder_obj = None

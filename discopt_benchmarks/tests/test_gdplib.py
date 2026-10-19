@@ -255,6 +255,51 @@ def test_feasibility_check_counts_a_variable_used_only_by_the_objective():
     assert gr._max_constraint_violation(m) is None
 
 
+def _bigm_pyomo_model(y_value, x_value):
+    """min x + y s.t. x >= 5 - 1e7*y (a big-M row), y binary, 0 <= x <= 10.
+
+    The #1802 S2 shape: at ``y = 9.5e-7`` the row's ``M * y`` slack (9.5) switches
+    the constraint off although ``y`` reads as 0 to any integrality tolerance."""
+    import pyomo.environ as pyo
+
+    m = pyo.ConcreteModel()
+    m.x = pyo.Var(bounds=(0, 10))
+    m.y = pyo.Var(within=pyo.Binary)
+    m.c = pyo.Constraint(expr=m.x >= 5 - 1e7 * m.y)
+    m.obj = pyo.Objective(expr=m.x + m.y, sense=pyo.minimize)
+    m.x.set_value(x_value, skip_validation=True)
+    m.y.set_value(y_value, skip_validation=True)
+    return m
+
+
+def test_feasibility_check_judges_the_integral_rounding():
+    """#1802 S2: GAMS/SCIP certified 67.3236 on pyomo.eight_process (optimum
+    68.00974) with binaries at 9.5e-7 / 0.999999 buying slack through big-M rows;
+    the check passed them because it never looked at integrality."""
+    m = _bigm_pyomo_model(9.5e-7, 0.0)
+    viol = gr._max_constraint_violation(m)
+    assert viol is not None and viol > gr._ORACLE_FEAS_TOL
+    # Judged at the rounding, but not left there: the caller's point is unchanged.
+    assert m.y.value == 9.5e-7
+    # The same point with y truly integral and x honest is accepted.
+    ok = _bigm_pyomo_model(0.0, 5.0)
+    viol = gr._max_constraint_violation(ok)
+    assert viol is not None and viol <= gr._ORACLE_FEAS_TOL
+
+
+def test_feasibility_check_rejects_a_fractional_integer():
+    viol = gr._max_constraint_violation(_bigm_pyomo_model(0.4, 5.0))
+    assert viol == float("inf")
+
+
+def test_snap_integers_rounds_in_place_and_reports_the_move():
+    m = _bigm_pyomo_model(0.999999, 0.0)
+    dev = gr._snap_integers(m)
+    assert dev == pytest.approx(1e-6)
+    assert m.y.value == 1.0 and m.x.value == 0.0  # continuous values untouched
+    assert gr._snap_integers(_bigm_pyomo_model(0.4, 5.0)) == pytest.approx(0.4)
+
+
 @pytest.mark.skipif(not _has_gams(), reason="GAMS (SCIP/BARON subsolvers) not available")
 def test_gams_oracle_certifies_nonlinear_optimum():
     """SCIP via GAMS returns the feasibility-verified optimum for a nonlinear GDP."""
@@ -266,7 +311,11 @@ def test_gams_oracle_certifies_nonlinear_optimum():
 @pytest.mark.skipif(not _has_gams(), reason="GAMS not available")
 def test_gams_oracle_declines_when_gap_open():
     """A 0 s budget cannot close the gap -> no oracle value (never a bare incumbent)."""
-    assert gr._solve_with_gams(_spec("cstr"), method="bigm", time_limit=0.0, solver="scip") is None
+    why: list[str] = []
+    obj = gr._solve_with_gams(_spec("cstr"), method="bigm", time_limit=0.0, solver="scip", why=why)
+    assert obj is None
+    # #1802 S2: the decline says why instead of being an anonymous None.
+    assert len(why) == 1 and why[0].startswith("gams/scip: "), why
 
 
 @pytest.mark.correctness

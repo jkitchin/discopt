@@ -24,14 +24,17 @@ def test_every_panel_instance_has_an_oracle_row():
         if rec.source == "unproven":
             assert rec.value is None and rec.note, name
         else:
-            assert rec.source in {"baron+scip", "baron", "highs"}, name
+            assert rec.source in {"baron+scip", "baron", "scip", "highs"}, name
             assert isinstance(rec.value, float), name
     # The private tables name no instance outside the panel (a stale row would be
     # an oracle nothing checks).
-    assert set(gr._HIGHS_OPTIMA) <= set(gr.GDP_PARITY)
-    assert set(gr._UNPROVEN) <= set(gr.GDP_PARITY)
-    assert not set(gr._HIGHS_OPTIMA) & set(gr._UNPROVEN)
-    assert not set(gr._HIGHS_OPTIMA) & set(gr.reference_optima())
+    tables = [set(gr._HIGHS_OPTIMA), set(gr._GAMS_OPTIMA), set(gr._UNPROVEN)]
+    tables.append(set(gr.reference_optima()) & set(gr.GDP_PARITY))
+    for i, a in enumerate(tables):
+        assert a <= set(gr.GDP_PARITY)
+        for b in tables[i + 1 :]:
+            assert not a & b, a & b
+    assert all(src in {"baron+scip", "baron", "scip"} for _, src in gr._GAMS_OPTIMA.values())
 
 
 def test_parity_suite_is_pr58_plus_pyomo_gdpopt_models():
@@ -81,9 +84,16 @@ def test_pyomo_expected_values_name_catalog_instances_only():
     assert set(px.PYOMO_EXPECTED) <= set(px.CATALOG)
 
 
-def test_discover_resolves_pyomo_names_only_when_asked():
-    default = {s.name for s in gr.discover_models(include=[])} if gr.is_available() else set()
+@pytest.mark.skipif(not gr.is_available(), reason="needs gdplib (from source)")
+def test_default_sweep_lists_no_pyomo_names():
+    """The default sweep (``include=None``) is GDPlib's alone. ``include=[]`` -- what
+    this used to call -- selects nothing, so it passed whatever the sweep did."""
+    default = {s.name for s in gr.discover_models()}
+    assert default, "the default sweep found no GDPlib model; the check would be vacuous"
     assert not any(n.startswith(px.PREFIX) for n in default)
+
+
+def test_discover_resolves_pyomo_names_only_when_asked():
     specs = gr.discover_models(include=["pyomo.eight_process", "pyomo.no_such_model"])
     assert [s.name for s in specs] == ["pyomo.eight_process"]
 

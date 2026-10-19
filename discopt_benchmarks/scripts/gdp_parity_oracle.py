@@ -5,10 +5,13 @@ Runs, for every :data:`gdplib_runner.GDP_PARITY` instance whose
 ``--all``), GAMS/SCIP and GAMS/BARON on the ``gdp.bigm`` reformulation through
 :func:`gdplib_runner._solve_with_gams`. That function trusts a value only when the
 gap closed (``lb == ub``) and the incumbent GAMS loads back is feasible in the Pyomo
-model. As in ``_attach_oracle``, the two solvers must **both** certify and
-**agree**; one certifying alone, or a disagreement, leaves the row unproven and says
-so. Needs GAMS with SCIP and BARON licensed (BARON demo licenses cap at 10
-variables / 10 constraints and certify nothing here -- check the ``.lst``).
+model, with its integer variables rounded (#1802 S2). As in ``_attach_oracle``, two
+certifying solvers must **agree** (a disagreement leaves the row unproven); one
+solver certifying while the other *declines* (an open gap, a point infeasible at
+its integral rounding, a GAMS write failure -- each printed) certifies the row with
+that solver alone as its source, as ``batch_processing`` already is. Needs GAMS
+with SCIP and BARON licensed; a BARON demo license (10 variables / 10 constraints)
+is detected in the ``.lst`` and declines.
 
 Prints one line per instance (flushed) and the rows to paste into
 ``reference_optima()``; exits 2 when GAMS is unavailable and 1 when nothing was
@@ -60,21 +63,38 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{name:36s} NOT BUILDABLE here (missing builder or data)", flush=True)
             continue
         t0 = time.perf_counter()
-        scip = gr._solve_with_gams(spec, "bigm", args.time_limit, "scip")
-        baron = gr._solve_with_gams(spec, "bigm", args.time_limit, "baron")
+        why: list[str] = []
+        scip = gr._solve_with_gams(spec, "bigm", args.time_limit, "scip", why=why)
+        baron = gr._solve_with_gams(spec, "bigm", args.time_limit, "baron", why=why)
         wall = round(time.perf_counter() - t0, 1)
-        verdict = "unproven"
+        value, source = None, "unproven"
         if scip is not None and baron is not None:
             tol = 1e-4 + 1e-3 * max(abs(scip), abs(baron))
-            verdict = "DISAGREE" if abs(scip - baron) > tol else "certified"
-        rows[name] = {"scip": scip, "baron": baron, "verdict": verdict, "wall": wall}
-        print(f"{name:36s} scip={scip} baron={baron} -> {verdict} ({wall}s)", flush=True)
-        certified += verdict == "certified"
+            value, source = (None, "DISAGREE") if abs(scip - baron) > tol else (baron, "baron+scip")
+        elif baron is not None:
+            value, source = baron, "baron"
+        elif scip is not None:
+            value, source = scip, "scip"
+        rows[name] = {
+            "scip": scip,
+            "baron": baron,
+            "value": value,
+            "source": source,
+            "declines": why,
+            "wall": wall,
+            "time_limit": args.time_limit,
+            "method": "bigm",
+            "date": time.strftime("%Y-%m-%d"),
+        }
+        print(f"{name:36s} scip={scip} baron={baron} -> {source} ({wall}s)", flush=True)
+        for reason in why:
+            print(f"{'':36s}   {reason}", flush=True)
+        certified += value is not None
 
-    print("\n# rows for reference_optima() (BARON+SCIP agreed, both feasibility-verified):")
+    print("\n# rows for _GAMS_OPTIMA (gap closed, point feasible at its integral rounding):")
     for name, r in rows.items():
-        if r["verdict"] == "certified":
-            print(f'        "{name}": {r["baron"]!r},')
+        if r["value"] is not None:
+            print(f'    "{name}": ({r["value"]!r}, "{r["source"]}"),')
     if args.out:
         Path(args.out).write_text(json.dumps(rows, indent=1))
     print(f"certified {certified} of {len(rows)}", flush=True)
