@@ -45,6 +45,7 @@ Two entry points, both registered in :mod:`discopt.transformations`:
 
 from __future__ import annotations
 
+import bisect
 import copy
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -479,7 +480,16 @@ def transform_current_disjunctive_state(
     if members is not None:
         # Keep the nesting record in step with the rows (#1794 S3): a decided or
         # dropped block disjunction is gone, a promoted one has no parent now.
-        new_members = {k: v for k, v in members.items() if k not in plan.retired_keys}
+        # ``start`` is a row position, so it moves down past every dropped row
+        # before it (``rows`` replaces in place and appends the rest): a stale one
+        # misplaces a row-less block disjunction in the tree, and the reader
+        # refuses it.
+        dropped = sorted(plan.drop)
+        new_members = {
+            k: v._replace(start=v.start - bisect.bisect_left(dropped, v.start))
+            for k, v in members.items()
+            if k not in plan.retired_keys
+        }
         for k in plan.promoted_keys & set(new_members):
             rec = new_members[k]
             if rec.parent is not None:

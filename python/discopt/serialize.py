@@ -244,9 +244,11 @@ logger = logging.getLogger(__name__)
 #:   to ``either_or``). Writing only its rows would turn an OR into an AND.
 #:
 #: Both are read only from a document of minor >= 6
-#: (``_SCHEMA_MINOR_NEWAXIS_NESTED_DISJUNCTION``). A 1.5 reader refuses the
-#: unknown index kind, and reads the member object's missing ``body`` as a
-#: malformed row -- a refusal either way, never a silent drop.
+#: (``_SCHEMA_MINOR_NEWAXIS_NESTED_DISJUNCTION``). A 1.5 reader refuses either
+#: document as newer than itself ("document schema 'discopt.model/1.6' is newer
+#: than this reader ... holds content it cannot decode"), the cause being the
+#: unknown index kind or the member object's missing ``sense`` -- a refusal
+#: either way, never a silent drop (the fixture manifest's forward cells).
 #:
 #: 1.7 records the state of Disjunct blocks (#1775 G1.2 / G1.4, #1790), refused
 #: before: a ``block_indicator`` row -- an indicator row with its block's
@@ -1197,11 +1199,6 @@ def _refuse_unsupported(model: Model) -> None:
     _refuse_unclassified_attributes(model)
 
 
-def _named(con) -> str:
-    name = getattr(con, "name", None)
-    return f" (named {name!r})" if name else ""
-
-
 def _refuse_unclassified_attributes(model: Model) -> None:
     """Refuse a model carrying a private attribute this format does not classify.
 
@@ -1705,6 +1702,26 @@ def _dec_logic(entries: Any, nodes: list, name: Any) -> Any:
     return built[-1]
 
 
+def _is_scalar_binary(col: Any) -> bool:
+    return type(col) is Variable and col.var_type == VarType.BINARY and col.shape == ()
+
+
+def _dec_block_indicator(nodes: list, ref: Any, what: str) -> Variable:
+    """A Disjunct block's indicator column, referenced by *what* (#1801/#1803 review).
+
+    A block indicator is always ``Disjunct.indicator.variable``, a scalar binary.
+    Checked by kind: a continuous column here loaded and solved a different model,
+    and an expression node failed only inside the solve.
+    """
+    col = nodes[ref]
+    if isinstance(col, Variable) and _is_scalar_binary(col):
+        return col
+    raise SerializationError(
+        f"{what} must reference a Disjunct block's indicator (a scalar binary "
+        f"variable), got {col!r}"
+    )
+
+
 def _dec_indicators(d: dict, nodes: list) -> tuple:
     """The ``indicators`` of a 1.5+ disjunction row: one scalar binary per disjunct.
 
@@ -1726,7 +1743,7 @@ def _dec_indicators(d: dict, nodes: list) -> tuple:
         )
     cols = tuple(nodes[i] for i in refs)
     for col in cols:
-        if not (type(col) is Variable and col.var_type == VarType.BINARY and col.shape == ()):
+        if not _is_scalar_binary(col):
             raise SerializationError(
                 f"disjunction {name!r} has an indicator that is not a scalar binary "
                 f"variable ({col!r})"
@@ -1777,6 +1794,11 @@ def _dec_rows(docs: list[dict], nodes: list, minor: int) -> list:
                     ),
                 )
             )
+            if out[-1].disjunction is not None:
+                # Only ``add_disjunction`` tags a row, always on a block's indicator.
+                _dec_block_indicator(
+                    nodes, d["indicator"], f"indicator row {len(out) - 1} 'indicator'"
+                )
             if kind == "block_indicator":
                 # 1.7 (#1775 G1.2 / G1.4). Read only on this kind, so on a plain
                 # ``indicator`` row either key is refused as unread.
@@ -1786,7 +1808,9 @@ def _dec_rows(docs: list[dict], nodes: list, minor: int) -> list:
                         "'semantics'; the writer emits a plain 'indicator' row then"
                     )
                 if "parent" in d:
-                    out[-1].parent = nodes[d["parent"]]
+                    out[-1].parent = _dec_block_indicator(
+                        nodes, d["parent"], f"block_indicator row {len(out) - 1} 'parent'"
+                    )
                 if "semantics" in d:
                     out[-1].semantics = _dec_block_semantics(d["semantics"], len(out) - 1)
         elif kind == "sos":
@@ -1879,10 +1903,17 @@ def _dec_disjunction(d: Any, nodes: list, minor: int) -> Any:
         raise SerializationError(
             f"disjunction {d.get('name')!r} names unknown method {d['method']!r}"
         )
+    if not _seq(d["disjuncts"], "disjuncts"):
+        # ``either_or`` / ``disjunction`` refuse one; the lowering raised IndexError.
+        raise SerializationError(f"disjunction {d.get('name')!r} has no disjuncts")
     blocks = minor >= _SCHEMA_MINOR_DISJUNCT_BLOCKS
     return _DisjunctiveConstraint(
         parent_indicator=(
-            nodes[d["parent_indicator"]] if blocks and "parent_indicator" in d else None
+            _dec_block_indicator(
+                nodes, d["parent_indicator"], f"disjunction {d.get('name')!r} 'parent_indicator'"
+            )
+            if blocks and "parent_indicator" in d
+            else None
         ),
         disjuncts=[
             [_dec_member(c, nodes, minor) for c in _seq(dd, "a disjunct")]
@@ -2654,9 +2685,15 @@ def _dec_gdp_blocks(doc: Any, model: Model, rows: list, nodes: list) -> None:
         name = rec["name"]
         if name is not None and not isinstance(name, str):
             raise SerializationError(f"block disjunction {key!r} has a non-string name")
+        what = f"_gdp_blocks member {key!r}"
         members[key] = _BlockMembers(
-            [nodes[i] for i in _seq(rec["indicators"], "block-disjunction indicators")],
-            None if rec["parent"] is None else nodes[rec["parent"]],
+            [
+                _dec_block_indicator(nodes, i, f"{what} 'indicators'")
+                for i in _seq(rec["indicators"], "block-disjunction indicators")
+            ],
+            None
+            if rec["parent"] is None
+            else _dec_block_indicator(nodes, rec["parent"], f"{what} 'parent'"),
             start,
             name,
             DisjunctionSemantics[sem],
@@ -2678,12 +2715,25 @@ def _dec_gdp_blocks(doc: Any, model: Model, rows: list, nodes: list) -> None:
         d = Disjunct.__new__(Disjunct)
         d.name = _dec_name(rec["name"], "a disjunct name")
         d._model = model
-        d.indicator = BooleanVar(nodes[rec["indicator"]])
-        d._constraints = [
-            row(p, _IndicatorConstraint, "a disjunct row").constraint
-            for p in _seq(rec["rows"], "disjunct rows")
-        ]
-        d._local_vars = [nodes[i] for i in _seq(rec["local"], "disjunct local variables")]
+        what = f"_gdp_blocks disjunct {d.name!r}"
+        d.indicator = BooleanVar(
+            _dec_block_indicator(nodes, rec["indicator"], f"{what} 'indicator'")
+        )
+        d._constraints = []
+        for p in _seq(rec["rows"], "disjunct rows"):
+            r = row(p, _IndicatorConstraint, "a disjunct row")
+            if r.indicator is not d.indicator.variable:
+                raise SerializationError(
+                    f"{what} 'rows' lists row {p}, which is not activated by its indicator"
+                )
+            d._constraints.append(r.constraint)
+        d._local_vars = []
+        for i in _seq(rec["local"], "disjunct local variables"):
+            if type(nodes[i]) is not Variable:
+                raise SerializationError(
+                    f"{what} 'local' must reference variables, got {nodes[i]!r}"
+                )
+            d._local_vars.append(nodes[i])
         d._attached = True
         placed = rec["placed_in"]
         if placed is not None and not isinstance(placed, str):
@@ -2694,9 +2744,13 @@ def _dec_gdp_blocks(doc: Any, model: Model, rows: list, nodes: list) -> None:
         d._nested = []
         for entry in _seq(rec["nested"], "disjunct nesting"):
             if "dc" in entry:
-                d._nested.append(
-                    ("dc", row(entry["dc"], _DisjunctiveConstraint, "a nested row"), None, None)
-                )
+                dc = row(entry["dc"], _DisjunctiveConstraint, "a nested row")
+                if dc.parent_indicator is not d.indicator.variable:
+                    raise SerializationError(
+                        f"disjunct {d.name!r} 'nested' lists row {entry['dc']!r}, which is "
+                        "not nested in it"
+                    )
+                d._nested.append(("dc", dc, None, None))
                 continue
             blocks = []
             for k in _seq(entry["block"], "a nested block"):
@@ -2710,7 +2764,141 @@ def _dec_gdp_blocks(doc: Any, model: Model, rows: list, nodes: list) -> None:
             d._nested.append(
                 ("block", blocks, name, _dec_block_semantics_any(entry["semantics"], d.name))
             )
+    _refuse_nesting_cycle(built)
     model._gdp_factory_disjuncts.extend(built)
+
+
+def _refuse_nesting_cycle(blocks: list) -> None:
+    """``Disjunct.add_disjunction`` refuses a nesting cycle; so does the reader.
+
+    Lowering and ``validate`` walk the nesting recursively, so a cycle recurses
+    without end. Iterative, since a cycle not through the start block would make
+    ``Disjunct._encloses`` recurse forever too.
+    """
+    state: dict[int, int] = {}  # id -> 1 on the current path, 2 done
+    for root in blocks:
+        if id(root) in state:
+            continue
+        stack = [(root, iter(_nested_blocks(root)))]
+        state[id(root)] = 1
+        while stack:
+            node, children = stack[-1]
+            child = next(children, None)
+            if child is None:
+                state[id(node)] = 2
+                stack.pop()
+            elif state.get(id(child)) == 1:
+                raise SerializationError(
+                    f"_gdp_blocks disjunct {child.name!r} encloses itself through its "
+                    "'nested' blocks (a nesting cycle); no writer produces one"
+                )
+            elif id(child) not in state:
+                state[id(child)] = 1
+                stack.append((child, iter(_nested_blocks(child))))
+
+
+def _nested_blocks(d: Any) -> list:
+    return [inner for kind, item, *_ in d._nested if kind == "block" for inner in item]
+
+
+def _check_block_state(model: Model) -> None:
+    """Refuse block-disjunction records that disagree with the rows they describe.
+
+    Each ``_gdp_blocks`` member record restates what its rows already carry -- the
+    indicator of each disjunct, the enclosing disjunct's indicator and the declared
+    semantics -- and a block disjunction that takes part in nesting is always
+    recorded (``Model._emit_block_disjunction``). A record that disagrees, or is
+    missing, changes which block a disjunction is nested in or whether it is
+    recorded at all, so it is refused rather than reconciled. ``start`` is the
+    position of the block disjunction's first row; the GDP tree reads it to order a
+    record that tags no rows, so such a record must start no later than the first
+    row or record nested in it.
+    """
+    members = model.__dict__.get("_gdp_block_members") or {}
+    owner: dict[int, str] = {}  # id(indicator column) -> block-disjunction key
+
+    def own(col: Any, key: str, where: str) -> None:
+        if owner.setdefault(id(col), key) != key:
+            raise SerializationError(
+                f"{where}: indicator {col.name!r} belongs to two block disjunctions, "
+                f"{owner[id(col)]!r} and {key!r}"
+            )
+
+    for key, rec in members.items():
+        for col in rec.indicators:
+            own(col, key, f"_gdp_blocks member {key!r} 'indicators'")
+    parents: list = [(f"_gdp_blocks member {k!r} 'parent'", r.parent) for k, r in members.items()]
+    first_row: dict[str, int] = {}  # key -> position of its first tagged row
+    nested_at: dict[int, int] = {}  # id(parent indicator) -> first row nested in it
+
+    def nest(parent: Any, pos: int) -> None:
+        if parent is not None:
+            nested_at[id(parent)] = min(nested_at.get(id(parent), pos), pos)
+
+    for r in members.values():
+        nest(r.parent, r.start)
+    for pos, row in enumerate(model._constraints):
+        if type(row) is _DisjunctiveConstraint:
+            parents.append((f"row {pos} 'parent_indicator'", row.parent_indicator))
+            nest(row.parent_indicator, pos)
+            continue
+        if type(row) is not _IndicatorConstraint or row.disjunction is None:
+            continue
+        key, k, n = row.disjunction
+        own(row.indicator, key, f"row {pos}")
+        parents.append((f"row {pos} 'parent'", row.parent))
+        first_row.setdefault(key, pos)
+        nest(row.parent, pos)
+        rec = members.get(key)
+        if rec is None:
+            if row.parent is not None:
+                raise SerializationError(
+                    f"row {pos} is nested (it has a 'parent') in block disjunction {key!r}, "
+                    "which has no '_gdp_blocks' member record"
+                )
+            continue
+        if n != len(rec.indicators) or not 0 <= k < n or row.indicator is not rec.indicators[k]:
+            raise SerializationError(
+                f"_gdp_blocks member {key!r} 'indicators' disagree with row {pos} "
+                f"(disjunct {k} of {n})"
+            )
+        if row.parent is not rec.parent:
+            raise SerializationError(
+                f"_gdp_blocks member {key!r} 'parent' disagrees with row {pos}'s"
+            )
+        if row.semantics is not rec.semantics:
+            raise SerializationError(
+                f"_gdp_blocks member {key!r} 'semantics' {rec.semantics.name} disagrees "
+                f"with row {pos}'s {row.semantics.name}"
+            )
+    for key, rec in members.items():
+        if key in first_row:
+            if rec.start != first_row[key]:
+                raise SerializationError(
+                    f"_gdp_blocks member {key!r} 'start' {rec.start} is not the position "
+                    f"of its first row, {first_row[key]}"
+                )
+            continue
+        inner = [nested_at[id(c)] for c in rec.indicators if id(c) in nested_at]
+        if inner and rec.start > min(inner):
+            raise SerializationError(
+                f"_gdp_blocks member {key!r} 'start' {rec.start} is after row {min(inner)}, "
+                "which is nested in it"
+            )
+    for where, parent in parents:
+        if parent is None:
+            continue
+        key = owner.get(id(parent))
+        if key is None:
+            raise SerializationError(
+                f"{where} {parent.name!r} is the indicator of no block disjunction in this document"
+            )
+        if key not in members:
+            # A block disjunction with a disjunction nested in it is always recorded.
+            raise SerializationError(
+                f"{where} {parent.name!r} is a disjunct of block disjunction {key!r}, "
+                "which has no '_gdp_blocks' member record"
+            )
 
 
 def _dec_block_semantics_any(name: Any, where: Any) -> Any:
@@ -3395,6 +3583,7 @@ def _decode_document(doc: dict, minor: int) -> Model:
 
     _dec_complementarities(doc.get("complementarities"), model, nodes, minor)
     _dec_state(doc.get("state"), model, list(model._constraints), nodes, minor)
+    _check_block_state(model)
 
     # An entry naming a variable this document does not declare is dead weight
     # at best: `solve()` looks the point up by name, so the value is dropped

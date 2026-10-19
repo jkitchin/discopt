@@ -126,7 +126,8 @@ def test_block_state_in_an_older_document_is_refused():
         if row["kind"] == "block_indicator":
             row["kind"] = "indicator"
             row.pop("parent")
-    with pytest.raises(SerializationError, match="_gdp_blocks"):
+    # The specific refusal, not the generic unknown-key one, which names the key too.
+    with pytest.raises(SerializationError, match="1.6 document carries a '_gdp_blocks' state"):
         loads(_older(doc))
 
 

@@ -177,8 +177,8 @@ def test_unbuildable_cases_are_recorded_not_skipped():
         for case in ("logical_constraints", "gdp_indicators", "gdp_indicators_logic")
     }
     # `None` / `Ellipsis` indices and a disjunction member are encoded from 1.6
-    # (WP-3b); every earlier writer refused the index and refused (1.5) or crashed
-    # on (before 1.5) the member.
+    # (WP-3b); every earlier writer refused the index and crashed on the member
+    # (1.5's 6420787e included: AttributeError on the member's missing ``rhs``).
     expected |= {
         (v, case)
         for v in VERSIONS
