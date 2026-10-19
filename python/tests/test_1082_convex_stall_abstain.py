@@ -136,11 +136,21 @@ def _assert_sound(result):
     assert abs(result.objective - TLS2_OPT) <= 1e-4 * max(1.0, abs(TLS2_OPT))
 
 
+#: The #1059 convex-MINLP auto-route's opt-out. Since #1537 the routed
+#: LP/NLP-BB solve certifies tls2 at the root (0 node NLPs, 0.3 s), where it
+#: used to return uncertified and fall back to convex branch and bound. The
+#: abstention lives on that branch-and-bound path, which the route's fallback
+#: and every route-declined convex model still take, so the canary pins it.
+ROUTE_ENV = "DISCOPT_CONVEX_MINLP_ROUTE"
+
+
 def _solve_with_stall(monkeypatch, arm, k, corners):
     monkeypatch.setenv(ABSTAIN_ENV, arm)
+    monkeypatch.setenv(ROUTE_ENV, "0")
     stall = _InjectedStall(monkeypatch, k=k, corners=corners)
     _, result = _solve_tls2()
     assert stall.injected == 1, f"the stall never fired ({stall.calls} node solves)"
+    assert result.algorithm_route.startswith("nlp-bb"), result.algorithm_route
     return result
 
 
