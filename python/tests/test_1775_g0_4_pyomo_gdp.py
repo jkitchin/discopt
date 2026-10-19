@@ -353,3 +353,93 @@ def test_pyomo_variables_keep_their_values():
     conv = convert_pyomo_gdp(pm)
     check_evaluation_parity(conv, n_points=3)
     assert pm.x.value == 4.25
+
+
+def _nested(cost=0.0):
+    """d1 holds a nested [e1: x >= 9] v [e2: x <= 10]; d2 is the cheap branch."""
+    m = pyo.ConcreteModel()
+    m.x = pyo.Var(bounds=(0, 10))
+    m.d1 = gdp.Disjunct()
+    m.d1.c = pyo.Constraint(expr=m.x >= 8)
+    m.d1.e1 = gdp.Disjunct()
+    m.d1.e1.c = pyo.Constraint(expr=m.x >= 9)
+    m.d1.e2 = gdp.Disjunct()
+    m.d1.e2.c = pyo.Constraint(expr=m.x <= 10)
+    m.d1.inner = gdp.Disjunction(expr=[m.d1.e1, m.d1.e2])
+    m.d2 = gdp.Disjunct()
+    m.d2.c = pyo.Constraint(expr=m.x >= 1)
+    m.top = gdp.Disjunction(expr=[m.d1, m.d2])
+    obj = m.x + cost * m.d1.e1.binary_indicator_var if cost else m.x
+    m.o = pyo.Objective(expr=obj)
+    return m
+
+
+@pytest.mark.parametrize("method", ["big-m", "hull"])
+def test_a_nested_indicator_referenced_in_logic_keeps_pyomo_semantics(method):
+    """Pyomo leaves a nested indicator free when its parent is False; discopt's tree
+    selector implies the parent. Requiring the nested indicator True must not force
+    d1: Pyomo's bigm and hull both give 1.0 (d2, x = 1). Before the fix: 9.0."""
+    pm = _nested()
+    pm.L = pyo.LogicalConstraint(expr=pm.d1.e1.indicator_var)
+    conv = convert_pyomo_gdp(pm)
+    assert _solve(conv.model, method) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_a_nested_indicator_priced_in_the_objective_keeps_pyomo_semantics():
+    """x - 10 * e1: in Pyomo e1 is free under d2, so -9 (x = 1, e1 = 1). Pricing
+    the tree selector instead gives -1 (d1, e1, x = 9)."""
+    conv = convert_pyomo_gdp(_nested(cost=-10.0))
+    assert _solve(conv.model) == pytest.approx(-9.0, abs=1e-6)
+
+
+def test_a_nested_indicator_fixed_true_does_not_force_its_parent():
+    pm = _nested()
+    pm.d1.e1.indicator_var.fix(True)
+    conv = convert_pyomo_gdp(pm)
+    assert _solve(conv.model) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_an_unreferenced_nested_indicator_adds_no_column():
+    """Bound-neutral for models that never reference a nested indicator: no ``W``
+    column and no link rows, so the converted model is the one before the fix."""
+    conv = convert_pyomo_gdp(_nested())
+    names = [c.name for c in conv.model._constraints]
+    assert not any("indicator_link" in (n or "") for n in names), names
+    # The tree selector is a valid value for an indicator nothing constrains.
+    pm_e1 = next(d for d in conv.disjuncts if d.name == "d1.e1")
+    assert conv.booleans[pm_e1.indicator_var] is conv.disjuncts[pm_e1].indicator
+    assert _solve(conv.model) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_a_violated_constant_row_in_a_disjunct_deselects_it():
+    """A row with only fixed variables that fails makes its disjunct unselectable;
+    Pyomo gives 4.0 (d2). Before the fix the converter refused the model."""
+    m = pyo.ConcreteModel()
+    m.x = pyo.Var(bounds=(0, 10))
+    m.p = pyo.Var(initialize=3.0)
+    m.p.fix()
+    m.d1 = gdp.Disjunct()
+    m.d1.bad = pyo.Constraint(expr=m.p >= 5)
+    m.d1.c = pyo.Constraint(expr=m.x >= 1)
+    m.d2 = gdp.Disjunct()
+    m.d2.c = pyo.Constraint(expr=m.x >= 4)
+    m.top = gdp.Disjunction(expr=[m.d1, m.d2])
+    m.o = pyo.Objective(expr=m.x)
+    assert _solve(convert_pyomo_gdp(m).model) == pytest.approx(4.0, abs=1e-6)
+
+
+def test_parity_draws_a_fixed_indicator_binary_at_its_value():
+    """A row over a fixed indicator binary substitutes its value; the parity checker
+    used to draw that binary at random and report a false mismatch (GDPlib kaibel)."""
+    m = pyo.ConcreteModel()
+    m.x = pyo.Var(bounds=(0, 10))
+    m.d = gdp.Disjunct([1, 2])
+    m.d[1].c = pyo.Constraint(expr=m.x >= 2)
+    m.d[2].c = pyo.Constraint(expr=m.x >= 1)
+    m.top = gdp.Disjunction(expr=[m.d[1], m.d[2]], xor=False)
+    m.d[2].binary_indicator_var.fix(1)
+    m.r = pyo.Constraint(expr=m.d[1].binary_indicator_var <= m.d[2].binary_indicator_var)
+    m.o = pyo.Objective(expr=m.x)
+    conv = convert_pyomo_gdp(m)
+    rep = check_evaluation_parity(conv, n_points=20)
+    assert rep.row_checks > 0

@@ -29,14 +29,22 @@ intact:
   ``Disjunct`` and referenced only inside it and the disjunctions nested in it
   becomes a :meth:`Disjunct.variable` local; one referenced elsewhere stays an
   ordinary column, which is how Pyomo's own transformations treat it.
-* **Indicators and logic** -- a disjunct's ``indicator_var`` maps to the discopt
-  block's :attr:`Disjunct.indicator` and its ``binary_indicator_var`` to that
-  indicator's binary column, so a cost term written over Pyomo's indicator
-  binaries prices the same selector. Free ``BooleanVar`` components map to
-  :meth:`Model.boolean`; ``LogicalConstraint`` maps to :meth:`Model.logical`.
-  A fixed indicator, a fixed ``BooleanVar``, and a deactivated disjunct inside
-  an active disjunction (Pyomo's spelling of "fixed to False") are pinned with a
-  row.
+* **Indicators and logic** -- a top-level disjunct's ``indicator_var`` maps to
+  the discopt block's :attr:`Disjunct.indicator` and its ``binary_indicator_var``
+  to that indicator's binary column, so a cost term written over Pyomo's
+  indicator binaries prices the same selector. A *nested* disjunct's indicator
+  does not mean the same thing in the two systems: discopt's tree selector
+  implies its parent's (the inner selectors sum to the parent's), while Pyomo's
+  is free when the parent is False (the inner disjunction and its rows are then
+  relaxed). When anything outside the disjunction tree references a nested
+  indicator -- a row, the objective, a logical constraint, a fixed value -- it
+  becomes its own binary ``W`` and the tree selector is tied to it as
+  ``y = W AND y_parent``, which is Pyomo's semantics exactly; an unreferenced
+  nested indicator needs no column, since the tree selector is then a valid value
+  for it. Free ``BooleanVar`` components map to :meth:`Model.boolean`;
+  ``LogicalConstraint`` maps to :meth:`Model.logical`. A fixed indicator, a fixed
+  ``BooleanVar``, and a deactivated disjunct inside an active disjunction
+  (Pyomo's spelling of "fixed to False") are pinned with a row.
 
 Anything else refuses loudly, naming the component: nothing is dropped. The
 refusals are the cases where a faithful rebuild needs a discopt feature that does
@@ -204,6 +212,8 @@ class _Converter:
         self._dj: dict[int, Disjunct] = {}
         # id(VarData) -> (var, its home DisjunctData) for variables local to a block
         self._local_home: dict[int, Any] = {}
+        # id(indicator_var / binary_indicator_var) -> its nested DisjunctData
+        self._nested: dict[int, Any] = {}
         self._named: dict[int, Expression] = {}
         ne = self.ne
         self._known = (
@@ -258,11 +268,7 @@ class _Converter:
             claim(dj, None)
         for d in all_disjuncts:
             if id(d) not in owner:
-                raise self._refuse(
-                    "an active Disjunct that belongs to no active Disjunction "
-                    "(Pyomo's transformations refuse it too)",
-                    d,
-                )
+                raise self._refuse("an active Disjunct that belongs to no active Disjunction", d)
 
         self._find_locals(top_disjunctions)
 
@@ -431,10 +437,41 @@ class _Converter:
         block = self.m.make_disjunct(_name(d))
         self._dj[id(d)] = block
         self.out.disjuncts[d] = block
-        self._bools[id(d.indicator_var)] = block.indicator
+        # Until something references it, an unreferenced nested indicator's value
+        # can be read off the tree selector (see _nested_indicator).
         self.out.booleans[d.indicator_var] = block.indicator
+        if self._parent_disjunct.get(id(d)) is not None:
+            self._nested[id(d.indicator_var)] = d
+            self._nested[id(d.binary_indicator_var)] = d
+            return
+        self._bools[id(d.indicator_var)] = block.indicator
         self._vars[id(d.binary_indicator_var)] = block.indicator.variable
         self._var_objs_add(d.binary_indicator_var)
+
+    def _nested_indicator(self, d: Any) -> BooleanVar:
+        """Pyomo's indicator of the nested disjunct ``d`` as its own Boolean ``W``.
+
+        Pyomo leaves a nested indicator free when the parent disjunct is False;
+        discopt's tree selector ``y`` implies the parent's ``y_p``. Tying
+        ``y = W AND y_p`` (three rows) gives every reference to ``W`` Pyomo's
+        meaning while the tree keeps its own.
+        """
+        got = self._bools.get(id(d.indicator_var))
+        if got is not None:
+            return got
+        w = cast(BooleanVar, self.m.boolean(_name(d.indicator_var)))
+        y = self._dj[id(d)].indicator.variable
+        y_p = self._dj[id(self._parent_disjunct[id(d)])].indicator.variable
+        wv = w.variable
+        self.m.subject_to(
+            [y <= wv, y <= y_p, y >= wv + y_p - 1],
+            name=f"{_name(d)}_indicator_link",
+        )
+        self._bools[id(d.indicator_var)] = w
+        self.out.booleans[d.indicator_var] = w
+        self._vars[id(d.binary_indicator_var)] = wv
+        self._var_objs_add(d.binary_indicator_var)
+        return w
 
     def _var_objs_add(self, v: Any) -> None:
         if not hasattr(self, "_var_objs"):
@@ -449,7 +486,7 @@ class _Converter:
                 self._vars[v_id] = self._declare(v, block)
         rows = []
         for c in self._data(d, self.pyo.Constraint):
-            for rec in self._rows(c, d):
+            for rec in self._rows(c, d, block):
                 rows.append(rec.row)
         if rows:
             block.subject_to(rows)
@@ -469,12 +506,12 @@ class _Converter:
                         "False (Pyomo's transformations refuse it too)",
                         d,
                     )
-                self._pin(self._dj[id(d)], 0, d)
+                self._pin(d, 0)
             children.append(self._dj[id(d)])
             if d.active:
                 fixed = _fixed_indicator(d)
                 if fixed is not None:
-                    self._pin(self._dj[id(d)], fixed, d)
+                    self._pin(d, fixed)
         semantics = DisjunctionSemantics.SELECT_ONE if dj.xor else DisjunctionSemantics.OR
         if parent is None:
             self.m.add_disjunction(children, name=_name(dj), semantics=semantics)
@@ -482,8 +519,14 @@ class _Converter:
             self._dj[id(parent)].add_disjunction(children, name=_name(dj), semantics=semantics)
         self.out.disjunctions.append(dj)
 
-    def _pin(self, block: Disjunct, value: int, d: Any) -> None:
-        self.m.subject_to(block.indicator.variable == float(value), name=f"{_name(d)}_fixed")
+    def _pin(self, d: Any, value: int) -> None:
+        """Fix Pyomo's indicator of ``d``: a nested disjunct's is ``W``, not the
+        tree selector (fixing that to True would force the parent True too)."""
+        if self._parent_disjunct.get(id(d)) is not None:
+            col = self._nested_indicator(d).variable
+        else:
+            col = self._dj[id(d)].indicator.variable
+        self.m.subject_to(col == float(value), name=f"{_name(d)}_fixed")
 
     # -- variables ---------------------------------------------------------------
 
@@ -495,6 +538,8 @@ class _Converter:
         got = self._vars.get(id(v))
         if got is not None:
             return got
+        if id(v) in self._nested:
+            return self._nested_indicator(self._nested[id(v)]).variable
         if id(v) in self._local_home:
             # A local variable is declared when its block is filled, which happens
             # before any row that references it is converted.
@@ -529,16 +574,22 @@ class _Converter:
 
     # -- rows ------------------------------------------------------------------
 
-    def _rows(self, c: Any, disjunct: Any) -> list[RowRecord]:
+    def _rows(self, c: Any, disjunct: Any, block: Optional[Disjunct] = None) -> list[RowRecord]:
         body = self._expr(c.body)
         lb, ub = c.lb, c.ub
         out: list[RowRecord] = []
         if isinstance(body, float):
-            # Every variable in it is fixed: a constant, not a row. Pyomo's .nl
-            # writer drops it when it holds and refuses when it does not; so do we.
+            # Every variable in it is fixed: a constant, not a row. One that holds
+            # is dropped, as Pyomo's .nl writer drops it. One that is violated
+            # makes a disjunct holding it unselectable -- its tree selector is
+            # pinned to 0, as Pyomo's transformations relax the row only when the
+            # disjunct is off -- and a top-level model infeasible, which refuses.
             tol = 1e-8 * max(1.0, abs(body))
             lo_ok = lb is None or body >= float(lb) - tol
             hi_ok = ub is None or body <= float(ub) + tol
+            if not (lo_ok and hi_ok) and block is not None:
+                self.m.subject_to(block.indicator.variable == 0.0, name=f"{_name(c)}_infeasible")
+                return out
             if not (lo_ok and hi_ok):
                 raise self._refuse(
                     f"a constraint that is constant ({body!r}) after fixed values are "
@@ -701,6 +752,8 @@ class _Converter:
         got = self._bools.get(id(b))
         if got is not None:
             return got
+        if id(b) in self._nested:
+            return self._nested_indicator(self._nested[id(b)])
         if b.ctype is not self.PBooleanVar:
             raise self._refuse(f"a logical leaf of type {type(b).__name__}", lc)
         binary = b.get_associated_binary()
@@ -777,9 +830,10 @@ def check_evaluation_parity(
     interval evaluator at a degenerate box, which refuses an inexact result), so it
     shares no code with the converter. Points are drawn uniformly inside each
     column's bounds (infinite bounds are clipped to ``[-10, 10]`` around the
-    finite one); integer columns are rounded. A point where Pyomo cannot evaluate a
-    row (outside a function's domain) skips that row at that point and is counted
-    in neither total. Returns the counts; the caller asserts they are non-zero.
+    finite one); integer columns are rounded, and a fixed variable keeps its value.
+    A point where Pyomo cannot evaluate a row (outside a function's domain) skips
+    that row at that point and is counted in neither total. Returns the counts;
+    the caller asserts they are non-zero.
     """
     from discopt.mpec_report import point_box
 
@@ -792,6 +846,11 @@ def check_evaluation_parity(
         for _ in range(n_points):
             point: dict[int, np.ndarray] = {}
             for v, col in cols:
+                if v.fixed:
+                    # A fixed indicator binary keeps its column (the pin row reads
+                    # it) while rows substitute its value: draw it at that value.
+                    point[id(col)] = np.array(float(v.value))
+                    continue
                 lo = -10.0 if v.lb is None else float(v.lb)
                 hi = (lo + 20.0) if v.ub is None else float(v.ub)
                 if v.lb is None and v.ub is not None:

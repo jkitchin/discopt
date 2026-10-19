@@ -9,7 +9,13 @@ For each GDPlib model this runs spec §8's three checks on
    vs the discopt GDP tree;
 3. **optimum** (``--optimum``) -- Pyomo ``gdp.bigm`` -> ``.nl`` -> discopt vs the
    native model under discopt big-M, both under the same time limit; compared only
-   where both certify optimality.
+   where both certify optimality. The ``.nl`` side is a *reference*, not an
+   oracle, on nested disjunctions: Pyomo's ``gdp.bigm`` can compute a negative M
+   for a row that holds on the whole box, and a nested row's relaxation sums one
+   such term per enclosing indicator, so the transformed model can cut points the
+   GDP admits (seen in #1800's differential probe). The native incumbent is also
+   loaded into the original Pyomo GDP and checked there; on a mismatch, that check
+   says which side is wrong.
 
 A model whose conversion is *refused* is reported with the refusal, never skipped
 silently. Prints one line per model (flushed), then the totals, and exits non-zero
@@ -66,10 +72,12 @@ def _structure(pm, conv) -> dict:
 
 def _pyomo_violation(pm, conv, result) -> dict:
     """Load discopt's incumbent into the Pyomo model and measure it against the
-    *original GDP* there: global rows, each disjunction's selection count (one
-    for XOR, at least one for OR; relative to the parent indicator when nested),
-    the selected disjuncts' rows, and every logical constraint. Pyomo evaluates
-    everything, so this shares no code with discopt's own verifier."""
+    *original GDP* there, in Pyomo's semantics: global rows; each disjunction's
+    selection count (one for XOR, at least one for OR) wherever every enclosing
+    disjunct is selected -- under a deselected parent a nested disjunction and
+    its indicators are free; the rows of each disjunct selected along its whole
+    chain; and every logical constraint. Pyomo evaluates everything, so this
+    shares no code with discopt's own verifier."""
     import numpy as np
     import pyomo.environ as pyo
     from pyomo.core.base.logical_constraint import LogicalConstraint
@@ -82,6 +90,9 @@ def _pyomo_violation(pm, conv, result) -> dict:
         v.set_value(val(col), skip_validation=True)
     for b, boolean in conv.booleans.items():
         b.set_value(bool(round(val(boolean.variable))))
+        binary = b.get_associated_binary()
+        if binary is not None and not binary.fixed:
+            binary.set_value(round(val(boolean.variable)), skip_validation=True)
 
     def row_viol(c) -> float:
         body = pyo.value(c.body)
@@ -92,17 +103,30 @@ def _pyomo_violation(pm, conv, result) -> dict:
     def on(d) -> int:
         return int(round(pyo.value(d.binary_indicator_var)))
 
+    def parent_of(c):
+        p = c.parent_block()
+        while p is not None and p.ctype is not Disjunct:
+            p = p.parent_block()
+        return p
+
+    def selected(d) -> bool:
+        while d is not None:
+            if not on(d):
+                return False
+            d = parent_of(d)
+        return True
+
     worst, bad_logic, bad_count, checked = 0.0, 0, 0, 0
     for c in pm.component_data_objects(pyo.Constraint, active=True, descend_into=pyo.Block):
         worst = max(worst, row_viol(c))
         checked += 1
     for dj in conv.disjunctions:
-        parent = dj.parent_block()
-        while parent is not None and parent.ctype is not Disjunct:
-            parent = parent.parent_block()
-        need = 1 if parent is None else on(parent)
+        parent = parent_of(dj)
+        if parent is not None and not selected(parent):
+            continue
         n = sum(on(d) for d in dj.disjuncts)
-        bad_count += int((n != need) if dj.xor else (n < need or (need == 0 and n > 0)))
+        bad_count += int((n != 1) if dj.xor else (n < 1))
+        checked += 1
         for d in dj.disjuncts:
             if d.active and on(d):
                 for c in d.component_data_objects(
@@ -213,7 +237,7 @@ def main(argv: list[str] | None = None) -> int:
             warnings.simplefilter("ignore")
             try:
                 pm = spec.builder()
-            except Exception as e:  # an external tool missing at build time
+            except (ImportError, OSError) as e:  # an external tool or data file missing
                 rec["build_error"] = f"{type(e).__name__}: {str(e)[:120]}"
                 totals["build_error"] += 1
                 print(f"{spec.name:32s} BUILD-ERROR {rec['build_error']}", flush=True)
