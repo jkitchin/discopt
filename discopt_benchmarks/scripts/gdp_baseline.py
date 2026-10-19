@@ -20,10 +20,17 @@ average is recorded per run, and a run started above ``--max-load`` is marked
 Each run is scored against :func:`gdplib_runner.panel_oracle`:
 
 * ``solved`` -- claims optimal and agrees with the oracle;
-* ``incorrect`` -- claims optimal and the oracle refutes it, or reports an
-  incumbent strictly better than the oracle optimum (a false primal);
+* ``incorrect`` -- claims optimal and the oracle refutes it, reports an
+  incumbent strictly better than the oracle optimum (a false primal), or claims
+  infeasible on an instance with a known feasible point (a certified oracle, or a
+  discopt incumbent that is feasible in the Pyomo model);
 * ``claimed_unverified`` -- claims optimal on an instance whose oracle is unproven;
-* ``unsolved`` -- anything else.
+* ``unsolved`` -- anything else, a run killed at the time limit or by the
+  kernel's OOM killer (exit -9) included.
+
+"Agrees" is the repository's tolerance (CLAUDE.md: abs 1e-6, rel 1e-4), the same
+for every arm: a claim of optimality further from the oracle is a false
+certificate whatever the solver's own gap setting.
 
 discopt incumbents are additionally checked in the original Pyomo GDP model, under
 Pyomo's semantics (``gdp_convert_parity._pyomo_violation``).
@@ -206,11 +213,26 @@ def worker(name: str, arm: str, time_limit: float) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def score(rec: dict, oracle) -> str:
-    """``solved`` / ``incorrect`` / ``claimed_unverified`` / ``unsolved`` / ``error``."""
+#: CLAUDE.md's numerical tolerances: an objective "agrees" within abs + rel*|opt|.
+ABS_TOL, REL_TOL = 1e-6, 1e-4
+
+
+def score(rec: dict, oracle, feasible_known: bool = False) -> str:
+    """``solved`` / ``incorrect`` / ``claimed_unverified`` / ``unsolved`` / ``error``.
+
+    ``feasible_known``: the instance has a point verified feasible in the Pyomo model
+    even when its oracle value is unproven (see :func:`report`).
+    """
+    if rec.get("returncode") == -9:
+        return "unsolved"  # SIGKILL: the OOM killer, whatever it printed first
     if "error" in rec:
         return "error"
-    claimed = str(rec.get("status", "")).lower() == "optimal"
+    status = str(rec.get("status", "")).lower()
+    claimed = status == "optimal"
+    if status == "infeasible" and (
+        feasible_known or (oracle is not None and oracle.value is not None)
+    ):
+        return "incorrect"
     obj = rec.get("objective")
     bad_point = rec.get("in_pyomo") and (
         rec["in_pyomo"]["max_rel_violation"] > 1e-5
@@ -222,7 +244,7 @@ def score(rec: dict, oracle) -> str:
             return "incorrect"
         return "claimed_unverified" if claimed else "unsolved"
     opt = oracle.value
-    tol = 1e-4 + 1e-3 * abs(opt)
+    tol = ABS_TOL + REL_TOL * abs(opt)
     better = obj is not None and (obj < opt - tol if rec.get("minimize", True) else obj > opt + tol)
     if bad_point or better:
         return "incorrect"
@@ -279,10 +301,11 @@ def drive(args) -> int:
                 else:
                     tail = (proc.stderr or proc.stdout).strip().splitlines()[-3:]
                     why = " | ".join(tail)[:400]
-                    if proc.returncode == -9 and not why:
-                        # SIGKILL with no output: the kernel's OOM killer (the
-                        # container's dmesg shows it), not a crash in Python.
-                        why = "killed by SIGKILL (out of memory)"
+                    if proc.returncode == -9:
+                        # SIGKILL: the kernel's OOM killer (the container's dmesg
+                        # shows it), not a crash in Python -- even when the solver
+                        # printed warnings first.
+                        why = "killed by SIGKILL (out of memory)" + (f": {why}" if why else "")
                     rec = {
                         "instance": name,
                         "arm": arm,
@@ -322,9 +345,20 @@ def report(path: Path) -> int:
 
     rows = [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
     table = gr.panel_oracle()
+    # Instances with a point verified feasible in the Pyomo model: an infeasibility
+    # claim there is refuted even when the oracle value is unproven.
+    feasible = {
+        r["instance"]
+        for r in rows
+        if r.get("objective") is not None
+        and r.get("in_pyomo")
+        and r["in_pyomo"]["max_rel_violation"] <= 1e-5
+        and not r["in_pyomo"]["bad_counts"]
+        and not r["in_pyomo"]["bad_logic"]
+    }
     by_arm: dict[str, list] = {}
     for r in rows:
-        r["verdict"] = score(r, table.get(r["instance"]))
+        r["verdict"] = score(r, table.get(r["instance"]), r["instance"] in feasible)
         by_arm.setdefault(r["arm"], []).append(r)
 
     def sgm(walls, shift=1.0):
