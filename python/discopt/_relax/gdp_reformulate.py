@@ -24,6 +24,7 @@ import numpy as np
 
 from discopt._relax._numeric import FLOAT_EPS, ROUNDOFF_OPS
 from discopt.modeling.core import (
+    _BLOCK_ROWS,
     _SELECT_ONE_ROWS,
     GDP_AUX_PREFIX,
     BinaryOp,
@@ -87,9 +88,9 @@ _SUPPORTED_SEMANTICS: frozenset[tuple[SelectorActivation, SelectorCardinality]] 
 #: activation under ``sum_k y_k >= 1`` (``>= parent`` when nested). Hull, mbigm
 #: and the simplex-free paths keep ``_SUPPORTED_SEMANTICS``: Pyomo's hull and
 #: mbigm refuse OR too, and a hull's aggregation assumes exactly one selector.
-_BIG_M_SEMANTICS: frozenset[tuple[SelectorActivation, SelectorCardinality]] = (
-    _SELECT_ONE_ROWS | frozenset({(SelectorActivation.ONE_WAY, SelectorCardinality.AT_LEAST_ONE)})
-)
+#: One declaration with ``core._BLOCK_ROWS``: block emission and big-M serve the
+#: same pairs, so the two gates cannot drift apart.
+_BIG_M_SEMANTICS: frozenset[tuple[SelectorActivation, SelectorCardinality]] = _BLOCK_ROWS
 
 
 def _is_or(dc: _DisjunctiveConstraint) -> bool:
@@ -264,8 +265,9 @@ def reformulate_gdp(
         if _n_ind:
             _which = (
                 "Model.if_then rows, add_disjunction blocks the hull cannot take "
-                "(an empty disjunct, a shared indicator, or a block nested in a "
-                "Disjunct -- hull + nesting is #1775 G2.1)"
+                "(an empty disjunct, a shared indicator, a block nested in a "
+                "Disjunct -- hull + nesting is #1775 G2.1 -- or an OR block, "
+                "which may select several disjuncts)"
                 if method == "hull"
                 else "Model.if_then, and the Disjunct blocks of Model.add_disjunction"
             )

@@ -148,3 +148,53 @@ def test_serialize_refuses_an_or_block():
 
     with pytest.raises(SerializationError, match="OR add_disjunction block"):
         dumps(_or_block())
+
+
+# ── #1795 review: a partial OR selection must not pin the rest to 0 ─────────
+
+
+def _or_fixable():
+    m = dm.Model("or_fix")
+    x = m.continuous("x", lb=0, ub=10)
+    a = m.make_disjunct("a")
+    a.subject_to(x <= 4)
+    b = m.make_disjunct("b")
+    b.subject_to([x >= 2, x <= 6])
+    m.add_disjunction([a, b], semantics="or")
+    m.maximize(x + 3 * a.indicator.variable + 3 * b.indicator.variable)
+    return m, a, b
+
+
+@pytest.mark.smoke
+def test_partial_or_transform_is_refused_not_narrowed():
+    """Fixing ``a`` leaves ``b`` undecided under OR (optimum 10 with a=b=1); the
+    transform used to pin ``b`` to 0 and certify 7."""
+    from discopt.gdp import transform_current_disjunctive_state
+    from discopt.transformations import model_fingerprint
+
+    m, a, b = _or_fixable()
+    a.indicator.variable.lb = 1.0
+    a.indicator.variable.ub = 1.0
+    before = model_fingerprint(m)
+    with pytest.raises(ValueError, match="only some disjuncts of the OR disjunction"):
+        transform_current_disjunctive_state(m)
+    node_a = gdp_tree(m).disjunctions[0].disjuncts[0]
+    with pytest.raises(ValueError, match="only some disjuncts of the OR disjunction"):
+        transform_current_disjunctive_state(m, [node_a])
+    assert model_fingerprint(m) == before
+    assert _solve(m, "big-m") == pytest.approx(10.0)
+
+
+@pytest.mark.smoke
+def test_full_or_transform_and_reduced_subproblem_read_the_exact_set():
+    from discopt.gdp import transform_current_disjunctive_state
+
+    m, a, b = _or_fixable()
+    root = gdp_tree(m).disjunctions[0]
+    na, nb = root.disjuncts
+    for sel, want in (([na], 7.0), ([nb], 9.0), ([na, nb], 10.0)):
+        assert _solve(reduced_subproblem(m, sel), "big-m") == pytest.approx(want)
+    token = transform_current_disjunctive_state(m, [na, nb])
+    assert _solve(m, "big-m") == pytest.approx(10.0)
+    token.reverse()
+    assert _solve(m, "big-m") == pytest.approx(10.0)

@@ -8,6 +8,10 @@ tree is in one of four states:
 * **decided** -- active and a disjunct of it is selected (several, under OR
   semantics). The selected disjuncts' rows become ordinary rows, the others'
   rows are dropped, and every known indicator is pinned (1 selected, 0 not).
+  Under OR, :func:`reduced_subproblem` reads ``selected`` as exactly the set
+  enforced; :func:`transform_current_disjunctive_state` refuses a selection of
+  only some of an OR disjunction's disjuncts, since the rest would be undecided
+  rather than off.
 * **inactive** -- nested under a disjunct that is not selected. All of its rows
   are dropped and its known indicators are pinned to 0.
 * **undecided** -- active, nothing selected. It stays a disjunction. A
@@ -184,6 +188,20 @@ def _plan(model: Model, selected: Iterable[DisjunctNode], *, full: bool) -> _Pla
                 assert node.origin is not None
                 plan.add.append(node.origin.source)
             return
+        if (
+            not full
+            and node.semantics.cardinality is SelectorCardinality.AT_LEAST_ONE
+            and len(ks) < len(node.disjuncts)
+        ):
+            # Under OR, a disjunct left out of the selection is undecided, not
+            # off: pinning it to 0 would shrink the feasible set and certify a
+            # different optimum. A partial OR state has no representation here.
+            raise ValueError(
+                f"only some disjuncts of the OR disjunction {node.name!r} are "
+                "selected; the others stay undecided under OR semantics, which an "
+                "in-place transform cannot represent. Select all of them, or use "
+                "reduced_subproblem for an exact selection"
+            )
         if top_level:
             drop_rows(node)
         for j, d in enumerate(node.disjuncts):

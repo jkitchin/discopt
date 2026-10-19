@@ -361,7 +361,7 @@ class TestUnimplementedSemanticsRefuseLoudly:
         """One declaration, so the two gates cannot drift apart on 'supported'."""
         assert _SUPPORTED_SEMANTICS is _SELECT_ONE_ROWS
         # #1775 G1.4: block emission and big-M serve the same pairs, OR included.
-        assert core._BLOCK_ROWS == _BIG_M_SEMANTICS
+        assert core._BLOCK_ROWS is _BIG_M_SEMANTICS
 
 
 class TestNestedUnderHullRefusesClearly:

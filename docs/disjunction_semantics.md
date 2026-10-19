@@ -41,7 +41,7 @@ lowering.
 | member | pair | status |
 |---|---|---|
 | `SELECT_ONE` | `(ONE_WAY, EXACTLY_ONE)` | **implemented** — the meaning of `either_or` |
-| `OR` | `(ONE_WAY, AT_LEAST_ONE)` | **implemented** by big-M (`auto` routes OR there), simplex (indicators unread) and `add_disjunction` blocks (`at_least(1)`, nested: `sum >= parent`, `y_k <= parent`); hull and mbigm refuse an OR `either_or` (#1775 G1.4) |
+| `OR` | `(ONE_WAY, AT_LEAST_ONE)` | **implemented** by big-M (`auto` routes OR there), simplex (indicators unread) and `add_disjunction` blocks (`at_least(1)`, nested: `sum >= parent`, `y_k <= parent`); hull and mbigm refuse a top-level OR `either_or`; an OR `Model.disjunction` nested in an `either_or` takes the nested big-M form under big-m and mbigm alike, and hull refuses it (#1775 G1.4) |
 | `EXACTLY_ONE_TRUE` | `(REIFIED, EXACTLY_ONE)` | declared, not implemented — owes a boundary policy, §2 |
 
 ## 2. `either_or` is `SELECT_ONE`
