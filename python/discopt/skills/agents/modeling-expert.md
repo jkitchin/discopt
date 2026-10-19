@@ -29,15 +29,15 @@ m = dm.Model("name")
 x = m.continuous("x", shape=(n,), lb=0.0, ub=100.0)
 y = m.binary("y", shape=(m,))
 k = m.integer("k", lb=0, ub=10)
-p = m.parameter("price", value=50.0)     # mutable, differentiable
+p = m.parameter("price", value=50.0)  # mutable, differentiable
 
 m.minimize(cost @ x + fixed_cost @ y + p * x[0])
 m.subject_to(A @ x <= b, name="capacity")
 m.subject_to(x[0] * x[1] <= 50 * y[0], name="bilinear")
-m.subject_to([x[i] + x[i+1] <= limits[i] for i in range(n - 1)])
+m.subject_to([x[i] + x[i + 1] <= limits[i] for i in range(n - 1)])
 
 result = m.solve()
-val = result.value(x)   # numpy array
+val = result.value(x)  # numpy array
 ```
 
 ### Key files
@@ -64,7 +64,7 @@ y_expr = dm.sum(lambda k: y_pts[k] * lam[k], over=range(K))
 **Indicator / big-M** for `y = 1 ⇒ constraint`:
 ```python
 # c(x) <= 0 when y = 1; slack when y = 0
-m.subject_to(c_of_x <= M * (1 - y))     # M = valid upper bound on c(x)
+m.subject_to(c_of_x <= M * (1 - y))  # M = valid upper bound on c(x)
 ```
 Prefer tight M; wide M makes LP relaxation loose.
 

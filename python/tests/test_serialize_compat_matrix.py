@@ -185,6 +185,14 @@ def test_unbuildable_cases_are_recorded_not_skipped():
         if _key(v) < (1, 6)
         for case in ("index_none_ellipsis", "nested_disjunction")
     }
+    # Disjunct-block state (nested blocks, OR blocks, local variables) is encoded
+    # from 1.7 (WP-3b-2); every earlier writer refused it, or predates the builder.
+    expected |= {
+        (v, case)
+        for v in VERSIONS
+        if _key(v) < (1, 7)
+        for case in ("gdp_nested_blocks", "gdp_or_block")
+    }
     assert unbuildable == expected, sorted(unbuildable ^ expected)
     # register_function arrived in 1.1, so 1.0 cannot build the atom case.
     assert (

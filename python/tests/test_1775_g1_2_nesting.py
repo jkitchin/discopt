@@ -226,15 +226,17 @@ def test_unattached_block_holding_only_a_nested_disjunction_is_reported():
         m.solve()
 
 
-def test_serialize_refuses_nesting_and_clone_keeps_it(tmp_path):
-    from discopt.serialize import SerializationError, save
+def test_serialize_and_clone_keep_nesting(tmp_path):
+    """Refused before schema 1.7 (plan WP-3b-2); now written, with the parent links
+    and the block-disjunction record, so the reload solves to the same optimum."""
+    from discopt.serialize import load, save
 
     m, x, y = _nested_blocks()
     m.minimize(x + 3 * y)
-    with pytest.raises(SerializationError, match="nests a disjunction"):
-        save(m, tmp_path / "m.json")
-    r = m.clone().solve(time_limit=60)
-    assert r.status == "optimal" and r.objective == pytest.approx(7.0, abs=1e-6)
+    save(m, tmp_path / "m.json")
+    for copy in (load(tmp_path / "m.json"), m.clone()):
+        r = copy.solve(time_limit=60)
+        assert r.status == "optimal" and r.objective == pytest.approx(7.0, abs=1e-6)
 
 
 def _flat():

@@ -316,6 +316,57 @@ def nested_disjunction():
     return m, {}
 
 
+def gdp_nested_blocks():
+    """Disjunct blocks nested two ways, with a local variable (1.7+, WP-3b-2).
+
+    ``A`` nests a block disjunction (``Disjunct.add_disjunction``), ``B`` nests a
+    ``Model.disjunction`` (``Disjunct.subject_to``), and ``A1`` declares a local
+    column (``Disjunct.variable``). Min x + 3y: A,A1 gives (0, 6) = 18, A,A2 (2, 8)
+    = 26, B with its inner OR (7, 0) = 7. Every earlier writer refuses it.
+    """
+    import discopt.modeling as dm
+
+    m = dm.Model("gdp_nested_blocks")
+    x = m.continuous("x", lb=0.0, ub=10.0)
+    y = m.continuous("y", lb=0.0, ub=10.0)
+    a = m.make_disjunct("A")
+    a.subject_to(x <= 3.0)
+    a1 = m.make_disjunct("A1")
+    w = a1.variable("w", lb=0.0, ub=10.0)
+    a1.subject_to([y >= 6.0, w >= y])
+    a2 = m.make_disjunct("A2")
+    a2.subject_to([y >= 8.0, x >= 2.0])
+    a.add_disjunction([a1, a2], name="inner_blocks")
+    b = m.make_disjunct("B")
+    b.subject_to(x >= 7.0)
+    b.subject_to(m.disjunction([[x <= 8.0], [x >= 9.0]], name="inner_or"))
+    m.add_disjunction([a, b], name="outer")
+    m.minimize(x + 3.0 * y)
+    return m, {}
+
+
+def gdp_or_block():
+    """An OR block disjunction (#1775 G1.4; 1.7+, WP-3b-2): both modes may hold.
+
+    Max x + y with mode ``lo`` (x <= 2) or ``hi`` (y <= 3): both at once is
+    allowed, so the optimum (x <= 10, y <= 3 or x <= 2, y <= 10) is 13. Written as
+    select-one it would be the same here, which is why the semantics must travel:
+    the selector row is ``at_least(1)``, not ``exactly(1)``. Refused before 1.7.
+    """
+    import discopt.modeling as dm
+
+    m = dm.Model("gdp_or_block")
+    x = m.continuous("x", lb=0.0, ub=10.0)
+    y = m.continuous("y", lb=0.0, ub=10.0)
+    lo = m.make_disjunct("lo")
+    lo.subject_to(x <= 2.0)
+    hi = m.make_disjunct("hi")
+    hi.subject_to(y <= 3.0)
+    m.add_disjunction([lo, hi], name="modes", semantics="or")
+    m.maximize(x + y)
+    return m, {}
+
+
 #: name -> builder. Order is the manifest's order; never reorder or rename a case
 #: once a shipped version's fixtures exist for it (fixtures are immutable, §0.3.11).
 CASES = {
@@ -345,6 +396,9 @@ CASES = {
         # Added with schema 1.6 (WP-3b), recorded for every earlier version too.
         index_none_ellipsis,
         nested_disjunction,
+        # Added with schema 1.7 (WP-3b-2), recorded for every earlier version too.
+        gdp_nested_blocks,
+        gdp_or_block,
     )
 }
 

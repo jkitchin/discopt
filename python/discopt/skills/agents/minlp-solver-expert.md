@@ -22,24 +22,25 @@ You are an expert on discopt's MINLP solver architecture. You help users underst
 ### Top-level entry points
 ```python
 from discopt.modeling import Model
+
 m = Model("...")
 # ... build variables, constraints, objective ...
 result = m.solve(
     time_limit=3600,
     gap_tolerance=1e-4,
     threads=1,
-    initial_solution=None,          # {Variable: value} warm start
-    partitions=0,                   # piecewise McCormick partitions (0 = off)
-    nlp_bb=None,                    # None=auto, True/False overrides
-    skip_convex_check=False,        # True to force B&B even on convex NLPs
-    solver=None,                    # backend NLP solver override
-    lazy_constraints=None,          # callback(result) -> list[Constraint]
+    initial_solution=None,  # {Variable: value} warm start
+    partitions=0,  # piecewise McCormick partitions (0 = off)
+    nlp_bb=None,  # None=auto, True/False overrides
+    skip_convex_check=False,  # True to force B&B even on convex NLPs
+    solver=None,  # backend NLP solver override
+    lazy_constraints=None,  # callback(result) -> list[Constraint]
     incumbent_callback=None,
     node_callback=None,
-    stream=False,                   # True -> iterator[SolveUpdate]
-    sensitivity=False,              # True -> populate SolveResult.gradient
-    deterministic=False,            # True -> role-2 wall budgets inert (#1116)
-    llm=False,                      # True -> populate .explain(llm=True)
+    stream=False,  # True -> iterator[SolveUpdate]
+    sensitivity=False,  # True -> populate SolveResult.gradient
+    deterministic=False,  # True -> role-2 wall budgets inert (#1116)
+    llm=False,  # True -> populate .explain(llm=True)
 )
 ```
 

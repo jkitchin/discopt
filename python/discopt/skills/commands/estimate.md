@@ -51,6 +51,7 @@ Write a Python script that:
 
 ```python
 import os
+
 os.environ["JAX_PLATFORMS"] = "cpu"
 os.environ["JAX_ENABLE_X64"] = "1"
 
@@ -58,6 +59,7 @@ import numpy as np
 import discopt.modeling as dm
 from discopt.estimate import Experiment, ExperimentModel, estimate_parameters
 from discopt.doe import check_identifiability  # requires: pip install discopt-doe
+
 
 class MyExperiment(Experiment):
     def __init__(self, x_data):
@@ -74,6 +76,7 @@ class MyExperiment(Experiment):
             responses={...},
             measurement_error={...},
         )
+
 
 # Data
 x_data = np.array([...])

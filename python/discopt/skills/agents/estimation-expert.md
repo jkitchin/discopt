@@ -24,15 +24,19 @@ You are an expert on parameter estimation with `discopt.estimate`. You help user
 ### Core API
 ```python
 from discopt.estimate import (
-    Experiment, ExperimentModel, EstimationResult, estimate_parameters,
+    Experiment,
+    ExperimentModel,
+    EstimationResult,
+    estimate_parameters,
 )
 
 exp = MyExperiment()
 result = estimate_parameters(
-    exp, data,
+    exp,
+    data,
     initial_guess={"k": 0.5},
-    fixed_parameters=None,        # optional
-    solver_options=None,          # kwargs forwarded to Model.solve()
+    fixed_parameters=None,  # optional
+    solver_options=None,  # kwargs forwarded to Model.solve()
 )
 print(result.summary())
 ```
@@ -56,8 +60,8 @@ print(result.summary())
 ### Data format contract
 ```python
 data = {
-    "y_0": 1.23,                     # scalar
-    "y_1": np.array([2.1, 2.3, 2.0]) # 1-D array of replicates at same design
+    "y_0": 1.23,  # scalar
+    "y_1": np.array([2.1, 2.3, 2.0]),  # 1-D array of replicates at same design
 }
 ```
 Each response key must exist in `ExperimentModel.responses`. Extra keys raise `ValueError`; missing keys are silently skipped (useful for partial datasets).

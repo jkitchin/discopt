@@ -1,0 +1,420 @@
+{
+ "schema": "discopt.model/1.7",
+ "discopt": "0.9.1.dev0",
+ "name": "logical_constraints",
+ "variables": [
+  {
+   "name": "Y",
+   "type": "binary",
+   "shape": [
+    4
+   ],
+   "lb": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "ub": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "bound_stack": []
+  },
+  {
+   "name": "z",
+   "type": "binary",
+   "shape": [],
+   "lb": 0.0,
+   "ub": 1.0,
+   "bound_stack": []
+  },
+  {
+   "name": "x",
+   "type": "continuous",
+   "shape": [
+    4
+   ],
+   "lb": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "ub": [
+    10.0,
+    10.0,
+    10.0,
+    10.0
+   ],
+   "bound_stack": []
+  }
+ ],
+ "parameters": [],
+ "nodes": [
+  {
+   "op": "const",
+   "v": 2.0
+  },
+  {
+   "op": "var",
+   "ref": 0
+  },
+  {
+   "op": "index",
+   "base": 1,
+   "index": {
+    "k": "int",
+    "v": 0
+   }
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 0,
+   "b": 2
+  },
+  {
+   "op": "var",
+   "ref": 2
+  },
+  {
+   "op": "index",
+   "base": 4,
+   "index": {
+    "k": "int",
+    "v": 0
+   }
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 3,
+   "b": 5
+  },
+  {
+   "op": "index",
+   "base": 1,
+   "index": {
+    "k": "int",
+    "v": 1
+   }
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 0,
+   "b": 7
+  },
+  {
+   "op": "index",
+   "base": 4,
+   "index": {
+    "k": "int",
+    "v": 1
+   }
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 8,
+   "b": 9
+  },
+  {
+   "op": "index",
+   "base": 1,
+   "index": {
+    "k": "int",
+    "v": 2
+   }
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 0,
+   "b": 11
+  },
+  {
+   "op": "index",
+   "base": 4,
+   "index": {
+    "k": "int",
+    "v": 2
+   }
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 12,
+   "b": 13
+  },
+  {
+   "op": "index",
+   "base": 1,
+   "index": {
+    "k": "int",
+    "v": 3
+   }
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 0,
+   "b": 15
+  },
+  {
+   "op": "index",
+   "base": 4,
+   "index": {
+    "k": "int",
+    "v": 3
+   }
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 16,
+   "b": 17
+  },
+  {
+   "op": "var",
+   "ref": 1
+  },
+  {
+   "op": "sum",
+   "a": 4,
+   "axis": null
+  },
+  {
+   "op": "const",
+   "v": 3.0
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 21,
+   "b": 2
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 20,
+   "b": 22
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 0,
+   "b": 15
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 23,
+   "b": 24
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 25,
+   "b": 19
+  }
+ ],
+ "objective": {
+  "sense": "minimize",
+  "expr": 26,
+  "placeholder": false
+ },
+ "builder_objective": null,
+ "rows": [
+  {
+   "kind": "algebraic",
+   "body": 6,
+   "sense": "<=",
+   "name": "link0"
+  },
+  {
+   "kind": "algebraic",
+   "body": 10,
+   "sense": "<=",
+   "name": "link1"
+  },
+  {
+   "kind": "algebraic",
+   "body": 14,
+   "sense": "<=",
+   "name": "link2"
+  },
+  {
+   "kind": "algebraic",
+   "body": 18,
+   "sense": "<=",
+   "name": "link3"
+  },
+  {
+   "kind": "logical",
+   "logic": [
+    {
+     "c": "var",
+     "x": 2
+    },
+    {
+     "c": "var",
+     "x": 7
+    },
+    {
+     "c": "var",
+     "x": 15
+    },
+    {
+     "c": "not",
+     "a": 2
+    },
+    {
+     "c": "or",
+     "a": 1,
+     "b": 3
+    },
+    {
+     "c": "implies",
+     "a": 0,
+     "b": 4
+    }
+   ],
+   "name": "imp"
+  },
+  {
+   "kind": "logical",
+   "logic": [
+    {
+     "c": "var",
+     "x": 2
+    },
+    {
+     "c": "var",
+     "x": 15
+    },
+    {
+     "c": "atmost",
+     "k": 1,
+     "args": [
+      0,
+      1
+     ]
+    },
+    {
+     "c": "var",
+     "x": 7
+    },
+    {
+     "c": "var",
+     "x": 15
+    },
+    {
+     "c": "not",
+     "a": 4
+    },
+    {
+     "c": "or",
+     "a": 3,
+     "b": 5
+    },
+    {
+     "c": "var",
+     "x": 11
+    },
+    {
+     "c": "or",
+     "a": 6,
+     "b": 7
+    },
+    {
+     "c": "and",
+     "a": 2,
+     "b": 8
+    }
+   ],
+   "name": "card"
+  },
+  {
+   "kind": "logical",
+   "logic": [
+    {
+     "c": "var",
+     "x": 7
+    },
+    {
+     "c": "var",
+     "x": 11
+    },
+    {
+     "c": "not",
+     "a": 1
+    },
+    {
+     "c": "var",
+     "x": 19
+    },
+    {
+     "c": "and",
+     "a": 2,
+     "b": 3
+    },
+    {
+     "c": "iff",
+     "a": 0,
+     "b": 4
+    }
+   ],
+   "name": "iff"
+  },
+  {
+   "kind": "logical",
+   "logic": [
+    {
+     "c": "var",
+     "x": 7
+    },
+    {
+     "c": "var",
+     "x": 11
+    },
+    {
+     "c": "exactly",
+     "k": 1,
+     "args": [
+      0,
+      1
+     ]
+    }
+   ],
+   "name": null
+  }
+ ],
+ "builder_blocks": [],
+ "complementarities": null,
+ "state": {
+  "_aux_counter": 0,
+  "_decomp_stages": {},
+  "_decomp_blocks": {},
+  "_zero_spanning_factor_auxes": [],
+  "_implied_integer_auxes": [],
+  "_free_by_construction": [],
+  "_atan2_preconditions": [],
+  "_piecewise_domains": [],
+  "_coupling_keys": {
+   "names": [],
+   "row_indices": []
+  },
+  "_sets": [],
+  "_simplex_lowerings": [],
+  "_block_labels_var": {},
+  "_block_labels_con": {
+   "names": {},
+   "rows": []
+  }
+ },
+ "initial_point": []
+}

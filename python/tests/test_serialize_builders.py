@@ -127,7 +127,7 @@ def test_builder_is_refused_with_remedy(key):
 def test_builder_sweep_probe_fired():
     """§6: the parametrized tests above measure nothing over an empty table."""
     # Pinned, not a floor: a case that disappears must be noticed (#1797 review N3).
-    assert (len(cases.ROUND_TRIPS), len(cases.REFUSED), len(cases.READERS)) == (47, 10, 4)
+    assert (len(cases.ROUND_TRIPS), len(cases.REFUSED), len(cases.READERS)) == (50, 7, 4)
     areas = {key.split(":")[0] for key in (*cases.ROUND_TRIPS, *cases.REFUSED, *cases.READERS)}
     assert areas == {"dae", "ml", "gdp", "stochastic", "ro", "bilevel", "gp", "transform"}
 

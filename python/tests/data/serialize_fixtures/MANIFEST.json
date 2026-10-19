@@ -140,6 +140,22 @@
       "             ^^^^^",
       "AttributeError: '_DisjunctiveConstraint' object has no attribute 'rhs'"
      ]
+    },
+    "gdp_nested_blocks": {
+     "unbuildable": "AttributeError: 'Disjunct' object has no attribute 'variable'",
+     "trace_tail": [
+      "    w = a1.variable(\"w\", lb=0.0, ub=10.0)",
+      "        ^^^^^^^^^^^",
+      "AttributeError: 'Disjunct' object has no attribute 'variable'"
+     ]
+    },
+    "gdp_or_block": {
+     "unbuildable": "NotImplementedError: add_disjunction() declares DisjunctionSemantics.OR (one_way, at_least_one), which is not implemented. This path emits (one_way, exactly_one) only; that is not a valid substitute, since a different (activation, cardinality) pair has a different feasible set. Tracking issue: https://github.com/jkitchi",
+     "trace_tail": [
+      "    ...<6 lines>...",
+      "    )",
+      "NotImplementedError: add_disjunction() declares DisjunctionSemantics.OR (one_way, at_least_one), which is not implemented. This path emits (one_way, exactly_one) only; that is not a valid substitute, since a different (activation, cardinality) pair has a different feasible set. Tracking issue: https://github.com/jkitchin/discopt/issues/1124"
+     ]
     }
    },
    "forward": {
@@ -468,6 +484,85 @@
      "with_result.json": {
       "outcome": "loads_identical"
      }
+    },
+    "1.7": {
+     "array_bounds_inf.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_lowered.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "complementarity_vector_lowered.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "decomposition_marks.json": {
+      "outcome": "loads_identical"
+     },
+     "fast_api_blocks.json": {
+      "outcome": "loads_identical"
+     },
+     "fixed_scope.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_mpcc.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "from_nl_nvs01.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_st_e13.json": {
+      "outcome": "loads_identical"
+     },
+     "gdp_indicators.json": {
+      "outcome": "loaded",
+      "note": "no own-version fixture to compare (unbuildable here)"
+     },
+     "gdp_indicators_logic.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'logical'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "gdp_nested_blocks.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'block_indicator'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "gdp_or_block.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'block_indicator'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "index_none_ellipsis.json": {
+      "outcome": "refused",
+      "error": "SerializationError: unknown index kind 'none'"
+     },
+     "logical_constraints.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'logical'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "mip_indicator_sos_disjunction.json": {
+      "outcome": "loads_identical"
+     },
+     "nested_disjunction.json": {
+      "outcome": "refused",
+      "error": "KeyError: 'body'"
+     },
+     "parameters_and_start.json": {
+      "outcome": "loads_identical"
+     },
+     "registered_atom.json": {
+      "outcome": "loaded",
+      "note": "no own-version fixture to compare (unbuildable here)"
+     },
+     "scalar_nlp.json": {
+      "outcome": "loads_identical"
+     },
+     "shared_dag.json": {
+      "outcome": "loads_identical"
+     },
+     "with_result.json": {
+      "outcome": "loads_identical"
+     }
     }
    },
    "cases_python": {
@@ -476,7 +571,8 @@
    },
    "forward_python": {
     "1.5": "3.12.11",
-    "1.6": "3.13.16"
+    "1.6": "3.13.16",
+    "1.7": "3.13.16"
    }
   },
   "1.1": {
@@ -616,6 +712,22 @@
       "    if float(c.rhs) != 0.0:",
       "             ^^^^^",
       "AttributeError: '_DisjunctiveConstraint' object has no attribute 'rhs'"
+     ]
+    },
+    "gdp_nested_blocks": {
+     "unbuildable": "AttributeError: 'Disjunct' object has no attribute 'variable'",
+     "trace_tail": [
+      "    w = a1.variable(\"w\", lb=0.0, ub=10.0)",
+      "        ^^^^^^^^^^^",
+      "AttributeError: 'Disjunct' object has no attribute 'variable'"
+     ]
+    },
+    "gdp_or_block": {
+     "unbuildable": "NotImplementedError: add_disjunction() declares DisjunctionSemantics.OR (one_way, at_least_one), which is not implemented. This path emits (one_way, exactly_one) only; that is not a valid substitute, since a different (activation, cardinality) pair has a different feasible set. Tracking issue: https://github.com/jkitchi",
+     "trace_tail": [
+      "    ...<6 lines>...",
+      "    )",
+      "NotImplementedError: add_disjunction() declares DisjunctionSemantics.OR (one_way, at_least_one), which is not implemented. This path emits (one_way, exactly_one) only; that is not a valid substitute, since a different (activation, cardinality) pair has a different feasible set. Tracking issue: https://github.com/jkitchin/discopt/issues/1124"
      ]
     }
    },
@@ -892,6 +1004,84 @@
      "with_result.json": {
       "outcome": "loads_identical"
      }
+    },
+    "1.7": {
+     "array_bounds_inf.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_lowered.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "complementarity_vector_lowered.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "decomposition_marks.json": {
+      "outcome": "loads_identical"
+     },
+     "fast_api_blocks.json": {
+      "outcome": "loads_identical"
+     },
+     "fixed_scope.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_mpcc.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "from_nl_nvs01.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_st_e13.json": {
+      "outcome": "loads_identical"
+     },
+     "gdp_indicators.json": {
+      "outcome": "loaded",
+      "note": "no own-version fixture to compare (unbuildable here)"
+     },
+     "gdp_indicators_logic.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'logical'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "gdp_nested_blocks.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'block_indicator'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "gdp_or_block.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'block_indicator'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "index_none_ellipsis.json": {
+      "outcome": "refused",
+      "error": "SerializationError: unknown index kind 'none'"
+     },
+     "logical_constraints.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'logical'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "mip_indicator_sos_disjunction.json": {
+      "outcome": "loads_identical"
+     },
+     "nested_disjunction.json": {
+      "outcome": "refused",
+      "error": "KeyError: 'body'"
+     },
+     "parameters_and_start.json": {
+      "outcome": "loads_identical"
+     },
+     "registered_atom.json": {
+      "outcome": "loads_identical"
+     },
+     "scalar_nlp.json": {
+      "outcome": "loads_identical"
+     },
+     "shared_dag.json": {
+      "outcome": "loads_identical"
+     },
+     "with_result.json": {
+      "outcome": "loads_identical"
+     }
     }
    },
    "cases_python": {
@@ -900,7 +1090,8 @@
    },
    "forward_python": {
     "1.5": "3.12.11",
-    "1.6": "3.13.16"
+    "1.6": "3.13.16",
+    "1.7": "3.13.16"
    }
   },
   "1.2": {
@@ -1040,6 +1231,22 @@
       "    if float(c.rhs) != 0.0:",
       "             ^^^^^",
       "AttributeError: '_DisjunctiveConstraint' object has no attribute 'rhs'"
+     ]
+    },
+    "gdp_nested_blocks": {
+     "unbuildable": "AttributeError: 'Disjunct' object has no attribute 'variable'",
+     "trace_tail": [
+      "    w = a1.variable(\"w\", lb=0.0, ub=10.0)",
+      "        ^^^^^^^^^^^",
+      "AttributeError: 'Disjunct' object has no attribute 'variable'"
+     ]
+    },
+    "gdp_or_block": {
+     "unbuildable": "NotImplementedError: add_disjunction() declares DisjunctionSemantics.OR (one_way, at_least_one), which is not implemented. This path emits (one_way, exactly_one) only; that is not a valid substitute, since a different (activation, cardinality) pair has a different feasible set. Tracking issue: https://github.com/jkitchi",
+     "trace_tail": [
+      "    ...<6 lines>...",
+      "    )",
+      "NotImplementedError: add_disjunction() declares DisjunctionSemantics.OR (one_way, at_least_one), which is not implemented. This path emits (one_way, exactly_one) only; that is not a valid substitute, since a different (activation, cardinality) pair has a different feasible set. Tracking issue: https://github.com/jkitchin/discopt/issues/1124"
      ]
     }
    },
@@ -1269,6 +1476,84 @@
      "with_result.json": {
       "outcome": "loads_identical"
      }
+    },
+    "1.7": {
+     "array_bounds_inf.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_lowered.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "complementarity_vector_lowered.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "decomposition_marks.json": {
+      "outcome": "loads_identical"
+     },
+     "fast_api_blocks.json": {
+      "outcome": "loads_identical"
+     },
+     "fixed_scope.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_mpcc.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "from_nl_nvs01.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_st_e13.json": {
+      "outcome": "loads_identical"
+     },
+     "gdp_indicators.json": {
+      "outcome": "loaded",
+      "note": "no own-version fixture to compare (unbuildable here)"
+     },
+     "gdp_indicators_logic.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'logical'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "gdp_nested_blocks.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'block_indicator'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "gdp_or_block.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'block_indicator'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "index_none_ellipsis.json": {
+      "outcome": "refused",
+      "error": "SerializationError: unknown index kind 'none'"
+     },
+     "logical_constraints.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'logical'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "mip_indicator_sos_disjunction.json": {
+      "outcome": "loads_identical"
+     },
+     "nested_disjunction.json": {
+      "outcome": "refused",
+      "error": "KeyError: 'body'"
+     },
+     "parameters_and_start.json": {
+      "outcome": "loads_identical"
+     },
+     "registered_atom.json": {
+      "outcome": "loads_identical"
+     },
+     "scalar_nlp.json": {
+      "outcome": "loads_identical"
+     },
+     "shared_dag.json": {
+      "outcome": "loads_identical"
+     },
+     "with_result.json": {
+      "outcome": "loads_identical"
+     }
     }
    },
    "cases_python": {
@@ -1277,7 +1562,8 @@
    },
    "forward_python": {
     "1.5": "3.12.11",
-    "1.6": "3.13.16"
+    "1.6": "3.13.16",
+    "1.7": "3.13.16"
    }
   },
   "1.3": {
@@ -1417,6 +1703,22 @@
       "    if float(c.rhs) != 0.0:",
       "             ^^^^^",
       "AttributeError: '_DisjunctiveConstraint' object has no attribute 'rhs'"
+     ]
+    },
+    "gdp_nested_blocks": {
+     "unbuildable": "AttributeError: 'Disjunct' object has no attribute 'variable'",
+     "trace_tail": [
+      "    w = a1.variable(\"w\", lb=0.0, ub=10.0)",
+      "        ^^^^^^^^^^^",
+      "AttributeError: 'Disjunct' object has no attribute 'variable'"
+     ]
+    },
+    "gdp_or_block": {
+     "unbuildable": "NotImplementedError: add_disjunction() declares DisjunctionSemantics.OR (one_way, at_least_one), which is not implemented. This path emits (one_way, exactly_one) only; that is not a valid substitute, since a different (activation, cardinality) pair has a different feasible set. Tracking issue: https://github.com/jkitchi",
+     "trace_tail": [
+      "    ...<6 lines>...",
+      "    )",
+      "NotImplementedError: add_disjunction() declares DisjunctionSemantics.OR (one_way, at_least_one), which is not implemented. This path emits (one_way, exactly_one) only; that is not a valid substitute, since a different (activation, cardinality) pair has a different feasible set. Tracking issue: https://github.com/jkitchin/discopt/issues/1124"
      ]
     }
    },
@@ -1599,6 +1901,84 @@
      "with_result.json": {
       "outcome": "loads_identical"
      }
+    },
+    "1.7": {
+     "array_bounds_inf.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_lowered.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "complementarity_vector_lowered.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "decomposition_marks.json": {
+      "outcome": "loads_identical"
+     },
+     "fast_api_blocks.json": {
+      "outcome": "loads_identical"
+     },
+     "fixed_scope.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_mpcc.json": {
+      "outcome": "refused",
+      "error": "ValueError: too many values to unpack (expected 2)"
+     },
+     "from_nl_nvs01.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_st_e13.json": {
+      "outcome": "loads_identical"
+     },
+     "gdp_indicators.json": {
+      "outcome": "loaded",
+      "note": "no own-version fixture to compare (unbuildable here)"
+     },
+     "gdp_indicators_logic.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'logical'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "gdp_nested_blocks.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'block_indicator'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "gdp_or_block.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'block_indicator'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "index_none_ellipsis.json": {
+      "outcome": "refused",
+      "error": "SerializationError: unknown index kind 'none'"
+     },
+     "logical_constraints.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'logical'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "mip_indicator_sos_disjunction.json": {
+      "outcome": "loads_identical"
+     },
+     "nested_disjunction.json": {
+      "outcome": "refused",
+      "error": "KeyError: 'body'"
+     },
+     "parameters_and_start.json": {
+      "outcome": "loads_identical"
+     },
+     "registered_atom.json": {
+      "outcome": "loads_identical"
+     },
+     "scalar_nlp.json": {
+      "outcome": "loads_identical"
+     },
+     "shared_dag.json": {
+      "outcome": "loads_identical"
+     },
+     "with_result.json": {
+      "outcome": "loads_identical"
+     }
     }
    },
    "cases_python": {
@@ -1607,7 +1987,8 @@
    },
    "forward_python": {
     "1.5": "3.12.11",
-    "1.6": "3.13.16"
+    "1.6": "3.13.16",
+    "1.7": "3.13.16"
    }
   },
   "1.4": {
@@ -1748,6 +2129,22 @@
       "             ^^^^^",
       "AttributeError: '_DisjunctiveConstraint' object has no attribute 'rhs'"
      ]
+    },
+    "gdp_nested_blocks": {
+     "unbuildable": "AttributeError: 'Disjunct' object has no attribute 'variable'",
+     "trace_tail": [
+      "    w = a1.variable(\"w\", lb=0.0, ub=10.0)",
+      "        ^^^^^^^^^^^",
+      "AttributeError: 'Disjunct' object has no attribute 'variable'"
+     ]
+    },
+    "gdp_or_block": {
+     "unbuildable": "NotImplementedError: add_disjunction() declares DisjunctionSemantics.OR (one_way, at_least_one), which is not implemented. This path emits (one_way, exactly_one) only; that is not a valid substitute, since a different (activation, cardinality) pair has a different feasible set. Tracking issue: https://github.com/jkitchi",
+     "trace_tail": [
+      "    ...<6 lines>...",
+      "    )",
+      "NotImplementedError: add_disjunction() declares DisjunctionSemantics.OR (one_way, at_least_one), which is not implemented. This path emits (one_way, exactly_one) only; that is not a valid substitute, since a different (activation, cardinality) pair has a different feasible set. Tracking issue: https://github.com/jkitchin/discopt/issues/1124"
+     ]
     }
    },
    "forward": {
@@ -1882,6 +2279,84 @@
      "with_result.json": {
       "outcome": "loads_identical"
      }
+    },
+    "1.7": {
+     "array_bounds_inf.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_lowered.json": {
+      "outcome": "refused",
+      "error": "SerializationError: malformed discopt document: ValueError: too many values to unpack (expected 2)"
+     },
+     "complementarity_vector_lowered.json": {
+      "outcome": "refused",
+      "error": "SerializationError: malformed discopt document: ValueError: too many values to unpack (expected 2)"
+     },
+     "decomposition_marks.json": {
+      "outcome": "loads_identical"
+     },
+     "fast_api_blocks.json": {
+      "outcome": "loads_identical"
+     },
+     "fixed_scope.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_mpcc.json": {
+      "outcome": "refused",
+      "error": "SerializationError: malformed discopt document: ValueError: too many values to unpack (expected 2)"
+     },
+     "from_nl_nvs01.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_st_e13.json": {
+      "outcome": "loads_identical"
+     },
+     "gdp_indicators.json": {
+      "outcome": "loaded",
+      "note": "no own-version fixture to compare (unbuildable here)"
+     },
+     "gdp_indicators_logic.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'logical'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "gdp_nested_blocks.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'block_indicator'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "gdp_or_block.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'block_indicator'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "index_none_ellipsis.json": {
+      "outcome": "refused",
+      "error": "SerializationError: unknown index kind 'none'"
+     },
+     "logical_constraints.json": {
+      "outcome": "refused",
+      "error": "SerializationError: row has unknown kind 'logical'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row."
+     },
+     "mip_indicator_sos_disjunction.json": {
+      "outcome": "loads_identical"
+     },
+     "nested_disjunction.json": {
+      "outcome": "refused",
+      "error": "SerializationError: malformed discopt document: KeyError: 'sense'"
+     },
+     "parameters_and_start.json": {
+      "outcome": "loads_identical"
+     },
+     "registered_atom.json": {
+      "outcome": "loads_identical"
+     },
+     "scalar_nlp.json": {
+      "outcome": "loads_identical"
+     },
+     "shared_dag.json": {
+      "outcome": "loads_identical"
+     },
+     "with_result.json": {
+      "outcome": "loads_identical"
+     }
     }
    },
    "cases_python": {
@@ -1890,7 +2365,8 @@
    },
    "forward_python": {
     "1.5": "3.12.11",
-    "1.6": "3.13.16"
+    "1.6": "3.13.16",
+    "1.7": "3.13.16"
    }
   },
   "1.5": {
@@ -2025,11 +2501,29 @@
       "             ^^^^^",
       "AttributeError: '_DisjunctiveConstraint' object has no attribute 'rhs'"
      ]
+    },
+    "gdp_nested_blocks": {
+     "unbuildable": "AttributeError: 'Disjunct' object has no attribute 'variable'",
+     "trace_tail": [
+      "    w = a1.variable(\"w\", lb=0.0, ub=10.0)",
+      "        ^^^^^^^^^^^",
+      "AttributeError: 'Disjunct' object has no attribute 'variable'"
+     ]
+    },
+    "gdp_or_block": {
+     "unbuildable": "NotImplementedError: add_disjunction() declares DisjunctionSemantics.OR (one_way, at_least_one), which is not implemented. This path emits (one_way, exactly_one) only; that is not a valid substitute, since a different (activation, cardinality) pair has a different feasible set. Tracking issue: https://github.com/jkitchi",
+     "trace_tail": [
+      "    ...<6 lines>...",
+      "    )",
+      "NotImplementedError: add_disjunction() declares DisjunctionSemantics.OR (one_way, at_least_one), which is not implemented. This path emits (one_way, exactly_one) only; that is not a valid substitute, since a different (activation, cardinality) pair has a different feasible set. Tracking issue: https://github.com/jkitchin/discopt/issues/1124"
+     ]
     }
    },
    "cases_python": {
     "index_none_ellipsis": "3.13.16",
-    "nested_disjunction": "3.13.16"
+    "nested_disjunction": "3.13.16",
+    "gdp_nested_blocks": "3.13.16",
+    "gdp_or_block": "3.13.16"
    },
    "forward": {
     "1.6": {
@@ -2095,10 +2589,83 @@
      "with_result.json": {
       "outcome": "loads_identical"
      }
+    },
+    "1.7": {
+     "array_bounds_inf.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_lowered.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_vector_lowered.json": {
+      "outcome": "loads_identical"
+     },
+     "decomposition_marks.json": {
+      "outcome": "loads_identical"
+     },
+     "fast_api_blocks.json": {
+      "outcome": "loads_identical"
+     },
+     "fixed_scope.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_mpcc.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_nvs01.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_st_e13.json": {
+      "outcome": "loads_identical"
+     },
+     "gdp_indicators.json": {
+      "outcome": "loads_identical"
+     },
+     "gdp_indicators_logic.json": {
+      "outcome": "loads_identical"
+     },
+     "gdp_nested_blocks.json": {
+      "outcome": "refused",
+      "error": "SerializationError: document schema 'discopt.model/1.7' is newer than this reader (discopt.model/1.5) and has 'state' key(s) ['_gdp_blocks'] it does not know; refusing rather than dropping them. Upgrade discopt to read it."
+     },
+     "gdp_or_block.json": {
+      "outcome": "refused",
+      "error": "SerializationError: document schema 'discopt.model/1.7' is newer than this reader (discopt.model/1.5) and holds content it cannot decode (SerializationError: row has unknown kind 'block_indicator'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row.); upgrade discopt"
+     },
+     "index_none_ellipsis.json": {
+      "outcome": "refused",
+      "error": "SerializationError: document schema 'discopt.model/1.7' is newer than this reader (discopt.model/1.5) and holds content it cannot decode (SerializationError: unknown index kind 'none'); upgrade discopt to read it."
+     },
+     "logical_constraints.json": {
+      "outcome": "loads_identical"
+     },
+     "mip_indicator_sos_disjunction.json": {
+      "outcome": "loads_identical"
+     },
+     "nested_disjunction.json": {
+      "outcome": "refused",
+      "error": "SerializationError: document schema 'discopt.model/1.7' is newer than this reader (discopt.model/1.5) and holds content it cannot decode (KeyError: 'sense'); upgrade discopt to read it."
+     },
+     "parameters_and_start.json": {
+      "outcome": "loads_identical"
+     },
+     "registered_atom.json": {
+      "outcome": "loads_identical"
+     },
+     "scalar_nlp.json": {
+      "outcome": "loads_identical"
+     },
+     "shared_dag.json": {
+      "outcome": "loads_identical"
+     },
+     "with_result.json": {
+      "outcome": "loads_identical"
+     }
     }
    },
    "forward_python": {
-    "1.6": "3.13.16"
+    "1.6": "3.13.16",
+    "1.7": "3.13.16"
    }
   },
   "1.6": {
@@ -2229,6 +2796,240 @@
      "sha256": "4c088e6169927dd47240063934db6bb0f408a6e415ee324857b0db3e291d4160",
      "to_nl_sha256": null,
      "to_nl_refused": "ValueError: .nl export: the model carries a disjunctive constraint (Model.either_or / Model.if_else, GDP) named 'outer'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
+    },
+    "gdp_nested_blocks": {
+     "unbuildable": "SerializationError: cannot serialize: the model nests a disjunction in a Disjunct block (Disjunct.add_disjunction / Disjunct.subject_to), which this format version does not record (#1775 G1.2). Use pickle or Model.clone() for same-version transport.",
+     "trace_tail": [
+      "  File \"/tmp/wp1/wt-1.6/python/discopt/serialize.py\", line 1180, in _refuse_unsupported",
+      "    raise SerializationError(_NESTING_REFUSAL)",
+      "discopt.serialize.SerializationError: cannot serialize: the model nests a disjunction in a Disjunct block (Disjunct.add_disjunction / Disjunct.subject_to), which this format version does not record (#1775 G1.2). Use pickle or Model.clone() for same-version transport."
+     ]
+    },
+    "gdp_or_block": {
+     "unbuildable": "SerializationError: cannot serialize: the model has an OR add_disjunction block (#1775 G1.4), which this format version does not record. Use pickle or Model.clone() for same-version transport.",
+     "trace_tail": [
+      "    ...<3 lines>...",
+      "    )",
+      "discopt.serialize.SerializationError: cannot serialize: the model has an OR add_disjunction block (#1775 G1.4), which this format version does not record. Use pickle or Model.clone() for same-version transport."
+     ]
+    }
+   },
+   "forward": {
+    "1.7": {
+     "array_bounds_inf.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_lowered.json": {
+      "outcome": "loads_identical"
+     },
+     "complementarity_vector_lowered.json": {
+      "outcome": "loads_identical"
+     },
+     "decomposition_marks.json": {
+      "outcome": "loads_identical"
+     },
+     "fast_api_blocks.json": {
+      "outcome": "loads_identical"
+     },
+     "fixed_scope.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_mpcc.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_nvs01.json": {
+      "outcome": "loads_identical"
+     },
+     "from_nl_st_e13.json": {
+      "outcome": "loads_identical"
+     },
+     "gdp_indicators.json": {
+      "outcome": "loads_identical"
+     },
+     "gdp_indicators_logic.json": {
+      "outcome": "loads_identical"
+     },
+     "gdp_nested_blocks.json": {
+      "outcome": "refused",
+      "error": "SerializationError: document schema 'discopt.model/1.7' is newer than this reader (discopt.model/1.6) and has 'state' key(s) ['_gdp_blocks'] it does not know; refusing rather than dropping them. Upgrade discopt to read it."
+     },
+     "gdp_or_block.json": {
+      "outcome": "refused",
+      "error": "SerializationError: document schema 'discopt.model/1.7' is newer than this reader (discopt.model/1.6) and holds content it cannot decode (SerializationError: row has unknown kind 'block_indicator'. This file was written by a newer discopt than the one reading it; refusing rather than dropping the row.); upgrade discopt"
+     },
+     "index_none_ellipsis.json": {
+      "outcome": "loads_identical"
+     },
+     "logical_constraints.json": {
+      "outcome": "loads_identical"
+     },
+     "mip_indicator_sos_disjunction.json": {
+      "outcome": "loads_identical"
+     },
+     "nested_disjunction.json": {
+      "outcome": "loads_identical"
+     },
+     "parameters_and_start.json": {
+      "outcome": "loads_identical"
+     },
+     "registered_atom.json": {
+      "outcome": "loads_identical"
+     },
+     "scalar_nlp.json": {
+      "outcome": "loads_identical"
+     },
+     "shared_dag.json": {
+      "outcome": "loads_identical"
+     },
+     "with_result.json": {
+      "outcome": "loads_identical"
+     }
+    }
+   },
+   "forward_python": {
+    "1.7": "3.13.16"
+   }
+  },
+  "1.7": {
+   "schema": "discopt.model/1.7",
+   "commit": "1fd02427a42222bcf45474efb6eb8eaccb125e6c",
+   "discopt_version": "0.9.1.dev0",
+   "python": "3.13.16",
+   "cases": {
+    "scalar_nlp": {
+     "file": "scalar_nlp.json",
+     "sha256": "fa3882eea16796f66805606a10e095f896f854120342656b5186fb7aa5af4722",
+     "to_nl_sha256": "99787845c11051508641270c744c626a66db2c3f336d802cdc525d7d7e1984c5",
+     "to_nl_refused": null
+    },
+    "array_bounds_inf": {
+     "file": "array_bounds_inf.json",
+     "sha256": "7f525e004c1f5b6c6d72fc42b334d8094dcb1d2731b677de61e36839d0b0214d",
+     "to_nl_sha256": "d3b082468b17f96b7f2524e8fab16860c8f8e46407954e16bacfff8eebbd5108",
+     "to_nl_refused": null
+    },
+    "mip_indicator_sos_disjunction": {
+     "file": "mip_indicator_sos_disjunction.json",
+     "sha256": "d9a7e5832aa3f594620a5a6d29cb58b04fb41476f16adc283b82ef8a564a9db3",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries an indicator constraint (Model.if_then). This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
+    },
+    "shared_dag": {
+     "file": "shared_dag.json",
+     "sha256": "9a5bcaf4bed4d3c39ac8804a1f3636149e11844bc2d2998f62f0012c35dda3b5",
+     "to_nl_sha256": "1f0ae6f560240865384e792d847ec84c0e0aefc8600060137d2dc4b000ada9e3",
+     "to_nl_refused": null
+    },
+    "fixed_scope": {
+     "file": "fixed_scope.json",
+     "sha256": "adbb5c4fc0717963edc26e363a52f5c0b3feafcbf1d1ea8acf86bf64325c2f58",
+     "to_nl_sha256": "4085a021806538699f80cb58952aad8ccbdadbce9a2b503075d3cc2d64c11aef",
+     "to_nl_refused": null
+    },
+    "complementarity_lowered": {
+     "file": "complementarity_lowered.json",
+     "sha256": "bbea9bf5a22ac0af5e5837a5a3476f20da8855f06d5e8940860c8f0ff19de472",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries a disjunctive constraint (Model.either_or / Model.if_else, GDP) named 'pq'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
+    },
+    "with_result": {
+     "file": "with_result.json",
+     "sha256": "61110e9557272ccb27c912f4f1f532fd8024792ecc3cca85ddf4477c5f8af892",
+     "to_nl_sha256": "6e08b0bdec6e132c87a21893404fa0b8af30ab54acce1b2df8af222a8f2aa52b",
+     "to_nl_refused": null
+    },
+    "from_nl_nvs01": {
+     "file": "from_nl_nvs01.json",
+     "sha256": "0afc2c9a1e69f92aaa8eb364bdd41e18efa19f907173acf2e2cdb31b483d82aa",
+     "to_nl_sha256": "ad1fbb03c9c1c4202f2a0f0e8f857ffb1af948c4ce5981bf4c08f0c15238d3e7",
+     "to_nl_refused": null,
+     "input_sha256": "a754d8f98b200bc914e0be867df2ae0cfe6a4c4f5f9d023b7d09a3c2fd934de7"
+    },
+    "from_nl_st_e13": {
+     "file": "from_nl_st_e13.json",
+     "sha256": "6299538e53cd5eb9842c4d65731440ff6f22bbc4e59c763efcb3d7425a5c3327",
+     "to_nl_sha256": "f76aebc77035c50aeed080f835b5e65ef16da3586cd3acb8ee46c63f8cb2768b",
+     "to_nl_refused": null,
+     "input_sha256": "f568f2bec83e905a8741c518e3f350c65bbd4ae2b96643514b50458ce3eb7559"
+    },
+    "from_nl_mpcc": {
+     "file": "from_nl_mpcc.json",
+     "sha256": "f568abc5c70e01b549b5f9f69963eca577e38f116ab548d0cd2ac331f70fd36b",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries a disjunctive constraint (Model.either_or / Model.if_else, GDP) named 'nl_compl0'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct).",
+     "input_sha256": "b9d827c3efbbc40f5e675a7b605efc747c97d7f4e220cb2e46aa3a9f0e81f4e1"
+    },
+    "fast_api_blocks": {
+     "file": "fast_api_blocks.json",
+     "sha256": "084ba0bc803892af3602d03423d551652d55b0ca8c90461c47bd6ce701e7925a",
+     "to_nl_sha256": "59a4f2f3ff20f1b633dbd5450ed0029217e208db98900834f3f959f74e4b9f78",
+     "to_nl_refused": null
+    },
+    "parameters_and_start": {
+     "file": "parameters_and_start.json",
+     "sha256": "08c8e9f65b6751a1bfc86f35cf775e4003b5a71b1f361fc15763f47802ee7a76",
+     "to_nl_sha256": "ffe61bc724c936887a884cbc7b5440d9df3c6af24bad8e987eeeb0023af7ce87",
+     "to_nl_refused": null
+    },
+    "decomposition_marks": {
+     "file": "decomposition_marks.json",
+     "sha256": "c8f30cdbbc7dd6cb9f04d8c0026c5b11035b75768b96dcdf35543dea5bcbb3ed",
+     "to_nl_sha256": "12889d0402cf36f6992650c79b6bbbdc58e88692eeb0baea8aff5633989f4741",
+     "to_nl_refused": null
+    },
+    "registered_atom": {
+     "file": "registered_atom.json",
+     "sha256": "e90e6c4835a00c2228eacd1c394d4704d597509fac80d40ae6625c3481a13dd3",
+     "to_nl_sha256": "0f2e2a6671eeeea0efba04a6b745bf0478e93b0b2d76fad2e0d5ead0106c3d50",
+     "to_nl_refused": null
+    },
+    "logical_constraints": {
+     "file": "logical_constraints.json",
+     "sha256": "49a7c1a7105d899b3cf58ca3ceb555d799defa5973eff3ba2011844752e83a5d",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries a propositional-logic constraint over BooleanVars named 'imp'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
+    },
+    "complementarity_vector_lowered": {
+     "file": "complementarity_vector_lowered.json",
+     "sha256": "a6a9031a983c29b115779ba0729a40140aba3723632320e823577278234acba5",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries a disjunctive constraint (Model.either_or / Model.if_else, GDP) named 'pq_0'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
+    },
+    "gdp_indicators": {
+     "file": "gdp_indicators.json",
+     "sha256": "455ff5d9f39df03df7c3ff5442d7c72e2bb9f089ba7446d02aa058e4abbd8b1d",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries a disjunctive constraint (Model.either_or / Model.if_else, GDP) named 'mode'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
+    },
+    "gdp_indicators_logic": {
+     "file": "gdp_indicators_logic.json",
+     "sha256": "91c50a43bb5069483e2b3f9ad63bbe268357081d07ef9f7d5f2343ddf125561d",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries a disjunctive constraint (Model.either_or / Model.if_else, GDP) named 'mode'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
+    },
+    "index_none_ellipsis": {
+     "file": "index_none_ellipsis.json",
+     "sha256": "9e23859e868ccc759ca9a6fe464465f0b292c44e7f6560390580474afa8c45cd",
+     "to_nl_sha256": "c98e6adc58d95907e6d81328f6816df272758b1a0dbfba5a67da1ac70f537aa8",
+     "to_nl_refused": null
+    },
+    "nested_disjunction": {
+     "file": "nested_disjunction.json",
+     "sha256": "ea5cfe7f247ee259c7f1183a5013c45912dea293d8983cab2f96cef642204451",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries a disjunctive constraint (Model.either_or / Model.if_else, GDP) named 'outer'. This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
+    },
+    "gdp_nested_blocks": {
+     "file": "gdp_nested_blocks.json",
+     "sha256": "233a1f5b68ebc865efe083879164c93cbf061430a094cf39fc2dbd32929897a7",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries an indicator constraint (Model.if_then). This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
+    },
+    "gdp_or_block": {
+     "file": "gdp_or_block.json",
+     "sha256": "afc16233ebc91af752639f1445371d97d54833c5aa5d4b533cb024762ffba7b6",
+     "to_nl_sha256": null,
+     "to_nl_refused": "ValueError: .nl export: the model carries an indicator constraint (Model.if_then). This writer emits ordinary algebraic rows and variable bounds only, so there is nothing faithful to write. Lower it to algebra first and export the lowered model:\n    from discopt._relax.gdp_reformulate import reformulate_gdp\n    lowered = reformulate_gdp(model, method='big-m')   # or method='hull'\n(the lowering adds selector binaries and needs finite bounds on the variables of each disjunct)."
     }
    }
   }

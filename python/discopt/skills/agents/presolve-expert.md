@@ -46,7 +46,8 @@ result = m.solve()
 # final gap / relaxation value at the root node.
 
 # For explicit OBBT probing:
-from discopt._relax.obbt import obbt_tighten   # if exposed
+from discopt._relax.obbt import obbt_tighten  # if exposed
+
 tight_lb, tight_ub = obbt_tighten(m, iterations=3)
 ```
 

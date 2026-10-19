@@ -317,12 +317,14 @@ def _reactor():
     m.minimize(
         dm.sum(lambda k: float(cr[k]) * y[k], over=range(4))
         + dm.sum(
-            lambda t: float(pA * hp[t])
-            * (
-                float(CA0 * Fp[t])
-                - dm.sum(
-                    lambda k: float(CA0 * kr * V[k]) * F[t, k] / (F[t, k] + float(kr * V[k])),
-                    over=range(4),
+            lambda t: (
+                float(pA * hp[t])
+                * (
+                    float(CA0 * Fp[t])
+                    - dm.sum(
+                        lambda k: float(CA0 * kr * V[k]) * F[t, k] / (F[t, k] + float(kr * V[k])),
+                        over=range(4),
+                    )
                 )
             ),
             over=range(3),

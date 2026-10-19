@@ -35,8 +35,13 @@ Note that only two of the four encodings are MIP: `relu_bigm.py` and `formulatio
 import numpy as np
 import discopt.modeling as dm
 from discopt.ml import (
-    NetworkDefinition, DenseLayer, Activation, OffsetScaling,
-    NNFormulation, LayerBounds, propagate_bounds,
+    NetworkDefinition,
+    DenseLayer,
+    Activation,
+    OffsetScaling,
+    NNFormulation,
+    LayerBounds,
+    propagate_bounds,
 )
 
 # Define the network (or load it with one of the readers)
@@ -45,18 +50,21 @@ net = NetworkDefinition(
         DenseLayer(W1, b1, Activation.RELU),
         DenseLayer(W2, b2, Activation.LINEAR),
     ],
-    input_bounds=(lb, ub),          # essential for ReLU big-M
+    input_bounds=(lb, ub),  # essential for ReLU big-M
 )
 
 # Embed in an optimization model. Scaling belongs to the *formulation*, not to
 # the NetworkDefinition — the definition carries only layers and input bounds.
 m = dm.Model("ml_opt")
 f = NNFormulation(
-    m, net,
-    strategy="relu_bigm",           # or "full_space", "reduced_space"
-    scaling=OffsetScaling(          # optional
-        x_offset=mu_x, x_factor=sd_x,
-        y_offset=mu_y, y_factor=sd_y,
+    m,
+    net,
+    strategy="relu_bigm",  # or "full_space", "reduced_space"
+    scaling=OffsetScaling(  # optional
+        x_offset=mu_x,
+        x_factor=sd_x,
+        y_offset=mu_y,
+        y_factor=sd_y,
     ),
 )
 f.formulate()
@@ -76,6 +84,7 @@ input variables you already have on the model.
 
 ```python
 from discopt.ml import add_predictor
+
 outputs, formulation = add_predictor(m, x, sklearn_gbm, input_bounds=(lb, ub))
 ```
 
@@ -91,6 +100,7 @@ net = load_onnx("model.onnx", input_bounds=(lb, ub))
 ### Tree ensembles
 ```python
 from discopt.ml import TreeFormulation
+
 # Gradient-boosted regression tree ensemble -> MILP via per-leaf encoding.
 # The box comes from the ensemble/input variables, not from a keyword here.
 tree_f = TreeFormulation(m, ensemble, prefix="tree")
@@ -100,12 +110,13 @@ tree_f.formulate()
 ### Trainable surrogates
 ```python
 from discopt.ml import TrainableNetwork, train
+
 # Weights are decision Variables, so the surrogate trains inside the NLP —
 # typically jointly with a physics model via discopt.dae.fit.
 surrogate = TrainableNetwork(m, sizes=[2, 8, 1], activation="tanh", name="surr")
-expr = surrogate(x)                 # a symbolic expression in the model
-result = train(m, ...)              # thin local-NLP solve over the weights
-net = surrogate.freeze(result)      # -> NetworkDefinition, back to the frozen path
+expr = surrogate(x)  # a symbolic expression in the model
+result = train(m, ...)  # thin local-NLP solve over the weights
+net = surrogate.freeze(result)  # -> NetworkDefinition, back to the frozen path
 ```
 
 ### Key files

@@ -1,0 +1,460 @@
+{
+ "schema": "discopt.model/1.7",
+ "discopt": "0.9.1.dev0",
+ "name": "gdp_nested_blocks",
+ "variables": [
+  {
+   "name": "x",
+   "type": "continuous",
+   "shape": [],
+   "lb": 0.0,
+   "ub": 10.0,
+   "bound_stack": []
+  },
+  {
+   "name": "y",
+   "type": "continuous",
+   "shape": [],
+   "lb": 0.0,
+   "ub": 10.0,
+   "bound_stack": []
+  },
+  {
+   "name": "A_active",
+   "type": "binary",
+   "shape": [],
+   "lb": 0.0,
+   "ub": 1.0,
+   "bound_stack": []
+  },
+  {
+   "name": "A1_active",
+   "type": "binary",
+   "shape": [],
+   "lb": 0.0,
+   "ub": 1.0,
+   "bound_stack": []
+  },
+  {
+   "name": "w",
+   "type": "continuous",
+   "shape": [],
+   "lb": 0.0,
+   "ub": 10.0,
+   "bound_stack": []
+  },
+  {
+   "name": "A2_active",
+   "type": "binary",
+   "shape": [],
+   "lb": 0.0,
+   "ub": 1.0,
+   "bound_stack": []
+  },
+  {
+   "name": "B_active",
+   "type": "binary",
+   "shape": [],
+   "lb": 0.0,
+   "ub": 1.0,
+   "bound_stack": []
+  }
+ ],
+ "parameters": [],
+ "nodes": [
+  {
+   "op": "var",
+   "ref": 2
+  },
+  {
+   "op": "var",
+   "ref": 0
+  },
+  {
+   "op": "const",
+   "v": 3.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 1,
+   "b": 2
+  },
+  {
+   "op": "var",
+   "ref": 6
+  },
+  {
+   "op": "const",
+   "v": 7.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 5,
+   "b": 1
+  },
+  {
+   "op": "var",
+   "ref": 3
+  },
+  {
+   "op": "const",
+   "v": 6.0
+  },
+  {
+   "op": "var",
+   "ref": 1
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 8,
+   "b": 9
+  },
+  {
+   "op": "var",
+   "ref": 4
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 9,
+   "b": 11
+  },
+  {
+   "op": "var",
+   "ref": 5
+  },
+  {
+   "op": "const",
+   "v": 8.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 14,
+   "b": 9
+  },
+  {
+   "op": "const",
+   "v": 2.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 16,
+   "b": 1
+  },
+  {
+   "op": "sum_over",
+   "args": [
+    7,
+    13
+   ]
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 18,
+   "b": 0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 1,
+   "b": 14
+  },
+  {
+   "op": "const",
+   "v": 9.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 21,
+   "b": 1
+  },
+  {
+   "op": "sum_over",
+   "args": [
+    0,
+    4
+   ]
+  },
+  {
+   "op": "const",
+   "v": 1.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 23,
+   "b": 24
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 2,
+   "b": 9
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 1,
+   "b": 26
+  }
+ ],
+ "objective": {
+  "sense": "minimize",
+  "expr": 27,
+  "placeholder": false
+ },
+ "builder_objective": null,
+ "rows": [
+  {
+   "kind": "indicator",
+   "indicator": 0,
+   "constraint": {
+    "body": 3,
+    "sense": "<=",
+    "name": "A_then_0"
+   },
+   "active_value": 1,
+   "name": null,
+   "disjunction": [
+    "add_disjunction:outer:0",
+    0,
+    2
+   ]
+  },
+  {
+   "kind": "indicator",
+   "indicator": 4,
+   "constraint": {
+    "body": 6,
+    "sense": "<=",
+    "name": "B_then_0"
+   },
+   "active_value": 1,
+   "name": null,
+   "disjunction": [
+    "add_disjunction:outer:0",
+    1,
+    2
+   ]
+  },
+  {
+   "kind": "block_indicator",
+   "indicator": 7,
+   "constraint": {
+    "body": 10,
+    "sense": "<=",
+    "name": "A1_then_0"
+   },
+   "active_value": 1,
+   "name": null,
+   "disjunction": [
+    "add_disjunction:inner_blocks:1",
+    0,
+    2
+   ],
+   "parent": 0
+  },
+  {
+   "kind": "block_indicator",
+   "indicator": 7,
+   "constraint": {
+    "body": 12,
+    "sense": "<=",
+    "name": "A1_then_1"
+   },
+   "active_value": 1,
+   "name": null,
+   "disjunction": [
+    "add_disjunction:inner_blocks:1",
+    0,
+    2
+   ],
+   "parent": 0
+  },
+  {
+   "kind": "block_indicator",
+   "indicator": 13,
+   "constraint": {
+    "body": 15,
+    "sense": "<=",
+    "name": "A2_then_0"
+   },
+   "active_value": 1,
+   "name": null,
+   "disjunction": [
+    "add_disjunction:inner_blocks:1",
+    1,
+    2
+   ],
+   "parent": 0
+  },
+  {
+   "kind": "block_indicator",
+   "indicator": 13,
+   "constraint": {
+    "body": 17,
+    "sense": "<=",
+    "name": "A2_then_1"
+   },
+   "active_value": 1,
+   "name": null,
+   "disjunction": [
+    "add_disjunction:inner_blocks:1",
+    1,
+    2
+   ],
+   "parent": 0
+  },
+  {
+   "kind": "algebraic",
+   "body": 19,
+   "sense": "==",
+   "name": "_disj_inner_blocks_select"
+  },
+  {
+   "kind": "nested_disjunction",
+   "disjuncts": [
+    [
+     {
+      "body": 20,
+      "sense": "<=",
+      "name": null
+     }
+    ],
+    [
+     {
+      "body": 22,
+      "sense": "<=",
+      "name": null
+     }
+    ]
+   ],
+   "name": "inner_or",
+   "method": null,
+   "semantics": "SELECT_ONE",
+   "parent_indicator": 4
+  },
+  {
+   "kind": "algebraic",
+   "body": 25,
+   "sense": "==",
+   "name": "_disj_outer_select"
+  }
+ ],
+ "builder_blocks": [],
+ "complementarities": null,
+ "state": {
+  "_aux_counter": 0,
+  "_decomp_stages": {},
+  "_decomp_blocks": {},
+  "_zero_spanning_factor_auxes": [],
+  "_implied_integer_auxes": [],
+  "_free_by_construction": [],
+  "_atan2_preconditions": [],
+  "_piecewise_domains": [],
+  "_coupling_keys": {
+   "names": [],
+   "row_indices": []
+  },
+  "_sets": [],
+  "_simplex_lowerings": [],
+  "_block_labels_var": {},
+  "_block_labels_con": {
+   "names": {},
+   "rows": []
+  },
+  "_gdp_blocks": {
+   "members": [
+    {
+     "key": "add_disjunction:outer:0",
+     "indicators": [
+      0,
+      4
+     ],
+     "parent": null,
+     "start": 0,
+     "name": "outer",
+     "semantics": "SELECT_ONE"
+    },
+    {
+     "key": "add_disjunction:inner_blocks:1",
+     "indicators": [
+      7,
+      13
+     ],
+     "parent": 0,
+     "start": 2,
+     "name": "inner_blocks",
+     "semantics": "SELECT_ONE"
+    }
+   ],
+   "disjuncts": [
+    {
+     "name": "A",
+     "indicator": 0,
+     "rows": [
+      0
+     ],
+     "nested": [
+      {
+       "block": [
+        1,
+        2
+       ],
+       "name": "inner_blocks",
+       "semantics": "SELECT_ONE"
+      }
+     ],
+     "local": [],
+     "placed_in": "the model"
+    },
+    {
+     "name": "A1",
+     "indicator": 7,
+     "rows": [
+      2,
+      3
+     ],
+     "nested": [],
+     "local": [
+      11
+     ],
+     "placed_in": "disjunct 'A'"
+    },
+    {
+     "name": "A2",
+     "indicator": 13,
+     "rows": [
+      4,
+      5
+     ],
+     "nested": [],
+     "local": [],
+     "placed_in": "disjunct 'A'"
+    },
+    {
+     "name": "B",
+     "indicator": 4,
+     "rows": [
+      1
+     ],
+     "nested": [
+      {
+       "dc": 7
+      }
+     ],
+     "local": [],
+     "placed_in": "the model"
+    }
+   ]
+  }
+ },
+ "initial_point": []
+}
