@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import numpy as np
 
@@ -250,9 +250,20 @@ def reformulate_gdp(
     # ``Model.add_disjunction`` (indicator rows tagged with their disjunction) are
     # lowered by hull, with the user's indicators as the selectors -- the model
     # already carries their ``exactly(1)`` row. ``_hull_groups`` maps a group key
-    # to its rebuilt ``_DisjunctiveConstraint`` and selectors; ``None`` when no
-    # group qualifies.
-    _hull_groups = _collect_indicator_hull_groups(model) if method == "hull" else {}
+    # to its rebuilt ``_DisjunctiveConstraint`` and selectors; empty when no group
+    # qualifies. Blocks and disjunctions nested in a hulled group are hulled inside
+    # it (#1775 G2.1) and named in ``_hull_plan``'s absorbed sets.
+    _hull_plan = (
+        _collect_indicator_hull_groups(model)
+        if method == "hull"
+        else _HullPlan({}, {}, set(), set())
+    )
+    _hull_groups = _hull_plan.groups
+
+    def _hulled_inside(c) -> bool:
+        if isinstance(c, _IndicatorConstraint):
+            return c.disjunction is not None and c.disjunction[0] in _hull_plan.absorbed_keys
+        return id(c) in _hull_plan.absorbed_ids
 
     # Every other indicator row -- a plain ``Model.if_then``, any block under
     # ``"simplex"`` -- is lowered by big-M (or multiple big-M). Say so rather than
@@ -261,18 +272,21 @@ def reformulate_gdp(
         _n_ind = sum(
             1
             for c in model._constraints
-            if (
-                isinstance(c, _IndicatorConstraint)
-                and (c.disjunction is None or c.disjunction[0] not in _hull_groups)
+            if not _hulled_inside(c)
+            and (
+                (
+                    isinstance(c, _IndicatorConstraint)
+                    and (c.disjunction is None or c.disjunction[0] not in _hull_groups)
+                )
+                or (isinstance(c, _DisjunctiveConstraint) and c.parent_indicator is not None)
             )
-            or (isinstance(c, _DisjunctiveConstraint) and c.parent_indicator is not None)
         )
         if _n_ind:
             _which = (
                 "Model.if_then rows, add_disjunction blocks the hull cannot take "
-                "(an empty disjunct, a shared indicator, a block nested in a "
-                "Disjunct -- hull + nesting is #1775 G2.1 -- or an OR block, "
-                "which may select several disjuncts)"
+                "(an empty disjunct, a shared indicator, an OR block, which may "
+                "select several disjuncts, or a block nested in one of those), and "
+                "OR disjunctions nested in a Disjunct"
                 if method == "hull"
                 else "Model.if_then, and the Disjunct blocks of Model.add_disjunction"
             )
@@ -303,6 +317,8 @@ def reformulate_gdp(
 
     _hull_emitted: set[str] = set()
     for ci, c in enumerate(model._constraints):
+        if _hulled_inside(c):
+            continue  # lowered inside its parent's hull (#1775 G2.1)
         if (
             isinstance(c, _IndicatorConstraint)
             and c.disjunction is not None
@@ -313,7 +329,11 @@ def reformulate_gdp(
                 _hull_emitted.add(key)
                 dc, sels = _hull_groups[key]
                 new_vars, new_cons = _reformulate_disjunction_hull(
-                    dc, new_model, _add_aux_binary, selectors=sels
+                    dc,
+                    new_model,
+                    _add_aux_binary,
+                    selectors=sels,
+                    child_selectors=_hull_plan.child_selectors,
                 )
                 new_model._constraints.extend(new_cons)
         elif isinstance(c, _IndicatorConstraint):
@@ -322,8 +342,10 @@ def reformulate_gdp(
         elif isinstance(c, _DisjunctiveConstraint) and c.parent_indicator is not None:
             # #1775 G1.2: nested in a Disjunct block. The nested big-M lowering ties
             # its selectors to the block's indicator (they sum to it), whatever the
-            # method: hull + nesting is #1775 G2.1 and the simplex lowering has no
-            # selectors. Counted in the warning above for those two methods.
+            # method, unless the hull took it in with its parent (#1775 G2.1, skipped
+            # above): the simplex lowering has no selectors, and a hull of the child
+            # alone would assume its parent selected. Counted in the warning above
+            # for those two methods.
             new_vars, new_cons = _reformulate_disjunction_nested(
                 c, new_model, _add_aux_binary, parent_selector=c.parent_indicator
             )
@@ -381,6 +403,21 @@ def reformulate_gdp(
             # Regular Constraint -- keep as-is
             new_model._constraints.append(c)
 
+    # A hulled block none of whose disjuncts has a row of its own (each holds only
+    # nesting) tags no row, so the loop above never reached it: lower it here, or
+    # the nested disjunctions it took in would be dropped (#1790 shapes, G2.1).
+    for key, (dc, sels) in _hull_groups.items():
+        if key not in _hull_emitted:
+            _hull_emitted.add(key)
+            new_vars, new_cons = _reformulate_disjunction_hull(
+                dc,
+                new_model,
+                _add_aux_binary,
+                selectors=sels,
+                child_selectors=_hull_plan.child_selectors,
+            )
+            new_model._constraints.extend(new_cons)
+
     # Complementarity provenance (#1147). The rows above materialize a declared
     # ``0 <= f _|_ g >= 0`` into a selector binary and big-M/hull rows; the
     # *relation* — its source operands, its bounds, its scale — lives only on
@@ -393,64 +430,142 @@ def reformulate_gdp(
     return new_model
 
 
-def _collect_indicator_hull_groups(
-    model: Model,
-) -> dict[str, tuple[_DisjunctiveConstraint, list[Variable]]]:
+class _HullPlan(NamedTuple):
+    """What :func:`_collect_indicator_hull_groups` hands the GDP pass.
+
+    ``groups`` maps the key of each top-level ``add_disjunction`` block the hull
+    lowers to its rebuilt disjunction and selectors. ``child_selectors`` maps
+    ``id`` of a block nested inside one of them to its indicators, whose select row
+    (``sum == parent``) the model already carries. ``absorbed_keys`` /
+    ``absorbed_ids`` name the nested blocks and the nested ``Model.disjunction``
+    objects lowered *inside* a group, so the pass skips them where they stand.
+    """
+
+    groups: dict[str, tuple[_DisjunctiveConstraint, list[Variable]]]
+    child_selectors: dict[int, list[Variable]]
+    absorbed_keys: set[str]
+    absorbed_ids: set[int]
+
+
+def _collect_indicator_hull_groups(model: Model) -> _HullPlan:
     """Rebuild the ``Model.add_disjunction`` blocks the hull can lower (#1615 C-10a).
 
     ``add_disjunction`` lowers each Disjunct to ``if_then`` rows tagged
-    ``(key, k, n)``. A group qualifies when every disjunct ``0..n-1`` has at
-    least one row, each disjunct's rows share one indicator with
+    ``(key, k, n)``. A group qualifies when it is SELECT_ONE, every disjunct
+    ``0..n-1`` has content, each disjunct's rows share one indicator with
     ``active_value == 1``, and the ``n`` indicators are distinct. An empty
     disjunct leaves its indicator unrecorded, and the hull needs every selector,
-    so such a group stays on big-M (and is counted in the caller's warning).
+    so such a group stays on big-M (and is counted in the caller's warning). An OR
+    block may select several disjuncts, and the hull's aggregation assumes exactly
+    one, so it stays on big-M too (#1775 G1.4).
+
+    Nesting (#1775 G2.1). A block nested in a Disjunct sums its indicators to the
+    parent's, not to 1, so it cannot be hulled on its own: with the parent off, its
+    hull would force every disaggregated copy -- and so every shared variable -- to
+    0. It is hulled *inside* its parent instead, as an item of the parent disjunct,
+    when the parent group is itself hulled; so is a ``Model.disjunction`` passed to
+    ``Disjunct.subject_to``. A disjunct whose only content is nesting has its
+    indicator from the nesting record. Whatever is not taken in stays on big-M,
+    tied to its parent's indicator exactly as before.
     """
     rows: dict[str, dict[int, list[_IndicatorConstraint]]] = {}
     sizes: dict[str, int] = {}
-    nested: set[str] = set()
+    parents: dict[str, Optional[Variable]] = {}
+    excluded: set[str] = set()
     for c in model._constraints:
         if isinstance(c, _IndicatorConstraint) and c.disjunction is not None:
             key, k, n = c.disjunction
             rows.setdefault(key, {}).setdefault(k, []).append(c)
-            # #1775 G1.2: a block nested in a Disjunct sums its indicators to the
-            # parent's, not to 1. The hull below assumes exactly one is selected:
-            # with the parent off, it would force every disaggregated copy -- and
-            # so every shared variable -- to 0. Its rows stay on big-M.
-            if c.parent is not None:
-                nested.add(key)
-            # #1775 G1.4: an OR block may select several disjuncts; the hull's
-            # aggregation assumes exactly one. Its rows stay on big-M.
+            if key in parents and parents[key] is not c.parent:
+                excluded.add(key)  # inconsistent nesting tag: leave it on big-M
+            parents.setdefault(key, c.parent)
             if c.semantics is not DisjunctionSemantics.SELECT_ONE:
-                nested.add(key)
+                excluded.add(key)
             if sizes.setdefault(key, n) != n:
                 sizes[key] = -1  # inconsistent tag: leave the group on big-M
-    groups: dict[str, tuple[_DisjunctiveConstraint, list[Variable]]] = {}
-    for key, by_k in rows.items():
-        if key in nested:
-            continue
-        n = sizes[key]
-        if n < 1 or sorted(by_k) != list(range(n)):
-            continue
+    members = getattr(model, "_gdp_block_members", {})
+    for key, mem in members.items():
+        if key in rows and parents.get(key) is not mem.parent:
+            excluded.add(key)
+        parents.setdefault(key, mem.parent)
+        if mem.semantics is not DisjunctionSemantics.SELECT_ONE:
+            excluded.add(key)
+        if sizes.setdefault(key, len(mem.indicators)) != len(mem.indicators):
+            sizes[key] = -1
+
+    # The nested content of each disjunct, keyed by the id of its indicator.
+    child_keys: dict[int, list[str]] = {}
+    for key, par in parents.items():
+        if par is not None:
+            child_keys.setdefault(id(par), []).append(key)
+    child_dcs: dict[int, list[_DisjunctiveConstraint]] = {}
+    for c in model._constraints:
+        if isinstance(c, _DisjunctiveConstraint) and c.parent_indicator is not None:
+            child_dcs.setdefault(id(c.parent_indicator), []).append(c)
+
+    def _selectors(key: str) -> Optional[list[Variable]]:
+        n = sizes.get(key, -1)
+        if key in excluded or n < 1:
+            return None
+        by_k = rows.get(key, {})
+        mem = members.get(key)
         sels: list[Variable] = []
-        ok = True
         for k in range(n):
-            inds = {id(r.indicator) for r in by_k[k]}
-            if len(inds) != 1 or any(r.active_value != 1 for r in by_k[k]):
-                ok = False
-                break
-            ind = by_k[k][0].indicator
+            ks = by_k.get(k, [])
+            inds = {id(r.indicator) for r in ks}
+            if len(inds) > 1 or any(r.active_value != 1 for r in ks):
+                return None
+            if ks:
+                ind = ks[0].indicator
+                if mem is not None and mem.indicators[k] is not ind:
+                    return None
+            elif mem is not None:
+                ind = mem.indicators[k]
+                if id(ind) not in child_keys and id(ind) not in child_dcs:
+                    return None  # an empty disjunct: no content to hull
+            else:
+                return None
             if not isinstance(ind, Variable):
-                ok = False
-                break
+                return None
             sels.append(ind)
-        if not ok or len({id(v) for v in sels}) != n:
+        if len({id(v) for v in sels}) != n:
+            return None
+        return sels
+
+    child_selectors: dict[int, list[Variable]] = {}
+    absorbed_keys: set[str] = set()
+    absorbed_ids: set[int] = set()
+
+    def _build(key: str, sels: list[Variable]) -> _DisjunctiveConstraint:
+        by_k = rows.get(key, {})
+        disjuncts: list[list] = []
+        for k, ind in enumerate(sels):
+            items: list = [r.constraint for r in by_k.get(k, [])]
+            for ck in child_keys.get(id(ind), []):
+                csels = _selectors(ck)
+                if csels is None:
+                    continue  # stays on big-M, tied to ``ind``
+                child = _build(ck, csels)
+                child_selectors[id(child)] = csels
+                absorbed_keys.add(ck)
+                items.append(child)
+            for cdc in child_dcs.get(id(ind), []):
+                if cdc.semantics is not DisjunctionSemantics.SELECT_ONE:
+                    continue  # OR: big-M only
+                absorbed_ids.add(id(cdc))
+                items.append(cdc)
+            disjuncts.append(items)
+        return _DisjunctiveConstraint(disjuncts=disjuncts, name=key.replace(":", "_"))
+
+    groups: dict[str, tuple[_DisjunctiveConstraint, list[Variable]]] = {}
+    for key in parents:
+        if parents[key] is not None:
             continue
-        dc = _DisjunctiveConstraint(
-            disjuncts=[[r.constraint for r in by_k[k]] for k in range(n)],
-            name=key.replace(":", "_"),
-        )
-        groups[key] = (dc, sels)
-    return groups
+        sels = _selectors(key)
+        if sels is None:
+            continue
+        groups[key] = (_build(key, sels), sels)
+    return _HullPlan(groups, child_selectors, absorbed_keys, absorbed_ids)
 
 
 #: Real-valued functions undefined on a whole *region* of the line, as
@@ -1838,34 +1953,14 @@ def _reformulate_disjunction_nested(
 # ── Hull reformulation ──
 
 
-def _reject_nested_under_hull(dc: _DisjunctiveConstraint) -> None:
-    """Refuse a nested disjunction on the hull path, which cannot lower it.
-
-    Only the big-M path implements nesting (``_reformulate_disjunction_nested``).
-    The hull path walks ``con.body`` over every item in a disjunct, and a nested
-    ``_DisjunctiveConstraint`` has no ``.body`` — so without this guard the pass
-    dies on a bare ``AttributeError`` from deep inside the disaggregation, which
-    names neither the disjunction nor the real limitation (issue #1124).
-    """
-    for k, disjunct in enumerate(dc.disjuncts):
-        for item in disjunct:
-            if isinstance(item, _DisjunctiveConstraint):
-                raise NotImplementedError(
-                    f"the hull reformulation does not support nested disjunctions: "
-                    f"disjunct {k} of {dc.name or '<anon>'!r} contains the nested "
-                    f"disjunction {item.name or '<anon>'!r}. Use "
-                    "gdp_method='big-m' (or 'mbigm'), which implements nesting, or "
-                    "flatten the disjunction. Tracking issue: "
-                    "https://github.com/jkitchin/discopt/issues/1124"
-                )
-
-
 def _reformulate_disjunction_hull(
     dc: _DisjunctiveConstraint,
     model: Model,
     add_aux_binary,
     eps: float = 1e-8,
     selectors: Optional[list[Variable]] = None,
+    prefix: Optional[str] = None,
+    child_selectors: Optional[dict[int, list[Variable]]] = None,
 ) -> tuple[list[Variable], list[Constraint]]:
     """Reformulate a disjunction via convex hull relaxation.
 
@@ -1893,6 +1988,27 @@ def _reformulate_disjunction_hull(
         auxiliaries. The caller owns their select-one row, so none is emitted
         (#1615 C-10a: the indicators of a ``Model.add_disjunction`` block, whose
         ``exactly(1)`` row the model already carries).
+    prefix : str, optional
+        Name stem of the generated variables and rows (default: ``dc.name``). A
+        nested disjunction gets one derived from its parent's, so two unnamed
+        children cannot collide.
+    child_selectors : dict, optional
+        ``id`` of a nested disjunction -> the selectors it is hulled on, for a
+        nested ``add_disjunction`` block (its indicators, whose ``sum == parent``
+        row the model carries). Any other nested disjunction gets fresh selectors.
+
+    Nesting (#1775 G2.1) is lowered from the leaves up, as Pyomo's ``gdp.hull``
+    does: a disjunction nested in disjunct ``k`` is hulled first, on its own fresh
+    selectors, and everything that emits -- its select-one row, its aggregation
+    rows ``x = sum v``, its bound links and its hulled rows -- becomes rows of
+    disjunct ``k``. The child's selectors and disaggregated copies are **local** to
+    disjunct ``k``: they are not disaggregated again but, being zero whenever
+    ``y_k`` is, are already disjunct ``k``'s own copies. So they get the bound links
+    ``lb*y_k <= w <= ub*y_k`` and enter the parent's perspective as ``w / yhat_k``,
+    while every variable the child shares with the outside is disaggregated by the
+    parent as usual. Re-hulling then turns the child's ``sum y_c = 1`` into
+    ``sum y_c = y_k`` and its ``x = sum v`` into ``x_k = sum v``: the exact nested
+    hull at every integer point.
 
     Returns
     -------
@@ -1900,11 +2016,11 @@ def _reformulate_disjunction_hull(
         New variables and constraints.
     """
     _require_supported_semantics(dc)
-    _reject_nested_under_hull(dc)
     n_disjuncts = len(dc.disjuncts)
     new_vars: list[Variable] = []
     new_cons: list[Constraint] = []
-    prefix = dc.name or "anon"
+    if prefix is None:
+        prefix = dc.name or "anon"
 
     if selectors is not None:
         if len(selectors) != n_disjuncts:
@@ -1939,17 +2055,62 @@ def _reformulate_disjunction_hull(
     # function's docstring for why the disjunction-wide union is not enough).
     _assert_hull_saw_every_variable(dc)
 
+    # --- Nested disjunctions, leaves first (#1775 G2.1) ---
+    # rows[k]: disjunct k's rows, its children's emitted rows included;
+    # local[k]: the variables its children created, keyed by name.
+    rows: list[list[Constraint]] = []
+    local: list[dict[str, Variable]] = []
+    for k, disjunct in enumerate(dc.disjuncts):
+        rows_k: list[Constraint] = []
+        local_k: dict[str, Variable] = {}
+        for j, item in enumerate(disjunct):
+            if isinstance(item, _DisjunctiveConstraint):
+                own = (child_selectors or {}).get(id(item))
+                child_vars, child_cons = _reformulate_disjunction_hull(
+                    item,
+                    model,
+                    add_aux_binary,
+                    eps=eps,
+                    selectors=own,
+                    prefix=f"{prefix}_d{k}_{item.name or j}",
+                    child_selectors=child_selectors,
+                )
+                # A block's indicators are zero whenever y_k is (their ``sum ==
+                # parent`` row), so they are disjunct k's own, like fresh selectors.
+                local_k.update((v.name, v) for v in [*(own or []), *child_vars])
+                rows_k.extend(child_cons)
+                new_vars.extend(child_vars)
+            else:
+                rows_k.append(item)
+        rows.append(rows_k)
+        local.append(local_k)
+
     # --- Collect all variables across all disjuncts ---
+    # A child's variables are local to their disjunct, never disaggregated again.
+    local_names = {name for local_k in local for name in local_k}
     all_vars: dict[str, Variable] = {}
-    for disjunct in dc.disjuncts:
-        for con in disjunct:
-            all_vars.update(_collect_variables(con.body))
+    for k, rows_k in enumerate(rows):
+        for con in rows_k:
+            for n, v in _collect_variables(con.body).items():
+                if n not in local_names:
+                    all_vars[n] = v
+                elif n not in local[k]:
+                    # A nested block's indicator used in a sibling disjunct: there it
+                    # is a shared variable, here a local -- no one copy is both.
+                    raise ValueError(
+                        f"GDP hull reformulation of disjunction {prefix!r}: {n!r}, an "
+                        "indicator of a disjunction nested in one of its disjuncts, "
+                        f"also appears in disjunct {k}. Use gdp_method='big-m'."
+                    )
 
     # --- Per-disjunct bounds and disaggregated variables ---
-    # disjunct_bounds[k][var_name] = (dlb, dub)
+    # disjunct_bounds[k][var_name] = (dlb, dub). Only the disjunct's own rows bound
+    # its copies: a child's rows hold under a child selector, not under y_k.
     disjunct_bounds: list[dict[str, tuple[float, float]]] = []
     for k, disjunct in enumerate(dc.disjuncts):
-        db = _extract_disjunct_bounds(disjunct, model)
+        db = _extract_disjunct_bounds(
+            [c for c in disjunct if not isinstance(c, _DisjunctiveConstraint)], model
+        )
         # Fill in global bounds for variables not constrained in this disjunct
         for vname, var in all_vars.items():
             if vname not in db:
@@ -2039,12 +2200,42 @@ def _reformulate_disjunction_hull(
                     name=f"_hull_lb_{prefix}_{vname}_{k}",
                 )
             )
+        # A child's variable w is disjunct k's own copy: lb*y_k <= w <= ub*y_k. Its
+        # bounds hold 0 (a copy's [min(lb,0), max(ub,0)]; a selector's [0, 1]), so
+        # the links are valid, and at y_k = 0 they pin it to 0 as for any copy.
+        for wname, w in local[k].items():
+            wlb, wub = float(np.min(w.lb)), float(np.max(w.ub))
+            if not (wlb <= 0.0 <= wub):
+                raise AssertionError(
+                    f"hull of {prefix!r}: nested variable {wname!r} has bounds "
+                    f"[{wlb:g}, {wub:g}], which exclude 0"
+                )
+            new_cons.append(
+                Constraint(
+                    body=w - _wrap(wub) * y_k,
+                    sense="<=",
+                    rhs=0.0,
+                    name=f"_hull_ub_{prefix}_{wname}_{k}",
+                )
+            )
+            if wlb < 0.0:
+                new_cons.append(
+                    Constraint(
+                        body=w - _wrap(wlb) * y_k,
+                        sense=">=",
+                        rhs=0.0,
+                        name=f"_hull_lb_{prefix}_{wname}_{k}",
+                    )
+                )
 
     # --- Constraint reformulation per disjunct ---
-    for k, disjunct in enumerate(dc.disjuncts):
+    for k, rows_k in enumerate(rows):
         y_k = selectors[k]
+        # The perspective divides every variable owned by disjunct k by yhat_k:
+        # its copies of the shared variables, and its children's locals.
+        zero_vars = {**all_vars, **local[k]}
 
-        for j, con in enumerate(disjunct):
+        for j, con in enumerate(rows_k):
             cname = f"_hull_{prefix}_d{k}_c{j}"
 
             if _is_linear(con.body):
@@ -2087,9 +2278,10 @@ def _reformulate_disjunction_hull(
                 # 3.86e-09 (the on disjunct). Shrinking eps does not help --
                 # the model is still exactly infeasible at eps = 1e-14 -- which is
                 # why only cancelling the terms, not making them small, fixes it.
-                g0 = _body_at_zero(con.body, all_vars) - float(np.max(con.rhs))
+                g0 = _body_at_zero(con.body, zero_vars) - float(np.max(con.rhs))
                 y_clamp = _wrap(1.0 - eps) * y_k + _wrap(eps)
                 persp_map = {vname: disagg[k][vname] / y_clamp for vname in all_vars}
+                persp_map.update({wname: w / y_clamp for wname, w in local[k].items()})
                 subst_body = _substitute_vars(con.body, persp_map)
                 hull_body = subst_body * y_clamp
                 if g0 != 0.0:
@@ -2201,6 +2393,8 @@ def _assert_hull_saw_every_variable(dc: _DisjunctiveConstraint) -> None:
 
     for k, disjunct in enumerate(dc.disjuncts):
         for j, con in enumerate(disjunct):
+            if isinstance(con, _DisjunctiveConstraint):
+                continue  # checked by its own hull call (#1775 G2.1)
             collected = _collect_variables(con.body)
             missed = sorted(
                 {

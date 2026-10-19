@@ -111,6 +111,53 @@ def _nested3_member(v, t):
     return (x <= 3 + t and mid) or x >= 7 - t
 
 
+def _nested3_blocks():
+    """``nested3`` as Disjunct blocks (#1775 G2.1: hull lowers block nesting too):
+    A [x<=3, M1 [y<=2, I1 [z<=1] v I2 [z>=4]] v M2 [y>=6]] v B [x>=7]."""
+    m = dm.Model("nested3_blocks")
+    x = m.continuous("x", lb=0, ub=10)
+    y = m.continuous("y", lb=0, ub=10)
+    z = m.continuous("z", lb=0, ub=10)
+    i1, i2 = m.make_disjunct("I1"), m.make_disjunct("I2")
+    i1.subject_to(z <= 1)
+    i2.subject_to(z >= 4)
+    m1, m2 = m.make_disjunct("M1"), m.make_disjunct("M2")
+    m1.subject_to(y <= 2)
+    m1.add_disjunction([i1, i2], name="inner")
+    m2.subject_to(y >= 6)
+    a, b = m.make_disjunct("A"), m.make_disjunct("B")
+    a.subject_to(x <= 3)
+    a.add_disjunction([m1, m2], name="mid")
+    b.subject_to(x >= 7)
+    m.add_disjunction([a, b], name="outer")
+    m.minimize(x + y + z)
+    return m
+
+
+def _nested3_blocks_member(v, t):
+    """The indicators are columns, so the point carries its selection, which must
+    be consistent (each level's indicators sum to its parent's)."""
+    s = {k: round(v[f"{k}_active"]) for k in ("A", "B", "M1", "M2", "I1", "I2")}
+    if s["A"] + s["B"] != 1 or s["M1"] + s["M2"] != s["A"] or s["I1"] + s["I2"] != s["M1"]:
+        return False
+    return (
+        (not s["A"] or v["x"] <= 3 + t)
+        and (not s["B"] or v["x"] >= 7 - t)
+        and (not s["M1"] or v["y"] <= 2 + t)
+        and (not s["M2"] or v["y"] >= 6 - t)
+        and (not s["I1"] or v["z"] <= 1 + t)
+        and (not s["I2"] or v["z"] >= 4 - t)
+    )
+
+
+_NESTED3_SELECTIONS = [
+    {"A": 1, "B": 0, "M1": 1, "M2": 0, "I1": 1, "I2": 0},
+    {"A": 1, "B": 0, "M1": 1, "M2": 0, "I1": 0, "I2": 1},
+    {"A": 1, "B": 0, "M1": 0, "M2": 1, "I1": 0, "I2": 0},
+    {"A": 0, "B": 1, "M1": 0, "M2": 0, "I1": 0, "I2": 0},
+]
+
+
 def _or_semantics():
     m = dm.Model("or_semantics")
     x = m.continuous("x", lb=0, ub=10)
@@ -398,6 +445,20 @@ SHAPES: list[Shape] = [
         refuses={"simplex": (Exception, r"nested disjunction is not an algebraic predicate")},
     ),
     Shape(
+        "nested3_blocks",
+        _nested3_blocks,
+        _nested3_blocks_member,
+        # Every consistent selection on a grid, so each disjunct's feasible region
+        # is sampled (random indicators are rarely consistent).
+        points=[
+            {"x": x, "y": y, "z": z, **{f"{k}_active": a for k, a in sel.items()}}
+            for sel in _NESTED3_SELECTIONS
+            for x in (2.0, 5.0, 8.0)
+            for y in (1.0, 4.0, 7.0)
+            for z in (0.5, 2.5, 5.0)
+        ],
+    ),
+    Shape(
         "or_semantics",
         _or_semantics,
         lambda v, t: v["x"] <= 6 + t,
@@ -606,9 +667,7 @@ SHAPES: list[Shape] = [
 #: the task or open issue, and ``raises`` pins the failure, so neither an
 #: unrelated harness error nor a silently-renamed API can keep the marker green.
 #: Strict, so the marker fails the day the case starts passing.
-XFAIL: dict[tuple[str, str], tuple[str, type[BaseException]]] = {
-    ("nested3", "hull"): ("hull refuses nesting: #1775 G2.1", NotImplementedError),
-}
+XFAIL: dict[tuple[str, str], tuple[str, type[BaseException]]] = {}
 
 
 def _params():
