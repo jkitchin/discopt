@@ -24,6 +24,7 @@ import numpy as np
 
 from discopt._relax._numeric import FLOAT_EPS, ROUNDOFF_OPS
 from discopt.modeling.core import (
+    _BLOCK_ROWS,
     _SELECT_ONE_ROWS,
     GDP_AUX_PREFIX,
     BinaryOp,
@@ -83,23 +84,39 @@ _BIGM_SENTINEL = 1e15
 _SUPPORTED_SEMANTICS: frozenset[tuple[SelectorActivation, SelectorCardinality]] = _SELECT_ONE_ROWS
 
 
+#: #1775 G1.4: big-M (and its nested form) also encodes OR -- the same one-way
+#: activation under ``sum_k y_k >= 1`` (``>= parent`` when nested). Hull, mbigm
+#: and the simplex-free paths keep ``_SUPPORTED_SEMANTICS``: Pyomo's hull and
+#: mbigm refuse OR too, and a hull's aggregation assumes exactly one selector.
+#: One declaration with ``core._BLOCK_ROWS``: block emission and big-M serve the
+#: same pairs, so the two gates cannot drift apart.
+_BIG_M_SEMANTICS: frozenset[tuple[SelectorActivation, SelectorCardinality]] = _BLOCK_ROWS
+
+
+def _is_or(dc: _DisjunctiveConstraint) -> bool:
+    """True when ``dc`` declares at-least-one (OR) cardinality."""
+    return dc.semantics.cardinality is SelectorCardinality.AT_LEAST_ONE
+
+
 def _semantics_is_supported(semantics: DisjunctionSemantics) -> bool:
     """True when the rows this module emits encode *semantics* exactly."""
     return _semantics_supported_by(semantics, _SUPPORTED_SEMANTICS)
 
 
-def _require_supported_semantics(dc: _DisjunctiveConstraint) -> None:
+def _require_supported_semantics(
+    dc: _DisjunctiveConstraint,
+    supported: frozenset[tuple[SelectorActivation, SelectorCardinality]] = _SUPPORTED_SEMANTICS,
+) -> None:
     """Refuse any disjunction whose declared semantics these rows do not encode.
 
     Emitting one-way/exactly-one rows for a disjunction declared ``OR`` or
     ``EXACTLY_ONE_TRUE`` would silently hand back a different feasible set than
     the model declares — a truth-semantics model would be solved as select-one
-    and certified. Refuse loudly instead (issue #1124).
+    and certified. Refuse loudly instead (issue #1124). ``supported`` is what the
+    calling lowering emits (big-M passes :data:`_BIG_M_SEMANTICS`).
     """
     semantics = getattr(dc, "semantics", DisjunctionSemantics.SELECT_ONE)
-    _require_semantics_supported(
-        semantics, _SUPPORTED_SEMANTICS, f"disjunction {dc.name or '<anon>'!r}"
-    )
+    _require_semantics_supported(semantics, supported, f"disjunction {dc.name or '<anon>'!r}")
 
 
 #: Every ``method`` :func:`reformulate_gdp` implements. Anything else is refused:
@@ -248,8 +265,9 @@ def reformulate_gdp(
         if _n_ind:
             _which = (
                 "Model.if_then rows, add_disjunction blocks the hull cannot take "
-                "(an empty disjunct, a shared indicator, or a block nested in a "
-                "Disjunct -- hull + nesting is #1775 G2.1)"
+                "(an empty disjunct, a shared indicator, a block nested in a "
+                "Disjunct -- hull + nesting is #1775 G2.1 -- or an OR block, "
+                "which may select several disjuncts)"
                 if method == "hull"
                 else "Model.if_then, and the Disjunct blocks of Model.add_disjunction"
             )
@@ -327,7 +345,7 @@ def reformulate_gdp(
                         f"{c.name or '<anon>'!r}: its indicators were read (to be "
                         "referenced in logic, fixed or priced), and the simplex "
                         "lowering has no selector binaries to bind them to. Use "
-                        "'big-m', 'mbigm' or 'hull'."
+                        + ("'big-m'." if _is_or(c) else "'big-m', 'mbigm' or 'hull'.")
                     )
                 new_vars, new_cons = _reformulate_disjunction_simplex(
                     c, new_model, _add_simplex_weight, ci
@@ -339,6 +357,10 @@ def reformulate_gdp(
             else:
                 # big-m and mbigm both go through _reformulate_disjunction;
                 # the difference is only whether lp_data is supplied.
+                if chosen == "mbigm":
+                    # #1775 G1.4: OR is a big-M feature only; mbigm refuses it,
+                    # as Pyomo's gdp.mbigm does.
+                    _require_supported_semantics(c)
                 disj_lp = lp_data if chosen == "mbigm" else None
                 new_vars, new_cons = _reformulate_disjunction(
                     c, new_model, _add_aux_binary, lp_data=disj_lp, selectors=own_sels
@@ -389,6 +411,10 @@ def _collect_indicator_hull_groups(
             # with the parent off, it would force every disaggregated copy -- and
             # so every shared variable -- to 0. Its rows stay on big-M.
             if c.parent is not None:
+                nested.add(key)
+            # #1775 G1.4: an OR block may select several disjuncts; the hull's
+            # aggregation assumes exactly one. Its rows stay on big-M.
+            if c.semantics is not DisjunctionSemantics.SELECT_ONE:
                 nested.add(key)
             if sizes.setdefault(key, n) != n:
                 sizes[key] = -1  # inconsistent tag: leave the group on big-M
@@ -1562,9 +1588,11 @@ def _reformulate_disjunction(
     place of generated selectors, and step 1 is skipped: the model already
     carries their ``exactly(1)`` row.
 
+    Under OR semantics (#1775 G1.4) step 1 is ``sum_k y_k >= 1``.
+
     Returns new variables and constraints.
     """
-    _require_supported_semantics(dc)
+    _require_supported_semantics(dc, _BIG_M_SEMANTICS)
     n_disjuncts = len(dc.disjuncts)
     new_vars = []
     new_cons = []
@@ -1595,7 +1623,7 @@ def _reformulate_disjunction(
         new_cons.append(
             Constraint(
                 body=sum_expr - _wrap(1.0),
-                sense="==",
+                sense=">=" if _is_or(dc) else "==",
                 rhs=0.0,
                 name=f"_gdp_select_{dc.name}" if dc.name else None,
             )
@@ -1711,9 +1739,11 @@ def _reformulate_disjunction_nested(
     """Reformulate a nested disjunction linked to a parent selector.
 
     When parent_selector = 0, all inner selectors must be 0.
-    When parent_selector = 1, exactly one inner selector must be 1.
+    When parent_selector = 1, exactly one inner selector must be 1 -- or, under
+    OR semantics (#1775 G1.4), at least one: ``sum_k y_k >= parent`` together
+    with ``y_k <= parent`` for each ``k``.
     """
-    _require_supported_semantics(dc)
+    _require_supported_semantics(dc, _BIG_M_SEMANTICS)
     n_disjuncts = len(dc.disjuncts)
     new_vars = []
     new_cons = []
@@ -1733,11 +1763,15 @@ def _reformulate_disjunction_nested(
     new_cons.append(
         Constraint(
             body=sum_expr - parent_selector,
-            sense="==",
+            sense=">=" if _is_or(dc) else "==",
             rhs=0.0,
             name=f"_gdp_nested_select_{dc.name}" if dc.name else None,
         )
     )
+    if _is_or(dc):
+        new_cons.extend(
+            Constraint(body=y_k - parent_selector, sense="<=", rhs=0.0) for y_k in selectors
+        )
 
     # Big-M for each inner constraint
     for k, disjunct in enumerate(dc.disjuncts):

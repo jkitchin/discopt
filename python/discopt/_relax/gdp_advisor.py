@@ -41,6 +41,7 @@ import numpy as np
 from discopt.modeling.core import (
     Constraint,
     Model,
+    SelectorCardinality,
     _DisjunctiveConstraint,
 )
 
@@ -165,6 +166,20 @@ def recommend_method(
     # is the only lowering that can take the disjunction -- unless it is nested,
     # which hull does not lower either.
     from discopt._relax.gdp_reformulate import _domain_gap
+
+    # #1775 G1.4: OR is lowered by big-M only (hull and mbigm refuse it).
+    if dc.semantics.cardinality is SelectorCardinality.AT_LEAST_ONE:
+        return GdpAdvice(
+            disjunction_index=-1,
+            name=name,
+            recommendation="big-m",
+            rationale="OR (at-least-one) semantics ⇒ big-m, the lowering that encodes it",
+            n_disjuncts=n_disjuncts,
+            n_common_vars=n_common_vars,
+            hull_aux_cost=hull_aux_cost,
+            has_nonlinear=has_nonlinear,
+            max_big_m=effective_M,
+        )
 
     nested = any(not isinstance(c, Constraint) for d in dc.disjuncts for c in d)
     gaps = [
