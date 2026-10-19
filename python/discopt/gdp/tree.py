@@ -243,8 +243,37 @@ def gdp_tree(model: Model) -> GDPTree:
     # #1775 G1.2: fill the indicators of block disjuncts that emitted no row, then
     # move every root that names a parent indicator under the disjunct owning it.
     members = getattr(model, "_gdp_block_members", {})
+    # A block disjunction none of whose disjuncts has a row of its own (each holds
+    # only nested disjunctions, or nothing) is tagged on no row, so the loop above
+    # never saw it (#1790); build its node from the emission record, at the place
+    # in model order where its emission began.
+    rowless: list[DisjunctionNode] = []
+    for key, rec in members.items():
+        if key in groups:
+            continue
+        group = DisjunctionNode(
+            next_id(),
+            key,
+            "add_disjunction",
+            DisjunctionSemantics.SELECT_ONE,
+            [],
+            None,
+            Origin(rec.start, key),
+        )
+        group.disjuncts = [
+            DisjunctNode(next_id(), None, None, 1, [], parent=group) for _ in rec.indicators
+        ]
+        groups[key] = group
+        rowless.append(group)
+        if rec.parent is not None:
+            parents[group] = rec.parent
+    if rowless:
+        # Stable, and a row-less node sorts before a root starting at the same index.
+        # Every root built here has an origin; -1 would only ever sort a stray first.
+        roots = sorted(rowless + roots, key=lambda r: r.origin.index if r.origin else -1)
     for key, node in groups.items():
-        for d, v in zip(node.disjuncts, members.get(key, ())):
+        rec = members.get(key)
+        for d, v in zip(node.disjuncts, rec.indicators if rec is not None else ()):
             if d.indicator is None:
                 d.indicator, d.name = BooleanVar(v), v.name
     owner: dict[int, DisjunctNode] = {}
