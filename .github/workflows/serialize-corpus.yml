@@ -1,0 +1,79 @@
+name: Serialization corpus (weekly)
+
+# Serialization plan WP-8 (docs/dev/serialization-completion-plan.md §6): the
+# `slow` serialization tests, which the PR-fast lane skips -- the in-repo corpus
+# round trip (test_serialize_corpus.py and the harness behind it), the ratio
+# budgets (test_serialize_perf_budget.py), the builder sweep's slow half, and the
+# property/fuzz tests under the `slow` hypothesis profile, which draws FRESH
+# examples (the `ci` profile the fast lane uses is derandomized, so it never finds
+# a new reader bug -- this job is where they are hunted).
+#
+# Weekly, like graduation-gate.yml, not nightly: ci.yml explains why a daily
+# re-run against a SHA that has usually not moved is not worth its minutes. A PR
+# that edits the format, the fixtures or this job runs it too, so a break is seen
+# before merge rather than at the next Monday. The full MINLPLib/QPLIB corpora are
+# not in the repository and do not run here (owner machine, plan §6).
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Mondays 06:37 UTC, clear of the graduation gate (07:42) and AMP (08:18).
+    - cron: "37 6 * * 1"
+  pull_request:
+    paths:
+      - ".github/workflows/serialize-corpus.yml"
+      - "python/discopt/serialize.py"
+      - "python/discopt/result_io.py"
+      - "python/tests/data/serialize_fixtures/**"
+      - "scripts/serialize_corpus_roundtrip.py"
+      - "scripts/serialize_perf_ladder.py"
+
+concurrency:
+  group: >-
+    ${{ github.workflow }}-${{
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        && github.run_id || github.ref }}
+  cancel-in-progress: true
+
+# Same release-profile overrides as ci.yml (see the comment there).
+env:
+  CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS: "true"
+  CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS: "true"
+
+jobs:
+  serialize-corpus:
+    name: Serialization corpus + slow property/fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python dependencies
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install maturin
+          pip install jax jaxlib numpy scipy highspy pytest pytest-timeout pytest-xdist hypothesis
+          maturin develop --release
+      - name: In-repo corpus harness
+        run: |
+          source .venv/bin/activate
+          python -u scripts/serialize_corpus_roundtrip.py --in-repo-only
+      - name: Slow serialization tests (corpus, budgets, builders)
+        run: |
+          source .venv/bin/activate
+          pytest python/tests/test_serialize_corpus.py python/tests/test_serialize_perf_budget.py \
+            python/tests/test_serialize_builders.py -m slow -q --tb=short --timeout=600 -n 2
+      - name: Property and fuzz tests, slow profile (fresh examples)
+        env:
+          HYPOTHESIS_PROFILE: slow
+        run: |
+          source .venv/bin/activate
+          pytest python/tests/test_serialize_property.py python/tests/test_serialize_fuzz.py \
+            -m "slow or not slow" -q --tb=short --timeout=900 -n 2

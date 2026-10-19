@@ -6416,7 +6416,8 @@ class Model:
     # per-node stamp is a per-node cost): a lone ``Expression`` pickle carries its
     # model through its variables, and with it that model's one stamp. To keep a
     # model on disk, use ``Model.save`` /
-    # ``discopt.modeling.dumps`` (``discopt.serialize``).
+    # ``discopt.modeling.dumps`` (``discopt.serialize``), whose compatibility rules
+    # are in ``docs/dev/serialization-format.md``.
 
     def __getstate__(self) -> tuple:
         import discopt
