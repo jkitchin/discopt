@@ -90,7 +90,9 @@ Versioning
 ``SCHEMA`` is ``discopt.model/<major>.<minor>``. A reader refuses any other major.
 Every key a document may carry at its top level and in its ``state`` section is
 listed, with the minor that first wrote it, in ``_TOP_LEVEL_KEYS`` and
-``_STATE_KEYS``, and a reader acts on a document's minor as follows:
+``_STATE_KEYS`` (rendered, with the schema history and the permanent refusals, in
+``docs/dev/serialization-format.md``; ``test_serialize_docs_match.py`` fails if the
+two drift), and a reader acts on a document's minor as follows:
 
 * **minor at or below the reader's, only listed keys** -- loaded strictly;
 * **minor at or below the reader's, an unlisted key** -- refused: no writer of
