@@ -155,6 +155,7 @@ from discopt.modeling.core import (
     Constant,
     Constraint,
     CustomCall,
+    DisjunctionSemantics,
     Expression,
     FunctionCall,
     IndexExpression,
@@ -1124,6 +1125,17 @@ def _refuse_unsupported(model: Model) -> None:
         # #1775 G1.2: nesting in a Disjunct block is carried by a parent link this
         # format does not record. Dropping it would turn a nested disjunction into a
         # top-level one -- a different feasible set -- so refuse instead.
+        if (
+            type(con) is _IndicatorConstraint
+            and con.semantics is not DisjunctionSemantics.SELECT_ONE
+        ):
+            # #1775 G1.4: block semantics are not recorded either; written as
+            # select-one, an OR block would reload with a different selector space.
+            raise SerializationError(
+                "cannot serialize: the model has an OR add_disjunction block "
+                "(#1775 G1.4), which this format version does not record. Use "
+                "pickle or Model.clone() for same-version transport."
+            )
         nested = (type(con) is _IndicatorConstraint and con.parent is not None) or (
             type(con) is _DisjunctiveConstraint and con.parent_indicator is not None
         )
