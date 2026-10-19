@@ -176,6 +176,15 @@ def test_unbuildable_cases_are_recorded_not_skipped():
         if _key(v) < (1, 5)
         for case in ("logical_constraints", "gdp_indicators", "gdp_indicators_logic")
     }
+    # `None` / `Ellipsis` indices and a disjunction member are encoded from 1.6
+    # (WP-3b); every earlier writer refused the index and refused (1.5) or crashed
+    # on (before 1.5) the member.
+    expected |= {
+        (v, case)
+        for v in VERSIONS
+        if _key(v) < (1, 6)
+        for case in ("index_none_ellipsis", "nested_disjunction")
+    }
     assert unbuildable == expected, sorted(unbuildable ^ expected)
     # register_function arrived in 1.1, so 1.0 cannot build the atom case.
     assert (
