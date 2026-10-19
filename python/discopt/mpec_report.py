@@ -83,6 +83,8 @@ __all__ = [
     "admitted_residual_scale",
     "admitted_residual_scale_definition",
     "evaluate_at_point",
+    "evaluate_on_point_box",
+    "point_box",
     "is_certified_status",
     "is_local_status",
     "max_source_complementarity",
@@ -536,8 +538,16 @@ def evaluate_at_point(
         that looks like a measurement and is not one; the failure is loud
         instead (CLAUDE.md §6/§7).
     """
+    return evaluate_on_point_box(model, expr, point_box(model, point))
+
+
+def point_box(model: "Model", point: dict[int, np.ndarray]) -> dict:
+    """The degenerate interval box of ``point`` (see :func:`evaluate_at_point`).
+
+    Built once and passed to :func:`evaluate_on_point_box` for many expressions,
+    it saves rebuilding the box over every model variable per expression.
+    """
     from discopt._relax.convexity.interval import Interval
-    from discopt._relax.convexity.interval_eval import evaluate_interval
 
     box = {}
     for v in model._variables:
@@ -547,6 +557,12 @@ def evaluate_at_point(
         arr = np.asarray(vals, dtype=np.float64)
         shaped = arr.reshape(v.shape) if v.shape else arr.reshape(())
         box[v] = Interval(shaped.copy(), shaped.copy())
+    return box
+
+
+def evaluate_on_point_box(model: "Model", expr: "Expression", box: dict) -> np.ndarray:
+    """:func:`evaluate_at_point` on a box from :func:`point_box`; same refusals."""
+    from discopt._relax.convexity.interval_eval import evaluate_interval
 
     enclosure = evaluate_interval(expr, model, box)
     lo = np.asarray(enclosure.lo, dtype=np.float64)
