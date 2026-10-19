@@ -271,7 +271,17 @@ def drive(args) -> int:
                     rec = json.loads(lines[-1][len("@@RESULT ") :])
                 else:
                     tail = (proc.stderr or proc.stdout).strip().splitlines()[-3:]
-                    rec = {"instance": name, "arm": arm, "error": " | ".join(tail)[:400]}
+                    why = " | ".join(tail)[:400]
+                    if proc.returncode == -9 and not why:
+                        # SIGKILL with no output: the kernel's OOM killer (the
+                        # container's dmesg shows it), not a crash in Python.
+                        why = "killed by SIGKILL (out of memory)"
+                    rec = {
+                        "instance": name,
+                        "arm": arm,
+                        "error": why,
+                        "returncode": proc.returncode,
+                    }
             except subprocess.TimeoutExpired:
                 rec = {
                     "instance": name,
