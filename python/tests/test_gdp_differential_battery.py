@@ -119,6 +119,45 @@ def _or_semantics():
     return m
 
 
+def _or_indicators():
+    """#1775 G1.4: OR with its indicators read -- both may be selected at once."""
+    m = dm.Model("or_indicators")
+    x = m.continuous("x", lb=0, ub=10)
+    d = m.either_or([[x <= 4], [x >= 2, x <= 6]], name="d", semantics="or")
+    d.indicators
+    m.minimize(x)
+    return m
+
+
+def _or_indicators_member(v, t):
+    a, b = round(v["d_0_active"]), round(v["d_1_active"])
+    if a + b < 1:
+        return False
+    return (not a or v["x"] <= 4 + t) and (not b or 2 - t <= v["x"] <= 6 + t)
+
+
+def _or_block():
+    """#1775 G1.4: an OR ``add_disjunction`` block (``at_least(1)``)."""
+    m = dm.Model("or_block")
+    x = m.continuous("x", lb=0, ub=10)
+    y = m.continuous("y", lb=0, ub=10)
+    a = m.make_disjunct("a")
+    a.subject_to([x <= 4, y <= 5])
+    b = m.make_disjunct("b")
+    b.subject_to([x >= 2, x <= 6])
+    m.add_disjunction([a, b], semantics="or")
+    m.minimize(x + y)
+    return m
+
+
+def _or_block_member(v, t):
+    a, b = round(v["a_active"]), round(v["b_active"])
+    if a + b < 1:
+        return False
+    ok_a = v["x"] <= 4 + t and v["y"] <= 5 + t
+    return (not a or ok_a) and (not b or 2 - t <= v["x"] <= 6 + t)
+
+
 def _local_var():
     """``z`` appears only in the second disjunct; the first does not mention it."""
     m = dm.Model("local_var")
@@ -362,11 +401,34 @@ SHAPES: list[Shape] = [
         "or_semantics",
         _or_semantics,
         lambda v, t: v["x"] <= 6 + t,
-        # G1.4 implements OR for big-M only; hull and mbigm refuse it, as Pyomo does,
-        # and so does auto, which dispatches among them.
+        # #1775 G1.4: big-M lowers OR (auto routes it there; simplex is projection-
+        # based); hull and mbigm refuse it, as Pyomo's do.
+        refuses={m: (NotImplementedError, r"DisjunctionSemantics\.OR") for m in ("mbigm", "hull")},
+    ),
+    Shape(
+        "or_indicators",
+        _or_indicators,
+        _or_indicators_member,
+        points=[
+            {"x": x, "d_0_active": a, "d_1_active": b}
+            for x in (0.0, 2.0, 3.0, 4.0, 4.5, 6.0, 7.0)
+            for a, b in ((1, 0), (0, 1), (1, 1), (0, 0))
+        ],
         refuses={
-            m: (NotImplementedError, r"DisjunctionSemantics\.OR") for m in ("mbigm", "hull", "auto")
+            **{m: (NotImplementedError, r"DisjunctionSemantics\.OR") for m in ("mbigm", "hull")},
+            "simplex": (ValueError, r"indicators were read"),
         },
+    ),
+    Shape(
+        "or_block",
+        _or_block,
+        _or_block_member,
+        points=[
+            {"x": x, "y": y, "a_active": a, "b_active": b}
+            for x in (0.0, 2.0, 3.0, 4.0, 4.5, 6.0, 7.0)
+            for y in (0.0, 5.0)
+            for a, b in ((1, 0), (0, 1), (1, 1), (0, 0))
+        ],
     ),
     Shape(
         "local_var",
@@ -546,10 +608,6 @@ SHAPES: list[Shape] = [
 #: Strict, so the marker fails the day the case starts passing.
 XFAIL: dict[tuple[str, str], tuple[str, type[BaseException]]] = {
     ("nested3", "hull"): ("hull refuses nesting: #1775 G2.1", NotImplementedError),
-    ("or_semantics", "big-m"): (
-        "big-M refuses OR (AT_LEAST_ONE) semantics: #1775 G1.4",
-        NotImplementedError,
-    ),
 }
 
 

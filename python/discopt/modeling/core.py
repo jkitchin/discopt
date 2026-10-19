@@ -324,12 +324,12 @@ class DisjunctionSemantics(Enum):
     SELECT_ONE : tuple
         ``(ONE_WAY, EXACTLY_ONE)``. Exactly one disjunct is *selected*; an
         unselected disjunct's predicate may nonetheless be true. This is the
-        meaning of :meth:`Model.either_or` and the only semantics any lowering
-        currently implements.
+        default meaning of :meth:`Model.either_or`, implemented by every lowering.
     OR : tuple
         ``(ONE_WAY, AT_LEAST_ONE)``. At least one disjunct is selected. Its
         projection onto ``x`` equals ``SELECT_ONE``'s; the two differ only in
-        the selector space.
+        the selector space. Lowered by big-M (and ``auto``, which routes it
+        there) and by ``add_disjunction``; hull and mbigm refuse it (#1775 G1.4).
     EXACTLY_ONE_TRUE : tuple
         ``(REIFIED, EXACTLY_ONE)``. Exactly one *predicate* is true, which
         requires full reification of every selector. Deliberately **not**
@@ -412,6 +412,13 @@ def _coerce_disjunction_semantics(value) -> DisjunctionSemantics:
 # reformulation in ``_relax.gdp_reformulate`` actually build.
 _SELECT_ONE_ROWS: frozenset[tuple[SelectorActivation, SelectorCardinality]] = frozenset(
     {(SelectorActivation.ONE_WAY, SelectorCardinality.EXACTLY_ONE)}
+)
+
+# #1775 G1.4: ``add_disjunction`` also emits OR -- the same one-way rows under
+# ``sum_k y_k >= 1`` (``at_least(1)``), or ``>= parent`` with ``y_k <= parent``
+# when nested in a Disjunct.
+_BLOCK_ROWS: frozenset[tuple[SelectorActivation, SelectorCardinality]] = (
+    _SELECT_ONE_ROWS | frozenset({(SelectorActivation.ONE_WAY, SelectorCardinality.AT_LEAST_ONE)})
 )
 
 
@@ -8072,9 +8079,10 @@ class Model:
         name : str, optional
             Name for the disjunction.
         semantics : DisjunctionSemantics or str, default ``SELECT_ONE``
-            The declared meaning of the disjunction. Recorded on the model; a
-            value other than ``SELECT_ONE`` is refused by the GDP reformulation
-            pass rather than approximated.
+            The declared meaning of the disjunction. Recorded on the model.
+            ``OR`` (at least one selected) is lowered by big-M (#1775 G1.4); a
+            lowering that does not encode the declared value refuses it rather
+            than approximating it.
 
         Examples
         --------
@@ -8690,9 +8698,10 @@ class Model:
         name : str, optional
             Name for the disjunction.
         semantics : DisjunctionSemantics or str, default ``SELECT_ONE``
-            The declared meaning of the disjunction. Anything other than
-            ``SELECT_ONE`` raises: this path lowers to indicator constraints
-            immediately, so there is no later pass that could honor it.
+            The declared meaning of the disjunction: ``SELECT_ONE`` (an
+            ``exactly(1)`` row) or ``OR`` (``at_least(1)``, #1775 G1.4). Anything
+            else raises: this path lowers to indicator constraints immediately,
+            so there is no later pass that could honor it.
 
         Example
         -------
@@ -8706,13 +8715,17 @@ class Model:
         # here rather than in the GDP pass — but on the pair it emits, via the
         # same predicate that pass uses, not on which member it was handed.
         resolved = _coerce_disjunction_semantics(semantics)
-        _require_semantics_supported(resolved, _SELECT_ONE_ROWS, "add_disjunction()")
+        _require_semantics_supported(resolved, _BLOCK_ROWS, "add_disjunction()")
         blocks = list(disjuncts)
         _claim_blocks(blocks, "the model", name)
-        self._emit_block_disjunction(blocks, name, parent=None)
+        self._emit_block_disjunction(blocks, name, parent=None, semantics=resolved)
 
     def _emit_block_disjunction(
-        self, disjuncts: list["Disjunct"], name: Optional[str], parent: Optional[Variable]
+        self,
+        disjuncts: list["Disjunct"],
+        name: Optional[str],
+        parent: Optional[Variable],
+        semantics: DisjunctionSemantics = DisjunctionSemantics.SELECT_ONE,
     ) -> None:
         """Lower one block disjunction, then the disjunctions nested in its blocks.
 
@@ -8748,6 +8761,7 @@ class Model:
             for row in self._constraints[n_before:]:
                 row.disjunction = (key, k, len(disjuncts))
                 row.parent = parent
+                row.semantics = semantics
             # #1430: the block's rows are now in ``_constraints``; record that so
             # ``validate`` does not report it as forgotten. Set per disjunct rather
             # than for the call, so a list that raises part-way through leaves an
@@ -8762,12 +8776,14 @@ class Model:
             # no state. Read with ``getattr(model, "_gdp_block_members", {})``.
             members = self.__dict__.setdefault("_gdp_block_members", {})
             members[key] = _BlockMembers(
-                [d.indicator.variable for d in disjuncts], parent, n_start, name
+                [d.indicator.variable for d in disjuncts], parent, n_start, name, semantics
             )
         for d in disjuncts:
-            for kind, item, inner_name in d._nested:
+            for kind, item, inner_name, inner_semantics in d._nested:
                 if kind == "block":
-                    self._emit_block_disjunction(item, inner_name, parent=d.indicator.variable)
+                    self._emit_block_disjunction(
+                        item, inner_name, parent=d.indicator.variable, semantics=inner_semantics
+                    )
                 else:
                     if item._model is not None or item.parent_indicator is not None:
                         # #1790: the same object nested in two blocks would be one
@@ -8787,11 +8803,21 @@ class Model:
         # cardinality (exactly one indicator active), not a truth-XOR over the
         # disjunct predicates.
         row_name = f"_disj_{name}_select" if name else None
+        at_least = semantics.cardinality is SelectorCardinality.AT_LEAST_ONE
         if parent is None:
-            self.exactly(1, indicators, name=row_name)
+            if at_least:
+                self.at_least(1, indicators, name=row_name)
+            else:
+                self.exactly(1, indicators, name=row_name)
         else:
             self._validate_binaries(indicators, "add_disjunction")
-            self.subject_to(sum(indicators) == parent, name=row_name)
+            if at_least:
+                # At least one when the parent is selected, none when it is not.
+                self.subject_to(sum(indicators) >= parent, name=row_name)
+                for ind in indicators:
+                    self.subject_to(ind <= parent)
+            else:
+                self.subject_to(sum(indicators) == parent, name=row_name)
 
     # ── Boolean logic (GDP) ──
 
@@ -11670,7 +11696,7 @@ class Model:
 
         def subtree_rows(d: "Disjunct", out: set[int]) -> None:
             out.update(id(c) for c in d._constraints)
-            for kind, item, _ in d._nested:
+            for kind, item, *_ in d._nested:
                 if kind == "block":
                     for inner in item:
                         subtree_rows(inner, out)
@@ -12310,6 +12336,11 @@ class _IndicatorConstraint:
     # (``Disjunct.add_disjunction``) to that Disjunct's indicator column: the
     # block is active only when it is, and its indicators sum to it instead of 1.
     parent: Optional[Variable] = field(default=None, compare=False)
+    # #1775 G1.4: the declared semantics of the block disjunction this row belongs
+    # to (``disjunction`` set). SELECT_ONE or OR; an OR block may select several.
+    semantics: "DisjunctionSemantics" = field(
+        default=DisjunctionSemantics.SELECT_ONE, compare=False
+    )
 
 
 @dataclass
@@ -12324,8 +12355,8 @@ class _DisjunctiveConstraint:
     method: Optional[str] = None
     # The declared meaning of this disjunction (issue #1124). Carried on the IR
     # so a lowering can never *infer* the semantics from whichever activation it
-    # happens to emit. Only SELECT_ONE is implemented; the GDP pass refuses any
-    # other value loudly rather than approximating it with one-way activation.
+    # happens to emit. SELECT_ONE everywhere, OR under big-M (#1775 G1.4); the GDP
+    # pass refuses anything else loudly rather than approximating it.
     semantics: DisjunctionSemantics = DisjunctionSemantics.SELECT_ONE
     # #1775 G1.1: the model this disjunction was added to by ``Model.either_or``
     # (``None`` for one built by ``Model.disjunction`` for nesting), and the
@@ -12403,7 +12434,10 @@ class _DisjunctiveConstraint:
             if any(getattr(c, "name", None) == row_name for c in model._constraints):
                 raise ValueError(f"Name {row_name!r} already used by a row in the model")
             cols = tuple(model.binary(nm) for nm in names)
-            model.exactly(1, list(cols), name=row_name)
+            if self.semantics.cardinality is SelectorCardinality.AT_LEAST_ONE:
+                model.at_least(1, list(cols), name=row_name)  # #1775 G1.4
+            else:
+                model.exactly(1, list(cols), name=row_name)
             self._indicator_vars = cols
         return tuple(BooleanVar(v) for v in self._indicator_vars)
 
@@ -12438,12 +12472,14 @@ class _BlockMembers(NamedTuple):
     """What ``Model._emit_block_disjunction`` records about a block disjunction
     that takes part in nesting (#1775 G1.2): its indicators in disjunct order, the
     enclosing disjunct's indicator (``None`` at top level), the index in
-    ``_constraints`` where its emission began, and its user-given name."""
+    ``_constraints`` where its emission began, its user-given name, and its
+    declared semantics (#1775 G1.4)."""
 
     indicators: list[Variable]
     parent: Optional[Variable]
     start: int
     name: Optional[str]
+    semantics: DisjunctionSemantics = DisjunctionSemantics.SELECT_ONE
 
 
 @dataclass
@@ -12704,10 +12740,10 @@ class Disjunct:
         self.indicator: "BooleanVar" = bv
         self._constraints: list[Constraint] = []
         # #1775 G1.2: disjunctions nested in this block, in the order added, as
-        # ``("block", [Disjunct, ...], name)`` (``add_disjunction``) or
-        # ``("dc", _DisjunctiveConstraint, None)`` (``subject_to(m.disjunction(..))``),
+        # ``("block", [Disjunct, ...], name, semantics)`` (``add_disjunction``) or
+        # ``("dc", _DisjunctiveConstraint, None, None)`` (``subject_to(m.disjunction(..))``),
         # and the variables declared on it (``variable``).
-        self._nested: list[tuple[str, Any, Optional[str]]] = []
+        self._nested: list[tuple[str, Any, Optional[str], Any]] = []
         self._local_vars: list[Variable] = []
         # #1430: set by ``Model.add_disjunction``. False means this block's
         # constraints live nowhere but here, so a solve would silently omit them.
@@ -12747,9 +12783,9 @@ class Disjunct:
                         f"disjunction {item.name or '<anon>'!r} is already on the model "
                         "or nested elsewhere; build a fresh one with Model.disjunction"
                     )
-                if any(kind == "dc" and obj is item for kind, obj, _ in self._nested):
+                if any(kind == "dc" and obj is item for kind, obj, *_ in self._nested):
                     raise ValueError(f"disjunction {item.name or '<anon>'!r} is nested twice")
-                self._nested.append(("dc", item, None))
+                self._nested.append(("dc", item, None, None))
             else:
                 self._constraints.append(item)
 
@@ -12769,7 +12805,7 @@ class Disjunct:
         """
         self._require_open("nest a disjunction in")
         resolved = _coerce_disjunction_semantics(semantics)
-        _require_semantics_supported(resolved, _SELECT_ONE_ROWS, "Disjunct.add_disjunction()")
+        _require_semantics_supported(resolved, _BLOCK_ROWS, "Disjunct.add_disjunction()")
         blocks = list(disjuncts)
         for d in blocks:
             if not isinstance(d, Disjunct) or d._model is not self._model:
@@ -12782,10 +12818,10 @@ class Disjunct:
                     f"make a nesting cycle ({d.name!r} is {self.name!r} or encloses it)"
                 )
         _claim_blocks(blocks, f"disjunct {self.name!r}", name)
-        self._nested.append(("block", blocks, name))
+        self._nested.append(("block", blocks, name, resolved))
 
     def _encloses(self, other: "Disjunct") -> bool:
-        for kind, item, _ in self._nested:
+        for kind, item, *_ in self._nested:
             if kind == "block" and any(d is other or d._encloses(other) for d in item):
                 return True
         return False
