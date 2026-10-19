@@ -12,8 +12,12 @@ Plan: ``docs/dev/serialization-completion-plan.md`` WP-7. Two parts:
   - gzipped document <= ``GZ_OVER_NL`` x the ``.nl`` bytes;
   - ``pickle.dumps`` wall <= ``PICKLE_OVER_DUMPS`` x the ``dumps`` wall.
 
-  A ratio over two sub-millisecond walls is timer noise, so an instance enters
-  the wall budgets only when its denominator is at least ``MIN_DENOM_S``; and a
+  A wall under a few milliseconds is timer noise, so every operation is timed
+  ``timeit.Timer.autorange``-style: one sample repeats it until the sample lasts
+  ``SAMPLE_S``, and its wall is the best sample over the call count. A wall ratio
+  is judged when its denominator's *sample* lasted at least ``MIN_DENOM_S``,
+  which autoranging guarantees on any machine (a fixed per-call floor did not:
+  the 5 instances the budget test uses fell under it on a faster machine). A
   document carries a fixed header (schema, provenance, empty sections) that a
   tiny ``.nl`` does not, so the size budget judges ``.nl`` files of at least
   ``MIN_NL_BYTES`` (measured: the 169-byte ``mpcc_complementarity.nl`` gives a
@@ -34,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import gc
 import gzip
 import importlib.util
 import json
@@ -52,7 +57,12 @@ RT_OVER_FROM_NL = 5.0
 GZ_OVER_NL = 3.0
 PICKLE_OVER_DUMPS = 1.25
 
-#: Smallest denominator wall a wall ratio is judged on.
+#: Shortest timed sample: an operation faster than this is repeated within the
+#: sample until it is not, and its wall is the sample's over the call count.
+SAMPLE_S = 0.05
+
+#: Shortest denominator *sample* a wall ratio is judged on. Autoranging makes
+#: every sample at least ``SAMPLE_S``, so this fails only if the timing does.
 MIN_DENOM_S = 0.005
 
 #: Smallest ``.nl`` the size ratio is judged on.
@@ -71,27 +81,49 @@ def _harness():
     return mod
 
 
-def _best(fn, repeats: int) -> tuple[float, object]:
-    best, out = float("inf"), None
+def _loops_for(fn) -> tuple[int, object]:
+    """Calls per sample so one sample lasts at least ``SAMPLE_S`` (the
+    ``timeit.Timer.autorange`` ladder 1, 2, 5, 10, 20, ...), and *fn*'s result."""
+    loops = 1
+    while True:
+        for scale in (1, 2, 5):
+            n = loops * scale
+            t = time.perf_counter()
+            for _ in range(n):
+                out = fn()
+            if time.perf_counter() - t >= SAMPLE_S:
+                return n, out
+        loops *= 10
+
+
+def _best(fn, repeats: int) -> tuple[float, float, object]:
+    """Per-call wall, the best sample's wall, and *fn*'s result: the best of
+    *repeats* samples, each ``loops`` calls of *fn* lasting at least
+    ``SAMPLE_S``, with a full collection before each sample."""
+    loops, out = _loops_for(fn)
+    best = float("inf")
     for _ in range(repeats):
+        gc.collect()
         t = time.perf_counter()
-        out = fn()
+        for _ in range(loops):
+            out = fn()
         best = min(best, time.perf_counter() - t)
-    return best, out
+    return best / loops, best, out
 
 
 def measure(model, repeats: int) -> dict:
     """Walls and sizes for one built model."""
     from discopt.serialize import dumps, loads
 
-    t_dumps, text = _best(lambda: dumps(model, provenance=False), repeats)
-    t_loads, _ = _best(lambda: loads(text), repeats)
-    t_pdumps, blob = _best(lambda: pickle.dumps(model), repeats)
-    t_ploads, _ = _best(lambda: pickle.loads(blob), repeats)
-    t_deepcopy, _ = _best(lambda: copy.deepcopy(model), repeats)
+    t_dumps, s_dumps, text = _best(lambda: dumps(model, provenance=False), repeats)
+    t_loads, _, _ = _best(lambda: loads(text), repeats)
+    t_pdumps, _, blob = _best(lambda: pickle.dumps(model), repeats)
+    t_ploads, _, _ = _best(lambda: pickle.loads(blob), repeats)
+    t_deepcopy, _, _ = _best(lambda: copy.deepcopy(model), repeats)
     raw = text.encode()
     return {
         "dumps_s": t_dumps,
+        "dumps_sample_s": s_dumps,
         "loads_s": t_loads,
         "pickle_dumps_s": t_pdumps,
         "pickle_loads_s": t_ploads,
@@ -104,16 +136,19 @@ def measure(model, repeats: int) -> dict:
 
 
 def ratios(row: dict) -> dict:
-    """The three budget ratios for an instance row; ``None`` where a wall ratio
-    is not judged (its denominator is below ``MIN_DENOM_S``)."""
+    """The three budget ratios for an instance row; ``None`` where a ratio is not
+    judged (a denominator sample under ``MIN_DENOM_S``, a ``.nl`` under
+    ``MIN_NL_BYTES``)."""
     rt = row["dumps_s"] + row["loads_s"]
     return {
-        "rt_over_from_nl": (rt / row["from_nl_s"]) if row["from_nl_s"] >= MIN_DENOM_S else None,
+        "rt_over_from_nl": (
+            rt / row["from_nl_s"] if row["from_nl_sample_s"] >= MIN_DENOM_S else None
+        ),
         "gz_over_nl": (
             row["gz_bytes"] / row["nl_bytes"] if row["nl_bytes"] >= MIN_NL_BYTES else None
         ),
         "pickle_over_dumps": (
-            row["pickle_dumps_s"] / row["dumps_s"] if row["dumps_s"] >= MIN_DENOM_S else None
+            row["pickle_dumps_s"] / row["dumps_s"] if row["dumps_sample_s"] >= MIN_DENOM_S else None
         ),
     }
 
@@ -134,8 +169,13 @@ def measure_instance(path: Path, repeats: int) -> dict:
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        t_from_nl, model = _best(lambda: dm.from_nl(str(path)), repeats)
-        row = {"name": path.stem, "from_nl_s": t_from_nl, "nl_bytes": path.stat().st_size}
+        t_from_nl, s_from_nl, model = _best(lambda: dm.from_nl(str(path)), repeats)
+        row = {
+            "name": path.stem,
+            "from_nl_s": t_from_nl,
+            "from_nl_sample_s": s_from_nl,
+            "nl_bytes": path.stat().st_size,
+        }
         row.update(measure(model, repeats))
     row.update(ratios(row))
     row["over_budget"] = over_budget(row)

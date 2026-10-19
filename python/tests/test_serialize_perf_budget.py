@@ -4,10 +4,12 @@ Plan: ``docs/dev/serialization-completion-plan.md`` WP-7. The budgets are ratios
 of walls measured in the same process, so they hold on any machine; the
 constants and the measurement live in ``scripts/serialize_perf_ladder.py``,
 which also runs the full ladder. The instances are the five largest of the
-in-repo ``.nl`` floor by ``dumps`` wall -- each denominator well above the
-ladder's ``MIN_DENOM_S`` noise floor, so every ratio here is judged.
+in-repo ``.nl`` floor by ``dumps`` wall. Every wall is autoranged (each sample
+repeats the operation until it lasts the ladder's ``SAMPLE_S``), so each
+denominator sample clears ``MIN_DENOM_S`` on any machine and every ratio here is
+judged; a fixed per-call floor did not hold on faster hardware.
 
-``slow``: about 3 s of best-of-five timing.
+``slow``: about 20 s of best-of-five timing.
 """
 
 from __future__ import annotations
@@ -50,7 +52,7 @@ def _judge(rows, key, budget):
     over = []
     for row in rows:
         value = row[key]
-        assert value is not None, (row["name"], key, "below the noise floor: pick another")
+        assert value is not None, (row["name"], key, "not judged: autoranging failed")
         if value > budget:
             over.append((row["name"], round(value, 3)))
     return over
@@ -69,10 +71,13 @@ def test_document_size_within_ratio_budget(rows):
 
 def test_budget_probe_fired(rows):
     """§6: every instance was measured, and every ratio of every instance is one
-    the budget tests judge (none fell below a noise floor and was skipped).
+    the budget tests judge (none fell below a noise floor and was skipped), and
+    every denominator was timed over a sample of at least ``MIN_DENOM_S``.
 
     Recomputed from the rows rather than counted by the tests above, so it holds
     when ``-n`` puts them in different workers."""
     assert [r["name"] for r in rows] == [p.stem for p in INSTANCES]
     judged = sum(r[k] is not None for r in rows for k in _KEYS)
     assert judged == len(_KEYS) * len(INSTANCES), judged
+    samples = [r[k] for r in rows for k in ("from_nl_sample_s", "dumps_sample_s")]
+    assert min(samples) >= ladder.MIN_DENOM_S, min(samples)
