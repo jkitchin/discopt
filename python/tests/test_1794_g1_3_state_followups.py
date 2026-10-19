@@ -10,7 +10,8 @@ Before the fix:
   lost the fast-API rows (``optimal 1.0`` where the answer is 6), the fast-API
   objective, and the complementarity records.
 * S1 -- a partial transform of nested structure left a model that ``validate``
-  or ``gdp_tree`` refused.
+  or ``gdp_tree`` refused, or (after #1790) a tree reporting the decided
+  disjunction as still open.
 * S2 -- a selection resolved by address alone, so a stale node or one from
   another model silently named a different disjunction.
 * S3 -- ``_gdp_block_members`` was left describing rows the transform removed.
@@ -192,9 +193,13 @@ def test_deciding_a_block_parent_promotes_its_undecided_child(nested):
     m = _blocks(nested)
     rows = list(m._constraints)
     (root,) = gdp_tree(m).disjunctions
+    inner = [d.name for d in root.disjuncts[0].children[0].disjuncts]
     tok = transform_current_disjunctive_state(m, [root.disjuncts[0]])
-    (promoted,) = gdp_tree(m).disjunctions  # was refused: parent owns no disjunction
+    # Was refused (parent owns no disjunction); with #1790's row-less nodes, the
+    # decided A|B instead survived as a root and the undecided child vanished.
+    (promoted,) = gdp_tree(m).disjunctions
     assert promoted.parent is None
+    assert [d.name for d in promoted.disjuncts] == inner
     assert _solve(m) == pytest.approx(18.0, abs=1e-6)
     tok.reverse()
     assert all(p is q for p, q in zip(m._constraints, rows)) and len(m._constraints) == len(rows)
