@@ -6277,7 +6277,16 @@ class Model:
             elif isinstance(c, _IndicatorConstraint):
                 roots += [c.indicator, c.constraint.body]
             elif isinstance(c, _DisjunctiveConstraint):
-                roots += [r.body for dd in c.disjuncts for r in dd]
+                # A disjunct may hold a whole disjunction (``Model.disjunction()``
+                # nested inside ``either_or``), not only rows: walk into it rather
+                # than reading a ``.body`` it does not have (WP-6 sweep).
+                stack = [c]
+                while stack:
+                    for r in (r for dd in stack.pop().disjuncts for r in dd):
+                        if isinstance(r, _DisjunctiveConstraint):
+                            stack.append(r)
+                        elif isinstance(r, Constraint):
+                            roots.append(r.body)
             elif isinstance(c, _SOSConstraint):
                 roots += list(c.variables)
             elif isinstance(c, _LogicalConstraint):
@@ -8026,6 +8035,20 @@ class Model:
         # ``float()`` TypeError deep inside ``solve()``. #1677: a complemented
         # binary ``1 - z`` (or ``~b``) is the same column with ``active_value=0``.
         indicator, active_value = _normalize_indicator(indicator, "if_then")
+        # Only a row can be an indicator constraint. A disjunction (or any other
+        # container) passed here was stored as the row and then crashed every walk
+        # that reads ``.constraint.body`` -- pickle, deepcopy, clone -- while solve
+        # reported it as never added (#1797 review S1). Refuse it here, before
+        # anything is recorded.
+        for k, c in enumerate(then_constraints):
+            if not isinstance(c, Constraint):
+                raise TypeError(
+                    f"if_then: then_constraints[{k}] is a {type(c).__name__}, not a "
+                    "Constraint. if_then accepts only rows; to make a disjunction "
+                    "conditional on a selector, nest it in a block: "
+                    "d = m.make_disjunct(name); d.add_disjunction(...), then add d with "
+                    "m.add_disjunction([d, ...])"
+                )
         for k, c in enumerate(then_constraints):
             c.name = f"{name}_then_{k}" if name else None
             # Store as indicator constraint; Rust presolve will handle
