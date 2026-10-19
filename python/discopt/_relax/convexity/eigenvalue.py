@@ -230,7 +230,7 @@ PSD_CERT_SPARSE_ROW_NNZ = 8
 PSD_CERT_EIG_MAX_N = 4000
 
 
-def psd_certified(Q) -> bool:
+def psd_certified(Q, *, eig_max_n: int = PSD_CERT_EIG_MAX_N) -> bool:
     """True only when ``Q`` (symmetrized, dense or scipy-sparse) is PROVED PSD (#1679).
 
     The one PSD predicate shared by the ``solver="pounce"`` route
@@ -252,7 +252,9 @@ def psd_certified(Q) -> bool:
     1. ``n > PSD_CERT_EXACT_MAX_N`` and sparse (at most
        :data:`PSD_CERT_SPARSE_ROW_NNZ` nonzeros per row): budgeted exact elimination;
        a decided verdict is returned.
-    2. ``n > PSD_CERT_EIG_MAX_N``: not proved.
+    2. ``n > eig_max_n`` (default :data:`PSD_CERT_EIG_MAX_N`): not proved. A caller
+       with a tighter time budget passes a smaller ``eig_max_n``; it only decides
+       whether the dense eigensolve runs, never what a decided verdict is.
     3. The computed ``lambda_min`` against ``s = psd_decision_slack(||Q||_F)``:
        ``lambda_min >= s > 0`` proves PSD, ``lambda_min < -s`` refutes it (the
        computed spectrum is exact for a matrix within ``O(u ||Q||)`` of ``Q``).
@@ -278,7 +280,7 @@ def psd_certified(Q) -> bool:
             exact = exact_psd(Ss, budget=PSD_PROVED_EXACT_BUDGET)
             if exact is not None:
                 return exact
-        if n > PSD_CERT_EIG_MAX_N:
+        if n > eig_max_n:
             return False
         S = Ss.toarray()
     else:
@@ -295,7 +297,7 @@ def psd_certified(Q) -> bool:
             exact = exact_psd(S, budget=PSD_PROVED_EXACT_BUDGET)
             if exact is not None:
                 return exact
-        if n > PSD_CERT_EIG_MAX_N:
+        if n > eig_max_n:
             return False
     eigs = np.linalg.eigvalsh(S)
     lam_min = float(eigs[0])

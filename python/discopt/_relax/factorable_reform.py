@@ -63,6 +63,8 @@ from discopt.modeling.core import (
     UnaryOp,
     Variable,
     VarType,
+    _DisjunctiveConstraint,
+    _IndicatorConstraint,
     carry_validation_guards,
 )
 from discopt.mpec import carry_complementarities
@@ -273,17 +275,65 @@ def _expr_node_count(expr: Expression) -> int:
     return sizes[id(expr)]
 
 
+# Nodes a materialised builder row spends per nonzero: ``coeff * x[j]`` is a
+# ``*`` node over two leaves, joined to the running sum by one ``+`` node.
+_BUILDER_ROW_NODES_PER_NONZERO = 4
+
+
+def _builder_row_node_bound(model: Model) -> int:
+    """Upper bound on the node count of any fast-API row once materialised (#1808).
+
+    ``add_linear_constraints`` rows live in ``model._builder_linear_blocks`` until
+    ``Model._materialize_builder_linear_rows`` turns each into a left-deep ``+``
+    chain *inside* the solve, after the recursion gates have already sized the
+    model. Read from the CSR row lengths, so nothing is materialised here.
+    """
+    largest = 0
+    for A, *_ in getattr(model, "_builder_linear_blocks", None) or []:
+        if A.shape[0] == 0:
+            continue
+        nnz = int(np.max(np.diff(A.indptr)))
+        largest = max(largest, _BUILDER_ROW_NODES_PER_NONZERO * nnz + 4)
+    return largest
+
+
+def _iter_constraint_bodies(items) -> Iterator[Expression]:
+    """Every expression constraint body in *items*, including the bodies of
+    indicator rows and of every disjunct of every (nested) disjunction (#1808).
+
+    Iterative, like the count it feeds. The GDP lowering walks disjunct bodies
+    recursively inside the solve, so a gate that skips them sizes the wrong model.
+    """
+    stack = list(items)
+    while stack:
+        c = stack.pop()
+        if isinstance(c, Constraint):
+            yield c.body
+        elif isinstance(c, _IndicatorConstraint):
+            stack.append(c.constraint)
+        elif isinstance(c, _DisjunctiveConstraint):
+            for disjunct in c.disjuncts:
+                stack.extend(disjunct)
+        elif isinstance(c, (list, tuple)):
+            stack.extend(c)
+
+
 def _max_expr_node_count(model: Model) -> int:
-    """Largest single-expression node count across the objective and constraint
-    bodies — an upper bound on how deep the per-expression walk can recurse."""
+    """Largest single-expression node count across the objective and every
+    constraint body the solve can walk — an upper bound on how deep the
+    per-expression walk can recurse.
+
+    Counts the bodies inside indicator rows and disjunctions, and bounds the
+    fast-API rows that are materialised only later in the solve (#1808): an
+    under-count here runs a deep model at the default recursion limit.
+    """
     largest = 0
     obj = getattr(model, "_objective", None)
     if obj is not None:
         largest = _expr_node_count(obj.expression)
-    for c in getattr(model, "_constraints", []) or []:
-        if isinstance(c, Constraint):
-            largest = max(largest, _expr_node_count(c.body))
-    return largest
+    for body in _iter_constraint_bodies(getattr(model, "_constraints", []) or []):
+        largest = max(largest, _expr_node_count(body))
+    return max(largest, _builder_row_node_bound(model))
 
 
 def _recursion_headroom_need(model: Model) -> int:
