@@ -10,10 +10,10 @@ a different model without a word. Each mutation below must be refused at
 
 The record of each block disjunction must also agree with the rows it describes
 (its indicators, parent and semantics), every parent must belong to a recorded
-block disjunction, and the nesting must be acyclic. ``start`` is not cross-checked
-against row positions: ``transform_current_disjunctive_state`` leaves it stale
-when it drops earlier rows (see ``test_a_transformed_model_still_round_trips``),
-so a position check would refuse documents a writer produces.
+block disjunction, and the nesting must be acyclic. Its ``start`` must be the
+position of its first row (for a block disjunction that tags none, no later than
+its first descendant); ``transform_current_disjunctive_state`` renumbers it when
+it drops earlier rows (``test_a_transformation_renumbers_block_starts``).
 """
 
 from __future__ import annotations
@@ -164,6 +164,16 @@ MUTATIONS = {
         lambda d: _members(d).pop(0),
         "no '_gdp_blocks' member record",
     ),
+    "the start of a block disjunction with rows moved": (
+        "gdp_nested_blocks",
+        lambda d: _members(d)[1].__setitem__("start", _members(d)[1]["start"] + 1),
+        "'start'",
+    ),
+    "the start of a block disjunction with rows moved earlier": (
+        "gdp_nested_blocks",
+        lambda d: _members(d)[1].__setitem__("start", _members(d)[1]["start"] - 1),
+        "'start'",
+    ),
     "a disjunct listing another disjunct's row": (
         "gdp_nested_blocks",
         lambda d: _disjuncts(d)[0].__setitem__("rows", [1]),
@@ -214,39 +224,87 @@ def test_block_reference_probe_fired():
     assert refused == len(MUTATIONS) >= 20
 
 
-def test_a_transformed_model_still_round_trips():
-    """A transformation leaves ``_BlockMembers.start`` stale; the reader accepts it.
+def _rowless_after(first: bool):
+    """A row-less block disjunction ``R`` between two others, optionally after
+    ``first``, a 10-row block disjunction a transformation can decide away.
 
-    Dropping the decided ``first`` disjunction's rows moves the block rows down
-    while their records keep the old start, so a check of start against row
-    positions would refuse this writer's own document.
+    ``R``'s blocks hold only nested block disjunctions, so ``R`` tags no row and is
+    known only from its ``_BlockMembers`` record, placed by ``start``; its emission
+    is 7 rows, fewer than the 10 that deciding ``first`` drops before it.
+    """
+    m = dm.Model("rowless")
+    x = m.continuous("x", lb=0.0, ub=10.0)
+    y = m.continuous("y", lb=0.0, ub=10.0)
+    if first:
+        f1 = m.make_disjunct("F1")
+        f1.subject_to([x <= 9.0, x <= 9.1, x <= 9.2, x <= 9.3, x <= 9.4])
+        f2 = m.make_disjunct("F2")
+        f2.subject_to([y <= 9.0, y <= 9.1, y <= 9.2, y <= 9.3, y <= 9.4])
+        m.add_disjunction([f1, f2], name="first")
+    p, q = m.make_disjunct("P"), m.make_disjunct("Q")
+    for outer, lo in ((p, 0.0), (q, 5.0)):
+        inner = [m.make_disjunct(f"{outer.name}{k}") for k in (1, 2)]
+        inner[0].subject_to(x >= lo)
+        inner[1].subject_to(y >= lo)
+        outer.add_disjunction(inner, name=f"in_{outer.name}")
+    m.add_disjunction([p, q], name="R")
+    m.either_or([[x <= 4.0], [y <= 4.0]], name="last")
+    m.minimize(x + y)
+    return m
+
+
+def _root_order(model):
+    from discopt.gdp.tree import gdp_tree
+
+    # A block disjunction's node is named by its key, ``add_disjunction:<name>:<n>``;
+    # the counter differs between the two builds, the name does not.
+    return [
+        r.name.rsplit(":", 1)[0] if r.kind == "add_disjunction" else r.name
+        for r in gdp_tree(model).disjunctions
+    ]
+
+
+def test_a_transformation_renumbers_block_starts():
+    """Deciding ``first`` drops its rows; the records after them move down too.
+
+    Before the renumbering ``R`` kept its old start, 10 rows too late, sorted after
+    ``last`` in the GDP tree, and its document was refused by the start check.
     """
     from discopt.gdp.state import transform_current_disjunctive_state
     from discopt.gdp.tree import gdp_tree
 
-    m = dm.Model("transformed")
-    x = m.continuous("x", lb=0.0, ub=10.0)
-    y = m.continuous("y", lb=0.0, ub=10.0)
-    m.either_or([[x <= 1.0], [x >= 9.0]], name="first")
-    a = m.make_disjunct("A")
-    a.subject_to(x <= 3.0)
-    a1 = m.make_disjunct("A1")
-    a1.subject_to(y >= 6.0)
-    a2 = m.make_disjunct("A2")
-    a2.subject_to(y >= 8.0)
-    a.add_disjunction([a1, a2], name="inner")
-    b = m.make_disjunct("B")
-    b.subject_to(x >= 7.0)
-    m.add_disjunction([a, b], name="outer")
-    m.minimize(x + 3.0 * y)
-    first = next(n for n in gdp_tree(m).walk() if n.name == "first")
-    transform_current_disjunctive_state(m, [first.disjuncts[1]])
-    starts = [rec.start for rec in m._gdp_block_members.values()]
+    m = _rowless_after(first=True)
+    assert _root_order(m) == ["add_disjunction:first", "add_disjunction:R", "last"]
+    first = next(n for n in gdp_tree(m).walk() if n.name.startswith("add_disjunction:first"))
+    token = transform_current_disjunctive_state(m, [first.disjuncts[0]])
+    fresh = _rowless_after(first=False)
+    assert _root_order(m) == _root_order(fresh) == ["add_disjunction:R", "last"]
+    # Each record starts at its first row; the row-less ``R`` at its first nested one.
+    # (The positions are not a fresh build's: the decided selector row stays.)
+    for model in (m, fresh):
+        members = model._gdp_block_members
+        tags = [getattr(c, "disjunction", None) for c in model._constraints]
+        first_row = {
+            k: min(i for i, t in enumerate(tags) if t and t[0] == k)
+            for k in members
+            if any(t and t[0] == k for t in tags)
+        }
+        assert {k: members[k].start for k in first_row} == first_row
+        (r,) = (rec for rec in members.values() if rec.name == "R")
+        assert r.start == min(first_row.values())
+    token.reverse()
+    assert _root_order(m) == ["add_disjunction:first", "add_disjunction:R", "last"]
+
+
+def test_a_transformed_model_round_trips():
+    """The transformed model's document passes the reader's start check."""
+    from discopt.gdp.state import transform_current_disjunctive_state
+    from discopt.gdp.tree import gdp_tree
+
+    m = _rowless_after(first=True)
+    first = next(n for n in gdp_tree(m).walk() if n.name.startswith("add_disjunction:first"))
+    transform_current_disjunctive_state(m, [first.disjuncts[0]])
     text = dumps(m, provenance=False)
-    first_rows = [
-        i for i, r in enumerate(json.loads(text)["rows"]) if r.get("disjunction") is not None
-    ]
-    assert min(first_rows) < min(starts)  # the start really is stale
     assert dumps(loads(text), provenance=False) == text
 
 
@@ -311,3 +369,15 @@ def test_the_or_fixture_read_as_select_one_is_infeasible():
     sel["sense"] = "=="
     got = _solve(loads(json.dumps(doc)))
     assert got.status == "infeasible"
+
+
+def test_a_row_less_block_disjunction_starting_after_its_rows_is_refused():
+    """``R`` tags no row, so its start is bounded by the first row nested in it."""
+    doc = json.loads(dumps(_rowless_after(first=False), provenance=False))
+    (r,) = (rec for rec in _members(doc) if rec["name"] == "R")
+    assert r["start"] == 0
+    r["start"] = 1
+    with pytest.raises(SerializationError, match="'start' 1 is after row 0"):
+        loads(json.dumps(doc))
+    r["start"] = 0
+    loads(json.dumps(doc))

@@ -2809,10 +2809,10 @@ def _check_block_state(model: Model) -> None:
     semantics -- and a block disjunction that takes part in nesting is always
     recorded (``Model._emit_block_disjunction``). A record that disagrees, or is
     missing, changes which block a disjunction is nested in or whether it is
-    recorded at all, so it is refused rather than reconciled. ``start`` is not
-    checked against row positions: ``transform_current_disjunctive_state`` leaves
-    it stale when it drops earlier rows, and the GDP tree reads it only to order a
-    record that has no rows.
+    recorded at all, so it is refused rather than reconciled. ``start`` is the
+    position of the block disjunction's first row; the GDP tree reads it to order a
+    record that tags no rows, so such a record must start no later than the first
+    row or record nested in it.
     """
     members = model.__dict__.get("_gdp_block_members") or {}
     owner: dict[int, str] = {}  # id(indicator column) -> block-disjunction key
@@ -2828,15 +2828,27 @@ def _check_block_state(model: Model) -> None:
         for col in rec.indicators:
             own(col, key, f"_gdp_blocks member {key!r} 'indicators'")
     parents: list = [(f"_gdp_blocks member {k!r} 'parent'", r.parent) for k, r in members.items()]
+    first_row: dict[str, int] = {}  # key -> position of its first tagged row
+    nested_at: dict[int, int] = {}  # id(parent indicator) -> first row nested in it
+
+    def nest(parent: Any, pos: int) -> None:
+        if parent is not None:
+            nested_at[id(parent)] = min(nested_at.get(id(parent), pos), pos)
+
+    for r in members.values():
+        nest(r.parent, r.start)
     for pos, row in enumerate(model._constraints):
         if type(row) is _DisjunctiveConstraint:
             parents.append((f"row {pos} 'parent_indicator'", row.parent_indicator))
+            nest(row.parent_indicator, pos)
             continue
         if type(row) is not _IndicatorConstraint or row.disjunction is None:
             continue
         key, k, n = row.disjunction
         own(row.indicator, key, f"row {pos}")
         parents.append((f"row {pos} 'parent'", row.parent))
+        first_row.setdefault(key, pos)
+        nest(row.parent, pos)
         rec = members.get(key)
         if rec is None:
             if row.parent is not None:
@@ -2858,6 +2870,20 @@ def _check_block_state(model: Model) -> None:
             raise SerializationError(
                 f"_gdp_blocks member {key!r} 'semantics' {rec.semantics.name} disagrees "
                 f"with row {pos}'s {row.semantics.name}"
+            )
+    for key, rec in members.items():
+        if key in first_row:
+            if rec.start != first_row[key]:
+                raise SerializationError(
+                    f"_gdp_blocks member {key!r} 'start' {rec.start} is not the position "
+                    f"of its first row, {first_row[key]}"
+                )
+            continue
+        inner = [nested_at[id(c)] for c in rec.indicators if id(c) in nested_at]
+        if inner and rec.start > min(inner):
+            raise SerializationError(
+                f"_gdp_blocks member {key!r} 'start' {rec.start} is after row {min(inner)}, "
+                "which is nested in it"
             )
     for where, parent in parents:
         if parent is None:
