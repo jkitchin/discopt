@@ -8111,6 +8111,7 @@ class Model:
         >>> d = m.either_or([[x[0] <= 5], [x[0] >= 15]], name="mode")
         >>> m.logical(d.indicators[0].implies(other_disjunct_indicator))
         """
+        _refuse_empty_disjunction(disjuncts, "either_or", name)
         dc = _DisjunctiveConstraint(
             disjuncts=disjuncts,
             name=name,
@@ -8636,6 +8637,7 @@ class Model:
             nested into an attached one (#1430). Dropping it silently would have
             the solver certify an optimum for the *relaxed* problem.
         """
+        _refuse_empty_disjunction(disjuncts, "disjunction", name)
         dc = _DisjunctiveConstraint(
             disjuncts=disjuncts,
             name=name,
@@ -12480,6 +12482,13 @@ def _claim_blocks(blocks: list["Disjunct"], owner: str, name: Optional[str]) -> 
             )
     for d in blocks:
         d._placed_in = owner
+
+
+def _refuse_empty_disjunction(disjuncts: Any, method: str, name: Optional[str]) -> None:
+    # A disjunction selects one of its disjuncts; with none there is nothing to
+    # select, and the GDP lowering failed later with a bare ``IndexError``.
+    if len(disjuncts) == 0:
+        raise ValueError(f"{method}() got no disjuncts for disjunction {name or '<anon>'!r}")
 
 
 class _BlockMembers(NamedTuple):
