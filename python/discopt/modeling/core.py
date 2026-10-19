@@ -12813,6 +12813,44 @@ def _logical_leaves(expr: LogicalExpression) -> list:
     return leaves
 
 
+def _logical_children(node: LogicalExpression) -> tuple:
+    if isinstance(node, (LogicalAnd, LogicalOr, LogicalEquivalent)):
+        return (node.left, node.right)
+    if isinstance(node, LogicalImplies):
+        return (node.antecedent, node.consequent)
+    if isinstance(node, LogicalNot):
+        return (node.operand,)
+    if isinstance(node, (LogicalAtLeast, LogicalAtMost, LogicalExactly)):
+        return tuple(node.operands)
+    return ()
+
+
+def _logical_node_count(expr: LogicalExpression) -> int:
+    """Node count of *expr* as a tree, computed iteratively (#1808).
+
+    The GDP lowering (``_to_nnf`` and the CNF pass) recurses once per level of a
+    logical expression, so the solve's recursion gate must size these too: a
+    loop-built ``Y[0] | Y[1] | ...`` is a left-deep chain. Bottom-up and memoised
+    by node identity, like ``factorable_reform._expr_node_count``.
+    """
+    sizes: dict[int, int] = {}
+    held: list = []  # keep every sized node alive: ids cannot recycle
+    stack: list = [(expr, False)]
+    while stack:
+        node, expanded = stack.pop()
+        nid = id(node)
+        if nid in sizes:
+            continue
+        children = _logical_children(node)
+        if not expanded and children:
+            stack.append((node, True))
+            stack.extend((c, False) for c in children if id(c) not in sizes)
+            continue
+        sizes[nid] = 1 + builtins_sum(sizes[id(c)] for c in children)
+        held.append(node)
+    return sizes[id(expr)]
+
+
 # Functional-style constructors for logical expressions
 
 
