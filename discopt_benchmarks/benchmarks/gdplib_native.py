@@ -197,8 +197,17 @@ class NativeRun:
     note: str = ""
 
 
-def solve_native(name: str, time_limit: float = 300.0) -> NativeRun:
+def solve_native(
+    name: str,
+    time_limit: float = 300.0,
+    gdp_method: str | None = None,
+    gdp_options: dict | None = None,
+) -> NativeRun:
     """Build the native model *name*, solve it, and assess soundness.
+
+    ``gdp_method`` and ``gdp_options`` (extra ``Model.solve`` keyword arguments) are
+    passed through, so one native model runs every route (#1775 G0.5); ``None``
+    keeps the solver's defaults.
 
     The oracle is the SCIP-certified :func:`reference_optima` value (a GDP optimum
     is reformulation-independent, so the same value anchors the native encoding).
@@ -212,7 +221,10 @@ def solve_native(name: str, time_limit: float = 300.0) -> NativeRun:
     t0 = time.time()
     try:
         model = NATIVE_BUILDERS[name]()
-        res = model.solve(time_limit=time_limit)
+        kwargs = dict(gdp_options or {})
+        if gdp_method is not None:
+            kwargs["gdp_method"] = gdp_method
+        res = model.solve(time_limit=time_limit, **kwargs)
     except Exception as exc:  # noqa: BLE001
         return NativeRun(
             name=name,

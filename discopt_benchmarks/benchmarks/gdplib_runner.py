@@ -128,8 +128,46 @@ GDPLIB_SMALL: tuple[str, ...] = (
     "modprodnet",
 )
 
+#: GDPlib's own benchmark panel (``gdplib/benchmark.py:PR58_BENCHMARK_INSTANCES``),
+#: the GDPlib half of the #1775 parity panel (spec §1.2).
+GDPLIB_PR58: tuple[str, ...] = (
+    "batch_processing",
+    "biofuel",
+    "cstr",
+    "disease_model",
+    "ex1_linan_2023",
+    "gdp_col",
+    "hda",
+    "kaibel",
+    "med_term_purchasing",
+    "methanol",
+    "mod_hens",
+    "modprodnet",
+    "positioning",
+    "small_batch",
+    "spectralog",
+    "stranded_gas",
+    "syngas",
+)
+
+#: The #1775 GDP parity panel (spec §1.2): GDPlib's PR58 set plus the Pyomo GDPopt
+#: test models, vendored from Pyomo 6.10.0 (``benchmarks.pyomo_gdp_examples``):
+#: 8PP in its algebraic and logical forms, strip packing, constrained layout,
+#: ``ex_633_trespalacios``, ``nonconvex_HEN`` and jobshop (``jobshop-small.dat``, the
+#: data the example's own ``__main__`` uses). Every name has a row in
+#: :func:`panel_oracle`: a verified optimum or an explicit "unproven".
+GDP_PARITY: tuple[str, ...] = GDPLIB_PR58 + (
+    "pyomo.eight_process",
+    "pyomo.eight_process_logical",
+    "pyomo.strip_packing_concrete",
+    "pyomo.constrained_layout_clay0203",
+    "pyomo.ex_633_trespalacios",
+    "pyomo.nonconvex_hen",
+    "pyomo.jobshop_small",
+)
+
 #: Named model sets selectable with ``--suite``.
-SUITES: dict[str, tuple[str, ...]] = {"gdplib_small": GDPLIB_SMALL}
+SUITES: dict[str, tuple[str, ...]] = {"gdplib_small": GDPLIB_SMALL, "gdp_parity": GDP_PARITY}
 
 
 def is_available() -> bool:
@@ -188,6 +226,17 @@ def discover_models(
     if include is not None:
         want = set(include)
         specs = [s for s in specs if s.name in want]
+        # #1775 G0.5: the vendored Pyomo examples are named ``pyomo.<name>`` and
+        # resolved only when asked for by name, so the default sweep is unchanged.
+        # An unknown ``pyomo.`` name is dropped like any other absent name; the
+        # --suite path refuses that loudly.
+        from benchmarks import pyomo_gdp_examples as px
+
+        for name in sorted(want):
+            if name.startswith(px.PREFIX) and name[len(px.PREFIX) :] in px.CATALOG:
+                specs.append(
+                    GDPModelSpec(name=name, builder=px.builder(name), module="pyomo_gdp_examples")
+                )
     if exclude_set:
         specs = [s for s in specs if s.name not in exclude_set]
     return sorted(specs, key=lambda s: s.name)
@@ -248,6 +297,88 @@ def reference_optima() -> dict[str, float]:
         "modprodnet": 3592.924373781839,
         "batch_processing": 679365.33,  # BARON-certified (SCIP left it unproven at 60s)
     }
+
+
+@dataclass(frozen=True)
+class OracleRecord:
+    """The oracle status of one parity-panel instance (#1775 G0.5).
+
+    ``source`` says what certified ``value``:
+
+    * ``"baron+scip"`` / ``"baron"`` -- the :func:`reference_optima` entries
+      (global solvers through GAMS, ``lb == ub``, feasibility-verified point);
+    * ``"highs"`` -- a linear instance, solved by HiGHS to proven optimality on
+      **both** the ``gdp.bigm`` and the ``gdp.hull`` reformulation with the
+      incumbent feasibility-verified in Pyomo each time (:func:`_solve_with_highs`),
+      and the two values agreeing;
+    * ``"unproven"`` -- no oracle yet; ``value`` is ``None`` and ``note`` says why.
+      ``discopt_benchmarks/scripts/gdp_parity_oracle.py`` fills these from the
+      BARON+SCIP GAMS oracle where GAMS is installed.
+
+    ``pyomo_expected`` is Pyomo's own test-suite value, a cross-check and never an
+    oracle (``pyomo_gdp_examples.PYOMO_EXPECTED``).
+    """
+
+    value: float | None
+    source: str
+    note: str = ""
+    pyomo_expected: tuple[float, float] | None = None
+
+
+#: HiGHS-certified optima of the linear parity-panel instances (see
+#: :class:`OracleRecord`); measured 2026-10-19 with HiGHS through ``appsi_highs``.
+#: The value is the ``gdp.bigm`` one; ``gdp.hull`` agreed to <= 4e-14 relative on
+#: every row.
+_HIGHS_OPTIMA: dict[str, float] = {
+    "disease_model": 304.4162107198232,
+    "med_term_purchasing": 6797.539701513444,
+    "pyomo.jobshop_small": 11.0,
+    "pyomo.strip_packing_concrete": 11.0,  # Pyomo's test asserts 11 too
+}
+
+_NO_GAMS = (
+    "nonlinear, so HiGHS is no oracle; the BARON+SCIP GAMS oracle has not been run "
+    "on it (scripts/gdp_parity_oracle.py)"
+)
+
+#: Panel instances with no oracle yet, and why.
+_UNPROVEN: dict[str, str] = {
+    "biofuel": _NO_GAMS,
+    "gdp_col": "BARON and SCIP did not prove it within budget (see reference_optima)",
+    "hda": _NO_GAMS,
+    "kaibel": _NO_GAMS + "; its builder also needs an ipopt executable",
+    "methanol": "BARON and SCIP did not prove it within budget (see reference_optima)",
+    "mod_hens": _NO_GAMS + "; its builder also needs an ipopt executable",
+    "stranded_gas": _NO_GAMS,
+    "pyomo.eight_process": _NO_GAMS,
+    "pyomo.eight_process_logical": _NO_GAMS,
+    "pyomo.constrained_layout_clay0203": _NO_GAMS,
+    "pyomo.ex_633_trespalacios": _NO_GAMS,
+    "pyomo.nonconvex_hen": _NO_GAMS,
+}
+
+
+def panel_oracle() -> dict[str, OracleRecord]:
+    """One :class:`OracleRecord` per :data:`GDP_PARITY` instance (#1775 G0.5).
+
+    Every panel name has a row: a certified value, or ``"unproven"`` with a reason.
+    A test pins that, so the panel cannot grow an instance nobody has an oracle
+    story for.
+    """
+    from benchmarks.pyomo_gdp_examples import PREFIX, PYOMO_EXPECTED
+
+    ref = reference_optima()
+    out: dict[str, OracleRecord] = {}
+    for name in GDP_PARITY:
+        expected = PYOMO_EXPECTED.get(name[len(PREFIX) :]) if name.startswith(PREFIX) else None
+        if name in ref:
+            source = "baron" if name == "batch_processing" else "baron+scip"
+            out[name] = OracleRecord(ref[name], source, pyomo_expected=expected)
+        elif name in _HIGHS_OPTIMA:
+            out[name] = OracleRecord(_HIGHS_OPTIMA[name], "highs", pyomo_expected=expected)
+        elif name in _UNPROVEN:
+            out[name] = OracleRecord(None, "unproven", _UNPROVEN[name], pyomo_expected=expected)
+    return out
 
 
 def _classify(pyomo_model) -> tuple[InstanceInfo, bool]:
@@ -513,8 +644,23 @@ def _max_constraint_violation(pyomo_model) -> float | None:
 
     Per-constraint violation is normalized by ``1 + |body|`` so a large-magnitude
     balance (e.g. water_network ~3e5) is judged on relative, not absolute, slack.
+
+    Only variables an active constraint or objective references are checked
+    (#1775 G0.5). A variable nothing references cannot affect feasibility, and the
+    ``appsi`` interfaces do not load one: GDPlib's ``med_term_purchasing`` has 667,
+    all unreferenced, which made a HiGHS-proven, verified-feasible optimum read as
+    "solution not fully loaded". A *referenced* unset variable still returns ``None``.
     """
     import pyomo.environ as pyo
+    from pyomo.core.expr.visitor import identify_variables
+
+    referenced: dict[int, object] = {}
+    for comp in pyomo_model.component_data_objects(pyo.Constraint, active=True):
+        for v in identify_variables(comp.body, include_fixed=True):
+            referenced.setdefault(id(v), v)
+    for comp in pyomo_model.component_data_objects(pyo.Objective, active=True):
+        for v in identify_variables(comp.expr, include_fixed=True):
+            referenced.setdefault(id(v), v)
 
     worst = 0.0
     for c in pyomo_model.component_data_objects(pyo.Constraint, active=True):
@@ -529,7 +675,7 @@ def _max_constraint_violation(pyomo_model) -> float | None:
         if c.has_ub():
             hi = float(pyo.value(c.upper))
             worst = max(worst, (body - hi) / scale)
-    for v in pyomo_model.component_data_objects(pyo.Var, active=True):
+    for v in referenced.values():
         val = v.value
         if val is None:
             return None  # an unset variable -> solution not fully loaded
@@ -590,6 +736,11 @@ def _attach_oracle(run: ModelRun, spec: GDPModelSpec, method: str, time_limit: f
         return
 
     ref = reference_optima().get(spec.name)
+    if ref is None:
+        # #1775 G0.5: a parity-panel instance certified offline (HiGHS on both
+        # reformulations) anchors the run the same way when no live oracle ran.
+        rec = panel_oracle().get(spec.name)
+        ref = rec.value if rec is not None else None
     if ref is not None:
         run.oracle_objective = ref
         run.oracle_source = "reference"
@@ -832,7 +983,8 @@ def main(argv: list[str] | None = None) -> int:
         "--suite",
         choices=sorted(SUITES),
         default=None,
-        help="named model set, e.g. gdplib_small (the 12 models under 500 vars). "
+        help="named model set: gdplib_small (the 12 models under 500 vars) or "
+        "gdp_parity (#1775: GDPlib PR58 + Pyomo's GDPopt test models). "
         "Mutually exclusive with --models.",
     )
     parser.add_argument(
@@ -865,7 +1017,7 @@ def main(argv: list[str] | None = None) -> int:
         # `include` filtering in discover_models() drops a requested-but-absent
         # model silently. For a preset pinned by name that is the §6 vacuity trap:
         # a panel that ran 8 of 12 models and reported clean. Refuse loudly.
-        found = {s.name for s in discover_models(exclude=args.exclude)}
+        found = {s.name for s in discover_models(include=args.models, exclude=args.exclude)}
         missing = [m for m in args.models if m not in found]
         if missing:
             print(

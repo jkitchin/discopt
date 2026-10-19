@@ -233,6 +233,28 @@ def test_feasibility_check_rejects_unset_solution():
     assert gr._max_constraint_violation(m) is None
 
 
+def test_feasibility_check_ignores_an_unreferenced_unset_variable():
+    """#1775 G0.5: a variable no active row or objective uses cannot affect
+    feasibility and is not loaded by appsi solvers (GDPlib med_term_purchasing has
+    667); it must not turn a verified point into 'unproven'."""
+    import pyomo.environ as pyo
+
+    m = _tiny_pyomo_model(1.0)
+    m.unused = pyo.Var(bounds=(0, 5))  # unset, and nothing references it
+    viol = gr._max_constraint_violation(m)
+    assert viol is not None and viol <= gr._ORACLE_FEAS_TOL
+
+
+def test_feasibility_check_counts_a_variable_used_only_by_the_objective():
+    import pyomo.environ as pyo
+
+    m = _tiny_pyomo_model(1.0)
+    m.z = pyo.Var(bounds=(0, 5))
+    m.obj.deactivate()
+    m.obj2 = pyo.Objective(expr=m.x + m.z)
+    assert gr._max_constraint_violation(m) is None
+
+
 @pytest.mark.skipif(not _has_gams(), reason="GAMS (SCIP/BARON subsolvers) not available")
 def test_gams_oracle_certifies_nonlinear_optimum():
     """SCIP via GAMS returns the feasibility-verified optimum for a nonlinear GDP."""
