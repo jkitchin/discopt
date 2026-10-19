@@ -249,15 +249,22 @@ logger = logging.getLogger(__name__)
 #: malformed row -- a refusal either way, never a silent drop.
 #:
 #: 1.7 records the state of Disjunct blocks (#1775 G1.2 / G1.4, #1790), refused
-#: before: on an ``indicator`` row its block's ``parent`` (the enclosing block's
-#: indicator) and non-default ``semantics`` (an OR block); on a ``disjunction``
-#: row its ``parent_indicator`` (nested in a block with ``Disjunct.subject_to``);
-#: and a ``_gdp_blocks`` state entry -- the block-disjunction record
+#: before: a ``block_indicator`` row -- an indicator row with its block's
+#: ``parent`` (the enclosing block's indicator) and/or non-default ``semantics``
+#: (an OR block); a ``nested_disjunction`` row -- a disjunction row with its
+#: ``parent_indicator`` (nested in a block with ``Disjunct.subject_to``); and a
+#: ``_gdp_blocks`` state entry -- the block-disjunction record
 #: (``_gdp_block_members``) and, when a block declares local variables
 #: (``Disjunct.variable``), the attached ``Disjunct`` objects, so ``validate``
 #: still refuses a use of one outside its block. Each is written only when set, so
 #: a model without nested or OR blocks or local variables writes what 1.6 wrote;
-#: each is read only from a document of minor >= 7.
+#: each is read only from a document of minor >= 7. The two rows are new *kinds*
+#: rather than new keys on the old ones because the readers before #1780
+#: (1.0-1.4) skip an unknown nested key -- they would load an OR block as
+#: select-one, or a nested block at top level, without a word -- while every
+#: reader refuses an unknown row kind. Only the local-variable record can be lost
+#: that way (an unknown ``state`` key is skipped there too), which drops a
+#: ``validate`` refusal, never a row.
 SCHEMA = "discopt.model/1.7"
 
 #: Major version this reader accepts. A document whose major differs is refused
@@ -279,9 +286,9 @@ _SCHEMA_MINOR_LOGIC_LOWERING_INDICATORS = 5
 #: document of this minor or later.
 _SCHEMA_MINOR_NEWAXIS_NESTED_DISJUNCTION = 6
 
-#: Minor that first wrote Disjunct-block state (plan WP-3b-2): ``parent`` /
-#: ``semantics`` on an indicator row, ``parent_indicator`` on a disjunction row,
-#: the ``_gdp_blocks`` state entry.
+#: Minor that first wrote Disjunct-block state (plan WP-3b-2): the
+#: ``block_indicator`` and ``nested_disjunction`` row kinds and the
+#: ``_gdp_blocks`` state entry.
 _SCHEMA_MINOR_DISJUNCT_BLOCKS = 7
 
 #: This reader's minor, the one ``SCHEMA`` names.
@@ -1533,11 +1540,18 @@ def _enc_rows(model: Model, table: _NodeTable) -> list[dict]:
                 }
             )
             # 1.7 (#1775 G1.2 / G1.4): written only when set, so a row outside any
-            # nested or OR block is written exactly as at 1.6.
+            # nested or OR block is written exactly as at 1.6. A row that has
+            # either is a ``block_indicator``, not an ``indicator`` carrying an
+            # extra key: the readers before #1780 (1.0-1.4) skip a key they do
+            # not know, and would load an OR block as select-one or a nested
+            # block as top-level without a word; every reader refuses an unknown
+            # row kind.
             if con.parent is not None:
                 rows[-1]["parent"] = table.add(con.parent)
             if con.semantics is not DisjunctionSemantics.SELECT_ONE:
                 rows[-1]["semantics"] = con.semantics.name
+            if "parent" in rows[-1] or "semantics" in rows[-1]:
+                rows[-1]["kind"] = "block_indicator"
         elif t is _SOSConstraint:
             rows.append(
                 {
@@ -1548,7 +1562,11 @@ def _enc_rows(model: Model, table: _NodeTable) -> list[dict]:
                 }
             )
         elif t is _DisjunctiveConstraint:
-            rows.append({"kind": "disjunction", **_enc_disjunction(con, table)})
+            row = _enc_disjunction(con, table)
+            # 1.7: its own kind when nested in a block, for the reason given at
+            # ``block_indicator`` above.
+            kind = "disjunction" if "parent_indicator" not in row else "nested_disjunction"
+            rows.append({"kind": kind, **row})
         elif t is _LogicalConstraint:
             rows.append({"kind": "logical", "logic": _enc_logic(con, table), "name": con.name})
         else:
@@ -1725,7 +1743,13 @@ def _dec_rows(docs: list[dict], nodes: list, minor: int) -> list:
         kind = d.get("kind")
         if kind == "algebraic":
             out.append(_dec_constraint(d, nodes))
-        elif kind == "indicator":
+        elif kind in ("indicator", "block_indicator"):
+            if kind == "block_indicator" and minor < _SCHEMA_MINOR_DISJUNCT_BLOCKS:
+                raise SerializationError(
+                    f"a schema 1.{minor} document carries a 'block_indicator' row, "
+                    "which no writer of that version produced; the document is "
+                    "malformed or was edited by hand"
+                )
             active_value = d["active_value"]
             if type(active_value) is not int or active_value not in (0, 1):
                 # Anything but 0/1 made the lowering activate the row for an
@@ -1753,9 +1777,14 @@ def _dec_rows(docs: list[dict], nodes: list, minor: int) -> list:
                     ),
                 )
             )
-            if minor >= _SCHEMA_MINOR_DISJUNCT_BLOCKS:
-                # 1.7 (#1775 G1.2 / G1.4). Not looked at in an older document, so
-                # there either key is refused as unread.
+            if kind == "block_indicator":
+                # 1.7 (#1775 G1.2 / G1.4). Read only on this kind, so on a plain
+                # ``indicator`` row either key is refused as unread.
+                if "parent" not in d and "semantics" not in d:
+                    raise SerializationError(
+                        f"block_indicator row {len(out) - 1} has neither 'parent' nor "
+                        "'semantics'; the writer emits a plain 'indicator' row then"
+                    )
                 if "parent" in d:
                     out[-1].parent = nodes[d["parent"]]
                 if "semantics" in d:
@@ -1773,6 +1802,22 @@ def _dec_rows(docs: list[dict], nodes: list, minor: int) -> list:
                 )
             )
         elif kind == "disjunction":
+            if "parent_indicator" in d:
+                raise SerializationError(
+                    f"disjunction row {d.get('name')!r} carries 'parent_indicator', "
+                    "which the writer puts only on a 'nested_disjunction' row"
+                )
+            out.append(_dec_disjunction(d, nodes, minor))
+        elif kind == "nested_disjunction":
+            # 1.7 (#1775 G1.2): a disjunction nested in a block by
+            # ``Disjunct.subject_to``; see ``block_indicator`` in ``_enc_rows``.
+            if minor < _SCHEMA_MINOR_DISJUNCT_BLOCKS or "parent_indicator" not in d:
+                raise SerializationError(
+                    f"a schema 1.{minor} document carries a 'nested_disjunction' row "
+                    f"{'without' if 'parent_indicator' not in d else 'with'} "
+                    "'parent_indicator', which no writer produced; the document is "
+                    "malformed or was edited by hand"
+                )
             out.append(_dec_disjunction(d, nodes, minor))
         elif kind == "logical":
             if minor < _SCHEMA_MINOR_LOGIC_LOWERING_INDICATORS:
