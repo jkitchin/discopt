@@ -5593,6 +5593,40 @@ def carry_validation_guards(src: "Model", dst: "Model") -> None:
                 seen.add(id(r))
 
 
+def carry_builder_objective(src: "Model", dst: "Model") -> None:
+    """Re-issue ``src``'s fast-API objective on ``dst``, a model rebuilt from it.
+
+    ``add_linear_objective`` / ``add_quadratic_objective`` keep the real objective in
+    ``src``'s Rust builder and leave a placeholder in ``_objective``, so a pass that
+    copies ``_objective`` carries a zero objective (#1794 B2, #1798). This repeats the
+    builder call on ``dst`` when ``src``'s objective is that placeholder (an
+    ``_objective_expression()`` rebuild is a gathered-index expression the Rust repr
+    refuses, which turns FBBT/presolve off). No-op otherwise.
+
+    Call it **after** every variable ``dst`` will hold exists: the call creates
+    ``dst``'s builder, which registers the variables present then, and a column
+    added later is unknown to it ("Variable not found in model" from the Rust repr).
+
+    The fast-API *rows* are carried separately, as ordinary constraints, with
+    ``src._builder_linear_constraints()``.
+    """
+    if src._objective is None or not getattr(src._objective, "_is_placeholder", False):
+        return
+    lin_blk = src._builder_linear_objective
+    quad_blk = src._builder_quadratic_objective
+    if lin_blk is not None:
+        c, x, constant, sense = lin_blk
+        dst.add_linear_objective(c, x, constant=constant, sense=sense)
+    elif quad_blk is not None:
+        Q, c, x, constant, sense = quad_blk
+        dst.add_quadratic_objective(Q, c, x, constant=constant, sense=sense)
+    else:
+        raise ValueError(
+            "objective is a builder placeholder but the model retains no builder "
+            "objective block to carry into the rebuilt model"
+        )
+
+
 def missing_validation_guards(src: "Model", dst: "Model") -> list[str]:
     """``attr: label`` of every guard of ``src`` that ``dst`` does not hold.
 

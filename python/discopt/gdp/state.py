@@ -59,6 +59,7 @@ from discopt.modeling.core import (
     SelectorCardinality,
     _DisjunctiveConstraint,
     _IndicatorConstraint,
+    carry_builder_objective,
     carry_validation_guards,
 )
 
@@ -366,27 +367,9 @@ def reduced_subproblem(model: Model, selected: Iterable[DisjunctNode]) -> Model:
     out._parameters = list(model._parameters)
     out._rebuild_name_index()
     out._objective = model._objective
-    if model._objective is not None and getattr(model._objective, "_is_placeholder", False):
-        # ``add_linear_objective`` / ``add_quadratic_objective`` keep the real
-        # objective in the source's Rust builder (#1794 B2). Re-issue the same
-        # builder call: an ``_objective_expression()`` rebuild is a gathered-index
-        # expression the Rust repr refuses, which turned FBBT/presolve off.
-        lin_blk = model._builder_linear_objective
-        quad_blk = model._builder_quadratic_objective
-        if lin_blk is not None:
-            c, x, constant, sense = lin_blk
-            out.add_linear_objective(c, x, constant=constant, sense=sense)
-        elif quad_blk is not None:
-            Q, c, x, constant, sense = quad_blk
-            out.add_quadratic_objective(Q, c, x, constant=constant, sense=sense)
-        else:
-            raise ValueError(
-                "objective is a builder placeholder but the model retains no builder "
-                "objective block to carry into the subproblem"
-            )
+    # Fast-API objective and rows live only in the source's builder (#1794 B2).
+    carry_builder_objective(model, out)
     out._constraints = plan.rows(model)
-    # Fast-API rows live only in the source's builder; carry them as ordinary
-    # rows, or the subproblem silently loses them (#1794 B2).
     out._constraints.extend(model._builder_linear_constraints())
     out._gdp_factory_disjuncts = list(model._gdp_factory_disjuncts)
     carry_complementarities(model, out, pass_name="gdp.fix_disjuncts")
