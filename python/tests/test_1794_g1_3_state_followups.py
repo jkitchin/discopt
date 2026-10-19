@@ -350,5 +350,7 @@ def test_save_refuses_a_model_holding_an_unreversed_transform(tmp_path):
     with pytest.raises(SerializationError, match="_gdp_state_tokens"):
         m.save(tmp_path / "m.dopt")
     reverse_current_disjunctive_state(m)
-    m.__dict__.pop("_gdp_state_tokens")
+    # The last reverse drops the record itself (#1797 review N1), so the source
+    # model saves again with nothing removed by hand.
+    assert "_gdp_state_tokens" not in vars(m)
     m.save(tmp_path / "m.dopt")
