@@ -1,0 +1,198 @@
+{
+ "schema": "discopt.model/1.7",
+ "discopt": "0.9.1.dev0",
+ "name": "array_bounds_inf",
+ "variables": [
+  {
+   "name": "x",
+   "type": "continuous",
+   "shape": [
+    3,
+    2
+   ],
+   "lb": [
+    [
+     "-inf",
+     0.0
+    ],
+    [
+     -1.0,
+     -1e+20
+    ],
+    [
+     0.0,
+     0.0
+    ]
+   ],
+   "ub": [
+    [
+     1.0,
+     "inf"
+    ],
+    [
+     2.0,
+     1e+20
+    ],
+    [
+     0.5,
+     3.0
+    ]
+   ],
+   "bound_stack": []
+  },
+  {
+   "name": "k",
+   "type": "integer",
+   "shape": [
+    2
+   ],
+   "lb": [
+    0.0,
+    0.0
+   ],
+   "ub": [
+    5.0,
+    9.0
+   ],
+   "bound_stack": []
+  }
+ ],
+ "parameters": [],
+ "nodes": [
+  {
+   "op": "var",
+   "ref": 0
+  },
+  {
+   "op": "index",
+   "base": 0,
+   "index": {
+    "k": "tuple",
+    "v": [
+     {
+      "k": "slice",
+      "start": 0,
+      "stop": 2,
+      "step": null
+     },
+     {
+      "k": "int",
+      "v": 1
+     }
+    ]
+   }
+  },
+  {
+   "op": "sum",
+   "a": 1,
+   "axis": null
+  },
+  {
+   "op": "var",
+   "ref": 1
+  },
+  {
+   "op": "index",
+   "base": 3,
+   "index": {
+    "k": "int",
+    "v": 1
+   }
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 2,
+   "b": 4
+  },
+  {
+   "op": "const",
+   "v": 7.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 5,
+   "b": 6
+  },
+  {
+   "op": "const",
+   "v": 2.0
+  },
+  {
+   "op": "binop",
+   "o": "**",
+   "a": 0,
+   "b": 8
+  },
+  {
+   "op": "sum",
+   "a": 9,
+   "axis": null
+  },
+  {
+   "op": "index",
+   "base": 3,
+   "index": {
+    "k": "int",
+    "v": 0
+   }
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 10,
+   "b": 11
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 8,
+   "b": 4
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 12,
+   "b": 13
+  }
+ ],
+ "objective": {
+  "sense": "minimize",
+  "expr": 14,
+  "placeholder": false
+ },
+ "builder_objective": null,
+ "rows": [
+  {
+   "kind": "algebraic",
+   "body": 7,
+   "sense": "<=",
+   "name": "mix"
+  }
+ ],
+ "builder_blocks": [],
+ "complementarities": null,
+ "state": {
+  "_aux_counter": 0,
+  "_decomp_stages": {},
+  "_decomp_blocks": {},
+  "_zero_spanning_factor_auxes": [],
+  "_implied_integer_auxes": [],
+  "_free_by_construction": [],
+  "_atan2_preconditions": [],
+  "_piecewise_domains": [],
+  "_coupling_keys": {
+   "names": [],
+   "row_indices": []
+  },
+  "_sets": [],
+  "_simplex_lowerings": [],
+  "_block_labels_var": {},
+  "_block_labels_con": {
+   "names": {},
+   "rows": []
+  }
+ },
+ "initial_point": []
+}

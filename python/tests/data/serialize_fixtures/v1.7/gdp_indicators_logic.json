@@ -1,0 +1,337 @@
+{
+ "schema": "discopt.model/1.7",
+ "discopt": "0.9.1.dev0",
+ "name": "gdp_indicators_logic",
+ "variables": [
+  {
+   "name": "x",
+   "type": "continuous",
+   "shape": [],
+   "lb": 0.0,
+   "ub": 20.0,
+   "bound_stack": []
+  },
+  {
+   "name": "w",
+   "type": "continuous",
+   "shape": [],
+   "lb": 0.0,
+   "ub": 20.0,
+   "bound_stack": []
+  },
+  {
+   "name": "mode_0_active",
+   "type": "binary",
+   "shape": [],
+   "lb": 0.0,
+   "ub": 1.0,
+   "bound_stack": []
+  },
+  {
+   "name": "mode_1_active",
+   "type": "binary",
+   "shape": [],
+   "lb": 0.0,
+   "ub": 1.0,
+   "bound_stack": []
+  },
+  {
+   "name": "pump_0_active",
+   "type": "binary",
+   "shape": [],
+   "lb": 0.0,
+   "ub": 1.0,
+   "bound_stack": []
+  },
+  {
+   "name": "pump_1_active",
+   "type": "binary",
+   "shape": [],
+   "lb": 0.0,
+   "ub": 1.0,
+   "bound_stack": []
+  }
+ ],
+ "parameters": [],
+ "nodes": [
+  {
+   "op": "var",
+   "ref": 0
+  },
+  {
+   "op": "const",
+   "v": 5.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 0,
+   "b": 1
+  },
+  {
+   "op": "const",
+   "v": 15.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 3,
+   "b": 0
+  },
+  {
+   "op": "var",
+   "ref": 2
+  },
+  {
+   "op": "var",
+   "ref": 3
+  },
+  {
+   "op": "var",
+   "ref": 1
+  },
+  {
+   "op": "const",
+   "v": 3.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 7,
+   "b": 8
+  },
+  {
+   "op": "const",
+   "v": 10.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 10,
+   "b": 7
+  },
+  {
+   "op": "var",
+   "ref": 4
+  },
+  {
+   "op": "var",
+   "ref": 5
+  },
+  {
+   "op": "sum_over",
+   "args": [
+    5,
+    6
+   ]
+  },
+  {
+   "op": "const",
+   "v": 1.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 14,
+   "b": 15
+  },
+  {
+   "op": "sum_over",
+   "args": [
+    12,
+    13
+   ]
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 17,
+   "b": 15
+  },
+  {
+   "op": "const",
+   "v": 12.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 0,
+   "b": 19
+  },
+  {
+   "op": "const",
+   "v": 2.0
+  },
+  {
+   "op": "binop",
+   "o": "**",
+   "a": 20,
+   "b": 21
+  },
+  {
+   "op": "const",
+   "v": 4.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 7,
+   "b": 23
+  },
+  {
+   "op": "binop",
+   "o": "**",
+   "a": 24,
+   "b": 21
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 22,
+   "b": 25
+  }
+ ],
+ "objective": {
+  "sense": "minimize",
+  "expr": 26,
+  "placeholder": false
+ },
+ "builder_objective": null,
+ "rows": [
+  {
+   "kind": "disjunction",
+   "disjuncts": [
+    [
+     {
+      "body": 2,
+      "sense": "<=",
+      "name": null
+     }
+    ],
+    [
+     {
+      "body": 4,
+      "sense": "<=",
+      "name": null
+     }
+    ]
+   ],
+   "name": "mode",
+   "method": null,
+   "semantics": "SELECT_ONE",
+   "indicators": [
+    5,
+    6
+   ]
+  },
+  {
+   "kind": "disjunction",
+   "disjuncts": [
+    [
+     {
+      "body": 9,
+      "sense": "<=",
+      "name": null
+     }
+    ],
+    [
+     {
+      "body": 11,
+      "sense": "<=",
+      "name": null
+     }
+    ]
+   ],
+   "name": "pump",
+   "method": null,
+   "semantics": "SELECT_ONE",
+   "indicators": [
+    12,
+    13
+   ]
+  },
+  {
+   "kind": "algebraic",
+   "body": 16,
+   "sense": "==",
+   "name": "_eo_mode_select"
+  },
+  {
+   "kind": "algebraic",
+   "body": 18,
+   "sense": "==",
+   "name": "_eo_pump_select"
+  },
+  {
+   "kind": "logical",
+   "logic": [
+    {
+     "c": "var",
+     "x": 6
+    },
+    {
+     "c": "var",
+     "x": 13
+    },
+    {
+     "c": "implies",
+     "a": 0,
+     "b": 1
+    }
+   ],
+   "name": "mode_implies_pump"
+  },
+  {
+   "kind": "logical",
+   "logic": [
+    {
+     "c": "var",
+     "x": 5
+    },
+    {
+     "c": "var",
+     "x": 12
+    },
+    {
+     "c": "or",
+     "a": 0,
+     "b": 1
+    },
+    {
+     "c": "var",
+     "x": 6
+    },
+    {
+     "c": "or",
+     "a": 2,
+     "b": 3
+    }
+   ],
+   "name": "cover"
+  }
+ ],
+ "builder_blocks": [],
+ "complementarities": null,
+ "state": {
+  "_aux_counter": 0,
+  "_decomp_stages": {},
+  "_decomp_blocks": {},
+  "_zero_spanning_factor_auxes": [],
+  "_implied_integer_auxes": [],
+  "_free_by_construction": [],
+  "_atan2_preconditions": [],
+  "_piecewise_domains": [],
+  "_coupling_keys": {
+   "names": [],
+   "row_indices": []
+  },
+  "_sets": [],
+  "_simplex_lowerings": [],
+  "_block_labels_var": {},
+  "_block_labels_con": {
+   "names": {},
+   "rows": []
+  }
+ },
+ "initial_point": []
+}

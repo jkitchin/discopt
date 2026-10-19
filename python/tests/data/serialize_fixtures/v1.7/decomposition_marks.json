@@ -1,0 +1,169 @@
+{
+ "schema": "discopt.model/1.7",
+ "discopt": "0.9.1.dev0",
+ "name": "decomposition_marks",
+ "variables": [
+  {
+   "name": "x",
+   "type": "continuous",
+   "shape": [
+    4
+   ],
+   "lb": [
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "ub": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "bound_stack": []
+  }
+ ],
+ "parameters": [],
+ "nodes": [
+  {
+   "op": "var",
+   "ref": 0
+  },
+  {
+   "op": "index",
+   "base": 0,
+   "index": {
+    "k": "int",
+    "v": 0
+   }
+  },
+  {
+   "op": "index",
+   "base": 0,
+   "index": {
+    "k": "int",
+    "v": 1
+   }
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 1,
+   "b": 2
+  },
+  {
+   "op": "const",
+   "v": 1.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 3,
+   "b": 4
+  },
+  {
+   "op": "index",
+   "base": 0,
+   "index": {
+    "k": "int",
+    "v": 2
+   }
+  },
+  {
+   "op": "index",
+   "base": 0,
+   "index": {
+    "k": "int",
+    "v": 3
+   }
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 6,
+   "b": 7
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 8,
+   "b": 4
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 1,
+   "b": 7
+  },
+  {
+   "op": "const",
+   "v": 1.5
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 10,
+   "b": 11
+  },
+  {
+   "op": "sum",
+   "a": 0,
+   "axis": null
+  }
+ ],
+ "objective": {
+  "sense": "minimize",
+  "expr": 13,
+  "placeholder": false
+ },
+ "builder_objective": null,
+ "rows": [
+  {
+   "kind": "algebraic",
+   "body": 5,
+   "sense": "<=",
+   "name": "b0"
+  },
+  {
+   "kind": "algebraic",
+   "body": 9,
+   "sense": "<=",
+   "name": "b1"
+  },
+  {
+   "kind": "algebraic",
+   "body": 12,
+   "sense": "<=",
+   "name": "link"
+  }
+ ],
+ "builder_blocks": [],
+ "complementarities": null,
+ "state": {
+  "_aux_counter": 0,
+  "_decomp_stages": {
+   "x": 1
+  },
+  "_decomp_blocks": {},
+  "_zero_spanning_factor_auxes": [],
+  "_implied_integer_auxes": [],
+  "_free_by_construction": [],
+  "_atan2_preconditions": [],
+  "_piecewise_domains": [],
+  "_coupling_keys": {
+   "names": [
+    "link"
+   ],
+   "row_indices": []
+  },
+  "_sets": [],
+  "_simplex_lowerings": [],
+  "_block_labels_var": {},
+  "_block_labels_con": {
+   "names": {},
+   "rows": []
+  }
+ },
+ "initial_point": []
+}

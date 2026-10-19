@@ -1,0 +1,706 @@
+{
+ "schema": "discopt.model/1.7",
+ "discopt": "0.9.1.dev0",
+ "name": "shared_dag",
+ "variables": [
+  {
+   "name": "v",
+   "type": "continuous",
+   "shape": [],
+   "lb": 0.0,
+   "ub": 3.0,
+   "bound_stack": []
+  },
+  {
+   "name": "w",
+   "type": "continuous",
+   "shape": [
+    4
+   ],
+   "lb": [
+    -1.0,
+    -1.0,
+    -1.0,
+    -1.0
+   ],
+   "ub": [
+    1.0,
+    1.0,
+    1.0,
+    1.0
+   ],
+   "bound_stack": []
+  }
+ ],
+ "parameters": [],
+ "nodes": [
+  {
+   "op": "var",
+   "ref": 0
+  },
+  {
+   "op": "call",
+   "f": "exp",
+   "args": [
+    0
+   ]
+  },
+  {
+   "op": "var",
+   "ref": 1
+  },
+  {
+   "op": "index",
+   "base": 2,
+   "index": {
+    "k": "int",
+    "v": 0
+   }
+  },
+  {
+   "op": "call",
+   "f": "sin",
+   "args": [
+    3
+   ]
+  },
+  {
+   "op": "index",
+   "base": 2,
+   "index": {
+    "k": "int",
+    "v": 1
+   }
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 4,
+   "b": 5
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 1,
+   "b": 6
+  },
+  {
+   "op": "const",
+   "v": 0.0
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 8,
+   "b": 3
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 7,
+   "b": 9
+  },
+  {
+   "op": "const",
+   "v": 50.0
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 10,
+   "b": 11
+  },
+  {
+   "op": "const",
+   "v": 0.1
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 13,
+   "b": 5
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 7,
+   "b": 14
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 15,
+   "b": 11
+  },
+  {
+   "op": "const",
+   "v": 0.2
+  },
+  {
+   "op": "index",
+   "base": 2,
+   "index": {
+    "k": "int",
+    "v": 2
+   }
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 17,
+   "b": 18
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 7,
+   "b": 19
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 20,
+   "b": 11
+  },
+  {
+   "op": "const",
+   "v": 0.30000000000000004
+  },
+  {
+   "op": "index",
+   "base": 2,
+   "index": {
+    "k": "int",
+    "v": 3
+   }
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 22,
+   "b": 23
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 7,
+   "b": 24
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 25,
+   "b": 11
+  },
+  {
+   "op": "const",
+   "v": 0.4
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 27,
+   "b": 3
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 7,
+   "b": 28
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 29,
+   "b": 11
+  },
+  {
+   "op": "const",
+   "v": 0.5
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 31,
+   "b": 5
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 7,
+   "b": 32
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 33,
+   "b": 11
+  },
+  {
+   "op": "const",
+   "v": 0.6000000000000001
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 35,
+   "b": 18
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 7,
+   "b": 36
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 37,
+   "b": 11
+  },
+  {
+   "op": "const",
+   "v": 0.7000000000000001
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 39,
+   "b": 23
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 7,
+   "b": 40
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 41,
+   "b": 11
+  },
+  {
+   "op": "const",
+   "v": 0.8
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 43,
+   "b": 3
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 7,
+   "b": 44
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 45,
+   "b": 11
+  },
+  {
+   "op": "const",
+   "v": 0.9
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 47,
+   "b": 5
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 7,
+   "b": 48
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 49,
+   "b": 11
+  },
+  {
+   "op": "const",
+   "v": 1.0
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 51,
+   "b": 18
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 7,
+   "b": 52
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 53,
+   "b": 11
+  },
+  {
+   "op": "const",
+   "v": 1.1
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 55,
+   "b": 23
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 7,
+   "b": 56
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 57,
+   "b": 11
+  },
+  {
+   "op": "const",
+   "v": 1.2000000000000002
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 59,
+   "b": 3
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 7,
+   "b": 60
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 61,
+   "b": 11
+  },
+  {
+   "op": "const",
+   "v": 1.3
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 63,
+   "b": 5
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 7,
+   "b": 64
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 65,
+   "b": 11
+  },
+  {
+   "op": "const",
+   "v": 1.4000000000000001
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 67,
+   "b": 18
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 7,
+   "b": 68
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 69,
+   "b": 11
+  },
+  {
+   "op": "const",
+   "v": 1.5
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 71,
+   "b": 23
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 7,
+   "b": 72
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 73,
+   "b": 11
+  },
+  {
+   "op": "const",
+   "v": 1.6
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 75,
+   "b": 3
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 7,
+   "b": 76
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 77,
+   "b": 11
+  },
+  {
+   "op": "const",
+   "v": 1.7000000000000002
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 79,
+   "b": 5
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 7,
+   "b": 80
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 81,
+   "b": 11
+  },
+  {
+   "op": "const",
+   "v": 1.8
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 83,
+   "b": 18
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 7,
+   "b": 84
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 85,
+   "b": 11
+  },
+  {
+   "op": "const",
+   "v": 1.9000000000000001
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 87,
+   "b": 23
+  },
+  {
+   "op": "binop",
+   "o": "+",
+   "a": 7,
+   "b": 88
+  },
+  {
+   "op": "binop",
+   "o": "-",
+   "a": 89,
+   "b": 11
+  },
+  {
+   "op": "binop",
+   "o": "*",
+   "a": 7,
+   "b": 7
+  }
+ ],
+ "objective": {
+  "sense": "minimize",
+  "expr": 91,
+  "placeholder": false
+ },
+ "builder_objective": null,
+ "rows": [
+  {
+   "kind": "algebraic",
+   "body": 12,
+   "sense": "<=",
+   "name": "r0"
+  },
+  {
+   "kind": "algebraic",
+   "body": 16,
+   "sense": "<=",
+   "name": "r1"
+  },
+  {
+   "kind": "algebraic",
+   "body": 21,
+   "sense": "<=",
+   "name": "r2"
+  },
+  {
+   "kind": "algebraic",
+   "body": 26,
+   "sense": "<=",
+   "name": "r3"
+  },
+  {
+   "kind": "algebraic",
+   "body": 30,
+   "sense": "<=",
+   "name": "r4"
+  },
+  {
+   "kind": "algebraic",
+   "body": 34,
+   "sense": "<=",
+   "name": "r5"
+  },
+  {
+   "kind": "algebraic",
+   "body": 38,
+   "sense": "<=",
+   "name": "r6"
+  },
+  {
+   "kind": "algebraic",
+   "body": 42,
+   "sense": "<=",
+   "name": "r7"
+  },
+  {
+   "kind": "algebraic",
+   "body": 46,
+   "sense": "<=",
+   "name": "r8"
+  },
+  {
+   "kind": "algebraic",
+   "body": 50,
+   "sense": "<=",
+   "name": "r9"
+  },
+  {
+   "kind": "algebraic",
+   "body": 54,
+   "sense": "<=",
+   "name": "r10"
+  },
+  {
+   "kind": "algebraic",
+   "body": 58,
+   "sense": "<=",
+   "name": "r11"
+  },
+  {
+   "kind": "algebraic",
+   "body": 62,
+   "sense": "<=",
+   "name": "r12"
+  },
+  {
+   "kind": "algebraic",
+   "body": 66,
+   "sense": "<=",
+   "name": "r13"
+  },
+  {
+   "kind": "algebraic",
+   "body": 70,
+   "sense": "<=",
+   "name": "r14"
+  },
+  {
+   "kind": "algebraic",
+   "body": 74,
+   "sense": "<=",
+   "name": "r15"
+  },
+  {
+   "kind": "algebraic",
+   "body": 78,
+   "sense": "<=",
+   "name": "r16"
+  },
+  {
+   "kind": "algebraic",
+   "body": 82,
+   "sense": "<=",
+   "name": "r17"
+  },
+  {
+   "kind": "algebraic",
+   "body": 86,
+   "sense": "<=",
+   "name": "r18"
+  },
+  {
+   "kind": "algebraic",
+   "body": 90,
+   "sense": "<=",
+   "name": "r19"
+  }
+ ],
+ "builder_blocks": [],
+ "complementarities": null,
+ "state": {
+  "_aux_counter": 0,
+  "_decomp_stages": {},
+  "_decomp_blocks": {},
+  "_zero_spanning_factor_auxes": [],
+  "_implied_integer_auxes": [],
+  "_free_by_construction": [],
+  "_atan2_preconditions": [],
+  "_piecewise_domains": [],
+  "_coupling_keys": {
+   "names": [],
+   "row_indices": []
+  },
+  "_sets": [],
+  "_simplex_lowerings": [],
+  "_block_labels_var": {},
+  "_block_labels_con": {
+   "names": {},
+   "rows": []
+  }
+ },
+ "initial_point": []
+}
