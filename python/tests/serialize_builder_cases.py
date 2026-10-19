@@ -259,9 +259,9 @@ def _torch_sequential():
 def ml_reader_sklearn_mlp():
     from sklearn.neural_network import MLPRegressor
 
-    return _reader_model(
-        "sk_mlp", MLPRegressor((3,), max_iter=50, random_state=0).fit(*_reader_data())
-    )
+    # By keyword: newer scikit-learn takes `loss` as the first positional parameter.
+    mlp = MLPRegressor(hidden_layer_sizes=(3,), max_iter=50, random_state=0)
+    return _reader_model("sk_mlp", mlp.fit(*_reader_data()))
 
 
 def ml_reader_sklearn_gbr():
