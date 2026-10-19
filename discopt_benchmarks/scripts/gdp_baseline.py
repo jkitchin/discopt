@@ -107,15 +107,37 @@ def _run_pyomo(model, arm: str, time_limit: float) -> dict:
             model.solutions.load_from(res)
     else:
         strategy = arm.split("-", 1)[1]
-        kwargs = {"time_limit": time_limit, "mip_solver": _MIP}
+        # A subproblem that keeps discrete columns goes to GDPopt's (local) MINLP
+        # solver, whose default is BARON; give it SCIP (the executable, which
+        # tolerates the dual suffix) so profile O stays open.
+        kwargs = {
+            "time_limit": time_limit,
+            "mip_solver": _MIP,
+            "minlp_solver": _GLOBAL_EXE,
+            "local_minlp_solver": _GLOBAL_EXE,
+        }
         if strategy == "gloa":
             kwargs["nlp_solver"] = _GLOBAL_EXE
         elif strategy == "lbb":
-            kwargs["minlp_solver"] = _GLOBAL
             kwargs.pop("mip_solver")
         else:
             kwargs["nlp_solver"] = _NLP
-        res = pyo.SolverFactory("gdpopt." + strategy).solve(model, **kwargs)
+        try:
+            res = pyo.SolverFactory("gdpopt." + strategy).solve(model, **kwargs)
+        except AttributeError as err:
+            # Pyomo 6.10 gdpopt.lbb: the time-limit exit calls a method that does
+            # not exist (``_get_final_results_object``; the real one is
+            # ``_get_final_pyomo_results_object``). Only that exact failure is a
+            # time-limit outcome; anything else propagates as an error.
+            if strategy != "lbb" or "_get_final_results_object" not in str(err):
+                raise
+            return {
+                "status": "maxTimeLimit",
+                "objective": None,
+                "bound": None,
+                "minimize": obj.sense == pyo.minimize,
+                "note": "pyomo gdpopt.lbb time-limit path bug (_get_final_results_object)",
+            }
         tc = str(res.solver.termination_condition)
     prob = res.problem[0] if hasattr(res.problem, "__getitem__") else res.problem
     minimize = obj.sense == pyo.minimize
