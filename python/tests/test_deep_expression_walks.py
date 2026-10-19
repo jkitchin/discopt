@@ -25,8 +25,9 @@ import discopt.transformations as dt
 import numpy as np
 import pytest
 
-#: Read with a fallback so these tests reach the pickling on code that predates it.
-_CHILDREN_FIRST_KEY = getattr(core, "_CHILDREN_FIRST_KEY", "_pickle_children_first")
+#: The state key the children-first list rode in before WP-7 moved it into the
+#: reduce arguments; asserted absent from every unpickled node.
+_CHILDREN_FIRST_KEY = "_pickle_children_first"
 
 
 def _chain(n: int):
@@ -91,6 +92,26 @@ def test_pickle_of_a_lone_loop_built_expression(n):
         c = pickle.loads(pickle.dumps(e, protocol=protocol))
         assert dt._canon(c) == dt._canon(e)
         assert _CHILDREN_FIRST_KEY not in vars(c)
+
+
+def test_unpickling_a_node_takes_no_python_setstate():
+    """WP-7: the children-first list rides in the outer node's reduce *arguments*.
+
+    It rode in the node's state until then, and stripping it back out took a
+    Python ``Expression.__setstate__`` on every node of every unpickle -- measured
+    at +126 % on unpickling a 200k-node expression against the pre-#1764 reader
+    (``docs/dev/data/serialize-pickle-ab-2026-10-19.jsonl``). Now every node but
+    ``Variable`` (read-only bounds, #1332) unpickles through the C default, and the
+    outer node's state is exactly what ``object.__reduce_ex__`` gives.
+    """
+    assert "__setstate__" not in vars(core.Expression)
+    _, e = _chain(50)
+    for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+        rv = e.__reduce_ex__(protocol)
+        assert rv[0] is core._new_after_children, protocol
+        assert rv[2] == object.__reduce_ex__(e, protocol)[2], protocol
+        # The scope the reduce opened closes only when the sentinel is pickled.
+        core._PICKLE_SCOPES.open = 0
 
 
 def test_pickled_expression_keeps_identity_with_its_model():

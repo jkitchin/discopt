@@ -30,6 +30,7 @@ import builtins as _builtins
 import contextlib as _contextlib
 import contextvars as _contextvars
 import copy as _copy
+import copyreg as _copyreg
 import functools as _functools
 import gc
 import math
@@ -522,9 +523,6 @@ _INTEGER_DEFAULT_UB = 1e6
 _UNSET_SHAPE: Any = object()
 
 
-#: Key under which a pickled expression carries its descendants, children first.
-_CHILDREN_FIRST_KEY = "_pickle_children_first"
-
 #: Per-thread count of open children-first pickling scopes. A scope opens when a
 #: model (``Model.__getstate__``) or a top-level expression starts listing its nodes
 #: children-first, and closes when the pickler reaches the ``_ChildrenFirstEnd``
@@ -554,6 +552,13 @@ def _open_children_first_scope() -> "_ChildrenFirstEnd":
 
 def _unpickled_scope_end() -> None:
     return None
+
+
+def _new_after_children(cls: "type[Expression]", _children_first: list) -> "Expression":
+    """Unpickle side of ``Expression.__reduce_ex__``: the argument list held the
+    node's descendants, already rebuilt and memoised; the node itself starts empty
+    and receives its state the default way."""
+    return cls.__new__(cls)
 
 
 class _ChildrenFirstEnd:
@@ -646,34 +651,32 @@ class Expression:
         return cast("Expression", _copy._reconstruct(self, None, *rv))
 
     # Pickling: the pickler has no memo to pre-fill, so the outermost expression
-    # carries its descendants, children first, at the front of its own state; they
-    # are written before anything that refers to them. Inside such a scope -- this
-    # one, or a model's (``Model.__getstate__``) -- nodes reduce plainly, so the walk
-    # happens once per pickle, not once per node.
+    # carries its descendants, children first, in the *arguments* of its
+    # constructor call; the pickler writes those before the node, and so before
+    # anything that refers to them. Inside such a scope -- this one, or a model's
+    # (``Model.__getstate__``) -- nodes reduce plainly, so the walk happens once per
+    # pickle, not once per node. (The list rode in the node's state until WP-7;
+    # stripping it back out took a Python ``__setstate__`` call on every node of
+    # every unpickle, where the arguments are simply dropped.)
     def __reduce_ex__(self, protocol: int):  # type: ignore[override]
         rv = object.__reduce_ex__(self, protocol)
         if _children_first_scope_open():
             return rv
-        if not isinstance(rv, tuple) or len(rv) < 3 or not isinstance(rv[2], dict):
+        if not isinstance(rv, tuple) or len(rv) < 3:
+            return rv
+        # Protocol >= 2 builds the node with ``copyreg.__newobj__(cls)``, 0 and 1
+        # with ``copyreg._reconstructor(cls, object, None)``; either is
+        # ``cls.__new__(cls)``, which is what replaces it below.
+        plain = (rv[0] is _copyreg.__newobj__ and rv[1] == (type(self),)) or (
+            rv[0] is _copyreg._reconstructor and rv[1] == (type(self), object, None)
+        )
+        if not plain:
             return rv
         below = _descendants_children_first(self)[:-1]
         if not below:
             return rv
-        state = {_CHILDREN_FIRST_KEY: [*below, _open_children_first_scope()]}
-        state.update(rv[2])
-        return (rv[0], rv[1], state, *rv[3:])
-
-    def __setstate__(self, state) -> None:
-        slots = None
-        if isinstance(state, tuple) and len(state) == 2:
-            state, slots = state
-        if state:
-            if _CHILDREN_FIRST_KEY in state:
-                state = {k: v for k, v in state.items() if k != _CHILDREN_FIRST_KEY}
-            self.__dict__.update(state)
-        if slots:
-            for key, value in slots.items():
-                setattr(self, key, value)
+        args = (type(self), [*below, _open_children_first_scope()])
+        return (_new_after_children, args, *rv[2:])
 
     # Cached static shape for composite nodes (populated at construction by
     # ``BinaryOp``/``UnaryOp`` where inferable; see M8). Class default of the
