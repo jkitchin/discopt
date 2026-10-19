@@ -15,10 +15,8 @@ a byte-diff caught, so fidelity here is judged by:
 3. **Bound-neutrality** -- ``node_count`` and the certified ``objective`` must be
    *exactly* unchanged across the round trip (CLAUDE.md §5, bound-neutral regime).
 
-``test_corpus_round_trip_is_nl_byte_identical`` applies (1) and (2) to every
-instance in the in-repo MINLPLib corpus, and ``test_corpus_probe_actually_fired``
-asserts the corpus was non-empty -- a parametrized test over an empty glob passes
-silently while measuring nothing.
+The corpus-wide checks of (1) and (2) live in ``test_serialize_corpus.py`` (WP-5),
+over every in-repo ``.nl`` and ``.qplib`` instance.
 """
 
 from __future__ import annotations
@@ -89,24 +87,6 @@ def test_reloaded_model_keeps_variable_names_unlike_nl():
     # Contrast: the .nl route loses them.
     nl_back = dm.from_nl(str(CORPUS[0]))
     assert all(v.name.startswith("x") for v in nl_back._variables)
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize("nl_path", CORPUS, ids=lambda p: p.stem)
-def test_corpus_round_trip_is_nl_byte_identical(nl_path):
-    """Every in-repo MINLPLib instance survives .nl -> native -> .nl unchanged."""
-    m = dm.from_nl(str(nl_path))
-    once = dumps(m, provenance=False)
-    reloaded = loads(once)
-    assert dumps(reloaded, provenance=False) == once, (
-        f"{nl_path.stem}: document not stable under reload"
-    )
-    assert reloaded.to_nl() == m.to_nl(), f"{nl_path.stem}: .nl differs after round trip"
-
-
-def test_corpus_probe_actually_fired():
-    """The corpus test is parametrized over a glob; an empty glob would pass silently."""
-    assert len(CORPUS) >= 60, f"expected the in-repo MINLPLib corpus, found {len(CORPUS)} files"
 
 
 @pytest.mark.slow

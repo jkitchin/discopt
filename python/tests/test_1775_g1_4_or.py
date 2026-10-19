@@ -148,3 +148,33 @@ def test_serialize_refuses_an_or_block():
 
     with pytest.raises(SerializationError, match="OR add_disjunction block"):
         dumps(_or_block())
+
+
+def test_rowless_or_block_keeps_its_semantics_in_the_tree():
+    """An OR block whose disjuncts hold only nested disjunctions emits no tagged
+    row; its tree node is rebuilt from the emission record (#1790), which must
+    carry OR too -- else ``reduced_subproblem`` refuses selecting both."""
+    m = dm.Model("rowless_or")
+    x = m.continuous("x", lb=0, ub=10)
+    y = m.continuous("y", lb=0, ub=10)
+    a = m.make_disjunct("A")
+    a1 = m.make_disjunct("A1")
+    a1.subject_to(y <= 5)
+    a2 = m.make_disjunct("A2")
+    a2.subject_to(y >= 4)
+    a.add_disjunction([a1, a2])
+    b = m.make_disjunct("B")
+    b1 = m.make_disjunct("B1")
+    b1.subject_to(x >= 8)
+    b.add_disjunction([b1])
+    m.add_disjunction([a, b], semantics="or")
+    m.maximize(y + 3 * a.indicator.variable + 3 * b.indicator.variable - x)
+    (root,) = gdp_tree(m).disjunctions
+    assert root.semantics is DisjunctionSemantics.OR
+    # Both selected: A2 (y = 10) and B1 (x = 8) give 10 + 6 - 8 = 8.
+    na, nb = root.disjuncts
+    sel = [na, na.children[0].disjuncts[1], nb, nb.children[0].disjuncts[0]]
+    assert _solve(reduced_subproblem(m, sel), "big-m") == pytest.approx(8.0, abs=1e-6)
+    # A with A2 alone: y = 10, x = 0 gives 13.
+    for method in ("big-m", "hull", "mbigm", "auto"):
+        assert _solve(m, method) == pytest.approx(13.0, abs=1e-6), method
