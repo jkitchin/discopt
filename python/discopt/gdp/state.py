@@ -52,7 +52,6 @@ from discopt.gdp.tree import DisjunctionNode, DisjunctNode, GDPTree, gdp_tree
 from discopt.modeling.core import (
     Constraint,
     Model,
-    Objective,
     _DisjunctiveConstraint,
     _IndicatorConstraint,
     carry_validation_guards,
@@ -70,11 +69,22 @@ Address = tuple
 
 def _signature(node: DisjunctionNode) -> tuple:
     """What a disjunction is, independent of object identity: kind, name, and per
-    disjunct its name, rows (as text) and number of nested disjunctions."""
+    disjunct its name, indicator, rows (as text) and nested disjunctions' own
+    signatures. The indicator separates twins with equal rows -- two anonymous
+    ``if_then`` on ``x >= 5`` differ only in it, and a stale node must not land
+    on the other one (#1796 review). Variable names survive clone and pickle."""
     return (
         node.kind,
         node.name,
-        tuple((d.name, tuple(str(r) for r in d.rows), len(d.children)) for d in node.disjuncts),
+        tuple(
+            (
+                d.name,
+                None if d.indicator is None else str(d.indicator.variable),
+                tuple(str(r) for r in d.rows),
+                tuple(_signature(ch) for ch in d.children),
+            )
+            for d in node.disjuncts
+        ),
     )
 
 
@@ -243,7 +253,10 @@ def _plan(model: Model, selected: Iterable[DisjunctNode], *, full: bool) -> _Pla
     def promote(node: DisjunctionNode) -> None:
         # Nested in a selected Disjunct block, whose indicator is now pinned to 1:
         # the parent link is satisfied, so re-emit the rows without it. Copies,
-        # never mutation: the token's ``before`` keeps the original rows.
+        # never mutation: the token's ``before`` keeps the original rows. So until
+        # ``reverse()``, the user's own handle to a promoted ``Model.disjunction``
+        # is not the row in the model, and ``gdp_tree(m).node_for(handle)``
+        # raises ``KeyError``; take the node from ``gdp_tree(m)`` instead.
         for i in own_rows(node):
             c: Any = copy.copy(rows[i])
             if isinstance(c, _DisjunctiveConstraint):
@@ -331,8 +344,22 @@ def reduced_subproblem(model: Model, selected: Iterable[DisjunctNode]) -> Model:
     out._objective = model._objective
     if model._objective is not None and getattr(model._objective, "_is_placeholder", False):
         # ``add_linear_objective`` / ``add_quadratic_objective`` keep the real
-        # objective in the source's Rust builder (#1794 B2).
-        out._objective = Objective(model._objective_expression(), model._objective.sense)
+        # objective in the source's Rust builder (#1794 B2). Re-issue the same
+        # builder call: an ``_objective_expression()`` rebuild is a gathered-index
+        # expression the Rust repr refuses, which turned FBBT/presolve off.
+        lin_blk = model._builder_linear_objective
+        quad_blk = model._builder_quadratic_objective
+        if lin_blk is not None:
+            c, x, constant, sense = lin_blk
+            out.add_linear_objective(c, x, constant=constant, sense=sense)
+        elif quad_blk is not None:
+            Q, c, x, constant, sense = quad_blk
+            out.add_quadratic_objective(Q, c, x, constant=constant, sense=sense)
+        else:
+            raise ValueError(
+                "objective is a builder placeholder but the model retains no builder "
+                "objective block to carry into the subproblem"
+            )
     out._constraints = plan.rows(model)
     # Fast-API rows live only in the source's builder; carry them as ordinary
     # rows, or the subproblem silently loses them (#1794 B2).
@@ -431,7 +458,7 @@ def transform_current_disjunctive_state(
         new_members = {k: v for k, v in members.items() if k not in plan.retired_keys}
         for k in plan.promoted_keys & set(new_members):
             rec = new_members[k]
-            if hasattr(rec, "_replace") and getattr(rec, "parent", None) is not None:
+            if rec.parent is not None:
                 new_members[k] = rec._replace(parent=None)
         model.__dict__["_gdp_block_members"] = new_members
     return DisjunctiveStateToken(

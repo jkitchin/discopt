@@ -116,6 +116,19 @@ def test_reduced_subproblem_keeps_a_fast_api_objective():
     assert _solve(sub) == pytest.approx(3.0, abs=1e-6)
 
 
+def test_reduced_subproblem_reissues_a_builder_objective_natively():
+    """The subproblem re-issues the builder call rather than rebuilding an
+    expression the Rust repr refuses (which disabled FBBT/presolve)."""
+    m = dm.Model("b2q")
+    x = m.continuous("x", lb=0, ub=10, shape=(2,))
+    m.either_or([[x[0] >= 3], [x[1] >= 4]], name="d")
+    m.add_quadratic_objective(np.eye(2), np.array([1.0, 0.0]), x, constant=1.0)
+    sub = reduced_subproblem(m, [gdp_tree(m).disjunctions[0].disjuncts[1]])
+    assert sub._builder_quadratic_objective is not None
+    # 0.5 * 4^2 + 1 at x = (0, 4).
+    assert _solve(sub) == pytest.approx(9.0, abs=1e-5)
+
+
 def test_reduced_subproblem_carries_complementarities_and_blocks():
     m = dm.Model("b2c")
     x = m.continuous("x", lb=0, ub=10)
@@ -232,6 +245,53 @@ def test_a_selection_from_another_model_is_refused():
     m2.minimize(y)
     with pytest.raises(ValueError, match="current GDP tree"):
         reduced_subproblem(m2, [gdp_tree(m1).disjunctions[0].disjuncts[1]])
+
+
+def _if_then_twins():
+    # Two anonymous implications with the same row: only the indicator tells
+    # them apart. Fixing z1 costs 5 + 3 = 8; z2 costs 5 + 7 = 12.
+    m = dm.Model("twins")
+    x = m.continuous("x", lb=0, ub=10)
+    z1 = m.binary("z1")
+    z2 = m.binary("z2")
+    m.either_or([[x >= 0], [x >= 0]], name="e0")
+    m.if_then(z1, [x >= 5])
+    m.if_then(z2, [x >= 5])
+    m.minimize(x + 3 * z1 + 7 * z2)
+    return m
+
+
+@pytest.mark.parametrize("via", ["transform", "reduced"])
+def test_a_stale_selection_never_lands_on_an_indicator_twin(via):
+    """#1796 review: the signature once ignored indicators, so after e0's row was
+    dropped a stale node for the z1 implication resolved to the z2 one and the
+    solve certified 12. It must be refused (or mean z1: 8), never pick z2."""
+    m = _if_then_twins()
+    e0, i1, _ = gdp_tree(m).disjunctions
+    transform_current_disjunctive_state(m, [e0.disjuncts[0]])
+    with pytest.raises(ValueError, match="current GDP tree"):
+        if via == "transform":
+            transform_current_disjunctive_state(m, [i1.disjuncts[0]])
+        else:
+            reduced_subproblem(m, [i1.disjuncts[0]])
+
+
+def test_either_or_twins_with_read_indicators_are_told_apart():
+    m = dm.Model("eo_twins")
+    x = m.continuous("x", lb=0, ub=10)
+    m.either_or([[x >= 0], [x >= 0]], name="e0")
+    da = m.either_or([[x >= 5], [x >= 0]])
+    db = m.either_or([[x >= 5], [x >= 0]])
+    m.minimize(x + 3 * da.indicators[0].variable + 7 * db.indicators[0].variable)
+    e0, a, b = gdp_tree(m).disjunctions
+    assert st._signature(a) != st._signature(b)
+    transform_current_disjunctive_state(m, [e0.disjuncts[0]])
+    with pytest.raises(ValueError, match="current GDP tree"):
+        transform_current_disjunctive_state(m, [a.disjuncts[0]])
+    # Taken fresh, the same choice is the z-priced-3 one: 5 + 3.
+    a2, _ = gdp_tree(m).disjunctions
+    transform_current_disjunctive_state(m, [a2.disjuncts[0]])
+    assert _solve(m) == pytest.approx(8.0, abs=1e-6)
 
 
 # ── S3: the nesting record and unique root indices ─────────────────────────
