@@ -65,6 +65,8 @@ from discopt.modeling.core import (
     VarType,
     _DisjunctiveConstraint,
     _IndicatorConstraint,
+    _logical_node_count,
+    _LogicalConstraint,
     carry_validation_guards,
 )
 from discopt.mpec import carry_complementarities
@@ -323,9 +325,10 @@ def _max_expr_node_count(model: Model) -> int:
     constraint body the solve can walk — an upper bound on how deep the
     per-expression walk can recurse.
 
-    Counts the bodies inside indicator rows and disjunctions, and bounds the
-    fast-API rows that are materialised only later in the solve (#1808): an
-    under-count here runs a deep model at the default recursion limit.
+    Counts the bodies inside indicator rows and disjunctions and the logical
+    expressions of ``m.logical`` rows, and bounds the fast-API rows that are
+    materialised only later in the solve (#1808): an under-count here runs a deep
+    model at the default recursion limit.
     """
     largest = 0
     obj = getattr(model, "_objective", None)
@@ -333,6 +336,11 @@ def _max_expr_node_count(model: Model) -> int:
         largest = _expr_node_count(obj.expression)
     for body in _iter_constraint_bodies(getattr(model, "_constraints", []) or []):
         largest = max(largest, _expr_node_count(body))
+    # A ``m.logical`` row is a ``LogicalExpression``, not an ``Expression``; the GDP
+    # lowering's ``_to_nnf`` recurses once per level of it inside the solve.
+    for c in getattr(model, "_constraints", []) or []:
+        if isinstance(c, _LogicalConstraint):
+            largest = max(largest, _logical_node_count(c.expression))
     return max(largest, _builder_row_node_bound(model))
 
 

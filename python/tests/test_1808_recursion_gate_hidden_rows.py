@@ -94,3 +94,84 @@ def test_repro_b_long_row_inside_disjunct(gdp_method):
         r = m.solve(time_limit=30, gdp_method=gdp_method)
     assert r.status == "optimal"
     assert r.objective == pytest.approx(0.0, abs=1e-6)
+
+
+# ``m.logical`` rows hold a ``LogicalExpression``, not an ``Expression``: the gate
+# skipped them, and the GDP lowering's ``_to_nnf`` (inside the solve) and the
+# post-solve ``DeclaredLogic`` check both recursed once per level of a loop-built
+# ``Y[0] | Y[1] | ...``.
+
+
+@pytest.fixture
+def default_recursion_limit():
+    """CPython's default limit. pytest runs tests at 3000, under which the old
+    recursive walks survived a 2500-deep chain that overflows a user's script."""
+    import sys
+
+    old = sys.getrecursionlimit()
+    sys.setrecursionlimit(1000)
+    try:
+        yield
+    finally:
+        sys.setrecursionlimit(old)
+
+
+def _logic_chain(Y, n, op):
+    e = Y[0]
+    for i in range(1, n):
+        e = op(e, Y[i])
+    return e
+
+
+@pytest.mark.smoke
+def test_count_sees_logical_constraint():
+    m = dm.Model("logic")
+    Y = m.boolean("Y", shape=(400,))
+    m.logical(_logic_chain(Y, 400, lambda a, b: a | b))
+    assert _max_expr_node_count(m) >= 2 * 400 - 1
+
+
+@pytest.mark.smoke
+def test_declared_logic_check_is_iterative(default_recursion_limit):
+    from discopt.validation.feasibility import DeclaredLogic
+
+    m = dm.Model("logic")
+    Y = m.boolean("Y", shape=(N,))
+    m.logical(_logic_chain(Y, N, lambda a, b: a | b))
+    m.logical(~_logic_chain(Y, N, lambda a, b: a & b))
+    m.minimize(dm.sum(Y.variable))
+    logic = DeclaredLogic(m)
+    one_on = np.zeros(N)
+    one_on[N // 2] = 1.0
+    assert logic.check(m, one_on).ok
+    assert not logic.check(m, np.zeros(N)).ok  # the OR is false
+    assert not logic.check(m, np.ones(N)).ok  # the NOT-AND is false
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "shape, sense, expected",
+    [
+        ("or", "min", 1.0),  # Y[0] | ... | Y[N-1]: at least one true
+        ("not_and", "max", N - 1.0),  # ~(Y[0] & ... & Y[N-1]): at least one false
+        ("implies", "max", float(N)),  # ((Y0 -> Y1) -> Y2) -> ...: all true holds
+    ],
+)
+def test_deep_logical_constraint_solves(shape, sense, expected, default_recursion_limit):
+    m = dm.Model("logic")
+    Y = m.boolean("Y", shape=(N,))
+    if shape == "or":
+        e = _logic_chain(Y, N, lambda a, b: a | b)
+    elif shape == "not_and":
+        e = ~_logic_chain(Y, N, lambda a, b: a & b)
+    else:
+        e = _logic_chain(Y, N, lambda a, b: a.implies(b))
+    m.logical(e)
+    obj = dm.sum(Y.variable)
+    m.minimize(obj) if sense == "min" else m.maximize(obj)
+    assert _max_expr_node_count(m) > _DEEP_SOLVE_DEPTH_GATE
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = m.solve(time_limit=60)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(expected, abs=1e-6)

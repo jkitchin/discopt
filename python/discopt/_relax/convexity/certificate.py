@@ -299,6 +299,44 @@ def _oa_convexity_certificate_enabled() -> bool:
 _QP_EXACT_CONVEXITY_MAX_N = 2000
 
 
+def _builder_hessian_certain_unproved(model: Model) -> bool:
+    """True only when the proof is *certain* to return "not proved" (#1809 review).
+
+    Read from the ``add_quadratic_objective`` block, before any classification or
+    extraction. The builder's Hessian is ``S = triu(Q) + triu(Q, 1)'`` (only the
+    upper triangle is read, so no two entries are summed and none can cancel), and
+    ``extract_qp_data`` returns exactly ``+S`` (minimize) or ``-S`` (maximize)
+    embedded at the variable's columns with a zero slack block --
+    ``test_builder_prediction_matches_extracted_hessian`` pins that. ``psd_certified``
+    on it then sees the same pattern: ``n`` active rows and ``nnz`` nonzeros. With
+    ``n`` above the cap the dense route is never taken; with ``nnz`` above
+    ``PSD_CERT_SPARSE_ROW_NNZ * n`` the exact elimination is not tried; and with
+    ``n > eig_max_n`` no eigensolve runs, so the verdict is "not proved". Any other
+    shape -- an expression objective, a non-canonical CSR -- is not predicted.
+    """
+    import scipy.sparse as sp
+
+    from .eigenvalue import PSD_CERT_SPARSE_ROW_NNZ
+
+    obj = getattr(model, "_objective", None)
+    blk = getattr(model, "_builder_quadratic_objective", None)
+    if blk is None or not getattr(obj, "_is_placeholder", False):
+        return False
+    Q = blk[0]
+    if not sp.isspmatrix_csr(Q) or not Q.has_canonical_format:
+        return False
+    n = Q.shape[0]
+    rows = np.repeat(np.arange(n), np.diff(Q.indptr))
+    upper = (Q.indices >= rows) & (Q.data != 0.0)
+    r, c = rows[upper], Q.indices[upper]
+    nnz = int(r.size + np.count_nonzero(r != c))
+    active = np.zeros(n, dtype=bool)
+    active[r] = True
+    active[c] = True
+    n_active = int(np.count_nonzero(active))
+    return n_active > _QP_EXACT_CONVEXITY_MAX_N and nnz > PSD_CERT_SPARSE_ROW_NNZ * n_active
+
+
 def certify_quadratic_objective_convex(model: Model, *, deadline: Optional[float] = None) -> bool:
     """Prove a QP/MIQP objective convex from its exact Hessian, or return ``False``.
 
@@ -352,6 +390,11 @@ def certify_quadratic_objective_convex(model: Model, *, deadline: Optional[float
     n_flat = sum(v.size for v in model._variables)
     if n_flat == 0:
         return False
+    # ... but a builder Hessian the proof below is certain to abstain on is refused
+    # here, before ``classify_problem`` and ``extract_qp_data`` (measured 4.8 s and
+    # 4.7 s on a dense n=2100 builder QP, for the same False).
+    if _builder_hessian_certain_unproved(model):
+        return False
 
     # #1520: no except. Every step declines by return value: ``classify_problem``
     # falls back to NLP/MINLP itself, ``extract_qp_data``'s rungs absorb their own
@@ -371,6 +414,8 @@ def certify_quadratic_objective_convex(model: Model, *, deadline: Optional[float
     if deadline is not None and time.perf_counter() > deadline:
         return False
     qd = extract_qp_data(model)
+    if deadline is not None and time.perf_counter() > deadline:
+        return False
     quad = qd.Q
     # ``.shape`` is available on both dense arrays and scipy sparse matrices.
     shape = getattr(quad, "shape", None)

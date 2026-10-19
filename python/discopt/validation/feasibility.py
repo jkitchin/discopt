@@ -1215,6 +1215,9 @@ class DeclaredLogic:
         return bool(self._nodes)
 
     def _index_booleans(self, expr, model) -> None:
+        # #1808: iterative. A loop-built ``Y[0] | Y[1] | ...`` is a left-deep chain
+        # as long as the model has booleans; recursing here raised RecursionError
+        # after the solve had already lowered and solved it.
         from discopt.modeling.core import (
             BooleanVar,
             LogicalAnd,
@@ -1227,26 +1230,29 @@ class DeclaredLogic:
             LogicalOr,
         )
 
-        if isinstance(expr, BooleanVar):
-            cols = _column_indices(expr.variable, model)
-            if cols.size != 1:
-                raise ValueError("a boolean in a logical constraint is not a scalar")
-            self._bool_cols[id(expr)] = int(cols[0])
-        elif isinstance(expr, (LogicalAnd, LogicalOr, LogicalEquivalent)):
-            self._index_booleans(expr.left, model)
-            self._index_booleans(expr.right, model)
-        elif isinstance(expr, LogicalNot):
-            self._index_booleans(expr.operand, model)
-        elif isinstance(expr, LogicalImplies):
-            self._index_booleans(expr.antecedent, model)
-            self._index_booleans(expr.consequent, model)
-        elif isinstance(expr, (LogicalAtLeast, LogicalAtMost, LogicalExactly)):
-            for op in expr.operands:
-                self._index_booleans(op, model)
-        else:
-            raise TypeError(f"logical node {type(expr).__name__} is not checkable")
+        stack = [expr]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, BooleanVar):
+                cols = _column_indices(node.variable, model)
+                if cols.size != 1:
+                    raise ValueError("a boolean in a logical constraint is not a scalar")
+                self._bool_cols[id(node)] = int(cols[0])
+            elif isinstance(node, (LogicalAnd, LogicalOr, LogicalEquivalent)):
+                stack += [node.right, node.left]
+            elif isinstance(node, LogicalNot):
+                stack.append(node.operand)
+            elif isinstance(node, LogicalImplies):
+                stack += [node.consequent, node.antecedent]
+            elif isinstance(node, (LogicalAtLeast, LogicalAtMost, LogicalExactly)):
+                stack += reversed(node.operands)
+            else:
+                raise TypeError(f"logical node {type(node).__name__} is not checkable")
 
     def _truth(self, expr, x) -> bool:
+        # #1808: iterative post-order, for the same reason as ``_index_booleans``.
+        # The truth value is the same as the short-circuit recursion's: every node
+        # is a pure function of its children.
         from discopt.modeling.core import (
             BooleanVar,
             LogicalAnd,
@@ -1259,26 +1265,52 @@ class DeclaredLogic:
             LogicalOr,
         )
 
-        if isinstance(expr, BooleanVar):
-            return bool(round(float(x[self._bool_cols[id(expr)]])) == 1)
-        if isinstance(expr, LogicalAnd):
-            return self._truth(expr.left, x) and self._truth(expr.right, x)
-        if isinstance(expr, LogicalOr):
-            return self._truth(expr.left, x) or self._truth(expr.right, x)
-        if isinstance(expr, LogicalEquivalent):
-            return self._truth(expr.left, x) == self._truth(expr.right, x)
-        if isinstance(expr, LogicalNot):
-            return not self._truth(expr.operand, x)
-        if isinstance(expr, LogicalImplies):
-            return (not self._truth(expr.antecedent, x)) or self._truth(expr.consequent, x)
-        n_true = sum(self._truth(op, x) for op in expr.operands)
-        if isinstance(expr, LogicalAtLeast):
-            return n_true >= expr.k
-        if isinstance(expr, LogicalAtMost):
-            return n_true <= expr.k
-        if isinstance(expr, LogicalExactly):
-            return n_true == expr.k
-        raise TypeError(f"logical node {type(expr).__name__} is not checkable")
+        def children(node) -> tuple:
+            if isinstance(node, (LogicalAnd, LogicalOr, LogicalEquivalent)):
+                return (node.left, node.right)
+            if isinstance(node, LogicalImplies):
+                return (node.antecedent, node.consequent)
+            if isinstance(node, LogicalNot):
+                return (node.operand,)
+            if isinstance(node, (LogicalAtLeast, LogicalAtMost, LogicalExactly)):
+                return tuple(node.operands)
+            if isinstance(node, BooleanVar):
+                return ()
+            raise TypeError(f"logical node {type(node).__name__} is not checkable")
+
+        value: dict[int, bool] = {}
+        stack: list = [(expr, False)]
+        while stack:
+            node, expanded = stack.pop()
+            if id(node) in value:
+                continue
+            kids = children(node)
+            if not expanded and kids:
+                stack.append((node, True))
+                stack.extend((c, False) for c in kids if id(c) not in value)
+                continue
+            if isinstance(node, BooleanVar):
+                v = bool(round(float(x[self._bool_cols[id(node)]])) == 1)
+            elif isinstance(node, LogicalAnd):
+                v = value[id(node.left)] and value[id(node.right)]
+            elif isinstance(node, LogicalOr):
+                v = value[id(node.left)] or value[id(node.right)]
+            elif isinstance(node, LogicalEquivalent):
+                v = value[id(node.left)] == value[id(node.right)]
+            elif isinstance(node, LogicalNot):
+                v = not value[id(node.operand)]
+            elif isinstance(node, LogicalImplies):
+                v = (not value[id(node.antecedent)]) or value[id(node.consequent)]
+            else:
+                n_true = sum(value[id(op)] for op in node.operands)
+                if isinstance(node, LogicalAtLeast):
+                    v = n_true >= node.k
+                elif isinstance(node, LogicalAtMost):
+                    v = n_true <= node.k
+                else:
+                    v = n_true == node.k
+            value[id(node)] = v
+        return value[id(expr)]
 
     def _leaf_scores(self, model, x) -> np.ndarray:
         """Per leaf: worst ``violation / allowance`` over its rows (``<= 1`` holds)."""
