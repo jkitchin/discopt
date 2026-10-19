@@ -100,7 +100,14 @@ def _run_pyomo(model, arm: str, time_limit: float) -> dict:
 
     obj = next(model.component_data_objects(pyo.Objective, active=True))
     if arm in ("pyomo-bigm", "pyomo-hull"):
-        pyo.TransformationFactory("gdp." + arm.split("-")[1]).apply_to(model)
+        transform = arm.split("-")[1]
+        opts = {}
+        if transform == "hull":
+            # A disjunct whose functions are not finite at the origin makes Pyomo's
+            # hull search for a well-defined point with a nonlinear solver whose
+            # default is gurobi_direct_minlp (GDPlib gdp_col); keep it open.
+            opts["well_defined_points_heuristic_solver"] = _GLOBAL
+        pyo.TransformationFactory("gdp." + transform).apply_to(model, **opts)
         res = pyo.SolverFactory(_GLOBAL).solve(model, timelimit=time_limit, load_solutions=False)
         tc = str(res.solver.termination_condition)
         if len(res.solution) > 0:  # an incumbent exists (none at a bare time limit)
