@@ -554,6 +554,21 @@ def _unpickled_scope_end() -> None:
     return None
 
 
+#: The state key a top-level expression's children-first list rode in before WP-7
+#: (#1804). A lone expression pickled by that code still unpickles with the list
+#: in its root's ``__dict__`` -- the per-node ``__setstate__`` that stripped it is
+#: gone -- so the copy and pickle paths drop it from the state they hand on, and
+#: the residue lasts only until the node's next copy or pickle.
+_LEGACY_CHILDREN_FIRST_KEY = "_pickle_children_first"
+
+
+def _without_legacy_children_first(rv: tuple) -> tuple:
+    """*rv* (an ``object.__reduce_ex__`` result) with the pre-WP-7 key left out of
+    its state. Only called when the key is present; the node is not modified."""
+    state = {k: v for k, v in rv[2].items() if k != _LEGACY_CHILDREN_FIRST_KEY}
+    return (rv[0], rv[1], state, *rv[3:])
+
+
 def _new_after_children(cls: "type[Expression]", _children_first: list) -> "Expression":
     """Unpickle side of ``Expression.__reduce_ex__``: the argument list held the
     node's descendants, already rebuilt and memoised; the node itself starts empty
@@ -638,6 +653,8 @@ class Expression:
         for node in _descendants_children_first(self, skip=memo):
             if id(node) not in memo:
                 rv = object.__reduce_ex__(node, 4)
+                if type(rv[2]) is dict and _LEGACY_CHILDREN_FIRST_KEY in rv[2]:
+                    rv = _without_legacy_children_first(rv)
                 y = _copy._reconstruct(node, memo, *rv)
                 if y is not node:
                     memo[id(node)] = y
@@ -648,6 +665,8 @@ class Expression:
     # children-first ``__reduce_ex__`` below (which walks the whole subtree).
     def __copy__(self) -> "Expression":
         rv = object.__reduce_ex__(self, 4)
+        if type(rv[2]) is dict and _LEGACY_CHILDREN_FIRST_KEY in rv[2]:
+            rv = _without_legacy_children_first(rv)
         return cast("Expression", _copy._reconstruct(self, None, *rv))
 
     # Pickling: the pickler has no memo to pre-fill, so the outermost expression
@@ -660,6 +679,8 @@ class Expression:
     # every unpickle, where the arguments are simply dropped.)
     def __reduce_ex__(self, protocol: int):  # type: ignore[override]
         rv = object.__reduce_ex__(self, protocol)
+        if len(rv) > 2 and type(rv[2]) is dict and _LEGACY_CHILDREN_FIRST_KEY in rv[2]:
+            rv = _without_legacy_children_first(rv)
         if _children_first_scope_open():
             return rv
         if not isinstance(rv, tuple) or len(rv) < 3:

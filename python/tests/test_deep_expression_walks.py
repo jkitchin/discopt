@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import copy
 import pickle
+from pathlib import Path
 
 import discopt.modeling as dm
 import discopt.modeling.core as core
@@ -112,6 +113,45 @@ def test_unpickling_a_node_takes_no_python_setstate():
         assert rv[2] == object.__reduce_ex__(e, protocol)[2], protocol
         # The scope the reduce opened closes only when the sentinel is pickled.
         core._PICKLE_SCOPES.open = 0
+
+
+def test_a_pre_wp7_lone_expression_pickle_loses_its_list_on_the_next_copy():
+    """A lone expression pickled before WP-7 carried the list in its root's state.
+
+    Without ``Expression.__setstate__`` it unpickles with the list still in the
+    root's ``__dict__``; the next pickle, deepcopy or copy drops it. The fixture is
+    real: ``x[0] * x[1] + exp(x[2]) - 2`` pickled (protocol 4) by the tree at
+    ``1c0f74b3``, the last commit with the state-borne list.
+    """
+    blob = (
+        Path(__file__).parent
+        / "data"
+        / "pickle_fixtures"
+        / "lone_expression_pickled_by_1c0f74b3.pkl"
+    ).read_bytes()
+    legacy = pickle.loads(blob)
+    # The residue the fix is for: present on load, so this test exercises it.
+    assert _CHILDREN_FIRST_KEY in vars(legacy)
+    model = next(
+        n for n in core._descendants_children_first(legacy) if isinstance(n, core.Variable)
+    ).model
+    checked = 0
+    copies = [
+        pickle.loads(pickle.dumps(legacy, protocol=p)) for p in range(pickle.HIGHEST_PROTOCOL + 1)
+    ]
+    copies += [copy.deepcopy(legacy), copy.copy(legacy)]
+    for c in copies:
+        assert type(c) is type(legacy)
+        for node in core._descendants_children_first(c):
+            assert _CHILDREN_FIRST_KEY not in vars(node)
+            checked += 1
+        assert vars(c).keys() == vars(legacy).keys() - {_CHILDREN_FIRST_KEY}
+    assert checked > len(copies)
+    assert _CHILDREN_FIRST_KEY.encode() not in pickle.dumps(legacy)
+    # The model it dragged along re-pickles to the same model.
+    again = pickle.loads(pickle.dumps(model))
+    assert dt.model_fingerprint(again) == dt.model_fingerprint(model)
+    assert again.solve(time_limit=10).objective == pytest.approx(-1.0, abs=1e-6)
 
 
 def test_pickled_expression_keeps_identity_with_its_model():
