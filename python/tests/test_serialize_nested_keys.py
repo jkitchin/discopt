@@ -67,6 +67,8 @@ def _every_op_model():
         + y[True][0]  # bool index
         + cube(y[1])  # registered atom
         + dm.sum(p * y)  # array param, array const via broadcasting
+        + dm.sum(y[:, None])  # `none` index (1.6)
+        + dm.sum(x[..., 0])  # `ellipsis` index (1.6)
     )
     m.minimize(body)
     m.subject_to(dm.sum([y[0], y[1], x[2, 0]]) <= 3.0, name="so")  # sum_over

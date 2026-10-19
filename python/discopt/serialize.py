@@ -233,7 +233,21 @@ logger = logging.getLogger(__name__)
 #: discopt") rather than dropping it -- which would leave the columns in the
 #: model with nothing tying them to the disjunction. Readers shipped before
 #: #1783 drop ``indicators`` silently; see the fixture manifest's forward cells.
-SCHEMA = "discopt.model/1.5"
+#:
+#: 1.6 adds two encodings, both refused by name before (the WP-6 builder sweep):
+#:
+#: * two index kinds, ``{"k": "none"}`` (``numpy.newaxis``) and ``{"k":
+#:   "ellipsis"}`` -- ``DAEBuilder.add_control`` and every ``TrainableNetwork``
+#:   forward pass index with them;
+#: * a disjunct member that is itself a disjunction, ``{"disjunction": {...}}``
+#:   with a disjunction row's fields (``Model.disjunction()`` passed as a member
+#:   to ``either_or``). Writing only its rows would turn an OR into an AND.
+#:
+#: Both are read only from a document of minor >= 6
+#: (``_SCHEMA_MINOR_NEWAXIS_NESTED_DISJUNCTION``). A 1.5 reader refuses the
+#: unknown index kind, and reads the member object's missing ``body`` as a
+#: malformed row -- a refusal either way, never a silent drop.
+SCHEMA = "discopt.model/1.6"
 
 #: Major version this reader accepts. A document whose major differs is refused
 #: rather than best-effort parsed.
@@ -248,6 +262,11 @@ _SCHEMA_MINOR_UNTAGGED_SOLUTION = 2
 #: and ``indicators`` on a disjunction row (#1775 G1.1). Each is read only from a
 #: document of this minor or later.
 _SCHEMA_MINOR_LOGIC_LOWERING_INDICATORS = 5
+
+#: Minor that first wrote the ``none`` / ``ellipsis`` index kinds and a
+#: disjunction as a disjunct member (plan WP-3b). Each is read only from a
+#: document of this minor or later.
+_SCHEMA_MINOR_NEWAXIS_NESTED_DISJUNCTION = 6
 
 #: This reader's minor, the one ``SCHEMA`` names.
 SCHEMA_MINOR = int(SCHEMA.rsplit(".", 1)[1])
@@ -499,16 +518,26 @@ def _enc_index(index: Any) -> Any:
         }
     if isinstance(index, tuple):
         return {"k": "tuple", "v": [_enc_index(i) for i in index]}
+    # 1.6: `x[:, None]` (DAEBuilder.add_control) and `e[..., None]`
+    # (TrainableNetwork). Identity tests: both are singletons.
+    if index is None:
+        return {"k": "none"}
+    if index is Ellipsis:
+        return {"k": "ellipsis"}
     raise SerializationError(
         f"cannot serialize index {index!r} of type {type(index).__name__}; "
-        "only integers, slices, and tuples of them are supported (None / Ellipsis "
-        "are planned for schema 1.6, plan WP-3b). Use pickle or Model.clone() for "
-        "same-version transport."
+        "only integers, booleans, slices, None, Ellipsis and tuples of them are "
+        "supported."
     )
 
 
-def _dec_index(obj: Any) -> Any:
+def _dec_index(obj: Any, minor: int) -> Any:
     kind = obj["k"]
+    if kind in ("none", "ellipsis") and minor < _SCHEMA_MINOR_NEWAXIS_NESTED_DISJUNCTION:
+        raise SerializationError(
+            f"a schema 1.{minor} document carries a {kind!r} index, which no writer "
+            "of that version produced; the document is malformed or was edited by hand"
+        )
     extra = dict.keys(obj) - _INDEX_KEYS.get(kind, dict.keys(obj))
     if extra:
         raise SerializationError(f"{kind} index has unknown key(s) {sorted(extra)}")
@@ -527,7 +556,11 @@ def _dec_index(obj: Any) -> Any:
             raise SerializationError("a slice step cannot be zero")
         return slice(*parts)
     if kind == "tuple":
-        return tuple(_dec_index(i) for i in obj["v"])
+        return tuple(_dec_index(i, minor) for i in obj["v"])
+    if kind == "none":
+        return None
+    if kind == "ellipsis":
+        return Ellipsis
     raise SerializationError(f"unknown index kind {kind!r}")
 
 
@@ -774,6 +807,8 @@ _INDEX_KEYS: dict[str, frozenset] = {
     "bool": frozenset({"k", "v"}),
     "slice": frozenset({"k", "start", "stop", "step"}),
     "tuple": frozenset({"k", "v"}),
+    "none": frozenset({"k"}),
+    "ellipsis": frozenset({"k"}),
 }
 
 #: Keys of a node's ``atom`` tag.
@@ -797,7 +832,7 @@ def _known_funcs() -> frozenset:
     return frozenset(_core._ELEMENTWISE_FUNCS) | _EXTRA_FUNCS
 
 
-def _decode_nodes(table: list[dict], variables: Any, params: list[Parameter]):
+def _decode_nodes(table: list[dict], variables: Any, params: list[Parameter], minor: int):
     """Rebuild expression objects from the node table.
 
     A node's children always precede it (the writer emits post-order), so a single
@@ -886,7 +921,7 @@ def _decode_nodes(table: list[dict], variables: Any, params: list[Parameter]):
         elif op == "param":
             built.append(param_refs[nd["ref"]])
         elif op == "index":
-            base, index = refs[nd["base"]], _dec_index(nd["index"])
+            base, index = refs[nd["base"]], _dec_index(nd["index"], minor)
             _check_index_in_range(base, index, i)
             built.append(IndexExpression(base, index))
         elif op == "binop":
@@ -1143,19 +1178,6 @@ def _refuse_unsupported(model: Model) -> None:
         )
         if nested:
             raise SerializationError(_NESTING_REFUSAL)
-        # A disjunct holding a whole disjunction (``Model.disjunction()`` passed as
-        # a member to ``either_or``): the row encoding has no member kind for it,
-        # and writing only its rows would flatten an OR into an AND. Planned for
-        # 1.6 (plan §4 WP-3b); until then, refuse rather than crash (WP-6 sweep).
-        if type(con) is _DisjunctiveConstraint and any(
-            type(r) is _DisjunctiveConstraint for d in con.disjuncts for r in d
-        ):
-            raise SerializationError(
-                "cannot serialize: the model nests a Model.disjunction() inside another "
-                f"disjunction's disjunct{_named(con)}, which this format version does not "
-                "record (planned for schema 1.6, plan WP-3b). Use pickle or Model.clone() "
-                "for same-version transport."
-            )
     # #1790: a nesting whose inner disjuncts are all empty tags no row with a
     # parent, so the row scan above misses it; the block-disjunction record exists
     # exactly when nesting is involved, so refuse on it with the same message.
@@ -1546,24 +1568,7 @@ def _enc_rows(model: Model, table: _NodeTable) -> list[dict]:
                 }
             )
         elif t is _DisjunctiveConstraint:
-            rows.append(
-                {
-                    "kind": "disjunction",
-                    "disjuncts": [[_enc_constraint(c, table) for c in d] for d in con.disjuncts],
-                    "name": con.name,
-                    "method": con.method,
-                    # By member NAME: this enum's `.value` is an (activation,
-                    # cardinality) pair of enums, not a string, so `.value` is
-                    # neither JSON-safe nor a stable identity to read back.
-                    "semantics": con.semantics.name,
-                }
-            )
-            if con._indicator_vars is not None:
-                # #1775 G1.1 (schema 1.5): the indicator columns, once read.
-                # Dropping them would leave those binaries in the model with
-                # nothing tying them to the disjunction. Omitted while unread, so
-                # such a row is written exactly as at 1.4.
-                rows[-1]["indicators"] = [table.add(v) for v in con._indicator_vars]
+            rows.append({"kind": "disjunction", **_enc_disjunction(con, table)})
         elif t is _LogicalConstraint:
             rows.append({"kind": "logical", "logic": _enc_logic(con, table), "name": con.name})
         else:
@@ -1735,8 +1740,6 @@ def _dec_indicators(d: dict, nodes: list) -> tuple:
 
 def _dec_rows(docs: list[dict], nodes: list, minor: int) -> list:
     """Rebuild the ordered, heterogeneous ``_constraints`` list."""
-    from discopt.modeling.core import DisjunctionSemantics
-
     out: list = []
     for d in docs:
         kind = d.get("kind")
@@ -1783,28 +1786,7 @@ def _dec_rows(docs: list[dict], nodes: list, minor: int) -> list:
                 )
             )
         elif kind == "disjunction":
-            if d["method"] not in _KNOWN_DISJUNCTION_METHODS:
-                raise SerializationError(
-                    f"disjunction {d.get('name')!r} names unknown method {d['method']!r}"
-                )
-            out.append(
-                _DisjunctiveConstraint(
-                    disjuncts=[
-                        [_dec_constraint(c, nodes) for c in _seq(dd, "a disjunct")]
-                        for dd in _seq(d["disjuncts"], "disjuncts")
-                    ],
-                    name=d["name"],
-                    method=d["method"],
-                    semantics=DisjunctionSemantics[d["semantics"]],
-                    # Schema 1.5 (#1775 G1.1), and only once read. Not looked at
-                    # in an older document, so there it is refused as unread.
-                    _indicator_vars=(
-                        _dec_indicators(d, nodes)
-                        if minor >= _SCHEMA_MINOR_LOGIC_LOWERING_INDICATORS and "indicators" in d
-                        else None
-                    ),
-                )
-            )
+            out.append(_dec_disjunction(d, nodes, minor))
         elif kind == "logical":
             if minor < _SCHEMA_MINOR_LOGIC_LOWERING_INDICATORS:
                 # No writer before 1.5 wrote a logical row (they refused the
@@ -1824,6 +1806,74 @@ def _dec_rows(docs: list[dict], nodes: list, minor: int) -> list:
                 "discopt than the one reading it; refusing rather than dropping the row."
             )
     return out
+
+
+def _enc_disjunction(con: Any, table: _NodeTable) -> dict:
+    """A disjunction's fields: a ``disjunction`` row without its ``kind``, and
+    (1.6) the record of a disjunction nested as a disjunct member."""
+    out = {
+        "disjuncts": [[_enc_member(c, table) for c in d] for d in con.disjuncts],
+        "name": con.name,
+        "method": con.method,
+        # By member NAME: this enum's `.value` is an (activation,
+        # cardinality) pair of enums, not a string, so `.value` is
+        # neither JSON-safe nor a stable identity to read back.
+        "semantics": con.semantics.name,
+    }
+    if con._indicator_vars is not None:
+        # #1775 G1.1 (schema 1.5): the indicator columns, once read.
+        # Dropping them would leave those binaries in the model with
+        # nothing tying them to the disjunction. Omitted while unread, so
+        # such a row is written exactly as at 1.4.
+        out["indicators"] = [table.add(v) for v in con._indicator_vars]
+    return out
+
+
+def _enc_member(c: Any, table: _NodeTable) -> dict:
+    """A disjunct member: a constraint, or (1.6) a nested disjunction --
+    ``Model.disjunction()`` passed as a member to ``either_or``."""
+    if type(c) is _DisjunctiveConstraint:
+        return {"disjunction": _enc_disjunction(c, table)}
+    return _enc_constraint(c, table)
+
+
+def _dec_disjunction(d: Any, nodes: list, minor: int) -> Any:
+    from discopt.modeling.core import DisjunctionSemantics
+
+    if d["method"] not in _KNOWN_DISJUNCTION_METHODS:
+        raise SerializationError(
+            f"disjunction {d.get('name')!r} names unknown method {d['method']!r}"
+        )
+    return _DisjunctiveConstraint(
+        disjuncts=[
+            [_dec_member(c, nodes, minor) for c in _seq(dd, "a disjunct")]
+            for dd in _seq(d["disjuncts"], "disjuncts")
+        ],
+        name=d["name"],
+        method=d["method"],
+        semantics=DisjunctionSemantics[d["semantics"]],
+        # Schema 1.5 (#1775 G1.1), and only once read. Not looked at
+        # in an older document, so there it is refused as unread.
+        _indicator_vars=(
+            _dec_indicators(d, nodes)
+            if minor >= _SCHEMA_MINOR_LOGIC_LOWERING_INDICATORS and "indicators" in d
+            else None
+        ),
+    )
+
+
+def _dec_member(c: Any, nodes: list, minor: int) -> Any:
+    # `in` does not mark the key read, so an older document's member keeps the
+    # key unread and the record check refuses it -- but say why, by name.
+    if "disjunction" in c:
+        if minor < _SCHEMA_MINOR_NEWAXIS_NESTED_DISJUNCTION:
+            raise SerializationError(
+                f"a schema 1.{minor} document nests a disjunction as a disjunct "
+                "member, which no writer of that version produced; the document is "
+                "malformed or was edited by hand"
+            )
+        return _dec_disjunction(c["disjunction"], nodes, minor)
+    return _dec_constraint(c, nodes)
 
 
 def _enc_constraint(c: Constraint, table: _NodeTable) -> dict:
@@ -3040,7 +3090,7 @@ def _decode_document(doc: dict, minor: int) -> Model:
         [_dec_variable(d, model) for d in _seq(doc["variables"], "variables")], "variable"
     )
     params = [_dec_parameter(d, model) for d in _seq(doc["parameters"], "parameters")]
-    nodes = _decode_nodes(_seq(doc["nodes"], "nodes"), variables, params)
+    nodes = _decode_nodes(_seq(doc["nodes"], "nodes"), variables, params, minor)
 
     model._constraints.extend(_dec_rows(_seq(doc["rows"], "rows"), nodes, minor))
     for row in model._constraints:

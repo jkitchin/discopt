@@ -19,12 +19,14 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import json
 import pickle
 import subprocess
 import sys
 import warnings
 from pathlib import Path
 
+import discopt.modeling as dm
 import discopt.transformations as dt
 import pytest
 import serialize_builder_cases as cases
@@ -125,7 +127,7 @@ def test_builder_is_refused_with_remedy(key):
 def test_builder_sweep_probe_fired():
     """§6: the parametrized tests above measure nothing over an empty table."""
     # Pinned, not a floor: a case that disappears must be noticed (#1797 review N3).
-    assert (len(cases.ROUND_TRIPS), len(cases.REFUSED), len(cases.READERS)) == (44, 13, 4)
+    assert (len(cases.ROUND_TRIPS), len(cases.REFUSED), len(cases.READERS)) == (47, 10, 4)
     areas = {key.split(":")[0] for key in (*cases.ROUND_TRIPS, *cases.REFUSED, *cases.READERS)}
     assert areas == {"dae", "ml", "gdp", "stochastic", "ro", "bilevel", "gp", "transform"}
 
@@ -172,9 +174,23 @@ def test_a_nested_disjunction_copies(copier):
     assert leaves == {id(copied._variables[0])} != {id(model._variables[0])}
 
 
-def test_a_nested_disjunction_is_refused_by_name_not_crashed():
-    with pytest.raises(SerializationError, match="nests a Model.disjunction.*'outer'"):
-        dumps(cases.gdp_nested_disjunction())
+def test_a_nested_disjunction_keeps_its_or_through_a_round_trip():
+    """1.6 writes a ``Model.disjunction()`` nested in ``either_or`` as a member
+    (before: refused, WP-6). The outer alternative is infeasible (x <= 20), so the
+    optimum is the inner OR's best arm, x = 7; flattened into an AND of the inner
+    rows the model would be infeasible."""
+    m = dm.Model("nested_or")
+    x = m.continuous("x", lb=0.0, ub=20.0)
+    m.maximize(x)
+    inner = m.disjunction([[x >= 1, x <= 3], [x >= 5, x <= 7]], name="inner")
+    m.either_or([[inner], [x >= 30]], name="outer")
+    text = dumps(m, provenance=False)
+    member = json.loads(text)["rows"][0]["disjuncts"][0][0]
+    assert set(member) == {"disjunction"}
+    reloaded = loads(text)
+    assert dumps(reloaded, provenance=False) == text
+    r = reloaded.solve(time_limit=30)
+    assert r.status == "optimal" and abs(r.objective - 7.0) < 1e-6
 
 
 @pytest.mark.parametrize("build", [cases.gdp_unattached_disjunction, cases.gdp_unattached_disjunct])
@@ -205,6 +221,7 @@ NOT_SOLVED_HERE = {
     "ml:reduced_space (sigmoid)": "19.4 s",
     "ml:frozen network": "ends 'feasible', not a terminal status",
     "bilevel:strong_duality": "34 s, ends 'feasible'",
+    "ml:trainable network": "stops at the time limit (30 s), ends 'feasible'",
 }
 
 

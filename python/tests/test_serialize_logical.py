@@ -60,8 +60,12 @@ def _logic_model(kind: str):
     return m
 
 
-def test_schema_minor_is_1_5():
-    assert SCHEMA == "discopt.model/1.5"
+def test_logical_rows_arrived_at_1_5():
+    """Pinned to the minor that introduced them, not to the current schema."""
+    from discopt import serialize
+
+    assert serialize._SCHEMA_MINOR_LOGIC_LOWERING_INDICATORS == 5
+    assert serialize.SCHEMA_MINOR >= 5 and SCHEMA.startswith("discopt.model/1.")
 
 
 @pytest.mark.parametrize("kind", sorted(FORMULAS))

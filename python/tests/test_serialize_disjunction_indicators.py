@@ -57,9 +57,9 @@ def _rows(doc):
     return [r for r in doc["rows"] if r["kind"] == "disjunction"]
 
 
-def test_schema_is_1_5():
-    assert serialize.SCHEMA == "discopt.model/1.5"
-    assert serialize._SCHEMA_MINOR_LOGIC_LOWERING_INDICATORS == serialize.SCHEMA_MINOR == 5
+def test_indicators_arrived_at_1_5():
+    """Pinned to the minor that introduced them, not to the current schema."""
+    assert serialize._SCHEMA_MINOR_LOGIC_LOWERING_INDICATORS == 5 <= serialize.SCHEMA_MINOR
 
 
 def test_indicators_written_only_once_read():

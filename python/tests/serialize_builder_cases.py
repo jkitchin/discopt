@@ -667,6 +667,7 @@ ROUND_TRIPS: dict[str, Callable[[], Any]] = {
     "dae:finite_difference": dae_finite_difference,
     "dae:method_of_lines": dae_method_of_lines,
     "dae:fit_trajectories": dae_fit_trajectories,
+    "dae:collocation with a control": dae_collocation_control,  # 1.6: `None` index
     "ml:full_space": _predictor("full_space", "TANH"),
     "ml:reduced_space (tanh)": _predictor("reduced_space", "TANH"),
     "ml:reduced_space (sigmoid)": _predictor("reduced_space", "SIGMOID"),
@@ -676,11 +677,13 @@ ROUND_TRIPS: dict[str, Callable[[], Any]] = {
     "ml:linear_tree (bigm)": _linear_tree("bigm"),
     "ml:trainable (l2 only)": ml_trainable_l2_only,
     "ml:frozen network": ml_frozen_network,
+    "ml:trainable network": ml_trainable_network,  # 1.6: `Ellipsis` index
     "gdp:either_or (select_one)": _either_or("select_one"),
     "gdp:either_or (or)": _either_or("or"),
     "gdp:either_or (exactly_one_true)": _either_or("exactly_one_true"),
     "gdp:disjunct blocks": gdp_disjunct_blocks,
     "gdp:logical": gdp_logical,
+    "gdp:nested disjunction()": gdp_nested_disjunction,  # 1.6: disjunction member
     "stochastic:expectation": _newsvendor("expectation"),
     "stochastic:cvar": _newsvendor("cvar"),
     "stochastic:mean_cvar": _newsvendor("mean_cvar"),
@@ -698,15 +701,10 @@ ROUND_TRIPS: dict[str, Callable[[], Any]] = {
     **_TRANSFORM_ROUND_TRIPS,
 }
 
-#: Each refusal is either final (plan §3.6) or planned for schema 1.6 (plan WP-3b).
+#: Each refusal is either final (plan §3.6) or planned for schema 1.7 (plan WP-3b-2,
+#: the Disjunct-block state).
 REFUSED: dict[str, Refusal] = {
-    # WP-3b: `None` / `Ellipsis` index kinds.
-    "dae:collocation with a control": Refusal(dae_collocation_control, "index None", "pickle"),
-    "ml:trainable network": Refusal(ml_trainable_network, "index Ellipsis", "pickle"),
-    # WP-3b: a disjunction as a disjunct member; #1775 G1.2: nested Disjunct blocks.
-    "gdp:nested disjunction()": Refusal(
-        gdp_nested_disjunction, "nests a Model.disjunction", "pickle"
-    ),
+    # WP-3b-2: #1775 G1.2 nested Disjunct blocks, local variables, G1.4 OR blocks.
     "gdp:nested Disjunct blocks": Refusal(gdp_nested_blocks, "#1775 G1.2", "pickle"),
     "gdp:Disjunct.variable": Refusal(gdp_disjunct_local_variable, "local variables", "pickle"),
     # #1775 G1.4: an OR block's semantics are not recorded by this format version.
