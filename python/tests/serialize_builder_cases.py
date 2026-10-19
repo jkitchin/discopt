@@ -684,6 +684,9 @@ ROUND_TRIPS: dict[str, Callable[[], Any]] = {
     "gdp:disjunct blocks": gdp_disjunct_blocks,
     "gdp:logical": gdp_logical,
     "gdp:nested disjunction()": gdp_nested_disjunction,  # 1.6: disjunction member
+    "gdp:nested Disjunct blocks": gdp_nested_blocks,  # 1.7: G1.2 parent links
+    "gdp:Disjunct.variable": gdp_disjunct_local_variable,  # 1.7: Disjunct records
+    "gdp:OR Disjunct blocks": gdp_or_disjunct_blocks,  # 1.7: G1.4 block semantics
     "stochastic:expectation": _newsvendor("expectation"),
     "stochastic:cvar": _newsvendor("cvar"),
     "stochastic:mean_cvar": _newsvendor("mean_cvar"),
@@ -701,14 +704,10 @@ ROUND_TRIPS: dict[str, Callable[[], Any]] = {
     **_TRANSFORM_ROUND_TRIPS,
 }
 
-#: Each refusal is either final (plan §3.6) or planned for schema 1.7 (plan WP-3b-2,
-#: the Disjunct-block state).
+#: Each refusal is final (plan §3.6): unattached blocks (#1430) and the records a
+#: reformulation pass keeps of its source model. (The 1.6 and 1.7 encodings left none
+#: planned.)
 REFUSED: dict[str, Refusal] = {
-    # WP-3b-2: #1775 G1.2 nested Disjunct blocks, local variables, G1.4 OR blocks.
-    "gdp:nested Disjunct blocks": Refusal(gdp_nested_blocks, "#1775 G1.2", "pickle"),
-    "gdp:Disjunct.variable": Refusal(gdp_disjunct_local_variable, "local variables", "pickle"),
-    # #1775 G1.4: an OR block's semantics are not recorded by this format version.
-    "gdp:OR Disjunct blocks": Refusal(gdp_or_disjunct_blocks, "OR add_disjunction", "pickle"),
     # #1430: not in the model; the remedy is to attach it.
     "gdp:unattached disjunction()": Refusal(
         gdp_unattached_disjunction, "never added", _either_or("select_one")

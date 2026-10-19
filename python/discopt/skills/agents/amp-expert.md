@@ -28,14 +28,14 @@ from discopt.solvers.amp import solve_amp
 
 result = solve_amp(
     model,
-    rel_gap=1e-4,               # stopping gap
+    rel_gap=1e-4,  # stopping gap
     abs_gap=1e-6,
     time_limit=3600,
-    max_iter=100,               # AMP outer iterations
-    initial_partitions=4,       # partitions per bilinear variable
+    max_iter=100,  # AMP outer iterations
+    initial_partitions=4,  # partitions per bilinear variable
     refinement_strategy="adaptive",  # or "uniform"
-    nlp_solver="ipopt",         # for upper-bound NLP
-    milp_solver="highs",        # for lower-bound MILP
+    nlp_solver="ipopt",  # for upper-bound NLP
+    milp_solver="highs",  # for lower-bound MILP
     verbose=True,
 )
 # result is a standard SolveResult (status, objective, bound, gap, x, ...)

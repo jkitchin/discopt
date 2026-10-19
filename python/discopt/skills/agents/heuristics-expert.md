@@ -53,7 +53,7 @@ fp_result = feasibility_pump(
 
 # Multi-start integrated with B&B: Model.solve automatically invokes
 # _solve_root_node_multistart when no incumbent is available.
-result = m.solve(time_limit=60)   # multi-start happens transparently
+result = m.solve(time_limit=60)  # multi-start happens transparently
 ```
 
 ### When discopt's heuristics fire automatically

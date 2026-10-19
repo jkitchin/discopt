@@ -25,22 +25,23 @@ You are an expert on Ipopt as used by discopt. You help users diagnose NLP failu
 ### Core API
 ```python
 # Top-level: discopt picks Ipopt via nlp_solver kwarg
-result = m.solve(nlp_solver="ipopt")   # cyipopt path
+result = m.solve(nlp_solver="ipopt")  # cyipopt path
 result = m.solve(nlp_solver="pounce")  # POUNCE (pure-Rust Ipopt port)
 
 # Direct use (for debugging):
 from discopt.solvers.ipopt_wrapper import solve_ipopt
+
 r = solve_ipopt(
-    evaluator,            # NLPEvaluator from discopt._relax.nlp_evaluator
+    evaluator,  # NLPEvaluator from discopt._relax.nlp_evaluator
     x0=...,
     options={
         "max_iter": 3000,
         "tol": 1e-8,
         "acceptable_tol": 1e-6,
         "acceptable_iter": 15,
-        "mu_strategy": "adaptive",      # or "monotone"
+        "mu_strategy": "adaptive",  # or "monotone"
         "nlp_scaling_method": "gradient-based",
-        "bound_push": 1e-2,             # distance from initial x to bounds
+        "bound_push": 1e-2,  # distance from initial x to bounds
         "print_level": 0,
     },
 )
@@ -61,26 +62,22 @@ r = solve_ipopt(
 ```python
 options = {
     # Tolerances
-    "tol": 1e-8,                       # KKT residual target
-    "acceptable_tol": 1e-6,            # fallback if regular tol stalls
+    "tol": 1e-8,  # KKT residual target
+    "acceptable_tol": 1e-6,  # fallback if regular tol stalls
     "acceptable_iter": 15,
-
     # Barrier
-    "mu_strategy": "adaptive",         # or "monotone"
-    "mu_init": 0.1,                    # initial barrier parameter
+    "mu_strategy": "adaptive",  # or "monotone"
+    "mu_init": 0.1,  # initial barrier parameter
     "mu_min": 1e-11,
-
     # Line search
-    "alpha_for_y": "primal",           # dual step rule
+    "alpha_for_y": "primal",  # dual step rule
     "watchdog_shortened_iter_trigger": 10,
-    "max_soc": 4,                      # second-order corrections per iter
-
+    "max_soc": 4,  # second-order corrections per iter
     # Restoration
     "expect_infeasible_problem": "no",  # "yes" speeds infeasibility detection
     "required_infeasibility_reduction": 0.9,
-
     # Output
-    "print_level": 0,                  # 0 silent, 5 useful, 12 verbose
+    "print_level": 0,  # 0 silent, 5 useful, 12 verbose
 }
 ```
 

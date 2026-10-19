@@ -61,7 +61,8 @@ If no model is given, ask the user to paste their model code or provide a file p
 - For automatic tightening, point to the public FBBT API:
   ```python
   from discopt import tightening
-  bt = tightening.fbbt_box(m)   # feasibility-based bound propagation
+
+  bt = tightening.fbbt_box(m)  # feasibility-based bound propagation
   # bt.lb, bt.ub, bt.n_tightened, bt.infeasible
   ```
 

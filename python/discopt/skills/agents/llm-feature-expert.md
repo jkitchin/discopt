@@ -38,9 +38,9 @@ from discopt.llm.tools import ModelBuilder
 from discopt.llm.chat import ChatSession
 import discopt  # also exposes top-level `discopt.chat()`
 
-session = discopt.chat()             # or ChatSession(llm_model=...)
+session = discopt.chat()  # or ChatSession(llm_model=...)
 session.say("I have 3 products and 2 factories ...")
-model = session.model                # validated discopt.Model
+model = session.model  # validated discopt.Model
 
 # Explain a solve result with LLM
 r = m.solve()
@@ -48,10 +48,12 @@ print(r.explain(llm=True, model="anthropic/claude-opus-4-20250514"))
 
 # Diagnose a failure
 from discopt.llm.diagnosis import diagnose_infeasibility
+
 report = diagnose_infeasibility(m, llm=True)
 
 # Reformulation suggestions
 from discopt.llm.reformulation import analyze_reformulations
+
 suggestions = analyze_reformulations(m, llm=True)  # returns list of validated patches
 ```
 
@@ -73,11 +75,11 @@ Every LLM output path is structured as:
 ```python
 raw_llm_output = llm.call(prompt)
 # NEVER: exec(raw_llm_output) or Model.from_string(raw_llm_output)
-validated = safety.validate(raw_llm_output)          # parse, type-check, sanitize
+validated = safety.validate(raw_llm_output)  # parse, type-check, sanitize
 # For formulation: apply tool calls via ModelBuilder, re-running validation at each step.
 # For reformulation: the LLM suggests; deterministic code re-derives and applies.
 # For explanation: the LLM output is text-only and presented as-is (no eval).
-model_built_by_tools = builder.build()                # only reaches here if safe
+model_built_by_tools = builder.build()  # only reaches here if safe
 ```
 
 When **extending** with a new LLM feature:

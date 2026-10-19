@@ -39,15 +39,15 @@ If no description is given, ask the user to describe their optimization problem.
    m = dm.Model("descriptive_name")
 
    # --- Variables ---
-   x = m.continuous("x", shape=(n,), lb=0)       # non-negative continuous
-   y = m.binary("use", shape=(k,))                # binary selection
-   n = m.integer("batches", lb=0, ub=100)         # integer
+   x = m.continuous("x", shape=(n,), lb=0)  # non-negative continuous
+   y = m.binary("use", shape=(k,))  # binary selection
+   n = m.integer("batches", lb=0, ub=100)  # integer
 
    # --- Objective ---
    m.minimize(...)  # or m.maximize(...)
 
    # --- Constraints ---
-   m.subject_to(A @ x <= b, name="capacity")      # ALWAYS use named constraints
+   m.subject_to(A @ x <= b, name="capacity")  # ALWAYS use named constraints
    m.subject_to(dm.sum(x) == 1, name="partition")
 
    # --- Validate & Summarize ---

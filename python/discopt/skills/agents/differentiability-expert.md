@@ -29,21 +29,21 @@ from discopt._relax.differentiable import differentiable_solve, differentiable_s
 m = dm.Model("...")
 x = m.continuous("x", lb=-10, ub=10)
 p = m.parameter("price", value=1.0)
-m.minimize((x - p)**2)
+m.minimize((x - p) ** 2)
 m.subject_to(x >= 0)
 m.subject_to(x <= 5)
 
 # Level 1: gradient of optimal objective w.r.t. parameter
 r = differentiable_solve(m)
-print(r.objective, r.gradient_p)          # 1.0, -2*(x* - p) ... via envelope theorem
+print(r.objective, r.gradient_p)  # 1.0, -2*(x* - p) ... via envelope theorem
 
 # Level 3: gradient of the optimal x* w.r.t. parameter
 r3 = differentiable_solve_l3(m)
-print(r3.x_star, r3.dx_star_dp)           # 1.0 (interior), 1.0
+print(r3.x_star, r3.dx_star_dp)  # 1.0 (interior), 1.0
 
 # Convenience via SolveResult (sensitivity=True)
 result = m.solve(sensitivity=True)
-g = result.gradient(p)                     # lazy; same as envelope theorem
+g = result.gradient(p)  # lazy; same as envelope theorem
 ```
 
 ### When each level applies
@@ -64,13 +64,15 @@ g = result.gradient(p)                     # lazy; same as envelope theorem
 import jax
 import jax.numpy as jnp
 
+
 def objective(p_value):
     p.value = jnp.asarray(p_value)
     r = differentiable_solve(m)
     return r.objective  # scalar
 
+
 grad_fn = jax.grad(objective)
-g = grad_fn(1.0)   # finite-difference-free exact gradient
+g = grad_fn(1.0)  # finite-difference-free exact gradient
 ```
 
 The custom VJP is defined via `_make_jax_differentiable_solve` so `jax.grad` / `jax.jit` / `jax.vmap` compose correctly.

@@ -143,11 +143,21 @@ def test_reduced_subproblem_accepts_several_selected_disjuncts_under_or():
     assert _solve(reduced_subproblem(m, [d0, d1]), "big-m") == pytest.approx(4.0, abs=1e-6)
 
 
-def test_serialize_refuses_an_or_block():
-    from discopt.serialize import SerializationError, dumps
+def test_serialize_keeps_an_or_block():
+    """Refused before schema 1.7 (plan WP-3b-2): written as select-one, an OR block
+    would reload with a different selector space. The semantics now travel."""
+    from discopt.serialize import dumps, loads
 
-    with pytest.raises(SerializationError, match="OR add_disjunction block"):
-        dumps(_or_block())
+    m = _or_block()
+    text = dumps(m, provenance=False)
+    reloaded = loads(text)
+    assert dumps(reloaded, provenance=False) == text
+    (root,) = gdp_tree(reloaded).disjunctions
+    assert root.semantics is DisjunctionSemantics.OR
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r1, r2 = m.solve(time_limit=60), reloaded.solve(time_limit=60)
+    assert (r1.status, r1.objective, r1.node_count) == (r2.status, r2.objective, r2.node_count)
 
 
 def test_rowless_or_block_keeps_its_semantics_in_the_tree():

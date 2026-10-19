@@ -77,8 +77,9 @@ it so the next solve respawns fresh.
 Don't guess — compute the Irreducible Infeasible Subsystem:
 ```python
 import discopt
-iis = discopt.compute_iis(m)          # deletion-filtering; exact for LP/MILP/convex
-print(iis.summary())                   # the minimal conflicting constraints + bounds
+
+iis = discopt.compute_iis(m)  # deletion-filtering; exact for LP/MILP/convex
+print(iis.summary())  # the minimal conflicting constraints + bounds
 # iis.constraints, iis.variable_bounds, iis.proven_irreducible
 ```
 The IIS is the smallest set of constraints/bounds that cannot all hold at once —
@@ -88,6 +89,7 @@ on a large model, pass `time_limit=...` (best-effort on nonconvex).
 For bound-only contradictions, FBBT will surface them directly:
 ```python
 from discopt import tightening
+
 bt = tightening.fbbt_box(m)
 if bt.infeasible:
     print("bounds are contradictory before any solve")

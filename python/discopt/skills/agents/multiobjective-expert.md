@@ -28,21 +28,30 @@ You are an expert on `discopt.mo` — discopt's deterministic multi-objective la
 ### Core API
 ```python
 from discopt.mo import (
-    weighted_sum, epsilon_constraint, weighted_tchebycheff,
-    normal_boundary_intersection, normalized_normal_constraint,
-    ParetoFront, ParetoPoint,
-    ideal_point, nadir_point, filter_nondominated,
-    hypervolume, igd, spread, epsilon_indicator,
+    weighted_sum,
+    epsilon_constraint,
+    weighted_tchebycheff,
+    normal_boundary_intersection,
+    normalized_normal_constraint,
+    ParetoFront,
+    ParetoPoint,
+    ideal_point,
+    nadir_point,
+    filter_nondominated,
+    hypervolume,
+    igd,
+    spread,
+    epsilon_indicator,
 )
 
 m = dm.Model("biobj")
 x = m.continuous("x", lb=-5, ub=5)
 y = m.continuous("y", lb=-5, ub=5)
 f1 = x**2 + y**2
-f2 = (x - 2)**2 + (y - 1)**2
+f2 = (x - 2) ** 2 + (y - 1) ** 2
 
 # Any of the five scalarizations:
-front = epsilon_constraint(m, [f1, f2], n_points=21)     # AUGMECON2 by default
+front = epsilon_constraint(m, [f1, f2], n_points=21)  # AUGMECON2 by default
 # front = weighted_sum(m, [f1, f2], n_weights=21)
 # front = weighted_tchebycheff(m, [f1, f2], n_weights=21)
 # front = normal_boundary_intersection(m, [f1, f2], n_points=21)

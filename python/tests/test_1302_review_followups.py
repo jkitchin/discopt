@@ -126,8 +126,14 @@ def test_schema_minor_is_bumped_for_the_non_additive_change():
     1.6 adds two more, again read only from a >=1.6 document (plan WP-3b-1): the
     ``none`` / ``ellipsis`` index kinds and a disjunction nested as a disjunct
     member. A 1.5 reader refuses both.
+
+    1.7 adds Disjunct-block state, read only from a >=1.7 document (plan WP-3b-2):
+    a nested block's ``parent`` and an OR block's ``semantics`` on indicator rows, a
+    nested disjunction's ``parent_indicator``, and the ``_gdp_blocks`` state record.
+    The writer emits them only for a model that every earlier writer refused, so a
+    plain model's document is unchanged apart from the schema string.
     """
-    assert S.SCHEMA == "discopt.model/1.6"
+    assert S.SCHEMA == "discopt.model/1.7"
 
 
 def test_legacy_11_document_restores_a_tagged_float_in_the_trace():

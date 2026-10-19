@@ -39,8 +39,9 @@ inspect the returned `SolveResult`. When the result points to a deeper problem
   Irreducible Infeasible Subsystem directly:
   ```python
   import discopt
-  iis = discopt.compute_iis(m)   # exact for LP/MILP/convex, best-effort nonconvex
-  print(iis.summary())            # minimal conflicting constraints + bounds
+
+  iis = discopt.compute_iis(m)  # exact for LP/MILP/convex, best-effort nonconvex
+  print(iis.summary())  # minimal conflicting constraints + bounds
   ```
 - The IIS is the smallest set of constraints/bounds that can't all hold — fix
   one of them. Common causes: typo'd RHS, sign error, `lb > ub`, over-tight bounds.
@@ -85,16 +86,16 @@ inspect the returned `SolveResult`. When the result points to a deeper problem
 3. **Reference solver parameters** the user can adjust (real `m.solve()` kwargs):
    ```python
    result = m.solve(
-       time_limit=3600,        # seconds
-       gap_tolerance=1e-4,     # relative gap
-       threads=1,              # CPU threads for Rust components
-       partitions=0,           # piecewise McCormick (0=standard, 4-8=tighter)
-       rlt="auto",             # "auto" | True | False
-       psd_cuts=False,         # PSD/eigenvalue cuts for QCQP
-       gdp_method="big-m",     # or "hull" for tighter disjunctive relaxations
-       nlp_bb=None,            # None=auto, True=NLP-BB, False=spatial B&B
-       deterministic=False,    # True -> reproducible (neutralizes role-2 clocks)
-       validate=False,         # post-solve KKT check -> result.validation_report
+       time_limit=3600,  # seconds
+       gap_tolerance=1e-4,  # relative gap
+       threads=1,  # CPU threads for Rust components
+       partitions=0,  # piecewise McCormick (0=standard, 4-8=tighter)
+       rlt="auto",  # "auto" | True | False
+       psd_cuts=False,  # PSD/eigenvalue cuts for QCQP
+       gdp_method="big-m",  # or "hull" for tighter disjunctive relaxations
+       nlp_bb=None,  # None=auto, True=NLP-BB, False=spatial B&B
+       deterministic=False,  # True -> reproducible (neutralizes role-2 clocks)
+       validate=False,  # post-solve KKT check -> result.validation_report
    )
    ```
    (GPU is via `JAX_PLATFORMS`, an env var, not a kwarg.)

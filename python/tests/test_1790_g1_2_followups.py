@@ -188,16 +188,28 @@ def test_local_variable_in_a_logic_row_is_refused():
         m.validate()
 
 
-def test_serialize_refuses_local_variables(tmp_path):
-    from discopt.serialize import SerializationError, save
+def test_serialize_keeps_local_variables(tmp_path):
+    """Refused before schema 1.7 (plan WP-3b-2). The blocks travel with their local
+    variables, so the reloaded model still refuses a use of one outside its block."""
+    from discopt.serialize import load, save
 
     m, _, _ = _local_on_a()
-    with pytest.raises(SerializationError, match="declares local variables"):
-        save(m, tmp_path / "m.json")
+    m.validate()
+    save(m, tmp_path / "m.json")
+    reloaded = load(tmp_path / "m.json")
+    reloaded.validate()
+    local = {v.name for d in reloaded._gdp_factory_disjuncts for v in d._local_vars}
+    assert local == {v.name for d in m._gdp_factory_disjuncts for v in d._local_vars} != set()
+    w = next(v for v in reloaded._variables if v.name in local)
+    reloaded.subject_to(w <= 1.0, name="escape")
+    with pytest.raises(ValueError, match="declared local to disjunct"):
+        reloaded.validate()
 
 
-def test_serialize_refuses_an_all_empty_nested_block_with_the_nesting_message(tmp_path):
-    from discopt.serialize import SerializationError, save
+def test_serialize_keeps_an_all_empty_nested_block(tmp_path):
+    """A nested block none of whose disjuncts emits a row is recorded only in the
+    block-disjunction record (#1790); refused before schema 1.7, now written."""
+    from discopt.serialize import load, save
 
     m, x, y = _xy("empty_inner")
     a = m.make_disjunct("A")
@@ -207,5 +219,15 @@ def test_serialize_refuses_an_all_empty_nested_block_with_the_nesting_message(tm
     b.subject_to(x >= 7)
     m.add_disjunction([a, b])
     m.minimize(x)
-    with pytest.raises(SerializationError, match="nests a disjunction in a Disjunct block"):
-        save(m, tmp_path / "m.json")
+    save(m, tmp_path / "m.json")
+    reloaded = load(tmp_path / "m.json")
+
+    def shape(model):
+        return [
+            (len(n.disjuncts), [len(d.children) for d in n.disjuncts])
+            for n in gdp_tree(model).disjunctions
+        ]
+
+    assert shape(reloaded) == shape(m) == [(2, [1, 0])]
+    r1, r2 = m.solve(time_limit=60), reloaded.solve(time_limit=60)
+    assert (r1.status, r1.objective, r1.node_count) == (r2.status, r2.objective, r2.node_count)

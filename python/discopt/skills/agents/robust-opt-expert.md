@@ -25,15 +25,18 @@ You are an expert on `discopt.ro` — the robust-optimization layer that reformu
 ```python
 import discopt.modeling as dm
 from discopt.ro import (
-    BoxUncertaintySet, EllipsoidalUncertaintySet, PolyhedralUncertaintySet,
+    BoxUncertaintySet,
+    EllipsoidalUncertaintySet,
+    PolyhedralUncertaintySet,
     budget_uncertainty_set,
-    RobustCounterpart, AffineDecisionRule,
+    RobustCounterpart,
+    AffineDecisionRule,
 )
 
 # 1. Build nominal model with Parameters for the uncertain quantities
 m = dm.Model("portfolio")
 w = m.continuous("w", shape=(n,), lb=0)
-mu = m.parameter("mu", value=mu_nominal)      # uncertain
+mu = m.parameter("mu", value=mu_nominal)  # uncertain
 m.maximize(mu @ w)
 m.subject_to(dm.sum(lambda i: w[i], over=range(n)) == 1)
 
@@ -60,7 +63,7 @@ x = m.continuous("x", shape=(n,))
 z_rule = AffineDecisionRule(
     name="z",
     shape=(m_dim,),
-    uncertainty_parameters=[mu],        # the xi vector
+    uncertainty_parameters=[mu],  # the xi vector
     model=m,
 )
 # z = Z0 + Z1 @ mu_perturb, where Z0, Z1 become decision variables
