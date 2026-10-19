@@ -91,6 +91,8 @@ def test_every_key_the_writer_emits_is_listed():
         | set(serialize._STATE_BESPOKE)
         | set(serialize._LAZY_PLAIN)
         | {"nl_source", "_gams_initial_values"}
+        # 1.7: `_gdp_block_members` and the attached disjuncts' local variables.
+        | {"_gdp_blocks"}
     )
     assert carried == set(serialize._STATE_KEYS)
 

@@ -2250,7 +2250,9 @@ _REFORMULATION_RECORD_PREFIXES = {
 #: ``_gams_initial_values``: the starting point a GAMS model declares (``x.l``),
 #: which ``from_gams`` / the GMO link attach and the solver seeds its primal
 #: search from. Model content, so carried (see ``_enc_gams_initial_values``).
-_LAZY_BESPOKE = frozenset({"_gams_initial_values"})
+#: ``_gdp_block_members`` (set by the first ``add_disjunction``): the block
+#: disjunctions, carried in the 1.7 ``_gdp_blocks`` state entry.
+_LAZY_BESPOKE = frozenset({"_gams_initial_values", "_gdp_block_members"})
 
 _LAZY_STATE = _LAZY_NOT_CARRIED | frozenset(_LAZY_PLAIN) | _LAZY_NL_SOURCE | _LAZY_BESPOKE
 
@@ -2269,7 +2271,6 @@ _STATE_AS_SORTED_LIST = (
 
 #: Attributes carried in "state" by a bespoke encoder.
 _STATE_BESPOKE = (
-    "_gdp_block_members",  # in "_gdp_blocks" (1.7)
     "_atan2_preconditions",
     "_piecewise_domains",
     "_coupling_keys",
