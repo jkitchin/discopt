@@ -41,8 +41,9 @@ Two entry points, both registered in :mod:`discopt.transformations`:
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import numpy as np
@@ -51,6 +52,7 @@ from discopt.gdp.tree import DisjunctionNode, DisjunctNode, GDPTree, gdp_tree
 from discopt.modeling.core import (
     Constraint,
     Model,
+    Objective,
     _DisjunctiveConstraint,
     _IndicatorConstraint,
     carry_validation_guards,
@@ -59,8 +61,34 @@ from discopt.modeling.core import (
 # A disjunct's address: the root disjunction's row index, then alternating
 # (disjunct index, child index) steps, ending with the disjunct index. It is
 # stable under ``Model.clone`` and ``create_using``'s deep copy, so a selection
-# taken from one model's tree can be resolved on a copy's tree.
+# taken from one model's tree can be resolved on a copy's tree. An address alone
+# is not trusted (#1794 S2): every disjunction on the path must also match the
+# one it resolves to (:func:`_signature`), so a node from a stale tree or another
+# model is refused rather than silently resolved to a different disjunction.
 Address = tuple
+
+
+def _signature(node: DisjunctionNode) -> tuple:
+    """What a disjunction is, independent of object identity: kind, name, and per
+    disjunct its name, rows (as text) and number of nested disjunctions."""
+    return (
+        node.kind,
+        node.name,
+        tuple((d.name, tuple(str(r) for r in d.rows), len(d.children)) for d in node.disjuncts),
+    )
+
+
+def _path(d: DisjunctNode) -> list[DisjunctionNode]:
+    """The disjunctions from ``d``'s root down to ``d``'s own."""
+    out: list[DisjunctionNode] = []
+    cur: Optional[DisjunctNode] = d
+    while cur is not None:
+        node = cur.parent
+        if node is None:
+            raise ValueError(f"{cur!r} is not part of a GDP tree")
+        out.append(node)
+        cur = node.parent
+    return out[::-1]
 
 
 def _address(d: DisjunctNode) -> Address:
@@ -81,17 +109,48 @@ def _address(d: DisjunctNode) -> Address:
         cur = parent
 
 
-def _resolve(tree: GDPTree, address: Address) -> DisjunctNode:
-    roots = {r.origin.index: r for r in tree.disjunctions if r.origin is not None}
-    node = roots.get(address[0])
-    if node is None:
-        raise ValueError(f"no disjunction at model row {address[0]}")
+def _resolve(tree: GDPTree, selected: DisjunctNode) -> DisjunctNode:
+    """``selected``'s counterpart on ``tree``, refused unless the structure matches."""
+    address = _address(selected)
+    expected = _path(selected)
+    stale = ValueError(
+        f"{selected!r} is not a disjunct of this model's current GDP tree (it comes from "
+        "another model, or from a tree taken before the model was changed); take the "
+        "selection from gdp_tree(model)"
+    )
+    # A row-less block disjunction (#1790) starts where its first nested row does,
+    # so two roots can share an index: pick the one whose structure matches, and
+    # refuse when that is still ambiguous (#1794 S3).
+    want = _signature(expected[0])
+    candidates = [
+        r
+        for r in tree.disjunctions
+        if r.origin is not None and r.origin.index == address[0] and _signature(r) == want
+    ]
+    if not candidates:
+        raise stale
+    if len(candidates) > 1:
+        raise ValueError(
+            f"{len(candidates)} identical disjunctions start at model row {address[0]}; "
+            f"{selected!r} cannot be resolved to one of them"
+        )
+    node = candidates[0]
     steps: list[int] = [int(i) for i in address[1:]]
+    depth = 0
     while True:
-        d: DisjunctNode = node.disjuncts[steps.pop(0)]
+        if _signature(node) != _signature(expected[depth]):
+            raise stale
+        k = steps.pop(0)
+        if k >= len(node.disjuncts):
+            raise stale
+        d: DisjunctNode = node.disjuncts[k]
         if not steps:
             return d
-        node = d.children[steps.pop(0)]
+        j = steps.pop(0)
+        if j >= len(d.children):
+            raise stale
+        node = d.children[j]
+        depth += 1
 
 
 def _chosen(tree: GDPTree, selected: Iterable[DisjunctNode]) -> dict[int, int]:
@@ -102,7 +161,7 @@ def _chosen(tree: GDPTree, selected: Iterable[DisjunctNode]) -> dict[int, int]:
             raise TypeError(
                 f"a selection is DisjunctNode objects from gdp_tree(model), not {type(d).__name__}"
             )
-        mine = _resolve(tree, _address(d))
+        mine = _resolve(tree, d)
         node = mine.parent
         assert node is not None
         k = next(i for i, x in enumerate(node.disjuncts) if x is mine)
@@ -125,25 +184,76 @@ def _chosen(tree: GDPTree, selected: Iterable[DisjunctNode]) -> dict[int, int]:
 
 @dataclass
 class _Plan:
-    drop: set[int]  # id() of model rows (or row-holding objects) to remove
+    drop: set[int]  # indices into model._constraints of rows to remove
     add: list[Any]  # ordinary rows and promoted disjunctions, in order
     pins: list[tuple[Any, float]]  # (indicator expression, value)
+    # index -> replacement row: a disjunction nested in a selected Disjunct block,
+    # left undecided, is re-emitted without its (now pinned) parent link.
+    replace: dict[int, Any] = field(default_factory=dict)
+    # ``_gdp_block_members`` keys of block disjunctions whose rows are gone.
+    retired_keys: set[str] = field(default_factory=set)
+    promoted_keys: set[str] = field(default_factory=set)
+
+    def rows(self, model: Model) -> list[Any]:
+        out = [
+            self.replace.get(i, c) for i, c in enumerate(model._constraints) if i not in self.drop
+        ]
+        out.extend(self.add)
+        out.extend(_pin_row(e, v) for e, v in self.pins)
+        return out
 
 
 def _plan(model: Model, selected: Iterable[DisjunctNode], *, full: bool) -> _Plan:
+    # A model that would not validate is refused before it is transformed: the
+    # transformation must not turn a forgotten block (#1430) into a silent drop.
+    model._reject_unattached_gdp_blocks()
     tree = gdp_tree(model)
     chosen = _chosen(tree, selected)
     plan = _Plan(set(), [], [])
-    indicator_rows = [c for c in model._constraints if isinstance(c, _IndicatorConstraint)]
+    rows = model._constraints
+    by_key: dict[str, list[int]] = {}
+    for i, c in enumerate(rows):
+        if isinstance(c, _IndicatorConstraint) and c.disjunction is not None:
+            by_key.setdefault(c.disjunction[0], []).append(i)
+
+    def own_rows(node: DisjunctionNode) -> list[int]:
+        """Indices of the model rows that make up ``node`` -- by row identity, never
+        by the wrapped constraint, which another disjunction or an ``if_then`` may
+        share (#1794 B1)."""
+        assert node.origin is not None
+        if isinstance(node.origin.source, _DisjunctiveConstraint):
+            return [node.origin.index]
+        if node.kind == "add_disjunction":
+            return by_key.get(node.origin.source, [])
+        # An implication is the run of consecutive rows starting at its origin.
+        n = len(node.disjuncts[0].rows)
+        run = list(range(node.origin.index, node.origin.index + n))
+        for i, r in zip(run, node.disjuncts[0].rows):
+            row: Any = rows[i]
+            if not (isinstance(row, _IndicatorConstraint) and row.constraint is r):
+                raise RuntimeError(f"implication {node.name!r} is not the row run gdp_tree read")
+        return run
 
     def drop_rows(node: DisjunctionNode) -> None:
-        # An either_or / nested Model.disjunction is one object in the model; a
-        # block or an implication is a set of indicator rows.
-        if node.origin is not None and isinstance(node.origin.source, _DisjunctiveConstraint):
-            plan.drop.add(id(node.origin.source))
-        else:
-            mine = {id(r) for d in node.disjuncts for r in d.rows}
-            plan.drop.update(id(c) for c in indicator_rows if id(c.constraint) in mine)
+        plan.drop.update(own_rows(node))
+        if node.kind == "add_disjunction":
+            assert node.origin is not None
+            plan.retired_keys.add(node.origin.source)
+
+    def promote(node: DisjunctionNode) -> None:
+        # Nested in a selected Disjunct block, whose indicator is now pinned to 1:
+        # the parent link is satisfied, so re-emit the rows without it. Copies,
+        # never mutation: the token's ``before`` keeps the original rows.
+        for i in own_rows(node):
+            c: Any = copy.copy(rows[i])
+            if isinstance(c, _DisjunctiveConstraint):
+                c.parent_indicator = None
+            else:
+                c.parent = None
+            plan.replace[i] = c
+        if node.kind == "add_disjunction":
+            assert node.origin is not None
+            plan.promoted_keys.add(node.origin.source)
 
     def pin(d: DisjunctNode, on: bool) -> None:
         if d.indicator is not None:
@@ -177,6 +287,8 @@ def _plan(model: Model, selected: Iterable[DisjunctNode], *, full: bool) -> _Pla
                 # Nested in a selected either_or disjunct: now unconditional.
                 assert node.origin is not None
                 plan.add.append(node.origin.source)
+            elif node.parent is not None:
+                promote(node)
             return
         if top_level:
             drop_rows(node)
@@ -205,17 +317,28 @@ def reduced_subproblem(model: Model, selected: Iterable[DisjunctNode]) -> Model:
     alone). Returns a new model sharing ``model``'s variables: global rows, the
     selected disjuncts' rows as ordinary rows, logical constraints, and one
     equality row per known indicator. The inactive disjuncts' rows are gone.
-    ``model`` is not changed.
+    Fast-API rows (``add_linear_constraints``) become ordinary rows, a fast-API
+    objective an ordinary objective, and the complementarity records and
+    ``Disjunct`` blocks are carried. ``model`` is not changed.
     """
+    from discopt.mpec import carry_complementarities
+
     plan = _plan(model, selected, full=True)
     out = Model(model.name)
     out._variables = list(model._variables)
     out._parameters = list(model._parameters)
     out._rebuild_name_index()
     out._objective = model._objective
-    out._constraints = [c for c in model._constraints if id(c) not in plan.drop]
-    out._constraints.extend(plan.add)
-    out._constraints.extend(_pin_row(e, v) for e, v in plan.pins)
+    if model._objective is not None and getattr(model._objective, "_is_placeholder", False):
+        # ``add_linear_objective`` / ``add_quadratic_objective`` keep the real
+        # objective in the source's Rust builder (#1794 B2).
+        out._objective = Objective(model._objective_expression(), model._objective.sense)
+    out._constraints = plan.rows(model)
+    # Fast-API rows live only in the source's builder; carry them as ordinary
+    # rows, or the subproblem silently loses them (#1794 B2).
+    out._constraints.extend(model._builder_linear_constraints())
+    out._gdp_factory_disjuncts = list(model._gdp_factory_disjuncts)
+    carry_complementarities(model, out, pass_name="gdp.fix_disjuncts")
     carry_validation_guards(model, out)
     return out
 
@@ -231,6 +354,10 @@ class DisjunctiveStateToken:
     model: Model
     before: list
     after: list
+    #: ``_gdp_factory_disjunctions`` and ``_gdp_block_members`` before the
+    #: transformation (#1794 S1/S3), restored by :meth:`reverse`.
+    factory_before: list = field(default_factory=list)
+    members_before: Optional[dict] = None
 
     def reverse(self) -> Model:
         """Restore the model's rows to what they were before the transformation.
@@ -245,6 +372,13 @@ class DisjunctiveStateToken:
                 "reversing would drop those changes"
             )
         self.model._constraints = list(self.before)
+        reg = self.model._gdp_factory_disjunctions
+        later = [dc for dc in reg if not any(dc is f for f in self.factory_before)]
+        self.model._gdp_factory_disjunctions = list(self.factory_before) + later
+        if self.members_before is None:
+            self.model.__dict__.pop("_gdp_block_members", None)
+        else:
+            self.model.__dict__["_gdp_block_members"] = dict(self.members_before)
         return self.model
 
 
@@ -277,18 +411,63 @@ def transform_current_disjunctive_state(
     chosen = _fixed_selection(model) if selected is None else list(selected)
     plan = _plan(model, chosen, full=False)
     before = list(model._constraints)
-    after = [c for c in before if id(c) not in plan.drop]
-    after.extend(plan.add)
-    after.extend(_pin_row(e, v) for e, v in plan.pins)
+    after = plan.rows(model)
+    reachable_before = _reachable_disjunctions(before)
+    reachable_after = _reachable_disjunctions(after)
+    factory_before = list(model._gdp_factory_disjunctions)
+    # A Model.disjunction the transformation decided or dropped is consumed, not
+    # forgotten: without this, validate (#1430) refuses the transformed model.
+    consumed = [
+        dc for dc in factory_before if id(dc) in reachable_before and id(dc) not in reachable_after
+    ]
+    members = model.__dict__.get("_gdp_block_members")
     model._constraints = after
-    return DisjunctiveStateToken(model, before, list(after))
+    model._gdp_factory_disjunctions = [
+        dc for dc in factory_before if not any(dc is c for c in consumed)
+    ]
+    if members is not None:
+        # Keep the nesting record in step with the rows (#1794 S3): a decided or
+        # dropped block disjunction is gone, a promoted one has no parent now.
+        new_members = {k: v for k, v in members.items() if k not in plan.retired_keys}
+        for k in plan.promoted_keys & set(new_members):
+            rec = new_members[k]
+            if hasattr(rec, "_replace") and getattr(rec, "parent", None) is not None:
+                new_members[k] = rec._replace(parent=None)
+        model.__dict__["_gdp_block_members"] = new_members
+    return DisjunctiveStateToken(
+        model,
+        before,
+        list(after),
+        factory_before=factory_before,
+        members_before=None if members is None else dict(members),
+    )
+
+
+def _reachable_disjunctions(rows: list) -> set[int]:
+    """``id()`` of every ``_DisjunctiveConstraint`` reachable from ``rows``."""
+    seen: set[int] = set()
+    stack = [c for c in rows if isinstance(c, _DisjunctiveConstraint)]
+    while stack:
+        dc = stack.pop()
+        if id(dc) in seen:
+            continue
+        seen.add(id(dc))
+        for group in dc.disjuncts:
+            stack.extend(it for it in group if isinstance(it, _DisjunctiveConstraint))
+    return seen
 
 
 def _transform_current_disjunctive_state_in_place(
     model: Model, selected: Optional[Iterable[DisjunctNode]] = None
 ) -> None:
     """Registry adapter: the in-place contract returns nothing; the undo token is
-    kept on the model for :func:`reverse_current_disjunctive_state`."""
+    kept on the model for :func:`reverse_current_disjunctive_state`.
+
+    The token lives in ``model._gdp_state_tokens``, which :mod:`discopt.serialize`
+    does not record, so :meth:`Model.save` refuses the model (``SerializationError``)
+    until every transformation is reversed: saving would reload a model that can no
+    longer be reversed. ``pickle`` and ``Model.clone`` carry the tokens.
+    """
     token = transform_current_disjunctive_state(model, selected)
     model.__dict__.setdefault("_gdp_state_tokens", []).append(token)
 
