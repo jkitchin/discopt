@@ -1032,6 +1032,21 @@ class SolverTuning:
     Distinct from :attr:`ils_solve_cap`, which limits sub-NLPs *per objective
     descent* keyed on the integer dimension; this one bounds the whole call."""
 
+    gdp_bound_pretransform: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_GDP_BOUND_PRETRANSFORM", default=False)
+    )
+    """Apply ``gdp.bound_pretransformation`` inside the big-M and mbigm lowerings
+    (``DISCOPT_GDP_BOUND_PRETRANSFORM``, default **OFF**; #1775 G2.4, bound-changing
+    on the ``"big-m"`` / ``"mbigm"`` routes).
+
+    A disjunct row bounding one variable becomes part of ``sum_k L_k y_k <= x <=
+    sum_k U_k y_k`` on the lowering's own selectors (exact under SELECT_ONE)
+    instead of a big-M row. The transformation itself is NC and user-selected
+    (``transformations.apply_to("gdp.bound_pretransformation", m)``); only its
+    automatic use is gated here. Default OFF until the §5 flag panel (CLAUDE.md)
+    shows it cert-clean and net-positive; the audit row is in
+    ``docs/dev/flag-retirement-audit.md``."""
+
     mbigm_conditioned: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_MBIGM_CONDITIONED", default=False)
     )

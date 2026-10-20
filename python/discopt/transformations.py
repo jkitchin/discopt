@@ -695,6 +695,13 @@ register(
     "discopt.gdp.state.reverse_current_disjunctive_state (#1775 G1.3)",
 )
 register(
+    "gdp.bound_pretransformation",
+    "discopt.gdp.bound_pretransform:_bound_pretransform_in_place",
+    style="in_place",
+    summary="Disjunct-local variable bounds as sum_k L_k y_k <= x <= sum_k U_k y_k "
+    "(SELECT_ONE; a GDP lowering must follow; #1775 G2.4)",
+)
+register(
     "integer.bilinear",
     "discopt._relax.integer_product_reform:reformulate_integer_bilinear",
     style="functional",

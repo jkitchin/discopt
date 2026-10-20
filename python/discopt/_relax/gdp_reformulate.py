@@ -328,6 +328,24 @@ def reformulate_gdp(
             if not any(isinstance(it, _DisjunctiveConstraint) for d in dc.disjuncts for it in d)
         }
     _mbc_done: dict[str, Optional[list[Constraint]]] = {}
+
+    # #1775 G2.4 (flag DISCOPT_GDP_BOUND_PRETRANSFORM, default OFF): under big-M and
+    # mbigm, the univariate rows of each complete top-level block group without
+    # nesting become the bound rows of gdp.bound_pretransformation, on the block's
+    # own indicators; the replaced indicator rows are skipped below. (either_or
+    # disjunctions are handled inside _reformulate_disjunction.)
+    _pt_on = method in ("big-m", "mbigm") and _bound_pretransform_enabled()
+    _pt_dropped: set[int] = set()
+    if _pt_on:
+        from discopt.gdp.bound_pretransform import pretransform_disjunction
+
+        for key, (dc, sels) in _collect_indicator_hull_groups(model).groups.items():
+            if key in _mbc_groups or any(
+                isinstance(it, _DisjunctiveConstraint) for d in dc.disjuncts for it in d
+            ):
+                continue
+            drop = pretransform_disjunction(dc.disjuncts, sels, new_model, new_model._constraints)
+            _pt_dropped.update(*drop)
     _mbc_budget = [_MBIGM_CONDITIONED_LP_BUDGET]  # shared by the whole lowering
 
     _hull_emitted: set[str] = set()
@@ -369,6 +387,8 @@ def reformulate_gdp(
                 )
                 new_model._constraints.extend(new_cons)
         elif isinstance(c, _IndicatorConstraint):
+            if id(c.constraint) in _pt_dropped:
+                continue  # replaced by a bound row (#1775 G2.4)
             new_cons = _reformulate_indicator(c, new_model, lp_data=lp_data)
             new_model._constraints.extend(new_cons)
         elif isinstance(c, _DisjunctiveConstraint) and c.parent_indicator is not None:
@@ -437,7 +457,12 @@ def reformulate_gdp(
                     new_vars, new_cons = res
                 else:
                     new_vars, new_cons = _reformulate_disjunction(
-                        c, new_model, _add_aux_binary, lp_data=disj_lp, selectors=own_sels
+                        c,
+                        new_model,
+                        _add_aux_binary,
+                        lp_data=disj_lp,
+                        selectors=own_sels,
+                        pretransform=_pt_on and chosen in ("big-m", "mbigm"),
                     )
             new_model._constraints.extend(new_cons)
         elif isinstance(c, _SOSConstraint):
@@ -1021,6 +1046,14 @@ _MBIGM_CONDITIONED_LP_BUDGET = 1000
 #: (#1824 review): a valid M only has to be ``>=`` the rigorous LP bound, and a
 #: coefficient within 1e3 of today's keeps the matrix's range near today's.
 _MBIGM_CONDITIONED_MIN_REL = 1e-3
+
+
+def _bound_pretransform_enabled() -> bool:
+    """Is #1775 G2.4's automatic bound pretransformation on? (``DISCOPT_GDP_BOUND_PRETRANSFORM``,
+    default OFF)."""
+    from discopt.solver_tuning import current as _tuning
+
+    return bool(_tuning().gdp_bound_pretransform)
 
 
 def _mbigm_conditioned_enabled() -> bool:
@@ -2067,6 +2100,7 @@ def _reformulate_disjunction(
     add_aux_binary,
     lp_data: tuple | None = None,
     selectors: Optional[list[Variable]] = None,
+    pretransform: bool = False,
 ) -> tuple[list[Variable], list[Constraint]]:
     """Reformulate a disjunction via big-M.
 
@@ -2121,10 +2155,26 @@ def _reformulate_disjunction(
             )
         )
 
+    # #1775 G2.4: univariate rows of a SELECT_ONE disjunction without nesting become
+    # gdp.bound_pretransformation's bound rows on these selectors (``pretransform``,
+    # set only under DISCOPT_GDP_BOUND_PRETRANSFORM); the rows they replace are
+    # skipped below.
+    dropped: list[set[int]] = [set() for _ in dc.disjuncts]
+    if (
+        pretransform
+        and not _is_or(dc)
+        and not any(isinstance(it, _DisjunctiveConstraint) for d in dc.disjuncts for it in d)
+    ):
+        from discopt.gdp.bound_pretransform import pretransform_disjunction
+
+        dropped = pretransform_disjunction(dc.disjuncts, selectors, model, new_cons)
+
     # Big-M reformulation for each constraint in each disjunct
     for k, disjunct in enumerate(dc.disjuncts):
         y_k = selectors[k]
         for j, item in enumerate(disjunct):
+            if id(item) in dropped[k]:
+                continue
             # Handle nested disjunctions
             if isinstance(item, _DisjunctiveConstraint):
                 inner_vars, inner_cons = _reformulate_disjunction_nested(
