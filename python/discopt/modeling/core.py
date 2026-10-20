@@ -8865,7 +8865,9 @@ class Model:
         disjunction, so ``solve(gdp_method="hull")`` lowers the block by the
         convex hull with the Disjunct indicators as its selectors (the same
         relaxation ``either_or`` gets); other methods use big-M. A block with an
-        empty disjunct has no row carrying that indicator and stays on big-M.
+        empty disjunct has no row carrying that indicator and stays on big-M. A
+        block nested in a Disjunct (:meth:`Disjunct.add_disjunction`) is hulled
+        inside its enclosing block's hull (#1775 G2.1).
 
         Because each block owns a *named* indicator, the select-one reading is
         directly observable here, and it is the one users most often misread:
