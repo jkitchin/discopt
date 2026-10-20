@@ -30,8 +30,13 @@ on reformulated models.
 `np.sign(np.sum(value))` for a constant vector, so a mixed-sign multiplier
 certified non-robust points. Constant multipliers (`*`, `/`, `@`) are now
 signed element-wise; a mixed-sign one is split into its positive and negative
-parts. A parameter element that enters one row through several coefficients of
-opposite sign is worst-cased per occurrence -- sound, possibly conservative.
+parts. Sign tracking worst-cases each *occurrence* of a parameter element, which
+over-counts when occurrences cancel (`sum(M @ p)`, `3*p0 - p0`) and reported
+feasible models infeasible; a box row that is structurally affine in the
+uncertain parameters with constant coefficients now uses the exact aggregate
+coefficient instead (`aggregate_affine_counterpart`). Non-affine rows keep sign
+tracking, which is a heuristic there. Certain Parameters multiplying an
+uncertain one are frozen at their `formulate()`-time value.
 
 ## Future Work (roughly by priority)
 
