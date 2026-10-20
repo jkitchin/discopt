@@ -75,6 +75,7 @@ _MISS = object()
 
 __all__ = [
     "scalar_elements",
+    "scalar_leaf_value",
     "scalar_matmul_contraction",
     "static_shape",
     "sum_result_shape",
@@ -124,6 +125,32 @@ def static_shape(expr: Expression) -> Optional[tuple[int, ...]]:
         # only the walk is slower. Narrow on purpose — any other failure escapes.
         pass
     return shape
+
+
+def scalar_leaf_value(expr: Constant | Parameter) -> Optional[float]:
+    """A ``Constant``/``Parameter`` leaf's value as one float, or ``None`` if not scalar.
+
+    The leaf rule every one-row linear extractor needs (issue #1825). Those walkers
+    return ``(coeffs, offset)`` for a *single* scalar row, and used to read a leaf
+    as ``float(np.sum(value))``. On an array-valued leaf that sum is a different
+    constraint: ``x >= np.array([5., 1.])`` is the two rows ``x >= 5`` and
+    ``x >= 1``, and the sum made it the one row ``x >= 6``, which excludes the
+    optimum ``x = 5``. mbigm computed its M over that too-small region and OBBT
+    tightened ``x >= 6`` -- both certified a wrong optimum.
+
+    ``None`` (any leaf with more than one element) makes the extractor decline the
+    whole row, which is always sound: the row is left out of the LP, so the LP
+    region only grows, and a big-M falls back to interval arithmetic. A
+    size-1 array (``np.array([2.])``) broadcasts to one row and is accepted.
+
+    Because every variable leaf those walkers accept is a single scalar slot, a
+    body whose leaves all pass this test is itself a scalar, so this one rule
+    rejects every array-valued body built from element-wise operators.
+    """
+    value = np.asarray(expr.value, dtype=np.float64)
+    if value.size != 1:
+        return None
+    return float(value.reshape(()))
 
 
 def sum_result_shape(expr: SumExpression) -> Optional[tuple[int, ...]]:
