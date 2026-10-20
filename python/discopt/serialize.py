@@ -3509,13 +3509,17 @@ class _NodeSpans:
     def __len__(self) -> int:
         return len(self._starts)
 
+    # Records are re-decoded with the plain decoder: `_scan_nodes` already ran
+    # the strict one over these exact bytes (repeated keys and bare NaN were
+    # refused there), and on bytes it accepts the two build the same dict -- the
+    # strict one's Python hook was a third of the scan's cost.
     def __iter__(self) -> Any:
-        decode, text = _STRICT_DECODER.raw_decode, self._text
+        decode, text = _PLAIN_DECODER.raw_decode, self._text
         for start in self._starts:
             yield decode(text, start)[0]
 
     def __getitem__(self, i: int) -> Any:
-        return _STRICT_DECODER.raw_decode(self._text, self._starts[i])[0]
+        return _PLAIN_DECODER.raw_decode(self._text, self._starts[i])[0]
 
 
 class _FastPathMiss(Exception):
@@ -3541,6 +3545,9 @@ def _skip_ws(text: str, i: int) -> int:
 _STRICT_DECODER = json.JSONDecoder(
     parse_constant=_refuse_json_constant, object_pairs_hook=_unique_pairs
 )
+
+#: For re-reading records the strict decoder has already accepted (`_NodeSpans`).
+_PLAIN_DECODER = json.JSONDecoder()
 
 
 def _parse_document(text: Union[str, bytes]) -> Any:
