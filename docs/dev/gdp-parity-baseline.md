@@ -24,6 +24,18 @@ python discopt_benchmarks/scripts/gdp_baseline.py --out docs/dev/data/gdp_baseli
 * **discopt arms:** `gdp_method` set to `big-m` (the default route), `hull`, `mbigm`,
   `auto` or `loa`. All discopt rows are at `5f8a174c`. Every discopt incumbent is
   also checked in the original Pyomo model under Pyomo's semantics.
+* **Provenance.** The existing rows record `discopt.__file__` only, not a commit or a
+  host; the `5f8a174c` above is the author's record of the run. From now on each row
+  also records `git_head` (`git rev-parse HEAD` in the tree `discopt` was imported
+  from, or None with `git_head_error` saying why) and `hostname`.
+  * `5f8a174c` predates `cf5ffb21`, which changed the fast-API placeholder objective.
+    That change cannot affect these rows. The converted GDPlib models have no
+    `_builder_linear_blocks` and carry their real objective expression, not a
+    placeholder (checked on med_term_purchasing, disease_model, modprodnet and
+    small_batch).
+  * An interleaved control, run by the PR's reviewer, solved med_term_purchasing
+    big-m, disease_model big-m and modprodnet hull on `5f8a174c` and on `cf5ffb21`
+    or later. Node counts and objectives were identical.
 * **Scoring** (`gdp_baseline.score`), at the repository's tolerance (abs 1e-6,
   rel 1e-4):
   * `solved` -- claims optimal and agrees with the oracle;
@@ -31,7 +43,18 @@ python discopt_benchmarks/scripts/gdp_baseline.py --out docs/dev/data/gdp_baseli
     the optimum, an infeasibility claim on a known-feasible instance, or a point
     that violates the Pyomo model;
   * `claimed_unverified` -- claims optimal where the oracle is unproven;
-  * `unsolved` -- anything else, including time-limit and OOM kills.
+  * "known-feasible" means a certified oracle, or a discopt incumbent that is
+    *verified* feasible in the Pyomo model (`gdp_baseline.verified_feasible`). A
+    verified incumbent passed at least one check, has no row, count or logic
+    violation, and was also checked against variable bounds and integrality
+    (within 1e-5, before rounding).
+    * The existing rows predate the bound and integrality checks, so none of
+      their incumbents counts as verified.
+    * That changes no verdict. The panel's only infeasibility claim (GDPopt LBB
+      on kaibel) is on an instance with no discopt incumbent.
+  * `unsolved` -- anything else, including time-limit kills and exit -9, which is
+    recorded as "killed (SIGKILL; presumed OOM)". Rows written before this label
+    say "out of memory". The kernel log was not checked for each one.
 * **SGM** uses a 1 s shift, and every run that is not solved counts at 300 s.
 
 ### Deviations from the spec, stated so the gate run (G6.1) can close them
@@ -46,7 +69,12 @@ python discopt_benchmarks/scripts/gdp_baseline.py --out docs/dev/data/gdp_baseli
   cores (`--jobs 3`, recorded per row as `jobs`), because the cloud container cannot
   hold an unattended 8 h serial job.
   * **Control:** 35 already-measured (instance, arm) pairs were re-run at 3 jobs.
-    Status and verdict were identical in all 35. Wall times were higher by a factor
+    Status and verdict were identical in all 35. That does **not** show that
+    parallelism changes no verdict on memory-heavy instances. All 8 stranded_gas
+    SIGKILLs (see Errors) came from the jobs=3 phase. There, `drive()` queued
+    instance-major, so the 3 concurrent runs were usually arms of the *same*
+    instance, with the same memory footprint. `drive()` now never runs two arms of
+    one instance at once. Whether stranded_gas survives serially is unmeasured. Wall times were higher by a factor
     of **1.20** (geometric mean over the 27 pairs ≥ 1 s; sd of the log ratio 0.14;
     range 1.00–1.87).
   * **Effect:** the timings of the parallel rows are inflated by about that much, on
@@ -123,6 +151,15 @@ refutes:
   capability gap on this panel.
 * **discopt LOA on stranded_gas** refuses because a row inside a disjunct has no
   finite lower bound for big-M.
+* **Killed (SIGKILL; presumed OOM), exit -9: 18 runs, scored `unsolved`.**
+  * discopt, 5 runs: biofuel hull and LOA (serial phase), and stranded_gas big-m,
+    mbigm and auto (jobs=3 phase).
+  * GDPopt enumerate, 9 runs: biofuel, disease_model, kaibel, med_term_purchasing,
+    mod_hens, positioning, spectralog, stranded_gas and syngas.
+  * GDPopt LOA, GLOA, LBB and RIC on stranded_gas, 4 runs.
+  * All 8 stranded_gas kills (4 GDPopt, enumerate and 3 discopt) ran in the jobs=3
+    phase, where arms of the same instance were co-scheduled. They may be
+    artifacts of that phase.
 * **GDPopt:**
   * LOA, GLOA and RIC raise on spectralog ("unbounded MILP discrete problem");
   * GLOA trips an `AssertionError` in Pyomo's FBBT on batch_processing.

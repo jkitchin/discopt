@@ -23,17 +23,23 @@ Each run is scored against :func:`gdplib_runner.panel_oracle`:
 * ``incorrect`` -- claims optimal and the oracle refutes it, reports an
   incumbent strictly better than the oracle optimum (a false primal), or claims
   infeasible on an instance with a known feasible point (a certified oracle, or a
-  discopt incumbent that is feasible in the Pyomo model);
+  discopt incumbent verified feasible in the Pyomo model, :func:`verified_feasible`);
 * ``claimed_unverified`` -- claims optimal on an instance whose oracle is unproven;
-* ``unsolved`` -- anything else, a run killed at the time limit or by the
-  kernel's OOM killer (exit -9) included.
+* ``unsolved`` -- anything else, a run killed at the time limit or by SIGKILL
+  (exit -9, presumed the kernel's OOM killer) included.
 
 "Agrees" is the repository's tolerance (CLAUDE.md: abs 1e-6, rel 1e-4), the same
 for every arm: a claim of optimality further from the oracle is a false
 certificate whatever the solver's own gap setting.
 
 discopt incumbents are additionally checked in the original Pyomo GDP model, under
-Pyomo's semantics (``gdp_convert_parity._pyomo_violation``).
+Pyomo's semantics (``gdp_convert_parity._pyomo_violation``, with its variable-bound
+and integrality checks on).
+
+Before any row is written, :func:`preflight` checks that every requested arm's
+solvers are available and refuses the run otherwise. Error rows are retried on a
+restart (``--skip-errors`` keeps them). Each row records the git ``HEAD`` and host
+it ran on.
 
     python -u discopt_benchmarks/scripts/gdp_baseline.py --out base.jsonl
     python -u discopt_benchmarks/scripts/gdp_baseline.py --out base.jsonl --report
@@ -188,7 +194,33 @@ def _run_discopt(model, arm: str, time_limit: float) -> dict:
         "node_count": getattr(r, "node_count", None),
     }
     if r.x is not None and r.objective is not None:
-        out["in_pyomo"] = _pyomo_violation(model, conv, r)
+        out["in_pyomo"] = _pyomo_violation(model, conv, r, domains=True)
+    return out
+
+
+def _provenance(discopt_file: str) -> dict:
+    """The git ``HEAD`` of the tree ``discopt`` was imported from, and the host.
+
+    ``git_head`` is None, with ``git_head_error`` saying why, when it cannot be read
+    (an installed wheel, no git): a row never claims a commit it did not check."""
+    import socket
+
+    out: dict = {"hostname": socket.gethostname(), "git_head": None}
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=str(Path(discopt_file).resolve().parent),
+        )
+    except (OSError, subprocess.SubprocessError) as err:
+        out["git_head_error"] = f"{type(err).__name__}: {err}"[:200]
+        return out
+    if proc.returncode == 0 and proc.stdout.strip():
+        out["git_head"] = proc.stdout.strip()
+    else:
+        out["git_head_error"] = (proc.stderr.strip() or f"exit {proc.returncode}")[:200]
     return out
 
 
@@ -196,6 +228,7 @@ def worker(name: str, arm: str, time_limit: float) -> dict:
     import discopt
 
     rec: dict = {"instance": name, "arm": arm, "discopt": discopt.__file__}
+    rec.update(_provenance(discopt.__file__))
     t_build = time.perf_counter()
     model = _spec(name).builder()
     rec["build_s"] = round(time.perf_counter() - t_build, 2)
@@ -215,6 +248,35 @@ def worker(name: str, arm: str, time_limit: float) -> dict:
 
 #: CLAUDE.md's numerical tolerances: an objective "agrees" within abs + rel*|opt|.
 ABS_TOL, REL_TOL = 1e-6, 1e-4
+#: A point's relative row / bound violation, and its distance from integrality.
+FEAS_TOL, INT_TOL = 1e-5, 1e-5
+_DOMAIN_KEYS = ("max_bound_violation", "max_integrality_violation")
+
+
+def _violates(inp: dict | None) -> bool:
+    """The Pyomo check *measured* a violation (rows, counts, logic, or -- when it
+    was asked for -- bounds or integrality)."""
+    if not inp:
+        return False
+    return bool(
+        inp["max_rel_violation"] > FEAS_TOL
+        or inp["bad_counts"]
+        or inp["bad_logic"]
+        or inp.get("max_bound_violation", 0.0) > FEAS_TOL
+        or inp.get("max_integrality_violation", 0.0) > INT_TOL
+    )
+
+
+def verified_feasible(inp: dict | None) -> bool:
+    """The point is *verified* feasible in the Pyomo model: at least one check ran
+    (CLAUDE.md §6), the bound and integrality checks were run, and nothing is
+    violated. A row from before those checks existed is not verified."""
+    return bool(
+        inp
+        and inp.get("checked", 0) > 0
+        and all(k in inp for k in _DOMAIN_KEYS)
+        and not _violates(inp)
+    )
 
 
 def score(rec: dict, oracle, feasible_known: bool = False) -> str:
@@ -234,11 +296,7 @@ def score(rec: dict, oracle, feasible_known: bool = False) -> str:
     ):
         return "incorrect"
     obj = rec.get("objective")
-    bad_point = rec.get("in_pyomo") and (
-        rec["in_pyomo"]["max_rel_violation"] > 1e-5
-        or rec["in_pyomo"]["bad_counts"]
-        or rec["in_pyomo"]["bad_logic"]
-    )
+    bad_point = _violates(rec.get("in_pyomo"))
     if oracle is None or oracle.value is None:
         if bad_point:
             return "incorrect"
@@ -258,15 +316,78 @@ def score(rec: dict, oracle, feasible_known: bool = False) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _done(path: Path) -> set[tuple[str, str]]:
+def _done(path: Path, skip_errors: bool = False) -> set[tuple[str, str]]:
+    """The (instance, arm) pairs with a recorded outcome. An error row (a worker
+    exception, or a crash with no result) is not an outcome and is retried unless
+    ``skip_errors``; a SIGKILL (exit -9) is scored as a kill, so it counts as done.
+    :func:`latest_rows` keeps the newest row per pair."""
     if not path.exists():
         return set()
     out = set()
     for line in path.read_text().splitlines():
         if line.strip():
             r = json.loads(line)
+            if "error" in r and r.get("returncode") != -9 and not skip_errors:
+                continue
             out.add((r["instance"], r["arm"]))
     return out
+
+
+def latest_rows(rows: list[dict]) -> list[dict]:
+    """The newest row per (instance, arm), in first-seen order (a retried error
+    row is superseded by its retry)."""
+    last: dict[tuple[str, str], dict] = {}
+    for r in rows:
+        last.pop((r["instance"], r["arm"]), None)
+        last[(r["instance"], r["arm"])] = r
+    return list(last.values())
+
+
+#: The solvers each arm needs (``mcpp`` is GLOA's McCormick library, not a solver).
+ARM_SOLVERS = {
+    "pyomo-bigm": (_GLOBAL,),
+    "pyomo-hull": (_GLOBAL,),
+    "pyomo-loa": (_MIP, _NLP, _GLOBAL_EXE),
+    "pyomo-gloa": (_MIP, _GLOBAL_EXE, "mcpp"),
+    "pyomo-lbb": (_NLP, _GLOBAL_EXE),
+    "pyomo-ric": (_MIP, _NLP, _GLOBAL_EXE),
+    "pyomo-enumerate": (_MIP, _NLP, _GLOBAL_EXE),
+    **dict.fromkeys(DISCOPT_ARMS, ("discopt",)),
+}
+
+
+def _solver_available(name: str) -> bool:
+    if name == "mcpp":
+        from pyomo.contrib.mcpp.pyomo_mcpp import mcpp_available
+
+        return bool(mcpp_available())
+    if name == "discopt":
+        import discopt._rust  # noqa: F401  -- raises when the extension is missing
+        from discopt.pyomo.gdp import convert_pyomo_gdp  # noqa: F401
+
+        return True
+    import pyomo.environ as pyo
+
+    return bool(pyo.SolverFactory(name).available(exception_flag=False))
+
+
+def preflight(arms: list[str]) -> None:
+    """Refuse the run, before any row is written, when a requested arm is unknown or
+    one of its solvers is unavailable (otherwise every run of that arm is an error
+    row: e.g. Pyomo 6.10 on macOS without ``scip_direct`` or mcpp)."""
+    unknown = [a for a in arms if a not in ARM_SOLVERS]
+    if unknown:
+        raise ValueError(f"unknown arm(s): {', '.join(unknown)}")
+    cache: dict[str, bool] = {}
+    missing = []
+    for arm in arms:
+        for solver in ARM_SOLVERS[arm]:
+            if solver not in cache:
+                cache[solver] = _solver_available(solver)
+            if not cache[solver]:
+                missing.append(f"{arm} needs {solver}")
+    if missing:
+        raise RuntimeError("solver preflight failed: " + "; ".join(missing))
 
 
 def _run_one(name: str, arm: str, args) -> dict:
@@ -289,10 +410,9 @@ def _run_one(name: str, arm: str, args) -> dict:
             tail = (proc.stderr or proc.stdout).strip().splitlines()[-3:]
             why = " | ".join(tail)[:400]
             if proc.returncode == -9:
-                # SIGKILL: the kernel's OOM killer (the container's dmesg
-                # shows it), not a crash in Python -- even when the solver
-                # printed warnings first.
-                why = "killed by SIGKILL (out of memory)" + (f": {why}" if why else "")
+                # SIGKILL: presumed the kernel's OOM killer, not a crash in
+                # Python -- even when the solver printed warnings first.
+                why = "killed (SIGKILL; presumed OOM)" + (f": {why}" if why else "")
             rec = {
                 "instance": name,
                 "arm": arm,
@@ -321,17 +441,20 @@ def drive(args) -> int:
 
     With ``--jobs N > 1`` the runs share the machine, so their wall times carry
     contention: each row records ``jobs`` and its start load, and a timing claim
-    from a parallel run needs a serial control on a sample of the same runs.
+    from a parallel run needs a serial control on a sample of the same runs. Two
+    arms of the same instance never run at once: they have the same memory
+    footprint, so co-scheduling them multiplies one instance's peak (the jobs=3
+    stranded_gas rows were all SIGKILLed).
     """
     import threading
-    from concurrent.futures import ThreadPoolExecutor
 
     from benchmarks import gdplib_runner as gr
 
     names = [n for n in (args.include.split(",") if args.include else gr.GDP_PARITY) if n]
     arms = [a for a in (args.arms.split(",") if args.arms else ARMS) if a]
+    preflight(arms)
     out = Path(args.out)
-    done = _done(out)
+    done = _done(out, getattr(args, "skip_errors", False))
     table = gr.panel_oracle()
     pending = []
     for i, name in enumerate(names):
@@ -339,10 +462,29 @@ def drive(args) -> int:
         order = arms[i % len(arms) :] + arms[: i % len(arms)]
         pending.extend((name, arm) for arm in order if (name, arm) not in done)
     lock = threading.Lock()
+    cond = threading.Condition()
+    queue, running = list(pending), set()
+
+    def next_task() -> tuple[str, str] | None:
+        # The first queued run whose instance is not running; wait when every
+        # queued run's instance is busy.
+        with cond:
+            while queue:
+                for k, (name, _arm) in enumerate(queue):
+                    if name not in running:
+                        running.add(name)
+                        return queue.pop(k)
+                cond.wait()
+            return None
 
     def one(task: tuple[str, str]) -> None:
         name, arm = task
-        rec = _run_one(name, arm, args)
+        try:
+            rec = _run_one(name, arm, args)
+        finally:
+            with cond:
+                running.discard(name)
+                cond.notify_all()
         rec["verdict"] = score(rec, table.get(name))
         with lock, out.open("a") as fh:
             fh.write(json.dumps(rec, default=str) + "\n")
@@ -353,10 +495,40 @@ def drive(args) -> int:
                 flush=True,
             )
 
-    with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
-        list(pool.map(one, pending))
+    failures: list[BaseException] = []
+
+    def loop() -> None:
+        try:
+            while (task := next_task()) is not None:
+                one(task)
+        except BaseException as err:  # re-raised below, never swallowed
+            failures.append(err)
+
+    threads = [threading.Thread(target=loop) for _ in range(max(1, args.jobs))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    if failures:
+        raise failures[0]
     print(f"ran {len(pending)} new runs; {len(_done(out))} recorded in {out}", flush=True)
     return 0 if (pending or done) else 1
+
+
+def score_rows(rows: list[dict], table: dict) -> list[dict]:
+    """Score the newest row per (instance, arm) in place, and return those rows.
+
+    An instance with a point :func:`verified_feasible` in the Pyomo model refutes an
+    infeasibility claim there even when its oracle value is unproven."""
+    rows = latest_rows(rows)
+    feasible = {
+        r["instance"]
+        for r in rows
+        if r.get("objective") is not None and verified_feasible(r.get("in_pyomo"))
+    }
+    for r in rows:
+        r["verdict"] = score(r, table.get(r["instance"]), r["instance"] in feasible)
+    return rows
 
 
 def report(path: Path) -> int:
@@ -364,21 +536,8 @@ def report(path: Path) -> int:
     from benchmarks import gdplib_runner as gr
 
     rows = [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
-    table = gr.panel_oracle()
-    # Instances with a point verified feasible in the Pyomo model: an infeasibility
-    # claim there is refuted even when the oracle value is unproven.
-    feasible = {
-        r["instance"]
-        for r in rows
-        if r.get("objective") is not None
-        and r.get("in_pyomo")
-        and r["in_pyomo"]["max_rel_violation"] <= 1e-5
-        and not r["in_pyomo"]["bad_counts"]
-        and not r["in_pyomo"]["bad_logic"]
-    }
     by_arm: dict[str, list] = {}
-    for r in rows:
-        r["verdict"] = score(r, table.get(r["instance"]), r["instance"] in feasible)
+    for r in score_rows(rows, gr.panel_oracle()):
         by_arm.setdefault(r["arm"], []).append(r)
 
     def sgm(walls, shift=1.0):
@@ -438,6 +597,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-load", type=float, default=16.0)
     ap.add_argument("--include", default="")
     ap.add_argument("--arms", default="")
+    ap.add_argument("--skip-errors", action="store_true", help="treat recorded error rows as done")
     ap.add_argument("--report", action="store_true")
     args = ap.parse_args(argv)
     if args.report:
