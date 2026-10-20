@@ -1032,6 +1032,39 @@ class SolverTuning:
     Distinct from :attr:`ils_solve_cap`, which limits sub-NLPs *per objective
     descent* keyed on the integer dimension; this one bounds the whole call."""
 
+    mbigm_conditioned: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_MBIGM_CONDITIONED", default=False)
+    )
+    """Multiple big-M conditioned on each disjunct (``DISCOPT_MBIGM_CONDITIONED``,
+    default **OFF**; #1775 G2.3, bound-changing on the ``"mbigm"`` route).
+
+    Today ``gdp_method="mbigm"`` gives each disjunct row one M: an exact LP of its
+    body over the global linear rows and the box. With the flag ON, a row ``c`` of
+    disjunct ``k`` in a SELECT_ONE disjunction gets one ``M_{c,j}`` per *other*
+    disjunct ``j`` -- the exact-LP bound of its body over the global linear rows
+    **plus disjunct j's linear rows** -- and becomes ``body <= sum_{j != k}
+    M_{c,j} y_j`` (Pyomo's ``gdp.mbigm``). Exactly one ``y`` is 1, so the row is
+    exact at every integer point; each ``M_{c,j}`` is never above today's M, so
+    the LP relaxation is at least as tight. Sizing on the ``gdp_parity`` panel
+    (#1775, 2026-10-20): conditioning tightens 35-60 % of the rows on 6 of 23
+    measured instances.
+
+    **State: default OFF, panel owed** (owner decision 2026-10-20; tracking item
+    #1775 G2.3; audit row in ``docs/dev/flag-retirement-audit.md``). The entry
+    panel ran 2026-10-20 (21 ``gdp_parity`` instances, mbigm, 60 s, OFF/ON
+    interleaved) and was **cert-clean but not net-positive**: node counts fell on
+    med_term_purchasing, ex1_linan_2023 and small_batch, but modprodnet lost its
+    certificate and gdp_col, mod_hens and spectralog lost or worsened their
+    incumbent. Blocker: the conditioning LPs run before branch-and-bound and
+    ignore the solve's time limit -- the deterministic budget of 1,000 LPs does
+    not count :func:`~discopt._relax.gdp_reformulate._compute_big_m_lp`'s own LPs
+    and is not a deadline (stranded_gas spent >10 min in setup). What would
+    change it: deadline-aware conditioning (fall back to today's M once a share of
+    the time limit is spent), then the corpus panel decides graduate vs retire.
+    That panel ran before the #1824 review's soundness fixes (rigorous
+    Neumaier-Shcherbina M, no term dropped on a positive maximum, array-valued
+    rows keep today's M), so it is owed again on the fixed route."""
+
     gdp_sumover: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_GDP_SUMOVER", default=True)
     )
