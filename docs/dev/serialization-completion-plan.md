@@ -1,6 +1,6 @@
 # Model serialization — completion plan
 
-> **Plan v1.14 — 2026-10-19 — author: Claude (planning session for jkitchin).**
+> **Plan v1.15 — 2026-10-20 — author: Claude (planning session for jkitchin).**
 > Status: proposed; no work package started. Every claim about the code below was
 > read from the tree at `3191cc65` (schema `discopt.model/1.4`, `discopt 0.9.1.dev0`,
 > after PRs #1748 and #1764). Agents executing a package **re-verify** the lines they
@@ -787,6 +787,41 @@ a documented hole ("untested before 1.N"). O5 — encode logical constraints at 
 
 ## 9. Change log
 
+- **v1.15 (2026-10-20, #1812 fixed: serialization memory)** — The v1.14 memory
+  finding, root-caused and fixed. Experiment (on #1812): `dumps`' transient was
+  the document built as one `dict` per node (+2.8 / +3.6 GB on 6.8 M / 9.0 M
+  nodes), not the encoder (+ the output string only); `loads`' peak was the
+  `json.loads` tree (+2.9 / +3.7 GB) alive with the model being built. The
+  reloaded model looked ~1.5x bigger, but its live Python bytes match the parsed
+  one (tracemalloc 277 vs 284 MB at 1.1 M nodes, identical node counts by type):
+  the gap was heap the freed tree left behind -- the constant-interning
+  hypothesis was refuted. Fix, format unchanged: the writer keeps the node table
+  as JSON text (each chunk of finished records encoded by one `json.dumps` of the
+  list, brackets dropped) and assembles the document from per-section pieces,
+  which `save` writes one by one; the reader parses the top level pair by pair
+  with the same strict decoder, scans `nodes` record by record keeping only
+  offsets, and decodes each record when the model is built -- anything else
+  re-parses the old way, so malformed documents fail exactly as before (a
+  differential test over 19 layouts and mutations x 8 fixtures). Peak RSS above
+  the live model, main -> branch, one process per arm:
+
+  | | `acopf_caseactivsg70k_qcqp` | QPLIB_8547 |
+  |---|---|---|
+  | `dumps` | 3.35 -> **1.83 GB** | 4.19 -> **2.23 GB** |
+  | `loads` | 5.77 -> **3.71 GB** | 6.74 -> **3.86 GB** |
+  | `save` | 3.26 -> **1.69 GB** | 4.11 -> **1.88 GB** |
+  | `load` | 6.65 -> **4.15 GB** | 7.92 -> **4.46 GB** |
+
+  (The QPLIB_8547 branch figures predate the shared-chunk encoder and the plain
+  re-read, which change time, not memory.) Time, interleaved A/B, 3 rounds per
+  arm, 1.1 M nodes (`acopf_case9241pegase_qcqp`), load ~1.0: `dumps` +8.2 %,
+  `save` +4.8 %, `loads` +7.4 %, `load` +6.5 %; tracemalloc peak `dumps`
+  -44 %, `loads` -34 %. The remaining `loads` cost is the second decode of each
+  node record that keeping no tree requires. Two retractions on the way
+  (CLAUDE.md §11): a single non-interleaved run had suggested no slowdown -- the
+  interleaved A/B measured +28 % `dumps` / +12 % `loads` for the first version,
+  which the shared-chunk encoder and the plain re-read then brought to the
+  figures above.
 - **v1.14 (2026-10-19, D11 met: the full-corpus sweep)** — Run on `17089f85`
   (main after #1806) with the WP-5 harness's `check_instance`, unmodified, over the
   full MINLPLib `.nl` set (1,609, `minlplib.org/minlplib_nl.zip`) and every QPLIB
