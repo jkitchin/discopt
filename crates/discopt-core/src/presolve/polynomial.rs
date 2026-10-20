@@ -700,7 +700,7 @@ fn build_quadratic_body(
                 right: flat[1],
             }),
         };
-        let term = if (mono.coeff - 1.0).abs() < 1e-15 {
+        let term = if mono.coeff == 1.0 {
             body
         } else {
             let c = model.arena.add(ExprNode::Constant(mono.coeff));
@@ -960,6 +960,50 @@ mod tests {
             assert!(v.lb[0].is_finite());
             assert!(v.ub[0].is_finite());
         }
+    }
+
+    // #1817: a monomial coefficient within 1e-15 of 1.0 was snapped to 1.0
+    // when the reformulated body was rebuilt.
+    #[test]
+    fn reformulate_keeps_monomial_coefficient_exactly() {
+        let a = 1.0 - 2.0_f64.powi(-52);
+        let mut arena = ExprArena::new();
+        let x = make_var(&mut arena, "x", 0);
+        let four = arena.add(ExprNode::Constant(4.0));
+        let pow = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Pow,
+            left: x,
+            right: four,
+        });
+        let coeff = arena.add(ExprNode::Constant(a));
+        let body = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: coeff,
+            right: pow,
+        });
+        let model = ModelRepr {
+            arena,
+            objective: x,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![ConstraintRepr {
+                body,
+                sense: ConstraintSense::Le,
+                rhs: 16.0,
+                name: Some("c".into()),
+            }],
+            variables: vec![varinfo("x", -2.0, 2.0)],
+            n_vars: 1,
+        };
+        let (new_model, stats) = reformulate_polynomial(&model);
+        assert_eq!(stats.constraints_rewritten, 1);
+        let c = new_model
+            .constraints
+            .iter()
+            .find(|c| c.name.as_deref() == Some("c"))
+            .expect("rewritten row keeps its name");
+        // At x = 1 every auxiliary product is 1, so the body is the coefficient.
+        let n: usize = new_model.variables.iter().map(|v| v.size).sum();
+        assert_eq!(new_model.arena.evaluate(c.body, &vec![1.0; n]), a);
     }
 
     #[test]

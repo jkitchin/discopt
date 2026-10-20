@@ -285,11 +285,13 @@ fn strengthen_row(model: &ModelRepr, row: &LinearRow) -> Option<LinearRow> {
 /// Build a fresh expression body: `Σ (c_j · x_j) + constant`.
 fn build_linear_body(arena: &mut ExprArena, row: &LinearRow) -> ExprId {
     let mut term_ids: Vec<ExprId> = Vec::with_capacity(row.terms.len());
+    // #1817: exact tests only. An absolute 1e-15 drop/snap rebuilt a row that
+    // was not the row it read.
     for &(leaf_id, _, coeff) in &row.terms {
-        if coeff.abs() < 1e-15 {
+        if coeff == 0.0 {
             continue;
         }
-        let term = if (coeff - 1.0).abs() < 1e-15 {
+        let term = if coeff == 1.0 {
             leaf_id
         } else {
             let c = arena.add(ExprNode::Constant(coeff));
@@ -301,7 +303,7 @@ fn build_linear_body(arena: &mut ExprArena, row: &LinearRow) -> ExprId {
         };
         term_ids.push(term);
     }
-    if row.constant.abs() > 1e-15 {
+    if row.constant != 0.0 {
         term_ids.push(arena.add(ExprNode::Constant(row.constant)));
     }
     if term_ids.is_empty() {
@@ -349,6 +351,28 @@ mod tests {
             lb: vec![lb],
             ub: vec![ub],
         }
+    }
+
+    // #1817: `build_linear_body` dropped |c| < 1e-15 and |constant| <= 1e-15 and
+    // snapped a coefficient within 1e-15 of 1.0 to a bare leaf.
+    #[test]
+    fn build_linear_body_keeps_coefficients_exactly() {
+        let mut arena = ExprArena::new();
+        let x = scalar_var(&mut arena, "x", 0);
+        let y = scalar_var(&mut arena, "y", 1);
+        let a = 1.0 - 2.0_f64.powi(-52);
+        let row = LinearRow {
+            terms: vec![(x, 0, a), (y, 1, 1e-17)],
+            constant: 1e-17,
+            sense: ConstraintSense::Le,
+            rhs: 0.0,
+            tightened: 0,
+        };
+        let body = build_linear_body(&mut arena, &row);
+        // Snapping `a` to 1.0 would give exactly 1.0 here.
+        assert_eq!(arena.evaluate(body, &[1.0, 0.0]), a);
+        // Dropping the tiny term and constant would give exactly 0.0 here.
+        assert_eq!(arena.evaluate(body, &[0.0, 1.0]), 2e-17);
     }
 
     fn term(arena: &mut ExprArena, c: f64, x: ExprId) -> ExprId {

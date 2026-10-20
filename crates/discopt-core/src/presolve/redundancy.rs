@@ -150,6 +150,9 @@ struct Signature {
     /// the first non-zero coefficient and sign-flipped so leading is
     /// positive.
     coeffs_norm: Vec<(ExprId, f64)>,
+    /// Whether the values above were divided by the lead magnitude (exactly).
+    /// An unscaled row is compared only with another unscaled row (#1817).
+    scaled: bool,
     /// `Le` / `Eq` / `Ge` after normalisation.
     sense_after_norm: ConstraintSense,
     /// RHS after subtracting the polynomial constant offset, dividing
@@ -189,31 +192,61 @@ fn canonical_signature(
         return None;
     }
     coeffs.sort_by_key(|(id, _)| id.0);
-    // try_polynomial canonicalises but in the `is_some` arm there
-    // may still be near-zero coefficients; drop them so different
-    // arena spellings of the same row collapse.
-    coeffs.retain(|(_, c)| c.abs() > 1e-15);
+    // #1817: only an exact zero is not a term. Dropping |c| < 1e-15 so that
+    // "different spellings of the same row collapse" made two rows that differ
+    // in a real term compare equal, and then deleted one of them.
+    coeffs.retain(|(_, c)| *c != 0.0);
     if coeffs.is_empty() {
         return None;
     }
     let lead = coeffs[0].1;
     let scale = lead.abs();
     let flip = lead < 0.0;
-    for (_, c) in coeffs.iter_mut() {
-        *c = if flip { -*c / scale } else { *c / scale };
-    }
-    let rhs_shifted = rhs - poly.constant;
-    let rhs_norm = if flip {
-        -rhs_shifted / scale
+    // #1817: every value the comparison reads must be the row's own value
+    // exactly, or two rows that are not parallel (or a looser row and a tighter
+    // one) can compare as the same. Divide by the lead magnitude only when every
+    // quotient is exact; otherwise keep the row unscaled (sign-normalised only),
+    // which still matches an identical row and never a merely nearby one.
+    let rhs_shifted = exact_difference(rhs, poly.constant)?;
+    let divides_exactly = coeffs
+        .iter()
+        .map(|&(_, c)| c)
+        .chain(std::iter::once(rhs_shifted))
+        .all(|v| (v / scale).mul_add(scale, -v) == 0.0);
+    let (unit, scaled) = if divides_exactly {
+        (scale, true)
     } else {
-        rhs_shifted / scale
+        (1.0, false)
     };
+    for (_, c) in coeffs.iter_mut() {
+        let q = *c / unit;
+        *c = if flip { -q } else { q };
+    }
+    let q = rhs_shifted / unit;
+    let rhs_norm = if flip { -q } else { q };
     let sense_norm = if flip { flip_sense(sense) } else { sense };
     Some(Signature {
         coeffs_norm: coeffs,
+        scaled,
         sense_after_norm: sense_norm,
         rhs_after_norm: rhs_norm,
     })
+}
+
+/// `a - b` when the floating-point subtraction is exact, else `None`.
+///
+/// TwoSum (Knuth): `s + err == a - b` exactly, so `err == 0` means `s` is the
+/// exact difference.
+fn exact_difference(a: f64, b: f64) -> Option<f64> {
+    let nb = -b;
+    let s = a + nb;
+    let bb = s - a;
+    let err = (a - (s - bb)) + (nb - bb);
+    if s.is_finite() && err == 0.0 {
+        Some(s)
+    } else {
+        None
+    }
 }
 
 fn flip_sense(s: ConstraintSense) -> ConstraintSense {
@@ -227,14 +260,16 @@ fn flip_sense(s: ConstraintSense) -> ConstraintSense {
 /// True if both signatures have identical normalised LHS coefficient
 /// vectors.
 fn same_normalised_lhs(a: &Signature, b: &Signature) -> bool {
-    if a.coeffs_norm.len() != b.coeffs_norm.len() {
+    if a.scaled != b.scaled || a.coeffs_norm.len() != b.coeffs_norm.len() {
         return false;
     }
     for (pa, pb) in a.coeffs_norm.iter().zip(b.coeffs_norm.iter()) {
         if pa.0 != pb.0 {
             return false;
         }
-        if (pa.1 - pb.1).abs() > 1e-9 {
+        // #1817: exact. A 1e-9 tolerance called rows parallel that are not, and
+        // the pass then deleted one of them.
+        if pa.1 != pb.1 {
             return false;
         }
     }
@@ -253,12 +288,18 @@ enum Dom {
 /// constraints is dominant.
 fn dominates(i: &Signature, j: &Signature) -> Dom {
     use ConstraintSense::*;
+    // #1817: exact comparisons (the signature values are exact, see
+    // `canonical_signature`). A row is dropped only when the other implies it:
+    // the old 1e-9 "equal" band dropped a row up to 1e-9 tighter, and an
+    // equality dropped every parallel inequality whatever its RHS -- with
+    // `x + y == 5` and `x + y <= 3` the pass deleted the `<=` row and the
+    // infeasible pair became feasible.
+    let (ri, rj) = (i.rhs_after_norm, j.rhs_after_norm);
     match (i.sense_after_norm, j.sense_after_norm) {
         (Le, Le) => {
-            let d = i.rhs_after_norm - j.rhs_after_norm;
-            if d.abs() < 1e-9 {
+            if ri == rj {
                 Dom::Equal
-            } else if d < 0.0 {
+            } else if ri < rj {
                 // i.rhs < j.rhs: i ≤ smaller is tighter than j ≤ bigger
                 Dom::IDominatesJ
             } else {
@@ -266,10 +307,9 @@ fn dominates(i: &Signature, j: &Signature) -> Dom {
             }
         }
         (Ge, Ge) => {
-            let d = i.rhs_after_norm - j.rhs_after_norm;
-            if d.abs() < 1e-9 {
+            if ri == rj {
                 Dom::Equal
-            } else if d > 0.0 {
+            } else if ri > rj {
                 // i.rhs > j.rhs: i ≥ bigger is tighter than j ≥ smaller
                 Dom::IDominatesJ
             } else {
@@ -277,15 +317,19 @@ fn dominates(i: &Signature, j: &Signature) -> Dom {
             }
         }
         (Eq, Eq) => {
-            if (i.rhs_after_norm - j.rhs_after_norm).abs() < 1e-9 {
+            if ri == rj {
                 Dom::Equal
             } else {
                 // Inconsistent equalities → infeasible. Leave for FBBT.
                 Dom::Independent
             }
         }
-        (Eq, _) => Dom::IDominatesJ,
-        (_, Eq) => Dom::JDominatesI,
+        // An equality implies a parallel inequality only when it satisfies it.
+        // Otherwise the pair is infeasible: keep both and leave it for FBBT.
+        (Eq, Le) if ri <= rj => Dom::IDominatesJ,
+        (Eq, Ge) if ri >= rj => Dom::IDominatesJ,
+        (Le, Eq) if rj <= ri => Dom::JDominatesI,
+        (Ge, Eq) if rj >= ri => Dom::JDominatesI,
         // Mixed inequality senses: skip in v0.
         _ => Dom::Independent,
     }
@@ -342,6 +386,102 @@ mod tests {
             left: cxx,
             right: cyy,
         })
+    }
+
+    /// Two-variable model with rows `(cx, cy, sense, rhs)`, all over `x, y`.
+    fn two_var_model(rows: &[(f64, f64, ConstraintSense, f64)]) -> ModelRepr {
+        let mut arena = ExprArena::new();
+        let x = scalar_var(&mut arena, "x", 0);
+        let y = scalar_var(&mut arena, "y", 1);
+        let constraints = rows
+            .iter()
+            .map(|&(cx, cy, sense, rhs)| ConstraintRepr {
+                body: linear_2var(&mut arena, cx, x, cy, y),
+                sense,
+                rhs,
+                name: None,
+            })
+            .collect();
+        ModelRepr {
+            arena,
+            objective: x,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints,
+            variables: vec![vinfo("x", 0.0, 10.0), vinfo("y", 0.0, 10.0)],
+            n_vars: 2,
+        }
+    }
+
+    // #1817: an equality dominated every parallel inequality whatever its RHS,
+    // so `x + y == 5` with `2x + 2y <= 6` (infeasible) lost the `<=` row.
+    #[test]
+    fn equality_does_not_drop_an_inequality_it_violates() {
+        use ConstraintSense::*;
+        for rows in [
+            [(1.0, 1.0, Eq, 5.0), (2.0, 2.0, Le, 6.0)],
+            [(2.0, 2.0, Le, 6.0), (1.0, 1.0, Eq, 5.0)],
+            [(1.0, 1.0, Eq, 5.0), (2.0, 2.0, Ge, 12.0)],
+            [(2.0, 2.0, Ge, 12.0), (1.0, 1.0, Eq, 5.0)],
+        ] {
+            let (out, stats) = detect_row_redundancy(&two_var_model(&rows));
+            assert_eq!(stats.constraints_removed, 0, "{rows:?}");
+            assert_eq!(out.constraints.len(), 2);
+        }
+        // An equality that satisfies the inequality still drops it.
+        let (out, stats) =
+            detect_row_redundancy(&two_var_model(&[(2.0, 2.0, Le, 12.0), (1.0, 1.0, Eq, 5.0)]));
+        assert_eq!(stats.removed_indices, vec![0]);
+        assert_eq!(out.constraints[0].sense, Eq);
+    }
+
+    // #1817: the 1e-9 band called rows parallel (LHS) or equal (RHS) that are not.
+    #[test]
+    fn nearly_parallel_or_nearly_equal_rows_are_kept() {
+        use ConstraintSense::*;
+        let eps = 2.0_f64.powi(-40);
+        for rows in [
+            [(1.0, 1.0, Le, 5.0), (1.0, 1.0 + eps, Le, 5.0)],
+            [(1.0, 1.0, Le, 5.0), (1.0, 1.0, Le, 5.0 - eps)],
+        ] {
+            let (_, stats) = detect_row_redundancy(&two_var_model(&rows));
+            if rows[1].1 == 1.0 {
+                // Same LHS, the second RHS is tighter: the FIRST row goes.
+                assert_eq!(stats.removed_indices, vec![0], "{rows:?}");
+            } else {
+                assert_eq!(stats.constraints_removed, 0, "{rows:?}");
+            }
+        }
+    }
+
+    // #1817: a tiny coefficient is a term, not noise to drop before comparing.
+    #[test]
+    fn tiny_coefficient_is_not_dropped_before_comparing() {
+        use ConstraintSense::*;
+        let (_, stats) = detect_row_redundancy(&two_var_model(&[
+            (1.0, 1e-17, Le, 5.0),
+            (1.0, 0.0, Le, 5.0),
+        ]));
+        assert_eq!(stats.constraints_removed, 0);
+    }
+
+    // #1817: a normalisation that rounds is not used; the row is compared
+    // unscaled, so an identical row still matches and a scaled copy does not.
+    #[test]
+    fn inexact_normalisation_compares_unscaled() {
+        use ConstraintSense::*;
+        // 0.1 / 3.0 rounds. The identical pair still collapses (looser goes)...
+        let (_, stats) =
+            detect_row_redundancy(&two_var_model(&[(3.0, 0.1, Le, 5.0), (3.0, 0.1, Le, 4.0)]));
+        assert_eq!(stats.removed_indices, vec![0]);
+        // ...but a copy scaled by 2 cannot be shown parallel with exact values
+        // through a rounding division, so both are kept.
+        let (_, stats) =
+            detect_row_redundancy(&two_var_model(&[(3.0, 0.1, Le, 5.0), (6.0, 0.2, Le, 4.0)]));
+        assert_eq!(stats.constraints_removed, 0);
+        // Exactly representable multiples are still found.
+        let (_, stats) =
+            detect_row_redundancy(&two_var_model(&[(1.0, 1.0, Le, 5.0), (2.0, 2.0, Le, 6.0)]));
+        assert_eq!(stats.removed_indices, vec![0]);
     }
 
     #[test]
