@@ -1335,9 +1335,11 @@ def _extract_body_coeffs(
     """Extract linear coefficient vector from an expression.
 
     Returns (c_vec, offset) where body(x) = c_vec @ x + offset,
-    or None if the expression is nonlinear.
+    or None if the expression is nonlinear or is not a single scalar row
+    (an array-valued variable, index or constant leaf; #1825).
     """
     from discopt._flat_index import resolve_scalar_slot
+    from discopt._relax.scalarize import scalar_leaf_value
     from discopt.modeling.core import (
         BinaryOp,
         Constant,
@@ -1349,10 +1351,12 @@ def _extract_body_coeffs(
     )
 
     def _extract(e) -> tuple[dict, float] | None:
-        if isinstance(e, Constant):
-            return {}, float(np.sum(e.value))
-        if isinstance(e, Parameter):
-            return {}, float(np.sum(e.value))
+        if isinstance(e, (Constant, Parameter)):
+            # #1825: an array-valued leaf makes the body several rows, not one.
+            # Summing it (the old ``float(np.sum(value))``) turned
+            # ``x >= [5, 1]`` into ``x >= 6`` and mbigm certified a wrong optimum.
+            value = scalar_leaf_value(e)
+            return None if value is None else ({}, value)
         if isinstance(e, (Variable, IndexExpression)):
             # #941's single source of truth, which this layer was open-coding.
             # The hand-rolled version did ``int(e.index)``, which raises
@@ -3177,11 +3181,19 @@ def _extract_disjunct_bounds(
     dict[str, tuple[float, float]]
         Mapping from variable name to (lb, ub).
     """
+    from discopt._relax.scalarize import scalar_leaf_value
+
     bounds: dict[str, list[float]] = {}
 
     def _init_var(v: Variable) -> None:
         if v.name not in bounds:
             bounds[v.name] = [float(np.min(v.lb)), float(np.max(v.ub))]
+
+    def _scalar_const(e: Expression) -> float | None:
+        # #1825: only a scalar constant is one bound. An array-valued one makes the
+        # row several bounds (``float()`` on it raised a TypeError); such a row is
+        # skipped, which leaves the variable's global bounds -- looser, so sound.
+        return scalar_leaf_value(e) if isinstance(e, Constant) else None
 
     for con in disjunct:
         # Identify single-variable body, possibly with constant offset
@@ -3193,19 +3205,19 @@ def _extract_disjunct_bounds(
             var = whole
         elif isinstance(body, BinaryOp) and body.op == "-":
             # Pattern: var - const <= 0  =>  var <= const
-            if (lvar := _whole_variable(body.left)) is not None and isinstance(
-                body.right, Constant
+            if (lvar := _whole_variable(body.left)) is not None and (
+                (rc := _scalar_const(body.right)) is not None
             ):
                 var = lvar
-                offset = -float(body.right.value)
+                offset = -rc
             # Pattern: const - var <= 0  =>  var >= const
-            elif isinstance(body.left, Constant) and (
+            elif (lc := _scalar_const(body.left)) is not None and (
                 (rvar := _whole_variable(body.right)) is not None
             ):
                 var = rvar
                 # const - var (sense) 0  =>  -var (sense) -const  =>  var (flip) const
                 # We handle this by negating and flipping sense below
-                offset = float(body.left.value)
+                offset = lc
                 # For "const - var <= 0" => var >= const
                 # For "const - var >= 0" => var <= const
                 _init_var(var)
@@ -3222,11 +3234,11 @@ def _extract_disjunct_bounds(
                 continue
         elif isinstance(body, BinaryOp) and body.op == "+":
             # Pattern: var + const <= 0  =>  var <= -const
-            if (lvar := _whole_variable(body.left)) is not None and isinstance(
-                body.right, Constant
+            if (lvar := _whole_variable(body.left)) is not None and (
+                (rc := _scalar_const(body.right)) is not None
             ):
                 var = lvar
-                offset = float(body.right.value)
+                offset = rc
 
         if var is None:
             continue

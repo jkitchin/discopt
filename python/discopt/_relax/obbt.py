@@ -18,7 +18,7 @@ from typing import Optional
 import numpy as np
 
 from discopt._flat_index import resolve_scalar_slot
-from discopt._relax.scalarize import sum_is_full_reduction
+from discopt._relax.scalarize import scalar_leaf_value, sum_is_full_reduction
 from discopt.modeling.core import Model
 from discopt.solvers import SolveStatus
 from discopt.solvers.lp_backend import (
@@ -416,17 +416,18 @@ def _extract_linear_constraints(
         expr: Expression,
     ) -> Optional[tuple[dict[int, float], float]]:
         """Extract linear coefficients. Returns (var_idx -> coeff, offset)."""
-        if isinstance(expr, Constant):
-            return {}, float(np.sum(expr.value))
+        if isinstance(expr, (Constant, Parameter)):
+            # #1825: an array-valued leaf makes the body several rows. Summing it
+            # turned ``x >= [5, 1]`` into ``x >= 6`` and OBBT tightened past the
+            # optimum ``x = 5``; the row is declined instead.
+            value = scalar_leaf_value(expr)
+            return None if value is None else ({}, value)
 
         if isinstance(expr, Variable):
             offset = _compute_var_offset(expr)
             if expr.size == 1:
                 return {offset: 1.0}, 0.0
             return None
-
-        if isinstance(expr, Parameter):
-            return {}, float(np.sum(expr.value))
 
         if isinstance(expr, BinaryOp):
             if expr.op == "+":
@@ -506,6 +507,11 @@ def _extract_linear_constraints(
             # contain -- an invalid tightening, not just a weak one (#1160).
             if not sum_is_full_reduction(expr):
                 return None
+            if isinstance(expr.operand, (Constant, Parameter)):
+                # The full reduction of a bare constant is exactly its sum. Only
+                # the bare leaf qualifies: ``sum(x0 + [1, 2])`` is ``2*x0 + 3``,
+                # which a per-leaf fold would get wrong (#1825).
+                return {}, float(np.sum(expr.operand.value))
             return _extract_coeffs(expr.operand)
 
         if isinstance(expr, SumOverExpression):
@@ -655,15 +661,15 @@ def _extract_linear_objective_with_offset(
         return model._flat_var_offset(var)
 
     def _extract(expr: Expression) -> Optional[tuple[dict[int, float], float]]:
-        if isinstance(expr, Constant):
-            return {}, float(np.sum(expr.value))
+        if isinstance(expr, (Constant, Parameter)):
+            # #1825: see the sibling extractor above.
+            value = scalar_leaf_value(expr)
+            return None if value is None else ({}, value)
         if isinstance(expr, Variable):
             offset = _compute_var_offset(expr)
             if expr.size == 1:
                 return {offset: 1.0}, 0.0
             return None
-        if isinstance(expr, Parameter):
-            return {}, float(np.sum(expr.value))
         if isinstance(expr, BinaryOp):
             if expr.op == "+":
                 le = _extract(expr.left)
@@ -710,6 +716,8 @@ def _extract_linear_objective_with_offset(
             # not one (#1160).
             if not sum_is_full_reduction(expr):
                 return None
+            if isinstance(expr.operand, (Constant, Parameter)):
+                return {}, float(np.sum(expr.operand.value))
             return _extract(expr.operand)
         if isinstance(expr, SumOverExpression):
             merged: dict[int, float] = {}
