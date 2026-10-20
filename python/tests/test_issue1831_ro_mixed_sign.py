@@ -145,24 +145,86 @@ def test_summed_matrix_rows_robust(kind, case):
     assert checks == len(VERTICES)
 
 
-def test_vector_matrix_row_each_row_exact():
+@pytest.mark.parametrize("kind", ["box", "polyhedral"])
+@pytest.mark.parametrize("form", ["x + M@p", "M@p + x*ones"])
+def test_vector_matrix_row_each_row_exact(kind, form):
     """``x + M @ p <= 10`` row-wise: each row worst-cased by its own signs.
 
-    Box only: a ``@`` row has no statically known shape, so it is not split into
-    scalar rows, and the polyhedral counterpart of an unsplit vector row is a
-    separate pre-existing defect (it reports this feasible model infeasible on
-    origin/main too), not a sign fold.
+    A ``@`` row had no statically known shape, so it was not split into scalar
+    rows. The box counterpart is exact for it anyway (the ``c+ + c-`` split is
+    row-wise), but the polyhedral one gave the whole vector row one set of
+    duals and reported this feasible model infeasible. ``_shape_of`` now shapes
+    matmul and reduction bodies, so both are split per element.
     """
-    kind = "box"
     m = dm.Model("ro")
     x = m.continuous("x", lb=0, ub=20)
     p = m.parameter("p", value=PBAR.copy())
-    m.subject_to(x + M_MIX @ p <= 10)
+    body = x + M_MIX @ p if form == "x + M@p" else M_MIX @ p + x * np.ones(2)
+    m.subject_to(body <= 10)
     m.maximize(x)
     RobustCounterpart(m, _uncertainty(kind, p)).formulate()
+    assert len(m._constraints) >= 2  # split per element
     r = m.solve()
+    assert r.status == "optimal"
     # Row 0: max 3p0 - p1 = 6 -> x <= 4. Row 1: max -2p0 + p1 = 2 -> x <= 8.
-    assert float(r.value(x)) == pytest.approx(4.0, abs=1e-5)
+    xv = float(r.value(x))
+    assert xv == pytest.approx(4.0, abs=1e-5)
+    checks = 0
+    for v in VERTICES:
+        assert xv + float(np.max(M_MIX @ v)) <= 10 + 1e-5
+        checks += 1
+    assert checks == len(VERTICES)
+
+
+@pytest.mark.parametrize(
+    "rhs,objective,expected",
+    [
+        # Pre-#1831 sign tracking certified y = (0, 2): lhs 2 > 1 at p = -1.
+        (1.0, "y1 - y0", [1.0 / 3.0, 2.0]),
+        (1.0, "y0 + y1", [1.0, 2.0]),
+    ],
+)
+def test_mixed_constant_over_variable_coefficient_is_exact(rhs, objective, expected):
+    """``sum([3, -1] * (p * y))``: the coefficient of ``p`` is ``3 y0 - y1``.
+
+    Its sign depends on the decision, so the ``c+ + c-`` split would pick two
+    different values of the one scalar ``p`` -- sound but conservative
+    (objective 1 instead of 5/3 for the first case). The box counterpart routes
+    the term to the |coeff| linearization, which is exact; checked against the
+    vertex model (one row per endpoint of ``p``).
+    """
+
+    def build(model, y, pv=None):
+        p = pv if pv is not None else model.parameter("p", value=np.array(0.0))
+        model.subject_to(dm.sum(C_MIX * (p * y)) <= rhs)
+        return p
+
+    def obj(y):
+        return y[1] - y[0] if objective == "y1 - y0" else y[0] + y[1]
+
+    m = dm.Model("ro")
+    y = m.continuous("y", lb=0, ub=2, shape=(2,))
+    p = build(m, y)
+    m.maximize(obj(y))
+    RobustCounterpart(m, BoxUncertaintySet(p, delta=1.0)).formulate()
+    r = m.solve()
+    assert r.status == "optimal"
+    yv = np.asarray(r.value(y), dtype=float)
+
+    o = dm.Model("oracle")
+    yo = o.continuous("y", lb=0, ub=2, shape=(2,))
+    for pv in (-1.0, 1.0):
+        o.subject_to(dm.sum(C_MIX * (pv * yo)) <= rhs)
+    o.maximize(obj(yo))
+    ro = o.solve()
+    assert ro.status == "optimal"
+    assert r.objective == pytest.approx(ro.objective, abs=1e-5)
+    assert yv == pytest.approx(expected, abs=1e-5)
+    checks = 0
+    for pv in (-1.0, 1.0):
+        assert pv * float(C_MIX @ yv) <= rhs + 1e-6
+        checks += 1
+    assert checks == 2
 
 
 @pytest.mark.parametrize("kind", ["box", "polyhedral"])

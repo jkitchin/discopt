@@ -23,6 +23,7 @@ general and exact when every parameter element enters the row once, affinely.
 from __future__ import annotations
 
 import warnings
+from typing import Optional
 
 import numpy as np
 
@@ -411,6 +412,64 @@ def eval_constant_expr(expr) -> np.ndarray:
         f"({type(expr).__name__}) numerically, so the sign of the coefficient it "
         "applies to an uncertain parameter is unknown. Refusing rather than guessing."
     )
+
+
+def _shape_of(expr) -> Optional[tuple[int, ...]]:
+    """Static shape of *expr*, extending ``_known_shape`` to matmul and reductions.
+
+    ``None`` when it cannot be determined statically. ``_known_shape`` gives up
+    at a matmul or a reduction, and so does every element-wise node above one:
+    ``x + M @ p`` has no known shape there, which is what kept such a row from
+    being split per element (#1831).
+    """
+    from discopt.modeling.core import (
+        BinaryOp,
+        IndexExpression,
+        MatMulExpression,
+        SumExpression,
+        SumOverExpression,
+        UnaryOp,
+        _known_shape,
+    )
+
+    known = _known_shape(expr)
+    if known is not None:
+        return known
+    if isinstance(expr, (BinaryOp, SumOverExpression)):
+        parts = [expr.left, expr.right] if isinstance(expr, BinaryOp) else expr.terms
+        shapes = [_shape_of(t) for t in parts]
+        if any(sh is None for sh in shapes):
+            return None
+        try:
+            return tuple(int(d) for d in np.broadcast_shapes(*shapes))
+        except ValueError:
+            return None
+    if isinstance(expr, UnaryOp):
+        return _shape_of(expr.operand)
+    if isinstance(expr, MatMulExpression):
+        sl, sr = _shape_of(expr.left), _shape_of(expr.right)
+        if sl is None or sr is None or not (1 <= len(sl) <= 2 and 1 <= len(sr) <= 2):
+            return None
+        if sl[-1] != sr[0]:
+            return None
+        return tuple(sl[:-1]) + tuple(sr[1:])
+    if isinstance(expr, SumExpression):
+        if expr.axis is None:
+            return ()
+        so = _shape_of(expr.operand)
+        if so is None or not so:
+            return None
+        axis = expr.axis % len(so)
+        return tuple(d for i, d in enumerate(so) if i != axis)
+    if isinstance(expr, IndexExpression):
+        sb = _shape_of(expr.base)
+        if sb is None:
+            return None
+        try:
+            return tuple(np.empty(sb, dtype=np.int8)[expr.index].shape)
+        except (IndexError, TypeError, ValueError):
+            return None
+    return None
 
 
 def substitute_param(expr, param_name: str, replacement):

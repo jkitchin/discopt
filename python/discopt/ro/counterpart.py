@@ -264,21 +264,21 @@ def _split_vector_uncertain_rows(constraints, names: set[str]) -> list:
     value, so the affine rule could not adapt and returned the static value
     for every budget (#1611 X-30c). Splitting is exact for every set kind.
 
-    Rows whose body has no statically known shape (reductions, matmul) or is
-    scalar, and rows with no uncertain parameter, pass through unchanged.
+    Rows whose body is scalar, or whose shape cannot be determined statically,
+    and rows with no uncertain parameter, pass through unchanged. A body shaped
+    by a matmul or a reduction is split too (#1831): ``x + M @ p <= b`` used to
+    pass through whole, and the polyhedral counterpart gave its rows one set of
+    duals and reported a feasible model infeasible.
     """
     from discopt.modeling.core import Constraint, IndexExpression
-    from discopt.ro.formulations._common import _contains_uncertain_param
+    from discopt.ro.formulations._common import _contains_uncertain_param, _shape_of
 
     out = []
     for con in constraints:
         if not isinstance(con, Constraint) or not _contains_uncertain_param(con.body, names):
             out.append(con)
             continue
-        try:
-            shape = tuple(con.body.shape)
-        except AttributeError:
-            shape = ()
+        shape = _shape_of(con.body) or ()
         if int(np.prod(shape)) <= 1:
             out.append(con)
             continue
