@@ -433,6 +433,11 @@ def _has_bilinear_param_var(expr, param_names: set[str]) -> bool:
     )
 
     if isinstance(expr, BinaryOp):
+        if expr.op in ("*", "/") and (
+            _mixed_constant_over_coupled(expr.right, expr.left, param_names)
+            or (expr.op == "*" and _mixed_constant_over_coupled(expr.left, expr.right, param_names))
+        ):
+            return True
         if expr.op == "*":
             if not isinstance(expr.left, Constant) and not isinstance(expr.right, Constant):
                 # Check for the specific pattern: one side is a Variable (or
@@ -472,6 +477,10 @@ def _has_bilinear_param_var(expr, param_names: set[str]) -> bool:
             expr.right, param_names
         )
     if isinstance(expr, (MatMulExpression,)):
+        if _mixed_constant_over_coupled(
+            expr.left, expr.right, param_names
+        ) or _mixed_constant_over_coupled(expr.right, expr.left, param_names):
+            return True
         # #1726: RO-1 for ``p @ x`` / ``x @ p``. It is the same coefficient-times-
         # variable product as ``p * x`` and carries the same hazard: sign-tracking
         # replaces ``p`` by ONE corner of its box, which protects the row only when
@@ -498,3 +507,26 @@ def _has_bilinear_param_var(expr, param_names: set[str]) -> bool:
     if isinstance(expr, SumOverExpression):
         return any(_has_bilinear_param_var(t, param_names) for t in expr.terms)
     return False
+
+
+def _mixed_constant_over_coupled(factor, other, param_names: set[str]) -> bool:
+    """A mixed-sign constant multiplying a term that holds a variable AND ``p``.
+
+    Sign tracking splits a mixed-sign constant into ``c+ + c-`` and worst-cases
+    each part on its own (#1831). That is exact when each parameter element
+    enters once, but in ``sum([3, -1] * (p * y))`` with a scalar ``p`` the two
+    parts pick *different* values of the same ``p`` -- sound, but the row
+    becomes ``3 p_max y0 - p_min y1`` instead of ``max_p p (3 y0 - y1)``. The
+    coefficient of ``p`` there, ``3 y0 - y1``, depends on the decision, and the
+    |coeff| linearization is exact for it: measured on that row (``p`` in
+    [-1, 1], rhs 1, maximize ``y1 - y0``, ``y`` in [0, 2]^2) the split gives
+    objective 1, the linearization the true robust optimum 5/3.
+    """
+    from discopt.ro.formulations._common import _needs_multiplier_sign, eval_constant_expr
+
+    if not _needs_multiplier_sign(factor, other, param_names):
+        return False
+    if not (_contains_variable(other) and _contains_uncertain_param(other, param_names)):
+        return False
+    value = np.asarray(eval_constant_expr(factor), dtype=np.float64)
+    return bool(np.any(value > 0) and np.any(value < 0))
