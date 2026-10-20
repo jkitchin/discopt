@@ -23,6 +23,7 @@ import numpy as np
 
 from discopt.ro.formulations._common import (
     _contains_uncertain_param,
+    eval_constant_expr,
     substitute_param,
 )
 from discopt.ro.uncertainty import PolyhedralUncertaintySet
@@ -244,31 +245,25 @@ class PolyhedralRobustFormulation:
 
 
 def _eval_constant_expr(expr) -> float:
-    """Evaluate a constant expression (no variables) to a float."""
-    from discopt.modeling.core import (
-        BinaryOp,
-        Constant,
-        UnaryOp,
-    )
+    """Evaluate the constant coefficient of one parameter component to a float.
 
-    if isinstance(expr, Constant):
-        return float(np.sum(expr.value))
-    if isinstance(expr, BinaryOp):
-        lv = _eval_constant_expr(expr.left)
-        rv = _eval_constant_expr(expr.right)
-        if expr.op == "+":
-            return lv + rv
-        if expr.op == "-":
-            return lv - rv
-        if expr.op == "*":
-            return lv * rv
-        if expr.op == "/":
-            return lv / rv
-    if isinstance(expr, UnaryOp):
-        v = _eval_constant_expr(expr.operand)
-        if expr.op == "neg":
-            return -v
-    return 0.0
+    The row has already been split into scalar rows, so the coefficient is a
+    scalar. A non-scalar value means the row is vector-valued and has no single
+    coefficient; refuse instead of folding it. The former evaluator returned
+    ``float(np.sum(value))`` for a vector constant and ``0.0`` for every node it
+    did not recognise (``SumExpression``, ``IndexExpression``, ...), so
+    ``sum(c * p) <= b`` got a zero coefficient and was never robustified
+    (#1831 audit).
+    """
+    value = eval_constant_expr(expr)
+    if value.size != 1:
+        raise NotImplementedError(
+            "Polyhedral robust counterpart: the coefficient of an uncertain "
+            f"parameter component has shape {value.shape}, not a scalar -- the row "
+            "is vector-valued with no statically known shape. Index it into scalar "
+            "rows. Refusing to fold the coefficient vector into one number."
+        )
+    return float(value.reshape(()))
 
 
 def _support_function_lp(coeff: np.ndarray, A: np.ndarray, b: np.ndarray, maximize: bool) -> float:
@@ -279,22 +274,29 @@ def _support_function_lp(coeff: np.ndarray, A: np.ndarray, b: np.ndarray, maximi
     (larger support on a max, smaller on a min) to keep the robust-optimization
     constraint it feeds an outer (never optimistic) approximation.
     """
-    try:
-        from discopt.solvers import SolveStatus
-        from discopt.solvers.lp_pounce import solve_lp
+    from discopt.solvers import SolveStatus
+    from discopt.solvers.lp_pounce import solve_lp
 
-        k = len(coeff)
-        c_obj = -coeff if maximize else coeff
-        # Free decision variables (the uncertainty ξ), bounded only by A ξ <= b.
-        res = solve_lp(c_obj, A_ub=A, b_ub=b, bounds=[(-np.inf, np.inf)] * k)
-        if res.status == SolveStatus.OPTIMAL and res.objective is not None:
-            val = float(-res.objective if maximize else res.objective)
-            margin = 1e-7 * (1.0 + abs(val))
-            return val + margin if maximize else val - margin
-    except ImportError:
-        pass
-    # Conservative fallback: use component-wise bounds.
-    return float(np.sum(np.abs(coeff) * np.max(np.abs(b))))
+    k = len(coeff)
+    c_obj = -coeff if maximize else coeff
+    # Free decision variables (the uncertainty ξ), bounded only by A ξ <= b.
+    res = solve_lp(c_obj, A_ub=A, b_ub=b, bounds=[(-np.inf, np.inf)] * k)
+    if res.status == SolveStatus.OPTIMAL and res.objective is not None:
+        val = float(-res.objective if maximize else res.objective)
+        margin = 1e-7 * (1.0 + abs(val))
+        return val + margin if maximize else val - margin
+    # #1831 audit: this used to fall back to ``sum(|coeff|) * max(|b|)``, which
+    # bounds the support only when the polytope lies inside the box
+    # ``|xi_j| <= max|b|`` -- false for a scaled or unbounded polytope -- and so
+    # returned a finite, optimistic worst case exactly when the LP said the
+    # support was not a finite optimum. Refuse instead.
+    raise ValueError(
+        "Polyhedral robust counterpart: the support LP "
+        f"{'max' if maximize else 'min'} coeff^T xi over {{A xi <= b}} returned "
+        f"status {res.status!r}, not a finite optimum. If the uncertainty polytope "
+        "is unbounded in this direction the robust row has no finite worst case. "
+        "Refusing to substitute a guessed bound."
+    )
 
 
 def _build_weighted_sum(variables: list, weights: np.ndarray):

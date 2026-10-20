@@ -1,0 +1,329 @@
+"""#1831: robust counterparts must sign a constant multiplier element-wise.
+
+``sign_tracking_substitute`` gave a constant vector multiplying an uncertain
+parameter ONE sign, ``np.sign(np.sum(c))``. For a mixed-sign ``c`` every element
+whose coefficient had the other sign was substituted at its *best* case, and the
+solve certified a non-robust point as optimal: ``x + sum([3, -1] * p) <= 10``
+over ``p in [0, 2]^2`` returned ``x = 6`` (robust truth ``x = 4``). The same
+audit found that a negative or mixed-sign *divisor* (``p / d``) and a constant
+*matrix* (``C @ p``) propagated no sign at all, and that the polyhedral
+constant-coefficient path folded vectors with ``float(np.sum(.))`` and returned
+``0.0`` for any node it did not recognise (``sum(c * p) <= b`` got a zero
+coefficient and was never robustified).
+
+Every robust optimum here is checked against an independent oracle: the
+counterpart over a polytope is exactly the model with one copy of each uncertain
+row per vertex, so each vertex model is solved and compared, and the returned
+point is verified feasible at every vertex.
+"""
+
+from __future__ import annotations
+
+import itertools
+
+import discopt.modeling as dm
+import numpy as np
+import pytest
+from discopt.ro import BoxUncertaintySet, PolyhedralUncertaintySet, RobustCounterpart
+
+pytestmark = pytest.mark.smoke
+
+PBAR = np.array([1.0, 1.0])
+DELTA = np.array([1.0, 1.0])
+VERTICES = [PBAR + DELTA * np.array(s) for s in itertools.product((-1.0, 1.0), repeat=2)]
+
+C_MIX = np.array([3.0, -1.0])
+M_MIX = np.array([[3.0, -1.0], [-2.0, 1.0]])
+
+# Each case maps the parameter (a Parameter, or a numpy vertex for the oracle) and
+# the scalar decision variable x to the left-hand side of ``lhs <= 10``; ``S`` is
+# the sum (``dm.sum`` in a model, ``np.sum`` for the numeric vertex check).
+ROW_CASES = {
+    "sum_c_times_p": lambda p, x, S=dm.sum: x + S(C_MIX * p),
+    "sum_p_times_c": lambda p, x, S=dm.sum: x + S(p * C_MIX),
+    "c_matmul_p": lambda p, x, S=dm.sum: x + C_MIX @ p,
+    "p_matmul_c": lambda p, x, S=dm.sum: x + p @ C_MIX,
+    "div_mixed": lambda p, x, S=dm.sum: x + S(p / np.array([1.0 / 3.0, -1.0])),
+    "div_negative": lambda p, x, S=dm.sum: x + S(p / np.array([-1.0, -2.0])),
+    "matrix_negative": lambda p, x, S=dm.sum: x + S(np.array([[-1.0, -1.0]]) @ p),
+    "neg_of_mixed": lambda p, x, S=dm.sum: x - S(C_MIX * p),
+    # Same-sign and scalar shapes: their behaviour is locked, not changed.
+    "same_sign_pos": lambda p, x, S=dm.sum: x + S(np.array([3.0, 1.0]) * p),
+    "same_sign_neg": lambda p, x, S=dm.sum: x + S(np.array([-3.0, -1.0]) * p),
+    "scalar_coeffs": lambda p, x, S=dm.sum: x + 3.0 * p[0] - 1.0 * p[1],
+}
+
+
+def _uncertainty(kind, p):
+    if kind == "box":
+        return BoxUncertaintySet(p, delta=DELTA)
+    # The same box as a polytope {xi : |xi_j| <= delta_j}.
+    return PolyhedralUncertaintySet(p, A=np.vstack([np.eye(2), -np.eye(2)]), b=np.ones(4))
+
+
+def _vertex_oracle(row):
+    """max x s.t. row(v, x) <= 10 at every vertex v: the exact robust optimum."""
+    m = dm.Model("oracle")
+    x = m.continuous("x", lb=0, ub=20)
+    for v in VERTICES:
+        m.subject_to(row(v, x) <= 10)
+    m.maximize(x)
+    r = m.solve()
+    assert r.status == "optimal"
+    return float(r.value(x))
+
+
+def _robust(kind, row):
+    m = dm.Model("ro")
+    x = m.continuous("x", lb=0, ub=20)
+    p = m.parameter("p", value=PBAR.copy())
+    m.subject_to(row(p, x) <= 10)
+    m.maximize(x)
+    RobustCounterpart(m, _uncertainty(kind, p)).formulate()
+    r = m.solve()
+    assert r.status == "optimal"
+    return float(r.value(x))
+
+
+def test_issue_repro_box_gives_robust_optimum():
+    """The exact repro from #1831: x = 4, robust at every box vertex."""
+    m = dm.Model("ro")
+    x = m.continuous("x", lb=0, ub=20)
+    p = m.parameter("p", value=np.array([1.0, 1.0]))
+    m.subject_to(x + dm.sum(np.array([3.0, -1.0]) * p) <= 10)
+    m.maximize(x)
+    RobustCounterpart(m, BoxUncertaintySet(p, delta=np.array([1.0, 1.0]))).formulate()
+    r = m.solve()
+    xv = float(r.value(x))
+    # Pre-fix: optimal at x = 6, which violates the row at p = (2, 0) (lhs 12).
+    assert xv == pytest.approx(4.0, abs=1e-6)
+    checks = 0
+    for v in VERTICES:
+        assert xv + C_MIX @ v <= 10 + 1e-6
+        checks += 1
+    assert checks == 4
+
+
+@pytest.mark.parametrize("kind", ["box", "polyhedral"])
+@pytest.mark.parametrize("case", sorted(ROW_CASES))
+def test_robust_row_matches_vertex_oracle(kind, case):
+    row = ROW_CASES[case]
+    xv = _robust(kind, row)
+    assert xv == pytest.approx(_vertex_oracle(row), abs=1e-5)
+    checks = 0
+    for v in VERTICES:
+        lhs = float(row(v, xv, np.sum))
+        assert lhs <= 10 + 1e-5, f"{case}: not robust at vertex {v} (lhs {lhs})"
+        checks += 1
+    assert checks == len(VERTICES)
+
+
+@pytest.mark.parametrize("kind", ["box", "polyhedral"])
+@pytest.mark.parametrize("case", ["matrix_matmul_p", "p_matmul_matrix"])
+def test_summed_matrix_rows_robust(kind, case):
+    """``sum(M @ p)`` with a column of ``M`` of mixed sign: robust, maybe conservative.
+
+    ``p_j`` enters the summed row once per row of ``M``. Sign tracking worst-cases
+    each occurrence independently, which is sound but can exceed the joint worst
+    case (as it always did for ``3*p - p``); the polyhedral dual is exact. The
+    load-bearing check is robustness at every vertex. Pre-fix the box counterpart
+    passed the sign through ``@`` unchanged and was not robust.
+    """
+    row = {
+        "matrix_matmul_p": lambda p, x, S=dm.sum: x + S(M_MIX @ p),
+        "p_matmul_matrix": lambda p, x, S=dm.sum: x + S(p @ M_MIX),
+    }[case]
+    xv = _robust(kind, row)
+    oracle = _vertex_oracle(row)
+    assert xv <= oracle + 1e-5
+    if kind == "polyhedral":
+        assert xv == pytest.approx(oracle, abs=1e-5)
+    checks = 0
+    for v in VERTICES:
+        assert float(row(v, xv, np.sum)) <= 10 + 1e-5
+        checks += 1
+    assert checks == len(VERTICES)
+
+
+@pytest.mark.parametrize("kind", ["box", "polyhedral"])
+@pytest.mark.parametrize("form", ["x + M@p", "M@p + x*ones"])
+def test_vector_matrix_row_each_row_exact(kind, form):
+    """``x + M @ p <= 10`` row-wise: each row worst-cased by its own signs.
+
+    A ``@`` row had no statically known shape, so it was not split into scalar
+    rows. The box counterpart is exact for it anyway (the ``c+ + c-`` split is
+    row-wise), but the polyhedral one gave the whole vector row one set of
+    duals and reported this feasible model infeasible. ``_shape_of`` now shapes
+    matmul and reduction bodies, so both are split per element.
+    """
+    m = dm.Model("ro")
+    x = m.continuous("x", lb=0, ub=20)
+    p = m.parameter("p", value=PBAR.copy())
+    body = x + M_MIX @ p if form == "x + M@p" else M_MIX @ p + x * np.ones(2)
+    m.subject_to(body <= 10)
+    m.maximize(x)
+    RobustCounterpart(m, _uncertainty(kind, p)).formulate()
+    assert len(m._constraints) >= 2  # split per element
+    r = m.solve()
+    assert r.status == "optimal"
+    # Row 0: max 3p0 - p1 = 6 -> x <= 4. Row 1: max -2p0 + p1 = 2 -> x <= 8.
+    xv = float(r.value(x))
+    assert xv == pytest.approx(4.0, abs=1e-5)
+    checks = 0
+    for v in VERTICES:
+        assert xv + float(np.max(M_MIX @ v)) <= 10 + 1e-5
+        checks += 1
+    assert checks == len(VERTICES)
+
+
+@pytest.mark.parametrize(
+    "rhs,objective,expected",
+    [
+        # Pre-#1831 sign tracking certified y = (0, 2): lhs 2 > 1 at p = -1.
+        (1.0, "y1 - y0", [1.0 / 3.0, 2.0]),
+        (1.0, "y0 + y1", [1.0, 2.0]),
+    ],
+)
+def test_mixed_constant_over_variable_coefficient_is_exact(rhs, objective, expected):
+    """``sum([3, -1] * (p * y))``: the coefficient of ``p`` is ``3 y0 - y1``.
+
+    Its sign depends on the decision, so the ``c+ + c-`` split would pick two
+    different values of the one scalar ``p`` -- sound but conservative
+    (objective 1 instead of 5/3 for the first case). The box counterpart routes
+    the term to the |coeff| linearization, which is exact; checked against the
+    vertex model (one row per endpoint of ``p``).
+    """
+
+    def build(model, y, pv=None):
+        p = pv if pv is not None else model.parameter("p", value=np.array(0.0))
+        model.subject_to(dm.sum(C_MIX * (p * y)) <= rhs)
+        return p
+
+    def obj(y):
+        return y[1] - y[0] if objective == "y1 - y0" else y[0] + y[1]
+
+    m = dm.Model("ro")
+    y = m.continuous("y", lb=0, ub=2, shape=(2,))
+    p = build(m, y)
+    m.maximize(obj(y))
+    RobustCounterpart(m, BoxUncertaintySet(p, delta=1.0)).formulate()
+    r = m.solve()
+    assert r.status == "optimal"
+    yv = np.asarray(r.value(y), dtype=float)
+
+    o = dm.Model("oracle")
+    yo = o.continuous("y", lb=0, ub=2, shape=(2,))
+    for pv in (-1.0, 1.0):
+        o.subject_to(dm.sum(C_MIX * (pv * yo)) <= rhs)
+    o.maximize(obj(yo))
+    ro = o.solve()
+    assert ro.status == "optimal"
+    assert r.objective == pytest.approx(ro.objective, abs=1e-5)
+    assert yv == pytest.approx(expected, abs=1e-5)
+    checks = 0
+    for pv in (-1.0, 1.0):
+        assert pv * float(C_MIX @ yv) <= rhs + 1e-6
+        checks += 1
+    assert checks == 2
+
+
+@pytest.mark.parametrize("kind", ["box", "polyhedral"])
+def test_vector_row_mixed_sign_each_element(kind):
+    """``x + c * p <= 10`` elementwise: row j needs p_j at its own worst case."""
+    m = dm.Model("ro")
+    x = m.continuous("x", lb=0, ub=20)
+    p = m.parameter("p", value=PBAR.copy())
+    m.subject_to(x + np.array([3.0, -4.0]) * p <= 10)
+    m.maximize(x)
+    RobustCounterpart(m, _uncertainty(kind, p)).formulate()
+    r = m.solve()
+    # Row 0: 3*p0 <= 6 -> x <= 4. Row 1: -4*p1 <= 0 -> x <= 10.
+    assert float(r.value(x)) == pytest.approx(4.0, abs=1e-5)
+
+
+@pytest.mark.parametrize("kind", ["box", "polyhedral"])
+@pytest.mark.parametrize(("rhs", "feasible"), [(5.5, False), (6.5, True)])
+def test_parameter_only_row(kind, rhs, feasible):
+    """A row with no variable reaches the constant-coefficient path.
+
+    ``max over the box of 3*p0 - p1`` is 6, so ``<= 5.5`` is robustly infeasible
+    and ``<= 6.5`` is feasible. Pre-fix both kinds returned ``optimal`` for 5.5:
+    the box counterpart signed ``[3, -1]`` as ``+1`` (worst case 4) and the
+    polyhedral evaluator returned a 0.0 coefficient for the ``SumExpression``.
+    """
+    m = dm.Model("ro")
+    x = m.continuous("x", lb=0, ub=20)
+    p = m.parameter("p", value=PBAR.copy())
+    m.subject_to(dm.sum(C_MIX * p) <= rhs)
+    m.maximize(x)
+    RobustCounterpart(m, _uncertainty(kind, p)).formulate()
+    r = m.solve()
+    if feasible:
+        assert r.status == "optimal"
+        assert float(r.value(x)) == pytest.approx(20.0, abs=1e-6)
+    else:
+        assert r.status == "infeasible"
+
+
+def test_box_objective_mixed_sign_cost():
+    """min max_p  sum([3, -1] * p) + x  over the box: worst cost is 6 + x."""
+    m = dm.Model("ro")
+    x = m.continuous("x", lb=1, ub=2)
+    p = m.parameter("p", value=PBAR.copy())
+    m.minimize(dm.sum(C_MIX * p) + x)
+    RobustCounterpart(m, BoxUncertaintySet(p, delta=DELTA)).formulate()
+    r = m.solve()
+    # Pre-fix: both p at their upper bound, objective 3*2 - 2 + 1 = 5.
+    assert r.objective == pytest.approx(7.0, abs=1e-6)
+
+
+def test_same_sign_formulation_unchanged():
+    """A same-sign constant keeps the single ``c * p_wc`` node (no split)."""
+    from discopt.modeling.core import BinaryOp, Constant, SumExpression
+
+    m = dm.Model("ro")
+    x = m.continuous("x", lb=0, ub=20)
+    p = m.parameter("p", value=PBAR.copy())
+    m.subject_to(x + dm.sum(np.array([3.0, 1.0]) * p) <= 10)
+    m.maximize(x)
+    RobustCounterpart(m, BoxUncertaintySet(p, delta=DELTA)).formulate()
+    body = m._constraints[0].body  # (x + sum(c * p)) - 10
+    s = body.left.right
+    assert isinstance(s, SumExpression)
+    prod = s.operand
+    assert isinstance(prod, BinaryOp) and prod.op == "*"
+    assert isinstance(prod.left, Constant) and isinstance(prod.right, Constant)
+    np.testing.assert_array_equal(prod.left.value, [3.0, 1.0])
+    np.testing.assert_array_equal(prod.right.value, PBAR + DELTA)
+
+
+def test_eval_constant_expr_full_value_and_refusal():
+    from discopt.modeling.core import Constant, IndexExpression, SumExpression
+    from discopt.ro.formulations._common import eval_constant_expr
+
+    c = Constant(np.array([3.0, -1.0]))
+    np.testing.assert_array_equal(eval_constant_expr(c), [3.0, -1.0])
+    assert float(eval_constant_expr(SumExpression(c * Constant(np.array([2.0, 2.0]))))) == 4.0
+    assert float(eval_constant_expr(IndexExpression(c, 1))) == -1.0
+
+    m = dm.Model("v")
+    x = m.continuous("x")
+    with pytest.raises(NotImplementedError, match="cannot evaluate"):
+        eval_constant_expr(x)
+
+
+def test_polyhedral_unbounded_support_refuses():
+    """An unbounded support LP has no finite worst case: refuse, never guess.
+
+    Pre-fix the constant-coefficient path fell back to ``sum|c| * max|b|`` = 4 on
+    any non-optimal LP status, so a polytope unbounded above (``xi >= -1``) gave
+    a finite "worst case" and the row was certified robustly feasible.
+    """
+    m = dm.Model("ro")
+    x = m.continuous("x", lb=0, ub=20)
+    p = m.parameter("p", value=PBAR.copy())
+    m.subject_to(dm.sum(np.array([3.0, 1.0]) * p) <= 100)
+    m.maximize(x)
+    rc = RobustCounterpart(m, PolyhedralUncertaintySet(p, A=-np.eye(2), b=np.ones(2)))
+    with pytest.raises(ValueError, match="support LP"):
+        rc.formulate()
