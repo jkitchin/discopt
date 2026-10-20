@@ -611,6 +611,25 @@ def _descendants_children_first(root: "Expression", skip: "Optional[dict]" = Non
     return order
 
 
+def _copy_node_into_memo(node: "Expression", memo: dict) -> None:
+    """Deep-copy one node whose children are already in *memo*, by the default mechanism.
+
+    This is ``copy.deepcopy``'s own path for an object without ``__deepcopy__``
+    (``object.__reduce_ex__`` + ``copy._reconstruct``). A caller that has already
+    visited the nodes children-first (``Model.__deepcopy__``) calls it directly
+    rather than ``copy.deepcopy(node, memo)``, which would dispatch to
+    ``Expression.__deepcopy__`` and re-walk each node's (all memo-hit) children
+    once per node (#1822).
+    """
+    rv = object.__reduce_ex__(node, 4)
+    if type(rv[2]) is dict and _LEGACY_CHILDREN_FIRST_KEY in rv[2]:
+        rv = _without_legacy_children_first(rv)
+    y = _copy._reconstruct(node, memo, *rv)
+    if y is not node:
+        memo[id(node)] = y
+        _copy._keep_alive(node, memo)
+
+
 class Expression:
     """
     Base class for all mathematical expressions in a discopt model.
@@ -652,13 +671,7 @@ class Expression:
     def __deepcopy__(self, memo: dict) -> "Expression":
         for node in _descendants_children_first(self, skip=memo):
             if id(node) not in memo:
-                rv = object.__reduce_ex__(node, 4)
-                if type(rv[2]) is dict and _LEGACY_CHILDREN_FIRST_KEY in rv[2]:
-                    rv = _without_legacy_children_first(rv)
-                y = _copy._reconstruct(node, memo, *rv)
-                if y is not node:
-                    memo[id(node)] = y
-                    _copy._keep_alive(node, memo)
+                _copy_node_into_memo(node, memo)
         return cast("Expression", memo[id(self)])
 
     # The default shallow copy, spelled out so it does not go through the
@@ -6389,8 +6402,13 @@ class Model:
         # Copy every expression node children-first into the shared memo, so the
         # attribute loop below meets each one as a memo hit (see
         # ``_expressions_children_first``).
+        # ``_copy_node_into_memo`` rather than ``copy.deepcopy``: each node's
+        # children are already copied, so ``Expression.__deepcopy__``'s own walk
+        # would only re-find memo hits -- once per node, which cost 26-44 % of a
+        # model copy (#1822).
         for node in self._expressions_children_first():
-            _copy.deepcopy(node, memo)
+            if id(node) not in memo:
+                _copy_node_into_memo(node, memo)
         for key, value in self.__dict__.items():
             if _is_model_cache(key):
                 # Solve-time memoisation (evaluators, convexity, FBBT structure,

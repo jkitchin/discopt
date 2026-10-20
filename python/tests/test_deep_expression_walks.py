@@ -67,6 +67,40 @@ def test_deepcopy_of_an_expression_keeps_its_sharing():
     assert c.left is not s
 
 
+def test_model_deepcopy_does_not_rewalk_each_node(monkeypatch):
+    """#1822: ``Model.__deepcopy__`` copies its nodes children-first itself.
+
+    It used to hand each node to ``copy.deepcopy``, which dispatched to
+    ``Expression.__deepcopy__`` and re-walked that node's (already copied)
+    children -- once per node, 26-44 % of a model copy. The only nodes still
+    copied through the override are the ``x[i]`` a variable memoises in its
+    ``_elem_cache``, reached from the variable's own state (one level deep: their
+    base is that variable, already in the memo).
+    """
+    m, _ = _chain(500)
+    calls = []
+    orig = core.Expression.__deepcopy__
+
+    def counting(self, memo):
+        calls.append(self)
+        return orig(self, memo)
+
+    monkeypatch.setattr(core.Expression, "__deepcopy__", counting)
+    c = copy.deepcopy(m)
+    monkeypatch.undo()
+    stray = [
+        n
+        for n in calls
+        if not (isinstance(n, core.IndexExpression) and isinstance(n.base, core.Variable))
+    ]
+    assert not stray, sorted({type(n).__name__ for n in stray})
+    # The copy is still the same graph, built from fresh objects.
+    assert dt.model_fingerprint(c) == dt.model_fingerprint(m)
+    assert c._objective.expression is not m._objective.expression
+    assert c._constraints[0].body.right is c._objective.expression  # body is 3 - e
+    assert c._variables[0] is not m._variables[0]
+
+
 def test_canonical_text_is_unchanged():
     """The iterative renderer emits exactly the text the recursive one did."""
     m = dm.Model("t")
