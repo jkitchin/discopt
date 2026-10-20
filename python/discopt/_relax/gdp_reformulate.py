@@ -315,10 +315,42 @@ def reformulate_gdp(
     if method == "mbigm" or "mbigm" in auto_advice.values():
         lp_data = _precompute_lp_relaxation(model)
 
+    # #1775 G2.3 (flag DISCOPT_MBIGM_CONDITIONED, default OFF): under "mbigm", a
+    # SELECT_ONE disjunction without nesting -- an either_or, or a complete
+    # add_disjunction block group -- gets M conditioned on each other disjunct.
+    # Anything the conditioned route declines keeps today's route.
+    _mbc_on = lp_data is not None and _mbigm_conditioned_enabled()
+    _mbc_groups: dict[str, tuple[_DisjunctiveConstraint, list[Variable]]] = {}
+    if _mbc_on and method == "mbigm":
+        _mbc_groups = {
+            key: (dc, sels)
+            for key, (dc, sels) in _collect_indicator_hull_groups(model).groups.items()
+            if not any(isinstance(it, _DisjunctiveConstraint) for d in dc.disjuncts for it in d)
+        }
+    _mbc_done: dict[str, Optional[list[Constraint]]] = {}
+    _mbc_budget = [_MBIGM_CONDITIONED_LP_BUDGET]  # shared by the whole lowering
+
     _hull_emitted: set[str] = set()
     for ci, c in enumerate(model._constraints):
         if _hulled_inside(c):
             continue  # lowered inside its parent's hull (#1775 G2.1)
+        if (
+            isinstance(c, _IndicatorConstraint)
+            and c.disjunction is not None
+            and c.disjunction[0] in _mbc_groups
+        ):
+            key = c.disjunction[0]
+            if key not in _mbc_done:
+                dc, sels = _mbc_groups[key]
+                res = _reformulate_disjunction_mbigm_conditioned(
+                    dc, new_model, _add_aux_binary, lp_data, selectors=sels, budget=_mbc_budget
+                )
+                _mbc_done[key] = None if res is None else res[1]
+                if res is not None:
+                    new_model._constraints.extend(res[1])
+            if _mbc_done[key] is not None:
+                continue  # the whole group was lowered above
+            # declined: this row takes today's route below
         if (
             isinstance(c, _IndicatorConstraint)
             and c.disjunction is not None
@@ -389,9 +421,24 @@ def reformulate_gdp(
                     # as Pyomo's gdp.mbigm does.
                     _require_supported_semantics(c)
                 disj_lp = lp_data if chosen == "mbigm" else None
-                new_vars, new_cons = _reformulate_disjunction(
-                    c, new_model, _add_aux_binary, lp_data=disj_lp, selectors=own_sels
+                res = (
+                    _reformulate_disjunction_mbigm_conditioned(
+                        c,
+                        new_model,
+                        _add_aux_binary,
+                        lp_data,
+                        selectors=own_sels,
+                        budget=_mbc_budget,
+                    )
+                    if chosen == "mbigm" and _mbc_on
+                    else None
                 )
+                if res is not None:
+                    new_vars, new_cons = res
+                else:
+                    new_vars, new_cons = _reformulate_disjunction(
+                        c, new_model, _add_aux_binary, lp_data=disj_lp, selectors=own_sels
+                    )
             new_model._constraints.extend(new_cons)
         elif isinstance(c, _SOSConstraint):
             new_cons = _reformulate_sos(c, new_model, _add_aux_binary)
@@ -901,18 +948,7 @@ def _compute_big_m_lp(
     # always appended *after* the originals, so the first ``n_vars`` scalar
     # columns are exactly the original variables that ``c_vec`` indexes — take
     # only those.
-    bounds_list: list[tuple[float, float]] = []
-    for v in model._variables:
-        if len(bounds_list) >= n_vars:
-            break
-        lb_flat = np.asarray(v.lb, dtype=np.float64).ravel()
-        ub_flat = np.asarray(v.ub, dtype=np.float64).ravel()
-        for i in range(v.size):
-            if len(bounds_list) >= n_vars:
-                break
-            lb_i = float(lb_flat[i]) if lb_flat.size == v.size else float(lb_flat.flat[0])
-            ub_i = float(ub_flat[i]) if ub_flat.size == v.size else float(ub_flat.flat[0])
-            bounds_list.append((lb_i, ub_i))
+    bounds_list = _lp_box(model, n_vars)
 
     _INF_THRESH = _BIGM_SENTINEL  # shared "unbounded" magnitude; see _compute_big_m
 
@@ -954,6 +990,265 @@ def _compute_big_m_lp(
 
     # Fall back to interval arithmetic
     return _compute_big_m(constraint, model, default)
+
+
+def _lp_box(model: Model, n_vars: int) -> list[tuple[float, float]]:
+    """The LP's variable bounds: one ``(lb, ub)`` per flat scalar column, for the
+    first ``n_vars`` columns (the original variables ``lp_data`` indexes; see
+    :func:`_compute_big_m_lp` on X-2 and GDP-2, #413)."""
+    bounds_list: list[tuple[float, float]] = []
+    for v in model._variables:
+        if len(bounds_list) >= n_vars:
+            break
+        lb_flat = np.asarray(v.lb, dtype=np.float64).ravel()
+        ub_flat = np.asarray(v.ub, dtype=np.float64).ravel()
+        for i in range(v.size):
+            if len(bounds_list) >= n_vars:
+                break
+            lb_i = float(lb_flat[i]) if lb_flat.size == v.size else float(lb_flat.flat[0])
+            ub_i = float(ub_flat[i]) if ub_flat.size == v.size else float(ub_flat.flat[0])
+            bounds_list.append((lb_i, ub_i))
+    return bounds_list
+
+
+#: Exact LPs one lowering may spend on conditioned Ms (#1775 G2.3). Sizing found
+#: ~0.1 s per LP on batch_processing (450 LPs, 41 s) and >5,000 on kaibel; past the
+#: budget the remaining rows keep today's unconditioned M, so a large model cannot
+#: spend its whole time limit before branch-and-bound starts.
+_MBIGM_CONDITIONED_LP_BUDGET = 1000
+
+
+def _mbigm_conditioned_enabled() -> bool:
+    """Is #1775 G2.3's conditioned mbigm on? (``DISCOPT_MBIGM_CONDITIONED``, default OFF)."""
+    from discopt.solver_tuning import current as _tuning
+
+    return bool(_tuning().mbigm_conditioned)
+
+
+def _conditioned_ms(
+    con: Constraint,
+    k: int,
+    linear_rows: list[tuple[list, list, list, list]],
+    model: Model,
+    lp_data: tuple,
+    box: list[tuple[float, float]],
+    solve_lp,
+    budget: Optional[list[int]] = None,
+) -> tuple[list[float], list[float]]:
+    """Per-other-disjunct big-Ms of row ``con`` of disjunct ``k`` (#1775 G2.3).
+
+    Returns ``(up, down)``, one entry per disjunct (``0.0`` at ``k``): ``up[j]``
+    bounds ``body`` from above and ``down[j]`` bounds ``-body``, over the global
+    linear rows, disjunct ``j``'s linear rows and the box. Dropping ``j``'s
+    nonlinear rows only enlarges the LP region, so each M stays valid.
+
+    Every M starts at today's unconditioned value (:func:`_compute_big_m_lp`,
+    which also refuses an unbounded or undefined body exactly as before) and is
+    lowered only by an OPTIMAL exact-LP value ``best``: to ``1.01 * best`` (today's
+    relative margin), or to **0** -- the term dropped -- when ``best`` is within the
+    LP's accuracy of zero or below. That is the exact bound: disjunct ``j`` implies
+    the row. A small positive floor there instead (``1e-6`` was tried first) put
+    940 such coefficients into med_term_purchasing, and HiGHS's root LP on that
+    matrix failed discopt's certificate check (primal/dual pair dual-infeasible),
+    so a 1-node ``optimal`` became an uncertified ``feasible``; dropping them
+    restored the verified ``optimal``. Snapping can remove only points that
+    violate disjunct ``j``'s own rows by less than the LP's accuracy.
+
+    A status that is not OPTIMAL -- INFEASIBLE included -- keeps today's M: an
+    LP-infeasible disjunct could justify ``M = 0`` (it can never be selected), but
+    only on a checked certificate, which this route does not take. ``budget`` is a
+    one-element list counting the exact LPs this lowering may still run; at 0 the
+    remaining rows keep today's M (deterministic, unlike a wall-clock cap).
+    """
+    from discopt.solvers import SolveStatus
+
+    M_now = _compute_big_m_lp(con, model, lp_data)
+    n = len(linear_rows)
+    up = [0.0 if j == k else M_now for j in range(n)]
+    down = list(up)
+    A_ub, b_ub, A_eq, b_eq, n_vars = lp_data
+    coeffs = _extract_body_coeffs(con.body, model, n_vars)
+    if coeffs is None:
+        return up, down  # nonlinear body: today's M for every j
+    c_vec, offset = coeffs
+    want_up = con.sense in ("<=", "==")
+    want_down = con.sense in (">=", "==")
+    for j, (ub_rows, ub_rhs, eq_rows, eq_rhs) in enumerate(linear_rows):
+        if j == k:
+            continue
+        Au, bu = _stack_rows(A_ub, b_ub, ub_rows, ub_rhs)
+        Ae, be = _stack_rows(A_eq, b_eq, eq_rows, eq_rhs)
+        for side, wanted, sign in (("up", want_up, -1.0), ("down", want_down, 1.0)):
+            if not wanted:
+                continue
+            if budget is not None:
+                if budget[0] <= 0:
+                    continue  # budget spent: today's M
+                budget[0] -= 1
+            # up: max body = -min(-c.x); down: max(-body) = -min(c.x) - offset.
+            res = solve_lp(c=sign * c_vec, A_ub=Au, b_ub=bu, A_eq=Ae, b_eq=be, bounds=box)
+            if res.status != SolveStatus.OPTIMAL or res.objective is None:
+                continue
+            best = -float(res.objective) + (offset if side == "up" else -offset)
+            if not np.isfinite(best) or abs(best) >= _BIGM_SENTINEL:
+                continue
+            # LP accuracy of the objective, relative to the row's own scale.
+            zero_tol = 1e-9 * max(1.0, abs(offset), M_now)
+            M_j = 0.0 if best <= zero_tol else best * 1.01
+            if side == "up":
+                up[j] = min(up[j], M_j)
+            else:
+                down[j] = min(down[j], M_j)
+    return up, down
+
+
+def _stack_rows(A, b, rows: list, rhs: list):
+    """``A``/``b`` (global, possibly ``None``) with extra dense rows appended."""
+    import scipy.sparse as sp
+
+    if not rows:
+        return A, b
+    extra = sp.csr_matrix(np.asarray(rows, dtype=np.float64))
+    A2 = extra if A is None else sp.vstack([sp.csr_matrix(A), extra]).tocsr()
+    b2 = np.asarray(rhs, dtype=np.float64)
+    if b is not None:
+        b2 = np.concatenate([np.asarray(b, dtype=np.float64).ravel(), b2])
+    return A2, b2
+
+
+def _disjunct_linear_rows(disjunct: list, model: Model, n_vars: int):
+    """A disjunct's linear rows as ``(A_ub, b_ub, A_eq, b_eq)`` lists, ``<=`` form."""
+    ub_rows: list = []
+    ub_rhs: list = []
+    eq_rows: list = []
+    eq_rhs: list = []
+    for con in disjunct:
+        if isinstance(con, _DisjunctiveConstraint):
+            continue
+        coeffs = _extract_body_coeffs(con.body, model, n_vars)
+        if coeffs is None or np.size(con.rhs) != 1:
+            continue
+        a, off = coeffs
+        rhs = float(np.asarray(con.rhs).ravel()[0]) - off
+        if con.sense == "<=":
+            ub_rows.append(a)
+            ub_rhs.append(rhs)
+        elif con.sense == ">=":
+            ub_rows.append(-a)
+            ub_rhs.append(-rhs)
+        elif con.sense == "==":
+            eq_rows.append(a)
+            eq_rhs.append(rhs)
+    return ub_rows, ub_rhs, eq_rows, eq_rhs
+
+
+def _reformulate_disjunction_mbigm_conditioned(
+    dc: _DisjunctiveConstraint,
+    model: Model,
+    add_aux_binary,
+    lp_data: Optional[tuple],
+    selectors: Optional[list[Variable]] = None,
+    budget: Optional[list[int]] = None,
+) -> tuple[list[Variable], list[Constraint]] | None:
+    """Multiple big-M conditioned on each disjunct (#1775 G2.3, flag-gated).
+
+    A row ``body <= 0`` of disjunct ``k`` becomes ``body <= sum_{j != k} M_{c,j}
+    y_j`` (``>=`` and ``==`` likewise), with the ``M_{c,j}`` of
+    :func:`_conditioned_ms`. With exactly one ``y_j = 1`` the row is ``body <= 0``
+    when ``k`` is selected and ``body <= M_{c,j}`` -- a valid bound over disjunct
+    ``j``'s region -- otherwise: exact at every integer point. Each ``M_{c,j}`` is
+    at most today's M, so the relaxation is at least as tight as unconditioned
+    mbigm.
+
+    SELECT_ONE disjunctions without nesting only; returns ``None`` (the caller
+    keeps today's route) for anything else, when there is no LP relaxation, or
+    when no exact LP oracle exists.
+    ``selectors`` as in :func:`_reformulate_disjunction`: given ones are the
+    caller's, whose select row the model already carries. ``budget`` is the
+    lowering's shared LP budget (see :func:`_conditioned_ms`).
+    """
+    if lp_data is None:
+        return None  # no LP relaxation to condition on
+    items = [it for d in dc.disjuncts for it in d]
+    if _is_or(dc) or any(isinstance(it, _DisjunctiveConstraint) for it in items):
+        return None
+    # Big-M bounds ``body`` against 0 (operator-built rows always have rhs 0); a
+    # row with a nonzero rhs keeps today's route rather than a new convention.
+    if any(np.any(np.asarray(it.rhs, dtype=np.float64) != 0.0) for it in items):
+        return None
+    try:
+        from discopt.solvers.lp_backend import get_exact_lp_solver
+
+        solve_lp = get_exact_lp_solver()
+    except ImportError:
+        return None
+    if solve_lp is None:
+        return None
+    _require_supported_semantics(dc)
+    n_disjuncts = len(dc.disjuncts)
+    new_vars: list[Variable] = []
+    new_cons: list[Constraint] = []
+    if selectors is not None:
+        if len(selectors) != n_disjuncts:
+            raise ValueError(
+                f"mbigm of disjunction {dc.name or 'anon'!r}: {len(selectors)} selectors "
+                f"for {n_disjuncts} disjuncts."
+            )
+        selectors = list(selectors)
+    else:
+        selectors = []
+        for k in range(n_disjuncts):
+            y_k = add_aux_binary(f"disj_{dc.name or 'anon'}_{k}")
+            selectors.append(y_k)
+            new_vars.append(y_k)
+        sum_expr: Expression = selectors[0]
+        for k in range(1, n_disjuncts):
+            sum_expr = sum_expr + selectors[k]
+        new_cons.append(
+            Constraint(
+                body=sum_expr - _wrap(1.0),
+                sense="==",
+                rhs=0.0,
+                name=f"_gdp_select_{dc.name}" if dc.name else None,
+            )
+        )
+
+    n_vars = lp_data[4]
+    box = _lp_box(model, n_vars)
+    if budget is None:
+        budget = [_MBIGM_CONDITIONED_LP_BUDGET]
+    linear_rows = [_disjunct_linear_rows(d, model, n_vars) for d in dc.disjuncts]
+    for k, disjunct in enumerate(dc.disjuncts):
+        for j, con in enumerate(disjunct):
+            up, down = _conditioned_ms(con, k, linear_rows, model, lp_data, box, solve_lp, budget)
+            cname = f"_gdp_mbc_{dc.name}_d{k}_c{j}" if dc.name else None
+
+            def _relax(ms: list[float]) -> Expression:
+                terms = [_wrap(m) * selectors[i] for i, m in enumerate(ms) if i != k and m != 0.0]
+                out: Expression = _wrap(0.0)
+                for t in terms:
+                    out = out + t
+                return out
+
+            if con.sense in ("<=", "=="):
+                new_cons.append(
+                    Constraint(
+                        body=con.body - _relax(up),
+                        sense="<=",
+                        rhs=0.0,
+                        name=(cname + "_le") if cname and con.sense == "==" else cname,
+                    )
+                )
+            if con.sense in (">=", "=="):
+                new_cons.append(
+                    Constraint(
+                        body=con.body + _relax(down),
+                        sense=">=",
+                        rhs=0.0,
+                        name=(cname + "_ge") if cname and con.sense == "==" else cname,
+                    )
+                )
+    return new_vars, new_cons
 
 
 def _extract_body_coeffs(

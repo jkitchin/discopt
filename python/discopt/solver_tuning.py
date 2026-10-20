@@ -1032,6 +1032,26 @@ class SolverTuning:
     Distinct from :attr:`ils_solve_cap`, which limits sub-NLPs *per objective
     descent* keyed on the integer dimension; this one bounds the whole call."""
 
+    mbigm_conditioned: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_MBIGM_CONDITIONED", default=False)
+    )
+    """Multiple big-M conditioned on each disjunct (``DISCOPT_MBIGM_CONDITIONED``,
+    default **OFF**; #1775 G2.3, bound-changing on the ``"mbigm"`` route).
+
+    Today ``gdp_method="mbigm"`` gives each disjunct row one M: an exact LP of its
+    body over the global linear rows and the box. With the flag ON, a row ``c`` of
+    disjunct ``k`` in a SELECT_ONE disjunction gets one ``M_{c,j}`` per *other*
+    disjunct ``j`` -- the exact-LP bound of its body over the global linear rows
+    **plus disjunct j's linear rows** -- and becomes ``body <= sum_{j != k}
+    M_{c,j} y_j`` (Pyomo's ``gdp.mbigm``). Exactly one ``y`` is 1, so the row is
+    exact at every integer point; each ``M_{c,j}`` is never above today's M, so
+    the LP relaxation is at least as tight. Sizing on the ``gdp_parity`` panel
+    (#1775, 2026-10-20): conditioning tightens 35-60 % of the rows on 6 of 23
+    measured instances.
+
+    Default OFF until the §5 flag panel (CLAUDE.md) shows it cert-clean and
+    net-positive; the audit row is in ``docs/dev/flag-retirement-audit.md``."""
+
     gdp_sumover: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_GDP_SUMOVER", default=True)
     )
