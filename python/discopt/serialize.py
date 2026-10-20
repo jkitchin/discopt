@@ -141,10 +141,12 @@ Examples
 
 from __future__ import annotations
 
+import array
 import gzip
 import json
 import logging
 import math
+import re
 import warnings
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -628,14 +630,65 @@ class _NodeTable:
     ``Constraint`` rather than comparing. ``_alive`` holds a strong reference to
     every visited node so CPython cannot recycle an id mid-walk and alias two
     distinct nodes onto one table entry.
+
+    With ``stream=True`` (what :func:`dumps` uses) a node is kept as its JSON text,
+    not its dict: each record is encoded as soon as it is final and runs of them
+    are joined into chunks, so ``nodes`` stays empty and :meth:`json_parts` returns
+    the array. A dict per node was ~400 bytes against ~75 of text, and held the
+    whole table at once -- 2.8-3.6 GB for a 7-9 M-node model, most of what
+    ``dumps`` cost above the model itself (#1812). The text is what ``json.dumps``
+    writes for the same dicts, byte for byte. A record is final only after
+    ``_tag_atom``, which adds a key to it and may append later nodes first, so a
+    chunk takes only a prefix of finished records.
     """
 
-    def __init__(self, var_ids: dict[int, int], param_ids: dict[int, int]):
+    #: Records per chunk in streaming mode.
+    _CHUNK = 4096
+
+    def __init__(self, var_ids: dict[int, int], param_ids: dict[int, int], stream: bool = False):
         self.nodes: list[dict] = []
         self._seen: dict[int, int] = {}
         self._alive: list[Any] = []
         self._var_ids = var_ids
         self._param_ids = param_ids
+        self._stream = stream
+        self._count = 0
+        self._chunks: list[str] = []
+        self._pending: list[Optional[str]] = []
+
+    def __len__(self) -> int:
+        return self._count
+
+    def _flush(self) -> None:
+        done = 0
+        for text in self._pending:
+            if text is None:
+                break
+            done += 1
+        if done:
+            self._chunks.append(", ".join(self._pending[:done]))  # type: ignore[arg-type]
+            del self._pending[:done]
+
+    def json_parts(self) -> list[str]:
+        """The table as a JSON array, in pieces whose concatenation is exactly
+        what ``json.dumps(nodes)`` writes (streaming mode only). Pieces, not one
+        string, so :func:`save` never holds the node text twice; the per-node
+        bookkeeping is released."""
+        if not self._stream:
+            raise SerializationError("json_parts() needs a streaming node table")
+        self._flush()
+        if self._pending:  # pragma: no cover - every record is finalised by add()
+            raise SerializationError("node table has an unfinished record")
+        parts = ["["]
+        for k, chunk in enumerate(self._chunks):
+            if k:
+                parts.append(", ")
+            parts.append(chunk)
+        parts.append("]")
+        self._chunks = []
+        self._seen = {}
+        self._alive = []
+        return parts
 
     def add(self, expr: Expression) -> int:
         """Return the table id for *expr*, encoding it (and its children) if new.
@@ -661,13 +714,24 @@ class _NodeTable:
                             stack.append((kid, False))
                     continue
             self._alive.append(node)
-            self._seen[key] = len(self.nodes)
+            index = self._count
+            self._seen[key] = index
             enc = self._encode(node)
             # Placed BEFORE tagging: `_tag_atom` may add the atom's argument to
             # the table, and the index reserved above is only correct if this
             # node is already at it.
-            self.nodes.append(enc)
+            self._count += 1
+            if self._stream:
+                self._pending.append(None)
+            else:
+                self.nodes.append(enc)
             self._tag_atom(node, enc)
+            if self._stream:
+                base = index - (self._count - len(self._pending))
+                # Same call `dumps` makes on the whole document, so the same bytes.
+                self._pending[base] = json.dumps(enc, allow_nan=False)
+                if len(self._pending) >= self._CHUNK:
+                    self._flush()
         return self._seen[id(expr)]
 
     def _tag_atom(self, node: Any, enc: dict) -> None:
@@ -1114,7 +1178,7 @@ def _retag_atoms(table: list[dict], built: list[Any], variables: list, params: l
     The two failures that indicate a *caller* defect rather than an absent
     registration therefore log at DEBUG on ``discopt.serialize``.
     """
-    if not any("atom" in nd for nd in table):
+    if not (table.has_atom if isinstance(table, _NodeSpans) else any("atom" in nd for nd in table)):
         return
     from discopt.operators import ATOM_ATTR, get_registered
 
@@ -3155,13 +3219,38 @@ def dumps(
     SerializationError
         If the model carries anything this version cannot write faithfully.
     """
+    return "".join(
+        _document_parts(model, result=result, indent=indent, provenance=provenance, author=author)
+    )
+
+
+def _document_parts(
+    model: Model,
+    *,
+    result: Any,
+    indent: Optional[int],
+    provenance: bool,
+    author: Optional[str],
+) -> list[str]:
+    """The document :func:`dumps` returns, as pieces whose concatenation is it.
+
+    :func:`save` writes the pieces to the file one by one, so the whole document
+    is never one string in memory there. With ``indent=None`` (the default) the
+    node table is streamed as text (see :class:`_NodeTable`) and each top-level
+    value is encoded on its own; ``json.dumps`` of a dict writes exactly
+    ``{`` + ``"key": value`` pairs joined by ``", "`` + ``}`` with each value
+    encoded as it would be alone, so the bytes are the same as one
+    ``json.dumps(doc)`` (#1812; pinned by the golden fixtures). An ``indent``
+    changes that layout, so it keeps the one-call path.
+    """
     _refuse_unsupported(model)
 
     import discopt
 
     var_ids = {id(v): i for i, v in enumerate(model._variables)}
     param_ids = {id(p): i for i, p in enumerate(model._parameters)}
-    table = _NodeTable(var_ids, param_ids)
+    stream = indent is None
+    table = _NodeTable(var_ids, param_ids, stream=stream)
 
     rows = _enc_rows(model, table)
 
@@ -3250,7 +3339,21 @@ def dumps(
     # `allow_nan=False`: bare NaN/Infinity is not valid JSON, and every float has
     # already been routed through `_enc_float`, so this asserts that nothing
     # slipped past the encoders rather than silently writing a non-standard token.
-    return json.dumps(doc, allow_nan=False, indent=indent)
+    if not stream:
+        return [json.dumps(doc, allow_nan=False, indent=indent)]
+    node_parts = table.json_parts()
+    del table
+    parts = ["{"]
+    for k, (key, value) in enumerate(doc.items()):
+        if k:
+            parts.append(", ")
+        parts.append(json.dumps(key) + ": ")
+        if key == "nodes":
+            parts.extend(node_parts)
+        else:
+            parts.append(json.dumps(value, allow_nan=False))
+    parts.append("}")
+    return parts
 
 
 def _refuse_json_constant(token: str) -> Any:
@@ -3374,6 +3477,136 @@ def _unread_keys(doc: dict) -> list[str]:
     return sorted(out)
 
 
+class _NodeSpans:
+    """The ``nodes`` array of a document text, read lazily (#1812).
+
+    Holds where each record starts in the text; iterating decodes one record at a
+    time with the same strict decoder ``json.loads`` used, so the decoder sees the
+    same dicts and only one exists at once. ``json.loads`` built the whole table
+    as dicts first -- 2.9-3.7 GB for a 7-9 M-node document, held while the model
+    was built (a ``loads`` peak of tree plus model), and left behind as heap the
+    allocator could not return. ``has_atom`` says whether any record carries an
+    atom tag, so ``_retag_atoms`` need not decode the table a second time.
+    """
+
+    __slots__ = ("_text", "_starts", "has_atom")
+
+    def __init__(self, text: str, starts: "array.array[int]", has_atom: bool):
+        self._text = text
+        self._starts = starts
+        self.has_atom = has_atom
+
+    def __len__(self) -> int:
+        return len(self._starts)
+
+    def __iter__(self) -> Any:
+        decode, text = _STRICT_DECODER.raw_decode, self._text
+        for start in self._starts:
+            yield decode(text, start)[0]
+
+    def __getitem__(self, i: int) -> Any:
+        return _STRICT_DECODER.raw_decode(self._text, self._starts[i])[0]
+
+
+class _FastPathMiss(Exception):
+    """The document is not laid out the way :func:`_parse_fast` reads it."""
+
+
+#: What ``json.loads`` treats as whitespace between tokens.
+_JSON_WS = re.compile(r"[ \t\n\r]*")
+
+
+def _skip_ws(text: str, i: int) -> int:
+    """Index of the first non-whitespace character at or after *i*."""
+    m = _JSON_WS.match(text, i)
+    assert m is not None  # a `*` pattern always matches
+    return m.end()
+
+
+#: The decoder ``loads`` has always used: bare NaN/Infinity refused, a key
+#: repeated in one object refused.
+_STRICT_DECODER = json.JSONDecoder(
+    parse_constant=_refuse_json_constant, object_pairs_hook=_unique_pairs
+)
+
+
+def _parse_document(text: Union[str, bytes]) -> Any:
+    """``json.loads`` of a document, with the ``nodes`` array kept as text.
+
+    The fast path reads a top-level object pair by pair with the same decoder
+    (same constant refusal, same repeated-key refusal) and scans ``nodes`` record
+    by record, keeping only offsets. Anything it does not expect -- another
+    layout, a syntax error, a refusal from a hook -- re-parses the whole text the
+    original way, so a malformed document fails exactly as it always did.
+    """
+    if isinstance(text, (bytes, bytearray)):
+        # What `json.loads` does with bytes.
+        text = text.decode(json.detect_encoding(text), "surrogatepass")
+    try:
+        return _parse_fast(text)
+    except (_FastPathMiss, json.JSONDecodeError, SerializationError, IndexError):
+        return json.loads(
+            text, parse_constant=_refuse_json_constant, object_pairs_hook=_unique_pairs
+        )
+
+
+def _parse_fast(text: str) -> dict:
+    decode = _STRICT_DECODER.raw_decode
+    i = _skip_ws(text, 0)
+    if text[i : i + 1] != "{":
+        raise _FastPathMiss
+    i = _skip_ws(text, i + 1)
+    pairs: list = []
+    if text[i : i + 1] == "}":
+        i += 1
+    else:
+        while True:
+            if text[i : i + 1] != '"':
+                raise _FastPathMiss
+            key, i = decode(text, i)
+            i = _skip_ws(text, i)
+            if text[i : i + 1] != ":":
+                raise _FastPathMiss
+            i = _skip_ws(text, i + 1)
+            if key == "nodes" and text[i : i + 1] == "[":
+                value, i = _scan_nodes(text, i)
+            else:
+                value, i = decode(text, i)
+            pairs.append((key, value))
+            i = _skip_ws(text, i)
+            if text[i : i + 1] == ",":
+                i = _skip_ws(text, i + 1)
+                continue
+            if text[i : i + 1] == "}":
+                i += 1
+                break
+            raise _FastPathMiss
+    if _skip_ws(text, i) != len(text):
+        raise _FastPathMiss
+    return _unique_pairs(pairs)
+
+
+def _scan_nodes(text: str, i: int) -> tuple:
+    decode = _STRICT_DECODER.raw_decode
+    starts = array.array("q")
+    has_atom = False
+    i = _skip_ws(text, i + 1)
+    if text[i : i + 1] == "]":
+        return _NodeSpans(text, starts, False), i + 1
+    while True:
+        starts.append(i)
+        record, i = decode(text, i)  # parsed, checked and dropped: only the offset stays
+        if not has_atom and isinstance(record, dict) and "atom" in record:
+            has_atom = True
+        i = _skip_ws(text, i)
+        if text[i : i + 1] == ",":
+            i = _skip_ws(text, i + 1)
+            continue
+        if text[i : i + 1] == "]":
+            return _NodeSpans(text, starts, has_atom), i + 1
+        raise _FastPathMiss
+
+
 def loads(text: Union[str, bytes]) -> Model:
     """Rebuild a :class:`Model` from a JSON string produced by :func:`dumps`.
 
@@ -3392,9 +3625,7 @@ def loads(text: Union[str, bytes]) -> Model:
     # so one here is not a discopt document; refuse it on read rather than accept
     # it and fail the next save (#1291).
     try:
-        doc = json.loads(
-            text, parse_constant=_refuse_json_constant, object_pairs_hook=_unique_pairs
-        )
+        doc = _parse_document(text)
     except json.JSONDecodeError as exc:
         raise SerializationError(f"not valid JSON: {exc}") from exc
     if not isinstance(doc, dict):
@@ -3527,7 +3758,10 @@ def _decode_document(doc: dict, minor: int) -> Model:
         [_dec_variable(d, model) for d in _seq(doc["variables"], "variables")], "variable"
     )
     params = [_dec_parameter(d, model) for d in _seq(doc["parameters"], "parameters")]
-    nodes = _decode_nodes(_seq(doc["nodes"], "nodes"), variables, params, minor)
+    table = doc["nodes"]
+    if not isinstance(table, _NodeSpans):  # read by `json.loads` (the fallback path)
+        table = _seq(table, "nodes")
+    nodes = _decode_nodes(table, variables, params, minor)
 
     model._constraints.extend(_dec_rows(_seq(doc["rows"], "rows"), nodes, minor))
     for row in model._constraints:
@@ -3684,12 +3918,15 @@ def save(
     ``provenance`` and ``author`` are passed through to :func:`dumps`.
     """
     p = Path(path)
-    text = dumps(model, result=result, indent=indent, provenance=provenance, author=author)
-    if p.suffix == ".gz":
-        with gzip.open(p, "wt", encoding="utf-8") as fh:
-            fh.write(text)
-    else:
-        p.write_text(text, encoding="utf-8")
+    # Written piece by piece, so the document is never one string here (#1812).
+    parts = _document_parts(
+        model, result=result, indent=indent, provenance=provenance, author=author
+    )
+    opener = gzip.open if p.suffix == ".gz" else open
+    with opener(p, "wt", encoding="utf-8") as fh:  # type: ignore[operator]
+        parts.reverse()
+        while parts:
+            fh.write(parts.pop())
 
 
 def load(path: Union[str, Path]) -> Model:
@@ -3701,4 +3938,6 @@ def load(path: Union[str, Path]) -> Model:
     raw = Path(path).read_bytes()
     if raw[:2] == _GZIP_MAGIC:
         raw = gzip.decompress(raw)
-    return loads(raw.decode("utf-8"))
+    text = raw.decode("utf-8")
+    del raw  # not alongside the text while the model is built (#1812)
+    return loads(text)
