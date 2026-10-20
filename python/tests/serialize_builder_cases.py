@@ -646,6 +646,9 @@ _TRANSFORM_ROUND_TRIPS = {
         gdp_disjunct_blocks,
         lambda m: {"selected": _selected_second_disjunct(m)},
     )[0],
+    "transform:gdp.bound_pretransformation": _transform(
+        "gdp.bound_pretransformation", _either_or("select_one")
+    )[0],
     "transform:mpec.gdp": _mpcc_transform("mpec.gdp"),
     "transform:mpec.sos1": _mpcc_transform("mpec.sos1"),
     "transform:mpec.scholtes": _mpcc_transform("mpec.scholtes", scholtes=True),
