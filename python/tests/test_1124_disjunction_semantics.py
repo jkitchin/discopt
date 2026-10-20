@@ -364,18 +364,26 @@ class TestUnimplementedSemanticsRefuseLoudly:
         assert core._BLOCK_ROWS is _BIG_M_SEMANTICS
 
 
-class TestNestedUnderHullRefusesClearly:
-    def test_nested_hull_raises_not_implemented_not_attribute_error(self):
-        """Was a bare ``AttributeError: '_DisjunctiveConstraint' has no attribute 'body'``."""
+class TestNestedUnderHull:
+    def test_nested_hull_lowers_instead_of_refusing(self):
+        """Was ``NotImplementedError`` (and before that a bare ``AttributeError``);
+        #1775 G2.1 lowers it by a nested hull, with no big-M row."""
         m = dm.Model("nested_hull")
         z = m.continuous("z", lb=0.0, ub=10.0)
         m.minimize(z)
         inner = m.disjunction([[z >= 3.0], [z >= 7.0]], name="in")
         m.either_or([[z >= 1.0, inner], [z >= 9.0]], name="out")
-        with pytest.raises(NotImplementedError) as exc:
-            reformulate_gdp(m, method="hull")
-        msg = str(exc.value)
-        assert "nested" in msg and "big-m" in msg
+        low = reformulate_gdp(m, method="hull")
+        # The child's copies of z exist (it was hulled, inside disjunct 0 of out) ...
+        assert {"_hull_out_d0_in_v_z_0", "_hull_out_d0_in_v_z_1"} <= {
+            v.name for v in low._variables
+        }
+        # ... and no row came from the nested big-M lowering.
+        names = [getattr(c, "name", None) or "" for c in low._constraints]
+        assert not any(n.startswith("_gdp_nested") for n in names)
+        r = m.solve(gdp_method="hull")
+        assert r.status == "optimal"
+        assert r.objective == pytest.approx(3.0, abs=1e-4)
 
     def test_nested_big_m_still_works(self):
         """The refusal is hull-only; big-M implements nesting and must be unaffected."""

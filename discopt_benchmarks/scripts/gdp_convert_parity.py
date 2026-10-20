@@ -70,14 +70,21 @@ def _structure(pm, conv) -> dict:
     return {"ok": ok, "pyomo": want, "discopt": got}
 
 
-def _pyomo_violation(pm, conv, result) -> dict:
+def _pyomo_violation(pm, conv, result, *, domains: bool = False) -> dict:
     """Load discopt's incumbent into the Pyomo model and measure it against the
     *original GDP* there, in Pyomo's semantics: global rows; each disjunction's
     selection count (one for XOR, at least one for OR) wherever every enclosing
     disjunct is selected -- under a deselected parent a nested disjunction and
     its indicators are free; the rows of each disjunct selected along its whole
     chain; and every logical constraint. Pyomo evaluates everything, so this
-    shares no code with discopt's own verifier."""
+    shares no code with discopt's own verifier.
+
+    The values are loaded with ``skip_validation`` and booleans are rounded, so the
+    rows alone do not show a point outside a variable's bounds or off integrality.
+    ``domains=True`` also reports ``max_bound_violation`` (relative, like a row) and
+    ``max_integrality_violation`` (of the incumbent *before* rounding) over every
+    converted variable and boolean; a caller that treats the point as feasible must
+    ask for them."""
     import numpy as np
     import pyomo.environ as pyo
     from pyomo.core.base.logical_constraint import LogicalConstraint
@@ -86,10 +93,21 @@ def _pyomo_violation(pm, conv, result) -> dict:
     def val(col) -> float:
         return float(np.asarray(result.x[col.name]).reshape(-1)[0])
 
+    worst_bound, worst_int = 0.0, 0.0
     for v, col in conv.variables.items():
-        v.set_value(val(col), skip_validation=True)
+        x = val(col)
+        v.set_value(x, skip_validation=True)
+        lb, ub = v.lb, v.ub
+        lo = 0.0 if lb is None else float(lb) - x
+        hi = 0.0 if ub is None else x - float(ub)
+        worst_bound = max(worst_bound, max(0.0, lo, hi) / max(1.0, abs(x)))
+        if v.is_integer():
+            worst_int = max(worst_int, abs(x - round(x)))
     for b, boolean in conv.booleans.items():
-        b.set_value(bool(round(val(boolean.variable))))
+        raw = val(boolean.variable)
+        worst_int = max(worst_int, abs(raw - round(raw)))
+        worst_bound = max(worst_bound, max(0.0, -raw, raw - 1.0))
+        b.set_value(bool(round(raw)))
         binary = b.get_associated_binary()
         if binary is not None and not binary.fixed:
             binary.set_value(round(val(boolean.variable)), skip_validation=True)
@@ -137,12 +155,16 @@ def _pyomo_violation(pm, conv, result) -> dict:
     for lc in pm.component_data_objects(LogicalConstraint, active=True, descend_into=pyo.Block):
         bad_logic += int(not bool(pyo.value(lc.expr)))
         checked += 1
-    return {
+    out = {
         "max_rel_violation": worst,
         "bad_counts": bad_count,
         "bad_logic": bad_logic,
         "checked": checked,
     }
+    if domains:
+        out["max_bound_violation"] = worst_bound
+        out["max_integrality_violation"] = worst_int
+    return out
 
 
 def _optimum(spec, time_limit: float) -> dict:
