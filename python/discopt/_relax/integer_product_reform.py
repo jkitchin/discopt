@@ -208,9 +208,10 @@ class _Expander:
         # x_i - lo - sum 2^k e_k == 0
         link = ref if lo == 0 else BinaryOp("-", ref, Constant(float(lo)))
         for k in range(nbits):
-            e = Variable(f"_ipx_e{self._counter}", VarType.BINARY, (), 0.0, 1.0, self.model)
+            e_name = self.model._fresh_name(f"_ipx_e{self._counter}")
+            e = Variable(e_name, VarType.BINARY, (), 0.0, 1.0, self.model)
             self._counter += 1
-            self.model._variables.append(e)
+            self.model._register_generated_variable(e)  # #1799
             # e_k is bit k of round(x_i - lo): the link row pins sum 2^k e_k to
             # x_i - lo exactly, and the binary digits of a value in [0, 2^nbits-1]
             # are unique.
@@ -255,7 +256,7 @@ class _Expander:
         if _ckey is not None and _ckey in self._bigm_cache:
             return self._bigm_cache[_ckey]
         v = Variable(
-            f"_ipx_v{self._counter}",
+            self.model._fresh_name(f"_ipx_v{self._counter}"),
             VarType.CONTINUOUS,
             (),
             min(0.0, lo_o),
@@ -263,7 +264,7 @@ class _Expander:
             self.model,
         )
         self._counter += 1
-        self.model._variables.append(v)
+        self.model._register_generated_variable(v)
         # v == e * other, both scalar variable references (``other`` is either an
         # original factor or, in the square expansion, another expansion bit — in
         # every case already appended before this product), so v reconstructs as
@@ -306,9 +307,10 @@ class _Expander:
         if cached is not None:
             return cached
         n = len(bits)
-        z = Variable(f"_ipx_z{self._counter}", VarType.BINARY, (), 0.0, 1.0, self.model)
+        z_name = self.model._fresh_name(f"_ipx_z{self._counter}")
+        z = Variable(z_name, VarType.BINARY, (), 0.0, 1.0, self.model)
         self._counter += 1
-        self.model._variables.append(z)
+        self.model._register_generated_variable(z)
         # z is exactly the product of its binary inputs, so it reconstructs from a
         # point over the originals once its inputs are reconstructed. Record the
         # AND spec (evaluated after every input bit, which are appended earlier).

@@ -324,6 +324,7 @@ class AffineDecisionRule:
 
         # ── 5. Retire y from the model variable list and renumber ────────────
         m._variables = [v for v in m._variables if v is not y]
+        m._names.discard(y.name)  # #1799: the name is free again, as on a reload
         for i, v in enumerate(m._variables):
             v._index = i
 
