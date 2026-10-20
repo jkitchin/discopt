@@ -67,3 +67,36 @@ def test_a_point_infeasible_in_pyomo_is_incorrect_even_unproven(gb):
     unproven = OracleRecord(None, "unproven", "gap open")
     bad = {"max_rel_violation": 0.02, "bad_counts": 0, "bad_logic": 0}
     assert gb.score(_rec(status="optimal", objective=1.0, in_pyomo=bad), unproven) == "incorrect"
+
+
+def test_parallel_driver_runs_each_pending_pair_once(gb, tmp_path, monkeypatch):
+    """``--jobs 3``: every pending (instance, arm) runs exactly once, recorded runs
+    are skipped, and every row is written whole (one JSON object per line)."""
+    import argparse
+    import json
+    import threading
+
+    out = tmp_path / "base.jsonl"
+    out.write_text(json.dumps({"instance": "i0", "arm": "a0", "status": "optimal"}) + "\n")
+    seen, lock = [], threading.Lock()
+
+    def fake_run(name, arm, args):
+        with lock:
+            seen.append((name, arm))
+        return {"instance": name, "arm": arm, "status": "killed", "load1": 0.0, "jobs": args.jobs}
+
+    monkeypatch.setattr(gb, "_run_one", fake_run)
+    args = argparse.Namespace(
+        include="i0,i1,i2",
+        arms="a0,a1",
+        out=str(out),
+        jobs=3,
+        time_limit=1.0,
+        grace=1.0,
+        max_load=16.0,
+    )
+    assert gb.drive(args) == 0
+    pairs = {(f"i{i}", f"a{a}") for i in range(3) for a in range(2)}
+    assert sorted(seen) == sorted(pairs - {("i0", "a0")})
+    rows = [json.loads(ln) for ln in out.read_text().splitlines()]
+    assert {(r["instance"], r["arm"]) for r in rows} == pairs and len(rows) == 6

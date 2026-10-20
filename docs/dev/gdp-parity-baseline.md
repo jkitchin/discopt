@@ -1,79 +1,75 @@
 # GDP parity baseline: open-solver profile O (#1775 G0.6)
 
-**Status: partial, 14 of 24 panel instances.** The run stopped because the cloud
-container it ran in shuts down shortly after a session goes idle, so it cannot hold
-an 8-hour job. The results so far are in
-[`data/gdp_baseline_g06.jsonl`](data/gdp_baseline_g06.jsonl), and the command below
-resumes from them. G0.6 is not done until all 24 instances are measured and the
-gap table and per-family targets below are final.
-
-## Finishing the run
-
-On a Linux machine with root (Ubuntu 24.04 is the tested target):
+This is the entry experiment for the spec §1.2 gate: the gap table and the per-family
+targets. The full 24-instance `gdp_parity` panel was run under 12 arms at 300 s per
+run, 288 runs in all. The raw rows are in
+[`data/gdp_baseline_g06.jsonl`](data/gdp_baseline_g06.jsonl), and the report is
+reproduced with:
 
 ```bash
-sudo bash discopt_benchmarks/scripts/install_open_gdp_solvers.sh   # profile O solvers
-cp docs/dev/data/gdp_baseline_g06.jsonl /tmp/base.jsonl
-python -u discopt_benchmarks/scripts/gdp_baseline.py --out /tmp/base.jsonl \
-    --time-limit 300 --grace 120          # skips the 170 recorded runs
-python -u discopt_benchmarks/scripts/gdp_baseline.py --out /tmp/base.jsonl --report
+python discopt_benchmarks/scripts/gdp_baseline.py --out docs/dev/data/gdp_baseline_g06.jsonl --report
 ```
 
-Keep the machine otherwise idle: every run records its 1-minute load, and a run
-started above `--max-load` (default 16) is marked `load_gated` and is not a timing
-claim (CLAUDE.md §9).
+## Setup
 
-**Mixed discopt versions.** The discopt rows already recorded were measured on
-`5f8a174c`, which is before `cf5ffb21` changed the fast-API placeholder objective.
-That change is not expected to move these results, because the GDPlib/Pyomo
-conversion does not use the fast API, but that expectation is untested. To measure
-every discopt row on one version, delete the `discopt-*` rows before resuming. That
-adds about 120 runs.
+* **Panel:** the 17 GDPlib PR58 instances plus the 7 Pyomo GDPopt test models (spec
+  §1.2). Each is scored against `gdplib_runner.panel_oracle()`, which has 17
+  certified values and 7 marked `unproven`.
+* **Pyomo arms:**
+  * `gdp.bigm` and `gdp.hull`, each solved by SCIP 10 (pyscipopt);
+  * GDPopt LOA, GLOA, LBB, RIC and enumerate, with CBC as the MIP solver, Ipopt
+    3.11.9 as the NLP solver and SCIP as the MINLP / global NLP solver.
 
-## What is measured
+  The solvers are installed by `scripts/install_open_gdp_solvers.sh`.
+* **discopt arms:** `gdp_method` set to `big-m` (the default route), `hull`, `mbigm`,
+  `auto` or `loa`. All discopt rows are at `5f8a174c`. Every discopt incumbent is
+  also checked in the original Pyomo model under Pyomo's semantics.
+* **Scoring** (`gdp_baseline.score`), at the repository's tolerance (abs 1e-6,
+  rel 1e-4):
+  * `solved` -- claims optimal and agrees with the oracle;
+  * `incorrect` -- one of: claims optimal and disagrees, an incumbent better than
+    the optimum, an infeasibility claim on a known-feasible instance, or a point
+    that violates the Pyomo model;
+  * `claimed_unverified` -- claims optimal where the oracle is unproven;
+  * `unsolved` -- anything else, including time-limit and OOM kills.
+* **SGM** uses a 1 s shift, and every run that is not solved counts at 300 s.
 
-The suite is `gdp_parity`: the 17 GDPlib instances of GDPlib PR 58, plus 7 Pyomo
-GDPopt test models (spec §1.2). The 12 arms are interleaved per instance, each run is
-a subprocess with a hard kill at `time_limit + grace`, and the time limit is 300 s:
+### Deviations from the spec, stated so the gate run (G6.1) can close them
 
-* **Pyomo:** `gdp.bigm` and `gdp.hull` solved by SCIP (pyscipopt), and GDPopt
-  LOA / GLOA / LBB / RIC / enumerate, with CBC as the MIP solver, Ipopt as the NLP
-  solver and SCIP as the MINLP / global NLP solver.
-* **discopt:** `gdp_method` set to `big-m` (the default route), `hull`, `mbigm`,
-  `auto` or `loa`. Every discopt incumbent is also checked in the original Pyomo
-  model under Pyomo's GDP semantics.
+* **Pyomo arms do not go through GDPlib's `benchmark.py`.** It has GAMS profiles
+  only, so `gdp_baseline.py` configures profile O directly.
+* **GDPopt's MIP solver is CBC, not HiGHS.** Pyomo's HiGHS interfaces raise on the
+  dual suffix GDPopt attaches (`NoDualsError`).
+* **`gdpopt.ldsda` was not run.**
+* **One repeat, not three.** The gate's 3 repeats and bootstrap CI belong to G6.1.
+* **Concurrency.** The first 170 runs were serial. The last 118 ran 3 at a time on 4
+  cores (`--jobs 3`, recorded per row as `jobs`), because the cloud container cannot
+  hold an unattended 8 h serial job.
+  * **Control:** 35 already-measured (instance, arm) pairs were re-run at 3 jobs.
+    Status and verdict were identical in all 35. Wall times were higher by a factor
+    of **1.20** (geometric mean over the 27 pairs ≥ 1 s; sd of the log ratio 0.14;
+    range 1.00–1.87).
+  * **Effect:** the timings of the parallel rows are inflated by about that much, on
+    both sides. Verdicts near the 300 s limit could move. The SGM ratios below mix
+    the two regimes, so treat them as ±20 %.
+  * No run started above the load gate (max 1-minute load 6.7, against the gate of 16).
 
-Scoring is `gdp_baseline.score`, against `gdplib_runner.panel_oracle()` at the
-repository's tolerance (abs 1e-6, rel 1e-4):
-
-* `solved` -- claims optimal and agrees with the oracle;
-* `incorrect` -- one of: claims optimal and disagrees, an incumbent better than the
-  optimum, an infeasibility claim on a known-feasible instance, or a point that
-  violates the Pyomo model;
-* `claimed_unverified` -- claims optimal where the oracle is unproven;
-* `unsolved` -- anything else, including time-limit kills and out-of-memory kills
-  (exit -9).
-
-SGM uses a 1 s shift, and every run that is not solved counts at the time limit.
-
-## Partial results (14 instances; not final)
-
-The full report, from `--report` on the partial file:
+## Results
 
 ```
 arm                  n solved incorr unver   SGM(s) median_solved  total(s)
-pyomo-bigm          14      8      0     1    29.25          1.72    2024.5
-pyomo-hull          14      8      0     0    27.10          3.42    2080.6
-pyomo-loa           15      4      2     3    93.12          1.90    3314.6
-pyomo-gloa          15      4      2     0    90.58          1.52    3313.9
-pyomo-lbb           14      6      0     0    79.54         59.13    2625.7
-pyomo-ric           14      4      2     3    84.38          1.97    3014.4
-pyomo-enumerate     14      3      1     2   108.43          0.95    3306.4
-discopt-big-m       14      6      0     0   103.42         39.28    2600.9
-discopt-hull        14      5      0     0   111.48         16.13    2865.6
-discopt-mbigm       14      6      0     0   102.03         38.02    2602.0
-discopt-auto        14      6      0     0   102.94         40.38    2601.3
-discopt-loa         14      4      0     0    83.53          0.71    3053.5
+pyomo-bigm          24     17      0     1    10.60          0.34    2343.8
+pyomo-hull          24     17      0     0    10.51          0.34    2401.1
+pyomo-loa           24     11      2     3    35.85          1.90    3933.4
+pyomo-gloa          24     11      3     0    38.82          1.44    3971.9
+pyomo-lbb           24     14      0     0    34.30          4.25    3330.3
+pyomo-ric           24     11      2     3    34.63          1.65    3932.3
+pyomo-enumerate     24     10      1     2    43.01          0.98    4251.9
+discopt-big-m       24     14      0     0    58.12         22.94    3524.9
+discopt-hull        24     12      0     0    73.88         31.96    4143.0
+discopt-mbigm       24     14      0     0    57.67         22.65    3525.6
+discopt-auto        24     14      0     0    58.12         23.29    3528.9
+discopt-loa         24      8      0     0    57.57          0.54    4855.2
 ```
 
 Per run: S solved, X incorrect, ? claimed_unverified, - unsolved, E error.
@@ -94,23 +90,101 @@ Per run: S solved, X incorrect, ? claimed_unverified, - unsolved, E error.
 | modprodnet | baron+scip | S | S | S | S | S | S | S | S | - | S | S | - |
 | positioning | baron+scip | S | S | - | - | S | - | - | S | S | S | S | S |
 | small_batch | baron+scip | S | S | S | S | S | S | S | S | S | S | S | S |
+| spectralog | baron+scip | S | S | E | E | - | E | - | S | - | S | S | - |
+| stranded_gas | unproven | - | - | - | - | - | - | - | - | E | - | - | E |
+| syngas | baron+scip | S | S | S | S | S | S | - | - | - | - | - | - |
+| pyomo.eight_process | baron | S | S | S | S | S | S | S | S | S | S | S | S |
+| pyomo.eight_process_logical | baron | S | S | S | S | S | S | S | S | S | S | S | S |
+| pyomo.strip_packing_concrete | highs | S | S | S | S | S | S | S | S | S | S | S | S |
+| pyomo.constrained_layout_clay0203 | baron+scip | S | S | - | S | S | - | S | S | S | S | S | - |
+| pyomo.ex_633_trespalacios | baron+scip | S | S | S | S | S | S | S | S | S | S | S | - |
+| pyomo.nonconvex_hen | baron+scip | S | S | S | X | S | S | S | S | S | S | S | - |
+| pyomo.jobshop_small | highs | S | S | S | S | S | S | S | S | S | S | S | S |
 
-Observations, to be confirmed on the full panel:
+### Correctness
 
-* **No incorrect discopt run.** Every incorrect run is a GDPopt false certificate:
-  * on cstr, LOA, GLOA, RIC and enumerate all claim `optimal` at 3.1302 against the
-    certified 3.0620;
-  * on med_term_purchasing (a maximization), LOA claims 6781.50, and GLOA and RIC
-    claim 6793.46, against 6797.54.
-* **discopt's gap to Pyomo's bigm/hull with SCIP:** on the big-M family discopt
-  solves 6 of 14 instances against 8 for Pyomo, and its SGM is 3.5x Pyomo's. The
-  two instances it does not solve are batch_processing and cstr, both at the
-  300 s limit.
-* **discopt hull** refuses gdp_col, hda and kaibel with
-  `HullPerspectiveOriginError`: a disjunct body is not finite at the origin. That is
-  a loud refusal, not a wrong answer, and it is the next hull capability gap after
-  G2.1.
-* **discopt LOA** solves 4 instances, with a lower SGM than Pyomo LOA, and has no
-  false certificate.
+**Gate item 1 holds for every discopt family: `incorrect_count = 0`.** All 8 incorrect
+runs are GDPopt false certificates, each claiming `optimal` at a value the oracle
+refutes:
 
-Per-family targets (spec §1.2) are set once the panel is complete.
+| instance | arms | claimed | certified |
+|---|---|---|---|
+| cstr | LOA, GLOA, RIC, enumerate | 3.1302 | 3.0620 |
+| med_term_purchasing (max) | LOA | 6781.50 | 6797.54 |
+| med_term_purchasing (max) | GLOA, RIC | 6793.46 | 6797.54 |
+| pyomo.nonconvex_hen | GLOA | 132290.4 | 114384.8 |
+
+### Errors
+
+* **discopt hull refuses 4 instances** with `HullPerspectiveOriginError`: gdp_col,
+  hda, kaibel and stranded_gas. Each has a disjunct body with `log` or a division
+  that is not finite at the origin, so the eps-perspective cannot cancel its residual
+  there. This is a loud refusal, not a wrong answer, and it is hull's largest
+  capability gap on this panel.
+* **discopt LOA on stranded_gas** refuses because a row inside a disjunct has no
+  finite lower bound for big-M.
+* **GDPopt:**
+  * LOA, GLOA and RIC raise on spectralog ("unbounded MILP discrete problem");
+  * GLOA trips an `AssertionError` in Pyomo's FBBT on batch_processing.
+
+## Gap table
+
+Pyomo-only and discopt-only list the instances solved by one side but not the other.
+"Both-solved SGM" is the SGM over the instances both sides solve.
+
+| family | discopt solved / SGM | Pyomo solved / SGM | SGM ratio | Pyomo-only | discopt-only | both-solved SGM d / P |
+|---|---|---|---|---|---|---|
+| big-m | 14 / 58.1 | 17 / 10.6 | 5.48 | batch_processing, cstr, syngas | -- | 17.5 / 0.80 |
+| hull | 12 / 73.9 | 17 / 10.5 | 7.03 | + modprodnet, spectralog | -- | 17.6 / 0.63 |
+| loa | 8 / 57.6 | 11 / 35.9 | 1.61 | modprodnet, syngas, ex_633, nonconvex_hen | positioning | 1.30 / 1.89 |
+| gloa, lbb, ric, enumerate | no discopt route (G4.2–G4.4) | 11 / 38.8, 14 / 34.3, 11 / 34.6, 10 / 43.0 | -- | | | |
+| best-of | 14 / 30.6 | 17 / 9.4 | 3.26 | | | |
+| default (`big-m`) vs Pyomo best | 14 / 58.1 | 17 / 9.4 | 6.18 | | | |
+
+What the gap is made of:
+
+* **big-M and hull: the per-node engine, not the formulation.** On the instances both
+  sides solve, discopt's SGM is about 22x SCIP's (17.5 s vs 0.80 s), and the three
+  Pyomo-only instances are 300 s time-outs for discopt.
+  * batch_processing has no incumbent at all.
+  * cstr ends with an incumbent of 3.359 against a bound of 0.108; the certified
+    optimum is 3.062.
+  * This is a dual-side gap (bound strength and node throughput) on reformulated
+    MINLPs. GDP structure does not explain it.
+  * `mbigm` and `auto` change nothing on this panel: they solve the same 14 at the
+    same SGM.
+* **hull** adds the 4 refusals above and loses modprodnet and spectralog to the
+  time limit.
+* **LOA:**
+  * on the instances both sides solve, discopt is faster (SGM 1.30 s vs 1.89 s) and
+    solves positioning, which Pyomo does not;
+  * discopt fails to certify 4 instances that Pyomo LOA solves: 2 nonconvex Pyomo
+    models, where Pyomo's LOA is a local method that happens to be right, and
+    modprodnet and syngas.
+
+## Per-family targets (gate §1.2, profile O)
+
+A family meets the gate when it has `incorrect = 0`, solved ≥ Pyomo's, and
+SGM(discopt) / SGM(Pyomo) ≤ 1.0 (G6.1 adds 3 repeats and the bootstrap CI). No family
+meets it today.
+
+| family | target solved | target SGM (s) | today | gap to close |
+|---|---|---|---|---|
+| big-m (default) | ≥ 17 | ≤ 10.6 | 14 / 58.1 | 3 instances (batch_processing, cstr, syngas); 5.5x SGM |
+| hull | ≥ 17 | ≤ 10.5 | 12 / 73.9 | the 4 origin refusals and 5 time-outs; 7.0x SGM |
+| loa | ≥ 11 | ≤ 35.9 | 8 / 57.6 | 4 instances; 1.6x SGM |
+| gloa | ≥ 11 | ≤ 38.8 | none | the route (G4.3) |
+| lbb | ≥ 14 | ≤ 34.3 | none | the route (G4.4) |
+| ric | ≥ 11 | ≤ 34.6 | none | the route (G4.2) |
+| enumerate | ≥ 10 | ≤ 43.0 | none | the route (G4.2) |
+
+For the G5 entry experiments:
+
+* The big-M and hull gaps sit in the B&B engine's throughput and bound on the
+  reformulated model. That is where G5.1 (disjunct-local FBBT/OBBT) and G5.2 (k-way
+  branching) have to show a measured effect.
+* The hull origin refusals need a hull form that never evaluates the body at 0 for a
+  de-selected disjunct. G2.2's perspective variants do not obviously provide one,
+  since the eps-perspective still evaluates g at 0 when y = 0, so this is not yet
+  scoped to a task.
+* LOA's gap is 4 instances, not speed.

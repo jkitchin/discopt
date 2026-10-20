@@ -269,7 +269,63 @@ def _done(path: Path) -> set[tuple[str, str]]:
     return out
 
 
+def _run_one(name: str, arm: str, args) -> dict:
+    """One run in its own subprocess, hard-killed at ``time_limit + grace``."""
+    load = os.getloadavg()[0]
+    t0 = time.perf_counter()
+    cmd = [sys.executable, "-u", str(HERE), "--worker", name, arm, str(args.time_limit)]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=args.time_limit + args.grace,
+            cwd=str(BENCH.parent),
+        )
+        lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("@@RESULT ")]
+        if lines:
+            rec = json.loads(lines[-1][len("@@RESULT ") :])
+        else:
+            tail = (proc.stderr or proc.stdout).strip().splitlines()[-3:]
+            why = " | ".join(tail)[:400]
+            if proc.returncode == -9:
+                # SIGKILL: the kernel's OOM killer (the container's dmesg
+                # shows it), not a crash in Python -- even when the solver
+                # printed warnings first.
+                why = "killed by SIGKILL (out of memory)" + (f": {why}" if why else "")
+            rec = {
+                "instance": name,
+                "arm": arm,
+                "error": why,
+                "returncode": proc.returncode,
+            }
+    except subprocess.TimeoutExpired:
+        rec = {
+            "instance": name,
+            "arm": arm,
+            "status": "killed",
+            "objective": None,
+            "bound": None,
+            "wall": args.time_limit + args.grace,
+        }
+    rec["elapsed"] = round(time.perf_counter() - t0, 2)
+    rec["load1"] = round(load, 2)
+    rec["load_gated"] = load > args.max_load
+    rec["time_limit"] = args.time_limit
+    rec["jobs"] = args.jobs
+    return rec
+
+
 def drive(args) -> int:
+    """Run every pending (instance, arm) pair, ``--jobs`` at a time.
+
+    With ``--jobs N > 1`` the runs share the machine, so their wall times carry
+    contention: each row records ``jobs`` and its start load, and a timing claim
+    from a parallel run needs a serial control on a sample of the same runs.
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
     from benchmarks import gdplib_runner as gr
 
     names = [n for n in (args.include.split(",") if args.include else gr.GDP_PARITY) if n]
@@ -277,66 +333,30 @@ def drive(args) -> int:
     out = Path(args.out)
     done = _done(out)
     table = gr.panel_oracle()
-    n_new = 0
+    pending = []
     for i, name in enumerate(names):
         # Interleave: rotate the arm order per instance so no arm always runs first.
         order = arms[i % len(arms) :] + arms[: i % len(arms)]
-        for arm in order:
-            if (name, arm) in done:
-                continue
-            load = os.getloadavg()[0]
-            t0 = time.perf_counter()
-            cmd = [sys.executable, "-u", str(HERE), "--worker", name, arm, str(args.time_limit)]
-            try:
-                proc = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=args.time_limit + args.grace,
-                    cwd=str(BENCH.parent),
-                )
-                lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("@@RESULT ")]
-                if lines:
-                    rec = json.loads(lines[-1][len("@@RESULT ") :])
-                else:
-                    tail = (proc.stderr or proc.stdout).strip().splitlines()[-3:]
-                    why = " | ".join(tail)[:400]
-                    if proc.returncode == -9:
-                        # SIGKILL: the kernel's OOM killer (the container's dmesg
-                        # shows it), not a crash in Python -- even when the solver
-                        # printed warnings first.
-                        why = "killed by SIGKILL (out of memory)" + (f": {why}" if why else "")
-                    rec = {
-                        "instance": name,
-                        "arm": arm,
-                        "error": why,
-                        "returncode": proc.returncode,
-                    }
-            except subprocess.TimeoutExpired:
-                rec = {
-                    "instance": name,
-                    "arm": arm,
-                    "status": "killed",
-                    "objective": None,
-                    "bound": None,
-                    "wall": args.time_limit + args.grace,
-                }
-            rec["elapsed"] = round(time.perf_counter() - t0, 2)
-            rec["load1"] = round(load, 2)
-            rec["load_gated"] = load > args.max_load
-            rec["time_limit"] = args.time_limit
-            rec["verdict"] = score(rec, table.get(name))
-            with out.open("a") as fh:
-                fh.write(json.dumps(rec, default=str) + "\n")
-            n_new += 1
+        pending.extend((name, arm) for arm in order if (name, arm) not in done)
+    lock = threading.Lock()
+
+    def one(task: tuple[str, str]) -> None:
+        name, arm = task
+        rec = _run_one(name, arm, args)
+        rec["verdict"] = score(rec, table.get(name))
+        with lock, out.open("a") as fh:
+            fh.write(json.dumps(rec, default=str) + "\n")
             print(
                 f"{name:34s} {arm:16s} {rec['verdict']:18s} status={rec.get('status')} "
                 f"obj={rec.get('objective')} bound={rec.get('bound')} "
                 f"wall={rec.get('wall')} load={rec['load1']}",
                 flush=True,
             )
-    print(f"ran {n_new} new runs; {len(_done(out))} recorded in {out}", flush=True)
-    return 0 if (n_new or done) else 1
+
+    with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
+        list(pool.map(one, pending))
+    print(f"ran {len(pending)} new runs; {len(_done(out))} recorded in {out}", flush=True)
+    return 0 if (pending or done) else 1
 
 
 def report(path: Path) -> int:
@@ -412,6 +432,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--time-limit", type=float, default=300.0)
     ap.add_argument("--grace", type=float, default=120.0)
+    ap.add_argument(
+        "--jobs", type=int, default=1, help="runs at once (rows record it; see drive())"
+    )
     ap.add_argument("--max-load", type=float, default=16.0)
     ap.add_argument("--include", default="")
     ap.add_argument("--arms", default="")
