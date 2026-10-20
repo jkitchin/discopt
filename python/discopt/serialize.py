@@ -3562,9 +3562,16 @@ def _parse_document(text: Union[str, bytes]) -> Any:
     if isinstance(text, (bytes, bytearray)):
         # What `json.loads` does with bytes.
         text = text.decode(json.detect_encoding(text), "surrogatepass")
+    elif not isinstance(text, str):
+        # `json.loads`'s own refusal; the fast path would fail on it in `re`.
+        raise TypeError(
+            f"the JSON object must be str, bytes or bytearray, not {text.__class__.__name__}"
+        )
+    # No `IndexError`: the fast path indexes the text only by slice, and
+    # `raw_decode` past the end raises `JSONDecodeError`.
     try:
         return _parse_fast(text)
-    except (_FastPathMiss, json.JSONDecodeError, SerializationError, IndexError):
+    except (_FastPathMiss, json.JSONDecodeError, SerializationError):
         return json.loads(
             text, parse_constant=_refuse_json_constant, object_pairs_hook=_unique_pairs
         )

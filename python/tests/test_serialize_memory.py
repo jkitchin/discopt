@@ -31,17 +31,29 @@ NL = pathlib.Path(__file__).parent / "data" / "minlplib_nl" / "hda.nl"
 
 
 def _built_cases():
-    out = []
+    out, failed = [], {}
     for name, build in reg.CASES.items():
         try:
             model, _ = build()
-        except Exception:  # noqa: BLE001 - a case this build cannot make is not this test's
+        except Exception as exc:  # noqa: BLE001 - recorded, and asserted below
+            failed[name] = f"{type(exc).__name__}: {exc}"
             continue
         out.append((name, model))
-    return out
+    return out, failed
 
 
-CASES = _built_cases()
+CASES, UNBUILT = _built_cases()
+
+#: Chunk sizes that make every fixture write many chunks, one record per chunk
+#: included; the default (4096) leaves all but the largest in one.
+CHUNKS = (1, 2, 5, ser._NodeTable._CHUNK)
+
+
+def test_every_fixture_case_builds():
+    """A case that fails to build drops out of the byte-identity tests below; it
+    must not do so silently."""
+    assert not UNBUILT, UNBUILT
+    assert len(CASES) == len(reg.CASES) >= 20
 
 
 # ── writer ───────────────────────────────────────────────────────────────────
@@ -64,13 +76,79 @@ def test_dumps_streams_the_node_table(monkeypatch):
     assert main[0]._stream and main[0].nodes == []
 
 
+def _one_call(model) -> str:
+    """``json.dumps`` of the document in one call: an ``indent`` takes the
+    non-streamed path, so this is independent of the chunking under test."""
+    return json.dumps(json.loads(dumps(model, provenance=False, indent=2)), allow_nan=False)
+
+
+@pytest.mark.parametrize("chunk", CHUNKS)
 @pytest.mark.parametrize("name, model", CASES, ids=[n for n, _ in CASES])
-def test_dumps_is_one_json_dumps_of_its_document(name, model):
-    """The streamed bytes equal ``json.dumps`` of the same document in one call."""
+def test_dumps_is_one_json_dumps_of_its_document(name, model, chunk, monkeypatch):
+    """The streamed bytes equal ``json.dumps`` of the same document in one call,
+    however many chunks the node table is written in."""
+    monkeypatch.setattr(ser._NodeTable, "_CHUNK", chunk)
     text = dumps(model, provenance=False)
+    assert text == _one_call(model)
     assert text == json.dumps(json.loads(text), allow_nan=False)
     indented = dumps(model, provenance=False, indent=2)
     assert indented == json.dumps(json.loads(text), allow_nan=False, indent=2)
+
+
+@pytest.mark.parametrize("chunk", (1, 64, 1000, ser._NodeTable._CHUNK))
+def test_a_corpus_model_is_byte_identical_in_any_number_of_chunks(chunk, monkeypatch):
+    """A real model (hda, 4069 nodes) over chunk sizes that split it 1-4069 ways."""
+    model = dm.from_nl(str(NL))
+    expected = _one_call(model)
+    monkeypatch.setattr(ser._NodeTable, "_CHUNK", chunk)
+    chunks = []
+    flush = ser._NodeTable._flush
+
+    def spy(self):
+        flush(self)
+        if len(self) > 1000:
+            chunks.append(len(self._chunks))
+
+    monkeypatch.setattr(ser._NodeTable, "_flush", spy)
+    text = dumps(model, provenance=False)
+    assert text == expected
+    assert max(chunks) == -(-len(json.loads(text)["nodes"]) // chunk)
+
+
+def _ignores_arg_model(terms: int):
+    """Atoms whose lowering ignores the argument: ``_tag_atom`` adds the argument's
+    nodes while the atom's own record is still open, so a flush in between must
+    stop before it (or the tag, added last, is dropped from the text)."""
+    from discopt.modeling.core import Constant
+    from discopt.operators import register_function
+
+    fn = register_function("mem1812_ignores_arg", lambda t: dm.exp(Constant(1.0)), replace=True)
+    m = dm.Model(f"open_record_{terms}")
+    x = m.continuous("x", shape=(3,), lb=-1.0, ub=1.0)
+    arg = x[0]
+    for i in range(terms):
+        arg = arg + (i + 0.5) * x[(i + 1) % 3]
+    m.minimize(fn(arg) + fn(fn(arg * 2.0)) + x[2])
+    return m
+
+
+@pytest.mark.parametrize(
+    "chunk, terms",
+    [(1, 10), (2, 10), (5, 10), (5, 300), (ser._NodeTable._CHUNK, 1400)],
+)
+def test_an_open_atom_record_is_not_flushed_before_its_tag(chunk, terms, monkeypatch):
+    """#1248's class: a dropped atom tag is sound but silently looser. With 1400
+    terms the argument is over 4096 nodes, so the default chunk fills inside the
+    open record too."""
+    monkeypatch.setattr(ser._NodeTable, "_CHUNK", chunk)
+    model = _ignores_arg_model(terms)
+    text = dumps(model, provenance=False)
+    nodes = json.loads(text)["nodes"]
+    if terms == 1400:
+        assert len(nodes) > ser._NodeTable._CHUNK
+    assert text == _one_call(model)
+    assert sum("atom" in nd for nd in nodes) == 3
+    assert dumps(loads(text), provenance=False) == text
 
 
 def test_save_writes_exactly_dumps(tmp_path):
@@ -92,6 +170,16 @@ def test_loads_keeps_the_node_table_as_text():
     assert isinstance(doc["nodes"], ser._NodeSpans)
     assert list(doc["nodes"]) == json.loads(text)["nodes"]
     assert doc["nodes"][17] == json.loads(text)["nodes"][17]
+
+
+@pytest.mark.parametrize("bad", [memoryview(b"{}"), None, 17, ["{}"]])
+def test_a_non_text_document_gets_json_loads_type_error(bad):
+    with pytest.raises(TypeError) as exc:
+        json.loads(bad)
+    with pytest.raises(TypeError) as ours:
+        loads(bad)
+    assert str(ours.value) == str(exc.value)
+    assert str(ours.value).startswith("the JSON object must be str, bytes or bytearray, not ")
 
 
 def _outcome(text):
