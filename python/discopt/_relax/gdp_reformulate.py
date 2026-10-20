@@ -2001,14 +2001,24 @@ def _reformulate_disjunction_hull(
     does: a disjunction nested in disjunct ``k`` is hulled first, on its own fresh
     selectors, and everything that emits -- its select-one row, its aggregation
     rows ``x = sum v``, its bound links and its hulled rows -- becomes rows of
-    disjunct ``k``. The child's selectors and disaggregated copies are **local** to
-    disjunct ``k``: they are not disaggregated again but, being zero whenever
-    ``y_k`` is, are already disjunct ``k``'s own copies. So they get the bound links
-    ``lb*y_k <= w <= ub*y_k`` and enter the parent's perspective as ``w / yhat_k``,
-    while every variable the child shares with the outside is disaggregated by the
-    parent as usual. Re-hulling then turns the child's ``sum y_c = 1`` into
-    ``sum y_c = y_k`` and its ``x = sum v`` into ``x_k = sum v``: the exact nested
-    hull at every integer point.
+    disjunct ``k``. The variables the child (and, recursively, its own children)
+    introduced -- selectors, disaggregated copies, a nested block's indicators --
+    are **local** to disjunct ``k``: they are not disaggregated again but, being
+    zero whenever ``y_k`` is, are already disjunct ``k``'s own copies, and enter the
+    parent's perspective as ``w / yhat_k``. Every variable the child shares with the
+    outside is disaggregated by the parent as usual. Re-hulling then turns the
+    child's ``sum y_c = 1`` into ``sum y_c = y_k`` and its ``x = sum v`` into
+    ``x_k = sum v``: the exact nested hull at every integer point.
+
+    A local needs no bound link of its own at the parent: each is tied to a selector
+    at the level that created it (a copy by ``dlb*y_c <= v <= dub*y_c``), and each
+    selector to ``y_k`` by its select row (the re-hulled ``sum y_c = y_k``, or a
+    block's ``sum == parent`` row), so ``w <= max(dub, 0)*y_k`` and its lower twin
+    are already implied. A local that also appears in a sibling disjunct (a nested
+    block's indicator used in a sibling's rows) cannot be disjunct ``k``'s copy
+    there, so it is treated as shared and disaggregated like any other variable --
+    exact too: at ``y_k = 1`` the sibling copies are pinned to 0, and at ``y_k = 0``
+    the variable itself is 0 (its select row), so the sibling sees its true value.
 
     Returns
     -------
@@ -2075,9 +2085,13 @@ def _reformulate_disjunction_hull(
                     prefix=f"{prefix}_d{k}_{item.name or j}",
                     child_selectors=child_selectors,
                 )
-                # A block's indicators are zero whenever y_k is (their ``sum ==
-                # parent`` row), so they are disjunct k's own, like fresh selectors.
-                local_k.update((v.name, v) for v in [*(own or []), *child_vars])
+                # A block's indicators -- the child's and, below it, its own
+                # children's -- are zero whenever y_k is (their ``sum == parent``
+                # rows), so they are disjunct k's own, like fresh selectors.
+                local_k.update(
+                    (v.name, v)
+                    for v in [*_nested_block_selectors(item, child_selectors), *child_vars]
+                )
                 rows_k.extend(child_cons)
                 new_vars.extend(child_vars)
             else:
@@ -2086,22 +2100,19 @@ def _reformulate_disjunction_hull(
         local.append(local_k)
 
     # --- Collect all variables across all disjuncts ---
-    # A child's variables are local to their disjunct, never disaggregated again.
+    # A child's variables are local to their disjunct, never disaggregated again --
+    # unless another disjunct uses one too (a nested block's indicator in a
+    # sibling's rows): no one copy is both, so it is shared, and disaggregated.
+    used = [
+        {n: v for con in rows_k for n, v in _collect_variables(con.body).items()} for rows_k in rows
+    ]
+    for k, local_k in enumerate(local):
+        for n in [n for n in local_k if any(n in used[j] for j in range(n_disjuncts) if j != k)]:
+            del local_k[n]
     local_names = {name for local_k in local for name in local_k}
     all_vars: dict[str, Variable] = {}
-    for k, rows_k in enumerate(rows):
-        for con in rows_k:
-            for n, v in _collect_variables(con.body).items():
-                if n not in local_names:
-                    all_vars[n] = v
-                elif n not in local[k]:
-                    # A nested block's indicator used in a sibling disjunct: there it
-                    # is a shared variable, here a local -- no one copy is both.
-                    raise ValueError(
-                        f"GDP hull reformulation of disjunction {prefix!r}: {n!r}, an "
-                        "indicator of a disjunction nested in one of its disjuncts, "
-                        f"also appears in disjunct {k}. Use gdp_method='big-m'."
-                    )
+    for used_k in used:
+        all_vars.update((n, v) for n, v in used_k.items() if n not in local_names)
 
     # --- Per-disjunct bounds and disaggregated variables ---
     # disjunct_bounds[k][var_name] = (dlb, dub). Only the disjunct's own rows bound
@@ -2200,32 +2211,16 @@ def _reformulate_disjunction_hull(
                     name=f"_hull_lb_{prefix}_{vname}_{k}",
                 )
             )
-        # A child's variable w is disjunct k's own copy: lb*y_k <= w <= ub*y_k. Its
-        # bounds hold 0 (a copy's [min(lb,0), max(ub,0)]; a selector's [0, 1]), so
-        # the links are valid, and at y_k = 0 they pin it to 0 as for any copy.
+    # A local w is zero whenever y_k is, so its bounds hold 0 (a copy's
+    # [min(lb,0), max(ub,0)]; a selector's [0, 1]). Its bound links are implied
+    # (see the docstring), so none is emitted here.
+    for k in range(n_disjuncts):
         for wname, w in local[k].items():
             wlb, wub = float(np.min(w.lb)), float(np.max(w.ub))
             if not (wlb <= 0.0 <= wub):
                 raise AssertionError(
                     f"hull of {prefix!r}: nested variable {wname!r} has bounds "
                     f"[{wlb:g}, {wub:g}], which exclude 0"
-                )
-            new_cons.append(
-                Constraint(
-                    body=w - _wrap(wub) * y_k,
-                    sense="<=",
-                    rhs=0.0,
-                    name=f"_hull_ub_{prefix}_{wname}_{k}",
-                )
-            )
-            if wlb < 0.0:
-                new_cons.append(
-                    Constraint(
-                        body=w - _wrap(wlb) * y_k,
-                        sense=">=",
-                        rhs=0.0,
-                        name=f"_hull_lb_{prefix}_{wname}_{k}",
-                    )
                 )
 
     # --- Constraint reformulation per disjunct ---
@@ -2333,6 +2328,22 @@ class HullVariableCoverageError(ValueError):
     Raised by :func:`_assert_hull_saw_every_variable`. See its docstring for why
     this is a refusal and not a best-effort reformulation.
     """
+
+
+def _nested_block_selectors(
+    dc: _DisjunctiveConstraint, child_selectors: Optional[dict[int, list[Variable]]]
+) -> list[Variable]:
+    """The indicators of ``dc`` and of every block nested below it (#1775 G2.1).
+
+    Only a nested ``add_disjunction`` block has them (``child_selectors``); a
+    disjunction hulled on fresh selectors returns those among its new variables.
+    """
+    out = list((child_selectors or {}).get(id(dc), []))
+    for disjunct in dc.disjuncts:
+        for item in disjunct:
+            if isinstance(item, _DisjunctiveConstraint):
+                out.extend(_nested_block_selectors(item, child_selectors))
+    return out
 
 
 def _assert_hull_saw_every_variable(dc: _DisjunctiveConstraint) -> None:

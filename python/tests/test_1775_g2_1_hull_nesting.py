@@ -177,9 +177,13 @@ def test_or_child_stays_on_big_m_and_says_so():
     assert r.status == "optimal" and r.objective == pytest.approx(6.0, abs=1e-6)
 
 
-def test_a_child_indicator_in_a_sibling_disjunct_is_refused():
-    """A nested block's indicator is local to its disjunct in the hull; used in a
-    sibling disjunct too, it would need to be both a local and a shared variable."""
+def _sibling():
+    """outer: A [x <= 3, inner: A1 [y >= 6] v A2 [y >= 8]] v B [x >= 7, x + y_A1 <= 9].
+
+    B reads the indicator of a block nested in A. Enumerated by hand (x, y in
+    [0, 10]; y_A1 = 0 whenever B holds): A&A1 x <= 3, y >= 6; A&A2 x <= 3, y >= 8;
+    B x in [7, 9], y free.
+    """
     m, x, y = g12._xy("sibling")
     a = m.make_disjunct("A")
     a.subject_to(x <= 3)
@@ -190,9 +194,63 @@ def test_a_child_indicator_in_a_sibling_disjunct_is_refused():
     b = m.make_disjunct("B")
     b.subject_to([x >= 7, x + a1.indicator.variable <= 9])
     m.add_disjunction([a, b], name="outer")
-    m.minimize(x + y)
-    with pytest.raises(ValueError, match="also appears in disjunct 1"):
-        reformulate_gdp(m, "hull")
+    return m, x, y
+
+
+SIBLING = [
+    (lambda x, y: x + y, 6.0),  # A&A1 (0, 6)
+    (lambda x, y: -x - y, -19.0),  # B (9, 10)
+    (lambda x, y: -x + 2 * y, -9.0),  # B (9, 0)
+    (lambda x, y: x - 3 * y, -30.0),  # A (0, 10)
+    (lambda x, y: (x - 2) ** 2 + (y - 3) ** 2, 9.0),  # A&A1 (2, 6)
+]
+
+
+@pytest.mark.parametrize("obj, truth", SIBLING)
+def test_a_child_indicator_in_a_sibling_disjunct_is_hulled(obj, truth):
+    """A nested block's indicator is local to its disjunct in the hull; read by a
+    sibling disjunct too, it is shared there instead, and disaggregated (exact: it
+    is 0 whenever the sibling holds). Fails before: ``ValueError: ... also appears
+    in disjunct 1. Use gdp_method='big-m'`` (and before G2.1 the shape solved, on
+    big-M with a ``UserWarning``)."""
+    m, x, y = _sibling()
+    m.minimize(obj(x, y))
+    r = _strict_solve(m)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(truth, abs=1e-6)
+
+
+def test_a_sibling_read_indicator_is_disaggregated():
+    """The outer hull gives ``A1_active`` (read by B) a copy in each disjunct."""
+    m, x, y = _sibling()
+    low = _strict_hull(m)
+    copies = {v.name for v in low._variables if "_v_" in v.name}
+    assert any(n.endswith("_v_A1_active_0") for n in copies), sorted(copies)
+    assert any(n.endswith("_v_A1_active_1") for n in copies), sorted(copies)
+
+
+def test_a_grandchild_indicator_is_local_to_the_outer_disjunct():
+    """The indicators of a block two levels down are local to A at the outer level,
+    like the child's own: no copy anywhere. Fails before: they were disaggregated at
+    the outer level, which only loosened the relaxation (B's copy was free in
+    ``[0, y_B]``, decoupling the indicator from A's copy of it)."""
+    m, x, y = g12._xy("grandchild")
+    a = m.make_disjunct("A")
+    a.subject_to(x <= 3)
+    a1, a2 = m.make_disjunct("A1"), m.make_disjunct("A2")
+    a2.subject_to(y <= 1)
+    a1a, a1b = m.make_disjunct("A1a"), m.make_disjunct("A1b")
+    a1a.subject_to(y >= 6)
+    a1b.subject_to(y >= 8)
+    a1.add_disjunction([a1a, a1b], name="gc")
+    a.add_disjunction([a1, a2], name="ch")
+    b = m.make_disjunct("B")
+    b.subject_to(x >= 7)
+    m.add_disjunction([a, b], name="outer")
+    low = _strict_hull(m)
+    names = {v.name for v in low._variables}
+    for ind in ("A1a_active", "A1b_active", "A1_active", "A2_active"):
+        assert not any(f"_v_{ind}_" in n for n in names), (ind, sorted(names))
 
 
 @pytest.mark.parametrize(
