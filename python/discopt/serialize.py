@@ -623,6 +623,10 @@ def _dec_axis(obj: Any) -> Any:
 # ── expression DAG ─────────────────────────────────────────────────────────
 
 
+#: ``json.dumps(obj, allow_nan=False)`` without building an encoder per call.
+_NODE_ENCODER = json.JSONEncoder(allow_nan=False).encode
+
+
 class _NodeTable:
     """Builds the flat node table, preserving DAG sharing by object identity.
 
@@ -631,10 +635,10 @@ class _NodeTable:
     every visited node so CPython cannot recycle an id mid-walk and alias two
     distinct nodes onto one table entry.
 
-    With ``stream=True`` (what :func:`dumps` uses) a node is kept as its JSON text,
-    not its dict: each record is encoded as soon as it is final and runs of them
-    are joined into chunks, so ``nodes`` stays empty and :meth:`json_parts` returns
-    the array. A dict per node was ~400 bytes against ~75 of text, and held the
+    With ``stream=True`` (what :func:`dumps` uses) the table is kept as JSON text,
+    not dicts: every ``_CHUNK`` records, the finished ones are encoded into one
+    chunk and dropped, so ``nodes`` stays empty and :meth:`json_parts` returns the
+    array. A dict per node was ~400 bytes against ~75 of text, and held the
     whole table at once -- 2.8-3.6 GB for a 7-9 M-node model, most of what
     ``dumps`` cost above the model itself (#1812). The text is what ``json.dumps``
     writes for the same dicts, byte for byte. A record is final only after
@@ -654,19 +658,26 @@ class _NodeTable:
         self._stream = stream
         self._count = 0
         self._chunks: list[str] = []
-        self._pending: list[Optional[str]] = []
+        self._pending: list[dict] = []
+        # Table indices whose record is still open (inside its `_tag_atom`).
+        self._open: list[int] = []
 
     def __len__(self) -> int:
         return self._count
 
     def _flush(self) -> None:
-        done = 0
-        for text in self._pending:
-            if text is None:
-                break
-            done += 1
-        if done:
-            self._chunks.append(", ".join(self._pending[:done]))  # type: ignore[arg-type]
+        """Encode the finished prefix of the pending records as one chunk.
+
+        A record is open while its ``_tag_atom`` runs; records appended inside
+        that call come later in the table and finish first, so the open ones are
+        a stack and everything before the oldest is final. One ``json.dumps`` of
+        the list -- one C call, not one per node -- writes ``[`` + each record as
+        it would be alone joined by ``", "`` + ``]``; the brackets are dropped.
+        """
+        flushed = self._count - len(self._pending)
+        done = (self._open[0] - flushed) if self._open else len(self._pending)
+        if done > 0:
+            self._chunks.append(_NODE_ENCODER(self._pending[:done])[1:-1])
             del self._pending[:done]
 
     def json_parts(self) -> list[str]:
@@ -722,16 +733,15 @@ class _NodeTable:
             # node is already at it.
             self._count += 1
             if self._stream:
-                self._pending.append(None)
-            else:
-                self.nodes.append(enc)
-            self._tag_atom(node, enc)
-            if self._stream:
-                base = index - (self._count - len(self._pending))
-                # Same call `dumps` makes on the whole document, so the same bytes.
-                self._pending[base] = json.dumps(enc, allow_nan=False)
+                self._pending.append(enc)
+                self._open.append(index)
+                self._tag_atom(node, enc)
+                self._open.pop()
                 if len(self._pending) >= self._CHUNK:
                     self._flush()
+            else:
+                self.nodes.append(enc)
+                self._tag_atom(node, enc)
         return self._seen[id(expr)]
 
     def _tag_atom(self, node: Any, enc: dict) -> None:
@@ -3516,6 +3526,9 @@ class _FastPathMiss(Exception):
 _JSON_WS = re.compile(r"[ \t\n\r]*")
 
 
+_WS_CHARS = frozenset(" \t\n\r")
+
+
 def _skip_ws(text: str, i: int) -> int:
     """Index of the first non-whitespace character at or after *i*."""
     m = _JSON_WS.match(text, i)
@@ -3598,6 +3611,9 @@ def _scan_nodes(text: str, i: int) -> tuple:
         record, i = decode(text, i)  # parsed, checked and dropped: only the offset stays
         if not has_atom and isinstance(record, dict) and "atom" in record:
             has_atom = True
+        if text.startswith(", ", i) and text[i + 2 : i + 3] not in _WS_CHARS:
+            i += 2  # what every writer emits; the general path below is the same grammar
+            continue
         i = _skip_ws(text, i)
         if text[i : i + 1] == ",":
             i = _skip_ws(text, i + 1)

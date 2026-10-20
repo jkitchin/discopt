@@ -158,10 +158,16 @@ def test_fast_path_fails_and_loads_exactly_like_json_loads(doc, monkeypatch):
 
 
 def test_a_document_with_atom_tags_retags_on_the_fast_path():
-    """``has_atom`` stands in for a second decode of the table in ``_retag_atoms``."""
-    case = next((m for n, m in CASES if n == "registered_atom"), None)
-    if case is None:
-        pytest.skip("no registered-atom case in this build")
-    text = dumps(case, provenance=False)
+    """``has_atom`` stands in for a second decode of the table in ``_retag_atoms``.
+
+    Built here, not at import: another test may re-register the atom's name in
+    between, and a stale registration is (rightly) not written as a tag.
+    """
+    try:
+        model, _ = reg.CASES["registered_atom"]()
+    except Exception as exc:  # noqa: BLE001 - this build cannot make the case
+        pytest.skip(f"no registered-atom case in this build: {exc}")
+    text = dumps(model, provenance=False)
+    assert '"atom"' in text
     assert ser._parse_document(text)["nodes"].has_atom
     assert dumps(loads(text), provenance=False) == text
