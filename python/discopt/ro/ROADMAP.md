@@ -26,10 +26,12 @@ multi-period example is needed to demonstrate the value.
 expression trees. An expression simplifier would improve solver performance
 on reformulated models.
 
-**Mixed-sign vector constants.** Sign tracking uses `np.sign(np.sum(value))`
-to determine the sign of a constant vector, which is incorrect for vectors
-with mixed-sign components (e.g., `[-3, 1, 2]` sums to 0, defaulting to +1).
-Per-component sign tracking would fix this.
+**Mixed-sign vector constants (fixed, #1831).** Sign tracking used
+`np.sign(np.sum(value))` for a constant vector, so a mixed-sign multiplier
+certified non-robust points. Constant multipliers (`*`, `/`, `@`) are now
+signed element-wise; a mixed-sign one is split into its positive and negative
+parts. A parameter element that enters one row through several coefficients of
+opposite sign is worst-cased per occurrence -- sound, possibly conservative.
 
 ## Future Work (roughly by priority)
 

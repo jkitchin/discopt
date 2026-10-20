@@ -9,14 +9,15 @@ The sign starts at +1 at the tree root and flips through ``-`` (subtraction)
 and unary negation nodes.  Multiplication by a negative constant also flips
 the sign.
 
-.. note::
-
-   The sign determination for constant multipliers uses
-   ``np.sign(np.sum(value))``, which collapses a vector to a single scalar
-   sign.  This is correct when all components share the same sign (the
-   common case for cost coefficients, demands, etc.) but can be inaccurate
-   for mixed-sign constant vectors.  A future release may add per-component
-   sign tracking for full element-wise correctness.
+Constant multipliers (``c * e``, ``e * c``, ``e / c``, ``C @ e``, ``e @ C``)
+are signed element-wise, never by a fold such as ``np.sign(np.sum(c))``
+(#1831). A constant whose nonzero entries share one sign flips (or keeps) the
+scalar sign as before. A *mixed-sign* constant is split exactly as
+``c = c+ + c-`` (``c+ = max(c, 0)``, ``c- = min(c, 0)``) and each part is
+robustified with its own sign, so every element of ``e`` is substituted at the
+worst-case bound for the sign of its own coefficient. Each occurrence of a
+parameter is worst-cased independently, which is conservative (sound) in
+general and exact when every parameter element enters the row once, affinely.
 """
 
 from __future__ import annotations
@@ -90,28 +91,38 @@ def sign_tracking_substitute(
                 expr.right, wc_lower, wc_upper, param_names, maximize, sign * -1
             )
         elif expr.op == "*":
-            # Propagate sign through multiplication only when one side is a
-            # constant (the most common case: scalar * variable).
+            # Propagate sign through multiplication by a constant-valued side
+            # (the most common case: scalar * variable), element-wise (#1831).
+            if _needs_multiplier_sign(expr.left, expr.right, param_names):
+                return _signed_constant_product(
+                    expr.left,
+                    expr.right,
+                    lambda c, e: BinaryOp("*", c, e),
+                    wc_lower,
+                    wc_upper,
+                    param_names,
+                    maximize,
+                    sign,
+                )
+            if _needs_multiplier_sign(expr.right, expr.left, param_names):
+                return _signed_constant_product(
+                    expr.right,
+                    expr.left,
+                    lambda c, e: BinaryOp("*", e, c),
+                    wc_lower,
+                    wc_upper,
+                    param_names,
+                    maximize,
+                    sign,
+                )
             if isinstance(expr.left, Constant):
-                left_sign = int(np.sign(np.sum(expr.left.value)))
                 nl = expr.left
                 nr = sign_tracking_substitute(
-                    expr.right,
-                    wc_lower,
-                    wc_upper,
-                    param_names,
-                    maximize,
-                    sign * (left_sign or 1),
+                    expr.right, wc_lower, wc_upper, param_names, maximize, sign
                 )
             elif isinstance(expr.right, Constant):
-                right_sign = int(np.sign(np.sum(expr.right.value)))
                 nl = sign_tracking_substitute(
-                    expr.left,
-                    wc_lower,
-                    wc_upper,
-                    param_names,
-                    maximize,
-                    sign * (right_sign or 1),
+                    expr.left, wc_lower, wc_upper, param_names, maximize, sign
                 )
                 nr = expr.right
             else:
@@ -140,8 +151,23 @@ def sign_tracking_substitute(
                 nr = sign_tracking_substitute(
                     expr.right, wc_lower, wc_upper, param_names, maximize, sign
                 )
+        elif expr.op == "/" and _needs_multiplier_sign(expr.right, expr.left, param_names):
+            # ``e / d`` with a constant-valued divisor is ``e * (1/d)``: the
+            # sign of each entry of ``d`` is the sign of its coefficient. A
+            # negative divisor used to propagate without a flip (#1831 audit).
+            return _signed_constant_product(
+                expr.right,
+                expr.left,
+                lambda d, e: BinaryOp("/", e, d),
+                wc_lower,
+                wc_upper,
+                param_names,
+                maximize,
+                sign,
+                reciprocal=True,
+            )
         else:
-            # Division, power: propagate sign through without flip.
+            # Division by a non-constant, power: propagate sign through without flip.
             nl = sign_tracking_substitute(
                 expr.left, wc_lower, wc_upper, param_names, maximize, sign
             )
@@ -167,6 +193,32 @@ def sign_tracking_substitute(
         return FunctionCall(expr.func_name, *new_args)
 
     if isinstance(expr, MatMulExpression):
+        # ``C @ e`` / ``e @ C`` with a constant-valued ``C``: entry ``C[i, j]``
+        # is the coefficient of ``e[j]`` in row ``i``, so its sign must reach
+        # ``e`` just as a ``*`` multiplier's does. Passing the sign through
+        # unchanged ignored every negative entry (#1831 audit).
+        if _needs_multiplier_sign(expr.left, expr.right, param_names):
+            return _signed_constant_product(
+                expr.left,
+                expr.right,
+                lambda c, e: MatMulExpression(c, e),
+                wc_lower,
+                wc_upper,
+                param_names,
+                maximize,
+                sign,
+            )
+        if _needs_multiplier_sign(expr.right, expr.left, param_names):
+            return _signed_constant_product(
+                expr.right,
+                expr.left,
+                lambda c, e: MatMulExpression(e, c),
+                wc_lower,
+                wc_upper,
+                param_names,
+                maximize,
+                sign,
+            )
         nl = sign_tracking_substitute(expr.left, wc_lower, wc_upper, param_names, maximize, sign)
         nr = sign_tracking_substitute(expr.right, wc_lower, wc_upper, param_names, maximize, sign)
         return MatMulExpression(nl, nr)
@@ -190,6 +242,175 @@ def sign_tracking_substitute(
 
     # Variable, unknown node: return as-is.
     return expr
+
+
+def _needs_multiplier_sign(factor, other, param_names: set[str]) -> bool:
+    """True when *factor* is a constant-valued multiplier of an uncertain *other*.
+
+    Only then does the sign of *factor* decide a worst case. A factor that
+    mentions a variable or an uncertain parameter is not a constant multiplier
+    (those products are handled by the bilinear routing and the generic branch).
+    """
+    from discopt.modeling.core import Constant
+
+    if not _contains_uncertain_param(other, param_names):
+        return False
+    if isinstance(factor, Constant):
+        return True
+    from discopt.ro.formulations.box import _contains_variable
+
+    return not _contains_variable(factor) and not _contains_uncertain_param(factor, param_names)
+
+
+def _signed_constant_product(
+    factor,
+    other,
+    rebuild,
+    wc_lower,
+    wc_upper,
+    param_names: set[str],
+    maximize: bool,
+    sign: int,
+    *,
+    reciprocal: bool = False,
+):
+    """Robustify ``rebuild(factor, other)`` where *factor* is constant-valued.
+
+    The sign of each entry of *factor* is the sign of the coefficient it
+    applies to (for ``reciprocal=True``, i.e. a divisor, the sign of ``1/d``,
+    which is the same). If the nonzero entries share one sign, that sign is
+    folded into ``sign`` and the node is rebuilt as before. If they are mixed,
+    ``factor`` is split exactly into its positive and negative parts and each
+    part is robustified with its own sign (#1831) -- the former
+    ``np.sign(np.sum(c))`` gave all entries the sign of the sum, substituting
+    every element whose coefficient had the other sign at its *best* case.
+    """
+    from discopt.modeling.core import BinaryOp, Constant
+
+    value = np.asarray(eval_constant_expr(factor), dtype=np.float64)
+    has_pos = bool(np.any(value > 0))
+    has_neg = bool(np.any(value < 0))
+
+    if not (has_pos and has_neg):
+        factor_sign = -1 if has_neg else 1
+        new_other = sign_tracking_substitute(
+            other, wc_lower, wc_upper, param_names, maximize, sign * factor_sign
+        )
+        return rebuild(factor, new_other)
+
+    if reciprocal:
+        if np.any(value == 0):
+            raise ValueError(
+                "Robust counterpart: a constant divisor of an uncertain term has "
+                "zero entries; the division is undefined."
+            )
+        # e / d == e * (1/d); split 1/d by sign and multiply.
+        recip = 1.0 / value
+        pos = Constant(np.where(recip > 0, recip, 0.0))
+        neg = Constant(np.where(recip < 0, recip, 0.0))
+
+        def rebuild_part(c, e):
+            return BinaryOp("*", e, c)
+
+    else:
+        pos = Constant(np.where(value > 0, value, 0.0))
+        neg = Constant(np.where(value < 0, value, 0.0))
+        rebuild_part = rebuild
+    pos_term = rebuild_part(
+        pos, sign_tracking_substitute(other, wc_lower, wc_upper, param_names, maximize, sign)
+    )
+    neg_term = rebuild_part(
+        neg, sign_tracking_substitute(other, wc_lower, wc_upper, param_names, maximize, -sign)
+    )
+    return BinaryOp("+", pos_term, neg_term)
+
+
+_NUMPY_FUNCS = {
+    "abs": np.abs,
+    "exp": np.exp,
+    "log": np.log,
+    "log10": np.log10,
+    "log2": np.log2,
+    "log1p": np.log1p,
+    "sqrt": np.sqrt,
+    "sin": np.sin,
+    "cos": np.cos,
+    "tan": np.tan,
+    "sinh": np.sinh,
+    "cosh": np.cosh,
+    "tanh": np.tanh,
+    "asin": np.arcsin,
+    "acos": np.arccos,
+    "atan": np.arctan,
+    "asinh": np.arcsinh,
+    "acosh": np.arccosh,
+    "atanh": np.arctanh,
+    "sign": np.sign,
+}
+
+
+def eval_constant_expr(expr) -> np.ndarray:
+    """Evaluate a variable-free expression to its full numpy value.
+
+    Every node is evaluated with numpy semantics (broadcasting, ``axis``,
+    indexing) so a vector constant is never collapsed to a scalar. A node this
+    evaluator does not know raises ``NotImplementedError`` rather than
+    contributing a guessed value -- the former polyhedral evaluator returned
+    ``float(np.sum(value))`` for a vector constant and ``0.0`` for any node it
+    did not recognise, so ``sum(c * p)`` got a zero coefficient (#1831 audit).
+    """
+    from discopt.modeling.core import (
+        BinaryOp,
+        Constant,
+        FunctionCall,
+        IndexExpression,
+        MatMulExpression,
+        Parameter,
+        SumExpression,
+        SumOverExpression,
+        UnaryOp,
+    )
+
+    if isinstance(expr, (Constant, Parameter)):
+        return np.asarray(expr.value, dtype=np.float64)
+    if isinstance(expr, BinaryOp):
+        lv = eval_constant_expr(expr.left)
+        rv = eval_constant_expr(expr.right)
+        if expr.op == "+":
+            return np.asarray(lv + rv)
+        if expr.op == "-":
+            return np.asarray(lv - rv)
+        if expr.op == "*":
+            return np.asarray(lv * rv)
+        if expr.op == "/":
+            return np.asarray(lv / rv)
+        if expr.op == "**":
+            return np.asarray(np.power(lv, rv))
+    elif isinstance(expr, UnaryOp):
+        v = eval_constant_expr(expr.operand)
+        if expr.op == "neg":
+            return np.asarray(-v)
+        if expr.op == "abs":
+            return np.asarray(np.abs(v))
+    elif isinstance(expr, MatMulExpression):
+        return np.asarray(eval_constant_expr(expr.left) @ eval_constant_expr(expr.right))
+    elif isinstance(expr, SumExpression):
+        return np.asarray(np.sum(eval_constant_expr(expr.operand), axis=expr.axis))
+    elif isinstance(expr, SumOverExpression):
+        total = np.asarray(0.0)
+        for t in expr.terms:
+            total = total + eval_constant_expr(t)
+        return np.asarray(total)
+    elif isinstance(expr, IndexExpression):
+        return np.asarray(eval_constant_expr(expr.base)[expr.index])
+    elif isinstance(expr, FunctionCall) and expr.func_name in _NUMPY_FUNCS:
+        if len(expr.args) == 1:
+            return np.asarray(_NUMPY_FUNCS[expr.func_name](eval_constant_expr(expr.args[0])))
+    raise NotImplementedError(
+        f"Robust counterpart: cannot evaluate the constant sub-expression {expr!r} "
+        f"({type(expr).__name__}) numerically, so the sign of the coefficient it "
+        "applies to an uncertain parameter is unknown. Refusing rather than guessing."
+    )
 
 
 def substitute_param(expr, param_name: str, replacement):
