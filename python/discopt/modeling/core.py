@@ -4472,6 +4472,38 @@ BOUND_SOURCES = frozenset(
 from discopt.status import is_local_status as _is_local_status  # noqa: E402
 
 
+def _refuse_retired_variable(var: Any, model: Optional["Model"]) -> None:
+    """Refuse a Variable of *model* that is no longer one of its columns.
+
+    ``result.x`` is keyed by name, and a name can outlive its Variable: a pass
+    that substitutes a variable out (``AffineDecisionRule.apply`` replaces ``y``
+    by its affine policy) drops it from ``model._variables`` and frees the name,
+    so a later ``m.continuous("y", ...)`` is legal. A name-only lookup then
+    resolved the retired ``y`` to the NEW ``y``'s value without a word. A
+    Variable that belongs to the solved model is therefore identified by
+    position and identity -- ``model._variables[var._index] is var`` -- before
+    its name is consulted. A Variable of a different model (a clone's source,
+    a rebuilt model) has no identity in this one and keeps the by-name lookup.
+
+    ``result._model`` is the live model, not a snapshot, so a variable
+    substituted out *after* the solve is refused too: loud where the stored
+    value may still be right, never silent where it is wrong.
+    """
+    if model is None or not isinstance(var, Variable) or var.model is not model:
+        return
+    variables = model._variables
+    idx = var._index
+    if 0 <= idx < len(variables) and variables[idx] is var:
+        return
+    raise KeyError(
+        f"Variable {var.name!r} is no longer a variable of the solved model "
+        "(substituted out by a reformulation such as AffineDecisionRule.apply), so "
+        "the solution has no value for it. A variable now carrying the same name, "
+        "if any, is a different variable; read the policy or substitution that "
+        "replaced it instead."
+    )
+
+
 def _value_not_a_variable_message(node: Any) -> str:
     """Why ``SolveResult.value(node)`` cannot serve a non-``Variable`` argument.
 
@@ -5301,14 +5333,18 @@ class SolveResult:
         TypeError
             If *var* is an expression rather than a variable.
         KeyError
-            If *var* names no variable of the solved model.
+            If *var* names no variable of the solved model, or is a Variable of
+            the solved model that a reformulation has since substituted out
+            (its name may now belong to a different variable).
         """
         if self.x is None:
             raise ValueError("No solution available")
-        # Resolve by name first: the lookup is what it always was, so every
-        # handle that names a column of the solved model -- Variable, IndexedVar,
-        # anything else carrying its name -- keeps working. Only a lookup that
-        # WOULD have raised reaches the diagnosis below.
+        _refuse_retired_variable(var, self._model)
+        # Resolve by name: every handle that names a column of the solved model
+        # -- Variable, IndexedVar, anything else carrying its name -- keeps
+        # working. A Variable OF the solved model was checked by identity above,
+        # so its name can no longer reach a different column (#1799 follow-up).
+        # Only a lookup that WOULD have raised reaches the diagnosis below.
         name = getattr(var, "name", None)
         if isinstance(name, str) and name in self.x:
             return self.x[name]
