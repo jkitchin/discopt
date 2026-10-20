@@ -304,7 +304,8 @@ def _builder_hessian_certain_unproved(model: Model) -> bool:
 
     Read from the ``add_quadratic_objective`` block, before any classification or
     extraction. The builder's Hessian is ``S = triu(Q) + triu(Q, 1)'`` (only the
-    upper triangle is read, so no two entries are summed and none can cancel), and
+    upper triangle is read, so no two entries are summed and none can cancel;
+    ``add_quadratic_objective`` stores a symmetric ``Q`` since #1818, so ``S == Q``), and
     ``extract_qp_data`` returns exactly ``+S`` (minimize) or ``-S`` (maximize)
     embedded at the variable's columns with a zero slack block --
     ``test_builder_prediction_matches_extracted_hessian`` pins that. ``psd_certified``

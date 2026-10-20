@@ -89,9 +89,9 @@ def test_singular_psd_builder_qp_on_pounce_nlp_minimises_the_real_objective():
 
 @pytest.mark.parametrize("sym", [False, True])
 def test_objective_expression_matches_the_builder_convention(sym):
-    """``_objective_expression`` is the builder's ``0.5 x'Sx + c'x + k`` with
-    ``S = triu(Q) + striu(Q)'`` -- including for a non-symmetric Q, where the
-    builder reads only the upper triangle."""
+    """``_objective_expression`` is the builder's ``0.5 x'Sx + c'x + k``. For a
+    non-symmetric Q that is ``0.5 x'Qx`` (#1818: Q is stored as its symmetric
+    part; it used to be ``S = triu(Q) + striu(Q)'``, a different objective)."""
     rng = np.random.default_rng(3)
     Q = rng.normal(size=(3, 3))
     if sym:
@@ -100,7 +100,7 @@ def test_objective_expression_matches_the_builder_convention(sym):
     m = dm.Model("conv")
     x = m.continuous("x", shape=(3,), lb=-5, ub=5)
     m.add_quadratic_objective(Q, c, x, constant=1.25)
-    Sm = np.triu(Q) + np.triu(Q, 1).T
+    Sm = 0.5 * Q + 0.5 * Q.T
     from discopt._tape_nlp_evaluator import make_evaluator
 
     ev = make_evaluator(m)

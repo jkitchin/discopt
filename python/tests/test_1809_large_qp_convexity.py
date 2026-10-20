@@ -134,7 +134,10 @@ def test_builder_prediction_matches_extracted_hessian(kind, sense):
     x = m.continuous("x", shape=(n,), lb=-1, ub=1)
     m.add_linear_constraints(sp.csr_matrix(np.ones((2, n))), x, "<=", np.ones(2))
     m.add_quadratic_objective(Q, np.ones(n), x, sense=sense)
-    S = (sp.triu(Q, 0) + sp.triu(Q, 1).T).toarray()
+    # #1818: a non-symmetric Q is stored as its symmetric part (same x'Qx); the
+    # builder then reads S = triu + triu' of that, which is the matrix itself.
+    Qd = Q.toarray()
+    S = Qd if np.array_equal(Qd, Qd.T) else 0.5 * Qd + 0.5 * Qd.T
     qd = extract_qp_data(m)
     E = qd.Q.toarray() if sp.issparse(qd.Q) else np.asarray(qd.Q)
     expected = np.zeros_like(E)

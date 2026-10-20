@@ -234,19 +234,19 @@ class TestNLRoundTrip:
     def test_quadratic_builder_multi_term_with_constant_roundtrip(self, tmp_path):
         """Multi-term Q (diag + cross) plus a constant emits a SUMLIST body.
 
-        The builder reads only triu(Q) and reflects it, so the exported
-        objective is 0.5 x'(triu(Q)+striu(Q)')x + constant.
+        A non-symmetric Q is stored as its symmetric part (#1818), so the
+        exported objective is 0.5 x'Qx + c'x + constant.
         """
         m = dm.Model("rt_quad2")
         x = m.continuous("x", shape=(2,), lb=0.0, ub=1.0)
-        q_mat = np.array([[2.0, 1.0], [0.0, 4.0]])  # triu; reflected to symmetric
+        q_mat = np.array([[2.0, 1.0], [0.0, 4.0]])  # upper-only; symmetric part below
         m.add_quadratic_objective(q_mat, np.array([0.5, 0.0]), x, constant=3.0)
         writer, _ = _write_and_reload(m, tmp_path)
         assert "o54" in writer.write()  # SUMLIST body
         _writer, reloaded = _write_and_reload(m, tmp_path)
         perm = _nl_perm(m, writer)
         ev2 = NLPEvaluator(reloaded)
-        s_mat = np.array([[2.0, 1.0], [1.0, 4.0]])
+        s_mat = np.array([[2.0, 0.5], [0.5, 4.0]])
         for xv in _sample_points(m, n_points=3, seed=3):
             expected = 0.5 * xv @ s_mat @ xv + 0.5 * xv[0] + 3.0
             assert ev2.evaluate_objective(xv[perm]) == pytest.approx(expected, abs=1e-9)

@@ -1216,9 +1216,9 @@ pub fn parse_nl_full(content: &str) -> Result<ParsedNl, NlParseError> {
                                 var_nodes.len()
                             )));
                         };
-                        if (coeff - 1.0).abs() < 1e-15 {
+                        if coeff == 1.0 {
                             lin_terms.push(operand);
-                        } else if (coeff + 1.0).abs() < 1e-15 {
+                        } else if coeff == -1.0 {
                             lin_terms.push(arena.intern(ExprNode::UnaryOp {
                                 op: UnOp::Neg,
                                 operand,
@@ -1313,9 +1313,9 @@ pub fn parse_nl_full(content: &str) -> Result<ParsedNl, NlParseError> {
                 if coeff == 0.0 {
                     continue;
                 }
-                if (coeff - 1.0).abs() < 1e-15 {
+                if coeff == 1.0 {
                     lin_terms.push(var_nodes[vi]);
-                } else if (coeff + 1.0).abs() < 1e-15 {
+                } else if coeff == -1.0 {
                     let neg = arena.intern(ExprNode::UnaryOp {
                         op: UnOp::Neg,
                         operand: var_nodes[vi],
@@ -1514,9 +1514,10 @@ pub fn parse_nl_full(content: &str) -> Result<ParsedNl, NlParseError> {
     })
 }
 
-/// Check if an ExprId is a zero constant.
+/// Check if an ExprId is a zero constant. Exactly zero (#1817): a constant
+/// below an absolute threshold is part of the model and is kept.
 fn is_zero_constant(arena: &ExprArena, id: ExprId) -> bool {
-    matches!(arena.get(id), ExprNode::Constant(v) if v.abs() < 1e-15)
+    matches!(arena.get(id), ExprNode::Constant(v) if *v == 0.0)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1976,6 +1977,28 @@ pub fn parse_nl_file_full(path: &str) -> Result<ParsedNl, NlParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // #1817: a linear coefficient within 1e-15 of +-1 was snapped to +-1, and a
+    // nonlinear part below 1e-15 was treated as zero. Written by discopt's own
+    // `.nl` exporter, with `C0`'s nonlinear part set to `n1e-17`.
+    #[test]
+    fn coefficients_near_one_and_tiny_constants_are_exact() {
+        let a = 1.0 - 2.0_f64.powi(-52);
+        let text = "g3 1 1 0\n 2 2 1 0 2\n 0 0\n 0 0\n 0 0 0\n 0 0 0 1 0\n \
+                    0 0 0 0 0\n 4 2\n 0 0\n 0 0 0 0 0\nC0\nn1e-17\nC1\nn0\nO0 0\n\
+                    n0\nr\n4 0.5\n4 -0.5\nb\n0 0.0 1.0\n0 0.0 1.0\nk1\n2\nJ0 2\n\
+                    0 0.9999999999999998\n1 1e-17\nJ1 2\n0 -0.9999999999999998\n1 -1.0\n\
+                    G0 2\n0 0.9999999999999998\n1 -0.9999999999999998\n";
+        let m = parse_nl(text).expect("parses");
+        let c0 = m.constraints[0].body;
+        let c1 = m.constraints[1].body;
+        // Snapping `a` to 1 would give exactly 1.0 / -1.0 here.
+        assert_eq!(m.arena.evaluate(c1, &[1.0, 0.0]), -a);
+        assert_eq!(m.evaluate_objective(&[0.0, 1.0]), -a);
+        // Dropping the 1e-17 nonlinear part would give exactly 0.0 here.
+        assert_eq!(m.arena.evaluate(c0, &[0.0, 0.0]), 1e-17);
+        assert_eq!(m.arena.evaluate(c0, &[1.0, 0.0]), a + 1e-17);
+    }
 
     /// Generate a simple linear .nl file:
     /// min 2*x + 3*y  s.t. x + y <= 10,  0 <= x <= 100, 0 <= y <= 100

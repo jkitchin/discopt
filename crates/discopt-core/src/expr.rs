@@ -798,8 +798,8 @@ impl ModelBuilder {
 
                     let idx_node = self.get_index_node(var_idx, col);
 
-                    if (val - 1.0).abs() < 1e-15 {
-                        // Coefficient is 1.0, skip multiplication
+                    if val == 1.0 {
+                        // Coefficient is exactly 1.0, skip multiplication (#1813)
                         terms.push(idx_node);
                     } else {
                         let const_node = self.arena.add(ExprNode::Constant(val));
@@ -840,11 +840,11 @@ impl ModelBuilder {
         let mut terms = Vec::new();
 
         for (j, &cj) in c.iter().enumerate() {
-            if cj.abs() < 1e-15 {
+            if cj == 0.0 {
                 continue;
             }
             let idx_node = self.get_index_node(var_idx, j);
-            if (cj - 1.0).abs() < 1e-15 {
+            if cj == 1.0 {
                 terms.push(idx_node);
             } else {
                 let const_node = self.arena.add(ExprNode::Constant(cj));
@@ -865,7 +865,7 @@ impl ModelBuilder {
             } else {
                 self.arena.add(ExprNode::SumOver { terms })
             };
-            if constant.abs() < 1e-15 {
+            if constant == 0.0 {
                 lin
             } else {
                 let c_node = self.arena.add(ExprNode::Constant(constant));
@@ -905,7 +905,11 @@ impl ModelBuilder {
             for k in row_start..row_end {
                 let j = q_indices[k];
                 let qij = q_data[k];
-                if qij.abs() < 1e-15 {
+                // #1813: coefficients are stored exactly as given. Only an exact zero
+                // is skipped and only an exact 1.0 drops its multiply; an absolute
+                // tolerance here changed the model the solver and the convexity
+                // certificate see (a diagonal of 2 - 2^-50 became 2).
+                if qij == 0.0 {
                     continue;
                 }
                 // Only process upper triangle (i <= j) to avoid double-counting
@@ -922,7 +926,7 @@ impl ModelBuilder {
                     left: xi,
                     right: xj,
                 });
-                if (coeff - 1.0).abs() < 1e-15 {
+                if coeff == 1.0 {
                     terms.push(prod);
                 } else {
                     let c_node = self.arena.add(ExprNode::Constant(coeff));
@@ -937,11 +941,11 @@ impl ModelBuilder {
 
         // Linear terms: c'x
         for (j, &cj) in c.iter().enumerate() {
-            if cj.abs() < 1e-15 {
+            if cj == 0.0 {
                 continue;
             }
             let idx_node = self.get_index_node(var_idx, j);
-            if (cj - 1.0).abs() < 1e-15 {
+            if cj == 1.0 {
                 terms.push(idx_node);
             } else {
                 let const_node = self.arena.add(ExprNode::Constant(cj));
@@ -961,7 +965,7 @@ impl ModelBuilder {
             } else {
                 self.arena.add(ExprNode::SumOver { terms })
             };
-            if constant.abs() < 1e-15 {
+            if constant == 0.0 {
                 body
             } else {
                 let c_node = self.arena.add(ExprNode::Constant(constant));

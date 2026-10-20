@@ -2635,61 +2635,75 @@ def _is_linear(expr: Expression) -> bool:
     any nonlinear operation (**, FunctionCall, bilinear terms).
     False negatives are safe (they cause fallback to perspective functions).
     """
-    if isinstance(expr, (Variable, Constant)):
-        return True
-    if isinstance(expr, IndexExpression):
-        return True
-    if isinstance(expr, UnaryOp):
-        if expr.op in ("neg", "-"):
-            return _is_linear(expr.operand)
-        return False
-    if isinstance(expr, BinaryOp):
-        if expr.op in ("+", "-"):
-            return _is_linear(expr.left) and _is_linear(expr.right)
-        if expr.op == "*":
-            # Linear only if at least one side is a constant
-            if isinstance(expr.left, Constant) or isinstance(expr.right, Constant):
-                return _is_linear(expr.left) and _is_linear(expr.right)
+    # #1814: an explicit worklist, not one Python frame per level. A loop-built
+    # ``x[0] + ... + x[2499]`` overflowed here when ``Model.complementarity`` asked
+    # whether its operand needs a lift, at build time, outside any solve-time
+    # recursion gate. The predicate is "every node reached passes its local test",
+    # so the visiting order cannot change the answer.
+    stack = [expr]
+    seen: set[int] = set()
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, (Variable, Constant, IndexExpression)):
+            continue
+        if isinstance(node, UnaryOp):
+            if node.op not in ("neg", "-"):
+                return False
+            stack.append(node.operand)
+            continue
+        if isinstance(node, BinaryOp):
+            if node.op in ("+", "-"):
+                stack.extend((node.left, node.right))
+            elif node.op == "*":
+                # Linear only if at least one side is a constant
+                if not (isinstance(node.left, Constant) or isinstance(node.right, Constant)):
+                    return False
+                stack.extend((node.left, node.right))
+            elif node.op == "/":
+                # x / constant is linear
+                if not isinstance(node.right, Constant):
+                    return False
+                stack.append(node.left)
+            else:
+                # ** is always nonlinear
+                return False
+            continue
+        if isinstance(node, FunctionCall):
             return False
-        if expr.op == "/":
-            # x / constant is linear
-            if isinstance(expr.right, Constant):
-                return _is_linear(expr.left)
+        # #1154: the indexed summation Σ[t0, t1, ...] IS linear when every term is,
+        # and is admitted as such (``DISCOPT_GDP_SUMOVER``, default ON) — but only
+        # because the whole walker family moved with it. The ORDER is the lesson.
+        #
+        # ``_is_linear`` is a shared gate with ~10 consumers, and several read a True
+        # as "and I can therefore take this apart". #1039's first attempt widened
+        # this predicate ALONE, while the hull substitution family
+        # (``_hull_linear_substitute`` → ``_substitute_vars`` → ``_collect_variables``)
+        # and ``_bound_expression`` still had no case for the node. ``all_vars`` came
+        # back empty, so hull emitted ``Σ[3 terms] - (0 * y0) <= 0`` — the disjunct
+        # body imposed GLOBALLY, its selector coefficient collapsed to zero and the
+        # disaggregated variables never created. That cut off the other mode and
+        # certified ``optimal`` at -3.0 against a true -30.0: a dual bound ABOVE the
+        # minimum, where the conservative False had produced a loud refusal. #1150
+        # reverted it; #1154 shipped it with the family complete, plus
+        # ``_assert_hull_saw_every_variable``, which now refuses loudly rather than
+        # emitting that row for ANY node the collector cannot see.
+        #
+        # Two things stay true regardless. A caller that only needs "can this body
+        # become one LP row" should ask ``_extract_body_coeffs`` directly — it returns
+        # the row as the witness, so it cannot promise more than it delivers. And
+        # widening this predicate is bound-changing (it moves the FBBT structural mask
+        # at ``solver.py:3068`` and the aux-lift gate at ``factorable_reform.py:684``),
+        # which is why it ships behind a flag; the §5 panel that graduated it
+        # default-ON is ``docs/dev/issue-1154-gdp-sumover-panel-2026-09-04.md``.
+        terms = _sumover_terms(node)
+        if terms is None:
             return False
-        # ** is always nonlinear
-        return False
-    if isinstance(expr, FunctionCall):
-        return False
-    # #1154: the indexed summation Σ[t0, t1, ...] IS linear when every term is,
-    # and is admitted as such (``DISCOPT_GDP_SUMOVER``, default ON) — but only
-    # because the whole walker family moved with it. The ORDER is the lesson.
-    #
-    # ``_is_linear`` is a shared gate with ~10 consumers, and several read a True
-    # as "and I can therefore take this apart". #1039's first attempt widened
-    # this predicate ALONE, while the hull substitution family
-    # (``_hull_linear_substitute`` → ``_substitute_vars`` → ``_collect_variables``)
-    # and ``_bound_expression`` still had no case for the node. ``all_vars`` came
-    # back empty, so hull emitted ``Σ[3 terms] - (0 * y0) <= 0`` — the disjunct
-    # body imposed GLOBALLY, its selector coefficient collapsed to zero and the
-    # disaggregated variables never created. That cut off the other mode and
-    # certified ``optimal`` at -3.0 against a true -30.0: a dual bound ABOVE the
-    # minimum, where the conservative False had produced a loud refusal. #1150
-    # reverted it; #1154 shipped it with the family complete, plus
-    # ``_assert_hull_saw_every_variable``, which now refuses loudly rather than
-    # emitting that row for ANY node the collector cannot see.
-    #
-    # Two things stay true regardless. A caller that only needs "can this body
-    # become one LP row" should ask ``_extract_body_coeffs`` directly — it returns
-    # the row as the witness, so it cannot promise more than it delivers. And
-    # widening this predicate is bound-changing (it moves the FBBT structural mask
-    # at ``solver.py:3068`` and the aux-lift gate at ``factorable_reform.py:684``),
-    # which is why it ships behind a flag; the §5 panel that graduated it
-    # default-ON is ``docs/dev/issue-1154-gdp-sumover-panel-2026-09-04.md``.
-    terms = _sumover_terms(expr)
-    if terms is not None:
         # A sum is linear iff every term is; an empty sum is the constant 0.
-        return all(_is_linear(t) for t in terms)
-    return False
+        stack.extend(terms)
+    return True
 
 
 def _substitute_vars(

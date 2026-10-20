@@ -267,13 +267,13 @@ class TestNlExportQuadraticObjective:
         [
             [[2.0, 1.0], [1.0, 2.0]],  # full symmetric
             [[2.0, 2.0], [0.0, 2.0]],  # upper-triangular
-            [[2.0, 0.0], [2.0, 2.0]],  # lower-triangular (lower must be ignored)
+            [[2.0, 0.0], [2.0, 2.0]],  # lower-triangular
             [[2.0, 3.0], [-1.0, 2.0]],  # asymmetric (indefinite)
         ],
     )
     def test_objective_function_matches_builder_at_fixed_point(self, tmp_path, Q):
-        # The builder reads only triu(Q) and reflects it; export must reproduce
-        # the SAME objective FUNCTION for any Q form. Compare at a fixed point
+        # Q is stored as its symmetric part (#1818); export must reproduce the
+        # SAME objective FUNCTION for any Q form. Compare at a fixed point
         # (tight bounds) so the check is valid even for nonconvex Q.
         import numpy as np
 

@@ -5681,7 +5681,8 @@ def _builder_objective_expression(c, x: "Variable", constant: float, Q=None) -> 
 
     The builder's own convention: ``S = triu(Q) + triu(Q, 1)ᵀ`` (only the upper
     triangle of ``Q`` is read), as gathered elementwise products, so the size is
-    ``O(nnz)`` and never a chain of scalar terms.
+    ``O(nnz)`` and never a chain of scalar terms. ``add_quadratic_objective``
+    stores a symmetric ``Q`` (#1818), for which ``S == Q``.
 
     ``add_linear_objective`` / ``add_quadratic_objective`` store this on
     ``_objective`` with ``_is_placeholder`` set. The flag tells the Rust repr to take
@@ -8104,7 +8105,9 @@ class Model:
         Parameters
         ----------
         Q : scipy.sparse matrix or numpy.ndarray
-            Symmetric quadratic coefficient matrix, shape ``(n, n)``.
+            Quadratic coefficient matrix, shape ``(n, n)``. A non-symmetric ``Q``
+            is replaced by its symmetric part ``(Q + Q')/2``, which has the same
+            ``x'Qx``; a symmetric ``Q`` is stored as given.
         c : numpy.ndarray
             Linear coefficient vector, shape ``(n,)``.
         x : Variable
@@ -8129,6 +8132,17 @@ class Model:
 
         if Q.shape != (n, n):
             raise ValueError(f"Q has shape {Q.shape} but expected ({n}, {n}).")
+        # #1818: the builder reads only the upper triangle, so a non-symmetric Q
+        # built a different objective than ``0.5 x'Qx`` -- an upper-only Q doubled
+        # its cross terms and a lower-only Q lost them. Store the symmetric part,
+        # which has the same ``x'Qx``; every reader (the Rust builder, the Python
+        # objective expression, the retained block, the convexity certificate)
+        # then sees that one matrix. ``0.5*Q + 0.5*Q'`` rather than ``(Q + Q')/2``
+        # so a huge entry cannot overflow; a symmetric Q is left untouched.
+        if (Q != Q.T).nnz:
+            Q = (0.5 * Q + 0.5 * Q.T).tocsr()
+        Q.sum_duplicates()
+        Q.sort_indices()
 
         builder = self._get_builder()
         if not hasattr(x, "_builder_idx"):
