@@ -43,6 +43,7 @@ from discopt.modeling.core import (
     SumOverExpression,
     UnaryOp,
     Variable,
+    _refuse_retired_variable,
     objective_sense_sign,
 )
 
@@ -694,6 +695,8 @@ class DiffSolveResult:
         """Get the optimal value of a variable."""
         if self.x is None:
             raise ValueError("No solution available")
+        # Identity before name, as in SolveResult.value (#1799 follow-up).
+        _refuse_retired_variable(var, self._model)
         return self.x[var.name]
 
     def gradient(self, param: Parameter) -> np.ndarray:
