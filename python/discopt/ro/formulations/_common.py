@@ -437,9 +437,12 @@ def _shape_of(expr) -> Optional[tuple[int, ...]]:
         return known
     if isinstance(expr, (BinaryOp, SumOverExpression)):
         parts = [expr.left, expr.right] if isinstance(expr, BinaryOp) else expr.terms
-        shapes = [_shape_of(t) for t in parts]
-        if any(sh is None for sh in shapes):
-            return None
+        shapes = []
+        for t in parts:
+            sh = _shape_of(t)
+            if sh is None:
+                return None
+            shapes.append(sh)
         try:
             return tuple(int(d) for d in np.broadcast_shapes(*shapes))
         except ValueError:
