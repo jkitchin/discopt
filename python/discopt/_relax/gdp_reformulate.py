@@ -210,7 +210,7 @@ def reformulate_gdp(
     def _add_aux_binary(prefix: str, shape=()) -> Variable:
         name = f"{GDP_AUX_PREFIX}{prefix}_{_aux_counter[0]}"
         _aux_counter[0] += 1
-        while name in _taken:
+        while name in _taken or name in new_model._names:
             name = f"{GDP_AUX_PREFIX}{prefix}_{_aux_counter[0]}"
             _aux_counter[0] += 1
         _taken.add(name)
@@ -222,7 +222,7 @@ def reformulate_gdp(
             1.0,
             new_model,
         )
-        new_model._variables.append(var)
+        new_model._register_generated_variable(var)  # #1799
         return var
 
     _weight_counter = [0]
@@ -238,12 +238,12 @@ def reformulate_gdp(
 
         name = f"{SIMPLEX_WEIGHT_PREFIX}{_weight_counter[0]}"
         _weight_counter[0] += 1
-        while name in _taken:
+        while name in _taken or name in new_model._names:
             name = f"{SIMPLEX_WEIGHT_PREFIX}{_weight_counter[0]}"
             _weight_counter[0] += 1
         _taken.add(name)
         var = Variable(name, VarType.CONTINUOUS, (size,), 0.0, 1.0, new_model)
-        new_model._variables.append(var)
+        new_model._register_generated_variable(var)  # #1799
         return var
 
     # #1615 C-10a: under ``gdp_method="hull"`` the Disjunct blocks of
@@ -2161,7 +2161,7 @@ def _reformulate_disjunction_hull(
             v_lb = min(dlb, 0.0)
             v_ub = max(dub, 0.0)
             v_jk = Variable(
-                f"_hull_{prefix}_v_{vname}_{k}",
+                model._fresh_name(f"_hull_{prefix}_v_{vname}_{k}"),  # #1799
                 VarType.CONTINUOUS,
                 var.shape,
                 v_lb,
@@ -2170,7 +2170,7 @@ def _reformulate_disjunction_hull(
             )
             disagg_k[vname] = v_jk
             new_vars.append(v_jk)
-            model._variables.append(v_jk)
+            model._register_generated_variable(v_jk)
         disagg.append(disagg_k)
 
     # --- Aggregation: x_j == sum_k(v_{j,k}) ---

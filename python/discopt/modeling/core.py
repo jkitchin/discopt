@@ -6794,6 +6794,42 @@ class Model:
         idx = var._index
         return offsets[idx] if idx < n else offsets[n]
 
+    def _fresh_name(self, base: str) -> str:
+        """``base``, or ``base_2``, ``base_3``, ... -- the first not yet in ``_names``.
+
+        For names a reformulation pass generates (#1799). A pass builds its names
+        from a prefix and a counter or the source's names, and two applications --
+        two unnamed disjunctions under hull, say -- can produce the same one. Two
+        variables sharing a name make name-keyed output ambiguous and the
+        serialized document unloadable, so the second gets a suffix instead.
+        """
+        if base not in self._names:
+            return base
+        k = 2
+        while f"{base}_{k}" in self._names:
+            k += 1
+        return f"{base}_{k}"
+
+    def _register_generated_variable(self, var: "Variable") -> "Variable":
+        """Append a variable a reformulation pass created, registering its name (#1799).
+
+        The passes append to ``_variables`` directly -- they do not register with
+        the Rust builder, whose columns a lowering re-issues once all of them exist
+        (#1798) -- and so used to skip ``_names`` too. The transformed model then
+        accepted a second variable with an auxiliary's name, which
+        ``serialize.dumps`` wrote and ``loads`` refused. Registering here makes
+        :meth:`_check_name` refuse that declaration where it is made. Choose the
+        name with :meth:`_fresh_name`; a clash here is a bug in the pass.
+        """
+        if var.name in self._names:
+            raise ValueError(
+                f"reformulation generated the variable name {var.name!r}, which the "
+                "model already uses (pick it with Model._fresh_name)"
+            )
+        self._variables.append(var)
+        self._names.add(var.name)
+        return var
+
     def _register_variable(self, var: "Variable") -> "Variable":
         """Append a variable and register it with the Rust builder if active."""
         self._variables.append(var)

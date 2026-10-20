@@ -609,6 +609,9 @@ class _Lifter:
         :func:`collect_lift_aux_names` sink (#1727)."""
         name = f"_fr_aux_{self._counter}"
         self._counter += 1
+        while name in self.model._names:  # #1799: unique among the model's names
+            name = f"_fr_aux_{self._counter}"
+            self._counter += 1
         sink = _LIFT_AUX_SINK.get()
         if sink is not None:
             sink.add(name)
@@ -652,7 +655,7 @@ class _Lifter:
             return None
         name = self._new_aux_name()
         w = Variable(name, VarType.CONTINUOUS, (), lo, hi, self.model)
-        self.model._variables.append(w)
+        self.model._register_generated_variable(w)
         self._cache[key] = w
         # Normalised form ``body == 0`` with body = w - leaf**exp.
         self.aux_constraints.append(Constraint(BinaryOp("-", w, pow_expr), "==", 0.0))
@@ -701,7 +704,7 @@ class _Lifter:
         w = Variable(name, vtype, (), lo, hi, self.model)
         if integer and _lift_affine_monomials_enabled():
             self.implied_integer_auxes.add(name)
-        self.model._variables.append(w)
+        self.model._register_generated_variable(w)
         self._expr_cache[key] = w
         # Clear any sign-definite division in the defining equality ``w == expr``
         # (so a ratio ``w == N / D`` becomes the bilinear ``w*D == N`` the
@@ -742,7 +745,7 @@ class _Lifter:
             return None
         name = self._new_aux_name()
         d = Variable(name, VarType.CONTINUOUS, (), d_lo, d_hi, self.model)
-        self.model._variables.append(d)
+        self.model._register_generated_variable(d)
         pow_expr = BinaryOp("**", base_var, Constant(float(p)))
         self.aux_constraints.append(Constraint(BinaryOp("-", d, pow_expr), "==", 0.0))
         return d

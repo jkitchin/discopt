@@ -1186,8 +1186,10 @@ def _reformulate(model: Model) -> Model:
     aux: dict[frozenset, Variable] = {}
     aux_rows: list[Constraint] = []
     for i, mono in enumerate(sorted(monos, key=lambda m: tuple(sorted(m)))):
-        z = Variable(f"_bml_z{i}", VarType.CONTINUOUS, (), 0.0, 1.0, new_model)
-        new_model._variables.append(z)
+        z = Variable(
+            new_model._fresh_name(f"_bml_z{i}"), VarType.CONTINUOUS, (), 0.0, 1.0, new_model
+        )
+        new_model._register_generated_variable(z)  # #1799
         aux[mono] = z
         aux_spec.append(("z", tuple(_flat(k) for k in sorted(mono))))
         refs = [ctx.refs[k] for k in sorted(mono)]
@@ -1212,18 +1214,19 @@ def _reformulate(model: Model) -> Model:
     def _encode_square(sq: _SquareTerm) -> Variable:
         nonlocal sq_counter
         y = Variable(
-            f"_bml_y{sq_counter}",
+            new_model._fresh_name(f"_bml_y{sq_counter}"),
             VarType.CONTINUOUS,
             (),
             float(sq.lo),
             float(sq.hi),
             new_model,
         )
-        new_model._variables.append(y)
+        new_model._register_generated_variable(y)
         t_lo = 0.0 if sq.lo <= 0 <= sq.hi else float(min(sq.lo**2, sq.hi**2))
         t_hi = float(max(sq.lo**2, sq.hi**2))
-        t = Variable(f"_bml_t{sq_counter}", VarType.CONTINUOUS, (), t_lo, t_hi, new_model)
-        new_model._variables.append(t)
+        t_name = new_model._fresh_name(f"_bml_t{sq_counter}")
+        t = Variable(t_name, VarType.CONTINUOUS, (), t_lo, t_hi, new_model)
+        new_model._register_generated_variable(t)
         sq_counter += 1
         y_terms = tuple(
             (sq.poly[m], tuple(_flat(k) for k in sorted(m))) for m in _mono_order(sq.poly)
