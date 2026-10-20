@@ -18,6 +18,7 @@ from __future__ import annotations
 import warnings
 
 import discopt.modeling as dm
+import numpy as np
 import pytest
 from discopt._relax import gdp_reformulate as gr
 from discopt._relax.gdp_reformulate import reformulate_gdp
@@ -67,9 +68,36 @@ def _lower(build, monkeypatch, on):
         return reformulate_gdp(m, "mbigm")
 
 
+#: Today's (pre-G2.3) mbigm lowering of the two fixtures, pinned literally: one M
+#: per row, ``body - M (1 - y_k) <= 0``.
+_TODAY = {
+    "_three_slabs": [
+        "(((_gdp_aux_disj_slab_0_0 + _gdp_aux_disj_slab_1_1) + _gdp_aux_disj_slab_2_2) - 1) == 0.0",
+        "((x - 2) - (8.08 * (1 - _gdp_aux_disj_slab_0_0))) <= 0.0",
+        "((y - 1) - (19.19 * (1 - _gdp_aux_disj_slab_0_0))) <= 0.0",
+        "((4 - x) - (4.04 * (1 - _gdp_aux_disj_slab_1_1))) <= 0.0",
+        "((x - 6) - (4.04 * (1 - _gdp_aux_disj_slab_1_1))) <= 0.0",
+        "((y - 5) - (15.15 * (1 - _gdp_aux_disj_slab_1_1))) <= 0.0",
+        "((8 - x) - (8.08 * (1 - _gdp_aux_disj_slab_2_2))) <= 0.0",
+        "((y - 9) - (11.11 * (1 - _gdp_aux_disj_slab_2_2))) <= 0.0",
+    ],
+    "_blocks": [
+        "((x - 2) - (8.08 * (1 - A_active))) <= 0.0",
+        "((y - 1) - (19.19 * (1 - A_active))) <= 0.0",
+        "((4 - x) - (4.04 * (1 - B_active))) <= 0.0",
+        "((x - 6) - (4.04 * (1 - B_active))) <= 0.0",
+        "((y - 5) - (15.15 * (1 - B_active))) <= 0.0",
+        "((8 - x) - (8.08 * (1 - C_active))) <= 0.0",
+        "((y - 9) - (11.11 * (1 - C_active))) <= 0.0",
+        "(Σ[3 terms] - 1) == 0.0",
+    ],
+}
+
+
 @pytest.mark.parametrize("build", [_three_slabs, _blocks])
 def test_flag_off_is_todays_lowering(build, monkeypatch):
-    """OFF and unset give the same rows (default OFF), and neither takes the new route."""
+    """OFF and unset give today's rows exactly (default OFF), pinned literally
+    above, and neither takes the new route."""
     called = []
     real = gr._reformulate_disjunction_mbigm_conditioned
     monkeypatch.setattr(
@@ -83,7 +111,7 @@ def test_flag_off_is_todays_lowering(build, monkeypatch):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         unset = _rows(reformulate_gdp(m, "mbigm"))
-    assert off == unset and not called
+    assert off == unset == _TODAY[build.__name__] and not called
 
 
 @pytest.mark.parametrize("build", [_three_slabs, _blocks])
@@ -201,3 +229,132 @@ def test_spent_budget_keeps_todays_m(monkeypatch):
     monkeypatch.setattr(gr, "_MBIGM_CONDITIONED_LP_BUDGET", 0)
     text = "\n".join(_rows(_lower(_three_slabs, monkeypatch, on=True)))
     assert "19.19" in text  # today's M for y <= 1
+
+
+# --- #1824 review: counterexamples to the first version -----------------------
+
+
+def _gap(U, eps, form):
+    """x, z in [0, U]; A: x - z <= 0, B: x - z <= eps. max x - z = eps (B).
+
+    The first version took M = 0 for A's row against B whenever the LP value
+    ``eps`` fell below ``1e-9 * max(1, |offset|, M_now)`` -- a tolerance that
+    grows with the box (M_now = U) -- and certified 0."""
+    m = dm.Model("gap")
+    x = m.continuous("x", lb=0, ub=U)
+    z = m.continuous("z", lb=0, ub=U)
+    if form == "either_or":
+        m.either_or([[x - z <= 0], [x - z - eps <= 0]], name="g")
+    else:
+        a, b = m.make_disjunct("A"), m.make_disjunct("B")
+        a.subject_to([x - z <= 0])
+        b.subject_to([x - z - eps <= 0])
+        m.add_disjunction([a, b], name="g")
+    m.maximize(x - z)
+    return m
+
+
+@pytest.mark.parametrize("form", ["either_or", "blocks"])
+@pytest.mark.parametrize("U, eps", [(1e6, 1e-4), (1e8, 0.05), (1e9, 0.5)])
+def test_large_box_small_positive_m_is_not_dropped(U, eps, form, monkeypatch):
+    """Fails on 62841482 (``optimal`` 0 on every case): a positive conditioned
+    maximum is never dropped, however large the box."""
+    monkeypatch.setenv(FLAG, "1")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        r = _gap(U, eps, form).solve(gdp_method="mbigm", time_limit=60)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(eps, rel=1e-4, abs=1e-6)
+    assert r.bound >= eps - 1e-6  # max sense: the bound never falls below the optimum
+
+
+@pytest.mark.parametrize("U, eps", [(1e6, 1e-4), (1e8, 0.05), (1e9, 0.5)])
+def test_every_conditioned_m_dominates_the_true_maximum(U, eps, monkeypatch):
+    """The row-level invariant behind the solve test: A's M against B is >= eps."""
+    from discopt.solvers.lp_backend import get_exact_lp_solver
+
+    m = _gap(U, eps, "either_or")
+    (dc,) = [c for c in m._constraints if isinstance(c, gr._DisjunctiveConstraint)]
+    lp_data = gr._precompute_lp_relaxation(m)
+    assert lp_data is not None
+    rows = [gr._disjunct_linear_rows(d, m, lp_data[4]) for d in dc.disjuncts]
+    (con,) = dc.disjuncts[0]
+    up, _ = gr._conditioned_ms(
+        con, 0, rows, m, lp_data, gr._lp_box(m, lp_data[4]), get_exact_lp_solver()
+    )
+    assert up[1] >= eps
+
+
+def _vector_in_j(form):
+    """A: x >= 8; B: x >= [5, 1] (an array rhs: body ``Constant((2,)) - x``).
+    min x = 5 (B). Summing the constant read B as ``6 - x <= 0``."""
+    m = dm.Model("vec_j")
+    x = m.continuous("x", lb=0, ub=10)
+    if form == "either_or":
+        m.either_or([[x >= 8], [x >= np.array([5.0, 1.0])]], name="v")
+    else:
+        a, b = m.make_disjunct("A"), m.make_disjunct("B")
+        a.subject_to([x >= 8])
+        b.subject_to([x >= np.array([5.0, 1.0])])
+        m.add_disjunction([a, b], name="v")
+    m.minimize(x)
+    return m, 5.0
+
+
+def _vector_in_k(form):
+    """A: x >= [5, -100]; B: x <= 2. min x = 0 (B). Summing A's constant reads its
+    row as ``-95 - 2x <= 0``, whose max over B is -95 < 0: the term was dropped and
+    ``x >= 5`` then held in B too, making B infeasible."""
+    m = dm.Model("vec_k")
+    x = m.continuous("x", lb=0, ub=10)
+    if form == "either_or":
+        m.either_or([[x >= np.array([5.0, -100.0])], [x <= 2]], name="v")
+    else:
+        a, b = m.make_disjunct("A"), m.make_disjunct("B")
+        a.subject_to([x >= np.array([5.0, -100.0])])
+        b.subject_to([x <= 2])
+        m.add_disjunction([a, b], name="v")
+    m.minimize(x)
+    return m, 0.0
+
+
+@pytest.mark.parametrize("form", ["either_or", "blocks"])
+@pytest.mark.parametrize("build", [_vector_in_j, _vector_in_k])
+def test_array_valued_rows_keep_todays_m(build, form, monkeypatch):
+    """Fails on 62841482 (5.98 for ``_vector_in_j``, 5 for ``_vector_in_k``): a row
+    whose body is array-valued is neither an LP row of j nor conditioned in k."""
+    monkeypatch.setenv(FLAG, "1")
+    m, truth = build(form)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        r = m.solve(gdp_method="mbigm", time_limit=60)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(truth, abs=1e-6)
+
+
+def test_an_undershooting_vertex_objective_cannot_shrink_m():
+    """M rests on the Neumaier-Shcherbina bound from the vertex duals, not on the
+    vertex objective. Simulate a float simplex whose reported ``min`` is 2e-4 too
+    high -- a maximum 2e-4 too low, i.e. negative where the truth is +1e-4 -- with
+    its duals intact: A's M against B must still cover the true maximum."""
+    import dataclasses
+
+    from discopt.solvers.lp_backend import get_exact_lp_solver
+
+    exact = get_exact_lp_solver()
+    corrupted = []
+
+    def undershooting(**kw):
+        res = exact(**kw)
+        corrupted.append(1)
+        return dataclasses.replace(res, objective=res.objective + 2e-4)
+
+    eps = 1e-4
+    m = _gap(1e6, eps, "either_or")
+    (dc,) = [c for c in m._constraints if isinstance(c, gr._DisjunctiveConstraint)]
+    lp_data = gr._precompute_lp_relaxation(m)
+    assert lp_data is not None
+    rows = [gr._disjunct_linear_rows(d, m, lp_data[4]) for d in dc.disjuncts]
+    (con,) = dc.disjuncts[0]
+    up, _ = gr._conditioned_ms(con, 0, rows, m, lp_data, gr._lp_box(m, lp_data[4]), undershooting)
+    assert corrupted and up[1] >= eps

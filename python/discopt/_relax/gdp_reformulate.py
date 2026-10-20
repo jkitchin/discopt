@@ -1017,6 +1017,11 @@ def _lp_box(model: Model, n_vars: int) -> list[tuple[float, float]]:
 #: spend its whole time limit before branch-and-bound starts.
 _MBIGM_CONDITIONED_LP_BUDGET = 1000
 
+#: Smallest conditioned M, relative to today's, short of dropping the term
+#: (#1824 review): a valid M only has to be ``>=`` the rigorous LP bound, and a
+#: coefficient within 1e3 of today's keeps the matrix's range near today's.
+_MBIGM_CONDITIONED_MIN_REL = 1e-3
+
 
 def _mbigm_conditioned_enabled() -> bool:
     """Is #1775 G2.3's conditioned mbigm on? (``DISCOPT_MBIGM_CONDITIONED``, default OFF)."""
@@ -1044,21 +1049,33 @@ def _conditioned_ms(
 
     Every M starts at today's unconditioned value (:func:`_compute_big_m_lp`,
     which also refuses an unbounded or undefined body exactly as before) and is
-    lowered only by an OPTIMAL exact-LP value ``best``: to ``1.01 * best`` (today's
-    relative margin), or to **0** -- the term dropped -- when ``best`` is within the
-    LP's accuracy of zero or below. That is the exact bound: disjunct ``j`` implies
-    the row. A small positive floor there instead (``1e-6`` was tried first) put
-    940 such coefficients into med_term_purchasing, and HiGHS's root LP on that
-    matrix failed discopt's certificate check (primal/dual pair dual-infeasible),
-    so a 1-node ``optimal`` became an uncertified ``feasible``; dropping them
-    restored the verified ``optimal``. Snapping can remove only points that
-    violate disjunct ``j``'s own rows by less than the LP's accuracy.
+    lowered only by a *rigorous* upper bound ``safe`` on the LP maximum
+    (:func:`_safe_lp_max`, the Neumaier-Shcherbina bound read off the OPTIMAL
+    vertex's duals), never by the raw vertex objective: a float simplex optimum
+    can undershoot the true maximum by an amount set by its dual-feasibility
+    tolerance times the box widths, which no fixed tolerance bounds. With ``safe``:
 
-    A status that is not OPTIMAL -- INFEASIBLE included -- keeps today's M: an
-    LP-infeasible disjunct could justify ``M = 0`` (it can never be selected), but
-    only on a checked certificate, which this route does not take. ``budget`` is a
-    one-element list counting the exact LPs this lowering may still run; at 0 the
-    remaining rows keep today's M (deterministic, unlike a wall-clock cap).
+    * ``safe <= 0`` -- every point of disjunct ``j``'s LP region has ``body <= 0``,
+      so disjunct ``j`` implies the row and the term is dropped (``M = 0``). This
+      removes no point at all, so no LP accuracy enters the argument.
+    * ``safe > 0`` -- ``M = max(1.01 * safe, _MBIGM_CONDITIONED_MIN_REL * M_now)``
+      (capped at today's M): valid because it is ``>= safe``, and never a tiny
+      coefficient. A tiny one is what broke med_term_purchasing: a ``1e-6`` floor
+      put 940 such coefficients into it and HiGHS's root LP on that matrix failed
+      discopt's certificate check (primal/dual pair dual-infeasible).
+
+    The first version snapped ``M`` to 0 whenever the raw objective was below
+    ``1e-9 * max(1, |offset|, M_now)``. That tolerance grows with the box, so on
+    ``x, z in [0, 1e6]`` it dropped a term whose true maximum was ``1e-4`` and
+    certified a wrong optimum (#1824 review). A body or rhs that is not a single
+    scalar keeps today's M (see :func:`_is_scalar_linear_row`).
+
+    A status that is not OPTIMAL -- INFEASIBLE included -- or an OPTIMAL exit
+    without finite duals keeps today's M: an LP-infeasible disjunct could justify
+    ``M = 0`` (it can never be selected), but only on a checked certificate, which
+    this route does not take. ``budget`` is a one-element list counting the exact
+    LPs this lowering may still run; at 0 the remaining rows keep today's M
+    (deterministic, unlike a wall-clock cap).
     """
     from discopt.solvers import SolveStatus
 
@@ -1067,6 +1084,8 @@ def _conditioned_ms(
     up = [0.0 if j == k else M_now for j in range(n)]
     down = list(up)
     A_ub, b_ub, A_eq, b_eq, n_vars = lp_data
+    if not _is_scalar_linear_row(con):
+        return up, down  # array-valued body or rhs: today's M for every j
     coeffs = _extract_body_coeffs(con.body, model, n_vars)
     if coeffs is None:
         return up, down  # nonlinear body: today's M for every j
@@ -1089,17 +1108,74 @@ def _conditioned_ms(
             res = solve_lp(c=sign * c_vec, A_ub=Au, b_ub=bu, A_eq=Ae, b_eq=be, bounds=box)
             if res.status != SolveStatus.OPTIMAL or res.objective is None:
                 continue
-            best = -float(res.objective) + (offset if side == "up" else -offset)
-            if not np.isfinite(best) or abs(best) >= _BIGM_SENTINEL:
+            safe = _safe_lp_max(sign * c_vec, res, Au, bu, Ae, be, box)
+            if safe is None:
+                continue  # no rigorous bound: today's M
+            safe += offset if side == "up" else -offset
+            safe += 4.0 * FLOAT_EPS * abs(offset)  # the rounding of that addition
+            if not np.isfinite(safe) or abs(safe) >= _BIGM_SENTINEL:
                 continue
-            # LP accuracy of the objective, relative to the row's own scale.
-            zero_tol = 1e-9 * max(1.0, abs(offset), M_now)
-            M_j = 0.0 if best <= zero_tol else best * 1.01
+            if safe <= 0.0:
+                M_j = 0.0  # body <= safe <= 0 on all of disjunct j: the row is implied
+            else:
+                M_j = max(1.01 * safe, _MBIGM_CONDITIONED_MIN_REL * M_now)
             if side == "up":
                 up[j] = min(up[j], M_j)
             else:
                 down[j] = min(down[j], M_j)
     return up, down
+
+
+def _safe_lp_max(f, res, A_ub, b_ub, A_eq, b_eq, box) -> Optional[float]:
+    """Rigorous upper bound on ``max -f.x`` (= ``-min f.x``) over the LP that
+    ``res`` solved, or ``None`` when none can be formed (#1824 review).
+
+    ``-g`` for the Neumaier-Shcherbina lower bound ``g <= min f.x``
+    (:func:`discopt._relax.obbt._ns_safe_lp_lower_bound`, which subtracts its own
+    float-evaluation margin): valid for any multipliers, so the simplex's
+    tolerances cannot make it undershoot. Also never below the vertex value, which
+    is a feasible point's objective up to primal tolerance."""
+    import scipy.sparse as sp
+
+    from discopt._relax.obbt import _ns_safe_lp_lower_bound
+
+    parts_A = [sp.csr_matrix(a) for a in (A_ub, A_eq) if a is not None]
+    parts_b = [np.asarray(v, dtype=np.float64).ravel() for v in (b_ub, b_eq) if v is not None]
+    A = sp.vstack(parts_A).tocsr() if parts_A else None
+    b = np.concatenate(parts_b) if parts_b else None
+    n_eq = 0 if A_eq is None else int(sp.csr_matrix(A_eq).shape[0])
+    lo = np.array([lb for lb, _ in box], dtype=np.float64)
+    hi = np.array([ub for _, ub in box], dtype=np.float64)
+    g = _ns_safe_lp_lower_bound(f, getattr(res, "dual_values", None), A, b, lo, hi, n_eq=n_eq)
+    if g is None or not np.isfinite(g):
+        return None
+    return max(-float(g), -float(res.objective))
+
+
+def _is_scalar_linear_row(con: Constraint) -> bool:
+    """Is ``con`` one scalar row as :func:`_extract_body_coeffs` reads it?
+
+    That walker sums an array-valued ``Constant``/``Parameter`` into one offset, so
+    ``x >= np.array([5, 1])`` (body ``Constant((2,)) - x``) reads as ``6 - 2x <=
+    0``-like nonsense (#1825). An array-valued variable already declines there
+    (``resolve_scalar_slot``); this rejects the array-valued leaves it does not."""
+    from discopt.modeling.core import BinaryOp, Constant, Parameter, SumOverExpression, UnaryOp
+
+    if np.size(con.rhs) != 1:
+        return False
+    stack: list = [con.body]
+    while stack:
+        e = stack.pop()
+        if isinstance(e, (Constant, Parameter)):
+            if np.size(e.value) != 1:
+                return False
+        elif isinstance(e, BinaryOp):
+            stack.extend((e.left, e.right))
+        elif isinstance(e, UnaryOp):
+            stack.append(e.operand)
+        elif isinstance(e, SumOverExpression):
+            stack.extend(e.terms)
+    return True
 
 
 def _stack_rows(A, b, rows: list, rhs: list):
@@ -1123,10 +1199,10 @@ def _disjunct_linear_rows(disjunct: list, model: Model, n_vars: int):
     eq_rows: list = []
     eq_rhs: list = []
     for con in disjunct:
-        if isinstance(con, _DisjunctiveConstraint):
-            continue
+        if isinstance(con, _DisjunctiveConstraint) or not _is_scalar_linear_row(con):
+            continue  # omitting a row only enlarges j's LP region, so every M stays valid
         coeffs = _extract_body_coeffs(con.body, model, n_vars)
-        if coeffs is None or np.size(con.rhs) != 1:
+        if coeffs is None:
             continue
         a, off = coeffs
         rhs = float(np.asarray(con.rhs).ravel()[0]) - off
