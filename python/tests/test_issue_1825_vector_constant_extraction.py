@@ -11,7 +11,10 @@ two rows the single row ``x >= 6``, which excludes the optimum ``x = 5``:
 * mbigm computed its M over the too-small region and certified 1.0 (truth 10) and
   9.0 (truth 5);
 * LOA's master used the same row and certified 9.0 (truth 5);
-* ``run_obbt`` tightened ``x >= 6`` and AMP certified 6.0 (truth 5).
+* ``run_obbt`` tightened ``x >= 6`` and AMP certified 6.0 (truth 5);
+* Benders' master used the same row and certified 6.0 (truth 5);
+* the hull's disjunct-bound reader raised ``TypeError`` on the array (summing it
+  instead, the tempting "fix", reads ``x >= [5, 1]`` as ``x >= 6``).
 
 The fix (``_relax/scalarize.scalar_leaf_value``) declines the whole row when a
 leaf has more than one element. Declining a row only enlarges the LP region, so
@@ -46,11 +49,15 @@ def _global_vector_row_model(use_parameter: bool = False):
     return m
 
 
-def _open_box_vector_row_model():
+def _open_box_vector_row_model(scalar_companion: bool = False):
     m = dm.Model("vo")
     x = m.continuous("x", lb=-1e30, ub=10)
     y = m.continuous("y", lb=-1, ub=1)
     m.subject_to(x >= np.array([5.0, 1.0]))
+    if scalar_companion:
+        # A scalar row the extractor must keep, so its output is never ``None`` and
+        # the assertions on it always execute.
+        m.subject_to(x <= 9)
     m.minimize(x + y * y)
     return m
 
@@ -121,14 +128,48 @@ def test_hull_vector_row_in_disjunct_does_not_raise():
     assert r.objective == pytest.approx(10.0, abs=1e-6)
 
 
+@pytest.mark.smoke
+@pytest.mark.parametrize("gdp_method", ["hull", "auto"])
+def test_hull_vector_lower_bound_row_in_disjunct(gdp_method):
+    # ``x >= [5, 1]`` is ``x >= 5``. Reading the array constant as one bound by
+    # summing it gives the disjunct bound ``x >= 6`` and the hull certifies 6.0;
+    # the row must be skipped (global bounds kept) instead.
+    m = dm.Model("vhl")
+    x = m.continuous("x", lb=0, ub=10)
+    m.either_or([[x >= np.array([5.0, 1.0])], [x >= 7]], name="v")
+    m.minimize(x)
+    r = _solve(m, gdp_method=gdp_method)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(5.0, abs=1e-6)
+
+
+# ── decomposition (Benders reads rows through ``_extract_body_coeffs``) ──
+
+
+@pytest.mark.smoke
+def test_benders_vector_row():
+    m = dm.Model("bd")
+    y = m.integer("y", lb=0, ub=2)
+    x = m.continuous("x", lb=0, ub=20)
+    m.subject_to(x + 2 * y >= np.array([5.0, 1.0]))
+    m.minimize(3 * y + x)
+    r = _solve(m, decomposition="benders")
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(5.0, abs=1e-6)  # was a certified 6.0
+    assert r.bound <= 5.0 + 1e-6
+
+
 # ── OBBT extraction (run_obbt, bootstrap_finite_bounds, RLT-1, Shor, mbigm LP) ──
 
 
 @pytest.mark.smoke
 def test_obbt_extraction_keeps_the_optimum_feasible():
-    A_ub, b_ub, _, _, _ = ob._extract_linear_constraints(_open_box_vector_row_model())
-    if A_ub is not None:
-        assert np.all(A_ub @ np.array([5.0, 0.0]) <= b_ub + 1e-12)
+    model = _open_box_vector_row_model(scalar_companion=True)
+    A_ub, b_ub, _, _, _ = ob._extract_linear_constraints(model)
+    assert A_ub is not None
+    # Only the scalar companion row ``x <= 9``; the vector row is declined.
+    assert A_ub.tolist() == [[1.0, 0.0]] and b_ub.tolist() == [9.0]
+    assert np.all(A_ub @ np.array([5.0, 0.0]) <= b_ub + 1e-12)
 
 
 @pytest.mark.smoke
@@ -138,10 +179,11 @@ def test_obbt_extraction_sum_of_broadcast_is_not_folded_per_leaf():
     m = dm.Model("s")
     x = m.continuous("x", lb=-10, ub=10)
     m.subject_to(dm.sum(x + np.array([1.0, 2.0])) >= 5)
+    m.subject_to(x <= 9)  # scalar companion, so A_ub is never None
     m.minimize(x)
     A_ub, b_ub, _, _, _ = ob._extract_linear_constraints(m)
-    if A_ub is not None:
-        assert np.all(A_ub @ np.array([1.0]) <= b_ub + 1e-12)
+    assert A_ub is not None
+    assert np.all(A_ub @ np.array([1.0]) <= b_ub + 1e-12)
 
 
 @pytest.mark.smoke
@@ -161,8 +203,19 @@ def test_obbt_objective_extraction_declines_sum_of_broadcast():
     x = m.continuous("x", lb=0, ub=10)
     m.minimize(dm.sum(x + np.array([1.0, 2.0])))  # 2x + 3
     res = ob._extract_linear_objective_with_offset(m, 1)
-    if res is not None:
-        assert res[0].tolist() == [2.0] and res[1] == 3.0
+    # Declining is sound; a per-leaf fold would give ``x + 3``.
+    assert res is None or (res[0].tolist() == [2.0] and res[1] == 3.0)
+
+
+@pytest.mark.smoke
+def test_obbt_objective_extraction_folds_full_reduction_of_bare_constant():
+    # sum([1, 2]) is exactly 3, so the objective is extracted, offset included.
+    m = dm.Model("so2")
+    x = m.continuous("x", lb=0, ub=10)
+    m.minimize(2 * x + dm.sum(np.array([1.0, 2.0])))
+    res = ob._extract_linear_objective_with_offset(m, 1)
+    assert res is not None
+    assert res[0].tolist() == [2.0] and res[1] == 3.0
 
 
 @pytest.mark.smoke
