@@ -10,6 +10,8 @@ skipped and only an exact 1.0 drops its multiply.
 
 from __future__ import annotations
 
+from fractions import Fraction
+
 import discopt.modeling as dm
 import numpy as np
 import pytest
@@ -49,7 +51,10 @@ def _laplacian_with_dent(n=60, k=30):
 
 def test_indefinite_laplacian_is_kept_exactly_and_not_certified():
     L = _laplacian_with_dent()
-    assert np.linalg.eigvalsh(L)[0] < 0  # the input really is indefinite
+    # The input really is indefinite: ``1' L 1 = -2^-50``, in exact rational
+    # arithmetic. Not ``eigvalsh``: the true lambda_min is about -1.5e-17, below its
+    # resolution, and Accelerate's LAPACK returns +1.1e-16 for it.
+    assert sum(Fraction(v) for v in L.flat) == -Fraction(1, 2**50)
     m = _qp(L)
     Q, _ = _extracted(m)
     assert np.array_equal(Q, L)

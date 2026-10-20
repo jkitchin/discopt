@@ -21,7 +21,7 @@ Neumaier (1990), *Interval Methods for Systems of Equations*.
 from __future__ import annotations
 
 import math
-from typing import Optional, Union
+from typing import Optional, Sequence, Union
 
 import numpy as np
 
@@ -135,8 +135,9 @@ def _eager_children(expr: Expression) -> tuple:
 
     ``SumOverExpression`` terms are not listed: its affine fast path (#1712)
     reads them without evaluating each one, and pre-evaluating 90,000 terms
-    would undo it. A child listed here that ``_eval_impl`` would not have
-    evaluated only costs time; one missing only costs recursion depth.
+    would undo it. :func:`_eval` instead tries that path first and pushes the
+    terms only when it declines. A child listed here that ``_eval_impl`` would
+    not have evaluated only costs time; one missing only costs recursion depth.
     """
     if isinstance(expr, BinaryOp):
         return (expr.left, expr.right)
@@ -165,19 +166,36 @@ def _eval(expr: Expression, model: Optional[Model], box: dict, cache: dict) -> I
     # its operand at build time, outside any solve-time headroom gate. Every node
     # is still evaluated by ``_eval_impl`` exactly once, so the enclosures are
     # unchanged.
+    #
+    # A ``SumOverExpression`` is resolved here rather than in ``_eval_impl``: the
+    # #1712 affine fast path is tried first, and only when it declines are the
+    # terms pushed as children -- a ``dm.sum([e, x[i]])`` chain nests one sum per
+    # level, and its terms recursed once per level otherwise.
     stack: list[tuple[Expression, bool]] = [(expr, False)]
     while stack:
         node, expanded = stack.pop()
         nid = id(node)
         if nid in cache:
             continue
+        is_sum = isinstance(node, SumOverExpression)
         if not expanded:
-            pending = [c for c in _eager_children(node) if id(c) not in cache]
+            if is_sum:
+                fast = _sum_over_fast(node, box)
+                if fast is not None:
+                    cache[nid] = fast
+                    continue
+                children: Sequence[Expression] = node.terms
+            else:
+                children = _eager_children(node)
+            pending = [c for c in children if id(c) not in cache]
             if pending:
                 stack.append((node, True))
                 stack.extend((c, False) for c in reversed(pending))
                 continue
-        cache[nid] = _eval_impl(node, model, box, cache)
+        if is_sum:
+            cache[nid] = _sum_over_generic(node, model, box, cache)
+        else:
+            cache[nid] = _eval_impl(node, model, box, cache)
     return cache[eid]
 
 
@@ -275,15 +293,10 @@ def _eval_impl(expr: Expression, model: Optional[Model], box: dict, cache: dict)
         return Interval(np.nextafter(lo, -np.inf), np.nextafter(hi, np.inf))
 
     if isinstance(expr, SumOverExpression):
-        if not expr.terms:
-            return Interval(np.zeros(()), np.zeros(()))
-        fast = _scalar_affine_sum(expr.terms, box)
+        fast = _sum_over_fast(expr, box)
         if fast is not None:
             return fast
-        total = _eval(expr.terms[0], model, box, cache)
-        for t in expr.terms[1:]:
-            total = total + _eval(t, model, box, cache)
-        return total
+        return _sum_over_generic(expr, model, box, cache)
 
     if isinstance(expr, MatMulExpression):
         return _eval_matmul(expr, model, box, cache)
@@ -294,6 +307,26 @@ def _eval_impl(expr: Expression, model: Optional[Model], box: dict, cache: dict)
 # ──────────────────────────────────────────────────────────────────────
 # Per-element linear sums (#1712)
 # ──────────────────────────────────────────────────────────────────────
+
+
+def _sum_over_fast(expr: SumOverExpression, box: dict) -> Optional[Interval]:
+    """The enclosure of ``expr`` without evaluating its terms, else ``None``.
+
+    An empty sum is the constant 0; otherwise :func:`_scalar_affine_sum`.
+    """
+    if not expr.terms:
+        return Interval(np.zeros(()), np.zeros(()))
+    return _scalar_affine_sum(expr.terms, box)
+
+
+def _sum_over_generic(
+    expr: SumOverExpression, model: Optional[Model], box: dict, cache: dict
+) -> Interval:
+    """``Σ terms`` by :meth:`Interval.__add__`, folded left to right."""
+    total = _eval(expr.terms[0], model, box, cache)
+    for t in expr.terms[1:]:
+        total = total + _eval(t, model, box, cache)
+    return total
 
 
 def _scalar_leaf_bounds(expr: Expression, box: dict, bases: dict) -> Optional[tuple[float, float]]:

@@ -3,7 +3,8 @@
 The MPEC lowering runs when the relation is added, at build time, outside the
 solve-time recursion gate (#1808). Two recursive walkers sat on that path: the
 interval evaluator (``_elem_shape`` sizes the operand) and ``_is_linear`` (whether
-the operand needs a lift). Both now use an explicit stack.
+the operand needs a lift). Both now use an explicit stack, including through a
+``dm.sum`` nested one level per step.
 """
 
 from __future__ import annotations
@@ -69,6 +70,47 @@ def test_shared_subexpression_enclosure_unchanged():
 def test_complementarity_on_deep_operand_builds(default_recursion_limit):
     m, _, y, e = _deep_pair()
     m.complementarity(e, y)
+
+
+def _nested_sum(shape, n):
+    """``dm.sum`` nested one level per step: one ``SumOverExpression`` per level.
+
+    ``"affine"`` keeps every level on the #1712 fast path's pattern except that a
+    term is itself a sum, so the fast path declines at every level;
+    ``"bilinear"`` adds a bilinear term per level as well.
+    """
+    m = dm.Model("nested")
+    x = m.continuous("x", shape=n + 1, lb=0, ub=1)
+    y = m.continuous("y", lb=0, ub=1)
+    e = x[0]
+    for i in range(1, n):
+        if shape == "affine":
+            e = dm.sum([e, x[i % 3]])
+        else:
+            e = dm.sum([e * 1.0, x[i] * x[i + 1]])
+    return m, y, e
+
+
+NESTED = [("affine", 600), ("bilinear", 600), ("bilinear", 2500)]
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("shape,n", NESTED)
+def test_nested_sum_operand_evaluates(shape, n, default_recursion_limit):
+    m, _, e = _nested_sum(shape, n)
+    enc = evaluate_interval(e, m)
+    # x in [0, 1]: each level adds one term in [0, 1], plus x[0]. Every level's
+    # add (and product) rounds outward, ~1e-9 over 2500 levels.
+    assert float(enc.lo) <= 0.0 and float(enc.lo) > -1e-6
+    assert float(enc.hi) >= n and float(enc.hi) < n + 1e-6
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("shape,n", NESTED)
+@pytest.mark.parametrize("method", ["gdp", "sos1"])
+def test_complementarity_on_nested_sum_builds(shape, n, method, default_recursion_limit):
+    m, y, e = _nested_sum(shape, n)
+    m.complementarity(e, y, method=method)
 
 
 @pytest.mark.slow
