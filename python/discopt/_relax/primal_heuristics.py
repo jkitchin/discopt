@@ -1424,7 +1424,9 @@ def integer_local_search(
 
     from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
 
-    lb, ub = _get_variable_bounds(model)
+    # Row-pinned columns count as fixed: a move off ``z == c`` is infeasible anyway,
+    # and it costs a sub-NLP to find out (#1775 G3.3, see ``_pinned_bounds``).
+    lb, ub = _pinned_bounds(model, *_get_variable_bounds(model))
     cl, cu = _infer_constraint_bounds(evaluator)
     cl = np.asarray(cl, dtype=np.float64)
     cu = np.asarray(cu, dtype=np.float64)
@@ -2343,7 +2345,9 @@ def one_hot_config_subnlp(
     n_vars = int(int_mask.size)
     x_relax = np.asarray(x_relax, dtype=np.float64)
 
-    groups = _scan_one_hot_rows(model, int_mask, n_vars)
+    groups, decided = _prune_decided_groups(
+        _scan_one_hot_rows(model, int_mask, n_vars), *_pinned_bounds(model, lb, ub)
+    )
     if not groups:
         return []
 
@@ -2388,7 +2392,7 @@ def one_hot_config_subnlp(
     # binaries) but not on cstr (15/20) — and on cstr, searching the 5 uncovered
     # binaries turns "no point at all" into a feasible 3.13020 against a true
     # optimum of 3.06201. So the residual gets its own bounded search.
-    covered = {j for g in groups for j in g}
+    covered = {j for g in groups for j in g} | decided
     residual = [
         j
         for j in np.nonzero(int_mask)[0].tolist()
@@ -2660,7 +2664,9 @@ def one_hot_config_dive(
     lb0, ub0 = _get_variable_bounds(model)
     n_vars = int(int_mask.size)
     x_relax = np.asarray(x_relax, dtype=np.float64)
-    groups = _scan_one_hot_rows(model, int_mask, n_vars)
+    groups, _decided = _prune_decided_groups(
+        _scan_one_hot_rows(model, int_mask, n_vars), *_pinned_bounds(model, lb0, ub0)
+    )
     if not groups:
         return []
 
@@ -3570,6 +3576,48 @@ def local_branching(
             if submip is not None and (best is None or submip[1] < best[1]):
                 best = submip
     return best
+
+
+def _pinned_bounds(model: Model, lb: np.ndarray, ub: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``lb``/``ub`` with every single-variable equality applied (exact, #1775 G3.3).
+
+    A binary pinned by a row ``b == 1`` is as decided as one with ``lb == ub == 1``;
+    measured with two one-hot rows over four row-pinned binaries the solve took
+    32 s against 0.2 s for the same model pinned by bounds, all of it in the
+    one-hot searches. Fresh arrays; the model is not touched.
+    """
+    from discopt._relax.uniform_relax import _fix_single_var_equalities
+
+    return _fix_single_var_equalities(model, lb, ub)
+
+
+def _prune_decided_groups(
+    groups: list[list[int]], lb: np.ndarray, ub: np.ndarray
+) -> tuple[list[list[int]], set[int]]:
+    """The one-hot groups the bounds leave open, and the columns they decide.
+
+    A member fixed at 0 (``ub < 0.5``) is not a choice and leaves its group; a
+    group with a member fixed at 1 (``lb > 0.5``), or with no live member, is
+    decided and leaves the search, its columns returned as decided so the
+    residual search leaves them alone too. A group left with ONE live member is
+    not decided -- that member is still a free column -- and stays a one-member
+    group, so the plans seed it to 1 as before (review of #1865). Searching the
+    decided ones only proposes points outside the model's own bounds. Measured
+    on a GDP subproblem with every indicator fixed (#1775 G3.3), the two one-hot
+    searches spent 9.1 s on 152 sub-NLPs whose points the incumbent guard then
+    rejected.
+    Callers pass :func:`_pinned_bounds`, so a row-pinned member counts as fixed.
+    """
+    open_groups: list[list[int]] = []
+    decided: set[int] = set()
+    for g in groups:
+        live = [j for j in g if ub[j] >= 0.5]
+        if any(lb[j] > 0.5 for j in g) or not live:
+            decided.update(g)
+        else:
+            open_groups.append(live)
+            decided.update(j for j in g if j not in live)
+    return open_groups, decided
 
 
 def _scan_one_hot_rows(model: Model, binary_mask: np.ndarray, n_vars: int) -> list[list[int]]:

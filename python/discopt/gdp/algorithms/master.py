@@ -384,15 +384,7 @@ class MasterMILP:
         if len(config) != len(self.int_indices):
             raise ValueError("MasterMILP.exclude: config does not match the discrete columns")
         if not self.all_binary:
-            # The exact exclusion's big-M coefficients are u - v + 1 and v + 1 - l
-            # (#756): with an infinite or default (1e20) bound they mean nothing.
-            for idx in self.int_indices:
-                lo, hi = float(self.lb[idx]), float(self.ub[idx])
-                if not (math.isfinite(lo) and math.isfinite(hi)) or max(abs(lo), abs(hi)) >= 1e19:
-                    raise ValueError(
-                        f"MasterMILP.exclude: discrete column {idx} has bounds [{lo:g}, {hi:g}]; "
-                        "the exact no-good needs finite bounds on every general integer"
-                    )
+            self._check_exact_no_good_bounds()
         if self.all_binary:
             x = np.zeros(self.n_vars)
             for idx, v in zip(self.int_indices, config):
@@ -400,6 +392,17 @@ class MasterMILP:
             _add_no_good_cut(x, self.int_indices, self.cuts, self.cut_rhs, self.n_vars)
         else:
             self.no_good_configs.append(config)
+
+    def _check_exact_no_good_bounds(self) -> None:
+        # The exact exclusion's big-M coefficients are u - v + 1 and v + 1 - l
+        # (#756): with an infinite or default (1e20) bound they mean nothing.
+        for idx in self.int_indices:
+            lo, hi = float(self.lb[idx]), float(self.ub[idx])
+            if not (math.isfinite(lo) and math.isfinite(hi)) or max(abs(lo), abs(hi)) >= 1e19:
+                raise ValueError(
+                    f"MasterMILP.exclude: discrete column {idx} has bounds [{lo:g}, {hi:g}]; "
+                    "the exact no-good needs finite bounds on every general integer"
+                )
 
     def config_of(self, x: np.ndarray) -> tuple[int, ...]:
         return _int_config_key(x, self.int_indices)
@@ -409,11 +412,24 @@ class MasterMILP:
         time_limit: float,
         gap_tolerance: float = 1e-4,
         incumbent: Optional[float] = None,
+        *,
+        objective_override: Optional[Any] = None,
+        exclude_also: Any = (),
+        extra_cuts: Any = (),
     ) -> MasterResult:
         """Solve within ``time_limit`` (the caller's deadline remainder).
 
         ``incumbent`` (minimization convention, constant included) loosens the
         master's own gap to the outer one, as LOA does (``master_gap_tolerance``).
+
+        ``objective_override`` (a coefficient vector over ``x``), with
+        ``exclude_also`` (configurations) and ``extra_cuts`` (``(row, rhs)``
+        pairs, ``row @ x <= rhs``), serves the initialization strategies (G3.3):
+        the same rows, cuts and no-goods with another linear objective and extra
+        exclusions for this call only. The epigraph cuts are left out (a
+        relaxation of a feasibility question), no row, cut or no-good is
+        recorded on the master (only ``n_solves`` counts the call), and the
+        result carries no ``bound``.
         """
         from discopt.solvers import SolveStatus
         from discopt.solvers._gap import master_gap_tolerance
@@ -421,27 +437,63 @@ class MasterMILP:
         self.n_solves += 1
         if incumbent is not None and not math.isfinite(incumbent):
             incumbent = None  # no incumbent yet: the master keeps its own gap
-        lin = self.objective is not None
-        obj = None if self.objective is None else (self.objective[0], self.objective[1])
+        override = objective_override is not None
+        cuts, cut_rhs, no_goods = self.cuts, self.cut_rhs, self.no_good_configs
+        obj: Optional[tuple[np.ndarray, float]]
+        if override:
+            c = np.asarray(objective_override, dtype=np.float64)
+            if c.shape != (self.n_vars,) or not np.all(np.isfinite(c)):
+                raise ValueError(f"objective_override must be {self.n_vars} finite numbers")
+            obj, lin, convex = (c, 0.0), True, False
+            keep = [i for i, row in enumerate(self.cuts) if row.shape == (self.n_vars,)]
+            cuts = [self.cuts[i] for i in keep]
+            cut_rhs = [self.cut_rhs[i] for i in keep]
+            for row, rhs in extra_cuts:
+                row = np.asarray(row, dtype=np.float64)
+                if row.shape != (self.n_vars,) or not np.all(np.isfinite(row)):
+                    raise ValueError(f"extra_cuts: each row must be {self.n_vars} finite numbers")
+                cuts.append(row)
+                cut_rhs.append(float(rhs))
+            no_goods = list(self.no_good_configs)
+            for config in exclude_also:
+                config = tuple(int(v) for v in config)
+                if len(config) != len(self.int_indices):
+                    raise ValueError("exclude_also: config does not match the discrete columns")
+                if self.all_binary:
+                    x0 = np.zeros(self.n_vars)
+                    for idx, v in zip(self.int_indices, config):
+                        x0[idx] = v
+                    _add_no_good_cut(x0, self.int_indices, cuts, cut_rhs, self.n_vars)
+                else:
+                    self._check_exact_no_good_bounds()
+                    no_goods.append(config)
+        else:
+            if exclude_also or extra_cuts:
+                raise ValueError(
+                    "exclude_also and extra_cuts are only for an objective_override solve"
+                )
+            obj = None if self.objective is None else (self.objective[0], self.objective[1])
+            lin, convex = self.objective is not None, self.objective_convex
         r = _solve_master_milp(
             self.rows,
             self.rhs,
             self.senses,
-            self.cuts,
-            self.cut_rhs,
+            cuts,
+            cut_rhs,
             self.n_vars,
             self.integrality,
             self.lb,
             self.ub,
             obj,
             lin,
-            self.objective_convex,
+            convex,
             time_limit=max(0.0, float(time_limit)),
             gap_tolerance=master_gap_tolerance(
-                gap_tolerance, None if incumbent is None else incumbent - self.offset
+                gap_tolerance,
+                None if incumbent is None or override else incumbent - self.offset,
             ),
             milp_solver=self.backend,
-            no_good_configs=self.no_good_configs,
+            no_good_configs=no_goods,
             int_indices=self.int_indices,
         )
         status = "error" if r is None else str(getattr(r.status, "value", r.status))
@@ -449,7 +501,63 @@ class MasterMILP:
             infeasible = r is not None and r.status == SolveStatus.INFEASIBLE
             return MasterResult(None, None, None, infeasible, status)
         x = np.asarray(r.x, dtype=np.float64)[: self.n_vars]
+        if override:
+            return MasterResult(x, self.config_of(x), None, False, status)
         bound = None
         if self.bound_valid and r.bound is not None and math.isfinite(float(r.bound)):
             bound = float(r.bound) + self.offset
         return MasterResult(x, self.config_of(x), bound, False, status)
+
+
+def build_master(lowered: Any, *, backend: str = DEFAULT_MASTER_BACKEND) -> MasterMILP:
+    """The master of a lowered (algebraic) model: every row that is one linear row.
+
+    The same extraction LOA performs (``_extract_body_coeffs`` is the single gate,
+    #1039): a row it reads becomes a master row, any other row is left to the
+    subproblems. A linear objective goes in the minimization convention
+    (MAXIMIZE negated, constant kept, #1611/#1773); a nonlinear one leaves the
+    master without an objective (``objective_convex`` is the caller's to set
+    once it has a convexity certificate). Bounds and integrality are the
+    lowered model's own.
+    """
+    from discopt._relax.gdp_reformulate import _extract_body_coeffs
+    from discopt.modeling.core import Constraint, ObjectiveSense, VarType
+
+    variables = lowered._variables
+    n = sum(int(v.size) for v in variables)
+
+    def flat(attr: str) -> np.ndarray:
+        return np.concatenate(
+            [
+                np.ravel(np.broadcast_to(np.asarray(getattr(v, attr), dtype=np.float64), v.shape))
+                for v in variables
+            ]
+        )
+
+    integrality = np.concatenate(
+        [
+            np.full(int(v.size), int(v.var_type in (VarType.BINARY, VarType.INTEGER)))
+            for v in variables
+        ]
+    ).astype(np.int32)
+    objective = None
+    if lowered._objective is not None:
+        coeffs = _extract_body_coeffs(lowered._objective_expression(), lowered, n)
+        if coeffs is not None:
+            c, off = coeffs
+            if lowered._objective.sense == ObjectiveSense.MAXIMIZE:
+                c, off = -c, -off
+            objective = (np.asarray(c, dtype=np.float64), float(off))
+    master = MasterMILP(
+        n, flat("lb"), flat("ub"), integrality, objective=objective, backend=backend
+    )
+    for con in lowered._constraints:
+        if not isinstance(con, Constraint):
+            continue
+        coeffs = _extract_body_coeffs(con.body, lowered, n)
+        if coeffs is None:
+            continue
+        c_vec, off = coeffs
+        sense = con.sense if isinstance(con.sense, str) else getattr(con.sense, "value", con.sense)
+        master.add_row(c_vec, str(sense), float(con.rhs) - float(off))
+    return master
