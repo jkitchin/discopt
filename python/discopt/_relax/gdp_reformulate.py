@@ -1834,6 +1834,7 @@ def _bound_array_reduction(expr: Expression, model: Model, memo: _BoundMemo) -> 
             return (0.0, 0.0)
         return (k * lo, k * hi)
 
+    assert isinstance(expr, MatMulExpression)  # the caller dispatches only these two
     sl, sr = _shape_of(expr.left), _shape_of(expr.right)
     if sl is None or sr is None or not (1 <= len(sl) <= 2 and 1 <= len(sr) <= 2):
         return (-np.inf, np.inf)
