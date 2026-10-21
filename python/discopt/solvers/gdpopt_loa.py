@@ -7,7 +7,6 @@ Requires a matrix MILP backend for the master problem solver.
 from __future__ import annotations
 
 import logging
-import time
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
@@ -22,14 +21,11 @@ from discopt.gdp.algorithms.master import (  # noqa: F401 - re-exported for call
     _solve_master_milp,
 )
 from discopt.modeling.core import (
-    Constraint,
     Model,
-    ObjectiveSense,
     SolveResult,
-    VarType,
 )
 from discopt.solvers import pounce_incumbent_options, pounce_option_defaults
-from discopt.solvers._gap import master_gap_tolerance, optimality_gap
+from discopt.solvers._gap import optimality_gap
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     # #1063: type-only. ``_relax/nlp_evaluator`` imports jax at module scope, so a
@@ -47,8 +43,13 @@ def solve_gdpopt_loa(
     max_iterations: int = 100,
     nlp_solver: str = "ipm",
     milp_solver: str = "auto",
+    **options,
 ) -> SolveResult:
     """Solve a GDP model via Logic-based Outer Approximation.
+
+    A thin entry point over :class:`discopt.gdp.algorithms.loa.LOA` (#1775 G4.1),
+    the framework's LOA; ``options`` are its ``init_algorithm``,
+    ``set_cover_iterlim`` and ``subproblem``.
 
     Parameters
     ----------
@@ -59,7 +60,7 @@ def solve_gdpopt_loa(
     gap_tolerance : float
         Relative optimality gap tolerance.
     max_iterations : int
-        Maximum LOA iterations.
+        Maximum LOA iterations (master solves).
     nlp_solver : str
         NLP solver backend for subproblems (``"ipm"``, ``"pounce"``, ``"ipopt"``).
     milp_solver : str
@@ -72,401 +73,17 @@ def solve_gdpopt_loa(
     -------
     SolveResult
     """
-    t_start = time.perf_counter()
+    from discopt.gdp.algorithms.loa import LOA
 
-    # 1. Reformulate GDP to standard MINLP via big-M
-    from discopt.transformations import get as _get_transformation
-
-    reformulated = _get_transformation("gdp").apply(model, method="big-m")
-
-    # 2. Build NLP evaluator for the reformulated model
-    from discopt._relax.convexity import classify_oa_cut_convexity
-    from discopt._tape_nlp_evaluator import make_evaluator
-
-    evaluator = make_evaluator(reformulated)  # #1063: canonical funnel, not the JAX ctor
-    from discopt.solvers.oa import _oa_rows
-
-    oa_convexity = classify_oa_cut_convexity(reformulated)
-    # #1297: cut generation indexes the mask per evaluator row, not per Constraint.
-    oa_rows = _oa_rows(evaluator, reformulated, oa_convexity.constraint_mask)
-    n_vars = evaluator.n_variables
-    n_cons = evaluator.n_constraints
-    lb, ub = evaluator.variable_bounds
-    obj_is_linear = False
-    master_bound_valid = False
-
-    # 3. Identify integer/binary variable indices
-    int_indices = []
-    offset = 0
-    for v in reformulated._variables:
-        if v.var_type in (VarType.BINARY, VarType.INTEGER):
-            for i in range(v.size):
-                int_indices.append(offset + i)
-        offset += v.size
-    # Build integrality vector for MILP master
-    integrality = np.zeros(n_vars, dtype=np.int32)
-    for idx in int_indices:
-        integrality[idx] = 1
-
-    # 4. Extract linear constraints as coefficient matrices
-    linear_A_rows = []
-    linear_b_rows = []
-    linear_senses = []
-    nonlinear_indices = []
-
-    from discopt._relax.gdp_reformulate import _extract_body_coeffs
-
-    # #1039: ask ONE question, and ask the component that answers it with a
-    # witness. This loop used to gate on ``_is_linear(c.body)`` first and only
-    # then call the extractor — two predicates for one decision, and the
-    # conservative one wins. ``_is_linear`` rejects ``SumOverExpression``, so
-    # the ``exactly-one`` row that ``make_disjunct``/``add_disjunction`` emits
-    # never reached the master MILP: the master could pick "no disjunct
-    # active", whose fixed-integer NLP is infeasible, and LOA reported
-    # ``status="unknown"`` on a trivially feasible model. ``_extract_body_coeffs``
-    # returning ``(c_vec, offset)`` *is* the proof the body is one linear row —
-    # it cannot claim more than it produces — so it is the correct and only
-    # gate. Anything it cannot read goes to the NLP subproblem, as before.
-    for k, c in enumerate(reformulated._constraints):
-        if not isinstance(c, Constraint):
-            continue
-        coeffs = _extract_body_coeffs(c.body, reformulated, n_vars)
-        if coeffs is not None:
-            c_vec, off = coeffs
-            linear_A_rows.append(c_vec)
-            linear_b_rows.append(-off)  # body - off sense 0 → c_vec @ x sense -off
-            linear_senses.append(c.sense)
-        else:
-            nonlinear_indices.append(k)
-
-    # 5. Check if objective is linear
-    _raw_obj = reformulated._objective
-    # ``_objective_expression()``, not ``_objective.expression``: a fast-API
-    # objective (``add_linear_objective``) leaves a zero placeholder there, and the
-    # master then minimized 0 and reported bound 0 (#1798).
-    obj_coeffs = (
-        _extract_body_coeffs(reformulated._objective_expression(), reformulated, n_vars)
-        if _raw_obj is not None
-        else None
-    )
-    obj_is_linear = obj_coeffs is not None
-    master_bound_valid = obj_is_linear or oa_convexity.objective_is_convex
-    # #1611 C-11: the evaluator works in minimization convention -- it negates a
-    # MAXIMIZE objective -- so the NLP subproblems, the objective OA cuts, LB and
-    # UB below all live in ``min -f``. Put the linear master objective in the same
-    # convention (as ``oa._decompose_model`` does), and un-negate the objective and
-    # bound at the return sites with ``obj_sign``. Without this the master
-    # minimized ``+f`` while the subproblems minimized ``-f``, and the result
-    # carried the internal (negated) bound on the wrong side of the incumbent.
-    maximize = _raw_obj is not None and _raw_obj.sense == ObjectiveSense.MAXIMIZE
-    obj_sign = -1.0 if maximize else 1.0
-    if maximize and obj_coeffs is not None:
-        _c_vec, _c_off = obj_coeffs
-        obj_coeffs = (-_c_vec, -_c_off)
-    # The linear master minimizes ``c_vec @ x`` only: its objective constant is not
-    # a column, so the master's ``bound`` is offset-free and must have the constant
-    # added back before it becomes LB (and the incumbent handed to the master's gap
-    # tolerance must have it removed), exactly as ``oa.py`` does with
-    # ``decomp.obj_coeffs[1]``. Dropping it reported ``bound = 0`` on ``min x - 10``
-    # with incumbent ``-10``: a dual bound above the incumbent.
-    master_obj_offset = float(obj_coeffs[1]) if obj_coeffs is not None else 0.0
-
-    if n_cons > 0 and not all(oa_rows.convex_mask):
-        logger.warning(
-            "LOA: generating OA cuts only for %d of %d constraint rows classified convex",
-            sum(1 for is_convex in oa_rows.convex_mask if is_convex),
-            len(oa_rows.convex_mask),
-        )
-    if not obj_is_linear and not oa_convexity.objective_is_convex:
-        logger.warning(
-            "LOA: nonlinear objective is not convex in the optimization sense; "
-            "disabling master lower-bound updates and skipping objective OA cuts"
-        )
-
-    # 6. Solve initial NLP relaxation (continuous)
-    x_relax = _solve_nlp_relaxation(evaluator, lb, ub, nlp_solver)
-
-    # 7. Initialize OA cut pool
-    oa_A_rows: list[np.ndarray] = []
-    oa_b_rows: list[float] = []
-
-    if x_relax is not None:
-        _add_oa_cuts(
-            evaluator,
-            x_relax,
-            n_vars,
-            n_cons,
-            oa_A_rows,
-            oa_b_rows,
-            obj_is_linear,
-            oa_rows,
-            oa_convexity.objective_is_convex,
-        )
-
-    # 8. Main LOA loop
-    LB = -1e20
-    UB = 1e20
-    incumbent = None
-    incumbent_obj = None
-
-    # C-35: integer configurations whose fixed-integer NLP subproblem failed to
-    # resolve *non-rigorously* (diverged / iteration limit / error). A local NLP
-    # failure is NOT a proof of infeasibility, so we must NOT exclude such a
-    # configuration with a no-good cut. Tracked to refuse certification and to
-    # break the loop soundly if the master re-proposes an unresolved config.
-    unresolved_int_configs: set[tuple[int, ...]] = set()
-
-    # #756: integer configurations proven infeasible that must be excluded with an
-    # *exact* single-point no-good. The binary-only exclusion form (``_add_no_good_cut``)
-    # is only valid when every discrete variable is 0/1; for a general integer it also
-    # cuts off feasible configurations (a certified false infeasible). When any discrete
-    # variable is non-binary we exclude each proven-infeasible point exactly via
-    # auxiliary-binary "move away" disjunctions built in the master (see
-    # ``_build_no_good_augmentation``).
-    all_binary_discrete = _discrete_vars_all_binary(int_indices, lb, ub)
-    no_good_configs: list[tuple[int, ...]] = []
-
-    # #1611 C-11: integer configurations whose fixed-integer NLP already returned
-    # a point. Re-solving one adds the same OA cuts at the same point, so the
-    # master proposes it again forever: the loop can only spin to the time limit.
-    # Measured on the C-11 synthesis model the NLP point violates its linear rows
-    # by ~1e-6 (the NLP's own feasibility tolerance), so its objective sits 3.8e-5
-    # past the exact master bound, the gap reads as a crossed certificate (1.0),
-    # and LOA re-solved the same configuration for the full 30 s. A re-proposal
-    # carries no new information; stop (certification is still decided only by
-    # the gap below, never by this exit).
-    solved_int_configs: set[tuple[int, ...]] = set()
-
-    # #756: terminal state must distinguish a rigorous infeasibility proof from a
-    # limit exhaustion. A timeout / iteration-cap / non-infeasible master verdict is
-    # NOT an infeasibility proof and must never be certified as ``infeasible``.
-    timed_out = False
-    master_infeasible = False
-
-    for iteration in range(max_iterations):
-        elapsed = time.perf_counter() - t_start
-        if elapsed >= time_limit:
-            timed_out = True
-            break
-
-        # a. Build and solve master MILP
-        master_result = _solve_master_milp(
-            linear_A_rows,
-            linear_b_rows,
-            linear_senses,
-            oa_A_rows,
-            oa_b_rows,
-            n_vars,
-            integrality,
-            lb,
-            ub,
-            obj_coeffs,
-            obj_is_linear,
-            master_bound_valid,
-            time_limit=time_limit - elapsed,
-            gap_tolerance=master_gap_tolerance(
-                gap_tolerance, UB - master_obj_offset if UB < 1e20 else None
-            ),
-            milp_solver=milp_solver,
-            no_good_configs=no_good_configs,
-            int_indices=int_indices,
-        )
-
-        if master_result is None or master_result.x is None:
-            # #756: only a rigorous INFEASIBLE verdict is an infeasibility proof.
-            # A master that returns no solution under a time/iteration limit (or a
-            # backend error) has proved nothing — never certify it as infeasible.
-            from discopt.solvers import SolveStatus
-
-            if master_result is not None and master_result.status == SolveStatus.INFEASIBLE:
-                master_infeasible = True
-                logger.info("LOA: Master MILP proven infeasible at iteration %d", iteration)
-            else:
-                logger.info(
-                    "LOA: Master MILP returned no solution (status=%s) at iteration %d; "
-                    "not treating as an infeasibility proof",
-                    None if master_result is None else master_result.status,
-                    iteration,
-                )
-            break
-
-        x_master = master_result.x[:n_vars]
-        master_config = _int_config_key(x_master, int_indices)
-        if master_config in solved_int_configs:
-            if master_bound_valid and master_result.bound is not None:
-                LB = max(LB, master_result.bound + master_obj_offset)
-            logger.info(
-                "LOA: master re-proposed the already-solved integer configuration %s "
-                "at iteration %d; no new cuts can be generated, stopping",
-                master_config,
-                iteration,
-            )
-            break
-        # Valid LB comes from the master's dual ``bound`` only, never the
-        # incumbent ``objective`` (an upper bound on a limited master solve).
-        if master_bound_valid and master_result.bound is not None:
-            LB = max(LB, master_result.bound + master_obj_offset)
-
-        # b. Fix integers to master values, solve NLP subproblem
-        sub_lb = lb.copy()
-        sub_ub = ub.copy()
-        for idx in int_indices:
-            val = round(x_master[idx])
-            sub_lb[idx] = val
-            sub_ub[idx] = val
-
-        x_nlp = _solve_nlp_subproblem(evaluator, sub_lb, sub_ub, nlp_solver)
-
-        if x_nlp is not None:
-            solved_int_configs.add(master_config)
-            x_nlp = _repair_incumbent(reformulated, evaluator, x_nlp)
-            obj_nlp = float(evaluator.evaluate_objective(x_nlp))
-            if obj_nlp < UB:
-                UB = obj_nlp
-                incumbent = x_nlp.copy()
-                incumbent_obj = obj_nlp
-
-            # c. Generate OA cuts at NLP solution
-            _add_oa_cuts(
-                evaluator,
-                x_nlp,
-                n_vars,
-                n_cons,
-                oa_A_rows,
-                oa_b_rows,
-                obj_is_linear,
-                oa_rows,
-                oa_convexity.objective_is_convex,
-            )
-        else:
-            # C-35: the fixed-integer NLP subproblem returned no feasible point.
-            # A no-good cut is only SOUND when this configuration is RIGOROUSLY
-            # infeasible/dominated. A local NLP that merely failed to converge is
-            # NOT such a proof (the NLP layer never emits a rigorous
-            # infeasibility verdict). Split on a rigorous check.
-            rigorously_infeasible = _fixed_subproblem_rigorously_infeasible(
-                evaluator, sub_lb, sub_ub
-            )
-
-            # OA cuts at master point (valid supporting linearizations either way).
-            _add_oa_cuts(
-                evaluator,
-                x_master,
-                n_vars,
-                n_cons,
-                oa_A_rows,
-                oa_b_rows,
-                obj_is_linear,
-                oa_rows,
-                oa_convexity.objective_is_convex,
-            )
-
-            if rigorously_infeasible:
-                # Proven infeasible ⇒ exclude EXACTLY this integer configuration
-                # (anti-cycling + certification preserved). The binary-only cut is
-                # valid only when every discrete variable is 0/1; for general
-                # integers it also cuts feasible points (#756), so route those
-                # through the exact auxiliary-binary no-good built in the master.
-                if all_binary_discrete:
-                    _add_no_good_cut(x_master, int_indices, oa_A_rows, oa_b_rows, n_vars)
-                else:
-                    no_good_configs.append(_int_config_key(x_master, int_indices))
-            else:
-                # Non-rigorous failure ⇒ do NOT exclude this configuration.
-                # Record it as unresolved (result not certified) and break
-                # soundly if the master re-proposes it (avoids cycling without
-                # the anti-cycling no-good cut).
-                config_key = _int_config_key(x_master, int_indices)
-                already_seen = config_key in unresolved_int_configs
-                unresolved_int_configs.add(config_key)
-                if already_seen:
-                    logger.info(
-                        "LOA: integer configuration %s unresolved by NLP "
-                        "(non-rigorous failure) and re-proposed; stopping without "
-                        "a no-good cut (result not certified)",
-                        config_key,
-                    )
-                    break
-
-        # d. Check convergence
-        gap = _compute_gap(LB, UB)
-        logger.info(
-            "LOA iter %d: LB=%.6f UB=%.6f gap=%.4f%% cuts=%d",
-            iteration,
-            LB,
-            UB,
-            gap * 100,
-            len(oa_A_rows),
-        )
-
-        if gap <= gap_tolerance:
-            break
-
-    # 9. Build result
-    wall_time = time.perf_counter() - t_start
-    gap = _compute_gap(LB, UB)
-    bound = obj_sign * LB if master_bound_valid and LB > -1e19 else None
-    reported_gap = gap if bound is not None and UB < 1e19 else None
-
-    # C-35: unresolved configurations mean the search is incomplete — we did not
-    # exclude them, so neither optimality nor infeasibility is proved. Downgrade
-    # certification and never report a *certified* "infeasible" in this state.
-    has_unresolved = len(unresolved_int_configs) > 0
-
-    if incumbent is not None:
-        # #756: a timeout means optimality was never proved — report "feasible",
-        # never "optimal", even if the last computed gap happens to be small.
-        certified = (gap <= gap_tolerance) and not has_unresolved and not timed_out
-        status = "optimal" if certified else "feasible"
-        x_dict = _build_x_dict(incumbent, reformulated)
-        return SolveResult(
-            status=status,
-            objective=None if incumbent_obj is None else obj_sign * incumbent_obj,
-            bound=bound,
-            gap=reported_gap,
-            x=x_dict,
-            wall_time=wall_time,
-            gap_certified=not has_unresolved,
-        )
-
-    if has_unresolved:
-        # No feasible incumbent AND unresolved configurations: cannot certify
-        # infeasibility (a diverged subproblem is not a proof).
-        return SolveResult(
-            status="unknown",
-            objective=None,
-            bound=bound,
-            gap=None,
-            x=None,  # no incumbent -- see SolveResult.x's contract (#1105)
-            wall_time=wall_time,
-            gap_certified=False,
-        )
-
-    if master_infeasible:
-        # The only path to a certified infeasible: the master relaxation (linear
-        # rows + valid OA cuts + exact single-point no-good exclusions) was proved
-        # infeasible by the MILP backend.
-        return SolveResult(
-            status="infeasible",
-            objective=None,
-            bound=bound,
-            gap=None,
-            x=None,  # no incumbent -- see SolveResult.x's contract (#1105)
-            wall_time=wall_time,
-        )
-
-    # #756: no incumbent and no infeasibility proof — the loop stopped on the time
-    # limit, the iteration cap, or a non-infeasible master verdict. None of these
-    # prove infeasibility, so return an uncertified "unknown" result.
-    return SolveResult(
-        status="unknown",
-        objective=None,
-        bound=bound,
-        gap=None,
-        x=None,  # no incumbent -- see SolveResult.x's contract (#1105)
-        wall_time=wall_time,
-        gap_certified=False,
-    )
+    return LOA(
+        model,
+        time_limit=time_limit,
+        gap_tolerance=gap_tolerance,
+        iteration_limit=max_iterations,
+        nlp_solver=nlp_solver,
+        milp_solver=milp_solver,
+        **options,
+    ).run()
 
 
 def _repair_incumbent(reformulated: Model, evaluator, x: np.ndarray) -> np.ndarray:

@@ -134,7 +134,9 @@ class TestIssue756TimeLimit:
         assert r.status != "infeasible", (
             "timeout with zero iterations must not certify infeasibility"
         )
-        assert r.status == "unknown"
+        # #1775 G4.1 (spec §5.4): a limit with no incumbent names the limit; it was
+        # "unknown" before LOA moved onto the framework. Neither is a certificate.
+        assert r.status == "time_limit"
         assert r.objective is None
         assert r.gap_certified is False
 

@@ -11360,11 +11360,17 @@ GDP_OPTION_KEYS: frozenset[str] = frozenset(
         "check_sat",
         "direction_norm",
         "subproblem_presolve",
+        # discopt's own: "nlp" (local fixed-integer NLP) or "global" (each
+        # configuration certified by discopt). Pyomo selects this through the
+        # choice of NLP solver; there is no key of its own to reuse.
+        "subproblem",
     }
 )
 
 #: The ``gdp_options`` keys each implemented native method reads.
-_GDP_OPTIONS_READ: dict[str, frozenset[str]] = {"loa": frozenset({"iterlim"})}
+_GDP_OPTIONS_READ: dict[str, frozenset[str]] = {
+    "loa": frozenset({"iterlim", "init_algorithm", "set_cover_iterlim", "subproblem"})
+}
 
 
 def _validate_gdp_method(gdp_method: object, solver: Optional[str] = None) -> None:
@@ -11439,10 +11445,20 @@ def _validate_gdp_options(gdp_method: str, gdp_options: object) -> dict[str, Any
             f"gdp_method={gdp_method!r} does not read gdp_options {unread} yet; it "
             f"reads {sorted(read)}."
         )
-    if "iterlim" in gdp_options:
-        it = gdp_options["iterlim"]
-        if isinstance(it, bool) or not isinstance(it, (int, np.integer)) or it < 1:
-            raise ValueError(f"gdp_options['iterlim'] must be a positive integer, got {it!r}")
+    for key, low in (("iterlim", 1), ("set_cover_iterlim", 0)):
+        if key in gdp_options:
+            it = gdp_options[key]
+            if isinstance(it, bool) or not isinstance(it, (int, np.integer)) or it < low:
+                raise ValueError(f"gdp_options[{key!r}] must be an integer >= {low}, got {it!r}")
+    if "init_algorithm" in gdp_options or "subproblem" in gdp_options:
+        from discopt.gdp.algorithms.init import INIT_STRATEGIES
+        from discopt.gdp.algorithms.loa import LOA_SUBPROBLEMS
+
+        for key, allowed in (("init_algorithm", INIT_STRATEGIES), ("subproblem", LOA_SUBPROBLEMS)):
+            if key in gdp_options and gdp_options[key] not in allowed:
+                raise ValueError(
+                    f"gdp_options[{key!r}] must be one of {allowed}, got {gdp_options[key]!r}"
+                )
     return dict(gdp_options)
 
 
@@ -13732,6 +13748,10 @@ def solve_model(
         # gdp_options' Pyomo name for the iteration limit (#1775 G3.1); without it
         # the iteration cap stays max_nodes, as before.
         loa_max_iter = int(_gdp_opts.get("iterlim", max_nodes))
+        # #1775 G4.1: LOA's framework options.
+        for key in ("init_algorithm", "set_cover_iterlim", "subproblem"):
+            if key in _gdp_opts:
+                loa_kwargs[key] = _gdp_opts[key]
 
         _declare_route("gdpopt-loa: logic-based outer approximation (MILP master + NLP)")
         return solve_gdpopt_loa(
@@ -19690,6 +19710,10 @@ def solve_model(
                             # deadline rides along purely as a time_limit backstop.
                             time_budget=_role2_horizon(min(5.0, 0.15 * max(1.0, time_limit))),
                             deadline=_deadline,
+                            box=(
+                                np.asarray(batch_lb[best_root_idx], dtype=np.float64),
+                                np.asarray(batch_ub[best_root_idx], dtype=np.float64),
+                            ),
                         )
                         if ils is not None:
                             _x_ils, _obj_ils = ils

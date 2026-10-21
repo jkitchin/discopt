@@ -67,12 +67,15 @@ def test_rule_1_covers_every_native_method(method):
     "method, options, match",
     [
         ("loa", {"no_such_option": 1}, "Unknown gdp_options key"),
-        ("loa", {"init_algorithm": "set_covering"}, "does not read gdp_options"),
+        ("loa", {"OA_penalty_factor": 1000.0}, "does not read gdp_options"),
         ("big-m", {"iterlim": 3}, "which reads none"),
         ("hull", {"iterlim": 3}, "which reads none"),
-        ("loa", {"iterlim": 0}, "positive integer"),
-        ("loa", {"iterlim": 2.5}, "positive integer"),
-        ("loa", {"iterlim": True}, "positive integer"),
+        ("loa", {"iterlim": 0}, "integer >= 1"),
+        ("loa", {"iterlim": 2.5}, "integer >= 1"),
+        ("loa", {"iterlim": True}, "integer >= 1"),
+        ("loa", {"init_algorithm": "set_cover"}, "must be one of"),
+        ("loa", {"subproblem": "exact"}, "must be one of"),
+        ("loa", {"set_cover_iterlim": -1}, "integer >= 0"),
     ],
 )
 def test_gdp_options_refusals(method, options, match):
@@ -231,9 +234,10 @@ def test_time_limit_with_an_open_gap_is_not_certified():
     assert r.bound_valid and not r.gap_certified
 
 
-def test_bound_within_tolerance_above_ub_is_published_clamped():
-    """offer_bound admits ub + tol; the reported bound never exceeds the objective."""
-    _, r = _run([("x", 2.0), ("lb", 1.0 + 5e-5)])
+def test_bound_within_rounding_above_ub_is_published_clamped():
+    """offer_bound admits a rounding-scale inversion; the reported bound never
+    exceeds the objective."""
+    _, r = _run([("x", 2.0), ("lb", 1.0 + 5e-6)])
     assert r.status == "optimal" and r.gap_certified
     assert r.bound == r.objective == pytest.approx(1.0) and r.gap == 0.0
 
@@ -301,11 +305,14 @@ def test_exhausted_without_proof_is_unknown():
     assert alg.stop_reason == "exhausted" and r.status == "unknown"
 
 
-def test_a_bound_crossing_the_incumbent_raises():
-    with pytest.raises(RuntimeError, match="crosses the verified incumbent"):
-        _run([("x", 2.0), ("lb", 1.5)])
-    with pytest.raises(RuntimeError, match="lies below the bound"):
-        _run([("lb", 3.0), ("x", 2.0)])
+@pytest.mark.parametrize("steps", [[("x", 2.0), ("lb", 1.5)], [("lb", 3.0), ("x", 2.0)]])
+def test_a_bound_crossing_the_incumbent_is_withdrawn(steps):
+    """Beyond rounding, a bound above a verified incumbent means one of them is
+    wrong (#945): nothing is certified and no bound is published -- never a
+    clamped certificate (#1059)."""
+    alg, r = _run(steps)
+    assert r.status == "feasible" and r.bound is None and not r.gap_certified
+    assert "crossed the verified incumbent" in r.solver_stats["lb_invalid_reason"]
 
 
 def test_infeasibility_proof_with_an_incumbent_raises():

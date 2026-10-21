@@ -85,3 +85,34 @@ def test_a_pinned_model_costs_few_sub_nlps(pin, monkeypatch):
     assert r.status == "optimal" and r.objective == pytest.approx(4.6, abs=1e-6)
     assert calls, "the probe never saw a sub-NLP"
     assert len(calls) <= 20, f"{len(calls)} sub-NLPs (101 / 80 before the fix)"
+
+
+def test_local_search_respects_the_callers_box(monkeypatch):
+    """#1775 G4.1: ``integer_local_search`` takes the caller's node box (the root's,
+    after its bound tightening). A column the box fixes -- like a lowered logic
+    auxiliary decided through rows over pinned binaries -- is not moved. Measured
+    on a GDP subproblem with logical constraints: 96 sub-NLPs without the root box,
+    24 with it."""
+    m = dm.Model("box")
+    x = m.continuous("x", lb=0, ub=10)
+    b = [m.binary(f"b{i}") for i in range(4)]
+    m.subject_to(x >= 1 + b[0] + 2 * b[1] + 3 * b[2] + 4 * b[3])
+    m.minimize((x - 2.5) ** 2 + b[0] + b[1] + b[2] + b[3])
+    x_relax = np.array([2.5, 0.2, 0.3, 0.1, 0.0])
+    box = (np.array([0, 1, 0, 0, 0.0]), np.array([10, 1, 0, 0, 0.0]))  # b0 = 1, rest 0
+
+    def run(with_box):
+        calls = []
+        real = ph.subnlp
+        monkeypatch.setattr(ph, "subnlp", lambda *a, **k: calls.append(1) or real(*a, **k))
+        out = ph.integer_local_search(m, x_relax, box=box if with_box else None)
+        monkeypatch.setattr(ph, "subnlp", real)
+        return out, len(calls)
+
+    out_box, n_box = run(True)
+    out_free, n_free = run(False)
+    assert n_free > 0, "the probe never saw a sub-NLP"
+    assert n_box < n_free, (n_box, n_free)
+    if out_box is not None:
+        xb, _ = out_box
+        assert [round(float(v)) for v in xb[1:]] == [1, 0, 0, 0]
