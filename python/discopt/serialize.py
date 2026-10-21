@@ -2631,10 +2631,12 @@ def _enc_piecewise_domains(model: Model, table) -> list[dict]:
     breakpoint span, and the check that catches a bound widened past it after
     declaration lives here. Dropping it on load would let a reloaded model clamp
     a widened input silently (#1482). The input is written through the shared
-    node table so it aliases the node the rows already carry.
+    node table so it aliases the node the rows already carry. A P-split record
+    (#1775 G2.8) can have ``lo = -inf`` (a part unbounded below), hence the
+    token encoding; the reader has always decoded tokens here.
     """
     return [
-        {"input": table.add(expr), "lo": float(lo), "hi": float(hi), "label": label}
+        {"input": table.add(expr), "lo": _enc_float(lo), "hi": _enc_float(hi), "label": label}
         for expr, lo, hi, label in getattr(model, "_piecewise_domains", []) or []
     ]
 

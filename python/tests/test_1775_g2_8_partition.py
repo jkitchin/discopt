@@ -20,7 +20,7 @@ import pytest
 from discopt._relax.gdp_reformulate import reformulate_gdp
 from discopt.gdp.partition import between_steps, partition_disjuncts
 from discopt.modeling._relax_integrality import relax_integrality
-from discopt.modeling.core import _DisjunctiveConstraint
+from discopt.modeling.core import Constraint, _DisjunctiveConstraint
 
 pytestmark = pytest.mark.smoke
 
@@ -56,8 +56,12 @@ def test_rows_are_split_into_auxiliaries_with_interval_bounds():
     assert rep.rows_split == 2 and rep.aux_vars == 4
     aux = _aux(m)
     assert len(aux) == 4
-    # Each part is two squares (x_i -/+ 1)^2 on [-3, 3]: enclosure [0, 32].
-    assert all(float(a.lb) == 0.0 and float(a.ub) == 32.0 for a in aux)
+    # Each part is two squares (x_i -/+ 1)^2 on [-3, 3]: enclosure [0, 32], rounded
+    # outward (evaluate_interval), so it contains the true range.
+    for a in aux:
+        assert float(a.lb) <= 0.0 and float(a.ub) >= 32.0
+        assert float(a.lb) == pytest.approx(0.0, abs=1e-12)
+        assert float(a.ub) == pytest.approx(32.0, rel=1e-12)
     (dc,) = [c for c in m._constraints if isinstance(c, _DisjunctiveConstraint)]
     for d in dc.disjuncts:
         (row,) = d
@@ -115,7 +119,9 @@ def test_a_nonconvex_row_is_split_exactly(direction):
     assert r.objective == pytest.approx(ref.objective, abs=1e-5)
 
 
-def test_ge_rows_are_negated_and_eq_and_single_part_rows_are_left():
+def test_dsl_ge_rows_eq_rows_and_single_part_rows():
+    """The DSL stores ``x**2 + y**2 >= 9`` as ``9 - (x**2 + y**2) <= 0``, so this
+    covers the summand signs only; the raw ``>=`` / rhs branches are tested below."""
     m = dm.Model("senses")
     x = m.continuous("x", lb=0, ub=4)
     y = m.continuous("y", lb=0, ub=4)
@@ -126,6 +132,58 @@ def test_ge_rows_are_negated_and_eq_and_single_part_rows_are_left():
     assert rep.rows_split == 1
     assert any("sense '=='" in s for s in rep.skipped) and any("one part" in s for s in rep.skipped)
     assert _solve(m).objective == pytest.approx(ref, abs=1e-5)
+
+
+def _raw(rows_a, rows_b, obj):
+    m = dm.Model("raw")
+    x = m.continuous("x", lb=0, ub=3)
+    y = m.continuous("y", lb=0, ub=3)
+    m.either_or([rows_a(x, y), rows_b(x, y)], name="d")
+    m.minimize(obj(x, y))
+    return m
+
+
+# Raw ``Constraint(body, sense, rhs)`` rows reach the ``>=`` negation and the rhs
+# term, which DSL rows (always ``body <= 0``) never do. The oracle is worked out by
+# hand, not by the unsplit solve: the base lowering drops a raw rhs in a disjunct
+# row (#1858). Each case kills a mutant of the split (measured on the PR head):
+# dropping the ``>=`` negation gives -3.0 on "ge_rhs0", flipping the rhs sign
+# gives -3.0 on "le_ge_rhs" and -1.0 on "le_rhs".
+_RAW_CASES = {
+    # A: x^2+y^2 <= 1 (best -1 at (1, 0)); B: x+y-5 >= 0 in [0,3]^2 (best (3, 2)).
+    "ge_rhs0": (
+        lambda x, y: [x**2 + y**2 - 1 <= 0],
+        lambda x, y: [Constraint(body=x + y - 5, sense=">=", rhs=0.0)],
+        lambda x, y: -x + 0.1 * y,
+        -2.8,
+    ),
+    # Same feasible set, the constants carried by rhs instead.
+    "le_ge_rhs": (
+        lambda x, y: [Constraint(body=x**2 + y**2, sense="<=", rhs=1.0)],
+        lambda x, y: [Constraint(body=x + y, sense=">=", rhs=5.0)],
+        lambda x, y: -x + 0.1 * y,
+        -2.8,
+    ),
+    # A: x^2+y^2 <= 4 (best x+y = 2*sqrt(2)); B: x+y <= 1 (best 1).
+    "le_rhs": (
+        lambda x, y: [Constraint(body=x**2 + y**2, sense="<=", rhs=4.0)],
+        lambda x, y: [x + y <= 1],
+        lambda x, y: -x - y,
+        -(2.0**1.5),
+    ),
+}
+
+
+@pytest.mark.parametrize("method", ["big-m", "hull"])
+@pytest.mark.parametrize("case", sorted(_RAW_CASES))
+def test_raw_ge_and_rhs_rows_are_split_exactly(case, method):
+    rows_a, rows_b, obj, opt = _RAW_CASES[case]
+    m = _raw(rows_a, rows_b, obj)
+    rep = partition_disjuncts(m)
+    assert rep.rows_split == 2
+    r = _solve(m, gdp_method=method)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(opt, abs=1e-5)
 
 
 def test_user_partitions_are_used_and_a_straddling_summand_is_refused():
@@ -230,3 +288,193 @@ def test_registered_transformations():
 def test_num_partitions_below_two_is_refused():
     with pytest.raises(ValueError, match="num_partitions"):
         partition_disjuncts(_balls()[0], num_partitions=1)
+
+
+def _state(m):
+    """Everything partition_disjuncts may touch, by identity and by text."""
+
+    def disj(c):
+        return (
+            id(c.disjuncts),
+            [(id(d), type(d), [id(r) for r in d], [str(r) for r in d]) for d in c.disjuncts],
+            c.big_m,
+        )
+
+    return (
+        [id(c) for c in m._constraints],
+        [str(c) if not isinstance(c, _DisjunctiveConstraint) else disj(c) for c in m._constraints],
+        [id(v) for v in m._variables],
+        sorted(m._names),
+        list(m._piecewise_domains),
+        [(id(b._constraints), [id(r) for r in b._constraints]) for b in m._gdp_factory_disjuncts],
+    )
+
+
+def _two_disjunctions(second):
+    """d1 splits over [[x], [y]]; d2 (``second``) refuses. Optimum -sqrt(2)."""
+    m = dm.Model("atomic")
+    x = m.continuous("x", lb=0, ub=3)
+    y = m.continuous("y", lb=0, ub=3)
+    z = m.continuous("z", lb=0, ub=3)
+    m.either_or([[x**2 + y**2 <= 1], [x + y <= 0.5]], name="d1")
+    m.either_or(second(x, y, z), name="d2")
+    m.minimize(-x - y)
+    return m, x, y
+
+
+_REFUSING = {
+    "straddle": (lambda x, y, z: [[x * y + x <= 1], [x <= 2]], "uses variables of partitions"),
+    "no_partition": (lambda x, y, z: [[x + z <= 1], [x <= 2]], "in no partition"),
+}
+
+
+@pytest.mark.parametrize("how", ["direct", "apply_to"])
+@pytest.mark.parametrize("why", sorted(_REFUSING))
+def test_a_refusal_partway_through_leaves_the_model_unchanged(why, how):
+    """Review of PR #1857 (p12): d1's rows used to be replaced before d2 refused,
+    with the global rows still unadded, and the model then certified -5.0."""
+    second, match = _REFUSING[why]
+    m, x, y = _two_disjunctions(second)
+    before = _state(m)
+    rows_d1 = [list(d) for d in m._constraints[0].disjuncts]
+    with pytest.raises(ValueError, match=match):
+        if how == "direct":
+            partition_disjuncts(m, partitions=[[x], [y]])
+        else:
+            dt.apply_to("gdp.partition_disjuncts", m, partitions=[[x], [y]])
+    assert _state(m) == before
+    assert [list(d) for d in m._constraints[0].disjuncts] == rows_d1
+    r = _solve(m)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(-(2.0**0.5), abs=1e-5)
+
+
+def test_a_refusal_after_a_block_row_leaves_the_blocks_unchanged():
+    m = dm.Model("blocks_atomic")
+    x = m.continuous("x", lb=0, ub=3)
+    y = m.continuous("y", lb=0, ub=3)
+    a, b = m.make_disjunct("A"), m.make_disjunct("B")
+    a.subject_to(x**2 + y**2 <= 1)
+    b.subject_to([x + y <= 0.5])
+    m.add_disjunction([a, b], name="outer")
+    m.either_or([[x * y + x <= 1], [x <= 2]], name="d2")
+    m.minimize(-x - y)
+    before = _state(m)
+    with pytest.raises(ValueError, match="uses variables of partitions"):
+        partition_disjuncts(m, partitions=[[x], [y]])
+    assert _state(m) == before
+    assert _solve(m).objective == pytest.approx(-(2.0**0.5), abs=1e-5)
+
+
+def test_a_tuple_disjunct_is_split_and_the_users_containers_are_not_assigned_into():
+    """Review of PR #1857 (p11): ``d[j] = new`` raised TypeError on a tuple disjunct
+    after the list disjunct before it had been rewritten (solve then gave -6.0)."""
+    m = dm.Model("tuple")
+    x = m.continuous("x", lb=0, ub=3)
+    y = m.continuous("y", lb=0, ub=3)
+    first = [x**2 + y**2 <= 1]
+    second = (x**2 + y**2 >= 4, x + y <= 3.5)
+    outer = [first, second]
+    first_rows, second_rows = list(first), list(second)
+    dc = m.either_or(outer, name="d")
+    m.minimize(-x - y)
+    rep = partition_disjuncts(m)
+    assert rep.rows_split == 3
+    # The user's lists were not written into; the disjunction holds new ones.
+    assert outer == [first, second] and first == first_rows and list(second) == second_rows
+    assert dc.disjuncts is not outer and isinstance(dc.disjuncts[1], tuple)
+    assert all("_gdp_psplit_a" in str(r.body) for d in dc.disjuncts for r in d)
+    r = _solve(m)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(-3.5, abs=1e-5)
+
+
+def test_partitions_of_vector_elements_and_duplicates_are_refused_with_guidance():
+    m = dm.Model("vec")
+    x = m.continuous("x", shape=(2,), lb=0, ub=1)
+    y = m.continuous("y", lb=0, ub=1)
+    m.either_or([[x[0] ** 2 + x[1] ** 2 + y <= 1], [y >= 0.5]])
+    m.minimize(-y)
+    before = _state(m)
+    with pytest.raises(ValueError, match="element of the vector variable 'x'"):
+        partition_disjuncts(m, partitions=[[x[0]], [x[1]]])
+    with pytest.raises(ValueError, match="duplicate variable 'y'"):
+        partition_disjuncts(m, partitions=[[x, y], [y]])
+    with pytest.raises(ValueError, match="not a list of variables"):
+        partition_disjuncts(m, partitions=[y, x])
+    assert _state(m) == before
+
+
+def test_a_row_over_one_vector_variable_says_why_it_is_not_split():
+    m = dm.Model("vec_skip")
+    x = m.continuous("x", shape=(2,), lb=0, ub=1)
+    y = m.continuous("y", lb=0, ub=1)
+    m.either_or([[x[0] ** 2 + x[1] ** 2 <= 1], [y >= 0.5]])
+    m.minimize(-y)
+    rep = partition_disjuncts(m)
+    assert rep.rows_split == 0
+    (reason,) = [s for s in rep.skipped if "disjunct 0" in s]
+    assert "vector variable(s) ['x'] count as one variable" in reason
+
+
+def _disc_or_line():
+    m = dm.Model("stale")
+    x = m.continuous("x", lb=0, ub=3)
+    y = m.continuous("y", lb=0, ub=3)
+    m.either_or([[x**2 + y**2 <= 40], [x + y <= 1]], name="d")
+    m.minimize(-x - y)
+    return m, x, y
+
+
+@pytest.mark.parametrize("method", ["big-m", "hull"])
+def test_widening_a_bound_after_partitioning_is_refused(method):
+    """Review of PR #1857 (p5): partition on [0,3]^2, widen to [0,6]^2, and the
+    auxiliaries' frozen bounds cut the new optimum -sqrt(80) (-6.0 certified)."""
+    m, x, y = _disc_or_line()
+    partition_disjuncts(m)
+    x.ub = 6.0
+    y.ub = 6.0
+    with pytest.raises(ValueError, match="interval enclosure is .* outside the bounds"):
+        _solve(m, gdp_method=method)
+    # The guard reads the enclosure, not a fingerprint: tightening is fine.
+    m2, x2, y2 = _disc_or_line()
+    partition_disjuncts(m2)
+    x2.ub = 2.0
+    r = _solve(m2, gdp_method=method)
+    assert r.status == "optimal" and r.objective == pytest.approx(-5.0, abs=1e-5)
+
+
+def test_the_bound_guard_travels_with_copies_lowerings_and_documents():
+    import copy
+    import pickle
+
+    from discopt import serialize
+
+    m, _, _ = _disc_or_line()
+    partition_disjuncts(m)
+    assert len(m._piecewise_domains) == 4
+
+    def widened_is_refused(mm):
+        for v in mm._variables:
+            if v.name in ("x", "y"):
+                v.ub = 6.0
+        with pytest.raises(ValueError, match="gdp.partition_disjuncts: auxiliary"):
+            mm.validate()
+
+    widened_is_refused(copy.deepcopy(m))
+    widened_is_refused(pickle.loads(pickle.dumps(m)))
+    widened_is_refused(serialize.loads(serialize.dumps(m)))
+    widened_is_refused(between_steps(_disc_or_line()[0]))
+    widened_is_refused(dt.create_using("gdp.partition_disjuncts", _disc_or_line()[0]))
+    unbounded_below = dm.Model("ub")
+    u = unbounded_below.continuous("u", lb=-1e30, ub=1)
+    w = unbounded_below.continuous("w", lb=0, ub=1)
+    unbounded_below.either_or([[-(u**2) - w <= 0], [w >= 0.5]])
+    unbounded_below.minimize(w)
+    partition_disjuncts(unbounded_below)
+    lo = [lo for _, lo, _, _ in unbounded_below._piecewise_domains]
+    assert float("-inf") in lo  # written as a token: a bare -inf is not JSON
+    again = serialize.loads(serialize.dumps(unbounded_below))
+    assert [r[1:3] for r in again._piecewise_domains] == [
+        r[1:3] for r in unbounded_below._piecewise_domains
+    ]

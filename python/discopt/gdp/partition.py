@@ -28,12 +28,29 @@ disjunction and every indicator row (``if_then``, ``add_disjunction`` blocks) wh
 summands fall into at least two groups. An ``==`` row, an array-valued row and a
 row that groups into one part are left as they are, and so is a row that
 depends on a Parameter (its auxiliaries' bounds would be frozen at today's
-value). Refused, loudly: a summand
-whose variables straddle two user-given partitions, a variable of a row in no
+value). Refused, loudly: a summand whose variables lie in two user-given
+partitions (this grouping cannot split the row: P-split assigns each summand to
+one part), a variable listed in two partitions, a variable of a row in no
 partition, an ``h_p`` with no finite upper bound (``a_p`` would have none; spec
 §0.2 item 5), and an ``h_p`` undefined on part of the box (the global row keeps it
 everywhere, #1779). A user ``big_m`` (#1775 G2.6) on a split row is dropped: it
 bounded the old body, not ``sum a_p + c``.
+
+**Atomic.** Every replacement row, auxiliary and global row is built before the
+model is touched, so a refusal leaves the model exactly as it was. The user's
+disjunct containers are never assigned into: a disjunction whose rows change gets
+new lists (a tuple disjunct a new tuple), and its Disjunct blocks are re-pointed.
+
+**Frozen to the variable bounds of the call.** ``[lo_p, hi_p]`` is the interval
+enclosure of ``h_p`` over the box *at the time of the call* (``evaluate_interval``,
+rounded outward). Widening a bound afterwards can push ``h_p`` past ``hi_p``, and
+then an unselected disjunct's global row ``h_p <= a_p <= hi_p`` cuts points that
+have become feasible. Each enclosure is therefore recorded as a validation guard
+(``Model._piecewise_domains``, the same re-check a ``piecewise`` input's breakpoint
+span gets), so :meth:`Model.validate` -- and with it every solve -- refuses the
+model once a bound has moved an enclosure outside its auxiliary's bounds.
+Tightening a bound is fine. The guard travels with ``deepcopy``, ``pickle``,
+:mod:`discopt.serialize` and every lowering (``carry_validation_guards``).
 """
 
 from __future__ import annotations
@@ -44,6 +61,7 @@ from typing import Any, Optional, Sequence
 import numpy as np
 
 from discopt.constants import DEFAULT_VARIABLE_BOUND
+from discopt.modeling._piecewise import DOMAINS_ATTR, PSPLIT_GUARD_PREFIX
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -122,8 +140,10 @@ def _groups(
             if len(hit) > 1:
                 raise ValueError(
                     f"gdp.partition_disjuncts: a summand of {where} uses variables of "
-                    f"partitions {sorted(hit)}; a summand must lie in one partition "
-                    "(P-split splits a sum, not a term)."
+                    f"partitions {sorted(hit)} ({sorted(names)}). P-split assigns each "
+                    "summand to one part, so these partitions cannot split this row. Put "
+                    "those variables in one partition, or leave partitions=None: the "
+                    "automatic grouping keeps summands that share a variable together."
                 )
             parts[hit.pop()].append((sign, t))
         return [p for p in parts if p]
@@ -179,24 +199,82 @@ def _sum(signed: list) -> Expression:
     return total
 
 
+class _Plan:
+    """Everything :func:`partition_disjuncts` will add, built without touching the
+    model: the auxiliaries (indexed as they will be once registered), the global
+    rows, and the enclosure guards."""
+
+    def __init__(self, model: Model) -> None:
+        self.model = model
+        self.aux: list[Variable] = []
+        self.globals_out: list[Constraint] = []
+        self.guards: list[tuple[Expression, float, float, str]] = []
+        self._reserved: set[str] = set()
+        self.var_by_name = {v.name: v for v in model._variables}
+
+    def _fresh_name(self, base: str) -> str:
+        # Model._fresh_name, also avoiding the names this plan has taken already.
+        taken = self.model._names
+        name, k = base, 2
+        while name in taken or name in self._reserved:
+            name, k = f"{base}_{k}", k + 1
+        self._reserved.add(name)
+        return name
+
+    def new_aux(self, lb: float, ub: float) -> Variable:
+        a = Variable(self._fresh_name("_gdp_psplit_a"), VarType.CONTINUOUS, (), lb, ub, self.model)
+        # Its position once the commit registers the auxiliaries in order.
+        a._index = len(self.model._variables) + len(self.aux)
+        self.aux.append(a)
+        return a
+
+
+def _one_part_reason(terms: list, partitions: Optional[list[set[str]]], plan: _Plan) -> str:
+    if len(terms) < 2:
+        return "one part (a single variable term)"
+    if partitions is not None:
+        why = "one part (every summand is in the same partition)"
+    else:
+        why = "one part (its summands are linked through shared variables)"
+    vector = sorted(
+        {
+            n
+            for _, _, names in terms
+            for n in names
+            if n in plan.var_by_name and plan.var_by_name[n].shape != ()
+        }
+    )
+    if vector:
+        why += (
+            f"; the elements of the vector variable(s) {vector} count as one variable, "
+            "so a row over several of them is not split across them. Declare them as "
+            "separate scalar variables to split it"
+        )
+    return why
+
+
 def _split_row(
     con: Constraint,
-    model: Model,
+    plan: _Plan,
     partitions: Optional[list[set[str]]],
     num_partitions: int,
     report: PartitionReport,
-    globals_out: list[Constraint],
     where: str,
     local_names: set[str],
 ) -> Constraint:
-    """The split replacement of ``con`` (or ``con`` itself when not split)."""
+    """The split replacement of ``con`` (or ``con`` itself when not split).
+
+    Adds to ``plan`` only; the model is not changed.
+    """
+    from discopt._relax.convexity.interval_eval import evaluate_interval
     from discopt._relax.gdp_reformulate import (
         _BIGM_SENTINEL,
-        _bound_expression,
+        _body_at_zero,
         _domain_gap,
         _domain_gap_error,
     )
 
+    model = plan.model
     if con.sense not in ("<=", ">=") or np.size(con.rhs) != 1:
         report.skipped.append(f"{where}: sense {con.sense!r}")
         return con
@@ -213,6 +291,7 @@ def _split_row(
         # values; a later parameter update could then cut feasible points.
         report.skipped.append(f"{where}: depends on a Parameter")
         return con
+    # body >= rhs  <=>  -body + rhs <= 0;  body <= rhs  <=>  body - rhs <= 0.
     sign0 = 1.0 if con.sense == "<=" else -1.0
     raw: list = []
     _summands(con.body, sign0, raw)
@@ -223,40 +302,46 @@ def _split_row(
         if names:
             terms.append((sign, t, names))
         else:
-            from discopt._relax.gdp_reformulate import _body_at_zero
-
             const += sign * float(_body_at_zero(t, {}))
     rhs = float(np.asarray(con.rhs, dtype=np.float64).ravel()[0])
     const -= sign0 * rhs
     parts = _groups(terms, partitions, num_partitions, where)
     if len(parts) < 2:
-        report.skipped.append(f"{where}: one part")
+        report.skipped.append(f"{where}: {_one_part_reason(terms, partitions, plan)}")
         return con
     alphas: list[Variable] = []
+    pending: list[tuple[Expression, float, float]] = []
     for p, signed in enumerate(parts):
         h = _sum(signed)
         gap = _domain_gap(h, model)
         if gap is not None:
             raise _domain_gap_error(con, gap, "gdp.partition_disjuncts")
-        lo, hi = (float(v) for v in _bound_expression(h, model))
+        # evaluate_interval rounds outward, so [lo, hi] contains h over the box
+        # exactly, not up to float error; it is also what the validate-time guard
+        # recomputes, so the guard holds at the call by construction.
+        iv = evaluate_interval(h, model)
+        lo, hi = float(np.min(iv.lo)), float(np.max(iv.hi))
         if not (np.isfinite(hi) and abs(hi) < _BIGM_SENTINEL):
             raise ValueError(
                 f"gdp.partition_disjuncts: part {p} of {where} has no finite upper bound "
                 f"(interval enclosure [{lo:g}, {hi:g}]), so its auxiliary would have none "
                 "and an unselected disjunct could not absorb it. Bound its variables."
             )
-        lb = lo if np.isfinite(lo) and abs(lo) < _BIGM_SENTINEL else None
-        a = Variable(
-            model._fresh_name("_gdp_psplit_a"),
-            VarType.CONTINUOUS,
-            (),
-            -DEFAULT_VARIABLE_BOUND if lb is None else lb,
-            hi,
-            model,
-        )
-        model._register_generated_variable(a)
+        pending.append((h, lo, hi))
+    # Only now, with every part of the row validated, is anything planned.
+    for h, lo, hi in pending:
+        finite_lo = bool(np.isfinite(lo) and abs(lo) < _BIGM_SENTINEL)
+        a = plan.new_aux(lo if finite_lo else -DEFAULT_VARIABLE_BOUND, hi)
         alphas.append(a)
-        globals_out.append(Constraint(body=h - a, sense="<=", rhs=0.0))
+        plan.globals_out.append(Constraint(body=h - a, sense="<=", rhs=0.0))
+        plan.guards.append(
+            (
+                h,
+                lo if finite_lo else -np.inf,
+                hi,
+                f"{PSPLIT_GUARD_PREFIX} auxiliary {a.name} of {where}",
+            )
+        )
         report.aux_vars += 1
     body: Expression = alphas[0]
     for a in alphas[1:]:
@@ -265,6 +350,47 @@ def _split_row(
         body = body + const
     report.rows_split += 1
     return Constraint(body=body, sense="<=", rhs=0.0, name=con.name)
+
+
+def _partition_names(model: Model, partitions: Sequence[Sequence[Variable]]) -> list[set[str]]:
+    """The user's partitions as name sets, refusing anything P-split cannot use."""
+    owner: dict[str, int] = {}
+    out: list[set[str]] = []
+    for i, group in enumerate(partitions):
+        if isinstance(group, Expression):
+            raise ValueError(
+                f"gdp.partition_disjuncts: partition {i} is {group!r}, not a list of "
+                "variables; pass partitions=[[x, y], [z], ...]."
+            )
+        names: set[str] = set()
+        for v in group:
+            if not isinstance(v, Variable):
+                hint = ""
+                if isinstance(v, IndexExpression) and isinstance(v.base, Variable):
+                    hint = (
+                        f" It is an element of the vector variable {v.base.name!r}: a "
+                        "partition holds whole variables, so the elements of one vector "
+                        "variable cannot go into different parts. List the whole variable, "
+                        "or declare the elements as separate scalar variables."
+                    )
+                raise ValueError(
+                    f"gdp.partition_disjuncts: partition {i} holds {v!r} "
+                    f"({type(v).__name__}), not a Variable.{hint}"
+                )
+            if v.model is not model:
+                raise ValueError(
+                    f"gdp.partition_disjuncts: partition {i} holds {v.name!r}, which is "
+                    "not a variable of this model."
+                )
+            if owner.get(v.name, i) != i:
+                raise ValueError(
+                    f"gdp.partition_disjuncts: duplicate variable {v.name!r}: it is in "
+                    f"partitions {owner[v.name]} and {i}. Each variable goes in one partition."
+                )
+            owner[v.name] = i
+            names.add(v.name)
+        out.append(names)
+    return out
 
 
 def partition_disjuncts(
@@ -278,66 +404,105 @@ def partition_disjuncts(
     ``partitions`` (a list of variable groups) is used for every split row when
     given; otherwise the summands of each row are grouped automatically (summands
     sharing a variable stay together) into at most ``num_partitions`` parts.
+
+    Atomic: a refusal leaves ``model`` unchanged. The auxiliaries' bounds are the
+    enclosures over today's variable box; :meth:`Model.validate` refuses the model
+    if a bound is later widened past one of them (module docstring).
     """
     if num_partitions < 2 and partitions is None:
         raise ValueError(
             f"gdp.partition_disjuncts: num_partitions must be >= 2, got {num_partitions!r}"
         )
-    parts = None if partitions is None else [{v.name for v in p} for p in partitions]
+    parts = None if partitions is None else _partition_names(model, partitions)
     report = PartitionReport()
-    globals_out: list[Constraint] = []
+    plan = _Plan(model)
     local_names = {v.name for d in model._gdp_factory_disjuncts for v in d._local_vars}
     replaced: dict[int, Constraint] = {}
+    new_disjuncts: list[tuple[_DisjunctiveConstraint, list, Any]] = []
+    new_indicators: list[tuple[_IndicatorConstraint, Constraint]] = []
+    seen: set[int] = set()
 
+    # Phase 1: plan. Nothing below assigns into the model or the user's containers.
     def walk(dc: _DisjunctiveConstraint) -> None:
+        if id(dc) in seen:
+            return
+        seen.add(id(dc))
         label = dc.name or "<anon>"
         big_m = [list(r) for r in dc.big_m] if dc.big_m is not None else None
+        out: list = []
+        changed = False
         for k, d in enumerate(dc.disjuncts):
-            for j, item in enumerate(d):
+            rows = list(d)
+            d_changed = False
+            for j, item in enumerate(rows):
                 if isinstance(item, _DisjunctiveConstraint):
                     walk(item)
                     continue
                 new = _split_row(
                     item,
-                    model,
+                    plan,
                     parts,
                     num_partitions,
                     report,
-                    globals_out,
                     f"row {j} of disjunct {k} of {label!r}",
                     local_names,
                 )
                 if new is not item:
-                    d[j] = new
+                    rows[j] = new
                     replaced[id(item)] = new
+                    d_changed = True
                     if big_m is not None:
                         big_m[k][j] = None  # it bounded the old body
-        if big_m is not None:
-            kept = any(v is not None for r in big_m for v in r)
-            dc.big_m = tuple(tuple(r) for r in big_m) if kept else None
+            out.append((tuple(rows) if isinstance(d, tuple) else rows) if d_changed else d)
+            changed = changed or d_changed
+        if changed:
+            new_big_m = dc.big_m
+            if big_m is not None:
+                kept = any(v is not None for r in big_m for v in r)
+                new_big_m = tuple(tuple(r) for r in big_m) if kept else None
+            new_disjuncts.append((dc, out, new_big_m))
 
-    for i, c in enumerate(list(model._constraints)):
+    for i, c in enumerate(model._constraints):
         if isinstance(c, _DisjunctiveConstraint):
             walk(c)
         elif isinstance(c, _IndicatorConstraint):
             new = _split_row(
                 c.constraint,
-                model,
+                plan,
                 parts,
                 num_partitions,
                 report,
-                globals_out,
                 f"indicator row {c.constraint.name or i}",
                 local_names,
             )
             if new is not c.constraint:
                 replaced[id(c.constraint)] = new
-                c.constraint = new
+                new_indicators.append((c, new))
     # A Disjunct block keeps its own rows (serialization rebuilds blocks from them,
-    # and validate scopes local variables by them): point them at the new rows.
-    for blk in model._gdp_factory_disjuncts:
-        blk._constraints = [replaced.get(id(r), r) for r in blk._constraints]
-    model._constraints.extend(globals_out)
+    # and validate scopes local variables by them): it is pointed at the new rows.
+    new_blocks = [
+        (blk, [replaced.get(id(r), r) for r in blk._constraints])
+        for blk in model._gdp_factory_disjuncts
+        if any(id(r) in replaced for r in blk._constraints)
+    ]
+
+    # Phase 2: commit. Plain assignments and appends; nothing here can refuse.
+    for a in plan.aux:
+        assert a._index == len(model._variables)
+        model._register_generated_variable(a)
+    for dc, out, new_big_m in new_disjuncts:
+        dc.disjuncts = out
+        dc.big_m = new_big_m
+    for ic, new in new_indicators:
+        ic.constraint = new
+    for blk, rows in new_blocks:
+        blk._constraints = rows
+    model._constraints.extend(plan.globals_out)
+    guards = getattr(model, DOMAINS_ATTR, None)
+    if guards is None:
+        guards = []
+        setattr(model, DOMAINS_ATTR, guards)
+    guards.extend(plan.guards)
     return report
 
 

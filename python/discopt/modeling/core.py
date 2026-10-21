@@ -5696,7 +5696,8 @@ class _DetachedNlRepr:
 #: rewrite relied on, re-checked by :meth:`Model.validate` before every solve
 #: because variable bounds are mutable afterwards. ``_atan2_preconditions`` holds
 #: the sign an ``atan2`` rewrite assumed; ``_piecewise_domains`` the breakpoint
-#: span a ``piecewise`` lowering clamps its input to. Each record references the
+#: span a ``piecewise`` lowering clamps its input to, and the enclosure each
+#: ``gdp.partition_disjuncts`` auxiliary was bounded by (#1775 G2.8). Each record references the
 #: model's own ``Variable`` objects. A pass that rebuilds a model into a fresh
 #: ``Model`` must forward them with :func:`carry_validation_guards` -- the rows the
 #: guard protects are forwarded with it, so dropping the guard turns a later bound
