@@ -1749,6 +1749,26 @@ def integer_box_polish_enabled() -> bool:
     )
 
 
+def integer_box_polish_may_fire(model: Model) -> bool:
+    """Whether :func:`integer_box_search` with its *default* caps can enumerate
+    anything on ``model`` -- the #1193 flag is on and the integer count fits the cap of
+    the path the model takes (direct when it has no continuous slot, sub-NLP
+    otherwise). Used by the solver to decide whether to set aside the #1870 exit-polish
+    reserve: a reserve for a search that returns ``None`` on entry would just be
+    search time thrown away. Grid-size and incumbent checks are left to the search
+    itself; this predicate errs toward reserving, never toward skipping one the
+    search could use.
+    """
+    if not integer_box_polish_enabled():
+        return False
+    int_mask = _get_integer_mask(model)
+    n_int = int(np.count_nonzero(int_mask))
+    if n_int == 0:
+        return False
+    direct = not bool(np.any(~int_mask))
+    return n_int <= (_DIRECT_MAX_INT_VARS if direct else _SUBNLP_MAX_INT_VARS)
+
+
 def integer_box_search(
     model: Model,
     x_incumbent: np.ndarray,
@@ -1765,6 +1785,7 @@ def integer_box_search(
     solve_budget: Optional[int] = None,
     eval_budget: Optional[int] = None,
     deadline: Optional[float] = None,
+    objective_cutoff: Optional[float] = None,
 ) -> Optional[tuple[np.ndarray, float]]:
     """Objective-improving integer *box* search around an incumbent.
 
@@ -1819,6 +1840,20 @@ def integer_box_search(
     variable that presolve has fixed still routes to the sub-NLP path. That is the
     conservative direction — it can only decline a speedup, never take one that is
     not warranted.
+
+    **``objective_cutoff`` (issue #1870).** When given (evaluator convention, i.e.
+    minimisation), only points with objective strictly below it are returned. On the
+    direct path the objective -- one cheap evaluation -- is computed *before* the
+    acceptance arbiter, and a cell that cannot beat the cutoff is skipped without
+    the feasibility check. The arbiter, not the objective, is what a direct cell
+    costs: on nvs19 the 6,560-cell grid takes 2.5 s with the arbiter on every cell
+    (0.38 ms/cell; the 0.014 ms/cell figure above prices the objective alone) and
+    only 12 cells beat the incumbent. A skipped cell is one a strict-improvement
+    caller would reject anyway: over the same cells the cut search returns the
+    uncut search's point whenever that point beats the cutoff, and ``None``
+    otherwise, and the arbiter still vets every point it returns. (A skipped cell
+    is charged one evaluation instead of two, so a budget-truncated search can
+    reach further cells.) ``None`` keeps the uncut search exactly.
     """
     # As in ``one_hot_swap_search``: a non-positive ``time_budget`` is the caller
     # saying there is no budget at all, and #912's deterministic cell budget must
@@ -1941,7 +1976,15 @@ def integer_box_search(
             seed = seed_src.copy()
         for k, j in enumerate(int_idx):
             seed[j] = float(combo[k])
-        if direct:
+        if direct and objective_cutoff is not None:
+            # #1870: price the cheap objective first; the arbiter only for a cell
+            # that can still beat the cutoff.
+            budget.charge(EVAL)
+            if not float(evaluator.evaluate_objective(seed)) < objective_cutoff:
+                continue
+            budget.charge(EVAL)
+            found = _finalize_candidate(evaluator, seed, int_mask, integer_tol, feas_tol)
+        elif direct:
             # One constraint-vector evaluation plus one objective evaluation.
             budget.charge(EVAL, 2)
             found = _finalize_candidate(evaluator, seed, int_mask, integer_tol, feas_tol)
@@ -1959,6 +2002,8 @@ def integer_box_search(
         if found is not None:
             if not direct:
                 cont_at[combo] = np.asarray(found[0]).copy()
+            if objective_cutoff is not None and not found[1] < objective_cutoff:
+                continue
             if best is None or found[1] < best[1]:
                 best = (np.asarray(found[0]).copy(), float(found[1]))
     return best
