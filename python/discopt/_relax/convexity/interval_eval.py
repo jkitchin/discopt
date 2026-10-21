@@ -70,7 +70,11 @@ def evaluate_interval(
             (``test_enclosure_ignores_model_argument``).
         box: Optional dict ``{Variable: Interval}`` that overrides the
             variable's declared bounds. When ``None`` or a variable is
-            missing, the declared ``(lb, ub)`` of the variable is used.
+            missing, the declared ``(lb, ub)`` of the variable is used. A
+            :class:`Parameter` is a point at its ``value`` unless the box holds
+            an entry under :func:`param_box_key` of its name, which ranges it
+            over that interval (the robust counterpart's worst case over an
+            uncertainty box, #1836).
         _cache: Memoization dict keyed by ``id(expr)``.
 
     Returns:
@@ -80,6 +84,15 @@ def evaluate_interval(
     if _cache is None:
         _cache = {}
     return _eval(expr, model, box or {}, _cache)
+
+
+def param_box_key(name: str) -> tuple[str, str]:
+    """The ``box`` key that ranges the :class:`Parameter` named *name*.
+
+    ``Parameter`` is not hashable (``Expression.__eq__`` builds a constraint),
+    so it is keyed by name; the tuple cannot collide with a ``Variable`` key.
+    """
+    return ("__parameter__", name)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -205,6 +218,9 @@ def _eval_impl(expr: Expression, model: Optional[Model], box: dict, cache: dict)
         v = np.asarray(expr.value, dtype=np.float64)
         return Interval(v, v)
     if isinstance(expr, Parameter):
+        ranged = box.get(param_box_key(expr.name))
+        if ranged is not None:
+            return ranged
         v = np.asarray(expr.value, dtype=np.float64)
         return Interval(v, v)
     if isinstance(expr, Variable):
@@ -644,7 +660,18 @@ def _eval_power(expr: BinaryOp, left: Interval, right: Interval) -> Interval:
     # fractional rules apply.
     if not isinstance(expr.right, (Constant, Parameter)):
         return _unbounded(_broadcast_shape(left.lo.shape, right.lo.shape))
-    raw = np.asarray(expr.right.value)
+    if isinstance(expr.right, Parameter) and not np.array_equal(right.lo, right.hi):
+        # A Parameter ranged by the box (:func:`param_box_key`): the exponent is
+        # the interval ``right``, not ``expr.right.value``. Reading the value
+        # collapsed ``2**p`` over ``p in [0, 1]`` to the point ``2**p_bar``, so
+        # the robust counterpart took a non-worst case for the whole box
+        # (#1836). ``b**e = exp(e * log(b))`` encloses it for ``b > 0``.
+        if np.any(left.lo <= 0):
+            return _unbounded(_broadcast_shape(left.lo.shape, right.lo.shape))
+        return iv.exp(right * iv.log(left))
+    # The exponent is a point: a Constant, an unranged Parameter at its value,
+    # or a ranged one whose box interval is degenerate.
+    raw = np.asarray(right.lo if isinstance(expr.right, Parameter) else expr.right.value)
     if raw.ndim != 0:
         return _unbounded(_broadcast_shape(left.lo.shape, raw.shape))
     n = float(raw)

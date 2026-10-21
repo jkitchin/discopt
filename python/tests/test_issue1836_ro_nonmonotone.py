@@ -293,3 +293,30 @@ def test_certain_parameter_deciding_a_direction_refuses(build):
     m.maximize(x)
     with pytest.raises(NotImplementedError, match="certain Parameter 'c'"):
         RobustCounterpart(m, BoxUncertaintySet(p, delta=0.5)).formulate()
+
+
+@pytest.mark.parametrize(
+    "base, lo, hi",
+    [(2.0, 1.0, 2.0), (0.5, 0.5, 1.0)],
+)
+def test_interval_of_constant_to_ranged_parameter_is_the_box_range(base, lo, hi):
+    """``evaluate_interval`` ranges a Parameter exponent over its box entry.
+
+    ``_eval_power`` read ``Parameter.value`` for the exponent and ignored the
+    ``param_box_key`` interval, so ``2**p`` over ``p in [0, 1]`` enclosed the
+    single point ``2**p_bar`` -- unsound for every consumer that ranges a
+    parameter (#1836).
+    """
+    from discopt._relax.convexity.interval import Interval
+    from discopt._relax.convexity.interval_eval import evaluate_interval, param_box_key
+
+    m = dm.Model("pow_ranged")
+    p = m.parameter("p", value=0.5)
+    box = {param_box_key("p"): Interval(np.array(0.0), np.array(1.0))}
+    enc = evaluate_interval(base**p, None, box)
+    assert float(enc.lo) <= lo + 1e-12 and float(enc.hi) >= hi - 1e-12
+    assert float(enc.lo) == pytest.approx(lo, abs=1e-9)
+    assert float(enc.hi) == pytest.approx(hi, abs=1e-9)
+    # Unranged, the Parameter is still the point at its value.
+    point = evaluate_interval(base**p, None, None)
+    assert float(point.lo) == pytest.approx(base**0.5) == float(point.hi)
