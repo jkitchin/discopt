@@ -159,6 +159,18 @@ class RobustCounterpart:
             raise RuntimeError("formulate() has already been called")
 
         self._refuse_opaque_uncertain_calls()
+        # An earlier pass may have read a worst-case direction from the sign of a
+        # parameter this pass makes uncertain; that direction stays a worst case
+        # only if the sign holds over this pass's set (#1839 review).
+        from discopt.ro.formulations._common import (
+            check_sign_assumptions,
+            uncertainty_bounding_box,
+        )
+
+        check_sign_assumptions(
+            self._model,
+            ranged={u.parameter.name: uncertainty_bounding_box(u) for u in self._uncertainty_sets},
+        )
         self._orient_uncertain_rows()
         strategy = self._build_strategy()
         strategy.build()

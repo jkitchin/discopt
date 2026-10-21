@@ -27,6 +27,7 @@ from __future__ import annotations
 import numpy as np
 
 from discopt.ro.formulations._common import (
+    _contains_any_parameter,
     _contains_uncertain_param,
     aggregate_affine_counterpart,
     is_affine_in_params,
@@ -153,6 +154,26 @@ class BoxRobustFormulation:
             nonlocal aux_idx
             new_constraints = []
 
+            # #1836: the decomposition below -- nominal value plus, per
+            # parameter, a finite-difference coefficient times the deviation --
+            # is exact only for an expression jointly affine in the uncertain
+            # parameters. For ``x + p**3`` the "coefficient" ``(p_bar+1)**3 -
+            # p_bar**3`` is not a slope of anything, and for ``x + p1*p2`` the
+            # per-parameter penalties are each taken with the other parameter at
+            # nominal; both certified non-robust points. Such an expression is
+            # robustified whole by sign tracking, which handles a nonlinear node
+            # only by proof and refuses otherwise.
+            if not is_affine_in_params(expr, set(unc_map)):
+                wc_expr = sign_tracking_substitute(
+                    expr,
+                    {n: u.lower for n, u in unc_map.items()},
+                    {n: u.upper for n, u in unc_map.items()},
+                    set(unc_map),
+                    maximize=maximize,
+                    sign=+1,
+                )
+                return wc_expr, []
+
             # Step 1: substitute ALL params with nominal to get the base expression
             all_nominal = expr
             for pname, unc in unc_map.items():
@@ -267,7 +288,14 @@ class BoxRobustFormulation:
                         unit_j = substitute_param(expr_at_nom, pname, bumped)
                         coeff_j = BinaryOp("-", unit_j, base)
 
-                        t_ub = _coeff_magnitude_bound(coeff_j)
+                        # A certain Parameter in the coefficient can change (or be
+                        # made uncertain by a later pass), so no bound read from its
+                        # current value is valid; leave t unbounded then.
+                        t_ub = (
+                            None
+                            if _contains_any_parameter(coeff_j)
+                            else _coeff_magnitude_bound(coeff_j)
+                        )
                         t_name = f"{self._prefix}_abs{aux_idx}"
                         if t_ub is None:
                             t_var = m.continuous(t_name, lb=0)

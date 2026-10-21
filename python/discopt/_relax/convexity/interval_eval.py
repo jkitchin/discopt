@@ -660,7 +660,18 @@ def _eval_power(expr: BinaryOp, left: Interval, right: Interval) -> Interval:
     # fractional rules apply.
     if not isinstance(expr.right, (Constant, Parameter)):
         return _unbounded(_broadcast_shape(left.lo.shape, right.lo.shape))
-    raw = np.asarray(expr.right.value)
+    if isinstance(expr.right, Parameter) and not np.array_equal(right.lo, right.hi):
+        # A Parameter ranged by the box (:func:`param_box_key`): the exponent is
+        # the interval ``right``, not ``expr.right.value``. Reading the value
+        # collapsed ``2**p`` over ``p in [0, 1]`` to the point ``2**p_bar``, so
+        # the robust counterpart took a non-worst case for the whole box
+        # (#1836). ``b**e = exp(e * log(b))`` encloses it for ``b > 0``.
+        if np.any(left.lo <= 0):
+            return _unbounded(_broadcast_shape(left.lo.shape, right.lo.shape))
+        return iv.exp(right * iv.log(left))
+    # The exponent is a point: a Constant, an unranged Parameter at its value,
+    # or a ranged one whose box interval is degenerate.
+    raw = np.asarray(right.lo if isinstance(expr.right, Parameter) else expr.right.value)
     if raw.ndim != 0:
         return _unbounded(_broadcast_shape(left.lo.shape, raw.shape))
     n = float(raw)

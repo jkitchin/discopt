@@ -58,15 +58,26 @@ def test_box_counterpart_matches_grid_oracle(name, row, pbar, delta, f):
     assert float(np.max(xv + f(grid))) <= 10.0 + 1e-5
 
 
-def test_non_monotone_with_variable_refused():
-    """``(x - p)**2`` has no constant worst case: refused, not certified."""
-    m = dm.Model("refuse")
+def test_non_monotone_with_variable_solved_exactly():
+    """``(x - p)**2`` is even in ``x - p``: worst-cased by its exact ``|x - p|``.
+
+    ``max |x - p|`` over ``p in [0.5, 1.5]`` is ``max(x - 0.5, 1.5 - x)``, so
+    the robust row is ``x <= 0.5 + sqrt(10)`` (and a slack lower bound). A
+    sign-tracked substitution at either single end of ``p`` would be wrong on
+    one side of ``x = 1``.
+    """
+    m = dm.Model("even_var")
     x = m.continuous("x", lb=0, ub=20)
     p = m.parameter("p", value=1.0)
     m.subject_to((x - p) ** 2 <= 10)
     m.maximize(x)
-    with pytest.raises(NotImplementedError, match="#1836"):
-        RobustCounterpart(m, BoxUncertaintySet(p, delta=0.5)).formulate()
+    RobustCounterpart(m, BoxUncertaintySet(p, delta=0.5)).formulate()
+    r = m.solve()
+    assert r.status in ("optimal", "feasible")
+    xv = float(r.value(x))
+    assert xv == pytest.approx(0.5 + np.sqrt(10.0), abs=1e-5)
+    grid = np.linspace(0.5, 1.5, 2001)
+    assert float(np.max((xv - grid) ** 2)) <= 10.0 + 1e-6
 
 
 def test_divisor_through_zero_refused():
