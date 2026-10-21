@@ -241,3 +241,40 @@ def test_continuous_solve_with_duals_does_not_import_jax():
     )
     assert p.returncode == 0, p.stderr[-2000:]
     assert "JAX_LOADED False" in p.stdout, p.stdout
+
+
+def _wide_trap() -> Model:
+    """10 integers centred in ``[0, 2]``: the radius-1 grid is 3**10 = 59,049 cells,
+    beyond the 20,000-cell uncut direct cap -- nvs24's shape. With ``d = x - 1`` the
+    objective ``-(d0*d1*d2) + 0.1*sum(d**2)`` makes the centre a strict 2-opt local
+    optimum whose 3-step escape ``d = (1,1,1,0,...)`` pays -0.7."""
+    m = Model("wide_trap")
+    xs = [m.integer(f"x{i}", lb=0, ub=2) for i in range(10)]
+    d = [x - 1 for x in xs]
+    m.subject_to(sum(d) <= 3)
+    m.minimize(-(d[0] * d[1] * d[2]) + 0.1 * sum(di * di for di in d))
+    return m
+
+
+def test_cutoff_reprices_the_direct_cell_cap():
+    """nvs24's failure mode: its optimum is two coordinates away at radius 1, but the
+    59,049-cell grid was declined on entry by the 20,000-cell cap, which was priced for
+    an arbiter call on every cell. Under a cutoff a losing cell costs one objective
+    evaluation, so the default cap is re-priced (``_DIRECT_CUTOFF_MAX_COMBOS``)."""
+    m = _wide_trap()
+    ev = make_evaluator(m)
+    centre = np.ones(10)
+    assert 3**10 > ph._DIRECT_MAX_COMBOS  # the probe must sit above the uncut cap
+    assert 3**10 <= ph._DIRECT_CUTOFF_MAX_COMBOS
+    assert integer_box_search(m, centre, radius=1, evaluator=ev) is None  # declined on entry
+    f0 = float(ev.evaluate_objective(centre))
+    out = integer_box_search(m, centre, radius=1, evaluator=ev, objective_cutoff=f0)
+    assert out is not None and out[1] == pytest.approx(-0.7)
+    # Any three +-1 steps with product +1 pays -0.7 (e.g. (1,1,1) or (-1,-1,1)).
+    d = out[0] - 1.0
+    assert np.all(np.abs(d[:3]) == 1.0) and np.prod(d[:3]) == 1.0 and not d[3:].any(), d
+    # An explicit cap is still honoured exactly (#1193's rule).
+    assert (
+        integer_box_search(m, centre, radius=1, evaluator=ev, objective_cutoff=f0, max_combos=1000)
+        is None
+    )

@@ -1728,6 +1728,14 @@ _SUBNLP_MAX_INT_VARS = 3
 _SUBNLP_MAX_COMBOS = 128
 _DIRECT_MAX_INT_VARS = 64
 _DIRECT_MAX_COMBOS = 20_000
+# #1870: with an ``objective_cutoff`` a direct cell that cannot win costs ONE objective
+# evaluation and skips the arbiter, so the cell cap and its eval budget are re-priced
+# again. Measured on nvs24 (10 integers, radius 1 = 3**10 = 59,049 cells, beyond the
+# 20,000 cap -- which is why its optimum two coordinates away was never tried): the
+# whole cut grid costs 0.28-0.33 s including the cell sort, against ~0.38 ms/cell
+# with the arbiter on every cell. Defaults only, like the caps above.
+_DIRECT_CUTOFF_MAX_COMBOS = 100_000
+_DIRECT_CUTOFF_EVAL_BUDGET = 2 * _DIRECT_CUTOFF_MAX_COMBOS
 
 
 def integer_box_polish_enabled() -> bool:
@@ -1853,7 +1861,12 @@ def integer_box_search(
     uncut search's point whenever that point beats the cutoff, and ``None``
     otherwise, and the arbiter still vets every point it returns. (A skipped cell
     is charged one evaluation instead of two, so a budget-truncated search can
-    reach further cells.) ``None`` keeps the uncut search exactly.
+    reach further cells.) Because a cut cell is that cheap, the direct path's
+    *default* cell cap and eval budget are re-priced once more under a cutoff
+    (``_DIRECT_CUTOFF_MAX_COMBOS`` / ``_DIRECT_CUTOFF_EVAL_BUDGET``): nvs24's 59,049-
+    cell radius-1 grid exceeds the 20,000 cap and was declined on entry, although its
+    optimum is two coordinates from the stalled incumbent. ``None`` keeps the uncut
+    search exactly.
     """
     # As in ``one_hot_swap_search``: a non-positive ``time_budget`` is the caller
     # saying there is no budget at all, and #912's deterministic cell budget must
@@ -1871,6 +1884,7 @@ def integer_box_search(
     # silently overriding a caller's cap because we happened to pick a cheaper
     # inner loop would be a silent approximation (CLAUDE.md §3).
     direct = not bool(np.any(~int_mask)) and integer_box_polish_enabled()
+    cut_direct = direct and objective_cutoff is not None
     eff_max_int_vars = (
         max_int_vars
         if max_int_vars is not None
@@ -1901,7 +1915,11 @@ def integer_box_search(
     cell_cap = int(
         max_combos
         if max_combos is not None
-        else (_DIRECT_MAX_COMBOS if direct else _SUBNLP_MAX_COMBOS)
+        else (
+            _DIRECT_CUTOFF_MAX_COMBOS
+            if cut_direct
+            else (_DIRECT_MAX_COMBOS if direct else _SUBNLP_MAX_COMBOS)
+        )
     )
     if n_combos <= 1 or n_combos > cell_cap:
         return None
@@ -1942,7 +1960,9 @@ def integer_box_search(
     # both -- so charging a 0.014 ms cell against the 128-solve budget would
     # throttle it by a factor of ~1000 for no reason.
     if direct:
-        if eval_budget is None:
+        if eval_budget is None and cut_direct:
+            eval_budget = _DIRECT_CUTOFF_EVAL_BUDGET
+        elif eval_budget is None:
             from discopt import solver_tuning as _st
 
             eval_budget = max(2, round(_BOX_BUDGET_RATIO * _st.current().ils_eval_budget))
