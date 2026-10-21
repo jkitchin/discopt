@@ -22,8 +22,10 @@ from __future__ import annotations
 import numpy as np
 
 from discopt.ro.formulations._common import (
+    _contains_any_parameter,
     _contains_uncertain_param,
     eval_constant_expr,
+    record_must_stay_certain,
     refuse_non_affine,
     substitute_param,
 )
@@ -150,7 +152,12 @@ class PolyhedralRobustFormulation:
                 # Check if ANY coefficient involves decision variables.
                 from discopt.ro.formulations.box import _contains_variable
 
-                has_var_coeff = any(_contains_variable(c) for c in coeff_exprs)
+                # A coefficient holding a certain Parameter takes the dual route
+                # too, which keeps it symbolic: evaluating it froze the Parameter,
+                # and a later pass over it robustified nothing (#1839 review).
+                has_var_coeff = any(
+                    _contains_variable(c) or _contains_any_parameter(c) for c in coeff_exprs
+                )
 
                 if not has_var_coeff:
                     # All coefficients are constants: compute the worst-case
@@ -191,6 +198,8 @@ class PolyhedralRobustFormulation:
                     # (aux variables), so their duality RHS is 0.
                     for j in range(n_lifted):
                         coeff_j_expr = coeff_exprs[j] if j < k else Constant(np.array(0.0))
+                        if j < k and _contains_any_parameter(coeff_j_expr):
+                            record_must_stay_certain(coeff_j_expr, "polyhedral dual equality")
                         # Build sum_i A[i,j] * lam[i]
                         dual_sum = _build_weighted_sum(lam_vars, A_poly[:, j])
                         if maximize:
