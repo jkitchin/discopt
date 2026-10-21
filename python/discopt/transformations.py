@@ -673,6 +673,7 @@ for _alias, _method in (
     ("gdp.mbigm", "mbigm"),
     ("gdp.auto", "auto"),
     ("gdp.simplex", "simplex"),
+    ("gdp.binary_multiplication", "binary_multiplication"),
 ):
     register(
         _alias,

@@ -124,7 +124,9 @@ def _require_supported_semantics(
 #: the dispatch below routes an unrecognised name to big-M, so before this check a
 #: typo (or a not-yet-implemented native name such as ``"gloa"``) solved as big-M
 #: and reported ``optimal`` with no warning.
-GDP_REFORMULATION_METHODS: frozenset[str] = frozenset({"big-m", "hull", "mbigm", "auto", "simplex"})
+GDP_REFORMULATION_METHODS: frozenset[str] = frozenset(
+    {"big-m", "hull", "mbigm", "auto", "simplex", "binary_multiplication"}
+)
 
 
 def _require_reformulation_method(method: object, what: str) -> None:
@@ -160,7 +162,13 @@ def reformulate_gdp(
         and exists for the disjunct rows neither of them can lower at all
         (unbounded interval enclosure *and* non-finite at the origin); it is
         never selected by ``"auto"``.
-        Indicator and SOS constraints always use big-M regardless.
+        ``"binary_multiplication"`` (#1775 G2.5; Pyomo's
+        ``gdp.binary_multiplication``) writes each disjunct row ``body (sense) 0``
+        as ``body * y (sense) 0`` on its selector: exact, with no big-M and so no
+        bound on the body needed, but nonconvex (the spatial B&B handles the
+        products). It also lowers indicator rows, the ``add_disjunction`` blocks
+        and nested disjunctions; ``"auto"`` never selects it.
+        Indicator and SOS constraints otherwise use big-M regardless.
     respect_disjunction_methods : bool, default True
         Whether a disjunction-local ``method`` override should take precedence
         over the solver-wide ``method``. Set to ``False`` for solver frontends
@@ -389,7 +397,9 @@ def reformulate_gdp(
         elif isinstance(c, _IndicatorConstraint):
             if id(c.constraint) in _pt_dropped:
                 continue  # replaced by a bound row (#1775 G2.4)
-            new_cons = _reformulate_indicator(c, new_model, lp_data=lp_data)
+            new_cons = _reformulate_indicator(
+                c, new_model, lp_data=lp_data, multiply=method == "binary_multiplication"
+            )
             new_model._constraints.extend(new_cons)
         elif isinstance(c, _DisjunctiveConstraint) and c.parent_indicator is not None:
             # #1775 G1.2: nested in a Disjunct block. The nested big-M lowering ties
@@ -399,7 +409,11 @@ def reformulate_gdp(
             # alone would assume its parent selected. Counted in the warning above
             # for those two methods.
             new_vars, new_cons = _reformulate_disjunction_nested(
-                c, new_model, _add_aux_binary, parent_selector=c.parent_indicator
+                c,
+                new_model,
+                _add_aux_binary,
+                parent_selector=c.parent_indicator,
+                multiply=method == "binary_multiplication",
             )
             new_model._constraints.extend(new_cons)
         elif isinstance(c, _DisjunctiveConstraint):
@@ -463,6 +477,7 @@ def reformulate_gdp(
                         lp_data=disj_lp,
                         selectors=own_sels,
                         pretransform=_pt_on and chosen in ("big-m", "mbigm"),
+                        multiply=chosen == "binary_multiplication",
                     )
             new_model._constraints.extend(new_cons)
         elif isinstance(c, _SOSConstraint):
@@ -2028,10 +2043,27 @@ _MONOTONE_SLOPE = {"exp": _slope_exp, "log": _slope_log, "sqrt": _slope_sqrt}
 # ── Indicator constraint reformulation ──
 
 
+def _binary_multiplication_rows(
+    con: Constraint, on: Expression, model: Model, name: Optional[str]
+) -> list[Constraint]:
+    """``body (sense) 0`` enforced where ``on`` is 1 and vacuous where it is 0:
+    ``body * on (sense) 0`` (#1775 G2.5, Pyomo ``gdp.binary_multiplication``).
+
+    Exact for a binary ``on``, with no bound on ``body`` needed. Like big-M it
+    keeps ``body`` in the model at every point, so a body undefined on part of
+    the box is refused the same way (#1779).
+    """
+    gap = _domain_gap(con.body, model)
+    if gap is not None:
+        raise _domain_gap_error(con, gap, "binary multiplication")
+    return [Constraint(body=con.body * on, sense=con.sense, rhs=0.0, name=name)]
+
+
 def _reformulate_indicator(
     ic: _IndicatorConstraint,
     model: Model,
     lp_data: tuple | None = None,
+    multiply: bool = False,
 ) -> list[Constraint]:
     """Reformulate an indicator constraint to big-M constraints.
 
@@ -2044,9 +2076,15 @@ def _reformulate_indicator(
 
     When ``active_value == 0``, the logic flips: we use ``M * indicator``
     instead of ``M * (1 - indicator)``.
+
+    ``multiply`` (#1775 G2.5) emits ``body * y (sense) 0`` instead -- or
+    ``body * (1 - y)`` when ``active_value == 0`` -- with no big-M.
     """
     con = ic.constraint
     y = ic.indicator
+    if multiply:
+        on = y if ic.active_value == 1 else _wrap(1.0) - y
+        return _binary_multiplication_rows(con, on, model, con.name)
     if lp_data is not None:
         M = _compute_big_m_lp(con, model, lp_data)
     else:
@@ -2105,8 +2143,10 @@ def _reformulate_disjunction(
     lp_data: tuple | None = None,
     selectors: Optional[list[Variable]] = None,
     pretransform: bool = False,
+    multiply: bool = False,
 ) -> tuple[list[Variable], list[Constraint]]:
-    """Reformulate a disjunction via big-M.
+    """Reformulate a disjunction via big-M (or, with ``multiply``, by binary
+    multiplication: step 2 becomes ``g_j(x) * y_k <= 0``, #1775 G2.5).
 
     For ``either_or([[g1<=0, g2<=0], [h1<=0, h2<=0]])``:
     1. Introduce binary selectors y_0, y_1 with y_0 + y_1 == 1
@@ -2182,13 +2222,20 @@ def _reformulate_disjunction(
             # Handle nested disjunctions
             if isinstance(item, _DisjunctiveConstraint):
                 inner_vars, inner_cons = _reformulate_disjunction_nested(
-                    item, model, add_aux_binary, parent_selector=y_k
+                    item, model, add_aux_binary, parent_selector=y_k, multiply=multiply
                 )
                 new_vars.extend(inner_vars)
                 new_cons.extend(inner_cons)
                 continue
 
             con = item
+            if multiply:
+                new_cons.extend(
+                    _binary_multiplication_rows(
+                        con, y_k, model, f"_gdp_{dc.name}_d{k}_c{j}" if dc.name else None
+                    )
+                )
+                continue
             if lp_data is not None:
                 M = _compute_big_m_lp(con, model, lp_data)
             else:
@@ -2281,8 +2328,13 @@ def _reformulate_disjunction_nested(
     model: Model,
     add_aux_binary,
     parent_selector,
+    multiply: bool = False,
 ) -> tuple[list[Variable], list[Constraint]]:
     """Reformulate a nested disjunction linked to a parent selector.
+
+    ``multiply`` (#1775 G2.5) emits the binary-multiplication rows of
+    :func:`_binary_multiplication_rows` on the inner selectors instead of big-M:
+    an inner selector is at most its parent, so it is 1 only when the parent is.
 
     When parent_selector = 0, all inner selectors must be 0.
     When parent_selector = 1, exactly one inner selector must be 1 -- or, under
@@ -2326,13 +2378,20 @@ def _reformulate_disjunction_nested(
             if isinstance(item, _DisjunctiveConstraint):
                 # Recursive nesting
                 inner_vars, inner_cons = _reformulate_disjunction_nested(
-                    item, model, add_aux_binary, parent_selector=y_k
+                    item, model, add_aux_binary, parent_selector=y_k, multiply=multiply
                 )
                 new_vars.extend(inner_vars)
                 new_cons.extend(inner_cons)
                 continue
 
             con = item
+            if multiply:
+                new_cons.extend(
+                    _binary_multiplication_rows(
+                        con, y_k, model, f"_gdp_nested_{dc.name}_d{k}_c{j}" if dc.name else None
+                    )
+                )
+                continue
             M = _compute_big_m(con, model)
             deactivation = _wrap(M) * (_wrap(1.0) - y_k)
 

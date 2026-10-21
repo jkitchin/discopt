@@ -636,7 +636,15 @@ def _mpcc_transform(name, scholtes=False):
     return build
 
 
-_GDP_PASSES = ["gdp", "gdp.bigm", "gdp.hull", "gdp.mbigm", "gdp.auto", "gdp.simplex"]
+_GDP_PASSES = [
+    "gdp",
+    "gdp.bigm",
+    "gdp.hull",
+    "gdp.mbigm",
+    "gdp.auto",
+    "gdp.simplex",
+    "gdp.binary_multiplication",
+]
 
 _TRANSFORM_ROUND_TRIPS = {
     **{f"transform:{name}": _transform(name, _either_or("select_one"))[0] for name in _GDP_PASSES},

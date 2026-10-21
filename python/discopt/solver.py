@@ -11712,6 +11712,11 @@ def solve_model(
           than big-M/hull on every corpus benchmarked in #1182 and never chosen
           by ``"auto"``; it exists for disjunct rows big-M and hull both refuse
           (unbounded interval enclosure *and* non-finite at the origin).
+        - ``"binary_multiplication"`` — each disjunct row ``body (sense) 0``
+          becomes ``body * y (sense) 0`` on its selector (#1775 G2.5; Pyomo's
+          ``gdp.binary_multiplication``). Exact and needs no big-M, so no bound
+          on the body; the products make the model nonconvex, which the spatial
+          B&B handles. Never chosen by ``"auto"``; the default solver only.
         - ``"loa"`` — *native* logic-based Outer Approximation on the
           disjunctive form (dispatches to :func:`solve_gdpopt_loa`), not a
           reformulation.
@@ -12400,7 +12405,11 @@ def solve_model(
         _lpm_class = classify_problem(
             _lpm_get_transformation("gdp").apply(
                 model,
-                method=gdp_method if gdp_method in ("big-m", "hull", "mbigm", "auto") else "big-m",
+                method=(
+                    gdp_method
+                    if gdp_method in ("big-m", "hull", "mbigm", "auto", "binary_multiplication")
+                    else "big-m"
+                ),
             )
         )
         if _lpm_class not in (_PC.LP, _PC.MILP):
@@ -12711,6 +12720,13 @@ def solve_model(
                 "family to branch or decompose on, so the combination is "
                 "contradictory rather than merely slow. Use the default solver "
                 "with gdp_method='simplex', or solver='mip-nlp' with "
+                f"gdp_method in {{{', '.join(sorted(repr(m) for m in gdp_methods))}}}."
+            )
+        if gdp_method == "binary_multiplication":
+            raise ValueError(
+                "gdp_method='binary_multiplication' is not supported by "
+                "solver='mip-nlp'. Use the default solver with "
+                "gdp_method='binary_multiplication', or solver='mip-nlp' with "
                 f"gdp_method in {{{', '.join(sorted(repr(m) for m in gdp_methods))}}}."
             )
         if gdp_method == "oa":
@@ -29324,6 +29340,12 @@ def _solve_scip(
     from discopt.transformations import get as _get_transformation
     from discopt.validation.feasibility import verify_point
 
+    if gdp_method == "binary_multiplication":
+        raise ValueError(
+            "gdp_method='binary_multiplication' is not supported by solver='scip'; "
+            "pass 'big-m', 'hull', 'mbigm' or 'auto', or use the default solver with "
+            "gdp_method='binary_multiplication'."
+        )
     if gdp_method not in ("big-m", "hull", "mbigm", "auto"):
         raise ValueError(
             f"gdp_method={gdp_method!r} is a discopt decomposition; solver='scip' "

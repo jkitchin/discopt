@@ -52,7 +52,7 @@ import numpy as np
 #: Lowerings ``reformulate_gdp`` implements. Kept literal (not read from
 #: ``GDP_REFORMULATION_METHODS``) so a method added there without a battery run
 #: shows up as a mismatch in ``test_battery_covers_every_method``.
-METHODS: tuple[str, ...] = ("big-m", "mbigm", "hull", "simplex", "auto")
+METHODS: tuple[str, ...] = ("big-m", "mbigm", "hull", "simplex", "auto", "binary_multiplication")
 
 #: Integer auxiliaries are enumerated; above this many the shape is too large for
 #: an exhaustive extension check and is refused rather than sampled.
