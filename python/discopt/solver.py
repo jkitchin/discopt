@@ -11337,17 +11337,47 @@ def _refusing_on_callback_failure(fn: _F) -> _F:
 
 
 #: Native logic-based GDP methods: they solve the disjunctive form directly and
-#: are not reformulations (solve-routing.md §4).
-NATIVE_GDP_METHODS: frozenset[str] = frozenset({"loa"})
+#: are not reformulations (solve-routing.md §4, extended by #1775 G3.1). Each is
+#: refused until its algorithm lands (``IMPLEMENTED_NATIVE_GDP_METHODS``); a name
+#: here is reserved on the native axis, never aliased to an algebraic method.
+NATIVE_GDP_METHODS: frozenset[str] = frozenset({"loa", "gloa", "lbb", "ric", "enumerate", "ldsda"})
+
+#: The native methods that run today.
+IMPLEMENTED_NATIVE_GDP_METHODS: frozenset[str] = frozenset({"loa"})
+
+#: ``gdp_options`` keys (#1775 G3.1, spec §4.3): Pyomo GDPopt's names where the
+#: meaning is the same, so a Pyomo user's config translates. A key outside this
+#: catalogue is refused as unknown; a catalogued key the chosen method does not
+#: read yet is refused as unsupported -- never silently ignored.
+GDP_OPTION_KEYS: frozenset[str] = frozenset(
+    {
+        "iterlim",
+        "init_algorithm",
+        "set_cover_iterlim",
+        "OA_penalty_factor",
+        "max_slack",
+        "integer_tolerance",
+        "check_sat",
+        "direction_norm",
+        "subproblem_presolve",
+    }
+)
+
+#: The ``gdp_options`` keys each implemented native method reads.
+_GDP_OPTIONS_READ: dict[str, frozenset[str]] = {"loa": frozenset({"iterlim"})}
 
 
-def _validate_gdp_method(gdp_method: object) -> None:
+def _validate_gdp_method(gdp_method: object, solver: Optional[str] = None) -> None:
     """Refuse a ``gdp_method`` no route implements, before any work is done.
 
     Every route below maps a name it does not handle to big-M (the default
     lowering, AMP, the presolve relaxation), so an unknown name -- a typo, or the
     reserved-but-unimplemented ``"gloa"`` -- used to solve as big-M and report
     ``optimal`` with no warning. ``"oa"`` stays accepted as the deprecated alias.
+
+    A native name with ``solver="mip-nlp"`` is refused first (solve-routing §4
+    rule 1, for every native name); a native name whose algorithm has not landed
+    is refused next (#1775 G3.1).
     """
     from discopt._relax.gdp_reformulate import GDP_REFORMULATION_METHODS
 
@@ -11355,6 +11385,65 @@ def _validate_gdp_method(gdp_method: object) -> None:
     if gdp_method not in valid:
         allowed = ", ".join(sorted(repr(m) for m in valid))
         raise ValueError(f"Unknown gdp_method={gdp_method!r}. Choose one of: {allowed}.")
+    if gdp_method in NATIVE_GDP_METHODS and solver == "mip-nlp":
+        # The same message the mip-nlp route raises (solve-routing §4 rule 1).
+        allowed = ", ".join(sorted({"big-m", "hull", "mbigm", "auto"}))
+        raise ValueError(
+            f"gdp_method={gdp_method!r} conflicts with solver='mip-nlp'. "
+            "Use mip_nlp_method to select the MIP-NLP algorithm and reserve "
+            f"gdp_method for GDP reformulation methods: {allowed}."
+        )
+    if gdp_method in NATIVE_GDP_METHODS - IMPLEMENTED_NATIVE_GDP_METHODS:
+        raise ValueError(
+            f"gdp_method={gdp_method!r} is reserved on the native GDP axis and not "
+            "implemented yet (#1775 G4). Native methods available now: "
+            f"{', '.join(sorted(repr(m) for m in IMPLEMENTED_NATIVE_GDP_METHODS))}; "
+            "or use a reformulation such as 'big-m' or 'hull'."
+        )
+
+
+def _validate_gdp_options(gdp_method: str, gdp_options: object) -> dict[str, Any]:
+    """``gdp_options`` as a dict, refused unless every key is read by ``gdp_method``.
+
+    #1775 G3.1 (spec §4.3): one mapping carries the native algorithms' options.
+    An unknown key, a key the method does not read, and options passed with a
+    reformulation method (which reads none) are refused before any work.
+    """
+    from collections.abc import Mapping
+
+    if gdp_options is None:
+        return {}
+    if not isinstance(gdp_options, Mapping):
+        raise TypeError(
+            f"gdp_options must be a mapping of option names to values, got "
+            f"{type(gdp_options).__name__}"
+        )
+    unknown = sorted(str(k) for k in gdp_options if k not in GDP_OPTION_KEYS)
+    if unknown:
+        raise ValueError(
+            f"Unknown gdp_options key(s) {unknown}. Known keys: "
+            f"{', '.join(sorted(GDP_OPTION_KEYS))}."
+        )
+    read = _GDP_OPTIONS_READ.get(gdp_method)
+    if read is None:
+        if gdp_options:
+            raise ValueError(
+                f"gdp_options={dict(gdp_options)!r} given with gdp_method={gdp_method!r}, "
+                "which reads none: gdp_options configure the native GDP methods "
+                f"({', '.join(sorted(repr(m) for m in IMPLEMENTED_NATIVE_GDP_METHODS))})."
+            )
+        return {}
+    unread = sorted(k for k in gdp_options if k not in read)
+    if unread:
+        raise ValueError(
+            f"gdp_method={gdp_method!r} does not read gdp_options {unread} yet; it "
+            f"reads {sorted(read)}."
+        )
+    if "iterlim" in gdp_options:
+        it = gdp_options["iterlim"]
+        if isinstance(it, bool) or not isinstance(it, (int, np.integer)) or it < 1:
+            raise ValueError(f"gdp_options['iterlim'] must be a positive integer, got {it!r}")
+    return dict(gdp_options)
 
 
 @_solve_leaves_model_unchanged
@@ -11391,6 +11480,7 @@ def solve_model(
     use_learned_relaxations: bool = False,
     mccormick_bounds: str = "auto",
     gdp_method: str = "big-m",
+    gdp_options: Optional[Mapping[str, Any]] = None,
     decomposition: Optional[str] = None,
     decomposition_structure=None,
     record_decomposition: bool = False,
@@ -11921,7 +12011,8 @@ def solve_model(
     # without threading a field through ~18 SolveResult construction sites.
     abs_gap_tol = _resolve_abs_gap_tolerance(abs_gap_tolerance)
     _validate_solve_budgets(gap_tolerance, time_limit)
-    _validate_gdp_method(gdp_method)
+    _validate_gdp_method(gdp_method, solver if solver is not None else kwargs.get("solver"))
+    _gdp_opts = _validate_gdp_options(gdp_method, gdp_options)
     # #1533: ``pounce_options`` names the same POUNCE options as ``ipopt_options``.
     ipopt_options = _resolve_pounce_options(ipopt_options, pounce_options)
     _GAP_TOLERANCES.append((float(gap_tolerance), abs_gap_tol))
@@ -13638,13 +13729,16 @@ def solve_model(
         loa_kwargs = {}
         if "milp_solver" in kwargs:
             loa_kwargs["milp_solver"] = kwargs.pop("milp_solver")
+        # gdp_options' Pyomo name for the iteration limit (#1775 G3.1); without it
+        # the iteration cap stays max_nodes, as before.
+        loa_max_iter = int(_gdp_opts.get("iterlim", max_nodes))
 
         _declare_route("gdpopt-loa: logic-based outer approximation (MILP master + NLP)")
         return solve_gdpopt_loa(
             model,
             time_limit=time_limit,
             gap_tolerance=gap_tolerance,
-            max_iterations=max_nodes,
+            max_iterations=loa_max_iter,
             nlp_solver=nlp_solver,
             **loa_kwargs,
         )

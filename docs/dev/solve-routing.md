@@ -264,10 +264,21 @@ the disjunctions into an algebraic MIP/MINLP, or solve the disjunctive form
 
 | `gdp_method` | Meaning | Kind |
 |---|---|---|
-| `big-m`, `hull`, `mbigm`, `auto` | reformulate disjunctions → algebraic MIP/MINLP | reformulation |
+| `big-m`, `hull`, `mbigm`, `auto`, `simplex`, `binary_multiplication` | reformulate disjunctions → algebraic MIP/MINLP | reformulation |
 | `loa` | logic-based OA, solved natively on the disjunctive form (`solve_gdpopt_loa`) | native disjunctive |
+| `gloa`, `lbb`, `ric`, `enumerate`, `ldsda` | *reserved* — global LOA, logic-based B&B, relaxation–integer cuts, configuration enumeration, LD-SDA; each lands with its #1775 G4 task and raises `ValueError` ("reserved on the native GDP axis") until then | reserved (native) |
 | `oa` | *deprecated* — was "OA solver + big-M reform"; now warns and reforms as `big-m` | deprecated |
-| `gloa` | *reserved* — global logic-based OA, native axis; not yet implemented | reserved (native) |
+
+The native set is `solver.NATIVE_GDP_METHODS`; the subset that runs is
+`IMPLEMENTED_NATIVE_GDP_METHODS`. Native methods share one loop
+(`discopt.gdp.algorithms.GDPAlgorithm`: deadline into every subsolve, the
+§5.4 status rules of #1775 — never `optimal` with a configuration unresolved or
+an LB the method cannot certify) and take their options through **`gdp_options`**,
+a mapping with Pyomo GDPopt's key names (`iterlim`, `init_algorithm`,
+`set_cover_iterlim`, `OA_penalty_factor`, `max_slack`, `integer_tolerance`,
+`check_sat`, `direction_norm`, `subproblem_presolve`). An unknown key, a key the
+chosen method does not read yet, and any `gdp_options` with a reformulation method
+raise `ValueError` at entry. `loa` reads `iterlim` today (default: `max_nodes`).
 
 **Axis 2 — `solver` / `mip_nlp_method`: *how the resulting algebraic MIP/MINLP is
 solved.*** With `solver="mip-nlp"`, `mip_nlp_method` selects the decomposition
@@ -276,12 +287,15 @@ algorithm: `oa`, `ecp`, `fp`, `goa`, `lp_nlp_bb` (implemented); `roa` (reserved)
 ### The two locked rules
 
 1. **Native-disjunctive `gdp_method` + `solver="mip-nlp"` raises.** Requesting a
-   native `gdp_method` (`loa`) together with `solver="mip-nlp"` is contradictory —
+   native `gdp_method` (any of `NATIVE_GDP_METHODS`, reserved ones included) together with `solver="mip-nlp"` is contradictory —
    one says "solve the disjunctions natively," the other says "reformulate to
    algebraic and decompose." This raises a clear `ValueError` rather than silently
    reformulating away the native request.
-   Enforced: `solver.py` (`native_gdp_methods = {"loa"}` guard, ~line 3819).
-   Test: `test_mip_nlp_rejects_native_gdp_solver_method` (`python/tests/test_mip_nlp.py`).
+   Enforced: `solver.py` `_validate_gdp_method` at `solve_model` entry (before the
+   reserved-name refusal, so the conflict is what a caller sees), and again in the
+   mip-nlp route's `native_gdp_methods` guard.
+   Tests: `test_mip_nlp_rejects_native_gdp_solver_method` (`python/tests/test_mip_nlp.py`),
+   `test_rule_1_covers_every_native_method` (`python/tests/test_1775_g3_1_gdp_routing_and_base.py`).
 
 2. **`goa` ≠ `gloa`; they must stay distinct and must not be aliased.** `goa` is a
    `mip_nlp_method` (generalized/global OA over the *algebraic* MINLP). `gloa`

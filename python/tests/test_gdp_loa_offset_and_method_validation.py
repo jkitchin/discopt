@@ -54,7 +54,7 @@ def _gdp_model() -> dm.Model:
     return m
 
 
-@pytest.mark.parametrize("method", ["gloa", "lbb", "ric", "bigmm", "Big-M", ""])
+@pytest.mark.parametrize("method", ["bigmm", "Big-M", "", "goa"])
 def test_unknown_gdp_method_raises(method):
     with pytest.raises(ValueError, match="Unknown gdp_method"):
         _gdp_model().solve(gdp_method=method, time_limit=10)
@@ -65,6 +65,9 @@ def test_unknown_gdp_method_raises_without_disjunctions():
     x = m.continuous("x", lb=0, ub=1)
     m.minimize(x)
     with pytest.raises(ValueError, match="Unknown gdp_method"):
+        m.solve(gdp_method="bigmm", time_limit=10)
+    # #1775 G3.1: "gloa" is reserved on the native axis, still refused up front.
+    with pytest.raises(ValueError, match="reserved on the native GDP axis"):
         m.solve(gdp_method="gloa", time_limit=10)
 
 
