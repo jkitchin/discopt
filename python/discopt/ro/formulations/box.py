@@ -27,6 +27,7 @@ from __future__ import annotations
 import numpy as np
 
 from discopt.ro.formulations._common import (
+    _contains_any_parameter,
     _contains_uncertain_param,
     aggregate_affine_counterpart,
     is_affine_in_params,
@@ -287,7 +288,14 @@ class BoxRobustFormulation:
                         unit_j = substitute_param(expr_at_nom, pname, bumped)
                         coeff_j = BinaryOp("-", unit_j, base)
 
-                        t_ub = _coeff_magnitude_bound(coeff_j)
+                        # A certain Parameter in the coefficient can change (or be
+                        # made uncertain by a later pass), so no bound read from its
+                        # current value is valid; leave t unbounded then.
+                        t_ub = (
+                            None
+                            if _contains_any_parameter(coeff_j)
+                            else _coeff_magnitude_bound(coeff_j)
+                        )
                         t_name = f"{self._prefix}_abs{aux_idx}"
                         if t_ub is None:
                             t_var = m.continuous(t_name, lb=0)

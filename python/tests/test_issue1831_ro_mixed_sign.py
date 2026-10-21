@@ -202,14 +202,15 @@ CERTAIN_CASES = {
 
 @pytest.mark.parametrize("q_value", [[3.0, -1.0], [1.5, 0.75]], ids=["mixed_q", "uniform_q"])
 @pytest.mark.parametrize("case", sorted(CERTAIN_CASES))
-def test_certain_parameter_multiplier_is_signed_and_frozen(case, q_value):
-    """A certain Parameter multiplying ``p`` is signed by its value, then frozen.
+def test_certain_parameter_multiplier_is_signed_and_kept_symbolic(case, q_value):
+    """A certain Parameter multiplying ``p`` is signed by its value and kept.
 
     ``q = [3, -1]`` is mixed-sign, so each element of ``p`` needs its own worst
     case (origin/main was non-robust on all three). Whether ``q`` is mixed or of
-    one sign, the counterpart must keep no reference to ``q``: its worst-case
-    direction was read from ``q``'s value (the uniform-sign case used to keep the
-    live Parameter node while the split case froze it).
+    one sign, the counterpart must keep ``q`` symbolic, so a later pass over it
+    can still robustify it: freezing it into a Constant made that pass a silent
+    no-op (#1839 review). The direction read from ``q``'s value is a recorded
+    assumption (``test_ro_certain_parameter_multipliers.py``).
     """
     from discopt.modeling.core import Parameter
 
@@ -233,7 +234,8 @@ def test_certain_parameter_multiplier_is_signed_and_frozen(case, q_value):
             params(t, out)
         return out
 
-    assert params(m._constraints[0].body, []) == []
+    assert "q" in params(m._constraints[0].body, [])
+    assert "p" not in params(m._constraints[0].body, [])
     r = m.solve()
     assert r.status == "optimal"
     xv = float(r.value(x))

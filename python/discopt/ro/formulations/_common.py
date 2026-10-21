@@ -29,12 +29,16 @@ structurally affine in the uncertain parameters with constant coefficients, and
 ``g(x, p_bar) +- sum_j delta_j * |coeff_j|`` whenever sign tracking would
 over-count. Rows that are not affine keep sign tracking.
 
-A *certain* :class:`Parameter` (or any variable-free expression of one) that
-multiplies an uncertain parameter is evaluated at its ``formulate()``-time value
-and frozen into a :class:`Constant` on both routes: the worst-case direction is
-decided from that value, so a later update of the parameter could not be
-honoured by the counterpart. Re-run ``formulate()`` on a fresh model after
-changing such a parameter.
+A *certain* :class:`Parameter` that multiplies an uncertain one (``q * p`` with
+a box on ``p`` only) stays symbolic in the counterpart: a later
+``RobustCounterpart`` pass over ``q`` must still find it, and freezing it into a
+:class:`Constant` made that pass robustify nothing (#1839 review). Its value
+does decide the worst-case direction of ``p``, so that decision is recorded as
+a sign assumption on the model (:data:`SIGN_GUARD_ATTR`): a later pass that
+makes ``q`` uncertain checks the assumption over ``q``'s set, and
+``Model.validate`` re-checks it before every solve, so a ``q.value`` that
+changes sign is refused instead of silently mis-robustified. The exact
+aggregate route takes no coefficient that holds a Parameter.
 Above a *nonlinear* node the sign may pass to the uncertain operand only when the
 node is proven monotone in that operand over the whole uncertainty box (#1836).
 The former traversal passed the sign through ``1/p``, ``p**k``, ``abs`` and every
@@ -61,7 +65,11 @@ handled in exactly one of these ways, and never by passing the sign unproven:
   ``p``) is replaced by the endpoint of its interval over the box.
 * **Refused** with ``NotImplementedError`` naming the node otherwise -- in
   particular a division by, or a negative power of, an uncertain quantity whose
-  range contains 0, and any node with no monotonicity rule.
+  range contains 0, and any node with no monotonicity rule. A certain
+  Parameter whose value would decide the direction at a nonlinear node (``c/p``,
+  ``p**c``, the sign of ``q * x`` multiplying ``1/p``) is refused too: there is no
+  symbolic split of such a node to record a sign assumption on, and evaluating it
+  would freeze the Parameter.
 """
 
 from __future__ import annotations
@@ -324,6 +332,151 @@ def sign_tracking_substitute(
     return expr
 
 
+#: Model attribute holding the sign assumptions a robust counterpart relied on,
+#: as ``(factor_expr, required_sign, strict, label)``: ``factor_expr`` mentions
+#: no uncertain parameter, ``required_sign`` (+1 / -1, broadcast over the
+#: factor's entries) is the sign its worst-case direction was read from, and
+#: ``strict`` excludes 0. ``required_sign=None`` marks an expression whose
+#: Parameters must stay certain (:func:`record_must_stay_certain`). Set only
+#: when a record exists. Re-checked by ``Model.validate`` before every solve (it is one of
+#: ``discopt.modeling.core.VALIDATION_GUARD_ATTRS``) and by a later
+#: ``RobustCounterpart.formulate`` over the set it makes uncertain. Not written
+#: by :mod:`discopt.serialize`, which therefore refuses a model that carries it
+#: rather than reloading it unguarded (only a model whose counterpart kept a
+#: certain Parameter symbolic carries one).
+SIGN_GUARD_ATTR = "_ro_sign_preconditions"
+
+
+class RobustSignAssumptionError(ValueError):
+    """A sign a robust counterpart was built on no longer holds."""
+
+
+def _contains_any_parameter(expr, exclude: frozenset[str] | set[str] = frozenset()) -> bool:
+    """True when *expr* mentions a :class:`Parameter` not named in *exclude*."""
+    from discopt.modeling.core import Parameter, _iter_model_leaves
+
+    return any(
+        isinstance(leaf, Parameter) and leaf.name not in exclude
+        for leaf in _iter_model_leaves(expr)
+    )
+
+
+def record_sign_assumption(factor, required_sign, *, strict: bool, label: str) -> None:
+    # ``required_sign=None`` records a must-stay-certain assumption instead
+    # (:func:`record_must_stay_certain`).
+    """Record that a worst-case direction was read from the sign of *factor*.
+
+    Callers record only factors that mention a certain :class:`Parameter`; a
+    factor with no model leaf at all is ignored here.
+    """
+    from discopt.modeling.core import _iter_model_leaves
+
+    model = next((leaf.model for leaf in _iter_model_leaves(factor)), None)
+    if model is None:
+        return
+    records = getattr(model, SIGN_GUARD_ATTR, None)
+    if records is None:
+        records = []
+        setattr(model, SIGN_GUARD_ATTR, records)
+    records.append(
+        (
+            factor,
+            None if required_sign is None else np.asarray(required_sign, dtype=np.int8),
+            bool(strict),
+            f"robust counterpart: {label}",
+        )
+    )
+
+
+def record_must_stay_certain(expr, label: str) -> None:
+    """Record that the counterpart is exact only while *expr*'s Parameters are certain.
+
+    The polyhedral dual equality ``coeff(q) = A^T lam`` is exact for any fixed
+    ``q``, but a later pass making ``q`` uncertain would demand it for every
+    ``q`` with one ``lam`` -- a false infeasibility (``lam`` must adjust with
+    ``q``). Value changes are fine; only a later robustification is refused.
+    """
+    record_sign_assumption(expr, None, strict=False, label=label)
+
+
+def check_sign_assumptions(model, ranged: Optional[dict] = None) -> None:
+    """Raise :class:`RobustSignAssumptionError` if a recorded sign no longer holds.
+
+    Without *ranged* each factor is enclosed over the current variable bounds
+    with every Parameter at its current value (``Model.validate``). With
+    *ranged* -- ``{parameter_name: (lo, hi)}`` for parameters a new
+    ``RobustCounterpart`` pass is about to make uncertain -- only the factors
+    mentioning one of them are checked, with those parameters ranged over
+    their sets: the earlier pass's direction stays a worst case for every
+    value in the set only if the sign does.
+    """
+    from discopt._relax.convexity.interval import Interval
+    from discopt._relax.convexity.interval_eval import evaluate_interval, param_box_key
+
+    box = {}
+    for name, (lo, hi) in (ranged or {}).items():
+        box[param_box_key(name)] = Interval(
+            np.asarray(lo, dtype=np.float64), np.asarray(hi, dtype=np.float64)
+        )
+    for factor, required, strict, label in getattr(model, SIGN_GUARD_ATTR, None) or []:
+        if ranged is not None and not _contains_uncertain_param(factor, set(ranged)):
+            continue
+        if required is None:
+            if ranged is not None:
+                raise RobustSignAssumptionError(
+                    f"{label}: an earlier robust counterpart is exact only while the "
+                    f"parameter(s) in {factor!r} are certain (a dual equality holds them), "
+                    f"and this pass makes {', '.join(sorted(ranged))} uncertain. Robustify "
+                    "every uncertain parameter in one RobustCounterpart instead."
+                )
+            continue
+        enc = evaluate_interval(factor, None, box)
+        lo = np.asarray(enc.lo, dtype=np.float64)
+        hi = np.asarray(enc.hi, dtype=np.float64)
+        req = np.broadcast_to(required, lo.shape) if lo.shape else required.reshape(())
+        pos, neg = req > 0, req < 0
+        if strict:
+            ok = bool(np.all(lo[pos] > 0) and np.all(hi[neg] < 0))
+        else:
+            ok = bool(np.all(lo[pos] >= 0) and np.all(hi[neg] <= 0))
+        if not ok:
+            where = (
+                "over the uncertainty set of " + ", ".join(sorted(ranged))
+                if ranged
+                else "at the current parameter values and variable bounds"
+            )
+            raise RobustSignAssumptionError(
+                f"{label}: the robust counterpart chose the worst case of an uncertain "
+                f"parameter from the sign of {factor!r}, which no longer holds {where} "
+                f"(enclosure [{np.min(lo)}, {np.max(hi)}]). The counterpart would be "
+                "non-robust. Robustify every uncertain parameter in one "
+                "RobustCounterpart, or rebuild the model after changing the value or "
+                "bound."
+            )
+
+
+def uncertainty_bounding_box(unc) -> tuple[np.ndarray, np.ndarray]:
+    """Element-wise bounds ``(lo, hi)`` of the parameter over its uncertainty set."""
+    pbar = np.asarray(unc.parameter.value, dtype=np.float64)
+    if unc.kind == "box":
+        return np.asarray(unc.lower), np.asarray(unc.upper)
+    if unc.kind == "ellipsoidal":
+        half = unc.rho * np.sqrt(np.maximum(np.diag(unc.Sigma), 0.0))
+        half = half.reshape(pbar.shape)
+        return pbar - half, pbar + half
+    from discopt.ro.formulations.polyhedral import _support_function_lp
+
+    k = pbar.size
+    lo = np.empty(k)
+    hi = np.empty(k)
+    for j in range(k):
+        e = np.zeros(unc.A.shape[1])
+        e[j] = 1.0
+        hi[j] = _support_function_lp(e, unc.A, unc.b, True)
+        lo[j] = _support_function_lp(e, unc.A, unc.b, False)
+    return pbar + lo.reshape(pbar.shape), pbar + hi.reshape(pbar.shape)
+
+
 def _needs_multiplier_sign(factor, other, param_names: set[str]) -> bool:
     """True when *factor* is a constant-valued multiplier of an uncertain *other*.
 
@@ -365,7 +518,7 @@ def _signed_constant_product(
     ``np.sign(np.sum(c))`` gave all entries the sign of the sum, substituting
     every element whose coefficient had the other sign at its *best* case.
     """
-    from discopt.modeling.core import BinaryOp, Constant
+    from discopt.modeling.core import BinaryOp, Constant, Expression
 
     value = np.asarray(eval_constant_expr(factor), dtype=np.float64)
     has_pos = bool(np.any(value > 0))
@@ -377,26 +530,59 @@ def _signed_constant_product(
             "zero entries; the division is undefined."
         )
 
+    symbolic = not isinstance(factor, Constant) and _contains_any_parameter(factor)
+
     if not (has_pos and has_neg):
         factor_sign = -1 if has_neg else 1
+        if symbolic:
+            # The factor keeps its Parameter; the direction read from its value
+            # is a recorded assumption (module docstring, #1839 review).
+            record_sign_assumption(
+                factor, np.array(factor_sign), strict=reciprocal, label="constant multiplier"
+            )
         new_other = sign_tracking_substitute(
             other, wc_lower, wc_upper, param_names, maximize, sign * factor_sign
         )
-        # A non-Constant factor (a certain Parameter, or an expression of one)
-        # is frozen at the value its sign was read from, exactly as the mixed
-        # split below freezes it (#1831 review).
-        frozen = factor if isinstance(factor, Constant) else Constant(value)
-        return rebuild(frozen, new_other)
+        return rebuild(factor, new_other)
 
     if reciprocal:
         # e / d == e * (1/d); split 1/d by sign and multiply.
         recip = 1.0 / value
-        pos = Constant(np.where(recip > 0, recip, 0.0))
-        neg = Constant(np.where(recip < 0, recip, 0.0))
+        if symbolic:
+            record_sign_assumption(
+                factor, np.where(value < 0, -1, 1), strict=True, label="mixed-sign divisor"
+            )
+            pos_mask = Constant(np.where(recip > 0, 1.0, 0.0))
+            neg_mask = Constant(np.where(recip < 0, 1.0, 0.0))
+
+            def masked(mask, e):
+                return BinaryOp("*", BinaryOp("/", e, factor), mask)
+
+            pos_term = masked(
+                pos_mask,
+                sign_tracking_substitute(other, wc_lower, wc_upper, param_names, maximize, sign),
+            )
+            neg_term = masked(
+                neg_mask,
+                sign_tracking_substitute(other, wc_lower, wc_upper, param_names, maximize, -sign),
+            )
+            return BinaryOp("+", pos_term, neg_term)
+        pos: Expression = Constant(np.where(recip > 0, recip, 0.0))
+        neg: Expression = Constant(np.where(recip < 0, recip, 0.0))
 
         def rebuild_part(c, e):
             return BinaryOp("*", e, c)
 
+    elif symbolic:
+        # Split the Parameter-valued factor by the sign of each entry at its
+        # current value, keeping it symbolic (zero entries join the positive
+        # part, so a later value may be >= 0 there).
+        record_sign_assumption(
+            factor, np.where(value < 0, -1, 1), strict=False, label="mixed-sign multiplier"
+        )
+        pos = BinaryOp("*", factor, Constant(np.where(value >= 0, 1.0, 0.0)))
+        neg = BinaryOp("*", factor, Constant(np.where(value < 0, 1.0, 0.0)))
+        rebuild_part = rebuild
     else:
         pos = Constant(np.where(value > 0, value, 0.0))
         neg = Constant(np.where(value < 0, value, 0.0))
@@ -472,6 +658,10 @@ def affine_param_jacobians(expr, param_names: set[str]):
     def constant_factor(factor):
         if _contains_variable(factor):
             raise _NotAffine("coefficient contains a decision variable")
+        if _contains_any_parameter(factor):
+            # A certain Parameter coefficient must stay symbolic (module
+            # docstring); sign tracking handles it under a recorded assumption.
+            raise _NotAffine("coefficient contains a certain Parameter")
         return np.asarray(eval_constant_expr(factor), dtype=np.float64)
 
     def scale(jac, c):
@@ -602,7 +792,7 @@ def aggregate_affine_counterpart(expr, unc_sets, param_names: set[str], maximize
             cancels = True
     if not cancels:
         return None
-    result = freeze_constant_multipliers(expr, param_names)
+    result = expr
     for name in jacs:
         result = substitute_param(result, name, Constant(unc_sets[name].parameter.value))
     for name, (j, _s) in jacs.items():
@@ -611,48 +801,6 @@ def aggregate_affine_counterpart(expr, unc_sets, param_names: set[str], maximize
         pen = np.sum(np.abs(j) * delta, axis=tuple(range(j.ndim - k, j.ndim)))
         result = BinaryOp("+" if maximize else "-", result, Constant(np.asarray(pen)))
     return result
-
-
-def freeze_constant_multipliers(expr, param_names: set[str]):
-    """Replace each non-Constant constant-valued multiplier of an uncertain term
-    by its current value (see the module docstring on certain Parameters)."""
-    from discopt.modeling.core import (
-        BinaryOp,
-        Constant,
-        FunctionCall,
-        IndexExpression,
-        MatMulExpression,
-        SumExpression,
-        SumOverExpression,
-        UnaryOp,
-    )
-
-    def fr(e):
-        return freeze_constant_multipliers(e, param_names)
-
-    def fix(factor, other):
-        if isinstance(factor, Constant) or not _needs_multiplier_sign(factor, other, param_names):
-            return fr(factor)
-        return Constant(np.asarray(eval_constant_expr(factor), dtype=np.float64))
-
-    if isinstance(expr, BinaryOp):
-        if expr.op in ("*", "/"):
-            left = fix(expr.left, expr.right) if expr.op == "*" else fr(expr.left)
-            return BinaryOp(expr.op, left, fix(expr.right, expr.left))
-        return BinaryOp(expr.op, fr(expr.left), fr(expr.right))
-    if isinstance(expr, MatMulExpression):
-        return MatMulExpression(fix(expr.left, expr.right), fix(expr.right, expr.left))
-    if isinstance(expr, UnaryOp):
-        return UnaryOp(expr.op, fr(expr.operand))
-    if isinstance(expr, FunctionCall):
-        return FunctionCall(expr.func_name, *[fr(a) for a in expr.args])
-    if isinstance(expr, IndexExpression):
-        return IndexExpression(fr(expr.base), expr.index)
-    if isinstance(expr, SumExpression):
-        return SumExpression(fr(expr.operand), expr.axis)
-    if isinstance(expr, SumOverExpression):
-        return SumOverExpression([fr(t) for t in expr.terms])
-    return expr
 
 
 class _Ctx(NamedTuple):
