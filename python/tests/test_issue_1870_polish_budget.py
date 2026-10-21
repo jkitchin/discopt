@@ -218,3 +218,26 @@ def test_clock_limited_kernel_exit_leaves_the_polish_a_live_deadline(monkeypatch
     assert reserve is not None and reserve > 0.0, r.solver_stats
     # The polish starts with (most of) the withheld slice still ahead of it.
     assert seen["slack"] is not None and seen["slack"] > 0.5 * reserve, (seen, reserve)
+
+
+def test_continuous_solve_with_duals_does_not_import_jax():
+    """The second leak of the same class, found by solving every in-repo instance and
+    checking ``sys.modules``: 65 of 66 stay JAX-free; ``chance`` loaded JAX through
+    ``_duals_against_declared_box`` -> ``jacobian_for_recovery``, which imported
+    ``_relax.nlp_evaluator`` for one integer threshold."""
+    chance = Path(__file__).parent / "data" / "minlplib_nl" / "chance.nl"
+    code = (
+        "import sys, logging, warnings; logging.disable(logging.CRITICAL)\n"
+        "warnings.simplefilter('ignore')\n"
+        "import discopt.modeling as dm\n"
+        f"r = dm.from_nl({str(chance)!r}).solve(time_limit=30)\n"
+        "assert r.status == 'optimal', r.status\n"
+        "assert r.constraint_duals is not None, 'the probe must reach dual recovery'\n"
+        "print('JAX_LOADED', 'jax' in sys.modules)\n"
+    )
+    env = {k: v for k, v in os.environ.items() if k != "DISCOPT_NLP_EVAL"}
+    p = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, cwd="/", env=env
+    )
+    assert p.returncode == 0, p.stderr[-2000:]
+    assert "JAX_LOADED False" in p.stdout, p.stdout

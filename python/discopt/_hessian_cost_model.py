@@ -13,6 +13,20 @@ compile step and reports 0.0 directly.
 
 from __future__ import annotations
 
+# Above this many dense Jacobian entries (m * n), the JAX evaluator's
+# ``evaluate_jacobian`` routes through the sparse coloring path instead of compiling
+# the dense ``jax.jacfwd``. The dense compile replicates the whole constraint program
+# once per input variable, so for a large model its XLA jaxpr explodes during MLIR
+# lowering and aborts the *process* with a native SIGBUS/SIGILL (rsyn0810m03hfsg:
+# 1935 x 1185 ~ 2.3M entries, yet only ~0.2% nonzero). The cap sits well above
+# any small/medium model — which keep the faster dense path with no behavior
+# change — and below the crash regime, where the dense compile is not a viable
+# option anyway, so sparse is strictly safer. Here rather than in
+# ``_relax/nlp_evaluator`` because ``_dual_recovery`` consults it on the default
+# continuous-solve path, and importing it from the evaluator module loaded JAX for
+# one integer (#1870; measured on ``chance``, the one in-repo solve that loaded it).
+_DENSE_JACOBIAN_COMPILE_LIMIT = 1_000_000
+
 # --- First-time Lagrangian-Hessian XLA compile-cost model (F4) ------------------
 # The first evaluate_hessian_values call forces an uninterruptible first-time XLA
 # compile. The root-heuristic budget gate (solver.py) needs an a-priori estimate

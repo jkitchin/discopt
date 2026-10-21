@@ -86,7 +86,8 @@ def jacobian_for_recovery(evaluator, x_flat: np.ndarray, *, m: int):
     two run the same fit on the same models, so a size that defeats one defeats
     the other.
     """
-    from discopt._relax.nlp_evaluator import _DENSE_JACOBIAN_COMPILE_LIMIT
+    # JAX-free home (#1870): importing it from ``_relax.nlp_evaluator`` loaded JAX.
+    from discopt._hessian_cost_model import _DENSE_JACOBIAN_COMPILE_LIMIT
 
     n = int(x_flat.size)
     if m * n > _DENSE_JACOBIAN_COMPILE_LIMIT and hasattr(evaluator, "evaluate_sparse_jacobian"):
