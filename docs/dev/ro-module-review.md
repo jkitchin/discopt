@@ -144,6 +144,18 @@ same SOC penalty (coefficient extraction like the polyhedral path, penalty
 builders too — it converts every unknown-pattern gap in this module from silent to
 loud in one stroke.
 
+**Status (#1835).** The leftover-parameter guard shipped (PR #1832), and #1756 added
+`dm.sum(p * x)`. But the remaining `_extract_penalties` design was itself unsound:
+it attached an unscaled `‖Σ^{1/2} M‖` to each `M @ p` node and ignored outer
+scaling, sums, indexing and repeated occurrences, so `x + 5 (c @ p) ≤ 70` (ρ=1,
+c=[3,4]) certified x=20 when the truth is 10. It also used `‖L a‖` where the
+exact worst case is `‖Lᵀ a‖`, which matters once Σ is not diagonal. `ellipsoidal.py`
+now computes, for each scalar row, the aggregated coefficient `a(x) = ∂g/∂p`
+with a symbolic reverse sweep, and adds one penalty `ρ‖Lᵀ a(x)‖`. A row that is
+not affine in `p` (products of `p`, `p` inside a nonlinear function or a divisor)
+is refused with `NotImplementedError`. The scalar `p·x` and `sum(a * s)` cases
+that this section listed as refused are now robustified exactly.
+
 ### RO-3. `budget_uncertainty_set` is not the Bertsimas–Sim set
 
 The H-representation stored is `box ∩ {|Σξ_j/δ_j| ≤ Γ}` — the all-plus and

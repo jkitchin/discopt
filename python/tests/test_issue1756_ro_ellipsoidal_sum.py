@@ -55,12 +55,14 @@ def test_sum_form_in_objective():
     assert r.objective == pytest.approx(10.5, abs=1e-5)
 
 
-def test_scalar_times_vector_sum_still_refused():
-    # sum(a * s) for a scalar s is (1^T a) s, not a dot product: still refused.
+def test_scalar_times_vector_sum_is_robustified():
+    # sum(a * s) for a scalar s is (1^T a) s: coefficient of a is s * 1 (#1835),
+    # so the row is 9 s - RHO * sqrt(3) s >= 10. It used to be refused.
     m = dm.Model("s")
     s = m.continuous("s", lb=0, ub=10)
     a = m.parameter("a", value=A_HAT)
     m.subject_to(dm.sum(a * s) >= 10)
     m.minimize(s)
-    with pytest.raises(NotImplementedError):
-        RobustCounterpart(m, EllipsoidalUncertaintySet(a, rho=RHO)).formulate()
+    RobustCounterpart(m, EllipsoidalUncertaintySet(a, rho=RHO)).formulate()
+    expected = 10.0 / (A_HAT.sum() - RHO * np.sqrt(3.0))
+    assert m.solve().objective == pytest.approx(expected, abs=1e-5)
