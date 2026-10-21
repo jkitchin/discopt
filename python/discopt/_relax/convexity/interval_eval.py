@@ -256,7 +256,7 @@ def _eval_impl(expr: Expression, model: Optional[Model], box: dict, cache: dict)
             return left / right
         if expr.op == "**":
             return _eval_power(expr, left, right)
-        return _unbounded(left.lo.shape)
+        return _unbounded(_broadcast_shape(left.lo.shape, right.lo.shape))
 
     # --- Function calls --------------------------------------------
     if isinstance(expr, FunctionCall):
@@ -659,10 +659,10 @@ def _eval_power(expr: BinaryOp, left: Interval, right: Interval) -> Interval:
     # Require a concrete scalar exponent so we know whether integer or
     # fractional rules apply.
     if not isinstance(expr.right, (Constant, Parameter)):
-        return _unbounded(left.lo.shape)
+        return _unbounded(_broadcast_shape(left.lo.shape, right.lo.shape))
     raw = np.asarray(expr.right.value)
     if raw.ndim != 0:
-        return _unbounded(left.lo.shape)
+        return _unbounded(_broadcast_shape(left.lo.shape, raw.shape))
     n = float(raw)
     n_int = int(n)
     if np.isclose(n, float(n_int)):
@@ -717,7 +717,7 @@ def _eval_function_call(
         return Interval(np.full(shape, -np.pi), np.full(shape, np.pi))
 
     if len(args) != 1:
-        return _unbounded(args[0].lo.shape)
+        return _unbounded(_broadcast_shape(*(a.lo.shape for a in args)))
 
     arg = args[0]
     name = expr.func_name
@@ -940,9 +940,53 @@ def _eval_matmul(
             lo[i] = _widen_sum(prods_lo.sum(), prods_lo, k, None, -1.0)
             hi[i] = _widen_sum(prods_hi.sum(), prods_hi, k, None, +1.0)
         return Interval(np.nextafter(lo, -np.inf), np.nextafter(hi, np.inf))
-    # Other shapes fall through as unbounded for now — not needed by
-    # any expression the convexity certificate currently targets.
-    return _unbounded(A_lo.shape[:-1] if A_lo.ndim >= 1 else ())
+    if 1 <= A_lo.ndim <= 2 and 1 <= B_lo.ndim <= 2:
+        # #1842: every other 1-D / 2-D product -- ``(k,) @ (k, n)``,
+        # ``(m, k) @ (k, n)``, ``(k,) @ (k,)``. These fell through to an
+        # unbounded enclosure of shape ``A.shape[:-1]``, which is the product's
+        # shape only for ``(m, k) @ (k,)``: ``(c @ M)[0]`` then raised
+        # ``IndexError: array is 0-dimensional`` in the root relaxation build,
+        # and even with the shape right a constant ``sum(M @ M)`` had no finite
+        # enclosure, so the dual bound never left the variable box. Each output
+        # entry is the same interval dot product as the branch above, widened by
+        # the same accumulation bound, so the enclosure is sound by the same
+        # argument; the branch above is left as it was.
+        out_shape = _matmul_shape(A_lo.shape, B_lo.shape)
+        a_lo2 = A_lo.reshape(1, -1) if A_lo.ndim == 1 else A_lo
+        a_hi2 = A_hi.reshape(1, -1) if A_hi.ndim == 1 else A_hi
+        b_lo2 = B_lo.reshape(-1, 1) if B_lo.ndim == 1 else B_lo
+        b_hi2 = B_hi.reshape(-1, 1) if B_hi.ndim == 1 else B_hi
+        m, k = a_lo2.shape
+        n = b_lo2.shape[1]
+        lo = np.zeros((m, n), dtype=np.float64)
+        hi = np.zeros((m, n), dtype=np.float64)
+        for i in range(m):
+            for j in range(n):
+                a_l, a_h = a_lo2[i], a_hi2[i]
+                b_l, b_h = b_lo2[:, j], b_hi2[:, j]
+                corners = (a_l * b_l, a_l * b_h, a_h * b_l, a_h * b_h)
+                prods_lo = np.minimum(np.minimum(corners[0], corners[1]), np.minimum(*corners[2:]))
+                prods_hi = np.maximum(np.maximum(corners[0], corners[1]), np.maximum(*corners[2:]))
+                lo[i, j] = _widen_sum(prods_lo.sum(), prods_lo, k, None, -1.0)
+                hi[i, j] = _widen_sum(prods_hi.sum(), prods_hi, k, None, +1.0)
+        return Interval(
+            np.nextafter(lo, -np.inf).reshape(out_shape),
+            np.nextafter(hi, np.inf).reshape(out_shape),
+        )
+    # Batched (>2-D) products fall through as unbounded -- not needed by any
+    # expression the convexity certificate currently targets -- but with the
+    # product's shape, so a consumer that indexes it does not crash (#1842).
+    return _unbounded(_matmul_shape(A_lo.shape, B_lo.shape))
+
+
+def _matmul_shape(a: tuple, b: tuple) -> tuple:
+    """Shape of ``A @ B`` under numpy's rules (``ValueError`` if incompatible)."""
+    return tuple(np.matmul(np.zeros(a), np.zeros(b)).shape)
+
+
+def _broadcast_shape(*shapes: tuple) -> tuple:
+    """Shape of an element-wise result over operands of *shapes* (#1842)."""
+    return tuple(np.broadcast_shapes(*shapes))
 
 
 __all__ = ["evaluate_interval"]
