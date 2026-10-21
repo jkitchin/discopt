@@ -480,6 +480,12 @@ INVENTORY: tuple[tuple[str, str, str, str], ...] = (
     ("discopt.decomposition.learning", "record_outcome", "trivial", "record append"),
     ("discopt.decomposition.learning.store", "RecordStore", "trivial", "constructor"),
     ("discopt.mpec", "require_all_relations_lowered", "trivial", "predicate over rows"),
+    (
+        "discopt.ro.formulations._common",
+        "check_sign_assumptions",
+        "trivial",
+        "one interval walk per recorded RO sign assumption (#1831 review)",
+    ),
     ("discopt.solvers._root_presolve", "coef_tighten_enabled", "trivial", "env read"),
     ("discopt.solvers.amp", "_apply_flat_bounds_to_model", "trivial", "one pass over bounds"),
     ("discopt.warm_start", "_prepare_warm_start", "trivial", "one pass over x0"),
