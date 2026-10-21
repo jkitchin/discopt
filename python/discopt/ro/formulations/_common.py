@@ -15,9 +15,26 @@ are signed element-wise, never by a fold such as ``np.sign(np.sum(c))``
 scalar sign as before. A *mixed-sign* constant is split exactly as
 ``c = c+ + c-`` (``c+ = max(c, 0)``, ``c- = min(c, 0)``) and each part is
 robustified with its own sign, so every element of ``e`` is substituted at the
-worst-case bound for the sign of its own coefficient. Each occurrence of a
-parameter is worst-cased independently, which is conservative (sound) in
-general and exact when every parameter element enters the row once, affinely.
+worst-case bound for the sign of its own coefficient.
+
+Sign tracking worst-cases each *occurrence* of a parameter independently. That
+is exact only when no element's coefficients cancel across occurrences:
+``sum(M @ p)`` with ``M = [[3, -1], [-2, 1]]`` is ``p0`` exactly, yet tracking
+the two rows of ``M`` separately charges ``|3| + |-2|`` for ``p0`` and
+``|-1| + |1|`` for ``p1`` -- a counterpart so conservative it reported a
+feasible model infeasible (#1831 review). :func:`affine_param_jacobians`
+therefore extracts the exact aggregate coefficient of a row that is
+structurally affine in the uncertain parameters with constant coefficients, and
+:func:`aggregate_affine_counterpart` builds the exact box counterpart
+``g(x, p_bar) +- sum_j delta_j * |coeff_j|`` whenever sign tracking would
+over-count. Rows that are not affine keep sign tracking.
+
+A *certain* :class:`Parameter` (or any variable-free expression of one) that
+multiplies an uncertain parameter is evaluated at its ``formulate()``-time value
+and frozen into a :class:`Constant` on both routes: the worst-case direction is
+decided from that value, so a later update of the parameter could not be
+honoured by the counterpart. Re-run ``formulate()`` on a fresh model after
+changing such a parameter.
 """
 
 from __future__ import annotations
@@ -292,19 +309,24 @@ def _signed_constant_product(
     has_pos = bool(np.any(value > 0))
     has_neg = bool(np.any(value < 0))
 
+    if reciprocal and np.any(value == 0):
+        raise ValueError(
+            "Robust counterpart: a constant divisor of an uncertain term has "
+            "zero entries; the division is undefined."
+        )
+
     if not (has_pos and has_neg):
         factor_sign = -1 if has_neg else 1
         new_other = sign_tracking_substitute(
             other, wc_lower, wc_upper, param_names, maximize, sign * factor_sign
         )
-        return rebuild(factor, new_other)
+        # A non-Constant factor (a certain Parameter, or an expression of one)
+        # is frozen at the value its sign was read from, exactly as the mixed
+        # split below freezes it (#1831 review).
+        frozen = factor if isinstance(factor, Constant) else Constant(value)
+        return rebuild(frozen, new_other)
 
     if reciprocal:
-        if np.any(value == 0):
-            raise ValueError(
-                "Robust counterpart: a constant divisor of an uncertain term has "
-                "zero entries; the division is undefined."
-            )
         # e / d == e * (1/d); split 1/d by sign and multiply.
         recip = 1.0 / value
         pos = Constant(np.where(recip > 0, recip, 0.0))
@@ -324,6 +346,251 @@ def _signed_constant_product(
         neg, sign_tracking_substitute(other, wc_lower, wc_upper, param_names, maximize, -sign)
     )
     return BinaryOp("+", pos_term, neg_term)
+
+
+class _NotAffine(Exception):
+    """Internal: the expression is not affine in the uncertain parameters with
+    constant coefficients (or uses a node the extractor does not model)."""
+
+
+def _value_shape(expr) -> tuple[int, ...]:
+    """Static shape of *expr* (:func:`_shape_of`), or :class:`_NotAffine`."""
+    shape = _shape_of(expr)
+    if shape is None:
+        raise _NotAffine(f"shape of {type(expr).__name__} is not statically known")
+    return shape
+
+
+def affine_param_jacobians(expr, param_names: set[str]):
+    """Exact constant coefficients of *expr* in its uncertain parameters.
+
+    Returns ``{name: (J, S)}`` when *expr* is structurally affine in every
+    uncertain parameter it mentions and each coefficient is variable-free, or
+    ``None`` otherwise. ``J`` has shape ``out + P`` (``out`` the shape of the
+    parameter-bearing part of *expr*, which broadcasts against *expr*; ``P``
+    the parameter's shape) and is the exact derivative: *expr* equals
+    ``expr(p_bar) + sum J * (p - p_bar)`` for every ``p``. ``S`` has the same
+    shape and accumulates ``|J|`` *per occurrence* -- the coefficient magnitude
+    sign tracking charges. ``S > |J|`` exactly where occurrences cancel.
+
+    Affinity is decided structurally (``p`` reaches the root only through
+    ``+ - neg``, sums, indexing, and products, quotients or matmuls with a
+    constant-valued side), never by sampling: a finite second difference
+    passes ``abs(p - p_bar)``.
+    """
+    from discopt.modeling.core import (
+        BinaryOp,
+        IndexExpression,
+        MatMulExpression,
+        Parameter,
+        SumExpression,
+        SumOverExpression,
+        UnaryOp,
+    )
+    from discopt.ro.formulations.box import _contains_variable
+
+    def add(a, b, sign_b):
+        out = dict(a)
+        for name, (jb, sb) in b.items():
+            if name in out:
+                ja, sa = out[name]
+                out[name] = (ja + sign_b * jb, sa + sb)
+            else:
+                out[name] = (sign_b * jb, sb)
+        return out
+
+    def broadcast(jac, shape):
+        out = {}
+        for name, (j, s) in jac.items():
+            pshape = j.shape[j.ndim - pdims[name] :]
+            target = tuple(shape) + pshape
+            out[name] = (np.broadcast_to(j, target), np.broadcast_to(s, target))
+        return out
+
+    def constant_factor(factor):
+        if _contains_variable(factor):
+            raise _NotAffine("coefficient contains a decision variable")
+        return np.asarray(eval_constant_expr(factor), dtype=np.float64)
+
+    def scale(jac, c):
+        out = {}
+        for name, (j, s) in jac.items():
+            cx = c.reshape(c.shape + (1,) * pdims[name])
+            out[name] = (j * cx, s * np.abs(cx))
+        return out
+
+    def matmul(jac, c, c_left):
+        out = {}
+        for name, (j, s) in jac.items():
+            k = pdims[name]
+            pshape = j.shape[j.ndim - k :]
+            eshape = j.shape[: j.ndim - k]
+            jf = j.reshape(eshape + (-1,))
+            sf = s.reshape(eshape + (-1,))
+            ca = np.abs(c)
+            if c_left:
+                cols_j = [c @ jf[..., i] for i in range(jf.shape[-1])]
+                cols_s = [ca @ sf[..., i] for i in range(sf.shape[-1])]
+            else:
+                cols_j = [jf[..., i] @ c for i in range(jf.shape[-1])]
+                cols_s = [sf[..., i] @ ca for i in range(sf.shape[-1])]
+            nj = np.stack(cols_j, axis=-1)
+            ns = np.stack(cols_s, axis=-1)
+            oshape = nj.shape[:-1]
+            out[name] = (nj.reshape(oshape + pshape), ns.reshape(oshape + pshape))
+        return out
+
+    def has_p(e):
+        return _contains_uncertain_param(e, param_names)
+
+    def jac(e):
+        if not has_p(e):
+            return {}
+        if isinstance(e, Parameter):
+            pshape = tuple(np.shape(e.value))
+            n = int(np.prod(pshape)) if pshape else 1
+            pdims[e.name] = len(pshape)
+            eye = np.eye(n).reshape(pshape + pshape)
+            return {e.name: (eye, eye.copy())}
+        if isinstance(e, BinaryOp):
+            if e.op in ("+", "-"):
+                return add(jac(e.left), jac(e.right), 1.0 if e.op == "+" else -1.0)
+            if e.op == "*":
+                if has_p(e.left) and has_p(e.right):
+                    raise _NotAffine("product of two uncertain terms")
+                if has_p(e.left):
+                    return scale(jac(e.left), constant_factor(e.right))
+                return scale(jac(e.right), constant_factor(e.left))
+            if e.op == "/" and not has_p(e.right):
+                d = constant_factor(e.right)
+                if np.any(d == 0):
+                    raise ValueError(
+                        "Robust counterpart: a constant divisor of an uncertain term "
+                        "has zero entries; the division is undefined."
+                    )
+                return scale(jac(e.left), 1.0 / d)
+            raise _NotAffine(f"operator {e.op!r} on an uncertain term")
+        if isinstance(e, UnaryOp):
+            if e.op == "neg":
+                return {n: (-j, s) for n, (j, s) in jac(e.operand).items()}
+            raise _NotAffine(f"unary {e.op!r} on an uncertain term")
+        if isinstance(e, MatMulExpression):
+            if has_p(e.left) and has_p(e.right):
+                raise _NotAffine("matmul of two uncertain terms")
+            if has_p(e.right):
+                c = constant_factor(e.left)
+                inner = broadcast(jac(e.right), _value_shape(e.right))
+                return matmul(inner, c, c_left=True)
+            c = constant_factor(e.right)
+            inner = broadcast(jac(e.left), _value_shape(e.left))
+            return matmul(inner, c, c_left=False)
+        if isinstance(e, SumExpression):
+            oshape = _value_shape(e.operand)
+            inner = broadcast(jac(e.operand), oshape)
+            nd = len(oshape)
+            if e.axis is None:
+                axes: tuple[int, ...] = tuple(range(nd))
+            else:
+                raw = e.axis if isinstance(e.axis, tuple) else (e.axis,)
+                axes = tuple(a % nd for a in raw)
+            return {n: (np.sum(j, axis=axes), np.sum(s, axis=axes)) for n, (j, s) in inner.items()}
+        if isinstance(e, SumOverExpression):
+            total: dict = {}
+            for t in e.terms:
+                total = add(total, jac(t), 1.0)
+            return total
+        if isinstance(e, IndexExpression):
+            idx = e.index if isinstance(e.index, tuple) else (e.index,)
+            if any(i is Ellipsis or i is None for i in idx):
+                raise _NotAffine("ellipsis/newaxis index on an uncertain term")
+            inner = broadcast(jac(e.base), _value_shape(e.base))
+            return {n: (j[idx], s[idx]) for n, (j, s) in inner.items()}
+        raise _NotAffine(f"{type(e).__name__} on an uncertain term")
+
+    pdims: dict[str, int] = {}
+    try:
+        return {n: (np.asarray(j), np.asarray(s)) for n, (j, s) in jac(expr).items()}
+    except _NotAffine:
+        return None
+
+
+def aggregate_affine_counterpart(expr, unc_sets, param_names: set[str], maximize: bool):
+    """Exact box counterpart of an affine row whose occurrences cancel, else ``None``.
+
+    For ``g(x, p) = g(x, p_bar) + sum_j coeff_j * (p_j - p_bar_j)`` with constant
+    ``coeff`` the worst case over ``|p_j - p_bar_j| <= delta_j`` is
+    ``g(x, p_bar) + sum_j delta_j * |coeff_j|`` (``-`` when minimising),
+    element-wise for a vector row. ``coeff`` is the *aggregate* coefficient from
+    :func:`affine_param_jacobians`, so occurrences that cancel are netted before
+    the absolute value -- the step sign tracking cannot take.
+
+    Returns ``None`` (the caller keeps sign tracking) when *expr* is not affine
+    with constant coefficients, or when no coefficient cancels: sign tracking is
+    then already exact, and keeping it leaves every such formulation unchanged.
+    *unc_sets* maps parameter names to box uncertainty sets.
+    """
+    from discopt.modeling.core import BinaryOp, Constant
+
+    jacs = affine_param_jacobians(expr, param_names)
+    if not jacs:
+        return None
+    cancels = False
+    for j, s in jacs.values():
+        if np.any(s - np.abs(j) > 1e-12 * np.maximum(1.0, s)):
+            cancels = True
+    if not cancels:
+        return None
+    result = freeze_constant_multipliers(expr, param_names)
+    for name in jacs:
+        result = substitute_param(result, name, Constant(unc_sets[name].parameter.value))
+    for name, (j, _s) in jacs.items():
+        delta = np.asarray(unc_sets[name].delta, dtype=np.float64)
+        k = delta.ndim
+        pen = np.sum(np.abs(j) * delta, axis=tuple(range(j.ndim - k, j.ndim)))
+        result = BinaryOp("+" if maximize else "-", result, Constant(np.asarray(pen)))
+    return result
+
+
+def freeze_constant_multipliers(expr, param_names: set[str]):
+    """Replace each non-Constant constant-valued multiplier of an uncertain term
+    by its current value (see the module docstring on certain Parameters)."""
+    from discopt.modeling.core import (
+        BinaryOp,
+        Constant,
+        FunctionCall,
+        IndexExpression,
+        MatMulExpression,
+        SumExpression,
+        SumOverExpression,
+        UnaryOp,
+    )
+
+    def fr(e):
+        return freeze_constant_multipliers(e, param_names)
+
+    def fix(factor, other):
+        if isinstance(factor, Constant) or not _needs_multiplier_sign(factor, other, param_names):
+            return fr(factor)
+        return Constant(np.asarray(eval_constant_expr(factor), dtype=np.float64))
+
+    if isinstance(expr, BinaryOp):
+        if expr.op in ("*", "/"):
+            left = fix(expr.left, expr.right) if expr.op == "*" else fr(expr.left)
+            return BinaryOp(expr.op, left, fix(expr.right, expr.left))
+        return BinaryOp(expr.op, fr(expr.left), fr(expr.right))
+    if isinstance(expr, MatMulExpression):
+        return MatMulExpression(fix(expr.left, expr.right), fix(expr.right, expr.left))
+    if isinstance(expr, UnaryOp):
+        return UnaryOp(expr.op, fr(expr.operand))
+    if isinstance(expr, FunctionCall):
+        return FunctionCall(expr.func_name, *[fr(a) for a in expr.args])
+    if isinstance(expr, IndexExpression):
+        return IndexExpression(fr(expr.base), expr.index)
+    if isinstance(expr, SumExpression):
+        return SumExpression(fr(expr.operand), expr.axis)
+    if isinstance(expr, SumOverExpression):
+        return SumOverExpression([fr(t) for t in expr.terms])
+    return expr
 
 
 _NUMPY_FUNCS = {
@@ -437,7 +704,7 @@ def _shape_of(expr) -> Optional[tuple[int, ...]]:
         return known
     if isinstance(expr, (BinaryOp, SumOverExpression)):
         parts = [expr.left, expr.right] if isinstance(expr, BinaryOp) else expr.terms
-        shapes = []
+        shapes: list[tuple[int, ...]] = []
         for t in parts:
             sh = _shape_of(t)
             if sh is None:

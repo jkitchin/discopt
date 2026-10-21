@@ -28,6 +28,7 @@ import numpy as np
 
 from discopt.ro.formulations._common import (
     _contains_uncertain_param,
+    aggregate_affine_counterpart,
     sign_tracking_substitute,
     substitute_param,
 )
@@ -78,14 +79,25 @@ class BoxRobustFormulation:
 
         from discopt.modeling.core import Constraint, Objective, ObjectiveSense
 
+        unc_map = {u.parameter.name: u for u in self._uncertainty_sets}
+
+        def robustify(expr, maximize: bool):
+            # An affine row whose parameter occurrences cancel (``sum(M @ p)``,
+            # ``3*p0 - p0``) gets the exact aggregate counterpart; sign tracking
+            # would charge every occurrence separately (#1831 review).
+            exact = aggregate_affine_counterpart(expr, unc_map, param_names, maximize)
+            if exact is not None:
+                return exact
+            return sign_tracking_substitute(
+                expr, wc_lower, wc_upper, param_names, maximize=maximize, sign=+1
+            )
+
         new_constraints = []
         for con in m._constraints:
             if not isinstance(con, Constraint):
                 new_constraints.append(con)
                 continue
-            new_expr = sign_tracking_substitute(
-                con.body, wc_lower, wc_upper, param_names, maximize=True, sign=+1
-            )
+            new_expr = robustify(con.body, maximize=True)
             new_constraints.append(
                 Constraint(body=new_expr, sense=con.sense, rhs=con.rhs, name=con.name)
             )
@@ -95,14 +107,7 @@ class BoxRobustFormulation:
         if obj is None:
             return
         maximize_obj_wc = obj.sense == ObjectiveSense.MINIMIZE
-        new_expr = sign_tracking_substitute(
-            obj.expression,
-            wc_lower,
-            wc_upper,
-            param_names,
-            maximize=maximize_obj_wc,
-            sign=+1,
-        )
+        new_expr = robustify(obj.expression, maximize=maximize_obj_wc)
         m._objective = Objective(expression=new_expr, sense=obj.sense)
 
     # ------------------------------------------------------------------
@@ -195,14 +200,18 @@ class BoxRobustFormulation:
                     wc_upper = {pname: unc.upper}
                     # Worst case of constant_coeff * p over [p_bar-delta, p_bar+delta].
                     # Contribution = coeff * (p_wc - p_bar) where p_wc depends on sign.
-                    wc_expr = sign_tracking_substitute(
-                        expr_at_nom,
-                        wc_lower,
-                        wc_upper,
-                        {pname},
-                        maximize=maximize,
-                        sign=+1,
+                    wc_expr = aggregate_affine_counterpart(
+                        expr_at_nom, {pname: unc}, {pname}, maximize
                     )
+                    if wc_expr is None:
+                        wc_expr = sign_tracking_substitute(
+                            expr_at_nom,
+                            wc_lower,
+                            wc_upper,
+                            {pname},
+                            maximize=maximize,
+                            sign=+1,
+                        )
                     # Penalty = (worst-case expression) - (nominal expression)
                     wc_penalty = BinaryOp("-", wc_expr, base)
                     result = BinaryOp("+", result, wc_penalty)
