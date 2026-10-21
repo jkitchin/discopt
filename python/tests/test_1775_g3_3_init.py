@@ -259,3 +259,19 @@ def test_master_override_solve_leaves_the_master_alone():
         m.solve(10, exclude_also=[(1, 1)])
     with pytest.raises(ValueError, match="2 finite numbers"):
         m.solve(10, objective_override=[1.0])
+
+
+def test_set_covering_excludes_on_the_indicators_only():
+    """Review of #1865: a failed selection is excluded on its indicator columns.
+    The full integer configuration would include this unbounded integer, whose
+    exact no-good refuses (needs finite bounds), and would let the master
+    propose the same selection again with another value of it."""
+    m = _two(infeasible_d1=True)
+    k = m.integer("k", lb=0)  # unbounded general integer, unused by the disjuncts
+    m.subject_to(k >= 0)
+    sp = GDPSpace.from_model(m)
+    dl = Deadline(120)
+    solve, calls = _global(sp, dl)
+    rep = initialize("set_covering", sp, solve, dl)
+    assert {d.name for d in rep.uncovered} == {"d[1]"}
+    assert len([c for c in calls if "d[1]" in c]) == 2  # each failed selection once

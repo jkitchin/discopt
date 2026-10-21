@@ -34,7 +34,12 @@ from typing import Any, Optional
 import numpy as np
 
 from discopt.gdp.algorithms.base import Deadline
-from discopt.gdp.algorithms.master import DEFAULT_MASTER_BACKEND, MasterMILP, build_master
+from discopt.gdp.algorithms.master import (
+    DEFAULT_MASTER_BACKEND,
+    MasterMILP,
+    _add_no_good_cut,
+    build_master,
+)
 from discopt.gdp.tree import DisjunctionNode, DisjunctNode, GDPTree, gdp_tree
 from discopt.modeling.core import Model, _DisjunctiveConstraint
 
@@ -250,7 +255,11 @@ def initialize(
 
     # set_covering
     covered = set(space.columns) - space.nonlinear
-    failed: list[tuple[int, ...]] = []
+    # A failed selection is excluded on the indicator columns alone (always 0/1):
+    # excluding the master's full integer configuration would let it propose the
+    # same selection again with other auxiliary values (review of #1865).
+    cols = sorted(set(space.columns.values()))
+    failed: list[tuple[np.ndarray, float]] = []
     while True:
         uncovered = set(space.columns) - covered
         if not uncovered:
@@ -263,7 +272,7 @@ def initialize(
             report.stop_reason = "deadline"
             break
         c = _activity_objective(space, m.n_vars, uncovered)
-        r = m.solve(deadline.sub_limit(master_time_cap), objective_override=c, exclude_also=failed)
+        r = m.solve(deadline.sub_limit(master_time_cap), objective_override=c, extra_cuts=failed)
         if r.x is None:
             report.stop_reason = (
                 "master infeasible" if r.proven_infeasible else "master no solution"
@@ -278,8 +287,11 @@ def initialize(
         if _solved(result):
             covered.update(sel)
         else:
-            assert r.config is not None
-            failed.append(r.config)
+            assert r.x is not None
+            rows: list[np.ndarray] = []
+            rhs: list[float] = []
+            _add_no_good_cut(np.asarray(r.x), cols, rows, rhs, m.n_vars)
+            failed.append((rows[0], rhs[0]))
     report.covered = covered & set(space.columns)
     report.uncovered = set(space.columns) - covered
     return report

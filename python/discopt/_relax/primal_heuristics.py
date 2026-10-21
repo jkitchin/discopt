@@ -3532,19 +3532,22 @@ def _prune_decided_groups(
     """The one-hot groups the bounds leave open, and the columns they decide.
 
     A member fixed at 0 (``ub < 0.5``) is not a choice and leaves its group; a
-    group with a member fixed at 1 (``lb > 0.5``), or left with one member, is
+    group with a member fixed at 1 (``lb > 0.5``), or with no live member, is
     decided and leaves the search, its columns returned as decided so the
-    residual search leaves them alone too. Searching them only proposes points
-    outside the model's own bounds. Measured on a GDP subproblem with every
-    indicator fixed (#1775 G3.3): ``one_hot_config_subnlp``/``one_hot_config_dive``
-    spent 9.1 s on 152 sub-NLPs whose points the incumbent guard then rejected.
+    residual search leaves them alone too. A group left with ONE live member is
+    not decided -- that member is still a free column -- and stays a one-member
+    group, so the plans seed it to 1 as before (review of #1865). Searching the
+    decided ones only proposes points outside the model's own bounds. Measured
+    on a GDP subproblem with every indicator fixed (#1775 G3.3), the two one-hot
+    searches spent 9.1 s on 152 sub-NLPs whose points the incumbent guard then
+    rejected.
     Callers pass :func:`_pinned_bounds`, so a row-pinned member counts as fixed.
     """
     open_groups: list[list[int]] = []
     decided: set[int] = set()
     for g in groups:
         live = [j for j in g if ub[j] >= 0.5]
-        if any(lb[j] > 0.5 for j in g) or len(live) <= 1:
+        if any(lb[j] > 0.5 for j in g) or not live:
             decided.update(g)
         else:
             open_groups.append(live)
