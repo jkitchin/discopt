@@ -230,6 +230,11 @@ def bound_pretransform(model: Model) -> PretransformReport:
         )
         if any(drop):
             report.disjunctions += 1
+            if c.big_m is not None:  # #1775 G2.6: keep the user Ms aligned with the rows
+                c.big_m = tuple(
+                    tuple(m for r, m in zip(d, ms) if id(r) not in drop[k])
+                    for k, (d, ms) in enumerate(zip(c.disjuncts, c.big_m))
+                )
             for k, d in enumerate(c.disjuncts):
                 kept = [r for r in d if id(r) not in drop[k]]
                 report.rows_removed += len(d) - len(kept)

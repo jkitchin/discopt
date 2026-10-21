@@ -1945,6 +1945,15 @@ def _dec_rows(docs: list[dict], nodes: list, minor: int) -> list:
 def _enc_disjunction(con: Any, table: _NodeTable) -> dict:
     """A disjunction's fields: a ``disjunction`` row without its ``kind``, and
     (1.6) the record of a disjunction nested as a disjunct member."""
+    if con.big_m is not None:
+        # #1775 G2.6: no schema key for it yet. An older reader skips an unknown
+        # nested key, so writing one would reload a model with computed Ms, a
+        # different model; refuse instead of dropping it.
+        raise SerializationError(
+            f"disjunction {con.name or '<anon>'!r} carries a user big_m (#1775 G2.6), "
+            "which this schema cannot record. Save the model without big_m and pass "
+            "it again after loading."
+        )
     out = {
         "disjuncts": [[_enc_member(c, table) for c in d] for d in con.disjuncts],
         "name": con.name,

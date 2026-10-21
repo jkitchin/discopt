@@ -8344,6 +8344,7 @@ class Model:
         name: Optional[str] = None,
         *,
         semantics: Union[DisjunctionSemantics, str] = DisjunctionSemantics.SELECT_ONE,
+        big_m: Union[float, dict, None] = None,
     ) -> "_DisjunctiveConstraint":
         """
         Add disjunctive constraint (Generalized Disjunctive Programming).
@@ -8374,6 +8375,22 @@ class Model:
             ``OR`` (at least one selected) is lowered by big-M (#1775 G1.4); a
             lowering that does not encode the declared value refuses it rather
             than approximating it.
+        big_m : float or dict, optional
+            User big-M values for ``gdp_method="big-m"`` (#1775 G2.6; Pyomo's
+            ``bigM``). A number applies to every row; a dict maps a row
+            (the ``Constraint`` object passed in ``disjuncts``) to its M, with
+            the key ``None`` as the default for the others. Rows without a value
+            get the computed M as before. Each value is a magnitude and must be
+            finite and ``>= 0``. Each one is checked when the model is lowered:
+            it is certified when it is at least the interval bound of the row's
+            body, or at least a rigorous LP bound over the model's linear rows and
+            each other disjunct's linear rows; it is **refused** when the LP finds
+            a point feasible for the whole model that the value would cut; and
+            otherwise it is used but not certified, in which case ``solve``
+            withholds the certificate (``optimal`` becomes ``feasible``,
+            ``infeasible`` becomes ``unknown``, and the bound is dropped), so a
+            user M can never produce a false certificate. Other methods ignore
+            it, with a warning.
 
         Examples
         --------
@@ -8394,6 +8411,7 @@ class Model:
             name=name,
             semantics=_coerce_disjunction_semantics(semantics),
             _model=self,
+            big_m=_normalize_big_m(big_m, disjuncts, name),
         )
         self._constraints.append(dc)
         return dc
@@ -8886,6 +8904,7 @@ class Model:
         name: Optional[str] = None,
         *,
         semantics: Union[DisjunctionSemantics, str] = DisjunctionSemantics.SELECT_ONE,
+        big_m: Union[float, dict, None] = None,
     ) -> "_DisjunctiveConstraint":
         """Create a disjunction object for nesting inside either_or().
 
@@ -8901,6 +8920,8 @@ class Model:
             Name for the disjunction.
         semantics : DisjunctionSemantics or str, default ``SELECT_ONE``
             The declared meaning of the disjunction; see :meth:`either_or`.
+        big_m : float or dict, optional
+            User big-M values, as in :meth:`either_or` (#1775 G2.6).
 
         Returns
         -------
@@ -8919,6 +8940,7 @@ class Model:
             disjuncts=disjuncts,
             name=name,
             semantics=_coerce_disjunction_semantics(semantics),
+            big_m=_normalize_big_m(big_m, disjuncts, name),
         )
         # #1430: remember what this factory handed out, so ``validate`` can tell a
         # disjunction that was nested into the model from one that was forgotten.
@@ -10351,6 +10373,7 @@ class Model:
                 _repair_published_incumbent(_ck_res)
                 _guard_unresolved_objective(_ck_res)
                 self._withhold_default_box_certificate(_ck_res)
+                self._withhold_user_big_m_certificate(_ck_res)
                 return _ck_res
 
         from discopt._relax.deadline import deadline_scope
@@ -11137,6 +11160,8 @@ class Model:
             _guard_unresolved_objective(result)
             # #1678 (b): after every other guard, so nothing re-grants it.
             self._withhold_default_box_certificate(result)
+            # #1775 G2.6: a user big-M that could not be certified.
+            self._withhold_user_big_m_certificate(result)
             # #1727: drop the factorable lift's auxiliary columns from ``x``. After
             # the guards above, which judge the point as the route left it. Only
             # names the lift recorded AND the caller did not declare.
@@ -11432,6 +11457,56 @@ class Model:
             self._last_solve_result = result
 
         return result
+
+    def _withhold_user_big_m_certificate(self, result: "SolveResult") -> None:
+        """#1775 G2.6: no certificate that rests on an unverified user big-M.
+
+        A user M (``either_or(..., big_m=...)``) that is too small cuts feasible
+        points of an unselected disjunct, so neither an optimum, nor a dual bound,
+        nor an infeasibility proved over the lowered model is a proof for the
+        model as declared. :func:`discopt.gdp.user_big_m.uncertified_user_big_ms`
+        names every user M it could not certify (one proven too small has already
+        been refused by the lowering). When it names any: ``optimal`` becomes
+        ``feasible``, ``infeasible`` becomes ``unknown``, ``gap_certified`` is set
+        ``False`` and the bound and gap are cleared. The incumbent is kept: it was
+        verified against the declared model by the guards before this one.
+
+        Conservative on purpose: it runs whatever ``gdp_method`` the solve used,
+        so a user M on a disjunction another method lowered (with a warning that
+        the value is ignored) also withholds. Only ever downgrades.
+        """
+        from discopt.gdp.user_big_m import model_has_user_big_m, uncertified_user_big_ms
+
+        if not model_has_user_big_m(self):
+            return
+        if not (
+            result.status in ("optimal", "infeasible")
+            or bool(result.gap_certified)
+            or result.bound is not None
+        ):
+            return
+        reasons = uncertified_user_big_ms(self)
+        if not reasons:
+            return
+        import logging as _ulogging
+        import warnings as _uwarnings
+
+        msg = (
+            f"{self.name}: {len(reasons)} user big_m value(s) could not be certified, so "
+            f"this result carries no certificate and no dual bound (#1775 G2.6). First: "
+            f"{reasons[0]}. Raise big_m above the reported bound, or leave it unset."
+        )
+        _ulogging.getLogger("discopt.solver").warning(msg)
+        _uwarnings.warn(msg, UserWarning, stacklevel=3)
+        if result.status == "optimal":
+            result.status = "feasible"
+        elif result.status == "infeasible":
+            result.status = "unknown"
+        result.gap_certified = False
+        result._set_bound(None, valid=False)
+        result.gap = None
+        result.solver_stats = dict(result.solver_stats or {})
+        result.solver_stats["certificate/user_big_m_uncertified"] = float(len(reasons))
 
     def _withhold_default_box_certificate(self, result: "SolveResult") -> None:
         """#1678 (b): no certificate that rests on the default ``±9.999e19`` box.
@@ -12646,6 +12721,11 @@ class _DisjunctiveConstraint:
     # It applies only when that indicator is 1: its selectors sum to it.
     parent_indicator: Optional[Variable] = field(default=None, compare=False, repr=False)
     _indicator_vars: Optional[tuple[Variable, ...]] = field(default=None, compare=False, repr=False)
+    # #1775 G2.6: user big-M values, aligned with ``disjuncts`` (one entry per row;
+    # ``None`` = no user value, also for a nested disjunction), or ``None`` when the
+    # user gave none. Read by the big-M lowering only; see
+    # :mod:`discopt.gdp.user_big_m` for how each value is validated.
+    big_m: Optional[tuple[tuple[Optional[float], ...], ...]] = None
 
     def __repr__(self) -> str:
         # Short on purpose: ``Model.either_or`` returns this object, so a bare call
@@ -12738,6 +12818,59 @@ def _claim_blocks(blocks: list["Disjunct"], owner: str, name: Optional[str]) -> 
             )
     for d in blocks:
         d._placed_in = owner
+
+
+def _normalize_big_m(
+    big_m: Any, disjuncts: list[list], name: Optional[str]
+) -> Optional[tuple[tuple[Optional[float], ...], ...]]:
+    """``either_or``'s ``big_m`` as one entry per row (#1775 G2.6), or ``None``.
+
+    A number applies to every row; a dict maps a row (by identity) to its M, with
+    the key ``None`` as the default for the rows it does not name -- the more
+    specific value wins, as in Pyomo's ``bigM`` argument. Each M is a magnitude:
+    a ``<=`` row becomes ``body <= M (1 - y)``, a ``>=`` row ``body >= -M (1 - y)``,
+    and ``==`` both. Refused: a negative or non-finite M, and a dict key that is
+    not a row of this disjunction.
+    """
+    if big_m is None:
+        return None
+    label = name or "<anon>"
+
+    def _check(v: Any, what: str) -> float:
+        if isinstance(v, bool) or not isinstance(v, (int, float, np.integer, np.floating)):
+            raise TypeError(f"either_or {label!r}: big_m for {what} must be a number, got {v!r}")
+        f = float(v)
+        if not np.isfinite(f) or f < 0.0:
+            raise ValueError(
+                f"either_or {label!r}: big_m for {what} must be finite and >= 0, got {f!r}"
+            )
+        return f
+
+    if isinstance(big_m, dict):
+        rows = {id(c): c for d in disjuncts for c in d if not isinstance(c, _DisjunctiveConstraint)}
+        for key in big_m:
+            if key is not None and id(key) not in rows:
+                raise ValueError(
+                    f"either_or {label!r}: a big_m key is not a row of this disjunction "
+                    f"({key!r}). Key big_m by the Constraint objects passed in "
+                    "disjuncts, or use the key None for the default."
+                )
+        default = None if big_m.get(None) is None else _check(big_m[None], "the default (None)")
+        per = {id(k): _check(v, repr(k)) for k, v in big_m.items() if k is not None}
+        out = tuple(
+            tuple(
+                None if isinstance(c, _DisjunctiveConstraint) else per.get(id(c), default)
+                for c in d
+            )
+            for d in disjuncts
+        )
+    else:
+        m = _check(big_m, "every row")
+        out = tuple(
+            tuple(None if isinstance(c, _DisjunctiveConstraint) else m for c in d)
+            for d in disjuncts
+        )
+    return out if any(v is not None for d in out for v in d) else None
 
 
 def _refuse_empty_disjunction(disjuncts: Any, method: str, name: Optional[str]) -> None:

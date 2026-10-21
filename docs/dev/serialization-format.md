@@ -107,6 +107,7 @@ These raise `SerializationError` on save. None is a section waiting to be writte
 | output of `integer.bilinear / integer.multilinear` | records point back at the source model; some feed a bound | save the source model, re-apply the pass after loading |
 | output of `nonsmooth.epigraph` | records point back at the source model; some feed a bound | save the source model, re-apply the pass after loading |
 | output of `gdp.transform_current_disjunctive_state` | records point back at the source model; some feed a bound | save the source model, re-apply the pass after loading |
+| a user `big_m` on a disjunction (#1775 G2.6) | no schema key records it; an older reader would reload computed Ms | save without `big_m`, pass it again after loading |
 | a `Model.disjunction()` / `Disjunct` never attached | `validate` refuses the model anyway (#1430) | attach it, or drop it |
 | an unclassified private attribute | dropping it would reload a different model | classify it in `serialize.py` |
 <!-- end generated -->
