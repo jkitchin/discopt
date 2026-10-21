@@ -11891,6 +11891,14 @@ def solve_model(
 
     require_all_relations_lowered(model, context="solve_model")
 
+    # solve_model is public and does not go through Model.validate(): re-check a
+    # robust counterpart's recorded sign assumptions here too, or a certain
+    # Parameter whose value flipped sign after formulate() solves non-robustly.
+    if getattr(model, "_ro_sign_preconditions", None):
+        from discopt.ro.formulations._common import check_sign_assumptions
+
+        check_sign_assumptions(model)
+
     # --- #1619 B-13: dm.external memos and failure records are per solve ---
     # A callable may read state the caller changed since the last solve (a
     # parameter sweep), so a value cached by a previous solve is not this solve's.

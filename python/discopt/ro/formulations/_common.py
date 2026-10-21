@@ -918,6 +918,10 @@ def aggregate_affine_counterpart(expr, unc_sets, param_names: set[str], maximize
         return None
     cancels = False
     for j, s in jacs.values():
+        # A relative threshold: a cancellation smaller than ~1e-12 * S (e.g. a
+        # residue of ``1e12 * p - 1e12 * p`` rounding) is not detected and the
+        # row keeps sign tracking. That miss is only conservative -- sign
+        # tracking charges S >= |J| -- never optimistic.
         if np.any(s - np.abs(j) > 1e-12 * np.maximum(1.0, s)):
             cancels = True
     if not cancels:

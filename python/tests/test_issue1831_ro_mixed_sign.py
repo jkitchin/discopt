@@ -452,3 +452,52 @@ def test_polyhedral_unbounded_support_refuses():
     rc = RobustCounterpart(m, PolyhedralUncertaintySet(p, A=-np.eye(2), b=np.ones(2)))
     with pytest.raises(ValueError, match="support LP"):
         rc.formulate()
+
+
+# --- #1839 review: non-affine rows that also hold a cancelling affine part ----
+#
+# The affine extractor must refuse each non-affine node; a mutant that let one
+# through (a FunctionCall read as ``{}``, ``p*p`` read as ``p + p``, ``abs``
+# passed through, ``1/(p+c)`` or ``**`` read as their left operand) builds the
+# aggregate counterpart from a wrong coefficient and returns a non-robust point.
+# Each row is checked on a dense grid over the box, exact for these scalar rows.
+
+NONAFFINE_ROWS = {
+    "exp_plus_cancel": (0.0, 1.0, lambda p, x, F: x + F.exp(p) + 3.0 * p - 3.0 * p),
+    "max_plus_cancel": (
+        0.0,
+        1.0,
+        lambda p, x, F: x + F.maximum(p, -p) - 2.0 * p + 3.0 * p - 3.0 * p,
+    ),
+    "min_plus_cancel": (
+        0.0,
+        1.0,
+        lambda p, x, F: x - F.minimum(p, -p) - 2.0 * p + 3.0 * p - 3.0 * p,
+    ),
+    "dm_abs_plus_cancel": (0.0, 1.0, lambda p, x, F: x + F.abs(p) - 2.0 * p),
+    "builtin_abs_plus_cancel": (0.0, 1.0, lambda p, x, F: x + abs(p) - 2.0 * p),
+    "p_times_p_plus_cancel": (1.0, 1.0, lambda p, x, F: x + 3.0 * p - 3.0 * p + p * p),
+    "reciprocal_plus_cancel": (1.0, 1.0, lambda p, x, F: x + 1.0 / (p + 3.0) + 3.0 * p - 3.0 * p),
+    "pow1_plus_cancel": (1.0, 1.0, lambda p, x, F: x + (p - 1.0) ** 1 + 3.0 * p - 3.0 * p),
+    "pow2_plus_cancel": (1.0, 2.0, lambda p, x, F: x + (p - 1.0) ** 2 + 3.0 * p - 3.0 * p),
+}
+
+
+@pytest.mark.parametrize("case", sorted(NONAFFINE_ROWS))
+def test_nonaffine_row_with_cancelling_part_stays_robust(case):
+    pbar, delta, row = NONAFFINE_ROWS[case]
+    m = dm.Model("nonaffine")
+    x = m.continuous("x", lb=-50, ub=50)
+    p = m.parameter("p", value=pbar)
+    m.subject_to(row(p, x, dm) <= 6.0)
+    m.maximize(x)
+    RobustCounterpart(m, BoxUncertaintySet(p, delta=delta)).formulate()
+    r = m.solve()
+    assert r.status == "optimal"
+    xv = float(r.value(x))
+    grid = np.linspace(pbar - delta, pbar + delta, 401)
+    checks = 0
+    for v in grid:
+        assert float(row(v, xv, np)) <= 6.0 + 1e-6, (case, v, xv)
+        checks += 1
+    assert checks == grid.size

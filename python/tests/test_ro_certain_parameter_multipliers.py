@@ -216,3 +216,45 @@ def test_serialize_refuses_a_guarded_model():
     RobustCounterpart(m, BoxUncertaintySet(p, delta=P_DELTA)).formulate()
     with pytest.raises(SerializationError, match="_ro_sign_preconditions"):
         dumps(m)
+
+
+def _flipped_guarded_model():
+    m = dm.Model("value_flip_entry")
+    x = m.continuous("x", lb=0, ub=20)
+    p = m.parameter("p", value=P_BAR)
+    q = m.parameter("q", value=Q_BAR)
+    m.subject_to(x + q * p <= 10)
+    m.maximize(x)
+    RobustCounterpart(m, BoxUncertaintySet(p, delta=P_DELTA)).formulate()
+    return m, q
+
+
+def test_value_change_flipping_sign_is_refused_by_solve_model():
+    """``solve_model`` does not run ``Model.validate``; before it checked the
+    guard itself, a flipped ``q`` certified x = 10 against a worst case of 14."""
+    from discopt.solver import solve_model
+
+    m, q = _flipped_guarded_model()
+    q.value = -1.0
+    with pytest.raises(RobustSignAssumptionError):
+        solve_model(m)
+    q.value = Q_BAR
+    assert solve_model(m).status == "optimal"
+
+
+@pytest.mark.parametrize("carrier", ["clone", "deepcopy", "pickle"])
+def test_guard_travels_with_the_model(carrier):
+    import copy
+    import pickle
+
+    m, _q = _flipped_guarded_model()
+    if carrier == "clone":
+        m2 = m.clone()
+    elif carrier == "deepcopy":
+        m2 = copy.deepcopy(m)
+    else:
+        m2 = pickle.loads(pickle.dumps(m))
+    (q2,) = [prm for prm in m2._parameters if prm.name == "q"]
+    q2.value = -1.0
+    with pytest.raises(RobustSignAssumptionError):
+        m2.solve()
