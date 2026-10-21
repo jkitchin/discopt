@@ -3113,6 +3113,7 @@ def _body_at_zero(expr: Expression, all_vars: dict[str, Variable]) -> float:
         "^": lambda a, b: a**b,
     }
     _NARY: dict[str, Callable[..., float]] = {"max": max, "min": min}
+    from discopt.modeling.core import Parameter
 
     def _walk(e: Expression) -> float:
         if isinstance(e, Variable):
@@ -3122,10 +3123,32 @@ def _body_at_zero(expr: Expression, all_vars: dict[str, Variable]) -> float:
                     "collected as a disjunct variable"
                 )
             return 0.0
-        if isinstance(e, Constant):
-            return float(np.max(e.value))
+        if isinstance(e, (Constant, Parameter)):
+            # A Parameter is read at its current value: the lowering runs again
+            # on every solve (#1846). Only a single value is a scalar; an array
+            # in scalar position used to answer ``np.max`` of it -- a guess.
+            v = np.asarray(e.value, dtype=np.float64)
+            if v.size != 1:
+                raise HullPerspectiveOriginError(
+                    f"array-valued {type(e).__name__} of shape {v.shape} in a scalar body"
+                )
+            return float(v.reshape(()))
         if isinstance(e, IndexExpression):
-            return _walk(e.base)
+            if isinstance(e.base, (Constant, Parameter)):
+                # The indexed ENTRY, not the whole array: ``c[0]`` with
+                # ``c = [1, 5]`` read as max(c) = 5, so g(0) was wrong and the
+                # eps residual on the de-selected disjunct was not cancelled.
+                v = np.asarray(np.asarray(e.base.value, dtype=np.float64)[e.index])
+                if v.size != 1:
+                    raise HullPerspectiveOriginError(
+                        f"index {e.index!r} selects {v.size} entries in a scalar body"
+                    )
+                return float(v.reshape(()))
+            if isinstance(e.base, Variable):
+                return _walk(e.base)
+            raise HullPerspectiveOriginError(
+                f"unsupported indexed expression over {type(e.base).__name__}"
+            )
         if isinstance(e, UnaryOp):
             if e.op not in _UN:
                 raise HullPerspectiveOriginError(f"unsupported unary op {e.op!r}")
@@ -3181,9 +3204,18 @@ def _hull_linear_substitute(
     For a linear expression ``a*x + b``, returns ``a*v_k + b*y_k`` where
     ``v_k`` is the disaggregated variable from *var_map*.
     """
+    from discopt.modeling.core import Parameter
+
     if isinstance(expr, Variable):
         return var_map.get(expr.name, expr)
-    if isinstance(expr, Constant):
+    # A Parameter is a constant for the solve, so it is part of ``b`` and is
+    # scaled by y_k like a Constant -- indexed (``p[0]``) or not. Returning it
+    # unscaled imposed ``b`` on the de-selected disjunct, whose disaggregated
+    # variables are pinned to 0: ``if_else(y >= 1, p[0], 0)`` forced the "then"
+    # branch and certified a wrong optimum (#1846).
+    if isinstance(expr, (Constant, Parameter)) or (
+        isinstance(expr, IndexExpression) and isinstance(expr.base, (Constant, Parameter))
+    ):
         result: Expression = expr * y_k
         return result
     if isinstance(expr, IndexExpression):
