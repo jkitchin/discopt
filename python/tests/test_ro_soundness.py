@@ -88,15 +88,19 @@ def test_ro1_nonnegative_variable_fast_path_still_correct():
 
 
 # --------------------------------------------------------------------------- RO-2
-def test_ro2_scalar_ellipsoidal_refuses_loudly():
-    """Scalar p*x is not the p@x pattern -> must raise, not silently no-op."""
+def test_ro2_scalar_ellipsoidal_is_robustified():
+    """Scalar p*x is robustified, never silently left nominal.
+
+    It used to raise (RO-2's guard). Since #1835 the counterpart uses the row's
+    aggregated coefficient a(x) = x, so the row becomes x + 0.5 |x| <= 4: x = 8/3.
+    """
     m = dm.Model("ro2s")
     x = m.continuous("x", shape=(1,), lb=0, ub=10)
     p = m.parameter("p", value=1.0)
     m.maximize(x[0])
     m.subject_to(p * x[0] <= 4, name="c")
-    with pytest.raises(NotImplementedError, match="silently non-robust|could not robustify"):
-        RobustCounterpart(m, EllipsoidalUncertaintySet(p, rho=0.5)).formulate()
+    RobustCounterpart(m, EllipsoidalUncertaintySet(p, rho=0.5)).formulate()
+    assert m.solve().objective == pytest.approx(4.0 / 1.5, abs=1e-5)
 
 
 def test_ro2_elementwise_sum_ellipsoidal_is_robustified():
