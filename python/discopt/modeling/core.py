@@ -10304,12 +10304,15 @@ class Model:
         # (``_convex_kernel._build``), so a caller who asked for another GDP
         # reformulation would get big-M with the option silently ignored. Leave
         # such solves to the default path, which honours ``gdp_method``.
+        # #1775 G3.1: likewise any ``gdp_options``: ``solve_model`` validates them
+        # (unknown or unread keys raise) and the kernel would drop them unread.
         if (
             not skip_convex_check
             and solver is None
             and lazy_constraints is None
             and incumbent_callback is None
             and kwargs.get("gdp_method", "big-m") == "big-m"
+            and kwargs.get("gdp_options") is None
         ):
             _ck_res = None
 

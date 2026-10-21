@@ -85,6 +85,32 @@ def test_gdp_options_must_be_a_mapping():
         _gdp().solve(gdp_method="loa", gdp_options=[("iterlim", 3)], time_limit=10)
 
 
+def test_gdp_options_are_not_dropped_by_the_convex_kernel(monkeypatch):
+    """Model.solve's convex-kernel shortcut returns without reaching solve_model;
+    it must not take a solve that carries gdp_options (review of #1861). The
+    kernel is stubbed to certify, which is what it does on its own class
+    (clay0303hfsg, syn05hfsg) -- the small models here it declines."""
+    import discopt.solvers._convex_kernel as ck
+    from discopt.modeling.core import SolveResult
+
+    calls = []
+
+    def certify(model, **kw):
+        calls.append(1)
+        return SolveResult(status="optimal", objective=0.0, bound=0.0, x={"x": np.array(1.0)})
+
+    monkeypatch.setattr(ck, "try_convex_solve", certify)
+    m = dm.Model("convex")
+    x = m.continuous("x", lb=-5, ub=5)
+    m.minimize((x - 1) ** 2)
+    assert m.solve(time_limit=10).status == "optimal" and calls == [1]  # the stub is live
+    refusals = (({"iterlmi": 5}, "Unknown gdp_options key"), ({"iterlim": 5}, "reads none"))
+    for options, match in refusals:
+        with pytest.raises(ValueError, match=match):
+            m.solve(gdp_options=options, time_limit=10)
+    assert calls == [1]
+
+
 def test_empty_gdp_options_with_a_reformulation_is_fine():
     r = _gdp().solve(gdp_method="hull", gdp_options={}, time_limit=30)
     assert r.status == "optimal" and r.objective == pytest.approx(1.0, abs=1e-5)
@@ -195,6 +221,35 @@ def test_iteration_limit_with_an_open_gap_is_feasible_not_optimal():
     assert alg.stop_reason == "iteration_limit"
     assert r.status == "feasible" and r.objective == pytest.approx(4.0)
     assert r.bound == pytest.approx(0.5) and r.gap == pytest.approx(3.5 / 4.0)
+    # A valid bound on an open gap is not a certificate (review of #1861).
+    assert r.bound_valid and not r.gap_certified
+
+
+def test_time_limit_with_an_open_gap_is_not_certified():
+    alg, r = _run([("x", 5.0), ("lb", 0.5), ("tick", 10.0), ("x", 2.0)], time_limit=5.0)
+    assert alg.stop_reason == "time_limit" and r.status == "feasible"
+    assert r.bound_valid and not r.gap_certified
+
+
+def test_bound_within_tolerance_above_ub_is_published_clamped():
+    """offer_bound admits ub + tol; the reported bound never exceeds the objective."""
+    _, r = _run([("x", 2.0), ("lb", 1.0 + 5e-5)])
+    assert r.status == "optimal" and r.gap_certified
+    assert r.bound == r.objective == pytest.approx(1.0) and r.gap == 0.0
+
+
+def test_reported_gap_agrees_with_status_near_zero():
+    """|ub| < 1: a gap reported under gap_tolerance must mean converged."""
+    m = dm.Model("small")
+    x = m.continuous("x", lb=0, ub=1)
+    m.either_or([[x <= 0.2], [x >= 0.5]], name="d")
+    m.minimize(x * 0.01)
+    alg = _Scripted(m, [("x", 0.2), ("lb", 0.0019)], gap_tolerance=1e-3)
+    r = alg.run()
+    # ub = 0.002, lb = 0.0019: diff 1e-4 > 1e-3 * 0.002, so not converged ...
+    assert r.status == "feasible"
+    # ... and the reported gap says so (it was 1e-4 under a max(1, |ub|) scale).
+    assert r.gap > alg.gap_tolerance
 
 
 def test_an_unresolved_configuration_blocks_optimal():

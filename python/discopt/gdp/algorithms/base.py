@@ -205,11 +205,24 @@ class GDPAlgorithm:
         scale = abs(ref) if math.isfinite(ref) else 0.0
         return max(self.abs_gap_tolerance, self.gap_tolerance * scale)
 
+    def _published_lb(self) -> float:
+        # offer_bound admits an LB up to tolerance above UB; publishing it as is
+        # would report bound > objective. Clamped so bound <= incumbent exactly.
+        return min(self.lb, self.ub)
+
     def gap(self) -> Optional[float]:
-        """Relative gap on the min-convention LB/UB, ``None`` if either is missing."""
+        """Relative gap on the min-convention LB/UB, ``None`` if either is missing.
+
+        Measured against the same scale as :meth:`converged` (``|ub|``, floored by
+        the absolute tolerance), so a gap reported under ``gap_tolerance`` is one
+        that converged.
+        """
         if not self.lb_valid or self.incumbent is None or not math.isfinite(self.lb):
             return None
-        return max(0.0, self.ub - self.lb) / max(1.0, abs(self.ub))
+        diff = max(0.0, self.ub - self._published_lb())
+        if diff <= self._abs_tol(self.ub):
+            return 0.0
+        return diff / max(abs(self.ub), self.abs_gap_tolerance / max(self.gap_tolerance, 1e-300))
 
     def converged(self) -> bool:
         """Optimality proved: valid LB, nothing unresolved, gap within tolerance."""
@@ -235,10 +248,14 @@ class GDPAlgorithm:
 
     def result(self) -> SolveResult:
         status = self.status()
-        certified = self.lb_valid and not self.unresolved
+        # bound_valid: the LB is a valid bound. gap_certified: the result is a
+        # proof -- an open gap (feasible / time_limit / iteration_limit) never is,
+        # however valid its bound (SolveResult contract).
+        lb_ok = self.lb_valid and not self.unresolved
+        certified = lb_ok and status in ("optimal", "infeasible")
         bound: Optional[float] = None
-        if certified and math.isfinite(self.lb) and status != "infeasible":
-            bound = self.obj_sign * self.lb
+        if lb_ok and math.isfinite(self.lb) and status != "infeasible":
+            bound = self.obj_sign * self._published_lb()
         x = None
         objective = None
         if self.incumbent is not None:
@@ -266,7 +283,7 @@ class GDPAlgorithm:
             x=x,
             wall_time=self.deadline.elapsed(),
             gap_certified=certified,
-            bound_valid=bound is not None,
+            bound_valid=bound is not None and lb_ok,
             solver_stats=stats,
             algorithm_route=self.route,
         )
