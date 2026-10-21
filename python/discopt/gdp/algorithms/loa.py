@@ -24,6 +24,7 @@ configurations never leave the master: they block ``optimal``, not the bound.
 from __future__ import annotations
 
 import math
+import time
 from typing import Any, Optional
 
 import numpy as np
@@ -80,10 +81,20 @@ class LOA(GDPAlgorithm):
         self.evaluator = make_evaluator(low)
         self.n = int(self.evaluator.n_variables)
         self.n_work = sum(int(v.size) for v in self.space.work._variables)
-        # The caller's deadline bounds the certification pass too (> 100 s on
-        # kaibel) -- all of it, not a carved slice (#912). A row it does not reach
-        # gets no cut, which keeps the master a relaxation.
-        convexity = classify_oa_cut_convexity(low, deadline=self.deadline.absolute())
+        # The certification pass gets half of what is left (> 100 s on kaibel
+        # otherwise, leaving the master nothing); a row it does not reach gets no
+        # cut, which keeps the master a relaxation. A #912 role-2 slice, so it is
+        # routed through the #1116 switch: under ``deterministic`` it becomes the
+        # solve's own role-1 deadline, so speed matters only at the wall.
+        from discopt.solver import _role2_deadline
+
+        left = self.deadline.remaining()
+        convexity = classify_oa_cut_convexity(
+            low,
+            deadline=_role2_deadline(
+                None if math.isinf(left) else time.perf_counter() + 0.5 * left
+            ),
+        )
         self.convexity_truncated = convexity.truncated
         self.oa_rows = _oa_rows(self.evaluator, low, convexity.constraint_mask)
         self.master = self.space.master(backend=milp_solver)

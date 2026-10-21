@@ -128,12 +128,15 @@ def test_the_deadline_reaches_the_nlp_calls(monkeypatch):
     assert all(t is not None and 0 < t <= 20 for _, t in seen)
 
 
-def test_convexity_gets_the_callers_whole_deadline(monkeypatch):
-    """#912: classification spends the caller's own deadline (``contract``), not a
-    carved slice of it, and none at all without a time limit."""
+def test_convexity_slice_is_role2_and_yields_under_deterministic(monkeypatch):
+    """#912/#1116: classification gets half of what is left, and under
+    ``deterministic`` the solve's own role-1 deadline instead, so the OA cut set
+    stops depending on machine speed short of the wall."""
+    import dataclasses
     import time
 
     import discopt._relax.convexity as conv
+    import discopt.solver as S
 
     seen = []
     real = conv.classify_oa_cut_convexity
@@ -145,10 +148,17 @@ def test_convexity_gets_the_callers_whole_deadline(monkeypatch):
     monkeypatch.setattr(conv, "classify_oa_cut_convexity", spy)
     t0 = time.perf_counter()
     _quiet(LOA, _nonconvex(), time_limit=20)
-    _quiet(LOA, _nonconvex(), time_limit=None)
-    assert len(seen) == 2
-    assert t0 + 20 <= seen[0] <= time.perf_counter() + 20
-    assert seen[1] is None
+    assert len(seen) == 1 and t0 + 9 <= seen[0] <= time.perf_counter() + 10
+
+    orig = S._tuning
+    monkeypatch.setattr(S, "_tuning", lambda: dataclasses.replace(orig(), deterministic=True))
+    wall = time.perf_counter() + 1000.0
+    token = S._ROLE1_DEADLINE.set(wall)
+    try:
+        _quiet(LOA, _nonconvex(), time_limit=20)
+    finally:
+        S._ROLE1_DEADLINE.reset(token)
+    assert len(seen) == 2 and seen[1] == wall
 
 
 def test_gdp_options_drive_loa():
