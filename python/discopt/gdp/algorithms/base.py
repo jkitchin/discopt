@@ -59,6 +59,14 @@ class Deadline:
     def expired(self) -> bool:
         return self.remaining() <= 0.0
 
+    def absolute(self) -> Optional[float]:
+        """The caller's own deadline as a reading of this clock; ``None`` without one.
+
+        For a component that takes an absolute deadline: it receives the whole of
+        the caller's budget (#912's ``contract`` role), never a carved slice of it.
+        """
+        return None if self.time_limit is None else self.start + self.time_limit
+
     def sub_limit(self, cap: Optional[float] = None) -> float:
         """The time limit to give a subsolve: what is left, capped by ``cap``."""
         left = self.remaining()

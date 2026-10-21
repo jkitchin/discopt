@@ -128,6 +128,29 @@ def test_the_deadline_reaches_the_nlp_calls(monkeypatch):
     assert all(t is not None and 0 < t <= 20 for _, t in seen)
 
 
+def test_convexity_gets_the_callers_whole_deadline(monkeypatch):
+    """#912: classification spends the caller's own deadline (``contract``), not a
+    carved slice of it, and none at all without a time limit."""
+    import time
+
+    import discopt._relax.convexity as conv
+
+    seen = []
+    real = conv.classify_oa_cut_convexity
+
+    def spy(model, **k):
+        seen.append(k.get("deadline"))
+        return real(model, **k)
+
+    monkeypatch.setattr(conv, "classify_oa_cut_convexity", spy)
+    t0 = time.perf_counter()
+    _quiet(LOA, _nonconvex(), time_limit=20)
+    _quiet(LOA, _nonconvex(), time_limit=None)
+    assert len(seen) == 2
+    assert t0 + 20 <= seen[0] <= time.perf_counter() + 20
+    assert seen[1] is None
+
+
 def test_gdp_options_drive_loa():
     r = _quiet(
         _nonconvex().solve,
