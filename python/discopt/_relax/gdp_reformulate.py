@@ -1863,9 +1863,9 @@ def _bound_array_reduction(expr: Expression, model: Model, memo: _BoundMemo) -> 
         with np.errstate(invalid="ignore"):
             a = np.where(C2 == 0.0, 0.0, C2 * o_lo)
             b = np.where(C2 == 0.0, 0.0, C2 * o_hi)
-        lo = np.minimum(a, b).sum(axis=axis)
-        hi = np.maximum(a, b).sum(axis=axis)
-        return (float(np.min(lo)), float(np.max(hi)))
+        row_lo = np.minimum(a, b).sum(axis=axis)
+        row_hi = np.maximum(a, b).sum(axis=axis)
+        return (float(np.min(row_lo)), float(np.max(row_hi)))
     p_lo, p_hi = _interval_mul(l_lo, l_hi, r_lo, r_hi)
     return (k * p_lo, k * p_hi)
 
