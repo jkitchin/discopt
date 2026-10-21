@@ -108,7 +108,17 @@ _METHOD_ALIASES: dict[str, str] = {
 #: Attribute under which a Model records the domain each ``piecewise`` call
 #: relies on, re-checked by ``Model.validate``. A list of
 #: ``(input_expr, span_lo, span_hi, label)`` tuples.
+#:
+#: The record means "a construction-time rewrite relied on ``input_expr`` staying
+#: inside ``[span_lo, span_hi]`` over the variable box", which is not specific to
+#: ``piecewise``: ``gdp.partition_disjuncts`` (P-split, #1775 G2.8) records the
+#: enclosure each auxiliary was bounded by here too, so it gets the same re-check,
+#: copy, pickle, serialization and ``carry_validation_guards`` plumbing. Its labels
+#: start with :data:`PSPLIT_GUARD_PREFIX`, which only selects the error wording.
 DOMAINS_ATTR = "_piecewise_domains"
+
+#: Label prefix of a P-split enclosure record in :data:`DOMAINS_ATTR`.
+PSPLIT_GUARD_PREFIX = "gdp.partition_disjuncts:"
 
 #: Slack for a *composite* input's interval enclosure only. Interval arithmetic
 #: rounds outward, so ``2*s`` with ``s in [0, 1]`` encloses as
@@ -284,7 +294,21 @@ def check_domains(model: "Model") -> None:
     for expr, lo, hi, label in getattr(model, DOMAINS_ATTR, ()):
         detail = _domain_violation(expr, model, lo, hi)
         if detail is not None:
+            if label.startswith(PSPLIT_GUARD_PREFIX):
+                raise _psplit_error(label, expr, model, lo, hi)
             raise _domain_error(label, detail + "; a bound was widened after declaration")
+
+
+def _psplit_error(label: str, expr: "Expression", model: "Model", lo: float, hi: float):
+    e_lo, e_hi, _ = _input_enclosure(expr, model)
+    return ValueError(
+        f"{label}: over the current variable box this part's interval enclosure is "
+        f"[{e_lo:.12g}, {e_hi:.12g}], outside the bounds [{lo:.12g}, {hi:.12g}] its "
+        "auxiliary was given from the box at the time of the call. With it, an "
+        "unselected disjunct's global row h_p <= a_p could cut points that are now "
+        "feasible. A bound was widened after partitioning: apply "
+        "gdp.partition_disjuncts to the model before partitioning, with the new bounds."
+    )
 
 
 # ---------------------------------------------------------------------------
