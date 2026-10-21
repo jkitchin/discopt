@@ -696,6 +696,12 @@ register(
     "discopt.gdp.state.reverse_current_disjunctive_state (#1775 G1.3)",
 )
 register(
+    "gdp.cuttingplane",
+    "discopt.gdp.cuttingplane:_cuttingplane_model",
+    style="functional",
+    summary="Big-M plus Sawaya-Grossmann hull-separation cuts, convex disjuncts only (#1775 G2.7)",
+)
+register(
     "gdp.bound_pretransformation",
     "discopt.gdp.bound_pretransform:_bound_pretransform_in_place",
     style="in_place",
