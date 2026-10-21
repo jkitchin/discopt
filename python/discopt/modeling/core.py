@@ -6511,7 +6511,13 @@ class Model:
         # children are already copied, so ``Expression.__deepcopy__``'s own walk
         # would only re-find memo hits -- once per node, which cost 26-44 % of a
         # model copy (#1822).
-        for node in self._expressions_children_first():
+        nodes = self._expressions_children_first()
+        # #1854: copy every model that owns a shared leaf to completion first (see
+        # ``_foreign_owner_models``), so those leaves are memo hits below.
+        for owner in self._foreign_owner_models(nodes):
+            if id(owner) not in memo:
+                _copy.deepcopy(owner, memo)
+        for node in nodes:
             if id(node) not in memo:
                 _copy_node_into_memo(node, memo)
         for key, value in self.__dict__.items():
@@ -6585,6 +6591,28 @@ class Model:
         for rel in self._complementarities:
             roots += [getattr(rel, "f", None), getattr(rel, "g", None)]
         return roots
+
+    def _foreign_owner_models(self, nodes: list) -> list:
+        """Models other than this one that own a leaf this model reaches (#1854).
+
+        A GDP / transformation result shares the source model's ``Variable``
+        objects, whose ``model`` is the source, so copying (or pickling) the
+        result reaches the source through a shared leaf's state. Reached from
+        inside the leaf, the source was rebuilt -- and its Rust builder replayed
+        -- while that leaf was still empty (``'Variable' object has no attribute
+        'name'``). ``__deepcopy__`` copies these models first and ``__getstate__``
+        writes them first, so each is complete before anything that needs it.
+        """
+        owners: list = []
+        seen: set[int] = {id(self)}
+        for leaf in [*nodes, *self._variables, *self._parameters]:
+            if not isinstance(leaf, (Variable, Parameter)):
+                continue
+            owner = getattr(leaf, "model", None)
+            if isinstance(owner, Model) and id(owner) not in seen:
+                seen.add(id(owner))
+                owners.append(owner)
+        return owners
 
     def _expressions_children_first(self) -> list:
         from discopt.serialize import _children
@@ -6694,6 +6722,8 @@ class Model:
         # anything that refers to them (see ``_expressions_children_first``).
         nodes = self._expressions_children_first()
         state: dict = {
+            # #1854: first of all, so each is unpickled whole before the nodes.
+            "_pickle_foreign_models": self._foreign_owner_models(nodes),
             "_pickle_expressions": [*nodes, _open_children_first_scope()],
             "_pickle_format": (_MODEL_PICKLE_FORMAT, discopt.__version__, SCHEMA),
         }
@@ -6743,6 +6773,7 @@ class Model:
             )
         attrs, had_builder, row_marks = state
         attrs.pop("_pickle_expressions", None)
+        attrs.pop("_pickle_foreign_models", None)
         self.__dict__.update(attrs)
         self._restore_row_marks(row_marks)
         if had_builder:

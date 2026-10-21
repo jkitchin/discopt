@@ -39,8 +39,6 @@ Also refused:
   model while its solve still reports a certified optimum. The cuts depend on the
   feasible set and, through x*, on the objective, so a parameter anywhere is
   refused (unused ones included: refusing is simpler than proving one unused).
-- a fast-API model (``add_linear_constraints``, ``add_linear_objective``, ...):
-  cloning its lowering raises (#1854).
 
 The cuts are equally frozen to the variable bounds of the call: changing a bound
 of ``model`` (or of the output, which shares its variables) afterwards can make a
@@ -204,13 +202,6 @@ def cuttingplane(
             "parameters, so changing one afterwards leaves cuts that can remove "
             "feasible points while the solve reports a certified optimum. Fix the "
             "values as constants first, or use gdp.bigm or gdp.hull."
-        )
-    if model._builder is not None:
-        raise NotImplementedError(
-            "gdp.cuttingplane: fast-API models (add_linear_constraints, "
-            "add_linear_objective, ...) are not supported yet: cloning their GDP "
-            "lowering raises (#1854). Build the model with subject_to/minimize, or "
-            "use gdp.bigm or gdp.hull."
         )
     linear = _require_convex_disjuncts(model)
 
