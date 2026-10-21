@@ -193,14 +193,119 @@ def _nominal_and_penalties(expr, unc_map: dict, where: str):
     nominal = expr
     for name, unc in unc_map.items():
         nominal = substitute_param(nominal, name, Constant(unc.parameter.value))
+    # Substituting p_bar leaves variable-free subtrees such as ``Constant @ Constant``
+    # (a 2-D matrix parameter: ``sum(B * (P @ A))``); fold each to its exact numpy
+    # value so the solver never evaluates a 2-D matmul of constants (#1845).
+    nominal = _fold_constants(nominal)[0]
 
     penalties = []
     for name, unc in unc_map.items():
         if name in coeffs:
             pen = _soc_penalty(coeffs[name], unc)
             if pen is not None:
-                penalties.append(pen)
+                penalties.append(_fold_constants(pen)[0])
+    for e in [nominal] + penalties:
+        _refuse_2d_matmul(e, where)
     return nominal, penalties
+
+
+def _fold_constants(expr):
+    """``(expr', numeric)``: *expr* with every maximal Constant-only subtree folded.
+
+    A subtree with no Variable and no Parameter is replaced by ``Constant`` of
+    its exact numpy value (:func:`eval_constant_expr`); ``numeric`` says whether
+    all of *expr* was such a subtree. A node the evaluator does not know is kept
+    as it is, with its children folded.
+    """
+    from discopt.modeling.core import (
+        BinaryOp,
+        Constant,
+        FunctionCall,
+        IndexExpression,
+        MatMulExpression,
+        SumExpression,
+        SumOverExpression,
+        UnaryOp,
+    )
+
+    if isinstance(expr, Constant):
+        return expr, True
+    if isinstance(expr, BinaryOp):
+        (lf, ln), (rf, rn) = _fold_constants(expr.left), _fold_constants(expr.right)
+        new, numeric = BinaryOp(expr.op, lf, rf), ln and rn
+    elif isinstance(expr, MatMulExpression):
+        (lf, ln), (rf, rn) = _fold_constants(expr.left), _fold_constants(expr.right)
+        new, numeric = MatMulExpression(lf, rf), ln and rn
+    elif isinstance(expr, UnaryOp):
+        of, numeric = _fold_constants(expr.operand)
+        new = UnaryOp(expr.op, of)
+    elif isinstance(expr, IndexExpression):
+        bf, numeric = _fold_constants(expr.base)
+        new = IndexExpression(bf, expr.index)
+    elif isinstance(expr, SumExpression):
+        of, numeric = _fold_constants(expr.operand)
+        new = SumExpression(of, axis=expr.axis)
+    elif isinstance(expr, SumOverExpression):
+        parts = [_fold_constants(t) for t in expr.terms]
+        new, numeric = SumOverExpression([t for t, _ in parts]), all(n for _, n in parts)
+    elif isinstance(expr, FunctionCall):
+        parts = [_fold_constants(a) for a in expr.args]
+        new = FunctionCall(expr.func_name, *[a for a, _ in parts])
+        numeric = all(n for _, n in parts)
+    else:
+        return expr, False
+    if not numeric:
+        return new, False
+    try:
+        return Constant(eval_constant_expr(new)), True
+    except NotImplementedError:
+        return new, False
+
+
+def _refuse_2d_matmul(expr, where: str) -> None:
+    """Refuse a counterpart that still contains a 2-D @ 2-D matmul (#1845).
+
+    The solver mis-evaluates a matrix-matrix product inside an element-wise
+    product or a sum (``sum(B * (A @ X))`` certifies a false optimum, #1845).
+    After :func:`_fold_constants` such a node can only involve a decision
+    variable (or a certain Parameter), e.g. the coefficient ``X @ Aᵀ`` of ``P`` in
+    ``sum(X * (P @ A))``; refuse it rather than hand it to the solver.
+    """
+    from discopt.modeling.core import (
+        BinaryOp,
+        FunctionCall,
+        IndexExpression,
+        MatMulExpression,
+        SumExpression,
+        SumOverExpression,
+        UnaryOp,
+    )
+
+    if isinstance(expr, MatMulExpression):
+        sl, sr = _shape_of(expr.left), _shape_of(expr.right)
+        if sl is not None and sr is not None and len(sl) == 2 and len(sr) == 2:
+            raise NotImplementedError(
+                f"Ellipsoidal robust counterpart: {where} is not supported -- its robust "
+                f"counterpart contains the matrix-matrix product {expr!r} (shapes {sl} @ "
+                f"{sr}), which the solver currently mis-evaluates "
+                "(#1845: sum(B * (A @ X)) with a 2-D X certifies a false optimum). "
+                "Refusing rather than returning a possibly wrong certified answer."
+            )
+        children = [expr.left, expr.right]
+    elif isinstance(expr, BinaryOp):
+        children = [expr.left, expr.right]
+    elif isinstance(expr, (UnaryOp, SumExpression)):
+        children = [expr.operand]
+    elif isinstance(expr, IndexExpression):
+        children = [expr.base]
+    elif isinstance(expr, SumOverExpression):
+        children = list(expr.terms)
+    elif isinstance(expr, FunctionCall):
+        children = list(expr.args)
+    else:
+        return
+    for c in children:
+        _refuse_2d_matmul(c, where)
 
 
 def _row_coefficient(expr, unc_map: dict) -> dict[str, _Cot]:
