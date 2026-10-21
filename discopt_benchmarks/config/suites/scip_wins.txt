@@ -1,7 +1,7 @@
 # scip_wins -- small MINLPLib instances SCIP 10.0 solves to proven optimality
 # (or proves infeasible) in <= 5 s, single thread, where discopt does NOT within
 # 120 s. Measured 2026-10-21; method and full numbers in
-# docs/dev/scip-wins-2026-10-21.md. One line per failure class; re-derive the
+# docs/dev/scip-wins-2026-10-21.md. One or two per failure class; re-derive the
 # list from the screen, do not extend it by hand.
 #
 # Not vendored: run with --fetch (or --use-cache).
