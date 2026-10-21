@@ -70,11 +70,7 @@ def evaluate_interval(
             (``test_enclosure_ignores_model_argument``).
         box: Optional dict ``{Variable: Interval}`` that overrides the
             variable's declared bounds. When ``None`` or a variable is
-            missing, the declared ``(lb, ub)`` of the variable is used. A
-            :class:`Parameter` is a point at its ``value`` unless the box holds
-            an entry under :func:`param_box_key` of its name, which ranges it
-            over that interval (the robust counterpart's worst case over an
-            uncertainty box, #1836).
+            missing, the declared ``(lb, ub)`` of the variable is used.
         _cache: Memoization dict keyed by ``id(expr)``.
 
     Returns:
@@ -84,15 +80,6 @@ def evaluate_interval(
     if _cache is None:
         _cache = {}
     return _eval(expr, model, box or {}, _cache)
-
-
-def param_box_key(name: str) -> tuple[str, str]:
-    """The ``box`` key that ranges the :class:`Parameter` named *name*.
-
-    ``Parameter`` is not hashable (``Expression.__eq__`` builds a constraint),
-    so it is keyed by name; the tuple cannot collide with a ``Variable`` key.
-    """
-    return ("__parameter__", name)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -218,9 +205,6 @@ def _eval_impl(expr: Expression, model: Optional[Model], box: dict, cache: dict)
         v = np.asarray(expr.value, dtype=np.float64)
         return Interval(v, v)
     if isinstance(expr, Parameter):
-        ranged = box.get(param_box_key(expr.name))
-        if ranged is not None:
-            return ranged
         v = np.asarray(expr.value, dtype=np.float64)
         return Interval(v, v)
     if isinstance(expr, Variable):
