@@ -29,7 +29,7 @@ from discopt._relax import (
     integer_product_reform,
     nonsmooth_lift,
 )
-from discopt.gdp import bound_pretransform
+from discopt.gdp import bound_pretransform, cuttingplane
 from discopt.gdp import state as gdp_state
 from discopt.modeling import _relax_integrality
 from discopt.modeling.core import from_nl
@@ -143,6 +143,7 @@ EXPECTED = {
     ),
     # #1775 G2.4: a pre-lowering pass, in place.
     "gdp.bound_pretransformation": bound_pretransform._bound_pretransform_in_place,
+    "gdp.cuttingplane": cuttingplane._cuttingplane_model,
     "integer.bilinear": integer_product_reform.reformulate_integer_bilinear,
     "integer.multilinear": integer_product_reform.reformulate_integer_multilinear,
     "binary.multilinear": binary_multilinear_reform.reformulate_binary_multilinear,
