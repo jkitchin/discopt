@@ -474,7 +474,7 @@ def _value_shape(expr) -> tuple[int, ...]:
     return shape
 
 
-def affine_param_jacobians(expr, param_names: set[str], *, factors: Optional[list] = None):
+def affine_param_jacobians(expr, param_names: set[str]):
     """Exact constant coefficients of *expr* in its uncertain parameters.
 
     Returns ``{name: (J, S)}`` when *expr* is structurally affine in every
@@ -491,10 +491,8 @@ def affine_param_jacobians(expr, param_names: set[str], *, factors: Optional[lis
     constant-valued side), never by sampling: a finite second difference
     passes ``abs(p - p_bar)``.
 
-    When *factors* is a list, each constant-valued coefficient expression read
-    is appended to it, so a caller that bakes ``J`` can commit the Parameters
-    those expressions read. The extraction itself commits nothing: it runs on
-    every row, most of which keep sign tracking and their live multipliers.
+    The extraction commits nothing: it runs on every row, most of which keep
+    sign tracking and their live multipliers.
     """
     from discopt.modeling.core import (
         BinaryOp,
@@ -528,8 +526,6 @@ def affine_param_jacobians(expr, param_names: set[str], *, factors: Optional[lis
     def constant_factor(factor):
         if _contains_variable(factor):
             raise _NotAffine("coefficient contains a decision variable")
-        if factors is not None:
-            factors.append(factor)
         return np.asarray(eval_constant_expr(factor, record=False), dtype=np.float64)
 
     def scale(jac, c):
@@ -651,8 +647,7 @@ def aggregate_affine_counterpart(expr, unc_sets, param_names: set[str], maximize
     """
     from discopt.modeling.core import BinaryOp, Constant
 
-    factors: list = []
-    jacs = affine_param_jacobians(expr, param_names, factors=factors)
+    jacs = affine_param_jacobians(expr, param_names)
     if not jacs:
         return None
     cancels = False
@@ -665,9 +660,9 @@ def aggregate_affine_counterpart(expr, unc_sets, param_names: set[str], maximize
             cancels = True
     if not cancels:
         return None
-    # The penalty below bakes J, i.e. the values of these coefficients.
-    for f in factors:
-        _commit_values_in(f)
+    # The penalty below bakes J. Its coefficients are exactly the multipliers
+    # freeze_constant_multipliers replaces (constant-valued, parameter-free,
+    # multiplying an uncertain term), so freezing them commits every value J read.
     result = freeze_constant_multipliers(expr, param_names)
     for name in jacs:
         result = substitute_param(result, name, Constant(unc_sets[name].parameter.value))
