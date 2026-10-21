@@ -197,9 +197,23 @@ class RobustCounterpart:
         downstream shape or affinity error.
         """
         from discopt.modeling.core import Constraint
+        from discopt.ro.formulations._common import uncertain_param_outside_rows
 
         names = {u.parameter.name for u in self._uncertainty_sets}
         m = self._model
+        # #1847: no formulation rewrites an indicator / disjunct row, a
+        # complementarity or a piecewise domain, so an uncertain parameter there
+        # was solved at its nominal value.
+        hidden = uncertain_param_outside_rows(m, names)
+        if hidden:
+            raise NotImplementedError(
+                f"RobustCounterpart: uncertain parameter(s) {sorted(names)} appear in "
+                f"{hidden}, which no robust formulation rewrites (only plain "
+                "constraint rows and the objective are robustified). Solving them at "
+                "the nominal value would certify a non-robust point. Move the "
+                "uncertain term into an ordinary constraint (e.g. introduce a "
+                "variable equal to it) or remove the disjunction."
+            )
         sites = [(c.name, c.body) for c in m._constraints if isinstance(c, Constraint)]
         if m._objective is not None:
             sites.append(("<objective>", m._objective.expression))

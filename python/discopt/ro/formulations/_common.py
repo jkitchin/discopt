@@ -1709,6 +1709,75 @@ def _contains_uncertain_param(expr, param_names: set[str]) -> bool:
     return False
 
 
+#: Model attributes that hold expressions outside ``_constraints`` / the
+#: objective. None is robustified by any formulation, so an uncertain parameter
+#: in one is a bypass (#1847).
+_NON_ROW_MODEL_SLOTS = (
+    "_complementarities",
+    "_piecewise_domains",
+    "_simplex_lowerings",
+    "_gdp_factory_disjunctions",
+    "_gdp_factory_disjuncts",
+)
+
+
+def non_row_sites(model, pred) -> list[str]:
+    """Where an expression satisfying *pred* sits in a model entry no RO pass rewrites.
+
+    The formulations (and :class:`~discopt.ro.affine_policy.AffineDecisionRule`)
+    rewrite plain ``Constraint`` rows and the objective. Every other entry -- an
+    ``if_then`` indicator row, the disjunct rows of an ``either_or`` /
+    ``if_else`` / ``add_disjunction`` (nested blocks included), a
+    complementarity, a piecewise domain -- was passed through untouched (#1847:
+    ``dm.if_else(y >= 1, p[0], 0)`` was solved at the nominal ``p`` and certified
+    as robust). The walk is generic over the objects such an entry holds
+    (attributes, lists, dicts), so a container type added later is covered
+    without a new case here; it stops at a ``Model``, whose own rows the caller
+    checks.
+    """
+    from discopt.modeling.core import Constraint, Expression, Model
+
+    found: list[str] = []
+    seen: set[int] = set()
+
+    def _visit(obj, where: str) -> None:
+        if obj is None or isinstance(obj, (Model, str, bytes, int, float, bool, np.ndarray)):
+            return
+        if id(obj) in seen:
+            return
+        seen.add(id(obj))
+        if isinstance(obj, Expression):
+            if pred(obj):
+                found.append(where)
+            return
+        if isinstance(obj, dict):
+            children = list(obj.values())
+        elif isinstance(obj, (list, tuple, set, frozenset)):
+            children = list(obj)
+        else:
+            attrs = dict(getattr(obj, "__dict__", {}))
+            for slot in getattr(type(obj), "__slots__", ()):
+                if hasattr(obj, slot):
+                    attrs[slot] = getattr(obj, slot)
+            children = list(attrs.values())
+        for child in children:
+            _visit(child, where)
+
+    for i, con in enumerate(model._constraints):
+        if not isinstance(con, Constraint):
+            name = getattr(con, "name", None)
+            _visit(con, f"{type(con).__name__} {name or i!r}")
+    for slot in _NON_ROW_MODEL_SLOTS:
+        _visit(getattr(model, slot, None), slot)
+    # Deduplicated, in first-seen order.
+    return list(dict.fromkeys(found))
+
+
+def uncertain_param_outside_rows(model, param_names: set[str]) -> list[str]:
+    """:func:`non_row_sites` holding an uncertain parameter (#1847)."""
+    return non_row_sites(model, lambda e: _contains_uncertain_param(e, param_names))
+
+
 def assert_no_uncertain_params_remain(model, param_names: set[str], *, kind: str) -> None:
     """Refuse loudly if any uncertain parameter survived robustification (RO-2).
 
@@ -1729,6 +1798,7 @@ def assert_no_uncertain_params_remain(model, param_names: set[str], *, kind: str
     obj = model._objective
     if obj is not None and _contains_uncertain_param(obj.expression, param_names):
         leftovers.append("<objective>")
+    leftovers.extend(uncertain_param_outside_rows(model, param_names))  # #1847
 
     if leftovers:
         raise NotImplementedError(

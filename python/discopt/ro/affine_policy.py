@@ -233,6 +233,22 @@ class AffineDecisionRule:
         y = self._recourse_var
         pfx = self._prefix
 
+        # Step 3 substitutes y only in plain rows and the objective. A y inside an
+        # indicator / disjunct row, a complementarity or a piecewise domain would
+        # stay the retired static variable, decoupled from the policy: that row
+        # would constrain nothing (#1847 audit). Refuse before changing the model.
+        from discopt.modeling.core import _iter_model_leaves
+        from discopt.ro.formulations._common import non_row_sites
+
+        hidden = non_row_sites(m, lambda e: any(leaf is y for leaf in _iter_model_leaves(e)))
+        if hidden:
+            raise NotImplementedError(
+                f"AffineDecisionRule: the recourse variable {y.name!r} appears in "
+                f"{hidden}, which the affine substitution does not rewrite; the "
+                "variable there would be decoupled from the policy. Move that term "
+                "into an ordinary constraint or choose a different recourse variable."
+            )
+
         # ── 1. Create intercept y₀ ────────────────────────────────────────────
         # Inherit bounds from the original recourse variable: y₀ represents
         # the baseline value of y when all perturbations are zero.
