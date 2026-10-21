@@ -34,7 +34,8 @@ one part), a variable listed in two partitions, a variable of a row in no
 partition, an ``h_p`` with no finite upper bound (``a_p`` would have none; spec
 §0.2 item 5), and an ``h_p`` undefined on part of the box (the global row keeps it
 everywhere, #1779). A user ``big_m`` (#1775 G2.6) on a split row is dropped: it
-bounded the old body, not ``sum a_p + c``.
+bounded the old body, not ``sum a_p + c``. A raw ``Constraint(body, sense, rhs)``
+with a non-zero ``rhs`` is refused, as at every other door into a disjunct (#1858).
 
 **Atomic.** Every replacement row, auxiliary and global row is built before the
 model is touched, so a refusal leaves the model exactly as it was. The user's
@@ -76,6 +77,7 @@ from discopt.modeling.core import (
     VarType,
     _DisjunctiveConstraint,
     _IndicatorConstraint,
+    _reject_unnormalized_rhs,
 )
 
 
@@ -275,6 +277,11 @@ def _split_row(
     )
 
     model = plan.model
+    # A raw ``Constraint(body, sense, rhs)`` with rhs != 0 is refused, not folded
+    # into the constant: every other door into a disjunct refuses it (#1858), and
+    # splitting it would hand Model.validate a normalized row it would otherwise
+    # have refused. It can only arrive here by mutating a row after construction.
+    _reject_unnormalized_rhs(con, where=f"gdp.partition_disjuncts ({where})")
     if con.sense not in ("<=", ">=") or np.size(con.rhs) != 1:
         report.skipped.append(f"{where}: sense {con.sense!r}")
         return con
@@ -291,7 +298,7 @@ def _split_row(
         # values; a later parameter update could then cut feasible points.
         report.skipped.append(f"{where}: depends on a Parameter")
         return con
-    # body >= rhs  <=>  -body + rhs <= 0;  body <= rhs  <=>  body - rhs <= 0.
+    # body >= 0  <=>  -body <= 0.
     sign0 = 1.0 if con.sense == "<=" else -1.0
     raw: list = []
     _summands(con.body, sign0, raw)
@@ -303,8 +310,6 @@ def _split_row(
             terms.append((sign, t, names))
         else:
             const += sign * float(_body_at_zero(t, {}))
-    rhs = float(np.asarray(con.rhs, dtype=np.float64).ravel()[0])
-    const -= sign0 * rhs
     parts = _groups(terms, partitions, num_partitions, where)
     if len(parts) < 2:
         report.skipped.append(f"{where}: {_one_part_reason(terms, partitions, plan)}")

@@ -121,7 +121,7 @@ def test_a_nonconvex_row_is_split_exactly(direction):
 
 def test_dsl_ge_rows_eq_rows_and_single_part_rows():
     """The DSL stores ``x**2 + y**2 >= 9`` as ``9 - (x**2 + y**2) <= 0``, so this
-    covers the summand signs only; the raw ``>=`` / rhs branches are tested below."""
+    covers the summand signs only; the raw ``>=`` branch is tested below."""
     m = dm.Model("senses")
     x = m.continuous("x", lb=0, ub=4)
     y = m.continuous("y", lb=0, ub=4)
@@ -143,40 +143,37 @@ def _raw(rows_a, rows_b, obj):
     return m
 
 
-# Raw ``Constraint(body, sense, rhs)`` rows reach the ``>=`` negation and the rhs
-# term, which DSL rows (always ``body <= 0``) never do. The oracle is worked out by
-# hand, not by the unsplit solve: the base lowering drops a raw rhs in a disjunct
-# row (#1858). Each case kills a mutant of the split (measured on the PR head):
-# dropping the ``>=`` negation gives -3.0 on "ge_rhs0", flipping the rhs sign
-# gives -3.0 on "le_ge_rhs" and -1.0 on "le_rhs".
+# A raw ``Constraint(body, ">=", 0.0)`` keeps its sense, so it reaches the ``>=``
+# negation, which DSL rows (always ``body <= 0``) never do. The oracle is worked
+# out by hand, not by the unsplit solve (the base lowering mishandled raw rows,
+# #1858). Each case kills the mutant that drops the negation (measured: -3.0).
 _RAW_CASES = {
     # A: x^2+y^2 <= 1 (best -1 at (1, 0)); B: x+y-5 >= 0 in [0,3]^2 (best (3, 2)).
-    "ge_rhs0": (
+    "ge": (
         lambda x, y: [x**2 + y**2 - 1 <= 0],
         lambda x, y: [Constraint(body=x + y - 5, sense=">=", rhs=0.0)],
         lambda x, y: -x + 0.1 * y,
         -2.8,
     ),
-    # Same feasible set, the constants carried by rhs instead.
-    "le_ge_rhs": (
-        lambda x, y: [Constraint(body=x**2 + y**2, sense="<=", rhs=1.0)],
-        lambda x, y: [Constraint(body=x + y, sense=">=", rhs=5.0)],
+    # The same feasible set with both rows raw: a raw ``<=`` and a raw ``>=``.
+    "le_ge": (
+        lambda x, y: [Constraint(body=x**2 + y**2 - 1, sense="<=", rhs=0.0)],
+        lambda x, y: [Constraint(body=5 - x - y, sense="<=", rhs=0.0)],
         lambda x, y: -x + 0.1 * y,
         -2.8,
     ),
-    # A: x^2+y^2 <= 4 (best x+y = 2*sqrt(2)); B: x+y <= 1 (best 1).
-    "le_rhs": (
-        lambda x, y: [Constraint(body=x**2 + y**2, sense="<=", rhs=4.0)],
-        lambda x, y: [x + y <= 1],
-        lambda x, y: -x - y,
-        -(2.0**1.5),
+    "ge_both": (
+        lambda x, y: [Constraint(body=1 - x**2 - y**2, sense=">=", rhs=0.0)],
+        lambda x, y: [Constraint(body=x + y - 5, sense=">=", rhs=0.0)],
+        lambda x, y: -x + 0.1 * y,
+        -2.8,
     ),
 }
 
 
 @pytest.mark.parametrize("method", ["big-m", "hull"])
 @pytest.mark.parametrize("case", sorted(_RAW_CASES))
-def test_raw_ge_and_rhs_rows_are_split_exactly(case, method):
+def test_raw_ge_rows_are_split_exactly(case, method):
     rows_a, rows_b, obj, opt = _RAW_CASES[case]
     m = _raw(rows_a, rows_b, obj)
     rep = partition_disjuncts(m)
@@ -184,6 +181,26 @@ def test_raw_ge_and_rhs_rows_are_split_exactly(case, method):
     r = _solve(m, gdp_method=method)
     assert r.status == "optimal"
     assert r.objective == pytest.approx(opt, abs=1e-5)
+
+
+@pytest.mark.parametrize("sense", ["<=", ">="])
+def test_a_raw_nonzero_rhs_row_is_refused_and_nothing_changes(sense):
+    """A non-zero ``rhs`` is refused rather than folded into the split constant,
+    as at every other door into a disjunct (#1858). Construction refuses it there,
+    so the row is built with rhs=0 and given its rhs afterwards -- the one route
+    by which it can reach partition_disjuncts. Splitting it would have turned it
+    into a normalized row that Model.validate accepts."""
+    m = dm.Model("raw_rhs")
+    x = m.continuous("x", lb=0, ub=3)
+    y = m.continuous("y", lb=0, ub=3)
+    row = Constraint(body=x**2 + y**2, sense=sense, rhs=0.0)
+    m.either_or([[x + y <= 1], [x**2 + y**2 - 4 <= 0, row]], name="d")
+    m.minimize(-x - y)
+    row.rhs = 4.0
+    before = _state(m)
+    with pytest.raises(ValueError, match=r"non-zero rhs \(4\.0\).*gdp\.partition_disjuncts"):
+        partition_disjuncts(m)
+    assert _state(m) == before
 
 
 def test_user_partitions_are_used_and_a_straddling_summand_is_refused():
