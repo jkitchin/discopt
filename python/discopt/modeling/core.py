@@ -33,6 +33,7 @@ import copy as _copy
 import copyreg as _copyreg
 import functools as _functools
 import gc
+import itertools as _itertools
 import math
 import re
 import threading as _threading
@@ -8384,13 +8385,16 @@ class Model:
             finite and ``>= 0``. Each one is checked when the model is lowered:
             it is certified when it is at least the interval bound of the row's
             body, or at least a rigorous LP bound over the model's linear rows and
-            each other disjunct's linear rows; it is **refused** when the LP finds
-            a point feasible for the whole model that the value would cut; and
-            otherwise it is used but not certified, in which case ``solve``
-            withholds the certificate (``optimal`` becomes ``feasible``,
-            ``infeasible`` becomes ``unknown``, and the bound is dropped), so a
-            user M can never produce a false certificate. Other methods ignore
-            it, with a warning.
+            the linear rows of each region where the row is relaxed (each other
+            disjunct, and for a nested disjunction each region where an enclosing
+            disjunct is off); it is **refused** when the LP finds a point
+            feasible for the whole model that the value would cut; and otherwise
+            it is used but not certified, in which case ``solve`` withholds the
+            certificate (``optimal`` becomes ``feasible``, ``infeasible`` becomes
+            ``unknown``, and the bound is dropped), so a user M can never produce
+            a false certificate. The withhold applies only when this solve's
+            lowering actually read the value; a hull solve does not. Other
+            methods ignore it, with a warning.
 
         Examples
         --------
@@ -8413,6 +8417,7 @@ class Model:
             _model=self,
             big_m=_normalize_big_m(big_m, disjuncts, name),
         )
+        _key_big_m(dc)
         self._constraints.append(dc)
         return dc
 
@@ -8942,6 +8947,7 @@ class Model:
             semantics=_coerce_disjunction_semantics(semantics),
             big_m=_normalize_big_m(big_m, disjuncts, name),
         )
+        _key_big_m(dc)
         # #1430: remember what this factory handed out, so ``validate`` can tell a
         # disjunction that was nested into the model from one that was forgotten.
         # Tracked by identity at the *construction* site rather than reconstructed
@@ -9646,6 +9652,10 @@ class Model:
         # ``time_limit`` measured from HERE, not from the primary's start.
         _t_solve0 = _time.perf_counter()
         self.validate()
+        # #1775 G2.6: which user big-M disjunctions this solve's lowerings read.
+        from discopt.gdp.user_big_m import use_counts as _ubm_use_counts
+
+        _ubm_snapshot = _ubm_use_counts(self)
 
         # --- #1537 C: exact recentring of large-offset variables (default ON; =0 opts out) ---
         # A box far from the origin is the same model in coordinates ``x = z + c``
@@ -10373,7 +10383,7 @@ class Model:
                 _repair_published_incumbent(_ck_res)
                 _guard_unresolved_objective(_ck_res)
                 self._withhold_default_box_certificate(_ck_res)
-                self._withhold_user_big_m_certificate(_ck_res)
+                self._withhold_user_big_m_certificate(_ck_res, _ubm_snapshot)
                 return _ck_res
 
         from discopt._relax.deadline import deadline_scope
@@ -11161,7 +11171,7 @@ class Model:
             # #1678 (b): after every other guard, so nothing re-grants it.
             self._withhold_default_box_certificate(result)
             # #1775 G2.6: a user big-M that could not be certified.
-            self._withhold_user_big_m_certificate(result)
+            self._withhold_user_big_m_certificate(result, _ubm_snapshot)
             # #1727: drop the factorable lift's auxiliary columns from ``x``. After
             # the guards above, which judge the point as the route left it. Only
             # names the lift recorded AND the caller did not declare.
@@ -11458,7 +11468,9 @@ class Model:
 
         return result
 
-    def _withhold_user_big_m_certificate(self, result: "SolveResult") -> None:
+    def _withhold_user_big_m_certificate(
+        self, result: "SolveResult", snapshot: Optional[dict[int, int]] = None
+    ) -> None:
         """#1775 G2.6: no certificate that rests on an unverified user big-M.
 
         A user M (``either_or(..., big_m=...)``) that is too small cuts feasible
@@ -11471,11 +11483,20 @@ class Model:
         ``False`` and the bound and gap are cleared. The incumbent is kept: it was
         verified against the declared model by the guards before this one.
 
-        Conservative on purpose: it runs whatever ``gdp_method`` the solve used,
-        so a user M on a disjunction another method lowered (with a warning that
-        the value is ignored) also withholds. Only ever downgrades.
+        Only the disjunctions whose user Ms a lowering of this solve read are
+        judged (``snapshot``, from :func:`discopt.gdp.user_big_m.use_counts` at
+        the start of the solve): ``hull``, ``mbigm`` and the other methods ignore
+        a user M (with a warning), so it cannot weaken their result -- and its
+        validation may not even apply there (a row ``hull`` lowers but big-M
+        cannot, #1851 review). A disjunction with a user M and no tracking key is
+        always judged. Without a snapshot every one is judged. Only ever
+        downgrades.
         """
-        from discopt.gdp.user_big_m import model_has_user_big_m, uncertified_user_big_ms
+        from discopt.gdp.user_big_m import (
+            model_has_user_big_m,
+            uncertified_user_big_ms,
+            used_since,
+        )
 
         if not model_has_user_big_m(self):
             return
@@ -11485,7 +11506,9 @@ class Model:
             or result.bound is not None
         ):
             return
-        reasons = uncertified_user_big_ms(self)
+        reasons = uncertified_user_big_ms(
+            self, used=None if snapshot is None else used_since(snapshot)
+        )
         if not reasons:
             return
         import logging as _ulogging
@@ -12726,6 +12749,10 @@ class _DisjunctiveConstraint:
     # user gave none. Read by the big-M lowering only; see
     # :mod:`discopt.gdp.user_big_m` for how each value is validated.
     big_m: Optional[tuple[tuple[Optional[float], ...], ...]] = None
+    # #1775 G2.6: identifies this disjunction's user Ms across copies of the model
+    # (``deepcopy`` keeps it), so ``Model.solve`` can tell whether a lowering read
+    # them; see :func:`discopt.gdp.user_big_m.record_use`.
+    _big_m_key: Optional[int] = field(default=None, compare=False, repr=False)
 
     def __repr__(self) -> str:
         # Short on purpose: ``Model.either_or`` returns this object, so a bare call
@@ -12818,6 +12845,15 @@ def _claim_blocks(blocks: list["Disjunct"], owner: str, name: Optional[str]) -> 
             )
     for d in blocks:
         d._placed_in = owner
+
+
+_BIG_M_KEYS = _itertools.count(1)
+
+
+def _key_big_m(dc: "_DisjunctiveConstraint") -> None:
+    """Give a disjunction with user big-M values its tracking key (#1775 G2.6)."""
+    if dc.big_m is not None:
+        dc._big_m_key = next(_BIG_M_KEYS)
 
 
 def _normalize_big_m(

@@ -118,7 +118,7 @@ def test_m_below_the_interval_bound_is_certified_by_the_conditioned_lp():
     x = m.continuous("x", lb=0, ub=100)
     c = x <= 2
     d = m.either_or([[c], [x >= 5, x <= 12]], big_m={c: 11})
-    verdict = resolve_user_big_ms(d, m)[id(c)]
+    verdict = resolve_user_big_ms(d, m)[(id(d), 0, 0)]
     assert verdict.certified, verdict.reason
     m.maximize(x)
     r = _solve(m)
@@ -196,27 +196,72 @@ def test_an_uncertified_m_withholds_the_certificate():
     assert r.solver_stats["certificate/user_big_m_uncertified"] == 1.0
 
 
-def test_an_uncertified_infeasibility_becomes_unknown():
-    m = dm.Model("inf")
+def _false_infeasibility():
+    """M = 6 is too small for x <= 2: on the arm x >= 9, x**2 <= 90.25 allows x up
+    to 9.5, where x - 2 = 7.5. The LP maximiser x = 10 violates x**2 <= 90.25, so
+    there is no witness and the M is used uncertified. The lowered row gives
+    x <= 8, so the lowered model is infeasible although x = 9 is optimal."""
+    m = dm.Model("false_inf")
     x = m.continuous("x", lb=0, ub=10)
-    m.subject_to(x >= 8)
-    m.either_or([[x**2 <= 4], [x <= 3]], big_m=50)
+    m.subject_to(x**2 <= 90.25)
+    m.subject_to(x >= 5)
+    r0 = x <= 2
+    m.either_or([[r0], [x >= 9]], big_m={r0: 6.0})
     m.minimize(x)
-    r = _solve(m)
+    return m
+
+
+def test_an_uncertified_infeasibility_becomes_unknown():
+    """The guard is what turns the lowered model's infeasibility into unknown."""
+    from unittest import mock
+
+    with mock.patch.object(dm.Model, "_withhold_user_big_m_certificate", lambda *a, **k: None):
+        r_off = _solve(_false_infeasibility())
+    assert r_off.status == "infeasible" and r_off.gap_certified  # the false proof
+    r = _solve(_false_infeasibility())
     assert r.status == "unknown" and not r.gap_certified
+    assert r.bound is None
+    assert r.solver_stats["certificate/user_big_m_uncertified"] == 1.0
 
 
-def test_a_too_small_m_ignored_by_hull_withholds_without_raising():
+def test_a_too_small_m_ignored_by_hull_keeps_the_hull_certificate():
+    """Hull never reads the M, so it cannot weaken the hull result (#1851 review):
+    the guard judges only the disjunctions a lowering of this solve read."""
     m = dm.Model("hull_small")
     x = m.continuous("x", lb=0, ub=10)
     c = x <= 2
     m.either_or([[c], [x >= 5]], big_m={c: 3}, name="d")
     m.maximize(x)
-    reasons = uncertified_user_big_ms(m)
+    reasons = uncertified_user_big_ms(m)  # standalone: every user M is judged
     assert len(reasons) == 1 and "too small" in reasons[0]
     r = _solve(m, gdp_method="hull")
-    assert r.status == "feasible" and not r.gap_certified
+    assert r.status == "optimal" and r.gap_certified
     assert r.objective == pytest.approx(10.0, abs=1e-6)
+    with pytest.raises(ValueError, match="too small"):  # big-M does read it
+        _solve(m)
+
+
+def _domain_gap_model(big_m):
+    m = dm.Model("gap")
+    x = m.continuous("x", lb=0, ub=10)
+    y = m.continuous("y", lb=-1, ub=10)
+    m.either_or([[dm.sqrt(y) <= 1, x <= 2], [x >= 5]], big_m=big_m, name="d")
+    m.minimize((x - 3) ** 2 + y)
+    return m
+
+
+def test_a_domain_gap_does_not_break_a_hull_solve():
+    """sqrt(y) on y in [-1, 10] has no big-M (domain gap); hull lowers it. The
+    guard raised the domain-gap error after a working hull solve (#1851 review)."""
+    plain = _solve(_domain_gap_model(None), gdp_method="hull")
+    r = _solve(_domain_gap_model(50), gdp_method="hull")
+    assert plain.status == "optimal" and plain.gap_certified
+    assert r.status == plain.status and r.gap_certified == plain.gap_certified
+    assert r.objective == pytest.approx(plain.objective, abs=1e-6)
+    reasons = uncertified_user_big_ms(_domain_gap_model(50))  # reported, not raised
+    assert len(reasons) == 1 and "undefined on part of the box" in reasons[0]
+    with pytest.raises(ValueError, match="undefined on part"):
+        _solve(_domain_gap_model(50))  # big-M cannot lower it, user M or not
 
 
 def test_an_ignored_m_warns_and_hull_keeps_its_certificate_when_certified():
@@ -256,6 +301,147 @@ def test_nested_disjunction_takes_its_user_m_unconditioned():
     m2.minimize(z2)
     with pytest.raises(ValueError, match="too small"):
         reformulate_gdp(m2, "big-m")
+
+
+def _nested_parent_unselected(m_c):
+    """x <= 1 in the inner disjunction under the outer x <= 6 arm. The row is
+    relaxed in A∩D (x in [4, 5]: x - 1 <= 4) *and* in the outer B arm, where the
+    inner selectors are all 0 (x in [8, 10]: x - 1 <= 9)."""
+    m = dm.Model("nested_parent")
+    x = m.continuous("x", lb=0, ub=10)
+    c = x <= 1
+    inner = m.disjunction([[c], [x >= 4, x <= 5]], name="inner", big_m={c: m_c})
+    m.either_or([[x <= 6, inner], [x >= 8]], name="outer")
+    m.maximize(x)
+    return m
+
+
+def test_a_nested_m_valid_only_given_its_parent_is_not_certified():
+    """M = 4.5 covers the inner sibling (4) but not the outer B arm (9): a nested
+    disjunction must not be conditioned as if its parent were always selected.
+    Conditioned that way, B is cut to x <= 5.5 and the solve certifies 5 against
+    the true 10 (mutant M8 of the #1851 review)."""
+    m = _nested_parent_unselected(4.5)
+    with pytest.raises(ValueError, match=r"too small: the point \{x=10\}"):
+        _solve(m)
+    assert any("too small" in r for r in uncertified_user_big_ms(m))
+
+
+def test_a_nested_m_is_conditioned_on_its_parent_path():
+    """#1851 review point 7. The row x <= 1 is relaxed in A∩D (x - 1 <= 5 with
+    A's x <= 6) and in B (x <= 9: x - 1 <= 8); the box alone gives 9. M = 8.5 is
+    valid, and certified only by conditioning on both."""
+    m = dm.Model("nested_path")
+    x = m.continuous("x", lb=0, ub=10)
+    c = x <= 1
+    inner = m.disjunction([[c], [x >= 4]], name="inner", big_m={c: 8.5})
+    m.either_or([[x <= 6, inner], [x >= 8, x <= 9]], name="outer")
+    m.maximize(x)
+    assert uncertified_user_big_ms(m) == []
+    r = _solve(m)
+    assert r.status == "optimal" and r.gap_certified
+    assert r.objective == pytest.approx(9.0, abs=1e-6)
+
+
+def test_a_block_nested_m_is_judged_without_its_parent():
+    """A disjunction in an ``add_disjunction`` block (``parent_indicator``): its
+    parent is not visible, so only the global rows bound it. M = 4.5 covers the
+    inner sibling but not the B block (x - 1 up to 8.5 at x = 9.5); x = 10 fails
+    x**2 <= 90.25, so there is no witness and the M is used uncertified. The
+    lowered model cuts B to x <= 5.5 and would certify 5 against the true 9.5:
+    the guard must judge it with the block semantics and withhold."""
+    m = dm.Model("block_nested")
+    x = m.continuous("x", lb=0, ub=10)
+    m.subject_to(x**2 <= 90.25)
+    c = x <= 1
+    inner = m.disjunction([[c], [x >= 4, x <= 5]], name="inner", big_m={c: 4.5})
+    a, b = m.make_disjunct("A"), m.make_disjunct("B")
+    a.subject_to([x <= 6, inner])
+    b.subject_to(x >= 8)
+    m.add_disjunction([a, b], name="outer")
+    m.maximize(x)
+    assert inner.parent_indicator is not None
+    r = _solve(m)
+    assert r.status == "feasible" and not r.gap_certified and r.bound is None
+    assert r.solver_stats["certificate/user_big_m_uncertified"] == 1.0
+
+
+def test_one_row_in_two_places_keeps_each_m():
+    """Ms are keyed by position, not by the row object (#1851 review nit): the
+    same ``Constraint`` in the outer and the nested disjunction keeps both."""
+    m = dm.Model("shared")
+    x = m.continuous("x", lb=0, ub=10)
+    c = x <= 2
+    inner = m.disjunction([[c], [x >= 4]], name="inner", big_m={c: 20.0})
+    m.either_or([[c, inner], [x >= 5]], name="outer", big_m={c: 9.0})
+    rows = _rows(m)
+    assert sum("(9 * (1 - " in r for r in rows) == 1
+    assert sum("(20 * (1 - " in r for r in rows) == 1
+
+
+# ── exact ties, LP failures ──────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("sense", ["<=", ">="])
+def test_an_m_equal_to_the_interval_bound_is_certified(sense):
+    """The interval enclosure is the one the computed M rests on; an M equal to
+    it is as valid (#1851 review point 4: a 1e-9 slack refused every tie)."""
+    m = dm.Model("tie")
+    x = m.continuous("x", lb=0, ub=10)
+    c = x <= 2 if sense == "<=" else x >= 5
+    other = x >= 5 if sense == "<=" else x <= 2
+    d = m.either_or([[c], [other]], big_m={c: 8.0 if sense == "<=" else 5.0})
+    verdict = resolve_user_big_ms(d, m)[(id(d), 0, 0)]
+    assert verdict.certified, verdict.reason
+    m.maximize(x) if sense == "<=" else m.minimize(x)
+    r = _solve(m)
+    assert r.status == "optimal" and r.gap_certified
+
+
+def _conditioned():
+    m = dm.Model("cond")
+    x = m.continuous("x", lb=0, ub=100)
+    c = x <= 2
+    d = m.either_or([[c], [x >= 5, x <= 12]], big_m={c: 11})
+    return m, d
+
+
+def test_an_lp_that_does_not_end_optimal_leaves_the_m_uncertified(monkeypatch):
+    import discopt.solvers.lp_backend as lpb
+    from discopt.solvers import SolveStatus
+
+    real = lpb.get_exact_lp_solver()
+
+    def failing(**kw):
+        res = real(**kw)
+        res.status = SolveStatus.ITERATION_LIMIT
+        return res
+
+    monkeypatch.setattr(lpb, "get_exact_lp_solver", lambda: failing)
+    m, d = _conditioned()
+    verdict = resolve_user_big_ms(d, m)[(id(d), 0, 0)]
+    assert not verdict.certified and "ended" in verdict.reason
+
+
+def test_no_rigorous_lp_bound_leaves_the_m_uncertified(monkeypatch):
+    import discopt._relax.gdp_reformulate as gr
+
+    monkeypatch.setattr(gr, "_safe_lp_max", lambda *a, **k: None)
+    m, d = _conditioned()
+    verdict = resolve_user_big_ms(d, m)[(id(d), 0, 0)]
+    assert not verdict.certified and "no rigorous LP bound" in verdict.reason
+
+
+def test_an_infeasible_region_lp_says_why_it_is_not_certified():
+    """#1851 review point 6: the other disjunct is empty, so the row is never
+    relaxed, but a float LP's infeasible is not a proof; the reason says so."""
+    m = dm.Model("empty_region")
+    x = m.continuous("x", lb=0, ub=10)
+    c = x <= 2
+    d = m.either_or([[c], [x >= 5, x <= 4]], big_m={c: 1.0})
+    verdict = resolve_user_big_ms(d, m)[(id(d), 0, 0)]
+    assert not verdict.certified
+    assert "reports infeasible" in verdict.reason and "not a proof" in verdict.reason
 
 
 def test_bound_pretransform_keeps_the_user_ms_aligned():

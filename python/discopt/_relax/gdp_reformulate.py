@@ -360,11 +360,14 @@ def reformulate_gdp(
     # against the *declared* model. Used by the big-M lowering only.
     _user_ctx: list = []
 
-    def _user_ms(dc: _DisjunctiveConstraint, nested: bool) -> Optional[dict[int, float]]:
-        from discopt.gdp.user_big_m import _Context, _has_big_m, resolve_user_big_ms
+    def _user_ms(
+        dc: _DisjunctiveConstraint, nested: bool
+    ) -> Optional[dict[tuple[int, int, int], float]]:
+        from discopt.gdp.user_big_m import _Context, _has_big_m, record_use, resolve_user_big_ms
 
         if not _has_big_m(dc):
             return None
+        record_use(dc)  # before validating: a refusal still means the M was read
         if not _user_ctx:
             _user_ctx.append(_Context(model))
         verdicts = resolve_user_big_ms(dc, model, nested=nested, ctx=_user_ctx[0])
@@ -2185,12 +2188,13 @@ def _reformulate_disjunction(
     selectors: Optional[list[Variable]] = None,
     pretransform: bool = False,
     multiply: bool = False,
-    user_ms: Optional[dict[int, float]] = None,
+    user_ms: Optional[dict[tuple[int, int, int], float]] = None,
 ) -> tuple[list[Variable], list[Constraint]]:
     """Reformulate a disjunction via big-M (or, with ``multiply``, by binary
     multiplication: step 2 becomes ``g_j(x) * y_k <= 0``, #1775 G2.5).
 
-    ``user_ms`` maps ``id(row)`` to a user M (#1775 G2.6, already validated by
+    ``user_ms`` maps a row's position ``(id(disjunction), disjunct, row)`` to a
+    user M (#1775 G2.6, already validated by
     :func:`discopt.gdp.user_big_m.resolve_user_big_ms`), used in place of the
     computed M for that row and for the rows of nested disjunctions.
 
@@ -2287,8 +2291,8 @@ def _reformulate_disjunction(
                     )
                 )
                 continue
-            if user_ms is not None and id(con) in user_ms:
-                M = user_ms[id(con)]
+            if user_ms is not None and (id(dc), k, j) in user_ms:
+                M = user_ms[(id(dc), k, j)]
             elif lp_data is not None:
                 M = _compute_big_m_lp(con, model, lp_data)
             else:
@@ -2382,7 +2386,7 @@ def _reformulate_disjunction_nested(
     add_aux_binary,
     parent_selector,
     multiply: bool = False,
-    user_ms: Optional[dict[int, float]] = None,
+    user_ms: Optional[dict[tuple[int, int, int], float]] = None,
 ) -> tuple[list[Variable], list[Constraint]]:
     """Reformulate a nested disjunction linked to a parent selector.
 
@@ -2451,8 +2455,8 @@ def _reformulate_disjunction_nested(
                     )
                 )
                 continue
-            if user_ms is not None and id(con) in user_ms:
-                M = user_ms[id(con)]  # #1775 G2.6
+            if user_ms is not None and (id(dc), k, j) in user_ms:
+                M = user_ms[(id(dc), k, j)]  # #1775 G2.6
             else:
                 M = _compute_big_m(con, model)
             deactivation = _wrap(M) * (_wrap(1.0) - y_k)
