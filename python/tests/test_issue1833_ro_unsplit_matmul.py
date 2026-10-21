@@ -76,18 +76,14 @@ def test_unknown_static_shape_split_by_evaluation(monkeypatch):
     assert len(rows) == 2
 
 
-def test_unevaluable_shape_refused(monkeypatch):
-    import discopt.ro.formulations._common as common
+def test_unevaluable_shape_refused():
+    """A row whose shape cannot be evaluated is refused, never assumed scalar."""
+    from discopt.modeling.core import FunctionCall
 
     m = dm.Model("refuse")
     x = m.continuous("x", lb=0, ub=20)
     p = m.parameter("p", value=np.array([1.0, 1.0]))
-    m.subject_to(x + M @ p <= 10)
-    monkeypatch.setattr(common, "_shape_of", lambda e: None)
-
-    def boom(e):
-        raise NotImplementedError("no")
-
-    monkeypatch.setattr(common, "eval_constant_expr", boom)
+    # A function node with no shape rule over a vector: shape unknown.
+    m.subject_to(x + FunctionCall("no_such_op", M @ p) <= 10)
     with pytest.raises(NotImplementedError, match="#1833"):
         _split_vector_uncertain_rows(m._constraints, {"p"})

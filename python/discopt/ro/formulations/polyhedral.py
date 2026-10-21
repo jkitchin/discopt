@@ -227,6 +227,7 @@ class PolyhedralRobustFormulation:
             if not isinstance(con, Constraint):
                 new_constraints.append(con)
                 continue
+            _require_scalar_row(con, set(unc_map))
             new_body, aux_cons = _robustify_expr(con.body, maximize=True)
             new_constraints.append(
                 Constraint(
@@ -247,6 +248,31 @@ class PolyhedralRobustFormulation:
         new_expr, aux_cons = _robustify_expr(obj.expression, maximize=maximize_obj_wc)
         m._objective = Objective(expression=new_expr, sense=obj.sense)
         m._constraints.extend(aux_cons)
+
+
+def _require_scalar_row(con, names: set[str]) -> None:
+    """Refuse an uncertain row that is not one scalar row.
+
+    The counterpart gives each row ONE set of duals ``lam``; a vector row would
+    need one set per element, since the adversary picks a different worst case
+    for each. :class:`~discopt.ro.RobustCounterpart` splits vector rows by their
+    evaluated shape first, so this only fires when the formulation is driven
+    directly with an unsplit row -- which gave ``x + M @ p <= 10`` a vector of
+    dual equalities and reported a feasible model infeasible (#1833).
+    """
+    from discopt.ro.counterpart import _evaluated_shape
+
+    if not _contains_uncertain_param(con.body, names):
+        return
+    shape = _evaluated_shape(con.body)
+    rhs_size = int(np.asarray(con.rhs).size)
+    if shape is None or int(np.prod(shape)) != 1 or rhs_size != 1:
+        raise NotImplementedError(
+            f"Polyhedral robust counterpart: the uncertain row {con.name!r} has shape "
+            f"{shape if shape is not None else 'unknown'}, not one scalar row. Each "
+            "scalar row needs its own dual multipliers; split it into scalar rows "
+            "(RobustCounterpart does this) rather than dualize it as one."
+        )
 
 
 def _eval_constant_expr(expr) -> float:

@@ -1088,6 +1088,7 @@ def _contains_uncertain_param(expr, param_names: set[str]) -> bool:
     """Check whether *expr* contains any Parameter whose name is in *param_names*."""
     from discopt.modeling.core import (
         BinaryOp,
+        CustomCall,
         FunctionCall,
         IndexExpression,
         MatMulExpression,
@@ -1099,6 +1100,11 @@ def _contains_uncertain_param(expr, param_names: set[str]) -> bool:
 
     if isinstance(expr, Parameter):
         return expr.name in param_names
+    if isinstance(expr, CustomCall):
+        # An uncertain parameter passed to an opaque ``dm.custom`` function was
+        # invisible here, so the RO-2 guard below (which uses this walker) did
+        # not see it either: ``x + f(p) <= 10`` was solved at the nominal p.
+        return any(_contains_uncertain_param(a, param_names) for a in expr.args)
     if isinstance(expr, (BinaryOp, MatMulExpression)):
         return _contains_uncertain_param(expr.left, param_names) or _contains_uncertain_param(
             expr.right, param_names
