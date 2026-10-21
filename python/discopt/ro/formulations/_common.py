@@ -1448,6 +1448,13 @@ def eval_constant_expr(expr) -> np.ndarray:
     elif isinstance(expr, FunctionCall) and expr.func_name in _NUMPY_FUNCS:
         if len(expr.args) == 1:
             return np.asarray(_NUMPY_FUNCS[expr.func_name](eval_constant_expr(expr.args[0])))
+    elif isinstance(expr, FunctionCall) and expr.func_name in ("max", "min") and len(expr.args) > 1:
+        # ``dm.maximum`` / ``dm.minimum``: the element-wise max / min of the args.
+        fold = np.maximum if expr.func_name == "max" else np.minimum
+        out = eval_constant_expr(expr.args[0])
+        for a in expr.args[1:]:
+            out = fold(out, eval_constant_expr(a))
+        return np.asarray(out)
     raise NotImplementedError(
         f"Robust counterpart: cannot evaluate the constant sub-expression {expr!r} "
         f"({type(expr).__name__}) numerically, so the sign of the coefficient it "
@@ -1707,6 +1714,313 @@ def _contains_uncertain_param(expr, param_names: set[str]) -> bool:
         # left at its nominal value (#1836 audit).
         return any(_contains_uncertain_param(a, param_names) for a in expr.args)
     return False
+
+
+#: Model attribute listing the rows (and ``"<objective>"``) whose box counterpart
+#: is only a conservative restriction (#1848). ``Model.solve`` withholds the
+#: certificate of a model that carries it: the restriction's ``infeasible`` does
+#: not prove the robust problem infeasible, and its optimum is not the robust
+#: optimum. Not written by :mod:`discopt.serialize`, which therefore refuses it.
+CONSERVATIVE_ATTR = "_ro_conservative_rows"
+
+
+def record_conservative(model, where: str) -> None:
+    """Note that *where*'s robust counterpart may be conservative (#1848)."""
+    held = getattr(model, CONSERVATIVE_ATTR, None)
+    if held is None:
+        held = []
+        setattr(model, CONSERVATIVE_ATTR, held)
+    if where not in held:
+        held.append(where)
+
+
+def additive_terms(expr) -> tuple[float, list[list]]:
+    """``(const, [[coef, term], ...])`` with ``expr == const + sum(coef * term)``.
+
+    Flattens ``+``, ``-``, ``neg``, a scalar ``Constant`` factor or divisor and
+    ``SumOverExpression``; any other node is a term. An index over one of those
+    nodes is distributed to its operands (``(a + b)[i]`` is ``a[i] + b[i]``, a
+    scalar operand broadcasts unindexed) when every operand's static shape is
+    either the node's or ``()`` -- the form a split vector row takes. Exact: the
+    same function, regrouped.
+    """
+    from discopt.modeling.core import (
+        BinaryOp,
+        Constant,
+        IndexExpression,
+        SumOverExpression,
+        UnaryOp,
+    )
+
+    def _operands(e):
+        if isinstance(e, BinaryOp) and e.op in ("+", "-", "*", "/"):
+            return [e.left, e.right]
+        if isinstance(e, UnaryOp) and e.op == "neg":
+            return [e.operand]
+        if isinstance(e, SumOverExpression):
+            return list(e.terms)
+        return None
+
+    def _push_index(e):
+        """``e.base`` rebuilt with ``e.index`` applied to each operand, or None."""
+        base, idx = e.base, e.index
+        ops = _operands(base)
+        sb = _shape_of(base)
+        if ops is None or sb is None or sb == ():
+            return None
+        new_ops = []
+        for o in ops:
+            so = _shape_of(o)
+            if so == ():
+                new_ops.append(o)
+            elif so == sb:
+                new_ops.append(IndexExpression(o, idx))
+            else:
+                return None
+        if isinstance(base, BinaryOp):
+            return BinaryOp(base.op, new_ops[0], new_ops[1])
+        if isinstance(base, UnaryOp):
+            return UnaryOp(base.op, new_ops[0])
+        return SumOverExpression(new_ops)
+
+    def _scalar_const(e):
+        if isinstance(e, Constant) and np.asarray(e.value).size == 1:
+            return float(np.asarray(e.value).reshape(()))
+        return None
+
+    const = 0.0
+    pairs: list[list] = []  # [coef, term]
+    stack = [(expr, 1.0)]
+    while stack:
+        e, c = stack.pop()
+        sc = _scalar_const(e)
+        if sc is not None:
+            const += c * sc
+            continue
+        if isinstance(e, BinaryOp) and e.op in ("+", "-"):
+            stack.append((e.right, c if e.op == "+" else -c))
+            stack.append((e.left, c))
+            continue
+        if isinstance(e, UnaryOp) and e.op == "neg":
+            stack.append((e.operand, -c))
+            continue
+        if isinstance(e, BinaryOp) and e.op == "*":
+            lc, rc = _scalar_const(e.left), _scalar_const(e.right)
+            if lc is not None:
+                stack.append((e.right, c * lc))
+                continue
+            if rc is not None:
+                stack.append((e.left, c * rc))
+                continue
+        if isinstance(e, BinaryOp) and e.op == "/":
+            rc = _scalar_const(e.right)
+            if rc is not None and rc != 0.0:
+                stack.append((e.left, c / rc))
+                continue
+        if isinstance(e, SumOverExpression):
+            for t in reversed(e.terms):
+                stack.append((t, c))
+            continue
+        if isinstance(e, IndexExpression):
+            pushed = _push_index(e)
+            if pushed is not None:
+                stack.append((pushed, c))
+                continue
+        pairs.append([c, e])
+
+    return const, pairs
+
+
+def cancel_like_terms(expr):
+    """*expr* with structurally equal additive terms merged, or *expr* itself.
+
+    ``x + exp(p) - exp(p)`` is ``x``, but per-occurrence sign tracking charges
+    each ``exp(p)`` its own worst case (``exp(p_hi) - exp(p_lo)``): the dependency
+    problem, which made a feasible robust model "infeasible" (#1848). The
+    additive structure (``+``, ``-``, ``neg``, a scalar ``Constant`` factor or
+    divisor, ``SumOverExpression``) is flattened into ``coef * term`` pairs, terms
+    are grouped by exact structural equality (Variables/Parameters by identity,
+    Constants by value), and the coefficients summed. This is the same function,
+    regrouped. Only scalar terms are merged, so a cancelled array term cannot
+    change the row's shape. Returns the original object when nothing merges.
+    """
+    from discopt._relax.least_squares import _expr_equal
+    from discopt.modeling.core import BinaryOp, Constant
+
+    const, pairs = additive_terms(expr)
+
+    merged = False
+    groups: list[list] = []
+    buckets: dict[str, list[int]] = {}
+    for c, e in pairs:
+        key = repr(e)  # a cheap pre-filter; equality is decided by _expr_equal
+        hit = None
+        if _shape_of(e) == ():
+            for gi in buckets.get(key, []):
+                if _expr_equal(groups[gi][1], e):
+                    hit = gi
+                    break
+        if hit is None:
+            buckets.setdefault(key, []).append(len(groups))
+            groups.append([c, e])
+        else:
+            groups[hit][0] += c
+            merged = True
+    if not merged:
+        return expr
+
+    out = None
+    for c, e in groups:
+        if c == 0.0:
+            continue
+        term = e if c == 1.0 else BinaryOp("*", Constant(np.array(c)), e)
+        out = term if out is None else BinaryOp("+", out, term)
+    if out is None:
+        return Constant(np.array(const))
+    if const != 0.0:
+        out = BinaryOp("+", out, Constant(np.array(const)))
+    return out
+
+
+def worst_case_attained(expr, unc_map: dict, maximize: bool, max_components: int = 10) -> bool:
+    """True when sign tracking's worst case of *expr* is attained at a box vertex.
+
+    For a row ``a(x) + h(p)`` -- every term holding an uncertain parameter is
+    variable-free -- sign tracking gives a valid bound ``C`` on the worst case of
+    ``h`` over the box. If some vertex ``v`` has ``h(v) = C`` the bound is
+    achieved, so ``C`` IS the worst case and the counterpart is exact even though
+    a parameter occurs more than once (``|p| - 2p`` over ``[-1, 1]``: both
+    occurrences ask for ``p = -1``). False whenever this cannot be shown: a term
+    mixing variables and uncertain parameters, more than *max_components*
+    uncertain components (``2**k`` vertices), or a node the numeric evaluator
+    does not know. False only withholds a certificate (#1848).
+    """
+    import itertools
+
+    from discopt.modeling.core import BinaryOp, Constant, Variable, _iter_model_leaves
+
+    names = set(unc_map)
+    _const, pairs = additive_terms(expr)
+    h = None
+    for c, t in pairs:
+        if not _contains_uncertain_param(t, names):
+            continue
+        if any(isinstance(leaf, Variable) for leaf in _iter_model_leaves(t)):
+            return False
+        term = BinaryOp("*", Constant(np.array(c)), t)
+        h = term if h is None else BinaryOp("+", h, term)
+    if h is None:
+        return True
+    present = [n for n in sorted(names) if _contains_uncertain_param(h, {n})]
+    lows = {n: np.asarray(unc_map[n].lower, dtype=np.float64) for n in present}
+    highs = {n: np.asarray(unc_map[n].upper, dtype=np.float64) for n in present}
+    sizes = [max(1, lows[n].size) for n in present]
+    if sum(sizes) > max_components:
+        return False
+
+    def _at(values: dict) -> float:
+        e = h
+        for n, v in values.items():
+            e = substitute_param(e, n, Constant(v))
+        val = np.asarray(eval_constant_expr(e), dtype=np.float64)
+        if val.size != 1:
+            raise NotImplementedError("non-scalar uncertain part")
+        return float(val.reshape(()))
+
+    try:
+        with np.errstate(all="ignore"):
+            wc = sign_tracking_substitute(h, lows, highs, names, maximize=maximize, sign=+1)
+            C = float(np.asarray(eval_constant_expr(wc), dtype=np.float64).reshape(()))
+            tol = 1e-9 * max(1.0, abs(C))
+            for bits in itertools.product((0, 1), repeat=sum(sizes)):
+                values, k = {}, 0
+                for n, sz in zip(present, sizes):
+                    pick = np.asarray(bits[k : k + sz], dtype=bool).reshape(lows[n].shape)
+                    values[n] = np.where(pick, highs[n], lows[n])
+                    k += sz
+                v = _at(values)
+                if (v >= C - tol) if maximize else (v <= C + tol):
+                    return True
+    except (NotImplementedError, ValueError):
+        # The evaluator has no rule for a node, or a shape it cannot reduce to a
+        # scalar: exactness is not shown, which is the conservative answer.
+        return False
+    return False
+
+
+def max_uncertain_multiplicity(expr, param_names: set[str]) -> int:
+    """The largest number of occurrences of one uncertain scalar component in *expr*.
+
+    Sign tracking substitutes every occurrence of a parameter at the bound its
+    own (proven) monotone direction asks for. When each scalar component occurs
+    once, those choices are one vertex of the box, so the counterpart is the
+    exact worst case. When a component occurs more than once, two occurrences may
+    take different bounds -- no single point of the box -- and the counterpart is
+    only a conservative restriction (#1848). ``u * u`` of one subtree counts its
+    operand once: sign tracking takes it as ``|u| * |u|`` (or one direction for
+    both factors), which is exact. Counts are per path, memoised per node.
+    """
+    from discopt._relax.least_squares import _expr_equal
+    from discopt.modeling.core import (
+        BinaryOp,
+        CustomCall,
+        FunctionCall,
+        IndexExpression,
+        MatMulExpression,
+        Parameter,
+        SumExpression,
+        SumOverExpression,
+        UnaryOp,
+    )
+
+    memo: dict[int, dict[str, np.ndarray]] = {}
+
+    def _add(acc: dict, other: dict) -> None:
+        for k, v in other.items():
+            acc[k] = acc[k] + v if k in acc else v.copy()
+
+    def _count(e) -> dict[str, np.ndarray]:
+        hit = memo.get(id(e))
+        if hit is not None:
+            return hit
+        out: dict[str, np.ndarray] = {}
+        if isinstance(e, Parameter):
+            if e.name in param_names:
+                out[e.name] = np.ones(max(1, int(np.asarray(e.value).size)), dtype=np.int64)
+        elif isinstance(e, IndexExpression) and isinstance(e.base, Parameter):
+            if e.base.name in param_names:
+                val = np.asarray(e.base.value)
+                cnt = np.zeros(max(1, val.size), dtype=np.int64)
+                try:
+                    picked = np.arange(val.size).reshape(val.shape)[e.index]
+                    np.add.at(cnt, np.ravel(picked), 1)
+                except (IndexError, TypeError, ValueError):
+                    cnt += 1  # cannot resolve the index: every component
+                out[e.base.name] = cnt
+        else:
+            if isinstance(e, BinaryOp):
+                kids = [e.left, e.right]
+                if e.op == "*" and _expr_equal(e.left, e.right):
+                    kids = [e.left]
+            elif isinstance(e, MatMulExpression):
+                kids = [e.left, e.right]
+            elif isinstance(e, (UnaryOp, SumExpression)):
+                kids = [e.operand]
+            elif isinstance(e, IndexExpression):
+                kids = [e.base]
+            elif isinstance(e, (FunctionCall, CustomCall)):
+                kids = list(e.args)
+            elif isinstance(e, SumOverExpression):
+                kids = list(e.terms)
+            else:
+                kids = []
+            for k in kids:
+                _add(out, _count(k))
+        memo[id(e)] = out
+        return out
+
+    counts = _count(expr)
+    return max((int(v.max()) for v in counts.values() if v.size), default=0)
 
 
 #: Model attributes that hold expressions outside ``_constraints`` / the

@@ -10462,6 +10462,7 @@ class Model:
                 _guard_unresolved_objective(_ck_res)
                 self._withhold_default_box_certificate(_ck_res)
                 self._withhold_user_big_m_certificate(_ck_res, _ubm_snapshot)
+                self._withhold_conservative_ro_certificate(_ck_res)
                 return _ck_res
 
         from discopt._relax.deadline import deadline_scope
@@ -11250,6 +11251,8 @@ class Model:
             self._withhold_default_box_certificate(result)
             # #1775 G2.6: a user big-M that could not be certified.
             self._withhold_user_big_m_certificate(result, _ubm_snapshot)
+            # #1848: a box robust counterpart that is only a conservative restriction.
+            self._withhold_conservative_ro_certificate(result)
             # #1727: drop the factorable lift's auxiliary columns from ``x``. After
             # the guards above, which judge the point as the route left it. Only
             # names the lift recorded AND the caller did not declare.
@@ -11608,6 +11611,50 @@ class Model:
         result.gap = None
         result.solver_stats = dict(result.solver_stats or {})
         result.solver_stats["certificate/user_big_m_uncertified"] = float(len(reasons))
+
+    def _withhold_conservative_ro_certificate(self, result: "SolveResult") -> None:
+        """#1848: no certificate from a robust counterpart that is not exact.
+
+        The box counterpart worst-cases each occurrence of an uncertain parameter
+        on its own. Where a component still occurs more than once in a non-affine
+        row (after like terms cancel), the occurrences may take different bounds,
+        so the counterpart is a conservative *restriction* of the robust problem:
+        a point it accepts is robust, but its ``infeasible`` does not prove the
+        robust problem infeasible and its optimum is not the robust optimum. The
+        rows are recorded by ``discopt.ro`` (``CONSERVATIVE_ATTR``); a result on
+        such a model keeps its point and loses its certificate. Only downgrades.
+        """
+        from discopt.ro.formulations._common import CONSERVATIVE_ATTR
+
+        rows = getattr(self, CONSERVATIVE_ATTR, None)
+        if not rows:
+            return
+        if not (
+            result.status in ("optimal", "infeasible")
+            or bool(result.gap_certified)
+            or result.bound is not None
+        ):
+            return
+        import logging as _rlogging
+        import warnings as _rwarnings
+
+        msg = (
+            f"{self.name}: the box robust counterpart of {rows} is conservative (an "
+            "uncertain parameter occurs more than once in a nonlinear term, and each "
+            "occurrence was worst-cased separately), so this result is robust but "
+            "carries no certificate and no dual bound (#1848)."
+        )
+        _rlogging.getLogger("discopt.solver").warning(msg)
+        _rwarnings.warn(msg, UserWarning, stacklevel=3)
+        if result.status == "optimal":
+            result.status = "feasible"
+        elif result.status == "infeasible":
+            result.status = "unknown"
+        result.gap_certified = False
+        result._set_bound(None, valid=False)
+        result.gap = None
+        result.solver_stats = dict(result.solver_stats or {})
+        result.solver_stats["certificate/ro_conservative_rows"] = float(len(rows))
 
     def _withhold_default_box_certificate(self, result: "SolveResult") -> None:
         """#1678 (b): no certificate that rests on the default ``±9.999e19`` box.
