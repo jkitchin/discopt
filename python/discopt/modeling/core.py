@@ -6181,15 +6181,47 @@ def _affine_binary_terms(expr) -> Optional[tuple[dict, float]]:
     return None
 
 
+def _require_binary_indicator(indicator, where: str) -> None:
+    """Refuse an indicator column that is not one binary column (#1844).
+
+    An integer ``z in [0, 3]`` or a continuous ``z in [0, 1]`` has no single
+    meaning as "the rows hold when z == 1": the big-M lowering scales the slack by
+    ``1 - z`` (over-enforcing the rows for ``z >= 2``) while binary multiplication
+    multiplies the body by ``z`` (active for any ``z > 0``), so the optimum
+    depended on ``gdp_method``. Checked at ``if_then`` and again by
+    ``Model.validate`` (a variable's type can change after the call, and a
+    deserialized model never passes through ``if_then``).
+    """
+    if _scalar_binary_leaf_key(indicator) is not None:
+        return
+    base = indicator.base if isinstance(indicator, IndexExpression) else indicator
+    vtype = getattr(base, "var_type", None)
+    what = (
+        "a binary variable but not a single column"
+        if vtype is VarType.BINARY
+        else f"{vtype.name.lower() if vtype is not None else type(base).__name__}"
+    )
+    raise TypeError(
+        f"{where}: the indicator {indicator!r} must be a single binary variable "
+        f"(or a BooleanVar), but it is {what}. A non-binary selector has no single "
+        "'active' value: the big-M and binary-multiplication lowerings would give "
+        "different optima (#1844). Use a binary variable (m.binary(...)) and, if "
+        "needed, link it to the integer one."
+    )
+
+
 def _normalize_indicator(indicator, where: str):
     """``(column, active_value)`` for an ``if_then`` indicator (#1677).
 
     A plain variable / indexed variable passes through with ``active_value=1``
-    (non-binary selectors are refused downstream by the integrality gates, as
-    before). A ``BooleanVar`` is its backing binary; ``~b`` is that binary with
-    ``active_value=0``. A compound expression is accepted only when it is an
-    affine function of ONE binary column taking exactly the values {0, 1}: ``z``
-    itself (``active_value=1``) or its complement ``1 - z`` (``active_value=0``).
+    when it is ONE binary column; an integer or continuous selector, or a vector
+    of columns, is refused here (#1844: nothing downstream refused it, and the
+    lowerings then disagreed -- big-M over-enforced the rows for ``z >= 2``,
+    binary multiplication treated every ``z > 0`` as active). A ``BooleanVar``
+    is its backing binary; ``~b`` is that binary with ``active_value=0``. A
+    compound expression is accepted only when it is an affine function of ONE
+    binary column taking exactly the values {0, 1}: ``z`` itself
+    (``active_value=1``) or its complement ``1 - z`` (``active_value=0``).
     Normalising here means every consumer -- the big-M / hull GDP lowering, the
     certificate verifier, serialization, the MPEC residuals -- sees a single 0/1
     column plus the value that activates the rows, which they all already handle.
@@ -6212,6 +6244,7 @@ def _normalize_indicator(indicator, where: str):
             f"{type(indicator).__name__}."
         )
     if isinstance(indicator, (Variable, IndexExpression)):
+        _require_binary_indicator(indicator, where)
         return indicator, 1
     aff = _affine_binary_terms(indicator)
     if aff is not None:
@@ -12306,6 +12339,10 @@ class Model:
             if for_solve and isinstance(c, Constraint):
                 _reject_unnormalized_rhs(c, where="Model.validate", index=ci)
             elif for_solve and isinstance(c, (_IndicatorConstraint, _DisjunctiveConstraint)):
+                if isinstance(c, _IndicatorConstraint):
+                    _require_binary_indicator(
+                        c.indicator, f"Model.validate (_constraints[{ci}])"
+                    )  # #1844
                 # #1858: the rows inside a disjunct or indicator constraint, which
                 # can arrive here without passing a construction-time check (a
                 # direct append, a disjunct list mutated after ``either_or``).
