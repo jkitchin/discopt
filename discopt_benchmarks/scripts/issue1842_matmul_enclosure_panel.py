@@ -273,7 +273,6 @@ def instances():
 
 
 def solve(build, flag: str, tl: float):
-    from discopt.modeling.core import ObjectiveSense
     from discopt.validation.feasibility import verify_point
 
     _set_arm(flag)
@@ -289,7 +288,6 @@ def solve(build, flag: str, tl: float):
             [np.ravel(np.asarray(r.x[v.name], dtype=np.float64)) for v in m._variables]
         )
         bad = not verify_point(m, flat).ok
-    assert (m._objective.sense == ObjectiveSense.MAXIMIZE) in (True, False)
     return r, wall, bad, fired
 
 
@@ -302,8 +300,10 @@ def nl_neutrality(paths, tl: float):
         for f in ("0", "1"):
             _set_arm(f)
             FIRED["n"] = 0
-            out[f] = (from_nl(str(p)).solve(time_limit=tl, deterministic=True), FIRED["n"])
-        (r0, f0), (r1, f1) = out["0"], out["1"]
+            t0 = time.perf_counter()
+            r = from_nl(str(p)).solve(time_limit=tl, deterministic=True)
+            out[f] = (r, FIRED["n"], time.perf_counter() - t0)
+        (r0, f0, w0), (r1, f1, w1) = out["0"], out["1"]
         checks += 2
         if f0 or f1:
             viol.append(f"{p.name}: enclosure fired on a .nl model (OFF {f0}, ON {f1})")
@@ -319,7 +319,9 @@ def nl_neutrality(paths, tl: float):
                 )
             )
         )
-        timed_out = "time_limit" in (r0.status, r1.status)
+        # A budgeted exit with an incumbent reports "feasible", not "time_limit":
+        # key the escape on the limit actually being reached (wall time).
+        timed_out = "time_limit" in (r0.status, r1.status) or max(w0, w1) >= 0.95 * tl
         if not same and not timed_out:
             viol.append(
                 f"{p.name}: OFF {r0.status} n={r0.node_count} obj={r0.objective} vs "
@@ -344,6 +346,18 @@ def main() -> int:
     import discopt._relax.convexity.interval_eval as ie
 
     assert hasattr(ie, "_matmul_enclosure_enabled"), "flag consumer absent from loaded code"
+    # §8: a marker unique to the version under test. The panel's ON arm is "variable
+    # unset", which is ON only once the default is graduated; on a tree from before
+    # the flip both arms would be OFF.
+    saved = os.environ.pop(FLAG, None)
+    try:
+        assert ie._matmul_enclosure_enabled() is True, (
+            f"{FLAG} unset does not read ON in the loaded code ({discopt.__file__}): "
+            "this is not the graduated tree"
+        )
+    finally:
+        if saved is not None:
+            os.environ[FLAG] = saved
     _install_counter()
     print(f"discopt from {discopt.__file__}; load {os.getloadavg()}", flush=True)
     tol = 1e-5
@@ -431,7 +445,8 @@ def main() -> int:
     print(f"node-count changes (OFF -> ON) on both-certified: {node_moves}")
     print(f"uncertified both: ON bound tighter {tighter}, looser {looser}")
     print(f"total wall: OFF {wall['0']:.0f}s ON {wall['1']:.0f}s")
-    return 0 if compared and checks and not viol else 1
+    # §6: an ON solve that never fired the enclosure measured nothing; fail loudly.
+    return 0 if compared and checks and not viol and not unfired else 1
 
 
 if __name__ == "__main__":
