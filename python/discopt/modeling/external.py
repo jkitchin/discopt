@@ -95,7 +95,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Sequence, Union
+from typing import Any, Callable, Optional, Sequence, Union, cast
 
 import numpy as np
 
@@ -541,4 +541,4 @@ def _build_composite(
         (x,), (dx,) = primals, tangents
         return value(x), contract(jacobian(x), dx)
 
-    return value
+    return cast("Callable[..., Any]", value)

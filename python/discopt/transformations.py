@@ -702,6 +702,31 @@ register(
     summary="Big-M plus Sawaya-Grossmann hull-separation cuts, convex disjuncts only (#1775 G2.7)",
 )
 register(
+    "gdp.partition_disjuncts",
+    "discopt.gdp.partition:_partition_in_place",
+    style="in_place",
+    summary="P-split: split additively separable disjunct rows over variable "
+    "partitions (#1775 G2.8)",
+)
+register(
+    "gdp.between_steps",
+    "discopt.gdp.partition:between_steps",
+    style="functional",
+    summary="P-split followed by the hull lowering (#1775 G2.8)",
+)
+register(
+    "gdp.basic_step",
+    "discopt.gdp.basic_step:_basic_step_in_place",
+    style="in_place",
+    summary="Basic step: replace disjunctions by their Cartesian product (#1775 G2.9)",
+)
+register(
+    "gdp.bilinear",
+    "discopt.gdp.bilinear:_bilinear_in_place",
+    style="in_place",
+    summary="Binary-times-variable products as disjunctions (#1775 G2.9)",
+)
+register(
     "gdp.bound_pretransformation",
     "discopt.gdp.bound_pretransform:_bound_pretransform_in_place",
     style="in_place",

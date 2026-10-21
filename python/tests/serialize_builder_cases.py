@@ -609,6 +609,29 @@ def _selected_second_disjunct(model):
     return [disjunction.disjuncts[1]]
 
 
+def _psplit_source():
+    """A disjunction whose first row is separable over x and y (#1775 G2.8)."""
+    m, x, y = _xy("psplit")
+    m.either_or([[x**2 + y**2 <= 4], [x >= 3]], name="d")
+    return m
+
+
+def _two_disjunctions():
+    """Two disjunctions sharing x, for the basic step (#1775 G2.9)."""
+    m, x, y = _xy("basic_step")
+    m.either_or([[x <= 2], [x >= 8]], name="a")
+    m.either_or([[x <= 5, y >= 6], [x >= 5, y <= 4]], name="b")
+    return m
+
+
+def _bilinear_source():
+    """A binary-times-continuous product, for gdp.bilinear (#1775 G2.9)."""
+    m, x, y = _xy("bilinear")
+    z = m.binary("z")
+    m.subject_to(z * x + y >= 3)
+    return m
+
+
 def _create(name, source, **kwargs):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -658,6 +681,14 @@ _TRANSFORM_ROUND_TRIPS = {
         "gdp.bound_pretransformation", _either_or("select_one")
     )[0],
     "transform:gdp.cuttingplane": _transform("gdp.cuttingplane", _either_or("select_one"))[0],
+    "transform:gdp.partition_disjuncts": _transform("gdp.partition_disjuncts", _psplit_source)[0],
+    "transform:gdp.between_steps": _transform("gdp.between_steps", _psplit_source)[0],
+    "transform:gdp.basic_step": _transform(
+        "gdp.basic_step",
+        _two_disjunctions,
+        lambda m: {"disjunctions": [c for c in m._constraints if hasattr(c, "disjuncts")]},
+    )[0],
+    "transform:gdp.bilinear": _transform("gdp.bilinear", _bilinear_source)[0],
     "transform:mpec.gdp": _mpcc_transform("mpec.gdp"),
     "transform:mpec.sos1": _mpcc_transform("mpec.sos1"),
     "transform:mpec.scholtes": _mpcc_transform("mpec.scholtes", scholtes=True),

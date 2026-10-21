@@ -21965,7 +21965,7 @@ def _tangent_box_bound(value: float, grad: np.ndarray, s: np.ndarray, lo, hi) ->
     when anything is non-finite (#1491): no bound is claimed from a bad slope.
     """
     if not (np.isfinite(value) and np.all(np.isfinite(grad)) and np.all(np.isfinite(s))):
-        return -np.inf
+        return float(-np.inf)
     total = float(value)
     for j in range(grad.size):
         gj = float(grad[j])
@@ -21973,7 +21973,7 @@ def _tangent_box_bound(value: float, grad: np.ndarray, s: np.ndarray, lo, hi) ->
             continue
         target = lo[j] if gj > 0.0 else hi[j]
         if not np.isfinite(target):
-            return -np.inf
+            return float(-np.inf)
         total += gj * (float(target) - float(s[j]))
     return total
 
@@ -22056,7 +22056,7 @@ def _outward_tangent_bound(
         if np.any(uncertain):
             reach = np.maximum(s_a[uncertain] - lo_a[uncertain], hi_a[uncertain] - s_a[uncertain])
             if not np.all(np.isfinite(reach)):
-                return -np.inf
+                return float(-np.inf)
             gu = np.abs(g[uncertain])
             # the tangent already added -|g_j| |t_j - s_j| (0 where g_j == 0)
             paid = np.where(gu > 0.0, gu * np.abs(target[uncertain] - s_a[uncertain]), 0.0)
@@ -22605,7 +22605,7 @@ def _convex_nlp_certificate(
             if m > 0:
                 cy = np.asarray(evaluator.evaluate_constraints(y), np.float64)
                 if not np.all(np.isfinite(cy)) or _viol(cy) > viol_tol:
-                    return np.inf
+                    return float(np.inf)
             val = float(evaluator.evaluate_objective(y))
             val = val if np.isfinite(val) else np.inf
             probed_p.append((val, t))
@@ -31131,7 +31131,7 @@ def _convex_qp_node_lower_bound(
     lo = np.where(lo <= -_CONSTRAINT_INF, -np.inf, lo)
     hi = np.where(hi >= _CONSTRAINT_INF, np.inf, hi)
     if not np.all(np.isfinite(x)):
-        return -np.inf
+        return float(-np.inf)
     Pm = np.zeros((n, n)) if P is None else np.asarray(P, dtype=np.float64)  # noqa: N806
     cv = np.asarray(c, dtype=np.float64)
     Px = Pm @ x  # noqa: N806
@@ -31207,11 +31207,13 @@ def _convex_qp_node_lower_bound(
         # the polyhedral bound below is also computed, and the larger is kept (both
         # are valid lower bounds).
         if closed >= f - 1e-7 * (1.0 + abs(f)):
-            return closed
-        return max(
-            box_only,
-            closed,
-            _convex_qp_node_lower_bound(P, c, obj_const, G, h, A, b, node_lb, node_ub, x),
+            return float(closed)
+        return float(
+            max(
+                box_only,
+                closed,
+                _convex_qp_node_lower_bound(P, c, obj_const, G, h, A, b, node_lb, node_ub, x),
+            )
         )
 
     # Multiplier-free: f(x) + min over the node polyhedron of grad f(x) . (u - x).
