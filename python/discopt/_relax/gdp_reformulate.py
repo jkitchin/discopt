@@ -2921,7 +2921,16 @@ def _reformulate_disjunction_hull(
                 persp_map.update({wname: w / y_clamp for wname, w in local[k].items()})
                 subst_body = _substitute_vars(con.body, persp_map)
                 hull_body = subst_body * y_clamp
-                if g0 != 0.0:
+                g0_live = _parametric_body_at_zero(con.body, zero_vars)
+                if g0_live is not None:
+                    # A Parameter in the body: g(0) must track its live value, or a
+                    # model lowered once (``transformations.create_using``) keeps
+                    # ``eps * g0_old`` after ``p.value`` changes and leaves an
+                    # off-disjunct residual -- the #1043 false-infeasible class
+                    # (PR #1862 review).
+                    g0_expr = g0_live - _wrap(float(np.max(con.rhs)))
+                    hull_body = hull_body - _wrap(eps) * g0_expr * (_wrap(1.0) - y_k)
+                elif g0 != 0.0:
                     hull_body = hull_body - _wrap(eps * g0) * (_wrap(1.0) - y_k)
                 rhs_expr = _wrap(con.rhs) * y_clamp
 
@@ -3075,6 +3084,64 @@ class HullPerspectiveOriginError(ValueError):
     Raised by :func:`_body_at_zero`. See its docstring for why this is a refusal
     rather than a fallback value.
     """
+
+
+def _parametric_body_at_zero(expr: Expression, all_vars: dict[str, Variable]):
+    """``g(0)`` as an expression in the model's Parameters, or ``None`` if it has none.
+
+    :func:`_body_at_zero` reads a Parameter at its value when the lowering runs.
+    That is enough inside ``Model.solve`` (it lowers again on every solve), but a
+    model lowered once and re-solved after ``p.value = ...`` must cancel the new
+    ``g(0)``, so the residual term is built from this expression instead. It is
+    accepted only when every operation in it stays finite for any parameter
+    value (``+ - *``, a non-negative integer power, ``abs``/``neg``, ``exp``,
+    ``sin``, ``cos``, ``tanh``): ``log(p)`` or ``1/p`` could become undefined
+    after a later value change, where the lowering can no longer refuse, so such
+    a body is refused now -- as every Parameter-bearing perspective was before.
+    """
+    from discopt.modeling.core import Parameter, _iter_model_leaves
+
+    if not any(isinstance(leaf, Parameter) for leaf in _iter_model_leaves(expr)):
+        return None
+    zeros: dict[str, Expression] = {
+        name: Constant(np.zeros(tuple(v.shape))) if tuple(v.shape) else Constant(np.array(0.0))
+        for name, v in all_vars.items()
+    }
+    g0 = _substitute_vars(expr, zeros)
+    safe_funcs = {"exp", "sin", "cos", "tanh", "abs"}
+    stack = [g0]
+    while stack:
+        e = stack.pop()
+        if isinstance(e, (Constant, Parameter)):
+            continue
+        if isinstance(e, IndexExpression) and isinstance(e.base, (Constant, Parameter)):
+            continue
+        if isinstance(e, BinaryOp) and e.op in ("+", "-", "*"):
+            stack.extend((e.left, e.right))
+            continue
+        if isinstance(e, BinaryOp) and e.op == "**" and isinstance(e.right, Constant):
+            p = np.asarray(e.right.value, dtype=np.float64)
+            if p.size == 1 and float(p) >= 0 and float(p) == int(p):
+                stack.append(e.left)
+                continue
+        if isinstance(e, UnaryOp) and e.op in ("neg", "-", "abs"):
+            stack.append(e.operand)
+            continue
+        if isinstance(e, FunctionCall) and e.func_name in safe_funcs and len(e.args) == 1:
+            stack.append(e.args[0])
+            continue
+        terms = _sumover_terms(e)
+        if terms is not None:
+            stack.extend(terms)
+            continue
+        raise HullPerspectiveOriginError(
+            f"the body's value at the origin depends on a Parameter through "
+            f"{type(e).__name__} {e!r}, which may become undefined for another "
+            "parameter value; the hull perspective could then not cancel its residual "
+            "on a de-selected disjunct. Use gdp_method='big-m', or move the Parameter "
+            "out of that operation"
+        )
+    return g0
 
 
 def _body_at_zero(expr: Expression, all_vars: dict[str, Variable]) -> float:

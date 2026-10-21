@@ -116,6 +116,10 @@ def _expr_equal(a: Expression, b: Expression) -> bool:
 
 def _index_equal(ia, ib) -> bool:
     """Compare two ``IndexExpression`` indices (ints, slices, tuples, arrays)."""
+    # ``x[True]`` adds an axis and ``x[1]`` picks an entry: a boolean never equals
+    # an integer index, though ``True == 1`` (PR #1862 review).
+    if isinstance(ia, (bool, np.bool_)) != isinstance(ib, (bool, np.bool_)):
+        return False
     if type(ia) is not type(ib):
         # int vs np.integer etc. — fall back to value comparison below.
         try:

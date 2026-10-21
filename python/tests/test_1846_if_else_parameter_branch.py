@@ -84,3 +84,48 @@ def test_body_at_zero_reads_the_indexed_entry():
     vars_ = {"x": x}
     assert _body_at_zero(dm.exp(x) + c[0], vars_) == pytest.approx(2.0)  # was 1 + max(c)
     assert _body_at_zero(dm.exp(x) + p[1], vars_) == pytest.approx(8.0)  # was a refusal
+
+
+def test_lowered_model_tracks_a_parameter_change():
+    # PR #1862 review: a model lowered once (transformations API) kept the hull
+    # residual eps*g(0) at the Parameter's lowering-time value, so after
+    # ``q.value = 50`` the equality disjunct's off-face residual was not cancelled
+    # and the lowered model reported a false ``infeasible`` (truth 4.0).
+    import discopt.transformations as dt
+
+    m = dm.Model()
+    x = m.continuous("x", lb=0, ub=5)
+    y = m.continuous("y", lb=0, ub=5)
+    q = m.parameter("q", value=3.0)
+    m.either_or([[dm.exp(x) + q == y + 2], [x >= 4]])
+    m.minimize(x + y)
+    lowered = dt.create_using("gdp.hull", m)
+    lq = next(p for p in lowered._parameters if p.name == "q")
+    for value, truth in ((3.0, 2.0), (50.0, 4.0)):
+        lq.value = value
+        r = _solve(lowered)
+        assert r.status == "optimal", value
+        assert r.objective == pytest.approx(truth, abs=1e-4), value
+
+
+def test_parameter_in_an_unsafe_origin_value_is_refused():
+    # log(q) at the origin may become undefined for a later q, where a lowered
+    # model can no longer refuse: refused at lowering, as before #1846.
+    from discopt._relax.gdp_reformulate import reformulate_gdp
+
+    m = dm.Model()
+    x = m.continuous("x", lb=0, ub=5)
+    q = m.parameter("q", value=3.0)
+    m.either_or([[dm.exp(x) + dm.log(q) <= 4], [x >= 4]])
+    m.minimize(x)
+    with pytest.raises(ValueError, match="may become undefined"):
+        reformulate_gdp(m, "hull")
+
+
+def test_bool_index_is_not_an_integer_index():
+    from discopt._relax.least_squares import _expr_equal
+
+    m = dm.Model()
+    x = m.continuous("x", shape=(2,), lb=-1, ub=1)
+    assert not _expr_equal(x[True], x[1])
+    assert _expr_equal(x[1], x[np.int64(1)])
