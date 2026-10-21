@@ -11,8 +11,10 @@ shape is the same enclosure), and so do the sibling fallbacks (``**`` with a
 non-scalar exponent, multi-argument calls, unknown binary ops, and a division by
 an interval containing zero). The finite interval dot product for the general
 1-D / 2-D forms is bound-changing -- ``c @ x``, ``x @ x``, ``x @ Q @ x`` went
-from unbounded to finite and moved node counts on a solve panel -- so it is
-behind the default-OFF ``DISCOPT_MATMUL_INTERVAL_ENCLOSURE`` (CLAUDE.md §5).
+from unbounded to finite and moved node counts on a solve panel -- so it was
+behind ``DISCOPT_MATMUL_INTERVAL_ENCLOSURE`` until the CLAUDE.md §5 panel
+graduated it default ON (``=0`` is the opt-out). The repro now certifies on the
+default path.
 """
 
 from __future__ import annotations
@@ -34,12 +36,12 @@ OPT = 9.0 - np.sqrt(2.0)
 
 @pytest.fixture
 def enclosure_on(monkeypatch):
-    monkeypatch.setenv(FLAG, "1")
+    monkeypatch.delenv(FLAG, raising=False)  # the default since graduation
 
 
 @pytest.fixture
 def enclosure_off(monkeypatch):
-    monkeypatch.delenv(FLAG, raising=False)
+    monkeypatch.setenv(FLAG, "0")
 
 
 def _repro():
@@ -61,7 +63,7 @@ def test_issue_repro_solves_to_optimum(enclosure_on):
 
 
 def test_issue_repro_flag_off_does_not_crash_and_is_sound(enclosure_off):
-    # The IndexError is gone without the flag, but the constant ``sum(M @ M)`` has
+    # With the opt-out the IndexError stays gone, but the constant ``sum(M @ M)`` has
     # no finite enclosure, so the dual bound stays at the box (measured: status
     # ``feasible``, bound 20.0, ~7000 nodes in 5 s). Whatever it reports must hold.
     m, x = _repro()
