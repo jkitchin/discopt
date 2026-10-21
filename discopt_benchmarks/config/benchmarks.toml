@@ -34,6 +34,12 @@ instance_list_inline = [
 ]
 time_limit_seconds = 60
 
+[suites.scip_wins]
+description = "13 small MINLPLib instances SCIP solves in <=5 s and discopt does not in 120 s (2026-10-21 screen)"
+sources = ["minlplib"]
+instance_list = "config/suites/scip_wins.txt"
+time_limit_seconds = 120
+
 [suites.miqp]
 description = "MIQP class: every MINLPLib BQP/IQP/MBQP/MIQP instance (quadratic objective, linear constraints, discrete vars) -- 150 instances, all with a .solu oracle"
 sources = ["minlplib"]
