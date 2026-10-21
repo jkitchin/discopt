@@ -14469,6 +14469,7 @@ def solve_model(
                     use_learned_relaxations=use_learned_relaxations,
                     mccormick_bounds=mccormick_bounds,
                     gdp_method=gdp_method,
+                    gdp_options=gdp_options,
                     decomposition=decomposition,
                     decomposition_structure=decomposition_structure,
                     record_decomposition=record_decomposition,
