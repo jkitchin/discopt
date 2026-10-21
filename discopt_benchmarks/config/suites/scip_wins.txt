@@ -4,7 +4,7 @@
 # docs/dev/scip-wins-2026-10-21.md. One or two per failure class; re-derive the
 # list from the screen, do not extend it by hand.
 #
-# Not vendored: run with --fetch (or --use-cache).
+# Not vendored: run with --fetch (or --use-cache). Tracked in #1866.
 #
 # convex IQCP, single constraint: no proof (SCIP <= 0.5 s)
 ball_mk3_10
