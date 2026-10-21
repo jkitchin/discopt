@@ -29,6 +29,7 @@ import numpy as np
 from discopt.ro.formulations._common import (
     _contains_uncertain_param,
     aggregate_affine_counterpart,
+    is_affine_in_params,
     sign_tracking_substitute,
     substitute_param,
 )
@@ -192,7 +193,14 @@ class BoxRobustFormulation:
                 )
                 coeff_expr = BinaryOp("-", unit, base)
 
-                if not _contains_variable(coeff_expr):
+                # The finite differences below are the coefficients of ``xi`` only
+                # for a row affine in p; for ``x + exp(p)`` they are secants and
+                # the |coeff| linearization treated a nonlinear row as linear
+                # (#1841). Such a row is worst-cased by sign tracking instead,
+                # which is sound through monotone nodes and refuses otherwise.
+                if not _contains_variable(coeff_expr) or not is_affine_in_params(
+                    expr_at_nom, {pname}
+                ):
                     # Non-bilinear: use sign-tracking for this param only.
                     # Apply to result which already has all params at nominal.
                     # Re-derive the non-bilinear worst-case contribution.
@@ -240,7 +248,6 @@ class BoxRobustFormulation:
                     if delta_arr.size == 1 and nominal_arr.size > 1:
                         delta_arr = np.full(nominal_arr.shape, float(delta_arr.flat[0]))
                     is_scalar_param = np.ndim(nominal) == 0
-                    t_ub = _estimate_coeff_bound(m)
 
                     for j in range(nominal_arr.size):
                         if float(delta_arr.flat[j]) == 0.0:
@@ -260,12 +267,20 @@ class BoxRobustFormulation:
                         unit_j = substitute_param(expr_at_nom, pname, bumped)
                         coeff_j = BinaryOp("-", unit_j, base)
 
-                        t_var = m.continuous(
-                            f"{self._prefix}_abs{aux_idx}",
-                            lb=0,
-                            ub=t_ub,
-                        )
+                        t_ub = _coeff_magnitude_bound(coeff_j)
+                        t_name = f"{self._prefix}_abs{aux_idx}"
+                        if t_ub is None:
+                            t_var = m.continuous(t_name, lb=0)
+                        else:
+                            t_var = m.continuous(t_name, lb=0, ub=t_ub)
                         aux_idx += 1
+                        if t_ub is None:
+                            # #1834: no finite enclosure of |coeff_j|, so t is
+                            # unbounded above by construction; the large-bounds
+                            # warning's remedy does not apply to it (#1755).
+                            if not hasattr(m, "_free_by_construction"):
+                                m._free_by_construction = set()
+                            m._free_by_construction.add(t_var.name)
 
                         # |coeff_j| <= t_j:  coeff_j - t_j <= 0  and  -coeff_j - t_j <= 0
                         new_constraints.append(
@@ -344,21 +359,30 @@ class BoxRobustFormulation:
         return False
 
 
-def _estimate_coeff_bound(m) -> float:
-    """Estimate an upper bound on the magnitude of any linear coefficient.
+def _coeff_magnitude_bound(coeff) -> "float | None":
+    """A valid upper bound on ``|coeff(x)|`` over the variable box, or ``None``.
 
-    Uses the maximum absolute variable bound in the model as a conservative
-    estimate.  This is used to set finite bounds on absolute-value auxiliary
-    variables so the IPM solver converges reliably.
+    Taken from a sound interval enclosure of the coefficient expression, so the
+    ``ro_abs`` auxiliary ``t >= |coeff|`` never cuts off its own counterpart.
+    The former cap ``max|variable bound| + 1`` ignored the coefficient's scale:
+    ``5 * y * p`` with ``y`` in [-10, 10] has ``|coeff|`` up to 50 against a cap
+    of 11, and made a feasible robust model infeasible (#1834 -- the box twin of
+    the polyhedral dual cap removed in #1611 X-30b). ``None`` (unbounded) when
+    the enclosure is not finite; ``t`` enters only linearly, so that is no
+    obstacle to the solve.
     """
-    max_bound = 1.0
-    for v in m._variables:
-        if v.ub is not None:
-            max_bound = max(max_bound, float(np.max(np.abs(v.ub))))
-        if v.lb is not None:
-            max_bound = max(max_bound, float(np.max(np.abs(v.lb))))
-    # Cap at a reasonable value to avoid numerical issues
-    return min(max_bound + 1.0, 1e8)
+    from discopt._relax.convexity.interval_eval import evaluate_interval
+
+    enc = evaluate_interval(coeff, None)
+    mag = np.maximum(np.abs(np.asarray(enc.lo, dtype=np.float64)), np.abs(enc.hi))
+    bound = float(np.max(mag)) if np.size(mag) else 0.0
+    # A coefficient over a variable at the modeling layer's "unbounded" default
+    # (9.999e19) is no finite bound either.
+    if not np.isfinite(bound) or bound >= 1e19:
+        return None
+    # Outward slack on top of the (already outward-rounded) enclosure, so an
+    # interior-point solve at the bound is not active against the true |coeff|.
+    return bound * (1.0 + 1e-6) + 1e-6
 
 
 def _contains_variable(expr) -> bool:

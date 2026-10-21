@@ -9,6 +9,15 @@ The sign starts at +1 at the tree root and flips through ``-`` (subtraction)
 and unary negation nodes.  Multiplication by a negative constant also flips
 the sign.
 
+A sign may pass only through a node proven monotone in its uncertain operand
+(#1836): ``+ - neg``, sums and indexing, products, quotients and matmuls with a
+side of known sign, odd positive integer powers and the monotone intrinsics in
+``_INCREASING_FUNCS`` / ``_DECREASING_FUNCS``. Below any other node (``1/p``,
+``p**2``, ``abs(p)``, ``cos(p)``, ``p*p``) a variable-free sub-expression is
+replaced by the matching end of a sound interval enclosure over the box, and
+one that mentions a decision variable is refused with ``NotImplementedError``
+-- passing the sign through those nodes certified non-robust points.
+
 Constant multipliers (``c * e``, ``e * c``, ``e / c``, ``C @ e``, ``e @ C``)
 are signed element-wise, never by a fold such as ``np.sign(np.sum(c))``
 (#1831). A constant whose nonzero entries share one sign flips (or keeps) the
@@ -39,7 +48,6 @@ changing such a parameter.
 
 from __future__ import annotations
 
-import warnings
 from typing import Optional
 
 import numpy as np
@@ -133,42 +141,34 @@ def sign_tracking_substitute(
                     maximize,
                     sign,
                 )
-            if isinstance(expr.left, Constant):
-                nl = expr.left
-                nr = sign_tracking_substitute(
-                    expr.right, wc_lower, wc_upper, param_names, maximize, sign
+            left_has_param = _contains_uncertain_param(expr.left, param_names)
+            right_has_param = _contains_uncertain_param(expr.right, param_names)
+            if left_has_param and right_has_param:
+                # ``p * p``, ``p * exp(p)``: not monotone in either occurrence
+                # with a known direction, so no per-occurrence substitution is
+                # a worst case (#1836; this used to warn and substitute anyway).
+                return _interval_worst_case(expr, wc_lower, wc_upper, param_names, maximize, sign)
+            if not (left_has_param or right_has_param):
+                return expr
+            # One side carries the uncertainty, the other is a decision-variable
+            # expression (a constant-valued one was handled above). The
+            # multiplier's sign decides the worst case, so it must be provably
+            # sign-definite over the variable box.
+            factor, other = (expr.right, expr.left) if left_has_param else (expr.left, expr.right)
+            factor_sign = _definite_sign(factor, strict=False)
+            if factor_sign is None:
+                raise NotImplementedError(
+                    "Robust counterpart (sign tracking): an uncertain term is "
+                    f"multiplied by {factor!r}, whose sign is not fixed over the "
+                    "variable bounds, so the worst-case direction of the uncertain "
+                    "parameter is unknown. Refusing rather than guessing (#1836)."
                 )
-            elif isinstance(expr.right, Constant):
-                nl = sign_tracking_substitute(
-                    expr.left, wc_lower, wc_upper, param_names, maximize, sign
-                )
-                nr = expr.right
-            else:
-                # Neither side is a Constant node.  This could be:
-                # (a) Parameter * Variable: the Parameter will be substituted
-                #     by the recursive call, which is fine.
-                # (b) True bilinear: two non-constant, non-parameter expressions
-                #     both involving uncertain parameters.  This case cannot be
-                #     handled correctly by sign tracking alone.
-                # We warn only for case (b): both sides contain uncertain params.
-                left_has_param = _contains_uncertain_param(expr.left, param_names)
-                right_has_param = _contains_uncertain_param(expr.right, param_names)
-                if left_has_param and right_has_param:
-                    warnings.warn(
-                        "Bilinear term detected in robust reformulation: "
-                        "both sides of a multiplication contain uncertain "
-                        "parameters.  The sign-tracking substitution may "
-                        "not produce a conservative robust counterpart.  "
-                        "Consider reformulating to separate uncertain "
-                        "parameters from decision variables.",
-                        stacklevel=4,
-                    )
-                nl = sign_tracking_substitute(
-                    expr.left, wc_lower, wc_upper, param_names, maximize, sign
-                )
-                nr = sign_tracking_substitute(
-                    expr.right, wc_lower, wc_upper, param_names, maximize, sign
-                )
+            new_other = sign_tracking_substitute(
+                other, wc_lower, wc_upper, param_names, maximize, sign * factor_sign
+            )
+            if left_has_param:
+                return BinaryOp("*", new_other, factor)
+            return BinaryOp("*", factor, new_other)
         elif expr.op == "/" and _needs_multiplier_sign(expr.right, expr.left, param_names):
             # ``e / d`` with a constant-valued divisor is ``e * (1/d)``: the
             # sign of each entry of ``d`` is the sign of its coefficient. A
@@ -184,31 +184,79 @@ def sign_tracking_substitute(
                 sign,
                 reciprocal=True,
             )
-        else:
-            # Division by a non-constant, power: propagate sign through without flip.
+        elif expr.op == "/":
+            if _contains_uncertain_param(expr.right, param_names):
+                # ``1 / p`` is decreasing on each side of 0: the sign does not
+                # pass through a divisor (#1836).
+                return _interval_worst_case(expr, wc_lower, wc_upper, param_names, maximize, sign)
+            if not _contains_uncertain_param(expr.left, param_names):
+                return expr
+            # ``e / d`` with a variable divisor: monotone in ``e`` only when
+            # ``d`` keeps one strict sign over the variable box.
+            divisor_sign = _definite_sign(expr.right, strict=True)
+            if divisor_sign is None:
+                raise NotImplementedError(
+                    "Robust counterpart (sign tracking): an uncertain term is "
+                    f"divided by {expr.right!r}, whose sign is not fixed (or which "
+                    "can be 0) over the variable bounds, so the worst-case "
+                    "direction of the uncertain parameter is unknown. Refusing "
+                    "rather than guessing (#1836)."
+                )
             nl = sign_tracking_substitute(
-                expr.left, wc_lower, wc_upper, param_names, maximize, sign
+                expr.left, wc_lower, wc_upper, param_names, maximize, sign * divisor_sign
             )
-            nr = sign_tracking_substitute(
-                expr.right, wc_lower, wc_upper, param_names, maximize, sign
-            )
+            nr = expr.right
+        elif expr.op == "**":
+            if not _contains_uncertain_param(expr, param_names):
+                return expr
+            if not _contains_uncertain_param(expr.right, param_names) and _is_increasing_power(
+                expr.right
+            ):
+                nl = sign_tracking_substitute(
+                    expr.left, wc_lower, wc_upper, param_names, maximize, sign
+                )
+                nr = expr.right
+            else:
+                # ``p**2``, ``p**-1``, ``2**p`` with a base of unknown sign: not
+                # monotone with a known direction (#1836).
+                return _interval_worst_case(expr, wc_lower, wc_upper, param_names, maximize, sign)
+        else:
+            if not _contains_uncertain_param(expr, param_names):
+                return expr
+            return _interval_worst_case(expr, wc_lower, wc_upper, param_names, maximize, sign)
         return BinaryOp(expr.op, nl, nr)
 
     if isinstance(expr, UnaryOp):
-        child_sign = sign * -1 if expr.op == "neg" else sign
+        if expr.op != "neg":
+            # ``abs(p)`` is not monotone: passing the sign through substituted
+            # the bound of largest ``p``, not of largest ``|p|`` (#1836).
+            if not _contains_uncertain_param(expr, param_names):
+                return expr
+            return _interval_worst_case(expr, wc_lower, wc_upper, param_names, maximize, sign)
         return UnaryOp(
             expr.op,
             sign_tracking_substitute(
-                expr.operand, wc_lower, wc_upper, param_names, maximize, child_sign
+                expr.operand, wc_lower, wc_upper, param_names, maximize, -sign
             ),
         )
 
     if isinstance(expr, FunctionCall):
-        new_args = [
-            sign_tracking_substitute(a, wc_lower, wc_upper, param_names, maximize, sign)
-            for a in expr.args
-        ]
-        return FunctionCall(expr.func_name, *new_args)
+        if not _contains_uncertain_param(expr, param_names):
+            return expr
+        if len(expr.args) == 1 and expr.func_name in _INCREASING_FUNCS:
+            fn_sign = sign
+        elif len(expr.args) == 1 and expr.func_name in _DECREASING_FUNCS:
+            fn_sign = -sign
+        else:
+            # ``cos(p)``, ``p**2`` spelled as a function, ``max(p, q)``: no
+            # known monotone direction (#1836).
+            return _interval_worst_case(expr, wc_lower, wc_upper, param_names, maximize, sign)
+        return FunctionCall(
+            expr.func_name,
+            sign_tracking_substitute(
+                expr.args[0], wc_lower, wc_upper, param_names, maximize, fn_sign
+            ),
+        )
 
     if isinstance(expr, MatMulExpression):
         # ``C @ e`` / ``e @ C`` with a constant-valued ``C``: entry ``C[i, j]``
@@ -237,9 +285,33 @@ def sign_tracking_substitute(
                 maximize,
                 sign,
             )
-        nl = sign_tracking_substitute(expr.left, wc_lower, wc_upper, param_names, maximize, sign)
-        nr = sign_tracking_substitute(expr.right, wc_lower, wc_upper, param_names, maximize, sign)
-        return MatMulExpression(nl, nr)
+        left_has_param = _contains_uncertain_param(expr.left, param_names)
+        right_has_param = _contains_uncertain_param(expr.right, param_names)
+        if left_has_param and right_has_param:
+            return _interval_worst_case(expr, wc_lower, wc_upper, param_names, maximize, sign)
+        if not (left_has_param or right_has_param):
+            return expr
+        # ``p @ x`` / ``x @ p`` with a variable side: as for ``*``, the variable
+        # entries must share one provable sign (#1836).
+        factor = expr.right if left_has_param else expr.left
+        factor_sign = _definite_sign(factor, strict=False)
+        if factor_sign is None:
+            raise NotImplementedError(
+                "Robust counterpart (sign tracking): an uncertain term is "
+                f"matrix-multiplied by {factor!r}, whose entries do not share a "
+                "sign fixed over the variable bounds, so the worst-case direction "
+                "of the uncertain parameter is unknown. Refusing rather than "
+                "guessing (#1836)."
+            )
+        if left_has_param:
+            nl = sign_tracking_substitute(
+                expr.left, wc_lower, wc_upper, param_names, maximize, sign * factor_sign
+            )
+            return MatMulExpression(nl, expr.right)
+        nr = sign_tracking_substitute(
+            expr.right, wc_lower, wc_upper, param_names, maximize, sign * factor_sign
+        )
+        return MatMulExpression(expr.left, nr)
 
     if isinstance(expr, IndexExpression):
         nb = sign_tracking_substitute(expr.base, wc_lower, wc_upper, param_names, maximize, sign)
@@ -260,6 +332,121 @@ def sign_tracking_substitute(
 
     # Variable, unknown node: return as-is.
     return expr
+
+
+# Single-argument intrinsics that are monotone over their whole domain, so the
+# worst case of ``f(e)`` is ``f`` of the worst case of ``e`` in the same
+# (increasing) or the opposite (decreasing) direction.
+_INCREASING_FUNCS = frozenset(
+    {
+        "exp",
+        "log",
+        "log2",
+        "log10",
+        "log1p",
+        "sqrt",
+        "atan",
+        "asin",
+        "sinh",
+        "asinh",
+        "acosh",
+        "atanh",
+        "tanh",
+        "erf",
+        "sigmoid",
+        "softplus",
+    }
+)
+_DECREASING_FUNCS = frozenset({"acos"})
+
+
+def _is_increasing_power(exponent) -> bool:
+    """True when ``b ** exponent`` is increasing in ``b`` over the whole real line.
+
+    That is a constant scalar exponent equal to 1 or a positive odd integer
+    (``b**3``). Every other exponent -- even (``b**2``), negative (``b**-1``),
+    fractional -- is non-monotone or decreasing on part of the line.
+    """
+    from discopt.ro.formulations.box import _contains_variable
+
+    if _contains_variable(exponent):
+        return False
+    k = np.asarray(eval_constant_expr(exponent), dtype=np.float64)
+    if k.size != 1:
+        return False
+    kv = float(k.reshape(()))
+    return kv > 0 and kv == int(kv) and int(kv) % 2 == 1
+
+
+def _definite_sign(expr, *, strict: bool) -> Optional[int]:
+    """+1 / -1 when *expr* (free of uncertain parameters) keeps one sign over the
+    declared variable bounds, else ``None``. ``strict`` excludes 0.
+
+    Decided by a sound interval enclosure, so a ``None`` may be conservative but
+    a sign is never wrong.
+    """
+    from discopt._relax.convexity.interval_eval import evaluate_interval
+
+    enc = evaluate_interval(expr, None)
+    lo = np.asarray(enc.lo, dtype=np.float64)
+    hi = np.asarray(enc.hi, dtype=np.float64)
+    if strict:
+        if np.all(lo > 0):
+            return 1
+        if np.all(hi < 0):
+            return -1
+        return None
+    if np.all(lo >= 0):
+        return 1
+    if np.all(hi <= 0):
+        return -1
+    return None
+
+
+def _interval_worst_case(expr, wc_lower, wc_upper, param_names: set[str], maximize, sign):
+    """Worst case of a variable-free, non-monotone uncertain sub-expression.
+
+    Sign tracking may pass a direction only through a node that is monotone in
+    its uncertain operand (#1836). Below any other node -- ``1/p``, ``p**2``,
+    ``abs(p)``, ``cos(p)``, ``p*p`` -- the worst case is replaced by the matching
+    end of a sound interval enclosure of the whole sub-expression over the
+    uncertainty box: exact for a single occurrence of a scalar parameter under a
+    monotone-by-pieces node, conservative (never optimistic) otherwise. The
+    enclosing path is monotone (everything above was sign-tracked), so the
+    result is a valid worst case of the row.
+
+    A sub-expression that also mentions a decision variable has no constant
+    worst case, and is refused.
+    """
+    from discopt._relax.convexity.interval import Interval
+    from discopt._relax.convexity.interval_eval import evaluate_interval, param_box_key
+    from discopt.modeling.core import Constant
+    from discopt.ro.formulations.box import _contains_variable
+
+    if _contains_variable(expr):
+        raise NotImplementedError(
+            "Robust counterpart (sign tracking): the uncertain parameter enters "
+            f"{expr!r} through a node that is not monotone (or not monotone in a "
+            "known direction) together with a decision variable, so no worst-case "
+            "substitution is valid. Rewrite the row to be monotone in the uncertain "
+            "parameter. Refusing rather than certifying a non-robust point (#1836)."
+        )
+    box = {
+        param_box_key(n): Interval(
+            np.asarray(wc_lower[n], dtype=np.float64), np.asarray(wc_upper[n], dtype=np.float64)
+        )
+        for n in param_names
+    }
+    enc = evaluate_interval(expr, None, box)
+    use_upper = maximize ^ (sign < 0)
+    value = np.asarray(enc.hi if use_upper else enc.lo, dtype=np.float64)
+    if not np.all(np.isfinite(value)):
+        raise NotImplementedError(
+            f"Robust counterpart (sign tracking): {expr!r} has no finite worst case "
+            "over the uncertainty set (an unbounded or unsupported enclosure, e.g. a "
+            "divisor that can be 0). Refusing rather than substituting a guess (#1836)."
+        )
+    return Constant(value)
 
 
 def _needs_multiplier_sign(factor, other, param_names: set[str]) -> bool:
@@ -789,6 +976,112 @@ def substitute_param(expr, param_name: str, replacement):
     if isinstance(expr, SumOverExpression):
         return SumOverExpression([substitute_param(t, param_name, replacement) for t in expr.terms])
     return expr
+
+
+def is_affine_in_params(expr, param_names: set[str]) -> bool:
+    """True when *expr* is structurally affine in the uncertain parameters.
+
+    The parameters may reach the root only through ``+ - neg``, sums, indexing,
+    and products, quotients or matmuls whose other side is free of uncertain
+    parameters (it may hold decision variables: ``y * p`` is affine in ``p``).
+    The finite-difference coefficient ``g(p_bar + e_j) - g(p_bar)`` that the
+    polyhedral and box-linearization counterparts dualize is the exact
+    coefficient of ``xi_j`` only then; for ``exp(p)`` or ``p * p`` it is a
+    secant, and the dual reformulation treated a nonlinear row as linear,
+    certifying non-robust points (#1841). Decided structurally, never by
+    sampling.
+    """
+    from discopt.modeling.core import (
+        BinaryOp,
+        IndexExpression,
+        MatMulExpression,
+        Parameter,
+        SumExpression,
+        SumOverExpression,
+        UnaryOp,
+    )
+
+    def has_p(e):
+        return _contains_uncertain_param(e, param_names)
+
+    def affine(e) -> bool:
+        if not has_p(e):
+            return True
+        if isinstance(e, Parameter):
+            return True
+        if isinstance(e, BinaryOp):
+            if e.op in ("+", "-"):
+                return affine(e.left) and affine(e.right)
+            if e.op == "*":
+                if has_p(e.left) and has_p(e.right):
+                    return False
+                return affine(e.left) and affine(e.right)
+            if e.op == "/":
+                return not has_p(e.right) and affine(e.left)
+            return False
+        if isinstance(e, MatMulExpression):
+            if has_p(e.left) and has_p(e.right):
+                return False
+            return affine(e.left) and affine(e.right)
+        if isinstance(e, UnaryOp):
+            return e.op == "neg" and affine(e.operand)
+        if isinstance(e, (SumExpression, IndexExpression)):
+            return affine(e.operand if isinstance(e, SumExpression) else e.base)
+        if isinstance(e, SumOverExpression):
+            return all(affine(t) for t in e.terms)
+        return False
+
+    return affine(expr)
+
+
+def refuse_non_affine(expr, param_names: set[str], *, kind: str) -> None:
+    """Raise ``NotImplementedError`` unless *expr* is affine in the parameters."""
+    if not is_affine_in_params(expr, param_names):
+        raise NotImplementedError(
+            f"The {kind} robust counterpart dualizes the coefficient of each "
+            "uncertain parameter, which is exact only for a row affine in the "
+            f"parameter; {expr!r} is not (the parameter enters through a "
+            "nonlinear node or a product of uncertain terms). Its finite-difference "
+            "coefficient is a secant, and the counterpart would certify non-robust "
+            "points. Rewrite the row to be affine in the uncertain parameter, or "
+            "use a box set on a row monotone in it. Refusing (#1841)."
+        )
+
+
+def substitute_variables(expr, value_of):
+    """Replace every :class:`Variable` ``v`` by ``Constant(value_of(v))``."""
+    from discopt.modeling.core import (
+        BinaryOp,
+        Constant,
+        FunctionCall,
+        IndexExpression,
+        MatMulExpression,
+        SumExpression,
+        SumOverExpression,
+        UnaryOp,
+        Variable,
+    )
+
+    def sub(e):
+        if isinstance(e, Variable):
+            return Constant(np.asarray(value_of(e), dtype=np.float64))
+        if isinstance(e, BinaryOp):
+            return BinaryOp(e.op, sub(e.left), sub(e.right))
+        if isinstance(e, UnaryOp):
+            return UnaryOp(e.op, sub(e.operand))
+        if isinstance(e, MatMulExpression):
+            return MatMulExpression(sub(e.left), sub(e.right))
+        if isinstance(e, FunctionCall):
+            return FunctionCall(e.func_name, *[sub(a) for a in e.args])
+        if isinstance(e, IndexExpression):
+            return IndexExpression(sub(e.base), e.index)
+        if isinstance(e, SumExpression):
+            return SumExpression(sub(e.operand), e.axis)
+        if isinstance(e, SumOverExpression):
+            return SumOverExpression([sub(t) for t in e.terms])
+        return e
+
+    return sub(expr)
 
 
 def _contains_uncertain_param(expr, param_names: set[str]) -> bool:

@@ -24,6 +24,7 @@ import numpy as np
 from discopt.ro.formulations._common import (
     _contains_uncertain_param,
     eval_constant_expr,
+    refuse_non_affine,
     substitute_param,
 )
 from discopt.ro.uncertainty import PolyhedralUncertaintySet
@@ -129,6 +130,10 @@ class PolyhedralRobustFormulation:
                 # one (#1611 X-30a).
                 if not _contains_uncertain_param(expr_isolated, {pname}):
                     continue
+
+                # The finite difference below is the coefficient of xi_j only for
+                # a row affine in p; for ``exp(p)`` it is a secant (#1841).
+                refuse_non_affine(expr_isolated, {pname}, kind="polyhedral")
 
                 # Extract per-component coefficients of p in the expression.
                 # coeff_j = (expr at p_j = p_bar_j + 1) - (expr at p_j = p_bar_j)

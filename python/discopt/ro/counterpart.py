@@ -264,11 +264,13 @@ def _split_vector_uncertain_rows(constraints, names: set[str]) -> list:
     value, so the affine rule could not adapt and returned the static value
     for every budget (#1611 X-30c). Splitting is exact for every set kind.
 
-    Rows whose body is scalar, or whose shape cannot be determined statically,
-    and rows with no uncertain parameter, pass through unchanged. A body shaped
-    by a matmul or a reduction is split too (#1831): ``x + M @ p <= b`` used to
-    pass through whole, and the polyhedral counterpart gave its rows one set of
-    duals and reported a feasible model infeasible.
+    Rows whose body is scalar, and rows with no uncertain parameter, pass
+    through unchanged. A body shaped by a matmul or a reduction is split too
+    (#1831): ``x + M @ p <= b`` used to pass through whole, and the polyhedral
+    counterpart gave its rows one set of duals and reported a feasible model
+    infeasible. A body whose shape is not statically known is split by its
+    *evaluated* shape, and refused when that cannot be computed (#1833) -- it
+    used to pass through whole, with the same false infeasibility.
     """
     from discopt.modeling.core import Constraint, IndexExpression
     from discopt.ro.formulations._common import _contains_uncertain_param, _shape_of
@@ -278,7 +280,12 @@ def _split_vector_uncertain_rows(constraints, names: set[str]) -> list:
         if not isinstance(con, Constraint) or not _contains_uncertain_param(con.body, names):
             out.append(con)
             continue
-        shape = _shape_of(con.body) or ()
+        shape = _shape_of(con.body)
+        if shape is None:
+            # #1833: a row whose shape is not statically known used to pass
+            # through whole, and a vector row then got ONE set of polyhedral
+            # duals (a false infeasibility) -- split by the evaluated shape.
+            shape = _evaluated_shape(con)
         if int(np.prod(shape)) <= 1:
             out.append(con)
             continue
@@ -296,3 +303,26 @@ def _split_vector_uncertain_rows(constraints, names: set[str]) -> list:
                 )
             )
     return out
+
+
+def _evaluated_shape(con) -> tuple[int, ...]:
+    """Shape of ``con.body`` from a numeric evaluation, or ``NotImplementedError``.
+
+    Every variable is replaced by ones of its shape and every parameter by its
+    value; only the shape of the result is used. A body the numeric evaluator
+    does not model is refused: a vector row robustified whole is wrong (#1833).
+    """
+    from discopt.ro.formulations._common import eval_constant_expr, substitute_variables
+
+    try:
+        with np.errstate(all="ignore"):
+            value = eval_constant_expr(substitute_variables(con.body, lambda v: np.ones(v.shape)))
+    except NotImplementedError as exc:
+        raise NotImplementedError(
+            f"RobustCounterpart: the shape of uncertain row {con.name!r} cannot be "
+            "determined, so it cannot be split into scalar rows; robustifying a "
+            "vector row whole gives every element one worst case and is wrong for "
+            "a coupled uncertainty set. Index the row into scalar rows. Refusing "
+            "(#1833)."
+        ) from exc
+    return tuple(int(d) for d in np.shape(value))
