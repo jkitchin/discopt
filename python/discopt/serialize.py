@@ -491,7 +491,9 @@ _KNOWN_SENSES = frozenset({"<=", "==", ">="})
 
 #: Per-disjunction methods the GDP lowering dispatches on. An unknown one fell
 #: through to big-M without a word.
-_KNOWN_DISJUNCTION_METHODS = frozenset({None, "hull", "big-m", "mbigm", "simplex"})
+_KNOWN_DISJUNCTION_METHODS = frozenset(
+    {None, "hull", "big-m", "mbigm", "simplex", "binary_multiplication"}
+)
 
 
 def _enc_array(arr: np.ndarray) -> Any:

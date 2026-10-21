@@ -8286,7 +8286,11 @@ class Model:
 
         Notes
         -----
-        The indicator is lowered to a big-M row. ``M`` is the tightest valid
+        How the indicator is lowered depends on ``gdp_method``. Under
+        ``"binary_multiplication"`` (#1775 G2.5) each row ``body (sense) 0``
+        becomes the exact ``body * z (sense) 0`` (``body * (1 - z)`` for an
+        indicator active at 0), with no big-M. Under every other method it is
+        lowered to a big-M row. ``M`` is the tightest valid
         value discopt can derive for the body over the variable box (an LP bound
         for a linear body, interval arithmetic otherwise) **times a 1.01 safety
         factor** (``_relax/gdp_reformulate.py``); a body with no finite bound is

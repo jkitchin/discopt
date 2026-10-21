@@ -12722,6 +12722,13 @@ def solve_model(
                 "with gdp_method='simplex', or solver='mip-nlp' with "
                 f"gdp_method in {{{', '.join(sorted(repr(m) for m in gdp_methods))}}}."
             )
+        if gdp_method == "binary_multiplication":
+            raise ValueError(
+                "gdp_method='binary_multiplication' is not supported by "
+                "solver='mip-nlp'. Use the default solver with "
+                "gdp_method='binary_multiplication', or solver='mip-nlp' with "
+                f"gdp_method in {{{', '.join(sorted(repr(m) for m in gdp_methods))}}}."
+            )
         if gdp_method == "oa":
             warnings.warn(
                 "gdp_method='oa' is deprecated for selecting MINLP OA. Use "
@@ -29333,6 +29340,12 @@ def _solve_scip(
     from discopt.transformations import get as _get_transformation
     from discopt.validation.feasibility import verify_point
 
+    if gdp_method == "binary_multiplication":
+        raise ValueError(
+            "gdp_method='binary_multiplication' is not supported by solver='scip'; "
+            "pass 'big-m', 'hull', 'mbigm' or 'auto', or use the default solver with "
+            "gdp_method='binary_multiplication'."
+        )
     if gdp_method not in ("big-m", "hull", "mbigm", "auto"):
         raise ValueError(
             f"gdp_method={gdp_method!r} is a discopt decomposition; solver='scip' "
