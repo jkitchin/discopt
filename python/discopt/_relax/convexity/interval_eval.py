@@ -39,6 +39,7 @@ from discopt.modeling.core import (
     UnaryOp,
     Variable,
 )
+from discopt.solver_tuning import _env_flag
 
 from . import interval as iv
 from .interval import Interval
@@ -70,7 +71,11 @@ def evaluate_interval(
             (``test_enclosure_ignores_model_argument``).
         box: Optional dict ``{Variable: Interval}`` that overrides the
             variable's declared bounds. When ``None`` or a variable is
-            missing, the declared ``(lb, ub)`` of the variable is used.
+            missing, the declared ``(lb, ub)`` of the variable is used. A
+            :class:`Parameter` is a point at its ``value`` unless the box holds
+            an entry under :func:`param_box_key` of its name, which ranges it
+            over that interval (the robust counterpart's worst case over an
+            uncertainty box, #1836).
         _cache: Memoization dict keyed by ``id(expr)``.
 
     Returns:
@@ -80,6 +85,15 @@ def evaluate_interval(
     if _cache is None:
         _cache = {}
     return _eval(expr, model, box or {}, _cache)
+
+
+def param_box_key(name: str) -> tuple[str, str]:
+    """The ``box`` key that ranges the :class:`Parameter` named *name*.
+
+    ``Parameter`` is not hashable (``Expression.__eq__`` builds a constraint),
+    so it is keyed by name; the tuple cannot collide with a ``Variable`` key.
+    """
+    return ("__parameter__", name)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -205,6 +219,9 @@ def _eval_impl(expr: Expression, model: Optional[Model], box: dict, cache: dict)
         v = np.asarray(expr.value, dtype=np.float64)
         return Interval(v, v)
     if isinstance(expr, Parameter):
+        ranged = box.get(param_box_key(expr.name))
+        if ranged is not None:
+            return ranged
         v = np.asarray(expr.value, dtype=np.float64)
         return Interval(v, v)
     if isinstance(expr, Variable):
@@ -240,7 +257,7 @@ def _eval_impl(expr: Expression, model: Optional[Model], box: dict, cache: dict)
             return left / right
         if expr.op == "**":
             return _eval_power(expr, left, right)
-        return _unbounded(left.lo.shape)
+        return _unbounded(_broadcast_shape(left.lo.shape, right.lo.shape))
 
     # --- Function calls --------------------------------------------
     if isinstance(expr, FunctionCall):
@@ -643,10 +660,21 @@ def _eval_power(expr: BinaryOp, left: Interval, right: Interval) -> Interval:
     # Require a concrete scalar exponent so we know whether integer or
     # fractional rules apply.
     if not isinstance(expr.right, (Constant, Parameter)):
-        return _unbounded(left.lo.shape)
-    raw = np.asarray(expr.right.value)
+        return _unbounded(_broadcast_shape(left.lo.shape, right.lo.shape))
+    if isinstance(expr.right, Parameter) and not np.array_equal(right.lo, right.hi):
+        # A Parameter ranged by the box (:func:`param_box_key`): the exponent is
+        # the interval ``right``, not ``expr.right.value``. Reading the value
+        # collapsed ``2**p`` over ``p in [0, 1]`` to the point ``2**p_bar``, so
+        # the robust counterpart took a non-worst case for the whole box
+        # (#1836). ``b**e = exp(e * log(b))`` encloses it for ``b > 0``.
+        if np.any(left.lo <= 0):
+            return _unbounded(_broadcast_shape(left.lo.shape, right.lo.shape))
+        return iv.exp(right * iv.log(left))
+    # The exponent is a point: a Constant, an unranged Parameter at its value,
+    # or a ranged one whose box interval is degenerate.
+    raw = np.asarray(right.lo if isinstance(expr.right, Parameter) else expr.right.value)
     if raw.ndim != 0:
-        return _unbounded(left.lo.shape)
+        return _unbounded(_broadcast_shape(left.lo.shape, raw.shape))
     n = float(raw)
     n_int = int(n)
     if np.isclose(n, float(n_int)):
@@ -701,7 +729,7 @@ def _eval_function_call(
         return Interval(np.full(shape, -np.pi), np.full(shape, np.pi))
 
     if len(args) != 1:
-        return _unbounded(args[0].lo.shape)
+        return _unbounded(_broadcast_shape(*(a.lo.shape for a in args)))
 
     arg = args[0]
     name = expr.func_name
@@ -884,8 +912,8 @@ def _eval_matmul(
     times variable-vector; the handling below covers that case plus
     the symmetric one.
     """
-    left = _eval(expr.left, model, box, cache)
-    right = _eval(expr.right, model, box, cache)
+    left = _matmul_operand(_eval(expr.left, model, box, cache), expr.left)
+    right = _matmul_operand(_eval(expr.right, model, box, cache), expr.right)
 
     # For a matmul of interval matrices A (m × k) by B (k × n) the
     # enclosure is formed from the interval dot products. We express
@@ -924,9 +952,95 @@ def _eval_matmul(
             lo[i] = _widen_sum(prods_lo.sum(), prods_lo, k, None, -1.0)
             hi[i] = _widen_sum(prods_hi.sum(), prods_hi, k, None, +1.0)
         return Interval(np.nextafter(lo, -np.inf), np.nextafter(hi, np.inf))
-    # Other shapes fall through as unbounded for now — not needed by
-    # any expression the convexity certificate currently targets.
-    return _unbounded(A_lo.shape[:-1] if A_lo.ndim >= 1 else ())
+    out_shape = _matmul_shape(A_lo.shape, B_lo.shape)
+    if 1 <= A_lo.ndim <= 2 and 1 <= B_lo.ndim <= 2 and _matmul_enclosure_enabled():
+        # #1842: every other 1-D / 2-D product -- ``(k,) @ (k, n)``,
+        # ``(m, k) @ (k, n)``, ``(k,) @ (k,)``. Without the flag these are
+        # unbounded (in the product's shape, below); with it, a constant
+        # ``sum(M @ M)`` gets a finite enclosure, so the #1842 repro's dual bound
+        # leaves the variable box and certifies. Each output entry is the same
+        # interval dot product as the branch above, widened by the same
+        # accumulation bound, so the enclosure is sound by the same argument; the
+        # branch above is left as it was.
+        a_lo2 = A_lo.reshape(1, -1) if A_lo.ndim == 1 else A_lo
+        a_hi2 = A_hi.reshape(1, -1) if A_hi.ndim == 1 else A_hi
+        b_lo2 = B_lo.reshape(-1, 1) if B_lo.ndim == 1 else B_lo
+        b_hi2 = B_hi.reshape(-1, 1) if B_hi.ndim == 1 else B_hi
+        m, k = a_lo2.shape
+        n = b_lo2.shape[1]
+        lo = np.zeros((m, n), dtype=np.float64)
+        hi = np.zeros((m, n), dtype=np.float64)
+        for i in range(m):
+            for j in range(n):
+                a_l, a_h = a_lo2[i], a_hi2[i]
+                b_l, b_h = b_lo2[:, j], b_hi2[:, j]
+                corners = (a_l * b_l, a_l * b_h, a_h * b_l, a_h * b_h)
+                prods_lo = np.minimum(np.minimum(corners[0], corners[1]), np.minimum(*corners[2:]))
+                prods_hi = np.maximum(np.maximum(corners[0], corners[1]), np.maximum(*corners[2:]))
+                lo[i, j] = _widen_sum(prods_lo.sum(), prods_lo, k, None, -1.0)
+                hi[i, j] = _widen_sum(prods_hi.sum(), prods_hi, k, None, +1.0)
+        return Interval(
+            np.nextafter(lo, -np.inf).reshape(out_shape),
+            np.nextafter(hi, np.inf).reshape(out_shape),
+        )
+    # Everything else is unbounded, as it always was, but in the PRODUCT's shape
+    # (#1842). The old fallback used ``A.shape[:-1]``, which is the product's
+    # shape only for ``(m, k) @ (k,)``: for ``(k,) @ (k, n)`` it was 0-d, and
+    # ``(c @ M)[0]`` raised ``IndexError: array is 0-dimensional`` in the root
+    # relaxation build. Unbounded in either shape is the same enclosure, so this
+    # part is bound-neutral and is not behind the flag.
+    return _unbounded(out_shape)
+
+
+def _matmul_enclosure_enabled() -> bool:
+    """``DISCOPT_MATMUL_INTERVAL_ENCLOSURE`` -- finite enclosures for the general
+    1-D / 2-D matmul (#1842). Default OFF.
+
+    Bound-changing: forms that were ``(-inf, inf)`` (``c @ x`` with an ndarray
+    ``c``, ``x @ x``, ``x @ Q @ x``, ``X @ Y``, ...) become finite, and a 48-model
+    panel moved 4 node counts with the objective unchanged (11->9, 63->51, 37->39,
+    97->89). Sound -- sampled and corner-checked against an exact ``math.fsum``
+    reference with 0 violations -- but not yet run on the CLAUDE.md §5 corpus
+    panel, so it stays off until that panel graduates it
+    (``docs/dev/flag-retirement-audit.md``).
+    """
+    return _env_flag("DISCOPT_MATMUL_INTERVAL_ENCLOSURE", default=False)
+
+
+def _matmul_operand(enc: Interval, node: Expression) -> Interval:
+    """*enc* broadcast to *node*'s static shape when *enc* came back 0-d.
+
+    A fallback elsewhere in this evaluator (an unrecognised node type, for one)
+    may return a 0-d unbounded enclosure for a shaped operand; ``np.matmul``
+    rejects a 0-d operand, so the product shape could not be formed (#1842). A
+    0-d enclosure holds for every entry, so broadcasting it is the same enclosure.
+    """
+    if enc.lo.ndim != 0:
+        return enc
+    try:
+        shape = node.shape
+    except AttributeError:  # no statically known shape: _matmul_shape copes
+        return enc
+    if not shape:
+        return enc
+    return Interval(np.broadcast_to(enc.lo, shape), np.broadcast_to(enc.hi, shape))
+
+
+def _matmul_shape(a: tuple, b: tuple) -> tuple:
+    """Shape of ``A @ B`` under numpy's rules (``ValueError`` if incompatible).
+
+    A 0-d operand, whose shape :func:`_matmul_operand` could not recover, keeps
+    the pre-#1842 rule ``A.shape[:-1]`` rather than raising: ``np.matmul``
+    rejects a scalar, and the enclosure there is unbounded regardless.
+    """
+    if len(a) == 0 or len(b) == 0:
+        return tuple(a[:-1])
+    return tuple(np.matmul(np.zeros(a), np.zeros(b)).shape)
+
+
+def _broadcast_shape(*shapes: tuple) -> tuple:
+    """Shape of an element-wise result over operands of *shapes* (#1842)."""
+    return tuple(np.broadcast_shapes(*shapes))
 
 
 __all__ = ["evaluate_interval"]

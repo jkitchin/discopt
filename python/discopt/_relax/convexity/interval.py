@@ -307,8 +307,11 @@ class Interval:
         # treats unbounded Hessian entries as UNKNOWN.
         contains = other.contains_zero()
         if np.any(contains):
-            inf = np.float64(np.inf)
-            return Interval(np.full_like(self.lo, -inf), np.full_like(self.hi, inf))
+            # In the BROADCAST shape, not the numerator's: ``1.0 / x`` for a vector
+            # ``x`` built a 0-d result here, which a later ``c @ (1/x)`` then fed to
+            # ``np.matmul`` as a scalar operand and crashed (#1842).
+            shape = np.broadcast_shapes(self.lo.shape, other.lo.shape)
+            return Interval(np.full(shape, -np.inf), np.full(shape, np.inf))
         inv_lo = 1.0 / other.hi
         inv_hi = 1.0 / other.lo
         # ``_exact0`` (#957): ``1/x`` is zero only for ``x = ±inf``, where the

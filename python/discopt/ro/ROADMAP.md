@@ -30,8 +30,24 @@ on reformulated models.
 `np.sign(np.sum(value))` for a constant vector, so a mixed-sign multiplier
 certified non-robust points. Constant multipliers (`*`, `/`, `@`) are now
 signed element-wise; a mixed-sign one is split into its positive and negative
-parts. A parameter element that enters one row through several coefficients of
-opposite sign is worst-cased per occurrence -- sound, possibly conservative.
+parts. Sign tracking worst-cases each *occurrence* of a parameter element, which
+over-counts when occurrences cancel (`sum(M @ p)`, `3*p0 - p0`) and reported
+feasible models infeasible; a box row that is structurally affine in the
+uncertain parameters with constant coefficients now uses the exact aggregate
+coefficient instead (`aggregate_affine_counterpart`). Certain Parameters
+multiplying an uncertain one are frozen at their `formulate()`-time value.
+
+**Non-monotone and non-affine rows (fixed, #1836, #1841).** Sign tracking used
+to pass a direction through `1/p`, `p**k`, `abs` and every function call,
+certifying non-robust points. A direction now passes only through nodes proven
+monotone in the uncertain operand; a variable-free sub-expression below any
+other node is worst-cased by a sound interval enclosure over the box, and one
+that mixes in a decision variable is refused. The polyhedral counterpart and
+the box |coeff| linearization dualize finite-difference coefficients, which are
+exact only for rows affine in p: polyhedral refuses non-affine rows, and the box
+route worst-cases them by sign tracking. The box `ro_abs` auxiliaries are
+bounded by an interval enclosure of their coefficient (#1834), not by the
+largest variable bound.
 
 ## Future Work (roughly by priority)
 

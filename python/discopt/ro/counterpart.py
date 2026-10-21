@@ -51,7 +51,7 @@ Example
 
 from __future__ import annotations
 
-from typing import Union
+from typing import Optional, Union
 
 import numpy as np
 
@@ -158,6 +158,19 @@ class RobustCounterpart:
         if self._formulated:
             raise RuntimeError("formulate() has already been called")
 
+        self._refuse_opaque_uncertain_calls()
+        # An earlier pass may have read a worst-case direction from the sign of a
+        # parameter this pass makes uncertain; that direction stays a worst case
+        # only if the sign holds over this pass's set (#1839 review).
+        from discopt.ro.formulations._common import (
+            check_sign_assumptions,
+            uncertainty_bounding_box,
+        )
+
+        check_sign_assumptions(
+            self._model,
+            ranged={u.parameter.name: uncertainty_bounding_box(u) for u in self._uncertainty_sets},
+        )
         self._orient_uncertain_rows()
         strategy = self._build_strategy()
         strategy.build()
@@ -173,6 +186,33 @@ class RobustCounterpart:
             kind=self.kind,
         )
         self._formulated = True
+
+    def _refuse_opaque_uncertain_calls(self) -> None:
+        """Refuse an uncertain parameter passed into an opaque ``dm.custom`` call.
+
+        No counterpart can see inside a user function, so it can neither take
+        the worst case of ``f(p)`` nor substitute ``p`` in it; before #1833 such
+        a row was solved at the nominal ``p``. Refuse every set type up front,
+        for constraints and objective alike, with the reason rather than a
+        downstream shape or affinity error.
+        """
+        from discopt.modeling.core import Constraint
+
+        names = {u.parameter.name for u in self._uncertainty_sets}
+        m = self._model
+        sites = [(c.name, c.body) for c in m._constraints if isinstance(c, Constraint)]
+        if m._objective is not None:
+            sites.append(("<objective>", m._objective.expression))
+        for where, expr in sites:
+            call = _opaque_uncertain_call(expr, names)
+            if call is not None:
+                raise NotImplementedError(
+                    f"RobustCounterpart: uncertain parameter(s) {sorted(names)} are "
+                    f"passed into the opaque custom function {call!r} in {where!r}. "
+                    "A robust counterpart cannot take the worst case over a function "
+                    "it cannot see into; write the dependence on the uncertain "
+                    "parameter algebraically."
+                )
 
     def _orient_uncertain_rows(self) -> None:
         """Rewrite every uncertain row as ``body <= rhs`` before robustifying.
@@ -248,6 +288,43 @@ class RobustCounterpart:
         raise ValueError(f"Unsupported uncertainty set kind: {self.kind!r}")
 
 
+def _opaque_uncertain_call(expr, names: set[str]):
+    """Return the first ``CustomCall`` in *expr* whose arguments hold an uncertain param."""
+    from discopt.modeling.core import (
+        BinaryOp,
+        CustomCall,
+        FunctionCall,
+        IndexExpression,
+        MatMulExpression,
+        SumExpression,
+        SumOverExpression,
+        UnaryOp,
+    )
+    from discopt.ro.formulations._common import _contains_uncertain_param
+
+    if isinstance(expr, CustomCall):
+        if any(_contains_uncertain_param(a, names) for a in expr.args):
+            return expr
+        children = list(expr.args)
+    elif isinstance(expr, (BinaryOp, MatMulExpression)):
+        children = [expr.left, expr.right]
+    elif isinstance(expr, (UnaryOp, SumExpression)):
+        children = [expr.operand]
+    elif isinstance(expr, IndexExpression):
+        children = [expr.base]
+    elif isinstance(expr, FunctionCall):
+        children = list(expr.args)
+    elif isinstance(expr, SumOverExpression):
+        children = list(expr.terms)
+    else:
+        return None
+    for child in children:
+        found = _opaque_uncertain_call(child, names)
+        if found is not None:
+            return found
+    return None
+
+
 def _split_vector_uncertain_rows(constraints, names: set[str]) -> list:
     """Expand every vector-valued uncertain row into one scalar row per element.
 
@@ -264,35 +341,129 @@ def _split_vector_uncertain_rows(constraints, names: set[str]) -> list:
     value, so the affine rule could not adapt and returned the static value
     for every budget (#1611 X-30c). Splitting is exact for every set kind.
 
-    Rows whose body is scalar, or whose shape cannot be determined statically,
-    and rows with no uncertain parameter, pass through unchanged. A body shaped
-    by a matmul or a reduction is split too (#1831): ``x + M @ p <= b`` used to
-    pass through whole, and the polyhedral counterpart gave its rows one set of
-    duals and reported a feasible model infeasible.
+    The row's shape is its *evaluated* shape (:func:`_evaluated_shape`), the
+    broadcast of the body with the right-hand side -- not a static inference.
+    The static one returned ``None`` for ``exp(M @ p)`` and every other node
+    built over a matmul that it did not special-case, and ``None`` was read as
+    "scalar": the row passed through whole and the polyhedral counterpart
+    reported a feasible model infeasible (#1831, #1833). An uncertain row whose
+    shape cannot be evaluated is refused, never assumed scalar. Rows with no
+    uncertain parameter pass through unchanged.
     """
     from discopt.modeling.core import Constraint, IndexExpression
-    from discopt.ro.formulations._common import _contains_uncertain_param, _shape_of
+    from discopt.ro.formulations._common import _contains_uncertain_param
 
     out = []
     for con in constraints:
         if not isinstance(con, Constraint) or not _contains_uncertain_param(con.body, names):
             out.append(con)
             continue
-        shape = _shape_of(con.body) or ()
+        body_shape = _evaluated_shape(con.body)
+        if body_shape is None:
+            raise NotImplementedError(
+                f"RobustCounterpart: cannot determine the shape of the uncertain row "
+                f"{con.name!r} ({con.body!r}), so it cannot be split into the scalar "
+                "rows whose worst cases are taken independently. Refusing rather than "
+                "robustifying it as one row. Index it into scalar rows explicitly (#1833)."
+            )
+        rhs = np.asarray(con.rhs, dtype=np.float64)
+        shape = tuple(int(d) for d in np.broadcast_shapes(body_shape, rhs.shape))
         if int(np.prod(shape)) <= 1:
             out.append(con)
             continue
-        rhs = np.asarray(con.rhs, dtype=np.float64)
+        rhs_full = np.broadcast_to(rhs, shape)
+        offset = len(shape) - len(body_shape)
         for idx in np.ndindex(*shape):
-            index = idx[0] if len(idx) == 1 else idx
-            elem_rhs = float(rhs[idx]) if rhs.ndim > 0 else float(rhs)
+            # The element of the body that broadcasts to ``idx``: trailing axes
+            # align, and a length-1 body axis is stretched.
+            body_idx = tuple(
+                0 if body_shape[d] == 1 else idx[d + offset] for d in range(len(body_shape))
+            )
+            if not body_idx:
+                elem_body = con.body
+            else:
+                elem_body = IndexExpression(
+                    con.body, body_idx[0] if len(body_idx) == 1 else body_idx
+                )
             name = f"{con.name}[{','.join(map(str, idx))}]" if con.name is not None else None
             out.append(
                 Constraint(
-                    body=IndexExpression(con.body, index),
+                    body=elem_body,
                     sense=con.sense,
-                    rhs=elem_rhs,
+                    rhs=float(rhs_full[idx]),
                     name=name,
                 )
             )
     return out
+
+
+class _ShapeUnknown(Exception):
+    """Raised inside :func:`_evaluated_shape` for a node it cannot evaluate."""
+
+
+def _evaluated_shape(expr) -> Optional[tuple[int, ...]]:
+    """The numpy shape *expr* evaluates to, or ``None`` when it cannot be evaluated.
+
+    Every leaf is replaced by zeros of its declared shape and the tree is
+    evaluated with numpy's own semantics (broadcasting, ``@``, ``axis`` sums,
+    indexing), so the result is the shape the solver's evaluators produce,
+    whatever composition the body is built from -- including the ones a static
+    shape inference does not special-case (an element-wise function over a
+    matmul, an indexed sum of vector terms). A node with no numpy rule here (a
+    :class:`CustomCall`, an unknown function name) or an operation numpy rejects
+    gives ``None``; the caller must refuse on it, never read it as a scalar.
+    """
+    try:
+        with np.errstate(all="ignore"):
+            return tuple(int(d) for d in np.shape(_eval_zeros(expr)))
+    except _ShapeUnknown:
+        return None
+
+
+def _eval_zeros(expr) -> np.ndarray:
+    from discopt.modeling.core import (
+        _ELEMENTWISE_FUNCS,
+        BinaryOp,
+        Constant,
+        FunctionCall,
+        IndexExpression,
+        MatMulExpression,
+        Parameter,
+        SumExpression,
+        SumOverExpression,
+        UnaryOp,
+        Variable,
+    )
+
+    try:
+        if isinstance(expr, (Constant, Parameter)):
+            return np.zeros(np.shape(expr.value))
+        if isinstance(expr, Variable):
+            return np.zeros(expr.shape)
+        if isinstance(expr, BinaryOp):
+            lv, rv = _eval_zeros(expr.left), _eval_zeros(expr.right)
+            if expr.op in ("+", "-", "*", "/", "**"):
+                return np.zeros(np.broadcast_shapes(lv.shape, rv.shape))
+        elif isinstance(expr, UnaryOp):
+            if expr.op in ("neg", "abs"):
+                return _eval_zeros(expr.operand)
+        elif isinstance(expr, MatMulExpression):
+            return np.asarray(np.matmul(_eval_zeros(expr.left), _eval_zeros(expr.right)))
+        elif isinstance(expr, SumExpression):
+            return np.asarray(np.sum(_eval_zeros(expr.operand), axis=expr.axis))
+        elif isinstance(expr, SumOverExpression):
+            shapes = [_eval_zeros(t).shape for t in expr.terms]
+            return np.zeros(np.broadcast_shapes(*shapes))
+        elif isinstance(expr, IndexExpression):
+            return np.asarray(_eval_zeros(expr.base)[expr.index])
+        elif isinstance(expr, FunctionCall):
+            args = [_eval_zeros(a) for a in expr.args]
+            if len(args) == 1 and (expr.func_name == "prod" or expr.func_name.startswith("norm")):
+                return np.zeros(())
+            if expr.func_name in _ELEMENTWISE_FUNCS and args:
+                return np.zeros(np.broadcast_shapes(*(a.shape for a in args)))
+    except (ValueError, IndexError, TypeError) as exc:
+        # numpy refused the operation (a shape clash, an out-of-range index):
+        # there is no shape to report.
+        raise _ShapeUnknown(str(exc)) from exc
+    raise _ShapeUnknown(f"no shape rule for {type(expr).__name__} {expr!r}")

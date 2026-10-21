@@ -51,6 +51,13 @@ ROW_CASES = {
     "same_sign_pos": lambda p, x, S=dm.sum: x + S(np.array([3.0, 1.0]) * p),
     "same_sign_neg": lambda p, x, S=dm.sum: x + S(np.array([-3.0, -1.0]) * p),
     "scalar_coeffs": lambda p, x, S=dm.sum: x + 3.0 * p[0] - 1.0 * p[1],
+    # Occurrences of one element that cancel: worst-casing each occurrence on its
+    # own (sign tracking) over-counts, so these need the aggregate coefficient.
+    "sum_matrix_matmul_p": lambda p, x, S=dm.sum: x + S(M_MIX @ p),
+    "sum_p_matmul_matrix": lambda p, x, S=dm.sum: x + S(p @ M_MIX),
+    "same_term_cancels": lambda p, x, S=dm.sum: x + S(C_MIX * p) - S(C_MIX * p),
+    "scalar_cancel": lambda p, x, S=dm.sum: x + 3.0 * p[0] - p[0] - 2.0 * p[1],
+    "negation_cancels": lambda p, x, S=dm.sum: x + S(C_MIX * p) + S(-(C_MIX * p)) + p[0],
 }
 
 
@@ -119,30 +126,148 @@ def test_robust_row_matches_vertex_oracle(kind, case):
 
 
 @pytest.mark.parametrize("kind", ["box", "polyhedral"])
-@pytest.mark.parametrize("case", ["matrix_matmul_p", "p_matmul_matrix"])
-def test_summed_matrix_rows_robust(kind, case):
-    """``sum(M @ p)`` with a column of ``M`` of mixed sign: robust, maybe conservative.
+@pytest.mark.parametrize(
+    ("row", "rhs", "expected"),
+    [
+        # sum(M @ p) == p0 for this M, so the worst case is pbar0 + delta0 = 2.
+        (lambda p, x: x + dm.sum(M_MIX @ p), 7.0, 5.0),
+        # The uncertain terms cancel identically: the row is x <= 10.
+        (lambda p, x: x + dm.sum(C_MIX * p) - dm.sum(C_MIX * p), 10.0, 10.0),
+    ],
+    ids=["sum_M_at_p", "c_p_minus_c_p"],
+)
+def test_cancelling_occurrences_are_exact(kind, row, rhs, expected):
+    """#1831 review blocker: the mixed-sign split was sound but over-counted.
 
-    ``p_j`` enters the summed row once per row of ``M``. Sign tracking worst-cases
-    each occurrence independently, which is sound but can exceed the joint worst
-    case (as it always did for ``3*p - p``); the polyhedral dual is exact. The
-    load-bearing check is robustness at every vertex. Pre-fix the box counterpart
-    passed the sign through ``@`` unchanged and was not robust.
+    Sign tracking worst-cases every occurrence of ``p_j`` separately, so a row
+    whose occurrences cancel was charged ``sum |coeff|`` instead of
+    ``|sum coeff|``: the first case came back INFEASIBLE (main: 5, truth 5), the
+    second 2 (main: 6, truth 10). The box counterpart now uses the aggregate
+    coefficient of a row that is affine in ``p``.
     """
-    row = {
-        "matrix_matmul_p": lambda p, x, S=dm.sum: x + S(M_MIX @ p),
-        "p_matmul_matrix": lambda p, x, S=dm.sum: x + S(p @ M_MIX),
-    }[case]
-    xv = _robust(kind, row)
-    oracle = _vertex_oracle(row)
-    assert xv <= oracle + 1e-5
-    if kind == "polyhedral":
-        assert xv == pytest.approx(oracle, abs=1e-5)
+    m = dm.Model("ro")
+    x = m.continuous("x", lb=0, ub=20)
+    p = m.parameter("p", value=PBAR.copy())
+    m.subject_to(row(p, x) <= rhs)
+    m.maximize(x)
+    RobustCounterpart(m, _uncertainty(kind, p)).formulate()
+    r = m.solve()
+    assert r.status == "optimal"
+    assert float(r.value(x)) == pytest.approx(expected, abs=1e-5)
+
+
+@pytest.mark.parametrize("kind", ["box", "polyhedral"])
+@pytest.mark.parametrize(("rhs", "feasible"), [(3.5, False), (6.5, True)])
+def test_parameter_only_matmul_vector_row(kind, rhs, feasible):
+    """``M @ p <= rhs``: row 0 reaches ``3*2 - 0 = 6``, row 1 ``-2*0 + 2 = 2``.
+
+    So ``3.5`` is robustly infeasible and ``6.5`` feasible. origin/main returned
+    OPTIMAL for ``3.5`` on both kinds (the polyhedral evaluator folded the vector
+    coefficient with ``np.sum``).
+    """
+    m = dm.Model("ro")
+    x = m.continuous("x", lb=0, ub=20)
+    p = m.parameter("p", value=PBAR.copy())
+    m.subject_to(M_MIX @ p <= rhs)
+    m.maximize(x)
+    RobustCounterpart(m, _uncertainty(kind, p)).formulate()
+    r = m.solve()
+    if feasible:
+        assert r.status == "optimal"
+        assert float(r.value(x)) == pytest.approx(20.0, abs=1e-6)
+    else:
+        assert r.status == "infeasible"
+
+
+def test_polyhedral_constant_coefficient_must_be_scalar():
+    """The polyhedral coefficient evaluator refuses a vector, never folds it.
+
+    A row that reaches it unsplit (a shape the splitter cannot determine) would
+    otherwise get ``sum(coeff)`` as its coefficient -- the #1831 fold.
+    """
+    from discopt.modeling.core import Constant, SumExpression
+    from discopt.ro.formulations.polyhedral import _eval_constant_expr
+
+    assert _eval_constant_expr(SumExpression(Constant(np.array([3.0, -1.0])))) == 2.0
+    with pytest.raises(NotImplementedError):
+        _eval_constant_expr(Constant(np.array([3.0, -1.0])))
+
+
+CERTAIN_CASES = {
+    "q_times_p": lambda p, q, x, S=dm.sum: x + S(q * p),
+    "p_times_q": lambda p, q, x, S=dm.sum: x + S(p * q),
+    "affine_of_q_times_p": lambda p, q, x, S=dm.sum: x + S((q * 2.0 - 1.0) * p),
+}
+
+
+@pytest.mark.parametrize("q_value", [[3.0, -1.0], [1.5, 0.75]], ids=["mixed_q", "uniform_q"])
+@pytest.mark.parametrize("case", sorted(CERTAIN_CASES))
+def test_certain_parameter_multiplier_is_signed_and_kept_symbolic(case, q_value):
+    """A certain Parameter multiplying ``p`` is signed by its value and kept.
+
+    ``q = [3, -1]`` is mixed-sign, so each element of ``p`` needs its own worst
+    case (origin/main was non-robust on all three). Whether ``q`` is mixed or of
+    one sign, the counterpart must keep ``q`` symbolic, so a later pass over it
+    can still robustify it: freezing it into a Constant made that pass a silent
+    no-op (#1839 review). The direction read from ``q``'s value is a recorded
+    assumption (``test_ro_certain_parameter_multipliers.py``).
+    """
+    from discopt.modeling.core import Parameter
+
+    row = CERTAIN_CASES[case]
+    q_value = np.array(q_value)
+    m = dm.Model("ro")
+    x = m.continuous("x", lb=0, ub=20)
+    p = m.parameter("p", value=PBAR.copy())
+    q = m.parameter("q", value=q_value.copy())
+    m.subject_to(row(p, q, x) <= 10)
+    m.maximize(x)
+    RobustCounterpart(m, BoxUncertaintySet(p, delta=DELTA)).formulate()
+
+    def params(e, out):
+        if isinstance(e, Parameter):
+            out.append(e.name)
+        for attr in ("left", "right", "operand", "base"):
+            if hasattr(e, attr):
+                params(getattr(e, attr), out)
+        for t in getattr(e, "terms", []) or getattr(e, "args", []):
+            params(t, out)
+        return out
+
+    assert "q" in params(m._constraints[0].body, [])
+    assert "p" not in params(m._constraints[0].body, [])
+    r = m.solve()
+    assert r.status == "optimal"
+    xv = float(r.value(x))
+
+    def oracle_row(v, xx):
+        return row(v, q_value, xx, np.sum)
+
+    assert xv == pytest.approx(_vertex_oracle(oracle_row), abs=1e-5)
     checks = 0
     for v in VERTICES:
-        assert float(row(v, xv, np.sum)) <= 10 + 1e-5
+        assert float(oracle_row(v, xv)) <= 10 + 1e-5
         checks += 1
     assert checks == len(VERTICES)
+
+
+@pytest.mark.parametrize("affine", [True, False], ids=["affine_row", "sign_tracked_row"])
+@pytest.mark.parametrize("divisor", [[2.0, 0.0], [-2.0, 0.0]], ids=["pos", "neg"])
+def test_uniform_sign_divisor_with_zero_refuses(divisor, affine):
+    """A zero entry in a constant divisor of ``p`` is refused on both routes.
+
+    Before, only a *mixed*-sign divisor was checked; a one-signed divisor with a
+    zero entry was folded to that sign and rebuilt. ``exp`` keeps the row off the
+    affine route so the sign-tracking check is exercised too.
+    """
+    m = dm.Model("ro")
+    x = m.continuous("x", lb=0, ub=20)
+    p = m.parameter("p", value=PBAR.copy())
+    term = p / np.array(divisor)
+    m.subject_to(x + dm.sum(term if affine else dm.exp(term)) <= 10)
+    m.maximize(x)
+    with pytest.raises(ValueError, match="zero entries"):
+        RobustCounterpart(m, BoxUncertaintySet(p, delta=DELTA)).formulate()
 
 
 @pytest.mark.parametrize("kind", ["box", "polyhedral"])
@@ -327,3 +452,52 @@ def test_polyhedral_unbounded_support_refuses():
     rc = RobustCounterpart(m, PolyhedralUncertaintySet(p, A=-np.eye(2), b=np.ones(2)))
     with pytest.raises(ValueError, match="support LP"):
         rc.formulate()
+
+
+# --- #1839 review: non-affine rows that also hold a cancelling affine part ----
+#
+# The affine extractor must refuse each non-affine node; a mutant that let one
+# through (a FunctionCall read as ``{}``, ``p*p`` read as ``p + p``, ``abs``
+# passed through, ``1/(p+c)`` or ``**`` read as their left operand) builds the
+# aggregate counterpart from a wrong coefficient and returns a non-robust point.
+# Each row is checked on a dense grid over the box, exact for these scalar rows.
+
+NONAFFINE_ROWS = {
+    "exp_plus_cancel": (0.0, 1.0, lambda p, x, F: x + F.exp(p) + 3.0 * p - 3.0 * p),
+    "max_plus_cancel": (
+        0.0,
+        1.0,
+        lambda p, x, F: x + F.maximum(p, -p) - 2.0 * p + 3.0 * p - 3.0 * p,
+    ),
+    "min_plus_cancel": (
+        0.0,
+        1.0,
+        lambda p, x, F: x - F.minimum(p, -p) - 2.0 * p + 3.0 * p - 3.0 * p,
+    ),
+    "dm_abs_plus_cancel": (0.0, 1.0, lambda p, x, F: x + F.abs(p) - 2.0 * p),
+    "builtin_abs_plus_cancel": (0.0, 1.0, lambda p, x, F: x + abs(p) - 2.0 * p),
+    "p_times_p_plus_cancel": (1.0, 1.0, lambda p, x, F: x + 3.0 * p - 3.0 * p + p * p),
+    "reciprocal_plus_cancel": (1.0, 1.0, lambda p, x, F: x + 1.0 / (p + 3.0) + 3.0 * p - 3.0 * p),
+    "pow1_plus_cancel": (1.0, 1.0, lambda p, x, F: x + (p - 1.0) ** 1 + 3.0 * p - 3.0 * p),
+    "pow2_plus_cancel": (1.0, 2.0, lambda p, x, F: x + (p - 1.0) ** 2 + 3.0 * p - 3.0 * p),
+}
+
+
+@pytest.mark.parametrize("case", sorted(NONAFFINE_ROWS))
+def test_nonaffine_row_with_cancelling_part_stays_robust(case):
+    pbar, delta, row = NONAFFINE_ROWS[case]
+    m = dm.Model("nonaffine")
+    x = m.continuous("x", lb=-50, ub=50)
+    p = m.parameter("p", value=pbar)
+    m.subject_to(row(p, x, dm) <= 6.0)
+    m.maximize(x)
+    RobustCounterpart(m, BoxUncertaintySet(p, delta=delta)).formulate()
+    r = m.solve()
+    assert r.status == "optimal"
+    xv = float(r.value(x))
+    grid = np.linspace(pbar - delta, pbar + delta, 401)
+    checks = 0
+    for v in grid:
+        assert float(row(v, xv, np)) <= 6.0 + 1e-6, (case, v, xv)
+        checks += 1
+    assert checks == grid.size

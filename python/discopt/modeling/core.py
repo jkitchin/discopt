@@ -5701,7 +5701,13 @@ class _DetachedNlRepr:
 #: ``Model`` must forward them with :func:`carry_validation_guards` -- the rows the
 #: guard protects are forwarded with it, so dropping the guard turns a later bound
 #: widening from a refusal into a silent clamp (#1498).
-VALIDATION_GUARD_ATTRS: tuple[str, ...] = ("_atan2_preconditions", "_piecewise_domains")
+VALIDATION_GUARD_ATTRS: tuple[str, ...] = (
+    "_atan2_preconditions",
+    "_piecewise_domains",
+    # The sign a robust counterpart read a worst-case direction from
+    # (``discopt.ro.formulations._common.SIGN_GUARD_ATTR``); set only when present.
+    "_ro_sign_preconditions",
+)
 
 
 def carry_validation_guards(src: "Model", dst: "Model") -> None:
@@ -12227,6 +12233,13 @@ class Model:
         from discopt.modeling._piecewise import check_domains
 
         check_domains(self)
+
+        # Same reasoning for a robust counterpart whose worst-case direction was
+        # read from a Parameter value or variable bound changed since.
+        if getattr(self, "_ro_sign_preconditions", None):
+            from discopt.ro.formulations._common import check_sign_assumptions
+
+            check_sign_assumptions(self)
 
         names = set()
         for var in self._variables:
