@@ -39,6 +39,7 @@ from discopt.modeling.core import (
     UnaryOp,
     Variable,
 )
+from discopt.solver_tuning import _env_flag
 
 from . import interval as iv
 from .interval import Interval
@@ -911,8 +912,8 @@ def _eval_matmul(
     times variable-vector; the handling below covers that case plus
     the symmetric one.
     """
-    left = _eval(expr.left, model, box, cache)
-    right = _eval(expr.right, model, box, cache)
+    left = _matmul_operand(_eval(expr.left, model, box, cache), expr.left)
+    right = _matmul_operand(_eval(expr.right, model, box, cache), expr.right)
 
     # For a matmul of interval matrices A (m × k) by B (k × n) the
     # enclosure is formed from the interval dot products. We express
@@ -951,18 +952,16 @@ def _eval_matmul(
             lo[i] = _widen_sum(prods_lo.sum(), prods_lo, k, None, -1.0)
             hi[i] = _widen_sum(prods_hi.sum(), prods_hi, k, None, +1.0)
         return Interval(np.nextafter(lo, -np.inf), np.nextafter(hi, np.inf))
-    if 1 <= A_lo.ndim <= 2 and 1 <= B_lo.ndim <= 2:
+    out_shape = _matmul_shape(A_lo.shape, B_lo.shape)
+    if 1 <= A_lo.ndim <= 2 and 1 <= B_lo.ndim <= 2 and _matmul_enclosure_enabled():
         # #1842: every other 1-D / 2-D product -- ``(k,) @ (k, n)``,
-        # ``(m, k) @ (k, n)``, ``(k,) @ (k,)``. These fell through to an
-        # unbounded enclosure of shape ``A.shape[:-1]``, which is the product's
-        # shape only for ``(m, k) @ (k,)``: ``(c @ M)[0]`` then raised
-        # ``IndexError: array is 0-dimensional`` in the root relaxation build,
-        # and even with the shape right a constant ``sum(M @ M)`` had no finite
-        # enclosure, so the dual bound never left the variable box. Each output
-        # entry is the same interval dot product as the branch above, widened by
-        # the same accumulation bound, so the enclosure is sound by the same
-        # argument; the branch above is left as it was.
-        out_shape = _matmul_shape(A_lo.shape, B_lo.shape)
+        # ``(m, k) @ (k, n)``, ``(k,) @ (k,)``. Without the flag these are
+        # unbounded (in the product's shape, below); with it, a constant
+        # ``sum(M @ M)`` gets a finite enclosure, so the #1842 repro's dual bound
+        # leaves the variable box and certifies. Each output entry is the same
+        # interval dot product as the branch above, widened by the same
+        # accumulation bound, so the enclosure is sound by the same argument; the
+        # branch above is left as it was.
         a_lo2 = A_lo.reshape(1, -1) if A_lo.ndim == 1 else A_lo
         a_hi2 = A_hi.reshape(1, -1) if A_hi.ndim == 1 else A_hi
         b_lo2 = B_lo.reshape(-1, 1) if B_lo.ndim == 1 else B_lo
@@ -984,14 +983,58 @@ def _eval_matmul(
             np.nextafter(lo, -np.inf).reshape(out_shape),
             np.nextafter(hi, np.inf).reshape(out_shape),
         )
-    # Batched (>2-D) products fall through as unbounded -- not needed by any
-    # expression the convexity certificate currently targets -- but with the
-    # product's shape, so a consumer that indexes it does not crash (#1842).
-    return _unbounded(_matmul_shape(A_lo.shape, B_lo.shape))
+    # Everything else is unbounded, as it always was, but in the PRODUCT's shape
+    # (#1842). The old fallback used ``A.shape[:-1]``, which is the product's
+    # shape only for ``(m, k) @ (k,)``: for ``(k,) @ (k, n)`` it was 0-d, and
+    # ``(c @ M)[0]`` raised ``IndexError: array is 0-dimensional`` in the root
+    # relaxation build. Unbounded in either shape is the same enclosure, so this
+    # part is bound-neutral and is not behind the flag.
+    return _unbounded(out_shape)
+
+
+def _matmul_enclosure_enabled() -> bool:
+    """``DISCOPT_MATMUL_INTERVAL_ENCLOSURE`` -- finite enclosures for the general
+    1-D / 2-D matmul (#1842). Default OFF.
+
+    Bound-changing: forms that were ``(-inf, inf)`` (``c @ x`` with an ndarray
+    ``c``, ``x @ x``, ``x @ Q @ x``, ``X @ Y``, ...) become finite, and a 48-model
+    panel moved 4 node counts with the objective unchanged (11->9, 63->51, 37->39,
+    97->89). Sound -- sampled and corner-checked against an exact ``math.fsum``
+    reference with 0 violations -- but not yet run on the CLAUDE.md §5 corpus
+    panel, so it stays off until that panel graduates it
+    (``docs/dev/flag-retirement-audit.md``).
+    """
+    return _env_flag("DISCOPT_MATMUL_INTERVAL_ENCLOSURE", default=False)
+
+
+def _matmul_operand(enc: Interval, node: Expression) -> Interval:
+    """*enc* broadcast to *node*'s static shape when *enc* came back 0-d.
+
+    A fallback elsewhere in this evaluator (an unrecognised node type, for one)
+    may return a 0-d unbounded enclosure for a shaped operand; ``np.matmul``
+    rejects a 0-d operand, so the product shape could not be formed (#1842). A
+    0-d enclosure holds for every entry, so broadcasting it is the same enclosure.
+    """
+    if enc.lo.ndim != 0:
+        return enc
+    try:
+        shape = node.shape
+    except AttributeError:  # no statically known shape: _matmul_shape copes
+        return enc
+    if not shape:
+        return enc
+    return Interval(np.broadcast_to(enc.lo, shape), np.broadcast_to(enc.hi, shape))
 
 
 def _matmul_shape(a: tuple, b: tuple) -> tuple:
-    """Shape of ``A @ B`` under numpy's rules (``ValueError`` if incompatible)."""
+    """Shape of ``A @ B`` under numpy's rules (``ValueError`` if incompatible).
+
+    A 0-d operand, whose shape :func:`_matmul_operand` could not recover, keeps
+    the pre-#1842 rule ``A.shape[:-1]`` rather than raising: ``np.matmul``
+    rejects a scalar, and the enclosure there is unbounded regardless.
+    """
+    if len(a) == 0 or len(b) == 0:
+        return tuple(a[:-1])
     return tuple(np.matmul(np.zeros(a), np.zeros(b)).shape)
 
 
