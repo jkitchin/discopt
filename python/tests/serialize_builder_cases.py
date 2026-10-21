@@ -609,6 +609,13 @@ def _selected_second_disjunct(model):
     return [disjunction.disjuncts[1]]
 
 
+def _psplit_source():
+    """A disjunction whose first row is separable over x and y (#1775 G2.8)."""
+    m, x, y = _xy("psplit")
+    m.either_or([[x**2 + y**2 <= 4], [x >= 3]], name="d")
+    return m
+
+
 def _create(name, source, **kwargs):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -658,6 +665,8 @@ _TRANSFORM_ROUND_TRIPS = {
         "gdp.bound_pretransformation", _either_or("select_one")
     )[0],
     "transform:gdp.cuttingplane": _transform("gdp.cuttingplane", _either_or("select_one"))[0],
+    "transform:gdp.partition_disjuncts": _transform("gdp.partition_disjuncts", _psplit_source)[0],
+    "transform:gdp.between_steps": _transform("gdp.between_steps", _psplit_source)[0],
     "transform:mpec.gdp": _mpcc_transform("mpec.gdp"),
     "transform:mpec.sos1": _mpcc_transform("mpec.sos1"),
     "transform:mpec.scholtes": _mpcc_transform("mpec.scholtes", scholtes=True),
