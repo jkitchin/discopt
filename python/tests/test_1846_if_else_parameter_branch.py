@@ -129,3 +129,28 @@ def test_bool_index_is_not_an_integer_index():
     x = m.continuous("x", shape=(2,), lb=-1, ub=1)
     assert not _expr_equal(x[True], x[1])
     assert _expr_equal(x[1], x[np.int64(1)])
+
+
+@pytest.mark.parametrize("value", [1.0, 1000.0, 1e5])
+def test_lowered_model_matches_a_fresh_hull_solve(value):
+    # The PR #1862 reviewer's probe: before the fix, the model lowered at q = 1
+    # and re-solved at q = 1000 certified -0.9964 (truth -5, the x <= -1 disjunct).
+    import discopt.transformations as dt
+
+    def build():
+        m = dm.Model()
+        x = m.continuous("x", lb=-5, ub=5)
+        q = m.parameter("q", value=1.0)
+        m.either_or([[dm.exp(x) + q * x + q == 4], [x <= -1]])
+        m.minimize(x)
+        return m, q
+
+    m, _ = build()
+    lowered = dt.create_using("gdp.hull", m)
+    next(p for p in lowered._parameters if p.name == "q").value = value
+    fresh, q = build()
+    q.value = value
+    r, r_fresh = _solve(lowered), _solve(fresh, gdp_method="hull")
+    assert r.status == r_fresh.status == "optimal"
+    assert r.objective == pytest.approx(-5.0, abs=1e-4)
+    assert r.objective == pytest.approx(r_fresh.objective, abs=1e-6)
