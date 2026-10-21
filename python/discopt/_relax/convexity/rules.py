@@ -1989,10 +1989,15 @@ class OACutConvexity:
 
     objective_is_convex: bool
     constraint_mask: list[bool]
+    #: Rows left unclassified because ``deadline`` passed (counted not convex).
+    truncated: int = 0
 
 
 def classify_oa_cut_convexity(
-    model: Model, *, use_certificate: Optional[bool] = None
+    model: Model,
+    *,
+    use_certificate: Optional[bool] = None,
+    deadline: Optional[float] = None,
 ) -> OACutConvexity:
     """Return the convexity information needed to generate sound OA cuts.
 
@@ -2009,6 +2014,13 @@ def classify_oa_cut_convexity(
     disables its objective cuts on a model the dispatch routed to it *because*
     that certificate proved it convex (#1352). With the flag opted out (``=0``) the verdict
     is exactly the pre-#1352 one, including for an explicit ``True``.
+
+    ``deadline`` (a ``time.perf_counter()`` instant, #1775 G4.1): once it passes,
+    each remaining row counts as not convex -- it gets no OA cut, which only
+    weakens the caller's master and never cuts a feasible point -- and
+    ``truncated`` says how many. Measured on kaibel (GDPlib): the full pass took
+    over 100 s, all of it before LOA's first master solve. ``None`` classifies
+    every row, as before.
     """
     from .certificate import _oa_convexity_certificate_enabled
 
@@ -2029,8 +2041,12 @@ def classify_oa_cut_convexity(
     )
 
     constraint_mask: list[bool] = []
+    truncated = 0
     for c in model._constraints:
-        if isinstance(c, Constraint):
+        if deadline is not None and time.perf_counter() >= deadline:
+            constraint_mask.append(False)
+            truncated += isinstance(c, Constraint)
+        elif isinstance(c, Constraint):
             constraint_mask.append(
                 classify_constraint(c, model, cache, use_certificate=use_certificate)
             )
@@ -2040,6 +2056,7 @@ def classify_oa_cut_convexity(
     return OACutConvexity(
         objective_is_convex=obj_convex,
         constraint_mask=constraint_mask,
+        truncated=truncated,
     )
 
 

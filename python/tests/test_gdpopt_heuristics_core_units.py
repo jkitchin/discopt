@@ -186,7 +186,9 @@ class TestGDPoptLOASolves:
         x = m.continuous("x", lb=0, ub=10)
         m.subject_to((x - 1) ** 2 <= 4)
         m.minimize(x + y)
-        r = loa.solve_gdpopt_loa(m, time_limit=30, max_iterations=10)
+        # The NLP path (#1775 G4.1: the default is now the global subproblem,
+        # which certifies this configuration without the local NLP).
+        r = loa.solve_gdpopt_loa(m, time_limit=30, max_iterations=10, subproblem="nlp")
         assert r.status == "unknown"
         assert r.objective is None
         assert r.gap_certified is False

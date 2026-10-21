@@ -24,6 +24,7 @@ configurations never leave the master: they block ``optimal``, not the bound.
 from __future__ import annotations
 
 import math
+import time
 from typing import Any, Optional
 
 import numpy as np
@@ -53,7 +54,7 @@ class LOA(GDPAlgorithm):
         milp_solver: str = DEFAULT_MASTER_BACKEND,
         init_algorithm: str = "no_init",
         set_cover_iterlim: int = 8,
-        subproblem: str = "nlp",
+        subproblem: str = "global",
         **kw: Any,
     ) -> None:
         from discopt._relax.convexity import classify_oa_cut_convexity
@@ -80,7 +81,14 @@ class LOA(GDPAlgorithm):
         self.evaluator = make_evaluator(low)
         self.n = int(self.evaluator.n_variables)
         self.n_work = sum(int(v.size) for v in self.space.work._variables)
-        convexity = classify_oa_cut_convexity(low)
+        # The deadline bounds the certification pass too (> 100 s on kaibel); a
+        # row it does not reach gets no cut, which keeps the master a relaxation.
+        left = self.deadline.remaining()
+        convexity = classify_oa_cut_convexity(
+            low,
+            deadline=None if math.isinf(left) else time.perf_counter() + 0.5 * left,
+        )
+        self.convexity_truncated = convexity.truncated
         self.oa_rows = _oa_rows(self.evaluator, low, convexity.constraint_mask)
         self.master = self.space.master(backend=milp_solver)
         self.obj_is_linear = self.master.objective is not None
@@ -95,6 +103,10 @@ class LOA(GDPAlgorithm):
         self.init_report: Any = None
 
     # ── pieces ────────────────────────────────────────────────────────────
+
+    def _nlp_limit(self) -> Optional[float]:
+        left = self.deadline.sub_limit()
+        return None if math.isinf(left) else left
 
     def _cuts_at(self, x: np.ndarray) -> None:
         from discopt.solvers.gdpopt_loa import _add_oa_cuts
@@ -171,7 +183,13 @@ class LOA(GDPAlgorithm):
     def initialize(self) -> None:
         from discopt.solvers.gdpopt_loa import _solve_nlp_relaxation
 
-        x_relax = _solve_nlp_relaxation(self.evaluator, self.lb_box, self.ub_box, self.nlp_solver)
+        x_relax = _solve_nlp_relaxation(
+            self.evaluator,
+            self.lb_box,
+            self.ub_box,
+            self.nlp_solver,
+            time_limit=self._nlp_limit(),
+        )
         if x_relax is not None:
             self._cuts_at(np.asarray(x_relax, dtype=np.float64))
         if self.init_algorithm != "no_init":
@@ -220,7 +238,9 @@ class LOA(GDPAlgorithm):
         sub_ub = np.array(self.ub_box, dtype=np.float64)
         for idx in self.master.int_indices:
             sub_lb[idx] = sub_ub[idx] = round(float(x_master[idx]))
-        x = _solve_nlp_subproblem(self.evaluator, sub_lb, sub_ub, self.nlp_solver)
+        x = _solve_nlp_subproblem(
+            self.evaluator, sub_lb, sub_ub, self.nlp_solver, time_limit=self._nlp_limit()
+        )
         self.n_subproblems += 1
         if x is not None:
             self.mark_solved(config)
@@ -254,9 +274,8 @@ class LOA(GDPAlgorithm):
         if x is not None:
             self._offer(x)
             self._cuts_at(x)
-        else:
-            self._cuts_at(x_master)
         if res.status == "infeasible":
+            self._cuts_at(x_master)
             self._exclude_certified(config, None)
             self.mark_solved(config)
         elif res.status == "optimal":
@@ -266,9 +285,11 @@ class LOA(GDPAlgorithm):
         elif x is not None:
             self.mark_solved(config)  # a point but no certificate: as the NLP mode
         else:
-            seen = config in self.unresolved
-            self.mark_unresolved(config)
-            return not seen
+            # The global solve proved nothing and found no point: fall back to the
+            # NLP mode's step for this configuration, so global mode never does
+            # worse than it (measured: small_batch, positioning, where discopt
+            # could not bound the reduced model but the fixed-integer NLP solves).
+            return self._nlp_step(x_master, config)
         return True
 
     def run(self) -> "SolveResult":

@@ -131,8 +131,10 @@ def _compute_gap(lb: float, ub: float) -> float:
     return optimality_gap(lb, ub, denom_floor=1e-10)
 
 
-def _solve_nlp_relaxation(evaluator, lb, ub, nlp_solver: str) -> np.ndarray | None:
-    """Solve the continuous NLP relaxation."""
+def _solve_nlp_relaxation(
+    evaluator, lb, ub, nlp_solver: str, time_limit: float | None = None
+) -> np.ndarray | None:
+    """Solve the continuous NLP relaxation (within ``time_limit`` seconds, if given)."""
     lb_clip = np.clip(lb, -1e8, 1e8)
     ub_clip = np.clip(ub, -1e8, 1e8)
     x0 = 0.5 * (lb_clip + ub_clip)
@@ -143,7 +145,10 @@ def _solve_nlp_relaxation(evaluator, lb, ub, nlp_solver: str) -> np.ndarray | No
         else:
             from discopt.solvers.nlp_pounce import solve_nlp
 
-        result = solve_nlp(evaluator, x0, options={"print_level": 0})
+        options: dict = {"print_level": 0}
+        if time_limit is not None:
+            options["max_wall_time"] = max(float(time_limit), 0.05)
+        result = solve_nlp(evaluator, x0, options=options)
 
         from discopt.solvers import SolveStatus
 
@@ -156,8 +161,10 @@ def _solve_nlp_relaxation(evaluator, lb, ub, nlp_solver: str) -> np.ndarray | No
     return None
 
 
-def _solve_nlp_subproblem(evaluator, sub_lb, sub_ub, nlp_solver: str) -> np.ndarray | None:
-    """Solve NLP subproblem with fixed integer bounds."""
+def _solve_nlp_subproblem(
+    evaluator, sub_lb, sub_ub, nlp_solver: str, time_limit: float | None = None
+) -> np.ndarray | None:
+    """Solve NLP subproblem with fixed integer bounds (within ``time_limit`` seconds)."""
     # IPM log-barriers require strict lb < x < ub; relax fixed vars by tiny slack
     ipm_lb = sub_lb.copy()
     ipm_ub = sub_ub.copy()
@@ -184,6 +191,9 @@ def _solve_nlp_subproblem(evaluator, sub_lb, sub_ub, nlp_solver: str) -> np.ndar
         opts = pounce_option_defaults()
         opts.update(pounce_incumbent_options())
         opts.update({"max_iter": 200})
+        if time_limit is not None:
+            # #1775 G4.1: the caller's deadline remainder, as for every subsolve.
+            opts["max_wall_time"] = max(float(time_limit), 0.05)
         result = solve_nlp(cast("NLPEvaluator", proxy), x0, options=opts)
 
         from discopt.solvers import SolveStatus
