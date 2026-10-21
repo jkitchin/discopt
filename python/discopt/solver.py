@@ -11890,6 +11890,10 @@ def solve_model(
     from discopt.mpec import require_all_relations_lowered
 
     require_all_relations_lowered(model, context="solve_model")
+    if getattr(model, "_ro_commitments", None):
+        from discopt.ro.formulations._common import check_ro_commitments
+
+        check_ro_commitments(model, context="solve_model")
 
     # --- #1619 B-13: dm.external memos and failure records are per solve ---
     # A callable may read state the caller changed since the last solve (a

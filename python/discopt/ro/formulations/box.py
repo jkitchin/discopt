@@ -528,5 +528,7 @@ def _mixed_constant_over_coupled(factor, other, param_names: set[str]) -> bool:
         return False
     if not (_contains_variable(other) and _contains_uncertain_param(other, param_names)):
         return False
-    value = np.asarray(eval_constant_expr(factor), dtype=np.float64)
+    # Only the sign pattern is read: the |coeff| linearization keeps the factor
+    # live and is valid for either sign, so nothing is committed.
+    value = np.asarray(eval_constant_expr(factor, record=False), dtype=np.float64)
     return bool(np.any(value > 0) and np.any(value < 0))

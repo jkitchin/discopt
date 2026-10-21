@@ -1297,6 +1297,20 @@ def _refuse_unclassified_attributes(model: Model) -> None:
     )
     if not unknown:
         return
+    if "_ro_commitments" in unknown:
+        # Attached by RobustCounterpart.formulate() only when the counterpart was
+        # built from the value or sign of a certain Parameter, and enforced at
+        # solve time (discopt.ro.formulations._common.check_ro_commitments). This
+        # schema has no key for it, and a reload without it would solve after an
+        # update that breaks the counterpart -- so refuse rather than drop it.
+        names = sorted(model._ro_commitments)  # type: ignore[attr-defined]
+        raise SerializationError(
+            "cannot serialize: a robust counterpart on this model was built from the "
+            f"value or sign of certain Parameter(s) {names}, a commitment this format "
+            "does not record; a reloaded model could then be solved after an update "
+            "that breaks the counterpart. Save the model before "
+            "RobustCounterpart.formulate() and re-run it after loading."
+        )
     passes = sorted(
         {
             label

@@ -200,19 +200,32 @@ CERTAIN_CASES = {
 }
 
 
-@pytest.mark.parametrize("q_value", [[3.0, -1.0], [1.5, 0.75]], ids=["mixed_q", "uniform_q"])
-@pytest.mark.parametrize("case", sorted(CERTAIN_CASES))
-def test_certain_parameter_multiplier_is_signed_and_frozen(case, q_value):
-    """A certain Parameter multiplying ``p`` is signed by its value, then frozen.
-
-    ``q = [3, -1]`` is mixed-sign, so each element of ``p`` needs its own worst
-    case (origin/main was non-robust on all three). Whether ``q`` is mixed or of
-    one sign, the counterpart must keep no reference to ``q``: its worst-case
-    direction was read from ``q``'s value (the uniform-sign case used to keep the
-    live Parameter node while the split case froze it).
-    """
+def _param_names(e, out):
     from discopt.modeling.core import Parameter
 
+    if isinstance(e, Parameter):
+        out.append(e.name)
+    for attr in ("left", "right", "operand", "base"):
+        if hasattr(e, attr):
+            _param_names(getattr(e, attr), out)
+    for t in getattr(e, "terms", []) or getattr(e, "args", []):
+        _param_names(t, out)
+    return out
+
+
+@pytest.mark.parametrize("q_value", [[3.0, -1.0], [1.5, 0.75]], ids=["mixed_q", "uniform_q"])
+@pytest.mark.parametrize("case", sorted(CERTAIN_CASES))
+def test_certain_parameter_multiplier_is_signed_and_committed(case, q_value):
+    """A certain Parameter multiplying ``p`` is signed by its value and committed.
+
+    ``q = [3, -1]`` is mixed-sign, so each element of ``p`` needs its own worst
+    case (origin/main was non-robust on all three). The ``c+ + c-`` split bakes
+    ``q``'s value into the counterpart, which records a *value* commitment. A
+    uniform-sign bare ``q`` stays live in the row -- freezing it silently made
+    a second ``RobustCounterpart`` over ``q`` a no-op and a later update of ``q``
+    ignored (#1839 review) -- under a *sign* commitment. A compound multiplier
+    ``f(q)`` stays live under a value commitment.
+    """
     row = CERTAIN_CASES[case]
     q_value = np.array(q_value)
     m = dm.Model("ro")
@@ -223,17 +236,14 @@ def test_certain_parameter_multiplier_is_signed_and_frozen(case, q_value):
     m.maximize(x)
     RobustCounterpart(m, BoxUncertaintySet(p, delta=DELTA)).formulate()
 
-    def params(e, out):
-        if isinstance(e, Parameter):
-            out.append(e.name)
-        for attr in ("left", "right", "operand", "base"):
-            if hasattr(e, attr):
-                params(getattr(e, attr), out)
-        for t in getattr(e, "terms", []) or getattr(e, "args", []):
-            params(t, out)
-        return out
+    mixed = bool(np.any(q_value < 0))
+    names = _param_names(m._constraints[0].body, [])
+    assert "p" not in names
+    assert ("q" in names) == (not mixed)
+    kind = "sign" if (not mixed and case != "affine_of_q_times_p") else "value"
+    assert m._ro_commitments["q"]["kind"] == kind
+    np.testing.assert_array_equal(m._ro_commitments["q"]["value"], q_value)
 
-    assert params(m._constraints[0].body, []) == []
     r = m.solve()
     assert r.status == "optimal"
     xv = float(r.value(x))
@@ -247,6 +257,240 @@ def test_certain_parameter_multiplier_is_signed_and_frozen(case, q_value):
         assert float(oracle_row(v, xv)) <= 10 + 1e-5
         checks += 1
     assert checks == len(VERTICES)
+
+
+# --- #1839 review: a second RobustCounterpart over a certain Parameter --------
+#
+# ``x + q*p <= 10``, max x, with p in [0.5, 1.5] (pass 1) and q in [1, 3] (pass
+# 2): q*p ranges over [0.5, 4.5], so the robust truth is x = 5.5. The first
+# version of this PR froze q into a Constant in pass 1, so pass 2 found no q and
+# returned x = 7 -- non-robust -- in every variant.
+
+TWO_PASS_FORMS = {
+    "q*p": lambda p, q: dm.sum(q * p),
+    "p*q": lambda p, q: dm.sum(p * q),
+}
+
+
+def _two_pass_model(q_value, form):
+    m = dm.Model("two_pass")
+    x = m.continuous("x", lb=-20, ub=20)
+    p = m.parameter("p", value=np.ones_like(np.asarray(q_value, dtype=float)))
+    q = m.parameter("q", value=q_value)
+    m.subject_to(x + TWO_PASS_FORMS[form](p, q) <= 10)
+    m.maximize(x)
+    RobustCounterpart(m, BoxUncertaintySet(p, delta=0.5)).formulate()
+    return m, x, q
+
+
+@pytest.mark.parametrize("form", sorted(TWO_PASS_FORMS))
+@pytest.mark.parametrize(
+    ("second", "q_value"),
+    [("box", 2.0), ("box", np.array([2.0])), ("ellipsoidal", np.array([2.0]))],
+    ids=["box_scalar", "box_vec", "ellipsoidal_vec"],
+)
+def test_second_pass_over_uniform_sign_multiplier_is_robust(second, q_value, form):
+    from discopt.ro import EllipsoidalUncertaintySet
+
+    m, x, q = _two_pass_model(q_value, form)
+    assert m._ro_commitments["q"]["kind"] == "sign"
+    if second == "box":
+        u2 = BoxUncertaintySet(q, delta=1.0)
+    else:
+        u2 = EllipsoidalUncertaintySet(q, rho=1.0)
+    RobustCounterpart(m, u2).formulate()
+    # Pass 2 eliminated q and checked its whole set against the sign: no
+    # commitment on it remains.
+    assert not hasattr(m, "_ro_commitments")
+    r = m.solve()
+    assert r.status == "optimal"
+    xv = float(r.value(x))
+    assert xv == pytest.approx(5.5, abs=1e-6)
+    checks = 0
+    for qq in (1.0, 3.0):
+        for pp in (0.5, 1.5):
+            assert xv + qq * pp <= 10 + 1e-6
+            checks += 1
+    assert checks == 4
+
+
+def test_second_pass_over_set_crossing_zero_refuses():
+    """Pass 1 chose p's worst case for q >= 0; q in [-1, 5] breaks that."""
+    m, _x, q = _two_pass_model(2.0, "q*p")
+    with pytest.raises(ValueError, match="crosses zero"):
+        RobustCounterpart(m, BoxUncertaintySet(q, delta=3.0)).formulate()
+
+
+@pytest.mark.parametrize(
+    ("q_value", "row"),
+    [
+        # Mixed sign: the c+ / c- split bakes q's value. Pass 2 used to return
+        # x = 8 here (truth 6), on origin/main as well.
+        (np.array([2.0, -2.0]), lambda p, q: dm.sum(q * p)),
+        # Cancelling row: the aggregate coefficient J = q bakes q's value.
+        (np.array([2.0]), lambda p, q: dm.sum(q * p) + dm.sum(3.0 * p) - dm.sum(3.0 * p)),
+    ],
+    ids=["mixed_sign_q", "aggregate_cancel"],
+)
+def test_second_pass_over_baked_value_refuses(q_value, row):
+    m = dm.Model("two_pass")
+    x = m.continuous("x", lb=-20, ub=20)
+    p = m.parameter("p", value=np.ones_like(q_value))
+    q = m.parameter("q", value=q_value)
+    m.subject_to(x + row(p, q) <= 10)
+    m.maximize(x)
+    RobustCounterpart(m, BoxUncertaintySet(p, delta=0.5)).formulate()
+    assert m._ro_commitments["q"]["kind"] == "value"
+    with pytest.raises(ValueError, match="baked the value of Parameter 'q'"):
+        RobustCounterpart(m, BoxUncertaintySet(q, delta=1.0)).formulate()
+
+
+# --- #1839 review: updating a certain Parameter after formulate() -------------
+
+
+def _update_model(row, q0):
+    m = dm.Model("update")
+    x = m.continuous("x", lb=-50, ub=50)
+    p = m.parameter("p", value=PBAR.copy())
+    q = m.parameter("q", value=np.array(q0, dtype=float))
+    m.subject_to(row(p, q, x) <= 10)
+    m.maximize(x)
+    RobustCounterpart(m, BoxUncertaintySet(p, delta=np.array([0.5, 0.5]))).formulate()
+    return m, x, q
+
+
+UPDATE_ROWS = {
+    "q*p": lambda p, q, x, S=dm.sum: x + S(q * p),
+    "q*(x+p)": lambda p, q, x, S=dm.sum: S(q * (x + p)),
+    "cancel_row": lambda p, q, x, S=dm.sum: x + S(q * p) + S(3.0 * p) - S(3.0 * p),
+}
+
+
+@pytest.mark.parametrize("case", ["q*p", "q*(x+p)"])
+def test_same_sign_update_is_honoured(case):
+    """The live multiplier sees ``q = [3, 3]``; the first version of this PR
+    solved with the frozen ``[2, 2]`` (x = 4 for ``q*p``, truth 1)."""
+    row = UPDATE_ROWS[case]
+    m, x, q = _update_model(row, [2.0, 2.0])
+    q.value = np.array([3.0, 3.0])
+    r = m.solve()
+    assert r.status == "optimal"
+    xv = float(r.value(x))
+    worst = max(
+        float(row(PBAR + 0.5 * np.array(s), np.array([3.0, 3.0]), xv, np.sum))
+        for s in itertools.product((-1.0, 1.0), repeat=2)
+    )
+    assert worst == pytest.approx(10.0, abs=1e-5)
+
+
+@pytest.mark.parametrize(
+    ("case", "q0", "q1", "match"),
+    [
+        ("q*p", [2.0, 2.0], [-2.0, -2.0], "breaks that sign"),
+        ("q*(x+p)", [2.0, 2.0], [2.0, -1.0], "breaks that sign"),
+        ("q*p", [2.0, -2.0], [3.0, -2.0], "baked its value"),
+        ("cancel_row", [2.0, 2.0], [3.0, 3.0], "baked its value"),
+    ],
+)
+def test_commitment_breaking_update_refuses_to_solve(case, q0, q1, match):
+    m, _x, q = _update_model(UPDATE_ROWS[case], q0)
+    q.value = np.array(q1)
+    with pytest.raises(ValueError, match=match):
+        m.solve()
+    from discopt.solver import solve_model
+
+    with pytest.raises(ValueError, match=match):
+        solve_model(m)
+    # Restoring the committed value makes the model solvable again.
+    q.value = np.array(q0)
+    assert m.solve().status == "optimal"
+
+
+@pytest.mark.parametrize("carrier", ["clone", "deepcopy", "pickle"])
+def test_commitments_travel_with_the_model(carrier):
+    import copy
+    import pickle
+
+    m, _x, _q = _update_model(UPDATE_ROWS["q*p"], [2.0, -2.0])
+    if carrier == "clone":
+        m2 = m.clone()
+    elif carrier == "deepcopy":
+        m2 = copy.deepcopy(m)
+    else:
+        m2 = pickle.loads(pickle.dumps(m))
+    assert m2._ro_commitments == m._ro_commitments
+    (q2,) = [prm for prm in m2._parameters if prm.name == "q"]
+    q2.value = np.array([3.0, -2.0])
+    with pytest.raises(ValueError, match="baked its value"):
+        m2.solve()
+
+
+def test_serialize_refuses_a_committed_model():
+    """The format has no key for the commitments; dropping them would let a
+    reloaded model solve after a commitment-breaking update."""
+    from discopt.serialize import SerializationError, dumps, loads
+
+    m, _x, _q = _update_model(UPDATE_ROWS["q*p"], [2.0, -2.0])
+    with pytest.raises(SerializationError, match=r"certain Parameter\(s\) \['q'\]"):
+        dumps(m)
+    # A counterpart that committed nothing serializes as before.
+    m2 = dm.Model("plain")
+    x = m2.continuous("x", lb=0, ub=20)
+    p = m2.parameter("p", value=PBAR.copy())
+    m2.subject_to(x + dm.sum(C_MIX * p) <= 10)
+    m2.maximize(x)
+    RobustCounterpart(m2, BoxUncertaintySet(p, delta=DELTA)).formulate()
+    assert not hasattr(m2, "_ro_commitments")
+    assert loads(dumps(m2)).solve().status == "optimal"
+
+
+# --- #1839 review: non-affine rows that also hold a cancelling affine part ----
+#
+# The affine extractor must refuse each non-affine node; a mutant that let one
+# through (a FunctionCall read as ``{}``, ``p*p`` read as ``p + p``, ``abs``
+# passed through, ``1/(p+c)`` or ``**`` read as their left operand) builds the
+# aggregate counterpart from a wrong coefficient and returns a non-robust point.
+# Each row is checked on a dense grid over the box, exact for these scalar rows.
+
+NONAFFINE_ROWS = {
+    "exp_plus_cancel": (0.0, 1.0, lambda p, x, F: x + F.exp(p) + 3.0 * p - 3.0 * p),
+    "max_plus_cancel": (
+        0.0,
+        1.0,
+        lambda p, x, F: x + F.maximum(p, -p) - 2.0 * p + 3.0 * p - 3.0 * p,
+    ),
+    "min_plus_cancel": (
+        0.0,
+        1.0,
+        lambda p, x, F: x - F.minimum(p, -p) - 2.0 * p + 3.0 * p - 3.0 * p,
+    ),
+    "dm_abs_plus_cancel": (0.0, 1.0, lambda p, x, F: x + F.abs(p) - 2.0 * p),
+    "builtin_abs_plus_cancel": (0.0, 1.0, lambda p, x, F: x + abs(p) - 2.0 * p),
+    "p_times_p_plus_cancel": (1.0, 1.0, lambda p, x, F: x + 3.0 * p - 3.0 * p + p * p),
+    "reciprocal_plus_cancel": (1.0, 1.0, lambda p, x, F: x + 1.0 / (p + 3.0) + 3.0 * p - 3.0 * p),
+    "pow1_plus_cancel": (1.0, 1.0, lambda p, x, F: x + (p - 1.0) ** 1 + 3.0 * p - 3.0 * p),
+    "pow2_plus_cancel": (1.0, 2.0, lambda p, x, F: x + (p - 1.0) ** 2 + 3.0 * p - 3.0 * p),
+}
+
+
+@pytest.mark.parametrize("case", sorted(NONAFFINE_ROWS))
+def test_nonaffine_row_with_cancelling_part_stays_robust(case):
+    pbar, delta, row = NONAFFINE_ROWS[case]
+    m = dm.Model("nonaffine")
+    x = m.continuous("x", lb=-50, ub=50)
+    p = m.parameter("p", value=pbar)
+    m.subject_to(row(p, x, dm) <= 6.0)
+    m.maximize(x)
+    RobustCounterpart(m, BoxUncertaintySet(p, delta=delta)).formulate()
+    r = m.solve()
+    assert r.status == "optimal"
+    xv = float(r.value(x))
+    grid = np.linspace(pbar - delta, pbar + delta, 401)
+    checks = 0
+    for v in grid:
+        assert float(row(v, xv, np)) <= 6.0 + 1e-6, (case, v, xv)
+        checks += 1
+    assert checks == grid.size
 
 
 @pytest.mark.parametrize("affine", [True, False], ids=["affine_row", "sign_tracked_row"])

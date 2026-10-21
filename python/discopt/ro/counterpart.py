@@ -158,21 +158,84 @@ class RobustCounterpart:
         if self._formulated:
             raise RuntimeError("formulate() has already been called")
 
+        from discopt.ro.formulations._common import (
+            assert_no_uncertain_params_remain,
+            merge_commitment,
+            recording_commitments,
+        )
+
+        names = {u.parameter.name for u in self._uncertainty_sets}
+        self._check_prior_commitments()
         self._orient_uncertain_rows()
         strategy = self._build_strategy()
-        strategy.build()
+        try:
+            with recording_commitments() as made:
+                strategy.build()
+        finally:
+            # Merged even when the build raises part-way: the model may already
+            # carry rewritten rows whose validity rests on these commitments.
+            store = dict(getattr(self._model, "_ro_commitments", None) or {})
+            for name in names:
+                # This pass eliminated the parameter; a sign commitment on it
+                # was checked against the whole set by _check_prior_commitments.
+                store.pop(name, None)
+            for name, entry in made.items():
+                if name not in names:
+                    merge_commitment(store, name, entry)
+            # Attached only while non-empty, so a model with no commitment is
+            # exactly as before (``discopt.serialize`` refuses one that has any).
+            if store:
+                self._model._ro_commitments = store
+            elif hasattr(self._model, "_ro_commitments"):
+                del self._model._ro_commitments
 
         # Universal soundness guard (RO-2): a correct counterpart eliminates every
         # uncertain parameter. If any survived, the pattern was silently left at
         # nominal — refuse loudly rather than return a non-robust model.
-        from discopt.ro.formulations._common import assert_no_uncertain_params_remain
-
-        assert_no_uncertain_params_remain(
-            self._model,
-            {u.parameter.name for u in self._uncertainty_sets},
-            kind=self.kind,
-        )
+        assert_no_uncertain_params_remain(self._model, names, kind=self.kind)
         self._formulated = True
+
+    def _check_prior_commitments(self) -> None:
+        """Refuse a set whose parameter an earlier counterpart committed (#1839 review).
+
+        An earlier ``formulate()`` on this model may have decided a worst case
+        from the value of a then-certain Parameter that this pass now treats as
+        uncertain. A *value* commitment (the value was baked into the
+        counterpart) cannot hold for a whole set and is refused. A *sign*
+        commitment (the Parameter stayed live and only its sign was used) is
+        valid exactly when every point of the new set has that sign, which is
+        checked on the set's component-wise range; the product of two uncertain
+        parameters is then robustified exactly, one pass at a time.
+        """
+        commitments = getattr(self._model, "_ro_commitments", None) or {}
+        for unc in self._uncertainty_sets:
+            name = unc.parameter.name
+            entry = commitments.get(name)
+            if entry is None:
+                continue
+            if entry["kind"] == "value":
+                raise ValueError(
+                    f"RobustCounterpart: an earlier RobustCounterpart.formulate() on "
+                    f"this model baked the value of Parameter {name!r} into its "
+                    "counterpart (a mixed-sign or cancelling coefficient, or a "
+                    "polyhedral support coefficient), so it cannot now be made "
+                    "uncertain: the earlier worst case is not the worst case over "
+                    f"the new set. Pass the uncertainty set of {name!r} to the "
+                    "same RobustCounterpart as the others, or rebuild the model."
+                )
+            lo, hi = _component_range(unc)
+            sign = int(entry["sign"])
+            if not np.all((lo >= 0) if sign > 0 else (hi <= 0)):
+                raise ValueError(
+                    f"RobustCounterpart: an earlier RobustCounterpart.formulate() on "
+                    f"this model chose its worst case from the sign of Parameter "
+                    f"{name!r} ({'non-negative' if sign > 0 else 'non-positive'}), "
+                    f"but the new uncertainty set lets it range over "
+                    f"[{lo.tolist()!r}, {hi.tolist()!r}], which crosses zero; the "
+                    "earlier worst case is not the worst case over that set. Pass "
+                    f"the uncertainty set of {name!r} to the same RobustCounterpart "
+                    "as the others, or rebuild the model."
+                )
 
     def _orient_uncertain_rows(self) -> None:
         """Rewrite every uncertain row as ``body <= rhs`` before robustifying.
@@ -296,3 +359,34 @@ def _split_vector_uncertain_rows(constraints, names: set[str]) -> list:
                 )
             )
     return out
+
+
+def _component_range(unc) -> tuple[np.ndarray, np.ndarray]:
+    """Component-wise ``(lower, upper)`` of *unc*'s parameter over the whole set.
+
+    Exact for a box and an ellipsoid (``p_bar_i +- rho * ||Sigma^{1/2}[i, :]||``);
+    for a polytope, the support LPs of ``+-e_i`` (each widened outward by the
+    LP's conservative margin), which raise when the set is unbounded.
+    """
+    nominal = np.asarray(unc.parameter.value, dtype=np.float64)
+    if unc.kind == "box":
+        return np.asarray(unc.lower), np.asarray(unc.upper)
+    if unc.kind == "ellipsoidal":
+        half = unc.rho * np.linalg.norm(unc.Sigma_sqrt, axis=1).reshape(nominal.shape)
+        return nominal - half, nominal + half
+    if unc.kind == "polyhedral":
+        from discopt.ro.formulations.polyhedral import _support_function_lp
+
+        flat = nominal.reshape(-1)
+        lo = np.empty_like(flat)
+        hi = np.empty_like(flat)
+        for i in range(flat.size):
+            e = np.zeros(unc.A.shape[1])
+            e[i] = 1.0
+            lo[i] = flat[i] + _support_function_lp(e, unc.A, unc.b, maximize=False)
+            hi[i] = flat[i] + _support_function_lp(e, unc.A, unc.b, maximize=True)
+        return lo.reshape(nominal.shape), hi.reshape(nominal.shape)
+    raise NotImplementedError(
+        f"RobustCounterpart: no component range for an uncertainty set of kind "
+        f"{unc.kind!r}; cannot check an earlier sign commitment against it."
+    )

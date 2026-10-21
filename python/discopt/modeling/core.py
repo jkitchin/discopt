@@ -9800,6 +9800,13 @@ class Model:
             from discopt.mpec import require_all_relations_lowered
 
             require_all_relations_lowered(self, context="Model.solve")
+        # A robust counterpart decided worst cases from the value (or sign) of
+        # certain Parameters; a later update that breaks that is refused here
+        # and again in ``solve_model`` (#1839 review).
+        if getattr(self, "_ro_commitments", None):
+            from discopt.ro.formulations._common import check_ro_commitments
+
+            check_ro_commitments(self, context="Model.solve")
 
         # Opt-in Gauss-Newton objective Hessian (issue #98). Read by
         # ``solver._make_evaluator`` when (re)building the NLPEvaluator; toggling

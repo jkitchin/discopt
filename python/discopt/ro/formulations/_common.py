@@ -30,19 +30,125 @@ structurally affine in the uncertain parameters with constant coefficients, and
 over-count. Rows that are not affine keep sign tracking.
 
 A *certain* :class:`Parameter` (or any variable-free expression of one) that
-multiplies an uncertain parameter is evaluated at its ``formulate()``-time value
-and frozen into a :class:`Constant` on both routes: the worst-case direction is
-decided from that value, so a later update of the parameter could not be
-honoured by the counterpart. Re-run ``formulate()`` on a fresh model after
-changing such a parameter.
+multiplies an uncertain parameter decides a worst-case direction from its
+``formulate()``-time value, so the counterpart is only valid while that value
+(or, for some uses, its sign) holds. Nothing is frozen silently (#1839 review):
+
+* A multiplier whose entries share one sign stays *live* in the counterpart --
+  a later update of its value is honoured -- and, when it is a bare Parameter,
+  a **sign commitment** is recorded: the counterpart is valid for every value
+  with that sign.
+* Where the value itself is baked into the counterpart -- the ``c+ + c-`` split
+  of a mixed-sign multiplier, the aggregate coefficient of
+  :func:`aggregate_affine_counterpart`, a polyhedral support coefficient, or a
+  compound multiplier ``f(q)`` -- a **value commitment** is recorded.
+
+Commitments live on the model (``model._ro_commitments``, see
+:func:`check_ro_commitments`), travel with copies and pickles (the
+:mod:`discopt.serialize` format has no key for them, so ``dumps`` refuses such
+a model), and are enforced twice: a later
+:class:`~discopt.ro.RobustCounterpart` whose uncertainty set covers a committed
+Parameter refuses unless the whole set satisfies a sign commitment, and
+``Model.solve`` refuses when a committed Parameter's current value breaks its
+commitment. Pass every uncertainty set to one ``RobustCounterpart``, or rebuild
+the model, instead of updating such a parameter.
 """
 
 from __future__ import annotations
 
 import warnings
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Optional
 
 import numpy as np
+
+# Commitments recorded while one ``RobustCounterpart.formulate()`` builds its
+# counterpart (module docstring). ``None`` outside that scope: an evaluation
+# made anywhere else commits nothing.
+_COMMITMENT_SINK: ContextVar[Optional[dict]] = ContextVar("_ro_commitment_sink", default=None)
+
+
+@contextmanager
+def recording_commitments():
+    """Collect the commitments made while the body runs into a fresh dict."""
+    sink: dict = {}
+    token = _COMMITMENT_SINK.set(sink)
+    try:
+        yield sink
+    finally:
+        _COMMITMENT_SINK.reset(token)
+
+
+def merge_commitment(store: dict, name: str, entry: dict) -> None:
+    """Add *entry* for Parameter *name* to *store*; a value commitment dominates.
+
+    Two sign commitments of opposite sign cannot both hold except at zero, so
+    they are merged into a value commitment rather than either being dropped.
+    """
+    old = store.get(name)
+    if old is None or entry["kind"] == "value":
+        store[name] = entry
+    elif old["kind"] == "sign" and old["sign"] != entry["sign"]:
+        store[name] = {"kind": "value", "value": entry["value"]}
+
+
+def _commit(param, kind: str, sign: int = 1) -> None:
+    sink = _COMMITMENT_SINK.get()
+    if sink is None:
+        return
+    entry: dict = {"kind": kind, "value": np.asarray(param.value, dtype=np.float64).tolist()}
+    if kind == "sign":
+        entry["sign"] = int(sign)
+    merge_commitment(sink, param.name, entry)
+
+
+def _commit_values_in(expr) -> None:
+    """Record a value commitment for every Parameter that *expr* reads."""
+    eval_constant_expr(expr, record=True)
+
+
+def check_ro_commitments(model, *, context: str) -> None:
+    """Refuse a solve whose committed Parameters no longer satisfy their commitments.
+
+    A no-op on a model no robust counterpart has committed. ``ValueError``
+    names the Parameter, the commitment and the offending value.
+    """
+    commitments = getattr(model, "_ro_commitments", None)
+    if not commitments:
+        return
+    by_name = {p.name: p for p in getattr(model, "_parameters", [])}
+    for name, entry in commitments.items():
+        param = by_name.get(name)
+        if param is None:
+            raise ValueError(
+                f"{context}: the robust counterpart was built from the value of "
+                f"Parameter {name!r}, which the model no longer holds; refusing to "
+                "solve a counterpart whose validity cannot be checked."
+            )
+        current = np.asarray(param.value, dtype=np.float64)
+        recorded = np.asarray(entry["value"], dtype=np.float64)
+        if entry["kind"] == "value":
+            if current.shape == recorded.shape and np.array_equal(current, recorded):
+                continue
+            raise ValueError(
+                f"{context}: Parameter {name!r} was changed after RobustCounterpart."
+                f"formulate() baked its value {recorded.tolist()!r} into the robust "
+                f"counterpart; it is now {current.tolist()!r}. The counterpart is not "
+                "valid for the new value. Rebuild the model and re-run formulate() "
+                "with the new value (or, for a second uncertain parameter, pass all "
+                "uncertainty sets to one RobustCounterpart)."
+            )
+        sign = int(entry["sign"])
+        if current.shape == recorded.shape and np.all(sign * current >= 0):
+            continue
+        raise ValueError(
+            f"{context}: Parameter {name!r} multiplies an uncertain parameter, and "
+            "RobustCounterpart.formulate() chose the worst case from its sign "
+            f"({'non-negative' if sign > 0 else 'non-positive'}); it is now "
+            f"{current.tolist()!r}, which breaks that sign, so the counterpart is no "
+            "longer robust. Rebuild the model and re-run formulate()."
+        )
 
 
 def sign_tracking_substitute(
@@ -303,9 +409,9 @@ def _signed_constant_product(
     ``np.sign(np.sum(c))`` gave all entries the sign of the sum, substituting
     every element whose coefficient had the other sign at its *best* case.
     """
-    from discopt.modeling.core import BinaryOp, Constant
+    from discopt.modeling.core import BinaryOp, Constant, Parameter
 
-    value = np.asarray(eval_constant_expr(factor), dtype=np.float64)
+    value = np.asarray(eval_constant_expr(factor, record=False), dtype=np.float64)
     has_pos = bool(np.any(value > 0))
     has_neg = bool(np.any(value < 0))
 
@@ -320,11 +426,18 @@ def _signed_constant_product(
         new_other = sign_tracking_substitute(
             other, wc_lower, wc_upper, param_names, maximize, sign * factor_sign
         )
-        # A non-Constant factor (a certain Parameter, or an expression of one)
-        # is frozen at the value its sign was read from, exactly as the mixed
-        # split below freezes it (#1831 review).
-        frozen = factor if isinstance(factor, Constant) else Constant(value)
-        return rebuild(frozen, new_other)
+        # The factor stays live, so a later update of a certain Parameter is
+        # honoured; the counterpart is valid only while its sign holds, so that
+        # is committed (#1839 review). A compound factor ``f(q)`` has no
+        # per-Parameter sign to commit and commits the values it reads.
+        if isinstance(factor, Parameter):
+            _commit(factor, "sign", factor_sign)
+        elif not isinstance(factor, Constant):
+            _commit_values_in(factor)
+        return rebuild(factor, new_other)
+
+    # The split below bakes the value of a certain Parameter into c+ and c-.
+    _commit_values_in(factor)
 
     if reciprocal:
         # e / d == e * (1/d); split 1/d by sign and multiply.
@@ -361,7 +474,7 @@ def _value_shape(expr) -> tuple[int, ...]:
     return shape
 
 
-def affine_param_jacobians(expr, param_names: set[str]):
+def affine_param_jacobians(expr, param_names: set[str], *, factors: Optional[list] = None):
     """Exact constant coefficients of *expr* in its uncertain parameters.
 
     Returns ``{name: (J, S)}`` when *expr* is structurally affine in every
@@ -377,6 +490,11 @@ def affine_param_jacobians(expr, param_names: set[str]):
     ``+ - neg``, sums, indexing, and products, quotients or matmuls with a
     constant-valued side), never by sampling: a finite second difference
     passes ``abs(p - p_bar)``.
+
+    When *factors* is a list, each constant-valued coefficient expression read
+    is appended to it, so a caller that bakes ``J`` can commit the Parameters
+    those expressions read. The extraction itself commits nothing: it runs on
+    every row, most of which keep sign tracking and their live multipliers.
     """
     from discopt.modeling.core import (
         BinaryOp,
@@ -410,7 +528,9 @@ def affine_param_jacobians(expr, param_names: set[str]):
     def constant_factor(factor):
         if _contains_variable(factor):
             raise _NotAffine("coefficient contains a decision variable")
-        return np.asarray(eval_constant_expr(factor), dtype=np.float64)
+        if factors is not None:
+            factors.append(factor)
+        return np.asarray(eval_constant_expr(factor, record=False), dtype=np.float64)
 
     def scale(jac, c):
         out = {}
@@ -531,15 +651,23 @@ def aggregate_affine_counterpart(expr, unc_sets, param_names: set[str], maximize
     """
     from discopt.modeling.core import BinaryOp, Constant
 
-    jacs = affine_param_jacobians(expr, param_names)
+    factors: list = []
+    jacs = affine_param_jacobians(expr, param_names, factors=factors)
     if not jacs:
         return None
     cancels = False
     for j, s in jacs.values():
+        # A relative threshold: a cancellation smaller than ~1e-12 * S (e.g. a
+        # residue of ``1e12 * p - 1e12 * p`` rounding) is not detected and the
+        # row keeps sign tracking. That miss is only conservative -- sign
+        # tracking charges S >= |J| -- never optimistic.
         if np.any(s - np.abs(j) > 1e-12 * np.maximum(1.0, s)):
             cancels = True
     if not cancels:
         return None
+    # The penalty below bakes J, i.e. the values of these coefficients.
+    for f in factors:
+        _commit_values_in(f)
     result = freeze_constant_multipliers(expr, param_names)
     for name in jacs:
         result = substitute_param(result, name, Constant(unc_sets[name].parameter.value))
@@ -553,7 +681,8 @@ def aggregate_affine_counterpart(expr, unc_sets, param_names: set[str], maximize
 
 def freeze_constant_multipliers(expr, param_names: set[str]):
     """Replace each non-Constant constant-valued multiplier of an uncertain term
-    by its current value (see the module docstring on certain Parameters)."""
+    by its current value, committing that value (see the module docstring on
+    certain Parameters)."""
     from discopt.modeling.core import (
         BinaryOp,
         Constant,
@@ -617,7 +746,7 @@ _NUMPY_FUNCS = {
 }
 
 
-def eval_constant_expr(expr) -> np.ndarray:
+def eval_constant_expr(expr, *, record: bool = True) -> np.ndarray:
     """Evaluate a variable-free expression to its full numpy value.
 
     Every node is evaluated with numpy semantics (broadcasting, ``axis``,
@@ -626,6 +755,13 @@ def eval_constant_expr(expr) -> np.ndarray:
     contributing a guessed value -- the former polyhedral evaluator returned
     ``float(np.sum(value))`` for a vector constant and ``0.0`` for any node it
     did not recognise, so ``sum(c * p)`` got a zero coefficient (#1831 audit).
+
+    With ``record`` (the default) every Parameter read records a value
+    commitment while a ``RobustCounterpart.formulate()`` is building (module
+    docstring): a caller that bakes the result into the counterpart must not be
+    able to forget it. A caller that only reads a sign, or keeps the
+    expression live, passes ``record=False`` and commits what it relies on
+    itself.
     """
     from discopt.modeling.core import (
         BinaryOp,
@@ -639,11 +775,16 @@ def eval_constant_expr(expr) -> np.ndarray:
         UnaryOp,
     )
 
+    def ev(e):
+        return eval_constant_expr(e, record=record)
+
+    if isinstance(expr, Parameter) and record:
+        _commit(expr, "value")
     if isinstance(expr, (Constant, Parameter)):
         return np.asarray(expr.value, dtype=np.float64)
     if isinstance(expr, BinaryOp):
-        lv = eval_constant_expr(expr.left)
-        rv = eval_constant_expr(expr.right)
+        lv = ev(expr.left)
+        rv = ev(expr.right)
         if expr.op == "+":
             return np.asarray(lv + rv)
         if expr.op == "-":
@@ -655,25 +796,25 @@ def eval_constant_expr(expr) -> np.ndarray:
         if expr.op == "**":
             return np.asarray(np.power(lv, rv))
     elif isinstance(expr, UnaryOp):
-        v = eval_constant_expr(expr.operand)
+        v = ev(expr.operand)
         if expr.op == "neg":
             return np.asarray(-v)
         if expr.op == "abs":
             return np.asarray(np.abs(v))
     elif isinstance(expr, MatMulExpression):
-        return np.asarray(eval_constant_expr(expr.left) @ eval_constant_expr(expr.right))
+        return np.asarray(ev(expr.left) @ ev(expr.right))
     elif isinstance(expr, SumExpression):
-        return np.asarray(np.sum(eval_constant_expr(expr.operand), axis=expr.axis))
+        return np.asarray(np.sum(ev(expr.operand), axis=expr.axis))
     elif isinstance(expr, SumOverExpression):
         total = np.asarray(0.0)
         for t in expr.terms:
-            total = total + eval_constant_expr(t)
+            total = total + ev(t)
         return np.asarray(total)
     elif isinstance(expr, IndexExpression):
-        return np.asarray(eval_constant_expr(expr.base)[expr.index])
+        return np.asarray(ev(expr.base)[expr.index])
     elif isinstance(expr, FunctionCall) and expr.func_name in _NUMPY_FUNCS:
         if len(expr.args) == 1:
-            return np.asarray(_NUMPY_FUNCS[expr.func_name](eval_constant_expr(expr.args[0])))
+            return np.asarray(_NUMPY_FUNCS[expr.func_name](ev(expr.args[0])))
     raise NotImplementedError(
         f"Robust counterpart: cannot evaluate the constant sub-expression {expr!r} "
         f"({type(expr).__name__}) numerically, so the sign of the coefficient it "
