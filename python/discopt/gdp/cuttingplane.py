@@ -15,8 +15,9 @@ the hull relaxation's, which is tighter:
    only weakens the cut, never cuts a feasible point. This is Pyomo's
    ``back_off_constraint_with_calculated_cut_violation``, with the back-off read
    off a certified bound rather than a float optimum. The set is rHull when every
-   disjunct row is linear (an LP: exactly the Sawaya-Grossmann back-off), and the
-   model itself otherwise (the dual bound of solving it with objective ``g·x``,
+   disjunct row is linear (exactly the Sawaya-Grossmann back-off; an LP when the
+   global rows are linear too, a convex NLP when they are not), and the model
+   itself otherwise (the dual bound of solving it with objective ``g·x``,
    a convex MINLP here, which is at least as tight as rHull's). The reason is
    speed: discopt does not prove the perspective rows of a nonlinear hull convex,
    so it solves rHull by spatial branch and bound (measured ~25 s per solve on a
@@ -29,6 +30,25 @@ disjunction only when its disjuncts are convex: like Pyomo, the transformation i
 **refused** for a disjunct row that is not linear or proven convex (a convex body
 for ``<=``, a concave one for ``>=``; a nonlinear equality is refused), and for an
 OR disjunction, which the hull lowering refuses.
+
+Also refused:
+
+- a model that declares a ``Parameter``. Each cut is computed at the parameter
+  values of the call, but the output keeps the live parameters, so a later
+  ``p.value = ...`` would leave a cut that removes feasible points of the new
+  model while its solve still reports a certified optimum. The cuts depend on the
+  feasible set and, through x*, on the objective, so a parameter anywhere is
+  refused (unused ones included: refusing is simpler than proving one unused).
+- a fast-API model (``add_linear_constraints``, ``add_linear_objective``, ...):
+  cloning its lowering raises (#1854).
+
+The cuts are equally frozen to the variable bounds of the call: changing a bound
+of ``model`` (or of the output, which shares its variables) afterwards can make a
+cut cut off points that have become feasible. Re-run the transformation instead.
+
+A disjunction whose hull lowering falls back to big-M (``if_then``, and an
+``add_disjunction`` nested in another) has the big-M relaxation as its "hull", so
+no cut separates x* from it: such models get 0 cuts.
 """
 
 from __future__ import annotations
@@ -44,7 +64,6 @@ from discopt.modeling.core import (
     Variable,
     _DisjunctiveConstraint,
     _IndicatorConstraint,
-    carry_validation_guards,
 )
 
 
@@ -129,11 +148,11 @@ def _point(r, names: list[str], shapes: dict[str, tuple]) -> dict[str, np.ndarra
     return out
 
 
-def _local_point(m: Model, names: list[str], shapes: dict[str, tuple]):
+def _local_point(m: Model, names: list[str], shapes: dict[str, tuple], time_limit: float):
     """A local NLP solve of ``m``; its point on ``names``, or ``None``."""
     from discopt.solvers.nlp_pounce import solve_nlp_from_model
 
-    res = solve_nlp_from_model(m)
+    res = solve_nlp_from_model(m, options={"max_wall_time": float(time_limit)})
     if res.x is None or not np.all(np.isfinite(res.x)):
         return None
     flat = np.asarray(res.x, dtype=np.float64)
@@ -165,7 +184,10 @@ def cuttingplane(
 
     ``model`` is not modified; the returned model shares its variables (as the
     other GDP lowerings do). ``time_limit`` bounds each of the three solves of an
-    iteration. See the module docstring for the algorithm and the refusals.
+    iteration (the separation NLP through its ``max_wall_time``). ``max_cuts=0``
+    returns the big-M lowering without solving anything. The cuts are frozen to
+    the variable bounds of the call; see the module docstring for that, the
+    algorithm and the refusals.
     """
     from discopt._relax.gdp_reformulate import reformulate_gdp
     from discopt.modeling import _relax_integrality
@@ -174,6 +196,22 @@ def cuttingplane(
         raise ValueError(f"gdp.cuttingplane: norm must be 2 or 'inf', got {norm!r}")
     if max_cuts < 0:
         raise ValueError(f"gdp.cuttingplane: max_cuts must be >= 0, got {max_cuts!r}")
+    if model._parameters:
+        raise ValueError(
+            "gdp.cuttingplane: the model declares Parameters "
+            f"({', '.join(p.name for p in model._parameters)}). The cuts would be "
+            "computed at their current values, but the output keeps the live "
+            "parameters, so changing one afterwards leaves cuts that can remove "
+            "feasible points while the solve reports a certified optimum. Fix the "
+            "values as constants first, or use gdp.bigm or gdp.hull."
+        )
+    if model._builder is not None:
+        raise NotImplementedError(
+            "gdp.cuttingplane: fast-API models (add_linear_constraints, "
+            "add_linear_objective, ...) are not supported yet: cloning their GDP "
+            "lowering raises (#1854). Build the model with subject_to/minimize, or "
+            "use gdp.bigm or gdp.hull."
+        )
     linear = _require_convex_disjuncts(model)
 
     out = reformulate_gdp(model, "big-m")
@@ -183,6 +221,9 @@ def cuttingplane(
         return model, report
     if model._objective is None:
         raise ValueError("gdp.cuttingplane: the model has no objective to relax over")
+    if max_cuts == 0:
+        report.stopped = "max_cuts=0 reached"
+        return out, report
 
     names = [v.name for v in model._variables]
     shapes = {v.name: v.shape for v in model._variables}
@@ -232,7 +273,7 @@ def cuttingplane(
                 sep.subject_to(v - c <= t)
                 sep.subject_to(c - v <= t)
             sep.minimize(t)
-        xh = _local_point(sep, names, shapes)
+        xh = _local_point(sep, names, shapes, time_limit)
         if xh is None:
             report.stopped = "the separation problem returned no point"
             break
@@ -266,7 +307,6 @@ def cuttingplane(
             )
         report.cuts += 1
         report.cut_rows.append((g, v_lb))
-    carry_validation_guards(model, out)
     return out, report
 
 
