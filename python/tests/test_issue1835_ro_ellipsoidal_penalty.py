@@ -349,3 +349,42 @@ def test_canonical_matmul_row_is_formulated_unchanged():
         assert isinstance(scaled, MatMulExpression)
         np.testing.assert_array_equal(scaled.left.value, unc.Sigma_sqrt)
         assert isinstance(scaled.right, Variable) and scaled.right.name == "x"
+
+
+M2 = np.array([[3.0, -1.0], [-2.0, 1.0]])
+SIG2 = np.diag([1.0, 0.25])
+
+
+def _robust_rhs_slack(A):
+    """min_i (10 - A_i @ 1 - ||L^T A_i||): the robust max of x for x + A @ p <= 10."""
+    L = np.linalg.cholesky(SIG2)
+    return min(10.0 - row.sum() - np.linalg.norm(L.T @ row) for row in A)
+
+
+def test_sum_over_terms_are_aggregated_into_one_coefficient():
+    """``SumOver([M @ p, c * p])``: row i's coefficient is M[i] + c[i] e_i, one penalty."""
+    from discopt.modeling.core import SumOverExpression
+
+    c = np.array([2.0, -1.0])
+    m = dm.Model()
+    x = m.continuous("x", lb=-50, ub=50)
+    p = m.parameter("p", value=np.ones(2))
+    m.subject_to(x + SumOverExpression([M2 @ p, c * p]) <= 10)
+    m.maximize(x)
+    RobustCounterpart(m, EllipsoidalUncertaintySet(p, rho=1.0, Sigma=SIG2)).formulate()
+    r = m.solve()
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(_robust_rhs_slack(M2 + np.diag(c)), abs=1e-6)
+
+
+def test_left_multiplied_parameter_folds_to_a_constant_penalty():
+    """``p @ M``: coefficient of row j is column M[:, j], a constant, so the penalty is a number."""
+    m = dm.Model()
+    x = m.continuous("x", lb=-50, ub=50)
+    p = m.parameter("p", value=np.ones(2))
+    m.subject_to(x + p @ M2 <= 10)
+    m.maximize(x)
+    RobustCounterpart(m, EllipsoidalUncertaintySet(p, rho=1.0, Sigma=SIG2)).formulate()
+    r = m.solve()
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(_robust_rhs_slack(M2.T), abs=1e-6)
