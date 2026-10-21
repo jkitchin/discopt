@@ -5262,6 +5262,17 @@ class SolveResult:
             self.gap_certified = False
             self.gap = None
 
+        # #1856: an infeasibility certificate carries no dual bound. The NLP-BB
+        # route returned ``status="infeasible"`` with ``bound=-10.058`` (its last
+        # frontier minimum) and, through the derivation below, ``bound_valid=True``
+        # -- a finite "valid global dual bound" on a problem with no feasible
+        # point, against the documented contract (``bound`` is ``None``). Cleared
+        # here, at the chokepoint every construction passes through, rather than
+        # route by route; ``bound_valid`` then follows from ``bound is None``.
+        if self.status == "infeasible":
+            self.bound = None
+            self.gap = None
+
         # #1244: ``bound_valid`` / ``bound_source``, normalized LAST so the
         # derivation below reads the FINAL ``gap_certified``, not the value a
         # producer passed in.
@@ -5339,6 +5350,8 @@ class SolveResult:
         a caller cannot install an inconsistent pair: no bound means no claim,
         and the provenance vocabulary is closed.
         """
+        if self.status == "infeasible":
+            bound = None  # #1856: an infeasibility certificate carries no bound
         self.bound = bound
         if bound is None or not np.isfinite(bound):
             self.bound_valid = False
