@@ -165,15 +165,25 @@ def tighten_root_bounds_with_fbbt(
             logger.debug("Root FBBT model conversion skipped: %s", exc)
             model_repr = None
 
+    fbbt_proved_empty = False
     if model_repr is not None:
         try:
             fbbt_lbs, fbbt_ubs = model_repr.fbbt(
                 max_iter=max_iter, tol=tol, time_limit_ms=time_limit_ms
             )
+            fbbt_lbs = np.asarray(fbbt_lbs, dtype=np.float64)
+            fbbt_ubs = np.asarray(fbbt_ubs, dtype=np.float64)
+            # #1852: the Rust pass reports a proven-empty box as the
+            # ``Interval::empty()`` sentinel ``[+inf, -inf]`` on every block
+            # (``fbbt_until`` marks all bounds empty once a row is violated past
+            # its feasibility tolerance). ``_flat_fbbt_bounds`` copies finite
+            # values only, so the proof was dropped: an infeasible model went on
+            # to an NLP that cannot certify infeasibility, and ended ``unknown``.
+            fbbt_proved_empty = bool(np.any(fbbt_lbs - fbbt_ubs > tol))
             tightened_lb, tightened_ub = _flat_fbbt_bounds(
                 model,
-                np.asarray(fbbt_lbs, dtype=np.float64),
-                np.asarray(fbbt_ubs, dtype=np.float64),
+                fbbt_lbs,
+                fbbt_ubs,
                 tightened_lb,
                 tightened_ub,
             )
@@ -182,7 +192,7 @@ def tighten_root_bounds_with_fbbt(
 
     _round_integral_bounds(tightened_lb, tightened_ub, int_offsets, int_sizes)
 
-    infeasible = bool(np.any(tightened_lb > tightened_ub + tol))
+    infeasible = fbbt_proved_empty or bool(np.any(tightened_lb > tightened_ub + tol))
     close = (tightened_lb > tightened_ub) & (tightened_lb <= tightened_ub + tol)
     if np.any(close):
         midpoint = 0.5 * (tightened_lb[close] + tightened_ub[close])
