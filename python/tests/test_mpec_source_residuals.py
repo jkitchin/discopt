@@ -589,12 +589,21 @@ def test_accept_local_incumbent_accepts_a_satisfied_integral_indicator_model():
     ],
 )
 def test_indicator_source_residual_refuses_nonbinary_variables(selector_kind, selector_value):
-    """An if_then selector must be covered by the binary-integrality gate."""
+    """An if_then selector must be covered by the binary-integrality gate.
+
+    ``if_then`` itself refuses a non-binary selector since #1844; the row is
+    appended directly so the residual report's own gate stays covered (a model
+    can reach it without passing ``if_then``, e.g. a selector retyped later).
+    """
+    from discopt.modeling.core import _IndicatorConstraint
+
     m = dm.Model("nonbinary_indicator")
     x = m.continuous("x", lb=0.0, ub=2.0)
     selector = getattr(m, selector_kind)("selector", lb=0.0, ub=2.0)
     m.minimize(x)
-    m.if_then(selector, [x <= 1.0])
+    with pytest.raises(TypeError, match="must be a single binary variable"):
+        m.if_then(selector, [x <= 1.0])
+    m._constraints.append(_IndicatorConstraint(selector, x <= 1.0, active_value=1))
     pair = complementarity(0.0 * x, 1.0 + 0.0 * x, name="harmless")
     m._complementarities.append(pair)
     point = np.array([1.5, selector_value])

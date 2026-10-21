@@ -104,7 +104,7 @@ pub struct ScalarProgram {
 }
 
 /// Numpy broadcast of two shapes, or `None` when they do not broadcast.
-fn broadcast(a: &[usize], b: &[usize]) -> Option<Vec<usize>> {
+pub(crate) fn broadcast(a: &[usize], b: &[usize]) -> Option<Vec<usize>> {
     let rank = a.len().max(b.len());
     let mut out = vec![0usize; rank];
     for axis in 0..rank {
@@ -129,7 +129,7 @@ fn broadcast(a: &[usize], b: &[usize]) -> Option<Vec<usize>> {
     Some(out)
 }
 
-fn numel(shape: &[usize]) -> usize {
+pub(crate) fn numel(shape: &[usize]) -> usize {
     shape
         .iter()
         .product::<usize>()
@@ -137,7 +137,7 @@ fn numel(shape: &[usize]) -> usize {
 }
 
 /// Row-major flat index of `idx` within `shape`.
-fn flat_of(idx: &[usize], shape: &[usize]) -> usize {
+pub(crate) fn flat_of(idx: &[usize], shape: &[usize]) -> usize {
     let mut flat = 0usize;
     for (axis, &i) in idx.iter().enumerate() {
         let mut stride = 1usize;
@@ -150,7 +150,7 @@ fn flat_of(idx: &[usize], shape: &[usize]) -> usize {
 }
 
 /// Row-major multi-index of flat position `pos` within `shape`.
-fn idx_of(mut pos: usize, shape: &[usize]) -> Vec<usize> {
+pub(crate) fn idx_of(mut pos: usize, shape: &[usize]) -> Vec<usize> {
     let mut out = vec![0usize; shape.len()];
     for axis in (0..shape.len()).rev() {
         let d = shape[axis].max(1);
@@ -163,7 +163,7 @@ fn idx_of(mut pos: usize, shape: &[usize]) -> Vec<usize> {
 /// Flat index into `operand_shape` for output multi-index `out_idx`, applying
 /// numpy broadcasting: a size-1 operand axis is read at 0 whatever the output
 /// index is, and missing leading axes are ignored.
-fn broadcast_flat(out_idx: &[usize], operand_shape: &[usize]) -> usize {
+pub(crate) fn broadcast_flat(out_idx: &[usize], operand_shape: &[usize]) -> usize {
     let r = operand_shape.len();
     let lead = out_idx.len() - r;
     let mut idx = vec![0usize; r];
@@ -365,11 +365,14 @@ pub(crate) fn shapes_of_partial(arena: &ExprArena) -> Vec<Result<Vec<usize>, Exp
 }
 
 /// Shape of node `i` from its operands' (already computed) shapes.
-fn node_shape(
+pub(crate) fn node_shape<S>(
     arena: &ExprArena,
     i: usize,
-    shapes: &[Vec<usize>],
-) -> Result<Vec<usize>, ExpandError> {
+    shapes: &S,
+) -> Result<Vec<usize>, ExpandError>
+where
+    S: std::ops::Index<usize, Output = Vec<usize>> + ?Sized,
+{
     {
         let s: Vec<usize> = match arena.get(ExprId(i)) {
             ExprNode::Constant(_) => Vec::new(),
@@ -446,7 +449,7 @@ fn node_shape(
 }
 
 /// Numpy `@` result shape for the four rank combinations discopt emits.
-fn matmul_shape(l: &[usize], r: &[usize]) -> Result<Vec<usize>, ExpandError> {
+pub(crate) fn matmul_shape(l: &[usize], r: &[usize]) -> Result<Vec<usize>, ExpandError> {
     match (l.len(), r.len()) {
         (1, 1) if l[0] == r[0] => Ok(Vec::new()),
         (2, 1) if l[1] == r[0] => Ok(vec![l[0]]),

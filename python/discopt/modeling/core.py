@@ -4233,6 +4233,35 @@ def _reject_unnormalized_rhs(constraint: "Constraint", *, where: str, index: int
     )
 
 
+def _reject_unnormalized_rhs_in(item: Any, *, where: str) -> None:
+    """Apply :func:`_reject_unnormalized_rhs` to every row nested in ``item`` (#1858).
+
+    The rows of a disjunct or an indicator constraint are not top-level
+    ``Constraint`` entries, so the per-row refusal in ``subject_to`` and
+    ``validate`` never saw them -- and the GDP lowerings (big-M, mbigm,
+    binary multiplication, the indicator lowering, hull for ``if_then``) read only
+    ``body``, so ``Constraint(x, "<=", 2.0)`` in a disjunct was lowered as
+    ``x <= 0`` and certified. The rows get the same refusal as a top-level row,
+    for the same reason (see :func:`_reject_unnormalized_rhs`), rather than being
+    normalized here: a normalized row would be a different object, and disjunct
+    rows are keyed by identity (``either_or(big_m={row: M})``, a row shared
+    between disjuncts or with the model).
+
+    ``item`` is a ``Constraint``, an ``_IndicatorConstraint``, a
+    ``_DisjunctiveConstraint`` (walked through its disjuncts, nested ones
+    included), or a list of disjuncts as passed to ``either_or``.
+    """
+    if isinstance(item, Constraint):
+        _reject_unnormalized_rhs(item, where=where)
+    elif isinstance(item, _IndicatorConstraint):
+        _reject_unnormalized_rhs_in(item.constraint, where=where)
+    elif isinstance(item, _DisjunctiveConstraint):
+        _reject_unnormalized_rhs_in(item.disjuncts, where=where)
+    elif isinstance(item, (list, tuple)):
+        for sub in item:
+            _reject_unnormalized_rhs_in(sub, where=where)
+
+
 @dataclass
 class ConstraintList:
     """A collection of constraints created from vectorized expressions."""
@@ -5233,6 +5262,17 @@ class SolveResult:
             self.gap_certified = False
             self.gap = None
 
+        # #1856: an infeasibility certificate carries no dual bound. The NLP-BB
+        # route returned ``status="infeasible"`` with ``bound=-10.058`` (its last
+        # frontier minimum) and, through the derivation below, ``bound_valid=True``
+        # -- a finite "valid global dual bound" on a problem with no feasible
+        # point, against the documented contract (``bound`` is ``None``). Cleared
+        # here, at the chokepoint every construction passes through, rather than
+        # route by route; ``bound_valid`` then follows from ``bound is None``.
+        if self.status == "infeasible":
+            self.bound = None
+            self.gap = None
+
         # #1244: ``bound_valid`` / ``bound_source``, normalized LAST so the
         # derivation below reads the FINAL ``gap_certified``, not the value a
         # producer passed in.
@@ -5310,6 +5350,8 @@ class SolveResult:
         a caller cannot install an inconsistent pair: no bound means no claim,
         and the provenance vocabulary is closed.
         """
+        if self.status == "infeasible":
+            bound = None  # #1856: an infeasibility certificate carries no bound
         self.bound = bound
         if bound is None or not np.isfinite(bound):
             self.bound_valid = False
@@ -6153,15 +6195,47 @@ def _affine_binary_terms(expr) -> Optional[tuple[dict, float]]:
     return None
 
 
+def _require_binary_indicator(indicator, where: str) -> None:
+    """Refuse an indicator column that is not one binary column (#1844).
+
+    An integer ``z in [0, 3]`` or a continuous ``z in [0, 1]`` has no single
+    meaning as "the rows hold when z == 1": the big-M lowering scales the slack by
+    ``1 - z`` (over-enforcing the rows for ``z >= 2``) while binary multiplication
+    multiplies the body by ``z`` (active for any ``z > 0``), so the optimum
+    depended on ``gdp_method``. Checked at ``if_then`` and again by
+    ``Model.validate`` (a variable's type can change after the call, and a
+    deserialized model never passes through ``if_then``).
+    """
+    if _scalar_binary_leaf_key(indicator) is not None:
+        return
+    base = indicator.base if isinstance(indicator, IndexExpression) else indicator
+    vtype = getattr(base, "var_type", None)
+    what = (
+        "a binary variable but not a single column"
+        if vtype is VarType.BINARY
+        else f"{vtype.name.lower() if vtype is not None else type(base).__name__}"
+    )
+    raise TypeError(
+        f"{where}: the indicator {indicator!r} must be a single binary variable "
+        f"(or a BooleanVar), but it is {what}. A non-binary selector has no single "
+        "'active' value: the big-M and binary-multiplication lowerings would give "
+        "different optima (#1844). Use a binary variable (m.binary(...)) and, if "
+        "needed, link it to the integer one."
+    )
+
+
 def _normalize_indicator(indicator, where: str):
     """``(column, active_value)`` for an ``if_then`` indicator (#1677).
 
     A plain variable / indexed variable passes through with ``active_value=1``
-    (non-binary selectors are refused downstream by the integrality gates, as
-    before). A ``BooleanVar`` is its backing binary; ``~b`` is that binary with
-    ``active_value=0``. A compound expression is accepted only when it is an
-    affine function of ONE binary column taking exactly the values {0, 1}: ``z``
-    itself (``active_value=1``) or its complement ``1 - z`` (``active_value=0``).
+    when it is ONE binary column; an integer or continuous selector, or a vector
+    of columns, is refused here (#1844: nothing downstream refused it, and the
+    lowerings then disagreed -- big-M over-enforced the rows for ``z >= 2``,
+    binary multiplication treated every ``z > 0`` as active). A ``BooleanVar``
+    is its backing binary; ``~b`` is that binary with ``active_value=0``. A
+    compound expression is accepted only when it is an affine function of ONE
+    binary column taking exactly the values {0, 1}: ``z`` itself
+    (``active_value=1``) or its complement ``1 - z`` (``active_value=0``).
     Normalising here means every consumer -- the big-M / hull GDP lowering, the
     certificate verifier, serialization, the MPEC residuals -- sees a single 0/1
     column plus the value that activates the rows, which they all already handle.
@@ -6184,6 +6258,7 @@ def _normalize_indicator(indicator, where: str):
             f"{type(indicator).__name__}."
         )
     if isinstance(indicator, (Variable, IndexExpression)):
+        _require_binary_indicator(indicator, where)
         return indicator, 1
     aff = _affine_binary_terms(indicator)
     if aff is not None:
@@ -6450,7 +6525,13 @@ class Model:
         # children are already copied, so ``Expression.__deepcopy__``'s own walk
         # would only re-find memo hits -- once per node, which cost 26-44 % of a
         # model copy (#1822).
-        for node in self._expressions_children_first():
+        nodes = self._expressions_children_first()
+        # #1854: copy every model that owns a shared leaf to completion first (see
+        # ``_foreign_owner_models``), so those leaves are memo hits below.
+        for owner in self._foreign_owner_models(nodes):
+            if id(owner) not in memo:
+                _copy.deepcopy(owner, memo)
+        for node in nodes:
             if id(node) not in memo:
                 _copy_node_into_memo(node, memo)
         for key, value in self.__dict__.items():
@@ -6524,6 +6605,28 @@ class Model:
         for rel in self._complementarities:
             roots += [getattr(rel, "f", None), getattr(rel, "g", None)]
         return roots
+
+    def _foreign_owner_models(self, nodes: list) -> list:
+        """Models other than this one that own a leaf this model reaches (#1854).
+
+        A GDP / transformation result shares the source model's ``Variable``
+        objects, whose ``model`` is the source, so copying (or pickling) the
+        result reaches the source through a shared leaf's state. Reached from
+        inside the leaf, the source was rebuilt -- and its Rust builder replayed
+        -- while that leaf was still empty (``'Variable' object has no attribute
+        'name'``). ``__deepcopy__`` copies these models first and ``__getstate__``
+        writes them first, so each is complete before anything that needs it.
+        """
+        owners: list = []
+        seen: set[int] = {id(self)}
+        for leaf in [*nodes, *self._variables, *self._parameters]:
+            if not isinstance(leaf, (Variable, Parameter)):
+                continue
+            owner = getattr(leaf, "model", None)
+            if isinstance(owner, Model) and id(owner) not in seen:
+                seen.add(id(owner))
+                owners.append(owner)
+        return owners
 
     def _expressions_children_first(self) -> list:
         from discopt.serialize import _children
@@ -6633,6 +6736,8 @@ class Model:
         # anything that refers to them (see ``_expressions_children_first``).
         nodes = self._expressions_children_first()
         state: dict = {
+            # #1854: first of all, so each is unpickled whole before the nodes.
+            "_pickle_foreign_models": self._foreign_owner_models(nodes),
             "_pickle_expressions": [*nodes, _open_children_first_scope()],
             "_pickle_format": (_MODEL_PICKLE_FORMAT, discopt.__version__, SCHEMA),
         }
@@ -6682,6 +6787,7 @@ class Model:
             )
         attrs, had_builder, row_marks = state
         attrs.pop("_pickle_expressions", None)
+        attrs.pop("_pickle_foreign_models", None)
         self.__dict__.update(attrs)
         self._restore_row_marks(row_marks)
         if had_builder:
@@ -8334,6 +8440,8 @@ class Model:
                     "d = m.make_disjunct(name); d.add_disjunction(...), then add d with "
                     "m.add_disjunction([d, ...])"
                 )
+        # #1858: refuse a raw non-zero rhs before anything is recorded.
+        _reject_unnormalized_rhs_in(list(then_constraints), where=f"if_then {name or '<anon>'!r}")
         for k, c in enumerate(then_constraints):
             c.name = f"{name}_then_{k}" if name else None
             # Store as indicator constraint; Rust presolve will handle
@@ -8417,6 +8525,7 @@ class Model:
         >>> m.logical(d.indicators[0].implies(other_disjunct_indicator))
         """
         _refuse_empty_disjunction(disjuncts, "either_or", name)
+        _reject_unnormalized_rhs_in(disjuncts, where=f"either_or {name or '<anon>'!r}")  # #1858
         dc = _DisjunctiveConstraint(
             disjuncts=disjuncts,
             name=name,
@@ -8690,10 +8799,16 @@ class Model:
                 "if_else() condition must be an inequality, not an equality; "
                 "an equality condition holds on a zero-measure set."
             )
+        # #1858: the complement below is built from ``body`` alone.
+        _reject_unnormalized_rhs(condition, where="if_else condition")
         then_expr = _wrap(then_value)
         else_expr = _wrap(else_value)
-        # condition is normalized to ``body <= 0``; its complement is ``-body <= 0``.
-        complement = Constraint(-condition.body, sense="<=", rhs=0.0)
+        # The comparison operators normalize the condition to ``body <= 0``, whose
+        # complement is ``-body <= 0``. A raw ``Constraint(body, ">=", 0.0)`` keeps
+        # its sense, and its complement is ``-body >= 0``: negating the body under
+        # the *same* sense covers both (#1858; a hardcoded ``"<="`` made the
+        # complement of a raw ``>=`` row identical to the row itself).
+        complement = Constraint(-condition.body, sense=condition.sense, rhs=0.0)
         lb, ub = self._branch_bounds(then_expr, else_expr, condition, complement)
         self._aux_counter += 1
         base = name or "ifelse"
@@ -8948,6 +9063,7 @@ class Model:
             the solver certify an optimum for the *relaxed* problem.
         """
         _refuse_empty_disjunction(disjuncts, "disjunction", name)
+        _reject_unnormalized_rhs_in(disjuncts, where=f"disjunction {name or '<anon>'!r}")  # #1858
         dc = _DisjunctiveConstraint(
             disjuncts=disjuncts,
             name=name,
@@ -10391,6 +10507,7 @@ class Model:
                 _guard_unresolved_objective(_ck_res)
                 self._withhold_default_box_certificate(_ck_res)
                 self._withhold_user_big_m_certificate(_ck_res, _ubm_snapshot)
+                self._withhold_conservative_ro_certificate(_ck_res)
                 return _ck_res
 
         from discopt._relax.deadline import deadline_scope
@@ -11179,6 +11296,8 @@ class Model:
             self._withhold_default_box_certificate(result)
             # #1775 G2.6: a user big-M that could not be certified.
             self._withhold_user_big_m_certificate(result, _ubm_snapshot)
+            # #1848: a box robust counterpart that is only a conservative restriction.
+            self._withhold_conservative_ro_certificate(result)
             # #1727: drop the factorable lift's auxiliary columns from ``x``. After
             # the guards above, which judge the point as the route left it. Only
             # names the lift recorded AND the caller did not declare.
@@ -11537,6 +11656,50 @@ class Model:
         result.gap = None
         result.solver_stats = dict(result.solver_stats or {})
         result.solver_stats["certificate/user_big_m_uncertified"] = float(len(reasons))
+
+    def _withhold_conservative_ro_certificate(self, result: "SolveResult") -> None:
+        """#1848: no certificate from a robust counterpart that is not exact.
+
+        The box counterpart worst-cases each occurrence of an uncertain parameter
+        on its own. Where a component still occurs more than once in a non-affine
+        row (after like terms cancel), the occurrences may take different bounds,
+        so the counterpart is a conservative *restriction* of the robust problem:
+        a point it accepts is robust, but its ``infeasible`` does not prove the
+        robust problem infeasible and its optimum is not the robust optimum. The
+        rows are recorded by ``discopt.ro`` (``CONSERVATIVE_ATTR``); a result on
+        such a model keeps its point and loses its certificate. Only downgrades.
+        """
+        from discopt.ro.formulations._common import CONSERVATIVE_ATTR
+
+        rows = getattr(self, CONSERVATIVE_ATTR, None)
+        if not rows:
+            return
+        if not (
+            result.status in ("optimal", "infeasible")
+            or bool(result.gap_certified)
+            or result.bound is not None
+        ):
+            return
+        import logging as _rlogging
+        import warnings as _rwarnings
+
+        msg = (
+            f"{self.name}: the box robust counterpart of {rows} is conservative (an "
+            "uncertain parameter occurs more than once in a nonlinear term, and each "
+            "occurrence was worst-cased separately), so this result is robust but "
+            "carries no certificate and no dual bound (#1848)."
+        )
+        _rlogging.getLogger("discopt.solver").warning(msg)
+        _rwarnings.warn(msg, UserWarning, stacklevel=3)
+        if result.status == "optimal":
+            result.status = "feasible"
+        elif result.status == "infeasible":
+            result.status = "unknown"
+        result.gap_certified = False
+        result._set_bound(None, valid=False)
+        result.gap = None
+        result.solver_stats = dict(result.solver_stats or {})
+        result.solver_stats["certificate/ro_conservative_rows"] = float(len(rows))
 
     def _withhold_default_box_certificate(self, result: "SolveResult") -> None:
         """#1678 (b): no certificate that rests on the default ``±9.999e19`` box.
@@ -12267,6 +12430,15 @@ class Model:
             # ``c.rhs`` verbatim, and ``solve`` always comes through here.
             if for_solve and isinstance(c, Constraint):
                 _reject_unnormalized_rhs(c, where="Model.validate", index=ci)
+            elif for_solve and isinstance(c, (_IndicatorConstraint, _DisjunctiveConstraint)):
+                if isinstance(c, _IndicatorConstraint):
+                    _require_binary_indicator(
+                        c.indicator, f"Model.validate (_constraints[{ci}])"
+                    )  # #1844
+                # #1858: the rows inside a disjunct or indicator constraint, which
+                # can arrive here without passing a construction-time check (a
+                # direct append, a disjunct list mutated after ``either_or``).
+                _reject_unnormalized_rhs_in(c, where=f"Model.validate (_constraints[{ci}])")
             cname = getattr(c, "name", None)
             if cname is None:
                 continue
@@ -13276,7 +13448,10 @@ class Disjunct:
         blocks with :meth:`add_disjunction` instead.
         """
         self._require_open("add a constraint to")
-        for item in constraint if isinstance(constraint, list) else [constraint]:
+        items = constraint if isinstance(constraint, list) else [constraint]
+        # #1858: checked for the whole list first, so a refusal adds nothing.
+        _reject_unnormalized_rhs_in(items, where=f"Disjunct {self.name!r}.subject_to")
+        for item in items:
             if isinstance(item, _DisjunctiveConstraint):
                 if item._model is not None or item.parent_indicator is not None:
                     raise ValueError(

@@ -158,14 +158,14 @@ def _verify_side(
     Raises on a feasible witness when ``ctx.refuse``."""
     from discopt._relax.gdp_reformulate import (
         _BIGM_SENTINEL,
-        _bound_expression,
         _extract_body_coeffs,
+        _gdp_body_bounds,
         _is_scalar_linear_row,
         _safe_lp_max,
         _stack_rows,
     )
 
-    lo, hi = _bound_expression(con.body, ctx.model)
+    lo, hi = _gdp_body_bounds(con.body, ctx.model)
     ival = float(hi) if side == "up" else -float(lo)
     # Compared exactly, with no slack: this is the enclosure the computed M
     # (``_compute_big_m``) rests on, so an M equal to it is as valid as the

@@ -1165,6 +1165,12 @@ impl ExprArena {
         let offsets = self.var_offset_map();
         let mut memo: std::collections::HashMap<ExprId, Option<std::rc::Rc<Vec<QuadForm>>>> =
             std::collections::HashMap::new();
+        // Static shape of every node combined so far (#1845). The flat value
+        // vectors carry no shape, and combining them by flat length alone was
+        // wrong whenever two operands' shapes differed: a 2-D `A @ X`
+        // contracted both flat vectors into one scalar, and `(2,1) * (1,2)`
+        // zipped two length-2 vectors instead of broadcasting to `(2, 2)`.
+        let mut shapes = ShapeMemo::default();
 
         // In-degree over the reachable sub-DAG, counting multiplicity (`x * x`
         // consumes `x` twice). A memo entry is dropped the moment its last
@@ -1206,7 +1212,8 @@ impl ExprArena {
                     }
                 }
             } else {
-                let v = self.quad_combine(cur, &offsets, &memo);
+                shapes.record(self, cur);
+                let v = self.quad_combine(cur, &offsets, &memo, &shapes);
                 if let Some(rc) = v.as_ref() {
                     live += rc.iter().map(|q| q.n_terms()).sum::<usize>();
                     // Declining here keeps a would-be dense `Q` from ever being
@@ -1268,8 +1275,12 @@ impl ExprArena {
         id: ExprId,
         offsets: &std::collections::HashMap<usize, usize>,
         memo: &std::collections::HashMap<ExprId, Option<std::rc::Rc<Vec<QuadForm>>>>,
+        shapes: &ShapeMemo,
     ) -> Option<std::rc::Rc<Vec<QuadForm>>> {
         let child = |c: &ExprId| -> Option<std::rc::Rc<Vec<QuadForm>>> { memo.get(c)?.clone() };
+        // Operand shapes for the array-aware arms; `None` (decline) when a
+        // shape is unknown.
+        let shape = |c: &ExprId| -> Option<&Vec<usize>> { shapes.get(*c) };
 
         let vals: Vec<QuadForm> = match self.get(id) {
             ExprNode::Constant(v) => vec![QuadForm::constant(*v)],
@@ -1286,19 +1297,21 @@ impl ExprArena {
             ExprNode::BinaryOp { op, left, right } => {
                 let l = child(left)?;
                 let r = child(right)?;
+                let (ls, rs) = (shape(left)?, shape(right)?);
+                let broadcast = |l: &[QuadForm], r: &[QuadForm], f| broadcast(l, ls, r, rs, f);
                 match op {
-                    BinOp::Add => broadcast(&l, &r, |a, b| {
+                    BinOp::Add => broadcast(&l, &r, &|a, b| {
                         let mut o = a.clone();
                         o.add_assign_scaled(b, 1.0);
                         Some(o)
                     })?,
-                    BinOp::Sub => broadcast(&l, &r, |a, b| {
+                    BinOp::Sub => broadcast(&l, &r, &|a, b| {
                         let mut o = a.clone();
                         o.add_assign_scaled(b, -1.0);
                         Some(o)
                     })?,
-                    BinOp::Mul => broadcast(&l, &r, |a, b| a.mul(b))?,
-                    BinOp::Div => broadcast(&l, &r, |a, b| {
+                    BinOp::Mul => broadcast(&l, &r, &|a, b| a.mul(b))?,
+                    BinOp::Div => broadcast(&l, &r, &|a, b| {
                         // A variable in the denominator is not polynomial;
                         // a zero denominator is not representable either.
                         //
@@ -1315,7 +1328,7 @@ impl ExprArena {
                             Some(a.scaled(1.0 / b.constant))
                         }
                     })?,
-                    BinOp::Pow => broadcast(&l, &r, |a, e| {
+                    BinOp::Pow => broadcast(&l, &r, &|a, e| {
                         if e.degree() != 0 {
                             return None; // variable exponent
                         }
@@ -1399,17 +1412,31 @@ impl ExprArena {
             ExprNode::MatMul { left, right } => {
                 let l = child(left)?;
                 let r = child(right)?;
-                // `evaluate_matmul` contracts the two flat vectors. Equal
-                // lengths only: zipping mismatched lengths would silently
-                // answer a different model.
-                if l.len() != r.len() {
+                // Numpy `@` over the operands' shapes (#1845). This used to
+                // contract the two flat vectors whatever their rank, which is
+                // `@` only for `(k,) @ (k,)`: `A @ X` with a 2-D `X` became
+                // one scalar, and `sum(B * (A @ X))` was certified wrong.
+                let (ls, rs) = (shape(left)?, shape(right)?);
+                crate::expand::matmul_shape(ls, rs).ok()?;
+                if l.len() != crate::expand::numel(ls) || r.len() != crate::expand::numel(rs) {
                     return None;
                 }
-                let mut acc = QuadForm::default();
-                for (a, b) in l.iter().zip(r.iter()) {
-                    acc.add_assign_scaled(&a.mul(b)?, 1.0);
+                let inner = if ls.len() == 1 { ls[0] } else { ls[1] };
+                let rows = if ls.len() == 1 { 1 } else { ls[0] };
+                let cols = if rs.len() == 1 { 1 } else { rs[1] };
+                let mut out = Vec::with_capacity(rows * cols);
+                for i in 0..rows {
+                    for j in 0..cols {
+                        let mut acc = QuadForm::default();
+                        for p in 0..inner {
+                            let lf = if ls.len() == 1 { p } else { i * inner + p };
+                            let rf = if rs.len() == 1 { p } else { p * cols + j };
+                            acc.add_assign_scaled(&l[lf].mul(&r[rf])?, 1.0);
+                        }
+                        out.push(acc);
+                    }
                 }
-                vec![acc]
+                out
             }
             ExprNode::Sum { operand, axis } => {
                 if axis.is_some() {
@@ -1838,10 +1865,28 @@ impl ExprArena {
     /// Evaluate matrix-multiply as a dot product for 1-D vectors,
     /// or sum(a_i * b_i) for arrays.
     fn evaluate_matmul(&self, left: ExprId, right: ExprId, x: &[f64]) -> f64 {
+        // Scalar-valued only for `(k,) @ (k,)` (#1845): any other rank is an
+        // array, and contracting the two flat vectors answered a different
+        // model. NaN is this evaluator's "not scalar-representable" signal.
+        if !(self.is_vector_leaf(left) && self.is_vector_leaf(right)) {
+            return f64::NAN;
+        }
         let lv = self.collect_array_values(left, x);
         let rv = self.collect_array_values(right, x);
+        if lv.len() != rv.len() {
+            return f64::NAN;
+        }
         // Dot product of the collected values.
         lv.iter().zip(rv.iter()).map(|(a, b)| a * b).sum()
+    }
+
+    /// True when `id` is a 1-D leaf (variable / constant / parameter) or a 1-D
+    /// index into one -- the operands [`Self::collect_array_values`] reads
+    /// element by element, so a dot product of two of them is `@` (#1845).
+    pub(crate) fn is_vector_leaf(&self, id: ExprId) -> bool {
+        let mut shapes = ShapeMemo::default();
+        shapes.record(self, id);
+        shapes.get(id).is_some_and(|s| s.len() == 1)
     }
 
     /// Collect all scalar values from an expression that represents
@@ -2272,8 +2317,15 @@ impl ModelRepr {
     }
 
     fn evaluate_matmul(&self, left: ExprId, right: ExprId, x: &[f64]) -> f64 {
+        // `(k,) @ (k,)` only; see `ExprArena::evaluate_matmul` (#1845).
+        if !(self.arena.is_vector_leaf(left) && self.arena.is_vector_leaf(right)) {
+            return f64::NAN;
+        }
         let lv = self.collect_array_values(left, x);
         let rv = self.collect_array_values(right, x);
+        if lv.len() != rv.len() {
+            return f64::NAN;
+        }
         lv.iter().zip(rv.iter()).map(|(a, b)| a * b).sum()
     }
 
@@ -2545,6 +2597,63 @@ mod tests {
         }
         let pt = [1.0, -2.0, 3.0];
         assert_eq!(qf_eval(&q, &pt), a.evaluate(root, &pt));
+    }
+
+    #[test]
+    fn test_quadratic_form_2d_matmul_follows_numpy_1845() {
+        // sum(B * (A @ X)) with X (2, 2): the walk used to contract A's and X's
+        // flat vectors into one scalar. Coefficient of X[p, j] is
+        // sum_i B[i, j] * A[i, p].
+        let mut a = ExprArena::new();
+        let x = a.add(ExprNode::Variable {
+            name: "X".into(),
+            index: 0,
+            size: 4,
+            shape: vec![2, 2],
+        });
+        let am = [2.0, -1.0, 0.5, 1.0];
+        let bm = [1.0, 0.0, 3.0, -2.0];
+        let ca = a.add(ExprNode::ConstantArray(am.to_vec(), vec![2, 2]));
+        let cb = a.add(ExprNode::ConstantArray(bm.to_vec(), vec![2, 2]));
+        let mm = a.add(ExprNode::MatMul { left: ca, right: x });
+        let prod = bin(&mut a, BinOp::Mul, cb, mm);
+        let root = a.add(ExprNode::Sum {
+            operand: prod,
+            axis: None,
+        });
+        let q = a.quadratic_form(root, 1_000).expect("should extract");
+        assert!(q.quadratic.is_empty());
+        for p in 0..2 {
+            for j in 0..2 {
+                let want: f64 = (0..2).map(|i| bm[i * 2 + j] * am[i * 2 + p]).sum();
+                assert_eq!(q.linear.get(&(p * 2 + j)).copied().unwrap_or(0.0), want);
+            }
+        }
+        // The scalar evaluator has no array semantics for a 2-D matmul: NaN
+        // (decline), not the flat dot product it used to return.
+        assert!(a.evaluate(mm, &[1.0, 0.5, 0.2, 1.0]).is_nan());
+    }
+
+    #[test]
+    fn test_quadratic_form_broadcasts_by_shape_1845() {
+        // (2, 1) * (1, 2) is a (2, 2) outer product; zipping the two length-2
+        // flat vectors (what flat-length broadcasting did) is a different sum.
+        let mut a = ExprArena::new();
+        let x = a.add(ExprNode::Variable {
+            name: "x".into(),
+            index: 0,
+            size: 2,
+            shape: vec![1, 2],
+        });
+        let col = a.add(ExprNode::ConstantArray(vec![3.0, 5.0], vec![2, 1]));
+        let prod = bin(&mut a, BinOp::Mul, col, x);
+        let root = a.add(ExprNode::Sum {
+            operand: prod,
+            axis: None,
+        });
+        let q = a.quadratic_form(root, 1_000).expect("should extract");
+        assert_eq!(q.linear[&0], 8.0);
+        assert_eq!(q.linear[&1], 8.0);
     }
 
     #[test]
@@ -3441,21 +3550,87 @@ pub type QuadFormCoo = (Vec<usize>, Vec<usize>, Vec<f64>, Vec<usize>, Vec<f64>, 
 ///
 /// Any other length pairing is refused rather than zipped: truncating to the
 /// shorter operand would silently answer a different model.
-fn broadcast<F>(l: &[QuadForm], r: &[QuadForm], f: F) -> Option<Vec<QuadForm>>
-where
-    F: Fn(&QuadForm, &QuadForm) -> Option<QuadForm>,
-{
-    let n = match (l.len(), r.len()) {
-        (a, b) if a == b => a,
-        (1, b) => b,
-        (a, 1) => a,
-        _ => return None,
-    };
+fn broadcast(
+    l: &[QuadForm],
+    ls: &[usize],
+    r: &[QuadForm],
+    rs: &[usize],
+    f: &dyn Fn(&QuadForm, &QuadForm) -> Option<QuadForm>,
+) -> Option<Vec<QuadForm>> {
+    use crate::expand::{broadcast_flat, idx_of, numel};
+    // Numpy broadcasting by SHAPE (#1845), not by flat length: `(2,1) * (1,2)`
+    // is a `(2, 2)` outer product even though both operands have two entries.
+    if l.len() != numel(ls) || r.len() != numel(rs) {
+        return None;
+    }
+    let out_shape = crate::expand::broadcast(ls, rs)?;
+    let n = numel(&out_shape);
     let mut out = Vec::with_capacity(n);
+    if ls == rs {
+        for k in 0..n {
+            out.push(f(&l[k], &r[k])?);
+        }
+        return Some(out);
+    }
     for k in 0..n {
-        let a = if l.len() == 1 { &l[0] } else { &l[k] };
-        let b = if r.len() == 1 { &r[0] } else { &r[k] };
-        out.push(f(a, b)?);
+        let idx = idx_of(k, &out_shape);
+        out.push(f(
+            &l[broadcast_flat(&idx, ls)],
+            &r[broadcast_flat(&idx, rs)],
+        )?);
     }
     Some(out)
+}
+
+/// Static shapes of the nodes [`ExprArena::quadratic_form`] has combined, keyed
+/// by node; `None` for a node whose shape cannot be inferred (#1845).
+#[derive(Default)]
+struct ShapeMemo(std::collections::HashMap<ExprId, Option<Vec<usize>>>);
+
+impl ShapeMemo {
+    fn get(&self, id: ExprId) -> Option<&Vec<usize>> {
+        self.0.get(&id)?.as_ref()
+    }
+
+    /// Record `id`'s shape. Its operands are already recorded (post-order),
+    /// except an `Index` base, which `quadratic_form` does not descend into: it
+    /// is a leaf whenever the walk can use it, so its shape is read directly.
+    fn record(&mut self, arena: &ExprArena, id: ExprId) {
+        if self.0.contains_key(&id) {
+            return;
+        }
+        if let ExprNode::Index { base, .. } = arena.get(id) {
+            if !self.0.contains_key(base) {
+                let leaf = crate::expand::operands(arena.get(*base)).is_empty();
+                let s = if leaf {
+                    crate::expand::node_shape(arena, base.0, &ShapeView(self)).ok()
+                } else {
+                    None
+                };
+                self.0.insert(*base, s);
+            }
+        }
+        let known = crate::expand::operands(arena.get(id))
+            .iter()
+            .all(|c| self.get(*c).is_some());
+        let s = if known {
+            crate::expand::node_shape(arena, id.0, &ShapeView(self)).ok()
+        } else {
+            None
+        };
+        self.0.insert(id, s);
+    }
+}
+
+/// `shapes[i]` view of a [`ShapeMemo`] for [`crate::expand::node_shape`], which
+/// reads only operands the caller has checked are recorded.
+struct ShapeView<'a>(&'a ShapeMemo);
+
+impl std::ops::Index<usize> for ShapeView<'_> {
+    type Output = Vec<usize>;
+    fn index(&self, i: usize) -> &Vec<usize> {
+        self.0
+            .get(ExprId(i))
+            .expect("ShapeMemo: operand shape read before it was recorded")
+    }
 }

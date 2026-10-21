@@ -704,30 +704,24 @@ def _extract_linear_coefficients_sparse(expr, model: Model, n: int):
                 continue
 
             if isinstance(node, MatMulExpression):
-                # Handle Constant @ Variable or Variable @ Constant
+                # Only the scalar dot product ``c @ x`` / ``x @ c`` of a 1-D
+                # constant and a 1-D variable of the same length is read here.
+                # Any other rank is array-valued: ``c @ X`` with a 2-D ``X`` read
+                # ``c[j]`` for every flat entry of ``X`` (an IndexError, or a wrong
+                # coefficient when the sizes happened to fit; #1845). Decline so the
+                # per-component rungs, which follow numpy's shapes, take the row.
                 if isinstance(node.left, Constant) and isinstance(node.right, Variable):
-                    mat = node.left.value
-                    var = node.right
-                    offset = _compute_var_offset(var, model)
-                    # mat @ var => result is mat @ x[offset:offset+size]
-                    # For 1-D mat (dot product), coefficients are mat elements
-                    if mat.ndim == 1:
-                        for j in range(var.size):
-                            _add(offset + j, scale * float(mat[j]))
-                    elif mat.ndim == 2:
-                        # Returns vector; this should be used inside a sum
-                        raise _NotLinearError("MatMul returning vector in scalar context")
-                    continue
-                if isinstance(node.right, Constant) and isinstance(node.left, Variable):
-                    mat = node.right.value
-                    var = node.left
-                    offset = _compute_var_offset(var, model)
-                    if mat.ndim == 1:
-                        for j in range(var.size):
-                            _add(offset + j, scale * float(mat[j]))
-                        continue
-                    raise _NotLinearError("MatMul returning vector in scalar context")
-                raise _NotLinearError("MatMul between non-trivial expressions")
+                    mat, var = node.left.value, node.right
+                elif isinstance(node.right, Constant) and isinstance(node.left, Variable):
+                    mat, var = node.right.value, node.left
+                else:
+                    raise _NotLinearError("MatMul between non-trivial expressions")
+                if mat.ndim != 1 or len(var.shape) != 1 or mat.shape[0] != var.size:
+                    raise _NotLinearError("MatMul returning an array in scalar context")
+                offset = _compute_var_offset(var, model)
+                for j in range(var.size):
+                    _add(offset + j, scale * float(mat[j]))
+                continue
 
             raise _NotLinearError(f"Unhandled expression type: {type(node).__name__}")
 
@@ -1039,26 +1033,20 @@ def _extract_quadratic_terms(expr, model: Model, n: int):
                 continue
 
             if isinstance(node, MatMulExpression):
-                # Handle Constant @ Variable for linear parts of QP constraints
+                # Linear parts of QP rows: the 1-D dot product only (#1845; see
+                # the same arm of the LP walk).
                 if isinstance(node.left, Constant) and isinstance(node.right, Variable):
-                    mat = node.left.value
-                    var = node.right
-                    offset = _compute_var_offset(var, model)
-                    if mat.ndim == 1:
-                        for j in range(var.size):
-                            c[offset + j] += scale * float(mat[j])
-                        continue
-                    raise _NotQuadraticError("MatMul returning vector")
-                if isinstance(node.right, Constant) and isinstance(node.left, Variable):
-                    mat = node.right.value
-                    var = node.left
-                    offset = _compute_var_offset(var, model)
-                    if mat.ndim == 1:
-                        for j in range(var.size):
-                            c[offset + j] += scale * float(mat[j])
-                        continue
-                    raise _NotQuadraticError("MatMul returning vector")
-                raise _NotQuadraticError("MatMul between non-trivial expressions")
+                    mat, var = node.left.value, node.right
+                elif isinstance(node.right, Constant) and isinstance(node.left, Variable):
+                    mat, var = node.right.value, node.left
+                else:
+                    raise _NotQuadraticError("MatMul between non-trivial expressions")
+                if mat.ndim != 1 or len(var.shape) != 1 or mat.shape[0] != var.size:
+                    raise _NotQuadraticError("MatMul returning an array")
+                offset = _compute_var_offset(var, model)
+                for j in range(var.size):
+                    c[offset + j] += scale * float(mat[j])
+                continue
 
             raise _NotQuadraticError(f"Unhandled expression type: {type(node).__name__}")
 

@@ -44,9 +44,11 @@ from discopt.modeling.core import (
     LogicalImplies,
     LogicalNot,
     LogicalOr,
+    MatMulExpression,
     Model,
     SelectorActivation,
     SelectorCardinality,
+    SumExpression,
     SumOverExpression,
     UnaryOp,
     Variable,
@@ -748,7 +750,7 @@ def _domain_gap(expr: Expression, model: Model) -> Optional[str]:
     """
     from discopt.modeling.core import Parameter
 
-    memo = _BoundMemo()
+    memo = _BoundMemo(array_reductions=True)  # #1855: the big-M enclosure's rules
     _seed_self_products(expr, model, memo)
     seen: set[int] = set()
     stack: list = [expr]
@@ -812,10 +814,18 @@ def _seed_self_products(expr: Expression, model: Model, memo: _BoundMemo) -> Non
     :func:`_domain_gap` refuse ``sqrt(x*x + 1)`` and the product-written distance
     rows of layout models, which are defined on the whole box (review of #1787).
     A product of two structurally equal operands -- the same object, or the same
-    printed expression, which names every leaf -- is a square, so ``[0, max^2]``
-    when the operand's enclosure straddles 0. Seeded only into this check's memo:
-    the big-M enclosure itself is unchanged, so no M moves.
+    DAG with identical Variables/Parameters and equal Constant *values* -- is a
+    square, so ``[0, max^2]`` when the operand's enclosure straddles 0. Seeded
+    only into this check's memo: the big-M enclosure itself is unchanged, so no M
+    moves.
+
+    Never compare by ``str()``: ``Constant.__str__`` prints only the shape, so
+    ``(a @ v) * (b @ v)`` with different vectors ``a``, ``b`` printed as a square,
+    was enclosed as nonnegative, and a ``sqrt`` of it that goes negative on the
+    box was accepted -- a certified false optimum (#1843).
     """
+    from discopt._relax.least_squares import _expr_equal
+
     order: list = []
     seen: set[int] = set()
     stack: list = [(expr, False)]
@@ -830,11 +840,7 @@ def _seed_self_products(expr: Expression, model: Model, memo: _BoundMemo) -> Non
         stack.append((node, True))
         stack.extend((c, False) for c in _expr_children(node))
     for node in order:  # children before parents
-        if (
-            isinstance(node, BinaryOp)
-            and node.op == "*"
-            and (node.left is node.right or str(node.left) == str(node.right))
-        ):
+        if isinstance(node, BinaryOp) and node.op == "*" and _expr_equal(node.left, node.right):
             lo, hi = _bound_expression(node.left, model, memo)
             sq = sorted((lo * lo, hi * hi))
             memo.put_bound(node, (0.0 if lo <= 0.0 <= hi else sq[0], sq[1]))
@@ -913,7 +919,7 @@ def _compute_big_m(
     gap = _domain_gap(constraint.body, model)
     if gap is not None:
         raise _domain_gap_error(constraint, gap, "big-M")
-    lo, hi = _bound_expression(constraint.body, model)
+    lo, hi = _gdp_body_bounds(constraint.body, model)
 
     def _require_finite_upper() -> float:
         # Valid M for a ``body <= 0`` disjunct: any value >= max body. The
@@ -1598,11 +1604,17 @@ class _BoundMemo:
     box.
     """
 
-    __slots__ = ("bounds", "errors")
+    __slots__ = ("bounds", "errors", "array_reductions")
 
-    def __init__(self) -> None:
+    def __init__(self, *, array_reductions: bool = False) -> None:
         self.bounds: dict[int, tuple[Expression, tuple[float, float]]] = {}
         self.errors: dict[int, tuple[Expression, tuple[float, float]]] = {}
+        # #1855: enclose ``dm.sum`` (``SumExpression``) and ``@``
+        # (``MatMulExpression``) instead of answering ``(-inf, inf)``. Opt-in, set
+        # only by the GDP lowerings (:func:`_gdp_body_bounds`, :func:`_domain_gap`),
+        # so the other callers of :func:`_bound_expression` (factorable
+        # reformulation, OBBT) stay bound-neutral.
+        self.array_reductions = array_reductions
 
     def put_bound(self, expr: Expression, res: tuple[float, float]) -> tuple[float, float]:
         self.bounds[id(expr)] = (expr, res)
@@ -1774,8 +1786,88 @@ def _bound_expression(
         elif expr.func_name == "neg":
             return memo.put_bound(expr, (-arg_hi, -arg_lo))
 
+    if memo.array_reductions and isinstance(expr, (SumExpression, MatMulExpression)):
+        return memo.put_bound(expr, _bound_array_reduction(expr, model, memo))
+
     # Fallback: unknown expression type
     return memo.put_bound(expr, (-np.inf, np.inf))
+
+
+def _gdp_body_bounds(body: Expression, model: Model) -> tuple[float, float]:
+    """The enclosure a GDP big-M rests on: :func:`_bound_expression` with the
+    ``dm.sum`` / matmul rules on (#1855). Used by :func:`_compute_big_m` and by the
+    user-M validation that must agree with it."""
+    return _bound_expression(body, model, _BoundMemo(array_reductions=True))
+
+
+def _interval_mul(a_lo: float, a_hi: float, b_lo: float, b_hi: float) -> tuple[float, float]:
+    """``[a] * [b]`` with ``0 * inf = 0`` (a zero endpoint times an unbounded one
+    contributes 0, never NaN, which would compare False and poison a min/max)."""
+    with np.errstate(invalid="ignore"):
+        prods = np.array([a_lo * b_lo, a_lo * b_hi, a_hi * b_lo, a_hi * b_hi])
+    prods = np.where(np.isnan(prods), 0.0, prods)
+    return float(prods.min()), float(prods.max())
+
+
+def _bound_array_reduction(expr: Expression, model: Model, memo: _BoundMemo) -> tuple[float, float]:
+    """#1855: a scalar enclosure of every entry of ``dm.sum(u)`` / ``A @ B``.
+
+    Every enclosure in :func:`_bound_expression` is one interval holding *every*
+    entry of an array-valued node, so an entry of a reduction that adds ``k``
+    entries of ``u`` lies in ``k * [lo(u), hi(u)]``. A matmul entry adds ``k``
+    products of an ``A`` entry and a ``B`` entry, so it lies in ``k * ([A] * [B])``;
+    when one factor is a ``Constant`` its signs are known per entry and the
+    enclosure is the exact interval dot product with the other factor's interval,
+    taken over every row/column. ``(-inf, inf)`` when a shape cannot be determined
+    statically (sound: the caller refuses).
+    """
+    from discopt.ro.formulations._common import _shape_of
+
+    if isinstance(expr, SumExpression):
+        lo, hi = _bound_expression(expr.operand, model, memo)
+        s_in, s_out = _shape_of(expr.operand), _shape_of(expr)
+        if s_in is None or s_out is None:
+            return (-np.inf, np.inf)
+        n_out = int(np.prod(s_out, dtype=np.int64))
+        k = int(np.prod(s_in, dtype=np.int64)) // n_out if n_out else 0
+        if k == 0:
+            return (0.0, 0.0)
+        return (k * lo, k * hi)
+
+    assert isinstance(expr, MatMulExpression)  # the caller dispatches only these two
+    sl, sr = _shape_of(expr.left), _shape_of(expr.right)
+    if sl is None or sr is None or not (1 <= len(sl) <= 2 and 1 <= len(sr) <= 2):
+        return (-np.inf, np.inf)
+    if sl[-1] != sr[0]:
+        return (-np.inf, np.inf)
+    k = int(sl[-1])
+    if k == 0:
+        return (0.0, 0.0)
+    l_lo, l_hi = _bound_expression(expr.left, model, memo)
+    r_lo, r_hi = _bound_expression(expr.right, model, memo)
+    for const, (o_lo, o_hi), left in (
+        (expr.left, (r_lo, r_hi), True),
+        (expr.right, (l_lo, l_hi), False),
+    ):
+        if not isinstance(const, Constant):
+            continue
+        C = np.asarray(const.value, dtype=np.float64)
+        # Dot products along the contracted axis: rows of a left constant
+        # (``C @ u``: axis -1), columns of a right one (``u @ C``: axis 0).
+        C2 = (
+            (C.reshape(1, -1) if C.ndim == 1 else C)
+            if left
+            else (C.reshape(-1, 1) if C.ndim == 1 else C)
+        )
+        axis = 1 if left else 0
+        with np.errstate(invalid="ignore"):
+            a = np.where(C2 == 0.0, 0.0, C2 * o_lo)
+            b = np.where(C2 == 0.0, 0.0, C2 * o_hi)
+        row_lo = np.minimum(a, b).sum(axis=axis)
+        row_hi = np.maximum(a, b).sum(axis=axis)
+        return (float(np.min(row_lo)), float(np.max(row_hi)))
+    p_lo, p_hi = _interval_mul(l_lo, l_hi, r_lo, r_hi)
+    return (k * p_lo, k * p_hi)
 
 
 def _fractional_power_bounds(lo: float, hi: float, p: float) -> tuple[float, float] | None:
@@ -2829,7 +2921,16 @@ def _reformulate_disjunction_hull(
                 persp_map.update({wname: w / y_clamp for wname, w in local[k].items()})
                 subst_body = _substitute_vars(con.body, persp_map)
                 hull_body = subst_body * y_clamp
-                if g0 != 0.0:
+                g0_live = _parametric_body_at_zero(con.body, zero_vars)
+                if g0_live is not None:
+                    # A Parameter in the body: g(0) must track its live value, or a
+                    # model lowered once (``transformations.create_using``) keeps
+                    # ``eps * g0_old`` after ``p.value`` changes and leaves an
+                    # off-disjunct residual -- the #1043 false-infeasible class
+                    # (PR #1862 review).
+                    g0_expr = g0_live - _wrap(float(np.max(con.rhs)))
+                    hull_body = hull_body - _wrap(eps) * g0_expr * (_wrap(1.0) - y_k)
+                elif g0 != 0.0:
                     hull_body = hull_body - _wrap(eps * g0) * (_wrap(1.0) - y_k)
                 rhs_expr = _wrap(con.rhs) * y_clamp
 
@@ -2985,6 +3086,64 @@ class HullPerspectiveOriginError(ValueError):
     """
 
 
+def _parametric_body_at_zero(expr: Expression, all_vars: dict[str, Variable]):
+    """``g(0)`` as an expression in the model's Parameters, or ``None`` if it has none.
+
+    :func:`_body_at_zero` reads a Parameter at its value when the lowering runs.
+    That is enough inside ``Model.solve`` (it lowers again on every solve), but a
+    model lowered once and re-solved after ``p.value = ...`` must cancel the new
+    ``g(0)``, so the residual term is built from this expression instead. It is
+    accepted only when every operation in it stays finite for any parameter
+    value (``+ - *``, a non-negative integer power, ``abs``/``neg``, ``exp``,
+    ``sin``, ``cos``, ``tanh``): ``log(p)`` or ``1/p`` could become undefined
+    after a later value change, where the lowering can no longer refuse, so such
+    a body is refused now -- as every Parameter-bearing perspective was before.
+    """
+    from discopt.modeling.core import Parameter, _iter_model_leaves
+
+    if not any(isinstance(leaf, Parameter) for leaf in _iter_model_leaves(expr)):
+        return None
+    zeros: dict[str, Expression] = {
+        name: Constant(np.zeros(tuple(v.shape))) if tuple(v.shape) else Constant(np.array(0.0))
+        for name, v in all_vars.items()
+    }
+    g0 = _substitute_vars(expr, zeros)
+    safe_funcs = {"exp", "sin", "cos", "tanh", "abs"}
+    stack = [g0]
+    while stack:
+        e = stack.pop()
+        if isinstance(e, (Constant, Parameter)):
+            continue
+        if isinstance(e, IndexExpression) and isinstance(e.base, (Constant, Parameter)):
+            continue
+        if isinstance(e, BinaryOp) and e.op in ("+", "-", "*"):
+            stack.extend((e.left, e.right))
+            continue
+        if isinstance(e, BinaryOp) and e.op == "**" and isinstance(e.right, Constant):
+            p = np.asarray(e.right.value, dtype=np.float64)
+            if p.size == 1 and float(p) >= 0 and float(p) == int(p):
+                stack.append(e.left)
+                continue
+        if isinstance(e, UnaryOp) and e.op in ("neg", "-", "abs"):
+            stack.append(e.operand)
+            continue
+        if isinstance(e, FunctionCall) and e.func_name in safe_funcs and len(e.args) == 1:
+            stack.append(e.args[0])
+            continue
+        terms = _sumover_terms(e)
+        if terms is not None:
+            stack.extend(terms)
+            continue
+        raise HullPerspectiveOriginError(
+            f"the body's value at the origin depends on a Parameter through "
+            f"{type(e).__name__} {e!r}, which may become undefined for another "
+            "parameter value; the hull perspective could then not cancel its residual "
+            "on a de-selected disjunct. Use gdp_method='big-m', or move the Parameter "
+            "out of that operation"
+        )
+    return g0
+
+
 def _body_at_zero(expr: Expression, all_vars: dict[str, Variable]) -> float:
     """Evaluate a disjunct constraint body with every disjunct variable at 0.
 
@@ -3022,6 +3181,7 @@ def _body_at_zero(expr: Expression, all_vars: dict[str, Variable]) -> float:
         "^": lambda a, b: a**b,
     }
     _NARY: dict[str, Callable[..., float]] = {"max": max, "min": min}
+    from discopt.modeling.core import Parameter
 
     def _walk(e: Expression) -> float:
         if isinstance(e, Variable):
@@ -3031,10 +3191,32 @@ def _body_at_zero(expr: Expression, all_vars: dict[str, Variable]) -> float:
                     "collected as a disjunct variable"
                 )
             return 0.0
-        if isinstance(e, Constant):
-            return float(np.max(e.value))
+        if isinstance(e, (Constant, Parameter)):
+            # A Parameter is read at its current value: the lowering runs again
+            # on every solve (#1846). Only a single value is a scalar; an array
+            # in scalar position used to answer ``np.max`` of it -- a guess.
+            v = np.asarray(e.value, dtype=np.float64)
+            if v.size != 1:
+                raise HullPerspectiveOriginError(
+                    f"array-valued {type(e).__name__} of shape {v.shape} in a scalar body"
+                )
+            return float(v.reshape(()))
         if isinstance(e, IndexExpression):
-            return _walk(e.base)
+            if isinstance(e.base, (Constant, Parameter)):
+                # The indexed ENTRY, not the whole array: ``c[0]`` with
+                # ``c = [1, 5]`` read as max(c) = 5, so g(0) was wrong and the
+                # eps residual on the de-selected disjunct was not cancelled.
+                v = np.asarray(np.asarray(e.base.value, dtype=np.float64)[e.index])
+                if v.size != 1:
+                    raise HullPerspectiveOriginError(
+                        f"index {e.index!r} selects {v.size} entries in a scalar body"
+                    )
+                return float(v.reshape(()))
+            if isinstance(e.base, Variable):
+                return _walk(e.base)
+            raise HullPerspectiveOriginError(
+                f"unsupported indexed expression over {type(e.base).__name__}"
+            )
         if isinstance(e, UnaryOp):
             if e.op not in _UN:
                 raise HullPerspectiveOriginError(f"unsupported unary op {e.op!r}")
@@ -3090,9 +3272,18 @@ def _hull_linear_substitute(
     For a linear expression ``a*x + b``, returns ``a*v_k + b*y_k`` where
     ``v_k`` is the disaggregated variable from *var_map*.
     """
+    from discopt.modeling.core import Parameter
+
     if isinstance(expr, Variable):
         return var_map.get(expr.name, expr)
-    if isinstance(expr, Constant):
+    # A Parameter is a constant for the solve, so it is part of ``b`` and is
+    # scaled by y_k like a Constant -- indexed (``p[0]``) or not. Returning it
+    # unscaled imposed ``b`` on the de-selected disjunct, whose disaggregated
+    # variables are pinned to 0: ``if_else(y >= 1, p[0], 0)`` forced the "then"
+    # branch and certified a wrong optimum (#1846).
+    if isinstance(expr, (Constant, Parameter)) or (
+        isinstance(expr, IndexExpression) and isinstance(expr.base, (Constant, Parameter))
+    ):
         result: Expression = expr * y_k
         return result
     if isinstance(expr, IndexExpression):

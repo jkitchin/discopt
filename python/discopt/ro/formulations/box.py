@@ -30,9 +30,13 @@ from discopt.ro.formulations._common import (
     _contains_any_parameter,
     _contains_uncertain_param,
     aggregate_affine_counterpart,
+    cancel_like_terms,
     is_affine_in_params,
+    max_uncertain_multiplicity,
+    record_conservative,
     sign_tracking_substitute,
     substitute_param,
+    worst_case_attained,
 )
 from discopt.ro.uncertainty import BoxUncertaintySet
 
@@ -76,30 +80,25 @@ class BoxRobustFormulation:
 
     def _build_sign_tracking(self, m, param_names):
         """Robustify via sign-tracking (original approach, no bilinear terms)."""
-        wc_lower = {u.parameter.name: u.lower for u in self._uncertainty_sets}
-        wc_upper = {u.parameter.name: u.upper for u in self._uncertainty_sets}
-
         from discopt.modeling.core import Constraint, Objective, ObjectiveSense
 
         unc_map = {u.parameter.name: u for u in self._uncertainty_sets}
 
-        def robustify(expr, maximize: bool):
+        def robustify(expr, maximize: bool, where: str):
             # An affine row whose parameter occurrences cancel (``sum(M @ p)``,
             # ``3*p0 - p0``) gets the exact aggregate counterpart; sign tracking
             # would charge every occurrence separately (#1831 review).
             exact = aggregate_affine_counterpart(expr, unc_map, param_names, maximize)
             if exact is not None:
                 return exact
-            return sign_tracking_substitute(
-                expr, wc_lower, wc_upper, param_names, maximize=maximize, sign=+1
-            )
+            return self._sign_track_nonaffine(expr, unc_map, maximize, where)
 
         new_constraints = []
-        for con in m._constraints:
+        for ci, con in enumerate(m._constraints):
             if not isinstance(con, Constraint):
                 new_constraints.append(con)
                 continue
-            new_expr = robustify(con.body, maximize=True)
+            new_expr = robustify(con.body, maximize=True, where=con.name or f"_constraints[{ci}]")
             new_constraints.append(
                 Constraint(body=new_expr, sense=con.sense, rhs=con.rhs, name=con.name)
             )
@@ -109,8 +108,40 @@ class BoxRobustFormulation:
         if obj is None:
             return
         maximize_obj_wc = obj.sense == ObjectiveSense.MINIMIZE
-        new_expr = robustify(obj.expression, maximize=maximize_obj_wc)
+        new_expr = robustify(obj.expression, maximize=maximize_obj_wc, where="<objective>")
         m._objective = Objective(expression=new_expr, sense=obj.sense)
+
+    def _sign_track_nonaffine(self, expr, unc_map, maximize: bool, where: str):
+        """Worst case of a row that is not affine in the uncertain parameters.
+
+        Like terms are cancelled first (#1848): ``x + exp(p) - exp(p)`` is ``x``,
+        and charging each ``exp(p)`` its own worst case made a feasible robust
+        model infeasible. If the cancelled row is affine it takes the exact
+        aggregate. Otherwise sign tracking substitutes each occurrence at its own
+        worst bound, which is the exact worst case only when no uncertain
+        component occurs twice; else the row is recorded as conservative and
+        ``Model.solve`` withholds the result's certificate.
+        """
+        names = set(unc_map)
+        cancelled = cancel_like_terms(expr)
+        if cancelled is not expr:
+            if not _contains_uncertain_param(cancelled, names):
+                return cancelled
+            exact = aggregate_affine_counterpart(cancelled, unc_map, names, maximize)
+            if exact is not None:
+                return exact
+        if max_uncertain_multiplicity(cancelled, names) > 1 and not worst_case_attained(
+            cancelled, unc_map, maximize
+        ):
+            record_conservative(self._model, where)
+        return sign_tracking_substitute(
+            cancelled,
+            {n: u.lower for n, u in unc_map.items()},
+            {n: u.upper for n, u in unc_map.items()},
+            names,
+            maximize=maximize,
+            sign=+1,
+        )
 
     # ------------------------------------------------------------------
     # Bilinear path: coefficient extraction + absolute-value linearization
@@ -141,7 +172,7 @@ class BoxRobustFormulation:
         unc_map = {u.parameter.name: u for u in self._uncertainty_sets}
         aux_idx = 0
 
-        def _robustify_expr(expr, maximize: bool):
+        def _robustify_expr(expr, maximize: bool, where: str):
             """Replace uncertain parameters in expr with worst-case penalty.
 
             Returns (new_expr, list_of_new_constraints).
@@ -164,15 +195,10 @@ class BoxRobustFormulation:
             # robustified whole by sign tracking, which handles a nonlinear node
             # only by proof and refuses otherwise.
             if not is_affine_in_params(expr, set(unc_map)):
-                wc_expr = sign_tracking_substitute(
-                    expr,
-                    {n: u.lower for n, u in unc_map.items()},
-                    {n: u.upper for n, u in unc_map.items()},
-                    set(unc_map),
-                    maximize=maximize,
-                    sign=+1,
-                )
-                return wc_expr, []
+                cancelled = cancel_like_terms(expr)  # #1848
+                if cancelled is expr or not is_affine_in_params(cancelled, set(unc_map)):
+                    return self._sign_track_nonaffine(expr, unc_map, maximize, where), []
+                expr = cancelled
 
             # Step 1: substitute ALL params with nominal to get the base expression
             all_nominal = expr
@@ -345,11 +371,13 @@ class BoxRobustFormulation:
 
         # -- Robustify constraints ----------------------------------------
         new_constraints = []
-        for con in m._constraints:
+        for ci, con in enumerate(m._constraints):
             if not isinstance(con, Constraint):
                 new_constraints.append(con)
                 continue
-            new_body, aux_cons = _robustify_expr(con.body, maximize=True)
+            new_body, aux_cons = _robustify_expr(
+                con.body, maximize=True, where=con.name or f"_constraints[{ci}]"
+            )
             new_constraints.append(
                 Constraint(body=new_body, sense=con.sense, rhs=con.rhs, name=con.name)
             )
@@ -361,7 +389,9 @@ class BoxRobustFormulation:
         if obj is None:
             return
         maximize_obj_wc = obj.sense == ObjectiveSense.MINIMIZE
-        new_expr, aux_cons = _robustify_expr(obj.expression, maximize=maximize_obj_wc)
+        new_expr, aux_cons = _robustify_expr(
+            obj.expression, maximize=maximize_obj_wc, where="<objective>"
+        )
         m._objective = Objective(expression=new_expr, sense=obj.sense)
         m._constraints.extend(aux_cons)
 

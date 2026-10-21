@@ -9,7 +9,8 @@ set holding every feasible point -- the hull relaxation when every disjunct row 
 linear, and the model itself (``model.clone()``) when one is nonlinear -- so every
 cut holds at every feasible point, however inexact the separation. Disjuncts must
 be linear or proven convex; anything else is refused, as are models with
-Parameters (the cuts would go stale) and fast-API models (#1854).
+Parameters (the cuts would go stale). Fast-API models were refused until #1854
+fixed cloning their lowering.
 """
 
 from __future__ import annotations
@@ -203,14 +204,20 @@ def test_a_parameter_only_in_the_objective_is_refused():
         cuttingplane(m)
 
 
-def test_a_fast_api_model_is_refused_citing_1854():
+def test_a_fast_api_model_is_accepted_since_1854():
+    # Refused while cloning a big-M-lowered fast-API model raised (#1854).
+    # min X0 - 2 X1, X0 + X1 <= 15, X0 <= 2 or X0 >= 6 on [0, 10]^2: (0, 10) = -20.
     m = dm.Model("fast")
     X = m.continuous("X", shape=(2,), lb=0, ub=10)
     m.add_linear_constraints(np.array([[1.0, 1.0]]), X, "<=", np.array([15.0]))
     m.either_or([[X[0] <= 2], [X[0] >= 6]])
     m.add_linear_objective(np.array([1.0, -2.0]), X)
-    with pytest.raises(NotImplementedError, match="#1854"):
-        cuttingplane(m)
+    out, _report = cuttingplane(m)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = out.solve(time_limit=60)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(-20.0, abs=1e-6)
 
 
 def _back_off_returning(monkeypatch, fake):
