@@ -274,3 +274,22 @@ def test_unprovable_rows_refuse(name):
     m.maximize(x)
     with pytest.raises(NotImplementedError, match="#1836"):
         RobustCounterpart(m, BoxUncertaintySet(p, delta=delta)).formulate()
+
+
+@pytest.mark.parametrize(
+    "build",
+    [lambda x, p, c: x + c / p <= 10, lambda x, p, c: x + p**c <= 10],
+    ids=["certain_numerator_over_p", "p_pow_certain_exponent"],
+)
+def test_certain_parameter_deciding_a_direction_refuses(build):
+    """The direction through ``c / p`` (``p**c``) depends on the sign (value) of
+    the certain Parameter ``c``; reading it would freeze ``c`` at its
+    formulate()-time value, so the counterpart refuses instead."""
+    m = dm.Model("ro")
+    x = m.continuous("x", lb=0, ub=20)
+    p = m.parameter("p", value=1.0)
+    c = m.parameter("c", value=2.0)
+    m.subject_to(build(x, p, c))
+    m.maximize(x)
+    with pytest.raises(NotImplementedError, match="certain Parameter 'c'"):
+        RobustCounterpart(m, BoxUncertaintySet(p, delta=0.5)).formulate()

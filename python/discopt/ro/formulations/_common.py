@@ -725,6 +725,56 @@ def _refuse(expr, reason: str):
     )
 
 
+def _refuse_certain_parameter(param):
+    """A certain Parameter cannot decide a worst-case direction (#1836).
+
+    The direction through a nonlinear node would be read from the parameter's
+    ``formulate()``-time value and silently frozen into the counterpart, which a
+    later update of the parameter could not honour.
+    """
+    _refuse(
+        param,
+        f"the worst-case direction through this nonlinear node depends on the value "
+        f"of the certain Parameter {param.name!r}, which would be frozen at its "
+        "formulate()-time value; declare it uncertain or replace it by a constant",
+    )
+
+
+def _first_certain_parameter(expr, ctx: _Ctx):
+    """The first Parameter in *expr* that is not one of the uncertain ones, or None."""
+    from discopt.modeling.core import (
+        BinaryOp,
+        CustomCall,
+        FunctionCall,
+        IndexExpression,
+        MatMulExpression,
+        Parameter,
+        SumExpression,
+        SumOverExpression,
+        UnaryOp,
+    )
+
+    stack = [expr]
+    while stack:
+        e = stack.pop()
+        if isinstance(e, Parameter):
+            if e.name not in ctx.param_names:
+                return e
+        elif isinstance(e, (BinaryOp, MatMulExpression)):
+            stack += [e.left, e.right]
+        elif isinstance(e, UnaryOp):
+            stack.append(e.operand)
+        elif isinstance(e, (FunctionCall, CustomCall)):
+            stack += list(e.args)
+        elif isinstance(e, IndexExpression):
+            stack.append(e.base)
+        elif isinstance(e, SumExpression):
+            stack.append(e.operand)
+        elif isinstance(e, SumOverExpression):
+            stack += list(e.terms)
+    return None
+
+
 def _has_param(expr, ctx: _Ctx) -> bool:
     return _contains_uncertain_param(expr, ctx.param_names)
 
@@ -854,6 +904,9 @@ def _power_directions(expr, ctx: _Ctx):
         return [None, None]
     if _contains_variable(exponent):
         return "the exponent depends on a decision variable"
+    certain = _first_certain_parameter(exponent, ctx)
+    if certain is not None:
+        _refuse_certain_parameter(certain)
     k = np.asarray(eval_constant_expr(exponent), dtype=np.float64)
     if np.all((k == 0) | (k == 1)):
         return [1, None]
@@ -1041,7 +1094,9 @@ def _interval_raw(expr, ctx: _Ctx):
         lo = np.asarray(ctx.wc_lower[expr.name], dtype=np.float64)
         hi = np.asarray(ctx.wc_upper[expr.name], dtype=np.float64)
         return np.minimum(lo, hi), np.maximum(lo, hi)
-    if isinstance(expr, (Constant, Parameter)):
+    if isinstance(expr, Parameter):
+        _refuse_certain_parameter(expr)
+    if isinstance(expr, Constant):
         v = np.asarray(expr.value, dtype=np.float64)
         return v, v
     if isinstance(expr, Variable):
