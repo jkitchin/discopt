@@ -272,7 +272,12 @@ def test_equality_row_requires_vanishing_coefficient():
     RobustCounterpart(m, EllipsoidalUncertaintySet(p, rho=0.2)).formulate()
     r = m.solve()
     # The two robust rows meet at the norm's kink, so the solver may not certify
-    # the bound; whatever it returns must be the robust point.
+    # the bound; whatever it returns must be the robust point, and an `optimal`
+    # claim must carry a valid bound.
+    if r.status == "optimal":
+        assert r.gap_certified and r.bound is not None and r.bound >= 1.0 - 1e-6
+    else:
+        assert r.gap_certified is False
     assert r.objective == pytest.approx(1.0, abs=1e-5)
     np.testing.assert_allclose(r.value(x), 0.0, atol=1e-6)
 
@@ -388,3 +393,93 @@ def test_left_multiplied_parameter_folds_to_a_constant_penalty():
     r = m.solve()
     assert r.status == "optimal"
     assert r.objective == pytest.approx(_robust_rhs_slack(M2.T), abs=1e-6)
+
+
+# ── Mutation kills: one-line rows with a closed-form penalty ───────────────────
+
+
+def test_negated_occurrence_cancels_the_coefficient():
+    """``p @ x - (p @ y)`` at x = y = 1 has coefficient x - y = 0, so no penalty.
+
+    A ``neg`` that left the cotangent unsigned gives coefficient x + y and a
+    penalty ||(2, 2)|| = 2.83.
+    """
+    m = dm.Model()
+    x = m.continuous("x", shape=2, lb=1, ub=1)
+    y = m.continuous("y", shape=2, lb=1, ub=1)
+    t = m.continuous("t", lb=-50, ub=50)
+    p = m.parameter("p", value=np.ones(2))
+    m.subject_to(p @ x + (-(p @ y)) + t <= 5)
+    m.maximize(t)
+    RobustCounterpart(m, EllipsoidalUncertaintySet(p, rho=1.0)).formulate()
+    r = m.solve()
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(5.0, abs=1e-6)
+
+
+def test_repeated_index_accumulates_the_coefficient():
+    """``sum(p[[0, 0, 1]])`` has coefficient (2, 1): penalty sqrt(5), not sqrt(2)."""
+    m = dm.Model()
+    x = m.continuous("x", lb=-50, ub=50)
+    p = m.parameter("p", value=np.ones(2))
+    m.subject_to(x + dm.sum(p[[0, 0, 1]]) <= 10)
+    m.maximize(x)
+    RobustCounterpart(m, EllipsoidalUncertaintySet(p, rho=1.0)).formulate()
+    r = m.solve()
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(10.0 - 3.0 - np.sqrt(5.0), abs=1e-6)
+
+
+A_ASYM = np.array([[2.0, -1.0], [0.5, 1.0]])
+B_ASYM = np.array([[1.0, 0.0], [3.0, -2.0]])
+PB2 = np.array([[1.0, 2.0], [-1.0, 0.5]])
+SIG4 = np.diag([1.0, 0.5, 2.0, 0.25])
+
+
+def _matrix_row_truth(g, rho):
+    """``10 - g(P_bar) - rho * sqrt(a' Sigma a)``, a = d g / d P by exact differences."""
+    base = g(PB2)
+    a = np.array([g(PB2 + np.eye(4)[j].reshape(2, 2)) - base for j in range(4)])
+    return 10.0 - base - rho * np.sqrt(a @ SIG4 @ a)
+
+
+@pytest.mark.parametrize(
+    "build, g",
+    [
+        (lambda P: (P @ A_ASYM)[0, 1], lambda P: (P @ A_ASYM)[0, 1]),
+        (lambda P: (A_ASYM @ P)[1, 0], lambda P: (A_ASYM @ P)[1, 0]),
+        (lambda P: dm.sum(B_ASYM * (P @ A_ASYM)), lambda P: np.sum(B_ASYM * (P @ A_ASYM))),
+        (lambda P: dm.sum((A_ASYM @ P) * B_ASYM), lambda P: np.sum((A_ASYM @ P) * B_ASYM)),
+    ],
+    ids=["P@A_indexed", "A@P_indexed", "sum_B_PA", "sum_AP_B"],
+)
+def test_matrix_parameter_matrix_constant_row(build, g):
+    """A 2-D parameter times an asymmetric 2-D constant: coefficient ``w @ Aᵀ`` / ``Aᵀ @ w``.
+
+    Swapping the order of the product gives a different coefficient (for
+    ``(P @ A)[0, 1]`` the row is ``A[:, 1]`` vs ``A[0, :]``, norms sqrt(2) vs
+    sqrt(5)). The nominal ``P_bar @ A`` is a constant matmul, folded before the
+    solver sees it (#1845 mis-evaluates ``sum(B * (C1 @ C2))``).
+    """
+    rho = 0.7
+    m = dm.Model()
+    x = m.continuous("x", lb=-50, ub=50)
+    P = m.parameter("P", value=PB2)
+    m.subject_to(x + build(P) <= 10)
+    m.maximize(x)
+    RobustCounterpart(m, EllipsoidalUncertaintySet(P, rho=rho, Sigma=SIG4)).formulate()
+    r = m.solve()
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(_matrix_row_truth(g, rho), abs=1e-6)
+
+
+def test_matrix_matrix_product_over_variables_is_refused():
+    """``sum(X * (P @ A))`` with 2-D X: coefficient ``X @ Aᵀ`` is a 2-D matmul of
+    variables, which the solver mis-evaluates (#1845) -- refuse, do not solve."""
+    m = dm.Model()
+    X = m.continuous("X", shape=(2, 2), lb=0, ub=1)
+    P = m.parameter("P", value=PB2)
+    m.subject_to(dm.sum(X * (P @ A_ASYM)) <= 1)
+    m.maximize(dm.sum(X))
+    with pytest.raises(NotImplementedError, match="#1845"):
+        RobustCounterpart(m, EllipsoidalUncertaintySet(P, rho=0.7, Sigma=SIG4)).formulate()

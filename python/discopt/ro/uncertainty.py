@@ -134,7 +134,12 @@ class EllipsoidalUncertaintySet(UncertaintySet):
     with uncertain coefficient vector :math:`a = \\bar{a} + \\xi` becomes:
 
     .. math::
-        \\bar{a}^\\top x + \\rho \\|\\Sigma^{1/2} x\\|_2 \\le b
+        \\bar{a}^\\top x + \\rho \\|L^\\top x\\|_2
+        = \\bar{a}^\\top x + \\rho \\sqrt{x^\\top \\Sigma x} \\le b
+
+    where :math:`L` is the Cholesky factor :math:`\\Sigma = L L^\\top`
+    (:attr:`Sigma_sqrt`). The norm is of :math:`L^\\top x`, not :math:`L x`; the
+    two agree only for a diagonal :math:`\\Sigma`.
 
     This is a second-order cone constraint and is handled by
     :class:`~discopt.ro.formulations.ellipsoidal.EllipsoidalRobustFormulation`.
@@ -172,7 +177,10 @@ class EllipsoidalUncertaintySet(UncertaintySet):
 
     @property
     def Sigma_sqrt(self) -> np.ndarray:
-        """Square root of the shape matrix Σ^{1/2}."""
+        """The factor L of Σ = L Lᵀ (Cholesky; eigen-factor for a singular Σ).
+
+        The worst-case penalty of a row with p-coefficient a is ρ‖Lᵀa‖ = ρ·sqrt(aᵀΣa).
+        """
         return self._Sigma_sqrt
 
 
