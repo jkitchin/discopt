@@ -4233,6 +4233,35 @@ def _reject_unnormalized_rhs(constraint: "Constraint", *, where: str, index: int
     )
 
 
+def _reject_unnormalized_rhs_in(item: Any, *, where: str) -> None:
+    """Apply :func:`_reject_unnormalized_rhs` to every row nested in ``item`` (#1858).
+
+    The rows of a disjunct or an indicator constraint are not top-level
+    ``Constraint`` entries, so the per-row refusal in ``subject_to`` and
+    ``validate`` never saw them -- and the GDP lowerings (big-M, mbigm,
+    binary multiplication, the indicator lowering, hull for ``if_then``) read only
+    ``body``, so ``Constraint(x, "<=", 2.0)`` in a disjunct was lowered as
+    ``x <= 0`` and certified. The rows get the same refusal as a top-level row,
+    for the same reason (see :func:`_reject_unnormalized_rhs`), rather than being
+    normalized here: a normalized row would be a different object, and disjunct
+    rows are keyed by identity (``either_or(big_m={row: M})``, a row shared
+    between disjuncts or with the model).
+
+    ``item`` is a ``Constraint``, an ``_IndicatorConstraint``, a
+    ``_DisjunctiveConstraint`` (walked through its disjuncts, nested ones
+    included), or a list of disjuncts as passed to ``either_or``.
+    """
+    if isinstance(item, Constraint):
+        _reject_unnormalized_rhs(item, where=where)
+    elif isinstance(item, _IndicatorConstraint):
+        _reject_unnormalized_rhs_in(item.constraint, where=where)
+    elif isinstance(item, _DisjunctiveConstraint):
+        _reject_unnormalized_rhs_in(item.disjuncts, where=where)
+    elif isinstance(item, (list, tuple)):
+        for sub in item:
+            _reject_unnormalized_rhs_in(sub, where=where)
+
+
 @dataclass
 class ConstraintList:
     """A collection of constraints created from vectorized expressions."""
@@ -8333,6 +8362,8 @@ class Model:
                     "d = m.make_disjunct(name); d.add_disjunction(...), then add d with "
                     "m.add_disjunction([d, ...])"
                 )
+        # #1858: refuse a raw non-zero rhs before anything is recorded.
+        _reject_unnormalized_rhs_in(list(then_constraints), where=f"if_then {name or '<anon>'!r}")
         for k, c in enumerate(then_constraints):
             c.name = f"{name}_then_{k}" if name else None
             # Store as indicator constraint; Rust presolve will handle
@@ -8416,6 +8447,7 @@ class Model:
         >>> m.logical(d.indicators[0].implies(other_disjunct_indicator))
         """
         _refuse_empty_disjunction(disjuncts, "either_or", name)
+        _reject_unnormalized_rhs_in(disjuncts, where=f"either_or {name or '<anon>'!r}")  # #1858
         dc = _DisjunctiveConstraint(
             disjuncts=disjuncts,
             name=name,
@@ -8689,10 +8721,16 @@ class Model:
                 "if_else() condition must be an inequality, not an equality; "
                 "an equality condition holds on a zero-measure set."
             )
+        # #1858: the complement below is built from ``body`` alone.
+        _reject_unnormalized_rhs(condition, where="if_else condition")
         then_expr = _wrap(then_value)
         else_expr = _wrap(else_value)
-        # condition is normalized to ``body <= 0``; its complement is ``-body <= 0``.
-        complement = Constraint(-condition.body, sense="<=", rhs=0.0)
+        # The comparison operators normalize the condition to ``body <= 0``, whose
+        # complement is ``-body <= 0``. A raw ``Constraint(body, ">=", 0.0)`` keeps
+        # its sense, and its complement is ``-body >= 0``: negating the body under
+        # the *same* sense covers both (#1858; a hardcoded ``"<="`` made the
+        # complement of a raw ``>=`` row identical to the row itself).
+        complement = Constraint(-condition.body, sense=condition.sense, rhs=0.0)
         lb, ub = self._branch_bounds(then_expr, else_expr, condition, complement)
         self._aux_counter += 1
         base = name or "ifelse"
@@ -8947,6 +8985,7 @@ class Model:
             the solver certify an optimum for the *relaxed* problem.
         """
         _refuse_empty_disjunction(disjuncts, "disjunction", name)
+        _reject_unnormalized_rhs_in(disjuncts, where=f"disjunction {name or '<anon>'!r}")  # #1858
         dc = _DisjunctiveConstraint(
             disjuncts=disjuncts,
             name=name,
@@ -12266,6 +12305,11 @@ class Model:
             # ``c.rhs`` verbatim, and ``solve`` always comes through here.
             if for_solve and isinstance(c, Constraint):
                 _reject_unnormalized_rhs(c, where="Model.validate", index=ci)
+            elif for_solve and isinstance(c, (_IndicatorConstraint, _DisjunctiveConstraint)):
+                # #1858: the rows inside a disjunct or indicator constraint, which
+                # can arrive here without passing a construction-time check (a
+                # direct append, a disjunct list mutated after ``either_or``).
+                _reject_unnormalized_rhs_in(c, where=f"Model.validate (_constraints[{ci}])")
             cname = getattr(c, "name", None)
             if cname is None:
                 continue
@@ -13275,7 +13319,10 @@ class Disjunct:
         blocks with :meth:`add_disjunction` instead.
         """
         self._require_open("add a constraint to")
-        for item in constraint if isinstance(constraint, list) else [constraint]:
+        items = constraint if isinstance(constraint, list) else [constraint]
+        # #1858: checked for the whole list first, so a refusal adds nothing.
+        _reject_unnormalized_rhs_in(items, where=f"Disjunct {self.name!r}.subject_to")
+        for item in items:
             if isinstance(item, _DisjunctiveConstraint):
                 if item._model is not None or item.parent_indicator is not None:
                     raise ValueError(
