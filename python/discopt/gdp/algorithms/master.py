@@ -277,11 +277,17 @@ def _solve_master_milp(
 
 @dataclass
 class MasterResult:
-    """One master solve. ``bound`` is a valid lower bound on the GDP (minimization
-    convention, objective constant included) or ``None``: a master whose
-    objective is neither linear nor certified convex bounds nothing.
-    ``proven_infeasible`` is set only on the backend's rigorous INFEASIBLE verdict;
-    a limit or an error leaves ``x`` ``None`` and proves nothing."""
+    """One master solve. ``bound`` is a lower bound (minimization convention,
+    objective constant included) or ``None``: a master whose objective is neither
+    linear nor certified convex bounds nothing. ``proven_infeasible`` is set only
+    on the backend's rigorous INFEASIBLE verdict; a limit or an error leaves ``x``
+    ``None`` and proves nothing.
+
+    Both speak only for the configurations the master still admits. Once a
+    caller has excluded a configuration that was *dominated* (solved, not proved
+    infeasible), the valid lower bound on the GDP is ``min(incumbent, bound)``,
+    and ``proven_infeasible`` means "no better configuration", not "the GDP is
+    infeasible", unless every excluded configuration was itself infeasible."""
 
     x: Optional[np.ndarray]
     config: Optional[tuple[int, ...]]
@@ -311,6 +317,11 @@ class MasterMILP:
         objective_convex: bool = False,
         backend: str = DEFAULT_MASTER_BACKEND,
     ) -> None:
+        if objective is not None and objective_convex:
+            raise ValueError(
+                "MasterMILP: objective_convex selects the epigraph form for a nonlinear "
+                "objective; a linear objective (c, offset) needs none"
+            )
         self.n_vars = int(n_vars)
         self.lb = np.asarray(lb, dtype=np.float64)
         self.ub = np.asarray(ub, dtype=np.float64)
@@ -372,6 +383,16 @@ class MasterMILP:
         config = tuple(int(v) for v in config)
         if len(config) != len(self.int_indices):
             raise ValueError("MasterMILP.exclude: config does not match the discrete columns")
+        if not self.all_binary:
+            # The exact exclusion's big-M coefficients are u - v + 1 and v + 1 - l
+            # (#756): with an infinite or default (1e20) bound they mean nothing.
+            for idx in self.int_indices:
+                lo, hi = float(self.lb[idx]), float(self.ub[idx])
+                if not (math.isfinite(lo) and math.isfinite(hi)) or max(abs(lo), abs(hi)) >= 1e19:
+                    raise ValueError(
+                        f"MasterMILP.exclude: discrete column {idx} has bounds [{lo:g}, {hi:g}]; "
+                        "the exact no-good needs finite bounds on every general integer"
+                    )
         if self.all_binary:
             x = np.zeros(self.n_vars)
             for idx, v in zip(self.int_indices, config):
@@ -398,6 +419,8 @@ class MasterMILP:
         from discopt.solvers._gap import master_gap_tolerance
 
         self.n_solves += 1
+        if incumbent is not None and not math.isfinite(incumbent):
+            incumbent = None  # no incumbent yet: the master keeps its own gap
         lin = self.objective is not None
         obj = None if self.objective is None else (self.objective[0], self.objective[1])
         r = _solve_master_milp(

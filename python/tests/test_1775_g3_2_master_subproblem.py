@@ -98,6 +98,35 @@ def test_master_refuses_malformed_input(call, match):
         call(_binary_master())
 
 
+def test_master_refuses_an_exact_no_good_on_an_unbounded_integer():
+    """Review of #1864: the #756 augmentation's coefficients are u - v + 1, v + 1 - l."""
+    for ub in (np.inf, 1e20):
+        m = MasterMILP(1, [0], [ub], [1], objective=(np.array([1.0]), 0.0))
+        with pytest.raises(ValueError, match="needs finite bounds"):
+            m.exclude((1,))
+        assert m.no_good_configs == []
+
+
+def test_master_refuses_a_linear_objective_with_the_epigraph_flag():
+    with pytest.raises(ValueError, match="needs none"):
+        MasterMILP(1, [0], [1], [1], objective=(np.array([1.0]), 0.0), objective_convex=True)
+
+
+def test_master_ignores_a_non_finite_incumbent(monkeypatch):
+    """No incumbent yet (inf) must not reach the master's gap rule (LOA: UB < 1e20)."""
+    import discopt.solvers._gap as gap
+
+    seen = []
+
+    orig = gap.master_gap_tolerance
+    monkeypatch.setattr(
+        gap, "master_gap_tolerance", lambda tol, inc: seen.append(inc) or orig(tol, inc)
+    )
+    _binary_master().solve(time_limit=10, incumbent=float("inf"))
+    _binary_master().solve(time_limit=10, incumbent=15.0)
+    assert seen == [None, 5.0]
+
+
 def test_master_backends_agree():
     pytest.importorskip("highspy")
     for backend in ("simplex", "highs"):
@@ -227,6 +256,15 @@ def test_unknown_mode_is_refused():
     m = _gdp()
     with pytest.raises(ValueError, match="mode must be one of"):
         solve_subproblem(m, [_disjuncts(m)[0]], Deadline(1.0), mode="globl")
+
+
+def test_unknown_nlp_solver_is_refused_even_past_the_deadline():
+    t = [0.0]
+    d = Deadline(1.0, clock=lambda: t[0])
+    t[0] = 2.0
+    m = _gdp()
+    with pytest.raises(ValueError, match="nlp_solver must be"):
+        solve_subproblem(m, [_disjuncts(m)[0]], d, nlp_solver="ipotp")
 
 
 # ── the pieces together ──────────────────────────────────────────────────────

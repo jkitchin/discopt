@@ -85,10 +85,8 @@ def _local(sub: Model, limit: float, nlp_solver: str) -> SubproblemResult:
 
     if nlp_solver == "ipopt":
         from discopt.solvers.nlp_ipopt import solve_nlp_from_model
-    elif nlp_solver == "pounce":
-        from discopt.solvers.nlp_pounce import solve_nlp_from_model
     else:
-        raise ValueError(f"nlp_solver must be 'pounce' or 'ipopt', got {nlp_solver!r}")
+        from discopt.solvers.nlp_pounce import solve_nlp_from_model
     # The point is the product (#945): request the incumbent options.
     opts = pounce_option_defaults()
     opts.update(pounce_incumbent_options())
@@ -138,6 +136,8 @@ def solve_subproblem(
     """
     if mode not in SUBPROBLEM_MODES:
         raise ValueError(f"mode must be one of {SUBPROBLEM_MODES}, got {mode!r}")
+    if nlp_solver not in ("pounce", "ipopt"):
+        raise ValueError(f"nlp_solver must be 'pounce' or 'ipopt', got {nlp_solver!r}")
     sub = reduced_subproblem(model, selected)
     limit = deadline.sub_limit(time_cap)
     if not limit > 0.0:
