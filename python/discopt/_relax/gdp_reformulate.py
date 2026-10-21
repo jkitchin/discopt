@@ -1812,7 +1812,7 @@ def _fractional_power_slope(v: float, err: float, p: float) -> float:
         return 0.0
     left = v - err
     if not (np.isfinite(v) and left > 0.0):
-        return np.inf
+        return float(np.inf)
     with np.errstate(over="ignore"):
         s = abs(p) * max(np.float64(left) ** (p - 1.0), np.float64(v + err) ** (p - 1.0))
     return float(s)
@@ -1892,7 +1892,7 @@ def _pick_err(target: float, corners) -> float:
     error than the corners it was chosen from.
     """
     matched = [e for v, e in corners if v == target]
-    return max(matched) if matched else max((e for _, e in corners), default=np.inf)
+    return float(max(matched) if matched else max((e for _, e in corners), default=np.inf))
 
 
 def _bound_error(

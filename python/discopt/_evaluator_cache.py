@@ -164,7 +164,7 @@ def _value_bytes(value: Any) -> bytes:
     ``0.0`` maps ``-0.0`` to ``+0.0`` under round-to-nearest and leaves every
     other value — NaN and the infinities included — untouched.
     """
-    return np.asarray(np.asarray(value, dtype=np.float64) + 0.0).tobytes()
+    return bytes(np.asarray(np.asarray(value, dtype=np.float64) + 0.0).tobytes())
 
 
 # Number of distinct-fingerprint evaluators kept per model. A single slot was
