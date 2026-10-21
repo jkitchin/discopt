@@ -11712,6 +11712,11 @@ def solve_model(
           than big-M/hull on every corpus benchmarked in #1182 and never chosen
           by ``"auto"``; it exists for disjunct rows big-M and hull both refuse
           (unbounded interval enclosure *and* non-finite at the origin).
+        - ``"binary_multiplication"`` — each disjunct row ``body (sense) 0``
+          becomes ``body * y (sense) 0`` on its selector (#1775 G2.5; Pyomo's
+          ``gdp.binary_multiplication``). Exact and needs no big-M, so no bound
+          on the body; the products make the model nonconvex, which the spatial
+          B&B handles. Never chosen by ``"auto"``; the default solver only.
         - ``"loa"`` — *native* logic-based Outer Approximation on the
           disjunctive form (dispatches to :func:`solve_gdpopt_loa`), not a
           reformulation.
@@ -12400,7 +12405,11 @@ def solve_model(
         _lpm_class = classify_problem(
             _lpm_get_transformation("gdp").apply(
                 model,
-                method=gdp_method if gdp_method in ("big-m", "hull", "mbigm", "auto") else "big-m",
+                method=(
+                    gdp_method
+                    if gdp_method in ("big-m", "hull", "mbigm", "auto", "binary_multiplication")
+                    else "big-m"
+                ),
             )
         )
         if _lpm_class not in (_PC.LP, _PC.MILP):

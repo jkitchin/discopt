@@ -433,8 +433,11 @@ SHAPES: list[Shape] = [
         _unbounded,
         lambda v, t: v["x"] <= 2 + t or v["x"] >= 5 - t,
         # big-M / mbigm / hull need a finite enclosure and refuse (spec §0.2 item
-        # 5); simplex exists for exactly these rows (#1182) and must lower them.
-        refuses={m: _UNBOUNDED_REFUSAL for m in METHODS if m != "simplex"},
+        # 5); simplex exists for exactly these rows (#1182) and must lower them,
+        # and binary multiplication needs no bound on the body (#1775 G2.5).
+        refuses={
+            m: _UNBOUNDED_REFUSAL for m in METHODS if m not in ("simplex", "binary_multiplication")
+        },
         box={"x": (0.0, 20.0)},
     ),
     Shape(
@@ -527,8 +530,11 @@ SHAPES: list[Shape] = [
         points=[{"x": -0.8}, {"x": -1.0}, {"x": 4.0}, {"x": 9.0}, {"x": 1.0}],
         # #1779: big-M, mbigm and simplex keep the sqrt row where its disjunct is
         # inactive, which imposed x >= 0 on the first disjunct (a false optimal);
-        # they refuse it. Hull, and auto (routed to hull), lower it soundly.
-        refuses={m: _DOMAIN_REFUSAL for m in ("big-m", "mbigm", "simplex")},
+        # they refuse it, as does binary multiplication (#1775 G2.5), which keeps it
+        # too. Hull, and auto (routed to hull), lower it soundly.
+        refuses={
+            m: _DOMAIN_REFUSAL for m in ("big-m", "mbigm", "simplex", "binary_multiplication")
+        },
     ),
     Shape(
         "domain_restricted_wrapped",
@@ -537,7 +543,9 @@ SHAPES: list[Shape] = [
             v["x"] <= -0.5 + t or (v["x"] >= 0 and math.exp(-math.sqrt(v["x"])) <= 0.5 + t)
         ),
         points=[{"x": -0.8}, {"x": -1.0}, {"x": 1.0}, {"x": 9.0}],
-        refuses={m: _DOMAIN_REFUSAL for m in ("big-m", "mbigm", "simplex")},
+        refuses={
+            m: _DOMAIN_REFUSAL for m in ("big-m", "mbigm", "simplex", "binary_multiplication")
+        },
     ),
     Shape(
         "nested_blocks",
