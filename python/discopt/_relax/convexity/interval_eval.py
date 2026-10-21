@@ -955,8 +955,8 @@ def _eval_matmul(
     out_shape = _matmul_shape(A_lo.shape, B_lo.shape)
     if 1 <= A_lo.ndim <= 2 and 1 <= B_lo.ndim <= 2 and _matmul_enclosure_enabled():
         # #1842: every other 1-D / 2-D product -- ``(k,) @ (k, n)``,
-        # ``(m, k) @ (k, n)``, ``(k,) @ (k,)``. Without the flag these are
-        # unbounded (in the product's shape, below); with it, a constant
+        # ``(m, k) @ (k, n)``, ``(k,) @ (k,)``. With the flag opted out these are
+        # unbounded (in the product's shape, below); by default a constant
         # ``sum(M @ M)`` gets a finite enclosure, so the #1842 repro's dual bound
         # leaves the variable box and certifies. Each output entry is the same
         # interval dot product as the branch above, widened by the same
@@ -994,17 +994,20 @@ def _eval_matmul(
 
 def _matmul_enclosure_enabled() -> bool:
     """``DISCOPT_MATMUL_INTERVAL_ENCLOSURE`` -- finite enclosures for the general
-    1-D / 2-D matmul (#1842). Default OFF.
+    1-D / 2-D matmul (#1842). Default ON; ``=0`` is the opt-out to the unbounded
+    enclosure.
 
     Bound-changing: forms that were ``(-inf, inf)`` (``c @ x`` with an ndarray
-    ``c``, ``x @ x``, ``x @ Q @ x``, ``X @ Y``, ...) become finite, and a 48-model
-    panel moved 4 node counts with the objective unchanged (11->9, 63->51, 37->39,
-    97->89). Sound -- sampled and corner-checked against an exact ``math.fsum``
-    reference with 0 violations -- but not yet run on the CLAUDE.md §5 corpus
-    panel, so it stays off until that panel graduates it
-    (``docs/dev/flag-retirement-audit.md``).
+    ``c``, ``x @ x``, ``x @ Q @ x``, ``X @ Y``, ...) become finite. Sound --
+    sampled and corner-checked against an exact ``math.fsum`` reference with 0
+    violations. Graduated 2026-10-21 by the CLAUDE.md §5 panel
+    (``discopt_benchmarks/scripts/issue1842_matmul_enclosure_panel.py``): 60
+    ``@`` models, 430 checks, 0 violations against brute-force / closed-form
+    oracles; 4 certificates gained (the #1842 class), 0 lost; nodes on
+    both-certified 3586 -> 3560; and on the 66 in-repo ``.nl`` models the
+    enclosure never fires (``docs/dev/flag-retirement-audit.md``).
     """
-    return _env_flag("DISCOPT_MATMUL_INTERVAL_ENCLOSURE", default=False)
+    return _env_flag("DISCOPT_MATMUL_INTERVAL_ENCLOSURE", default=True)
 
 
 def _matmul_operand(enc: Interval, node: Expression) -> Interval:
