@@ -356,6 +356,43 @@ def reformulate_gdp(
             _pt_dropped.update(*drop)
     _mbc_budget = [_MBIGM_CONDITIONED_LP_BUDGET]  # shared by the whole lowering
 
+    # #1775 G2.6: user big-M values (``either_or(..., big_m=...)``), validated
+    # against the *declared* model. Used by the big-M lowering only.
+    _user_ctx: list = []
+
+    def _user_ms(
+        dc: _DisjunctiveConstraint, nested: bool
+    ) -> Optional[dict[tuple[int, int, int], float]]:
+        from discopt.gdp.user_big_m import _Context, _has_big_m, record_use, resolve_user_big_ms
+
+        if not _has_big_m(dc):
+            return None
+        record_use(dc)  # before validating: a refusal still means the M was read
+        if not _user_ctx:
+            _user_ctx.append(_Context(model))
+        verdicts = resolve_user_big_ms(dc, model, nested=nested, ctx=_user_ctx[0])
+        weak = [v.reason for v in verdicts.values() if not v.certified]
+        if weak:
+            warnings.warn(
+                f"{len(weak)} user big_m value(s) could not be certified and are used as "
+                f"given; Model.solve withholds the certificate of the result (#1775 "
+                f"G2.6). First: {weak[0]}",
+                UserWarning,
+                stacklevel=3,
+            )
+        return {key: v.M for key, v in verdicts.items()}
+
+    def _warn_user_m_ignored(dc: _DisjunctiveConstraint, chosen: str) -> None:
+        from discopt.gdp.user_big_m import _has_big_m
+
+        if _has_big_m(dc):
+            warnings.warn(
+                f"big_m on disjunction {dc.name or '<anon>'!r} is ignored: it is "
+                f"lowered by {chosen!r}, and only gdp_method='big-m' reads a user M.",
+                UserWarning,
+                stacklevel=3,
+            )
+
     _hull_emitted: set[str] = set()
     for ci, c in enumerate(model._constraints):
         if _hulled_inside(c):
@@ -408,13 +445,17 @@ def reformulate_gdp(
             # above): the simplex lowering has no selectors, and a hull of the child
             # alone would assume its parent selected. Counted in the warning above
             # for those two methods.
+            _bm = method == "binary_multiplication"
             new_vars, new_cons = _reformulate_disjunction_nested(
                 c,
                 new_model,
                 _add_aux_binary,
                 parent_selector=c.parent_indicator,
-                multiply=method == "binary_multiplication",
+                multiply=_bm,
+                user_ms=None if _bm else _user_ms(c, nested=True),
             )
+            if _bm:
+                _warn_user_m_ignored(c, method)
             new_model._constraints.extend(new_cons)
         elif isinstance(c, _DisjunctiveConstraint):
             # A per-disjunction ``method`` override (set e.g. by Model.if_else)
@@ -431,6 +472,8 @@ def reformulate_gdp(
             # read) is each lowering's default, so it generates its own exactly as
             # before.
             own_sels = list(c._indicator_vars) if c._indicator_vars is not None else None
+            if chosen != "big-m":
+                _warn_user_m_ignored(c, chosen)
             if chosen == "simplex":
                 if own_sels is not None:
                     raise ValueError(
@@ -478,6 +521,7 @@ def reformulate_gdp(
                         selectors=own_sels,
                         pretransform=_pt_on and chosen in ("big-m", "mbigm"),
                         multiply=chosen == "binary_multiplication",
+                        user_ms=_user_ms(c, nested=False) if chosen == "big-m" else None,
                     )
             new_model._constraints.extend(new_cons)
         elif isinstance(c, _SOSConstraint):
@@ -2144,9 +2188,15 @@ def _reformulate_disjunction(
     selectors: Optional[list[Variable]] = None,
     pretransform: bool = False,
     multiply: bool = False,
+    user_ms: Optional[dict[tuple[int, int, int], float]] = None,
 ) -> tuple[list[Variable], list[Constraint]]:
     """Reformulate a disjunction via big-M (or, with ``multiply``, by binary
     multiplication: step 2 becomes ``g_j(x) * y_k <= 0``, #1775 G2.5).
+
+    ``user_ms`` maps a row's position ``(id(disjunction), disjunct, row)`` to a
+    user M (#1775 G2.6, already validated by
+    :func:`discopt.gdp.user_big_m.resolve_user_big_ms`), used in place of the
+    computed M for that row and for the rows of nested disjunctions.
 
     For ``either_or([[g1<=0, g2<=0], [h1<=0, h2<=0]])``:
     1. Introduce binary selectors y_0, y_1 with y_0 + y_1 == 1
@@ -2222,7 +2272,12 @@ def _reformulate_disjunction(
             # Handle nested disjunctions
             if isinstance(item, _DisjunctiveConstraint):
                 inner_vars, inner_cons = _reformulate_disjunction_nested(
-                    item, model, add_aux_binary, parent_selector=y_k, multiply=multiply
+                    item,
+                    model,
+                    add_aux_binary,
+                    parent_selector=y_k,
+                    multiply=multiply,
+                    user_ms=user_ms,
                 )
                 new_vars.extend(inner_vars)
                 new_cons.extend(inner_cons)
@@ -2236,7 +2291,9 @@ def _reformulate_disjunction(
                     )
                 )
                 continue
-            if lp_data is not None:
+            if user_ms is not None and (id(dc), k, j) in user_ms:
+                M = user_ms[(id(dc), k, j)]
+            elif lp_data is not None:
                 M = _compute_big_m_lp(con, model, lp_data)
             else:
                 M = _compute_big_m(con, model)
@@ -2329,6 +2386,7 @@ def _reformulate_disjunction_nested(
     add_aux_binary,
     parent_selector,
     multiply: bool = False,
+    user_ms: Optional[dict[tuple[int, int, int], float]] = None,
 ) -> tuple[list[Variable], list[Constraint]]:
     """Reformulate a nested disjunction linked to a parent selector.
 
@@ -2378,7 +2436,12 @@ def _reformulate_disjunction_nested(
             if isinstance(item, _DisjunctiveConstraint):
                 # Recursive nesting
                 inner_vars, inner_cons = _reformulate_disjunction_nested(
-                    item, model, add_aux_binary, parent_selector=y_k, multiply=multiply
+                    item,
+                    model,
+                    add_aux_binary,
+                    parent_selector=y_k,
+                    multiply=multiply,
+                    user_ms=user_ms,
                 )
                 new_vars.extend(inner_vars)
                 new_cons.extend(inner_cons)
@@ -2392,7 +2455,10 @@ def _reformulate_disjunction_nested(
                     )
                 )
                 continue
-            M = _compute_big_m(con, model)
+            if user_ms is not None and (id(dc), k, j) in user_ms:
+                M = user_ms[(id(dc), k, j)]  # #1775 G2.6
+            else:
+                M = _compute_big_m(con, model)
             deactivation = _wrap(M) * (_wrap(1.0) - y_k)
 
             if con.sense == "<=":

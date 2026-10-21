@@ -55,6 +55,11 @@ def _refusal_table() -> str:
     ]
     rows += [
         (
+            "a user `big_m` on a disjunction (#1775 G2.6)",
+            "no schema key records it; an older reader would reload computed Ms",
+            "save without `big_m`, pass it again after loading",
+        ),
+        (
             "a `Model.disjunction()` / `Disjunct` never attached",
             "`validate` refuses the model anyway (#1430)",
             "attach it, or drop it",
