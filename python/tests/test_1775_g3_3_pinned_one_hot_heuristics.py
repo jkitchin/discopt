@@ -50,10 +50,12 @@ def test_prune_decided_groups():
     ub = np.array([1, 1, 0, 1, 1, 0, 1, 1.0])
     groups = [[0, 1, 2], [3, 5], [6, 7]]
     open_groups, decided = ph._prune_decided_groups(groups, lb, ub)
-    # [0, 1, 2]: 2 is fixed at 0 and leaves; [3, 5]: one live member, decided;
-    # [6, 7]: 6 is fixed at 1, decided.
-    assert open_groups == [[0, 1]]
-    assert decided == {2, 3, 5, 6, 7}
+    # [0, 1, 2]: 2 is fixed at 0 and leaves; [3, 5]: 5 leaves, 3 is still free and
+    # stays as a one-member group (seeded to 1); [6, 7]: 6 is fixed at 1, decided.
+    assert open_groups == [[0, 1], [3]]
+    assert decided == {2, 5, 6, 7}
+    # no live member: decided
+    assert ph._prune_decided_groups([[0, 1]], np.zeros(2), np.zeros(2)) == ([], {0, 1})
 
 
 def test_pinned_bounds_reads_single_variable_rows_exactly():
@@ -116,3 +118,23 @@ def test_local_search_respects_the_callers_box(monkeypatch):
     if out_box is not None:
         xb, _ = out_box
         assert [round(float(v)) for v in xb[1:]] == [1, 0, 0, 0]
+
+
+def test_a_lone_live_member_is_still_seeded_to_one():
+    """Review of #1865: b1, b2 pinned to 0 leave b0 as the group's only live
+    member. It is not fixed, so the plan must still set it to 1 -- a relaxation
+    point reading 0.3 there (e.g. a truncated root) rounds it to 0, which makes
+    the one-hot row unsatisfiable."""
+    m = dm.Model("lone")
+    x = m.continuous("x", lb=0, ub=10)
+    b = [m.binary(f"b{i}") for i in range(3)]
+    m.subject_to(b[0] + b[1] + b[2] == 1)
+    m.subject_to(b[1] == 0)
+    b[2].ub = 0
+    m.subject_to(x >= 2 * b[0])
+    m.minimize(x)
+    x_relax = np.array([1.0, 0.3, 0.0, 0.0])
+    out = ph.one_hot_config_subnlp(m, x_relax)
+    assert out, "no plan found a point"
+    assert all(round(float(xp[1])) == 1 for xp, _ in out)
+    assert min(obj for _, obj in out) == pytest.approx(2.0, abs=1e-6)

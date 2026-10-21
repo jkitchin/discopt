@@ -415,18 +415,21 @@ class MasterMILP:
         *,
         objective_override: Optional[Any] = None,
         exclude_also: Any = (),
+        extra_cuts: Any = (),
     ) -> MasterResult:
         """Solve within ``time_limit`` (the caller's deadline remainder).
 
         ``incumbent`` (minimization convention, constant included) loosens the
         master's own gap to the outer one, as LOA does (``master_gap_tolerance``).
 
-        ``objective_override`` (a coefficient vector over ``x``) and
-        ``exclude_also`` (configurations) serve the initialization strategies
-        (G3.3): the same rows, cuts and no-goods with another linear objective
-        and extra exclusions for this call only. The epigraph cuts are left out
-        (a relaxation of a feasibility question), nothing is recorded on the
-        master, and the result carries no ``bound``.
+        ``objective_override`` (a coefficient vector over ``x``), with
+        ``exclude_also`` (configurations) and ``extra_cuts`` (``(row, rhs)``
+        pairs, ``row @ x <= rhs``), serves the initialization strategies (G3.3):
+        the same rows, cuts and no-goods with another linear objective and extra
+        exclusions for this call only. The epigraph cuts are left out (a
+        relaxation of a feasibility question), no row, cut or no-good is
+        recorded on the master (only ``n_solves`` counts the call), and the
+        result carries no ``bound``.
         """
         from discopt.solvers import SolveStatus
         from discopt.solvers._gap import master_gap_tolerance
@@ -445,6 +448,12 @@ class MasterMILP:
             keep = [i for i, row in enumerate(self.cuts) if row.shape == (self.n_vars,)]
             cuts = [self.cuts[i] for i in keep]
             cut_rhs = [self.cut_rhs[i] for i in keep]
+            for row, rhs in extra_cuts:
+                row = np.asarray(row, dtype=np.float64)
+                if row.shape != (self.n_vars,) or not np.all(np.isfinite(row)):
+                    raise ValueError(f"extra_cuts: each row must be {self.n_vars} finite numbers")
+                cuts.append(row)
+                cut_rhs.append(float(rhs))
             no_goods = list(self.no_good_configs)
             for config in exclude_also:
                 config = tuple(int(v) for v in config)
@@ -459,8 +468,10 @@ class MasterMILP:
                     self._check_exact_no_good_bounds()
                     no_goods.append(config)
         else:
-            if exclude_also:
-                raise ValueError("exclude_also is only for an objective_override solve")
+            if exclude_also or extra_cuts:
+                raise ValueError(
+                    "exclude_also and extra_cuts are only for an objective_override solve"
+                )
             obj = None if self.objective is None else (self.objective[0], self.objective[1])
             lin, convex = self.objective is not None, self.objective_convex
         r = _solve_master_milp(
