@@ -24,7 +24,7 @@ Usage::
         --time-limit 120 --workers 1 --names-file <dir>/candidates.txt
 
 The 2026-10-21 run that produced ``config/suites/scip_wins.txt`` is written up
-in ``reports/scip_wins_2026-10-21.md``.
+in ``docs/dev/scip-wins-2026-10-21.md``.
 """
 
 from __future__ import annotations
