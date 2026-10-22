@@ -692,7 +692,9 @@ def _norm_scalar_spelling(name: str, arg: Expression) -> Optional[Expression]:
         if mat is None:
             return None
         rows, cols = shape
-        cell = [[UnaryOp("abs", mat[i * cols + j]) for j in range(cols)] for i in range(rows)]
+        cell: list[list[Expression]] = [
+            [UnaryOp("abs", mat[i * cols + j]) for j in range(cols)] for i in range(rows)
+        ]
         if p == 1.0:
             lines = [[cell[i][j] for i in range(rows)] for j in range(cols)]
         else:
