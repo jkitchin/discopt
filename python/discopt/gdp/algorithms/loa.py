@@ -57,7 +57,6 @@ class LOA(GDPAlgorithm):
         subproblem: str = "global",
         **kw: Any,
     ) -> None:
-        from discopt._relax.convexity import classify_oa_cut_convexity
         from discopt._tape_nlp_evaluator import make_evaluator
         from discopt.solvers.oa import _oa_rows
 
@@ -81,20 +80,7 @@ class LOA(GDPAlgorithm):
         self.evaluator = make_evaluator(low)
         self.n = int(self.evaluator.n_variables)
         self.n_work = sum(int(v.size) for v in self.space.work._variables)
-        # The certification pass gets half of what is left (> 100 s on kaibel
-        # otherwise, leaving the master nothing); a row it does not reach gets no
-        # cut, which keeps the master a relaxation. A #912 role-2 slice, so it is
-        # routed through the #1116 switch: under ``deterministic`` it becomes the
-        # solve's own role-1 deadline, so speed matters only at the wall.
-        from discopt.solver import _role2_deadline
-
-        left = self.deadline.remaining()
-        convexity = classify_oa_cut_convexity(
-            low,
-            deadline=_role2_deadline(
-                None if math.isinf(left) else time.perf_counter() + 0.5 * left
-            ),
-        )
+        convexity = self._oa_convexity(low)
         self.convexity_truncated = convexity.truncated
         self.oa_rows = _oa_rows(self.evaluator, low, convexity.constraint_mask)
         self.objective_certified_convex = bool(convexity.objective_is_convex)
@@ -103,7 +89,7 @@ class LOA(GDPAlgorithm):
         if not self.obj_is_linear and convexity.objective_is_convex:
             self.master.objective_convex = True
         if not self.master.bound_valid:
-            self.invalidate_bound("the objective is neither linear nor certified convex")
+            self._master_bounds_nothing()
         self.lb_box, self.ub_box = self.evaluator.variable_bounds
         #: Best certified bound (min convention) of a configuration excluded as
         #: dominated: the master no longer bounds it.
@@ -111,6 +97,28 @@ class LOA(GDPAlgorithm):
         self.init_report: Any = None
 
     # ── pieces ────────────────────────────────────────────────────────────
+
+    def _oa_convexity(self, low: Model) -> Any:
+        """Which rows (and whether the objective) may carry OA cuts."""
+        from discopt._relax.convexity import classify_oa_cut_convexity
+        from discopt.solver import _role2_deadline
+
+        # The certification pass gets half of what is left (> 100 s on kaibel
+        # otherwise, leaving the master nothing); a row it does not reach gets no
+        # cut, which keeps the master a relaxation. A #912 role-2 slice, so it is
+        # routed through the #1116 switch: under ``deterministic`` it becomes the
+        # solve's own role-1 deadline, so speed matters only at the wall.
+        left = self.deadline.remaining()
+        return classify_oa_cut_convexity(
+            low,
+            deadline=_role2_deadline(
+                None if math.isinf(left) else time.perf_counter() + 0.5 * left
+            ),
+        )
+
+    def _master_bounds_nothing(self) -> None:
+        """The master's optimum bounds nothing (no linear or certified-convex objective)."""
+        self.invalidate_bound("the objective is neither linear nor certified convex")
 
     def _make_master(self, milp_solver: str) -> MasterMILP:
         """The master: the lowered model's linear rows (GLOA overrides this)."""
@@ -166,6 +174,15 @@ class LOA(GDPAlgorithm):
             return
         self.offer_bound(min(bound, self.excluded_floor))
 
+    def _master_empty(self, r: Any) -> None:
+        """The master returned no point (``r.proven_infeasible`` if it proved so)."""
+        # Only a rigorous INFEASIBLE verdict on a relaxation is a proof.
+        if r.proven_infeasible and not math.isfinite(self.excluded_floor):
+            self.prove_infeasible()
+        elif r.proven_infeasible:
+            # Every remaining configuration is gone: the excluded ones bound it.
+            self.offer_bound(self.excluded_floor)
+
     # ── the initialization strategies ─────────────────────────────────────
 
     def _solve_selection(self, selection: list) -> Any:
@@ -193,7 +210,8 @@ class LOA(GDPAlgorithm):
             self._exclude_certified(config, bound)
         return res
 
-    def initialize(self) -> None:
+    def _seed_cuts(self) -> None:
+        """OA cuts at the continuous NLP relaxation, before the first master."""
         from discopt.solvers.gdpopt_loa import _solve_nlp_relaxation
 
         x_relax = _solve_nlp_relaxation(
@@ -205,6 +223,9 @@ class LOA(GDPAlgorithm):
         )
         if x_relax is not None:
             self._cuts_at(np.asarray(x_relax, dtype=np.float64))
+
+    def initialize(self) -> None:
+        self._seed_cuts()
         if self.init_algorithm != "no_init":
             self.init_report = initialize(
                 self.init_algorithm,
@@ -225,12 +246,7 @@ class LOA(GDPAlgorithm):
         )
         self.n_master += 1
         if r.x is None:
-            # Only a rigorous INFEASIBLE verdict on a relaxation is a proof.
-            if r.proven_infeasible and not math.isfinite(self.excluded_floor):
-                self.prove_infeasible()
-            elif r.proven_infeasible:
-                # Every remaining configuration is gone: the excluded ones bound it.
-                self.offer_bound(self.excluded_floor)
+            self._master_empty(r)
             return False
         self._offer_master_bound(r.bound)
         assert r.config is not None
@@ -240,7 +256,9 @@ class LOA(GDPAlgorithm):
             return self._global_step(r.x, r.config)
         return self._nlp_step(r.x, r.config)
 
-    def _nlp_step(self, x_master: np.ndarray, config: tuple) -> bool:
+    def _fixed_integer_nlp(self, x_master: np.ndarray) -> tuple[Optional[np.ndarray], bool]:
+        """The lowered model's NLP with every integer column fixed at the master's
+        value: ``(repaired point or None, proved infeasible by interval arithmetic)``."""
         from discopt.solvers.gdpopt_loa import (
             _fixed_subproblem_rigorously_infeasible,
             _repair_incumbent,
@@ -256,12 +274,17 @@ class LOA(GDPAlgorithm):
         )
         self.n_subproblems += 1
         if x is not None:
-            self.mark_solved(config)
             x = _repair_incumbent(self.space.lowered, self.evaluator, x)
-            self._offer(np.asarray(x, dtype=np.float64))
-            self._cuts_at(np.asarray(x, dtype=np.float64))
+            return np.asarray(x, dtype=np.float64), False
+        return None, _fixed_subproblem_rigorously_infeasible(self.evaluator, sub_lb, sub_ub)
+
+    def _nlp_step(self, x_master: np.ndarray, config: tuple) -> bool:
+        x, rigorous = self._fixed_integer_nlp(x_master)
+        if x is not None:
+            self.mark_solved(config)
+            self._offer(x)
+            self._cuts_at(x)
             return True
-        rigorous = _fixed_subproblem_rigorously_infeasible(self.evaluator, sub_lb, sub_ub)
         self._cuts_at(x_master)
         if rigorous:
             self.master.exclude(config)
