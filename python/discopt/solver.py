@@ -11437,7 +11437,7 @@ def _refusing_on_callback_failure(fn: _F) -> _F:
 NATIVE_GDP_METHODS: frozenset[str] = frozenset({"loa", "gloa", "lbb", "ric", "enumerate", "ldsda"})
 
 #: The native methods that run today.
-IMPLEMENTED_NATIVE_GDP_METHODS: frozenset[str] = frozenset({"loa", "gloa"})
+IMPLEMENTED_NATIVE_GDP_METHODS: frozenset[str] = frozenset({"loa", "gloa", "ric", "enumerate"})
 
 #: ``gdp_options`` keys (#1775 G3.1, spec §4.3): Pyomo GDPopt's names where the
 #: meaning is the same, so a Pyomo user's config translates. A key outside this
@@ -11458,6 +11458,9 @@ GDP_OPTION_KEYS: frozenset[str] = frozenset(
         # configuration certified by discopt). Pyomo selects this through the
         # choice of NLP solver; there is no key of its own to reuse.
         "subproblem",
+        # discopt's own (#1775 G4.2): enumerate's ceiling on the configuration
+        # count, above which it refuses rather than truncate.
+        "max_configurations",
     }
 )
 
@@ -11466,6 +11469,10 @@ _GDP_OPTIONS_READ: dict[str, frozenset[str]] = {
     "loa": frozenset({"iterlim", "init_algorithm", "set_cover_iterlim", "subproblem"}),
     # GLOA's subproblems are always global, so it reads no "subproblem" key.
     "gloa": frozenset({"iterlim", "init_algorithm", "set_cover_iterlim"}),
+    # RIC's subproblems are always global, as GLOA's (#1775 G4.2).
+    "ric": frozenset({"iterlim", "init_algorithm", "set_cover_iterlim"}),
+    # Enumerate solves every configuration: no iteration limit, no master.
+    "enumerate": frozenset({"max_configurations"}),
 }
 
 
@@ -11541,7 +11548,7 @@ def _validate_gdp_options(gdp_method: str, gdp_options: object) -> dict[str, Any
             f"gdp_method={gdp_method!r} does not read gdp_options {unread} yet; it "
             f"reads {sorted(read)}."
         )
-    for key, low in (("iterlim", 1), ("set_cover_iterlim", 0)):
+    for key, low in (("iterlim", 1), ("set_cover_iterlim", 0), ("max_configurations", 1)):
         if key in gdp_options:
             it = gdp_options[key]
             if isinstance(it, bool) or not isinstance(it, (int, np.integer)) or it < low:
@@ -11928,6 +11935,12 @@ def solve_model(
           master is a MILP relaxation of every row (nonconvex ones included)
           and whose subproblems are certified by discopt, so its bound needs
           no convexity certificate.
+        - ``"ric"`` — *native* relaxation with integer cuts (#1775 G4.2): the
+          lowered model's linear rows plus no-goods as the master, global
+          subproblems, a no-good only on a certificate.
+        - ``"enumerate"`` — *native* enumeration of every configuration, each
+          solved globally (#1775 G4.2); refuses above
+          ``gdp_options["max_configurations"]`` (default 10⁴), never truncates.
         - ``"oa"`` — *deprecated*; historically "OA solver + big-M reform".
           Now emits a ``DeprecationWarning`` and reformulates as ``"big-m"``.
           Use ``solver="mip-nlp", mip_nlp_method="oa"`` for algebraic OA.
@@ -11937,8 +11950,8 @@ def solve_model(
         contradictory (one asks to solve the disjunctions natively, the other
         to reformulate and decompose) and raises ``ValueError``. Likewise
         ``"gloa"`` is on this native axis and is distinct from the algebraic
-        ``mip_nlp_method="goa"``. The other native names (``"lbb"``, ``"ric"``,
-        ``"enumerate"``, ``"ldsda"``) are reserved and not yet implemented, so --
+        ``mip_nlp_method="goa"``. The other native names (``"lbb"``, ``"ldsda"``)
+        are reserved and not yet implemented, so --
         like any other name not listed above -- they raise ``ValueError`` rather
         than silently solving as big-M. See
         ``docs/dev/solve-routing.md`` §4 for the locked contract (#323).
@@ -12722,7 +12735,7 @@ def solve_model(
             "bound has no hook that applies user cuts. Leave nlp_bb unset so the "
             "spatial branch and bound, which does, solves the model."
         )
-    if _feasibility_callbacks and gdp_method in ("oa", "loa", "gloa"):
+    if _feasibility_callbacks and gdp_method in ("oa", "loa", "gloa", "ric", "enumerate"):
         _refuse_unenforced_callbacks(
             f"gdp_method={gdp_method!r}",
             _feasibility_callbacks,
@@ -13829,7 +13842,7 @@ def solve_model(
         )
 
     # --- LOA decomposition: intercept before GDP reformulation ---
-    if gdp_method in ("loa", "gloa"):
+    if gdp_method in ("loa", "gloa", "ric", "enumerate"):
         from discopt.solvers.gdpopt_loa import solve_gdpopt_loa
 
         _warn_abs_gap_ignored(f"The GDPopt-{gdp_method.upper()} decomposition", abs_gap_tolerance)
@@ -13841,15 +13854,15 @@ def solve_model(
         # the iteration cap stays max_nodes, as before.
         loa_max_iter = int(_gdp_opts.get("iterlim", max_nodes))
         # #1775 G4.1: LOA's framework options.
-        for key in ("init_algorithm", "set_cover_iterlim", "subproblem"):
+        for key in ("init_algorithm", "set_cover_iterlim", "subproblem", "max_configurations"):
             if key in _gdp_opts:
                 loa_kwargs[key] = _gdp_opts[key]
 
-        if gdp_method == "gloa":
-            from discopt.gdp.algorithms.gloa import GLOA
+        if gdp_method != "loa":
+            from discopt.solvers.gdpopt_loa import native_gdp_class
 
-            _declare_route(GLOA.route)
-            loa_kwargs["algorithm"] = "gloa"
+            _declare_route(native_gdp_class(gdp_method).route)
+            loa_kwargs["algorithm"] = gdp_method
         else:
             _declare_route("gdpopt-loa: logic-based outer approximation (MILP master + NLP)")
         return solve_gdpopt_loa(

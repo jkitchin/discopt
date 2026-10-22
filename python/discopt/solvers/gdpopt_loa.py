@@ -7,7 +7,7 @@ Requires a matrix MILP backend for the master problem solver.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 
@@ -72,19 +72,25 @@ def solve_gdpopt_loa(
     algorithm : str
         ``"loa"`` (:class:`~discopt.gdp.algorithms.loa.LOA`) or ``"gloa"``
         (:class:`~discopt.gdp.algorithms.gloa.GLOA`, #1775 G4.3: a relaxation
-        master and global subproblems).
+        master and global subproblems), ``"ric"``
+        (:class:`~discopt.gdp.algorithms.ric.RIC`, #1775 G4.2: linear master and
+        global subproblems) or ``"enumerate"``
+        (:class:`~discopt.gdp.algorithms.enumerate.Enumerate`: every
+        configuration, global subproblems; takes ``max_configurations``).
 
     Returns
     -------
     SolveResult
     """
-    from discopt.gdp.algorithms.gloa import GLOA
-    from discopt.gdp.algorithms.loa import LOA
-
-    classes = {"loa": LOA, "gloa": GLOA}
-    if algorithm not in classes:
-        raise ValueError(f"algorithm must be one of {sorted(classes)}, got {algorithm!r}")
-    return classes[algorithm](
+    cls = native_gdp_class(algorithm)
+    if algorithm == "enumerate":
+        # Every configuration is solved (or the run refuses up front): no master,
+        # no NLP, and no iteration limit to truncate the enumeration.
+        result: SolveResult = cls(
+            model, time_limit=time_limit, gap_tolerance=gap_tolerance, **options
+        ).run()
+        return result
+    result = cls(
         model,
         time_limit=time_limit,
         gap_tolerance=gap_tolerance,
@@ -93,6 +99,21 @@ def solve_gdpopt_loa(
         milp_solver=milp_solver,
         **options,
     ).run()
+    return result
+
+
+def native_gdp_class(algorithm: str) -> Any:
+    """The :mod:`discopt.gdp.algorithms` class behind a native ``gdp_method``
+    (its constructor's options differ by method, hence ``Any``)."""
+    from discopt.gdp.algorithms.enumerate import Enumerate
+    from discopt.gdp.algorithms.gloa import GLOA
+    from discopt.gdp.algorithms.loa import LOA
+    from discopt.gdp.algorithms.ric import RIC
+
+    classes = {"loa": LOA, "gloa": GLOA, "ric": RIC, "enumerate": Enumerate}
+    if algorithm not in classes:
+        raise ValueError(f"algorithm must be one of {sorted(classes)}, got {algorithm!r}")
+    return classes[algorithm]
 
 
 def _repair_incumbent(reformulated: Model, evaluator, x: np.ndarray) -> np.ndarray:

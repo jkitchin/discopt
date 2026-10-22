@@ -18,6 +18,7 @@ every PR.
   broadcast check at ``BinaryOp`` construction (only when both shapes are known).
 """
 
+import gc
 import time
 
 import discopt.modeling as dm
@@ -403,8 +404,22 @@ def test_m7_name_check_is_not_quadratic():
             m.continuous(f"x{i}")
         return (time.perf_counter() - t0) / n * 1e6
 
-    small = per_var_us(1000)
-    large = per_var_us(4000)
+    def best_of(n, reps=3):
+        # Min of a few runs with GC off: one sample each tripped the 2.5x check on a
+        # busy 4-worker runner (53.6 vs 187.8 us/var, CI run 39765396648), and a
+        # collection pause lands disproportionately on the larger model. Under 4
+        # CPU burners, 40 trials: worst ratio 2.30 single-sample, 1.73 this way;
+        # a re-injected per-declaration name rebuild (the O(n^2) bug) still reads 4.13.
+        was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            return min(per_var_us(n) for _ in range(reps))
+        finally:
+            if was_enabled:
+                gc.enable()
+
+    small = best_of(1000)
+    large = best_of(4000)
     # O(1): large ≈ small. O(n²): large ≈ 4× small. Fail only on clear quadratic.
     assert large < small * 2.5, (
         f"name check looks super-linear: {small:.1f} us/var at n=1k vs {large:.1f} us/var at n=4k"

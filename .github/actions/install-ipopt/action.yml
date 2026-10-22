@@ -1,0 +1,116 @@
+name: Install Ipopt (cached)
+description: >-
+  Install Ipopt and the BLAS/LAPACK/gfortran it builds against from the Ubuntu
+  repos, serving the .deb files from the Actions cache when this runner image has
+  been seen before.
+
+# Why a cache: the apt mirror is the slowest step in CI on a bad day. Measured on
+# PR runs 39765396648 and 39767505111 (2026-10-22): this install took 5.5, 10, 13,
+# 18 and 22 min on runners where it normally takes ~20 s, longer than the tests the
+# job then runs. A cache hit installs the cached .debs with `dpkg -i` and contacts
+# no mirror at all (no `apt-get update` either).
+#
+# The cache key is the runner image (ImageOS + ImageVersion) and the package list:
+# the .debs are the dependency closure that image did not already have, so they
+# are only valid for it. A new image is a miss, which takes the apt path and
+# refills the cache. The miss path installs with the same `dpkg -i` a hit uses,
+# from the files it just downloaded, so every miss tests what later hits will run.
+# A hit whose `dpkg -i` fails falls back to apt, so a stale cache can cost time but
+# never the install. The cache is saved only after a verified install
+# (`pkg-config --exists ipopt`), so a failed or partial download is never cached.
+#
+# Failure semantics are unchanged from the inline step this replaces: if every
+# apt attempt fails the step still succeeds and the cyipopt tests skip (see
+# python/tests/conftest.py) rather than error. The step says which path it took.
+
+inputs:
+  packages:
+    description: Space-separated apt packages to install.
+    default: coinor-libipopt-dev liblapack-dev libblas-dev gfortran
+
+runs:
+  using: composite
+  steps:
+    - id: key
+      shell: bash
+      env:
+        PKGS: ${{ inputs.packages }}
+      run: |
+        echo "image=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+        echo "pkgs=$(printf '%s\n' $PKGS | sort | paste -sd- -)" >> "$GITHUB_OUTPUT"
+
+    - id: restore
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.cache/ipopt-debs
+        key: ipopt-debs-v1-${{ runner.os }}-${{ steps.key.outputs.image }}-${{ steps.key.outputs.pkgs }}
+
+    - id: install
+      shell: bash
+      env:
+        PKGS: ${{ inputs.packages }}
+      run: |
+        set -u
+        DEBS="$HOME/.cache/ipopt-debs"
+        mkdir -p "$DEBS"
+        shopt -s nullglob
+        path=""
+
+        install_debs() {
+          local debs=("$DEBS"/*.deb)
+          [ "${#debs[@]}" -gt 0 ] || return 1
+          sudo dpkg -i "${debs[@]}" && pkg-config --exists ipopt
+        }
+
+        cached=("$DEBS"/*.deb)
+        if [ "${#cached[@]}" -gt 0 ]; then
+          echo "cache hit: ${#cached[@]} .deb files for this image"
+          if install_debs; then
+            path="cache"
+          else
+            echo "::warning::cached .debs did not install cleanly; falling back to apt"
+          fi
+        fi
+
+        if [ -z "$path" ]; then
+          # The pre-baked packages.microsoft.com (azure-cli) apt source is unrelated
+          # and intermittently serves a bad Release file ("Clearsigned file isn't
+          # valid ... NOSPLIT"); drop it (we don't use azure-cli). Retry with
+          # backoff so a transient mirror blip can't fail the job.
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list \
+                     /etc/apt/sources.list.d/azure-cli.list || true
+          for i in 1 2 3; do
+            sudo rm -rf "$DEBS"
+            mkdir -p "$DEBS"
+            if sudo apt-get update \
+              && sudo apt-get install -y --no-install-recommends --download-only \
+                   -o Dir::Cache::archives="$DEBS" $PKGS; then
+              sudo rm -rf "$DEBS/partial" "$DEBS/lock"
+              sudo chown -R "$(id -u):$(id -g)" "$DEBS"
+              downloaded=("$DEBS"/*.deb)
+              if [ "${#downloaded[@]}" -eq 0 ] && pkg-config --exists ipopt; then
+                path="preinstalled"  # the image already has everything; nothing to cache
+                break
+              fi
+              if install_debs; then
+                path="apt"
+                break
+              fi
+            fi
+            echo "apt attempt $i failed; retrying in $((i * 15))s..." >&2
+            sleep $((i * 15))
+          done
+        fi
+
+        echo "path=${path:-none}" >> "$GITHUB_OUTPUT"
+        if pkg-config --exists ipopt; then
+          echo "Ipopt $(pkg-config --modversion ipopt) installed via ${path:-unknown}"
+        else
+          echo "::warning::Ipopt is NOT installed (every apt attempt failed); cyipopt tests will skip"
+        fi
+
+    - if: steps.install.outputs.path == 'apt' && steps.restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.cache/ipopt-debs
+        key: ${{ steps.restore.outputs.cache-primary-key }}

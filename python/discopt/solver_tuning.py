@@ -1080,6 +1080,30 @@ class SolverTuning:
     Neumaier-Shcherbina M, no term dropped on a positive maximum, array-valued
     rows keep today's M), so it is owed again on the fixed route."""
 
+    hull_conic_quadratic: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_HULL_CONIC_QUADRATIC", default=False)
+    )
+    """Hull a separable convex quadratic row as a second-order cone
+    (``DISCOPT_HULL_CONIC_QUADRATIC``, default **OFF**; bound-changing on the
+    ``"hull"`` route).
+
+    Today every nonlinear disjunct row gets the eps-perspective
+    ``yhat * g(v / yhat) - eps * g(0) * (1 - y) <= 0``. For ``g = sum_i q_i (x_i -
+    a_i)^2 - R`` (``q_i > 0``, ``R >= 0``: a ball or axis-aligned ellipsoid) the
+    flag emits the smoothed cone ``sqrt(S + delta^2) <= sqrt(R + delta^2) y +
+    delta (1 - y)``, ``S = sum_i q_i (v_i - a_i y)^2``, instead: no eps division,
+    exact at every integer point, a relaxation of the perspective between them
+    (``_conic_hull_body`` has the algebra), and certified convex by the convexity
+    detector, so a hull of convex disjuncts keeps the convex route. A child's
+    cone row in a nested hull is passed up unchanged: it contains the exact nested
+    hull of its leaf and is exact at every integer point.
+
+    Entry measurement (flat three-circle disjunction, 5 objectives x 3 interleaved
+    reps, all optimal and equal to big-M): 76.8 s per rep with today's hull ->
+    0.54 s smoothed (11.3 s with the unsmoothed cone), certified convex at the
+    root, 1 node; big-M 0.1 s. **State: default OFF, panel
+    owed**; audit row in ``docs/dev/flag-retirement-audit.md``."""
+
     gdp_sumover: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_GDP_SUMOVER", default=True)
     )

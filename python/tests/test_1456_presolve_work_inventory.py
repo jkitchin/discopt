@@ -443,6 +443,8 @@ INVENTORY: tuple[tuple[str, str, str, str], ...] = (
         "env read (#1619)",
     ),
     ("discopt._relax.convexity.patterns", "clear_declared_box_cache", "trivial", "cache clear"),
+    # #1775 G4.2: the native GDP method's class, read for its route label.
+    ("discopt.solvers.gdpopt_loa", "native_gdp_class", "trivial", "dict lookup"),
     (
         "discopt._relax.convexity.certificate",
         "set_charge_scope_abs_gap_tol",
