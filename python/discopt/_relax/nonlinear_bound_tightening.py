@@ -864,6 +864,80 @@ def _min_univariate_quadratic(a: float, b: float, lb: float, ub: float) -> float
     return min(a * lb * lb + b * lb, a * x_eval * x_eval + b * x_eval, a * ub * ub + b * ub)
 
 
+# #1867: the integrality tolerance a solution is accepted at. An integer column's
+# value may sit up to this far from an integer, so the integer-domain minimum below
+# is taken over [k - tol, k + tol] around each candidate integer, not at k exactly.
+_INTEGER_DOMAIN_TOL = 1e-5
+
+
+def integer_separable_quadratic_enabled() -> bool:
+    """``DISCOPT_INTEGER_SEPARABLE_QUAD`` gate for the #1867 integer-domain minimum.
+
+    With it, :class:`SeparableQuadraticUpperBoundRule` takes each integer/binary
+    column's minimum contribution over its *integer* points instead of over the
+    continuous interval. ``a*(x**2 - x)`` on ``x in {-1,...,2}`` has continuous
+    minimum ``-a/4`` at ``x = 0.5`` but integer minimum ``0``, which is what proves
+    ``ball_mk3_*`` / ``ball_mk4_*`` infeasible at presolve. Bound-changing (a
+    strictly tighter minimum feeds both the infeasibility test and the leave-one-out
+    tightening), so gated per CLAUDE.md section 5. Read at call time.
+
+    **Graduated (default ON, 2026-10-22).** Firing scan of the rule at the root box,
+    flag OFF vs ON, over 394 MINLPLib instances (<= 200 vars/cons, the 66 vendored
+    included): output changes on 5, never looser -- ``ball_mk3_10/20/30`` proven
+    infeasible (MINLPLib ``=inf=``), ``ball_mk2_10/30`` 10/30 bounds tighter. Panel
+    on the 5, 120 s, interleaved, load <= 1.7: cert-clean (no bound past an optimum,
+    no false infeasible, both incumbents pass ``verify_point`` on a fresh model) and
+    net-positive -- certified 1 -> 5 (``ball_mk3_*`` infeasible in 0.1-0.2 s, time
+    limit OFF; ``ball_mk2_30`` optimal in 39.8 s, 140 nodes, time limit OFF;
+    ``ball_mk2_10`` 53.0 -> 39.4 s). ``DISCOPT_INTEGER_SEPARABLE_QUAD=0`` restores the
+    continuous minimum. Not covered: rows with integer cross terms (``ball_mk4_*``).
+    """
+    return os.environ.get("DISCOPT_INTEGER_SEPARABLE_QUAD", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
+
+
+def _min_univariate_quadratic_integer(a: float, b: float, lb: float, ub: float) -> float:
+    """Min of ``a*x^2 + b*x`` (``a >= 0``) over the integer points of ``[lb, ub]``,
+    each widened by ``_INTEGER_DOMAIN_TOL`` (#1867).
+
+    Convexity puts the integer minimiser at ``floor(x*)`` or ``ceil(x*)`` of the
+    vertex ``x* = -b/(2a)``, clamped to the integer range (an endpoint when
+    ``a == 0``); each candidate's contribution is the continuous minimum over its
+    tolerance window intersected with ``[lb, ub]``. Never below the continuous
+    minimum, so it can only tighten. An empty integer range (``ceil(lb) >
+    floor(ub)``) abstains to the continuous minimum: emptiness is the box's
+    business, not this bound's.
+    """
+    # The range is rounded with the SAME tolerance a solution is accepted at: an
+    # integer k with lb in (k, k + tol] still has accepted points (x = lb is within tol
+    # of k), so it must stay a candidate. Rounding with a 1e-9 slack dropped it and
+    # overestimated the minimum -- e.g. (x - 1)**2 on [1 + 5e-6, 3] gave 0.99998 where
+    # the accepted point x = lb gives 2.5e-11 -- which could prove a false infeasible
+    # or cut an accepted point (#1881 review). Each window below is intersected with
+    # [lb, ub], so a candidate never reaches outside the box.
+    tol = _INTEGER_DOMAIN_TOL
+    lo = float(np.ceil(lb - tol))
+    hi = float(np.floor(ub + tol))
+    if not (np.isfinite(lo) and np.isfinite(hi)) or lo > hi:
+        return _min_univariate_quadratic(a, b, lb, ub)
+    if abs(a) <= 1e-12:
+        candidates = {lo, hi}
+    else:
+        x_star = -b / (2.0 * a)
+        candidates = {
+            min(max(float(np.floor(x_star)), lo), hi),
+            min(max(float(np.ceil(x_star)), lo), hi),
+        }
+    return min(
+        _min_univariate_quadratic(a, b, max(k - tol, lb), min(k + tol, ub)) for k in candidates
+    )
+
+
 def _tighten_univariate_quadratic_interval(
     a: float,
     b: float,
@@ -1339,8 +1413,17 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
             constant_term, coeffs, constant_absum = structure
 
             min_contribs: dict[int, float] = {}
+            integer_domain = integer_separable_quadratic_enabled()
             for flat_idx, (a, b) in coeffs.items():
-                min_contribs[flat_idx] = _min_univariate_quadratic(
+                # #1867: an integer/binary column's contribution is minimised over
+                # its integer points (see ``_min_univariate_quadratic_integer``).
+                is_int = metadata.flat_var_types[flat_idx] in (VarType.INTEGER, VarType.BINARY)
+                minimiser = (
+                    _min_univariate_quadratic_integer
+                    if integer_domain and is_int
+                    else _min_univariate_quadratic
+                )
+                min_contribs[flat_idx] = minimiser(
                     a,
                     b,
                     float(tightened_lb[flat_idx]),
