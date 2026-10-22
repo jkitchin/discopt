@@ -752,6 +752,15 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
         "if time.perf_counter() - self._t0 >= self.total:",
         "residual",
     ),
+    # #1775 G4.1: LOA's OA-cut convexity certification gets half of what is left.
+    # Unbounded it ran > 100 s on ``kaibel``; given the caller's whole budget it
+    # would leave the master nothing. Bound-changing (an unreached row gets no
+    # cut), so it is wrapped in ``_role2_deadline`` like the #1116 eleven.
+    (
+        "gdp/algorithms/loa.py",
+        "None if math.isinf(left) else time.perf_counter() + 0.5 * left",
+        "residual",
+    ),
 )
 
 _KNOWN_KEYS = {(p, s) for p, s, _ in KNOWN}
@@ -835,8 +844,10 @@ def test_residual_count_is_visible():
     # routed through ``solver._role2_*``, but a wrap is not a conversion — the
     # flag is default-off, so with it off the gate still decides how much work
     # runs. Pinned separately by ``test_1116_wrapped_gates_stay_wrapped``.
-    assert len(residual) == 20, (
-        f"the #912 residual inventory changed ({len(residual)} entries, expected 20). "
+    # 20 -> 21: LOA's convexity-certification slice (#1775 G4.1), wrapped in
+    # ``_role2_deadline`` from the start; see its KNOWN entry.
+    assert len(residual) == 21, (
+        f"the #912 residual inventory changed ({len(residual)} entries, expected 21). "
         "If you converted one, drop it from KNOWN and lower this number; if you added "
         "one, convert it instead. This count is a deliberate resting point, not a "
         "backlog — see the module docstring for the evidence and the condition that "
@@ -955,8 +966,9 @@ def test_1116_wrapped_gates_stay_wrapped():
         f"only {checked} of {len(_KNOWN_KEYS)} recorded gates were located in source "
         "— this probe has stopped measuring (rule 6)"
     )
-    assert len(wrapped) == 11, (
-        f"the #1116 role-2 suppression count changed ({len(wrapped)} gates, expected 11).\n"
+    # 11 -> 12: LOA's convexity-certification slice (#1775 G4.1).
+    assert len(wrapped) == 12, (
+        f"the #1116 role-2 suppression count changed ({len(wrapped)} gates, expected 12).\n"
         + "\n".join(f"  {p}: {s}" for p, s in sorted(wrapped))
     )
     for path, line in wrapped:

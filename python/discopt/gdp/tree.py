@@ -127,6 +127,74 @@ class GDPTree:
         raise KeyError(f"no disjunction was built from {source!r}")
 
 
+def _fill_empty_block_indicators(model: Model, groups: dict) -> None:
+    """Name the indicator of a block disjunct that emitted no row (#1775 G4.1).
+
+    ``add_disjunction`` tags each block's rows with its indicator, so an empty
+    block -- Pyomo's "do nothing" disjunct, ``[x <= u] v []`` -- is tagged on no
+    row and its node had ``indicator=None``, though the model owns the column.
+    The disjunction's selector row (``exactly(1, indicators)`` at top level) holds
+    every block's indicator with coefficient 1: when exactly one disjunct of a
+    node is unnamed and exactly one ``== 1`` row is the node's known indicators
+    plus one other binary column, that column is the empty block's indicator.
+    Anything less certain leaves the node as it was.
+    """
+    from discopt._relax.milp_relaxation import _linearize_affine_expr_sparse
+    from discopt.modeling.core import SelectorCardinality, VarType
+
+    # Only an ``exactly(1)`` selector row is ``sum == 1``; under OR (``>=``) a
+    # different unit row could be mistaken for it, so the inference stays off.
+    todo = [
+        node
+        for node in groups.values()
+        if node.kind == "add_disjunction"
+        and node.semantics.cardinality is SelectorCardinality.EXACTLY_ONE
+        and sum(d.indicator is None for d in node.disjuncts) == 1
+        and any(d.indicator is not None for d in node.disjuncts)
+    ]
+    if not todo:
+        return
+    cols: list[tuple[Variable, int]] = []
+    for v in model._variables:
+        cols.extend((v, k) for k in range(int(v.size)))
+    n = len(cols)
+
+    def col_of(var: Variable) -> Optional[int]:
+        off = 0
+        for v in model._variables:
+            if v is var:
+                return off if v.size == 1 else None
+            off += int(v.size)
+        return None
+
+    rows: list[frozenset[int]] = []
+    for c in model._constraints:
+        if getattr(c, "sense", None) != "==" or type(c) is not Constraint:
+            continue
+        try:
+            terms, const = _linearize_affine_expr_sparse(c.body, model, n)
+        except (ValueError, TypeError):
+            continue
+        nz = {j: t for j, t in terms.items() if abs(t) > 1e-12}
+        if abs(float(const) + 1.0) > 1e-12 or any(abs(t - 1.0) > 1e-12 for t in nz.values()):
+            continue
+        rows.append(frozenset(nz))
+    for node in todo:
+        known = [col_of(d.indicator.variable) for d in node.disjuncts if d.indicator is not None]
+        if any(j is None for j in known):
+            continue
+        want = frozenset(j for j in known if j is not None)
+        hits = [r for r in rows if want < r and len(r) == len(want) + 1]
+        if len(hits) != 1:
+            continue
+        (extra,) = hits[0] - want
+        var, k = cols[extra]
+        if var.var_type is not VarType.BINARY or var.size != 1:
+            continue
+        d = next(d for d in node.disjuncts if d.indicator is None)
+        d.indicator, d.name = BooleanVar(var), var.name
+
+
 def gdp_tree(model: Model) -> GDPTree:
     """Build the :class:`GDPTree` of ``model`` (read-only; allocates nothing)."""
     counter = [0]
@@ -276,6 +344,7 @@ def gdp_tree(model: Model) -> GDPTree:
         for d, v in zip(node.disjuncts, rec.indicators if rec is not None else ()):
             if d.indicator is None:
                 d.indicator, d.name = BooleanVar(v), v.name
+    _fill_empty_block_indicators(model, groups)
     owner: dict[int, DisjunctNode] = {}
     for node in roots:
         for d in node.disjuncts:

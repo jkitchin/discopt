@@ -69,7 +69,20 @@ PYOMO_ARMS = (
     "pyomo-ric",
     "pyomo-enumerate",
 )
-DISCOPT_ARMS = ("discopt-big-m", "discopt-hull", "discopt-mbigm", "discopt-auto", "discopt-loa")
+#: LOA on the framework with its options (#1775 G4.1): arm -> gdp_options.
+LOA_OPTION_ARMS: dict[str, dict] = {
+    "discopt-loa-global": {"subproblem": "global"},
+    "discopt-loa-setcover": {"init_algorithm": "set_covering"},
+    "discopt-loa-global-setcover": {"subproblem": "global", "init_algorithm": "set_covering"},
+}
+DISCOPT_ARMS = (
+    "discopt-big-m",
+    "discopt-hull",
+    "discopt-mbigm",
+    "discopt-auto",
+    "discopt-loa",
+    *LOA_OPTION_ARMS,
+)
 ARMS = PYOMO_ARMS + DISCOPT_ARMS
 
 #: The spec §1.2 family pairing (discopt route -> Pyomo strategy).
@@ -182,10 +195,14 @@ def _run_discopt(model, arm: str, time_limit: float) -> dict:
     from gdp_convert_parity import _pyomo_violation
 
     conv = convert_pyomo_gdp(model)
-    method = arm.split("-", 1)[1]
+    options = LOA_OPTION_ARMS.get(arm)
+    method = "loa" if options is not None else arm.split("-", 1)[1]
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        r = conv.model.solve(gdp_method=method, time_limit=time_limit)
+        if options is not None:
+            r = conv.model.solve(gdp_method=method, gdp_options=options, time_limit=time_limit)
+        else:
+            r = conv.model.solve(gdp_method=method, time_limit=time_limit)
     out = {
         "status": r.status,
         "objective": None if r.objective is None else float(r.objective),

@@ -1343,6 +1343,7 @@ def integer_local_search(
     solve_budget: Optional[int] = None,
     deadline: Optional[float] = None,
     feas_tol: float = 1e-6,
+    box: Optional[tuple[np.ndarray, np.ndarray]] = None,
     seed: int = 0,
 ) -> Optional[tuple[np.ndarray, float]]:
     """Constraint-violation-guided integer local search (1-opt + 2-opt).
@@ -1427,6 +1428,14 @@ def integer_local_search(
     # Row-pinned columns count as fixed: a move off ``z == c`` is infeasible anyway,
     # and it costs a sub-NLP to find out (#1775 G3.3, see ``_pinned_bounds``).
     lb, ub = _pinned_bounds(model, *_get_variable_bounds(model))
+    if box is not None:
+        # The caller's node box (the root's, after its bound tightening): a column
+        # it fixes -- e.g. a logic auxiliary decided through rows over pinned
+        # indicators -- is fixed for every move too (#1775 G4.1).
+        blo = np.asarray(box[0], dtype=np.float64)
+        bhi = np.asarray(box[1], dtype=np.float64)
+        if blo.shape == lb.shape and bhi.shape == ub.shape:
+            lb, ub = np.maximum(lb, blo), np.minimum(ub, bhi)
     cl, cu = _infer_constraint_bounds(evaluator)
     cl = np.asarray(cl, dtype=np.float64)
     cu = np.asarray(cu, dtype=np.float64)

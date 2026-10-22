@@ -25,6 +25,7 @@ A subclass implements :meth:`GDPAlgorithm.iterate` and reports through
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections.abc import Callable, Hashable
@@ -33,6 +34,8 @@ from typing import Any, Optional
 import numpy as np
 
 from discopt.modeling.core import Model, ObjectiveSense, SolveResult
+
+logger = logging.getLogger(__name__)
 
 
 class Deadline:
@@ -75,6 +78,11 @@ class GDPAlgorithm:
     """
 
     route: str = "gdp"
+    #: Whether the LB is valid only once every configuration is resolved. True
+    #: for an LB built from configuration bounds (enumerate); False for a master
+    #: relaxation that never excluded the unresolved ones (LOA, RIC), whose
+    #: bound stays valid while optimality is still blocked (C-35).
+    bound_needs_resolution: bool = True
 
     def __init__(
         self,
@@ -82,7 +90,7 @@ class GDPAlgorithm:
         *,
         time_limit: Optional[float] = None,
         gap_tolerance: float = 1e-4,
-        abs_gap_tolerance: float = 1e-9,
+        abs_gap_tolerance: float = 1e-6,
         iteration_limit: Optional[int] = None,
         clock: Callable[[], float] = time.perf_counter,
     ) -> None:
@@ -114,20 +122,18 @@ class GDPAlgorithm:
     # ── reporting, for subclasses ─────────────────────────────────────────
 
     def offer_bound(self, lb: float) -> None:
-        """A valid lower bound (minimization convention) from a relaxation.
+        """A lower bound (minimization convention) from a relaxation.
 
-        The LB only rises. A bound above a verified incumbent beyond tolerance is
-        a soundness bug in the caller and is raised, never clamped.
+        The LB only rises. A bound above a verified incumbent by more than
+        rounding (``bound_inversion_tolerance``) means one of the two is wrong:
+        the bound is withdrawn and nothing is certified -- never clamped into a
+        certificate (#945, #1059).
         """
         lb = float(lb)
         if math.isnan(lb):
             raise ValueError("offer_bound: NaN bound")
-        if lb > self.ub + self._abs_tol(self.ub):
-            raise RuntimeError(
-                f"{type(self).__name__}: bound {lb!r} crosses the verified incumbent "
-                f"{self.ub!r}; the relaxation that produced it is not valid."
-            )
         self.lb = max(self.lb, lb)
+        self._check_crossing()
 
     def offer_incumbent(self, x_flat: Any) -> bool:
         """Verify ``x_flat`` on the original model; keep it when it improves UB.
@@ -142,15 +148,23 @@ class GDPAlgorithm:
         if not vr.ok or vr.objective is None or not math.isfinite(vr.objective):
             return False
         obj = self.obj_sign * float(vr.objective)
-        if self.lb > obj + self._abs_tol(obj):
-            raise RuntimeError(
-                f"{type(self).__name__}: verified incumbent {obj!r} lies below the bound "
-                f"{self.lb!r}; a bound offered earlier was not valid."
-            )
         if obj < self.ub:
             self.ub = obj
             self.incumbent = x.copy()
+            self._check_crossing()
         return True
+
+    def _check_crossing(self) -> None:
+        from discopt.solvers._gap import bound_inversion_tolerance
+
+        if self.incumbent is None or not math.isfinite(self.lb):
+            return
+        if self.lb - self.ub > bound_inversion_tolerance(self.lb, self.ub, self.abs_gap_tolerance):
+            reason = f"the bound {self.lb!r} crossed the verified incumbent {self.ub!r}"
+            # Withdrawing the bound is the sound outcome (#945/#1059), but a
+            # crossing means a relaxation is wrong somewhere: say so.
+            logger.warning("%s: %s; bound withdrawn", self.route, reason)
+            self.invalidate_bound(reason)
 
     def invalidate_bound(self, reason: str) -> None:
         """The method's LB conditions failed: no bound, no ``optimal``."""
@@ -201,28 +215,26 @@ class GDPAlgorithm:
 
     # ── status (spec §5.4) ───────────────────────────────────────────────
 
-    def _abs_tol(self, ref: float) -> float:
-        scale = abs(ref) if math.isfinite(ref) else 0.0
-        return max(self.abs_gap_tolerance, self.gap_tolerance * scale)
-
     def _published_lb(self) -> float:
         # offer_bound admits an LB up to tolerance above UB; publishing it as is
         # would report bound > objective. Clamped so bound <= incumbent exactly.
         return min(self.lb, self.ub)
 
-    def gap(self) -> Optional[float]:
-        """Relative gap on the min-convention LB/UB, ``None`` if either is missing.
+    def _gap_value(self) -> float:
+        """The repository's one convergence gap (``solvers._gap.optimality_gap``)."""
+        from discopt.solvers._gap import optimality_gap
 
-        Measured against the same scale as :meth:`converged` (``|ub|``, floored by
-        the absolute tolerance), so a gap reported under ``gap_tolerance`` is one
-        that converged.
+        return optimality_gap(self.lb, self.ub, abs_tol=self.abs_gap_tolerance, denom_floor=1e-10)
+
+    def gap(self) -> Optional[float]:
+        """The reported gap (``reported_gap``), ``None`` without a valid LB or incumbent.
+
+        The convergence test's own arithmetic, so a gap under ``gap_tolerance``
+        is one that converged.
         """
         if not self.lb_valid or self.incumbent is None or not math.isfinite(self.lb):
             return None
-        diff = max(0.0, self.ub - self._published_lb())
-        if diff <= self._abs_tol(self.ub):
-            return 0.0
-        return diff / max(abs(self.ub), self.abs_gap_tolerance / max(self.gap_tolerance, 1e-300))
+        return self._gap_value()
 
     def converged(self) -> bool:
         """Optimality proved: valid LB, nothing unresolved, gap within tolerance."""
@@ -230,7 +242,7 @@ class GDPAlgorithm:
             return False
         if not math.isfinite(self.lb):
             return False
-        return self.ub - self.lb <= self._abs_tol(self.ub)
+        return self._gap_value() <= self.gap_tolerance
 
     def status(self) -> str:
         if self.incumbent is not None:
@@ -251,8 +263,8 @@ class GDPAlgorithm:
         # bound_valid: the LB is a valid bound. gap_certified: the result is a
         # proof -- an open gap (feasible / time_limit / iteration_limit) never is,
         # however valid its bound (SolveResult contract).
-        lb_ok = self.lb_valid and not self.unresolved
-        certified = lb_ok and status in ("optimal", "infeasible")
+        lb_ok = self.lb_valid and not (self.bound_needs_resolution and self.unresolved)
+        certified = lb_ok and not self.unresolved and status in ("optimal", "infeasible")
         bound: Optional[float] = None
         if lb_ok and math.isfinite(self.lb) and status != "infeasible":
             bound = self.obj_sign * self._published_lb()
