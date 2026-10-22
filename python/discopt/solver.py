@@ -3732,6 +3732,16 @@ def _compute_interval_bound(model, node_lb, node_ub, negate):
         logger.debug("interval objective bound failed: %s", e)
         return -np.inf
     bound = -hi if negate else lo
+    if not np.isfinite(bound):
+        # #1869 (c): over an unbounded side interval arithmetic on a sign-changing
+        # polynomial is ``inf - inf``; the separable minorant still bounds it.
+        from discopt._relax.separable_poly_bound import (
+            separable_poly_bound_enabled,
+            separable_poly_lower_bound,
+        )
+
+        if separable_poly_bound_enabled():
+            bound = separable_poly_lower_bound(model, node_lb, node_ub, negate)
     return bound if np.isfinite(bound) else -np.inf
 
 
@@ -4839,7 +4849,7 @@ def _tighten_node_bounds_with_status(evaluator, node_lb, node_ub, cl_list, cu_li
         )
         if infeasible:
             return tightened_lb, tightened_ub, True
-        if np.any(np.abs(tightened_lb - lb) > 1e-12) or np.any(np.abs(tightened_ub - ub) > 1e-12):
+        if _bounds_moved(tightened_lb, lb) or _bounds_moved(tightened_ub, ub):
             lb = tightened_lb
             ub = tightened_ub
             changed = True
@@ -4879,6 +4889,19 @@ def _tighten_node_bounds(evaluator, node_lb, node_ub, cl_list, cu_list, max_roun
         evaluator, node_lb, node_ub, cl_list, cu_list, max_rounds=max_rounds
     )
     return lb, ub
+
+
+def _bounds_moved(new: np.ndarray, old: np.ndarray, tol: float = 1e-12) -> bool:
+    """Whether any bound moved by more than ``tol``. An unchanged infinite bound did
+    not move: ``inf - inf`` is NaN, which compared False but raised a RuntimeWarning
+    on every unbounded model (#1869), so equal entries are excluded explicitly."""
+    new = np.asarray(new, dtype=np.float64)
+    old = np.asarray(old, dtype=np.float64)
+    differ = new != old
+    if not np.any(differ):
+        return False
+    with np.errstate(invalid="ignore"):
+        return bool(np.any(differ & ~(np.abs(new - old) <= tol)))
 
 
 def _apply_nonlinear_tightening_with_status(
@@ -6589,8 +6612,13 @@ def _search_termination(
     time_limit: float,
     debug_quit: bool = False,
     time_yield: bool = False,
+    unproven_removal: bool = False,
 ) -> Optional[str]:
     """Why a Python-tree B&B loop stopped, for ``SolveResult.termination`` (#1585).
+
+    ``unproven_removal``: the loop fathomed a node without proof (a non-rigorous
+    sentinel, tracked on the Python side), so a drain with the gap open is
+    ``"unresolved"``, not ``"exhausted"`` (#1869).
 
     Called IMMEDIATELY after the loop exits, before any terminal polish or
     re-certification can move the incumbent, so it reads the tree in the state
@@ -6609,6 +6637,20 @@ def _search_termination(
     if time_yield:
         return _st.TERMINATION_TIME_LIMIT
     if _tree_drained(tree):
+        # #1869: a drained tree whose bound is pinned (#467) or held open by an
+        # unresolved floor (#598) removed a subtree without proof -- not exhausted.
+        _s = tree.stats()
+        # ``unproven_removal`` alone suffices: after a sentinel import the tree's
+        # own bound has collapsed onto the incumbent, so its gap test reads closed
+        # while the reported bound is the (lower) taint floor -- haverly: tree gap
+        # 0, reported -475 vs -400.
+        _open = not _gap_converged(tree, gap_tolerance, abs_gap_tol)
+        if (
+            bool(_s.get("bound_unresolved"))
+            or unproven_removal
+            or (_open and np.isfinite(float(_s.get("unresolved_floor", np.inf))))
+        ):
+            return _st.TERMINATION_UNRESOLVED
         return _st.TERMINATION_EXHAUSTED
     if _gap_converged(tree, gap_tolerance, abs_gap_tol):
         return _st.TERMINATION_GAP
@@ -7564,6 +7606,46 @@ def _declared_box_tightening(model: Model, deadline: Optional[float] = None):
     # ``_apply_nonlinear_tightening_with_status``); an exception is a defect, and
     # returning ``None`` for it made both consumers silently skip their check.
     return tighten_nonlinear_bounds(model, raw_lb, raw_ub, deadline=deadline)
+
+
+def _unbounded_branching_enabled() -> bool:
+    """``DISCOPT_UNBOUNDED_BRANCH`` gate (#1869): branch an unbounded variable at a
+    finite point in the spatial tree.
+
+    The spatial selectors skip a dimension of infinite width (#467), so a node whose
+    only open direction is unbounded -- or whose relaxation has no finite bound
+    because of one -- was fathomed with the tree bound pinned at ``-inf``: the tree
+    "exhausts" with an open gap after a handful of nodes (``haverly``: 69 nodes,
+    3.7 s, bound -475 vs -400). With the flag such a node is split at a finite
+    point (``select_unbounded_branch`` in ``branching.rs``): the bounded child can
+    be bounded and the unbounded one keeps its inherited bound, so nothing is
+    removed without proof. Entry experiment (#1869): the outer pieces of
+    ``haverly`` and ``ex7_3_1`` are prunable by the existing relaxation; those of
+    ``prolog`` and ``ex4_1_5`` are not.
+
+    Bound-changing search (it decides which subtrees exist), so gated per
+    CLAUDE.md section 5; read at call time.
+
+    **Graduated (default ON, 2026-10-22).** Panel over the 120 local MINLPLib
+    instances (<= 200 vars/cons) that keep an unbounded continuous variable after
+    FBBT, ON vs OFF, 30 s, interleaved: cert-clean (240 rows, 0 problems: no bound
+    past an optimum, no false infeasible, every incumbent passes ``verify_point``
+    on a fresh model) and net-positive -- certified 84 -> 86, none lost
+    (``haverly`` 69 nodes "exhausted" at bound -475 -> optimal in 57 nodes / 3.7 s;
+    ``ex7_3_1`` 1 node at bound 0.0 -> optimal in 5 nodes / 0.4 s); shifted
+    geometric mean wall over the 84 certified by both 3.10 vs 3.10 s. Cost: an
+    instance whose outer pieces no relaxation can bound now searches to its time
+    limit instead of stopping after one node uncertified (``prolog`` 0.7 -> 29.2 s,
+    ``ex4_1_5`` 0.2 -> 30.4 s, which now finds the optimum 0 instead of 0.2986);
+    those need the bounds tracked on #1869. ``=0`` restores the #467 fathom.
+    """
+    return os.environ.get("DISCOPT_UNBOUNDED_BRANCH", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
 
 
 def _route_tightened_box_enabled() -> bool:
@@ -16529,6 +16611,11 @@ def solve_model(
 
     _refresh_mask: Any = _refresh_mask_import
 
+    # #1869: split an unbounded dimension at a finite point instead of fathoming
+    # the node unresolved (see ``_unbounded_branching_enabled``).
+    if _unbounded_branching_enabled():
+        tree.set_unbounded_branching(True)
+
     # Enable nonconvex spatial branching so integer-feasible nodes are not
     # prematurely fathomed.  The NLP local optimum at such a node may not
     # be the global optimum of the continuous subproblem.
@@ -17681,6 +17768,14 @@ def solve_model(
     for _off, _sz in zip(int_offsets, int_sizes):
         _nbb_int_mask[int(_off) : int(_off) + int(_sz)] = True
     _NBB_MIN_REL_WIDTH = 2e-6
+
+    _unbounded_branch = _unbounded_branching_enabled()
+
+    def _has_unbounded_continuous_dim(_nlb, _nub) -> bool:
+        """#1869: True iff some CONTINUOUS column has infinite width in this box --
+        a dimension the Rust tree splits on an untrusted node."""
+        _w = np.asarray(_nub, dtype=np.float64) - np.asarray(_nlb, dtype=np.float64)
+        return bool(np.any((~_nbb_int_mask) & ~np.isfinite(_w)))
 
     def _nbb_is_branchable(_nlb, _nub) -> bool:
         """Conservative: True iff some CONTINUOUS dimension is still wide enough for
@@ -19231,6 +19326,15 @@ def solve_model(
                         pass
                     elif not np.isfinite(result_lbs[i]):
                         result_lbs[i] = _INFEASIBILITY_SENTINEL
+                    elif (
+                        _unbounded_branch
+                        and result_lbs[i] >= _SENTINEL_THRESHOLD
+                        and _has_unbounded_continuous_dim(batch_lb[i], batch_ub[i])
+                    ):
+                        # #1869: keep it open for the Rust tree to split the
+                        # unbounded dimension (see the batch path's keep-open arm).
+                        result_lbs[i] = -np.inf
+                        result_feas[i] = False
                     elif _nonrigorous_sentinel_fathom(result_lbs[i], node_infeasible_mask[i]):
                         _gap_certified = False
 
@@ -19350,7 +19454,15 @@ def solve_model(
                 # parent floor via the -inf import) instead of a taint-inducing
                 # non-rigorous fathom. Only when branchable — an unbranchable node
                 # kept open could dead-end unbranched and falsely certify (#467).
-                if _narrow_box_branch and _nbb_is_branchable(batch_lb[i], batch_ub[i]):
+                # #1869: the same keep-open import for a node with an unbounded
+                # CONTINUOUS dimension -- the Rust tree splits exactly such a
+                # dimension of an untrusted node (``select_unbounded_branch``), so
+                # it cannot dead-end. Its relaxation could not certify the box
+                # (a Farkas ray cannot clear an infinite bound), which is why it
+                # failed; the split gives the bounded child a box it can.
+                if (_narrow_box_branch and _nbb_is_branchable(batch_lb[i], batch_ub[i])) or (
+                    _unbounded_branch and _has_unbounded_continuous_dim(batch_lb[i], batch_ub[i])
+                ):
                     result_lbs[i] = -np.inf
                     result_feas[i] = False
                     _lbc, _ubc = _clip_start_box(
@@ -21076,6 +21188,7 @@ def solve_model(
         time_limit=time_limit,
         debug_quit=_debug_quit,
         time_yield=_rr_reserve_yield,
+        unproven_removal=_nonrigorous_fathom,
     )
     python_time = wall_time - rust_time - jax_time
 

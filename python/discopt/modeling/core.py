@@ -5039,6 +5039,8 @@ class SolveResult:
     #   ``abs_gap_tolerance`` (status usually ``optimal``);
     # - ``"exhausted"``: the tree drained -- every node was pruned or solved
     #   (status usually ``optimal`` with an incumbent, ``infeasible`` without);
+    # - ``"unresolved"``: the tree drained but removed a subtree without proof (the
+    #   #467 pin or an open #598 floor), so the search is incomplete (#1869);
     # - ``"node_limit"`` / ``"time_limit"`` / ``"iteration_limit"``: a budget ran
     #   out first. Depending on the route the status of such an exit is either the
     #   budget name or ``feasible`` (an incumbent plus a certified bound with an
@@ -5062,7 +5064,8 @@ class SolveResult:
     #   (``_refuse_unclosed_published_pair`` / the #1285 polish recheck) reports
     #   ``status="feasible"`` with ``termination="gap"``;
     # - a drained tree whose bound is held below the incumbent by an unresolved
-    #   floor reports ``status="feasible"`` with ``termination="exhausted"``.
+    #   floor reports ``status="feasible"`` with ``termination="unresolved"``
+    #   (``"exhausted"`` before #1869).
     #
     # Read ``status`` / ``gap_certified`` for what is proven; never infer a
     # certificate from this field.

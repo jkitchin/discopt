@@ -94,6 +94,12 @@ LOCAL_INFEASIBLE = "local_infeasible"
 TERMINATION_GAP = "gap"
 #: Every node of the tree was fathomed or proved; the search ran to completion.
 TERMINATION_EXHAUSTED = "exhausted"
+#: The tree drained, but a subtree was removed WITHOUT proof -- the #467 pin (no
+#: branch direction and no finite bound, typically an unbounded dimension), a
+#: non-rigorous sentinel fathom, or a #598 unresolved floor that keeps the gap
+#: open -- so the search did not run to completion and ``"exhausted"`` would
+#: overstate it (#1869). ``status`` decides what was still proven.
+TERMINATION_UNRESOLVED = "unresolved"
 #: ``max_nodes`` was reached with nodes still open.
 TERMINATION_NODE_LIMIT = "node_limit"
 #: ``time_limit`` was reached (including the tail reserved for the root-relaxation
@@ -113,6 +119,7 @@ TERMINATION_REASONS = frozenset(
     {
         TERMINATION_GAP,
         TERMINATION_EXHAUSTED,
+        TERMINATION_UNRESOLVED,
         TERMINATION_NODE_LIMIT,
         TERMINATION_TIME_LIMIT,
         TERMINATION_ITERATION_LIMIT,

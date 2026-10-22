@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use crate::bnb::branching::{
     create_children, create_children_spatial, create_children_spatial_int, is_integer_feasible,
     select_branch_variable, select_branch_variable_pseudocost, select_spatial_branch_variable,
-    select_spatial_integer_branch_variable, spatial_box_is_tight, BranchDecision, Pseudocosts,
-    VarBranchInfo,
+    select_spatial_integer_branch_variable, select_unbounded_branch, spatial_box_is_tight,
+    BranchDecision, Pseudocosts, VarBranchInfo,
 };
 use crate::bnb::node::{Node, NodeId, NodeStatus};
 use crate::bnb::pool::{NodePool, SelectionStrategy};
@@ -351,6 +351,9 @@ pub struct TreeManager {
     /// [`Self::set_sos1_selector_cols`] (gated by `DISCOPT_SOS1_SELECTOR_BRANCH`),
     /// so this is inert by default and the legacy branch path is byte-identical.
     sos1_selector_cols: Vec<usize>,
+    /// #1869: split an unbounded dimension at a finite point instead of fathoming
+    /// the node unresolved (see `select_unbounded_branch`). Off by default.
+    unbounded_branching: bool,
     /// Externally-proved rigorous lower bound for the ROOT box (#933 part (a)),
     /// installed via [`Self::seed_root_bound`]. Every node's box is a subset of
     /// the root box, so this value is a valid lower bound for every subtree —
@@ -406,6 +409,7 @@ impl TreeManager {
             bound_contradicted: false,
             branch_var_counts: vec![0; n_vars],
             sos1_selector_cols: Vec::new(),
+            unbounded_branching: false,
             root_seed: f64::NEG_INFINITY,
         }
     }
@@ -457,6 +461,12 @@ impl TreeManager {
     /// branching on continuous variables instead of being fathomed.
     pub fn set_nonconvex(&mut self, nonconvex: bool) {
         self.nonconvex = nonconvex;
+    }
+
+    /// #1869: enable splitting an unbounded dimension at a finite point (see
+    /// [`crate::bnb::branching::select_unbounded_branch`]).
+    pub fn set_unbounded_branching(&mut self, on: bool) {
+        self.unbounded_branching = on;
     }
 
     /// Register integer columns (in nonlinear terms) eligible for spatial
@@ -944,11 +954,54 @@ impl TreeManager {
                     let node = self.pool.get(result.node_id);
                     (node.lb.clone(), node.ub.clone())
                 };
+                // #1869: a node whose OWN relaxation proved no bound (an untrusted
+                // import -- raw `-inf`, then floored at the parent on import) and
+                // that has an unbounded dimension splits THAT dimension first: it
+                // is why no relaxation bounds the node, and bisecting the finite
+                // ones cannot fix it.
+                let unbounded = if self.unbounded_branching {
+                    select_unbounded_branch(
+                        &nlb,
+                        &nub,
+                        &self.integer_vars,
+                        &self.spatial_integer_cols,
+                        &result.solution,
+                    )
+                } else {
+                    None
+                };
+                let node_bound = self.pool.get(result.node_id).local_lower_bound;
+                if let Some((uidx, ubp, uint)) =
+                    unbounded.filter(|_| !result.bound_trusted || !node_bound.is_finite())
+                {
+                    self.branch_unbounded(result.node_id, uidx, ubp, uint);
+                    stats.branched += 1;
+                    continue;
+                }
+                // #1869: the selectors normalise a width by the ROOT width, and a
+                // column whose root range is infinite reads `finite / inf = 0` --
+                // "tight" -- the moment a node bounds it, so it is never branched
+                // again and the node is fathomed on its (loose) bound. Measure such a
+                // column against the node's own scale `max(1, |lb|, |ub|)` instead.
+                let (ref_lb, ref_ub) = if self.unbounded_branching {
+                    let mut gl = self.global_lb.clone();
+                    let mut gu = self.global_ub.clone();
+                    for i in 0..gl.len().min(nlb.len()) {
+                        if !(gu[i] - gl[i]).is_finite() && (nub[i] - nlb[i]).is_finite() {
+                            let scale = 1f64.max(nlb[i].abs()).max(nub[i].abs());
+                            gl[i] = nlb[i];
+                            gu[i] = nlb[i] + scale;
+                        }
+                    }
+                    (gl, gu)
+                } else {
+                    (self.global_lb.clone(), self.global_ub.clone())
+                };
                 let cont = select_spatial_branch_variable(
                     &nlb,
                     &nub,
-                    &self.global_lb,
-                    &self.global_ub,
+                    &ref_lb,
+                    &ref_ub,
                     &self.integer_vars,
                     &self.branch_deprioritized,
                     false, // independent continuous only
@@ -956,8 +1009,8 @@ impl TreeManager {
                 let spatial_int = select_spatial_integer_branch_variable(
                     &nlb,
                     &nub,
-                    &self.global_lb,
-                    &self.global_ub,
+                    &ref_lb,
+                    &ref_ub,
                     &self.spatial_integer_cols,
                 );
 
@@ -977,8 +1030,8 @@ impl TreeManager {
                     let dependent = select_spatial_branch_variable(
                         &nlb,
                         &nub,
-                        &self.global_lb,
-                        &self.global_ub,
+                        &ref_lb,
+                        &ref_ub,
                         &self.integer_vars,
                         &self.branch_deprioritized,
                         true,
@@ -992,6 +1045,11 @@ impl TreeManager {
                         self.pool.add(right);
                         stats.branched += 1;
                         self.record_branch_var(dep_decision.var_index);
+                    } else if let Some((uidx, ubp, uint)) = unbounded {
+                        // #1869: the only open direction is unbounded; split it at
+                        // a finite point instead of fathoming the node unresolved.
+                        self.branch_unbounded(result.node_id, uidx, ubp, uint);
+                        stats.branched += 1;
                     } else {
                         // No branching direction remains. Whether this fathom is
                         // sound depends on BOTH the node's dual bound and whether
@@ -1090,6 +1148,27 @@ impl TreeManager {
                 // Flag the tree bound unresolved so `update_global_lower_bound`
                 // pins the global bound at -inf (gap = ∞ → feasible/unknown). A
                 // trusted (finite-bound) node here IS resolved and stays certifiable.
+                //
+                // #1869: an untrusted node with an unbounded dimension is not a
+                // dead end -- split that dimension at a finite point instead
+                // (`select_unbounded_branch`); the bounded child can be bounded.
+                if self.unbounded_branching && (!trusted || !result.bound_trusted) {
+                    let (ulb, uub) = {
+                        let node = self.pool.get(result.node_id);
+                        (node.lb.clone(), node.ub.clone())
+                    };
+                    if let Some((uidx, ubp, uint)) = select_unbounded_branch(
+                        &ulb,
+                        &uub,
+                        &self.integer_vars,
+                        &self.spatial_integer_cols,
+                        &result.solution,
+                    ) {
+                        self.branch_unbounded(result.node_id, uidx, ubp, uint);
+                        stats.branched += 1;
+                        continue;
+                    }
+                }
                 if !trusted {
                     self.bound_unresolved = true;
                 } else if !result.bound_trusted && node_lb < SENTINEL_THRESHOLD {
@@ -1310,6 +1389,26 @@ impl TreeManager {
     /// O(1) upper bound on the open frontier (see [`NodePool::open_upper_bound`]).
     pub fn open_upper_bound(&self) -> usize {
         self.pool.open_upper_bound()
+    }
+
+    /// #1869: branch `id` on an unbounded column at the finite point `bp`. Both
+    /// children inherit the parent's bound; the unbounded one keeps it until a
+    /// relaxation bounds it, so no subtree is removed without proof.
+    fn branch_unbounded(&mut self, id: NodeId, idx: usize, bp: f64, is_int: bool) {
+        let parent = self.pool.get(id).clone();
+        self.retire(id, NodeStatus::Branched);
+        let (left, right) = if is_int {
+            create_children_spatial_int(&parent, idx, bp, || self.next_id())
+        } else {
+            let decision = BranchDecision {
+                var_index: idx,
+                branch_point: bp,
+            };
+            create_children_spatial(&parent, &decision, || self.next_id())
+        };
+        self.pool.add(left);
+        self.pool.add(right);
+        self.record_branch_var(idx);
     }
 
     fn retire(&mut self, id: NodeId, status: NodeStatus) {

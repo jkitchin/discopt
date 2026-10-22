@@ -611,6 +611,80 @@ pub fn spatial_box_is_tight(
     true
 }
 
+/// #1869: pick an UNBOUNDED spatially-relevant dimension and a FINITE point to split
+/// it at, or `None` when every such dimension has finite width.
+///
+/// The spatial selectors skip a dimension of infinite width (#467: bisecting an
+/// infinite interval never shrinks it), so a node whose only open direction is
+/// unbounded used to be fathomed with the tree bound pinned at `-inf`. Splitting at
+/// a finite point instead gives one child a finite box, which a relaxation can
+/// bound, and leaves the other unbounded, so it keeps its inherited bound and the
+/// tree can never certify through it until a relaxation bounds it. The point grows
+/// geometrically on re-splits of the unbounded child, `l + 2 max(1, |l|, |x|)` for
+/// `[l, inf)` (mirrored for `(-inf, u]`; the relaxation value, or 0, for a free
+/// column), so the finite children cover any bounded region in finitely many
+/// splits. Returns `(index, point, is_integer)`; an integer column's point is an
+/// integer and the caller splits it disjointly. Among candidates the one with the
+/// largest finite relaxation magnitude is chosen (lowest index on ties).
+pub fn select_unbounded_branch(
+    node_lb: &[f64],
+    node_ub: &[f64],
+    integer_vars: &[VarBranchInfo],
+    spatial_int_cols: &[bool],
+    solution: &[f64],
+) -> Option<(usize, f64, bool)> {
+    let n = node_lb.len();
+    let mut is_int = vec![false; n];
+    for var in integer_vars {
+        for i in 0..var.size {
+            let idx = var.offset + i;
+            if idx < n {
+                is_int[idx] = true;
+            }
+        }
+    }
+    let mut best: Option<(usize, f64)> = None;
+    for idx in 0..n {
+        let spatial_int_col = idx < spatial_int_cols.len() && spatial_int_cols[idx];
+        if is_int[idx] && !spatial_int_col {
+            continue;
+        }
+        if (node_ub[idx] - node_lb[idx]).is_finite() {
+            continue;
+        }
+        let mag = solution
+            .get(idx)
+            .copied()
+            .filter(|v| v.is_finite())
+            .map(f64::abs)
+            .unwrap_or(0.0);
+        if best.is_none_or(|(_, m)| mag > m) {
+            best = Some((idx, mag));
+        }
+    }
+    let (idx, mag) = best?;
+    let (lo, hi) = (node_lb[idx], node_ub[idx]);
+    let x = solution.get(idx).copied().filter(|v| v.is_finite());
+    let mut bp = if lo.is_finite() {
+        lo + 2.0 * 1f64.max(lo.abs()).max(mag)
+    } else if hi.is_finite() {
+        hi - 2.0 * 1f64.max(hi.abs()).max(mag)
+    } else {
+        x.unwrap_or(0.0)
+    };
+    if !bp.is_finite() {
+        return None;
+    }
+    if is_int[idx] {
+        bp = bp.floor();
+        // The disjoint split is `<= bp` / `>= bp + 1`; both sides must be non-empty.
+        if bp < lo || bp + 1.0 > hi {
+            return None;
+        }
+    }
+    Some((idx, bp, is_int[idx]))
+}
+
 /// Create two children partitioning an integer variable's domain disjointly:
 /// left `x_idx <= bp`, right `x_idx >= bp + 1`. Unlike
 /// [`create_children_spatial`] (shared branch point, valid for continuous
@@ -1016,5 +1090,57 @@ mod tests {
             none.is_none(),
             "an unbounded integer dimension is not branchable"
         );
+    }
+
+    // #1869: an unbounded dimension gets a FINITE split point inside its domain.
+    #[test]
+    fn unbounded_branch_point_is_finite_and_inside() {
+        let none: Vec<VarBranchInfo> = vec![];
+        // [2, inf): l + 2 max(1, |l|, |x|) with x = 3 -> 2 + 6 = 8.
+        let (i, bp, int) =
+            select_unbounded_branch(&[0.0, 2.0], &[1.0, f64::INFINITY], &none, &[], &[0.5, 3.0])
+                .expect("an unbounded column");
+        assert_eq!((i, int), (1, false));
+        assert!((bp - 8.0).abs() < 1e-12 && bp > 2.0, "{bp}");
+        // (-inf, -4]: mirrored, u - 2 max(1, |u|, |x|) = -4 - 8 = -12.
+        let (_, bp, _) =
+            select_unbounded_branch(&[f64::NEG_INFINITY], &[-4.0], &none, &[], &[f64::NAN])
+                .unwrap();
+        assert!((bp + 12.0).abs() < 1e-12, "{bp}");
+        // Free column: the relaxation value (0 when it is not finite).
+        let (_, bp, _) =
+            select_unbounded_branch(&[f64::NEG_INFINITY], &[f64::INFINITY], &none, &[], &[-7.5])
+                .unwrap();
+        assert_eq!(bp, -7.5);
+        let (_, bp, _) = select_unbounded_branch(
+            &[f64::NEG_INFINITY],
+            &[f64::INFINITY],
+            &none,
+            &[],
+            &[f64::INFINITY],
+        )
+        .unwrap();
+        assert_eq!(bp, 0.0);
+        // All finite: nothing to split.
+        assert!(select_unbounded_branch(&[0.0], &[1.0], &none, &[], &[0.5]).is_none());
+    }
+
+    #[test]
+    fn unbounded_branch_skips_ordinary_integers_and_floors_spatial_ones() {
+        let ints = vec![VarBranchInfo {
+            offset: 0,
+            size: 1,
+            is_integer: true,
+        }];
+        // An ordinary integer column is the fractional brancher's, not this one's.
+        assert!(
+            select_unbounded_branch(&[0.0], &[f64::INFINITY], &ints, &[false], &[2.5]).is_none()
+        );
+        // A spatial-integer column gets an integer point, split disjointly.
+        let (i, bp, int) =
+            select_unbounded_branch(&[0.5], &[f64::INFINITY], &ints, &[true], &[2.5]).unwrap();
+        assert_eq!((i, int), (0, true));
+        assert_eq!(bp, bp.floor());
+        assert!(bp >= 0.5);
     }
 }
