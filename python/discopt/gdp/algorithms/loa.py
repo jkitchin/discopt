@@ -134,12 +134,13 @@ class LOA(GDPAlgorithm):
         """``x_work`` extended to the lowered model's columns.
 
         The lowering shares the work model's columns as its prefix and may add
-        its own after them (the logical constraints' auxiliaries). The extension
-        only feeds cut generation, which linearizes certified-convex rows; a
-        linear row's OA cut is the row itself whatever the point, and the
-        auxiliaries sit in linear rows only, so their values (here the box point
-        nearest 0) cannot change a cut. Previously a point was dropped -- neither
-        offered nor cut -- whenever the lowering added a column.
+        its own after them (the logical constraints' auxiliary binaries, which
+        feed disjunction, SOS and logical rows, some of them big-M). The extension
+        only feeds cut generation, and any in-box value keeps every cut valid: a
+        certified-convex row's OA tangent is valid at any point, a non-convex row
+        gets no cut, and the auxiliaries enter rows linearly. Their values (here
+        the box point nearest 0) affect cut strength only. Previously a point was
+        dropped -- neither offered nor cut -- whenever the lowering added a column.
         """
         x = np.asarray(x_work, dtype=np.float64)
         if x.shape[0] >= self.n:

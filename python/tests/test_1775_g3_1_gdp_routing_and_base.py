@@ -315,6 +315,14 @@ def test_a_bound_crossing_the_incumbent_is_withdrawn(steps):
     assert "crossed the verified incumbent" in r.solver_stats["lb_invalid_reason"]
 
 
+def test_a_crossing_is_logged(caplog):
+    """Withdrawing the bound is sound, but a crossing means a relaxation is wrong
+    somewhere; it must not be silent."""
+    with caplog.at_level("WARNING", logger="discopt.gdp.algorithms.base"):
+        _run([("x", 2.0), ("lb", 3.0)])
+    assert any("crossed the verified incumbent" in r.message for r in caplog.records)
+
+
 def test_infeasibility_proof_with_an_incumbent_raises():
     alg = _Scripted(_gdp(), [("x", 2.0)])
     alg.run()

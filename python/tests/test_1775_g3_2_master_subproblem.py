@@ -215,6 +215,26 @@ def test_global_subproblem_proves_infeasibility_local_never_does():
     assert loc.status == "unresolved" and not loc.certified
 
 
+def test_an_uncertified_infeasible_is_unresolved(monkeypatch):
+    """``infeasible`` proves nothing without ``gap_certified`` (the SolveResult
+    contract); LOA would exclude the configuration on it, and with every one
+    excluded report the GDP infeasible."""
+    from types import SimpleNamespace
+
+    from discopt.modeling.core import Model
+
+    def heuristic(self, **k):
+        return SimpleNamespace(
+            status="infeasible", gap_certified=False, bound=None, bound_valid=False, x=None
+        )
+
+    m = _infeasible_first_disjunct()
+    d0 = _disjuncts(m)[0]
+    monkeypatch.setattr(Model, "solve", heuristic)
+    r = solve_subproblem(m, [d0], Deadline(60), mode="global")
+    assert r.status == "unresolved" and not r.certified
+
+
 def test_local_subproblem_returns_a_verified_point():
     m = _gdp(with_integer=False)
     r = _quiet(solve_subproblem, m, [_disjuncts(m)[1]], Deadline(60), mode="local")

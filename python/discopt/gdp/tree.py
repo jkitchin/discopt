@@ -140,12 +140,15 @@ def _fill_empty_block_indicators(model: Model, groups: dict) -> None:
     Anything less certain leaves the node as it was.
     """
     from discopt._relax.milp_relaxation import _linearize_affine_expr_sparse
-    from discopt.modeling.core import VarType
+    from discopt.modeling.core import SelectorCardinality, VarType
 
+    # Only an ``exactly(1)`` selector row is ``sum == 1``; under OR (``>=``) a
+    # different unit row could be mistaken for it, so the inference stays off.
     todo = [
         node
         for node in groups.values()
         if node.kind == "add_disjunction"
+        and node.semantics.cardinality is SelectorCardinality.EXACTLY_ONE
         and sum(d.indicator is None for d in node.disjuncts) == 1
         and any(d.indicator is not None for d in node.disjuncts)
     ]

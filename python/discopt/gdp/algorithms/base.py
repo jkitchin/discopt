@@ -25,6 +25,7 @@ A subclass implements :meth:`GDPAlgorithm.iterate` and reports through
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections.abc import Callable, Hashable
@@ -33,6 +34,8 @@ from typing import Any, Optional
 import numpy as np
 
 from discopt.modeling.core import Model, ObjectiveSense, SolveResult
+
+logger = logging.getLogger(__name__)
 
 
 class Deadline:
@@ -157,9 +160,11 @@ class GDPAlgorithm:
         if self.incumbent is None or not math.isfinite(self.lb):
             return
         if self.lb - self.ub > bound_inversion_tolerance(self.lb, self.ub, self.abs_gap_tolerance):
-            self.invalidate_bound(
-                f"the bound {self.lb!r} crossed the verified incumbent {self.ub!r}"
-            )
+            reason = f"the bound {self.lb!r} crossed the verified incumbent {self.ub!r}"
+            # Withdrawing the bound is the sound outcome (#945/#1059), but a
+            # crossing means a relaxation is wrong somewhere: say so.
+            logger.warning("%s: %s; bound withdrawn", self.route, reason)
+            self.invalidate_bound(reason)
 
     def invalidate_bound(self, reason: str) -> None:
         """The method's LB conditions failed: no bound, no ``optimal``."""

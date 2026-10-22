@@ -105,8 +105,12 @@ def _global(sub: Model, limit: float, gap_tolerance: float) -> SubproblemResult:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         r = sub.solve(time_limit=limit, gap_tolerance=gap_tolerance)
+    # ``infeasible`` is a proof only with ``gap_certified`` (the SolveResult
+    # contract); LOA excludes a configuration on it, so anything less is unresolved.
     if r.status == "infeasible":
-        return SubproblemResult("infeasible", reason="certified by discopt")
+        if r.gap_certified:
+            return SubproblemResult("infeasible", reason="certified by discopt")
+        return SubproblemResult("unresolved", reason="infeasible, not certified")
     bound = r.bound if (r.bound_valid and r.bound is not None and math.isfinite(r.bound)) else None
     x = None if r.x is None else _flat(sub, r.x)
     obj, why = _verified(sub, x)

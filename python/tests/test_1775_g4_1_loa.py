@@ -107,6 +107,23 @@ def test_empty_disjunct_indicator_is_named():
     assert r.status == "optimal" and r.objective == pytest.approx(0.0, abs=1e-6)
 
 
+def test_empty_disjunct_inference_stays_off_under_or():
+    """Under OR the selector row is ``>= 1``, so the one ``sum == 1`` unit row
+    holding the known indicators is some other row -- here ``A + w == 1`` -- and
+    ``w`` must not be named B's indicator."""
+    m = dm.Model("or_empty")
+    x = m.continuous("x", lb=0, ub=10)
+    w = m.binary("w")
+    a = m.make_disjunct("A")
+    a.subject_to(x >= 4)
+    b = m.make_disjunct("B")
+    m.add_disjunction([a, b], name="d", semantics="or")
+    m.subject_to(a.indicator.variable + w == 1)
+    m.minimize(x + w)
+    (node,) = list(gdp_tree(m).walk())
+    assert node.disjuncts[1].indicator is None
+
+
 def test_the_deadline_reaches_the_nlp_calls(monkeypatch):
     import discopt.solvers.gdpopt_loa as gl
 
