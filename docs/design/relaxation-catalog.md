@@ -30,9 +30,17 @@ A function is **fully certifiable** only if all three hold along the global path
 > not** (status `feasible`, `bound=None`) — the default engine has no `sign` envelope.
 > Its only one, `relax_sign`, lived in the retired compiler. §1–§3 below still give the
 > envelope *rules*; a "Source:" naming a retired file is historical.
+>
+> **`sign` closed (#1873 follow-up).** `canonical_expr` used to refuse `sign`, so a model
+> containing one was opaque to the relaxation. It is now a `call` node relaxed by
+> `uniform_relax._build_sign`: the closed convex hull of its three-piece graph over the
+> argument box, i.e. the enclosure `[sign(lo), sign(hi)]` (`interval_eval`) plus the two
+> slanted sides through `(0, ∓1)`/`(hi, 1)` and `(lo, -1)`. Measured on seven `sign` models
+> (`test_sign_envelope.py`), including a `sign(x) == 0` constraint and an unattained
+> infimum: all seven certify, every bound at or below the true optimum, where before three
+> of four had `bound=None` and the fourth ran to its limit. **24 of 24 now certify.**
 
-So every function the modeling API exposes satisfies (1) and (2), and all but `sign`
-satisfy (3). What remains are *tightness* gaps (§5) and the curvature/FBBT coverage
+So every function the modeling API exposes satisfies (1), (2) and (3). What remains are *tightness* gaps (§5) and the curvature/FBBT coverage
 notes.
 
 ---
@@ -65,8 +73,9 @@ foundation BARON/Couenne use. Trilinear and higher products are **not** exact hu
 
 Source (historical): `mccormick.py` + `envelopes.py`, dispatched by `relaxation_compiler.py`
 — all retired in #1873. The default engine's univariate envelopes are the
-`_UNIVARIATE_FN` table in `uniform_relax.py`. Every row below except `sign` certifies on
-the default path (re-audit above); the "Relaxation" column names the retired function.
+`_UNIVARIATE_FN` table in `uniform_relax.py` (plus `_build_abs` and `_build_sign`). Every
+row below certifies on the default path (re-audit above); the "Relaxation" column names the
+retired function, except `sign`, whose entry is the default engine's.
 
 | Function | Relaxation | Curvature handling |
 |---|---|---|
@@ -83,7 +92,7 @@ the default path (re-audit above); the "Relaxation" column names the retired fun
 | `tanh` | `relax_tanh` | concave/convex by sign |
 | `sigmoid` | `relax_sigmoid` | 3-regime logistic |
 | `softplus` | `relax_softplus` | convex |
-| `sign` | `relax_sign` | constant bounds per sign regime (discontinuous; loose) |
+| `sign` | `_build_sign` (`uniform_relax.py`) | closed convex hull of the 3-piece graph: `[sign(lo), sign(hi)]` plus the slanted sides; exact, but a box with `0` inside keeps both slanted sides until branching separates the regimes |
 | `asinh` | `relax_asinh` (envelopes) | sign-split |
 | `acosh` | `relax_acosh` (envelopes) | concave |
 | `atanh` | `relax_atanh` (envelopes) | sign-split |
@@ -256,8 +265,8 @@ functions that already had relaxations + IR support are writable from native Pyt
 - **No automatic relaxation tightening loop:** `obbt.py` and nonlinear bound tightening
   exist but there is no range-reduction / probing / duality-based loop coordinated with
   the relaxation the way BARON does. (Components present; orchestration is the gap.)
-- **`sign` and discontinuous functions** get only constant per-regime bounds (loose); no
-  SOS / indicator reformulation.
+- **`sign`** gets the closed hull of its graph (`_build_sign`); it is tight on a box but
+  converges only by branching across `0`, with no SOS / indicator reformulation.
 
 ### E. Bound propagation (FBBT) coverage — IMPROVED
 
@@ -340,7 +349,9 @@ convexity-detection tracks (x-space + GP, §9), and FBBT in both directions.
 
 **Remaining (low value):**
 
-5. **Discrete / `sign` / indicator handling.** *Finding: sign's continuous convex/concave hull
+5. **Discrete / `sign` / indicator handling.** *(Superseded: the default engine now emits the
+   hull in `_build_sign`. The "finding" below was also wrong: over a zero-spanning box the hull
+   is a polygon with two slanted sides, not the constant `±1` box.)* *Finding: sign's continuous convex/concave hull
    over a zero-spanning box is already exact* (constant `±1`, since sign equals `−1` across all
    of `[lb, 0)`), so `relax_sign` is not loose in the continuous sense. Tightening genuinely
    requires a *discrete* binary-indicator (SOS1/big-M) reformulation — niche (sign is rarely

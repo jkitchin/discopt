@@ -131,7 +131,6 @@ def test_unknown_activation_raises():
 # ── test 3: end-to-end neural-DAE training (smoke) ──────────────────────────
 
 
-@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_neural_dae_training_end_to_end():
     """Rebuild scripts/hybrid_ml/neural_dae_prototype.py on the new API.
@@ -187,7 +186,6 @@ def test_neural_dae_training_end_to_end():
 # ── test 4: kernel surrogate variant ────────────────────────────────────────
 
 
-@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_kernel_surrogate_training():
     """Linear-in-alpha kernel surrogate: zero init, few iterations."""
@@ -209,9 +207,7 @@ def test_kernel_surrogate_training():
 # ── test 5: freeze / from_definition round-trip ─────────────────────────────
 
 
-@pytest.mark.requires_jax
 def test_freeze_matches_symbolic_and_from_definition_round_trips():
-    from discopt._relax.nlp_evaluator import NLPEvaluator
     from discopt.warm_start import unflatten_solution, validate_initial_solution
 
     m = Model()
@@ -260,8 +256,6 @@ def test_freeze_matches_symbolic_and_from_definition_round_trips():
 
     frozen_from_result = net.freeze(_FakeNLPResult(x))
     np.testing.assert_allclose(frozen_from_result.forward(pts), frozen.forward(pts), atol=1e-12)
-    # silence unused-evaluator import (kept to document the training entry type)
-    assert NLPEvaluator is not None
 
 
 # ── test 6: Gauss-Newton detector fires on the training objective ───────────
@@ -278,4 +272,22 @@ def test_gauss_newton_detector_fires_on_training_objective():
 
     m, dae, net, state_init, _ = _build_hybrid(factory)
     ev = NLPEvaluator(m, gauss_newton=True)
+    assert ev.is_gauss_newton is True
+
+
+@pytest.mark.smoke
+def test_gauss_newton_detector_fires_on_the_tape():
+    """The same detector on the tape evaluator ``train()`` now gets by default: the
+    model's stacked layer matmuls and its array-valued collocation residuals both
+    lower, so neither the evaluator nor Gauss-Newton falls back to JAX."""
+    from discopt._tape_nlp_evaluator import make_evaluator
+
+    def factory(m):
+        net = TrainableNetwork(m, [1, 6, 1], activation="tanh", name="rate")
+        return net, net
+
+    m, dae, net, state_init, _ = _build_hybrid(factory)
+    m._gauss_newton_hessian = True
+    ev = make_evaluator(m)
+    assert type(ev).__name__ == "TapeNLPEvaluator", type(ev)
     assert ev.is_gauss_newton is True

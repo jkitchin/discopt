@@ -878,18 +878,16 @@ def _matmul(left: np.ndarray, right: np.ndarray, E: Any, budget: _Budget) -> np.
     ``+``, so an inner dimension of K gives a chain of depth K and POUNCE refuses
     past ``max_depth`` — the same trap :func:`_sum_along` documents.
 
-    Stacked (ndim > 2) operands are refused rather than looped over. ``jnp``
-    broadcasts the leading batch dimensions there, and reproducing that rule by
-    hand is exactly the kind of silent divergence this module refuses; nothing in
-    discopt's modeling layer emits one today.
+    Stacked (ndim > 2) operands follow ``np.matmul``/``jnp.matmul``: the last two
+    axes are the matrices and the leading (batch) axes broadcast; a 1-D operand is
+    promoted as below and its added axis dropped. ``discopt.ml.TrainableNetwork``
+    emits one per layer (``(N, 1, d_in) @ (d_in, d_out)``), which used to send every
+    trainable surrogate to the JAX evaluator.
     """
     if left.ndim == 0 or right.ndim == 0:
         raise UnsupportedForTape("MatMulExpression with a scalar operand is not a matmul")
     if left.ndim > 2 or right.ndim > 2:
-        raise UnsupportedForTape(
-            f"MatMulExpression of stacked operands (shapes {left.shape} @ {right.shape}); "
-            "only 1-D/2-D matmul is lowered"
-        )
+        return _stacked_matmul(left, right, E, budget)
     # numpy's own promotion rule: a 1-D left operand is a row prepended with 1, a
     # 1-D right operand is a column appended with 1, and the added axis is dropped
     # from the result.
@@ -922,6 +920,40 @@ def _matmul(left: np.ndarray, right: np.ndarray, E: Any, budget: _Budget) -> np.
         return cast(np.ndarray, out[0])
     if right.ndim == 1:
         return cast(np.ndarray, out[:, 0])
+    return out
+
+
+def _stacked_matmul(left: np.ndarray, right: np.ndarray, E: Any, budget: _Budget) -> np.ndarray:
+    """``np.matmul`` with batch axes: a 2-D :func:`_matmul` per broadcast batch index.
+
+    The batch shapes broadcast by numpy's own rule (``np.broadcast_shapes``), so a
+    pair ``jnp`` would refuse is refused here too, as ``UnsupportedForTape``.
+    """
+    # numpy's promotion of a 1-D operand, recorded so the added axis can be dropped.
+    drop_row = left.ndim == 1
+    drop_col = right.ndim == 1
+    a = left.reshape(1, -1) if drop_row else left
+    b = right.reshape(-1, 1) if drop_col else right
+    if a.shape[-1] != b.shape[-2]:
+        raise UnsupportedForTape(
+            f"MatMulExpression shape mismatch: {left.shape} @ {right.shape} "
+            f"({a.shape[-1]} vs {b.shape[-2]} over the contracted axis)"
+        )
+    try:
+        batch = np.broadcast_shapes(a.shape[:-2], b.shape[:-2])
+    except ValueError as exc:
+        raise UnsupportedForTape(
+            f"MatMulExpression batch axes do not broadcast: {left.shape} @ {right.shape}"
+        ) from exc
+    a = np.broadcast_to(a, batch + a.shape[-2:])
+    b = np.broadcast_to(b, batch + b.shape[-2:])
+    out = np.empty(batch + (a.shape[-2], b.shape[-1]), dtype=object)
+    for idx in np.ndindex(*batch):
+        out[idx] = _matmul(a[idx], b[idx], E, budget)
+    if drop_row:
+        out = out[..., 0, :]
+    if drop_col:
+        out = out[..., 0]
     return out
 
 

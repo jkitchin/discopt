@@ -82,14 +82,11 @@ def test_interval_bound_never_invalid_on_unsupported_ops():
     degrade to ``-inf`` (a no-op) rather than emit an invalid finite bound."""
     m = dm.Model("t")
     x = m.continuous("x", lb=0.1, ub=2.0)
-    # sign is not modelled by the interval evaluator -> unbounded -> -inf.
-    # (erf, then sigmoid, formerly used here, are now modelled; sign is
-    # discontinuous and remains an intentionally unsupported atom.)
-    try:
-        m.minimize(dm.sign(x))
-    except AttributeError:
-        pytest.skip("dm.sign not available in this build")
-    bound = S._compute_interval_bound(m, np.array([0.1]), np.array([2.0]), negate=False)
+    y = m.continuous("y", lb=0.5, ub=1.5)
+    # A variable exponent is not modelled by the interval evaluator -> unbounded
+    # -> -inf. (erf, sigmoid and then sign, formerly used here, are now modelled.)
+    m.minimize(x**y)
+    bound = S._compute_interval_bound(m, np.array([0.1, 0.5]), np.array([2.0, 1.5]), negate=False)
     assert bound == -np.inf
 
 

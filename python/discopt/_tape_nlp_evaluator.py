@@ -447,7 +447,14 @@ class TapeNLPEvaluator:
         # Every residual is a subexpression of an objective that already lowered,
         # so this cannot introduce a new UnsupportedForTape -- and if it somehow
         # does, it must propagate to `try_build` and degrade to JAX, not be caught.
-        return [compile_to_nl_expr(r, self._model) for r in residuals]
+        #
+        # An array-valued residual contributes one row per element, in the order the
+        # JAX arm's `residual_vector` concatenates them (`jnp.reshape(r, (-1,))` per
+        # residual): `compile_to_nl_array(r).reshape(-1)` is that order by contract.
+        out: list = []
+        for r in residuals:
+            out.extend(compile_to_nl_array(r, self._model).reshape(-1).tolist())
+        return out
 
     def _warn_gn_declined(self, message: str) -> None:
         if self._gn_decline_logged:

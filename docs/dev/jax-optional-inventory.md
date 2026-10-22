@@ -60,7 +60,9 @@ All measured 2026-10-22 on this branch (Linux, Python 3.13, 4 cores).
   - The rest, 64 node IDs in 47 functions, genuinely exercise JAX features:
     `dm.custom`-based DIRECT/surrogate solves, the JAX evaluator as an oracle,
     `DISCOPT_ANALYTIC_SEPGRAD`, and trainable NN surrogates whose stacked
-    matmul has no tape opcode (§1). They are marked `requires_jax`.
+    matmul has no tape opcode (§1). They are marked `requires_jax`. (The
+    trainable-surrogate group was un-marked in the follow-up that lowered
+    stacked matmul and array-valued Gauss-Newton residuals; §1.)
 - **After those changes:** `pytest -m smoke` without JAX gives **3449 passed, 213
   skipped, 0 failed** (434 s). With JAX installed it gives **3768 passed, 24
   skipped, 0 failed** (466 s).
@@ -100,16 +102,24 @@ construct that reaches it, and what removing the fallback would take:
 | `_lower_function` (`function {name!r}`) | a `FunctionCall` name with no lowering. Every name `dm.*` emits is lowered today (`exp log log10 log1p log2 sqrt sin cos tan asin acos atan sinh cosh tanh asinh acosh atanh erf abs sign min max atan2 sigmoid softplus entropy centropy signpower prod norm*`), so only a hand-built node reaches it | none |
 | `_fold` (empty; deeper than `NlExpr.max_depth`) | `dm.prod`/`dm.min`/`dm.max`/`norm` of an empty array, or of more elements than the tape's nesting depth | moderate: an n-ary tape opcode, or a balanced-tree fold, removes the depth limit |
 | `_lower_norm` (order; **matrix norm**; scalar) | `dm.norm(X, ord)` with 2-D `X` (the CLAUDE.md case: 219 `jax` modules), or a 0-D argument | large for `ord=2` (spectral norm needs an SVD opcode with derivatives). `ord=1`/`inf` of a matrix are max-of-column/row-sums, which are cheap folds. `"fro"` is refused at `dm.norm` already (#1369) |
-| `TapeNLPEvaluator._build_residual_exprs` → `compile_to_nl_expr` (array-valued) | Gauss-Newton (`gauss_newton=True`, which `discopt.ml.train()` sets) with an **array-valued residual** -- measured on `test_dae_fit` / `test_nn_trainable` kernel surrogates | small: lower each residual with `compile_to_nl_array(r).reshape(-1)` and concatenate, which is exactly the JAX evaluator's `residual_vector` (`jnp.reshape(fn(x), (-1,))` per residual). Not done here: it moves these models from the JAX to the tape derivative engine on JAX installs too, which §5 treats as a change that needs its own differential check |
-| `_matmul` stacked operands, from `TrainableNetwork` | trainable NN layers, e.g. `(20, 2, 6) @ (6, 1)` -- measured on `test_nn_trainable` | moderate: batched matmul lowering |
+| ~~`TapeNLPEvaluator._build_residual_exprs` → `compile_to_nl_expr` (array-valued)~~ | Gauss-Newton (`gauss_newton=True`, which `discopt.ml.train()` sets) with an **array-valued residual** | **Done** (#1873 follow-up): each residual is lowered with `compile_to_nl_array(r).reshape(-1)` and concatenated, the JAX arm's `residual_vector` order |
+| ~~`_matmul` stacked operands, from `TrainableNetwork`~~ | trainable NN layers, e.g. `(20, 1, 6) @ (6, 1)` | **Done** (#1873 follow-up): `_stacked_matmul` follows `np.matmul` (broadcast batch axes, 1-D promotion) |
 | `_require` (arity) | a function called with the wrong number of arguments | none (malformed) |
 
 So the fallback a JAX-less user can actually hit, with a correctly formed model, comes
-down to five cases: **`dm.custom`-family nodes** (permanently `[jax]`), **matrix
-norms**, **stacked matmul**, **reductions deeper than `max_depth`**, and
-**array-valued Gauss-Newton residuals**. The last two make `discopt.ml` trainable
-surrogates (`train()`) `[jax]`-only today. Each refuses with the tape's own reason
-and the extra. The last four are lowering work, listed here with their fixes.
+down to three cases: **`dm.custom`-family nodes** (permanently `[jax]`), **matrix
+norms**, and **reductions deeper than `max_depth`**. Each refuses with the tape's own
+reason and the extra; the last two are lowering work, listed above with their fixes.
+
+**Stacked matmul and array-valued Gauss-Newton residuals were lowered in the #1873
+follow-up**, so `discopt.ml` trainable surrogates (`train()`) and `discopt.dae.fit`
+no longer need JAX. Because that moves those models from the JAX evaluator to the tape
+on JAX installs too, it was checked differentially on the four `test_nn_trainable` /
+`test_dae_fit` training models: 120 comparisons of objective, gradient, constraints,
+Jacobian and Gauss-Newton Lagrangian Hessian at random points agree to 1.0e-15
+relative, and `train()` on each backend (3 interleaved repetitions) gives identical
+iteration counts and objectives on all four, while running about 10× faster
+(tape 0.06–0.36 s vs JAX 0.77–2.05 s per fit).
 
 ## 2. Deliberate JAX autodiff users (`[jax]`-only, refusing with the named error)
 

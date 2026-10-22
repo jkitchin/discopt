@@ -2422,6 +2422,8 @@ def _build_univariate_call(ctx: _Builder, node: CNode, w: int) -> Envelope:
             ctx.univariate_atom_specs.append((fname, w, v_idx, v_coeff, float(lt.const)))
     if fname == "abs":
         return _build_abs(ctx, w, lt, lo, hi)
+    if fname == "sign":
+        return _build_sign(ctx, w, lt, lo, hi)
     entry = _UNIVARIATE_FN.get(fname)
     if entry is None:
         entry = _registered_envelope_entry(fname)
@@ -2641,6 +2643,47 @@ def _build_abs(ctx: _Builder, w: int, lt: LinForm, lo: float, hi: float) -> Enve
     ctx.add_row(c2, lt.const)
     tight = _emit_secant_only(ctx, w, lt, lo, hi, abs, sign=+1.0)
     return Envelope(rows=[], tight=tight)
+
+
+def _build_sign(ctx: _Builder, w: int, lt: LinForm, lo: float, hi: float) -> Envelope:
+    """``w = sign(t)`` -- the closed convex hull of its graph over ``[lo, hi]``.
+
+    ``sign`` is discontinuous, so no secant/tangent rule applies, but its graph over
+    a box is three pieces (``-1`` on ``t < 0``, ``0`` at ``t = 0``, ``1`` on
+    ``t > 0``) whose hull is a polygon. The aux column's interval enclosure
+    ``[sign(lo), sign(hi)]`` (``interval_eval``) supplies the horizontal sides; the
+    rows below are the slanted ones, each through two points of the graph's closure:
+
+    * ``lo < 0 < hi``: ``w >= -1 + 2t/hi`` (through ``(0,-1)``, ``(hi,1)``) and
+      ``w <= 1 - 2t/lo`` (through ``(lo,-1)``, ``(0,1)``);
+    * ``lo == 0 < hi``: ``w >= t/hi`` (through ``(0,0)``, ``(hi,1)``);
+    * ``lo < 0 == hi``: ``w <= -t/lo`` (through ``(lo,-1)``, ``(0,0)``);
+    * a sign-definite box (or ``t == 0``): the enclosure pins ``w``; no row.
+
+    Soundness: every graph point satisfies each row on the box (each row is a chord
+    of the hull and the hull contains the graph). Not finitely convergent at the
+    jump: a box keeping ``0`` in its interior keeps both slanted sides, which is
+    why a ``sign`` term certifies only once branching separates the regimes.
+    """
+    if not (math.isfinite(lo) and math.isfinite(hi)) or hi < lo:
+        return Envelope(rows=[], tight=False)
+    if lo > 0.0 or hi < 0.0 or lo == hi == 0.0:
+        return Envelope(rows=[], tight=True)
+    if hi > 0.0:
+        # w >= c0 + t/hi * s  ->  (s/hi) t - w <= -c0, with (c0, s) = (-1, 2) when
+        # the box straddles 0 and (0, 1) when it starts at 0.
+        c0, s = (-1.0, 2.0) if lo < 0.0 else (0.0, 1.0)
+        coeffs = lt.scaled(s / hi).coeffs
+        coeffs[w] = coeffs.get(w, 0.0) - 1.0
+        ctx.add_row(coeffs, -c0 - s * lt.const / hi)
+    if lo < 0.0:
+        # w <= c0 - t/lo * s  ->  w + (s/lo) t <= c0, with (c0, s) = (1, 2) when the
+        # box straddles 0 and (0, 1) when it ends at 0.
+        c0, s = (1.0, 2.0) if hi > 0.0 else (0.0, 1.0)
+        coeffs = lt.scaled(s / lo).coeffs
+        coeffs[w] = coeffs.get(w, 0.0) + 1.0
+        ctx.add_row(coeffs, c0 - s * lt.const / lo)
+    return Envelope(rows=[], tight=True)
 
 
 def _emit_secant_only(ctx, w, lt, lo, hi, f, sign) -> bool:
