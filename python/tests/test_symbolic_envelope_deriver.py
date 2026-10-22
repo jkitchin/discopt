@@ -3,8 +3,8 @@
 These validate :mod:`discopt._relax.symbolic` against the same discipline as the
 hand-written relaxations: every derived envelope must be *sound*
 (``cv <= f <= cc``), correctly *curved* (``cv`` convex, ``cc`` concave), and —
-for the McCormick-exact convex/concave atoms — must reproduce the existing
-``discopt._relax.mccormick`` primitives bit-for-bit.
+for the McCormick-exact convex/concave atoms — must reproduce the closed-form
+envelope (the function itself and its secant) to rounding.
 
 The engine itself imports SymPy (a design-time ``[sympy]`` extra); the whole
 module is skipped if SymPy is unavailable.

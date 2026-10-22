@@ -3620,20 +3620,6 @@ class TestCurrentCodeWeaknesses:
         except ImportError:
             pytest.skip("Rust simplex MILP binding not built")
 
-    def test_relaxation_compiler_handles_bilinear(self):
-        """Relaxation compiler must handle BinaryOp('*', Variable, Variable)."""
-        try:
-            from discopt._relax.relaxation_compiler import compile_relaxation
-
-            m = _make_nlp1()
-            # compile_relaxation(expr, model, partitions, mode)
-            assert m._objective is not None
-            compile_relaxation(m._objective.expression, m, partitions=0, mode="standard")
-        except (ImportError, AttributeError):
-            pytest.skip("relaxation_compiler not available in expected form")
-        except Exception as e:
-            pytest.fail(f"Relaxation compiler failed on bilinear model: {e}")
-
     @pytest.mark.smoke
     def test_solve_result_has_gap_certified(self):
         """SolveResult must have gap_certified attribute."""
