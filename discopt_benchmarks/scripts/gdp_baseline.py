@@ -86,6 +86,7 @@ DISCOPT_ARMS = (
     "discopt-ric",
     "discopt-enumerate",
     "discopt-lbb",
+    "discopt-ldsda",
 )
 ARMS = PYOMO_ARMS + DISCOPT_ARMS
 

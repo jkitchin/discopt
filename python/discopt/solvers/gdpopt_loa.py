@@ -78,7 +78,9 @@ def solve_gdpopt_loa(
         (:class:`~discopt.gdp.algorithms.enumerate.Enumerate`: every
         configuration, global subproblems; takes ``max_configurations``) or
         ``"lbb"`` (:class:`~discopt.gdp.algorithms.lbb.LBB`, #1775 G4.4:
-        branch and bound over disjunctions; takes ``propagate``).
+        branch and bound over disjunctions; takes ``propagate``) or ``"ldsda"``
+        (:class:`~discopt.gdp.algorithms.ldsda.LDSDA`, #1775 G4.5: a local
+        discrete-steepest descent; no bound, never ``optimal``).
 
     Returns
     -------
@@ -92,8 +94,8 @@ def solve_gdpopt_loa(
             model, time_limit=time_limit, gap_tolerance=gap_tolerance, **options
         ).run()
         return result
-    if algorithm == "lbb":
-        # Node solves are discopt's own: no master and no NLP solver to pass.
+    if algorithm in ("lbb", "ldsda"):
+        # Node / point solves are discopt's own: no master and no NLP solver to pass.
         result = cls(
             model,
             time_limit=time_limit,
@@ -120,10 +122,18 @@ def native_gdp_class(algorithm: str) -> Any:
     from discopt.gdp.algorithms.enumerate import Enumerate
     from discopt.gdp.algorithms.gloa import GLOA
     from discopt.gdp.algorithms.lbb import LBB
+    from discopt.gdp.algorithms.ldsda import LDSDA
     from discopt.gdp.algorithms.loa import LOA
     from discopt.gdp.algorithms.ric import RIC
 
-    classes = {"loa": LOA, "gloa": GLOA, "lbb": LBB, "ric": RIC, "enumerate": Enumerate}
+    classes = {
+        "loa": LOA,
+        "gloa": GLOA,
+        "lbb": LBB,
+        "ric": RIC,
+        "enumerate": Enumerate,
+        "ldsda": LDSDA,
+    }
     if algorithm not in classes:
         raise ValueError(f"algorithm must be one of {sorted(classes)}, got {algorithm!r}")
     return classes[algorithm]

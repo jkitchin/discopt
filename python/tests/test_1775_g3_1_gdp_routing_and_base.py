@@ -48,14 +48,20 @@ def _gdp(sense="min"):
 
 def test_native_axis_is_the_spec_set():
     assert NATIVE_GDP_METHODS == {"loa", "gloa", "lbb", "ric", "enumerate", "ldsda"}
-    # gloa landed in G4.3, ric and enumerate in G4.2, lbb in G4.4
-    assert RESERVED == ["ldsda"]
+    # gloa landed in G4.3, ric and enumerate in G4.2, lbb in G4.4, ldsda in G4.5
+    assert RESERVED == []
 
 
-@pytest.mark.parametrize("method", RESERVED)
-def test_reserved_native_method_is_refused_as_reserved(method):
+def test_a_reserved_native_method_is_refused_as_reserved(monkeypatch):
+    """Every native method has landed (G4.5); the reservation path stays for the
+    next one, so it is exercised by taking one out of the implemented set."""
+    import discopt.solver as solver
+
+    monkeypatch.setattr(
+        solver, "IMPLEMENTED_NATIVE_GDP_METHODS", solver.IMPLEMENTED_NATIVE_GDP_METHODS - {"ldsda"}
+    )
     with pytest.raises(ValueError, match="reserved on the native GDP axis"):
-        _gdp().solve(gdp_method=method, time_limit=10)
+        _gdp().solve(gdp_method="ldsda", time_limit=10)
 
 
 @pytest.mark.parametrize("method", sorted(NATIVE_GDP_METHODS))

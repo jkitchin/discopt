@@ -308,7 +308,7 @@ def _refusal_models():
 
     m6 = base()
     m6.b = pyo.BooleanVar()
-    m6.lc = pyo.LogicalConstraint(expr=pyo.lor(m6.b, True))
+    m6.lc = pyo.LogicalConstraint(expr=pyo.land(m6.b, False))
 
     m7 = base()
     m7.v = pyo.Var([1, 2], bounds=(0, 1))
@@ -323,7 +323,7 @@ def _refusal_models():
         ("discrete domain", m3, "not an interval"),
         ("orphan disjunct", m4, "belongs to no active Disjunction"),
         ("logic in a disjunct", m5, "LogicalConstraint inside a Disjunct"),
-        ("boolean literal", m6, "Boolean literal"),
+        ("logic that folds to False", m6, "always false"),
         ("SOS", m7, "SOSConstraint"),
         ("floor/ceil", m8, "the function"),
     ]
@@ -443,3 +443,68 @@ def test_parity_draws_a_fixed_indicator_binary_at_its_value():
     conv = convert_pyomo_gdp(m)
     rep = check_evaluation_parity(conv, n_points=20)
     assert rep.row_checks > 0
+
+
+# ── logical constants (#1775 G4.5) ───────────────────────────────────────────
+#
+# discopt has no logical constant. Pyomo builds them freely -- an empty
+# ``lor(... for s in S if s < first)`` in Pyomo's own four_stage_dynamic_model
+# crashed the converter with an IndexError -- so the converter folds them: for
+# every assignment of the free Booleans, the converted model is feasible exactly
+# when Pyomo's formula is true.
+
+
+def _formulas(m):
+    b1, b2, b3 = m.b[1], m.b[2], m.b[3]
+    return [
+        b1.implies(pyo.lor()),  # x -> False  ==  not x
+        pyo.lor().implies(b1),  # always true
+        b1.implies(pyo.land()),  # always true
+        pyo.land(b1, True, b2),
+        pyo.lor(b1, False, b2),
+        pyo.lnot(pyo.lor(b1, pyo.lor())),
+        b1.equivalent_to(True),
+        b1.equivalent_to(False),
+        b1.xor(True),
+        pyo.exactly(1, b1, True, b2),
+        pyo.exactly(2, b1, True, b2),
+        pyo.atmost(1, True, b1, b2),
+        pyo.atleast(2, False, b1, b2, b3),
+        pyo.atleast(1, True, b1),
+        pyo.atmost(0, True, b1),
+        b1.implies(pyo.lor(b2, pyo.land())),
+    ]
+
+
+def _with(i, values):
+    m = pyo.ConcreteModel()
+    m.b = pyo.BooleanVar([1, 2, 3])
+    m.x = pyo.Var(bounds=(0, 1))
+    m.o = pyo.Objective(expr=m.x)
+    m.lc = pyo.LogicalConstraint(expr=_formulas(m)[i])
+    for k, v in zip((1, 2, 3), values):
+        m.b[k].fix(v)
+    return m
+
+
+@pytest.mark.parametrize("i", range(16))
+def test_constants_fold_to_the_same_truth_table(i):
+    import itertools
+
+    checked = 0
+    for values in itertools.product([False, True], repeat=3):
+        pm = _with(i, values)
+        truth = bool(pyo.value(pm.lc.body))
+        try:
+            dmodel = convert_pyomo_gdp(pm).model
+        except PyomoGDPConversionError as err:
+            assert not truth and "always false" in str(err)
+            checked += 1
+            continue
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            r = dmodel.solve(time_limit=30)
+        assert (r.status == "optimal") is truth, (i, values, r.status)
+        assert r.status in ("optimal", "infeasible")
+        checked += 1
+    assert checked == 8

@@ -66,9 +66,8 @@ def test_unknown_gdp_method_raises_without_disjunctions():
     m.minimize(x)
     with pytest.raises(ValueError, match="Unknown gdp_method"):
         m.solve(gdp_method="bigmm", time_limit=10)
-    # #1775 G3.1: a reserved native name is refused up front ("lbb" until G4.4).
-    with pytest.raises(ValueError, match="reserved on the native GDP axis"):
-        m.solve(gdp_method="ldsda", time_limit=10)
+    # #1775 G3.1's reserved native names have all landed (G4.5); the reservation
+    # path is tested in test_1775_g3_1_gdp_routing_and_base.
 
 
 @pytest.mark.parametrize("method", ["gloa", "typo"])

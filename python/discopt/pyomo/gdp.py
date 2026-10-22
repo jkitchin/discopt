@@ -50,7 +50,7 @@ Anything else refuses loudly, naming the component: nothing is dropped. The
 refusals are the cases where a faithful rebuild needs a discopt feature that does
 not exist (``Expr_if``, external functions, discrete non-integer domains,
 ``Piecewise``, ``SOSConstraint``, a logical constraint inside a disjunct, a
-Boolean literal inside a logical formula, more than one active objective) or
+logical constraint that folds to False, more than one active objective) or
 where the Pyomo model is itself ill-formed (a disjunct in no disjunction, or in
 two).
 
@@ -294,7 +294,15 @@ class _Converter:
                     "hold algebraic rows only)",
                     lc,
                 )
-            self.m.logical(self._logic(lc.expr, lc), name=lc.name)
+            formula = self._logic(lc.expr, lc)
+            if formula is False:
+                raise self._refuse(
+                    "a logical constraint that is always false (the model is "
+                    "infeasible as written)",
+                    lc,
+                )
+            if formula is not True:  # an always-true constraint constrains nothing
+                self.m.logical(formula, name=lc.name)
             self.out.logical.append(lc)
 
         self._objective()
@@ -707,45 +715,92 @@ class _Converter:
 
     # -- logic -----------------------------------------------------------------
 
-    def _logic(self, e: Any, lc: Any) -> LogicalExpression:
+    def _logic(self, e: Any, lc: Any) -> "LogicalExpression | bool":
+        """``e`` as a discopt logical formula, with constants folded away.
+
+        discopt has no logical constant, so a Boolean literal -- or an empty
+        ``lor()``/``land()``, which Pyomo builds from a comprehension over an
+        empty set (``x.implies(lor(y[s] for s in S if s < first))``) -- is folded
+        into the formula around it. The result is a formula, or ``True``/``False``
+        when the whole formula is constant.
+        """
         le = self.le
         if isinstance(e, _NATIVE_NUMBERS) or (
             not e.is_expression_type() and getattr(e, "is_constant", lambda: False)()
         ):
-            raise self._refuse(
-                "a Boolean literal inside a logical formula (discopt has no "
-                "logical constant; simplify the formula first)",
-                lc,
-            )
+            value = self.pyo.value(e)
+            if value not in (0, 1):
+                raise self._refuse(f"the Boolean literal {value!r}", lc)
+            return bool(value)
         if not e.is_expression_type():
             return self._boolean(e, lc)
         args = e.args
         if isinstance(e, le.NotExpression):
-            return dm.lnot(self._logic(args[0], lc))
-        if isinstance(e, le.AndExpression):
-            return dm.land(*[self._logic(a, lc) for a in args])
-        if isinstance(e, le.OrExpression):
-            return dm.lor(*[self._logic(a, lc) for a in args])
+            a = self._logic(args[0], lc)
+            return (not a) if isinstance(a, bool) else dm.lnot(a)
+        if isinstance(e, (le.AndExpression, le.OrExpression)):
+            is_and = isinstance(e, le.AndExpression)
+            terms = []
+            for x in args:
+                v = self._logic(x, lc)
+                if isinstance(v, bool):
+                    if v is not is_and:  # False in a conjunction, True in a disjunction
+                        return v
+                    continue
+                terms.append(v)
+            if not terms:  # every operand was the identity, or there were none
+                return is_and
+            return dm.land(*terms) if is_and else dm.lor(*terms)
         if isinstance(e, le.XorExpression):
             if len(args) != 2:
                 raise self._refuse(f"an {len(args)}-ary xor", lc)
-            return dm.xor(self._logic(args[0], lc), self._logic(args[1], lc))
+            a, b = self._logic(args[0], lc), self._logic(args[1], lc)
+            if isinstance(a, bool) and isinstance(b, bool):
+                return a != b
+            if isinstance(a, bool):
+                return dm.lnot(b) if a else b  # type: ignore[arg-type]
+            if isinstance(b, bool):
+                return dm.lnot(a) if b else a
+            return dm.xor(a, b)
         if isinstance(e, le.ImplicationExpression):
-            return self._logic(args[0], lc).implies(self._logic(args[1], lc))
+            a, b = self._logic(args[0], lc), self._logic(args[1], lc)
+            if a is False or b is True:
+                return True
+            if a is True:
+                return b
+            if b is False:
+                return dm.lnot(a)  # type: ignore[arg-type]
+            return a.implies(b)  # type: ignore[union-attr]
         if isinstance(e, le.EquivalenceExpression):
             if len(args) != 2:
                 raise self._refuse(f"an {len(args)}-ary equivalence", lc)
-            return self._logic(args[0], lc).equivalent_to(self._logic(args[1], lc))
-        for cls, ctor in (
-            (le.ExactlyExpression, dm.exactly),
-            (le.AtMostExpression, dm.atmost),
-            (le.AtLeastExpression, dm.atleast),
+            a, b = self._logic(args[0], lc), self._logic(args[1], lc)
+            if isinstance(a, bool) and isinstance(b, bool):
+                return a == b
+            if isinstance(a, bool):
+                return b if a else dm.lnot(b)  # type: ignore[arg-type]
+            if isinstance(b, bool):
+                return a if b else dm.lnot(a)
+            return a.equivalent_to(b)
+        for cls, ctor, holds in (
+            (le.ExactlyExpression, dm.exactly, lambda t, n, k: t == k if n == 0 else None),
+            (le.AtMostExpression, dm.atmost, lambda t, n, k: t <= k if n == 0 else None),
+            (le.AtLeastExpression, dm.atleast, lambda t, n, k: t >= k if n == 0 else None),
         ):
             if isinstance(e, cls):
                 k = self.pyo.value(args[0])
                 if float(k) != int(k):
                     raise self._refuse(f"a cardinality {k!r} that is not an integer", lc)
-                return ctor(int(k), *[self._logic(a, lc) for a in args[1:]])
+                vals = [self._logic(a, lc) for a in args[1:]]
+                terms = [v for v in vals if not isinstance(v, bool)]
+                # Each True operand counts toward k; a False one never does.
+                k_left = int(k) - sum(v is True for v in vals)
+                decided = holds(0, len(terms), k_left)
+                if decided is not None:
+                    return bool(decided)
+                if k_left < 0:  # more True operands than allowed already
+                    return cls is le.AtLeastExpression
+                return ctor(k_left, *terms)
         raise self._refuse(f"a {type(e).__name__} logical expression", lc)
 
     def _boolean(self, b: Any, lc: Any) -> BooleanVar:
