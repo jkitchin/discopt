@@ -6192,9 +6192,18 @@ mod tests {
         let free = run(None);
         assert_eq!(free.status, MilpStatus::Optimal);
         let capped = run(Some(1));
-        assert_eq!(capped.status, MilpStatus::NodeLimit, "cap did not stop the search");
+        assert_eq!(
+            capped.status,
+            MilpStatus::NodeLimit,
+            "cap did not stop the search"
+        );
         assert!(capped.obj.is_finite() && capped.obj >= free.obj - 1e-9);
-        assert!(capped.nodes < free.nodes, "{} vs {}", capped.nodes, free.nodes);
+        assert!(
+            capped.nodes < free.nodes,
+            "{} vs {}",
+            capped.nodes,
+            free.nodes
+        );
         assert!(capped.bound <= free.obj + 1e-9, "bound past the optimum");
     }
 

@@ -34665,12 +34665,24 @@ def _milp_engine_full_budget_enabled() -> bool:
     explicit guard is ``max_open_nodes``, sized from ``_MILP_ENGINE_FRONTIER_BYTES``.
 
     Changes search time, so gated per CLAUDE.md section 5; read at call time.
+
+    **Graduated (default ON, 2026-10-22).** Panel over the 26 MINLPLib instances
+    (<= 200 vars/cons) whose solve reaches this engine, ON vs OFF, 60 s,
+    interleaved: cert-clean (52 rows, 0 problems: no bound past an optimum, no false
+    infeasible, every incumbent passes ``verify_point`` on a fresh model), certified
+    19 vs 19 with none lost; 25 of 26 identical in status, objective and node count;
+    ``tln4`` 8.7 at 25.0 s -> 8.6 at 60.1 s. At 120 s, 2 reps: ``tln4`` OFF 8.7 at
+    24.6 / 24.0 s (node cap), ON **optimal 8.3** at 73.5 / 74.6 s. ``tln5``/``tln6``
+    are unaffected: run 1 finds no incumbent there, so they defer to the Python
+    MILP tree, which already spends the full budget. ``=0`` restores the legacy
+    budget (100k nodes per run, no reclaimed reserve).
     """
-    return os.environ.get("DISCOPT_MILP_ENGINE_FULL_BUDGET", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    return os.environ.get("DISCOPT_MILP_ENGINE_FULL_BUDGET", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
     )
 
 

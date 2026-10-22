@@ -105,17 +105,26 @@ def test_run1_node_limit_with_a_verified_incumbent_is_kept(monkeypatch):
 
 def test_incumbent_reclaims_the_withheld_reserve(monkeypatch):
     """With an incumbent from run 1 the #917 extension goes to the re-entry: run 2's
-    clock exceeds what was left of the reduced ``time_limit``."""
+    clock exceeds what was left of the (reduced) ``time_limit``. The extension is
+    injected at the real call site, which must forward it."""
     monkeypatch.setenv(FLAG, "1")
     calls = _spy(monkeypatch, _worse_feasible_first)
-    m = _milp_route_model()
-    tl, ext = 6.0, 4.0
-    import time
+    real_simplex = SV._solve_milp_simplex
+    seen = {}
+    ext = 4.0
 
-    t0 = time.perf_counter()
-    SV._solve_milp_simplex(m, tl, 1e-4, 100_000, t0, incumbent_time_extension=ext)
+    def with_extension(*a, **kw):
+        seen["forwarded"] = kw.get("incumbent_time_extension")
+        seen["time_limit"] = a[1]
+        kw["incumbent_time_extension"] = ext
+        return real_simplex(*a, **kw)
+
+    monkeypatch.setattr(SV, "_solve_milp_simplex", with_extension)
+    _milp_route_model().solve(time_limit=6)
+    assert "forwarded" in seen, "the engine route was not taken -- the probe measured nothing"
+    assert seen["forwarded"] is not None, "the call site does not forward the extension"
     assert len(calls) == 2, "the re-entry did not run -- the probe measured nothing"
-    assert calls[1]["time_limit_s"] > tl - calls[0]["time_limit_s"] + 0.5 * ext
+    assert calls[1]["time_limit_s"] > seen["time_limit"] - calls[0]["time_limit_s"] + 0.5 * ext
 
 
 def test_flag_off_is_the_legacy_budget(monkeypatch):
@@ -126,6 +135,9 @@ def test_flag_off_is_the_legacy_budget(monkeypatch):
     assert all("max_open_nodes" not in c for c in calls)
 
 
-def test_flag_defaults_off(monkeypatch):
+def test_flag_defaults_on(monkeypatch):
+    """Graduated under CLAUDE.md section 5 (panel in the gate's docstring)."""
     monkeypatch.delenv(FLAG, raising=False)
+    assert SV._milp_engine_full_budget_enabled()
+    monkeypatch.setenv(FLAG, "0")
     assert not SV._milp_engine_full_budget_enabled()
