@@ -2603,6 +2603,7 @@ def _reformulate_disjunction_hull(
     selectors: Optional[list[Variable]] = None,
     prefix: Optional[str] = None,
     child_selectors: Optional[dict[int, list[Variable]]] = None,
+    cone_rows: Optional[set[int]] = None,
 ) -> tuple[list[Variable], list[Constraint]]:
     """Reformulate a disjunction via convex hull relaxation.
 
@@ -2638,6 +2639,11 @@ def _reformulate_disjunction_hull(
         ``id`` of a nested disjunction -> the selectors it is hulled on, for a
         nested ``add_disjunction`` block (its indicators, whose ``sum == parent``
         row the model carries). Any other nested disjunction gets fresh selectors.
+    cone_rows : set, optional
+        Collects the ``id`` of every cone row this call emits or passes up
+        (``DISCOPT_HULL_CONIC_QUADRATIC``, :func:`_conic_hull_body`), so a parent
+        hulling this disjunction as a child keeps them as they are rather than
+        nesting a perspective inside them (see the comment at that branch).
 
     Nesting (#1775 G2.1) is lowered from the leaves up, as Pyomo's ``gdp.hull``
     does: a disjunction nested in disjunct ``k`` is hulled first, on its own fresh
@@ -2712,6 +2718,8 @@ def _reformulate_disjunction_hull(
     # local[k]: the variables its children created, keyed by name.
     rows: list[list[Constraint]] = []
     local: list[dict[str, Variable]] = []
+    child_cones: set[int] = set()
+    conic = _hull_conic_quadratic_enabled()
     for k, disjunct in enumerate(dc.disjuncts):
         rows_k: list[Constraint] = []
         local_k: dict[str, Variable] = {}
@@ -2726,6 +2734,7 @@ def _reformulate_disjunction_hull(
                     selectors=own,
                     prefix=f"{prefix}_d{k}_{item.name or j}",
                     child_selectors=child_selectors,
+                    cone_rows=child_cones,
                 )
                 # A block's indicators -- the child's and, below it, its own
                 # children's -- are zero whenever y_k is (their ``sum == parent``
@@ -2875,6 +2884,33 @@ def _reformulate_disjunction_hull(
         for j, con in enumerate(rows_k):
             cname = f"_hull_{prefix}_d{k}_c{j}"
 
+            if id(con) in child_cones and set(_collect_variables(con.body)) <= set(local[k]):
+                # A child's cone row over disjunct k's locals is kept as is. The
+                # exact nested hull of its leaf is the homogeneous cone S <= R y_c^2
+                # (the parent's perspective of a 1-homogeneous row is itself), the
+                # smoothed row contains it for every y_c in [0, 1] (y_c <= y_k <= 1),
+                # and at y_k = 0 every local is 0, where the row reads
+                # delta - delta = 0: a relaxation, exact at every integer point.
+                new_cons.append(con)
+                if cone_rows is not None:
+                    cone_rows.add(id(con))
+                continue
+
+            if conic and not _is_linear(con.body):
+                cone = _conic_hull_body(
+                    con,
+                    zero_vars,
+                    {**{n: disagg[k][n] for n in all_vars}, **local[k]},
+                    y_k,
+                    model,
+                )
+                if cone is not None:
+                    row = Constraint(body=cone, sense="<=", rhs=0.0, name=cname)
+                    new_cons.append(row)
+                    if cone_rows is not None:
+                        cone_rows.add(id(row))
+                    continue
+
             if _is_linear(con.body):
                 # Linear f(x) = a^T x + b: hull gives a^T v_k + b * y_k
                 # Substitute vars -> disagg vars and scale constants by y_k
@@ -2971,6 +3007,138 @@ def _reformulate_disjunction_hull(
                 )
 
     return new_vars, new_cons
+
+
+def _hull_conic_quadratic_enabled() -> bool:
+    """Is the cone hull of separable convex quadratic rows on?
+    (``DISCOPT_HULL_CONIC_QUADRATIC``, default OFF)."""
+    from discopt.solver_tuning import current as _tuning
+
+    return bool(_tuning().hull_conic_quadratic)
+
+
+def _sumover_as_chain(expr: Expression) -> Expression:
+    """``expr`` with every ``Σ[t1, …, tn]`` rewritten as the chain ``t1 + … + tn``.
+
+    The equivalence :func:`_sumover_terms` states (and #1154's tests check per
+    walker). Needed because ``distribute_products`` expands ``(a + b)**2`` but not
+    ``(Σ[a, b])**2``, so :func:`extract_quadratic_support` abstained on every circle
+    the Pyomo converter emits (``Σ[x, -2.5, -15]**2 + Σ[y, 3, -10]**2 - 36``): all 24
+    disjunct rows of ``pyomo.constrained_layout_clay0203``. Only the node types a
+    quadratic can be made of are rebuilt; any other node is returned as is, and the
+    extractor abstains on it as before.
+    """
+    terms = _sumover_terms(expr)
+    if terms is not None:
+        out = _sumover_as_chain(terms[0])
+        for t in terms[1:]:
+            out = BinaryOp("+", out, _sumover_as_chain(t))
+        return out
+    if isinstance(expr, BinaryOp):
+        return BinaryOp(expr.op, _sumover_as_chain(expr.left), _sumover_as_chain(expr.right))
+    if isinstance(expr, UnaryOp):
+        return UnaryOp(expr.op, _sumover_as_chain(expr.operand))
+    return expr
+
+
+def _conic_hull_body(
+    con: Constraint,
+    owned: dict[str, Variable],
+    copies: dict[str, Expression],
+    y_k: Variable,
+    model: Model,
+) -> Optional[Expression]:
+    """The cone hull of ``con`` as a body ``<= 0``, or ``None`` to keep the perspective.
+
+    For ``g = body - rhs`` (``rhs - body`` for ``>=``) recognized exactly as
+    ``sum_i q_i x_i^2 + c_i x_i + d`` with every ``q_i > 0`` and no cross term,
+    completing the square gives ``g = sum_i q_i (x_i - a_i)^2 - R``,
+    ``a_i = -c_i / (2 q_i)``, ``R = sum_i q_i a_i^2 - d``. With ``R >= 0`` and
+    ``S = sum_i (sqrt(q_i) (v_i - a_i y))^2`` the row emitted is
+
+        sqrt(S + delta^2) <= sqrt(R + delta^2) * y + delta * (1 - y).
+
+    At ``y = 1`` it is exactly ``S <= R`` (the disjunct's own row) and at ``y = 0``
+    exactly ``S <= 0`` (``v = 0``, where the bound links already put it). Between,
+    it contains the perspective ``S <= R y^2``: the right side squared exceeds
+    ``R y^2 + delta^2`` by ``2 delta y (1 - y)(sqrt(R + delta^2) - delta) >= 0``.
+    So it is a relaxation of the hull, exact at every integer point, and convex (a
+    norm of an affine map below an affine function), which the convexity detector
+    certifies. ``delta = 1e-6 * max(1, sqrt(R))`` keeps the ``sqrt`` argument away
+    from 0: the exact cone ``sqrt(S) <= sqrt(R) y`` has
+    an infinite derivative at its apex ``v = 0, y = 0``, where every switched-off
+    disjunct sits, and
+    there the NLP heuristics returned invalid-number failures (status -13 on all
+    128 dive solves of one nested-circle objective) and an OA solve of the flat
+    three-circle model took 6.4 s against 0.10 s smoothed. No eps division.
+
+    Abstains -- the caller keeps the eps-perspective -- on an equality, a body with
+    a Parameter (its coefficients must stay live, #1862), anything not purely
+    quadratic, a cross term, a variable with no square term (a rotated cone would
+    be needed), a non-scalar or unowned variable, and ``R < 0`` (an empty disjunct
+    or rounding at a point: the perspective path keeps today's behaviour).
+
+    ``R`` is widened by ``8 * FLOAT_EPS * (sum_i q_i a_i^2 + |d|)`` -- outward --
+    to cover the rounding of the centres, the radius and the ``sqrt(q_i)``
+    scalings, so a point the exact row admits is never cut off. The off
+    disjunct's row is *exactly* 0 in floating point as well (a residual on a row
+    that must hold at 0 is the #1043 false-infeasible class): every square term is
+    ``(c * (0 - a * 0))**2 = 0`` and ``sqrt(fl(delta**2)) == delta`` for binary64
+    without over/underflow (checked on 4,000 values of ``delta``: no exception).
+    """
+    from discopt._relax.quadratic_form import extract_quadratic_support, polynomial_degree_bound
+    from discopt.modeling.core import Parameter, _iter_model_leaves, sqrt
+
+    if con.sense == "<=":
+        sign = 1.0
+    elif con.sense == ">=":
+        sign = -1.0
+    else:
+        return None
+    if np.ndim(con.rhs) != 0:
+        return None
+    if any(isinstance(leaf, Parameter) for leaf in _iter_model_leaves(con.body)):
+        return None
+    body = _sumover_as_chain(con.body)
+    bound = polynomial_degree_bound(body)
+    if bound is None or bound > 2:
+        return None  # cheap abstention before the expansion (see its docstring)
+    reduced = extract_quadratic_support(body, model)
+    if reduced is None:
+        return None
+    support, Q, c, d = reduced
+    if not support:
+        return None
+    Q, c, d = sign * Q, sign * c, sign * (d - float(con.rhs))
+    if np.any(Q - np.diag(np.diag(Q))) or not np.all(np.diag(Q) > 0.0):
+        return None
+
+    by_offset = {
+        model._flat_var_offset(v): name
+        for name, v in owned.items()
+        if tuple(v.shape) == ()
+        and v._index < len(model._variables)
+        and model._variables[v._index] is v
+    }
+    names = [by_offset.get(i) for i in support]
+    if any(n is None for n in names):
+        return None
+
+    q = np.diag(Q)
+    a = -c / (2.0 * q)
+    span = float(np.sum(q * a * a))
+    radius_sq = span - d
+    if not radius_sq >= 0.0:
+        return None
+    radius_sq += 8.0 * FLOAT_EPS * (span + abs(d))
+
+    delta = 1e-6 * max(1.0, float(np.sqrt(radius_sq)))
+    squares: Expression = _wrap(delta * delta)
+    for name, qi, ai in zip(names, q, a):
+        term = _wrap(float(np.sqrt(qi))) * (copies[name] - _wrap(float(ai)) * y_k)
+        squares = squares + term**2
+    top = float(np.sqrt(radius_sq + delta * delta))
+    return sqrt(squares) - _wrap(top) * y_k - _wrap(delta) * (_wrap(1.0) - y_k)
 
 
 class HullVariableCoverageError(ValueError):
