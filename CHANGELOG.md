@@ -195,7 +195,7 @@ The release procedure that produces these entries is documented in
 - **`DISCOPT_SCALE_FREE_BRANCHING` is default OFF again (`=1` opts in).** It made
   the native spatial kernel lose MINLPLib `tanksize` (certified in 63 s with it
   off; with it on, a 200 s time limit with the bound frozen at 1.2422 against
-  1.2686). Re-measured on the 66-instance corpus at 120 s: certified 50 off, 49
+  1.2686). Re-measured on the 66-instance corpus at 120 s: certified 53 off, 52
   on, no instance gained. Its original graduation panel ran at 20 s, which could
   not see the loss. `test_tanksize_driver_seeded_certifies` passes again.
 

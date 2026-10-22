@@ -9937,10 +9937,10 @@ def _scale_free_branching_enabled() -> bool:
     **Default OFF since 2026-10-22; ``=1`` opts in.** It graduated on introduction
     (default ON) on the panels below, but the corpus half ran at 20 s, too short
     to see a lost certificate on an instance that needs ~60 s. Re-run at 120 s
-    (66 corpus instances, OFF/ON interleaved, default solve): certified 50 -> 49
+    (66 corpus instances, OFF/ON interleaved, default solve): certified 53 -> 52
     -- ON loses ``tanksize`` (OFF: optimal in 63 s, 16,499 nodes; ON: time limit,
-    bound frozen at 1.2422 against 1.2686), gains none; 0 false bounds; wall 2011
-    -> 2074 s. That fails §5's "no certification regression" bar. Mechanism
+    bound frozen at 1.2422 against 1.2686), gains none; 0 false bounds; wall 2013
+    -> 2062 s. That fails §5's "no certification regression" bar. Mechanism
     (instrumented): the rule scales widths by ROOT widths, and loose root bounds
     (``x46``: 27,050) make other columns look relatively narrow, so it bisects
     ``x0``/``x1`` (root width ~40) down to ~1e-9, where 27% of node LPs end
