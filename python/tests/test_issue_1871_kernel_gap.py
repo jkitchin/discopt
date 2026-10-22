@@ -70,8 +70,11 @@ def test_both_flags_certify_st_m2_on_the_kernel(monkeypatch):
     assert abs(r.objective - OPT) <= 1e-4 * abs(OPT)
 
 
-def test_flags_default_off(monkeypatch):
+def test_flag_defaults(monkeypatch):
+    """The gap rule graduated (CLAUDE.md section 5); the cutoff box awaits its panel."""
     monkeypatch.delenv(GAP, raising=False)
     monkeypatch.delenv(CUT, raising=False)
-    assert not SV._kernel_documented_gap_enabled()
+    assert SV._kernel_documented_gap_enabled()
     assert not SV._kernel_cutoff_obbt_enabled()
+    monkeypatch.setenv(GAP, "0")
+    assert not SV._kernel_documented_gap_enabled()

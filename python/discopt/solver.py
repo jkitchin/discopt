@@ -7294,8 +7294,16 @@ def _withdraw_unresolved_certificate(result: SolveResult) -> None:
 
 
 def _kernel_documented_gap_enabled() -> bool:
-    """``DISCOPT_KERNEL_DOCUMENTED_GAP`` gate (#1871), read at call time. **Default
-    OFF** pending its CLAUDE.md section 5 panel.
+    """``DISCOPT_KERNEL_DOCUMENTED_GAP`` gate (#1871), read at call time.
+
+    **Graduated (default ON, 2026-10-22).** CLAUDE.md section 5 panel over the 101
+    kernel-routed instances among the 394 local MINLPLib instances (<= 200
+    vars/cons), ON vs OFF, 30 s, interleaved: cert-clean (202 rows, 0 problems;
+    every incumbent passes ``verify_point`` on a fresh model), certified 93 = 93,
+    none lost, certified objectives identical; fewer nodes on 16 instances and more
+    on none (``st_qpc-m3a`` 1857 -> 163, ``st_rv8`` 343 -> 205, ``fuel`` 145 -> 53,
+    ``supplychain`` 195 -> 117); total wall 377 -> 373 s. ``=0`` restores the
+    absolute arm.
 
     The native kernel's stop and prune test conjoins an ABSOLUTE ``gap_tol``, set
     to ``gap_tolerance`` (1e-4 by default), with the documented criterion
@@ -7308,11 +7316,12 @@ def _kernel_documented_gap_enabled() -> bool:
     looser ``gap_tolerance`` already lifts it (#1615), which leaves the documented
     criterion. An explicit ``abs_gap_tolerance`` keeps the #1243 ``min`` mapping.
     """
-    return os.environ.get("DISCOPT_KERNEL_DOCUMENTED_GAP", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    return os.environ.get("DISCOPT_KERNEL_DOCUMENTED_GAP", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
     )
 
 
