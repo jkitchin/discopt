@@ -59,12 +59,32 @@ def read_junit(path: Path) -> tuple[dict[str, float], list[str]]:
     return times, unresolved
 
 
+def unmask(nid: str) -> str:
+    """Recover a node id GitHub's log masking cut short (``test_hi***``).
+
+    Actions replaces any substring equal to a secret with ``***``, so a test name
+    can arrive truncated. Accept it only when exactly one test function in the file
+    starts with the visible prefix and nothing (no parameter id) follows the mask;
+    otherwise refuse, since a guessed key would silently not match.
+    """
+    path, _, name = nid.partition("::")
+    prefix, _, rest = name.partition("***")
+    found = re.findall(rf"^def ({re.escape(prefix)}\w*)\(", (ROOT / path).read_text(), re.M)
+    if rest or len(found) != 1:
+        raise SystemExit(
+            f"masked node id {nid!r} cannot be recovered ({len(found)} candidates); "
+            "build from the fast-junit-*.xml artifacts instead"
+        )
+    return f"{path}::{found[0]}"
+
+
 def read_durations_log(path: Path) -> dict[str, float]:
     times: dict[str, float] = {}
     for line in path.read_text(errors="replace").splitlines():
         m = _DURATION_LINE.search(line)
         if m:
-            times[m.group(2)] = float(m.group(1))
+            nid = m.group(2)
+            times[unmask(nid) if "***" in nid else nid] = float(m.group(1))
     return times
 
 

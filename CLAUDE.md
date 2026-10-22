@@ -281,6 +281,9 @@ whose **call phase** exceeds 15 s fails unless its node id is in
 The list only shrinks; rebuild it deliberately with `scripts/update_time_budget_allowlist.py`
 from **CI** timings (each fast shard prints every test >= 5 s and uploads a call-phase junit
 report). CI runs some tests ~3x slower than a dev machine, so a locally built list is wrong.
+Keys are node ids: **renaming or reparametrizing an allowlisted test drops its entry**, and
+the renamed test then fails the budget on its first CI run. Rename the key in the same PR
+(`test_ci_time_budget.py` fails on a key that names no test).
 
 ### Benchmarking
 ```bash
