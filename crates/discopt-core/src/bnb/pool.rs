@@ -102,6 +102,9 @@ impl Ord for HeapEntry {
 pub struct NodePool {
     /// All nodes ever created (indexed by NodeId).
     nodes: Vec<Node>,
+    /// `released[i]`: node `i` left the frontier and its per-node vectors (box,
+    /// parent solution, basis) were freed by [`Self::release_storage`] (#1874).
+    released: Vec<bool>,
     /// Priority queue of open (pending) nodes.
     open: BinaryHeap<HeapEntry>,
     /// Selection strategy.
@@ -113,6 +116,7 @@ impl NodePool {
     pub fn new(strategy: SelectionStrategy) -> Self {
         Self {
             nodes: Vec::new(),
+            released: Vec::new(),
             open: BinaryHeap::new(),
             strategy,
         }
@@ -140,6 +144,7 @@ impl NodePool {
             });
         }
         self.nodes.push(node);
+        self.released.push(false);
         id
     }
 
@@ -185,6 +190,13 @@ impl NodePool {
             .count()
     }
 
+    /// An upper bound on the open count in O(1): the heap's length, which also
+    /// holds stale entries skipped by lazy deletion. Used for the frontier memory
+    /// guard (#1874), where over-counting can only stop the search earlier.
+    pub fn open_upper_bound(&self) -> usize {
+        self.open.len()
+    }
+
     /// Return an already-exported node to the open frontier so it is selected
     /// and re-evaluated again.
     ///
@@ -203,6 +215,7 @@ impl NodePool {
     /// Any stale entry left behind is skipped by the usual lazy-deletion rule
     /// once the node leaves `Pending` again.
     pub fn reopen(&mut self, id: NodeId) {
+        assert!(!self.released[id.0], "reopen of a released node {:?}", id);
         let node = &mut self.nodes[id.0];
         node.status = NodeStatus::Pending;
         let lower_bound = node.local_lower_bound;
@@ -221,10 +234,39 @@ impl NodePool {
         });
     }
 
-    /// Mark a node as pruned.
+    /// Mark a node as pruned and free its per-node vectors.
     pub fn prune(&mut self, id: NodeId) {
         self.nodes[id.0].status = NodeStatus::Pruned;
         // Lazy deletion: stale entry will be skipped in select_next.
+        self.release_storage(id);
+    }
+
+    /// Free a node's box, parent solution and basis once it has left the frontier
+    /// (#1874). The pool keeps every node ever created, so these vectors were the
+    /// whole of its growth: measured on MINLPLib ``tln4`` (336 columns, 232 rows)
+    /// ~5.5 KB per node, 645 MB at the 100k-node default reached in ~14 s, which
+    /// made ``max_nodes`` a de-facto memory guard. The scalars a retired node is
+    /// still read for -- status, local lower bound, depth, parent -- are kept, so
+    /// the frontier minimum, the tight/unresolved floors and depth-stride gates are
+    /// unaffected. Readers of a released box must refuse, not see an empty one:
+    /// see [`Self::is_released`]. Releasing a node that is still open is a bug.
+    pub fn release_storage(&mut self, id: NodeId) {
+        let node = &mut self.nodes[id.0];
+        debug_assert!(
+            !matches!(node.status, NodeStatus::Pending | NodeStatus::Evaluated),
+            "release_storage on a frontier node {:?}",
+            id
+        );
+        node.lb = Vec::new();
+        node.ub = Vec::new();
+        node.parent_solution = None;
+        node.basis = None;
+        self.released[id.0] = true;
+    }
+
+    /// Whether [`Self::release_storage`] freed this node's vectors.
+    pub fn is_released(&self, id: NodeId) -> bool {
+        self.released[id.0]
     }
 
     /// Total number of nodes ever created.
@@ -382,5 +424,35 @@ mod tests {
         // Same lower bound: prefer deeper node.
         assert_eq!(pool.select_next(), Some(NodeId(1)));
         assert_eq!(pool.select_next(), Some(NodeId(0)));
+    }
+
+    /// #1874: a retired node's vectors are freed, its scalars kept, and a frontier
+    /// node is never released (reopen refuses a released one).
+    #[test]
+    fn release_storage_frees_vectors_and_keeps_scalars() {
+        let mut pool = NodePool::new(SelectionStrategy::BestFirst);
+        let mut n0 = Node::new(NodeId(0), None, 3, vec![], vec![]);
+        n0.local_lower_bound = -2.5;
+        n0.lb = vec![0.0; 50];
+        n0.ub = vec![1.0; 50];
+        n0.parent_solution = Some(vec![0.5; 50]);
+        pool.add(n0);
+        assert!(!pool.is_released(NodeId(0)));
+        pool.prune(NodeId(0));
+        assert!(pool.is_released(NodeId(0)));
+        let n = pool.get(NodeId(0));
+        assert!(n.lb.is_empty() && n.ub.is_empty() && n.parent_solution.is_none());
+        assert_eq!(n.lb.capacity(), 0, "vector not freed");
+        assert_eq!((n.depth, n.local_lower_bound), (3, -2.5));
+        assert_eq!(n.status, NodeStatus::Pruned);
+    }
+
+    #[test]
+    #[should_panic(expected = "reopen of a released node")]
+    fn reopen_refuses_a_released_node() {
+        let mut pool = NodePool::new(SelectionStrategy::BestFirst);
+        pool.add(Node::new(NodeId(0), None, 0, vec![], vec![]));
+        pool.prune(NodeId(0));
+        pool.reopen(NodeId(0));
     }
 }

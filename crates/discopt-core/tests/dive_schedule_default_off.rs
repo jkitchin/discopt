@@ -36,6 +36,7 @@ fn stride_unset_never_dives_away_from_the_root() {
         n_struct: N,
         integer_cols: (0..N).collect(),
         max_nodes: 4_000,
+        max_open_nodes: None,
         time_limit_s: Some(60.0),
         gap_tol: 1e-9,
         abs_gap_tol: None,

@@ -754,7 +754,7 @@ impl TreeManager {
                 } else if result.bound_trusted {
                     // Convex mode: NLP local optimum = global optimum for the
                     // continuous subproblem.  Fathom the node.
-                    self.pool.get_mut(result.node_id).status = NodeStatus::Fathomed;
+                    self.retire(result.node_id, NodeStatus::Fathomed);
                     stats.fathomed += 1;
 
                     // #1296: record the point's own value, not `node_lb`. The two
@@ -810,7 +810,7 @@ impl TreeManager {
             // no-op and the legacy branch path below runs unchanged.
             if let Some(sos1_decision) = self.select_sos1_spatial(result.node_id) {
                 let parent = self.pool.get(result.node_id).clone();
-                self.pool.get_mut(result.node_id).status = NodeStatus::Branched;
+                self.retire(result.node_id, NodeStatus::Branched);
                 let (left, right) =
                     create_children_spatial(&parent, &sos1_decision, || self.next_id());
                 self.pool.add(left);
@@ -887,7 +887,7 @@ impl TreeManager {
                 };
 
                 let parent = self.pool.get(result.node_id).clone();
-                self.pool.get_mut(result.node_id).status = NodeStatus::Branched;
+                self.retire(result.node_id, NodeStatus::Branched);
 
                 let (mut left, mut right) = create_children(&parent, decision, || self.next_id());
 
@@ -985,7 +985,7 @@ impl TreeManager {
                     );
                     if let Some((ref dep_decision, _)) = dependent {
                         let parent = self.pool.get(result.node_id).clone();
-                        self.pool.get_mut(result.node_id).status = NodeStatus::Branched;
+                        self.retire(result.node_id, NodeStatus::Branched);
                         let (left, right) =
                             create_children_spatial(&parent, dep_decision, || self.next_id());
                         self.pool.add(left);
@@ -1049,14 +1049,14 @@ impl TreeManager {
                                 self.tight_unread.push(result.node_id);
                             }
                         }
-                        self.pool.get_mut(result.node_id).status = NodeStatus::Fathomed;
+                        self.retire(result.node_id, NodeStatus::Fathomed);
                         stats.fathomed += 1;
                     }
                 } else if int_w >= cont_w {
                     // Integer domain-partition wins (or ties).
                     let (sidx, sbp, _) = spatial_int.unwrap();
                     let parent = self.pool.get(result.node_id).clone();
-                    self.pool.get_mut(result.node_id).status = NodeStatus::Branched;
+                    self.retire(result.node_id, NodeStatus::Branched);
                     let (left, right) =
                         create_children_spatial_int(&parent, sidx, sbp, || self.next_id());
                     self.pool.add(left);
@@ -1068,7 +1068,7 @@ impl TreeManager {
                     let (cont_decision, _) = cont.unwrap();
                     let cont_var = cont_decision.var_index;
                     let parent = self.pool.get(result.node_id).clone();
-                    self.pool.get_mut(result.node_id).status = NodeStatus::Branched;
+                    self.retire(result.node_id, NodeStatus::Branched);
                     let (left, right) =
                         create_children_spatial(&parent, &cont_decision, || self.next_id());
                     self.pool.add(left);
@@ -1124,7 +1124,7 @@ impl TreeManager {
                     // removed the region deliberately, so no floor is owed.
                     self.unresolved_floor = self.unresolved_floor.min(node_lb);
                 }
-                self.pool.get_mut(result.node_id).status = NodeStatus::Fathomed;
+                self.retire(result.node_id, NodeStatus::Fathomed);
                 stats.fathomed += 1;
                 // Only a node that produced its OWN trusted bound may become the
                 // incumbent. A failed relaxation's untrusted bound-box midpoint
@@ -1303,6 +1303,22 @@ impl TreeManager {
         Ok(())
     }
 
+    /// Move a node off the frontier with `status` and free its per-node vectors
+    /// (#1874; see [`NodePool::release_storage`]). A node kept as a #1510 tight
+    /// floor keeps its box: the Python driver reads it back through
+    /// [`Self::node_box`] to offer an interval enclosure of the same box.
+    /// O(1) upper bound on the open frontier (see [`NodePool::open_upper_bound`]).
+    pub fn open_upper_bound(&self) -> usize {
+        self.pool.open_upper_bound()
+    }
+
+    fn retire(&mut self, id: NodeId, status: NodeStatus) {
+        self.pool.get_mut(id).status = status;
+        if !self.tight_floors.contains_key(&id) {
+            self.pool.release_storage(id);
+        }
+    }
+
     /// A node's stored `local_lower_bound`, or `None` when the id was never
     /// allocated in the pool.
     ///
@@ -1324,8 +1340,16 @@ impl TreeManager {
     }
 
     /// A node's box `(lb, ub)`, or `None` for an id never allocated.
+    ///
+    /// Panics on a node whose box was released when it left the frontier
+    /// (#1874): an empty box returned in its place would read as "no columns".
     pub fn node_box(&self, id: NodeId) -> Option<(Vec<f64>, Vec<f64>)> {
         if id.0 < self.pool.total_count() {
+            assert!(
+                !self.pool.is_released(id),
+                "node_box({:?}): the node left the frontier and its box was released",
+                id
+            );
             let n = self.pool.get(id);
             Some((n.lb.clone(), n.ub.clone()))
         } else {
