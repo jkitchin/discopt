@@ -7535,6 +7535,107 @@ def _declared_box_tightening(model: Model, deadline: Optional[float] = None):
     return tighten_nonlinear_bounds(model, raw_lb, raw_ub, deadline=deadline)
 
 
+def _route_tightened_box_enabled() -> bool:
+    """``DISCOPT_ROUTE_TIGHTENED_BOX`` gate (#1867): hand the MIP-NLP family the
+    declared-box nonlinear tightening instead of the declared box.
+
+    ``solve_model`` computes that tightening before any routing (#863) and used it
+    only to prove infeasibility; the box itself was dropped, so a route that runs
+    no presolve of its own solved the looser problem. ``ball_mk2_10``'s row
+    ``sum(x_i**2 - 0.987 x_i) <= 0`` over integers in ``[-1, 1]`` pins every
+    column to 0 under the #1867 integer minimum, yet the convex route ran
+    ``lp_nlp_bb`` on ``[-1, 1]^10`` for 19 s without certifying -- the ``ball_*``
+    family is built so outer approximation needs exponentially many cuts.
+
+    Bound-changing (the route solves over a smaller, valid box), so gated per
+    CLAUDE.md section 5. Read at call time. Only the pass's **fixings** are handed
+    over (columns with ``lb == ub``); a merely narrower box is not.
+
+    **Why fixings only (measured 2026-10-22, 30 s, interleaved).** Handing over the
+    whole tightened box changed it on 100 of the 154 convex-routed MINLPLib
+    instances (<= 200 vars/cons, never looser) and was sound -- 200 rows, 0
+    problems -- but NOT regression-free: certified 81 -> 82 with 4 lost, confirmed
+    systematic over 3 reps (identical node counts): ``du-opt`` 8.0 s certified ->
+    36.8 s uncertified from ONE narrowed integer bound (``x15`` 0..10 -> 0..4),
+    ``smallinvDAXr3b150-165`` / ``r4b050-055`` certified -> uncertified,
+    ``enpro56pb`` 8.1 -> 19.6 s, ``ravempb`` 4.6 -> 12.6 s; gains
+    ``smallinvDAXr1b100-110`` and ``sssd25-04``. Splitting by column type does not
+    separate the two (losses and gains include integer-only and continuous-only
+    changes), so that hypothesis is falsified too. A narrower box reshapes the
+    outer approximation around the columns that stay; a fixing removes the column.
+
+    **Graduated (default ON, 2026-10-22).** Fixings change the box on 6 of the 100:
+    ``ball_mk2_10/30``, ``du-opt5``, ``hybriddynamic_fixed``, ``meanvarx``,
+    ``st_miqp1``. Panel, 3 reps, interleaved, load < 2: cert-clean (36 rows, 0
+    problems: no bound past an optimum, every incumbent passes ``verify_point`` on a
+    fresh model), every instance certified 3/3 in both arms, and net-positive --
+    ``ball_mk2_10`` 10.32 -> 0.20 s, ``ball_mk2_30`` 10.57 -> 0.23 s; the other four
+    unchanged (identical node counts; ``du-opt5`` 2.48 -> 2.64 s, sd 0.03/0.10).
+    ``=0`` hands the declared box to the route, as before.
+    """
+    return os.environ.get("DISCOPT_ROUTE_TIGHTENED_BOX", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
+
+
+#: Integer bounds from the declared-box pass are rounded with the integrality
+#: tolerance a solution is accepted at, so rounding never cuts an accepted point.
+_ROUTE_BOX_INT_TOL = 1e-5
+
+
+def _model_with_tightened_box(model: Model, tightening) -> Optional[Model]:
+    """A copy of ``model`` whose variable boxes are ``tightening``'s, or ``None``.
+
+    ``None`` when the pass changed nothing, proved nothing, or the gate is off --
+    the caller then keeps ``model`` itself, so an unchanged box costs no copy and is
+    bound-neutral. Only ever tightens: each new bound is the max/min of the
+    declared one and the pass's, and integer columns round with the integrality
+    tolerance (``ceil(lb - tol)``, ``floor(ub + tol)``), never inward of an
+    accepted point. A crossed box is left to the route (it is the pass's
+    infeasibility proof's business, already handled by the caller).
+    """
+    if tightening is None or not _route_tightened_box_enabled():
+        return None
+    t_lb, t_ub, stats = tightening
+    if getattr(stats, "infeasible", False):
+        return None
+    raw_lb, raw_ub = flat_variable_bounds(model)
+    new_lb = np.maximum(raw_lb, np.asarray(t_lb, dtype=np.float64))
+    new_ub = np.minimum(raw_ub, np.asarray(t_ub, dtype=np.float64))
+    off = 0
+    is_int = np.zeros(raw_lb.size, dtype=bool)
+    for v in model._variables:
+        if v.var_type in (VarType.INTEGER, VarType.BINARY):
+            is_int[off : off + v.size] = True
+        off += v.size
+    tol = _ROUTE_BOX_INT_TOL
+    new_lb[is_int] = np.maximum(raw_lb[is_int], np.ceil(new_lb[is_int] - tol))
+    new_ub[is_int] = np.minimum(raw_ub[is_int], np.floor(new_ub[is_int] + tol))
+    if np.any(new_lb > new_ub):
+        return None
+    # Only FIXINGS are handed over: a column the pass pins (``lb == ub``) leaves the
+    # problem, while a merely narrower box reshapes the route's outer approximation
+    # around the columns that stay -- measured both ways on the 100 convex-routed
+    # instances whose box the pass changes (see ``_route_tightened_box_enabled``).
+    fixed = new_lb == new_ub
+    new_lb = np.where(fixed, new_lb, raw_lb)
+    new_ub = np.where(fixed, new_ub, raw_ub)
+    if np.array_equal(new_lb, raw_lb) and np.array_equal(new_ub, raw_ub):
+        return None
+    clone = model.clone()
+    off = 0
+    for v in clone._variables:
+        k = v.size
+        v.lb = np.reshape(new_lb[off : off + k], v.shape)
+        v.ub = np.reshape(new_ub[off : off + k], v.shape)
+        off += k
+    return clone
+
+
 def _constant_objective_result(model: Model, t_start: float) -> Optional[SolveResult]:
     """Decide a model with **no columns** here; return ``None`` for anything else.
 
@@ -12973,7 +13074,12 @@ def solve_model(
         # remaining budget back to the default path, and that path must see the
         # model it was called with rather than a big-M reformulation of it.
         _pre_route_model = model
-        model = _get_transformation("gdp").apply(model, method=resolved_gdp_method)
+        # #1867: the route solves over the declared-box tightening computed above
+        # (``_model_with_tightened_box``), on a copy so the fallback and the caller
+        # keep the box they declared. Same variables by name, so the result maps
+        # back unchanged.
+        _route_box_model = _model_with_tightened_box(model, _declared_tightening) or model
+        model = _get_transformation("gdp").apply(_route_box_model, method=resolved_gdp_method)
 
         # #1334: the lowering appends a selector binary per disjunct, and the warm
         # start was flattened against the variables the USER declared -- so
@@ -13086,7 +13192,7 @@ def solve_model(
         _routed_x = getattr(_mip_nlp_result, "x", None) if _mip_nlp_result is not None else None
         if (
             _mip_nlp_result is not None
-            and model is _pre_route_model
+            and model is _route_box_model
             # Truth-tested, not ``is not None``: an empty dict is a no-incumbent
             # result, and recovering duals "at the incumbent" of a solve that has
             # none is meaningless -- it only raised a KeyError into the debug-level
@@ -13095,11 +13201,16 @@ def solve_model(
             and getattr(_mip_nlp_result, "constraint_duals", None) is None
         ):
             try:
+                # On the caller's model, not the tightened copy: bound multipliers
+                # must refer to the box the caller declared.
                 _x_flat = np.concatenate(
-                    [np.asarray(_routed_x[v.name], dtype=float).ravel() for v in model._variables]
+                    [
+                        np.asarray(_routed_x[v.name], dtype=float).ravel()
+                        for v in _pre_route_model._variables
+                    ]
                 )
                 _cd, _bdl, _bdu = _recover_nlp_duals_at_incumbent(
-                    model,
+                    _pre_route_model,
                     _x_flat,
                     time_budget=_role2_horizon(max(0.1, min(5.0, time_limit * 0.05))),
                 )
