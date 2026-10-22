@@ -40,6 +40,9 @@ import discopt.modeling as dm
 import numpy as np
 import pytest
 from discopt import Model
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.solver import _compute_alphabb_bound
 
@@ -95,10 +98,15 @@ def test_c17_spike_bound_is_sound(s):
     assert bound <= true_min + 1e-6, f"unsound alphaBB bound {bound} > true min {true_min}"
 
 
-def test_c17_sampled_alpha_would_have_been_unsound():
-    """Documents the bug: the OLD sampled-alpha + center-only gate DOES exceed the
-    true box minimum on the spike, so the fix is load-bearing (not vacuous)."""
-    from discopt._relax.alphabb import estimate_alpha
+def test_c17_rigorous_alpha_covers_the_spike():
+    """The C-17 fix is load-bearing: the spike needs a large, finite alpha.
+
+    This used to also run the OLD sampled estimator (``_relax.alphabb.
+    estimate_alpha``) to show it collapsed to 0 between sample points; that
+    module was retired in #1873 with the McCormick-"nlp" route, so only the half
+    that tests current code remains.
+    """
+    from discopt._alphabb_rigorous import rigorous_alpha
 
     B, a, s = 4.0, 1.0, 0.006
     LB, UB = -2.0, 2.0
@@ -108,16 +116,11 @@ def test_c17_sampled_alpha_would_have_been_unsound():
         UB,
     )
     true_min = _dense_min(lambda g: 0.5 * g**2 - B * np.exp(-((g - a) ** 2) / (2 * s * s)), LB, UB)
-    alpha_sampled = np.asarray(estimate_alpha(ev._obj_fn, np.array([LB]), np.array([UB])))
-    # The sampled alpha collapses to 0 (spike falls between all sample points)...
-    assert float(alpha_sampled[0]) < 1e-8
-    # ...and the rigorous alpha needed to convexify the box is enormous & finite.
-    from discopt._relax.alphabb import rigorous_alpha
-
     alpha_rig = np.asarray(rigorous_alpha(expr, m))
     assert np.all(np.isfinite(alpha_rig))
-    assert float(alpha_rig[0]) > float(alpha_sampled[0]) + 1.0
-    # The now-current bound stays sound where the sampled one would not.
+    # A sampled estimate misses a spike of width s = 0.006 on [-2, 2]; the
+    # rigorous one must see the curvature B / s**2 it carries.
+    assert float(alpha_rig[0]) > 1.0
     bound = _compute_alphabb_bound(ev, m, expr, np.array([LB]), np.array([UB]))
     assert bound <= true_min + 1e-6
 

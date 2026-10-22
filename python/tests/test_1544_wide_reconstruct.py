@@ -26,6 +26,9 @@ from discopt._relax.canonical_expr import (
     canonicalize,
     reconstruct,
 )
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.dag_compiler import compile_expression
 from discopt.modeling.core import BinaryOp, FunctionCall, UnaryOp
 

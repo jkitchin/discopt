@@ -25,10 +25,13 @@ soundness are covered backend-free in ``test_customcall_reduced.py``.
 from __future__ import annotations
 
 import discopt.modeling as dm
+import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 from discopt.modeling import Model
 from discopt.modeling.core import CustomCall
 
@@ -230,14 +233,3 @@ class TestRefusals:
 
         with pytest.raises(ValueError, match="custom|opaque|AD-only"):
             to_nl(m)
-
-    def test_relaxation_compile_raises(self):
-        from discopt._relax.relaxation_compiler import compile_objective_relaxation
-
-        m = Model("relax")
-        x = m.continuous("x", lb=-10, ub=10)
-        f = dm.custom(lambda x: (x - 3.0) ** 2)
-        m.minimize(f(x))
-
-        with pytest.raises(NotImplementedError, match="custom|opaque|relaxation"):
-            compile_objective_relaxation(m)

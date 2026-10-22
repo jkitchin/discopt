@@ -139,7 +139,7 @@ def run(args: argparse.Namespace) -> dict:
 
     # alphaBB rigorous alpha
     try:
-        import discopt._relax.alphabb as ab
+        import discopt._alphabb_rigorous as ab
 
         _orig_alpha = ab.rigorous_alpha
 

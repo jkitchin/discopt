@@ -53,15 +53,6 @@ def test_nlp_bb_with_warm_start():
     assert res.objective == pytest.approx(0.09, abs=1e-4)
 
 
-def test_mccormick_nlp_node_bounds():
-    # mccormick_bounds="nlp" compiles relaxation evaluators for objective and
-    # constraints and bounds every open node with them.
-    m = _bilinear_binary_model()
-    res = m.solve(mccormick_bounds="nlp", time_limit=120.0)
-    assert res.status in ("optimal", "feasible")
-    assert res.objective == pytest.approx(2.0, abs=1e-4)
-
-
 def test_mccormick_none_disables_extra_bounds():
     m = _bilinear_binary_model()
     res = m.solve(mccormick_bounds="none", time_limit=120.0)

@@ -266,7 +266,7 @@ def _cyipopt_available() -> bool:
 
 
 def pytest_collection_modifyitems(config, items):
-    """Auto-skip ``requires_cyipopt`` tests when cyipopt/Ipopt is unavailable.
+    """Auto-skip ``requires_cyipopt`` / ``requires_jax`` tests when the stack is absent.
 
     The optional Ipopt system stack is installed via apt in CI, which can fail on
     a transient mirror outage. Marked tests should then SKIP (not ERROR) so a flaky
@@ -292,6 +292,17 @@ def pytest_collection_modifyitems(config, items):
         reason = _CUTOVER_DEFERRED_TESTS.get(item.originalname)
         if reason is not None:
             item.add_marker(pytest.mark.xfail(reason=reason, strict=False, run=False))
+
+    # #1873: JAX is the optional discopt[jax] extra. A test that reaches JAX at
+    # run time carries ``requires_jax``; a module that imports it at collection
+    # time skips itself with ``pytest.importorskip("jax")``.
+    from discopt._optional_jax import jax_available
+
+    if not jax_available():
+        skip_no_jax = pytest.mark.skip(reason="JAX not installed (the discopt[jax] extra)")
+        for item in items:
+            if "requires_jax" in item.keywords:
+                item.add_marker(skip_no_jax)
 
     if _cyipopt_available():
         return

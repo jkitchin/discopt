@@ -30,6 +30,9 @@ from discopt._relax.integer_product_reform import (
     extend_initial_point,
     reformulate_integer_bilinear,
 )
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.nlp_evaluator import cached_evaluator
 from discopt._relax.primal_heuristics import _check_constraint_feasibility
 from discopt.solver import _one_hot_swap_reseed

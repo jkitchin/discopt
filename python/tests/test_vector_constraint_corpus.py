@@ -19,6 +19,9 @@ import warnings
 import numpy as np
 import pytest
 from discopt import Model
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.solver import _native_kernel_verify_point
 from discopt.solvers._convex_kernel import _incumbent_is_feasible

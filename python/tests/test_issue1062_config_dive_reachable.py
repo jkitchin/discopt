@@ -70,6 +70,7 @@ def test_one_hot_groups_are_detected(monkeypatch):
     assert groups, "no one-hot group detected — the dive tests would prove nothing"
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_dive_runs_even_when_the_wave_found_points(monkeypatch):
     """The defect: a successful wave used to make the dive unreachable."""
@@ -111,6 +112,7 @@ def test_dive_runs_even_when_the_wave_found_points(monkeypatch):
     )
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_dive_still_runs_when_the_wave_finds_nothing(monkeypatch):
     """The pre-existing #993 path must keep working — this is not a swap."""

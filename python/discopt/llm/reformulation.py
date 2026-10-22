@@ -315,14 +315,15 @@ def _detect_bilinear(model: Model) -> list[ReformulationSuggestion]:
             ReformulationSuggestion(
                 category="mccormick_partitioning",
                 description=(
-                    "Found bilinear terms in the objective \u2014 use partitions=4 or "
-                    "partitions=8 for tighter McCormick relaxations"
+                    "Found bilinear terms in the objective \u2014 if the default "
+                    'relaxation leaves a large gap, try solver="amp" (adaptive '
+                    "partitioning of the McCormick relaxation)"
                 ),
                 impact=(
-                    "Piecewise McCormick can significantly tighten "
+                    "Adaptive McCormick partitioning can significantly tighten "
                     "relaxations for bilinear/pooling problems"
                 ),
-                auto_applicable=True,
+                auto_applicable=False,
                 details={"constraints": []},
             )
         ]
@@ -333,14 +334,15 @@ def _detect_bilinear(model: Model) -> list[ReformulationSuggestion]:
                 category="mccormick_partitioning",
                 description=(
                     f"Found bilinear terms in {len(bilinear_constraints)} "
-                    f"constraints — use partitions=4 or partitions=8 for "
-                    f"tighter McCormick relaxations"
+                    f"constraints — if the default relaxation leaves a large gap, "
+                    f'try solver="amp" (adaptive partitioning of the McCormick '
+                    f"relaxation)"
                 ),
                 impact=(
-                    "Piecewise McCormick can significantly tighten "
+                    "Adaptive McCormick partitioning can significantly tighten "
                     "relaxations for bilinear/pooling problems"
                 ),
-                auto_applicable=True,
+                auto_applicable=False,
                 details={"constraints": bilinear_constraints},
             )
         )

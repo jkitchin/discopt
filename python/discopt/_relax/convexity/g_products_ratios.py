@@ -9,8 +9,7 @@ giving a named §5 entry point plus the factor curvatures for context.
 
 Design note. The paper derives *explicit* transforming functions per §5
 sub-case; discopt already carries dedicated envelopes for the common shapes
-(bilinear, reciprocal, linear-fractional, monomial joint hulls — see
-``symbolic/patterns.py`` and ``symbolic/gp_hull.py``). Rather than duplicate
+(bilinear, reciprocal, linear-fractional, monomial joint hulls). Rather than duplicate
 those or hand-transcribe a fragile per-case ``G`` table (a soundness risk),
 the general detector *is* the sound §5 recognizer: its constant-``ρ`` witness
 ``G=exp(ρ·)`` convexifies exactly the G-convex products/ratios, verified

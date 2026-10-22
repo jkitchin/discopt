@@ -18,6 +18,8 @@ import pytest
 
 pytest.importorskip("pounce")
 
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.nlp_evaluator import NLPEvaluator  # noqa: E402
 from discopt._relax.primal_heuristics import (  # noqa: E402
     _get_integer_mask,

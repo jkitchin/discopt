@@ -22,6 +22,10 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import discopt.modeling as dm  # noqa: E402
 import numpy as np  # noqa: E402
+import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.differentiable import differentiable_solve  # noqa: E402
 
 

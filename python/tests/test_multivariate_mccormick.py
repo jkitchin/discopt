@@ -5,15 +5,14 @@ the M1 acceptance criteria in issue #51:
 
 - **Soundness**: every composition rule produces ``cv <= f(g(x)) <= cc`` on
   randomized samples (>= 10**4 per composition) drawn from non-degenerate
-  inner relaxations ``cv_g < cc_g``. This is the case the legacy midpoint
-  composition rule (``relax_f(0.5*(cv_g+cc_g), cv_g, cc_g)``) does *not* handle
-  soundly, so the new rule strictly fixes a correctness gap there.
+  inner relaxations ``cv_g < cc_g`` -- the case the legacy midpoint composition
+  rule (``relax_f(0.5*(cv_g+cc_g), cv_g, cc_g)``) did *not* handle soundly. (That
+  rule and the univariate ``mccormick.py`` primitives it used were retired with
+  the McCormick-"nlp" route in #1873; these rules live on in ``mcbox``.)
 - **Structural validity**: at degenerate inner intervals (``cv_g == cc_g``) the
   composition reduces to ``f(value)``.
 - **Tightness floor**: the new rule's bracket is never wider than basic
   monotone-interval-arithmetic on monotone functions (``[f(cv_g), f(cc_g)]``).
-- **Legacy unsoundness witness**: documents that the legacy midpoint rule is
-  unsound at non-degenerate inputs on a representative case, motivating M1.
 """
 
 from __future__ import annotations
@@ -26,24 +25,13 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 import jax.nn as jnn
 import jax.numpy as jnp
 import numpy as np
-import pytest
-from discopt._relax.mccormick import (
-    relax_abs,
-    relax_atan,
-    relax_exp,
-    relax_log,
-    relax_log2,
-    relax_log10,
-    relax_sigmoid,
-    relax_sinh,
-    relax_softplus,
-    relax_sqrt,
-    relax_square,
-    relax_tanh,
-)
 from discopt._relax.multivariate_mccormick import (
     compose_abs,
     compose_atan,
@@ -86,12 +74,6 @@ def _random_inner_relaxation(rng, g_lb, g_ub, n=N_SAMPLES):
     return jnp.array(cv_g), jnp.array(cc_g), jnp.array(true_g)
 
 
-def _midpoint_legacy(relax_fn, cv_g, cc_g):
-    """Reproduce the legacy midpoint composition: relax_fn(mid, cv_g, cc_g)."""
-    mid = 0.5 * (cv_g + cc_g)
-    return relax_fn(mid, cv_g, cc_g)
-
-
 def _assert_sound(cv, cc, true_f, label):
     cv = np.asarray(cv)
     cc = np.asarray(cc)
@@ -107,82 +89,49 @@ def _assert_sound(cv, cc, true_f, label):
     assert int(np.sum(cv > cc + TOL)) == 0, f"[{label}] cv > cc somewhere"
 
 
-def _assert_at_least_as_tight(cv_new, cc_new, cv_old, cc_old, label, *, require_strict=False):
-    """Assert that the new (cv_new, cc_new) bracket is contained in the old one.
-
-    Tighter means cv_new >= cv_old and cc_new <= cc_old at every sample.
-    With ``require_strict=True``, also asserts the new rule is strictly tighter
-    on at least one sample (per the M1 acceptance criteria).
-    """
-    cv_new = np.asarray(cv_new)
-    cc_new = np.asarray(cc_new)
-    cv_old = np.asarray(cv_old)
-    cc_old = np.asarray(cc_old)
-    cv_loose = int(np.sum(cv_new + TOL < cv_old))
-    cc_loose = int(np.sum(cc_new > cc_old + TOL))
-    assert cv_loose == 0, (
-        f"[{label}] new cv looser than legacy at {cv_loose}/{cv_new.size} samples; "
-        f"max gap = {np.max(cv_old - cv_new):.3e}"
-    )
-    assert cc_loose == 0, (
-        f"[{label}] new cc looser than legacy at {cc_loose}/{cc_new.size} samples; "
-        f"max gap = {np.max(cc_new - cc_old):.3e}"
-    )
-    if require_strict:
-        cv_strict = int(np.sum(cv_new > cv_old + 1e-6))
-        cc_strict = int(np.sum(cc_new + 1e-6 < cc_old))
-        assert cv_strict + cc_strict > 0, (
-            f"[{label}] new rule is no tighter than legacy on any sample; "
-            "either the bounds were degenerate or the rules coincide."
-        )
-
-
 # ---------------------------------------------------------------------------
 # Per-function test cases
 # ---------------------------------------------------------------------------
 
 
-# (name, compose_fn, legacy_relax_fn, true_fn, [(g_lb, g_ub), ...])
+# (name, compose_fn, true_fn, [(g_lb, g_ub), ...])
 _TEST_CASES = [
-    ("exp", compose_exp, relax_exp, jnp.exp, [(-2.0, 1.0), (0.0, 3.0), (-3.0, -0.5)]),
-    ("log", compose_log, relax_log, jnp.log, [(0.5, 5.0), (1e-3, 1.0), (1.0, 100.0)]),
-    ("log2", compose_log2, relax_log2, jnp.log2, [(0.5, 5.0), (1.0, 100.0)]),
-    ("log10", compose_log10, relax_log10, jnp.log10, [(0.5, 5.0), (1.0, 100.0)]),
-    ("sqrt", compose_sqrt, relax_sqrt, jnp.sqrt, [(0.0, 4.0), (1.0, 9.0)]),
+    ("exp", compose_exp, jnp.exp, [(-2.0, 1.0), (0.0, 3.0), (-3.0, -0.5)]),
+    ("log", compose_log, jnp.log, [(0.5, 5.0), (1e-3, 1.0), (1.0, 100.0)]),
+    ("log2", compose_log2, jnp.log2, [(0.5, 5.0), (1.0, 100.0)]),
+    ("log10", compose_log10, jnp.log10, [(0.5, 5.0), (1.0, 100.0)]),
+    ("sqrt", compose_sqrt, jnp.sqrt, [(0.0, 4.0), (1.0, 9.0)]),
     (
         "softplus",
         compose_softplus,
-        relax_softplus,
         lambda t: jnp.logaddexp(t, 0.0),
         [(-2.0, 2.0), (0.0, 5.0)],
     ),
-    ("abs", compose_abs, relax_abs, jnp.abs, [(-3.0, 3.0), (0.5, 4.0), (-4.0, -0.5)]),
+    ("abs", compose_abs, jnp.abs, [(-3.0, 3.0), (0.5, 4.0), (-4.0, -0.5)]),
     (
         "square",
         compose_square,
-        relax_square,
         lambda t: t * t,
         [(-3.0, 3.0), (0.5, 4.0), (-4.0, -0.5)],
     ),
-    ("tanh", compose_tanh, relax_tanh, jnp.tanh, [(0.0, 2.0), (-2.0, 0.0), (-1.5, 1.5)]),
-    ("atan", compose_atan, relax_atan, jnp.arctan, [(0.0, 5.0), (-5.0, 0.0), (-2.0, 2.0)]),
+    ("tanh", compose_tanh, jnp.tanh, [(0.0, 2.0), (-2.0, 0.0), (-1.5, 1.5)]),
+    ("atan", compose_atan, jnp.arctan, [(0.0, 5.0), (-5.0, 0.0), (-2.0, 2.0)]),
     (
         "sigmoid",
         compose_sigmoid,
-        relax_sigmoid,
         jnn.sigmoid,
         [(0.0, 3.0), (-3.0, 0.0), (-2.0, 2.0)],
     ),
-    ("sinh", compose_sinh, relax_sinh, jnp.sinh, [(0.0, 2.0), (-2.0, 0.0), (-1.0, 1.0)]),
+    ("sinh", compose_sinh, jnp.sinh, [(0.0, 2.0), (-2.0, 0.0), (-1.0, 1.0)]),
 ]
 
 
 @pytest.mark.parametrize(
-    "name, compose_fn, legacy_fn, true_fn, intervals",
+    "name, compose_fn, true_fn, intervals",
     _TEST_CASES,
     ids=[c[0] for c in _TEST_CASES],
 )
-def test_soundness(name, compose_fn, legacy_fn, true_fn, intervals):
+def test_soundness(name, compose_fn, true_fn, intervals):
     """TM2014 rule produces cv <= f(true_g) <= cc on >= 10k samples per interval."""
     rng = np.random.default_rng(seed=hash(name) & 0xFFFF_FFFF)
     for g_lb, g_ub in intervals:
@@ -210,11 +159,11 @@ _MONOTONE_BASELINE = {
 
 
 @pytest.mark.parametrize(
-    "name, compose_fn, _legacy_fn, _true_fn, intervals",
+    "name, compose_fn, _true_fn, intervals",
     [c for c in _TEST_CASES if c[0] in _MONOTONE_BASELINE],
     ids=[c[0] for c in _TEST_CASES if c[0] in _MONOTONE_BASELINE],
 )
-def test_monotone_cv_matches_interval_arithmetic(name, compose_fn, _legacy_fn, _true_fn, intervals):
+def test_monotone_cv_matches_interval_arithmetic(name, compose_fn, _true_fn, intervals):
     """For monotone-increasing ``f``, TM2014 cv equals f(cv_g) — pointwise tight on
     the underestimator side."""
     f_at_cv, _, direction = _MONOTONE_BASELINE[name]
@@ -233,33 +182,6 @@ def test_monotone_cv_matches_interval_arithmetic(name, compose_fn, _legacy_fn, _
                     atol=1e-9,
                     err_msg=f"{name}: TM2014 cv != f(cv_g)",
                 )
-
-
-def test_legacy_midpoint_is_unsound_witness():
-    """Document the soundness gap that motivates M1: the legacy midpoint rule
-    produces ``cv > f(true_g)`` at non-degenerate inner intervals, which the
-    TM2014 rule fixes."""
-    rng = np.random.default_rng(seed=12345)
-    g_lb, g_ub = -2.0, 1.0
-    cv_g, cc_g, true_g = _random_inner_relaxation(rng, g_lb, g_ub, N_SAMPLES)
-    # Force non-degenerate intervals.
-    nondegenerate = np.asarray(cc_g - cv_g) > 0.5
-    cv_g_nd = cv_g[nondegenerate]
-    cc_g_nd = cc_g[nondegenerate]
-    true_g_nd = true_g[nondegenerate]
-
-    cv_legacy, cc_legacy = _midpoint_legacy(relax_exp, cv_g_nd, cc_g_nd)
-    true_f = jnp.exp(true_g_nd)
-    legacy_cv_violations = int(np.sum(np.asarray(cv_legacy) > np.asarray(true_f) + TOL))
-    legacy_cc_violations = int(np.sum(np.asarray(cc_legacy) < np.asarray(true_f) - TOL))
-    assert legacy_cv_violations + legacy_cc_violations > 0, (
-        "Expected the legacy midpoint rule to be unsound on non-degenerate samples; "
-        "if this assertion ever fails, M1's motivation may have changed."
-    )
-
-    # And TM2014 is sound on the same inputs.
-    cv_new, cc_new = compose_exp(cv_g_nd, cc_g_nd, g_lb, g_ub)
-    _assert_sound(cv_new, cc_new, true_f, label="exp TM2014 on legacy-failing samples")
 
 
 def test_endpoints_are_tight():
@@ -330,7 +252,7 @@ def test_jit_compatibility():
     import jax
 
     rng = np.random.default_rng(0)
-    for name, compose_fn, _, _, intervals in _TEST_CASES:
+    for name, compose_fn, _, intervals in _TEST_CASES:
         g_lb, g_ub = intervals[0]
         cv_g, cc_g, _ = _random_inner_relaxation(rng, g_lb, g_ub, n=64)
         jitted = jax.jit(compose_fn, static_argnums=(2, 3))

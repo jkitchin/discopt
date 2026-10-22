@@ -17,6 +17,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import pytest
 from discopt.llm.advisor import (
+    _ADVISABLE_KEYS,
     _analyze_structure,
     _llm_augment,
     _llm_presolve,
@@ -58,7 +59,10 @@ def test_analyze_structure_features():
 def test_rule_based_params_bilinear_minlp():
     a = _analyze_structure(_bilinear_minlp())
     p = _rule_based_params(a)
-    assert p["partitions"] == 4  # bilinear + integer -> partitioned McCormick
+    # bilinear + integer: AMP is named for a stubborn gap; ``partitions`` is not
+    # advised (it configured the McCormick-"nlp" route retired in #1873).
+    assert "partitions" not in p
+    assert 'solver="amp"' in p["reasoning"]
     # #1362: the advisor used to recommend "ipm" and call it a "pure-JAX IPM".
     # That engine is retired; "ipm" is a silent alias for POUNCE, so the advice
     # was a no-op described wrongly. It now names the engine that exists.
@@ -75,16 +79,16 @@ def test_rule_based_params_pure_continuous_lp():
     m.subject_to(x[0] + x[1] <= 1.0)
     m.minimize(x[0])
     p = _rule_based_params(_analyze_structure(m))
-    assert p["partitions"] == 0
+    assert "partitions" not in p
     assert p["cutting_planes"] is False
 
 
 def test_suggest_solver_params_rule_based_only():
     params = suggest_solver_params(_bilinear_minlp(), llm=False)
-    assert params["partitions"] == 4
     # Suggested keys must all be real solve options (advisory contract).
     for key in ("nlp_solver", "batch_size", "gap_tolerance", "time_limit"):
         assert key in params
+    assert set(params) <= _ADVISABLE_KEYS
 
 
 def test_suggest_solver_params_llm_augmentation_merges_overrides():
@@ -94,14 +98,24 @@ def test_suggest_solver_params_llm_augmentation_merges_overrides():
     assert params["batch_size"] == 64
     assert params["reasoning"] == "wide frontier"
     # Non-overridden rule-based keys survive.
-    assert params["partitions"] == 4
+    assert params["nlp_solver"] == "pounce"
+
+
+def test_suggest_solver_params_drops_an_llm_key_solve_would_refuse():
+    """A model can answer with ``partitions`` even though the prompt no longer
+    lists it; passing the result to ``solve()`` must not then raise (#1873)."""
+    with patch("discopt.llm.provider.complete") as mock_complete:
+        mock_complete.return_value = '{"partitions": 8, "batch_size": 32, "bogus": 1}'
+        params = suggest_solver_params(_bilinear_minlp(), llm=True)
+    assert "partitions" not in params and "bogus" not in params
+    assert params["batch_size"] == 32
 
 
 def test_suggest_solver_params_llm_failure_degrades_gracefully():
     with patch("discopt.llm.provider.complete", side_effect=RuntimeError("no api")):
         params = suggest_solver_params(_bilinear_minlp(), llm=True)
     # Safety invariant: rule-based result untouched by a failing LLM.
-    assert params["partitions"] == 4
+    assert params["nlp_solver"] == "pounce"
     assert params["batch_size"] == 16
 
 

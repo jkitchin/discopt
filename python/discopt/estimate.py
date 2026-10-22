@@ -469,6 +469,9 @@ def _response_jacobian_wrt_parameters(
         the body. Pinned design inputs are the ordinary multi-experiment
         case, so getting this wrong refuses well-posed campaign models.
     """
+    from discopt._optional_jax import require_jax
+
+    require_jax("discopt.estimate (the exact sensitivity Jacobian via jax.jacobian)")
     import jax
     import jax.numpy as jnp
 

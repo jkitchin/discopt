@@ -1,15 +1,13 @@
 """Code generation: :class:`EnvelopeResult` -> pure-JAX relaxation closure.
 
-The emitted closure matches the univariate McCormick primitive contract used
-throughout :mod:`discopt._relax.mccormick`::
+The emitted closure follows the univariate McCormick primitive contract::
 
     relax_fn(x, lb, ub) -> (cv, cc)
 
 with ``cv <= f(x) <= cc`` for every ``x`` in ``[lb, ub]``. The closure lambdifies
 the SymPy ``f``/``f'`` onto :mod:`jax.numpy` (so it is ``jax.jit`` / ``jax.grad``
 / ``jax.vmap`` compatible and carries no SymPy dependency at call time) and
-delegates the convex/concave assembly to :mod:`discopt._relax.symbolic.runtime`,
-the same sympy-free construction the hand-written domain packs use.
+delegates the convex/concave assembly to :mod:`discopt._relax.symbolic.runtime`.
 """
 
 from __future__ import annotations

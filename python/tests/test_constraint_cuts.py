@@ -6,8 +6,11 @@ the compressor power term -> soundness certification. Reproduces the cut that wa
 hand-derived to close the gas-network bound from 67% to 0%.
 """
 
-import jax
 import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
+import jax
 
 jax.config.update("jax_enable_x64", True)
 

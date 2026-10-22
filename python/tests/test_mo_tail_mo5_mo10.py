@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import warnings
 
-import discopt._relax.dag_compiler as dag_compiler
+import discopt._point_eval as point_eval
 import discopt.modeling as dm
 import numpy as np
 import pytest
@@ -82,38 +82,34 @@ class TestMO5CompileCache:
 
     @pytest.mark.smoke
     def test_sweep_does_not_recompile_per_point(self, monkeypatch):
-        """A weighted_sum sweep compiles each objective once, not per point.
+        """A weighted_sum sweep lowers each objective once, not per point.
 
-        Pre-fix, ``evaluate_expression`` called ``compile_expression`` k times
-        per accepted point plus k^2 for the payoff table (26 for an 11-point
-        bi-objective sweep). With the evaluator, the legacy per-call
-        ``compile_expression`` is not used on the objective-evaluation path and
-        ``compile_expression_params`` is called exactly k times (once per
-        objective).
+        Pre-fix, ``evaluate_expression`` recompiled k times per accepted point plus
+        k^2 for the payoff table (26 for an 11-point bi-objective sweep). With the
+        evaluator, each objective is lowered exactly once (k == 2): the sweep
+        changes the scalarized objective, never a ``Parameter``, so no snapshot
+        invalidates a lowering. Since #1873 the lowering is the POUNCE tape, so
+        this counts :func:`discopt._point_eval.compile_point_fn` and asserts the
+        JAX evaluation path is not taken at all.
         """
-        ce_calls = {"n": 0}
-        cep_calls = {"n": 0}
-        orig_ce = dag_compiler.compile_expression
-        orig_cep = dag_compiler.compile_expression_params
+        calls = {"n": 0}
+        orig = point_eval.compile_point_fn
 
-        def counting_ce(*a, **k):
-            ce_calls["n"] += 1
-            return orig_ce(*a, **k)
+        def counting(*a, **k):
+            calls["n"] += 1
+            return orig(*a, **k)
 
-        def counting_cep(*a, **k):
-            cep_calls["n"] += 1
-            return orig_cep(*a, **k)
+        def no_jax(*a, **k):
+            raise AssertionError("objective evaluation fell back to the JAX compiler")
 
-        monkeypatch.setattr(dag_compiler, "compile_expression", counting_ce)
-        monkeypatch.setattr(dag_compiler, "compile_expression_params", counting_cep)
+        monkeypatch.setattr(point_eval, "compile_point_fn", counting)
+        monkeypatch.setattr(point_eval, "_jax_fallback", no_jax)
 
         m, objs = _biobj_qp()
         front = weighted_sum(m, objs, n_weights=11, time_limit=10)
         assert front.n >= 3
-        # Objective evaluation no longer goes through the per-call recompile.
-        assert ce_calls["n"] == 0
-        # Exactly one param-agnostic compile per objective (k == 2).
-        assert cep_calls["n"] == len(objs)
+        # Exactly one lowering per objective (k == 2).
+        assert calls["n"] == len(objs)
 
 
 # ─────────────────────────────────────────────────────────────

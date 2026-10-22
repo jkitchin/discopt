@@ -3,17 +3,20 @@
 These validate :mod:`discopt._relax.symbolic` against the same discipline as the
 hand-written relaxations: every derived envelope must be *sound*
 (``cv <= f <= cc``), correctly *curved* (``cv`` convex, ``cc`` concave), and —
-for the McCormick-exact convex/concave atoms — must reproduce the existing
-``discopt._relax.mccormick`` primitives bit-for-bit.
+for the McCormick-exact convex/concave atoms — must reproduce the closed-form
+envelope (the function itself and its secant) to rounding.
 
 The engine itself imports SymPy (a design-time ``[sympy]`` extra); the whole
 module is skipped if SymPy is unavailable.
 """
 
+import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 
 jax.config.update("jax_enable_x64", True)
 
@@ -96,27 +99,33 @@ def test_envelope_is_sound_and_correctly_curved(expr, domain):
 
 
 # --------------------------------------------------------------------------
-# Parity with the existing hand-written McCormick primitives
+# Parity with the closed-form envelopes
 # --------------------------------------------------------------------------
+# This compared against the hand-written ``discopt._relax.mccormick`` primitives
+# until they were retired with the McCormick-NLP route (#1873). For a function of
+# fixed curvature the envelope on [a, b] is known in closed form -- the function on
+# its own side, the secant on the other -- so that is the oracle now.
+
+
+def _secant(f, x, a, b):
+    return f(a) + (f(b) - f(a)) * (x - a) / (b - a)
 
 
 @pytest.mark.parametrize(
-    "expr, mc_name, domain",
+    "expr, f, curvature, domain",
     [
-        (X**2, "relax_square", (-3.0, 3.0)),
-        (sp.exp(X), "relax_exp", (-2.0, 2.0)),
-        (sp.log(X), "relax_log", (0.1, 5.0)),
-        (sp.sqrt(X), "relax_sqrt", (0.05, 5.0)),
+        (X**2, lambda t: t * t, "convex", (-3.0, 3.0)),
+        (sp.exp(X), jnp.exp, "convex", (-2.0, 2.0)),
+        (sp.log(X), jnp.log, "concave", (0.1, 5.0)),
+        (sp.sqrt(X), jnp.sqrt, "concave", (0.05, 5.0)),
     ],
 )
-def test_matches_handwritten_mccormick(expr, mc_name, domain):
-    from discopt._relax import mccormick
-
-    mc_fn = getattr(mccormick, mc_name)
+def test_matches_closed_form_envelope(expr, f, curvature, domain):
     sym_fn = lambdify_envelope(derive_envelope(expr, X))
 
     lo, hi = domain
     rng = np.random.default_rng(0)
+    checks = 0
     for _ in range(50):
         a, b = sorted(rng.uniform(lo, hi, size=2))
         if b - a < 1e-3:
@@ -124,9 +133,12 @@ def test_matches_handwritten_mccormick(expr, mc_name, domain):
         xs = jnp.linspace(a, b, 25)
         for x in xs:
             cv_s, cc_s = sym_fn(x, a, b)
-            cv_m, cc_m = mc_fn(x, a, b)
-            assert float(cv_s) == pytest.approx(float(cv_m), abs=1e-9, rel=1e-7)
-            assert float(cc_s) == pytest.approx(float(cc_m), abs=1e-9, rel=1e-7)
+            exact, chord = float(f(x)), float(_secant(f, x, a, b))
+            cv_m, cc_m = (exact, chord) if curvature == "convex" else (chord, exact)
+            assert float(cv_s) == pytest.approx(cv_m, abs=1e-9, rel=1e-7)
+            assert float(cc_s) == pytest.approx(cc_m, abs=1e-9, rel=1e-7)
+            checks += 1
+    assert checks == 50 * 25
 
 
 # --------------------------------------------------------------------------

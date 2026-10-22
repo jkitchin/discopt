@@ -21,7 +21,7 @@ import discopt.modeling as dm
 import numpy as np
 import pytest
 import test_1775_g2_1_hull_nesting as nesting
-from discopt._relax.dag_compiler import compile_expression
+from discopt._point_eval import compile_point_fn
 from discopt._relax.gdp_reformulate import _collect_variables, _is_linear, reformulate_gdp
 from gdp_differential import run_shape
 from test_gdp_differential_battery import SHAPES
@@ -124,14 +124,16 @@ def test_the_cone_row_is_exact_at_integer_points_and_relaxes_the_perspective(mon
     (sel,) = [n for n in names if n.startswith("_gdp_aux_")]
     vx, vy = sorted(n for n in names if n not in (sel,))  # ..._v_x_0, ..._v_y_0
     assert vx.endswith("_v_x_0") and vy.endswith("_v_y_0")
-    fn = compile_expression(row.body, low)
+    # The tape point evaluator, not the JAX DAG compiler: the row is evaluated at
+    # points only, and JAX is the optional discopt[jax] extra (#1873).
+    fn = compile_point_fn(row.body, low)
     index = {v.name: low._flat_var_offset(v) for v in low._variables}
     n_flat = sum(v.size for v in low._variables)
 
     def value(px, py, s):
         z = np.zeros(n_flat)
         z[index[vx]], z[index[vy]], z[index[sel]] = px, py, s
-        return float(fn(z))
+        return float(fn(z).reshape(()))
 
     def g(px, py):
         return 2 * (px - 1) ** 2 + 0.5 * (py + 1) ** 2 - 2

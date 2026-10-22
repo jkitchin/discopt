@@ -11,7 +11,6 @@ import tempfile
 
 import pytest
 from discopt.benchmarks.metrics import (
-    BatchMetrics,
     compute_batch_metrics,
     compute_solver_metrics,
     shifted_geometric_mean,
@@ -379,39 +378,3 @@ class TestBenchmarkExport:
             assert metrics.n_incorrect == 0
         finally:
             os.unlink(path)
-
-
-# ─────────────────────────────────────────────────────────────
-# TestBatchScaling
-# ─────────────────────────────────────────────────────────────
-
-
-class TestBatchScaling:
-    def test_batch_scaling_positive_throughputs(self):
-        """Run batch scaling on a simple model and verify throughputs > 0."""
-        from discopt.modeling.examples import example_simple_minlp
-
-        model = example_simple_minlp()
-        config = BenchmarkConfig(
-            suite="smoke",
-            batch_sizes=[1, 4, 16],
-        )
-        runner = BenchmarkRunner(config)
-        metrics = runner.run_batch_scaling(model)
-
-        assert isinstance(metrics, BatchMetrics)
-        assert len(metrics.throughputs) == 3
-        for tp in metrics.throughputs:
-            assert tp > 0.0
-
-    def test_batch_metrics_type(self):
-        """Verify the return type of run_batch_scaling."""
-        model = Model("tiny")
-        x = model.continuous("x", lb=0.0, ub=5.0)
-        model.minimize(x**2)
-
-        config = BenchmarkConfig(suite="smoke", batch_sizes=[1, 2])
-        runner = BenchmarkRunner(config)
-        metrics = runner.run_batch_scaling(model)
-        assert isinstance(metrics, BatchMetrics)
-        assert len(metrics.batch_sizes) == 2

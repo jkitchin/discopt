@@ -28,7 +28,7 @@ def _model():
     return m, x
 
 
-@pytest.mark.parametrize("mc_mode", [None, "nlp"])
+@pytest.mark.parametrize("mc_mode", [None, "none"])
 def test_infeasible_warm_start_starts_an_nlp(monkeypatch, mc_mode):
     seen: list[np.ndarray] = []
     node = S._solve_node_nlp
@@ -46,8 +46,9 @@ def test_infeasible_warm_start_starts_an_nlp(monkeypatch, mc_mode):
     monkeypatch.setattr(PH, "subnlp", spy_sub)
     m, x = _model()
     kw = {} if mc_mode is None else {"mccormick_bounds": mc_mode}
-    # The "nlp" mode runs to the limit (its alphaBB bound does not close); the
-    # root seeds fire in the first second either way.
+    # "none" (the Python tree's alphaBB route -- what the retired "nlp" mode was
+    # demoted to on this nonconvex model) runs to the limit; the root seeds fire
+    # in the first second either way.
     r = m.solve(time_limit=5, initial_solution={x: START}, **kw)
     assert seen, "no NLP ran -- the probe did not fire"
     assert any(p.size >= 3 and np.allclose(p[:3], START) for p in seen)

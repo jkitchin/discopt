@@ -19,7 +19,7 @@ Every node either has an exact SCIP spelling or is refused by name
   ``max``/``atan2``/``dm.custom`` have no SCIP expression handler exposed through
   PySCIPOpt and are refused.
 * ``a ** b`` with a non-constant exponent is rewritten as ``exp(b * log(a))``
-  -- discopt's own definition (``relaxation_compiler``) -- only when ``a > 0`` is
+  -- discopt's own definition -- only when ``a > 0`` is
   proven over the declared box; otherwise it is refused, because the rewrite
   would silently drop points where ``a <= 0``.
 * ``xlogx`` (``entropy``) is ``x*log(x)`` only where ``x > 0``; at ``x = 0`` discopt

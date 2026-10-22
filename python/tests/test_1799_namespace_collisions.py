@@ -178,6 +178,7 @@ def test_value_refuses_a_variable_substituted_out_before_the_solve():
         s.value(y)
 
 
+@pytest.mark.requires_jax
 def test_differentiable_value_refuses_a_substituted_variable():
     """``DiffSolveResult.value`` had the same name-only lookup."""
     from discopt._relax.differentiable import differentiable_solve

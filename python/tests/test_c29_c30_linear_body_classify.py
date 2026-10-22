@@ -128,6 +128,7 @@ def test_c30_maximize_sense_preserved_in_extracted_c():
     assert c[1] == pytest.approx(-1.0)
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_c30_autodiff_extractor_applies_maximize_sense():
     """The autodiff LP fallback itself (the sense-dropping culprit) must now

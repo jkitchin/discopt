@@ -37,6 +37,9 @@ from discopt._relax.cutting_planes import (
     generate_alphabb_quadratic_oa_cuts_from_evaluator,
 )
 from discopt._relax.model_utils import flat_variable_bounds
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.nlp_evaluator import NLPEvaluator
 
 FEAS_TOL = 1e-6

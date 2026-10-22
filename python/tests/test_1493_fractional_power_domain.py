@@ -15,6 +15,9 @@ from __future__ import annotations
 import discopt.modeling as dm
 import numpy as np
 import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.nlp_evaluator import cached_evaluator
 from discopt._relax.nonlinear_bound_tightening import (
     FunctionDomainBoundRule,

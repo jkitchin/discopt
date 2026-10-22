@@ -2511,6 +2511,9 @@ def _extract_lp_data_autodiff(model: Model, *, for_qp: bool = False) -> LPData:
     are handled the same way as scalar bodies: each component contributes
     one row in the LP matrix, and inequalities get one slack per row.
     """
+    from discopt._optional_jax import require_jax
+
+    require_jax("the legacy autodiff LP/QP extractor (the fallback behind the tape)")
     import jax
     import jax.numpy as jnp
 
@@ -2763,6 +2766,9 @@ def _qp_terms_tape(model: Model, n_orig: int) -> tuple[Any, np.ndarray, float] |
 
 def _qp_terms_jax(model: Model, n_orig: int) -> tuple[np.ndarray, np.ndarray, float]:
     """``(Q, c, d)`` via JAX — the legacy differentiator, kept as the fallback."""
+    from discopt._optional_jax import require_jax
+
+    require_jax("the legacy JAX QP-term extractor (the fallback behind the tape)")
     import jax
     import jax.numpy as jnp
 

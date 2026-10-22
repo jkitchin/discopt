@@ -820,7 +820,9 @@ class TestDiagnosisResult:
             python_time=2.0,
         )
         report2 = _diagnose_limit(m, r2, None)
-        assert "partitions" in report2.lower()
+        # Points at AMP, not the retired ``partitions`` option (#1873).
+        assert 'solver="amp"' in report2
+        assert "partitions=" not in report2
 
         # Large gap
         r3 = SolveResult(

@@ -28,6 +28,9 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.nlp_evaluator import NLPEvaluator  # noqa: E402
 from discopt._relax.primal_heuristics import (  # noqa: E402
     _local_branching_submip,

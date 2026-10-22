@@ -126,6 +126,7 @@ def test_probe_point_is_finite_for_unbounded_variables(lb, ub):
         assert v_lo <= value <= v_hi, f"probe point {value} outside [{v_lo}, {v_hi}]"
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_analytic_sepgrad_solves_a_lifted_model(monkeypatch):
     """End-to-end: with the analytic path on, a composite-lift model still solves.

@@ -31,8 +31,11 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import math  # noqa: E402
 
 import discopt.modeling as dm  # noqa: E402
+import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 import jax.numpy as jnp  # noqa: E402
-import pytest  # noqa: E402
 
 # Ackley's global minimum on any box containing the origin.
 TRUE_GLOBAL = 0.0

@@ -31,6 +31,9 @@ import discopt.modeling as dm
 import numpy as np
 import pytest
 import scipy.sparse as sp
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.dag_compiler import compile_expression
 from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.export.nl import _NLWriter
@@ -830,8 +833,6 @@ class TestCliSolve:
             "2",
             "--solver",
             "amp",
-            "--partitions",
-            "2",
             "--rlt",
             "off",
             "--no-nlp-bb",
@@ -849,7 +850,7 @@ class TestCliSolve:
         assert kwargs["gap_tolerance"] == 0.25
         assert kwargs["threads"] == 2
         assert kwargs["solver"] == "amp"
-        assert kwargs["partitions"] == 2
+        assert "partitions" not in kwargs  # the flag was retired in #1873
         assert kwargs["rlt"] == "off"
         assert kwargs["nlp_bb"] is False
         assert kwargs["tuning"].rlt_quad is False

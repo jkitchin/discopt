@@ -2053,6 +2053,7 @@ def test_partitioned_obbt_applies_scaling_update_before_custom_refinement(monkey
     assert result.n_tightened == 0
 
 
+@pytest.mark.requires_jax
 def test_partitioned_presolve_obbt_runs_on_bilinear_demo():
     """The real partition-aware OBBT path should solve bounded MILP subproblems."""
     from discopt._relax.nlp_evaluator import NLPEvaluator
@@ -2093,6 +2094,7 @@ def test_partitioned_presolve_obbt_runs_on_bilinear_demo():
     assert np.all(lb <= ub)
 
 
+@pytest.mark.requires_jax
 def test_partitioned_presolve_obbt_maximize_cutoff_uses_relaxation_objective_space(
     monkeypatch,
 ):
@@ -2203,6 +2205,7 @@ def test_amp_rejects_nonfinite_direct_initial_point(bad_value):
         )
 
 
+@pytest.mark.requires_jax
 @pytest.mark.memory_heavy
 def test_amp_does_not_accept_start_with_nonfinite_objective(monkeypatch):
     """A finite start with NaN objective is not a valid AMP incumbent."""
@@ -3094,6 +3097,7 @@ def test_issue91_minlptests_oa_rows_are_cut_or_explained(
     assert reasons == expected_reasons
 
 
+@pytest.mark.requires_jax
 def test_alphabb_quadratic_oa_cut_covers_issue_63_row():
     """The indefinite quadratic row should get a relaxed OA cut, not direct OA."""
     from discopt._relax.convexity import classify_oa_cut_convexity
@@ -3141,6 +3145,7 @@ def test_alphabb_quadratic_oa_cut_covers_issue_63_row():
         assert float(np.dot(cut.coeffs, point)) <= cut.rhs + 1e-8
 
 
+@pytest.mark.requires_jax
 def test_alphabb_quadratic_oa_skips_nonquadratic_row():
     """Nonquadratic rows must not be accepted by local Hessian coincidence."""
     from discopt._relax.cutting_planes import generate_alphabb_quadratic_oa_cuts_from_evaluator
@@ -3480,6 +3485,7 @@ def test_alphabb_cutoff_obbt_prerequisite_respects_expired_deadline(monkeypatch)
     assert cutoff_obbt_calls == []
 
 
+@pytest.mark.requires_jax
 @pytest.mark.memory_heavy
 def test_objective_cutoff_bounds_enable_alphabb_for_issue_63_instances():
     """The exact nlp_008 objective cutoff should create finite alpha-BB bounds."""

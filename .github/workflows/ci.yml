@@ -700,6 +700,56 @@ jobs:
         env:
           DISCOPT_LP_MILP_BACKEND: rust
 
+  # JAX is the optional `discopt[jax]` extra (#1873). Every other lane installs
+  # jax, so without this job nothing would notice a JAX import creeping back onto
+  # the default path, or a test that needs JAX but neither skips nor says so.
+  # It runs the smoke tier with JAX absent (JAX-only tests skip through
+  # `pytest.importorskip("jax")` / `requires_jax`) plus the corpus-wide guard,
+  # which solves every in-repo instance with JAX blocked and records the stack of
+  # any attempt to import it. cyipopt is left out too (its tests auto-skip).
+  python-nojax:
+    name: Python without JAX (3.12, ubuntu)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+      - name: Install Python dependencies (no jax/jaxlib)
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          uv pip install maturin
+          uv pip install \
+            numpy scipy highspy openpyxl scikit-learn pyyaml sympy \
+            "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
+            pyscipopt \
+            pytest pytest-timeout pytest-xdist hypothesis
+          maturin develop --release
+          # The lane means nothing if something above pulled JAX in transitively.
+          python -c "import importlib.util as u, sys; sys.exit(u.find_spec('jax') is not None)"
+      - name: Smoke tier without JAX
+        run: |
+          source .venv/bin/activate
+          scripts/run_memory_capped_pytest.sh pytest python/tests/ \
+            -q --tb=short --timeout=300 -m smoke -n 4 -p no:cacheprovider
+      - name: Corpus guard (no default path reaches for JAX)
+        run: |
+          source .venv/bin/activate
+          pytest -q --tb=short --timeout=3000 -p no:cacheprovider -m "" \
+            python/tests/test_1873_jax_optional.py
+
   # Sharded like python-fast (same 4-way split, same 4 workers); the
   # `python-coverage` job below combines the shards' data files and applies the
   # 85% gate to the union, so the gate measures exactly what it measured before.
@@ -741,10 +791,10 @@ jobs:
           restore-keys: |
             uv-${{ runner.os }}-py312-cov-
       - name: Install Python dependencies
-        # The optional-feature deps (sympy, pyomo, equinox/optax, onnx stack,
-        # litellm, xgboost, lightgbm) are installed here so the coverage gate
-        # measures the modules they unlock (symbolic envelopes, the Pyomo
-        # bridge, GNN branching, NN embedding readers, LLM helpers) with their
+        # The optional-feature deps (sympy, pyomo, onnx stack, litellm, xgboost,
+        # lightgbm) are installed here so the coverage gate measures the modules
+        # they unlock (symbolic envelopes, the Pyomo bridge, NN embedding
+        # readers, LLM helpers) with their
         # existing fast tests instead of skipping them (#87). Keep this list in
         # sync with the optional extras in pyproject.toml.
         run: |
@@ -754,7 +804,7 @@ jobs:
           uv pip install \
             jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
-            sympy pyomo litellm equinox optax onnx onnxruntime xgboost lightgbm pyscipopt \
+            sympy pyomo litellm onnx onnxruntime xgboost lightgbm pyscipopt \
             pytest pytest-timeout pytest-xdist pytest-cov hypothesis
           maturin develop --release
       # --cov-fail-under restored to 85 (#87) after the post-AMP-merge

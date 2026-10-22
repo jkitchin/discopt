@@ -29,7 +29,8 @@ If no model is given, ask the user to paste their model code or provide a file p
 
 ### Bilinear / Quadratic Terms
 - Look for `x * y` where both are continuous variables
-- Suggest McCormick partitioning: `m.solve(partitions=4)` for tighter relaxations
+- Suggest adaptive McCormick partitioning: `m.solve(solver="amp")` for a stubborn gap
+  (`partitions=k` was retired in #1873 and raises -- do not suggest it)
 - Suggest `m.solve(rlt=True)` — Reformulation-Linearization-Technique level-1 cuts
   (constraint×bound and constraint×constraint products) that tighten the McCormick
   LP; sound regardless of setting. Default is `rlt="auto"` (structure-gated per-node).

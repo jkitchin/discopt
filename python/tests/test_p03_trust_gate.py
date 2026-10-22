@@ -25,6 +25,9 @@ pytest.importorskip("pounce")
 
 import discopt.modeling as dm  # noqa: E402
 import discopt.solver as S  # noqa: E402
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 import jax.numpy as jnp  # noqa: E402
 from discopt.solver import (  # noqa: E402
     _make_evaluator,

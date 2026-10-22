@@ -30,8 +30,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "jax>=0.4",
-    "jaxlib>=0.4",
+    # JAX is NOT here: it is the `jax` extra below (issue #1873).
     "numpy>=1.24",
     "scipy>=1.10",
     "pounce-solver>=0.12",
@@ -48,6 +47,16 @@ Documentation = "https://github.com/jkitchin/discopt#readme"
 Issues = "https://github.com/jkitchin/discopt/issues"
 
 [project.optional-dependencies]
+# JAX (issue #1873): an optional extra, not a core dependency. The default solve
+# path -- the POUNCE tape, the Rust core, numpy -- imports no `jax` module. JAX is
+# needed only by the legacy NLP evaluator (the fallback for an expression with no
+# tape opcode, e.g. `dm.custom` or a matrix 2-norm; or `DISCOPT_NLP_EVAL=jax`), by
+# the features that use JAX autodiff on purpose (`discopt.estimate`,
+# `discopt.sensitivity`, `dm.argmin`/`implicit`/`external`, the differentiable and
+# parametric layers, sIPOPT, `discopt.ml.train`) and by the `dm.custom`
+# reduced-space engine. See docs/dev/jax-optional-inventory.md. Each of those raises an ImportError naming this extra without it
+# (`discopt._optional_jax`).
+jax = ["jax>=0.4", "jaxlib>=0.4"]
 # POUNCE is now a core dependency (the default NLP/IPM engine); this extra is
 # kept as a no-op alias for back-compat with `pip install discopt[pounce]`.
 pounce = ["pounce-solver>=0.12"]
@@ -89,14 +98,22 @@ gurobi = ["gurobipy>=10"]
 scip = ["pyscipopt>=5.2"]
 xgboost = ["xgboost>=1.7"]
 lightgbm = ["lightgbm>=4.0"]
-gnn = ["equinox>=0.13.8", "optax>=0.1"]
-learned = ["equinox>=0.13.8", "optax>=0.1"]
+# `gnn` / `learned` installed equinox + optax for the ICNN learned relaxations, which
+# were retired with the McCormick-"nlp" route in #1873 (no pretrained models ever
+# shipped, so they never took effect). Kept as aliases of `jax` for back-compat with
+# `pip install discopt[gnn]`, like `pounce`/`highs` above.
+gnn = ["discopt[jax]"]
+learned = ["discopt[jax]"]
 # Design-time symbolic envelope/relaxation derivation toolkit
 # (discopt._relax.symbolic). SymPy is used to *derive*, *verify*, and
 # *code-generate* JAX relaxation closures offline; it is never imported on the
 # solver hot path. See docs/notebooks/symbolic_envelopes.ipynb.
 sympy = ["sympy>=1.12"]
 dev = [
+    # The full test suite exercises the JAX-only features; a JAX-less tree runs
+    # with those tests skipped (`requires_jax` / `pytest.importorskip("jax")`).
+    "jax>=0.4",
+    "jaxlib>=0.4",
     "pytest",
     "pytest-timeout",
     "pytest-cov",
@@ -132,7 +149,7 @@ dev = [
     # solver="scip" is covered by test_scip_backend.py (#1784).
     "pyscipopt>=5.2",
 ]
-all = ["discopt[pounce,ipopt,cutest,llm,gnn,nn,ml,plot,sympy,pyomo,scip]"]
+all = ["discopt[jax,pounce,ipopt,cutest,llm,nn,ml,plot,sympy,pyomo,scip]"]
 
 [project.scripts]
 discopt = "discopt.cli:main"
@@ -181,10 +198,6 @@ disable_error_code = ["arg-type", "union-attr", "attr-defined"]
 [[tool.mypy.overrides]]
 module = "discopt._relax.dag_compiler"
 disable_error_code = "misc"
-
-[[tool.mypy.overrides]]
-module = "discopt._relax.relaxation_compiler"
-disable_error_code = ["misc", "attr-defined"]
 
 [[tool.mypy.overrides]]
 module = "discopt._relax.nlp_evaluator"
@@ -293,6 +306,7 @@ markers = [
     "memory_heavy: tests that can compile or solve enough AMP/JAX work to require memory caps",
     "requires_cyipopt: requires the optional cyipopt/Ipopt solver stack",
     "requires_pounce: requires the optional POUNCE (pure-Rust Ipopt port) solver",
+    "requires_jax: reaches JAX at run time; skipped without the discopt[jax] extra (#1873)",
     "gpu: requires GPU",
     "relaxation: theorem-style property tests for relaxation rules (containment, tightening); fast",
     "correctness: known-optima validation tests; usually also `slow`",

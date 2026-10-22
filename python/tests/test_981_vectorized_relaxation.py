@@ -23,6 +23,9 @@ import numpy as np
 import pytest
 from discopt import Model
 from discopt._relax.canonical_expr import canonicalize
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.dag_compiler import compile_expression
 from discopt._relax.scalarize import scalar_elements, static_shape
 from discopt._relax.term_classifier import classify_nonlinear_terms

@@ -1317,6 +1317,9 @@ class _Builder:
         # (`DISCOPT_SEPGRAD=jax`, the graduated flag's opt-out that CLAUDE.md §5
         # requires stay intact) or when POUNCE is absent/too old and there is no
         # tape to use at all. Never on a default install.
+        from discopt._optional_jax import require_jax
+
+        require_jax("JAX separation gradients (DISCOPT_SEPGRAD=jax, or POUNCE unavailable)")
         import jax
         import jax.numpy as jnp
 

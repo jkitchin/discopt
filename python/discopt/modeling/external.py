@@ -487,6 +487,9 @@ def _build_composite(
     change that. Building an external block does import JAX, because
     ``pure_callback`` is the mechanism.
     """
+    from discopt._optional_jax import require_jax
+
+    require_jax("dm.external (the pure_callback derivative bridge)")
     import jax
     import jax.numpy as jnp
 

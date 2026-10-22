@@ -8,9 +8,12 @@ import time
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
+import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 import jax.numpy as jnp
 import numpy as np
-import pytest
 from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.modeling import examples
 from discopt.modeling.core import Model

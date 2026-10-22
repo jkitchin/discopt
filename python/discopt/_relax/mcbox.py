@@ -1,9 +1,10 @@
 """MCBox — a propagating McCormick relaxation type with rule-based subgradients.
 
 The MC++ analogue, done the JAX way (MAiNGO-parity plan P0). Unlike the compiled
-relaxation fns in :mod:`relaxation_compiler` — which collapse to the exact function
-value at coincident points, so ``jax.grad`` of them is the *true* (nonconvex)
-gradient, not a McCormick subgradient (#572) — an :class:`MCBox` carries the genuine
+relaxation fns of the since-retired ``relaxation_compiler`` (#1873) — which collapsed
+to the exact function value at coincident points, so ``jax.grad`` of them was the
+*true* (nonconvex) gradient, not a McCormick subgradient (#572) — an :class:`MCBox`
+carries the genuine
 McCormick relaxation ``(cv, cc)`` over a box **plus its subgradients**, propagated by
 per-operator rule through arbitrary jax-traceable code. Evaluate any model function on
 ``MCBox`` leaves and the convex/concave relaxation and valid supporting hyperplanes
@@ -43,6 +44,11 @@ from __future__ import annotations
 import contextlib
 from dataclasses import dataclass
 from typing import cast
+
+from discopt._optional_jax import jax_available, missing_jax_error
+
+if not jax_available():  # #1873: JAX is the optional discopt[jax] extra
+    raise missing_jax_error(__name__)
 
 import jax
 import jax.numpy as jnp

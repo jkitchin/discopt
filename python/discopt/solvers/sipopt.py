@@ -281,6 +281,9 @@ def pounce_sensitivity(
             "side has no second-order content to differentiate again."
         )
 
+    from discopt._optional_jax import require_jax
+
+    require_jax("pounce_sensitivity (sIPOPT-style parametric sensitivity)")
     import jax
     import jax.numpy as jnp
 

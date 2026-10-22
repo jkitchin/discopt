@@ -77,7 +77,8 @@ python -m venv .venv && source .venv/bin/activate
 
 # Install Python dependencies. The `pounce` extra pulls in POUNCE
 # (pure-Rust Ipopt port, the default single-solve NLP backend); the
-# `ipopt` extra adds the optional cyipopt fallback.
+# `ipopt` extra adds the optional cyipopt fallback. JAX is the optional
+# `jax` extra for users (#1873); `dev` includes it so the whole suite runs.
 pip install -e ".[dev,pounce,ipopt,highs]"
 
 # Build Rust-Python bindings (from the repo root, not crates/discopt-python/)
@@ -85,6 +86,21 @@ maturin develop --release
 ```
 
 ## Running Tests
+
+### JAX is optional
+
+`jax`/`jaxlib` are the `discopt[jax]` extra, not core dependencies (#1873).
+A test that needs JAX must still pass on a JAX-less install, by skipping:
+
+- a module that imports JAX (or a JAX-only `discopt` module) at collection time
+  calls `pytest.importorskip("jax", reason=...)` before that import;
+- a test that reaches JAX only at run time carries `@pytest.mark.requires_jax`,
+  which `python/tests/conftest.py` turns into a skip when JAX is absent.
+
+Library code that needs JAX calls `discopt._optional_jax.require_jax(feature)`
+before importing it, so the user gets an `ImportError` naming the feature and the
+extra. CI's `Python without JAX` job runs `pytest -m smoke` with JAX uninstalled,
+plus the corpus-wide guard in `python/tests/test_1873_jax_optional.py`.
 
 The Python suite is tiered so you can pick the right cost/coverage point.
 Prefer the Make targets — they pin flags consistent with CI.
@@ -179,7 +195,7 @@ version bump, tagging, and PyPI publication. Tagging `vX.Y.Z` triggers
 
 - `crates/discopt-core/` -- Rust solver engine (expression IR, B&B tree, presolve)
 - `crates/discopt-python/` -- PyO3 bindings
-- `python/discopt/` -- Python package (modeling API, JAX layer, solver orchestrator)
+- `python/discopt/` -- Python package (modeling API, numpy relaxation layer, solver orchestrator)
 - `python/tests/` -- Python test suite
 - `docs/` -- Jupyter Book documentation (notebooks live in `docs/notebooks/`)
 

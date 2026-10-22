@@ -57,8 +57,10 @@ inspect the returned `SolveResult`. When the result points to a deeper problem
 
 ### If `status == "time_limit"` or `status == "node_limit"`:
 - Report the gap at termination: is it close to closing?
-- Tighten the relaxation: `partitions=4` or `8` (piecewise McCormick), `rlt=True`
-  (Reformulation-Linearization), `psd_cuts=True` (QCQP/quadratic), `cutting_planes=True`.
+- Tighten the relaxation: `rlt=True` (Reformulation-Linearization),
+  `psd_cuts=True` (QCQP/quadratic), `cutting_planes=True`; for a bilinear-heavy model
+  whose gap stalls, `solver="amp"` (adaptive McCormick partitioning). (`partitions=k`
+  was retired in #1873 and raises -- do not suggest it.)
 - Recommend tighter variable bounds (manually, or `discopt.tightening.fbbt_box(m)`)
   — these directly strengthen McCormick relaxations.
 - If the model has disjunctions (`if_then`/`either_or`), try `gdp_method="hull"`
@@ -89,7 +91,6 @@ inspect the returned `SolveResult`. When the result points to a deeper problem
        time_limit=3600,  # seconds
        gap_tolerance=1e-4,  # relative gap
        threads=1,  # CPU threads for Rust components
-       partitions=0,  # piecewise McCormick (0=standard, 4-8=tighter)
        rlt="auto",  # "auto" | True | False
        psd_cuts=False,  # PSD/eigenvalue cuts for QCQP
        gdp_method="big-m",  # or "hull" for tighter disjunctive relaxations

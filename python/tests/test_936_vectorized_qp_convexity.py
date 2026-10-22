@@ -44,6 +44,9 @@ from discopt._relax.convexity.certificate import (  # noqa: E402
     certify_quadratic_objective_convex,
 )
 from discopt._relax.convexity.interval_ad import interval_hessian  # noqa: E402
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.nlp_evaluator import cached_evaluator  # noqa: E402
 from discopt._relax.problem_classifier import (  # noqa: E402
     ProblemClass,

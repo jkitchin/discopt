@@ -61,79 +61,69 @@ def _flatten_solution(model, x_dict: dict[str, np.ndarray]) -> np.ndarray:
     return np.concatenate(parts)
 
 
+def _scalar(value) -> float:
+    arr = np.asarray(value, dtype=np.float64)
+    if arr.size != 1:
+        raise ValueError(f"an objective must be scalar-valued; this one has shape {arr.shape}")
+    return float(arr.reshape(()))
+
+
 def evaluate_expression(expr, model, x_dict: dict[str, np.ndarray]) -> float:
     """Evaluate a scalar discopt Expression at a given solution.
 
-    Compiles ``expr`` through the JAX DAG compiler using the model's current
-    parameter values, then calls it on the flat solution vector.
+    Lowers ``expr`` to the POUNCE tape with the model's current parameter values
+    and evaluates it at the flat solution vector. No JAX: the JAX DAG compiler is
+    used only for an expression the tape cannot lower (#1873).
 
     .. note::
 
-       This compiles ``expr`` afresh on every call (a full Expression-DAG walk
-       plus a JAX trace). Inside a scalarization sweep the same ``k`` objective
-       expressions are evaluated many times; use an :class:`ObjectiveEvaluator`
-       (via :func:`objective_evaluator`) to compile each objective once and
-       reuse it, which is what the sweep helpers do (MO5).
+       This lowers ``expr`` afresh on every call. Inside a scalarization sweep
+       the same ``k`` objective expressions are evaluated many times; use an
+       :class:`ObjectiveEvaluator` (via :func:`objective_evaluator`) to lower each
+       objective once and reuse it, which is what the sweep helpers do (MO5).
     """
-    from discopt._relax.dag_compiler import compile_expression
+    from discopt._point_eval import evaluate_at
 
-    fn = compile_expression(expr, model)
     x_flat = _flatten_solution(model, x_dict)
-    return float(np.asarray(fn(x_flat)))
+    return _scalar(evaluate_at(expr, model, x_flat))
 
 
 class ObjectiveEvaluator:
-    """Compile a fixed list of objective expressions once and reuse them.
+    """Lower a fixed list of objective expressions once and reuse them.
 
-    :func:`evaluate_expression` recompiles its expression (an Expression-DAG
-    walk plus a JAX trace) on every call. During a scalarization sweep the same
-    ``k`` objectives are cross-evaluated at every accepted point and, ``k``
-    times per anchor, for the payoff table — a full recompile each time of
-    expressions that never change (MO5). This helper compiles each objective's
-    *parameter-agnostic* callable once (via
-    :func:`~discopt._relax.dag_compiler.compile_expression_params`) and evaluates
-    it against the model's *current* parameter snapshot on each call.
+    :func:`evaluate_expression` re-lowers its expression on every call. During a
+    scalarization sweep the same ``k`` objectives are cross-evaluated at every
+    accepted point and, ``k`` times per anchor, for the payoff table -- a full
+    re-lowering each time of expressions that never change (MO5). This helper
+    lowers each objective once per parameter snapshot
+    (:class:`discopt._point_eval.PointEvaluator`) and reuses it.
 
-    The result is numerically identical to :func:`evaluate_expression`:
-    ``compile_expression`` is exactly ``compile_expression_params`` composed
-    with a fresh parameter snapshot, so threading the snapshot per call
-    reproduces the legacy value bit-for-bit while eliminating the redundant DAG
-    walks and traces.
+    The tape bakes parameter values in, so the evaluator re-reads
+    ``model._parameters`` on every :meth:`at` call and re-lowers only when a value
+    changed: scalarizers that mutate ``Parameter.value`` between solves
+    (epsilon-constraint, Tchebycheff, NBI, NNC) see the current values.
 
     The evaluator is keyed by object identity (``id(expr)``); pass the same
-    ``Expression`` objects used to build the sweep. It reads
-    ``model._parameters`` fresh on every :meth:`at` call, so scalarizers that
-    mutate ``Parameter.value`` between solves (ε-constraint, Tchebycheff, NBI,
-    NNC) see the current values.
+    ``Expression`` objects used to build the sweep.
     """
 
     def __init__(self, model, objectives: list) -> None:
-        from discopt._relax.dag_compiler import _build_param_index, compile_expression_params
+        from discopt._point_eval import PointEvaluator
 
         self._model = model
         self._objectives = list(objectives)
-        param_index = _build_param_index(model)
-        # One compiled param-agnostic callable per objective, keyed by identity.
-        self._fns = [compile_expression_params(e, model, param_index) for e in self._objectives]
-        self._by_id = {id(e): fn for e, fn in zip(self._objectives, self._fns)}
-
-    def _snapshot(self) -> tuple:
-        from discopt._relax.dag_compiler import _snapshot_params
-
-        return _snapshot_params(self._model)
+        self._eval = PointEvaluator(model)
 
     def at(self, index: int, x_dict: dict[str, np.ndarray]) -> float:
         """Evaluate objective ``index`` at solution ``x_dict``."""
         x_flat = _flatten_solution(self._model, x_dict)
-        params = self._snapshot()
-        return float(np.asarray(self._fns[index](x_flat, params)))
+        return _scalar(self._eval(self._objectives[index], x_flat))
 
     def vector_at(self, x_dict: dict[str, np.ndarray]) -> np.ndarray:
         """Evaluate all objectives at ``x_dict``, returning a ``(k,)`` array."""
         x_flat = _flatten_solution(self._model, x_dict)
-        params = self._snapshot()
         return np.array(
-            [float(np.asarray(fn(x_flat, params))) for fn in self._fns],
+            [_scalar(self._eval(e, x_flat)) for e in self._objectives],
             dtype=np.float64,
         )
 

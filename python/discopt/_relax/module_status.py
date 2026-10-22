@@ -78,8 +78,8 @@ class ModuleStatus:
 
 #: Module name relative to ``discopt._relax`` -> its declared status.
 #:
-#: Keys are dotted paths below ``discopt._relax`` (``"symbolic.patterns"``, not
-#: ``"discopt._relax.symbolic.patterns"``). Anything imported by production code
+#: Keys are dotted paths below ``discopt._relax`` (``"claim_audit"``, not
+#: ``"discopt._relax.claim_audit"``). Anything imported by production code
 #: must NOT appear here -- the guard test rejects stale entries.
 MODULE_STATUS: Final[dict[str, ModuleStatus]] = {
     # -- public: optional user-facing entry points -------------------------
@@ -112,38 +112,15 @@ MODULE_STATUS: Final[dict[str, ModuleStatus]] = {
             "claim_differential.py, never by the solver."
         ),
     ),
-    "icnn_trainer": ModuleStatus(
+    "symbolic.signed_signomial": ModuleStatus(
         status="tooling",
         reason=(
-            "Offline training pipeline that *produces* the pretrained ICNN "
-            "registry that learned_relaxations.py consumes at solve time. "
-            "Requires the equinox/optax extras; importing it during a solve "
-            "would violate the JAX-free solve path."
-        ),
-    ),
-    "symbolic.certified_learned": ModuleStatus(
-        status="tooling",
-        reason=(
-            "Design-time certification of guaranteed-convex networks as sound "
-            "relaxations (Phase 8 prototype), in the design-time symbolic "
-            "toolkit rather than on the solve path."
-        ),
-    ),
-    "symbolic.patterns": ModuleStatus(
-        status="tooling",
-        reason=(
-            "Design-time catalogue of certified relaxation/cut patterns and the "
-            "sole importer of symbolic.gp_hull and symbolic.signed_signomial. "
-            "No automated consumer: it is read and code-generated from by hand "
-            "(design/relaxation-patterns.md)."
-        ),
-    ),
-    "symbolic.registry": ModuleStatus(
-        status="tooling",
-        reason=(
-            "Design-time certification catalogue for the symbolic domain packs "
-            "and their sole importer (domains.chemeng/gas/power). No automated "
-            "consumer: certify_all is run by hand when a pack changes."
+            "Reference implementation (JAX) of the log-domain DC envelope of a "
+            "signed signomial. The production numpy engine "
+            "(convexity.signomial_global / convexity.signomial) is pinned to it "
+            "pointwise by test_signomial_global.py, test_signomial_canon.py and "
+            "test_g_signomial_products.py; nothing on the solve path imports it. "
+            "Its former importer, symbolic.patterns, was retired in #1873."
         ),
     ),
     # -- incubating: tested, no production call site yet -------------------

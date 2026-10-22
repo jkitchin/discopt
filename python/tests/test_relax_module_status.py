@@ -169,12 +169,45 @@ def test_relative_import_resolution_is_correct(graph):
         assert module not in srcs, f"{module} recorded as its own importer"
 
 
-def test_issue_1231_modules_are_live(graph):
-    """The three #1231 called dead are reachable from ``polyhedral_oa`` (#1347)."""
-    for name in ("chebyshev_model", "taylor_model", "ellipsoidal_arith"):
-        full = f"{RELAX}.{name}"
-        assert _production_imported(full, graph), f"{name} should be production-imported"
-        assert f"{RELAX}.polyhedral_oa" in graph["importers"][full]
+#: Retired with the McCormick-"nlp" route in #1873
+#: (docs/dev/nlp-mccormick-route-retirement.md). #1347 established that the first
+#: three were *live* -- reachable from ``polyhedral_oa`` -- which was true: they
+#: were live on a route whose bound never changed a result. Retiring the route
+#: retired them.
+RETIRED_1873 = (
+    "relaxation_compiler",
+    "batch_evaluator",
+    "mccormick_nlp",
+    "mccormick_evaluator",
+    "mccormick",
+    "envelopes",
+    "alphabb",
+    "piecewise_mccormick",
+    "oa_relax",
+    "polyhedral_oa",
+    "taylor_model",
+    "ellipsoidal_arith",
+    "chebyshev_model",
+    "learned_relaxations",
+    "icnn",
+    "icnn_trainer",
+    "symbolic.registry",
+    "symbolic.patterns",
+    "symbolic.gp_hull",
+    "symbolic.certified_learned",
+    "symbolic.domains",
+    "symbolic.domains.chemeng",
+    "symbolic.domains.gas",
+    "symbolic.domains.power",
+)
+
+
+def test_modules_retired_by_1873_stay_retired(graph):
+    """A retired module that reappears needs a new decision, not a quiet revert."""
+    back = [m for m in RETIRED_1873 if f"{RELAX}.{m}" in graph["modules"]]
+    assert len(RETIRED_1873) == 24
+    assert not back, f"retired in #1873 but present again: {back}"
+    assert not [m for m in RETIRED_1873 if m in MODULE_STATUS]
 
 
 def test_every_relax_module_is_imported_or_declared(graph):

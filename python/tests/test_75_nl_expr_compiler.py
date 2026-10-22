@@ -38,6 +38,9 @@ from discopt._nl_expr_compiler import (
     compile_to_nl_expr,
     try_compile,
 )
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.dag_compiler import compile_expression
 from discopt.modeling.core import Constant, FunctionCall, IndexExpression
 

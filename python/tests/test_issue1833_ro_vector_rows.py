@@ -221,6 +221,7 @@ def test_ellipsoidal_vector_row_is_robust(case, row, lin):
 # -- shape evaluation ---------------------------------------------------------
 
 
+@pytest.mark.requires_jax
 def test_evaluated_shape_covers_compositions_static_inference_misses():
     m = dm.Model()
     x = m.continuous("x")
@@ -317,6 +318,7 @@ def test_polyhedral_formulation_refuses_unsplit_vector_row():
         PolyhedralRobustFormulation(m, [unc]).build()
 
 
+@pytest.mark.requires_jax
 @pytest.mark.parametrize("kind", ["box", "polyhedral", "ellipsoidal"])
 @pytest.mark.parametrize("where", ["constraint", "objective", "nested"])
 def test_custom_call_of_uncertain_param_is_refused(kind, where):

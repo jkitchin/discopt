@@ -984,7 +984,7 @@ class Expression:
     # consumer reduces over. ``min``/``max`` have ``MathFunc::Min``/``Max``, which
     # look n-ary (``FunctionCall`` takes ``*args``) but are read as strictly
     # BINARY by four consumers -- ``expr.rs``'s two evaluators, ``fbbt.rs``'s
-    # forward interval, ``dag_compiler``/``relaxation_compiler``/``differentiable``
+    # forward interval, ``dag_compiler``/``differentiable``
     # -- each of which indexes ``args[0], args[1]`` and would silently DROP
     # ``args[2:]``. A dropped argument in the FBBT interval is not a loose bound,
     # it is a wrong one (``min`` over a subset is too high), i.e. a false
@@ -2236,11 +2236,13 @@ class DiscontinuousIntrinsicError(NotImplementedError):
     certificate, not a slow answer (CLAUDE.md §1).
 
     Why ``sign`` is exported and these are not, although it is discontinuous
-    too: ``sign`` already has every piece listed above -- an IR variant
-    (``MathFunc::Sign``), the interval rule ``sign(x) in [-1, 1]``
-    (``fbbt.rs``), and an envelope (``relax_sign``, dispatched from
-    ``_relax/relaxation_compiler.py``) -- because its range is a bounded,
-    fixed, three-point set that needs no auxiliary variable. A step function
+    too: ``sign`` has the IR and FBBT pieces listed above -- an IR variant
+    (``MathFunc::Sign``) and the interval rule ``sign(x) in [-1, 1]``
+    (``fbbt.rs``) -- and needs no integrality reformulation, because its range
+    is a bounded, fixed, three-point set that needs no auxiliary variable. (It
+    has no envelope in the default relaxation engine: its only one,
+    ``relax_sign``, lived in the McCormick-"nlp" route retired in #1873, so a
+    model with ``sign`` gets no dual bound and is reported uncertified.) A step function
     with an unbounded range does not fit that treatment; it needs the integer
     reformulation above. So the difference is not "``sign`` is smoother", it is
     "``sign`` was implemented and these were not".
@@ -3500,6 +3502,12 @@ def custom(fn: Callable, *, name: Optional[str] = None) -> Callable:
     """
     if not callable(fn):
         raise TypeError(f"custom() expects a callable, got {type(fn).__name__}")
+    from discopt._optional_jax import require_jax
+
+    # #1873: the body is traced and differentiated by JAX on every route (the
+    # MCBox engine, the JAX evaluator, DIRECT's local refine), so refuse here, at
+    # the call that names the feature, rather than at the first evaluation.
+    require_jax("dm.custom (a JAX-traced user function)")
 
     def _build(*args) -> Expression:
         return CustomCall(fn, *[_wrap(a) for a in args], name=name)
@@ -4176,7 +4184,7 @@ def _reject_unnormalized_rhs(constraint: "Constraint", *, where: str, index: int
     the offset into ``body``. Most of the tree honours that invariant by simply not
     looking at ``rhs``: **26 modules read ``Constraint.body`` and never read
     ``.rhs``**, among them the whole relaxation stack (``_relax/dag_compiler``,
-    ``relaxation_compiler``, ``milp_relaxation``, ``mccormick_subgradient``,
+    ``milp_relaxation``, ``mccormick_subgradient``,
     ``term_classifier``, ``nonlinear_bound_tightening``, ``dependent_vars``,
     ``implied_integer``, the convexity certificate, ``bilevel/kkt``, Benders, RO).
 
@@ -9422,8 +9430,10 @@ class Model:
             Until #1116 this defaulted to ``True`` and was read nowhere. See
             :meth:`discopt.solver.solve_model`.
         partitions : int, default 0
-            Number of piecewise McCormick partitions (0 = standard convex
-            relaxation, k > 0 = k partitions for tighter relaxations).
+            Retired (#1873). Piecewise McCormick partitions configured the
+            McCormick-"nlp" relaxation route, which has been removed; any nonzero
+            value raises ``ValueError``. See
+            ``docs/dev/nlp-mccormick-route-retirement.md``.
         rlt : bool or str, default "auto"
             Reformulation-Linearization Technique control for the McCormick LP
             relaxation. ``"auto"`` defers per-node RLT cuts to the structure-gated
@@ -9774,6 +9784,17 @@ class Model:
         # Entry clock: the #844 fallback below caps its budget at what is left of
         # ``time_limit`` measured from HERE, not from the primary's start.
         _t_solve0 = _time.perf_counter()
+        # #1873: refuse the retired McCormick-"nlp" route's options before any
+        # route (native kernel, convex kernel, HiGHS, ...) can take the model and
+        # silently ignore them.
+        from discopt.solver import _refuse_retired_relaxation_options
+
+        _refuse_retired_relaxation_options(
+            kwargs.get("mccormick_bounds", "auto"),
+            partitions,
+            kwargs.get("relaxation_arithmetic", "mccormick"),
+            kwargs.get("use_learned_relaxations", False),
+        )
         self.validate()
         # #1775 G2.6: which user big-M disjunctions this solve's lowerings read.
         from discopt.gdp.user_big_m import use_counts as _ubm_use_counts
@@ -10574,15 +10595,10 @@ class Model:
                 # calling it here imported JAX on every nonlinear solve even when
                 # the tape backend was selected (#75). The jax import stays inside
                 # the fallback so it happens only when the tape is not used.
-                from discopt._tape_nlp_evaluator import build_evaluator
-
-                def _jax_evaluator():
-                    from discopt._relax.nlp_evaluator import cached_evaluator
-
-                    return cached_evaluator(self)
+                from discopt._tape_nlp_evaluator import build_evaluator, jax_fallback_evaluator
 
                 _verify_snap = (
-                    build_evaluator(self, _jax_evaluator),
+                    build_evaluator(self, lambda: jax_fallback_evaluator(self)),
                     [v.name for v in self._variables],
                 )
                 # #1561: the same columns, frozen, for the certificate backstop.

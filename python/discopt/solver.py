@@ -1160,7 +1160,6 @@ def _native_kernel_ignored_levers(
     *,
     strategy,
     rlt,
-    partitions,
     presolve,
     in_tree_presolve_stride,
     kwargs,
@@ -1176,8 +1175,6 @@ def _native_kernel_ignored_levers(
         levers.append("strategy")
     if not (isinstance(rlt, str) and rlt == "auto"):
         levers.append("rlt")
-    if partitions:
-        levers.append("partitions")
     if not presolve:
         levers.append("presolve")
     if in_tree_presolve_stride != 1:
@@ -3250,14 +3247,9 @@ def _make_evaluator(model: Model):
     tape backend. Default is unchanged — anything other than ``tape`` takes the
     JAX path, and the tape is bound-CHANGING until the §5 panel says otherwise.
     """
-    from discopt._tape_nlp_evaluator import build_evaluator
+    from discopt._tape_nlp_evaluator import build_evaluator, jax_fallback_evaluator
 
-    def _jax_evaluator():
-        from discopt._relax.nlp_evaluator import cached_evaluator
-
-        return cached_evaluator(model)
-
-    return build_evaluator(model, _jax_evaluator)
+    return build_evaluator(model, lambda: jax_fallback_evaluator(model))
 
 
 def _alphabb_node_box(model, node_lb, node_ub):
@@ -3719,10 +3711,8 @@ def _compute_interval_bound(model, node_lb, node_ub, negate):
     model the internal minimization objective is ``-f``, so its valid lower
     bound is ``-hi``.
 
-    Unlike the McCormick-NLP bound this is cheap and unconditional, so it lets
-    every open nonconvex node carry a finite valid bound on every iteration
-    (instead of ``-inf`` on iterations where the periodic McCormick-NLP solve
-    is skipped). Returns ``-inf`` when the enclosure is not finite or
+    It is cheap and unconditional, so it lets every open nonconvex node carry a
+    finite valid bound on every iteration. Returns ``-inf`` when the enclosure is not finite or
     evaluation fails — never an invalid (too-high) bound.
     """
     if model._objective is None:
@@ -7191,7 +7181,7 @@ def _warn_native_kernel_bypassed(options: list[str]) -> None:
 
     The native Rust kernel (default ON) runs its own fixed best-first search and calls
     no node callback, so ``_native_kernel_feature_safe`` routes a solve that sets
-    ``strategy``, ``rlt``, ``partitions``, ``presolve=False``,
+    ``strategy``, ``rlt``, ``presolve=False``,
     ``in_tree_presolve_stride``, ``obbt_at_root=False`` or ``node_callback`` to the
     Python tree, which honours them. That is sound -- the Python tree is the trusted
     path -- but it changes the engine, its node counts, its gap-tolerance semantics
@@ -8338,8 +8328,6 @@ _MIP_NLP_IGNORED_OPTIONS: tuple[tuple[str, Callable[[Any], bool]], ...] = (
     ("rlt_cuts", lambda v: v is not False),
     ("rlt", lambda v: v != "auto"),
     ("cuts", lambda v: v != "auto"),
-    ("partitions", lambda v: v != 0),
-    ("use_learned_relaxations", lambda v: v is not False),
     ("mccormick_bounds", lambda v: v != "auto"),
     ("decomposition", lambda v: v is not None),
     ("lagrangian_bound", lambda v: v is not False),
@@ -8356,7 +8344,6 @@ _MIP_NLP_IGNORED_OPTIONS: tuple[tuple[str, Callable[[Any], bool]], ...] = (
     # a default solve on the mip-nlp path stays quiet and stays routable.
     ("in_tree_presolve_stride", lambda v: v != 1),
     ("eigenvalue_root_bound", lambda v: v is not False),
-    ("relaxation_arithmetic", lambda v: v != "mccormick"),
     ("subnlp_enabled", lambda v: v is not True),
     ("subnlp_backend", lambda v: v != "auto"),
     ("subnlp_frequency", lambda v: v != 20),
@@ -8373,6 +8360,49 @@ _MIP_NLP_IGNORED_OPTIONS: tuple[tuple[str, Callable[[Any], bool]], ...] = (
     # solver="mip-nlp" warns and proceeds, as with every other entry.
     ("abs_gap_tolerance", lambda v: v is not None),
 )
+
+
+_RETIRED_RELAXATION_DOC = "docs/dev/nlp-mccormick-route-retirement.md"
+
+
+def _refuse_retired_relaxation_options(
+    mccormick_bounds: Any,
+    partitions: Any,
+    relaxation_arithmetic: Any,
+    use_learned_relaxations: Any,
+) -> None:
+    """Refuse the options of the retired McCormick-"nlp" relaxation route (#1873).
+
+    ``mccormick_bounds="nlp"``, ``partitions``, ``relaxation_arithmetic`` and
+    ``use_learned_relaxations`` all configured one route: an NLP over the
+    compositional McCormick relaxation, kept as a node bound only for convex
+    models. Measured on the in-repo corpus it fired on 7 of 66 instances and,
+    with its bound forced to ``-inf``, left bound, node count and status
+    identical on 36 of 36 instance/variant pairs, while costing 1.4-3.3x wall
+    and 2.3-3.6x memory -- and on two instances it turned a certified 2-6 s
+    solve into a 27x time-limit overrun and a 13.6 GB out-of-memory kill. It was
+    retired under CLAUDE.md section 5 rather than kept behind the options. The
+    parameters stay in the signature so a caller gets this message instead of a
+    ``TypeError`` or, worse, a silent no-op.
+    """
+    retired = []
+    if mccormick_bounds == "nlp":
+        retired.append("mccormick_bounds='nlp'")
+    if partitions:
+        retired.append(f"partitions={partitions!r}")
+    if relaxation_arithmetic != "mccormick":
+        retired.append(f"relaxation_arithmetic={relaxation_arithmetic!r}")
+    if use_learned_relaxations:
+        retired.append("use_learned_relaxations=True")
+    if retired:
+        raise ValueError(
+            f"{', '.join(retired)}: the McCormick-'nlp' relaxation route these options "
+            "configured has been removed. Its bound never changed a result on the "
+            "corpus (36 of 36 measured pairs) and it could exhaust memory; see "
+            f"{_RETIRED_RELAXATION_DOC}. Omit the option(s): the default "
+            "mccormick_bounds='auto' already uses the LP-form McCormick relaxation "
+            "for nonconvex models and the NLP relaxation for convex ones."
+        )
 
 
 def _mip_nlp_ignored_options(values: Mapping[str, Any]) -> list[str]:
@@ -11927,8 +11957,9 @@ def solve_model(
         sound — a constraint×bound product is non-negative at every feasible
         point — so this only trades bound tightness for relaxation size.
     partitions : int, default 0
-        Number of piecewise McCormick partitions (0 = standard convex
-        relaxation, k > 0 = k partitions for tighter relaxations).
+        Retired (#1873): any nonzero value raises ``ValueError``. Piecewise
+        McCormick partitions configured the removed McCormick-"nlp" route; see
+        ``docs/dev/nlp-mccormick-route-retirement.md``.
     root_cut_rounds : int, optional
         Opt-in root PSD cut-pool separation rounds: when > 0 and the relaxer
         carries PSD cuts, a strong cut pool is separated once at the root box
@@ -11940,26 +11971,23 @@ def solve_model(
         Cap on the number of inherited root-pool cut rows (keeps per-node LP
         size bounded). ``None`` (default) falls back to ``DISCOPT_ROOT_CUT_MAX``
         (default 200).
+    relaxation_arithmetic : str, default "mccormick"
+        Retired (#1873): any other value raises ``ValueError``. It chose the
+        univariate envelope provider (alphaBB, Taylor, Chebyshev, ellipsoidal)
+        of the removed McCormick-"nlp" route.
     use_learned_relaxations : bool, default False
-        Use ICNN-based learned convex relaxations instead of standard
-        McCormick. Requires ``pip install discopt[gnn]`` (equinox + optax).
-        Falls back to standard McCormick for unsupported operations.
+        Retired (#1873): ``True`` raises ``ValueError``. ICNN-learned relaxations
+        fed only the removed McCormick-"nlp" route, and no pretrained models ever
+        shipped, so it always fell back to standard McCormick.
     mccormick_bounds : str, default "auto"
         McCormick relaxation lower-bounding strategy:
         ``"auto"`` resolves to ``"lp"`` for a **nonconvex** model with an
         objective (the LP-form McCormick relaxation is a valid global dual
-        bound; when the model has nothing the LP relaxer can tighten or the
-        relaxer cannot be built, the setup falls back, ultimately to
-        ``"none"`` since the nonconvex-``"nlp"`` downgrade below applies), and
-        to ``"none"`` for a convex model or one with no objective,
-        since convex models already get valid bounds from the NLP relaxation,
-        ``"nlp"`` solves an NLP over the McCormick objective relaxation.
-        This is a valid lower bound **only for convex models**: the bound
-        solver evaluates the relaxation at ``x_cv == x_cc`` where every
-        McCormick rule is tight, so it minimizes the original objective
-        *locally* and a nonconvex local optimum is not a valid bound
-        (issue #120). For nonconvex models it is automatically downgraded to
-        ``"none"``,
+        bound; when the model has nothing the LP relaxer can tighten, nothing
+        spatial-branchable, or the relaxer cannot be built, the setup falls back
+        to ``"none"``), and to ``"none"`` for a convex model or one with no
+        objective, since convex models already get valid bounds from the NLP
+        relaxation,
         ``"lp"`` solves an LP over the full McCormick reformulation —
         gives a *valid global* lower bound and tends to find provable
         global optima much faster on nonconvex problems with bilinears
@@ -11967,13 +11995,17 @@ def solve_model(
         is nonconvex and contains bilinear/multilinear terms; pair with
         ``subnlp_frequency=1`` to turn each LP primal into an incumbent.
         Requires at least one continuous variable; falls back to
-        ``"none"`` for pure-integer nonconvex models (the ``"nlp"`` fallback
-        would be unsound — issue #120),
+        ``"none"`` for pure-integer nonconvex models,
         ``"none"`` disables.
         (The former ``"midpoint"`` mode was removed in correctness issue C-18:
         it returned the underestimator's value at the box midpoint, which is not
         a valid lower bound on the box minimum, so it could certify a wrong
-        optimum. Selecting it now raises ``ValueError``.)
+        optimum. The former ``"nlp"`` mode -- an NLP over the compositional
+        McCormick objective relaxation, valid only for convex models -- was
+        retired in #1873: on the in-repo corpus its bound never changed a result
+        and it could exhaust memory; see
+        ``docs/dev/nlp-mccormick-route-retirement.md``. Selecting either now
+        raises ``ValueError``.)
     gdp_method : str, default "big-m"
         How a disjunctive (GDP) model is handled — the first of the two
         orthogonal solver axes (see the second, ``solver``/``mip_nlp_method``,
@@ -12262,9 +12294,11 @@ def solve_model(
     # over the box, which is exactly what mccormick_bounds="nlp" already does.
     # Rather than ship a non-bound that claims to be a bound, the mode is removed
     # and rejected loudly. Use "lp" for a valid global spatial bound on nonconvex
-    # models, or "nlp" for the convex-model relaxation bound. See
-    # docs/dev/correctness-issues.md (C-18).
-    _valid_mccormick_bounds = {"auto", "nlp", "lp", "none"}
+    # models. See docs/dev/correctness-issues.md (C-18).
+    _valid_mccormick_bounds = {"auto", "lp", "none"}
+    _refuse_retired_relaxation_options(
+        mccormick_bounds, partitions, relaxation_arithmetic, use_learned_relaxations
+    )
     if mccormick_bounds not in _valid_mccormick_bounds:
         if mccormick_bounds == "midpoint":
             raise ValueError(
@@ -12274,8 +12308,7 @@ def solve_model(
                 "valid lower bound on the box minimum (e.g. for x**2 on [1, 3] it "
                 "returns 3.0 while the true minimum is 1.0), so it could certify a "
                 "wrong optimum. Use mccormick_bounds='lp' for a valid global "
-                "spatial bound on nonconvex models with continuous variables, or "
-                "'nlp' for the convex-model relaxation bound."
+                "spatial bound on nonconvex models with continuous variables."
             )
         raise ValueError(
             f"Unknown mccormick_bounds={mccormick_bounds!r}. Choose one of "
@@ -12609,8 +12642,6 @@ def solve_model(
         "rlt_cuts": rlt_cuts,
         "rlt": rlt,
         "cuts": cuts,
-        "partitions": partitions,
-        "use_learned_relaxations": use_learned_relaxations,
         "mccormick_bounds": mccormick_bounds,
         "decomposition": decomposition,
         "lagrangian_bound": lagrangian_bound,
@@ -12625,7 +12656,6 @@ def solve_model(
         "presolve_reverse_ad": presolve_reverse_ad,
         "in_tree_presolve_stride": in_tree_presolve_stride,
         "eigenvalue_root_bound": eigenvalue_root_bound,
-        "relaxation_arithmetic": relaxation_arithmetic,
         "subnlp_enabled": subnlp_enabled,
         "subnlp_backend": subnlp_backend,
         "subnlp_frequency": subnlp_frequency,
@@ -12888,7 +12918,6 @@ def solve_model(
             name
             for name, differs in (
                 ("threads", threads != 1),  # SCIP's default solve is sequential
-                ("partitions", partitions != 0),
                 ("cutting_planes", cutting_planes is not False),
                 ("mccormick_bounds", mccormick_bounds != "auto"),
                 ("nlp_bb", nlp_bb is not None),
@@ -13334,7 +13363,6 @@ def solve_model(
             name
             for name, differs in (
                 ("threads", threads != 1),
-                ("partitions", partitions != 0),
                 ("cutting_planes", cutting_planes is not False),
                 ("mccormick_bounds", mccormick_bounds != "auto"),
                 ("nlp_bb", nlp_bb is not None),
@@ -13408,7 +13436,6 @@ def solve_model(
             name
             for name, differs in (
                 ("threads", threads != 1),  # DIRECT parallelism is n_jobs, not threads
-                ("partitions", partitions != 0),
                 ("cutting_planes", cutting_planes is not False),
                 ("mccormick_bounds", mccormick_bounds != "auto"),
                 ("nlp_bb", nlp_bb is not None),
@@ -13527,8 +13554,6 @@ def solve_model(
         _note_ignored("ipopt_options", ipopt_options is not None)
         _note_ignored("sparse", sparse is not None)
         _note_ignored("cutting_planes", cutting_planes is not False)
-        _note_ignored("partitions", partitions != 0)
-        _note_ignored("use_learned_relaxations", use_learned_relaxations is not False)
         _note_ignored("mccormick_bounds", mccormick_bounds != "auto")
         _note_ignored("nlp_bb", nlp_bb is not None)
         _note_ignored("node_callback", node_callback is not None)
@@ -13618,8 +13643,6 @@ def solve_model(
         _note_ignored_gp("batch_size", batch_size != 16)
         _note_ignored_gp("strategy", strategy != "best_first")
         _note_ignored_gp("max_nodes", max_nodes != 100_000)
-        _note_ignored_gp("partitions", partitions != 0)
-        _note_ignored_gp("use_learned_relaxations", use_learned_relaxations is not False)
         _note_ignored_gp("mccormick_bounds", mccormick_bounds != "auto")
         _note_ignored_gp("gdp_method", gdp_method != "big-m")
         _note_ignored_gp("cutting_planes", cutting_planes is not False)
@@ -13712,8 +13735,6 @@ def solve_model(
         _note_ignored_gp_minlp("deterministic", bool(deterministic))
         _note_ignored_gp_minlp("batch_size", batch_size != 16)
         _note_ignored_gp_minlp("strategy", strategy != "best_first")
-        _note_ignored_gp_minlp("partitions", partitions != 0)
-        _note_ignored_gp_minlp("use_learned_relaxations", use_learned_relaxations is not False)
         _note_ignored_gp_minlp("mccormick_bounds", mccormick_bounds != "auto")
         _note_ignored_gp_minlp("gdp_method", gdp_method != "big-m")
         _note_ignored_gp_minlp("cutting_planes", cutting_planes is not False)
@@ -14686,8 +14707,6 @@ def solve_model(
                     rlt_cuts=rlt_cuts,
                     rlt=rlt,
                     cuts=cuts,
-                    partitions=partitions,
-                    use_learned_relaxations=use_learned_relaxations,
                     mccormick_bounds=mccormick_bounds,
                     gdp_method=gdp_method,
                     gdp_options=gdp_options,
@@ -14711,7 +14730,6 @@ def solve_model(
                     presolve_reverse_ad=presolve_reverse_ad,
                     in_tree_presolve_stride=in_tree_presolve_stride,
                     eigenvalue_root_bound=eigenvalue_root_bound,
-                    relaxation_arithmetic=relaxation_arithmetic,
                     subnlp_enabled=subnlp_enabled,
                     subnlp_backend=subnlp_backend,
                     subnlp_frequency=subnlp_frequency,
@@ -15020,30 +15038,7 @@ def solve_model(
             # is sound. Anything else is a defect and propagates.
             logger.debug("Eigenvalue root bound failed: %s", e)
 
-    # --- Learned relaxation registry (opt-in) ---
     import warnings
-
-    _learned_registry = None
-    _relax_mode = "standard"
-    if use_learned_relaxations:
-        try:
-            from discopt._relax.learned_relaxations import load_pretrained_registry
-
-            _learned_registry = load_pretrained_registry()
-            if len(_learned_registry) > 0:
-                _relax_mode = "learned"
-            else:
-                warnings.warn(
-                    "No pretrained learned relaxation models found. "
-                    "Falling back to standard McCormick.",
-                    stacklevel=2,
-                )
-        except ImportError:
-            warnings.warn(
-                "Learned relaxations require pip install discopt[gnn] "
-                "(equinox + optax). Falling back to standard McCormick.",
-                stacklevel=2,
-            )
 
     # Anchor at the whole-solve clock (set before reformulation/presolve above)
     # so every ``now - t_start > time_limit`` deadline check and the reported
@@ -16234,7 +16229,6 @@ def solve_model(
     _native_search_levers = _native_kernel_ignored_levers(
         strategy=strategy,
         rlt=rlt,
-        partitions=partitions,
         presolve=presolve,
         in_tree_presolve_stride=in_tree_presolve_stride,
         kwargs=kwargs,
@@ -16620,10 +16614,9 @@ def solve_model(
     # false ``infeasible`` is emitted).
     _root_rigorously_infeasible = False
 
-    # Sense-derived negation flag for the internal (minimization) B&B. Unlike
-    # ``_mc_negate`` below — which is only assigned correctly inside the
-    # McCormick "nlp"/"midpoint" setup — this is valid in every relaxation
-    # mode, so the interval bound stays sound for maximization models too.
+    # Sense-derived negation flag for the internal (minimization) B&B, valid in
+    # every relaxation mode, so the interval bound stays sound for maximization
+    # models too.
     from discopt.modeling.core import ObjectiveSense as _ObjectiveSense
 
     _obj_negate = (
@@ -16667,12 +16660,9 @@ def solve_model(
         logger.debug("convex-objective node bound enabled (n_vars=%d)", n_vars)
 
     # --- McCormick relaxation bounds ---
-    _mc_obj_eval = None  # BatchRelaxationEvaluator for the McCormick "nlp" bound
-    _mc_obj_relax_fn = None  # raw relaxation fn for NLP bounds
-    _mc_con_relax_fns: list[Callable] | None = None
-    _mc_con_senses = None
-    _mc_negate = False
     _mc_mode = mccormick_bounds
+    # The LP relaxer was requested but discarded for a continuous model (#120/#1112).
+    _lp_downgraded = False
     _mc_lp_relaxer = None  # MccormickLPRelaxer instance when _mc_mode == "lp"
     # Global root cut pool (P3): separated once at the root, then inherited at
     # every node so each node reproduces the strong root bound for the cost of a
@@ -16720,16 +16710,10 @@ def solve_model(
     _root_pool_bound = None
 
     if _mc_mode == "auto":
-        # The McCormick "nlp" objective bound is a *valid* dual bound only when
-        # the objective relaxation is a convex underestimator. The bound solver
-        # evaluates the compiled relaxation at x_cv == x_cc (see
-        # mccormick_nlp.solve_mccormick_relaxation_nlp / McCormickRelaxation-
-        # Evaluator), where every McCormick rule is tight, so the minimized
-        # surface coincides with the original objective and is convex iff the
-        # model is convex. For a nonconvex model a *local* NLP solve of that
-        # surface can return a value ABOVE the true optimum and certify it as a
-        # lower bound — a silent false-optimal (issue #120: nvs16 certified the
-        # local 14.20 over the true optimum 0.70).
+        # A *local* NLP solve of a nonconvex surface can return a value ABOVE
+        # the true optimum and certify it as a lower bound — a silent
+        # false-optimal (issue #120: nvs16 certified the local 14.20 over the
+        # true optimum 0.70 through the since-retired McCormick "nlp" bound).
         #
         # For a nonconvex model with continuous variables, the LP-form McCormick
         # relaxation IS a rigorous valid dual bound: it is a polyhedral OUTER
@@ -16843,7 +16827,8 @@ def solve_model(
                 # "none" instead — the nonconvex "nlp" objective bound is not
                 # valid there (issue #120).
                 _mc_lp_relaxer = None
-                _mc_mode = "none" if _pure_discrete else "nlp"
+                _mc_mode = "none"
+                _lp_downgraded = not _pure_discrete
             else:
                 # Integer-ratio partition bound (issue #309; flag-gated,
                 # default OFF). When the PRE-reform model carries an eligible
@@ -16906,7 +16891,8 @@ def solve_model(
                         "alphaBB" if _pure_discrete else "NLP",
                     )
                     _mc_lp_relaxer = None
-                    _mc_mode = "none" if _pure_discrete else "nlp"
+                    _mc_mode = "none"
+                    _lp_downgraded = not _pure_discrete
                 else:
                     if _nl_int_cols:
                         _tree_spatial_int_cols = np.asarray(_nl_int_cols, dtype=np.int64)
@@ -17361,99 +17347,33 @@ def solve_model(
         else:
             _use_alphabb = True
 
-    # Soundness guard (issue #120): the McCormick "nlp" objective bound is a
-    # valid dual bound only for convex models. The bound solver evaluates the
-    # compiled relaxation at x_cv == x_cc, where every McCormick rule is tight,
-    # so it minimizes the original objective *locally*; for a nonconvex model
-    # that local optimum can lie ABOVE the true optimum and be certified as a
-    # lower bound (silent false-optimal). "auto" already avoids "nlp" for
-    # nonconvex models above; this also catches an explicit
-    # mccormick_bounds="nlp" and the lp→nlp fallbacks (e.g. pure-integer
-    # nonconvex models). Fall back to the rigorous alphaBB underestimator.
-    if _mc_mode == "nlp" and not _model_is_convex:
-        # The DEMOTION is unconditional — it is the soundness guard and never
-        # branches. Only the message does (#1112): as written it recommended
-        # ``mccormick_bounds='lp'`` to users who had just passed exactly that,
-        # and it fired even on models where the reduced-space engine is about to
-        # supply a perfectly good spatial bound, where it is pure misdirection.
+    # Issue #120 / #1112: the LP relaxer was discarded for a model with
+    # continuous variables (nothing it can bound, or nothing spatial-branchable).
+    # The node bound falls back to the rigorous alphaBB underestimator ("none").
+    # This used to fall back to the McCormick-"nlp" objective bound first, which
+    # the #120 guard then demoted for every nonconvex model; that route is retired
+    # (docs/dev/nlp-mccormick-route-retirement.md), so the fallback is now direct.
+    # Only the message branches (#1112): it recommended ``mccormick_bounds='lp'``
+    # to users who had just passed exactly that, and it fired even on models where
+    # the reduced-space engine is about to supply a perfectly good spatial bound.
+    if _lp_downgraded and not _model_is_convex:
         if _force_reduced_space:
-            # Reduced-space bounding is active for this model — set at the
+            # Reduced-space bounding is active for this model -- set at the
             # CustomCall gate above, which is also the ONLY way a CustomCall model
             # reaches this line: a non-admissible one returns early via
-            # ``_withhold_local_optimality_certificate``. So here the LP relaxer
-            # was discarded because the nonlinearity is hidden inside opaque
-            # ``dm.custom`` nodes with no lifted relaxation, "lp" is exactly what
-            # the user passed, and the reduced engine — not alphaBB — is about to
-            # supply the node bound. Every clause of the warning below would be
-            # wrong; there is no fallback to announce and no advice to give.
+            # ``_withhold_local_optimality_certificate``. The LP relaxer was
+            # discarded because the nonlinearity is hidden inside opaque
+            # ``dm.custom`` nodes, and the reduced engine -- not alphaBB -- is about
+            # to supply the node bound, so there is no fallback to announce.
             logger.debug(
-                "McCormick 'nlp' objective bound declined for a nonconvex model "
+                "LP-form McCormick relaxer discarded for a nonconvex model "
                 "(issue #120); reduced-space McCormick supplies the node bound."
             )
         else:
             logger.warning(
-                "McCormick 'nlp' objective bound is not a valid dual bound for "
-                "nonconvex models (issue #120); falling back to the alphaBB "
-                "underestimator. Use mccormick_bounds='lp' for a valid spatial "
-                "relaxation on models with continuous variables."
+                "The LP-form McCormick relaxation cannot bound this nonconvex model "
+                "(issue #120); falling back to the alphaBB underestimator."
             )
-        _mc_mode = "none"
-
-    if _mc_mode == "nlp" and model._objective is not None:
-        from discopt._relax.batch_evaluator import BatchRelaxationEvaluator
-        from discopt._relax.relaxation_compiler import (
-            compile_constraint_relaxation,
-            compile_objective_relaxation,
-        )
-        from discopt.modeling.core import ObjectiveSense
-
-        try:
-            _mc_obj_relax_fn = compile_objective_relaxation(
-                model,
-                partitions=partitions,
-                mode=_relax_mode,
-                learned_registry=_learned_registry,
-                arithmetic=relaxation_arithmetic,
-            )
-            _mc_obj_eval = BatchRelaxationEvaluator(_mc_obj_relax_fn, n_vars)
-            _mc_negate = model._objective.sense == ObjectiveSense.MAXIMIZE
-
-            if _mc_mode == "nlp" and model._constraints:
-                _mc_con_relax_fns = []
-                _mc_con_senses = []
-                for c in model._constraints:
-                    if isinstance(c, Constraint):
-                        _mc_con_relax_fns.append(
-                            compile_constraint_relaxation(
-                                c,
-                                model,
-                                partitions=partitions,
-                                mode=_relax_mode,
-                                learned_registry=_learned_registry,
-                                arithmetic=relaxation_arithmetic,
-                            )
-                        )
-                        _mc_con_senses.append(c.sense)
-        except Exception as e:
-            logger.warning("McCormick relaxation setup failed: %s", e)
-            _mc_obj_eval = None
-            _mc_obj_relax_fn = None
-
-    # `partitions=k` is only read by the alphaBB/NLP relaxation compiler above
-    # (`_mc_mode == "nlp"`). On the default LP route -- which is where any model
-    # with a relaxable nonlinearity goes -- and on the no-relaxation route it is
-    # not consulted at all, so the caller's request has no effect on the bound.
-    # Say so (#1362): a documented option that silently does nothing is how
-    # docs/notebooks/advanced_features.ipynb came to compare `partitions=0`
-    # against `partitions=4` and report the same 5 nodes under prose promising
-    # "fewer Branch & Bound nodes".
-    if partitions and _mc_mode != "nlp":
-        warnings.warn(
-            f"partitions={partitions} was ignored: piecewise McCormick is applied by the "
-            f"alphaBB/NLP relaxation compiler, and this model took the "
-            f"{_mc_mode!r} relaxation route. The bound is the standard McCormick one.",
-            stacklevel=2,
-        )
 
     # --- Warm-start: inject user-provided initial solution as incumbent ---
     if initial_point is not None:
@@ -17674,9 +17594,6 @@ def solve_model(
             _subnlp_backend_fn = None
 
     # --- B&B loop ---
-    # McCormick NLP is expensive (one IPM per node). Run it every N iterations
-    # and use cheap midpoint bounds in between. Period=1 means every iteration.
-    _mc_nlp_period = 5  # run McCormick NLP every 5th iteration
     iteration = 0
     _deadline = t_start + time_limit
 
@@ -18654,11 +18571,10 @@ def solve_model(
                         except (ValueError, ArithmeticError, RuntimeError) as e:
                             logger.debug("alphaBB bound failed at node %d: %s", i, e)
             # Cheap, always-valid interval-arithmetic bound. Runs every
-            # iteration so nonconvex nodes never sit at -inf between the
-            # periodic McCormick-NLP solves (which only fire every
-            # _mc_nlp_period iterations). max() of valid bounds stays valid,
-            # so this only ever tightens the global lower bound — enabling
-            # certified "optimal" status without weakening soundness.
+            # iteration so nonconvex nodes never sit at -inf. max() of valid
+            # bounds stays valid, so this only ever tightens the global lower
+            # bound — enabling certified "optimal" status without weakening
+            # soundness.
             if not _model_is_convex and model._objective is not None:
                 for i in range(n_batch):
                     if result_lbs[i] < _SENTINEL_THRESHOLD:
@@ -18676,45 +18592,6 @@ def solve_model(
                             )
                             if np.isfinite(pr_lb):
                                 result_lbs[i] = max(result_lbs[i], pr_lb)
-            # Tighten lower bounds with McCormick relaxation
-            if _mc_obj_eval is not None:
-                try:
-                    import jax.numpy as jnp
-
-                    lb_jax = jnp.array(batch_lb, dtype=jnp.float64)
-                    ub_jax = jnp.array(batch_ub, dtype=jnp.float64)
-                    # Use NLP mode only periodically to avoid per-node IPM overhead.
-                    # (The removed "midpoint" mode returned cv(mid), which is NOT a
-                    # valid lower bound on the box minimum — correctness issue C-18;
-                    # "nlp" is now the only McCormick objective-bound mode here.)
-                    _use_mc_nlp = (
-                        _mc_mode == "nlp"
-                        and _mc_obj_relax_fn is not None
-                        and (iteration == 0 or iteration % _mc_nlp_period == 0)
-                    )
-                    if _use_mc_nlp:
-                        from discopt._relax.mccormick_nlp import solve_mccormick_batch
-
-                        assert _mc_obj_relax_fn is not None
-                        mc_lbs = np.asarray(
-                            solve_mccormick_batch(
-                                _mc_obj_relax_fn,
-                                _mc_con_relax_fns,
-                                _mc_con_senses,
-                                lb_jax,
-                                ub_jax,
-                                negate=_mc_negate,
-                                deadline=t_start + time_limit,
-                            )
-                        )
-                    else:
-                        mc_lbs = None
-                    if mc_lbs is not None:
-                        for i in range(n_batch):
-                            if result_lbs[i] < _SENTINEL_THRESHOLD and np.isfinite(mc_lbs[i]):
-                                result_lbs[i] = max(result_lbs[i], float(mc_lbs[i]))
-                except (ValueError, ArithmeticError, RuntimeError) as e:
-                    logger.debug("Batch McCormick bound failed: %s", e)
             # Reduced-space McCormick per-node bound (P2.3). Replaces the lifted
             # LP for nodes where it applies; nodes it cannot bound (None) fall
             # through to the lifted block below unchanged.
@@ -19056,46 +18933,9 @@ def solve_model(
                             convex_lb = max(convex_lb, relax_lb)
                         except (ValueError, ArithmeticError, RuntimeError) as e:
                             logger.debug("alphaBB bound failed: %s", e)
-                    # McCormick relaxation bound
-                    if _mc_obj_relax_fn is not None:
-                        try:
-                            import jax.numpy as jnp
-
-                            lb_j = jnp.array(node_lb, dtype=jnp.float64)
-                            ub_j = jnp.array(node_ub, dtype=jnp.float64)
-                            _use_mc_nlp_serial = _mc_mode == "nlp" and (
-                                iteration == 0 or iteration % _mc_nlp_period == 0
-                            )
-                            if _use_mc_nlp_serial:
-                                from discopt._relax.mccormick_nlp import (
-                                    solve_mccormick_relaxation_nlp,
-                                )
-
-                                mc_lb = solve_mccormick_relaxation_nlp(
-                                    _mc_obj_relax_fn,
-                                    _mc_con_relax_fns,
-                                    _mc_con_senses,
-                                    lb_j,
-                                    ub_j,
-                                    negate=_mc_negate,
-                                    deadline=t_start + time_limit,
-                                )
-                            else:
-                                # The removed "midpoint" mode returned cv(mid),
-                                # which is NOT a valid lower bound (C-18); "nlp" is
-                                # the only McCormick objective-bound mode.
-                                mc_lb = -np.inf
-                            if np.isfinite(mc_lb):
-                                if _model_is_convex:
-                                    nlp_lb = max(nlp_lb, mc_lb)
-                                convex_lb = max(convex_lb, mc_lb)
-                        except (ValueError, ArithmeticError, RuntimeError) as e:
-                            logger.debug("McCormick bound failed: %s", e)
-
                     # Cheap, always-valid interval-arithmetic bound. Keeps
-                    # nonconvex nodes off -inf between the periodic
-                    # McCormick-NLP solves so the global lower bound tightens
-                    # every iteration. max() of valid bounds stays valid.
+                    # nonconvex nodes off -inf so the global lower bound
+                    # tightens every iteration. max() of valid bounds stays valid.
                     if not _model_is_convex:
                         iv_lb = _compute_interval_bound(model, node_lb, node_ub, _obj_negate)
                         if np.isfinite(iv_lb):

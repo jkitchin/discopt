@@ -231,7 +231,8 @@ def complete_lifted_point(lifted: Model, x_orig: np.ndarray) -> np.ndarray:
     At ``t = atom(x)`` every lifting row is satisfied, so the completed point is
     feasible for the lifted model exactly when *x_orig* is for the source.
     """
-    from discopt._relax.dag_compiler import compile_expression
+    # The POUNCE tape, not the JAX DAG compiler (#1873): this needs values only.
+    from discopt._point_eval import evaluate_at
 
     source: Model = lifted._nsl_source_model  # type: ignore[attr-defined]
     x_orig = np.asarray(x_orig, dtype=np.float64).reshape(-1)
@@ -240,7 +241,7 @@ def complete_lifted_point(lifted: Model, x_orig: np.ndarray) -> np.ndarray:
         raise ValueError(f"point has {x_orig.size} entries; the source model has {n_orig} columns")
     parts = [x_orig]
     for t, atom in lifted._nsl_aux:  # type: ignore[attr-defined]
-        val = np.asarray(compile_expression(atom, source)(x_orig), dtype=np.float64)
+        val = evaluate_at(atom, source, x_orig)
         val = np.broadcast_to(val, t.shape if t.shape else ()).reshape(-1)
         lo = np.broadcast_to(np.asarray(t.lb, dtype=np.float64), val.shape)
         hi = np.broadcast_to(np.asarray(t.ub, dtype=np.float64), val.shape)

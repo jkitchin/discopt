@@ -22,6 +22,9 @@ from discopt._relax.convexity.signomial_global import (
     classify_signomial_global,
     solve_signomial_global,
 )
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.symbolic.signed_signomial import signed_signomial_dc_envelope
 
 # ── model builders ────────────────────────────────────────────────────

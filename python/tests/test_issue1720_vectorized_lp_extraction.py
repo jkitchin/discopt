@@ -14,11 +14,14 @@ code path is exactly the one the 1000x1000 model takes.
 from __future__ import annotations
 
 import discopt._nl_expr_compiler as nlc
+import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 import discopt._relax.nlp_evaluator as nle
 import discopt._relax.problem_classifier as pc
 import discopt.modeling as dm
 import numpy as np
-import pytest
 import scipy.sparse as sp
 from discopt import Model
 from discopt._relax.affine_array import NotAffineError, affine_of

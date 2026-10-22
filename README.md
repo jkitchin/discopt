@@ -23,7 +23,7 @@ Jacobian, and Hessian evaluation.
 - **Rust AD tape for NLP evaluation** -- objective, gradient, constraint Jacobian, and Lagrangian Hessian (dense and sparse) come from a POUNCE-backed tape with no JAX on the path; `DISCOPT_NLP_EVAL=jax` restores the legacy JAX evaluator
 - **In-house LP/MILP engine** -- pure-Rust primal/dual simplex with warm starts and a sparse LU basis (`feral`); it drives every MINLP node LP. Models classified as *pure* LP/MILP at entry are routed to HiGHS instead, with discopt-verified certificates (`DISCOPT_LP_MILP_BACKEND=rust` opts back to the Rust simplex)
 - **NLP backends** -- POUNCE (pure-Rust Ipopt port, the universal default) and cyipopt (Ipopt); `nlp_solver="simplex"` selects the pure-Rust warm-started-simplex MILP B&B. The pure-JAX IPM has been retired -- `"ipm"`/`"sparse_ipm"` remain as back-compat aliases
-- **Convex relaxations** -- McCormick envelopes over 28 primitive operations (bilinear, powers, `exp`/`log` family, trig and inverse-trig, hyperbolics, `sigmoid`/`softplus`/`tanh`, `abs`/`min`/`max`/`sign`/`entropy`) plus a 22-intrinsic univariate envelope table in the uniform factorable engine (adding `erf`, `log1p`, and the inverse hyperbolics); piecewise McCormick, alphaBB underestimators, and G-convexity / convex-transformable relaxations
+- **Convex relaxations** -- an LP-form McCormick relaxation with lifted bilinear/multilinear terms (exact multilinear hull via RLT) plus a 22-intrinsic univariate envelope table in the uniform factorable engine (`exp`/`log` family, trig and inverse trig, hyperbolics and their inverses, `erf`, `log1p`, `sigmoid`/`softplus`, `entropy`, ...); every univariate function the API exposes except `sign` gets a certified dual bound. Rigorous alphaBB underestimators and G-convexity / convex-transformable relaxations; adaptive McCormick partitioning via AMP (below)
 - **Certified global MINLP** -- Adaptive Multivariate Partitioning (`solver="amp"`) for nonconvex bilinear/trilinear/signomial/trig models, and a signomial global optimizer (`DISCOPT_SGO`) for mixed-sign signomial and integer-signomial problems
 - **Decomposition solvers** -- MIP-NLP family (`solver="mip-nlp"`: OA, ECP, FP, GOA, LP/NLP-BB), Benders and Generalized Benders (GBD), Lagrangian decomposition, and an automatic structure/decomposition advisor
 - **Derivative-free optimization** -- `solver="direct"` (sampling search over black-box `dm.custom` bodies) and `solver="surrogate"` (surrogate-model search); both are explicitly non-certifying, and a governed variant runs as a root heuristic
@@ -107,17 +107,22 @@ JAX -- not on the LP, QP, MIQP and simplex-MILP paths, and not on the nonlinear 
 either. **That fallback is the exception, and it is on the default path**: a plain
 `Model.solve()` of `dm.norm(X, 2)` with a 3x3 `X`, with no `import jax` on the caller's
 side, takes `sys.modules` from 0 to 219 `jax` entries. "A default solve does not import
-JAX" is true of the tape-representable majority, not of every model.
+JAX" is true of the tape-representable majority, not of every model. JAX is the optional
+`discopt[jax]` extra (#1873); without it, such a model refuses with an `ImportError` that
+names the construct the tape has no opcode for and the extra to install.
 
 **Relaxation layer** (`python/discopt/_relax`): DAG compiler, the uniform factorable
-relaxation engine, McCormick convex/concave envelopes, alphaBB, piecewise McCormick,
-cutting planes, convexity detection, and the relaxation compiler. This layer is
+relaxation engine, the LP-form McCormick relaxation, alphaBB, cutting planes and
+convexity detection. This layer is
 **numpy**: measured over eight nonlinear corpus instances, a default solve loads
 ~50 `_relax` modules -- envelope evaluation (`uniform_relax`, `mccormick_lp`,
 `incremental_mccormick`) and cut separation (`cutting_planes`,
 `multilinear_separation`, `psd_cuts`) among them -- and zero `jax` modules. JAX is
-imported only by the optional differentiable-solve and learned-relaxation
-subsystems, which are off the default path.
+imported only by the legacy evaluator fallback, the `dm.custom` reduced-space engine
+and the optional differentiable-solve subsystem. (A McCormick-NLP relaxation route
+with its piecewise, Taylor/Chebyshev and learned envelope variants was retired in
+#1873: its bound never changed a result on the corpus. See
+`docs/dev/nlp-mccormick-route-retirement.md`.)
 
 **Solver wrappers** (`python/discopt/solvers`): POUNCE (pure-Rust Ipopt port) for
 LP/QP/NLP, the in-house simplex LP/MILP backends, cyipopt for Ipopt, AMP, the MIP-NLP
@@ -184,12 +189,21 @@ See the benchmark notebooks for full scaling plots and details:
 Requires Python 3.12+; building from source additionally needs Rust 1.84+.
 POUNCE -- the default numerical engine -- is a pure-Rust Ipopt port installed as a
 core dependency, with no system libraries needed. `highspy` (the pure LP/MILP entry
-route) and `jax`/`jaxlib` are also core dependencies; JAX is installed but is *not*
-imported by a default solve (see the NLP-evaluation note above). cyipopt is an
-optional fallback that needs the Ipopt C library.
+route) is also a core dependency. **JAX is optional** (the `discopt[jax]` extra, #1873):
+a default solve does not import it (see the NLP-evaluation note above). It is needed
+for a model with no tape opcode (`dm.custom`, a matrix 2-norm), `DISCOPT_NLP_EVAL=jax`,
+and the features that use JAX autodiff on purpose -- `discopt.estimate`,
+`discopt.sensitivity`, `dm.argmin`/`dm.implicit`/`dm.external`, the differentiable and
+parametric layers, sIPOPT sensitivity and trainable `discopt.ml` surrogates (`train()`).
+Without it each of
+those raises an `ImportError` naming the extra. cyipopt is an optional fallback that
+needs the Ipopt C library.
 
 ```bash
 pip install discopt
+
+# JAX-backed features (dm.custom, estimation, sensitivity, differentiable layers, ...)
+pip install "discopt[jax]"
 
 # Optional cyipopt fallback (needs the Ipopt C library; macOS: brew install ipopt)
 pip install "discopt[ipopt]"

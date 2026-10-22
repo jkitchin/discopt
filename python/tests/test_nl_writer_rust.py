@@ -385,6 +385,7 @@ def test_a_model_with_no_builder_rows_reports_a_zero_boundary():
     assert rep.n_builder_constraints == 0
 
 
+@pytest.mark.requires_jax
 def test_custom_call_still_refuses_loudly():
     """``dm.custom`` has no arena form; the fallback must still raise, not export."""
     m = dm.Model("custom")

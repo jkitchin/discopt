@@ -131,6 +131,7 @@ def test_unknown_activation_raises():
 # ── test 3: end-to-end neural-DAE training (smoke) ──────────────────────────
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_neural_dae_training_end_to_end():
     """Rebuild scripts/hybrid_ml/neural_dae_prototype.py on the new API.
@@ -186,6 +187,7 @@ def test_neural_dae_training_end_to_end():
 # ── test 4: kernel surrogate variant ────────────────────────────────────────
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_kernel_surrogate_training():
     """Linear-in-alpha kernel surrogate: zero init, few iterations."""
@@ -207,6 +209,7 @@ def test_kernel_surrogate_training():
 # ── test 5: freeze / from_definition round-trip ─────────────────────────────
 
 
+@pytest.mark.requires_jax
 def test_freeze_matches_symbolic_and_from_definition_round_trips():
     from discopt._relax.nlp_evaluator import NLPEvaluator
     from discopt.warm_start import unflatten_solution, validate_initial_solution
@@ -264,6 +267,7 @@ def test_freeze_matches_symbolic_and_from_definition_round_trips():
 # ── test 6: Gauss-Newton detector fires on the training objective ───────────
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_gauss_newton_detector_fires_on_training_objective():
     from discopt._relax.nlp_evaluator import NLPEvaluator

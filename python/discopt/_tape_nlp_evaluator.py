@@ -849,12 +849,40 @@ def make_evaluator(model: "Model") -> Any:
     ``cached_evaluator`` — that is what kept JAX on the path after Stage 3.
     """
 
-    def _jax_evaluator() -> Any:
-        from discopt._relax.nlp_evaluator import cached_evaluator
+    return build_evaluator(model, lambda: jax_fallback_evaluator(model))
 
-        return cached_evaluator(model)
 
-    return build_evaluator(model, _jax_evaluator)
+def jax_fallback_evaluator(model: "Model") -> Any:
+    """The cached legacy JAX evaluator, the fallback of :func:`build_evaluator`.
+
+    JAX is the optional ``discopt[jax]`` extra (#1873). Without it there is no
+    evaluator for a model the tape declines, so this refuses loudly and says why
+    the tape declined -- the operator to rewrite, or the extra to install --
+    rather than letting ``No module named 'jax'`` surface from deep in a solve.
+    """
+    from discopt._optional_jax import jax_available, missing_jax_error
+
+    if not jax_available():
+        raise missing_jax_error(
+            f"Evaluating this model needs the legacy JAX NLP evaluator because "
+            f"{_tape_decline_reason(model)}; it"
+        )
+    from discopt._relax.nlp_evaluator import cached_evaluator
+
+    return cached_evaluator(model)
+
+
+def _tape_decline_reason(model: "Model") -> str:
+    """Why the tape is not evaluating ``model`` -- for an error message only."""
+    if os.environ.get("DISCOPT_NLP_EVAL", "tape").strip().lower() == "jax":
+        return "DISCOPT_NLP_EVAL=jax selects it"
+    if not pounce_usable():
+        return "the POUNCE tape backend is unavailable (install `pounce-solver`)"
+    try:
+        TapeNLPEvaluator(model)
+    except UnsupportedForTape as exc:
+        return f"the POUNCE tape has no opcode for part of it ({exc})"
+    return "the POUNCE tape declined it"
 
 
 def build_evaluator(model: "Model", jax_factory: Any) -> Any:

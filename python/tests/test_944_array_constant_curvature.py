@@ -58,6 +58,9 @@ import pytest  # noqa: E402
 from discopt._relax.convexity import classify_model  # noqa: E402
 from discopt._relax.convexity.lattice import Curvature  # noqa: E402
 from discopt._relax.convexity.rules import classify_expr  # noqa: E402
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.nlp_evaluator import cached_evaluator  # noqa: E402
 from discopt._rust import model_to_repr  # noqa: E402
 

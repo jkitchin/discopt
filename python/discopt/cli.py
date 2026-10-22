@@ -73,8 +73,9 @@ def _cmd_about(_args):
     print(f"  Platform:     {platform.platform()}")
     print(f"  Executable:   {sys.executable}")
 
-    deps = ["jax", "jaxlib", "numpy", "scipy"]
-    optional_deps = ["cyipopt", "litellm", "pycutest", "onnx", "onnxruntime"]
+    deps = ["numpy", "scipy", "highspy", "pounce-solver"]
+    # jax/jaxlib are the `discopt[jax]` extra (#1873).
+    optional_deps = ["jax", "jaxlib", "cyipopt", "litellm", "pycutest", "onnx", "onnxruntime"]
     for name in deps:
         try:
             ver = importlib.metadata.version(name)
@@ -110,14 +111,23 @@ def _cmd_test(_args):
     except ImportError as e:
         errors.append(f"Rust extension: {e}")
 
-    try:
-        import jax
-        import jax.numpy as jnp
+    # JAX is the optional `discopt[jax]` extra (#1873): its absence is reported,
+    # not counted as a failure, and the JAX-only checks below are skipped.
+    from discopt._optional_jax import INSTALL_HINT, jax_available
 
-        _ = jnp.array([1.0, 2.0])
-        passed.append(f"JAX {jax.__version__} (backend: {jax.default_backend()})")
-    except Exception as e:
-        errors.append(f"JAX: {e}")
+    skipped = []
+    have_jax = jax_available()
+    if have_jax:
+        try:
+            import jax
+            import jax.numpy as jnp
+
+            _ = jnp.array([1.0, 2.0])
+            passed.append(f"JAX {jax.__version__} (backend: {jax.default_backend()})")
+        except Exception as e:
+            errors.append(f"JAX: {e}")
+    else:
+        skipped.append(f"JAX not installed (optional; `{INSTALL_HINT}`)")
 
     try:
         import discopt
@@ -135,20 +145,25 @@ def _cmd_test(_args):
     except Exception as e:
         errors.append(f"Model build + solve: {e}")
 
-    try:
-        from discopt._relax.dag_compiler import compile_objective
-        from discopt.modeling import Model
+    if have_jax:
+        try:
+            from discopt._relax.dag_compiler import compile_objective
+            from discopt.modeling import Model
 
-        m2 = Model("dag_test")
-        x = m2.continuous("x", lb=0, ub=1)
-        m2.minimize(x * x)
-        _ = compile_objective(m2)
-        passed.append("DAG compiler")
-    except Exception as e:
-        errors.append(f"DAG compiler: {e}")
+            m2 = Model("dag_test")
+            x = m2.continuous("x", lb=0, ub=1)
+            m2.minimize(x * x)
+            _ = compile_objective(m2)
+            passed.append("DAG compiler")
+        except Exception as e:
+            errors.append(f"DAG compiler: {e}")
+    else:
+        skipped.append("JAX DAG compiler (needs JAX)")
 
     for msg in passed:
         print(f"  PASS  {msg}")
+    for msg in skipped:
+        print(f"  SKIP  {msg}")
     for msg in errors:
         print(f"  FAIL  {msg}")
 
@@ -390,8 +405,6 @@ def _cmd_solve(args):
         overrides["threads"] = args.threads
     if args.solver is not None:
         overrides["solver"] = args.solver
-    if args.partitions is not None:
-        overrides["partitions"] = args.partitions
     if args.rlt is not None:
         overrides["rlt"] = args.rlt
     if args.nlp_bb is not None:
@@ -691,7 +704,6 @@ def main():
     p_solve.add_argument("--gap", type=float, default=None, help="Relative optimality gap tol.")
     p_solve.add_argument("--threads", type=int, default=None, help="Rust threads.")
     p_solve.add_argument("--solver", default=None, help="Backend selector (e.g. amp, gp).")
-    p_solve.add_argument("--partitions", type=int, default=None, help="McCormick partitions.")
     p_solve.add_argument("--rlt", default=None, choices=["auto", "on", "off"], help="RLT control.")
     p_solve.add_argument(
         "--nlp-bb", action=argparse.BooleanOptionalAction, default=None, help="Force NLP-BB on/off."

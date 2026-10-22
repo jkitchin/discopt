@@ -439,6 +439,9 @@ class Sensitivity:
         keeps Parameter values as a live argument rather than baking them in --
         without that the ``∂e/∂p`` term would silently be zero.
         """
+        from discopt._optional_jax import require_jax
+
+        require_jax("discopt.sensitivity's chain rule (d())")
         import jax
 
         from discopt.parametric import compile_expression

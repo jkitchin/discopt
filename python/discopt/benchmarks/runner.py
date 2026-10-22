@@ -3,13 +3,9 @@
 from __future__ import annotations
 
 import json
-import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-import numpy as np
-
-from discopt.benchmarks.metrics import BatchMetrics, compute_batch_metrics
 from discopt.modeling.core import Model, SolveResult
 
 
@@ -114,58 +110,6 @@ class BenchmarkRunner:
             result = self.run_instance(model, name, expected_obj)
             results.append(result)
         return results
-
-    def run_batch_scaling(self, model: Model) -> BatchMetrics:
-        """Measure batch evaluation throughput at different batch sizes.
-
-        Uses BatchRelaxationEvaluator to evaluate McCormick relaxations
-        at varying batch sizes and measures throughput.
-
-        Args:
-            model: Model to benchmark batch evaluation on.
-
-        Returns:
-            BatchMetrics with throughput at each batch size.
-        """
-        import jax.numpy as jnp
-
-        from discopt._relax.batch_evaluator import batch_evaluator_from_objective
-
-        evaluator = batch_evaluator_from_objective(model)
-        n_vars = evaluator.n_vars
-
-        # Get variable bounds for creating realistic test data
-        lb_list = []
-        ub_list = []
-        for v in model._variables:
-            lb_list.append(v.lb.flatten())
-            ub_list.append(v.ub.flatten())
-        base_lb = np.concatenate(lb_list)
-        base_ub = np.concatenate(ub_list)
-        # Clip to reasonable range to avoid numerical issues
-        base_lb = np.clip(base_lb, -100.0, 100.0)
-        base_ub = np.clip(base_ub, -100.0, 100.0)
-
-        throughputs = []
-        for batch_size in self._config.batch_sizes:
-            lb_batch = jnp.broadcast_to(jnp.array(base_lb), (batch_size, n_vars))
-            ub_batch = jnp.broadcast_to(jnp.array(base_ub), (batch_size, n_vars))
-
-            # Warmup
-            evaluator.evaluate_batch(lb_batch, ub_batch)
-
-            # Timed run
-            n_reps = max(1, 100 // batch_size)
-            t0 = time.perf_counter()
-            for _ in range(n_reps):
-                evaluator.evaluate_batch(lb_batch, ub_batch)
-            elapsed = time.perf_counter() - t0
-
-            total_evals = batch_size * n_reps
-            throughput = total_evals / elapsed if elapsed > 0 else 0.0
-            throughputs.append(throughput)
-
-        return compute_batch_metrics(self._config.batch_sizes, throughputs)
 
     def export_json(self, results: list[BenchmarkResult], path: str) -> None:
         """Export results as JSON.
