@@ -350,6 +350,7 @@ def test_initial_point_round_trips():
 # ── refusals: never a silent drop ──────────────────────────────────────────
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_custom_call_is_refused_by_name():
     m = dm.Model("custom")

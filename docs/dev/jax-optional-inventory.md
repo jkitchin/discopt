@@ -31,7 +31,41 @@ file.
 
 ## Measurements
 
-MEASUREMENTS_PLACEHOLDER
+All measured 2026-10-22 on this branch (Linux, Python 3.13, 4 cores).
+
+- **Corpus guard, JAX blocked:** all **66** in-repo `.nl` instances
+  (`python/tests/data/minlplib_nl/`) solve at `time_limit=10` with **0** attempts
+  to import `jax` and 0 exceptions (`test_the_whole_in_repo_corpus_...`, 275 s).
+- **`pytest -m smoke` with jax/jaxlib uninstalled, before the test-side work:**
+  118 collection errors, all `No module named 'jax'`: 53 test modules import
+  JAX directly and 65 import a JAX-only `discopt` module (the legacy evaluator or
+  DAG compiler as an oracle). After `importorskip`: 3418 passed, **82 failed, 14
+  errors**. Triage of those 96:
+  - **Library paths that used JAX on ordinary, non-JAX models. These were real
+    bugs for a JAX-less install, and the corpus guard cannot see them because
+    `.nl` solves never reach them:** `discopt.mo` cross-evaluated objectives
+    through `dag_compiler` (epsilon-constraint, AUGMECON2, NBI/NNC, weighted sums),
+    the GDP simplex lowering's source residuals, and the nonsmooth lift's
+    warm-start completion. All three now evaluate on the POUNCE tape
+    (`discopt/_point_eval.py`), with the JAX compiler kept only as the fallback for
+    an expression the tape cannot lower. Tape and JAX values agree to
+    **1.0e-14 relative** over **3066** comparisons, covering every
+    objective/constraint body of the 66 corpus instances (up to 40 per instance) at
+    3 random in-box points each, with identical finiteness. These are point values
+    (reports, warm starts), not bounds.
+  - A test fixture that imported JAX only to clear its cache
+    (`test_amp_integration.py`), and an mpec test that used `dm.custom` only to
+    get an opaque node (it now builds `CustomCall` directly).
+  - The rest, 64 node IDs in 47 functions, genuinely exercise JAX features:
+    `dm.custom`-based DIRECT/surrogate solves, the JAX evaluator as an oracle,
+    `DISCOPT_ANALYTIC_SEPGRAD`, and trainable NN surrogates whose stacked
+    matmul has no tape opcode (§1). They are marked `requires_jax`.
+- **After those changes:** `pytest -m smoke` without JAX gives **3449 passed, 213
+  skipped, 0 failed** (434 s). With JAX installed it gives **3768 passed, 24
+  skipped, 0 failed** (466 s).
+- **Notebooks:** 7 of 70 in `docs/notebooks/` import JAX directly, and others
+  use `dm.custom`, estimation, sensitivity or differentiable layers. The docs
+  build installs JAX explicitly (`docs.yml`), so it is unaffected.
 
 ## 1. The evaluator fallback
 
@@ -65,13 +99,16 @@ construct that reaches it, and what removing the fallback would take:
 | `_lower_function` (`function {name!r}`) | a `FunctionCall` name with no lowering. Every name `dm.*` emits is lowered today (`exp log log10 log1p log2 sqrt sin cos tan asin acos atan sinh cosh tanh asinh acosh atanh erf abs sign min max atan2 sigmoid softplus entropy centropy signpower prod norm*`), so only a hand-built node reaches it | none |
 | `_fold` (empty; deeper than `NlExpr.max_depth`) | `dm.prod`/`dm.min`/`dm.max`/`norm` of an empty array, or of more elements than the tape's nesting depth | moderate: an n-ary tape opcode, or a balanced-tree fold, removes the depth limit |
 | `_lower_norm` (order; **matrix norm**; scalar) | `dm.norm(X, ord)` with 2-D `X` (the CLAUDE.md case: 219 `jax` modules), or a 0-D argument | large for `ord=2` (spectral norm needs an SVD opcode with derivatives). `ord=1`/`inf` of a matrix are max-of-column/row-sums, which are cheap folds. `"fro"` is refused at `dm.norm` already (#1369) |
+| `TapeNLPEvaluator._build_residual_exprs` → `compile_to_nl_expr` (array-valued) | Gauss-Newton (`gauss_newton=True`, which `discopt.ml.train()` sets) with an **array-valued residual** -- measured on `test_dae_fit` / `test_nn_trainable` kernel surrogates | small: lower each residual with `compile_to_nl_array(r).reshape(-1)` and concatenate, which is exactly the JAX evaluator's `residual_vector` (`jnp.reshape(fn(x), (-1,))` per residual). Not done here: it moves these models from the JAX to the tape derivative engine on JAX installs too, which §5 treats as a change that needs its own differential check |
+| `_matmul` stacked operands, from `TrainableNetwork` | trainable NN layers, e.g. `(20, 2, 6) @ (6, 1)` -- measured on `test_nn_trainable` | moderate: batched matmul lowering |
 | `_require` (arity) | a function called with the wrong number of arguments | none (malformed) |
 
 So the fallback a JAX-less user can actually hit, with a correctly formed model, comes
-down to four cases: **`dm.custom`-family nodes** (permanently `[jax]`), **matrix
-norms**, **stacked matmul**, and **reductions deeper than `max_depth`**. The last
-three are opcode work in pounce, tracked by this table rather than by a separate
-issue.
+down to five cases: **`dm.custom`-family nodes** (permanently `[jax]`), **matrix
+norms**, **stacked matmul**, **reductions deeper than `max_depth`**, and
+**array-valued Gauss-Newton residuals**. The last two make `discopt.ml` trainable
+surrogates (`train()`) `[jax]`-only today. Each refuses with the tape's own reason
+and the extra. The last four are lowering work, listed here with their fixes.
 
 ## 2. Deliberate JAX autodiff users (`[jax]`-only, refusing with the named error)
 

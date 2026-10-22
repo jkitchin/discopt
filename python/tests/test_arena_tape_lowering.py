@@ -247,6 +247,7 @@ def test_relative_entropy_model_still_solves():
     assert float(res.objective) == pytest.approx(expected, abs=1e-4)
 
 
+@pytest.mark.requires_jax
 def test_custom_call_is_refused_by_both_paths():
     """``dm.custom`` has no tape equivalent; the arena path must not invent one."""
     from discopt._arena_tape import try_build_arena_tape

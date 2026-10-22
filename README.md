@@ -191,7 +191,8 @@ a default solve does not import it (see the NLP-evaluation note above). It is ne
 for a model with no tape opcode (`dm.custom`, a matrix 2-norm), `DISCOPT_NLP_EVAL=jax`,
 and the features that use JAX autodiff on purpose -- `discopt.estimate`,
 `discopt.sensitivity`, `dm.argmin`/`dm.implicit`/`dm.external`, the differentiable and
-parametric layers, sIPOPT sensitivity and the learned relaxations. Without it each of
+parametric layers, sIPOPT sensitivity, trainable `discopt.ml` surrogates (`train()`) and the
+learned relaxations. Without it each of
 those raises an `ImportError` naming the extra. cyipopt is an optional fallback that
 needs the Ipopt C library.
 

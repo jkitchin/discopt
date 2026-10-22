@@ -64,10 +64,13 @@ def _clear_jax_caches():
     """
     yield
     import gc
+    import sys
 
-    import jax
-
-    jax.clear_caches()
+    # Only a test that loaded JAX has XLA executables to release; importing it
+    # here just to clear an empty cache would fail without the discopt[jax]
+    # extra (#1873) and costs the multi-second import otherwise.
+    if "jax" in sys.modules:
+        sys.modules["jax"].clear_caches()
     gc.collect()
 
 

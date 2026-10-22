@@ -39,6 +39,7 @@ def _solve(tf, **kwargs):
 # ── the contract: no certificate, ever ───────────────────────────────────────
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 @pytest.mark.parametrize("name", ["branin", "sphere_2", "six_hump_camel"])
 def test_never_claims_a_certificate(name):
@@ -56,6 +57,7 @@ def test_never_claims_a_certificate(name):
     assert result.gap_certified is False
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_exhausted_budget_is_a_limit_not_infeasible():
     """A run that finds nothing reports a limit status, never ``"infeasible"``.
@@ -84,6 +86,7 @@ def test_exhausted_budget_is_a_limit_not_infeasible():
     assert result.gap_certified is False
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_a_sound_presolve_proof_short_circuits_before_direct_runs():
     """The other side: a *provable* infeasibility must not be spent on 200 evals.
@@ -106,6 +109,7 @@ def test_a_sound_presolve_proof_short_circuits_before_direct_runs():
     assert result.gap_certified is True
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_is_deterministic_across_runs():
     """DIRECT has no RNG; identical inputs must give byte-identical results."""
@@ -119,6 +123,7 @@ def test_is_deterministic_across_runs():
 # ── preconditions refuse loudly ──────────────────────────────────────────────
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_non_finite_box_raises():
     """DIRECT is defined only on a finite box; a big-M substitute would be silent."""
@@ -147,6 +152,7 @@ def test_missing_objective_raises():
         solve_direct(model, max_evals=50)
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_unknown_option_values_raise():
     tf = tfs.get("sphere_2")
@@ -157,6 +163,7 @@ def test_unknown_option_values_raise():
         model.solve(solver="direct", local_refine_method="magic", max_evals=50)
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_unknown_selector_names_the_valid_ones():
     tf = tfs.get("sphere_2")
@@ -368,6 +375,7 @@ def test_constrained_model_returns_a_feasible_point():
     assert xs[0] + xs[1] >= 2.0 - 1e-4, f"returned point is infeasible: {xs}"
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_solver_stats_report_the_evaluation_budget():
     """The evaluation count is the cost model, so it must be visible."""
@@ -379,6 +387,7 @@ def test_solver_stats_report_the_evaluation_budget():
         assert key in stats, f"missing {key}: {sorted(stats)}"
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_generic_options_it_cannot_honour_are_warned_about():
     """Silently accepting ``gap_tolerance`` would leave a wrong mental model."""
@@ -425,6 +434,7 @@ def test_n_jobs_changes_the_wall_clock_and_nothing_else():
     assert runs[1] == runs[4], runs
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_invalid_n_jobs_raises():
     tf = tfs.get("sphere_2")

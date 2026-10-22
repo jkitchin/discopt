@@ -475,14 +475,16 @@ def _flat_point(model: Model, x_by_name) -> np.ndarray:
 
 
 def _residual_of(model: Model, dc: _DisjunctiveConstraint, name: str, flat, counter):
-    from discopt._relax.dag_compiler import compile_expression
+    # The POUNCE tape, not the JAX DAG compiler: a residual is a value, and JAX is
+    # the optional discopt[jax] extra (#1873).
+    from discopt._point_eval import evaluate_at
 
     per_disjunct: list[float] = []
     for j, disjunct in enumerate(dc.disjuncts):
         worst = -math.inf
         for con in disjunct:
             for body in _predicates_of(con, f"residual of {name!r}, disjunct {j}"):
-                value = float(np.max(np.asarray(compile_expression(body, model)(flat))))
+                value = float(np.max(evaluate_at(body, model, flat)))
                 worst = max(worst, value)
                 counter[0] += 1
         per_disjunct.append(worst)

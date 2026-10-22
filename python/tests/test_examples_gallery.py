@@ -49,10 +49,17 @@ _GALLERY = [
     "example_bilevel_toll",
     # solver="direct" worked examples. Registered here so the examples are
     # themselves tested and cannot rot alongside the API they demonstrate.
-    "example_direct_blackbox",
-    "example_direct_simulator_minlp",
-    "example_direct_constrained",
-    "example_surrogate_expensive_blackbox",
+    # Their black boxes are ``dm.custom`` bodies, so they need the discopt[jax]
+    # extra (#1873).
+    *(
+        pytest.param(name, marks=pytest.mark.requires_jax)
+        for name in (
+            "example_direct_blackbox",
+            "example_direct_simulator_minlp",
+            "example_direct_constrained",
+            "example_surrogate_expensive_blackbox",
+        )
+    ),
 ]
 
 

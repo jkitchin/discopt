@@ -841,7 +841,10 @@ def test_point_evaluation_refuses_an_unsupported_atom():
     m = dm.Model("opaque")
     z = m.continuous("z", lb=0.1, ub=1.0)
     m.minimize(z)
-    opaque = dm.custom(lambda v: v * 2.0)(z)
+    # The node itself, not ``dm.custom``: the subject is the interval evaluator's
+    # refusal of an opaque node, which needs no JAX (``dm.custom`` refuses to
+    # build one without the discopt[jax] extra, #1873).
+    opaque = dm.CustomCall(lambda v: v * 2.0, z)
     with pytest.raises(ValueError, match="did not stay degenerate|not finite"):
         evaluate_at_point(m, opaque, point_from_flat(m, np.array([0.5])))
     _checked(True, "an unevaluable operand raises rather than reporting a midpoint")

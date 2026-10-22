@@ -195,6 +195,56 @@ def test_every_module_scope_jax_importer_refuses_with_the_named_error():
 
 
 # --------------------------------------------------------------------------- #
+# 3b. point evaluation without JAX (mo sweeps, GDP simplex residuals, nonsmooth lift)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.smoke
+def test_point_evaluation_is_exact_and_tracks_parameter_values():
+    import discopt.modeling as dm
+    import numpy as np
+    from discopt._point_eval import PointEvaluator, evaluate_at
+
+    m = dm.Model()
+    x = m.continuous("x", shape=(2,), lb=-5.0, ub=5.0)
+    p = m.parameter("p", value=2.0)
+    f = dm.exp(x[0]) * dm.sin(x[1]) + p * x[0] ** 2
+    g = x * p  # array-valued: the shape must come back
+    pt = np.array([0.3, -1.2])
+    want = float(np.exp(0.3) * np.sin(-1.2) + 2.0 * 0.3**2)
+    assert float(evaluate_at(f, m, pt)) == pytest.approx(want, rel=1e-14, abs=1e-14)
+    np.testing.assert_allclose(evaluate_at(g, m, pt), 2.0 * pt, rtol=1e-15)
+
+    ev = PointEvaluator(m)
+    assert float(ev(f, pt)) == pytest.approx(want, rel=1e-14, abs=1e-14)
+    p.value = np.asarray(3.0)  # the tape bakes parameters in; the cache must notice
+    assert float(ev(f, pt)) == pytest.approx(want + 0.3**2, rel=1e-14, abs=1e-14)
+
+
+@pytest.mark.smoke
+def test_multi_objective_sweep_runs_without_jax():
+    """``discopt.mo`` cross-evaluated objectives through the JAX DAG compiler, so a
+    sweep on an ordinary QP failed on a JAX-less install (found by the no-JAX smoke
+    run, not by the corpus guard: ``.nl`` solves never reach ``mo``)."""
+    p = _run_without_jax(
+        "import discopt.modeling as dm\n"
+        "from discopt.mo import epsilon_constraint\n"
+        "m = dm.Model()\n"
+        "x = m.continuous('x', lb=0.0, ub=2.0)\n"
+        "y = m.continuous('y', lb=0.0, ub=2.0)\n"
+        "m.subject_to(x + y >= 1)\n"
+        "front = epsilon_constraint(m, [x**2 + y, (x - 2)**2 + y**2], n_points=4,\n"
+        "                           time_limit=10)\n"
+        "print('POINTS', front.n)\n"
+        "print('ATTEMPTS', len(JAX_ATTEMPTS))\n"
+    )
+    assert p.returncode == 0, p.stderr[-3000:]
+    assert "ATTEMPTS 0" in p.stdout, p.stdout
+    n = int(p.stdout.split("POINTS", 1)[1].split()[0])
+    assert n >= 2, p.stdout
+
+
+# --------------------------------------------------------------------------- #
 # 4. the default path never reaches JAX
 # --------------------------------------------------------------------------- #
 
@@ -221,9 +271,7 @@ print("RESULT", json.dumps({{"n": len(paths), "solved": solved, "errors": errors
 
 def _assert_corpus_is_jax_free(paths: list[str], time_limit: float, timeout: float) -> None:
     assert paths, "the corpus is empty -- the guard would measure nothing"
-    p = _run_without_jax(
-        _SOLVE_ALL.format(paths=paths, time_limit=time_limit), timeout=timeout
-    )
+    p = _run_without_jax(_SOLVE_ALL.format(paths=paths, time_limit=time_limit), timeout=timeout)
     assert p.returncode == 0, p.stderr[-3000:]
     out = json.loads(p.stdout.split("RESULT", 1)[1])
     assert out["n"] == len(paths)

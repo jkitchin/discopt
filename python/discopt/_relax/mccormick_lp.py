@@ -2712,6 +2712,9 @@ class MccormickLPRelaxer:
         # JAX onto an otherwise JAX-free separation path.
         _jnp = None
         if any(not getattr(r.value_fn, "numpy_native", False) for r in specs):
+            from discopt._optional_jax import require_jax
+
+            require_jax("a JAX-backed separation tangent (DISCOPT_SEPGRAD=jax)")
             import jax.numpy as _jnp_mod
 
             _jnp = _jnp_mod

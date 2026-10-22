@@ -102,6 +102,7 @@ def _real_config_points():
     return uniq_points, uniq_objs
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_the_fixture_really_yields_three_separated_feasible_configurations():
     """§6 guard: without three ranked points every assertion below is vacuous."""
@@ -142,6 +143,7 @@ def _solve_with_replayed_points(monkeypatch, order):
     return res, len(ordered)
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_declined_injections_are_not_counted_as_incumbent_updates(monkeypatch):
     """Best point first: the two that follow are declined and must not be counted.
@@ -161,6 +163,7 @@ def test_declined_injections_are_not_counted_as_incumbent_updates(monkeypatch):
     assert res.subnlp_incumbent_updates < res.subnlp_feasible
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_the_counter_still_rises_when_the_points_genuinely_improve(monkeypatch):
     """The anti-vacuity arm: the fix must not hardwire the counter to 1.

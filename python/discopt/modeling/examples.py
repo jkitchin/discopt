@@ -865,6 +865,9 @@ def example_bilevel_toll():
 
 
 def example_direct_blackbox():
+    from discopt._optional_jax import require_jax
+
+    require_jax("this example (a dm.custom black box)")
     import jax.numpy as jnp
 
     m = dm.Model("direct_blackbox")
@@ -907,6 +910,9 @@ def example_direct_blackbox():
 
 
 def example_direct_simulator_minlp():
+    from discopt._optional_jax import require_jax
+
+    require_jax("this example (a dm.custom simulator)")
     import jax.numpy as jnp
 
     m = dm.Model("direct_simulator_minlp")
@@ -982,6 +988,9 @@ def example_direct_constrained():
 
 
 def example_surrogate_expensive_blackbox():
+    from discopt._optional_jax import require_jax
+
+    require_jax("this example (a dm.custom black box)")
     import jax.numpy as jnp
 
     m = dm.Model("surrogate_expensive_blackbox")

@@ -58,6 +58,7 @@ def _solve(tf, **kwargs):
 # ── the contract: no certificate, ever ───────────────────────────────────────
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 @pytest.mark.parametrize("name", ["branin", "sphere_2", "six_hump_camel"])
 def test_never_claims_a_certificate(name):
@@ -77,6 +78,7 @@ def test_never_claims_a_certificate(name):
     assert result.objective is not None
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_exhausted_budget_is_a_limit_not_infeasible():
     """A run that finds nothing feasible reports a limit, never ``"infeasible"``.
@@ -97,6 +99,7 @@ def test_exhausted_budget_is_a_limit_not_infeasible():
     assert result.gap_certified is False
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_is_deterministic_across_runs():
     """Same seed, same answer — the designs and multistart pools are all seeded.
@@ -112,6 +115,7 @@ def test_is_deterministic_across_runs():
     np.testing.assert_array_equal(first.x["x"], second.x["x"])
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_a_different_seed_gives_a_different_search():
     """The counterpart: the seed must actually reach the randomness.
@@ -128,6 +132,7 @@ def test_a_different_seed_gives_a_different_search():
 # ── preconditions refuse loudly ──────────────────────────────────────────────
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_non_finite_box_raises():
     """The surrogate is fitted on normalized distances; an infinite side is NaN.
@@ -151,6 +156,7 @@ def test_missing_objective_raises():
         solve_surrogate(model, max_evals=10)
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 @pytest.mark.parametrize(
     ("kwargs", "match"),
@@ -233,6 +239,7 @@ def test_the_acquisition_subproblem_certifies_while_the_outer_result_does_not():
     assert result.status != "optimal"
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_certified_optimizer_refuses_rather_than_degrading_quietly():
     """``acquisition_optimizer="certified"`` must raise, not fall back.
@@ -285,6 +292,7 @@ def test_a_non_expressible_acquisition_falls_back_and_says_so(caplog):
     assert any("not expressible" in rec.message for rec in caplog.records), caplog.text
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_solver_stats_report_which_acquisition_optimizer_ran():
     """The counters are how the design's central claim stays a measurement."""

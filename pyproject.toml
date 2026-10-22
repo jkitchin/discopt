@@ -53,8 +53,8 @@ Issues = "https://github.com/jkitchin/discopt/issues"
 # tape opcode, e.g. `dm.custom` or a matrix 2-norm; or `DISCOPT_NLP_EVAL=jax`), by
 # the features that use JAX autodiff on purpose (`discopt.estimate`,
 # `discopt.sensitivity`, `dm.argmin`/`implicit`/`external`, the differentiable and
-# parametric layers, sIPOPT, the learned relaxations) and by the legacy `_relax`
-# opt-outs. Each of those raises an ImportError naming this extra without it
+# parametric layers, sIPOPT, `discopt.ml.train`, the learned relaxations) and by
+# the legacy `_relax` opt-outs. See docs/dev/jax-optional-inventory.md. Each of those raises an ImportError naming this extra without it
 # (`discopt._optional_jax`).
 jax = ["jax>=0.4", "jaxlib>=0.4"]
 # POUNCE is now a core dependency (the default NLP/IPM engine); this extra is

@@ -89,6 +89,7 @@ def test_the_fixture_really_has_a_one_hot_group():
     assert groups, "no one-hot group detected — the accounting tests would prove nothing"
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_config_constructor_reports_attempts_when_nothing_is_feasible():
     """The headline case: zero feasible points, but the solves did happen."""
@@ -120,6 +121,7 @@ def test_config_constructor_reports_attempts_when_nothing_is_feasible():
     )
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_the_dive_contributes_its_own_attempts():
     """The dive kept no counter at all; the wave's alone would under-report.
@@ -162,6 +164,7 @@ def test_the_dive_contributes_its_own_attempts():
     )
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_enumeration_reports_attempts_when_nothing_is_feasible():
     """Same conflation at the ``enumerate_binary_seeds_subnlp`` call site (§2)."""
@@ -182,6 +185,7 @@ def test_enumeration_reports_attempts_when_nothing_is_feasible():
     assert stats["attempted"] > 0, "the enumeration solved sub-NLPs and reported none"
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_stats_is_optional_and_the_default_path_is_unchanged():
     """Callers that pass no dict must behave exactly as before."""
@@ -203,6 +207,7 @@ def test_stats_is_optional_and_the_default_path_is_unchanged():
     )
 
 
+@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_zero_attempts_is_reported_when_the_constructor_really_does_nothing():
     """The counter must still be able to say 0 — otherwise it is not a measurement.
