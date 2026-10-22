@@ -8,6 +8,7 @@ os.environ["JAX_PLATFORMS"] = "cpu"
 os.environ["JAX_ENABLE_X64"] = "1"
 
 import _sharding
+import _time_budget
 import pytest
 
 # Hypothesis profiles for the WP-4 property and fuzz tests (serialization plan).
@@ -154,11 +155,13 @@ def convex_kernel_solve():
 
 def pytest_addoption(parser):
     _sharding.addoption(parser)
+    _time_budget.addoption(parser)
 
 
 def pytest_configure(config):
-    """Register custom markers and the CI shard selector (see _sharding)."""
+    """Register custom markers, the CI shard selector and the time budget."""
     config.pluginmanager.register(_sharding.ShardPlugin(), "discopt-shard")
+    _time_budget.configure(config)
     config.addinivalue_line("markers", "correctness: Known-optimum correctness validation")
     config.addinivalue_line("markers", "minlptests: MINLPTests.jl standardized NLP/MINLP problems")
     config.addinivalue_line("markers", "integration: solver-dependent integration tests")
