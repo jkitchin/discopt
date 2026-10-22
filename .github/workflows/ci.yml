@@ -364,15 +364,22 @@ jobs:
   # AND the shard reports add up to the whole selection: a shard that died
   # before collecting, or a partition that dropped tests, is red here rather
   # than a quietly smaller lane (CLAUDE.md §6).
+  #
+  # `!cancelled()`, not `always()`: a newer push cancels this run (the
+  # `concurrency` block), and under `always()` the aggregator still ran, found
+  # no shard reports and went red -- a false "failure" on every superseded
+  # commit (seen on #1884, run 39764395701). `cancelled()` is true only when the
+  # *workflow* is cancelled; a failed or timed-out shard leaves it false, so
+  # those still reach the checks below and fail here.
   python-fast:
     name: Python fast (3.12, ubuntu)
     runs-on: ubuntu-latest
     needs: [changes, python-fast-shard]
     if: >-
-      always() &&
       needs.changes.outputs.code == 'true' &&
       github.event_name != 'push' &&
-      !contains(github.event.pull_request.labels.*.name, 'coverage')
+      !contains(github.event.pull_request.labels.*.name, 'coverage') &&
+      !cancelled()
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -834,11 +841,12 @@ jobs:
   python-coverage:
     name: Python coverage (3.12, ubuntu)
     needs: python-coverage-shard
+    # `!cancelled()` for the reason given at `python-fast`.
     if: >-
-      always() &&
       (github.event_name == 'push' ||
         (github.event_name == 'pull_request' &&
-          contains(github.event.pull_request.labels.*.name, 'coverage')))
+          contains(github.event.pull_request.labels.*.name, 'coverage'))) &&
+      !cancelled()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
