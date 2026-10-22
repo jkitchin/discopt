@@ -122,6 +122,9 @@ def test_flag_off_leaves_ex4_1_5_without_a_bound(monkeypatch):
     assert not r.gap_certified and r.bound is None
 
 
-def test_flag_default_is_off_until_its_panel(monkeypatch):
+def test_flag_defaults_on(monkeypatch):
+    """Graduated under CLAUDE.md section 5 (panel in the gate's docstring)."""
     monkeypatch.delenv(FLAG, raising=False)
+    assert S.separable_poly_bound_enabled()
+    monkeypatch.setenv(FLAG, "0")
     assert not S.separable_poly_bound_enabled()

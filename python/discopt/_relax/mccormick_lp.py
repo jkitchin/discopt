@@ -407,6 +407,69 @@ class MccormickLPResult:
             )
 
 
+def free_column_lp_cert_enabled() -> bool:
+    """``DISCOPT_FREE_COLUMN_LP_CERT`` gate (#1869 (b)): certify a declined McCormick
+    node LP with an unbounded nonlinear column through the verified HiGHS LP route.
+
+    ``prolog``'s pricing rows bound its bilinear sums (``x2 x0 + x4 x1 <= x18``,
+    ``x18 <= 3340.8 x7 + 500 x8``, ...), so its root LP is bounded at the optimum 0,
+    yet the in-house relaxer reported it ``uncertified``: with free columns the
+    floating dual's reduced costs land on an open side and the Neumaier--Shcherbina
+    bound is ``-inf``. ``lp_milp_highs.solve_lp_std`` certifies the same LP at -1e-12.
+    Its bound is rigorous for ANY dual, so HiGHS's accuracy decides only whether a
+    bound is found. Bound-changing (a node that had none gets one), so gated per
+    CLAUDE.md section 5; read at call time.
+
+    **Graduated (default ON, 2026-10-22).** Panel over the 120 local MINLPLib
+    instances (<= 200 vars/cons) that keep an unbounded continuous variable after
+    FBBT, ON vs OFF, 30 s, interleaved: cert-clean (240 rows, 0 problems: no bound
+    past an optimum, every incumbent passes ``verify_point`` on a fresh model) and
+    net-positive -- certified 88 -> 91, none lost (``prolog`` time limit with no
+    bound -> optimal in 289 nodes / 13.3 s; ``ex7_3_3`` and ``ex9_1_1`` also gained);
+    fewer nodes where both certify (``ex9_1_5`` 3 -> 1, ``ex9_1_8`` 5 -> 3), total
+    wall 1494 -> 1424 s. ``=0`` restores the decline.
+    """
+    return os.environ.get("DISCOPT_FREE_COLUMN_LP_CERT", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
+
+
+def _verified_free_column_bound(milp, time_limit: Optional[float]):
+    """``(bound, x)`` from the verified HiGHS route on ``min c'x, A_ub x <= b_ub``
+    (slacks in ``[0, inf)`` make it the route's equality form), or ``(None, None)``."""
+    import scipy.sparse as sp
+
+    from discopt.solvers.lp_milp_highs import StdForm, solve_lp_std
+
+    A = milp._A_ub
+    if A is None or milp._b_ub is None:
+        return None, None
+    A = sp.csr_matrix(A) if not sp.issparse(A) else A.tocsr()
+    m, n = A.shape
+    lo = np.array([b[0] for b in milp._bounds], dtype=np.float64)
+    hi = np.array([b[1] for b in milp._bounds], dtype=np.float64)
+    lo[lo <= -_RELAX_NUMERIC_CAP] = -np.inf
+    hi[hi >= _RELAX_NUMERIC_CAP] = np.inf
+    sf = StdForm.from_arrays(
+        np.concatenate([np.asarray(milp._c, dtype=np.float64), np.zeros(m)]),
+        sp.hstack([A, sp.identity(m, format="csr")]).tocsc(),
+        np.asarray(milp._b_ub, dtype=np.float64),
+        np.concatenate([lo, np.zeros(m)]),
+        np.concatenate([hi, np.full(m, np.inf)]),
+        obj_const=float(milp._obj_offset),
+    )
+    out = solve_lp_std(sf, time_limit=time_limit)
+    if out.status != "optimal" or out.bound is None or not np.isfinite(out.bound):
+        return None, None
+    if out.x is None:
+        return None, None
+    return float(out.bound), np.asarray(out.x, dtype=np.float64)[:n]
+
+
 def _no_bound_status(status: str) -> str:
     """Status for a no-bound result derived from an LP solve with ``status``.
 
@@ -2141,6 +2204,25 @@ class MccormickLPRelaxer:
                 if _filtered_bound is not None and _filtered_bound > bound:
                     bound = _filtered_bound
 
+        if (
+            (bound is None or not np.isfinite(bound))
+            and res.status == "optimal"
+            and milp._integrality is None
+            and self._nonlinear_cols
+            and self._has_unbounded_nonlinear_col(milp)
+            and free_column_lp_cert_enabled()
+        ):
+            # #1869 (b): every in-house certificate declined an LP with an unbounded
+            # nonlinear column -- the NS safe bound needs every open column's reduced
+            # cost on its safe side, and a floating dual rarely has it. The verified
+            # HiGHS LP route does exactly that certification (#1729 dual scaling, the
+            # rational ``exact_ns_bound``), so hand it this node LP.
+            _vb, _vx = _verified_free_column_bound(milp, _remaining())
+            if _vb is not None:
+                BOUND_PROVENANCE["verified_highs"] += 1
+                return MccormickLPResult(
+                    status="optimal", lower_bound=_vb, x=_vx[: self._n_orig].copy()
+                )
         if bound is None or not np.isfinite(bound):
             # #961: the LP may have solved to optimality, yet every certification
             # route above declined (no NS safe bound; the vertex objective refused

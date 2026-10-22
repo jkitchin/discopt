@@ -136,15 +136,18 @@ def test_deadline_exit_takes_the_tighter_of_banked_dual_and_box_floor(monkeypatc
     assert res.lower_bound == pytest.approx(seen_floor[0])
 
 
-def test_default_path_still_declines_an_uncertifiable_node():
+def test_default_path_still_declines_an_uncertifiable_node(monkeypatch):
     """Neutrality: with no clamp in force the new floor is never surfaced.
 
-    ``4stufen``'s root relaxation solves to LP optimality and every certification
-    route declines it, so the shipped contract is ``uncertified`` with no bound.
-    Nothing about this changes — the floor is reachable only from a truncated
-    build or a ``time_limit`` LP status, neither of which the default path
-    produces.
+    ``4stufen``'s root relaxation solves to LP optimality and every IN-HOUSE
+    certification route declines it, so the contract under test is ``uncertified``
+    with no bound. Nothing about this changes — the floor is reachable only from a
+    truncated build or a ``time_limit`` LP status, neither of which the default path
+    produces. #1869 (b)'s verified-HiGHS route does certify this LP (bound 11672 <=
+    MINLPLib's best dual 112657; pinned in ``test_issue_1869_free_column_lp_cert``),
+    so it is switched off here to keep this test about the #928 floor.
     """
+    monkeypatch.setenv("DISCOPT_FREE_COLUMN_LP_CERT", "0")
     model = from_nl(str(CORPUS / "4stufen.nl"))
     lb, ub = flat_variable_bounds(model)
 

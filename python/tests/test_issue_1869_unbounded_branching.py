@@ -55,9 +55,15 @@ def test_flag_off_drains_unresolved(name, monkeypatch):
 
 
 def test_unprunable_outer_piece_stays_open_and_honest(monkeypatch):
-    """``prolog``'s outer pieces have no relaxation bound yet: ON keeps searching and
-    never claims a bound or a certificate it does not have."""
+    """Without a bound for ``prolog``'s outer pieces, unbounded branching keeps
+    searching and never claims a bound or a certificate it does not have.
+
+    Part (b)'s verified free-column LP bound and the endgame polish together now
+    certify prolog (``test_issue_1869_endgame_polish.py``), so both are pinned off
+    here to keep this about part (a) alone."""
     monkeypatch.setenv(FLAG, "1")
+    monkeypatch.setenv("DISCOPT_FREE_COLUMN_LP_CERT", "0")
+    monkeypatch.setenv("DISCOPT_ENDGAME_POLISH", "0")
     r = _solve("prolog", tl=5.0)
     assert not r.gap_certified and r.status == "feasible"
     assert r.bound is None or r.bound <= 0.0 + 1e-6  # optimum 0

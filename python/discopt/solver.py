@@ -9,6 +9,7 @@ Connects:
 
 from __future__ import annotations
 
+import collections
 import contextlib
 import contextvars
 import dataclasses
@@ -1750,6 +1751,93 @@ def _native_exit_polish_enabled() -> bool:
     from discopt._relax.primal_heuristics import integer_box_polish_enabled
 
     return integer_box_polish_enabled()
+
+
+def _endgame_polish_enabled() -> bool:
+    """``DISCOPT_ENDGAME_POLISH`` gate (#1869), read at call time.
+
+    **Graduated (default ON, 2026-10-22).** CLAUDE.md section 5 panel: the in-repo
+    corpus plus the 120 local MINLPLib instances that keep an unbounded continuous
+    variable after FBBT (175 instances), ON vs OFF, 30 s, interleaved, POUNCE 0.13.0.
+    Cert-clean (350 rows, 0 problems: no bound past an optimum, no false optimum,
+    every incumbent passes ``verify_point`` on a fresh model) and net-positive:
+    certified 135 -> 136, none lost (``prolog`` 839 nodes uncertified -> optimal in 3
+    nodes / 3.6 s); it fired on 13 instances and was adopted on 9, with node counts
+    unchanged on every one (incumbents closer to the optimum, e.g. ``pointpack04``
+    0.99999996 -> 0.99999999986); total wall 1924 -> 1842 s, SGM over the 135 both
+    certify 2.30 vs 2.30 s. ``=0`` is the opt-out.
+
+    The Python tree's incumbents come from node NLPs run at the heuristic options,
+    whose gradient-based scaling makes the incumbent's *absolute* objective accurate
+    only to the scaled tolerance. ``prolog`` (optimum 0, an objective that cancels
+    ~1e5-sized bilinear terms) is the probe: under POUNCE 0.13.0 the tree's incumbent
+    is 1.51e-6, the verified bound is -1e-12, and the absolute gap 1.5e-6 never meets
+    the 1e-6 tolerance -- 1651 nodes to the 60 s limit. One re-solve from that
+    incumbent at ``tol=1e-12, constr_viol_tol=1e-14`` reaches 1.06e-8, row-exact.
+
+    Bound-neutral in the dual: the pass only proposes an incumbent, which ``subnlp``
+    re-verifies for constraint and integer feasibility and ``_inject_incumbent``
+    screens for the box, the user callbacks, and strict improvement.
+    """
+    return os.environ.get("DISCOPT_ENDGAME_POLISH", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
+
+
+#: #1869: the endgame polish fires only when the gap is within this factor of
+#: closing, i.e. where full NLP accuracy on the incumbent can plausibly certify.
+_ENDGAME_POLISH_WINDOW = 1e3
+#: #1869: options for the polish re-solve -- tight optimality AND feasibility. The
+#: feasibility half matters: an unscaled ``tol=1e-12`` re-solve of ``prolog`` reaches
+#: 1.2e-10 but violates a 1e5-scale row by 8.5e-14, and the terminal purification
+#: (#1285) then trades that point for a row-exact one at 8.2e-6 -- outside the gap.
+#: These options give 1.06e-8 with no row violation (scaled ratio 0).
+_ENDGAME_POLISH_NLP_OPTIONS = {"tol": 1e-12, "constr_viol_tol": 1e-14}
+#: #1869: wall cap for one polish re-solve (it warm-starts at a converged point).
+_ENDGAME_POLISH_MAX_S = 1.0
+
+
+def _endgame_polish_in_window(
+    ub: float, lb: float, gap_tolerance: float, abs_gap_tol: float
+) -> bool:
+    """Whether an open gap is close enough to closing for the endgame polish."""
+    return _gap_values_converged(
+        ub, lb, gap_tolerance * _ENDGAME_POLISH_WINDOW, abs_gap_tol * _ENDGAME_POLISH_WINDOW
+    )
+
+
+def _endgame_polish(model, x_inc, evaluator, backend, nlp_options, remaining_s: float):
+    """Re-solve the incumbent's NLP from the incumbent at full accuracy (#1869).
+
+    Returns ``subnlp``'s verified ``(x, obj)`` or ``None``; the caller adopts it only
+    on strict improvement through the incumbent funnel.
+    """
+    if remaining_s <= _DEADLINE_NLP_FLOOR_POLISH_S:
+        return None
+    from discopt._relax.primal_heuristics import subnlp
+
+    opts = dict(nlp_options or {})
+    opts.update(_ENDGAME_POLISH_NLP_OPTIONS)
+    return subnlp(
+        model,
+        x_inc,
+        backend=backend,
+        nlp_options=opts,
+        evaluator=evaluator,
+        time_budget=min(_ENDGAME_POLISH_MAX_S, remaining_s),
+    )
+
+
+#: #1869: do not start a polish with less than this much wall left.
+_DEADLINE_NLP_FLOOR_POLISH_S = 0.1
+
+#: #1869: how often the endgame polish ran (``"fired"``) and how often its point
+#: became the incumbent (``"adopted"``) -- the probe counter (CLAUDE.md section 6).
+ENDGAME_POLISH_STATS: "collections.Counter[str]" = collections.Counter()
 
 
 #: #1870: wall slice withheld from the native kernel for the #1193 exit polish --
@@ -7606,6 +7694,13 @@ def _declared_box_tightening(model: Model, deadline: Optional[float] = None):
     # ``_apply_nonlinear_tightening_with_status``); an exception is a defect, and
     # returning ``None`` for it made both consumers silently skip their check.
     return tighten_nonlinear_bounds(model, raw_lb, raw_ub, deadline=deadline)
+
+
+def _free_column_lp_cert_enabled() -> bool:
+    """See :func:`discopt._relax.mccormick_lp.free_column_lp_cert_enabled` (#1869 (b))."""
+    from discopt._relax.mccormick_lp import free_column_lp_cert_enabled
+
+    return free_column_lp_cert_enabled()
 
 
 def _unbounded_branching_enabled() -> bool:
@@ -14336,6 +14431,10 @@ def solve_model(
         _apply_flat_bounds_to_model(model, _per_lb, _per_ub)
         _origin_lb_chk, _origin_ub_chk = _per_lb, _per_ub
     _origin_has_finite_continuous_var = False
+    # #1869: a continuous variable at all (bounded or not). Under unbounded
+    # branching an infinite-box continuous column is branchable too -- the Rust tree
+    # splits it at a finite point -- so it no longer forces the #185 fallback.
+    _origin_has_continuous_var = any(_ov.var_type == VarType.CONTINUOUS for _ov in model._variables)
     _origin_chk_off = 0
     for _ov in model._variables:
         if _ov.var_type == VarType.CONTINUOUS:
@@ -17060,7 +17159,18 @@ def solve_model(
                     j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))
                 }
                 _nl_int_cols = sorted(_int_cols & set(_mc_lp_relaxer.nonlinear_columns))
-                _has_branchable = _origin_has_finite_continuous_var or bool(_nl_int_cols)
+                _has_branchable = (
+                    _origin_has_finite_continuous_var
+                    or bool(_nl_int_cols)
+                    or (
+                        # #1869 (b): keep the relaxer on an all-unbounded model only
+                        # when the tree can split those columns AND a declined node
+                        # LP can still be certified (``free_column_lp_cert_enabled``).
+                        _origin_has_continuous_var
+                        and _unbounded_branching_enabled()
+                        and _free_column_lp_cert_enabled()
+                    )
+                )
                 if not _has_branchable:
                     logger.info(
                         "McCormick LP requested but model has no spatial-branchable "
@@ -18311,6 +18421,8 @@ def solve_model(
     # declared infeasible (measured: hda at a 10 s limit and casctanks at 5 s both
     # reported ``infeasible`` on the first cut of this change).
     _rr_reserve_yield = False
+    # #1869: the incumbent value the endgame polish last ran on (one try per value).
+    _endgame_polished_obj: Optional[float] = None
     while True:
         elapsed = time.perf_counter() - t_start
         if not _rr_reserve_released and elapsed >= time_limit - _rr_reserve_s:
@@ -21202,6 +21314,41 @@ def solve_model(
                                 _root_cut_pool = (_A_rf, _b_rf, _idents_rf)
 
         iteration += 1
+
+        # #1869: an incumbent just outside the gap, re-solved to full NLP accuracy.
+        if (
+            _endgame_polish_enabled()
+            and not _tree_drained(tree)
+            and not _gap_converged(tree, gap_tolerance, abs_gap_tol)
+        ):
+            _eg_inc = tree.incumbent()
+            if _eg_inc is not None and float(_eg_inc[1]) != _endgame_polished_obj:
+                _eg_stats = tree.stats()
+                if _endgame_polish_in_window(
+                    float(_eg_stats.get("incumbent_value", float("inf"))),
+                    float(_eg_stats.get("global_lower_bound", float("-inf"))),
+                    gap_tolerance,
+                    abs_gap_tol,
+                ):
+                    _endgame_polished_obj = float(_eg_inc[1])
+                    ENDGAME_POLISH_STATS["fired"] += 1
+                    _eg = _endgame_polish(
+                        model,
+                        np.asarray(_eg_inc[0], dtype=np.float64),
+                        evaluator,
+                        _subnlp_backend_fn,
+                        subnlp_options,
+                        _remaining_budget(),
+                    )
+                    if _eg is not None and _eg[1] < _endgame_polished_obj:
+                        if _inject_incumbent(_eg[0].copy(), float(_eg[1])):
+                            ENDGAME_POLISH_STATS["adopted"] += 1
+                            _endgame_polished_obj = float(_eg[1])
+                            logger.info(
+                                "endgame polish (#1869): incumbent %.6g -> %.6g",
+                                float(_eg_inc[1]),
+                                float(_eg[1]),
+                            )
 
         # Check termination
         if _tree_drained(tree):
