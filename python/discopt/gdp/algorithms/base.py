@@ -62,6 +62,14 @@ class Deadline:
     def expired(self) -> bool:
         return self.remaining() <= 0.0
 
+    def at(self) -> Optional[float]:
+        """The caller's own deadline as a reading of this clock; ``None`` without one.
+
+        For a callee that takes an absolute deadline and is handed the whole of the
+        caller's budget (#912's ``contract`` role), never a carved slice of it.
+        """
+        return None if self.time_limit is None else self.start + self.time_limit
+
     def sub_limit(self, cap: Optional[float] = None) -> float:
         """The time limit to give a subsolve: what is left, capped by ``cap``."""
         left = self.remaining()
@@ -165,6 +173,10 @@ class GDPAlgorithm:
             # crossing means a relaxation is wrong somewhere: say so.
             logger.warning("%s: %s; bound withdrawn", self.route, reason)
             self.invalidate_bound(reason)
+
+    def extra_stats(self) -> dict[str, Any]:
+        """A method's own entries for ``solver_stats``."""
+        return {}
 
     def invalidate_bound(self, reason: str) -> None:
         """The method's LB conditions failed: no bound, no ``optimal``."""
@@ -287,6 +299,7 @@ class GDPAlgorithm:
         }
         if self.lb_invalid_reason:
             stats["lb_invalid_reason"] = self.lb_invalid_reason
+        stats.update(self.extra_stats())
         return SolveResult(
             status=status,
             objective=objective,

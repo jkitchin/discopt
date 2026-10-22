@@ -11407,7 +11407,7 @@ def _refusing_on_callback_failure(fn: _F) -> _F:
 NATIVE_GDP_METHODS: frozenset[str] = frozenset({"loa", "gloa", "lbb", "ric", "enumerate", "ldsda"})
 
 #: The native methods that run today.
-IMPLEMENTED_NATIVE_GDP_METHODS: frozenset[str] = frozenset({"loa"})
+IMPLEMENTED_NATIVE_GDP_METHODS: frozenset[str] = frozenset({"loa", "gloa"})
 
 #: ``gdp_options`` keys (#1775 G3.1, spec §4.3): Pyomo GDPopt's names where the
 #: meaning is the same, so a Pyomo user's config translates. A key outside this
@@ -11433,7 +11433,9 @@ GDP_OPTION_KEYS: frozenset[str] = frozenset(
 
 #: The ``gdp_options`` keys each implemented native method reads.
 _GDP_OPTIONS_READ: dict[str, frozenset[str]] = {
-    "loa": frozenset({"iterlim", "init_algorithm", "set_cover_iterlim", "subproblem"})
+    "loa": frozenset({"iterlim", "init_algorithm", "set_cover_iterlim", "subproblem"}),
+    # GLOA's subproblems are always global, so it reads no "subproblem" key.
+    "gloa": frozenset({"iterlim", "init_algorithm", "set_cover_iterlim"}),
 }
 
 
@@ -11890,6 +11892,10 @@ def solve_model(
         - ``"loa"`` — *native* logic-based Outer Approximation on the
           disjunctive form (dispatches to :func:`solve_gdpopt_loa`), not a
           reformulation.
+        - ``"gloa"`` — *native* global logic-based OA (#1775 G4.3): LOA whose
+          master is a MILP relaxation of every row (nonconvex ones included)
+          and whose subproblems are certified by discopt, so its bound needs
+          no convexity certificate.
         - ``"oa"`` — *deprecated*; historically "OA solver + big-M reform".
           Now emits a ``DeprecationWarning`` and reformulates as ``"big-m"``.
           Use ``solver="mip-nlp", mip_nlp_method="oa"`` for algebraic OA.
@@ -11898,10 +11904,11 @@ def solve_model(
         ``gdp_method`` (``"loa"``) combined with ``solver="mip-nlp"`` is
         contradictory (one asks to solve the disjunctions natively, the other
         to reformulate and decompose) and raises ``ValueError``. Likewise
-        ``"gloa"`` (global logic-based OA) is reserved for this native axis and
-        is distinct from the algebraic ``mip_nlp_method="goa"``; it is not yet
-        implemented, so -- like any other name not listed above -- it raises
-        ``ValueError`` rather than silently solving as big-M. See
+        ``"gloa"`` is on this native axis and is distinct from the algebraic
+        ``mip_nlp_method="goa"``. The other native names (``"lbb"``, ``"ric"``,
+        ``"enumerate"``, ``"ldsda"``) are reserved and not yet implemented, so --
+        like any other name not listed above -- they raise ``ValueError`` rather
+        than silently solving as big-M. See
         ``docs/dev/solve-routing.md`` §4 for the locked contract (#323).
     solver : str or None, default None
         Optional global-solver selector. Use ``"pounce"`` for exactly one POUNCE
@@ -12685,7 +12692,7 @@ def solve_model(
             "bound has no hook that applies user cuts. Leave nlp_bb unset so the "
             "spatial branch and bound, which does, solves the model."
         )
-    if _feasibility_callbacks and gdp_method in ("oa", "loa"):
+    if _feasibility_callbacks and gdp_method in ("oa", "loa", "gloa"):
         _refuse_unenforced_callbacks(
             f"gdp_method={gdp_method!r}",
             _feasibility_callbacks,
@@ -13801,10 +13808,10 @@ def solve_model(
         )
 
     # --- LOA decomposition: intercept before GDP reformulation ---
-    if gdp_method == "loa":
+    if gdp_method in ("loa", "gloa"):
         from discopt.solvers.gdpopt_loa import solve_gdpopt_loa
 
-        _warn_abs_gap_ignored("The GDPopt-LOA decomposition", abs_gap_tolerance)
+        _warn_abs_gap_ignored(f"The GDPopt-{gdp_method.upper()} decomposition", abs_gap_tolerance)
 
         loa_kwargs = {}
         if "milp_solver" in kwargs:
@@ -13817,7 +13824,13 @@ def solve_model(
             if key in _gdp_opts:
                 loa_kwargs[key] = _gdp_opts[key]
 
-        _declare_route("gdpopt-loa: logic-based outer approximation (MILP master + NLP)")
+        if gdp_method == "gloa":
+            from discopt.gdp.algorithms.gloa import GLOA
+
+            _declare_route(GLOA.route)
+            loa_kwargs["algorithm"] = "gloa"
+        else:
+            _declare_route("gdpopt-loa: logic-based outer approximation (MILP master + NLP)")
         return solve_gdpopt_loa(
             model,
             time_limit=time_limit,

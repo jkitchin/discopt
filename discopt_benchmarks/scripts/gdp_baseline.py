@@ -82,6 +82,7 @@ DISCOPT_ARMS = (
     "discopt-auto",
     "discopt-loa",
     *LOA_OPTION_ARMS,
+    "discopt-gloa",
 )
 ARMS = PYOMO_ARMS + DISCOPT_ARMS
 
@@ -90,6 +91,7 @@ FAMILIES = {
     "big-m": ("discopt-big-m", "pyomo-bigm"),
     "hull": ("discopt-hull", "pyomo-hull"),
     "loa": ("discopt-loa", "pyomo-loa"),
+    "gloa": ("discopt-gloa", "pyomo-gloa"),
 }
 
 #: Profile O solver roles. The spec names HiGHS for MIP; GDPopt cannot use it here.

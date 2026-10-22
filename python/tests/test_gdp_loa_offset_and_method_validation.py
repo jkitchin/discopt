@@ -66,9 +66,9 @@ def test_unknown_gdp_method_raises_without_disjunctions():
     m.minimize(x)
     with pytest.raises(ValueError, match="Unknown gdp_method"):
         m.solve(gdp_method="bigmm", time_limit=10)
-    # #1775 G3.1: "gloa" is reserved on the native axis, still refused up front.
+    # #1775 G3.1: a reserved native name is refused up front ("gloa" until G4.3).
     with pytest.raises(ValueError, match="reserved on the native GDP axis"):
-        m.solve(gdp_method="gloa", time_limit=10)
+        m.solve(gdp_method="lbb", time_limit=10)
 
 
 @pytest.mark.parametrize("method", ["gloa", "typo"])
@@ -77,7 +77,7 @@ def test_reformulate_gdp_rejects_unknown_method(method):
         reformulate_gdp(_gdp_model(), method=method)
 
 
-@pytest.mark.parametrize("method", ["big-m", "hull", "mbigm", "auto", "simplex", "loa"])
+@pytest.mark.parametrize("method", ["big-m", "hull", "mbigm", "auto", "simplex", "loa", "gloa"])
 def test_known_gdp_methods_still_solve(method):
     r = _gdp_model().solve(gdp_method=method, time_limit=30)
     assert r.status == "optimal"

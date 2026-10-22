@@ -53,6 +53,7 @@ solve_model(...)                                          [solver.py:2017]
   ├─ GDP INTERCEPT (model has disjunctions / logic)          [two-axis contract → §4]
   │     gdp_method="oa"    ──► Outer Approximation (solve_oa) (deprecated → mip-nlp/oa)
   │     gdp_method="loa"   ──► LOA decomposition   (native disjunctive axis)
+  │     gdp_method="gloa"  ──► global LOA (relaxation master; native axis)
   │     gdp_method="big-m"/"hull" ──► reformulate_gdp → standard MINLP (continue)
   │     NB: native gdp_method (loa) + solver="mip-nlp" ──► ValueError (contradictory; §4)
   │
@@ -266,7 +267,8 @@ the disjunctions into an algebraic MIP/MINLP, or solve the disjunctive form
 |---|---|---|
 | `big-m`, `hull`, `mbigm`, `auto`, `simplex`, `binary_multiplication` | reformulate disjunctions → algebraic MIP/MINLP | reformulation |
 | `loa` | logic-based OA, solved natively on the disjunctive form (`solve_gdpopt_loa`) | native disjunctive |
-| `gloa`, `lbb`, `ric`, `enumerate`, `ldsda` | *reserved* — global LOA, logic-based B&B, relaxation–integer cuts, configuration enumeration, LD-SDA; each lands with its #1775 G4 task and raises `ValueError` ("reserved on the native GDP axis") until then | reserved (native) |
+| `gloa` | global logic-based OA (#1775 G4.3): LOA with a MILP-relaxation master of every row and global subproblems, so its bound needs no convexity certificate (`solve_gdpopt_loa(algorithm="gloa")`) | native disjunctive |
+| `lbb`, `ric`, `enumerate`, `ldsda` | *reserved* — logic-based B&B, relaxation–integer cuts, configuration enumeration, LD-SDA; each lands with its #1775 G4 task and raises `ValueError` ("reserved on the native GDP axis") until then | reserved (native) |
 | `oa` | *deprecated* — was "OA solver + big-M reform"; now warns and reforms as `big-m` | deprecated |
 
 The native set is `solver.NATIVE_GDP_METHODS`; the subset that runs is
@@ -278,7 +280,7 @@ a mapping with Pyomo GDPopt's key names (`iterlim`, `init_algorithm`,
 `set_cover_iterlim`, `OA_penalty_factor`, `max_slack`, `integer_tolerance`,
 `check_sat`, `direction_norm`, `subproblem_presolve`). An unknown key, a key the
 chosen method does not read yet, and any `gdp_options` with a reformulation method
-raise `ValueError` at entry. `loa` (#1775 G4.1, `discopt.gdp.algorithms.loa.LOA`) reads `iterlim` (default: `max_nodes`), `init_algorithm` (default `no_init`), `set_cover_iterlim` and discopt's own `subproblem`: `"global"` (the default) certifies each configuration's reduced subproblem with discopt and falls back to the local NLP step when that proves nothing; `"nlp"` is the pre-G4.1 loop (fixed-integer NLP on the big-M lowering). Measured on the `gdp_parity` panel at 60 s: `nlp` 8 solved, `global` 12, 0 incorrect.
+raise `ValueError` at entry. `loa` (#1775 G4.1, `discopt.gdp.algorithms.loa.LOA`) reads `iterlim` (default: `max_nodes`), `init_algorithm` (default `no_init`), `set_cover_iterlim` and discopt's own `subproblem`: `"global"` (the default) certifies each configuration's reduced subproblem with discopt and falls back to the local NLP step when that proves nothing; `"nlp"` is the pre-G4.1 loop (fixed-integer NLP on the big-M lowering). Measured on the `gdp_parity` panel at 60 s: `nlp` 8 solved, `global` 12, 0 incorrect. `gloa` (#1775 G4.3, `discopt.gdp.algorithms.gloa.GLOA`) reads `iterlim`, `init_algorithm` and `set_cover_iterlim`; its subproblems are always global, so it reads no `subproblem` key.
 
 **Axis 2 — `solver` / `mip_nlp_method`: *how the resulting algebraic MIP/MINLP is
 solved.*** With `solver="mip-nlp"`, `mip_nlp_method` selects the decomposition
@@ -299,8 +301,8 @@ algorithm: `oa`, `ecp`, `fp`, `goa`, `lp_nlp_bb` (implemented); `roa` (reserved)
 
 2. **`goa` ≠ `gloa`; they must stay distinct and must not be aliased.** `goa` is a
    `mip_nlp_method` (generalized/global OA over the *algebraic* MINLP). `gloa`
-   (global *logic-based* OA) belongs on the *native* `gdp_method` axis and is
-   reserved — requesting it as a `mip_nlp_method` raises and points the caller at
+   (global *logic-based* OA) belongs on the *native* `gdp_method` axis, where it
+   runs since #1775 G4.3 — requesting it as a `mip_nlp_method` raises and points the caller at
    `goa` (algebraic) vs the `gdp_method` axis (logic-based).
    Enforced: `mip_nlp.py` `_normalize_method` (~line 638).
    Test: `test_mip_nlp_method_gloa_is_reserved_for_gdp_axis` (`python/tests/test_mip_nlp.py`).
