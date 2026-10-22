@@ -74,9 +74,11 @@ def solve_gdpopt_loa(
         (:class:`~discopt.gdp.algorithms.gloa.GLOA`, #1775 G4.3: a relaxation
         master and global subproblems), ``"ric"``
         (:class:`~discopt.gdp.algorithms.ric.RIC`, #1775 G4.2: linear master and
-        global subproblems) or ``"enumerate"``
+        global subproblems), ``"enumerate"``
         (:class:`~discopt.gdp.algorithms.enumerate.Enumerate`: every
-        configuration, global subproblems; takes ``max_configurations``).
+        configuration, global subproblems; takes ``max_configurations``) or
+        ``"lbb"`` (:class:`~discopt.gdp.algorithms.lbb.LBB`, #1775 G4.4:
+        branch and bound over disjunctions; takes ``propagate``).
 
     Returns
     -------
@@ -88,6 +90,16 @@ def solve_gdpopt_loa(
         # no NLP, and no iteration limit to truncate the enumeration.
         result: SolveResult = cls(
             model, time_limit=time_limit, gap_tolerance=gap_tolerance, **options
+        ).run()
+        return result
+    if algorithm == "lbb":
+        # Node solves are discopt's own: no master and no NLP solver to pass.
+        result = cls(
+            model,
+            time_limit=time_limit,
+            gap_tolerance=gap_tolerance,
+            iteration_limit=max_iterations,
+            **options,
         ).run()
         return result
     result = cls(
@@ -107,10 +119,11 @@ def native_gdp_class(algorithm: str) -> Any:
     (its constructor's options differ by method, hence ``Any``)."""
     from discopt.gdp.algorithms.enumerate import Enumerate
     from discopt.gdp.algorithms.gloa import GLOA
+    from discopt.gdp.algorithms.lbb import LBB
     from discopt.gdp.algorithms.loa import LOA
     from discopt.gdp.algorithms.ric import RIC
 
-    classes = {"loa": LOA, "gloa": GLOA, "ric": RIC, "enumerate": Enumerate}
+    classes = {"loa": LOA, "gloa": GLOA, "lbb": LBB, "ric": RIC, "enumerate": Enumerate}
     if algorithm not in classes:
         raise ValueError(f"algorithm must be one of {sorted(classes)}, got {algorithm!r}")
     return classes[algorithm]
