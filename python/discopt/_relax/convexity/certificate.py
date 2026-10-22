@@ -47,7 +47,7 @@ from .eigenvalue import (
     psd_decision_slack,
 )
 from .interval import Interval
-from .interval_ad import interval_hessian
+from .interval_ad import _flat_size, interval_hessian
 from .lattice import Curvature
 
 logger = logging.getLogger(__name__)
@@ -488,7 +488,12 @@ def certify_convex(
     """
     # Exact PSD-on-Q fast path (Phase 4 item 3, flag default-OFF). When a
     try:
-        ad = interval_hessian(expr, model, box=box)
+        # Over the expression's support: the rows and columns outside it are exact
+        # zeros, whose Gershgorin bounds (0 against a slack of 0) never decide a
+        # verdict, so restricting to the support decides exactly as the n x n form
+        # does -- without its O(n^2) memory (10.8 GB per bound on a 36804-column
+        # model).
+        ad = interval_hessian(expr, model, box=box, compact=True)
     except ValueError:
         # Expressions referencing array variables directly are not
         # supported by v1; abstain rather than guess. Also catches
@@ -521,7 +526,9 @@ def certify_convex(
     # 2×2 sufficient PSD test (Sylvester) — useful when the interval
     # Hessian is tight enough that Gershgorin's row-sum loosening
     # would cross zero but the determinant proof still holds.
-    if hess.lo.shape == (2, 2) and psd_2x2_sufficient(hess):
+    # Only on a two-variable model, as before compaction: a 2x2 support of a
+    # larger model is Gershgorin's to decide, so verdicts are unchanged.
+    if hess.lo.shape == (2, 2) and _flat_size(model) == 2 and psd_2x2_sufficient(hess):
         return Curvature.CONVEX
 
     # Gershgorin's bounds are rigorous (outward-rounded), so the only slack the

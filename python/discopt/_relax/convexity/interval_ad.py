@@ -211,6 +211,10 @@ class IntervalAD:
     grad: Interval
     hess: Interval
     rank1_factor: Optional[Rank1Factor] = None
+    #: ``None``: ``grad``/``hess`` span the model's flat variables. Otherwise the
+    #: sorted flat indices they span (``interval_hessian(compact=True)``); every
+    #: entry outside them is an exact structural zero.
+    support: Optional[np.ndarray] = None
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -647,13 +651,60 @@ def _dense_vec(d: dict, n: int) -> Interval:
     return Interval(lo, hi)
 
 
-def _densify(sad: _SparseAD, n: int) -> IntervalAD:
+def _support(sad: _SparseAD) -> np.ndarray:
+    """Sorted flat indices with a structurally nonzero grad, Hessian or rank-1 entry."""
+    rows, cols = sad.hess.rows_cols()
+    keys = set(sad.grad) | set(rows.tolist()) | set(cols.tolist())
+    if sad.rank1 is not None:
+        keys |= set(sad.rank1.v)
+        if sad.rank1.affine_base_grad is not None:
+            keys |= set(sad.rank1.affine_base_grad)
+    # One index at least: an all-zero 1x1 block decides like an all-zero n x n.
+    return np.array(sorted(keys) or [0], dtype=np.int64)
+
+
+def _densify(sad: _SparseAD, n: int, support: Optional[np.ndarray] = None) -> IntervalAD:
     """Materialise a sparse node into the public dense :class:`IntervalAD`.
 
     The only ``O(n²)`` allocation in the whole certificate; the
     scatter loop costs ``O(nnz)``. Absent grad/hess keys denote exact
-    structural zeros and are left as ``0.0``.
+    structural zeros and are left as ``0.0``. With ``support`` the arrays span
+    only those flat indices (``O(|support|²)``); see :func:`interval_hessian`.
     """
+    if support is not None:
+        k = int(support.shape[0])
+        if sad.unbounded:
+            out = _dense_unbounded(k)
+            return IntervalAD(value=out.value, grad=out.grad, hess=out.hess, support=support)
+        pos = {int(i): j for j, i in enumerate(support.tolist())}
+        rows, cols = sad.hess.rows_cols()
+        # ``searchsorted`` is monotone on the sorted support, so the remapped keys
+        # stay sorted, unique and upper-triangular.
+        keys = np.searchsorted(support, rows) * _KEY_SHIFT + np.searchsorted(support, cols)
+        sad = _SparseAD(
+            value=sad.value,
+            grad={pos[i]: e for i, e in sad.grad.items()},
+            hess=_HMap(keys.astype(np.int64), sad.hess.lo, sad.hess.hi),
+            n=k,
+            rank1=None
+            if sad.rank1 is None
+            else _SparseRank1(
+                c=sad.rank1.c,
+                v={pos[i]: e for i, e in sad.rank1.v.items()},
+                affine_base_value=sad.rank1.affine_base_value,
+                affine_base_grad=None
+                if sad.rank1.affine_base_grad is None
+                else {pos[i]: e for i, e in sad.rank1.affine_base_grad.items()},
+            ),
+        )
+        dense = _densify(sad, k)
+        return IntervalAD(
+            value=dense.value,
+            grad=dense.grad,
+            hess=dense.hess,
+            rank1_factor=dense.rank1_factor,
+            support=support,
+        )
     if sad.unbounded:
         return _dense_unbounded(n)
 
@@ -692,6 +743,8 @@ def interval_hessian(
     expr: Expression,
     model: Model,
     box: Optional[dict] = None,
+    *,
+    compact: bool = False,
 ) -> IntervalAD:
     """Interval value, gradient, and Hessian of a scalar expression.
 
@@ -711,6 +764,11 @@ def interval_hessian(
         IntervalHessianTooLarge: if ``expr``'s DAG exceeds
             :data:`_INTERVAL_HESSIAN_MAX_NODES` — the walk would blow the solver's
             time budget (#654); callers catch it and fall back soundly.
+
+    ``compact=True`` returns ``grad``/``hess`` over the expression's support only
+    (``IntervalAD.support``), every other entry being an exact zero. The full
+    ``n x n`` form of one constraint on a 36804-variable model (GDPlib biofuel,
+    big-M) is 10.8 GB per bound; the solve was killed for memory there.
     """
     n = _flat_size(model)
     if n == 0:
@@ -734,7 +792,7 @@ def interval_hessian(
         # for the whole walk, mirroring the dense path's per-op errstate.
         with np.errstate(over="ignore", invalid="ignore"):
             sad = _walk(expr, model, box, cache, n)
-            return _densify(sad, n)
+            return _densify(sad, n, _support(sad) if compact else None)
 
     # #1520: ``_walk`` recurses once per DAG level (a few frames each), so a
     # left-folded sum of a few hundred terms -- well inside the node budget --
