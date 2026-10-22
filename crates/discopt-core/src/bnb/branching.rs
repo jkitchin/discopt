@@ -1091,4 +1091,56 @@ mod tests {
             "an unbounded integer dimension is not branchable"
         );
     }
+
+    // #1869: an unbounded dimension gets a FINITE split point inside its domain.
+    #[test]
+    fn unbounded_branch_point_is_finite_and_inside() {
+        let none: Vec<VarBranchInfo> = vec![];
+        // [2, inf): l + 2 max(1, |l|, |x|) with x = 3 -> 2 + 6 = 8.
+        let (i, bp, int) =
+            select_unbounded_branch(&[0.0, 2.0], &[1.0, f64::INFINITY], &none, &[], &[0.5, 3.0])
+                .expect("an unbounded column");
+        assert_eq!((i, int), (1, false));
+        assert!((bp - 8.0).abs() < 1e-12 && bp > 2.0, "{bp}");
+        // (-inf, -4]: mirrored, u - 2 max(1, |u|, |x|) = -4 - 8 = -12.
+        let (_, bp, _) =
+            select_unbounded_branch(&[f64::NEG_INFINITY], &[-4.0], &none, &[], &[f64::NAN])
+                .unwrap();
+        assert!((bp + 12.0).abs() < 1e-12, "{bp}");
+        // Free column: the relaxation value (0 when it is not finite).
+        let (_, bp, _) =
+            select_unbounded_branch(&[f64::NEG_INFINITY], &[f64::INFINITY], &none, &[], &[-7.5])
+                .unwrap();
+        assert_eq!(bp, -7.5);
+        let (_, bp, _) = select_unbounded_branch(
+            &[f64::NEG_INFINITY],
+            &[f64::INFINITY],
+            &none,
+            &[],
+            &[f64::INFINITY],
+        )
+        .unwrap();
+        assert_eq!(bp, 0.0);
+        // All finite: nothing to split.
+        assert!(select_unbounded_branch(&[0.0], &[1.0], &none, &[], &[0.5]).is_none());
+    }
+
+    #[test]
+    fn unbounded_branch_skips_ordinary_integers_and_floors_spatial_ones() {
+        let ints = vec![VarBranchInfo {
+            offset: 0,
+            size: 1,
+            is_integer: true,
+        }];
+        // An ordinary integer column is the fractional brancher's, not this one's.
+        assert!(
+            select_unbounded_branch(&[0.0], &[f64::INFINITY], &ints, &[false], &[2.5]).is_none()
+        );
+        // A spatial-integer column gets an integer point, split disjointly.
+        let (i, bp, int) =
+            select_unbounded_branch(&[0.5], &[f64::INFINITY], &ints, &[true], &[2.5]).unwrap();
+        assert_eq!((i, int), (0, true));
+        assert_eq!(bp, bp.floor());
+        assert!(bp >= 0.5);
+    }
 }

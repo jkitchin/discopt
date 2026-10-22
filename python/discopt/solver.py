@@ -7614,13 +7614,27 @@ def _unbounded_branching_enabled() -> bool:
     ``prolog`` and ``ex4_1_5`` are not.
 
     Bound-changing search (it decides which subtrees exist), so gated per
-    CLAUDE.md section 5; read at call time. Default OFF until its panel passes.
+    CLAUDE.md section 5; read at call time.
+
+    **Graduated (default ON, 2026-10-22).** Panel over the 120 local MINLPLib
+    instances (<= 200 vars/cons) that keep an unbounded continuous variable after
+    FBBT, ON vs OFF, 30 s, interleaved: cert-clean (240 rows, 0 problems: no bound
+    past an optimum, no false infeasible, every incumbent passes ``verify_point``
+    on a fresh model) and net-positive -- certified 84 -> 86, none lost
+    (``haverly`` 69 nodes "exhausted" at bound -475 -> optimal in 57 nodes / 3.7 s;
+    ``ex7_3_1`` 1 node at bound 0.0 -> optimal in 5 nodes / 0.4 s); shifted
+    geometric mean wall over the 84 certified by both 3.10 vs 3.10 s. Cost: an
+    instance whose outer pieces no relaxation can bound now searches to its time
+    limit instead of stopping after one node uncertified (``prolog`` 0.7 -> 29.2 s,
+    ``ex4_1_5`` 0.2 -> 30.4 s, which now finds the optimum 0 instead of 0.2986);
+    those need the bounds tracked on #1869. ``=0`` restores the #467 fathom.
     """
-    return os.environ.get("DISCOPT_UNBOUNDED_BRANCH", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    return os.environ.get("DISCOPT_UNBOUNDED_BRANCH", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
     )
 
 
