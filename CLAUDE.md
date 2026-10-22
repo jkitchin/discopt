@@ -274,6 +274,12 @@ shard runs much longer than the others, refresh `python/tests/test_durations.jso
 unsharded `--junitxml` run with `scripts/update_test_durations.py`. Stale durations cost
 balance only, never coverage.
 
+The fast-lane shards also run with `--time-budget 15` (`python/tests/_time_budget.py`): a test
+whose **call phase** exceeds 15 s fails unless its node id is in
+`python/tests/time_budget_allowlist.json`. A new slow test should be sped up or marked `slow`
+(plus `correctness` if it checks a known optimum); an allowlist entry is a reviewed exception.
+The list only shrinks; rebuild it deliberately with `scripts/update_time_budget_allowlist.py`.
+
 ### Benchmarking
 ```bash
 python discopt_benchmarks/run_benchmarks.py --suite smoke     # Quick sanity check

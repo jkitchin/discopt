@@ -48,8 +48,8 @@ representation for the second, and deleting the probe outright for the first.
 
 from __future__ import annotations
 
+import gc
 import os
-import statistics
 import time
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -100,35 +100,41 @@ def test_cost_does_not_scale_quadratically_with_unrelated_variables():
     machine's speed; a quadratic sweep cannot come near it even on a slow runner.
 
     One A/B pair is not a measurement (CLAUDE.md §9). The pair runs ``_REPS`` times,
-    interleaved so both arms see the same load, and the **median** ratio is asserted
-    — a single sample makes this a load detector rather than a scaling one, and on a
-    contended CI runner it read 63.6x against a true ~4.5x. The models are built
-    outside the timed region for the same reason: construction is O(n) work this
-    test does not measure, and it is where the runner's allocation spikes land.
+    interleaved, and the ratio asserted is of each arm's **minimum**: load only ever
+    adds time, so the minimum is the best estimate of the uncontended cost. A single
+    sample read 63.6x on a contended CI runner against a true ~4.5x; the median of
+    per-pair ratios then read 21.7x under ``-n 4`` (per-pair [25.9, 21.7, 20.0, 24.6,
+    28.9, 9.2, 5.1]) — the large arm is ~16 ms, so one lost scheduler slice doubles
+    it. Measured with this estimator: 4.2x-5.1x idle and under load. The models are
+    built outside the timed region, with GC off inside it: construction is O(n) work
+    this test does not measure, and it is where the allocation spikes land.
     """
-    ratios = []
+    t_small, t_large = [], []
     for _ in range(_REPS):
         small = _wide_model_narrow_objective(400)
         large = _wide_model_narrow_objective(1600)
+        gc.collect()
+        gc.disable()
+        try:
+            t0 = time.perf_counter()
+            extract_qp_data(small)
+            t_small.append(time.perf_counter() - t0)
 
-        t0 = time.perf_counter()
-        extract_qp_data(small)
-        t_small = time.perf_counter() - t0
+            t0 = time.perf_counter()
+            extract_qp_data(large)
+            t_large.append(time.perf_counter() - t0)
+        finally:
+            gc.enable()
 
-        t0 = time.perf_counter()
-        extract_qp_data(large)
-        t_large = time.perf_counter() - t0
-
-        ratios.append(t_large / max(t_small, 1e-6))
-
-    assert len(ratios) == _REPS, "the scaling probe did not run"
+    assert len(t_small) == len(t_large) == _REPS, "the scaling probe did not run"
+    ratios = [round(b / max(a, 1e-6), 1) for a, b in zip(t_small, t_large)]
     # 4x the variables. Quadratic would be ~16x; measured post-fix is ~4.5x on the
-    # O(n) diagonal scan (sd 1.2 over 7 reps), and was ~29x pre-fix. 14x separates
-    # them with margin, and a quadratic sweep is quadratic in every repetition, so
-    # the median cannot hide one.
-    ratio = statistics.median(ratios)
+    # O(n) diagonal scan, and was ~29x pre-fix. 14x separates them with margin, and
+    # a quadratic sweep is quadratic in every repetition, so the minimum of the
+    # large arm cannot hide one.
+    ratio = min(t_large) / max(min(t_small), 1e-6)
     assert ratio < 14.0, (
-        f"extraction cost grew {ratio:.1f}x (median of {_REPS}) for 4x the variables "
+        f"extraction cost grew {ratio:.1f}x (min of {_REPS} per arm) for 4x the variables "
         f"— the pair sweep looks quadratic again (pre-fix this was ~29x). "
-        f"per-rep ratios: {[round(r, 1) for r in ratios]}"
+        f"per-rep ratios: {ratios}"
     )
