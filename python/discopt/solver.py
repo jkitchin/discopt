@@ -9934,8 +9934,28 @@ def _scale_free_branching_enabled() -> bool:
     per solve rather than read in Rust, whose ``OnceLock`` would latch one arm
     for a whole process.
 
-    Graduated on introduction (CLAUDE.md §5), default ON, ``=0`` restores the
-    absolute-width rule. Units panel (``issue1619_scale_free_branching_panel.py``:
+    **Default OFF since 2026-10-22; ``=1`` opts in.** It graduated on introduction
+    (default ON) on the panels below, but the corpus half ran at 20 s, too short
+    to see a lost certificate on an instance that needs ~60 s. Re-run at 120 s
+    (66 corpus instances, OFF/ON interleaved, default solve): certified 50 -> 49
+    -- ON loses ``tanksize`` (OFF: optimal in 63 s, 16,499 nodes; ON: time limit,
+    bound frozen at 1.2422 against 1.2686), gains none; 0 false bounds; wall 2011
+    -> 2074 s. That fails §5's "no certification regression" bar. Mechanism
+    (instrumented): the rule scales widths by ROOT widths, and loose root bounds
+    (``x46``: 27,050) make other columns look relatively narrow, so it bisects
+    ``x0``/``x1`` (root width ~40) down to ~1e-9, where 27% of node LPs end
+    ``Undecided`` (2,769 of 10,398, vs 606 of 16,499 OFF) and inherit their
+    parent's bound. Two repairs were tried and rejected: excluding unsplittable
+    terms (no effect) and a root-relative exhaustion floor (certifies only at a
+    hand-tuned 1e-4, with 2x the nodes -- a tolerance fit to one instance).
+
+    **Why it is kept, as an opt-in rather than retired:** on unit-rescaled
+    pooling it is a real win (below), so a model whose columns are badly scaled
+    against each other can ask for it. What would make it the default: a scale
+    that does not come from possibly-loose root bounds, re-run through both
+    panels at a time limit long enough to see certification changes.
+
+    Units panel (``issue1619_scale_free_branching_panel.py``:
     three seeded pooling plants and Haverly 1-3, p/q/pq formulations, flows in
     1/10/100 barrels, 54 rows at 60 s): 0 false certificates, 0 lost, certified
     45 -> 47, nodes 581,667 -> 459,675, wall 542 -> 457 s, median node-count
@@ -9946,7 +9966,7 @@ def _scale_free_branching_enabled() -> bool:
     Known outlier: Haverly 3 q-form in barrels, 87 -> 3,969 nodes (0.2 -> 0.8 s),
     traced to the absolute McCormick-tightness tolerance, not the branch rule.
     """
-    return os.environ.get("DISCOPT_SCALE_FREE_BRANCHING", "1") != "0"
+    return os.environ.get("DISCOPT_SCALE_FREE_BRANCHING", "0") not in ("0", "")
 
 
 def _p3_force_cut_path_enabled() -> bool:

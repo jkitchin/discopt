@@ -263,8 +263,9 @@ pub struct SpatialTreeConfig {
     /// each operand's width by its own root width, which a change of units (a
     /// positive rescaling of a column) leaves unchanged. Branching order only:
     /// every child pair still covers its parent box, so no bound moves. `false`
-    /// here (the struct default) is the legacy rule; the Python orchestrator turns
-    /// it on by default (`DISCOPT_SCALE_FREE_BRANCHING`, graduated; `=0` opts out).
+    /// here (the struct default) is the legacy rule, and so is the Python
+    /// orchestrator's default since 2026-10-22 (`DISCOPT_SCALE_FREE_BRANCHING=1`
+    /// opts in): scaling by possibly-loose ROOT widths lost tanksize's certificate.
     pub scale_free_branching: bool,
 }
 
