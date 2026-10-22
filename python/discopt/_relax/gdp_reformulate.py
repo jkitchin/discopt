@@ -3120,9 +3120,12 @@ def _conic_hull_body(
         and v._index < len(model._variables)
         and model._variables[v._index] is v
     }
-    names = [by_offset.get(i) for i in support]
-    if any(n is None for n in names):
-        return None
+    names: list[str] = []
+    for i in support:
+        name = by_offset.get(i)
+        if name is None:
+            return None
+        names.append(name)
 
     q = np.diag(Q)
     a = -c / (2.0 * q)
@@ -3138,7 +3141,8 @@ def _conic_hull_body(
         term = _wrap(float(np.sqrt(qi))) * (copies[name] - _wrap(float(ai)) * y_k)
         squares = squares + term**2
     top = float(np.sqrt(radius_sq + delta * delta))
-    return sqrt(squares) - _wrap(top) * y_k - _wrap(delta) * (_wrap(1.0) - y_k)
+    cone: Expression = sqrt(squares) - _wrap(top) * y_k - _wrap(delta) * (_wrap(1.0) - y_k)
+    return cone
 
 
 class HullVariableCoverageError(ValueError):
