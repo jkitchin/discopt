@@ -66,6 +66,24 @@ def test_integer_minimum_matches_brute_force_and_never_undercuts_the_continuous_
     assert checked == 500
 
 
+@pytest.mark.parametrize("side", ["lb", "ub"])
+def test_box_edge_within_the_integrality_tolerance_keeps_the_nearby_integer(side):
+    """#1881 review: an integer column whose box edge sits within the integrality
+    tolerance of an integer k (lb in (k, k + tol]) still has accepted points near k,
+    so k must stay a candidate. Rounding the range with a 1e-9 slack dropped it and
+    overestimated the minimum (0.99998 vs 2.5e-11), which could prove a false
+    infeasible or cut an accepted point."""
+    eps = 0.5 * N._INTEGER_DOMAIN_TOL
+    if side == "lb":
+        a, b, lb, ub, edge = 1.0, -2.0, 1.0 + eps, 3.0, 1.0 + eps  # (x - 1)**2 - 1
+    else:
+        a, b, lb, ub, edge = 1.0, -6.0, -1.0, 3.0 - eps, 3.0 - eps  # (x - 3)**2 - 9
+    got = N._min_univariate_quadratic_integer(a, b, lb, ub)
+    at_edge = a * edge * edge + b * edge  # an accepted point: within tol of an integer
+    assert got <= at_edge + 1e-15, (got, at_edge)
+    assert got >= N._min_univariate_quadratic(a, b, lb, ub) - 1e-15  # still a tightening
+
+
 def test_flag_on_proves_the_ball_mk3_shape_infeasible(monkeypatch):
     monkeypatch.setenv(FLAG, "1")
     with pytest.raises(N.NonlinearBoundTighteningInfeasible):

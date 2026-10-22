@@ -913,8 +913,16 @@ def _min_univariate_quadratic_integer(a: float, b: float, lb: float, ub: float) 
     floor(ub)``) abstains to the continuous minimum: emptiness is the box's
     business, not this bound's.
     """
-    lo = float(np.ceil(lb - 1e-9))
-    hi = float(np.floor(ub + 1e-9))
+    # The range is rounded with the SAME tolerance a solution is accepted at: an
+    # integer k with lb in (k, k + tol] still has accepted points (x = lb is within tol
+    # of k), so it must stay a candidate. Rounding with a 1e-9 slack dropped it and
+    # overestimated the minimum -- e.g. (x - 1)**2 on [1 + 5e-6, 3] gave 0.99998 where
+    # the accepted point x = lb gives 2.5e-11 -- which could prove a false infeasible
+    # or cut an accepted point (#1881 review). Each window below is intersected with
+    # [lb, ub], so a candidate never reaches outside the box.
+    tol = _INTEGER_DOMAIN_TOL
+    lo = float(np.ceil(lb - tol))
+    hi = float(np.floor(ub + tol))
     if not (np.isfinite(lo) and np.isfinite(hi)) or lo > hi:
         return _min_univariate_quadratic(a, b, lb, ub)
     if abs(a) <= 1e-12:
@@ -925,7 +933,6 @@ def _min_univariate_quadratic_integer(a: float, b: float, lb: float, ub: float) 
             min(max(float(np.floor(x_star)), lo), hi),
             min(max(float(np.ceil(x_star)), lo), hi),
         }
-    tol = _INTEGER_DOMAIN_TOL
     return min(
         _min_univariate_quadratic(a, b, max(k - tol, lb), min(k + tol, ub)) for k in candidates
     )
