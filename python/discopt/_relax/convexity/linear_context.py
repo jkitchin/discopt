@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+import scipy.sparse as sp
 
 from discopt._relax.convexity.lattice import Sign, is_strict, sign_from_bounds
 from discopt._relax.scalarize import sum_is_full_reduction
@@ -84,6 +85,21 @@ def extract_affine(
     when the expression contains any nonlinear operator or shape that
     doesn't reduce to a scalar affine form.
     """
+    terms = _affine_terms(expr, model, n_vars)
+    if terms is None:
+        return None
+    coeffs_dict, const = terms
+    coeffs = np.zeros(n_vars, dtype=np.float64)
+    for idx, v in coeffs_dict.items():
+        coeffs[idx] = v
+    return coeffs, const
+
+
+def _affine_terms(
+    expr: Expression, model: Model, n_vars: int
+) -> Optional[tuple[dict[int, float], float]]:
+    """:func:`extract_affine`'s ``(column -> coefficient, const)``, before it is
+    made dense: what :func:`build_linear_context` stacks into sparse rows."""
 
     def walk(node: Expression, scale: float) -> Optional[tuple[dict[int, float], float]]:
         if isinstance(node, Constant):
@@ -176,11 +192,7 @@ def extract_affine(
     if result is None:
         return None
     coeffs_dict, const = result
-    coeffs = np.zeros(n_vars, dtype=np.float64)
-    for idx, v in coeffs_dict.items():
-        if 0 <= idx < n_vars:
-            coeffs[idx] = v
-    return coeffs, const
+    return {idx: v for idx, v in coeffs_dict.items() if 0 <= idx < n_vars}, const
 
 
 def _is_scalar_const(expr: Expression) -> bool:
@@ -204,17 +216,19 @@ class LinearContext:
     """Linear relaxation of a model for affine range queries.
 
     ``A_ub x <= b_ub``, ``A_eq x = b_eq``, ``lb <= x <= ub``. The
-    coefficient matrices may be empty arrays (no linear constraints);
-    variable bounds are always present. ``n_vars`` is the flattened
-    decision-variable dimension.
+    coefficient matrices are CSR and may have no rows (no linear
+    constraints); variable bounds are always present. ``n_vars`` is the
+    flattened decision-variable dimension. They were dense until a
+    15k-row GDP lowering (GDPlib biofuel) spent 21.7 s in one ``np.vstack``
+    of full-width rows, all of it before the solve's deadline applied.
     """
 
     n_vars: int
     lb: np.ndarray
     ub: np.ndarray
-    A_ub: np.ndarray
+    A_ub: sp.csr_matrix
     b_ub: np.ndarray
-    A_eq: np.ndarray
+    A_eq: sp.csr_matrix
     b_eq: np.ndarray
 
     def affine_range(self, coeffs: np.ndarray, const: float) -> tuple[float, float]:
@@ -228,7 +242,8 @@ class LinearContext:
         lo_box, hi_box = _box_range(coeffs, self.lb, self.ub)
         lo_box += const
         hi_box += const
-        if self.A_ub.size == 0 and self.A_eq.size == 0:
+        # Rows, not ``.size``: on a sparse matrix that is the nonzero count.
+        if self.A_ub.shape[0] == 0 and self.A_eq.shape[0] == 0:
             return lo_box, hi_box
 
         from discopt.solvers import SolveStatus
@@ -237,9 +252,9 @@ class LinearContext:
         # ``bounds`` as (lo, hi) tuples; POUNCE maps ±inf via its own sentinel.
         bounds = [(float(lo), float(hi)) for lo, hi in zip(self.lb, self.ub)]
 
-        A_ub = self.A_ub if self.A_ub.size else None
+        A_ub = self.A_ub if self.A_ub.shape[0] else None
         b_ub = self.b_ub if self.b_ub.size else None
-        A_eq = self.A_eq if self.A_eq.size else None
+        A_eq = self.A_eq if self.A_eq.shape[0] else None
         b_eq = self.b_eq if self.b_eq.size else None
 
         try:
@@ -339,31 +354,44 @@ def build_linear_context(model: Model) -> Optional[LinearContext]:
         ub[offset : offset + v.size] = vub
         offset += v.size
 
-    ub_rows: list[tuple[np.ndarray, float]] = []
-    eq_rows: list[tuple[np.ndarray, float]] = []
+    ub_rows: list[tuple[dict[int, float], float]] = []
+    eq_rows: list[tuple[dict[int, float], float]] = []
 
     for c in model._constraints:
         if not isinstance(c, Constraint):
             continue
-        aff = extract_affine(c.body, model, n_vars)
+        aff = _affine_terms(c.body, model, n_vars)
         if aff is None:
             continue
-        coeffs, const = aff
+        terms, const = aff
         # body sense rhs  →  (coeffs · x + const)  sense  rhs
         adjusted_rhs = float(c.rhs) - const
         if c.sense == "<=":
-            ub_rows.append((coeffs, adjusted_rhs))
+            ub_rows.append((terms, adjusted_rhs))
         elif c.sense == ">=":
-            ub_rows.append((-coeffs, -adjusted_rhs))
+            ub_rows.append(({j: -a for j, a in terms.items()}, -adjusted_rhs))
         elif c.sense == "==":
-            eq_rows.append((coeffs, adjusted_rhs))
+            eq_rows.append((terms, adjusted_rhs))
 
-    A_ub = np.vstack([r[0] for r in ub_rows]) if ub_rows else np.zeros((0, n_vars))
-    b_ub = np.array([r[1] for r in ub_rows], dtype=np.float64) if ub_rows else np.zeros(0)
-    A_eq = np.vstack([r[0] for r in eq_rows]) if eq_rows else np.zeros((0, n_vars))
-    b_eq = np.array([r[1] for r in eq_rows], dtype=np.float64) if eq_rows else np.zeros(0)
+    return LinearContext(
+        n_vars=n_vars,
+        lb=lb,
+        ub=ub,
+        A_ub=_csr(ub_rows, n_vars),
+        b_ub=np.array([r[1] for r in ub_rows], dtype=np.float64),
+        A_eq=_csr(eq_rows, n_vars),
+        b_eq=np.array([r[1] for r in eq_rows], dtype=np.float64),
+    )
 
-    return LinearContext(n_vars=n_vars, lb=lb, ub=ub, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq)
+
+def _csr(rows: list[tuple[dict[int, float], float]], n_vars: int) -> sp.csr_matrix:
+    """The rows' coefficient dicts as one ``len(rows) x n_vars`` CSR matrix."""
+    indptr = np.zeros(len(rows) + 1, dtype=np.int64)
+    indptr[1:] = np.cumsum([len(t) for t, _ in rows], dtype=np.int64)
+    nnz = int(indptr[-1])
+    indices = np.fromiter((j for t, _ in rows for j in t), dtype=np.int64, count=nnz)
+    data = np.fromiter((a for t, _ in rows for a in t.values()), dtype=np.float64, count=nnz)
+    return sp.csr_matrix((data, indices, indptr), shape=(len(rows), n_vars))
 
 
 __all__ = ["LinearContext", "build_linear_context", "extract_affine"]
