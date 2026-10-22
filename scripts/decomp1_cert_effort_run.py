@@ -87,23 +87,8 @@ def main() -> None:
 
     ds._compute_interval_bound = _iv
 
-    try:
-        import discopt._relax.mccormick_nlp as mnlp
-
-        _orig_mcb = mnlp.solve_mccormick_batch
-
-        def _mcb(*a, **k):
-            r = _orig_mcb(*a, **k)
-            engine_counts["mccormick_nlp_batch_calls"] += 1
-            try:
-                engine_counts["mccormick_nlp_batch_nodes"] += int(len(r))
-            except Exception:
-                pass
-            return r
-
-        mnlp.solve_mccormick_batch = _mcb
-    except Exception:
-        pass
+    # (The McCormick-"nlp" batch-bound counter that stood here was removed with
+    # that route in #1873.)
 
     # MILP-path node-bound recovery (iteration-limit/numerical node LP exits):
     # each attempt = one node whose LP bound was untrusted; a None return

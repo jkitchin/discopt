@@ -4,8 +4,16 @@ This subpackage is a **design-time** toolkit: it uses SymPy to *derive*, *verify
 and *code-generate* convex/concave envelopes for nonlinear atoms. SymPy is an
 optional ``[sympy]`` extra and **must not** be required to import the sympy-free
 parts of this package (the pure-JAX :mod:`~discopt._relax.symbolic.runtime`
-assembly, the hand-written :mod:`~discopt._relax.symbolic.domains` packs, the
-numeric :mod:`~discopt._relax.symbolic.patterns`, etc.).
+assembly, :mod:`~discopt._relax.symbolic.verification`,
+:mod:`~discopt._relax.symbolic.signed_signomial`, etc.).
+
+No solver path consumes the generated JAX closures: the McCormick-"nlp" route
+they plugged into was retired in #1873, together with the hand-written domain
+packs, their registry and the pattern catalogue
+(``docs/dev/nlp-mccormick-route-retirement.md``). What remains is the
+derive -> code-generate -> verify toolkit, and ``signed_signomial``, the
+reference implementation the production numpy signomial engine
+(:mod:`discopt._relax.convexity.signomial_global`) is tested against pointwise.
 
 To honor that, the top-level names that depend on SymPy are exposed **lazily**
 (PEP 562): importing this package — or any sympy-free submodule — does not import

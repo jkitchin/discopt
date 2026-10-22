@@ -1,8 +1,8 @@
 """LP-form McCormick relaxation: bilinears lifted to aux columns, solved by HiGHS.
 
 This is the "spatial-BB" relaxation: a polyhedral underestimator of the
-nonconvex feasible set. Unlike the McCormick-NLP path in
-:mod:`discopt._relax.mccormick_nlp`, it returns a globally optimal value of
+nonconvex feasible set. Unlike the retired McCormick-NLP path (#1873), it
+returns a globally optimal value of
 the linear relaxation in one LP solve — no local minima, no warm-start
 sensitivity. The trade-off is that bound information per node is loose
 until spatial branching tightens variable domains.
@@ -2714,7 +2714,9 @@ class MccormickLPRelaxer:
         if any(not getattr(r.value_fn, "numpy_native", False) for r in specs):
             from discopt._optional_jax import require_jax
 
-            require_jax("a JAX-backed separation tangent (DISCOPT_SEPGRAD=jax)")
+            require_jax(
+                "a JAX separation tangent (DISCOPT_SEPGRAD=jax or DISCOPT_ANALYTIC_SEPGRAD=1)"
+            )
             import jax.numpy as _jnp_mod
 
             _jnp = _jnp_mod

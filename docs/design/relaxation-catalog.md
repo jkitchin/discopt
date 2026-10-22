@@ -16,19 +16,33 @@ SCIP, ANTIGONE).
 A function is **fully certifiable** only if all three hold along the global path:
 1. the modeling API can build the node (`dm.*` / operator),
 2. the node round-trips into the Rust IR (`MathFunc`) for FBBT + B&B, and
-3. the JAX relaxation compiler has a rule that returns a valid `(cv, cc)` pair.
+3. the default relaxation engine bounds it — the numpy factorable engine
+   (`uniform_relax.py`) and the LP-form McCormick relaxation (`milp_relaxation.py`,
+   `mccormick_lp.py`) built on it.
 
-As of this audit **every function the modeling API exposes satisfies all three** — the
-former (1)/(2) asymmetries (gaps A and C) are closed. What remains are *tightness* gaps
-(§5) and the curvature/FBBT coverage notes.
+> **Re-audited 2026-10-22 (#1873).** Criterion 3 used to read "the JAX relaxation
+> compiler has a rule", and this document's coverage claim was audited against that
+> compiler. The compiler, and the McCormick-NLP route it served, were retired in #1873
+> (`docs/dev/nlp-mccormick-route-retirement.md`): its bound never changed a result on the
+> corpus. The claim was re-measured against the default engine by solving, for each of
+> the 24 univariate functions the API exposes, `min f(x) - x*y` on a box inside `f`'s
+> domain with a default `solve()`: **23 of 24 return a certified dual bound; `sign` does
+> not** (status `feasible`, `bound=None`) — the default engine has no `sign` envelope.
+> Its only one, `relax_sign`, lived in the retired compiler. §1–§3 below still give the
+> envelope *rules*; a "Source:" naming a retired file is historical.
+
+So every function the modeling API exposes satisfies (1) and (2), and all but `sign`
+satisfy (3). What remains are *tightness* gaps (§5) and the curvature/FBBT coverage
+notes.
 
 ---
 
 ## 1. Operator relaxations (arithmetic core)
 
-Source: `python/discopt/_relax/mccormick.py`. Convention: each `relax_*` returns
-`(cv, cc)` with `cv ≤ f ≤ cc`; convex parts are exact, concave parts use secant lines
-(`_secant`, mccormick.py:23).
+Source (historical): `python/discopt/_relax/mccormick.py`, retired in #1873. The default
+engine applies the same rules in `milp_relaxation.py` (lifted products and quotients) and
+`uniform_relax.py`. Convention: each rule gives `(cv, cc)` with `cv ≤ f ≤ cc`; convex parts
+are exact, concave parts use secant lines.
 
 | Operator | Node | Function | Underestimator | Overestimator | Notes |
 |---|---|---|---|---|---|
@@ -49,9 +63,10 @@ foundation BARON/Couenne use. Trilinear and higher products are **not** exact hu
 
 ## 2. Univariate function relaxations
 
-Source: `mccormick.py` + `envelopes.py`. Dispatched by `relaxation_compiler.py`
-(`_univariate_relax` and `_envelope_relax` tables). **Every row below is now covered all
-three ways** (builder ✓, Rust IR ✓, relaxation ✓) and is fully certifiable.
+Source (historical): `mccormick.py` + `envelopes.py`, dispatched by `relaxation_compiler.py`
+— all retired in #1873. The default engine's univariate envelopes are the
+`_UNIVARIATE_FN` table in `uniform_relax.py`. Every row below except `sign` certifies on
+the default path (re-audit above); the "Relaxation" column names the retired function.
 
 | Function | Relaxation | Curvature handling |
 |---|---|---|
@@ -98,13 +113,15 @@ The modeling API exposes builders for all of them, including `atan/asin/acos`
 
 ## 3. Composite / multivariate relaxations
 
-Source: `envelopes.py`, `multivariate_mccormick.py`, `relaxation_compiler.py`,
-`factorable_reform.py`, `milp_relaxation.py`.
+Source: `factorable_reform.py`, `milp_relaxation.py`, `multivariate_mccormick.py`
+(the latter now consumed by the reduced-space `mcbox` engine). The NLP-path envelopes in
+`envelopes.py` / `relaxation_compiler.py` (trilinear, `relax_signomial_multi`,
+`relax_fractional`, `relax_log_sum`, `relax_exp_bilinear`) were retired in #1873 with the
+McCormick-NLP route; their bullets below are kept as the record of the rule.
 
-Two regimes share this section: the compositional **NLP/value-evaluator** (`envelopes.py`,
-`multivariate_mccormick.py`) and the **LP** relaxation (`milp_relaxation.py`). The LP path
-carries explicit lifted product variables and now produces the **exact multilinear hull**
-(§6.D); the NLP-path envelopes below are the compositional (looser) counterparts.
+The **LP** relaxation (`milp_relaxation.py`) carries explicit lifted product variables and
+produces the **exact multilinear hull** (§6.D); the retired NLP-path envelopes were the
+compositional (looser) counterparts.
 
 - **Trilinear / multilinear `∏ xᵢ` (NLP path)** — `relax_trilinear` (single ordering) and
   `relax_trilinear_exact` (permutation-symmetric nested McCormick), auto-detected via
@@ -134,13 +151,13 @@ carries explicit lifted product variables and now produces the **exact multiline
 
 | Backend | File | What it does | Notes |
 |---|---|---|---|
-| **McCormick (NLP)** | `mccormick.py`, `envelopes.py`, `relaxation_compiler.py` | compositional cv/cc envelopes (numpy) | opt-in via `mccormick_bounds="nlp"`; midpoint or convex-NLP solve; **valid dual bound only for convex models** (see §6); never selected by `"auto"` (which resolves to `"lp"` for nonconvex models, `"none"` for convex ones) |
+| ~~McCormick (NLP)~~ | ~~`mccormick.py`, `envelopes.py`, `relaxation_compiler.py`~~ | compositional cv/cc envelopes | **retired in #1873**: fired only for convex models with an explicit option, and its bound changed nothing in 36/36 measured pairs (`docs/dev/nlp-mccormick-route-retirement.md`); `mccormick_bounds="nlp"` is refused |
 | **McCormick LP** | `mccormick_lp.py`, `milp_relaxation.py` | polyhedral **outer** approximation with **lifted bilinear aux columns**, solved as an LP | rigorous valid dual bound; tighter than the midpoint evaluator; default (`mccormick_bounds="auto"`) for a nonconvex model with relaxable nonlinearity |
-| **α-BB (rigorous)** | `alphabb.py` | `f ∓ Σαᵢ(xᵢ−lb)(ub−xᵢ)`, α from a **sound interval Hessian + interval-Gershgorin** bound | now auto-dispatched as a fallback and selectable via `arithmetic="alphabb"`; the rigorous α replaces the older sampling estimator |
-| **TM2014 multivariate** | `multivariate_mccormick.py` | tighter univariate composition | 11 ops |
-| **Piecewise McCormick** | `piecewise_mccormick.py` | partitioned envelopes (`partitions>0`) | bilinear, exp, log, sqrt, square, sin, cos, tan |
-| **Outer approx / Chebyshev / Taylor / ellipsoidal** | `oa_relax.py`, `polyhedral_oa.py`, `chebyshev_model.py`, `taylor_model.py`, `ellipsoidal_arith.py` | affine OA cuts on a reference box (with remainder bounds) | exp, log, log2, log10, sqrt, sin, cos, tan, atan, asin, acos, sinh, cosh, tanh |
-| **Learned (ICNN)** | `learned_relaxations.py`, `icnn.py` | input-convex NN relaxations | {bilinear, exp, log, sqrt, sin} with McCormick fallback |
+| **α-BB (rigorous)** | `_alphabb_rigorous.py` (`rigorous_alpha`) | `f ∓ Σαᵢ(xᵢ−lb)(ub−xᵢ)`, α from a **sound interval Hessian + interval-Gershgorin** bound | auto-dispatched as the node-bound fallback (`solver._compute_alphabb_bound`); the rigorous α replaced the sampling estimator (C-17). The JAX `alphabb.py` and `relaxation_arithmetic="alphabb"` were retired in #1873 |
+| **TM2014 multivariate** | `multivariate_mccormick.py` | tighter univariate composition | 11 ops; used by the reduced-space `mcbox` engine (`dm.custom` models) |
+| **Partitioned McCormick (AMP)** | `solvers/amp.py`, `discretization.py` | adaptive domain partitioning | `solver="amp"`. The uniform `piecewise_mccormick.py` / `partitions>0` was retired in #1873 |
+| ~~Outer approx / Chebyshev / Taylor / ellipsoidal~~ | ~~`oa_relax.py`, `polyhedral_oa.py`, `chebyshev_model.py`, `taylor_model.py`, `ellipsoidal_arith.py`~~ | affine OA cuts on a reference box | **retired in #1873** (`relaxation_arithmetic=` is refused) |
+| ~~Learned (ICNN)~~ | ~~`learned_relaxations.py`, `icnn.py`~~ | input-convex NN relaxations | **retired in #1873**: no pretrained models ever shipped, so `use_learned_relaxations=True` always fell back |
 
 **Bound tightening & cuts** (part of the global story, complementary to relaxations):
 `obbt.py` (optimality-based bound tightening via per-variable LPs),
@@ -162,14 +179,15 @@ outer mode, #1482, which made it production code).
 Certifying a global optimum requires the reported lower bound to be a **rigorous valid
 dual bound**, not merely a feasible value. Two guards enforce this:
 
-- **McCormick-`nlp` bound is valid only for convex models (issue #120).** The NLP bound
-  solver evaluates the compiled relaxation at `x_cv == x_cc`, where every McCormick rule
-  is *tight*, so it effectively minimizes the original objective *locally*. For a
-  nonconvex model that local optimum can lie **above** the true optimum and be falsely
-  certified as a lower bound. `solver.py` (~line 2386) detects `_mc_mode == "nlp" and not
-  _model_is_convex` and falls back to the rigorous α-BB underestimator / `"none"`. The
-  **LP** path (`mccormick_lp.py`) is a polyhedral *outer* approximation and is therefore
-  always a valid bound (and an infeasible LP is a rigorous fathom).
+- **A local NLP value is not a bound for a nonconvex model (issue #120).** The
+  since-retired McCormick-`nlp` bound evaluated the compiled relaxation at
+  `x_cv == x_cc`, where every McCormick rule is *tight*, so it effectively minimized the
+  original objective *locally*; for a nonconvex model that local optimum can lie
+  **above** the true optimum. The guard that demoted it is now the direct fallback: when
+  the LP relaxer is discarded for a nonconvex model, the node bound falls back to the
+  rigorous α-BB underestimator (`solver.py`, `_lp_downgraded`). The **LP** path
+  (`mccormick_lp.py`) is a polyhedral *outer* approximation and is therefore always a
+  valid bound (and an infeasible LP is a rigorous fathom).
 - **`gap_certified` guard (PR #139).** `SolveResult.__post_init__`
   (`modeling/core.py` ~line 1143) downgrades `gap_certified → False` and clears
   `bound`/`gap` whenever a result claims certification but `bound` is `None` or non-finite

@@ -423,7 +423,7 @@ def compose_sinh(cv_g, cc_g, g_lb, g_ub):
 
 # ---------------------------------------------------------------------------
 # Dispatch table: maps function name to composition rule.
-# Used by relaxation_compiler to wire in the tightened composition path.
+# Used by mcbox (the reduced-space MCBox type) for the tightened composition path.
 # ---------------------------------------------------------------------------
 
 

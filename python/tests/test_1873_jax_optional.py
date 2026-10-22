@@ -170,7 +170,9 @@ _JAX_MODULES = sorted(
 
 
 def test_every_module_scope_jax_importer_refuses_with_the_named_error():
-    assert len(_JAX_MODULES) >= 30, _JAX_MODULES  # the scan found the modules
+    # The scan found the modules: 37 before the McCormick-"nlp" route was retired
+    # (#1873, 22 of them went with it), 15 after.
+    assert len(_JAX_MODULES) >= 10, _JAX_MODULES
     p = _run_without_jax(
         "import importlib, json\n"
         "from discopt._optional_jax import MissingJaxError\n"

@@ -84,6 +84,14 @@ def _timer(mod, name, label, timers, counts):
 # A. Is the relaxation compiler the issue names on the default solve path?
 # --------------------------------------------------------------------------- #
 def arm_compiler_on_path(reps=3):
+    import importlib.util
+
+    # The answer this arm measured (not on the default path) was acted on: the
+    # compiler was retired with the McCormick-"nlp" route in #1873. Say so
+    # instead of crashing on the import (a skipped arm must not read as a pass).
+    if importlib.util.find_spec("discopt._relax.relaxation_compiler") is None:
+        print("[A] SKIPPED: relaxation_compiler was retired in #1873; arm A is moot")
+        return
     import discopt._relax.relaxation_compiler as rc
 
     calls = collections.Counter()

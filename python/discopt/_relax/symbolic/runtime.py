@@ -1,12 +1,11 @@
-"""Sympy-free runtime envelope assembly shared by code-gen and domain packs.
+"""Sympy-free runtime envelope assembly behind the code generator.
 
 This module contains the pure-JAX construction of convex/concave envelopes from
 a function ``f`` and its derivative ``f'`` (supplied as JAX callables) plus the
-curvature data. It is imported on the solver hot path; it does **not** import
-SymPy. The SymPy code generator (:mod:`discopt._relax.symbolic.codegen`) lambdifies
-``f``/``f'`` and calls these helpers, and the hand-written domain packs
-(:mod:`discopt._relax.symbolic.domains`) call them with hand-written ``f``/``f'`` —
-so a single, tested envelope construction backs both paths.
+curvature data. It does **not** import SymPy. The SymPy code generator
+(:mod:`discopt._relax.symbolic.codegen`) lambdifies ``f``/``f'`` and calls these
+helpers. (The hand-written domain packs that also called them were retired in
+#1873 with the McCormick-"nlp" route they fed.)
 
 Contract for every helper: ``(x, lb, ub) -> (cv, cc)`` with ``cv <= f(x) <= cc``
 on ``[lb, ub]``, ``cv`` convex and ``cc`` concave, all branching via

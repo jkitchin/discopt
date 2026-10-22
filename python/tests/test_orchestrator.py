@@ -244,13 +244,6 @@ class TestSolveSimple:
     def test_solve_wall_time_positive(self, result):
         assert result.wall_time > 0
 
-    def test_piecewise_partitions_parameter(self):
-        """solve(partitions=4) should produce a valid result."""
-        m = example_simple_minlp()
-        result = m.solve(partitions=4)
-        assert isinstance(result, SolveResult)
-        assert result.status in ("optimal", "feasible")
-
 
 # ──────────────────────────────────────────────────────────
 # TestSolveCorrectness — Verify against known optima

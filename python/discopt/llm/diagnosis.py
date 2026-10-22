@@ -278,12 +278,12 @@ def _diagnose_limit(model: Model, result: SolveResult, llm_model: str | None) ->
                 "near-optimal. Consider accepting it."
             )
         elif result.gap < 0.10:
-            lines.append("Moderate gap. Try: partitions=4, cutting_planes=True")
+            lines.append('Moderate gap. Try: cutting_planes=True, or solver="amp"')
         else:
             lines.append(
                 "Large gap. The relaxation is weak. Try: "
-                "tighter variable bounds, partitions=8, "
-                "cutting_planes=True"
+                "tighter variable bounds, cutting_planes=True, "
+                'or solver="amp" for bilinear-heavy models'
             )
 
     lines.append("")
@@ -328,7 +328,7 @@ def _diagnose_large_gap(model: Model, result: SolveResult, llm_model: str | None
         f"{result.gap:.2%} — the relaxation is weak.\n\n"
         f"## Suggestions\n"
         f"1. Tighten variable bounds to strengthen relaxations\n"
-        f"2. Use partitions=4 for McCormick tightening\n"
+        f'2. For bilinear terms, try solver="amp" (adaptive McCormick partitioning)\n'
         f"3. Enable cutting_planes=True for OA cuts\n"
         f"4. Check for large big-M values that weaken the LP relaxation\n"
         f"5. Consider reformulating bilinear terms"

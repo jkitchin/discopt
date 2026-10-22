@@ -11,9 +11,10 @@ The mechanism is `python/discopt/_optional_jax.py`:
   subclasses `ModuleNotFoundError` with `name="jax"`. Any existing `except ImportError`
   therefore behaves as it did when `import jax` failed on its own. The message names
   the feature and `pip install 'discopt[jax]'`.
-- Every module with a module-scope `import jax` (37 of them) checks `jax_available()`
-  before that import. `jax_available()` uses `importlib.util.find_spec`, so it never
-  imports JAX.
+- Every module with a module-scope `import jax` checks `jax_available()`
+  before that import (37 such modules at first; 15 remain since 22 were retired with the
+  McCormick-"nlp" route, §3). `jax_available()` uses `importlib.util.find_spec`, so it
+  never imports JAX.
 - Function-level JAX users on a public path call `require_jax(...)` before importing it.
 
 Guards (`python/tests/test_1873_jax_optional.py`):
@@ -123,37 +124,28 @@ and the extra. The last four are lowering work, listed here with their fixes.
 | `pounce_sensitivity` (sIPOPT) | `solvers/sipopt.py` |
 | `discopt.parametric` / `_relax/parametric.py` | module guard on `_relax/parametric.py` |
 | differentiable solves (`_relax/differentiable*.py`, `pounce_layer.py`) | module guards |
-| learned / ICNN relaxations, `_relax/symbolic/*` | module guards (`icnn*`, `learned_relaxations` guard *before* `equinox`) |
+| `_relax/symbolic/{runtime,verification,signed_signomial}` (design-time toolkit / oracle) | module guards |
 | `DISCOPT_BLOCK_VECTOR_EVAL` (default OFF) | `_block_eval.py:_make_jac_values_fn` |
 
-`use_learned_relaxations=True` still catches `ImportError` and warns that it is
-falling back to standard McCormick. It did so before #1873 when equinox was missing.
-The warning is loud, the fallback is sound (standard McCormick is a valid
-relaxation), and the `gnn`/`learned` extras now include JAX.
+`use_learned_relaxations`, the ICNN modules and the rest of `_relax/symbolic` were retired
+with the McCormick-"nlp" route (§3).
 
-## 3. Module-scope importers in `_relax/`
+## 3. Module-scope importers in `_relax/` — resolved
 
-Which non-JAX modules import each one, statically:
+**Retraction.** This section first said that most of these modules had "no importer outside
+other JAX modules and tests", and the PR description repeated it as "retirement
+*candidates*". That framing was wrong. Most of them were reachable from `solver.py` through
+`relaxation_compiler`, behind `mccormick_bounds="nlp"`/`partitions`/`relaxation_arithmetic`/
+`use_learned_relaxations` (with `nlp_bb=False`, on convex models). The owner asked for a
+definite answer, so it was measured. **`docs/dev/nlp-mccormick-route-retirement.md` is the
+record and the per-module table.** In short:
 
-| Module | Imported from (outside the JAX set and tests) |
-|---|---|
-| `nlp_evaluator` | `_tape_nlp_evaluator` (the fallback), `solver`, `solvers.{nlp_pounce,nlp_ipopt,oa,gdpopt_loa}`, `_relax.{primal_heuristics,differentiable_solve}`, `_block_eval`. All lazy and reached only through the fallback or `DISCOPT_NLP_EVAL=jax` |
-| `dag_compiler` | `_relax.__init__` (lazy `__getattr__`), `uniform_relax` (`DISCOPT_SEPGRAD=jax` or no POUNCE only), `problem_classifier` (`_extract_lp_data_autodiff` / `_qp_terms_jax`, the legacy fallbacks behind the tape), `nonsmooth_lift`, `simplex_lowering`, `mo.utils`, `modeling.argmin`, `solvers.nlp_native`, `cli` |
-| `relaxation_compiler`, `batch_evaluator`, `mccormick_nlp` | `solver`, only when `_mc_mode == "nlp"` survives to the node loop. Under the default `mccormick_bounds="auto"` it does not: a convex model starts at `"none"`, and the #120 soundness guard demotes every lp→nlp fallback on a nonconvex model to alphaBB. So this needs an explicit `mccormick_bounds="nlp"` on a convex model |
-| `mccormick_subgradient` (+ `mcbox`) | `solver`, the reduced-space engine for `dm.custom` models (already `[jax]`-only) |
-| `learned_relaxations` (+ `icnn*`) | `solver`, `use_learned_relaxations=True` |
-| `differentiable` | `modeling.core`, `parametric`, `sensitivity` (deliberate users, §2) |
-| `parametric` | `discopt.parametric` (§2) |
-| `sparse_hessian` | `_block_eval` (flag-gated, default OFF) |
-| `symbolic.runtime`, `symbolic.verification` | `symbolic.codegen`, `symbolic.__init__` (design-time toolkit) |
-| `alphabb`, `differentiable_lp/qp`, `ellipsoidal_arith`, `envelopes`, `mccormick`, `mccormick_evaluator`, `multivariate_mccormick`, `oa_relax`, `piecewise_mccormick`, `polyhedral_oa`, `pounce_layer`, `sparse_jacobian`, `taylor_model`, `symbolic.{certified_learned,gp_hull,patterns,registry,signed_signomial,domains.*}` | **no importer outside other JAX modules and tests** |
-
-**Retirement (CLAUDE.md §5) is not done here, deliberately.** This issue asked whether
-each module is reachable. The answer for the last row is "only from other JAX modules
-and tests", which makes them retirement *candidates*, not modules shown dead. Several
-are reached through `relaxation_compiler` (the `mccormick_bounds="nlp"` path) or
-through the differentiable layers, and both of those are reachable. Deleting a module
-together with its tests is a separate decision per module, with its own measurement.
-Optional JAX does not depend on it: a JAX-less install never imports any of these on
-the default path (measured above), and an opt-in path that does refuses with the
-named error.
+- **Retired (22 JAX modules + `chebyshev_model`, plus `symbolic.domains/__init__`):** the
+  McCormick-"nlp" route. Its bound changed nothing in 36 of 36 measured instance/variant
+  pairs, and on two instances it turned a certified 2–6 s solve into a 27× time-limit
+  overrun and a 13.6 GB OOM kill. Its four options are refused.
+- **Kept (15), each with a stated reason:** the JAX evaluator (`nlp_evaluator`,
+  `dag_compiler`, `sparse_jacobian`, `sparse_hessian`); the `dm.custom` global engine
+  (`mcbox`, `mccormick_subgradient`, `multivariate_mccormick`); the differentiable layers
+  (`differentiable*`, `pounce_layer`, `parametric`); and the symbolic toolkit
+  (`runtime`, `verification`) with its oracle `signed_signomial`.

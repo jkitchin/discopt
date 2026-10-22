@@ -33,7 +33,6 @@ def _args(nl: Path, **over) -> argparse.Namespace:
         gap=None,
         threads=None,
         solver=None,
-        partitions=None,
         rlt=None,
         nlp_bb=None,
         tuning=None,

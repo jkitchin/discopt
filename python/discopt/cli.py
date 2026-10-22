@@ -405,8 +405,6 @@ def _cmd_solve(args):
         overrides["threads"] = args.threads
     if args.solver is not None:
         overrides["solver"] = args.solver
-    if args.partitions is not None:
-        overrides["partitions"] = args.partitions
     if args.rlt is not None:
         overrides["rlt"] = args.rlt
     if args.nlp_bb is not None:
@@ -706,7 +704,6 @@ def main():
     p_solve.add_argument("--gap", type=float, default=None, help="Relative optimality gap tol.")
     p_solve.add_argument("--threads", type=int, default=None, help="Rust threads.")
     p_solve.add_argument("--solver", default=None, help="Backend selector (e.g. amp, gp).")
-    p_solve.add_argument("--partitions", type=int, default=None, help="McCormick partitions.")
     p_solve.add_argument("--rlt", default=None, choices=["auto", "on", "off"], help="RLT control.")
     p_solve.add_argument(
         "--nlp-bb", action=argparse.BooleanOptionalAction, default=None, help="Force NLP-BB on/off."

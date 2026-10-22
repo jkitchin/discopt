@@ -31,7 +31,6 @@ import pytest
 
 pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
 
-import jax.numpy as jnp
 import numpy as np
 from discopt._relax._fallback import FALLBACK_WARNINGS
 
@@ -146,67 +145,6 @@ def test_milp_relaxation_objective_defect_propagates_decline_absorbed(monkeypatc
     assert declines
     assert res.relaxation_objective() is None
     assert res.objective == pytest.approx(2.0, abs=1e-6)  # y=1, x=0.5 (or y=2, x=0)
-
-
-# ── oa_relax.py / relaxation_compiler.py ────────────────────────────────────
-
-
-def test_static_box_for_arg_interval_defect_propagates(monkeypatch):
-    """Removed: three nested ``except Exception: return None``."""
-    from discopt._relax import oa_relax
-    from discopt._relax.convexity import interval_eval
-
-    m = dm.Model("oa1520")
-    x = m.continuous("x", lb=0.5, ub=2.0)
-    calls: list[int] = []
-    monkeypatch.setattr(
-        interval_eval, "evaluate_interval", _counting_raiser(lambda: _Boom("iv"), calls)
-    )
-    with pytest.raises(_Boom):
-        oa_relax.static_box_for_arg(x, m)
-    assert calls
-
-
-def test_static_box_for_arg_declines_non_scalar_by_value():
-    """The one expected decline (a non-scalar argument) is now an explicit size
-    check, not a ``reshape`` raising into a bare ``except``."""
-    from discopt._relax import oa_relax
-
-    m = dm.Model("oa1520v")
-    v = m.continuous("v", shape=(3,), lb=0.5, ub=2.0)
-    s = m.continuous("s", lb=0.5, ub=2.0)
-    assert oa_relax.static_box_for_arg(v, m) is None
-    assert oa_relax.static_box_for_arg(s, m) == (0.5, 2.0)
-
-
-def test_oa_relax_build_narrowed_to_value_error(monkeypatch):
-    """Narrowed: ``make_oa_relax`` documents ``ValueError``; only that falls back
-    to McCormick."""
-    from discopt._relax import oa_relax
-    from discopt._relax.relaxation_compiler import compile_objective_relaxation
-
-    def model():
-        m = dm.Model("oacomp1520")
-        x = m.continuous("x", lb=-1.0, ub=1.0)
-        m.minimize(dm.exp(x))
-        m.subject_to(x >= -1.0)
-        return m
-
-    calls: list[int] = []
-    monkeypatch.setattr(oa_relax, "make_oa_relax", _counting_raiser(lambda: _Boom("oa"), calls))
-    with pytest.raises(_Boom):
-        compile_objective_relaxation(model(), arithmetic="chebyshev")
-    assert calls
-
-    declines: list[int] = []
-    monkeypatch.setattr(
-        oa_relax, "make_oa_relax", _counting_raiser(lambda: ValueError("domain"), declines)
-    )
-    fn = compile_objective_relaxation(model(), arithmetic="chebyshev")
-    assert declines
-    x = jnp.asarray([0.3])
-    cv, cc = fn(x, x, jnp.asarray([-1.0]), jnp.asarray([1.0]))
-    assert float(cv) <= np.exp(0.3) + 1e-9 <= float(cc) + 2e-9  # McCormick fallback, sound
 
 
 # ── gdp_advisor.py / gdp_reformulate.py ─────────────────────────────────────
@@ -585,95 +523,6 @@ def test_integer_ratio_node_bound_defect_propagates(monkeypatch):
     with pytest.raises(_Boom):
         p.node_bound(lb, ub)
     assert calls
-
-
-# ── mccormick_nlp.py ────────────────────────────────────────────────────────
-
-
-def test_mccormick_nlp_relaxation_probe_defect_propagates():
-    """Removed: the midpoint probe of the objective relaxation returned ``-inf``
-    on any exception."""
-    from discopt._relax.mccormick_nlp import solve_mccormick_relaxation_nlp
-
-    calls: list[int] = []
-    with pytest.raises(_Boom):
-        solve_mccormick_relaxation_nlp(
-            _counting_raiser(lambda: _Boom("relax"), calls),
-            None,
-            None,
-            jnp.array([0.0, 0.0]),
-            jnp.array([4.0, 4.0]),
-        )
-    assert calls
-
-
-def test_mccormick_nlp_pounce_failure_warns_and_returns_no_bound(monkeypatch, caplog):
-    """Kept: POUNCE raising yields ``-inf`` (always a valid bound) with a WARNING."""
-    import discopt.solvers.nlp_pounce as nlp_pounce
-    from discopt._relax.mccormick_nlp import solve_mccormick_relaxation_nlp
-    from discopt._relax.relaxation_compiler import compile_objective_relaxation
-
-    caplog.set_level(logging.DEBUG, logger="discopt.solver")
-    m = dm.Model("mcnlp1520")
-    x = m.continuous("x", lb=0.0, ub=4.0)
-    y = m.continuous("y", lb=0.0, ub=4.0)
-    m.minimize(x * x + y * y)
-    relax_fn = compile_objective_relaxation(m)
-    calls: list[int] = []
-    monkeypatch.setattr(nlp_pounce, "solve_nlp", _counting_raiser(lambda: _Boom("ipm"), calls))
-    val = solve_mccormick_relaxation_nlp(
-        relax_fn, None, None, jnp.array([0.0, 0.0]), jnp.array([4.0, 4.0])
-    )
-    assert calls
-    assert val == float("-inf")
-    assert len(_warnings_from(caplog, "McCormick relaxation NLP (POUNCE) solve failed")) == 1
-
-
-@pytest.mark.parametrize("status", ["iteration_limit", "unbounded"])
-def test_mccormick_nlp_unconverged_solve_is_not_a_bound(monkeypatch, status):
-    """An IPM iterate stopped short of convergence is not the relaxation's minimum,
-    so its objective is not a lower bound. It used to be returned as one (the
-    acceptance set included ``ITERATION_LIMIT`` and the stall-mapped ``UNBOUNDED``).
-    The injected objective 1e3 is far ABOVE the true relaxation minimum (0 at the
-    origin): accepting it would be a false node bound."""
-    import discopt.solvers.nlp_pounce as nlp_pounce
-    from discopt._relax.mccormick_nlp import solve_mccormick_relaxation_nlp
-    from discopt._relax.relaxation_compiler import compile_objective_relaxation
-    from discopt.solvers import NLPResult, SolveStatus
-
-    m = dm.Model("mcnlp_unconv_1520")
-    x = m.continuous("x", lb=0.0, ub=4.0)
-    y = m.continuous("y", lb=0.0, ub=4.0)
-    m.minimize(x * x + y * y)
-    relax_fn = compile_objective_relaxation(m)
-    calls: list[int] = []
-
-    def _fake(ev, x0, constraint_bounds=None, options=None):
-        calls.append(1)
-        return NLPResult(status=SolveStatus(status), x=np.asarray(x0), objective=1e3)
-
-    monkeypatch.setattr(nlp_pounce, "solve_nlp", _fake)
-    val = solve_mccormick_relaxation_nlp(
-        relax_fn, None, None, jnp.array([0.0, 0.0]), jnp.array([4.0, 4.0])
-    )
-    assert calls
-    assert val == float("-inf")
-
-
-def test_mccormick_nlp_converged_solve_is_still_a_bound():
-    """Control: the real converged solve still returns a finite bound <= the true
-    minimum (0, at the origin)."""
-    from discopt._relax.mccormick_nlp import solve_mccormick_relaxation_nlp
-    from discopt._relax.relaxation_compiler import compile_objective_relaxation
-
-    m = dm.Model("mcnlp_conv_1520")
-    x = m.continuous("x", lb=0.0, ub=4.0)
-    y = m.continuous("y", lb=0.0, ub=4.0)
-    m.minimize(x * x + y * y)
-    val = solve_mccormick_relaxation_nlp(
-        compile_objective_relaxation(m), None, None, jnp.array([0.0, 0.0]), jnp.array([4.0, 4.0])
-    )
-    assert np.isfinite(val) and val <= 1e-6
 
 
 # ── mccormick_subgradient.py ────────────────────────────────────────────────

@@ -480,7 +480,6 @@ def _with_kernel_on(monkeypatch):
         # the parametrization means what its name says.
         {"lazy_constraints": (lambda ctx, model: [])},
         {"mccormick_bounds": "none"},
-        {"use_learned_relaxations": True},
     ],
 )
 def test_kernel_feature_safe_declines_return_correct_optimum(monkeypatch, kwargs):

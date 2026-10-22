@@ -356,11 +356,10 @@ Three routes, in decreasing order of what they give you:
 Note what a surrogate certificate does and does not mean: it certifies the
 global optimum *of the fit*. Turning that into a statement about the true
 surface needs a validated error bound `|E_true − E_surrogate| ≤ ε`, so that
-optimizing the surrogate ± ε brackets the true MECP. discopt has rigorous
-remainder machinery for factorable functions
-({mod}`discopt._relax.taylor_model`, {mod}`discopt._relax.chebyshev_model`) but
-nothing that produces such a bound for a data-fitted surrogate. That gap is
-open.
+optimizing the surrogate ± ε brackets the true MECP. discopt has nothing that
+produces such a bound for a data-fitted surrogate. (Its Taylor/Chebyshev remainder
+models for factorable functions were retired in #1873 with the McCormick-NLP route
+they served.) That gap is open.
 
 ## Summary
 

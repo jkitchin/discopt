@@ -335,8 +335,9 @@ def _node_kernel(expr: Expression, model: Model, param_index: dict) -> tuple[tup
     if isinstance(expr, CustomCall):
         # Opaque AD-only user function: trace the stored callable through JAX so
         # value + autodiff gradients/Hessians come for free on the local NLP
-        # path. No relaxation rule exists (see relaxation_compiler / solver
-        # guards), so this branch is only reached on the continuous NLP path.
+        # path. No lifted relaxation rule exists (the reduced-space MCBox engine
+        # is the only global route; see the solver guards), so this branch is only
+        # reached on the local NLP path.
         user_fn = expr.fn
 
         def fn(x_flat, params, a, _user_fn=user_fn):

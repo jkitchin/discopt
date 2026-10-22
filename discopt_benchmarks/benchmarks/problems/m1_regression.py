@@ -1,9 +1,11 @@
 """M1 regression problems.
 
 Small problems whose objective or constraints apply a univariate transcendental
-to a non-trivial inner expression (bilinear, sum-of-squares, etc.).  These
-exercise the Tsoukalas & Mitsos 2014 univariate composition rule wired into
-``discopt._relax.relaxation_compiler`` (issue #51, item M1).
+to a non-trivial inner expression (bilinear, sum-of-squares, etc.).  They were
+written for the Tsoukalas & Mitsos 2014 univariate composition rule wired into
+``discopt._relax.relaxation_compiler`` (issue #51, item M1); that compiler was
+retired in #1873, and the instances stay as end-to-end correctness cases for
+whatever relaxation the default solve uses.
 
 Each instance has a closed-form known optimum that is straightforward to
 verify by inspection, so the regression check is purely about correctness:

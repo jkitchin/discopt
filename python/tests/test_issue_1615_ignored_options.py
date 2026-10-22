@@ -6,7 +6,7 @@ Each option must either take effect or be refused/declared loudly. Covered here:
   because ``_scoped_tuning`` popped it out of ``kwargs`` before the
   ``_native_kernel_feature_safe`` test that looked for it.
 * D-01/D-02/D-08/D-13 -- search levers the native kernel does not read
-  (``rlt``, ``partitions``, ``strategy``, ``presolve``,
+  (``rlt``, ``strategy``, ``presolve``,
   ``in_tree_presolve_stride``, ``obbt_at_root``) now route to the Python engine.
 * B-08 -- an explicit ``mu_init`` is honoured under ``warm_start=``.
 * C-10a -- ``gdp_method="hull"`` lowers ``add_disjunction`` blocks by hull, with
@@ -79,7 +79,6 @@ def test_explicit_tuning_routes_off_native_kernel(kernel_calls):
     [
         {"rlt": True},
         {"rlt": False},
-        {"partitions": 4},
         {"strategy": "depth_first"},
         {"presolve": False},
         {"in_tree_presolve_stride": 0},
@@ -88,7 +87,7 @@ def test_explicit_tuning_routes_off_native_kernel(kernel_calls):
 )
 def test_kernel_ignored_levers_route_to_python_engine(kernel_calls, kw):
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore")  # partitions=4 warns it is unused on the LP route
+        warnings.simplefilter("ignore")
         r = _haverly().solve(time_limit=60, **kw)
     assert kernel_calls == [], f"{kw} still handed the solve to the native kernel"
     assert r.objective == pytest.approx(400.0, abs=1e-3)
@@ -99,7 +98,6 @@ def test_kernel_lever_defaults_are_not_flagged():
         solver_mod._native_kernel_ignored_levers(
             strategy="best_first",
             rlt="auto",
-            partitions=0,
             presolve=True,
             in_tree_presolve_stride=1,
             kwargs={},

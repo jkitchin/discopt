@@ -268,16 +268,19 @@ def test_untraceable_custom_model_never_reaches_the_guard():
 # --------------------------------------------------------------------------- #
 # 3. The pre-existing arm is NOT regressed
 # --------------------------------------------------------------------------- #
-def test_factorable_nonconvex_nlp_keeps_the_original_wording():
-    """An explicit ``mccormick_bounds="nlp"`` on a factorable nonconvex model is
-    the case the original #120 text was written for. It must be untouched — the
-    fix narrows the message, it does not delete it."""
-    _, logs = _solve_capturing(_factorable_nonconvex_model(), mccormick_bounds="nlp", time_limit=20)
-    guard = [m for m in logs if "issue #120" in m]
-    _check(bool(guard), "the #120 guard did not fire on the factorable nonconvex arm")
+def test_explicit_nlp_is_refused_rather_than_downgraded():
+    """An explicit ``mccormick_bounds="nlp"`` used to reach the #120 guard and be
+    demoted to alphaBB with a warning recommending ``"lp"``. The McCormick-"nlp"
+    route was retired in #1873 (its bound never changed a result on the corpus),
+    so the request is refused at entry, before any route can take the model, and
+    the message names the record of why."""
+    with pytest.raises(ValueError) as exc:
+        _factorable_nonconvex_model().solve(mccormick_bounds="nlp", time_limit=5)
+    msg = str(exc.value)
+    _check("mccormick_bounds='nlp'" in msg, f"the refusal must name the option:\n{msg}")
     _check(
-        any(CIRCULAR in m for m in guard),
-        f"the original advice was lost on the arm it is correct for:\n{guard}",
+        "nlp-mccormick-route-retirement.md" in msg,
+        f"the refusal must point at the retirement record:\n{msg}",
     )
 
 
@@ -315,7 +318,7 @@ EXPECTED_CHECKS = {
     "test_reduced_space_solve_does_not_recommend_the_flag_already_passed": 4,
     "test_reduced_space_bound_is_sound_against_an_independent_feasible_point": 3,
     "test_untraceable_custom_model_never_reaches_the_guard": 4,
-    "test_factorable_nonconvex_nlp_keeps_the_original_wording": 2,
+    "test_explicit_nlp_is_refused_rather_than_downgraded": 2,
     "test_nn_style_model_is_not_downgraded": 1,
 }
 

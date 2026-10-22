@@ -1,11 +1,8 @@
-"""Coverage-driven unit/property tests (#87, final round) for three modules.
+"""Coverage-driven unit/property tests (#87, final round) for two modules.
 
-* ``discopt._relax.relaxation_compiler`` — envelope containment (``cv <= f <= cc``
-  on sampled boxes) for the atom extractors that the existing envelope suite
-  does not reach (signed powers, general ``x**y``, partitioned paths, prod,
-  norms, sign, indexed tight dispatches, alphaBB arithmetic, the learned-mode
-  bilinear dispatch), plus REJECT branches of the ``_try_extract_*`` helpers
-  exercised with near-miss shapes.
+(A third, ``relaxation_compiler``, was covered here until it was retired with the
+McCormick-"nlp" route in #1873; see docs/dev/nlp-mccormick-route-retirement.md.)
+
 * ``discopt._relax.convexity.patterns`` — every CONVEX/CONCAVE verdict is
   cross-checked against sampled midpoint convexity of the actual function on
   the declared box; near-miss shapes must abstain (``None``).
@@ -50,18 +47,6 @@ from discopt._relax.differentiable import (
     differentiable_solve_l3,
     find_active_set,
 )
-from discopt._relax.relaxation_compiler import (
-    _compile_relax_node,
-    _resolve_scalar_var_offset,
-    _try_extract_arrhenius,
-    _try_extract_monod,
-    _try_extract_signed_abs_product,
-    _try_extract_signed_power,
-    _try_extract_signomial_factors,
-    _try_extract_trilinear_chain,
-    _try_extract_xlogx,
-    compile_objective_relaxation,
-)
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -85,19 +70,6 @@ pytestmark = pytest.mark.unit
 def _grid(lb, ub, n):
     grids = [np.linspace(a, b, n) for a, b in zip(lb, ub)]
     return np.stack([g.ravel() for g in np.meshgrid(*grids)], axis=1)
-
-
-def _assert_envelope(model, f_np, lb, ub, n=6, tol=1e-7, **compile_kw):
-    """Compiled relaxation must satisfy cv <= f <= cc on a sampled grid."""
-    fn = compile_objective_relaxation(model, **compile_kw)
-    lb = np.asarray(lb, dtype=np.float64)
-    ub = np.asarray(ub, dtype=np.float64)
-    for pt in _grid(lb, ub, n):
-        cv, cc = fn(pt, pt, lb, ub)
-        f = float(f_np(pt))
-        assert float(cv) <= f + tol, f"cv {float(cv)} > f {f} at {pt}"
-        assert float(cc) >= f - tol, f"cc {float(cc)} < f {f} at {pt}"
-    return fn
 
 
 def _assert_sampled_curvature(f_np, lb, ub, verdict, n_pairs=60, tol=1e-9):
@@ -126,233 +98,6 @@ def _fd_grad(f, x, eps=1e-6):
         xm[i] -= eps
         g[i] = (f(xp) - f(xm)) / (2.0 * eps)
     return g
-
-
-# ──────────────────────────────────────────────────────────────────────
-# relaxation_compiler: envelope containment for uncovered atoms
-# ──────────────────────────────────────────────────────────────────────
-
-
-@pytest.mark.relaxation
-class TestRelaxationCompilerEnvelopes:
-    def test_signed_power_panhandle_envelope(self):
-        # f * |f|**(beta-1) with beta = 2.5 (Panhandle generalization of Weymouth).
-        m = Model("sp")
-        x = m.continuous("x", lb=-2.0, ub=2.0)
-        # Builtin abs() maps to UnaryOp("abs"), the shape the extractor matches.
-        m.minimize(x * abs(x) ** 1.5)
-        _assert_envelope(m, lambda p: p[0] * abs(p[0]) ** 1.5, [-2.0], [2.0], n=13)
-
-    def test_general_pow_envelope(self):
-        # x**y with variable exponent routes through exp(y*log(x)).
-        m = Model("pw")
-        x = m.continuous("x", lb=0.5, ub=2.0)
-        y = m.continuous("y", lb=1.0, ub=2.0)
-        m.minimize(x**y)
-        _assert_envelope(m, lambda p: p[0] ** p[1], [0.5, 1.0], [2.0, 2.0], n=7)
-
-    def test_general_pow_envelope_partitioned(self):
-        m = Model("pwp")
-        x = m.continuous("x", lb=0.5, ub=2.0)
-        y = m.continuous("y", lb=1.0, ub=2.0)
-        m.minimize(x**y)
-        _assert_envelope(m, lambda p: p[0] ** p[1], [0.5, 1.0], [2.0, 2.0], n=7, partitions=2)
-
-    def test_partitioned_nonsignomial_bilinear_envelope(self):
-        # (x+y)*y is a product of non-leaf factors: piecewise-McCormick bilinear.
-        m = Model("pb")
-        x = m.continuous("x", lb=0.0, ub=2.0)
-        y = m.continuous("y", lb=0.5, ub=2.0)
-        m.minimize((x + y) * y)
-        _assert_envelope(
-            m, lambda p: (p[0] + p[1]) * p[1], [0.0, 0.5], [2.0, 2.0], n=7, partitions=3
-        )
-
-    def test_partitioned_univariate_envelopes(self):
-        for build, f_np, lo, hi in [
-            (dm.exp, np.exp, -1.0, 1.5),
-            (dm.log, np.log, 0.5, 3.0),
-            (dm.sqrt, np.sqrt, 0.1, 4.0),
-        ]:
-            m = Model("pu")
-            x = m.continuous("x", lb=lo, ub=hi)
-            m.minimize(build(x))
-            _assert_envelope(m, lambda p, f=f_np: f(p[0]), [lo], [hi], n=11, partitions=3)
-
-    def test_prod_multilinear_envelope(self):
-        # prod over a length-3 vector on a sign-mixed box (recursive McCormick fold).
-        m = Model("pr")
-        v = m.continuous("v", shape=(3,), lb=-1.0, ub=2.0)
-        m.minimize(dm.prod(v))
-        _assert_envelope(m, np.prod, [-1.0] * 3, [2.0] * 3, n=5)
-
-    def test_prod_singleton_is_identity(self):
-        m = Model("pr1")
-        u = m.continuous("u", shape=(1,), lb=0.5, ub=2.0)
-        m.minimize(dm.prod(u))
-        fn = compile_objective_relaxation(m)
-        pt = np.array([1.3])
-        cv, cc = fn(pt, pt, np.array([0.5]), np.array([2.0]))
-        assert float(cv) == pytest.approx(1.3)
-        assert float(cc) == pytest.approx(1.3)
-
-    def test_norm2_envelope_is_inf_to_one_norm_sandwich(self):
-        # cv = max_i |x_i| and cc = sum_i |x_i| at a point evaluation.
-        m = Model("n2")
-        w = m.continuous("w", shape=(2,), lb=-1.0, ub=2.0)
-        m.minimize(dm.norm(w))
-        fn = _assert_envelope(m, np.linalg.norm, [-1.0] * 2, [2.0] * 2, n=7)
-        pt = np.array([-0.8, 1.5])
-        cv, cc = fn(pt, pt, np.full(2, -1.0), np.full(2, 2.0))
-        assert float(cv) == pytest.approx(1.5)
-        assert float(cc) == pytest.approx(2.3)
-
-    def test_sign_envelope(self):
-        m = Model("sg")
-        s = m.continuous("s", lb=-1.0, ub=2.0)
-        m.minimize(dm.sign(s))
-        _assert_envelope(m, lambda p: np.sign(p[0]), [-1.0], [2.0], n=11)
-
-    def test_asinh_indexed_envelope(self):
-        # IndexExpression argument takes the flat-index tight-envelope dispatch.
-        m = Model("as1")
-        v = m.continuous("v", shape=(2,), lb=-1.0, ub=2.0)
-        m.minimize(dm.asinh(v[1]))
-        _assert_envelope(m, lambda p: np.arcsinh(p[1]), [-1.0] * 2, [2.0] * 2, n=7)
-
-    def test_asinh_composite_fallback_envelope(self):
-        # Non-variable argument falls back to envelopes over propagated bounds.
-        m = Model("as2")
-        a = m.continuous("a", lb=-1.0, ub=1.0)
-        b = m.continuous("b", lb=-1.0, ub=1.0)
-        m.minimize(dm.asinh(a + b))
-        _assert_envelope(m, lambda p: np.arcsinh(p[0] + p[1]), [-1.0] * 2, [1.0] * 2, n=7, tol=1e-6)
-
-    def test_indexed_power_sin_cos_envelope(self):
-        # v[1]**3, sin(v[0]), cos(v[1]) all take the flat-index tight dispatches.
-        m = Model("ix")
-        v = m.continuous("v", shape=(2,), lb=-1.5, ub=2.0)
-        m.minimize(v[1] ** 3 + dm.sin(v[0]) + dm.cos(v[1]))
-        _assert_envelope(
-            m,
-            lambda p: p[1] ** 3 + np.sin(p[0]) + np.cos(p[1]),
-            [-1.5] * 2,
-            [2.0] * 2,
-            n=7,
-        )
-
-    def test_trilinear_exact_flag_envelope(self, monkeypatch):
-        # DISCOPT_TRILINEAR=exact selects the best-of-three nested envelope.
-        monkeypatch.setenv("DISCOPT_TRILINEAR", "exact")
-        m = Model("tri")
-        xs = [m.continuous(f"t{k}", lb=-1.0, ub=1.5) for k in range(3)]
-        m.minimize(xs[0] * xs[1] * xs[2])
-        _assert_envelope(m, np.prod, [-1.0] * 3, [1.5] * 3, n=5)
-
-    def test_alphabb_arithmetic_envelope(self):
-        m = Model("ab")
-        x = m.continuous("x", lb=-1.0, ub=2.0)
-        m.minimize(x**2 + dm.sin(x))
-        _assert_envelope(
-            m, lambda p: p[0] ** 2 + np.sin(p[0]), [-1.0], [2.0], n=11, arithmetic="alphabb"
-        )
-
-    def test_learned_bilinear_dispatch_uses_registry(self):
-        # A learned-mode bilinear must be routed through the registry model with
-        # the compositional midpoint as true value: fake model returns
-        # (true - 1, true + 1), so the output pins the dispatch wiring exactly.
-        class FakeRegistry:
-            def get(self, name):
-                if name == "bilinear":
-                    return lambda xy, xy_lb, xy_ub, true_val: (true_val - 1.0, true_val + 1.0)
-                return None
-
-        m = Model("lr")
-        x = m.continuous("x", lb=0.0, ub=2.0)
-        y = m.continuous("y", lb=0.0, ub=2.0)
-        m.minimize((x + y) * (y - x))  # non-signomial => generic bilinear path
-        fn = compile_objective_relaxation(m, mode="learned", learned_registry=FakeRegistry())
-        pt = np.array([0.5, 1.5])
-        cv, cc = fn(pt, pt, np.zeros(2), np.full(2, 2.0))
-        true = (0.5 + 1.5) * (1.5 - 0.5)
-        assert float(cv) == pytest.approx(true - 1.0)
-        assert float(cc) == pytest.approx(true + 1.0)
-
-
-class TestRelaxationCompilerExtractors:
-    @pytest.fixture()
-    def model(self):
-        m = Model("ex")
-        m.continuous("x", lb=0.5, ub=2.0)
-        m.continuous("y", lb=0.5, ub=2.0)
-        m.continuous("z", lb=0.5, ub=2.0)
-        m.continuous("v", shape=(2,), lb=0.5, ub=2.0)
-        return m
-
-    def _vars(self, m):
-        return m._variables[0], m._variables[1], m._variables[2], m._variables[3]
-
-    def test_trilinear_chain_matches_and_rejects(self, model):
-        x, y, z, _ = self._vars(model)
-        # Right-associative parsing z*(x*y) resolves all three offsets.
-        assert _try_extract_trilinear_chain(z * (x * y), model) == (0, 1, 2)
-        # Not a product at all.
-        assert _try_extract_trilinear_chain(x + y, model) is None
-        # Non-variable leaf inside the inner product.
-        assert _try_extract_trilinear_chain((x * (y + 1.0)) * z, model) is None
-
-    def test_signed_product_rejects(self, model):
-        x, y, _, _ = self._vars(model)
-        assert _try_extract_signed_abs_product(x + y, model) is None
-        assert _try_extract_signed_power(x + y, model) is None
-        # Non-positive exponent p <= 0 must be rejected.
-        assert _try_extract_signed_power(x * abs(x) ** (-1.0), model) is None
-        # The positive-exponent UnaryOp("abs") shape does match.
-        assert _try_extract_signed_power(x * abs(x) ** 1.5, model) == (0, 2.5)
-
-    def test_xlogx_monod_arrhenius_rejects(self, model):
-        x, y, _, _ = self._vars(model)
-        assert _try_extract_xlogx(x + y, model) is None
-        assert _try_extract_monod(x * y, model) is None  # not a division
-        assert _try_extract_arrhenius(dm.log(x), model) is None  # not exp
-        # exp(-c / nonvariable) has no scalar offset.
-        assert _try_extract_arrhenius(dm.exp(-1.0 / (x * y)), model) is None
-
-    def test_signomial_indexed_factors(self, model):
-        _, _, _, v = self._vars(model)
-        # Indexed powers, bare indexed factors, and tuple indices all resolve.
-        assert _try_extract_signomial_factors(v[0] ** 2.0 * v[1] ** 3.0, model) == [
-            (3, 2.0),
-            (3 + 1, 3.0),
-        ]
-        assert _try_extract_signomial_factors(v[0] * v[1], model) == [(3, 1.0), (4, 1.0)]
-        assert _try_extract_signomial_factors(v[(0,)] ** 2.0 * v[(1,)], model) == [
-            (3, 2.0),
-            (4, 1.0),
-        ]
-        # A multi-component tuple index cannot resolve to one flat slot.
-        bad_pow = BinaryOp("**", IndexExpression(v, (0, 1)), Constant(np.array(2.0)))
-        assert _try_extract_signomial_factors(BinaryOp("*", bad_pow, v[1]), model) is None
-
-    def test_resolve_scalar_var_offset_tuple_index(self, model):
-        x, y, _, v = self._vars(model)
-        assert _resolve_scalar_var_offset(v[(1,)], model) == 4
-        assert _resolve_scalar_var_offset(x + y, model) is None
-
-    def test_compile_node_raises_on_unknown_shapes(self, model):
-        x, _, _, _ = self._vars(model)
-        with pytest.raises(ValueError, match="unary"):
-            _compile_relax_node(UnaryOp("bogus", x), model)
-        with pytest.raises(ValueError, match="binary"):
-            _compile_relax_node(BinaryOp("%", x, x), model)
-        with pytest.raises(TypeError, match="Unhandled"):
-            _compile_relax_node("junk", model)
-        with pytest.raises(ValueError, match="Unknown function"):
-            _compile_relax_node(FunctionCall("bogusfn", x), model)
-        # prod over a non-array argument has no fixed size to fold over.
-        y = model._variables[1]
-        with pytest.raises(ValueError, match="fixed-size array"):
-            _compile_relax_node(FunctionCall("prod", x + y), model)
 
 
 # ──────────────────────────────────────────────────────────────────────

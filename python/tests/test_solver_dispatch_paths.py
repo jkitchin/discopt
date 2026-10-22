@@ -186,19 +186,6 @@ def test_pure_integer_nonconvex_box_search():
     assert res.objective == pytest.approx(9.0, abs=1e-6)
 
 
-def test_learned_relaxations_flag_is_accepted():
-    # The flag loads the pretrained registry when available and must degrade
-    # gracefully (same certified optimum) when no registry ships.
-    m = Model("learned")
-    x = m.continuous("x", lb=0.0, ub=2.0)
-    y = m.continuous("y", lb=0.0, ub=2.0)
-    m.subject_to(x * y >= 1.0)
-    m.minimize(x + y)
-    res = m.solve(use_learned_relaxations=True, time_limit=60.0)
-    assert res.status in ("optimal", "feasible")
-    assert res.objective == pytest.approx(2.0, abs=1e-4)
-
-
 def test_node_callback_receives_progress():
     m, x, y, b = _bilinear_binary_model()
     seen = []

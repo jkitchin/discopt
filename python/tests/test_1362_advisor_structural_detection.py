@@ -5,7 +5,8 @@ model is a **MILP with zero bilinear terms** (``classify_nonlinear_terms`` retur
 an empty ``bilinear`` list, ``classify_problem`` says ``MILP``), and both advisory
 modules said otherwise:
 
-* ``advisor.suggest_solver_params`` -> ``partitions: 4`` with the reasoning
+* ``advisor.suggest_solver_params`` -> ``partitions: 4`` (an option retired in
+  #1873, so the advisor no longer emits it at all) with the reasoning
   "Enabling 4-partition McCormick (bilinear terms detected)";
 * ``reformulation.analyze_reformulations`` -> "Found bilinear terms in 3
   constraints -- use partitions=4 or partitions=8".
@@ -90,15 +91,19 @@ def test_a_real_product_of_variables_is_still_detected(factory):
     assert model_has_bilinear(factory()) is True
 
 
-def test_advisor_does_not_recommend_partitions_for_a_milp():
+def test_advisor_does_not_report_bilinear_terms_for_a_milp():
     params = suggest_solver_params(_facility_location())
-    assert params["partitions"] == 0
+    # ``partitions`` is no longer advised at all: it configured the McCormick-"nlp"
+    # route retired in #1873, and solve() now refuses a nonzero value.
+    assert "partitions" not in params
     assert "bilinear" not in params["reasoning"].lower()
 
 
-def test_advisor_still_recommends_partitions_for_a_bilinear_minlp():
+def test_advisor_still_notices_a_bilinear_minlp():
     params = suggest_solver_params(_bilinear_constraint_model())
-    assert params["partitions"] == 4
+    assert "partitions" not in params
+    assert "bilinear" in params["reasoning"].lower()
+    assert 'solver="amp"' in params["reasoning"]
 
 
 def test_advisor_recommends_the_engine_that_exists():

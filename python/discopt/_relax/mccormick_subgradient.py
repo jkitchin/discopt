@@ -26,9 +26,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from discopt._flat_index import resolve_scalar_slot as _resolve_scalar_var_offset
 from discopt._relax import mcbox as _mcbox
 from discopt._relax.mcbox import UnsupportedMcboxOp, mcbox_leaves
-from discopt._relax.relaxation_compiler import _resolve_scalar_var_offset
 from discopt.modeling.core import (
     BinaryOp,
     Constant,

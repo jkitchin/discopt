@@ -17,7 +17,7 @@ Sections:
   1. Term Classifier            (term_classifier.py)
   2. Variable Selection         (partition_selection.py)
   3. Discretization State       (discretization.py)
-  4. Piecewise McCormick validity (existing mccormick.py / piecewise_mccormick.py)
+  4. (removed in #1873: the retired mccormick.py / piecewise_mccormick.py)
   5. MILP Relaxation lower bounds (milp_relaxation.py)
   6. End-to-end AMP             (solvers/amp.py + solver.py routing)
   7. Convergence properties     (AMP loop invariants)
@@ -943,149 +943,13 @@ class TestDiscretizationState:
 
 
 # ===========================================================================
-# Section 4: Piecewise McCormick Relaxation Validity
+# Section 4: Piecewise McCormick Relaxation Validity -- removed in #1873.
 #
-# Tests against EXISTING code in mccormick.py and piecewise_mccormick.py.
-# Some of these should PASS already; failures reveal existing bugs.
-# Key theoretical claim (CP 2016): piecewise gap < standard gap.
+# It tested the JAX primitives in mccormick.py / piecewise_mccormick.py, which
+# AMP never used; both were retired with the McCormick-"nlp" route
+# (docs/dev/nlp-mccormick-route-retirement.md). AMP's own partitioned
+# relaxation is covered by Section 5 below.
 # ===========================================================================
-
-
-class TestMcCormickSoundness:
-    """Soundness tests for McCormick relaxation primitives.
-
-    Theoretical requirement (CP 2016): relaxation must be a valid lower bound.
-    cv ≤ f(x) ≤ cc at every feasible point.
-    """
-
-    @pytest.fixture(autouse=True)
-    def _rng(self):
-        self.rng = np.random.default_rng(42)
-
-    def test_standard_mccormick_bilinear_valid(self):
-        """cv ≤ x*y ≤ cc at 500 random points — core soundness test."""
-        import jax.numpy as jnp
-        from discopt._relax.mccormick import relax_bilinear
-
-        x_lb, x_ub, y_lb, y_ub = 1.0, 4.0, 1.0, 4.0
-        for _ in range(500):
-            x = float(self.rng.uniform(x_lb, x_ub))
-            y = float(self.rng.uniform(y_lb, y_ub))
-            cv, cc = relax_bilinear(
-                jnp.float64(x),
-                jnp.float64(y),
-                jnp.float64(x_lb),
-                jnp.float64(x_ub),
-                jnp.float64(y_lb),
-                jnp.float64(y_ub),
-            )
-            w_true = x * y
-            assert float(cv) <= w_true + 1e-9, f"cv={cv} > w={w_true}"
-            assert float(cc) >= w_true - 1e-9, f"cc={cc} < w={w_true}"
-
-    def test_piecewise_mccormick_bilinear_valid(self):
-        """Piecewise McCormick is still a valid relaxation (cv ≤ x*y ≤ cc)."""
-        import jax.numpy as jnp
-        from discopt._relax.piecewise_mccormick import piecewise_mccormick_bilinear
-
-        x_lb, x_ub, y_lb, y_ub = 0.0, 10.0, 0.0, 10.0
-        for _ in range(300):
-            x = float(self.rng.uniform(x_lb, x_ub))
-            y = float(self.rng.uniform(y_lb, y_ub))
-            cv, cc = piecewise_mccormick_bilinear(
-                jnp.float64(x),
-                jnp.float64(y),
-                jnp.float64(x_lb),
-                jnp.float64(x_ub),
-                jnp.float64(y_lb),
-                jnp.float64(y_ub),
-                k=4,
-            )
-            w_true = x * y
-            assert float(cv) <= w_true + 1e-9, f"cv={cv} > w={w_true} at x={x}, y={y}"
-            assert float(cc) >= w_true - 1e-9, f"cc={cc} < w={w_true} at x={x}, y={y}"
-
-    def test_piecewise_strictly_tighter_than_standard(self):
-        """Piecewise gap < standard gap at the midpoint (key claim from CP 2016).
-
-        At the center of the domain, standard McCormick has its maximum gap.
-        Piecewise must be strictly tighter.
-        """
-        import jax.numpy as jnp
-        from discopt._relax.mccormick import relax_bilinear
-        from discopt._relax.piecewise_mccormick import piecewise_mccormick_bilinear
-
-        x_lb, x_ub, y_lb, y_ub = 0.0, 10.0, 0.0, 10.0
-        x, y = 5.0, 5.0  # exact midpoint — maximum standard McCormick gap
-
-        cv_std, cc_std = relax_bilinear(
-            jnp.float64(x),
-            jnp.float64(y),
-            jnp.float64(x_lb),
-            jnp.float64(x_ub),
-            jnp.float64(y_lb),
-            jnp.float64(y_ub),
-        )
-        cv_pw, cc_pw = piecewise_mccormick_bilinear(
-            jnp.float64(x),
-            jnp.float64(y),
-            jnp.float64(x_lb),
-            jnp.float64(x_ub),
-            jnp.float64(y_lb),
-            jnp.float64(y_ub),
-            k=4,
-        )
-        gap_std = float(cc_std - cv_std)
-        gap_pw = float(cc_pw - cv_pw)
-
-        assert gap_pw < gap_std, f"Piecewise gap {gap_pw:.4f} must be < standard gap {gap_std:.4f}"
-        # Also verify piecewise is still sound
-        w_true = x * y
-        assert float(cv_pw) <= w_true + 1e-9
-        assert float(cc_pw) >= w_true - 1e-9
-
-    def test_piecewise_gap_decreases_with_k(self):
-        """Gap must decrease as k increases (convergence property from CP 2016).
-
-        Theoretical bound: max gap ≤ (domain_width / k)².
-        """
-        import jax.numpy as jnp
-        from discopt._relax.piecewise_mccormick import piecewise_mccormick_bilinear
-
-        x_lb, x_ub, y_lb, y_ub = 0.0, 10.0, 0.0, 10.0
-        x, y = 3.0, 7.0
-        prev_gap = float("inf")
-        for k in [2, 4, 8, 16]:
-            cv, cc = piecewise_mccormick_bilinear(
-                jnp.float64(x),
-                jnp.float64(y),
-                jnp.float64(x_lb),
-                jnp.float64(x_ub),
-                jnp.float64(y_lb),
-                jnp.float64(y_ub),
-                k=k,
-            )
-            gap = float(cc - cv)
-            assert gap < prev_gap, f"Gap should decrease as k increases (k={k})"
-            prev_gap = gap
-
-    def test_piecewise_is_solution_agnostic(self):
-        """Document: current piecewise_mccormick is curvature-based, NOT solution-adaptive.
-
-        This test SHOULD PASS — it documents existing behavior as a baseline.
-        The AMP implementation will add solution-adaptive refinement separately.
-        """
-        # Same call twice → identical result (no solution context)
-        import jax.numpy as jnp
-        from discopt._relax.piecewise_mccormick import _partition_bounds
-
-        lbs1, ubs1 = _partition_bounds(jnp.float64(0.0), jnp.float64(10.0), 4)
-        lbs2, ubs2 = _partition_bounds(jnp.float64(0.0), jnp.float64(10.0), 4)
-        np.testing.assert_array_equal(
-            np.array(lbs1),
-            np.array(lbs2),
-            err_msg="Curvature-based partition is deterministic (good baseline)",
-        )
 
 
 # ===========================================================================
@@ -3729,15 +3593,6 @@ class TestCurrentCodeWeaknesses:
         assert abs(result.objective) < 1e-4, (
             f"x² on [-3,3] has global min 0 at x=0, got {result.objective}"
         )
-
-    def test_existing_piecewise_mccormick_bilinear_function_exists(self):
-        """piecewise_mccormick_bilinear must exist in piecewise_mccormick.py.
-
-        If this fails: the function was removed or renamed.
-        """
-        from discopt._relax.piecewise_mccormick import piecewise_mccormick_bilinear  # noqa: F401
-
-        assert callable(piecewise_mccormick_bilinear)
 
     def test_obbt_runs_on_bilinear_model(self):
         """OBBT should run without errors on a model with bilinear constraints.

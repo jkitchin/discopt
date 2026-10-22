@@ -824,10 +824,10 @@ jobs:
           restore-keys: |
             uv-${{ runner.os }}-py312-cov-
       - name: Install Python dependencies
-        # The optional-feature deps (sympy, pyomo, equinox/optax, onnx stack,
-        # litellm, xgboost, lightgbm) are installed here so the coverage gate
-        # measures the modules they unlock (symbolic envelopes, the Pyomo
-        # bridge, GNN branching, NN embedding readers, LLM helpers) with their
+        # The optional-feature deps (sympy, pyomo, onnx stack, litellm, xgboost,
+        # lightgbm) are installed here so the coverage gate measures the modules
+        # they unlock (symbolic envelopes, the Pyomo bridge, NN embedding
+        # readers, LLM helpers) with their
         # existing fast tests instead of skipping them (#87). Keep this list in
         # sync with the optional extras in pyproject.toml.
         run: |
@@ -837,7 +837,7 @@ jobs:
           uv pip install \
             jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn pyyaml \
             "pounce-solver @ git+https://github.com/jkitchin/pounce.git@main#subdirectory=python" \
-            sympy pyomo litellm equinox optax onnx onnxruntime xgboost lightgbm pyscipopt \
+            sympy pyomo litellm onnx onnxruntime xgboost lightgbm pyscipopt \
             pytest pytest-timeout pytest-xdist pytest-cov hypothesis
           maturin develop --release
       # --cov-fail-under restored to 85 (#87) after the post-AMP-merge

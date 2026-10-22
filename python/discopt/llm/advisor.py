@@ -18,6 +18,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+#: The keys :func:`suggest_solver_params` may return (``reasoning`` is prose).
+_ADVISABLE_KEYS = frozenset(
+    {"nlp_solver", "cutting_planes", "batch_size", "gap_tolerance", "time_limit", "reasoning"}
+)
+
+
 def suggest_solver_params(
     model: Model,
     llm: bool = False,
@@ -41,7 +47,7 @@ def suggest_solver_params(
     -------
     dict
         Recommended solver parameters with keys:
-        ``nlp_solver``, ``partitions``, ``cutting_planes``,
+        ``nlp_solver``, ``cutting_planes``,
         ``batch_size``, ``gap_tolerance``,
         ``time_limit``, and ``reasoning`` (explanation string).
     """
@@ -52,7 +58,13 @@ def suggest_solver_params(
         try:
             llm_suggestion = _llm_augment(model, analysis, params, llm_model)
             if llm_suggestion:
-                params.update(llm_suggestion)
+                # Only the documented keys: a model can answer with an option the
+                # solver refuses (``partitions``, retired in #1873) or does not
+                # have, and the caller is entitled to pass this dict to solve().
+                dropped = sorted(set(llm_suggestion) - _ADVISABLE_KEYS)
+                if dropped:
+                    logger.debug("LLM advisor suggested unsupported keys %s; ignored", dropped)
+                params.update({k: v for k, v in llm_suggestion.items() if k in _ADVISABLE_KEYS})
         except Exception as e:
             logger.debug("LLM advisor augmentation failed: %s", e)
 
@@ -100,8 +112,9 @@ def presolve_analysis(
     # Check for bilinear terms without partitioning
     if analysis["has_bilinear"] and analysis["n_integer"] > 0:
         warnings.append(
-            "Model has bilinear terms with integer variables — "
-            "consider using partitions=4 for tighter McCormick relaxations"
+            "Model has bilinear terms with integer variables — if the default "
+            'relaxation leaves a large gap, consider solver="amp" (adaptive '
+            "partitioning of the McCormick relaxation)"
         )
 
     # Check variable scaling
@@ -244,12 +257,15 @@ def _rule_based_params(analysis: dict) -> dict:
         params["nlp_solver"] = "pounce"
         params["reasoning"].append("Using POUNCE, the default Rust interior-point engine")
 
-    # Partitioning for bilinear terms
+    # Bilinear terms. This used to set ``partitions=4`` (piecewise McCormick),
+    # which only ever reached the retired McCormick-"nlp" route (#1873); the
+    # default LP-form McCormick relaxation already handles the products, and AMP
+    # is the partitioning engine for a gap it cannot close.
     if analysis["has_bilinear"] and not analysis["is_pure_continuous"]:
-        params["partitions"] = 4
-        params["reasoning"].append("Enabling 4-partition McCormick (bilinear terms detected)")
-    else:
-        params["partitions"] = 0
+        params["reasoning"].append(
+            "Bilinear terms detected: the default LP-form McCormick relaxation bounds "
+            'them; if the gap stalls, solver="amp" partitions the relaxation adaptively'
+        )
 
     # Cutting planes for large MINLPs
     if analysis["n_integer"] > 10 and analysis["n_constraints"] > 20:
@@ -302,7 +318,7 @@ def _llm_augment(
         f"## Current Suggestions\n{base_params}\n\n"
         "Respond with ONLY a JSON object of parameter overrides "
         "(empty {} if no changes needed). Valid keys: "
-        "nlp_solver, partitions, cutting_planes, "
+        "nlp_solver, cutting_planes, "
         "batch_size, gap_tolerance, time_limit. "
         "Include a 'reasoning' key explaining changes."
     )

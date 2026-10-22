@@ -112,8 +112,8 @@ If you doubt the result is correct:
 - `m.validate()` on the model (catches malformed constraints, aliased names).
 - `result = m.solve(validate=True)` runs a post-solve KKT check; inspect
   `result.validation_report`.
-- Re-solve with a tighter relaxation to see if the bound moves: `partitions=8`,
-  `rlt=True`. If the objective changes, the earlier run terminated on a weak
+- Re-solve with a tighter relaxation to see if the bound moves: `rlt=True`,
+  `psd_cuts=True` (QCQP), or `solver="amp"`. If the objective changes, the earlier run terminated on a weak
   bound, not a true optimum.
 - For nonconvex problems, confirm you got a *global* solve (spatial B&B), not a
   local NLP: check `result.status`/`bound`. Force spatial B&B with `nlp_bb=False`.
@@ -125,7 +125,7 @@ If you doubt the result is correct:
   High rust = tree too big (tighten bounds/relaxation); high jax = NLP evals
   expensive (simplify nonlinearity); high python = orchestration (normal for
   tiny solves).
-- Tighten the relaxation: `partitions=4..8`, `rlt=True`, `psd_cuts=True` (QCQP),
+- Tighten the relaxation: `rlt=True`, `psd_cuts=True` (QCQP), `solver="amp"` (bilinear),
   `gdp_method="hull"` for disjunctive models, `cutting_planes=True`.
 - Tighten bounds (manually or `tightening.fbbt_box`) — directly strengthens
   McCormick.

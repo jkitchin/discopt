@@ -311,6 +311,15 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
+- **JAX is an optional extra (#1873; `pip install 'discopt[jax]'`).** `jax`/`jaxlib` are
+  no longer core dependencies; the default solve path (POUNCE tape, Rust core, numpy)
+  imports no `jax` module. Without the extra, every JAX-only feature raises
+  `MissingJaxError`, an `ImportError` naming the feature and the extra. That covers
+  `dm.custom`, a model whose expression has no tape opcode (the error names the construct),
+  `discopt.estimate`, `discopt.sensitivity`, the differentiable and parametric layers, and
+  `discopt.ml.train`. The `dev` extra includes JAX. `discopt.mo` sweeps, the GDP simplex
+  lowering's residuals and the nonsmooth lift's warm start used JAX on ordinary models;
+  they now evaluate on the tape. Inventory: `docs/dev/jax-optional-inventory.md`.
 - **In-tree FBBT now tightens through array-valued rows by default** (#1568).
   `DISCOPT_IN_TREE_ARRAY_ROWS` is graduated to default-ON. Each array-valued
   constraint row (every `discopt.ml` layer and any vectorised `A @ x` or
@@ -334,6 +343,21 @@ The release procedure that produces these entries is documented in
   made *all* of discopt unimportable. Regression tests reproduce that
   environment with a `sys.meta_path` blocker and solve an LP, a MILP and an
   MINLP with the multiprocessing names unimportable.
+
+### Removed
+
+- **The McCormick-"nlp" relaxation route and its options (#1873).**
+  `mccormick_bounds="nlp"`, `partitions`, `relaxation_arithmetic` and
+  `use_learned_relaxations` now raise `ValueError`, and the CLI's `--partitions` is gone.
+  The route fired only for convex models with an explicit option (and `nlp_bb=False`).
+  On the in-repo corpus its bound left bound, node count and status identical in 36 of 36
+  measured instance/variant pairs. On two instances it turned a certified 2–6 s solve into
+  a 27× time-limit overrun and a 13.6 GB out-of-memory kill. 24 modules went with it:
+  `relaxation_compiler`, `mccormick_nlp`, the JAX `mccormick`/`envelopes`/`alphabb`
+  primitives, piecewise/OA/Taylor/Chebyshev/ellipsoidal arithmetics, the ICNN learned
+  relaxations, and the symbolic domain packs and registry. For a bilinear model whose gap
+  stalls, use `solver="amp"`. The `gnn`/`learned` extras are now aliases of `jax`. Record:
+  `docs/dev/nlp-mccormick-route-retirement.md`.
 
 ### Fixed
 
