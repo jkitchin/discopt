@@ -7608,6 +7608,13 @@ def _declared_box_tightening(model: Model, deadline: Optional[float] = None):
     return tighten_nonlinear_bounds(model, raw_lb, raw_ub, deadline=deadline)
 
 
+def _free_column_lp_cert_enabled() -> bool:
+    """See :func:`discopt._relax.mccormick_lp.free_column_lp_cert_enabled` (#1869 (b))."""
+    from discopt._relax.mccormick_lp import free_column_lp_cert_enabled
+
+    return free_column_lp_cert_enabled()
+
+
 def _unbounded_branching_enabled() -> bool:
     """``DISCOPT_UNBOUNDED_BRANCH`` gate (#1869): branch an unbounded variable at a
     finite point in the spatial tree.
@@ -14299,6 +14306,10 @@ def solve_model(
         _apply_flat_bounds_to_model(model, _per_lb, _per_ub)
         _origin_lb_chk, _origin_ub_chk = _per_lb, _per_ub
     _origin_has_finite_continuous_var = False
+    # #1869: a continuous variable at all (bounded or not). Under unbounded
+    # branching an infinite-box continuous column is branchable too -- the Rust tree
+    # splits it at a finite point -- so it no longer forces the #185 fallback.
+    _origin_has_continuous_var = any(_ov.var_type == VarType.CONTINUOUS for _ov in model._variables)
     _origin_chk_off = 0
     for _ov in model._variables:
         if _ov.var_type == VarType.CONTINUOUS:
@@ -17023,7 +17034,18 @@ def solve_model(
                     j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))
                 }
                 _nl_int_cols = sorted(_int_cols & set(_mc_lp_relaxer.nonlinear_columns))
-                _has_branchable = _origin_has_finite_continuous_var or bool(_nl_int_cols)
+                _has_branchable = (
+                    _origin_has_finite_continuous_var
+                    or bool(_nl_int_cols)
+                    or (
+                        # #1869 (b): keep the relaxer on an all-unbounded model only
+                        # when the tree can split those columns AND a declined node
+                        # LP can still be certified (``free_column_lp_cert_enabled``).
+                        _origin_has_continuous_var
+                        and _unbounded_branching_enabled()
+                        and _free_column_lp_cert_enabled()
+                    )
+                )
                 if not _has_branchable:
                     logger.info(
                         "McCormick LP requested but model has no spatial-branchable "
