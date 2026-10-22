@@ -165,6 +165,12 @@ _EXEMPT = {
     "model": "the probe's own positional argument",
     "time_limit": "replaced by the probe's own bounded budget",
     "kwargs": "the **kwargs catch-all, splatted through separately",
+    # Retired in #1873 with the McCormick-"nlp" route: refused with ValueError at the
+    # top of Model.solve and solve_model, so they can only ever hold their defaults
+    # by the time the probe runs and cannot change its answer.
+    "partitions": "retired in #1873; any nonzero value is refused at entry",
+    "relaxation_arithmetic": "retired in #1873; any non-default value is refused at entry",
+    "use_learned_relaxations": "retired in #1873; True is refused at entry",
     "incumbent_time_extension": (
         "an extra wall-clock slice granted on holding an incumbent; forwarding it "
         "would let the probe overrun the budget that bounds it"

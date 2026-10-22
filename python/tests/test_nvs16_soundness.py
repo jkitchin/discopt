@@ -45,13 +45,14 @@ def test_nvs16_default_is_sound():
 
 
 @pytest.mark.correctness
-@pytest.mark.parametrize("mode", ["auto", "none", "nlp", "lp"])
+@pytest.mark.parametrize("mode", ["auto", "none", "lp"])
 def test_nvs16_all_bounding_modes_sound(mode):
     """No McCormick bounding mode may certify an invalid bound on nvs16.
 
-    ``"nlp"`` and the pure-integer ``"lp"``→``"nlp"`` fallback are downgraded
-    to the alphaBB underestimator for this nonconvex model; all four modes must
-    return the true optimum with a valid (``<= optimum``) dual bound.
+    The pure-integer ``"lp"`` fallback goes to the alphaBB underestimator for
+    this nonconvex model; every mode must return the true optimum with a valid
+    (``<= optimum``) dual bound. (``"nlp"`` was a fourth mode until #1873 retired
+    it; it is now refused at entry -- ``test_mccormick_bounds.py``.)
     """
     m = dm.from_nl(str(_NL))
     r = m.solve(time_limit=60, mccormick_bounds=mode)
