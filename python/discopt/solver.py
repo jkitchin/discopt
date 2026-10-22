@@ -6490,6 +6490,25 @@ def _extend_budget_for_incumbent(
     """
     if extension_s <= 0.0 or not _tree_has_incumbent(tree):
         return None
+    return _reclaim_withheld_budget(
+        model, time_limit=time_limit, extension_s=extension_s, elapsed=elapsed, t_start=t_start
+    )
+
+
+def _reclaim_withheld_budget(
+    model,
+    *,
+    time_limit: float,
+    extension_s: float,
+    elapsed: float,
+    t_start: float,
+) -> float:
+    """Extend ``time_limit`` by ``extension_s`` and move every budget clock with it.
+
+    The deadline half of :func:`_extend_budget_for_incumbent`, for a caller that
+    has established "holds an incumbent" itself (the native MILP engine, #1874,
+    which has no Python tree to ask).
+    """
     extended = float(time_limit) + float(extension_s)
     # Keep the other two budget clocks in lockstep, or the extension buys wall time
     # the search cannot use. ``model._solve_deadline`` gates the incremental
@@ -15551,6 +15570,7 @@ def solve_model(
                         # means "this route's established default", which for
                         # this engine is no absolute criterion at all (#1315).
                         abs_gap_tolerance=abs_gap_tolerance,
+                        incumbent_time_extension=incumbent_time_extension,
                     )
                     if _simplex_res is not None and _simplex_res.algorithm_route is None:
                         # #1614 C1: the in-house engine answering a MILP must say so.
@@ -34611,6 +34631,60 @@ def _csc_for_rust_milp(A_eq):
     )
 
 
+#: ``Model.solve``'s ``max_nodes`` default. An explicit 100_000 cannot be told from
+#: it; the solver already reads ``max_nodes != 100_000`` as "the caller set it".
+_DEFAULT_MAX_NODES = 100_000
+
+#: #1874: memory the native MILP engine's open frontier may hold when the caller set
+#: no node cap. Sized per model from the bytes one open node carries (box, parent
+#: solution, basis); see ``_milp_engine_max_open_nodes``.
+_MILP_ENGINE_FRONTIER_BYTES = 2 << 30
+
+#: The node cap handed to the engine when the clock, the gap and the frontier
+#: budget govern (#1874). Not ``usize::MAX``: the driver compares against it only.
+_MILP_ENGINE_UNCAPPED_NODES = 1 << 62
+
+
+def _milp_engine_full_budget_enabled() -> bool:
+    """``DISCOPT_MILP_ENGINE_FULL_BUDGET`` gate (#1874): let the native MILP
+    engine use the caller's budget instead of stopping on the 100k-node default.
+
+    Three changes, all on ``_solve_milp_simplex``: (1) with an incumbent from run 1,
+    the #917 withheld reserve is reclaimed for the re-entry (it was never plumbed
+    here, so at ``time_limit=30`` the re-entry was skipped and 20 s went unused);
+    (2) when the caller set no ``max_nodes``, neither run is node-capped -- the
+    clock, the gap and an open-frontier memory budget govern -- and an explicit
+    ``max_nodes`` is ONE total across both runs, as its docstring promises; (3) a
+    run-1 ``node_limit`` exit holding a verified incumbent keeps it instead of
+    deferring to another engine with the budget spent.
+
+    The 100k default was a de-facto memory guard: the pool kept every node's
+    vectors, measured ~5.5 KB/node and 1,844 MB peak for a full tln4 search. The
+    pool now frees them when a node leaves the frontier (``release_storage``):
+    the same search peaks at 410 MB with an identical run-2 node count. The
+    explicit guard is ``max_open_nodes``, sized from ``_MILP_ENGINE_FRONTIER_BYTES``.
+
+    Changes search time, so gated per CLAUDE.md section 5; read at call time.
+    """
+    return os.environ.get("DISCOPT_MILP_ENGINE_FULL_BUDGET", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _milp_engine_max_open_nodes(n_cols: int, n_rows: int) -> int:
+    """Open-node cap for a ``_MILP_ENGINE_FRONTIER_BYTES`` budget (#1874).
+
+    An open node carries ``lb``/``ub``/parent solution (three f64 vectors over the
+    columns), a basis (one i8 per column, one usize per row) and ~256 bytes of
+    struct and heap-entry overhead. An overestimate only stops the search earlier.
+    """
+    per_node = 25 * int(n_cols) + 8 * int(n_rows) + 256
+    return max(1000, _MILP_ENGINE_FRONTIER_BYTES // per_node)
+
+
 def _solve_milp_simplex(
     model: Model,
     time_limit: float,
@@ -34621,6 +34695,7 @@ def _solve_milp_simplex(
     deferred: Optional[dict] = None,
     prefer_pounce: bool = False,
     abs_gap_tolerance: Optional[float] = None,
+    incumbent_time_extension: float = 0.0,
 ) -> Optional[SolveResult]:
     """Solve a pure MILP with the Rust-internal warm-started-simplex B&B
     (``nlp_solver="simplex"`` and the POUNCE-only default MILP path).
@@ -34721,6 +34796,18 @@ def _solve_milp_simplex(
     # budget is raised HERE and not by changing them.
     _cut_opts = _milp_root_cut_budget(_milp_budget) or {}
 
+    # #1874: under the flag, the clock, the gap and the frontier budget govern
+    # unless the caller named a node cap, which is then one total over both runs.
+    _full_budget = _milp_engine_full_budget_enabled()
+    _callers_node_cap = int(max_nodes) != _DEFAULT_MAX_NODES
+    _run1_nodes = int(max_nodes)
+    _frontier_opts: dict = {}
+    if _full_budget:
+        if not _callers_node_cap:
+            _run1_nodes = _MILP_ENGINE_UNCAPPED_NODES
+        _frontier_opts["max_open_nodes"] = _milp_engine_max_open_nodes(_A_n, _A_m)
+    _stopped_on_nodes = False
+
     status, x_struct, obj, bound, nodes, _lp_iters = solve_milp_csc_py(
         np.ascontiguousarray(lp_data.c, dtype=np.float64),
         _A_m,
@@ -34734,13 +34821,14 @@ def _solve_milp_simplex(
         np.ascontiguousarray(np.asarray(int_idx, dtype=np.int64)),
         n_orig,
         float(lp_data.obj_const),
-        int(max_nodes),
+        _run1_nodes,
         float(gap_tolerance),
         abs_gap_tol=(None if abs_gap_tolerance is None else float(abs_gap_tolerance)),
         initial_incumbent=_seed,
         time_limit_s=float(_milp_budget),
         debug_hook=_debug.rust_hook(),
         **_cut_opts,
+        **_frontier_opts,
     )
 
     def _driver_stats() -> dict[str, float]:
@@ -34826,9 +34914,42 @@ def _solve_milp_simplex(
     # on the same problem, so keeping the tighter one is sound.
     _sess_reentry = _debug.current()
     _debug_stop_pending = _sess_reentry is not None and _sess_reentry.stop_requested
+    # #1874: a node-capped run 1 holding an incumbent is not a stalled engine (the
+    # #291 case this defers on is "no incumbent"); with the flag it keeps its point
+    # -- verified below like any other -- instead of handing an empty-handed
+    # fallback the spent budget. The engine stopped on a node budget, so the exit
+    # stays uncertified.
+    if (
+        _full_budget
+        and status == "node_limit"
+        and np.isfinite(obj)
+        and _point_feasible(np.asarray(x_struct, dtype=np.float64)[:n_orig])
+    ):
+        status = "feasible"
+        _stopped_on_nodes = True
+    _effective_time_limit = float(time_limit)
     if status == "feasible" and not _debug_stop_pending:
-        _reentry_remaining = float(time_limit) - (time.perf_counter() - t_start)
-        if _reentry_remaining > _milp_budget + 1e-9:
+        _elapsed_run1 = time.perf_counter() - t_start
+        if _full_budget and incumbent_time_extension > 0.0:
+            # #917/#1874: an incumbent is in hand, the one state in which the
+            # withheld #844 reserve has nothing to protect.
+            _effective_time_limit = _reclaim_withheld_budget(
+                model,
+                time_limit=float(time_limit),
+                extension_s=float(incumbent_time_extension),
+                elapsed=_elapsed_run1,
+                t_start=t_start,
+            )
+        _reentry_remaining = _effective_time_limit - _elapsed_run1
+        _run2_nodes = int(max_nodes)
+        if _full_budget:
+            _run2_nodes = (
+                int(max_nodes) - int(nodes) if _callers_node_cap else _MILP_ENGINE_UNCAPPED_NODES
+            )
+        if _run2_nodes <= 0:
+            _stopped_on_nodes = True
+        elif _reentry_remaining > _milp_budget + 1e-9:
+            _stopped_on_nodes = False
             _xo1 = np.asarray(x_struct, dtype=np.float64)[:n_orig]
             _seed2 = None
             if _xo1.size == n_orig:
@@ -34874,7 +34995,7 @@ def _solve_milp_simplex(
                 np.ascontiguousarray(np.asarray(int_idx, dtype=np.int64)),
                 n_orig,
                 float(lp_data.obj_const),
-                int(max_nodes),
+                _run2_nodes,
                 float(gap_tolerance),
                 # #1323: run 1 passes this; run 2 used not to, so a re-entry
                 # spent its whole budget on a tree the caller's absolute
@@ -34884,7 +35005,10 @@ def _solve_milp_simplex(
                 initial_incumbent=_seed2,
                 time_limit_s=float(_reentry_remaining),
                 debug_hook=_debug.rust_hook(),
+                **_frontier_opts,
             )
+            # #1874: a node- or frontier-capped run 2 stopped on a node budget.
+            _stopped_on_nodes = _status2 == "node_limit"
             if _status2 in ("optimal", "feasible"):
                 _xo2 = np.asarray(_x2, dtype=np.float64)[:n_orig]
                 # Comparisons in the engine-internal (minimize) sense: lower
@@ -35068,13 +35192,16 @@ def _solve_milp_simplex(
             # ``Feasible`` does not say why it stopped (a spent budget, a withdrawn
             # certificate, an unresolved-floor drain -- `decide_status` in
             # milp_driver.rs), so only a spent clock is named; the rest stays None
-            # rather than guess. A ``node_limit`` exit never reaches here: it is a
-            # ``NodeLimit`` status, which defers below.
+            # rather than guess. A ``node_limit`` exit reaches here only under
+            # #1874's flag, holding a verified incumbent, and is named as such; any
+            # other ``NodeLimit`` status defers below.
             termination=(
                 "gap"
                 if status == "optimal"
+                else "node_limit"
+                if _stopped_on_nodes
                 else "time_limit"
-                if wall_time >= float(time_limit)
+                if wall_time >= _effective_time_limit
                 else None
             ),
         )

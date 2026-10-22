@@ -26,6 +26,7 @@ fn options() -> MilpOptions {
         n_struct: 2,
         integer_cols: vec![0],
         max_nodes: 10_000,
+        max_open_nodes: None,
         time_limit_s: Some(30.0),
         gap_tol: 1e-9,
         abs_gap_tol: None,

@@ -71,6 +71,7 @@ pub fn options() -> MilpOptions {
         n_struct: NS,
         integer_cols: (0..K).collect(),
         max_nodes: 200_000,
+        max_open_nodes: None,
         time_limit_s: Some(60.0),
         gap_tol: 1e-9,
         abs_gap_tol: None,

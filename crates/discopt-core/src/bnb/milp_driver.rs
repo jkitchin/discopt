@@ -379,6 +379,11 @@ pub struct MilpOptions {
     pub integer_cols: Vec<usize>,
     /// Node-creation cap.
     pub max_nodes: usize,
+    /// Open-frontier cap (#1874). `Some(k)`: the search stops, uncertified, once
+    /// more than `k` nodes are open -- the memory guard the caller sizes from a
+    /// byte budget, now that a node's vectors are freed when it leaves the
+    /// frontier (`NodePool::release_storage`). `None` = no frontier cap.
+    pub max_open_nodes: Option<usize>,
     /// Optional wall-time cap in seconds. `None` = unlimited. Checked at each
     /// batch boundary of the B&B search; on expiry the search stops and returns
     /// the incumbent with a valid (uncertified) dual bound — never a false
@@ -2178,6 +2183,7 @@ fn solve_milp_node_search(
     // function of batch order and the search stays deterministic.
     let mut batch_index: usize = 0;
     let mut nonroot_dives: usize = 0;
+    let mut frontier_capped = false;
 
     'search: loop {
         if fire_dbg!(MilpCheckpoint::IterStart) {
@@ -2189,6 +2195,14 @@ fn solve_milp_node_search(
         }
         if tm.stats().total_nodes >= opts.max_nodes {
             gap_certified = false;
+            break;
+        }
+        if opts
+            .max_open_nodes
+            .is_some_and(|k| tm.open_upper_bound() > k)
+        {
+            gap_certified = false;
+            frontier_capped = true;
             break;
         }
         if let Some(tl) = opts.time_limit_s {
@@ -2824,7 +2838,7 @@ fn solve_milp_node_search(
         stats.bound_unresolved || stats.unresolved_floor.is_finite(),
         gap_closed(&tm, opts),
         gap_certified,
-        stats.total_nodes >= opts.max_nodes,
+        stats.total_nodes >= opts.max_nodes || frontier_capped,
     );
 
     let mut res = MilpResult {
@@ -5404,6 +5418,7 @@ mod tests {
             n_struct: ns,
             integer_cols: (0..ns).collect(),
             max_nodes: 100_000,
+            max_open_nodes: None,
             time_limit_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -6093,6 +6108,7 @@ mod tests {
             n_struct: ns,
             integer_cols: int_cols,
             max_nodes: 100_000,
+            max_open_nodes: None,
             time_limit_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -6763,6 +6779,7 @@ mod tests {
             n_struct: 3,
             integer_cols: vec![0, 1, 2],
             max_nodes: 5_000,
+            max_open_nodes: None,
             time_limit_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -6896,6 +6913,7 @@ mod sparse_milp_diff {
                 n_struct: self.ns,
                 integer_cols: self.int_cols.clone(),
                 max_nodes: 100_000,
+                max_open_nodes: None,
                 time_limit_s: None,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
@@ -7194,6 +7212,7 @@ mod sparse_milp_diff {
             n_struct: 6,
             integer_cols: vec![0, 1, 2, 3, 4, 5],
             max_nodes: 100_000,
+            max_open_nodes: None,
             time_limit_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -7487,6 +7506,7 @@ mod lazy_separation {
                 n_struct: 4,
                 integer_cols: vec![0, 1, 2, 3],
                 max_nodes: 100_000,
+                max_open_nodes: None,
                 time_limit_s: None,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
@@ -7783,6 +7803,7 @@ mod node_separation {
                 n_struct: 3,
                 integer_cols: vec![0, 1, 2],
                 max_nodes: 100_000,
+                max_open_nodes: None,
                 time_limit_s: None,
                 gap_tol: 1e-9,
                 abs_gap_tol: None,
@@ -8062,6 +8083,7 @@ mod lazy_infeasible_node {
             n_struct: 2,
             integer_cols: vec![0, 1],
             max_nodes: 100_000,
+            max_open_nodes: None,
             time_limit_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -8197,6 +8219,7 @@ mod root_cut_budget_tests {
             n_struct: ns,
             integer_cols: (0..ns).collect(),
             max_nodes: 200_000,
+            max_open_nodes: None,
             time_limit_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,
@@ -8895,6 +8918,7 @@ mod tiny_entry_tests {
             n_struct: ns,
             integer_cols: int_cols,
             max_nodes: 10_000,
+            max_open_nodes: None,
             time_limit_s: None,
             gap_tol: 1e-9,
             abs_gap_tol: None,

@@ -51,6 +51,7 @@ fn options() -> MilpOptions {
         // Bounded so the test is fast: parity infeasibility needs full enumeration,
         // and the assertions below are about the schedule, not the certificate.
         max_nodes: 4_000,
+        max_open_nodes: None,
         time_limit_s: Some(60.0),
         gap_tol: 1e-9,
         abs_gap_tol: None,
