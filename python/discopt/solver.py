@@ -34768,6 +34768,25 @@ def _solve_milp_simplex(
                     # iterations while its denominator omits the re-entry's
                     # nodes reports a per-node cost that no run ever had.
                     _lp_iters = _lp_iters + _iters2
+            elif _status2 == "node_limit" and np.isfinite(_obj2):
+                # #1874: the engine reports ``NodeLimit`` WITH an incumbent when the
+                # re-entry hits ``max_nodes`` (``decide_status``'s node_limit_hit arm).
+                # The gate above admitted only optimal/feasible, so a strictly better
+                # verified point was thrown away -- tln4 at time_limit=120: run 2
+                # held 8.7 while 8.9 was reported. Same rules as a ``feasible``
+                # re-entry: strict improvement, ``_point_feasible`` on the original
+                # rows, and the exit stays uncertified (``feasible``). Both runs'
+                # bounds are valid lower bounds on the same problem, so the tighter
+                # one is kept rather than replaced.
+                _xo2 = np.asarray(_x2, dtype=np.float64)[:n_orig]
+                _better_primal = _obj2 < obj - 1e-9 * (1.0 + abs(obj))
+                if _better_primal and _point_feasible(_xo2):
+                    x_struct = _x2
+                    obj = _obj2
+                    if np.isfinite(_bound2) and (not np.isfinite(bound) or _bound2 > bound):
+                        bound = _bound2
+                    nodes = nodes + _nodes2
+                    _lp_iters = _lp_iters + _iters2
 
     wall_time = time.perf_counter() - t_start
     maximize = model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE
