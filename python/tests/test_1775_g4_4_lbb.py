@@ -253,3 +253,7 @@ def test_node_time_limit_is_validated():
     with pytest.raises(ValueError, match="node_time_limit"):
         LBB(_nonconvex(), node_time_limit=0)
     assert math.isclose(LBB(_nonconvex(), time_limit=100).node_time_limit, 10.0)
+    # #1153: the default node budget saturates instead of growing with the run's.
+    assert math.isclose(LBB(_nonconvex(), time_limit=3600).node_time_limit, 30.0)
+    assert math.isclose(LBB(_nonconvex(), time_limit=2).node_time_limit, 1.0)
+    assert math.isclose(LBB(_nonconvex()).node_time_limit, 30.0)

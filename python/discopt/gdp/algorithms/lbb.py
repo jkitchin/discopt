@@ -54,7 +54,8 @@ from discopt.gdp.algorithms.init import GDPSpace
 from discopt.gdp.tree import DisjunctionNode, DisjunctNode
 from discopt.modeling.core import Model
 
-#: The default per-node time budget when the run has no time limit (seconds).
+#: The default per-node time budget (seconds): the whole of it without a time
+#: limit, the ceiling of a tenth of the time limit otherwise.
 NODE_TIME_LIMIT = 30.0
 
 
@@ -103,9 +104,12 @@ class LBB(GDPAlgorithm):
 
         self.checker: Optional[LogicChecker] = LogicChecker(self.space) if propagate else None
         if node_time_limit is None:
-            node_time_limit = (
-                NODE_TIME_LIMIT if time_limit is None else max(1.0, 0.1 * float(time_limit))
-            )
+            # A tenth of the run, at least 1 s, and never more than NODE_TIME_LIMIT:
+            # a node budget that grew with the caller's would spend a bigger budget
+            # on longer node solves instead of more nodes (#1153's saturation rule).
+            node_time_limit = NODE_TIME_LIMIT
+            if time_limit is not None:
+                node_time_limit = min(NODE_TIME_LIMIT, max(1.0, 0.1 * float(time_limit)))
         self.node_time_limit = float(node_time_limit)
         self._tick = itertools.count()
         self._heap: list[tuple[float, int, _Node]] = []
