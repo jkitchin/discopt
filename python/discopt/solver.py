@@ -2052,11 +2052,7 @@ def _try_native_spatial_kernel(
     # ``abs_gap_tolerance``'s docstring: an absolute tolerance LOOSER than
     # ``gap_tolerance`` does not take effect on this route, which only ever
     # means the kernel does more work than asked.
-    _kernel_abs_tol = (
-        float(gap_tolerance)
-        if abs_gap_tolerance is None
-        else min(float(gap_tolerance), float(abs_gap_tolerance))
-    )
+    _kernel_abs_tol = _native_kernel_abs_tol(gap_tolerance, abs_gap_tolerance)
     # ...and SAY so when the ``min`` discarded it. Declining to loosen is the
     # safe direction, but a caller who asked for 1e6 and got 1e-4 explored
     # the same 45 nodes as with no tolerance at all and was told nothing
@@ -7124,6 +7120,27 @@ def _withdraw_unresolved_certificate(result: SolveResult) -> None:
     result.solver_stats["certificate/objective_unresolved"] = 1.0
 
 
+def _native_kernel_abs_tol(gap_tolerance: float, abs_gap_tolerance: Optional[float]) -> float:
+    """The native spatial kernel's absolute ``gap_tol`` (#1243 ``min`` mapping).
+
+    ``None`` keeps the kernel's established absolute stop, ``gap_tolerance``; a
+    positive request takes the tighter of the two (see the call site for why a
+    looser one is declined).
+
+    Zero is the exception (#1889): ``abs_gap_tolerance=0`` (GAMS ``optca=0``)
+    grants NO absolute allowance, i.e. it switches the absolute arm off rather
+    than naming an absolute stop. ``min`` would collapse ``gap_tol`` to 0 and
+    leave the kernel able to stop only on an exactly closed gap, discarding the
+    relative criterion the caller also asked for. So zero keeps the established
+    absolute conjunct (which can only tighten the stop) and the kernel's
+    ``abs_gap_tol`` arm receives the 0, removing the 1e-6 near-zero allowance the
+    caller did not grant.
+    """
+    if abs_gap_tolerance is None or float(abs_gap_tolerance) == 0.0:
+        return float(gap_tolerance)
+    return min(float(gap_tolerance), float(abs_gap_tolerance))
+
+
 def _warn_abs_gap_ignored(route: str, abs_gap_tolerance: Optional[float]) -> None:
     """Say so when *route* cannot honour an ``abs_gap_tolerance`` the caller set.
 
@@ -7216,17 +7233,22 @@ def _resolve_abs_gap_tolerance(abs_gap_tolerance: Optional[float]) -> float:
 
     ``None`` -- the default -- means "the established default for this route",
     which for every Python-tree route is :data:`_DEFAULT_ABS_GAP_TOL`. An
-    explicit value must be strictly positive and finite: a zero or negative
-    absolute tolerance cannot be met by a floating-point gap, so it would
-    silently turn the disjunctive criterion into the relative one alone, which
-    is exactly the mode #1243 exists to escape.
+    explicit value must be finite and ``>= 0``.
+
+    Zero is a real request, not a degenerate one (#1889): it is GAMS's
+    ``optca=0``, ``|PB - DB| <= 0``, and it is met whenever the gap closes
+    exactly (``max(0, UB - LB) <= 0``), so the criterion becomes "relative gap
+    met, or bounds meet". An earlier version refused it here and the GAMS link
+    mapped it to ``None``, which silently granted the 1e-6 default: a pair
+    ``PB=1e-7, DB=0`` at ``optcr=1e-4, optca=0`` -- relative gap 1, absolute gap
+    1e-7 -- was declared converged although neither requested criterion held.
     """
     if abs_gap_tolerance is None:
         return _DEFAULT_ABS_GAP_TOL
     val = float(abs_gap_tolerance)
-    if not np.isfinite(val) or val <= 0.0:
+    if not np.isfinite(val) or val < 0.0:
         raise ValueError(
-            f"abs_gap_tolerance must be a finite positive number, got {abs_gap_tolerance!r}"
+            f"abs_gap_tolerance must be a finite number >= 0, got {abs_gap_tolerance!r}"
         )
     return val
 
@@ -11776,7 +11798,9 @@ def solve_model(
         which is what it has always done -- this exposes the absolute half,
         which was the module constant ``_DEFAULT_ABS_GAP_TOL = 1e-6`` with no
         caller control (#1243). ``None`` (the default) keeps each route's
-        established default, so an omitted argument changes nothing.
+        established default, so an omitted argument changes nothing. ``0``
+        grants no absolute allowance (GAMS ``optca=0``): the search then stops
+        on the relative criterion or an exactly closed gap only (#1889).
 
         Needed whenever the optimum sits near zero, where a relative tolerance
         means nothing: a CALPHAD phase-stability certificate is the test
