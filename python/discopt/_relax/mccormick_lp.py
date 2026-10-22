@@ -418,13 +418,23 @@ def free_column_lp_cert_enabled() -> bool:
     bound is ``-inf``. ``lp_milp_highs.solve_lp_std`` certifies the same LP at -1e-12.
     Its bound is rigorous for ANY dual, so HiGHS's accuracy decides only whether a
     bound is found. Bound-changing (a node that had none gets one), so gated per
-    CLAUDE.md section 5; read at call time. Default OFF until its panel passes.
+    CLAUDE.md section 5; read at call time.
+
+    **Graduated (default ON, 2026-10-22).** Panel over the 120 local MINLPLib
+    instances (<= 200 vars/cons) that keep an unbounded continuous variable after
+    FBBT, ON vs OFF, 30 s, interleaved: cert-clean (240 rows, 0 problems: no bound
+    past an optimum, every incumbent passes ``verify_point`` on a fresh model) and
+    net-positive -- certified 88 -> 91, none lost (``prolog`` time limit with no
+    bound -> optimal in 289 nodes / 13.3 s; ``ex7_3_3`` and ``ex9_1_1`` also gained);
+    fewer nodes where both certify (``ex9_1_5`` 3 -> 1, ``ex9_1_8`` 5 -> 3), total
+    wall 1494 -> 1424 s. ``=0`` restores the decline.
     """
-    return os.environ.get("DISCOPT_FREE_COLUMN_LP_CERT", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    return os.environ.get("DISCOPT_FREE_COLUMN_LP_CERT", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
     )
 
 

@@ -55,6 +55,19 @@ def test_flag_on_certifies_prolog(monkeypatch):
     assert abs(r.objective - OPT) <= 1e-5 and r.bound <= OPT + 1e-9
 
 
+def test_4stufen_root_bound_is_below_the_best_known_dual(monkeypatch):
+    """A second real LP the route now certifies: ``4stufen``'s root, which every
+    in-house route declines. Its bound must not exceed MINLPLib's best dual."""
+    from discopt.modeling.core import from_nl
+    from discopt.solver import flat_variable_bounds
+
+    monkeypatch.setenv(FLAG, "1")
+    m = from_nl(os.path.join(os.path.dirname(PROLOG), "4stufen.nl"))
+    lb, ub = flat_variable_bounds(m)
+    r = ML.MccormickLPRelaxer(m).solve_at_node(lb, ub, time_limit=10.0)
+    assert r.status == "optimal" and r.lower_bound <= 112657.2579 + 1e-6
+
+
 def test_helper_refuses_an_unbounded_lp():
     """``min -x, x >= 0`` has no finite bound: the helper must return nothing."""
     import scipy.sparse as sp
@@ -85,6 +98,9 @@ def test_helper_bound_is_below_a_known_lp_optimum():
     assert x is not None and x.shape == (2,)
 
 
-def test_flag_default_is_off_until_its_panel(monkeypatch):
+def test_flag_defaults_on(monkeypatch):
+    """Graduated under CLAUDE.md section 5 (panel in the gate's docstring)."""
     monkeypatch.delenv(FLAG, raising=False)
+    assert ML.free_column_lp_cert_enabled()
+    monkeypatch.setenv(FLAG, "0")
     assert not ML.free_column_lp_cert_enabled()

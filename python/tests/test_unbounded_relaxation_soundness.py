@@ -174,23 +174,36 @@ def _camel_semiinfinite(lb0, ub0, lb1, ub1, name):
 def test_467_free_variable_root_not_falsely_optimal_nlp_route():
     """#467: both continuous vars one-sided-unbounded (x0=[-5,inf], x1=[-inf,5]).
 
-    ``_origin_has_finite_continuous_var`` is False, so the McCormick-LP guard
-    falls the solve back to the NLP relaxation. The root cannot be spatially
-    branched and no valid dual bound is established. The Rust tree previously
-    fathomed the root and collapsed ``global_lower_bound`` to the local-minimum
-    incumbent (0.2986), certifying it ``optimal`` with gap 0 — a false optimal.
-    The honest verdict is NOT optimal (feasible/unknown).
+    The Rust tree used to fathom the unbranchable root and collapse
+    ``global_lower_bound`` onto the local-minimum incumbent (0.2986), certifying it
+    ``optimal`` with gap 0 -- a false optimal. Since #1869 the root IS branchable
+    (an unbounded column is split at a finite point) and the outer pieces ARE
+    bounded (the separable polynomial minorant), so the solve can certify -- but only
+    the GLOBAL optimum 0.0 at the origin. The oracle is therefore the true optimum,
+    not "never optimal": the dual bound never exceeds 0, and a certificate is only
+    ever issued at the global optimum (never at 0.2986 or any other local point).
     """
     r = _camel_semiinfinite(-5.0, float("inf"), float("-inf"), 5.0, "c467_nlp").solve(
         time_limit=6.0
     )
-    assert r.status != "optimal", (
-        f"free-variable root falsely certified optimal: status={r.status} "
-        f"obj={r.objective} bound={r.bound}"
+    assert r.bound is None or r.bound <= 0.0 + 1e-6, f"bound past the optimum: {r.bound}"
+    if r.status == "optimal" or getattr(r, "gap_certified", False):
+        assert abs(r.objective) <= 1e-6, (
+            f"free-variable root certified a non-global point: status={r.status} "
+            f"obj={r.objective} bound={r.bound}"
+        )
+
+
+def test_467_free_variable_root_refuses_with_the_1869_bounds_off(monkeypatch):
+    """The legacy refusal stays pinned: with #1869's unbounded branching and
+    separable-polynomial bound off, nothing bounds the outer pieces and the solve
+    must not certify."""
+    monkeypatch.setenv("DISCOPT_UNBOUNDED_BRANCH", "0")
+    monkeypatch.setenv("DISCOPT_SEPARABLE_POLY_BOUND", "0")
+    r = _camel_semiinfinite(-5.0, float("inf"), float("-inf"), 5.0, "c467_off").solve(
+        time_limit=6.0
     )
-    assert not getattr(r, "gap_certified", False), (
-        f"free-variable root falsely reports gap_certified: bound={r.bound}"
-    )
+    assert r.status != "optimal" and not getattr(r, "gap_certified", False), (r.status, r.bound)
 
 
 @pytest.mark.smoke
