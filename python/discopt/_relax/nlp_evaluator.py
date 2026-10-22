@@ -30,6 +30,15 @@ from discopt._evaluator_cache import (
 from discopt._evaluator_cache import (
     evaluator_fingerprint as evaluator_fingerprint,  # re-export: callers import it here
 )
+
+# The dense-Jacobian compile cap lives in the JAX-free ``_hessian_cost_model``
+# (rationale there), re-exported as a module global so this module's own lookups --
+# and tests that monkeypatch it here -- behave exactly as before. It moved because
+# ``_dual_recovery`` reads it on the default continuous-solve path, and importing it
+# from here loaded JAX for one integer (#1870).
+from discopt._hessian_cost_model import (
+    _DENSE_JACOBIAN_COMPILE_LIMIT as _DENSE_JACOBIAN_COMPILE_LIMIT,
+)
 from discopt._hessian_cost_model import (
     _DENSE_OBJ_HESS_CHEAP_NNZ as _DENSE_OBJ_HESS_CHEAP_NNZ,
 )
@@ -57,17 +66,6 @@ from discopt._relax.dag_compiler import (
 from discopt.modeling.core import Constraint, Model, ObjectiveSense
 
 logger = logging.getLogger(__name__)
-
-# Above this many dense Jacobian entries (m * n), ``evaluate_jacobian`` routes
-# through the sparse coloring path instead of compiling the dense
-# ``jax.jacfwd``. The dense compile replicates the whole constraint program once
-# per input variable, so for a large model its XLA jaxpr explodes during MLIR
-# lowering and aborts the *process* with a native SIGBUS/SIGILL (rsyn0810m03hfsg:
-# 1935 x 1185 ~ 2.3M entries, yet only ~0.2% nonzero). The cap sits well above
-# any small/medium model — which keep the faster dense path with no behavior
-# change — and below the crash regime, where the dense compile is not a viable
-# option anyway, so sparse is strictly safer.
-_DENSE_JACOBIAN_COMPILE_LIMIT = 1_000_000
 
 # --- Dense Lagrangian-Hessian AD-mode gate (#923) --------------------------------
 # The dense Lagrangian Hessian is built by nesting two AD passes. The two nestings

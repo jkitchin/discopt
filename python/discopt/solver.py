@@ -1755,9 +1755,16 @@ def _native_exit_polish_enabled() -> bool:
     return integer_box_polish_enabled()
 
 
-def _native_exit_primal_polish(
-    model, x_flat, obj_val, bound_val, n_orig, outer_deadline, source=None
-):
+#: #1870: wall slice withheld from the native kernel for the #1193 exit polish --
+#: ``min(_NATIVE_POLISH_RESERVE_S, _NATIVE_POLISH_RESERVE_FRAC * budget)``, set aside
+#: only when :func:`~discopt._relax.primal_heuristics.integer_box_polish_may_fire`.
+#: The polish's extent is its own deterministic work budget (#912); this slice only
+#: keeps a clock-limited exit from arriving with nothing left to spend it in.
+_NATIVE_POLISH_RESERVE_S = 0.5
+_NATIVE_POLISH_RESERVE_FRAC = 0.05
+
+
+def _native_exit_primal_polish(model, x_flat, obj_val, bound_val, n_orig, deadline, source=None):
     """Improve an UNCERTIFIED native-kernel incumbent before reporting it (#1193).
 
     Returns ``(x_new, obj_new)`` — a strictly better, independently re-verified point
@@ -1789,6 +1796,16 @@ def _native_exit_primal_polish(
     which also supplies the true model-units objective; (3) it is adopted only on
     strict improvement in the model's own sense. Nothing here touches ``bound``,
     ``status`` or ``gap_certified`` — the exit was already uncertified and stays so.
+
+    Budget (#1870). ``deadline`` is the end of the solve's own budget, not the
+    kernel's base deadline: the kernel reclaims the #917 extension once it holds an
+    incumbent -- the only state in which this runs -- so the base deadline has
+    already passed on every clock-limited exit, and passing it starved the search to
+    zero cells (nvs19 at ``time_limit=20``: 0 cells, -1098.2 kept). The caller also
+    withholds a small slice from the kernel so a clock exit leaves time to spend.
+    The search runs with ``objective_cutoff`` at the incumbent: gate (3) below
+    rejects anything else, and on nvs19 it cuts the polish from 2.5 s to a fraction
+    of that by skipping the arbiter on the 6,548 cells that cannot win.
     """
     if not _native_exit_polish_enabled():
         return None
@@ -1797,12 +1814,22 @@ def _native_exit_primal_polish(
     is_max = model._objective is not None and model._objective.sense == _ObjSensePP.MAXIMIZE
 
     try:
-        from discopt._relax.nlp_evaluator import cached_evaluator as _cached_ev
         from discopt._relax.primal_heuristics import integer_box_search as _ibs
 
-        evaluator = _cached_ev(model)
+        # #1870: the canonical funnel, not ``cached_evaluator`` directly. That module
+        # imports jax at scope, so reaching past ``_make_evaluator`` loaded JAX into an
+        # otherwise JAX-free solve on every polish -- ~0.5 s measured inside the
+        # nvs19 exit, more than the whole box search costs with its cutoff.
+        evaluator = _make_evaluator(model)
         x_full = np.asarray(x_flat, dtype=np.float64)
-        found = _ibs(model, x_full, radius=1, evaluator=evaluator, deadline=outer_deadline)
+        found = _ibs(
+            model,
+            x_full,
+            radius=1,
+            evaluator=evaluator,
+            deadline=deadline,
+            objective_cutoff=float(evaluator.evaluate_objective(x_full)),
+        )
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("native-exit primal polish raised: %s", exc)
         return None
@@ -1973,6 +2000,39 @@ def _try_native_spatial_kernel(
     if rr_reserve_s > 0.0 and remaining is not None and remaining > 0.0:
         _bound_reserve = min(float(rr_reserve_s), 0.5 * remaining)
         remaining = remaining - _bound_reserve
+    # #1870: set aside a slice for the #1193 exit polish, which runs only after the
+    # kernel returns. Without it a clock-limited exit leaves nothing: the kernel runs
+    # to the very end of the budget (its base deadline plus the #917 extension it
+    # reclaims once it holds an incumbent). The slice comes out of that extension
+    # first -- spent only in the state where the polish can run, so while the
+    # extension covers it a solve that certifies inside its base budget is
+    # unchanged. The extension is nonzero only for models in the #844 fallback's
+    # scope (35% of the budget, against a <= 5% slice); outside it the slice comes
+    # out of the base budget, and a solve that would have certified in its last
+    # ``_polish_reserve`` seconds no longer does. That is the price of a clock exit
+    # that can still improve its incumbent; the #1870 panel records where it lands.
+    _incumbent_extension = max(0.0, float(incumbent_time_extension))
+    _polish_reserve = 0.0
+    if outer_deadline is not None:
+        from discopt._relax.primal_heuristics import integer_box_polish_may_fire
+
+        if integer_box_polish_may_fire(model):
+            _polish_reserve = min(
+                _NATIVE_POLISH_RESERVE_S,
+                _NATIVE_POLISH_RESERVE_FRAC * (_outer_budget + _incumbent_extension),
+            )
+    _from_extension = min(_incumbent_extension, _polish_reserve)
+    _incumbent_extension -= _from_extension
+    if remaining is not None and _polish_reserve > _from_extension:
+        remaining = max(0.0, remaining - (_polish_reserve - _from_extension))
+    # The end of this solve's own budget: base deadline plus the #917 extension the
+    # caller granted (the polish slice is inside it). The exit polish runs only with
+    # an incumbent, the state in which that extension is the kernel's to reclaim.
+    _polish_deadline = (
+        None
+        if outer_deadline is None
+        else outer_deadline + max(0.0, float(incumbent_time_extension))
+    )
     # #1243. The kernel's ``gap_tol`` has always been applied ABSOLUTELY
     # (``bound >= inc - gap_tol``), so this route's established absolute
     # tolerance *is* the caller's ``gap_tolerance``: the default below is
@@ -2065,8 +2125,8 @@ def _try_native_spatial_kernel(
     # forfeits the reserve outright: nvs17 at a 60 s budget stopped at 39.4 s with
     # its bound 4.4% short of its own incumbent, and giving the slice back closes
     # it (-1149.20 -> -1100.40).
-    if incumbent_time_extension > 0.0:
-        solve_kwargs["incumbent_time_extension_s"] = float(incumbent_time_extension)
+    if _incumbent_extension > 0.0:
+        solve_kwargs["incumbent_time_extension_s"] = float(_incumbent_extension)
     if initial_incumbent is not None:
         solve_kwargs["initial_incumbent"] = float(initial_incumbent)
     # #1656: price every McCormick-tight point at the posed problem's objective.
@@ -2303,7 +2363,7 @@ def _try_native_spatial_kernel(
     if native_status != "optimal" and x_flat is not None and obj_val is not None:
         _t_phase = time.perf_counter()
         _polished = _native_exit_primal_polish(
-            model, x_flat, obj_val, bound_val, n_orig, outer_deadline, source=source
+            model, x_flat, obj_val, bound_val, n_orig, _polish_deadline, source=source
         )
         _native_jax_s += time.perf_counter() - _t_phase
         if _polished is not None:
@@ -2345,6 +2405,10 @@ def _try_native_spatial_kernel(
     if _bext_s > 0.0:
         _native_stats = dict(_native_stats or {})
         _native_stats["budget/bound_extension_s"] = _bext_s
+    # #1870: same §6 observability for the exit-polish slice withheld from the kernel.
+    if _polish_reserve > 0.0:
+        _native_stats = dict(_native_stats or {})
+        _native_stats["budget/polish_reserve_s"] = float(_polish_reserve)
     # #1236: the kernel's per-node work counters. Until this, a kernel-routed
     # ``SolveResult`` carried an EMPTY ``solver_stats`` and ``root_bound=None`` /
     # ``root_gap=None`` -- measured on nvs13 (637 nodes, 24x SCIP), where that left
