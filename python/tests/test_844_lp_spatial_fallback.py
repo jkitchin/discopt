@@ -191,8 +191,12 @@ def test_fallback_budget_never_runs_past_the_callers_time_limit(fb, monkeypatch)
 
     monkeypatch.setattr(solver_mod, "solve_model", overrunning_primary)
     monkeypatch.setattr(lsb, "solve_lp_spatial_bb", recording_engine)
+    # Build before reading the clock: the solve's own clock starts at its entry, so
+    # a model built inside the timed window shifts the grant later by the build
+    # time -- up to 1.4 ms measured under coverage, past the 1 ms tolerance.
+    model = _pure_integer_min()
     t_start[0] = time.perf_counter()
-    _pure_integer_min().solve(time_limit=t_limit)
+    model.solve(time_limit=t_limit)
     assert len(granted) == 1, "the fallback never ran: the probe measured nothing"
     budget, at = granted[0]
     assert at + budget <= t_start[0] + t_limit + 1e-3
@@ -225,7 +229,11 @@ def test_engine_budget_clock_starts_at_entry(monkeypatch):
 
     monkeypatch.setattr(tc, "classify_nonlinear_terms", slow_classify)
     monkeypatch.setattr(im, "IncrementalMcCormickLP", recording_inc)
+    # Build before reading the clock (see the test above): the engine's clock starts
+    # at its entry, and the coverage lane failed this by 13 us with the build inside
+    # the window (CI run 39708905524: 531.446953901 <= 531.446940685).
+    model = _pure_integer_min()
     t_entry = time.perf_counter()
-    lsb.solve_lp_spatial_bb(_pure_integer_min(), time_limit=2.0)
+    lsb.solve_lp_spatial_bb(model, time_limit=2.0)
     assert len(seen) == 1 and seen[0] is not None, "the engine never built: nothing measured"
     assert seen[0] <= t_entry + 2.0 + 1e-3
