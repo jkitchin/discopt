@@ -22,6 +22,7 @@ GAMSlinks / SHOT ``GamsNLinstr`` headers, which mirror the GAMS ``gmomcc`` API.
 
 from __future__ import annotations
 
+import math
 from enum import IntEnum
 from typing import Callable
 
@@ -248,26 +249,77 @@ _UNARY: dict[str, Callable[[Expression], Expression]] = {
     "sigmoid": dm.sigmoid,
     "sign": dm.sign,
     "sqr": lambda a: a**2,
-    "errf": dm.erf,
+    # GAMS errorf is the standard normal CDF, not Gauss's erf (#1288 fixed the
+    # .gms parser; the GMO link kept the old mapping until #1889's audit).
+    "errf": lambda a: _const(0.5) * (_const(1.0) + dm.erf(a / _const(math.sqrt(2.0)))),
     "arcsin": lambda a: dm.FunctionCall("asin", a),
     "arccos": lambda a: dm.FunctionCall("acos", a),
     "arctan": lambda a: dm.FunctionCall("atan", a),
     "sinh": lambda a: dm.FunctionCall("sinh", a),
     "cosh": lambda a: dm.FunctionCall("cosh", a),
-    # Safeguarded eval forms GAMS emits in compiled NL for numerical safety
-    # (smooth-linear "sl" / smooth-quadratic "sq" extrapolation beyond a
-    # threshold).  Mathematically they are exp / log10 / reciprocal, which is
-    # what the model intends and what other solvers see, so they map to the base
-    # function (already value- and relaxation-supported -> stays global).
-    "slexp": dm.exp,
-    "sqexp": dm.exp,
-    "sllog10": dm.log10,
-    "sqlog10": dm.log10,
-    "slrec": lambda a: dm.Constant(1.0) / a,
-    "sqrec": lambda a: dm.Constant(1.0) / a,
-    # entropy(x) = x*log(x): convex on x >= 0, so it stays on the global path.
-    "entropy": lambda a: dm.FunctionCall("entropy", a),
+    # GAMS entropy(x) = -x*ln(x) (measured on GAMS 53: entropy(0.5) = 0.3466).
+    # discopt's ``entropy`` node is x*log(x), so the GAMS function is its negation.
+    "entropy": lambda a: -dm.FunctionCall("entropy", a),
 }
+
+
+# ── Smoothed extensions: sl*/sq* ────────────────────────────────────────────
+# GAMS defines each of these as the base function on one side of a threshold S
+# and its first- (sl) or second-order (sq) Taylor extension past it -- a
+# different function there, not a numerical safeguard (measured on GAMS 53:
+# slrec(0.5, 1) = 1.5, not 2). Each is written exactly through a clamp
+# ``u = max(x, S)`` (or ``min``) and the excursion ``d = clamp - S``, both of
+# which discopt relaxes, so the translation stays global:
+#
+#   slrec(x,S)   = 1/u - d/S^2                       u = max(x,S), d = min(x,S)-S
+#   sqrec(x,S)   = 1/u - d/S^2 + d^2/S^3
+#   sllog10(x,S) = log10(u) + d/(S ln10)
+#   sqlog10(x,S) = log10(u) + d/(S ln10) - d^2/(2 S^2 ln10)
+#   slexp(x,S)   = exp(u) + e^S d                    u = min(x,S), d = max(x,S)-S
+#   sqexp(x,S)   = exp(u) + e^S (d + d^2/2)
+#
+# Default thresholds when S is omitted, measured on GAMS 53.
+_SMOOTH_DEFAULT_S = {
+    "slrec": 1e-10,
+    "sqrec": 1e-10,
+    "sllog10": 1e-150,
+    "sqlog10": 1e-150,
+    "slexp": 150.0,
+    "sqexp": 150.0,
+}
+
+
+def _smoothed(name: str, x: Expression, s: Expression) -> Expression:
+    ln10 = _const(math.log(10.0))
+    out: Expression
+    if name in ("slexp", "sqexp"):
+        u = dm.minimum(x, s)
+        d = dm.maximum(x, s) - s
+        tail = d if name == "slexp" else d + _const(0.5) * d**2
+        out = dm.exp(u) + dm.exp(s) * tail
+        return out
+    u = dm.maximum(x, s)
+    d = dm.minimum(x, s) - s
+    if name in ("slrec", "sqrec"):
+        out = _const(1.0) / u - d / s**2
+        if name == "sqrec":
+            out = out + d**2 / s**3
+        return out
+    out = dm.log10(u) + d / (s * ln10)
+    if name == "sqlog10":
+        out = out - d**2 / (_const(2.0) * s**2 * ln10)
+    return out
+
+
+def _centropy(x: Expression, y: Expression, z: Expression | None = None) -> Expression:
+    """GAMS ``centropy(x, y[, Z]) = x*ln((x+Z)/(y+Z))``, ``Z`` defaulting to 1e-20.
+
+    Measured on GAMS 53: centropy(2,1) = 1.3863, centropy(2,1,1) = 0.8109. The
+    third argument used to be folded pairwise as ``centropy(centropy(x,y),Z)``.
+    """
+    z = _const(1e-20) if z is None else z
+    out: Expression = x * dm.log((x + z) / (y + z))
+    return out
 
 
 def _arctan2(y: Expression, x: Expression) -> Expression:
@@ -297,25 +349,21 @@ _BINARY: dict[str, Callable[[Expression, Expression], Expression]] = {
     "cvpower": lambda a, b: a**b,
     "vcpower": lambda a, b: a**b,
     "div": lambda a, b: a / b,
+    # div0(a, b) is a/b except at b = 0, where GAMS returns 1e299 instead of an
+    # evaluation error. That single point has no expression form; at it discopt
+    # raises an evaluation error, so the solver never returns it as a solution
+    # rather than returning a different value.
     "div0": lambda a, b: a / b,
     "min": dm.minimum,
     "max": dm.maximum,
     "arctan2": _arctan2,
-    # Safeguarded eval forms can also appear with a second argument carrying the
-    # smoothing threshold; it only affects out-of-domain numerical behaviour, so
-    # the intended function is the base form on the first argument.
-    "slexp": lambda a, _k: dm.exp(a),
-    "sqexp": lambda a, _k: dm.exp(a),
-    "sllog10": lambda a, _k: dm.log10(a),
-    "sqlog10": lambda a, _k: dm.log10(a),
-    "slrec": lambda a, _k: dm.Constant(1.0) / a,
-    "sqrec": lambda a, _k: dm.Constant(1.0) / a,
-    # signpower(x, a) = sign(x)*|x|**a and centropy(x, y) = x*log(x/y). These are
-    # nonconvex/bivariate with no rigorous relaxation, so discopt solves them on
-    # the local path; the GAMS link reports the result as LocallyOptimal.
+    # signpower(x, a) = sign(x)*|x|**a is nonconvex with no rigorous relaxation,
+    # so discopt solves it on the local path; the link reports LocallyOptimal.
     "signpower": lambda a, b: dm.FunctionCall("signpower", a, b),
-    "centropy": lambda a, b: dm.FunctionCall("centropy", a, b),
 }
+
+#: Functions GAMS defines for more than two arguments by folding pairwise.
+_NARY_FOLD: frozenset[str] = frozenset({"min", "max"})
 
 
 def _const(value: float) -> Expression:
@@ -491,12 +539,16 @@ def _apply_func(func_code: int, args: list[Expression]) -> Expression:
             "continuous optimization; model discrete behaviour with integer "
             "variables instead."
         )
+    if name in _SMOOTH_DEFAULT_S and len(args) in (1, 2):
+        s = args[1] if len(args) == 2 else _const(_SMOOTH_DEFAULT_S[name])
+        return _smoothed(name, args[0], s)
+    if name == "centropy" and len(args) in (2, 3):
+        return _centropy(*args)
     if len(args) == 1 and name in _UNARY:
         return _UNARY[name](args[0])
     if len(args) == 2 and name in _BINARY:
         return _BINARY[name](args[0], args[1])
-    if name in _BINARY and len(args) >= 2:
-        # n-ary min/max etc. folded pairwise
+    if name in _NARY_FOLD and len(args) > 2:
         expr = args[0]
         for nxt in args[1:]:
             expr = _BINARY[name](expr, nxt)

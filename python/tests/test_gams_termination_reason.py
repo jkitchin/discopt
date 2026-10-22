@@ -38,8 +38,10 @@ def _feasible(termination):
     ],
 )
 def test_feasible_result_preserves_termination(termination, expected_solve_stat, has_discrete):
+    # GAMS: 7 is a feasible point without discrete variables, 8 with them.
+    model_stat = link.MODELSTAT_INTEGER if has_discrete else link.MODELSTAT_FEASIBLE
     assert link.status_to_gams(_feasible(termination), has_discrete) == (
-        link.MODELSTAT_FEASIBLE,
+        model_stat,
         expected_solve_stat,
     )
 

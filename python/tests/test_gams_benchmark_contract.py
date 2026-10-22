@@ -35,6 +35,7 @@ def _fake_gams(monkeypatch, options):
     gmo.gmoIndexBaseSet = lambda *a: None
     gmo.gmoFree = lambda *a: None
     gmo.delete_gmoHandle_tp = lambda *a: None
+    gmo.gmoOptFile = lambda *a: 0
     package, core = ModuleType("gams"), ModuleType("gams.core")
     package.core, core.gev, core.gmo = core, gev, gmo
     for n, m in (
@@ -48,11 +49,17 @@ def _fake_gams(monkeypatch, options):
     monkeypatch.setattr(link, "_write_solution", lambda *a, **k: None)
 
 
-def _install_gev_options(gev, options):
+def _install_gev_options(gev, options, **int_opts):
     gev.gevResLim, gev.gevOptCR, gev.gevOptCA = "ResLim", "OptCR", "OptCA"
     dbl = dict(zip(("ResLim", "OptCR", "OptCA"), options[:3]))
     gev.gevGetDblOpt = lambda handle, name: dbl[name]
     gev.gevThreads = lambda handle: options[3]
+    # Integer options under their real gamsapi names and GAMS defaults.
+    ints = {"NodeLim": 0, "IterLim": 2147483647, "DomLim": 0, "UseCutOff": 0, "UseCheat": 0}
+    ints.update(int_opts)
+    for name in ints:
+        setattr(gev, f"gev{name}", name)
+    gev.gevGetIntOpt = lambda handle, name: ints[name]
 
 
 def test_control_file_forwards_gams_resource_limit_and_relative_gap(monkeypatch, tmp_path):
@@ -65,19 +72,55 @@ def test_control_file_forwards_gams_resource_limit_and_relative_gap(monkeypatch,
 
     monkeypatch.setattr(link, "solve_view", solve)
     assert link.solve_from_control_file("unused", sysdir=str(tmp_path)) == 0
-    # optca=0 forwarded as 0 (#1889: no absolute allowance), threads forwarded.
-    assert observed == {"time_limit": 0.25, "gap": 1e-6, "abs_gap": 0.0, "threads": 1}
+    # optca=0 is read at floating-point resolution (#1889), not as discopt's
+    # 1e-6 default; nodlim=0 (no limit) is not discopt's 100,000-node cap.
+    assert observed == {
+        "time_limit": 0.25,
+        "gap": 1e-6,
+        "abs_gap": link.OPTCA_ZERO_RESOLUTION,
+        "threads": 1,
+        "max_nodes": link.NODLIM_INFINITY,
+    }
 
 
 def test_positive_optca_and_threads_forwarded():
     gev = SimpleNamespace()
-    _install_gev_options(gev, (5.0, 1e-3, 1e-5, 4))
+    _install_gev_options(gev, (5.0, 1e-3, 1e-5, 4), NodeLim=250)
     assert link._read_gams_options(gev, None) == {
         "time_limit": 5.0,
         "gap": 1e-3,
         "abs_gap": 1e-5,
         "threads": 4,
+        "max_nodes": 250,
     }
+
+
+def test_negative_nodlim_rejected():
+    gev = SimpleNamespace()
+    _install_gev_options(gev, (5.0, 1e-3, 0, 1), NodeLim=-1)
+    with pytest.raises(ValueError, match="nodlim"):
+        link._read_gams_options(gev, None)
+
+
+def test_options_discopt_cannot_honour_are_reported():
+    gev = SimpleNamespace()
+    _install_gev_options(gev, (5.0, 1e-3, 0, 1), IterLim=50, DomLim=3, UseCutOff=1, UseCheat=1)
+    gev.gevCutOff = "CutOff"
+    dbl_get = gev.gevGetDblOpt
+    gev.gevGetDblOpt = lambda h, name: 7.5 if name == "CutOff" else dbl_get(h, name)
+    gmo = SimpleNamespace(gmoOptFile=lambda h: 1)
+    notes = link._unhonored_gams_options(gev, None, gmo, None)
+    joined = "\n".join(notes)
+    for word in ("iterlim=50", "domlim", "cutoff=7.5", "cheat", "optfile"):
+        assert word in joined, (word, notes)
+    assert all(n.startswith("*** discopt:") for n in notes)
+
+
+def test_default_options_report_nothing():
+    gev = SimpleNamespace()
+    _install_gev_options(gev, (5.0, 1e-3, 0, 1))
+    gmo = SimpleNamespace(gmoOptFile=lambda h: 0)
+    assert link._unhonored_gams_options(gev, None, gmo, None) == []
 
 
 @pytest.mark.parametrize(
@@ -103,9 +146,12 @@ def _export(model, result, **kwargs):
         gmoHobjval="objval",
         gmoTmipbest="objest",  # the real tail GAMS reports as objest
         gmoHresused="resused",
+        gmoTmipnod="nodes",
+        gmoHmarginals="marginals",
+        doubleArray=lambda n: [0.0] * n,
         gmoModelStatSet=lambda *a: None,
         gmoSolveStatSet=lambda *a: None,
-        gmoSetVarLOne=lambda *a: None,
+        gmoSetSolutionPrimal=lambda h, x: exported.__setitem__("x", list(x)),
         gmoSetHeadnTail=lambda h, f, v: exported.__setitem__(f, v),
         gmoUnloadSolutionLegacy=lambda *a: None,
     )
@@ -161,7 +207,22 @@ def test_valid_bound_without_incumbent_is_exported():
         x=None,
     )
     exported = _export(model, result)
-    assert exported == {"objest": 1.5, "resused": 0.0}
+    # No duals are computed, so marginals are flagged unavailable (#1889 audit).
+    assert exported == {"objest": 1.5, "resused": 0.0, "nodes": 0.0, "marginals": 0.0}
+
+
+def test_only_gmo_columns_are_written_back_in_order():
+    """Auxiliary variables added after the columns never reach GMO (#1889 audit)."""
+    model = dm.Model("gams-columns")
+    a = model.continuous("a", lb=0, ub=10)
+    b = model.continuous("b", lb=0, ub=10)
+    model._gams_columns = [a, b]
+    model.binary("a__semi_on")
+    model.minimize(a + b)
+    result = dm.SolveResult(
+        status="optimal", objective=3.0, x={"a": 1.0, "b": 2.0, "a__semi_on": 1.0}
+    )
+    assert _export(model, result)["x"] == [1.0, 2.0]
 
 
 @pytest.mark.parametrize("kwargs,expected", [({"resused": 4.25}, 4.25), ({}, 3.5)])
