@@ -155,6 +155,7 @@
 "python/tests/test_oa_exit_gate_verifies_incumbent.py::test_the_gate_repairs_without_moving_the_answer": 24.55,
 "python/tests/test_obbt_cascade_varmap.py::test_solve_certifies_the_true_optimum_with_an_integer_affine_variable": 28.36,
 "python/tests/test_pounce_node_solves_respect_deadline.py::test_every_structured_node_solve_carries_the_remaining_budget": 10.12,
+"python/tests/test_qplib_reader.py::test_to_model_reproduces_the_reference_point[QPLIB_3871]": 17.63,
 "python/tests/test_recognizer_adversarial.py::test_gas_recognizer_optimum_preserved_under_sign_flips[True-False]": 9.23,
 "python/tests/test_requires_python_floor.py::test_no_unguarded_imports_above_requires_python_floor": 13.88,
 "python/tests/test_row_filter_loose_bound.py::test_hda_root_bound_is_not_the_loose_safe_bound": 28.57,

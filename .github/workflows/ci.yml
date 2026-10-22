@@ -323,9 +323,11 @@ jobs:
           # runner's wall clock.
           # --time-budget fails any test whose call phase runs over 15 s unless
           # it is in python/tests/time_budget_allowlist.json (the tests already
-          # that slow when the budget landed). The lane kept growing back because
-          # each new real-solve test landed here unmarked; this makes that cost
-          # a reviewed decision. Fast lane only: coverage tracing inflates times.
+          # that slow on CI when the budget landed). The lane kept growing back
+          # because each new real-solve test landed here unmarked; this makes
+          # that cost a reviewed decision. Fast lane only: coverage tracing
+          # inflates times. --durations-min=5 lists every test near the
+          # allowlist threshold (budget / 2.5 = 6 s) in the log.
           # See python/tests/_time_budget.py.
           scripts/run_memory_capped_pytest.sh pytest python/tests/ \
             discopt_benchmarks/tests/test_1134_cert_baseline_shrink_guard.py \
@@ -337,7 +339,9 @@ jobs:
             --num-shards 4 --shard-id ${{ matrix.shard }} \
             --shard-report shard-report-${{ matrix.shard }}.json \
             --time-budget 15 \
-            --durations=20
+            -o junit_duration_report=call \
+            --junitxml=fast-junit-${{ matrix.shard }}.xml \
+            --durations=0 --durations-min=5
         env:
           JAX_PLATFORMS: cpu
           JAX_ENABLE_X64: "1"
@@ -347,7 +351,13 @@ jobs:
         if: always()
         with:
           name: fast-shard-report-${{ matrix.shard }}
-          path: shard-report-${{ matrix.shard }}.json
+          # The junit report carries call-phase times measured on the runner,
+          # which is what scripts/update_time_budget_allowlist.py needs: CI
+          # runs some tests ~3x slower than a dev machine (QPLIB_3871: 5.4 s
+          # local, 17.6 s on CI), so an allowlist built locally is wrong.
+          path: |
+            shard-report-${{ matrix.shard }}.json
+            fast-junit-${{ matrix.shard }}.xml
           if-no-files-found: ignore
           retention-days: 3
 

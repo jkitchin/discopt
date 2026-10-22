@@ -278,7 +278,9 @@ The fast-lane shards also run with `--time-budget 15` (`python/tests/_time_budge
 whose **call phase** exceeds 15 s fails unless its node id is in
 `python/tests/time_budget_allowlist.json`. A new slow test should be sped up or marked `slow`
 (plus `correctness` if it checks a known optimum); an allowlist entry is a reviewed exception.
-The list only shrinks; rebuild it deliberately with `scripts/update_time_budget_allowlist.py`.
+The list only shrinks; rebuild it deliberately with `scripts/update_time_budget_allowlist.py`
+from **CI** timings (each fast shard prints every test >= 5 s and uploads a call-phase junit
+report). CI runs some tests ~3x slower than a dev machine, so a locally built list is wrong.
 
 ### Benchmarking
 ```bash
