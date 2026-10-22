@@ -2073,6 +2073,27 @@ def _try_native_spatial_kernel(
     # evaluator, and on nvs19 it was the single largest cost in the solve.
     _native_jax_s += time.perf_counter() - _t_phase
 
+    # #1871: the Python tree re-runs root OBBT with the incumbent as a cutoff the
+    # moment it has one (Phase C); the kernel's box was fixed before its seed
+    # existed. Same call, same budget, and the spec is rebuilt on the result.
+    if initial_incumbent is not None and _kernel_cutoff_obbt_enabled() and n_vars <= 200:
+        _t_phase = time.perf_counter()
+        _cut_box = _kernel_cutoff_obbt_box(
+            model,
+            np.asarray(lb, dtype=np.float64)[:n_vars],
+            np.asarray(ub, dtype=np.float64)[:n_vars],
+            float(initial_incumbent) + off,
+            outer_deadline,
+        )
+        if _cut_box is not None:
+            _spec_cut = build_spatial_kernel_spec(model, bounds=_cut_box, deadline=outer_deadline)
+            if _spec_cut is not None:
+                for _k in [k for k in _spec_cut if k.startswith("meta_")]:
+                    _spec_cut.pop(_k)
+                spec = _spec_cut
+                KERNEL_CUTOFF_OBBT_STATS["adopted"] += 1
+        _native_jax_s += time.perf_counter() - _t_phase
+
     remaining = None if outer_deadline is None else max(0.0, outer_deadline - time.perf_counter())
     # #933: withhold the caller's root-fallback reserve from the kernel's
     # deadline, exactly as the Python node loop withholds it while bound-less
@@ -2141,6 +2162,9 @@ def _try_native_spatial_kernel(
     # ``gap_tolerance`` does not take effect on this route, which only ever
     # means the kernel does more work than asked.
     _kernel_abs_tol = _native_kernel_abs_tol(gap_tolerance, abs_gap_tolerance)
+    # #1871: with no absolute tolerance requested, the documented criterion is the
+    # Python tree's ``abs_gap_tol OR relative gap_tolerance``; see the gate.
+    _documented_gap = _kernel_documented_gap_applies(abs_gap_tolerance)
     # ...and SAY so when the ``min`` discarded it. Declining to loosen is the
     # safe direction, but a caller who asked for 1e6 and got 1e-4 explored
     # the same 45 nodes as with no tolerance at all and was told nothing
@@ -2166,7 +2190,7 @@ def _try_native_spatial_kernel(
     # ``inf`` a bound-less ``-inf`` passes it (``-inf >= -inf``) and the relative
     # arm then passes too (``inf <= inf``) -- measured: Haverly ``optimal`` at
     # node 0 with no bound. A finite lift keeps ``-inf`` failing the first clause.
-    if _relative_requested:
+    if _relative_requested or _documented_gap:
         _kernel_abs_tol = 1e300
     solve_kwargs = dict(
         max_nodes=int(max_nodes),
@@ -7267,6 +7291,90 @@ def _withdraw_unresolved_certificate(result: SolveResult) -> None:
     if result.solver_stats is None:
         result.solver_stats = {}
     result.solver_stats["certificate/objective_unresolved"] = 1.0
+
+
+def _kernel_documented_gap_enabled() -> bool:
+    """``DISCOPT_KERNEL_DOCUMENTED_GAP`` gate (#1871), read at call time. **Default
+    OFF** pending its CLAUDE.md section 5 panel.
+
+    The native kernel's stop and prune test conjoins an ABSOLUTE ``gap_tol``, set
+    to ``gap_tolerance`` (1e-4 by default), with the documented criterion
+    (absolute ``abs_gap_tol`` OR relative ``gap_tolerance``). At a large objective
+    scale that absolute arm is far stricter than the documented one, and near the
+    precision of the LP bound itself. ``st_m2`` (optimum -856648.82) is the probe:
+    the kernel reached bound -856648.8199 with the optimal incumbent -- a 1.5e-9
+    relative gap -- and still ran to its 120 s limit. ON, when the caller named no
+    ``abs_gap_tolerance``, the absolute arm is lifted exactly as an explicit
+    looser ``gap_tolerance`` already lifts it (#1615), which leaves the documented
+    criterion. An explicit ``abs_gap_tolerance`` keeps the #1243 ``min`` mapping.
+    """
+    return os.environ.get("DISCOPT_KERNEL_DOCUMENTED_GAP", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _kernel_cutoff_obbt_enabled() -> bool:
+    """``DISCOPT_KERNEL_CUTOFF_OBBT`` gate (#1871), read at call time. **Default
+    OFF** pending its CLAUDE.md section 5 panel.
+
+    Bound-changing: the native kernel's root box is tightened by root OBBT over the
+    McCormick relaxation with the verified seed incumbent as an objective cutoff,
+    the Python tree's Phase C call (``obbt_tighten_root(..., incumbent_cutoff=)``).
+    Points whose objective exceeds the incumbent are the only ones removed, so the
+    optimum stays in the box. ``st_m2`` with the documented gap criterion: 32,789
+    nodes / 94 s without it, 1 node / 0.9 s with it.
+    """
+    return os.environ.get("DISCOPT_KERNEL_CUTOFF_OBBT", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _kernel_documented_gap_applies(abs_gap_tolerance: Optional[float]) -> bool:
+    """Whether the kernel's absolute ``gap_tol`` arm is lifted for #1871: the gate is
+    on and the caller named no absolute tolerance (an explicit one keeps #1243)."""
+    return abs_gap_tolerance is None and _kernel_documented_gap_enabled()
+
+
+#: #1871: how often the cutoff-OBBT box replaced the kernel's root box (probe
+#: counter, CLAUDE.md section 6).
+KERNEL_CUTOFF_OBBT_STATS: "collections.Counter[str]" = collections.Counter()
+
+
+def _kernel_cutoff_obbt_box(model, lb, ub, cutoff: float, outer_deadline):
+    """Root box tightened by cutoff OBBT (#1871), or ``None`` when nothing moved.
+
+    ``cutoff`` is in the Python tree's internal (minimised, offset-inclusive)
+    objective units -- what ``obbt_tighten_root`` takes. An infeasible result
+    (nothing strictly better than the seed) also returns ``None``: the kernel then
+    proves that on its own box, so the certificate never rests on this pass.
+    """
+    from discopt._relax.obbt import obbt_tighten_root
+
+    now = time.perf_counter()
+    budget = _PERIODIC_OBBT_BUDGET_S
+    if outer_deadline is not None:
+        budget = min(budget, max(0.0, 0.25 * (outer_deadline - now)))
+    if budget <= _DEADLINE_NODE_FLOOR_S:
+        return None
+    KERNEL_CUTOFF_OBBT_STATS["fired"] += 1
+    res = obbt_tighten_root(
+        model,
+        np.array(lb),
+        ub=np.array(ub),
+        rounds=2,
+        incumbent_cutoff=float(cutoff),
+        deadline=now + budget,
+        time_limit_per_lp=0.1,
+    )
+    if res.infeasible or res.n_tightened <= 0:
+        return None
+    return (np.asarray(res.lb, dtype=np.float64), np.asarray(res.ub, dtype=np.float64))
 
 
 def _native_kernel_abs_tol(gap_tolerance: float, abs_gap_tolerance: Optional[float]) -> float:
