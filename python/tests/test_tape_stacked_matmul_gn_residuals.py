@@ -287,11 +287,13 @@ def test_matrix_norm_models_certify_at_the_lp_optimum(seed, ord_):
     routed to the spatial B&B like a vector norm; the bound must never exceed the
     LP oracle's optimum."""
     rng = np.random.default_rng(seed)
-    c_mat = rng.uniform(0.2, 1.5, size=(2, 3)) * rng.choice([-1.0, 1.0], size=(2, 3))
+    c_mat = rng.uniform(0.2, 1.5, size=(2, 2)) * rng.choice([-1.0, 1.0], size=(2, 2))
     b = 2.0
     oracle = _lp_oracle(c_mat, b, 1 if ord_ == 1 else "inf")
     m = dm.Model("matnorm")
-    x = m.continuous("X", shape=(2, 3), lb=-2.0, ub=2.0)
+    # 2x2, not 2x3: one 2x3 inf-norm seed took 15.3 s on CI (fast-lane budget
+    # 15 s); the shape is not what the test is about.
+    x = m.continuous("X", shape=c_mat.shape, lb=-2.0, ub=2.0)
     m.subject_to(dm.sum(c_mat * x) >= b)
     m.minimize(dm.norm(x, ord_))
     r = m.solve(time_limit=60)
