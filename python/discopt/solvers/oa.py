@@ -6717,6 +6717,13 @@ def solve_lp_nlp_bb(
     # ``bound_validity``; this narrows ``gap_certified`` only, and only ever
     # from True to False.
     gap_is_certified = bool(master_bound_valid and gap is not None and gap <= gap_tolerance)
+    # ``infeasible`` is a proof: :func:`_lp_nlp_bb_exit_status` sets it only on a
+    # master proven infeasible with nothing but valid rows (#1673 B4) and no
+    # incumbent. It was returned with ``gap_certified=False``, which the
+    # SolveResult contract reads as a heuristic verdict -- so a caller that honours
+    # the contract (a GDP subproblem, #1775) could not use the proof.
+    if status == "infeasible" and incumbent is None and not equality_relaxation:
+        gap_is_certified = True
     callback_stats["refused_candidates"] = int(refused_candidates[0])
     unverified_incumbent = False
     if incumbent is None and best_refused[0] is not None:
