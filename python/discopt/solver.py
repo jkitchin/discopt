@@ -3732,6 +3732,16 @@ def _compute_interval_bound(model, node_lb, node_ub, negate):
         logger.debug("interval objective bound failed: %s", e)
         return -np.inf
     bound = -hi if negate else lo
+    if not np.isfinite(bound):
+        # #1869 (c): over an unbounded side interval arithmetic on a sign-changing
+        # polynomial is ``inf - inf``; the separable minorant still bounds it.
+        from discopt._relax.separable_poly_bound import (
+            separable_poly_bound_enabled,
+            separable_poly_lower_bound,
+        )
+
+        if separable_poly_bound_enabled():
+            bound = separable_poly_lower_bound(model, node_lb, node_ub, negate)
     return bound if np.isfinite(bound) else -np.inf
 
 
