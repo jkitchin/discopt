@@ -34,7 +34,9 @@ _UNIVARIATE_BB_STEPS = 64
 #: Stop refining once the best leaf is this narrow relative to its magnitude.
 _UNIVARIATE_BB_REL_WIDTH = 1e-9
 
-_CACHE: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+#: Per-model separable minorant structure, keyed by the objective's sign.
+_Structure = Optional[tuple[float, dict[int, list[float]]]]
+_CACHE: "weakref.WeakKeyDictionary[object, dict[float, _Structure]]" = weakref.WeakKeyDictionary()
 
 
 def separable_poly_bound_enabled() -> bool:
@@ -150,7 +152,7 @@ def _interval_bb(coeffs: list[float], dcoeffs: list[float], a: float, b: float) 
 # ── structure ──
 
 
-def _structure(model, sign: float) -> Optional[tuple[float, dict[int, list[float]]]]:
+def _structure(model, sign: float) -> _Structure:
     """``(d, {flat_idx: univariate coeffs})`` -- the separable minorant of
     ``sign * f`` -- or ``None`` when the objective is not such a polynomial. Cached
     per (model, sign)."""
@@ -160,7 +162,7 @@ def _structure(model, sign: float) -> Optional[tuple[float, dict[int, list[float
     return per_model[sign]
 
 
-def _build_structure(model, sign: float):
+def _build_structure(model, sign: float) -> _Structure:
     from discopt._relax.milp_relaxation import _expr_to_polynomial
     from discopt._relax.term_classifier import distribute_products
 
