@@ -100,7 +100,7 @@ def test_counts_match_the_configurations():
 
 
 def test_enumerate_refuses_instead_of_truncating():
-    with pytest.raises(ValueError, match="above max_configurations=1"):
+    with pytest.raises(ValueError, match="more than max_configurations=1"):
         Enumerate(_nonconvex(), max_configurations=1)
     with pytest.raises(ValueError, match="max_configurations must be"):
         Enumerate(_nonconvex(), max_configurations=0)
@@ -209,7 +209,7 @@ def test_gdp_options():
         gdp_options={"max_configurations": 2},
     )
     assert r.status == "optimal" and r.solver_stats["n_configurations"] == 2
-    with pytest.raises(ValueError, match="above max_configurations=1"):
+    with pytest.raises(ValueError, match="more than max_configurations=1"):
         _quiet(_nonconvex().solve, gdp_method="enumerate", gdp_options={"max_configurations": 1})
     with pytest.raises(ValueError, match="does not read gdp_options"):
         _nonconvex().solve(gdp_method="enumerate", gdp_options={"iterlim": 3})

@@ -8,10 +8,14 @@ disjuncts -- as a global subproblem (§5.2), and keeps the best verified point.
   disjuncts; an OR (``AT_LEAST_ONE``) disjunction each nonempty subset of them.
   An implication (``if_then``) is left alone: its rows stay conditional in the
   subproblem, which is exact. Any other cardinality is refused.
-* **Refusal, never truncation.** The count is computed before anything is
-  solved; above ``max_configurations`` (default 10⁴) the run raises. Pyomo
-  enumerates ``itertools.product`` without a limit and lets infeasible logic
-  fail inside the NLP; pruning by logic propagation is G5.3's.
+* **Logic propagation (G5.3).** Configurations the GDP's logic refutes -- its
+  ``logical()`` constraints or a linear row over indicators alone
+  (:mod:`discopt.gdp.propagate`) -- are never generated: each is infeasible, so
+  dropping it changes no bound. Pyomo enumerates ``itertools.product`` and lets
+  infeasible logic fail inside the NLP. Measured on the panel: syngas 8388608
+  configurations -> 1440, mod_hens 4.3e9 -> 4096, gdp_col 32768 -> 35.
+* **Refusal, never truncation.** The surviving count is computed before anything
+  is solved; above ``max_configurations`` (default 10⁴) the run raises.
 * **Bound (§5.4).** The LB is the minimum, over every configuration, of its
   certified bound (``+inf`` for one certified infeasible). It is published only
   once every configuration has been solved *and* has a valid bound; until then
@@ -104,6 +108,7 @@ class Enumerate(GDPAlgorithm):
         time_limit: Optional[float] = None,
         gap_tolerance: float = 1e-4,
         max_configurations: int = MAX_CONFIGURATIONS,
+        propagate: bool = True,
         iteration_limit: Optional[int] = None,
         **kw: Any,
     ) -> None:
@@ -121,14 +126,30 @@ class Enumerate(GDPAlgorithm):
             iteration_limit=iteration_limit,
             **kw,
         )
-        self.n_configurations = count_configurations(self.space)
-        if self.n_configurations > max_configurations:
+        from discopt.gdp.propagate import LogicChecker, count_pruned, pruned_configurations
+
+        self.n_configurations_raw = count_configurations(self.space)
+        self.propagate = bool(propagate)
+        if self.propagate:
+            self.checker: Optional[LogicChecker] = LogicChecker(self.space)
+            kept = count_pruned(self.space, max_configurations, self.checker)
+        else:
+            self.checker = None
+            raw = self.n_configurations_raw
+            kept = raw if raw <= max_configurations else None
+        if kept is None:
             raise ValueError(
-                f"enumerate: the GDP has {self.n_configurations} configurations, above "
-                f"max_configurations={max_configurations}; raise the limit or use "
-                "gdp_method='ric', 'gloa' or 'loa' (enumerate never truncates)"
+                f"enumerate: the GDP has more than max_configurations={max_configurations} "
+                f"configurations ({self.n_configurations_raw} before logic propagation); "
+                "raise the limit or use gdp_method='ric', 'gloa' or 'loa' (enumerate "
+                "never truncates)"
             )
-        self._todo = configurations(self.space)
+        self.n_configurations = kept
+        self._todo: Iterator[list[DisjunctNode]] = (
+            pruned_configurations(self.space, self.checker)
+            if self.checker is not None
+            else configurations(self.space)
+        )
         #: Each solved configuration's bound (minimization convention): ``+inf``
         #: when certified infeasible, ``None`` when there is no valid bound.
         self.config_bounds: list[Optional[float]] = []
@@ -180,6 +201,7 @@ class Enumerate(GDPAlgorithm):
     def extra_stats(self) -> dict[str, Any]:
         return {
             "n_configurations": int(self.n_configurations),
+            "n_configurations_raw": int(self.n_configurations_raw),
             "n_configurations_solved": len(self.config_bounds),
         }
 
