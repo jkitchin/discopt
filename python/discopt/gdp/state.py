@@ -225,7 +225,9 @@ class _Plan:
         return out
 
 
-def _plan(model: Model, selected: Iterable[DisjunctNode], *, full: bool) -> _Plan:
+def _plan(
+    model: Model, selected: Iterable[DisjunctNode], *, full: bool, exact_or: bool = False
+) -> _Plan:
     # A model that would not validate is refused before it is transformed: the
     # transformation must not turn a forgotten block (#1430) into a silent drop.
     model._reject_unattached_gdp_blocks()
@@ -317,6 +319,7 @@ def _plan(model: Model, selected: Iterable[DisjunctNode], *, full: bool) -> _Pla
             return
         if (
             not full
+            and not exact_or
             and node.semantics.cardinality is SelectorCardinality.AT_LEAST_ONE
             and len(ks) < len(node.disjuncts)
         ):
@@ -435,16 +438,23 @@ def _fixed_selection(model: Model) -> list[DisjunctNode]:
 
 
 def transform_current_disjunctive_state(
-    model: Model, selected: Optional[Iterable[DisjunctNode]] = None
+    model: Model,
+    selected: Optional[Iterable[DisjunctNode]] = None,
+    *,
+    exact_or: bool = False,
 ) -> DisjunctiveStateToken:
     """Apply a (partial) selection to ``model`` in place; return the undo token.
 
     ``selected`` defaults to the disjuncts whose indicator is currently fixed at
     1 (Pyomo's reading of "current state"). Undecided disjunctions stay
     disjunctions; see the module docstring for the four states.
+
+    ``exact_or=True`` reads a selection of some disjuncts of an OR disjunction as
+    exactly those on and the rest off, as :func:`reduced_subproblem` does, instead
+    of refusing it: a branch-and-bound child that chose that subset (#1775 G4.4).
     """
     chosen = _fixed_selection(model) if selected is None else list(selected)
-    plan = _plan(model, chosen, full=False)
+    plan = _plan(model, chosen, full=False, exact_or=exact_or)
     before = list(model._constraints)
     after = plan.rows(model)
     reachable_before = _reachable_disjunctions(before)

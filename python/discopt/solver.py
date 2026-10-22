@@ -11579,7 +11579,9 @@ def _refusing_on_callback_failure(fn: _F) -> _F:
 NATIVE_GDP_METHODS: frozenset[str] = frozenset({"loa", "gloa", "lbb", "ric", "enumerate", "ldsda"})
 
 #: The native methods that run today.
-IMPLEMENTED_NATIVE_GDP_METHODS: frozenset[str] = frozenset({"loa", "gloa", "ric", "enumerate"})
+IMPLEMENTED_NATIVE_GDP_METHODS: frozenset[str] = frozenset(
+    {"loa", "gloa", "lbb", "ric", "enumerate"}
+)
 
 #: ``gdp_options`` keys (#1775 G3.1, spec §4.3): Pyomo GDPopt's names where the
 #: meaning is the same, so a Pyomo user's config translates. A key outside this
@@ -11615,6 +11617,9 @@ _GDP_OPTIONS_READ: dict[str, frozenset[str]] = {
     "ric": frozenset({"iterlim", "init_algorithm", "set_cover_iterlim"}),
     # Enumerate solves every configuration: no iteration limit, no master.
     "enumerate": frozenset({"max_configurations"}),
+    # LBB (#1775 G4.4): a node budget, and Pyomo's ``check_sat`` toggles the logic
+    # propagation that replaces it (on by default here: it is exact).
+    "lbb": frozenset({"iterlim", "check_sat"}),
 }
 
 
@@ -11695,6 +11700,9 @@ def _validate_gdp_options(gdp_method: str, gdp_options: object) -> dict[str, Any
             it = gdp_options[key]
             if isinstance(it, bool) or not isinstance(it, (int, np.integer)) or it < low:
                 raise ValueError(f"gdp_options[{key!r}] must be an integer >= {low}, got {it!r}")
+    if "check_sat" in gdp_options and not isinstance(gdp_options["check_sat"], bool):
+        got = gdp_options["check_sat"]
+        raise ValueError(f"gdp_options['check_sat'] must be a bool, got {got!r}")
     if "init_algorithm" in gdp_options or "subproblem" in gdp_options:
         from discopt.gdp.algorithms.init import INIT_STRATEGIES
         from discopt.gdp.algorithms.loa import LOA_SUBPROBLEMS
@@ -13996,7 +14004,7 @@ def solve_model(
         )
 
     # --- LOA decomposition: intercept before GDP reformulation ---
-    if gdp_method in ("loa", "gloa", "ric", "enumerate"):
+    if gdp_method in ("loa", "gloa", "lbb", "ric", "enumerate"):
         from discopt.solvers.gdpopt_loa import solve_gdpopt_loa
 
         _warn_abs_gap_ignored(f"The GDPopt-{gdp_method.upper()} decomposition", abs_gap_tolerance)
@@ -14011,6 +14019,8 @@ def solve_model(
         for key in ("init_algorithm", "set_cover_iterlim", "subproblem", "max_configurations"):
             if key in _gdp_opts:
                 loa_kwargs[key] = _gdp_opts[key]
+        if "check_sat" in _gdp_opts:
+            loa_kwargs["propagate"] = _gdp_opts["check_sat"]
 
         if gdp_method != "loa":
             from discopt.solvers.gdpopt_loa import native_gdp_class

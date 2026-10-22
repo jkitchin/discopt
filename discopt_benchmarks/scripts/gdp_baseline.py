@@ -85,6 +85,7 @@ DISCOPT_ARMS = (
     "discopt-gloa",
     "discopt-ric",
     "discopt-enumerate",
+    "discopt-lbb",
 )
 ARMS = PYOMO_ARMS + DISCOPT_ARMS
 
@@ -96,6 +97,7 @@ FAMILIES = {
     "gloa": ("discopt-gloa", "pyomo-gloa"),
     "ric": ("discopt-ric", "pyomo-ric"),
     "enumerate": ("discopt-enumerate", "pyomo-enumerate"),
+    "lbb": ("discopt-lbb", "pyomo-lbb"),
 }
 
 #: Profile O solver roles. The spec names HiGHS for MIP; GDPopt cannot use it here.
