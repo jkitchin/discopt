@@ -6155,6 +6155,49 @@ mod tests {
         assert!((r.obj - (-10.0)).abs() < 1e-6, "obj {}", r.obj);
     }
 
+    /// #1874: the open-frontier cap stops the search uncertified, with the
+    /// incumbent it holds, and without the cap the same search certifies. Root
+    /// machinery is off so the tree has to branch, and the seed is the incumbent.
+    #[test]
+    fn frontier_cap_stops_uncertified_with_the_incumbent() {
+        let w = [3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let mut a = w.to_vec();
+        a.push(1.0);
+        let mut c: Vec<f64> = w.iter().map(|v| -(v + 0.5)).collect();
+        c.push(0.0);
+        let l = [0.0; 9];
+        let mut u = vec![1.0; 8];
+        u.push(INF);
+        let lp = LpView {
+            a: &a,
+            m: 1,
+            n: 9,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let run = |cap: Option<usize>| {
+            let mut o = opts(8, (0..8).collect());
+            o.root_cuts = 0;
+            o.cut_rounds = 0;
+            o.gmi_cuts = false;
+            o.node_cuts = false;
+            o.heuristics = false;
+            o.presolve = false;
+            o.strong_branch = false;
+            o.initial_incumbent = Some(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+            o.max_open_nodes = cap;
+            solve_milp(&lp, &[20.5], 0.0, &o)
+        };
+        let free = run(None);
+        assert_eq!(free.status, MilpStatus::Optimal);
+        let capped = run(Some(1));
+        assert_eq!(capped.status, MilpStatus::NodeLimit, "cap did not stop the search");
+        assert!(capped.obj.is_finite() && capped.obj >= free.obj - 1e-9);
+        assert!(capped.nodes < free.nodes, "{} vs {}", capped.nodes, free.nodes);
+        assert!(capped.bound <= free.obj + 1e-9, "bound past the optimum");
+    }
+
     /// Same knapsack, driven to a hard truncation (`max_nodes = 0`) so the only
     /// possible incumbent is the seeded one: a valid seed must be adopted (and
     /// reported), an infeasible / fractional / wrong-length one silently

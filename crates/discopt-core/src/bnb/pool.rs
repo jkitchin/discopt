@@ -426,3 +426,32 @@ mod tests {
         assert_eq!(pool.select_next(), Some(NodeId(0)));
     }
 }
+
+    /// #1874: a retired node's vectors are freed, its scalars kept, and a frontier
+    /// node is never released (reopen refuses a released one).
+    #[test]
+    fn release_storage_frees_vectors_and_keeps_scalars() {
+        let mut pool = NodePool::new(SelectionStrategy::BestFirst);
+        let mut n0 = make_pending_node(0, 3, -2.5);
+        n0.lb = vec![0.0; 50];
+        n0.ub = vec![1.0; 50];
+        n0.parent_solution = Some(vec![0.5; 50]);
+        pool.add(n0);
+        assert!(!pool.is_released(NodeId(0)));
+        pool.prune(NodeId(0));
+        assert!(pool.is_released(NodeId(0)));
+        let n = pool.get(NodeId(0));
+        assert!(n.lb.is_empty() && n.ub.is_empty() && n.parent_solution.is_none());
+        assert_eq!(n.lb.capacity(), 0, "vector not freed");
+        assert_eq!((n.depth, n.local_lower_bound), (3, -2.5));
+        assert_eq!(n.status, NodeStatus::Pruned);
+    }
+
+    #[test]
+    #[should_panic(expected = "reopen of a released node")]
+    fn reopen_refuses_a_released_node() {
+        let mut pool = NodePool::new(SelectionStrategy::BestFirst);
+        pool.add(make_pending_node(0, 0, 0.0));
+        pool.prune(NodeId(0));
+        pool.reopen(NodeId(0));
+    }
