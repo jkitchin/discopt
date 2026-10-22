@@ -50,9 +50,9 @@ def test_flag_off_never_polishes(monkeypatch):
     assert SV.ENDGAME_POLISH_STATS["fired"] == 0
 
 
-def test_flag_defaults_off(monkeypatch):
-    """Default OFF pending its CLAUDE.md section 5 panel."""
+def test_flag_defaults_on(monkeypatch):
+    """Graduated under CLAUDE.md section 5 (panel in the gate's docstring)."""
     monkeypatch.delenv(FLAG, raising=False)
-    assert not SV._endgame_polish_enabled()
-    monkeypatch.setenv(FLAG, "1")
     assert SV._endgame_polish_enabled()
+    monkeypatch.setenv(FLAG, "0")
+    assert not SV._endgame_polish_enabled()

@@ -1754,8 +1754,18 @@ def _native_exit_polish_enabled() -> bool:
 
 
 def _endgame_polish_enabled() -> bool:
-    """``DISCOPT_ENDGAME_POLISH`` gate (#1869), read at call time. **Default OFF**
-    pending its CLAUDE.md section 5 panel.
+    """``DISCOPT_ENDGAME_POLISH`` gate (#1869), read at call time.
+
+    **Graduated (default ON, 2026-10-22).** CLAUDE.md section 5 panel: the in-repo
+    corpus plus the 120 local MINLPLib instances that keep an unbounded continuous
+    variable after FBBT (175 instances), ON vs OFF, 30 s, interleaved, POUNCE 0.13.0.
+    Cert-clean (350 rows, 0 problems: no bound past an optimum, no false optimum,
+    every incumbent passes ``verify_point`` on a fresh model) and net-positive:
+    certified 135 -> 136, none lost (``prolog`` 839 nodes uncertified -> optimal in 3
+    nodes / 3.6 s); it fired on 13 instances and was adopted on 9, with node counts
+    unchanged on every one (incumbents closer to the optimum, e.g. ``pointpack04``
+    0.99999996 -> 0.99999999986); total wall 1924 -> 1842 s, SGM over the 135 both
+    certify 2.30 vs 2.30 s. ``=0`` is the opt-out.
 
     The Python tree's incumbents come from node NLPs run at the heuristic options,
     whose gradient-based scaling makes the incumbent's *absolute* objective accurate
@@ -1769,11 +1779,12 @@ def _endgame_polish_enabled() -> bool:
     re-verifies for constraint and integer feasibility and ``_inject_incumbent``
     screens for the box, the user callbacks, and strict improvement.
     """
-    return os.environ.get("DISCOPT_ENDGAME_POLISH", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    return os.environ.get("DISCOPT_ENDGAME_POLISH", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
     )
 
 
