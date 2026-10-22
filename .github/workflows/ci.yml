@@ -230,10 +230,24 @@ jobs:
         with:
           extra_args: --all-files
 
-  python-fast:
-    name: Python fast (3.12, ubuntu)
+  # The PR-fast lane runs as FOUR duration-balanced shards with 4 xdist workers
+  # each, and `python-fast` below keeps the old check name as their aggregator.
+  # Measured before this split: 37 min on one runner at `-n 2` (run 39655619310),
+  # and 65 min for the same selection under coverage (run 39688620069, which
+  # then went red). On a 4-core/15 GB box (the runner's shape) the unsharded lane
+  # at `-n 4` took 20.5 min wall for 78.5 CPU-min of tests, and 72% of that was
+  # the 465 tests that take >= 2 s, so the shards are balanced by recorded test
+  # duration (python/tests/_sharding.py, python/tests/test_durations.json), not
+  # by count. The ubuntu-latest runner has 4 vCPUs; `-n 2` left half idle.
+  python-fast-shard:
+    name: Python fast shard ${{ matrix.shard }}/4 (3.12, ubuntu)
     runs-on: ubuntu-latest
     needs: changes
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     # `python-coverage` below runs the SAME pytest invocation as this job — same
     # test paths, same `-m` marker expression, same `--ignore`, same worker
     # count — plus test_amp.py and the optional-extra deps, i.e. a strict
@@ -329,12 +343,49 @@ jobs:
             --ignore=python/tests/test_correctness.py \
             --ignore=python/tests/test_amp.py \
             -n "${PYTEST_XDIST_WORKERS}" --dist loadgroup \
+            --num-shards 4 --shard-id ${{ matrix.shard }} \
+            --shard-report shard-report-${{ matrix.shard }}.json \
             --durations=20
         env:
           JAX_PLATFORMS: cpu
           JAX_ENABLE_X64: "1"
           PYTEST_MEMORY_LIMIT_MB: "32768"
-          PYTEST_XDIST_WORKERS: "2"
+          PYTEST_XDIST_WORKERS: "4"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fast-shard-report-${{ matrix.shard }}
+          path: shard-report-${{ matrix.shard }}.json
+          if-no-files-found: ignore
+          retention-days: 3
+
+  # Aggregator under the pre-split check name, so branch protection and anyone
+  # reading the checks list see one verdict. It fails unless every shard passed
+  # AND the shard reports add up to the whole selection: a shard that died
+  # before collecting, or a partition that dropped tests, is red here rather
+  # than a quietly smaller lane (CLAUDE.md §6).
+  python-fast:
+    name: Python fast (3.12, ubuntu)
+    runs-on: ubuntu-latest
+    needs: [changes, python-fast-shard]
+    if: >-
+      always() &&
+      needs.changes.outputs.code == 'true' &&
+      github.event_name != 'push' &&
+      !contains(github.event.pull_request.labels.*.name, 'coverage')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: fast-shard-report-*
+          path: shard-reports
+          merge-multiple: true
+      - name: Every shard passed and together they ran the whole lane
+        run: |
+          shopt -s nullglob
+          python3 scripts/check_shard_reports.py --num-shards 4 shard-reports/*.json
+          echo "shards: ${{ needs.python-fast-shard.result }}"
+          test "${{ needs.python-fast-shard.result }}" = success
 
   python-correctness:
     # Fast-correctness lane: runs the `correctness`-marked tests that are NOT
@@ -673,8 +724,11 @@ jobs:
         env:
           DISCOPT_LP_MILP_BACKEND: rust
 
-  python-coverage:
-    name: Python coverage (3.12, ubuntu)
+  # Sharded like python-fast (same 4-way split, same 4 workers); the
+  # `python-coverage` job below combines the shards' data files and applies the
+  # 85% gate to the union, so the gate measures exactly what it measured before.
+  python-coverage-shard:
+    name: Python coverage shard ${{ matrix.shard }}/4 (3.12, ubuntu)
     # Run coverage on main pushes, or on PRs explicitly opted in
     # via the `coverage` label.
     if: >-
@@ -682,6 +736,11 @@ jobs:
       (github.event_name == 'pull_request' &&
         contains(github.event.pull_request.labels.*.name, 'coverage'))
     runs-on: ubuntu-latest
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -748,13 +807,67 @@ jobs:
             -m "not slow and not correctness and not integration and not amp_benchmark and not requires_cyipopt and not memory_heavy" \
             --ignore=python/tests/test_correctness.py \
             -n "${PYTEST_XDIST_WORKERS}" --dist loadgroup \
-            --cov=discopt --cov-report=term-missing --cov-report=xml:coverage.xml \
-            --cov-fail-under=85
+            --num-shards 4 --shard-id ${{ matrix.shard }} \
+            --shard-report shard-report-${{ matrix.shard }}.json \
+            --durations=20 \
+            --cov=discopt --cov-report= || status=$?
+          # Keep the data even when a test failed, as the unsharded job did for
+          # its Codecov upload. Not a dotfile: upload-artifact@v4 skips those.
+          mkdir -p coverage-data
+          mv .coverage coverage-data/coverage.shard${{ matrix.shard }}
+          exit "${status:-0}"
         env:
           JAX_PLATFORMS: cpu
           JAX_ENABLE_X64: "1"
           PYTEST_MEMORY_LIMIT_MB: "32768"
-          PYTEST_XDIST_WORKERS: "2"
+          PYTEST_XDIST_WORKERS: "4"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-shard-${{ matrix.shard }}
+          path: |
+            coverage-data/
+            shard-report-${{ matrix.shard }}.json
+          if-no-files-found: ignore
+          retention-days: 3
+
+  python-coverage:
+    name: Python coverage (3.12, ubuntu)
+    needs: python-coverage-shard
+    if: >-
+      always() &&
+      (github.event_name == 'push' ||
+        (github.event_name == 'pull_request' &&
+          contains(github.event.pull_request.labels.*.name, 'coverage')))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-shard-*
+          path: shards
+          merge-multiple: true
+      - name: Every shard passed and together they ran the whole lane
+        run: |
+          shopt -s nullglob
+          python3 scripts/check_shard_reports.py --num-shards 4 shards/shard-report-*.json
+          echo "shards: ${{ needs.python-coverage-shard.result }}"
+          test "${{ needs.python-coverage-shard.result }}" = success
+      # The gate runs on the union of the four shards' data, i.e. the same
+      # selection the unsharded job measured. The source paths in the data are
+      # the runner's checkout path, which this job's checkout reproduces.
+      - name: Combine coverage and apply the 85% gate
+        run: |
+          python -m pip install --quiet coverage
+          shopt -s nullglob
+          files=(shards/coverage-data/coverage.shard*)
+          test "${#files[@]}" -eq 4 || { echo "expected 4 coverage files, got ${#files[@]}"; exit 1; }
+          python -m coverage combine "${files[@]}"
+          python -m coverage xml -o coverage.xml
+          python -m coverage report --fail-under=85
       - name: Upload to Codecov
         if: always()
         uses: codecov/codecov-action@v5
