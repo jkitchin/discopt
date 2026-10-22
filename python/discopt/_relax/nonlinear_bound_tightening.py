@@ -877,7 +877,9 @@ def integer_separable_quadratic_enabled() -> bool:
     column's minimum contribution over its *integer* points instead of over the
     continuous interval. ``a*(x**2 - x)`` on ``x in {-1,...,2}`` has continuous
     minimum ``-a/4`` at ``x = 0.5`` but integer minimum ``0``, which is what proves
-    ``ball_mk3_*`` / ``ball_mk4_*`` infeasible at presolve. Bound-changing (a
+    ``ball_mk3_*`` infeasible at presolve. (This docstring used to say
+    ``ball_mk3_*`` / ``ball_mk4_*``; ``ball_mk4_*`` has integer cross terms, which
+    this rule abstains on. It is :class:`IntegerBlockQuadraticRule`'s.) Bound-changing (a
     strictly tighter minimum feeds both the infeasibility test and the leave-one-out
     tightening), so gated per CLAUDE.md section 5. Read at call time.
 
@@ -3894,6 +3896,252 @@ class ConvexQuadraticEllipsoidRule(NonlinearBoundTighteningRule):
         return tightened_lb, tightened_ub
 
 
+#: Largest block (connected component of a row's ``Q``) whose integer minimum is
+#: found by enumeration, and the most lattice points one enumeration may visit. A
+#: block over either limit is bounded by its continuous minimum instead, which is
+#: valid and merely weaker.
+_INT_BLOCK_MAX_SIZE = 6
+_INT_BLOCK_MAX_POINTS = 20_000
+
+
+def integer_block_quadratic_enabled() -> bool:
+    """``DISCOPT_INTEGER_BLOCK_QUAD`` gate for :class:`IntegerBlockQuadraticRule` (#1867).
+
+    Bound-changing (the rule can prove a row infeasible), so gated per CLAUDE.md
+    section 5. Read at call time.
+
+    **Graduated (default ON, 2026-10-22).** Firing scan at the declared box, OFF vs
+    ON, over the 394 local MINLPLib instances (<= 200 vars/cons): the rule proves
+    exactly ``ball_mk4_05/10/15`` infeasible and changes nothing else. MINLPLib
+    lists 05/10 ``=inf=`` and 15 open (best dual 58.83, no primal); 15's row is the
+    same five-to-fifteen pairs ``100x^2 + 100y^2 - 98x - 98y - 4xy =
+    98(x^2 - x) + 98(y^2 - y) + 2(x - y)^2 >= 0`` on Z^2 against ``rhs -1``, so it
+    is infeasible by that identity, which the regression test checks exactly.
+    Panel, 120 s, interleaved: OFF certifies 05 only (SCIP: 05 in 0.6 s, 10 and 15
+    at its 60 s limit); ON proves all three infeasible at presolve. ``=0`` is the
+    opt-out.
+    """
+    return os.environ.get("DISCOPT_INTEGER_BLOCK_QUAD", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
+
+
+def _quad_components(Q: np.ndarray) -> list[np.ndarray]:
+    """Connected components of the graph whose edges are ``Q``'s nonzero off-diagonals."""
+    m = Q.shape[0]
+    label = np.full(m, -1, dtype=np.int64)
+    comps: list[np.ndarray] = []
+    for start in range(m):
+        if label[start] >= 0:
+            continue
+        label[start] = len(comps)
+        stack, members = [start], [start]
+        while stack:
+            i = stack.pop()
+            for j in np.nonzero(Q[i])[0]:
+                if label[j] < 0:
+                    label[j] = len(comps)
+                    stack.append(int(j))
+                    members.append(int(j))
+        comps.append(np.array(sorted(members), dtype=np.int64))
+    return comps
+
+
+def _min_quadratic_block_integer(
+    Q: np.ndarray, c: np.ndarray, lb: np.ndarray, ub: np.ndarray
+) -> tuple[float, float]:
+    """Lower bound on ``x'Qx + c'x`` (``Q`` positive definite) over integer points of
+    ``[lb, ub]``, each widened by ``_INTEGER_DOMAIN_TOL``. Returns ``(bound, absmag)``,
+    ``absmag`` the magnitude the bound was summed from (for the caller's float error).
+
+    With ``x*`` the unconstrained minimiser and ``U`` the value at an integer point
+    ``k0`` of the box, every accepted point ``x`` (within tol of an integer ``k``)
+    with ``q(x) <= U`` lies in the ellipsoid ``{q <= U}``, so its ``k`` lies in that
+    ellipsoid's coordinate box widened by tol; those ``k`` are enumerated. Over a
+    window ``|x - k|_inf <= tol``, ``q(x) >= q(k) - tol * ||2Qk + c||_1`` because
+    ``Q`` is PSD. Points outside the ellipsoid have ``q > U >= `` the enumerated
+    minimum, so the minimum over windows is a bound over every accepted point.
+    Falls back to the continuous minimum ``-c'Q^-1c/4`` (valid for any box) when the
+    integer range is empty or the enumeration would exceed the point cap.
+    """
+    tol = _INTEGER_DOMAIN_TOL
+    qinv = np.linalg.inv(Q)
+    x_star = -0.5 * (qinv @ c)
+    q_star = float(-0.25 * (c @ qinv @ c))
+    cont = (q_star, abs(q_star) + float(np.abs(c) @ np.abs(x_star)))
+    lo = np.ceil(lb - tol)
+    hi = np.floor(ub + tol)
+    if np.any(lo > hi) or not np.all(np.isfinite(x_star)):
+        return cont
+    k0 = np.minimum(np.maximum(np.round(x_star), lo), hi)
+    if not np.all(np.isfinite(k0)):
+        return cont
+    u_val = float(k0 @ Q @ k0 + c @ k0)
+    gap = max(u_val - q_star, 0.0) * (1.0 + 1e-9) + 1e-12 * (1.0 + abs(u_val))
+    diag_qinv = np.diag(qinv)
+    if not np.all(diag_qinv > 0.0):
+        return cont
+    radius = np.sqrt(gap * diag_qinv) * (1.0 + _ELLIPSOID_RADIUS_REL_SLACK)
+    radius = radius + _ELLIPSOID_RADIUS_ABS_SLACK
+    k_lo = np.maximum(np.ceil(x_star - radius - tol), lo)
+    k_hi = np.minimum(np.floor(x_star + radius + tol), hi)
+    if np.any(k_lo > k_hi) or not (np.all(np.isfinite(k_lo)) and np.all(np.isfinite(k_hi))):
+        return cont
+    sizes = (k_hi - k_lo + 1.0).astype(np.float64)
+    if float(np.prod(sizes)) > _INT_BLOCK_MAX_POINTS:
+        return cont
+    axes = [np.arange(a, b + 1.0) for a, b in zip(k_lo, k_hi)]
+    pts = np.stack([g.ravel() for g in np.meshgrid(*axes, indexing="ij")], axis=1)
+    vals = np.einsum("pi,ij,pj->p", pts, Q, pts) + pts @ c
+    grad_l1 = np.abs(2.0 * (pts @ Q) + c).sum(axis=1)
+    window = vals - tol * grad_l1
+    best = int(np.argmin(window))
+    kb = np.abs(pts[best])
+    absmag = float(kb @ np.abs(Q) @ kb + np.abs(c) @ kb)
+    # Never report below what the continuous minimum already guarantees, nor above
+    # the enumerated window bound.
+    return max(float(window[best]), q_star), absmag
+
+
+class IntegerBlockQuadraticRule(NonlinearBoundTighteningRule):
+    """Prove a convex quadratic row infeasible over its integer points, cross terms
+    included (#1867).
+
+    The row's ``(Q, c, d)`` is recovered exactly (or the row is skipped), and ``Q``
+    is split into connected blocks. A block of integer/binary columns that is
+    positive definite and small is bounded below by its **integer** minimum
+    (:func:`_min_quadratic_block_integer`); a singleton by the univariate minimum
+    (integer-domain for an integer column); any other positive-definite block by its
+    continuous minimum. A row with a block that is not positive definite (or a
+    concave singleton) is skipped. When the bounds' sum exceeds the row's upper
+    limit the row is infeasible.
+
+    This is the cross-term generalisation of the integer-domain minimum in
+    :class:`SeparableQuadraticUpperBoundRule`: ``ball_mk4_*``'s pairs
+    ``100x^2 + 100y^2 - 98x - 98y - 4xy`` reach ``-49`` at ``(0.5, 0.5)`` but never
+    go below ``0`` on Z^2, so ``sum <= -1`` is infeasible. It proves; it does not
+    tighten, and it only runs on rows with at least one multi-column integer block,
+    which neither the separable rule (it abstains on any cross term) nor the
+    ellipsoid rule (continuous) can decide.
+    """
+
+    name = "integer_block_quadratic"
+    # Each row's proof stands alone, so a prefix of the rows is a valid scan.
+    row_scan_is_anytime = True
+
+    def _row_blocks(self, model: Model, constraint, metadata: FlatVariableMetadata):
+        """Bound-independent half: ``(support, d, blocks)`` with ``blocks`` a list of
+        ``(positions, Q_b, c_b, kind)``, or ``None`` when the rule cannot use the row."""
+        degree = polynomial_degree_bound(constraint.body)
+        if degree is not None and degree > 2:
+            return None
+        reduced = extract_quadratic_support(constraint.body, model)
+        if reduced is None:
+            return None
+        support, Q, c, d = reduced
+        if len(support) < 2:
+            return None
+        if not (np.all(np.isfinite(Q)) and np.all(np.isfinite(c)) and np.isfinite(d)):
+            return None
+        Q = 0.5 * (Q + Q.T)
+        is_int = np.array(
+            [metadata.flat_var_types[int(j)] in (VarType.INTEGER, VarType.BINARY) for j in support]
+        )
+        blocks = []
+        has_int_block = False
+        for pos in _quad_components(Q):
+            Qb, cb = Q[np.ix_(pos, pos)], c[pos]
+            if pos.size == 1:
+                if Qb[0, 0] < -1e-12:
+                    return None
+                blocks.append((pos, Qb, cb, "int1" if is_int[pos[0]] else "cont1"))
+                continue
+            eig = np.linalg.eigvalsh(Qb)
+            if eig[0] <= 0.0 or eig[-1] > _ELLIPSOID_MAX_COND * eig[0]:
+                return None
+            if bool(np.all(is_int[pos])) and pos.size <= _INT_BLOCK_MAX_SIZE:
+                blocks.append((pos, Qb, cb, "intk"))
+                has_int_block = True
+            else:
+                blocks.append((pos, Qb, cb, "contk"))
+        if not has_int_block:
+            return None
+        return support, float(d), blocks
+
+    def tighten(
+        self,
+        model: Model,
+        flat_lb: np.ndarray,
+        flat_ub: np.ndarray,
+        metadata: FlatVariableMetadata,
+        deadline: Optional[float] = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if not integer_block_quadratic_enabled():
+            return flat_lb.copy(), flat_ub.copy()
+        for constraint in _rows_until(model, deadline):
+            # ``>=`` rows are ``-body <= 0`` with a negated Q, which is never PD when
+            # Q is, so only ``<=`` and ``==`` (its ``<=`` half) can be decided here.
+            if getattr(constraint, "sense", None) not in ("<=", "=="):
+                continue
+            structure = _cached_row_structure(
+                model,
+                self.name,
+                constraint,
+                metadata,
+                lambda c=constraint: self._row_blocks(model, c, metadata),
+            )
+            if structure is None:
+                continue
+            support, d, blocks = structure
+            sup = np.asarray(support, dtype=np.int64)
+            total = d
+            absmag = abs(d)
+            n_terms = 1
+            for pos, Qb, cb, kind in blocks:
+                cols = sup[pos]
+                lb_b = np.asarray(flat_lb[cols], dtype=np.float64)
+                ub_b = np.asarray(flat_ub[cols], dtype=np.float64)
+                if kind in ("int1", "cont1"):
+                    a, b = float(Qb[0, 0]), float(cb[0])
+                    minimiser = (
+                        _min_univariate_quadratic_integer
+                        if kind == "int1"
+                        else _min_univariate_quadratic
+                    )
+                    val = minimiser(a, b, float(lb_b[0]), float(ub_b[0]))
+                    mag = abs(val)
+                elif kind == "intk":
+                    val, mag = _min_quadratic_block_integer(Qb, cb, lb_b, ub_b)
+                else:
+                    qinv = np.linalg.inv(Qb)
+                    val = float(-0.25 * (cb @ qinv @ cb))
+                    mag = abs(val) + float(np.abs(cb) @ np.abs(0.5 * (qinv @ cb)))
+                if not np.isfinite(val):
+                    total = -np.inf
+                    break
+                total += val
+                absmag += mag
+                n_terms += pos.size
+            if not np.isfinite(total):
+                continue
+            # The same outward error bound the separable rule uses, over every
+            # magnitude the sum was built from; the PD/conditioning gate above keeps
+            # the per-block solves' own error far inside it.
+            float_err = (n_terms + 4.0) * 1e3 * _FLOAT_EPS * (1.0 + absmag)
+            if total > _EMPTY_INTERVAL_FEAS_TOL + float_err:
+                _prove_infeasible(
+                    self.name,
+                    constraint,
+                    "minimum quadratic activity over the integer points of its blocks "
+                    "exceeds the upper bound",
+                )
+        return flat_lb.copy(), flat_ub.copy()
+
+
 _EXPR_TYPES = (
     Variable,
     Constant,
@@ -3923,6 +4171,7 @@ DEFAULT_NONLINEAR_BOUND_RULES: tuple[NonlinearBoundTighteningRule, ...] = (
     SumOfSquaresUpperBoundRule(),
     SeparableQuadraticUpperBoundRule(),
     ConvexQuadraticEllipsoidRule(),
+    IntegerBlockQuadraticRule(),
     PeriodicVariableBoundRule(),
 )
 
