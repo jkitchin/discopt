@@ -1779,6 +1779,28 @@ def integer_box_polish_may_fire(model: Model) -> bool:
     return n_int <= (_DIRECT_MAX_INT_VARS if direct else _SUBNLP_MAX_INT_VARS)
 
 
+def _box_cells_by_distance(
+    axes: list[list[float]], center: tuple[int, ...]
+) -> list[tuple[int, ...]]:
+    """Every cell of the box ``itertools.product(*axes)``, ordered by Chebyshev
+    distance from ``center``, then L1 distance, ties in product order.
+
+    Vectorised (#1870): the old ``sorted(itertools.product(...), key=...)`` built
+    the key in Python at O(n_int) per cell, and this build runs *before* the search's
+    first deadline check. At the largest grids the cut direct path admits it was
+    0.10-0.16 s of the 0.5 s exit-polish slice (65,536 cells x 16 integers). The order
+    is identical: an ``ij`` meshgrid flattened in C order is product order, and
+    ``np.lexsort`` is stable, so ties keep it -- pinned against the old expression by
+    ``test_box_cell_order_matches_the_python_sort``.
+    """
+    grid = np.stack(
+        np.meshgrid(*[np.asarray(a, dtype=np.int64) for a in axes], indexing="ij"), axis=-1
+    ).reshape(-1, len(axes))
+    dev = np.abs(grid - np.asarray(center, dtype=np.int64))
+    order = np.lexsort((dev.sum(axis=1), dev.max(axis=1)))
+    return [tuple(row) for row in grid[order].tolist()]
+
+
 def integer_box_search(
     model: Model,
     x_incumbent: np.ndarray,
@@ -1943,13 +1965,7 @@ def integer_box_search(
     center_key = tuple(int(centers[k]) for k in range(n_int))
     cont_at: dict[tuple[int, ...], np.ndarray] = {center_key: x_inc.copy()}
 
-    def cheby(combo: tuple[int, ...]) -> int:
-        return max(abs(combo[k] - center_key[k]) for k in range(n_int))
-
-    combos = sorted(
-        (tuple(int(v) for v in c) for c in itertools.product(*axes)),
-        key=lambda c: (cheby(c), sum(abs(c[k] - center_key[k]) for k in range(n_int))),
-    )
+    combos = _box_cells_by_distance(axes, center_key)
 
     # #912: the enumeration's extent is a deterministic sub-NLP count, not a wall
     # budget. One solve per cell and the cell list is already capped by

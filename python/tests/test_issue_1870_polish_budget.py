@@ -278,3 +278,63 @@ def test_cutoff_reprices_the_direct_cell_cap():
         integer_box_search(m, centre, radius=1, evaluator=ev, objective_cutoff=f0, max_combos=1000)
         is None
     )
+
+
+# ---------------------------------------------------------------------------
+# PR #1875 review follow-ups
+# ---------------------------------------------------------------------------
+
+
+def _old_box_order(axes, center):
+    """The pre-#1870 expression, verbatim, as the oracle for the vectorised one."""
+    import itertools
+
+    n = len(axes)
+
+    def cheby(c):
+        return max(abs(c[k] - center[k]) for k in range(n))
+
+    return sorted(
+        (tuple(int(v) for v in c) for c in itertools.product(*axes)),
+        key=lambda c: (cheby(c), sum(abs(c[k] - center[k]) for k in range(n))),
+    )
+
+
+def test_box_cell_order_matches_the_python_sort():
+    """Bound-neutral refactor: the cell ORDER decides which improving point a
+    budget-truncated search reaches, so it must be identical, ties included."""
+    rng = np.random.default_rng(1870)
+    checked = 0
+    for _ in range(200):
+        n = int(rng.integers(1, 7))
+        axes, center = [], []
+        for _k in range(n):
+            c = int(rng.integers(-3, 4))
+            lo = c - int(rng.integers(0, 3))  # clamped boxes: the centre need not be mid-axis
+            hi = c + int(rng.integers(0, 3))
+            axes.append([float(v) for v in range(lo, hi + 1)])
+            center.append(c)
+        assert ph._box_cells_by_distance(axes, tuple(center)) == _old_box_order(axes, tuple(center))
+        checked += 1
+    assert checked == 200
+
+
+def test_dual_recovery_honours_a_patch_on_the_evaluator_module(monkeypatch):
+    """Moving ``_DENSE_JACOBIAN_COMPILE_LIMIT`` to the JAX-free module must not split
+    the knob: a patch on ``nlp_evaluator`` (the established one) still reaches
+    ``jacobian_for_recovery``."""
+    import scipy.sparse as sp
+    from discopt._dual_recovery import jacobian_for_recovery
+    from discopt._relax import nlp_evaluator as nle
+    from discopt._tape_nlp_evaluator import TapeNLPEvaluator
+
+    m = Model("rec")
+    x = m.continuous("x", lb=-5, ub=5)
+    y = m.continuous("y", lb=-5, ub=5)
+    m.subject_to(x * y <= 3)
+    m.minimize(x + y)
+    ev = TapeNLPEvaluator(m)
+    pt = np.array([0.3, -0.7])
+    assert not sp.issparse(jacobian_for_recovery(ev, pt, m=1))  # far below the real cap
+    monkeypatch.setattr(nle, "_DENSE_JACOBIAN_COMPILE_LIMIT", 0)
+    assert sp.issparse(jacobian_for_recovery(ev, pt, m=1)), "the patch did not reach recovery"
