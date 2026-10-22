@@ -48,6 +48,10 @@ def test_flag_off_leaves_the_root_lp_uncertified(monkeypatch):
 
 def test_flag_on_certifies_prolog(monkeypatch):
     monkeypatch.setenv(FLAG, "1")
+    # The bound is -1e-12; whether the incumbent lands inside the 1e-6 absolute gap
+    # depends on the NLP's accuracy (1.51e-6 under POUNCE 0.13.0), which the endgame
+    # polish closes -- see test_issue_1869_endgame_polish.py.
+    monkeypatch.setenv("DISCOPT_ENDGAME_POLISH", "1")
     ML.BOUND_PROVENANCE.clear()
     r = dm.from_nl(PROLOG).solve(time_limit=60)
     assert ML.BOUND_PROVENANCE.get("verified_highs", 0) > 0, "the verified route never fired"
