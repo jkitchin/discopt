@@ -1173,10 +1173,13 @@ def solve_milp(
 
         # node_limit / feasible: ``objective`` is the incumbent (upper bound) and
         # ``bound`` is the engine's dual lower bound (sound) if finite. Callers that
-        # need a lower bound must read ``bound``, never ``objective``.
+        # need a lower bound must read ``bound``, never ``objective``. With no
+        # incumbent the engine's vector is unset (zeros), not a point: ``x`` is
+        # ``None`` then, as ``objective`` is (#1775 G4.3: a GDP master read the
+        # zeros as a selection of no disjunct).
         return MILPResult(
             status=SolveStatus.ITERATION_LIMIT,
-            x=x_struct,
+            x=x_struct if np.isfinite(obj) else None,
             objective=float(obj) if np.isfinite(obj) else None,
             bound=float(bound) if np.isfinite(bound) else None,
             node_count=int(nodes),
@@ -1610,7 +1613,7 @@ def solve_milp_with_lazy_cuts(
         )
     return MILPResult(
         status=SolveStatus.ITERATION_LIMIT,
-        x=x_struct,
+        x=x_struct if np.isfinite(obj) else None,  # no incumbent: no point (see solve_milp)
         objective=float(obj) if np.isfinite(obj) else None,
         bound=float(bound) if np.isfinite(bound) else None,
         node_count=int(nodes),

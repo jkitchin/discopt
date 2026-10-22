@@ -43,6 +43,7 @@ def solve_gdpopt_loa(
     max_iterations: int = 100,
     nlp_solver: str = "ipm",
     milp_solver: str = "auto",
+    algorithm: str = "loa",
     **options,
 ) -> SolveResult:
     """Solve a GDP model via Logic-based Outer Approximation.
@@ -68,14 +69,22 @@ def solve_gdpopt_loa(
         ``"simplex"``, ``"highs"`` or ``"gurobi"``. ``"highs"`` is an explicit
         opt-in only (#356 took HiGHS off the default MILP path; #1060 restored
         it as a named master engine); ``"auto"`` never selects it.
+    algorithm : str
+        ``"loa"`` (:class:`~discopt.gdp.algorithms.loa.LOA`) or ``"gloa"``
+        (:class:`~discopt.gdp.algorithms.gloa.GLOA`, #1775 G4.3: a relaxation
+        master and global subproblems).
 
     Returns
     -------
     SolveResult
     """
+    from discopt.gdp.algorithms.gloa import GLOA
     from discopt.gdp.algorithms.loa import LOA
 
-    return LOA(
+    classes = {"loa": LOA, "gloa": GLOA}
+    if algorithm not in classes:
+        raise ValueError(f"algorithm must be one of {sorted(classes)}, got {algorithm!r}")
+    return classes[algorithm](
         model,
         time_limit=time_limit,
         gap_tolerance=gap_tolerance,
