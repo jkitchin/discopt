@@ -32,10 +32,11 @@ from discopt._evaluator_cache import (
 )
 
 # The dense-Jacobian compile cap lives in the JAX-free ``_hessian_cost_model``
-# (rationale there), re-exported as a module global so this module's own lookups --
-# and tests that monkeypatch it here -- behave exactly as before. It moved because
+# (rationale there), re-exported as a module global. It moved because
 # ``_dual_recovery`` reads it on the default continuous-solve path, and importing it
-# from here loaded JAX for one integer (#1870).
+# from here loaded JAX for one integer (#1870). A monkeypatch of THIS global still
+# reaches both readers: this module's own lookups, and ``jacobian_for_recovery``,
+# which reads it here whenever this module is loaded.
 from discopt._hessian_cost_model import (
     _DENSE_JACOBIAN_COMPILE_LIMIT as _DENSE_JACOBIAN_COMPILE_LIMIT,
 )

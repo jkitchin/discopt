@@ -86,8 +86,16 @@ def jacobian_for_recovery(evaluator, x_flat: np.ndarray, *, m: int):
     two run the same fit on the same models, so a size that defeats one defeats
     the other.
     """
-    # JAX-free home (#1870): importing it from ``_relax.nlp_evaluator`` loaded JAX.
-    from discopt._hessian_cost_model import _DENSE_JACOBIAN_COMPILE_LIMIT
+    # #1870: read the cap without importing ``_relax.nlp_evaluator`` (which imports
+    # JAX at scope), but from that module when it is already loaded: its global is the
+    # established knob, and a patch to it -- the only way it can differ from the
+    # JAX-free home -- must keep reaching this fit as it did before the move.
+    import sys
+
+    from discopt import _hessian_cost_model
+
+    _cap_home = sys.modules.get("discopt._relax.nlp_evaluator") or _hessian_cost_model
+    _DENSE_JACOBIAN_COMPILE_LIMIT = _cap_home._DENSE_JACOBIAN_COMPILE_LIMIT
 
     n = int(x_flat.size)
     if m * n > _DENSE_JACOBIAN_COMPILE_LIMIT and hasattr(evaluator, "evaluate_sparse_jacobian"):
