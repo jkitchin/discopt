@@ -42,12 +42,22 @@ _CACHE: "weakref.WeakKeyDictionary[object, dict[float, _Structure]]" = weakref.W
 def separable_poly_bound_enabled() -> bool:
     """``DISCOPT_SEPARABLE_POLY_BOUND`` gate (#1869 (c)). Bound-changing (a tighter
     node bound fathoms more), so gated per CLAUDE.md section 5; read at call time.
-    Default OFF until its panel passes."""
-    return os.environ.get("DISCOPT_SEPARABLE_POLY_BOUND", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+
+    **Graduated (default ON, 2026-10-22).** Panel over the 120 local MINLPLib
+    instances (<= 200 vars/cons) that keep an unbounded continuous variable after
+    FBBT, ON vs OFF, 30 s, interleaved: cert-clean (240 rows, 0 problems: no bound
+    past an optimum, every incumbent passes ``verify_point`` on a fresh model) and
+    net-positive -- certified 86 -> 87, none lost (``ex4_1_5`` time limit with no
+    bound -> optimal in 159 nodes / 2.5 s; SCIP 2.8 s); node counts identical on all
+    86 instances both arms certify, SGM wall 2.99 vs 2.99 s. It only fires where
+    plain interval arithmetic gave no finite bound. ``=0`` is the opt-out.
+    """
+    return os.environ.get("DISCOPT_SEPARABLE_POLY_BOUND", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
     )
 
 
