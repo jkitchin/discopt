@@ -4,8 +4,14 @@ GAMS defines ``optca`` as ``|PB - DB| <= optca``, so ``0`` grants no absolute
 allowance. The link used to map it to ``None``, which the solver resolves to its
 own 1e-6 default: the pair ``PB=1e-7, DB=0`` at ``optcr=1e-4`` (relative gap 1,
 absolute gap 1e-7) was declared converged although neither requested criterion
-held. Zero now reaches the solver as zero; the relative criterion and an exactly
-closed gap still terminate.
+held.
+
+Read literally, though, ``0`` cannot certify an optimum at exactly 0: rigorous
+bounds carry a safety margin (HiGHS's LP route publishes ``-1e-12`` against
+``0``) and the relative gap is undefined there, so GAMS's DEFAULT ``optca=0``
+reported a one-line LP ``min x, x in [0,1]`` as merely feasible. The link
+therefore reads ``0`` at floating-point resolution:
+``|PB-DB| <= 1e-9 * max(1, |PB|, |DB|)`` or the ``optcr`` test.
 """
 
 from types import SimpleNamespace
@@ -14,7 +20,7 @@ import discopt.modeling as dm
 import numpy as np
 import pytest
 from discopt import Model
-from discopt.gams.link import _read_gams_options
+from discopt.gams.link import OPTCA_ZERO_RESOLUTION, _read_gams_options
 from discopt.solver import (
     _gap_criterion,
     _gap_values_converged,
@@ -30,7 +36,9 @@ def _gams_options(optcr: float, optca: float) -> dict:
         gevResLim="ResLim",
         gevOptCR="OptCR",
         gevOptCA="OptCA",
+        gevNodeLim="NodeLim",
         gevGetDblOpt=lambda handle, name: values[name],
+        gevGetIntOpt=lambda handle, name: 0,
         gevThreads=lambda handle: 1,
     )
     return _read_gams_options(gev, None)
@@ -65,15 +73,18 @@ def test_omitted_abs_gap_keeps_the_discopt_default():
 # (incumbent, bound) in the MINIMIZE orientation, the GAMS optcr, and whether
 # ``|PB-DB| <= 0 OR rel <= optcr`` holds. The MAXIMIZE case mirrors each pair.
 _CASES = [
-    # near zero: only an exactly closed gap terminates
+    # near zero: only a gap at floating-point resolution terminates
     (1e-7, 0.0, 1e-4, False),
     (1e-7, 0.0, 0.0, False),
+    (1e-12, 0.0, 1e-4, True),  # a rigorous bound's safety margin
+    (1e-12, 0.0, 0.0, True),
     (0.0, 0.0, 1e-4, True),
     (0.0, 0.0, 0.0, True),
     # ordinary scale: the relative criterion still terminates
     (100.0 + 1e-3, 100.0, 1e-4, True),
     (100.0 + 1e-1, 100.0, 1e-4, False),
     (100.0 + 1e-3, 100.0, 0.0, False),
+    (100.0 + 1e-8, 100.0, 0.0, True),  # resolution scales with |PB|
     (100.0, 100.0, 0.0, True),
 ]
 
@@ -83,7 +94,7 @@ _CASES = [
 @pytest.mark.parametrize("inc, bnd, optcr, closed", _CASES)
 def test_zero_optca_criterion_on_every_certification_predicate(sense, inc, bnd, optcr, closed):
     options = _gams_options(optcr, 0.0)
-    assert options["abs_gap"] == 0.0
+    assert options["abs_gap"] == OPTCA_ZERO_RESOLUTION
     abs_tol = _resolve_abs_gap_tolerance(options["abs_gap"])
     if sense == "max":
         inc, bnd = -inc, -bnd
@@ -131,7 +142,8 @@ def _assert_published_pair_meets_zero_optca(r, optcr: float) -> None:
     assert r.status == "optimal", (r.status, r.algorithm_route)
     abs_gap = abs(r.objective - r.bound)
     rel_gap = abs_gap / max(abs(r.objective), abs(r.bound), 1e-10)
-    assert abs_gap <= 0.0 or rel_gap <= optcr, (r.objective, r.bound, r.algorithm_route)
+    resolution = OPTCA_ZERO_RESOLUTION * max(1.0, abs(r.objective), abs(r.bound))
+    assert abs_gap <= resolution or rel_gap <= optcr, (r.objective, r.bound, r.algorithm_route)
 
 
 @pytest.mark.slow
@@ -163,20 +175,32 @@ def test_zero_optca_solves_on_milp_routes(monkeypatch, sense, backend):
 @pytest.mark.slow
 @pytest.mark.parametrize("sense", ["min", "max"])
 @pytest.mark.parametrize("backend", ["highs", "rust"])
-def test_zero_optcr_and_optca_is_refused_loudly_not_loosened(monkeypatch, caplog, sense, backend):
-    """``optcr=0, optca=0`` asks for a certificate float64 cannot give.
-
-    The objective's evaluation enclosure at the incumbent (~7e-13 here) does not fit
-    inside a zero gap, so the #1551 guard withdraws the certificate and says so.
-    Before #1889 the link's 1e-6 default absorbed that error silently and the
-    solve was reported ``optimal`` under a criterion GAMS never requested.
-    """
+def test_zero_optcr_and_optca_still_certify(monkeypatch, sense, backend):
+    """``optcr=0, optca=0`` must certify a solved MILP, at resolution, not at 1e-6."""
     monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", backend)
     options = _gams_options(0.0, 0.0)
-    with caplog.at_level("WARNING"):
-        r = _knapsack(sense).solve(
-            time_limit=60, gap_tolerance=options["gap"], abs_gap_tolerance=options["abs_gap"]
-        )
+    r = _knapsack(sense).solve(
+        time_limit=60, gap_tolerance=options["gap"], abs_gap_tolerance=options["abs_gap"]
+    )
+    _assert_published_pair_meets_zero_optca(r, options["gap"])
     assert abs(r.objective) == pytest.approx(241.0)
-    assert r.status == "feasible", (r.status, r.algorithm_route)
-    assert "requested gap (rel 0, abs 0)" in caplog.text
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("sense", ["min", "max"])
+def test_zero_optimum_lp_certifies_under_gams_defaults(sense):
+    """GAMS defaults (optcr=1e-4, optca=0): ``min x, x in [0,1]`` is Optimal.
+
+    Measured: with optca=0 forwarded literally the published pair was
+    ``(0, -1e-12)`` and the certificate was withdrawn.
+    """
+    options = _gams_options(1e-4, 0.0)
+    m = Model()
+    x = m.continuous("x", lb=0.0, ub=1.0)
+    if sense == "min":
+        m.minimize(x)
+    else:
+        m.maximize(-x)
+    r = m.solve(gap_tolerance=options["gap"], abs_gap_tolerance=options["abs_gap"])
+    _assert_published_pair_meets_zero_optca(r, options["gap"])
+    assert r.gap_certified

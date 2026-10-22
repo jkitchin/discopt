@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 from discopt.modeling.core import Model, SolveResult, VarType
 
 from .gmo_translate import model_from_gmo
-from .instructions import VAR_FIELD_OPCODES
+from .instructions import VAR_FIELD_OPCODES, GamsTranslationError
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +41,11 @@ MODELSTAT_OPTIMAL = 1
 MODELSTAT_LOCALLY_OPTIMAL = 2
 MODELSTAT_UNBOUNDED = 3
 MODELSTAT_INFEASIBLE = 4
-MODELSTAT_FEASIBLE = 7  # intermediate non-optimal, feasible solution available
-MODELSTAT_INTEGER = 8  # integer solution (optimal MIP/MINLP)
+MODELSTAT_LOCALLY_INFEASIBLE = 5
+MODELSTAT_INTERMEDIATE_INFEASIBLE = 6
+MODELSTAT_FEASIBLE = 7  # feasible solution, problem WITHOUT discrete variables
+MODELSTAT_INTEGER = 8  # feasible solution, problem WITH discrete variables
+MODELSTAT_INTEGER_INFEASIBLE = 10  # proven infeasible, problem with discrete variables
 MODELSTAT_ERROR_NO_SOLUTION = 13
 MODELSTAT_NO_SOLUTION_RETURNED = 14
 
@@ -50,9 +53,13 @@ SOLVESTAT_NORMAL = 1
 SOLVESTAT_ITERATION = 2
 SOLVESTAT_RESOURCE = 3  # time / resource interrupt
 SOLVESTAT_TERMINATED = 4
+SOLVESTAT_CAPABILITY = 6  # the model uses something the solver does not support
 SOLVESTAT_USER_INTERRUPT = 8
 SOLVESTAT_SOLVER_ERROR = 10
 SOLVESTAT_SYSTEM_ERROR = 13
+
+#: GAMS's "no iteration limit" (``gevIterLim``'s default).
+ITERLIM_INFINITY = 2147483647
 
 
 def is_available() -> bool:
@@ -80,15 +87,19 @@ _TERMINATION_SOLVESTAT: dict[str | None, int] = {
 def status_to_gams(result: SolveResult, has_discrete: bool) -> tuple[int, int]:
     """Map a discopt :class:`SolveResult` to ``(modelStat, solveStat)``.
 
-    ``has_discrete`` selects between the continuous (``Optimal``) and discrete
-    (``Integer``) optimal model-status codes, matching GAMS conventions.
+    ``has_discrete`` selects GAMS's discrete-model codes: ``8`` (``Integer
+    Solution``) for a point that is not certified optimal, where a continuous
+    model gets ``2`` (local) or ``7`` (feasible), and ``10`` for a proven
+    infeasibility, where a continuous model gets ``4``. A certified optimum is
+    ``1`` (``Optimal``) for both.
 
     Globality is reported from ``result.gap_certified``: discopt sets it only
     when it produced a valid finite dual bound (McCormick, or the rigorous
     alphaBB fallback), with main's soundness guards downgrading it otherwise. A
-    ``"optimal"`` result is therefore reported as GAMS ``Optimal`` / ``Integer``
-    (certified global) only when certified, else ``LocallyOptimal`` -- the link
-    trusts the solver's certificate rather than a static function allow-list.
+    ``"optimal"`` result is therefore reported as GAMS ``Optimal`` (certified
+    global) only when certified, else ``LocallyOptimal`` (``Integer``
+    for a discrete model, since GAMS defines ``LocallyOptimal`` for NLP) -- the
+    link trusts the solver's certificate rather than a static allow-list.
 
     A ``"feasible"`` result takes its solve status from ``result.termination``
     (#1888): ``status`` says what was proven, ``termination`` why the search
@@ -97,25 +108,49 @@ def status_to_gams(result: SolveResult, has_discrete: bool) -> tuple[int, int]:
     """
     status = (result.status or "").lower()
     has_solution = result.x is not None
+    termination = getattr(result, "termination", None)
+    # GAMS defines 7 for a feasible point of a problem without discrete variables
+    # and 8 for one with them; 4 / 10 likewise for a proven infeasibility.
+    feasible_stat = MODELSTAT_INTEGER if has_discrete else MODELSTAT_FEASIBLE
 
     if status == "optimal":
         if not getattr(result, "gap_certified", True):
+            if has_discrete:
+                return MODELSTAT_INTEGER, SOLVESTAT_NORMAL
             return MODELSTAT_LOCALLY_OPTIMAL, SOLVESTAT_NORMAL
-        model_stat = MODELSTAT_INTEGER if has_discrete else MODELSTAT_OPTIMAL
-        return model_stat, SOLVESTAT_NORMAL
+        # GAMS's 1 is "proven optimal" for any problem class. A certified
+        # discrete optimum used to be reported as 8, the same code an
+        # uncertified one now gets, which would hide the certificate.
+        return MODELSTAT_OPTIMAL, SOLVESTAT_NORMAL
     if status == "feasible":
-        termination = getattr(result, "termination", None)
-        return MODELSTAT_FEASIBLE, _TERMINATION_SOLVESTAT.get(termination, SOLVESTAT_NORMAL)
+        return feasible_stat, _TERMINATION_SOLVESTAT.get(termination, SOLVESTAT_NORMAL)
     if status == "infeasible":
+        if has_discrete:
+            return MODELSTAT_INTEGER_INFEASIBLE, SOLVESTAT_NORMAL
         return MODELSTAT_INFEASIBLE, SOLVESTAT_NORMAL
     if status == "unbounded":
         return MODELSTAT_UNBOUNDED, SOLVESTAT_NORMAL
     if status in ("time_limit", "node_limit"):
-        model_stat = MODELSTAT_FEASIBLE if has_solution else MODELSTAT_NO_SOLUTION_RETURNED
+        model_stat = feasible_stat if has_solution else MODELSTAT_NO_SOLUTION_RETURNED
         return model_stat, SOLVESTAT_RESOURCE
     if status == "iteration_limit":
-        model_stat = MODELSTAT_FEASIBLE if has_solution else MODELSTAT_NO_SOLUTION_RETURNED
+        model_stat = feasible_stat if has_solution else MODELSTAT_NO_SOLUTION_RETURNED
         return model_stat, SOLVESTAT_ITERATION
+    # Local (no global claim) outcomes, discopt.status #1148.
+    if status == "local_optimal":
+        if has_discrete:
+            return MODELSTAT_INTEGER, SOLVESTAT_NORMAL
+        return MODELSTAT_LOCALLY_OPTIMAL, SOLVESTAT_NORMAL
+    if status == "local_limit":
+        # An iterate at a limit, neither stationary nor verified feasible: GAMS's
+        # "intermediate infeasible" makes no feasibility claim it cannot back.
+        model_stat = (
+            MODELSTAT_INTERMEDIATE_INFEASIBLE if has_solution else MODELSTAT_NO_SOLUTION_RETURNED
+        )
+        return model_stat, _TERMINATION_SOLVESTAT.get(termination, SOLVESTAT_ITERATION)
+    if status == "local_infeasible":
+        # Not an infeasibility proof: GAMS's "locally infeasible".
+        return MODELSTAT_LOCALLY_INFEASIBLE, SOLVESTAT_NORMAL
     # error / unknown
     return MODELSTAT_ERROR_NO_SOLUTION, SOLVESTAT_SOLVER_ERROR
 
@@ -131,19 +166,35 @@ def _read_gams_options(gev, gev_h) -> dict:
     rejected loudly rather than silently replaced by defaults:
 
     * ``reslim`` must be a positive number; ``optcr`` must be finite and ``>= 0``.
-    * ``optca`` must be finite and ``>= 0`` and is forwarded as is, ``0``
-      included.  GAMS defines it as ``|PB - DB| <= optca``, so ``0`` grants no
-      absolute allowance; mapping it to ``None`` would hand the solver its own
-      positive default (``1e-6``), which GAMS never asked for (#1889).
+    * ``optca`` must be finite and ``>= 0``; a positive value is forwarded as
+      is.  GAMS defines it as ``|PB - DB| <= optca``, so ``0`` grants no
+      absolute allowance.  It used to map to ``None``, i.e. the solver's own
+      ``1e-6`` (#1889), which accepted ``PB=1e-7, DB=0`` at ``optcr=1e-4``
+      although neither criterion held.  Taken literally, though, ``0`` cannot
+      certify any optimum at exactly 0: a rigorous dual bound carries a safety
+      margin (measured: HiGHS's LP route publishes ``-1e-12`` against ``0``)
+      and the relative gap is undefined there, so GAMS's default ``optca=0``
+      would report every zero-optimum model as merely feasible.  ``0`` is
+      therefore read as "no allowance beyond floating-point resolution": closed
+      iff ``|PB - DB| <= OPTCA_ZERO_RESOLUTION * max(1, |PB|, |DB|)`` or the
+      ``optcr`` test holds, which is exactly ``abs_gap=OPTCA_ZERO_RESOLUTION``
+      with ``gap=max(optcr, OPTCA_ZERO_RESOLUTION)``.  That is 1000x tighter
+      than the old default and still rejects the ``1e-7`` pair above.
     * ``threads`` comes from ``gevThreads(gev_h)``, which GEV has already
       resolved from the raw option (``0`` = all cores, ``-N`` = all but ``N``),
       so it is forwarded as is; a non-positive resolved count is rejected.
+    * ``nodlim`` is forwarded as ``max_nodes``. GAMS's ``0`` means no node
+      limit; discopt's own default is a 100,000-node cap, which GAMS never asked
+      for, so ``0`` maps to :data:`NODLIM_INFINITY`.
+
+    Options discopt cannot honour are reported by :func:`_unhonored_gams_options`.
     """
     reslim = float(gev.gevGetDblOpt(gev_h, gev.gevResLim))
     optcr = float(gev.gevGetDblOpt(gev_h, gev.gevOptCR))
     optca = float(gev.gevGetDblOpt(gev_h, gev.gevOptCA))
     # ``gevThreads`` is a function, not an option-name constant like ``gevResLim``.
     threads = int(gev.gevThreads(gev_h))
+    nodlim = int(gev.gevGetIntOpt(gev_h, gev.gevNodeLim))
     if math.isnan(reslim) or reslim <= 0.0:
         raise ValueError(f"unsupported GAMS reslim={reslim!r}: must be positive")
     if not math.isfinite(optcr) or optcr < 0.0:
@@ -152,12 +203,56 @@ def _read_gams_options(gev, gev_h) -> dict:
         raise ValueError(f"unsupported GAMS optca={optca!r}: must be finite and >= 0")
     if threads < 1:
         raise ValueError(f"unsupported resolved GAMS threads={threads}: must be >= 1")
+    if nodlim < 0:
+        raise ValueError(f"unsupported GAMS nodlim={nodlim}: must be >= 0")
+    if optca == 0.0:
+        optca = OPTCA_ZERO_RESOLUTION
+        optcr = max(optcr, OPTCA_ZERO_RESOLUTION)
     return {
         "time_limit": reslim,
         "gap": optcr,
         "abs_gap": optca,
         "threads": threads,
+        "max_nodes": nodlim if nodlim > 0 else NODLIM_INFINITY,
     }
+
+
+#: The resolution GAMS ``optca=0`` is read at, relative to ``max(1, |PB|, |DB|)``
+#: (see :func:`_read_gams_options`). A chosen constant: well above the ~1e-12
+#: margins rigorous bounds are published with, well below any gap a user would
+#: call open.
+OPTCA_ZERO_RESOLUTION = 1e-9
+
+#: ``max_nodes`` for GAMS ``nodlim=0`` (no limit): GAMS's own limit infinity,
+#: kept within a 32-bit int for every backend that takes a node budget.
+NODLIM_INFINITY = 2147483647
+
+
+def _unhonored_gams_options(gev, gev_h, gmo, gmo_h) -> list[str]:
+    """Messages naming every GAMS option set to a value discopt does not honour.
+
+    These used to be ignored without a word: a job with ``m.optfile=1`` or a
+    ``cutoff`` ran as if neither had been set. None of them changes what is
+    proven, so the solve goes ahead, but the user is told in the log and
+    listing which settings had no effect.
+    """
+    notes = []
+    iterlim = int(gev.gevGetIntOpt(gev_h, gev.gevIterLim))
+    if iterlim != ITERLIM_INFINITY:
+        notes.append(f"iterlim={iterlim} is ignored: discopt has no global iteration count")
+    if int(gev.gevGetIntOpt(gev_h, gev.gevDomLim)) > 0:
+        notes.append("domlim is ignored: discopt treats any evaluation error as infeasible")
+    if int(gev.gevGetIntOpt(gev_h, gev.gevUseCutOff)):
+        cutoff = float(gev.gevGetDblOpt(gev_h, gev.gevCutOff))
+        notes.append(f"cutoff={cutoff:g} is ignored: discopt does not take an objective cutoff")
+    if int(gev.gevGetIntOpt(gev_h, gev.gevUseCheat)):
+        notes.append("cheat is ignored: discopt does not take an improvement requirement")
+    if int(gmo.gmoOptFile(gmo_h)) > 0:
+        notes.append(
+            "optfile is ignored: the discopt GAMS link reads no solver option file; "
+            "only reslim, optcr, optca, nodlim and threads are forwarded"
+        )
+    return [f"*** discopt: {n}" for n in notes]
 
 
 def solve_view(
@@ -167,6 +262,7 @@ def solve_view(
     gap: float = 1e-4,
     abs_gap: float | None = None,
     threads: int = 1,
+    max_nodes: int = NODLIM_INFINITY,
 ):
     """Translate a GMO view, solve with discopt, and return ``(model, result)``.
 
@@ -176,7 +272,11 @@ def solve_view(
     """
     model = model_from_gmo(view)
     result = model.solve(
-        time_limit=time_limit, gap_tolerance=gap, abs_gap_tolerance=abs_gap, threads=threads
+        time_limit=time_limit,
+        gap_tolerance=gap,
+        abs_gap_tolerance=abs_gap,
+        threads=threads,
+        max_nodes=max_nodes,
     )
     return model, result
 
@@ -261,19 +361,49 @@ def solve_from_control_file(
 
         view = _GmoAdapter(gmo_h, gmo)
         t0 = time.perf_counter()
-        model, result = solve_view(view, **_read_gams_options(gev, gev_h))
+        notes = _unhonored_gams_options(gev, gev_h, gmo, gmo_h)
+        try:
+            model, result = solve_view(view, **_read_gams_options(gev, gev_h))
+        except GamsTranslationError as exc:
+            # A model the link refuses (an unsupported function, row or variable
+            # type) is GAMS's "capability problem": report it with the reason in
+            # the log and listing rather than crashing without a status file.
+            gev.gevStatCon(gev_h)
+            _log_stat(gev, gev_h, f"*** discopt: {exc}")
+            gmo.gmoModelStatSet(gmo_h, MODELSTAT_NO_SOLUTION_RETURNED)
+            gmo.gmoSolveStatSet(gmo_h, SOLVESTAT_CAPABILITY)
+            gmo.gmoUnloadSolutionLegacy(gmo_h)
+            gev.gevStatEOF(gev_h)
+            return 0
         resused = time.perf_counter() - t0
 
         # GAMS requires the solver to open, write, and finalize a status file via
         # the environment object; otherwise it reports solveStat=13 ("SOLVER DID
         # NOT WRITE A STATUS FILE") regardless of the GMO solution we unload.
         gev.gevStatCon(gev_h)
+        for note in notes:
+            _log_stat(gev, gev_h, note)
         _write_solution(gmo_h, gmo, model, result, resused=resused)
         gev.gevStatEOF(gev_h)
         return 0
     finally:
         _free_handle(gmo, gmo_h, gmo_ok, "gmoFree", "delete_gmoHandle_tp")
         _free_handle(gev, gev_h, gev_ok, "gevFree", "delete_gevHandle_tp")
+
+
+#: Longest line written through ``gevLogStat``; a longer or multi-line message
+#: was measured (GAMS 53) to vanish from the listing without an error.
+_STAT_LINE_MAX = 200
+
+
+def _log_stat(gev, gev_h, text: str) -> None:  # pragma: no cover - needs GAMS
+    """Write ``text`` to the GAMS log and listing, one bounded line at a time."""
+    for line in str(text).splitlines() or [""]:
+        while True:
+            gev.gevLogStat(gev_h, line[:_STAT_LINE_MAX])
+            line = line[_STAT_LINE_MAX:]
+            if not line:
+                break
 
 
 def _free_handle(mod, handle, created: bool, free_name: str, delete_name: str) -> None:
@@ -313,9 +443,16 @@ def _write_solution(
     gmo.gmoSolveStatSet(gmo_h, solve_stat)
 
     if result.x is not None:
-        for j, var in enumerate(model._variables):
-            val = float(result.x[var.name])
-            gmo.gmoSetVarLOne(gmo_h, j, val)
+        # Only the GMO columns, in GMO order: translation may add auxiliary
+        # variables (a semicontinuous on/off binary) after them.
+        columns = getattr(model, "_gams_columns", model._variables)
+        x = gmo.doubleArray(len(columns))
+        for j, var in enumerate(columns):
+            x[j] = float(result.x[var.name])
+        # Sets the variable levels AND computes every equation's level from
+        # them; per-column gmoSetVarLOne left each row at its input level
+        # (measured: a binding knapsack row listed at 0 instead of 100).
+        gmo.gmoSetSolutionPrimal(gmo_h, x)
         if result.objective is not None:
             gmo.gmoSetHeadnTail(gmo_h, gmo.gmoHobjval, float(result.objective))
     # Export a valid global dual bound even when the gap is open and even with no
@@ -327,6 +464,11 @@ def _write_solution(
     gmo.gmoSetHeadnTail(
         gmo_h, gmo.gmoHresused, float(result.wall_time if resused is None else resused)
     )
+    if result.node_count is not None:
+        gmo.gmoSetHeadnTail(gmo_h, gmo.gmoTmipnod, float(result.node_count))
+    # discopt returns no duals here: say so, rather than let GAMS list every
+    # marginal as 0, which reads as a computed dual.
+    gmo.gmoSetHeadnTail(gmo_h, gmo.gmoHmarginals, 0.0)
     gmo.gmoUnloadSolutionLegacy(gmo_h)
 
 
@@ -408,9 +550,11 @@ class _GmoAdapter:  # pragma: no cover - thin wrapper over gamsapi calls
 
     def obj_nl_sign(self) -> float:
         # Objective stored as ``objVarJac * objvar + ... + nl = rhs``; the true
-        # objective nonlinear part is ``-nl / objVarJac`` (objVarJac is +/-1).
+        # objective nonlinear part is ``-nl / objVarJac``.
         jac = float(self._gmo.gmoObjJacVal(self._h))
-        return -1.0 / jac if jac else -1.0
+        if jac == 0.0:
+            raise GamsTranslationError("objective variable has a zero Jacobian in its row")
+        return -1.0 / jac
 
     def obj_linear(self) -> dict[int, float]:
         gmo, n = self._gmo, self._n
@@ -438,8 +582,20 @@ class _GmoAdapter:  # pragma: no cover - thin wrapper over gamsapi calls
         return "" if (not name or name == "ERROR") else name
 
     def row_sense(self, i: int) -> str:
-        t = self._gmo.gmoGetEquTypeOne(self._h, i)
-        return {self._gmo.gmoequ_E: "==", self._gmo.gmoequ_L: "<=", self._gmo.gmoequ_G: ">="}[t]
+        gmo = self._gmo
+        t = gmo.gmoGetEquTypeOne(self._h, i)
+        sense = {gmo.gmoequ_E: "==", gmo.gmoequ_L: "<=", gmo.gmoequ_G: ">=", gmo.gmoequ_N: "free"}
+        if t not in sense:
+            # =X= (external), =C= (conic) and =B= (logic) rows: refuse by name
+            # rather than with a bare KeyError.
+            kind = {gmo.gmoequ_X: "=X= external", gmo.gmoequ_C: "=C= conic"}.get(
+                t, f"=B= logic (type {t})"
+            )
+            raise GamsTranslationError(
+                f"equation '{self.row_name(i) or i}' is an {kind} row, which the discopt "
+                "GAMS link does not support"
+            )
+        return sense[t]
 
     def row_rhs(self, i: int) -> float:
         return float(self._gmo.gmoGetRhsOne(self._h, i))

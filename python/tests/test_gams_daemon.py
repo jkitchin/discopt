@@ -84,6 +84,22 @@ def test_solve_error_is_isolated(sock):
         t.join(timeout=5)
 
 
+def test_solve_error_reaches_the_client(sock, capsys):
+    """The daemon's error text must reach the client, not just rc=1 (#1889 audit)."""
+
+    def boom(cf, sysdir=None):
+        raise RuntimeError("kaboom-marker")
+
+    srv = d.DaemonServer(socket_path=sock, solve_fn=boom)
+    t = _start(srv)
+    try:
+        assert d.solve_via_daemon("x", socket_path=sock) == 1
+        assert "kaboom-marker" in capsys.readouterr().err
+    finally:
+        d.stop_daemon(sock)
+        t.join(timeout=5)
+
+
 def test_stop(sock):
     srv = d.DaemonServer(socket_path=sock, solve_fn=lambda cf, sysdir=None: 0)
     t = _start(srv)

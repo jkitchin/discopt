@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 
 import discopt.modeling as dm
+import numpy as np
 import pytest
 from discopt.gams import (
     data_dir,
@@ -30,6 +31,7 @@ from discopt.gams.instructions import (
 from discopt.gams.instructions import (
     GamsOpCode as Op,
 )
+from discopt.modeling.core import Constant
 
 
 # ── instruction translator ──────────────────────────────────────────────────
@@ -119,39 +121,88 @@ def test_translate_unary_functions(vc):
         assert repr(expr).startswith(name)
 
 
-def test_translate_safeguarded_forms(vc):
-    # GAMS safeguarded eval forms map to their base function (exp / log10 / 1-x).
+def _value(expr, model, **point):
+    """Evaluate ``expr`` at ``point`` through the DAG compiler."""
+    from discopt._relax.dag_compiler import compile_expression
+
+    x = np.array([point[v.name] for v in model._variables], dtype=float)
+    return float(np.asarray(compile_expression(expr, model)(x)))
+
+
+# Values GAMS 53 computes for each intrinsic (``scalar v; v = f(...); display v;``).
+# These are the definitions the link must reproduce; the sl*/sq* forms are NOT
+# their base function past the threshold S, and entropy is -x*ln(x).
+_GAMS_VALUES = [
+    ("entropy", 0.5, (), 0.34657359),
+    ("entropy", 2.0, (), -1.38629436),
+    ("errf", 0.0, (), 0.5),
+    ("errf", 1.0, (), 0.84134475),
+    ("slrec", 0.5, (1.0,), 1.5),
+    ("slrec", 2.0, (1.0,), 0.5),
+    ("slrec", 1e-11, (), 1.9e10),
+    ("sqrec", 0.5, (1.0,), 1.75),
+    ("sqrec", 1e-11, (), 2.71e10),
+    ("slexp", 3.0, (1.0,), 8.15484549),
+    ("sqexp", 3.0, (1.0,), 13.59140914),
+    ("sllog10", 0.5, (1.0,), -0.21714724),
+    ("sqlog10", 0.5, (1.0,), -0.27143405),
+    ("sllog10", 1e-151, (), -150.39087),
+    ("centropy", 2.0, (1.0,), 1.38629436),
+    ("centropy", 2.0, (1.0, 1.0), 0.81093022),
+]
+
+
+@pytest.mark.parametrize("name, x0, extra, want", _GAMS_VALUES)
+def test_intrinsics_match_gams_values(name, x0, extra, want):
+    """#1889 audit: entropy's sign, errorf, centropy's 3rd arg, the sl*/sq* forms."""
+    from discopt.gams.instructions import _apply_func
+
+    m = dm.Model("f")
+    x = m.continuous("x", lb=-1e3, ub=1e3)
+    expr = _apply_func(FUNC_CODE[name], [x, *(Constant(e) for e in extra)])
+    assert _value(expr, m, x=x0) == pytest.approx(want, rel=1e-7)
+
+
+@pytest.mark.parametrize("name", ["slrec", "sqrec", "sllog10", "sqlog10", "slexp", "sqexp"])
+def test_smoothed_forms_equal_base_function_inside_threshold(name):
+    from discopt.gams.instructions import _apply_func
+
+    base = {"slrec": lambda v: 1 / v, "sqrec": lambda v: 1 / v}
+    base.update({"sllog10": np.log10, "sqlog10": np.log10, "slexp": np.exp, "sqexp": np.exp})
+    m = dm.Model("f")
+    x = m.continuous("x", lb=-1e3, ub=1e3)
+    expr = _apply_func(FUNC_CODE[name], [x, Constant(1.0)])
+    inside = 0.5 if name.endswith("exp") else 2.0
+    assert _value(expr, m, x=inside) == pytest.approx(base[name](inside), rel=1e-12)
+
+
+def test_centropy_three_args_is_not_folded(vc):
     v, c = vc
-    expected = {
-        "slexp": "exp(x)",
-        "sqexp": "exp(x)",
-        "sllog10": "log10(x)",
-        "sqlog10": "log10(x)",
-        "slrec": "(1 / x)",
-        "sqrec": "(1 / x)",
-    }
-    for name, want in expected.items():
-        # unary form: f(x)
-        u = translate_instructions([Op.nlPushV, Op.nlCallArg1], [1, FUNC_CODE[name]], v, c)
-        assert repr(u) == want
-        # binary form f(x, k): the smoothing threshold k is ignored
-        b = translate_instructions(
-            [Op.nlPushV, Op.nlPushI, Op.nlCallArg2], [1, 1, FUNC_CODE[name]], v, c
-        )
-        assert repr(b) == want
+    ops = [Op.nlPushV, Op.nlPushV, Op.nlPushV, Op.nlFuncArgN, Op.nlCallArgN]
+    expr = translate_instructions(ops, [1, 2, 1, 3, FUNC_CODE["centropy"]], v, c)
+    assert "centropy(centropy" not in repr(expr)
 
 
-def test_safeguarded_form_solves_to_base_optimum():
-    # A safeguarded form must solve to the *base* function's optimum: slrec(x)
-    # == 1/x; minimize 1/x on [1, 4] -> 0.25 at x = 4. (Whether the solver
-    # certifies the gap is its own call; here we verify the mapped semantics.)
+def test_only_min_max_fold_beyond_two_args(vc):
+    v, c = vc
+    ops = [Op.nlPushV, Op.nlPushV, Op.nlPushV, Op.nlFuncArgN, Op.nlCallArgN]
+    with pytest.raises(GamsTranslationError):
+        translate_instructions(ops, [1, 2, 1, 3, FUNC_CODE["power"]], v, c)
+
+
+def test_slrec_solves_to_the_gams_optimum():
+    # max slrec(x, 1) on [0.5, 2] is 1.5 at x = 0.5 (GAMS 53); the old 1/x
+    # mapping gave 2.0.
     m = dm.Model("sg")
-    x = m.continuous("x", lb=1.0, ub=4.0)
-    expr = translate_instructions([Op.nlPushV, Op.nlCallArg1], [1, FUNC_CODE["slrec"]], [x], [])
-    m.minimize(expr)
+    x = m.continuous("x", lb=0.5, ub=2.0)
+    m.maximize(
+        translate_instructions(
+            [Op.nlPushV, Op.nlPushI, Op.nlCallArg2], [1, 1, FUNC_CODE["slrec"]], [x], [1.0]
+        )
+    )
     result = m.solve(time_limit=30)
-    assert result.status in ("optimal", "feasible")
-    assert result.objective == pytest.approx(0.25, abs=1e-4)
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(1.5, abs=1e-6)
 
 
 def test_translate_errors(vc):
@@ -277,6 +328,111 @@ def test_model_from_gmo_discrete_types():
     assert all(v.var_type == dm.VarType.INTEGER for v in m._variables)
 
 
+class _FakeGmoCols(_FakeGmo):
+    """One-row fake whose columns, bounds and row sense are set per test.
+
+    ``min sum_j (x_j - target_j)^2`` subject to one row over all columns.
+    """
+
+    def __init__(self, cols, targets, sense=">=", rhs=-1e9):
+        super().__init__()
+        self._cols, self._targets, self._sense, self._rhs = cols, targets, sense, rhs
+
+    def num_vars(self):
+        return len(self._cols)
+
+    def var_type(self, j):
+        return self._cols[j][0]
+
+    def var_lower(self, j):
+        return self._cols[j][1]
+
+    def var_upper(self, j):
+        return self._cols[j][2]
+
+    def constants(self):
+        return list(self._targets)
+
+    def obj_nl(self):
+        ops, flds = [], []
+        for j in range(len(self._cols)):
+            ops += [Op.nlPushV, Op.nlSubI, Op.nlCallArg1]
+            flds += [j + 1, j + 1, FUNC_CODE["sqr"]]
+            if j:
+                ops.append(Op.nlAdd)
+                flds.append(0)
+        return ops, flds
+
+    def row_sense(self, i):
+        return self._sense
+
+    def row_rhs(self, i):
+        return self._rhs
+
+    def row_linear(self, i):
+        return {j: 1.0 for j in range(len(self._cols))}
+
+
+def test_fixed_binary_keeps_its_bounds():
+    # x.fx = 1 on a binary; min (x - 0)^2 is 1, not 0 (#1889 audit).
+    _, r = solve_view(_FakeGmoCols([(1, 1.0, 1.0)], [0.0]))
+    assert r.objective == pytest.approx(1.0, abs=1e-6)
+
+
+def test_integer_infinite_upper_bound_is_not_clamped():
+    m = model_from_gmo(_FakeGmoCols([(2, 0.0, 1e300)], [0.0]))
+    assert float(m._variables[0].ub) >= 1e19  # was clamped to 1e9
+
+
+@pytest.mark.parametrize("vtype", [5, 6], ids=["semicont", "semiint"])
+def test_semicontinuous_is_lowered_exactly(vtype):
+    # x = 0 or 2 <= x <= 5; min (x - 0.5)^2 -> 0.25 at x = 0 (GAMS 53), where
+    # the old continuous relaxation returned 2.25 at x = 2.
+    model, r = solve_view(_FakeGmoCols([(vtype, 2.0, 5.0)], [0.5]))
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(0.25, abs=1e-6)
+    assert r.x["x0"] == pytest.approx(0.0, abs=1e-6)
+    assert [v.name for v in model._gams_columns] == ["x0"]
+
+
+def test_semicontinuous_columns_keep_their_order():
+    # Two semicontinuous columns with a continuous one between: the on/off
+    # binaries must come after every GMO column, never between them.
+    model = model_from_gmo(
+        _FakeGmoCols([(5, 2.0, 5.0), (0, 0.0, 10.0), (5, 3.0, 4.0)], [0.5, 7.0, 3.5])
+    )
+    names = [v.name for v in model._variables]
+    assert names[:3] == ["x0", "x1", "x2"]
+    assert [v.name for v in model._gams_columns] == ["x0", "x1", "x2"]
+
+
+def test_semicontinuous_with_infinite_bound_is_refused():
+    with pytest.raises(GamsTranslationError, match="infinite bound"):
+        model_from_gmo(_FakeGmoCols([(5, 2.0, 1e300)], [0.0]))
+
+
+@pytest.mark.parametrize("vtype", [3, 4], ids=["sos1", "sos2"])
+def test_sos_members_are_refused(vtype):
+    with pytest.raises(GamsTranslationError, match="SOS"):
+        model_from_gmo(_FakeGmoCols([(vtype, 0.0, 1.0)], [0.0]))
+
+
+def test_free_row_imposes_nothing():
+    # An =N= row (sense "free") is dropped, so min (x - 0)^2 stays 0 even though
+    # the row would read x >= 3 under any other sense.
+    m = model_from_gmo(_FakeGmoCols([(0, 0.0, 5.0)], [0.0], sense="free", rhs=3.0))
+    assert len(m._constraints) == 0
+
+
+def test_failing_obj_nl_sign_is_not_swallowed():
+    class _Broken(_FakeGmoRawObj):
+        def obj_nl_sign(self):
+            raise RuntimeError("gmoObjJacVal failed")
+
+    with pytest.raises(RuntimeError, match="gmoObjJacVal"):
+        model_from_gmo(_Broken())
+
+
 def test_solve_view_end_to_end():
     model, result = solve_view(_FakeGmo())
     assert result.status == "optimal"
@@ -294,8 +450,10 @@ def test_status_to_gams_optimal_continuous():
 
 
 def test_status_to_gams_optimal_discrete():
+    # A certified optimum is GAMS's 1 (proven optimal) for any problem class;
+    # 8 (Integer Solution) is kept for a discrete point that is not certified.
     res = dm.SolveResult(status="optimal", objective=1.0, bound=1.0, x={"x": 0.0})
-    assert status_to_gams(res, has_discrete=True) == (8, 1)  # Integer, Normal
+    assert status_to_gams(res, has_discrete=True) == (1, 1)
 
 
 def test_status_to_gams_certified_global_default():
@@ -308,14 +466,26 @@ def test_status_to_gams_certified_global_default():
 def test_status_to_gams_uncertified_optimal_is_local():
     # Heuristic NLP-BB on a nonconvex model: locally optimal only, not global.
     res = dm.SolveResult(status="optimal", objective=1.0, x={"x": 0.0}, gap_certified=False)
-    # Reported as LocallyOptimal (2), not Optimal/Integer, for both var kinds.
+    # LocallyOptimal (2) is GAMS's NLP code; a discrete model's uncertified
+    # point is an Integer Solution (8). Neither is Optimal (1).
     assert status_to_gams(res, has_discrete=False) == (2, 1)
-    assert status_to_gams(res, has_discrete=True) == (2, 1)
+    assert status_to_gams(res, has_discrete=True) == (8, 1)
 
 
 def test_status_to_gams_infeasible():
     res = dm.SolveResult(status="infeasible")
     assert status_to_gams(res, has_discrete=False) == (4, 1)
+    assert status_to_gams(res, has_discrete=True) == (10, 1)  # Integer Infeasible
+
+
+@pytest.mark.parametrize("has_discrete", [False, True])
+def test_status_to_gams_local_statuses(has_discrete):
+    """The #1148 local outcomes used to fall through to 'error, no solution'."""
+    local = dm.SolveResult(status="local_optimal", objective=1.0, x={"x": 0.0})
+    assert status_to_gams(local, has_discrete) == ((8 if has_discrete else 2), 1)
+    limit = dm.SolveResult(status="local_limit", objective=1.0, x={"x": 0.0})
+    assert status_to_gams(limit, has_discrete) == (6, 2)  # intermediate infeasible
+    assert status_to_gams(dm.SolveResult(status="local_infeasible"), has_discrete) == (5, 1)
 
 
 def test_status_to_gams_time_limit_with_and_without_solution():
@@ -491,7 +661,7 @@ def test_smoke_gms_optimum_via_from_gams(entry):
 def test_translate_entropy_signpower_centropy(vc):
     v, c = vc
     e = translate_instructions([Op.nlPushV, Op.nlCallArg1], [1, FUNC_CODE["entropy"]], v, c)
-    assert repr(e) == "entropy(x)"
+    assert repr(e) == "neg(entropy(x))"  # GAMS entropy is -x*ln(x)
     sp = translate_instructions(
         [Op.nlPushV, Op.nlPushV, Op.nlCallArg2], [1, 2, FUNC_CODE["signpower"]], v, c
     )
@@ -499,7 +669,7 @@ def test_translate_entropy_signpower_centropy(vc):
     ce = translate_instructions(
         [Op.nlPushV, Op.nlPushV, Op.nlCallArg2], [1, 2, FUNC_CODE["centropy"]], v, c
     )
-    assert repr(ce) == "centropy(x, y)"
+    assert repr(ce) == "(x * log(((x + 1e-20) / (y + 1e-20))))"
 
 
 def test_translate_rejects_discontinuous(vc):
@@ -510,19 +680,19 @@ def test_translate_rejects_discontinuous(vc):
 
 
 def test_entropy_solves_globally():
-    # entropy(x) = x*log(x); min on [0.1, 3] -> -1/e at x = 1/e. entropy is
-    # certified convex (lattice profile + interval enclosure), so the solve is
-    # a *certified* global optimum, not just a feasible incumbent.
+    # GAMS entropy(x) = -x*ln(x); max on [0.1, 3] -> 1/e at x = 1/e. The
+    # translation negates discopt's convex x*log(x) node, so the solve is still
+    # a *certified* global optimum.
     import math
 
     m = dm.Model("ent")
     x = m.continuous("x", lb=0.1, ub=3.0)
     expr = translate_instructions([Op.nlPushV, Op.nlCallArg1], [1, FUNC_CODE["entropy"]], [x], [])
-    m.minimize(expr)
+    m.maximize(expr)
     result = m.solve(time_limit=30)
     assert result.status == "optimal"
-    assert result.objective == pytest.approx(-1.0 / math.e, abs=1e-4)
-    assert result.gap_certified  # certified global via the entropy convexity atom
+    assert result.objective == pytest.approx(1.0 / math.e, abs=1e-4)
+    assert result.gap_certified
 
 
 def test_no_cross_problem_contamination():

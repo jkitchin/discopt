@@ -190,6 +190,11 @@ def solve_via_daemon(
         resp = _request(path, payload)
     if resp is None:
         return None
+    if resp.get("error"):
+        # The failure happened in the daemon process: without this the reason
+        # (e.g. a GamsTranslationError refusing an unsupported function) was
+        # dropped and GAMS saw only a bare non-zero exit code.
+        sys.stderr.write(f"discopt-gams: solve failed: {resp['error']}\n")
     return int(resp.get("rc", 1))
 
 
