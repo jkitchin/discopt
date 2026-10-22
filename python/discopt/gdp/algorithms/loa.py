@@ -31,7 +31,7 @@ import numpy as np
 
 from discopt.gdp.algorithms.base import GDPAlgorithm
 from discopt.gdp.algorithms.init import INIT_STRATEGIES, GDPSpace, initialize
-from discopt.gdp.algorithms.master import DEFAULT_MASTER_BACKEND
+from discopt.gdp.algorithms.master import DEFAULT_MASTER_BACKEND, MasterMILP
 from discopt.modeling.core import Model, SolveResult
 
 LOA_SUBPROBLEMS = ("nlp", "global")
@@ -97,7 +97,8 @@ class LOA(GDPAlgorithm):
         )
         self.convexity_truncated = convexity.truncated
         self.oa_rows = _oa_rows(self.evaluator, low, convexity.constraint_mask)
-        self.master = self.space.master(backend=milp_solver)
+        self.objective_certified_convex = bool(convexity.objective_is_convex)
+        self.master = self._make_master(milp_solver)
         self.obj_is_linear = self.master.objective is not None
         if not self.obj_is_linear and convexity.objective_is_convex:
             self.master.objective_convex = True
@@ -110,6 +111,10 @@ class LOA(GDPAlgorithm):
         self.init_report: Any = None
 
     # ── pieces ────────────────────────────────────────────────────────────
+
+    def _make_master(self, milp_solver: str) -> MasterMILP:
+        """The master: the lowered model's linear rows (GLOA overrides this)."""
+        return self.space.master(backend=milp_solver)
 
     def _nlp_limit(self) -> Optional[float]:
         left = self.deadline.sub_limit()

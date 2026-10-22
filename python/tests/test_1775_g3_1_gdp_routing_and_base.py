@@ -48,7 +48,7 @@ def _gdp(sense="min"):
 
 def test_native_axis_is_the_spec_set():
     assert NATIVE_GDP_METHODS == {"loa", "gloa", "lbb", "ric", "enumerate", "ldsda"}
-    assert RESERVED == ["enumerate", "gloa", "lbb", "ldsda", "ric"]
+    assert RESERVED == ["enumerate", "lbb", "ldsda", "ric"]  # gloa landed in G4.3
 
 
 @pytest.mark.parametrize("method", RESERVED)

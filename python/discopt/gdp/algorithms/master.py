@@ -509,6 +509,139 @@ class MasterMILP:
         return MasterResult(x, self.config_of(x), bound, False, status)
 
 
+class RelaxationMaster(MasterMILP):
+    """A :class:`MasterMILP` over a MILP relaxation's columns (#1775 G4.3, GLOA).
+
+    The relaxation (:func:`discopt._relax.milp_relaxation.build_milp_relaxation`
+    of the lowered model) keeps the model's ``n_model`` columns first, with their
+    integrality, and appends continuous auxiliaries for the relaxed nonlinear
+    terms. Its rows are a valid outer approximation of *every* row -- a
+    nonconvex one included -- so the master's dual bound is a valid LB with no
+    convexity certificate; LOA's OA cuts (certified-convex rows only) still apply
+    and are padded onto the auxiliary columns. Callers keep working in the
+    model's columns: cuts, objective overrides and extra cuts over ``n_model``
+    columns (or ``n_model + 1`` with the epigraph column) are padded, and a
+    solve returns ``x`` over the model's columns only.
+    """
+
+    def __init__(
+        self,
+        relaxation: Any,
+        n_model: int,
+        *,
+        objective_fallback: Optional[tuple[np.ndarray, float]] = None,
+        backend: str = DEFAULT_MASTER_BACKEND,
+    ) -> None:
+        import scipy.sparse as sp
+
+        bounds = np.asarray(relaxation._bounds, dtype=np.float64).reshape(-1, 2)
+        n_cols = bounds.shape[0]
+        n_model = int(n_model)
+        if n_cols < n_model:
+            raise ValueError(
+                f"RelaxationMaster: the relaxation has {n_cols} columns, fewer than the "
+                f"model's {n_model}"
+            )
+        integ = relaxation._integrality
+        integ = (
+            np.zeros(n_cols, dtype=np.int32)
+            if integ is None
+            else np.asarray(integ, dtype=np.int32).reshape(-1)
+        )
+        self.n_model = n_model
+        self.cleaned_coefficients = 0
+        objective: Optional[tuple[np.ndarray, float]] = None
+        #: Whether the objective is the relaxation's (a linear form over its
+        #: auxiliaries standing for the model's objective, minimization convention).
+        self.objective_from_relaxation = bool(relaxation._objective_bound_valid)
+        if relaxation._objective_bound_valid:
+            objective = (
+                np.asarray(relaxation._c, dtype=np.float64).reshape(-1),
+                float(relaxation._obj_offset),
+            )
+        elif objective_fallback is not None:
+            c, off = objective_fallback
+            objective = (self._pad_to(np.asarray(c, dtype=np.float64), n_cols), float(off))
+        super().__init__(
+            n_cols, bounds[:, 0], bounds[:, 1], integ, objective=objective, backend=backend
+        )
+        aux_int = [i for i in self.int_indices if i >= n_model]
+        if aux_int:
+            # A configuration is the model's integer columns; an integer
+            # auxiliary would enter every no-good and the selection key.
+            raise ValueError(
+                f"RelaxationMaster: the relaxation adds {len(aux_int)} integer column(s); "
+                "a configuration must be the model's own integer columns"
+            )
+        A = relaxation._A_ub
+        if A is not None:
+            A = A.toarray() if sp.issparse(A) else np.asarray(A, dtype=np.float64)
+            b = np.asarray(relaxation._b_ub, dtype=np.float64).reshape(-1)
+            if A.shape != (b.shape[0], n_cols):
+                raise ValueError("RelaxationMaster: the relaxation's rows do not match its columns")
+            for row, rhs in zip(A, b):
+                self.add_row(row, "<=", float(rhs))
+        self.truncated = bool(getattr(relaxation, "_build_truncated", False))
+
+    def _pad_to(self, row: np.ndarray, n_cols: int) -> np.ndarray:
+        k = n_cols - self.n_model
+        if row.shape == (self.n_model,):
+            return np.concatenate([row, np.zeros(k)])
+        if row.shape == (self.n_model + 1,):  # (x, eta): eta follows every column
+            return np.concatenate([row[:-1], np.zeros(k), row[-1:]])
+        return row
+
+    def _pad(self, row: Any) -> np.ndarray:
+        return self._pad_to(np.asarray(row, dtype=np.float64), self.n_vars)
+
+    #: A cut coefficient below this fraction of the cut's largest is moved to the
+    #: right-hand side at its worst case over the column's box: the cut stays
+    #: valid (no feasible point is cut) and weakens by at most that fraction of
+    #: the column's range. Measured (#1775 G4.3): one 6.2e-9 entry in an OA
+    #: tangent made the default simplex B&B abandon a 19-column master after 11
+    #: nodes with no bound; cleaned at 1e-7 it solves to optimality.
+    CLEAN_REL = 1e-7
+
+    def add_cut(self, coeffs: Any, rhs: float) -> None:
+        row = self._pad(coeffs).copy()
+        rhs = float(rhs)
+        n = min(row.shape[0], self.n_vars)  # an epigraph column has no box
+        big = float(np.max(np.abs(row))) if row.size else 0.0
+        part = row[:n]
+        lo, hi = self.lb[:n], self.ub[:n]
+        boxed = np.isfinite(lo) & np.isfinite(hi) & (np.abs(lo) < 1e19) & (np.abs(hi) < 1e19)
+        tiny = (part != 0.0) & (np.abs(part) < self.CLEAN_REL * big) & boxed
+        for j in np.flatnonzero(tiny):
+            a = float(part[j])
+            rhs -= min(a * float(lo[j]), a * float(hi[j]))
+            part[j] = 0.0
+        self.cleaned_coefficients += int(np.count_nonzero(tiny))
+        super().add_cut(row, rhs)
+
+    def solve(
+        self,
+        time_limit: float,
+        gap_tolerance: float = 1e-4,
+        incumbent: Optional[float] = None,
+        *,
+        objective_override: Optional[Any] = None,
+        exclude_also: Any = (),
+        extra_cuts: Any = (),
+    ) -> MasterResult:
+        override = None if objective_override is None else self._pad(objective_override)
+        r = super().solve(
+            time_limit,
+            gap_tolerance,
+            incumbent,
+            objective_override=override,
+            exclude_also=exclude_also,
+            extra_cuts=[(self._pad(row), rhs) for row, rhs in extra_cuts],
+        )
+        if r.x is not None:
+            r.x = r.x[: self.n_model]
+        return r
+
+
 def build_master(lowered: Any, *, backend: str = DEFAULT_MASTER_BACKEND) -> MasterMILP:
     """The master of a lowered (algebraic) model: every row that is one linear row.
 
