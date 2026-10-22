@@ -267,6 +267,13 @@ pytest discopt_benchmarks/tests/ -k test_correctness     # Single test file
 pytest discopt_benchmarks/tests/ --cov=benchmarks --cov=utils  # With coverage (≥85% floor, restored by #87)
 ```
 
+CI runs the PR-fast and coverage lanes as 4 duration-balanced shards (`--num-shards 4
+--shard-id K`, `python/tests/_sharding.py`), `-n 4` each; the `Python fast` / `Python
+coverage` checks are aggregators that also verify the shards ran the whole selection. If one
+shard runs much longer than the others, refresh `python/tests/test_durations.json` from an
+unsharded `--junitxml` run with `scripts/update_test_durations.py`. Stale durations cost
+balance only, never coverage.
+
 ### Benchmarking
 ```bash
 python discopt_benchmarks/run_benchmarks.py --suite smoke     # Quick sanity check

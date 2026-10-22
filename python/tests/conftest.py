@@ -7,6 +7,7 @@ os.environ["JAX_PLATFORMS"] = "cpu"
 # Enable 64-bit precision for float64 support.
 os.environ["JAX_ENABLE_X64"] = "1"
 
+import _sharding
 import pytest
 
 # Hypothesis profiles for the WP-4 property and fuzz tests (serialization plan).
@@ -151,8 +152,13 @@ def convex_kernel_solve():
     return solve
 
 
+def pytest_addoption(parser):
+    _sharding.addoption(parser)
+
+
 def pytest_configure(config):
-    """Register custom markers."""
+    """Register custom markers and the CI shard selector (see _sharding)."""
+    config.pluginmanager.register(_sharding.ShardPlugin(), "discopt-shard")
     config.addinivalue_line("markers", "correctness: Known-optimum correctness validation")
     config.addinivalue_line("markers", "minlptests: MINLPTests.jl standardized NLP/MINLP problems")
     config.addinivalue_line("markers", "integration: solver-dependent integration tests")
