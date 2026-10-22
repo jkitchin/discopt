@@ -208,7 +208,10 @@ def test_relaxation_build_failure_is_reported_once_at_warning(monkeypatch, caplo
 
 
 @pytest.mark.unit
-def test_vector_l1_linf_norms_are_nonsmooth_but_matrix_norms_are_not():
+def test_l1_linf_norms_are_nonsmooth_but_the_spectral_norm_is_not():
+    """Vector and (since the #1873 follow-up) 2-D 1-/inf-norms are spelled out as
+    abs/max and route to the B&B; the spectral norm has no relaxation and stays
+    on the NLP."""
     from discopt.solver import _model_contains_nonsmooth_node
 
     for p, expect in [(1, True), ("inf", True), (2, False), (3, False)]:
@@ -216,7 +219,8 @@ def test_vector_l1_linf_norms_are_nonsmooth_but_matrix_norms_are_not():
         v = m.continuous("v", shape=(2,), lb=-2, ub=2)
         m.minimize(dm.norm(v, p))
         assert _model_contains_nonsmooth_node(m) is expect, p
-    m = dm.Model("s")
-    X = m.continuous("X", shape=(2, 2), lb=-2, ub=2)
-    m.minimize(dm.norm(X, 1))
-    assert _model_contains_nonsmooth_node(m) is False
+    for p, expect in [(1, True), ("inf", True), (2, False)]:
+        m = dm.Model("s")
+        X = m.continuous("X", shape=(2, 2), lb=-2, ub=2)
+        m.minimize(dm.norm(X, p))
+        assert _model_contains_nonsmooth_node(m) is expect, p

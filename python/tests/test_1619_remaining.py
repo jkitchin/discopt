@@ -212,3 +212,18 @@ def test_native_kernel_branching_does_not_depend_on_units(monkeypatch, flag, exp
         objs.append(r.objective)
     assert max(objs) - min(objs) <= 1e-6 * (1 + abs(objs[0]))
     assert (len(set(nodes)) == 1) == expect_equal, nodes
+
+
+def test_scale_free_branching_is_opt_in(monkeypatch):
+    """Default OFF since 2026-10-22: at 120 s on the corpus it lost tanksize's
+    certificate and gained none (see ``_scale_free_branching_enabled``). The slow
+    ``test_tanksize_driver_seeded_certifies`` is the end-to-end guard; this pins
+    the default cheaply so a re-graduation is a deliberate edit."""
+    from discopt.solver import _scale_free_branching_enabled
+
+    monkeypatch.delenv("DISCOPT_SCALE_FREE_BRANCHING", raising=False)
+    assert _scale_free_branching_enabled() is False
+    monkeypatch.setenv("DISCOPT_SCALE_FREE_BRANCHING", "1")
+    assert _scale_free_branching_enabled() is True
+    monkeypatch.setenv("DISCOPT_SCALE_FREE_BRANCHING", "0")
+    assert _scale_free_branching_enabled() is False

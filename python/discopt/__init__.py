@@ -54,11 +54,14 @@ if _os.environ.get("JAX_ENABLE_X64", "1") != "0":
     # The env var only takes effect if jax has not been imported yet. If the
     # caller did ``import jax`` *before* ``import discopt``, jax already read the
     # (unset) variable and is in float32 — silently the wrong precision. Update
-    # its live config directly in that case. Guarded on ``jax in sys.modules`` so
-    # this never forces the multi-second jax import on jax-free code paths.
-    if "jax" in _sys.modules:
+    # its live config directly in that case. Guarded on jax being a LOADED module
+    # so this never forces the multi-second jax import on jax-free code paths.
+    # ``sys.modules["jax"] = None`` -- the standard way to block an import, and
+    # how a JAX-less environment is simulated (#1873) -- is not a loaded jax.
+    _jax_mod = _sys.modules.get("jax")
+    if _jax_mod is not None:
         try:
-            _sys.modules["jax"].config.update("jax_enable_x64", True)
+            _jax_mod.config.update("jax_enable_x64", True)
         except Exception as _exc:  # noqa: BLE001 - never make ``import discopt`` fail
             # Not optional telemetry: if this update is swallowed, jax stays in
             # float32 and every downstream relaxation/NLP number is computed at

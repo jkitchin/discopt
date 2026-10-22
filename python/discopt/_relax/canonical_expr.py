@@ -669,18 +669,41 @@ def _prod_scalar_spelling(arg: Expression) -> Optional[Expression]:
 
 
 def _norm_scalar_spelling(name: str, arg: Expression) -> Optional[Expression]:
-    """Value-preserving scalar spelling of ``norm{p}(arg)`` for a 1-D ``arg``.
+    """Value-preserving scalar spelling of ``norm{p}(arg)``.
 
     Mirrors ``_nl_expr_compiler._lower_norm`` term for term, including what it
-    refuses: a 0-d argument (``jnp.linalg.norm`` raises on it) and a >=2-D one
-    (``jnp.linalg.norm``'s induced MATRIX norm, not a fold over elements). Both
-    return ``None`` and the caller keeps the call opaque.
+    refuses: a 0-d argument (``jnp.linalg.norm`` raises on it) and a 2-D one
+    other than ``ord`` 1 / inf, and anything of more dimensions
+    (``jnp.linalg.norm``'s spectral or undefined matrix norms are not folds over
+    elements). Those return ``None`` and the caller keeps the call opaque.
+
+    The 2-D ``ord=1`` / ``ord=inf`` cases are the largest absolute COLUMN / ROW
+    sum, spelled out as ``max`` of ``sum`` of ``abs`` -- exactly what the tape
+    evaluates, so they relax through the existing abs/max envelopes.
     """
     p = _norm_order(name)
     if p is None:
         return None
     shape = static_shape(arg)
-    if shape is None or len(shape) != 1 or shape[0] == 0:
+    if shape is None or 0 in shape:
+        return None
+    if len(shape) == 2 and p in (1.0, math.inf):
+        mat = scalar_elements(arg)
+        if mat is None:
+            return None
+        rows, cols = shape
+        cell: list[list[Expression]] = [
+            [UnaryOp("abs", mat[i * cols + j]) for j in range(cols)] for i in range(rows)
+        ]
+        if p == 1.0:
+            lines = [[cell[i][j] for i in range(rows)] for j in range(cols)]
+        else:
+            lines = cell
+        sums: list[Expression] = [
+            line[0] if len(line) == 1 else SumOverExpression(line) for line in lines
+        ]
+        return sums[0] if len(sums) == 1 else maximum(*sums)
+    if len(shape) != 1:
         return None
     elems = scalar_elements(arg)
     if elems is None:

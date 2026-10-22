@@ -149,3 +149,155 @@ def test_array_residual_gauss_newton_matches_the_jax_arm():
         rows = np.array([[float(g) for g in r.gradient(pt.tolist())] for r in tape._residual_exprs])
         ref = np.vstack([a1, a2.reshape(-1, 3)])
         np.testing.assert_allclose(rows, ref, rtol=1e-13, atol=1e-13)
+
+
+# --------------------------------------------------------------------------- #
+# Matrix 1-/inf-norms, reductions past NlExpr.max_depth, empty sums
+# --------------------------------------------------------------------------- #
+# Three more constructs the tape used to refuse, sending the whole model to the
+# JAX evaluator (``jax-optional-inventory.md`` §1). Each is checked against numpy
+# here, so the test runs without JAX; ``lower_diff`` in the PR compared them with
+# the JAX evaluator too (values and gradients, worst relative difference 1e-14).
+
+
+def _matrix_model():
+    m = dm.Model("mat")
+    x = m.continuous("X", shape=(4, 5), lb=-2, ub=2)
+    return m, x
+
+
+@pytest.mark.parametrize("ord_", [1, "inf"])
+def test_matrix_one_and_inf_norms_match_numpy(ord_):
+    m, x = _matrix_model()
+    node = compile_to_nl_array(dm.norm(x, ord_), m).reshape(-1)[0]
+    rng = np.random.default_rng(7)
+    checked = 0
+    for _ in range(5):
+        vals, flat = _flat_point(m, rng)
+        a = vals[x]
+        expected = np.linalg.norm(a, 1 if ord_ == 1 else np.inf)
+        assert node.eval(flat.tolist()) == pytest.approx(expected, rel=1e-14, abs=1e-14)
+        checked += 1
+    assert checked == 5
+
+
+def test_matrix_spectral_norm_is_still_refused():
+    m, x = _matrix_model()
+    with pytest.raises(UnsupportedForTape, match="spectral"):
+        compile_to_nl_array(dm.norm(x, 2), m)
+
+
+@pytest.mark.parametrize("what", ["prod", "norminf"])
+def test_reductions_past_max_depth_lower_as_a_balanced_tree(what):
+    import pounce
+
+    n = int(pounce.NlExpr.max_depth) + 2001  # past the limit, odd remainder
+    m = dm.Model("deep")
+    v = m.continuous("v", shape=(n,), lb=0.999, ub=1.001)
+    expr = dm.prod(v) if what == "prod" else dm.norm(v, "inf")
+    node = compile_to_nl_array(expr, m).reshape(-1)[0]
+    x = np.random.default_rng(8).uniform(0.999, 1.001, n)
+    expected = float(np.prod(x)) if what == "prod" else float(np.max(np.abs(x)))
+    assert node.eval(x.tolist()) == pytest.approx(expected, rel=1e-12)
+    grad = np.asarray(node.gradient(x.tolist()), dtype=float)
+    if what == "prod":
+        np.testing.assert_allclose(grad, expected / x, rtol=1e-11)
+    else:
+        assert grad[np.argmax(np.abs(x))] == pytest.approx(1.0)
+        assert np.count_nonzero(grad) == 1
+
+
+def test_short_reductions_keep_the_left_fold_bit_for_bit():
+    """Below the depth limit the fold is unchanged, so every model that lowered
+    before this change evaluates in the same order (bound-neutral by
+    construction): compare against an explicit left fold."""
+    m = dm.Model("short")
+    v = m.continuous("v", shape=(7,), lb=0.5, ub=1.5)
+    node = compile_to_nl_array(dm.prod(v), m).reshape(-1)[0]
+    x = np.random.default_rng(9).uniform(0.5, 1.5, 7)
+    acc = x[0]
+    for t in x[1:]:
+        acc = acc * t
+    assert node.eval(x.tolist()) == acc
+
+
+def test_empty_sums_lower_to_zero_constants():
+    m = dm.Model("empty")
+    x = m.continuous("x", shape=(3,), lb=-1, ub=1)
+    big = m.continuous("Y", shape=(2, 3), lb=-1, ub=1)
+    full = compile_to_nl_array(dm.sum(x[0:0]) + x[1], m)
+    flat = np.array([0.1, 0.2, 0.3, 0, 0, 0, 0, 0, 0], dtype=float)
+    assert full.reshape(-1)[0].eval(flat.tolist()) == pytest.approx(0.2)
+    per_row = compile_to_nl_array(dm.sum(big[:, 0:0], axis=1), m)
+    assert per_row.shape == (2,)
+    assert [n.eval(flat.tolist()) for n in per_row] == [0.0, 0.0]
+
+
+# --------------------------------------------------------------------------- #
+# Matrix 1-/inf-norms now RELAX too (canonical spelling) and certify
+# --------------------------------------------------------------------------- #
+def _lp_oracle(c_mat, b, ord_, lb=-2.0, ub=2.0):
+    """``min ||X||_ord s.t. <C, X> >= b``, X in [lb, ub]^(r x c), as an LP.
+
+    Variables: X (r*c), U = |X| (r*c), t. Rows: X - U <= 0, -X - U <= 0, each
+    column (ord 1) or row (ord inf) sum of U <= t, -<C, X> <= -b. Independent of
+    discopt: scipy's HiGHS LP with the textbook epigraph of a max of abs-sums.
+    """
+    from scipy.optimize import linprog
+
+    r, c = c_mat.shape
+    n = r * c
+    cost = np.zeros(2 * n + 1)
+    cost[-1] = 1.0
+    rows, rhs = [], []
+    for k in range(n):
+        for sgn in (1.0, -1.0):
+            row = np.zeros(2 * n + 1)
+            row[k], row[n + k] = sgn, -1.0
+            rows.append(row)
+            rhs.append(0.0)
+    lines = (
+        [[i * c + j for i in range(r)] for j in range(c)]
+        if ord_ == 1
+        else [[i * c + j for j in range(c)] for i in range(r)]
+    )
+    for line in lines:
+        row = np.zeros(2 * n + 1)
+        row[[n + k for k in line]] = 1.0
+        row[-1] = -1.0
+        rows.append(row)
+        rhs.append(0.0)
+    row = np.zeros(2 * n + 1)
+    row[:n] = -c_mat.reshape(-1)
+    rows.append(row)
+    rhs.append(-b)
+    bounds = [(lb, ub)] * n + [(0, None)] * n + [(0, None)]
+    res = linprog(cost, A_ub=np.array(rows), b_ub=np.array(rhs), bounds=bounds, method="highs")
+    assert res.status == 0, res.message
+    return float(res.fun)
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+@pytest.mark.parametrize("ord_", [1, "inf"])
+def test_matrix_norm_models_certify_at_the_lp_optimum(seed, ord_):
+    """Before: the matrix norm was opaque to the relaxation (no dual bound) and the
+    model went to the convex single NLP, which stalled at the kink -- measured
+    ``min norm(X, 1)`` s.t. ``sum(X) >= 3`` on a 2x3 X: objective 3.91 against
+    the optimum 1.0, uncertified. Now it is spelled out as max-of-abs-sums and
+    routed to the spatial B&B like a vector norm; the bound must never exceed the
+    LP oracle's optimum."""
+    rng = np.random.default_rng(seed)
+    c_mat = rng.uniform(0.2, 1.5, size=(2, 2)) * rng.choice([-1.0, 1.0], size=(2, 2))
+    b = 2.0
+    oracle = _lp_oracle(c_mat, b, 1 if ord_ == 1 else "inf")
+    m = dm.Model("matnorm")
+    # 2x2, not 2x3: one 2x3 inf-norm seed took 15.3 s on CI (fast-lane budget
+    # 15 s); the shape is not what the test is about.
+    x = m.continuous("X", shape=c_mat.shape, lb=-2.0, ub=2.0)
+    m.subject_to(dm.sum(c_mat * x) >= b)
+    m.minimize(dm.norm(x, ord_))
+    r = m.solve(time_limit=60)
+    assert r.bound is not None
+    assert r.bound <= oracle + 1e-6, (r.bound, oracle)
+    assert r.gap_certified, (r.status, r.objective, r.bound, oracle)
+    assert r.objective == pytest.approx(oracle, abs=1e-5, rel=1e-5)

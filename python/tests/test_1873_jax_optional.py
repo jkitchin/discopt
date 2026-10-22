@@ -157,6 +157,33 @@ def test_without_jax_dm_custom_refuses_at_construction():
     assert "REFUSED dm.custom" in p.stdout and "discopt[jax]" in p.stdout, p.stdout
 
 
+def test_a_none_entry_in_sys_modules_does_not_crash_import_or_solve():
+    """``sys.modules["jax"] = None`` is the standard way to block an import, and
+    ``jax_available()`` documents treating it as "not installed". Two call sites
+    tested ``"jax" in sys.modules`` instead, which is TRUE for a ``None`` entry:
+    ``import discopt`` then warned that JAX "is running in float32", and every
+    ``Model.solve()`` raised ``ModuleNotFoundError: No module named 'jax.numpy'``
+    from the float64 check (measured before the fix)."""
+    body = (
+        "import sys\n"
+        "sys.modules['jax'] = None\n"
+        "import logging\n"
+        "logging.basicConfig(level=logging.WARNING)\n"
+        "import discopt.modeling as dm\n"
+        "m = dm.Model('t')\n"
+        "x = m.continuous('x', lb=0.5, ub=2.0)\n"
+        "m.minimize(dm.exp(x) + x**2)\n"
+        "r = m.solve(time_limit=20)\n"
+        "print('STATUS', r.status)\n"
+    )
+    p = subprocess.run(
+        [sys.executable, "-c", body], capture_output=True, text=True, cwd="/", timeout=600
+    )
+    assert p.returncode == 0, p.stderr[-3000:]
+    assert "STATUS optimal" in p.stdout, (p.stdout, p.stderr[-2000:])
+    assert "float32" not in p.stderr, p.stderr[-2000:]
+
+
 # Every module with a module-scope ``import jax``. Importing one without JAX must
 # raise the named error, not a bare ``No module named 'jax'``.
 _JAX_MODULES = sorted(

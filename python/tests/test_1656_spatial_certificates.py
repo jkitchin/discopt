@@ -43,7 +43,7 @@ def _lsq():
 
 @pytest.mark.parametrize("scale_free", ["1", "0"])
 def test_native_kernel_certifies_the_published_pair(monkeypatch, scale_free):
-    # #1619 D-11: under the default scale-free branching rule the kernel closes
+    # #1619 D-11: under the (opt-in) scale-free branching rule the kernel closes
     # this gap in 1153 nodes without ever accepting a McCormick-tight LP
     # point as its incumbent, so there is no ``c'x`` to price. The pricing
     # witness (32 calls, all raised, 3495 nodes) lives on the legacy rule, which

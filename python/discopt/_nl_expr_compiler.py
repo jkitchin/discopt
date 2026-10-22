@@ -576,8 +576,9 @@ def _lower_uncached(
         operand = rec(expr.operand)
         if operand.size == 0:
             # `np.sum` of an empty object array returns the integer 0, not a tape
-            # node, and that would poison every node built on top of it.
-            raise UnsupportedForTape("SumExpression over an empty array has no tape node")
+            # node, and that would poison every node built on top of it. The value
+            # is `jnp.sum`'s: zeros of the reduced shape, built as tape constants.
+            return _empty_sum(operand.shape, expr.axis, E)
         return _sum_along(operand, expr.axis, E)
 
     if isinstance(expr, SumOverExpression):
@@ -954,6 +955,23 @@ def _stacked_matmul(left: np.ndarray, right: np.ndarray, E: Any, budget: _Budget
         out = out[..., 0, :]
     if drop_col:
         out = out[..., 0]
+    return out
+
+
+def _empty_sum(shape: tuple[int, ...], axis: Any, E: Any) -> np.ndarray:
+    """``jnp.sum`` of a ZERO-SIZE operand: ``0.0`` in every output slot.
+
+    The output shape is numpy's own (``np.sum`` of a float array of ``shape``),
+    which also validates ``axis``; a bad axis is refused in the tape's currency,
+    as in :func:`_sum_along`, rather than escaping the fallback as numpy's error.
+    """
+    try:
+        out_shape = np.sum(np.zeros(shape), axis=axis).shape
+    except (ValueError, TypeError) as exc:  # numpy's AxisError is a ValueError
+        raise UnsupportedForTape(f"sum axis {axis!r} is invalid for shape {shape}") from exc
+    out = np.empty(out_shape, dtype=object)
+    for idx in np.ndindex(*out_shape):
+        out[idx] = E.const_(0.0)
     return out
 
 
@@ -1485,14 +1503,20 @@ def _lower_function(expr: FunctionCall, E: Any, args: list, budget: _Budget) -> 
 
 
 def _fold(arr: np.ndarray, combine: Any, E: Any, what: str) -> Any:
-    """Left-fold ``combine`` over the C-order elements of ``arr``.
+    """Fold ``combine`` over the C-order elements of ``arr``.
 
-    Only for the two reductions with no n-ary opcode — ``prod`` (a ``*`` chain)
-    and ``norminf`` (a ``max`` chain). The chain's depth *is* its element count,
-    so the array's width is checked against ``NlExpr.max_depth`` up front rather
-    than letting POUNCE raise a ``ValueError`` that :func:`try_compile` does not
-    catch and that would therefore escape the fallback instead of degrading to
-    JAX. Sums route through :func:`_sum_along` and have no such limit.
+    Only for the reductions with no n-ary opcode — ``prod`` (a ``*`` chain) and
+    ``max`` (``norminf`` and the matrix 1-/inf-norms). Sums route through
+    :func:`_sum_along` and have no depth at all.
+
+    A left fold's depth *is* its element count, and POUNCE refuses an expression
+    nested past ``NlExpr.max_depth`` with a ``ValueError`` that
+    :func:`try_compile` does not catch. Below that limit the left fold is kept
+    as it always was, so every model that lowered before evaluates in the same
+    order, bit for bit. From the limit up the fold is a BALANCED pairwise tree,
+    depth ``ceil(log2 n)``: ``*`` and ``max`` are associative, so it is the same
+    function, and ``jnp.prod``/``jnp.max`` reduce as a tree too. That used to be
+    a refusal, which sent the whole model to the JAX evaluator.
 
     Refuses an empty array rather than inventing an identity element: the tape
     node for "the product of nothing" would be a constant the JAX path never
@@ -1504,10 +1528,13 @@ def _fold(arr: np.ndarray, combine: Any, E: Any, what: str) -> Any:
         raise UnsupportedForTape(f"{what} over an empty array has no tape node")
     limit = int(E.max_depth)
     if flat.size >= limit:
-        raise UnsupportedForTape(
-            f"{what} over {flat.size} elements would nest past NlExpr.max_depth "
-            f"({limit}); this reduction has no n-ary tape opcode"
-        )
+        level = flat.tolist()
+        while len(level) > 1:
+            paired = [combine(level[i], level[i + 1]) for i in range(0, len(level) - 1, 2)]
+            if len(level) % 2:
+                paired.append(level[-1])
+            level = paired
+        return level[0]
     acc = flat[0]
     for k in range(1, flat.size):
         acc = combine(acc, flat[k])
@@ -1515,7 +1542,8 @@ def _fold(arr: np.ndarray, combine: Any, E: Any, what: str) -> Any:
 
 
 def _lower_norm(name: str, E: Any, arr: np.ndarray) -> Any:
-    """``jnp.linalg.norm(arr, ord=p)`` for a vector ``arr``."""
+    """``jnp.linalg.norm(arr, ord=p)`` for a vector ``arr``, or a 2-D ``arr`` with
+    ``ord`` 1 or inf (the induced norms that are folds over elements)."""
     suffix = name[len("norm") :]
     if suffix == "inf":
         ord_p: float = math.inf
@@ -1527,10 +1555,18 @@ def _lower_norm(name: str, E: Any, arr: np.ndarray) -> Any:
         except ValueError as exc:
             raise UnsupportedForTape(f"unsupported norm order: {name!r}") from exc
 
+    if arr.ndim == 2 and ord_p in (1.0, math.inf):
+        # `jnp.linalg.norm`'s induced matrix norms that ARE folds: ord=1 is the
+        # largest absolute COLUMN sum, ord=inf the largest absolute ROW sum.
+        absolutes = _map(lambda a: _abs(E, a), arr)
+        sums = _sum_along(absolutes, 0 if ord_p == 1.0 else 1, E)
+        return _fold(sums, lambda a, b: E.max(a, b), E, name)
     if arr.ndim > 1:
         raise UnsupportedForTape(
-            f"{name} of a {arr.ndim}-D argument is jnp.linalg.norm's MATRIX norm "
-            "(induced/spectral), which is not a fold over elements"
+            f"{name} of a {arr.ndim}-D argument is jnp.linalg.norm's MATRIX norm; "
+            "only the 2-D ord=1 (max column sum) and ord=inf (max row sum) are folds "
+            "over elements. ord=2 is the spectral norm, which needs a singular-value "
+            "opcode the tape does not have"
         )
     # `jnp.linalg.norm` of a 0-d argument raises; a 1-element vector is fine and
     # `reshape(-1)` makes the 0-d case into one, matching nothing -- so refuse it

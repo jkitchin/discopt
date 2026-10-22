@@ -12,6 +12,16 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **Matrix 1-/inf-norms certify, and more models run without JAX (#1873 second
+  follow-up).** `dm.norm(X, 1)` / `dm.norm(X, "inf")` of a 2-D `X` (largest
+  absolute column / row sum) are evaluated by the default tape evaluator,
+  relaxed through the existing abs/max envelopes, and routed to the spatial
+  B&B like vector norms. They used to need JAX and had no dual bound: `min
+  norm(X, 1)` on a 2x3 `X` stalled at 3.91 against the optimum 1.0. `dm.prod`,
+  `max`-norms over more elements than the tape's nesting limit (10,000) and
+  `dm.sum` of a zero-size array also lower on the tape now. The spectral norm
+  `dm.norm(X, 2)` still needs `discopt[jax]`.
+
 - **`sign` has a relaxation, so models containing it can be certified (#1873
   follow-up).** It used to be refused by the canonicalizer, which left such models
   with `bound=None`. The default engine now relaxes `sign(t)` by the closed convex
@@ -181,6 +191,18 @@ The release procedure that produces these entries is documented in
   deep inside POUNCE.
 
 ### Fixed
+
+- **`DISCOPT_SCALE_FREE_BRANCHING` is default OFF again (`=1` opts in).** It made
+  the native spatial kernel lose MINLPLib `tanksize` (certified in 63 s with it
+  off; with it on, a 200 s time limit with the bound frozen at 1.2422 against
+  1.2686). Re-measured on the 66-instance corpus at 120 s: certified 53 off, 52
+  on, no instance gained. Its original graduation panel ran at 20 s, which could
+  not see the loss. `test_tanksize_driver_seeded_certifies` passes again.
+
+- **Blocking JAX with `sys.modules["jax"] = None` no longer crashes every solve.**
+  Two checks tested `"jax" in sys.modules`, which is true for a blocked entry:
+  `import discopt` warned that JAX ran in float32, and `Model.solve()` raised
+  `ModuleNotFoundError: No module named 'jax.numpy'`.
 
 - **Hand-written `dm.sum(C * x)` is read by three passes that used to refuse it.**
   The interval Hessian abstained on it. The sparse linear/quadratic extractors
