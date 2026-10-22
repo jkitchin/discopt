@@ -126,6 +126,9 @@ def _make_jac_values_fn(cons_fn_xp, colors: np.ndarray, seed_matrix: np.ndarray,
     against the caller's own index arrays removes an ordering assumption that
     would be silent when wrong — the whole failure mode #1370 is about.
     """
+    from discopt._optional_jax import require_jax
+
+    require_jax("DISCOPT_BLOCK_VECTOR_EVAL (the compressed-derivative evaluator)")
     import jax
     import jax.numpy as jnp
 

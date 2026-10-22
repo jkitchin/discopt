@@ -34,6 +34,9 @@ import discopt.modeling as dm
 import discopt.solver as S
 import numpy as np
 import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.nlp_evaluator import NLPEvaluator
 
 

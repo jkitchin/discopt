@@ -107,7 +107,9 @@ JAX -- not on the LP, QP, MIQP and simplex-MILP paths, and not on the nonlinear 
 either. **That fallback is the exception, and it is on the default path**: a plain
 `Model.solve()` of `dm.norm(X, 2)` with a 3x3 `X`, with no `import jax` on the caller's
 side, takes `sys.modules` from 0 to 219 `jax` entries. "A default solve does not import
-JAX" is true of the tape-representable majority, not of every model.
+JAX" is true of the tape-representable majority, not of every model. JAX is the optional
+`discopt[jax]` extra (#1873); without it, such a model refuses with an `ImportError` that
+names the construct the tape has no opcode for and the extra to install.
 
 **Relaxation layer** (`python/discopt/_relax`): DAG compiler, the uniform factorable
 relaxation engine, McCormick convex/concave envelopes, alphaBB, piecewise McCormick,
@@ -184,12 +186,20 @@ See the benchmark notebooks for full scaling plots and details:
 Requires Python 3.12+; building from source additionally needs Rust 1.84+.
 POUNCE -- the default numerical engine -- is a pure-Rust Ipopt port installed as a
 core dependency, with no system libraries needed. `highspy` (the pure LP/MILP entry
-route) and `jax`/`jaxlib` are also core dependencies; JAX is installed but is *not*
-imported by a default solve (see the NLP-evaluation note above). cyipopt is an
-optional fallback that needs the Ipopt C library.
+route) is also a core dependency. **JAX is optional** (the `discopt[jax]` extra, #1873):
+a default solve does not import it (see the NLP-evaluation note above). It is needed
+for a model with no tape opcode (`dm.custom`, a matrix 2-norm), `DISCOPT_NLP_EVAL=jax`,
+and the features that use JAX autodiff on purpose -- `discopt.estimate`,
+`discopt.sensitivity`, `dm.argmin`/`dm.implicit`/`dm.external`, the differentiable and
+parametric layers, sIPOPT sensitivity and the learned relaxations. Without it each of
+those raises an `ImportError` naming the extra. cyipopt is an optional fallback that
+needs the Ipopt C library.
 
 ```bash
 pip install discopt
+
+# JAX-backed features (dm.custom, estimation, sensitivity, differentiable layers, ...)
+pip install "discopt[jax]"
 
 # Optional cyipopt fallback (needs the Ipopt C library; macOS: brew install ipopt)
 pip install "discopt[ipopt]"

@@ -5,9 +5,12 @@ Each implemented pattern in ``symbolic.patterns`` is certified numerically
 proof in its docstring / ``design/relaxation-patterns.md``.
 """
 
+import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 import jax
 import numpy as np
-import pytest
 
 jax.config.update("jax_enable_x64", True)
 

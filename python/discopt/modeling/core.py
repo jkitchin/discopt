@@ -3500,6 +3500,12 @@ def custom(fn: Callable, *, name: Optional[str] = None) -> Callable:
     """
     if not callable(fn):
         raise TypeError(f"custom() expects a callable, got {type(fn).__name__}")
+    from discopt._optional_jax import require_jax
+
+    # #1873: the body is traced and differentiated by JAX on every route (the
+    # MCBox engine, the JAX evaluator, DIRECT's local refine), so refuse here, at
+    # the call that names the feature, rather than at the first evaluation.
+    require_jax("dm.custom (a JAX-traced user function)")
 
     def _build(*args) -> Expression:
         return CustomCall(fn, *[_wrap(a) for a in args], name=name)
@@ -10574,15 +10580,10 @@ class Model:
                 # calling it here imported JAX on every nonlinear solve even when
                 # the tape backend was selected (#75). The jax import stays inside
                 # the fallback so it happens only when the tape is not used.
-                from discopt._tape_nlp_evaluator import build_evaluator
-
-                def _jax_evaluator():
-                    from discopt._relax.nlp_evaluator import cached_evaluator
-
-                    return cached_evaluator(self)
+                from discopt._tape_nlp_evaluator import build_evaluator, jax_fallback_evaluator
 
                 _verify_snap = (
-                    build_evaluator(self, _jax_evaluator),
+                    build_evaluator(self, lambda: jax_fallback_evaluator(self)),
                     [v.name for v in self._variables],
                 )
                 # #1561: the same columns, frozen, for the certificate backstop.

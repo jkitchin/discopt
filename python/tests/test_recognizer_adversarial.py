@@ -13,9 +13,12 @@ A second block gives the soundness *gates* (``verify_envelope`` / Jensen) negati
 tests, ensuring they actually reject planted-unsound / planted-non-convex inputs.
 """
 
+import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 import jax
 import jax.numpy as jnp
-import pytest
 
 jax.config.update("jax_enable_x64", True)
 

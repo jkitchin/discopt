@@ -325,6 +325,9 @@ def _build_layer(
         ``full``.  Differentiable twice.  Carries ``inner_solve_count()`` and
         ``last_solve_info()`` for callers that need the underlying POUNCE result.
     """
+    from discopt._optional_jax import require_jax
+
+    require_jax("dm.argmin / dm.argmin_layer (differentiating the inner solve)")
     import jax
     import jax.numpy as jnp
 
@@ -871,6 +874,9 @@ def argmin(
     (``status="feasible"``, ``gap_certified=False``), and cannot be exported to
     ``.nl``: see the module docstring for the full contract.
     """
+    from discopt._optional_jax import require_jax
+
+    require_jax("dm.argmin")
     import jax.numpy as jnp
 
     if not isinstance(bind, dict) or not bind:

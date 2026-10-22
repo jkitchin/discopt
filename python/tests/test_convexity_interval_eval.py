@@ -9,8 +9,12 @@ from __future__ import annotations
 
 import discopt.modeling as dm
 import numpy as np
+import pytest
 from discopt._relax.convexity.interval import Interval
 from discopt._relax.convexity.interval_eval import evaluate_interval
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.dag_compiler import compile_expression
 from discopt.modeling.core import FunctionCall, Model
 

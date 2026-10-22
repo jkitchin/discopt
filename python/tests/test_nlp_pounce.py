@@ -17,6 +17,8 @@ import pytest
 
 pounce = pytest.importorskip("pounce")
 
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.nlp_evaluator import NLPEvaluator  # noqa: E402
 from discopt.modeling import examples  # noqa: E402
 from discopt.modeling.core import Model  # noqa: E402

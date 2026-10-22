@@ -19,6 +19,9 @@ import math
 import discopt.modeling as dm
 import numpy as np
 import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.envelopes import relax_power_int
 from discopt._relax.mccormick import relax_negative_int_power, relax_pow
 from discopt._relax.relaxation_compiler import compile_objective_relaxation

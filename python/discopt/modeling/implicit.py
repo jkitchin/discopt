@@ -53,6 +53,9 @@ def _implicit_solver(
     hand-rolled ``custom_vjp`` (reverse only) would break.  Exposed separately
     from :func:`implicit` so the numerics are unit-testable without a full model.
     """
+    from discopt._optional_jax import require_jax
+
+    require_jax("dm.implicit (jax.lax.custom_root)")
     import jax
     import jax.numpy as jnp
 
@@ -309,6 +312,9 @@ def implicit(
         If ``n_unknowns < 1``, ``x0`` has the wrong length, or ``residual``
         probed at a dummy point does not return exactly ``n_unknowns`` entries.
     """
+    from discopt._optional_jax import require_jax
+
+    require_jax("dm.implicit")
     import jax.numpy as jnp
 
     if n_unknowns < 1:

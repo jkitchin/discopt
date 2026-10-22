@@ -10,10 +10,13 @@ refusal outside scope.
 import os
 
 os.environ.setdefault("JAX_ENABLE_X64", "1")
+import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 from discopt._relax import mcbox as mc
 from discopt._relax.mcbox import UnsupportedMcboxOp, relax_through
 

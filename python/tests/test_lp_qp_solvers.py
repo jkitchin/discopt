@@ -14,10 +14,13 @@ Tests cover:
 from __future__ import annotations
 
 import discopt.modeling as dm
+import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 
 # ---------------------------------------------------------------
 # 1. Problem Classifier Tests

@@ -26,10 +26,13 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 import jax.nn as jnn
 import jax.numpy as jnp
 import numpy as np
-import pytest
 from discopt._relax.mccormick import (
     relax_abs,
     relax_atan,

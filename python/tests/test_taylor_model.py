@@ -14,6 +14,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 from discopt._relax import cutting_planes
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax import taylor_model as tm
 
 N_SAMPLES = 10_000

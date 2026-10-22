@@ -21,10 +21,13 @@ from __future__ import annotations
 
 import warnings
 
+import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 import discopt._relax.dag_compiler as dag_compiler
 import discopt.modeling as dm
 import numpy as np
-import pytest
 from discopt.mo import (
     ParetoFront,
     objective_evaluator,

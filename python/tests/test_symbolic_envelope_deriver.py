@@ -10,10 +10,13 @@ The engine itself imports SymPy (a design-time ``[sympy]`` extra); the whole
 module is skipped if SymPy is unavailable.
 """
 
+import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 
 jax.config.update("jax_enable_x64", True)
 

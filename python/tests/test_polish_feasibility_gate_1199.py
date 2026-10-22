@@ -29,6 +29,9 @@ import discopt.solver as solver_mod
 import numpy as np
 import pytest
 from discopt._relax import primal_heuristics as ph
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.nlp_evaluator import cached_evaluator
 from discopt.modeling.core import from_nl
 from discopt.solvers.nlp_ipopt import _infer_constraint_bounds

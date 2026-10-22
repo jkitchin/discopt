@@ -10,6 +10,9 @@ import discopt.modeling as dm
 import numpy as np
 import pytest
 from discopt import Model
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.dag_compiler import compile_expression
 from discopt.modeling.core import (
     _SUM_CANONICAL_MIN_TERMS,

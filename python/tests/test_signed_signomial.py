@@ -1,9 +1,12 @@
 """Soundness and curvature tests for the signed-signomial DC relaxation."""
 
+import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 from discopt._relax.symbolic.signed_signomial import signed_signomial_dc_envelope
 
 jax.config.update("jax_enable_x64", True)

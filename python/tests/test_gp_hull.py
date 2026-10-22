@@ -1,11 +1,14 @@
 # ruff: noqa: E402, I001
+import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 import jax
 
 jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp
 import numpy as np
-import pytest
 
 from discopt._relax.symbolic.gp_hull import monomial_log_envelope
 

@@ -33,9 +33,12 @@ Every test counts the assertions it executed and the file fails if a count is ze
 from __future__ import annotations
 
 import discopt.modeling as dm
+import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 import jax.numpy as jnp
 import numpy as np
-import pytest
 from discopt._alphabb_rigorous import rigorous_alpha
 from discopt._relax.mcbox import MCBox
 

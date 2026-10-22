@@ -3250,14 +3250,9 @@ def _make_evaluator(model: Model):
     tape backend. Default is unchanged — anything other than ``tape`` takes the
     JAX path, and the tape is bound-CHANGING until the §5 panel says otherwise.
     """
-    from discopt._tape_nlp_evaluator import build_evaluator
+    from discopt._tape_nlp_evaluator import build_evaluator, jax_fallback_evaluator
 
-    def _jax_evaluator():
-        from discopt._relax.nlp_evaluator import cached_evaluator
-
-        return cached_evaluator(model)
-
-    return build_evaluator(model, _jax_evaluator)
+    return build_evaluator(model, lambda: jax_fallback_evaluator(model))
 
 
 def _alphabb_node_box(model, node_lb, node_ub):

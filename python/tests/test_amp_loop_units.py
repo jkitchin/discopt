@@ -18,6 +18,9 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import numpy as np
 import pytest
 from discopt._relax.discretization import DiscretizationState
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt._relax.term_classifier import classify_nonlinear_terms
 from discopt.modeling.core import Model

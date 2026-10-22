@@ -45,6 +45,9 @@ import logging
 import discopt.modeling as dm
 import numpy as np
 import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.mcbox import MCBox
 from discopt._relax.mccormick_lp import MccormickLPRelaxer
 

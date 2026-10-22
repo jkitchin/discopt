@@ -18,6 +18,9 @@ import discopt.modeling as dm
 import discopt.solver as solver_mod
 import numpy as np
 import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.nlp_evaluator import cached_evaluator
 from discopt._relax.primal_heuristics import _check_constraint_feasibility
 from discopt.modeling.core import SolveResult

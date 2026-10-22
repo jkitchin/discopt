@@ -10,10 +10,13 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import time
 
 import discopt.modeling.core as dm
+import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 from discopt._relax.batch_evaluator import (
     BatchRelaxationEvaluator,
     batch_evaluator_from_constraint,

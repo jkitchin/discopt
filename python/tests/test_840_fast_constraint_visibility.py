@@ -23,7 +23,11 @@ from __future__ import annotations
 
 import discopt.modeling as dm
 import numpy as np
+import pytest
 import scipy.sparse as sp
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.nlp_evaluator import cached_evaluator
 from discopt._relax.primal_heuristics import _check_constraint_feasibility, is_qubo
 

@@ -19,10 +19,13 @@ import os
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 os.environ.setdefault("DISCOPT_REDUCED_LP_BACKEND", "scipy")
 import discopt.modeling as dm  # noqa: E402
+import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
-import pytest  # noqa: E402
 from discopt._relax.mcbox import (  # noqa: E402
     MCBox,
     UnsupportedMcboxOp,

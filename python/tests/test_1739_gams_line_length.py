@@ -16,6 +16,9 @@ from __future__ import annotations
 import discopt.modeling as dm
 import numpy as np
 import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.dag_compiler import compile_expression
 from discopt.export.gams import _MAX_LINE, _wrap_line
 from discopt.modeling.gams_parser import parse_gams

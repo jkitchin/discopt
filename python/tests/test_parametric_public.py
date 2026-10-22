@@ -16,9 +16,12 @@ import sys
 from types import SimpleNamespace
 
 import discopt.modeling as dm
+import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 import jax
 import numpy as np
-import pytest
 from discopt.parametric import (
     compile_expression,
     compile_response_function,

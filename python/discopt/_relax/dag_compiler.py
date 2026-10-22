@@ -39,6 +39,11 @@ from __future__ import annotations
 
 from typing import Callable
 
+from discopt._optional_jax import jax_available, missing_jax_error
+
+if not jax_available():  # #1873: JAX is the optional discopt[jax] extra
+    raise missing_jax_error(__name__)
+
 import jax.numpy as jnp
 import numpy as np
 

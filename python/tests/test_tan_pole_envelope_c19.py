@@ -22,6 +22,9 @@ pole-straddling box), not a single named box.
 
 import numpy as np
 import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax import mccormick as jm
 
 pytestmark = [pytest.mark.unit, pytest.mark.smoke]

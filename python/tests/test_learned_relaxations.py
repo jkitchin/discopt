@@ -14,9 +14,12 @@ from __future__ import annotations
 
 import tempfile
 
+import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 import jax
 import jax.numpy as jnp
-import pytest
 
 try:
     import equinox as eqx

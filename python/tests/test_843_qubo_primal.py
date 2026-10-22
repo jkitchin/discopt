@@ -29,6 +29,9 @@ from pathlib import Path
 import discopt.modeling as dm
 import numpy as np
 import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.qubo_primal import is_qubo, qubo_local_search
 

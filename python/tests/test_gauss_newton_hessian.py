@@ -20,6 +20,9 @@ import discopt.modeling as dm
 import numpy as np
 import pytest
 from discopt._relax.least_squares import extract_residuals
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from discopt._relax.nlp_evaluator import NLPEvaluator
 from discopt.modeling.core import Constant, Model
 

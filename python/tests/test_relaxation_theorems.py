@@ -18,6 +18,9 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import discopt.modeling.core as dm
 import pytest
+
+pytest.importorskip("jax", reason="JAX is the optional discopt[jax] extra (#1873)")
+
 from relaxation_harness import (
     assert_containment,
     assert_convexity,
