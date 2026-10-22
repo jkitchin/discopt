@@ -122,11 +122,11 @@ def test_translate_unary_functions(vc):
 
 
 def _value(expr, model, **point):
-    """Evaluate ``expr`` at ``point`` through the DAG compiler."""
-    from discopt._relax.dag_compiler import compile_expression
+    """Evaluate ``expr`` at ``point`` (POUNCE tape; no JAX on this path)."""
+    from discopt._point_eval import evaluate_at
 
     x = np.array([point[v.name] for v in model._variables], dtype=float)
-    return float(np.asarray(compile_expression(expr, model)(x)))
+    return float(np.asarray(evaluate_at(expr, model, x)))
 
 
 # Values GAMS 53 computes for each intrinsic (``scalar v; v = f(...); display v;``).
