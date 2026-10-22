@@ -30,11 +30,30 @@ STATUS_MAP: dict[str, tuple[str, str]] = {
 }
 
 
-def termination_for(status: str):
-    """Resolve a discopt status string to ``(TerminationCondition, SolverStatus)``."""
+# discopt SolveResult.termination -> Pyomo enums, for a ``feasible`` result that
+# a budget or a user stopped (#1888). ``gap`` / ``exhausted`` / ``presolve`` / ``None``
+# are normal completions and keep the status mapping.
+TERMINATION_MAP: dict[str, tuple[str, str]] = {
+    "time_limit": STATUS_MAP["time_limit"],
+    "node_limit": STATUS_MAP["node_limit"],
+    "iteration_limit": STATUS_MAP["iteration_limit"],
+    "interrupted": ("userInterrupt", "aborted"),
+}
+
+
+def termination_for(status: str, termination: str | None = None):
+    """Resolve a discopt status string to ``(TerminationCondition, SolverStatus)``.
+
+    ``termination`` is ``SolveResult.termination``. It refines only a ``feasible``
+    status: that is the one status that can stand beside an interrupted search
+    (#1888), and it never upgrades or downgrades what ``status`` says was proven.
+    """
     from pyomo.opt import SolverStatus, TerminationCondition
 
-    tc_name, ss_name = STATUS_MAP.get(status, ("unknown", "warning"))
+    if status == "feasible" and termination in TERMINATION_MAP:
+        tc_name, ss_name = TERMINATION_MAP[termination]
+    else:
+        tc_name, ss_name = STATUS_MAP.get(status, ("unknown", "warning"))
     return getattr(TerminationCondition, tc_name), getattr(SolverStatus, ss_name)
 
 

@@ -65,8 +65,8 @@ def test_control_file_forwards_gams_resource_limit_and_relative_gap(monkeypatch,
 
     monkeypatch.setattr(link, "solve_view", solve)
     assert link.solve_from_control_file("unused", sysdir=str(tmp_path)) == 0
-    # optca=0 -> None (discopt's positive default), threads forwarded.
-    assert observed == {"time_limit": 0.25, "gap": 1e-6, "abs_gap": None, "threads": 1}
+    # optca=0 forwarded as 0 (#1889: no absolute allowance), threads forwarded.
+    assert observed == {"time_limit": 0.25, "gap": 1e-6, "abs_gap": 0.0, "threads": 1}
 
 
 def test_positive_optca_and_threads_forwarded():

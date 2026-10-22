@@ -54,16 +54,23 @@ def test_option_is_on_both_public_signatures_and_is_forwardable():
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("bad", [0.0, -1e-6, float("inf"), float("nan")])
-def test_a_nonpositive_or_nonfinite_tolerance_is_refused(bad):
-    """Refuse loudly rather than degrade to the relative arm alone.
-
-    A zero or negative absolute tolerance can never be met by a floating-point
-    gap, so accepting it would silently turn the disjunction back into the
-    relative criterion — the exact mode this option exists to escape.
-    """
+@pytest.mark.parametrize("bad", [-1e-6, float("inf"), float("nan")])
+def test_a_negative_or_nonfinite_tolerance_is_refused(bad):
     with pytest.raises(ValueError, match="abs_gap_tolerance"):
         _resolve_abs_gap_tolerance(bad)
+
+
+@pytest.mark.unit
+def test_a_zero_tolerance_is_accepted_and_met_only_by_a_closed_gap():
+    """#1889: zero is GAMS ``optca=0``, not a degenerate request.
+
+    An earlier version refused it on the claim that a floating-point gap can never
+    meet it. It can: ``max(0, UB - LB) <= 0`` holds whenever the bounds meet, and
+    the relative arm still terminates everything else.
+    """
+    assert _resolve_abs_gap_tolerance(0.0) == 0.0
+    assert _gap_values_converged(2.0, 2.0, gap_tolerance=0.0, abs_gap_tol=0.0)
+    assert not _gap_values_converged(1e-7, 0.0, gap_tolerance=1e-4, abs_gap_tol=0.0)
 
 
 @pytest.mark.unit
@@ -256,12 +263,9 @@ def test_the_native_kernel_mapping_never_widens_the_fathom():
     assert "gap_tol=_kernel_abs_tol" in src, (
         "the native kernel no longer receives the min-mapped absolute tolerance"
     )
+    assert "_kernel_abs_tol = _native_kernel_abs_tol(" in src
 
-    # The mapping itself, replicated from the source under test.
-    def kernel_abs_tol(gap_tolerance: float, abs_gap_tolerance: float | None) -> float:
-        if abs_gap_tolerance is None:
-            return float(gap_tolerance)
-        return min(float(gap_tolerance), float(abs_gap_tolerance))
+    kernel_abs_tol = _solver._native_kernel_abs_tol
 
     # Default is untouched.
     assert kernel_abs_tol(1e-4, None) == 1e-4
@@ -270,8 +274,11 @@ def test_the_native_kernel_mapping_never_widens_the_fathom():
     # A looser absolute request does not loosen this route.
     assert kernel_abs_tol(1e-4, 1e-3) == 1e-4
     # Monotone: no request can produce a threshold above the established one.
-    for abs_req in (1e-12, 1e-9, 1e-6, 1e-4, 1e-2, 1.0):
+    for abs_req in (0.0, 1e-12, 1e-9, 1e-6, 1e-4, 1e-2, 1.0):
         assert kernel_abs_tol(1e-4, abs_req) <= 1e-4
+    # #1889: zero switches the absolute arm off; it does not collapse the
+    # kernel's stop to an exactly closed gap.
+    assert kernel_abs_tol(1e-4, 0.0) == 1e-4
 
 
 @pytest.mark.unit

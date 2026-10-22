@@ -50,6 +50,7 @@ SOLVESTAT_NORMAL = 1
 SOLVESTAT_ITERATION = 2
 SOLVESTAT_RESOURCE = 3  # time / resource interrupt
 SOLVESTAT_TERMINATED = 4
+SOLVESTAT_USER_INTERRUPT = 8
 SOLVESTAT_SOLVER_ERROR = 10
 SOLVESTAT_SYSTEM_ERROR = 13
 
@@ -65,6 +66,17 @@ def is_available() -> bool:
         return False
 
 
+#: ``SolveResult.termination`` values that name an interruption, and the GAMS
+#: solve status each maps to (#1888). ``gap`` / ``exhausted`` / ``presolve`` / ``None``
+#: are normal completions and are absent on purpose.
+_TERMINATION_SOLVESTAT: dict[str | None, int] = {
+    "time_limit": SOLVESTAT_RESOURCE,
+    "node_limit": SOLVESTAT_RESOURCE,
+    "iteration_limit": SOLVESTAT_ITERATION,
+    "interrupted": SOLVESTAT_USER_INTERRUPT,
+}
+
+
 def status_to_gams(result: SolveResult, has_discrete: bool) -> tuple[int, int]:
     """Map a discopt :class:`SolveResult` to ``(modelStat, solveStat)``.
 
@@ -77,6 +89,11 @@ def status_to_gams(result: SolveResult, has_discrete: bool) -> tuple[int, int]:
     ``"optimal"`` result is therefore reported as GAMS ``Optimal`` / ``Integer``
     (certified global) only when certified, else ``LocallyOptimal`` -- the link
     trusts the solver's certificate rather than a static function allow-list.
+
+    A ``"feasible"`` result takes its solve status from ``result.termination``
+    (#1888): ``status`` says what was proven, ``termination`` why the search
+    stopped, and a feasible incumbent at a time/node/iteration limit is a GAMS
+    resource/iteration interrupt, not a normal completion.
     """
     status = (result.status or "").lower()
     has_solution = result.x is not None
@@ -87,7 +104,8 @@ def status_to_gams(result: SolveResult, has_discrete: bool) -> tuple[int, int]:
         model_stat = MODELSTAT_INTEGER if has_discrete else MODELSTAT_OPTIMAL
         return model_stat, SOLVESTAT_NORMAL
     if status == "feasible":
-        return MODELSTAT_FEASIBLE, SOLVESTAT_NORMAL
+        termination = getattr(result, "termination", None)
+        return MODELSTAT_FEASIBLE, _TERMINATION_SOLVESTAT.get(termination, SOLVESTAT_NORMAL)
     if status == "infeasible":
         return MODELSTAT_INFEASIBLE, SOLVESTAT_NORMAL
     if status == "unbounded":
@@ -113,9 +131,10 @@ def _read_gams_options(gev, gev_h) -> dict:
     rejected loudly rather than silently replaced by defaults:
 
     * ``reslim`` must be a positive number; ``optcr`` must be finite and ``>= 0``.
-    * ``optca == 0`` means "no absolute criterion" in GAMS.  discopt's absolute
-      tolerance must be strictly positive, so ``0`` maps to ``None`` (the solver's
-      established default, ``1e-6``); a positive ``optca`` is forwarded as is.
+    * ``optca`` must be finite and ``>= 0`` and is forwarded as is, ``0``
+      included.  GAMS defines it as ``|PB - DB| <= optca``, so ``0`` grants no
+      absolute allowance; mapping it to ``None`` would hand the solver its own
+      positive default (``1e-6``), which GAMS never asked for (#1889).
     * ``threads`` comes from ``gevThreads(gev_h)``, which GEV has already
       resolved from the raw option (``0`` = all cores, ``-N`` = all but ``N``),
       so it is forwarded as is; a non-positive resolved count is rejected.
@@ -136,7 +155,7 @@ def _read_gams_options(gev, gev_h) -> dict:
     return {
         "time_limit": reslim,
         "gap": optcr,
-        "abs_gap": optca if optca > 0.0 else None,
+        "abs_gap": optca,
         "threads": threads,
     }
 

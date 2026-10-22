@@ -242,7 +242,7 @@ class DiscoptSolver(OptSolver):
         results = SolverResults()
         results.solver.name = "discopt"
         results.solver.wallclock_time = getattr(result, "wall_time", None)
-        tc, ss = _mapping.termination_for(result.status)
+        tc, ss = _mapping.termination_for(result.status, getattr(result, "termination", None))
         results.solver.termination_condition = tc
         results.solver.status = ss
         try:
