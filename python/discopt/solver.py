@@ -8173,10 +8173,13 @@ def _model_contains_nonsmooth_node(model: Model) -> bool:
     # abs/max kinks, along whole hyperplanes, and the relaxation layer spells them
     # out through those exact envelopes (#1493: the convex single NLP stalled on
     # ``min norm(v, inf)`` at 0.545 against the optimum 0.5 and, without this,
-    # never fell back to the B&B that certifies it). A >=2-D argument is a MATRIX
-    # norm with no relaxation, where the B&B could only discard the NLP's point,
-    # and a p-norm with 1 < p < inf is smooth away from the origin: both stay on
-    # the NLP.
+    # never fell back to the B&B that certifies it). The 2-D ``norm1``/``norminf``
+    # are the max absolute column/row sum, spelled out the same way (#1873
+    # follow-up), so they get the same treatment: measured, ``min norm(X, 1)``
+    # over a 2x3 ``X`` stalled on the convex NLP at 3.91 against the optimum 1.0,
+    # uncertified. Any other >=2-D argument is a MATRIX norm with no relaxation,
+    # where the B&B could only discard the NLP's point, and a p-norm with
+    # 1 < p < inf is smooth away from the origin: both stay on the NLP.
     _nonsmooth_vector_norms = {"norm1", "norm1.0", "norminf"}
     from discopt._relax.scalarize import static_shape
 
@@ -8197,7 +8200,7 @@ def _model_contains_nonsmooth_node(model: Model) -> bool:
             and expr.func_name in _nonsmooth_vector_norms
             and len(expr.args) == 1
             and (shape := static_shape(expr.args[0])) is not None
-            and len(shape) <= 1
+            and len(shape) <= 2
         ):
             return True
         left = getattr(expr, "left", None)
@@ -12304,10 +12307,12 @@ def solve_model(
     # *warn* about the pathological case where the user imported JAX themselves
     # (in float32) before discopt — which means JAX is already in ``sys.modules``.
     # Gating on that avoids forcing a JAX/XLA import (and its cold-start cost) on
-    # pure LP/MILP/MIQP solves that never touch JAX.
+    # pure LP/MILP/MIQP solves that never touch JAX. ``sys.modules["jax"] = None``
+    # blocks JAX rather than loading it (#1873), so test the entry, not the key:
+    # importing ``jax.numpy`` under that block raises on every solve.
     import sys
 
-    if "jax" in sys.modules:
+    if sys.modules.get("jax") is not None:
         import jax.numpy as jnp
 
         if jnp.zeros(1).dtype != jnp.float64:

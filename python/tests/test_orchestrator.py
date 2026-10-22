@@ -238,8 +238,25 @@ class TestSolveSimple:
         # x1^2 + x2 <= 3
         assert x1**2 + x2 <= 3.0 + 1e-4
 
-    def test_solve_node_count_positive(self, result):
-        assert result.node_count >= 1
+    def test_solve_node_count_is_the_routes_own_count(self, result):
+        """``node_count`` counts the nodes of whichever engine ran.
+
+        This model is a convex MIQCQP, so the default solve goes to the
+        convex-MINLP route (LP/NLP-BB over a HiGHS master), not discopt's own
+        branch and bound. HiGHS solves that master in presolve and reports
+        ``mip_node_count == 0`` (1 with presolve off), which is what the route
+        passes through. This test used to assert ``>= 1``, written when every
+        solve went through discopt's tree, which always counts its root.
+        """
+        assert "lp_nlp_bb" in (result.algorithm_route or ""), result.algorithm_route
+        assert isinstance(result.node_count, int)
+        assert result.node_count >= 0
+
+    def test_own_branch_and_bound_counts_at_least_the_root(self, monkeypatch):
+        monkeypatch.setenv("DISCOPT_CONVEX_MINLP_ROUTE", "0")
+        r = example_simple_minlp().solve()
+        assert "branch and bound" in (r.algorithm_route or ""), r.algorithm_route
+        assert r.node_count >= 1
 
     def test_solve_wall_time_positive(self, result):
         assert result.wall_time > 0

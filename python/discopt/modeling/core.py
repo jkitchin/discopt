@@ -3949,16 +3949,21 @@ def norm(x: Expression, ord: Union[int, float, str] = 2) -> Expression:
 
     Notes
     -----
-    ``norm`` is a **vector** norm. Given a 2-D argument the JAX evaluation path
-    applies :func:`numpy.linalg.norm`'s *matrix* semantics — ``ord=2`` is then
-    the spectral norm, not ``‖vec(X)‖₂``. The relaxation layer spells a 1-D
-    norm out over its elements (``sum|x_i|``, ``max|x_i|``,
-    ``sqrt(sum x_i**2)``, ...) exactly as the evaluator computes it, so a vector
-    norm relaxes like its hand-written scalar form (#1493). A matrix argument
-    has no envelope of its own: the only claim made about it is ``norm >= 0``,
-    so it cannot certify (it gets no useful dual bound rather than a wrong
-    one). Prefer building a matrix norm explicitly from ``dm.sum``/``**`` if
-    you need one on the global path.
+    ``norm`` is a **vector** norm. Given a 2-D argument the evaluators apply
+    :func:`numpy.linalg.norm`'s *matrix* semantics — ``ord=2`` is then the
+    spectral norm, not ``‖vec(X)‖₂``; ``ord=1``/``inf`` are the largest absolute
+    column/row sum. The default (POUNCE tape) evaluator handles the matrix
+    1-/inf-norms; the spectral norm needs the JAX evaluator (``discopt[jax]``).
+    The relaxation layer spells a 1-D norm out over its elements (``sum|x_i|``,
+    ``max|x_i|``, ``sqrt(sum x_i**2)``, ...) exactly as the evaluator computes
+    it, so a vector norm relaxes like its hand-written scalar form (#1493). A
+    matrix argument
+    with ``ord`` 1 or inf is spelled out the same way (max of absolute column /
+    row sums) and certifies; the spectral norm (``ord=2``) has no envelope of
+    its own: the only claim made about it is ``norm >= 0``, so it cannot
+    certify (it gets no useful dual bound rather than a wrong one). Prefer
+    building it explicitly from ``dm.sum``/``**`` if you need one on the global
+    path.
 
     Returns
     -------

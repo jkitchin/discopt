@@ -91,7 +91,7 @@ construct that reaches it, and what removing the fallback would take:
 | `_map` (> 2 operands) | no current caller (defensive) | none |
 | `compile_to_nl_expr` (array-valued) | a scalar-only caller given an array body; `TapeNLPEvaluator` flattens bodies, so not on the evaluator path | none |
 | `rec`, binary/unary operator | an operator outside `+ - * / ** neg abs`; the modeling layer emits none | none |
-| `rec`, empty `SumExpression` | `dm.sum` of a zero-size array | small: lower to the constant 0 |
+| ~~`rec`, empty `SumExpression`~~ | `dm.sum` of a zero-size array | **Done** (second follow-up): `_empty_sum` lowers it to `0.0` constants of numpy's reduced shape, as `jnp.sum` does |
 | `rec`, `IndexExpression` not static | an index the compiler cannot resolve to a slot, including out-of-range (numpy raises; `jnp` clamps) | none. Refusing is correct, and with JAX the fallback clamps silently |
 | `rec`, `CustomCall` | `dm.custom`, `dm.implicit`, `dm.external` (and `dm.argmin` layers) | **impossible by design**. The body is an opaque JAX callable, so these stay `[jax]`-only |
 | `rec`, unknown node type | a node class the compiler does not know (none today) | none |
@@ -100,16 +100,19 @@ construct that reaches it, and what removing the fallback would take:
 | `_broadcast_size` | operands that do not broadcast | none (malformed) |
 | `_require_fused_xlog` | `entropy`/`centropy` with a pounce build older than #489 | none. Upgrading pounce removes it |
 | `_lower_function` (`function {name!r}`) | a `FunctionCall` name with no lowering. Every name `dm.*` emits is lowered today (`exp log log10 log1p log2 sqrt sin cos tan asin acos atan sinh cosh tanh asinh acosh atanh erf abs sign min max atan2 sigmoid softplus entropy centropy signpower prod norm*`), so only a hand-built node reaches it | none |
-| `_fold` (empty; deeper than `NlExpr.max_depth`) | `dm.prod`/`dm.min`/`dm.max`/`norm` of an empty array, or of more elements than the tape's nesting depth | moderate: an n-ary tape opcode, or a balanced-tree fold, removes the depth limit |
-| `_lower_norm` (order; **matrix norm**; scalar) | `dm.norm(X, ord)` with 2-D `X` (the CLAUDE.md case: 219 `jax` modules), or a 0-D argument | large for `ord=2` (spectral norm needs an SVD opcode with derivatives). `ord=1`/`inf` of a matrix are max-of-column/row-sums, which are cheap folds. `"fro"` is refused at `dm.norm` already (#1369) |
+| `_fold` (empty) ~~/ deeper than `NlExpr.max_depth`~~ | `dm.prod`/`norm` of an empty array; ~~or of more elements than the tape's nesting depth~~ | Depth: **done** (second follow-up), a balanced pairwise tree from the limit up (the left fold below it is unchanged, bit for bit). Empty: none -- `jnp.max` of an empty array raises, so refusing is right |
+| `_lower_norm` (order; **matrix norm**; scalar) | `dm.norm(X, ord)` with 2-D `X` (the CLAUDE.md case: 219 `jax` modules), or a 0-D argument | `ord=1`/`inf` of a matrix: **done** (second follow-up), max column/row absolute sum. `ord=2` remains: the spectral norm needs a singular-value opcode with derivatives in POUNCE (a separate Rust package), so it stays `[jax]`-only. `"fro"` is refused at `dm.norm` already (#1369) |
 | ~~`TapeNLPEvaluator._build_residual_exprs` → `compile_to_nl_expr` (array-valued)~~ | Gauss-Newton (`gauss_newton=True`, which `discopt.ml.train()` sets) with an **array-valued residual** | **Done** (#1873 follow-up): each residual is lowered with `compile_to_nl_array(r).reshape(-1)` and concatenated, the JAX arm's `residual_vector` order |
 | ~~`_matmul` stacked operands, from `TrainableNetwork`~~ | trainable NN layers, e.g. `(20, 1, 6) @ (6, 1)` | **Done** (#1873 follow-up): `_stacked_matmul` follows `np.matmul` (broadcast batch axes, 1-D promotion) |
 | `_require` (arity) | a function called with the wrong number of arguments | none (malformed) |
 
 So the fallback a JAX-less user can actually hit, with a correctly formed model, comes
-down to three cases: **`dm.custom`-family nodes** (permanently `[jax]`), **matrix
-norms**, and **reductions deeper than `max_depth`**. Each refuses with the tape's own
-reason and the extra; the last two are lowering work, listed above with their fixes.
+down to two cases: **`dm.custom`-family nodes** (permanently `[jax]`) and the
+**spectral matrix norm** `dm.norm(X, 2)` of a 2-D `X` (it needs a POUNCE opcode).
+Each refuses with the tape's own reason and the extra. Matrix 1-/inf-norms,
+reductions deeper than `max_depth` and empty sums were lowered in the second
+follow-up; tape and JAX agree on them to 1e-14 relative (values and gradients, 28
+comparisons plus 4 on a 12,000-factor product).
 
 **Stacked matmul and array-valued Gauss-Newton residuals were lowered in the #1873
 follow-up**, so `discopt.ml` trainable surrogates (`train()`) and `discopt.dae.fit`

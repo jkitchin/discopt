@@ -265,12 +265,12 @@ def test_wide_sum_over_a_term_list_lowers():
 
 
 @pytest.mark.unit
-def test_chain_only_reductions_refuse_past_the_depth_limit():
-    """``prod`` and ``norminf`` have no n-ary opcode, so they refuse rather than crash.
-
-    Refusing is the sound direction — the caller degrades to JAX. Letting POUNCE
-    raise ``ValueError`` instead would escape ``try_compile`` and take the solve
-    down with it.
+def test_chain_only_reductions_lower_past_the_depth_limit_without_crashing():
+    """``prod`` and ``norminf`` have no n-ary opcode. A left chain past
+    ``NlExpr.max_depth`` makes POUNCE raise ``ValueError``, which would escape
+    ``try_compile`` and take the solve down with it, so they used to REFUSE there
+    (degrading to JAX). Since the #1873 follow-up they lower as a balanced tree
+    instead, depth ``ceil(log2 n)``: no crash, no refusal, the right value.
     """
     import pounce
 
@@ -279,12 +279,14 @@ def test_chain_only_reductions_refuse_past_the_depth_limit():
     x = m.continuous("x", shape=(n,), lb=0.1, ub=2.0)
     m.minimize(x[0])
 
-    refused = 0
-    for expr in (dm.prod(x), dm.norm(x, float("inf"))):
-        with pytest.raises(UnsupportedForTape, match="max_depth"):
-            compile_to_nl_array(expr, m)
-        refused += 1
-    assert refused == 2, f"only {refused} reductions checked"
+    pt = np.full(n, 1.0)
+    pt[7] = 1.5
+    lowered = 0
+    for expr, expected in ((dm.prod(x), 1.5), (dm.norm(x, float("inf")), 1.5)):
+        node = compile_to_nl_array(expr, m).reshape(-1)[0]
+        assert node.eval(pt.tolist()) == pytest.approx(expected)
+        lowered += 1
+    assert lowered == 2, f"only {lowered} reductions checked"
 
 
 @pytest.mark.unit
