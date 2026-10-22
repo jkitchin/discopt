@@ -52,24 +52,34 @@ class GLOA(LOA):
                 "on a certificate (subproblem must be 'global')"
             )
         self.relaxation_truncated = False
+        self.relaxation_aborted = False
         super().__init__(model, subproblem="global", **kw)
 
     def _make_master(self, milp_solver: str) -> MasterMILP:
         from discopt._relax.discretization import DiscretizationState
         from discopt._relax.milp_relaxation import build_milp_relaxation
         from discopt._relax.term_classifier import classify_nonlinear_terms
+        from discopt._relax.uniform_relax import RelaxationBuildAborted
 
         low = self.space.lowered
         linear = super()._make_master(milp_solver)
-        # The build gets the caller's whole deadline (#912 ``contract``): one
-        # stopped early is a weaker relaxation, still a valid one.
-        relaxation, _ = build_milp_relaxation(
-            low,
-            classify_nonlinear_terms(low),
-            DiscretizationState(),
-            build_deadline=self.deadline.at(),
-        )
         self.model_objective_linear = linear.objective is not None
+        # The build gets the caller's whole deadline (#912 ``contract``): one
+        # stopped early between rows is a weaker relaxation, still a valid one;
+        # one aborted (the objective walk itself overran) is no relaxation, and
+        # GLOA keeps LOA's master -- its linear rows, valid on their own.
+        at = self.deadline.at()
+        try:
+            relaxation, _ = build_milp_relaxation(
+                low,
+                classify_nonlinear_terms(low),
+                DiscretizationState(),
+                build_deadline=at,
+                abort_deadline=at,
+            )
+        except RelaxationBuildAborted:
+            self.relaxation_aborted = True
+            return linear
         master = RelaxationMaster(
             relaxation,
             self.n,
@@ -77,11 +87,17 @@ class GLOA(LOA):
             backend=milp_solver,
         )
         self.relaxation_truncated = master.truncated
+        if master.truncated:
+            # A truncated build may stop before the selection rows; the lowered
+            # model's own linear rows are exact, so they go back in.
+            for row, sense, rhs in zip(linear.rows, linear.senses, linear.rhs):
+                master.add_row(master.model_row(row), sense, rhs)
         return master
 
     def _cuts_at(self, x: Any) -> None:
-        # LOA's cuts are over the model's columns; ``add_cut`` pads them onto
-        # the relaxation's auxiliaries (and validates each one).
+        # LOA's cuts are over the model's columns (``(x, eta)`` for an
+        # objective epigraph cut); ``add_model_cut`` writes them over the
+        # relaxation's, and ``add_cut`` validates each one.
         from discopt.solvers.gdpopt_loa import _add_oa_cuts
 
         rows: list = []
@@ -97,8 +113,12 @@ class GLOA(LOA):
             self.oa_rows,
             self.master.objective_convex,
         )
+        master = self.master
         for row, b in zip(rows, rhs):
-            self.master.add_cut(row, b)
+            if isinstance(master, RelaxationMaster):
+                master.add_model_cut(row, b, epigraph=len(row) == self.n + 1)
+            else:  # the build was aborted: LOA's own master, LOA's own cuts
+                master.add_cut(row, b)
         self._objective_cut_at(x)
 
     def _objective_cut_at(self, x: Any) -> None:
@@ -138,6 +158,7 @@ class GLOA(LOA):
         return {
             "relaxation_columns": int(self.master.n_vars),
             "relaxation_truncated": bool(self.relaxation_truncated),
+            "relaxation_aborted": bool(self.relaxation_aborted),
             "cleaned_cut_coefficients": int(getattr(self.master, "cleaned_coefficients", 0)),
         }
 

@@ -115,11 +115,55 @@ def test_the_relaxation_master_pads_cuts_and_trims_points():
         _build_truncated = False
 
     master = RelaxationMaster(_Relax(), 2)
-    master.add_cut(np.array([0.0, -1.0]), -0.25)  # over the model's two columns
+    master.add_model_cut(np.array([0.0, -1.0]), -0.25)  # over the model's two columns
     assert master.cuts[-1].shape == (3,) and master.cuts[-1][2] == 0.0
     r = master.solve(10.0)
     assert r.x is not None and r.x.shape == (2,)
     assert r.bound == pytest.approx(1.0, abs=1e-6)
+
+
+def test_one_auxiliary_column_does_not_confuse_a_row_with_an_epigraph_row():
+    """Review of #1880: with exactly one auxiliary, a row over every relaxation
+    column has the length of an ``(x, eta)`` row. The caller now names the space:
+    ``add_cut`` takes relaxation rows as given, ``add_model_cut`` pads."""
+
+    class _Relax:
+        _c = np.array([0.0, 0.0, 1.0])
+        _obj_offset = 0.0
+        _objective_bound_valid = True
+        _A_ub = None
+        _b_ub = None
+        _bounds = [(0.0, 1.0), (0.0, 2.0), (0.0, 3.0)]
+        _integrality = np.zeros(3)
+
+    master = RelaxationMaster(_Relax(), 2)
+    master.add_cut(np.array([1.0, 0.0, -1.0]), 0.0)  # relaxation space, kept as is
+    assert list(master.cuts[-1]) == [1.0, 0.0, -1.0]
+    master.add_model_cut(np.array([0.0, 1.0]), 1.5)  # model space, auxiliary gets 0
+    assert list(master.cuts[-1]) == [0.0, 1.0, 0.0]
+    with pytest.raises(ValueError, match="expected 2 coefficients"):
+        master.add_model_cut(np.array([1.0, 0.0, -1.0]), 0.0)
+
+
+@pytest.mark.parametrize(
+    "objective",
+    [lambda x, y: x**2, lambda x, y: dm.exp(x), lambda x, y: (x + y) ** 2],
+    ids=["square", "exp", "square_of_sum"],
+)
+def test_a_one_auxiliary_relaxation_runs_to_a_certificate(objective):
+    """Each relaxation adds one auxiliary (the objective's); GLOA raised
+    ``ValueError`` on its first objective tangent before the fix."""
+    m = dm.Model("one_aux")
+    x = m.continuous("x", lb=-3, ub=3)
+    y = m.continuous("y", lb=-3, ub=3)
+    m.either_or([[x + y >= 1], [x - y >= 2]], name="d")
+    m.minimize(objective(x, y))
+    a = _quiet(GLOA, m, time_limit=60)
+    assert a.master.n_vars - a.n == 1
+    r = _quiet(a.run)
+    ref = _quiet(m.solve, gdp_method="big-m", time_limit=60)
+    assert r.status == "optimal" and r.gap_certified
+    assert r.objective == pytest.approx(ref.objective, abs=1e-6)
 
 
 def test_an_integer_auxiliary_is_refused():
@@ -261,3 +305,39 @@ def test_cut_cleaning_keeps_a_coefficient_without_a_finite_box():
     master.add_cut(np.array([2.0, 1e-12]), 1.0)
     assert master.cuts[-1][1] == 1e-12 and master.cut_rhs[-1] == 1.0
     assert master.cleaned_coefficients == 0
+
+
+def test_an_aborted_build_falls_back_to_loas_master(monkeypatch):
+    """Past the caller's deadline the build raises instead of finishing (the
+    objective walk is time-bounded); GLOA then keeps LOA's linear master."""
+    import discopt._relax.milp_relaxation as mr
+    from discopt._relax.uniform_relax import RelaxationBuildAborted
+
+    def aborted(*a, **k):
+        assert k.get("abort_deadline") is not None
+        raise RelaxationBuildAborted("test")
+
+    monkeypatch.setattr(mr, "build_milp_relaxation", aborted)
+    a = _quiet(GLOA, _nonconvex(), time_limit=60)
+    assert not isinstance(a.master, RelaxationMaster)
+    r = _quiet(a.run)
+    assert r.solver_stats["relaxation_aborted"] is True
+    assert r.status == "optimal" and r.objective == pytest.approx(3.0, abs=1e-5)
+
+
+def test_a_truncated_build_gets_the_linear_rows_back(monkeypatch):
+    import discopt._relax.milp_relaxation as mr
+
+    real = mr.build_milp_relaxation
+
+    def truncated(*a, **k):
+        relax, info = real(*a, **k)
+        relax._build_truncated = True
+        return relax, info
+
+    full = _quiet(GLOA, _nonconvex(), time_limit=60)
+    monkeypatch.setattr(mr, "build_milp_relaxation", truncated)
+    cut = _quiet(GLOA, _nonconvex(), time_limit=60)
+    linear = cut.space.master()
+    assert cut.relaxation_truncated
+    assert len(cut.master.rows) == len(full.master.rows) + len(linear.rows)

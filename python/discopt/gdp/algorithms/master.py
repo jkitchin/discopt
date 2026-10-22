@@ -518,10 +518,10 @@ class RelaxationMaster(MasterMILP):
     terms. Its rows are a valid outer approximation of *every* row -- a
     nonconvex one included -- so the master's dual bound is a valid LB with no
     convexity certificate; LOA's OA cuts (certified-convex rows only) still apply
-    and are padded onto the auxiliary columns. Callers keep working in the
-    model's columns: cuts, objective overrides and extra cuts over ``n_model``
-    columns (or ``n_model + 1`` with the epigraph column) are padded, and a
-    solve returns ``x`` over the model's columns only.
+    and are padded onto the auxiliary columns. A cut over the model's columns
+    goes through :meth:`add_model_cut` (the caller states its space); rows,
+    cuts, objective overrides and extra cuts otherwise span the relaxation's
+    ``n_vars`` columns. A solve returns ``x`` over the model's columns only.
     """
 
     def __init__(
@@ -561,7 +561,8 @@ class RelaxationMaster(MasterMILP):
             )
         elif objective_fallback is not None:
             c, off = objective_fallback
-            objective = (self._pad_to(np.asarray(c, dtype=np.float64), n_cols), float(off))
+            c = np.asarray(c, dtype=np.float64)
+            objective = (np.concatenate([c, np.zeros(n_cols - n_model)]), float(off))
         super().__init__(
             n_cols, bounds[:, 0], bounds[:, 1], integ, objective=objective, backend=backend
         )
@@ -583,16 +584,24 @@ class RelaxationMaster(MasterMILP):
                 self.add_row(row, "<=", float(rhs))
         self.truncated = bool(getattr(relaxation, "_build_truncated", False))
 
-    def _pad_to(self, row: np.ndarray, n_cols: int) -> np.ndarray:
-        k = n_cols - self.n_model
-        if row.shape == (self.n_model,):
-            return np.concatenate([row, np.zeros(k)])
-        if row.shape == (self.n_model + 1,):  # (x, eta): eta follows every column
-            return np.concatenate([row[:-1], np.zeros(k), row[-1:]])
-        return row
+    def model_row(self, coeffs: Any, *, epigraph: bool = False) -> np.ndarray:
+        """A row over the model's columns (``x``, or ``(x, eta)`` when
+        ``epigraph``) written over the relaxation's: zeros on the auxiliaries,
+        ``eta`` last. The caller states the row's space; a length alone cannot,
+        since with one auxiliary a relaxation row and an ``(x, eta)`` row have
+        the same length (review of #1880)."""
+        row = np.asarray(coeffs, dtype=np.float64).reshape(-1)
+        want = self.n_model + (1 if epigraph else 0)
+        if row.shape != (want,):
+            raise ValueError(
+                f"RelaxationMaster.model_row: expected {want} coefficients, got {row.shape[0]}"
+            )
+        aux = np.zeros(self.n_vars - self.n_model)
+        return np.concatenate([row[: self.n_model], aux, row[self.n_model :]])
 
-    def _pad(self, row: Any) -> np.ndarray:
-        return self._pad_to(np.asarray(row, dtype=np.float64), self.n_vars)
+    def add_model_cut(self, coeffs: Any, rhs: float, *, epigraph: bool = False) -> None:
+        """:meth:`add_cut` for a cut over the model's columns (see :meth:`model_row`)."""
+        self.add_cut(self.model_row(coeffs, epigraph=epigraph), rhs)
 
     #: A cut coefficient below this fraction of the cut's largest is moved to the
     #: right-hand side at its worst case over the column's box: the cut stays
@@ -603,7 +612,9 @@ class RelaxationMaster(MasterMILP):
     CLEAN_REL = 1e-7
 
     def add_cut(self, coeffs: Any, rhs: float) -> None:
-        row = self._pad(coeffs).copy()
+        """A cut over the relaxation's columns (``n_vars``, or ``n_vars + 1``
+        with the epigraph column); :meth:`add_model_cut` for the model's."""
+        row = np.array(coeffs, dtype=np.float64).reshape(-1)
         rhs = float(rhs)
         n = min(row.shape[0], self.n_vars)  # an epigraph column has no box
         big = float(np.max(np.abs(row))) if row.size else 0.0
@@ -628,14 +639,15 @@ class RelaxationMaster(MasterMILP):
         exclude_also: Any = (),
         extra_cuts: Any = (),
     ) -> MasterResult:
-        override = None if objective_override is None else self._pad(objective_override)
+        # ``objective_override`` and ``extra_cuts`` are over the relaxation's
+        # columns, as every caller sizes them by ``n_vars`` (the init strategies).
         r = super().solve(
             time_limit,
             gap_tolerance,
             incumbent,
-            objective_override=override,
+            objective_override=objective_override,
             exclude_also=exclude_also,
-            extra_cuts=[(self._pad(row), rhs) for row, rhs in extra_cuts],
+            extra_cuts=extra_cuts,
         )
         if r.x is not None:
             r.x = r.x[: self.n_model]
