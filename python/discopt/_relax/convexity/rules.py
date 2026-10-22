@@ -866,11 +866,46 @@ def _classify_binary(expr: BinaryOp, model: Optional[Model], cache: dict) -> Exp
         return _classify_division(expr, left, right, model, cache)
 
     if expr.op == "**":
-        if not _is_scalar_const(expr.right) and _is_scalar_const(expr.left):
+        if (
+            not _is_scalar_const(expr.right)
+            and _is_scalar_const(expr.left)
+            and power_composition_enabled()
+        ):
             return _classify_constant_base_power(expr, right)
         return _classify_power(expr, left, model, cache)
 
     return ExprInfo(Curvature.UNKNOWN, Sign.UNKNOWN)
+
+
+def power_composition_enabled() -> bool:
+    """``DISCOPT_POWER_COMPOSITION`` gate for the #1868 power rules.
+
+    Covers both: ``c ** f`` with a constant base (:func:`_classify_constant_base_power`)
+    and the DCP composition of an integer power with a non-affine base of proven
+    sign (in :func:`_classify_power`). Read at call time so a test can flip it per
+    solve. Sound either way -- the rules only ever replace an UNKNOWN verdict -- but
+    a convexity proof re-routes a whole model (the perspective-composite lesson
+    above), so the verdict is bound-changing and was gated per CLAUDE.md section 5.
+
+    **Graduated (default ON, 2026-10-22).** Firing scan over every DAG node of 389
+    MINLPLib instances (the 161 flagged convex plus 230 flagged not, <= 200
+    vars/cons; the 66 in-repo files included): fires on 7 -- the six
+    ``cvxnonsep_pcon*`` and ``hda`` (9 of 4,069 nodes) -- and the OFF arm equals the
+    pre-#1868 classifier on every node of all 389. Panel on the 7, flag ON vs OFF,
+    120 s, interleaved, load <= 1.5: cert-clean (14 rows, no bound past the MINLPLib
+    optimum, every incumbent re-verified by ``verify_point`` on a freshly read model,
+    no certificate lost) and net-positive -- certified 3 -> 6 (``pcon20/30/40``
+    4.6 s / 37.9 s / 71.8 s, gap open at 120 s OFF), and where both certify
+    (``pcon20r/30r/40r``) wall 45.8 s -> 3.6 s, nodes 657 -> 44; ``hda`` identical.
+    ``DISCOPT_POWER_COMPOSITION=0`` restores the pre-#1868 classifier.
+    """
+    return os.environ.get("DISCOPT_POWER_COMPOSITION", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
 
 
 def _classify_constant_base_power(expr: BinaryOp, exponent: ExprInfo) -> ExprInfo:
@@ -1338,6 +1373,8 @@ def _classify_power(
     if is_int and n_int >= 2 and n_int % 2 == 0:
         if base.curvature == Curvature.AFFINE:
             return ExprInfo(Curvature.CONVEX, Sign.NONNEG)
+        if not power_composition_enabled():
+            return ExprInfo(Curvature.UNKNOWN, Sign.NONNEG)
         if is_nonneg(base.sign):
             curv = compose(Curvature.CONVEX, Monotonicity.NONDEC, base.curvature)
         elif is_nonpos(base.sign):
@@ -1353,6 +1390,14 @@ def _classify_power(
     # composition extends both verdicts to a convex/concave base of proven sign.
     if is_int and n_int >= 3 and n_int % 2 == 1:
         out_sign = base.sign  # odd power preserves sign
+        if not power_composition_enabled():
+            # Pre-#1868: the affine-base verdicts only.
+            if base.curvature == Curvature.AFFINE:
+                if is_nonneg(base.sign):
+                    return ExprInfo(Curvature.CONVEX, out_sign)
+                if is_nonpos(base.sign):
+                    return ExprInfo(Curvature.CONCAVE, out_sign)
+            return ExprInfo(Curvature.UNKNOWN, out_sign)
         if is_nonneg(base.sign):
             if compose(Curvature.CONVEX, Monotonicity.NONDEC, base.curvature) == Curvature.CONVEX:
                 return ExprInfo(Curvature.CONVEX, out_sign)

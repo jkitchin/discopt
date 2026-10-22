@@ -25,6 +25,14 @@ from discopt.modeling.core import Model
 
 pytestmark = pytest.mark.unit
 
+FLAG = "DISCOPT_POWER_COMPOSITION"
+
+
+@pytest.fixture
+def flag_on(monkeypatch):
+    monkeypatch.setenv(FLAG, "1")
+
+
 BOX = {"x": (0.0, 5.0), "y": (0.0, 5.0), "z": (-5.0, 5.0)}
 
 
@@ -85,7 +93,7 @@ def _midpoint_violation(f, sense: str, n: int = 4000, seed: int = 1868) -> float
 
 
 @pytest.mark.parametrize("label,build,f,expected", CASES, ids=[c[0] for c in CASES])
-def test_power_composition_verdicts(label, build, f, expected):
+def test_power_composition_verdicts(label, build, f, expected, flag_on):
     m, x, y, z = _model()
     got = classify_expr(build(x, y, z), m)
     assert got == getattr(Curvature, expected), (label, got)
@@ -100,7 +108,19 @@ def test_the_abstaining_composite_really_is_nonconvex():
     assert _midpoint_violation(lambda x, y, z: (2.0**x - 3) ** 2, "CONVEX") > 1e-3
 
 
-def test_cvxnonsep_pcon_shape_classifies_convex():
+@pytest.mark.parametrize("label,build,f,expected", CASES, ids=[c[0] for c in CASES])
+def test_flag_off_is_the_pre_1868_classifier(label, build, f, expected, monkeypatch):
+    """OFF must be the old classifier exactly: every case the new rules decide is
+    UNKNOWN again, except the verdicts the old affine-base rules already gave.
+    (Measured more broadly: OFF-arm verdicts equal main's on every DAG node of 389
+    MINLPLib instances.)"""
+    monkeypatch.setenv(FLAG, "0")
+    m, x, y, z = _model()
+    got = classify_expr(build(x, y, z), m)
+    assert got == Curvature.UNKNOWN, (label, got)
+
+
+def test_cvxnonsep_pcon_shape_classifies_convex(flag_on):
     """The pcon row shape -- ``sqr(sum 2 ** (x_i + x_{i+1}))`` over a box -- end to end
     through ``classify_model``, without needing the MINLPLib file."""
     from discopt._relax.convexity import classify_model
@@ -114,3 +134,16 @@ def test_cvxnonsep_pcon_shape_classifies_convex():
     m.minimize(-sum(0.5 * v for v in allv))
     ok, mask = classify_model(m)
     assert ok and all(mask), mask
+
+
+def test_power_composition_defaults_on(monkeypatch):
+    """Graduated under CLAUDE.md section 5 (panel in ``power_composition_enabled``'s
+    docstring); ``=0`` is the opt-out."""
+    from discopt._relax.convexity.rules import power_composition_enabled
+
+    monkeypatch.delenv(FLAG, raising=False)
+    assert power_composition_enabled()
+    m, x, y, z = _model()
+    assert classify_expr(2 ** (x + y), m) == Curvature.CONVEX
+    monkeypatch.setenv(FLAG, "0")
+    assert not power_composition_enabled()
