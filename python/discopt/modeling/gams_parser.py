@@ -2210,7 +2210,10 @@ class _ModelBuilder:
             if vtype == "binary":
                 var = m.binary(name, shape=shape)
             elif vtype == "integer":
-                var = m.integer(name, shape=shape, lb=0, ub=1e6)
+                # GAMS's default integer box is [0, +INF] (measured on GAMS 53.2:
+                # `n.up` = +INF). An invented ub=1e6 certified 1e6 as the optimum
+                # of `max n s.t. n <= 2e6`.
+                var = m.integer(name, shape=shape, lb=0, ub=1e20)
             elif vtype == "positive":
                 var = m.continuous(name, shape=shape, lb=0.0)
             elif vtype == "negative":

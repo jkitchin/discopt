@@ -114,3 +114,23 @@ def test_writer_erf_round_trips_through_gams_errorf():
     r = parse_gams(text).solve(time_limit=60)
     assert r.status == "optimal"
     assert r.objective == pytest.approx(math.erf(0.3), abs=1e-7)
+
+
+def test_integer_default_upper_bound_is_infinite():
+    """GAMS's default integer box is [0, +INF] (GAMS 53.2: ``n.up`` = +INF).
+
+    The reader used to impose ub=1e6, and certified 1e6 as the optimum of
+    ``max n s.t. n <= 2e6`` (#1889 audit).
+    """
+    from discopt.modeling.gams_parser import parse_gams
+
+    src = (
+        "Integer Variable n; Variable z; Equation e, c; e.. z =e= n; c.. n =l= 2e6;"
+        " Model m /all/; solve m using mip maximizing z;"
+    )
+    m = parse_gams(src)
+    (n,) = [v for v in m._variables if v.name == "n"]
+    assert float(n.ub) >= 1e19
+    r = m.solve(time_limit=30)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(2e6)

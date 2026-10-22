@@ -10,18 +10,26 @@ GAMS-library-specific code living in the adapter in :mod:`discopt.gams.link`.
 
 from __future__ import annotations
 
-import warnings
 from typing import Protocol
+
+import numpy as np
 
 from discopt.modeling import core as dm
 from discopt.modeling.core import Expression, Model
 
-from .instructions import translate_instructions
+from .instructions import GamsTranslationError, translate_instructions
 
-# GMO variable-type codes (gmomcc: gmovar_X / _B / _I / _SC / _SI / _S1 / _S2).
+# GMO variable-type codes (gamsapi ``gmovar_*``, checked against GAMS 53).
 GMO_VAR_CONT = 0
 GMO_VAR_BINARY = 1
 GMO_VAR_INTEGER = 2
+GMO_VAR_SOS1 = 3
+GMO_VAR_SOS2 = 4
+GMO_VAR_SEMICONT = 5
+GMO_VAR_SEMIINT = 6
+
+# Bounds at or beyond this magnitude are GAMS's +/-INF (discopt's 1e20 sentinel).
+_INF = 1e19
 
 
 class GmoView(Protocol):
@@ -61,27 +69,46 @@ def model_from_gmo(g: GmoView) -> Model:
     # 1. Columns. Each GMO column is a scalar discopt variable.
     variables: list[Expression] = []
     initial: dict[str, float] = {}
+    semi: list[tuple] = []
     for j in range(n):
         name = g.var_name(j) or f"x{j + 1}"
         lo = g.var_lower(j)
         hi = g.var_upper(j)
         vtype = g.var_type(j)
+        if vtype in (GMO_VAR_SOS1, GMO_VAR_SOS2):
+            # Read as continuous this silently dropped the SOS restriction; the
+            # .gms reader refuses the same way (#1613).
+            raise GamsTranslationError(
+                f"GMO variable '{name}' is an SOS{vtype - 2} member; the discopt GAMS "
+                "link does not translate SOS sets, and reading it as continuous would "
+                "drop the restriction. Model it with binaries instead."
+            )
         if vtype == GMO_VAR_BINARY:
+            # A fixed binary (x.fx = 1) keeps its bounds in GMO; m.binary alone
+            # would widen it back to [0, 1].
             var = m.binary(name)
-        elif vtype == GMO_VAR_INTEGER:
-            var = m.integer(name, lb=_finite(lo, 0.0), ub=_finite(hi, 1e9))
+            var.lb = np.asarray(max(0.0, float(lo)))
+            var.ub = np.asarray(min(1.0, float(hi)))
+        elif vtype in (GMO_VAR_INTEGER, GMO_VAR_SEMIINT):
+            # GAMS's default integer .up is +INF (GAMS 53); it stays infinite
+            # rather than being clamped to an invented finite box.
+            var = m.integer(name, lb=_bound(lo), ub=_bound(hi))
+        elif vtype in (GMO_VAR_CONT, GMO_VAR_SEMICONT):
+            var = m.continuous(name, lb=_bound(lo), ub=_bound(hi))
         else:
-            if vtype not in (GMO_VAR_CONT,):
-                warnings.warn(
-                    f"GMO variable '{name}' has unsupported type code {vtype}; "
-                    "treated as continuous with its declared bounds.",
-                    stacklevel=2,
-                )
-            var = m.continuous(name, lb=_finite(lo, -1e20), ub=_finite(hi, 1e20))
+            raise GamsTranslationError(f"GMO variable '{name}' has unknown type code {vtype}")
+        if vtype in (GMO_VAR_SEMICONT, GMO_VAR_SEMIINT):
+            semi.append((var, name, float(lo), float(hi)))
         variables.append(var)
         lvl = g.var_level(j)
         if lvl not in (0.0, None):
             initial[name] = float(lvl)
+
+    # The model's first n variables are the GMO columns, in order; the solution
+    # write-back relies on that, so auxiliary variables are created only after.
+    m._gams_columns = list(variables)  # type: ignore[attr-defined]
+    for var, name, lo, hi in semi:
+        _lower_semi(m, var, name, lo, hi)
 
     # 2. Objective: constant + linear gradient + nonlinear part.
     obj = _const(g.obj_constant())
@@ -110,6 +137,10 @@ def model_from_gmo(g: GmoView) -> Model:
         rhs = g.row_rhs(i)
         sense = g.row_sense(i)
         name = g.row_name(i) or f"e{i + 1}"
+        if sense == "free":
+            # An =N= row imposes no relation (GAMS "no constraint"), so it adds
+            # nothing to the feasible set.
+            continue
         m.subject_to(_build_constraint(body, sense, rhs), name=name)
 
     if initial:
@@ -119,14 +150,40 @@ def model_from_gmo(g: GmoView) -> Model:
 
 
 def _obj_nl_sign(g: GmoView) -> float:
-    """Sign correction for the objective nonlinear part (1.0 if not supplied)."""
+    """Sign correction for the objective nonlinear part (1.0 if not supplied).
+
+    A view that supplies the method must answer: a failure here used to be
+    swallowed and replaced by ``1.0``, which flips the sign of the objective's
+    nonlinear part for a GMO objective row.
+    """
     fn = getattr(g, "obj_nl_sign", None)
     if fn is None:
         return 1.0
-    try:
-        return float(fn())
-    except Exception:
-        return 1.0
+    return float(fn())
+
+
+def _lower_semi(m: Model, var, name: str, lo: float, hi: float) -> None:
+    """Impose GAMS ``semicont``/``semiint`` semantics exactly: ``x = 0`` or ``lo <= x <= hi``.
+
+    Mirrors the .gms reader's lowering (#1613 C-03c): where ``0`` lies in
+    ``[lo, hi]`` the union is the box itself; otherwise an on/off binary ``z``
+    gives ``lo*z <= x <= hi*z`` on the hull ``[min(0, lo), max(0, hi)]``.
+    Integrality, for ``semiint``, stays on ``x``. An infinite bound would need an
+    invented big-M, so it is refused rather than approximated.
+    """
+    if lo <= 0.0 <= hi:
+        return
+    if not (abs(lo) < _INF and abs(hi) < _INF):
+        raise GamsTranslationError(
+            f"semicontinuous/semi-integer variable '{name}' has bounds [{lo}, {hi}] "
+            "excluding 0 and an infinite bound; `x = 0 or lo <= x <= up` has no exact "
+            "bounded lowering then. Give it a finite .lo and .up."
+        )
+    z = m.binary(f"{name}__semi_on")
+    m.subject_to(var >= lo * z, name=f"{name}__semi_lo")
+    m.subject_to(var <= hi * z, name=f"{name}__semi_up")
+    var.lb = np.asarray(min(0.0, lo))
+    var.ub = np.asarray(max(0.0, hi))
 
 
 def _build_constraint(body: Expression, sense: str, rhs: float):
@@ -157,13 +214,11 @@ def _is_zero_const(expr: Expression) -> bool:
     return isinstance(expr, dm.Constant) and float(expr.value) == 0.0
 
 
-def _finite(value: float, default: float) -> float:
-    """Clamp GAMS +/-inf sentinels to a default for bound construction."""
-    if value is None:
-        return default
+def _bound(value: float) -> float:
+    """A GMO bound as a discopt bound: GAMS +/-INF becomes the +/-1e20 sentinel."""
     v = float(value)
-    if v <= -1e19:
-        return default if default < 0 else -1e20
-    if v >= 1e19:
-        return default if default > 0 else 1e20
+    if v <= -_INF:
+        return -1e20
+    if v >= _INF:
+        return 1e20
     return v
