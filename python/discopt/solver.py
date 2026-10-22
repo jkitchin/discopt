@@ -7548,13 +7548,30 @@ def _route_tightened_box_enabled() -> bool:
     family is built so outer approximation needs exponentially many cuts.
 
     Bound-changing (the route solves over a smaller, valid box), so gated per
-    CLAUDE.md section 5. Read at call time.
+    CLAUDE.md section 5. Read at call time. Only the pass's **fixings** are handed
+    over (columns with ``lb == ub``); a merely narrower box is not.
 
-    **Graduated (default ON, 2026-10-22).** Firing scan: of the MINLPLib instances
-    the convex router diverts (<= 200 vars/cons), the box changes on the panel set
-    recorded in ``docs/dev/flag-retirement-audit.md``; panel ON vs OFF, interleaved:
-    cert-clean and net-positive, numbers in that row. ``=0`` hands the declared box
-    to the route, as before.
+    **Why fixings only (measured 2026-10-22, 30 s, interleaved).** Handing over the
+    whole tightened box changed it on 100 of the 154 convex-routed MINLPLib
+    instances (<= 200 vars/cons, never looser) and was sound -- 200 rows, 0
+    problems -- but NOT regression-free: certified 81 -> 82 with 4 lost, confirmed
+    systematic over 3 reps (identical node counts): ``du-opt`` 8.0 s certified ->
+    36.8 s uncertified from ONE narrowed integer bound (``x15`` 0..10 -> 0..4),
+    ``smallinvDAXr3b150-165`` / ``r4b050-055`` certified -> uncertified,
+    ``enpro56pb`` 8.1 -> 19.6 s, ``ravempb`` 4.6 -> 12.6 s; gains
+    ``smallinvDAXr1b100-110`` and ``sssd25-04``. Splitting by column type does not
+    separate the two (losses and gains include integer-only and continuous-only
+    changes), so that hypothesis is falsified too. A narrower box reshapes the
+    outer approximation around the columns that stay; a fixing removes the column.
+
+    **Graduated (default ON, 2026-10-22).** Fixings change the box on 6 of the 100:
+    ``ball_mk2_10/30``, ``du-opt5``, ``hybriddynamic_fixed``, ``meanvarx``,
+    ``st_miqp1``. Panel, 3 reps, interleaved, load < 2: cert-clean (36 rows, 0
+    problems: no bound past an optimum, every incumbent passes ``verify_point`` on a
+    fresh model), every instance certified 3/3 in both arms, and net-positive --
+    ``ball_mk2_10`` 10.32 -> 0.20 s, ``ball_mk2_30`` 10.57 -> 0.23 s; the other four
+    unchanged (identical node counts; ``du-opt5`` 2.48 -> 2.64 s, sd 0.03/0.10).
+    ``=0`` hands the declared box to the route, as before.
     """
     return os.environ.get("DISCOPT_ROUTE_TIGHTENED_BOX", "1").strip().lower() not in (
         "0",
@@ -7600,6 +7617,13 @@ def _model_with_tightened_box(model: Model, tightening) -> Optional[Model]:
     new_ub[is_int] = np.minimum(raw_ub[is_int], np.floor(new_ub[is_int] + tol))
     if np.any(new_lb > new_ub):
         return None
+    # Only FIXINGS are handed over: a column the pass pins (``lb == ub``) leaves the
+    # problem, while a merely narrower box reshapes the route's outer approximation
+    # around the columns that stay -- measured both ways on the 100 convex-routed
+    # instances whose box the pass changes (see ``_route_tightened_box_enabled``).
+    fixed = new_lb == new_ub
+    new_lb = np.where(fixed, new_lb, raw_lb)
+    new_ub = np.where(fixed, new_ub, raw_ub)
     if np.array_equal(new_lb, raw_lb) and np.array_equal(new_ub, raw_ub):
         return None
     clone = model.clone()

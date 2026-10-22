@@ -525,6 +525,32 @@ def _match_scaled_square_var(
     return _ScaledExpressionMatcher.match(expr, scale, leaf_match)
 
 
+def _match_scaled_bilinear(
+    expr,
+    scale: float,
+    metadata: FlatVariableMetadata,
+) -> Optional[tuple[int, int, float]]:
+    """Match ``c * (a*x) * (b*y)`` as ``(x, y, c*a*b)`` for scalar variables x, y.
+
+    The constant factors are peeled by ``_ScaledExpressionMatcher``; a product of
+    two non-constant operands then reaches the leaf, and each operand must itself be
+    a scaled scalar variable (``2*x8`` in ``ball_mk4``'s ``(2*x8)*x7``). ``x == y``
+    is returned too (a square spelled as a product of scaled copies); anything else
+    is unmatched (#1867).
+    """
+
+    def leaf_match(leaf: object, leaf_scale: float) -> Optional[tuple[int, int, float]]:
+        if not (isinstance(leaf, BinaryOp) and leaf.op == "*"):
+            return None
+        left = _match_scaled_linear_var(leaf.left, 1.0, metadata)
+        right = _match_scaled_linear_var(leaf.right, 1.0, metadata)
+        if left is None or right is None:
+            return None
+        return left[0], right[0], leaf_scale * left[1] * right[1]
+
+    return _ScaledExpressionMatcher.match(expr, scale, leaf_match)
+
+
 def _merge_affine_matches(
     left: tuple[Optional[int], float, float],
     right: tuple[Optional[int], float, float],
@@ -3911,15 +3937,19 @@ def integer_block_quadratic_enabled() -> bool:
     section 5. Read at call time.
 
     **Graduated (default ON, 2026-10-22).** Firing scan at the declared box, OFF vs
-    ON, over the 394 local MINLPLib instances (<= 200 vars/cons): the rule proves
-    exactly ``ball_mk4_05/10/15`` infeasible and changes nothing else. MINLPLib
-    lists 05/10 ``=inf=`` and 15 open (best dual 58.83, no primal); 15's row is the
-    same five-to-fifteen pairs ``100x^2 + 100y^2 - 98x - 98y - 4xy =
+    ON, over 388 local MINLPLib instances (<= 200 vars/cons; 2 more could not be
+    scanned -- one missing file, one ``RecursionError`` in the unrelated
+    ``_model_contains_nonsmooth_node`` walker): the rule reads 17 rows and proves
+    exactly ``ball_mk4_05/10/15`` infeasible, changing nothing else (it never
+    tightens a bound). MINLPLib lists 05/10 ``=inf=`` and 15 open (best dual 58.83,
+    no primal); 15's row is the same pairs ``100x^2 + 100y^2 - 98x - 98y - 4xy =
     98(x^2 - x) + 98(y^2 - y) + 2(x - y)^2 >= 0`` on Z^2 against ``rhs -1``, so it
     is infeasible by that identity, which the regression test checks exactly.
-    Panel, 120 s, interleaved: OFF certifies 05 only (SCIP: 05 in 0.6 s, 10 and 15
-    at its 60 s limit); ON proves all three infeasible at presolve. ``=0`` is the
-    opt-out.
+    Panel, 120 s, interleaved, load < 2: cert-clean (6 rows, 0 problems) and
+    net-positive -- OFF certifies none of the three (``time_limit`` at ~78 s, no
+    incumbent, 2-6k nodes), ON proves all three infeasible at presolve in 0.1 s.
+    SCIP 10 at 60 s: 05 infeasible in 0.6 s, 10 and 15 at its time limit. ``=0`` is
+    the opt-out.
     """
     return os.environ.get("DISCOPT_INTEGER_BLOCK_QUAD", "1").strip().lower() not in (
         "0",
@@ -4035,26 +4065,81 @@ class IntegerBlockQuadraticRule(NonlinearBoundTighteningRule):
 
     def _row_blocks(self, model: Model, constraint, metadata: FlatVariableMetadata):
         """Bound-independent half: ``(support, d, blocks)`` with ``blocks`` a list of
-        ``(positions, Q_b, c_b, kind)``, or ``None`` when the rule cannot use the row."""
-        degree = polynomial_degree_bound(constraint.body)
-        if degree is not None and degree > 2:
+        ``(positions, Q_b, c_b, kind)``, or ``None`` when the rule cannot use the row.
+
+        Built from the iterative flattener (``_cached_flat_terms``, #1198) and the
+        rule-family matchers, not ``extract_quadratic_support``: that expansion
+        recurses, and a 20k-term row raised ``RecursionError`` out of the whole
+        pass. Each term must be a constant, ``c*x``, ``c*x**2``/``c*x*x`` or a
+        product of two scaled variables; anything else abstains the row. ``Q`` stays
+        sparse until the blocks are known, so a long separable row costs one scan.
+        """
+        terms = _cached_flat_terms(model, constraint.body)
+        d = 0.0
+        lin: dict[int, float] = {}
+        quad: dict[tuple[int, int], float] = {}
+        has_cross = False
+        for scale, term in terms:
+            const_val = _constant_value(term)
+            if const_val is not None:
+                d += scale * const_val
+                continue
+            sq = _match_scaled_square_var(term, scale, metadata)
+            if sq is not None:
+                quad[(sq[0], sq[0])] = quad.get((sq[0], sq[0]), 0.0) + sq[1]
+                continue
+            li = _match_scaled_linear_var(term, scale, metadata)
+            if li is not None:
+                lin[li[0]] = lin.get(li[0], 0.0) + li[1]
+                continue
+            bi = _match_scaled_bilinear(term, scale, metadata)
+            if bi is None:
+                return None
+            i, j, coeff = bi
+            key = (min(i, j), max(i, j))
+            quad[key] = quad.get(key, 0.0) + coeff
+            has_cross = has_cross or i != j
+        if not has_cross:
+            return None  # separable: SeparableQuadraticUpperBoundRule's row
+        if not np.isfinite(d) or not all(np.isfinite(v) for v in (*lin.values(), *quad.values())):
             return None
-        reduced = extract_quadratic_support(constraint.body, model)
-        if reduced is None:
-            return None
-        support, Q, c, d = reduced
-        if len(support) < 2:
-            return None
-        if not (np.all(np.isfinite(Q)) and np.all(np.isfinite(c)) and np.isfinite(d)):
-            return None
-        Q = 0.5 * (Q + Q.T)
-        is_int = np.array(
-            [metadata.flat_var_types[int(j)] in (VarType.INTEGER, VarType.BINARY) for j in support]
-        )
+        support = tuple(sorted({k for pair in quad for k in pair} | set(lin)))
+        position = {j: p for p, j in enumerate(support)}
+        adj: dict[int, set[int]] = {p: set() for p in range(len(support))}
+        for (i, j), v in quad.items():
+            if i != j and v != 0.0:
+                adj[position[i]].add(position[j])
+                adj[position[j]].add(position[i])
+        is_int = [
+            metadata.flat_var_types[int(j)] in (VarType.INTEGER, VarType.BINARY) for j in support
+        ]
+        seen = [False] * len(support)
         blocks = []
         has_int_block = False
-        for pos in _quad_components(Q):
-            Qb, cb = Q[np.ix_(pos, pos)], c[pos]
+        for start in range(len(support)):
+            if seen[start]:
+                continue
+            seen[start] = True
+            stack, members = [start], [start]
+            while stack:
+                for nb in adj[stack.pop()]:
+                    if not seen[nb]:
+                        seen[nb] = True
+                        stack.append(nb)
+                        members.append(nb)
+            pos = np.array(sorted(members), dtype=np.int64)
+            if pos.size > _ELLIPSOID_MAX_SUPPORT:
+                return None  # a dense block this large is not worth decomposing here
+            cols = [support[p] for p in pos]
+            Qb = np.zeros((pos.size, pos.size), dtype=np.float64)
+            for a, ia in enumerate(cols):
+                for b, ib in enumerate(cols):
+                    if a == b:
+                        Qb[a, a] = quad.get((ia, ia), 0.0)
+                    elif a < b:
+                        v = 0.5 * quad.get((min(ia, ib), max(ia, ib)), 0.0)
+                        Qb[a, b] = Qb[b, a] = v
+            cb = np.array([lin.get(j, 0.0) for j in cols], dtype=np.float64)
             if pos.size == 1:
                 if Qb[0, 0] < -1e-12:
                     return None
@@ -4063,7 +4148,7 @@ class IntegerBlockQuadraticRule(NonlinearBoundTighteningRule):
             eig = np.linalg.eigvalsh(Qb)
             if eig[0] <= 0.0 or eig[-1] > _ELLIPSOID_MAX_COND * eig[0]:
                 return None
-            if bool(np.all(is_int[pos])) and pos.size <= _INT_BLOCK_MAX_SIZE:
+            if all(is_int[p] for p in pos) and pos.size <= _INT_BLOCK_MAX_SIZE:
                 blocks.append((pos, Qb, cb, "intk"))
                 has_int_block = True
             else:

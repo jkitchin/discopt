@@ -207,3 +207,31 @@ def test_route_box_flag_defaults_on(monkeypatch):
     assert _route_tightened_box_enabled()
     monkeypatch.setenv(BOX_FLAG, "0")
     assert not _route_tightened_box_enabled()
+
+
+def test_only_fixings_are_handed_over(monkeypatch):
+    """A column the pass pins goes to the route; a column it merely narrows does not.
+    Measured: handing over narrower boxes cost certificates (``du-opt``,
+    ``smallinvDAX*``), fixings did not (``_route_tightened_box_enabled``)."""
+    from types import SimpleNamespace
+
+    from discopt.solver import _model_with_tightened_box
+
+    monkeypatch.setenv(BOX_FLAG, "1")
+    m = Model("fix")
+    m.integer("a", lb=-1, ub=1)
+    m.integer("b", lb=-1, ub=1)
+    m.continuous("c", lb=0.0, ub=5.0)
+    stats = SimpleNamespace(infeasible=False)
+    # a pinned to 0 (within the integrality tolerance), b narrowed, c narrowed.
+    t_lb = np.array([-2e-6, -1.0, 1.0])
+    t_ub = np.array([3e-6, 0.0, 4.0])
+    clone = _model_with_tightened_box(m, (t_lb, t_ub, stats))
+    assert clone is not None and clone is not m
+    got = [(float(v.lb), float(v.ub)) for v in clone._variables]
+    assert got == [(0.0, 0.0), (-1.0, 1.0), (0.0, 5.0)], got
+    assert [(float(v.lb), float(v.ub)) for v in m._variables] == [(-1, 1), (-1, 1), (0, 5)]
+    # Nothing fixed -> no copy at all.
+    assert (
+        _model_with_tightened_box(m, (np.array([-1.0, 0, 1]), np.array([1.0, 1, 4]), stats)) is None
+    )
