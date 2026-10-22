@@ -11662,7 +11662,7 @@ NATIVE_GDP_METHODS: frozenset[str] = frozenset({"loa", "gloa", "lbb", "ric", "en
 
 #: The native methods that run today.
 IMPLEMENTED_NATIVE_GDP_METHODS: frozenset[str] = frozenset(
-    {"loa", "gloa", "lbb", "ric", "enumerate"}
+    {"loa", "gloa", "lbb", "ric", "enumerate", "ldsda"}
 )
 
 #: ``gdp_options`` keys (#1775 G3.1, spec §4.3): Pyomo GDPopt's names where the
@@ -11687,6 +11687,12 @@ GDP_OPTION_KEYS: frozenset[str] = frozenset(
         # discopt's own (#1775 G4.2): enumerate's ceiling on the configuration
         # count, above which it refuses rather than truncate.
         "max_configurations",
+        # LD-SDA's (#1775 G4.5), with Pyomo's names: the start, the external
+        # variables (names of ``exactly(1)`` logical constraints / root
+        # disjunctions; Pyomo takes the components themselves).
+        "starting_point",
+        "logical_constraint_list",
+        "disjunction_list",
     }
 )
 
@@ -11702,6 +11708,18 @@ _GDP_OPTIONS_READ: dict[str, frozenset[str]] = {
     # LBB (#1775 G4.4): a node budget, and Pyomo's ``check_sat`` toggles the logic
     # propagation that replaces it (on by default here: it is exact).
     "lbb": frozenset({"iterlim", "check_sat"}),
+    # LD-SDA (#1775 G4.5): a local search; ``subproblem`` is "local" or "global".
+    "ldsda": frozenset(
+        {
+            "iterlim",
+            "starting_point",
+            "logical_constraint_list",
+            "disjunction_list",
+            "direction_norm",
+            "subproblem",
+            "check_sat",
+        }
+    ),
 }
 
 
@@ -11782,14 +11800,24 @@ def _validate_gdp_options(gdp_method: str, gdp_options: object) -> dict[str, Any
             it = gdp_options[key]
             if isinstance(it, bool) or not isinstance(it, (int, np.integer)) or it < low:
                 raise ValueError(f"gdp_options[{key!r}] must be an integer >= {low}, got {it!r}")
+    if "direction_norm" in gdp_options:
+        from discopt.gdp.algorithms.ldsda import DIRECTION_NORMS
+
+        if gdp_options["direction_norm"] not in DIRECTION_NORMS:
+            raise ValueError(
+                f"gdp_options['direction_norm'] must be one of {DIRECTION_NORMS}, got "
+                f"{gdp_options['direction_norm']!r}"
+            )
     if "check_sat" in gdp_options and not isinstance(gdp_options["check_sat"], bool):
         got = gdp_options["check_sat"]
         raise ValueError(f"gdp_options['check_sat'] must be a bool, got {got!r}")
     if "init_algorithm" in gdp_options or "subproblem" in gdp_options:
         from discopt.gdp.algorithms.init import INIT_STRATEGIES
+        from discopt.gdp.algorithms.ldsda import LDSDA_SUBPROBLEMS
         from discopt.gdp.algorithms.loa import LOA_SUBPROBLEMS
 
-        for key, allowed in (("init_algorithm", INIT_STRATEGIES), ("subproblem", LOA_SUBPROBLEMS)):
+        subproblems = LDSDA_SUBPROBLEMS if gdp_method == "ldsda" else LOA_SUBPROBLEMS
+        for key, allowed in (("init_algorithm", INIT_STRATEGIES), ("subproblem", subproblems)):
             if key in gdp_options and gdp_options[key] not in allowed:
                 raise ValueError(
                     f"gdp_options[{key!r}] must be one of {allowed}, got {gdp_options[key]!r}"
@@ -14086,7 +14114,7 @@ def solve_model(
         )
 
     # --- LOA decomposition: intercept before GDP reformulation ---
-    if gdp_method in ("loa", "gloa", "lbb", "ric", "enumerate"):
+    if gdp_method in ("loa", "gloa", "lbb", "ric", "enumerate", "ldsda"):
         from discopt.solvers.gdpopt_loa import solve_gdpopt_loa
 
         _warn_abs_gap_ignored(f"The GDPopt-{gdp_method.upper()} decomposition", abs_gap_tolerance)
@@ -14098,7 +14126,16 @@ def solve_model(
         # the iteration cap stays max_nodes, as before.
         loa_max_iter = int(_gdp_opts.get("iterlim", max_nodes))
         # #1775 G4.1: LOA's framework options.
-        for key in ("init_algorithm", "set_cover_iterlim", "subproblem", "max_configurations"):
+        for key in (
+            "init_algorithm",
+            "set_cover_iterlim",
+            "subproblem",
+            "max_configurations",
+            "starting_point",
+            "logical_constraint_list",
+            "disjunction_list",
+            "direction_norm",
+        ):
             if key in _gdp_opts:
                 loa_kwargs[key] = _gdp_opts[key]
         if "check_sat" in _gdp_opts:
