@@ -105,13 +105,15 @@ def test_solve_gets_a_finite_bound(build):
 def test_a_solve_with_no_dual_bound_says_so(caplog):
     """``bound=None`` used to be the only trace, and only at DEBUG."""
     m = dm.Model("unbounded_relaxation")
-    x = m.continuous("x", lb=-1.0, ub=1.0)
-    # ``sign`` is deliberately kept opaque by the canonicalizer: no sound
-    # continuous envelope exists, so this model genuinely cannot be bounded.
-    m.minimize(dm.sign(x) + x)
+    x = m.continuous("x", lb=0.1, ub=2.0)
+    y = m.continuous("y", lb=0.5, ub=1.5)
+    # A variable exponent stays opaque in the canonicalizer and has no interval
+    # enclosure, so this model genuinely cannot be bounded. (``sign`` was used
+    # here until it got an envelope.)
+    m.minimize(x**y + x)
     with caplog.at_level(logging.WARNING, logger="discopt.solver"):
         r = m.solve(time_limit=10)
-    if r.bound is None:
-        assert any("no valid dual bound" in rec.message.lower() for rec in caplog.records), (
-            f"a boundless solve must say so at WARNING; got {[r.message for r in caplog.records]}"
-        )
+    assert r.bound is None, f"the probe needs a boundless model; got bound={r.bound!r}"
+    assert any("no valid dual bound" in rec.message.lower() for rec in caplog.records), (
+        f"a boundless solve must say so at WARNING; got {[r.message for r in caplog.records]}"
+    )

@@ -785,6 +785,13 @@ def _eval_function_call(
         return iv.softplus(arg)
     if name == "entropy":
         return iv.entropy(arg)
+    if name == "sign":
+        # ``sign`` is nondecreasing, so its image of ``[lo, hi]`` is contained in
+        # ``[sign(lo), sign(hi)]``; the values are exact, so no rounding. A NaN
+        # endpoint (an undefined argument) gives no enclosure.
+        if np.any(np.isnan(arg.lo)) or np.any(np.isnan(arg.hi)):
+            return _unbounded(arg.lo.shape)
+        return Interval(np.sign(arg.lo).astype(np.float64), np.sign(arg.hi).astype(np.float64))
     # A registered domain operator (#1248 A). Its enclosure is, by definition,
     # the enclosure of its lowering — the expression the model actually carries —
     # so this is sound by construction and never looser than the term-by-term

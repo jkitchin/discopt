@@ -12,6 +12,18 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **`sign` has a relaxation, so models containing it can be certified (#1873
+  follow-up).** It used to be refused by the canonicalizer, which left such models
+  with `bound=None`. The default engine now relaxes `sign(t)` by the closed convex
+  hull of its graph over the argument box. Discontinuous terms certify only once
+  branching separates `t < 0` from `t > 0`; a box keeping `0` inside stays loose.
+
+- **`discopt.ml.train()` and `discopt.dae.fit` run without JAX (#1873 follow-up).**
+  The POUNCE tape now lowers stacked (batched) matmul, which `TrainableNetwork`
+  emits per layer, and array-valued Gauss-Newton residuals. Those models move from
+  the JAX evaluator to the tape on JAX installs too: same iterations and objective
+  on the four reference training models, about 10× less wall time per fit.
+
 - **`solver="scip"`: hand the whole model to SCIP (#1784; `pip install discopt[scip]`).**
   Like `solver="gurobi"`, this bypasses discopt's own solvers. Unlike it, it
   accepts general MINLP models. The expression DAG is translated in memory into

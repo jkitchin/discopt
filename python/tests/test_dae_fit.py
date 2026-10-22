@@ -68,7 +68,6 @@ def test_unflatten_solution_round_trip():
 # ── test 2: two-trajectory shared-weight fit ────────────────────────────────
 
 
-@pytest.mark.requires_jax
 @pytest.mark.smoke
 def test_two_trajectory_shared_weight_fit():
     trajs = []

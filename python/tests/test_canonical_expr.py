@@ -208,15 +208,31 @@ def test_determinism_construction_order_independent():
     assert dag.cnode_of(a).key == dag.cnode_of(b).key
 
 
-def test_refusal_sign_is_opaque():
+def test_refusal_variable_exponent_is_opaque():
+    m = dm.Model()
+    x = m.continuous("x", lb=0.5, ub=2)
+    y = m.continuous("y", lb=0.5, ub=1.5)
+    e = x**y + x
+    m.minimize(e)
+    dag = canonicalize(m)
+    top = dag.cnode_of(e)
+    # the x**y subterm must be opaque; the surrounding sum is fine.
+    assert any(c.is_opaque for c in top.children) or top.is_opaque
+
+
+def test_sign_is_a_call_node():
+    """``sign`` used to be refused here ("no sound continuous envelope"); it now
+    canonicalizes to a ``call`` node, which ``uniform_relax._build_sign`` relaxes by
+    the hull of its three-piece graph."""
     m = dm.Model()
     x = m.continuous("x", lb=-2, ub=2)
     e = dm.sign(x) + x
     m.minimize(e)
     dag = canonicalize(m)
     top = dag.cnode_of(e)
-    # the sign(...) subterm must be opaque; the surrounding sum is fine.
-    assert any(c.is_opaque for c in top.children) or top.is_opaque
+    calls = [c for c in top.children if c.kind == "call"]
+    assert [c.payload for c in calls] == ["sign"], top.children
+    assert not any(c.is_opaque for c in top.children)
 
 
 def test_refusal_custom_call_is_opaque():

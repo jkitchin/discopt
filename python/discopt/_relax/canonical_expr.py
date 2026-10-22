@@ -586,9 +586,6 @@ class _Canonicalizer:
     def _canon_call(self, expr: FunctionCall) -> CNode:
         name = expr.func_name
         args = expr.args
-        # sign is discontinuous — no sound continuous envelope; keep it opaque.
-        if name == "sign":
-            raise UnsupportedCanonicalization("sign")
         if name.startswith("norm") and len(args) == 1:
             # ``dm.norm`` of a VECTOR is a reduction over its elements, spelled out
             # here exactly as the POUNCE tape lowers it (``_nl_expr_compiler.
