@@ -483,6 +483,12 @@ impl PyTreeManager {
         self.inner.set_nonconvex(nonconvex);
     }
 
+    /// #1869: split an unbounded dimension at a finite point instead of fathoming
+    /// the node unresolved (`TreeManager::set_unbounded_branching`).
+    fn set_unbounded_branching(&mut self, on: bool) {
+        self.inner.set_unbounded_branching(on);
+    }
+
     /// Register integer columns (in nonlinear terms) eligible for spatial
     /// domain-partition branching when no continuous variable remains to bisect
     /// (issue #194).
