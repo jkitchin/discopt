@@ -9965,6 +9965,26 @@ def _gap_is_closed(result, tol: float = 1e-6) -> bool:
     return gap is not None and np.isfinite(gap) and float(gap) <= tol
 
 
+def _result_certifies(result) -> bool:
+    """Did ``result`` come back certified optimal, by its producer's own test?
+
+    ``status == "optimal"`` with ``gap_certified`` is the producer's verdict that
+    the gap closed to the caller's tolerances, which :func:`_gap_is_closed` alone
+    cannot see: its fixed ``1e-6`` is far below the default relative 1e-4.
+    Measured on ``smallinvDAXr2b200-220`` (#1913): the fallback certified optimal
+    at a relative gap of 1.7e-5, the route's uncertified objective was 1.2e-10
+    better, and :func:`_merge_route_and_fallback` returned the route -- the
+    certificate was thrown away and the solve reported ``feasible``.
+    """
+    if _gap_is_closed(result):
+        return True
+    return (
+        result is not None
+        and getattr(result, "status", None) == "optimal"
+        and bool(getattr(result, "gap_certified", False))
+    )
+
+
 def _incumbent_is_unverified(result) -> bool:
     """Whether ``result``'s incumbent failed its producer's own feasibility gate.
 
@@ -10055,7 +10075,8 @@ def _merge_route_and_fallback(route, fallback, is_maximize: bool):
     # objective that appears to is evidence of an inconsistency somewhere, not a
     # better answer, and trading a proof for it would be exactly the kind of
     # silent certificate loss the fallback exists to prevent.
-    if route_wins and _gap_is_closed(fallback) and not _gap_is_closed(route):
+    adopt_certificate = False
+    if route_wins and _result_certifies(fallback) and not _result_certifies(route):
         # The decision is unconditional; only the alarm is gated. A closed gap
         # certifies the fallback's objective to within the gap tolerance, not
         # exactly, so a route objective a hair better (5822.93629 vs 5822.93629,
@@ -10070,12 +10091,16 @@ def _merge_route_and_fallback(route, fallback, is_maximize: bool):
         )
         logger.log(
             logging.WARNING if impossible else logging.DEBUG,
-            "#1059 route objective %.10g %s the fallback's CERTIFIED %.10g (dual bound "
-            "%s); keeping the certified result.%s",
+            "#1059 route objective %.10g %s the fallback's CERTIFIED %.10g (dual bound %s); %s%s",
             route.objective,
             "appears to beat" if impossible else "is within the certified gap of",
             fallback.objective,
             fb_bound,
+            (
+                "keeping the certified result."
+                if impossible
+                else "reporting it under that certificate."
+            ),
             (
                 " This should be impossible and indicates a bound or feasibility "
                 "inconsistency worth investigating."
@@ -10083,7 +10108,16 @@ def _merge_route_and_fallback(route, fallback, is_maximize: bool):
                 else ""
             ),
         )
-        route_wins = False
+        if impossible:
+            route_wins = False
+        else:
+            # #1913: the route's point is verified (an unverified one was held back
+            # above) and lies between the fallback's certified bound and its
+            # objective, so the gap against it is smaller in both the absolute and
+            # the relative sense -- the fallback's certificate holds for it. Keeping
+            # the fallback instead reported a worse point than one in hand
+            # (``smallinvDAXr5b200-220``: 156.6169 certified vs the route's 156.6043).
+            adopt_certificate = True
 
     winner = route if route_wins else fallback
     loser = fallback if route_wins else route
@@ -10171,6 +10205,14 @@ def _merge_route_and_fallback(route, fallback, is_maximize: bool):
             winner.gap_certified = False
         else:
             winner.gap = _gap_mod.reported_gap(obj, bnd)
+            if adopt_certificate and winner is route:
+                # The fallback's certified bound was installed on the route above
+                # (it is the tighter of two valid bounds) and does not cross the
+                # route's objective, so the certificate carries over.
+                winner.status = "optimal"
+                winner.gap_certified = True
+                if getattr(fallback, "termination", None) is not None:
+                    winner.termination = fallback.termination
     # ``node_count`` is a WORK statistic, not part of the answer, so it belongs to
     # the solve rather than to whichever side won it. Reporting only the winner's
     # made a routed ``squfl025-040`` say ``nodes=0`` after 61 s in which the
