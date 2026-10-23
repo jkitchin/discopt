@@ -741,7 +741,7 @@ class TapeNLPEvaluator:
             ch = self._hole_chain(x)
             gz = np.asarray(self._problem.gradient(ch.z), dtype=np.float64)
             n = self._n_variables
-            return gz[:n] + ch.dt.T @ gz[n:]
+            return np.asarray(gz[:n] + ch.dt.T @ gz[n:], dtype=np.float64)
         return np.asarray(self._problem.gradient(self._x(x)), dtype=np.float64)
 
     def evaluate_constraints(self, x: np.ndarray) -> np.ndarray:
@@ -808,7 +808,9 @@ class TapeNLPEvaluator:
         # array, not a rebuilt Python list (#1180).
         lam_list = np.asarray(lambda_, dtype=np.float64).ravel()
         if self._holes:
-            return self._hole_hessian_values(x, float(obj_factor), lam_list)
+            return np.asarray(
+                self._hole_hessian_values(x, float(obj_factor), lam_list), dtype=np.float64
+            )
         if self._residual_exprs is None:
             return np.asarray(
                 self._problem.hessian(self._x(x), lam=lam_list, obj_factor=float(obj_factor)),
