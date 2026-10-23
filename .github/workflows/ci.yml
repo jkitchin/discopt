@@ -347,6 +347,17 @@ jobs:
           JAX_ENABLE_X64: "1"
           PYTEST_MEMORY_LIMIT_MB: "32768"
           PYTEST_XDIST_WORKERS: "4"
+          # One BLAS thread per xdist worker. Unpinned, each of the 4 workers starts
+          # an OpenBLAS pool as wide as the 4-vCPU runner, and their spinning
+          # threads starve one another: the 40002x20004 `lsq_linear` that
+          # `test_1768`'s dual recovery runs took 4.5-4.9 s per copy with four
+          # copies at OPENBLAS_NUM_THREADS=1 and did not finish in 600 s unpinned
+          # (6.2 s for one unpinned copy alone). That is the >120 s timeout the
+          # coverage shards hit on every main push. Local coverage shard 0, -n 4:
+          # 422.7 s -> 350.9 s, test_1768 57.4 s -> 14.5 s.
+          OPENBLAS_NUM_THREADS: "1"
+          OMP_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -855,6 +866,10 @@ jobs:
           JAX_ENABLE_X64: "1"
           PYTEST_MEMORY_LIMIT_MB: "32768"
           PYTEST_XDIST_WORKERS: "4"
+          # One BLAS thread per xdist worker; see the `python-fast-shard` env.
+          OPENBLAS_NUM_THREADS: "1"
+          OMP_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
