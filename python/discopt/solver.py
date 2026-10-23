@@ -4610,6 +4610,20 @@ def _exit_polish_floor(time_limit, repair: bool) -> float:
     )
 
 
+def _status_without_incumbent(wall_time, time_limit, node_count, max_nodes) -> str:
+    """The status of a solve that reports no incumbent (#1775 G6.2).
+
+    Used when the only incumbent fails the exit gate and is withdrawn: nothing was
+    proved infeasible, so the honest reason is the resource that ran out, or
+    ``"unknown"`` when none did.
+    """
+    if max_nodes is not None and node_count >= max_nodes:
+        return "node_limit"
+    if time_limit is not None and wall_time >= time_limit:
+        return "time_limit"
+    return "unknown"
+
+
 def _arb_has_rows(arb) -> bool:
     # ``len``, never truthiness: a one-row numpy bound array reads its element.
     return arb.evaluator is not None and arb.cl is not None and len(arb.cl) > 0
@@ -22797,7 +22811,9 @@ def solve_model(
             _solver_stats[f"bound_provenance/{_prov_tag}"] = float(_prov_delta)
 
     # #1659: an incumbent outside the declared rows is never certified. Applied
-    # here, after every step above that can (re-)earn a certificate.
+    # here, after every step above that can (re-)earn a certificate. The point is
+    # still returned, marked: ``Model.solve`` withdraws it unless the #1537 repair
+    # turns it into one ``verify_point`` accepts (#1775 G6.2).
     if _spatial_exit_unverified:
         _solver_stats["spatial/exit_gate_refused"] = 1.0
         if status == "optimal":
@@ -27706,6 +27722,8 @@ def _solve_nlp_bb(
     # certified. Applied last, so neither the re-earn step nor the root-cut
     # composition above can restore a certificate this point cannot carry. The
     # bound is untouched: it is a valid dual bound regardless of the incumbent.
+    # Marked, not withdrawn here: ``Model.solve`` withdraws it unless the #1537
+    # repair turns it into one ``verify_point`` accepts (#1775 G6.2).
     if _integral_unverified:
         if status == "optimal":
             status = "feasible"

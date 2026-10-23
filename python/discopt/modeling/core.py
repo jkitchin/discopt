@@ -4596,6 +4596,51 @@ def _value_not_a_variable_message(node: Any) -> str:
     )
 
 
+#: Route stats that mark an incumbent its exit gate refused (#1659, #1561).
+_ROUTE_REFUSAL_STATS = ("spatial/exit_gate_refused", "nlpbb/integral_incumbent_unverified")
+
+
+def _withdraw_refused_incumbent(result, time_limit, max_nodes) -> None:
+    """Withdraw an incumbent the route refused and no repair verified (#1775 G6.2).
+
+    Owner decision (2026-10-23): a point the exit gate refuses is never reported.
+    The route marks it and still returns it, because ``Model.solve``'s #1537 repair
+    (:func:`~discopt.validation.feasibility.repair_point`, adopted only when
+    ``verify_point`` accepts the moved point) can still make it a verified
+    feasible point -- measured on #1836's robust row: the tree's incumbent is
+    5.7e-6 outside ``max(x-0.5, 1.5-x)**2 <= 10``, the exit polish's NLP errors on
+    the ``max`` kink, and the repair lands on ``0.5 + sqrt(10)`` exactly. Only a
+    point that survives neither is withdrawn: no ``x``, objective or gap, the
+    status naming the resource that ran out (``"unknown"`` if none did), and the
+    dual bound left standing.
+    """
+    stats = result.solver_stats or {}
+    if result.x is None or not any(stats.get(k) for k in _ROUTE_REFUSAL_STATS):
+        return
+    if stats.get("certificate/incumbent_repaired"):
+        return
+    import logging
+
+    from discopt.solver import _status_without_incumbent
+
+    logging.getLogger("discopt.solver").warning(
+        "#1775 G6.2: withdrawing an incumbent the exit gate refused and no repair "
+        "verified (objective %s); no point is reported.",
+        result.objective,
+    )
+    result.status = _status_without_incumbent(
+        result.wall_time, time_limit, result.node_count or 0, max_nodes
+    )
+    result.x = None
+    result.objective = None
+    result.gap = None
+    result.gap_certified = False
+    for _dual in ("constraint_duals", "bound_duals_lower", "bound_duals_upper"):
+        if getattr(result, _dual, None) is not None:
+            setattr(result, _dual, None)
+    result.solver_stats = {**stats, "certificate/incumbent_withdrawn": 1.0}
+
+
 @dataclass
 class SolveResult:
     """
@@ -11325,6 +11370,9 @@ class Model:
             self._withhold_user_big_m_certificate(result, _ubm_snapshot)
             # #1848: a box robust counterpart that is only a conservative restriction.
             self._withhold_conservative_ro_certificate(result)
+            # #1775 G6.2: a point the route's exit gate refused, that the #1537 repair
+            # above did not turn into one ``verify_point`` accepts, is not reported.
+            _withdraw_refused_incumbent(result, time_limit, kwargs.get("max_nodes"))
             # #1727: drop the factorable lift's auxiliary columns from ``x``. After
             # the guards above, which judge the point as the route left it. Only
             # names the lift recorded AND the caller did not declare.
