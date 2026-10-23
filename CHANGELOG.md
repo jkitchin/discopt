@@ -207,6 +207,21 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **Bound tightening no longer cuts feasible points near tanh/atan/sigmoid/erf/
+  softplus/atanh limits or across a tan pole (#1908).** These gave wrong `optimal`
+  values and false `infeasible` verdicts.
+  - The backward inverses clamped the output to `limit ∓ 1e-12` before inverting.
+    So `tanh(x) >= 0.5` imposed `x <= 14.16`, `atan(x) <= 2` imposed `x <= ~1e12`,
+    and `softplus(x) >= 0` imposed `x >= -27.6`. Now an output that reaches the
+    range limit leaves that side unbounded. Interior endpoints are inverted from a
+    guess and accepted only once the forward image's own outward-rounded bounds
+    verify them.
+  - The forward atanh image no longer clamps its argument away from ±1.
+  - The tan branch test now requires the box to lie strictly between enclosures of
+    both poles, in the Rust FBBT and in the Python interval `tan`. The double
+    `pi/2` sits below the real pole but rounded onto branch 1, so `[pi/2, 2]` was
+    given the inverted image `[1.6e16, -2.19]`.
+
 - **`DISCOPT_SCALE_FREE_BRANCHING` is default OFF again (`=1` opts in).** It made
   the native spatial kernel lose MINLPLib `tanksize` (certified in 63 s with it
   off; with it on, a 200 s time limit with the bound frozen at 1.2422 against

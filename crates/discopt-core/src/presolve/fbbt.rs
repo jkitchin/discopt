@@ -437,22 +437,38 @@ pub fn interval_cos(a: &Interval) -> Interval {
     ))
 }
 
+/// The `tan` branch `k` whose open interval `((k-1/2)pi, (k+1/2)pi)` provably
+/// contains `[a.lo, a.hi]`, or `None` when that cannot be certified.
+///
+/// Both adjacent poles are enclosed (the double `PI` is not `pi`, and the product
+/// rounds), and the box must lie strictly between the enclosures. Choosing the
+/// branch by `round(x / PI)` per endpoint is not enough (#1908): the double
+/// `pi/2` lies just *below* the real pole, on branch 0, yet `(pi/2) / PI` is
+/// exactly `0.5` and rounds to branch 1, so `[pi/2, 2]` -- which straddles the
+/// pole -- was treated as one branch and given the inverted image
+/// `[1.6e16, -2.19]`.
+fn tan_branch(a: &Interval) -> Option<f64> {
+    if !(a.lo.is_finite() && a.hi.is_finite()) || a.lo > a.hi {
+        return None;
+    }
+    let k = ((0.5 * a.lo + 0.5 * a.hi) / PI).round();
+    // `k -/+ 0.5` is exact for any `|k| < 2^52`; the product's error, plus that
+    // of `PI` itself, is under one ulp, well inside `lib_*`'s margin.
+    let left_pole_hi = lib_up((k - 0.5) * PI);
+    let right_pole_lo = lib_down((k + 0.5) * PI);
+    (a.lo > left_pole_hi && a.hi < right_pole_lo).then_some(k)
+}
+
 /// `tan([a,b])` with branch handling.
 ///
 /// `tan` is increasing and continuous on each branch `((k-1/2)pi, (k+1/2)pi)`
-/// with vertical asymptotes at `(k+1/2)pi`. When `[a,b]` lies within a single
-/// branch (no asymptote strictly inside), `tan` is monotone, so the image is
+/// with vertical asymptotes at `(k+1/2)pi`. When `[a,b]` provably lies within a
+/// single branch ([`tan_branch`]), `tan` is monotone, so the image is
 /// `[tan(a), tan(b)]`. Otherwise the image is unbounded and we return `entire`.
 pub fn interval_tan(a: &Interval) -> Interval {
-    // The branch index of x is round(x / pi): branch k spans
-    // ((k-1/2)pi, (k+1/2)pi), with asymptotes at the half-integer multiples.
-    let branch_lo = (a.lo / PI).round();
-    let branch_hi = (a.hi / PI).round();
-    if branch_lo == branch_hi {
-        // Same branch: tan is increasing and finite here.
+    if tan_branch(a).is_some() {
         Interval::new(lib_down(a.lo.tan()), lib_up(a.hi.tan()))
     } else {
-        // Spans at least one asymptote: unbounded.
         Interval::entire()
     }
 }
@@ -947,12 +963,29 @@ fn eval_node_interval(
                     Interval::new(lib_down(lo).max(0.0), lib_up(hi))
                 }
                 MathFunc::Atanh => {
-                    // atanh defined on (-1, 1), monotonically increasing.
-                    // Clamp just inside the domain to avoid +/-inf.
-                    const EPS: f64 = 1e-12;
-                    let lo = a0.lo.clamp(-1.0 + EPS, 1.0 - EPS).atanh();
-                    let hi = a0.hi.clamp(-1.0 + EPS, 1.0 - EPS).atanh();
-                    Interval::new(lib_down(lo), lib_up(hi))
+                    // atanh is defined on (-1, 1), increasing, and unbounded at
+                    // both ends. An endpoint at or past a domain limit maps to
+                    // that side's infinity; an interior one is evaluated exactly
+                    // and rounded outward. (Clamping to `1 - 1e-12` capped the
+                    // image at atanh(1 - 1e-12) ~ 14.2 and declared feasible
+                    // models with x in (1 - 1e-12, 1) infeasible, #1908.) An
+                    // argument wholly outside the domain gets `entire`: sound,
+                    // and it concludes nothing.
+                    if a0.hi <= -1.0 || a0.lo >= 1.0 {
+                        Interval::entire()
+                    } else {
+                        let lo = if a0.lo <= -1.0 {
+                            f64::NEG_INFINITY
+                        } else {
+                            lib_down(a0.lo.atanh())
+                        };
+                        let hi = if a0.hi >= 1.0 {
+                            f64::INFINITY
+                        } else {
+                            lib_up(a0.hi.atanh())
+                        };
+                        Interval::new(lo, hi)
+                    }
                 }
                 MathFunc::Erf => {
                     // erf is monotonically increasing, range (-1, 1)
@@ -1072,12 +1105,11 @@ fn eval_node_interval(
 /// Inverse error function `erf^{-1}(y)` for `y in (-1, 1)`.
 ///
 /// A Winitzki closed-form initial guess refined by Newton iterations against
-/// `libm::erf` (which converges to ~machine precision). Backward propagation
-/// widens the result outward by a small margin so the preimage stays a sound
-/// superset despite any residual error.
+/// `libm::erf`. It is only a *guess*: near `|y| -> 1` the Newton step divides by
+/// a vanishing derivative, so backward propagation never trusts it directly but
+/// certifies it through [`increasing_preimage`].
 fn erfinv(y: f64) -> f64 {
     use std::f64::consts::PI;
-    let y = y.clamp(-1.0 + 1e-12, 1.0 - 1e-12);
     let a = 0.147_f64;
     let ln = (1.0 - y * y).ln();
     let t1 = 2.0 / (PI * a) + 0.5 * ln;
@@ -1092,6 +1124,75 @@ fn erfinv(y: f64) -> f64 {
         x -= (libm::erf(x) - y) / deriv;
     }
     x
+}
+
+/// A sound enclosure of `{x : f(x) in t}` for a strictly increasing `f` mapping
+/// onto the open range `(r_lo, r_hi)` (#1908).
+///
+/// `inv` is an approximate inverse; it is only a starting guess. `f_up`/`f_down`
+/// are outward-rounded upper/lower bounds on `f` -- the same ones the forward
+/// image uses. An endpoint is accepted only once it is *verified*: a lower end
+/// `x` with `f_up(x) <= t.lo` excludes every smaller argument (`f` is strictly
+/// increasing, so `f(x') < f(x) <= t.lo`), and symmetrically for the upper end.
+/// A guess that fails is pushed outward by a geometrically growing step.
+///
+/// Each side whose endpoint reaches a range limit is left unbounded: the
+/// preimage of `[c, r_hi]` is `[f^{-1}(c), +inf)`. Clamping that endpoint to
+/// `r_hi - 1e-12` first -- what the tanh, atan, sigmoid and erf rules did --
+/// imposed a finite bound (`tanh(x) >= 0.5` gave `x <= 14.16`) that cut off
+/// every larger feasible point, and so the optimum. A side that cannot be
+/// verified (an endpoint past the range, a non-finite guess, no verified point
+/// within the step budget) is also left unbounded: looser, never wrong.
+fn increasing_preimage(
+    t: &Interval,
+    r_lo: f64,
+    r_hi: f64,
+    inv: impl Fn(f64) -> f64,
+    f_up: impl Fn(f64) -> f64,
+    f_down: impl Fn(f64) -> f64,
+) -> Interval {
+    // The step starts at a few ulps of the guess and quadruples, so 64 rounds
+    // span every finite double before giving up.
+    const ROUNDS: usize = 64;
+    let lo = if t.lo > r_lo && t.lo < r_hi {
+        let mut x = inv(t.lo);
+        let mut step = 4.0 * f64::EPSILON * x.abs().max(f64::MIN_POSITIVE);
+        let mut verified = f64::NEG_INFINITY;
+        for _ in 0..ROUNDS {
+            if !x.is_finite() {
+                break;
+            }
+            if f_up(x) <= t.lo {
+                verified = x;
+                break;
+            }
+            x -= step;
+            step *= 4.0;
+        }
+        verified
+    } else {
+        f64::NEG_INFINITY
+    };
+    let hi = if t.hi < r_hi && t.hi > r_lo {
+        let mut x = inv(t.hi);
+        let mut step = 4.0 * f64::EPSILON * x.abs().max(f64::MIN_POSITIVE);
+        let mut verified = f64::INFINITY;
+        for _ in 0..ROUNDS {
+            if !x.is_finite() {
+                break;
+            }
+            if f_down(x) >= t.hi {
+                verified = x;
+                break;
+            }
+            x += step;
+            step *= 4.0;
+        }
+        verified
+    } else {
+        f64::INFINITY
+    };
+    Interval::new(lo, hi)
 }
 
 /// Backward-propagate an output bound through the expression DAG to
@@ -1476,17 +1577,16 @@ fn backward_propagate_with(
                     );
                 }
                 MathFunc::Tanh => {
-                    // tanh increasing onto (-1, 1), inverse atanh. Clamp inside domain.
-                    const EPS: f64 = 1e-12;
-                    let lo = lib_down(tightened.lo.clamp(-1.0 + EPS, 1.0 - EPS).atanh());
-                    let hi = lib_up(tightened.hi.clamp(-1.0 + EPS, 1.0 - EPS).atanh());
-                    backward_propagate(
-                        arena,
-                        args[0],
-                        Interval::new(lo, hi),
-                        node_bounds,
-                        var_bounds,
+                    // tanh increasing onto (-1, 1), inverse atanh.
+                    let pre = increasing_preimage(
+                        &tightened,
+                        -1.0,
+                        1.0,
+                        f64::atanh,
+                        |x| lib_up(x.tanh()),
+                        |x| lib_down(x.tanh()),
                     );
+                    backward_propagate(arena, args[0], pre, node_bounds, var_bounds);
                 }
                 MathFunc::Atanh => {
                     // atanh increasing on (-1, 1), inverse tanh.
@@ -1505,12 +1605,12 @@ fn backward_propagate_with(
                     // tan is monotone within a single branch. If the forward
                     // input interval lies in one branch, invert via atan with
                     // the branch offset: x = atan(y) + k*pi.
+                    // The branch must be certified pole-free (#1908); a box that
+                    // may straddle a pole has a two-piece preimage, so skip.
                     use std::f64::consts::PI;
                     let inp = node_bounds[args[0].0];
-                    let branch_lo = (inp.lo / PI).round();
-                    let branch_hi = (inp.hi / PI).round();
-                    if branch_lo == branch_hi {
-                        let k_pi = branch_lo * PI;
+                    if let Some(k) = tan_branch(&inp) {
+                        let k_pi = k * PI;
                         // `k_pi` is a rounded multiple of pi: absolute error.
                         let new_lo = abs_down(tightened.lo.atan() + k_pi, k_pi.abs() + PI);
                         let new_hi = abs_up(tightened.hi.atan() + k_pi, k_pi.abs() + PI);
@@ -1524,18 +1624,20 @@ fn backward_propagate_with(
                     }
                 }
                 MathFunc::Atan => {
-                    // atan increasing onto (-pi/2, pi/2), inverse tan. Clamp range.
+                    // atan increasing onto (-pi/2, pi/2), inverse tan. The double
+                    // `FRAC_PI_2` is below the real pi/2, so an endpoint at or past
+                    // it is treated as reaching the limit: unbounded, which is the
+                    // conservative side.
                     use std::f64::consts::FRAC_PI_2;
-                    const EPS: f64 = 1e-12;
-                    let lo = lib_down(tightened.lo.clamp(-FRAC_PI_2 + EPS, FRAC_PI_2 - EPS).tan());
-                    let hi = lib_up(tightened.hi.clamp(-FRAC_PI_2 + EPS, FRAC_PI_2 - EPS).tan());
-                    backward_propagate(
-                        arena,
-                        args[0],
-                        Interval::new(lo, hi),
-                        node_bounds,
-                        var_bounds,
+                    let pre = increasing_preimage(
+                        &tightened,
+                        -FRAC_PI_2,
+                        FRAC_PI_2,
+                        f64::tan,
+                        |x| lib_up(x.atan()),
+                        |x| lib_down(x.atan()),
                     );
+                    backward_propagate(arena, args[0], pre, node_bounds, var_bounds);
                 }
                 MathFunc::Asin => {
                     // asin increasing onto [-pi/2, pi/2], inverse sin; preimage in [-1, 1].
@@ -1590,43 +1692,37 @@ fn backward_propagate_with(
                 }
                 MathFunc::Sigmoid => {
                     // sigmoid increasing onto (0, 1), inverse logit a = ln(p/(1-p)).
-                    const EPS: f64 = 1e-12;
-                    let logit = |p: f64| {
-                        let p = p.clamp(EPS, 1.0 - EPS);
-                        p.ln() - (1.0 - p).ln()
-                    };
-                    backward_propagate(
-                        arena,
-                        args[0],
-                        // `1 - p` loses digits: absolute error at scale 1.
-                        Interval::new(
-                            abs_down(logit(tightened.lo), 1.0),
-                            abs_up(logit(tightened.hi), 1.0),
-                        ),
-                        node_bounds,
-                        var_bounds,
+                    // The bounds on sigmoid are the forward image's: `0.5 +
+                    // 0.5*tanh` cancels for very negative x, so absolute error.
+                    let sig = |x: f64| 0.5 + 0.5 * (0.5 * x).tanh();
+                    let pre = increasing_preimage(
+                        &tightened,
+                        0.0,
+                        1.0,
+                        |p: f64| p.ln() - (1.0 - p).ln(),
+                        |x| abs_up(sig(x), 1.0),
+                        |x| abs_down(sig(x), 1.0),
                     );
+                    backward_propagate(arena, args[0], pre, node_bounds, var_bounds);
                 }
                 MathFunc::Softplus => {
                     // softplus increasing onto (0, inf), inverse a = s + ln(1 - e^{-s}), s > 0.
-                    const EPS: f64 = 1e-12;
-                    // a = s + ln(1 - e^{-s}). `ln_1p(-exp(-s))` cancels
-                    // catastrophically for small s (relative error ~eps/s in the
-                    // argument); `-expm1(-s)` computes `1 - e^{-s}` accurately.
-                    let inv = |s: f64| {
-                        let s = s.max(EPS);
-                        s + (-(-s).exp_m1()).ln()
-                    };
-                    backward_propagate(
-                        arena,
-                        args[0],
-                        Interval::new(
-                            abs_down(inv(tightened.lo), tightened.lo),
-                            abs_up(inv(tightened.hi), tightened.hi),
-                        ),
-                        node_bounds,
-                        var_bounds,
+                    // `ln_1p(-exp(-s))` cancels catastrophically for small s
+                    // (relative error ~eps/s in the argument); `-expm1(-s)`
+                    // computes `1 - e^{-s}` accurately. An output bound at or
+                    // below 0 is the range limit, so that side stays unbounded:
+                    // clamping it to `1e-12` turned `softplus(x) >= 0`, which
+                    // every x satisfies, into `x >= -27.6` (#1908).
+                    let sp = |x: f64| x.max(0.0) + (-x.abs()).exp().ln_1p();
+                    let pre = increasing_preimage(
+                        &tightened,
+                        0.0,
+                        f64::INFINITY,
+                        |s: f64| s + (-(-s).exp_m1()).ln(),
+                        |x| lib_up(sp(x)),
+                        |x| lib_down(sp(x)).max(0.0),
                     );
+                    backward_propagate(arena, args[0], pre, node_bounds, var_bounds);
                 }
                 MathFunc::Entropy => {
                     // `x*ln(x)` is not monotone: it falls on [0, 1/e] and rises
@@ -1676,19 +1772,17 @@ fn backward_propagate_with(
                     }
                 }
                 MathFunc::Erf => {
-                    // erf increasing onto (-1, 1); invert with erfinv, clamped
-                    // to the open domain and widened by a small margin so the
-                    // preimage is a sound superset despite erfinv's tiny error.
-                    const M: f64 = 1e-9;
-                    let lo = erfinv(tightened.lo) - M;
-                    let hi = erfinv(tightened.hi) + M;
-                    backward_propagate(
-                        arena,
-                        args[0],
-                        Interval::new(lo, hi),
-                        node_bounds,
-                        var_bounds,
+                    // erf increasing onto (-1, 1); `erfinv` is the guess and the
+                    // forward image's bounds on erf verify it.
+                    let pre = increasing_preimage(
+                        &tightened,
+                        -1.0,
+                        1.0,
+                        erfinv,
+                        |x| lib_up(libm::erf(x)),
+                        |x| lib_down(libm::erf(x)),
                     );
+                    backward_propagate(arena, args[0], pre, node_bounds, var_bounds);
                 }
                 MathFunc::Sin => {
                     // sin is monotone on each piece between consecutive extrema
@@ -5027,5 +5121,236 @@ mod prod_reduction_tests {
             "{:?}",
             b[1]
         );
+    }
+}
+
+/// #1908: inverse/limit rules of the unary FBBT. Each test checks the exact
+/// failure the issue reported, then samples points to show no feasible
+/// argument is cut.
+#[cfg(test)]
+mod tests_1908 {
+    use super::*;
+    use crate::expr::*;
+    use std::f64::consts::FRAC_PI_2;
+
+    /// Backward-propagate `func(x) in out` on `x in [lo, hi]`; the new box of x.
+    fn unary_preimage(func: MathFunc, lo: f64, hi: f64, out: Interval) -> Interval {
+        let mut arena = ExprArena::new();
+        let x = arena.add(ExprNode::Variable {
+            name: "x".into(),
+            index: 0,
+            size: 1,
+            shape: vec![],
+        });
+        let f = arena.add(ExprNode::FunctionCall {
+            func,
+            args: vec![x],
+        });
+        let box0 = vec![Interval::new(lo, hi)];
+        let nb = forward_propagate(&arena, f, &box0);
+        let mut vb = box0.clone();
+        backward_propagate(&arena, f, out, &nb, &mut vb);
+        vb[0]
+    }
+
+    fn unary_image(func: MathFunc, lo: f64, hi: f64) -> Interval {
+        let mut arena = ExprArena::new();
+        let x = arena.add(ExprNode::Variable {
+            name: "x".into(),
+            index: 0,
+            size: 1,
+            shape: vec![],
+        });
+        let f = arena.add(ExprNode::FunctionCall {
+            func,
+            args: vec![x],
+        });
+        forward_propagate(&arena, f, &[Interval::new(lo, hi)])[f.0]
+    }
+
+    fn is_entire(i: Interval) -> bool {
+        i.lo == f64::NEG_INFINITY && i.hi == f64::INFINITY
+    }
+
+    fn sigmoid(x: f64) -> f64 {
+        0.5 + 0.5 * (0.5 * x).tanh()
+    }
+
+    fn softplus(x: f64) -> f64 {
+        x.max(0.0) + (-x.abs()).exp().ln_1p()
+    }
+
+    /// Deterministic uniform draws in [0, 1).
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> f64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 11) as f64 / (1u64 << 53) as f64
+        }
+    }
+
+    #[test]
+    fn output_at_the_range_limit_leaves_that_side_unbounded() {
+        // tanh(x) >= 0.5 on [0, 50]: x = 45 is feasible; the clamp gave x <= 14.16.
+        let t = unary_preimage(MathFunc::Tanh, 0.0, 50.0, Interval::new(0.5, f64::INFINITY));
+        assert_eq!(t.hi, 50.0, "{t:?}");
+        assert!(
+            t.lo <= 0.5f64.atanh() && t.lo > 0.5f64.atanh() - 1e-12,
+            "{t:?}"
+        );
+
+        let s = unary_preimage(
+            MathFunc::Sigmoid,
+            0.0,
+            50.0,
+            Interval::new(0.6, f64::INFINITY),
+        );
+        let logit = (0.6f64 / 0.4).ln();
+        assert_eq!(s.hi, 50.0, "{s:?}");
+        assert!(s.lo <= logit && s.lo > logit - 1e-12, "{s:?}");
+
+        let e = unary_preimage(MathFunc::Erf, 0.0, 50.0, Interval::new(0.5, f64::INFINITY));
+        assert_eq!(e.hi, 50.0, "{e:?}");
+        let erfinv_half = 0.476_936_276_204_469_9;
+        assert!(e.lo <= erfinv_half && e.lo > erfinv_half - 1e-12, "{e:?}");
+
+        // atan(x) <= 2 holds everywhere (2 > pi/2); the clamp gave x <= ~1e12.
+        let a = unary_preimage(
+            MathFunc::Atan,
+            0.0,
+            1e13,
+            Interval::new(f64::NEG_INFINITY, 2.0),
+        );
+        assert_eq!(a.hi, 1e13, "{a:?}");
+
+        // softplus(x) >= 0 holds everywhere; the clamp gave x >= -27.6.
+        let p = unary_preimage(
+            MathFunc::Softplus,
+            -50.0,
+            50.0,
+            Interval::new(0.0, f64::INFINITY),
+        );
+        assert_eq!(p.lo, -50.0, "{p:?}");
+    }
+
+    #[test]
+    fn increasing_inverses_never_cut_a_sampled_feasible_point() {
+        type F = fn(f64) -> f64;
+        let cases: [(MathFunc, F, f64); 5] = [
+            (MathFunc::Tanh, f64::tanh, 40.0),
+            (MathFunc::Atan, f64::atan, 1e17),
+            (MathFunc::Sigmoid, sigmoid, 60.0),
+            (MathFunc::Erf, libm::erf, 8.0),
+            (MathFunc::Softplus, softplus, 60.0),
+        ];
+        let mut rng = Lcg(1908);
+        let mut checks = 0usize;
+        for (func, f, span) in cases {
+            for _ in 0..400 {
+                // Arguments spread on a log scale so both the interior and the
+                // saturated tails (where the old clamps cut) are hit.
+                let mag = span.powf(rng.next());
+                let x = if func == MathFunc::Softplus || rng.next() < 0.5 {
+                    mag * if rng.next() < 0.5 { -1.0 } else { 1.0 }
+                } else {
+                    mag
+                };
+                let y = f(x);
+                // An output band around f(x), at most a few ulps wide on each
+                // side, so the inverse has to be tight to be sound.
+                let w = 4.0 * f64::EPSILON * y.abs().max(f64::MIN_POSITIVE);
+                let out = match (rng.next() * 3.0) as u32 {
+                    0 => Interval::new(y - w, f64::INFINITY),
+                    1 => Interval::new(f64::NEG_INFINITY, y + w),
+                    _ => Interval::new(y - w, y + w),
+                };
+                let (lo, hi) = (-span.max(1.0) * 2.0, span.max(1.0) * 2.0);
+                let pre = unary_preimage(func, lo, hi, out);
+                assert!(
+                    pre.lo <= x && x <= pre.hi,
+                    "{func:?}: x={x:e} f(x)={y:e} out={out:?} cut, preimage {pre:?}"
+                );
+                checks += 1;
+            }
+        }
+        assert_eq!(checks, 2000);
+    }
+
+    #[test]
+    fn atanh_image_is_unbounded_at_the_domain_edges() {
+        // x in [0.9, 1 - 1e-14] and x = tanh(14.5) is inside: the image must
+        // reach atanh(tanh(14.5)) ~ 14.5, not stop at atanh(1 - 1e-12) ~ 14.16.
+        let r = unary_image(MathFunc::Atanh, 0.9, 1.0 - 1e-14);
+        assert!(r.hi >= (1.0f64 - 1e-14).atanh(), "{r:?}");
+        assert!(r.hi > 16.0, "{r:?}");
+        let up = unary_image(MathFunc::Atanh, 0.5, 1.0);
+        assert_eq!(up.hi, f64::INFINITY);
+        let down = unary_image(MathFunc::Atanh, -1.0, 0.0);
+        assert_eq!(down.lo, f64::NEG_INFINITY);
+        // Near -1 the old clamp overestimated the lower end.
+        let near = unary_image(MathFunc::Atanh, -1.0 + 1e-14, 0.0);
+        assert!(near.lo <= (-1.0f64 + 1e-14).atanh(), "{near:?}");
+    }
+
+    #[test]
+    fn tan_box_across_a_pole_is_unbounded() {
+        // The double pi/2 sits below the real pole, so [pi/2, 2] straddles it.
+        assert!(is_entire(interval_tan(&Interval::new(FRAC_PI_2, 2.0))));
+        assert!(is_entire(interval_tan(&Interval::new(1.57, 2.0))));
+        assert!(is_entire(interval_tan(&Interval::new(-FRAC_PI_2, 0.0))));
+        // ...and backward propagation does not tighten through it.
+        let b = unary_preimage(
+            MathFunc::Tan,
+            FRAC_PI_2,
+            2.0,
+            Interval::new(f64::NEG_INFINITY, -1.0),
+        );
+        assert_eq!((b.lo, b.hi), (FRAC_PI_2, 2.0));
+        // A box certifiably inside one branch still tightens soundly.
+        let c = unary_preimage(
+            MathFunc::Tan,
+            1.6,
+            2.0,
+            Interval::new(f64::NEG_INFINITY, -10.0),
+        );
+        let edge = std::f64::consts::PI - 10f64.atan();
+        assert!(c.lo == 1.6 && c.hi >= edge && c.hi < edge + 1e-9, "{c:?}");
+    }
+
+    #[test]
+    fn tan_image_contains_sampled_points() {
+        let mut rng = Lcg(19081);
+        let mut checks = 0usize;
+        for _ in 0..3000 {
+            let a = (rng.next() - 0.5) * 40.0;
+            // Widths from 1e-12 to ~4, so many boxes end within ulps of a pole.
+            let b = a + 4.0 * 1e-12f64.powf(rng.next());
+            let img = interval_tan(&Interval::new(a, b));
+            assert!(img.lo <= img.hi, "inverted image {img:?} on [{a}, {b}]");
+            for k in 0..=4 {
+                let p = a + (b - a) * (k as f64) / 4.0;
+                let v = p.tan();
+                assert!(img.lo <= v && v <= img.hi, "tan({p}) = {v} outside {img:?}");
+                checks += 1;
+            }
+        }
+        // Boxes starting at the double of each pole, the case that used to invert.
+        for k in -6i32..=6 {
+            let pole = (k as f64 + 0.5) * std::f64::consts::PI;
+            for lo in [pole, pole.next_up(), pole.next_down()] {
+                let img = interval_tan(&Interval::new(lo, lo + 0.3));
+                assert!(img.lo <= img.hi, "inverted image {img:?} at {lo}");
+                let v = lo.tan();
+                assert!(
+                    img.lo <= v && v <= img.hi,
+                    "tan({lo}) = {v} outside {img:?}"
+                );
+                checks += 1;
+            }
+        }
+        assert_eq!(checks, 15_000 + 39);
     }
 }
