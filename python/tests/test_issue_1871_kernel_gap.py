@@ -32,7 +32,7 @@ pytestmark = pytest.mark.unit
 
 GAP = "DISCOPT_KERNEL_DOCUMENTED_GAP"
 CUT = "DISCOPT_KERNEL_CUTOFF_OBBT"
-ST_M2 = os.path.join(os.path.dirname(__file__), "data", "minlplib_nl", "st_m2.nl")
+ST_M2 = os.path.join(os.path.dirname(__file__), "data", "issue_1871", "st_m2.nl")
 OPT = -856648.8186999999  # minlplib.solu
 
 
@@ -90,7 +90,7 @@ def test_flag_defaults(monkeypatch):
     assert not SV._kernel_cutoff_obbt_enabled()
 
 
-NOUS1 = os.path.join(os.path.dirname(__file__), "data", "minlplib_nl", "nous1.nl")
+NOUS1 = os.path.join(os.path.dirname(__file__), "data", "issue_1871", "nous1.nl")
 NOUS1_OPT = 1.567072  # minlplib.solu
 
 
