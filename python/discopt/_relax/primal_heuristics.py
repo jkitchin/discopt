@@ -13,6 +13,7 @@ import logging
 import math
 import os
 import time
+import weakref
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Optional
 
@@ -1144,6 +1145,14 @@ def subnlp(
         if np.any(int_mask):
             x0[int_mask] = np.round(x0[int_mask])
             x0 = np.clip(x0, lb_orig, ub_orig)
+
+            # #1775 G6.2: with the integers fixed, a linear row over integers only
+            # is a constant. If the assignment breaks one, no continuous
+            # completion exists, so do not solve for one. Measured on the GDP
+            # panel's big-M eight_process: integer_local_search spent 4.9 s on 24
+            # sub-NLPs, every one breaking a ``sum_k y_k == 1`` row.
+            if _refuted_by_integer_rows(model, int_mask, x0, feas_tol):
+                return None
 
             # Tighten bounds on integer variables; ``saved_bounds`` restores them.
             offset = 0
@@ -3695,6 +3704,96 @@ def _scan_one_hot_rows(model: Model, binary_mask: np.ndarray, n_vars: int) -> li
         seen.update(g)
         groups.append(sorted(g))
     return groups
+
+
+#: Per-model cache for :func:`_integer_linear_rows`, keyed weakly on the model so a
+#: discarded model takes its entry with it.
+_INT_ROW_CACHE: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+@dataclass(frozen=True)
+class _IntegerRow:
+    """A linear row ``sum_j coef[j] * x[idx[j]] + const (sense) 0`` over integers only."""
+
+    idx: np.ndarray
+    coef: np.ndarray
+    const: float
+    sense: str
+
+
+def _integer_linear_rows(model: Model, int_mask: np.ndarray) -> list[_IntegerRow]:
+    """The model's linear rows whose whole support is integer (#1775 G6.2).
+
+    Once :func:`subnlp` fixes the integers, each such row is a constant, so the
+    assignment either satisfies it or no continuous completion can. Rows that are
+    not affine, are vector-valued, or mention any continuous variable are left out;
+    leaving a row out only means the NLP decides it, as before.
+
+    The scan linearizes every constraint once per model (sparse, the
+    :func:`_scan_one_hot_rows` route), so it is cached. The key is the identity of
+    every constraint in order plus the integer mask, so adding or replacing a
+    constraint, or changing a variable's type, rescans.
+    """
+    from discopt._relax.milp_relaxation import _linearize_affine_expr_sparse
+
+    key = (tuple(id(c) for c in model._constraints), int_mask.tobytes())
+    hit = _INT_ROW_CACHE.get(model)
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    n_vars = int(int_mask.size)
+    rows: list[_IntegerRow] = []
+    for c in model._constraints:
+        sense = getattr(c, "sense", None)
+        if sense not in ("<=", ">=", "=="):
+            continue
+        try:
+            terms, const = _linearize_affine_expr_sparse(c.body, model, n_vars)
+        except Exception as exc:  # noqa: BLE001 - a non-affine row is left to the NLP
+            logger.debug("integer-row scan skipped a body: %s: %s", type(exc).__name__, exc)
+            continue
+        nz = sorted(j for j, v in terms.items() if v != 0.0)
+        if not nz or not np.isfinite(const) or nz[0] < 0 or nz[-1] >= n_vars:
+            continue
+        if not np.all(int_mask[nz]):
+            continue
+        rows.append(
+            _IntegerRow(
+                np.asarray(nz, dtype=np.int64),
+                np.asarray([terms[j] for j in nz], dtype=np.float64),
+                float(const),
+                sense,
+            )
+        )
+    _INT_ROW_CACHE[model] = (key, rows)
+    return rows
+
+
+def _refuted_by_integer_rows(
+    model: Model, int_mask: np.ndarray, x: np.ndarray, feas_tol: float
+) -> bool:
+    """Whether the integer values in ``x`` violate an integer-only linear row.
+
+    Refuses only beyond what :func:`subnlp`'s own final
+    :func:`_check_constraint_feasibility` could accept on that row at the same
+    integer values: that check passes a row whose violation is at most
+    ``max(SMALL_ROW_ABS_FLOOR, tol + rtol * scale)`` (its distance cap only lowers
+    the second term), with ``rtol = 1e-9`` and ``scale = sum |a_j x_j|``. This uses
+    ten times that, so a refused assignment is one that check rejects anyway and
+    no point subnlp would have returned is lost.
+    """
+    for row in _integer_linear_rows(model, int_mask):
+        vals = x[row.idx]
+        body = float(row.coef @ vals) + row.const
+        if row.sense == "<=":
+            viol = body
+        elif row.sense == ">=":
+            viol = -body
+        else:
+            viol = abs(body)
+        scale = float(np.abs(row.coef) @ np.abs(vals)) + abs(row.const)
+        if viol > 10.0 * max(SMALL_ROW_ABS_FLOOR, feas_tol + 1e-9 * scale):
+            return True
+    return False
 
 
 def _detect_one_hot_groups(model: Model, binary_mask: np.ndarray, n_vars: int) -> list[list[int]]:
