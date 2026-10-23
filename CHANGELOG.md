@@ -12,6 +12,21 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **`dm.external` and the spectral norm `dm.norm(X, 2)` run without JAX, and the
+  spectral norm certifies (#1903).**
+  - The default tape evaluator now supports numpy-evaluated "holes"
+    (`discopt/_tape_holes.py`). The node becomes extra tape columns filled by
+    numpy (the caller's `fn`/`jac`/`hess` for `dm.external`; SVD-based value,
+    gradient and Hessian for σ₁), folded back into the model's variables by the
+    chain rule. It matches the JAX evaluator to 3e-15.
+  - Building a `dm.external` block no longer imports JAX.
+  - σ₁ of a matrix also gets a relaxation: dual-norm cuts `w >= uᵀXv` plus
+    interval bounds. It routes to the spatial branch-and-bound, because it is
+    non-differentiable where singular values tie, which is where its minimizers
+    sit.
+  - Box maximization, `min σ₁` with a tied optimum and a small MINLP all certify
+    at their exact optima.
+
 - **Matrix 1-/inf-norms certify, and more models run without JAX (#1873 second
   follow-up).** `dm.norm(X, 1)` / `dm.norm(X, "inf")` of a 2-D `X` (largest
   absolute column / row sum) are evaluated by the default tape evaluator,

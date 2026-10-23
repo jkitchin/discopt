@@ -87,8 +87,11 @@ Example
     m.subject_to(block(x)[0] == 3.0)
     res = m.solve()             # status="feasible"; no certificate, by contract
 
-Note that importing this module does not import JAX; building an external block
-does, because the callback machinery is JAX's.
+Neither importing this module nor building an external block imports JAX (#1903):
+the default tape evaluator calls *fn*/*jac*/*hess* directly, through
+:mod:`discopt._tape_holes`. JAX is imported only if the legacy JAX evaluator is
+used (``DISCOPT_NLP_EVAL=jax``, or a model the tape cannot otherwise lower), which
+is where the ``pure_callback`` bridge described above still lives.
 """
 
 from __future__ import annotations
@@ -99,7 +102,7 @@ from typing import Any, Callable, Optional, Sequence, Union, cast
 
 import numpy as np
 
-from discopt.modeling.core import custom
+from discopt.modeling.core import CustomCall, _wrap
 
 __all__ = [
     "ExternalSpec",
@@ -419,18 +422,26 @@ def external(
         )
     )
 
-    composite = _build_composite(label, out_shape, f_call, j_call, h_call)
     spec = ExternalSpec(name=label, out_shape=out_shape, has_hessian=h_call is not None)
+
+    # The JAX composite is built on first use only (#1903). The default tape
+    # evaluator calls the numpy callables directly (``_discopt_external_numpy``
+    # below, consumed by ``discopt._tape_holes``), so a solve that never reaches
+    # the JAX evaluator never imports JAX for this block.
+    composite_box: list = []
 
     # The spec rides on a plain wrapper rather than on the ``custom_jvp`` object
     # itself: ``CustomCall.fn`` is what the solver inspects, and a plain function
     # is guaranteed to accept an attribute.
     def body(x):
-        return composite(x)
+        if not composite_box:
+            composite_box.append(_build_composite(label, out_shape, f_call, j_call, h_call))
+        return composite_box[0](x)
 
     body.__name__ = label
     body._discopt_external = spec  # type: ignore[attr-defined]
     body._discopt_external_failures = failures  # type: ignore[attr-defined]
+    body._discopt_external_numpy = (f_call, j_call, h_call, out_shape)  # type: ignore[attr-defined]
 
     def reset() -> None:
         # Per-solve state: the memo (values are only stable within a solve) and
@@ -442,7 +453,14 @@ def external(
 
     body._discopt_external_reset = reset  # type: ignore[attr-defined]
 
-    builder = custom(body, name=label)
+    # Not ``custom(body)``: that refuses without JAX (#1873), and this block no
+    # longer needs it. The node is the same ``CustomCall`` ``custom`` would build,
+    # so the opaque-node contract (no certificate, refusal with integers, no
+    # ``.nl`` export) applies unchanged.
+    def builder(*args):
+        return CustomCall(body, *[_wrap(a) for a in args], name=label)
+
+    builder.__name__ = label
     builder._discopt_external = spec  # type: ignore[attr-defined]
     builder._discopt_external_failures = failures  # type: ignore[attr-defined]
     builder._discopt_external_reset = reset  # type: ignore[attr-defined]

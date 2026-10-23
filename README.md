@@ -100,13 +100,16 @@ array transfer for the B&B tree manager, expression IR, batch dispatch, and .nl 
 
 **NLP evaluation** (`python/discopt/_tape_nlp_evaluator.py`, `_nl_expr_compiler.py`):
 objective, gradient, constraints, Jacobian, and Lagrangian Hessian (dense and sparse)
-from a POUNCE Rust AD tape. This is the default; expressions with no tape opcode (an
-opaque `dm.custom` body, a matrix norm) fall back to the JAX evaluator, and
+from a POUNCE Rust AD tape. This is the default. `dm.external` blocks and the spectral
+norm `dm.norm(X, 2)` of a matrix are evaluated by numpy as *holes* in the tape and
+folded back in by the chain rule (#1903); expressions the tape still declines (an
+opaque `dm.custom` body, a `dm.external` nested inside another) fall back to the JAX
+evaluator, and
 `DISCOPT_NLP_EVAL=jax` selects it wholesale. A tape-representable solve does not import
 JAX -- not on the LP, QP, MIQP and simplex-MILP paths, and not on the nonlinear ones
 either. **That fallback is the exception, and it is on the default path**: a plain
-`Model.solve()` of `dm.norm(X, 2)` with a 3x3 `X`, with no `import jax` on the caller's
-side, takes `sys.modules` from 0 to 219 `jax` entries. "A default solve does not import
+`Model.solve()` of a `dm.external` nested inside another one's argument, with no
+`import jax` on the caller's side, takes `sys.modules` from 0 to 222 `jax` entries. "A default solve does not import
 JAX" is true of the tape-representable majority, not of every model. JAX is the optional
 `discopt[jax]` extra (#1873); without it, such a model refuses with an `ImportError` that
 names the construct the tape has no opcode for and the extra to install.

@@ -3633,6 +3633,8 @@ def _build_multivar(ctx: _Builder, node: CNode, w: int) -> Envelope:
       * anything else (centropy, general n-ary): the sound aux interval floor.
     """
     fname: str = node.payload
+    if fname.startswith("specnorm:"):
+        return _build_spectral_norm(ctx, node, w)
     args = [ctx.rep(c) for c in node.children]
     if fname == "max" and len(args) >= 2:
         for la in args:  # w >= a_i  ->  a_i - w <= 0
@@ -3647,6 +3649,72 @@ def _build_multivar(ctx: _Builder, node: CNode, w: int) -> Envelope:
             ctx.add_row(coeffs, la.const)
         return Envelope(rows=[], tight=True)
     return Envelope(rows=[], tight=False)  # interval floor (loose-but-sound)
+
+
+#: Shrink applied to every spectral-norm cut coefficient so a cut can never
+#: overshoot sigma_1 through rounding in the computed singular vectors: the cut
+#: ``u^T X v <= sigma_1(X)`` needs ``|u| |v| <= 1``, and dividing by the computed
+#: norms times ``1 - _SPEC_CUT_PAD`` guarantees it with margin.
+_SPEC_CUT_PAD = 1e-12
+
+#: Entry cuts ``w >= +-x_ij`` are one pair per element; past this many elements
+#: they stop being cheap relative to what they add (the singular-pair cuts carry
+#: the bound), so only the singular-pair cuts are emitted.
+_SPEC_ENTRY_CUT_MAX = 400
+
+
+def _build_spectral_norm(ctx: _Builder, node: CNode, w: int) -> Envelope:
+    """``w = sigma_1(X)``, the spectral norm, ``X`` the node's row-major children (#1903).
+
+    ``sigma_1(X) = max over unit u, v of u^T X v``, so **for any unit pair the row**
+    ``w >= u^T X v`` **is valid everywhere** -- linear in ``X``, box-independent.
+    Emitted for every singular pair of the box centre ``C`` (exact at ``C``: the top
+    pair gives ``sigma_1(C)``) and, for small matrices, for ``u = e_i, v = +-e_j``
+    (``w >= |x_ij|``). As branching shrinks the box around a point, the centre cut
+    becomes exact there, so the lower side converges. The upper side is the aux
+    column's bound, ``sigma_1(C) + sigma_1(R)`` / ``sigma_1(max|X|)``
+    (``interval_eval._matrix_norm_interval``), whose gap is ``O(sigma_1(R))``.
+
+    Sound by construction (each row is a dual-norm inequality); checked by
+    graph-point sampling in ``test_spectral_norm.py``.
+    """
+    m_str, n_str = str(node.payload)[len("specnorm:") :].split("x")
+    m, n = int(m_str), int(n_str)
+    reps = [ctx.rep(c) for c in node.children]
+    los = np.empty(m * n)
+    his = np.empty(m * n)
+    for k, child in enumerate(node.children):
+        los[k], his[k] = ctx.bounds(child)
+    pairs: list[tuple[np.ndarray, np.ndarray]] = []
+    if np.all(np.isfinite(los)) and np.all(np.isfinite(his)):
+        center = (0.5 * (los + his)).reshape(m, n)
+        u_mat, _, vt = np.linalg.svd(center, full_matrices=False)
+        pairs.extend((u_mat[:, k], vt[k]) for k in range(min(m, n)))
+    if m * n <= _SPEC_ENTRY_CUT_MAX:
+        for i in range(m):
+            for j in range(n):
+                for sgn in (1.0, -1.0):
+                    u = np.zeros(m)
+                    v = np.zeros(n)
+                    u[i], v[j] = 1.0, sgn
+                    pairs.append((u, v))
+    for u, v in pairs:
+        norm_uv = float(np.linalg.norm(u)) * float(np.linalg.norm(v))
+        if not (np.isfinite(norm_uv) and norm_uv > 0.0):
+            continue
+        coef = np.outer(u, v).reshape(-1) * ((1.0 - _SPEC_CUT_PAD) / norm_uv)
+        # sum_k coef_k * X_k - w <= 0, with X_k = reps[k].coeffs . x + reps[k].const
+        row: dict[int, float] = {}
+        const = 0.0
+        for ck, rk in zip(coef, reps):
+            if ck == 0.0:
+                continue
+            for j, cj in rk.coeffs.items():
+                row[j] = row.get(j, 0.0) + ck * cj
+            const += ck * rk.const
+        row[w] = row.get(w, 0.0) - 1.0
+        ctx.add_row(row, -const)
+    return Envelope(rows=[], tight=False)
 
 
 def _build_opaque(ctx: _Builder, node: CNode, w: int) -> Envelope:

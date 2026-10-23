@@ -8512,6 +8512,15 @@ def _custom_call_reduced_admissible(reduced_model: Model, n_orig: int) -> bool:
     ``jnp`` intrinsic hidden in an opaque body, or a non-finite box) means the model is
     NOT reduced-relaxable, so the caller keeps the existing local-NLP-only path. Any
     other status means the relaxation builds → the global reduced-space solve is valid."""
+    # A `dm.external` body is numpy behind a callback, which MCBox cannot trace:
+    # with JAX the probe returns "unsupported" for it (measured), so answering
+    # here is the same verdict -- and it keeps a JAX-free solve from reaching for
+    # the JAX-only probe at all (#1903), which used to log a spurious fallback.
+    if any(
+        getattr(cc.fn, "_discopt_external_numpy", None) is not None
+        for cc in _model_custom_calls(reduced_model)
+    ):
+        return False
     try:
         from discopt._relax.mccormick_subgradient import reduced_mccormick_lp_bound as _probe
 
@@ -8581,6 +8590,21 @@ def _model_contains_nonsmooth_node(model: Model) -> bool:
             and len(expr.args) == 1
             and (shape := static_shape(expr.args[0])) is not None
             and len(shape) <= 2
+        ):
+            return True
+        # #1903: the spectral norm sigma_1 of a matrix is non-differentiable where
+        # its top singular values coincide -- which is where minimizers of
+        # sigma_1 concentrate (min ||X||_2 over a symmetric feasible set lands on
+        # repeated singular values). Measured on a 2x2 MINLP whose optimum is
+        # X = I: lp_nlp_bb did not certify in its budget and NLP-BB stalled at
+        # bound 1.45 against 1.6, while the spatial B&B, which relaxes sigma_1
+        # with dual-norm cuts (`uniform_relax._build_spectral_norm`), certifies.
+        if (
+            isinstance(expr, FunctionCall)
+            and expr.func_name in ("norm", "norm2", "norm2.0")
+            and len(expr.args) == 1
+            and (shape := static_shape(expr.args[0])) is not None
+            and len(shape) == 2
         ):
             return True
         left = getattr(expr, "left", None)

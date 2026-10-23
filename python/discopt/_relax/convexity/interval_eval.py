@@ -728,6 +728,14 @@ def _eval_function_call(
         shape = np.broadcast_shapes(args[0].lo.shape, args[1].lo.shape)
         return Interval(np.full(shape, -np.pi), np.full(shape, np.pi))
 
+    if expr.func_name.startswith("specnorm:"):
+        # #1903: the canonical spectral-norm node, one scalar argument per element.
+        m_str, n_str = expr.func_name[len("specnorm:") :].split("x")
+        shape2 = (int(m_str), int(n_str))
+        lo_m = np.array([float(np.asarray(a.lo).reshape(())) for a in args]).reshape(shape2)
+        hi_m = np.array([float(np.asarray(a.hi).reshape(())) for a in args]).reshape(shape2)
+        return _matrix_norm_interval("norm2", Interval(lo_m, hi_m))
+
     if len(args) != 1:
         return _unbounded(_broadcast_shape(*(a.lo.shape for a in args)))
 
@@ -828,6 +836,79 @@ def _prod_interval(arg: Interval) -> Interval:
     return acc
 
 
+#: Relative outward pad on an SVD-computed singular value. LAPACK's SVD is
+#: backward stable, so a computed sigma_1 is within a small multiple of
+#: ``(m + n) * eps * sigma_1`` of the true one; 1e-10 covers that with room to
+#: spare at any size the modeling layer builds, and is far below every tolerance
+#: the solver compares bounds with.
+_SVD_PAD = 1e-10
+
+
+def _spectral_upper(c: np.ndarray, r: np.ndarray, mag: np.ndarray) -> float:
+    """Sound upper bound on sigma_1 over the box ``|X - c| <= r`` (``|X| <= mag``).
+
+    ``sigma_1(X) <= sigma_1(c) + sigma_1(X - c) <= sigma_1(c) + sigma_1(r)`` (triangle
+    inequality, then monotonicity of sigma_1 in entrywise absolute value:
+    ``u^T A v <= |u|^T |A| |v| <= |u|^T B |v|`` for ``|A| <= B``), and directly
+    ``sigma_1(X) <= sigma_1(mag)``. The smaller, padded outward.
+    """
+    if not (np.all(np.isfinite(mag)) and np.all(np.isfinite(c)) and np.all(np.isfinite(r))):
+        return float(np.inf)
+    hi_a = float(np.linalg.norm(mag, 2))
+    hi_b = float(np.linalg.norm(c, 2)) + float(np.linalg.norm(r, 2))
+    return min(hi_a, hi_b) * (1.0 + _SVD_PAD) + 1e-300
+
+
+def _matrix_norm_interval(name: str, arg: Interval) -> Interval:
+    """Sound scalar enclosure of the induced matrix norm of a 2-D ``arg`` (#1903).
+
+    ``|X_ij|`` lies in ``[a_lo, a_hi]`` (outward interval abs). Then:
+
+    * ``norm1`` (largest absolute column sum) and ``norminf`` (row sum) are exact
+      compositions of interval sums and a max of existing doubles;
+    * the spectral norm satisfies ``sigma_1 >= |X_ij|`` and ``sigma_1 >=`` every row
+      and column 2-norm (``sigma_1 = max_{|u|=|v|=1} u^T X v``), which bound it below,
+      and :func:`_spectral_upper` above.
+    """
+    a = iv.absolute(arg)
+    a_lo = np.asarray(a.lo, dtype=np.float64)
+    a_hi = np.asarray(a.hi, dtype=np.float64)
+    if name == "norminf" or name in ("norm1", "norm1.0"):
+        axis = 1 if name == "norminf" else 0
+        lines = a_lo.shape[1 - axis]
+        sums = []
+        for k in range(lines):
+            take = (slice(None), k) if axis == 0 else (k, slice(None))
+            acc = Interval(np.asarray(a_lo[take][0]), np.asarray(a_hi[take][0]))
+            for lo_v, hi_v in zip(a_lo[take][1:], a_hi[take][1:]):
+                acc = acc + Interval(np.asarray(lo_v), np.asarray(hi_v))
+            sums.append(acc)
+        return Interval(
+            np.asarray(max(float(sm.lo) for sm in sums)),
+            np.asarray(max(float(sm.hi) for sm in sums)),
+        )
+    lo_x = np.asarray(arg.lo, dtype=np.float64)
+    hi_x = np.asarray(arg.hi, dtype=np.float64)
+    c = 0.5 * (lo_x + hi_x)
+    r = 0.5 * (hi_x - lo_x)
+    upper = _spectral_upper(c, r, a_hi)
+    # Row and column 2-norms of the entrywise lower magnitudes, rounded down.
+    lines_lo = np.concatenate([np.sqrt((a_lo**2).sum(axis=1)), np.sqrt((a_lo**2).sum(axis=0))])
+    lower = max(float(np.max(a_lo)), float(np.max(lines_lo)) * (1.0 - _SVD_PAD))
+    if np.all(np.isfinite(c)) and np.all(np.isfinite(r)):
+        # The centre's top singular pair gives sigma_1(X) >= u^T X v for every X;
+        # its minimum over the box is a lower bound that is EXACT on a point box
+        # (sigma_1(c)), which the certificate guard evaluates at the incumbent
+        # (#1551). The row/column bounds above are not tight at a point.
+        u_mat, _, vt = np.linalg.svd(c, full_matrices=False)
+        coef = np.outer(u_mat[:, 0], vt[0])
+        coef = coef * ((1.0 - _SVD_PAD) / (np.linalg.norm(u_mat[:, 0]) * np.linalg.norm(vt[0])))
+        box_min = float(np.sum(np.minimum(coef * lo_x, coef * hi_x)))
+        lower = max(lower, box_min - _SVD_PAD * float(np.sum(np.abs(coef) * a_hi)))
+    lower = max(0.0, min(lower, upper))
+    return Interval(np.asarray(lower), np.asarray(upper))
+
+
 def _norm_interval(name: str, arg: Interval) -> Interval:
     """Sound SCALAR enclosure of ``norm{p}(arg)`` (#1493).
 
@@ -840,12 +921,19 @@ def _norm_interval(name: str, arg: Interval) -> Interval:
     enclosure is composed from outward-rounded interval operations on
     ``|arg_i|``: exact composition for ``p`` in {1, 2, inf}, and the
     norm-equivalence sandwich ``||x||_inf <= ||x||_p <= ||x||_1`` for any other
-    ``p >= 1``. A >=2-D argument is ``jnp.linalg.norm``'s induced MATRIX norm,
+    ``p >= 1``. A 2-D argument is ``jnp.linalg.norm``'s induced MATRIX norm,
     which the entrywise bounds above do NOT enclose (``||I_3||_2 = 1`` while the
-    entrywise 2-norm is ``sqrt(3)``), so it gets only ``[0, +inf)`` -- true of
-    every norm.
+    entrywise 2-norm is ``sqrt(3)``); it gets :func:`_matrix_norm_interval` for
+    ``p`` in {1, 2, inf} (#1903) and ``[0, +inf)`` -- true of every norm --
+    otherwise, as does anything of more dimensions.
     """
     lo_arr = np.asarray(arg.lo, dtype=np.float64)
+    if (
+        lo_arr.ndim == 2
+        and lo_arr.size
+        and name in ("norm1", "norm1.0", "norm", "norm2", "norm2.0", "norminf")
+    ):
+        return _matrix_norm_interval(name, arg)
     if lo_arr.ndim >= 2 or lo_arr.size == 0:
         return Interval(np.asarray(0.0), np.asarray(np.inf))
     suffix = name[len("norm") :]

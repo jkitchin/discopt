@@ -155,10 +155,13 @@ def test_the_fallback_puts_jax_on_the_default_path():
     """The counter-example, which is why the docs no longer say "a default solve
     never imports JAX".
 
-    A matrix norm has no tape opcode, so ``build_evaluator`` calls the JAX factory
+    A construct the tape declines makes ``build_evaluator`` call the JAX factory,
     and `_relax/nlp_evaluator` — which imports jax at module scope — is loaded. This
     is deliberate behaviour, not a leak; what was wrong was the documentation
-    asserting the opposite two sentences after describing it.
+    asserting the opposite two sentences after describing it. (The example used to
+    be ``dm.norm(X, 2)`` of a matrix; #1903 put the spectral norm on the tape, so a
+    ``dm.external`` nested in another one's argument -- still declined -- is the
+    example now. ``test_spectral_norm.py`` pins that the spectral norm loads none.)
 
     Asserting the *mechanism* (the evaluator module is loaded) rather than a module
     count, so the test says what happened rather than merely that a number moved.
@@ -171,10 +174,12 @@ def test_the_fallback_puts_jax_on_the_default_path():
         "import discopt.modeling as dm\n"
         "assert not [k for k in sys.modules if k == 'jax' or k.startswith('jax.')], (\n"
         "    'jax was already imported before the solve; the probe proves nothing')\n"
+        "import numpy as np\n"
+        "sq = dm.external(lambda x: np.array([x[0] ** 2]), jac=lambda x: np.array([[2 * x[0]]]),\n"
+        "                 hess=lambda x: np.array([[[2.0]]]), shape=(1,), name='sq')\n"
         "m = dm.Model('fallback')\n"
-        "X = m.continuous('X', shape=(3, 3), lb=-2.0, ub=2.0)\n"
-        "m.minimize(dm.norm(X, 2))\n"
-        "m.subject_to(dm.sum(X) >= 1.0)\n"
+        "x = m.continuous('x', shape=(1,), lb=0.5, ub=2.0)\n"
+        "m.minimize(sq(sq(x))[0] + x[0])\n"
         "m.solve(time_limit=30)\n"
         "n = len([k for k in sys.modules if k == 'jax' or k.startswith('jax.')])\n"
         "ev = 'discopt._relax.nlp_evaluator' in sys.modules\n"

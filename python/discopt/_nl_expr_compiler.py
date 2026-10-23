@@ -633,6 +633,26 @@ def _lower_uncached(
         return _matmul(rec(expr.left), rec(expr.right), E, budget)
 
     if isinstance(expr, CustomCall):
+        # A `dm.external` block carries its OWN numpy value/Jacobian/Hessian, so
+        # inside a lowering that accepts numpy-evaluated holes (#1903) it becomes
+        # tape variables the evaluator fills in -- see `discopt._tape_holes`.
+        numpy_rule = getattr(expr.fn, "_discopt_external_numpy", None)
+        from discopt._tape_holes import active_sink
+
+        sink = active_sink()
+        if numpy_rule is not None and sink is not None and len(expr.args) == 1:
+            f, jac, hess, out_shape = numpy_rule
+            if hess is None:
+                raise UnsupportedForTape(f"dm.external {expr.name!r} supplies no Hessian")
+            return sink.add(
+                E,
+                name=f"dm.external {expr.name!r}",
+                f=f,
+                jac=jac,
+                hess=hess,
+                arg_nodes=rec(expr.args[0]),
+                out_shape=tuple(out_shape),
+            )
         # By contract (`modeling/core.py`) a dm.custom body is an opaque callable
         # that must be JAX-differentiable. There is no tape equivalent, and there
         # should not be a silent one -- relaxing an opaque callable needs AD
@@ -1561,12 +1581,37 @@ def _lower_norm(name: str, E: Any, arr: np.ndarray) -> Any:
         absolutes = _map(lambda a: _abs(E, a), arr)
         sums = _sum_along(absolutes, 0 if ord_p == 1.0 else 1, E)
         return _fold(sums, lambda a, b: E.max(a, b), E, name)
+    if arr.ndim == 2 and ord_p == 2.0:
+        # The spectral norm sigma_1: no finite formula in the entries, but numpy's
+        # SVD gives its value and exact derivatives, so it is a numpy-evaluated
+        # hole when the caller accepts holes (#1903).
+        from discopt._tape_holes import (
+            active_sink,
+            spectral_norm,
+            spectral_norm_grad,
+            spectral_norm_hess,
+        )
+
+        sink = active_sink()
+        if sink is not None:
+            if 0 in arr.shape:
+                raise UnsupportedForTape(f"{name} of an empty matrix")
+            return sink.add(
+                E,
+                name=f"{name} (spectral norm)",
+                f=spectral_norm,
+                jac=spectral_norm_grad,
+                hess=spectral_norm_hess,
+                arg_nodes=arr,
+                out_shape=(),
+            ).reshape(-1)[0]
     if arr.ndim > 1:
         raise UnsupportedForTape(
             f"{name} of a {arr.ndim}-D argument is jnp.linalg.norm's MATRIX norm; "
             "only the 2-D ord=1 (max column sum) and ord=inf (max row sum) are folds "
-            "over elements. ord=2 is the spectral norm, which needs a singular-value "
-            "opcode the tape does not have"
+            "over elements. The 2-D ord=2 (spectral) norm is evaluated by numpy as a "
+            "tape hole, which only a lowering that accepts holes can use "
+            "(discopt._tape_holes)"
         )
     # `jnp.linalg.norm` of a 0-d argument raises; a 1-element vector is fine and
     # `reshape(-1)` makes the 0-d case into one, matching nothing -- so refuse it

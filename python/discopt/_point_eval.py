@@ -8,9 +8,10 @@ features fail on an install without the ``discopt[jax]`` extra.
 
 The POUNCE tape the NLP evaluator already uses lowers the same expressions to
 ``NlExpr`` nodes whose ``eval`` returns a float64 value. JAX remains the fallback
-for an expression the tape has no opcode for (``dm.custom``, a matrix 2-norm, ...),
-which is the same rule ``build_evaluator`` applies, and it refuses with the named
-error when JAX is not installed.
+for an expression the tape has no opcode for (``dm.custom``, ...), which is the
+same rule ``build_evaluator`` applies, and it refuses with the named error when JAX
+is not installed. ``dm.external`` blocks and the spectral norm are numpy-evaluated
+holes (:mod:`discopt._tape_holes`, #1903), so they need no JAX here either.
 
 Parameters are compile-time constants on the tape, so a compiled expression is
 valid only for the parameter values it was built with. :class:`PointEvaluator`
@@ -25,21 +26,25 @@ from typing import Any, Callable
 import numpy as np
 
 
-def _tape_or_none(expr: Any, model: Any) -> np.ndarray | None:
-    """``expr`` lowered to an object array of ``NlExpr`` nodes, or ``None``.
+def _tape_or_none(expr: Any, model: Any) -> tuple[np.ndarray, list] | None:
+    """``(nodes, holes)``: ``expr`` as ``NlExpr`` nodes plus its numpy holes, or ``None``.
 
     ``None`` means the tape cannot represent it (or POUNCE is unusable), never a
     numerical failure, so a caller cannot confuse "no tape" with "bad point".
     """
     from discopt._nl_expr_compiler import UnsupportedForTape, compile_to_nl_array
+    from discopt._tape_holes import hole_sink
     from discopt._tape_nlp_evaluator import pounce_usable
 
     if not pounce_usable():
         return None
+    n = sum(v.size for v in model._variables)
     try:
-        return compile_to_nl_array(expr, model)
+        with hole_sink(n) as sink:
+            nodes = compile_to_nl_array(expr, model)
     except UnsupportedForTape:
         return None
+    return nodes, list(sink.holes)
 
 
 def _jax_fallback(expr: Any, model: Any, why: str) -> Callable[[np.ndarray], np.ndarray]:
@@ -58,14 +63,20 @@ def compile_point_fn(expr: Any, model: Any) -> Callable[[np.ndarray], np.ndarray
     Parameters are taken at their current values, the same snapshot
     ``dag_compiler.compile_expression`` takes.
     """
-    nodes = _tape_or_none(expr, model)
-    if nodes is None:
+    lowered = _tape_or_none(expr, model)
+    if lowered is None:
         return _jax_fallback(expr, model, "the POUNCE tape has no lowering for it")
+    nodes, holes = lowered
     flat_nodes = nodes.reshape(-1).tolist()
     shape = nodes.shape
 
     def fn(x: np.ndarray) -> np.ndarray:
         xs = [float(t) for t in np.asarray(x, dtype=np.float64).reshape(-1)]
+        # A hole's outputs are tape slots after the model's own variables (in
+        # creation order); fill them from numpy before evaluating the nodes.
+        for h in holes:
+            arg = np.fromiter((e.eval(xs) for e in h.arg_nodes.reshape(-1)), dtype=np.float64)
+            xs.extend(np.asarray(h.f(arg.reshape(h.in_shape)), dtype=np.float64).reshape(-1))
         out = np.fromiter((e.eval(xs) for e in flat_nodes), dtype=np.float64, count=len(flat_nodes))
         return out.reshape(shape)
 
