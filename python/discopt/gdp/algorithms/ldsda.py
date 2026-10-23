@@ -1,4 +1,4 @@
-"""Logic-based discrete-steepest descent (#1775 G4.5, spec §5.3; Bernal et al. 2022).
+"""Logic-based discrete-steepest descent (#1775 G4.5, spec §5.3; Ovalle et al. 2025).
 
 :class:`LDSDA` is a **local** search over *external variables*: each is an
 ``exactly(1)`` group of Booleans -- a disjunction's disjuncts, or the operands of
