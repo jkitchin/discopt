@@ -79,6 +79,15 @@ def test_a_route_objective_past_the_certified_bound_keeps_the_fallback():
     assert out is fb and out.objective == pytest.approx(FB_OBJ)
 
 
+def test_a_route_objective_a_hair_below_the_bound_keeps_the_fallback():
+    """Within the inversion tolerance of the bound but on the wrong side: adopting it
+    would publish bound > objective, so the certified fallback is kept (#1618 D-37)."""
+    route = _R(FB_BOUND - 1e-9, None)
+    fb = _R(FB_OBJ, FB_BOUND, gap_certified=True, status="optimal")
+    out = _merge_route_and_fallback(route, fb, is_maximize=False)
+    assert out is fb and out.bound <= out.objective
+
+
 def test_an_uncertified_fallback_does_not_certify_the_route():
     route = _R(ROUTE_OBJ, ROUTE_BOUND)
     fb = _R(FB_OBJ + 1.0, 120.0, gap_certified=False, status="feasible")

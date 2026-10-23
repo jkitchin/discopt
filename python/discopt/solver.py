@@ -10099,7 +10099,7 @@ def _merge_route_and_fallback(route, fallback, is_maximize: bool):
             (
                 "keeping the certified result."
                 if impossible
-                else "reporting it under that certificate."
+                else "reporting it under that certificate if it lies inside the gap."
             ),
             (
                 " This should be impossible and indicates a bound or feasibility "
@@ -10108,7 +10108,21 @@ def _merge_route_and_fallback(route, fallback, is_maximize: bool):
                 else ""
             ),
         )
-        if impossible:
+        # Adopt only a route objective that lies inside [certified bound, fallback
+        # objective] exactly. One below the bound by less than the inversion
+        # tolerance (#1618 D-37: 5822.936290000 vs a bound of 5822.936290001) is
+        # not flagged impossible, but publishing it would invert the pair, so the
+        # certified fallback is kept, as before.
+        inside = (
+            not impossible
+            and fb_bound is not None
+            and (
+                float(fb_bound) >= route.objective
+                if is_maximize
+                else float(fb_bound) <= route.objective
+            )
+        )
+        if not inside:
             route_wins = False
         else:
             # #1913: the route's point is verified (an unverified one was held back
