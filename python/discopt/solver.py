@@ -4610,6 +4610,20 @@ def _exit_polish_floor(time_limit, repair: bool) -> float:
     )
 
 
+def _status_without_incumbent(wall_time, time_limit, node_count, max_nodes) -> str:
+    """The status of a solve that reports no incumbent (#1775 G6.2).
+
+    Used when the only incumbent fails the exit gate and is withdrawn: nothing was
+    proved infeasible, so the honest reason is the resource that ran out, or
+    ``"unknown"`` when none did.
+    """
+    if max_nodes is not None and node_count >= max_nodes:
+        return "node_limit"
+    if time_limit is not None and wall_time >= time_limit:
+        return "time_limit"
+    return "unknown"
+
+
 def _arb_has_rows(arb) -> bool:
     # ``len``, never truthiness: a one-row numpy bound array reads its element.
     return arb.evaluator is not None and arb.cl is not None and len(arb.cl) > 0
@@ -22797,12 +22811,18 @@ def solve_model(
             _solver_stats[f"bound_provenance/{_prov_tag}"] = float(_prov_delta)
 
     # #1659: an incumbent outside the declared rows is never certified. Applied
-    # here, after every step above that can (re-)earn a certificate.
+    # here, after every step above that can (re-)earn a certificate. #1775 G6.2
+    # (owner decision 2026-10-23): nor is it reported. A point the exit gate
+    # refuses even after the repair polish is withdrawn; the bound stands, since
+    # it is a valid dual bound whatever the incumbent.
     if _spatial_exit_unverified:
         _solver_stats["spatial/exit_gate_refused"] = 1.0
-        if status == "optimal":
-            status = "feasible"
+        _solver_stats["spatial/incumbent_withdrawn"] = 1.0
+        status = _status_without_incumbent(wall_time, time_limit, stats["total_nodes"], max_nodes)
         _gap_certified = False
+        obj_val = None
+        x_dict = None
+        gap_val = None
 
     # #1383: the certificate must survive the FINAL (objective, bound) pair.
     # Everything above may still have moved `obj_val` after the tree computed
@@ -27706,12 +27726,18 @@ def _solve_nlp_bb(
     # certified. Applied last, so neither the re-earn step nor the root-cut
     # composition above can restore a certificate this point cannot carry. The
     # bound is untouched: it is a valid dual bound regardless of the incumbent.
+    # #1775 G6.2 (owner decision 2026-10-23): nor is it reported -- withdrawn,
+    # with its duals.
     if _integral_unverified:
-        if status == "optimal":
-            status = "feasible"
         _gap_certified = False
         _ext_stats = dict(_ext_stats or {})
         _ext_stats["nlpbb/integral_incumbent_unverified"] = 1.0
+        _ext_stats["nlpbb/incumbent_withdrawn"] = 1.0
+        status = _status_without_incumbent(wall_time, time_limit, stats["total_nodes"], max_nodes)
+        obj_val = None
+        x_dict = None
+        gap_val = None
+        constraint_duals = bound_duals_lower = bound_duals_upper = None
 
     return SolveResult(
         status=status,
