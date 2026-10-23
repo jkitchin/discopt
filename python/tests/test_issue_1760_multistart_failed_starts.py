@@ -122,6 +122,11 @@ def _heuristic_order(monkeypatch, flag):
     import discopt._relax.primal_heuristics as PH
 
     monkeypatch.setenv("DISCOPT_GDP_CONFIG_FIRST", flag)
+    # The ROOT schedule only. ``DISCOPT_GDP_CONFIG_DEFER`` (#1775 G6.2, default ON)
+    # adds one more constructor call in the B&B loop, with the rest of the grant --
+    # here at 5.3 s with 2.9 s, after the pump -- which is not the double root call
+    # this order test guards against; ``test_1775_g6_2_gdp_config_defer`` covers it.
+    monkeypatch.setenv("DISCOPT_GDP_CONFIG_DEFER", "0")
     order: list[str] = []
     for name in ("feasibility_pump", "one_hot_config_subnlp"):
         real = getattr(PH, name)

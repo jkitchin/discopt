@@ -784,8 +784,8 @@ _GDP_CONFIG_DEFER_ROOT_S = 1.5
 
 def _gdp_config_defer_enabled() -> bool:
     """Whether the #823 constructor's grant is split (``DISCOPT_GDP_CONFIG_DEFER``,
-    #1775 G6.2; **default OFF**, BC: it changes which incumbents are found, never a
-    bound).
+    #1775 G6.2; **default ON** since the §5 panel, ``=0`` opts out; BC: it changes
+    which incumbents are found, never a bound).
 
     The constructor runs once at the root on ``_gdp_config_deadline``'s grant
     (15 s at any limit of 100 s or more) and, measured on the GDP parity panel,
@@ -813,16 +813,23 @@ def _gdp_config_defer_enabled() -> bool:
     trigger is the clock, so which node it fires at would depend on machine speed
     (#912's inventory records it as a residual gate).
 
-    Graduation needs the §5 panel (cert-clean and net-positive); the row is in
-    ``docs/dev/flag-retirement-audit.md``.
+    **Graduated** on the §5 panel (2026-10-23; ``gdp_parity`` 24 x {big-m, hull} at
+    100 s plus the 66 in-repo ``.nl``, 118 OFF/ON pairs; the row in
+    ``docs/dev/flag-retirement-audit.md`` has the numbers): cert-clean (0 incorrect,
+    0 bounds past an oracle, no certification lost, every incumbent independently
+    verified) and net-positive on the GDP class (SGM 23.65 -> 13.55 s over the 15
+    certifying pairs it touches; the cost is 3-5 s on 30-40 s hull solves where the
+    held-back call fires and finds nothing), neutral on the ``.nl`` corpus.
+    ``DISCOPT_GDP_CONFIG_DEFER=0`` restores the single root grant. Empty is not an
+    off-value (same shape as :func:`_gdp_config_primal_enabled`).
     """
     if _tuning().deterministic:
         return False
-    return os.environ.get("DISCOPT_GDP_CONFIG_DEFER", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    return os.environ.get("DISCOPT_GDP_CONFIG_DEFER", "").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 
@@ -5169,6 +5176,25 @@ def _bounds_moved(new: np.ndarray, old: np.ndarray, tol: float = 1e-12) -> bool:
         return False
     with np.errstate(invalid="ignore"):
         return bool(np.any(differ & ~(np.abs(new - old) <= tol)))
+
+
+def _carry_solve_clocks(src: Model, dst: Model) -> None:
+    """Copy the solve's clocks onto a model a reformulation returned (#1775 G6.2).
+
+    ``solve_model`` stamps ``_solve_deadline`` (#654/#875) and
+    ``_convexity_time_budget`` on the model it is given; the pre-B&B passes read
+    them from whatever model they are handed. A reformulation that returns a new
+    model drops both, and those passes then run with no deadline. Every other
+    reform carried them inline; the GDP lowering did not, which measured as
+    GDPlib ``biofuel`` (hull, ``time_limit=10``) spending 398 s, from 85 s to 355 s
+    inside one ``tighten_nonlinear_bounds`` pass with ``deadline=None``.
+    """
+    if dst is src:
+        return
+    for attr in ("_solve_deadline", "_convexity_time_budget"):
+        value = getattr(src, attr, None)
+        if value is not None:
+            setattr(dst, attr, value)
 
 
 def _apply_nonlinear_tightening_with_status(
@@ -13711,6 +13737,7 @@ def solve_model(
         # back unchanged.
         _route_box_model = _model_with_tightened_box(model, _declared_tightening) or model
         model = _get_transformation("gdp").apply(_route_box_model, method=resolved_gdp_method)
+        _carry_solve_clocks(_pre_route_model, model)
 
         # #1334: the lowering appends a selector binary per disjunct, and the warm
         # start was flattened against the variables the USER declared -- so
@@ -14191,11 +14218,13 @@ def solve_model(
 
         from discopt.transformations import get as _get_transformation
 
+        _amp_gdp_src = model
         model = _get_transformation("gdp").apply(
             model,
             method=amp_gdp_method,
             respect_disjunction_methods=False,
         )
+        _carry_solve_clocks(_amp_gdp_src, model)
 
         # #1334: AFTER the lowering, never before. ``_normalize_initial_point``
         # raises ``AMP initial_point has length 1; expected 3`` on the short vector
@@ -14542,7 +14571,9 @@ def solve_model(
 
         from discopt.transformations import get as _get_transformation
 
+        _oa_gdp_src = model
         model = _get_transformation("gdp").apply(model, method="big-m")
+        _carry_solve_clocks(_oa_gdp_src, model)
 
         return solve_mip_nlp(
             model,
@@ -14607,7 +14638,9 @@ def solve_model(
     # --- GDP reformulation: convert indicator/disjunctive/SOS to standard MINLP ---
     from discopt.transformations import get as _get_transformation
 
+    _gdp_src = model
     model = _get_transformation("gdp").apply(model, method=gdp_method)
+    _carry_solve_clocks(_gdp_src, model)
 
     # #1255: the lowering appends a selector binary per disjunct, so a warm start
     # flattened against the variables the USER declared no longer describes this
@@ -25577,6 +25610,7 @@ def _solve_nlp_bb(
 
     model_before_gdp = model
     model = _get_transformation("gdp").apply(model, method="big-m")
+    _carry_solve_clocks(model_before_gdp, model)
 
     rust_time = 0.0
     jax_time = 0.0
