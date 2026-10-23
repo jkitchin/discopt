@@ -799,7 +799,9 @@ def _gdp_config_defer_enabled() -> bool:
     is held back. It is spent in one more call, from the same seed, once the search
     has run for as long as that rest -- the ski-rental rule, so a solve that
     finishes sooner never pays it, and one that does not pays at most twice what
-    the better fixed schedule would. The second call runs whether or not an
+    the better fixed schedule would. Time the solve already spent before the
+    constructor counts: when it exceeds the rest, the whole grant is spent at the
+    root (``_gdp_config_root_until``). The second call runs whether or not an
     incumbent exists by then, since improving one is what the late grant bought.
 
     Wired on the two routes whose search loop can make the second call: the Python
@@ -818,11 +820,21 @@ def _gdp_config_defer_enabled() -> bool:
     )
 
 
-def _gdp_config_root_until(full_deadline: float, now: float) -> float:
-    """The root call's deadline: the whole grant, or its first share when deferring."""
-    if _gdp_config_defer_enabled():
-        return min(full_deadline, now + _GDP_CONFIG_DEFER_ROOT_S)
-    return full_deadline
+def _gdp_config_root_until(full_deadline: float, now: float, solve_start: float) -> float:
+    """The root call's deadline: the whole grant, or its first share when deferring.
+
+    The solve's time before the constructor counts toward the ski-rental rule: when
+    it already exceeds what would be held back, the solve is a long one and the
+    whole grant is spent now. Measured on gdp_col (big-M, 100 s, 3 repeats per
+    arm): the root work before the constructor takes ~43 s, the root never
+    finishes inside the limit (0 nodes), so a held-back rest was never spent and
+    the incumbent was 19880.18 against 19346.12 with the full grant.
+    """
+    if not _gdp_config_defer_enabled():
+        return full_deadline
+    if now - solve_start >= full_deadline - now:
+        return full_deadline
+    return min(full_deadline, now + _GDP_CONFIG_DEFER_ROOT_S)
 
 
 def _gdp_config_hold_back(
@@ -20239,7 +20251,7 @@ def solve_model(
             _cfg_stats: dict = {}
             _cfg_t0 = time.perf_counter()
             _cfg_full = _gdp_config_deadline(_deadline, _cfg_t0)
-            _cfg_until = _gdp_config_root_until(_cfg_full, _cfg_t0)
+            _cfg_until = _gdp_config_root_until(_cfg_full, _cfg_t0, t_start)
             try:
                 _cfg_results = one_hot_config_subnlp(
                     model,
@@ -26395,7 +26407,7 @@ def _solve_nlp_bb(
                     _cfg_stats: dict = {}
                     _cfg_t0 = time.perf_counter()
                     _cfg_full = _gdp_config_deadline(t_start + time_limit, _cfg_t0)
-                    _cfg_until = _gdp_config_root_until(_cfg_full, _cfg_t0)
+                    _cfg_until = _gdp_config_root_until(_cfg_full, _cfg_t0, t_start)
                     try:
                         from discopt._relax.primal_heuristics import one_hot_config_subnlp
 

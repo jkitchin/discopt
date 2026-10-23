@@ -24,10 +24,19 @@ pytestmark = pytest.mark.smoke
 def test_default_off_and_root_until(monkeypatch):
     monkeypatch.delenv("DISCOPT_GDP_CONFIG_DEFER", raising=False)
     assert not SV._gdp_config_defer_enabled()
-    assert SV._gdp_config_root_until(100.0, 50.0) == 100.0
+    assert SV._gdp_config_root_until(100.0, 50.0, 45.0) == 100.0
     monkeypatch.setenv("DISCOPT_GDP_CONFIG_DEFER", "1")
-    assert SV._gdp_config_root_until(100.0, 50.0) == 50.0 + SV._GDP_CONFIG_DEFER_ROOT_S
-    assert SV._gdp_config_root_until(50.5, 50.0) == 50.5  # never past the full grant
+    assert SV._gdp_config_root_until(100.0, 50.0, 45.0) == 50.0 + SV._GDP_CONFIG_DEFER_ROOT_S
+    assert SV._gdp_config_root_until(50.5, 50.0, 49.9) == 50.5  # never past the full grant
+
+
+def test_a_long_root_spends_the_whole_grant_now(monkeypatch):
+    """Ski rental counts the time already spent: the gdp_col case (the solve ran
+    ~43 s before the constructor, its 7 s rest would never have been spent)."""
+    monkeypatch.setenv("DISCOPT_GDP_CONFIG_DEFER", "1")
+    assert SV._gdp_config_root_until(108.6, 100.0, 57.0) == 108.6
+    assert SV._gdp_config_root_until(108.6, 100.0, 91.4) == 108.6  # equal: buy now
+    assert SV._gdp_config_root_until(108.6, 100.0, 92.0) == 101.5
 
 
 def test_hold_back(monkeypatch):
