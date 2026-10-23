@@ -1516,8 +1516,15 @@ def _native_seed_bracket(x_rel: float, lo_b: float, up_b: float) -> tuple[float,
 
 
 def _kernel_seed_ils_enabled() -> bool:
-    """``DISCOPT_KERNEL_SEED_ILS`` gate (#1871), read at call time. **Default OFF**
-    pending its CLAUDE.md section 5 panel.
+    """``DISCOPT_KERNEL_SEED_ILS`` gate (#1871), read at call time.
+
+    **Graduated (default ON, 2026-10-23).** CLAUDE.md section 5 panel over the 101
+    kernel-routed local MINLPLib instances, ON vs OFF, 30 s, interleaved: cert-clean
+    (202 rows, 0 problems), certified 94 = 94, none lost; it fired on ``nous1`` only
+    and left the other 100 bit-identical in node count. ``nous1``: no incumbent ->
+    the optimum 1.56707. Its bound at 30 s moves -0.076 -> -0.301 because the new
+    incumbent switches on ``DISCOPT_KERNEL_CUTOFF_OBBT``'s box, the search-path
+    trade-off recorded there; this pass touches no relaxation. ``=0`` is the opt-out.
 
     Primal only: when the native seed's bracket enumeration yields no candidate, run
     the Python tree's root ``integer_local_search`` from the seed's relaxation point.
@@ -1526,11 +1533,12 @@ def _kernel_seed_ils_enabled() -> bool:
     probe: all four enumerated sub-NLPs end infeasible and the kernel ran 120 s with
     no incumbent; the local search reaches the optimum 1.56707 in 7 s.
     """
-    return os.environ.get("DISCOPT_KERNEL_SEED_ILS", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    return os.environ.get("DISCOPT_KERNEL_SEED_ILS", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
     )
 
 

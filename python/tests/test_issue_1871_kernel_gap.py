@@ -110,6 +110,9 @@ def test_seed_ils_off_leaves_nous1_unseeded(monkeypatch):
     assert _nous1_seed() == (None, None)
 
 
-def test_seed_ils_defaults_off(monkeypatch):
+def test_seed_ils_defaults_on(monkeypatch):
+    """Graduated under CLAUDE.md section 5 (panel in the gate's docstring)."""
     monkeypatch.delenv("DISCOPT_KERNEL_SEED_ILS", raising=False)
+    assert SV._kernel_seed_ils_enabled()
+    monkeypatch.setenv("DISCOPT_KERNEL_SEED_ILS", "0")
     assert not SV._kernel_seed_ils_enabled()
