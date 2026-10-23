@@ -7326,8 +7326,26 @@ def _kernel_documented_gap_enabled() -> bool:
 
 
 def _kernel_cutoff_obbt_enabled() -> bool:
-    """``DISCOPT_KERNEL_CUTOFF_OBBT`` gate (#1871), read at call time. **Default
-    OFF** pending its CLAUDE.md section 5 panel.
+    """``DISCOPT_KERNEL_CUTOFF_OBBT`` gate (#1871), read at call time.
+
+    **Graduated (default ON, 2026-10-23, owner decision).** CLAUDE.md section 5
+    panel over the 101 kernel-routed local MINLPLib instances, ON vs OFF with
+    ``DISCOPT_KERNEL_DOCUMENTED_GAP`` ON, 30 s, interleaved: cert-clean (202 rows,
+    0 problems), certified 93 -> 94 (``st_m2``: 1 node / 8.1 s), none lost,
+    certified objectives identical; fewer nodes on about 50 instances
+    (``st_m1`` 2021 -> 1, the pooling and ``st_ph*`` families to 1), more on four
+    (``st_rv8`` 205 -> 307, ``st_rv9`` 765 -> 933, ``st_rv3``, ``st_qpc-m3a``);
+    total wall 371 -> 349 s.
+
+    Recorded trade-off: the root bound is tighter wherever it fires (``nvs17``
+    -11121 -> -4946, ``nvs23`` -190353 -> -91525, ``nous2`` -0.830 -> -0.762), but
+    on the uncertified instances the bound at a limit follows a different search
+    path. At 30 s it is looser on ``nous2``, ``nvs17``, ``nvs23`` and ``tanksize``
+    and tighter on ``st_m2``, ``nvs19`` and ``nvs24``. At 3000 nodes it is looser on
+    ``nous2``, ``nvs23`` and ``tanksize`` and tighter on ``nvs17``. Scoring branches
+    against the untightened widths was tried and falsified (tanksize better, nous2
+    worse). The owner read section 5's "looser bound" as the fixed-box relaxation
+    bound, which is tighter, and graduated the flag. ``=0`` is the opt-out.
 
     Bound-changing: the native kernel's root box is tightened by root OBBT over the
     McCormick relaxation with the verified seed incumbent as an objective cutoff,
@@ -7336,11 +7354,12 @@ def _kernel_cutoff_obbt_enabled() -> bool:
     optimum stays in the box. ``st_m2`` with the documented gap criterion: 32,789
     nodes / 94 s without it, 1 node / 0.9 s with it.
     """
-    return os.environ.get("DISCOPT_KERNEL_CUTOFF_OBBT", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    return os.environ.get("DISCOPT_KERNEL_CUTOFF_OBBT", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
     )
 
 
