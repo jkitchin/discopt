@@ -11804,10 +11804,13 @@ class Model:
             )
         if not (hits or box_bound):
             return
-        had_claim = result.status == "optimal" or bool(result.gap_certified)
-        had_bound = result.bound is not None
-        if not (had_claim or had_bound):
-            return
+        # A point on the box is always named, even when the result carries no
+        # claim to withdraw: a solve stopped by its time limit after its incumbent
+        # reached the corner (measured on #1678's own model under CI load: 713
+        # nodes in 20 s, x = -9.98e19, no bound) is the same answer about the
+        # invented box, and without this warning it was reported only as "the
+        # relaxation could not bound this objective". (``box_bound`` implies a
+        # bound, so that branch always has something to clear.)
         if hits:
             what = (
                 f"the returned point sits on the default variable bound "

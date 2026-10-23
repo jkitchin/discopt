@@ -91,6 +91,10 @@ def solve_milp(
     can bound the search by work instead of wall clock. The default is the
     budget this driver always used; the other matrix backends already take it.
     """
+    # The clock starts here, not after the model is built: ``time_limit`` is the
+    # caller's stopping contract, and building the rows took 0.69 s of a 10 s
+    # budget on a loaded CI runner, which the tree then granted again.
+    t0 = time.perf_counter()
     import discopt.modeling as dm
     from discopt.solver import _solve_milp_bb
 
@@ -130,7 +134,6 @@ def solve_milp(
     _add_rows(m, A_ub, b_ub, xs, "<=")
     _add_rows(m, A_eq, b_eq, xs, "==")
 
-    t0 = time.perf_counter()
     res = _solve_milp_bb(
         m,
         time_limit if time_limit is not None else 1e9,

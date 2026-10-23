@@ -105,6 +105,11 @@ def test_either_or_nesting_is_hulled(obj, truth):
     assert r.objective == pytest.approx(truth, abs=1e-6)
 
 
+# Certifies under a wall-clock limit. On CI's coverage lane the solve ran into that
+# limit (61.9 s of 60 s; 30 s on the fast lane), so it is a slow correctness
+# test (#1915): kept out of the fast and coverage lanes, run by the slow lane.
+@pytest.mark.slow
+@pytest.mark.correctness
 @pytest.mark.parametrize("obj", CIRCLES)
 def test_nonlinear_nesting_matches_big_m(obj):
     """The perspective of a child's perspective rows: same certified optimum as

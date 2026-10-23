@@ -53,6 +53,11 @@ def test_reported_point_meets_its_disjunct(method):
     assert r.bound <= TRUE_OPT + 1e-6
 
 
+# Certifies under a wall-clock limit. On CI's coverage lane the solve ran into that
+# limit (60.2 s of 60 s; 27 s on the fast lane), so it is a slow correctness
+# test (#1915): kept out of the fast and coverage lanes, run by the slow lane.
+@pytest.mark.slow
+@pytest.mark.correctness
 def test_backstop_decertifies_and_repairs_an_infeasible_disjunct(monkeypatch):
     """The route certifies the issue's point (``y`` short of ``exp(x) - 1`` by
     5.9e-5); the declared-model check must withhold the certificate and the repair

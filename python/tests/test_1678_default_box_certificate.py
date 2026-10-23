@@ -88,6 +88,28 @@ def test_no_certificate_on_the_default_box(build):
         assert r.solver_stats.get("certificate/default_box_withheld") is None
 
 
+def test_a_time_limited_point_on_the_box_is_still_named():
+    """The shape CI produced under load: the tree stopped on its time limit after
+    the incumbent reached the corner, with no bound and no claim. The guard had
+    nothing to withdraw and stayed silent, so the box went unnamed and the
+    parametrized test above failed its ``default_box_withheld`` assertion."""
+    from discopt.modeling.core import SolveResult
+
+    m = _nlp_1678()
+    r = SolveResult(
+        status="feasible",
+        objective=-9.979e19,
+        x={"x": np.asarray(-9.979e19), "z": np.asarray(0.0)},
+    )
+    assert r.bound is None and not r.gap_certified
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        m._withhold_default_box_certificate(r)
+    assert r.solver_stats.get("certificate/default_box_withheld") == 1.0
+    assert any(_MATCH in str(w.message) for w in caught)
+    assert r.status == "feasible" and r.bound is None and not r.gap_certified
+
+
 def test_an_explicit_huge_bound_is_honoured():
     """The #850 reading survives for a bound the user wrote."""
     m = dm.Model("nlp_explicit")
