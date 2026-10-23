@@ -4589,6 +4589,48 @@ def _spatial_row_arbiter(evaluator, cl_list, cu_list, prereform_model, prereform
     return _RowArbiter(pf_eval, pf_cl, pf_cu, int(prereform_nvars))
 
 
+#: #1775 G6.2: wall floor of the spatial exit polish when it is a REPAIR -- the
+#: integral incumbent fails the #1659 exit gate. Mirrors #1870's exit-polish slice,
+#: ``min(_NATIVE_POLISH_RESERVE_S, _NATIVE_POLISH_RESERVE_FRAC * budget)``. A
+#: clock-limited exit otherwise leaves the polish ``0.1`` s: measured on GDPlib
+#: ``mod_hens`` (big-M, 300 s), the polish got exactly 0.1 s in 4/4 runs and hit
+#: TIME_LIMIT in 2, and the run that reported a point 4.5e-5 outside row 431 was
+#: one where no repair landed. A refinement keeps the 0.1 s floor.
+_EXIT_REPAIR_FLOOR_S = _NATIVE_POLISH_RESERVE_S
+_EXIT_REPAIR_FLOOR_FRAC = _NATIVE_POLISH_RESERVE_FRAC
+_EXIT_POLISH_FLOOR_S = 0.1
+
+
+def _exit_polish_floor(time_limit, repair: bool) -> float:
+    if not repair:
+        return _EXIT_POLISH_FLOOR_S
+    return max(
+        _EXIT_POLISH_FLOOR_S,
+        min(_EXIT_REPAIR_FLOOR_S, _EXIT_REPAIR_FLOOR_FRAC * float(time_limit)),
+    )
+
+
+def _arb_has_rows(arb) -> bool:
+    # ``len``, never truthiness: a one-row numpy bound array reads its element.
+    return arb.evaluator is not None and arb.cl is not None and len(arb.cl) > 0
+
+
+def _passes_exit_gate(arb, x) -> bool:
+    """Whether ``x`` clears the #1659 exit gate's term-scaled 1e-6 row test."""
+    if not _arb_has_rows(arb):
+        return True
+    excess, _, n_cmp = _nonlinear_point_excess(arb.evaluator, arb.view(x), arb.cl, arb.cu)
+    return bool(n_cmp == 0 or excess <= _NLPBB_EXIT_ABS_TOL)
+
+
+def _polish_keeps_exit_gate(arb, x_new, x_old) -> bool:
+    """The terminal polish never swaps a point the exit gate passes for one it
+    refuses (#1775 G6.2). The polish's own feasibility legs run at the search's
+    1e-4 tolerance, so on their own they would let it hand the exit gate a point
+    that is then reported uncertified in place of a clean one."""
+    return not _passes_exit_gate(arb, x_old) or _passes_exit_gate(arb, x_new)
+
+
 def _is_integer_feasible_solution(x, int_offsets, int_sizes, tol=1e-5):
     """Return True if all discrete variables are integral within tolerance."""
     for off, sz in zip(int_offsets, int_sizes):
@@ -21924,6 +21966,10 @@ def solve_model(
         # #1659: the rows the reported point is judged against -- the pre-lift
         # model's when the factorable lift ran (see ``_spatial_row_arbiter``).
         _arb = _spatial_row_arbiter(evaluator, cl_list, cu_list, _prereform_model, _prereform_nvars)
+        # #1775 G6.2: the integral realisation fails the exit gate (judged even when
+        # the snap was refused above, #1561) -- the polish below, which fixes the
+        # integers exactly, is then its repair, and gets a repair-sized budget.
+        _exit_repair = not _passes_exit_gate(_arb, _rounded_inc)
 
         # Refine the incumbent's continuous variables with a KKT-accurate
         # re-solve (integers fixed at their incumbent values). The batched JAX
@@ -21986,7 +22032,8 @@ def solve_model(
             # deliberately does NOT take them: its product is the MULTIPLIERS.
             _polish_opts.update(pounce_incumbent_options())
             _polish_opts["max_wall_time"] = max(
-                0.1, min(5.0, time_limit - (time.perf_counter() - t_start))
+                _exit_polish_floor(time_limit, _exit_repair),
+                min(5.0, time_limit - (time.perf_counter() - t_start)),
             )
             _polish_opts.setdefault("print_level", 0)
             _polished = _solve_node_nlp_kkt(
@@ -22130,6 +22177,7 @@ def solve_model(
                         )
                     )
                     and _pobj >= _min_accept_obj
+                    and _polish_keeps_exit_gate(_arb, _refined, sol_flat)
                 )
                 if _accept:
                     sol_flat = _refined
