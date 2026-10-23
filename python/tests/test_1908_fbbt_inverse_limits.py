@@ -81,6 +81,11 @@ def test_softplus_lower_side_stays_open():
     assert r.objective == pytest.approx(-50.0, abs=1e-6)
 
 
+# Certifies under a wall-clock limit. On CI's coverage lane the solve ran into that
+# limit (30.65 s of 30 s; 6.3 s on the fast lane), so it is a slow correctness
+# test (#1915): kept out of the fast and coverage lanes, run by the slow lane.
+@pytest.mark.slow
+@pytest.mark.correctness
 def test_atanh_near_one_is_feasible():
     m = dm.Model("atanh")
     x = m.continuous("x", lb=0.9, ub=1 - 1e-14)
@@ -88,11 +93,7 @@ def test_atanh_near_one_is_feasible():
     m.minimize(x)
     witness = math.tanh(14.5)  # inside the box, atanh(witness) >= 14.5
     assert 0.9 <= witness <= 1 - 1e-14 and math.atanh(witness) >= 14.5
-    # The limit caps the solve; it is not the claim under test. On CI the coverage
-    # lane runs this solve 2-5x slower than the fast lane (measured in #1915:
-    # 6.3 s fast vs 30.65 s, its 30 s limit), so the old 30 s limit let a
-    # slow runner stop it before it certified.
-    r = m.solve(time_limit=100)
+    r = m.solve(time_limit=30)
     assert r.status == "optimal", r.status
     assert r.objective == pytest.approx(witness, abs=1e-6)
     assert math.atanh(float(r.x["x"])) >= 14.5 - 1e-6

@@ -40,11 +40,7 @@ def _strict_hull(m):
 def _strict_solve(m):
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)
-        # The limit caps the solve; it is not the claim under test. On CI the coverage
-        # lane runs this solve 2-5x slower than the fast lane (measured in #1915:
-        # 30 s fast vs 61.9 s, its 60 s limit), so the old 60 s limit let a
-        # slow runner stop it before it certified.
-        return m.solve(gdp_method="hull", time_limit=100)
+        return m.solve(gdp_method="hull", time_limit=60)
 
 
 def _nested3():
@@ -109,6 +105,11 @@ def test_either_or_nesting_is_hulled(obj, truth):
     assert r.objective == pytest.approx(truth, abs=1e-6)
 
 
+# Certifies under a wall-clock limit. On CI's coverage lane the solve ran into that
+# limit (61.9 s of 60 s; 30 s on the fast lane), so it is a slow correctness
+# test (#1915): kept out of the fast and coverage lanes, run by the slow lane.
+@pytest.mark.slow
+@pytest.mark.correctness
 @pytest.mark.parametrize("obj", CIRCLES)
 def test_nonlinear_nesting_matches_big_m(obj):
     """The perspective of a child's perspective rows: same certified optimum as
