@@ -73,3 +73,41 @@ def test_every_structured_node_solve_carries_the_remaining_budget(monkeypatch):
         assert started_at <= budget + SETUP_SLACK, started_at
         # Never granted more than what was left when it started.
         assert started_at + float(limit) <= budget + SETUP_SLACK, (started_at, limit)
+
+
+def test_model_construction_is_charged_to_the_time_limit(monkeypatch):
+    """``solve_milp`` started its clock after building the model, so the tree was
+    granted the whole ``time_limit`` again on top of construction (0.69 s of a
+    10 s budget on a loaded CI runner, which failed the test above). The clock now
+    starts at entry: construction is slowed here by 0.3 s, and the tree's
+    ``t_start`` must still be the call's own start."""
+    import discopt.solver as solver
+    import discopt.solvers.milp_pounce as mp
+
+    orig_rows = mp._add_rows
+
+    def slow_rows(*args, **kwargs):
+        time.sleep(0.15)
+        return orig_rows(*args, **kwargs)
+
+    seen: list[float] = []
+    orig_bb = solver._solve_milp_bb
+
+    def spy_bb(model, time_limit, gap, batch, strategy, max_nodes, t_start, **kw):
+        seen.append(t_start)
+        return orig_bb(model, time_limit, gap, batch, strategy, max_nodes, t_start, **kw)
+
+    monkeypatch.setattr(mp, "_add_rows", slow_rows)
+    monkeypatch.setattr(solver, "_solve_milp_bb", spy_bb)
+    entered = time.perf_counter()
+    res = mp.solve_milp(
+        c=np.array([-1.0, -1.0]),
+        A_ub=sp.csr_matrix(np.array([[1.0, 1.0]])),
+        b_ub=np.array([1.5]),
+        bounds=[(0, 1), (0, 1)],
+        integrality=np.array([1, 1]),
+        time_limit=10.0,
+    )
+    assert seen, "the tree was not called -- the probe did not fire"
+    assert seen[0] - entered < 0.1, seen[0] - entered
+    assert res.objective == pytest.approx(-1.0)

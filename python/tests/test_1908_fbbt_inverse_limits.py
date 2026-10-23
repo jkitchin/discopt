@@ -81,6 +81,11 @@ def test_softplus_lower_side_stays_open():
     assert r.objective == pytest.approx(-50.0, abs=1e-6)
 
 
+# Certifies under a wall-clock limit. On CI's coverage lane the solve ran into that
+# limit (30.65 s of 30 s; 6.3 s on the fast lane), so it is a slow correctness
+# test (#1915): kept out of the fast and coverage lanes, run by the slow lane.
+@pytest.mark.slow
+@pytest.mark.correctness
 def test_atanh_near_one_is_feasible():
     m = dm.Model("atanh")
     x = m.continuous("x", lb=0.9, ub=1 - 1e-14)
