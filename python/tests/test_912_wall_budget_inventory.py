@@ -567,6 +567,16 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
         "return now + min(remaining, share)",
         "residual",
     ),
+    # #1775 G6.2, ``DISCOPT_GDP_CONFIG_DEFER`` (default OFF): not a new budget but
+    # the entry above split in two -- 1.5 s at the root, the rest held back and
+    # spent once the search has run that long. The held-back call's trigger is the
+    # clock, so it takes the same category. Under ``deterministic`` the split is
+    # off (``_gdp_config_defer_enabled``), so that mode is unchanged by the flag.
+    (
+        "solver.py",
+        '"ready_at": now + rest,',
+        "residual",
+    ),
     (
         "solver.py",
         "deadline=_role2_deadline(time.perf_counter() + _pc_budget),",
@@ -846,8 +856,11 @@ def test_residual_count_is_visible():
     # runs. Pinned separately by ``test_1116_wrapped_gates_stay_wrapped``.
     # 20 -> 21: LOA's convexity-certification slice (#1775 G4.1), wrapped in
     # ``_role2_deadline`` from the start; see its KNOWN entry.
-    assert len(residual) == 21, (
-        f"the #912 residual inventory changed ({len(residual)} entries, expected 21). "
+    # 21 -> 22: ``DISCOPT_GDP_CONFIG_DEFER``'s held-back call (#1775 G6.2). Not a new
+    # budget: the GDP-config constructor's grant split in two, default OFF, and off
+    # under ``deterministic``; see its KNOWN entry.
+    assert len(residual) == 22, (
+        f"the #912 residual inventory changed ({len(residual)} entries, expected 22). "
         "If you converted one, drop it from KNOWN and lower this number; if you added "
         "one, convert it instead. This count is a deliberate resting point, not a "
         "backlog — see the module docstring for the evidence and the condition that "

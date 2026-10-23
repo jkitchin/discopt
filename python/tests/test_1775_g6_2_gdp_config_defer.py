@@ -127,3 +127,15 @@ def test_flag_off_is_one_full_grant(build, monkeypatch):
         warnings.simplefilter("ignore")
         build().solve(time_limit=40)
     assert len(calls) == 1 and calls[0] > 5.0  # min(0.15 x 40, 15) = 6 s
+
+
+def test_deterministic_turns_the_split_off(monkeypatch):
+    """The held-back call fires on a clock (#912), so ``deterministic`` keeps the
+    single grant whatever the variable says."""
+    from discopt.solver_tuning import SolverTuning
+
+    monkeypatch.setenv("DISCOPT_GDP_CONFIG_DEFER", "1")
+    assert SV._gdp_config_defer_enabled()
+    monkeypatch.setattr(SV, "_tuning", lambda: SolverTuning(deterministic=True))
+    assert not SV._gdp_config_defer_enabled()
+    assert SV._gdp_config_root_until(100.0, 50.0, 45.0) == 100.0

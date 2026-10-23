@@ -809,9 +809,15 @@ def _gdp_config_defer_enabled() -> bool:
     spatial kernel's seed generator runs before the kernel and has no loop to come
     back from, so it keeps the single full grant.
 
+    Off under ``deterministic`` whatever the variable says: the held-back call's
+    trigger is the clock, so which node it fires at would depend on machine speed
+    (#912's inventory records it as a residual gate).
+
     Graduation needs the §5 panel (cert-clean and net-positive); the row is in
     ``docs/dev/flag-retirement-audit.md``.
     """
+    if _tuning().deterministic:
+        return False
     return os.environ.get("DISCOPT_GDP_CONFIG_DEFER", "0").strip().lower() in (
         "1",
         "true",
@@ -26019,10 +26025,10 @@ def _solve_nlp_bb(
                         and _gdd_obj < _SENTINEL_THRESHOLD
                         and _gdd_feas
                         and _is_integer_feasible_solution(_gdd_sol, int_offsets, int_sizes)
-                        and tree.inject_incumbent(_gdd_sol, _gdd_obj)
                     ):
-                        _subnlp_incumbent_updates += 1
-                        _gdd_improved += 1
+                        if tree.inject_incumbent(_gdd_sol, _gdd_obj):
+                            _subnlp_incumbent_updates += 1
+                            _gdd_improved += 1
                 logger.info(
                     "GDP config subNLP (nlp-bb, deferred, iteration %d): %d sub-NLP "
                     "solve(s), %d feasible point(s), %d improving, %.2f s",
