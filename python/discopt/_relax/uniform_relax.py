@@ -2096,7 +2096,10 @@ def _emit_1d(
         # Degenerate/unbounded box: the aux interval floor is the sound relaxation.
         return False
     try:
-        flo, fhi = float(f(lo)), float(f(hi))
+        # An endpoint on an open domain edge (``atanh(1.0)``) evaluates to inf;
+        # the ``_finite`` check below declines it, so numpy's warning is noise.
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            flo, fhi = float(f(lo)), float(f(hi))
     except (ValueError, ArithmeticError):
         return False
     if not _finite(flo, fhi):
@@ -2689,7 +2692,8 @@ def _build_sign(ctx: _Builder, w: int, lt: LinForm, lo: float, hi: float) -> Env
 def _emit_secant_only(ctx, w, lt, lo, hi, f, sign) -> bool:
     if not _finite(lo, hi) or (hi - lo) < _MIN_WIDTH:
         return False
-    flo, fhi = float(f(lo)), float(f(hi))
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):  # see _emit_1d
+        flo, fhi = float(f(lo)), float(f(hi))
     if not _finite(flo, fhi):
         return False
     slope = (fhi - flo) / (hi - lo)

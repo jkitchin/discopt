@@ -621,20 +621,30 @@ def tan(x: Interval) -> Interval:
     within a single continuous branch are handled by the monotonic
     rule.
     """
-    half_pi = np.pi / 2
     pi = np.pi
     lo = np.asarray(x.lo, dtype=np.float64)
     hi = np.asarray(x.hi, dtype=np.float64)
 
-    # Normalize so the branch check is easy: find k such that
-    # (lo, hi) ⊂ (−π/2 + kπ, π/2 + kπ).
-    k_lo = np.floor((lo + half_pi) / pi)
-    k_hi = np.floor((hi + half_pi) / pi)
-    same_branch = k_lo == k_hi
+    # The box must lie strictly between *enclosures* of the two poles of one
+    # branch, ``(k - 1/2)π`` and ``(k + 1/2)π`` (#1908). A per-endpoint
+    # ``floor((x + π/2) / π)`` is not enough: the double ``π/2`` is just below
+    # the real pole, on branch 0, but ``(π/2 + π/2) / π`` rounds to exactly 1,
+    # so ``[π/2, 2]`` -- which straddles the pole -- was called one branch and
+    # given the inverted image ``[1.6e16, -2.19]``. ``k ∓ 1/2`` is exact; the
+    # product and the double ``π`` err by under one ulp, inside the margin.
+    with np.errstate(invalid="ignore", over="ignore"):
+        k = np.round((0.5 * lo + 0.5 * hi) / pi)
+        left = (k - 0.5) * pi
+        right = (k + 0.5) * pi
+        margin = 4.0 * np.finfo(np.float64).eps
+        left_hi = _round_up(left + margin * np.abs(left))
+        right_lo = _round_down(right - margin * np.abs(right))
+        same_branch = np.isfinite(lo) & np.isfinite(hi) & (lo > left_hi) & (hi < right_lo)
 
     inf = np.float64(np.inf)
-    tan_lo = np.tan(lo)
-    tan_hi = np.tan(hi)
+    with np.errstate(invalid="ignore"):
+        tan_lo = np.tan(lo)
+        tan_hi = np.tan(hi)
     out_lo = np.where(same_branch, tan_lo, -inf)
     out_hi = np.where(same_branch, tan_hi, inf)
     return Interval(_round_down(out_lo), _round_up(out_hi))
