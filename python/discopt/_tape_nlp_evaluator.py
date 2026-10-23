@@ -28,7 +28,12 @@ order the JAX evaluator concatenates. ``constraint_row_map`` is therefore *not*
 the identity, and callers must consume it rather than assume one row per
 constraint (#908).
 
-What remains unrepresentable — an opaque ``dm.custom`` body, a matrix norm, an
+``dm.external`` blocks and the spectral norm of a matrix are numpy-evaluated
+*holes* (:mod:`discopt._tape_holes`, #1903): extra tape columns the evaluator fills
+from numpy and folds back into x-space by the chain rule (see the "holes" section
+of :class:`TapeNLPEvaluator`).
+
+What remains unrepresentable — an opaque ``dm.custom`` body, a nested hole, an
 operator with no tape opcode — still raises ``UnsupportedForTape``. Callers use
 :func:`try_build`, which returns ``None`` for those, so the JAX path stays intact
 underneath.
@@ -49,7 +54,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 import numpy as np
 
@@ -62,6 +67,7 @@ from discopt._nl_expr_compiler import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from discopt._tape_holes import Hole
     from discopt.modeling.core import Constraint, Model
 
 logger = logging.getLogger(__name__)
@@ -320,6 +326,7 @@ class TapeNLPEvaluator:
         # exactly, and its output is verified bit-identical to the walk below
         # (`issue1215_arena_tape_differential.py`), so this is a marshaling
         # change, not a numerical one.
+        self._holes: list[Hole] = []
         obj, cons, sizes = self._build_tape_nodes(model)
         if self._negate:
             obj = -obj
@@ -331,6 +338,15 @@ class TapeNLPEvaluator:
         self._hi = [float(v) for v in ub]
         self._obj_expr = obj
         self._con_exprs = cons
+        # #1903: hole outputs are extra tape columns after the model's own; they
+        # are never variables of the NLP, so their tape bounds are free.
+        n_hole_vars = sum(h.n_out for h in self._holes)
+        self._n_tape = self._n_variables + n_hole_vars
+        self._tape_lo = self._lo + [-np.inf] * n_hole_vars
+        self._tape_hi = self._hi + [np.inf] * n_hole_vars
+        self._hole_args = [node for h in self._holes for node in h.arg_nodes.reshape(-1)]
+        self._hole_dense = self._n_tape <= _HOLE_DENSE_MAX
+        self._chain_local = threading.local()
         self._residual_exprs = self._build_residual_exprs()
         self._shared_problem = self._new_problem() if _nlproblem_is_thread_safe() else None
         # Only used on the per-thread fallback. thread-LOCAL storage rather than a
@@ -389,6 +405,17 @@ class TapeNLPEvaluator:
 
         if model._objective is None:
             raise ValueError("Model has no objective set.")
+        from discopt._tape_holes import hole_sink
+
+        # #1903: numpy-evaluated holes (`dm.external`, the spectral norm) are
+        # accepted on this walk; `_build` folds them back into x-space.
+        with hole_sink(self._n_variables) as sink:
+            obj, cons, sizes = self._walk_tape_nodes(model)
+        self._holes = list(sink.holes)
+        return obj, cons, sizes
+
+    def _walk_tape_nodes(self, model: "Model") -> tuple[Any, list, list[int]]:
+        """The Python DAG walk of :meth:`_build_tape_nodes` (arena path declined)."""
         obj = compile_to_nl_expr(model._objective_expression(), model)
         # A body may be ARRAY-valued -- `x <= 1` on a 3-vector is ONE Constraint
         # and THREE rows -- so fan each one out. `reshape(-1)` is C order, which is
@@ -424,6 +451,12 @@ class TapeNLPEvaluator:
         given at the JAX arm: the caller set an option that then did nothing.
         """
         if not self._gauss_newton_requested:
+            return None
+        if self._holes:
+            self._warn_gn_declined(
+                "gauss_newton ignored: the model contains a numpy-evaluated node "
+                "(dm.external or a spectral matrix norm); using the exact Hessian."
+            )
             return None
         if self._negate:
             self._warn_gn_declined(
@@ -467,11 +500,11 @@ class TapeNLPEvaluator:
         the per-thread fallback below cannot hand one thread's aux tape to another.
         """
         main = self._pounce.build_nl_problem(
-            self._n_variables,
+            self._n_tape,
             self._obj_expr,
             constraints=self._con_exprs or None,
-            x_l=self._lo,
-            x_u=self._hi,
+            x_l=self._tape_lo,
+            x_u=self._tape_hi,
         )
         residual = None
         if self._residual_exprs is not None:
@@ -485,7 +518,19 @@ class TapeNLPEvaluator:
                 x_l=self._lo,
                 x_u=self._hi,
             )
-        return (main, residual)
+        args = None
+        if self._holes:
+            # #1903: every hole's argument, as the constraint rows of an x-space
+            # tape -- its Jacobian is dA/dx, and its weighted Hessian is the
+            # argument-curvature term of the chain rule.
+            args = self._pounce.build_nl_problem(
+                self._n_variables,
+                self._pounce.NlExpr.const_(0.0),
+                constraints=self._hole_args,
+                x_l=self._lo,
+                x_u=self._hi,
+            )
+        return (main, residual, args)
 
     @property
     def _problem_pair(self) -> Any:
@@ -505,6 +550,10 @@ class TapeNLPEvaluator:
     @property
     def _residual_problem(self) -> Any:
         return self._problem_pair[1]
+
+    @property
+    def _args_problem(self) -> Any:
+        return self._problem_pair[2]
 
     def _ensure_fresh(self) -> None:
         """Rebuild if a ``Parameter.value`` moved since the tape was built."""
@@ -556,6 +605,8 @@ class TapeNLPEvaluator:
 
     def jacobian_structure(self) -> tuple[np.ndarray, np.ndarray]:
         self._ensure_fresh()
+        if self._jac_struct is None and self._holes:
+            self._jac_struct = self._hole_jacobian_structure()
         if self._jac_struct is None:
             r, c = self._problem.jacobian_structure()
             self._jac_struct = (
@@ -567,6 +618,8 @@ class TapeNLPEvaluator:
     def hessian_structure(self) -> tuple[np.ndarray, np.ndarray]:
         """Lower-triangle COO, matching the JAX evaluator's convention."""
         self._ensure_fresh()
+        if self._hess_struct is None and self._holes:
+            self._hess_struct = self._hole_hessian_structure()
         if self._hess_struct is None:
             r, c = self._problem.hessian_structure()
             rows = np.asarray(r, dtype=np.int64)
@@ -678,22 +731,35 @@ class TapeNLPEvaluator:
 
     def evaluate_objective(self, x: np.ndarray) -> float:
         self._ensure_fresh()
+        if self._holes:
+            return float(self._problem.objective(self._hole_chain(x).z))
         return float(self._problem.objective(self._x(x)))
 
     def evaluate_gradient(self, x: np.ndarray) -> np.ndarray:
         self._ensure_fresh()
+        if self._holes:
+            ch = self._hole_chain(x)
+            gz = np.asarray(self._problem.gradient(ch.z), dtype=np.float64)
+            n = self._n_variables
+            return gz[:n] + ch.dt.T @ gz[n:]
         return np.asarray(self._problem.gradient(self._x(x)), dtype=np.float64)
 
     def evaluate_constraints(self, x: np.ndarray) -> np.ndarray:
         self._ensure_fresh()
         if self._n_constraints == 0:
             return np.zeros(0, dtype=np.float64)
+        if self._holes:
+            return np.asarray(self._problem.constraints(self._hole_chain(x).z), dtype=np.float64)
         return np.asarray(self._problem.constraints(self._x(x)), dtype=np.float64)
 
     def evaluate_jacobian_values(self, x: np.ndarray) -> np.ndarray:
         self._ensure_fresh()
         if self._n_constraints == 0:
             return np.zeros(0, dtype=np.float64)
+        if self._holes:
+            rows, cols = self.jacobian_structure()
+            jx = self._hole_x_jacobian(self._hole_chain(x))
+            return np.asarray(jx[rows, cols], dtype=np.float64).reshape(-1)
         return np.asarray(self._problem.jacobian(self._x(x)), dtype=np.float64)
 
     def evaluate_jacobian(self, x: np.ndarray) -> np.ndarray:
@@ -741,6 +807,8 @@ class TapeNLPEvaluator:
         # Same reasoning as ``_x``: the multiplier vector goes across as an
         # array, not a rebuilt Python list (#1180).
         lam_list = np.asarray(lambda_, dtype=np.float64).ravel()
+        if self._holes:
+            return self._hole_hessian_values(x, float(obj_factor), lam_list)
         if self._residual_exprs is None:
             return np.asarray(
                 self._problem.hessian(self._x(x), lam=lam_list, obj_factor=float(obj_factor)),
@@ -797,6 +865,213 @@ class TapeNLPEvaluator:
             x, 1.0, np.zeros(self._n_constraints, dtype=np.float64)
         )
 
+    # -- numpy-evaluated holes (#1903) ---------------------------------------
+    #
+    # The tape is built over ``z = (x, t)``: ``t`` are the outputs of the holes,
+    # ``t_k = f_k(a_k(x))``, with ``f_k`` numpy (`dm.external`'s callables, or
+    # sigma_1) and ``a_k`` the hole's taped argument. The NLP sees only ``x``, so
+    # every derivative is folded back through ``dt/dx = G J_a`` (``G`` the holes'
+    # Jacobians in their arguments, ``J_a = da/dx``):
+    #
+    #   grad F   = F_x + Dt^T F_t                                  (Dt = dt/dx)
+    #   J        = J_zx + J_zt Dt
+    #   H_L      = P^T H_z P + J_a^T blkdiag(sum_q w_q H_q) J_a + sum_j (G^T w)_j d2a_j
+    #
+    # with ``P = [I; Dt]``, ``H_z`` the tape's Lagrangian Hessian in ``z`` and
+    # ``w = dL/dt = obj_factor * F_t + J_zt^T lambda``. The last term is the
+    # argument problem's own weighted Hessian, so it comes from the tape too.
+
+    def _hole_chain(self, x: np.ndarray) -> "_HoleChain":
+        """Per-point hole data, cached for the last point on this thread."""
+        xv = np.ascontiguousarray(np.asarray(x, dtype=np.float64).ravel())
+        key = xv.tobytes()
+        cached = getattr(self._chain_local, "entry", None)
+        if cached is not None and cached[0] == self._generation and cached[1] == key:
+            return cast("_HoleChain", cached[2])
+        ch = _HoleChain(self, xv)
+        self._chain_local.entry = (self._generation, key, ch)
+        return ch
+
+    def _hole_x_jacobian(self, ch: "_HoleChain"):
+        """The constraint Jacobian in x-space (dense when small, else CSR)."""
+        n, nt, m = self._n_variables, self._n_tape, self._n_constraints
+        r, c = self._z_jacobian_structure()
+        vals = np.asarray(self._problem.jacobian(ch.z), dtype=np.float64)
+        if self._hole_dense:
+            jz = np.zeros((m, nt))
+            np.add.at(jz, (r, c), vals)
+            return jz[:, :n] + jz[:, n:] @ ch.dt
+        import scipy.sparse as sp
+
+        jzs = sp.coo_matrix((vals, (r, c)), shape=(m, nt)).tocsc()
+        return (jzs[:, :n] + jzs[:, n:] @ ch.dt).tocsr()
+
+    def _z_jacobian_structure(self) -> tuple[np.ndarray, np.ndarray]:
+        cached = getattr(self, "_jz_struct", None)
+        if cached is None or cached[0] != self._generation:
+            r, c = self._problem.jacobian_structure()
+            cached = (
+                self._generation,
+                np.asarray(r, dtype=np.int64),
+                np.asarray(c, dtype=np.int64),
+            )
+            self._jz_struct = cached
+        return cached[1], cached[2]
+
+    def _hole_dt_pattern(self):
+        """Boolean pattern of ``dt/dx``: each output touches its argument's support."""
+        import scipy.sparse as sp
+
+        n = self._n_variables
+        ar, ac = self._args_problem.jacobian_structure()
+        n_args = len(self._hole_args)
+        ja = sp.coo_matrix(
+            (np.ones(len(ar)), (np.asarray(ar), np.asarray(ac))), shape=(n_args, n)
+        ).tocsr()
+        blocks = []
+        offset = 0
+        for h in self._holes:
+            sub = ja[offset : offset + h.n_in]
+            support = (abs(sub).sum(axis=0) > 0).astype(np.float64)
+            blocks.append(sp.csr_matrix(np.ones((h.n_out, 1)) @ np.asarray(support)))
+            offset += h.n_in
+        return sp.vstack(blocks).tocsr(), ja
+
+    def _hole_jacobian_structure(self) -> tuple[np.ndarray, np.ndarray]:
+        import scipy.sparse as sp
+
+        n, nt, m = self._n_variables, self._n_tape, self._n_constraints
+        if m == 0:
+            return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int64)
+        r, c = self._z_jacobian_structure()
+        jz = sp.coo_matrix((np.ones(len(r)), (r, c)), shape=(m, nt)).tocsc()
+        dt, _ = self._hole_dt_pattern()
+        pat = (abs(jz[:, :n]) + abs(jz[:, n:]) @ dt).tocoo()
+        order = np.lexsort((pat.col, pat.row))
+        return pat.row[order].astype(np.int64), pat.col[order].astype(np.int64)
+
+    def _hole_hessian_structure(self) -> tuple[np.ndarray, np.ndarray]:
+        """Lower triangle of every term of ``H_L`` above, symbolically."""
+        import scipy.sparse as sp
+
+        n, nt = self._n_variables, self._n_tape
+        hr, hc = self._problem.hessian_structure()
+        hz = sp.coo_matrix(
+            (np.ones(len(hr)), (np.asarray(hr), np.asarray(hc))), shape=(nt, nt)
+        ).tocsr()
+        hz = abs(hz) + abs(hz.T)
+        dt, ja = self._hole_dt_pattern()
+        p = sp.vstack([sp.identity(n, format="csr"), dt]).tocsr()
+        total = abs(p.T @ hz @ p)
+        offset = 0
+        for h in self._holes:
+            sub = ja[offset : offset + h.n_in]
+            total = total + abs(sub.T @ sp.csr_matrix(np.ones((h.n_in, h.n_in))) @ sub)
+            offset += h.n_in
+        ar, ac = self._args_problem.hessian_structure()
+        if len(ar):
+            arg_h = sp.coo_matrix(
+                (np.ones(len(ar)), (np.asarray(ar), np.asarray(ac))), shape=(n, n)
+            )
+            total = total + abs(arg_h) + abs(arg_h.T)
+        low = sp.tril(total).tocoo()
+        order = np.lexsort((low.col, low.row))
+        return low.row[order].astype(np.int64), low.col[order].astype(np.int64)
+
+    def _hole_hessian_values(self, x: np.ndarray, obj_factor: float, lam: np.ndarray):
+        if self._hole_dense:
+            return self._hole_hessian_values_dense(x, obj_factor, lam)
+        import scipy.sparse as sp
+
+        n, nt = self._n_variables, self._n_tape
+        ch = self._hole_chain(x)
+        hr, hc = self._problem.hessian_structure()
+        hv = np.asarray(
+            self._problem.hessian(ch.z, lam=lam, obj_factor=obj_factor), dtype=np.float64
+        )
+        low = sp.coo_matrix((hv, (np.asarray(hr), np.asarray(hc))), shape=(nt, nt)).tocsr()
+        hz = low + sp.tril(low, -1).T
+        p = sp.vstack([sp.identity(n, format="csr"), ch.dt]).tocsr()
+        total = p.T @ hz @ p
+        # w = dL/dt
+        gz = np.asarray(self._problem.gradient(ch.z), dtype=np.float64)
+        w = obj_factor * gz[n:]
+        if self._n_constraints:
+            r, c = self._z_jacobian_structure()
+            jv = np.asarray(self._problem.jacobian(ch.z), dtype=np.float64)
+            jz = sp.coo_matrix((jv, (r, c)), shape=(self._n_constraints, nt)).tocsc()
+            w = w + jz[:, n:].T @ lam
+        lam_args = np.zeros(len(self._hole_args))
+        offset_t = offset_a = 0
+        for h, g, hh in zip(self._holes, ch.g, ch.h):
+            wk = w[offset_t : offset_t + h.n_out]
+            # J_a^T (sum_q w_q H_q) J_a, over this hole's argument rows
+            block = np.tensordot(wk, hh, axes=(0, 0))
+            sub = ch.ja[offset_a : offset_a + h.n_in]
+            total = total + sub.T @ sp.csr_matrix(block) @ sub
+            lam_args[offset_a : offset_a + h.n_in] = wk @ g
+            offset_t += h.n_out
+            offset_a += h.n_in
+        if np.any(lam_args != 0.0):
+            ar, ac = self._args_problem.hessian_structure()
+            av = np.asarray(
+                self._args_problem.hessian(ch.xv, lam=lam_args, obj_factor=0.0),
+                dtype=np.float64,
+            )
+            alow = sp.coo_matrix((av, (np.asarray(ar), np.asarray(ac))), shape=(n, n)).tocsr()
+            total = total + alow + sp.tril(alow, -1).T
+        rows, cols = self.hessian_structure()
+        return np.asarray(total.tocsr()[rows, cols], dtype=np.float64).reshape(-1)
+
+    def _hole_hessian_values_dense(self, x: np.ndarray, obj_factor: float, lam: np.ndarray):
+        """:meth:`_hole_hessian_values` in dense numpy, for small tapes.
+
+        The same algebra term for term; it exists because scipy's per-call
+        constructor overhead dominated small models (measured 1.9x the JAX
+        evaluator's wall on a 2x2 ``min sigma_1`` solve, all of it in
+        ``scipy.sparse.__init__``).
+        """
+        n, nt = self._n_variables, self._n_tape
+        ch = self._hole_chain(x)
+        hr, hc = self._problem.hessian_structure()
+        hv = np.asarray(
+            self._problem.hessian(ch.z, lam=lam, obj_factor=obj_factor), dtype=np.float64
+        )
+        low = np.zeros((nt, nt))
+        np.add.at(low, (np.asarray(hr), np.asarray(hc)), hv)
+        hz = low + np.tril(low, -1).T
+        p = np.vstack([np.eye(n), ch.dt])
+        total = p.T @ hz @ p
+        gz = np.asarray(self._problem.gradient(ch.z), dtype=np.float64)
+        w = obj_factor * gz[n:]
+        if self._n_constraints:
+            r, c = self._z_jacobian_structure()
+            jv = np.asarray(self._problem.jacobian(ch.z), dtype=np.float64)
+            jz = np.zeros((self._n_constraints, nt))
+            np.add.at(jz, (r, c), jv)
+            w = w + jz[:, n:].T @ lam
+        lam_args = np.zeros(len(self._hole_args))
+        offset_t = offset_a = 0
+        for h, g, hh in zip(self._holes, ch.g, ch.h):
+            wk = w[offset_t : offset_t + h.n_out]
+            block = np.tensordot(wk, hh, axes=(0, 0))
+            sub = ch.ja[offset_a : offset_a + h.n_in]
+            total = total + sub.T @ block @ sub
+            lam_args[offset_a : offset_a + h.n_in] = wk @ g
+            offset_t += h.n_out
+            offset_a += h.n_in
+        if np.any(lam_args != 0.0):
+            ar, ac = self._args_problem.hessian_structure()
+            av = np.asarray(
+                self._args_problem.hessian(ch.xv, lam=lam_args, obj_factor=0.0),
+                dtype=np.float64,
+            )
+            alow = np.zeros((n, n))
+            np.add.at(alow, (np.asarray(ar), np.asarray(ac)), av)
+            total = total + alow + np.tril(alow, -1).T
+        rows, cols = self.hessian_structure()
+        return np.asarray(total[rows, cols], dtype=np.float64).reshape(-1)
+
     # -- legacy single-argument wrappers ------------------------------------
     # `_obj_fn` / `_cons_fn` are read directly by the IPM batch path, OA, and
     # alpha estimation. They must exist and must read current parameter values.
@@ -806,6 +1081,97 @@ class TapeNLPEvaluator:
 
     def _cons_fn(self, x: np.ndarray) -> np.ndarray:
         return np.asarray(self.evaluate_constraints(x), dtype=np.float64)
+
+
+#: Tape width (model variables plus hole outputs) up to which the hole chain rule
+#: runs in dense numpy rather than scipy.sparse. Dense ``(n, n)`` work at this size
+#: is microseconds, while scipy's constructors cost ~20-50 us each per call.
+_HOLE_DENSE_MAX = 300
+
+
+class _HoleChain:
+    """One point's hole data: ``z = (x, t)`` at once, the derivatives on first use.
+
+    Values and derivatives are split because the IPM asks for values far more
+    often: measured on a degenerate ``min sigma_1`` solve, 18,894 of 41,703
+    evaluator callbacks were ``constraints`` (line-search trial points). Building
+    every derivative for each of them cost 1.1 ms per call in scipy constructors
+    alone; a value-only point is the argument tape plus one SVD per hole.
+    """
+
+    def __init__(self, ev: TapeNLPEvaluator, xv: np.ndarray) -> None:
+        self._ev = ev
+        self.xv = xv
+        a_vals = np.asarray(ev._args_problem.constraints(xv), dtype=np.float64)
+        self._a = a_vals
+        parts = [xv]
+        offset = 0
+        for h in ev._holes:
+            a = a_vals[offset : offset + h.n_in].reshape(h.in_shape)
+            parts.append(np.asarray(h.f(a), dtype=np.float64).reshape(h.n_out))
+            offset += h.n_in
+        self.z = np.concatenate(parts)
+        self._derivs: Optional[tuple] = None
+
+    def _derivatives(self) -> tuple:
+        if self._derivs is None:
+            import scipy.sparse as sp
+
+            ev = self._ev
+            n = ev._n_variables
+            args = ev._args_problem
+            ar, ac = args.jacobian_structure()
+            av = np.asarray(args.jacobian(self.xv), dtype=np.float64)
+            if ev._hole_dense:
+                jad = np.zeros((len(ev._hole_args), n))
+                np.add.at(jad, (np.asarray(ar), np.asarray(ac)), av)
+                gs_d: list[np.ndarray] = []
+                hs_d: list[np.ndarray] = []
+                dt_d = []
+                off = 0
+                for h in ev._holes:
+                    a = self._a[off : off + h.n_in].reshape(h.in_shape)
+                    g = np.asarray(h.jac(a), dtype=np.float64).reshape(h.n_out, h.n_in)
+                    hh = np.asarray(h.hess(a), dtype=np.float64).reshape(h.n_out, h.n_in, h.n_in)
+                    gs_d.append(g)
+                    hs_d.append(hh)
+                    dt_d.append(g @ jad[off : off + h.n_in])
+                    off += h.n_in
+                self._derivs = (np.vstack(dt_d), jad, gs_d, hs_d)
+                return self._derivs
+            ja = sp.coo_matrix(
+                (av, (np.asarray(ar), np.asarray(ac))), shape=(len(ev._hole_args), n)
+            ).tocsr()
+            gs: list[np.ndarray] = []
+            hs: list[np.ndarray] = []
+            dt_rows = []
+            offset = 0
+            for h in ev._holes:
+                a = self._a[offset : offset + h.n_in].reshape(h.in_shape)
+                g = np.asarray(h.jac(a), dtype=np.float64).reshape(h.n_out, h.n_in)
+                hh = np.asarray(h.hess(a), dtype=np.float64).reshape(h.n_out, h.n_in, h.n_in)
+                gs.append(g)
+                hs.append(hh)
+                dt_rows.append(sp.csr_matrix(g) @ ja[offset : offset + h.n_in])
+                offset += h.n_in
+            self._derivs = (sp.vstack(dt_rows).tocsr(), ja, gs, hs)
+        return self._derivs
+
+    @property
+    def dt(self):
+        return self._derivatives()[0]
+
+    @property
+    def ja(self):
+        return self._derivatives()[1]
+
+    @property
+    def g(self) -> list[np.ndarray]:
+        return cast("list[np.ndarray]", self._derivatives()[2])
+
+    @property
+    def h(self) -> list[np.ndarray]:
+        return cast("list[np.ndarray]", self._derivatives()[3])
 
 
 def try_build(model: "Model") -> Optional[TapeNLPEvaluator]:

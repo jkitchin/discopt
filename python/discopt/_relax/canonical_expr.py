@@ -600,6 +600,21 @@ class _Canonicalizer:
             spelled = _norm_scalar_spelling(name, args[0])
             if spelled is not None:
                 return self.canon(spelled)
+            # #1903: the SPECTRAL norm of a matrix (largest singular value) is no
+            # fold over elements, but it is a convex function of them with a
+            # dedicated envelope (`uniform_relax._build_spectral_norm`). It
+            # becomes a multivariable node over the row-major elements, the shape
+            # carried in its name so the builder and the interval rule can rebuild
+            # the matrix.
+            shape = static_shape(args[0])
+            if _norm_order(name) == 2.0 and shape is not None and len(shape) == 2:
+                if 0 not in shape:
+                    elems = scalar_elements(args[0])
+                    if elems is not None:
+                        return self._callN(
+                            f"specnorm:{shape[0]}x{shape[1]}",
+                            tuple(self.canon(e) for e in elems),
+                        )
         if name == "prod" and len(args) == 1:
             # ``prod`` of an array is the product of its ELEMENTS (``jnp.prod``;
             # the tape's ``*`` fold in ``_nl_expr_compiler``), so it is spelled

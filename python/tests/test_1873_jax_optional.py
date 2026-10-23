@@ -121,15 +121,23 @@ def test_a_blocked_jax_counts_as_unavailable(monkeypatch):
 
 @pytest.mark.smoke
 def test_without_jax_the_evaluator_fallback_names_the_construct_and_the_extra():
-    """The measured case from CLAUDE.md: ``dm.norm(X, 2)`` of a 3x3 ``X`` has no tape
-    opcode, so its solve used to load 219 ``jax`` modules. Without JAX it must refuse,
-    and say which construct needs the fallback, not just that JAX is missing."""
+    """A model the tape declines must refuse without JAX, naming the construct.
+
+    The original case here, ``dm.norm(X, 2)`` of a 3x3 ``X``, no longer reaches the
+    fallback at all: #1903 made the spectral norm a numpy-evaluated hole on the
+    tape (``test_spectral_norm.py``). A ``dm.external`` nested inside another one's
+    argument is still declined -- the chain rule would have to run through two
+    numpy layers -- so it is the construct used now.
+    """
     p = _run_without_jax(
+        "import numpy as np\n"
         "import discopt.modeling as dm\n"
         "from discopt._optional_jax import MissingJaxError\n"
+        "sq = dm.external(lambda x: np.array([x[0] ** 2]), jac=lambda x: np.array([[2 * x[0]]]),\n"
+        "                 hess=lambda x: np.array([[[2.0]]]), shape=(1,), name='sq')\n"
         "m = dm.Model()\n"
-        "X = m.continuous('X', shape=(3, 3), lb=-2.0, ub=2.0)\n"
-        "m.minimize(dm.norm(X, 2) + dm.sum(X))\n"
+        "x = m.continuous('x', shape=(1,), lb=0.5, ub=2.0)\n"
+        "m.minimize(sq(sq(x))[0] + x[0])\n"
         "try:\n"
         "    m.solve(time_limit=10)\n"
         "except MissingJaxError as exc:\n"
@@ -139,8 +147,43 @@ def test_without_jax_the_evaluator_fallback_names_the_construct_and_the_extra():
     )
     assert p.returncode == 0, p.stderr[-3000:]
     assert "REFUSED" in p.stdout, p.stdout
-    assert "no opcode" in p.stdout and "norm2" in p.stdout, p.stdout
+    assert "no opcode" in p.stdout and "nested" in p.stdout, p.stdout
     assert "pip install 'discopt[jax]'" in p.stdout, p.stdout
+
+
+@pytest.mark.smoke
+def test_without_jax_the_spectral_norm_and_dm_external_solve():
+    """#1903: both used to need the JAX evaluator; both now run on the tape."""
+    p = _run_without_jax(
+        "import numpy as np\n"
+        "import discopt.modeling as dm\n"
+        "m = dm.Model('spec')\n"
+        "X = m.continuous('X', shape=(3, 3), lb=-2.0, ub=2.0)\n"
+        "m.minimize(dm.norm(X, 2))\n"
+        "m.subject_to(dm.sum(X) >= 1.0)\n"
+        "r = m.solve(time_limit=30)\n"
+        "print('SPEC', r.status, r.objective)\n"
+        "blk = dm.external(lambda x: np.array([x[0] ** 2 * x[1]]),\n"
+        "                  jac=lambda x: np.array([[2 * x[0] * x[1], x[0] ** 2]]),\n"
+        "                  hess=lambda x: np.array([[[2 * x[1], 2 * x[0]], [2 * x[0], 0.0]]]),\n"
+        "                  shape=(1,), name='sim')\n"
+        "m2 = dm.Model('ext')\n"
+        "y = m2.continuous('y', shape=(2,), lb=0.2, ub=3.0)\n"
+        "m2.minimize(dm.sum(y))\n"
+        "m2.subject_to(blk(y)[0] == 3.0)\n"
+        "r2 = m2.solve(time_limit=30)\n"
+        "print('EXT', r2.status, r2.objective)\n"
+        "print('ATTEMPTS', len(JAX_ATTEMPTS))\n"
+    )
+    assert p.returncode == 0, p.stderr[-3000:]
+    lines = dict(ln.split(" ", 1) for ln in p.stdout.splitlines() if " " in ln)
+    status, obj = lines["SPEC"].split()
+    assert status == "optimal" and abs(float(obj) - 1.0 / 3.0) < 1e-6, lines["SPEC"]
+    status2, obj2 = lines["EXT"].split()
+    # min y0 + y1 s.t. y0^2 y1 = 3  ->  y0 = 6^(1/3), y1 = 3 / y0^2
+    y0 = 6.0 ** (1.0 / 3.0)
+    assert status2 in ("feasible", "optimal") and abs(float(obj2) - (y0 + 3 / y0**2)) < 1e-5
+    assert lines["ATTEMPTS"] == "0", p.stdout
 
 
 @pytest.mark.smoke

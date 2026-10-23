@@ -208,6 +208,8 @@
 "python/tests/test_sparse_hessian.py::TestSparseHessianValues::test_general_nonlinear_matches_dense": 9.42,
 "python/tests/test_sparse_routes_1619.py::test_pounce_lp_route_peak_memory_is_linear": 18.77,
 "python/tests/test_spatial_native_kernel.py::test_kernel_feature_safe_declines_return_correct_optimum[kwargs3]": 20.05,
+"python/tests/test_spectral_norm.py::test_degenerate_minimisation_certifies": 9.1,
+"python/tests/test_spectral_norm.py::test_mixed_integer_model_certifies_against_enumeration": 18.46,
 "python/tests/test_surrogate.py::test_is_deterministic_across_runs": 6.97,
 "python/tests/test_surrogate.py::test_never_claims_a_certificate[branin]": 6.48,
 "python/tests/test_surrogate.py::test_never_claims_a_certificate[sphere_2]": 8.63,

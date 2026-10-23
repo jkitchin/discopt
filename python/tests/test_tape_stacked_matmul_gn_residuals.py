@@ -181,7 +181,10 @@ def test_matrix_one_and_inf_norms_match_numpy(ord_):
     assert checked == 5
 
 
-def test_matrix_spectral_norm_is_still_refused():
+def test_matrix_spectral_norm_is_a_hole_not_a_plain_node():
+    """A plain lowering (no hole sink) still refuses sigma_1 -- it is not a fold
+    over elements. The NLP evaluator and the point evaluator lower it as a numpy
+    hole instead (#1903, ``test_spectral_norm.py``)."""
     m, x = _matrix_model()
     with pytest.raises(UnsupportedForTape, match="spectral"):
         compile_to_nl_array(dm.norm(x, 2), m)

@@ -105,15 +105,30 @@ def test_norm_interval_is_scalar_and_encloses_samples(p):
 
 @pytest.mark.unit
 @pytest.mark.parametrize("p", [1, 2, "inf"])
-def test_matrix_norm_interval_is_only_nonnegativity(p):
-    """A 2-D norm is jnp's MATRIX norm; entrywise bounds do not enclose it."""
+def test_matrix_norm_interval_encloses_the_induced_norm(p):
+    """A 2-D norm is jnp's MATRIX norm; entrywise bounds do not enclose it
+    (``||I_3||_2 = 1`` but the entrywise 2-norm is ``sqrt(3)``). It used to get only
+    ``[0, inf)``; since #1903 it gets the induced-norm enclosure, which must contain
+    the true value on every sampled point and be exact on a point box."""
     m = dm.Model("mat")
     X = m.continuous("X", shape=(3, 3), lb=-1, ub=1)
-    # ||I_3||_2 = 1 but the entrywise 2-norm is sqrt(3): an entrywise lower bound
-    # would cut the identity off.
+    ordv = {1: 1, 2: 2, "inf": np.inf}[p]
     box = {X: Interval(np.eye(3), np.eye(3))}
     enc = evaluate_interval(dm.norm(X, p), m, box)
-    assert float(enc.lo) == 0.0 and float(enc.hi) == np.inf
+    truth = np.linalg.norm(np.eye(3), ordv)
+    assert float(enc.lo) <= truth <= float(enc.hi)
+    assert float(enc.hi) - float(enc.lo) <= 1e-9 * max(1.0, truth)
+    rng = np.random.default_rng(3)
+    checked = 0
+    for _ in range(200):
+        lo = rng.uniform(-1, 0.5, (3, 3))
+        hi = lo + rng.uniform(0.0, 1.0, (3, 3))
+        enc = evaluate_interval(dm.norm(X, p), m, {X: Interval(lo, hi)})
+        for _ in range(10):
+            v = np.linalg.norm(rng.uniform(lo, hi), ordv)
+            assert float(enc.lo) - 1e-12 <= v <= float(enc.hi) + 1e-12, (p, v, enc)
+            checked += 1
+    assert checked == 2000
 
 
 @pytest.mark.unit
@@ -208,10 +223,11 @@ def test_relaxation_build_failure_is_reported_once_at_warning(monkeypatch, caplo
 
 
 @pytest.mark.unit
-def test_l1_linf_norms_are_nonsmooth_but_the_spectral_norm_is_not():
+def test_l1_linf_and_spectral_norms_are_nonsmooth():
     """Vector and (since the #1873 follow-up) 2-D 1-/inf-norms are spelled out as
-    abs/max and route to the B&B; the spectral norm has no relaxation and stays
-    on the NLP."""
+    abs/max and route to the B&B. The spectral norm of a matrix joined them in
+    #1903: it is non-differentiable where its top singular values coincide, which
+    is where its minimizers sit, and it now has a relaxation the B&B can use."""
     from discopt.solver import _model_contains_nonsmooth_node
 
     for p, expect in [(1, True), ("inf", True), (2, False), (3, False)]:
@@ -219,7 +235,7 @@ def test_l1_linf_norms_are_nonsmooth_but_the_spectral_norm_is_not():
         v = m.continuous("v", shape=(2,), lb=-2, ub=2)
         m.minimize(dm.norm(v, p))
         assert _model_contains_nonsmooth_node(m) is expect, p
-    for p, expect in [(1, True), ("inf", True), (2, False)]:
+    for p, expect in [(1, True), ("inf", True), (2, True)]:
         m = dm.Model("s")
         X = m.continuous("X", shape=(2, 2), lb=-2, ub=2)
         m.minimize(dm.norm(X, p))
