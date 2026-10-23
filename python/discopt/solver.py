@@ -5171,6 +5171,25 @@ def _bounds_moved(new: np.ndarray, old: np.ndarray, tol: float = 1e-12) -> bool:
         return bool(np.any(differ & ~(np.abs(new - old) <= tol)))
 
 
+def _carry_solve_clocks(src: Model, dst: Model) -> None:
+    """Copy the solve's clocks onto a model a reformulation returned (#1775 G6.2).
+
+    ``solve_model`` stamps ``_solve_deadline`` (#654/#875) and
+    ``_convexity_time_budget`` on the model it is given; the pre-B&B passes read
+    them from whatever model they are handed. A reformulation that returns a new
+    model drops both, and those passes then run with no deadline. Every other
+    reform carried them inline; the GDP lowering did not, which measured as
+    GDPlib ``biofuel`` (hull, ``time_limit=10``) spending 398 s, from 85 s to 355 s
+    inside one ``tighten_nonlinear_bounds`` pass with ``deadline=None``.
+    """
+    if dst is src:
+        return
+    for attr in ("_solve_deadline", "_convexity_time_budget"):
+        value = getattr(src, attr, None)
+        if value is not None:
+            setattr(dst, attr, value)
+
+
 def _apply_nonlinear_tightening_with_status(
     model: Model,
     lb: np.ndarray,
@@ -13711,6 +13730,7 @@ def solve_model(
         # back unchanged.
         _route_box_model = _model_with_tightened_box(model, _declared_tightening) or model
         model = _get_transformation("gdp").apply(_route_box_model, method=resolved_gdp_method)
+        _carry_solve_clocks(_pre_route_model, model)
 
         # #1334: the lowering appends a selector binary per disjunct, and the warm
         # start was flattened against the variables the USER declared -- so
@@ -14191,11 +14211,13 @@ def solve_model(
 
         from discopt.transformations import get as _get_transformation
 
+        _amp_gdp_src = model
         model = _get_transformation("gdp").apply(
             model,
             method=amp_gdp_method,
             respect_disjunction_methods=False,
         )
+        _carry_solve_clocks(_amp_gdp_src, model)
 
         # #1334: AFTER the lowering, never before. ``_normalize_initial_point``
         # raises ``AMP initial_point has length 1; expected 3`` on the short vector
@@ -14542,7 +14564,9 @@ def solve_model(
 
         from discopt.transformations import get as _get_transformation
 
+        _oa_gdp_src = model
         model = _get_transformation("gdp").apply(model, method="big-m")
+        _carry_solve_clocks(_oa_gdp_src, model)
 
         return solve_mip_nlp(
             model,
@@ -14607,7 +14631,9 @@ def solve_model(
     # --- GDP reformulation: convert indicator/disjunctive/SOS to standard MINLP ---
     from discopt.transformations import get as _get_transformation
 
+    _gdp_src = model
     model = _get_transformation("gdp").apply(model, method=gdp_method)
+    _carry_solve_clocks(_gdp_src, model)
 
     # #1255: the lowering appends a selector binary per disjunct, so a warm start
     # flattened against the variables the USER declared no longer describes this
@@ -25577,6 +25603,7 @@ def _solve_nlp_bb(
 
     model_before_gdp = model
     model = _get_transformation("gdp").apply(model, method="big-m")
+    _carry_solve_clocks(model_before_gdp, model)
 
     rust_time = 0.0
     jax_time = 0.0
