@@ -3,7 +3,8 @@
 The root disjunct-configuration constructor always spent its full 15 s grant on
 the GDP parity panel, finding its final point in 0.03-5 s. With the flag on, the
 root call gets ``_GDP_CONFIG_DEFER_ROOT_S`` and the rest is spent in one more call
-from the same seed once the search has run for as long as that rest. Default OFF
+from the same seed once the search has run for as long as that rest. Default ON
+since its §5 panel; ``=0`` opts out.
 (BC: it changes which incumbents are found, never a bound).
 """
 
@@ -21,8 +22,19 @@ from discopt._relax import primal_heuristics as PH
 pytestmark = pytest.mark.smoke
 
 
-def test_default_off_and_root_until(monkeypatch):
+def test_default_on_and_opt_out(monkeypatch):
+    """Graduated: unset is ON, ``=0`` (and its spellings) opt out, empty is not off."""
     monkeypatch.delenv("DISCOPT_GDP_CONFIG_DEFER", raising=False)
+    assert SV._gdp_config_defer_enabled()
+    monkeypatch.setenv("DISCOPT_GDP_CONFIG_DEFER", "")
+    assert SV._gdp_config_defer_enabled()
+    for off in ("0", "false", "no", "off", " OFF "):
+        monkeypatch.setenv("DISCOPT_GDP_CONFIG_DEFER", off)
+        assert not SV._gdp_config_defer_enabled(), off
+
+
+def test_opt_out_and_root_until(monkeypatch):
+    monkeypatch.setenv("DISCOPT_GDP_CONFIG_DEFER", "0")
     assert not SV._gdp_config_defer_enabled()
     assert SV._gdp_config_root_until(100.0, 50.0, 45.0) == 100.0
     monkeypatch.setenv("DISCOPT_GDP_CONFIG_DEFER", "1")
@@ -41,8 +53,8 @@ def test_a_long_root_spends_the_whole_grant_now(monkeypatch):
 
 def test_hold_back(monkeypatch):
     seed = np.array([1.0, 2.0])
-    monkeypatch.delenv("DISCOPT_GDP_CONFIG_DEFER", raising=False)
-    assert SV._gdp_config_hold_back(seed, 115.0, 101.5, 101.6) is None  # flag off
+    monkeypatch.setenv("DISCOPT_GDP_CONFIG_DEFER", "0")
+    assert SV._gdp_config_hold_back(seed, 115.0, 101.5, 101.6) is None  # opted out
     monkeypatch.setenv("DISCOPT_GDP_CONFIG_DEFER", "1")
     held = SV._gdp_config_hold_back(seed, 115.0, 101.5, 101.6)
     assert held is not None and held["remaining"] == pytest.approx(13.4)
@@ -113,7 +125,7 @@ def test_the_deferred_call_runs_with_the_rest_of_the_grant(build, monkeypatch):
 
 
 @pytest.mark.parametrize("build", [_spatial_gdp, _convex_gdp])
-def test_flag_off_is_one_full_grant(build, monkeypatch):
+def test_opt_out_is_one_full_grant(build, monkeypatch):
     calls: list[float] = []
     real = PH.one_hot_config_subnlp
 
@@ -122,7 +134,7 @@ def test_flag_off_is_one_full_grant(build, monkeypatch):
         return real(*a, **k)
 
     monkeypatch.setattr(PH, "one_hot_config_subnlp", spy)
-    monkeypatch.delenv("DISCOPT_GDP_CONFIG_DEFER", raising=False)
+    monkeypatch.setenv("DISCOPT_GDP_CONFIG_DEFER", "0")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         build().solve(time_limit=40)

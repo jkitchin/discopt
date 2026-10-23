@@ -784,8 +784,8 @@ _GDP_CONFIG_DEFER_ROOT_S = 1.5
 
 def _gdp_config_defer_enabled() -> bool:
     """Whether the #823 constructor's grant is split (``DISCOPT_GDP_CONFIG_DEFER``,
-    #1775 G6.2; **default OFF**, BC: it changes which incumbents are found, never a
-    bound).
+    #1775 G6.2; **default ON** since the §5 panel, ``=0`` opts out; BC: it changes
+    which incumbents are found, never a bound).
 
     The constructor runs once at the root on ``_gdp_config_deadline``'s grant
     (15 s at any limit of 100 s or more) and, measured on the GDP parity panel,
@@ -813,16 +813,23 @@ def _gdp_config_defer_enabled() -> bool:
     trigger is the clock, so which node it fires at would depend on machine speed
     (#912's inventory records it as a residual gate).
 
-    Graduation needs the §5 panel (cert-clean and net-positive); the row is in
-    ``docs/dev/flag-retirement-audit.md``.
+    **Graduated** on the §5 panel (2026-10-23; ``gdp_parity`` 24 x {big-m, hull} at
+    100 s plus the 66 in-repo ``.nl``, 118 OFF/ON pairs; the row in
+    ``docs/dev/flag-retirement-audit.md`` has the numbers): cert-clean (0 incorrect,
+    0 bounds past an oracle, no certification lost, every incumbent independently
+    verified) and net-positive on the GDP class (SGM 23.65 -> 13.55 s over the 15
+    certifying pairs it touches; the cost is 3-5 s on 30-40 s hull solves where the
+    held-back call fires and finds nothing), neutral on the ``.nl`` corpus.
+    ``DISCOPT_GDP_CONFIG_DEFER=0`` restores the single root grant. Empty is not an
+    off-value (same shape as :func:`_gdp_config_primal_enabled`).
     """
     if _tuning().deterministic:
         return False
-    return os.environ.get("DISCOPT_GDP_CONFIG_DEFER", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    return os.environ.get("DISCOPT_GDP_CONFIG_DEFER", "").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
     )
 
 
