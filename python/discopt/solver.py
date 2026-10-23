@@ -774,6 +774,100 @@ def _gdp_config_primal_enabled() -> bool:
 #: own right. The size is taken from the backend's own entry experiment
 _GDP_CONFIG_BUDGET_FRACTION = 0.15
 _GDP_CONFIG_BUDGET_CAP_S = 15.0
+#: Root share of the #823 constructor's grant under ``DISCOPT_GDP_CONFIG_DEFER``.
+#: Measured on the GDP parity panel (#1775 G6.2, 32 pairs, cap A/B): at a 1.5 s
+#: cap every certifying pair certified the same objective (SGM 48.1 -> 36.0 s);
+#: what the full 15 s grant bought was incumbents on time-limited pairs, which the
+#: deferred remainder is there to keep.
+_GDP_CONFIG_DEFER_ROOT_S = 1.5
+
+
+def _gdp_config_defer_enabled() -> bool:
+    """Whether the #823 constructor's grant is split (``DISCOPT_GDP_CONFIG_DEFER``,
+    #1775 G6.2; **default OFF**, BC: it changes which incumbents are found, never a
+    bound).
+
+    The constructor runs once at the root on ``_gdp_config_deadline``'s grant
+    (15 s at any limit of 100 s or more) and, measured on the GDP parity panel,
+    always spends it: on eight_process, nonconvex_hen, modprodnet and small_batch
+    it found its final point in 0.03-5 s and used 15.0-15.3 s, 37-85 % of the
+    solve. A fixed shorter cap is a trade, not a fix: at 1.5 s every certifying
+    pair kept its objective and ran faster, but mod_hens' incumbent worsened
+    133646 -> 188281 and clay0203 (hull) lost its incumbent.
+
+    ON, the root call gets ``_GDP_CONFIG_DEFER_ROOT_S`` and the rest of the grant
+    is held back. It is spent in one more call, from the same seed, once the search
+    has run for as long as that rest -- the ski-rental rule, so a solve that
+    finishes sooner never pays it, and one that does not pays at most twice what
+    the better fixed schedule would. Time the solve already spent before the
+    constructor counts: when it exceeds the rest, the whole grant is spent at the
+    root (``_gdp_config_root_until``). The second call runs whether or not an
+    incumbent exists by then, since improving one is what the late grant bought.
+
+    Wired on the two routes whose search loop can make the second call: the Python
+    spatial loop (``solve_model``) and NLP-B&B (``_solve_nlp_bb``). The native
+    spatial kernel's seed generator runs before the kernel and has no loop to come
+    back from, so it keeps the single full grant.
+
+    Off under ``deterministic`` whatever the variable says: the held-back call's
+    trigger is the clock, so which node it fires at would depend on machine speed
+    (#912's inventory records it as a residual gate).
+
+    Graduation needs the §5 panel (cert-clean and net-positive); the row is in
+    ``docs/dev/flag-retirement-audit.md``.
+    """
+    if _tuning().deterministic:
+        return False
+    return os.environ.get("DISCOPT_GDP_CONFIG_DEFER", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _gdp_config_root_until(full_deadline: float, now: float, solve_start: float) -> float:
+    """The root call's deadline: the whole grant, or its first share when deferring.
+
+    The solve's time before the constructor counts toward the ski-rental rule: when
+    it already exceeds what would be held back, the solve is a long one and the
+    whole grant is spent now. Measured on gdp_col (big-M, 100 s, 3 repeats per
+    arm): the root work before the constructor takes ~43 s, the root never
+    finishes inside the limit (0 nodes), so a held-back rest was never spent and
+    the incumbent was 19880.18 against 19346.12 with the full grant.
+    """
+    if not _gdp_config_defer_enabled():
+        return full_deadline
+    if now - solve_start >= full_deadline - now:
+        return full_deadline
+    return min(full_deadline, now + _GDP_CONFIG_DEFER_ROOT_S)
+
+
+def _gdp_config_hold_back(
+    seed: np.ndarray, full_deadline: float, root_until: float, now: float
+) -> Optional[dict]:
+    """What the deferred schedule holds back after the root call returned at ``now``.
+
+    ``None`` when deferral is off, when nothing is left, or when the root call
+    stopped before its deadline: it then ran out of plans, and a second call from
+    the same seed would only repeat it.
+    """
+    if not _gdp_config_defer_enabled():
+        return None
+    rest = full_deadline - now
+    if now < root_until or rest <= 0.0:
+        return None
+    return {
+        "seed": np.asarray(seed, dtype=np.float64).copy(),
+        "remaining": rest,
+        "ready_at": now + rest,
+    }
+
+
+def _gdp_config_deferred_due(held: Optional[dict], iteration: int, now: float) -> bool:
+    """Whether the held-back call is due: past the root, and the search has run
+    for as long as what was held back (the ski-rental rule)."""
+    return held is not None and iteration > 0 and now >= held["ready_at"]
 
 
 def _gdp_config_first_enabled() -> bool:
@@ -18028,6 +18122,9 @@ def solve_model(
     # Try to find an integer-feasible incumbent before B&B starts.
     _fp_ran = False
     _gdp_cfg_ran = False  # #1760: the root disjunct-configuration constructor runs once
+    # #1775 G6.2: the held-back rest of that constructor's grant under
+    # ``DISCOPT_GDP_CONFIG_DEFER`` -- {"seed", "remaining", "ready_at"} -- else None.
+    _gdp_cfg_deferred: Optional[dict] = None
 
     # Re-attach the captured modeler start (by name) to the post-reform working
     # model so ``_gams_initial_seed`` can build a root subnlp seed from it. Only
@@ -18730,6 +18827,52 @@ def solve_model(
         # Update per-iteration time budget for NLP subproblem solves (issue #5).
         remaining = time_limit - elapsed
         opts["max_wall_time"] = max(remaining, _DEADLINE_NODE_FLOOR_S)
+
+        # #1775 G6.2 (``DISCOPT_GDP_CONFIG_DEFER``): the held-back rest of the root
+        # disjunct-configuration grant, spent once the search has run for as long
+        # as that rest. See ``_gdp_config_defer_enabled``. Primal only: points come
+        # from ``subnlp``, which verifies them, and ``_inject_incumbent`` keeps a
+        # point only if it improves.
+        if _gdp_cfg_deferred is not None and _gdp_config_deferred_due(
+            _gdp_cfg_deferred, iteration, time.perf_counter()
+        ):
+            _gdd, _gdp_cfg_deferred = _gdp_cfg_deferred, None
+            _gdd_t0 = time.perf_counter()
+            _gdd_until = min(_deadline, _gdd_t0 + float(_gdd["remaining"]))
+            if _gdd_until > _gdd_t0 and _subnlp_backend_fn is not None:
+                from discopt._relax.primal_heuristics import one_hot_config_subnlp
+
+                _gdd_stats: dict = {}
+                try:
+                    _gdd_results = one_hot_config_subnlp(
+                        model,
+                        _gdd["seed"],
+                        backend=_subnlp_backend_fn,
+                        nlp_options=subnlp_options,
+                        evaluator=evaluator,
+                        deadline=_gdd_until,
+                        stats=_gdd_stats,
+                    )
+                except Exception as _e:
+                    logger.debug("one_hot_config_subnlp (deferred) raised: %s", _e)
+                    _gdd_results = []
+                _subnlp_calls += int(_gdd_stats.get("attempted", 0))
+                _gdd_improved = 0
+                for _x_gd, _obj_gd in _gdd_results:
+                    _subnlp_feasible += 1
+                    if np.isfinite(_obj_gd) and _obj_gd < _SENTINEL_THRESHOLD:
+                        if _inject_incumbent(np.asarray(_x_gd).copy(), float(_obj_gd)):
+                            _subnlp_incumbent_updates += 1
+                            _gdd_improved += 1
+                logger.info(
+                    "GDP config subNLP (deferred, iteration %d): %d sub-NLP solve(s), "
+                    "%d feasible point(s), %d improving, %.2f s",
+                    iteration,
+                    int(_gdd_stats.get("attempted", 0)),
+                    len(_gdd_results),
+                    _gdd_improved,
+                    time.perf_counter() - _gdd_t0,
+                )
 
         # Export batch from Rust tree
         t_rust_start = time.perf_counter()
@@ -20081,6 +20224,7 @@ def solve_model(
         # most once per solve. Where it runs is ``_gdp_config_first_enabled()``.
         def _root_gdp_config_primal() -> None:
             nonlocal _gdp_cfg_ran, _subnlp_calls, _subnlp_feasible, _subnlp_incumbent_updates
+            nonlocal _gdp_cfg_deferred
             if not (
                 iteration == 0
                 and not _gdp_cfg_ran
@@ -20111,6 +20255,9 @@ def solve_model(
                 else 0.5 * np.add(*_clip_start_box(lb, ub))
             )
             _cfg_stats: dict = {}
+            _cfg_t0 = time.perf_counter()
+            _cfg_full = _gdp_config_deadline(_deadline, _cfg_t0)
+            _cfg_until = _gdp_config_root_until(_cfg_full, _cfg_t0, t_start)
             try:
                 _cfg_results = one_hot_config_subnlp(
                     model,
@@ -20118,12 +20265,20 @@ def solve_model(
                     backend=_subnlp_backend_fn,
                     nlp_options=subnlp_options,
                     evaluator=evaluator,
-                    deadline=_gdp_config_deadline(_deadline, time.perf_counter()),
+                    deadline=_cfg_until,
                     stats=_cfg_stats,
                 )
             except Exception as _e:
                 logger.debug("one_hot_config_subnlp raised: %s", _e)
                 _cfg_results = []
+            _gdp_cfg_deferred = _gdp_config_hold_back(
+                _cfg_seed, _cfg_full, _cfg_until, time.perf_counter()
+            )
+            if _gdp_cfg_deferred is not None:
+                logger.info(
+                    "GDP config subNLP (root, deferred schedule): %.2f s held back",
+                    _gdp_cfg_deferred["remaining"],
+                )
             # Log unconditionally, including the zero case. Without this, a run
             # showing no change is ambiguous between "the constructor ran and
             # found nothing" and "the gate never opened" — the §6 vacuity trap,
@@ -25674,6 +25829,9 @@ def _solve_nlp_bb(
 
     # --- Feasibility pump flag ---
     _fp_ran = False
+    # #1775 G6.2: the held-back rest of the root disjunct-configuration grant under
+    # ``DISCOPT_GDP_CONFIG_DEFER`` (see ``_gdp_config_hold_back``), else None.
+    _gdp_cfg_deferred_nb: Optional[dict] = None
 
     # --- Soundness: distinguish a PROVEN-infeasible fathom from a merely
     # UNCONVERGED one. A node whose NLP returns SolveStatus.INFEASIBLE (or whose
@@ -25828,6 +25986,58 @@ def _solve_nlp_bb(
         # Update per-iteration time budget for NLP subproblem solves (issue #5).
         remaining = time_limit - elapsed
         opts["max_wall_time"] = max(remaining, 0.1)
+
+        # #1775 G6.2 (``DISCOPT_GDP_CONFIG_DEFER``): the held-back rest of the root
+        # disjunct-configuration grant; see ``_gdp_config_defer_enabled``. Points
+        # are re-verified by this path's own standard, as at the root call.
+        if _gdp_cfg_deferred_nb is not None and _gdp_config_deferred_due(
+            _gdp_cfg_deferred_nb, iteration, time.perf_counter()
+        ):
+            _gdd_nb, _gdp_cfg_deferred_nb = _gdp_cfg_deferred_nb, None
+            _gdd_t0 = time.perf_counter()
+            _gdd_until = min(t_start + time_limit, _gdd_t0 + float(_gdd_nb["remaining"]))
+            if _gdd_until > _gdd_t0:
+                from discopt._relax.primal_heuristics import one_hot_config_subnlp
+
+                _gdd_found: list = []
+                _gdd_stats: dict = {}
+                try:
+                    _gdd_found = one_hot_config_subnlp(
+                        model,
+                        _gdd_nb["seed"],
+                        evaluator=evaluator,
+                        deadline=_gdd_until,
+                        stats=_gdd_stats,
+                    )
+                except Exception as _e:  # pragma: no cover - defensive
+                    logger.debug("nlp-bb one_hot_config_subnlp (deferred) raised: %s", _e)
+                _subnlp_calls += int(_gdd_stats.get("attempted", 0))
+                _gdd_improved = 0
+                for _gdd_x, _ in _gdd_found:
+                    _subnlp_feasible += 1
+                    _gdd_sol = np.asarray(_gdd_x, dtype=np.float64).copy()
+                    _gdd_obj = float(evaluator.evaluate_objective(_gdd_sol))
+                    _gdd_feas = not cl_list or _check_constraint_feasibility(
+                        evaluator, _gdd_sol, cl_list, cu_list
+                    )
+                    if (
+                        np.isfinite(_gdd_obj)
+                        and _gdd_obj < _SENTINEL_THRESHOLD
+                        and _gdd_feas
+                        and _is_integer_feasible_solution(_gdd_sol, int_offsets, int_sizes)
+                    ):
+                        if tree.inject_incumbent(_gdd_sol, _gdd_obj):
+                            _subnlp_incumbent_updates += 1
+                            _gdd_improved += 1
+                logger.info(
+                    "GDP config subNLP (nlp-bb, deferred, iteration %d): %d sub-NLP "
+                    "solve(s), %d feasible point(s), %d improving, %.2f s",
+                    iteration,
+                    int(_gdd_stats.get("attempted", 0)),
+                    len(_gdd_found),
+                    _gdd_improved,
+                    time.perf_counter() - _gdd_t0,
+                )
 
         # Export batch from Rust tree
         t_rust_start = time.perf_counter()
@@ -26201,6 +26411,9 @@ def _solve_nlp_bb(
                     logger.info("GDP config subNLP (nlp-bb): entering disjunct selection")
                     _cfg_found = []
                     _cfg_stats: dict = {}
+                    _cfg_t0 = time.perf_counter()
+                    _cfg_full = _gdp_config_deadline(t_start + time_limit, _cfg_t0)
+                    _cfg_until = _gdp_config_root_until(_cfg_full, _cfg_t0, t_start)
                     try:
                         from discopt._relax.primal_heuristics import one_hot_config_subnlp
 
@@ -26208,13 +26421,14 @@ def _solve_nlp_bb(
                             model,
                             result_sols[best_root_idx],
                             evaluator=evaluator,
-                            deadline=_gdp_config_deadline(
-                                t_start + time_limit, time.perf_counter()
-                            ),
+                            deadline=_cfg_until,
                             stats=_cfg_stats,
                         )
                     except Exception as _e:  # pragma: no cover - defensive
                         logger.debug("nlp-bb one_hot_config_subnlp raised: %s", _e)
+                    _gdp_cfg_deferred_nb = _gdp_config_hold_back(
+                        result_sols[best_root_idx], _cfg_full, _cfg_until, time.perf_counter()
+                    )
                     logger.info(
                         "GDP config subNLP: %d sub-NLP solve(s), %d feasible point(s)",
                         int(_cfg_stats.get("attempted", 0)),
