@@ -1515,6 +1515,38 @@ def _native_seed_bracket(x_rel: float, lo_b: float, up_b: float) -> tuple[float,
     return (float(lo), float(hi)) if abs(x_rel - lo) <= abs(x_rel - hi) else (float(hi), float(lo))
 
 
+def _kernel_seed_ils_enabled() -> bool:
+    """``DISCOPT_KERNEL_SEED_ILS`` gate (#1871), read at call time.
+
+    **Graduated (default ON, 2026-10-23).** CLAUDE.md section 5 panel over the 101
+    kernel-routed local MINLPLib instances, ON vs OFF, 30 s, interleaved: cert-clean
+    (202 rows, 0 problems), certified 94 = 94, none lost; it fired on ``nous1`` only
+    and left the other 100 bit-identical in node count. ``nous1``: no incumbent ->
+    the optimum 1.56707. Its bound at 30 s moves -0.076 -> -0.301 because the new
+    incumbent switches on ``DISCOPT_KERNEL_CUTOFF_OBBT``'s box, the search-path
+    trade-off recorded there; this pass touches no relaxation. ``=0`` is the opt-out.
+
+    Primal only: when the native seed's bracket enumeration yields no candidate, run
+    the Python tree's root ``integer_local_search`` from the seed's relaxation point.
+    Every point it returns is re-verified against the original model like any seed
+    candidate, so no bound or certificate can move. ``nous1`` (POUNCE 0.13.0) is the
+    probe: all four enumerated sub-NLPs end infeasible and the kernel ran 120 s with
+    no incumbent; the local search reaches the optimum 1.56707 in 7 s.
+    """
+    return os.environ.get("DISCOPT_KERNEL_SEED_ILS", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
+
+
+#: #1871: seed integer local search runs (``"fired"``) and verified-candidate yields
+#: (``"found"``) -- the probe counter (CLAUDE.md section 6).
+KERNEL_SEED_ILS_STATS: "collections.Counter[str]" = collections.Counter()
+
+
 def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
     """Yield candidate feasible points (flat) for the native-kernel seed, from the SAME
     NLP heuristics the trusted spatial path uses to find its first incumbent — general
@@ -1559,6 +1591,7 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
     ev = None
     backend = None
     xr = None
+    _seed_yielded = 0
     try:
         from discopt.solvers.nlp_backend import get_nlp_solver
 
@@ -1620,6 +1653,7 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
                     logger.debug("native seed subnlp raised: %s", exc)
                     cand = None
                 if cand is not None and cand[0] is not None:
+                    _seed_yielded += 1
                     yield np.asarray(cand[0], dtype=np.float64)
         elif time.perf_counter() < deadline:
             # Too many free integers to enumerate. The legacy fallback is a single
@@ -1677,6 +1711,33 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
                     yield np.asarray(cand[0], dtype=np.float64)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("native seed subnlp import/setup failed: %s", exc)
+
+    # #1871: the enumeration repairs only the continuous variables around each
+    # bracketed integer assignment, and on ``nous1`` all four sub-NLPs end
+    # infeasible. The Python tree's first incumbent there comes from its root
+    # integer local search, which the seed never ran. Run it when the enumeration
+    # found nothing; its points go through the same verification as every other.
+    if (
+        int_pos
+        and _seed_yielded == 0
+        and backend is not None
+        and _kernel_seed_ils_enabled()
+        and time.perf_counter() < deadline
+    ):
+        from discopt._relax.primal_heuristics import integer_local_search
+
+        KERNEL_SEED_ILS_STATS["fired"] += 1
+        ils = integer_local_search(
+            model,
+            xr if xr is not None else base,
+            backend=backend,
+            evaluator=ev,
+            deadline=deadline,
+            box=(lb, ub),
+        )
+        if ils is not None and ils[0] is not None:
+            KERNEL_SEED_ILS_STATS["found"] += 1
+            yield np.asarray(ils[0], dtype=np.float64)
 
     if not int_pos and time.perf_counter() < deadline:
         try:
@@ -2073,6 +2134,27 @@ def _try_native_spatial_kernel(
     # evaluator, and on nvs19 it was the single largest cost in the solve.
     _native_jax_s += time.perf_counter() - _t_phase
 
+    # #1871: the Python tree re-runs root OBBT with the incumbent as a cutoff the
+    # moment it has one (Phase C); the kernel's box was fixed before its seed
+    # existed. Same call, same budget, and the spec is rebuilt on the result.
+    if initial_incumbent is not None and _kernel_cutoff_obbt_enabled() and n_vars <= 200:
+        _t_phase = time.perf_counter()
+        _cut_box = _kernel_cutoff_obbt_box(
+            model,
+            np.asarray(lb, dtype=np.float64)[:n_vars],
+            np.asarray(ub, dtype=np.float64)[:n_vars],
+            float(initial_incumbent) + off,
+            outer_deadline,
+        )
+        if _cut_box is not None:
+            _spec_cut = build_spatial_kernel_spec(model, bounds=_cut_box, deadline=outer_deadline)
+            if _spec_cut is not None:
+                for _k in [k for k in _spec_cut if k.startswith("meta_")]:
+                    _spec_cut.pop(_k)
+                spec = _spec_cut
+                KERNEL_CUTOFF_OBBT_STATS["adopted"] += 1
+        _native_jax_s += time.perf_counter() - _t_phase
+
     remaining = None if outer_deadline is None else max(0.0, outer_deadline - time.perf_counter())
     # #933: withhold the caller's root-fallback reserve from the kernel's
     # deadline, exactly as the Python node loop withholds it while bound-less
@@ -2141,6 +2223,9 @@ def _try_native_spatial_kernel(
     # ``gap_tolerance`` does not take effect on this route, which only ever
     # means the kernel does more work than asked.
     _kernel_abs_tol = _native_kernel_abs_tol(gap_tolerance, abs_gap_tolerance)
+    # #1871: with no absolute tolerance requested, the documented criterion is the
+    # Python tree's ``abs_gap_tol OR relative gap_tolerance``; see the gate.
+    _documented_gap = _kernel_documented_gap_applies(abs_gap_tolerance)
     # ...and SAY so when the ``min`` discarded it. Declining to loosen is the
     # safe direction, but a caller who asked for 1e6 and got 1e-4 explored
     # the same 45 nodes as with no tolerance at all and was told nothing
@@ -2166,7 +2251,7 @@ def _try_native_spatial_kernel(
     # ``inf`` a bound-less ``-inf`` passes it (``-inf >= -inf``) and the relative
     # arm then passes too (``inf <= inf``) -- measured: Haverly ``optimal`` at
     # node 0 with no bound. A finite lift keeps ``-inf`` failing the first clause.
-    if _relative_requested:
+    if _relative_requested or _documented_gap:
         _kernel_abs_tol = 1e300
     solve_kwargs = dict(
         max_nodes=int(max_nodes),
@@ -7267,6 +7352,124 @@ def _withdraw_unresolved_certificate(result: SolveResult) -> None:
     if result.solver_stats is None:
         result.solver_stats = {}
     result.solver_stats["certificate/objective_unresolved"] = 1.0
+
+
+def _kernel_documented_gap_enabled() -> bool:
+    """``DISCOPT_KERNEL_DOCUMENTED_GAP`` gate (#1871), read at call time.
+
+    **Graduated (default ON, 2026-10-22).** CLAUDE.md section 5 panel over the 101
+    kernel-routed instances among the 394 local MINLPLib instances (<= 200
+    vars/cons), ON vs OFF, 30 s, interleaved: cert-clean (202 rows, 0 problems;
+    every incumbent passes ``verify_point`` on a fresh model), certified 93 = 93,
+    none lost, certified objectives identical; fewer nodes on 16 instances and more
+    on none (``st_qpc-m3a`` 1857 -> 163, ``st_rv8`` 343 -> 205, ``fuel`` 145 -> 53,
+    ``supplychain`` 195 -> 117); total wall 377 -> 373 s. ``=0`` restores the
+    absolute arm.
+
+    The native kernel's stop and prune test conjoins an ABSOLUTE ``gap_tol``, set
+    to ``gap_tolerance`` (1e-4 by default), with the documented criterion
+    (absolute ``abs_gap_tol`` OR relative ``gap_tolerance``). At a large objective
+    scale that absolute arm is far stricter than the documented one, and near the
+    precision of the LP bound itself. ``st_m2`` (optimum -856648.82) is the probe:
+    the kernel reached bound -856648.8199 with the optimal incumbent -- a 1.5e-9
+    relative gap -- and still ran to its 120 s limit. ON, when the caller named no
+    ``abs_gap_tolerance``, the absolute arm is lifted exactly as an explicit
+    looser ``gap_tolerance`` already lifts it (#1615), which leaves the documented
+    criterion. An explicit ``abs_gap_tolerance`` keeps the #1243 ``min`` mapping.
+    """
+    return os.environ.get("DISCOPT_KERNEL_DOCUMENTED_GAP", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
+
+
+def _kernel_cutoff_obbt_enabled() -> bool:
+    """``DISCOPT_KERNEL_CUTOFF_OBBT`` gate (#1871), read at call time.
+
+    **Graduated (default ON, 2026-10-23, owner decision).** CLAUDE.md section 5
+    panel over the 101 kernel-routed local MINLPLib instances, ON vs OFF with
+    ``DISCOPT_KERNEL_DOCUMENTED_GAP`` ON, 30 s, interleaved: cert-clean (202 rows,
+    0 problems), certified 93 -> 94 (``st_m2``: 1 node / 8.1 s), none lost,
+    certified objectives identical; fewer nodes on about 50 instances
+    (``st_m1`` 2021 -> 1, the pooling and ``st_ph*`` families to 1), more on four
+    (``st_rv8`` 205 -> 307, ``st_rv9`` 765 -> 933, ``st_rv3``, ``st_qpc-m3a``);
+    total wall 371 -> 349 s.
+
+    Recorded trade-off: the root bound is tighter wherever it fires (``nvs17``
+    -11121 -> -4946, ``nvs23`` -190353 -> -91525, ``nous2`` -0.830 -> -0.762), but
+    on the uncertified instances the bound at a limit follows a different search
+    path. At 30 s it is looser on ``nous2``, ``nvs17``, ``nvs23`` and ``tanksize``
+    and tighter on ``st_m2``, ``nvs19`` and ``nvs24``. At 3000 nodes it is looser on
+    ``nous2``, ``nvs23`` and ``tanksize`` and tighter on ``nvs17``. Scoring branches
+    against the untightened widths was tried and falsified (tanksize better, nous2
+    worse). The owner read section 5's "looser bound" as the fixed-box relaxation
+    bound, which is tighter, and graduated the flag. ``=0`` is the opt-out.
+
+    Later evidence (2026-10-23, recorded per CLAUDE.md section 11): once
+    ``DISCOPT_KERNEL_SEED_ILS`` gives ``nous1`` an incumbent, this box (16 of 50
+    columns shrunk, 2 near-fixed; spec otherwise identical) takes its root bound
+    -0.847 -> -0.825 but its bound at 3000 nodes -0.070 -> -0.219 and at 120 s
+    0.32 -> 0.069. Same search-path signature as above, on one more instance.
+
+    Bound-changing: the native kernel's root box is tightened by root OBBT over the
+    McCormick relaxation with the verified seed incumbent as an objective cutoff,
+    the Python tree's Phase C call (``obbt_tighten_root(..., incumbent_cutoff=)``).
+    Points whose objective exceeds the incumbent are the only ones removed, so the
+    optimum stays in the box. ``st_m2`` with the documented gap criterion: 32,789
+    nodes / 94 s without it, 1 node / 0.9 s with it.
+    """
+    return os.environ.get("DISCOPT_KERNEL_CUTOFF_OBBT", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
+
+
+def _kernel_documented_gap_applies(abs_gap_tolerance: Optional[float]) -> bool:
+    """Whether the kernel's absolute ``gap_tol`` arm is lifted for #1871: the gate is
+    on and the caller named no absolute tolerance (an explicit one keeps #1243)."""
+    return abs_gap_tolerance is None and _kernel_documented_gap_enabled()
+
+
+#: #1871: how often the cutoff-OBBT box replaced the kernel's root box (probe
+#: counter, CLAUDE.md section 6).
+KERNEL_CUTOFF_OBBT_STATS: "collections.Counter[str]" = collections.Counter()
+
+
+def _kernel_cutoff_obbt_box(model, lb, ub, cutoff: float, outer_deadline):
+    """Root box tightened by cutoff OBBT (#1871), or ``None`` when nothing moved.
+
+    ``cutoff`` is in the Python tree's internal (minimised, offset-inclusive)
+    objective units -- what ``obbt_tighten_root`` takes. An infeasible result
+    (nothing strictly better than the seed) also returns ``None``: the kernel then
+    proves that on its own box, so the certificate never rests on this pass.
+    """
+    from discopt._relax.obbt import obbt_tighten_root
+
+    now = time.perf_counter()
+    budget = _PERIODIC_OBBT_BUDGET_S
+    if outer_deadline is not None:
+        budget = min(_PERIODIC_OBBT_BUDGET_S, max(0.0, 0.25 * (outer_deadline - now)))
+    if budget <= _DEADLINE_NODE_FLOOR_S:
+        return None
+    KERNEL_CUTOFF_OBBT_STATS["fired"] += 1
+    res = obbt_tighten_root(
+        model,
+        np.array(lb),
+        ub=np.array(ub),
+        rounds=2,
+        incumbent_cutoff=float(cutoff),
+        deadline=now + budget,
+        time_limit_per_lp=0.1,
+    )
+    if res.infeasible or res.n_tightened <= 0:
+        return None
+    return (np.asarray(res.lb, dtype=np.float64), np.asarray(res.ub, dtype=np.float64))
 
 
 def _native_kernel_abs_tol(gap_tolerance: float, abs_gap_tolerance: Optional[float]) -> float:
