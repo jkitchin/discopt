@@ -80,3 +80,36 @@ def test_flag_defaults(monkeypatch):
     monkeypatch.setenv(CUT, "0")
     assert not SV._kernel_documented_gap_enabled()
     assert not SV._kernel_cutoff_obbt_enabled()
+
+
+NOUS1 = os.path.join(os.path.dirname(__file__), "data", "minlplib_nl", "nous1.nl")
+NOUS1_OPT = 1.567072  # minlplib.solu
+
+
+def _nous1_seed():
+    m = dm.from_nl(NOUS1)
+    b = fbbt_box(m)
+    lb, ub = np.asarray(b.lb, float), np.asarray(b.ub, float)
+    return SV._native_kernel_seed(m, lb, ub, 1.0, 0.0, lb.size, None)
+
+
+def test_seed_ils_gives_nous1_a_verified_seed(monkeypatch):
+    """The kernel seed's enumeration finds nothing on nous1; the local search does."""
+    monkeypatch.setenv("DISCOPT_KERNEL_SEED_ILS", "1")
+    SV.KERNEL_SEED_ILS_STATS.clear()
+    value, point = _nous1_seed()
+    assert SV.KERNEL_SEED_ILS_STATS["fired"] == 1, "the local search never ran"
+    assert value is not None and point is not None
+    assert value >= NOUS1_OPT - 1e-6  # a verified feasible point never beats the optimum
+    ok, obj = SV._native_kernel_verify_point(dm.from_nl(NOUS1), point)
+    assert ok and abs(obj - value) <= 1e-9 * (1 + abs(value))
+
+
+def test_seed_ils_off_leaves_nous1_unseeded(monkeypatch):
+    monkeypatch.setenv("DISCOPT_KERNEL_SEED_ILS", "0")
+    assert _nous1_seed() == (None, None)
+
+
+def test_seed_ils_defaults_off(monkeypatch):
+    monkeypatch.delenv("DISCOPT_KERNEL_SEED_ILS", raising=False)
+    assert not SV._kernel_seed_ils_enabled()

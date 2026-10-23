@@ -1515,6 +1515,30 @@ def _native_seed_bracket(x_rel: float, lo_b: float, up_b: float) -> tuple[float,
     return (float(lo), float(hi)) if abs(x_rel - lo) <= abs(x_rel - hi) else (float(hi), float(lo))
 
 
+def _kernel_seed_ils_enabled() -> bool:
+    """``DISCOPT_KERNEL_SEED_ILS`` gate (#1871), read at call time. **Default OFF**
+    pending its CLAUDE.md section 5 panel.
+
+    Primal only: when the native seed's bracket enumeration yields no candidate, run
+    the Python tree's root ``integer_local_search`` from the seed's relaxation point.
+    Every point it returns is re-verified against the original model like any seed
+    candidate, so no bound or certificate can move. ``nous1`` (POUNCE 0.13.0) is the
+    probe: all four enumerated sub-NLPs end infeasible and the kernel ran 120 s with
+    no incumbent; the local search reaches the optimum 1.56707 in 7 s.
+    """
+    return os.environ.get("DISCOPT_KERNEL_SEED_ILS", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+#: #1871: seed integer local search runs (``"fired"``) and verified-candidate yields
+#: (``"found"``) -- the probe counter (CLAUDE.md section 6).
+KERNEL_SEED_ILS_STATS: "collections.Counter[str]" = collections.Counter()
+
+
 def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
     """Yield candidate feasible points (flat) for the native-kernel seed, from the SAME
     NLP heuristics the trusted spatial path uses to find its first incumbent — general
@@ -1559,6 +1583,7 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
     ev = None
     backend = None
     xr = None
+    _seed_yielded = 0
     try:
         from discopt.solvers.nlp_backend import get_nlp_solver
 
@@ -1620,6 +1645,7 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
                     logger.debug("native seed subnlp raised: %s", exc)
                     cand = None
                 if cand is not None and cand[0] is not None:
+                    _seed_yielded += 1
                     yield np.asarray(cand[0], dtype=np.float64)
         elif time.perf_counter() < deadline:
             # Too many free integers to enumerate. The legacy fallback is a single
@@ -1677,6 +1703,33 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
                     yield np.asarray(cand[0], dtype=np.float64)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("native seed subnlp import/setup failed: %s", exc)
+
+    # #1871: the enumeration repairs only the continuous variables around each
+    # bracketed integer assignment, and on ``nous1`` all four sub-NLPs end
+    # infeasible. The Python tree's first incumbent there comes from its root
+    # integer local search, which the seed never ran. Run it when the enumeration
+    # found nothing; its points go through the same verification as every other.
+    if (
+        int_pos
+        and _seed_yielded == 0
+        and backend is not None
+        and _kernel_seed_ils_enabled()
+        and time.perf_counter() < deadline
+    ):
+        from discopt._relax.primal_heuristics import integer_local_search
+
+        KERNEL_SEED_ILS_STATS["fired"] += 1
+        ils = integer_local_search(
+            model,
+            xr if xr is not None else base,
+            backend=backend,
+            evaluator=ev,
+            deadline=deadline,
+            box=(lb, ub),
+        )
+        if ils is not None and ils[0] is not None:
+            KERNEL_SEED_ILS_STATS["found"] += 1
+            yield np.asarray(ils[0], dtype=np.float64)
 
     if not int_pos and time.perf_counter() < deadline:
         try:
@@ -7346,6 +7399,12 @@ def _kernel_cutoff_obbt_enabled() -> bool:
     against the untightened widths was tried and falsified (tanksize better, nous2
     worse). The owner read section 5's "looser bound" as the fixed-box relaxation
     bound, which is tighter, and graduated the flag. ``=0`` is the opt-out.
+
+    Later evidence (2026-10-23, recorded per CLAUDE.md section 11): once
+    ``DISCOPT_KERNEL_SEED_ILS`` gives ``nous1`` an incumbent, this box (16 of 50
+    columns shrunk, 2 near-fixed; spec otherwise identical) takes its root bound
+    -0.847 -> -0.825 but its bound at 3000 nodes -0.070 -> -0.219 and at 120 s
+    0.32 -> 0.069. Same search-path signature as above, on one more instance.
 
     Bound-changing: the native kernel's root box is tightened by root OBBT over the
     McCormick relaxation with the verified seed incumbent as an objective cutoff,
