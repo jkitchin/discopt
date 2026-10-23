@@ -7454,7 +7454,7 @@ def _kernel_cutoff_obbt_box(model, lb, ub, cutoff: float, outer_deadline):
     now = time.perf_counter()
     budget = _PERIODIC_OBBT_BUDGET_S
     if outer_deadline is not None:
-        budget = min(budget, max(0.0, 0.25 * (outer_deadline - now)))
+        budget = min(_PERIODIC_OBBT_BUDGET_S, max(0.0, 0.25 * (outer_deadline - now)))
     if budget <= _DEADLINE_NODE_FLOOR_S:
         return None
     KERNEL_CUTOFF_OBBT_STATS["fired"] += 1

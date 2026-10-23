@@ -406,6 +406,19 @@ def test_kernel_loose_gap_never_closes_without_a_bound(monkeypatch):
 
 
 def test_kernel_default_gap_is_silent(monkeypatch):
+    # #1871: with no ``abs_gap_tolerance`` named, the kernel stops on the documented
+    # criterion, which Haverly meets on its relative arm.
+    r, warned = _kernel_gap_solve(monkeypatch)
+    assert warned == []
+    assert r.status == "optimal" and r.solver_stats["gap_criterion"] == "relative"
+
+
+def test_kernel_absolute_arm_opt_out_is_silent(monkeypatch):
+    # ``DISCOPT_KERNEL_DOCUMENTED_GAP=0`` restores the pre-#1871 absolute arm. The
+    # #1871 cutoff box is pinned off too: it changes the search, and the label
+    # records where the final gap lands (1.8e-8 with both off, 5.3e-5 with the box).
+    monkeypatch.setenv("DISCOPT_KERNEL_DOCUMENTED_GAP", "0")
+    monkeypatch.setenv("DISCOPT_KERNEL_CUTOFF_OBBT", "0")
     r, warned = _kernel_gap_solve(monkeypatch)
     assert warned == []
     assert r.status == "optimal" and r.solver_stats["gap_criterion"] == "absolute"

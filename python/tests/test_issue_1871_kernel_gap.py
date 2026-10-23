@@ -26,6 +26,10 @@ from discopt.tightening import fbbt_box
 
 pytestmark = pytest.mark.unit
 
+# The three solve-backed tests below take ~8 s each here and ~3x that on CI, over
+# the fast lane's 15 s budget, so they run in the slow/correctness lanes; the fast
+# lane keeps the gate logic, the defaults and the unseeded-OFF check.
+
 GAP = "DISCOPT_KERNEL_DOCUMENTED_GAP"
 CUT = "DISCOPT_KERNEL_CUTOFF_OBBT"
 ST_M2 = os.path.join(os.path.dirname(__file__), "data", "minlplib_nl", "st_m2.nl")
@@ -42,6 +46,8 @@ def test_documented_gap_applies_only_without_an_absolute_request(monkeypatch):
     assert not SV._kernel_documented_gap_applies(None)
 
 
+@pytest.mark.slow
+@pytest.mark.correctness
 def test_cutoff_box_keeps_the_optimum_and_shrinks_the_box():
     """The cutoff box must contain the known optimal point and be strictly smaller."""
     m = dm.from_nl(ST_M2)
@@ -58,6 +64,8 @@ def test_cutoff_box_keeps_the_optimum_and_shrinks_the_box():
     assert np.all(x >= clb - 1e-6) and np.all(x <= cub + 1e-6), "optimum cut from the box"
 
 
+@pytest.mark.slow
+@pytest.mark.correctness
 def test_both_flags_certify_st_m2_on_the_kernel(monkeypatch):
     monkeypatch.setenv(GAP, "1")
     monkeypatch.setenv(CUT, "1")
@@ -93,6 +101,8 @@ def _nous1_seed():
     return SV._native_kernel_seed(m, lb, ub, 1.0, 0.0, lb.size, None)
 
 
+@pytest.mark.slow
+@pytest.mark.correctness
 def test_seed_ils_gives_nous1_a_verified_seed(monkeypatch):
     """The kernel seed's enumeration finds nothing on nous1; the local search does."""
     monkeypatch.setenv("DISCOPT_KERNEL_SEED_ILS", "1")
