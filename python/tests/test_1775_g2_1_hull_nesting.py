@@ -40,7 +40,11 @@ def _strict_hull(m):
 def _strict_solve(m):
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)
-        return m.solve(gdp_method="hull", time_limit=60)
+        # The limit caps the solve; it is not the claim under test. On CI the coverage
+        # lane runs this solve 2-5x slower than the fast lane (measured in #1915:
+        # 30 s fast vs 61.9 s, its 60 s limit), so the old 60 s limit let a
+        # slow runner stop it before it certified.
+        return m.solve(gdp_method="hull", time_limit=100)
 
 
 def _nested3():

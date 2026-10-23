@@ -79,7 +79,11 @@ def test_backstop_decertifies_and_repairs_an_infeasible_disjunct(monkeypatch):
     injected: list[float] = []
     monkeypatch.setattr(solver, "solve_model", certify_the_bad_point)
     m, x, y = _witness()
-    r = m.solve(gdp_method="hull", time_limit=60)
+    # The limit caps the solve; it is not the claim under test. On CI the coverage
+    # lane runs this solve 2-5x slower than the fast lane (measured in #1915:
+    # 27 s fast vs 60.2 s, its 60 s limit), so the old 60 s limit let a
+    # slow runner stop it before it certified.
+    r = m.solve(gdp_method="hull", time_limit=110)
     assert injected, "the route was not intercepted, so no bad point was checked"
     stats = r.solver_stats or {}
     assert stats.get("certificate/incumbent_unverified") == 1.0
