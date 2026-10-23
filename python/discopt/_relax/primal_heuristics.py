@@ -2499,9 +2499,12 @@ def one_hot_config_subnlp(
     # deterministic outcome. Where the wave finishes early the dive is unaffected —
     # ``flay03m`` exhausts 72 plans in 2.62 s and ``flay02m`` 66 in 1.69 s of the
     # same 15 s slice, both already reproducible, and neither is touched.
+    # Freed from the slice, not from ``time_limit`` (#1371): ``None`` here let GDPlib
+    # hda run 526 s past a 100 s limit (#1775 G6.2).
     from discopt import solver_tuning as _st
+    from discopt.solver import _role1_deadline
 
-    wave_deadline = None if _st.current().deterministic else deadline
+    wave_deadline = _role1_deadline() if _st.current().deterministic else deadline
     for ci, ri in wave_plans:
         if wave_deadline is not None and _now() >= wave_deadline:
             stop = "deadline"
@@ -2517,8 +2520,8 @@ def one_hot_config_subnlp(
             seed[j] = v
         # The caller's deadline is a stopping contract, so the per-solve budget is
         # what remains of it — not a slice of it. ``wave_deadline`` is ``deadline``
-        # except under ``deterministic``, where the wave is bounded by its solve
-        # cap instead (see above).
+        # except under ``deterministic``, where it is the solve's own role-1
+        # deadline and the wave's extent is its solve cap (see above).
         budget = None if wave_deadline is None else max(0.0, wave_deadline - _now())
         if budget is not None and budget <= 0.0:
             stop = "deadline"
