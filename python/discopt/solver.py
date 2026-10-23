@@ -22811,18 +22811,14 @@ def solve_model(
             _solver_stats[f"bound_provenance/{_prov_tag}"] = float(_prov_delta)
 
     # #1659: an incumbent outside the declared rows is never certified. Applied
-    # here, after every step above that can (re-)earn a certificate. #1775 G6.2
-    # (owner decision 2026-10-23): nor is it reported. A point the exit gate
-    # refuses even after the repair polish is withdrawn; the bound stands, since
-    # it is a valid dual bound whatever the incumbent.
+    # here, after every step above that can (re-)earn a certificate. The point is
+    # still returned, marked: ``Model.solve`` withdraws it unless the #1537 repair
+    # turns it into one ``verify_point`` accepts (#1775 G6.2).
     if _spatial_exit_unverified:
         _solver_stats["spatial/exit_gate_refused"] = 1.0
-        _solver_stats["spatial/incumbent_withdrawn"] = 1.0
-        status = _status_without_incumbent(wall_time, time_limit, stats["total_nodes"], max_nodes)
+        if status == "optimal":
+            status = "feasible"
         _gap_certified = False
-        obj_val = None
-        x_dict = None
-        gap_val = None
 
     # #1383: the certificate must survive the FINAL (objective, bound) pair.
     # Everything above may still have moved `obj_val` after the tree computed
@@ -27726,18 +27722,14 @@ def _solve_nlp_bb(
     # certified. Applied last, so neither the re-earn step nor the root-cut
     # composition above can restore a certificate this point cannot carry. The
     # bound is untouched: it is a valid dual bound regardless of the incumbent.
-    # #1775 G6.2 (owner decision 2026-10-23): nor is it reported -- withdrawn,
-    # with its duals.
+    # Marked, not withdrawn here: ``Model.solve`` withdraws it unless the #1537
+    # repair turns it into one ``verify_point`` accepts (#1775 G6.2).
     if _integral_unverified:
+        if status == "optimal":
+            status = "feasible"
         _gap_certified = False
         _ext_stats = dict(_ext_stats or {})
         _ext_stats["nlpbb/integral_incumbent_unverified"] = 1.0
-        _ext_stats["nlpbb/incumbent_withdrawn"] = 1.0
-        status = _status_without_incumbent(wall_time, time_limit, stats["total_nodes"], max_nodes)
-        obj_val = None
-        x_dict = None
-        gap_val = None
-        constraint_duals = bound_duals_lower = bound_duals_upper = None
 
     return SolveResult(
         status=status,

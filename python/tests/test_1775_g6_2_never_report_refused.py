@@ -3,8 +3,12 @@
 Owner decision (2026-10-23). Before, a point that failed the exit gate even after
 the repair polish (#1916) was returned with its objective and ``x``, merely
 uncertified -- on GDPlib ``mod_hens`` such a point was 5.05e-5 outside a Pyomo
-row. It is now withdrawn on both routes: no ``x``, no objective, the status names
-the resource that ran out (``"unknown"`` if none did), and the dual bound stands.
+row. The routes still mark it and return it, and ``Model.solve`` withdraws it
+AFTER its #1537 repair, unless that repair produced a point ``verify_point``
+accepts. Withdrawing inside the route was tried first and was wrong: on #1836's
+robust row the tree's point is 5.7e-6 outside, the exit polish errors on the
+``max`` kink, and the #1537 repair lands on ``0.5 + sqrt(10)`` exactly -- an
+early withdrawal discarded that answer (``test_issue1836_ro_sign_monotone``).
 """
 
 from __future__ import annotations
@@ -83,19 +87,54 @@ def _refuse_at_exit(monkeypatch):
 
 @pytest.mark.parametrize(
     "build, stat",
-    [(_spatial_gdp, "spatial/incumbent_withdrawn"), (_convex_gdp, "nlpbb/incumbent_withdrawn")],
+    [
+        (_spatial_gdp, "spatial/exit_gate_refused"),
+        (_convex_gdp, "nlpbb/integral_incumbent_unverified"),
+    ],
 )
 def test_a_refused_incumbent_is_withdrawn(build, stat, monkeypatch):
+    """The repair is switched off, so nothing can verify the refused point."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         ok = build().solve(time_limit=30)
     assert ok.status == "optimal" and ok.x is not None  # the unforced control
     calls = _refuse_at_exit(monkeypatch)
+    monkeypatch.setenv("DISCOPT_INCUMBENT_REPAIR", "0")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         r = build().solve(time_limit=30)
     assert calls, "the exit gate never ran"
-    assert (r.solver_stats or {}).get(stat) == 1.0, r.solver_stats
+    stats = r.solver_stats or {}
+    assert stats.get(stat) == 1.0 and stats.get("certificate/incumbent_withdrawn") == 1.0, stats
     assert r.x is None and r.objective is None and r.gap is None
     assert r.status in ("unknown", "time_limit", "node_limit")
     assert not r.gap_certified
+
+
+def test_a_refused_point_the_repair_verifies_is_kept():
+    """#1836's robust row: refused by the spatial exit gate, repaired by #1537."""
+    from discopt.ro import BoxUncertaintySet, RobustCounterpart
+
+    m = dm.Model("even_var")
+    x = m.continuous("x", lb=0, ub=20)
+    p = m.parameter("p", value=1.0)
+    m.subject_to((x - p) ** 2 <= 10)
+    m.maximize(x)
+    RobustCounterpart(m, BoxUncertaintySet(p, delta=0.5)).formulate()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = m.solve()
+    stats = r.solver_stats or {}
+    if not stats.get("spatial/exit_gate_refused"):
+        pytest.skip("the route accepted its own point on this run; nothing to repair")
+    assert stats.get("certificate/incumbent_repaired") == 1.0, stats
+    assert "certificate/incumbent_withdrawn" not in stats
+    assert r.objective == pytest.approx(0.5 + np.sqrt(10.0), abs=1e-9)
+
+
+def test_withdraw_is_a_no_op_without_a_refusal():
+    from discopt.modeling.core import SolveResult, _withdraw_refused_incumbent
+
+    r = SolveResult(status="feasible", objective=1.0, x={"x": np.array(1.0)})
+    _withdraw_refused_incumbent(r, 10.0, None)
+    assert r.objective == 1.0 and r.x is not None
