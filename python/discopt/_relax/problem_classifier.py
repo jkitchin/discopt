@@ -90,10 +90,9 @@ def classify_problem(model: Model) -> ProblemClass:
         # handler answered for the AttributeError ``model_to_repr`` raises here.
         return ProblemClass.MINLP if has_integer else ProblemClass.NLP
     try:
-        from discopt._rust import model_to_repr
+        from discopt._repr_cache import readonly_model_repr
 
-        _builder = getattr(model, "_builder", None)
-        repr = model_to_repr(model, _builder)
+        repr = readonly_model_repr(model)  # only degree / quadratic-form queries
     except (ImportError, *_MODEL_TO_REPR_DECLINES) as exc:
         # Not merely an optimization: misrouting an LP/QP to the MINLP path is the
         # difference between the fast family and full spatial B&B, so a silent

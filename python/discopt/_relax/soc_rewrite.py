@@ -79,9 +79,30 @@ from .convexity.patterns import (
     _affine_lower_bound,
     _expr_struct_eq,
     _summed_vector_square_base,
+    _total_scalar_variables,
 )
 
 _LOG = logging.getLogger(__name__)
+
+#: Deterministic work allowance for one pass over a model (#1456: this runs
+#: before branch and bound arms ``time_limit``). Units: one per expression node
+#: the scan visits, plus, for a candidate cone, ``n_total`` per dense affine
+#: extraction (its ``t``) and the row's term count per curvature unit charged to
+#: its classification. Exhausting it stops the scan; the rows already rewritten
+#: are kept, which stays exact because each row's rewrite is independent of the
+#: others. A 5000-term cone over 5001 variables spends 6.0e4 units (measured), so the cap
+#: leaves the scan of models orders of magnitude larger than any in-repo instance.
+_SOC_SCAN_WORK_BUDGET = 5_000_000
+
+
+class _ScanExhausted(Exception):
+    """The pass spent :data:`_SOC_SCAN_WORK_BUDGET`. Private: raised by
+    :func:`_sum_terms` / :func:`_charge` and caught only by the pass driver."""
+
+
+def _charge(work: Any, units: int) -> None:
+    if work is not None and not work.spend(units):
+        raise _ScanExhausted
 
 
 def _split_const_factors(expr: Expression) -> tuple[float, Optional[Expression]]:
@@ -132,7 +153,9 @@ def _square_base(core: Expression) -> Optional[Expression]:
     return None
 
 
-def _sum_terms(expr: Expression, sign: float) -> Iterator[tuple[float, Expression]]:
+def _sum_terms(
+    expr: Expression, sign: float, work: Any = None
+) -> Iterator[tuple[float, Expression]]:
     """``(scale, term)`` over the ``+``/``-``/``neg``/n-ary-sum tree at ``expr``.
 
     The same reading as :func:`~discopt._relax.convexity.patterns._flatten_sum_terms`,
@@ -143,6 +166,7 @@ def _sum_terms(expr: Expression, sign: float) -> Iterator[tuple[float, Expressio
     stack = [(expr, sign)]
     while stack:
         node, scale = stack.pop()
+        _charge(work, 1)
         if isinstance(node, BinaryOp) and node.op in ("+", "-"):
             stack.append((node.right, scale if node.op == "+" else -scale))
             stack.append((node.left, scale))
@@ -192,7 +216,7 @@ class SquaredSocRow:
 
 
 def _squared_soc_row(
-    c: Constraint, model: Model
+    c: Constraint, model: Model, work: Any = None
 ) -> Optional[tuple[Constraint, float, float, Expression]]:
     """``(row, sign, sqrt_k, t)`` for the norm form of ``c``, or ``None``."""
     if c.sense == "<=":
@@ -204,7 +228,7 @@ def _squared_soc_row(
     positive: list[tuple[float, Expression]] = []
     const = 0.0
     neg: Optional[tuple[float, Expression]] = None
-    for scale, term in _sum_terms(c.body, sign):
+    for scale, term in _sum_terms(c.body, sign, work):
         k, core = _split_const_factors(term)
         w = scale * k
         if core is None:
@@ -223,6 +247,7 @@ def _squared_soc_row(
             return None
         if getattr(base, "shape", None) != () or _contains_parameter(base):
             return None
+        _charge(work, _total_scalar_variables(model))  # dense affine extraction
         lb = _affine_lower_bound(base, model)
         if lb is None or lb < 0.0:
             return None
@@ -242,6 +267,21 @@ def _squared_soc_row(
     rhs: Expression = t if k == 1.0 else sqrt_k * t
     row = Constraint(body=FunctionCall("sqrt", q) - rhs, sense="<=", rhs=0.0, name=c.name)
     return row, sign, sqrt_k, t
+
+
+def _term_count(body: Expression) -> int:
+    """Terms of the rewritten row: the ``sqrt`` argument's summands, plus ``t``."""
+    count = 1
+    stack = [body]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, BinaryOp) and node.op in ("+", "-"):
+            stack.extend((node.left, node.right))
+        elif isinstance(node, FunctionCall):
+            stack.extend(node.args)
+        else:
+            count += 1
+    return count
 
 
 def rewrite_squared_soc_rows(model: Model) -> tuple[Model, list[SquaredSocRow]]:
@@ -268,22 +308,32 @@ def rewrite_squared_soc_rows(model: Model) -> tuple[Model, list[SquaredSocRow]]:
 
 def _rewrite_squared_soc_rows_inner(model: Model) -> tuple[Model, list[SquaredSocRow]]:
     from .convexity import classify_constraint
-    from .convexity.patterns import _total_scalar_variables
+    from .objective_epigraph import WorkCounter
     from .problem_classifier import _extract_linear_coefficients
 
     new_constraints: Optional[list] = None
     rows: list[SquaredSocRow] = []
     cache: dict = {}
-    n_total = None
+    n_total = _total_scalar_variables(model)
+    work = WorkCounter(_SOC_SCAN_WORK_BUDGET)
     for i, c in enumerate(model._constraints):
         if not isinstance(c, Constraint):
             continue
-        found = _squared_soc_row(c, model)
-        if found is None:
-            continue
-        new, sign, sqrt_k, t = found
-        if n_total is None:
-            n_total = _total_scalar_variables(model)
+        try:
+            found = _squared_soc_row(c, model, work)
+            if found is None:
+                continue
+            new, sign, sqrt_k, t = found
+            # The ``t`` extraction below, then the classification walk.
+            _charge(work, n_total)
+            _charge(work, 8 * _term_count(new.body))
+        except _ScanExhausted:
+            _LOG.debug(
+                "squared-SOC scan stopped at row %d of %d: work budget spent",
+                i,
+                len(model._constraints),
+            )
+            break
         # ``t`` passed ``_affine_lower_bound``, which ran this same extraction.
         coeffs, t_const = _extract_linear_coefficients(t, model, n_total)
         if not np.any(np.asarray(coeffs) != 0.0):

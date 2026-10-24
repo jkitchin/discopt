@@ -230,6 +230,11 @@ def _canonical(aff: _Aff) -> Expression:
     return terms[0] if len(terms) == 1 else SumOverExpression(terms)
 
 
+#: Stands in for the rebuilt node of an affine subtree, which is never used: an
+#: affine child is always emitted as ``_canonical(aff)``.
+_AFFINE_ONLY: Any = object()
+
+
 class _Rewriter:
     """``x -> z + c`` substitution with every scalar affine subtree folded."""
 
@@ -292,18 +297,24 @@ class _Rewriter:
                     return leaf, None
                 return leaf + Constant(np.asarray(ck, dtype=np.float64)), None
             return IndexExpression(self(expr.base), expr.index), None
+        # An affine node is only ever emitted as ``_canonical(aff)`` (``_emit``), so
+        # its rebuilt node is not built (#1929 follow-up): building it emitted --
+        # canonicalised -- both children, so a sum chain of n terms canonicalised
+        # every prefix, O(n^2) nodes (48.7 s of a 60 s limit on gams04, 4.1M
+        # products for 122k nonzeros). ``_AFFINE_ONLY`` marks such a node.
         if isinstance(expr, UnaryOp):
             child, caff = self._rw(expr.operand)
-            node = UnaryOp(expr.op, self._emit(child, caff))
             if expr.op == "neg" and caff is not None:
                 coefs, const, leaves = caff
-                return node, ({k: -a for k, a in coefs.items()}, -const, leaves)
-            return node, None
+                return _AFFINE_ONLY, ({k: -a for k, a in coefs.items()}, -const, leaves)
+            return UnaryOp(expr.op, self._emit(child, caff)), None
         if isinstance(expr, BinaryOp):
             left, laff = self._rw(expr.left)
             right, raff = self._rw(expr.right)
-            node = BinaryOp(expr.op, self._emit(left, laff), self._emit(right, raff))
-            return node, _combine(expr.op, laff, raff)
+            aff = _combine(expr.op, laff, raff)
+            if aff is not None:
+                return _AFFINE_ONLY, aff
+            return BinaryOp(expr.op, self._emit(left, laff), self._emit(right, raff)), None
         if type(expr) is FunctionCall:
             return FunctionCall(expr.func_name, *(self(a) for a in expr.args)), None
         if isinstance(expr, MatMulExpression):
@@ -312,13 +323,12 @@ class _Rewriter:
             return SumExpression(self(expr.operand), axis=expr.axis), None
         if isinstance(expr, SumOverExpression):
             parts = [self._rw(t) for t in expr.terms]
-            node = SumOverExpression([self._emit(n, a) for n, a in parts])
             if all(a is not None for _, a in parts):
                 acc: _Aff = ({}, 0.0, {})
                 for _, a in parts:
                     acc = _combine("+", acc, a)  # type: ignore[assignment]
-                return node, acc
-            return node, None
+                return _AFFINE_ONLY, acc
+            return SumOverExpression([self._emit(n, a) for n, a in parts]), None
         raise RecentreUnsupported(f"no rewrite rule for {type(expr).__name__}")
 
     def _emit(self, node: Expression, aff: Optional[_Aff]) -> Expression:
@@ -326,7 +336,7 @@ class _Rewriter:
 
         The same source node always emits the same object (``self.emitted``), so
         the rewrite preserves the DAG's sharing."""
-        if aff is None or _is_leaf(node):
+        if aff is None or (node is not _AFFINE_ONLY and _is_leaf(node)):
             return node
         out = self.emitted.get(id(aff))
         if out is None:

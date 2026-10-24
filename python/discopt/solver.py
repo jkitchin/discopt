@@ -7217,8 +7217,8 @@ def _objective_at_reported_point(
     x = np.asarray(x, dtype=np.float64)
     value = float(np.asarray(c, dtype=np.float64) @ x) + float(obj_const)
     if Q is not None:
-        Q_arr = np.asarray(Q, dtype=np.float64)
-        value += 0.5 * float(x @ Q_arr @ x)
+        Q_arr = _matrix_operand(Q)
+        value += 0.5 * float(x @ (Q_arr @ x))
     return value
 
 
@@ -8534,9 +8534,9 @@ def _check_model_scaling(model: Model) -> None:
         return
 
     try:
-        from discopt._rust import model_to_repr
+        from discopt._repr_cache import readonly_model_repr
 
-        repr_ = model_to_repr(model, getattr(model, "_builder", None))
+        repr_ = readonly_model_repr(model)  # scaling_diagnostics() only reads
         diag = repr_.scaling_diagnostics()
     except Exception as exc:  # pragma: no cover - diagnostic must never break a solve
         # Not a swallowed error in an *instrument* (CLAUDE.md §7): this is a
@@ -8663,6 +8663,8 @@ def _expression_contains_custom_call(root) -> bool:
 
 def _model_custom_calls(model: Model):
     """Yield every ``CustomCall`` in *model*'s objective and constraint bodies."""
+    if CustomCall._instances_created == 0:
+        return  # none exists anywhere, so none is in this model (exact)
     obj = getattr(model, "_objective", None)
     if obj is not None:
         yield from _iter_custom_calls(getattr(obj, "expression", None))
@@ -8754,6 +8756,8 @@ def _model_contains_custom_call(model: Model) -> bool:
     about. The solver uses this to force the local NLP path and to refuse global
     branch-and-bound (see ``solve_model``). See issue #27b.
     """
+    if CustomCall._instances_created == 0:
+        return False  # none exists anywhere, so none is in this model (exact)
     obj = getattr(model, "_objective", None)
     if obj is not None and _expression_contains_custom_call(getattr(obj, "expression", None)):
         return True
@@ -8920,7 +8924,12 @@ def _model_contains_nonsmooth_node(model: Model) -> bool:
 
 
 def _convexity_rewrites(
-    model: Model, *, entropy: bool = True, soc: bool = True, epigraph: bool = True
+    model: Model,
+    *,
+    entropy: bool = True,
+    soc: bool = True,
+    epigraph: bool = True,
+    entropy_deadline: Optional[Callable[[], bool]] = None,
 ) -> tuple[Model, tuple[str, ...]]:
     """Apply the exact rewrites ``solve_model`` runs before classifying convexity.
 
@@ -8945,7 +8954,7 @@ def _convexity_rewrites(
     if entropy:
         from discopt._relax.factorable_reform import canonicalize_entropy
 
-        new = canonicalize_entropy(model)
+        new = canonicalize_entropy(model, entropy_deadline)
         if new is not model:
             applied.append("entropy")
             model = new
@@ -11728,6 +11737,10 @@ def _scoped_deep_recursion(fn: _F) -> _F:
 
         # #1520: no ``except``. The count is iterative with no failure mode; the old
         # ``depth = 0`` fallback ran a deep model on the small default stack.
+        # The count walks every body before ``solve_model`` anchors its clock.
+        # ``Model.solve`` sizes the model first and charges that walk to the
+        # caller's budget; the count is memoised by body identity, so this call is
+        # then a cache hit (``telecomsp_nor_sun``: ~9 s -> ~16 ms).
         depth = _max_expr_node_count(model)
         if depth <= _DEEP_SOLVE_DEPTH_GATE:
             return fn(model, *args, **kwargs)
@@ -13215,6 +13228,56 @@ def solve_model(
         """
         return _remaining_budget() <= floor
 
+    from discopt._relax.presolve_deadline import presolve_deadline_enabled
+
+    _spent_checkpoints_on = presolve_deadline_enabled()
+
+    def _budget_spent_result(phase: str) -> Optional[SolveResult]:
+        """A ``time_limit`` result when the whole budget is already GONE at the
+        entry of a mandatory pre-search *phase*, else ``None``.
+
+        ``_deadline_exhausted`` gates the optional passes; the mandatory ones --
+        scaling diagnostics, routing, problem classification, convexity
+        classification -- had no gate at all, so on a large model each whole-model
+        walk ran to completion after the deadline and the overruns added up: in
+        the 60 s large-instance sweep ``telecomsp_nor_sun`` was still classifying
+        at 135 s and ``parabol5_2_4`` returned at 115 s. Nothing past this point can
+        produce a result inside a budget that is already spent, so returning here
+        reports exactly what the late arm before the search build reports when it
+        has no time left -- no incumbent, no bound -- without the walks.
+
+        Sound by construction: no incumbent exists yet at any call site (every
+        earlier path that finds one returns it), and an absent bound claims
+        nothing. ``DISCOPT_PRESOLVE_DEADLINE=0`` turns these checkpoints off with
+        the rest of the pre-solve deadline (an A/B lever, not a mode).
+        """
+        if not _spent_checkpoints_on or _remaining_budget() > 0.0:
+            return None
+        # Only the default path: an explicitly chosen backend (``solver="gurobi"``,
+        # ``"mip-nlp"``, ...) applies its own time-limit contract and reports its
+        # own diagnostics, e.g. the MIP-NLP trace at ``time_limit=0``. ``_solver``
+        # is read at call time; every checkpoint runs after it is assigned.
+        if _solver not in (None, "bb"):
+            return None
+        logger.info("time_limit spent before %s; returning time_limit with no search", phase)
+        wall = time.perf_counter() - _solve_t0
+        from discopt import debug as _debug_spent
+
+        _debug_spent.fire(
+            _debug_spent.Checkpoint.TERMINATED,
+            model=model,
+            iteration=0,
+            elapsed=wall,
+            error="time_limit",
+        )
+        return SolveResult(
+            status="time_limit",
+            wall_time=wall,
+            node_count=0,
+            python_time=wall,
+            bound_valid=False,
+        )
+
     # --- #1385: a model with no columns is decided here, not by a backend ---
     trivial = _constant_objective_result(model, _solve_t0)
     if trivial is not None:
@@ -13750,6 +13813,9 @@ def solve_model(
         model, deadline=_role2_deadline(time.perf_counter() + _nbt_budget_s)
     )
     _check_finite_bounds(model, _declared_tightening)
+    _spent = _budget_spent_result("the scaling diagnostics")
+    if _spent is not None:
+        return _spent
     # Same block, same reason (#1059): scaling is a property of the declared
     # model, so it is reported once here rather than by whichever family runs.
     _check_model_scaling(model)
@@ -13864,6 +13930,9 @@ def solve_model(
                 + ")"
             )
         else:
+            _spent = _budget_spent_result("the convex-MINLP auto-route")
+            if _spent is not None:
+                return _spent
             (
                 _auto_route_method,
                 _auto_route_reason,
@@ -14984,6 +15053,9 @@ def solve_model(
     # linear model nonlinear or the reverse.
     from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
+    _spent = _budget_spent_result("problem classification")
+    if _spent is not None:
+        return _spent
     _already_linear = classify_problem(model) in (ProblemClass.LP, ProblemClass.MILP)
 
     model, _rewrites = _convexity_rewrites(
@@ -14993,6 +15065,7 @@ def solve_model(
         # kept in ``_convexity_rewrites`` for ``Model.convexity()``.
         soc=False,
         epigraph=not _has_bb_callbacks,
+        entropy_deadline=_presolve_deadline.abandon_hook("canonicalize_entropy"),
     )
     if "objective_epigraph" in _rewrites:
         logger.debug("relaxed objective-defining equality to binding inequality")
@@ -15372,9 +15445,15 @@ def solve_model(
         )
         from discopt.transformations import get as _get_transformation
 
-        if has_integer_multilinear_reformulation_work(model):
+        # #1456 item 2: entry gate plus the in-pass hook, as for the factorable
+        # pass -- on expiry the detector says "none" and the rewrite returns the
+        # model unchanged, the two outcomes this block already handles.
+        _iml_expired = _presolve_deadline.abandon_hook("integer_multilinear")
+        if _presolve_deadline.afford(
+            "integer_multilinear"
+        ) and has_integer_multilinear_reformulation_work(model, deadline=_iml_expired):
             _iml_n0 = sum(v.size for v in model._variables)
-            _iml = _get_transformation("integer.multilinear").apply(model)
+            _iml = _get_transformation("integer.multilinear").apply(model, deadline=_iml_expired)
             if _iml is not model:
                 from discopt._relax.problem_classifier import ProblemClass, classify_problem
                 from discopt._relax.term_classifier import classify_nonlinear_terms
@@ -15553,13 +15632,16 @@ def solve_model(
     # the MIQP-batch certification path). This witness is far cheaper than a
     # full convexity classification (~6s on ex1263), so the common path and
     # the reformulated path both stay fast.
+    # #1456 item 2: the entry gate alone left this pass unbounded once started
+    # (telecomsp_nor_sun at time_limit=300: still rewriting at 360 s).
+    _ipx_expired = _presolve_deadline.abandon_hook("integer_bilinear")
     if (
         not _did_multilinear_reform
         and not _already_linear
         and _presolve_deadline.afford("integer_bilinear")
-        and has_nonconvex_integer_bilinear(model)
+        and has_nonconvex_integer_bilinear(model, deadline=_ipx_expired)
     ):
-        _ipx = _get_transformation("integer.bilinear").apply(model)
+        _ipx = _get_transformation("integer.bilinear").apply(model, deadline=_ipx_expired)
         # Adopt the reformulation ONLY when it eliminates *all* nonlinearity,
         # i.e. yields an equivalent pure MILP. If other nonlinear terms remain
         # (e.g. the transcendentals in gear), the model would still go through
@@ -15762,6 +15844,12 @@ def solve_model(
 
     # --- Build Rust model representation for FBBT ---
     global _IN_TREE_PRESOLVE_GLOBAL_CALLS, _IN_TREE_PRESOLVE_NLPBB_CALLS, _IN_TREE_ARRAY_ROW_CALLS
+    # Everything this repr feeds (FBBT, root presolve, the search) is skipped or
+    # returns ``time_limit`` once the budget is gone, and the build itself is
+    # ~14 s on ``telecomsp_nor_sun`` -- measured starting 6 s past a 300 s limit.
+    _spent = _budget_spent_result("the Rust model build")
+    if _spent is not None:
+        return _spent
     _IN_TREE_PRESOLVE_GLOBAL_CALLS = 0  # PF1 telemetry reset (issue #632)
     _IN_TREE_PRESOLVE_NLPBB_CALLS = 0  # #1513
     _IN_TREE_PRESOLVE_SKIPPED.clear()  # #1513
@@ -15813,6 +15901,9 @@ def solve_model(
     # -7.0 with nothing to branch on. So ``presolve_requested`` is kept separate:
     # the HiGHS skip must not disable coefficient tightening, while a *user's*
     # ``presolve=False`` still does.
+    _spent = _budget_spent_result("the pure LP/MILP routing test")
+    if _spent is not None:
+        return _spent
     presolve_requested = presolve
     if presolve and _highs_takes_pure_lp_milp(
         model,
@@ -16112,6 +16203,9 @@ def solve_model(
     # for an LP (#1712); nothing between the two reads or changes the model.
     from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
+    _spent = _budget_spent_result("dispatch classification")
+    if _spent is not None:
+        return _spent
     problem_class = classify_problem(model)
 
     _pure_continuous = _is_pure_continuous(model)
@@ -16919,6 +17013,9 @@ def solve_model(
                 abs_gap_tol=abs_gap_tol,
             )
 
+    _spent = _budget_spent_result("root FBBT")
+    if _spent is not None:
+        return _spent
     # --- Extract variable info ---
     n_vars, lb, ub, int_offsets, int_sizes = _extract_variable_info(model)
 
@@ -28360,6 +28457,9 @@ def _solve_batch_pounce(
     if not caller_limit or caller_limit <= 0:
         caller_limit = 30.0
     batch_opts["max_wall_time"] = min(30.0, caller_limit)
+    # The caller's ``max_wall_time`` is what is left of its budget; the whole
+    # wave, not each instance, must end by then.
+    _batch_deadline = time.perf_counter() + caller_limit
 
     # Multistart only helps escape weak local minima on nonconvex nodes.
     do_multistart = bool(multistart) and not convex
@@ -28484,10 +28584,12 @@ def _solve_batch_pounce(
                 f"POUNCE node waves need OS threads; {sys.platform} cannot start one"
             )
         with _timing.charge("pounce"):
-            results = pounce.solve_nlp_batch(
+            results = _solve_nlp_batch_by_deadline(
+                pounce.solve_nlp_batch,
                 problems,
-                x0s=x0s,
-                options=batch_opts,
+                x0s,
+                batch_opts,
+                _batch_deadline,
                 share_structure=True,
             )
     except Exception as e:
@@ -30875,6 +30977,32 @@ def _feas_matrix(A):
     return np.asarray(A, dtype=np.float64)
 
 
+def _matrix_operand(M):
+    """``M`` as a matrix-product operand: a scipy sparse matrix stays sparse (CSR,
+    ``float64``); anything else becomes ``np.asarray(M, dtype=float64)`` -- what
+    these call sites always did with it.
+
+    ``np.asarray`` on a sparse matrix does not raise: it returns a 0-d object
+    array wrapping it (CLAUDE.md), so a sparse block that reached one of those
+    calls would have been silently wrong. The MIQP node loop keeps the blocks of a
+    sparse-extracted model sparse (#1928 follow-up), so every consumer goes
+    through this.
+    """
+    if _sp_issparse(M):
+        return M.tocsr().astype(np.float64, copy=False)
+    return np.asarray(M, dtype=np.float64)
+
+
+def _matrix_abs(M):
+    """Entrywise ``|M|`` for a dense or sparse operand (``np.abs`` on dense)."""
+    return abs(M) if _sp_issparse(M) else np.abs(M)
+
+
+def _matrix_rows(M) -> int:
+    """Row count of a dense or sparse 2-D operand (0 for ``None``)."""
+    return 0 if M is None else int(M.shape[0]) if _sp_issparse(M) else int(np.asarray(M).shape[0])
+
+
 def _matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, bounds, tol=1e-6, rtol=1e-9) -> bool:
     """Check a matrix-form LP/QP solution against its own constraints.
 
@@ -31090,11 +31218,11 @@ def _matrix_solution_violations(x, A_ub, b_ub, A_eq, b_eq, bounds) -> str:
     x = np.asarray(x, dtype=np.float64)
     parts: list[str] = []
     if A_ub is not None and b_ub is not None and len(b_ub):
-        v = np.asarray(A_ub, dtype=np.float64) @ x - np.asarray(b_ub, dtype=np.float64)
+        v = _matrix_operand(A_ub) @ x - np.asarray(b_ub, dtype=np.float64)
         if v.size and float(np.max(v)) > 0.0:
             parts.append(f"A_ub row {int(np.argmax(v))} by {float(np.max(v)):.6e}")
     if A_eq is not None and b_eq is not None and len(b_eq):
-        v = np.abs(np.asarray(A_eq, dtype=np.float64) @ x - np.asarray(b_eq, dtype=np.float64))
+        v = np.abs(_matrix_operand(A_eq) @ x - np.asarray(b_eq, dtype=np.float64))
         if v.size and float(np.max(v)) > 0.0:
             parts.append(f"A_eq row {int(np.argmax(v))} by {float(np.max(v)):.6e}")
     if bounds is not None:
@@ -32453,14 +32581,15 @@ def _convex_qp_node_lower_bound(
     hi = np.where(hi >= _CONSTRAINT_INF, np.inf, hi)
     if not np.all(np.isfinite(x)):
         return float(-np.inf)
-    Pm = np.zeros((n, n)) if P is None else np.asarray(P, dtype=np.float64)  # noqa: N806
+    Pm = np.zeros((n, n)) if P is None else _matrix_operand(P)  # noqa: N806
     cv = np.asarray(c, dtype=np.float64)
     Px = Pm @ x  # noqa: N806
     f = 0.5 * float(x @ Px) + float(cv @ x) + float(obj_const)
     ax = np.abs(x)
-    mag = float(ax @ (np.abs(Pm) @ ax)) + float(np.abs(cv) @ ax) + abs(float(obj_const))
-    has_G = G is not None and np.asarray(G).size > 0  # noqa: N806
-    has_A = A is not None and np.asarray(A).size > 0  # noqa: N806
+    absP = _matrix_abs(Pm)  # noqa: N806
+    mag = float(ax @ (absP @ ax)) + float(np.abs(cv) @ ax) + abs(float(obj_const))
+    has_G = G is not None and _matrix_rows(G) > 0 and G.shape[1] > 0  # noqa: N806
+    has_A = A is not None and _matrix_rows(A) > 0 and A.shape[1] > 0  # noqa: N806
     # One rounding unit of everything summed: the error that dominates here is the
     # final cancellation of the expanded terms against ``obj_const`` (each term
     # carries half an ulp), not the short inner products. Under ``x = y - 1e6`` the
@@ -32474,8 +32603,9 @@ def _convex_qp_node_lower_bound(
     # Lagrangian has the same Hessian. Minimised per coordinate over the box this
     # is tight to ~g_j^2 / (2 D_j) at an IPM point and finite even on an open side
     # -- a purely linear tangent pays |g_j| x (box width) instead.
-    absP = np.abs(Pm)  # noqa: N806
-    D = np.maximum(0.0, np.diag(Pm) - (absP.sum(axis=1) - np.abs(np.diag(Pm))))  # noqa: N806
+    diagP = Pm.diagonal() if _sp_issparse(Pm) else np.diag(Pm)  # noqa: N806
+    rowsum = np.asarray(absP.sum(axis=1), dtype=np.float64).ravel()
+    D = np.maximum(0.0, diagP - (rowsum - np.abs(diagP)))  # noqa: N806
 
     def _box_term(g: np.ndarray) -> tuple[float, float]:
         if not np.all(np.isfinite(g)):
@@ -32508,17 +32638,17 @@ def _convex_qp_node_lower_bound(
     if y is not None or z is not None:
         val, g, m2 = f, Px + cv, mag
         if has_G and z is not None and np.asarray(z).size:
-            Gm, hv = np.asarray(G, dtype=np.float64), np.asarray(h, dtype=np.float64)  # noqa: N806
+            Gm, hv = _matrix_operand(G), np.asarray(h, dtype=np.float64)  # noqa: N806
             zv = np.maximum(np.asarray(z, dtype=np.float64), 0.0)
             val += float(zv @ (Gm @ x - hv))
             g = g + Gm.T @ zv
-            m2 += float(zv @ (np.abs(Gm) @ ax + np.abs(hv)))
+            m2 += float(zv @ (_matrix_abs(Gm) @ ax + np.abs(hv)))
         if has_A and y is not None and np.asarray(y).size:
-            Am, bv = np.asarray(A, dtype=np.float64), np.asarray(b, dtype=np.float64)  # noqa: N806
+            Am, bv = _matrix_operand(A), np.asarray(b, dtype=np.float64)  # noqa: N806
             yv = np.asarray(y, dtype=np.float64)
             val += float(yv @ (Am @ x - bv))
             g = g + Am.T @ yv
-            m2 += float(np.abs(yv) @ (np.abs(Am) @ ax + np.abs(bv)))
+            m2 += float(np.abs(yv) @ (_matrix_abs(Am) @ ax + np.abs(bv)))
         t, m3 = _box_term(g)
         closed = -np.inf
         if np.isfinite(t) and np.isfinite(val):
@@ -32546,9 +32676,9 @@ def _convex_qp_node_lower_bound(
     g0 = Px + cv
     res = _highs_solve_lp(
         g0,
-        A_ub=np.asarray(G, dtype=np.float64) if has_G else None,
+        A_ub=_matrix_operand(G) if has_G else None,
         b_ub=np.asarray(h, dtype=np.float64) if has_G else None,
-        A_eq=np.asarray(A, dtype=np.float64) if has_A else None,
+        A_eq=_matrix_operand(A) if has_A else None,
         b_eq=np.asarray(b, dtype=np.float64) if has_A else None,
         bounds=list(zip(np.asarray(node_lb, float).tolist(), np.asarray(node_ub, float).tolist())),
     )
@@ -32594,10 +32724,10 @@ def _linear_node_verified_empty(A_ub, b_ub, A_eq, b_eq, node_lb, node_ub) -> boo
         ub0 = np.asarray(node_ub, dtype=np.float64)
         res0 = _simplex_solve_lp(
             np.zeros(lb.shape[0]),
-            A_ub=None if A_ub is None or np.asarray(A_ub).shape[0] == 0 else A_ub,
-            b_ub=None if A_ub is None or np.asarray(A_ub).shape[0] == 0 else b_ub,
-            A_eq=None if A_eq is None or np.asarray(A_eq).shape[0] == 0 else A_eq,
-            b_eq=None if A_eq is None or np.asarray(A_eq).shape[0] == 0 else b_eq,
+            A_ub=None if _matrix_rows(A_ub) == 0 else A_ub,
+            b_ub=None if _matrix_rows(A_ub) == 0 else b_ub,
+            A_eq=None if _matrix_rows(A_eq) == 0 else A_eq,
+            b_eq=None if _matrix_rows(A_eq) == 0 else b_eq,
             bounds=list(zip(lb.tolist(), ub0.tolist())),
         )
         return bool(res0.status == SolveStatus.INFEASIBLE)
@@ -32606,10 +32736,10 @@ def _linear_node_verified_empty(A_ub, b_ub, A_eq, b_eq, node_lb, node_ub) -> boo
     ub = np.asarray(node_ub, dtype=np.float64)
     res = _highs_solve_lp(
         np.zeros(lb.shape[0]),
-        A_ub=None if A_ub is None or np.asarray(A_ub).shape[0] == 0 else A_ub,
-        b_ub=None if A_ub is None or np.asarray(A_ub).shape[0] == 0 else b_ub,
-        A_eq=None if A_eq is None or np.asarray(A_eq).shape[0] == 0 else A_eq,
-        b_eq=None if A_eq is None or np.asarray(A_eq).shape[0] == 0 else b_eq,
+        A_ub=None if _matrix_rows(A_ub) == 0 else A_ub,
+        b_ub=None if _matrix_rows(A_ub) == 0 else b_ub,
+        A_eq=None if _matrix_rows(A_eq) == 0 else A_eq,
+        b_eq=None if _matrix_rows(A_eq) == 0 else b_eq,
         bounds=list(zip(lb.tolist(), ub.tolist())),
     )
     return bool(res.status == SolveStatus.INFEASIBLE)
@@ -32709,13 +32839,13 @@ def _structured_node_recovery(
     lb_n, ub_n = _snap_inverted_bounds(
         np.asarray(node_lb, dtype=np.float64), np.asarray(node_ub, dtype=np.float64)
     )
-    A_ub_m = None if A_ub is None else np.asarray(A_ub, dtype=np.float64)
+    A_ub_m = None if A_ub is None else _matrix_operand(A_ub)
     b_ub_m = None if b_ub is None else np.asarray(b_ub, dtype=np.float64)
-    A_eq_m = None if A_eq is None else np.asarray(A_eq, dtype=np.float64)
+    A_eq_m = None if A_eq is None else _matrix_operand(A_eq)
     b_eq_m = None if b_eq is None else np.asarray(b_eq, dtype=np.float64)
     try:
         res = pounce.solve_qp(
-            P=None if Q is None else np.asarray(Q, dtype=np.float64),
+            P=None if Q is None else _matrix_operand(Q),
             c=np.asarray(c, dtype=np.float64),
             G=A_ub_m,
             h=b_ub_m,
@@ -32748,7 +32878,7 @@ def _structured_node_recovery(
     ):
         return None
     bound = _convex_qp_node_lower_bound(
-        None if Q is None else np.asarray(Q, dtype=np.float64),
+        None if Q is None else _matrix_operand(Q),
         c,
         obj_const,
         A_ub_m,
@@ -32961,26 +33091,40 @@ def _miqp_origin_shift(qp_data, lb: np.ndarray, ub: np.ndarray, n_orig: int, mod
         return None
     sS = s[S]
 
-    Q = _dense_Q(qp_data.Q)
+    import scipy.sparse as _sp
+
+    # #1928 follow-up: only the shifted columns are read, so a sparse ``Q`` /
+    # ``A_eq`` is sliced to them instead of densified whole (the full ``A_eq`` was
+    # 15,690 x 20,072 on unitcommit_50_20_2_mod_8). Same values either way.
     c = np.asarray(qp_data.c, dtype=np.float64)
-    A = _dense_A(qp_data.A_eq)
     b = np.asarray(qp_data.b_eq, dtype=np.float64)
+    if _sp.issparse(qp_data.Q):
+        Qc = _sp.csc_matrix(qp_data.Q, dtype=np.float64)
+        QS = Qc[:, S].toarray()
+        QSS = Qc[S, :][:, S].toarray()
+    else:
+        Q = _dense_Q(qp_data.Q)
+        QS = Q[:, S]
+        QSS = Q[np.ix_(S, S)]
+    if _sp.issparse(qp_data.A_eq):
+        A_csc = _sp.csc_matrix(qp_data.A_eq, dtype=np.float64)
+        AS = A_csc[:, S].toarray() if A_csc.shape[0] > 0 else None
+    else:
+        A = _dense_A(qp_data.A_eq)
+        AS = A[:, S] if A.ndim == 2 and A.shape[0] > 0 else None
 
     c_new = c.copy()
-    QS = Q[:, S]
     for i in np.flatnonzero(np.any(QS != 0.0, axis=1)):
         p, e = _two_product(QS[i], sS)
         c_new[i] = _exact_sum([c[i]], p, e)
 
     b_new = b.copy()
-    if A.ndim == 2 and A.shape[0] > 0:
-        AS = A[:, S]
+    if AS is not None:
         for i in np.flatnonzero(np.any(AS != 0.0, axis=1)):
             p, e = _two_product(AS[i], sS)
             b_new[i] = _exact_sum([b[i]], -p, -e)
 
     pc, ec = _two_product(c[S], sS)
-    QSS = Q[np.ix_(S, S)]
     ii, jj = np.nonzero(QSS)
     p1, e1 = _two_product(0.5 * QSS[ii, jj], sS[ii])
     p2, e2 = _two_product(p1, sS[jj])
@@ -33049,17 +33193,32 @@ def _slack_reconstruction(S: np.ndarray):
     :data:`_SLACK_PINV_MAX_DIM`; above it this returns ``None`` (the caller then
     solves the wave serially, as on any wave failure).
     """
-    nz = S != 0.0
-    col_counts = nz.sum(axis=0)
+    import scipy.sparse as _sp
+
     if S.shape[1] == 0:
         return lambda rhs: np.zeros(0, dtype=np.float64)
-    if int(col_counts.max()) <= 1:
+    if _sp.issparse(S):
+        # The same test on the stored pattern (explicit zeros dropped first, as
+        # ``S != 0`` drops them on the dense block), without densifying ``S``.
+        Sc = _sp.csc_matrix(S, dtype=np.float64)
+        Sc.eliminate_zeros()
+        col_counts = np.diff(Sc.indptr)
+        rows = np.zeros(Sc.shape[1], dtype=np.intp)
+        vals = np.zeros(Sc.shape[1], dtype=np.float64)
+        has = col_counts == 1
+        rows[has] = Sc.indices[Sc.indptr[:-1][has]]
+        vals[has] = Sc.data[Sc.indptr[:-1][has]]
+    else:
+        nz = S != 0.0
+        col_counts = nz.sum(axis=0)
         rows = np.argmax(nz, axis=0)
+        vals = None
+    if int(col_counts.max()) <= 1:
         used = col_counts == 1
         if np.unique(rows[used]).size == int(used.sum()):
             cols = np.flatnonzero(used)
             r_used = rows[used]
-            s_used = S[r_used, cols]
+            s_used = vals[used] if vals is not None else S[r_used, cols]
 
             def _apply(rhs: np.ndarray) -> np.ndarray:
                 z = np.zeros(S.shape[1], dtype=np.float64)
@@ -33069,11 +33228,154 @@ def _slack_reconstruction(S: np.ndarray):
             return _apply
     if min(S.shape) > _SLACK_PINV_MAX_DIM:
         return None
-    S_pinv = np.linalg.pinv(S)
+    S_pinv = np.linalg.pinv(S.toarray() if _sp.issparse(S) else S)
     return lambda rhs: S_pinv @ rhs
 
 
-def _pounce_qp_relaxation_nodes(qp_data, batch_lb, batch_ub, n_orig, t_start, time_limit):
+def _qp_batch_pool_width() -> int:
+    """Instances one ``pounce.solve_qp_batch`` call runs side by side: rayon's
+    global pool, ``RAYON_NUM_THREADS`` or the CPU count."""
+    env = os.environ.get("RAYON_NUM_THREADS", "").strip()
+    if env.isdigit() and int(env) > 0:
+        return int(env)
+    return max(1, os.cpu_count() or 1)
+
+
+def _solve_qp_batch_by_deadline(solve_qp_batch, problems: list, deadline: float) -> list:
+    """``solve_qp_batch(problems)`` in pool-width chunks that all end by ``deadline``.
+
+    Each chunk gets the whole remainder as its per-instance ``time_limit`` and is
+    not started once nothing is left; its entries are then ``None`` (#1928
+    follow-up, see the call site).
+    """
+    out: list = [None] * len(problems)
+    width = _qp_batch_pool_width()
+    for lo in range(0, len(problems), width):
+        left = deadline - time.perf_counter()
+        if left <= 0.0:
+            break
+        chunk = solve_qp_batch(problems[lo : lo + width], check_psd=False, time_limit=left)
+        out[lo : lo + len(chunk)] = chunk
+    return out
+
+
+#: Ipopt's ``Maximum_CpuTime_Exceeded``: what a node NLP that was never started at
+#: the deadline reports, i.e. exactly what a started one reports when its own wall
+#: limit runs out -- so the caller's existing handling of a timed-out node (no
+#: usable objective, node left open) applies unchanged.
+_NLP_NOT_STARTED_STATUS = -4
+
+
+def _solve_nlp_batch_by_deadline(
+    solve_nlp_batch, problems: list, x0s: list, options: dict, deadline: float, **kw
+) -> list:
+    """``solve_nlp_batch(problems, x0s=...)`` in pool-width chunks ending by ``deadline``.
+
+    POUNCE's ``max_wall_time`` is per instance, so one call over ``n`` problems on
+    a pool of width ``w`` can run ``ceil(n / w)`` back-to-back instances each
+    granted the whole remainder (``catmix800``: a node wave still running 3 s past
+    a 60 s limit). Each chunk here gets ``min(cap, what is left)`` and no chunk
+    starts once nothing is; an unstarted problem returns ``(x0, {"status": -4})``,
+    the time-out status. Same idea as :func:`_solve_qp_batch_by_deadline`.
+    """
+    cap = float(options.get("max_wall_time", 30.0))
+    out: list = []
+    width = _qp_batch_pool_width()
+    for lo in range(0, len(problems), width):
+        left = deadline - time.perf_counter()
+        if left <= 0.0:
+            out.extend(
+                (np.asarray(x0, dtype=np.float64), {"status": _NLP_NOT_STARTED_STATUS})
+                for x0 in x0s[lo:]
+            )
+            break
+        chunk_opts = {**options, "max_wall_time": min(cap, left)}
+        out.extend(
+            solve_nlp_batch(
+                problems[lo : lo + width], x0s=x0s[lo : lo + width], options=chunk_opts, **kw
+            )
+        )
+    return out
+
+
+@dataclasses.dataclass
+class _MiqpBlocks:
+    """The blocks of one MIQP standard form that the node loop reuses.
+
+    Built once per solve by :func:`_miqp_blocks`, never per wave. Every block holds
+    the values the old per-call ``_dense_A(A_eq)`` route produced -- dense for a
+    dense-extracted model, kept sparse (same values) for a sparse-extracted one --
+    and the full ``m x n_total`` slack-form matrix is never materialised (#1928 follow-up:
+    15,690 x 20,072 = 2.5 GB on ``unitcommit_50_20_2_mod_8``, ~14 s per
+    densification, repeated by the setup, every QP wave and the dual recovery).
+    """
+
+    n_total: int
+    A_ub: Any
+    b_ub: Any
+    A_eq: Any
+    b_eq: Any
+    P_s: np.ndarray  # Q[:n_orig, :n_orig]
+    A_struct: np.ndarray  # A_eq_full[:, :n_orig]
+    b_eq_full: np.ndarray
+    slack_block: Any  # A_eq_full[:, n_orig:], sparse when the extractor's is
+
+
+def _miqp_blocks(qp, n_orig: int) -> _MiqpBlocks:
+    """:class:`_MiqpBlocks` for ``qp``, from its sparse ``A_eq`` when it has one.
+
+    ``_decompose_eq_slack_form`` classifies and orders rows identically on sparse
+    and dense input (its sparse twin's docstring states the rule), and a row is
+    only ever scaled by ``+-1``, so densifying the decomposed blocks gives the
+    same arrays as decomposing the densified matrix.
+    """
+    import scipy.sparse as _sp
+
+    A = qp.A_eq
+    b_eq_full = np.asarray(qp.b_eq, dtype=np.float64)
+    x_u = np.asarray(qp.x_u, dtype=np.float64)
+    if _sp.issparse(A):
+        A = _sp.csr_matrix(A, dtype=np.float64)
+        n_total = A.shape[1] if A.shape[0] > 0 else n_orig
+        blocks = _decompose_eq_slack_form(
+            A, b_eq_full, n_orig, n_total - n_orig, x_u, row_sense=_declared_row_senses(qp, A)
+        )
+        # Kept sparse: every consumer takes a sparse operand (``_matrix_operand``)
+        # and POUNCE reads scipy-sparse directly, so a large model never pays for
+        # an ``m x n_orig`` dense block (two of them, ~1.5 GB, on unitcommit).
+        A_ub, b_ub, A_eq_s, b_eq_s = blocks
+        A_struct = A[:, :n_orig]
+        slack_block = A[:, n_orig:]
+    else:
+        A = _dense_A(A)
+        n_total = A.shape[1] if A.shape[0] > 0 else n_orig
+        A_ub, b_ub, A_eq_s, b_eq_s = _decompose_eq_slack_form(
+            A, b_eq_full, n_orig, n_total - n_orig, x_u, row_sense=_declared_row_senses(qp, A)
+        )
+        A_struct = A[:, :n_orig]
+        slack_block = A[:, n_orig:]
+    Q = qp.Q
+    P_s = (
+        _sp.csr_matrix(Q, dtype=np.float64)[:n_orig, :n_orig]
+        if _sp.issparse(Q)
+        else _dense_Q(Q)[:n_orig, :n_orig]
+    )
+    return _MiqpBlocks(
+        n_total=n_total,
+        A_ub=A_ub,
+        b_ub=b_ub,
+        A_eq=A_eq_s,
+        b_eq=b_eq_s,
+        P_s=P_s,
+        A_struct=A_struct,
+        b_eq_full=b_eq_full,
+        slack_block=slack_block,
+    )
+
+
+def _pounce_qp_relaxation_nodes(
+    qp_data, batch_lb, batch_ub, n_orig, t_start, time_limit, blocks=None
+):
     """Solve a batch of MIQP B&B node QP relaxations with POUNCE (JAX-free).
 
     Each node solves the augmented standard-form QP
@@ -33105,11 +33407,14 @@ def _pounce_qp_relaxation_nodes(qp_data, batch_lb, batch_ub, n_orig, t_start, ti
     callback path if ``solve_qp_batch`` is unavailable or the wave raises.
     """
     n_batch = len(batch_lb)
-    Q = _dense_Q(qp_data.Q)
     c = np.asarray(qp_data.c, dtype=np.float64)
-    A_eq = _dense_A(qp_data.A_eq)
     b_eq = np.asarray(qp_data.b_eq, dtype=np.float64)
     n_total = int(qp_data.x_l.shape[0])
+    # #1928 follow-up: the batched path reads only the prepared blocks (the
+    # caller's, computed once per solve, or built here); the full dense ``Q`` and
+    # ``A_eq`` are materialised only if the serial fallback below runs.
+    if blocks is None:
+        blocks = _miqp_blocks(qp_data, n_orig)
     n_slack = n_total - n_orig
 
     clean = np.zeros(n_batch, dtype=bool)
@@ -33144,17 +33449,10 @@ def _pounce_qp_relaxation_nodes(qp_data, batch_lb, batch_ub, n_orig, t_start, ti
         # decomposition returns ``None`` for an absent block (no pure
         # equalities or no inequalities), which POUNCE's ``solve_qp``
         # accepts directly.
-        A_ub_m, b_ub_m, A_eq_m, b_eq_m = _decompose_eq_slack_form(
-            A_eq,
-            b_eq,
-            n_orig,
-            n_slack,
-            np.asarray(qp_data.x_u, dtype=np.float64),
-            row_sense=_declared_row_senses(qp_data, A_eq),
-        )
-        P_s = Q[:n_orig, :n_orig]
+        A_ub_m, b_ub_m, A_eq_m, b_eq_m = blocks.A_ub, blocks.b_ub, blocks.A_eq, blocks.b_eq
+        P_s = blocks.P_s
         c_s = c[:n_orig]
-        A_struct = A_eq[:, :n_orig]
+        A_struct = blocks.A_struct
         # Exact slack reconstruction: the slack columns ``S`` are shared, so
         # given a structural ``x_s`` the original equality-slack iterate has
         # slacks ``z = S^+ (b_eq - A_struct x_s)``. Then
@@ -33171,7 +33469,7 @@ def _pounce_qp_relaxation_nodes(qp_data, batch_lb, batch_ub, n_orig, t_start, ti
         _wave_ok = True
         slack_of = None
         try:
-            slack_of = _slack_reconstruction(A_eq[:, n_orig:]) if n_slack > 0 else None
+            slack_of = _slack_reconstruction(blocks.slack_block) if n_slack > 0 else None
         except np.linalg.LinAlgError as e:
             _warn_fallback_once(
                 "batched POUNCE QP wave: slack pseudo-inverse",
@@ -33185,7 +33483,7 @@ def _pounce_qp_relaxation_nodes(qp_data, batch_lb, batch_ub, n_orig, t_start, ti
             logger.debug(
                 "batched POUNCE QP wave: slack block %s too large to pseudo-invert; "
                 "solving the wave serially",
-                A_eq[:, n_orig:].shape,
+                blocks.slack_block.shape,
             )
             _wave_ok = False
 
@@ -33210,14 +33508,28 @@ def _pounce_qp_relaxation_nodes(qp_data, batch_lb, batch_ub, n_orig, t_start, ti
         # Q is shared and convex by assumption (same as the JAX QP IPM);
         # skip the per-problem O(n^3) PSD check.
         results = None
+        # The solve's deadline reaches the wave (#1928 follow-up): it used to run
+        # unbounded, so a wave admitted just inside the limit ran to completion past
+        # it (unitcommit_50_20_2_mod_8: an 8-node wave started 0.6 s before the
+        # deadline and took 9.5 s). POUNCE's ``time_limit`` is per instance, opening
+        # when the instance starts, so the wave is submitted one pool-width at a
+        # time, each chunk with the whole remainder: the instances of a chunk run
+        # side by side, and every chunk ends by the deadline. A chunk with nothing
+        # left is not started: its nodes stay open on their parent bounds (``clean``
+        # stays False), the answer the deadline gives them anyway. Instances are
+        # solved independently, so chunking changes no result inside the limit.
         if _wave_ok:
             try:
-                results = solve_qp_batch(problems, check_psd=False)
+                results = _solve_qp_batch_by_deadline(
+                    solve_qp_batch, problems, t_start + time_limit
+                )
             except Exception as e:  # noqa: BLE001 - POUNCE native failure; see above
                 _warn_fallback_once("batched POUNCE QP wave", e, "solving the wave serially")
         if results is not None:
             for i in range(n_batch):
                 res = results[i]
+                if res is None:  # its chunk was past the deadline: left open
+                    continue
                 if res.status == "optimal" and res.x is not None and np.isfinite(res.obj):
                     x_s = np.asarray(res.x, dtype=np.float64)
                     if x_s.shape[0] == n_orig and np.all(np.isfinite(x_s)):
@@ -33253,6 +33565,9 @@ def _pounce_qp_relaxation_nodes(qp_data, batch_lb, batch_ub, n_orig, t_start, ti
 
     # --- Serial callback fallback (older wheels / batch failure) ---
     from discopt.solvers.qp_pounce import solve_qp as _pounce_qp
+
+    Q = _dense_Q(qp_data.Q)
+    A_eq = _dense_A(qp_data.A_eq)
 
     slack_lb = np.zeros(n_slack, dtype=np.float64)
     slack_ub = np.full(n_slack, 1e20, dtype=np.float64)
@@ -33599,7 +33914,7 @@ def _pounce_snap_incumbent(
     _cv = np.asarray(c, dtype=np.float64)
     _obj = float(np.dot(_cv, x[: _cv.size])) + float(obj_const)
     if Q is not None:
-        _Qm = np.asarray(Q, dtype=np.float64)
+        _Qm = _matrix_operand(Q)
         _xq = x[: _Qm.shape[0]]
         _obj += 0.5 * float(_xq @ (_Qm @ _xq))
     _nr = None
@@ -37697,18 +38012,17 @@ def _solve_miqp_bb(
     # nodes are first re-solved with POUNCE; only unrecoverable ones
     # decertify the gap (mirrors the P0.3 trust-gate + polish-retry).
     _gap_certified = True
-    _A_eq_dense = _dense_A(qp_data.A_eq)
-    _n_total0 = _A_eq_dense.shape[1] if _A_eq_dense.shape[0] > 0 else n_orig
-    _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m = _decompose_eq_slack_form(
-        _A_eq_dense,
-        np.asarray(qp_data.b_eq),
-        n_orig,
-        _n_total0 - n_orig,
-        np.asarray(qp_data.x_u, dtype=np.float64),
-        row_sense=_declared_row_senses(qp_data, _A_eq_dense),
+    # #1928 follow-up: one block build per frame, from the sparse ``A_eq``; the
+    # QP waves and the exit-time dual recovery reuse it (same arrays as before).
+    _blocks_m = _miqp_blocks(qp_data, n_orig)
+    _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m = (
+        _blocks_m.A_ub,
+        _blocks_m.b_ub,
+        _blocks_m.A_eq,
+        _blocks_m.b_eq,
     )
     _c_m = np.asarray(qp_data.c[:n_orig])
-    _Q_m = _dense_Q(qp_data.Q)[:n_orig, :n_orig]
+    _Q_m = _blocks_m.P_s
 
     # #1543: every node QP is SOLVED in coordinates ``d = x - _s`` whose origin
     # lies in the root box (see ``_miqp_origin_shift``); the tree, the feasibility
@@ -37730,17 +38044,13 @@ def _solve_miqp_bb(
         )
     _const_q = float(_qp_q.obj_const)
     _c_q = np.asarray(_qp_q.c[:n_orig], dtype=np.float64)
-    if _origin_shift is None:
-        _A_ub_q, _b_ub_q, _A_eq_q, _b_eq_q = _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m
-    else:
-        _A_ub_q, _b_ub_q, _A_eq_q, _b_eq_q = _decompose_eq_slack_form(
-            _A_eq_dense,
-            np.asarray(_qp_q.b_eq),
-            n_orig,
-            _n_total0 - n_orig,
-            np.asarray(_qp_q.x_u, dtype=np.float64),
-            row_sense=_declared_row_senses(_qp_q, _A_eq_dense),
-        )
+    _blocks_q = _blocks_m if _origin_shift is None else _miqp_blocks(_qp_q, n_orig)
+    _A_ub_q, _b_ub_q, _A_eq_q, _b_eq_q = (
+        _blocks_q.A_ub,
+        _blocks_q.b_ub,
+        _blocks_q.A_eq,
+        _blocks_q.b_eq,
+    )
 
     def _node_point_feasible(x_full, node_lb_i, node_ub_i) -> bool:
         """Does a node point satisfy the model's rows and the node's own box?
@@ -38046,6 +38356,7 @@ def _solve_miqp_bb(
             n_orig,
             t_start,
             time_limit,
+            blocks=_blocks_q,
         )
         if _origin_shift is not None:
             x_vals[:, :n_orig] += _s[:n_orig]
@@ -38342,19 +38653,9 @@ def _solve_miqp_bb(
         # Recover relaxation duals at the integer-feasible incumbent by
         # re-solving the QP relaxation with integer variables fixed.
         try:
-            A_eq_full = _dense_A(qp_data.A_eq)
-            n_total = A_eq_full.shape[1] if A_eq_full.shape[0] > 0 else n_orig
-            n_slack_local = n_total - n_orig
-            b_eq_full = np.asarray(qp_data.b_eq)
-            A_ub_, b_ub_, A_eq_, b_eq_ = _decompose_eq_slack_form(
-                A_eq_full,
-                b_eq_full,
-                n_orig,
-                n_slack_local,
-                np.asarray(qp_data.x_u, dtype=np.float64),
-                row_sense=_declared_row_senses(qp_data, A_eq_full),
-            )
-            Q_orig = _dense_Q(qp_data.Q)[:n_orig, :n_orig]
+            # The setup's blocks: the same decomposition of the same data.
+            A_ub_, b_ub_, A_eq_, b_eq_ = _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m
+            Q_orig = _Q_m
             constraint_duals, bound_duals_lower, bound_duals_upper = _mip_recover_relaxation_duals(
                 model,
                 lp_data=qp_data,

@@ -480,10 +480,10 @@ def _degree_linear(m) -> bool:
     cannot be built for is not an error here; it is the pre-#1712 path. The reason
     is logged rather than raised or reported as a fallback: nothing falls back.
     """
-    from discopt._rust import model_to_repr
+    from discopt._repr_cache import readonly_model_repr
 
     try:
-        rep = model_to_repr(m, getattr(m, "_builder", None))
+        rep = readonly_model_repr(m)  # only queried below
     except Exception as exc:  # noqa: BLE001 - "not proven linear": the tape decides
         logger.debug("convex kernel: no Rust repr for the linearity pre-check (%s)", exc)
         return False

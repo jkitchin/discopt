@@ -297,12 +297,14 @@ class NonlinearBoundTighteningStats:
 
 
 # Constraints between two ``time.perf_counter()`` reads inside a rule's row scan.
-# The read is ~50 ns and a row's match attempt is orders of magnitude more, so the
-# stride is free; it exists so the poll cannot be starved by a cheap-row model.
-# Granularity matters more than the poll's existence: #868 found ``probing`` polling
+# The read is ~50 ns and a row's match attempt is orders of magnitude more, so a
+# read per row is free. Granularity is what matters: #868 found ``probing`` polling
 # its deadline once per binary on an instance with 7 binaries and 107k constraints,
-# which is a poll that never fires in time.
-_DEADLINE_POLL_STRIDE = 64
+# which is a poll that never fires in time -- and a stride of 64 rows did the same
+# on a model whose rows are each expensive: ``densitymod`` (550 rows, ~1 s of
+# interval evaluation per defined-variable row) ran 67 s against a 10 s deadline,
+# because the first poll came after row 64. One row is the unit of overrun now.
+_DEADLINE_POLL_STRIDE = 1
 
 
 def _cached_model_structure(model: Model, key: str, metadata, build):

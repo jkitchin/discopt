@@ -316,7 +316,11 @@ class TestRouteBudgetWiring:
         monkeypatch.setenv(GUARD_ENV, "1")
         seen = self._capture(monkeypatch)
         _load("gbd").solve(solver="mip-nlp", mip_nlp_method="oa", time_limit=20.0)
-        assert seen["time_limit"] == pytest.approx(20.0)
+        from discopt.modeling.core import last_solve_prework_seconds
+
+        # The whole limit less only ``Model.solve``'s own pre-work.
+        assert seen["time_limit"] == pytest.approx(20.0 - last_solve_prework_seconds())
+        assert last_solve_prework_seconds() < 1.0
         assert seen["options"] is None or "termination_hook" not in seen["options"]
 
 

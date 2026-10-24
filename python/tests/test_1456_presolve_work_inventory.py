@@ -309,6 +309,7 @@ _BUDGET_HOME = {
     # each iteration and the deadline bounds the loop — the distinction
     # ``truck`` forced (81.5 s across 10.9 M correctly-budgeted iterations).
     "PresolveDeadline": "discopt._relax.presolve_deadline",
+    "_SOC_SCAN_WORK_BUDGET": "discopt._relax.soc_rewrite",
 }
 
 _CATEGORIES = ("terminal", "bounded", "wall", "trivial", "residual")
@@ -416,6 +417,10 @@ INVENTORY: tuple[tuple[str, str, str, str], ...] = (
         "bounded",
         "_MODEL_DISTRIBUTE_TERM_BUDGET",
     ),
+    # #1933: one pass over every row; stops (keeping the rows already rewritten,
+    # each exact on its own) when the work allowance is spent.
+    ("discopt._relax.soc_rewrite", "rewrite_squared_soc", "bounded", "_SOC_SCAN_WORK_BUDGET"),
+    ("discopt._relax.soc_rewrite", "rewrite_squared_soc_rows", "bounded", "_SOC_SCAN_WORK_BUDGET"),
     # --- wall: role 2, recorded in the #912 inventory -------------------------
     ("discopt._relax.nonlinear_bound_tightening", "tighten_nonlinear_bounds", "wall", "NBT"),
     ("discopt._relax.presolve_pipeline", "run_reverse_ad_tightening", "wall", "reverse-AD"),
@@ -456,7 +461,9 @@ INVENTORY: tuple[tuple[str, str, str, str], ...] = (
     # The entry gate itself (#1456): one monotonic clock read per optional pass,
     # O(1), and it is the thing that bounds the aggregate rather than any leaf.
     ("discopt._relax.presolve_deadline", "PresolveDeadline", "trivial", "clock read per pass"),
+    ("discopt._relax.presolve_deadline", "presolve_deadline_enabled", "trivial", "env read"),
     ("discopt._relax.model_utils", "_dcb_flat", "trivial", "flat index map"),
+    ("discopt._relax.soc_rewrite", "record_squared_soc_rows", "trivial", "list append (#1933)"),
     (
         "discopt._relax.nonlinear_bound_tightening",
         "FunctionDomainBoundRule",

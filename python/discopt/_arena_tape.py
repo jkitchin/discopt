@@ -472,10 +472,10 @@ def try_build_arena_tape(model: Any, E: Any) -> Optional[tuple[Any, list]]:
     if builder_objective(model) is not None:
         return None
 
-    from discopt._rust import model_to_repr
+    from discopt._repr_cache import readonly_model_repr
 
     try:
-        repr_ = model_to_repr(model, getattr(model, "_builder", None))
+        repr_ = readonly_model_repr(model)  # only queried below
     except Exception as exc:  # noqa: BLE001 -- see below; deliberately broad
         # "This model has no arena representation" is how `convert_expr` reports
         # several distinct cases, each with its own exception type and wording:
@@ -564,10 +564,10 @@ def try_build_expanded_tape(model: Any, E: Any) -> Optional[tuple[Any, list, lis
     if builder_objective(model) is not None:
         return None
 
-    from discopt._rust import model_to_repr
+    from discopt._repr_cache import readonly_model_repr
 
     try:
-        repr_ = model_to_repr(model, getattr(model, "_builder", None))
+        repr_ = readonly_model_repr(model)  # only queried below
     except Exception as exc:  # noqa: BLE001 -- see try_build_arena_tape
         _LOG.debug("expanded tape declined; model_to_repr refused: %s", exc)
         return None

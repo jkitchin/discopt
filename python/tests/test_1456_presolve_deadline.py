@@ -169,7 +169,10 @@ def test_a_pass_that_eats_the_budget_stops_the_ones_after_it(monkeypatch, caplog
     real = fr.canonicalize_entropy
     calls = {"n": 0}
 
-    def burns_the_budget(model):
+    def burns_the_budget(model, *a, **k):
+        # Accepts the in-pass hook but runs the real pass without it: this stands
+        # for a pass whose overrun is inside one uninterruptible step, so it
+        # completes (and must not be reported as skipped or abandoned).
         calls["n"] += 1
         time.sleep(1.5)  # > time_limit below, so the budget is gone on return
         return real(model)
@@ -219,8 +222,8 @@ def test_the_block_cannot_outlive_the_time_limit_by_more_than_one_pass(monkeypat
     real = fr.canonicalize_entropy
     burn_s = 3.0
 
-    def burns_the_budget(model):
-        time.sleep(burn_s)
+    def burns_the_budget(model, *a, **k):
+        time.sleep(burn_s)  # one uninterruptible step; see the test above
         return real(model)
 
     monkeypatch.setattr(fr, "canonicalize_entropy", burns_the_budget)

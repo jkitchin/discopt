@@ -422,3 +422,16 @@ def test_pyomo_squared_cone_through_nl(tmp_path):
     assert r.status == "optimal"
     assert r.algorithm_route is not None and "mip-nlp" in r.algorithm_route
     assert r.objective == pytest.approx(1.5683270831, abs=1e-6)
+
+
+def test_exhausted_work_budget_stops_the_scan(monkeypatch):
+    """#1456: the pass runs before ``time_limit`` is armed, so it carries a
+    deterministic budget; spending it leaves the model unchanged, never raises."""
+    import discopt._relax.soc_rewrite as soc
+
+    m = _issue_model("squared")
+    monkeypatch.setattr(soc, "_SOC_SCAN_WORK_BUDGET", 3)
+    new, rows = soc.rewrite_squared_soc_rows(m)
+    assert rows == [] and new is m
+    monkeypatch.setattr(soc, "_SOC_SCAN_WORK_BUDGET", 10_000)
+    assert len(soc.rewrite_squared_soc_rows(m)[1]) == 1

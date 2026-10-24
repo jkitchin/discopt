@@ -170,8 +170,14 @@ def test_fallback_keeps_its_reserve_after_a_primary_that_spent_its_budget(monkey
     # proportion pinned EXACTLY -- now on the primary's 65% share, since the
     # fallback's grant is no longer the bare reserve (below). The separate bound is
     # what would still fail if a declined attempt ever became expensive.
-    spent = last_attempt_seconds()
-    assert spent < 0.10 * 6.0, f"a DECLINED kernel attempt cost {spent:.3f}s of a 6 s budget"
+    attempt = last_attempt_seconds()
+    assert attempt < 0.10 * 6.0, f"a DECLINED kernel attempt cost {attempt:.3f}s of a 6 s budget"
+    # ``Model.solve`` deducts ALL of its pre-work (the attempt is one part), measured
+    # from its entry, and reports the deduction exactly.
+    from discopt.modeling.core import last_solve_prework_seconds
+
+    spent = last_solve_prework_seconds()
+    assert attempt <= spent < attempt + 1.0
     assert primary_tl == [pytest.approx(0.65 * (6.0 - spent), rel=1e-6)], (primary_tl, spent)
 
     # The fallback gets what is LEFT, capped at the caller's limit. This primary
