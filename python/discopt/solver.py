@@ -1548,7 +1548,13 @@ def _native_kernel_incumbent_value(model, source, sign, off, n_orig):
     it, exited ``optimal``, and the #789 check after the search then discarded
     the whole result, bound included. Rejecting it here keeps the incumbent a
     value an integral point attains; the kernel then branches the near-integral
-    column (``spatial_tree.rs``). The check is the #789 one on the lift
+    column (``spatial_tree.rs``). A failing point that the snap does not move is
+    not that class: the kernel's tight points are not points of the model, so the
+    answer is ``"decline"``, #789's response, taken before the budget is spent
+    (``test_issue1842_interval_matmul_shapes``: every one of 64 553 tight points
+    at ``x = 20`` failed a row by 12.4, and rejecting them ran the kernel to its
+    time limit where #789 used to route the model to the Python engine). The
+    check is the #789 one on the lift
     (``source=None``): a point that fails only the pre-reform model keeps its
     #1522 handling (repair on an uncertified exit).
 
@@ -1556,6 +1562,7 @@ def _native_kernel_incumbent_value(model, source, sign, off, n_orig):
     returns (CLAUDE.md §7).
     """
     from discopt._tape_nlp_evaluator import make_evaluator
+    from discopt.validation.feasibility import snap_integers
 
     target = model if source is None else source[0]
     ev = make_evaluator(target)
@@ -1571,8 +1578,15 @@ def _native_kernel_incumbent_value(model, source, sign, off, n_orig):
         lp_published = sign * (float(lp_obj) + off)
         if abs(declared - lp_published) > 1e-4 * (1.0 + abs(lp_published)):
             return "decline"
-        ok, _ = _native_kernel_verify_point(model, np.asarray(x, dtype=np.float64)[:n_orig])
+        x_orig = np.asarray(x, dtype=np.float64)[:n_orig]
+        ok, _ = _native_kernel_verify_point(model, x_orig)
         if not ok:
+            # Reject only the #1938 class, where the snap moved an integer column.
+            # A point that fails with every integer already integral means the
+            # kernel's tight points are not points of the model: #789's response,
+            # taken now instead of after the search.
+            if np.array_equal(snap_integers(model, x_orig), x_orig):
+                return "decline"
             return None
         return internal
 
