@@ -673,20 +673,65 @@ def _estimate_node(expr: Expression, memo: dict[int, int]) -> int:
     return 1
 
 
-def _estimate_terms(expr: Expression, memo: dict[int, int], unfolded: bool) -> int:
+#: #1923: recursion depth below which :func:`_estimate_terms` recurses (the fast
+#: path, ~3x quicker than the explicit stack on ordinary bodies: 0.55 s vs 1.7 s
+#: over ``optcdeg2``'s 100,001 bodies); a deeper subtree is handed to the iterative
+#: walk, so no chain depth can reach the interpreter's recursion limit.
+_ESTIMATE_RECURSION_DEPTH = 200
+
+
+def _estimate_terms(expr: Expression, memo: dict[int, int], unfolded: bool, depth: int = 0) -> int:
     """``unfolded=True`` is :func:`_unfolded_term_bound`'s variant: a quotient by
     a nonzero scalar constant counts its numerator's terms (the fold rewrites
     ``(a + b) / 2`` as ``0.5*a + 0.5*b``); every other node as above.
 
-    Iterative post-order (#1923): :func:`fold_affine_constants` rebuilds an affine
-    form as a left-folded chain one level per atom, so a shallow input can reach
-    this walk thousands of levels deep (the Goldstein-Price objective of
-    ``ex8_1_3``: depth 10 in, 1374 after one distribution and fold) -- past the
-    interpreter's recursion limit, which a recursive walk hit.
+    Recursive up to :data:`_ESTIMATE_RECURSION_DEPTH`, iterative below it
+    (#1923): :func:`fold_affine_constants` can rebuild an affine form as a
+    left-folded chain one level per atom, so a shallow input could reach this walk
+    thousands of levels deep (the Goldstein-Price objective of ``ex8_1_3``: depth
+    10 in, 1374 after one distribution and fold) and a purely recursive walk hit
+    the interpreter's limit. Both walks compute the same value.
     """
     hit = memo.get(id(expr))
     if hit is not None:
         return hit
+    if depth >= _ESTIMATE_RECURSION_DEPTH:
+        return _estimate_terms_iterative(expr, memo, unfolded)
+    d = depth + 1
+    if isinstance(expr, BinaryOp):
+        if expr.op in ("+", "-"):
+            est = min(
+                _estimate_terms(expr.left, memo, unfolded, d)
+                + _estimate_terms(expr.right, memo, unfolded, d),
+                _TERM_CAP,
+            )
+        elif expr.op == "*":
+            est = min(
+                _estimate_terms(expr.left, memo, unfolded, d)
+                * _estimate_terms(expr.right, memo, unfolded, d),
+                _TERM_CAP,
+            )
+        elif expr.op == "**" and isinstance(expr.right, Constant):
+            n = float(expr.right.value)
+            n_int = int(n)
+            if n == n_int and n_int >= 1:
+                est = min(int(_estimate_terms(expr.left, memo, unfolded, d) ** n_int), _TERM_CAP)
+            else:
+                est = 1
+        elif unfolded and expr.op == "/" and _scalar_constant(expr.right) not in (None, 0.0):
+            est = _estimate_terms(expr.left, memo, unfolded, d)
+        else:
+            est = 1
+    elif isinstance(expr, UnaryOp):
+        est = _estimate_terms(expr.operand, memo, unfolded, d)
+    else:
+        est = 1
+    memo[id(expr)] = est
+    return est
+
+
+def _estimate_terms_iterative(expr: Expression, memo: dict[int, int], unfolded: bool) -> int:
+    """:func:`_estimate_terms` as an explicit-stack post-order walk (no recursion)."""
     stack: list[tuple[Expression, bool]] = [(expr, False)]
     while stack:
         node, expanded = stack.pop()
@@ -1108,27 +1153,37 @@ def _fold_affine_root(expr: Expression, protected: frozenset[int] | None) -> Exp
             slot[1] += scale
 
     _affine_walk(expr, protected, collect)
-    # Signed terms in the order the left fold below adds them.
-    terms: list[tuple[bool, Expression]] = []
+    if len(coeffs) + (const_total != 0) > _FOLD_CHAIN_MAX:
+        # Possibly a long chain (#1923): collect the signed terms, and build a
+        # balanced sum when there really are more than the cap.
+        terms: list[tuple[bool, Expression]] = []
+        for atom, coeff in coeffs.values():
+            if coeff == 0:
+                continue
+            mag = abs(coeff)
+            term = atom if mag == 1 else BinaryOp("*", Constant(float(mag)), atom)
+            terms.append((coeff > 0, term))
+        if const_total != 0:
+            terms.append((const_total > 0, Constant(abs(float(const_total)))))
+        if len(terms) > _FOLD_CHAIN_MAX:
+            return _balanced_signed_sum(terms)
+    out: Expression | None = None
     for atom, coeff in coeffs.values():
         if coeff == 0:
             continue
         mag = abs(coeff)
-        terms.append((coeff > 0, atom if mag == 1 else BinaryOp("*", Constant(float(mag)), atom)))
+        term = atom if mag == 1 else BinaryOp("*", Constant(float(mag)), atom)
+        if out is None:
+            out = term if coeff > 0 else UnaryOp("neg", term)
+        else:
+            out = BinaryOp("+" if coeff > 0 else "-", out, term)
     if const_total != 0:
         cval = float(const_total)
-        terms.append((cval > 0, Constant(abs(cval))))
-    if not terms:
-        return Constant(0.0)
-    if len(terms) == 1 and const_total != 0:
-        return Constant(float(const_total))  # a lone constant stays a signed literal
-    if len(terms) > _FOLD_CHAIN_MAX:
-        return _balanced_signed_sum(terms)
-    positive, out = terms[0]
-    out = out if positive else UnaryOp("neg", out)
-    for positive, term in terms[1:]:
-        out = BinaryOp("+" if positive else "-", out, term)
-    return out
+        if out is None:
+            out = Constant(cval)
+        else:
+            out = BinaryOp("+" if cval > 0 else "-", out, Constant(abs(cval)))
+    return out if out is not None else Constant(0.0)
 
 
 # #1923: longest affine form :func:`_fold_affine_root` rebuilds as a left-folded
