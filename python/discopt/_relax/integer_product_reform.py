@@ -36,7 +36,7 @@ first; this module is that detector's downstream consumer.
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -762,11 +762,72 @@ def _over_distribution_budget(model: Model, pass_name: str) -> bool:
     return model_distribution_exceeds_budget(model, pass_name=pass_name)
 
 
-def _bodies(model: Model):
+def _integer_factor_vars(model: Model, implied) -> frozenset[int]:
+    """``_index`` of every variable that can be an integer factor here: declared
+    ``INTEGER``, or carrying an *implied*-integer element. A product with no such
+    factor is invisible to every detector and to the rewrite (each requires
+    :func:`_int_factor_range` of some factor), so a body referencing none of them
+    has nothing for this pass."""
+    implied_vars = {vi for vi, _ in implied}
+    return frozenset(
+        v._index
+        for v in model._variables
+        if v.var_type == VarType.INTEGER or v._index in implied_vars
+    )
+
+
+def _references_any(expr: Expression, var_indices: frozenset[int]) -> bool:
+    """True if the DAG of *expr* references a variable whose ``_index`` is in
+    *var_indices*. Walks every ``Expression``-valued attribute (and lists/tuples of
+    them) rather than a fixed child list, so no node type can hide a reference;
+    shared subexpressions are visited once."""
+    seen: set[int] = set()
+    stack: list = [expr]
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, Variable):
+            if node._index in var_indices:
+                return True
+            continue
+        for val in getattr(node, "__dict__", {}).values():
+            if isinstance(val, Expression):
+                stack.append(val)
+            elif isinstance(val, (list, tuple)):
+                stack.extend(x for x in val if isinstance(x, Expression))
+    return False
+
+
+class _Abandoned(Exception):
+    """The caller's in-pass ``deadline`` hook expired (#1456 item 2). Raised from
+    the per-body loops and caught at each public entry, which then returns the
+    answer it already gives when there is nothing to do: "nothing found" from a
+    detector, the input model unchanged from the rewrite. Partial work is
+    discarded wholesale, never adopted."""
+
+
+def _check(deadline: Optional[Callable[[], bool]]) -> None:
+    if deadline is not None and deadline():
+        raise _Abandoned
+
+
+def _bodies(model: Model, implied=frozenset(), deadline: Optional[Callable[[], bool]] = None):
+    """Distributed constraint bodies and objective, skipping (before the
+    distribution, which is the expensive part) every body that references no
+    integer-factor variable: such a body can produce no hit for any caller, so
+    skipping it is exact. ``truck``: the 1M-term distributed objective has none,
+    and walking it cost ~41 s of a 60 s budget."""
+    candidates = _integer_factor_vars(model, implied)
+    if not candidates:
+        return
     for c in model._constraints:
-        if isinstance(c, Constraint):
+        _check(deadline)
+        if isinstance(c, Constraint) and _references_any(c.body, candidates):
             yield distribute_products(c.body)
-    if model._objective is not None:
+    _check(deadline)
+    if model._objective is not None and _references_any(model._objective.expression, candidates):
         yield distribute_products(model._objective.expression)
 
 
@@ -834,33 +895,52 @@ def _has_int_multilinear(expr: Expression, implied) -> bool:
     return False
 
 
-def has_integer_product_work(model: Model, implied=frozenset(), multilinear: bool = False) -> bool:
+def has_integer_product_work(
+    model: Model,
+    implied=frozenset(),
+    multilinear: bool = False,
+    deadline: Optional[Callable[[], bool]] = None,
+) -> bool:
     """True if any constraint/objective has an integer-factor bilinear product or
     integer square (integer or *implied*-integer factor) this pass can linearize.
     When *multilinear* is set, also detect integer-multilinear products (issue
-    #707)."""
+    #707). ``deadline`` (a ``PresolveDeadline.abandon_hook``) is checked once per
+    body; on expiry the answer is "nothing found"."""
     if _over_distribution_budget(model, "integer-product reform"):
         return False
-    for body in _bodies(model):
-        found = []
-        _for_each_int_bilinear(body, implied, lambda ints: found.append(True))
-        if found or _has_int_square(body, implied):
-            return True
-        if multilinear and _has_int_multilinear(body, implied):
-            return True
+    try:
+        for body in _bodies(model, implied, deadline):
+            found = []
+            _for_each_int_bilinear(body, implied, lambda ints: found.append(True))
+            if found or _has_int_square(body, implied):
+                return True
+            if multilinear and _has_int_multilinear(body, implied):
+                return True
+    except _Abandoned:
+        return False
     return False
 
 
-def has_integer_multilinear_work(model: Model, implied=frozenset()) -> bool:
+def has_integer_multilinear_work(
+    model: Model, implied=frozenset(), deadline: Optional[Callable[[], bool]] = None
+) -> bool:
     """True if any constraint/objective has an integer-*multilinear* product
     (>=3 factors, <=1 continuous, >=1 integer/implied-integer) — the class the
-    ``DISCOPT_INTEGER_MULTILINEAR_REFORM`` pass linearizes (issue #707)."""
+    ``DISCOPT_INTEGER_MULTILINEAR_REFORM`` pass linearizes (issue #707).
+    ``deadline`` as in :func:`has_integer_product_work`."""
     if _over_distribution_budget(model, "integer-multilinear reform"):
         return False
-    return any(_has_int_multilinear(body, implied) for body in _bodies(model))
+    try:
+        return any(
+            _has_int_multilinear(body, implied) for body in _bodies(model, implied, deadline)
+        )
+    except _Abandoned:
+        return False
 
 
-def has_nonconvex_integer_bilinear(model: Model) -> bool:
+def has_nonconvex_integer_bilinear(
+    model: Model, deadline: Optional[Callable[[], bool]] = None
+) -> bool:
     """True if the model contains a *distinct-variable* integer-factor bilinear
     product ``x_i*x_j`` (``i != j``). Such a term has an indefinite Hessian, so it
     is a cheap, sound **nonconvexity** witness — and it is exactly the structure
@@ -868,6 +948,9 @@ def has_nonconvex_integer_bilinear(model: Model) -> bool:
     reformulation to nonconvex models (a convex MIQP with only ``x**2`` squares
     has no distinct bilinear term and is left to the convex fast paths) without
     paying for a full convexity classification.
+
+    ``deadline`` as in :func:`has_integer_product_work`: on expiry the witness
+    reports "none", the answer every caller handles by leaving the model alone.
     """
     from .implied_integer import detect_implied_integers
 
@@ -875,14 +958,17 @@ def has_nonconvex_integer_bilinear(model: Model) -> bool:
         return False
     implied = frozenset(detect_implied_integers(model))
     found: list[bool] = []
-    for body in _bodies(model):
-        _for_each_int_bilinear(body, implied, lambda ints: found.append(True))
-        if found:
-            return True
+    try:
+        for body in _bodies(model, implied, deadline):
+            _for_each_int_bilinear(body, implied, lambda ints: found.append(True))
+            if found:
+                return True
+    except _Abandoned:
+        return False
     return False
 
 
-def _participation(model: Model, implied) -> dict:
+def _participation(model: Model, implied, deadline: Optional[Callable[[], bool]] = None) -> dict:
     """Count, per integer factor ``(var._index, elem)``, the number of bilinear
     products it appears in — used to pick the most-shared factor to expand."""
     counts: dict[tuple[int, int], int] = {}
@@ -891,12 +977,17 @@ def _participation(model: Model, implied) -> dict:
         for vi, eli in ints:
             counts[(vi._index, eli)] = counts.get((vi._index, eli), 0) + 1
 
-    for body in _bodies(model):
+    for body in _bodies(model, implied, deadline):
         _for_each_int_bilinear(body, implied, tally)
     return counts
 
 
-def expand_integer_products(model: Model, implied=frozenset(), multilinear: bool = False) -> Model:
+def expand_integer_products(
+    model: Model,
+    implied=frozenset(),
+    multilinear: bool = False,
+    deadline: Optional[Callable[[], bool]] = None,
+) -> Model:
     """Return a model equivalent to *model* with integer-factor bilinear products
     binary-expanded + big-M-linearized to their exact (pure-MILP) form. ``implied``
     is an optional set of ``(var._index, elem)`` treated as integer-valued in
@@ -907,9 +998,15 @@ def expand_integer_products(model: Model, implied=frozenset(), multilinear: bool
     when the blowup guard discards the result. Any other exception propagates:
     returning the input on an arbitrary error made a crashed pass
     indistinguishable from "nothing to do" -- ``transformations.check()``
-    reported such a crash as an unchanged model (#1497; CLAUDE.md §3/§7)."""
+    reported such a crash as an unchanged model (#1497; CLAUDE.md §3/§7).
+
+    ``deadline`` (a ``PresolveDeadline.abandon_hook``) is checked once per body in
+    the detection, the participation count and the rewrite; on expiry the pass
+    abandons wholesale and returns *model* unchanged -- the partial rewrite is
+    discarded, never adopted. ``telecomsp_nor_sun`` at ``time_limit=300`` was
+    measured still inside this rewrite at 360 s."""
     try:
-        if not has_integer_product_work(model, implied, multilinear=multilinear):
+        if not has_integer_product_work(model, implied, multilinear=multilinear, deadline=deadline):
             return model
         new_model = Model(model.name)
         new_model._variables = list(model._variables)
@@ -919,12 +1016,13 @@ def expand_integer_products(model: Model, implied=frozenset(), multilinear: bool
         exp = _Expander(
             new_model,
             implied=implied,
-            participation=_participation(model, implied),
+            participation=_participation(model, implied, deadline),
             multilinear=multilinear,
         )
 
         rebuilt: list[Constraint] = []
         for c in model._constraints:
+            _check(deadline)
             if not isinstance(c, Constraint):
                 rebuilt.append(c)
                 continue
@@ -966,7 +1064,7 @@ def expand_integer_products(model: Model, implied=frozenset(), multilinear: bool
         carry_complementarities(model, new_model, pass_name="integer-product expansion")
         carry_validation_guards(model, new_model)  # #1498
         return new_model
-    except IntegerProductNotApplicable:
+    except (IntegerProductNotApplicable, _Abandoned):
         return model
 
 
@@ -1063,7 +1161,9 @@ def has_reformulation_work(model: Model) -> bool:
     return has_integer_product_work(model, implied)
 
 
-def reformulate_integer_bilinear(model: Model) -> Model:
+def reformulate_integer_bilinear(
+    model: Model, deadline: Optional[Callable[[], bool]] = None
+) -> Model:
     """End-to-end pass: detect implied-integer factor variables, then exactly
     linearize every integer-factor bilinear product into pure-MILP form. This is
     the entry the solver calls; it is a no-op (returns *model*) when nothing
@@ -1071,19 +1171,23 @@ def reformulate_integer_bilinear(model: Model) -> Model:
     from .implied_integer import detect_implied_integers
 
     implied = frozenset(detect_implied_integers(model))
-    return expand_integer_products(model, implied)
+    return expand_integer_products(model, implied, deadline=deadline)
 
 
-def has_integer_multilinear_reformulation_work(model: Model) -> bool:
+def has_integer_multilinear_reformulation_work(
+    model: Model, deadline: Optional[Callable[[], bool]] = None
+) -> bool:
     """True if the model has an integer-*multilinear* product (>=3 factors, <=1
     continuous, >=1 declared/implied-integer) that the ``#707`` pass linearizes."""
     from .implied_integer import detect_implied_integers
 
     implied = frozenset(detect_implied_integers(model))
-    return has_integer_multilinear_work(model, implied)
+    return has_integer_multilinear_work(model, implied, deadline)
 
 
-def reformulate_integer_multilinear(model: Model) -> Model:
+def reformulate_integer_multilinear(
+    model: Model, deadline: Optional[Callable[[], bool]] = None
+) -> Model:
     """End-to-end pass (issue #707): detect implied-integer factors, then exactly
     linearize every integer-factor bilinear **and** integer-multilinear product
     (>=3 factors, <=1 continuous). A no-op (returns *model*) when nothing applies.
@@ -1092,4 +1196,4 @@ def reformulate_integer_multilinear(model: Model) -> Model:
     from .implied_integer import detect_implied_integers
 
     implied = frozenset(detect_implied_integers(model))
-    return expand_integer_products(model, implied, multilinear=True)
+    return expand_integer_products(model, implied, multilinear=True, deadline=deadline)

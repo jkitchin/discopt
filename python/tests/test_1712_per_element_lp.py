@@ -222,9 +222,9 @@ def _record_linear_skips(monkeypatch):
     seen = {"entropy": 0, "rules": []}
     real_entropy, real_tighten = fr.canonicalize_entropy, nbt.tighten_nonlinear_bounds
 
-    def entropy(model):
+    def entropy(model, *a, **k):
         seen["entropy"] += 1
-        return real_entropy(model)
+        return real_entropy(model, *a, **k)
 
     def tighten(*a, **k):
         if "rules" in k:  # the solve's domain pass; the declared-box pass uses defaults

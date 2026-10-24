@@ -775,6 +775,11 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
     # decides when to stop, never how much work a refit does (that is capped by
     # operation counts, ``_dual_recovery.REFIT_LSMR_MAXITER``).
     ("solver.py", "deadline=t_start + time_limit,", "contract"),
+    # The batched node NLP wave ends by the caller's remaining budget, whole: the
+    # ``max_wall_time`` it is handed IS what is left of ``time_limit``. It decides
+    # when to stop starting instances, never how much work one does (post-#1929
+    # sweep: ``catmix800``'s wave ran 3 s past a 60 s limit).
+    ("solver.py", "_batch_deadline = time.perf_counter() + caller_limit", "contract"),
     # #1775 G4.1: LOA's OA-cut convexity certification gets half of what is left.
     # Unbounded it ran > 100 s on ``kaibel``; given the caller's whole budget it
     # would leave the master nothing. Bound-changing (an unreached row gets no

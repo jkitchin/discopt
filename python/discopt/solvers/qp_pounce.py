@@ -50,6 +50,7 @@ from discopt.solvers.lp_pounce import (
     _phase1_verdict,
     _simplex_feasibility_verdict,
     _stack_constraints,
+    _to_dense,
     finite_bound_threshold,
 )
 
@@ -145,7 +146,10 @@ def solve_qp(
             "supported (MIQPs go through HiGHS or the B&B path)."
         )
 
-    Q_arr = np.asarray(Q, dtype=np.float64)
+    # This callback path is dense by design (``_stack_constraints`` densifies A
+    # too); a sparse ``Q`` is densified the same way rather than through
+    # ``np.asarray``, which would wrap it in a 0-d object array.
+    Q_arr = _to_dense(Q)
     c_arr = np.asarray(c, dtype=np.float64).ravel()
     n = len(c_arr)
     if Q_arr.shape != (n, n):
