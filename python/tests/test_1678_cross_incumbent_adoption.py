@@ -65,13 +65,17 @@ def _forge(monkeypatch, *, cross_x_better: bool):
 
     monkeypatch.setattr(L, "_solve_milp_scaled", fake)
     monkeypatch.setattr(L, "presolve_exact_class", lambda sf: False)
+    # #1920: the fix-and-propagate start finds the true optimum on this toy model and
+    # would be published over the forged worse primary point; it is not under test.
+    monkeypatch.setenv("DISCOPT_MILP_FIXPROP_SEED", "0")
     return calls
 
 
 def test_better_cross_point_is_adopted_and_the_certificate_stands(monkeypatch):
     calls = _forge(monkeypatch, cross_x_better=True)
     r = _model().solve(time_limit=30, gap_tolerance=1e-4)
-    assert calls[:2] == ["primary", "cross"], calls
+    # #1920: the two solves run concurrently, so either may return first.
+    assert sorted(calls[:2]) == ["cross", "primary"], calls
     assert r.objective == pytest.approx(OPT, abs=1e-9)
     assert r.status == "optimal" and r.gap_certified
     # The published bound is the weaker (cross) one, never an unconfirmed claim.
