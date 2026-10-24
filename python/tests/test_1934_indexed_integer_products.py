@@ -4,10 +4,10 @@
 ``.var``; the node stores it in ``.base``, so every ``x[i]`` resolved to ``None``
 and the bilinear, square and #707 multilinear passes never fired on a model
 written with array variables. Recognising them is bound-changing (CLAUDE.md §5),
-so it sits behind ``DISCOPT_INTEGER_PRODUCT_INDEXED`` (default ON after its panel,
-``scripts/panel_1934_indexed_integer_products.py``; ``=0`` opts out).
+so it sits behind ``DISCOPT_INTEGER_PRODUCT_INDEXED`` (default OFF: its panel was
+cert-clean but not net-positive on dense integer QPs; see the flag's docstring).
 
-Covered here: the ``=0`` opt-out is the legacy behaviour and the default is ON;
+Covered here: the default and ``=0`` are the legacy behaviour;
 flag ON resolves int, tuple and negative indices to the flat element ``_int_factor_range`` reads,
 refuses slices/bools/out-of-range; two references to one element share one
 expansion; a 2-D variable's expansion links the right element; and the rewrite
@@ -50,11 +50,11 @@ def test_opt_out_keeps_legacy_behaviour(monkeypatch):
     assert ipr.reformulate_integer_bilinear(m) is m
 
 
-def test_default_is_on(monkeypatch):
+def test_default_is_off(monkeypatch):
     monkeypatch.delenv(FLAG, raising=False)
     m, x = _issue_model()
-    assert ipr._scalar_var_ref(x[0]) == (x, 0)
-    assert ipr.has_nonconvex_integer_bilinear(m) is True
+    assert ipr._scalar_var_ref(x[0]) is None
+    assert ipr.has_nonconvex_integer_bilinear(m) is False
 
 
 def test_issue_reproducer(flag_on):

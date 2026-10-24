@@ -156,9 +156,10 @@ def test_box_dependent_child_rows_would_be_invalid_and_are_excluded(monkeypatch)
     they must never be inherited. Demonstrate the hazard, then assert the shipped
     root pool contains no such row and the flag-ON solve still certifies the true
     optimum that naive child-row inheritance would have cut off."""
-    # The fixture is written with an integer array variable; since #1934 the
-    # integer-product reform recognises it and solves it as an exact MILP, which
-    # never reaches the spatial cut pool under test. Pin the pre-#1934 route.
+    # The fixture is written with an integer array variable; with
+    # DISCOPT_INTEGER_PRODUCT_INDEXED on (#1934) the integer-product reform solves
+    # it as an exact MILP, which never reaches the spatial cut pool under test.
+    # Pin the spatial route so the test does not depend on that flag's default.
     monkeypatch.setenv("DISCOPT_INTEGER_PRODUCT_INDEXED", "0")
     from discopt._relax.mccormick_lp import MccormickLPRelaxer
     from discopt._relax.milp_relaxation import build_milp_relaxation
@@ -234,9 +235,10 @@ def test_cut_inherit_structure_gated_fires_on_dense_qp(monkeypatch):
     non-empty root pool — the pool-fires predicate. On the dense integer QP the
     pool populates, so the gate decision is ON and the square/PSD separators are
     skipped at nodes, while the certificate is preserved (bound <= optimum)."""
-    # The fixture is written with an integer array variable; since #1934 the
-    # integer-product reform recognises it and solves it as an exact MILP, which
-    # never reaches the spatial cut pool under test. Pin the pre-#1934 route.
+    # The fixture is written with an integer array variable; with
+    # DISCOPT_INTEGER_PRODUCT_INDEXED on (#1934) the integer-product reform solves
+    # it as an exact MILP, which never reaches the spatial cut pool under test.
+    # Pin the spatial route so the test does not depend on that flag's default.
     monkeypatch.setenv("DISCOPT_INTEGER_PRODUCT_INDEXED", "0")
     model = _build_dense_int_qp()
     res = model.solve(time_limit=60, tuning=SolverTuning(cut_inherit=None))
