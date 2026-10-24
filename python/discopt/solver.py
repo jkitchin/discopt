@@ -3734,6 +3734,88 @@ def _hessian_is_psd_with_margin(H_sym) -> bool:
     return eig_min >= margin
 
 
+#: #1927: largest objective Hessian ``_sparse_hessian_is_pd_with_margin`` hands to the
+#: dense ``eigvalsh``. Measured (``_QP_EXACT_CONVEXITY_MAX_N``'s note, same
+#: container class): n=2000 0.33 s, n=4000 2.47 s; it is cubic, so n=10,000 is
+#: tens of seconds -- what ``nd_netgen-2000-2-5-a-a-ns_7`` (9,999 columns) and
+#: ``popdynm200`` (11,215) spent past a 60 s limit inside this test. Above the cap
+#: only the exact sparse pre-checks and Gershgorin decide, and an undecided matrix
+#: abstains (the convex-objective bound is a tightening only).
+_CONVEX_OBJ_DENSE_EIG_MAX_N = 4000
+
+
+def _objective_hessian_sparse(evaluator, x: np.ndarray, n: int):
+    """The objective Hessian's lower triangle at ``x`` as CSR, or ``None``.
+
+    #1927: built from the evaluator's lower-triangle Lagrangian structure at
+    ``obj_factor=1, lambda=0`` -- the same values ``evaluate_hessian`` scatters into
+    a dense ``n x n`` array (0.8 GB per copy at n=10,000), without the array.
+    ``None`` when the evaluator has no sparse Hessian entry point.
+    """
+    import scipy.sparse as sp
+
+    if not (
+        hasattr(evaluator, "hessian_structure") and hasattr(evaluator, "evaluate_hessian_values")
+    ):
+        return None
+    rows, cols = evaluator.hessian_structure()
+    n_cons = int(getattr(evaluator, "n_constraints", 0) or 0)
+    vals = np.asarray(
+        evaluator.evaluate_hessian_values(x, 1.0, np.zeros(n_cons, dtype=np.float64)),
+        dtype=np.float64,
+    )
+    lower = sp.coo_matrix(
+        (vals, (np.asarray(rows, dtype=np.int64), np.asarray(cols, dtype=np.int64))),
+        shape=(n, n),
+    ).tocsr()  # sums duplicate entries, as the dense scatter's ``np.add.at`` does
+    lower.sort_indices()
+    return lower
+
+
+def _symmetric_from_lower(lower):
+    """``lower + tril(lower, -1).T``: the mirror ``evaluate_lagrangian_hessian`` uses."""
+    import scipy.sparse as sp
+
+    return (lower + sp.tril(lower, -1).T).tocsr()
+
+
+def _sparse_hessian_is_pd_with_margin(H) -> bool:
+    """:func:`_hessian_is_psd_with_margin` on a full symmetric sparse ``H`` (#1927).
+
+    Same verdict wherever the dense test runs, decided cheaply when it can be:
+
+    * the margin is the same: ``max(_CONVEX_OBJ_PSD_TOL, K * eps * ||H||_F)``;
+    * ``lambda_min <= min_i H_ii`` (Rayleigh quotient at ``e_i``), so a diagonal
+      entry below the margin -- e.g. a column that enters the objective only
+      linearly -- is "not positive definite" exactly, with no eigensolve;
+    * Gershgorin, ``lambda_min >= min_i (H_ii - sum_{j != i} |H_ij|)``, proves it
+      when that is at least the margin;
+    * otherwise the dense ``eigvalsh`` decides, as before, up to
+      :data:`_CONVEX_OBJ_DENSE_EIG_MAX_N`; above it the test abstains (False).
+    """
+    import scipy.sparse as sp
+
+    n = H.shape[0]
+    if H.ndim != 2 or H.shape[0] != H.shape[1] or not np.all(np.isfinite(H.data)):
+        return False
+    norm = float(np.sqrt(np.sum(H.data * H.data)))
+    if not np.isfinite(norm):
+        return False
+    margin = max(
+        _CONVEX_OBJ_PSD_TOL,
+        _CONVEX_OBJ_PSD_EIG_ROUNDOFF_K * float(np.finfo(np.float64).eps) * norm,
+    )
+    diag = H.diagonal()
+    if n == 0 or float(diag.min()) < margin:
+        return False
+    radius = np.asarray(abs(H).sum(axis=1)).ravel() - np.abs(diag)
+    if float(np.min(diag - radius)) >= margin:
+        return True
+    if n > _CONVEX_OBJ_DENSE_EIG_MAX_N:
+        return False
+    return _hessian_is_psd_with_margin(H.toarray() if sp.issparse(H) else H)
+
+
 def _objective_is_convex_quadratic(
     model: Model, evaluator, n_vars: int, remaining_budget: float | None = None
 ) -> bool:
@@ -3850,9 +3932,17 @@ def _objective_is_convex_quadratic(
     # objective really is quadratic (rejecting any non-quadratic that slipped
     # past the structural check above) before trusting the constant-Hessian
     # convexity argument.
+    _sparse_route = hasattr(evaluator, "hessian_structure") and hasattr(
+        evaluator, "evaluate_hessian_values"
+    )
     try:
-        H1 = np.asarray(evaluator.evaluate_hessian(0.5 * (lb_f + ub_f)), dtype=np.float64)
-        H2 = np.asarray(evaluator.evaluate_hessian(0.25 * lb_f + 0.75 * ub_f), dtype=np.float64)
+        if _sparse_route:
+            # #1927: sparse, not two dense n x n arrays; same values.
+            S1 = _objective_hessian_sparse(evaluator, 0.5 * (lb_f + ub_f), n_vars)
+            S2 = _objective_hessian_sparse(evaluator, 0.25 * lb_f + 0.75 * ub_f, n_vars)
+        else:
+            H1 = np.asarray(evaluator.evaluate_hessian(0.5 * (lb_f + ub_f)), dtype=np.float64)
+            H2 = np.asarray(evaluator.evaluate_hessian(0.25 * lb_f + 0.75 * ub_f), dtype=np.float64)
     except (ValueError, ArithmeticError, RuntimeError) as exc:
         # #1520/#1569: a sound fallback over the evaluator call ONLY — the box
         # above is validated, so what reaches here is the objective's own
@@ -3866,6 +3956,19 @@ def _objective_is_convex_quadratic(
             "keeping the McCormick objective bound",
         )
         return False
+    if _sparse_route:
+        if not (np.all(np.isfinite(S1.data)) and np.all(np.isfinite(S2.data))):
+            return False
+        # ``allclose`` entrywise, as on the dense pair. Both come from one
+        # structure, so their patterns match and the comparison is on the stored
+        # values (the mirrored upper triangle repeats them).
+        if not (
+            np.array_equal(S1.indptr, S2.indptr)
+            and np.array_equal(S1.indices, S2.indices)
+            and np.allclose(S1.data, S2.data, atol=1e-7, rtol=1e-7)
+        ):
+            return False
+        return _sparse_hessian_is_pd_with_margin(_symmetric_from_lower(S1))
     if H1.shape != (n_vars, n_vars) or H2.shape != (n_vars, n_vars):
         return False
     if not (np.all(np.isfinite(H1)) and np.all(np.isfinite(H2))):
