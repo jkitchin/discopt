@@ -1117,6 +1117,78 @@ def _sqrt(E: Any, a: Any) -> Any:
     )
 
 
+def _scalar_const(expr: Expression) -> Optional[float]:
+    """The value of a scalar ``Constant``/``Parameter``, else ``None``."""
+    if isinstance(expr, (Constant, Parameter)):
+        v = np.asarray(expr.value)
+        if v.ndim == 0:
+            return float(v)
+    return None
+
+
+def _is_square(expr: Expression) -> bool:
+    """``b**2``, ``b*b`` (structurally equal factors) or ``dm.sum(v**2)``."""
+    from discopt._relax.convexity.patterns import _expr_struct_eq, _summed_vector_square_base
+
+    if isinstance(expr, SumExpression):
+        return _summed_vector_square_base(expr) is not None
+    if not isinstance(expr, BinaryOp):
+        return False
+    if expr.op == "**":
+        return _scalar_const(expr.right) == 2.0
+    return expr.op == "*" and _expr_struct_eq(expr.left, expr.right)
+
+
+def _is_sum_of_squares(expr: Expression) -> bool:
+    """Is ``expr`` a nonnegatively weighted sum of squares plus a constant ``>= 0``?
+
+    Then ``sqrt(expr)`` is the Euclidean norm ``||b||`` of the vector of
+    (weighted) square bases, and its minimum value ``0`` is attained exactly where
+    every base vanishes. There ``f(y) >= 0 = f(x0)`` for all ``y``, so ``0`` is a
+    valid subgradient (an exact global underestimator slope) whatever the bases
+    are -- the same reasoning that gives ``dm.norm(.., 2)`` the plain ``E.sqrt``
+    (#1933). The edge-honest :func:`_sqrt` returns ``inf * 0 = NaN`` there instead,
+    which a solver iterating at the apex of a cone (``||x|| <= s`` at ``x = 0``)
+    reports as an invalid number. Away from ``expr == 0`` the two lowerings are the
+    same function with the same derivatives (see :func:`_sqrt`).
+
+    Mirrored on the Rust arena by ``_arena_tape._arena_sum_of_squares``; the two
+    must decide alike so both lowering paths build the same tape.
+    """
+    stack: list[tuple[Expression, float]] = [(expr, 1.0)]
+    while stack:
+        node, sign = stack.pop()
+        if isinstance(node, BinaryOp) and node.op in ("+", "-"):
+            stack.append((node.left, sign))
+            stack.append((node.right, sign if node.op == "+" else -sign))
+            continue
+        if isinstance(node, UnaryOp) and node.op == "neg":
+            stack.append((node.operand, -sign))
+            continue
+        if isinstance(node, SumOverExpression):
+            stack.extend((t, sign) for t in node.terms)
+            continue
+        c = _scalar_const(node)
+        if c is not None:
+            if not sign * c >= 0.0:  # also rejects NaN
+                return False
+            continue
+        if isinstance(node, BinaryOp) and node.op == "*":
+            cl, cr = _scalar_const(node.left), _scalar_const(node.right)
+            if cl is not None and _is_square(node.right):
+                if not sign * cl >= 0.0:
+                    return False
+                continue
+            if cr is not None and _is_square(node.left):
+                if not sign * cr >= 0.0:
+                    return False
+                continue
+        if sign > 0.0 and _is_square(node):
+            continue
+        return False
+    return True
+
+
 def _is_constant_half(node: Any) -> bool:
     """Is ``node`` a variable-free tape node whose value is exactly ``0.5``?"""
     try:
@@ -1361,8 +1433,11 @@ def _lower_function(expr: FunctionCall, E: Any, args: list, budget: _Budget) -> 
         "erf",
     }
     if name == "sqrt":
-        # Not the native opcode directly: see `_sqrt` (#1491).
+        # Not the native opcode directly: see `_sqrt` (#1491) -- except for the
+        # square root of a sum of squares, which is a norm (#1933).
         _require(args, 1, name)
+        if _is_sum_of_squares(expr.args[0]):
+            return _map(E.sqrt, arg0())
         return _map(lambda a: _sqrt(E, a), arg0())
     if name in native_unary:
         _require(args, 1, name)

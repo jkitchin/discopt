@@ -8927,6 +8927,7 @@ def _convexity_rewrites(
     model: Model,
     *,
     entropy: bool = True,
+    soc: bool = True,
     epigraph: bool = True,
     entropy_deadline: Optional[Callable[[], bool]] = None,
 ) -> tuple[Model, tuple[str, ...]]:
@@ -8938,11 +8939,15 @@ def _convexity_rewrites(
 
     * ``"entropy"`` -- ``x*log(x)`` -> ``entropy(x)`` and ``x*log(x/y)`` ->
       ``centropy(x, y)`` (:func:`~discopt._relax.factorable_reform.canonicalize_entropy`).
+    * ``"squared_soc"`` -- ``sum w_i a_i**2 + c <= k t**2`` with ``t >= 0`` on the
+      box rewritten to its norm form ``sqrt(sum w_i a_i**2 + c) <= sqrt(k) t``
+      (:func:`~discopt._relax.soc_rewrite.rewrite_squared_soc`, #1933).
     * ``"objective_epigraph"`` -- ``min z`` with ``z == g(x)`` relaxed to
       ``z >= g(x)`` (:func:`~discopt._relax.objective_epigraph.relax_objective_defining_equality`).
 
-    Both are exact at the optimum. They are the reason the solve can prove a model
-    convex that the bare classifier does not, so this is the single definition
+    All are exact (the first two on the whole box, the epigraph at the optimum).
+    They are the reason the solve can prove a model convex that the bare
+    classifier does not, so this is the single definition
     shared by the solve and by :meth:`discopt.modeling.core.Model.convexity`.
     """
     applied: list[str] = []
@@ -8953,6 +8958,12 @@ def _convexity_rewrites(
         if new is not model:
             applied.append("entropy")
             model = new
+    if soc:
+        from discopt._relax.soc_rewrite import rewrite_squared_soc
+
+        model, changed = rewrite_squared_soc(model)
+        if changed:
+            applied.append("squared_soc")
     if epigraph:
         from discopt._relax.objective_epigraph import relax_objective_defining_equality
 
@@ -13876,6 +13887,38 @@ def solve_model(
             options=scip_options,
         )
 
+    # --- #1933: squared-form second-order cones to their norm form ---
+    # ``sum w_i a_i**2 + c <= k t**2`` with ``t >= 0`` on the box is the same set as
+    # ``sqrt(sum w_i a_i**2 + c) <= sqrt(k) t`` (exact on the whole box, see
+    # ``_relax/soc_rewrite.py``), and only the second is convex as a function. It
+    # runs here, ahead of the convex-MINLP router, because every consumer below
+    # must see the norm form: the router's convexity proof, and the OA cuts of the
+    # family it routes to -- a gradient cut of the squared row taken outside the
+    # cone is not valid for it. After the SCIP hand-off above, which receives the
+    # model as written and recognizes the squared cone itself. The rewritten rows
+    # are recorded so ``Model.solve`` reports constraint duals for the rows the
+    # caller wrote (``convert_squared_soc_duals``).
+    # The variables are untouched, so callbacks see the point they always did.
+    #
+    # The #1456 pre-solve gate is constructed here, at the first pass it gates,
+    # rather than at the reformulation block below: this pass runs ahead of the
+    # router and must see ``time_limit`` the same way (entry gate + per-row
+    # abandon hook). See the #1456 note at the reformulation block.
+    from discopt._relax.presolve_deadline import PresolveDeadline
+    from discopt._relax.soc_rewrite import record_squared_soc_rows, rewrite_squared_soc_rows
+
+    _presolve_deadline = PresolveDeadline(_deadline_exhausted)
+    _soc_caller_model = model
+    _soc_rows: list = []
+    if _presolve_deadline.afford("squared_soc"):
+        model, _soc_rows = rewrite_squared_soc_rows(
+            model, deadline=_presolve_deadline.abandon_hook("squared_soc")
+        )
+    if _soc_rows:
+        record_squared_soc_rows(_soc_caller_model, _soc_rows)
+        _carry_solve_clocks(_soc_caller_model, model)
+        logger.debug("rewrote %d squared-form cone row(s) to norm form", len(_soc_rows))
+
     # --- #1059: auto-route a convexity-certified MINLP to the MIP-NLP family ---
     # Only when the caller expressed no preference -- neither an explicit
     # solver= (including solver="bb"), nor any option this family would drop.
@@ -14986,10 +15029,8 @@ def solve_model(
     # it. Declining a pass only ever weakens a still-valid bound.
     # See ``_relax/presolve_deadline.py`` for why this is a clock and not a
     # deterministic work allowance (that design was built and falsified).
-    from discopt._relax.presolve_deadline import PresolveDeadline
-
-    _presolve_deadline = PresolveDeadline(_deadline_exhausted)
-
+    # ``_presolve_deadline`` itself is constructed earlier, at the #1933
+    # squared-SOC pass, the first pass it gates.
     _entropy_ok = _presolve_deadline.afford("canonicalize_entropy")
 
     # --- Objective-defining-equality relaxation (the SUSPECT "objective
@@ -15029,6 +15070,9 @@ def solve_model(
     model, _rewrites = _convexity_rewrites(
         model,
         entropy=_entropy_ok and not _already_linear,
+        # Already applied ahead of the convex-MINLP router (#1933); the pass is
+        # kept in ``_convexity_rewrites`` for ``Model.convexity()``.
+        soc=False,
         epigraph=not _has_bb_callbacks,
         entropy_deadline=_presolve_deadline.abandon_hook("canonicalize_entropy"),
     )

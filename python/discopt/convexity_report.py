@@ -36,7 +36,8 @@ class ConvexityReport:
             Indicator, disjunctive, SOS and logical constraints are never
             reported convex. Empty on budget exhaustion.
         rewrites: The exact rewrites applied before classifying, in order
-            (``"entropy"``, ``"objective_epigraph"``). These are what let a model
+            (``"entropy"``, ``"squared_soc"``,
+            ``"objective_epigraph"``). These are what let a model
             be proven convex here that the bare classifier would not prove.
 
     For a model with integer or binary variables the verdict is about the
