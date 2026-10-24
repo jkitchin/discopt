@@ -762,11 +762,57 @@ def _over_distribution_budget(model: Model, pass_name: str) -> bool:
     return model_distribution_exceeds_budget(model, pass_name=pass_name)
 
 
-def _bodies(model: Model):
+def _integer_factor_vars(model: Model, implied) -> frozenset[int]:
+    """``_index`` of every variable that can be an integer factor here: declared
+    ``INTEGER``, or carrying an *implied*-integer element. A product with no such
+    factor is invisible to every detector and to the rewrite (each requires
+    :func:`_int_factor_range` of some factor), so a body referencing none of them
+    has nothing for this pass."""
+    implied_vars = {vi for vi, _ in implied}
+    return frozenset(
+        v._index
+        for v in model._variables
+        if v.var_type == VarType.INTEGER or v._index in implied_vars
+    )
+
+
+def _references_any(expr: Expression, var_indices: frozenset[int]) -> bool:
+    """True if the DAG of *expr* references a variable whose ``_index`` is in
+    *var_indices*. Walks every ``Expression``-valued attribute (and lists/tuples of
+    them) rather than a fixed child list, so no node type can hide a reference;
+    shared subexpressions are visited once."""
+    seen: set[int] = set()
+    stack: list = [expr]
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, Variable):
+            if node._index in var_indices:
+                return True
+            continue
+        for val in getattr(node, "__dict__", {}).values():
+            if isinstance(val, Expression):
+                stack.append(val)
+            elif isinstance(val, (list, tuple)):
+                stack.extend(x for x in val if isinstance(x, Expression))
+    return False
+
+
+def _bodies(model: Model, implied=frozenset()):
+    """Distributed constraint bodies and objective, skipping (before the
+    distribution, which is the expensive part) every body that references no
+    integer-factor variable: such a body can produce no hit for any caller, so
+    skipping it is exact. ``truck``: the 1M-term distributed objective has none,
+    and walking it cost ~41 s of a 60 s budget."""
+    candidates = _integer_factor_vars(model, implied)
+    if not candidates:
+        return
     for c in model._constraints:
-        if isinstance(c, Constraint):
+        if isinstance(c, Constraint) and _references_any(c.body, candidates):
             yield distribute_products(c.body)
-    if model._objective is not None:
+    if model._objective is not None and _references_any(model._objective.expression, candidates):
         yield distribute_products(model._objective.expression)
 
 
@@ -841,7 +887,7 @@ def has_integer_product_work(model: Model, implied=frozenset(), multilinear: boo
     #707)."""
     if _over_distribution_budget(model, "integer-product reform"):
         return False
-    for body in _bodies(model):
+    for body in _bodies(model, implied):
         found = []
         _for_each_int_bilinear(body, implied, lambda ints: found.append(True))
         if found or _has_int_square(body, implied):
@@ -857,7 +903,7 @@ def has_integer_multilinear_work(model: Model, implied=frozenset()) -> bool:
     ``DISCOPT_INTEGER_MULTILINEAR_REFORM`` pass linearizes (issue #707)."""
     if _over_distribution_budget(model, "integer-multilinear reform"):
         return False
-    return any(_has_int_multilinear(body, implied) for body in _bodies(model))
+    return any(_has_int_multilinear(body, implied) for body in _bodies(model, implied))
 
 
 def has_nonconvex_integer_bilinear(model: Model) -> bool:
@@ -875,7 +921,7 @@ def has_nonconvex_integer_bilinear(model: Model) -> bool:
         return False
     implied = frozenset(detect_implied_integers(model))
     found: list[bool] = []
-    for body in _bodies(model):
+    for body in _bodies(model, implied):
         _for_each_int_bilinear(body, implied, lambda ints: found.append(True))
         if found:
             return True
@@ -891,7 +937,7 @@ def _participation(model: Model, implied) -> dict:
         for vi, eli in ints:
             counts[(vi._index, eli)] = counts.get((vi._index, eli), 0) + 1
 
-    for body in _bodies(model):
+    for body in _bodies(model, implied):
         _for_each_int_bilinear(body, implied, tally)
     return counts
 

@@ -456,6 +456,7 @@ INVENTORY: tuple[tuple[str, str, str, str], ...] = (
     # The entry gate itself (#1456): one monotonic clock read per optional pass,
     # O(1), and it is the thing that bounds the aggregate rather than any leaf.
     ("discopt._relax.presolve_deadline", "PresolveDeadline", "trivial", "clock read per pass"),
+    ("discopt._relax.presolve_deadline", "presolve_deadline_enabled", "trivial", "env read"),
     ("discopt._relax.model_utils", "_dcb_flat", "trivial", "flat index map"),
     (
         "discopt._relax.nonlinear_bound_tightening",

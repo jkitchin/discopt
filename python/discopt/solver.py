@@ -11718,7 +11718,14 @@ def _scoped_deep_recursion(fn: _F) -> _F:
 
         # #1520: no ``except``. The count is iterative with no failure mode; the old
         # ``depth = 0`` fallback ran a deep model on the small default stack.
+        _t_size0 = time.perf_counter()
         depth = _max_expr_node_count(model)
+        # The count walks every body before ``solve_model`` anchors its clock, so on
+        # a large model it is wall the caller's ``time_limit`` never saw
+        # (``telecomsp_nor_sun``: ~9 s). Hand the solve what is left of it.
+        _tl = kwargs.get("time_limit")
+        if isinstance(_tl, (int, float)) and math.isfinite(_tl):
+            kwargs["time_limit"] = max(0.0, float(_tl) - (time.perf_counter() - _t_size0))
         if depth <= _DEEP_SOLVE_DEPTH_GATE:
             return fn(model, *args, **kwargs)
         # A handful of Python frames are entered per node along the deepest path
@@ -13205,6 +13212,50 @@ def solve_model(
         """
         return _remaining_budget() <= floor
 
+    from discopt._relax.presolve_deadline import presolve_deadline_enabled
+
+    _spent_checkpoints_on = presolve_deadline_enabled()
+
+    def _budget_spent_result(phase: str) -> Optional[SolveResult]:
+        """A ``time_limit`` result when the whole budget is already GONE at the
+        entry of a mandatory pre-search *phase*, else ``None``.
+
+        ``_deadline_exhausted`` gates the optional passes; the mandatory ones --
+        scaling diagnostics, routing, problem classification, convexity
+        classification -- had no gate at all, so on a large model each whole-model
+        walk ran to completion after the deadline and the overruns added up: in
+        the 60 s large-instance sweep ``telecomsp_nor_sun`` was still classifying
+        at 135 s and ``parabol5_2_4`` returned at 115 s. Nothing past this point can
+        produce a result inside a budget that is already spent, so returning here
+        reports exactly what the late arm before the search build reports when it
+        has no time left -- no incumbent, no bound -- without the walks.
+
+        Sound by construction: no incumbent exists yet at any call site (every
+        earlier path that finds one returns it), and an absent bound claims
+        nothing. ``DISCOPT_PRESOLVE_DEADLINE=0`` turns these checkpoints off with
+        the rest of the pre-solve deadline (an A/B lever, not a mode).
+        """
+        if not _spent_checkpoints_on or _remaining_budget() > 0.0:
+            return None
+        logger.info("time_limit spent before %s; returning time_limit with no search", phase)
+        wall = time.perf_counter() - _solve_t0
+        from discopt import debug as _debug_spent
+
+        _debug_spent.fire(
+            _debug_spent.Checkpoint.TERMINATED,
+            model=model,
+            iteration=0,
+            elapsed=wall,
+            error="time_limit",
+        )
+        return SolveResult(
+            status="time_limit",
+            wall_time=wall,
+            node_count=0,
+            python_time=wall,
+            bound_valid=False,
+        )
+
     # --- #1385: a model with no columns is decided here, not by a backend ---
     trivial = _constant_objective_result(model, _solve_t0)
     if trivial is not None:
@@ -13740,6 +13791,9 @@ def solve_model(
         model, deadline=_role2_deadline(time.perf_counter() + _nbt_budget_s)
     )
     _check_finite_bounds(model, _declared_tightening)
+    _spent = _budget_spent_result("the scaling diagnostics")
+    if _spent is not None:
+        return _spent
     # Same block, same reason (#1059): scaling is a property of the declared
     # model, so it is reported once here rather than by whichever family runs.
     _check_model_scaling(model)
@@ -13833,6 +13887,9 @@ def solve_model(
                 + ")"
             )
         else:
+            _spent = _budget_spent_result("the convex-MINLP auto-route")
+            if _spent is not None:
+                return _spent
             (
                 _auto_route_method,
                 _auto_route_reason,
@@ -14953,6 +15010,9 @@ def solve_model(
     # linear model nonlinear or the reverse.
     from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
+    _spent = _budget_spent_result("problem classification")
+    if _spent is not None:
+        return _spent
     _already_linear = classify_problem(model) in (ProblemClass.LP, ProblemClass.MILP)
 
     model, _rewrites = _convexity_rewrites(
@@ -15777,6 +15837,9 @@ def solve_model(
     # -7.0 with nothing to branch on. So ``presolve_requested`` is kept separate:
     # the HiGHS skip must not disable coefficient tightening, while a *user's*
     # ``presolve=False`` still does.
+    _spent = _budget_spent_result("the pure LP/MILP routing test")
+    if _spent is not None:
+        return _spent
     presolve_requested = presolve
     if presolve and _highs_takes_pure_lp_milp(
         model,
@@ -16076,6 +16139,9 @@ def solve_model(
     # for an LP (#1712); nothing between the two reads or changes the model.
     from discopt._relax.problem_classifier import ProblemClass, classify_problem
 
+    _spent = _budget_spent_result("dispatch classification")
+    if _spent is not None:
+        return _spent
     problem_class = classify_problem(model)
 
     _pure_continuous = _is_pure_continuous(model)
@@ -16883,6 +16949,9 @@ def solve_model(
                 abs_gap_tol=abs_gap_tol,
             )
 
+    _spent = _budget_spent_result("root FBBT")
+    if _spent is not None:
+        return _spent
     # --- Extract variable info ---
     n_vars, lb, ub, int_offsets, int_sizes = _extract_variable_info(model)
 

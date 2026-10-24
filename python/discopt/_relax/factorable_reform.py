@@ -248,7 +248,14 @@ def _expr_node_count_children(node: Expression) -> tuple[Expression, ...]:
     return ()
 
 
-def _expr_node_count(expr: Expression) -> int:
+_COUNTED_COMPOSITES = (BinaryOp, UnaryOp, FunctionCall, SumExpression, SumOverExpression)
+
+
+def _expr_node_count(
+    expr: Expression,
+    sizes: Optional[dict[int, int]] = None,
+    held: Optional[list[Expression]] = None,
+) -> int:
     """Count the nodes in *expr* iteratively (so this measurement never itself
     recurses into the very depth it is trying to size).
 
@@ -258,9 +265,20 @@ def _expr_node_count(expr: Expression) -> int:
     sum(size(child))``, memoised by node identity -- instead of by visiting every
     occurrence, which was exponential on a reduced-space NN embedding. Same
     number, linear time.
+
+    *sizes*/*held* let :func:`_max_expr_node_count` share one memo across a
+    model's bodies (a node's tree size does not depend on which body reaches it),
+    and a leaf -- any node :func:`_expr_node_count_children` gives no children --
+    is sized inline instead of through the stack. Same numbers; measured on
+    ``telecomsp_nor_sun`` (21,270 bodies, 13.2 M tree nodes) the model-wide count
+    went from 15.2 s to a fraction of that, and it runs several times per solve.
     """
-    sizes: dict[int, int] = {}
-    held: list[Expression] = []  # keep every sized node alive: ids cannot recycle
+    if sizes is None:
+        sizes = {}
+    if held is None:
+        held = []  # keep every sized node alive: ids cannot recycle
+    if not isinstance(expr, _COUNTED_COMPOSITES):
+        return 1
     stack: list[tuple[Expression, bool]] = [(expr, False)]
     while stack:
         node, expanded = stack.pop()
@@ -268,11 +286,21 @@ def _expr_node_count(expr: Expression) -> int:
         if nid in sizes:
             continue
         children = _expr_node_count_children(node)
-        if not expanded and children:
+        if not expanded:
             stack.append((node, True))
-            stack.extend((c, False) for c in children if id(c) not in sizes)
+            for c in children:
+                if id(c) in sizes:
+                    continue
+                if isinstance(c, _COUNTED_COMPOSITES):
+                    stack.append((c, False))
+                else:
+                    sizes[id(c)] = 1
+                    held.append(c)
             continue
-        sizes[nid] = 1 + sum(sizes[id(c)] for c in children)
+        total = 1
+        for c in children:
+            total += sizes[id(c)]
+        sizes[nid] = total
         held.append(node)
     return sizes[id(expr)]
 
@@ -320,6 +348,39 @@ def _iter_constraint_bodies(items) -> Iterator[Expression]:
             stack.extend(c)
 
 
+# The last model-wide count, as ``(roots, {id(root): count})``. The solve sizes
+# the same bodies several times -- the deep-recursion wrapper, the recentre pass,
+# the factorable and term-classifier gates -- and the reformulated models between
+# them share most bodies with the original. An expression node is never mutated in
+# place (every rewrite builds new nodes), so a root's tree size is a function of
+# its identity; ``roots`` holds them so no id can be recycled while cached. One
+# entry, so the cache pins at most one model's bodies. Measured on
+# ``telecomsp_nor_sun`` (21,270 bodies, 13.2 M tree nodes): ~10 s per count, run
+# about four times per solve against a 60 s ``time_limit``.
+_ROOT_COUNT_CACHE: tuple[tuple[Expression, ...], dict[int, int]] = ((), {})
+
+
+def _root_node_counts(roots: list[Expression]) -> list[int]:
+    """:func:`_expr_node_count` of each of *roots*, reusing the previous call's
+    counts for roots it already sized (by identity) and one shared memo for the
+    rest."""
+    global _ROOT_COUNT_CACHE
+    # Bind the cached roots locally: while this call runs they stay alive even if
+    # another thread replaces the cache, so an id in ``prev`` still names them.
+    prev_roots, prev = _ROOT_COUNT_CACHE
+    sizes: dict[int, int] = {}
+    held: list[Expression] = []
+    counts: list[int] = []
+    for r in roots:
+        c = prev.get(id(r))
+        if c is None:
+            c = _expr_node_count(r, sizes, held)
+        counts.append(c)
+    _ROOT_COUNT_CACHE = (tuple(roots), {id(r): c for r, c in zip(roots, counts)})
+    del prev_roots
+    return counts
+
+
 def _max_expr_node_count(model: Model) -> int:
     """Largest single-expression node count across the objective and every
     constraint body the solve can walk — an upper bound on how deep the
@@ -330,12 +391,12 @@ def _max_expr_node_count(model: Model) -> int:
     materialised only later in the solve (#1808): an under-count here runs a deep
     model at the default recursion limit.
     """
-    largest = 0
+    roots: list[Expression] = []
     obj = getattr(model, "_objective", None)
     if obj is not None:
-        largest = _expr_node_count(obj.expression)
-    for body in _iter_constraint_bodies(getattr(model, "_constraints", []) or []):
-        largest = max(largest, _expr_node_count(body))
+        roots.append(obj.expression)
+    roots.extend(_iter_constraint_bodies(getattr(model, "_constraints", []) or []))
+    largest = max(_root_node_counts(roots), default=0)
     # A ``m.logical`` row is a ``LogicalExpression``, not an ``Expression``; the GDP
     # lowering's ``_to_nnf`` recurses once per level of it inside the solve.
     for c in getattr(model, "_constraints", []) or []:

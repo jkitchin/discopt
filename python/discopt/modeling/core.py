@@ -10715,7 +10715,16 @@ class Model:
         # budget that has already been spent is not available to reserve. Flag-off
         # gives ``_ck_elapsed == 0.0`` exactly, so ``_remaining_tl is time_limit``
         # numerically and both figures below are unchanged.
-        _remaining_tl = max(0.0, time_limit - _ck_elapsed)
+        #
+        # What is left is measured from this method's entry clock, not as
+        # ``time_limit - _ck_elapsed``: the convex-kernel attempt is not the only
+        # work above. The evaluator build and the incumbent-verification snapshot
+        # run here too, and on a large model they are seconds each --
+        # ``parabol5_2_4`` spent ~20 s of a 60 s limit above this line, none of it
+        # charged, so ``solve_model`` started with a full minute.
+        # The kernel's wall is inside the same elapsed time, so it is still
+        # deducted exactly once.
+        _remaining_tl = max(0.0, time_limit - (_time.perf_counter() - _t_solve0))
         _fb_reserve = 0.0
         if (
             _lp_spatial_fallback_enabled()
