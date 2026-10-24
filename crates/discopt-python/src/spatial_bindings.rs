@@ -16,11 +16,14 @@
 //! `fixed_cols`/`fixed_coeffs`, plus `fixed_rhs` (each row is `<= rhs`).
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
-use discopt_core::bnb::spatial_kernel::{BlfTerm, EnvTerm, FixedRow, SpatialKernelSpec};
-use discopt_core::bnb::spatial_tree::{
-    solve_spatial_tree_with_hooks, IncumbentPrice, IncumbentValueFn, PrimalHook, SpatialTreeConfig,
-    TreeStatus,
+use discopt_core::bnb::spatial_kernel::{
+    assemble_node_lp, BlfTerm, EnvTerm, FixedRow, SpatialKernelSpec,
 };
+use discopt_core::bnb::spatial_tree::{
+    solve_spatial_tree_observed, IncumbentPrice, IncumbentValueFn, NodeObservation, NodeObserver,
+    PrimalHook, SpatialTreeConfig, TreeStatus,
+};
+use discopt_core::lp::simplex::LpStatus;
 use discopt_core::lp::simplex::SimplexOptions;
 use numpy::{PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
@@ -49,6 +52,7 @@ use std::time::{Duration, Instant};
     incumbent_time_extension_s=None, bound_time_extension_s=None,
     cold_dual_start=false, primal_hook=None, incumbent_value=None,
     scale_free_branching=false, warm_start_children=false, warm_flip_boxed=false,
+    node_observer=None,
 ))]
 pub fn solve_spatial_tree_py<'py>(
     py: Python<'py>,
@@ -100,6 +104,7 @@ pub fn solve_spatial_tree_py<'py>(
     scale_free_branching: bool,
     warm_start_children: bool,
     warm_flip_boxed: bool,
+    node_observer: Option<PyObject>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let c = c.as_slice()?;
     let integrality = integrality.as_slice()?;
@@ -364,6 +369,11 @@ pub fn solve_spatial_tree_py<'py>(
     // `IncumbentValueFn`). Same GIL and error rule as the primal hook: the first
     // exception rejects that point and every later one, and is raised on return.
     let mut value_err: Option<PyErr> = None;
+    // #1935: the optional `node_observer(record)` sees every solved node LP -- the
+    // assembled LP (CSC + b/l/u/c), the basis it started from, and the simplex's
+    // result -- so the node-LP sequence can be replayed through another engine.
+    // It observes only; same GIL and first-error rule as the hooks above.
+    let mut observer_err: Option<PyErr> = None;
     // Release the GIL for the (potentially long) solve.
     let res = py.allow_threads(|| {
         let mut call = |x: &[f64], inc: Option<f64>| -> Option<(f64, Vec<f64>)> {
@@ -432,12 +442,73 @@ pub fn solve_spatial_tree_py<'py>(
         } else {
             None
         };
-        solve_spatial_tree_with_hooks(&spec, &cfg, &opts, hook, value_fn)
+        let spec_ref = &spec;
+        let mut observe = |o: &NodeObservation<'_>| {
+            if observer_err.is_some() {
+                return;
+            }
+            let Some(cb) = node_observer.as_ref() else {
+                return;
+            };
+            let lp = assemble_node_lp(spec_ref, o.lo, o.hi);
+            let mut c = spec_ref.c.clone();
+            c.resize(lp.n_total, 0.0);
+            let (col_ptr, row_idx, vals) = lp.sp.raw();
+            let r = o.result;
+            let status = match r.status {
+                LpStatus::Optimal => "optimal",
+                LpStatus::Infeasible => "infeasible",
+                LpStatus::Unbounded => "unbounded",
+                LpStatus::IterLimit => "iter_limit",
+                LpStatus::Numerical => "numerical",
+            };
+            let res: PyResult<()> = Python::with_gil(|py| {
+                let d = PyDict::new(py);
+                d.set_item("id", o.id)?;
+                d.set_item("parent", o.parent)?;
+                d.set_item("m", lp.m)?;
+                d.set_item("n", lp.n_total)?;
+                d.set_item("col_ptr", PyArray1::from_slice(py, col_ptr))?;
+                d.set_item("row_idx", PyArray1::from_slice(py, row_idx))?;
+                d.set_item("vals", PyArray1::from_slice(py, vals))?;
+                d.set_item("b", PyArray1::from_slice(py, &lp.b))?;
+                d.set_item("l", PyArray1::from_slice(py, &lp.l))?;
+                d.set_item("u", PyArray1::from_slice(py, &lp.u))?;
+                d.set_item("c", PyArray1::from_vec(py, c))?;
+                d.set_item("status", status)?;
+                d.set_item("n_pivots", r.n_pivots)?;
+                d.set_item("lp_s", r.lp_s)?;
+                d.set_item("obj", r.obj)?;
+                d.set_item("bound", r.bound)?;
+                d.set_item("warm_started", r.warm_started)?;
+                if let Some(b) = o.start {
+                    d.set_item("start_col_status", PyArray1::from_slice(py, &b.col_status))?;
+                }
+                d.set_item(
+                    "end_col_status",
+                    PyArray1::from_slice(py, &r.basis.col_status),
+                )?;
+                cb.call1(py, (d,))?;
+                Ok(())
+            });
+            if let Err(e) = res {
+                observer_err = Some(e);
+            }
+        };
+        let observer: Option<&mut NodeObserver<'_>> = if node_observer.is_some() {
+            Some(&mut observe)
+        } else {
+            None
+        };
+        solve_spatial_tree_observed(&spec, &cfg, &opts, hook, value_fn, observer)
     });
     if let Some(e) = hook_err {
         return Err(e);
     }
     if let Some(e) = value_err {
+        return Err(e);
+    }
+    if let Some(e) = observer_err {
         return Err(e);
     }
 

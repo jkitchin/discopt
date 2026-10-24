@@ -42,6 +42,9 @@ struct QNode {
     /// the parent itself inherited. `None` unless
     /// [`SpatialTreeConfig::warm_start_children`] is on (and at the root).
     basis: Option<Rc<Basis>>,
+    /// The `node_count` id of the node that pushed this one (`None` at the root);
+    /// read only by a [`NodeObserver`].
+    parent: Option<usize>,
 }
 
 impl PartialEq for QNode {
@@ -409,6 +412,26 @@ pub struct SpatialTreeResult {
     pub node_lp_s: f64,
 }
 
+/// One solved node, as a [`NodeObserver`] sees it (#1935 engine comparison).
+pub struct NodeObservation<'a> {
+    /// This node's id (the tree's `node_count` when it was solved; the root is 1).
+    pub id: usize,
+    /// The id of the node that pushed it; `None` at the root.
+    pub parent: Option<usize>,
+    /// The box the node LP was assembled over (after propagation).
+    pub lo: &'a [f64],
+    /// Upper side of that box.
+    pub hi: &'a [f64],
+    /// The basis the LP was started from, if any.
+    pub start: Option<&'a Basis>,
+    /// The node solve's result.
+    pub result: &'a crate::bnb::spatial_kernel::SpatialNodeResult,
+}
+
+/// Called after every node LP with that node's [`NodeObservation`]. It observes
+/// only: nothing it does reaches the search.
+pub type NodeObserver<'a> = dyn FnMut(&NodeObservation<'_>) + 'a;
+
 /// A caller-supplied primal heuristic for [`solve_spatial_tree_with_hook`] (#1522).
 ///
 /// Called with a node's LP point (all `n_cols` columns) and the current incumbent
@@ -585,8 +608,22 @@ pub fn solve_spatial_tree_with_hooks(
     spec: &SpatialKernelSpec,
     config: &SpatialTreeConfig,
     opts: &SimplexOptions,
+    hook: Option<&mut PrimalHook<'_>>,
+    value_fn: Option<&mut IncumbentValueFn<'_>>,
+) -> SpatialTreeResult {
+    solve_spatial_tree_observed(spec, config, opts, hook, value_fn, None)
+}
+
+/// [`solve_spatial_tree_with_hooks`] that also reports every solved node to
+/// `observer` (#1935: capturing the node-LP sequence to replay it through another
+/// LP engine). `None` is exactly [`solve_spatial_tree_with_hooks`].
+pub fn solve_spatial_tree_observed(
+    spec: &SpatialKernelSpec,
+    config: &SpatialTreeConfig,
+    opts: &SimplexOptions,
     mut hook: Option<&mut PrimalHook<'_>>,
     mut value_fn: Option<&mut IncumbentValueFn<'_>>,
+    mut observer: Option<&mut NodeObserver<'_>>,
 ) -> SpatialTreeResult {
     let mut n_primal_hook_calls = 0usize;
     let mut n_primal_hook_improvements = 0usize;
@@ -606,6 +643,7 @@ pub fn solve_spatial_tree_with_hooks(
         lo: spec.global_lo.clone(),
         hi: spec.global_hi.clone(),
         basis: None,
+        parent: None,
     });
     // Root box widths (for root-relative branch scoring in the fallback rule).
     let root_w: Vec<f64> = spec
@@ -654,6 +692,7 @@ pub fn solve_spatial_tree_with_hooks(
         lo,
         hi,
         basis: parent_basis,
+        parent: parent_id,
     }) = heap.pop()
     {
         if deadline.is_some_and(|d| Instant::now() >= d) && !extension_taken && incumbent.is_some()
@@ -813,6 +852,16 @@ pub fn solve_spatial_tree_with_hooks(
         n_node_pivots += node.n_pivots;
         n_warm_starts += usize::from(node.warm_started);
         n_warm_shape_mismatch += usize::from(node.warm_shape_mismatch);
+        if let Some(obs) = observer.as_mut() {
+            obs(&NodeObservation {
+                id: node_count,
+                parent: parent_id,
+                lo: &lo,
+                hi: &hi,
+                start: parent_basis.as_deref(),
+                result: &node,
+            });
+        }
         if node.status == LpStatus::Optimal && node.bound == f64::NEG_INFINITY {
             n_uncertified += 1;
         }
@@ -874,6 +923,7 @@ pub fn solve_spatial_tree_with_hooks(
                         parent_bound,
                         spec.integrality[j],
                         parent_basis.clone(),
+                        Some(node_count),
                     );
                 }
                 None => global_lb_closed = global_lb_closed.min(parent_bound),
@@ -1113,6 +1163,7 @@ pub fn solve_spatial_tree_with_hooks(
             bound,
             spec.integrality[split_col],
             child_basis,
+            Some(node_count),
         );
     }
 
@@ -1216,6 +1267,7 @@ fn push_children(
     pb: f64,
     is_int: bool,
     basis: Option<Rc<Basis>>,
+    parent: Option<usize>,
 ) {
     if is_int {
         // integer: child1 x<=floor, child2 x>=ceil
@@ -1232,6 +1284,7 @@ fn push_children(
                 lo: lo1,
                 hi: hi1,
                 basis: basis.clone(),
+                parent,
             });
         }
         if hi2[split_col] >= lo2[split_col] - 1e-12 {
@@ -1240,6 +1293,7 @@ fn push_children(
                 lo: lo2,
                 hi: hi2,
                 basis: basis.clone(),
+                parent,
             });
         }
     } else {
@@ -1252,12 +1306,14 @@ fn push_children(
             lo: lo.to_vec(),
             hi: hi1,
             basis: basis.clone(),
+            parent,
         });
         heap.push(QNode {
             pb,
             lo: lo2,
             hi: hi.to_vec(),
             basis: basis.clone(),
+            parent,
         });
     }
 }

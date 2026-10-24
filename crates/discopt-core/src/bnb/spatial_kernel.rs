@@ -232,6 +232,12 @@ pub struct SpatialNodeResult {
     pub n_lp_solves: usize,
     /// Simplex pivots of the node relaxation solve (OBBT probes excluded).
     pub n_pivots: usize,
+    /// Wall seconds of the node relaxation's simplex call alone (no assembly,
+    /// safe bound or OBBT), the engine cost a per-node LP comparison needs.
+    pub lp_s: f64,
+    /// The simplex's reported objective. Diagnostic only: the bound is `bound`,
+    /// never this value.
+    pub obj: f64,
     /// Optimal basis of the node relaxation solve: the warm start its children
     /// inherit under [`SpatialTreeConfig::warm_start_children`]. Meaningful only
     /// when `status` is `Optimal`.
@@ -506,6 +512,7 @@ pub fn solve_spatial_node_from(
         }
         None => None,
     };
+    let t_lp = std::time::Instant::now();
     let sol = match start {
         Some(basis) => solve_lp_warm_csc(
             lp.sp.clone(),
@@ -529,6 +536,7 @@ pub fn solve_spatial_node_from(
             opts,
         ),
     };
+    let lp_s = t_lp.elapsed().as_secs_f64();
     let mut n_lp_solves = 1usize;
 
     // Rigorous safe lower bound from the row duals — NEVER the raw simplex objective
@@ -569,6 +577,8 @@ pub fn solve_spatial_node_from(
         tightened,
         n_lp_solves,
         n_pivots: sol.iters,
+        lp_s,
+        obj: sol.obj,
         basis: sol.basis,
         warm_started,
         warm_shape_mismatch,
