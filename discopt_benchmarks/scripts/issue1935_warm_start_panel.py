@@ -48,6 +48,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 CORPUS = os.path.join(REPO, "python", "tests", "data", "minlplib_nl")
 OPTIMA = os.path.join(REPO, "docs", "dev", "data", "cert-optima.json")
+#: A MINLPLib download (``nl/<name>.nl`` + ``minlplib.solu``) for ``mlib:<name>``
+#: instances, from ``--minlplib`` (passed to workers through the environment).
+MLIB_ENV = "ISSUE1935_MINLPLIB_DIR"
 FLAG = "DISCOPT_NATIVE_WARM_START"
 ARMS = ("0", "1", "2")
 TOL_ABS, TOL_REL = 1e-6, 1e-4
@@ -71,6 +74,10 @@ def _build(name: str):
         from discopt.modeling.core import from_nl
 
         return from_nl(os.path.join(CORPUS, rest[0] + ".nl"))
+    if kind == "mlib":
+        from discopt.modeling.core import from_nl
+
+        return from_nl(os.path.join(os.environ[MLIB_ENV], "nl", rest[0] + ".nl"))
     sys.path.insert(0, HERE)
     from _pooling import pool18
 
@@ -165,6 +172,20 @@ def _tol(ref: float) -> float:
     return TOL_ABS + TOL_REL * max(1.0, abs(ref))
 
 
+def _read_solu() -> dict:
+    """``{(tag, name): value}`` from ``minlplib.solu`` (tags opt/best/bestdual)."""
+    d = os.environ.get(MLIB_ENV)
+    path = os.path.join(d, "minlplib.solu") if d else ""
+    out = {}
+    if path and os.path.exists(path):
+        with open(path) as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3 and parts[0].startswith("="):
+                    out[(parts[0].strip("="), parts[1])] = float(parts[2])
+    return out
+
+
 def _sgm(xs, shift=1.0):
     return math.exp(sum(math.log(x + shift) for x in xs) / len(xs)) - shift
 
@@ -172,6 +193,7 @@ def _sgm(xs, shift=1.0):
 def _summarize(recs: list[dict], tl: float) -> int:
     with open(OPTIMA) as f:
         optima = json.load(f)
+    solu = _read_solu()
     by = {}
     for r in recs:
         by.setdefault(r["name"], {})[r["arm"]] = r
@@ -192,6 +214,13 @@ def _summarize(recs: list[dict], tl: float) -> int:
             refs = []
             if base in optima:
                 refs.append(("cert-optima", _min_sense(rec, optima[base]), True))
+            if name.startswith("mlib:"):
+                # `=opt=` is the proven optimum; `=best=` a feasible value, which
+                # no valid bound may cross.
+                for tag, exact in (("opt", True), ("best", False)):
+                    v = solu.get((tag, name[5:]))
+                    if v is not None:
+                        refs.append((f"solu {tag}", _min_sense(rec, v), exact))
             for oa, other in arms.items():
                 if oa != arm and other["objective"] is not None and other["point_ok"]:
                     refs.append((f"arm {oa}", _min_sense(other, other["objective"]), False))
@@ -296,15 +325,25 @@ def main() -> int:
     ap.add_argument("--instances", default="", help="comma-separated subset of names")
     ap.add_argument("--out", default="", help="append raw records (JSON lines) here")
     ap.add_argument("--summarize", default="", help="only summarize this JSON-lines file")
+    ap.add_argument(
+        "--minlplib",
+        default="",
+        help="MINLPLib download (nl/ + minlplib.solu); adds mlib:<name> for --instances",
+    )
     a = ap.parse_args()
+    if a.minlplib:
+        os.environ[MLIB_ENV] = os.path.abspath(a.minlplib)
     if a.summarize:
         with open(a.summarize) as f:
             recs = [json.loads(line) for line in f if line.strip()]
         return _summarize(recs, a.time_limit)
     names = _instances()
     if a.instances:
-        want = set(a.instances.split(","))
+        want = a.instances.split(",")
         names = [n for n in names if n in want or n.split(":", 1)[-1] in want]
+        if a.minlplib:
+            have = {n.split(":", 1)[-1] for n in names}
+            names += [f"mlib:{w}" for w in want if w not in have and ":" not in w]
     print(f"load: {os.getloadavg()}  instances: {len(names)}  tl={a.time_limit}", flush=True)
     recs = []
     with ThreadPoolExecutor(max_workers=a.jobs) as ex:
