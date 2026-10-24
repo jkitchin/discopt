@@ -63,29 +63,32 @@ def test_model_solve_charges_its_pre_work(monkeypatch):
 
 
 def test_sizing_walk_is_charged(monkeypatch):
-    """Fails before: the wrapper's sizing walk was outside the solve's clock, so
-    a 0.6 s walk under a 0.5 s limit still produced a full search."""
+    """Fails before: the recursion gate's sizing walk ran before ``solve_model``
+    started its clock and was charged to nothing. ``Model.solve`` now sizes the
+    model itself (a cache hit for the gate) and deducts the walk."""
     real_count = fr._max_expr_node_count
-    reached: list[str] = []
+    real_solve = solver_mod.solve_model
+    seen: list[float] = []
+    slow_calls: list[int] = []
 
     def slow_count(model):
-        time.sleep(0.6)
+        slow_calls.append(1)
+        if len(slow_calls) == 1:
+            time.sleep(1.0)  # the first (uncached) sizing of this model
         return real_count(model)
 
-    def must_not_run(*a, **k):
-        reached.append("scaling")
-        raise AssertionError("a mandatory phase ran after the budget was spent")
+    def spy(*a, **k):
+        seen.append(k["time_limit"])
+        return real_solve(*a, **k)
 
     monkeypatch.setattr(fr, "_max_expr_node_count", slow_count)
-    monkeypatch.setattr(solver_mod, "_check_model_scaling", must_not_run)
-    t0 = time.perf_counter()
-    res = solver_mod.solve_model(_small_nonconvex(), time_limit=0.5)
-    wall = time.perf_counter() - t0
-    assert reached == []
-    assert res.status == "time_limit"
-    assert res.objective is None and res.bound is None and res.x is None
-    assert res.node_count == 0
-    assert wall < 5.0, wall
+    monkeypatch.setattr(solver_mod, "solve_model", spy)
+    from discopt.modeling.core import last_solve_prework_seconds
+
+    _small_nonconvex().solve(time_limit=20)
+    assert seen, "solve_model was never reached, so the assertion below is vacuous"
+    assert seen[0] <= 19.0, seen
+    assert seen[0] == 20 - last_solve_prework_seconds()
 
 
 def test_mandatory_phases_stop_once_the_budget_is_gone(monkeypatch):
@@ -205,3 +208,56 @@ def test_leaf_and_deep_counts(depth):
     for _ in range(depth):
         e = e + x
     assert fr._expr_node_count(e) == 2 * depth + 1
+
+
+# --- the whole-model "is there an opaque node?" walk ---------------------------
+
+
+def _square(v):
+    return v * v
+
+
+def test_custom_call_creation_is_counted_by_every_route():
+    import copy
+    import pickle
+
+    from discopt.modeling.core import CustomCall
+
+    m = dm.Model("cc_count")
+    x = m.continuous("x", lb=0, ub=1)
+    before = CustomCall._instances_created
+    node = dm.custom(_square, name="sq")(x)
+    assert isinstance(node, CustomCall)
+    assert CustomCall._instances_created == before + 1
+    copy.copy(node)
+    assert CustomCall._instances_created == before + 2
+    copy.deepcopy(node)
+    assert CustomCall._instances_created >= before + 3
+    n = CustomCall._instances_created
+    pickle.loads(pickle.dumps(node))
+    assert CustomCall._instances_created == n + 1
+
+
+def test_no_custom_call_in_the_process_skips_the_walk(monkeypatch):
+    """With none ever created, the answer is exact without walking 21k rows."""
+    from discopt.modeling.core import CustomCall
+
+    def boom(*a, **k):
+        raise AssertionError("walked although no CustomCall exists")
+
+    monkeypatch.setattr(CustomCall, "_instances_created", 0)
+    monkeypatch.setattr(solver_mod, "_iter_custom_calls", boom)
+    monkeypatch.setattr(solver_mod, "_expression_contains_custom_call", boom)
+    m = _small_nonconvex()
+    assert solver_mod._model_contains_custom_call(m) is False
+    assert list(solver_mod._model_custom_calls(m)) == []
+
+
+def test_a_custom_call_is_still_found_when_one_exists():
+    m = dm.Model("cc_found")
+    x = m.continuous("x", lb=0, ub=1)
+    y = m.continuous("y", lb=0, ub=1)
+    m.subject_to(dm.custom(_square, name="sq")(x) + y <= 1)
+    m.minimize(y)
+    assert solver_mod._model_contains_custom_call(m) is True
+    assert len(list(solver_mod._model_custom_calls(m))) == 1

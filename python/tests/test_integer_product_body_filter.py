@@ -92,3 +92,70 @@ def test_implied_integer_counts_as_candidate():
     # x is implied-integer: the bilinear product is visible with, not without, it.
     assert ipr._participation(m, implied) == {(x._index, 0): 1}
     assert ipr._participation(m, frozenset()) == {}
+
+
+# --- in-pass abandonment (#1456 item 2) ---------------------------------------
+
+
+def _bilinear_model(n_rows: int):
+    m = dm.Model("abandon")
+    ys = [m.integer(f"y{i}", lb=0, ub=7) for i in range(n_rows + 1)]
+    for i in range(n_rows):
+        m.subject_to(ys[i] * ys[i + 1] <= 20)
+    m.minimize(-ys[0])
+    return m
+
+
+def _expires_after(n: int):
+    calls = [0]
+
+    def hook() -> bool:
+        calls[0] += 1
+        return calls[0] > n
+
+    return hook, calls
+
+
+def test_a_hook_that_never_fires_changes_nothing():
+    m = _bilinear_model(6)
+    never = lambda: False  # noqa: E731
+    assert ipr.has_nonconvex_integer_bilinear(m, deadline=never) is True
+    a = ipr.reformulate_integer_bilinear(m)
+    b = ipr.reformulate_integer_bilinear(m, deadline=never)
+    assert a is not m and b is not m
+    assert len(a._variables) == len(b._variables)
+    assert [str(c.body) for c in a._constraints] == [str(c.body) for c in b._constraints]
+
+
+def test_expiry_mid_detection_reports_nothing_found():
+    m = _bilinear_model(6)
+    hook, calls = _expires_after(0)
+    assert ipr.has_nonconvex_integer_bilinear(m, deadline=hook) is False
+    assert calls[0] >= 1
+    hook, _ = _expires_after(0)
+    assert ipr.has_integer_product_work(m, frozenset(), deadline=hook) is False
+    hook, _ = _expires_after(0)
+    assert ipr.has_integer_multilinear_work(m, frozenset(), deadline=hook) is False
+
+
+def test_expiry_mid_rewrite_returns_the_model_unchanged():
+    """Detection passes (first body), then the hook fires inside the rewrite:
+    the partial rewrite is discarded wholesale."""
+    m = _bilinear_model(6)
+    n_vars, n_cons = len(m._variables), len(m._constraints)
+    hook, calls = _expires_after(3)
+    out = ipr.reformulate_integer_bilinear(m, deadline=hook)
+    assert out is m
+    assert calls[0] > 3  # the hook fired after detection had already succeeded
+    assert len(m._variables) == n_vars and len(m._constraints) == n_cons
+    hook, _ = _expires_after(3)
+    assert ipr.reformulate_integer_multilinear(m, deadline=hook) is m
+
+
+def test_solver_transformation_forwards_the_hook():
+    from discopt.transformations import get
+
+    m = _bilinear_model(4)
+    hook, _ = _expires_after(0)
+    assert get("integer.bilinear").apply(m, deadline=hook) is m
+    assert get("integer.bilinear").apply(m) is not m

@@ -8534,9 +8534,9 @@ def _check_model_scaling(model: Model) -> None:
         return
 
     try:
-        from discopt._rust import model_to_repr
+        from discopt._repr_cache import readonly_model_repr
 
-        repr_ = model_to_repr(model, getattr(model, "_builder", None))
+        repr_ = readonly_model_repr(model)  # scaling_diagnostics() only reads
         diag = repr_.scaling_diagnostics()
     except Exception as exc:  # pragma: no cover - diagnostic must never break a solve
         # Not a swallowed error in an *instrument* (CLAUDE.md §7): this is a
@@ -8663,6 +8663,8 @@ def _expression_contains_custom_call(root) -> bool:
 
 def _model_custom_calls(model: Model):
     """Yield every ``CustomCall`` in *model*'s objective and constraint bodies."""
+    if CustomCall._instances_created == 0:
+        return  # none exists anywhere, so none is in this model (exact)
     obj = getattr(model, "_objective", None)
     if obj is not None:
         yield from _iter_custom_calls(getattr(obj, "expression", None))
@@ -8754,6 +8756,8 @@ def _model_contains_custom_call(model: Model) -> bool:
     about. The solver uses this to force the local NLP path and to refuse global
     branch-and-bound (see ``solve_model``). See issue #27b.
     """
+    if CustomCall._instances_created == 0:
+        return False  # none exists anywhere, so none is in this model (exact)
     obj = getattr(model, "_objective", None)
     if obj is not None and _expression_contains_custom_call(getattr(obj, "expression", None)):
         return True
@@ -11718,14 +11722,11 @@ def _scoped_deep_recursion(fn: _F) -> _F:
 
         # #1520: no ``except``. The count is iterative with no failure mode; the old
         # ``depth = 0`` fallback ran a deep model on the small default stack.
-        _t_size0 = time.perf_counter()
+        # The count walks every body before ``solve_model`` anchors its clock.
+        # ``Model.solve`` sizes the model first and charges that walk to the
+        # caller's budget; the count is memoised by body identity, so this call is
+        # then a cache hit (``telecomsp_nor_sun``: ~9 s -> ~16 ms).
         depth = _max_expr_node_count(model)
-        # The count walks every body before ``solve_model`` anchors its clock, so on
-        # a large model it is wall the caller's ``time_limit`` never saw
-        # (``telecomsp_nor_sun``: ~9 s). Hand the solve what is left of it.
-        _tl = kwargs.get("time_limit")
-        if isinstance(_tl, (int, float)) and math.isfinite(_tl):
-            kwargs["time_limit"] = max(0.0, float(_tl) - (time.perf_counter() - _t_size0))
         if depth <= _DEEP_SOLVE_DEPTH_GATE:
             return fn(model, *args, **kwargs)
         # A handful of Python frames are entered per node along the deepest path
@@ -13236,6 +13237,12 @@ def solve_model(
         the rest of the pre-solve deadline (an A/B lever, not a mode).
         """
         if not _spent_checkpoints_on or _remaining_budget() > 0.0:
+            return None
+        # Only the default path: an explicitly chosen backend (``solver="gurobi"``,
+        # ``"mip-nlp"``, ...) applies its own time-limit contract and reports its
+        # own diagnostics, e.g. the MIP-NLP trace at ``time_limit=0``. ``_solver``
+        # is read at call time; every checkpoint runs after it is assigned.
+        if _solver not in (None, "bb"):
             return None
         logger.info("time_limit spent before %s; returning time_limit with no search", phase)
         wall = time.perf_counter() - _solve_t0
@@ -15396,9 +15403,15 @@ def solve_model(
         )
         from discopt.transformations import get as _get_transformation
 
-        if has_integer_multilinear_reformulation_work(model):
+        # #1456 item 2: entry gate plus the in-pass hook, as for the factorable
+        # pass -- on expiry the detector says "none" and the rewrite returns the
+        # model unchanged, the two outcomes this block already handles.
+        _iml_expired = _presolve_deadline.abandon_hook("integer_multilinear")
+        if _presolve_deadline.afford(
+            "integer_multilinear"
+        ) and has_integer_multilinear_reformulation_work(model, deadline=_iml_expired):
             _iml_n0 = sum(v.size for v in model._variables)
-            _iml = _get_transformation("integer.multilinear").apply(model)
+            _iml = _get_transformation("integer.multilinear").apply(model, deadline=_iml_expired)
             if _iml is not model:
                 from discopt._relax.problem_classifier import ProblemClass, classify_problem
                 from discopt._relax.term_classifier import classify_nonlinear_terms
@@ -15577,13 +15590,16 @@ def solve_model(
     # the MIQP-batch certification path). This witness is far cheaper than a
     # full convexity classification (~6s on ex1263), so the common path and
     # the reformulated path both stay fast.
+    # #1456 item 2: the entry gate alone left this pass unbounded once started
+    # (telecomsp_nor_sun at time_limit=300: still rewriting at 360 s).
+    _ipx_expired = _presolve_deadline.abandon_hook("integer_bilinear")
     if (
         not _did_multilinear_reform
         and not _already_linear
         and _presolve_deadline.afford("integer_bilinear")
-        and has_nonconvex_integer_bilinear(model)
+        and has_nonconvex_integer_bilinear(model, deadline=_ipx_expired)
     ):
-        _ipx = _get_transformation("integer.bilinear").apply(model)
+        _ipx = _get_transformation("integer.bilinear").apply(model, deadline=_ipx_expired)
         # Adopt the reformulation ONLY when it eliminates *all* nonlinearity,
         # i.e. yields an equivalent pure MILP. If other nonlinear terms remain
         # (e.g. the transcendentals in gear), the model would still go through
@@ -15786,6 +15802,12 @@ def solve_model(
 
     # --- Build Rust model representation for FBBT ---
     global _IN_TREE_PRESOLVE_GLOBAL_CALLS, _IN_TREE_PRESOLVE_NLPBB_CALLS, _IN_TREE_ARRAY_ROW_CALLS
+    # Everything this repr feeds (FBBT, root presolve, the search) is skipped or
+    # returns ``time_limit`` once the budget is gone, and the build itself is
+    # ~14 s on ``telecomsp_nor_sun`` -- measured starting 6 s past a 300 s limit.
+    _spent = _budget_spent_result("the Rust model build")
+    if _spent is not None:
+        return _spent
     _IN_TREE_PRESOLVE_GLOBAL_CALLS = 0  # PF1 telemetry reset (issue #632)
     _IN_TREE_PRESOLVE_NLPBB_CALLS = 0  # #1513
     _IN_TREE_PRESOLVE_SKIPPED.clear()  # #1513
