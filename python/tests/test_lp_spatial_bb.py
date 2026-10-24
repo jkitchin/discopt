@@ -406,11 +406,15 @@ def _oracle_1627():
 
 @pytest.mark.smoke
 @pytest.mark.parametrize("sense", ["min", "max"])
-def test_gap_tolerance_exit_publishes_the_proven_bound_not_the_incumbent(sense):
+def test_gap_tolerance_exit_publishes_the_proven_bound_not_the_incumbent(sense, monkeypatch):
     """#1627: on the gap-tolerance exit the node just popped is still live. Its bound
     must reach the published dual bound; the engine used to drop it and, with the
     frontier then empty, publish ``bound = incumbent`` with ``gap = 0`` -- a
     certified bound 4.6e-3 above the brute-force optimum."""
+    # Since #1934 the integer-product reform recognises ``x[i] * x[j]`` of this
+    # array-variable fixture and solves it as an exact MILP, so the LP-spatial
+    # gap-tolerance exit under test is never reached. Pin the pre-#1934 route.
+    monkeypatch.setenv("DISCOPT_INTEGER_PRODUCT_INDEXED", "0")
     opt = _oracle_1627()  # minimize-sense optimum (49.61427314400109)
     m = _miqp_1627(sense)
     r = m.solve(time_limit=30, lp_spatial=True)

@@ -40,6 +40,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from discopt._flat_index import flat_index_in_shape
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -72,24 +73,73 @@ _MAX_BITS = 12
 _BIGM_BOUND_CAP = 1e15
 
 
+def _indexed_refs_enabled() -> bool:
+    """``DISCOPT_INTEGER_PRODUCT_INDEXED`` (default ON since #1934; ``=0`` opts
+    out): recognise entries of array variables (``x[0] * x[1]``, ``w[0, 1] ** 2``)
+    as integer product factors.
+
+    Until #1934 :func:`_scalar_var_ref` read the indexed variable from
+    ``IndexExpression.variable`` / ``.var``, neither of which exists (the node
+    stores it in ``.base``), so every indexed reference resolved to ``None`` and
+    this whole pass -- bilinear, square and #707 multilinear -- never fired on a
+    model written with array variables. Recognising them is value-preserving (the
+    same algebraic identity as for a scalar variable) but **bound-changing**: such
+    models are now rewritten, and a fully linearized one is re-routed from the
+    spatial McCormick path to the MILP engine.
+
+    Graduated on the CLAUDE.md §5 panel (``scripts/panel_1934_indexed_integer_
+    products.py``, 30 s/instance): the 70-file ``.nl`` corpus is detector-identical
+    ON vs OFF; on 33 generated array-variable models (integer bilinear, integer x
+    continuous, squares with cross terms, 2-D) both arms solve 33/33 to the
+    brute-force / cross-arm optimum with 0 of 526 soundness checks failing, and
+    total wall falls 55.9 s -> 1.7 s. The opt-out keeps the legacy route for A/B;
+    see ``docs/dev/flag-retirement-audit.md``."""
+    return _env_flag("DISCOPT_INTEGER_PRODUCT_INDEXED", default=True)
+
+
 def _scalar_var_ref(expr: Expression) -> Optional[tuple[Variable, int]]:
     """Return ``(variable, flat_element)`` if *expr* is a scalar variable
     reference (a scalar ``Variable`` or an ``IndexExpression`` selecting one
-    scalar element), else ``None``."""
+    scalar element), else ``None``.
+
+    ``flat_element`` is the C-order position within the variable, the element
+    :func:`_int_factor_range` reads (``np.asarray(var.lb).flat[elem]``) and the
+    one :class:`_Expander` keys its expansion cache on, so ``x[1, 0]`` and
+    ``x[-1, 0]`` of a shape-(2, 2) ``x`` share one expansion. Indexed references
+    resolve only under :func:`_indexed_refs_enabled`."""
     if isinstance(expr, Variable):
         if expr.size == 1:
             return expr, 0
         return None
     if isinstance(expr, IndexExpression):
-        var = expr.variable if hasattr(expr, "variable") else getattr(expr, "var", None)
+        if not _indexed_refs_enabled():
+            return None
+        var = expr.base
         if not isinstance(var, Variable):
             return None
-        idx = getattr(expr, "index", None)
-        if isinstance(idx, int):
-            return var, idx
-        # Multi-dim or non-scalar index: not handled here.
-        return None
+        shape = tuple(var.shape or ())
+        if not shape:
+            return None
+        # A slice, partial, fancy, bool or out-of-range index is not one scalar
+        # element: ``None``, never a guessed slot (#941).
+        elem = flat_index_in_shape(expr.index, shape)
+        if elem is None:
+            return None
+        return var, elem
     return None
+
+
+def _elem_ref(var: Variable, elem: int) -> Expression:
+    """The scalar expression naming ``var``'s flat element *elem* -- the inverse
+    of :func:`_scalar_var_ref`. A multi-dimensional variable needs the full index
+    tuple: ``IndexExpression(w, 3)`` on a shape-(2, 2) ``w`` is a row, not
+    ``w[1, 1]``."""
+    if var.size == 1:
+        return var
+    shape = tuple(var.shape)
+    if len(shape) == 1:
+        return IndexExpression(var, elem)
+    return IndexExpression(var, tuple(int(i) for i in np.unravel_index(elem, shape)))
 
 
 def _int_factor_range(
@@ -204,7 +254,7 @@ class _Expander:
             return cached
         nbits = max(1, math.ceil(math.log2(hi - lo + 1)))
         bits: list[tuple[int, Variable]] = []
-        ref = var if var.size == 1 else IndexExpression(var, elem)
+        ref = _elem_ref(var, elem)
         # x_i - lo - sum 2^k e_k == 0
         link = ref if lo == 0 else BinaryOp("-", ref, Constant(float(lo)))
         for k in range(nbits):
@@ -519,7 +569,7 @@ def _try_expand_mul(node: BinaryOp, model: Model, exp: _Expander) -> Optional[Ex
     # columns; the pure-bilinear entry stays byte-identical), same default-OFF
     # flag (``DISCOPT_MULTILINEAR_COUPLING_RLT``).
     if exp.multilinear and exp.coupling_rlt:
-        ref_i = vi if vi.size == 1 else IndexExpression(vi, eli)
+        ref_i = _elem_ref(vi, eli)
         exp.add_bitlink_rlt(ref_i, base_lo, bits, other_e, lo_o, hi_o)
     if const != 1.0:
         expanded = BinaryOp("*", Constant(const), expanded)
@@ -620,7 +670,7 @@ def _try_expand_multilinear(node: BinaryOp, exp: _Expander) -> Optional[Expressi
     if exp.coupling_rlt and cont_factors:
         _cexpr, _clo, _chi = cont_factors[0]
         for (v, el, _lo0, _hi0), (lo_i, bits_i) in zip(int_refs, int_factors):
-            ref_i = v if v.size == 1 else IndexExpression(v, el)
+            ref_i = _elem_ref(v, el)
             exp.add_bitlink_rlt(ref_i, lo_i, bits_i, _cexpr, _clo, _chi)
 
     # Distribute the product of the integer factors into monomials over the binary
