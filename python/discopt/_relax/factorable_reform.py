@@ -731,6 +731,12 @@ class _Lifter:
         hi = float(np.max(base_var.ub))
         if not (np.isfinite(lo) and np.isfinite(hi)) or lo < 0.0:
             return None
+        if p < 0.0 and lo <= 0.0:
+            # #1922: a negative power is unbounded above as the base -> 0, so the
+            # aux has no finite box (and Python's ``0.0 ** p`` raises
+            # ZeroDivisionError rather than returning inf). Decline the lift, as
+            # for any other unboundable power.
+            return None
         d_lo, d_hi = lo**p, hi**p
         # ``base_var >= 0`` makes ``base**p`` monotone on ``[lo, hi]``, so the
         # interval extremes are at the endpoints — but for a NEGATIVE power it is
