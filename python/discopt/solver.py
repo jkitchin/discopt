@@ -10674,6 +10674,41 @@ def _ipx_cheap_first_enabled() -> bool:
     )
 
 
+def _ipx_objective_only_decline_enabled() -> bool:
+    """Decline the integer-bilinear lift when no CONSTRAINT has an integer product
+    (#1934). ``DISCOPT_IPX_OBJECTIVE_ONLY_DECLINE``, **default ON**; ``=0`` restores
+    the old gate (any integer product anywhere, objective included).
+
+    Why: the lift's value is making a nonconvex *feasible set* exact. When every
+    integer product sits in the objective the feasible set is already polyhedral,
+    and the lift only trades the spatial route's objective relaxation and cuts for
+    big-M rows over hundreds of binaries. Measured on the #1934 entry experiment
+    (lift vs no lift, interleaved ABBA, 30 s; the probe patches
+    ``has_nonconvex_integer_bilinear``):
+
+    * **Some constraint carries a product -- lift kept.** The 12 in-repo
+      instances that adopt it (``ex1263``-``ex1266``, ``nvs02/10/11/12/14/15``,
+      ``prob02/03``; all but ``nvs15``) are 8 wins (``ex1264`` 0.74 s vs no
+      certificate at 30 s, ``prob02`` 0.09 vs 3.62 s), 3 ties, 0 losses; held-out
+      dense constraint QPs ``con12``/``con15`` certify in 4-5 s where no lift
+      times out; ``mixed15`` ends with the tighter bound. One mixed row:
+      ``con20``, both uncertified, lift bound tighter but incumbent worse.
+    * **Objective only -- lift declined.** Dense integer QPs
+      ``sum_{i<j} Q_ij x_i x_j + sum x`` on ``[0, 10]^n``: n = 12..20 lift loses
+      on all 8 rows (n=15 21.7 vs 3.0 s, n=18 21.8 vs 2.0 s, n=20 a worse
+      incumbent and looser bound); sparse n = 15/25/40: 3.3 vs 0.45, 19.7 vs 0.68,
+      20.7 vs 0.93 s; held out, integer x continuous ``objIC14`` finds NO incumbent
+      in 30 s with the lift vs optimal in 7.4 s without, and boxes / other ranges
+      lose 1.4-2.5x. Cost of declining: 3 small wins forfeited (dense n=8,
+      0.31 vs 0.42 / 0.62 s; ``obj12_u30`` 2.8 vs 6.9 s) and 4 ties (``nvs15``,
+      the only in-repo instance whose route changes, 0.10 vs 0.11 s).
+
+    Soundness: both routes are exact formulations of the same problem; the gate
+    only chooses which runs, so it cannot change a certificate's validity.
+    """
+    return os.environ.get("DISCOPT_IPX_OBJECTIVE_ONLY_DECLINE", "1") != "0"
+
+
 def _scale_free_branching_enabled() -> bool:
     """#1619 D-11: ``DISCOPT_SCALE_FREE_BRANCHING`` for the native spatial kernel.
 
@@ -15597,6 +15632,9 @@ def solve_model(
     # the MIQP-batch certification path). This witness is far cheaper than a
     # full convexity classification (~6s on ex1263), so the common path and
     # the reformulated path both stay fast.
+    # #1934: and the witness must sit in a CONSTRAINT row -- with every integer
+    # product in the objective the lift was measured to lose to the spatial route
+    # (``_ipx_objective_only_decline_enabled``, opt-out ``=0``).
     # #1456 item 2: the entry gate alone left this pass unbounded once started
     # (telecomsp_nor_sun at time_limit=300: still rewriting at 360 s).
     _ipx_expired = _presolve_deadline.abandon_hook("integer_bilinear")
@@ -15604,7 +15642,11 @@ def solve_model(
         not _did_multilinear_reform
         and not _already_linear
         and _presolve_deadline.afford("integer_bilinear")
-        and has_nonconvex_integer_bilinear(model, deadline=_ipx_expired)
+        and has_nonconvex_integer_bilinear(
+            model,
+            deadline=_ipx_expired,
+            in_constraints=_ipx_objective_only_decline_enabled(),
+        )
     ):
         _ipx = _get_transformation("integer.bilinear").apply(model, deadline=_ipx_expired)
         # Adopt the reformulation ONLY when it eliminates *all* nonlinearity,

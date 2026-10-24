@@ -74,9 +74,9 @@ _BIGM_BOUND_CAP = 1e15
 
 
 def _indexed_refs_enabled() -> bool:
-    """``DISCOPT_INTEGER_PRODUCT_INDEXED`` (default OFF, issue #1934): recognise
-    entries of array variables (``x[0] * x[1]``, ``w[0, 1] ** 2``) as integer
-    product factors.
+    """``DISCOPT_INTEGER_PRODUCT_INDEXED`` (default ON, issue #1934; ``=0`` opts
+    out): recognise entries of array variables (``x[0] * x[1]``, ``w[0, 1] ** 2``)
+    as integer product factors.
 
     Until #1934 :func:`_scalar_var_ref` read the indexed variable from
     ``IndexExpression.variable`` / ``.var``, neither of which exists (the node
@@ -87,21 +87,15 @@ def _indexed_refs_enabled() -> bool:
     models are now rewritten, and a fully linearized one is re-routed from the
     spatial McCormick path to the MILP engine.
 
-    Why it is not the default (CLAUDE.md §5): the panel is cert-clean but not
-    net-positive. ``scripts/panel_1934_indexed_integer_products.py`` (33 small
-    generated models, <= 6 integers) is 55.9 s -> 1.7 s total wall ON, but one
-    size up the lift loses to the spatial route it replaces. Dense integer QP
-    ``sum_{i<j} Q_ij x_i x_j + sum x``, ``x in [0, 10]^n``, ``Q ~ N(0, 1)`` seed 0,
-    ``sum x >= n``, 30 s: n=15 optimal in ~3 s OFF vs ~22 s ON; n=20 OFF
-    ``feasible`` -2208.41 / bound ~-2670, ON ``time_limit`` -2125.35 / bound
-    ~-3090 (worse incumbent and looser bound). The same model with *scalar*
-    variables already takes the lift by default and loses the same way, so the
-    weakness is the adoption step's, not this recognition's. What would change
-    this: the adoption declining the lift when it will lose (the #1236 cheap-first
-    probe would fix the scalar path too), or a wider panel (dense, n >= 15, real
-    modeling-API models) measuring net-positive. See
-    ``docs/dev/flag-retirement-audit.md``."""
-    return _env_flag("DISCOPT_INTEGER_PRODUCT_INDEXED", default=False)
+    Graduation history. The first graduation (on a panel of 33 small generated
+    models only) was retracted: dense integer QPs one size up lost to the spatial
+    route (n=15: ~3 s OFF vs ~22 s ON; n=20: worse incumbent and looser bound).
+    The same loss was already on the default path for the scalar-variable form, so
+    it was fixed where it lives -- the solver's adoption gate now declines the lift
+    when no constraint carries an integer product
+    (``solver._ipx_objective_only_decline_enabled``) -- and this flag was re-panelled
+    on top of it; the numbers are in ``docs/dev/flag-retirement-audit.md``."""
+    return _env_flag("DISCOPT_INTEGER_PRODUCT_INDEXED", default=True)
 
 
 def _scalar_var_ref(expr: Expression) -> Optional[tuple[Variable, int]]:
@@ -870,12 +864,18 @@ def _check(deadline: Optional[Callable[[], bool]]) -> None:
         raise _Abandoned
 
 
-def _bodies(model: Model, implied=frozenset(), deadline: Optional[Callable[[], bool]] = None):
+def _bodies(
+    model: Model,
+    implied=frozenset(),
+    deadline: Optional[Callable[[], bool]] = None,
+    include_objective: bool = True,
+):
     """Distributed constraint bodies and objective, skipping (before the
     distribution, which is the expensive part) every body that references no
     integer-factor variable: such a body can produce no hit for any caller, so
     skipping it is exact. ``truck``: the 1M-term distributed objective has none,
-    and walking it cost ~41 s of a 60 s budget."""
+    and walking it cost ~41 s of a 60 s budget. ``include_objective=False``
+    yields the constraint bodies only."""
     candidates = _integer_factor_vars(model, implied)
     if not candidates:
         return
@@ -884,7 +884,11 @@ def _bodies(model: Model, implied=frozenset(), deadline: Optional[Callable[[], b
         if isinstance(c, Constraint) and _references_any(c.body, candidates):
             yield distribute_products(c.body)
     _check(deadline)
-    if model._objective is not None and _references_any(model._objective.expression, candidates):
+    if (
+        include_objective
+        and model._objective is not None
+        and _references_any(model._objective.expression, candidates)
+    ):
         yield distribute_products(model._objective.expression)
 
 
@@ -996,7 +1000,9 @@ def has_integer_multilinear_work(
 
 
 def has_nonconvex_integer_bilinear(
-    model: Model, deadline: Optional[Callable[[], bool]] = None
+    model: Model,
+    deadline: Optional[Callable[[], bool]] = None,
+    in_constraints: bool = False,
 ) -> bool:
     """True if the model contains a *distinct-variable* integer-factor bilinear
     product ``x_i*x_j`` (``i != j``). Such a term has an indefinite Hessian, so it
@@ -1008,6 +1014,11 @@ def has_nonconvex_integer_bilinear(
 
     ``deadline`` as in :func:`has_integer_product_work`: on expiry the witness
     reports "none", the answer every caller handles by leaving the model alone.
+
+    ``in_constraints=True`` looks only at the constraint rows (#1934): a model
+    whose integer products are all in the objective has a polyhedral feasible
+    set, and there the lift was measured to lose to the spatial route (see
+    ``solver._ipx_objective_only_decline_enabled``).
     """
     from .implied_integer import detect_implied_integers
 
@@ -1016,7 +1027,7 @@ def has_nonconvex_integer_bilinear(
     implied = frozenset(detect_implied_integers(model))
     found: list[bool] = []
     try:
-        for body in _bodies(model, implied, deadline):
+        for body in _bodies(model, implied, deadline, include_objective=not in_constraints):
             _for_each_int_bilinear(body, implied, lambda ints: found.append(True))
             if found:
                 return True
