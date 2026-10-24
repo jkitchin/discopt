@@ -16,6 +16,9 @@ use discopt_core::expr::{
 // PyModelRepr — opaque wrapper around ModelRepr
 // ─────────────────────────────────────────────────────────────
 
+/// One `.nl` suffix segment as handed to Python: `(kind, name, [(index, value), ...])`.
+type NlSuffixEntry = (i32, String, Vec<(usize, f64)>);
+
 #[pyclass]
 pub struct PyModelRepr {
     inner: ModelRepr,
@@ -40,7 +43,7 @@ pub struct PyModelRepr {
     /// `.nl` suffix segments `(kind, name, [(index, value), ...])`, verbatim and in
     /// file order (#1921). Indexed by the file's numbering, so — like
     /// `initial_point` — empty for every repr a transform produces.
-    suffixes: Vec<(i32, String, Vec<(usize, f64)>)>,
+    suffixes: Vec<NlSuffixEntry>,
     /// The #1568 expanded array-row FBBT view, built on the first
     /// `in_tree_presolve` call that wants it and reused at every later node.
     /// Keyed on the repr's structure, never its bounds (the node box overrides
@@ -161,7 +164,7 @@ impl PyModelRepr {
     /// file order (#1921). `kind & 3` is the entity (0 variable, 1 constraint,
     /// 2 objective, 3 problem) and `kind & 4` marks real values. Empty for a
     /// model that did not come from a `.nl` file and for every transformed repr.
-    fn suffixes(&self) -> Vec<(i32, String, Vec<(usize, f64)>)> {
+    fn suffixes(&self) -> Vec<NlSuffixEntry> {
         self.suffixes.clone()
     }
 
