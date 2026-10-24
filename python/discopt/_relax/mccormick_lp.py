@@ -38,6 +38,7 @@ from discopt._relax.milp_relaxation import (
     build_milp_relaxation,
 )
 from discopt._relax.term_classifier import NonlinearTerms, classify_nonlinear_terms
+from discopt._relax.uniform_relax import RelaxationBuildAborted
 from discopt.modeling.core import Model, VarType
 from discopt.solver_tuning import current as _tuning
 
@@ -594,6 +595,9 @@ class MccormickLPRelaxer:
         # ``solver_stats`` and by the tests to prove the mechanism fired
         # (CLAUDE.md §6: a gate that never fires must not read as a pass).
         self.yield_rounds: int = 0
+        # #1924: cold builds discarded at the caller's ``abort_deadline``
+        # (``status="aborted"``, no bound). Diagnostic only.
+        self.aborted_builds: int = 0
         # Spatial-BB uses standard McCormick globally — no partitioning here.
         self._disc = DiscretizationState(partitions={})
         self._n_orig = sum(v.size for v in model._variables)
@@ -1158,6 +1162,7 @@ class MccormickLPRelaxer:
         want_marginals: bool = False,
         skip_pool_separators: bool = False,
         build_deadline: Optional[float] = None,
+        abort_deadline: Optional[float] = None,
         round_deadline: Optional[float] = None,
         yield_round: bool = False,
         rigorous_only: bool = False,
@@ -1190,6 +1195,7 @@ class MccormickLPRelaxer:
                 want_marginals=want_marginals,
                 skip_pool_separators=skip_pool_separators,
                 build_deadline=build_deadline,
+                abort_deadline=abort_deadline,
                 round_deadline=round_deadline,
                 yield_round=yield_round,
             )
@@ -1209,6 +1215,7 @@ class MccormickLPRelaxer:
         want_marginals: bool = False,
         skip_pool_separators: bool = False,
         build_deadline: Optional[float] = None,
+        abort_deadline: Optional[float] = None,
         round_deadline: Optional[float] = None,
         yield_round: bool = False,
     ) -> MccormickLPResult:
@@ -1275,6 +1282,7 @@ class MccormickLPRelaxer:
             want_marginals=want_marginals,
             skip_pool_separators=skip_pool_separators,
             build_deadline=build_deadline,
+            abort_deadline=abort_deadline,
             round_deadline=round_deadline,
             yield_round=yield_round,
         )
@@ -1323,6 +1331,7 @@ class MccormickLPRelaxer:
                 psd_max_rounds=psd_max_rounds,
                 want_marginals=False,
                 skip_pool_separators=False,
+                abort_deadline=abort_deadline,
             )
             if base_free.status != "infeasible":
                 # The pool row(s) caused a FALSE fathom of a non-empty node. Re-solve
@@ -1341,6 +1350,7 @@ class MccormickLPRelaxer:
                     psd_max_rounds=psd_max_rounds,
                     want_marginals=want_marginals,
                     skip_pool_separators=False,
+                    abort_deadline=abort_deadline,
                 )
                 self._pool_stats["dropped_nodes"] += 1
                 # Adopt the pool-free result unconditionally: it is a valid relaxation
@@ -1425,6 +1435,7 @@ class MccormickLPRelaxer:
         want_marginals: bool = False,
         skip_pool_separators: bool = False,
         build_deadline: Optional[float] = None,
+        abort_deadline: Optional[float] = None,
         round_deadline: Optional[float] = None,
         yield_round: bool = False,
     ) -> MccormickLPResult:
@@ -1590,6 +1601,7 @@ class MccormickLPRelaxer:
                 ),
                 rlt_level1=self._rlt_applicable,
                 build_deadline=_eff_build_deadline,
+                abort_deadline=abort_deadline,
             )
             # #966 round-admission measurement: EMA of the cold-build wall. A
             # deadline-truncated build stopped early, so its wall underestimates
@@ -1601,6 +1613,13 @@ class MccormickLPRelaxer:
                     if self._build_wall_ema is None
                     else 0.5 * self._build_wall_ema + 0.5 * _build_wall
                 )
+        except RelaxationBuildAborted:
+            # #1924: the caller's ``abort_deadline`` reached into the build. Not a
+            # failure: the build is discarded whole (never used truncated), so the
+            # node simply gets no LP bound this time -- the same sound decline as a
+            # skipped round. Counted, not warned.
+            self.aborted_builds += 1
+            return MccormickLPResult(status="aborted")
         except Exception as exc:
             # Build failures here are otherwise invisible: the node silently gets
             # no LP bound. The full traceback goes to DEBUG on every node (hot

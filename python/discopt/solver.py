@@ -13165,6 +13165,21 @@ def solve_model(
             return _remaining_budget()
         return max(0.0, _remaining_budget() - _rr_reserve_s)
 
+    def _setup_abort_deadline() -> Optional[float]:
+        """Abort deadline for a root-setup ``solve_at_node`` build (#1924).
+
+        One fallback reserve past :func:`_root_setup_build_deadline` -- the
+        ``root_build_abort`` (#1757) convention: a build that is merely late keeps
+        its bound; one that outlives the reserve is discarded whole, which the root
+        probe already treats as sound (no probe -> the ``"none"`` bound source and
+        the rigorous root-relaxation fallback). ``None`` (no abort) when
+        ``DISCOPT_NODE_BUILD_ABORT=0`` or there is no build deadline.
+        """
+        if not _tuning().node_build_abort:
+            return None
+        _bd = _root_setup_build_deadline()
+        return None if _bd is None else _bd + _ROOT_BUILD_ABORT_GRACE_S
+
     def _root_setup_build_deadline() -> Optional[float]:
         """Absolute deadline for a pre-B&B root-setup relaxation *build* (#1152).
 
@@ -17850,6 +17865,7 @@ def solve_model(
                             # worst), and #928's cut-short objective floor keeps the
                             # bound finite.
                             build_deadline=_root_setup_build_deadline(),
+                            abort_deadline=_setup_abort_deadline(),
                         )
                         # #930: bank the probe's proved bound WITH the box it was
                         # proved over. This solve costs real time (3.4 s on hda)
@@ -17942,6 +17958,7 @@ def solve_model(
                             # #1152: bound the pool's cold build too. Fewer
                             # separated cuts only loosens per-node bounds.
                             build_deadline=_root_setup_build_deadline(),
+                            abort_deadline=_setup_abort_deadline(),
                         )
                         if _pool_chunks and _pool_chunks[0] is not None:
                             # solve_at_node captures each separated chunk as a
@@ -18045,6 +18062,7 @@ def solve_model(
                             # #1152: bound the pool's cold build too (see the PSD
                             # pool above) — fewer cuts only loosens, never falsifies.
                             build_deadline=_root_setup_build_deadline(),
+                            abort_deadline=_setup_abort_deadline(),
                         )
                         _pool_solve_wall = time.perf_counter() - _pool_solve_t0
                         _sep_after = getattr(_mc_lp_relaxer, "_sep_timers", {})
@@ -18378,6 +18396,13 @@ def solve_model(
     # --- B&B loop ---
     iteration = 0
     _deadline = t_start + time_limit
+    # #1924: the node loop's cold relaxation builds abort one fallback reserve past
+    # the solve deadline (``DISCOPT_NODE_BUILD_ABORT``); see ``_setup_abort_deadline``.
+    _node_abort_deadline: Optional[float] = (
+        _deadline + _ROOT_BUILD_ABORT_GRACE_S
+        if _tuning().node_build_abort and math.isfinite(_deadline)
+        else None
+    )
 
     # --- #732 Stage 1-A: narrow-box branch-instead-of-taint --------------------
     # (``DISCOPT_NARROW_BOX_BRANCH``, default OFF — bound-changing, awaits the §5
@@ -19532,6 +19557,7 @@ def solve_model(
                         np.asarray(batch_lb[i]),
                         np.asarray(batch_ub[i]),
                         time_limit=max(_node_remaining, _DEADLINE_NODE_FLOOR_S),
+                        abort_deadline=_node_abort_deadline,
                         round_deadline=(_deadline if _round_budget_enabled else None),
                         yield_round=_yield_round,
                         inherited_cuts=_root_cut_pool,
@@ -19560,7 +19586,10 @@ def solve_model(
                         # A yielded round that banked no bound must not leave the
                         # node fathomed-without-proof on the failure sentinel
                         # (#966; see :func:`_yield_keeps_node_open`).
-                        _yield_keeps_node_open(_yield_round, nlp_failed, result_lbs, i)
+                        # #1924: an aborted build banked no bound either; same rule.
+                        _yield_keeps_node_open(
+                            _yield_round or mc_res.status == "aborted", nlp_failed, result_lbs, i
+                        )
                     else:
                         if nlp_failed:
                             # A failed / locally-infeasible NLP solve is not an
@@ -19894,6 +19923,7 @@ def solve_model(
                         node_lb,
                         node_ub,
                         time_limit=max(_deadline - time.perf_counter(), _DEADLINE_NODE_FLOOR_S),
+                        abort_deadline=_node_abort_deadline,
                         round_deadline=(_deadline if _round_budget_enabled else None),
                         yield_round=_serial_yield_round,
                         inherited_cuts=_root_cut_pool,
@@ -19943,7 +19973,8 @@ def solve_model(
                         # node fathomed-without-proof on the failure sentinel
                         # (#966; see :func:`_yield_keeps_node_open`).
                         _yield_keeps_node_open(
-                            _serial_yield_round,
+                            _serial_yield_round
+                            or (mc_lp_res is not None and mc_lp_res.status == "aborted"),
                             result_lbs[i] >= _SENTINEL_THRESHOLD,
                             result_lbs,
                             i,
