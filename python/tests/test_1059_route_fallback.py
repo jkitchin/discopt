@@ -294,7 +294,12 @@ class TestRouteBudget:
         seen = self._capture(monkeypatch)
         _load("gbd").solve(solver="mip-nlp", mip_nlp_method="oa", time_limit=20.0)
         assert seen, "solve_mip_nlp was never called"
-        assert seen["time_limit"] == pytest.approx(20.0)
+        from discopt.modeling.core import last_solve_prework_seconds
+
+        # The whole limit less only ``Model.solve``'s own pre-work: no kernel attempt
+        # and no route share are taken from it.
+        assert seen["time_limit"] == pytest.approx(20.0 - last_solve_prework_seconds())
+        assert last_solve_prework_seconds() < 1.0
 
 
 @pytest.mark.slow

@@ -120,9 +120,14 @@ def test_flag_off_deducts_exactly_zero(monkeypatch):
     """Flag-off must forward the caller's budget bit-identically."""
     forwarded, attempts = _patched_solve(monkeypatch, kernel_on=False, attempt_s=_FAKE_ATTEMPT_S)
     assert attempts == 0, "no attempt may be made with the flag off"
-    # Exact equality, deliberately: `==`, not `approx`. The deduction is subtracted
-    # from every downstream deadline, so "close to zero" is not the contract.
-    assert forwarded == _TIME_LIMIT, f"flag-off budget drifted: {forwarded!r} != {_TIME_LIMIT!r}"
+    # Exact equality, deliberately: `==`, not `approx`. The KERNEL deduction is
+    # literally zero; what is forwarded is the limit less ``Model.solve``'s own
+    # pre-work, which it reports exactly (charged since the post-#1929 sweep).
+    from discopt.modeling.core import last_solve_prework_seconds
+
+    expected = _TIME_LIMIT - last_solve_prework_seconds()
+    assert forwarded == expected, f"flag-off budget drifted: {forwarded!r} != {expected!r}"
+    assert last_solve_prework_seconds() < 1.0
     assert _ck.last_attempt_seconds() == 0.0, (
         f"flag-off attempt clock is not literally 0.0: {_ck.last_attempt_seconds()!r}"
     )
@@ -144,7 +149,10 @@ def test_flag_off_is_exact_on_the_fallback_reserve_path_too(monkeypatch):
         monkeypatch, kernel_on=False, attempt_s=0.0, model_fn=_reserve_model
     )
     assert attempts == 0
-    expected = _TIME_LIMIT - 0.35 * _TIME_LIMIT
+    from discopt.modeling.core import last_solve_prework_seconds
+
+    remaining = _TIME_LIMIT - last_solve_prework_seconds()
+    expected = remaining - 0.35 * remaining
     assert forwarded == expected, f"reserve arithmetic drifted: {forwarded!r} != {expected!r}"
 
 

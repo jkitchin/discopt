@@ -8,7 +8,7 @@ import types
 import discopt.modeling as dm
 import numpy as np
 import pytest
-from discopt.modeling.core import SolveResult
+from discopt.modeling.core import SolveResult, last_solve_prework_seconds
 from discopt.solvers import MILPResult, QPResult, SolveStatus
 from discopt.solvers import gurobi as gurobi_backend
 
@@ -629,7 +629,9 @@ def test_model_solve_gurobi_dispatches_lp(monkeypatch):
 
     assert result.status == "optimal"
     assert calls["model"] is m
-    assert calls["time_limit"] == 12.0
+    # the stated limit less only ``Model.solve``'s own pre-work, reported exactly
+    assert calls["time_limit"] == 12.0 - last_solve_prework_seconds()
+    assert last_solve_prework_seconds() < 1.0
     assert calls["threads"] == 3
     assert calls["options"] == {"Method": 1}
 
@@ -711,7 +713,9 @@ def test_model_solve_gurobi_dispatches_qp(monkeypatch):
 
     assert result.status == "optimal"
     assert calls["model"] is m
-    assert calls["time_limit"] == 9.0
+    # the stated limit less only ``Model.solve``'s own pre-work, reported exactly
+    assert calls["time_limit"] == 9.0 - last_solve_prework_seconds()
+    assert last_solve_prework_seconds() < 1.0
     assert calls["gap_tolerance"] == 1e-6
     assert calls["threads"] == 4
     assert calls["options"] == {"Method": 2}
@@ -754,7 +758,9 @@ def test_model_solve_gurobi_dispatches_miqp(monkeypatch):
 
     assert result.status == "optimal"
     assert calls["model"] is m
-    assert calls["time_limit"] == 8.0
+    # the stated limit less only ``Model.solve``'s own pre-work, reported exactly
+    assert calls["time_limit"] == 8.0 - last_solve_prework_seconds()
+    assert last_solve_prework_seconds() < 1.0
     assert calls["gap_tolerance"] == 1e-5
     assert calls["threads"] == 2
     assert calls["options"] == {"MIPFocus": 1}
@@ -798,7 +804,9 @@ def test_model_solve_gurobi_dispatches_qcp(monkeypatch):
 
     assert result.status == "optimal"
     assert calls["model"] is m
-    assert calls["time_limit"] == 7.0
+    # the stated limit less only ``Model.solve``'s own pre-work, reported exactly
+    assert calls["time_limit"] == 7.0 - last_solve_prework_seconds()
+    assert last_solve_prework_seconds() < 1.0
     assert calls["gap_tolerance"] == 1e-6
     assert calls["threads"] == 2
     assert calls["options"] == {"BarConvTol": 1e-8}
@@ -843,7 +851,9 @@ def test_model_solve_gurobi_dispatches_miqcqp(monkeypatch):
 
     assert result.status == "optimal"
     assert calls["model"] is m
-    assert calls["time_limit"] == 6.0
+    # the stated limit less only ``Model.solve``'s own pre-work, reported exactly
+    assert calls["time_limit"] == 6.0 - last_solve_prework_seconds()
+    assert last_solve_prework_seconds() < 1.0
     assert calls["gap_tolerance"] == 1e-5
     assert calls["threads"] == 1
     assert calls["options"] == {"MIPFocus": 1}

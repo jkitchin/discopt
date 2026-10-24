@@ -408,8 +408,13 @@ def forwarded_budget():
     a tolerance: the proportion stays pinned exactly, and the deduction stays visible
     rather than being absorbed into slack that would also hide a real regression.
 
-    (An **explicit** ``solver=`` skips the check entirely, so those tests keep asserting
-    the whole limit and must NOT use this.)
+    Since the large-instance sweep after #1921-#1929, ``Model.solve`` deducts all of
+    its pre-work measured from its entry (evaluator build, snapshot, recursion
+    sizing), of which the kernel attempt is one part; ``last_solve_prework_seconds``
+    reports exactly what was deducted.
+
+    (An **explicit** ``solver=`` skips the kernel check, so those tests expect the
+    whole limit less the pre-work alone, ``limit - last_solve_prework_seconds()``.)
 
     Call it after the solve::
 
@@ -418,13 +423,18 @@ def forwarded_budget():
     """
 
     def _expected(limit: float, fraction: float = 1.0):
+        from discopt.modeling.core import last_solve_prework_seconds
         from discopt.solvers._convex_kernel import last_attempt_seconds
 
-        spent = last_attempt_seconds()
-        assert spent < 0.10 * limit, (
-            f"the convex-kernel check cost {spent:.3f}s of a {limit}s budget; it is a "
+        attempt = last_attempt_seconds()
+        assert attempt < 0.10 * limit, (
+            f"the convex-kernel check cost {attempt:.3f}s of a {limit}s budget; it is a "
             "classification on an auto-routed solve, not a solve"
         )
+        # ``Model.solve`` deducts ALL of its pre-work (the kernel attempt included),
+        # measured from its entry, not only the attempt.
+        spent = last_solve_prework_seconds()
+        assert attempt <= spent < 0.10 * limit + attempt
         return pytest.approx(fraction * (limit - spent), rel=1e-6)
 
     return _expected

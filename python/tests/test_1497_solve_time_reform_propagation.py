@@ -161,8 +161,8 @@ def _config_reform(calls, indicators):
     empty one is adopted at any budget (where a short budget hits ``_DcbSkip``)."""
     real = ipr.reformulate_integer_multilinear
 
-    def _wrapped(model):
-        out = real(model)
+    def _wrapped(model, **kw):
+        out = real(model, **kw)
         if out is not model:
             calls.append(1)
             setattr(out, "_ipx_config_indicators", frozenset(indicators))

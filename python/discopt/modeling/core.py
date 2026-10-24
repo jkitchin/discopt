@@ -2389,6 +2389,17 @@ class CustomCall(Expression):
     Built via :func:`custom`; do not instantiate directly in user code.
     """
 
+    #: How many ``CustomCall`` nodes this process has ever created. Counted in
+    #: ``__new__``, which construction, ``copy`` and unpickling all go through, so
+    #: zero means no model in the process can contain one and the whole-model
+    #: "is there an opaque node?" walk can answer without walking. Measured on
+    #: ``telecomsp_nor_sun`` (21,270 rows): ~5 s per walk, four walks per solve.
+    _instances_created: int = 0
+
+    def __new__(cls, *args, **kwargs):
+        CustomCall._instances_created += 1
+        return super().__new__(cls)
+
     def __init__(self, fn: Callable, *args: Expression, name: Optional[str] = None):
         self.fn = fn
         self.args = tuple(args)
@@ -5759,6 +5770,22 @@ _MODEL_INIT_CACHES = frozenset({"_flat_var_offsets_cache"})
 #: ``id()`` of the original's DAG nodes, holding locally defined compiled closures
 #: that cannot be pickled, and cleared at the start of every solve anyway.
 _MODEL_UNNAMED_CACHES = frozenset({"_uniform_relax_analysis"})
+
+
+class _PreworkClock(_threading.local):
+    seconds: float = 0.0
+
+
+_PREWORK = _PreworkClock()
+
+
+def last_solve_prework_seconds() -> float:
+    """Wall ``Model.solve`` spent on this thread before handing over to
+    ``solve_model`` -- the amount deducted from ``time_limit`` (the convex-kernel
+    attempt, :func:`discopt.solvers._convex_kernel.last_attempt_seconds`, is part
+    of it). Read it after a solve to compute exactly what the default path was
+    given; 0.0 on a thread that has not solved."""
+    return _PREWORK.seconds
 
 
 def _is_model_cache(key: str) -> bool:
@@ -9900,6 +9927,19 @@ class Model:
                 debug=debug,
                 **kwargs,
             )
+            # #1929 follow-up: the nested solve below gets what is LEFT of
+            # ``time_limit``, not all of it again -- building the recentred twin is
+            # part of this solve (it took 48.7 s of a 60 s limit on gams04 before
+            # its rewrite was made linear, and is charged either way). Validated
+            # first: ``max(0.0, nan - spent)`` would quietly turn a NaN limit into
+            # an already-spent one.
+            from discopt.solver import _validate_solve_budgets
+
+            _validate_solve_budgets(gap_tolerance, time_limit)
+
+            def _left_of_limit() -> float:
+                return max(0.0, float(time_limit) - (_time.perf_counter() - _t_solve0))
+
             try:
                 _rc = _recentre.recentre(self)
             except _recentre.RecentreUnsupported as exc:
@@ -9914,6 +9954,7 @@ class Model:
                     exc,
                     self.name,
                 )
+                _solve_args["time_limit"] = _left_of_limit()
                 _unrecentred = cast(
                     Union[SolveResult, Iterator[SolveUpdate]], self.solve(**_solve_args)
                 )
@@ -9923,6 +9964,7 @@ class Model:
                     _unrecentred.solver_stats["recentre/skipped"] = str(exc)
                 return _unrecentred
             if _rc is not None:
+                _solve_args["time_limit"] = _left_of_limit()
                 result = _recentre.solve_recentred(self, _rc, _solve_args)
                 # The same tail the unrecentred path runs, on THIS model: the
                 # objective recomputed from the mapped point in the original
@@ -10700,7 +10742,25 @@ class Model:
         # budget that has already been spent is not available to reserve. Flag-off
         # gives ``_ck_elapsed == 0.0`` exactly, so ``_remaining_tl is time_limit``
         # numerically and both figures below are unchanged.
-        _remaining_tl = max(0.0, time_limit - _ck_elapsed)
+        #
+        # What is left is measured from this method's entry clock, not as
+        # ``time_limit - _ck_elapsed``: the convex-kernel attempt is not the only
+        # work above. The evaluator build and the incumbent-verification snapshot
+        # run here too, and on a large model they are seconds each --
+        # ``parabol5_2_4`` spent ~20 s of a 60 s limit above this line, none of it
+        # charged, so ``solve_model`` started with a full minute. The kernel's wall
+        # is inside the same elapsed time, so it is still deducted exactly once.
+        #
+        # ``solve_model``'s recursion gate sizes every body before it starts its
+        # own clock (``telecomsp_nor_sun``: ~9 s). The count is memoised by body
+        # identity, so sizing ``self`` HERE charges that walk to this budget and
+        # leaves the gate a cache hit.
+        from discopt._relax.factorable_reform import _max_expr_node_count
+
+        _max_expr_node_count(self)
+        _prework_s = _time.perf_counter() - _t_solve0
+        _PREWORK.seconds = _prework_s
+        _remaining_tl = max(0.0, time_limit - _prework_s)
         _fb_reserve = 0.0
         if (
             _lp_spatial_fallback_enabled()
