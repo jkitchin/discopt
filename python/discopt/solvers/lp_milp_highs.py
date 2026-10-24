@@ -34,6 +34,7 @@ import contextvars
 import dataclasses
 import logging
 import os
+import threading
 import time
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
@@ -1969,6 +1970,181 @@ def _fixed_integer_lp(sf: "StdForm", x: np.ndarray, time_limit: Optional[float])
     return solve_lp_std(dataclasses.replace(sf, xl=xl, xu=xu), time_limit=time_limit)
 
 
+#: #1920: wall-clock cap of the :func:`fix_and_propagate_point` start heuristic, and
+#: the share of the solve's time limit it may take when that is smaller. Work is also
+#: capped by count (:data:`FIXPROP_ROW_VISITS_PER_NNZ`), so a cap only ever costs a
+#: start, never a certificate.
+FIXPROP_MAX_SECONDS = 2.0
+FIXPROP_BUDGET_FRACTION = 0.05
+FIXPROP_ROW_VISITS_PER_NNZ = 50
+
+
+def _fixprop_seed_enabled() -> bool:
+    """``DISCOPT_MILP_FIXPROP_SEED`` (#1920, default ON; ``=0`` starts HiGHS cold when
+    the caller gave no warm start).
+
+    Graduated on introduction by the panel recorded in
+    ``docs/dev/issue-1920-fixprop-seed-panel.md``; the opt-out keeps the cold start
+    reachable for A/B measurement.
+    """
+    return os.environ.get("DISCOPT_MILP_FIXPROP_SEED", "1") != "0"
+
+
+def fix_and_propagate_point(
+    sf: StdForm, n_struct: int, deadline: Optional[float]
+) -> Optional[np.ndarray]:
+    """#1920: a candidate start for HiGHS by fix-and-propagate, or ``None``.
+
+    ``deadline`` is a ``time.monotonic`` value. Fix the structural columns in order
+    -- each at the midpoint of its domain as propagation has left it (the finite side
+    when one side is open, rounded when integer) -- and after each fix propagate the
+    rows to a fixpoint with activity-bound (FBBT) reasoning on ``A x = b``. A row whose
+    activity cannot meet ``b`` is a dead end and the heuristic gives up; it never
+    backtracks. This is the classic fix-and-propagate primal heuristic (as in SCIP),
+    and it exists for the class HiGHS's own heuristics miss: measured on a 2-64-64-1
+    ``relu_bigm`` network, plain HiGHS (and HiGHS through OMLT's formulation) had no
+    incumbent after 52 s; fixing the two inputs lets propagation decide every
+    pre-activation, binary and output, and this returned a point in 0.3-0.5 s on all
+    six nets tried.
+
+    The result is only a candidate: the caller re-optimises its integers by
+    :func:`_fixed_integer_lp` and keeps a point only if it passes the incumbent
+    verifier. Propagation here decides nothing a certificate rests on. Open bound sides
+    are the ``1e20`` sentinel and are tested on the bound, never on a product with it
+    (CLAUDE.md).
+    """
+    A = sf.A.tocsr()
+    At = sf.A.tocsc()
+    m = A.shape[0]
+    lo = np.asarray(sf.xl, dtype=np.float64).copy()
+    hi = np.asarray(sf.xu, dtype=np.float64).copy()
+    is_int = np.zeros(sf.n, dtype=bool)
+    is_int[sf.int_idx] = True
+    budget = [FIXPROP_ROW_VISITS_PER_NNZ * max(1, A.nnz)]
+
+    def open_lo(v: np.ndarray) -> np.ndarray:
+        return v <= -INF
+
+    def open_hi(v: np.ndarray) -> np.ndarray:
+        return v >= INF
+
+    def propagate(rows: np.ndarray) -> Optional[bool]:
+        """``True`` at a fixpoint, ``None`` on a dead end, ``False`` out of budget."""
+        queue = list(dict.fromkeys(int(i) for i in rows))
+        queued = np.zeros(m, dtype=bool)
+        queued[queue] = True
+        head = 0
+        while head < len(queue):
+            i = queue[head]
+            head += 1
+            queued[i] = False
+            budget[0] -= 1
+            if budget[0] < 0 or (deadline is not None and time.monotonic() > deadline):
+                return False
+            s, e = A.indptr[i], A.indptr[i + 1]
+            cols, a = A.indices[s:e], A.data[s:e]
+            lj, hj = lo[cols], hi[cols]
+            pos = a > 0
+            # The smallest / largest value of each term a_j x_j over the box; an open
+            # side contributes an infinite term, counted rather than summed.
+            min_open = np.where(pos, open_lo(lj), open_hi(hj))
+            max_open = np.where(pos, open_hi(hj), open_lo(lj))
+            tmin = np.where(min_open, 0.0, a * np.where(pos, lj, hj))
+            tmax = np.where(max_open, 0.0, a * np.where(pos, hj, lj))
+            n_min_open, n_max_open = int(min_open.sum()), int(max_open.sum())
+            smin, smax = float(tmin.sum()), float(tmax.sum())
+            # The rest of the row without term j; finite only if no OTHER term is open.
+            rmin_ok = (n_min_open - min_open) == 0
+            rmax_ok = (n_max_open - max_open) == 0
+            rmin = smin - tmin
+            rmax = smax - tmax
+            b = float(sf.b[i])
+            with np.errstate(divide="ignore", invalid="ignore"):
+                # a_j x_j = b - rest  =>  x_j in [(b - rmax)/a_j, (b - rmin)/a_j] for a_j > 0
+                lo_src_ok = np.where(pos, rmax_ok, rmin_ok)
+                hi_src_ok = np.where(pos, rmin_ok, rmax_ok)
+                new_lo = np.where(lo_src_ok, (b - np.where(pos, rmax, rmin)) / a, -INF)
+                new_hi = np.where(hi_src_ok, (b - np.where(pos, rmin, rmax)) / a, INF)
+            ints = is_int[cols]
+            new_lo = np.where(ints & (new_lo > -INF), np.ceil(new_lo - 1e-6), new_lo)
+            new_hi = np.where(ints & (new_hi < INF), np.floor(new_hi + 1e-6), new_hi)
+            scale = 1.0 + np.minimum(np.abs(lj), INF) + np.minimum(np.abs(hj), INF)
+            up = new_lo > lj + 1e-9 * scale
+            down = new_hi < hj - 1e-9 * scale
+            if not (up.any() or down.any()):
+                continue
+            lo[cols[up]] = new_lo[up]
+            hi[cols[down]] = new_hi[down]
+            touched = cols[up | down]
+            gap = lo[touched] - hi[touched]
+            if np.any(gap > 1e-7 * (1.0 + np.abs(lo[touched]))):
+                return None
+            snap = gap > 0  # crossed by round-off only: collapse to the midpoint
+            if snap.any():
+                mid = 0.5 * (lo[touched[snap]] + hi[touched[snap]])
+                lo[touched[snap]] = mid
+                hi[touched[snap]] = mid
+            for j in touched:
+                for r in At.indices[At.indptr[j] : At.indptr[j + 1]]:
+                    if not queued[r]:
+                        queued[r] = True
+                        queue.append(int(r))
+        return True
+
+    if propagate(np.arange(m)) is not True:
+        return None
+    for j in range(int(n_struct)):
+        lj, hj = lo[j], hi[j]
+        if hj - lj <= 0.0:
+            continue
+        if lj > -INF and hj < INF:
+            v = 0.5 * (lj + hj)
+        elif lj > -INF:
+            v = lj
+        elif hj < INF:
+            v = hj
+        else:
+            v = 0.0
+        if is_int[j]:
+            v = float(min(max(round(v), lj), hj))
+        lo[j] = hi[j] = v
+        if propagate(At.indices[At.indptr[j] : At.indptr[j + 1]]) is not True:
+            return None
+    x = 0.5 * (lo + hi)
+    return x if np.all(np.isfinite(x)) else None
+
+
+def _fixprop_start(
+    sf: StdForm, n_struct: int, time_limit: Optional[float], stats: dict[str, float]
+) -> Optional[tuple[np.ndarray, float]]:
+    """#1920: a VERIFIED start from :func:`fix_and_propagate_point`, or ``None``.
+
+    The candidate's integers are re-optimised by :func:`_fixed_integer_lp` and the
+    point is kept only if it passes :func:`_verified_mip_point` -- the standing of any
+    HiGHS incumbent. Budget: :data:`FIXPROP_MAX_SECONDS`, or
+    :data:`FIXPROP_BUDGET_FRACTION` of ``time_limit`` when smaller.
+    """
+    # ``monotonic``, as in :func:`solve_milp_std`: this clock only budgets the start
+    # and must not shift the route's own ``perf_counter`` deadline reads.
+    t0 = time.monotonic()
+    cap = FIXPROP_MAX_SECONDS
+    if time_limit is not None:
+        cap = min(FIXPROP_MAX_SECONDS, FIXPROP_BUDGET_FRACTION * max(0.0, float(time_limit)))
+    stats["milp/fixprop_ran"] = 1.0
+    x = fix_and_propagate_point(sf, n_struct, t0 + cap)
+    pt = None
+    if x is not None:
+        rem = cap - (time.monotonic() - t0)
+        if rem > 0.0:
+            fx = _fixed_integer_lp(sf, x, rem)
+            pt = _verified_mip_point(sf, fx.x) if fx.status == "optimal" else None
+    stats["milp/fixprop_time"] = time.monotonic() - t0
+    if pt is not None:
+        stats["milp/fixprop_found"] = 1.0
+        stats["milp/fixprop_objective"] = float(pt[1])
+    return pt
+
+
 def _rederived_point(
     sf: "StdForm", x: Optional[np.ndarray], time_limit: Optional[float], stats: dict
 ) -> Optional[tuple[np.ndarray, float]]:
@@ -2396,7 +2572,34 @@ def solve_milp_std(
     # ``monotonic``, not ``perf_counter``: this clock only budgets the #1612 re-solve,
     # and must not shift the route's own ``perf_counter`` deadline reads.
     t0 = time.monotonic()
+    # #1920: with no warm start, give the PRIMARY one (the cross-solve of #1634 stays
+    # cold, #1733); kept as the incumbent if HiGHS ends without one of its own.
+    start = None
+    start_stats: dict[str, float] = {}
+    if initial_point is None and sf.int_idx.size and _fixprop_seed_enabled():
+        start = _fixprop_start(
+            sf, sf.n if n_struct is None else int(n_struct), time_limit, start_stats
+        )
+        if start is not None:
+            kw["initial_point"] = start[0][: sf.n if n_struct is None else int(n_struct)]
+        if time_limit is not None:
+            kw["time_limit"] = float(time_limit) - (time.monotonic() - t0)
     out = _certified_milp(sf, kw)
+    out.stats.update(start_stats)
+    if (
+        start is not None
+        and out.status in ("feasible", "time_limit", "node_limit")
+        and (
+            out.objective is None
+            # HiGHS can decline a start; a better verified point still stands.
+            or out.objective - start[1] > CERT_ABS + CERT_REL * abs(float(out.objective))
+        )
+    ):
+        out.x, out.objective = start
+        out.status = "feasible"
+        out.stats["milp/fixprop_incumbent_published"] = 1.0
+        if out.bound is not None:
+            out.bound = min(out.bound, out.objective)
     if (
         out.status == "infeasible"
         and out.gap_certified
@@ -2481,11 +2684,181 @@ def _cross_form_infeasible_check(
     )
 
 
+def _concurrent_cross_enabled() -> bool:
+    """``DISCOPT_MILP_CONCURRENT_CROSS`` (#1920, default ON; ``=0`` runs the #1634
+    presolve-free cross-solve after the primary instead of beside it).
+
+    A documented opt-out, not a stalled graduation: it changes when the cross-solve
+    runs, never what a verdict needs. It exists for a single-core budget, where two
+    concurrent HiGHS solves only share one CPU, and for A/B measurement.
+    """
+    return os.environ.get("DISCOPT_MILP_CONCURRENT_CROSS", "1") != "0"
+
+
+class _CrossStop:
+    """#1920: a stop signal another thread can raise on a running HiGHS MILP solve.
+
+    ``deadline`` (a ``time.perf_counter`` value, set later) and ``event`` are both read
+    from HiGHS's MIP interrupt callback, so the cross-solve's cap can be set after it
+    started -- the cap depends on the primary's wall time, known only when the primary
+    returns.
+    """
+
+    def __init__(self) -> None:
+        self.event = threading.Event()
+        self.deadline: Optional[float] = None
+
+    def should_stop(self) -> bool:
+        return self.event.is_set() or (
+            self.deadline is not None and time.perf_counter() >= self.deadline
+        )
+
+    def attach(self, h: Any, highspy: Any) -> None:
+        def _interrupt(callback_type, message, data_out, data_in, user_data):  # noqa: ARG001
+            data_in.user_interrupt = self.should_stop()
+
+        h.setCallback(_interrupt, None)
+        h.startCallback(highspy.cb.HighsCallbackType.kCallbackMipInterrupt)
+
+
 def _certified_milp(sf: StdForm, kw: dict[str, Any]) -> HighsOutcome:
-    """One HiGHS MILP solve with every route certificate check (#1537/#1621, #1634)."""
-    out = _solve_milp_scaled(sf, **kw)
-    if out.gap_certified and out.status in ("optimal", "infeasible"):
-        return _cross_check_presolve(sf, out, kw)
+    """One HiGHS MILP solve with every route certificate check (#1537/#1621, #1634).
+
+    #1920: the #1634 presolve-free cross-solve runs CONCURRENTLY with the primary
+    (HiGHS releases the GIL), from the same start and under the same time limit,
+    instead of after it on what the primary left. Measured on three 2-40-40-1
+    ``relu_bigm`` nets: the sequential cross-solve was 27-100 s of 54-157 s totals,
+    against 23-41 s for HiGHS alone. Its verdict rule and its own cap
+    (:data:`PRESOLVE_CROSS_BUDGET_FACTOR` times the primary's wall time) are those of
+    :func:`_cross_check_presolve`; it now never starves for lack of budget left over.
+
+    When the primary ends WITHOUT a certificate (a time, node or interrupt limit), the
+    cross-solve is stopped at once and its tree bound joins the primary's
+    (:func:`_merge_uncertified_cross`): the published bound is then the
+    ``min(presolved, presolve-free)`` rule on every exit, so it no longer drops when a
+    longer run happens to prove optimality without confirming it.
+    """
+    if not _concurrent_cross_enabled() or presolve_exact_class(sf):
+        out = _solve_milp_scaled(sf, **kw)
+        if out.gap_certified and out.status in ("optimal", "infeasible"):
+            return _cross_check_presolve(sf, out, kw)
+        return out
+    t0 = time.perf_counter()
+    stop = _CrossStop()
+    kw_c = dict(kw, initial_point=None, stop=stop)  # #1733: the cross-solve starts cold
+    box: dict[str, Any] = {}
+    ctx = contextvars.copy_context()  # the #1620 user options are a ContextVar
+
+    def _run_cross() -> None:
+        try:
+            box["out"] = ctx.run(_solve_milp_scaled, sf, presolve=False, **kw_c)
+        except BaseException as err:  # re-raised in the caller's thread below
+            box["err"] = err
+
+    th = threading.Thread(target=_run_cross, name="discopt-highs-cross", daemon=True)
+    th.start()
+    try:
+        out = _solve_milp_scaled(sf, **kw)
+    except BaseException:
+        stop.event.set()
+        th.join()
+        raise
+    certified = out.gap_certified and out.status in ("optimal", "infeasible")
+    if certified:
+        cap = max(PRESOLVE_CROSS_MIN_BUDGET, PRESOLVE_CROSS_BUDGET_FACTOR * float(out.wall_time))
+        stop.deadline = t0 + cap
+        out.stats["milp/presolve_cross_check_budget"] = cap
+    else:
+        stop.event.set()
+    th.join()
+    if "err" in box:
+        raise box["err"]
+    cross: HighsOutcome = box["out"]
+    out.stats["milp/presolve_cross_concurrent"] = 1.0
+    out.stats["milp/presolve_cross_check_ran"] = 1.0
+    out.stats["milp/presolve_cross_check_time"] = float(cross.wall_time)
+    if not certified:
+        rem = None
+        if kw["time_limit"] is not None:
+            rem = float(kw["time_limit"]) - (time.perf_counter() - t0)
+        return _merge_uncertified_cross(sf, out, cross, rem)
+    # The cross-solve's wall time is already inside the elapsed wall here, so
+    # :func:`_tight_cross_bound` must not charge it a second time.
+    # As in the sequential path, what is left of the cross-solve's own cap bounds
+    # the #1640 tight re-run too.
+    elapsed = time.perf_counter() - t0
+    left = cap - elapsed
+    if kw["time_limit"] is not None:
+        left = min(left, float(kw["time_limit"]) - elapsed)
+    kw_j = dict(kw, initial_point=None, time_limit=max(0.0, left), _cross_wall_charged=True)
+    return _judge_presolve_cross(sf, out, cross, kw_j)
+
+
+def _merge_uncertified_cross(
+    sf: StdForm, out: HighsOutcome, cross: HighsOutcome, time_limit: Optional[float]
+) -> HighsOutcome:
+    """#1920: fold the stopped cross-solve into a primary that ended without a certificate.
+
+    The cross-solve's point counts only as RE-DERIVED: the LP over its own integers
+    (:func:`_fixed_integer_lp`, 1e-7 primal tolerance), verified, within
+    ``time_limit``. Its raw point is never used. The verifier's relative row tolerance
+    lets a point spend ``FEAS_RTOL * M`` on a big-M row, and choosing the BEST
+    objective among candidates selects exactly such points. Measured on the #1654
+    ``sequencing`` family at M = 1e10: the raw presolve-free point verified at 11.0
+    while violating the model by 8; the LP over its integers gives the true 31.0.
+    Adopting the raw point published the infeasible 11.0, and it then outranked the
+    #1654 rescue's certified 31.0. With no budget left for the LP, nothing is taken
+    from the cross point.
+
+    * A re-derived cross point below the primary's tree bound by more than the equality
+      yardstick refutes that bound (the #1634 falsifier); only the NS-safe root bounds
+      then stand, as on a refuted certificate.
+    * Otherwise the bound is ``max(root, min(primary tree, cross tree))`` -- the rule
+      :func:`_weaker_bound` certifies on and :func:`_withdraw` publishes. The
+      presolved tree bound alone is exactly what #1634 found can lie above the optimum
+      (seed 965: 3e-6 above it with the cross-solve undecided); with both bounds in
+      hand the published one no longer rests on it.
+    * A re-derived cross point better than the primary's incumbent (by more than the
+      yardstick) is adopted. A primary with no incumbent becomes ``feasible`` on it.
+
+    Results that carry no bound (``error``, ``unbounded``, an uncertified
+    ``infeasible``) are left as they are.
+    """
+    if out.status not in ("feasible", "time_limit", "node_limit"):
+        return out
+    pt = None
+    if cross.x is not None and (time_limit is None or time_limit > 0.0):
+        fx = _fixed_integer_lp(sf, cross.x, time_limit)
+        pt = _verified_mip_point(sf, fx.x) if fx.status == "optimal" else None
+    roots = [b for b in (out.root_bound, cross.root_bound) if b is not None]
+    root = max(roots) if roots else None
+    if out.bound is not None:
+        tree: Optional[float] = None
+        if pt is not None and out.bound - pt[1] > CERT_ABS + CERT_REL * abs(out.bound):
+            out.stats["milp/presolve_bound_refuted"] = 1.0
+            out.labels["milp/presolve_bound_refuted"] = (
+                f"bound {out.bound:.12g} is above a verified point's objective {pt[1]:.12g}"
+            )
+        elif cross.bound is not None:
+            tree = min(float(out.bound), float(cross.bound))
+        if tree is not None and (root is None or tree > root):
+            out.bound = tree
+            out.labels["milp/bound_provenance"] = "min(presolved, presolve-free)"
+        else:
+            out.bound = root
+            out.labels["milp/bound_provenance"] = "root-ns" if root is not None else "none"
+        if cross.bound is not None:
+            out.stats["milp/presolve_cross_bound"] = float(cross.bound)
+    if pt is not None and (
+        out.objective is None
+        or out.objective - pt[1] > CERT_ABS + CERT_REL * abs(float(out.objective))
+    ):
+        out.x, out.objective = pt
+        out.stats["milp/presolve_cross_incumbent_adopted"] = 1.0
+        if out.status != "feasible":
+            out.status = "feasible"
+    if out.bound is not None and out.objective is not None:
+        out.bound = min(out.bound, out.objective)
     return out
 
 
@@ -2813,6 +3186,16 @@ def _cross_check_presolve(sf: StdForm, out: HighsOutcome, kw: dict[str, Any]) ->
     cross = _solve_milp_scaled(sf, presolve=False, **kw)
     out.stats["milp/presolve_cross_check_ran"] = 1.0
     out.stats["milp/presolve_cross_check_time"] = float(cross.wall_time)
+    return _judge_presolve_cross(sf, out, cross, kw)
+
+
+def _judge_presolve_cross(
+    sf: StdForm, out: HighsOutcome, cross: HighsOutcome, kw: dict[str, Any]
+) -> HighsOutcome:
+    """The verdict half of :func:`_cross_check_presolve`: hold the certified primary
+    ``out`` against the presolve-free ``cross``. ``kw["time_limit"]`` is the budget
+    left before the cross-solve's wall time is charged, unless ``kw`` says it already
+    was (``_cross_wall_charged``, the concurrent path of :func:`_certified_milp`)."""
     pt = _rederived_point(sf, cross.x, kw["time_limit"], out.stats)
     refuted = None
     if pt is not None:
@@ -3021,10 +3404,13 @@ def _tight_cross_bound(
     if obj is None:
         return False
     kw = dict(kw)
+    charged = kw.pop("_cross_wall_charged", False)
     if kw["time_limit"] is not None:
         # ``kw`` already had the primary's wall time taken off by the caller
-        # (:func:`_cross_check_presolve`); only the cross-solve's is left to charge.
-        kw["time_limit"] = float(kw["time_limit"]) - float(cross.wall_time)
+        # (:func:`_cross_check_presolve`); only the cross-solve's is left to charge --
+        # unless it ran concurrently and the caller charged the elapsed wall (#1920).
+        if not charged:
+            kw["time_limit"] = float(kw["time_limit"]) - float(cross.wall_time)
         if kw["time_limit"] <= 0.0:
             out.stats["milp/presolve_cross_tight_skipped"] = 1.0
             return False
@@ -3082,8 +3468,14 @@ def _solve_milp_std(
     presolve: bool = True,
     feasibility_tolerance: float = 1e-6,
     row_form: Optional[bool] = None,
+    stop: Optional[_CrossStop] = None,
 ) -> HighsOutcome:
     """Solve the MILP ``sf`` under the §3.2 contract.
+
+    ``stop`` lets another thread end HiGHS's tree search early (#1920): only the
+    concurrent presolve-free cross-solve of :func:`_certified_milp` passes one. An
+    interrupted solve ends as a ``kInterrupt`` limit exit, with whatever tree bound
+    and incumbent it had, through exactly the checks of any other limit exit.
 
     ``row_form`` forces the #1733 logical folding on or off (``None``: the
     ``DISCOPT_MILP_ROW_FORM`` default with its HiGHS-version gate); only the
@@ -3159,6 +3551,8 @@ def _solve_milp_std(
     rem = remaining()
     if rem is not None and rem <= 0.0:
         return done(HighsOutcome("time_limit", message="MILP time budget exhausted"))
+    if stop is not None and stop.should_stop():
+        return done(HighsOutcome("node_limit", message="MILP solve stopped before it ran"))
     opts: list[tuple[str, Any]] = [
         ("mip_rel_gap", float(gap_tolerance)),
         ("mip_abs_gap", 1e-6 if abs_gap_tolerance is None else float(abs_gap_tolerance)),
@@ -3216,6 +3610,7 @@ def _solve_milp_std(
         # refused -- gets no answer from it.
         return done(HighsOutcome("error", message=pass_why))
 
+    seeded = False
     if initial_point is not None:
         seed = complete_seed(sf, initial_point, sf.n if n_struct is None else int(n_struct))
         if seed is None:
@@ -3226,10 +3621,42 @@ def _solve_milp_std(
             if h.setSolution(sol) != highspy.HighsStatus.kOk:
                 logger.warning("HiGHS rejected the MILP start; solving without it")
                 stats["milp/seed_rejected"] = 1.0
+            else:
+                seeded = True
 
+    if stop is not None:
+        stop.attach(h, highspy)
     run_st = h.run()
     name = _status_name(h)
     info = h.getInfo()
+    if seeded and name == "kOptimal" and not np.isfinite(float(info.mip_dual_bound)):
+        # #1920: handed a start, HiGHS's presolve can accept it and stop with
+        # ``kOptimal`` at 0 nodes and NO dual bound -- the search that produces a
+        # bound never ran. A certificate with nothing behind it is not one: measured
+        # on a fixed-input piecewise-linear MILP (test_nonlinear_to_pwl), the route
+        # then certified ``optimal`` with ``bound=None`` and Model.solve published it
+        # uncertified with no bound at all. The same solve is re-run cold, so the
+        # outcome is whatever the route's own checks make of HiGHS's unseeded answer.
+        rem = remaining()
+        cold = _solve_milp_std(
+            sf,
+            time_limit=rem,
+            gap_tolerance=gap_tolerance,
+            abs_gap_tolerance=abs_gap_tolerance,
+            max_nodes=max_nodes,
+            initial_point=None,
+            n_struct=n_struct,
+            root_check=root_check,
+            presolve=presolve,
+            feasibility_tolerance=feasibility_tolerance,
+            row_form=row_form,
+            stop=stop,
+        )
+        cold.stats["milp/seeded_optimal_without_bound"] = 1.0
+        cold.wall_time = time.perf_counter() - t0
+        return cold
+    if stop is not None and name == "kInterrupt":
+        stats["milp/stopped_by_peer"] = 1.0
     stats["lp/iters"] = float(info.simplex_iteration_count)
     stats["lp/driver_nodes"] = float(info.mip_node_count)
     nodes = int(info.mip_node_count)
