@@ -97,8 +97,8 @@ def _indexed_refs_enabled() -> bool:
     ~-3090 (worse incumbent and looser bound). The same model with *scalar*
     variables already takes the lift by default and loses the same way, so the
     weakness is the adoption step's, not this recognition's. What would change
-    this: the adoption declining the lift when it will lose (the #1236 cheap-first
-    probe would fix the scalar path too), or a wider panel (dense, n >= 15, real
+    this: the adoption declining the lift when it will lose -- tracked in #1940,
+    which would fix the scalar path too -- or a wider panel (dense, n >= 15, real
     modeling-API models) measuring net-positive. See
     ``docs/dev/flag-retirement-audit.md``.
 
