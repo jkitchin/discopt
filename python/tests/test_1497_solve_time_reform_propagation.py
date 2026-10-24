@@ -43,11 +43,16 @@ def _binary_cubic() -> dm.Model:
 
 def _integer_bilinear() -> dm.Model:
     # Distinct-variable integer x continuous product: the nonconvexity witness
-    # ``has_nonconvex_integer_bilinear`` fires and the lift is a pure MILP.
+    # ``has_nonconvex_integer_bilinear`` fires and the lift is a pure MILP. The
+    # product sits in a constraint through the epigraph ``t <= n*y`` (minimising
+    # ``-t`` makes it tight, so this is ``min -(n*y) + 2n + y``): since #1934 the
+    # solver declines the lift when every integer product is in the objective.
     m = dm.Model("ipx_1497")
     n = m.integer("n", lb=0, ub=5)
     y = m.continuous("y", lb=0, ub=3)
-    m.minimize(-(n * y) + 2 * n + y)
+    t = m.continuous("t", lb=0, ub=15)
+    m.minimize(-t + 2 * n + y)
+    m.subject_to(t - n * y <= 0)
     m.subject_to(n + y <= 6)
     return m
 

@@ -9,7 +9,9 @@ the panel has two parts:
    must be invisible where no array variable exists.
 2. **Array-variable panel** -- generated models written with integer array
    variables, the class the flag targets: integer bilinear (pure and with
-   continuous partners), integer squares mixed with cross terms, 2-D variables.
+   continuous partners), integer squares mixed with cross terms, 2-D variables,
+   and (added after the #1937 review) larger dense objective-only and
+   dense constraint-product models with no brute-force oracle.
    Each instance is solved OFF and ON, interleaved, and checked for
    *cert-clean* (no wrong ``optimal``; dual bound never above the oracle;
    incumbent independently feasible on the ORIGINAL model; no certified-OFF
