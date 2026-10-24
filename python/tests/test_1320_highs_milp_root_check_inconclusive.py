@@ -31,6 +31,14 @@ from discopt.solvers.lp_milp_highs import HighsOutcome, StdForm, solve_milp_std
 TL = 10.0
 
 
+@pytest.fixture(autouse=True)
+def _no_start_heuristic(monkeypatch):
+    """These tests script ``time.perf_counter`` read by read around ONE HiGHS solve.
+    The #1920 fix-and-propagate start runs a fixed-integer LP first, whose clock
+    reads would consume the script; the start is not what is under test here."""
+    monkeypatch.setenv("DISCOPT_MILP_FIXPROP_SEED", "0")
+
+
 def _starved_clock():
     """Budget intact at the pre-solve gate (so HiGHS really runs and returns its
     own status), a sliver left at the root-check gate (so the check RUNS rather

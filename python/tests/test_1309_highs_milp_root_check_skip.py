@@ -19,7 +19,16 @@ import itertools
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 from discopt.solvers.lp_milp_highs import StdForm, solve_milp_std
+
+
+@pytest.fixture(autouse=True)
+def _no_start_heuristic(monkeypatch):
+    """These tests script ``time.perf_counter`` read by read around ONE HiGHS solve.
+    The #1920 fix-and-propagate start runs a fixed-integer LP first, whose clock
+    reads would consume the script; the start is not what is under test here."""
+    monkeypatch.setenv("DISCOPT_MILP_FIXPROP_SEED", "0")
 
 
 def _fake_clock():
