@@ -9900,6 +9900,19 @@ class Model:
                 debug=debug,
                 **kwargs,
             )
+            # #1929 follow-up: the nested solve below gets what is LEFT of
+            # ``time_limit``, not all of it again -- building the recentred twin is
+            # part of this solve (it took 48.7 s of a 60 s limit on gams04 before
+            # its rewrite was made linear, and is charged either way). Validated
+            # first: ``max(0.0, nan - spent)`` would quietly turn a NaN limit into
+            # an already-spent one.
+            from discopt.solver import _validate_solve_budgets
+
+            _validate_solve_budgets(gap_tolerance, time_limit)
+
+            def _left_of_limit() -> float:
+                return max(0.0, float(time_limit) - (_time.perf_counter() - _t_solve0))
+
             try:
                 _rc = _recentre.recentre(self)
             except _recentre.RecentreUnsupported as exc:
@@ -9914,6 +9927,7 @@ class Model:
                     exc,
                     self.name,
                 )
+                _solve_args["time_limit"] = _left_of_limit()
                 _unrecentred = cast(
                     Union[SolveResult, Iterator[SolveUpdate]], self.solve(**_solve_args)
                 )
@@ -9923,6 +9937,7 @@ class Model:
                     _unrecentred.solver_stats["recentre/skipped"] = str(exc)
                 return _unrecentred
             if _rc is not None:
+                _solve_args["time_limit"] = _left_of_limit()
                 result = _recentre.solve_recentred(self, _rc, _solve_args)
                 # The same tail the unrecentred path runs, on THIS model: the
                 # objective recomputed from the mapped point in the original
