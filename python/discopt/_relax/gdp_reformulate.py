@@ -142,6 +142,7 @@ def reformulate_gdp(
     method: str = "big-m",
     *,
     respect_disjunction_methods: bool = True,
+    fbbt_deadline: Optional[float] = None,
 ) -> Model:
     """Replace GDP constraints with standard MINLP constraints.
 
@@ -171,6 +172,10 @@ def reformulate_gdp(
         products). It also lowers indicator rows, the ``add_disjunction`` blocks
         and nested disjunctions; ``"auto"`` never selects it.
         Indicator and SOS constraints otherwise use big-M regardless.
+    fbbt_deadline : float, optional
+        Absolute ``time.perf_counter()`` deadline for the root FBBT that caps an
+        SOS member with no declared bound (#1921, #1929). A solve passes its own;
+        ``None`` (a standalone call) leaves it uncapped.
     respect_disjunction_methods : bool, default True
         Whether a disjunction-local ``method`` override should take precedence
         over the solver-wide ``method``. Set to ``False`` for solver frontends
@@ -242,7 +247,7 @@ def reformulate_gdp(
 
     def _sos_implied_bounds(v) -> tuple[float, float]:
         if not _implied_cache:
-            _implied_cache.append(_unconditional_fbbt_bounds(model))
+            _implied_cache.append(_unconditional_fbbt_bounds(model, deadline=fbbt_deadline))
         return _member_bounds(v, model, _implied_cache[0])
 
     _weight_counter = [0]
@@ -3811,7 +3816,9 @@ def _extract_disjunct_bounds(
 # ── SOS constraint reformulation ──
 
 
-def _unconditional_fbbt_bounds(model: Model) -> tuple[np.ndarray, np.ndarray] | None:
+def _unconditional_fbbt_bounds(
+    model: Model, deadline: Optional[float] = None
+) -> tuple[np.ndarray, np.ndarray] | None:
     """Flat root-FBBT bounds implied by ``model``'s *unconditional* rows (#1921).
 
     Only plain :class:`Constraint` rows (and fast-API linear rows) are kept: a
@@ -3822,7 +3829,7 @@ def _unconditional_fbbt_bounds(model: Model) -> tuple[np.ndarray, np.ndarray] | 
     the relaxation empty (the box is then meaningless as a cap).
     """
     from discopt.solver import _extract_variable_info
-    from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
+    from discopt.solvers._root_presolve import fbbt_budget_ms, tighten_root_bounds_with_fbbt
 
     rows = Model(model.name)
     rows._variables = list(model._variables)
@@ -3832,7 +3839,16 @@ def _unconditional_fbbt_bounds(model: Model) -> tuple[np.ndarray, np.ndarray] | 
     rows._constraints = [c for c in model._constraints if type(c) is Constraint]
     rows._constraints.extend(model._builder_linear_constraints())
     _, lb, ub, int_offsets, int_sizes = _extract_variable_info(rows)
-    lb2, ub2, infeasible, _ = tighten_root_bounds_with_fbbt(rows, lb, ub, int_offsets, int_sizes)
+    # Capped at the caller's deadline (#1929): FBBT is anytime, so a cap only
+    # leaves the box looser -- a member without a finite cap then refuses.
+    lb2, ub2, infeasible, _ = tighten_root_bounds_with_fbbt(
+        rows,
+        lb,
+        ub,
+        int_offsets,
+        int_sizes,
+        time_limit_ms=fbbt_budget_ms(deadline),
+    )
     if infeasible:
         return None
     return lb2, ub2

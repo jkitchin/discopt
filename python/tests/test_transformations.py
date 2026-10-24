@@ -347,7 +347,10 @@ def test_amp_route_lowers_gdp_through_the_registry_with_its_own_options(dispatch
     r = _gdp_model().solve(solver="amp", time_limit=30)
     assert r.objective == pytest.approx(5.0, abs=1e-5)
     amp = [o for n, o in dispatched if n == "gdp"]
-    assert {"method": "big-m", "respect_disjunction_methods": False} in amp
+    # The route's own options (a solve also passes its FBBT deadline, #1929).
+    assert any(
+        o.get("method") == "big-m" and o.get("respect_disjunction_methods") is False for o in amp
+    ), amp
 
 
 def test_integer_product_pass_goes_through_the_registry(dispatched):

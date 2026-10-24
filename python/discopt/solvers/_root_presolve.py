@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
+import time
 from typing import Any
 
 import numpy as np
@@ -122,6 +124,19 @@ def _flat_fbbt_bounds(
         offset += size
 
     return tightened_lb, tightened_ub
+
+
+def fbbt_budget_ms(deadline: float | None) -> int | None:
+    """``time_limit_ms`` for :func:`tighten_root_bounds_with_fbbt` from an absolute
+    ``time.perf_counter()`` deadline (#1929).
+
+    ``None`` -- no cap -- for no deadline or an infinite one (``int(inf)`` would
+    raise); at least 1 ms otherwise, because ``0`` means "unlimited" to the Rust
+    binding and a spent deadline must not read as that.
+    """
+    if deadline is None or not math.isfinite(deadline):
+        return None
+    return max(1, int(1000.0 * (deadline - time.perf_counter())))
 
 
 def tighten_root_bounds_with_fbbt(

@@ -14456,6 +14456,7 @@ def solve_model(
             model,
             method=amp_gdp_method,
             respect_disjunction_methods=False,
+            fbbt_deadline=_solve_t0 + float(time_limit),
         )
         _carry_solve_clocks(_amp_gdp_src, model)
 
@@ -14872,7 +14873,9 @@ def solve_model(
     from discopt.transformations import get as _get_transformation
 
     _gdp_src = model
-    model = _get_transformation("gdp").apply(model, method=gdp_method)
+    model = _get_transformation("gdp").apply(
+        model, method=gdp_method, fbbt_deadline=_solve_t0 + float(time_limit)
+    )
     _carry_solve_clocks(_gdp_src, model)
 
     # #1255: the lowering appends a selector binary per disjunct, so a warm start
@@ -15244,8 +15247,15 @@ def solve_model(
                 _fr_sz.append(_v.size)
             _fr_o += _v.size
         _, _fr_lb, _fr_ub, _, _ = _extract_variable_info(model)
+        # #1929: capped at the wall time left, as at the root presolve (#863).
+        # ``afford`` above only decides whether this block STARTS; uncapped, this
+        # FBBT ran 175 s on transswitch2383wpp against a 60 s solve. FBBT is
+        # anytime, so a cap returns a valid, looser box, and the root presolve
+        # re-tightens later. ``inf`` left (an uncapped solve) means no cap.
+        _fr_left = _remaining_budget()
+        _fr_budget_ms = None if not math.isfinite(_fr_left) else max(1, int(1000 * _fr_left))
         _fr_lb, _fr_ub, _fr_infeas, _fr_changed = tighten_root_bounds_with_fbbt(
-            model, _fr_lb, _fr_ub, _fr_off, _fr_sz
+            model, _fr_lb, _fr_ub, _fr_off, _fr_sz, time_limit_ms=_fr_budget_ms
         )
         if not _fr_infeas and _fr_changed:
             from discopt.solvers.amp import _apply_flat_bounds_to_model
@@ -25921,14 +25931,16 @@ def _solve_nlp_bb(
 
     # --- Root presolve: FBBT + integer-bound rounding before tree creation ---
     t_rust_start = time.perf_counter()
-    from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
+    from discopt.solvers._root_presolve import fbbt_budget_ms, tighten_root_bounds_with_fbbt
 
+    # #1929: capped at the solve's deadline, like every root FBBT call.
     lb, ub, root_infeasible, _ = tighten_root_bounds_with_fbbt(
         model,
         lb,
         ub,
         int_offsets,
         int_sizes,
+        time_limit_ms=fbbt_budget_ms(t_start + time_limit),
     )
     rust_time += time.perf_counter() - t_rust_start
     if root_infeasible:
@@ -37614,10 +37626,12 @@ def _solve_miqp_bb(
     # such bounds (here to [0, 1]/[0, 0.833]) so every node relaxation is
     # well-posed; a True root_infeasible from FBBT is itself a sound proof.
     t_rust_start = time.perf_counter()
-    from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
+    from discopt.solvers._root_presolve import fbbt_budget_ms, tighten_root_bounds_with_fbbt
 
+    # #1929: capped at the solve's deadline, like every root FBBT call
+    # (unitcommit_50_20_2_mod_8 sat here at 40 s on a 60 s limit).
     lb, ub, root_infeasible, _ = tighten_root_bounds_with_fbbt(
-        model, lb, ub, int_offsets, int_sizes
+        model, lb, ub, int_offsets, int_sizes, time_limit_ms=fbbt_budget_ms(t_start + time_limit)
     )
     rust_time += time.perf_counter() - t_rust_start
     if root_infeasible:
