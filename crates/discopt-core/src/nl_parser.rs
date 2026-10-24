@@ -761,6 +761,28 @@ pub struct ParsedNl {
     /// cannot tell "starting value 0.0" from "no starting value". Empty when the
     /// file has no `x` segment.
     pub initial_point: Vec<(usize, f64)>,
+    /// Every `S` (suffix) segment, in file order (#1921). Kept verbatim and
+    /// indexed by the file's own numbering (column / row / objective), for the
+    /// same reason as `initial_point`: the indices are invalidated by any
+    /// presolve transform, so they ride alongside the model. The caller decides
+    /// which suffixes it interprets — and must refuse the ones that change the
+    /// model's meaning but that it does not interpret (e.g. SOS sets), rather
+    /// than reading past them.
+    pub suffixes: Vec<NlSuffix>,
+}
+
+/// One `.nl` suffix segment: `S<kind> <count> <name>` followed by `count`
+/// `<index> <value>` lines.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NlSuffix {
+    /// The raw `kind` field. `kind & 3` is the entity (0 variable, 1 constraint,
+    /// 2 objective, 3 problem); `kind & 4` marks real (vs integer) values.
+    pub kind: i32,
+    /// The suffix name, e.g. `sosno` or `ref`.
+    pub name: String,
+    /// `(index, value)` entries in file order. Integer suffix values are
+    /// stored exactly as `f64` (any `i32` is representable).
+    pub entries: Vec<(usize, f64)>,
 }
 
 /// Parse a text-mode .nl file, returning the model together with any
@@ -865,6 +887,7 @@ pub fn parse_nl_full(content: &str) -> Result<ParsedNl, NlParseError> {
     // discarded under a leading underscore — the initial point never left the
     // parser, so a round-trip dropped it; #1225).
     let mut initial_point: Vec<(usize, f64)> = Vec::new();
+    let mut suffixes: Vec<NlSuffix> = Vec::new();
 
     // Determine variable types from header counts.
     // In .nl format the variables are ordered:
@@ -1278,13 +1301,31 @@ pub fn parse_nl_full(content: &str) -> Result<ParsedNl, NlParseError> {
                 }
             }
             b'S' => {
-                // Suffix: S<kind> <count> <name>
+                // Suffix: S<kind> <count> <name>, then `count` lines `<index> <value>`.
+                // Captured rather than read past (#1921): some suffixes (`sosno`/`ref`)
+                // carry constraints, and the caller must see them to honour or refuse
+                // them.
                 let parts = split_ws(&line[1..]);
                 if parts.len() >= 2 {
+                    let kind = parse_i32(parts[0])?;
                     let count = parse_usize(parts[1])?;
+                    let name = parts.get(2).map(|s| s.to_string()).unwrap_or_default();
+                    let mut entries = Vec::with_capacity(count);
                     for _ in 0..count {
-                        let _sl = reader.next_line()?;
+                        let sl = reader.next_line()?;
+                        let sp = split_ws(sl);
+                        if sp.len() < 2 {
+                            return Err(NlParseError::Parse(format!(
+                                "suffix '{name}': malformed entry line '{sl}'"
+                            )));
+                        }
+                        entries.push((parse_usize(sp[0])?, parse_f64(sp[1])?));
                     }
+                    suffixes.push(NlSuffix {
+                        kind,
+                        name,
+                        entries,
+                    });
                 }
             }
             b'd' => {
@@ -1511,6 +1552,7 @@ pub fn parse_nl_full(content: &str) -> Result<ParsedNl, NlParseError> {
         model,
         complementarities,
         initial_point: unique,
+        suffixes,
     })
 }
 
@@ -2398,6 +2440,69 @@ mod tests {
     // ─── Test: header parsing ─────────────────────────────
 
     // ─── Tests: the `x` segment (initial point), #1225 ────
+
+    // ─── Tests: suffix segments are captured, not read past (#1921) ────
+
+    #[test]
+    fn test_suffixes_are_captured() {
+        let mut nl = linear_nl();
+        nl.push_str("S0 2 sosno\n0 1\n1 -3\nS4 1 ref\n1 2.5\n");
+        let parsed = parse_nl_full(&nl).unwrap();
+        assert_eq!(
+            parsed.suffixes,
+            vec![
+                NlSuffix {
+                    kind: 0,
+                    name: "sosno".into(),
+                    entries: vec![(0, 1.0), (1, -3.0)],
+                },
+                NlSuffix {
+                    kind: 4,
+                    name: "ref".into(),
+                    entries: vec![(1, 2.5)],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_binary_suffix_segment_transcodes_to_the_text_form() {
+        // An integer and a real suffix in the binary body encoding.
+        let mut body: Vec<u8> = vec![b'S'];
+        for v in [0i32, 2] {
+            body.extend_from_slice(&v.to_le_bytes());
+        }
+        body.extend_from_slice(b"sosno\n");
+        for v in [0i32, 1, 1, -1] {
+            body.extend_from_slice(&v.to_le_bytes());
+        }
+        body.push(b'S');
+        for v in [4i32, 1] {
+            body.extend_from_slice(&v.to_le_bytes());
+        }
+        body.extend_from_slice(b"ref\n");
+        body.extend_from_slice(&1i32.to_le_bytes());
+        body.extend_from_slice(&2.5f64.to_le_bytes());
+
+        let nl = linear_nl();
+        let mut reader = LineReader::new(&nl);
+        let header = parse_header(&mut reader).unwrap();
+        let mut out = String::new();
+        transcode_binary_body(&header, &body, &mut out).unwrap();
+        let mut text = nl.clone();
+        text.push_str(&out);
+        let parsed = parse_nl_full(&text).unwrap();
+        assert_eq!(parsed.suffixes.len(), 2);
+        assert_eq!(parsed.suffixes[0].entries, vec![(0, 1.0), (1, -1.0)]);
+        assert_eq!(parsed.suffixes[1].entries, vec![(1, 2.5)]);
+    }
+
+    #[test]
+    fn test_malformed_suffix_entry_errors() {
+        let mut nl = linear_nl();
+        nl.push_str("S0 1 sosno\n0\n");
+        assert!(parse_nl_full(&nl).is_err());
+    }
 
     #[test]
     fn test_initial_point_is_captured_sparsely() {

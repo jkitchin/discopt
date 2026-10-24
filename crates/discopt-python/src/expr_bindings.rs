@@ -37,6 +37,10 @@ pub struct PyModelRepr {
     /// renumber columns, so a transform's output must start from empty instead
     /// of inheriting indices that no longer mean anything (#1225).
     initial_point: Vec<(usize, f64)>,
+    /// `.nl` suffix segments `(kind, name, [(index, value), ...])`, verbatim and in
+    /// file order (#1921). Indexed by the file's numbering, so — like
+    /// `initial_point` — empty for every repr a transform produces.
+    suffixes: Vec<(i32, String, Vec<(usize, f64)>)>,
     /// The #1568 expanded array-row FBBT view, built on the first
     /// `in_tree_presolve` call that wants it and reused at every later node.
     /// Keyed on the repr's structure, never its bounds (the node box overrides
@@ -52,6 +56,11 @@ impl PyModelRepr {
             inner: parsed.model,
             complementarities: parsed.complementarities,
             initial_point: parsed.initial_point,
+            suffixes: parsed
+                .suffixes
+                .into_iter()
+                .map(|sfx| (sfx.kind, sfx.name, sfx.entries))
+                .collect(),
             array_row_cache: Default::default(),
             // A repr recovered from a `.nl` parse has no builder rows.
             n_builder_constraints: 0,
@@ -146,6 +155,14 @@ impl PyModelRepr {
     /// mean inheriting stale indices (#1225).
     fn initial_point(&self) -> Vec<(usize, f64)> {
         self.initial_point.clone()
+    }
+
+    /// `.nl` suffix segments as `[(kind, name, [(index, value), ...]), ...]`, in
+    /// file order (#1921). `kind & 3` is the entity (0 variable, 1 constraint,
+    /// 2 objective, 3 problem) and `kind & 4` marks real values. Empty for a
+    /// model that did not come from a `.nl` file and for every transformed repr.
+    fn suffixes(&self) -> Vec<(i32, String, Vec<(usize, f64)>)> {
+        self.suffixes.clone()
     }
 
     /// Tighten variable block `block_idx`'s element-wise bounds by
@@ -868,6 +885,7 @@ impl PyModelRepr {
                 inner: new_model,
                 complementarities: Vec::new(),
                 initial_point: Vec::new(),
+                suffixes: Vec::new(),
                 array_row_cache: Default::default(),
             },
             dict.into(),
@@ -900,6 +918,7 @@ impl PyModelRepr {
                 inner: new_model,
                 complementarities: Vec::new(),
                 initial_point: Vec::new(),
+                suffixes: Vec::new(),
                 array_row_cache: Default::default(),
             },
             dict.into(),
@@ -1367,6 +1386,7 @@ impl PyModelRepr {
                 inner: result.model,
                 complementarities: Vec::new(),
                 initial_point: Vec::new(),
+                suffixes: Vec::new(),
                 array_row_cache: Default::default(),
             },
             stats.into(),
@@ -1398,6 +1418,7 @@ impl PyModelRepr {
                     inner: self.inner.clone(),
                     complementarities: self.complementarities.clone(),
                     initial_point: self.initial_point.clone(),
+                    suffixes: self.suffixes.clone(),
                     array_row_cache: Default::default(),
                 },
                 PySubstitutionChain {
@@ -1416,6 +1437,7 @@ impl PyModelRepr {
                 inner: reduced,
                 complementarities: Vec::new(),
                 initial_point: Vec::new(),
+                suffixes: Vec::new(),
                 array_row_cache: Default::default(),
             },
             PySubstitutionChain {
@@ -1862,6 +1884,7 @@ pub fn model_to_repr(
         n_builder_constraints,
         // Built from a Python Model, not parsed from a `.nl` file: no `x` segment.
         initial_point: Vec::new(),
+        suffixes: Vec::new(),
         array_row_cache: Default::default(),
     })
 }
