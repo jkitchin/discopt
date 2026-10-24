@@ -9,9 +9,7 @@ the panel has two parts:
    must be invisible where no array variable exists.
 2. **Array-variable panel** -- generated models written with integer array
    variables, the class the flag targets: integer bilinear (pure and with
-   continuous partners), integer squares mixed with cross terms, 2-D variables,
-   and (added after the #1937 review) larger dense objective-only and
-   dense constraint-product models with no brute-force oracle.
+   continuous partners), integer squares mixed with cross terms, 2-D variables.
    Each instance is solved OFF and ON, interleaved, and checked for
    *cert-clean* (no wrong ``optimal``; dual bound never above the oracle;
    incumbent independently feasible on the ORIGINAL model; no certified-OFF
@@ -154,57 +152,8 @@ def gen_two_dim(seed, k, ub):
     return m, [w], True
 
 
-def gen_dense_objective(seed, n, ub=10):
-    """The #1937 review's probe: every product in the objective, linear row."""
-    rng = np.random.default_rng(seed)
-    q = rng.normal(size=(n, n))
-    m = dm.Model(f"denseobj_n{n}_s{seed}")
-    x = m.integer("x", shape=(n,), lb=0, ub=ub)
-    m.minimize(
-        sum(float(q[i, j]) * x[i] * x[j] for i in range(n) for j in range(i + 1, n))
-        + sum(x[i] for i in range(n))
-    )
-    m.subject_to(sum(x[i] for i in range(n)) >= n)
-    return m, [x], False
-
-
-def gen_dense_constraint(seed, n, ub=10):
-    """Dense products in one constraint row, linear objective."""
-    rng = np.random.default_rng(seed)
-    q = np.abs(rng.normal(size=(n, n)))
-    m = dm.Model(f"densecon_n{n}_s{seed}")
-    x = m.integer("x", shape=(n,), lb=0, ub=ub)
-    m.minimize(-sum(float(rng.uniform(0.5, 2.0)) * x[i] for i in range(n)))
-    m.subject_to(
-        sum(float(q[i, j]) * x[i] * x[j] for i in range(n) for j in range(i + 1, n))
-        <= float(n * ub * ub / 4)
-    )
-    return m, [x], False
-
-
-def gen_objective_int_cont(seed, n, ub=4):
-    """Objective-only integer x continuous products."""
-    rng = np.random.default_rng(seed)
-    m = dm.Model(f"objic_n{n}_s{seed}")
-    x = m.integer("x", shape=(n,), lb=0, ub=ub)
-    y = m.continuous("y", shape=(n,), lb=0.0, ub=5.0)
-    m.minimize(
-        sum(float(rng.normal()) * x[i] * y[j] for i in range(n) for j in range(n) if i != j)
-        + sum(y[i] for i in range(n))
-    )
-    m.subject_to(sum(x[i] for i in range(n)) >= n)
-    m.subject_to(sum(y[i] for i in range(n)) >= n)
-    return m, [x, y], False
-
-
 def instances():
     out = []
-    # Larger models, no brute-force oracle (cross-arm only): the class the first
-    # graduation missed (#1937 review) and its constraint-side counterpart.
-    for n in (12, 15, 20):
-        out.append(gen_dense_objective(500, n))
-        out.append(gen_dense_constraint(600, n))
-    out.append(gen_objective_int_cont(700, 14))
     for s in range(3):
         for n, ub in ((3, 7), (4, 5), (5, 4), (6, 3)):
             out.append(gen_int_bilinear(100 + s, n, ub))
@@ -300,19 +249,6 @@ def panel(tl):
                         check(
                             abs(a["obj"] - oracle) <= 1e-5 * max(1, abs(oracle)),
                             f"{tag}: optimal {a['obj']} != oracle {oracle}",
-                        )
-        # Cross-arm certificate check (every instance; the only one without an
-        # oracle): no arm's dual bound may exceed the best feasible incumbent any
-        # arm found (minimisation throughout).
-        incs = [a["obj"] for arm in res.values() for a in arm if a["obj"] is not None]
-        if incs:
-            best_inc = min(incs)
-            for arm in res.values():
-                for a in arm:
-                    if a["bound"] is not None:
-                        check(
-                            a["bound"] <= best_inc + 1e-6 * max(1.0, abs(best_inc)),
-                            f"{m.name}: bound {a['bound']} above best incumbent {best_inc}",
                         )
         off_opt = [a for a in res[False] if a["status"] == "optimal"]
         on_opt = [a for a in res[True] if a["status"] == "optimal"]

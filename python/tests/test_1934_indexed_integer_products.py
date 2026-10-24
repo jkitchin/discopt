@@ -4,12 +4,10 @@
 ``.var``; the node stores it in ``.base``, so every ``x[i]`` resolved to ``None``
 and the bilinear, square and #707 multilinear passes never fired on a model
 written with array variables. Recognising them is bound-changing (CLAUDE.md §5),
-so it sits behind ``DISCOPT_INTEGER_PRODUCT_INDEXED`` (default ON; ``=0`` opts
-out). It graduated together with the solver's objective-only decline
-(``DISCOPT_IPX_OBJECTIVE_ONLY_DECLINE``), which keeps the lift off models whose
-integer products are all in the objective, where it was measured to lose.
+so it sits behind ``DISCOPT_INTEGER_PRODUCT_INDEXED`` (default OFF: its panel was
+cert-clean but not net-positive on dense integer QPs; see the flag's docstring).
 
-Covered here: ``=0`` is the legacy behaviour and the default is ON;
+Covered here: the default and ``=0`` are the legacy behaviour;
 flag ON resolves int, tuple and negative indices to the flat element ``_int_factor_range`` reads,
 refuses slices/bools/out-of-range; two references to one element share one
 expansion; a 2-D variable's expansion links the right element; and the rewrite
@@ -52,11 +50,11 @@ def test_opt_out_keeps_legacy_behaviour(monkeypatch):
     assert ipr.reformulate_integer_bilinear(m) is m
 
 
-def test_default_is_on(monkeypatch):
+def test_default_is_off(monkeypatch):
     monkeypatch.delenv(FLAG, raising=False)
     m, x = _issue_model()
-    assert ipr._scalar_var_ref(x[0]) == (x, 0)
-    assert ipr.has_nonconvex_integer_bilinear(m) is True
+    assert ipr._scalar_var_ref(x[0]) is None
+    assert ipr.has_nonconvex_integer_bilinear(m) is False
 
 
 def test_issue_reproducer(flag_on):
@@ -252,70 +250,3 @@ def test_solve_end_to_end_matches_brute_force(flag_on):
     r = m.solve(time_limit=30)
     assert r.status == "optimal"
     assert r.objective == pytest.approx(best, abs=1e-6)
-
-
-# --- the objective-only decline (``DISCOPT_IPX_OBJECTIVE_ONLY_DECLINE``) ---
-
-DECLINE = "DISCOPT_IPX_OBJECTIVE_ONLY_DECLINE"
-
-
-def _objective_only_model(n=6):
-    rng = np.random.default_rng(0)
-    q = rng.normal(size=(n, n))
-    m = dm.Model("objonly")
-    x = m.integer("x", shape=(n,), lb=0, ub=4)
-    m.minimize(
-        sum(float(q[i, j]) * x[i] * x[j] for i in range(n) for j in range(i + 1, n))
-        + sum(x[i] for i in range(n))
-    )
-    m.subject_to(sum(x[i] for i in range(n)) >= n)
-    return m, x
-
-
-@pytest.fixture
-def lift_calls(monkeypatch):
-    """Record every integer-bilinear lift the solver builds. The registry
-    resolves ``integer.bilinear`` to this module attribute at call time."""
-    calls: list[bool] = []
-    real = ipr.reformulate_integer_bilinear
-
-    def spy(model, **kw):
-        out = real(model, **kw)
-        calls.append(out is not model)
-        return out
-
-    monkeypatch.setattr(ipr, "reformulate_integer_bilinear", spy)
-    return calls
-
-
-def test_constraint_witness_ignores_the_objective(flag_on):
-    m, _ = _objective_only_model()
-    assert ipr.has_nonconvex_integer_bilinear(m) is True
-    assert ipr.has_nonconvex_integer_bilinear(m, in_constraints=True) is False
-    m2, _ = _issue_model()  # the product is in a constraint
-    assert ipr.has_nonconvex_integer_bilinear(m2, in_constraints=True) is True
-
-
-def test_objective_only_products_are_not_lifted(flag_on, monkeypatch, lift_calls):
-    """Fails without the decline: the objective-only model took the lift."""
-    monkeypatch.delenv(DECLINE, raising=False)
-    m, x = _objective_only_model()
-    r = m.solve(time_limit=30)
-    assert r.status == "optimal"
-    assert lift_calls == []
-    best, _ = _brute_force(m, [x])
-    assert r.objective == pytest.approx(best, abs=1e-6)
-
-    monkeypatch.setenv(DECLINE, "0")  # opt-out: the old gate lifts it
-    m0, _ = _objective_only_model()
-    r0 = m0.solve(time_limit=30)
-    assert lift_calls == [True]
-    assert r0.objective == pytest.approx(best, abs=1e-6)
-
-
-def test_constraint_products_are_still_lifted(flag_on, monkeypatch, lift_calls):
-    monkeypatch.delenv(DECLINE, raising=False)
-    m, x = _issue_model()
-    r = m.solve(time_limit=30)
-    assert r.status == "optimal" and lift_calls == [True]
-    assert r.objective == pytest.approx(_brute_force(m, [x])[0], abs=1e-6)
