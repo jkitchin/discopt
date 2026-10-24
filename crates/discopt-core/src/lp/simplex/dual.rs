@@ -907,7 +907,7 @@ impl<'a> PreparedDual<'a> {
         for (slot, &j) in basis.iter().enumerate() {
             slot_of[j] = slot as i64;
         }
-        let stat = start.col_status.clone();
+        let mut stat = start.col_status.clone();
         if stat.len() != n {
             crate::profile::incr(crate::profile::Ctr::DualPrepRejectShape);
             return None;
@@ -953,6 +953,7 @@ impl<'a> PreparedDual<'a> {
                 crate::profile::incr(crate::profile::Ctr::DualPrepRejectSingular);
                 return None;
             }
+            let mut flips = 0u64;
             for j in 0..n {
                 if stat[j] == BASIC || u[j] - l[j] <= tol {
                     continue; // basic or fixed: dual feasibility is unconstrained
@@ -967,9 +968,26 @@ impl<'a> PreparedDual<'a> {
                     dj >= -tol
                 };
                 if !ok {
+                    // #1935: a boxed column's wrong-signed `d_j` is right-signed at
+                    // its other bound (`!ok` means `|d_j| > tol` in the direction
+                    // the move fixes). Only the nonbasic VALUE changes, so the
+                    // factorization above still describes the basis.
+                    if opts.warm_flip_boxed && l[j] > -INF && u[j] < INF {
+                        stat[j] = if stat[j] == AT_UPPER {
+                            AT_LOWER
+                        } else {
+                            AT_UPPER
+                        };
+                        flips += 1;
+                        continue;
+                    }
                     crate::profile::incr(crate::profile::Ctr::DualPrepRejectDualInf);
                     return None; // dual-infeasible warm start → cold fallback
                 }
+            }
+            if flips > 0 {
+                crate::profile::incr_by(crate::profile::Ctr::DualPrepFlipColumns, flips);
+                crate::profile::incr(crate::profile::Ctr::DualPrepFlipAccepts);
             }
         }
 
@@ -2098,6 +2116,72 @@ mod tests {
 
     fn opts() -> SimplexOptions {
         SimplexOptions::default()
+    }
+
+    /// #1935 `warm_flip_boxed`: a warm start whose only dual infeasibilities sit on
+    /// BOXED nonbasic columns is repaired by moving them to their other bound, and
+    /// reaches the cold optimum; with the option off the same start is refused, as
+    /// before. `min -x1 - x2 s.t. x1 + x2 + s = 1.5, x in [0,1]^2, s >= 0` from the
+    /// slack basis with both x at their lower bound: `y = 0`, `d = (-1, -1)`, so
+    /// both are wrong-signed at lower and right-signed at upper.
+    #[test]
+    fn warm_flip_boxed_repairs_a_dual_infeasible_boxed_start() {
+        let sp = SparseCols::from_dense(&[1.0, 1.0, 1.0], 1, 3);
+        let (c, l, u, b) = (
+            vec![-1.0, -1.0, 0.0],
+            vec![0.0, 0.0, 0.0],
+            vec![1.0, 1.0, INF],
+            vec![1.5],
+        );
+        let start = Basis {
+            col_status: vec![AT_LOWER, AT_LOWER, BASIC],
+            basic_vars: vec![2],
+        };
+        let mut checked = 0usize;
+        let _guard = crate::profile::test_guard();
+        crate::profile::reset();
+        crate::profile::set_enabled(true);
+
+        let off = opts();
+        assert!(PreparedDual::prepare_cols(&sp, 1, 3, &c, &l, &u, &start, &off).is_none());
+        assert_eq!(
+            crate::profile::counter(crate::profile::Ctr::DualPrepRejectDualInf),
+            1
+        );
+        checked += 2;
+
+        let on = SimplexOptions {
+            warm_flip_boxed: true,
+            ..opts()
+        };
+        let prepared = PreparedDual::prepare_cols(&sp, 1, 3, &c, &l, &u, &start, &on);
+        assert!(
+            prepared.is_some(),
+            "boxed dual infeasibilities must be repaired"
+        );
+        assert_eq!(
+            crate::profile::counter(crate::profile::Ctr::DualPrepFlipColumns),
+            2
+        );
+        assert_eq!(
+            crate::profile::counter(crate::profile::Ctr::DualPrepFlipAccepts),
+            1
+        );
+        checked += 3;
+        let warm = prepared.unwrap().reoptimize(&l, &u, &b, &on);
+        crate::profile::set_enabled(false);
+        let cold = solve_lp_warm_csc(sp.clone(), 1, 3, &c, &l, &u, &b, None, &off);
+        assert_eq!(warm.status, LpStatus::Optimal);
+        assert_eq!(cold.status, LpStatus::Optimal);
+        assert!((warm.obj - (-1.5)).abs() < 1e-9, "warm obj {}", warm.obj);
+        assert!((cold.obj - warm.obj).abs() < 1e-9);
+        checked += 4;
+
+        // A wrong-signed column with an INFINITE side cannot be flipped: refused.
+        let u_open = vec![1.0, INF, INF];
+        assert!(PreparedDual::prepare_cols(&sp, 1, 3, &c, &l, &u_open, &start, &on).is_none());
+        checked += 1;
+        assert_eq!(checked, 10, "flip-repair probe did not run every assertion");
     }
 
     /// The κ₁ recovery must be *off* when unset, must accept an explicit sweep

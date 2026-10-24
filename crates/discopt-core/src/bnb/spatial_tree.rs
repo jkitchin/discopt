@@ -18,11 +18,13 @@
 //!   `lo = p` for a split point `p in [lo,hi]`), whose union is the parent — so no
 //!   feasible point is ever lost.
 
-use crate::bnb::spatial_kernel::{solve_spatial_node, EnvTerm, SpatialKernelSpec};
+use crate::bnb::spatial_kernel::{solve_spatial_node_from, EnvTerm, SpatialKernelSpec};
 use crate::bnb::spatial_propagate::propagate_spec_fixpoint;
+use crate::lp::basis::Basis;
 use crate::lp::simplex::{LpStatus, SimplexOptions};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 /// An open B&B node in the best-bound frontier: its box and the inherited lower
@@ -35,6 +37,9 @@ struct QNode {
     pb: f64,
     lo: Vec<f64>,
     hi: Vec<f64>,
+    /// The parent's optimal node-LP basis, shared by both children; `None` unless
+    /// [`SpatialTreeConfig::warm_start_children`] is on and the parent solved.
+    basis: Option<Rc<Basis>>,
 }
 
 impl PartialEq for QNode {
@@ -267,6 +272,22 @@ pub struct SpatialTreeConfig {
     /// orchestrator's default since 2026-10-22 (`DISCOPT_SCALE_FREE_BRANCHING=1`
     /// opts in): scaling by possibly-loose ROOT widths lost tanksize's certificate.
     pub scale_free_branching: bool,
+    /// #1935 warm-start experiment: start each child's node LP from its parent's
+    /// optimal basis (dual simplex) instead of solving it from scratch. Off (the
+    /// default) is the cold solve every node has always had.
+    ///
+    /// Why it is worth measuring: #1935 replaced the node-LP engine with HiGHS
+    /// warm-started from the parent and measured the median per-node LP time
+    /// falling 6.27 -> 0.81 ms, but its baseline was this kernel's COLD solve, so
+    /// the number does not separate the engine from the warm start. This flag is
+    /// the other half of that comparison, on the in-house simplex.
+    ///
+    /// Bound-changing, not bound-neutral: a different starting basis can end on a
+    /// different optimal vertex of a degenerate node LP, with different duals and
+    /// so a different safe bound, LP point and branching decision. Soundness does
+    /// not depend on the start (see `solve_spatial_node_from`). Cost: each queued
+    /// node holds one shared parent basis (`n_total` status bytes plus `m` indices).
+    pub warm_start_children: bool,
 }
 
 impl Default for SpatialTreeConfig {
@@ -288,6 +309,7 @@ impl Default for SpatialTreeConfig {
             incumbent_time_extension: None,
             bound_time_extension: None,
             scale_free_branching: false,
+            warm_start_children: false,
         }
     }
 }
@@ -367,6 +389,22 @@ pub struct SpatialTreeResult {
     pub n_incumbent_value_calls: usize,
     /// #1656: [`IncumbentValueFn`] calls whose value exceeded `cᵀx` (see above).
     pub n_incumbent_value_raised: usize,
+    /// #1935: node LPs started from the parent's basis
+    /// ([`SpatialTreeConfig::warm_start_children`]). 0 with the flag off, which is
+    /// how a panel tells "the warm start never engaged" from "it engaged and did
+    /// not help" (CLAUDE.md §6). Whether a warm start then stayed warm or fell back
+    /// to a cold solve inside the simplex is `DualWarmSolves`/`DualColdFallbacks`
+    /// under `DISCOPT_PROFILE`.
+    pub n_warm_starts: usize,
+    /// #1935: nodes that had a parent basis but were solved without it because
+    /// the node LP's dimensions differ from the parent's.
+    pub n_warm_shape_mismatch: usize,
+    /// #1935: simplex pivots summed over node relaxation solves (OBBT probes
+    /// excluded). Deterministic, unlike `node_lp_s`.
+    pub n_node_pivots: usize,
+    /// #1935: wall seconds spent inside the node solve (LP assembly, the LP, the
+    /// safe bound and any OBBT sweep).
+    pub node_lp_s: f64,
 }
 
 /// A caller-supplied primal heuristic for [`solve_spatial_tree_with_hook`] (#1522).
@@ -552,6 +590,10 @@ pub fn solve_spatial_tree_with_hooks(
     let mut n_primal_hook_improvements = 0usize;
     let mut n_incumbent_value_calls = 0usize;
     let mut n_incumbent_value_raised = 0usize;
+    let mut n_warm_starts = 0usize;
+    let mut n_warm_shape_mismatch = 0usize;
+    let mut n_node_pivots = 0usize;
+    let mut node_lp_s = 0.0f64;
     // Best-bound frontier: a min-heap on the inherited lower bound. Exploring the
     // lowest-bound region first lifts the global frontier minimum (the reported dual
     // bound) as fast as possible — the key to certifying instances like tanksize
@@ -561,6 +603,7 @@ pub fn solve_spatial_tree_with_hooks(
         pb: f64::NEG_INFINITY,
         lo: spec.global_lo.clone(),
         hi: spec.global_hi.clone(),
+        basis: None,
     });
     // Root box widths (for root-relative branch scoring in the fallback rule).
     let root_w: Vec<f64> = spec
@@ -608,6 +651,7 @@ pub fn solve_spatial_tree_with_hooks(
         pb: parent_bound,
         lo,
         hi,
+        basis: parent_basis,
     }) = heap.pop()
     {
         if deadline.is_some_and(|d| Instant::now() >= d) && !extension_taken && incumbent.is_some()
@@ -675,6 +719,10 @@ pub fn solve_spatial_tree_with_hooks(
                 n_primal_hook_improvements,
                 n_incumbent_value_calls,
                 n_incumbent_value_raised,
+                n_warm_starts,
+                n_warm_shape_mismatch,
+                n_node_pivots,
+                node_lp_s,
             };
         }
         // Fathom by the parent bound if the incumbent already dominates it. The
@@ -709,6 +757,10 @@ pub fn solve_spatial_tree_with_hooks(
                 n_primal_hook_improvements,
                 n_incumbent_value_calls,
                 n_incumbent_value_raised,
+                n_warm_starts,
+                n_warm_shape_mismatch,
+                n_node_pivots,
+                node_lp_s,
             };
         }
         node_count += 1;
@@ -745,8 +797,20 @@ pub fn solve_spatial_tree_with_hooks(
         // the extra slice the tree just granted itself is spent on an LP that
         // still cannot be interrupted. See `node_lp_opts`.
         let node_opts = node_lp_opts(opts, deadline);
-        let node = solve_spatial_node(spec, &lo, &hi, config.run_obbt, &node_opts);
+        let t_node = Instant::now();
+        let node = solve_spatial_node_from(
+            spec,
+            &lo,
+            &hi,
+            config.run_obbt,
+            &node_opts,
+            parent_basis.as_deref(),
+        );
+        node_lp_s += t_node.elapsed().as_secs_f64();
         n_lp_solves += node.n_lp_solves;
+        n_node_pivots += node.n_pivots;
+        n_warm_starts += usize::from(node.warm_started);
+        n_warm_shape_mismatch += usize::from(node.warm_shape_mismatch);
         if node.status == LpStatus::Optimal && node.bound == f64::NEG_INFINITY {
             n_uncertified += 1;
         }
@@ -790,6 +854,7 @@ pub fn solve_spatial_tree_with_hooks(
             match split {
                 Some(j) => {
                     let at = clamp_interior(0.5 * (lo[j] + hi[j]), lo[j], hi[j]);
+                    // No optimal basis to hand down from an undecided LP.
                     push_children(
                         &mut heap,
                         &lo,
@@ -798,6 +863,7 @@ pub fn solve_spatial_tree_with_hooks(
                         at,
                         parent_bound,
                         spec.integrality[j],
+                        None,
                     );
                 }
                 None => global_lb_closed = global_lb_closed.min(parent_bound),
@@ -953,6 +1019,10 @@ pub fn solve_spatial_tree_with_hooks(
                                     n_primal_hook_improvements,
                                     n_incumbent_value_calls,
                                     n_incumbent_value_raised,
+                                    n_warm_starts,
+                                    n_warm_shape_mismatch,
+                                    n_node_pivots,
+                                    node_lp_s,
                                 };
                             }
                         }
@@ -1023,6 +1093,7 @@ pub fn solve_spatial_tree_with_hooks(
         };
 
         // Two covering children.
+        let child_basis = config.warm_start_children.then(|| Rc::new(node.basis));
         push_children(
             &mut heap,
             &lo,
@@ -1031,6 +1102,7 @@ pub fn solve_spatial_tree_with_hooks(
             split_at,
             bound,
             spec.integrality[split_col],
+            child_basis,
         );
     }
 
@@ -1067,6 +1139,10 @@ pub fn solve_spatial_tree_with_hooks(
                 n_primal_hook_improvements,
                 n_incumbent_value_calls,
                 n_incumbent_value_raised,
+                n_warm_starts,
+                n_warm_shape_mismatch,
+                n_node_pivots,
+                node_lp_s,
             }
         }
         None => SpatialTreeResult {
@@ -1087,6 +1163,10 @@ pub fn solve_spatial_tree_with_hooks(
             n_primal_hook_improvements,
             n_incumbent_value_calls,
             n_incumbent_value_raised,
+            n_warm_starts,
+            n_warm_shape_mismatch,
+            n_node_pivots,
+            node_lp_s,
         },
     }
 }
@@ -1125,6 +1205,7 @@ fn push_children(
     split_at: f64,
     pb: f64,
     is_int: bool,
+    basis: Option<Rc<Basis>>,
 ) {
     if is_int {
         // integer: child1 x<=floor, child2 x>=ceil
@@ -1140,6 +1221,7 @@ fn push_children(
                 pb,
                 lo: lo1,
                 hi: hi1,
+                basis: basis.clone(),
             });
         }
         if hi2[split_col] >= lo2[split_col] - 1e-12 {
@@ -1147,6 +1229,7 @@ fn push_children(
                 pb,
                 lo: lo2,
                 hi: hi2,
+                basis: basis.clone(),
             });
         }
     } else {
@@ -1158,11 +1241,13 @@ fn push_children(
             pb,
             lo: lo.to_vec(),
             hi: hi1,
+            basis: basis.clone(),
         });
         heap.push(QNode {
             pb,
             lo: lo2,
             hi: hi.to_vec(),
+            basis: basis.clone(),
         });
     }
 }
@@ -2086,5 +2171,84 @@ mod gap_criterion_tests {
         assert_eq!(res_w.node_count, base.node_count);
         assert_eq!(res_w.incumbent, base.incumbent);
         assert_eq!(res_w.bound, base.bound);
+    }
+
+    /// #1935: `warm_start_children` changes how node LPs START, never what the
+    /// search may conclude. On a nonconvex box-constrained problem with several
+    /// lifted terms (two bilinear products, a square, a linear coupling row), the
+    /// warm and cold searches must both certify, agree on the optimum to the gap,
+    /// keep each bound below the other arm's incumbent, and the warm arm must
+    /// actually have warm-started (the probe-fired check, CLAUDE.md §6). Off, no
+    /// node may warm-start.
+    #[test]
+    fn warm_start_children_certifies_the_cold_optimum() {
+        use crate::bnb::spatial_kernel::FixedRow;
+        // min  w01 - 2 w12 + s0 - x2   with w01 = x0*x1, w12 = x1*x2, s0 = x0^2
+        // s.t. x0 + x1 + x2 <= 2.5,   x in [-1, 2]^3.
+        let spec = SpatialKernelSpec {
+            n_cols: 6,
+            n_orig: 3,
+            c: vec![0.0, 0.0, -1.0, 1.0, -2.0, 1.0],
+            integrality: vec![false; 6],
+            global_lo: vec![-1.0, -1.0, -1.0, -1e20, -1e20, -1e20],
+            global_hi: vec![2.0, 2.0, 2.0, 1e20, 1e20, 1e20],
+            fixed_rows: vec![FixedRow {
+                cols: vec![0, 1, 2],
+                coeffs: vec![1.0, 1.0, 1.0],
+                rhs: 2.5,
+            }],
+            terms: vec![
+                EnvTerm::Bilinear { i: 0, j: 1, w: 3 },
+                EnvTerm::Bilinear { i: 1, j: 2, w: 4 },
+                EnvTerm::Monomial { i: 0, s: 5, p: 2 },
+            ],
+            blf_terms: vec![],
+            obbt_candidates: vec![],
+        };
+        let base = SpatialTreeConfig {
+            max_nodes: 20_000,
+            gap_tol: 1e-6,
+            ..SpatialTreeConfig::default()
+        };
+        let warm_cfg = SpatialTreeConfig {
+            warm_start_children: true,
+            ..base
+        };
+        let opts = SimplexOptions::default();
+        let cold = solve_spatial_tree(&spec, &base, &opts);
+        let warm = solve_spatial_tree(&spec, &warm_cfg, &opts);
+        let mut checked = 0usize;
+
+        assert_eq!(cold.status, TreeStatus::Optimal, "{cold:?}");
+        assert_eq!(warm.status, TreeStatus::Optimal, "{warm:?}");
+        checked += 2;
+        assert!(cold.node_count > 3, "too few nodes to exercise inheritance");
+        assert_eq!(cold.n_warm_starts, 0, "flag off must never warm-start");
+        assert_eq!(cold.n_warm_shape_mismatch, 0);
+        checked += 3;
+        assert!(warm.n_warm_starts > 0, "warm arm never warm-started");
+        // Every node but the root and children of an undecided LP has a parent basis.
+        assert!(warm.n_warm_starts + warm.n_warm_shape_mismatch < warm.node_count);
+        checked += 2;
+        let (ic, iw) = (cold.incumbent.unwrap(), warm.incumbent.unwrap());
+        assert!((ic - iw).abs() <= 2e-6, "incumbents {ic} vs {iw}");
+        // Each arm's certified bound is a valid lower bound: never above an
+        // incumbent either arm found.
+        assert!(warm.bound <= ic + 1e-9 && warm.bound <= iw + 1e-9);
+        assert!(cold.bound <= ic + 1e-9 && cold.bound <= iw + 1e-9);
+        checked += 3;
+        // The incumbent is feasible for the original problem.
+        let x = &warm.incumbent_x;
+        assert!(x[0] + x[1] + x[2] <= 2.5 + 1e-6);
+        let obj = x[0] * x[1] - 2.0 * x[1] * x[2] + x[0] * x[0] - x[2];
+        assert!(
+            (obj - iw).abs() <= 1e-4,
+            "objective at point {obj} vs incumbent {iw}"
+        );
+        checked += 2;
+        assert_eq!(
+            checked, 12,
+            "warm-start tree probe did not run every assertion"
+        );
     }
 }

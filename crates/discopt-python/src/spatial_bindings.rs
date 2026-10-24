@@ -48,7 +48,7 @@ use std::time::{Duration, Instant};
     propagation_rounds=15, initial_incumbent=None, time_limit_s=None,
     incumbent_time_extension_s=None, bound_time_extension_s=None,
     cold_dual_start=false, primal_hook=None, incumbent_value=None,
-    scale_free_branching=false,
+    scale_free_branching=false, warm_start_children=false, warm_flip_boxed=false,
 ))]
 pub fn solve_spatial_tree_py<'py>(
     py: Python<'py>,
@@ -98,6 +98,8 @@ pub fn solve_spatial_tree_py<'py>(
     primal_hook: Option<PyObject>,
     incumbent_value: Option<PyObject>,
     scale_free_branching: bool,
+    warm_start_children: bool,
+    warm_flip_boxed: bool,
 ) -> PyResult<Bound<'py, PyDict>> {
     let c = c.as_slice()?;
     let integrality = integrality.as_slice()?;
@@ -329,6 +331,7 @@ pub fn solve_spatial_tree_py<'py>(
         incumbent_time_extension,
         bound_time_extension,
         scale_free_branching,
+        warm_start_children,
     };
     // The node LP's start basis (`SimplexOptions::cold_dual_start`, default OFF,
     // set from `DISCOPT_LP_COLD_DUAL_START`). Everything else is the default.
@@ -339,8 +342,12 @@ pub fn solve_spatial_tree_py<'py>(
     // post-extension, onto the options each node LP runs under. Setting
     // `cfg.deadline` here as well would freeze the pre-extension value into every
     // node and defeat the #917/#933 extensions. See `spatial_tree::node_lp_opts`.
+    // #1935: `warm_flip_boxed` repairs a dual-infeasible inherited basis by bound
+    // flips (see `SimplexOptions::warm_flip_boxed`); it only matters when a node LP
+    // is warm-started, i.e. with `warm_start_children`.
     let opts = SimplexOptions {
         cold_dual_start,
+        warm_flip_boxed,
         ..SimplexOptions::default()
     };
 
@@ -469,5 +476,11 @@ pub fn solve_spatial_tree_py<'py>(
     out.set_item("n_primal_hook_improvements", res.n_primal_hook_improvements)?;
     out.set_item("n_incumbent_value_calls", res.n_incumbent_value_calls)?;
     out.set_item("n_incumbent_value_raised", res.n_incumbent_value_raised)?;
+    // #1935 warm-start experiment: whether the parent basis was used, and the
+    // node-LP effort it is meant to cut.
+    out.set_item("n_warm_starts", res.n_warm_starts)?;
+    out.set_item("n_warm_shape_mismatch", res.n_warm_shape_mismatch)?;
+    out.set_item("n_node_pivots", res.n_node_pivots)?;
+    out.set_item("node_lp_s", res.node_lp_s)?;
     Ok(out)
 }

@@ -556,6 +556,12 @@ counters!(
     // #1510: the primal warm entry (`run_warm`) refusing the same malformed start.
     PrimalWarmRejectInfBound,
     DualPrepAccept,
+    // #1935 `SimplexOptions::warm_flip_boxed`: nonbasic boxed columns moved to their
+    // other bound to make a dual-infeasible warm start dual-feasible, and the starts
+    // accepted only because of such a move (a subset of `DualPrepAccept`). Zero with
+    // the option off; the pair says whether the repair engaged (CLAUDE.md §6).
+    DualPrepFlipColumns,
+    DualPrepFlipAccepts,
     ExpandResetArmed,
     ExpandResetRetries,
     ExpandResetRescues,

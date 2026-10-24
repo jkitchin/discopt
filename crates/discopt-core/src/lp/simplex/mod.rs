@@ -250,6 +250,25 @@ pub struct SimplexOptions {
     /// which is bound-changing under the §5 regime. Set from Python by
     /// `DISCOPT_LP_COLD_DUAL_START`, pending its graduation panel.
     pub cold_dual_start: bool,
+    /// #1935: repair a dual-infeasible warm-start basis by bound flips instead of
+    /// rejecting it.
+    ///
+    /// `PreparedDual::prepare` refuses a start on which some nonbasic reduced cost
+    /// has the wrong sign. A B&B child inherits its parent's optimal basis, but the
+    /// child's envelope rows carry new coefficients, so that test fails often —
+    /// measured on the native spatial kernel (`nvs13`, 600 warm starts): 389
+    /// refused dual-infeasible, 52 singular, 159 accepted. A nonbasic column with
+    /// BOTH bounds finite whose `d_j` has the wrong sign at one bound has the right
+    /// sign at the other, so moving it there makes the start dual-feasible at the
+    /// cost of some primal infeasibility, which is what the dual simplex removes.
+    /// The basis matrix and its factorization do not change. Columns with an
+    /// infinite side cannot be repaired this way; a start that still has one is
+    /// refused as before. Soundness is unchanged: the repaired start satisfies the
+    /// precondition `prepare` verifies, and the verdict is checked as always.
+    ///
+    /// Default `false`. The native spatial kernel sets it when
+    /// `DISCOPT_NATIVE_WARM_START=2`.
+    pub warm_flip_boxed: bool,
 }
 
 impl SimplexOptions {
@@ -294,6 +313,7 @@ impl Default for SimplexOptions {
             dual_stall_patience: dual::stall_patience_default(),
             dual_cost_perturb: dual::cost_perturb_default(),
             cold_dual_start: false,
+            warm_flip_boxed: false,
         }
     }
 }

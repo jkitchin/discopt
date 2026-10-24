@@ -230,6 +230,20 @@ pub struct SpatialNodeResult {
     pub tightened: Vec<(f64, f64)>,
     /// Total LP solves performed (1 node solve + OBBT probes).
     pub n_lp_solves: usize,
+    /// Simplex pivots of the node relaxation solve (OBBT probes excluded).
+    pub n_pivots: usize,
+    /// Optimal basis of the node relaxation solve: the warm start its children
+    /// inherit under [`SpatialTreeConfig::warm_start_children`]. Meaningful only
+    /// when `status` is `Optimal`.
+    ///
+    /// [`SpatialTreeConfig::warm_start_children`]: crate::bnb::spatial_tree::SpatialTreeConfig::warm_start_children
+    pub basis: crate::lp::basis::Basis,
+    /// Whether the solve was started from the caller's `warm` basis.
+    pub warm_started: bool,
+    /// The caller passed a `warm` basis whose dimensions differ from this node's LP
+    /// (an envelope generator emitted a different number of rows than at the
+    /// parent), so the node was solved without it.
+    pub warm_shape_mismatch: bool,
 }
 
 /// Assemble the node LP over the box `(lo, hi)` (both length `n_cols`; `lo/hi` on the
@@ -433,6 +447,30 @@ pub fn solve_spatial_node(
     run_obbt: bool,
     opts: &SimplexOptions,
 ) -> SpatialNodeResult {
+    solve_spatial_node_from(spec, lo, hi, run_obbt, opts, None)
+}
+
+/// [`solve_spatial_node`] started from `warm`, normally the parent node's optimal
+/// basis (#1935 warm-start experiment).
+///
+/// A child differs from its parent only in its box: the column bounds and the
+/// box-dependent envelope coefficients move, the row layout does not (except
+/// where a generator drops rows on a degenerate box, see
+/// [`SpatialNodeResult::warm_shape_mismatch`]). The parent's optimal basis is then
+/// the textbook dual-simplex warm start. Only the START changes: the bound is
+/// still [`ns_safe_bound_csc`] on the returned duals, an `Infeasible` verdict
+/// still carries a verified Farkas ray, and `solve_lp_warm_csc` cold-solves
+/// whenever the basis is singular or otherwise unusable, so the basis cannot make
+/// a verdict unsound — it can only change which optimal vertex (and duals) the
+/// solve lands on.
+pub fn solve_spatial_node_from(
+    spec: &SpatialKernelSpec,
+    lo: &[f64],
+    hi: &[f64],
+    run_obbt: bool,
+    opts: &SimplexOptions,
+    warm: Option<&crate::lp::basis::Basis>,
+) -> SpatialNodeResult {
     let lp = assemble_node_lp(spec, lo, hi);
     // Objective padded with zeros over the slack columns.
     let mut c = spec.c.clone();
@@ -453,13 +491,23 @@ pub fn solve_spatial_node(
     // optimum changes, and `solve_lp_warm_csc` cold-falls-back whenever the basis
     // is unusable. See `SimplexOptions::cold_dual_start` for why: the cold primal
     // grinds to `max_iter` on equality-rich (hence primal-degenerate) relaxations.
-    let start = if opts.cold_dual_start {
-        cold_dual_start_basis(&c, &lp.l, &lp.u, lp.m, lp.n_total)
-    } else {
-        None
+    let warm_fits = |b: &crate::lp::basis::Basis| {
+        b.col_status.len() == lp.n_total && b.basic_vars.len() == lp.m
+    };
+    let warm_shape_mismatch = warm.is_some_and(|b| !warm_fits(b));
+    let warm = warm.filter(|b| warm_fits(b));
+    let warm_started = warm.is_some();
+    let cold_start;
+    let start = match warm {
+        Some(b) => Some(b),
+        None if opts.cold_dual_start => {
+            cold_start = cold_dual_start_basis(&c, &lp.l, &lp.u, lp.m, lp.n_total);
+            cold_start.as_ref()
+        }
+        None => None,
     };
     let sol = match start {
-        Some(ref basis) => solve_lp_warm_csc(
+        Some(basis) => solve_lp_warm_csc(
             lp.sp.clone(),
             lp.m,
             lp.n_total,
@@ -520,6 +568,10 @@ pub fn solve_spatial_node(
         dual: sol.dual,
         tightened,
         n_lp_solves,
+        n_pivots: sol.iters,
+        basis: sol.basis,
+        warm_started,
+        warm_shape_mismatch,
     }
 }
 
@@ -599,6 +651,58 @@ mod tests {
             blf_terms: vec![],
             obbt_candidates: vec![0, 1],
         }
+    }
+
+    /// #1935: the parent's optimal basis is a START, never an answer. On a child
+    /// box (the parent split at x = 0.7) the warm solve must engage and certify the
+    /// same node-LP bound as the cold solve of the identical LP; a basis whose
+    /// dimensions do not fit the child's LP must be refused and the node solved
+    /// exactly as with no basis at all.
+    #[test]
+    fn parent_basis_warm_start_reaches_the_cold_child_bound() {
+        let mut checked = 0usize;
+        let opts = SimplexOptions::default();
+        for spec in [bilinear_spec(), equality_spec()] {
+            let lo = vec![0.0, 0.0, -1e20];
+            let hi = vec![2.0, 2.0, 1e20];
+            let parent = solve_spatial_node(&spec, &lo, &hi, false, &opts);
+            assert_eq!(parent.status, LpStatus::Optimal);
+            assert!(!parent.warm_started && !parent.warm_shape_mismatch);
+            checked += 2;
+            for (clo, chi) in [
+                (vec![0.0, 0.0, -1e20], vec![0.7, 2.0, 1e20]),
+                (vec![0.7, 0.0, -1e20], vec![2.0, 2.0, 1e20]),
+            ] {
+                let cold = solve_spatial_node(&spec, &clo, &chi, false, &opts);
+                let warm =
+                    solve_spatial_node_from(&spec, &clo, &chi, false, &opts, Some(&parent.basis));
+                assert!(warm.warm_started, "parent basis was not used");
+                assert!(!warm.warm_shape_mismatch);
+                assert_eq!(warm.status, cold.status);
+                checked += 3;
+                if cold.status == LpStatus::Optimal {
+                    assert!(
+                        (warm.bound - cold.bound).abs() <= 1e-7 * (1.0 + cold.bound.abs()),
+                        "warm bound {} vs cold {}",
+                        warm.bound,
+                        cold.bound
+                    );
+                    checked += 1;
+                }
+
+                // A basis for a different LP shape: refused, solved cold.
+                let mut wrong = parent.basis.clone();
+                wrong.col_status.push(crate::lp::basis::AT_LOWER);
+                let refused =
+                    solve_spatial_node_from(&spec, &clo, &chi, false, &opts, Some(&wrong));
+                assert!(refused.warm_shape_mismatch && !refused.warm_started);
+                assert_eq!(refused.status, cold.status);
+                assert_eq!(refused.bound, cold.bound);
+                assert_eq!(refused.n_pivots, cold.n_pivots);
+                checked += 4;
+            }
+        }
+        assert_eq!(checked, 36, "warm-start probe did not run every assertion");
     }
 
     #[test]
