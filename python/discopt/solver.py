@@ -8924,7 +8924,11 @@ def _model_contains_nonsmooth_node(model: Model) -> bool:
 
 
 def _convexity_rewrites(
-    model: Model, *, entropy: bool = True, epigraph: bool = True
+    model: Model,
+    *,
+    entropy: bool = True,
+    epigraph: bool = True,
+    entropy_deadline: Optional[Callable[[], bool]] = None,
 ) -> tuple[Model, tuple[str, ...]]:
     """Apply the exact rewrites ``solve_model`` runs before classifying convexity.
 
@@ -8945,7 +8949,7 @@ def _convexity_rewrites(
     if entropy:
         from discopt._relax.factorable_reform import canonicalize_entropy
 
-        new = canonicalize_entropy(model)
+        new = canonicalize_entropy(model, entropy_deadline)
         if new is not model:
             applied.append("entropy")
             model = new
@@ -15023,7 +15027,10 @@ def solve_model(
     _already_linear = classify_problem(model) in (ProblemClass.LP, ProblemClass.MILP)
 
     model, _rewrites = _convexity_rewrites(
-        model, entropy=_entropy_ok and not _already_linear, epigraph=not _has_bb_callbacks
+        model,
+        entropy=_entropy_ok and not _already_linear,
+        epigraph=not _has_bb_callbacks,
+        entropy_deadline=_presolve_deadline.abandon_hook("canonicalize_entropy"),
     )
     if "objective_epigraph" in _rewrites:
         logger.debug("relaxed objective-defining equality to binding inequality")
@@ -28415,6 +28422,9 @@ def _solve_batch_pounce(
     if not caller_limit or caller_limit <= 0:
         caller_limit = 30.0
     batch_opts["max_wall_time"] = min(30.0, caller_limit)
+    # The caller's ``max_wall_time`` is what is left of its budget; the whole
+    # wave, not each instance, must end by then.
+    _batch_deadline = time.perf_counter() + caller_limit
 
     # Multistart only helps escape weak local minima on nonconvex nodes.
     do_multistart = bool(multistart) and not convex
@@ -28539,10 +28549,12 @@ def _solve_batch_pounce(
                 f"POUNCE node waves need OS threads; {sys.platform} cannot start one"
             )
         with _timing.charge("pounce"):
-            results = pounce.solve_nlp_batch(
+            results = _solve_nlp_batch_by_deadline(
+                pounce.solve_nlp_batch,
                 problems,
-                x0s=x0s,
-                options=batch_opts,
+                x0s,
+                batch_opts,
+                _batch_deadline,
                 share_structure=True,
             )
     except Exception as e:
@@ -33209,6 +33221,45 @@ def _solve_qp_batch_by_deadline(solve_qp_batch, problems: list, deadline: float)
             break
         chunk = solve_qp_batch(problems[lo : lo + width], check_psd=False, time_limit=left)
         out[lo : lo + len(chunk)] = chunk
+    return out
+
+
+#: Ipopt's ``Maximum_CpuTime_Exceeded``: what a node NLP that was never started at
+#: the deadline reports, i.e. exactly what a started one reports when its own wall
+#: limit runs out -- so the caller's existing handling of a timed-out node (no
+#: usable objective, node left open) applies unchanged.
+_NLP_NOT_STARTED_STATUS = -4
+
+
+def _solve_nlp_batch_by_deadline(
+    solve_nlp_batch, problems: list, x0s: list, options: dict, deadline: float, **kw
+) -> list:
+    """``solve_nlp_batch(problems, x0s=...)`` in pool-width chunks ending by ``deadline``.
+
+    POUNCE's ``max_wall_time`` is per instance, so one call over ``n`` problems on
+    a pool of width ``w`` can run ``ceil(n / w)`` back-to-back instances each
+    granted the whole remainder (``catmix800``: a node wave still running 3 s past
+    a 60 s limit). Each chunk here gets ``min(cap, what is left)`` and no chunk
+    starts once nothing is; an unstarted problem returns ``(x0, {"status": -4})``,
+    the time-out status. Same idea as :func:`_solve_qp_batch_by_deadline`.
+    """
+    cap = float(options.get("max_wall_time", 30.0))
+    out: list = []
+    width = _qp_batch_pool_width()
+    for lo in range(0, len(problems), width):
+        left = deadline - time.perf_counter()
+        if left <= 0.0:
+            out.extend(
+                (np.asarray(x0, dtype=np.float64), {"status": _NLP_NOT_STARTED_STATUS})
+                for x0 in x0s[lo:]
+            )
+            break
+        chunk_opts = {**options, "max_wall_time": min(cap, left)}
+        out.extend(
+            solve_nlp_batch(
+                problems[lo : lo + width], x0s=x0s[lo : lo + width], options=chunk_opts, **kw
+            )
+        )
     return out
 
 

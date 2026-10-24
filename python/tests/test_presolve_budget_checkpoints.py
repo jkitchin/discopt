@@ -261,3 +261,111 @@ def test_a_custom_call_is_still_found_when_one_exists():
     m.minimize(y)
     assert solver_mod._model_contains_custom_call(m) is True
     assert len(list(solver_mod._model_custom_calls(m))) == 1
+
+
+# --- entropy canonicalization abandons mid-run ------------------------------
+
+
+def _entropy_model(n: int):
+    m = dm.Model("entropy_hook")
+    xs = [m.continuous(f"x{i}", lb=0.1, ub=2) for i in range(n)]
+    for x in xs:
+        m.subject_to(x * dm.log(x) <= 1)
+    m.minimize(sum(xs))
+    return m
+
+
+def test_entropy_rewrite_unaffected_by_a_hook_that_never_fires():
+    m = _entropy_model(4)
+    a = fr.canonicalize_entropy(m)
+    b = fr.canonicalize_entropy(m, lambda: False)
+    assert a is not m and b is not m
+    assert [str(c.body) for c in a._constraints] == [str(c.body) for c in b._constraints]
+    assert any("entropy" in str(c.body) for c in b._constraints)
+
+
+def test_entropy_rewrite_expiring_mid_run_returns_the_model_unchanged():
+    m = _entropy_model(6)
+    calls = [0]
+
+    def hook():
+        calls[0] += 1
+        return calls[0] > 2  # two rows rewritten, then the budget is gone
+
+    assert fr.canonicalize_entropy(m, hook) is m
+    assert calls[0] == 3
+    assert all("entropy" not in str(c.body) for c in m._constraints)
+
+
+def test_solver_rewrites_forward_the_entropy_hook():
+    m = _entropy_model(3)
+    out, applied = solver_mod._convexity_rewrites(m, epigraph=False, entropy_deadline=lambda: True)
+    assert out is m and applied == ()
+    out, applied = solver_mod._convexity_rewrites(m, epigraph=False)
+    assert applied == ("entropy",)
+
+
+# --- batched node NLPs end by the caller's remaining budget ---------------------
+
+
+def test_nlp_batch_runs_in_pool_width_chunks_and_stops_at_the_deadline(monkeypatch):
+    import numpy as np
+
+    monkeypatch.setenv("RAYON_NUM_THREADS", "2")
+    calls: list[tuple[int, float]] = []
+
+    def fake_batch(problems, x0s, options, share_structure):
+        calls.append((len(problems), options["max_wall_time"]))
+        time.sleep(0.3)  # the chunk uses up the budget
+        return [(np.asarray(x0) + 1.0, {"status": 0, "obj_val": 1.0}) for x0 in x0s]
+
+    problems = list(range(5))
+    x0s = [np.full(2, float(i)) for i in range(5)]
+    out = solver_mod._solve_nlp_batch_by_deadline(
+        fake_batch,
+        problems,
+        x0s,
+        {"max_wall_time": 30.0, "print_level": 0},
+        time.perf_counter() + 0.2,
+        share_structure=True,
+    )
+    assert len(calls) == 1  # the second chunk was never started
+    assert calls[0][0] == 2 and calls[0][1] <= 0.2
+    assert len(out) == 5
+    assert [o[1]["status"] for o in out] == [0, 0, -4, -4, -4]
+    # an unstarted problem hands back its start, like a timed-out one
+    assert np.array_equal(out[3][0], x0s[3])
+
+
+def test_nlp_batch_with_time_left_is_one_pass_per_chunk(monkeypatch):
+    import numpy as np
+
+    monkeypatch.setenv("RAYON_NUM_THREADS", "4")
+    sizes: list[int] = []
+
+    def fake_batch(problems, x0s, options, share_structure):
+        sizes.append(len(problems))
+        assert options["max_wall_time"] <= 30.0
+        return [(np.asarray(x0), {"status": 0, "obj_val": 0.0}) for x0 in x0s]
+
+    out = solver_mod._solve_nlp_batch_by_deadline(
+        fake_batch,
+        list(range(9)),
+        [np.zeros(1)] * 9,
+        {"max_wall_time": 30.0},
+        time.perf_counter() + 60.0,
+        share_structure=True,
+    )
+    assert sizes == [4, 4, 1]
+    assert [o[1]["status"] for o in out] == [0] * 9
+
+
+def test_the_time_out_status_is_not_accepted_as_a_node_bound():
+    """The unstarted status must map to the same non-accepted class as a node
+    NLP that timed out, so the caller leaves the node open."""
+    from discopt.solvers import SolveStatus
+    from discopt.solvers.nlp_ipopt import _IPOPT_STATUS_MAP
+
+    status = _IPOPT_STATUS_MAP[solver_mod._NLP_NOT_STARTED_STATUS]
+    assert status == SolveStatus.TIME_LIMIT
+    assert status not in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT)

@@ -41,6 +41,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
+
 from discopt._evaluator_cache import _value_bytes
 from discopt.modeling.core import Constraint, Model
 
@@ -61,22 +63,38 @@ def _state_key(model: Model) -> tuple[tuple, tuple] | None:
     variables = tuple(model._variables)
     parameters = tuple(model._parameters)
     objective = model._objective
+    # Column-wise, not one small tuple per variable/row: on
+    # ``acopf_caseactivsg25k_qcqp`` (328k variables, 365k rows) the per-object
+    # tuples cost 4.4 s -- each is a GC-tracked allocation, and every collection
+    # rescans a heap holding the whole expression graph -- against ~1 s for this.
+    # Bounds are compared as one float64 vector (``+ 0.0`` folds ``-0.0`` onto
+    # ``+0.0``, as ``_value_bytes`` does); the shapes column makes the
+    # concatenation unambiguous.
+    if variables:
+        lb = np.concatenate([np.ravel(np.asarray(v.lb, dtype=np.float64)) for v in variables])
+        ub = np.concatenate([np.ravel(np.asarray(v.ub, dtype=np.float64)) for v in variables])
+        bounds = ((lb + 0.0).tobytes(), (ub + 0.0).tobytes())
+    else:
+        bounds = (b"", b"")
     key = (
-        tuple(
-            (
-                id(v),
-                v.name,
-                v.var_type,
-                v.shape,
-                _value_bytes(v.lb),
-                _value_bytes(v.ub),
-                getattr(v, "_is_placeholder", None),
-                getattr(v, "_builder_idx", None),
-            )
-            for v in variables
-        ),
+        tuple(map(id, variables)),
+        tuple(v.name for v in variables),
+        tuple(v.var_type for v in variables),
+        tuple(v.shape for v in variables),
+        tuple(getattr(v, "_is_placeholder", None) for v in variables),
+        tuple(getattr(v, "_builder_idx", None) for v in variables),
+        bounds,
         tuple((id(p), _value_bytes(p.value)) for p in parameters),
-        tuple((id(c), id(c.body), c.sense, _value_bytes(c.rhs), c.name) for c in constraints),
+        tuple(map(id, constraints)),
+        tuple(id(c.body) for c in constraints),
+        tuple(c.sense for c in constraints),
+        # A scalar rhs compares by value (``-0.0 == 0.0``; a NaN only ever
+        # misses); an array rhs by its bytes, so tuple equality never meets an
+        # array's ambiguous truth value.
+        tuple(
+            r if type(r) in (float, int) else _value_bytes(r) for r in (c.rhs for c in constraints)
+        ),
+        tuple(c.name for c in constraints),
         None
         if objective is None
         else (id(objective), id(objective.expression), str(objective.sense)),

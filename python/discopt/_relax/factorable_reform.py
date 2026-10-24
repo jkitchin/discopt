@@ -2340,7 +2340,7 @@ def _canonicalize_entropy_expr(expr: Expression, model: Model) -> Expression:
     return expr
 
 
-def canonicalize_entropy(model: Model) -> Model:
+def canonicalize_entropy(model: Model, deadline: Optional[Callable[[], bool]] = None) -> Model:
     """Return a model equivalent to *model* with entropy-family products (in the
     objective or any constraint) rewritten to their intrinsics (issue #207):
 
@@ -2361,11 +2361,21 @@ def canonicalize_entropy(model: Model) -> Model:
     size-scaled recursion headroom as :func:`factorable_reformulate` (#1520: a
     3000-term ``.nl`` row used to ``RecursionError``, which a blanket handler
     turned into "no entropy term found").
+
+    ``deadline`` (a ``PresolveDeadline.abandon_hook``) is checked once per
+    constraint; on expiry the pass returns *model* unchanged and discards what it
+    rewrote -- the answer it already gives when nothing matches. Measured on
+    ``telecomsp_nor_sun`` (21,270 rows, no ``log`` anywhere): ~30 s, started inside
+    a 60 s ``time_limit`` and finished well past it.
     """
-    return _run_factorable_with_headroom(model, lambda: _canonicalize_entropy_inner(model))
+    return _run_factorable_with_headroom(
+        model, lambda: _canonicalize_entropy_inner(model, deadline)
+    )
 
 
-def _canonicalize_entropy_inner(model: Model) -> Model:
+def _canonicalize_entropy_inner(
+    model: Model, deadline: Optional[Callable[[], bool]] = None
+) -> Model:
     # #1520: no except. The walk declines by returning the model unchanged; the
     # old ``except Exception: return model`` could only hide a defect as "no
     # entropy term found". ``ComplementarityProvenanceError`` already propagated.
@@ -2382,6 +2392,8 @@ def _canonicalize_entropy_inner(model: Model) -> Model:
 
     new_constraints: list = []
     for c in model._constraints:
+        if deadline is not None and deadline():
+            return model
         if isinstance(c, Constraint):
             new_body = _canonicalize_entropy_expr(c.body, model)
             if new_body is not c.body:
