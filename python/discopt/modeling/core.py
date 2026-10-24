@@ -10736,12 +10736,12 @@ class Model:
         # budget binds, while the instances this targets (tln4/tln5) burn 100% of the
         # budget and still return nothing. Out-of-scope models keep the full budget.
         #
-        # #911: everything from here on splits what is LEFT of the caller's budget
-        # after the convex-kernel attempt, not the budget as stated. The reserve is a
-        # fraction of the remainder for the same reason the primary is: 35% of a
-        # budget that has already been spent is not available to reserve. Flag-off
-        # gives ``_ck_elapsed == 0.0`` exactly, so ``_remaining_tl is time_limit``
-        # numerically and both figures below are unchanged.
+        # #911: everything from here on splits what is LEFT of the caller's budget,
+        # not the budget as stated. The reserve is a fraction of the remainder for the
+        # same reason the primary is: 35% of a budget that has already been spent is
+        # not available to reserve. ``_remaining_tl`` is ``time_limit`` less
+        # ``_prework_s`` -- never ``time_limit`` itself, even with the convex kernel
+        # off -- and ``last_solve_prework_seconds()`` reports the deduction exactly.
         #
         # What is left is measured from this method's entry clock, not as
         # ``time_limit - _ck_elapsed``: the convex-kernel attempt is not the only

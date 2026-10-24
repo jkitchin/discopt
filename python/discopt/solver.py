@@ -33265,11 +33265,12 @@ def _solve_nlp_batch_by_deadline(
 
 @dataclasses.dataclass
 class _MiqpBlocks:
-    """The dense blocks of one MIQP standard form that the node loop reuses.
+    """The blocks of one MIQP standard form that the node loop reuses.
 
-    Built once per solve by :func:`_miqp_blocks`, never per wave. Every array is
-    bit-for-bit what the old per-call ``_dense_A(A_eq)`` route produced; only the
-    full ``m x n_total`` slack-form matrix is never materialised (#1928 follow-up:
+    Built once per solve by :func:`_miqp_blocks`, never per wave. Every block holds
+    the values the old per-call ``_dense_A(A_eq)`` route produced -- dense for a
+    dense-extracted model, kept sparse (same values) for a sparse-extracted one --
+    and the full ``m x n_total`` slack-form matrix is never materialised (#1928 follow-up:
     15,690 x 20,072 = 2.5 GB on ``unitcommit_50_20_2_mod_8``, ~14 s per
     densification, repeated by the setup, every QP wave and the dual recovery).
     """
