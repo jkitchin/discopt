@@ -22,7 +22,7 @@ from typing import NamedTuple, Optional
 
 import numpy as np
 
-from discopt._relax._numeric import FLOAT_EPS, ROUNDOFF_OPS
+from discopt._relax._numeric import FLOAT_EPS, ROUNDOFF_OPS, is_effectively_finite
 from discopt.modeling.core import (
     _BLOCK_ROWS,
     _SELECT_ONE_ROWS,
@@ -142,6 +142,7 @@ def reformulate_gdp(
     method: str = "big-m",
     *,
     respect_disjunction_methods: bool = True,
+    fbbt_deadline: Optional[float] = None,
 ) -> Model:
     """Replace GDP constraints with standard MINLP constraints.
 
@@ -171,6 +172,10 @@ def reformulate_gdp(
         products). It also lowers indicator rows, the ``add_disjunction`` blocks
         and nested disjunctions; ``"auto"`` never selects it.
         Indicator and SOS constraints otherwise use big-M regardless.
+    fbbt_deadline : float, optional
+        Absolute ``time.perf_counter()`` deadline for the root FBBT that caps an
+        SOS member with no declared bound (#1921, #1929). A solve passes its own;
+        ``None`` (a standalone call) leaves it uncapped.
     respect_disjunction_methods : bool, default True
         Whether a disjunction-local ``method`` override should take precedence
         over the solver-wide ``method``. Set to ``False`` for solver frontends
@@ -234,6 +239,16 @@ def reformulate_gdp(
         )
         new_model._register_generated_variable(var)  # #1799
         return var
+
+    # #1921: an SOS member with an infinite declared bound has no declared big-M.
+    # Bounds FBBT implies from the model's unconditional rows hold at every
+    # feasible point, so they are a valid cap; computed once, on first need.
+    _implied_cache: list = []
+
+    def _sos_implied_bounds(v) -> tuple[float, float]:
+        if not _implied_cache:
+            _implied_cache.append(_unconditional_fbbt_bounds(model, deadline=fbbt_deadline))
+        return _member_bounds(v, model, _implied_cache[0])
 
     _weight_counter = [0]
 
@@ -527,7 +542,9 @@ def reformulate_gdp(
                     )
             new_model._constraints.extend(new_cons)
         elif isinstance(c, _SOSConstraint):
-            new_cons = _reformulate_sos(c, new_model, _add_aux_binary)
+            new_cons = _reformulate_sos(
+                c, new_model, _add_aux_binary, implied_bounds=_sos_implied_bounds
+            )
             new_model._constraints.extend(new_cons)
         elif isinstance(c, _LogicalConstraint):
             new_cons = _logical_to_linear(c, new_model, _add_aux_binary)
@@ -3799,12 +3816,84 @@ def _extract_disjunct_bounds(
 # ── SOS constraint reformulation ──
 
 
+def _unconditional_fbbt_bounds(
+    model: Model, deadline: Optional[float] = None
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Flat root-FBBT bounds implied by ``model``'s *unconditional* rows (#1921).
+
+    Only plain :class:`Constraint` rows (and fast-API linear rows) are kept: a
+    disjunct, indicator, SOS or logical row holds only conditionally, so
+    propagating it as if it always held could imply a bound that cuts a feasible
+    point. Dropping rows only relaxes the feasible set, so every returned bound
+    holds at every feasible point of ``model``. Returns ``None`` when FBBT proves
+    the relaxation empty (the box is then meaningless as a cap).
+    """
+    from discopt.solver import _extract_variable_info
+    from discopt.solvers._root_presolve import fbbt_budget_ms, tighten_root_bounds_with_fbbt
+
+    rows = Model(model.name)
+    rows._variables = list(model._variables)
+    rows._parameters = list(model._parameters)
+    rows._rebuild_name_index()
+    rows._objective = model._objective
+    rows._constraints = [c for c in model._constraints if type(c) is Constraint]
+    rows._constraints.extend(model._builder_linear_constraints())
+    _, lb, ub, int_offsets, int_sizes = _extract_variable_info(rows)
+    # Capped at the caller's deadline (#1929): FBBT is anytime, so a cap only
+    # leaves the box looser -- a member without a finite cap then refuses.
+    lb2, ub2, infeasible, _ = tighten_root_bounds_with_fbbt(
+        rows,
+        lb,
+        ub,
+        int_offsets,
+        int_sizes,
+        time_limit_ms=fbbt_budget_ms(deadline),
+    )
+    if infeasible:
+        return None
+    return lb2, ub2
+
+
+def _member_bounds(
+    v, model: Model, flat: tuple[np.ndarray, np.ndarray] | None
+) -> tuple[float, float]:
+    """Interval of SOS member ``v`` in the flat box ``flat`` (``(-inf, inf)`` when
+    the member's columns cannot be resolved)."""
+    if flat is None:
+        return -np.inf, np.inf
+    lb, ub = flat
+    offsets = {}
+    offset = 0
+    for var in model._variables:
+        offsets[id(var)] = offset
+        offset += var.size
+    if isinstance(v, Variable) and id(v) in offsets:
+        cols = np.arange(offsets[id(v)], offsets[id(v)] + v.size)
+    elif isinstance(v, IndexExpression) and isinstance(v.base, Variable) and id(v.base) in offsets:
+        cols = np.atleast_1d(np.arange(v.base.size).reshape(v.base.shape)[v.index])
+        cols = cols.ravel() + offsets[id(v.base)]
+    else:
+        return -np.inf, np.inf
+    lo, hi = float(np.min(lb[cols])), float(np.max(ub[cols]))
+    # Outward pad: FBBT works in floating point; a cap a hair too large is still
+    # valid, one a hair too small could cut a feasible point.
+    pad_lo = 1e-7 * max(1.0, abs(lo)) if np.isfinite(lo) else 0.0
+    pad_hi = 1e-7 * max(1.0, abs(hi)) if np.isfinite(hi) else 0.0
+    return lo - pad_lo, hi + pad_hi
+
+
 def _reformulate_sos(
     sc: _SOSConstraint,
     model: Model,
     add_aux_binary,
+    implied_bounds: Callable | None = None,
 ) -> list[Constraint]:
     """Reformulate SOS Type 1 or Type 2 constraint via binary indicators.
+
+    A member whose declared bound is infinite takes its big-M from
+    ``implied_bounds(member)`` -- bounds valid at every feasible point of the
+    model (root FBBT over its unconditional rows, #1921); the reformulation
+    refuses only when that is infinite too.
 
     SOS1: At most one variable x_i can be nonzero.
       - Introduce binary z_i for each variable
@@ -3833,8 +3922,16 @@ def _reformulate_sos(
         v = sc.variables[i]
         # Extract bounds — v may be a Variable or IndexExpression
         lo_v, hi_v = _bound_expression(v, model)
-        ub_val = hi_v
-        lb_val = lo_v
+        # #1921: the default box is the +-9.999e19 *sentinel* for "no bound", not
+        # inf, so test with is_effectively_finite: an isfinite test took the
+        # sentinel as a 1e20 big-M, which HiGHS rejects and which is no cap.
+        if implied_bounds is not None and not (
+            is_effectively_finite(lo_v) and is_effectively_finite(hi_v)
+        ):
+            imp_lo, imp_hi = implied_bounds(v)
+            lo_v, hi_v = max(lo_v, imp_lo), min(hi_v, imp_hi)
+        ub_val = hi_v if is_effectively_finite(hi_v) else np.inf
+        lb_val = lo_v if is_effectively_finite(lo_v) else -np.inf
 
         # GDP-1 (#413): the linking constraint ``x_i <= ub_i * z_i`` uses
         # ``ub_i`` as the value x_i may take when z_i=1. A too-small ``ub_i``

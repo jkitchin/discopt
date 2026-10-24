@@ -388,6 +388,14 @@ KNOWN_SLICES: tuple[tuple[str, str, str], ...] = (
         "(time.monotonic() - started) * 1000.0",
         "contract",
     ),
+    # #1929 ``fbbt_budget_ms``: ALL of the time left before the caller's deadline,
+    # converted to the Rust FBBT binding's milliseconds. Nothing is carved (no
+    # fraction, no cap); it answers "when do we stop?".
+    (
+        "solvers/_root_presolve.py",
+        "1000.0 * (deadline - time.perf_counter())",
+        "contract",
+    ),
     # ``_deadline_wall_cap``: a 3 s clamp on ONE heuristic sub-NLP, derived from
     # the caller's deadline. The clamp makes the sub-NLP's returned iterate a
     # function of machine speed even when the deadline is an hour away, so it is
@@ -762,6 +770,11 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
         "if time.perf_counter() - self._t0 >= self.total:",
         "residual",
     ),
+    # #1926: the post-NLP dual refit (``_duals_against_declared_box``) may not START
+    # past the solve's own deadline -- the caller's ``time_limit``, whole. It
+    # decides when to stop, never how much work a refit does (that is capped by
+    # operation counts, ``_dual_recovery.REFIT_LSMR_MAXITER``).
+    ("solver.py", "deadline=t_start + time_limit,", "contract"),
     # #1775 G4.1: LOA's OA-cut convexity certification gets half of what is left.
     # Unbounded it ran > 100 s on ``kaibel``; given the caller's whole budget it
     # would leave the master nothing. Bound-changing (an unreached row gets no

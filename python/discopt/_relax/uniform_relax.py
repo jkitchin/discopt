@@ -973,6 +973,12 @@ class _Builder:
         # ``RelaxationBuildAborted`` (polled every ``_ABORT_POLL_STRIDE`` calls).
         self._abort_deadline = abort_deadline
         self._abort_polls = 0
+        # #1924: the ``{Variable: Interval}`` box ``_try_convex_lift`` hands the
+        # curvature certificate, built once per original box rather than per
+        # lift-eligible node (an O(n_vars) rebuild per node dominated the cold build
+        # of 2,000-variable models). ``(lb, ub, box)``; the certificate restores
+        # every entry it narrows, so the box can be shared.
+        self._cbox_cache: Optional[tuple[np.ndarray, np.ndarray, dict]] = None
         # Skip the composite convex/concave OA lift (#640 Bucket 3): it lifts the
         # whole convex node to a box-dependent epigraph aux the incremental McCormick
         # patch cannot regenerate. Skipping it keeps the objective as the plain sum
@@ -1573,7 +1579,15 @@ class _Builder:
 
         verdict = cast(
             Optional[str],
-            _multivar_box_curvature(self._expr(node), self.model, idxs, flat_lb, flat_ub, cbox),
+            _multivar_box_curvature(
+                self._expr(node),
+                self.model,
+                idxs,
+                flat_lb,
+                flat_ub,
+                cbox,
+                abort_deadline=self._abort_deadline,
+            ),
         )
         if verdict == "convex" or verdict == "concave":
             certs = self._analysis.hessian_certs.setdefault(nid, [])
@@ -1740,7 +1754,16 @@ class _Builder:
         if not (np.all(np.isfinite(lo)) and np.all(np.isfinite(hi))) or np.any(hi < lo):
             return None
 
-        cbox = _build_convexity_box(self.model, flat_lb, flat_ub)
+        cached = self._cbox_cache
+        if (
+            cached is not None
+            and np.array_equal(cached[0], flat_lb)
+            and np.array_equal(cached[1], flat_ub)
+        ):
+            cbox = cached[2]
+        else:
+            cbox = _build_convexity_box(self.model, flat_lb, flat_ub)
+            self._cbox_cache = (flat_lb.copy(), flat_ub.copy(), cbox)
         # Certify curvature: global DCP first (box-independent, cached), else the
         # sound box-restricted interval-Hessian PSD/NSD certificate (monotone-inherited
         # across sub-boxes, cached; abstains -> None).

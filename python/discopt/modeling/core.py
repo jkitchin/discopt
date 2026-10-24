@@ -13936,6 +13936,11 @@ def from_nl(path: str) -> Model:
     for k, (body, var_index, flag) in enumerate(compl_pairs):
         _add_nl_complementarity(m, body, var_index, flag, index=k)
 
+    # SOS1/SOS2 sets carried as ``sosno``/``ref`` variable suffixes (#1921). The
+    # parser used to read past every suffix, so the sets were silently dropped and
+    # a solve returned points of the relaxation as optima of the model.
+    n_sos = _add_nl_sos_sets(m, nl_repr)
+
     # Keep nl_repr for backward compatibility (Rust evaluator for validation)
     m._nl_repr = nl_repr
     # Record the source path so the solver can hand POUNCE the original .nl for
@@ -13954,11 +13959,113 @@ def from_nl(path: str) -> Model:
     # is there now: ``nlp_native`` reads the file only while its bytes still hash to
     # this, so a copy of the model that moved (pickle, ``Model.save``) or a file
     # edited since cannot hand POUNCE a different problem.
-    if not compl_pairs:
+    # The same holds for SOS sets: their reformulation adds selector binaries and
+    # rows the raw .nl does not have (POUNCE ignores the suffixes).
+    if not compl_pairs and not n_sos:
         m._source_nl_path = os.path.abspath(path)
         m._source_nl_sha256 = source_digest
 
     return m
+
+
+# Suffixes that encode SOS constraints in a way :func:`_add_nl_sos_sets` does not
+# interpret: AMPL's piecewise-linear SOS2 encoding (``sos``/``sosref``, written
+# when ``pl_linearize`` is off). Reading past them would drop constraints, so a
+# file that carries one is refused (#1921).
+_NL_UNSUPPORTED_SOS_SUFFIXES = ("sos", "sosref")
+
+
+def _add_nl_sos_sets(m: "Model", rep) -> int:
+    """Declare the SOS sets of a ``.nl`` file's ``sosno``/``ref`` suffixes.
+
+    AMPL convention (also SCIP's and Couenne's readers): the integer variable
+    suffix ``sosno`` names the set a column belongs to -- a positive value is an
+    SOS1 set, a negative value an SOS2 set, ``0`` no set -- and the real variable
+    suffix ``ref`` gives each member's weight, which orders the set. Each set
+    becomes one :meth:`Model.sos1` / :meth:`Model.sos2` over its members sorted by
+    weight. Returns the number of sets added.
+
+    Refuses (``ValueError``) whatever it cannot read faithfully, instead of
+    dropping a constraint: an SOS-encoding suffix it does not interpret, an SOS2
+    member without a ``ref`` weight or with a tied weight (the order of an SOS2
+    set is part of the constraint), and a column outside the model.
+    """
+    suffixes = rep.suffixes()
+    if not suffixes:
+        return 0
+
+    sosno: dict[int, float] = {}
+    ref: dict[int, float] = {}
+    for kind, name, entries in suffixes:
+        entity = kind & 3
+        if name in _NL_UNSUPPORTED_SOS_SUFFIXES:
+            raise ValueError(
+                f"the .nl file carries the '{name}' suffix (AMPL's piecewise-linear "
+                "SOS encoding), which discopt does not interpret; reading past it "
+                "would silently drop SOS constraints (#1921). Re-export the model "
+                "with piecewise-linear terms linearized (AMPL option pl_linearize 1)."
+            )
+        if name not in ("sosno", "ref"):
+            continue
+        if entity != 0:
+            raise ValueError(
+                f"the .nl file carries a '{name}' suffix on a non-variable entity "
+                f"(kind {kind}); SOS sets are declared on variables (#1921)"
+            )
+        target = sosno if name == "sosno" else ref
+        for index, value in entries:
+            target[int(index)] = float(value)
+
+    sets: dict[int, list[int]] = {}
+    for column, value in sosno.items():
+        if value != int(value):
+            raise ValueError(f"non-integer sosno {value} on column {column}")
+        if int(value) != 0:
+            sets.setdefault(int(value), []).append(column)
+    if not sets:
+        return 0
+
+    columns: list[Variable] = []
+    for var in m._variables:
+        if var.size != 1:
+            raise ValueError(
+                "SOS suffixes need one variable per .nl column; got a block variable "
+                f"'{var.name}' of size {var.size}"
+            )
+        columns.append(var)
+
+    for set_id in sorted(sets, key=lambda k: (abs(k), k)):
+        members = sets[set_id]
+        sos_type = 1 if set_id > 0 else 2
+        for column in members:
+            if not 0 <= column < len(columns):
+                raise ValueError(
+                    f"SOS set {set_id}: column {column} is outside the model's "
+                    f"{len(columns)} variables"
+                )
+        if sos_type == 2:
+            missing = [c for c in members if c not in ref]
+            if missing:
+                raise ValueError(
+                    f"SOS2 set {abs(set_id)}: columns {missing} have no 'ref' weight, "
+                    "so the set's order is undefined (#1921)"
+                )
+            weights = [ref[c] for c in members]
+            if len(set(weights)) != len(weights):
+                raise ValueError(
+                    f"SOS2 set {abs(set_id)}: tied 'ref' weights, so the set's order "
+                    "is undefined (#1921)"
+                )
+        # SOS1 is order-free; ordering by weight (ties and gaps by column) keeps the
+        # declaration deterministic.
+        members = sorted(members, key=lambda c: (ref.get(c, float("inf")), c))
+        vars_ = [columns[c] for c in members]
+        name = f"sos{sos_type}_{abs(set_id)}"
+        if sos_type == 1:
+            m.sos1(vars_, name=name)
+        else:
+            m.sos2(vars_, name=name)
+    return len(sets)
 
 
 def nl_file_sha256(path: str) -> str:

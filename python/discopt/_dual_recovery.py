@@ -28,6 +28,7 @@ validation layer and the solver can import it without a cycle.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -39,6 +40,20 @@ from scipy.optimize import lsq_linear
 # ``examiner.ACTIVE_TOL``; kept here so the solver does not have to import the
 # validation layer just to name a tolerance.
 ACTIVE_TOL = 1e-6
+
+#: #1926: iteration caps for a LARGE sparse refit, one whose least-squares system
+#: has more than this many columns and rows (``min(m, n)``). SciPy's defaults are
+#: up to 100 ``trf`` iterations, each an LSMR solve of up to ``min(m, n)`` inner
+#: iterations: measured on ``acopf_case1354pegase_qcqp`` (19,236 x 23,094, nnz
+#: 56,550) one ``trf`` iteration took ~15 s and the whole refit would have run
+#: ~25 min -- without ever reaching stationarity (residual 41-50 from 100 at every
+#: cap tried, so it ended withheld anyway). Operation counts, not a clock (#912):
+#: the same system gets the same answer on any machine. A system at or below the
+#: size keeps SciPy's defaults, so every dense refit and every small sparse one is
+#: byte-identical; a capped refit that stops short of stationarity is caught by
+#: the caller's residual check and its duals are withheld, never reported wrong.
+REFIT_LSMR_MAXITER = 1000
+REFIT_MAX_TRF_ITER = 10
 
 
 def _jac_rows(jac) -> int:
@@ -182,8 +197,14 @@ def recover_multipliers(
     ub: np.ndarray,
     is_continuous: np.ndarray,
     active_tol: float = ACTIVE_TOL,
+    deadline: Optional[float] = None,
 ) -> DualRecovery:
     """Fit KKT multipliers at ``x_flat`` against the box ``(lb, ub)``.
+
+    ``deadline`` (#1926, absolute ``time.perf_counter()`` time) is the caller's
+    solve deadline: once it has passed, no least-squares refit is started and the
+    result is ``ok=False`` (the refit cannot be interrupted once running, so the
+    check is at its start; :data:`REFIT_LSMR_MAXITER` bounds a large one).
 
     ``lb``/``ub`` decide which bounds are active, and therefore which
     multipliers are allowed to be nonzero — this is the whole reason the caller
@@ -361,8 +382,21 @@ def recover_multipliers(
         A = np.concatenate(cols, axis=1) if cols else np.zeros((cont_idx.size, 0))
     b = -grad_c
 
+    if deadline is not None and time.perf_counter() >= deadline:
+        return DualRecovery(
+            ok=False,
+            detail="the solve's time limit was reached before the dual refit",
+            cont_idx=cont_idx,
+            row_select=row_select,
+            lb_active=lb_active,
+            ub_active=ub_active,
+            stat_resid=np.zeros(0),
+        )
+    _caps: dict = {}
+    if use_sparse and min(A.shape) > REFIT_LSMR_MAXITER:
+        _caps = {"lsmr_maxiter": REFIT_LSMR_MAXITER, "max_iter": REFIT_MAX_TRF_ITER}
     try:
-        y = lsq_linear(A, b, bounds=(np.asarray(var_lb_y), np.asarray(var_ub_y))).x
+        y = lsq_linear(A, b, bounds=(np.asarray(var_lb_y), np.asarray(var_ub_y)), **_caps).x
     except Exception as e:  # pragma: no cover - scipy failure path
         return DualRecovery(
             ok=False,

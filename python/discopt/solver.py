@@ -3734,6 +3734,88 @@ def _hessian_is_psd_with_margin(H_sym) -> bool:
     return eig_min >= margin
 
 
+#: #1927: largest objective Hessian ``_sparse_hessian_is_pd_with_margin`` hands to the
+#: dense ``eigvalsh``. Measured (``_QP_EXACT_CONVEXITY_MAX_N``'s note, same
+#: container class): n=2000 0.33 s, n=4000 2.47 s; it is cubic, so n=10,000 is
+#: tens of seconds -- what ``nd_netgen-2000-2-5-a-a-ns_7`` (9,999 columns) and
+#: ``popdynm200`` (11,215) spent past a 60 s limit inside this test. Above the cap
+#: only the exact sparse pre-checks and Gershgorin decide, and an undecided matrix
+#: abstains (the convex-objective bound is a tightening only).
+_CONVEX_OBJ_DENSE_EIG_MAX_N = 4000
+
+
+def _objective_hessian_sparse(evaluator, x: np.ndarray, n: int):
+    """The objective Hessian's lower triangle at ``x`` as CSR, or ``None``.
+
+    #1927: built from the evaluator's lower-triangle Lagrangian structure at
+    ``obj_factor=1, lambda=0`` -- the same values ``evaluate_hessian`` scatters into
+    a dense ``n x n`` array (0.8 GB per copy at n=10,000), without the array.
+    ``None`` when the evaluator has no sparse Hessian entry point.
+    """
+    import scipy.sparse as sp
+
+    if not (
+        hasattr(evaluator, "hessian_structure") and hasattr(evaluator, "evaluate_hessian_values")
+    ):
+        return None
+    rows, cols = evaluator.hessian_structure()
+    n_cons = int(getattr(evaluator, "n_constraints", 0) or 0)
+    vals = np.asarray(
+        evaluator.evaluate_hessian_values(x, 1.0, np.zeros(n_cons, dtype=np.float64)),
+        dtype=np.float64,
+    )
+    lower = sp.coo_matrix(
+        (vals, (np.asarray(rows, dtype=np.int64), np.asarray(cols, dtype=np.int64))),
+        shape=(n, n),
+    ).tocsr()  # sums duplicate entries, as the dense scatter's ``np.add.at`` does
+    lower.sort_indices()
+    return lower
+
+
+def _symmetric_from_lower(lower):
+    """``lower + tril(lower, -1).T``: the mirror ``evaluate_lagrangian_hessian`` uses."""
+    import scipy.sparse as sp
+
+    return (lower + sp.tril(lower, -1).T).tocsr()
+
+
+def _sparse_hessian_is_pd_with_margin(H) -> bool:
+    """:func:`_hessian_is_psd_with_margin` on a full symmetric sparse ``H`` (#1927).
+
+    Same verdict wherever the dense test runs, decided cheaply when it can be:
+
+    * the margin is the same: ``max(_CONVEX_OBJ_PSD_TOL, K * eps * ||H||_F)``;
+    * ``lambda_min <= min_i H_ii`` (Rayleigh quotient at ``e_i``), so a diagonal
+      entry below the margin -- e.g. a column that enters the objective only
+      linearly -- is "not positive definite" exactly, with no eigensolve;
+    * Gershgorin, ``lambda_min >= min_i (H_ii - sum_{j != i} |H_ij|)``, proves it
+      when that is at least the margin;
+    * otherwise the dense ``eigvalsh`` decides, as before, up to
+      :data:`_CONVEX_OBJ_DENSE_EIG_MAX_N`; above it the test abstains (False).
+    """
+    import scipy.sparse as sp
+
+    n = H.shape[0]
+    if H.ndim != 2 or H.shape[0] != H.shape[1] or not np.all(np.isfinite(H.data)):
+        return False
+    norm = float(np.sqrt(np.sum(H.data * H.data)))
+    if not np.isfinite(norm):
+        return False
+    margin = max(
+        _CONVEX_OBJ_PSD_TOL,
+        _CONVEX_OBJ_PSD_EIG_ROUNDOFF_K * float(np.finfo(np.float64).eps) * norm,
+    )
+    diag = H.diagonal()
+    if n == 0 or float(diag.min()) < margin:
+        return False
+    radius = np.asarray(abs(H).sum(axis=1)).ravel() - np.abs(diag)
+    if float(np.min(diag - radius)) >= margin:
+        return True
+    if n > _CONVEX_OBJ_DENSE_EIG_MAX_N:
+        return False
+    return _hessian_is_psd_with_margin(H.toarray() if sp.issparse(H) else H)
+
+
 def _objective_is_convex_quadratic(
     model: Model, evaluator, n_vars: int, remaining_budget: float | None = None
 ) -> bool:
@@ -3850,9 +3932,17 @@ def _objective_is_convex_quadratic(
     # objective really is quadratic (rejecting any non-quadratic that slipped
     # past the structural check above) before trusting the constant-Hessian
     # convexity argument.
+    _sparse_route = hasattr(evaluator, "hessian_structure") and hasattr(
+        evaluator, "evaluate_hessian_values"
+    )
     try:
-        H1 = np.asarray(evaluator.evaluate_hessian(0.5 * (lb_f + ub_f)), dtype=np.float64)
-        H2 = np.asarray(evaluator.evaluate_hessian(0.25 * lb_f + 0.75 * ub_f), dtype=np.float64)
+        if _sparse_route:
+            # #1927: sparse, not two dense n x n arrays; same values.
+            S1 = _objective_hessian_sparse(evaluator, 0.5 * (lb_f + ub_f), n_vars)
+            S2 = _objective_hessian_sparse(evaluator, 0.25 * lb_f + 0.75 * ub_f, n_vars)
+        else:
+            H1 = np.asarray(evaluator.evaluate_hessian(0.5 * (lb_f + ub_f)), dtype=np.float64)
+            H2 = np.asarray(evaluator.evaluate_hessian(0.25 * lb_f + 0.75 * ub_f), dtype=np.float64)
     except (ValueError, ArithmeticError, RuntimeError) as exc:
         # #1520/#1569: a sound fallback over the evaluator call ONLY — the box
         # above is validated, so what reaches here is the objective's own
@@ -3866,6 +3956,19 @@ def _objective_is_convex_quadratic(
             "keeping the McCormick objective bound",
         )
         return False
+    if _sparse_route:
+        if not (np.all(np.isfinite(S1.data)) and np.all(np.isfinite(S2.data))):
+            return False
+        # ``allclose`` entrywise, as on the dense pair. Both come from one
+        # structure, so their patterns match and the comparison is on the stored
+        # values (the mirrored upper triangle repeats them).
+        if not (
+            np.array_equal(S1.indptr, S2.indptr)
+            and np.array_equal(S1.indices, S2.indices)
+            and np.allclose(S1.data, S2.data, atol=1e-7, rtol=1e-7)
+        ):
+            return False
+        return _sparse_hessian_is_pd_with_margin(_symmetric_from_lower(S1))
     if H1.shape != (n_vars, n_vars) or H2.shape != (n_vars, n_vars):
         return False
     if not (np.all(np.isfinite(H1)) and np.all(np.isfinite(H2))):
@@ -6406,6 +6509,7 @@ def _duals_against_declared_box(
     bound_duals_lower: Optional[dict[str, np.ndarray]],
     bound_duals_upper: Optional[dict[str, np.ndarray]],
     active_tol: float = 1e-6,
+    deadline: Optional[float] = None,
 ) -> tuple[
     Optional[dict[str, np.ndarray]],
     Optional[dict[str, np.ndarray]],
@@ -6451,7 +6555,8 @@ def _duals_against_declared_box(
 
     Refuses rather than guesses (CLAUDE.md §3): if the refit cannot meet
     stationarity at the declared active set, all three families come back
-    ``None`` with a warning naming the variable. A dual that does not satisfy
+    ``None`` with a warning naming the variable. So does a refit the solve's
+    ``deadline`` (#1926) leaves no time to start. A dual that does not satisfy
     the user's own KKT system is worse than no dual, because nothing downstream
     can tell it is wrong.
     """
@@ -6534,6 +6639,7 @@ def _duals_against_declared_box(
         ub=declared_ub,
         is_continuous=is_continuous,
         active_tol=active_tol,
+        deadline=deadline,
     )
 
     # Name the offenders, and say whether presolve is the cause — that is the
@@ -13165,6 +13271,21 @@ def solve_model(
             return _remaining_budget()
         return max(0.0, _remaining_budget() - _rr_reserve_s)
 
+    def _setup_abort_deadline() -> Optional[float]:
+        """Abort deadline for a root-setup ``solve_at_node`` build (#1924).
+
+        One fallback reserve past :func:`_root_setup_build_deadline` -- the
+        ``root_build_abort`` (#1757) convention: a build that is merely late keeps
+        its bound; one that outlives the reserve is discarded whole, which the root
+        probe already treats as sound (no probe -> the ``"none"`` bound source and
+        the rigorous root-relaxation fallback). ``None`` (no abort) when
+        ``DISCOPT_NODE_BUILD_ABORT=0`` or there is no build deadline.
+        """
+        if not _tuning().node_build_abort:
+            return None
+        _bd = _root_setup_build_deadline()
+        return None if _bd is None else _bd + _ROOT_BUILD_ABORT_GRACE_S
+
     def _root_setup_build_deadline() -> Optional[float]:
         """Absolute deadline for a pre-B&B root-setup relaxation *build* (#1152).
 
@@ -14335,6 +14456,7 @@ def solve_model(
             model,
             method=amp_gdp_method,
             respect_disjunction_methods=False,
+            fbbt_deadline=_solve_t0 + float(time_limit),
         )
         _carry_solve_clocks(_amp_gdp_src, model)
 
@@ -14751,7 +14873,9 @@ def solve_model(
     from discopt.transformations import get as _get_transformation
 
     _gdp_src = model
-    model = _get_transformation("gdp").apply(model, method=gdp_method)
+    model = _get_transformation("gdp").apply(
+        model, method=gdp_method, fbbt_deadline=_solve_t0 + float(time_limit)
+    )
     _carry_solve_clocks(_gdp_src, model)
 
     # #1255: the lowering appends a selector binary per disjunct, so a warm start
@@ -15123,8 +15247,15 @@ def solve_model(
                 _fr_sz.append(_v.size)
             _fr_o += _v.size
         _, _fr_lb, _fr_ub, _, _ = _extract_variable_info(model)
+        # #1929: capped at the wall time left, as at the root presolve (#863).
+        # ``afford`` above only decides whether this block STARTS; uncapped, this
+        # FBBT ran 175 s on transswitch2383wpp against a 60 s solve. FBBT is
+        # anytime, so a cap returns a valid, looser box, and the root presolve
+        # re-tightens later. ``inf`` left (an uncapped solve) means no cap.
+        _fr_left = _remaining_budget()
+        _fr_budget_ms = None if not math.isfinite(_fr_left) else max(1, int(1000 * _fr_left))
         _fr_lb, _fr_ub, _fr_infeas, _fr_changed = tighten_root_bounds_with_fbbt(
-            model, _fr_lb, _fr_ub, _fr_off, _fr_sz
+            model, _fr_lb, _fr_ub, _fr_off, _fr_sz, time_limit_ms=_fr_budget_ms
         )
         if not _fr_infeas and _fr_changed:
             from discopt.solvers.amp import _apply_flat_bounds_to_model
@@ -17850,6 +17981,7 @@ def solve_model(
                             # worst), and #928's cut-short objective floor keeps the
                             # bound finite.
                             build_deadline=_root_setup_build_deadline(),
+                            abort_deadline=_setup_abort_deadline(),
                         )
                         # #930: bank the probe's proved bound WITH the box it was
                         # proved over. This solve costs real time (3.4 s on hda)
@@ -17942,6 +18074,7 @@ def solve_model(
                             # #1152: bound the pool's cold build too. Fewer
                             # separated cuts only loosens per-node bounds.
                             build_deadline=_root_setup_build_deadline(),
+                            abort_deadline=_setup_abort_deadline(),
                         )
                         if _pool_chunks and _pool_chunks[0] is not None:
                             # solve_at_node captures each separated chunk as a
@@ -18045,6 +18178,7 @@ def solve_model(
                             # #1152: bound the pool's cold build too (see the PSD
                             # pool above) — fewer cuts only loosens, never falsifies.
                             build_deadline=_root_setup_build_deadline(),
+                            abort_deadline=_setup_abort_deadline(),
                         )
                         _pool_solve_wall = time.perf_counter() - _pool_solve_t0
                         _sep_after = getattr(_mc_lp_relaxer, "_sep_timers", {})
@@ -18378,6 +18512,13 @@ def solve_model(
     # --- B&B loop ---
     iteration = 0
     _deadline = t_start + time_limit
+    # #1924: the node loop's cold relaxation builds abort one fallback reserve past
+    # the solve deadline (``DISCOPT_NODE_BUILD_ABORT``); see ``_setup_abort_deadline``.
+    _node_abort_deadline: Optional[float] = (
+        _deadline + _ROOT_BUILD_ABORT_GRACE_S
+        if _tuning().node_build_abort and math.isfinite(_deadline)
+        else None
+    )
 
     # --- #732 Stage 1-A: narrow-box branch-instead-of-taint --------------------
     # (``DISCOPT_NARROW_BOX_BRANCH``, default OFF — bound-changing, awaits the §5
@@ -19532,6 +19673,7 @@ def solve_model(
                         np.asarray(batch_lb[i]),
                         np.asarray(batch_ub[i]),
                         time_limit=max(_node_remaining, _DEADLINE_NODE_FLOOR_S),
+                        abort_deadline=_node_abort_deadline,
                         round_deadline=(_deadline if _round_budget_enabled else None),
                         yield_round=_yield_round,
                         inherited_cuts=_root_cut_pool,
@@ -19560,7 +19702,10 @@ def solve_model(
                         # A yielded round that banked no bound must not leave the
                         # node fathomed-without-proof on the failure sentinel
                         # (#966; see :func:`_yield_keeps_node_open`).
-                        _yield_keeps_node_open(_yield_round, nlp_failed, result_lbs, i)
+                        # #1924: an aborted build banked no bound either; same rule.
+                        _yield_keeps_node_open(
+                            _yield_round or mc_res.status == "aborted", nlp_failed, result_lbs, i
+                        )
                     else:
                         if nlp_failed:
                             # A failed / locally-infeasible NLP solve is not an
@@ -19894,6 +20039,7 @@ def solve_model(
                         node_lb,
                         node_ub,
                         time_limit=max(_deadline - time.perf_counter(), _DEADLINE_NODE_FLOOR_S),
+                        abort_deadline=_node_abort_deadline,
                         round_deadline=(_deadline if _round_budget_enabled else None),
                         yield_round=_serial_yield_round,
                         inherited_cuts=_root_cut_pool,
@@ -19943,7 +20089,8 @@ def solve_model(
                         # node fathomed-without-proof on the failure sentinel
                         # (#966; see :func:`_yield_keeps_node_open`).
                         _yield_keeps_node_open(
-                            _serial_yield_round,
+                            _serial_yield_round
+                            or (mc_lp_res is not None and mc_lp_res.status == "aborted"),
                             result_lbs[i] >= _SENTINEL_THRESHOLD,
                             result_lbs,
                             i,
@@ -24957,6 +25104,7 @@ def _solve_continuous(
             constraint_duals=constraint_duals,
             bound_duals_lower=bound_duals_lower,
             bound_duals_upper=bound_duals_upper,
+            deadline=t_start + time_limit,
         )
 
     _gap_certified = True
@@ -25052,6 +25200,7 @@ def _solve_continuous(
                 constraint_duals=constraint_duals,
                 bound_duals_lower=bound_duals_lower,
                 bound_duals_upper=bound_duals_upper,
+                deadline=t_start + time_limit,
             )
 
     # Root-node certification metrics (cert:T0.1). This path has no B&B tree —
@@ -25782,14 +25931,16 @@ def _solve_nlp_bb(
 
     # --- Root presolve: FBBT + integer-bound rounding before tree creation ---
     t_rust_start = time.perf_counter()
-    from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
+    from discopt.solvers._root_presolve import fbbt_budget_ms, tighten_root_bounds_with_fbbt
 
+    # #1929: capped at the solve's deadline, like every root FBBT call.
     lb, ub, root_infeasible, _ = tighten_root_bounds_with_fbbt(
         model,
         lb,
         ub,
         int_offsets,
         int_sizes,
+        time_limit_ms=fbbt_budget_ms(t_start + time_limit),
     )
     rust_time += time.perf_counter() - t_rust_start
     if root_infeasible:
@@ -27428,6 +27579,7 @@ def _solve_nlp_bb(
                     constraint_duals=constraint_duals,
                     bound_duals_lower=bound_duals_lower,
                     bound_duals_upper=bound_duals_upper,
+                    deadline=t_start + time_limit,
                 )
 
                 # The refined primal was already adopted above, from the
@@ -32839,6 +32991,52 @@ def _miqp_origin_shift(qp_data, lb: np.ndarray, ub: np.ndarray, n_orig: int, mod
     return s, qp_data._replace(c=c_new, b_eq=b_new, obj_const=float(const_new))
 
 
+#: #1928: largest slack block (``min(rows, cols)``) the batched QP wave hands to a
+#: dense ``np.linalg.pinv`` when the block is NOT the one-slack-per-row form
+#: :func:`_slack_reconstruction` solves in closed form. The SVD is cubic; above the
+#: cap the wave declines and the serial path answers the same nodes.
+_SLACK_PINV_MAX_DIM = 2000
+
+
+def _slack_reconstruction(S: np.ndarray):
+    """``rhs -> S^+ rhs`` for the slack block ``S`` of an equality-plus-slack form.
+
+    #1928. The batched QP wave used ``np.linalg.pinv(S)`` -- a dense SVD of an
+    ``m x n_slack`` block, recomputed every wave: ``unitcommit_50_20_2_mod_8``
+    (15,690 rows) sat in it from 80 s to past 120 s on a 60 s limit. The
+    extractors give each inequality row its own slack column, so the columns of
+    ``S`` have disjoint supports, ``S^T S`` is diagonal, and
+    ``S^+ rhs = (rhs[r_j] / s_j)_j`` (``0`` for an empty column) -- exact, in
+    ``O(m * n_slack)`` for the scan and ``O(n_slack)`` per node.
+
+    Any other block falls back to the pseudo-inverse up to
+    :data:`_SLACK_PINV_MAX_DIM`; above it this returns ``None`` (the caller then
+    solves the wave serially, as on any wave failure).
+    """
+    nz = S != 0.0
+    col_counts = nz.sum(axis=0)
+    if S.shape[1] == 0:
+        return lambda rhs: np.zeros(0, dtype=np.float64)
+    if int(col_counts.max()) <= 1:
+        rows = np.argmax(nz, axis=0)
+        used = col_counts == 1
+        if np.unique(rows[used]).size == int(used.sum()):
+            cols = np.flatnonzero(used)
+            r_used = rows[used]
+            s_used = S[r_used, cols]
+
+            def _apply(rhs: np.ndarray) -> np.ndarray:
+                z = np.zeros(S.shape[1], dtype=np.float64)
+                z[cols] = np.asarray(rhs, dtype=np.float64)[r_used] / s_used
+                return z
+
+            return _apply
+    if min(S.shape) > _SLACK_PINV_MAX_DIM:
+        return None
+    S_pinv = np.linalg.pinv(S)
+    return lambda rhs: S_pinv @ rhs
+
+
 def _pounce_qp_relaxation_nodes(qp_data, batch_lb, batch_ub, n_orig, t_start, time_limit):
     """Solve a batch of MIQP B&B node QP relaxations with POUNCE (JAX-free).
 
@@ -32935,13 +33133,23 @@ def _pounce_qp_relaxation_nodes(qp_data, batch_lb, batch_ub, n_orig, t_start, ti
         # marshalling around them is ours: a failure there is a defect and
         # propagates (the old handler wrapped this whole block).
         _wave_ok = True
+        slack_of = None
         try:
-            S_pinv = np.linalg.pinv(A_eq[:, n_orig:]) if n_slack > 0 else None
+            slack_of = _slack_reconstruction(A_eq[:, n_orig:]) if n_slack > 0 else None
         except np.linalg.LinAlgError as e:
             _warn_fallback_once(
                 "batched POUNCE QP wave: slack pseudo-inverse",
                 e,
                 "solving the wave serially",
+            )
+            _wave_ok = False
+        if n_slack > 0 and _wave_ok and slack_of is None:
+            # #1928: a general slack block too large for a dense SVD -- the
+            # serial path answers the same nodes without one.
+            logger.debug(
+                "batched POUNCE QP wave: slack block %s too large to pseudo-invert; "
+                "solving the wave serially",
+                A_eq[:, n_orig:].shape,
             )
             _wave_ok = False
 
@@ -32978,7 +33186,7 @@ def _pounce_qp_relaxation_nodes(qp_data, batch_lb, batch_ub, n_orig, t_start, ti
                     x_s = np.asarray(res.x, dtype=np.float64)
                     if x_s.shape[0] == n_orig and np.all(np.isfinite(x_s)):
                         if n_slack > 0:
-                            z = S_pinv @ (b_eq - A_struct @ x_s)
+                            z = slack_of(b_eq - A_struct @ x_s)
                             x_full = np.concatenate([x_s, z])
                         else:
                             x_full = x_s
@@ -37418,10 +37626,12 @@ def _solve_miqp_bb(
     # such bounds (here to [0, 1]/[0, 0.833]) so every node relaxation is
     # well-posed; a True root_infeasible from FBBT is itself a sound proof.
     t_rust_start = time.perf_counter()
-    from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
+    from discopt.solvers._root_presolve import fbbt_budget_ms, tighten_root_bounds_with_fbbt
 
+    # #1929: capped at the solve's deadline, like every root FBBT call
+    # (unitcommit_50_20_2_mod_8 sat here at 40 s on a 60 s limit).
     lb, ub, root_infeasible, _ = tighten_root_bounds_with_fbbt(
-        model, lb, ub, int_offsets, int_sizes
+        model, lb, ub, int_offsets, int_sizes, time_limit_ms=fbbt_budget_ms(t_start + time_limit)
     )
     rust_time += time.perf_counter() - t_rust_start
     if root_infeasible:

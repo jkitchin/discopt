@@ -1609,6 +1609,38 @@ class SolverTuning:
     bought. The abort is only prompt because a DCP check inside the build polls it
     too (``uniform_relax._Builder._dcp``): before that, QPLIB_2880 raised 20 s late."""
 
+    node_build_abort: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_NODE_BUILD_ABORT", default=True)
+    )
+    """Abort a ``solve_at_node`` **cold relaxation build** past its deadline
+    (``DISCOPT_NODE_BUILD_ABORT``, default **on**, opt-out ``=0``; §5
+    bound-changing; issue #1924).
+
+    ``build_deadline`` truncates only the constraint-row loop, so the objective walk
+    and any single constraint's walk are uninterruptible by it; the node loop's cold
+    build had no deadline at all unless ``DISCOPT_NODE_ROUND_BUDGET`` was on. Measured
+    at ``time_limit=60`` (MINLPLib): ``chimera_mis-01`` (2,032 vars, objective only),
+    ``t1000`` and ``gastrans582_cold13`` sat inside one cold build -- convexity
+    certification -- past 135 s.
+
+    When on, the root LP probe and the root cut-pool builds get ``abort_deadline`` =
+    their root-setup build deadline + one fallback reserve
+    (``_ROOT_BUILD_ABORT_GRACE_S``), and the node loop's builds get the solve
+    deadline + the same reserve, mirroring ``root_build_abort`` (#1757). Past it the
+    build raises ``RelaxationBuildAborted`` (polled every 256 node relaxations and
+    before each curvature sub-box), is discarded whole, and the node reports
+    ``status="aborted"`` with no LP bound: a node whose NLP also failed is kept open
+    at its parent bound, never fathomed on the failure sentinel. Sound: no relaxation
+    is used partially, so a bound is unchanged or absent, never weaker-than-claimed.
+    Bound-changing because an aborted build loses a bound the overrunning build
+    would have produced.
+
+    Graduated on introduction (§5 panel, 2026-10-24, interleaved, frozen snapshot):
+    70 in-repo instances x 10 s, 206 oracle checks, 0 violations, 0 certificates
+    lost, never fired (total wall 347.5 s OFF / 347.1 s ON). Targeted at 60 s (OFF /
+    ON, same status and bound): ``chimera_mis-01`` 90.9 / 62.4 s,
+    ``autocorr_bern40-40`` 129.3 / 61.7 s. Row in ``docs/dev/flag-retirement-audit.md``."""
+
     root_setup_build_deadline: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_ROOT_SETUP_BUILD_DEADLINE", default=True)
     )

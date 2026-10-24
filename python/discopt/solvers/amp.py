@@ -2418,14 +2418,16 @@ def _solve_amp_impl(
             int_sizes.append(v.size)
         offset += v.size
 
-    from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
+    from discopt.solvers._root_presolve import fbbt_budget_ms, tighten_root_bounds_with_fbbt
 
+    # #1929: capped at this solve's deadline.
     flat_lb, flat_ub, root_infeasible, root_changed = tighten_root_bounds_with_fbbt(
         model,
         flat_lb,
         flat_ub,
         int_offsets,
         int_sizes,
+        time_limit_ms=fbbt_budget_ms(t_start + time_limit),
     )
     if root_infeasible:
         return _finish(
@@ -2810,7 +2812,10 @@ def _solve_amp_impl(
                     )
                     _apply_flat_bounds_to_model(model, state.flat_lb, state.flat_ub)
                     try:
-                        from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
+                        from discopt.solvers._root_presolve import (
+                            fbbt_budget_ms,
+                            tighten_root_bounds_with_fbbt,
+                        )
 
                         fbbt_lb, fbbt_ub, fbbt_infeasible, _fbbt_changed = (
                             tighten_root_bounds_with_fbbt(
@@ -2819,6 +2824,7 @@ def _solve_amp_impl(
                                 state.flat_ub,
                                 int_offsets,
                                 int_sizes,
+                                time_limit_ms=fbbt_budget_ms(deadline),  # #1929
                             )
                         )
                         if not fbbt_infeasible:

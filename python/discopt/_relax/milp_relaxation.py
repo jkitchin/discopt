@@ -20,6 +20,7 @@ Theory: Nagarajan et al., JOGO 2018, Section 4 (piecewise McCormick relaxation).
 
 from __future__ import annotations
 
+import bisect
 import itertools
 import logging
 import math
@@ -2261,8 +2262,16 @@ def _multivar_box_curvature(
     flat_lb: np.ndarray,
     flat_ub: np.ndarray,
     box: dict,
+    abort_deadline: Optional[float] = None,
 ) -> Optional[str]:
     """Sound box-restricted ``"convex"``/``"concave"`` certificate for a node.
+
+    ``abort_deadline`` (#1924, absolute ``perf_counter`` time) is the enclosing
+    build's abort deadline, polled before each sub-box's interval Hessian: one
+    certificate can enumerate up to :data:`_MULTIVAR_MAX_SUBBOXES` of them, so
+    the build's per-node poll alone let a single node outlive the deadline by
+    seconds. Past it this raises ``RelaxationBuildAborted`` (the build is then
+    discarded whole); no verdict is recorded.
 
     The multivariate curvature certificate. ``expr`` is C²,
     so it is convex on the (convex) box iff ``∇²expr ⪰ 0`` at *every* point of the
@@ -2302,22 +2311,44 @@ def _multivar_box_curvature(
         return None
     widths = his - los
 
-    # Locate each dependent flat index within its (possibly vector) Variable.
-    var_at: dict[int, tuple[Variable, int]] = {}
+    # Locate each dependent flat index within its (possibly vector) Variable. Only
+    # the dependent indices are resolved (#1924): a map over every flat column was
+    # an O(n_vars) rebuild per certificate, a visible share of a 2,000-variable
+    # model's cold build.
+    starts = []
     offset = 0
     for v in model._variables:
-        for c in range(v.size):
-            var_at[offset + c] = (v, c)
+        starts.append(offset)
         offset += v.size
-    if any(j not in var_at for j in dep):
-        return None
-    loc = {j: var_at[j] for j in dep}
+    loc: dict[int, tuple[Variable, int]] = {}
+    for j in dep:
+        if not 0 <= j < offset:
+            return None
+        k = bisect.bisect_right(starts, j) - 1
+        v = model._variables[k]
+        loc[j] = (v, j - starts[k])
     affected_vars = {loc[j][0] for j in dep}
     saved = {v: box[v] for v in affected_vars}
 
     tol = _COMPOSITE_CURV_TOL
     non_pinned = [i for i in range(d) if widths[i] > tol]
-    ix = np.ix_(dep, dep)
+
+    def _dep_block(arr: np.ndarray, support) -> np.ndarray:
+        # #1924: the Hessian comes back over the expression's support only
+        # (``compact=True``) instead of the model's n x n -- two dense n x n arrays
+        # per sub-box were the cost of this loop on 2,000-variable models. A
+        # dependent column outside the support has a structurally zero row and
+        # column, exactly as in the dense form, so the block is the same matrix.
+        if support is None:
+            return arr[np.ix_(dep, dep)]
+        pos = {int(c): k for k, c in enumerate(np.asarray(support).tolist())}
+        sel = [pos.get(j, -1) for j in dep]
+        keep = np.array([k >= 0 for k in sel], dtype=bool)
+        src = np.array([k for k in sel if k >= 0], dtype=np.intp)
+        out = np.zeros((d, d), dtype=np.float64)
+        if src.size:
+            out[np.ix_(keep, keep)] = arr[np.ix_(src, src)]
+        return out
 
     def _verdict_at(k: int) -> Optional[str]:
         edges = [
@@ -2327,6 +2358,12 @@ def _multivar_box_curvature(
         all_convex = True
         all_concave = True
         for combo in itertools.product(*[range(len(e) - 1) for e in edges]):
+            if abort_deadline is not None and time.perf_counter() >= abort_deadline:
+                from discopt._relax.canonical_expr import RelaxationBuildAborted
+
+                raise RelaxationBuildAborted(
+                    "relaxation build passed its abort deadline inside a curvature certificate"
+                )
             lo_arr = {v: np.array(saved[v].lo, dtype=np.float64).reshape(-1) for v in affected_vars}
             hi_arr = {v: np.array(saved[v].hi, dtype=np.float64).reshape(-1) for v in affected_vars}
             for i, j in enumerate(dep):
@@ -2338,7 +2375,7 @@ def _multivar_box_curvature(
                     lo_arr[v].reshape(saved[v].lo.shape), hi_arr[v].reshape(saved[v].hi.shape)
                 )
             try:
-                ad = interval_hessian(expr, model, box=box)
+                ad = interval_hessian(expr, model, box=box, compact=True)
             except ValueError:
                 # #1520: narrowed. ``interval_hessian``'s documented decline (array-
                 # shaped values, ``IntervalHessianTooLarge``) is "no verdict", the
@@ -2346,10 +2383,17 @@ def _multivar_box_curvature(
                 # body used to arrive here as ``RecursionError``; ``interval_hessian``
                 # now runs deep walks on a large stack instead.)
                 return None
-            h_lo = np.asarray(ad.hess.lo, dtype=np.float64)[ix]
-            h_hi = np.asarray(ad.hess.hi, dtype=np.float64)[ix]
-            if not (np.all(np.isfinite(h_lo)) and np.all(np.isfinite(h_hi))):
+            full_lo = np.asarray(ad.hess.lo, dtype=np.float64)
+            full_hi = np.asarray(ad.hess.hi, dtype=np.float64)
+            # Finiteness over the WHOLE compact matrix, before the block is cut: the
+            # abstention sentinel (an unbounded walk) densifies to +-inf over a
+            # one-index fallback support that need not be dependent, and a block cut
+            # from it would read as all-zero curvature. The support lies inside the
+            # dependent set otherwise, so this is the dense form's check.
+            if not (np.all(np.isfinite(full_lo)) and np.all(np.isfinite(full_hi))):
                 return None
+            h_lo = _dep_block(full_lo, ad.support)
+            h_hi = _dep_block(full_hi, ad.support)
             abs_max = np.maximum(np.abs(h_lo), np.abs(h_hi))
             row_radius = abs_max.sum(axis=1) - np.abs(np.diag(abs_max))
             gersh_lo = np.diag(h_lo) - row_radius  # ≤ λ_min(H)

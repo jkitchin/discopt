@@ -25,6 +25,7 @@ signature compatibility and ignored).
 
 from __future__ import annotations
 
+import time
 from typing import Any, Optional, Union, cast
 
 import numpy as np
@@ -126,6 +127,10 @@ def _sparse_rows(A: Optional[Union[np.ndarray, sp.spmatrix]], n: int) -> "sp.csr
     return sp.csr_matrix(np.asarray(A, dtype=np.float64).reshape(-1, n))
 
 
+#: ``solve_lp_warm_csc_py``'s ``max_iter`` default (``lp_bindings.rs``).
+_SIMPLEX_DEFAULT_MAX_ITER = 100_000
+
+
 def solve_lp(
     c: np.ndarray,
     A_ub: Optional[Union[np.ndarray, sp.spmatrix]] = None,
@@ -223,7 +228,16 @@ def solve_lp(
     _warm_kw: dict[str, Any] = {}
     if max_iter is not None:
         _warm_kw["max_iter"] = int(max_iter)
+    # #1925: the budget reaches the simplex (``SimplexOptions::deadline``, polled
+    # every 256 pivots). It used to be accepted here and dropped, so OBBT/DBBT's
+    # 0.1 s per-LP grant ran to optimality instead (``autocorr_bern30-23``: one
+    # DBBT pass outlived a 60 s solve by 75 s). An exit on the deadline returns no
+    # objective, like any non-optimal exit, so no caller can take a bound from it.
+    if time_limit is not None:
+        _warm_kw["time_limit_s"] = max(0.0, float(time_limit))
     from discopt import _timing
+
+    _t0 = time.perf_counter()
 
     with _timing.charge("rust"):
         status, x_full, obj, iters, _cs, _bv, dual, _ray = solve_lp_warm_csc_py(
@@ -249,6 +263,15 @@ def solve_lp(
         "numerical": SolveStatus.ERROR,
     }
     st = status_map.get(status, SolveStatus.ERROR)
+    if (
+        status == "iter_limit"
+        and time_limit is not None
+        and int(iters) < (_SIMPLEX_DEFAULT_MAX_ITER if max_iter is None else int(max_iter))
+    ):
+        # The simplex reports a deadline exit as ``iter_limit``; stopping short of
+        # the pivot cap says it was the deadline (decided on the pivot count, not
+        # by reading the clock again -- #912).
+        st = SolveStatus.TIME_LIMIT
     if status == "numerical" and m > 0:
         # #1618 A-15: the Rust simplex exits ``numerical`` on some plainly infeasible
         # LPs (``x0 + x1 <= 1``, ``x0 + x1 >= 3`` over ``x >= 0`` -- one pivot, then
@@ -261,7 +284,11 @@ def solve_lp(
 
         proved, _why = phase1_infeasibility_proof(
             StdForm.from_arrays(c_std, a_std, b_vec, lb_std, ub_std),
-            time_limit=time_limit,
+            time_limit=(
+                None
+                if time_limit is None
+                else max(0.0, float(time_limit) - (time.perf_counter() - _t0))
+            ),
         )
         if proved:
             return LPResult(status=SolveStatus.INFEASIBLE)
