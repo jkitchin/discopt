@@ -41,7 +41,7 @@ def test_one_slack_per_row_is_solved_in_closed_form(pinv_calls):
 
 @pytest.mark.unit
 def test_a_large_disjoint_block_needs_no_pseudo_inverse(pinv_calls):
-    m = k = solver._SLACK_PINV_MAX_DIM * 4
+    m = k = solver._SLACK_PINV_MAX_DIM + 500  # above the pinv cap
     S = np.zeros((m, k))
     S[np.arange(k), np.arange(k)] = -1.0
     rhs = np.arange(m, dtype=float)
