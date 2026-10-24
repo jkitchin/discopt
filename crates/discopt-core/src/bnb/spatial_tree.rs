@@ -37,8 +37,10 @@ struct QNode {
     pb: f64,
     lo: Vec<f64>,
     hi: Vec<f64>,
-    /// The parent's optimal node-LP basis, shared by both children; `None` unless
-    /// [`SpatialTreeConfig::warm_start_children`] is on and the parent solved.
+    /// The node-LP basis this node starts from, shared by both children: the
+    /// parent's optimal basis, or, when the parent's LP decided nothing, the one
+    /// the parent itself inherited. `None` unless
+    /// [`SpatialTreeConfig::warm_start_children`] is on (and at the root).
     basis: Option<Rc<Basis>>,
 }
 
@@ -854,7 +856,15 @@ pub fn solve_spatial_tree_with_hooks(
             match split {
                 Some(j) => {
                     let at = clamp_interior(0.5 * (lo[j] + hi[j]), lo[j], hi[j]);
-                    // No optimal basis to hand down from an undecided LP.
+                    // An undecided LP has no optimal basis of its own, so the
+                    // children inherit the one THIS node was started from (its
+                    // nearest solved ancestor's). Handing down nothing made the
+                    // whole subtree cold, and cold solves are what fail: on
+                    // MINLPLib `hybriddynamic_var` 85% of cold node LPs end
+                    // `Numerical` against 1% of warm ones, so one undecided node
+                    // turned its subtree undecided (#1935). The children's boxes
+                    // lie inside that ancestor's, so the basis fits their LP; it
+                    // is a start only, never a verdict. `None` with the flag off.
                     push_children(
                         &mut heap,
                         &lo,
@@ -863,7 +873,7 @@ pub fn solve_spatial_tree_with_hooks(
                         at,
                         parent_bound,
                         spec.integrality[j],
-                        None,
+                        parent_basis.clone(),
                     );
                 }
                 None => global_lb_closed = global_lb_closed.min(parent_bound),
@@ -2227,7 +2237,7 @@ mod gap_criterion_tests {
         assert_eq!(cold.n_warm_shape_mismatch, 0);
         checked += 3;
         assert!(warm.n_warm_starts > 0, "warm arm never warm-started");
-        // Every node but the root and children of an undecided LP has a parent basis.
+        // Every node but the root has an inherited basis.
         assert!(warm.n_warm_starts + warm.n_warm_shape_mismatch < warm.node_count);
         checked += 2;
         let (ic, iw) = (cold.incumbent.unwrap(), warm.incumbent.unwrap());
@@ -2250,5 +2260,68 @@ mod gap_criterion_tests {
             checked, 12,
             "warm-start tree probe did not run every assertion"
         );
+    }
+
+    /// #1935: a node whose LP decides nothing hands its children the basis it was
+    /// itself started from. Forcing undecided LPs with a tiny pivot cap, every
+    /// LP-solved node except the root must then be warm-started: the root solved,
+    /// and each later node inherits from its nearest solved ancestor. Before this,
+    /// an undecided node handed down nothing and its whole subtree solved cold.
+    #[test]
+    fn undecided_nodes_pass_their_inherited_basis_down() {
+        let spec = probe_spec_1935();
+        let cfg = SpatialTreeConfig {
+            max_nodes: 4_000,
+            gap_tol: 1e-6,
+            warm_start_children: true,
+            ..SpatialTreeConfig::default()
+        };
+        let mut checked = 0usize;
+        let mut exercised = 0usize;
+        for max_iter in [3usize, 4, 5, 6, 8] {
+            let opts = SimplexOptions {
+                max_iter,
+                ..SimplexOptions::default()
+            };
+            let res = solve_spatial_tree(&spec, &cfg, &opts);
+            if res.root_status != "bounded" {
+                continue;
+            }
+            assert_eq!(
+                res.n_warm_starts + res.n_warm_shape_mismatch,
+                res.n_lp_solves - 1,
+                "max_iter={max_iter}: a solved node started cold: {res:?}"
+            );
+            checked += 1;
+            if res.n_undecided > 0 {
+                exercised += 1;
+            }
+        }
+        assert!(checked > 0, "no run solved its root");
+        assert!(exercised > 0, "no run produced an undecided node LP");
+    }
+
+    fn probe_spec_1935() -> SpatialKernelSpec {
+        use crate::bnb::spatial_kernel::FixedRow;
+        SpatialKernelSpec {
+            n_cols: 6,
+            n_orig: 3,
+            c: vec![0.0, 0.0, -1.0, 1.0, -2.0, 1.0],
+            integrality: vec![false; 6],
+            global_lo: vec![-1.0, -1.0, -1.0, -1e20, -1e20, -1e20],
+            global_hi: vec![2.0, 2.0, 2.0, 1e20, 1e20, 1e20],
+            fixed_rows: vec![FixedRow {
+                cols: vec![0, 1, 2],
+                coeffs: vec![1.0, 1.0, 1.0],
+                rhs: 2.5,
+            }],
+            terms: vec![
+                EnvTerm::Bilinear { i: 0, j: 1, w: 3 },
+                EnvTerm::Bilinear { i: 1, j: 2, w: 4 },
+                EnvTerm::Monomial { i: 0, s: 5, p: 2 },
+            ],
+            blf_terms: vec![],
+            obbt_candidates: vec![],
+        }
     }
 }
