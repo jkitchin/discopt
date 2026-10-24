@@ -6406,6 +6406,7 @@ def _duals_against_declared_box(
     bound_duals_lower: Optional[dict[str, np.ndarray]],
     bound_duals_upper: Optional[dict[str, np.ndarray]],
     active_tol: float = 1e-6,
+    deadline: Optional[float] = None,
 ) -> tuple[
     Optional[dict[str, np.ndarray]],
     Optional[dict[str, np.ndarray]],
@@ -6451,7 +6452,8 @@ def _duals_against_declared_box(
 
     Refuses rather than guesses (CLAUDE.md §3): if the refit cannot meet
     stationarity at the declared active set, all three families come back
-    ``None`` with a warning naming the variable. A dual that does not satisfy
+    ``None`` with a warning naming the variable. So does a refit the solve's
+    ``deadline`` (#1926) leaves no time to start. A dual that does not satisfy
     the user's own KKT system is worse than no dual, because nothing downstream
     can tell it is wrong.
     """
@@ -6534,6 +6536,7 @@ def _duals_against_declared_box(
         ub=declared_ub,
         is_continuous=is_continuous,
         active_tol=active_tol,
+        deadline=deadline,
     )
 
     # Name the offenders, and say whether presolve is the cause — that is the
@@ -24988,6 +24991,7 @@ def _solve_continuous(
             constraint_duals=constraint_duals,
             bound_duals_lower=bound_duals_lower,
             bound_duals_upper=bound_duals_upper,
+            deadline=t_start + time_limit,
         )
 
     _gap_certified = True
@@ -25083,6 +25087,7 @@ def _solve_continuous(
                 constraint_duals=constraint_duals,
                 bound_duals_lower=bound_duals_lower,
                 bound_duals_upper=bound_duals_upper,
+                deadline=t_start + time_limit,
             )
 
     # Root-node certification metrics (cert:T0.1). This path has no B&B tree —
@@ -27459,6 +27464,7 @@ def _solve_nlp_bb(
                     constraint_duals=constraint_duals,
                     bound_duals_lower=bound_duals_lower,
                     bound_duals_upper=bound_duals_upper,
+                    deadline=t_start + time_limit,
                 )
 
                 # The refined primal was already adopted above, from the
