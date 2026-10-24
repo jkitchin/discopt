@@ -8920,7 +8920,7 @@ def _model_contains_nonsmooth_node(model: Model) -> bool:
 
 
 def _convexity_rewrites(
-    model: Model, *, entropy: bool = True, epigraph: bool = True
+    model: Model, *, entropy: bool = True, soc: bool = True, epigraph: bool = True
 ) -> tuple[Model, tuple[str, ...]]:
     """Apply the exact rewrites ``solve_model`` runs before classifying convexity.
 
@@ -8930,11 +8930,15 @@ def _convexity_rewrites(
 
     * ``"entropy"`` -- ``x*log(x)`` -> ``entropy(x)`` and ``x*log(x/y)`` ->
       ``centropy(x, y)`` (:func:`~discopt._relax.factorable_reform.canonicalize_entropy`).
+    * ``"squared_soc"`` -- ``sum w_i a_i**2 + c <= k t**2`` with ``t >= 0`` on the
+      box rewritten to its norm form ``sqrt(sum w_i a_i**2 + c) <= sqrt(k) t``
+      (:func:`~discopt._relax.soc_rewrite.rewrite_squared_soc`, #1933).
     * ``"objective_epigraph"`` -- ``min z`` with ``z == g(x)`` relaxed to
       ``z >= g(x)`` (:func:`~discopt._relax.objective_epigraph.relax_objective_defining_equality`).
 
-    Both are exact at the optimum. They are the reason the solve can prove a model
-    convex that the bare classifier does not, so this is the single definition
+    All are exact (the first two on the whole box, the epigraph at the optimum).
+    They are the reason the solve can prove a model convex that the bare
+    classifier does not, so this is the single definition
     shared by the solve and by :meth:`discopt.modeling.core.Model.convexity`.
     """
     applied: list[str] = []
@@ -8945,6 +8949,12 @@ def _convexity_rewrites(
         if new is not model:
             applied.append("entropy")
             model = new
+    if soc:
+        from discopt._relax.soc_rewrite import rewrite_squared_soc
+
+        model, changed = rewrite_squared_soc(model)
+        if changed:
+            applied.append("squared_soc")
     if epigraph:
         from discopt._relax.objective_epigraph import relax_objective_defining_equality
 
@@ -13811,6 +13821,27 @@ def solve_model(
             options=scip_options,
         )
 
+    # --- #1933: squared-form second-order cones to their norm form ---
+    # ``sum w_i a_i**2 + c <= k t**2`` with ``t >= 0`` on the box is the same set as
+    # ``sqrt(sum w_i a_i**2 + c) <= sqrt(k) t`` (exact on the whole box, see
+    # ``_relax/soc_rewrite.py``), and only the second is convex as a function. It
+    # runs here, ahead of the convex-MINLP router, because every consumer below
+    # must see the norm form: the router's convexity proof, and the OA cuts of the
+    # family it routes to -- a gradient cut of the squared row taken outside the
+    # cone is not valid for it. After the SCIP hand-off above, which receives the
+    # model as written and recognizes the squared cone itself. The rewritten rows
+    # are recorded so ``Model.solve`` reports constraint duals for the rows the
+    # caller wrote (``convert_squared_soc_duals``).
+    # The variables are untouched, so callbacks see the point they always did.
+    from discopt._relax.soc_rewrite import record_squared_soc_rows, rewrite_squared_soc_rows
+
+    _soc_caller_model = model
+    model, _soc_rows = rewrite_squared_soc_rows(model)
+    if _soc_rows:
+        record_squared_soc_rows(_soc_caller_model, _soc_rows)
+        _carry_solve_clocks(_soc_caller_model, model)
+        logger.debug("rewrote %d squared-form cone row(s) to norm form", len(_soc_rows))
+
     # --- #1059: auto-route a convexity-certified MINLP to the MIP-NLP family ---
     # Only when the caller expressed no preference -- neither an explicit
     # solver= (including solver="bb"), nor any option this family would drop.
@@ -14956,7 +14987,12 @@ def solve_model(
     _already_linear = classify_problem(model) in (ProblemClass.LP, ProblemClass.MILP)
 
     model, _rewrites = _convexity_rewrites(
-        model, entropy=_entropy_ok and not _already_linear, epigraph=not _has_bb_callbacks
+        model,
+        entropy=_entropy_ok and not _already_linear,
+        # Already applied ahead of the convex-MINLP router (#1933); the pass is
+        # kept in ``_convexity_rewrites`` for ``Model.convexity()``.
+        soc=False,
+        epigraph=not _has_bb_callbacks,
     )
     if "objective_epigraph" in _rewrites:
         logger.debug("relaxed objective-defining equality to binding inequality")

@@ -188,6 +188,98 @@ def _chain_leaves(prog: _Program, root: int) -> Optional[list[tuple[int, int]]]:
     return out
 
 
+#: Node budget for one structural-equality test in :func:`_arena_sum_of_squares`.
+#: Square bases are small in practice; a larger one is declared "not a square",
+#: which keeps the edge-honest ``sqrt`` -- the behaviour before #1933.
+_STRUCT_EQ_BUDGET = 4096
+
+
+def _arena_struct_eq(prog: _Program, x: int, y: int) -> bool:
+    """Structural equality of two arena subtrees (same ops, constants, variables)."""
+    op, a, b, k = prog.op, prog.a, prog.b, prog.k
+    stack = [(x, y)]
+    budget = _STRUCT_EQ_BUDGET
+    while stack:
+        p, q = stack.pop()
+        if p == q:
+            continue
+        budget -= 1
+        if budget < 0:
+            return False
+        o = op[p]
+        if o != op[q] or o == OP_UNSUPPORTED:
+            return False
+        if o in (OP_CONST, OP_VAR):
+            if k[p] != k[q]:
+                return False
+            continue
+        if o == OP_SUMOVER:
+            tp, tq = prog.args(p), prog.args(q)
+            if tp.shape != tq.shape:
+                return False
+            stack.extend(zip(tp.tolist(), tq.tolist()))
+            continue
+        if (a[p] < 0) != (a[q] < 0) or (b[p] < 0) != (b[q] < 0):
+            return False
+        if a[p] >= 0:
+            stack.append((int(a[p]), int(a[q])))
+        if b[p] >= 0:
+            stack.append((int(b[p]), int(b[q])))
+    return True
+
+
+def _arena_sum_of_squares(prog: _Program, root: int) -> bool:
+    """The arena analogue of :func:`discopt._nl_expr_compiler._is_sum_of_squares`.
+
+    A nonnegatively weighted sum of ``b**2`` / ``b*b`` terms plus constants ``>= 0``,
+    through ``+``/``-``/``neg`` chains and n-ary sums. The two must decide alike so
+    the arena and the Python-DAG path build the same tape for ``sqrt``.
+    """
+    op, a, b, k = prog.op, prog.a, prog.b, prog.k
+
+    def const(i: int) -> Optional[float]:
+        return float(k[i]) if op[i] == OP_CONST else None
+
+    def square(i: int) -> bool:
+        if op[i] == OP_POW:
+            return const(int(b[i])) == 2.0
+        return op[i] == OP_MUL and _arena_struct_eq(prog, int(a[i]), int(b[i]))
+
+    stack: list[tuple[int, float]] = [(root, 1.0)]
+    while stack:
+        i, sign = stack.pop()
+        o = op[i]
+        if o == OP_ADD or o == OP_SUB:
+            stack.append((int(a[i]), sign))
+            stack.append((int(b[i]), sign if o == OP_ADD else -sign))
+            continue
+        if o == OP_NEG:
+            stack.append((int(a[i]), -sign))
+            continue
+        if o == OP_SUMOVER:
+            stack.extend((int(t), sign) for t in prog.args(i))
+            continue
+        c = const(i)
+        if c is not None:
+            if not sign * c >= 0.0:  # also rejects NaN
+                return False
+            continue
+        if o == OP_MUL:
+            cl, cr = const(int(a[i])), const(int(b[i]))
+            if cl is not None and square(int(b[i])):
+                if not sign * cl >= 0.0:
+                    return False
+                continue
+            if cr is not None and square(int(a[i])):
+                if not sign * cr >= 0.0:
+                    return False
+                continue
+        if sign > 0.0 and square(i):
+            continue
+        return False
+    return True
+
+
 def lower(prog: _Program, roots: list[int], E: Any) -> list:
     """Lower the arena to a ``cache`` of tape nodes, ``None`` where unsupported.
 
@@ -292,8 +384,12 @@ def lower(prog: _Program, roots: list[int], E: Any) -> list:
                 cache[i] = E.log(arg) * E.const_(1.0 / math.log(2.0))
                 continue
             if fidx == _FUNC_SQRT:
-                # Same edge-honest form as `_nl_expr_compiler._sqrt` (#1491).
-                cache[i] = _sqrt(E, arg)
+                # Same edge-honest form as `_nl_expr_compiler._sqrt` (#1491), and
+                # the same norm exception for a sum of squares (#1933).
+                if _arena_sum_of_squares(prog, int(a[i])):
+                    cache[i] = E.sqrt(arg)
+                else:
+                    cache[i] = _sqrt(E, arg)
                 continue
             method = _FUNC_METHOD.get(fidx)
             if method is None:

@@ -10768,11 +10768,17 @@ class Model:
         )
 
         from discopt._relax.factorable_reform import collect_lift_aux_names
+        from discopt._relax.soc_rewrite import collect_squared_soc_rows
 
         _lift_aux_names: set[str] = set()
+        _soc_rows_by_model: dict = {}
         _t_primary0 = _time.perf_counter()
         try:
-            with deadline_scope(_primary_tl), collect_lift_aux_names() as _lift_aux_names:
+            with (
+                deadline_scope(_primary_tl),
+                collect_lift_aux_names() as _lift_aux_names,
+                collect_squared_soc_rows() as _soc_rows_by_model,
+            ):
                 result = solve_model(
                     self,
                     time_limit=_primary_tl,
@@ -10820,6 +10826,15 @@ class Model:
                 del self._solve_deadline
             except AttributeError:
                 pass
+
+        # --- #1933: duals for the squared cone rows the caller wrote ---------- #
+        # ``solve_model`` solved those rows in their norm form; its multipliers are
+        # for that function, so rescale them to the caller's row (or withhold them).
+        _soc_rows = _soc_rows_by_model.get(id(self))
+        if _soc_rows and isinstance(result, SolveResult):
+            from discopt._relax.soc_rewrite import convert_squared_soc_duals
+
+            convert_squared_soc_duals(result, self, _soc_rows)
 
         # --- Bill the convex-kernel attempt to the reported wall (#1422) ------ #
         # #911 made the DECLINED attempt's wall count against the budget handed to
