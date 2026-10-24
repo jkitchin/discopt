@@ -1510,7 +1510,7 @@ def _native_kernel_primal_hook(model, source, sign, off, n_orig, outer_deadline)
     return hook
 
 
-def _native_kernel_incumbent_value(model, source, sign, off):
+def _native_kernel_incumbent_value(model, source, sign, off, n_orig):
     """The kernel's incumbent pricing callback (#1656, ``incumbent_value=``).
 
     Returns ``price(x, lp_obj)`` for a McCormick-tight LP point ``x`` whose lifted
@@ -1538,8 +1538,21 @@ def _native_kernel_incumbent_value(model, source, sign, off):
     but could not finish: its bound cannot pass the lift's own optimum, and it ran
     100 000 nodes to ``node_limit``.
 
-    ``None`` (point not accepted) when the objective is not finite there. No
-    ``except``: an evaluator failure is raised by the binding when the tree
+    ``None`` (point not accepted) when the objective is not finite there, and
+    when the point fails :func:`_native_kernel_verify_point` on ``model`` (#1938).
+    The kernel's integrality test passes a column within ``int_tol`` (1e-5) of an
+    integer, but ``verify_point`` judges the point's integral realisation, and on
+    a big-M row ``x - M*z <= 0`` a binary at ``z = 1e-6`` gives ``x`` room
+    ``M*z`` that ``z = 0`` does not. Measured on a 4-variable reproducer: the
+    tree adopted such a point at -1.00994 (true optimum -1.005), pruned against
+    it, exited ``optimal``, and the #789 check after the search then discarded
+    the whole result, bound included. Rejecting it here keeps the incumbent a
+    value an integral point attains; the kernel then branches the near-integral
+    column (``spatial_tree.rs``). The check is the #789 one on the lift
+    (``source=None``): a point that fails only the pre-reform model keeps its
+    #1522 handling (repair on an uncertified exit).
+
+    No ``except``: an evaluator failure is raised by the binding when the tree
     returns (CLAUDE.md §7).
     """
     from discopt._tape_nlp_evaluator import make_evaluator
@@ -1558,6 +1571,9 @@ def _native_kernel_incumbent_value(model, source, sign, off):
         lp_published = sign * (float(lp_obj) + off)
         if abs(declared - lp_published) > 1e-4 * (1.0 + abs(lp_published)):
             return "decline"
+        ok, _ = _native_kernel_verify_point(model, np.asarray(x, dtype=np.float64)[:n_orig])
+        if not ok:
+            return None
         return internal
 
     return price
@@ -2397,7 +2413,9 @@ def _try_native_spatial_kernel(
     if initial_incumbent is not None:
         solve_kwargs["initial_incumbent"] = float(initial_incumbent)
     # #1656: price every McCormick-tight point at the posed problem's objective.
-    solve_kwargs["incumbent_value"] = _native_kernel_incumbent_value(model, source, sign, off)
+    solve_kwargs["incumbent_value"] = _native_kernel_incumbent_value(
+        model, source, sign, off, n_orig
+    )
     if _tuning().native_nlp_primal:
         solve_kwargs["primal_hook"] = _native_kernel_primal_hook(
             model, source, sign, off, n_orig, outer_deadline
