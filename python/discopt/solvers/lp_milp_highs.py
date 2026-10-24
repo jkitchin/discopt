@@ -2670,24 +2670,45 @@ def _cross_check_rescaled(
     return plain
 
 
-def _withdraw(out: HighsOutcome, why: str) -> HighsOutcome:
+def _withdraw(out: HighsOutcome, why: str, cross: Optional[HighsOutcome] = None) -> HighsOutcome:
     """#1634: strip a HiGHS MILP certificate the presolve cross-check could not confirm.
 
     Mirrors ``decertify_root_check`` (#1309/#1320): ``optimal`` keeps its verified
     incumbent as an uncertified ``feasible`` over the NS-safe root bound; ``infeasible``
     has no incumbent and becomes ``error``.
+
+    #1920: when the presolve-free cross-solve RAN and left a bound of its own (it hit
+    the budget without a verdict, and did not refute the primary), the published bound
+    is ``max(root, min(primary tree bound, cross tree bound))``. ``min`` of the two
+    configurations' bounds is the rule :func:`_weaker_bound` already certifies on (they
+    fail on disjoint instances, so the ``min`` is valid whenever either is), and each
+    is the same floating-point tree bound the route publishes on any budgeted exit.
+    Falling back to the root bound alone made the bound non-monotone in the time limit:
+    measured on a 2-32-32-1 ``relu_bigm`` net, ``time_limit=5`` returned HiGHS's tree
+    bound -2.06, while ``time_limit=11`` (kOptimal at ~8 s, cross-solve cut off at
+    ~3 s) returned the root bound -5.82; the issue's 600 s run returned -15.30 against
+    -4.38 at 180 s. With no cross bound, or a refuted primary, the root bound stands.
     """
     out.labels["milp/certificate"] = "declined"
     out.gap_certified = False
     out.message = f"HiGHS MILP certificate withdrawn: {why} (#1634)"
+    provenance = "root-ns"
     if out.status == "optimal":
         out.status = "feasible"
-        out.bound = out.root_bound
+        tree = None
+        if cross is not None and cross.bound is not None and out.bound is not None:
+            tree = min(float(out.bound), float(cross.bound))
+        if tree is not None and (out.root_bound is None or tree > out.root_bound):
+            out.bound = tree
+            provenance = "min(presolved, presolve-free)"
+            out.stats["milp/withdrawn_bound_from_trees"] = 1.0
+        else:
+            out.bound = out.root_bound
         if out.bound is not None and out.objective is not None:
             out.bound = min(out.bound, out.objective)
     else:
         out.status, out.bound = "error", None
-    out.labels["milp/bound_provenance"] = "root-ns" if out.bound is not None else "none"
+    out.labels["milp/bound_provenance"] = provenance if out.bound is not None else "none"
     return out
 
 
@@ -2925,6 +2946,7 @@ def _weaker_bound(
             out,
             f"the presolve-free cross-solve did not confirm it (status {cross.status}: "
             f"{cross.message or 'no message'})",
+            cross,
         )
     if out.status != "optimal" or out.bound is None or cross.bound is None:
         return out
