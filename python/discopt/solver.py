@@ -32979,6 +32979,52 @@ def _miqp_origin_shift(qp_data, lb: np.ndarray, ub: np.ndarray, n_orig: int, mod
     return s, qp_data._replace(c=c_new, b_eq=b_new, obj_const=float(const_new))
 
 
+#: #1928: largest slack block (``min(rows, cols)``) the batched QP wave hands to a
+#: dense ``np.linalg.pinv`` when the block is NOT the one-slack-per-row form
+#: :func:`_slack_reconstruction` solves in closed form. The SVD is cubic; above the
+#: cap the wave declines and the serial path answers the same nodes.
+_SLACK_PINV_MAX_DIM = 2000
+
+
+def _slack_reconstruction(S: np.ndarray):
+    """``rhs -> S^+ rhs`` for the slack block ``S`` of an equality-plus-slack form.
+
+    #1928. The batched QP wave used ``np.linalg.pinv(S)`` -- a dense SVD of an
+    ``m x n_slack`` block, recomputed every wave: ``unitcommit_50_20_2_mod_8``
+    (15,690 rows) sat in it from 80 s to past 120 s on a 60 s limit. The
+    extractors give each inequality row its own slack column, so the columns of
+    ``S`` have disjoint supports, ``S^T S`` is diagonal, and
+    ``S^+ rhs = (rhs[r_j] / s_j)_j`` (``0`` for an empty column) -- exact, in
+    ``O(m * n_slack)`` for the scan and ``O(n_slack)`` per node.
+
+    Any other block falls back to the pseudo-inverse up to
+    :data:`_SLACK_PINV_MAX_DIM`; above it this returns ``None`` (the caller then
+    solves the wave serially, as on any wave failure).
+    """
+    nz = S != 0.0
+    col_counts = nz.sum(axis=0)
+    if S.shape[1] == 0:
+        return lambda rhs: np.zeros(0, dtype=np.float64)
+    if int(col_counts.max()) <= 1:
+        rows = np.argmax(nz, axis=0)
+        used = col_counts == 1
+        if np.unique(rows[used]).size == int(used.sum()):
+            cols = np.flatnonzero(used)
+            r_used = rows[used]
+            s_used = S[r_used, cols]
+
+            def _apply(rhs: np.ndarray) -> np.ndarray:
+                z = np.zeros(S.shape[1], dtype=np.float64)
+                z[cols] = np.asarray(rhs, dtype=np.float64)[r_used] / s_used
+                return z
+
+            return _apply
+    if min(S.shape) > _SLACK_PINV_MAX_DIM:
+        return None
+    S_pinv = np.linalg.pinv(S)
+    return lambda rhs: S_pinv @ rhs
+
+
 def _pounce_qp_relaxation_nodes(qp_data, batch_lb, batch_ub, n_orig, t_start, time_limit):
     """Solve a batch of MIQP B&B node QP relaxations with POUNCE (JAX-free).
 
@@ -33075,13 +33121,23 @@ def _pounce_qp_relaxation_nodes(qp_data, batch_lb, batch_ub, n_orig, t_start, ti
         # marshalling around them is ours: a failure there is a defect and
         # propagates (the old handler wrapped this whole block).
         _wave_ok = True
+        slack_of = None
         try:
-            S_pinv = np.linalg.pinv(A_eq[:, n_orig:]) if n_slack > 0 else None
+            slack_of = _slack_reconstruction(A_eq[:, n_orig:]) if n_slack > 0 else None
         except np.linalg.LinAlgError as e:
             _warn_fallback_once(
                 "batched POUNCE QP wave: slack pseudo-inverse",
                 e,
                 "solving the wave serially",
+            )
+            _wave_ok = False
+        if n_slack > 0 and _wave_ok and slack_of is None:
+            # #1928: a general slack block too large for a dense SVD -- the
+            # serial path answers the same nodes without one.
+            logger.debug(
+                "batched POUNCE QP wave: slack block %s too large to pseudo-invert; "
+                "solving the wave serially",
+                A_eq[:, n_orig:].shape,
             )
             _wave_ok = False
 
@@ -33118,7 +33174,7 @@ def _pounce_qp_relaxation_nodes(qp_data, batch_lb, batch_ub, n_orig, t_start, ti
                     x_s = np.asarray(res.x, dtype=np.float64)
                     if x_s.shape[0] == n_orig and np.all(np.isfinite(x_s)):
                         if n_slack > 0:
-                            z = S_pinv @ (b_eq - A_struct @ x_s)
+                            z = slack_of(b_eq - A_struct @ x_s)
                             x_full = np.concatenate([x_s, z])
                         else:
                             x_full = x_s
