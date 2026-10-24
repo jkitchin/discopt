@@ -57,7 +57,7 @@ import copy as _copy
 import logging
 import math
 from dataclasses import dataclass
-from typing import Any, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional
 
 import numpy as np
 
@@ -225,6 +225,11 @@ def _squared_soc_row(
         sign = -1.0
     else:
         return None
+    # A scalar row only: the dual conversion (and ``t``'s scalar check) read one
+    # multiplier per row. A vector row ``x**2 <= t**2`` is not proven convex
+    # today, but nothing here should depend on that.
+    if getattr(c.body, "shape", ()) not in ((), (1,)):
+        return None
     positive: list[tuple[float, Expression]] = []
     const = 0.0
     neg: Optional[tuple[float, Expression]] = None
@@ -284,7 +289,9 @@ def _term_count(body: Expression) -> int:
     return count
 
 
-def rewrite_squared_soc_rows(model: Model) -> tuple[Model, list[SquaredSocRow]]:
+def rewrite_squared_soc_rows(
+    model: Model, deadline: Optional[Callable[[], bool]] = None
+) -> tuple[Model, list[SquaredSocRow]]:
     """Rewrite squared-form second-order cone rows to their norm form.
 
     Returns ``(model, rows)``. When no row matches (see the module docstring), the
@@ -295,18 +302,25 @@ def rewrite_squared_soc_rows(model: Model) -> tuple[Model, list[SquaredSocRow]]:
     (otherwise ``q <= k c**2`` is a convex quadratic as written) and the
     rewritten row is proven convex.
 
+    Two bounds (#1456): the deterministic :data:`_SOC_SCAN_WORK_BUDGET`, and
+    ``deadline``, the solve's ``PresolveDeadline.abandon_hook`` -- checked once
+    per row, the outer loop. When it fires the pass discards everything it
+    rewrote and returns ``(model, [])``, the "found nothing" outcome.
+
     The curvature walks recurse one frame per node, so they run with the same
     size-scaled recursion headroom as :func:`~discopt._relax.convexity.classify_model`.
     """
     from .convexity.rules import _recursion_headroom_need, _run_with_deep_recursion
 
     return _run_with_deep_recursion(
-        lambda: _rewrite_squared_soc_rows_inner(model),
+        lambda: _rewrite_squared_soc_rows_inner(model, deadline),
         depth_need=_recursion_headroom_need(model),
     )
 
 
-def _rewrite_squared_soc_rows_inner(model: Model) -> tuple[Model, list[SquaredSocRow]]:
+def _rewrite_squared_soc_rows_inner(
+    model: Model, deadline: Optional[Callable[[], bool]]
+) -> tuple[Model, list[SquaredSocRow]]:
     from .convexity import classify_constraint
     from .objective_epigraph import WorkCounter
     from .problem_classifier import _extract_linear_coefficients
@@ -317,6 +331,8 @@ def _rewrite_squared_soc_rows_inner(model: Model) -> tuple[Model, list[SquaredSo
     n_total = _total_scalar_variables(model)
     work = WorkCounter(_SOC_SCAN_WORK_BUDGET)
     for i, c in enumerate(model._constraints):
+        if deadline is not None and deadline():
+            return model, []  # time limit spent: abandon wholesale
         if not isinstance(c, Constraint):
             continue
         try:
@@ -366,9 +382,11 @@ def _rewrite_squared_soc_rows_inner(model: Model) -> tuple[Model, list[SquaredSo
     return new_model, rows
 
 
-def rewrite_squared_soc(model: Model) -> tuple[Model, bool]:
+def rewrite_squared_soc(
+    model: Model, deadline: Optional[Callable[[], bool]] = None
+) -> tuple[Model, bool]:
     """:func:`rewrite_squared_soc_rows`, returning ``(model, changed)``."""
-    new_model, rows = rewrite_squared_soc_rows(model)
+    new_model, rows = rewrite_squared_soc_rows(model, deadline)
     return new_model, bool(rows)
 
 

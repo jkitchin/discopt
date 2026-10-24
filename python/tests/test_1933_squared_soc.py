@@ -435,3 +435,60 @@ def test_exhausted_work_budget_stops_the_scan(monkeypatch):
     assert rows == [] and new is m
     monkeypatch.setattr(soc, "_SOC_SCAN_WORK_BUDGET", 10_000)
     assert len(soc.rewrite_squared_soc_rows(m)[1]) == 1
+
+
+def _two_cones() -> dm.Model:
+    m = dm.Model("two_cones")
+    x = m.continuous("x", shape=(2,), lb=-1, ub=1)
+    s = m.continuous("s", shape=(2,), lb=0, ub=10)
+    m.subject_to(x[0] ** 2 + 0.09 <= s[0] ** 2, name="cone0")
+    m.subject_to(x[1] ** 2 + 0.09 <= s[1] ** 2, name="cone1")
+    m.minimize(x[0] + x[1] + s[0] + s[1])
+    return m
+
+
+def test_spent_time_limit_abandons_the_pass_wholesale():
+    """#1456 abandon hook: checked per row; when it fires, everything rewritten
+    so far is discarded and the model comes back unchanged."""
+    m = _two_cones()
+    assert len(rewrite_squared_soc_rows(m)[1]) == 2  # the control
+
+    new, rows = rewrite_squared_soc_rows(m, deadline=lambda: True)
+    assert rows == [] and new is m
+
+    # Fires only after the first row was rewritten: still nothing is kept.
+    calls = {"n": 0}
+
+    def expires_after_first_row() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 1
+
+    new, rows = rewrite_squared_soc_rows(m, deadline=expires_after_first_row)
+    assert calls["n"] == 2, "the hook must be read once per row, in the outer loop"
+    assert rows == [] and new is m
+
+
+def test_solve_hands_the_pass_its_presolve_gate(monkeypatch):
+    """The solve gates the pass at entry and passes the per-row abandon hook."""
+    import discopt._relax.soc_rewrite as soc
+
+    seen = []
+    real = soc.rewrite_squared_soc_rows
+
+    def spy(model, deadline=None):
+        seen.append(deadline)
+        return real(model, deadline)
+
+    monkeypatch.setattr(soc, "rewrite_squared_soc_rows", spy)
+    r = _issue_model("squared").solve(time_limit=30)
+    assert r.status == "optimal"
+    assert seen and callable(seen[0]) and seen[0]() is False
+
+
+def test_vector_shaped_row_is_declined():
+    m = dm.Model()
+    x = m.continuous("x", shape=(3,), lb=-1, ub=1)
+    s = m.continuous("s", lb=0, ub=10)
+    m.subject_to(x**2 <= s**2)
+    m.minimize(s)
+    assert rewrite_squared_soc_rows(m)[1] == []

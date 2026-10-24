@@ -13899,10 +13899,21 @@ def solve_model(
     # are recorded so ``Model.solve`` reports constraint duals for the rows the
     # caller wrote (``convert_squared_soc_duals``).
     # The variables are untouched, so callbacks see the point they always did.
+    #
+    # The #1456 pre-solve gate is constructed here, at the first pass it gates,
+    # rather than at the reformulation block below: this pass runs ahead of the
+    # router and must see ``time_limit`` the same way (entry gate + per-row
+    # abandon hook). See the #1456 note at the reformulation block.
+    from discopt._relax.presolve_deadline import PresolveDeadline
     from discopt._relax.soc_rewrite import record_squared_soc_rows, rewrite_squared_soc_rows
 
+    _presolve_deadline = PresolveDeadline(_deadline_exhausted)
     _soc_caller_model = model
-    model, _soc_rows = rewrite_squared_soc_rows(model)
+    _soc_rows: list = []
+    if _presolve_deadline.afford("squared_soc"):
+        model, _soc_rows = rewrite_squared_soc_rows(
+            model, deadline=_presolve_deadline.abandon_hook("squared_soc")
+        )
     if _soc_rows:
         record_squared_soc_rows(_soc_caller_model, _soc_rows)
         _carry_solve_clocks(_soc_caller_model, model)
@@ -15018,10 +15029,8 @@ def solve_model(
     # it. Declining a pass only ever weakens a still-valid bound.
     # See ``_relax/presolve_deadline.py`` for why this is a clock and not a
     # deterministic work allowance (that design was built and falsified).
-    from discopt._relax.presolve_deadline import PresolveDeadline
-
-    _presolve_deadline = PresolveDeadline(_deadline_exhausted)
-
+    # ``_presolve_deadline`` itself is constructed earlier, at the #1933
+    # squared-SOC pass, the first pass it gates.
     _entropy_ok = _presolve_deadline.afford("canonicalize_entropy")
 
     # --- Objective-defining-equality relaxation (the SUSPECT "objective
