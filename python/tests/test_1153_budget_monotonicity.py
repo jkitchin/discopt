@@ -427,6 +427,15 @@ KNOWN: tuple[tuple[str, str, int, str], ...] = (
         1,
         "split",  # the OA master's share of the caller's budget
     ),
+    (
+        "solvers/_root_presolve.py",
+        "return max(1, int(1000.0 * (deadline - time.perf_counter())))",
+        1,
+        # #1929 ``fbbt_budget_ms``: ALL of the time left before the caller's
+        # deadline, in the Rust FBBT binding's milliseconds. The ``1000.0 *`` is a
+        # unit conversion, not a fraction; the "split" is the whole role-1 budget.
+        "split",
+    ),
 )
 
 _KNOWN_COUNT = {(p, s): n for p, s, n, _ in KNOWN}
