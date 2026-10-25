@@ -11523,7 +11523,61 @@ do. The flag therefore makes the spelling of a model irrelevant, which is what i
 for. It is now **default ON** (`=0` opt-out). The dense-QP cost belongs to the race
 and should be fixed there, for both spellings.
 
-## 85. #1959: the lift race's lift slice ends on the MILP engine's stall (2026-10-25)
+## 85. #1944: the lift race's no-incumbent tie goes to the tighter bound (2026-10-25)
+
+**Problem.** `tln6` hit the time limit at 120 s on pure defaults, although its
+un-lifted model certifies in about 36 s (#1944, after §83). Traced with every race
+slice recorded (count-only probe around `solve_model`): **neither 5 s slice held an
+incumbent**. Both relative gaps were `inf`, §82's tie rule handed the rest of the
+budget to the lift, and the lifted MILP's bound stayed near 6.
+
+**Hypothesis.** Without incumbents the gap cannot rank the arms, but the dual bounds
+can. Both formulations are exact, so each slice's bound is a valid bound on the same
+objective, and the tighter one predicts the arm that closes. Kill criterion: a race
+that reaches the `inf`/`inf` tie where the arm with the looser bound is the one that
+certifies, or where the change loses a certificate.
+
+**Entry experiment.** The race probe ran over 148 instances at 30 s:
+- §82's panel: its 31 synthetic models and its in-repo `ex1263`–`ex1266`, with the
+  MINLPLib copies of its `nvs`/`prob` instances;
+- every MINLPLib `IQP`/`IQCP`/`IQCQP`/`MIQP`/`MIQCP`/`MIQCQP`/`INLP` instance with at
+  most 120 vars/cons;
+- the `MIQCP`/`MIQP`/`MINLP` ones up to 300 vars (no `smallinv`/`ball_mk`/`cvxnonsep`).
+
+51 instances raced. 5 reached the gap comparison, and 2 of those (`tln6`, `tln7`) reached it with
+`inf`/`inf`:
+
+| instance | lift slice bound | un-lifted slice bound | optimum |
+|---|---:|---:|---:|
+| tln6 | 5.7 | 15.2 | 15.3 |
+| tln7 | 2.8 | 14.16 | 15.0 |
+
+On the other 3 (`dense_n18_s1`, `dense_n20_s1`, `conge20`), only the un-lifted slice
+had an incumbent, so the gap already chose it. The un-lifted bound was also the
+tighter one. Not falsified, but the evidence is one family (`tln`). The rule rests on
+the bounds' validity, not on that family.
+
+**Rule (shipped, inside `DISCOPT_IPX_RACE`).** `solver._ipx_continuation_arm`:
+- If either slice has an incumbent, the smaller gap continues (unchanged, tie →
+  lift).
+- If neither has one, the tighter dual bound continues: higher for min, lower for
+  max. Equal or non-finite bounds keep the lift.
+
+The rule changes behaviour only at the `inf`/`inf` tie. Of the 148 probed instances,
+only `tln6` and `tln7` reach it, so every other race takes the same arms as before.
+
+**Measured** (120 s, arms interleaved, `uptime` load < 1):
+
+| tln6 | status | wall | bound |
+|---|---|---:|---:|
+| old rule (3 runs) | time limit | 120.0 / 120.0 / 122.2 s | 15.22 / 15.20 / 15.20 |
+| new rule (3 runs) | **optimal** 15.3 | **57.8 / 56.1 / 56.3 s** (sd 0.9) | 15.3 |
+
+`tln7` still finds no incumbent in 120 s under either rule. Its bound is 14.28 with
+the un-lifted continuation, against 14.16 with the lift continuation at 30 s. That
+instance is a primal-heuristic problem on the un-lifted arm, not a routing one.
+
+## 86. #1959: the lift race's lift slice ends on the MILP engine's stall (2026-10-25)
 
 **The cost, located.** On the #1940 dense integer QPs the race's 5 s lift slice is
 two pieces. The native MILP engine runs first on its #291 stall budget (half of what
