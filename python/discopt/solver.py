@@ -5760,6 +5760,29 @@ def _solve_root_node_multistart(
 _LAZY_REQUEUE_CAP = 100
 
 
+def _lazy_rows_upper_form(cuts, n_vars: int) -> tuple[np.ndarray, np.ndarray]:
+    """Lazy-constraint rows as ``A x <= b`` over the ``n_vars`` original columns.
+
+    ``>=`` rows are negated and ``==`` rows become the two inequalities, so the
+    node LP sees exactly the constraints the callback returned (#1954).
+    """
+    rows: list[np.ndarray] = []
+    rhs: list[float] = []
+    for c in cuts:
+        a = np.asarray(c.coeffs, dtype=np.float64).ravel()
+        if a.shape[0] != n_vars:
+            raise ValueError(f"lazy row has {a.shape[0]} coefficients, model has {n_vars}")
+        if c.sense in ("<=", "=="):
+            rows.append(a)
+            rhs.append(float(c.rhs))
+        if c.sense in (">=", "=="):
+            rows.append(-a)
+            rhs.append(-float(c.rhs))
+        if c.sense not in ("<=", ">=", "=="):
+            raise ValueError(f"lazy row sense {c.sense!r}")
+    return np.vstack(rows), np.asarray(rhs, dtype=np.float64)
+
+
 def _nonrigorous_sentinel_fathom(node_lower_bound: float, node_infeasible: bool) -> bool:
     """Whether a nonconvex node is being fathomed *non-rigorously* (issue #27a).
 
@@ -6320,7 +6343,10 @@ def _invoke_pre_import_callbacks(
                     n_rejected += 1
                 for cut in cuts:
                     coeffs, rhs, sense = cut_result_to_dense(cut, model)
-                    _cut_pool.add(LinearCut(coeffs=coeffs, rhs=rhs, sense=sense))
+                    # protected: a lazy row is part of the model, so it is keyed
+                    # exactly and never purged (#1954); the node LP reads it back
+                    # through ``CutPool.protected_rows``.
+                    _cut_pool.add(LinearCut(coeffs=coeffs, rhs=rhs, sense=sense), protected=True)
                 logger.info(
                     "Lazy constraint callback added %d cut(s) at node %d",
                     len(cuts),
@@ -18031,6 +18057,7 @@ def solve_model(
     _nonrigorous_fathom = False
     #: node id -> how many times `lazy_constraints` requeued it (#1365 cap).
     _lazy_requeues: dict[int, int] = {}
+    _n_lazy_rows_synced = 0  # #1954: lazy rows already handed to the node LP
     # #1611 D-30: the model's verified HiGHS standard form, built on the first
     # failed node of a fully linear model (see ``_linear_node_lp_rescue``).
     # ``False`` = not applicable (nonlinear model, or a lifted variable layout).
@@ -21982,6 +22009,15 @@ def solve_model(
                 requeue_mask=_requeue_mask,
                 exclusion_mask=_exclusion_mask,
             )
+            # #1954: hand the stored lazy rows to the node McCormick LP. Before
+            # this they reached only the node NLP, so the LP kept returning the
+            # point a row cuts off and a correct separator requeued the node to
+            # the cap. Protected rows are never purged, so the count only grows.
+            if _mc_lp_relaxer is not None and _cut_pool is not None:
+                _lazy_rows = _cut_pool.protected_rows()
+                if len(_lazy_rows) != _n_lazy_rows_synced:
+                    _mc_lp_relaxer.set_model_rows(*_lazy_rows_upper_form(_lazy_rows, n_vars))
+                    _n_lazy_rows_synced = len(_lazy_rows)
             if _requeue_mask.any():
                 for _rq_idx in np.flatnonzero(_requeue_mask):
                     _nid = int(result_ids[_rq_idx])
@@ -21990,8 +22026,9 @@ def solve_model(
                         logger.warning(
                             "Node %d was requeued %d times by lazy_constraints without "
                             "the cuts separating its relaxation point; excluding it "
-                            "instead. A cut that does not cut off the point it was "
-                            "returned for cannot make progress.",
+                            "instead and withdrawing the certificate over its region. "
+                            "A cut that does not cut off the point it was returned "
+                            "for cannot make progress.",
                             _nid,
                             _LAZY_REQUEUE_CAP,
                         )
@@ -21999,6 +22036,24 @@ def solve_model(
                         result_lbs[_rq_idx] = _INFEASIBILITY_SENTINEL
                         _exclusion_mask[_rq_idx] = True
                         _n_cb_rejected += 1
+                        # #1954: a lazy cut rejects one POINT; it proves nothing
+                        # about the rest of the box (#1365). Excluding the node at
+                        # the cap is therefore an unproven fathom, handled exactly
+                        # like the batch sweep's non-rigorous sentinels: decertify,
+                        # and keep the node's POP-TIME bound (proved at its parent,
+                        # still in the pool -- import has not run) as a floor of
+                        # the reported global bound, so certification can only be
+                        # re-earned by the floor-inclusive gap closing. Before this
+                        # the region silently left the bound and a correct
+                        # separator certified -2.0 on a model whose optimum is -2.9.
+                        _gap_certified = False
+                        _cap_pop_lb = float(
+                            np.asarray(
+                                tree.node_lower_bounds(np.asarray([_nid], dtype=np.int64)),
+                                dtype=np.float64,
+                            )[0]
+                        )
+                        _taint_floor_internal = min(_taint_floor_internal, _cap_pop_lb)
             # #748: a callback rejection sentinels a FEASIBLE node without proving
             # its region empty of acceptable points — a non-rigorous fathom. It is
             # applied here, AFTER the batch's own non-rigorous-sentinel sweep
