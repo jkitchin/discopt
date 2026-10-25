@@ -417,14 +417,45 @@ pub(super) fn optimal_fails_original_audit(
     l: &[f64],
     u: &[f64],
 ) -> bool {
-    if sol.status != LpStatus::Optimal || sol.x.len() != n {
+    sol.status == LpStatus::Optimal && point_fails_original_audit(&sol.x, cols, m, n, b, l, u)
+}
+
+/// #1945: [`optimal_fails_original_audit`] on a bare point `x` already mapped to the
+/// ORIGINAL space, for a caller that keeps its solution in solve coordinates
+/// ([`super::scaled_problem::ScaledProblem::verify`]) and unscales only a copy.
+pub(super) fn point_fails_original_audit(
+    x: &[f64],
+    cols: &SparseCols,
+    m: usize,
+    n: usize,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+) -> bool {
+    if x.len() != n {
         return false;
     }
-    let fails = audit_feasibility(cols, m, n, b, l, u, &sol.x) != Feasibility::Ok;
+    let fails = audit_feasibility(cols, m, n, b, l, u, x) != Feasibility::Ok;
     if fails {
         crate::profile::incr(crate::profile::Ctr::ScaledOptimalOriginalAuditFail);
     }
     fails
+}
+
+/// The final audit's feasibility tolerance: relative to `1 + |bound|` on a finite
+/// bound, and to `1 + |b_i|` on a row (see [`audit_feasibility`]).
+pub(crate) const AUDIT_FEAS: f64 = 1e-6;
+
+/// #1945: whether every `x[j]` lies in `[l[j], u[j]]` under exactly the bound test
+/// of [`audit_feasibility`] (relative [`AUDIT_FEAS`] tolerance, a side at or past
+/// the ±INF sentinel skipped), with no counter side effects. Shared so the MILP
+/// driver's incumbent acceptance and the LP audit cannot disagree on what "within
+/// bounds" means. Compares the first `min(x, l, u)` entries.
+pub(crate) fn bounds_hold(l: &[f64], u: &[f64], x: &[f64]) -> bool {
+    x.iter().zip(l).zip(u).all(|((&xj, &lj), &uj)| {
+        (lj <= -INF || xj >= lj - AUDIT_FEAS * (1.0 + lj.abs().min(INF)))
+            && (uj >= INF || xj <= uj + AUDIT_FEAS * (1.0 + uj.abs().min(INF)))
+    })
 }
 
 /// #1935: the verdict for a scaled `Optimal` the original LP refuses, after the
@@ -460,7 +491,7 @@ fn audit_feasibility(
     u: &[f64],
     x: &[f64],
 ) -> Feasibility {
-    const FEAS: f64 = 1e-6;
+    const FEAS: f64 = AUDIT_FEAS;
     for j in 0..n {
         // A bound at or past the ±INF sentinel is NO bound: the whole engine reads
         // `u[j] >= INF` / `l[j] <= -INF` as "unbounded on that side" (ratio tests,
