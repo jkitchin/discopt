@@ -24,7 +24,7 @@ such run is printed as ``KILL`` and fails the panel.
 slower (issue #1959: CI runs about 3x slower, so ``--slice 1.67``).
 
 Usage: ``python -u scripts/panel_1959_race_stall_exit.py [--time-limit 30] [--reps 2]
-[--slice 5] [--only a,b]``. Prints per-solve progress and an executed-check count;
+[--slice 5] [--only a,b] [--nl a.nl,b.nl]``. Prints per-solve progress and an executed-check count;
 exits non-zero on any failure or when nothing was checked (CLAUDE.md §6).
 """
 
@@ -112,7 +112,15 @@ def main():
     ap.add_argument("--slice", type=float, default=None, help="race slice length, seconds")
     ap.add_argument("--only", default=None, help="comma-separated instance names")
     ap.add_argument("--out", default=None, help="JSON-lines file, one line per solve")
+    ap.add_argument(
+        "--nl",
+        default=None,
+        help="comma-separated extra .nl files (e.g. MINLPLib tln6/tln7) added to the panel",
+    )
     args = ap.parse_args()
+    for path in args.nl.split(",") if args.nl else []:
+        nm = os.path.splitext(os.path.basename(path))[0]
+        P.INSTANCES[nm] = ((lambda path=path: (P.from_nl(path),) * 2), False)
     tl = args.time_limit
     if args.slice is not None:
         scale = args.slice / solver_mod._IPX_RACE_SLICE_S
