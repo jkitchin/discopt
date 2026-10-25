@@ -2416,6 +2416,13 @@ def _try_native_spatial_kernel(
     if _kernel_pseudocost_branching_enabled():
         solve_kwargs["pseudocost_branching"] = True
         solve_kwargs["pseudocost_reliability"] = _kernel_pseudocost_reliability()
+    # #1935: start each child's node LP from its parent's basis (default OFF);
+    # mode 2 also repairs a dual-infeasible inherited basis by bound flips.
+    _warm_mode = _native_warm_start_mode()
+    if _warm_mode >= 1:
+        solve_kwargs["warm_start_children"] = True
+    if _warm_mode >= 2:
+        solve_kwargs["warm_flip_boxed"] = True
     if _bound_reserve > 0.0:
         solve_kwargs["bound_time_extension_s"] = float(_bound_reserve)
     # #917: hand the kernel the caller's withheld #844 reserve so it can reclaim
@@ -2750,6 +2757,13 @@ def _try_native_spatial_kernel(
     )
     # #1913: integer branches chosen by pseudocost; 0 unless DISCOPT_KERNEL_PSEUDOCOST.
     _native_stats["tree/pseudocost_picks"] = float(int(res.get("n_pseudocost_picks") or 0))
+    # #1935: the parent-basis warm start (``DISCOPT_NATIVE_WARM_START``). The warm
+    # count is 0 with the flag off, which tells "never engaged" from "engaged and
+    # did not help"; pivots and seconds are the node-LP effort it is meant to cut.
+    _native_stats["tree/warm_starts"] = float(int(res.get("n_warm_starts") or 0))
+    _native_stats["tree/warm_shape_mismatch"] = float(int(res.get("n_warm_shape_mismatch") or 0))
+    _native_stats["tree/node_pivots"] = float(int(res.get("n_node_pivots") or 0))
+    _native_stats["tree/node_lp_s"] = float(res.get("node_lp_s") or 0.0)
 
     # #1236: root-node certification metrics, mapped out of the kernel's internal
     # minimize convention with the same ``sign * (value + offset)`` the incumbent
@@ -10829,6 +10843,37 @@ def _kernel_pseudocost_reliability() -> int:
     23 s (0: 30 s, 4: 30.5 s) and genpooling_meyer04's bound at 747,372 (0: 688,825);
     4 certified nvs19 at 60 s but slowed st_e31 back to 30 s."""
     return max(0, int(os.environ.get("DISCOPT_KERNEL_PSEUDOCOST_RELIABILITY", "1") or 0))
+
+
+def _native_warm_start_mode() -> int:
+    """#1935 experiment: ``DISCOPT_NATIVE_WARM_START`` for the native spatial kernel.
+
+    Starts each child's node LP from its parent's optimal basis with the dual
+    simplex (``SpatialTreeConfig::warm_start_children``) instead of solving it
+    from scratch. #1935 measured HiGHS warm-started from the parent against this
+    kernel's cold solve, so its 6.27 -> 0.81 ms median node-LP time does not say
+    how much is the engine and how much the warm start; this flag measures the
+    warm start on the in-house simplex.
+
+    Modes: ``0`` (default) cold; ``1`` warm start; ``2`` warm start, and a
+    dual-infeasible inherited basis is repaired by moving boxed nonbasic columns
+    to their other bound (``SimplexOptions::warm_flip_boxed``) instead of being
+    handed to the primal simplex. Mode 2 exists because mode 1 measured on
+    ``nvs13``: of 600 inherited bases the dual simplex refused 389 as
+    dual-infeasible and 52 as singular. Anything else raises ``ValueError``.
+
+    **Default OFF.** Bound-changing: a different start can end on
+    a different optimal vertex of a degenerate node LP, so node counts and bounds
+    move. Soundness does not depend on the start: the bound is still the
+    Neumaier-Shcherbina bound on the returned duals and an infeasible verdict
+    still needs a verified Farkas ray. What would make it the default: the
+    CLAUDE.md §5 corpus panel, cert-clean and net-positive. Read at call time,
+    like ``_scale_free_branching_enabled``.
+    """
+    raw = os.environ.get("DISCOPT_NATIVE_WARM_START", "0").strip() or "0"
+    if raw not in ("0", "1", "2"):
+        raise ValueError(f"DISCOPT_NATIVE_WARM_START must be 0, 1 or 2, got {raw!r}")
+    return int(raw)
 
 
 def _p3_force_cut_path_enabled() -> bool:

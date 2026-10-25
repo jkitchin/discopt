@@ -556,6 +556,18 @@ counters!(
     // #1510: the primal warm entry (`run_warm`) refusing the same malformed start.
     PrimalWarmRejectInfBound,
     DualPrepAccept,
+    // #1935 `SimplexOptions::warm_flip_boxed`: nonbasic boxed columns moved to their
+    // other bound to make a dual-infeasible warm start dual-feasible, and the starts
+    // accepted only because of such a move (a subset of `DualPrepAccept`). Zero with
+    // the option off; the pair says whether the repair engaged (CLAUDE.md §6).
+    DualPrepFlipColumns,
+    DualPrepFlipAccepts,
+    // #1935: `Optimal` solves of an equilibrated LP whose unscaled point fails the
+    // audit against the ORIGINAL LP, and how many of those the unscaled retry then
+    // decided. The rest return `Numerical`. A false `Optimal` the scaled audit
+    // let through is exactly what the first counter counts (CLAUDE.md §6).
+    ScaledOptimalOriginalAuditFail,
+    ScaledOptimalUnscaledRetryDecided,
     ExpandResetArmed,
     ExpandResetRetries,
     ExpandResetRescues,

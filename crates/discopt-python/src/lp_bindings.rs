@@ -353,6 +353,7 @@ pub fn solve_lp_py<'py>(
         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
         dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
         cold_dual_start: false,
+        warm_flip_boxed: false,
     };
     let sol = simplex_solve_lp(&lp, b.as_slice()?, &opts);
     let status = match sol.status {
@@ -492,6 +493,7 @@ pub fn solve_lp_warm_py<'py>(
         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
         dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
         cold_dual_start: false,
+        warm_flip_boxed: false,
     };
     let b_slice = b.as_slice()?;
 
@@ -545,7 +547,7 @@ pub fn solve_lp_warm_py<'py>(
 #[pyfunction]
 #[pyo3(signature = (c, m, n, col_ptr, row_idx, vals, b, lb, ub,
                     start_col_status=None, start_basic_vars=None, tol=1e-9, max_iter=100_000,
-                    time_limit_s=None))]
+                    time_limit_s=None, warm_flip_boxed=false))]
 #[allow(clippy::too_many_arguments)]
 pub fn solve_lp_warm_csc_py<'py>(
     py: Python<'py>,
@@ -563,6 +565,7 @@ pub fn solve_lp_warm_csc_py<'py>(
     tol: f64,
     max_iter: usize,
     time_limit_s: Option<f64>,
+    warm_flip_boxed: bool,
 ) -> PyResult<(
     String,
     Bound<'py, PyArray1<f64>>,
@@ -612,6 +615,8 @@ pub fn solve_lp_warm_csc_py<'py>(
         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
         dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
         cold_dual_start: false,
+        // #1935: see `SimplexOptions::warm_flip_boxed` (default off).
+        warm_flip_boxed,
     };
     let start = match (start_col_status, start_basic_vars) {
         (Some(cs), Some(bv)) => build_extended_basis(cs.as_slice()?, bv.as_slice()?, n, m),
@@ -749,6 +754,7 @@ pub fn solve_lp_batch_py<'py>(
         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
         dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
         cold_dual_start: false,
+        warm_flip_boxed: false,
     };
     // The solve touches no Python objects, so release the GIL to let the core's
     // rayon workers run the batch concurrently without contending on it.
@@ -1647,6 +1653,7 @@ fn run_milp_hooked<'py>(
             dual_stall_patience: SimplexOptions::default().dual_stall_patience,
             dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
             cold_dual_start: false,
+            warm_flip_boxed: false,
         },
     };
     // Wrap an attached Python debugger (if any) as a core hook. It is created

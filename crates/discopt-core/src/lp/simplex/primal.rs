@@ -44,6 +44,18 @@ pub fn solve_lp(lp: &LpView<'_>, b: &[f64], opts: &SimplexOptions) -> LpSolve {
             // ill-scaled LPs where the certificate matters most).
             scaled.unscale_dual(&mut sol.dual);
             scaled.unscale_ray(&mut sol.ray);
+            // #1935: the scaled audit can pass a point the original LP refuses.
+            if sol.status == LpStatus::Optimal {
+                let cols = SparseCols::from_dense(lp.a, lp.m, lp.n);
+                if optimal_fails_original_audit(&sol, &cols, lp.m, lp.n, b, lp.l, lp.u) {
+                    let alt = solve_lp_scaled(lp, b, opts);
+                    return if retry_decided(&alt) {
+                        alt
+                    } else {
+                        downgrade_false_optimal(sol)
+                    };
+                }
+            }
             sol
         }
         None => solve_lp_scaled(lp, b, opts),
@@ -265,6 +277,8 @@ pub fn solve_lp_cols_scaled(
 ) -> LpSolve {
     match Scaling::from_sparse(&cols, m, n) {
         Some(scaling) => {
+            // #1935: the original matrix, kept for the post-solve audit below.
+            let original = cols.clone();
             scaling.scale_cols(&mut cols);
             let cs = scaling.scale_c(c);
             let ls = scaling.scale_lower(l);
@@ -277,6 +291,15 @@ pub fn solve_lp_cols_scaled(
             scaling.unscale_x(&mut sol.x);
             scaling.unscale_dual(&mut sol.dual);
             scaling.unscale_ray(&mut sol.ray);
+            // #1935: the scaled audit can pass a point the original LP refuses.
+            if optimal_fails_original_audit(&sol, &original, m, n, b, l, u) {
+                let alt = solve_lp_cols(original, m, n, c, l, u, b, opts);
+                return if retry_decided(&alt) {
+                    alt
+                } else {
+                    downgrade_false_optimal(sol)
+                };
+            }
             sol
         }
         // Well-conditioned: solve unscaled — bit-identical to `solve_lp`'s `None`
@@ -372,6 +395,60 @@ fn record_excursion(ratio: f64) {
     } else {
         crate::profile::Ctr::AuditExcursionGe1e6x
     });
+}
+
+/// #1935: re-check an `Optimal` solve of the EQUILIBRATED LP against the ORIGINAL
+/// one, after its point has been unscaled.
+///
+/// The final audit in `assemble` runs on the scaled system, with a tolerance of
+/// `1e-6 * (1 + |bound|)` in scaled units. Equilibration divides column `j`'s value
+/// and bounds by its factor `s_j`, so on a column scaled by `s_j` the audit admits
+/// about `s_j * 1e-6` in original units. A column that mixes ~1e-14 entries with
+/// O(1) ones is scaled by ~1e6: on a captured MINLPLib `pooling_adhya1stp` node LP
+/// the engine returned `Optimal` with a basic column 0.0179 below its lower bound,
+/// on an LP that is infeasible (`scaled_optimal_is_audited_against_the_original_lp`).
+/// `cols`, `b`, `l`, `u` are the ORIGINAL data. Returns `true` when the point fails.
+pub(super) fn optimal_fails_original_audit(
+    sol: &LpSolve,
+    cols: &SparseCols,
+    m: usize,
+    n: usize,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+) -> bool {
+    if sol.status != LpStatus::Optimal || sol.x.len() != n {
+        return false;
+    }
+    let fails = audit_feasibility(cols, m, n, b, l, u, &sol.x) != Feasibility::Ok;
+    if fails {
+        crate::profile::incr(crate::profile::Ctr::ScaledOptimalOriginalAuditFail);
+    }
+    fails
+}
+
+/// #1935: the verdict for a scaled `Optimal` the original LP refuses, after the
+/// unscaled retry also failed to decide: `Numerical`, with no certificate (the
+/// [`LpSolve::dual`] contract is "empty for every other status"). The caller then
+/// falls back or branches; it never certifies the point.
+pub(super) fn downgrade_false_optimal(mut sol: LpSolve) -> LpSolve {
+    sol.status = LpStatus::Numerical;
+    sol.dual.clear();
+    sol.ray.clear();
+    sol
+}
+
+/// #1935: whether an unscaled retry of a refused scaled `Optimal` decided the LP.
+/// Its own audit ran in original units, so its `Optimal` holds on the original LP.
+pub(super) fn retry_decided(alt: &LpSolve) -> bool {
+    let decided = matches!(
+        alt.status,
+        LpStatus::Optimal | LpStatus::Infeasible | LpStatus::Unbounded
+    );
+    if decided {
+        crate::profile::incr(crate::profile::Ctr::ScaledOptimalUnscaledRetryDecided);
+    }
+    decided
 }
 
 fn audit_feasibility(
