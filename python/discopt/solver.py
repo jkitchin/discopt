@@ -1207,6 +1207,7 @@ def _native_kernel_feature_safe(
     node_callback,
     kwargs,
     search_levers=(),
+    cut_callback=None,
 ) -> bool:
     """Whether the native spatial kernel may take over this solve (#789).
 
@@ -1226,6 +1227,13 @@ def _native_kernel_feature_safe(
     already-trusted default path.
     """
     if incumbent_callback is not None or node_callback is not None:
+        return False
+    # The kernel has no cut hook either: a ``cut_callback`` reaching it was simply
+    # never called (0 calls, silently) on every scalar model on the spatial path --
+    # the #1535 defect, which survived on this route because its regression test's
+    # model used an array variable and so never reached the kernel until
+    # ``DISCOPT_NATIVE_KERNEL_VECTOR_VARS``.
+    if cut_callback is not None:
         return False
     if kwargs.get("iteration_callback") is not None:
         return False
@@ -7885,11 +7893,12 @@ def _warn_native_kernel_bypassed(options: list[str]) -> None:
     The native Rust kernel (default ON) runs its own fixed best-first search and calls
     no node callback, so ``_native_kernel_feature_safe`` routes a solve that sets
     ``strategy``, ``rlt``, ``presolve=False``,
-    ``in_tree_presolve_stride``, ``obbt_at_root=False`` or ``node_callback`` to the
-    Python tree, which honours them. That is sound -- the Python tree is the trusted
-    path -- but it changes the engine, its node counts, its gap-tolerance semantics
-    (the kernel stops absolutely at ``gap_tolerance <= 1e-4``; the Python tree uses
-    absolute-OR-relative) and usually its wall time, and the caller was told nothing.
+    ``in_tree_presolve_stride``, ``obbt_at_root=False``, ``node_callback`` or
+    ``cut_callback`` to the Python tree, which honours them. That is sound -- the
+    Python tree is the trusted path -- but it changes the engine, its node counts,
+    its gap-tolerance semantics (the kernel stops absolutely at
+    ``gap_tolerance <= 1e-4``; the Python tree uses absolute-OR-relative) and
+    usually its wall time, and the caller was told nothing.
     Silent when the kernel is opted out (``DISCOPT_NATIVE_SPATIAL_KERNEL=0``), since
     then nothing moved.
     """
@@ -17649,7 +17658,9 @@ def solve_model(
         kwargs=kwargs,
     )
     _warn_native_kernel_bypassed(
-        _native_search_levers + (["node_callback"] if node_callback is not None else [])
+        _native_search_levers
+        + (["node_callback"] if node_callback is not None else [])
+        + (["cut_callback"] if cut_callback is not None else [])
     )
     if not _native_budget_spent and _native_kernel_feature_safe(
         mccormick_bounds=mccormick_bounds,
@@ -17659,6 +17670,7 @@ def solve_model(
         node_callback=node_callback,
         kwargs=kwargs,
         search_levers=_native_search_levers,
+        cut_callback=cut_callback,
     ):
         _native_result = _try_native_spatial_kernel(
             model,

@@ -379,6 +379,9 @@ def test_row_filter_counter_moves_when_the_branch_opens(monkeypatch):
 
     monkeypatch.setattr(MilpRelaxationModel, "solve", _uncertified_once)
     monkeypatch.setenv(_FLAG, "1")
+    # The filter lives in the Python tree's node LP; keep this array model off the
+    # native kernel, which has no such LP to doctor (DISCOPT_NATIVE_KERNEL_VECTOR_VARS).
+    monkeypatch.setenv("DISCOPT_NATIVE_KERNEL_VECTOR_VARS", "0")
 
     m = dm.Model("ctl")
     x = m.continuous("x", shape=(2,), lb=0, ub=1)
