@@ -6,7 +6,7 @@ and the bilinear, square and #707 multilinear passes never fired on a model
 written with array variables. Recognising them is bound-changing (CLAUDE.md §5),
 so it sits behind ``DISCOPT_INTEGER_PRODUCT_INDEXED`` (default ON since 2026-10-25,
 when an array model was shown to take exactly its scalar twin's path; see the flag's
-docstring and performance-plan §83).
+docstring and performance-plan §84).
 
 Covered here: the default recognises indexed entries and ``=0`` is the legacy
 behaviour;
@@ -53,7 +53,7 @@ def test_opt_out_keeps_legacy_behaviour(monkeypatch):
 
 
 def test_default_is_on_with_an_opt_out(monkeypatch):
-    """Graduated 2026-10-25 (performance-plan §83): an array model now takes its
+    """Graduated 2026-10-25 (performance-plan §84): an array model now takes its
     scalar twin's path. ``=0`` keeps the legacy blindness reachable for A/B."""
     monkeypatch.delenv(FLAG, raising=False)
     m, x = _issue_model()

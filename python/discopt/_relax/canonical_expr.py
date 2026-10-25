@@ -221,6 +221,9 @@ class _Canonicalizer:
         self._distribute_max = (
             int(_tun.distribute_affine_products_max) if _tun.distribute_affine_products else 0
         )
+        # Bare bilinear products ``x_i * x_j`` the model has without distribution,
+        # as ``frozenset({key_i, key_j})``; filled by :func:`canonicalize`.
+        self._existing_pairs: frozenset = frozenset()
 
     # -- interning ---------------------------------------------------------- #
     def _mk(self, kind: str, key: tuple, children: tuple[CNode, ...], payload: Any) -> CNode:
@@ -445,7 +448,8 @@ class _Canonicalizer:
 
         ``None`` (keep the product) unless both factors are affine in bare
         variables, their supports are disjoint, at least one has more than one
-        part, and the pair count is within the cap. Value-identical either way;
+        part, the pair count is within the cap, and at least one pair is already
+        a product elsewhere in the model. Value-identical either way;
         why the distributed form never relaxes looser is in
         ``SolverTuning.distribute_affine_products`` (#1944).
         """
@@ -459,6 +463,14 @@ class _Canonicalizer:
         if {v.key for _, v in ta} & {v.key for _, v in tb}:
             return None
         if len(ta) * len(tb) > self._distribute_max:
+            return None
+        # Distribute only when at least one pair is a product the model already
+        # has. The gain is column sharing; without it the pairs are new columns.
+        # Measured on tanksize (#1944): 38 new pairs, none shared; the root moved
+        # 0.8382 -> 0.8419 and the kernel tree doubled (19,039 -> 37,709 nodes).
+        if not any(
+            frozenset((xi.key, yj.key)) in self._existing_pairs for _, xi in ta for _, yj in tb
+        ):
             return None
         terms: list[tuple[float, CNode]] = []
         for ai, xi in ta:
@@ -845,6 +857,28 @@ class CanonicalDAG:
         return tuple(self._intern.values())
 
 
+def _walk_model(
+    canon: "_Canonicalizer", model: Model
+) -> tuple[Optional[CNode], list[CNode], list[int], list[Expression]]:
+    """Canonicalize the objective and every scalar constraint row with ``canon``."""
+    obj_node: Optional[CNode] = None
+    if model._objective is not None:
+        obj_node = canon.canon(model._objective.expression)
+
+    con_nodes: list[CNode] = []
+    con_index: list[int] = []
+    con_exprs: list[Expression] = []
+    for i, c in enumerate(model._constraints):
+        rows = scalar_elements(c.body)
+        if rows is None:
+            rows = [c.body]  # not statically scalarizable — unchanged behaviour
+        for body in rows:
+            con_nodes.append(canon.canon(body))
+            con_index.append(i)
+            con_exprs.append(body)
+    return obj_node, con_nodes, con_index, con_exprs
+
+
 def canonicalize(model: Model, abort_deadline: Optional[float] = None) -> CanonicalDAG:
     """Hash-cons ``model``'s objective + constraint bodies into a canonical DAG.
 
@@ -866,21 +900,21 @@ def canonicalize(model: Model, abort_deadline: Optional[float] = None) -> Canoni
     relaxation builder's own polls.
     """
     canon = _Canonicalizer(model, abort_deadline=abort_deadline)
-    obj_node: Optional[CNode] = None
-    if model._objective is not None:
-        obj_node = canon.canon(model._objective.expression)
-
-    con_nodes: list[CNode] = []
-    con_index: list[int] = []
-    con_exprs: list[Expression] = []
-    for i, c in enumerate(model._constraints):
-        rows = scalar_elements(c.body)
-        if rows is None:
-            rows = [c.body]  # not statically scalarizable — unchanged behaviour
-        for body in rows:
-            con_nodes.append(canon.canon(body))
-            con_index.append(i)
-            con_exprs.append(body)
+    if canon._distribute_max:
+        # #1944: distribution pays only where a pair lands on a product the model
+        # already has, so first find those products with distribution off.
+        pre = _Canonicalizer(model, abort_deadline=abort_deadline)
+        pre._distribute_max = 0
+        _walk_model(pre, model)
+        canon._existing_pairs = frozenset(
+            frozenset((node.children[0].key, node.children[1].key))
+            for node in pre._intern.values()
+            if node.kind == "prod"
+            and len(node.children) == 2
+            and node.payload[0] == (1.0, 1.0)
+            and all(ch.kind == "var" for ch in node.children)
+        )
+    obj_node, con_nodes, con_index, con_exprs = _walk_model(canon, model)
 
     return CanonicalDAG(
         model=model,

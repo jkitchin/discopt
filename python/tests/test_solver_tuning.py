@@ -43,9 +43,9 @@ def test_defaults_match_legacy_env_defaults():
     assert t.lp_cold_dual_start is False
     assert t.native_nlp_primal is False
     assert t.rlt is False
-    assert t.rlt_lineq is False
-    assert t.rlt_lineq_max == 4096
-    assert t.rlt_ineq is False
+    assert t.rlt_lineq is True
+    assert t.rlt_lineq_max == 0
+    assert t.rlt_ineq is True
     assert t.distribute_affine_products is False
     assert t.distribute_affine_products_max == 64
     # lifted_fbbt was deprecated/removed in #581 (graduated-gate net-negative).
@@ -79,9 +79,9 @@ def test_defaults_match_legacy_env_defaults():
         ("DISCOPT_ILS_SOLVE_CAP", "5", "ils_solve_cap", 5),
         ("DISCOPT_ILS_SOLVE_CAP", "0", "ils_solve_cap", 0),  # escape hatch = uncapped
         ("DISCOPT_RLT_QUAD_MAX", "64", "rlt_quad_max", 64),
-        ("DISCOPT_RLT_LINEQ", "1", "rlt_lineq", True),
+        ("DISCOPT_RLT_LINEQ", "0", "rlt_lineq", False),
         ("DISCOPT_RLT_LINEQ_MAX", "32", "rlt_lineq_max", 32),
-        ("DISCOPT_RLT_INEQ", "1", "rlt_ineq", True),
+        ("DISCOPT_RLT_INEQ", "0", "rlt_ineq", False),
         ("DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS", "1", "distribute_affine_products", True),
         ("DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS_MAX", "16", "distribute_affine_products_max", 16),
         ("DISCOPT_TRILINEAR", "nested", "trilinear_nested", True),

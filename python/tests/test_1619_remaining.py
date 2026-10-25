@@ -204,6 +204,9 @@ def test_native_kernel_branching_does_not_depend_on_units(monkeypatch, flag, exp
     units. Measured: 125 / 125 / 107 nodes with the absolute-width rule, 33 / 33 /
     33 scale-free."""
     monkeypatch.setenv("DISCOPT_SCALE_FREE_BRANCHING", flag)
+    # This test needs a tree to branch in. Since #1944 the lineq RLT rows close
+    # Haverly's root (1 node), so they are switched off here.
+    monkeypatch.setenv("DISCOPT_RLT_LINEQ", "0")
     pool = _pooling()
     nodes, objs = [], []
     for unit in (1, 10, 100):

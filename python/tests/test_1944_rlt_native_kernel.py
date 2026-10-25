@@ -101,7 +101,7 @@ def test_distribution_tightens_and_never_crosses(monkeypatch, seed):
     lb = np.array([0, 0, 0, 0, 0, 0], dtype=float)
     ub = np.array([1, 1, 1, 4, 4, 4], dtype=float)
 
-    monkeypatch.delenv("DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS", raising=False)
+    monkeypatch.setenv("DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS", "0")
     off = _lp_bound(build_uniform_relaxation(m, box=(lb, ub)))
     monkeypatch.setenv("DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS", "1")
     on = _lp_bound(build_uniform_relaxation(m, box=(lb, ub)))
@@ -183,17 +183,37 @@ def test_distribution_refuses_overlapping_supports(monkeypatch):
     assert any(len(A) == 2 and len(B) == 2 for _w, A, _ca, B, _cb in rel.bilinear_linform_specs)
 
 
-def test_distribution_respects_the_pair_cap(monkeypatch):
+def _three_by_three(shared: bool):
     m = dm.Model()
     x = [m.continuous(f"x{k}", lb=0.0, ub=1.0) for k in range(3)]
     y = [m.continuous(f"y{k}", lb=0.0, ub=1.0) for k in range(3)]
+    if shared:
+        m.subject_to(x[0] * y[0] <= 0.5)  # the pair x0*y0 exists without distribution
     m.minimize((x[0] + x[1] + x[2]) * (y[0] - y[1] + y[2]))
+    return m
+
+
+def test_distribution_respects_the_pair_cap(monkeypatch):
     monkeypatch.setenv("DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS", "1")
     monkeypatch.setenv("DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS_MAX", "8")  # 9 pairs needed
-    rel = build_uniform_relaxation(m, box=(np.zeros(6), np.ones(6)))
-    assert not rel.bilinear_map
+    rel = build_uniform_relaxation(_three_by_three(True), box=(np.zeros(6), np.ones(6)))
+    assert sorted(rel.bilinear_map) == [(0, 3)]  # only the constraint's own product
     monkeypatch.setenv("DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS_MAX", "9")
-    rel = build_uniform_relaxation(m, box=(np.zeros(6), np.ones(6)))
+    rel = build_uniform_relaxation(_three_by_three(True), box=(np.zeros(6), np.ones(6)))
+    assert len(rel.bilinear_map) == 9
+
+
+def test_distribution_needs_a_pair_the_model_already_has(monkeypatch):
+    """No shared pair, no distribution: the pairs would all be new columns.
+
+    Measured on tanksize (#1944): 38 new pairs and none shared; the root moved
+    0.8382 -> 0.8419 but the kernel tree doubled.
+    """
+    monkeypatch.setenv("DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS", "1")
+    rel = build_uniform_relaxation(_three_by_three(False), box=(np.zeros(6), np.ones(6)))
+    assert not rel.bilinear_map
+    assert any(len(A) == 3 and len(B) == 3 for _w, A, _ca, B, _cb in rel.bilinear_linform_specs)
+    rel = build_uniform_relaxation(_three_by_three(True), box=(np.zeros(6), np.ones(6)))
     assert len(rel.bilinear_map) == 9
 
 
@@ -380,3 +400,33 @@ def test_ineq_kernel_solve_certifies_the_same_optimum(monkeypatch):
         out[flag] = res
     assert abs(out["0"]["incumbent"] - out["1"]["incumbent"]) < 1e-6
     assert out["1"]["bound"] <= out["1"]["incumbent"] + 1e-6
+
+
+@pytest.mark.correctness
+@pytest.mark.parametrize("case", [1, 2, 3])
+def test_default_relaxation_closes_haverly_at_the_root(monkeypatch, case):
+    """Graduation regression (#1944): the default lineq rows close Haverly's root.
+
+    Haverly's q-formulation with the composition rows ``sum_l q_l = 1`` times each
+    flow is the pq-formulation, whose LP closes these instances. Measured before
+    the graduation: 59 / 125 / 67 nodes. The optimum must be unchanged.
+    """
+    import os
+    import sys
+
+    sys.path.insert(
+        0, os.path.join(os.path.dirname(__file__), "..", "..", "discopt_benchmarks", "scripts")
+    )
+    from _pooling import pool18
+
+    out = {}
+    for flag in ("0", "1"):
+        monkeypatch.setenv("DISCOPT_RLT_LINEQ", flag)
+        r = pool18.build_pool(pool18.haverly(case), "q")[0].solve(time_limit=60)
+        assert r.status == "optimal" and r.gap_certified, (flag, r.status)
+        assert r.algorithm_route.startswith("native-spatial"), r.algorithm_route
+        out[flag] = r
+    assert out["1"].node_count == 1, out["1"].node_count
+    assert out["0"].node_count > 1, out["0"].node_count
+    ref = out["0"].objective
+    assert abs(out["1"].objective - ref) <= 1e-6 * (1.0 + abs(ref))

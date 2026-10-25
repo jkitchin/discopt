@@ -90,7 +90,7 @@ def _indexed_refs_enabled() -> bool:
     Why it is the default: least surprise. Without it the solver treats a model
     differently depending only on whether it was spelled with an array or with
     scalars. With it, an array model takes exactly its scalar twin's path, which
-    is measured, not assumed (performance-plan §83): over 23 twin pairs under the
+    is measured, not assumed (performance-plan §84): over 23 twin pairs under the
     default solve, the witness, the lifted model (rows, flat bounds), the
     certification, the certified objective, the final route and the #1940 race's
     sequence of arms all match, and so do node counts wherever the outcome is
