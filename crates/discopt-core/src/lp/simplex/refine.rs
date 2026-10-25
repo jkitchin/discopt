@@ -69,7 +69,7 @@ use crate::presolve::directed::{add_down, add_up, mul_down, sub_down};
 /// compute `b − A x` accurately when the individual products nearly cancel — the
 /// ~1e-12 residual buried under ~1e-10 terms in hda's Arrhenius core.
 #[derive(Clone, Copy, Debug, Default)]
-struct Dd {
+pub(super) struct Dd {
     hi: f64,
     lo: f64,
 }
@@ -94,13 +94,13 @@ fn two_prod(a: f64, b: f64) -> (f64, f64) {
 
 impl Dd {
     #[inline]
-    fn zero() -> Self {
+    pub(super) fn zero() -> Self {
         Dd { hi: 0.0, lo: 0.0 }
     }
 
     /// Add an ordinary `f64`, keeping the trailing bits.
     #[inline]
-    fn add_f64(self, x: f64) -> Self {
+    pub(super) fn add_f64(self, x: f64) -> Self {
         let (s, e) = two_sum(self.hi, x);
         let lo = e + self.lo;
         // Renormalize so the invariant |lo| ≤ ½ ulp(hi) holds for the next step.
@@ -111,7 +111,7 @@ impl Dd {
     /// Add the exact product `a·b`, keeping the trailing bits (a fused
     /// multiply-accumulate at ≈106-bit precision).
     #[inline]
-    fn add_prod(self, a: f64, b: f64) -> Self {
+    pub(super) fn add_prod(self, a: f64, b: f64) -> Self {
         let (p, pe) = two_prod(a, b);
         let (s, e) = two_sum(self.hi, p);
         let lo = (e + pe) + self.lo;
@@ -122,7 +122,7 @@ impl Dd {
     /// Round back to the nearest `f64` (`hi` already carries the correctly-rounded
     /// sum; `lo` only refines ties, so `hi` is the right answer).
     #[inline]
-    fn to_f64(self) -> f64 {
+    pub(super) fn to_f64(self) -> f64 {
         self.hi
     }
 }

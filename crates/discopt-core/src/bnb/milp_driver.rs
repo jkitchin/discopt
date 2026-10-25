@@ -1479,13 +1479,12 @@ fn solve_milp_node_search(
     // they would not change it, but reading `c` here keeps that independent of
     // what the cut loop does later.
     let lattice = if obj_integrality_enabled() {
-        let base =
-            crate::bnb::obj_integral::objective_granularity(&c[..ns], &is_int).map(|spacing| {
-                crate::bnb::obj_integral::ObjLattice {
-                    spacing,
-                    shift: 0.0,
-                }
-            });
+        let base = crate::bnb::obj_integral::objective_granularity(
+            &c[..ns],
+            &is_int,
+            &base_l[..ns],
+            &base_u[..ns],
+        );
         if obj_lattice_subst_enabled() {
             // Bounds are the presolved ones on purpose: presolve only narrows and
             // never cuts a feasible point, so a column it fixed is fixed at every
@@ -1516,6 +1515,7 @@ fn solve_milp_node_search(
     tm.set_objective_lattice(
         lattice.map(|l| l.spacing),
         obj_const + lattice.map_or(0.0, |l| l.shift),
+        lattice.map_or(0.0, |l| l.drift),
     );
     tm.initialize();
 
@@ -5469,7 +5469,13 @@ mod tests {
         // Anti-vacuity (CLAUDE.md §6): the driver's detector must actually fire on
         // this fixture, or the run below exercises nothing.
         assert_eq!(
-            crate::bnb::obj_integral::objective_granularity(&c[..ns], &is_int[..ns]),
+            crate::bnb::obj_integral::objective_granularity(
+                &c[..ns],
+                &is_int[..ns],
+                &l[..ns],
+                &u[..ns]
+            )
+            .map(|lat| lat.spacing),
             Some(1.0),
             "fixture must present a unit objective lattice"
         );
@@ -5506,7 +5512,8 @@ mod tests {
         u[ns] = 1.0;
         let is_int: Vec<bool> = (0..n).map(|j| j < ns).collect();
         assert_eq!(
-            crate::bnb::obj_integral::objective_granularity(&c, &is_int),
+            crate::bnb::obj_integral::objective_granularity(&c, &is_int, &l, &u)
+                .map(|lat| lat.spacing),
             None,
             "a costed continuous column must disable the lattice"
         );

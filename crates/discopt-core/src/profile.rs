@@ -434,6 +434,10 @@ counters!(
     WarmSubtolRepair,
     WarmSubtolRepairNoop,
     WarmSubtolRepairFailed,
+    // #1953: a column the `SUBTOL_NOISE_REL` test set aside as rounding whose
+    // reduced cost survived one dual-refinement step with margin over its measured
+    // error, and so was admitted to the sub-tolerance ratio test.
+    SubtolSuspectConfirmed,
     // #1008 R1: the warm dual's unstable- (near-zero-) pivot exit, split by which
     // way it went. `Recoveries` counts in-place refactorize+recompute+re-select,
     // which keeps the monotone dual loop alive; `Bails` counts the hand-off to the

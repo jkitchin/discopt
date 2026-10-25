@@ -586,17 +586,18 @@ fn repair_subtol_dual_optimum(
     {
         return sol;
     }
-    let cands = super::primal::subtol_candidates(
-        sp,
-        n,
-        c,
-        l,
-        u,
-        &sol.basis.col_status,
-        &sol.dual,
-        super::primal::subtol_impact_floor(sol.obj),
-    );
-    if cands.is_empty() {
+    let floor = super::primal::subtol_impact_floor(sol.obj);
+    let (cands, suspects) =
+        super::primal::subtol_scan(sp, n, c, l, u, &sol.basis.col_status, &sol.dual, floor);
+    // #1953: a suspect (set aside only by the noise test) also hands off when the
+    // NS bound from these duals leaves the vertex uncertified; the primal then
+    // settles it with refined duals.
+    if cands.is_empty()
+        && (suspects.is_empty()
+            || !super::primal::subtol_suspects_matter(
+                sp, m, n, c, l, u, b, &sol.dual, sol.obj, floor,
+            ))
+    {
         return sol;
     }
     crate::profile::incr(crate::profile::Ctr::WarmSubtolRepair);

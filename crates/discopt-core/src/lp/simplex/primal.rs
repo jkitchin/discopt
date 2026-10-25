@@ -672,6 +672,7 @@ pub(super) fn subtol_impact_floor(obj: f64) -> f64 {
 /// an O(1) cost (the mixed-cost witness of the #1597 review), and the unscaled
 /// `d_y` is itself sub-`tol`. `room_j` here is only an upper bound on the step —
 /// the cheap prefilter; the caller measures the true ratio-test step.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn subtol_candidates(
     cols: &SparseCols,
@@ -683,9 +684,31 @@ pub(super) fn subtol_candidates(
     y: &[f64],
     floor: f64,
 ) -> Vec<(usize, f64, f64)> {
-    let mut out = Vec::new();
+    subtol_scan(cols, n_real, cost, lb, ub, stat, y, floor).0
+}
+
+/// [`subtol_candidates`], plus the **suspects**: wrong-signed columns that clear
+/// the impact floor but were set aside by the [`SUBTOL_NOISE_REL`] test alone
+/// (#1953). The noise test is a guess about `y`'s error, not a measurement of
+/// it, and an exact `d_j` can sit below it: on `min -x + (1 - 2^-32) y`,
+/// `x - y = 0`, `x, y in [2^30, 2^31]`, `d = -2^-32` is computed without any
+/// rounding, the column can move `2^30`, and the pivot is worth 0.25 -- yet
+/// `|d| = 2.3e-10 <= 1e-6 * 2`. A suspect is never pivoted on as is; see
+/// [`Simplex::subtol_entering`] and [`subtol_suspects_matter`].
+#[allow(clippy::too_many_arguments)]
+pub(super) fn subtol_scan(
+    cols: &SparseCols,
+    n_real: usize,
+    cost: &[f64],
+    lb: &[f64],
+    ub: &[f64],
+    stat: &[i8],
+    y: &[f64],
+    floor: f64,
+) -> (Vec<(usize, f64, f64)>, Vec<(usize, f64, f64)>) {
+    let (mut out, mut suspects) = (Vec::new(), Vec::new());
     if !(floor.is_finite() && floor > 0.0) {
-        return out;
+        return (out, suspects);
     }
     for j in 0..n_real {
         if stat[j] == BASIC {
@@ -702,19 +725,64 @@ pub(super) fn subtol_candidates(
         } else {
             (stat[j] == AT_LOWER && dj < 0.0) || (stat[j] == AT_UPPER && dj > 0.0)
         };
-        if !improving || dj.abs() <= SUBTOL_NOISE_REL * (cost[j].abs() + mag) {
-            continue; // optimal-signed, or indistinguishable from rounding
+        if !improving {
+            continue; // optimal-signed
         }
         let room = if lo_inf || hi_inf {
             f64::INFINITY
         } else {
             ub[j] - lb[j]
         };
-        if dj.abs() * room > floor {
+        if dj.abs() * room <= floor {
+            continue;
+        }
+        if dj.abs() <= SUBTOL_NOISE_REL * (cost[j].abs() + mag) {
+            suspects.push((j, dj, room)); // possibly rounding; verify before use
+        } else {
             out.push((j, dj, room));
         }
     }
-    out
+    (out, suspects)
+}
+
+/// Whether the suspects of [`subtol_scan`] can matter at objective `obj`: true
+/// when the Neumaier-Shcherbina bound from `y` (rigorous since #1956) does not
+/// certify `obj` to within `floor`. When it does, no column -- noise or not --
+/// can improve the objective by more than `floor`, and the vertex is optimal at
+/// that tolerance whatever the suspects' true signs. Only a failed certificate
+/// pays for the dual refinement that settles them (#1953).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn subtol_suspects_matter(
+    cols: &SparseCols,
+    m: usize,
+    n_real: usize,
+    cost: &[f64],
+    lb: &[f64],
+    ub: &[f64],
+    b: &[f64],
+    y: &[f64],
+    obj: f64,
+    floor: f64,
+) -> bool {
+    let (col_ptr, row_idx, vals) = cols.raw();
+    if col_ptr.len() < n_real + 1 || y.len() != m || b.len() < m {
+        return true;
+    }
+    match super::refine::ns_safe_bound_csc(
+        y,
+        &cost[..n_real],
+        &col_ptr[..n_real + 1],
+        row_idx,
+        vals,
+        m,
+        n_real,
+        &b[..m],
+        &lb[..n_real],
+        &ub[..n_real],
+    ) {
+        Some(g) => !(obj - g <= floor),
+        None => true,
+    }
 }
 
 // The dot-product error factor lives in `crate::numeric` so the reduced-cost fixing
@@ -2364,9 +2432,19 @@ impl<'a> Simplex<'a> {
             obj += cost[j] * v;
         }
         let floor = subtol_impact_floor(obj);
-        let cands = subtol_candidates(
+        let (mut cands, suspects) = subtol_scan(
             &self.cols, self.n, cost, &self.lb, &self.ub, &self.stat, y, floor,
         );
+        // #1953: a suspect is admitted only when refined duals confirm its sign
+        // with a reduced cost above their own measured error, and only when the
+        // NS bound from `y` fails to certify the vertex in the first place.
+        if !suspects.is_empty()
+            && subtol_suspects_matter(
+                &self.cols, self.m, self.n, cost, &self.lb, &self.ub, self.b, y, obj, floor,
+            )
+        {
+            cands.extend(self.confirm_suspects(cost, y, art_sign, &suspects)?);
+        }
         let mut best: Option<(usize, f64)> = None;
         let mut best_gain = floor;
         for (j, dj, room) in cands {
@@ -2403,6 +2481,74 @@ impl<'a> Simplex<'a> {
             }
         }
         Ok(best)
+    }
+
+    /// The suspects of [`subtol_scan`] whose reduced cost survives one step of
+    /// dual refinement (#1953), as `(j, d_j, room_j)` with the refined `d_j`.
+    ///
+    /// `y` solves `B^T y = c_B` only up to rounding and conditioning. The residual
+    /// `r = c_B - B^T y` is formed in double-double and `dy = B^{-T} r` is one
+    /// refinement step; `|dy|` is then a measured estimate of `y`'s error, where
+    /// [`SUBTOL_NOISE_REL`] is a fixed guess at it. A suspect is confirmed when its
+    /// refined `d_j = c_j - A_j^T (y + dy)` (double-double) keeps the improving
+    /// sign and exceeds `2 * (|A_j|^T |dy| + gamma * (|c_j| + |A_j|^T |y + dy|))`
+    /// -- larger than the error `y` was measured to carry, plus the dot product's
+    /// own rounding. An exact `y` has `dy = 0` and confirms an exact `d_j` of any
+    /// size; a noisy one is rejected, which is the pre-#1953 verdict.
+    fn confirm_suspects(
+        &mut self,
+        cost: &[f64],
+        y: &[f64],
+        art_sign: &[f64],
+        suspects: &[(usize, f64, f64)],
+    ) -> Result<Vec<(usize, f64, f64)>, LpStatus> {
+        use super::refine::Dd;
+        let m = self.m;
+        let mut dy = vec![0.0f64; m];
+        for (i, slot) in dy.iter_mut().enumerate() {
+            let jb = self.basis[i];
+            let mut r = Dd::zero().add_f64(cost[jb]);
+            if jb < self.n {
+                let (ri, va) = self.cols.col(jb);
+                for (&row, &a) in ri.iter().zip(va) {
+                    r = r.add_prod(-a, y[row]);
+                }
+            } else {
+                let k = jb - self.n;
+                r = r.add_prod(-art_sign[k], y[k]);
+            }
+            *slot = r.to_f64();
+        }
+        if dy.iter().any(|v| *v != 0.0) && self.lu.btran(&mut dy).is_err() {
+            return Err(LpStatus::Numerical);
+        }
+        if !dy.iter().all(|v| v.is_finite()) {
+            return Ok(Vec::new());
+        }
+        let yr: Vec<f64> = y.iter().zip(&dy).map(|(a, d)| a + d).collect();
+        let mut out = Vec::new();
+        for &(j, _, room) in suspects {
+            let (ri, va) = self.cols.col(j);
+            let mut d = Dd::zero().add_f64(cost[j]);
+            let (mut mag_dy, mut mag_y) = (0.0f64, 0.0f64);
+            for (&row, &a) in ri.iter().zip(va) {
+                d = d.add_prod(-a, yr[row]);
+                mag_dy += (a * dy[row]).abs();
+                mag_y += (a * yr[row]).abs();
+            }
+            let dj = d.to_f64();
+            let err = mag_dy + gamma(ri.len() + 2) * (cost[j].abs() + mag_y);
+            let improving = if self.is_free(j) {
+                dj != 0.0
+            } else {
+                (self.stat[j] == AT_LOWER && dj < 0.0) || (self.stat[j] == AT_UPPER && dj > 0.0)
+            };
+            if improving && dj.abs() > 2.0 * err {
+                crate::profile::incr(crate::profile::Ctr::SubtolSuspectConfirmed);
+                out.push((j, dj, room));
+            }
+        }
+        Ok(out)
     }
 
     /// Primal simplex iterations for the given `cost`. Returns Ok(()) at
@@ -4709,5 +4855,34 @@ mod tests {
         checked += 1;
 
         assert_eq!(checked, 6, "floor probe must have run every property");
+    }
+
+    /// #1953: an exact sub-noise reduced cost on a wide box is a real descent.
+    ///
+    /// `min -x + (1 - 2^-32) y`, `x - y = 0`, `x, y in [2^30, 2^31]`: the optimum is
+    /// `x = y = 2^31`, objective `-0.5`. At the start vertex `d = -2^-32` exactly,
+    /// below `SUBTOL_NOISE_REL * (|c| + |A^T y|)`, and the column was dropped as
+    /// rounding: both entry points certified `Optimal` at `-0.25`. The refined
+    /// duals measure no error in `y`, so the suspect is confirmed and pivoted on.
+    #[test]
+    fn subtol_unit_wide_box() {
+        let eps = 2f64.powi(-32);
+        let lo = 2f64.powi(30);
+        let c = [-1.0, 1.0 - eps];
+        let (l, u, b) = ([lo, lo], [2.0 * lo, 2.0 * lo], [0.0]);
+        let sp = SparseCols::from_csc(vec![0, 1, 2], vec![0, 0], vec![1.0, -1.0]);
+        let opts = SimplexOptions::default();
+        let raw = solve_lp_cols(sp.clone(), 1, 2, &c, &l, &u, &b, &opts);
+        let scl = solve_lp_cols_scaled(sp, 1, 2, &c, &l, &u, &b, &opts);
+        for r in [&raw, &scl] {
+            assert!(
+                r.status != LpStatus::Optimal || r.obj <= -0.5 + 1e-9,
+                "{:?} {}",
+                r.status,
+                r.obj
+            );
+        }
+        assert_eq!(raw.status, LpStatus::Optimal);
+        assert!(raw.obj <= -0.5 + 1e-9);
     }
 }
