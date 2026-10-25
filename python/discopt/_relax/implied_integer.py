@@ -25,22 +25,157 @@ This is exactly the structure the ``ex126x`` trim-loss models carry: e.g.
 Detection iterates to a fixpoint so chains (``x`` integer because ``y`` was just
 proven integer) are caught. Range links like ``b ≤ x ≤ b+4`` (inequalities) are
 **never** sufficient and are correctly ignored.
+
+**Exact arithmetic (#1952).** Every test is exact: a coefficient within 1e-9 of an
+integer is *not* an integer (``(1 + 2**-40)·x - y = 0`` does not make ``x``
+integer), and a coefficient of 5e-10 is in the row (dropping it let ``x - y +
+5e-10·w = 0`` mark ``x``). Exact tests on the float extraction are still not
+enough, because the extractor rounds while it accumulates (``2**53·x + 0.5·x -
+2**53·x + x - y`` extracts as ``{x: 1, y: -1}``; its exact ``x`` coefficient is
+3/2). So the float extraction is only a prefilter, and each candidate row is
+re-derived in ``Fraction`` arithmetic by :func:`_exact_linear_row`; the proof is
+read off those exact coefficients, and a row outside the walker's grammar is
+skipped.
 """
 
 from __future__ import annotations
 
+import math
+from fractions import Fraction
+
 import numpy as np
 
-from discopt.modeling.core import Constraint, Model, VarType
+from discopt._flat_index import resolve_scalar_slot
+from discopt.modeling.core import (
+    BinaryOp,
+    Constant,
+    Constraint,
+    IndexExpression,
+    Model,
+    SumOverExpression,
+    UnaryOp,
+    Variable,
+    VarType,
+)
 
 from .gdp_reformulate import _is_linear
 from .problem_classifier import _extract_linear_coefficients_sparse, _NotLinearError
 
-_INT_TOL = 1e-9
+
+class _NotExactLinear(Exception):
+    """The row is outside the exact walker's grammar; the caller skips it."""
 
 
-def _is_int_value(x: float) -> bool:
-    return abs(x - round(x)) <= _INT_TOL
+def _exact_const(node) -> Fraction:
+    """Exact rational value of a variable-free subtree (#1952).
+
+    Every leaf is a binary64 ``Constant``; ``Fraction(float)`` is exact, and so is
+    every ``+ - * /`` on Fractions, so the result is the exact value of the
+    expression *as written*, not of its float evaluation.
+    """
+    if isinstance(node, Constant):
+        v = node.value
+        if v.ndim == 0 or v.size == 1:
+            f = float(v.reshape(()))
+            if not math.isfinite(f):
+                raise _NotExactLinear("non-finite constant")
+            return Fraction(f)
+        raise _NotExactLinear("array constant")
+    if isinstance(node, UnaryOp) and node.op == "neg":
+        return -_exact_const(node.operand)
+    if isinstance(node, BinaryOp) and node.op in ("+", "-", "*", "/"):
+        lv, rv = _exact_const(node.left), _exact_const(node.right)
+        if node.op == "+":
+            return lv + rv
+        if node.op == "-":
+            return lv - rv
+        if node.op == "*":
+            return lv * rv
+        if rv == 0:
+            raise _NotExactLinear("division by zero")
+        return lv / rv
+    raise _NotExactLinear(f"non-constant node {type(node).__name__}")
+
+
+def _is_var_free(node) -> bool:
+    if isinstance(node, Constant):
+        return True
+    if isinstance(node, UnaryOp):
+        return node.op == "neg" and _is_var_free(node.operand)
+    if isinstance(node, BinaryOp):
+        return _is_var_free(node.left) and _is_var_free(node.right)
+    return False
+
+
+def _exact_linear_row(body, model: Model, n: int) -> tuple[dict[int, Fraction], Fraction]:
+    """Exact rational ``(terms, const)`` of a linear row body (#1952).
+
+    The float extractor (``_extract_linear_coefficients_sparse``) rounds while it
+    accumulates: ``0.1*x + 0.2*x + 0.7*x - y`` and ``2**53*x + 0.5*x - 2**53*x + x - y``
+    both come out as exactly ``{x: 1.0, y: -1.0}``, although the exact coefficients
+    of ``x`` are not 1 (the second is 3/2). An integrality proof read off those
+    floats is a proof about a different row. This walker does the same sum in
+    ``Fraction`` arithmetic, so the coefficients it returns are the exact values of
+    the row as stored. It deliberately covers only the plain linear grammar; any
+    other node raises :class:`_NotExactLinear` and the row is skipped, which can
+    only under-detect.
+
+    Iterative, like the float walker, because a ``.nl`` body is a left-leaning chain
+    one node deep per term (#1064).
+    """
+    terms: dict[int, Fraction] = {}
+    const = Fraction(0)
+
+    def add(i: int, v: Fraction) -> None:
+        if not 0 <= i < n:
+            raise _NotExactLinear(f"slot {i} outside [0, {n})")
+        terms[i] = terms.get(i, Fraction(0)) + v
+
+    stack: list[tuple[object, Fraction]] = [(body, Fraction(1))]
+    while stack:
+        node, scale = stack.pop()
+        if _is_var_free(node):
+            const += scale * _exact_const(node)
+            continue
+        if isinstance(node, (Variable, IndexExpression)):
+            slot = resolve_scalar_slot(node, model)
+            if slot is None:
+                raise _NotExactLinear("not a single scalar slot")
+            add(slot, scale)
+            continue
+        if isinstance(node, UnaryOp) and node.op == "neg":
+            stack.append((node.operand, -scale))
+            continue
+        if isinstance(node, BinaryOp):
+            if node.op == "+":
+                stack.append((node.right, scale))
+                stack.append((node.left, scale))
+                continue
+            if node.op == "-":
+                stack.append((node.right, -scale))
+                stack.append((node.left, scale))
+                continue
+            if node.op == "*":
+                if _is_var_free(node.left):
+                    stack.append((node.right, scale * _exact_const(node.left)))
+                    continue
+                if _is_var_free(node.right):
+                    stack.append((node.left, scale * _exact_const(node.right)))
+                    continue
+                raise _NotExactLinear("product of two variable expressions")
+            if node.op == "/" and _is_var_free(node.right):
+                d = _exact_const(node.right)
+                if d == 0:
+                    raise _NotExactLinear("division by zero")
+                stack.append((node.left, scale / d))
+                continue
+            raise _NotExactLinear(f"operator {node.op}")
+        if isinstance(node, SumOverExpression):
+            for t in reversed(node.terms):
+                stack.append((t, scale))
+            continue
+        raise _NotExactLinear(f"node {type(node).__name__}")
+    return terms, const
 
 
 def detect_implied_integers(model: Model) -> set[tuple[int, int]]:
@@ -66,9 +201,10 @@ def detect_implied_integers(model: Model) -> set[tuple[int, int]]:
     * ``_extract_linear_coefficients_sparse`` is the accumulator the dense wrapper
       is already built on, so the coefficient values are bit-identical.
     * The integer-coefficient test ran over all ``n`` slots; entries absent from the
-      row are exactly ``0.0``, which passes ``|a - round(a)| <= tol``, so testing
-      only the stored entries accepts and rejects exactly the same rows. It uses
-      ``np.round`` on the stored values for the same half-to-even tie behaviour.
+      row are exactly ``0.0``, which is an integer, so testing only the stored
+      entries accepts and rejects exactly the same rows. (Since #1952 every test is
+      exact and the proof is read off the exact rational row; see the module
+      docstring.)
     * The support is sorted ASCENDING, which is the order ``np.nonzero`` produced,
       and rows stay in ``model._constraints`` order. The fixpoint loop below is
       order-sensitive in principle, so preserving both orders — rather than merely
@@ -89,8 +225,9 @@ def detect_implied_integers(model: Model) -> set[tuple[int, int]]:
     )
 
     # Pre-extract integer-data linear equality rows once, as (support, coefficients)
-    # with the support ascending.
-    eq_rows: list[tuple[list[int], dict[int, float]]] = []
+    # with the support ascending. The float extraction is a cheap prefilter; the
+    # proof uses the exact rational row (#1952).
+    eq_rows: list[tuple[list[int], dict[int, Fraction]]] = []
     for c in model._constraints:
         if not isinstance(c, Constraint) or c.sense != "==":
             continue
@@ -102,12 +239,20 @@ def detect_implied_integers(model: Model) -> set[tuple[int, int]]:
             continue
         if terms:
             vals = np.fromiter(terms.values(), dtype=np.float64, count=len(terms))
-            if not np.all(np.abs(vals - np.round(vals)) <= _INT_TOL):
+            if not np.all(vals == np.round(vals)):
                 continue
-        if not _is_int_value(float(const)):
+        if not float(const).is_integer():
             continue
-        nz = sorted(i for i, v in terms.items() if abs(v) > _INT_TOL)
-        eq_rows.append((nz, terms))
+        try:
+            exact, exact_const = _exact_linear_row(c.body, model, n)
+        except _NotExactLinear:
+            continue
+        if exact_const.denominator != 1:
+            continue
+        if any(v.denominator != 1 for v in exact.values()):
+            continue
+        nz = sorted(i for i, v in exact.items() if v != 0)
+        eq_rows.append((nz, exact))
 
     marked: set[tuple[int, int]] = set()
     changed = True
@@ -117,7 +262,7 @@ def detect_implied_integers(model: Model) -> set[tuple[int, int]]:
             for idx in nz:
                 if is_int[idx]:
                     continue
-                if abs(abs(terms[idx]) - 1.0) > _INT_TOL:
+                if abs(terms[idx]) != 1:
                     continue  # coefficient must be ±1 for the integer-quotient proof
                 if all(is_int[j] for j in nz if j != idx):
                     var, elem = flat[idx]
