@@ -281,8 +281,8 @@ pub struct SpatialTreeConfig {
     /// candidate with fewer than this many observations on either side has both
     /// child LPs solved (after propagation) before the pick, and their gains are
     /// recorded as observations (at most `STRONG_BRANCH_CANDIDATES` per node, and
-    /// only while strong branching has spent less wall time than the tree's own
-    /// node solves). `0` is plain pseudocost branching.
+    /// skipped at a node whose worst-case pass would exceed a tenth of the time
+    /// left). `0` is plain pseudocost branching.
     pub pseudocost_reliability: usize,
 }
 
@@ -575,10 +575,6 @@ pub fn solve_spatial_tree_with_hooks(
     let mut n_incumbent_value_calls = 0usize;
     let mut n_incumbent_value_raised = 0usize;
     let mut n_pseudocost_picks = 0usize;
-    // #1913: wall time in the tree's own node solves, and in `strong_branch_init`,
-    // which may spend no more than the former (see the call site).
-    let mut node_lp_time = Duration::ZERO;
-    let mut strong_time = Duration::ZERO;
     // Best-bound frontier: a min-heap on the inherited lower bound. Exploring the
     // lowest-bound region first lifts the global frontier minimum (the reported dual
     // bound) as fast as possible — the key to certifying instances like tanksize
@@ -782,7 +778,7 @@ pub fn solve_spatial_tree_with_hooks(
         let node_opts = node_lp_opts(opts, deadline);
         let t_node = Instant::now();
         let node = solve_spatial_node(spec, &lo, &hi, config.run_obbt, &node_opts);
-        node_lp_time += t_node.elapsed();
+        let node_time = t_node.elapsed();
         n_lp_solves += node.n_lp_solves;
         if node.status == LpStatus::Optimal && node.bound == f64::NEG_INFINITY {
             n_uncertified += 1;
@@ -901,14 +897,17 @@ pub fn solve_spatial_tree_with_hooks(
             }
         }
         if config.pseudocost_branching && frac_int.is_some() {
-            // Strong branching may spend no more wall time than the tree's own node
-            // solves have, checked before each child LP. Where a node LP is expensive
-            // (qspp_0_10_0_1_10_1: ~7 s, 4 nodes in 30 s) an uncapped pass took the
-            // whole budget; an LP-count cap still did, and starved st_e31, whose
-            // cheap LPs gain from it.
-            if config.pseudocost_reliability > 0 && bound.is_finite() && strong_time < node_lp_time
-            {
-                let t_sb = Instant::now();
+            // Skip the pass when its worst case -- two child LPs per candidate at
+            // this node's own solve time -- exceeds a tenth of the time left. Where
+            // one node LP is a large share of the budget (qspp_0_10_0_1_10_1: ~7 s,
+            // 4 nodes in 30 s) a pass costs nodes it cannot repay; a global LP-count
+            // or wall-time quota instead throttled the cheap-LP instances that gain
+            // from it (st_e31, genpooling_meyer04).
+            let affordable = deadline.is_none_or(|d| {
+                let left = d.saturating_duration_since(Instant::now());
+                node_time * (2 * STRONG_BRANCH_CANDIDATES as u32) <= left / 10
+            });
+            if config.pseudocost_reliability > 0 && bound.is_finite() && affordable {
                 n_lp_solves += strong_branch_init(
                     spec,
                     x,
@@ -918,9 +917,7 @@ pub fn solve_spatial_tree_with_hooks(
                     config,
                     &node_opts,
                     (&mut pc_sum, &mut pc_cnt),
-                    t_sb + (node_lp_time - strong_time),
                 );
-                strong_time += t_sb.elapsed();
             }
             frac_int = pseudocost_pick(spec, x, config.int_tol, &pc_sum, &pc_cnt);
             n_pseudocost_picks += 1;
@@ -1310,8 +1307,7 @@ const STRONG_BRANCH_CANDIDATES: usize = 8;
 /// propagation and record each child's per-unit bound gain as a pseudocost
 /// observation. A child proven empty records the gap to the incumbent (or one unit
 /// of the bound's magnitude without one), so a column that prunes a side ranks
-/// high. Stops before any child LP once `until` (or the LP deadline) has passed.
-/// Only the branching choice reads these numbers; no bound or box of the tree is
+/// high. Only the branching choice reads these numbers; no bound or box of the tree is
 /// changed. Returns the LP solves spent.
 #[allow(clippy::too_many_arguments)]
 fn strong_branch_init(
@@ -1323,7 +1319,6 @@ fn strong_branch_init(
     config: &SpatialTreeConfig,
     opts: &SimplexOptions,
     (pc_sum, pc_cnt): (&mut [Vec<f64>; 2], &mut [Vec<usize>; 2]),
-    until: Instant,
 ) -> usize {
     let rel = config.pseudocost_reliability;
     let mut cands: Vec<(f64, usize)> = Vec::new();
@@ -1348,8 +1343,7 @@ fn strong_branch_init(
     for &(_, j) in cands.iter().take(STRONG_BRANCH_CANDIDATES) {
         let f = x[j] - x[j].floor();
         for up in [false, true] {
-            let now = Instant::now();
-            if now >= until || opts.deadline.is_some_and(|d| now >= d) {
+            if opts.deadline.is_some_and(|d| Instant::now() >= d) {
                 return n_lp;
             }
             let mut l2 = lo.to_vec();
