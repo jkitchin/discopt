@@ -11576,3 +11576,86 @@ only `tln6` and `tln7` reach it, so every other race takes the same arms as befo
 `tln7` still finds no incumbent in 120 s under either rule. Its bound is 14.28 with
 the un-lifted continuation, against 14.16 with the lift continuation at 30 s. That
 instance is a primal-heuristic problem on the un-lifted arm, not a routing one.
+
+## 86. #1959: the lift race's lift slice ends on the MILP engine's stall (2026-10-25)
+
+**The cost, located.** On the #1940 dense integer QPs the race's 5 s lift slice is
+two pieces. The native MILP engine runs first on its #291 stall budget (half of what
+is left, ~2.3 s), stalls with **no incumbent** (`node_limit`, e.g. 1323 nodes on
+dense n=15 s0), and defers. The legacy route then gives the rest of the slice
+(~2.5 s) to the Python MILP tree on the same lifted model.
+
+**Hypothesis, and how it was tested.** That second piece never produces anything the
+race uses. Entry experiment: the lift arm alone at slices of 5, 1.67 and 1 s on the
+12 adopted corpus instances, the dense QPs and `conge10/15`. Every one of the 11
+Python-tree runs after a stall returned no incumbent and no certificate, including
+`ex1265`/`ex1266` at 1.67 and 1 s. Kill criterion: any such run returning an
+incumbent or a certificate. `scripts/panel_1959_race_stall_exit.py` records every one
+in its OFF arm and fails on it: **77 of 77** returned neither (28 at 30 s, 49 in the
+CI proxy). Not killed.
+
+**Shipped: `DISCOPT_IPX_RACE_STALL_EXIT` (default ON, `=0` opt-out).** Inside a lift
+SLICE only (not the continuation, not an ordinary solve), the engine's deferral ends
+the slice, reporting `time_limit` with the engine's valid bound. The engine's own
+budget is unchanged, so anything the engine certifies in the slice runs the same
+tree to the same certificate.
+
+Panel (#1940's 43 instances, ON/OFF ABBA, 2 reps, every incumbent re-verified on the
+original model, every bound and certified objective cross-checked):
+
+| run | checks | certified OFF / ON | total wall OFF → ON | faster / slower |
+|---|---:|---:|---:|---:|
+| 30 s, 5 s slices | 754, 0 fail | 42 / 42 | 177.3 → **145.5 s** | 11 / 0 |
+| CI proxy: 10 s, 1.67 s slices | 765, 0 fail | 40 / 40 | 129.2 → **115.4 s** | 13 / 0 |
+
+The issue's family at 30 s: dense n=15 s0 6.87 → 4.27 s, n=15 s1 6.51 → 4.01, n=18 s0
+7.22 → 5.06, n=18 s1 17.45 → 15.28, n=20 s0 8.49 → 6.45, n=20 s1 19.99 → 18.04;
+`arrqp_n15` 7.05 → 4.14. The corpus is unchanged at 30 s (all inside the engine's
+run). In the CI proxy `ex1265`/`ex1266` do not certify inside the lift slice in
+**either** arm, which corrects the issue's assumption that the adopted corpus
+always certifies inside slice one: that holds at dev speed only. They certify in
+the continuation, and are faster ON (5.08 → 4.20 s, 5.30 → 4.36 s).
+
+**Re-run on top of §85's tie rule (#1961).** §85 hands an `inf`/`inf` tie to the arm
+with the tighter bound, and the stall exit changes the bound a stalled lift slice
+reports (the engine's alone, not merged with the Python tree's), so the panels were
+re-run on the merge, with MINLPLib `tln6`/`tln7` (the §85 instances) added via
+`--nl`. 45 instances: at 30 s 774 checks, 0 failures, certified 42 = 42, total wall
+237.1 → 207.3 s, 11 faster / 0 slower; CI proxy 786 checks, 0 failures, certified
+40 = 40, 151.2 → 137.2 s, 13 faster / 0 slower. 88 more post-stall Python-tree runs,
+none with an incumbent or a certificate (165 of 165 in all). `tln6` at 120 s
+certifies in both arms (OFF 60.8 s, ON 59.0 s, 2 reps each): the stall exit fires
+there and the tie still goes to the un-lifted arm.
+
+**Falsified, not shipped.**
+
+- *A work-capped un-lifted probe first* (the issue's "order the arms by cost"). The
+  un-lifted arm with `max_nodes=50` and the full 30 s limit costs 7.4–9.2 s on
+  `ex1263`–`ex1266` (8.3–10.9 s at 500 nodes). Its setup does not scale with the
+  node cap, so putting it first costs the corpus far more than it saves the dense
+  QPs.
+- *Giving the un-lifted slice what the lift slice did not use* (so both opening
+  slices still sum to 10 s). `dense_n18_s1` got a 7.0 s un-lifted slice, still ended
+  uncertified at 6.7 s (4081 nodes), and restarted anyway: 15.4 → 17.1 s (single runs). The spatial
+  search sizes its root work from its limit (the §84 lesson again), so a longer slice
+  is a different search, not more of the same one.
+
+- *Running both arms concurrently* (entry experiment only; two threads, each arm on
+  its own model copy, 30 s, "first certificate" assumes the loser is cancelled, which
+  neither engine supports today). The dense family gains (n=15 s0 4.27 → 2.00 s,
+  n=18 s1 15.28 → 9.55, n=20 s1 18.04 → 12.26), but every corpus lift win slows 2–3x
+  from GIL and CPU contention with the un-lifted arm, whose kernel seeding is Python
+  (5.6 s of `ex1265`'s 8.7 s un-lifted solve is `integer_local_search` sub-NLPs):
+  `ex1265` 1.92 → 3.66 s, `ex1266` 1.42 → 4.57, `ex1263` 1.03 → 1.92, `ex1264`
+  0.65 → 1.47. That fails "the lift must still win where it wins today", so not
+  pursued as a plain concurrent race.
+- *Root cuts as the reason the lift slice cannot shrink.* `DISCOPT_MILP_ROOT_CUTS=0`
+  gives `ex1265` the identical tree (1883 nodes); its first ~0.7 s of engine time is
+  reliability strong branching (39 calls, 2.07 s summed across threads at T=5). The
+  ~1.8 s of engine work `ex1265` needs is intrinsic, not a budget-sized stage.
+
+**What remains (now #1963).** The race now costs ~2.8 s per lost race, down from 5 s,
+but not zero. That residue is the engine's stage-sized budget, which `ex1265` needs.
+The restart on `dense_n18_s1`/`n20_s1` (un-lifted slice + continuation) is
+untouched. #1959 was narrowed to the stall exit (owner's direction) and both
+remaining costs moved to #1963, with the measurements above as its ruled-out list.
