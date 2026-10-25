@@ -2412,6 +2412,10 @@ def _try_native_spatial_kernel(
     # The kernel's own default is the legacy rule, so ``=0`` passes nothing.
     if _scale_free_branching_enabled():
         solve_kwargs["scale_free_branching"] = True
+    # #1913: pseudocost choice of the fractional integer column (see the helper).
+    if _kernel_pseudocost_branching_enabled():
+        solve_kwargs["pseudocost_branching"] = True
+        solve_kwargs["pseudocost_reliability"] = _kernel_pseudocost_reliability()
     # #1935: start each child's node LP from its parent's basis (default OFF);
     # mode 2 also repairs a dual-infeasible inherited basis by bound flips.
     _warm_mode = _native_warm_start_mode()
@@ -2751,6 +2755,8 @@ def _try_native_spatial_kernel(
     _native_stats["tree/incumbent_value_raised"] = float(
         int(res.get("n_incumbent_value_raised") or 0)
     )
+    # #1913: integer branches chosen by pseudocost; 0 unless DISCOPT_KERNEL_PSEUDOCOST.
+    _native_stats["tree/pseudocost_picks"] = float(int(res.get("n_pseudocost_picks") or 0))
     # #1935: the parent-basis warm start (``DISCOPT_NATIVE_WARM_START``). The warm
     # count is 0 with the flag off, which tells "never engaged" from "engaged and
     # did not help"; pivots and seconds are the node-LP effort it is meant to cut.
@@ -10774,6 +10780,69 @@ def _scale_free_branching_enabled() -> bool:
     traced to the absolute McCormick-tightness tolerance, not the branch rule.
     """
     return os.environ.get("DISCOPT_SCALE_FREE_BRANCHING", "0") not in ("0", "")
+
+
+def _kernel_pseudocost_branching_enabled() -> bool:
+    """#1913/#1941: ``DISCOPT_KERNEL_PSEUDOCOST`` for the native spatial kernel.
+
+    **Graduated (default ON, 2026-10-25, #1941); ``=0`` restores the legacy rule.**
+
+    The kernel branched on the LOWEST-INDEX fractional integer column, so on
+    pure-integer QCQPs the tree was a chaotic function of the root box: nvs17 on
+    eleven valid root boxes between ``DISCOPT_KERNEL_CUTOFF_OBBT``'s box and the
+    presolved box took 17,229 to >= 100,000 nodes, non-monotone in the box (the
+    cutoff box 97,949, the presolved box 60,405) -- the #1904 nvs17 "regression".
+    ON, the column is picked by pseudocost product score
+    (``SpatialTreeConfig::pseudocost_branching``), with reliability initialisation
+    (:func:`_kernel_pseudocost_reliability`). Branching order only: every child pair
+    covers its parent box, so no bound moves. nvs17 over the same boxes: 9,741 to
+    13,147 nodes.
+
+    Section 5 panel (``issue1913_pseudocost_panel.py``): 226 MINLPLib instances
+    with integer columns, <= 200 vars/cons, proven status, OFF vs ON at 30 s,
+    interleaved. The rule fires on 18 (``tree/pseudocost_picks``); on the other 208
+    the code path is never entered. Over the 18, with reliability 1 and the
+    affordability guard: cert-clean (108 checks, 0 problems: no bound past the
+    oracle, no wrong certificate, every incumbent ``verify_point``-ed on a fresh
+    model), certified +nvs17, none lost; nvs18 5,779 -> 2,061 nodes, nvs13 575 ->
+    349, st_e31 21.7 -> 22.1 s; total wall 421 -> 401 s. At 120 s on the 12 neither
+    arm certifies at 30 s: 72 checks, 0 problems, certified +nvs19, none lost;
+    bounds nvs23 -10,944 -> -1,426 (opt -1,125), nvs24 -110,963 -> -2,643 (opt
+    -1,033), graphpart_clique-50/-60 45.5 -> 95 / 7 -> 35.5, genpooling_meyer04
+    740,514 -> 747,372; total wall 1442 -> 1399 s. Recorded trade-off, the search
+    path at a limit (as for ``DISCOPT_KERNEL_CUTOFF_OBBT``): looser on
+    graphpart_clique-40 317.5 -> 292.5 (opt 1183) and qspp_0_10_0_1_10_1 267.5 ->
+    252.5 (opt 621). Plain pseudocost (reliability 0) lost st_e31's 30 s
+    certificate (21 -> 30 s) and loosened genpooling_meyer04; that is what the
+    reliability initialisation fixed.
+
+    The strong-branching affordability guard reads the wall clock (``per_node *
+    512 <= left`` in ``spatial_tree.rs``): a phase-entry gate of the kind
+    ``deterministic`` leaves alone. It binds only within about 512 node-times of
+    ``time_limit``, so a run with real slack against its limit is unaffected; a run
+    close enough to flip it is the "slow enough to flip such a gate" case that
+    ``deterministic`` does not claim to reproduce. A bound-neutral panel on kernel
+    instances near their limit should read a flipped guard as that, not as drift.
+    Read at call time.
+    """
+    return os.environ.get("DISCOPT_KERNEL_PSEUDOCOST", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
+
+
+def _kernel_pseudocost_reliability() -> int:
+    """#1941: ``DISCOPT_KERNEL_PSEUDOCOST_RELIABILITY`` (default 1), observations per
+    side below which ``DISCOPT_KERNEL_PSEUDOCOST`` strong-branches a candidate first
+    (``SpatialTreeConfig::pseudocost_reliability``), when ~512 more nodes fit in the
+    time left. ``0`` is plain pseudocost branching. A numeric knob read only under
+    that flag. Measured on the 18 instances the rule reaches, 60 s: 1 kept st_e31 at
+    23 s (0: 30 s, 4: 30.5 s) and genpooling_meyer04's bound at 747,372 (0: 688,825);
+    4 certified nvs19 at 60 s but slowed st_e31 back to 30 s."""
+    return max(0, int(os.environ.get("DISCOPT_KERNEL_PSEUDOCOST_RELIABILITY", "1") or 0))
 
 
 def _native_warm_start_mode() -> int:
