@@ -273,9 +273,11 @@ pub struct SpatialTreeConfig {
     pub scale_free_branching: bool,
     /// #1913: choose the fractional integer column to branch on by pseudocost
     /// (product rule over the per-unit bound gains observed on each side, unknown
-    /// sides taking the average of the known ones). Off (the default) is the legacy
-    /// rule: the lowest-index fractional column. Branching order only: every child
-    /// pair still covers its parent box, so no bound moves.
+    /// sides taking the average of the known ones). Off (the struct default) is the
+    /// legacy rule: the lowest-index fractional column; the Python orchestrator turns
+    /// it on by default since #1941 (`DISCOPT_KERNEL_PSEUDOCOST=0` opts out).
+    /// Branching order only: every child pair still covers its parent box, so no
+    /// bound moves.
     pub pseudocost_branching: bool,
     /// #1913: reliability initialisation for `pseudocost_branching`. A fractional
     /// candidate with fewer than this many observations on either side has both
