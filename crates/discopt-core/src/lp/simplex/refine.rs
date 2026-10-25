@@ -62,6 +62,8 @@
 // against several arrays at once, so a range loop is the clearest form here.
 #![allow(clippy::needless_range_loop)]
 
+use crate::presolve::directed::{add_down, add_up, mul_down, sub_down};
+
 /// A value held to roughly double the working precision as an unevaluated sum
 /// `hi + lo` with `|lo| ≤ ½ ulp(hi)` ("double-double"). Enough extra precision to
 /// compute `b − A x` accurately when the individual products nearly cancel — the
@@ -122,6 +124,105 @@ impl Dd {
     #[inline]
     fn to_f64(self) -> f64 {
         self.hi
+    }
+}
+
+/// Absolute slack charged for a `two_prod` whose FMA remainder may have underflowed
+/// (`|a·b|` below `PROD_EXACT_FLOOR`) and is therefore no longer exact. Far above
+/// that error, and still ~1e-307, so it never shows in a bound.
+const DD_UNDERFLOW_SLACK: f64 = 4.0 * f64::MIN_POSITIVE;
+
+/// Below this product magnitude the FMA remainder of `two_prod` may be inexact
+/// (matches `presolve::directed`'s `TINY`).
+const PROD_EXACT_FLOOR: f64 = 1.0e-290;
+
+/// A [`Dd`] accumulator that also carries a rigorous bound on its own rounding
+/// error (#1956), so the exact value of the accumulated expression is proved to lie
+/// in `[hi + lo - err, hi + lo + err]`.
+///
+/// `two_sum` is error-free for every finite input, and `two_prod` is error-free
+/// unless the product is near underflow. Each `Dd` step rounds only its low-word
+/// additions; the error of each such rounding is itself recovered *exactly* by
+/// `two_sum` and accumulated upward, so an exact computation (the common case for a
+/// short column) carries `err = 0` and a proved-zero reduced cost stays exactly
+/// zero. The `hi`/`lo` words are computed exactly as [`Dd`] computes them, so the
+/// centre is bit-identical to the unenclosed accumulator. A non-finite word or
+/// error means the enclosure failed (overflow); callers treat that as "no bound".
+#[derive(Clone, Copy, Debug, Default)]
+struct DdEnc {
+    d: Dd,
+    err: f64,
+}
+
+/// `fl(a + b)` and the absolute value of its exact rounding error.
+#[inline]
+fn add_with_err(a: f64, b: f64) -> (f64, f64) {
+    let (s, e) = two_sum(a, b);
+    (s, e.abs())
+}
+
+impl DdEnc {
+    #[inline]
+    fn zero() -> Self {
+        DdEnc::default()
+    }
+
+    /// [`Dd::add_f64`], enclosed.
+    #[inline]
+    fn add_f64(self, x: f64) -> Self {
+        let (s, e) = two_sum(self.d.hi, x);
+        let (lo, elo) = add_with_err(e, self.d.lo); // the one rounded step
+        let (hi, lo2) = two_sum(s, lo);
+        DdEnc {
+            d: Dd { hi, lo: lo2 },
+            err: add_up(self.err, elo),
+        }
+    }
+
+    /// [`Dd::add_prod`], enclosed.
+    #[inline]
+    fn add_prod(self, a: f64, b: f64) -> Self {
+        let (p, pe) = two_prod(a, b);
+        let (s, e) = two_sum(self.d.hi, p);
+        let (t, et) = add_with_err(e, pe);
+        let (lo, elo) = add_with_err(t, self.d.lo);
+        let (hi, lo2) = two_sum(s, lo);
+        let mut err = add_up(add_up(self.err, et), elo);
+        if a != 0.0 && b != 0.0 && p.abs() < PROD_EXACT_FLOOR {
+            err = add_up(err, DD_UNDERFLOW_SLACK);
+        }
+        DdEnc {
+            d: Dd { hi, lo: lo2 },
+            err,
+        }
+    }
+
+    #[inline]
+    fn neg(self) -> Self {
+        DdEnc {
+            d: Dd {
+                hi: -self.d.hi,
+                lo: -self.d.lo,
+            },
+            err: self.err,
+        }
+    }
+
+    /// A float `<=` the exact accumulated value (NaN if the enclosure overflowed).
+    #[inline]
+    fn lower(self) -> f64 {
+        sub_down(add_down(self.d.hi, self.d.lo), self.err)
+    }
+
+    /// A float `>=` the exact accumulated value (NaN if the enclosure overflowed).
+    #[inline]
+    fn upper(self) -> f64 {
+        add_up(add_up(self.d.hi, self.d.lo), self.err)
+    }
+
+    #[inline]
+    fn is_finite(self) -> bool {
+        self.d.hi.is_finite() && self.d.lo.is_finite() && self.err.is_finite()
     }
 }
 
@@ -226,14 +327,17 @@ pub const REFINE_INF: f64 = 1e20;
 /// by >1600x while costing three orders less than `CERT_REL`, so it cannot by itself
 /// flip a node from certified to uncertified.
 ///
-/// **This is a measured guard, not a proof.** A flat relative margin cannot be one:
-/// the error/`S` ratio is bounded by `ulp·|(Aᵀy)_j| / |rc_j|`, which is unbounded when
-/// the reduced cost cancels. The rigorous model is the provable forward error
-/// `milp_simplex._safe_lp_lower_bound_sharp` computes, and unifying the two is what
-/// #1230 step 2 is for — it needs `|(Aᵀy)_j|` accumulated per column and changes the
-/// abstention structure (a free column whose computed `rc` is `0` can no longer be
-/// certified at all), so it is a separate, panel-gated step. CLAUDE.md §1 orders the
-/// trade in the meantime: a measured guard beats no guard.
+/// **This is a measured guard, not a proof**, and since #1956 it is no longer what
+/// makes the bound valid. A flat relative margin cannot be a proof: the error/`S`
+/// ratio is bounded by `ulp·|(Aᵀy)_j| / |rc_j|`, which is unbounded when the reduced
+/// cost cancels (#1956: `rc_1 = -4.4e-18` rounded to `0`, its `rc·u` term with
+/// `u = 1e14` lost, a certified bound `4.4e-4` above the optimum). The proof is now
+/// [`NsEval::rigorous`], an enclosure of every rounding error; the reported value is
+/// `min(rigorous, dd - NS_MARGIN_REL·S)`, so the margin can only lower a bound, never
+/// raise one, and every bound that was valid before is unchanged where the enclosure
+/// is tighter than the margin (the common case: it costs ~`n·ulp`, the margin `1e-12`).
+/// Dropping the margin would tighten bounds and is therefore a bound-changing step
+/// under CLAUDE.md §5, not part of the #1956 soundness fix.
 pub const NS_MARGIN_REL: f64 = 1e-12;
 
 /// Whether the safe bounds subtract [`NS_MARGIN_REL`]. Default **ON** — it is a
@@ -251,7 +355,7 @@ fn ns_margin_enabled() -> bool {
     })
 }
 
-/// One Neumaier–Shcherbina evaluation, carrying both arms so the opt-out is
+/// One Neumaier–Shcherbina evaluation, carrying every arm so the opt-out is
 /// bit-identical to the pre-#1230 code rather than a re-derivation of it.
 #[derive(Clone, Copy, Debug)]
 struct NsEval {
@@ -264,14 +368,21 @@ struct NsEval {
     /// `S = 1 + |bᵀy| + Σ_j |contrib_j|`, the margin base. A sum of non-negative
     /// terms, so its own `f64` rounding cannot make it a material under-estimate.
     s: f64,
+    /// A float **proved** `<= g(y)` (#1956), or `None` when no proof is available: a
+    /// column whose enclosed reduced cost can take the sign that rides an open box
+    /// side, or an overflowed enclosure. Each reduced cost `c_j - (Aᵀy)_j` and `bᵀy`
+    /// is accumulated as a [`DdEnc`], each box term is the minimum of the enclosed
+    /// reduced-cost interval times the finite endpoints (the four corners, rounded
+    /// down), and the terms are summed in a [`DdEnc`] whose lower end is reported.
+    rigorous: Option<f64>,
 }
 
 impl NsEval {
-    /// The reported bound, or `None` when it is not finite.
+    /// The reported bound, or `None` when it is not finite or not proved.
     #[inline]
     fn finish(self) -> Option<f64> {
         let g = if ns_margin_enabled() {
-            self.dd - NS_MARGIN_REL * self.s
+            self.rigorous?.min(self.dd - NS_MARGIN_REL * self.s)
         } else {
             self.legacy
         };
@@ -283,12 +394,45 @@ impl NsEval {
     }
 }
 
-/// The shared body of [`ns_safe_bound`] and [`ns_safe_bound_csc`]: everything except
-/// how `(Aᵀy)_j` is formed. `aty(j)` supplies that column inner product, already
-/// rounded to `f64` exactly as both callers have always done. Returns `None` on the
-/// open-box-side abstention (a nonzero reduced cost riding an infinite bound).
+/// A float `<=` `min_{x ∈ [l, u]} r·x` over every `r ∈ [rl, ru]`, or `None` when that
+/// minimum is unbounded below (some admissible `r` rides an open side). `rl <= ru`.
 #[inline]
-fn ns_accumulate<F: FnMut(usize) -> f64>(
+fn enclosed_box_term(rl: f64, ru: f64, l: f64, u: f64) -> Option<f64> {
+    let l_open = l <= -REFINE_INF;
+    let u_open = u >= REFINE_INF;
+    if (l_open && ru > 0.0) || (u_open && rl < 0.0) {
+        return None;
+    }
+    if rl == 0.0 && ru == 0.0 {
+        return Some(0.0);
+    }
+    // `r·x` is bilinear, so its minimum over the box is at a corner; an open side
+    // that survived the test above contributes nothing below the finite corners.
+    let mut best = f64::INFINITY;
+    for x in [l, u] {
+        if x <= -REFINE_INF || x >= REFINE_INF {
+            continue;
+        }
+        for r in [rl, ru] {
+            best = best.min(mul_down(r, x));
+        }
+    }
+    if best == f64::INFINITY {
+        // Both sides open and the interval is not exactly {0}: excluded above, but
+        // never report a value without a corner behind it.
+        return None;
+    }
+    Some(best)
+}
+
+/// The shared body of [`ns_safe_bound`] and [`ns_safe_bound_csc`]: everything except
+/// how `(Aᵀy)_j` is formed. `aty(j)` supplies that column inner product as an
+/// enclosed double-double accumulator; its centre is the value both callers have
+/// always used (`hi`), so the legacy and `dd` arms are bit-identical to before #1956.
+/// Returns `None` on the legacy open-box-side abstention (a nonzero computed reduced
+/// cost riding an infinite bound).
+#[inline]
+fn ns_accumulate<F: FnMut(usize) -> DdEnc>(
     y: &[f64],
     c: &[f64],
     n: usize,
@@ -301,8 +445,24 @@ fn ns_accumulate<F: FnMut(usize) -> f64>(
     let mut legacy = acc.to_f64();
     let mut dd = acc;
     let mut s = 1.0 + legacy.abs();
+    let mut rig = Some(
+        b.iter()
+            .zip(y)
+            .fold(DdEnc::zero(), |e, (&bi, &yi)| e.add_prod(bi, yi)),
+    );
     for j in 0..n {
-        let rc = c[j] - aty(j);
+        let aty_j = aty(j);
+        // #1956: the reduced cost is enclosed in double-double *before* rounding;
+        // the legacy arms keep the old `c_j - fl(Aᵀy)_j` exactly.
+        if let Some(acc_r) = rig {
+            let rc = aty_j.neg().add_f64(c[j]);
+            rig = if rc.is_finite() {
+                enclosed_box_term(rc.lower(), rc.upper(), l[j], u[j]).map(|t| acc_r.add_f64(t))
+            } else {
+                None
+            };
+        }
+        let rc = c[j] - aty_j.d.hi;
         let bound = if rc > 0.0 {
             if l[j] <= -REFINE_INF {
                 return None;
@@ -321,10 +481,15 @@ fn ns_accumulate<F: FnMut(usize) -> f64>(
         dd = dd.add_prod(rc, bound);
         s += term.abs();
     }
+    let rigorous = rig
+        .filter(|e| e.is_finite())
+        .map(DdEnc::lower)
+        .filter(|g| g.is_finite());
     Some(NsEval {
         legacy,
         dd: dd.to_f64(),
         s,
+        rigorous,
     })
 }
 
@@ -341,12 +506,15 @@ fn ns_accumulate<F: FnMut(usize) -> f64>(
 /// `None` when the bound is `−∞` (a reduced cost with the wrong-signed open box
 /// side). `a` is row-major `m × n`.
 ///
-/// That is the *exact-arithmetic* statement. In floating point the evaluation can
-/// land above `p*`, which is what [`NS_MARGIN_REL`] is for: the returned value is
-/// `g(y) − 1e-9·S`, accumulated end-to-end in double-double. Before #1230 it was
-/// neither — `bᵀy` was rounded to `f64` and the box terms summed in plain `f64`
-/// with no margin — and it exceeded the true optimum on 206 of 980 exactly
-/// verified LPs. `DISCOPT_NS_MARGIN=0` restores that older evaluation bit-exactly.
+/// That is the *exact-arithmetic* statement. In floating point the returned value is
+/// proved `<= g(y)` (#1956): every reduced cost, `bᵀy`, box product and the final sum
+/// are enclosed (see [`NsEval::rigorous`]), and [`NS_MARGIN_REL`]` · S` is
+/// additionally subtracted from the double-double value, the smaller of the two being
+/// returned. Before #1230 it was neither — `bᵀy` was rounded to `f64` and the box
+/// terms summed in plain `f64` with no margin — and it exceeded the true optimum on
+/// 206 of 980 exactly verified LPs; between #1230 and #1956 the margin alone was a
+/// measured guard that a cancelling reduced cost defeated. `DISCOPT_NS_MARGIN=0`
+/// restores the pre-#1230 evaluation bit-exactly (and with it, the unsoundness).
 ///
 /// This is the exact formula the MILP boundary applies to candidate A's drifted
 /// dual (`milp_simplex._safe_lp_lower_bound_std`, which has always subtracted the
@@ -366,12 +534,12 @@ pub fn ns_safe_bound(
         return None;
     }
     ns_accumulate(y, c, n, b, l, u, |j| {
-        // Reduced cost (c − Aᵀy)_j, high-precision so a tiny true rc is not lost.
-        let mut aty = Dd::zero();
+        // (Aᵀy)_j, enclosed in double-double so a tiny true rc is not lost (#1956).
+        let mut aty = DdEnc::zero();
         for i in 0..m {
             aty = aty.add_prod(a[i * n + j], y[i]);
         }
-        aty.to_f64()
+        aty
     })?
     .finish()
 }
@@ -379,18 +547,17 @@ pub fn ns_safe_bound(
 /// CSC twin of [`ns_safe_bound`]: the Neumaier–Shcherbina safe lower bound for
 /// `min cᵀx s.t. A x = b, l ≤ x ≤ u` where `A` is given column-major as the raw
 /// CSC arrays (`col_ptr` length `n+1`, `row_idx`/`vals` the nonzeros). Identical
-/// arithmetic and rigor to the dense version — `bᵀy`, each column's `(Aᵀy)_j` and
-/// the running sum of the reduced-cost box terms all at double-double precision,
-/// then [`NS_MARGIN_REL`] subtracted — so the result is a rigorous lower bound
-/// (`≤` the true optimum) at any conditioning. Returns `None` when a nonzero
-/// reduced cost meets an infinite bound (no finite certificate) or a dual is
-/// non-finite. Used by the native spatial node kernel, whose node LPs are CSC, so
+/// arithmetic and rigor to the dense version — `bᵀy`, each column's reduced cost and
+/// the running sum of the box terms enclosed at double-double precision — so the
+/// result is proved `<= g(y)` for the given `y` (#1956). Returns `None` when a
+/// reduced cost that can take the open side's sign meets an infinite bound (no
+/// finite certificate) or a dual is non-finite. Used by the native spatial node kernel, whose node LPs are CSC, so
 /// no dense `m×n` matrix is ever materialized to certify the bound.
 ///
-/// The rigor claim in the previous paragraph was **false before #1230** and is why
-/// the margin exists: the box terms were summed in plain `f64` and nothing was
-/// subtracted, so the value could land a few ulps of `S` above `p*`. See
-/// [`NS_MARGIN_REL`].
+/// The rigor claim in the previous paragraph was **false before #1956**: until #1230
+/// the box terms were summed in plain `f64` with nothing subtracted, and from #1230
+/// to #1956 `(Aᵀy)_j` was rounded before the subtraction, so a cancelling reduced
+/// cost could vanish together with its `rc·bound` term. See [`NS_MARGIN_REL`].
 #[allow(clippy::too_many_arguments)]
 pub fn ns_safe_bound_csc(
     y: &[f64],
@@ -409,12 +576,12 @@ pub fn ns_safe_bound_csc(
     }
     debug_assert_eq!(col_ptr.len(), n + 1);
     ns_accumulate(y, c, n, b, l, u, |j| {
-        // (Aᵀy)_j = sum over column j's nonzeros of vals[p]*y[row_idx[p]], in DD.
-        let mut aty = Dd::zero();
+        // (Aᵀy)_j = sum over column j's nonzeros of vals[p]*y[row_idx[p]], enclosed.
+        let mut aty = DdEnc::zero();
         for p in col_ptr[j]..col_ptr[j + 1] {
             aty = aty.add_prod(vals[p], y[row_idx[p]]);
         }
-        aty.to_f64()
+        aty
     })?
     .finish()
 }
@@ -1072,7 +1239,7 @@ mod tests {
             g <= ISSUE_1230_P_STAR,
             "UNSOUND: g = {g} exceeds the verified optimum {ISSUE_1230_P_STAR}"
         );
-        // Still useful: the margin costs ~1e-9·S, not the bound.
+        // Still useful: the margin costs ~1e-12·S, not the bound.
         assert!(
             g >= ISSUE_1230_P_STAR - 1e-4,
             "bound {g} is uselessly loose"
@@ -1098,11 +1265,11 @@ mod tests {
         // read once per process and both arms have to be exercised in one test run.
         let (y, c, a, m, n, b, l, u) = issue_1230_violator();
         let ev = ns_accumulate(&y, &c, n, &b, &l, &u, |j| {
-            let mut aty = Dd::zero();
+            let mut aty = DdEnc::zero();
             for i in 0..m {
                 aty = aty.add_prod(a[i * n + j], y[i]);
             }
-            aty.to_f64()
+            aty
         })
         .expect("finite evaluation");
         assert_eq!(
@@ -1119,6 +1286,83 @@ mod tests {
             ev.dd > ISSUE_1230_P_STAR,
             "DD accumulation alone already fixed this — the fixture no longer pins the margin"
         );
+    }
+
+    /// #1956, 2x2: both columns fixed at `2^60`, rows `x0 - x1 = 0` and
+    /// `2^-54·x0 = 64`, `c = (1, -1)`: `g(y) = cᵀx = 0` for every `y`. With `y = (1, 1)`
+    /// `(Aᵀy)_0 = 1 + 2^-54` rounds to `1`, so the old evaluation lost both box terms
+    /// and returned `63.999999999935`. Zero tolerance: any value above `0` is unsound.
+    #[test]
+    fn issue_1956_cancelling_reduced_cost_on_fixed_columns() {
+        let x = 2f64.powi(60);
+        let (c, b, l, u, y) = ([1.0, -1.0], [0.0, 64.0], [x, x], [x, x], [1.0, 1.0]);
+        let a = [1.0, -1.0, 2f64.powi(-54), 0.0];
+        let g = ns_safe_bound(&y, &c, &a, 2, 2, &b, &l, &u).expect("finite bound");
+        assert!(g <= 0.0, "UNSOUND: g = {g} > optimum 0");
+        let (cp, ri, v) = dense_to_csc(&a, 2, 2);
+        let gc = ns_safe_bound_csc(&y, &c, &cp, &ri, &v, 2, 2, &b, &l, &u).expect("finite");
+        assert!(gc <= 0.0, "UNSOUND: csc g = {gc} > optimum 0");
+        assert!(
+            g >= -1e-6 && gc >= -1e-6,
+            "bound uselessly loose: {g}, {gc}"
+        );
+    }
+
+    /// #1956, the end-to-end LP: `min -c1·x1 - 0.7·x2` s.t. `1.1·x1 + x2 = 0`,
+    /// `x1 ∈ [0, R]`, `x2 ∈ [-2R, 2R]`, `c1 = fl(1.1·0.7)`. With the exactly optimal
+    /// dual `y = -0.7`, `rc_1 = -δ` (`δ = c1 - 1.1·0.7 = 4.4e-18`) rounds to `0` after
+    /// `(Aᵀy)_1` is rounded, dropping `-δ·R`. Zero tolerance against the exact optimum.
+    #[test]
+    fn issue_1956_cancelling_reduced_cost_on_wide_box() {
+        let c1 = 1.1f64 * 0.7;
+        let neg_delta = 1.1f64.mul_add(0.7, -c1); // exact: 1.1·0.7 - c1 = -δ
+        assert!(neg_delta < 0.0);
+        for r in [1e8, 1e12, 1e14] {
+            let (c, a, b) = ([-c1, -0.7], [1.1, 1.0], [0.0]);
+            let (l, u) = ([0.0, -2.0 * r], [r, 2.0 * r]);
+            let p_star_lo = mul_down(neg_delta, r); // <= exact p* = -δ·R
+            let g = ns_safe_bound(&[-0.7], &c, &a, 1, 2, &b, &l, &u).expect("finite bound");
+            assert!(
+                g <= p_star_lo,
+                "UNSOUND at R={r}: g = {g} > p* = {p_star_lo}"
+            );
+            assert!(g >= p_star_lo - 1e-9, "bound uselessly loose at R={r}: {g}");
+        }
+    }
+
+    /// The enclosure abstains, rather than guessing, when a free column's reduced cost
+    /// is not *proved* zero, and stays finite when it is exactly zero.
+    #[test]
+    fn issue_1956_free_column_needs_a_proved_zero_reduced_cost() {
+        assert_eq!(enclosed_box_term(0.0, 0.0, -1e30, 1e30), Some(0.0));
+        assert_eq!(enclosed_box_term(-1e-300, 1e-300, -1e30, 1e30), None);
+        assert_eq!(enclosed_box_term(-1.0, -0.5, -1e30, 3.0), Some(-3.0));
+        assert_eq!(enclosed_box_term(-1.0, 2.0, -4.0, 3.0), Some(-8.0));
+        assert_eq!(enclosed_box_term(0.5, 1.0, 2.0, 1e30), Some(1.0));
+    }
+
+    /// The enclosure brackets the exact value of a sum that cancels to far below the
+    /// rounding of its terms.
+    #[test]
+    fn dd_enclosure_brackets_exact_cancellation() {
+        let mut e = DdEnc::zero();
+        for (a, b) in [
+            (1e16, 1.0),
+            (1.0, 1.0),
+            (-1e16, 1.0),
+            (0.1, 3.0),
+            (-0.3, 1.0),
+        ] {
+            e = e.add_prod(a, b);
+        }
+        // Exact: 1 + fl(0.1)·3 - fl(0.3), computed exactly in rationals below.
+        let exact = 1.0 + (0.1f64.mul_add(3.0, -0.3)); // 0.1*3-0.3 exact via FMA, +1 exact
+        assert!(
+            e.lower() <= exact && exact <= e.upper(),
+            "{:?} vs {exact}",
+            e
+        );
+        assert!(e.upper() - e.lower() < 1e-14);
     }
 
     // Dense a (row-major m×n) -> CSC arrays (col_ptr, row_idx, vals).
