@@ -11052,3 +11052,34 @@ audit now refuses costs an unscaled cold re-solve. Devex stops at such points to
 for the default path on its own:** a scale-aware primal feasibility test inside the
 dual loop (tolerance per basic variable in original units), so it does not stop at
 points the audit will refuse.
+
+### 79d. Scale-aware primal feasibility in the dual loop: works as designed, does not rescue DSE (2026-10-25)
+
+Hypothesis from §79c: DSE collapses on `nvs20` because the dual loop stops at
+points feasible to `tol` in scaled units but not in original units. Prototype
+(local worktree, `ISSUE1935_SCALED_TOL=1`): `select_leaving` judges a basic column
+against `max(min(tol, 1e-7 * (1 + |c_j * bound'|) / c_j), 1e-15)`, i.e. the
+original-space audit's tolerance with a 10x margin; only columns scaled by more
+than ~100x get a tighter test. `cargo test -p discopt-core --lib` passes with it on
+(878).
+
+`nvs20`, warm-start mode 2, 30 s:
+
+| variant | status | node-LP s | refused `Optimal` | dual cold fallbacks |
+|---|---|---:|---:|---:|
+| Devex | optimal | 0.68 | 32 | 6 |
+| Devex + scaled tol | optimal | 0.70 | 27 | 6 |
+| DSE4 + sparse | time limit | 26.73 | 452 | 906 |
+| DSE4 + sparse + scaled tol | time limit | 26.40 | 27 | 886 |
+| DSE4 + scaled tol (dense solves) | time limit | 26.77 | 28 | 937 |
+| DSE3 + scaled tol (dense solves) | time limit | 26.27 | 153 | 2 |
+
+The test removes the refused points DSE was producing (452 -> 27), so that part of
+§79c's diagnosis holds, but **the collapse survives it**: DSE4 still abandons the
+dual loop ~900 times (not degeneracy: longest degenerate run 3; not the sparse
+solves: same with dense), and DSE3 has almost no fallbacks yet takes 81,025 pivots
+against Devex's 5,087. The remaining defect is in the inherited weights across
+nodes. Untested hypothesis: each node re-derives its own equilibration, so a
+parent's weights are in different units from the child's LP. On Devex the scaled
+tolerance changes little (refusals 32 -> 27, time unchanged), so it does not pay for
+an engine change by itself. Neither piece ships; the prototypes stay local.
