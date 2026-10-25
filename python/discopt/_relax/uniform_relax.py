@@ -422,11 +422,6 @@ class UniformRelaxation:
     # Bucket 3), consumed by the incremental McCormick patch to regenerate their
     # box-dependent envelope rows in closed form.
     affine_square_map: dict = dataclasses.field(default_factory=dict)
-    # Affine-FORM squares ``(Σ a_k·col_k + d)**2`` over two or more columns (or one
-    # lifted aux), ``aux -> (cols, coeffs, const)`` (#1941). Same consumer and same
-    # 4-row secant + 3-tangent envelope as ``affine_square_map``; the base may name
-    # lifted aux columns, whose bounds the patch derives first.
-    affine_form_square_map: dict = dataclasses.field(default_factory=dict)
     # Ratio-of-products lifts ``((num_cols...), (den_cols...)) -> aux`` over bare
     # originals with integer exponents (issue #309); consumed by the integer-ratio
     # partition bound to address the quotient column of its piece LPs.
@@ -1019,9 +1014,6 @@ class _Builder:
         # ``(var, aux) -> (coeff, const)`` so the incremental McCormick patch can
         # regenerate the box-dependent envelope in closed form.
         self.affine_square_map: dict[tuple[int, int], tuple[float, float]] = {}
-        # Affine-form squares over several columns (#1941): ``aux -> (cols, coeffs,
-        # const)``; see ``UniformRelaxation.affine_form_square_map``.
-        self.affine_form_square_map: dict[int, tuple[tuple, tuple, float]] = {}
         # Ratio-of-products lifts ``w = (Π x_i) / (Π y_j)`` over BARE original
         # variables with integer exponents (issue #309): keyed
         # ``((num_cols_sorted...), (den_cols_sorted...)) -> aux`` with multiplicity
@@ -3037,16 +3029,6 @@ def _build_power(ctx: _Builder, node: CNode, w: int) -> Envelope:
         items = [(j, c) for j, c in lt.coeffs.items() if c != 0.0]
         if len(items) == 1 and 0 <= items[0][0] < ctx.n_orig:
             ctx.affine_square_map[items[0][0], w] = (float(items[0][1]), float(lt.const))
-        elif items:
-            # #1941: an affine FORM over several columns, or over one lifted aux
-            # (``(x1 - 6*x0**2)**2`` lifts ``x0**2`` first). Same convex hull; the
-            # patch derives the form's interval from its columns' node bounds.
-            items.sort()
-            ctx.affine_form_square_map[w] = (
-                tuple(int(j) for j, _ in items),
-                tuple(float(c) for _, c in items),
-                float(lt.const),
-            )
     # #1351: an integer power over a base that is affine in ONE original but NOT the
     # bare ``x_i`` (``(x_i - c)**p``) gets no ``monomial_map`` entry -- that key
     # *means* ``x_i**p`` and ``single_orig_col`` rightly refuses a shifted/scaled
@@ -4973,7 +4955,6 @@ def build_uniform_relaxation(
         composite_multivar_specs=list(ctx.composite_multivar_specs),
         singular_tangent_specs=list(ctx.singular_tangent_specs),
         affine_square_map=dict(ctx.affine_square_map),
-        affine_form_square_map=dict(ctx.affine_form_square_map),
         ratio_map=dict(ctx.ratio_map),
         finite_domain_trig_square_tables=list(ctx.finite_domain_trig_square_tables),
         integrality=list(ctx.integrality),

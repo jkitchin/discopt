@@ -23262,13 +23262,6 @@ def solve_model(
         for _pfam, _pcount in _mc_lp_relaxer._pool_stats.items():
             if _pcount > 0:
                 _solver_stats[f"pool/{_pfam}"] = float(_pcount)
-    # #1941: how many node LPs the incremental fast path assembled, and how many of
-    # them carried the objective floor (``DISCOPT_INCREMENTAL_WIDEN``). Emitted
-    # whenever the fast path exists, zeros included, so "never ran" is visible.
-    _inc_engine = None if _mc_lp_relaxer is None else _mc_lp_relaxer._inc
-    if _inc_engine is not None:
-        _solver_stats["incremental/assembled_nodes"] = float(_inc_engine.n_assembled)
-        _solver_stats["incremental/floor_rows"] = float(_inc_engine.n_floor_rows)
     # #1039: the #671 failure-triggered row filter, surfaced so a test can assert
     # the mechanism directly ("never fires on an already-solving instance")
     # instead of inferring it from two whole solves compared across a wall clock.

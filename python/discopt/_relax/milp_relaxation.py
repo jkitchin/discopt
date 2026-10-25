@@ -2550,8 +2550,6 @@ def _uniform_relaxation_delegate(
     # Affine squares ``(c·x_j+d)**2`` (#640 Bucket 3): ``(var, aux) -> (coeff, const)``
     # for the incremental McCormick patch's closed-form envelope regeneration.
     vm["affine_square"] = dict(rel.affine_square_map)
-    # Affine-form squares over several columns (#1941): ``aux -> (cols, coeffs, const)``.
-    vm["affine_form_square"] = dict(rel.affine_form_square_map)
     # Ratio-of-products lifts (issue #309): the quotient aux column each exact
     # ``(Π x_i)/(Π y_j)`` of bare originals was lifted to, for the integer-ratio
     # partition bound.
@@ -3423,14 +3421,6 @@ def _reciprocal_term_lower_bound(
         return 0.0
     denom_lo = _expression_lower_bound_for_lift(denominator, model, flat_lb, flat_ub)
     denom_hi = _expression_upper_bound_for_lift(denominator, model, flat_lb, flat_ub)
-    return _reciprocal_bound_from_enclosure(scaled_numerator, denom_lo, denom_hi)
-
-
-def _reciprocal_bound_from_enclosure(
-    scaled_numerator: float, denom_lo: Optional[float], denom_hi: Optional[float]
-) -> Optional[float]:
-    """The arithmetic half of :func:`_reciprocal_term_lower_bound`, given the
-    denominator's enclosure (shared with :class:`SeparableBoundPlan`)."""
     # A strictly-positive, finite lower end is required for a sound reciprocal;
     # _expression_lower_bound_for_lift returns None when it cannot prove one.
     if denom_lo is None or not np.isfinite(denom_lo) or denom_lo <= 1e-12:
@@ -3551,14 +3541,6 @@ def _even_power_term_lower_bound(
     """
     bl = _expression_lower_bound_for_lift(base, model, flat_lb, flat_ub)
     bh = _expression_upper_bound_for_lift(base, model, flat_lb, flat_ub)
-    return _even_power_bound_from_enclosure(coeff, n, bl, bh)
-
-
-def _even_power_bound_from_enclosure(
-    coeff: float, n: int, bl: Optional[float], bh: Optional[float]
-) -> Optional[float]:
-    """The arithmetic half of :func:`_even_power_term_lower_bound`, given the base's
-    enclosure (shared with :class:`SeparableBoundPlan`)."""
     if coeff >= 0.0:
         if bl is None or bh is None or not (np.isfinite(bl) and np.isfinite(bh)):
             return 0.0
@@ -3601,251 +3583,166 @@ def _separable_objective_lower_bound(
     before the exact path sees it. The per-variable polynomial (exact terms plus
     the legacy path's float monomial coefficients, taken at their exact float
     values) is bounded by ``_exact_polynomial_lower_bound``.
-
-    The matching depends only on ``expr``; the box enters only the interval
-    arithmetic. :class:`SeparableBoundPlan` holds the two halves apart so a caller
-    bounding one expression over many boxes matches it once (#1941).
     """
-    plan = SeparableBoundPlan.compile(expr, model, len(flat_lb), expand_powers=expand_powers)
-    return plan.evaluate(flat_lb, flat_ub)
+    raw_terms: list[tuple[float, Expression]] = []
+    _flatten_additive_terms(expr, 1.0, raw_terms)
 
-
-class SeparableBoundPlan:
-    """:func:`_separable_objective_lower_bound` split at the box (#1941).
-
-    ``compile`` runs everything that depends only on the expression -- the additive
-    flattening, the exact univariate-polynomial match, the power expansion, the
-    distribution and the shape matchers, the affine linearizations -- and records,
-    in term order, a constant or a box-dependent step per term. ``evaluate`` runs
-    those steps over one box. It performs the operations the single-shot function
-    performed, in the same order, so it returns the same float; the matching that
-    dominated its cost (2.2 s per call on du-opt5's objective) is paid once. A
-    structural abstention (an unrecognized term, the #1456 distribution budget, a
-    non-finite monomial coefficient) is a plan whose ``evaluate`` returns ``None``
-    for every box, exactly as the function did.
-    """
-
-    __slots__ = ("_steps", "_exact_terms", "_exact_const", "_has_terms", "_n_vars", "_abstain")
-
-    def __init__(self) -> None:
-        self._steps: list[tuple] = []
-        self._exact_terms: dict[int, dict[int, Fraction]] = {}
-        self._exact_const = Fraction(0)
-        self._has_terms = False
-        self._n_vars = 0
-        self._abstain = False
-
-    @classmethod
-    def compile(
-        cls, expr: Expression, model: Model, n_vars: int, *, expand_powers: bool = False
-    ) -> "SeparableBoundPlan":
-        plan = cls()
-        plan._n_vars = int(n_vars)
-        raw_terms: list[tuple[float, Expression]] = []
-        _flatten_additive_terms(expr, 1.0, raw_terms)
-
-        exact_terms: dict[int, dict[int, Fraction]] = {}
-        exact_const = Fraction(0)
-        terms: list[tuple[float, Expression]] = []
-        for scale, term in raw_terms:
-            exact = _exact_univariate_polynomial(term, model)
-            if exact is not None:
-                var_idx, coeffs = exact
-                frac_scale = Fraction(scale)
-                if var_idx is None:
-                    exact_const += frac_scale * coeffs.get(0, Fraction(0))
-                else:
-                    exact_terms[var_idx] = _exact_poly_add(
-                        exact_terms.get(var_idx, {}),
-                        {p: frac_scale * c for p, c in coeffs.items()},
-                    )
-                continue
-            if expand_powers:
-                expanded = _expand_integer_powers_for_relaxation(term, model)
-                _flatten_additive_terms(expanded, scale, terms)
+    exact_terms: dict[int, dict[int, Fraction]] = {}
+    exact_const = Fraction(0)
+    terms: list[tuple[float, Expression]] = []
+    for scale, term in raw_terms:
+        exact = _exact_univariate_polynomial(term, model)
+        if exact is not None:
+            var_idx, coeffs = exact
+            frac_scale = Fraction(scale)
+            if var_idx is None:
+                exact_const += frac_scale * coeffs.get(0, Fraction(0))
             else:
-                terms.append((scale, term))
-        plan._has_terms = bool(terms)
-
-        steps = plan._steps
-        polynomial_terms: dict[int, dict[int, float]] = {}
-
-        def _compile_simple_term(scale: float, term: Expression) -> bool:
-            """One already-distributed, non-reciprocal term; ``False`` abstains."""
-            if abs(scale) <= 1e-12:
-                return True
-            const = _constant_value(term)
-            if const is not None:
-                steps.append(("const", scale * const))
-                return True
-            x_exp = _match_x_exp_product(term, model)
-            if x_exp is not None:
-                scalar, var_idx = x_exp
-                term_scale = scale * scalar
-                if abs(term_scale) <= 1e-12:
-                    return True
-                if term_scale > 0.0:
-                    steps.append(("const", term_scale * (-1.0 / np.e)))
-                    return True
-                steps.append(("x_exp", term_scale, var_idx))
-                return True
-            if _is_cos_call(term):
-                steps.append(("cos", term, scale, model))
-                return True
-            monomial = _match_scaled_monomial(term, model)
-            if monomial is not None:
-                scalar, var_idx, power = monomial
-                polynomial_terms.setdefault(var_idx, {})
-                polynomial_terms[var_idx][power] = (
-                    polynomial_terms[var_idx].get(power, 0.0) + scale * scalar
+                exact_terms[var_idx] = _exact_poly_add(
+                    exact_terms.get(var_idx, {}),
+                    {p: frac_scale * c for p, c in coeffs.items()},
                 )
-                return True
-            try:
-                lin, lin_const = _linearize_affine_expr_sparse(term, model, plan._n_vars)
-            except ValueError:
-                return False
-            steps.append(("affine", scale, lin, lin_const))
+            continue
+        if expand_powers:
+            expanded = _expand_integer_powers_for_relaxation(term, model)
+            _flatten_additive_terms(expanded, scale, terms)
+        else:
+            terms.append((scale, term))
+
+    total = 0.0
+    polynomial_terms: dict[int, dict[int, float]] = {}
+
+    def _accumulate_simple_term(scale: float, term: Expression) -> bool:
+        """Fold one already-distributed, non-reciprocal term into the running bound.
+
+        Returns ``False`` (caller abstains entirely) when the term is not one of
+        the recognized separable shapes.
+        """
+        nonlocal total
+        if abs(scale) <= 1e-12:
+            return True
+        const = _constant_value(term)
+        if const is not None:
+            total += scale * const
             return True
 
-        for scale, term in terms:
-            if abs(scale) <= 1e-12:
-                continue
-            # Reciprocal ``k / D(x)`` and multivariate even powers: matched on the
-            # un-distributed term (see the comments these steps' bounds carry).
-            recip = _match_scaled_constant_division(term, scale)
-            if recip is not None:
-                k, denom = recip
-                if abs(k) <= 1e-12:
-                    steps.append(("const", 0.0))
-                else:
-                    steps.append(("recip", k, *_lift_bound_plans(denom, model, n_vars)))
-                continue
-            even_pow = _match_scaled_even_power(term, scale)
-            if even_pow is not None and _count_distinct_scalar_refs(even_pow[1], model) >= 2:
-                coeff, base, power = even_pow
-                steps.append(("even_power", coeff, power, *_lift_bound_plans(base, model, n_vars)))
-                continue
-            # #1456: a term the per-call distribution budget cannot afford abstains
-            # without paying for it.
-            if estimate_distributed_terms(fold_affine_constants(term)) > _DISTRIBUTE_TERM_BUDGET:
-                plan._abstain = True
-                return plan
-            sub_terms: list[tuple[float, Expression]] = []
-            _flatten_additive_terms(distribute_products(term), scale, sub_terms)
-            for sub_scale, sub_term in sub_terms:
-                if not _compile_simple_term(sub_scale, sub_term):
-                    plan._abstain = True
-                    return plan
+        x_exp = _match_x_exp_product(term, model)
+        if x_exp is not None:
+            scalar, var_idx = x_exp
+            term_scale = scale * scalar
+            if abs(term_scale) <= 1e-12:
+                return True
+            if term_scale > 0.0:
+                total += term_scale * (-1.0 / np.e)
+                return True
+            upper = _x_exp_upper_bound(var_idx, flat_lb, flat_ub)
+            if upper is None:
+                return False
+            total += term_scale * upper
+            return True
 
-        for var_idx, float_coeffs in polynomial_terms.items():
-            exact_terms[var_idx] = _exact_poly_add(
-                exact_terms.get(var_idx, {}),
-                {p: Fraction(c) for p, c in float_coeffs.items() if math.isfinite(c)},
+        if _is_cos_call(term):
+            integer_lb = _integer_affine_cos_lower_bound(term, scale, model, flat_lb, flat_ub)
+            total += integer_lb if integer_lb is not None else -abs(scale)
+            return True
+
+        monomial = _match_scaled_monomial(term, model)
+        if monomial is not None:
+            scalar, var_idx, power = monomial
+            polynomial_terms.setdefault(var_idx, {})
+            polynomial_terms[var_idx][power] = (
+                polynomial_terms[var_idx].get(power, 0.0) + scale * scalar
             )
-            if not all(math.isfinite(c) for c in float_coeffs.values()):
-                plan._abstain = True
-                return plan
-        plan._exact_terms = exact_terms
-        plan._exact_const = exact_const
-        return plan
+            return True
 
-    def evaluate(self, flat_lb: np.ndarray, flat_ub: np.ndarray) -> Optional[float]:
-        """The lower bound over ``[flat_lb, flat_ub]``, or ``None`` (abstain)."""
-        if self._abstain:
-            return None
-        if len(flat_lb) != self._n_vars:
-            raise ValueError(f"plan compiled for {self._n_vars} columns, box has {len(flat_lb)}")
-        total = 0.0
-        for step in self._steps:
-            kind = step[0]
-            if kind == "const":
-                total += step[1]
-            elif kind == "x_exp":
-                upper = _x_exp_upper_bound(step[2], flat_lb, flat_ub)
-                if upper is None:
-                    return None
-                total += step[1] * upper
-            elif kind == "cos":
-                scale = step[2]
-                integer_lb = _integer_affine_cos_lower_bound(
-                    step[1], scale, step[3], flat_lb, flat_ub
-                )
-                total += integer_lb if integer_lb is not None else -abs(scale)
-            elif kind == "affine":
-                _scale, lin, lin_const = step[1], step[2], step[3]
-                want_lower = _scale >= 0.0
-                bound = float(lin_const)
-                for var_idx in sorted(lin):
-                    c = lin[var_idx]
-                    if abs(c) <= 1e-12:
-                        continue
-                    if not (0 <= var_idx < self._n_vars):
-                        return None  # unindexable support
-                    chosen = (
-                        float(flat_lb[var_idx])
-                        if (c >= 0.0) == want_lower
-                        else float(flat_ub[var_idx])
-                    )
-                    if not _is_effectively_finite(chosen):
-                        return None
-                    bound += c * chosen
-                total += _scale * bound
-            elif kind == "recip":
-                lo, hi = _lift_enclosure(step[2], step[3], flat_lb, flat_ub)
-                b = _reciprocal_bound_from_enclosure(step[1], lo, hi)
-                if b is None:
-                    return None
-                total += b
-            else:  # "even_power"
-                lo, hi = _lift_enclosure(step[3], step[4], flat_lb, flat_ub)
-                b = _even_power_bound_from_enclosure(step[1], step[2], lo, hi)
-                if b is None:
-                    return None
-                total += b
+        affine_bound = _scaled_affine_lower_bound(term, scale, model, flat_lb, flat_ub)
+        if affine_bound is None:
+            return False
+        total += affine_bound
+        return True
 
-        exact_total = self._exact_const
-        for var_idx, exact_coeffs in self._exact_terms.items():
-            if not 0 <= var_idx < len(flat_lb):
+    for scale, term in terms:
+        if abs(scale) <= 1e-12:
+            continue
+
+        # Reciprocal term ``k / D(x)`` with a strictly-positive denominator (e.g.
+        # ex8_1_6's ``-1/(0.1 + (x0-4)**2 + (x1-4)**2)``). The MILP linearizer
+        # cannot relax a non-constant division, so without this the whole
+        # objective is dropped and AMP can never certify. A rigorous interval
+        # enclosure ``D in [D_lo, D_hi]`` with ``D_lo > 0`` yields a valid
+        # constant lower bound for the term: ``k/D_hi`` when ``k > 0`` else
+        # ``k/D_lo`` (``1/D`` is decreasing in ``D``). The bound tightens as B&B
+        # branching shrinks the box, eventually enabling certification. Matched
+        # on the un-distributed term so ``D``'s ``(x-a)**2`` shape survives for a
+        # tight interval enclosure (distribution would expand it to a polynomial
+        # whose naive interval enclosure is uselessly loose on a wide box).
+        recip = _match_scaled_constant_division(term, scale)
+        if recip is not None:
+            recip_bound = _reciprocal_term_lower_bound(recip[0], recip[1], model, flat_lb, flat_ub)
+            if recip_bound is None:
                 return None
-            lower = _exact_polynomial_lower_bound(
-                exact_coeffs, float(flat_lb[var_idx]), float(flat_ub[var_idx])
-            )
-            if lower is None:
+            total += recip_bound
+            continue
+
+        # Even-power term ``c * (E(x))**n`` (n even) with a *multivariate* base,
+        # e.g. Rosenbrock's ``100 * (x1 - x0**2)**2``. Distributing it yields a
+        # bilinear/multivariate polynomial whose cross terms no single-variable
+        # matcher accepts, so the whole objective would be dropped. But a square
+        # is nonnegative regardless of its argument's structure: for ``c >= 0``
+        # the term is ``>= 0`` (tightened to the vertex minimum of ``E**n`` when
+        # the box encloses ``E``). Recognizing it on the un-distributed term lets
+        # AMP certify sum-of-squares objectives at the root. Single-variable
+        # bases are left to the polynomial path, which combines them with any
+        # linear term in the same variable for a strictly tighter bound.
+        even_pow = _match_scaled_even_power(term, scale)
+        if even_pow is not None and _count_distinct_scalar_refs(even_pow[1], model) >= 2:
+            coeff, base, power = even_pow
+            ep_bound = _even_power_term_lower_bound(coeff, base, power, model, flat_lb, flat_ub)
+            if ep_bound is None:
                 return None
-            exact_total += lower
+            total += ep_bound
+            continue
 
-        exact_float = _fraction_to_float_down(exact_total)
-        if exact_float is None or not np.isfinite(total):
+        # Distribute this single term and fold each resulting sub-term through the
+        # simple-shape matchers (polynomial path needs the expanded form).
+        # #1456: a term the per-call distribution budget cannot afford would come
+        # back with products left intact -- not a separable shape -- after up to
+        # the full budget of work, repeated at every relaxation build. Abstain
+        # without paying for it (only johnall's and saa_2's bodies are that big).
+        if estimate_distributed_terms(fold_affine_constants(term)) > _DISTRIBUTE_TERM_BUDGET:
             return None
-        total = total + exact_float
-        if total != 0.0 and self._has_terms:
-            # ``total`` mixes the legacy float terms with the exact part; one
-            # rounding of this final sum is moved outward.
-            total = math.nextafter(total, -math.inf)
-        if not np.isfinite(total):
+        sub_terms: list[tuple[float, Expression]] = []
+        _flatten_additive_terms(distribute_products(term), scale, sub_terms)
+        for sub_scale, sub_term in sub_terms:
+            if not _accumulate_simple_term(sub_scale, sub_term):
+                return None
+
+    exact_total = exact_const
+    for var_idx, float_coeffs in polynomial_terms.items():
+        exact_terms[var_idx] = _exact_poly_add(
+            exact_terms.get(var_idx, {}),
+            {p: Fraction(c) for p, c in float_coeffs.items() if math.isfinite(c)},
+        )
+        if not all(math.isfinite(c) for c in float_coeffs.values()):
             return None
-        return float(total)
+    for var_idx, exact_coeffs in exact_terms.items():
+        if not 0 <= var_idx < len(flat_lb):
+            return None
+        lower = _exact_polynomial_lower_bound(
+            exact_coeffs, float(flat_lb[var_idx]), float(flat_ub[var_idx])
+        )
+        if lower is None:
+            return None
+        exact_total += lower
 
-
-def _lift_bound_plans(
-    expr: Expression, model: Model, n_vars: int
-) -> tuple["SeparableBoundPlan", "SeparableBoundPlan"]:
-    """Plans for ``_expression_lower_bound_for_lift`` of ``expr`` and of ``-expr``
-    (the latter gives ``_expression_upper_bound_for_lift``)."""
-    return (
-        SeparableBoundPlan.compile(expr, model, n_vars, expand_powers=True),
-        SeparableBoundPlan.compile(UnaryOp("neg", expr), model, n_vars, expand_powers=True),
-    )
-
-
-def _lift_enclosure(
-    lower: "SeparableBoundPlan",
-    lower_of_negated: "SeparableBoundPlan",
-    flat_lb: np.ndarray,
-    flat_ub: np.ndarray,
-) -> tuple[Optional[float], Optional[float]]:
-    """``(_expression_lower_bound_for_lift, _expression_upper_bound_for_lift)`` of
-    the expression the two plans were compiled from, over one box."""
-    lo = _finite_bound_or_none(lower.evaluate(flat_lb, flat_ub))
-    neg = _finite_bound_or_none(lower_of_negated.evaluate(flat_lb, flat_ub))
-    return lo, (None if neg is None else -neg)
+    exact_float = _fraction_to_float_down(exact_total)
+    if exact_float is None or not np.isfinite(total):
+        return None
+    total = total + exact_float
+    if total != 0.0 and terms:
+        # ``total`` mixes the legacy float terms with the exact part; one
+        # rounding of this final sum is moved outward.
+        total = math.nextafter(total, -math.inf)
+    if not np.isfinite(total):
+        return None
+    return float(total)
