@@ -11010,6 +11010,27 @@ instances, 30 s, 77 checks against `minlplib.solu`): false 0, bad points 0, lost
 `rows_verified` -- row equalities of `[A | I]` only, so a negative slack or a
 structural outside its box would still pass. A related gap, outside this change.
 
+**Covered since #1945 (2026-10-25).**
+- **Entry experiment** (`main` @ `e5812d0`, count-only counters).
+  - Default route: the driver saw only 488 `Optimal` node LPs on 5 corpus instances, and 0 failed the original-space audit.
+  - AMP route (whose MILP relaxations go through the driver): 314 of 18,930 failed, and 129 of them were integral vertices `rows_verified` accepted as incumbents.
+  - Every violation was below 1e-3 relative; most were 1e-6–1e-5. Nothing like the fixture's 1.8e-2 appeared.
+  - No published result was wrong: the Python gates (`_point_feasible`, the MILP-BB exit, the LP route) check bounds and refuse such a point.
+- **Fix.** `lp::simplex::ScaledProblem` owns the original CSC, the `Scaling` and the scaled CSC, built once per batch.
+  - Every driver node, strong-branch and dive solve goes through `ScaledProblem::verify`: audit the unscaled point against the original data, re-solve on the original data on failure, map a decided retry back into solve coordinates exactly, else `Numerical`.
+  - `incumbent_verified` adds the audit's bound test (`primal::bounds_hold`) to `rows_verified` for node and dive incumbents.
+  - A structural test fails if code outside `lp/simplex` builds a `Scaling` or scales a matrix.
+- **Panel** (in-repo corpus, 70 instances × {default, AMP} × {`main`, branch}, 30 s, interleaved):
+  - 0 certificates lost or gained (54/54 default, 22/22 AMP), 0 objective drift on both-certified pairs;
+  - 133/140 pairs identical in node count and objective;
+  - both-certified wall time: median ratio 0.987 (default) and 1.001 (AMP).
+  - The 7 differing pairs all ran at or near the time limit. Two more interleaved runs per arm put 5 of them within `main`'s own spread; on cvxnonsep_psig30 only the branch's node count varies (621/675/622 against `main`'s 675×3), with identical objective and certificate.
+  - One reproducible gain: nvs05 under AMP reaches the optimal incumbent 5.4709 in 3/3 runs, where `main` stalls at 7.7542 in 3/3.
+  - Bounds that moved all got tighter and stay below the oracle: nvs05 4.319 → 5.089, tanksize 1.2610 → 1.2618, nvs14 (AMP) −40454.0 → −40379.6.
+- **Counters** (branch, AMP, the 7 instances with driver failures):
+  - unscaled retries decide most refusals (e.g. nvs06 56/59, st_e38 30/31), except nvs21 (63/459; the rest become `Numerical`, with the panel outcome unchanged);
+  - `DriverIncumbentBoundsRefused` = 0 everywhere, so the incumbent bound check is defense in depth behind `verify`.
+
 ### 79c. DSE with inherited weights + hypersparse solves: in-tree, mixed; blocked by the scaled feasibility tolerance (2026-10-25)
 
 Built in a local worktree (not merged): the dual loop's final steepest-edge
