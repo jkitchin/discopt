@@ -38,6 +38,37 @@ import scipy.sparse as sp
 _TOL = 1e-12
 
 
+def _vector_vars_enabled() -> bool:
+    """``DISCOPT_NATIVE_KERNEL_VECTOR_VARS``: let the native kernel take models with
+    array (vector / matrix) variables. **Default ON since its §5 panel**; ``=0``
+    restores the old decline (every array model on the Python spatial tree).
+
+    The kernel works on flat columns and the solver side already maps results back
+    through ``_unpack_solution``; only this producer assumed one column per variable
+    object, so every model written with ``shape=`` fell to the Python spatial tree.
+    With the flag, the spec is built over the C-order flat columns, which is the
+    layout ``build_uniform_relaxation`` and ``flat_variable_bounds`` already use:
+    an array model and its scalar twin produce byte-identical specs, so the array
+    path inherits the scalar path's soundness exactly
+    (``test_native_kernel_vector_vars.py`` pins the identity).
+
+    Graduation panel (``scripts/panel_native_kernel_vector_vars.py``, 30 s, OFF/ON
+    interleaved ABBA): the 154 in-repo ``.nl`` files give identical specs OFF and ON
+    (all scalar); 17 array/scalar twin pairs give byte-identical specs; over 50
+    array-variable models -- the #1934 panel's 33 (brute-force oracle), dense integer
+    QPs n = 10..20, non-uniform bounds, 2-D variables, scalars around arrays -- total
+    wall 151.4 -> 61.5 s, certified 48 -> 50, 35 faster and 0 slower, with every
+    incumbent re-verified on the original model and every bound checked against the
+    oracle: 969 checks, 0 failures. Dense QP n=15 6.3 -> 1.0 s; ``qp_n18_s1`` and
+    ``qp_n20_s1`` certify (6.2 s, 8.8 s) where OFF ends uncertified at 30 s. Models
+    outside the kernel's term families (the panel's ``mixed_*``) are declined as
+    before and are unchanged.
+    """
+    from discopt.solver_tuning import _env_flag
+
+    return _env_flag("DISCOPT_NATIVE_KERNEL_VECTOR_VARS", default=True)
+
+
 def build_spatial_kernel_spec(
     model, bounds: Optional[tuple] = None, deadline: Optional[float] = None
 ) -> Optional[dict]:
@@ -61,16 +92,18 @@ def build_spatial_kernel_spec(
     ``model_value = sign * (internal + offset)``. Callers pass the non-``meta_`` keys
     to the kernel; :func:`solve_with_native_kernel` strips them automatically."""
     from discopt._relax.incremental_mccormick import row_support_within
+    from discopt._relax.model_utils import flat_variable_bounds
     from discopt._relax.uniform_relax import RelaxationBuildAborted, build_uniform_relaxation
     from discopt.modeling.core import VarType
     from discopt.solver_tuning import current as _tuning
 
-    # Scalar-variable models only: the relaxation's column 0..n_orig-1 maps to the n
-    # variable objects one-to-one only when each has size 1. Vector variables shift
-    # the layout and are a follow-up.
-    if any(int(getattr(v, "size", 1)) != 1 for v in model._variables):
+    # Columns 0..n_orig-1 of the relaxation are the model's variables flattened in
+    # C order, one per scalar ELEMENT. Without the flag a model with any array
+    # variable is declined (the pre-flag behaviour); see ``_vector_vars_enabled``.
+    sizes = [int(getattr(v, "size", 1)) for v in model._variables]
+    if any(sz != 1 for sz in sizes) and not _vector_vars_enabled():
         return None
-    n_orig = len(model._variables)
+    n_orig = sum(sizes)
 
     if bounds is not None:
         lb = np.asarray(bounds[0], dtype=np.float64).copy()
@@ -78,8 +111,7 @@ def build_spatial_kernel_spec(
         if lb.shape != (n_orig,) or ub.shape != (n_orig,):
             return None
     else:
-        lb = np.array([float(np.min(v.lb)) for v in model._variables], dtype=np.float64)
-        ub = np.array([float(np.max(v.ub)) for v in model._variables], dtype=np.float64)
+        lb, ub = flat_variable_bounds(model)
 
     def _build(box_lb, box_ub):
         # Skip the separable objective floor and convex-lift OA rows: both are
@@ -390,9 +422,11 @@ def build_spatial_kernel_spec(
     global_hi[:n_orig] = ub
 
     integrality = np.zeros(ncol, dtype=np.int64)
-    for k, v in enumerate(model._variables):
+    off = 0
+    for v, sz in zip(model._variables, sizes):
         if v.var_type in (VarType.INTEGER, VarType.BINARY):
-            integrality[k] = 1
+            integrality[off : off + sz] = 1
+        off += sz
     milp_int = getattr(milp, "_integrality", None)
     if milp_int is not None:
         mi = np.asarray(milp_int).ravel()

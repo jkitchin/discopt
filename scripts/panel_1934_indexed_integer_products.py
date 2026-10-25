@@ -152,6 +152,26 @@ def gen_two_dim(seed, k, ub):
     return m, [w], True
 
 
+def gen_dense_qp(seed, n):
+    """The #1940 dense integer QP with an array variable -- the class that blocked
+    this flag's graduation: ``sum_{i<j} Q_ij x_i x_j + sum x``, ``x in [0,10]^n``,
+    ``Q ~ N(0,1)``, ``sum x >= n``. Too large to brute-force; its oracle is the
+    certified optimum, cross-checked between arms."""
+    rng = np.random.default_rng(seed)
+    m = dm.Model(f"dense_n{n}_s{seed}")
+    x = m.integer("x", shape=(n,), lb=0, ub=10)
+    m.minimize(
+        sum(float(rng.normal()) * x[i] * x[j] for i in range(n) for j in range(i + 1, n))
+        + sum(x[i] for i in range(n))
+    )
+    m.subject_to(sum(x[i] for i in range(n)) >= n)
+    return m, [x], False
+
+
+def dense_instances():
+    return [gen_dense_qp(s, n) for n in (12, 15, 18, 20) for s in (0, 1)]
+
+
 def instances():
     out = []
     for s in range(3):
@@ -222,9 +242,9 @@ def solve_arm(m, on, tl):
     )
 
 
-def panel(tl):
+def panel(tl, dense=False):
     rows_out = []
-    for m, vars_, pure in instances():
+    for m, vars_, pure in instances() + (dense_instances() if dense else []):
         set_flag(True)
         fires = ipr.has_nonconvex_integer_bilinear(m)
         set_flag(False)
@@ -290,11 +310,16 @@ def main():
     ap.add_argument("--time-limit", type=float, default=30.0)
     ap.add_argument("--out", default=None)
     ap.add_argument("--skip-corpus", action="store_true")
+    ap.add_argument(
+        "--dense",
+        action="store_true",
+        help="also run the dense integer array QPs (n = 12..20) that blocked graduation",
+    )
     args = ap.parse_args()
     print("load:", os.getloadavg(), flush=True)
     if not args.skip_corpus:
         corpus_neutrality()
-    rows = panel(args.time_limit)
+    rows = panel(args.time_limit, dense=args.dense)
     n = len(rows)
     off_solved = sum(r["off_status"][0] == "optimal" for r in rows)
     on_solved = sum(r["on_status"][0] == "optimal" for r in rows)

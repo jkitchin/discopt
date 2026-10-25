@@ -304,7 +304,16 @@ def test_fbbt_box_contains_dae_solution():
     res = m.solve(time_limit=20, max_nodes=50)
     assert res.x is not None
 
-    assert str(res.status) in ("SolveStatus.OPTIMAL", "SolveStatus.FEASIBLE", "optimal", "feasible")
+    # ``node_limit``: the native spatial kernel's name for a max_nodes stop holding a
+    # verified incumbent (accepted since #1153); it serves this model since
+    # DISCOPT_NATIVE_KERNEL_VECTOR_VARS. The incumbent is what the check below needs.
+    assert str(res.status) in (
+        "SolveStatus.OPTIMAL",
+        "SolveStatus.FEASIBLE",
+        "optimal",
+        "feasible",
+        "node_limit",
+    )
     repr_ = model_to_repr(m)
     lbs, ubs = repr_.fbbt(max_iter=50, tol=1e-9)
     lbs, ubs = np.asarray(lbs), np.asarray(ubs)

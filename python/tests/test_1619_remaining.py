@@ -49,7 +49,10 @@ def test_binary_qp_legacy_opt_out_keeps_spatial_bb(monkeypatch):
     r = _dopants().solve(time_limit=60)
     assert r.status == "optimal"
     assert r.objective == pytest.approx(-1.16, abs=1e-6)
-    assert r.algorithm_route.startswith("spatial-bb")
+    # Spatial B&B, not the MILP route. ``x`` is an array variable, so since
+    # ``DISCOPT_NATIVE_KERNEL_VECTOR_VARS`` the native Rust spatial kernel serves it
+    # (``native-spatial``); with that flag off it is the Python tree (``spatial-bb``).
+    assert r.algorithm_route.startswith(("spatial-bb", "native-spatial")), r.algorithm_route
 
 
 # ── E-02 ─────────────────────────────────────────────────────────────────────

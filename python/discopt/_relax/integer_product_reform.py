@@ -74,9 +74,9 @@ _BIGM_BOUND_CAP = 1e15
 
 
 def _indexed_refs_enabled() -> bool:
-    """``DISCOPT_INTEGER_PRODUCT_INDEXED`` (default OFF, issue #1934): recognise
-    entries of array variables (``x[0] * x[1]``, ``w[0, 1] ** 2``) as integer
-    product factors.
+    """``DISCOPT_INTEGER_PRODUCT_INDEXED`` (issue #1934; **default ON** since
+    2026-10-25, ``=0`` restores the legacy blindness): recognise entries of array
+    variables (``x[0] * x[1]``, ``w[0, 1] ** 2``) as integer product factors.
 
     Until #1934 :func:`_scalar_var_ref` read the indexed variable from
     ``IndexExpression.variable`` / ``.var``, neither of which exists (the node
@@ -87,29 +87,32 @@ def _indexed_refs_enabled() -> bool:
     models are now rewritten, and a fully linearized one is re-routed from the
     spatial McCormick path to the MILP engine.
 
-    Why it is not the default (CLAUDE.md §5): the panel is cert-clean but not
-    net-positive. ``scripts/panel_1934_indexed_integer_products.py`` (33 small
-    generated models, <= 6 integers) is 55.9 s -> 1.7 s total wall ON, but one
-    size up the lift loses to the spatial route it replaces. Dense integer QP
-    ``sum_{i<j} Q_ij x_i x_j + sum x``, ``x in [0, 10]^n``, ``Q ~ N(0, 1)`` seed 0,
-    ``sum x >= n``, 30 s: n=15 optimal in ~3 s OFF vs ~22 s ON; n=20 OFF
-    ``feasible`` -2208.41 / bound ~-2670, ON ``time_limit`` -2125.35 / bound
-    ~-3090 (worse incumbent and looser bound). The same model with *scalar*
-    variables already takes the lift by default and loses the same way, so the
-    weakness is the adoption step's, not this recognition's. What would change
-    this: the adoption declining the lift when it will lose -- tracked in #1940,
-    which would fix the scalar path too -- or a wider panel (dense, n >= 15, real
-    modeling-API models) measuring net-positive. See
-    ``docs/dev/flag-retirement-audit.md``.
+    Why it is the default: least surprise. Without it the solver treats a model
+    differently depending only on whether it was spelled with an array or with
+    scalars. With it, an array model takes exactly its scalar twin's path, which
+    is measured, not assumed (performance-plan §84): over 23 twin pairs under the
+    default solve, the witness, the lifted model (rows, flat bounds), the
+    certification, the certified objective, the final route and the #1940 race's
+    sequence of arms all match, and so do node counts wherever the outcome is
+    clock-free (178 checks, 0 failures).
 
-    Tried and falsified (2026-10-24): declining the lift whenever no constraint
-    carries an integer product. It separated a 39-instance generated/corpus
-    experiment well (objective-only: 16 lift losses, 3 small wins), but a
-    PWL-linearized model -- a MILP of 97 rows plus one ``n*x`` product in the
-    objective (``test_nonlinear_to_pwl``) -- went 1.5 s -> 32 s under it, on
-    *scalar* variables, i.e. a regression of today's default. Where the products
-    sit is not the separator; the hardness of the linear part matters too."""
-    return _env_flag("DISCOPT_INTEGER_PRODUCT_INDEXED", default=False)
+    Graduation panel (``scripts/panel_1934_indexed_integer_products.py --dense``,
+    30 s, ABBA, on top of the #1940 race and ``DISCOPT_NATIVE_KERNEL_VECTOR_VARS``):
+    cert-clean -- 590 checks, 0 failures, 41/41 certified in both arms. Faster on
+    the 33 small generated array models (37.3 s -> 2.2 s; SGM(1 s) 0.652 ->
+    0.066) and over all 41 by SGM (0.823 -> 0.557). **Slower on the 8 dense integer
+    array QPs** (20.4 s -> 66.7 s; SGM 1.73 -> 6.42), so total wall rises 57.6 s
+    -> 68.9 s. That loss is the #1940 race's 5 s lift slice, which the same models
+    written with scalar variables already pay by default; keeping this flag off
+    would hide it for one spelling, not fix it. The fix belongs in the race, where
+    it would serve both spellings. Owner decision, 2026-10-25.
+
+    History: first kept OFF (2026-10-24) when the lift was adopted whenever
+    possible and the dense QPs lost 7x with a lost certificate at n=20; and a
+    rule "decline the lift when no constraint carries an integer product" was
+    falsified then by ``test_nonlinear_to_pwl`` (1.5 s -> 32 s on scalars). Both
+    are superseded by the #1940 race."""
+    return _env_flag("DISCOPT_INTEGER_PRODUCT_INDEXED", default=True)
 
 
 def _scalar_var_ref(expr: Expression) -> Optional[tuple[Variable, int]]:
