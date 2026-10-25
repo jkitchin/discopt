@@ -10886,3 +10886,60 @@ least once; every OFF run folded nothing.
   certificate and route (`highs-lp`) are identical.
 
 Default ON; `=0` restores the term-by-term sum.
+
+## 79. #1935: the node-LP gap to HiGHS on `pooling_bental5stp`, decomposed (2026-10-25)
+
+Context: the #1935 warm-start work (`DISCOPT_NATIVE_WARM_START`, audit row in
+`flag-retirement-audit.md`) left the in-house simplex within ~1.1-1.4x of
+warm-started HiGHS per node LP on six of seven MINLPLib instances from the issue's
+table, and 3.9x behind on `pooling_bental5stp` (same machine, identical LP
+sequence, `issue1935_highs_node_lp_replay.py`).
+
+**Instrument.** `issue1935_node_lp_pivot_harness.py` captures the 1,499
+warm-started node LPs of a mode-2 tree with their exact start bases and re-solves
+them, so variants are compared on identical inputs rather than on diverging trees.
+It reproduces the in-tree pivot count on **1499/1499** LPs (the §6 check).
+
+**Decomposition** (same 1,499 LPs):
+
+| | pivots | note |
+|---|---:|---|
+| in-house, current | 74,331 | plus uncounted pivots of stalled probes (degenerate dual pivots alone: 77,655) |
+| HiGHS from the **same** start basis | 46,016 | algorithm gap ~1.6x |
+| HiGHS from **its own** parent bases | ~29,500 | start-basis gap ~1.6x |
+
+Per-pivot cost was ~1.9x HiGHS's, and LU was ~47% of LP time.
+
+**Falsified: perturbing costs from the first pivot (HiGHS's policy).** Measured as
+a temporary knob, not committed. Fixed inputs: degenerate dual pivots -75%, total
+pivots -7%, time unchanged. In-tree: *slower*, LP time 11.0 -> 15.3 s and median
+3.1 -> 4.7 ms per LP, because every LP then runs a perturbed solve plus a clean-up,
+each refactorizing. Also measured: perturbation off is 20x the pivots (1,495,081)
+with 10 LPs `Numerical`; perturbation size 1e-5 / 1e-4 changes nothing.
+
+**Shipped (bound-neutral): skip the discarded AMD analysis.** Since feral 0.16
+(§18i) `SparseLu::factor`'s default Markowitz pivoting reads the symbolic only for
+its dimension, yet both `FeralLU` sparse sites still ran `SparseLuSymbolic::analyze`
+(AMD on AᵀA) before every factorization. They now pass
+`SparseLuSymbolic::natural(m)` on that route (`linsolve.rs::symbolic_for`);
+`GilbertPeierls` keeps AMD. Evidence:
+
+- fixed inputs: pivots and verdicts identical on 1499/1499; `LuSymbolic`
+  2,646 ms -> 5 ms; `LuNumeric` unchanged;
+- interleaved A/B (two saved extensions swapped per run, load ~1.0, n = 4 each):
+  11.97 s (sd 0.57) -> 9.23 s (sd 0.25), **1.30x**;
+- whole-solve exact comparison, 24 solves across native-spatial, spatial-bb,
+  MIP-NLP and MIQP routes: all **21 certifying solves bit-identical** in
+  `node_count`, objective and bound; the 3 that hit the 120 s limit explore more
+  nodes in the same time with identical incumbent and bound;
+- `cargo test -p discopt-core`: 877 lib tests and all integration tests pass.
+
+**Measured, not built: a slack peel.** 75% of these bases' basic columns are
+slacks; factorizing only the structural nucleus (`examples/issue1935_lu_nucleus.rs`,
+300 bases x 20 reps) is 3.9x cheaper (1.017 -> 0.263 ms, m 755 -> nucleus 183).
+§18g's peel lost bchoco06's bound and §18i records that Markowitz already
+triangularizes, so this is reported as a measurement, not proposed as a flag.
+
+**What remains.** The algorithm gap from the same start (~1.6x) -- dual
+steepest-edge pricing vs Devex is the standard lever -- and the start-basis gap
+(~1.6x), which is about which optimal vertex a parent ends on.
