@@ -11236,3 +11236,38 @@ and 33.7 s. discopt reaches 1.482 at 900 s. The flags-OFF path is bound-neutral:
 in-repo corpus, 53 of the 54 instances certified by both arms are byte-identical in
 node count and objective. The 54th, cvxnonsep_nsig30, is 316-320 nodes on `main`
 itself across three runs, which is pre-existing wall-clock nondeterminism.
+
+## 81. #1935/#1944: `DISCOPT_NATIVE_WARM_START=2` graduated (2026-10-25)
+
+§80 found that #1944's RLT rows pay only on a node LP that does not start cold.
+The kernel's cold primal ends `Numerical`/`IterLimit` on equality-rich
+relaxations, and undecided nodes are bisected with no bound gain. The warm start
+had passed both §5 bars on #1935's own 34-instance kernel panel and was pending
+the owner's decision. The owner asked for it (#1944 follow-up). Before flipping
+it, the panel was re-run wider and on current `main`, which now includes #1943's
+pseudocost branching and #1945's LP verification.
+
+**Panel.** `issue1944_rlt_panel.py --with-corpus --on-env
+DISCOPT_NATIVE_WARM_START=2 --off-env DISCOPT_NATIVE_WARM_START=0`, 30 s, 2
+workers, arms interleaved, each child asserting its own arm's environment.
+Population: 270 instances, the 45 in-repo corpus instances with a proven optimum
+plus the 225 of §80.
+
+| | mode 0 (cold) | mode 2 (warm + flip repair) |
+|---|---:|---:|
+| checks / problems | 1,620 / 0 | |
+| certified gained | | `tanksize`, `nous2` |
+| certified lost | | none |
+| nodes, both certify | 49,256 | 46,523 |
+| wall, both certify | 539.7 s | 510.8 s |
+| total wall | 1671.9 s | 1597.1 s |
+
+Among the 36 instances neither arm certifies, 9 bounds are tighter with the warm
+start. Examples: nous1 -0.049 -> 0.411, nvs19 -1196.8 -> -1099.0 (opt -1098.4),
+nvs23 -1825.8 -> -1545.1, nvs24 -4371.2 -> -2906.3, wastewater15m1 1802.5 ->
+1971.7. One is looser: tln4 7.9 -> 7.8, on the lifted MILP route the warm start
+does not touch, so that is time-limit noise.
+
+**Verdict: graduated.** The default is now `2`; `=0` restores the cold start and
+mode 1 stays addressable. #1944's three gates are graduated on this `main` in the
+next PR (§82).

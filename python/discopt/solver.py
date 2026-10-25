@@ -2758,7 +2758,7 @@ def _try_native_spatial_kernel(
     # #1913: integer branches chosen by pseudocost; 0 unless DISCOPT_KERNEL_PSEUDOCOST.
     _native_stats["tree/pseudocost_picks"] = float(int(res.get("n_pseudocost_picks") or 0))
     # #1935: the parent-basis warm start (``DISCOPT_NATIVE_WARM_START``). The warm
-    # count is 0 with the flag off, which tells "never engaged" from "engaged and
+    # count is 0 with ``=0`` (cold), which tells "never engaged" from "engaged and
     # did not help"; pivots and seconds are the node-LP effort it is meant to cut.
     _native_stats["tree/warm_starts"] = float(int(res.get("n_warm_starts") or 0))
     _native_stats["tree/warm_shape_mismatch"] = float(int(res.get("n_warm_shape_mismatch") or 0))
@@ -10846,7 +10846,7 @@ def _kernel_pseudocost_reliability() -> int:
 
 
 def _native_warm_start_mode() -> int:
-    """#1935 experiment: ``DISCOPT_NATIVE_WARM_START`` for the native spatial kernel.
+    """#1935: ``DISCOPT_NATIVE_WARM_START`` for the native spatial kernel.
 
     Starts each child's node LP from its parent's optimal basis with the dual
     simplex (``SpatialTreeConfig::warm_start_children``) instead of solving it
@@ -10855,22 +10855,35 @@ def _native_warm_start_mode() -> int:
     how much is the engine and how much the warm start; this flag measures the
     warm start on the in-house simplex.
 
-    Modes: ``0`` (default) cold; ``1`` warm start; ``2`` warm start, and a
-    dual-infeasible inherited basis is repaired by moving boxed nonbasic columns
-    to their other bound (``SimplexOptions::warm_flip_boxed``) instead of being
-    handed to the primal simplex. Mode 2 exists because mode 1 measured on
-    ``nvs13``: of 600 inherited bases the dual simplex refused 389 as
+    Modes: ``0`` cold (the opt-out); ``1`` warm start; ``2`` (the default) warm
+    start, and a dual-infeasible inherited basis is repaired by moving boxed
+    nonbasic columns to their other bound (``SimplexOptions::warm_flip_boxed``)
+    instead of being handed to the primal simplex. Mode 2 exists because mode 1
+    measured on ``nvs13``: of 600 inherited bases the dual simplex refused 389 as
     dual-infeasible and 52 as singular. Anything else raises ``ValueError``.
 
-    **Default OFF.** Bound-changing: a different start can end on
+    **Graduated to mode 2 (#1944).** Bound-changing: a different start can end on
     a different optimal vertex of a degenerate node LP, so node counts and bounds
     move. Soundness does not depend on the start: the bound is still the
     Neumaier-Shcherbina bound on the returned duals and an infeasible verdict
-    still needs a verified Farkas ray. What would make it the default: the
-    CLAUDE.md §5 corpus panel, cert-clean and net-positive. Read at call time,
-    like ``_scale_free_branching_enabled``.
+    still needs a verified Farkas ray. Graduation panel
+    (``issue1944_rlt_panel.py --with-corpus --on-env DISCOPT_NATIVE_WARM_START=2
+    --off-env DISCOPT_NATIVE_WARM_START=0``; 270 instances: the in-repo corpus
+    plus every small nonconvex polynomial MINLPLib instance with a proven
+    optimum; 30 s, interleaved; ``performance-plan.md`` section 81):
+
+    * cert-clean: 1,620 checks, 0 problems;
+    * net-positive: tanksize and nous2 gained, nothing lost;
+    * wall: total 1671.9 -> 1597.1 s, over the instances both certify
+      539.7 -> 510.8 s;
+    * bounds: tighter on 9 of the 36 instances neither certifies.
+
+    Cold node LPs are also the reason #1944's RLT rows did not pay. The kernel's
+    cold primal ends ``Numerical`` on equality-rich relaxations, and an
+    undecided node is bisected with no bound gain. ``=0`` restores the cold
+    start. Read at call time, like ``_scale_free_branching_enabled``.
     """
-    raw = os.environ.get("DISCOPT_NATIVE_WARM_START", "0").strip() or "0"
+    raw = os.environ.get("DISCOPT_NATIVE_WARM_START", "2").strip() or "2"
     if raw not in ("0", "1", "2"):
         raise ValueError(f"DISCOPT_NATIVE_WARM_START must be 0, 1 or 2, got {raw!r}")
     return int(raw)
