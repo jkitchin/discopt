@@ -281,7 +281,7 @@ pub struct SpatialTreeConfig {
     /// candidate with fewer than this many observations on either side has both
     /// child LPs solved (after propagation) before the pick, and their gains are
     /// recorded as observations (at most `STRONG_BRANCH_CANDIDATES` per node, and
-    /// skipped at a node whose worst-case pass would exceed a tenth of the time
+    /// skipped at a node whose worst-case pass would exceed 1/32 of the time
     /// left). `0` is plain pseudocost branching.
     pub pseudocost_reliability: usize,
 }
@@ -898,14 +898,15 @@ pub fn solve_spatial_tree_with_hooks(
         }
         if config.pseudocost_branching && frac_int.is_some() {
             // Skip the pass when its worst case -- two child LPs per candidate at
-            // this node's own solve time -- exceeds a tenth of the time left. Where
-            // one node LP is a large share of the budget (qspp_0_10_0_1_10_1: ~7 s,
-            // 4 nodes in 30 s) a pass costs nodes it cannot repay; a global LP-count
-            // or wall-time quota instead throttled the cheap-LP instances that gain
-            // from it (st_e31, genpooling_meyer04).
+            // this node's own solve time -- exceeds 1/32 of the time left, i.e. when
+            // fewer than ~512 more nodes of this cost fit in the budget: reliability
+            // information cannot amortise over so short a tree. At 1/10 (~160 nodes)
+            // graphpart_clique-40 at 120 s halved its nodes (169 -> 86) for a looser
+            // bound; a global LP-count or wall-time quota instead throttled the
+            // cheap-LP instances that gain from it (st_e31, genpooling_meyer04).
             let affordable = deadline.is_none_or(|d| {
                 let left = d.saturating_duration_since(Instant::now());
-                node_time * (2 * STRONG_BRANCH_CANDIDATES as u32) <= left / 10
+                node_time * (2 * STRONG_BRANCH_CANDIDATES as u32) <= left / 32
             });
             if config.pseudocost_reliability > 0 && bound.is_finite() && affordable {
                 n_lp_solves += strong_branch_init(
