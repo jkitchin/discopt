@@ -11616,6 +11616,17 @@ run). In the CI proxy `ex1265`/`ex1266` do not certify inside the lift slice in
 always certifies inside slice one: that holds at dev speed only. They certify in
 the continuation, and are faster ON (5.08 → 4.20 s, 5.30 → 4.36 s).
 
+**Re-run on top of §85's tie rule (#1961).** §85 hands an `inf`/`inf` tie to the arm
+with the tighter bound, and the stall exit changes the bound a stalled lift slice
+reports (the engine's alone, not merged with the Python tree's), so the panels were
+re-run on the merge, with MINLPLib `tln6`/`tln7` (the §85 instances) added via
+`--nl`. 45 instances: at 30 s 774 checks, 0 failures, certified 42 = 42, total wall
+237.1 → 207.3 s, 11 faster / 0 slower; CI proxy 786 checks, 0 failures, certified
+40 = 40, 151.2 → 137.2 s, 13 faster / 0 slower. 88 more post-stall Python-tree runs,
+none with an incumbent or a certificate (165 of 165 in all). `tln6` at 120 s
+certifies in both arms (OFF 60.8 s, ON 59.0 s, 2 reps each): the stall exit fires
+there and the tie still goes to the un-lifted arm.
+
 **Falsified, not shipped.**
 
 - *A work-capped un-lifted probe first* (the issue's "order the arms by cost"). The

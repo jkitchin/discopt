@@ -10805,7 +10805,12 @@ def _ipx_race_stall_exit_enabled() -> bool:
     in both arms); total wall 129.2 -> 115.4 s; 13 faster, 0 slower. At that
     speed ``ex1265``/``ex1266`` no longer certify inside the lift slice in
     either arm (they certify in the continuation), and are faster ON
-    (5.08 -> 4.20 s, 5.30 -> 4.36 s). The lift slice still costs ~2.8 s where
+    (5.08 -> 4.20 s, 5.30 -> 4.36 s). Re-run on top of #1961's tie rule, with
+    MINLPLib ``tln6``/``tln7`` added (45 instances): 774 / 786 checks, 0
+    failures, certified 42 = 42 / 40 = 40, 237.1 -> 207.3 s / 151.2 -> 137.2 s,
+    0 slower; 88 more post-stall Python-tree runs, none with an incumbent or a
+    certificate; ``tln6`` at 120 s certifies in both arms (60.8 / 59.0 s). The
+    lift slice still costs ~2.8 s where
     the lift loses: the engine's stage-sized budget is what ``ex1265`` needs
     (``_IPX_RACE_SLICE_S``).
 
