@@ -768,7 +768,7 @@ def _affine_square_sum_matrix(
         if isinstance(node, BinaryOp) and node.op == "+":
             _flatten_sum(node.left)
             _flatten_sum(node.right)
-        elif isinstance(node, SumExpression):
+        elif isinstance(node, SumExpression) and _summed_vector_square_base(node) is None:
             _flatten_sum(node.operand)
         else:
             terms.append(node)
@@ -796,6 +796,18 @@ def _affine_square_sum_matrix(
                 return None
             rows.append(np.zeros(n_total, dtype=np.float64))
             consts.append(float(np.sqrt(cval)))
+            continue
+        # ``dm.sum(v**2)`` for a vector affine ``v`` is one square per element of
+        # ``v`` (#1933; the same reading the sum-of-squares lift gives it, #1679).
+        vec_base = _summed_vector_square_base(core)
+        if vec_base is not None:
+            vec_rows = _vector_affine_rows(vec_base, model, n_total)
+            if vec_rows is None:
+                return None
+            A_v, b_v = vec_rows
+            root_v = float(np.sqrt(scale))
+            rows.extend(root_v * np.asarray(A_v.toarray(), dtype=np.float64))
+            consts.extend((root_v * np.asarray(b_v, dtype=np.float64).ravel()).tolist())
             continue
         base: Optional[Expression] = None
         if (
@@ -1357,13 +1369,15 @@ def classify_sqrt_pattern(
       (MINLPLib ``tls*``). Requires ``classify_expr`` / ``cache`` to verify the
       bases are affine; skipped when they are not supplied.
     """
-    if is_homogeneous_psd_quadratic(arg, model):
+    # Euclidean norm of an affine map: sqrt(sum_i (a_i.x + b_i)^2) = ||A x + b||,
+    # convex for any affine map. Tried first: it is a structural walk, while the
+    # homogeneous PSD recognizer below runs an eigendecomposition on the support
+    # (3.3 s on a 5000-term cone, #1933). Either one proving CONVEX suffices, so
+    # the order changes only the cost.
+    if is_affine_norm_square(arg, model):
         return Curvature.CONVEX
 
-    # Euclidean norm of an affine map: sqrt(sum_i (a_i.x + b_i)^2) = ||A x + b||,
-    # convex for any affine map (the homogeneous PSD recognizer above only
-    # catches the b == 0 / MatMul cases).
-    if is_affine_norm_square(arg, model):
+    if is_homogeneous_psd_quadratic(arg, model):
         return Curvature.CONVEX
 
     # Geometric-mean concavity: sqrt of a product of nonneg affine powers.

@@ -1038,6 +1038,8 @@ pub fn solve_spatial_tree_observed(
         let terms_tight = worst_gap <= config.mccormick_tol;
 
         let mut accepted_lp_point = false;
+        // #1938: the caller's pricer rejected this point (see below).
+        let mut rejected_lp_point = false;
         if int_ok && terms_tight {
             // Feasible point: accept if it improves the incumbent. The objective is
             // linear over the (now-tight) lifted columns, so `cᵀx` is the objective
@@ -1088,6 +1090,7 @@ pub fn solve_spatial_tree_observed(
                         }
                     }
                 };
+                rejected_lp_point = priced.is_none();
                 if let Some(obj) = priced {
                     if incumbent.map(|inc| obj < inc - 1e-12).unwrap_or(true) {
                         incumbent = Some(obj);
@@ -1138,7 +1141,17 @@ pub fn solve_spatial_tree_observed(
             widest_original_col(spec, &lo, &hi, &root_w, config.min_box_width)
                 .map(|j| (j, clamp_interior(x[j], lo[j], hi[j])))
         };
-        let pick = if let Some(j) = frac_int {
+        // #1938: a rejected point passed `int_tol` but not the caller's check on
+        // its integral realisation (a binary at 1e-6 on a big-M row). Spatial
+        // branching leaves that value inside both children and the LP returns it
+        // again, so branch the unfixed integer column farthest from an integer at
+        // its floor/ceil: both children exclude the value.
+        let near_int = if rejected_lp_point && frac_int.is_none() {
+            near_integral_col(spec, x, &lo, &hi)
+        } else {
+            None
+        };
+        let pick = if let Some(j) = frac_int.or(near_int) {
             Some((j, x[j].floor() + 0.5)) // integer branch: <= floor, >= ceil
         } else if let Some(col) = branch_col.filter(|&c| width(c) > config.min_box_width) {
             // Spatial branch at the LP value, pulled to the interior.
@@ -1258,6 +1271,25 @@ fn widest_original_col(
 /// each inheriting `pb` as its (valid) region lower bound. The two children cover
 /// the parent box exactly, so no feasible point is lost.
 #[allow(clippy::too_many_arguments)]
+/// The unfixed integer column whose value is farthest from an integer, among those
+/// with a NONZERO distance, or `None` (#1938). Used only after the caller rejected a
+/// point every integer column of which is within `int_tol`.
+fn near_integral_col(spec: &SpatialKernelSpec, x: &[f64], lo: &[f64], hi: &[f64]) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    let mut best_d = 0.0f64;
+    for (j, &is_int) in spec.integrality.iter().enumerate().take(spec.n_cols) {
+        if !is_int || hi[j] - lo[j] < 0.5 {
+            continue;
+        }
+        let d = (x[j] - x[j].round()).abs();
+        if d > best_d {
+            best_d = d;
+            best = Some(j);
+        }
+    }
+    best
+}
+
 fn push_children(
     heap: &mut BinaryHeap<QNode>,
     lo: &[f64],
@@ -2178,6 +2210,93 @@ mod gap_criterion_tests {
         assert_eq!(d.status, TreeStatus::Declined);
         assert_eq!(d.n_incumbent_value_calls, 1);
         assert!(d.node_count <= base.node_count);
+    }
+
+    /// #1938: a pricer that rejects a point whose binary sits within `int_tol` of
+    /// an integer but whose integral realisation violates a big-M row must not
+    /// stall the tree. `min -y*v - x + c*z + w` s.t. `x - M*z <= 0`,
+    /// `x - w <= eps`, `y + v = 2`: the node LPs return `z = eps/M = 1e-6`, and
+    /// spatial branching keeps that value in both children. Branching the
+    /// near-integral `z` at its floor/ceil excludes it; the tree then certifies
+    /// the true optimum `-1 - eps + c = -1.005` at `z = 1`.
+    #[test]
+    fn rejected_near_integral_point_branches_the_integer() {
+        use crate::bnb::spatial_kernel::FixedRow;
+        let (eps, big_m, c) = (1e-2, 1e4, 5e-3);
+        // cols: x, w, z (binary), y, v, t = y*v
+        let spec = SpatialKernelSpec {
+            n_cols: 6,
+            n_orig: 5,
+            c: vec![-1.0, 1.0, c, 0.0, 0.0, -1.0],
+            integrality: vec![false, false, true, false, false, false],
+            global_lo: vec![0.0, 0.0, 0.0, 0.0, 0.0, -1e20],
+            global_hi: vec![big_m, big_m, 1.0, 2.0, 2.0, 1e20],
+            fixed_rows: vec![
+                FixedRow {
+                    cols: vec![0, 2],
+                    coeffs: vec![1.0, -big_m],
+                    rhs: 0.0,
+                },
+                FixedRow {
+                    cols: vec![0, 1],
+                    coeffs: vec![1.0, -1.0],
+                    rhs: eps,
+                },
+                FixedRow {
+                    cols: vec![3, 4],
+                    coeffs: vec![1.0, 1.0],
+                    rhs: 2.0,
+                },
+                FixedRow {
+                    cols: vec![3, 4],
+                    coeffs: vec![-1.0, -1.0],
+                    rhs: -2.0,
+                },
+            ],
+            terms: vec![EnvTerm::Bilinear { i: 3, j: 4, w: 5 }],
+            blf_terms: vec![],
+            obbt_candidates: vec![],
+        };
+        let cfg = SpatialTreeConfig {
+            max_nodes: 20_000,
+            gap_tol: 1e-6,
+            ..SpatialTreeConfig::default()
+        };
+        // The integral realisation the caller verifies: `z` snapped.
+        let mut rejected = 0usize;
+        let mut snap_check = |x: &[f64], lp: f64| {
+            if x[0] - big_m * x[2].round() > 1e-6 {
+                rejected += 1;
+                IncumbentPrice::Reject
+            } else {
+                IncumbentPrice::Value(lp)
+            }
+        };
+        let r = solve_spatial_tree_with_hooks(
+            &spec,
+            &cfg,
+            &SimplexOptions::default(),
+            None,
+            Some(&mut snap_check),
+        );
+        assert!(
+            rejected >= 1,
+            "the probe never produced a near-integral point"
+        );
+        assert_eq!(r.status, TreeStatus::Optimal, "{r:?}");
+        let inc = r.incumbent.expect("no incumbent");
+        let opt = -1.0 - eps + c;
+        assert!((inc - opt).abs() < 1e-5, "incumbent {inc} vs optimum {opt}");
+        assert!(
+            r.bound <= opt + 1e-6,
+            "bound {} above optimum {opt}",
+            r.bound
+        );
+        assert!(
+            (r.incumbent_x[2] - 1.0).abs() < 1e-9,
+            "z = {}",
+            r.incumbent_x[2]
+        );
     }
 
     /// #1522: a hook handing back the optimum at the root is adopted, recorded as

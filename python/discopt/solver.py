@@ -1510,7 +1510,7 @@ def _native_kernel_primal_hook(model, source, sign, off, n_orig, outer_deadline)
     return hook
 
 
-def _native_kernel_incumbent_value(model, source, sign, off):
+def _native_kernel_incumbent_value(model, source, sign, off, n_orig):
     """The kernel's incumbent pricing callback (#1656, ``incumbent_value=``).
 
     Returns ``price(x, lp_obj)`` for a McCormick-tight LP point ``x`` whose lifted
@@ -1538,11 +1538,31 @@ def _native_kernel_incumbent_value(model, source, sign, off):
     but could not finish: its bound cannot pass the lift's own optimum, and it ran
     100 000 nodes to ``node_limit``.
 
-    ``None`` (point not accepted) when the objective is not finite there. No
-    ``except``: an evaluator failure is raised by the binding when the tree
+    ``None`` (point not accepted) when the objective is not finite there, and
+    when the point fails :func:`_native_kernel_verify_point` on ``model`` (#1938).
+    The kernel's integrality test passes a column within ``int_tol`` (1e-5) of an
+    integer, but ``verify_point`` judges the point's integral realisation, and on
+    a big-M row ``x - M*z <= 0`` a binary at ``z = 1e-6`` gives ``x`` room
+    ``M*z`` that ``z = 0`` does not. Measured on a 4-variable reproducer: the
+    tree adopted such a point at -1.00994 (true optimum -1.005), pruned against
+    it, exited ``optimal``, and the #789 check after the search then discarded
+    the whole result, bound included. Rejecting it here keeps the incumbent a
+    value an integral point attains; the kernel then branches the near-integral
+    column (``spatial_tree.rs``). A failing point that the snap does not move is
+    not that class: the kernel's tight points are not points of the model, so the
+    answer is ``"decline"``, #789's response, taken before the budget is spent
+    (``test_issue1842_interval_matmul_shapes``: every one of 64 553 tight points
+    at ``x = 20`` failed a row by 12.4, and rejecting them ran the kernel to its
+    time limit where #789 used to route the model to the Python engine). The
+    check is the #789 one on the lift
+    (``source=None``): a point that fails only the pre-reform model keeps its
+    #1522 handling (repair on an uncertified exit).
+
+    No ``except``: an evaluator failure is raised by the binding when the tree
     returns (CLAUDE.md §7).
     """
     from discopt._tape_nlp_evaluator import make_evaluator
+    from discopt.validation.feasibility import snap_integers
 
     target = model if source is None else source[0]
     ev = make_evaluator(target)
@@ -1558,6 +1578,16 @@ def _native_kernel_incumbent_value(model, source, sign, off):
         lp_published = sign * (float(lp_obj) + off)
         if abs(declared - lp_published) > 1e-4 * (1.0 + abs(lp_published)):
             return "decline"
+        x_orig = np.asarray(x, dtype=np.float64)[:n_orig]
+        ok, _ = _native_kernel_verify_point(model, x_orig)
+        if not ok:
+            # Reject only the #1938 class, where the snap moved an integer column.
+            # A point that fails with every integer already integral means the
+            # kernel's tight points are not points of the model: #789's response,
+            # taken now instead of after the search.
+            if np.array_equal(snap_integers(model, x_orig), x_orig):
+                return "decline"
+            return None
         return internal
 
     return price
@@ -2404,7 +2434,9 @@ def _try_native_spatial_kernel(
     if initial_incumbent is not None:
         solve_kwargs["initial_incumbent"] = float(initial_incumbent)
     # #1656: price every McCormick-tight point at the posed problem's objective.
-    solve_kwargs["incumbent_value"] = _native_kernel_incumbent_value(model, source, sign, off)
+    solve_kwargs["incumbent_value"] = _native_kernel_incumbent_value(
+        model, source, sign, off, n_orig
+    )
     if _tuning().native_nlp_primal:
         solve_kwargs["primal_hook"] = _native_kernel_primal_hook(
             model, source, sign, off, n_orig, outer_deadline
@@ -8941,6 +8973,7 @@ def _convexity_rewrites(
     model: Model,
     *,
     entropy: bool = True,
+    soc: bool = True,
     epigraph: bool = True,
     entropy_deadline: Optional[Callable[[], bool]] = None,
 ) -> tuple[Model, tuple[str, ...]]:
@@ -8952,11 +8985,15 @@ def _convexity_rewrites(
 
     * ``"entropy"`` -- ``x*log(x)`` -> ``entropy(x)`` and ``x*log(x/y)`` ->
       ``centropy(x, y)`` (:func:`~discopt._relax.factorable_reform.canonicalize_entropy`).
+    * ``"squared_soc"`` -- ``sum w_i a_i**2 + c <= k t**2`` with ``t >= 0`` on the
+      box rewritten to its norm form ``sqrt(sum w_i a_i**2 + c) <= sqrt(k) t``
+      (:func:`~discopt._relax.soc_rewrite.rewrite_squared_soc`, #1933).
     * ``"objective_epigraph"`` -- ``min z`` with ``z == g(x)`` relaxed to
       ``z >= g(x)`` (:func:`~discopt._relax.objective_epigraph.relax_objective_defining_equality`).
 
-    Both are exact at the optimum. They are the reason the solve can prove a model
-    convex that the bare classifier does not, so this is the single definition
+    All are exact (the first two on the whole box, the epigraph at the optimum).
+    They are the reason the solve can prove a model convex that the bare
+    classifier does not, so this is the single definition
     shared by the solve and by :meth:`discopt.modeling.core.Model.convexity`.
     """
     applied: list[str] = []
@@ -8967,6 +9004,12 @@ def _convexity_rewrites(
         if new is not model:
             applied.append("entropy")
             model = new
+    if soc:
+        from discopt._relax.soc_rewrite import rewrite_squared_soc
+
+        model, changed = rewrite_squared_soc(model)
+        if changed:
+            applied.append("squared_soc")
     if epigraph:
         from discopt._relax.objective_epigraph import relax_objective_defining_equality
 
@@ -13921,6 +13964,38 @@ def solve_model(
             options=scip_options,
         )
 
+    # --- #1933: squared-form second-order cones to their norm form ---
+    # ``sum w_i a_i**2 + c <= k t**2`` with ``t >= 0`` on the box is the same set as
+    # ``sqrt(sum w_i a_i**2 + c) <= sqrt(k) t`` (exact on the whole box, see
+    # ``_relax/soc_rewrite.py``), and only the second is convex as a function. It
+    # runs here, ahead of the convex-MINLP router, because every consumer below
+    # must see the norm form: the router's convexity proof, and the OA cuts of the
+    # family it routes to -- a gradient cut of the squared row taken outside the
+    # cone is not valid for it. After the SCIP hand-off above, which receives the
+    # model as written and recognizes the squared cone itself. The rewritten rows
+    # are recorded so ``Model.solve`` reports constraint duals for the rows the
+    # caller wrote (``convert_squared_soc_duals``).
+    # The variables are untouched, so callbacks see the point they always did.
+    #
+    # The #1456 pre-solve gate is constructed here, at the first pass it gates,
+    # rather than at the reformulation block below: this pass runs ahead of the
+    # router and must see ``time_limit`` the same way (entry gate + per-row
+    # abandon hook). See the #1456 note at the reformulation block.
+    from discopt._relax.presolve_deadline import PresolveDeadline
+    from discopt._relax.soc_rewrite import record_squared_soc_rows, rewrite_squared_soc_rows
+
+    _presolve_deadline = PresolveDeadline(_deadline_exhausted)
+    _soc_caller_model = model
+    _soc_rows: list = []
+    if _presolve_deadline.afford("squared_soc"):
+        model, _soc_rows = rewrite_squared_soc_rows(
+            model, deadline=_presolve_deadline.abandon_hook("squared_soc")
+        )
+    if _soc_rows:
+        record_squared_soc_rows(_soc_caller_model, _soc_rows)
+        _carry_solve_clocks(_soc_caller_model, model)
+        logger.debug("rewrote %d squared-form cone row(s) to norm form", len(_soc_rows))
+
     # --- #1059: auto-route a convexity-certified MINLP to the MIP-NLP family ---
     # Only when the caller expressed no preference -- neither an explicit
     # solver= (including solver="bb"), nor any option this family would drop.
@@ -15031,10 +15106,8 @@ def solve_model(
     # it. Declining a pass only ever weakens a still-valid bound.
     # See ``_relax/presolve_deadline.py`` for why this is a clock and not a
     # deterministic work allowance (that design was built and falsified).
-    from discopt._relax.presolve_deadline import PresolveDeadline
-
-    _presolve_deadline = PresolveDeadline(_deadline_exhausted)
-
+    # ``_presolve_deadline`` itself is constructed earlier, at the #1933
+    # squared-SOC pass, the first pass it gates.
     _entropy_ok = _presolve_deadline.afford("canonicalize_entropy")
 
     # --- Objective-defining-equality relaxation (the SUSPECT "objective
@@ -15074,6 +15147,9 @@ def solve_model(
     model, _rewrites = _convexity_rewrites(
         model,
         entropy=_entropy_ok and not _already_linear,
+        # Already applied ahead of the convex-MINLP router (#1933); the pass is
+        # kept in ``_convexity_rewrites`` for ``Model.convexity()``.
+        soc=False,
         epigraph=not _has_bb_callbacks,
         entropy_deadline=_presolve_deadline.abandon_hook("canonicalize_entropy"),
     )
