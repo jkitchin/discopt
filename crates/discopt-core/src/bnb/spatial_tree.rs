@@ -281,8 +281,7 @@ pub struct SpatialTreeConfig {
     /// candidate with fewer than this many observations on either side has both
     /// child LPs solved (after propagation) before the pick, and their gains are
     /// recorded as observations (at most `STRONG_BRANCH_CANDIDATES` per node, and
-    /// skipped at a node whose worst-case pass would exceed 1/32 of the time
-    /// left). `0` is plain pseudocost branching.
+    /// skipped unless ~512 more nodes fit in the time left). `0` is plain pseudocost branching.
     pub pseudocost_reliability: usize,
 }
 
@@ -897,16 +896,21 @@ pub fn solve_spatial_tree_with_hooks(
             }
         }
         if config.pseudocost_branching && frac_int.is_some() {
-            // Skip the pass when its worst case -- two child LPs per candidate at
-            // this node's own solve time -- exceeds 1/32 of the time left, i.e. when
-            // fewer than ~512 more nodes of this cost fit in the budget: reliability
-            // information cannot amortise over so short a tree. At 1/10 (~160 nodes)
-            // graphpart_clique-40 at 120 s halved its nodes (169 -> 86) for a looser
-            // bound; a global LP-count or wall-time quota instead throttled the
-            // cheap-LP instances that gain from it (st_e31, genpooling_meyer04).
+            // Strong branching amortises only over a long tree, so skip the pass
+            // unless ~512 more nodes fit in the time left -- judged both at the
+            // tree's measured wall time per node (which includes the propagation and
+            // primal-hook work around the LP, and earlier passes) and at the pass's
+            // own worst case, two child LPs per candidate at this node's solve time.
+            // graphpart_clique-40 at 120 s spends ~0.7 s per node mostly outside the
+            // LP: an LP-time-only test let the pass run and halved its nodes (166 ->
+            // 98) for a looser bound. A global LP-count or wall-time quota instead
+            // throttled the cheap-node instances that gain from it (st_e31,
+            // genpooling_meyer04).
             let affordable = deadline.is_none_or(|d| {
                 let left = d.saturating_duration_since(Instant::now());
-                node_time * (2 * STRONG_BRANCH_CANDIDATES as u32) <= left / 32
+                let per_node = t_tree_start.elapsed() / node_count.max(1) as u32;
+                per_node * 512 <= left
+                    && node_time * (2 * STRONG_BRANCH_CANDIDATES as u32) <= left / 32
             });
             if config.pseudocost_reliability > 0 && bound.is_finite() && affordable {
                 n_lp_solves += strong_branch_init(
