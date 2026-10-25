@@ -585,6 +585,20 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
         '"ready_at": now + rest,',
         "residual",
     ),
+    # #1940, ``DISCOPT_IPX_RACE`` (default ON since its §5 panel, performance-plan
+    # §81): the integer-bilinear lift race. Whether it runs at all is this check on
+    # the time left, and the two 5 s slices it then spends (``_ipx_lift_race``'s
+    # ``min(_IPX_RACE_SLICE_S, _remaining())``, a capped piece of what is left that
+    # the carved-slice scanner cannot see through the helper) decide which exact
+    # formulation gets the rest of the budget -- so the route is set by machine
+    # speed, which is what ``residual`` means. Both formulations are exact, so the
+    # answer cannot change, only which tree finds it. Off under ``deterministic``,
+    # where the legacy rule (always lift) is kept.
+    (
+        "solver.py",
+        "and float(time_limit) - (time.perf_counter() - _solve_t0) >= _IPX_RACE_MIN_LIMIT_S",
+        "residual",
+    ),
     (
         "solver.py",
         "deadline=_role2_deadline(time.perf_counter() + _pc_budget),",
@@ -877,8 +891,12 @@ def test_residual_count_is_visible():
     # 21 -> 22: ``DISCOPT_GDP_CONFIG_DEFER``'s held-back call (#1775 G6.2). Not a new
     # budget: the GDP-config constructor's grant split in two (default ON since its
     # §5 panel), and off under ``deterministic``; see its KNOWN entry.
-    assert len(residual) == 22, (
-        f"the #912 residual inventory changed ({len(residual)} entries, expected 22). "
+    # 22 -> 23: the #1940 lift race (``DISCOPT_IPX_RACE``, default ON since its §5
+    # panel). A wall-clock observation by design -- it races two exact formulations
+    # because no structural predictor survived -- and off under ``deterministic``;
+    # see its KNOWN entry.
+    assert len(residual) == 23, (
+        f"the #912 residual inventory changed ({len(residual)} entries, expected 23). "
         "If you converted one, drop it from KNOWN and lower this number; if you added "
         "one, convert it instead. This count is a deliberate resting point, not a "
         "backlog — see the module docstring for the evidence and the condition that "
