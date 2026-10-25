@@ -11423,5 +11423,22 @@ arms, so the n=20 certification loss is gone. Net effect is split by class:
 The dense loss is now purely the race's 5 s lift slice: with array models on the
 native kernel the un-lifted arm certifies dense n=15 in ~0.9 s, so a race that first
 spends 5 s on the lift loses ~6x. Scalar dense QPs pay the same cost by default since
-#1948. Whether the flag graduates on this split is left to the owner, and the flag
-stays OFF until then.
+#1948.
+
+**Parity check, then graduated (owner decision, least surprise).** With the flag ON
+and the default solve (race on), 23 array/scalar twin pairs were compared: the dense
+QPs n = 10–20, non-uniform bounds, 2-D, scalars around arrays, integer products in
+constraint rows, and integer × continuous products in rows. 178 checks, 0 failures.
+Every pair agrees on:
+
+- the product witness;
+- the lifted model (row count, flat bounds);
+- certification, the certified objective and the final route;
+- the race's exact sequence of arms.
+
+Node counts are identical wherever the outcome is clock-free: the 15 pairs certified
+inside the lift slice, and those certified inside the un-lifted slice. The two that
+reached the race's restart differ slightly (7393 vs 7085), as clock-dependent runs
+do. The flag therefore makes the spelling of a model irrelevant, which is what it was
+for. It is now **default ON** (`=0` opt-out). The dense-QP cost belongs to the race
+and should be fixed there, for both spellings.

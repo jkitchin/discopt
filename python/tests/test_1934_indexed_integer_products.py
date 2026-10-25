@@ -4,10 +4,12 @@
 ``.var``; the node stores it in ``.base``, so every ``x[i]`` resolved to ``None``
 and the bilinear, square and #707 multilinear passes never fired on a model
 written with array variables. Recognising them is bound-changing (CLAUDE.md §5),
-so it sits behind ``DISCOPT_INTEGER_PRODUCT_INDEXED`` (default OFF: its panel was
-cert-clean but not net-positive on dense integer QPs; see the flag's docstring).
+so it sits behind ``DISCOPT_INTEGER_PRODUCT_INDEXED`` (default ON since 2026-10-25,
+when an array model was shown to take exactly its scalar twin's path; see the flag's
+docstring and performance-plan §83).
 
-Covered here: the default and ``=0`` are the legacy behaviour;
+Covered here: the default recognises indexed entries and ``=0`` is the legacy
+behaviour;
 flag ON resolves int, tuple and negative indices to the flat element ``_int_factor_range`` reads,
 refuses slices/bools/out-of-range; two references to one element share one
 expansion; a 2-D variable's expansion links the right element; and the rewrite
@@ -50,9 +52,14 @@ def test_opt_out_keeps_legacy_behaviour(monkeypatch):
     assert ipr.reformulate_integer_bilinear(m) is m
 
 
-def test_default_is_off(monkeypatch):
+def test_default_is_on_with_an_opt_out(monkeypatch):
+    """Graduated 2026-10-25 (performance-plan §83): an array model now takes its
+    scalar twin's path. ``=0`` keeps the legacy blindness reachable for A/B."""
     monkeypatch.delenv(FLAG, raising=False)
     m, x = _issue_model()
+    assert ipr._scalar_var_ref(x[0]) == (x, 0)
+    assert ipr.has_nonconvex_integer_bilinear(m) is True
+    monkeypatch.setenv(FLAG, "0")
     assert ipr._scalar_var_ref(x[0]) is None
     assert ipr.has_nonconvex_integer_bilinear(m) is False
 
