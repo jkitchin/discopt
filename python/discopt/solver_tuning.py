@@ -466,7 +466,7 @@ class SolverTuning:
     * hda's 30 s bound -64,510 -> -7,002 (optimum -5,964); nous1 0.41 -> 0.89.
     * The Haverly pooling models close at the root.
 
-    ``performance-plan.md`` section 82 has the record."""
+    ``performance-plan.md`` section 83 has the record."""
 
     rlt_lineq_max: int = field(default_factory=lambda: _env_int("DISCOPT_RLT_LINEQ_MAX", 0))
     """New-column cap for linear-equality RLT (``DISCOPT_RLT_LINEQ_MAX``, default
