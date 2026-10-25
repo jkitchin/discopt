@@ -10800,7 +10800,16 @@ def _kernel_pseudocost_branching_enabled() -> bool:
     graphpart_clique-40 317.5 -> 292.5 (opt 1183) and qspp_0_10_0_1_10_1 267.5 ->
     252.5 (opt 621). Plain pseudocost (reliability 0) lost st_e31's 30 s
     certificate (21 -> 30 s) and loosened genpooling_meyer04; that is what the
-    reliability initialisation fixed. Read at call time.
+    reliability initialisation fixed.
+
+    The strong-branching affordability guard reads the wall clock (``per_node *
+    512 <= left`` in ``spatial_tree.rs``): a phase-entry gate of the kind
+    ``deterministic`` leaves alone. It binds only within about 512 node-times of
+    ``time_limit``, so a run with real slack against its limit is unaffected; a run
+    close enough to flip it is the "slow enough to flip such a gate" case that
+    ``deterministic`` does not claim to reproduce. A bound-neutral panel on kernel
+    instances near their limit should read a flipped guard as that, not as drift.
+    Read at call time.
     """
     return os.environ.get("DISCOPT_KERNEL_PSEUDOCOST", "1").strip().lower() not in (
         "0",
