@@ -35,6 +35,10 @@ struct QNode {
     pb: f64,
     lo: Vec<f64>,
     hi: Vec<f64>,
+    /// #1913: the integer branch that created this node -- `(column, up, distance
+    /// the LP value moved)` -- so its LP bound can update that column's pseudocost.
+    /// `None` at the root and for spatial children.
+    br: Option<(usize, bool, f64)>,
 }
 
 impl PartialEq for QNode {
@@ -267,6 +271,12 @@ pub struct SpatialTreeConfig {
     /// orchestrator's default since 2026-10-22 (`DISCOPT_SCALE_FREE_BRANCHING=1`
     /// opts in): scaling by possibly-loose ROOT widths lost tanksize's certificate.
     pub scale_free_branching: bool,
+    /// #1913: choose the fractional integer column to branch on by pseudocost
+    /// (product rule over the per-unit bound gains observed on each side, unknown
+    /// sides taking the average of the known ones). Off (the default) is the legacy
+    /// rule: the lowest-index fractional column. Branching order only: every child
+    /// pair still covers its parent box, so no bound moves.
+    pub pseudocost_branching: bool,
 }
 
 impl Default for SpatialTreeConfig {
@@ -288,6 +298,7 @@ impl Default for SpatialTreeConfig {
             incumbent_time_extension: None,
             bound_time_extension: None,
             scale_free_branching: false,
+            pseudocost_branching: false,
         }
     }
 }
@@ -367,6 +378,9 @@ pub struct SpatialTreeResult {
     pub n_incumbent_value_calls: usize,
     /// #1656: [`IncumbentValueFn`] calls whose value exceeded `cᵀx` (see above).
     pub n_incumbent_value_raised: usize,
+    /// #1913: integer branches chosen by pseudocost (`config.pseudocost_branching`);
+    /// 0 when the flag is off -- the probe that the rule fired.
+    pub n_pseudocost_picks: usize,
 }
 
 /// A caller-supplied primal heuristic for [`solve_spatial_tree_with_hook`] (#1522).
@@ -552,6 +566,7 @@ pub fn solve_spatial_tree_with_hooks(
     let mut n_primal_hook_improvements = 0usize;
     let mut n_incumbent_value_calls = 0usize;
     let mut n_incumbent_value_raised = 0usize;
+    let mut n_pseudocost_picks = 0usize;
     // Best-bound frontier: a min-heap on the inherited lower bound. Exploring the
     // lowest-bound region first lifts the global frontier minimum (the reported dual
     // bound) as fast as possible — the key to certifying instances like tanksize
@@ -561,7 +576,12 @@ pub fn solve_spatial_tree_with_hooks(
         pb: f64::NEG_INFINITY,
         lo: spec.global_lo.clone(),
         hi: spec.global_hi.clone(),
+        br: None,
     });
+    // #1913: per-column pseudocosts, `[down, up]` sums of per-unit bound gains and
+    // their observation counts. Read only under `config.pseudocost_branching`.
+    let mut pc_sum = [vec![0.0f64; spec.n_cols], vec![0.0f64; spec.n_cols]];
+    let mut pc_cnt = [vec![0usize; spec.n_cols], vec![0usize; spec.n_cols]];
     // Root box widths (for root-relative branch scoring in the fallback rule).
     let root_w: Vec<f64> = spec
         .global_lo
@@ -608,6 +628,7 @@ pub fn solve_spatial_tree_with_hooks(
         pb: parent_bound,
         lo,
         hi,
+        br,
     }) = heap.pop()
     {
         if deadline.is_some_and(|d| Instant::now() >= d) && !extension_taken && incumbent.is_some()
@@ -675,6 +696,7 @@ pub fn solve_spatial_tree_with_hooks(
                 n_primal_hook_improvements,
                 n_incumbent_value_calls,
                 n_incumbent_value_raised,
+                n_pseudocost_picks,
             };
         }
         // Fathom by the parent bound if the incumbent already dominates it. The
@@ -709,6 +731,7 @@ pub fn solve_spatial_tree_with_hooks(
                 n_primal_hook_improvements,
                 n_incumbent_value_calls,
                 n_incumbent_value_raised,
+                n_pseudocost_picks,
             };
         }
         node_count += 1;
@@ -798,6 +821,7 @@ pub fn solve_spatial_tree_with_hooks(
                         at,
                         parent_bound,
                         spec.integrality[j],
+                        None,
                     );
                 }
                 None => global_lb_closed = global_lb_closed.min(parent_bound),
@@ -813,6 +837,13 @@ pub fn solve_spatial_tree_with_hooks(
         // global lower bound. Sound: `max(safe, parent)` is still `<=` the true region
         // optimum since both terms are.
         let bound = node.bound.max(parent_bound);
+        if let Some((col, up, dist)) = br {
+            if node.bound.is_finite() && parent_bound.is_finite() && dist > 0.0 {
+                let d = usize::from(up);
+                pc_sum[d][col] += (node.bound - parent_bound).max(0.0) / dist;
+                pc_cnt[d][col] += 1;
+            }
+        }
         // #1236: node 1 IS the root region, and `bound` is the rigorous lower bound
         // just proven for it — the same value that reaches `global_lb_closed` or the
         // children's `pb`. Recorded here (and at the three other arms node 1 can
@@ -854,6 +885,10 @@ pub fn solve_spatial_tree_with_hooks(
                 frac_int = Some(j);
                 break;
             }
+        }
+        if config.pseudocost_branching && frac_int.is_some() {
+            frac_int = pseudocost_pick(spec, x, config.int_tol, &pc_sum, &pc_cnt);
+            n_pseudocost_picks += 1;
         }
         // (b) every lifted term McCormick-tight — fixed-width EnvTerms and the
         //     affine-form product (BlfTerm) terms alike.
@@ -953,6 +988,7 @@ pub fn solve_spatial_tree_with_hooks(
                                     n_primal_hook_improvements,
                                     n_incumbent_value_calls,
                                     n_incumbent_value_raised,
+                                    n_pseudocost_picks,
                                 };
                             }
                         }
@@ -1008,6 +1044,7 @@ pub fn solve_spatial_tree_with_hooks(
             widest_original_col(spec, &lo, &hi, &root_w, config.min_box_width)
                 .map(|j| (j, clamp_interior(x[j], lo[j], hi[j])))
         };
+        let int_frac = frac_int.map(|j| x[j] - x[j].floor());
         let pick = if let Some(j) = frac_int {
             Some((j, x[j].floor() + 0.5)) // integer branch: <= floor, >= ceil
         } else if let Some(col) = branch_col.filter(|&c| width(c) > config.min_box_width) {
@@ -1031,6 +1068,7 @@ pub fn solve_spatial_tree_with_hooks(
             split_at,
             bound,
             spec.integrality[split_col],
+            int_frac,
         );
     }
 
@@ -1067,6 +1105,7 @@ pub fn solve_spatial_tree_with_hooks(
                 n_primal_hook_improvements,
                 n_incumbent_value_calls,
                 n_incumbent_value_raised,
+                n_pseudocost_picks,
             }
         }
         None => SpatialTreeResult {
@@ -1087,6 +1126,7 @@ pub fn solve_spatial_tree_with_hooks(
             n_primal_hook_improvements,
             n_incumbent_value_calls,
             n_incumbent_value_raised,
+            n_pseudocost_picks,
         },
     }
 }
@@ -1125,7 +1165,11 @@ fn push_children(
     split_at: f64,
     pb: f64,
     is_int: bool,
+    frac: Option<f64>,
 ) {
+    // #1913: a fractional-integer branch records its column, side and the distance
+    // the LP value moves, for the pseudocost update when each child is solved.
+    let br = |up: bool| frac.map(|f| (split_col, up, if up { 1.0 - f } else { f }));
     if is_int {
         // integer: child1 x<=floor, child2 x>=ceil
         let f = (split_at - 0.5).floor();
@@ -1140,6 +1184,7 @@ fn push_children(
                 pb,
                 lo: lo1,
                 hi: hi1,
+                br: br(false),
             });
         }
         if hi2[split_col] >= lo2[split_col] - 1e-12 {
@@ -1147,6 +1192,7 @@ fn push_children(
                 pb,
                 lo: lo2,
                 hi: hi2,
+                br: br(true),
             });
         }
     } else {
@@ -1158,13 +1204,66 @@ fn push_children(
             pb,
             lo: lo.to_vec(),
             hi: hi1,
+            br: None,
         });
         heap.push(QNode {
             pb,
             lo: lo2,
             hi: hi.to_vec(),
+            br: None,
         });
     }
+}
+
+/// #1913: the fractional integer column with the largest pseudocost product score
+/// `max(f_down * pc_down, eps) * max(f_up * pc_up, eps)` (Achterberg, Koch & Martin
+/// 2005), ties to the lowest index. A side never observed takes the mean of the
+/// observed pseudocosts on that side, or 1 before any observation, so the first
+/// choices fall back to the most balanced fractionality. Not `branching::Pseudocosts`:
+/// its unobserved default is a fixed 1.0, which on an objective scaled like nvs17's
+/// (gains ~1e3 per unit) ranks every unobserved column last, so it is never tried.
+fn pseudocost_pick(
+    spec: &SpatialKernelSpec,
+    x: &[f64],
+    int_tol: f64,
+    pc_sum: &[Vec<f64>; 2],
+    pc_cnt: &[Vec<usize>; 2],
+) -> Option<usize> {
+    let mean = |d: usize| {
+        let (s, n) = pc_sum[d]
+            .iter()
+            .zip(pc_cnt[d].iter())
+            .filter(|(_, &n)| n > 0)
+            .fold((0.0, 0usize), |(s, n), (&ps, &pn)| {
+                (s + ps / pn as f64, n + 1)
+            });
+        if n > 0 {
+            s / n as f64
+        } else {
+            1.0
+        }
+    };
+    let avg = [mean(0), mean(1)];
+    let pc = |d: usize, j: usize| {
+        if pc_cnt[d][j] > 0 {
+            pc_sum[d][j] / pc_cnt[d][j] as f64
+        } else {
+            avg[d]
+        }
+    };
+    const EPS: f64 = 1e-6;
+    let mut best: Option<(f64, usize)> = None;
+    for (j, &is_int) in spec.integrality.iter().enumerate().take(spec.n_cols) {
+        if !is_int || (x[j] - x[j].round()).abs() <= int_tol {
+            continue;
+        }
+        let f = x[j] - x[j].floor();
+        let score = (f * pc(0, j)).max(EPS) * ((1.0 - f) * pc(1, j)).max(EPS);
+        if best.map(|(b, _)| score > b).unwrap_or(true) {
+            best = Some((score, j));
+        }
+    }
+    best.map(|(_, j)| j)
 }
 
 fn dot(a: &[f64], b: &[f64]) -> f64 {
@@ -1512,6 +1611,93 @@ mod tests {
         assert_eq!(res.status, TreeStatus::Optimal);
         assert!((res.incumbent.unwrap() - (-2.0)).abs() < 1e-9);
         assert!((res.incumbent_x[0] - 2.0).abs() < 1e-9);
+    }
+
+    /// #1913: with no observations every side takes pseudocost 1, so the product
+    /// rule picks the most balanced fractionality; observed gains then decide, and
+    /// integral or continuous columns are never picked.
+    #[test]
+    fn pseudocost_pick_prefers_balanced_then_observed_gains() {
+        let spec = SpatialKernelSpec {
+            n_cols: 4,
+            n_orig: 4,
+            c: vec![0.0; 4],
+            integrality: vec![true, true, true, false],
+            global_lo: vec![0.0; 4],
+            global_hi: vec![5.0; 4],
+            fixed_rows: vec![],
+            terms: vec![],
+            blf_terms: vec![],
+            obbt_candidates: vec![],
+        };
+        let x = [1.1, 2.5, 3.0, 0.5];
+        let zero_s = [vec![0.0; 4], vec![0.0; 4]];
+        let zero_n = [vec![0usize; 4], vec![0usize; 4]];
+        assert_eq!(pseudocost_pick(&spec, &x, 1e-5, &zero_s, &zero_n), Some(1));
+        // Column 0 has gained 10 per unit on both sides, column 1 only 0.1.
+        let s = [vec![10.0, 0.1, 0.0, 0.0], vec![10.0, 0.1, 0.0, 0.0]];
+        let n = [vec![1, 1, 0, 0], vec![1, 1, 0, 0]];
+        assert_eq!(pseudocost_pick(&spec, &x, 1e-5, &s, &n), Some(0));
+        // No fractional integer column: nothing to pick.
+        let xi = [1.0, 2.0, 3.0, 0.5];
+        assert_eq!(pseudocost_pick(&spec, &xi, 1e-5, &s, &n), None);
+    }
+
+    /// #1913: the rule changes only which column is branched, so a pure integer
+    /// program certifies the same optimum either way; the probe counter is 0 with
+    /// the rule off and positive with it on.
+    #[test]
+    fn pseudocost_branching_certifies_the_same_optimum() {
+        // max 5a + 4b + 3c  s.t.  2a + 3b + c <= 5.5,  4a + b + 2c <= 10.5,
+        // 3a + 4b + 2c <= 7.5, a,b,c in [0, 5] integer; the optimum is found by
+        // enumeration below.
+        let rows = vec![
+            (vec![2.0, 3.0, 1.0], 5.5),
+            (vec![4.0, 1.0, 2.0], 10.5),
+            (vec![3.0, 4.0, 2.0], 7.5),
+        ];
+        let c = vec![-5.0, -4.0, -3.0];
+        let mut best = f64::INFINITY;
+        for a in 0..=5 {
+            for b in 0..=5 {
+                for cc in 0..=5 {
+                    let v = [a as f64, b as f64, cc as f64];
+                    if rows.iter().all(|(r, rhs)| dot(r, &v) <= *rhs) {
+                        best = best.min(dot(&c, &v));
+                    }
+                }
+            }
+        }
+        let spec = SpatialKernelSpec {
+            n_cols: 3,
+            n_orig: 3,
+            c,
+            integrality: vec![true, true, true],
+            global_lo: vec![0.0; 3],
+            global_hi: vec![5.0; 3],
+            fixed_rows: rows
+                .iter()
+                .map(|(r, rhs)| FixedRow {
+                    cols: vec![0, 1, 2],
+                    coeffs: r.clone(),
+                    rhs: *rhs,
+                })
+                .collect(),
+            terms: vec![],
+            blf_terms: vec![],
+            obbt_candidates: vec![],
+        };
+        for on in [false, true] {
+            let cfg = SpatialTreeConfig {
+                pseudocost_branching: on,
+                ..SpatialTreeConfig::default()
+            };
+            let res = solve_spatial_tree(&spec, &cfg, &SimplexOptions::default());
+            assert_eq!(res.status, TreeStatus::Optimal);
+            assert!((res.incumbent.unwrap() - best).abs() < 1e-9);
+            assert!(res.bound <= best + 1e-9);
+            assert_eq!(res.n_pseudocost_picks > 0, on);
+        }
     }
 
     /// Issue #788: an expired wall-clock budget must retain the best known

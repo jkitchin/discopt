@@ -48,7 +48,7 @@ use std::time::{Duration, Instant};
     propagation_rounds=15, initial_incumbent=None, time_limit_s=None,
     incumbent_time_extension_s=None, bound_time_extension_s=None,
     cold_dual_start=false, primal_hook=None, incumbent_value=None,
-    scale_free_branching=false,
+    scale_free_branching=false, pseudocost_branching=false,
 ))]
 pub fn solve_spatial_tree_py<'py>(
     py: Python<'py>,
@@ -98,6 +98,7 @@ pub fn solve_spatial_tree_py<'py>(
     primal_hook: Option<PyObject>,
     incumbent_value: Option<PyObject>,
     scale_free_branching: bool,
+    pseudocost_branching: bool,
 ) -> PyResult<Bound<'py, PyDict>> {
     let c = c.as_slice()?;
     let integrality = integrality.as_slice()?;
@@ -329,6 +330,7 @@ pub fn solve_spatial_tree_py<'py>(
         incumbent_time_extension,
         bound_time_extension,
         scale_free_branching,
+        pseudocost_branching,
     };
     // The node LP's start basis (`SimplexOptions::cold_dual_start`, default OFF,
     // set from `DISCOPT_LP_COLD_DUAL_START`). Everything else is the default.
@@ -469,5 +471,6 @@ pub fn solve_spatial_tree_py<'py>(
     out.set_item("n_primal_hook_improvements", res.n_primal_hook_improvements)?;
     out.set_item("n_incumbent_value_calls", res.n_incumbent_value_calls)?;
     out.set_item("n_incumbent_value_raised", res.n_incumbent_value_raised)?;
+    out.set_item("n_pseudocost_picks", res.n_pseudocost_picks)?;
     Ok(out)
 }

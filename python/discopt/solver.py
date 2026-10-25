@@ -2382,6 +2382,9 @@ def _try_native_spatial_kernel(
     # The kernel's own default is the legacy rule, so ``=0`` passes nothing.
     if _scale_free_branching_enabled():
         solve_kwargs["scale_free_branching"] = True
+    # #1913: pseudocost choice of the fractional integer column (see the helper).
+    if _kernel_pseudocost_branching_enabled():
+        solve_kwargs["pseudocost_branching"] = True
     if _bound_reserve > 0.0:
         solve_kwargs["bound_time_extension_s"] = float(_bound_reserve)
     # #917: hand the kernel the caller's withheld #844 reserve so it can reclaim
@@ -2712,6 +2715,8 @@ def _try_native_spatial_kernel(
     _native_stats["tree/incumbent_value_raised"] = float(
         int(res.get("n_incumbent_value_raised") or 0)
     )
+    # #1913: integer branches chosen by pseudocost; 0 unless DISCOPT_KERNEL_PSEUDOCOST.
+    _native_stats["tree/pseudocost_picks"] = float(int(res.get("n_pseudocost_picks") or 0))
 
     # #1236: root-node certification metrics, mapped out of the kernel's internal
     # minimize convention with the same ``sign * (value + offset)`` the incumbent
@@ -10728,6 +10733,17 @@ def _scale_free_branching_enabled() -> bool:
     traced to the absolute McCormick-tightness tolerance, not the branch rule.
     """
     return os.environ.get("DISCOPT_SCALE_FREE_BRANCHING", "0") not in ("0", "")
+
+
+def _kernel_pseudocost_branching_enabled() -> bool:
+    """#1913: ``DISCOPT_KERNEL_PSEUDOCOST`` for the native spatial kernel.
+
+    Picks the fractional integer column to branch on by pseudocost product score
+    (``SpatialTreeConfig::pseudocost_branching``) instead of the lowest-index
+    fractional column. Branching order only; every child pair covers its parent.
+    Default OFF pending the section 5 panel. Read at call time.
+    """
+    return os.environ.get("DISCOPT_KERNEL_PSEUDOCOST", "0") not in ("0", "")
 
 
 def _p3_force_cut_path_enabled() -> bool:

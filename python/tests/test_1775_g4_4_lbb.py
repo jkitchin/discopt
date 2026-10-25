@@ -64,7 +64,16 @@ def _mixed():
     return m
 
 
-MODELS = [_nonconvex, _or_model, _nested, _nonlinear_objective, _chain, _mixed]
+MODELS = [
+    _nonconvex,
+    _or_model,
+    _nested,
+    _nonlinear_objective,
+    _chain,
+    # #1913 item 6: its big-M reference solve plus LBB took ~11 s on a dev machine and
+    # ran over the fast lane's 15 s call budget on CI (#1901, #1904).
+    pytest.param(_mixed, marks=[pytest.mark.slow, pytest.mark.correctness]),
+]
 
 
 @pytest.mark.parametrize("mk", MODELS)
