@@ -586,7 +586,7 @@ KNOWN: tuple[tuple[str, str, str], ...] = (
         "residual",
     ),
     # #1940, ``DISCOPT_IPX_RACE`` (default ON since its §5 panel, performance-plan
-    # §81): the integer-bilinear lift race. Whether it runs at all is this check on
+    # §82): the integer-bilinear lift race. Whether it runs at all is this check on
     # the time left, and the two 5 s slices it then spends (``_ipx_lift_race``'s
     # ``min(_IPX_RACE_SLICE_S, _remaining())``, a capped piece of what is left that
     # the carved-slice scanner cannot see through the helper) decide which exact
