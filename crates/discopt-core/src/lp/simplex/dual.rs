@@ -20,7 +20,10 @@
 #![allow(clippy::needless_range_loop)]
 
 use super::linsolve::{node_feral_lu, FeralLU, LinearSolver};
-use super::primal::{solve_lp_cols, solve_lp_cols_warm};
+use super::primal::{
+    downgrade_false_optimal, optimal_fails_original_audit, retry_decided, solve_lp_cols,
+    solve_lp_cols_warm,
+};
 use super::scaling::{ScaledLp, Scaling};
 use super::sparse::SparseCols;
 use super::{LpSolve, LpStatus, SimplexOptions};
@@ -327,6 +330,18 @@ pub fn solve_lp_warm(lp: &LpView<'_>, b: &[f64], start: &Basis, opts: &SimplexOp
             // checks against.
             scaled.unscale_dual(&mut sol.dual);
             scaled.unscale_ray(&mut sol.ray);
+            // #1935: the scaled audit can pass a point the original LP refuses.
+            if sol.status == LpStatus::Optimal {
+                let cols = SparseCols::from_dense(lp.a, lp.m, lp.n);
+                if optimal_fails_original_audit(&sol, &cols, lp.m, lp.n, b, lp.l, lp.u) {
+                    let alt = solve_lp_warm_scaled(lp, b, start, opts);
+                    return if retry_decided(&alt) {
+                        alt
+                    } else {
+                        downgrade_false_optimal(sol)
+                    };
+                }
+            }
             sol
         }
         None => solve_lp_warm_scaled(lp, b, start, opts),
@@ -479,6 +494,22 @@ fn solve_lp_warm_csc_inner(
                     LpStatus::Optimal | LpStatus::Infeasible | LpStatus::Unbounded
                 ) {
                     return alt;
+                }
+                return sol;
+            }
+            // #1935: the scaled audit can pass a point the original LP refuses
+            // (`optimal_fails_original_audit`). Same recovery as #649 above: retry on
+            // the exactly-reconstructed unscaled matrix, whose own audit runs in
+            // original units; if that decides nothing either, refuse the point.
+            if sol.status == LpStatus::Optimal {
+                scaling.unscale_cols(&mut sp); // exact pow2 → original matrix
+                if optimal_fails_original_audit(&sol, &sp, m, n, b, l, u) {
+                    let alt = solve_csc_core(&sp, m, n, c, l, u, b, start, opts);
+                    return if retry_decided(&alt) {
+                        alt
+                    } else {
+                        downgrade_false_optimal(sol)
+                    };
                 }
             }
             sol
@@ -2774,6 +2805,104 @@ mod tests {
     /// Minimal parser for the captured stall fixture (a flat JSON of number
     /// arrays produced by the F2 capture hook). Returns the CSC + LP data + basis.
     #[allow(clippy::type_complexity)]
+    /// Max violation of `l <= x <= u` and `Ax = b` in the ORIGINAL (unscaled) LP,
+    /// each relative to the magnitude it is measured against.
+    fn original_space_violation(
+        sp: &SparseCols,
+        m: usize,
+        n: usize,
+        b: &[f64],
+        l: &[f64],
+        u: &[f64],
+        x: &[f64],
+    ) -> (f64, f64) {
+        let mut bound = 0.0f64;
+        for j in 0..n {
+            if l[j] > -INF {
+                bound = bound.max((l[j] - x[j]) / (1.0 + l[j].abs()));
+            }
+            if u[j] < INF {
+                bound = bound.max((x[j] - u[j]) / (1.0 + u[j].abs()));
+            }
+        }
+        let mut ax = vec![0.0; m];
+        for j in 0..n {
+            let (rows, vals) = sp.col(j);
+            for (&r, &v) in rows.iter().zip(vals) {
+                ax[r] += v * x[j];
+            }
+        }
+        let row = (0..m)
+            .map(|i| (ax[i] - b[i]).abs() / (1.0 + b[i].abs()))
+            .fold(0.0, f64::max);
+        (bound, row)
+    }
+
+    /// #1935 (captured MINLPLib `pooling_adhya1stp` native-kernel node LP): column 0
+    /// mixes entries of 7.1e-14 and 1.7e-9 with O(1) ones, so geometric-mean
+    /// equilibration scales it by ~1e6 and a 0.0179 violation of its lower bound
+    /// passes the 1e-6 feasibility audit in SCALED space. The engine returned
+    /// `Optimal` (-538.904) on an LP that is infeasible (a Farkas-certified
+    /// `Infeasible` under another pricing rule; HiGHS agrees; dropping the 20
+    /// entries with |a| <= 1e-12 makes this engine say `Infeasible` too). Whatever
+    /// the verdict, an `Optimal` must hold on the original LP.
+    #[test]
+    fn scaled_optimal_is_audited_against_the_original_lp() {
+        let json = include_str!("testdata/adhya1stp_tiny_coef_false_optimal_lp.json");
+        let (m, n, col_ptr, row_idx, vals, c, l, u, b, basic_vars, col_status) =
+            parse_stall_fixture(json);
+        let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+        let mut checked = 0usize;
+
+        // The mechanism: column 0 is scaled so hard that its lower bound, and any
+        // violation of it, shrinks below the audit's absolute floor.
+        let scaling = super::super::scaling::Scaling::from_sparse(&sp, m, n).expect("scaled");
+        let l_scaled = scaling.scale_lower(&l);
+        let factor = l[0] / l_scaled[0];
+        assert!(factor > 1e5, "column 0 scale factor {factor:e}");
+        assert!(l_scaled[0].abs() < 1e-4, "scaled bound {:e}", l_scaled[0]);
+        checked += 2;
+
+        let start = Basis {
+            col_status,
+            basic_vars,
+        };
+        let _guard = crate::profile::test_guard();
+        for warm in [None, Some(&start)] {
+            crate::profile::reset_totals();
+            crate::profile::set_enabled(true);
+            let sol = solve_lp_warm_csc(sp.clone(), m, n, &c, &l, &u, &b, warm, &opts());
+            let refused = crate::profile::counter_snapshot()
+                .into_iter()
+                .find(|(k, _)| *k == "ScaledOptimalOriginalAuditFail")
+                .map_or(0, |(_, v)| v);
+            crate::profile::set_enabled(false);
+            // The check fired: the scaled solve's `Optimal` was refused...
+            assert!(
+                refused >= 1,
+                "warm={}: original-space audit never fired",
+                warm.is_some()
+            );
+            // ...and the LP, which is infeasible, is not reported `Optimal`.
+            assert_ne!(sol.status, LpStatus::Optimal, "warm={}", warm.is_some());
+            checked += 2;
+            if sol.status == LpStatus::Optimal {
+                let (bound, row) = original_space_violation(&sp, m, n, &b, &l, &u, &sol.x);
+                assert!(
+                    bound <= 1e-6 && row <= 1e-6,
+                    "warm={}: Optimal {} violates the original LP (bound {bound:e}, row {row:e})",
+                    warm.is_some(),
+                    sol.obj
+                );
+            }
+            checked += 1;
+        }
+        assert_eq!(
+            checked, 8,
+            "false-Optimal probe did not run every assertion"
+        );
+    }
+
     fn parse_stall_fixture(
         json: &str,
     ) -> (

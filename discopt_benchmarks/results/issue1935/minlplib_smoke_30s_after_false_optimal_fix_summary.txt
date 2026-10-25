@@ -1,0 +1,23 @@
+scored 7 kernel-routed instances, 77 bound/objective checks
+                              mode 0        mode 1        mode 2
+certified                          2             5             7
+SGM wall s                    24.142        11.333         5.789
+total wall s                 182.534       101.018        49.166
+total nodes                    27662         21220         18964
+median ms/node LP              6.902         4.957         1.234
+median pivots/node           112.079        55.843        16.596
+warm starts                    0.000     19458.000     18180.000
+shape mismatches               0.000         0.000         0.000
+FALSE bound/cert                   0             0             0
+bad points                         0             0             0
+mode 1 vs 0: lost []  gained ['mlib:hybriddynamic_var', 'mlib:nous2', 'mlib:pooling_bental5stp']
+mode 2 vs 0: lost []  gained ['mlib:hybriddynamic_var', 'mlib:nous2', 'mlib:nvs20', 'mlib:pooling_adhya1stp', 'mlib:pooling_bental5stp']
+
+per instance, modes 0 / 1 / 2: nodes | wall s | ms/node LP | cert
+  mlib:ex2_1_9                 9201 / 9563 / 9105 | 7.8 / 3.2 / 2.7 | 0.737 / 0.232 / 0.188 | CCC
+  mlib:hybriddynamic_var       4713 / 1787 / 1819 | 30.0 / 7.7 / 4.2 | 5.663 / 2.878 / 0.866 | -CC
+  mlib:nous2                   3474 / 1007 / 633 | 30.4 / 7.4 / 3.2 | 7.746 / 4.957 / 1.234 | -CC
+  mlib:nvs20                   3122 / 1504 / 269 | 30.0 / 30.0 / 3.6 | 8.407 / 17.842 / 2.218 | --C
+  mlib:pooling_adhya1stp       2391 / 1434 / 1285 | 30.0 / 30.0 / 15.1 | 6.902 / 11.399 / 1.298 | --C
+  mlib:pooling_bental5stp      570 / 1766 / 1766 | 30.0 / 13.5 / 13.8 | 46.839 / 5.581 / 5.758 | -CC
+  mlib:st_e31                  4191 / 4159 / 4087 | 24.1 / 9.2 / 6.6 | 4.734 / 1.227 / 0.567 | CCC

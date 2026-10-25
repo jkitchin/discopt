@@ -17,9 +17,12 @@
 //! [`solve_lp_multi_rhs`] is the common special case: one LP (`A`, `c`, bounds)
 //! solved for several right-hand sides.
 
-use super::primal::solve_lp_scaled;
+use super::primal::{
+    downgrade_false_optimal, optimal_fails_original_audit, retry_decided, solve_lp_scaled,
+};
 use super::scaling::Scaling;
-use super::{LpSolve, SimplexOptions};
+use super::sparse::SparseCols;
+use super::{LpSolve, LpStatus, SimplexOptions};
 use crate::lp::crossover::LpView;
 
 /// One LP in a batch: the right-hand side and variable bounds. The constraint
@@ -52,6 +55,8 @@ pub fn solve_lp_batch(
     match Scaling::from_matrix(a, m, n) {
         Some(scaling) => {
             let a_s = scaling.scale_matrix(a);
+            // #1935: the original matrix in CSC, for the per-instance audit below.
+            let cols = SparseCols::from_dense(a, m, n);
             let c_s = scaling.scale_c(c);
             let solve_one = |inst: &LpInstance| -> LpSolve {
                 let b_s = scaling.scale_b(&inst.b);
@@ -75,6 +80,25 @@ pub fn solve_lp_batch(
                 // LPs where the certificate matters most (Rust-1).
                 scaling.unscale_dual(&mut sol.dual);
                 scaling.unscale_ray(&mut sol.ray);
+                // #1935: the scaled audit can pass a point the original LP refuses.
+                if sol.status == LpStatus::Optimal
+                    && optimal_fails_original_audit(&sol, &cols, m, n, &inst.b, &inst.l, &inst.u)
+                {
+                    let view = LpView {
+                        a,
+                        m,
+                        n,
+                        c,
+                        l: &inst.l,
+                        u: &inst.u,
+                    };
+                    let alt = solve_lp_scaled(&view, &inst.b, opts);
+                    return if retry_decided(&alt) {
+                        alt
+                    } else {
+                        downgrade_false_optimal(sol)
+                    };
+                }
                 sol
             };
             map_instances(instances, solve_one)

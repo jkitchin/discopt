@@ -10981,5 +10981,31 @@ mixes entries of 7.1e-14 and 1.7e-9 with O(1) ones. Hypothesis, not yet verified
 geometric-mean equilibration scales that column by ~10⁶, so the violation passes
 the feasibility audit in scaled space. The node's safe bound stays valid (it holds
 for any multipliers, and the region's true bound is +inf); the risk is the
-infeasible LP point reaching incumbent acceptance. Tracked separately; not fixed
-on the #1935 branch.
+infeasible LP point reaching incumbent acceptance.
+
+**Verified and fixed (same day).** The regression test
+`scaled_optimal_is_audited_against_the_original_lp` (fixture
+`testdata/adhya1stp_tiny_coef_false_optimal_lp.json`) confirms the mechanism:
+column 0's equilibration factor exceeds 1e5 and its scaled lower bound is below
+1e-4, so the audit's absolute floor (1e-6 in scaled units) admits ~0.1 in original
+units. Every equilibrated entry point in `lp/simplex` (`solve_lp`,
+`solve_lp_cols_scaled`, `solve_lp_warm`, `solve_lp_warm_csc`, `solve_lp_batch`)
+now re-audits an `Optimal` point against the ORIGINAL LP after unscaling
+(`primal::optimal_fails_original_audit`); a refused point is re-solved on the
+exactly-restored unscaled matrix (#649's recovery), and if that decides nothing
+the verdict is `Numerical`, which the trees branch on. Counters
+`ScaledOptimalOriginalAuditFail` / `ScaledOptimalUnscaledRetryDecided`.
+
+It is not rare. Refused / node LPs (retry decided): `nvs20` mode 2 32/266 (28),
+`nous2` mode 2 21/514 (18), `st_e31` mode 0 55/3,559 (54), `pooling_adhya1stp`
+mode 2 6/1,271 (6), `tanksize` mode 2 1/17,092 (1). Not bound-neutral, by design:
+on the 24-solve exact set every certifying solve still certifies with an identical
+objective; node counts shift where a refused LP now gets a different verdict
+(`st_e31` 4,367 -> 4,191, `nous2` mode 2 599 -> 633). MINLPLib smoke (7 kernel
+instances, 30 s, 77 checks against `minlplib.solu`): false 0, bad points 0, lost
+0, certified 2/5/7 for modes 0/1/2.
+
+**Not covered: the MILP driver.** It scales its working matrix itself
+(`milp_driver.rs`) and, since #1287, verifies an integral LP vertex with
+`rows_verified` -- row equalities of `[A | I]` only, so a negative slack or a
+structural outside its box would still pass. A related gap, outside this change.
