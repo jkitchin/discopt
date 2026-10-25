@@ -150,12 +150,17 @@ def test_root_pool_cuts_valid_on_every_child_feasible_point():
 
 
 @pytest.mark.smoke
-def test_box_dependent_child_rows_would_be_invalid_and_are_excluded():
+def test_box_dependent_child_rows_would_be_invalid_and_are_excluded(monkeypatch):
     """The hazard THRU-4 must exclude: rows of a CHILD-box relaxation (e.g. the
     secant of ``x**2`` on a sub-box) cut feasible points outside that sub-box, so
     they must never be inherited. Demonstrate the hazard, then assert the shipped
     root pool contains no such row and the flag-ON solve still certifies the true
     optimum that naive child-row inheritance would have cut off."""
+    # The fixture is written with an integer array variable; with
+    # DISCOPT_INTEGER_PRODUCT_INDEXED on (#1934) the integer-product reform solves
+    # it as an exact MILP, which never reaches the spatial cut pool under test.
+    # Pin the spatial route so the test does not depend on that flag's default.
+    monkeypatch.setenv("DISCOPT_INTEGER_PRODUCT_INDEXED", "0")
     from discopt._relax.mccormick_lp import MccormickLPRelaxer
     from discopt._relax.milp_relaxation import build_milp_relaxation
 
@@ -224,12 +229,17 @@ def test_cut_inherit_force_off_no_skip():
 
 
 @pytest.mark.smoke
-def test_cut_inherit_structure_gated_fires_on_dense_qp():
+def test_cut_inherit_structure_gated_fires_on_dense_qp(monkeypatch):
     """CUT-INHERIT-GRAD: the STRUCTURE-GATED opt-in (``cut_inherit=None``, env
     ``DISCOPT_CUT_INHERIT=gated``) must auto-engage on a model that separates a
     non-empty root pool — the pool-fires predicate. On the dense integer QP the
     pool populates, so the gate decision is ON and the square/PSD separators are
     skipped at nodes, while the certificate is preserved (bound <= optimum)."""
+    # The fixture is written with an integer array variable; with
+    # DISCOPT_INTEGER_PRODUCT_INDEXED on (#1934) the integer-product reform solves
+    # it as an exact MILP, which never reaches the spatial cut pool under test.
+    # Pin the spatial route so the test does not depend on that flag's default.
+    monkeypatch.setenv("DISCOPT_INTEGER_PRODUCT_INDEXED", "0")
     model = _build_dense_int_qp()
     res = model.solve(time_limit=60, tuning=SolverTuning(cut_inherit=None))
     opt, _ = _brute_force_opt()
