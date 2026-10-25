@@ -114,7 +114,11 @@ def test_an_unlifted_slice_that_certifies_wins_and_keeps_its_certificate(monkeyp
         ((10.0, 9.9), (10.0, 5.0), "lift"),  # lift has the smaller gap
         ((10.0, 5.0), (10.0, 9.9), "unlifted"),
         ((10.0, 5.0), (10.0, 5.0), "lift"),  # a tie keeps the legacy choice
-        ((None, 5.0), (None, 4.0), "lift"),  # neither has an incumbent: tie
+        # Neither has an incumbent (#1944): the tighter dual bound continues.
+        ((None, 5.0), (None, 4.0), "lift"),
+        ((None, 5.7), (None, 15.2), "unlifted"),  # tln6's measured slice bounds
+        ((None, 5.0), (None, 5.0), "lift"),  # equal bounds keep the legacy choice
+        ((None, None), (None, 15.2), "lift"),  # no bound to compare keeps the lift
         ((None, 5.0), (10.0, 4.0), "unlifted"),  # only one has a gap at all
     ],
 )
@@ -135,6 +139,27 @@ def test_neither_slice_certifies_so_the_smaller_gap_continues(
     # The continuation gets the rest of the caller's budget, not another slice.
     assert stub.calls[2][1]["time_limit"] > 60.0 - 2 * S._IPX_RACE_SLICE_S - 1.0
     assert result.objective == 9.0 and result.gap_certified
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize(
+    "lifted_bound,unlifted_bound,maximize,expected",
+    [
+        (5.7, 15.2, False, "unlifted"),
+        (15.2, 5.7, False, "lift"),
+        (5.7, 15.2, True, "lift"),  # maximize: the LOWER bound is the tighter one
+        (15.2, 5.7, True, "unlifted"),
+        (float("inf"), 5.0, False, "lift"),
+    ],
+)
+def test_without_incumbents_the_tighter_bound_continues(
+    lifted_bound, unlifted_bound, maximize, expected
+):
+    lifted = _fake(None, lifted_bound, False)
+    unlifted = _fake(None, unlifted_bound, False)
+    assert S._ipx_continuation_arm(lifted, unlifted, maximize) == expected
+    # With an incumbent on either side the gap still decides, bounds aside.
+    assert S._ipx_continuation_arm(_fake(16.0, 5.7, False), unlifted, maximize) == "lift"
 
 
 @pytest.mark.smoke
