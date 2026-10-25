@@ -23,6 +23,7 @@ pub mod presolve;
 pub mod primal;
 pub mod refine;
 pub mod regularized_lu;
+pub mod scaled_problem;
 pub mod scaling;
 pub mod sparse;
 
@@ -33,6 +34,7 @@ pub use dual::{
 };
 pub use presolve::{tighten_bounds, tighten_bounds_csc};
 pub use primal::{solve_lp, solve_lp_cols, solve_lp_cols_scaled, solve_lp_scaled};
+pub use scaled_problem::ScaledProblem;
 pub use scaling::Scaling;
 pub use sparse::SparseCols;
 

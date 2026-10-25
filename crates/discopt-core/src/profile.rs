@@ -568,6 +568,10 @@ counters!(
     // let through is exactly what the first counter counts (CLAUDE.md §6).
     ScaledOptimalOriginalAuditFail,
     ScaledOptimalUnscaledRetryDecided,
+    // #1945: integral MILP-driver vertices (node LP or dive) whose original rows
+    // verify but whose original columns miss their bounds, refused as incumbents
+    // by `incumbent_verified` (defense in depth behind `ScaledProblem::verify`).
+    DriverIncumbentBoundsRefused,
     ExpandResetArmed,
     ExpandResetRetries,
     ExpandResetRescues,
