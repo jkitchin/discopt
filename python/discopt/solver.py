@@ -10800,7 +10800,9 @@ def _ipx_race_enabled() -> bool:
        instance the lift is adopted on in-repo ends.
     2. Otherwise run the UN-LIFTED model for one slice. If it certifies, return it.
     3. Otherwise continue whichever arm had the smaller relative gap, restarted
-       with the rest of the budget (ties -> the lift, the legacy choice).
+       with the rest of the budget (ties -> the lift, the legacy choice). When
+       NEITHER slice holds an incumbent both gaps are ``inf``; the arm with the
+       tighter dual bound continues instead (:func:`_ipx_continuation_arm`).
 
     All three results are merged by :func:`_merge_route_and_fallback`: best
     incumbent, tightest dual bound. Both arms are exact formulations of the same
@@ -10869,6 +10871,32 @@ def _ipx_relative_gap(result) -> float:
     return abs(float(obj) - float(bnd)) / max(1.0, abs(float(obj)))
 
 
+def _ipx_continuation_arm(lifted, unlifted, is_maximize: bool) -> str:
+    """The arm the #1940 race continues when neither slice certified.
+
+    The smaller relative gap continues; a tie keeps the lift (the legacy choice).
+
+    #1944: when NEITHER slice holds an incumbent, both gaps are ``inf`` and that
+    tie used to hand the rest of the budget to the lift. The two dual bounds are
+    still comparable -- both formulations are exact, so each slice's bound is a
+    valid bound on the caller's objective -- and the tighter one continues
+    (equal or non-finite bounds keep the lift). Measured on every race that
+    reached this tie (``tln6``/``tln7``, 30 s): lifted bounds 5.7 / 2.8 against
+    un-lifted 15.2 / 14.2 (optima 15.3 / 15.0). The lift continuation ended
+    uncertified at 120 s with its own bound near 6, while the un-lifted arm
+    certifies ``tln6`` in about 36 s (``performance-plan.md`` section 85).
+    """
+    gl, gu = _ipx_relative_gap(lifted), _ipx_relative_gap(unlifted)
+    if not (math.isinf(gl) and math.isinf(gu)):
+        return "lift" if gl <= gu else "unlifted"
+    bl, bu = getattr(lifted, "bound", None), getattr(unlifted, "bound", None)
+    if bl is None or bu is None or not (np.isfinite(bl) and np.isfinite(bu)):
+        return "lift"
+    bl, bu = float(bl), float(bu)
+    tighter = bu < bl if is_maximize else bu > bl
+    return "unlifted" if tighter else "lift"
+
+
 def _ipx_lift_race(entry_args: dict, solve_t0: float, is_maximize: bool) -> "SolveResult":
     """Run the #1940 lift race (see :func:`_ipx_race_enabled`) and return its answer.
 
@@ -10921,7 +10949,7 @@ def _ipx_lift_race(entry_args: dict, solve_t0: float, is_maximize: bool) -> "Sol
     if _result_certifies(unlifted):
         logger.info("#1940 lift race: the un-lifted slice certified; lift declined")
         return _done(merged)
-    arm = "lift" if gaps[0] <= gaps[1] else "unlifted"
+    arm = _ipx_continuation_arm(lifted, unlifted, is_maximize)
     spent = int(getattr(merged, "node_count", 0) or 0)
     rest = _remaining()
     logger.info(
