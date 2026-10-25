@@ -1681,17 +1681,27 @@ KERNEL_SEED_ILS_STATS: "collections.Counter[str]" = collections.Counter()
 def _kernel_seed_multistart_lazy_enabled() -> bool:
     """``DISCOPT_KERNEL_SEED_MULTISTART_LAZY`` gate (#1941 item 4), read at call time.
 
-    **Default OFF pending the section 5 panel.** The native kernel's seed runs a
-    pure-continuous model's ``continuous_multistart`` even when the sub-NLP from the
-    relaxation point has already yielded a verified seed. On one-node instances
-    that is most of the solve (2026-10-25, 120 s): ``pooling_bental4stp`` 9.7 of
-    10.5 s, ``st_m2`` 8.0 of 8.8 s, ``pooling_foulds2tp`` 4.4 of 4.9 s,
-    ``pooling_haverly3stp`` 4.3 of 4.9 s, each certifying the same optimum without
-    it. ON, the multistart runs only when no earlier stage yielded a candidate --
-    the rule ``DISCOPT_KERNEL_SEED_ILS`` already follows. Primal only: it changes
-    which verified point seeds the kernel's cutoff, never a bound.
+    **Graduated (default ON, 2026-10-25, #1941); ``=0`` restores the unconditional
+    multistart.** The native kernel's seed ran a pure-continuous model's
+    ``continuous_multistart`` even when the sub-NLP from the relaxation point had
+    already yielded a verified seed. On one-node instances that was most of the solve
+    (120 s): ``pooling_bental4stp`` 9.7 of 10.5 s, ``st_m2`` 8.0 of 8.8 s,
+    ``pooling_foulds2tp`` 4.4 of 4.9 s, ``pooling_haverly3stp`` 4.3 of 4.9 s. ON, the
+    multistart runs only when no earlier stage yielded a candidate -- the rule
+    ``DISCOPT_KERNEL_SEED_ILS`` already follows. Primal only: it changes which
+    verified point seeds the kernel's cutoff, never a bound.
+
+    Section 5 panel: the 158 pure-continuous MINLPLib instances with <= 200
+    vars/cons and a proven status, OFF vs ON, 30 s, interleaved, oracle-checked and
+    every incumbent ``verify_point``-ed on a fresh model. Cert-clean (948 checks, 0
+    problems); certified 149 = 149, none lost or gained; the rule fired on 94; total
+    wall 546 -> 404 s (pooling_bental5pq/5tp 14 -> 2.3-2.5 s, pooling_foulds2stp 12.9
+    -> 2.0 s, st_m2 10.1 -> 0.8 s, ex5_3_2 10.9 -> 1.7 s, st_rv9 11.9 -> 3.1 s).
+    The two neither arm certifies: rbrock's bound moves 6e-6, qp3's tightens.
+    ``kall_congruentcircles_c51`` (#188, whose global basin multistart finds) routes
+    to the Python tree, where this rule does not apply; both arms reach 1.07301.
     """
-    return os.environ.get("DISCOPT_KERNEL_SEED_MULTISTART_LAZY", "0").strip().lower() not in (
+    return os.environ.get("DISCOPT_KERNEL_SEED_MULTISTART_LAZY", "1").strip().lower() not in (
         "0",
         "false",
         "no",
