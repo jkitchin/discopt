@@ -11575,6 +11575,20 @@ the continuation, and are faster ON (5.08 → 4.20 s, 5.30 → 4.36 s).
   search sizes its root work from its limit (the §84 lesson again), so a longer slice
   is a different search, not more of the same one.
 
+- *Running both arms concurrently* (entry experiment only; two threads, each arm on
+  its own model copy, 30 s, "first certificate" assumes the loser is cancelled, which
+  neither engine supports today). The dense family gains (n=15 s0 4.27 → 2.00 s,
+  n=18 s1 15.28 → 9.55, n=20 s1 18.04 → 12.26), but every corpus lift win slows 2–3x
+  from GIL and CPU contention with the un-lifted arm, whose kernel seeding is Python
+  (5.6 s of `ex1265`'s 8.7 s un-lifted solve is `integer_local_search` sub-NLPs):
+  `ex1265` 1.92 → 3.66 s, `ex1266` 1.42 → 4.57, `ex1263` 1.03 → 1.92, `ex1264`
+  0.65 → 1.47. That fails "the lift must still win where it wins today", so not
+  pursued as a plain concurrent race.
+- *Root cuts as the reason the lift slice cannot shrink.* `DISCOPT_MILP_ROOT_CUTS=0`
+  gives `ex1265` the identical tree (1883 nodes); its first ~0.7 s of engine time is
+  reliability strong branching (39 calls, 2.07 s summed across threads at T=5). The
+  ~1.8 s of engine work `ex1265` needs is intrinsic, not a budget-sized stage.
+
 **What remains of #1959.** The race now costs ~2.8 s per lost race, down from 5 s,
 but not zero. That residue is the engine's stage-sized budget, which `ex1265` needs.
 The restart on `dense_n18_s1`/`n20_s1` (un-lifted slice + continuation) is
