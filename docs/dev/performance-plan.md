@@ -10943,3 +10943,43 @@ triangularizes, so this is reported as a measurement, not proposed as a flag.
 **What remains.** The algorithm gap from the same start (~1.6x) -- dual
 steepest-edge pricing vs Devex is the standard lever -- and the start-basis gap
 (~1.6x), which is about which optimal vertex a parent ends on.
+
+### 79a. Dual steepest-edge pricing: measured, not worth building yet (2026-10-25)
+
+Prototype (local worktree, not merged): Forrest–Goldfarb dual steepest-edge
+weights `w_i = ||e_iᵀB⁻¹||²` in place of the dual Devex approximation, with the
+exact `w_r` from the pivot row already computed and one extra ftran per pivot for
+`τ = B⁻¹ρ_r`. Measured with `examples/issue1935_dse_bench.rs` (prototype only) on
+captured node LPs from their exact start bases; it reproduces the in-tree pivots
+on every LP with the prototype off.
+
+| instance (LPs) | Devex | DSE, unit start | DSE, exact start |
+|---|---:|---:|---:|
+| `pooling_bental5stp` (1,499) | 74,331 | 68,919 | 55,193 (−26%) |
+| `st_e31` (1,499) | 17,831 | 18,943 | 14,222 (−20%) |
+| `nvs20` (267) | 4,945 | 5,298 | 4,555 (−8%) |
+| `pooling_adhya1stp` (1,270) | 23,204 | 24,765 | 23,148 (−0.2%) |
+
+Unit-start DSE is worse than Devex on three of four. Exact start needs `m` btrans
+per solve, which doubles LP time (`pooling_bental5stp` 7.6 → 16.9 s). The extra
+ftran costs ~20% per pivot, so even with exact weights for free (inherited from the
+parent) the projected net is ~0.9x–1.2x LP time across the four: neutral to
+negative. Kill criterion met for now; it would reopen if the per-pivot cost falls
+(e.g. hypersparse ftran/btran) or a free source of exact weights is shown to
+survive the child's coefficient changes. Objectives agreed with Devex on every LP
+where both returned `Optimal`.
+
+### 79b. Correctness finding: a false `Optimal` on a tiny-coefficient column (2026-10-25)
+
+Found by that comparison. On captured `pooling_adhya1stp` node LP 1221 the default
+engine (cold, warm, and warm with the bound-flip repair alike: 165 pivots each)
+returns `Optimal` at −538.904 with `Ax = b` to 1.5e-13 but a structural basic column
+below its lower bound by **0.0179** (x₀ = 7.6169, l₀ = 7.635). The LP is
+infeasible: DSE returns a Farkas-certified `Infeasible`, HiGHS agrees, and dropping
+the 20 entries with |a| ≤ 1e-12 makes the engine return `Infeasible` too. Column 0
+mixes entries of 7.1e-14 and 1.7e-9 with O(1) ones. Hypothesis, not yet verified:
+geometric-mean equilibration scales that column by ~10⁶, so the violation passes
+the feasibility audit in scaled space. The node's safe bound stays valid (it holds
+for any multipliers, and the region's true bound is +inf); the risk is the
+infeasible LP point reaching incumbent acceptance. Tracked separately; not fixed
+on the #1935 branch.
