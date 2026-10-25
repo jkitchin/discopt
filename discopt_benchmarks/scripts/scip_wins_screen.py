@@ -21,10 +21,16 @@ Usage::
         --time-limit 30 --workers 3
     # confirm the candidates sequentially, at a longer cap:
     python -u discopt_benchmarks/scripts/scip_wins_screen.py --out <dir> \\
-        --time-limit 120 --workers 1 --names-file <dir>/candidates.txt
+        --time-limit 120 --workers 1 --names-file <dir>/candidates_tl30.txt
 
-The 2026-10-21 run that produced ``config/suites/scip_wins.txt`` is written up
-in ``docs/dev/scip-wins-2026-10-21.md``.
+Each run writes ``<out>/candidates_tl<T>.txt``: every instance SCIP solves within
+``--max-scip-time`` that discopt does not, then every instance both solve where
+discopt takes >= ``--slow-factor`` times SCIP's time and >= 5 s. Stage 2 reads the
+stage-1 file, so the candidate list is never assembled by hand.
+
+The run that produced ``config/suites/scip_wins.txt`` is written up in
+``docs/dev/scip-wins-2026-10-25.md`` (the previous round:
+``docs/dev/scip-wins-2026-10-21.md``).
 """
 
 from __future__ import annotations
@@ -199,7 +205,13 @@ def verdict(res: dict, opt: float | None) -> str:
     return "FOUND_UNPROVEN" if _close(obj, opt) else "FAIL"
 
 
-def analyze(panel: list[dict], results: Path, max_scip_time: float) -> int:
+def analyze(
+    panel: list[dict],
+    results: Path,
+    max_scip_time: float,
+    slow_factor: float = 10.0,
+    candidates: Path | None = None,
+) -> int:
     res = {}
     for ln in results.open():
         j = json.loads(ln)
@@ -238,6 +250,27 @@ def analyze(panel: list[dict], results: Path, max_scip_time: float) -> int:
             f"discopt {r['vd']:14s} {d['status']:10s} {d.get('wall', d['proc_wall']):6.1f}s "
             f"obj={d.get('objective')} bound={d.get('bound')} opt={r['opt']}"
         )
+
+    def wall(r: dict) -> float:
+        return float(r.get("wall", r["proc_wall"]))
+
+    slow = [
+        r
+        for r in rows
+        if r["vs"] == "OK"
+        and r["vd"] == "OK"
+        and wall(r["d"]) >= 5.0
+        and wall(r["d"]) >= slow_factor * wall(r["s"])
+    ]
+    print(f"\nboth OK, discopt >= {slow_factor:g}x SCIP and >= 5 s: {len(slow)}")
+    for r in sorted(slow, key=lambda r: -wall(r["d"]) / max(wall(r["s"]), 1e-3)):
+        print(
+            f"  {r['name']:26s} discopt {wall(r['d']):6.1f}s ({r['d'].get('nodes')} nodes) | "
+            f"scip {wall(r['s']):6.2f}s ({r['s'].get('nodes')} nodes)"
+        )
+    if candidates is not None:
+        candidates.write_text("".join(f"{r['name']}\n" for r in wins + slow))
+        print(f"wrote {len(wins) + len(slow)} candidates to {candidates}")
     if bound_checks == 0:
         print("ERROR: no bound was checked -- the probe measured nothing")
         return 1
@@ -261,6 +294,12 @@ def main() -> None:
         help="only list instances SCIP solves within this many seconds",
     )
     ap.add_argument(
+        "--slow-factor",
+        type=float,
+        default=10.0,
+        help="also nominate instances both solve where discopt is this many times slower",
+    )
+    ap.add_argument(
         "--names-file",
         type=Path,
         help="restrict to these instances ('#' comments ignored); overrides the size filter",
@@ -272,7 +311,8 @@ def main() -> None:
     a.out.mkdir(parents=True, exist_ok=True)
     panel = build_panel(a.out, a.max_vars, a.max_cons, names)
     results = run(a.out, panel, a.time_limit, a.workers)
-    sys.exit(analyze(panel, results, a.max_scip_time))
+    cand = a.out / f"candidates_tl{int(a.time_limit)}.txt"
+    sys.exit(analyze(panel, results, a.max_scip_time, a.slow_factor, cand))
 
 
 if __name__ == "__main__":

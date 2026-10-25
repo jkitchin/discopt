@@ -1,28 +1,22 @@
 # scip_wins -- small MINLPLib instances SCIP 10.0 solves to proven optimality
 # (or proves infeasible) in <= 5 s, single thread, where discopt does NOT within
-# 120 s. Measured 2026-10-21; method and full numbers in
-# docs/dev/scip-wins-2026-10-21.md. One or two per failure class; re-derive the
+# 120 s. Measured 2026-10-25; method and full numbers in
+# docs/dev/scip-wins-2026-10-25.md (previous round: scip-wins-2026-10-21.md).
+# Every instance the stage-2 screen confirmed, grouped by class; re-derive the
 # list from the screen, do not extend it by hand.
 #
-# Not vendored: run with --fetch (or --use-cache). Tracked in #1866.
+# Not vendored: run with --fetch (or --use-cache). Tracked in #1941 (round 2 of #1913).
 #
-# convex IQCP, single constraint: no proof (SCIP <= 0.5 s)
-ball_mk3_10
-ball_mk2_10
-# MIQCP, integer bilinear: suboptimal incumbent, no proof (SCIP 0.1 s)
-tln4
+# MIQCP, integer bilinear: root too weak (SCIP closes the root by RLT separation)
+# (SCIP 0.2-0.3 s)
 tln5
-# pure-integer QCQP, <= 10 vars: suboptimal incumbent at 120 s (SCIP 1-5 s)
-nvs19
+tln6
+# pure-integer QCQP: optimal incumbent, bound stalls (SCIP 3.2 s)
 nvs23
-# unbounded continuous box: exits in < 1 s with NO dual bound (SCIP 0.04-2.8 s)
-ex4_1_5
-prolog
-# convex MINLP: optimal incumbent found, gap never closes (SCIP 1.1 s)
-cvxnonsep_pcon20
-# nonconvex: optimal incumbent found, no proof (SCIP <= 0.15 s)
-st_m2
-haverly
-# mixed-binary, nonconvex: suboptimal incumbent, no proof (SCIP 0.8-3.8 s)
-ex1252a
+# mixed-binary QCQP: optimal incumbent, bound stalls (SCIP 0.4-4.3 s)
 nous1
+nous2
+# nonconvex NLP: optimal incumbent, bound stuck at the root (SCIP 0.5 s)
+ex14_1_7
+# MINLP: suboptimal incumbent, weak relaxation (SCIP 0.8 s)
+ex1252a
