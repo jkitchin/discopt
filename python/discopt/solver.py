@@ -1678,6 +1678,32 @@ def _kernel_seed_ils_enabled() -> bool:
 KERNEL_SEED_ILS_STATS: "collections.Counter[str]" = collections.Counter()
 
 
+def _kernel_seed_multistart_lazy_enabled() -> bool:
+    """``DISCOPT_KERNEL_SEED_MULTISTART_LAZY`` gate (#1941 item 4), read at call time.
+
+    **Default OFF pending the section 5 panel.** The native kernel's seed runs a
+    pure-continuous model's ``continuous_multistart`` even when the sub-NLP from the
+    relaxation point has already yielded a verified seed. On one-node instances
+    that is most of the solve (2026-10-25, 120 s): ``pooling_bental4stp`` 9.7 of
+    10.5 s, ``st_m2`` 8.0 of 8.8 s, ``pooling_foulds2tp`` 4.4 of 4.9 s,
+    ``pooling_haverly3stp`` 4.3 of 4.9 s, each certifying the same optimum without
+    it. ON, the multistart runs only when no earlier stage yielded a candidate --
+    the rule ``DISCOPT_KERNEL_SEED_ILS`` already follows. Primal only: it changes
+    which verified point seeds the kernel's cutoff, never a bound.
+    """
+    return os.environ.get("DISCOPT_KERNEL_SEED_MULTISTART_LAZY", "0").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
+
+
+#: #1941: how often the lazy rule skipped the seed multistart (probe, section 6).
+KERNEL_SEED_MULTISTART_STATS: "collections.Counter[str]" = collections.Counter()
+
+
 def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
     """Yield candidate feasible points (flat) for the native-kernel seed, from the SAME
     NLP heuristics the trusted spatial path uses to find its first incumbent — general
@@ -1870,7 +1896,10 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
             KERNEL_SEED_ILS_STATS["found"] += 1
             yield np.asarray(ils[0], dtype=np.float64)
 
-    if not int_pos and time.perf_counter() < deadline:
+    _lazy_skip = _seed_yielded > 0 and _kernel_seed_multistart_lazy_enabled()
+    if not int_pos and _lazy_skip:
+        KERNEL_SEED_MULTISTART_STATS["skipped"] += 1
+    if not int_pos and not _lazy_skip and time.perf_counter() < deadline:
         try:
             from discopt._relax.primal_heuristics import continuous_multistart
 
