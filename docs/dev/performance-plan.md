@@ -10886,3 +10886,200 @@ least once; every OFF run folded nothing.
   certificate and route (`highs-lp`) are identical.
 
 Default ON; `=0` restores the term-by-term sum.
+
+## 79. #1935: the node-LP gap to HiGHS on `pooling_bental5stp`, decomposed (2026-10-25)
+
+Context: the #1935 warm-start work (`DISCOPT_NATIVE_WARM_START`, audit row in
+`flag-retirement-audit.md`) left the in-house simplex within ~1.1-1.4x of
+warm-started HiGHS per node LP on six of seven MINLPLib instances from the issue's
+table, and 3.9x behind on `pooling_bental5stp` (same machine, identical LP
+sequence, `issue1935_highs_node_lp_replay.py`).
+
+**Instrument.** `issue1935_node_lp_pivot_harness.py` captures the 1,499
+warm-started node LPs of a mode-2 tree with their exact start bases and re-solves
+them, so variants are compared on identical inputs rather than on diverging trees.
+It reproduces the in-tree pivot count on **1499/1499** LPs (the §6 check).
+
+**Decomposition** (same 1,499 LPs):
+
+| | pivots | note |
+|---|---:|---|
+| in-house, current | 74,331 | plus uncounted pivots of stalled probes (degenerate dual pivots alone: 77,655) |
+| HiGHS from the **same** start basis | 46,016 | algorithm gap ~1.6x |
+| HiGHS from **its own** parent bases | ~29,500 | start-basis gap ~1.6x |
+
+Per-pivot cost was ~1.9x HiGHS's, and LU was ~47% of LP time.
+
+**Falsified: perturbing costs from the first pivot (HiGHS's policy).** Measured as
+a temporary knob, not committed. Fixed inputs: degenerate dual pivots -75%, total
+pivots -7%, time unchanged. In-tree: *slower*, LP time 11.0 -> 15.3 s and median
+3.1 -> 4.7 ms per LP, because every LP then runs a perturbed solve plus a clean-up,
+each refactorizing. Also measured: perturbation off is 20x the pivots (1,495,081)
+with 10 LPs `Numerical`; perturbation size 1e-5 / 1e-4 changes nothing.
+
+**Shipped (bound-neutral): skip the discarded AMD analysis.** Since feral 0.16
+(§18i) `SparseLu::factor`'s default Markowitz pivoting reads the symbolic only for
+its dimension, yet both `FeralLU` sparse sites still ran `SparseLuSymbolic::analyze`
+(AMD on AᵀA) before every factorization. They now pass
+`SparseLuSymbolic::natural(m)` on that route (`linsolve.rs::symbolic_for`);
+`GilbertPeierls` keeps AMD. Evidence:
+
+- fixed inputs: pivots and verdicts identical on 1499/1499; `LuSymbolic`
+  2,646 ms -> 5 ms; `LuNumeric` unchanged;
+- interleaved A/B (two saved extensions swapped per run, load ~1.0, n = 4 each):
+  11.97 s (sd 0.57) -> 9.23 s (sd 0.25), **1.30x**;
+- whole-solve exact comparison, 24 solves across native-spatial, spatial-bb,
+  MIP-NLP and MIQP routes: all **21 certifying solves bit-identical** in
+  `node_count`, objective and bound; the 3 that hit the 120 s limit explore more
+  nodes in the same time with identical incumbent and bound;
+- `cargo test -p discopt-core`: 877 lib tests and all integration tests pass.
+
+**Measured, not built: a slack peel.** 75% of these bases' basic columns are
+slacks; factorizing only the structural nucleus (`examples/issue1935_lu_nucleus.rs`,
+300 bases x 20 reps) is 3.9x cheaper (1.017 -> 0.263 ms, m 755 -> nucleus 183).
+§18g's peel lost bchoco06's bound and §18i records that Markowitz already
+triangularizes, so this is reported as a measurement, not proposed as a flag.
+
+**What remains.** The algorithm gap from the same start (~1.6x) -- dual
+steepest-edge pricing vs Devex is the standard lever -- and the start-basis gap
+(~1.6x), which is about which optimal vertex a parent ends on.
+
+### 79a. Dual steepest-edge pricing: measured, not worth building yet (2026-10-25)
+
+Prototype (local worktree, not merged): Forrest–Goldfarb dual steepest-edge
+weights `w_i = ||e_iᵀB⁻¹||²` in place of the dual Devex approximation, with the
+exact `w_r` from the pivot row already computed and one extra ftran per pivot for
+`τ = B⁻¹ρ_r`. Measured with `examples/issue1935_dse_bench.rs` (prototype only) on
+captured node LPs from their exact start bases; it reproduces the in-tree pivots
+on every LP with the prototype off.
+
+| instance (LPs) | Devex | DSE, unit start | DSE, exact start |
+|---|---:|---:|---:|
+| `pooling_bental5stp` (1,499) | 74,331 | 68,919 | 55,193 (−26%) |
+| `st_e31` (1,499) | 17,831 | 18,943 | 14,222 (−20%) |
+| `nvs20` (267) | 4,945 | 5,298 | 4,555 (−8%) |
+| `pooling_adhya1stp` (1,270) | 23,204 | 24,765 | 23,148 (−0.2%) |
+
+Unit-start DSE is worse than Devex on three of four. Exact start needs `m` btrans
+per solve, which doubles LP time (`pooling_bental5stp` 7.6 → 16.9 s). The extra
+ftran costs ~20% per pivot, so even with exact weights for free (inherited from the
+parent) the projected net is ~0.9x–1.2x LP time across the four: neutral to
+negative. Kill criterion met for now; it would reopen if the per-pivot cost falls
+(e.g. hypersparse ftran/btran) or a free source of exact weights is shown to
+survive the child's coefficient changes. Objectives agreed with Devex on every LP
+where both returned `Optimal`.
+
+### 79b. Correctness finding: a false `Optimal` on a tiny-coefficient column (2026-10-25)
+
+Found by that comparison. On captured `pooling_adhya1stp` node LP 1221 the default
+engine (cold, warm, and warm with the bound-flip repair alike: 165 pivots each)
+returns `Optimal` at −538.904 with `Ax = b` to 1.5e-13 but a structural basic column
+below its lower bound by **0.0179** (x₀ = 7.6169, l₀ = 7.635). The LP is
+infeasible: DSE returns a Farkas-certified `Infeasible`, HiGHS agrees, and dropping
+the 20 entries with |a| ≤ 1e-12 makes the engine return `Infeasible` too. Column 0
+mixes entries of 7.1e-14 and 1.7e-9 with O(1) ones. Hypothesis, not yet verified:
+geometric-mean equilibration scales that column by ~10⁶, so the violation passes
+the feasibility audit in scaled space. The node's safe bound stays valid (it holds
+for any multipliers, and the region's true bound is +inf); the risk is the
+infeasible LP point reaching incumbent acceptance.
+
+**Verified and fixed (same day).** The regression test
+`scaled_optimal_is_audited_against_the_original_lp` (fixture
+`testdata/adhya1stp_tiny_coef_false_optimal_lp.json`) confirms the mechanism:
+column 0's equilibration factor exceeds 1e5 and its scaled lower bound is below
+1e-4, so the audit's absolute floor (1e-6 in scaled units) admits ~0.1 in original
+units. Every equilibrated entry point in `lp/simplex` (`solve_lp`,
+`solve_lp_cols_scaled`, `solve_lp_warm`, `solve_lp_warm_csc`, `solve_lp_batch`)
+now re-audits an `Optimal` point against the ORIGINAL LP after unscaling
+(`primal::optimal_fails_original_audit`); a refused point is re-solved on the
+exactly-restored unscaled matrix (#649's recovery), and if that decides nothing
+the verdict is `Numerical`, which the trees branch on. Counters
+`ScaledOptimalOriginalAuditFail` / `ScaledOptimalUnscaledRetryDecided`.
+
+It is not rare. Refused / node LPs (retry decided): `nvs20` mode 2 32/266 (28),
+`nous2` mode 2 21/514 (18), `st_e31` mode 0 55/3,559 (54), `pooling_adhya1stp`
+mode 2 6/1,271 (6), `tanksize` mode 2 1/17,092 (1). Not bound-neutral, by design:
+on the 24-solve exact set every certifying solve still certifies with an identical
+objective; node counts shift where a refused LP now gets a different verdict
+(`st_e31` 4,367 -> 4,191, `nous2` mode 2 599 -> 633). MINLPLib smoke (7 kernel
+instances, 30 s, 77 checks against `minlplib.solu`): false 0, bad points 0, lost
+0, certified 2/5/7 for modes 0/1/2.
+
+**Not covered: the MILP driver.** It scales its working matrix itself
+(`milp_driver.rs`) and, since #1287, verifies an integral LP vertex with
+`rows_verified` -- row equalities of `[A | I]` only, so a negative slack or a
+structural outside its box would still pass. A related gap, outside this change.
+
+### 79c. DSE with inherited weights + hypersparse solves: in-tree, mixed; blocked by the scaled feasibility tolerance (2026-10-25)
+
+Built in a local worktree (not merged): the dual loop's final steepest-edge
+weights (keyed by variable) travel with each queued node's basis, including
+through undecided nodes (`ISSUE1935_DSE=3`: exact weights by hypersparse `btran`
+where nothing is inherited; `=4`: unit weights there), and the loop's `rho`, `alpha`
+and `tau` solves can use feral's `btran_sparse`/`ftran_sparse` (`ISSUE1935_SPARSE=1`).
+
+Entry measurements first. Rows of `B⁻¹` on 300 captured `pooling_bental5stp` bases
+are 3.6% dense (27 of 755); all `m` exact weights cost 4.07 ms per LP with dense
+`btran` and 1.37 ms with `btran_sparse` (identical on 226,500 weights). Mechanism
+in-tree (`st_e31`, mode 2): 97% of start weights inherited (833,532 vs 29,017
+computed); pivots 32,416 -> 24,289 (-25%); same certified objective. Sparse solves
+alone follow an identical path (same nodes, same pivots).
+
+In-tree, 7 MINLPLib instances from the #1935 table, warm-start mode 2, 30 s, one
+solve at a time, variants interleaved; node-LP seconds base / sparse / DSE3 / DSE4:
+
+| instance | base | sparse | DSE3 | DSE4 |
+|---|---:|---:|---:|---:|
+| `pooling_bental5stp` | 9.87 | 10.72 | **6.66** (nodes 1,766 -> 833, wall 13.5 -> 10.4 s) | 10.50 |
+| `st_e31` | 2.36 | 2.40 | 2.26 | 2.19 |
+| `nous2` | 0.77 | 0.80 | 0.99 | 0.89 |
+| `ex2_1_9` | 1.65 | 1.86 | 1.95 | 2.14 |
+| `hybriddynamic_var` | 1.39 | 1.56 | 1.69 | 1.66 |
+| `pooling_adhya1stp` | 1.68 | 1.74 | 2.21 | 2.16 |
+| `nvs20` | 0.60 | 0.65 | 26.57, **certificate lost** | 26.88, **lost** |
+
+All objectives identical and all incumbents `verify_point`-clean; nothing ships.
+Hypersparse solves as wired are 2-13% slower on every instance (conversion and
+allocation outweigh the savings at m ~ 300-800). DSE wins once, is neutral once and
+loses five times.
+
+**Why `nvs20` collapses** (profiled, DSE4 vs base): `ScaledOptimalOriginalAuditFail`
+32 -> 431, `DualColdFallbacks` 6 -> 865, `Phase1Pivots` 2,694 -> 166,306. DSE steers
+the dual loop to vertices that are primal feasible to `tol` in SCALED units but not
+in original units -- the §79b mis-scaled tolerance -- and each one the original-space
+audit now refuses costs an unscaled cold re-solve. Devex stops at such points too
+(32 on the base run), just less often. **Prerequisite for DSE, and a candidate win
+for the default path on its own:** a scale-aware primal feasibility test inside the
+dual loop (tolerance per basic variable in original units), so it does not stop at
+points the audit will refuse.
+
+### 79d. Scale-aware primal feasibility in the dual loop: works as designed, does not rescue DSE (2026-10-25)
+
+Hypothesis from §79c: DSE collapses on `nvs20` because the dual loop stops at
+points feasible to `tol` in scaled units but not in original units. Prototype
+(local worktree, `ISSUE1935_SCALED_TOL=1`): `select_leaving` judges a basic column
+against `max(min(tol, 1e-7 * (1 + |c_j * bound'|) / c_j), 1e-15)`, i.e. the
+original-space audit's tolerance with a 10x margin; only columns scaled by more
+than ~100x get a tighter test. `cargo test -p discopt-core --lib` passes with it on
+(878).
+
+`nvs20`, warm-start mode 2, 30 s:
+
+| variant | status | node-LP s | refused `Optimal` | dual cold fallbacks |
+|---|---|---:|---:|---:|
+| Devex | optimal | 0.68 | 32 | 6 |
+| Devex + scaled tol | optimal | 0.70 | 27 | 6 |
+| DSE4 + sparse | time limit | 26.73 | 452 | 906 |
+| DSE4 + sparse + scaled tol | time limit | 26.40 | 27 | 886 |
+| DSE4 + scaled tol (dense solves) | time limit | 26.77 | 28 | 937 |
+| DSE3 + scaled tol (dense solves) | time limit | 26.27 | 153 | 2 |
+
+The test removes the refused points DSE was producing (452 -> 27), so that part of
+§79c's diagnosis holds, but **the collapse survives it**: DSE4 still abandons the
+dual loop ~900 times (not degeneracy: longest degenerate run 3; not the sparse
+solves: same with dense), and DSE3 has almost no fallbacks yet takes 81,025 pivots
+against Devex's 5,087. The remaining defect is in the inherited weights across
+nodes. Untested hypothesis: each node re-derives its own equilibration, so a
+parent's weights are in different units from the child's LP. On Devex the scaled
+tolerance changes little (refusals 32 -> 27, time unchanged), so it does not pay for
+an engine change by itself. Neither piece ships; the prototypes stay local.

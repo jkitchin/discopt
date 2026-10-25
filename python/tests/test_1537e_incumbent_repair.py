@@ -112,20 +112,29 @@ def test_repair_respects_the_box():
 
 
 @pytest.mark.correctness
-def test_ex14_1_9_rows_scaled_publishes_no_bought_certificate():
-    """Main: ``optimal``/certified at ``-9.98e-6`` (true minimum ~0) on a point the
-    original model rejects. Now the published point verifies in the ORIGINAL
-    units and its objective is the honest one; the certificate that rested on the
-    residual is withdrawn (the bound, a valid -9.98e-6, is untouched)."""
+def test_ex14_1_9_rows_scaled_publishes_no_bought_certificate(monkeypatch):
+    """Before #1537 E: ``optimal``/certified at ``-9.98e-6`` (true minimum ~0) on a
+    point the original model rejects. The published point must verify in the
+    ORIGINAL units with an honest objective, and no certificate may rest on the
+    residual (the bound, a valid -9.98e-6, is untouched).
+
+    #1935: the point that needed repairing was a scaled LP ``Optimal`` whose
+    unscaled point the original LP refuses. The LP layer now re-audits every
+    scaled ``Optimal`` against the original LP and refuses those
+    (``primal::optimal_fails_original_audit``; 4 refusals on this witness), so the
+    solver's own point already verifies and the post-solve repair has nothing to
+    fix. That is asserted directly: the published point verifies with the repair
+    switched OFF. The repair itself keeps its unit tests above."""
     orig = dm.from_nl(os.path.join(DATA, "ex14_1_9.nl"))
-    scaled = rescale_rows(orig, 1e-3)
-    r = scaled.solve(time_limit=20)
-    assert r.x is not None
-    check = verify_point(orig, _flat(r, scaled), with_objective=True)
-    assert check.ok, check.reason
-    assert check.objective >= -1e-6
-    assert not (r.gap_certified and r.objective < -1e-6)
-    assert r.solver_stats["certificate/incumbent_repaired"] == 1.0
+    for repair in ("1", "0"):
+        monkeypatch.setenv("DISCOPT_INCUMBENT_REPAIR", repair)
+        scaled = rescale_rows(orig, 1e-3)
+        r = scaled.solve(time_limit=20)
+        assert r.x is not None, repair
+        check = verify_point(orig, _flat(r, scaled), with_objective=True)
+        assert check.ok, (repair, check.reason)
+        assert check.objective >= -1e-6, repair
+        assert not (r.gap_certified and r.objective < -1e-6), repair
 
 
 @pytest.mark.correctness
@@ -147,14 +156,18 @@ def test_ex1225_shifted_keeps_its_certificate_on_a_repaired_point():
 def test_flag_off_publishes_the_unrepaired_point(monkeypatch):
     """``DISCOPT_INCUMBENT_REPAIR=0`` is the documented opt-out: the solver's own
     point, as before #1537 E. The solve itself is identical either way -- the repair
-    is post-solve, so the bound and node count do not move."""
+    is post-solve, so the bound and node count do not move. The opt-out never
+    reports a repair. (Since #1935 this witness needs none in either arm -- see
+    ``test_ex14_1_9_rows_scaled_publishes_no_bought_certificate`` -- so ``on``
+    reports none either; a repair that fired here would mean a refused point
+    reached the incumbent.)"""
     orig = dm.from_nl(os.path.join(DATA, "ex14_1_9.nl"))
     monkeypatch.setenv("DISCOPT_INCUMBENT_REPAIR", "0")
     off = rescale_rows(orig, 1e-3).solve(time_limit=20)
     monkeypatch.setenv("DISCOPT_INCUMBENT_REPAIR", "1")
     on = rescale_rows(orig, 1e-3).solve(time_limit=20)
     assert "certificate/incumbent_repaired" not in (off.solver_stats or {})
-    assert on.solver_stats["certificate/incumbent_repaired"] == 1.0
+    assert "certificate/incumbent_repaired" not in (on.solver_stats or {})
     assert on.bound == off.bound and on.node_count == off.node_count
 
 

@@ -164,6 +164,7 @@ fn main() -> ExitCode {
         dual_stall_patience: SimplexOptions::default().dual_stall_patience,
         dual_cost_perturb: SimplexOptions::default().dual_cost_perturb,
         cold_dual_start: false,
+        warm_flip_boxed: false,
     };
 
     let mut l = lp_data.l.clone();
