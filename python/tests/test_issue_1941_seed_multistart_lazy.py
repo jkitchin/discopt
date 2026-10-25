@@ -30,5 +30,5 @@ def test_both_arms_certify_the_same_optimum(monkeypatch, lazy):
     assert r.status == "optimal" and r.gap_certified
     assert r.objective == pytest.approx(DISPATCH_OPT, rel=1e-4)
     assert r.bound <= r.objective + 1e-9
-    skipped = SV.KERNEL_SEED_MULTISTART_STATS["skipped"]
-    assert (skipped > 0) == (lazy == "1"), dict(SV.KERNEL_SEED_MULTISTART_STATS)
+    capped = SV.KERNEL_SEED_MULTISTART_STATS["capped"]
+    assert (capped > 0) == (lazy == "1"), dict(SV.KERNEL_SEED_MULTISTART_STATS)

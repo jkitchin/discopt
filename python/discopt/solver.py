@@ -1681,25 +1681,24 @@ KERNEL_SEED_ILS_STATS: "collections.Counter[str]" = collections.Counter()
 def _kernel_seed_multistart_lazy_enabled() -> bool:
     """``DISCOPT_KERNEL_SEED_MULTISTART_LAZY`` gate (#1941 item 4), read at call time.
 
-    **Graduated (default ON, 2026-10-25, #1941); ``=0`` restores the unconditional
-    multistart.** The native kernel's seed ran a pure-continuous model's
-    ``continuous_multistart`` even when the sub-NLP from the relaxation point had
-    already yielded a verified seed. On one-node instances that was most of the solve
-    (120 s): ``pooling_bental4stp`` 9.7 of 10.5 s, ``st_m2`` 8.0 of 8.8 s,
-    ``pooling_foulds2tp`` 4.4 of 4.9 s, ``pooling_haverly3stp`` 4.3 of 4.9 s. ON, the
-    multistart runs only when no earlier stage yielded a candidate -- the rule
-    ``DISCOPT_KERNEL_SEED_ILS`` already follows. Primal only: it changes which
-    verified point seeds the kernel's cutoff, never a bound.
+    Default ON; ``=0`` restores the uncapped multistart. The native kernel's seed
+    ran a pure-continuous model's ``continuous_multistart`` for its whole budget
+    even when the sub-NLP from the relaxation point had already yielded a verified
+    seed. On one-node instances that was most of the solve (120 s):
+    ``pooling_bental4stp`` 9.7 of 10.5 s, ``st_m2`` 8.0 of 8.8 s,
+    ``pooling_foulds2tp`` 4.4 of 4.9 s. ON, once a seed exists the multistart gets
+    ``_SEED_MULTISTART_CAP_S`` (1 s) of wall: on a small model every start still
+    runs, on an expensive one the overhead is bounded. Primal only: it changes
+    which verified point seeds the kernel's cutoff, never a bound.
 
-    Section 5 panel: the 158 pure-continuous MINLPLib instances with <= 200
-    vars/cons and a proven status, OFF vs ON, 30 s, interleaved, oracle-checked and
-    every incumbent ``verify_point``-ed on a fresh model. Cert-clean (948 checks, 0
-    problems); certified 149 = 149, none lost or gained; the rule fired on 94; total
-    wall 546 -> 404 s (pooling_bental5pq/5tp 14 -> 2.3-2.5 s, pooling_foulds2stp 12.9
-    -> 2.0 s, st_m2 10.1 -> 0.8 s, ex5_3_2 10.9 -> 1.7 s, st_rv9 11.9 -> 3.1 s).
-    The two neither arm certifies: rbrock's bound moves 6e-6, qp3's tightens.
-    ``kall_congruentcircles_c51`` (#188, whose global basin multistart finds) routes
-    to the Python tree, where this rule does not apply; both arms reach 1.07301.
+    First form, falsified by CI (recorded per CLAUDE.md section 11): SKIPPING the
+    multistart outright passed a 158-instance panel (cert-clean, 149 = 149, wall
+    546 -> 404 s) but lost the global basin on #1656's ``_lsq`` model (certified
+    0.02735499 within the 1e-4 gap, against the optimum 0.0273541381) and made the
+    #1619 units test's seed unit-dependent. A one-shot full-accuracy re-solve from
+    the seed did not recover ``_lsq``: the seed is a different local optimum, which
+    is the multistart's job. The capped form keeps both tests at their original
+    assertions; its panel is in ``docs/dev/flag-retirement-audit.md``.
     """
     return os.environ.get("DISCOPT_KERNEL_SEED_MULTISTART_LAZY", "1").strip().lower() not in (
         "0",
@@ -1710,7 +1709,10 @@ def _kernel_seed_multistart_lazy_enabled() -> bool:
     )
 
 
-#: #1941: how often the lazy rule skipped the seed multistart (probe, section 6).
+#: #1941: wall cap on the seed multistart once a verified seed exists.
+_SEED_MULTISTART_CAP_S = 1.0
+
+#: #1941: how often the cap applied to a pure-continuous seed (probe, section 6).
 KERNEL_SEED_MULTISTART_STATS: "collections.Counter[str]" = collections.Counter()
 
 
@@ -1906,10 +1908,14 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
             KERNEL_SEED_ILS_STATS["found"] += 1
             yield np.asarray(ils[0], dtype=np.float64)
 
-    _lazy_skip = _seed_yielded > 0 and _kernel_seed_multistart_lazy_enabled()
-    if not int_pos and _lazy_skip:
-        KERNEL_SEED_MULTISTART_STATS["skipped"] += 1
-    if not int_pos and not _lazy_skip and time.perf_counter() < deadline:
+    # #1941: with a verified seed already in hand, the multistart only looks for a
+    # better basin, so it gets a short wall cap instead of the seed's whole budget.
+    _ms_deadline = deadline
+    if _seed_yielded > 0 and _kernel_seed_multistart_lazy_enabled():
+        _ms_deadline = min(deadline, time.perf_counter() + _SEED_MULTISTART_CAP_S)
+        if not int_pos:
+            KERNEL_SEED_MULTISTART_STATS["capped"] += 1
+    if not int_pos and time.perf_counter() < _ms_deadline:
         try:
             from discopt._relax.primal_heuristics import continuous_multistart
 
@@ -1917,7 +1923,7 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
                 model,
                 n_starts=int(min(64, max(16, 2 * int(n_orig)))),
                 evaluator=ev,
-                deadline=deadline,
+                deadline=_ms_deadline,
             )
             if cand is not None and cand[0] is not None:
                 yield np.asarray(cand[0], dtype=np.float64)
