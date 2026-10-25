@@ -10756,6 +10756,24 @@ _IPX_RACE_ARM: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "_IPX_RACE_ARM", default=None
 )
 
+#: Whether a nested ``solve_model`` is one of the race's two opening SLICES
+#: (``True``) rather than its continuation. Only a slice may end early on the
+#: MILP engine's stall (#1959); the continuation keeps the legacy fallback.
+_IPX_RACE_IN_SLICE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_IPX_RACE_IN_SLICE", default=False
+)
+
+
+def _ipx_race_stall_exit_enabled() -> bool:
+    """#1959: ``DISCOPT_IPX_RACE_STALL_EXIT``; placeholder docstring."""
+    return os.environ.get("DISCOPT_IPX_RACE_STALL_EXIT", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
 #: Wall-clock length of each of the two opening slices of the #1940 lift race.
 #:
 #: Measured, not chosen. 3 s is too short for the LIFT arm: the native MILP engine
@@ -10897,9 +10915,11 @@ def _ipx_lift_race(entry_args: dict, solve_t0: float, is_maximize: bool) -> "Sol
         if not final:
             over["incumbent_time_extension"] = 0.0
         tok = _IPX_RACE_ARM.set(arm)
+        tok_slice = _IPX_RACE_IN_SLICE.set(not final)
         try:
             return solve_model(**{**base, **over}, **extra)
         finally:
+            _IPX_RACE_IN_SLICE.reset(tok_slice)
             _IPX_RACE_ARM.reset(tok)
 
     def _remaining() -> float:
@@ -13442,6 +13462,9 @@ def solve_model(
     # The lift race re-enters ``solve_model`` with these, so each of its arms is
     # the same solve the caller asked for, differing only in its time limit.
     _ipx_entry_args = dict(locals())
+    # #1959: set where this call adopts the lift as a race's opening lift SLICE;
+    # read at the MILP engine's deferral below.
+    _ipx_race_lift_slice = False
     # --- Complementarity relations must be lowered before we solve (#1147) ---
     # This is the boundary every solve passes through, including the callers
     # that never touch ``Model.solve`` (differentiable_solve, primal_heuristics).
@@ -16049,6 +16072,12 @@ def solve_model(
         _ipx_race_arm = _IPX_RACE_ARM.get()
         if _ipx_adopt and _ipx_race_arm == "unlifted":
             _ipx_adopt = False
+        _ipx_race_lift_slice = (
+            _ipx_adopt
+            and _ipx_race_arm == "lift"
+            and _IPX_RACE_IN_SLICE.get()
+            and _ipx_race_stall_exit_enabled()
+        )
         if (
             _ipx_adopt
             and _ipx_race_arm is None
@@ -16977,6 +17006,29 @@ def solve_model(
                     if _simplex_res is not None:
                         return _simplex_res
                     _engine_bound = _deferred.get("bound")
+                    if _ipx_race_lift_slice:
+                        # #1959: the engine stalled with no incumbent inside a
+                        # race's lift slice. The Python tree below has never
+                        # turned that into an incumbent or a certificate on the
+                        # lifted model (see ``_ipx_race_stall_exit_enabled``),
+                        # and the race's next slice is the un-lifted arm, so end
+                        # the slice here and keep the engine's valid bound.
+                        logger.info(
+                            "#1940 lift race: the MILP engine stalled with no "
+                            "incumbent; ending the lift slice (#1959)"
+                        )
+                        _stall_stats = dict(_deferred.get("stats") or {})
+                        return SolveResult(
+                            status="time_limit",
+                            bound=_engine_bound,
+                            wall_time=time.perf_counter() - t_start,
+                            node_count=int(_stall_stats.get("milp_driver/nodes", 0)),
+                            solver_stats=_stall_stats or None,
+                            algorithm_route=(
+                                "native-milp: discopt monolithic Rust MILP engine "
+                                "(lift race slice, ended on the engine's stall, #1959)"
+                            ),
+                        )
                 # POUNCE-only mode (nlp_solver="pounce", the universal default)
                 # routes to the self-hosted B&B and bypasses HiGHS entirely. An
                 # interior-point method is the wrong tool for the *linear* node LPs
