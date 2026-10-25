@@ -280,8 +280,9 @@ pub struct SpatialTreeConfig {
     /// #1913: reliability initialisation for `pseudocost_branching`. A fractional
     /// candidate with fewer than this many observations on either side has both
     /// child LPs solved (after propagation) before the pick, and their gains are
-    /// recorded as observations (at most `STRONG_BRANCH_CANDIDATES` per node). `0`
-    /// is plain pseudocost branching.
+    /// recorded as observations (at most `STRONG_BRANCH_CANDIDATES` per node, and
+    /// only while strong branching has spent no more LP solves than the tree's own
+    /// nodes). `0` is plain pseudocost branching.
     pub pseudocost_reliability: usize,
 }
 
@@ -574,6 +575,8 @@ pub fn solve_spatial_tree_with_hooks(
     let mut n_incumbent_value_calls = 0usize;
     let mut n_incumbent_value_raised = 0usize;
     let mut n_pseudocost_picks = 0usize;
+    // #1913: LP solves spent by `strong_branch_init` (also counted in `n_lp_solves`).
+    let mut n_strong_lp_solves = 0usize;
     // Best-bound frontier: a min-heap on the inherited lower bound. Exploring the
     // lowest-bound region first lifts the global frontier minimum (the reported dual
     // bound) as fast as possible — the key to certifying instances like tanksize
@@ -894,8 +897,14 @@ pub fn solve_spatial_tree_with_hooks(
             }
         }
         if config.pseudocost_branching && frac_int.is_some() {
-            if config.pseudocost_reliability > 0 && bound.is_finite() {
-                n_lp_solves += strong_branch_init(
+            // Strong branching may spend at most as many LP solves as the tree's own
+            // nodes have: where a node LP is expensive (qspp, graphpart: a few dozen
+            // nodes in 30 s) uncapped strong branching took the budget's nodes.
+            if config.pseudocost_reliability > 0
+                && bound.is_finite()
+                && n_strong_lp_solves <= n_lp_solves - n_strong_lp_solves
+            {
+                let k = strong_branch_init(
                     spec,
                     x,
                     (&lo, &hi),
@@ -905,6 +914,8 @@ pub fn solve_spatial_tree_with_hooks(
                     &node_opts,
                     (&mut pc_sum, &mut pc_cnt),
                 );
+                n_strong_lp_solves += k;
+                n_lp_solves += k;
             }
             frac_int = pseudocost_pick(spec, x, config.int_tol, &pc_sum, &pc_cnt);
             n_pseudocost_picks += 1;
