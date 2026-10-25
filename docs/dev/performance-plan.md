@@ -11083,3 +11083,74 @@ nodes. Untested hypothesis: each node re-derives its own equilibration, so a
 parent's weights are in different units from the child's LP. On Devex the scaled
 tolerance changes little (refusals 32 -> 27, time unchanged), so it does not pay for
 an engine change by itself. Neither piece ships; the prototypes stay local.
+
+## 80. #1940: the integer-bilinear lift is raced, not assumed (2026-10-25)
+
+**Problem.** The integer-bilinear lift (`integer.bilinear`) was adopted whenever it
+yields a pure MILP. It wins on every in-repo instance it is adopted on, but loses
+5-30x on dense integer QPs and can end a time-limited solve with a worse incumbent
+and a worse bound. Five structural separators are already measured dead (#1940:
+lift size, product count, root-bound tightness, bit width, product location — the
+last falsified by the #1937 PWL counterexample), and cheap-first (§72, un-lifted
+probe first) costs 11.1x on the adopted corpus because the lift usually wins.
+
+**Hypothesis.** The two arms' *relative gaps after a short slice* predict the
+winner, so a lift-first race costs nothing where the lift wins quickly and recovers
+most of the loss where it does not. Kill criterion: the gap at the slice disagrees
+with the eventual winner on a decisive (non-tied) instance, or a simulated policy is
+not net-positive over lift-only.
+
+**Entry experiment** (39 instances, 30 s, lift vs no-lift in full plus each arm under
+a short limit, `scratchpad` harness; numbers below are from this machine). At a 3 s
+slice the policy simulated net-positive but `ex1265`'s lifted solve stops at 1.6 s
+`feasible` under `time_limit=3` and certifies in ~1.9 s at every limit >= 4 s — the
+native MILP engine sizes its stages from the limit — so 3 s is too short for the lift
+arm. At 5 s: simulated total wall 303.0 s (lift) / 295.0 s (no lift) / **222.7 s
+(race)**, certified 33 / 32 / **36** of 39; the 5 s gap picked the eventual winner,
+or one of two tied arms, on every instance that reached the gap comparison. Not
+falsified.
+
+**Rule (shipped, `DISCOPT_IPX_RACE`, default ON, `=0` restores the legacy rule).**
+`solver._ipx_lift_race`: a 5 s lifted slice (certifies -> answer); a 5 s un-lifted
+slice (certifies -> answer); otherwise continue the arm with the smaller relative gap
+(tie -> lift) on the rest of the budget. All results are merged by
+`_merge_route_and_fallback` — best incumbent, tightest dual bound; both formulations
+are exact, so each bound is valid for the caller's model. Each arm re-enters
+`solve_model` with the arguments it received (`_ipx_entry_args = dict(locals())`),
+so nothing is forwarded by name. Kept out of the race: `deterministic=True`, limits
+below 15 s, callbacks / warm starts / lazy constraints, cheap-first, nested arms.
+
+**Defect found by the first panel run** and fixed before the measurement below:
+`Model.solve` grants its primary `incumbent_time_extension` (#917, the 35 %
+`lp_spatial` reserve), and slices inherited it with the verbatim arguments. The 5 s
+un-lifted slice on `arrqp_n15` ran 15.5 s, the continuation got a negative budget,
+and the race returned uncertified an instance the lift certifies in 25 s (the one
+certification regression of that run). Only the continuation now receives the
+extension; slices run with `0`.
+
+**Graduation panel** (`scripts/panel_1940_lift_race.py`, 43 instances, 30 s, ON/OFF
+interleaved ABBA, 2 reps; incumbents re-verified on the original model, bounds checked
+against the best certified objective; 533 checks, **0 failures**):
+
+| | total wall | certified |
+|---|---:|---:|
+| always lift (OFF) | 330.0 s | 37 / 43 |
+| race (ON) | **261.0 s** | **39 / 43** |
+
+Faster: `dense_n15_s0` 24.5 -> 8.8 s, `dense_n18_s0` 23.6 -> 9.7 s, `sparse_n40`
+20.1 -> 6.3 s, `denselin_n15` 23.3 -> 12.4 s, `arrqp_n15` 25.0 -> 17.1 s; newly
+certified `dense_n20_s0` (21.7 s) and `denselin_n18` (15.7 s). On the four neither
+rule certifies the race has the tighter bound on all four and the better incumbent
+on three (`conge12` gap 0.05 % vs 11 %; `conge20` incumbent 72.06 vs 71.97, bound
+61.3 vs 57.5). Slower: `conge15` 6.3 -> 13.1 s (arms tie; the restart is pure
+overhead), `dense_n15_s1` 5.5 -> 6.8 s, `pwl_nx` 1.08 -> 1.37 s, and ~20-50 ms of
+re-entry on every instance the lift certifies inside its slice (the detection and the
+lift are built twice; `nvs02` 0.23 -> 0.28 s). The 12 adopted corpus instances all
+certify inside the first slice: same certified objective and node count as OFF
+(`test_1940_lift_race.py::test_bound_neutral_where_the_lift_certifies_in_its_slice`).
+
+**Not done, and why.** The continuation restarts its arm; a slice's tree is thrown
+away. Resuming would remove the `conge15` loss but needs a resumable B&B on both
+engines. The race does not seed the continuation with a slice's incumbent: the `rsyn0840m`
+measurement in `_merge_route_and_fallback`'s docstring shows a seeded fallback steers
+its heuristics worse, and the merge already keeps the best point.

@@ -10737,6 +10737,199 @@ def _ipx_cheap_first_enabled() -> bool:
     )
 
 
+#: Which arm of the #1940 lift race a nested ``solve_model`` is: ``"lift"`` adopts
+#: the integer-bilinear lift exactly as the legacy path does, ``"unlifted"``
+#: declines it, ``None`` (an ordinary solve) lets the race decide. A
+#: ``ContextVar`` for the reason given at ``_IPX_CHEAP_FIRST_IN_PROBE``: the
+#: choice must span the whole nested call and must not leak into a concurrent
+#: solve on another thread.
+_IPX_RACE_ARM: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "_IPX_RACE_ARM", default=None
+)
+
+#: Wall-clock length of each of the two opening slices of the #1940 lift race.
+#:
+#: Measured, not chosen. 3 s is too short for the LIFT arm: the native MILP engine
+#: sizes its internal stages from the limit it is given, and at ``time_limit=3``
+#: ``ex1265`` stops at 1.6 s ``feasible`` (1195 nodes) where at every limit >= 4 s
+#: it certifies in ~1.9 s (1883 nodes). With a 3 s slice the race therefore
+#: restarted ``ex1265`` and cost it 1.7 -> 6.4 s; with 5 s every one of the 12
+#: in-repo instances the lift is adopted on certifies inside the first slice and
+#: the race never runs past it. Longer slices make every race that does run
+#: dearer (each slice is paid in full before the winner restarts), so 5 s is the
+#: shortest slice that keeps the adopted corpus inside slice one.
+_IPX_RACE_SLICE_S = 5.0
+
+#: The race runs only when the caller's limit leaves room for both slices AND a
+#: continuation at least as long again; below that the legacy behaviour (adopt
+#: the lift) is kept, because two slices would consume the budget the winner
+#: needs and the race could only ever return a slice's partial answer.
+_IPX_RACE_MIN_LIMIT_S = 3.0 * _IPX_RACE_SLICE_S
+
+
+def _ipx_race_enabled() -> bool:
+    """Is the #1940 integer-bilinear lift race on? ``DISCOPT_IPX_RACE``.
+
+    **Default ON**; ``=0`` restores the legacy rule (adopt the lift whenever it
+    yields a pure MILP), which is kept intact behind the opt-out.
+
+    What it replaces
+    ----------------
+    The lift was adopted because it was *possible*, never because it was shown to
+    help. On most of what it applies to it wins -- every in-repo instance it is
+    adopted on, a PWL MILP with one ``n*x`` product, products in a covering row --
+    but on dense integer QPs it loses by 5-30x to the spatial route it replaces,
+    and at the time limit can return a worse incumbent and a worse bound. No
+    structural separator survived measurement (#1940 lists five that were killed:
+    lift size, product count, root-bound tightness, bit width, product location),
+    so the race does not predict the winner; it observes it.
+
+    The rule
+    --------
+    1. Run the LIFTED model for ``_IPX_RACE_SLICE_S``. If it certifies, that is
+       the answer -- the legacy result, at no extra cost. This is where every
+       instance the lift is adopted on in-repo ends.
+    2. Otherwise run the UN-LIFTED model for one slice. If it certifies, return it.
+    3. Otherwise continue whichever arm had the smaller relative gap, restarted
+       with the rest of the budget (ties -> the lift, the legacy choice).
+
+    All three results are merged by :func:`_merge_route_and_fallback`: best
+    incumbent, tightest dual bound. Both arms are exact formulations of the same
+    problem, so each bound is valid for the caller's model and the merge can only
+    tighten what is reported -- which is also what fixes #1940's "mixed" rows,
+    where one arm has the better bound and the other the better incumbent.
+
+    Measurement (#1940 graduation panel, ``scripts/panel_1940_lift_race.py``)
+    ------------------------------------------------------------------------
+    43 instances, 30 s limit, ON/OFF interleaved ABBA, 2 reps each: the 12 in-repo
+    instances the lift is adopted on; dense and sparse objective-only integer QPs;
+    dense QPs with a combinatorial linear side; constraint-product families (``<=``
+    and ``>=`` rows); objective-only integer x continuous products; a knapsack with
+    an objective-only product; the #1937 PWL counterexample; array-variable models
+    (under ``DISCOPT_INTEGER_PRODUCT_INDEXED=1``). Every incumbent re-verified on
+    the original model, every bound checked against the best certified objective:
+    533 checks, 0 failures.
+
+    ===================  ==========  =========
+    rule                 total wall  certified
+    ===================  ==========  =========
+    always lift (OFF)     330.0 s     37 / 43
+    race (ON)             261.0 s     39 / 43
+    ===================  ==========  =========
+
+    Faster beyond 2 sd and 1.2x: ``dense_n15_s0`` 24.5 -> 8.8 s, ``dense_n18_s0``
+    23.6 -> 9.7 s, ``sparse_n40`` 20.1 -> 6.3 s, ``denselin_n15`` 23.3 -> 12.4 s,
+    ``arrqp_n15`` 25.0 -> 17.1 s, and two newly certified (``dense_n20_s0``,
+    ``denselin_n18``). On the four neither rule certifies, the race reports the
+    tighter bound on all four and the better incumbent on three (``conge12``: gap
+    0.05 % against 11 %). Slower: ``conge15`` 6.3 -> 13.1 s (the arms tie, so the
+    restart is pure overhead), ``dense_n15_s1`` 5.5 -> 6.8 s, and ``pwl_nx``
+    1.08 -> 1.37 s. Every instance the lift certifies inside one slice pays only
+    the re-entry -- the detection and lift are built twice -- about 20-50 ms
+    (``nvs02`` 0.23 -> 0.28 s); its tree and certificate are unchanged.
+
+    Why not cheap-first (``DISCOPT_IPX_CHEAP_FIRST``)
+    ------------------------------------------------
+    That is the same race run in the other order, and the order is the whole
+    difference: the lift is the faster arm on most of the population, so running
+    the un-lifted model first pays its slice on nearly every solve (11.1x wall on
+    the adopted corpus). Lift-first pays nothing where the lift wins quickly.
+
+    When it does not run
+    --------------------
+    Under ``deterministic=True`` (the arm choice is a wall-clock observation), with
+    a limit below ``_IPX_RACE_MIN_LIMIT_S``, with any option in
+    ``_IPX_PROBE_BLOCKING_OPTIONS`` (a callback or warm start would see searches
+    that are thrown away), when cheap-first is enabled (it has already made the
+    choice), and inside a nested arm. Each of those keeps the legacy rule.
+    """
+    return os.environ.get("DISCOPT_IPX_RACE", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _ipx_relative_gap(result) -> float:
+    """Relative gap of a race slice, ``inf`` without an incumbent or a bound."""
+    obj = getattr(result, "objective", None)
+    bnd = getattr(result, "bound", None)
+    if obj is None or bnd is None or not np.isfinite(obj) or not np.isfinite(bnd):
+        return math.inf
+    return abs(float(obj) - float(bnd)) / max(1.0, abs(float(obj)))
+
+
+def _ipx_lift_race(entry_args: dict, solve_t0: float, is_maximize: bool) -> "SolveResult":
+    """Run the #1940 lift race (see :func:`_ipx_race_enabled`) and return its answer.
+
+    ``entry_args`` is ``solve_model``'s own arguments as it received them, so every
+    arm re-enters ``solve_model`` with exactly the caller's options -- nothing has
+    to be forwarded by name, so nothing can be dropped -- and differs from the
+    legacy solve only in ``_IPX_RACE_ARM`` and in its budgets: its ``time_limit``,
+    its ``max_nodes`` (ONE budget for the call, so each slice's nodes are charged
+    against what the next may use), and, for the two slices, a zero
+    ``incumbent_time_extension``. Each arm is therefore the very path that was
+    measured.
+    """
+    time_limit = float(entry_args["time_limit"])
+    max_nodes = int(entry_args["max_nodes"])
+    base = {k: v for k, v in entry_args.items() if k != "kwargs"}
+    extra = dict(entry_args.get("kwargs") or {})
+
+    def _run(arm: str, limit: float, nodes: int, final: bool = False):
+        # ``incumbent_time_extension`` lets a solve that holds an incumbent run past
+        # its limit (#917). It is the CALLER's grant for the whole call, so only the
+        # continuation may take it; a slice that inherits it is no longer a slice.
+        # Measured on ``arrqp_n15`` before this: the 5 s un-lifted slice ran 15.5 s
+        # on Model.solve's 10.5 s extension, leaving the continuation a negative
+        # budget, and the race returned uncertified what the lift certifies in 25 s.
+        over = {"time_limit": limit, "max_nodes": max(1, nodes)}
+        if not final:
+            over["incumbent_time_extension"] = 0.0
+        tok = _IPX_RACE_ARM.set(arm)
+        try:
+            return solve_model(**{**base, **over}, **extra)
+        finally:
+            _IPX_RACE_ARM.reset(tok)
+
+    def _remaining() -> float:
+        return time_limit - (time.perf_counter() - solve_t0)
+
+    def _done(result: SolveResult) -> SolveResult:
+        # A slice's ``wall_time`` covers only that slice; the caller was charged
+        # for every slice the race ran, so report the whole call.
+        result.wall_time = time.perf_counter() - solve_t0
+        return result
+
+    lifted = _run("lift", min(_IPX_RACE_SLICE_S, _remaining()), max_nodes)
+    if _result_certifies(lifted):
+        return _done(lifted)
+    spent = int(getattr(lifted, "node_count", 0) or 0)
+    unlifted = _run("unlifted", min(_IPX_RACE_SLICE_S, _remaining()), max_nodes - spent)
+    merged = _merge_route_and_fallback(lifted, unlifted, is_maximize)
+    gaps = (_ipx_relative_gap(lifted), _ipx_relative_gap(unlifted))
+    if _result_certifies(unlifted):
+        logger.info("#1940 lift race: the un-lifted slice certified; lift declined")
+        return _done(merged)
+    arm = "lift" if gaps[0] <= gaps[1] else "unlifted"
+    spent = int(getattr(merged, "node_count", 0) or 0)
+    rest = _remaining()
+    logger.info(
+        "#1940 lift race: neither %.0f s slice certified (relative gap lift %.3g, "
+        "un-lifted %.3g); continuing the %s arm for %.1f s",
+        _IPX_RACE_SLICE_S,
+        gaps[0],
+        gaps[1],
+        arm,
+        rest,
+    )
+    if rest <= 0.0 or spent >= max_nodes:
+        return _done(merged)
+    final = _run(arm, rest, max_nodes - spent, final=True)
+    return _done(_merge_route_and_fallback(merged, final, is_maximize))
+
+
 def _scale_free_branching_enabled() -> bool:
     """#1619 D-11: ``DISCOPT_SCALE_FREE_BRANCHING`` for the native spatial kernel.
 
@@ -13223,6 +13416,10 @@ def solve_model(
         Contains solution values, objective, gap, node count, and
         per-layer profiling times (Rust, JAX, Python).
     """
+    # #1940: the arguments exactly as received, before anything below rebinds one.
+    # The lift race re-enters ``solve_model`` with these, so each of its arms is
+    # the same solve the caller asked for, differing only in its time limit.
+    _ipx_entry_args = dict(locals())
     # --- Complementarity relations must be lowered before we solve (#1147) ---
     # This is the boundary every solve passes through, including the callers
     # that never touch ``Model.solve`` (differentiable_solve, primal_heuristics).
@@ -15825,6 +16022,29 @@ def solve_model(
             or _ipx_nl.general_nl
         )
         _ipx_adopt = _ipx_pure_milp and classify_problem(_ipx) == ProblemClass.MILP
+        # #1940: inside a race arm the arm IS the choice -- "lift" takes the legacy
+        # adoption below unchanged, "unlifted" declines it.
+        _ipx_race_arm = _IPX_RACE_ARM.get()
+        if _ipx_adopt and _ipx_race_arm == "unlifted":
+            _ipx_adopt = False
+        if (
+            _ipx_adopt
+            and _ipx_race_arm is None
+            and _ipx_race_enabled()
+            and not _ipx_cheap_first_enabled()
+            and not _IPX_CHEAP_FIRST_IN_PROBE.get()
+            and not deterministic
+            and float(time_limit) - (time.perf_counter() - _solve_t0) >= _IPX_RACE_MIN_LIMIT_S
+            and all(_ipx_entry_args.get(o) is None for o in _IPX_PROBE_BLOCKING_OPTIONS)
+        ):
+            from discopt.modeling.core import ObjectiveSense as _IpxObjSense
+
+            return _ipx_lift_race(
+                _ipx_entry_args,
+                _solve_t0,
+                _ipx_entry_args["model"]._objective is not None
+                and _ipx_entry_args["model"]._objective.sense == _IpxObjSense.MAXIMIZE,
+            )
         # #1236 cheap-first (flag-gated, default OFF): the lift is adopted
         # today because it is *possible*, never because it was shown to help,
         # and over the adopted population it is harmful more often than not.
