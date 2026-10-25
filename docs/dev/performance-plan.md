@@ -11589,8 +11589,8 @@ the continuation, and are faster ON (5.08 → 4.20 s, 5.30 → 4.36 s).
   reliability strong branching (39 calls, 2.07 s summed across threads at T=5). The
   ~1.8 s of engine work `ex1265` needs is intrinsic, not a budget-sized stage.
 
-**What remains of #1959.** The race now costs ~2.8 s per lost race, down from 5 s,
+**What remains (now #1963).** The race now costs ~2.8 s per lost race, down from 5 s,
 but not zero. That residue is the engine's stage-sized budget, which `ex1265` needs.
 The restart on `dense_n18_s1`/`n20_s1` (un-lifted slice + continuation) is
-untouched. Removing either needs the resumable search the issue lists as the
-expensive option.
+untouched. #1959 was narrowed to the stall exit (owner's direction) and both
+remaining costs moved to #1963, with the measurements above as its ruled-out list.
