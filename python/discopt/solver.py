@@ -2385,6 +2385,7 @@ def _try_native_spatial_kernel(
     # #1913: pseudocost choice of the fractional integer column (see the helper).
     if _kernel_pseudocost_branching_enabled():
         solve_kwargs["pseudocost_branching"] = True
+        solve_kwargs["pseudocost_reliability"] = _kernel_pseudocost_reliability()
     if _bound_reserve > 0.0:
         solve_kwargs["bound_time_extension_s"] = float(_bound_reserve)
     # #917: hand the kernel the caller's withheld #844 reserve so it can reclaim
@@ -10744,6 +10745,14 @@ def _kernel_pseudocost_branching_enabled() -> bool:
     Default OFF pending the section 5 panel. Read at call time.
     """
     return os.environ.get("DISCOPT_KERNEL_PSEUDOCOST", "0") not in ("0", "")
+
+
+def _kernel_pseudocost_reliability() -> int:
+    """#1913: ``DISCOPT_KERNEL_PSEUDOCOST_RELIABILITY``, observations per side below
+    which ``DISCOPT_KERNEL_PSEUDOCOST`` strong-branches a candidate first
+    (``SpatialTreeConfig::pseudocost_reliability``). ``0`` (the default) is plain
+    pseudocost branching. A numeric knob read only under that flag."""
+    return max(0, int(os.environ.get("DISCOPT_KERNEL_PSEUDOCOST_RELIABILITY", "0") or 0))
 
 
 def _p3_force_cut_path_enabled() -> bool:

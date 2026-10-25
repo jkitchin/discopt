@@ -49,6 +49,7 @@ use std::time::{Duration, Instant};
     incumbent_time_extension_s=None, bound_time_extension_s=None,
     cold_dual_start=false, primal_hook=None, incumbent_value=None,
     scale_free_branching=false, pseudocost_branching=false,
+    pseudocost_reliability=0,
 ))]
 pub fn solve_spatial_tree_py<'py>(
     py: Python<'py>,
@@ -99,6 +100,7 @@ pub fn solve_spatial_tree_py<'py>(
     incumbent_value: Option<PyObject>,
     scale_free_branching: bool,
     pseudocost_branching: bool,
+    pseudocost_reliability: usize,
 ) -> PyResult<Bound<'py, PyDict>> {
     let c = c.as_slice()?;
     let integrality = integrality.as_slice()?;
@@ -331,6 +333,7 @@ pub fn solve_spatial_tree_py<'py>(
         bound_time_extension,
         scale_free_branching,
         pseudocost_branching,
+        pseudocost_reliability,
     };
     // The node LP's start basis (`SimplexOptions::cold_dual_start`, default OFF,
     // set from `DISCOPT_LP_COLD_DUAL_START`). Everything else is the default.

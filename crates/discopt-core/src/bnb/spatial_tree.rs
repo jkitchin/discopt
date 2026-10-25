@@ -277,6 +277,12 @@ pub struct SpatialTreeConfig {
     /// rule: the lowest-index fractional column. Branching order only: every child
     /// pair still covers its parent box, so no bound moves.
     pub pseudocost_branching: bool,
+    /// #1913: reliability initialisation for `pseudocost_branching`. A fractional
+    /// candidate with fewer than this many observations on either side has both
+    /// child LPs solved (after propagation) before the pick, and their gains are
+    /// recorded as observations (at most `STRONG_BRANCH_CANDIDATES` per node). `0`
+    /// is plain pseudocost branching.
+    pub pseudocost_reliability: usize,
 }
 
 impl Default for SpatialTreeConfig {
@@ -299,6 +305,7 @@ impl Default for SpatialTreeConfig {
             bound_time_extension: None,
             scale_free_branching: false,
             pseudocost_branching: false,
+            pseudocost_reliability: 0,
         }
     }
 }
@@ -887,6 +894,18 @@ pub fn solve_spatial_tree_with_hooks(
             }
         }
         if config.pseudocost_branching && frac_int.is_some() {
+            if config.pseudocost_reliability > 0 && bound.is_finite() {
+                n_lp_solves += strong_branch_init(
+                    spec,
+                    x,
+                    (&lo, &hi),
+                    bound,
+                    incumbent,
+                    config,
+                    &node_opts,
+                    (&mut pc_sum, &mut pc_cnt),
+                );
+            }
             frac_int = pseudocost_pick(spec, x, config.int_tol, &pc_sum, &pc_cnt);
             n_pseudocost_picks += 1;
         }
@@ -1264,6 +1283,94 @@ fn pseudocost_pick(
         }
     }
     best.map(|(_, j)| j)
+}
+
+/// #1913: most candidates strong-branched at one node by [`strong_branch_init`].
+const STRONG_BRANCH_CANDIDATES: usize = 8;
+
+/// #1913 reliability initialisation: for the (at most [`STRONG_BRANCH_CANDIDATES`])
+/// best-scoring fractional integer columns observed fewer than
+/// `config.pseudocost_reliability` times on either side, solve both child LPs after
+/// propagation and record each child's per-unit bound gain as a pseudocost
+/// observation. A child proven empty records the gap to the incumbent (or one unit
+/// of the bound's magnitude without one), so a column that prunes a side ranks
+/// high. Only the branching choice reads these numbers; no bound or box of the
+/// tree is changed. Returns the LP solves spent.
+#[allow(clippy::too_many_arguments)]
+fn strong_branch_init(
+    spec: &SpatialKernelSpec,
+    x: &[f64],
+    (lo, hi): (&[f64], &[f64]),
+    bound: f64,
+    incumbent: Option<f64>,
+    config: &SpatialTreeConfig,
+    opts: &SimplexOptions,
+    (pc_sum, pc_cnt): (&mut [Vec<f64>; 2], &mut [Vec<usize>; 2]),
+) -> usize {
+    let rel = config.pseudocost_reliability;
+    let mut cands: Vec<(f64, usize)> = Vec::new();
+    for (j, &is_int) in spec.integrality.iter().enumerate().take(spec.n_cols) {
+        if !is_int || (x[j] - x[j].round()).abs() <= config.int_tol {
+            continue;
+        }
+        if pc_cnt[0][j].min(pc_cnt[1][j]) >= rel {
+            continue;
+        }
+        let f = x[j] - x[j].floor();
+        cands.push(((f * (1.0 - f)), j));
+    }
+    // Most balanced fractionality first; ties to the lowest index.
+    cands.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(Ordering::Equal)
+            .then(a.1.cmp(&b.1))
+    });
+    let pruned_gain = incumbent.map_or(bound.abs().max(1.0), |inc| (inc - bound).max(0.0));
+    let mut n_lp = 0usize;
+    for &(_, j) in cands.iter().take(STRONG_BRANCH_CANDIDATES) {
+        let f = x[j] - x[j].floor();
+        for up in [false, true] {
+            if opts.deadline.is_some_and(|d| Instant::now() >= d) {
+                return n_lp;
+            }
+            let mut l2 = lo.to_vec();
+            let mut h2 = hi.to_vec();
+            if up {
+                l2[j] = x[j].ceil();
+            } else {
+                h2[j] = x[j].floor();
+            }
+            let dist = if up { 1.0 - f } else { f };
+            let empty = l2[j] > h2[j]
+                || (config.run_propagation
+                    && !propagate_spec_fixpoint(
+                        spec,
+                        &mut l2,
+                        &mut h2,
+                        incumbent,
+                        config.propagation_rounds,
+                    ));
+            let gain = if empty {
+                Some(pruned_gain)
+            } else {
+                let child = solve_spatial_node(spec, &l2, &h2, false, opts);
+                n_lp += child.n_lp_solves;
+                match verdict_for(child.status) {
+                    NodeVerdict::EmptyRegion => Some(pruned_gain),
+                    NodeVerdict::Bound if child.bound.is_finite() => {
+                        Some((child.bound - bound).max(0.0))
+                    }
+                    _ => None,
+                }
+            };
+            if let Some(g) = gain {
+                let d = usize::from(up);
+                pc_sum[d][j] += g / dist.max(1e-9);
+                pc_cnt[d][j] += 1;
+            }
+        }
+    }
+    n_lp
 }
 
 fn dot(a: &[f64], b: &[f64]) -> f64 {
@@ -1687,9 +1794,10 @@ mod tests {
             blf_terms: vec![],
             obbt_candidates: vec![],
         };
-        for on in [false, true] {
+        for (on, rel) in [(false, 0), (true, 0), (true, 2)] {
             let cfg = SpatialTreeConfig {
                 pseudocost_branching: on,
+                pseudocost_reliability: rel,
                 ..SpatialTreeConfig::default()
             };
             let res = solve_spatial_tree(&spec, &cfg, &SimplexOptions::default());
