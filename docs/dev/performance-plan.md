@@ -11104,3 +11104,135 @@ nodes. Untested hypothesis: each node re-derives its own equilibration, so a
 parent's weights are in different units from the child's LP. On Devex the scaled
 tolerance changes little (refusals 32 -> 27, time unchanged), so it does not pay for
 an engine change by itself. Neither piece ships; the prototypes stay local.
+
+## 80. #1944: SCIP's RLT rows, made reachable by the native kernel (2026-10-25)
+
+Context: #1941's round-2 SCIP screen confirmed tln5, tln6, nous1 and nous2 as
+failures. #1944 attributed their weak roots to SCIP's RLT separator (removing it
+costs tln4 8.3 -> 5.9, nous1 0.345 -> -0.085).
+
+**Entry experiment 1: which RLT rows SCIP applies.** These are the LP rows named
+`rlt_cut_*` after `limits/nodes = 1` with default settings (SCIP 10.0,
+pyscipopt 6.3.0). Every one is over products that already exist
+(`maxunknownterms = 0`):
+
+- nous1 (12 rows) and nous2: all *linear equality x variable*. Examples are the
+  composition rows `x33 + x34 + x35 = 1` times a flow, and the flow balances
+  times a quality. This is exactly `DISCOPT_RLT_LINEQ`'s family.
+- tln4 (7 rows): all *linear inequality x bound factor*. Examples are
+  `(5 - sum_k i_k) * i_j >= 0` and `(1900 - 330 i9 - ...) * (12 - i5) >= 0`.
+  discopt has no family for these that reaches the kernel.
+
+**Falsified: "SCIP's RLT separator alone closes the root."** With every other
+separator off, SCIP's RLT root equals the separator-free root (nous1 -0.281,
+tln4 3.05). Its 5 cuts found on nous1 are all rejected, and none is applied.
+RLT pays only together with the other cuts. The issue's ablation measured
+removing RLT, never adding it alone.
+
+**Falsified: "the remaining nous gap is RLT."** With no separator, no presolve and
+no OBBT, SCIP's root on nous1 is -0.415; discopt's is -0.847. The boxes are
+identical, and discopt's is tighter on 14 columns. The difference is the
+objective `(c + a'x) * x0`. discopt relaxes it as one affine-form product, while
+SCIP distributes it, and `x2*x0`, `x3*x0` are the very products of the
+constraints `x24 = x2*x0`, `x25 = x3*x0`.
+
+**Built (all default-OFF; audit rows added):**
+
+1. `DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS`: the canonicalizer distributes a product
+   of two affine forms over disjoint variables. The result is never looser: summed,
+   the scaled per-pair McCormick inequalities are the affine-form ones.
+2. Kernel admission of the lineq rows. They were declined because
+   `X_{36,j} == 0` (from `x36 == 0`) looked like a fifth envelope row of the
+   product. They are now tagged `nonenvelope_rows`. This is a defect fix: with the
+   flag OFF nothing changes.
+3. `DISCOPT_RLT_INEQ`: inequality x bound-factor rows over existing products,
+   built at the kernel's root box and carried as fixed rows. They are valid in
+   every sub-box. The producer takes them from the real-box build, never the
+   probe build, and a test pins that.
+
+**Root LP at the presolved box (nous):**
+
+| | off | +distribute | +lineq (existing products) | both |
+|---|---:|---:|---:|---:|
+| nous1 | -0.847 | -0.636 | -0.759 | **0.0795** |
+| nous2 | -0.830 | -0.435 | -0.759 | **0.2384** |
+
+Lifting new products for the lineq rows (`DISCOPT_RLT_LINEQ_MAX=4096`) gives the
+same bound with 1,074 columns instead of 106. The kernel then runs 55 nodes in
+120 s instead of 16,231. Use `DISCOPT_RLT_LINEQ_MAX=0`.
+
+**Falsified: "the rows' losses are duplicate rows."** On the 225-instance panel
+below, the bundle lost pooling_adhya1pq / 1tp / 2tp. Ablation pins all three on
+the lineq rows. On adhya those rows duplicate no existing row and leave the root
+LP *exactly* unchanged (-856.25062 both ways). What changes is the node LP:
+adhya2tp's node-LP time goes 0.55 -> 19.2 s and undecided nodes 6 -> 2,618. The
+kernel's cold primal ends `Numerical`/`IterLimit` on these equality-rich
+relaxations, and an undecided node is bisected without bound gain. With
+`DISCOPT_NATIVE_WARM_START=2` (#1935) or `DISCOPT_LP_COLD_DUAL_START=1`, undecided
+is 0 and adhya2tp certifies in 433 nodes (387 off). The same mechanism is
+behind tln below and behind nous1's frozen bound: 3,489 of 12,282 nodes are
+undecided with distribution alone, and the 120 s and 600 s bounds were identical
+(0.8745).
+
+**Issue instances at 120 s** (current `main` incl. #1943, sequential, quiet
+machine, load < 1.5. "Bundle" = distribute + lineq (`MAX=0`) + ineq):
+
+| instance | default | bundle | bundle + warm start | SCIP |
+|---|---|---|---|---|
+| nous2 | bound 0.611 | **optimal 2.0 s** (41 nodes) | optimal 1.7 s (31 nodes; warm start alone 3.3 s) | 0.38 s |
+| nous1 | bound 0.295 | bound 0.875 | bound **1.40** at the 100k-node limit (opt 1.567); 900 s / 525k nodes: 1.482 | 4.3 s |
+| tln4 (unlifted) | 1.0 s | 12.4 s | **0.9 s** | 0.07 s |
+| tln5 (unlifted) | 46.5 s | open, 10.22 | **2.2 s** | 0.21 s |
+| tln6 (unlifted) | open, 12.88 | open, 15.04 | **36.3 s** | 0.29 s |
+
+The tln cells use `DISCOPT_RLT_INEQ` only; tln has no affine product or
+linear equality for the other two to act on. The warm start alone gives tln4
+1.3 s and tln5 20.1 s, and leaves tln6 open
+(14.72). The tln rows use the unlifted route. By default tln is lifted to a pure
+MILP, where these rows do not exist (tln5 bound 5.8, tln6 6.2 at 120 s), and
+`DISCOPT_IPX_CHEAP_FIRST` declines the lift only if its bounded probe certifies.
+Before #1943 merged, ineq alone certified tln4/5/6 in 1.3 / 1.6 / 3.7 s. #1943's
+strong branching solves child LPs cold, and on tln5 that leaves 4,943 of 11,869
+nodes undecided. With `DISCOPT_KERNEL_PSEUDOCOST=0` it is 0 undecided and 842
+nodes.
+
+**Panel (§5), 225 MINLPLib instances**, selected by filter from
+`instancedata.csv`: nonconvex, polynomial/quadratic only, at most 60 variables
+and constraints, a proven optimum. Run at 30 s, OFF/ON interleaved per instance,
+2 workers. Every incumbent was `verify_point`-ed on a freshly parsed model.
+Instrument: `discopt_benchmarks/scripts/issue1944_rlt_panel.py`, which asserts in
+every child that its arm's environment is the one it claims.
+
+- **Cert-clean:** 1,350 checks, 0 bounds across the oracle, 0 wrong optimal
+  verdicts, 0 unverified incumbents.
+- **Not net-positive on its own:** 189 -> 188 certified. Gained ex5_2_5 (1 node,
+  2.3 s) and nous2. Lost the three adhya instances (mechanism above).
+  Uncertified bounds: 4 tighter (nous1 -0.825 -> 0.079, sssd08-04persp, nvs24,
+  ex7_2_4) and 7 looser by tree path (tln5/6 on the lifted route, nvs19, nvs23,
+  wastewater05m1/15m1, ex8_4_1). Total wall 1482.8 -> 1455.5 s; median over
+  both-solved 0.46 -> 0.47 s.
+- **Conditional on the warm start** (both arms `DISCOPT_NATIVE_WARM_START=2`, the
+  same 225 instances and protocol):
+  - Cert-clean: 1,350 checks, 0 problems.
+  - **Net-positive: 189 -> 190 certified, 0 lost.** Gained ex5_2_5; nous2 is
+    3.3 s / 973 nodes -> 1.7 s / 31 nodes.
+  - Wall: total 1445.7 -> 1386.4 s (-4.1 %); over the 189 solved by both arms,
+    377.3 -> 343.4 s (-9.0 %); median 0.46 s both.
+  - Uncertified bounds: 5 tighter (nous1 0.411 -> 1.347), 6 looser by tree path
+    at the limit. The largest looser one is nvs24 -2578.9 -> -2904.2 (opt -1033),
+    a pure-integer QCQP the rows barely touch.
+
+**Verdict.** The three gates stay default-OFF. They are cert-clean in both
+panels, net-negative without the warm start and net-positive with it. They are
+not graduated on their own, because the measured benefit depends on a flag that
+is itself default-OFF. Graduation is sequenced behind #1935's
+`DISCOPT_NATIVE_WARM_START`: once it graduates, the conditional panel above is
+the graduation panel. Re-run it on that `main`.
+
+**nous1 stays open, with a measured reason.** Its root is 0.0795 against SCIP's
+0.345. The remaining gap is SCIP's other cuts (gomory/aggregation acting together
+with RLT) and tree throughput: SCIP with no separators at all needs 40,782 nodes
+and 33.7 s. discopt reaches 1.482 at 900 s. The flags-OFF path is bound-neutral: over the
+in-repo corpus, 53 of the 54 instances certified by both arms are byte-identical in
+node count and objective. The 54th, cvxnonsep_nsig30, is 316-320 nodes on `main`
+itself across three runs, which is pre-existing wall-clock nondeterminism.
