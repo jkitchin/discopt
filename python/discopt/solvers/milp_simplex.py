@@ -295,6 +295,14 @@ def _fbbt_eq_bounds(
     min/max activity of the *other* columns, with an explicit per-row infinity
     tally so a single open bound still propagates (vectorised over the sparse
     matrix; the per-element Python loop is too slow for this per-solve path).
+
+    Every derived side is widened outward by a bound on its whole floating-point
+    error, ``(nnz_i + 8)·eps·(Σ|terms| + |b_i|)/|a_ij| + 8·eps·|side|`` -- the bound
+    :func:`discopt.solvers.lp_milp_highs.fbbt_box` uses -- so it holds in exact
+    arithmetic. Unwidened, ``x0 + z1 + z2 = 1e16`` with ``z1 <= 1e16, z2 <= 1``
+    derived ``x0 >= 0`` (exact: ``-1``): the activity sum absorbed ``z2``, and the NS
+    bound and the Farkas check built on that box were above the optimum / proved a
+    feasible system infeasible (#1956 sweep).
     """
     coo = sp.csr_matrix(a_std).tocoo()
     rows = coo.row
@@ -307,6 +315,10 @@ def _fbbt_eq_bounds(
         return lb, ub
     pos = vals > 0.0
     b_r = b[rows]
+    eps = float(np.finfo(np.float64).eps)
+    slack_r = (np.bincount(rows, minlength=n_rows)[rows] + 8.0) * eps
+    absb_r = np.abs(b_r)
+    absa = np.abs(vals)
 
     for _ in range(rounds):
         # Min activity uses lb where coeff>0, ub where coeff<0; max activity swaps.
@@ -324,6 +336,10 @@ def _fbbt_eq_bounds(
         np.add.at(sum_min, rows, np.where(min_inf, 0.0, min_term))
         sum_max = np.zeros(n_rows)
         np.add.at(sum_max, rows, np.where(max_inf, 0.0, max_term))
+        mag_min = np.zeros(n_rows)
+        np.add.at(mag_min, rows, np.abs(np.where(min_inf, 0.0, min_term)))
+        mag_max = np.zeros(n_rows)
+        np.add.at(mag_max, rows, np.abs(np.where(max_inf, 0.0, max_term)))
         # Activity of the row excluding column j (finite iff every *other* term is).
         minrest_finite = (n_min_inf[rows] - min_inf.astype(np.float64)) == 0
         maxrest_finite = (n_max_inf[rows] - max_inf.astype(np.float64)) == 0
@@ -339,8 +355,12 @@ def _fbbt_eq_bounds(
         # bound — suppress the spurious RuntimeWarnings without changing any value
         # (bound-neutral by construction; the arithmetic is byte-identical).
         with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-            lo_cand = np.where(pos, (b_r - maxrest) / vals, (b_r - minrest) / vals)
-            hi_cand = np.where(pos, (b_r - minrest) / vals, (b_r - maxrest) / vals)
+            from_max = (b_r - maxrest) / vals
+            from_min = (b_r - minrest) / vals
+            err_max = slack_r * (mag_max[rows] + absb_r) / absa + 8.0 * eps * np.abs(from_max)
+            err_min = slack_r * (mag_min[rows] + absb_r) / absa + 8.0 * eps * np.abs(from_min)
+            lo_cand = np.where(pos, from_max - err_max, from_min - err_min)
+            hi_cand = np.where(pos, from_min + err_min, from_max + err_max)
         lo_valid = np.where(pos, maxrest_finite, minrest_finite)
         hi_valid = np.where(pos, minrest_finite, maxrest_finite)
 
@@ -417,11 +437,10 @@ def _safe_lp_lower_bound_std(
     # contain the feasible set, so g(y) stays <= p* (sound) while becoming finite.
     # Gated on actually needing it, so well-bounded LPs keep the cheap path.
     if (pos & ~np.isfinite(lb)).any() or (neg & ~np.isfinite(ub)).any():
-        # FBBT's float64 division roundoff (~ulp·|bound|) is dominated by the
-        # magnitude-scaled ``margin`` subtracted from g below, so the derived box
-        # needs no extra outward loosening — and adding one perturbs the (large)
-        # slack/aux bounds enough to break the safe bound's rescaling invariance
-        # without improving soundness. Use the FBBT bounds directly.
+        # The FBBT box is widened outward by its own rounding error (see
+        # ``_fbbt_eq_bounds``). A comment here used to say no widening was needed
+        # because ``margin`` dominates it; it does not -- an absorbed term in the
+        # activity sum is lost entirely, not by an ulp (#1956 sweep).
         lb, ub = _fbbt_eq_bounds(a_std, np.asarray(b, dtype=np.float64), lb, ub)
     # min_{z_k∈[lb,ub]} rc_k z_k = lb_k if rc_k>0, ub_k if rc_k<0, else 0 (the
     # rc_k==0 case contributes 0 even when that bound is infinite).
