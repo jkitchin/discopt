@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import time
 
 import numpy as np
@@ -347,6 +348,25 @@ def _affine_square_aux_bounds(coeff, const, li, ui):
     return _square_aux_bounds(t_lo, t_hi)
 
 
+def _incremental_widen_enabled() -> bool:
+    """``DISCOPT_INCREMENTAL_WIDEN`` (#1941 item 2): widen the incremental fast path.
+
+    Two parts that only make sense together:
+
+    * patch squares of multi-column affine forms (``affine_form_square``), so models
+      carrying ``(a.x + c)**2`` over several columns are admitted instead of
+      cold-building every node;
+    * append the cold build's separable objective floor to every fast-path node LP
+      (``_objective_floor_row``). Without it the fast path is looser than the cold
+      node build, so admission alone changes trees (a double well: root bound
+      -0.5875 against the cold -0.3054, 5 nodes against 3).
+
+    Bound-changing, so default-OFF until the CLAUDE.md section-5 panel passes;
+    recorded in ``docs/dev/flag-retirement-audit.md``. Off is byte-identical to the
+    path before #1941."""
+    return os.environ.get("DISCOPT_INCREMENTAL_WIDEN", "0") != "0"
+
+
 def _affine_form_interval(cols, coeffs, const, lo, hi):
     """Natural interval of ``const + sum(coeffs[k] * col[cols[k]])`` over column
     bounds ``lo``/``hi`` -- the enclosure the uniform engine's ``ctx.bounds`` gives the
@@ -631,6 +651,32 @@ class IncrementalMcCormickLP:
         # back at every bound-returning exit; ``c_override`` solves (feasibility
         # pump) are surrogates and deliberately excluded.
         self.obj_offset = float(getattr(_relax_probe, "_obj_offset", 0.0) or 0.0)
+        # The separable objective floor ``obj_lin >= sep_lb(box)`` (#640 Bucket 1)
+        # that the cold build adds and ``_full_build`` skips: its rhs depends on the
+        # box, so the row-for-row validation cannot include it. Without it the fast
+        # path is looser than the cold node build it stands in for, so admitting a
+        # model changed its tree (#1941: a double well's root bound -0.5875 against
+        # the cold path's -0.3054, 5 nodes against 3). ``assemble`` appends it per
+        # node from the same bound the cold build uses.
+        self._floor_expr = None
+        self._floor_plan = None
+        # Probe counters (CLAUDE.md section 6), reported as ``incremental/*`` solver stats.
+        self.n_assembled = 0
+        self.n_floor_rows = 0
+        model = self.model
+        if _incremental_widen_enabled() and model._objective is not None and np.any(c != 0.0):
+            from discopt._relax.milp_relaxation import SeparableBoundPlan
+            from discopt.modeling.core import ObjectiveSense, UnaryOp
+
+            _oe = model._objective.expression
+            self._floor_expr = (
+                UnaryOp("neg", _oe) if model._objective.sense == ObjectiveSense.MAXIMIZE else _oe
+            )
+            # Matched once; each node only evaluates it (the matching was ~2 s per
+            # call on du-opt5's objective, ~50x a cold build).
+            self._floor_plan = SeparableBoundPlan.compile(
+                self._floor_expr, model, self.n, expand_powers=True
+            )
         self.base_A = A  # CSR, sorted indices; product-row VALUES rewritten per node
         self.base_b = b.copy()
         self.base_bounds = bnds.copy()
@@ -638,7 +684,11 @@ class IncrementalMcCormickLP:
         self.monomial = dict(info.get("monomial", {}))  # any integer power p >= 2
         self.affine_square = dict(info.get("affine_square", {}))  # (var,aux)->(coeff,const)
         # aux -> (cols, coeffs, const): squares of affine forms over several columns (#1941)
-        self.affine_form_square = dict(info.get("affine_form_square", {}))
+        # Off: left empty, so their box-dependent rows stay unpatched and ``_validate``
+        # declines the model exactly as before #1941.
+        self.affine_form_square = (
+            dict(info.get("affine_form_square", {})) if _incremental_widen_enabled() else {}
+        )
 
         # C-44: per-column identity vector for this fixed lifted layout. The
         # incremental structure never rebuilds columns (``_patch`` only rewrites
@@ -1210,6 +1260,29 @@ class IncrementalMcCormickLP:
 
     # -- solve ------------------------------------------------------------- #
 
+    def _objective_floor_row(self, lb, ub):
+        """The cold build's separable objective floor over ``[lb, ub]`` as one row
+        ``-c·x <= obj_offset - sep_lb``, or ``None`` when the bound is not finite.
+
+        The cold build emits it only when ``sep_lb`` beats the objective's column-box
+        floor; otherwise the LP already implies it (its feasible set lies in the
+        column box). It is appended whenever finite, so the row count, and with it
+        the warm basis, stays stable from node to node. Sound: every feasible point
+        has ``objective >= sep_lb``, the same argument as the cold row."""
+        if self._floor_plan is None:
+            return None
+        from discopt._relax.milp_relaxation import _finite_bound_or_none
+        from discopt._relax.uniform_relax import _fix_single_var_equalities
+
+        flb, fub = _fix_single_var_equalities(
+            self.model, np.asarray(lb, dtype=np.float64), np.asarray(ub, dtype=np.float64)
+        )
+        # == ``_expression_lower_bound_for_lift(self._floor_expr, ...)``, the cold call.
+        sep = _finite_bound_or_none(self._floor_plan.evaluate(flb, fub))
+        if sep is None or not math.isfinite(sep):
+            return None
+        return -np.asarray(self.c, dtype=np.float64), self.obj_offset - float(sep)
+
     def assemble(self, lb, ub, cut_rows=None):
         """Patched McCormick LP rows over [lb,ub] with optional appended cut rows.
 
@@ -1217,6 +1290,12 @@ class IncrementalMcCormickLP:
         over the structural+aux columns (length ``ncol``). Returns ``(A, b, bounds)``.
         """
         A, b, bounds = self._patch(lb, ub)  # A is CSR (sparse)
+        self.n_assembled += 1
+        floor = self._objective_floor_row(lb, ub)
+        if floor is not None:
+            self.n_floor_rows += 1
+            A = sp.vstack([A, sp.csr_matrix(floor[0].reshape(1, -1))], format="csr")
+            b = np.concatenate([b, [floor[1]]])
         if cut_rows:
             extra_A = sp.csr_matrix(
                 np.array([np.asarray(co, dtype=np.float64)[: self.ncol] for co, _ in cut_rows])

@@ -6,18 +6,26 @@ single-original case (``affine_square_map``), so a model with a multi-column for
 (mathopt1/2, du-opt, prob09, st_e02, ...) left those rows frozen at the root box,
 failed ``_validate``, and fell back to a cold build at every node. The patch must
 reproduce the cold build exactly on every box; that is what these pin.
+
+Admission alone made the fast path weaker than the cold node build it replaces: the
+cold build also adds the separable objective floor. ``DISCOPT_INCREMENTAL_WIDEN``
+therefore carries both parts, and is off by default until its panel passes.
 """
 
 from __future__ import annotations
 
+import discopt.modeling as dm
 import numpy as np
 import pytest
-
-import discopt.modeling as dm
 from discopt._relax.incremental_mccormick import IncrementalMcCormickLP
 from discopt._relax.term_classifier import classify_nonlinear_terms
 
 pytestmark = pytest.mark.smoke
+
+
+@pytest.fixture
+def widen(monkeypatch):
+    monkeypatch.setenv("DISCOPT_INCREMENTAL_WIDEN", "1")
 
 
 def _engine(nested: bool):
@@ -34,7 +42,7 @@ def _engine(nested: bool):
 
 
 @pytest.mark.parametrize("nested", [False, True])
-def test_affine_form_square_is_patched_and_matches_cold_build(nested):
+def test_affine_form_square_is_patched_and_matches_cold_build(widen, nested):
     eng = _engine(nested)
     assert eng.ok, eng.decline_reason
     assert eng.afsq_form_rows, "no affine-form square was recognised"
@@ -54,3 +62,47 @@ def test_affine_form_square_is_patched_and_matches_cold_build(nested):
             mism += 1
     assert compared == 100
     assert mism == 0, f"{mism}/100 boxes mismatched"
+
+
+def test_flag_off_declines_as_before(monkeypatch):
+    monkeypatch.setenv("DISCOPT_INCREMENTAL_WIDEN", "0")
+    eng = _engine(nested=False)
+    assert not eng.ok and not eng.afsq_form_rows
+
+
+def _double_well():
+    m = dm.Model("well")
+    x = m.continuous("x", lb=-3, ub=3)
+    y = m.continuous("y", lb=-3, ub=3)
+    m.minimize((x**2 - 1) ** 2 + y**2 + 0.3 * x)
+    m.subject_to(x + y >= -2)
+    return m
+
+
+def test_fast_path_root_bound_matches_the_cold_node_build(widen):
+    """The admitted fast path must carry the cold build's objective floor: without
+    it the root bound was -0.5875 against the cold path's -0.3054."""
+    from discopt._relax.mccormick_lp import MccormickLPRelaxer
+    from discopt._relax.model_utils import flat_variable_bounds
+
+    m = _double_well()
+    lb, ub = flat_variable_bounds(m)
+    relaxer = MccormickLPRelaxer(m)
+    assert relaxer._inc is not None, "the double well should take the fast path"
+    assert relaxer._inc._objective_floor_row(lb, ub) is not None
+    fast = relaxer._try_incremental_node(lb, ub, None)
+    inc, relaxer._inc = relaxer._inc, None
+    cold = relaxer.solve_at_node(lb, ub, separate=False)
+    relaxer._inc = inc
+    assert fast.status == cold.status == "optimal"
+    assert fast.lower_bound == pytest.approx(cold.lower_bound, abs=1e-7)
+    assert fast.lower_bound == pytest.approx(-0.3054284845, abs=1e-6)
+
+
+@pytest.mark.parametrize("on", ["0", "1"])
+def test_double_well_tree_is_unchanged_by_the_flag(monkeypatch, on):
+    monkeypatch.setenv("DISCOPT_INCREMENTAL_WIDEN", on)
+    r = _double_well().solve(time_limit=20)
+    assert r.status == "optimal" and r.gap_certified
+    assert r.objective == pytest.approx(-0.305428483743916, abs=1e-6)
+    assert r.node_count == 3
