@@ -10765,7 +10765,56 @@ _IPX_RACE_IN_SLICE: contextvars.ContextVar[bool] = contextvars.ContextVar(
 
 
 def _ipx_race_stall_exit_enabled() -> bool:
-    """#1959: ``DISCOPT_IPX_RACE_STALL_EXIT``; placeholder docstring."""
+    """#1959: end the lift slice on the MILP engine's stall. ``DISCOPT_IPX_RACE_STALL_EXIT``.
+
+    **Default ON**; ``=0`` restores the #1940 race exactly as merged. It is an
+    opt-out for a shipped default (CLAUDE.md §5 "out of scope"), kept so the
+    change can be A/B'd.
+
+    What it changes
+    ---------------
+    Inside the race's opening LIFT slice (never its continuation, never an
+    ordinary solve), the native MILP engine's #291 stall guard can defer: its
+    half-of-remaining budget ran out with no incumbent. The legacy route then
+    hands the rest of the slice to the Python MILP tree (``_solve_milp_bb``) on
+    the same lifted model. Under this flag the slice ends at the deferral
+    instead, reporting ``time_limit`` with the engine's dual bound (valid: the
+    lift is an exact formulation), and the race moves on to the un-lifted slice.
+    The engine's own budget is untouched, so every instance the engine certifies
+    inside the slice -- the whole adopted corpus at dev speed -- runs the same
+    tree to the same certificate.
+
+    Why it is sound to skip the Python tree
+    ---------------------------------------
+    It is not skipped because it is slow but because, measured, it never
+    returned anything there. ``scripts/panel_1959_race_stall_exit.py`` records
+    every such run in its OFF arm and fails on one that yields an incumbent or a
+    certificate: 77 of 77 returned neither (28 in the 30 s panel, 49 in the
+    CI-speed proxy below), and in the entry experiment 11 of 11 at slices of 5,
+    1.67 and 1 s, including ``ex1265`` and ``ex1266`` at the short slices.
+    Without an incumbent the lift's gap is infinite, so the race's arm choice is
+    unchanged too.
+
+    Measurement (#1959 panel: #1940's 43 instances, ABBA, 2 reps)
+    -------------------------------------------------------------
+    At 30 s: 754 checks, 0 failures; certified 42 = 42; total wall 177.3 ->
+    145.5 s; 11 faster beyond 2 sd and 1.2x, 0 slower. Dense integer QP n=15 s0
+    6.87 -> 4.27 s, ``arrqp_n15`` 7.05 -> 4.14 s, ``sparse_n40`` 6.63 -> 3.77 s.
+    CI-speed proxy (``--slice 1.67``, limit 10 s, i.e. a 3x slower machine):
+    765 checks, 0 failures; certified 40 = 40 (all 12 adopted corpus instances
+    in both arms); total wall 129.2 -> 115.4 s; 13 faster, 0 slower. At that
+    speed ``ex1265``/``ex1266`` no longer certify inside the lift slice in
+    either arm (they certify in the continuation), and are faster ON
+    (5.08 -> 4.20 s, 5.30 -> 4.36 s). The lift slice still costs ~2.8 s where
+    the lift loses: the engine's stage-sized budget is what ``ex1265`` needs
+    (``_IPX_RACE_SLICE_S``).
+
+    Falsified alongside it: handing the un-used part of the lift slice to the
+    un-lifted slice. ``dense_n18_s1`` got a 7 s un-lifted slice, still ended
+    uncertified (the spatial search sizes its root work from its limit, so a
+    longer slice is a different search, not more of the same one) and paid the
+    restart anyway: 15.4 -> 17.1 s. performance-plan §85.
+    """
     return os.environ.get("DISCOPT_IPX_RACE_STALL_EXIT", "1").strip().lower() not in (
         "0",
         "false",
