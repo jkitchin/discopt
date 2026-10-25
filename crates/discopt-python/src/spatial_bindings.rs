@@ -483,6 +483,8 @@ pub fn solve_spatial_tree_py<'py>(
                 d.set_item("warm_started", r.warm_started)?;
                 if let Some(b) = o.start {
                     d.set_item("start_col_status", PyArray1::from_slice(py, &b.col_status))?;
+                    let bv: Vec<i64> = b.basic_vars.iter().map(|&v| v as i64).collect();
+                    d.set_item("start_basic_vars", PyArray1::from_vec(py, bv))?;
                 }
                 d.set_item(
                     "end_col_status",
