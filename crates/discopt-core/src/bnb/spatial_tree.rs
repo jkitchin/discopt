@@ -1267,10 +1267,6 @@ fn widest_original_col(
     best.map(|(_, j)| j)
 }
 
-/// Push the two covering children of `[lo, hi]` split on `split_col` at `split_at`,
-/// each inheriting `pb` as its (valid) region lower bound. The two children cover
-/// the parent box exactly, so no feasible point is lost.
-#[allow(clippy::too_many_arguments)]
 /// The unfixed integer column whose value is farthest from an integer, among those
 /// with a NONZERO distance, or `None` (#1938). Used only after the caller rejected a
 /// point every integer column of which is within `int_tol`.
@@ -1290,6 +1286,10 @@ fn near_integral_col(spec: &SpatialKernelSpec, x: &[f64], lo: &[f64], hi: &[f64]
     best
 }
 
+/// Push the two covering children of `[lo, hi]` split on `split_col` at `split_at`,
+/// each inheriting `pb` as its (valid) region lower bound. The two children cover
+/// the parent box exactly, so no feasible point is lost.
+#[allow(clippy::too_many_arguments)]
 fn push_children(
     heap: &mut BinaryHeap<QNode>,
     lo: &[f64],
