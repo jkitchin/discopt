@@ -16,8 +16,8 @@
 
 use super::refine::residual_matvec_dd;
 use feral::{
-    should_use_dense_lu, DenseLu, GeneralMatrix, LuParams, LuSingularAction, RefactorCause,
-    SparseColMatrix, SparseLu, SparseLuSymbolic,
+    should_use_dense_lu, DenseLu, GeneralMatrix, LuParams, LuPivoting, LuSingularAction,
+    RefactorCause, SparseColMatrix, SparseLu, SparseLuSymbolic,
 };
 
 /// Error from a basis factorization/solve.
@@ -379,7 +379,7 @@ impl FeralLU {
     ) -> Result<SparseLu, LinError> {
         let sym = {
             let _t = crate::profile::Timer::new(crate::profile::Phase::LuSymbolic);
-            SparseLuSymbolic::analyze(a).map_err(feral_err)?
+            symbolic_for(a, &params)?
         };
         let lu = {
             let _t = crate::profile::Timer::new(crate::profile::Phase::LuNumeric);
@@ -667,6 +667,25 @@ impl FeralLU {
     }
 }
 
+/// The symbolic analysis `SparseLu::factor` needs under `params` (#1935).
+///
+/// Since feral 0.16 the default `LuPivoting::Markowitz` chooses its own column
+/// order during factorization and reads the symbolic for its dimension only
+/// (`SparseLu::factor`, feral `src/lu/sparse_factor.rs`). AMD over `AᵀA` was still
+/// run on every refactorization and thrown away: on MINLPLib `pooling_bental5stp`'s
+/// node LPs (m = 755) that was 2.7 s of 5.4 s of LU time. The `natural` placeholder
+/// is O(m) and carries the same dimension, so the factor is bit-identical. Under
+/// `GilbertPeierls` the ordering is real and AMD still runs. `analyze` fails only
+/// on index overflow or a malformed pattern, never on a singular basis, so this
+/// cannot turn a refused factorization into an accepted one.
+fn symbolic_for(a: &SparseColMatrix, params: &LuParams) -> Result<SparseLuSymbolic, LinError> {
+    if params.pivoting == LuPivoting::Markowitz {
+        Ok(SparseLuSymbolic::natural(a.m))
+    } else {
+        SparseLuSymbolic::analyze(a).map_err(feral_err)
+    }
+}
+
 fn feral_err(e: feral::FeralError) -> LinError {
     LinError::Backend(format!("{e:?}"))
 }
@@ -685,7 +704,7 @@ impl LinearSolver for FeralLU {
             ))
         } else {
             let a = SparseColMatrix::from_dense_columns(m, cols).map_err(feral_err)?;
-            let sym = SparseLuSymbolic::analyze(&a).map_err(feral_err)?;
+            let sym = symbolic_for(&a, &params)?;
             Factored::Sparse(Box::new(
                 SparseLu::factor(&a, &sym, params).map_err(feral_err)?,
             ))
