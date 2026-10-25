@@ -11009,3 +11009,46 @@ instances, 30 s, 77 checks against `minlplib.solu`): false 0, bad points 0, lost
 (`milp_driver.rs`) and, since #1287, verifies an integral LP vertex with
 `rows_verified` -- row equalities of `[A | I]` only, so a negative slack or a
 structural outside its box would still pass. A related gap, outside this change.
+
+### 79c. DSE with inherited weights + hypersparse solves: in-tree, mixed; blocked by the scaled feasibility tolerance (2026-10-25)
+
+Built in a local worktree (not merged): the dual loop's final steepest-edge
+weights (keyed by variable) travel with each queued node's basis, including
+through undecided nodes (`ISSUE1935_DSE=3`: exact weights by hypersparse `btran`
+where nothing is inherited; `=4`: unit weights there), and the loop's `rho`, `alpha`
+and `tau` solves can use feral's `btran_sparse`/`ftran_sparse` (`ISSUE1935_SPARSE=1`).
+
+Entry measurements first. Rows of `B⁻¹` on 300 captured `pooling_bental5stp` bases
+are 3.6% dense (27 of 755); all `m` exact weights cost 4.07 ms per LP with dense
+`btran` and 1.37 ms with `btran_sparse` (identical on 226,500 weights). Mechanism
+in-tree (`st_e31`, mode 2): 97% of start weights inherited (833,532 vs 29,017
+computed); pivots 32,416 -> 24,289 (-25%); same certified objective. Sparse solves
+alone follow an identical path (same nodes, same pivots).
+
+In-tree, 7 MINLPLib instances from the #1935 table, warm-start mode 2, 30 s, one
+solve at a time, variants interleaved; node-LP seconds base / sparse / DSE3 / DSE4:
+
+| instance | base | sparse | DSE3 | DSE4 |
+|---|---:|---:|---:|---:|
+| `pooling_bental5stp` | 9.87 | 10.72 | **6.66** (nodes 1,766 -> 833, wall 13.5 -> 10.4 s) | 10.50 |
+| `st_e31` | 2.36 | 2.40 | 2.26 | 2.19 |
+| `nous2` | 0.77 | 0.80 | 0.99 | 0.89 |
+| `ex2_1_9` | 1.65 | 1.86 | 1.95 | 2.14 |
+| `hybriddynamic_var` | 1.39 | 1.56 | 1.69 | 1.66 |
+| `pooling_adhya1stp` | 1.68 | 1.74 | 2.21 | 2.16 |
+| `nvs20` | 0.60 | 0.65 | 26.57, **certificate lost** | 26.88, **lost** |
+
+All objectives identical and all incumbents `verify_point`-clean; nothing ships.
+Hypersparse solves as wired are 2-13% slower on every instance (conversion and
+allocation outweigh the savings at m ~ 300-800). DSE wins once, is neutral once and
+loses five times.
+
+**Why `nvs20` collapses** (profiled, DSE4 vs base): `ScaledOptimalOriginalAuditFail`
+32 -> 431, `DualColdFallbacks` 6 -> 865, `Phase1Pivots` 2,694 -> 166,306. DSE steers
+the dual loop to vertices that are primal feasible to `tol` in SCALED units but not
+in original units -- the §79b mis-scaled tolerance -- and each one the original-space
+audit now refuses costs an unscaled cold re-solve. Devex stops at such points too
+(32 on the base run), just less often. **Prerequisite for DSE, and a candidate win
+for the default path on its own:** a scale-aware primal feasibility test inside the
+dual loop (tolerance per basic variable in original units), so it does not stop at
+points the audit will refuse.
