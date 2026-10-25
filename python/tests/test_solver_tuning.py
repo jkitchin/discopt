@@ -45,6 +45,9 @@ def test_defaults_match_legacy_env_defaults():
     assert t.rlt is False
     assert t.rlt_lineq is False
     assert t.rlt_lineq_max == 4096
+    assert t.rlt_ineq is False
+    assert t.distribute_affine_products is False
+    assert t.distribute_affine_products_max == 64
     # lifted_fbbt was deprecated/removed in #581 (graduated-gate net-negative).
     assert not hasattr(t, "lifted_fbbt")
     assert t.trilinear_nested is False
@@ -78,6 +81,9 @@ def test_defaults_match_legacy_env_defaults():
         ("DISCOPT_RLT_QUAD_MAX", "64", "rlt_quad_max", 64),
         ("DISCOPT_RLT_LINEQ", "1", "rlt_lineq", True),
         ("DISCOPT_RLT_LINEQ_MAX", "32", "rlt_lineq_max", 32),
+        ("DISCOPT_RLT_INEQ", "1", "rlt_ineq", True),
+        ("DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS", "1", "distribute_affine_products", True),
+        ("DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS_MAX", "16", "distribute_affine_products_max", 16),
         ("DISCOPT_TRILINEAR", "nested", "trilinear_nested", True),
         ("DISCOPT_TRILINEAR", "meyer", "trilinear_meyer", True),
         ("DISCOPT_TRILINEAR", "exact", "trilinear_exact", True),
@@ -119,6 +125,10 @@ def test_explicit_field_overrides_env(monkeypatch):
     [
         (dict(rlt_quad_max=0), "rlt_quad_max must be >= 1"),
         (dict(rlt_lineq_max=-1), "rlt_lineq_max must be >= 0"),
+        (
+            dict(distribute_affine_products_max=-1),
+            "distribute_affine_products_max must be >= 0",
+        ),
         (dict(multilinear_rlt_max=0), "multilinear_rlt_max must be >= 1"),
         (dict(node_nlp_stride=0), "node_nlp_stride must be >= 1"),
         (dict(ils_solve_cap=-1), "ils_solve_cap must be >= 0"),

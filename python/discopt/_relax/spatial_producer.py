@@ -98,6 +98,7 @@ def build_spatial_kernel_spec(
             model,
             box=(box_lb, box_ub),
             rlt_lineq=bool(_tuning().rlt_lineq),
+            rlt_ineq=bool(_tuning().rlt_ineq),
             skip_separable_floor=True,
             skip_convex_lift=True,
             abort_deadline=deadline,
@@ -179,8 +180,16 @@ def build_spatial_kernel_spec(
 
     _support_within = row_support_within(A, _TOL)
 
+    # #1944: rows the build declares are no term's envelope (constraint-factor RLT)
+    # are never claimed, however their support looks; they are fixed rows, checked
+    # for box-independence below like every other one.
+    _nonenvelope = frozenset(int(r) for r in getattr(rel, "nonenvelope_rows", ()))
+
     def rows_with_col(cc: int):
-        return csc.indices[csc.indptr[cc] : csc.indptr[cc + 1]]
+        rows = csc.indices[csc.indptr[cc] : csc.indptr[cc + 1]]
+        if not _nonenvelope:
+            return rows
+        return [r for r in rows if int(r) not in _nonenvelope]
 
     env_rows: set[int] = set()
     # term arrays
@@ -320,8 +329,17 @@ def build_spatial_kernel_spec(
     if Ar.shape != A.shape or br.shape[0] != b.shape[0]:
         return None
     rp_indptr, rp_indices, rp_data = Ar.indptr, Ar.indices, Ar.data
+    # #1944: bound-factor RLT rows carry the box they were built at. The probe
+    # build's copies are valid only in the probe box, so they are never used; the
+    # real-box build's copies are valid in every sub-box of ``[lb, ub]``, which is
+    # every box the kernel visits (it only ever shrinks the root box). The two
+    # builds must agree on WHICH rows these are, or the row correspondence the
+    # check below relies on is gone.
+    _root_box = frozenset(int(r) for r in getattr(rel, "root_box_rows", ()))
+    if _root_box != frozenset(int(r) for r in getattr(rel_real, "root_box_rows", ())):
+        return None
     for r in range(A.shape[0]):
-        if r in env_rows:
+        if r in env_rows or r in _root_box:
             continue
         # Same nonzero pattern + values + rhs at both boxes?
         p0, p1 = indptr[r], indptr[r + 1]
@@ -342,6 +360,13 @@ def build_spatial_kernel_spec(
     fixed_rhs: list[float] = []
     for r in range(A.shape[0]):
         if r in env_rows:
+            continue
+        if r in _root_box:
+            row = Ar.getrow(r)
+            fixed_cols.extend(int(cc) for cc in row.indices)
+            fixed_coeffs.extend(float(v) for v in row.data)
+            fixed_row_ptr.append(len(fixed_cols))
+            fixed_rhs.append(float(br[r]))
             continue
         row = A.getrow(r)
         fixed_cols.extend(int(cc) for cc in row.indices)
