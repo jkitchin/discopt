@@ -1678,44 +1678,6 @@ def _kernel_seed_ils_enabled() -> bool:
 KERNEL_SEED_ILS_STATS: "collections.Counter[str]" = collections.Counter()
 
 
-def _kernel_seed_multistart_lazy_enabled() -> bool:
-    """``DISCOPT_KERNEL_SEED_MULTISTART_LAZY`` gate (#1941 item 4), read at call time.
-
-    Default ON; ``=0`` restores the uncapped multistart. The native kernel's seed
-    ran a pure-continuous model's ``continuous_multistart`` for its whole budget
-    even when the sub-NLP from the relaxation point had already yielded a verified
-    seed. On one-node instances that was most of the solve (120 s):
-    ``pooling_bental4stp`` 9.7 of 10.5 s, ``st_m2`` 8.0 of 8.8 s,
-    ``pooling_foulds2tp`` 4.4 of 4.9 s. ON, once a seed exists the multistart gets
-    ``_SEED_MULTISTART_CAP_S`` (1 s) of wall: on a small model every start still
-    runs, on an expensive one the overhead is bounded. Primal only: it changes
-    which verified point seeds the kernel's cutoff, never a bound.
-
-    First form, falsified by CI (recorded per CLAUDE.md section 11): SKIPPING the
-    multistart outright passed a 158-instance panel (cert-clean, 149 = 149, wall
-    546 -> 404 s) but lost the global basin on #1656's ``_lsq`` model (certified
-    0.02735499 within the 1e-4 gap, against the optimum 0.0273541381) and made the
-    #1619 units test's seed unit-dependent. A one-shot full-accuracy re-solve from
-    the seed did not recover ``_lsq``: the seed is a different local optimum, which
-    is the multistart's job. The capped form keeps both tests at their original
-    assertions; its panel is in ``docs/dev/flag-retirement-audit.md``.
-    """
-    return os.environ.get("DISCOPT_KERNEL_SEED_MULTISTART_LAZY", "1").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
-        "",
-    )
-
-
-#: #1941: wall cap on the seed multistart once a verified seed exists.
-_SEED_MULTISTART_CAP_S = 1.0
-
-#: #1941: how often the cap applied to a pure-continuous seed (probe, section 6).
-KERNEL_SEED_MULTISTART_STATS: "collections.Counter[str]" = collections.Counter()
-
-
 def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
     """Yield candidate feasible points (flat) for the native-kernel seed, from the SAME
     NLP heuristics the trusted spatial path uses to find its first incumbent — general
@@ -1908,14 +1870,7 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
             KERNEL_SEED_ILS_STATS["found"] += 1
             yield np.asarray(ils[0], dtype=np.float64)
 
-    # #1941: with a verified seed already in hand, the multistart only looks for a
-    # better basin, so it gets a short wall cap instead of the seed's whole budget.
-    _ms_deadline = deadline
-    if _seed_yielded > 0 and _kernel_seed_multistart_lazy_enabled():
-        _ms_deadline = min(deadline, time.perf_counter() + _SEED_MULTISTART_CAP_S)
-        if not int_pos:
-            KERNEL_SEED_MULTISTART_STATS["capped"] += 1
-    if not int_pos and time.perf_counter() < _ms_deadline:
+    if not int_pos and time.perf_counter() < deadline:
         try:
             from discopt._relax.primal_heuristics import continuous_multistart
 
@@ -1923,7 +1878,7 @@ def _native_kernel_seed_candidates(model, lb, ub, n_orig, deadline):
                 model,
                 n_starts=int(min(64, max(16, 2 * int(n_orig)))),
                 evaluator=ev,
-                deadline=_ms_deadline,
+                deadline=deadline,
             )
             if cand is not None and cand[0] is not None:
                 yield np.asarray(cand[0], dtype=np.float64)
