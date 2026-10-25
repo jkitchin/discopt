@@ -402,9 +402,10 @@ class SolverTuning:
     rlt_quad_max: int = field(default_factory=lambda: _env_int("DISCOPT_RLT_QUAD_MAX", 256))
     """Column cap for quadratic RLT (``DISCOPT_RLT_QUAD_MAX``, default 256)."""
 
-    rlt_lineq: bool = field(default_factory=lambda: _env_flag("DISCOPT_RLT_LINEQ", default=False))
+    rlt_lineq: bool = field(default_factory=lambda: _env_flag("DISCOPT_RLT_LINEQ", default=True))
     """Build-time RLT products of *linear equality* constraints with the original
-    variables (``DISCOPT_RLT_LINEQ``, default **off** pending the graduation panel).
+    variables (``DISCOPT_RLT_LINEQ``, default **on** since #1944's graduation
+    panel; ``=0`` opts out).
 
     For a linear equality ``a'x + c == 0`` and a variable ``x_j``, the product
     ``(a'x + c) * x_j == 0`` linearizes over the lifted product columns to
@@ -449,18 +450,36 @@ class SolverTuning:
       undecided nodes go 6 -> 2,618 with this flag, and the instance loses its
       certificate. With ``DISCOPT_NATIVE_WARM_START=2`` or
       ``DISCOPT_LP_COLD_DUAL_START=1`` it is 0 and the instance certifies (433 nodes
-      vs 387). Graduating this flag on the kernel route therefore waits on #1935's
-      warm start."""
+      vs 387). The warm start graduated (mode 2 is the default, #1949).
 
-    rlt_lineq_max: int = field(default_factory=lambda: _env_int("DISCOPT_RLT_LINEQ_MAX", 4096))
+    **Graduated (#1944)** together with ``rlt_ineq`` and
+    ``distribute_affine_products``, as the bundle measured, with
+    ``rlt_lineq_max = 0``. Panel: ``issue1944_rlt_panel.py --with-corpus`` on the
+    warm-start ``main``. Population: 270 instances (the in-repo corpus plus every
+    nonconvex polynomial MINLPLib instance with at most 60 vars/cons and a proven
+    optimum), 30 s, interleaved, every incumbent ``verify_point``-ed.
+
+    * Cert-clean: 1,620 checks, 0 problems.
+    * Net-positive: gained ex5_2_5, lost none.
+    * Wall where both certify: 523.9 -> 483.1 s. Total: 1596.9 -> 1527.9 s.
+
+    ``performance-plan.md`` section 82 has the record."""
+
+    rlt_lineq_max: int = field(default_factory=lambda: _env_int("DISCOPT_RLT_LINEQ_MAX", 0))
     """New-column cap for linear-equality RLT (``DISCOPT_RLT_LINEQ_MAX``, default
-    4096). Products already registered by the base decomposition are free; only
-    columns this pass has to lift itself count against the cap."""
+    **0**: existing products only, the policy of SCIP's RLT separator). Products
+    already registered by the base decomposition are free; only columns this pass
+    has to lift itself count against the cap. The default was 4096 while the flag
+    was off. #1944 measured lifting on the kernel route: the same root bound on
+    nous1 (0.0795), but 1,074 columns instead of 106 and 55 nodes in 120 s
+    instead of 16,231. A positive value restores lifting, which the QPLIB
+    root-LP measurement above used."""
 
-    rlt_ineq: bool = field(default_factory=lambda: _env_flag("DISCOPT_RLT_INEQ", default=False))
+    rlt_ineq: bool = field(default_factory=lambda: _env_flag("DISCOPT_RLT_INEQ", default=True))
     """Bound-factor RLT rows for the linear inequalities in the native spatial
     kernel's relaxation, over products the build already lifted
-    (``DISCOPT_RLT_INEQ``, default **off** pending the graduation panel; #1944).
+    (``DISCOPT_RLT_INEQ``, default **on** since #1944's graduation panel, see
+    ``rlt_lineq``; ``=0`` opts out).
 
     For ``g + a'x >= 0`` and a variable ``x_j`` in ``[l, u]`` whose product with
     every variable of the row is already a lifted column, adds the linearized
@@ -484,11 +503,12 @@ class SolverTuning:
     default only if the lift is declined (``DISCOPT_IPX_CHEAP_FIRST``)."""
 
     distribute_affine_products: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS", default=False)
+        default_factory=lambda: _env_flag("DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS", default=True)
     )
     """Distribute a product of two affine forms over disjoint original variables into
     a sum of bilinear products before relaxing it (``DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS``,
-    default **off** pending the graduation panel; #1944).
+    default **on** since #1944's graduation panel, see ``rlt_lineq``; ``=0`` opts
+    out).
 
     Without it ``(c + a'x) * (d + b'y)`` is one product ``w = A*B`` whose McCormick
     envelope uses the interval of each whole form. Distributed, it becomes
@@ -511,8 +531,16 @@ class SolverTuning:
     the constraints ``x24 = x2*x0`` and ``x25 = x3*x0``. Root LP at the presolved box
     (#1944): nous1 -0.847 -> -0.636, nous2 -0.830 -> -0.435.
 
+    **Only where a pair is shared.** A product is distributed only if at least one
+    of its pairs is already a product elsewhere in the model. Sharing is where the
+    gain comes from; without it every pair is a new column. #1944 measured tanksize:
+    38 new pairs, none shared. Its root moved 0.8382 -> 0.8419, but the kernel tree
+    doubled (19,039 -> 37,709 nodes) and the instance lost its certificate in the
+    panel. Over the panel population, every product distributed on an instance that
+    gained had a shared pair.
+
     The pair count is capped by ``distribute_affine_products_max``. A product above
-    the cap is left as one affine-form product, which is the unflagged behaviour."""
+    the cap is left as one affine-form product, which is the ``=0`` behaviour."""
 
     distribute_affine_products_max: int = field(
         default_factory=lambda: _env_int("DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS_MAX", 64)

@@ -148,16 +148,18 @@ compositional (looser) counterparts.
   into the LP relaxation, where the RLT cuts (§6.D) then make the **distinct-factor** product
   exact. (Repeated factors x², x³, … are themselves relaxed by the monomial-secant path.)
 - **Distributed affine products (#1944, `DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS`, default
-  off)** — `canonical_expr._Canonicalizer._distribute_affine_pair` rewrites
+  on)** — `canonical_expr._Canonicalizer._distribute_affine_pair` rewrites
   `(c + a'x)·(d + b'y)` over disjoint variables as `cd + c b'y + d a'x + Σ aᵢbⱼ xᵢyⱼ`
   before the build. The per-pair McCormick envelopes imply the affine-form envelope (sum
   the scaled pair inequalities), so the result is never looser. The pairs hash-cons onto
-  the columns of the same products written elsewhere. Overlapping supports are refused,
-  because a shared variable would turn its pair into a square.
-- **Constraint-factor RLT rows in the native kernel (#1944)** — two families over
+  the columns of the same products written elsewhere. A product is distributed only if
+  one of its pairs already exists elsewhere (no sharing, no gain: tanksize's tree doubled).
+  Overlapping supports are refused, because a shared variable would turn its pair into a
+  square.
+- **Constraint-factor RLT rows in the native kernel (#1944, default on)** — two families over
   **existing products only**, the policy of SCIP's RLT separator: *linear equality ×
-  variable* (`_emit_linear_equality_rlt`, `DISCOPT_RLT_LINEQ` with
-  `DISCOPT_RLT_LINEQ_MAX=0`; box-independent) and *linear inequality × bound factor*
+  variable* (`_emit_linear_equality_rlt`, `DISCOPT_RLT_LINEQ`, existing products
+  only by default (`DISCOPT_RLT_LINEQ_MAX=0`); box-independent) and *linear inequality × bound factor*
   (`_emit_linear_inequality_rlt`, `DISCOPT_RLT_INEQ`). The latter carry the box they were
   built at, so the kernel producer takes them from the **real** root-box build
   (`UniformRelaxation.root_box_rows`). They are valid in every sub-box and are never

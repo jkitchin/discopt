@@ -11271,3 +11271,50 @@ does not touch, so that is time-limit noise.
 **Verdict: graduated.** The default is now `2`; `=0` restores the cold start and
 mode 1 stays addressable. #1944's three gates are graduated on this `main` in the
 next PR (§82).
+
+## 82. #1944: the RLT bundle graduated, with a sharing gate on distribution (2026-10-25)
+
+Context: §80 found the bundle net-positive only with a warm-started node LP, and
+§81 made that the default (#1949). The bundle panel was re-run on that `main`:
+`issue1944_rlt_panel.py --with-corpus --base-env DISCOPT_NATIVE_WARM_START=2`,
+the same 270 instances, 30 s, interleaved.
+
+**First run: one certificate lost.** Cert-clean (1,620 checks, 0 problems).
+Gained ex5_2_5, but lost `tanksize`: the same ~19,000 nodes took 30 s instead of
+11.6 s. Ablation with the warm start on put the whole loss on distribution:
+
+| tanksize, 60 s | nodes | node-LP s |
+|---|---:|---:|
+| off | 19,039 | 7.9 |
+| distribute | 37,709 | 24.6 |
+| lineq (existing products) | 19,039 | 8.0 |
+| ineq | 17,375 | 7.9 |
+
+The root was *tighter* (0.8382 -> 0.8419), as the dominance argument requires,
+but distribution had added 38 columns and 112 rows.
+
+**Hypothesis: distribution pays only through column sharing.** Probe: for every
+product distribution rewrites on the 270, count its pairs that the undistributed
+model already has as products. Distribution fires on 14 instances:
+
+- **Every gainer shares.** ex5_2_5: 180 of 180 pairs. nous1/nous2: 4 of 8.
+  hda: 7 of 23 (its 30 s bound -64510 -> -7002). haverly: 2 of 2.
+- **The loser shares nothing.** tanksize: 0 of 38.
+- **The neutral ones share nothing.** ex1252/ex1252a, nvs05, st_e05.
+
+Not falsified. Built: `_distribute_affine_pair` now requires at least one pair
+that a distribution-off pre-pass of the canonicalizer found as a product. The
+pre-pass runs only when the flag is on. Afterwards tanksize is 19,039 nodes,
+the flag-off tree, and distribution fires on the 9 sharing instances.
+
+**Second run (graduation panel), gate in:**
+
+- Cert-clean: 1,620 checks, 0 problems.
+- **Net-positive: gained ex5_2_5, lost none.**
+- Wall where both certify: 523.9 -> 483.1 s (nodes 66,537 -> 62,237). Total:
+  1596.9 -> 1527.9 s.
+
+**Verdict: graduated.** `DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS`, `DISCOPT_RLT_LINEQ`
+and `DISCOPT_RLT_INEQ` now default on, and `DISCOPT_RLT_LINEQ_MAX` defaults to 0
+(existing products only). Each `=0` restores the legacy path;
+`DISCOPT_RLT_LINEQ_MAX=4096` restores lifting.

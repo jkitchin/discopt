@@ -46,6 +46,9 @@ def test_warm_start_mode_parsing(monkeypatch):
 @pytest.mark.parametrize("case", [1, 2])
 def test_every_warm_mode_certifies_the_cold_optimum(monkeypatch, case):
     results = {}
+    # Inheritance needs a tree. Since #1944 the lineq RLT rows close Haverly's
+    # root (1 node), so they are switched off here.
+    monkeypatch.setenv("DISCOPT_RLT_LINEQ", "0")
     for mode in ("0", "1", "2"):
         monkeypatch.setenv("DISCOPT_NATIVE_WARM_START", mode)
         r = _haverly_q(case).solve(time_limit=60)
