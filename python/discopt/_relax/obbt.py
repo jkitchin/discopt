@@ -78,9 +78,13 @@ def _ns_safe_lp_lower_bound(c, dual_values, A_ub, b_ub, lo, hi, *, rc_snap_tol=0
     raw vertex objective is therefore sound at any conditioning, and loses no
     tightness where the LP is well-behaved.
 
-    A magnitude-scaled margin is subtracted to dominate the floating-point error
-    of the dual evaluation itself (done in plain float64, not directed-rounding
-    interval arithmetic). Returns ``None`` when no usable lower bound exists.
+    The float64 value minus a magnitude-scaled margin is capped by the enclosed
+    ``milp_simplex.rigorous_ns_bound_std`` on the slack-augmented system
+    ``[A_ub | I] (x, s) = b_ub`` (``s >= 0`` on inequality rows, ``s = 0`` on
+    equality rows): a margin cannot cover a reduced cost that cancels to ``0`` in
+    float64 and drops its ``rc·bound`` term (#1956 sweep, ``-1e-10`` reported for an
+    LP whose minimum is ``-0.0555``). Returns ``None`` when no usable or no proved
+    lower bound exists.
 
     ``rc_snap_tol`` (default ``0.0`` -> disabled, exact legacy behaviour) enables
     the reduced-cost snap needed to consume an *interior-point* dual (POUNCE)
@@ -160,7 +164,46 @@ def _ns_safe_lp_lower_bound(c, dual_values, A_ub, b_ub, lo, hi, *, rc_snap_tol=0
     # Margin >> the float64 rounding error of the two dot products above
     # (~n * eps * magnitude); keeps g a rigorous under-estimate.
     margin = 1e-10 * (1.0 + abs(const) + float(np.abs(contrib).sum()))
-    return g - margin
+    if rc_snap_tol > 0.0:
+        # The snap replaces a reduced cost by 0 on an open side, which no enclosure
+        # can prove; this arm stays the heuristic the docstring describes.
+        return g - margin
+    proved = _rigorous_ns_slack_form(c, y, A_ub, b_ub, lo, hi, n_ub)
+    if proved is None:
+        return None
+    return min(g - margin, proved)
+
+
+def _rigorous_ns_slack_form(c, y, A_ub, b_ub, lo, hi, n_ub):
+    """Proved lower bound of ``_ns_safe_lp_lower_bound``'s ``g(y)`` (``None`` if none).
+
+    ``A_ub x <= b_ub`` becomes ``[A_ub | I] (x, s) = b_ub`` with ``s >= 0`` on the
+    leading ``n_ub`` inequality rows and ``s = 0`` on the equality rows; the standard
+    form multiplier is ``-y``, so ``c - [A|I]ᵀ(-y) = (c + Aᵀy, y)`` and ``bᵀ(-y)`` are
+    exactly this function's reduced costs and constant. A slack's reduced cost is
+    ``y_i >= 0`` against a lower bound of ``0`` (or a fixed ``0``), so it adds nothing.
+    """
+    import scipy.sparse as sp
+
+    from discopt.solvers.milp_simplex import rigorous_ns_bound_std
+
+    n = c.shape[0]
+    if A_ub is None or b_ub is None:
+        a_std = sp.csc_matrix((0, n))
+        b_std = np.zeros(0)
+        y_std = np.zeros(0)
+        lb, ub = lo, hi
+    else:
+        m = int(np.asarray(b_ub).shape[0])
+        a_std = sp.hstack([sp.csc_matrix(A_ub), sp.identity(m, format="csc")], format="csc")
+        b_std = np.asarray(b_ub, dtype=np.float64)
+        y_std = -y
+        s_hi = np.zeros(m)
+        s_hi[:n_ub] = np.inf
+        lb = np.concatenate([lo, np.zeros(m)])
+        ub = np.concatenate([hi, s_hi])
+        c = np.concatenate([c, np.zeros(m)])
+    return rigorous_ns_bound_std(y_std, c, a_std, b_std, lb, ub)
 
 
 def _max_abs(x) -> float:

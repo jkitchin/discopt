@@ -394,6 +394,45 @@ def _fbbt_eq_bounds(
     return lb, ub
 
 
+def rigorous_ns_bound_std(
+    y: np.ndarray,
+    c: np.ndarray,
+    a_std,
+    b: np.ndarray,
+    lb: np.ndarray,
+    ub: np.ndarray,
+) -> Optional[float]:
+    """A float **proved** ``<= g(y) = bᵀy + Σ_k min_{z_k∈[lb_k,ub_k]} (c − Aᵀy)_k z_k``,
+    or ``None`` when no proof is available (a reduced cost whose enclosure can take
+    the sign that rides an open side, or overflow).
+
+    The Rust ``ns_safe_bound_csc_py`` (#1956) accumulates every reduced cost in an
+    enclosed double-double and rounds each box term down. The float64 evaluations in
+    :func:`_safe_lp_lower_bound_std` and ``obbt._ns_safe_lp_lower_bound`` cannot be
+    rescued by a relative margin: a reduced cost that cancels below one ulp of
+    ``(Aᵀy)_k`` rounds to ``0`` and drops its ``rc·bound`` term, an error unbounded
+    relative to the margin's scale. Callers take the minimum of this and their own
+    value, so this can only lower a bound.
+    """
+    from discopt._rust import ns_safe_bound_csc_py
+
+    a = sp.csc_matrix(a_std)
+    m, n = a.shape
+    g = ns_safe_bound_csc_py(
+        np.ascontiguousarray(y, dtype=np.float64),
+        np.ascontiguousarray(c, dtype=np.float64),
+        m,
+        n,
+        np.ascontiguousarray(a.indptr, dtype=np.int64),
+        np.ascontiguousarray(a.indices, dtype=np.int64),
+        np.ascontiguousarray(a.data, dtype=np.float64),
+        np.ascontiguousarray(b, dtype=np.float64),
+        np.ascontiguousarray(lb, dtype=np.float64),
+        np.ascontiguousarray(ub, dtype=np.float64),
+    )
+    return None if g is None or not np.isfinite(g) else float(g)
+
+
 def _safe_lp_lower_bound_std(
     y: np.ndarray,
     c: np.ndarray,
@@ -412,9 +451,10 @@ def _safe_lp_lower_bound_std(
     so ``g(y)`` is a valid lower bound regardless of how ``y`` was obtained — it
     stays sound even when an ill-conditioned basis makes the reported vertex
     objective drift *above* the true optimum (the nvs22 false-certificate class).
-    A magnitude-scaled margin is subtracted so the float64 evaluation error cannot
-    push ``g`` above the true optimum. Returns ``None`` when no usable (finite)
-    bound exists (e.g. an unbounded box term)."""
+    The float64 value minus a magnitude-scaled margin is capped by the enclosed
+    :func:`rigorous_ns_bound_std` on the same box: the margin alone does not cover a
+    reduced cost that cancels to ``0`` in float64 (#1956 sweep). Returns ``None``
+    when no usable (finite) or no proved bound exists (e.g. an unbounded box term)."""
     y = np.asarray(y, dtype=np.float64)
     if y.size == 0 or not np.all(np.isfinite(y)):
         return None
@@ -456,7 +496,10 @@ def _safe_lp_lower_bound_std(
     if not np.isfinite(g):
         return None
     margin = _NS_MARGIN_REL * (1.0 + abs(by) + float(np.abs(contrib).sum()))
-    return g - margin
+    proved = rigorous_ns_bound_std(y, c, a_std, b, lb, ub)
+    if proved is None:
+        return None
+    return min(g - margin, proved)
 
 
 def _safe_lp_lower_bound(
