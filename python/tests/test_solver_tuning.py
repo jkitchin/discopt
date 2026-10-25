@@ -46,7 +46,7 @@ def test_defaults_match_legacy_env_defaults():
     assert t.rlt_lineq is True
     assert t.rlt_lineq_max == 0
     assert t.rlt_ineq is True
-    assert t.distribute_affine_products is True
+    assert t.distribute_affine_products is False
     assert t.distribute_affine_products_max == 64
     # lifted_fbbt was deprecated/removed in #581 (graduated-gate net-negative).
     assert not hasattr(t, "lifted_fbbt")
@@ -82,7 +82,7 @@ def test_defaults_match_legacy_env_defaults():
         ("DISCOPT_RLT_LINEQ", "0", "rlt_lineq", False),
         ("DISCOPT_RLT_LINEQ_MAX", "32", "rlt_lineq_max", 32),
         ("DISCOPT_RLT_INEQ", "0", "rlt_ineq", False),
-        ("DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS", "0", "distribute_affine_products", False),
+        ("DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS", "1", "distribute_affine_products", True),
         ("DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS_MAX", "16", "distribute_affine_products_max", 16),
         ("DISCOPT_TRILINEAR", "nested", "trilinear_nested", True),
         ("DISCOPT_TRILINEAR", "meyer", "trilinear_meyer", True),

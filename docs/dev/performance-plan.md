@@ -11272,7 +11272,7 @@ does not touch, so that is time-limit noise.
 mode 1 stays addressable. #1944's three gates are graduated on this `main` in the
 next PR (§82).
 
-## 82. #1944: the RLT bundle graduated, with a sharing gate on distribution (2026-10-25)
+## 82. #1944: the lineq/ineq RLT rows graduated; distribution share-gated and kept opt-in (2026-10-25)
 
 Context: §80 found the bundle net-positive only with a warm-started node LP, and
 §81 made that the default (#1949). The bundle panel was re-run on that `main`:
@@ -11314,7 +11314,40 @@ the flag-off tree, and distribution fires on the 9 sharing instances.
 - Wall where both certify: 523.9 -> 483.1 s (nodes 66,537 -> 62,237). Total:
   1596.9 -> 1527.9 s.
 
-**Verdict: graduated.** `DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS`, `DISCOPT_RLT_LINEQ`
-and `DISCOPT_RLT_INEQ` now default on, and `DISCOPT_RLT_LINEQ_MAX` defaults to 0
-(existing products only). Each `=0` restores the legacy path;
-`DISCOPT_RLT_LINEQ_MAX=4096` restores lifting.
+**Retracted (CI on #1950): distribution does not graduate.**
+`test_hda_root_bound_is_not_the_loose_safe_bound` failed with the three-flag
+bundle. It pins #671's row filter tightening hda's certified root bound at the
+declared box, via `MccormickLPRelaxer.solve_at_node`:
+
+| hda raw-box root | filter on | filter off |
+|---|---:|---:|
+| lineq on, distribution off | **-7,063** | -7.0e8 |
+| lineq on, distribution on | -5.6e8 | -5.4e6 |
+| lineq off, distribution off (old default) | -64,675 | -77,003 |
+| lineq off, distribution on | -4.2e9 | -1.4e6 |
+
+Without distribution the filter works, and the lineq rows give hda its best
+raw-box root (-7,063 against an optimum of -5,964). With distribution the
+filter's recovery inverts in both lineq settings. The real solve is unaffected:
+the presolved root is -7002.39 either way. This contradicts no soundness claim,
+because every arm is a valid bound, but it breaks a guarded mechanism for a
+reason not yet understood, so distribution stays opt-in. Its docstring and audit
+row say what would graduate it.
+
+**Panel for what graduates**: `RLT_LINEQ` (`MAX=0`) + `RLT_INEQ`, OFF arm both
+`=0`, distribution off in both arms, warm start in both:
+- Cert-clean: 1,620 checks, 0 problems.
+- Net-positive: no certificate gained or lost. Where both certify, nodes
+  66,530 -> 63,066 and wall 558.8 -> 518.3 s (-7.2 %); total wall 1630.6 ->
+  1588.6 s.
+- Bounds on the 36 neither certifies: hda -64,510 -> -7,002 (opt -5,964), nous1
+  0.41 -> 0.89, and tighter on nvs19, nvs23, wastewater05m1, ex5_2_5, ex7_2_4,
+  ex8_4_1. Looser by tree path at the limit on nvs24, wastewater15m1 and nvs05
+  (5.4668 -> 5.4660).
+- Haverly 1-3 (q-formulation) close at the root: 59 / 125 / 67 nodes -> 1.
+
+**Verdict: graduated.** `DISCOPT_RLT_LINEQ` and `DISCOPT_RLT_INEQ` default on,
+and `DISCOPT_RLT_LINEQ_MAX` defaults to 0 (existing products only). Each `=0`
+restores the legacy path; `DISCOPT_RLT_LINEQ_MAX=4096` restores lifting.
+`DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS` stays off, with the sharing gate kept for
+whoever takes up the hda interaction.

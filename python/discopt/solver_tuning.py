@@ -452,16 +452,19 @@ class SolverTuning:
       ``DISCOPT_LP_COLD_DUAL_START=1`` it is 0 and the instance certifies (433 nodes
       vs 387). The warm start graduated (mode 2 is the default, #1949).
 
-    **Graduated (#1944)** together with ``rlt_ineq`` and
-    ``distribute_affine_products``, as the bundle measured, with
-    ``rlt_lineq_max = 0``. Panel: ``issue1944_rlt_panel.py --with-corpus`` on the
-    warm-start ``main``. Population: 270 instances (the in-repo corpus plus every
-    nonconvex polynomial MINLPLib instance with at most 60 vars/cons and a proven
-    optimum), 30 s, interleaved, every incumbent ``verify_point``-ed.
+    **Graduated (#1944)** together with ``rlt_ineq``, with ``rlt_lineq_max = 0``.
+    ``distribute_affine_products`` was in the first bundle panel but stays opt-in
+    (see its docstring). Panel: ``issue1944_rlt_panel.py --with-corpus`` on the
+    warm-start ``main``, ON = lineq + ineq, OFF = both ``=0``. Population: 270
+    instances (the in-repo corpus plus every nonconvex polynomial MINLPLib instance
+    with at most 60 vars/cons and a proven optimum), 30 s, interleaved, every
+    incumbent ``verify_point``-ed.
 
     * Cert-clean: 1,620 checks, 0 problems.
-    * Net-positive: gained ex5_2_5, lost none.
-    * Wall where both certify: 523.9 -> 483.1 s. Total: 1596.9 -> 1527.9 s.
+    * No certificate gained or lost.
+    * Where both certify: nodes 66,530 -> 63,066, wall 558.8 -> 518.3 s.
+    * hda's 30 s bound -64,510 -> -7,002 (optimum -5,964); nous1 0.41 -> 0.89.
+    * The Haverly pooling models close at the root.
 
     ``performance-plan.md`` section 82 has the record."""
 
@@ -503,12 +506,20 @@ class SolverTuning:
     default only if the lift is declined (``DISCOPT_IPX_CHEAP_FIRST``)."""
 
     distribute_affine_products: bool = field(
-        default_factory=lambda: _env_flag("DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS", default=True)
+        default_factory=lambda: _env_flag("DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS", default=False)
     )
     """Distribute a product of two affine forms over disjoint original variables into
     a sum of bilinear products before relaxing it (``DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS``,
-    default **on** since #1944's graduation panel, see ``rlt_lineq``; ``=0`` opts
-    out).
+    default **off**; ``=1`` opts in; #1944).
+
+    **Why it is not the default.** It breaks #671's row-filter recovery on hda's
+    raw-box root LP. ``MccormickLPRelaxer.solve_at_node`` at the declared box,
+    lineq rows on: filter on/off certifies -7,063 / -7.0e8 without distribution and
+    -5.6e8 / -5.4e6 with it. That is ``test_hda_root_bound_is_not_the_loose_safe_bound``.
+    The real solve's root is unaffected (-7002.39 both ways after presolve), and
+    the bundle panel with distribution in was cert-clean and net-positive. But the
+    interaction is not understood, so the flag stays opt-in. What would change that:
+    a root cause for the hda interaction and a fix, then the bundle panel re-run.
 
     Without it ``(c + a'x) * (d + b'y)`` is one product ``w = A*B`` whose McCormick
     envelope uses the interval of each whole form. Distributed, it becomes
@@ -540,7 +551,7 @@ class SolverTuning:
     gained had a shared pair.
 
     The pair count is capped by ``distribute_affine_products_max``. A product above
-    the cap is left as one affine-form product, which is the ``=0`` behaviour."""
+    the cap is left as one affine-form product, which is the flag-off behaviour."""
 
     distribute_affine_products_max: int = field(
         default_factory=lambda: _env_int("DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS_MAX", 64)

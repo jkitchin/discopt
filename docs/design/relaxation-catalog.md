@@ -148,7 +148,7 @@ compositional (looser) counterparts.
   into the LP relaxation, where the RLT cuts (§6.D) then make the **distinct-factor** product
   exact. (Repeated factors x², x³, … are themselves relaxed by the monomial-secant path.)
 - **Distributed affine products (#1944, `DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS`, default
-  on)** — `canonical_expr._Canonicalizer._distribute_affine_pair` rewrites
+  off; it breaks #671's row-filter recovery on hda, see its docstring)** — `canonical_expr._Canonicalizer._distribute_affine_pair` rewrites
   `(c + a'x)·(d + b'y)` over disjoint variables as `cd + c b'y + d a'x + Σ aᵢbⱼ xᵢyⱼ`
   before the build. The per-pair McCormick envelopes imply the affine-form envelope (sum
   the scaled pair inequalities), so the result is never looser. The pairs hash-cons onto
