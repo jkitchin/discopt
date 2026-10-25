@@ -96,6 +96,7 @@ if TYPE_CHECKING:
 
 import numpy as np
 
+from discopt._flat_index import flat_index_in_shape
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -142,8 +143,12 @@ def _col_of(node, offsets: dict[int, int]) -> int:
             raise NotConvexKernel("array variable used as scalar")
         return offsets[node._index]
     if isinstance(node, IndexExpression) and isinstance(node.base, Variable):
-        base, idx = node.base, node.index
-        flat = int(np.ravel_multi_index(idx, base.shape)) if isinstance(idx, tuple) else int(idx)
+        base = node.base
+        # ``int(idx)`` sent ``x[-1]`` to the slot of the variable declared before
+        # ``x`` (the #941/#1952 pattern) and a partial index to one wrong scalar.
+        flat = flat_index_in_shape(node.index, tuple(base.shape or ()))
+        if flat is None:
+            raise NotConvexKernel("index does not name one scalar element")
         return offsets[base._index] + flat
     raise NotConvexKernel("non-variable leaf")
 
