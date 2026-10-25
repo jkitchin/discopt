@@ -386,6 +386,8 @@ def test_kernel_loose_relative_gap_is_honoured(monkeypatch):
 
     It used to be applied absolutely, so 0.2 explored the same 233 nodes as 1e-4.
     """
+    # Needs a tree. Since #1944 the default lineq RLT rows close Haverly's root.
+    monkeypatch.setenv("DISCOPT_RLT_LINEQ", "0")
     tight, _ = _kernel_gap_solve(monkeypatch)
     loose, warned = _kernel_gap_solve(monkeypatch, gap_tolerance=0.2)
     assert warned == []
