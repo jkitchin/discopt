@@ -2550,6 +2550,8 @@ def _uniform_relaxation_delegate(
     # Affine squares ``(c·x_j+d)**2`` (#640 Bucket 3): ``(var, aux) -> (coeff, const)``
     # for the incremental McCormick patch's closed-form envelope regeneration.
     vm["affine_square"] = dict(rel.affine_square_map)
+    # Affine-form squares over several columns (#1941): ``aux -> (cols, coeffs, const)``.
+    vm["affine_form_square"] = dict(rel.affine_form_square_map)
     # Ratio-of-products lifts (issue #309): the quotient aux column each exact
     # ``(Π x_i)/(Π y_j)`` of bare originals was lifted to, for the integer-ratio
     # partition bound.
