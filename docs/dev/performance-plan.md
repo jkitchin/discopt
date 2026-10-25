@@ -11342,3 +11342,86 @@ away. Resuming would remove the `conge15` loss but needs a resumable B&B on both
 engines. The race does not seed the continuation with a slice's incumbent: the `rsyn0840m`
 measurement in `_merge_route_and_fallback`'s docstring shows a seeded fallback steers
 its heuristics worse, and the merge already keeps the best point.
+
+## 83. #1934 follow-up: array variables reach the native spatial kernel (2026-10-25)
+
+**Retraction (CLAUDE.md §11).** §82, the #1948 PR body and the
+`DISCOPT_INTEGER_PRODUCT_INDEXED` audit row said that under that flag "the race's
+un-lifted arm runs the Python spatial tree, not the route the flag-OFF model takes".
+That was never measured and is false. Traced on `arrqp_n15` (30 s): flag OFF and the
+un-lifted arm with the flag ON take the **same** route, the Python spatial tree, in
+~6.9 s. Two other suspicions were also checked and dropped. The lifted array model
+and its scalar twin are identical (491 columns, 1695 rows) and take the same MILP
+route in the same ~24 s; the `native-milp` label seen in a 5 s slice is that engine's
+budget split, not a scalar/array difference.
+
+**What the flag's dense loss actually was.** Two things:
+
+1. The race's own overhead. The 5 s lift slice ends with no incumbent, the un-lifted
+   arm needs ~6.5 s, so its 5 s slice stops and the continuation restarts it:
+   5 + 5 + 6.3 = 16.7 s.
+2. Array models never reached the native spatial kernel.
+   `spatial_producer.build_spatial_kernel_spec` declined any model with a
+   `shape=` variable ("vector variables shift the layout and are a follow-up"), so
+   the un-lifted arm of an array model ran the Python tree (6.4 s on dense n=15) where
+   its scalar twin ran the native kernel (1.2 s). That is a scalar/array gap
+   independent of the indexed flag.
+
+**Falsified: removing the race's restart.** Both attempts died on measurement.
+
+- *Incumbent-extension slice* (the un-lifted slice gets the rest of the budget as a
+  #917 extension when the lift slice held no incumbent). `arrqp_n15`: the extended
+  slice ran 24 s **uncertified**, where the same arm with a plain 9.2 s limit
+  certifies in 6.3 s. The spatial search sizes its root work from its *base*
+  `time_limit`, so a 5 s solve that is later extended is a different, weaker search
+  (the #1153 lesson).
+- *Commit to the un-lifted arm when the lift slice held no incumbent.* The lift arm
+  alone at short limits: `ex1265`, `ex1266` and `conge10` have **no incumbent at
+  0.5 / 1 / 2 s** and certify at 5 s. On a machine ~3x slower than this one (CI), the
+  lift slice would end empty on the corpus and the rule would hand `ex1265` (no
+  un-lifted certificate) to the arm that cannot close it. Kill criterion met.
+
+The restart is the price of the race's safety net and stays.
+
+**Shipped: `DISCOPT_NATIVE_KERNEL_VECTOR_VARS` (graduated, default ON, `=0` opt-out).**
+The kernel and its consumer already work on flat columns; only the producer assumed
+one column per variable object. It now builds the spec over C-order flat columns:
+`n_orig` is the element count, bounds come from `flat_variable_bounds`, and integrality
+is set per element. The soundness argument is identity. An array model and its scalar
+twin give **byte-identical** specs, so the array path is the scalar path. On the
+native kernel the certified objective, dual bound and node count match the twin's
+exactly (`test_native_kernel_vector_vars.py`).
+
+Panel (`scripts/panel_native_kernel_vector_vars.py`, 30 s, OFF/ON ABBA):
+
+- the 154 in-repo `.nl` files give identical specs OFF and ON;
+- all 17 twin pairs are byte-identical;
+- 50 array-variable models (the #1934 panel's 33 with brute-force oracles, dense
+  integer QPs n = 10–20, non-uniform bounds, 2-D, scalars around arrays), 969 checks,
+  0 failures:
+
+| | total wall | certified |
+|---|---:|---:|
+| OFF | 151.4 s | 48 / 50 |
+| ON | **61.5 s** | **50 / 50** |
+
+35 faster, 0 slower. Dense QP n=15 6.3 → 1.0 s; `qp_n18_s1` and `qp_n20_s1` certify
+(6.2 s, 8.8 s) where OFF ends uncertified at 30 s. Models outside the kernel's term
+families (the `mixed_*` family) are declined as before and are unchanged.
+
+**`DISCOPT_INTEGER_PRODUCT_INDEXED` re-panelled on top of both (still OFF).**
+`scripts/panel_1934_indexed_integer_products.py --dense` (30 s, ABBA; the dense array
+QPs n = 12–20 are new to the script): 590 checks, 0 failures, 41/41 certified in both
+arms, so the n=20 certification loss is gone. Net effect is split by class:
+
+| class | total OFF | total ON | SGM(1 s) OFF | SGM(1 s) ON |
+|---|---:|---:|---:|---:|
+| 33 small array models | 37.3 s | **2.2 s** | 0.652 | **0.066** |
+| 8 dense array QPs | **20.4 s** | 66.7 s | **1.730** | 6.415 |
+| all 41 | **57.6 s** | 68.9 s | 0.823 | **0.557** |
+
+The dense loss is now purely the race's 5 s lift slice: with array models on the
+native kernel the un-lifted arm certifies dense n=15 in ~0.9 s, so a race that first
+spends 5 s on the lift loses ~6x. Scalar dense QPs pay the same cost by default since
+#1948. Whether the flag graduates on this split is left to the owner, and the flag
+stays OFF until then.
