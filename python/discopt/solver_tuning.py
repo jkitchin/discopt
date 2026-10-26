@@ -464,7 +464,16 @@ class SolverTuning:
     * No certificate gained or lost.
     * Where both certify: nodes 66,530 -> 63,066, wall 558.8 -> 518.3 s.
     * hda's 30 s bound -64,510 -> -7,002 (optimum -5,964); nous1 0.41 -> 0.89.
-    * The Haverly pooling models close at the root.
+
+    Retracted (#1983): this list also said "the Haverly pooling models close at the
+    root", crediting these rows. They do not. On the in-repo Haverly models, every
+    combination of ``DISCOPT_RLT_LINEQ``/``DISCOPT_RLT_INEQ`` (both on, both off)
+    and ``DISCOPT_KERNEL_CUTOFF_OBBT`` gives the same result
+    (``examples.example_pooling_haverly``: optimal at node 1;
+    MINLPLib ``haverly``: optimal in 57 nodes, root bound -600). On the
+    optimization book's Haverly instances (#1983) it is #1871's cutoff OBBT that
+    closes them at the root: without it they take 3, 11 and 13 nodes, and turning
+    both RLT flags off changes nothing.
 
     ``performance-plan.md`` section 83 has the record."""
 

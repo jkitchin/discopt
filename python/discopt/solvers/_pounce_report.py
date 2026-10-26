@@ -95,12 +95,13 @@ def solve_with_report(problem: Any, *args: Any, **kwargs: Any) -> tuple[Any, dic
         x, info = problem.solve(*args, report_path=path, report_detail=_REPORT_DETAIL, **kwargs)
         report = _read_report(path)
     if report is not None:
-        label_declined_retry(report)
+        label_retry_attempts(report)
     return x, info, report
 
 
-#: ``statistics`` keys that, after a declined gh#884 retry, POUNCE fills from the
-#: retry although the solution and every ``final_*`` metric are the base attempt's.
+#: ``statistics`` keys that, after a gh#884 retry, describe only the retry: POUNCE
+#: reports its last attempt's counts and trajectory and has no field for the base
+#: attempt's.
 _RETRY_COUNT_KEYS = (
     "iteration_count",
     "num_obj_evals",
@@ -111,37 +112,117 @@ _RETRY_COUNT_KEYS = (
 )
 
 
-def label_declined_retry(report: dict) -> None:
-    """Label, in place, the counts a declined dual-divergence retry left in ``report``.
+def _close(a: Any, b: Any) -> bool:
+    try:
+        fa, fb = float(a), float(b)
+    except (TypeError, ValueError):
+        return False
+    return fa == fb or abs(fa - fb) <= 1e-12 * max(abs(fa), abs(fb))
 
-    #1618 B-05c. When POUNCE's gh#884 dual-divergence guard fires it re-solves,
-    and when it declines the retry it reports the *base* attempt's answer. The
-    report it writes (and the ``info`` dict) is then mixed: ``solution`` and every
-    ``final_*`` metric are the base attempt's, but ``iteration_count``, the
-    evaluation counts and the ``iterations`` trajectory are the retry's. Measured
-    on the issue's toll-pricing MPEC with POUNCE 0.12.0: the log prints "Number of
-    Iterations....: 64" for the base attempt and "15" for the retry, then "gh#884
-    dual-divergence retry: declined ... the base attempt's answer is the one
-    reported", and the report carries ``iteration_count`` 15, 16 trajectory rows
-    and ``final_dual_inf`` 1.89e3 (the base attempt's; the retry ended "Solved To
-    Acceptable Level" with unscaled KKT error 1.69e-5).
 
-    The base attempt's counts are not in the report, so they cannot be
-    restored here (that needs POUNCE to emit per-attempt statistics). The mixed
-    document is left as POUNCE wrote it and labelled: ``statistics["counts_attempt"]``
-    names the attempt the counts and trajectory describe, and
-    ``statistics["solution_attempt"]`` the one the answer comes from. Only the
-    declined case is labelled -- the only one measured.
+def _solution_attempt(report: dict) -> str:
+    """Which attempt of a gh#884-retried solve the reported answer comes from.
+
+    ``"retry"`` when the trajectory's last main-phase row -- the retry's, since the
+    trajectory is the retry's -- ends at the reported ``final_objective`` and
+    ``final_dual_inf``; ``"base"`` when it does not (the answer is then the other
+    attempt's); ``"undetermined"`` without a trajectory row or those keys.
+    """
+    stats = report.get("statistics") or {}
+    rows = [r for r in report.get("iterations") or [] if r.get("phase", "main") == "main"]
+    if not rows or "final_objective" not in stats or "final_dual_inf" not in stats:
+        return "undetermined"
+    last = rows[-1]
+    if _close(last.get("objective"), stats["final_objective"]) and _close(
+        last.get("inf_du"), stats["final_dual_inf"]
+    ):
+        return "retry"
+    return "base"
+
+
+def label_retry_attempts(report: dict) -> None:
+    """Label, in place, which attempt of a gh#884-retried solve ``report`` describes.
+
+    When POUNCE's gh#884 dual-divergence guard fires it re-solves. Its report then
+    carries the *retry's* ``iteration_count``, evaluation counts and ``iterations``
+    trajectory, and nothing of the base attempt's (POUNCE 0.12 and 0.13; measured on
+    the #1618 toll-pricing MPEC: the log prints 57 iterations for the base attempt
+    and 98 for the retry, and the report holds 98). #1618 B-05c labelled this case
+    from ``dual_divergence_retry_promoted is False`` and asserted the answer was the
+    base attempt's. That held on POUNCE 0.12; on 0.13 the same flag comes with the
+    retry's answer (the report's ``final_objective`` and ``final_dual_inf`` are the
+    retry's last row), so the label contradicted the published answer (#1985).
+
+    The answer's attempt is therefore read from the document itself
+    (:func:`_solution_attempt`), not from the flag:
+
+    * ``statistics["counts_attempt"] = "retry"`` -- what the counts and the
+      trajectory describe; ``counts_attempt_keys`` lists them.
+    * ``statistics["solution_attempt"]`` -- ``"retry"``, ``"base"`` or
+      ``"undetermined"``.
+    * ``statistics["total_counts_complete"] = False`` -- the base attempt's work
+      is not in the report, so no total over this call can be formed.
     """
     stats = report.get("statistics")
     if not isinstance(stats, dict):
         return
-    if stats.get("dual_divergence_signature") is True and (
-        stats.get("dual_divergence_retry_promoted") is False
+    if stats.get("dual_divergence_signature") is not True or not isinstance(
+        stats.get("dual_divergence_retry_promoted"), bool
     ):
-        stats["counts_attempt"] = "declined_retry"
-        stats["solution_attempt"] = "base"
-        stats["counts_attempt_keys"] = [k for k in _RETRY_COUNT_KEYS if k in stats] + ["iterations"]
+        return
+    stats["counts_attempt"] = "retry"
+    stats["solution_attempt"] = _solution_attempt(report)
+    stats["counts_attempt_keys"] = [k for k in _RETRY_COUNT_KEYS if k in stats] + ["iterations"]
+    stats["total_counts_complete"] = False
+
+
+def record_attempts(reports: list, published: int) -> Optional[dict]:
+    """The published report of a solve made of several POUNCE calls, with every call's counts.
+
+    ``reports`` holds each POUNCE call's report in order (``None`` where POUNCE wrote
+    none); ``reports[published]`` is the one whose answer the solve publishes, and
+    is returned, changed in place. Its own keys stay that call's -- ``iteration_count``
+    is still the published call's -- and ``statistics`` gains:
+
+    * ``attempts`` -- one dict per call: ``attempt``, ``published``,
+      ``iteration_count``, the evaluation counts, ``status``,
+      ``total_wallclock_time_secs``, and the call's own ``counts_attempt`` /
+      ``solution_attempt`` labels;
+    * ``total_iteration_count`` -- the sum over the calls, the work the solve
+      paid for (#1985: a 331-iteration failure followed by a 14-iteration
+      continuation was reported as 14 iterations);
+    * ``total_counts_complete`` -- ``False`` when a call's report is missing or
+      a call's own counts leave out an attempt (a gh#884 retry,
+      :func:`label_retry_attempts`): the total is then a lower bound.
+    """
+    out = reports[published]
+    if not isinstance(out, dict):
+        return None
+    attempts = []
+    total = 0
+    complete = True
+    for i, rep in enumerate(reports):
+        st = (rep or {}).get("statistics") or {}
+        entry: dict[str, Any] = {"attempt": i, "published": i == published}
+        if rep is None:
+            entry["report_missing"] = True
+            complete = False
+        for key in ("iteration_count", *_RETRY_COUNT_KEYS[1:], "total_wallclock_time_secs"):
+            if key in st:
+                entry[key] = st[key]
+        entry["status"] = ((rep or {}).get("solution") or {}).get("status")
+        for key in ("counts_attempt", "solution_attempt"):
+            if key in st:
+                entry[key] = st[key]
+        if st.get("total_counts_complete") is False:
+            complete = False
+        total += int(st.get("iteration_count") or 0)
+        attempts.append(entry)
+    stats = out.setdefault("statistics", {})
+    stats["attempts"] = attempts
+    stats["total_iteration_count"] = total
+    stats["total_counts_complete"] = complete
+    return out
 
 
 def _read_report(path: str) -> Optional[dict]:

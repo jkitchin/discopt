@@ -4867,6 +4867,24 @@ class SolveResult:
         wherever a slack sits off its constraint value (typically the first
         iterations).
 
+        Several attempts (#1985). ``report["statistics"]["iteration_count"]`` and
+        the trajectory describe one POUNCE attempt, which is not always all the
+        work behind the answer:
+
+        * When POUNCE's gh#884 dual-divergence guard re-solved, the counts and
+          trajectory are the *retry's*; POUNCE reports nothing of the first
+          attempt. ``statistics["counts_attempt"]`` is then ``"retry"``,
+          ``statistics["solution_attempt"]`` says which attempt the answer is
+          from (``"retry"``, ``"base"`` or ``"undetermined"``, read from whether
+          the trajectory ends at the reported final values), and
+          ``statistics["total_counts_complete"]`` is ``False``.
+        * When ``solver="pounce"`` continued a mid-path solve (#1768), this is the
+          report of the call whose answer is published, and
+          ``statistics["attempts"]`` lists both calls' counts, with their sum in
+          ``statistics["total_iteration_count"]``. Compare formulations by that
+          total, not by ``iteration_count``; with ``total_counts_complete`` False
+          it is a lower bound.
+
         It describes the problem POUNCE was handed: for a maximization that is
         the negated objective, and for an LP or QP the matrix form with slacks
         eliminated. Diagnostic only; nothing in the solver reads it back.
@@ -5042,8 +5060,10 @@ class SolveResult:
     # POUNCE's ``pounce.solve-report/v1`` document for the single POUNCE call that
     # produced this result (#1534): iteration trajectory, restoration statistics,
     # timing. ``None`` on every route without exactly one POUNCE call. When
-    # ``solver="pounce"`` continued a mid-path solve (#1768) it is the
-    # continuation's report. Diagnostic, never load-bearing, like ``kkt``.
+    # ``solver="pounce"`` continued a mid-path solve (#1768) it is the report of
+    # the call whose answer is published, and its ``statistics["attempts"]`` /
+    # ``total_iteration_count`` cover both calls (#1985). Diagnostic, never
+    # load-bearing, like ``kkt``.
     solve_report: Optional[dict[str, Any]] = None
 
     # POUNCE qp-ipm's final primal-dual iterate (``x``, ``y``, ``z``, ``z_lb``,
@@ -9711,7 +9731,16 @@ class Model:
             no bound and ``gap_certified=False``, since nothing global was
             proved. (A solve POUNCE ends one barrier update early is continued
             once from its own point, and is ``"local_limit"`` if that does not
-            finish it, #1768.) ``result.algorithm_route`` names the arm
+            finish it, #1768. So a *feasible* point can come back
+            ``"local_limit"``: measured on pooling NLPs whose POUNCE
+            ``Solve_Succeeded`` point had barrier parameter ~1.8e-6 and a ~1.6e9
+            multiplier on a degenerate row. A caller that wants any feasible
+            local point, e.g. as an upper bound, should accept
+            ``"local_limit"`` with ``result.x`` and check its feasibility. The
+            continuation rescales the rows at that point, so a caller-fixed
+            ``nlp_scaling_method`` turns it off: such a mid-path
+            ``Solve_Succeeded`` is reported ``"local_limit"`` without being
+            continued.) ``result.algorithm_route`` names the arm
             (``"pounce:lp-ipm"``, ``"pounce:qp-ipm"``, ``"pounce:nlp"``) and
             ``result.solver_stats["pounce/iterations"]`` the convex engine's
             iteration count. A local infeasibility is ``"local_infeasible"``.
@@ -9725,8 +9754,15 @@ class Model:
 
             The convex LP/QP engine accepts ``tol``, ``max_iter``,
             ``max_wall_time``, ``print_level`` (any positive value prints its
-            iteration trace), ``tau`` and ``tau_max``; an NLP-engine option such
+            iteration trace), ``tau`` and ``tau_max``, and with pounce-solver
+            >= 0.13 its own ``qp_presolve``, ``qp_reg``, ``qp_hsde``,
+            ``qp_equilibrate`` and ``qp_crossover`` (``qp_crossover=True`` on an
+            LP returns a vertex; ``qp_presolve``/``qp_crossover`` cannot be
+            combined with a warm start), #1985; an NLP-engine option such
             as ``mu_strategy`` on an LP raises rather than being ignored.
+            ``result.solve_report`` describes the POUNCE work behind the answer;
+            compare formulations by its ``statistics["total_iteration_count"]``
+            where present, not ``iteration_count`` (see ``SolveResult``).
             The NLP engine does **not** run at Ipopt's defaults: discopt seeds
             ``constr_viol_tol=1e-8`` and ``bound_relax_factor=0`` (iterates
             and the returned point stay inside the declared box;

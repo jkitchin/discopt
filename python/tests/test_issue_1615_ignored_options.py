@@ -4,7 +4,7 @@ Each option must either take effect or be refused/declared loudly. Covered here:
 
 * D-03 -- an explicit ``tuning=`` never routed off the native spatial kernel,
   because ``_scoped_tuning`` popped it out of ``kwargs`` before the
-  ``_native_kernel_feature_safe`` test that looked for it.
+  ``_native_kernel_bypass_reasons`` test that looked for it.
 * D-01/D-02/D-08/D-13 -- search levers the native kernel does not read
   (``rlt``, ``strategy``, ``presolve``,
   ``in_tree_presolve_stride``, ``obbt_at_root``) now route to the Python engine.
@@ -502,14 +502,14 @@ def test_order1_sensitivity_skips_the_jax_kkt_jacobian(monkeypatch):
     assert np.abs(s.dx_dp).max() > 1e-3
 
 
-@pytest.mark.parametrize("key", ["qp_crossover", "qp_presolve", "qp_reg", "qp_hsde"])
-def test_pounce_cli_only_qp_option_names_the_cli_route(key):
-    # A-17/A-24: pounce.qp.solve_qp exposes none of these, so they stay refused,
-    # but the refusal now says they are CLI options and how to reach them,
-    # instead of filing them with NLP-engine options.
+def test_pounce_cli_only_qp_option_names_the_cli_route():
+    # A-17/A-24: a ``qp_*`` name pounce.qp.solve_qp does not take stays refused,
+    # and the refusal says how to reach a CLI option. (``qp_crossover``,
+    # ``qp_presolve``, ``qp_reg``, ``qp_hsde`` and ``qp_equilibrate`` are taken by
+    # pounce-solver >= 0.13 and forwarded since #1985.)
     m = dm.Model("l")
     x = m.continuous("x", lb=0, ub=10)
     m.maximize(3 * x)
     m.subject_to(x <= 4)
-    with pytest.raises(ValueError, match=rf"\['{key}'\].*command line.*m\.to_nl"):
-        m.solve(solver="pounce", pounce_options={key: "yes"})
+    with pytest.raises(ValueError, match=r"\['qp_no_such_knob'\].*command line.*m\.to_nl"):
+        m.solve(solver="pounce", pounce_options={"qp_no_such_knob": "yes"})

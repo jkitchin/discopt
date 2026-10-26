@@ -494,9 +494,9 @@ def test_kernel_feature_safe_declines_return_correct_optimum(monkeypatch, kwargs
 
 
 def test_kernel_feature_safe_predicate_units():
-    """The predicate declines each unsupported-feature request and accepts a
-    plain solve."""
-    from discopt.solver import _native_kernel_feature_safe as safe
+    """The routing reasons decline each unsupported-feature request, by name, and
+    are empty for a plain solve (#1983 folded the boolean predicate into them)."""
+    from discopt.solver import _native_kernel_bypass_reasons as reasons
 
     base = dict(
         mccormick_bounds="auto",
@@ -506,15 +506,18 @@ def test_kernel_feature_safe_predicate_units():
         node_callback=None,
         kwargs={},
     )
-    assert safe(**base) is True
-    assert safe(**{**base, "incumbent_callback": lambda *a: None}) is False
-    assert safe(**{**base, "node_callback": lambda *a: None}) is False
-    assert safe(**{**base, "lazy_constraints": lambda *a: []}) is False
-    assert safe(**{**base, "initial_point": np.zeros(3)}) is False
-    assert safe(**{**base, "mccormick_bounds": "none"}) is False
-    assert safe(**{**base, "kwargs": {"iteration_callback": lambda *a: None}}) is False
-    assert safe(**{**base, "kwargs": {"solution_pool": []}}) is False
-    assert safe(**{**base, "kwargs": {"tuning": object()}}) is False
+    assert reasons(**base) == []
+    for over, name in [
+        ({"incumbent_callback": lambda *a: None}, "incumbent_callback"),
+        ({"node_callback": lambda *a: None}, "node_callback"),
+        ({"lazy_constraints": lambda *a: []}, "lazy_constraints"),
+        ({"initial_point": np.zeros(3)}, "initial_point"),
+        ({"mccormick_bounds": "none"}, "mccormick_bounds"),
+        ({"kwargs": {"iteration_callback": lambda *a: None}}, "iteration_callback"),
+        ({"kwargs": {"solution_pool": []}}, "solution_pool"),
+        ({"kwargs": {"tuning": object()}}, "tuning"),
+    ]:
+        assert reasons(**{**base, **over}) == [name]
 
 
 def test_kernel_verifies_final_incumbent_and_declines_false_primal(monkeypatch):

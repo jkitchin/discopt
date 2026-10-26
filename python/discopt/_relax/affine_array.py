@@ -137,7 +137,14 @@ def _scale(a: Affine, c: Affine) -> Affine:
     shape = _broadcast_shape(a.shape, c.shape)
     a = _broadcast_to(a, shape)
     cv = _broadcast_to(c, shape).b
-    M = None if a.M is None else (sp.diags(cv, format="csr") @ a.M).tocsr()
+    if a.M is None:
+        M = None
+    elif cv.size == 1:
+        # A one-row node: ``diag(cv) @ M`` multiplies every stored entry by the one
+        # value, exactly what the scalar product does, without building ``diags``.
+        M = (a.M * float(cv[0])).tocsr()
+    else:
+        M = (sp.diags(cv, format="csr") @ a.M).tocsr()
     return Affine(M, a.b * cv, shape)
 
 
@@ -318,6 +325,7 @@ def affine_of(
     n: int,
     *,
     allow_parameters: bool = True,
+    memo: Optional[dict[int, tuple[Expression, Affine]]] = None,
 ) -> Affine:
     """The exact affine map of ``expr`` over the ``n`` flat variable slots.
 
@@ -330,8 +338,15 @@ def affine_of(
     Iterative post-order with a memo keyed by node identity, so a shared
     sub-DAG is evaluated once and a deep left-leaning ``((a + b) + c) + ...``
     chain (the ``.nl`` shape, #1064) costs no Python recursion.
+
+    ``memo`` lets a caller share that memo across several calls with the same
+    ``offset_of``, ``n`` and ``allow_parameters`` -- the rows of one model, whose
+    bodies share their variable and element nodes (``x[i, j]`` is one cached
+    node, #1215). Each entry holds its node, so no id in it can be recycled onto
+    another object while the memo lives (#1329). The maps are the same either way.
     """
-    memo: dict[int, Affine] = {}
+    if memo is None:
+        memo = {}
     stack: list[tuple[Expression, bool]] = [(expr, False)]
     while stack:
         node, expanded = stack.pop()
@@ -345,5 +360,8 @@ def affine_of(
                 if id(kid) not in memo:
                     stack.append((kid, False))
             continue
-        memo[key] = _combine(node, [memo[id(k)] for k in kids], offset_of, n, allow_parameters)
-    return memo[id(expr)]
+        memo[key] = (
+            node,
+            _combine(node, [memo[id(k)][1] for k in kids], offset_of, n, allow_parameters),
+        )
+    return memo[id(expr)][1]
