@@ -1283,7 +1283,8 @@ pub fn solve_spatial_tree_observed(
             // split, which the legacy column above is not.
             let col = if config.spatial_score {
                 n_spatial_score_picks += 1;
-                spatial_score_pick(spec, x, (&lo, &hi), config, (&spc_sum, &spc_cnt)).unwrap_or(col)
+                spatial_score_pick(spec, x, (&lo, &hi), &root_w, config, (&spc_sum, &spc_cnt))
+                    .unwrap_or(col)
             } else {
                 col
             };
@@ -1544,15 +1545,24 @@ fn term_operands(t: &EnvTerm) -> [Option<usize>; 2] {
 /// cuts; a column not yet observed on a side takes the mean over observed columns)
 /// is added, each component divided by its maximum over the candidates. Columns
 /// no wider than `min_box_width` are not candidates. `None` when none remains.
+/// Under `config.scale_free_branching` each gap is divided by its aux column's
+/// root width, as the legacy rule does, so the pick does not depend on units (the
+/// pseudocost estimate, a gain, already does not).
 fn spatial_score_pick(
     spec: &SpatialKernelSpec,
     x: &[f64],
     (lo, hi): (&[f64], &[f64]),
+    root_w: &[f64],
     config: &SpatialTreeConfig,
     (spc_sum, spc_cnt): (&[Vec<f64>; 2], &[Vec<usize>; 2]),
 ) -> Option<usize> {
     let mut viol = vec![0.0f64; spec.n_cols];
-    let mut add = |cols: &mut dyn Iterator<Item = usize>, gap: f64| {
+    let mut add = |cols: &mut dyn Iterator<Item = usize>, gap: f64, aux: usize| {
+        let gap = if config.scale_free_branching {
+            gap / root_w[aux]
+        } else {
+            gap
+        };
         let cols: Vec<usize> = cols
             .filter(|&c| hi[c] - lo[c] > config.min_box_width)
             .collect();
@@ -1567,7 +1577,11 @@ fn spatial_score_pick(
             None => f64::INFINITY,
         };
         if gap > 0.0 {
-            add(&mut term_operands(t).into_iter().flatten(), gap);
+            add(
+                &mut term_operands(t).into_iter().flatten(),
+                gap,
+                t.aux_col(),
+            );
         }
     }
     for t in &spec.blf_terms {
@@ -1578,7 +1592,7 @@ fn spatial_score_pick(
             let mut cols: Vec<usize> = t.a_cols.iter().chain(t.b_cols.iter()).copied().collect();
             cols.sort_unstable();
             cols.dedup();
-            add(&mut cols.into_iter(), gap);
+            add(&mut cols.into_iter(), gap, t.w);
         }
     }
     let cands: Vec<usize> = (0..spec.n_cols).filter(|&c| viol[c] > 0.0).collect();
@@ -2246,7 +2260,7 @@ mod tests {
             // Column 0 scores 0.5 + 0.5; columns 3 and 4 score 0.75 each. With
             // no observation the pseudocost component is uniform and moves nothing.
             assert_eq!(
-                spatial_score_pick(&spec, &x, (&lo, &hi), &cfg, (&none, &zero)),
+                spatial_score_pick(&spec, &x, (&lo, &hi), &[1.0; 8], &cfg, (&none, &zero)),
                 Some(0)
             );
         }
@@ -2263,7 +2277,7 @@ mod tests {
             ..SpatialTreeConfig::default()
         };
         assert_eq!(
-            spatial_score_pick(&spec, &x, (&lo, &hi), &cfg, (&s, &n)),
+            spatial_score_pick(&spec, &x, (&lo, &hi), &[1.0; 8], &cfg, (&s, &n)),
             Some(3)
         );
         // A column too narrow to split is never a candidate.
@@ -2273,7 +2287,7 @@ mod tests {
             spatial_score: true,
             ..SpatialTreeConfig::default()
         };
-        let pick = spatial_score_pick(&spec, &x, (&lo, &hi2), &cfg0, (&none, &zero));
+        let pick = spatial_score_pick(&spec, &x, (&lo, &hi2), &[1.0; 8], &cfg0, (&none, &zero));
         // Column 0's shares go to its partners: columns 1 and 2 score 1 each.
         assert_eq!(pick, Some(1));
     }

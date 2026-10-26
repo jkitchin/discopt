@@ -11724,3 +11724,70 @@ GIL-free: dense n=15 s0's un-lifted solve is 1.28 s, of which 0.44 s is Rust, an
 `ex1265`'s is 8.7 s, of which 5.6 s is the kernel's Python seed heuristics
 (`integer_local_search` sub-NLPs). With that, the thread design above is the one to
 re-measure.
+
+## 88. #1970: spatial branching variable selection in the native kernel (2026-10-26)
+
+**Hypothesis.** #1962's E2 measured that SCIP's nonlinear-handler branching rule is
+worth 10x nodes on nous1 (`constraints/nonlinear/branching/external=True`: 4,269 ->
+44,731), while the native kernel split the widest operand of the single term with
+the largest absolute McCormick gap, at the LP value, with no spatial pseudocost.
+Kill criterion (from the issue): the prototype must cut the nodes nous1 needs to
+reach a bound of 1.40 by at least 3x against the gap rule.
+
+**SCIP ablation first** (pyscipopt 6.3 / SCIP 10, nous1, nodes to optimal):
+default 4,269; `pscostweight=0` 12,295; `violsplit=u` 4,532; `branching/midpull=0`
+4,679; `midpull=0` and `clamp=0` 27,146; `pscostweight=0` and `midpull=0` 21,945.
+The 10x is two things: pseudocosts (~3x) and a split point kept away from the box
+bounds (~6x once both of SCIP's guards are off).
+
+**Prototype** (`SpatialTreeConfig::spatial_score`, `spatial_pscost_weight`,
+`spatial_midpull`): every operand of every violated term is a candidate; its
+violation score is the sum of those terms' gaps split evenly over their operands;
+a spatial pseudocost per side (bound gain per unit of width cut off, recorded as
+each spatial child is solved; an unobserved side takes the mean) gives the product
+of the two children's estimated gains; each component is divided by its maximum
+over the candidates and the two summed. The split point is `m * mid + (1 - m) * lp`.
+
+**Entry experiment, nous1 at 120 s** (default solve, 3 runs at a time on 4 cores):
+
+| rule | result | bound | nodes |
+|---|---|---:|---:|
+| legacy | time limit | 1.2099 | 64,333 |
+| legacy column, midpull 0.75 + clamp 0.2 | time limit | 1.2473 | 72,667 |
+| violation score only | time limit | 1.4618 (with midpull) | 14,293 |
+| score + pseudocost, LP-value split | time limit | 1.4973 | 21,328 |
+| score + pseudocost + clamp 0.2 | **optimal**, 73.5 s | 1.56707 | 19,475 |
+| score + pseudocost + midpull 0.75 | **optimal**, 32.4 s | 1.56707 | 11,921 |
+
+The legacy rule never reaches 1.40 in 64k nodes; the full rule certifies in 11,921.
+Not killed. The split point alone does nothing for the legacy column; the score
+alone does not certify; together they do, as in SCIP. Midpull subsumes the clamp
+(the point is then at least `m / 2` of the width from either bound), so only
+midpull shipped.
+
+**Shipped: `DISCOPT_KERNEL_SPATIAL_BRANCHING`, graduated default ON** (`=0` is the
+legacy rule; score + pseudocost weight 1 + midpull 0.75). Section 5 panel
+(`issue1944_rlt_panel.py --with-corpus --on-env DISCOPT_KERNEL_SPATIAL_BRANCHING=1`,
+270 instances, 30 s, interleaved, every incumbent `verify_point`-ed; the rule fires
+on 69 by `tree/spatial_score_picks`):
+
+* cert-clean: 1,620 checks, 0 problems;
+* certified +wastewater05m1 (162.26 -> certified 229.70 in 18.2 s), none lost;
+* where both certify: nodes 100,642 -> 65,272, wall 631.8 -> 608.1 s (tanksize
+  17,375 -> 519 nodes, 18.0 -> 2.5 s); total wall 1705.7 -> 1671.5 s;
+* 30 s bounds on the fired instances neither certifies: tighter on nous1 (0.83 ->
+  1.5668), ex5_2_5, nvs24, wastewater15m1; looser on ex8_4_1 (0.5886 -> 0.5854),
+  nvs19 (-1154.1 -> -1161.4), nvs23 (-1633.6 -> -1643.7).
+
+At 120 s on those 7 (interleaved): +nous1 (32.5 s), +wastewater15m1 (54.5 s); nvs19
+certifies in both; ex5_2_5 -7,857 -> -7,291 (node limit); ex8_4_1, nvs23, nvs24
+within 1%; none lost, no bound past its optimum. 24 instances where the rule never
+fired show node drift between arms too (non-kernel routes, wall-clock-gated work),
+so a node change on one instance is not by itself attributable to the flag.
+
+`DISCOPT_SCALE_FREE_BRANCHING` (opt-in) also scales the score's gaps by the aux
+columns' root widths, which keeps its units-invariance test exact under the new
+rule (Haverly 2 in 1/10/100 barrels: 97/97/91 nodes without that, equal with it).
+
+**#1970 status.** nous1 certifies at 120 s (Done item 1); the flag passed the
+section 5 panel and graduated (Done item 2).

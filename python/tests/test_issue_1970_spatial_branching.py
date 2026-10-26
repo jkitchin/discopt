@@ -3,9 +3,10 @@
 The kernel split the widest operand of the single term with the largest McCormick
 gap, at the LP value. ``DISCOPT_KERNEL_SPATIAL_BRANCHING`` scores every operand of
 every violated term (its share of the gaps plus a spatial pseudocost) and pulls the
-split point toward the midpoint, after SCIP's nonlinear-handler rule. Only the
-branching order changes, so both arms must certify the same optimum; the probe
-counter ``tree/spatial_score_picks`` says whether the rule ran.
+split point toward the midpoint, after SCIP's nonlinear-handler rule (default ON
+since #1970; ``=0`` is the legacy rule). Only the branching order changes, so both
+arms must certify the same optimum; the probe counter ``tree/spatial_score_picks``
+says whether the rule ran.
 """
 
 from __future__ import annotations
@@ -49,22 +50,24 @@ def test_flag_parsing(monkeypatch):
     for off in ("0", "", "off", "false"):
         monkeypatch.setenv("DISCOPT_KERNEL_SPATIAL_BRANCHING", off)
         assert _kernel_spatial_branching_kwargs() == {}
-    monkeypatch.delenv("DISCOPT_KERNEL_SPATIAL_BRANCHING", raising=False)
-    assert _kernel_spatial_branching_kwargs() == {}
-    monkeypatch.setenv("DISCOPT_KERNEL_SPATIAL_BRANCHING", "1")
-    assert _kernel_spatial_branching_kwargs() == {
+    on = {
         "spatial_score": True,
         "spatial_pscost_weight": 1.0,
         "spatial_midpull": 0.75,
     }
+    # Graduated: unset is ON.
+    monkeypatch.delenv("DISCOPT_KERNEL_SPATIAL_BRANCHING", raising=False)
+    assert _kernel_spatial_branching_kwargs() == on
+    monkeypatch.setenv("DISCOPT_KERNEL_SPATIAL_BRANCHING", "1")
+    assert _kernel_spatial_branching_kwargs() == on
 
 
 @pytest.mark.slow
 @pytest.mark.correctness
 def test_nous1_certifies(monkeypatch):
     """The issue's probe: OFF ends at the time limit (bound ~1.21 after ~64k nodes
-    at 120 s); ON certifies in ~12k nodes, ~33 s on a dev machine."""
-    monkeypatch.setenv("DISCOPT_KERNEL_SPATIAL_BRANCHING", "1")
+    at 120 s); ON (the default) certifies in ~12k nodes, ~33 s on a dev machine."""
+    monkeypatch.delenv("DISCOPT_KERNEL_SPATIAL_BRANCHING", raising=False)
     r = dm.from_nl(str(NOUS1)).solve(time_limit=150, gap_tolerance=1e-4)
     assert r.solver_stats["tree/spatial_score_picks"] > 0
     assert r.bound <= NOUS1_OPT + 1e-6
