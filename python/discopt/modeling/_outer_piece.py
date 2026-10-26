@@ -32,13 +32,13 @@ inner piece's (re-verified against the original model). For ``c > 0`` the same
 the outer bound, ``M`` is enlarged once without re-solving the outer piece.
 
 The rewrite accepts sums, products, divisions by an expression free of open
-columns, non-negative integer powers, positive rational powers ``p = k/q``
-(``q <= 8``) of any degree (``(s^D a)^p = s^{Dp} a^p`` with ``D`` padded to a
-multiple of ``q``; the domain of a fractional power is ``a >= 0``), ``abs``
+columns, positive constant powers of any degree (``(s^D a)^p = s^{Dp} a^p``, padded
+by ``s^(ceil(Dp) - Dp)``; :meth:`_Homogenizer._power`), ``sqrt``, ``abs``
 (``|s^D a| = s^D |a|``), and any function or other node of an argument free of
-open columns. Anything else (``log`` of an open column, a division by one, a free
-column with no finite side) raises :class:`OuterPieceUnsupported` and the model is
-solved exactly as with the flag OFF.
+open columns. Anything else (``log`` of an open column, a division by one, a
+negative power of one) raises :class:`OuterPieceUnsupported` and the model is
+solved exactly as with the flag OFF. A free column (no finite side) is measured
+from 0 and enters ``T`` as ``|x|`` (:func:`build_outer`).
 
 Gated by ``DISCOPT_OUTER_PIECE`` (default OFF; bound-changing, CLAUDE.md §5).
 """
@@ -50,7 +50,6 @@ import math
 import os
 import time
 from dataclasses import dataclass, field
-from fractions import Fraction
 from typing import Any, Optional
 
 import numpy as np
@@ -79,20 +78,21 @@ logger = logging.getLogger(__name__)
 
 FLAG = "DISCOPT_OUTER_PIECE"
 
-#: The piece sizes tried for the outer piece, smallest first; the first whose
-#: certified bound is usable (finite, and ``>= 0`` when the objective grows with
-#: ``T``) is kept. The grid is #1975's entry-experiment grid.
-M_GRID = (1e2, 1e4, 1e6)
+#: The piece sizes tried for the outer piece, in order; the first whose certified
+#: bound is usable (finite, and ``>= 0`` when the objective grows with ``T``) is
+#: kept. #1975's entry-experiment grid, middle first: a small ``M`` leaves
+#: near-optimal points in the outer piece (prolog: ``f ~ 0`` at ``T ~ 230``, plan
+#: §91), so its bound cannot be ``>= 0`` and the attempt only spends budget; a
+#: larger ``M`` also widens the bound's margin against the absolute gap tolerance
+#: (``c' = M^d c``), at the price of a wider inner box.
+M_GRID = (1e4, 1e6, 1e2)
 
 #: Share of ``time_limit`` the outer-piece solves may take together.
-OUTER_BUDGET_FRACTION = 0.3
+OUTER_BUDGET_FRACTION = 0.4
 
 #: A declared or FBBT bound at or beyond this magnitude is open (``Variable`` stores
 #: an infinite bound as ``9.999e19``).
 _OPEN = 1e19
-
-#: Largest denominator of a rational exponent the rewrite pads for.
-_MAX_POW_DENOM = 8
 
 _REFUSED_FIELDS = (
     "_piecewise_domains",
@@ -127,8 +127,8 @@ class OpenColumn:
 
     var_index: int  # position in ``model._variables``
     flat: int  # flat element of that variable
-    ref: float  # the finite side
-    sign: float  # +1: open above, -1: open below
+    ref: float  # the finite side (0 for a free column)
+    sign: float  # +1: open above, -1: open below, 0: free (open both ways)
     in_T: bool = True  # a generator: a term of T (see :func:`generators`)
 
 
@@ -149,9 +149,10 @@ def _flat_bounds(model: Model) -> tuple[np.ndarray, np.ndarray]:
 
 
 def open_columns(model: Model, lb: np.ndarray, ub: np.ndarray) -> list[OpenColumn]:
-    """Every scalar component with exactly one finite side in ``[lb, ub]``.
+    """Every scalar component with an infinite side in ``[lb, ub]``.
 
-    A component open on both sides raises: ``T`` has no finite reference for it."""
+    A free component (both sides open) is measured from 0 and enters ``T`` as
+    ``|x|``; see :func:`build_outer`."""
     cols: list[OpenColumn] = []
     off = 0
     for vi, v in enumerate(model._variables):
@@ -161,8 +162,8 @@ def open_columns(model: Model, lb: np.ndarray, ub: np.ndarray) -> list[OpenColum
             lo_open = not (np.isfinite(lo) and abs(lo) < _OPEN)
             hi_open = not (np.isfinite(hi) and abs(hi) < _OPEN)
             if lo_open and hi_open:
-                raise OuterPieceUnsupported(f"{v.name} element {e} is free (no finite side)")
-            if hi_open:
+                cols.append(OpenColumn(vi, e, 0.0, 0.0))
+            elif hi_open:
                 cols.append(OpenColumn(vi, e, float(lo), 1.0))
             elif lo_open:
                 cols.append(OpenColumn(vi, e, float(hi), -1.0))
@@ -257,12 +258,20 @@ class _Homogenizer:
                 # neg is linear; abs is positively homogeneous: |s^d a| = s^d |a|.
                 return UnaryOp(expr.op, a), d
             raise OuterPieceUnsupported(f"{expr.op}() of open columns")
+        if isinstance(expr, BinaryOp) and expr.op in ("+", "-"):
+            return self._sum_chain(expr)
         if isinstance(expr, BinaryOp):
             return self._binary(expr)
         if isinstance(expr, SumOverExpression):
             parts = [self(t) for t in expr.terms]
             dmax = max(d for _, d in parts)
             return SumOverExpression([self.lift(e, d, dmax) for e, d in parts]), dmax
+        if type(expr) is FunctionCall and len(expr.args) == 1:
+            a, d = self(expr.args[0])
+            if d and expr.func_name == "sqrt":
+                return self._power(a, d, 0.5, Constant(0.5))
+            if d and expr.func_name == "abs":
+                return FunctionCall("abs", a), d
         if type(expr) is FunctionCall:
             args = [self(a) for a in expr.args]
             if any(d for _, d in args):
@@ -280,6 +289,45 @@ class _Homogenizer:
             return SumExpression(a, axis=expr.axis), 0
         raise OuterPieceUnsupported(f"no rewrite rule for {type(expr).__name__}")
 
+    def _sum_chain(self, expr: BinaryOp) -> tuple[Expression, int]:
+        """A ``+``/``-`` chain, walked along its left spine without recursion: a
+        model built by ``e = e + x[i]`` in a loop is as deep as the loop is long."""
+        terms: list[tuple[float, Expression]] = []
+        node: Expression = expr
+        while (
+            isinstance(node, BinaryOp)
+            and node.op in ("+", "-")
+            and (node is expr or id(node) not in self.memo)
+        ):
+            terms.append((1.0 if node.op == "+" else -1.0, node.right))
+            node = node.left
+        terms.append((1.0, node))
+        parts = [(sg, *self(t)) for sg, t in reversed(terms)]
+        dmax = max(d for _, _, d in parts)
+        out = [self.lift(e if sg > 0 else UnaryOp("neg", e), d, dmax) for sg, e, d in parts]
+        return SumOverExpression(out), dmax
+
+    def _power(
+        self, a: Expression, da: int, p: float, p_node: Expression
+    ) -> tuple[Expression, int]:
+        """``a^p`` for a constant ``p > 0`` and ``a`` of degree ``da >= 1``.
+
+        ``(s^da a)^p = s^(da p) a^p`` (``s >= 0``; a fractional power's domain is
+        ``a >= 0``, where ``s^da a >= 0`` too), so with ``D = ceil(da p)``
+        ``s^D a^p = (s^da a)^p * s^(D - da p)``, the second factor a power of ``s``
+        in ``[0, 1)``. Exact for an integer ``da p`` (every integer power, and
+        ``sqrt``); otherwise the stored exponent ``D - fl(da p)`` is off by at most
+        an ulp of ``da p``, a factor ``s^delta`` with ``|delta| ~ 1e-16``.
+        """
+        if not (p > 0.0 and math.isfinite(p)):
+            raise OuterPieceUnsupported(f"power {p!r} of open columns")
+        D = math.ceil(da * p)
+        rest = D - da * p
+        powered = BinaryOp("**", a, p_node)
+        if rest == 0.0:
+            return powered, D
+        return BinaryOp("*", powered, BinaryOp("**", self.s, Constant(rest))), D
+
     def _binary(self, expr: BinaryOp) -> tuple[Expression, int]:
         op = expr.op
         a, da = self(expr.left)
@@ -292,23 +340,8 @@ class _Homogenizer:
                 return BinaryOp("**", a, b), 0
             if p is None:
                 raise OuterPieceUnsupported("a non-constant power of open columns")
-            if p == 0.0:
-                return BinaryOp("**", a, expr.right), 0
-            frac = Fraction(p).limit_denominator(_MAX_POW_DENOM)
-            if p < 0 or float(frac) != p:
-                raise OuterPieceUnsupported(f"power {p!r} of open columns")
-            q = frac.denominator
-            pad = (-da) % q  # (s^(da+pad) a)^p = s^((da+pad) p) a^p, (da+pad) p integral
-            if q > 1:
-                # A fractional power's domain is a >= 0, where s^k a >= 0 too.
-                base = self.lift(a, da, da + pad)
-            else:
-                base = a
-            return BinaryOp("**", base, expr.right), int((da + pad) * frac)
+            return self._power(a, da, p, expr.right)
         b, db = self(expr.right)
-        if op in ("+", "-"):
-            d = max(da, db)
-            return BinaryOp(op, self.lift(a, da, d), self.lift(b, db, d)), d
         if op == "*":
             return BinaryOp("*", a, b), da + db
         if op == "/":
@@ -375,16 +408,17 @@ def _box_columns(model: Model, cols: list[OpenColumn], width: float) -> list[Exp
         lb = np.array(v.lb, dtype=np.float64, copy=True)
         ub = np.array(v.ub, dtype=np.float64, copy=True)
         fl, fu = lb.reshape(-1), ub.reshape(-1)
-        if c.sign > 0:
+        if c.sign >= 0:
             fu[c.flat] = min(fu[c.flat], c.ref + width)
-        else:
+        if c.sign <= 0:
             fl[c.flat] = max(fl[c.flat], c.ref - width)
         if v.var_type is VarType.INTEGER:
             fl[c.flat] = math.ceil(fl[c.flat] - 1e-9)
             fu[c.flat] = math.floor(fu[c.flat] + 1e-9)
         v.lb, v.ub = lb, ub
         leaf = v[np.unravel_index(c.flat, v.shape)] if v.shape else v
-        terms.append(leaf - c.ref if c.sign > 0 else c.ref - leaf)
+        if c.sign != 0:  # |x - ref| is not a linear term; see build_inner
+            terms.append(leaf - c.ref if c.sign > 0 else c.ref - leaf)
     return terms
 
 
@@ -471,18 +505,43 @@ def build_outer(p: Plan, M: float) -> tuple[Model, int]:
         new._names.add(prm.name)
 
     s = new.continuous("_outer_s", lb=0.0, ub=1.0 / M)
-    # A generator's share is in [0, 1] (the shares sum to 1); any other open
-    # column's u is bounded only through the rewritten rows (checked below).
-    u_ub = np.array([1.0 if c.in_T else np.inf for c in p.cols])
-    u = new.continuous("_outer_u", shape=(len(p.cols),), lb=0.0, ub=u_ub)
+    # Shares. ``s * x_k = ref_k s + (share)``, with
+    #   one-sided generator:      sign * u,         u in [0, 1]
+    #   free generator:           u+ - u-,          u+, u- in [0, 1]
+    #   one-sided non-generator:  sign * u,         u in [0, inf)
+    #   free non-generator:       w,                w free
+    # The generators' shares sum to 1 (``T = sum sign (x - ref) + sum |x|`` over
+    # them, so ``u+ = max(x, 0)/T``, ``u- = max(-x, 0)/T`` is one admissible
+    # split). A non-generator's share is bounded only through the rewritten rows,
+    # which :func:`_require_bounded_shares` checks.
+    lo_u: list[float] = []
+    hi_u: list[float] = []
+    slots: list[tuple[int, Optional[int]]] = []
+    for c in p.cols:
+        if c.in_T:
+            slots.append((len(lo_u), len(lo_u) + 1 if c.sign == 0 else None))
+            lo_u += [0.0, 0.0] if c.sign == 0 else [0.0]
+            hi_u += [1.0, 1.0] if c.sign == 0 else [1.0]
+        else:
+            slots.append((len(lo_u), None))
+            lo_u.append(-np.inf if c.sign == 0 else 0.0)
+            hi_u.append(np.inf)
+    u = new.continuous("_outer_u", shape=(len(lo_u),), lb=np.array(lo_u), ub=np.array(hi_u))
     open_leaf: dict[tuple, Expression] = {}
-    for k, c in enumerate(p.cols):
+    simplex: list[Expression] = []
+    for c, (kp, km) in zip(p.cols, slots):
         v = model._variables[c.var_index]
-        uk = u[k]
-        # s * x_k = ref * s + sign * u_k
-        sx = (c.ref * s if c.ref != 0.0 else None, uk if c.sign > 0 else -uk)
-        leaf = sx[1] if sx[0] is None else sx[0] + sx[1]
-        open_leaf[(id(v), c.flat if v.shape else None)] = leaf
+        share: Expression
+        if km is not None:
+            share = u[kp] - u[km]
+            simplex += [u[kp], u[km]]
+        else:
+            share = -u[kp] if c.sign < 0 else u[kp]
+            if c.in_T:
+                simplex.append(u[kp])
+        open_leaf[(id(v), c.flat if v.shape else None)] = (
+            share if c.ref == 0.0 else Constant(c.ref) * s + share
+        )
     h = _Homogenizer(var_map, open_leaf)
     h.s = s
 
@@ -492,10 +551,7 @@ def build_outer(p: Plan, M: float) -> tuple[Model, int]:
         e, d = h(body)
         max_deg = max(max_deg, d)
         new._constraints.append(Constraint(body=e, sense=con.sense, rhs=0.0, name=con.name))
-    new.subject_to(
-        SumOverExpression([u[k] for k, c in enumerate(p.cols) if c.in_T]) == 1.0,
-        name="_outer_simplex",
-    )
+    new.subject_to(SumOverExpression(simplex) == 1.0, name="_outer_simplex")
     f, d = h(model._objective.expression)
     obj = f if p.sign > 0 else UnaryOp("neg", f)
     if d:
@@ -503,7 +559,7 @@ def build_outer(p: Plan, M: float) -> tuple[Model, int]:
         obj = BinaryOp("*", Constant(float(M) ** d), obj)
     new._objective = Objective(expression=obj, sense=ObjectiveSense.MINIMIZE)
     p.stats["outer_piece/max_row_degree"] = float(max_deg)
-    _require_bounded_shares(new, u, len(p.cols))
+    _require_bounded_shares(new, u, len(lo_u))
     return new, d
 
 
@@ -515,16 +571,26 @@ def _require_bounded_shares(new: Model, u: Variable, n: int) -> None:
     box = fbbt_box(new)
     offs = _offsets(new)
     j0 = offs[[i for i, v in enumerate(new._variables) if v is u][0]]
+    lo = np.asarray(box.lb, dtype=np.float64).ravel()[j0 : j0 + n]
     hi = np.asarray(box.ub, dtype=np.float64).ravel()[j0 : j0 + n]
-    if not np.all(np.isfinite(hi) & (np.abs(hi) < _OPEN)):
+    finite = np.isfinite(lo) & np.isfinite(hi) & (np.abs(lo) < _OPEN) & (np.abs(hi) < _OPEN)
+    if not np.all(finite):
         raise OuterPieceUnsupported("an open column's share stays unbounded in the outer piece")
 
 
 def build_inner(p: Plan, M: float) -> Model:
-    """The model with every generator boxed by ``M`` and the row ``T <= M``."""
+    """The model with every generator boxed by ``M`` and, when no generator is free,
+    the row ``T <= M``.
+
+    Inner and outer piece must cover the model, not partition it. A point outside
+    the box has a generator with ``|x - ref| > M``, so ``T > M`` and the outer piece
+    holds it; the row only shrinks the inner piece further where ``T`` is linear
+    (``|x|`` of a free generator is not)."""
     inner = p.model.clone()
-    terms = _box_columns(inner, [c for c in p.cols if c.in_T], M)
-    inner.subject_to(SumOverExpression(terms) <= M, name="_outer_piece_T")
+    gens = [c for c in p.cols if c.in_T]
+    terms = _box_columns(inner, gens, M)
+    if all(c.sign != 0 for c in gens):
+        inner.subject_to(SumOverExpression(terms) <= M, name="_outer_piece_T")
     return inner
 
 
@@ -589,7 +655,7 @@ def solve_with_outer_piece(
             break
     if B_out is None:
         stats["outer_piece/result"] = "no usable outer bound"
-        p.model._outer_piece_stats = dict(stats)  # type: ignore[attr-defined]
+        logger.info("outer piece declined on %r: %s", model.name, stats)
         return None
     stats["outer_piece/M"] = M_used
     stats["outer_piece/degree"] = float(d_used)
@@ -646,7 +712,7 @@ def solve_with_outer_piece(
             stats["outer_piece/result"] = "both pieces infeasible"
         else:
             stats["outer_piece/result"] = "no incumbent"
-            p.model._outer_piece_stats = dict(stats)  # type: ignore[attr-defined]
+            logger.info("outer piece declined on %r: %s", model.name, stats)
             return None
     else:
         outer_names = [v.name for v in model._variables]
