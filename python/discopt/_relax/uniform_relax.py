@@ -3251,6 +3251,13 @@ def _pow_bounds(lo: float, hi: float, e: float) -> tuple[float, float]:
     else:
         return (-math.inf, math.inf)
     rl, rh = float(np.asarray(r.lo)), float(np.asarray(r.hi))
+    if lo > 0.0 and rl < 0.0 and _pole_envelope_enabled():
+        # #1981: a power of a strictly positive base is positive, exactly. The
+        # outward-rounded ``exp(e*log(t))`` can step below 0 (``-5e-324`` on
+        # ``launch``'s ``x**-0.1959`` over ``[5, inf)``), and that hair of sign
+        # made the factor sign-indefinite, so its product with a ``[214, inf)``
+        # factor enclosed ``(-inf, inf)`` and the posynomial had no row at all.
+        rl = 0.0
     return (rl if math.isfinite(rl) else -math.inf, rh if math.isfinite(rh) else math.inf)
 
 
