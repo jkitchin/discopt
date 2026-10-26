@@ -59,9 +59,7 @@ def _install_fake_solver(monkeypatch, sleep_s):
         time.sleep(sleep_s)
         return _FakeMilpResult(SolveStatus.INFEASIBLE)
 
-    monkeypatch.setattr(
-        "discopt.solvers.lp_backend.get_milp_solver", lambda **kw: fake_solve_milp
-    )
+    monkeypatch.setattr("discopt.solvers.lp_backend.get_milp_solver", lambda **kw: fake_solve_milp)
     return calls
 
 
@@ -127,6 +125,9 @@ def _node_retry_count(monkeypatch, *, optout: bool) -> int:
     m.minimize(x * y - x)
     m.subject_to(x + y >= 1.0)
     relaxer = mlp.MccormickLPRelaxer(m)
+    # The cascade #1989 traced is on the COLD build path (there the incremental
+    # structure had declined); keep the incremental fast path out of the way.
+    monkeypatch.setattr(relaxer, "_try_incremental_node", lambda *a, **kw: None)
     lb = np.array([0.0, 0.0])
     ub = np.array([2.0, 2.0])
     res = relaxer.solve_at_node(lb, ub, time_limit=0.1, separate=False)
