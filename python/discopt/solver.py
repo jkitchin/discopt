@@ -1972,8 +1972,8 @@ def _endgame_polish_enabled() -> bool:
     is exactly unbounded below over its double data (see
     ``free_column_lp_cert_enabled``). Without it the panel shows no certification
     gain: the pass stays sound (primal only) and still improves incumbents on 9 of
-    the 13 instances where it fired. Whether that alone carries default-ON is an
-    owner call, recorded in docs/dev/flag-retirement-audit.md.
+    the 13 instances where it fired. Kept default-ON by owner decision
+    (2026-10-26, #1966) on that primal improvement alone.
 
     The Python tree's incumbents come from node NLPs run at the heuristic options,
     whose gradient-based scaling makes the incumbent's *absolute* objective accurate
