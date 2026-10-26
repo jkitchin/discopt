@@ -81,6 +81,9 @@ def _solve_one(nl: str, tl: float) -> None:
                 "nodes": r.node_count,
                 "wall": wall,
                 "picks": ss.get("tree/pseudocost_picks"),
+                # #1962: the separator and the integral-point probe fired (§6).
+                "cut_rounds": ss.get("tree/cut_rounds"),
+                "int_probes": ss.get("tree/int_probes"),
                 "route": getattr(r, "algorithm_route", None),
                 "verify_failed": bad,
             }

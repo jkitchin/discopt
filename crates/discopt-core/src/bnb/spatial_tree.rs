@@ -18,8 +18,9 @@
 //!   `lo = p` for a split point `p in [lo,hi]`), whose union is the parent — so no
 //!   feasible point is ever lost.
 
+use crate::bnb::convex_quad_cuts::{detect_convex_quad_forms, separate_round, ConvexQuadForm};
 use crate::bnb::spatial_kernel::{
-    solve_spatial_node, solve_spatial_node_from, EnvTerm, SpatialKernelSpec,
+    solve_spatial_node_with_cuts, EnvTerm, FixedRow, SpatialKernelSpec, SpatialNodeResult,
 };
 use crate::bnb::spatial_propagate::propagate_spec_fixpoint;
 use crate::lp::basis::Basis;
@@ -51,6 +52,10 @@ struct QNode {
     /// The `node_count` id of the node that pushed this one (`None` at the root);
     /// read only by a [`NodeObserver`].
     parent: Option<usize>,
+    /// #1962: the globally valid cuts this node's LP starts with -- the ones that
+    /// were binding at its parent's final LP. They are the last rows of the node
+    /// LP, in this order, so `basis` (which was taken over the same rows) fits it.
+    cuts: Rc<Vec<FixedRow>>,
 }
 
 impl PartialEq for QNode {
@@ -313,6 +318,22 @@ pub struct SpatialTreeConfig {
     /// not depend on the start (see `solve_spatial_node_from`). Cost: each queued
     /// node holds one shared parent basis (`n_total` status bytes plus `m` indices).
     pub warm_start_children: bool,
+    /// #1962: separation rounds at the root node. Each round adds the violated
+    /// outer-approximation cut of every certified convex quadratic form
+    /// ([`crate::bnb::convex_quad_cuts`]) at the node LP's point and re-solves the
+    /// LP warm. `0` (the default), together with `cut_rounds_node == 0`, is the
+    /// single-solve node every release before it has had.
+    pub cut_rounds_root: usize,
+    /// #1962: separation rounds at every non-root node (see `cut_rounds_root`).
+    pub cut_rounds_node: usize,
+    /// #1962: most cuts one round adds (the most violated first).
+    pub max_cuts_per_round: usize,
+    /// #1962: the integral-point probe. When a node's LP point is integral on every
+    /// integer column but some lifted term is not tight, re-solve the node LP with
+    /// the integer original columns fixed at their LP values (once per assignment)
+    /// and judge that LP's point for acceptance like any other. Primal only. Off
+    /// (the default) is the tree before it.
+    pub int_fix_probe: bool,
 }
 
 impl Default for SpatialTreeConfig {
@@ -337,6 +358,10 @@ impl Default for SpatialTreeConfig {
             pseudocost_branching: false,
             pseudocost_reliability: 0,
             warm_start_children: false,
+            cut_rounds_root: 0,
+            cut_rounds_node: 0,
+            max_cuts_per_round: 50,
+            int_fix_probe: false,
         }
     }
 }
@@ -435,6 +460,18 @@ pub struct SpatialTreeResult {
     /// #1935: wall seconds spent inside the node solve (LP assembly, the LP, the
     /// safe bound and any OBBT sweep).
     pub node_lp_s: f64,
+    /// #1962: certified convex quadratic forms the separator found in the spec
+    /// (0 with separation off, where detection is skipped).
+    pub n_cut_forms: usize,
+    /// #1962: separation rounds that added at least one cut and re-solved the LP.
+    pub n_cut_rounds: usize,
+    /// #1962: cuts added across all rounds (inherited cuts are not recounted).
+    pub n_cuts_added: usize,
+    /// #1962: integral-point probes run ([`SpatialTreeConfig::int_fix_probe`]) and
+    /// how many of them replaced the incumbent. Both 0 with the probe off.
+    pub n_int_probes: usize,
+    /// #1962: integral-point probes that replaced the incumbent (see above).
+    pub n_int_probe_improvements: usize,
 }
 
 /// One solved node, as a [`NodeObserver`] sees it (#1935 engine comparison).
@@ -659,6 +696,20 @@ pub fn solve_spatial_tree_observed(
     let mut n_warm_shape_mismatch = 0usize;
     let mut n_node_pivots = 0usize;
     let mut node_lp_s = 0.0f64;
+    // #1962: the separator's certified convex quadratic forms (none unless
+    // separation is configured, so the default path never runs detection).
+    let cut_forms: Vec<ConvexQuadForm> = if config.cut_rounds_root > 0 || config.cut_rounds_node > 0
+    {
+        detect_convex_quad_forms(spec)
+    } else {
+        Vec::new()
+    };
+    let mut n_cut_rounds = 0usize;
+    let mut n_cuts_added = 0usize;
+    // #1962: the integer assignments the integral-point probe has tried.
+    let mut int_probed: std::collections::HashSet<Vec<i64>> = std::collections::HashSet::new();
+    let mut n_int_probes = 0usize;
+    let mut n_int_probe_improvements = 0usize;
     // Best-bound frontier: a min-heap on the inherited lower bound. Exploring the
     // lowest-bound region first lifts the global frontier minimum (the reported dual
     // bound) as fast as possible — the key to certifying instances like tanksize
@@ -671,6 +722,7 @@ pub fn solve_spatial_tree_observed(
         br: None,
         basis: None,
         parent: None,
+        cuts: Rc::new(Vec::new()),
     });
     // #1913: per-column pseudocosts, `[down, up]` sums of per-unit bound gains and
     // their observation counts. Read only under `config.pseudocost_branching`.
@@ -725,6 +777,7 @@ pub fn solve_spatial_tree_observed(
         br,
         basis: parent_basis,
         parent: parent_id,
+        cuts: inherited_cuts,
     }) = heap.pop()
     {
         if deadline.is_some_and(|d| Instant::now() >= d) && !extension_taken && incumbent.is_some()
@@ -797,6 +850,11 @@ pub fn solve_spatial_tree_observed(
                 n_warm_shape_mismatch,
                 n_node_pivots,
                 node_lp_s,
+                n_cut_forms: cut_forms.len(),
+                n_cut_rounds,
+                n_cuts_added,
+                n_int_probes,
+                n_int_probe_improvements,
             };
         }
         // Fathom by the parent bound if the incumbent already dominates it. The
@@ -836,6 +894,11 @@ pub fn solve_spatial_tree_observed(
                 n_warm_shape_mismatch,
                 n_node_pivots,
                 node_lp_s,
+                n_cut_forms: cut_forms.len(),
+                n_cut_rounds,
+                n_cuts_added,
+                n_int_probes,
+                n_int_probe_improvements,
             };
         }
         node_count += 1;
@@ -873,14 +936,42 @@ pub fn solve_spatial_tree_observed(
         // still cannot be interrupted. See `node_lp_opts`.
         let node_opts = node_lp_opts(opts, deadline);
         let t_node = Instant::now();
-        let node = solve_spatial_node_from(
+        let mut node = solve_spatial_node_with_cuts(
             spec,
             &lo,
             &hi,
             config.run_obbt,
             &node_opts,
             parent_basis.as_deref(),
+            &inherited_cuts,
         );
+        // #1962: the separation loop. Every LP solved here is a relaxation of the
+        // node region (each cut holds at every feasible point), so each one's safe
+        // bound is valid and the node keeps the best of them; a round whose LP
+        // decides nothing is dropped and the node keeps the last decided result.
+        let rounds = if node_count == 1 {
+            config.cut_rounds_root
+        } else {
+            config.cut_rounds_node
+        };
+        let mut node_cuts: Rc<Vec<FixedRow>> = inherited_cuts.clone();
+        if rounds > 0 && !cut_forms.is_empty() {
+            let (cuts, rounds_done, added) = separation_loop(
+                spec,
+                (&lo, &hi),
+                config,
+                &node_opts,
+                &cut_forms,
+                rounds,
+                &mut node,
+                &inherited_cuts,
+                &mut n_lp_solves,
+                &mut n_node_pivots,
+            );
+            node_cuts = cuts;
+            n_cut_rounds += rounds_done;
+            n_cuts_added += added;
+        }
         let node_time = t_node.elapsed();
         node_lp_s += node_time.as_secs_f64();
         n_lp_solves += node.n_lp_solves;
@@ -960,6 +1051,7 @@ pub fn solve_spatial_tree_observed(
                         None,
                         parent_basis.clone(),
                         Some(node_count),
+                        inherited_cuts.clone(),
                     );
                 }
                 None => global_lb_closed = global_lb_closed.min(parent_bound),
@@ -1051,6 +1143,7 @@ pub fn solve_spatial_tree_observed(
                     config,
                     &node_opts,
                     (&mut pc_sum, &mut pc_cnt),
+                    &node_cuts,
                 );
             }
             frac_int = pseudocost_pick(spec, x, config.int_tol, &pc_sum, &pc_cnt);
@@ -1161,6 +1254,11 @@ pub fn solve_spatial_tree_observed(
                                     n_warm_shape_mismatch,
                                     n_node_pivots,
                                     node_lp_s,
+                                    n_cut_forms: cut_forms.len(),
+                                    n_cut_rounds,
+                                    n_cuts_added,
+                                    n_int_probes,
+                                    n_int_probe_improvements,
                                 };
                             }
                         }
@@ -1172,6 +1270,87 @@ pub fn solve_spatial_tree_observed(
                         incumbent = Some(obj);
                         incumbent_x = x[..spec.n_cols].to_vec();
                         accepted_lp_point = true;
+                    }
+                }
+            }
+        }
+        // #1962: the integral-point probe. The LP point is integral but some lifted
+        // term is not tight, so it cannot be accepted; fix every integer original
+        // column at its LP value and re-solve over that sub-box (once per integer
+        // assignment). When every term reads only integer columns the fixed box pins
+        // them all, so the probe's LP point is McCormick-tight and is judged by the
+        // SAME acceptance test and pricing as any LP point. Primal only: nothing it
+        // does reaches a bound, and a probe that does not decide is ignored.
+        if config.int_fix_probe
+            && int_ok
+            && !terms_tight
+            && !accepted_lp_point
+            && !rejected_lp_point
+            && spec.integrality[..spec.n_orig].iter().any(|&b| b)
+        {
+            let key: Vec<i64> = (0..spec.n_orig)
+                .filter(|&j| spec.integrality[j])
+                .map(|j| x[j].round() as i64)
+                .collect();
+            if int_probed.insert(key) {
+                n_int_probes += 1;
+                let mut l2 = lo.clone();
+                let mut h2 = hi.clone();
+                for j in 0..spec.n_orig {
+                    if spec.integrality[j] {
+                        let v = x[j].round().clamp(lo[j], hi[j]);
+                        l2[j] = v;
+                        h2[j] = v;
+                    }
+                }
+                let live = !config.run_propagation
+                    || propagate_spec_fixpoint(
+                        spec,
+                        &mut l2,
+                        &mut h2,
+                        incumbent,
+                        config.propagation_rounds,
+                    );
+                if live {
+                    let probe = solve_spatial_node_with_cuts(
+                        spec, &l2, &h2, false, &node_opts, None, &node_cuts,
+                    );
+                    n_lp_solves += probe.n_lp_solves;
+                    let px = &probe.x;
+                    let tight = probe.status == LpStatus::Optimal
+                        && (0..spec.n_cols).all(|j| {
+                            !spec.integrality[j] || (px[j] - px[j].round()).abs() <= config.int_tol
+                        })
+                        && max_term_gap(spec, px) <= config.mccormick_tol;
+                    if tight {
+                        let lp_obj = dot(&spec.c, px);
+                        if incumbent.map(|inc| lp_obj < inc - 1e-12).unwrap_or(true) {
+                            // A `Decline` is left to the main path to act on: the
+                            // probe only ever declines to accept.
+                            let priced = match value_fn.as_mut() {
+                                None => Some(lp_obj),
+                                Some(f) => {
+                                    n_incumbent_value_calls += 1;
+                                    match f(px, lp_obj) {
+                                        IncumbentPrice::Value(v) if v.is_finite() => {
+                                            if v > lp_obj {
+                                                n_incumbent_value_raised += 1;
+                                            }
+                                            Some(v.max(lp_obj))
+                                        }
+                                        _ => None,
+                                    }
+                                }
+                            };
+                            if let Some(obj) = priced {
+                                if incumbent.map(|inc| obj < inc - 1e-12).unwrap_or(true) {
+                                    incumbent = Some(obj);
+                                    incumbent_x = px[..spec.n_cols].to_vec();
+                                    accepted_lp_point = true;
+                                    n_int_probe_improvements += 1;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1244,8 +1423,15 @@ pub fn solve_spatial_tree_observed(
             continue;
         };
 
-        // Two covering children.
-        let child_basis = config.warm_start_children.then(|| Rc::new(node.basis));
+        // Two covering children. #1962: they inherit the cuts binding at this
+        // node's final LP (a cut whose slack is basic is dropped, and with it that
+        // slack from the basis, which leaves the basis exact for the kept rows).
+        let (child_cuts, child_basis) = binding_cuts(
+            spec.n_cols,
+            &node_cuts,
+            node.basis,
+            config.warm_start_children,
+        );
         push_children(
             &mut heap,
             &lo,
@@ -1255,8 +1441,9 @@ pub fn solve_spatial_tree_observed(
             bound,
             spec.integrality[split_col],
             int_frac,
-            child_basis,
+            child_basis.map(Rc::new),
             Some(node_count),
+            child_cuts,
         );
     }
 
@@ -1298,6 +1485,11 @@ pub fn solve_spatial_tree_observed(
                 n_warm_shape_mismatch,
                 n_node_pivots,
                 node_lp_s,
+                n_cut_forms: cut_forms.len(),
+                n_cut_rounds,
+                n_cuts_added,
+                n_int_probes,
+                n_int_probe_improvements,
             }
         }
         None => SpatialTreeResult {
@@ -1323,6 +1515,11 @@ pub fn solve_spatial_tree_observed(
             n_warm_shape_mismatch,
             n_node_pivots,
             node_lp_s,
+            n_cut_forms: cut_forms.len(),
+            n_cut_rounds,
+            n_cuts_added,
+            n_int_probes,
+            n_int_probe_improvements,
         },
     }
 }
@@ -1383,6 +1580,7 @@ fn push_children(
     frac: Option<f64>,
     basis: Option<Rc<Basis>>,
     parent: Option<usize>,
+    cuts: Rc<Vec<FixedRow>>,
 ) {
     // #1913: a fractional-integer branch records its column, side and the distance
     // the LP value moves, for the pseudocost update when each child is solved.
@@ -1404,6 +1602,7 @@ fn push_children(
                 br: br(false),
                 basis: basis.clone(),
                 parent,
+                cuts: cuts.clone(),
             });
         }
         if hi2[split_col] >= lo2[split_col] - 1e-12 {
@@ -1414,6 +1613,7 @@ fn push_children(
                 br: br(true),
                 basis: basis.clone(),
                 parent,
+                cuts: cuts.clone(),
             });
         }
     } else {
@@ -1428,6 +1628,7 @@ fn push_children(
             br: None,
             basis: basis.clone(),
             parent,
+            cuts: cuts.clone(),
         });
         heap.push(QNode {
             pb,
@@ -1436,6 +1637,7 @@ fn push_children(
             br: None,
             basis: basis.clone(),
             parent,
+            cuts: cuts.clone(),
         });
     }
 }
@@ -1512,6 +1714,7 @@ fn strong_branch_init(
     config: &SpatialTreeConfig,
     opts: &SimplexOptions,
     (pc_sum, pc_cnt): (&mut [Vec<f64>; 2], &mut [Vec<usize>; 2]),
+    cuts: &[FixedRow],
 ) -> usize {
     let rel = config.pseudocost_reliability;
     let mut cands: Vec<(f64, usize)> = Vec::new();
@@ -1559,7 +1762,7 @@ fn strong_branch_init(
             let gain = if empty {
                 Some(pruned_gain)
             } else {
-                let child = solve_spatial_node(spec, &l2, &h2, false, opts);
+                let child = solve_spatial_node_with_cuts(spec, &l2, &h2, false, opts, None, cuts);
                 n_lp += child.n_lp_solves;
                 match verdict_for(child.status) {
                     NodeVerdict::EmptyRegion => Some(pruned_gain),
@@ -1577,6 +1780,174 @@ fn strong_branch_init(
         }
     }
     n_lp
+}
+
+/// #1962: run up to `rounds` separation rounds on a solved node. Each round adds
+/// the violated cuts of `forms` at `node`'s LP point, extends its basis by the new
+/// rows (each new slack basic, so the extended basis is primal-feasible except on
+/// the violated rows, the dual simplex's textbook restart), and re-solves.
+///
+/// On return `node` is the last LP that decided (`Optimal`, or a Farkas-certified
+/// `Infeasible`) with its `bound` raised to the best safe bound any round proved,
+/// and the returned cut list is exactly the cut block of that LP. Stops early when a
+/// round finds nothing violated, when the LP objective stalls, or when an LP decides
+/// nothing (that round's cuts are dropped). Returns `(cuts, rounds, cuts added)`.
+#[allow(clippy::too_many_arguments)]
+fn separation_loop(
+    spec: &SpatialKernelSpec,
+    (lo, hi): (&[f64], &[f64]),
+    config: &SpatialTreeConfig,
+    opts: &SimplexOptions,
+    forms: &[ConvexQuadForm],
+    rounds: usize,
+    node: &mut SpatialNodeResult,
+    inherited: &Rc<Vec<FixedRow>>,
+    n_lp_solves: &mut usize,
+    n_node_pivots: &mut usize,
+) -> (Rc<Vec<FixedRow>>, usize, usize) {
+    use crate::lp::basis::BASIC;
+    let mut cuts: Vec<FixedRow> = inherited.as_ref().clone();
+    let mut best_bound = node.bound;
+    let mut done = 0usize;
+    let mut added = 0usize;
+    for _ in 0..rounds {
+        if node.status != LpStatus::Optimal {
+            break;
+        }
+        if opts.deadline.is_some_and(|d| Instant::now() >= d) {
+            break;
+        }
+        let new = separate_round(forms, &node.x, 1e-6, config.max_cuts_per_round);
+        if new.is_empty() {
+            break;
+        }
+        let k = new.len();
+        let mut warm = node.basis.clone();
+        let n_total = warm.col_status.len();
+        warm.col_status.extend(std::iter::repeat_n(BASIC, k));
+        warm.basic_vars.extend(n_total..n_total + k);
+        let base_len = cuts.len();
+        cuts.extend(new);
+        let next = solve_spatial_node_with_cuts(spec, lo, hi, false, opts, Some(&warm), &cuts);
+        *n_lp_solves += next.n_lp_solves;
+        *n_node_pivots += next.n_pivots;
+        match next.status {
+            LpStatus::Optimal => {
+                done += 1;
+                added += k;
+                let stalled = next.obj - node.obj <= 1e-6 * node.obj.abs().max(1.0);
+                best_bound = best_bound.max(next.bound);
+                // The re-solve skips OBBT; keep the first solve's tightenings. It
+                // is also always warm, so keep the first solve's warm-start record:
+                // that is what `n_warm_starts` reports (the inherited basis).
+                let tightened = std::mem::take(&mut node.tightened);
+                let (ws, wm) = (node.warm_started, node.warm_shape_mismatch);
+                *node = next;
+                node.tightened = tightened;
+                node.warm_started = ws;
+                node.warm_shape_mismatch = wm;
+                if stalled {
+                    break;
+                }
+            }
+            LpStatus::Infeasible => {
+                // A verified Farkas ray over valid rows: the region holds no
+                // feasible point.
+                done += 1;
+                added += k;
+                let (ws, wm) = (node.warm_started, node.warm_shape_mismatch);
+                *node = next;
+                node.warm_started = ws;
+                node.warm_shape_mismatch = wm;
+                return (Rc::new(cuts), done, added);
+            }
+            LpStatus::Unbounded | LpStatus::IterLimit | LpStatus::Numerical => {
+                cuts.truncate(base_len);
+                break;
+            }
+        }
+    }
+    node.bound = best_bound;
+    (Rc::new(cuts), done, added)
+}
+
+/// #1962: the cuts a node hands its children -- those whose slack is NONBASIC
+/// (binding) in its final basis -- and, when `keep_basis`, that basis restricted to
+/// the kept rows. A dropped cut's slack is basic, so removing the row and its slack
+/// together leaves a square basis over the remaining rows with the same basic
+/// structurals: still the node's optimal vertex, now of the smaller LP.
+fn binding_cuts(
+    n_cols: usize,
+    cuts: &Rc<Vec<FixedRow>>,
+    basis: Basis,
+    keep_basis: bool,
+) -> (Rc<Vec<FixedRow>>, Option<Basis>) {
+    use crate::lp::basis::BASIC;
+    if cuts.is_empty() {
+        return (cuts.clone(), keep_basis.then_some(basis));
+    }
+    let m = basis.basic_vars.len();
+    let n_total = basis.col_status.len();
+    // A basis that does not span this node's rows (an undecided LP has none):
+    // hand down the cuts unchanged and no basis.
+    if n_total != n_cols + m || m < cuts.len() {
+        return (cuts.clone(), None);
+    }
+    let first = n_cols + m - cuts.len(); // slack column of the first cut row
+    let keep: Vec<bool> = (0..cuts.len())
+        .map(|t| basis.col_status[first + t] != BASIC)
+        .collect();
+    if keep.iter().all(|&k| k) {
+        return (cuts.clone(), keep_basis.then_some(basis));
+    }
+    let kept: Vec<FixedRow> = cuts
+        .iter()
+        .zip(keep.iter())
+        .filter(|(_, &k)| k)
+        .map(|(c, _)| c.clone())
+        .collect();
+    let basis = keep_basis.then(|| {
+        let mut col_status = basis.col_status[..first].to_vec();
+        col_status.extend(
+            (0..cuts.len())
+                .filter(|&t| keep[t])
+                .map(|t| basis.col_status[first + t]),
+        );
+        // Every cut slack still basic is a dropped one; nothing else moves.
+        let basic_vars = basis
+            .basic_vars
+            .into_iter()
+            .filter(|&c| c < first)
+            .collect();
+        Basis {
+            col_status,
+            basic_vars,
+        }
+    });
+    (Rc::new(kept), basis)
+}
+
+/// The largest McCormick gap `|x_aux − f(operands)|` over every lifted term at `x`
+/// (`inf` when a term cannot be evaluated there) -- the acceptance test's measure.
+fn max_term_gap(spec: &SpatialKernelSpec, x: &[f64]) -> f64 {
+    let mut worst = 0.0f64;
+    for t in &spec.terms {
+        let gap = match term_true_value(t, x) {
+            Some(v) => (x[t.aux_col()] - v).abs(),
+            None => f64::INFINITY,
+        };
+        worst = worst.max(gap);
+    }
+    for t in &spec.blf_terms {
+        let a_val = t.a_const + dot_form(&t.a_cols, &t.a_coeffs, x);
+        let b_val = t.b_const + dot_form(&t.b_cols, &t.b_coeffs, x);
+        worst = worst.max((x[t.w] - a_val * b_val).abs());
+    }
+    if worst.is_nan() {
+        f64::INFINITY
+    } else {
+        worst
+    }
 }
 
 fn dot(a: &[f64], b: &[f64]) -> f64 {
@@ -2815,5 +3186,185 @@ mod gap_criterion_tests {
             blf_terms: vec![],
             obbt_candidates: vec![],
         }
+    }
+
+    /// #1962: `min x0² + x1² + x0·x1 − 7x0 − 8x1` over integers in `[0, 10]²` with
+    /// `x0 + x1 <= 6`. Columns `x0, x1, s0 = x0², s1 = x1², w = x0·x1`; the
+    /// objective's quadratic part is positive definite, which the per-term
+    /// McCormick relaxation cannot see.
+    fn convex_iqp_spec() -> SpatialKernelSpec {
+        use crate::bnb::spatial_kernel::BlfTerm;
+        SpatialKernelSpec {
+            n_cols: 5,
+            n_orig: 2,
+            c: vec![-7.0, -8.0, 1.0, 1.0, 1.0],
+            integrality: vec![true, true, false, false, false],
+            global_lo: vec![0.0, 0.0, 0.0, 0.0, 0.0],
+            global_hi: vec![10.0, 10.0, 100.0, 100.0, 100.0],
+            fixed_rows: vec![FixedRow {
+                cols: vec![0, 1],
+                coeffs: vec![1.0, 1.0],
+                rhs: 6.0,
+            }],
+            terms: vec![
+                EnvTerm::Monomial { i: 0, s: 2, p: 2 },
+                EnvTerm::Monomial { i: 1, s: 3, p: 2 },
+            ],
+            blf_terms: vec![BlfTerm {
+                a_cols: vec![0],
+                a_coeffs: vec![1.0],
+                a_const: 0.0,
+                b_cols: vec![1],
+                b_coeffs: vec![1.0],
+                b_const: 0.0,
+                w: 4,
+            }],
+            obbt_candidates: vec![],
+        }
+    }
+
+    /// #1962: the separation loop tightens the root, keeps every bound valid, and
+    /// certifies the same optimum as the single-solve tree, cold and warm.
+    #[test]
+    fn convex_cut_loop_tightens_root_and_certifies_the_same_optimum() {
+        let spec = convex_iqp_spec();
+        // Brute-force oracle over the integer grid.
+        let mut opt = f64::INFINITY;
+        for a in 0..=10 {
+            for b in 0..=10 {
+                let (x, y) = (a as f64, b as f64);
+                if x + y <= 6.0 {
+                    opt = opt.min(x * x + y * y + x * y - 7.0 * x - 8.0 * y);
+                }
+            }
+        }
+        let opts = SimplexOptions::default();
+        let mut checked = 0usize;
+        for warm in [false, true] {
+            let off = SpatialTreeConfig {
+                warm_start_children: warm,
+                ..SpatialTreeConfig::default()
+            };
+            let on = SpatialTreeConfig {
+                cut_rounds_root: 20,
+                cut_rounds_node: 3,
+                ..off
+            };
+            let r_off = solve_spatial_tree(&spec, &off, &opts);
+            let r_on = solve_spatial_tree(&spec, &on, &opts);
+            assert_eq!(r_off.status, TreeStatus::Optimal, "{r_off:?}");
+            assert_eq!(r_on.status, TreeStatus::Optimal, "{r_on:?}");
+            assert_eq!(
+                r_off.n_cut_forms + r_off.n_cut_rounds + r_off.n_cuts_added,
+                0
+            );
+            assert_eq!(r_on.n_cut_forms, 1, "the objective form was not certified");
+            assert!(r_on.n_cut_rounds > 0 && r_on.n_cuts_added > 0, "{r_on:?}");
+            checked += 5;
+            for r in [&r_off, &r_on] {
+                assert!((r.incumbent.unwrap() - opt).abs() <= 1e-6, "{r:?} vs {opt}");
+                assert!(r.bound <= opt + 1e-9 && r.root_bound <= opt + 1e-9, "{r:?}");
+                checked += 2;
+            }
+            // The cuts close most of the root gap the envelopes leave.
+            assert!(
+                r_on.root_bound > r_off.root_bound + 0.5 * (opt - r_off.root_bound),
+                "root {} (off {}) vs optimum {opt}",
+                r_on.root_bound,
+                r_off.root_bound
+            );
+            assert!(r_on.node_count <= r_off.node_count, "{r_on:?} vs {r_off:?}");
+            checked += 2;
+            if warm {
+                // The extended / restricted bases always fit their node LPs.
+                assert!(r_on.n_warm_starts > 0);
+                assert_eq!(r_on.n_warm_shape_mismatch, 0);
+                checked += 2;
+            }
+        }
+        assert_eq!(
+            checked,
+            2 * 11 + 2,
+            "cut-loop probe did not run every assertion"
+        );
+    }
+
+    /// #1962: a child inherits exactly the cuts binding at its parent, and the
+    /// parent's basis restricted to them stays square and consistent.
+    #[test]
+    fn binding_cuts_drops_basic_cut_rows_and_their_slacks() {
+        use crate::lp::basis::{AT_LOWER, AT_UPPER, BASIC};
+        let cut = |r: f64| FixedRow {
+            cols: vec![0],
+            coeffs: vec![1.0],
+            rhs: r,
+        };
+        let cuts = Rc::new(vec![cut(1.0), cut(2.0), cut(3.0)]);
+        // n_cols = 2, two base rows (slacks 2, 3) and three cut rows (slacks 4..7).
+        let basis = Basis {
+            col_status: vec![BASIC, AT_LOWER, AT_LOWER, BASIC, BASIC, AT_UPPER, BASIC],
+            basic_vars: vec![0, 3, 4, 6, 2],
+        };
+        // Row 2 (slack 4) and row 4 (slack 6) are basic, so only the middle cut is binding.
+        let (kept, b) = binding_cuts(2, &cuts, basis.clone(), true);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].rhs, 2.0);
+        let b = b.unwrap();
+        assert_eq!(
+            b.col_status,
+            vec![BASIC, AT_LOWER, AT_LOWER, BASIC, AT_UPPER]
+        );
+        assert_eq!(b.basic_vars, vec![0, 3, 2]);
+        assert_eq!(b.col_status.len(), 2 + b.basic_vars.len());
+        // Without a warm start the cuts are filtered the same way.
+        let (kept2, b2) = binding_cuts(2, &cuts, basis, false);
+        assert_eq!(kept2.len(), 1);
+        assert!(b2.is_none());
+        // A basis that does not span the rows hands the cuts down unfiltered.
+        let short = Basis {
+            col_status: vec![BASIC; 3],
+            basic_vars: vec![0],
+        };
+        let (kept3, b3) = binding_cuts(2, &cuts, short, true);
+        assert_eq!(kept3.len(), 3);
+        assert!(b3.is_none());
+        // Every cut binding (all slacks nonbasic): the basis passes through
+        // unchanged. n_cols = 5, two base rows and the three cuts.
+        let all = Basis {
+            col_status: [vec![BASIC; 5], vec![AT_LOWER; 5]].concat(),
+            basic_vars: vec![0, 1, 2, 3, 4],
+        };
+        let (kept4, b4) = binding_cuts(5, &cuts, all.clone(), true);
+        assert_eq!(kept4.len(), 3);
+        assert_eq!(b4.unwrap().col_status, all.col_status);
+    }
+
+    /// #1962: the integral-point probe finds a tight point from an integral but
+    /// untight LP point and changes no bound's validity.
+    #[test]
+    fn int_fix_probe_accepts_only_tight_points() {
+        let spec = convex_iqp_spec();
+        let opts = SimplexOptions::default();
+        let base = SpatialTreeConfig::default();
+        let probe = SpatialTreeConfig {
+            int_fix_probe: true,
+            ..base
+        };
+        let r0 = solve_spatial_tree(&spec, &base, &opts);
+        let r1 = solve_spatial_tree(&spec, &probe, &opts);
+        assert_eq!(r0.n_int_probes, 0);
+        assert_eq!(r1.status, TreeStatus::Optimal, "{r1:?}");
+        assert!(r1.n_int_probes > 0, "probe never fired: {r1:?}");
+        assert!((r1.incumbent.unwrap() - r0.incumbent.unwrap()).abs() <= 1e-6);
+        // The accepted point is genuinely feasible: integral, and its objective
+        // recomputed from the operands matches the incumbent.
+        let x = &r1.incumbent_x;
+        assert!((x[0] - x[0].round()).abs() <= 1e-6 && (x[1] - x[1].round()).abs() <= 1e-6);
+        let obj = x[0] * x[0] + x[1] * x[1] + x[0] * x[1] - 7.0 * x[0] - 8.0 * x[1];
+        assert!(
+            (obj - r1.incumbent.unwrap()).abs() <= 1e-6,
+            "{obj} vs {r1:?}"
+        );
+        assert!(x[0] + x[1] <= 6.0 + 1e-9);
     }
 }

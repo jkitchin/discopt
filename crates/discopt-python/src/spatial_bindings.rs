@@ -53,7 +53,8 @@ use std::time::{Duration, Instant};
     cold_dual_start=false, primal_hook=None, incumbent_value=None,
     scale_free_branching=false, pseudocost_branching=false,
     pseudocost_reliability=0, warm_start_children=false, warm_flip_boxed=false,
-    node_observer=None,
+    node_observer=None, cut_rounds_root=0, cut_rounds_node=0, max_cuts_per_round=50,
+    int_fix_probe=false,
 ))]
 pub fn solve_spatial_tree_py<'py>(
     py: Python<'py>,
@@ -108,6 +109,10 @@ pub fn solve_spatial_tree_py<'py>(
     warm_start_children: bool,
     warm_flip_boxed: bool,
     node_observer: Option<PyObject>,
+    cut_rounds_root: usize,
+    cut_rounds_node: usize,
+    max_cuts_per_round: usize,
+    int_fix_probe: bool,
 ) -> PyResult<Bound<'py, PyDict>> {
     let c = c.as_slice()?;
     let integrality = integrality.as_slice()?;
@@ -342,6 +347,10 @@ pub fn solve_spatial_tree_py<'py>(
         pseudocost_branching,
         pseudocost_reliability,
         warm_start_children,
+        cut_rounds_root,
+        cut_rounds_node,
+        max_cuts_per_round,
+        int_fix_probe,
     };
     // The node LP's start basis (`SimplexOptions::cold_dual_start`, default OFF,
     // set from `DISCOPT_LP_COLD_DUAL_START`). Everything else is the default.
@@ -561,5 +570,10 @@ pub fn solve_spatial_tree_py<'py>(
     out.set_item("n_warm_shape_mismatch", res.n_warm_shape_mismatch)?;
     out.set_item("n_node_pivots", res.n_node_pivots)?;
     out.set_item("node_lp_s", res.node_lp_s)?;
+    out.set_item("n_cut_forms", res.n_cut_forms)?;
+    out.set_item("n_cut_rounds", res.n_cut_rounds)?;
+    out.set_item("n_cuts_added", res.n_cuts_added)?;
+    out.set_item("n_int_probes", res.n_int_probes)?;
+    out.set_item("n_int_probe_improvements", res.n_int_probe_improvements)?;
     Ok(out)
 }
