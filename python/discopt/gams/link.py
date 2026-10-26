@@ -495,6 +495,17 @@ class _GmoAdapter:  # pragma: no cover - thin wrapper over gamsapi calls
         self._h = gmo_h
         self._gmo = gmo
         self._n: int = int(gmo.gmoN(gmo_h))
+        # Without a dictionary file (``option dictfile=0;``, as Pyomo's GAMS
+        # writer emits, or a registration lacking ``dictType``) every
+        # ``gmoGet*NameOne`` call prints "gmoDict failed" to stdout; check once
+        # and skip the lookups (#1972).  ``gmoNameDict`` is absent only from
+        # gamsapi builds that predate it; keep the unguarded lookups there.
+        try:
+            dict_path = str(gmo.gmoNameDict(gmo_h) or "")
+        except AttributeError:
+            self._has_dict = True
+        else:
+            self._has_dict = bool(dict_path) and os.path.isfile(dict_path)
         nc = int(gmo.gmoNLConst(gmo_h))
         self._pool: list[float]
         if nc > 0:
@@ -536,6 +547,8 @@ class _GmoAdapter:  # pragma: no cover - thin wrapper over gamsapi calls
     def var_name(self, j: int) -> str:
         # The GAMS dictionary may be unavailable (e.g. a control file saved
         # without it); fall back to a positional name in that case.
+        if not self._has_dict:
+            return ""
         try:
             name = str(self._gmo.gmoGetVarNameOne(self._h, j))
         except Exception:
@@ -575,6 +588,8 @@ class _GmoAdapter:  # pragma: no cover - thin wrapper over gamsapi calls
         return opcodes, self._remap_var_fields(opcodes, fields)
 
     def row_name(self, i: int) -> str:
+        if not self._has_dict:
+            return ""
         try:
             name = str(self._gmo.gmoGetEquNameOne(self._h, i))
         except Exception:

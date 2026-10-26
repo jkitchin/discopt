@@ -8,6 +8,7 @@ solver registration files.  None of this requires a GAMS installation.
 from __future__ import annotations
 
 import json
+import sys
 
 import discopt.modeling as dm
 import numpy as np
@@ -31,6 +32,7 @@ from discopt.gams.instructions import (
 from discopt.gams.instructions import (
     GamsOpCode as Op,
 )
+from discopt.gams.register import render_gamsconfig
 from discopt.modeling.core import Constant
 
 
@@ -526,6 +528,87 @@ def test_run_script_invokes_link():
     assert script.startswith("#!/bin/sh")
     assert "discopt.gams.link" in script
     assert '"$@"' in script
+
+
+def test_gamsconfig_requests_gmo_dictionary():
+    """#1972: without ``dictType`` GAMS writes no ``gamsdict.dat`` and every
+    name lookup prints "gmoDict failed"; both registration paths must set it."""
+    import yaml
+
+    entry = yaml.safe_load(gamsconfig_snippet("/abs/discopt-gams"))["solverConfig"][0]
+    assert entry["discopt"]["dictType"] == 5
+    text, _ = render_gamsconfig(None, "/abs/discopt-gams")
+    assert yaml.safe_load(text)["solverConfig"][0]["discopt"]["dictType"] == 5
+
+
+def test_run_script_launches_main_without_runpy_warning(tmp_path):
+    """#1972: ``-m discopt.gams.link`` triggers runpy's "found in sys.modules"
+    RuntimeWarning (the package imports ``.link``); the launcher must not."""
+    import shlex
+    import subprocess
+
+    script = run_script(sys.executable)
+    assert " -m discopt.gams.link" not in script
+    exec_line = next(ln for ln in script.splitlines() if ln.startswith("exec "))
+    argv = shlex.split(exec_line)[1:-1] + ["--help"]
+    # -W error turns the runpy RuntimeWarning into a failure.
+    proc = subprocess.run(
+        [argv[0], "-W", "error::RuntimeWarning", *argv[1:]],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "usage: discopt-gams" in proc.stderr
+    assert "RuntimeWarning" not in proc.stderr
+
+
+class _FakeGmo:
+    """Just enough of the gamsapi GMO module for ``_GmoAdapter``'s name lookups."""
+
+    def __init__(self, dict_path):
+        self.dict_path = dict_path
+        self.name_calls = 0
+
+    def gmoN(self, h):
+        return 2
+
+    def gmoNLConst(self, h):
+        return 0
+
+    def gmoNLCodeSize(self, h):
+        return 0
+
+    def gmoNameDict(self, h):
+        return self.dict_path
+
+    def gmoGetVarNameOne(self, h, j):
+        self.name_calls += 1
+        return f"x_{j}"
+
+    def gmoGetEquNameOne(self, h, i):
+        self.name_calls += 1
+        return f"e_{i}"
+
+
+@pytest.mark.parametrize("has_file", [True, False])
+@pytest.mark.parametrize("set_path", [True, False])
+def test_gmo_adapter_skips_name_lookups_without_dictionary(tmp_path, has_file, set_path):
+    """#1972: with no dictionary file (``option dictfile=0;``) the adapter must
+    not call ``gmoGet*NameOne`` at all -- libgmo prints "gmoDict failed" per call."""
+    from discopt.gams.link import _GmoAdapter
+
+    dict_file = tmp_path / "gamsdict.dat"
+    if has_file:
+        dict_file.write_bytes(b"")
+    gmo = _FakeGmo(str(dict_file) if set_path else "")
+    ad = _GmoAdapter(object(), gmo)
+    if has_file and set_path:
+        assert (ad.var_name(1), ad.row_name(0)) == ("x_1", "e_0")
+        assert gmo.name_calls == 2
+    else:
+        assert (ad.var_name(1), ad.row_name(0)) == ("", "")
+        assert gmo.name_calls == 0
 
 
 def test_parse_gams_args_prefers_control_file_over_param_file(tmp_path):
