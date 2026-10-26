@@ -1,8 +1,9 @@
 """#1935: parent-basis warm start for the native spatial kernel's node LPs.
 
-``DISCOPT_NATIVE_WARM_START`` selects how a child's node LP starts: ``0`` (the
-default) cold, ``1`` from the parent's optimal basis, ``2`` from that basis with
-a dual-infeasible start repaired by bound flips. The start can move which
+``DISCOPT_NATIVE_WARM_START`` selects how a child's node LP starts: ``0`` cold
+(the opt-out), ``1`` from the parent's optimal basis, ``2`` (the default since
+#1944's graduation panel) from that basis with a dual-infeasible start repaired
+by bound flips. The start can move which
 optimal vertex a degenerate node LP lands on, never what the search may
 conclude, so every mode must certify the same optimum. The counters are
 asserted, not inferred, so "the warm start never engaged" cannot read as a pass
@@ -31,8 +32,8 @@ def test_warm_start_mode_parsing(monkeypatch):
     from discopt.solver import _native_warm_start_mode
 
     monkeypatch.delenv("DISCOPT_NATIVE_WARM_START", raising=False)
-    assert _native_warm_start_mode() == 0
-    for raw, mode in (("", 0), ("0", 0), ("1", 1), ("2", 2), (" 2 ", 2)):
+    assert _native_warm_start_mode() == 2
+    for raw, mode in (("", 2), ("0", 0), ("1", 1), ("2", 2), (" 2 ", 2)):
         monkeypatch.setenv("DISCOPT_NATIVE_WARM_START", raw)
         assert _native_warm_start_mode() == mode, raw
     # A typo must not silently measure the cold arm twice.
@@ -45,6 +46,9 @@ def test_warm_start_mode_parsing(monkeypatch):
 @pytest.mark.parametrize("case", [1, 2])
 def test_every_warm_mode_certifies_the_cold_optimum(monkeypatch, case):
     results = {}
+    # Inheritance needs a tree. Since #1944 the lineq RLT rows close Haverly's
+    # root (1 node), so they are switched off here.
+    monkeypatch.setenv("DISCOPT_RLT_LINEQ", "0")
     for mode in ("0", "1", "2"):
         monkeypatch.setenv("DISCOPT_NATIVE_WARM_START", mode)
         r = _haverly_q(case).solve(time_limit=60)

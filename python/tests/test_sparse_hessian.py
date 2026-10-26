@@ -174,8 +174,13 @@ class TestEndToEndSolve:
     # regressed to dense `jax.hessian` assembly, the cost is O(n^2) in ~500
     # variables, not a 3x slip.
     @pytest.mark.timeout(300)
-    def test_dae_collocation_solve_does_not_hang(self):
+    def test_dae_collocation_solve_does_not_hang(self, monkeypatch):
         sys.setrecursionlimit(100000)
+        # This guards the NLP evaluator's sparse-Hessian path. The model's states
+        # are array variables, which since DISCOPT_NATIVE_KERNEL_VECTOR_VARS the
+        # native spatial kernel can take whole -- and then this test would no longer
+        # exercise the path it exists for. Keep the solve on the Python tree.
+        monkeypatch.setenv("DISCOPT_NATIVE_KERNEL_VECTOR_VARS", "0")
         # nfe keeps this a fast plumbing smoke test: it still routes through the
         # compressed-HVP Hessian path (asserted below), but solves in a few
         # seconds even on the ipm fallback used in CI (where pounce is absent).

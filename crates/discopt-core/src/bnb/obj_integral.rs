@@ -45,6 +45,7 @@
 /// at 1e-3, below which the cutoff `U - g` is indistinguishable from `U` and the
 /// rule buys nothing anyway.
 use crate::lp::simplex::sparse::SparseCols;
+use crate::presolve::directed::{add_up, div_up, mul_up};
 
 const MAX_DENOM: i64 = 1_000;
 
@@ -73,10 +74,15 @@ fn lcm_i64(a: i64, b: i64) -> Option<i64> {
     a.checked_div(g).and_then(|q| q.checked_mul(b))
 }
 
-/// Smallest `d in 1..=MAX_DENOM` with `d·v` integral to `RATIONAL_TOL`, else
-/// `None`. Continued-fraction expansion, so a value like `1/3` is found at
-/// `d = 3` rather than by scanning.
-fn denominator_of(v: f64) -> Option<i64> {
+/// The continued-fraction convergent `p/q` (`1 <= q <= MAX_DENOM`) nearest `v`
+/// to `RATIONAL_TOL`, else `None`. Continued-fraction expansion, so a value like
+/// `1/3` is found at `q = 3` rather than by scanning.
+///
+/// The convergent is a *candidate*, not a proof: `1 - 2^-32` is accepted as
+/// `1/1` here (#1953). What makes the lattice sound is [`rational_error`], which
+/// measures how far the stored coefficient really is from `p/q`, and the drift
+/// [`spacing_of`] builds from it.
+fn rationalize(v: f64) -> Option<(i64, i64)> {
     if !v.is_finite() {
         return None;
     }
@@ -101,8 +107,9 @@ fn denominator_of(v: f64) -> Option<i64> {
         if q1 != 0 {
             let approx = p1 as f64 / q1 as f64;
             if (approx - v).abs() <= RATIONAL_TOL * v.abs().max(1.0) {
-                let q = q1.abs();
-                return if q == 0 { None } else { Some(q) };
+                // q > 0: only the first partial quotient can be negative, and q
+                // is still 1 when it is consumed.
+                return if q1 <= 0 { None } else { Some((p1, q1)) };
             }
         }
         let frac = x - a;
@@ -114,68 +121,147 @@ fn denominator_of(v: f64) -> Option<i64> {
     None
 }
 
-/// The objective granularity `g > 0` when every attainable objective value lies
-/// on the lattice `k·g + obj_const`, or `None` when that cannot be proven.
+/// An upper bound on `|v - p/q|`, exact zero when `v == p/q` exactly (#1953).
 ///
-/// `c` and `is_int` are indexed alike over the structural columns. `obj_const`
-/// is deliberately **not** a parameter: it shifts the lattice but not its
-/// spacing, and every use here is a *difference* of objective values.
-pub fn objective_granularity(c: &[f64], is_int: &[bool]) -> Option<f64> {
+/// `v.mul_add(q, -p)` is the correctly rounded value of the exact `v*q - p`
+/// (`p` and `q` are small integers, exact in binary64). That exact value is a
+/// multiple of `ulp(v) >= 2^-1074`, so it rounds to zero only when it is zero,
+/// and otherwise its magnitude is at most `|e|*(1 + 2^-52)`.
+fn rational_error(v: f64, p: i64, q: i64) -> f64 {
+    let e = v.mul_add(q as f64, -(p as f64));
+    if e == 0.0 {
+        return 0.0;
+    }
+    div_up(mul_up(e.abs(), 1.0 + f64::EPSILON), q as f64)
+}
+
+/// One objective term: coefficient `t` on a column whose values satisfy
+/// `|x| <= mag` (`mag` may be `+inf`), plus `err`, an upper bound on how far `t`
+/// itself is from the coefficient the model really induces (zero for a cost read
+/// straight from `c`; the rounding of `-s*v` for a substituted term).
+#[derive(Debug, Clone, Copy)]
+struct Term {
+    t: f64,
+    mag: f64,
+    err: f64,
+}
+
+/// `|x| <= mag` over `[lo, up]`.
+fn magnitude(lo: f64, up: f64) -> f64 {
+    lo.abs().max(up.abs())
+}
+
+/// `a * mag` rounded up, with `0 * inf = 0`: a term that is exactly zero
+/// contributes nothing however wide its column.
+fn drift_of(a: f64, mag: f64) -> f64 {
+    if a == 0.0 {
+        0.0
+    } else {
+        mul_up(a, mag)
+    }
+}
+
+/// The objective lattice, or `None` when it cannot be proven.
+///
+/// `c`, `is_int`, `lo` and `up` are indexed alike over the structural columns.
+/// `obj_const` is deliberately **not** a parameter: it shifts the lattice but not
+/// its spacing, and every use here is a *difference* of objective values.
+pub fn objective_granularity(
+    c: &[f64],
+    is_int: &[bool],
+    lo: &[f64],
+    up: &[f64],
+) -> Option<ObjLattice> {
     debug_assert_eq!(c.len(), is_int.len());
-    let mut terms: Vec<f64> = Vec::new();
+    if lo.len() < c.len() || up.len() < c.len() {
+        return None;
+    }
+    let mut terms: Vec<Term> = Vec::new();
     for (j, &cj) in c.iter().enumerate() {
+        let mag = magnitude(lo[j], up[j]);
         if cj.abs() <= ZERO_TOL {
+            // Treated as zero, so its whole contribution is drift.
+            terms.push(Term {
+                t: cj,
+                mag,
+                err: 0.0,
+            });
             continue;
         }
         // A nonzero cost on a continuous column destroys the lattice outright.
         if !is_int.get(j).copied().unwrap_or(false) {
             return None;
         }
-        terms.push(cj);
+        terms.push(Term {
+            t: cj,
+            mag,
+            err: 0.0,
+        });
     }
-    spacing_of(&terms)
+    spacing_of(&terms, 0.0).map(|(spacing, drift)| ObjLattice {
+        spacing,
+        shift: 0.0,
+        drift,
+    })
 }
 
-/// The spacing of the lattice `{ k*g : k integer }` containing every value of
-/// `Sum_j t_j x_j` over integer `x_j`, or `None` when it cannot be proven.
+/// Largest admitted drift, relative to the spacing.
 ///
-/// Shared by both entry points so the rationalization and gcd — the part whose
-/// failure mode is a false bound — exists once.
-fn spacing_of(terms: &[f64]) -> Option<f64> {
+/// Not a soundness tolerance: every consumer accounts for the drift it is handed
+/// (see `TreeManager::cutoff_value`, `round_bound_up` and the global bound). It
+/// only declines lattices whose drift would eat the spacing they claim -- a
+/// lattice with `drift` comparable to `spacing` prunes nothing it may prune.
+const DRIFT_MAX_REL: f64 = 1e-9;
+
+/// The spacing `g` of a lattice `{ k*g }` and a drift `D` such that every value of
+/// `Sum_j t_j x_j` (over integer `x_j` within the terms' magnitudes) lies within
+/// `D` of a lattice point, or `None` when it cannot be proven.
+///
+/// The drift is what makes this sound (#1953). Each coefficient is replaced by a
+/// rational `r_j = p_j/q_j`; the lattice is exact for `Sum r_j x_j`, and the
+/// stored objective differs from it by at most
+/// `Sum_j (|t_j - r_j| + err_j) * mag_j`, summed with upward rounding, plus the
+/// caller's `anchor_err` (the rounding of a computed shift). Coefficients below
+/// `ZERO_TOL` are treated as zero and their whole `|t_j| * mag_j` is drift. Before
+/// this, `1 - 2^-32` was read as `1` with no account of the `2^-32 * 2^31 = 0.5`
+/// it moves the objective across a `[2^30, 2^31]` box, and a spacing of 1 pruned
+/// the optimum. A drift above `DRIFT_MAX_REL * g` (an infinite one included)
+/// declines.
+///
+/// Shared by both entry points so the rationalization and gcd -- the part whose
+/// failure mode is a false bound -- exists once.
+fn spacing_of(terms: &[Term], anchor_err: f64) -> Option<(f64, f64)> {
     let mut den: i64 = 1;
-    let mut any = false;
-    for &t in terms {
+    let mut drift = anchor_err;
+    let mut rats: Vec<(i64, i64)> = Vec::new();
+    for &Term { t, mag, err } in terms {
+        if !t.is_finite() || !err.is_finite() {
+            return None;
+        }
         if t.abs() <= ZERO_TOL {
+            drift = add_up(drift, drift_of(add_up(t.abs(), err), mag));
             continue;
         }
-        any = true;
-        den = lcm_i64(den, denominator_of(t)?)?;
+        let (p, q) = rationalize(t)?;
+        drift = add_up(drift, drift_of(add_up(rational_error(t, p, q), err), mag));
+        den = lcm_i64(den, q)?;
         if den > MAX_DENOM {
             return None;
         }
+        rats.push((p, q));
     }
-    if !any {
+    if rats.is_empty() {
         // A constant objective: every value is the same. Sound to call granular,
         // but there is nothing to prune, so decline and keep the downstream
         // arithmetic free of a degenerate case.
         return None;
     }
-    // With `d*t_j` all integral, the sum is `(1/d)*Sum (d*t_j) x_j` over integer
-    // `x_j`, hence a multiple of `gcd_j(d*t_j) / d`.
+    // With `r_j = p_j/q_j` and `den` a multiple of every `q_j`, `den*r_j` is the
+    // integer `p_j*(den/q_j)` -- exact integer arithmetic, no rounding test -- so
+    // `Sum r_j x_j` is a multiple of `gcd_j(den*r_j) / den`.
     let mut g_num: i64 = 0;
-    for &t in terms {
-        if t.abs() <= ZERO_TOL {
-            continue;
-        }
-        let scaled = t * den as f64;
-        let r = scaled.round();
-        if (scaled - r).abs() > RATIONAL_TOL * scaled.abs().max(1.0) {
-            return None;
-        }
-        if r.abs() > i64::MAX as f64 {
-            return None;
-        }
-        g_num = gcd_i64(g_num, r as i64);
+    for &(p, q) in &rats {
+        g_num = gcd_i64(g_num, p.checked_mul(den / q)?);
     }
     if g_num == 0 {
         return None;
@@ -184,11 +270,14 @@ fn spacing_of(terms: &[f64]) -> Option<f64> {
     if !g.is_finite() || g <= 0.0 {
         return None;
     }
-    Some(g)
+    if !drift.is_finite() || drift > DRIFT_MAX_REL * g {
+        return None;
+    }
+    Some((g, drift))
 }
 
-/// A proven objective lattice: every attainable objective value equals
-/// `k*spacing + shift + obj_const` for some integer `k`.
+/// A proven objective lattice: every attainable objective value lies within
+/// `drift` of `k*spacing + shift + obj_const` for some integer `k`.
 ///
 /// `shift` is the constant the substitution below contributes; it is zero for a
 /// directly-integral objective. It exists because the anchor is load-bearing:
@@ -201,6 +290,10 @@ pub struct ObjLattice {
     /// Constant the substitution contributes; zero for a directly-integral
     /// objective. Added to the model's objective constant to anchor the lattice.
     pub shift: f64,
+    /// Every attainable objective lies within `drift` of a lattice point, not on
+    /// one: the stored coefficients are only within rounding of the rationals the
+    /// lattice is built from (#1953). Zero when they are exactly those rationals.
+    pub drift: f64,
 }
 
 /// True only for a bit-exactly fixed column.
@@ -276,25 +369,51 @@ pub fn objective_lattice(
     }
     let integral = |k: usize| k < ns && is_int[k];
 
-    let mut terms: Vec<f64> = Vec::new();
+    // Rounding of the computed terms and shift (#1953). A product or quotient of
+    // floats is within `u = 2^-53` relative of exact, so `fl(-fl(c/a)*v)` is within
+    // `(2u + u^2)|t|` of `-c*v/a`; `REL` = `4u` covers that and the `1/(1-u)` of
+    // relating the error to the computed `t`. The shift is a running float sum;
+    // each step adds at most `u*|partial sum|` plus the error of its addend.
+    const REL: f64 = 2.0 * f64::EPSILON;
+    let mut terms: Vec<Term> = Vec::new();
     let mut shift = 0.0f64;
+    let mut shift_err = 0.0f64;
+    let add_shift = |shift: &mut f64, shift_err: &mut f64, v: f64, v_err: f64| {
+        *shift += v;
+        *shift_err = add_up(add_up(*shift_err, v_err), mul_up(shift.abs(), REL));
+    };
     let mut pending: Vec<usize> = Vec::new();
     for j in 0..ns {
         let cj = c[j];
+        let mag = magnitude(lo[j], up[j]);
         if cj.abs() <= ZERO_TOL {
+            terms.push(Term {
+                t: cj,
+                mag,
+                err: 0.0,
+            });
             continue;
         }
         if integral(j) {
-            terms.push(cj);
+            terms.push(Term {
+                t: cj,
+                mag,
+                err: 0.0,
+            });
         } else if is_fixed(lo[j], up[j]) {
-            shift += cj * lo[j];
+            let v = cj * lo[j];
+            add_shift(&mut shift, &mut shift_err, v, mul_up(v.abs(), REL));
         } else {
             pending.push(j);
         }
     }
     // Nothing to resolve: identical to `objective_granularity`, and no row work.
     if pending.is_empty() {
-        return spacing_of(&terms).map(|spacing| ObjLattice { spacing, shift });
+        return spacing_of(&terms, shift_err).map(|(spacing, drift)| ObjLattice {
+            spacing,
+            shift,
+            drift,
+        });
     }
 
     // Row-wise view, built only over the rows the pending columns touch. One
@@ -335,25 +454,34 @@ pub fn objective_lattice(
             // fixed. A second free continuous column -- another pending
             // objective column included -- makes the row prove nothing, so no
             // pair of pending columns can resolve through the same row and no
-            // resolution can depend on another.
-            if rows[i].iter().any(|&(k, v)| {
-                k != j && v.abs() > ZERO_TOL && !integral(k) && !is_fixed(lo[k], up[k])
-            }) {
+            // resolution can depend on another. A coefficient below `ZERO_TOL`
+            // counts: its column still moves `z_j`.
+            if rows[i]
+                .iter()
+                .any(|&(k, v)| k != j && v != 0.0 && !integral(k) && !is_fixed(lo[k], up[k]))
+            {
                 continue;
             }
             let s = c[j] / a_ij;
             if !s.is_finite() {
                 continue;
             }
-            shift += s * b[i];
+            let sb = s * b[i];
+            add_shift(&mut shift, &mut shift_err, sb, mul_up(sb.abs(), REL));
             for &(k, v) in &rows[i] {
-                if k == j || v.abs() <= ZERO_TOL {
+                if k == j || v == 0.0 {
                     continue;
                 }
+                let t = -s * v;
                 if integral(k) {
-                    terms.push(-s * v);
+                    terms.push(Term {
+                        t,
+                        mag: magnitude(lo[k], up[k]),
+                        err: mul_up(t.abs(), REL),
+                    });
                 } else {
-                    shift -= s * v * lo[k];
+                    let w = t * lo[k];
+                    add_shift(&mut shift, &mut shift_err, w, mul_up(w.abs(), 2.0 * REL));
                 }
             }
             resolved = true;
@@ -366,12 +494,24 @@ pub fn objective_lattice(
     if !shift.is_finite() {
         return None;
     }
-    spacing_of(&terms).map(|spacing| ObjLattice { spacing, shift })
+    spacing_of(&terms, shift_err).map(|(spacing, drift)| ObjLattice {
+        spacing,
+        shift,
+        drift,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The spacing over a `[-1000, 1000]` box per column: wide enough that a
+    /// rounded rational like `1/3` still has a negligible drift.
+    fn gran(c: &[f64], is_int: &[bool]) -> Option<f64> {
+        let lo = vec![-1000.0; c.len()];
+        let up = vec![1000.0; c.len()];
+        objective_granularity(c, is_int, &lo, &up).map(|l| l.spacing)
+    }
 
     /// Build the engine form `A z = b` from dense row-major `A`.
     fn csc(a: &[f64], m: usize, n: usize) -> SparseCols {
@@ -392,7 +532,7 @@ mod tests {
         let b = vec![0.0];
 
         assert_eq!(
-            objective_granularity(&c, &is_int),
+            gran(&c, &is_int),
             None,
             "base detector must refuse a costed continuous column"
         );
@@ -566,7 +706,7 @@ mod tests {
         let lo = vec![0.0, 0.0];
         let up = vec![10.0, 10.0];
         let b = vec![3.0];
-        let base = objective_granularity(&c, &is_int).expect("4x + 6y");
+        let base = gran(&c, &is_int).expect("4x + 6y");
         let got = objective_lattice(
             &c,
             &is_int,
@@ -644,7 +784,7 @@ mod tests {
                     csc: &csc(&a, 1, n),
                     b: &b,
                     m: 1,
-                    n: n,
+                    n,
                 },
             ) else {
                 continue;
@@ -677,7 +817,7 @@ mod tests {
     fn unit_binary_objective_has_granularity_one() {
         let c = vec![1.0, 1.0, 1.0];
         let is_int = vec![true; 3];
-        assert_eq!(objective_granularity(&c, &is_int), Some(1.0));
+        assert_eq!(gran(&c, &is_int), Some(1.0));
     }
 
     #[test]
@@ -685,14 +825,14 @@ mod tests {
         // 4x + 6y over integers hits only multiples of 2.
         let c = vec![4.0, 6.0];
         let is_int = vec![true, true];
-        assert_eq!(objective_granularity(&c, &is_int), Some(2.0));
+        assert_eq!(gran(&c, &is_int), Some(2.0));
     }
 
     #[test]
     fn half_integral_objective_is_detected() {
         let c = vec![0.5, 1.5];
         let is_int = vec![true, true];
-        let g = objective_granularity(&c, &is_int).expect("0.5-spaced lattice");
+        let g = gran(&c, &is_int).expect("0.5-spaced lattice");
         assert!((g - 0.5).abs() < 1e-12, "got {g}");
     }
 
@@ -700,14 +840,14 @@ mod tests {
     fn zero_cost_columns_are_ignored_even_when_continuous() {
         let c = vec![1.0, 0.0, 2.0];
         let is_int = vec![true, false, true];
-        assert_eq!(objective_granularity(&c, &is_int), Some(1.0));
+        assert_eq!(gran(&c, &is_int), Some(1.0));
     }
 
     #[test]
     fn refuses_when_a_continuous_column_carries_cost() {
         let c = vec![1.0, 3.0];
         let is_int = vec![true, false];
-        assert_eq!(objective_granularity(&c, &is_int), None);
+        assert_eq!(gran(&c, &is_int), None);
     }
 
     #[test]
@@ -715,28 +855,28 @@ mod tests {
         // Left uncapped, continued fractions would hand back 1/33102 here.
         let c = vec![1.0, std::f64::consts::PI];
         let is_int = vec![true, true];
-        assert_eq!(objective_granularity(&c, &is_int), None);
+        assert_eq!(gran(&c, &is_int), None);
     }
 
     #[test]
     fn handles_negative_and_mixed_sign_coefficients() {
         let c = vec![-2.0, 4.0, -6.0];
         let is_int = vec![true; 3];
-        assert_eq!(objective_granularity(&c, &is_int), Some(2.0));
+        assert_eq!(gran(&c, &is_int), Some(2.0));
     }
 
     #[test]
     fn refuses_a_denominator_past_the_cap() {
         let c = vec![1.0, 1.0 / 4001.0];
         let is_int = vec![true, true];
-        assert_eq!(objective_granularity(&c, &is_int), None);
+        assert_eq!(gran(&c, &is_int), None);
     }
 
     #[test]
     fn refuses_a_constant_objective() {
         let c = vec![0.0, 0.0];
         let is_int = vec![true, true];
-        assert_eq!(objective_granularity(&c, &is_int), None);
+        assert_eq!(gran(&c, &is_int), None);
     }
 
     /// The soundness property, stated as a test: for random integer points the
@@ -763,7 +903,7 @@ mod tests {
                 })
                 .collect();
             let is_int = vec![true; n];
-            let Some(g) = objective_granularity(&c, &is_int) else {
+            let Some(g) = gran(&c, &is_int) else {
                 continue;
             };
             for _ in 0..20 {
@@ -784,5 +924,96 @@ mod tests {
             checked > 500,
             "granularity property never exercised ({checked})"
         );
+    }
+
+    /// #1953 item 1: `1 - 2^-32` is exact in binary64 and is *not* 1. Over a
+    /// `[2^30, 2^31]` box it moves the objective by up to 0.5, so a unit lattice
+    /// would prune the optimum. Smaller boxes too (the issue's `N = 2^16`).
+    #[test]
+    fn issue_1953_near_integer_coefficient_is_not_a_unit_lattice() {
+        let eps = 2f64.powi(-32);
+        for n in [2f64.powi(30), 2f64.powi(16), 1e6] {
+            let c = [1.0, -(1.0 - eps)];
+            let lo = [n, n];
+            let up = [2.0 * n, 2.0 * n];
+            assert_eq!(
+                objective_granularity(&c, &[true, true], &lo, &up),
+                None,
+                "N = {n}"
+            );
+        }
+        // Unbounded columns: an inexact rational has unbounded drift.
+        let inf = f64::INFINITY;
+        assert_eq!(
+            objective_granularity(&[1.0 / 3.0], &[true], &[0.0], &[inf]),
+            None
+        );
+        // ... while an exact one needs no bound at all.
+        assert_eq!(
+            objective_granularity(&[0.5, 1.5], &[true, true], &[-inf, 0.0], &[inf, inf])
+                .map(|l| (l.spacing, l.drift)),
+            Some((0.5, 0.0))
+        );
+    }
+
+    /// A decimal spacing the model means (`0.01`, stored inexactly) is still
+    /// detected on a realistic box, with the drift reported rather than ignored,
+    /// and the drift really bounds the distance of attainable values from the
+    /// lattice.
+    #[test]
+    fn issue_1953_decimal_spacing_carries_its_drift() {
+        let c = [0.01, 0.03];
+        let lo = [0.0, -500.0];
+        let up = [1e4, 500.0];
+        let lat = objective_granularity(&c, &[true, true], &lo, &up).expect("0.01 lattice");
+        assert_eq!(lat.spacing, 0.01);
+        assert!(lat.drift > 0.0 && lat.drift < 1e-12, "drift {}", lat.drift);
+        let mut checked = 0;
+        for x in [0i64, 1, 7, 9999, 10_000] {
+            for y in [-500i64, -3, 0, 499, 500] {
+                let v = c[0] * x as f64 + c[1] * y as f64;
+                let exact = (x + 3 * y) as f64 / 100.0; // the lattice point
+                                                        // f64 evaluation adds its own rounding; allow it on top of drift.
+                assert!((v - exact).abs() <= lat.drift + 4.0 * f64::EPSILON * 1e2);
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 25);
+    }
+
+    /// A coefficient below `ZERO_TOL` is not free: over a wide column its whole
+    /// contribution is drift, and a wide enough column declines the lattice.
+    #[test]
+    fn issue_1953_dropped_tiny_coefficient_counts_as_drift() {
+        let c = [1.0, 1e-13];
+        let is_int = [true, false];
+        assert!(objective_granularity(&c, &is_int, &[0.0, 0.0], &[10.0, 1.0]).is_some());
+        assert_eq!(
+            objective_granularity(&c, &is_int, &[0.0, 0.0], &[10.0, 1e6]),
+            None
+        );
+    }
+
+    /// The substitution path accounts for the same drift: `z = (1 - 2^-32) y`
+    /// with `y` integer on `[2^30, 2^31]` is not a unit lattice.
+    #[test]
+    fn issue_1953_substituted_near_integer_term_is_declined() {
+        let eps = 2f64.powi(-32);
+        let n = 2f64.powi(30);
+        // columns: z (continuous, cost 1), y (int); row z - (1 - eps) y = 0
+        let a = vec![1.0, -(1.0 - eps)];
+        let got = objective_lattice(
+            &[1.0, 0.0],
+            &[false, true],
+            &[-1e12, n],
+            &[1e12, 2.0 * n],
+            &LatticeRows {
+                csc: &csc(&a, 1, 2),
+                b: &[0.0],
+                m: 1,
+                n: 2,
+            },
+        );
+        assert_eq!(got, None);
     }
 }

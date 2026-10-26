@@ -443,6 +443,20 @@ class UniformRelaxation:
     # native-kernel producer (#764) can emit a `BlfTerm` per product (bilinear and the
     # variable × linear-form / form × form products the factorable engine folds).
     bilinear_linform_specs: list = dataclasses.field(default_factory=list)
+    # Indices (into ``model._A_ub``) of rows that are NOT the envelope of any lifted
+    # term, though their support can lie inside one: the constraint-factor RLT rows
+    # (``_emit_linear_equality_rlt``). ``x36 == 0`` times ``x_j`` linearizes to the
+    # one-column row ``X_{36,j} == 0``, whose support ``{X}`` is inside the product's
+    # ``{x36, x_j, X}``, so the native-kernel producer's support-based claim took it
+    # for a fifth McCormick row and declined the whole model (#1944). The producer
+    # skips these when it claims envelope rows; they stay subject to its
+    # box-independence check like any other fixed row.
+    nonenvelope_rows: list = dataclasses.field(default_factory=list)
+    # Indices of rows whose coefficients come from the BUILD box rather than from
+    # the model alone: the bound-factor RLT rows of ``_emit_linear_inequality_rlt``.
+    # Each is valid in every sub-box of the build box and in no larger box. Every
+    # entry is also in ``nonenvelope_rows``.
+    root_box_rows: list = dataclasses.field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -844,7 +858,13 @@ class _TracedEvalFn:
 
 
 def _analysis_token(model: Model) -> tuple:
-    return (len(model._variables), len(model._constraints), id(model._objective))
+    # The product-distribution setting changes the canonical DAG itself (#1944),
+    # so a DAG canonicalized under the other setting must not be reused.
+    from discopt.solver_tuning import current as _tuning
+
+    _tun = _tuning()
+    dist = int(_tun.distribute_affine_products_max) if _tun.distribute_affine_products else 0
+    return (len(model._variables), len(model._constraints), id(model._objective), dist)
 
 
 class _ModelAnalysisCache:
@@ -1072,6 +1092,11 @@ class _Builder:
         # ``BlfTerm`` from each so the Rust kernel regenerates the McCormick rows per
         # box; the interval bounds are recomputed there, so only the structure is kept.
         self.bilinear_linform_specs: list[tuple[int, dict, float, dict, float]] = []
+        # Row indices that are never a lifted term's envelope (see
+        # ``UniformRelaxation.nonenvelope_rows``).
+        self.nonenvelope_rows: list[int] = []
+        # Row indices built from the box (see ``UniformRelaxation.root_box_rows``).
+        self.root_box_rows: list[int] = []
         self._ivbox = _interval_box(model, flat_lb, flat_ub)
         # Validation-only: aux column -> the modeling Expression whose exact value
         # that column represents (the node itself, a relaxed power, or a McCormick
@@ -4110,8 +4135,128 @@ def _emit_linear_equality_rlt(ctx: _Builder, model: Model) -> None:
             if not row:
                 continue
             # ``row · z == 0`` as the two inequalities the LP layer takes.
-            ctx.add_row(row, 0.0)
-            ctx.add_row({c: -v for c, v in row.items()}, 0.0)
+            for r in (row, {c: -v for c, v in row.items()}):
+                before = len(ctx.rows)
+                ctx.add_row(r, 0.0)
+                if len(ctx.rows) > before:
+                    ctx.nonenvelope_rows.append(before)
+
+
+def _existing_product_cols(ctx: _Builder) -> dict[tuple[int, int], int]:
+    """``(i, j) -> column`` (``i <= j``) for every product of two originals the
+    build has lifted: bilinear pairs and ``x_i**2`` squares."""
+    prod: dict[tuple[int, int], int] = {}
+    for (a, b), col in ctx.bilinear_map.items():
+        prod[(min(a, b), max(a, b))] = col
+    for (i, p), col in ctx.monomial_map.items():
+        if p == 2:
+            prod[(i, i)] = col
+    return prod
+
+
+def _emit_linear_inequality_rlt(ctx: _Builder, model: Model) -> None:
+    """Bound-factor RLT rows for the linear inequalities, over existing products only.
+
+    For a linear inequality written as the slack ``s(x) = g + a'x >= 0`` and a
+    variable ``x_j`` with finite bounds ``[l, u]``, both
+
+        ``s(x) * (x_j - l) >= 0``   and   ``s(x) * (u - x_j) >= 0``
+
+    hold at every point of the box that satisfies the inequality: each is a
+    product of two non-negative numbers. Expanded, ``s(x) * x_j = g x_j +
+    sum_i a_i x_i x_j``. Replacing every ``x_i x_j`` by its lifted column
+    ``X_ij`` gives a LINEAR row, and since ``X_ij = x_i x_j`` at every feasible
+    point, the row cuts none of them. This is the Sherali-Adams level-1
+    constraint-factor x bound-factor product {cite:p}`Sherali1990`.
+
+    **Existing products only.** A row is emitted only when every ``X_ij`` it needs
+    is already a lifted column, the policy of SCIP's RLT separator (its
+    ``maxunknownterms`` defaults to 0, {cite:p}`Bestuzheva2023`). This pass never
+    adds a column. The lineq pass's on-demand lifting multiplied nous1's
+    relaxation from 104 to 1,072 columns and bought no bound, which is why that
+    policy is the right one here (#1944).
+
+    **Box data.** ``l`` and ``u`` are the BUILD box's bounds, so a row is valid in
+    every sub-box of the build box and possibly in no larger one. That is the
+    whole reason the rows are recorded in ``ctx.root_box_rows``. The native
+    kernel only ever shrinks its root box, so the producer can carry the root-box
+    rows as fixed rows at every node. They are weaker there than rows rebuilt at
+    the node box would be, but never invalid. Equalities are skipped: for
+    ``s(x) == 0`` the bound-factor products are the lineq rows minus a multiple
+    of the constraint itself, so they add nothing (that is
+    :func:`_emit_linear_equality_rlt`'s family).
+
+    Measured motivation (#1944): every RLT cut SCIP 10 applies at tln4's root is
+    from this family, over existing products, and removing SCIP's RLT separator
+    costs 8.3 -> 3.8 there.
+    """
+    from discopt._relax.milp_relaxation import _linear_form_terms
+
+    n_orig = ctx.n_orig
+    prod = _existing_product_cols(ctx)
+    if not prod:
+        return
+    partners: dict[int, set[int]] = {}
+    for p, q in prod:
+        partners.setdefault(p, set()).add(q)
+        partners.setdefault(q, set()).add(p)
+
+    # Slack forms ``g + a'x >= 0``, one per finite side of each inequality.
+    slacks: list[tuple[dict[int, float], float]] = []
+    for constraint in model._constraints:
+        if constraint.sense not in ("<=", ">="):
+            continue
+        form = _linear_form_terms(constraint.body, model, n_orig)
+        if form is None:
+            continue
+        terms, const = form
+        terms = {int(i): float(a) for i, a in terms.items() if a != 0.0}
+        if not terms:
+            continue
+        # Stored as ``body <sense> rhs`` with ``body = terms.x + const``.
+        rhs = float(constraint.rhs)
+        if not math.isfinite(rhs):
+            continue
+        if constraint.sense == "<=":  # rhs - body >= 0
+            slacks.append(({i: -a for i, a in terms.items()}, rhs - const))
+        else:  # body - rhs >= 0
+            slacks.append((terms, const - rhs))
+
+    for a, g in slacks:
+        # A multiplier needs a product with EVERY variable of the row.
+        support = set(a)
+        candidates = None
+        for i in support:
+            pi = partners.get(i, set())
+            candidates = set(pi) if candidates is None else candidates & pi
+            if not candidates:
+                break
+        if not candidates:
+            continue
+        for j in sorted(candidates):
+            lo, hi = float(ctx.col_lb[j]), float(ctx.col_ub[j])
+            # s(x) * x_j as {col: coef}: g x_j + sum_i a_i X_ij.
+            sx: dict[int, float] = {j: g}
+            for i, ai in a.items():
+                col = prod[(min(i, j), max(i, j))]
+                sx[col] = sx.get(col, 0.0) + ai
+            for bound, lower in ((lo, True), (hi, False)):
+                if not math.isfinite(bound):
+                    continue
+                # lower: s*x_j - l*s >= 0  ->  -(s*x_j) + l*a'x <= -l*g
+                # upper: u*s - s*x_j >= 0  ->   (s*x_j) - u*a'x <=  u*g
+                row: dict[int, float] = {}
+                sgn = -1.0 if lower else 1.0
+                for col, v in sx.items():
+                    row[col] = row.get(col, 0.0) + sgn * v
+                for i, ai in a.items():
+                    row[i] = row.get(i, 0.0) - sgn * bound * ai
+                rhs_row = sgn * bound * g
+                before = len(ctx.rows)
+                ctx.add_row(row, rhs_row)
+                if len(ctx.rows) > before:
+                    ctx.nonenvelope_rows.append(before)
+                    ctx.root_box_rows.append(before)
 
 
 def _clamped_breakpoints(
@@ -4635,6 +4780,7 @@ def build_uniform_relaxation(
     *,
     rlt_quad: bool = False,
     rlt_lineq: bool = False,
+    rlt_ineq: bool = False,
     skip_separable_floor: bool = False,
     skip_convex_lift: bool = False,
     disc_state: object = None,
@@ -4687,6 +4833,12 @@ def build_uniform_relaxation(
         point) and box-independent, so unlike ``rlt_quad`` its rows survive the
         native spatial kernel's per-node box patching. Callers gate it on
         ``DISCOPT_RLT_LINEQ``.
+    rlt_ineq : bool, default False
+        Enable the linear-inequality x bound-factor RLT pass over products the
+        build already lifted (see :func:`_emit_linear_inequality_rlt`). Its rows
+        carry the BUILD box, so they are valid in every sub-box of it and in no
+        larger one; they are listed in ``UniformRelaxation.root_box_rows``. The
+        native-kernel producer is the only caller (#1944).
 
     Returns
     -------
@@ -4791,6 +4943,10 @@ def build_uniform_relaxation(
     # reasons (adds rows only, so skipping a truncated build stays sound).
     if rlt_lineq and not build_truncated:
         _emit_linear_equality_rlt(ctx, model)
+    # Linear-inequality x bound-factor RLT over existing products (#1944). Adds rows
+    # only, so skipping it on a truncated build stays sound for the same reason.
+    if rlt_ineq and not build_truncated:
+        _emit_linear_inequality_rlt(ctx, model)
 
     obj_offset = obj_lin.const
 
@@ -4960,6 +5116,8 @@ def build_uniform_relaxation(
         integrality=list(ctx.integrality),
         univariate_atom_specs=list(ctx.univariate_atom_specs),
         bilinear_linform_specs=list(ctx.bilinear_linform_specs),
+        nonenvelope_rows=list(ctx.nonenvelope_rows),
+        root_box_rows=list(ctx.root_box_rows),
     )
 
 

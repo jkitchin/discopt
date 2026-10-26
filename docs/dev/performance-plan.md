@@ -11010,6 +11010,27 @@ instances, 30 s, 77 checks against `minlplib.solu`): false 0, bad points 0, lost
 `rows_verified` -- row equalities of `[A | I]` only, so a negative slack or a
 structural outside its box would still pass. A related gap, outside this change.
 
+**Covered since #1945 (2026-10-25).**
+- **Entry experiment** (`main` @ `e5812d0`, count-only counters).
+  - Default route: the driver saw only 488 `Optimal` node LPs on 5 corpus instances, and 0 failed the original-space audit.
+  - AMP route (whose MILP relaxations go through the driver): 314 of 18,930 failed, and 129 of them were integral vertices `rows_verified` accepted as incumbents.
+  - Every violation was below 1e-3 relative; most were 1e-6–1e-5. Nothing like the fixture's 1.8e-2 appeared.
+  - No published result was wrong: the Python gates (`_point_feasible`, the MILP-BB exit, the LP route) check bounds and refuse such a point.
+- **Fix.** `lp::simplex::ScaledProblem` owns the original CSC, the `Scaling` and the scaled CSC, built once per batch.
+  - Every driver node, strong-branch and dive solve goes through `ScaledProblem::verify`: audit the unscaled point against the original data, re-solve on the original data on failure, map a decided retry back into solve coordinates exactly, else `Numerical`.
+  - `incumbent_verified` adds the audit's bound test (`primal::bounds_hold`) to `rows_verified` for node and dive incumbents.
+  - A structural test fails if code outside `lp/simplex` builds a `Scaling` or scales a matrix.
+- **Panel** (in-repo corpus, 70 instances × {default, AMP} × {`main`, branch}, 30 s, interleaved):
+  - 0 certificates lost or gained (54/54 default, 22/22 AMP), 0 objective drift on both-certified pairs;
+  - 133/140 pairs identical in node count and objective;
+  - both-certified wall time: median ratio 0.987 (default) and 1.001 (AMP).
+  - The 7 differing pairs all ran at or near the time limit. Two more interleaved runs per arm put 5 of them within `main`'s own spread; on cvxnonsep_psig30 only the branch's node count varies (621/675/622 against `main`'s 675×3), with identical objective and certificate.
+  - One reproducible gain: nvs05 under AMP reaches the optimal incumbent 5.4709 in 3/3 runs, where `main` stalls at 7.7542 in 3/3.
+  - Bounds that moved all got tighter and stay below the oracle: nvs05 4.319 → 5.089, tanksize 1.2610 → 1.2618, nvs14 (AMP) −40454.0 → −40379.6.
+- **Counters** (branch, AMP, the 7 instances with driver failures):
+  - unscaled retries decide most refusals (e.g. nvs06 56/59, st_e38 30/31), except nvs21 (63/459; the rest become `Numerical`, with the panel outcome unchanged);
+  - `DriverIncumbentBoundsRefused` = 0 everywhere, so the incumbent bound check is defense in depth behind `verify`.
+
 ### 79c. DSE with inherited weights + hypersparse solves: in-tree, mixed; blocked by the scaled feasibility tolerance (2026-10-25)
 
 Built in a local worktree (not merged): the dual loop's final steepest-edge
@@ -11083,3 +11104,835 @@ nodes. Untested hypothesis: each node re-derives its own equilibration, so a
 parent's weights are in different units from the child's LP. On Devex the scaled
 tolerance changes little (refusals 32 -> 27, time unchanged), so it does not pay for
 an engine change by itself. Neither piece ships; the prototypes stay local.
+
+## 80. #1944: SCIP's RLT rows, made reachable by the native kernel (2026-10-25)
+
+Context: #1941's round-2 SCIP screen confirmed tln5, tln6, nous1 and nous2 as
+failures. #1944 attributed their weak roots to SCIP's RLT separator (removing it
+costs tln4 8.3 -> 5.9, nous1 0.345 -> -0.085).
+
+**Entry experiment 1: which RLT rows SCIP applies.** These are the LP rows named
+`rlt_cut_*` after `limits/nodes = 1` with default settings (SCIP 10.0,
+pyscipopt 6.3.0). Every one is over products that already exist
+(`maxunknownterms = 0`):
+
+- nous1 (12 rows) and nous2: all *linear equality x variable*. Examples are the
+  composition rows `x33 + x34 + x35 = 1` times a flow, and the flow balances
+  times a quality. This is exactly `DISCOPT_RLT_LINEQ`'s family.
+- tln4 (7 rows): all *linear inequality x bound factor*. Examples are
+  `(5 - sum_k i_k) * i_j >= 0` and `(1900 - 330 i9 - ...) * (12 - i5) >= 0`.
+  discopt has no family for these that reaches the kernel.
+
+**Falsified: "SCIP's RLT separator alone closes the root."** With every other
+separator off, SCIP's RLT root equals the separator-free root (nous1 -0.281,
+tln4 3.05). Its 5 cuts found on nous1 are all rejected, and none is applied.
+RLT pays only together with the other cuts. The issue's ablation measured
+removing RLT, never adding it alone.
+
+**Falsified: "the remaining nous gap is RLT."** With no separator, no presolve and
+no OBBT, SCIP's root on nous1 is -0.415; discopt's is -0.847. The boxes are
+identical, and discopt's is tighter on 14 columns. The difference is the
+objective `(c + a'x) * x0`. discopt relaxes it as one affine-form product, while
+SCIP distributes it, and `x2*x0`, `x3*x0` are the very products of the
+constraints `x24 = x2*x0`, `x25 = x3*x0`.
+
+**Built (all default-OFF; audit rows added):**
+
+1. `DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS`: the canonicalizer distributes a product
+   of two affine forms over disjoint variables. The result is never looser: summed,
+   the scaled per-pair McCormick inequalities are the affine-form ones.
+2. Kernel admission of the lineq rows. They were declined because
+   `X_{36,j} == 0` (from `x36 == 0`) looked like a fifth envelope row of the
+   product. They are now tagged `nonenvelope_rows`. This is a defect fix: with the
+   flag OFF nothing changes.
+3. `DISCOPT_RLT_INEQ`: inequality x bound-factor rows over existing products,
+   built at the kernel's root box and carried as fixed rows. They are valid in
+   every sub-box. The producer takes them from the real-box build, never the
+   probe build, and a test pins that.
+
+**Root LP at the presolved box (nous):**
+
+| | off | +distribute | +lineq (existing products) | both |
+|---|---:|---:|---:|---:|
+| nous1 | -0.847 | -0.636 | -0.759 | **0.0795** |
+| nous2 | -0.830 | -0.435 | -0.759 | **0.2384** |
+
+Lifting new products for the lineq rows (`DISCOPT_RLT_LINEQ_MAX=4096`) gives the
+same bound with 1,074 columns instead of 106. The kernel then runs 55 nodes in
+120 s instead of 16,231. Use `DISCOPT_RLT_LINEQ_MAX=0`.
+
+**Falsified: "the rows' losses are duplicate rows."** On the 225-instance panel
+below, the bundle lost pooling_adhya1pq / 1tp / 2tp. Ablation pins all three on
+the lineq rows. On adhya those rows duplicate no existing row and leave the root
+LP *exactly* unchanged (-856.25062 both ways). What changes is the node LP:
+adhya2tp's node-LP time goes 0.55 -> 19.2 s and undecided nodes 6 -> 2,618. The
+kernel's cold primal ends `Numerical`/`IterLimit` on these equality-rich
+relaxations, and an undecided node is bisected without bound gain. With
+`DISCOPT_NATIVE_WARM_START=2` (#1935) or `DISCOPT_LP_COLD_DUAL_START=1`, undecided
+is 0 and adhya2tp certifies in 433 nodes (387 off). The same mechanism is
+behind tln below and behind nous1's frozen bound: 3,489 of 12,282 nodes are
+undecided with distribution alone, and the 120 s and 600 s bounds were identical
+(0.8745).
+
+**Issue instances at 120 s** (current `main` incl. #1943, sequential, quiet
+machine, load < 1.5. "Bundle" = distribute + lineq (`MAX=0`) + ineq):
+
+| instance | default | bundle | bundle + warm start | SCIP |
+|---|---|---|---|---|
+| nous2 | bound 0.611 | **optimal 2.0 s** (41 nodes) | optimal 1.7 s (31 nodes; warm start alone 3.3 s) | 0.38 s |
+| nous1 | bound 0.295 | bound 0.875 | bound **1.40** at the 100k-node limit (opt 1.567); 900 s / 525k nodes: 1.482 | 4.3 s |
+| tln4 (unlifted) | 1.0 s | 12.4 s | **0.9 s** | 0.07 s |
+| tln5 (unlifted) | 46.5 s | open, 10.22 | **2.2 s** | 0.21 s |
+| tln6 (unlifted) | open, 12.88 | open, 15.04 | **36.3 s** | 0.29 s |
+
+The tln cells use `DISCOPT_RLT_INEQ` only; tln has no affine product or
+linear equality for the other two to act on. The warm start alone gives tln4
+1.3 s and tln5 20.1 s, and leaves tln6 open
+(14.72). The tln rows use the unlifted route. By default tln is lifted to a pure
+MILP, where these rows do not exist (tln5 bound 5.8, tln6 6.2 at 120 s), and
+`DISCOPT_IPX_CHEAP_FIRST` declines the lift only if its bounded probe certifies.
+Before #1943 merged, ineq alone certified tln4/5/6 in 1.3 / 1.6 / 3.7 s. #1943's
+strong branching solves child LPs cold, and on tln5 that leaves 4,943 of 11,869
+nodes undecided. With `DISCOPT_KERNEL_PSEUDOCOST=0` it is 0 undecided and 842
+nodes.
+
+**Panel (§5), 225 MINLPLib instances**, selected by filter from
+`instancedata.csv`: nonconvex, polynomial/quadratic only, at most 60 variables
+and constraints, a proven optimum. Run at 30 s, OFF/ON interleaved per instance,
+2 workers. Every incumbent was `verify_point`-ed on a freshly parsed model.
+Instrument: `discopt_benchmarks/scripts/issue1944_rlt_panel.py`, which asserts in
+every child that its arm's environment is the one it claims.
+
+- **Cert-clean:** 1,350 checks, 0 bounds across the oracle, 0 wrong optimal
+  verdicts, 0 unverified incumbents.
+- **Not net-positive on its own:** 189 -> 188 certified. Gained ex5_2_5 (1 node,
+  2.3 s) and nous2. Lost the three adhya instances (mechanism above).
+  Uncertified bounds: 4 tighter (nous1 -0.825 -> 0.079, sssd08-04persp, nvs24,
+  ex7_2_4) and 7 looser by tree path (tln5/6 on the lifted route, nvs19, nvs23,
+  wastewater05m1/15m1, ex8_4_1). Total wall 1482.8 -> 1455.5 s; median over
+  both-solved 0.46 -> 0.47 s.
+- **Conditional on the warm start** (both arms `DISCOPT_NATIVE_WARM_START=2`, the
+  same 225 instances and protocol):
+  - Cert-clean: 1,350 checks, 0 problems.
+  - **Net-positive: 189 -> 190 certified, 0 lost.** Gained ex5_2_5; nous2 is
+    3.3 s / 973 nodes -> 1.7 s / 31 nodes.
+  - Wall: total 1445.7 -> 1386.4 s (-4.1 %); over the 189 solved by both arms,
+    377.3 -> 343.4 s (-9.0 %); median 0.46 s both.
+  - Uncertified bounds: 5 tighter (nous1 0.411 -> 1.347), 6 looser by tree path
+    at the limit. The largest looser one is nvs24 -2578.9 -> -2904.2 (opt -1033),
+    a pure-integer QCQP the rows barely touch.
+
+**Verdict.** The three gates stay default-OFF. They are cert-clean in both
+panels, net-negative without the warm start and net-positive with it. They are
+not graduated on their own, because the measured benefit depends on a flag that
+is itself default-OFF. Graduation is sequenced behind #1935's
+`DISCOPT_NATIVE_WARM_START`: once it graduates, the conditional panel above is
+the graduation panel. Re-run it on that `main`.
+
+**nous1 stays open, with a measured reason.** Its root is 0.0795 against SCIP's
+0.345. The remaining gap is SCIP's other cuts (gomory/aggregation acting together
+with RLT) and tree throughput: SCIP with no separators at all needs 40,782 nodes
+and 33.7 s. discopt reaches 1.482 at 900 s. The flags-OFF path is bound-neutral: over the
+in-repo corpus, 53 of the 54 instances certified by both arms are byte-identical in
+node count and objective. The 54th, cvxnonsep_nsig30, is 316-320 nodes on `main`
+itself across three runs, which is pre-existing wall-clock nondeterminism.
+
+## 81. #1935/#1944: `DISCOPT_NATIVE_WARM_START=2` graduated (2026-10-25)
+
+§80 found that #1944's RLT rows pay only on a node LP that does not start cold.
+The kernel's cold primal ends `Numerical`/`IterLimit` on equality-rich
+relaxations, and undecided nodes are bisected with no bound gain. The warm start
+had passed both §5 bars on #1935's own 34-instance kernel panel and was pending
+the owner's decision. The owner asked for it (#1944 follow-up). Before flipping
+it, the panel was re-run wider and on current `main`, which now includes #1943's
+pseudocost branching and #1945's LP verification.
+
+**Panel.** `issue1944_rlt_panel.py --with-corpus --on-env
+DISCOPT_NATIVE_WARM_START=2 --off-env DISCOPT_NATIVE_WARM_START=0`, 30 s, 2
+workers, arms interleaved, each child asserting its own arm's environment.
+Population: 270 instances, the 45 in-repo corpus instances with a proven optimum
+plus the 225 of §80.
+
+| | mode 0 (cold) | mode 2 (warm + flip repair) |
+|---|---:|---:|
+| checks / problems | 1,620 / 0 | |
+| certified gained | | `tanksize`, `nous2` |
+| certified lost | | none |
+| nodes, both certify | 49,256 | 46,523 |
+| wall, both certify | 539.7 s | 510.8 s |
+| total wall | 1671.9 s | 1597.1 s |
+
+Among the 36 instances neither arm certifies, 9 bounds are tighter with the warm
+start. Examples: nous1 -0.049 -> 0.411, nvs19 -1196.8 -> -1099.0 (opt -1098.4),
+nvs23 -1825.8 -> -1545.1, nvs24 -4371.2 -> -2906.3, wastewater15m1 1802.5 ->
+1971.7. One is looser: tln4 7.9 -> 7.8, on the lifted MILP route the warm start
+does not touch, so that is time-limit noise.
+
+**Verdict: graduated.** The default is now `2`; `=0` restores the cold start and
+mode 1 stays addressable. #1944's three gates are graduated on this `main` in the
+next PR (§83).
+
+## 82. #1940: the integer-bilinear lift is raced, not assumed (2026-10-25)
+
+**Problem.** The integer-bilinear lift (`integer.bilinear`) was adopted whenever it
+yields a pure MILP. It wins on every in-repo instance it is adopted on, but loses
+5-30x on dense integer QPs and can end a time-limited solve with a worse incumbent
+and a worse bound. Five structural separators are already measured dead (#1940:
+lift size, product count, root-bound tightness, bit width, product location — the
+last falsified by the #1937 PWL counterexample), and cheap-first (§72, un-lifted
+probe first) costs 11.1x on the adopted corpus because the lift usually wins.
+
+**Hypothesis.** The two arms' *relative gaps after a short slice* predict the
+winner, so a lift-first race costs nothing where the lift wins quickly and recovers
+most of the loss where it does not. Kill criterion: the gap at the slice disagrees
+with the eventual winner on a decisive (non-tied) instance, or a simulated policy is
+not net-positive over lift-only.
+
+**Entry experiment** (39 instances, 30 s, lift vs no-lift in full plus each arm under
+a short limit, `scratchpad` harness; numbers below are from this machine). At a 3 s
+slice the policy simulated net-positive but `ex1265`'s lifted solve stops at 1.6 s
+`feasible` under `time_limit=3` and certifies in ~1.9 s at every limit >= 4 s — the
+native MILP engine sizes its stages from the limit — so 3 s is too short for the lift
+arm. At 5 s: simulated total wall 303.0 s (lift) / 295.0 s (no lift) / **222.7 s
+(race)**, certified 33 / 32 / **36** of 39; the 5 s gap picked the eventual winner,
+or one of two tied arms, on every instance that reached the gap comparison. Not
+falsified.
+
+**Rule (shipped, `DISCOPT_IPX_RACE`, default ON, `=0` restores the legacy rule).**
+`solver._ipx_lift_race`: a 5 s lifted slice (certifies -> answer); a 5 s un-lifted
+slice (certifies -> answer); otherwise continue the arm with the smaller relative gap
+(tie -> lift) on the rest of the budget. All results are merged by
+`_merge_route_and_fallback` — best incumbent, tightest dual bound; both formulations
+are exact, so each bound is valid for the caller's model. Each arm re-enters
+`solve_model` with the arguments it received (`_ipx_entry_args = dict(locals())`),
+so nothing is forwarded by name. Kept out of the race: `deterministic=True`, limits
+below 15 s, callbacks / warm starts / lazy constraints, cheap-first, nested arms.
+
+**Defect found by the first panel run** and fixed before the measurement below:
+`Model.solve` grants its primary `incumbent_time_extension` (#917, the 35 %
+`lp_spatial` reserve), and slices inherited it with the verbatim arguments. The 5 s
+un-lifted slice on `arrqp_n15` ran 15.5 s, the continuation got a negative budget,
+and the race returned uncertified an instance the lift certifies in 25 s (the one
+certification regression of that run). Only the continuation now receives the
+extension; slices run with `0`.
+
+**Graduation panel** (`scripts/panel_1940_lift_race.py`, 43 instances, 30 s, ON/OFF
+interleaved ABBA, 2 reps; incumbents re-verified on the original model, bounds checked
+against the best certified objective; 533 checks, **0 failures**):
+
+| | total wall | certified |
+|---|---:|---:|
+| always lift (OFF) | 330.0 s | 37 / 43 |
+| race (ON) | **261.0 s** | **39 / 43** |
+
+Faster: `dense_n15_s0` 24.5 -> 8.8 s, `dense_n18_s0` 23.6 -> 9.7 s, `sparse_n40`
+20.1 -> 6.3 s, `denselin_n15` 23.3 -> 12.4 s, `arrqp_n15` 25.0 -> 17.1 s; newly
+certified `dense_n20_s0` (21.7 s) and `denselin_n18` (15.7 s). On the four neither
+rule certifies the race has the tighter bound on all four and the better incumbent
+on three (`conge12` gap 0.05 % vs 11 %; `conge20` incumbent 72.06 vs 71.97, bound
+61.3 vs 57.5). Slower: `conge15` 6.3 -> 13.1 s (arms tie; the restart is pure
+overhead), `dense_n15_s1` 5.5 -> 6.8 s, `pwl_nx` 1.08 -> 1.37 s, and ~20-50 ms of
+re-entry on every instance the lift certifies inside its slice (the detection and the
+lift are built twice; `nvs02` 0.23 -> 0.28 s). The 12 adopted corpus instances all
+certify inside the first slice: same certified objective and node count as OFF
+(`test_1940_lift_race.py::test_bound_neutral_where_the_lift_certifies_in_its_slice`).
+
+**Not done, and why.** The continuation restarts its arm; a slice's tree is thrown
+away. Resuming would remove the `conge15` loss but needs a resumable B&B on both
+engines. The race does not seed the continuation with a slice's incumbent: the `rsyn0840m`
+measurement in `_merge_route_and_fallback`'s docstring shows a seeded fallback steers
+its heuristics worse, and the merge already keeps the best point.
+
+## 83. #1944: the lineq/ineq RLT rows graduated; distribution share-gated and kept opt-in (2026-10-25)
+
+Context: §80 found the bundle net-positive only with a warm-started node LP, and
+§81 made that the default (#1949). The bundle panel was re-run on that `main`:
+`issue1944_rlt_panel.py --with-corpus --base-env DISCOPT_NATIVE_WARM_START=2`,
+the same 270 instances, 30 s, interleaved.
+
+**First run: one certificate lost.** Cert-clean (1,620 checks, 0 problems).
+Gained ex5_2_5, but lost `tanksize`: the same ~19,000 nodes took 30 s instead of
+11.6 s. Ablation with the warm start on put the whole loss on distribution:
+
+| tanksize, 60 s | nodes | node-LP s |
+|---|---:|---:|
+| off | 19,039 | 7.9 |
+| distribute | 37,709 | 24.6 |
+| lineq (existing products) | 19,039 | 8.0 |
+| ineq | 17,375 | 7.9 |
+
+The root was *tighter* (0.8382 -> 0.8419), as the dominance argument requires,
+but distribution had added 38 columns and 112 rows.
+
+**Hypothesis: distribution pays only through column sharing.** Probe: for every
+product distribution rewrites on the 270, count its pairs that the undistributed
+model already has as products. Distribution fires on 14 instances:
+
+- **Every gainer shares.** ex5_2_5: 180 of 180 pairs. nous1/nous2: 4 of 8.
+  hda: 7 of 23 (its 30 s bound -64510 -> -7002). haverly: 2 of 2.
+- **The loser shares nothing.** tanksize: 0 of 38.
+- **The neutral ones share nothing.** ex1252/ex1252a, nvs05, st_e05.
+
+Not falsified. Built: `_distribute_affine_pair` now requires at least one pair
+that a distribution-off pre-pass of the canonicalizer found as a product. The
+pre-pass runs only when the flag is on. Afterwards tanksize is 19,039 nodes,
+the flag-off tree, and distribution fires on the 9 sharing instances.
+
+**Second run (graduation panel), gate in:**
+
+- Cert-clean: 1,620 checks, 0 problems.
+- **Net-positive: gained ex5_2_5, lost none.**
+- Wall where both certify: 523.9 -> 483.1 s (nodes 66,537 -> 62,237). Total:
+  1596.9 -> 1527.9 s.
+
+**Retracted (CI on #1950): distribution does not graduate.**
+`test_hda_root_bound_is_not_the_loose_safe_bound` failed with the three-flag
+bundle. It pins #671's row filter tightening hda's certified root bound at the
+declared box, via `MccormickLPRelaxer.solve_at_node`:
+
+| hda raw-box root | filter on | filter off |
+|---|---:|---:|
+| lineq on, distribution off | **-7,063** | -7.0e8 |
+| lineq on, distribution on | -5.6e8 | -5.4e6 |
+| lineq off, distribution off (old default) | -64,675 | -77,003 |
+| lineq off, distribution on | -4.2e9 | -1.4e6 |
+
+Without distribution the filter works, and the lineq rows give hda its best
+raw-box root (-7,063 against an optimum of -5,964). With distribution the
+filter's recovery inverts in both lineq settings. The real solve is unaffected:
+the presolved root is -7002.39 either way. This contradicts no soundness claim,
+because every arm is a valid bound, but it breaks a guarded mechanism for a
+reason not yet understood, so distribution stays opt-in. Its docstring and audit
+row say what would graduate it.
+
+**Panel for what graduates**: `RLT_LINEQ` (`MAX=0`) + `RLT_INEQ`, OFF arm both
+`=0`, distribution off in both arms, warm start in both:
+- Cert-clean: 1,620 checks, 0 problems.
+- Net-positive: no certificate gained or lost. Where both certify, nodes
+  66,530 -> 63,066 and wall 558.8 -> 518.3 s (-7.2 %); total wall 1630.6 ->
+  1588.6 s.
+- Bounds on the 36 neither certifies: hda -64,510 -> -7,002 (opt -5,964), nous1
+  0.41 -> 0.89, and tighter on nvs19, nvs23, wastewater05m1, ex5_2_5, ex7_2_4,
+  ex8_4_1. Looser by tree path at the limit on nvs24, wastewater15m1 and nvs05
+  (5.4668 -> 5.4660).
+- Haverly 1-3 (q-formulation) close at the root: 59 / 125 / 67 nodes -> 1.
+
+**Verdict: graduated.** `DISCOPT_RLT_LINEQ` and `DISCOPT_RLT_INEQ` default on,
+and `DISCOPT_RLT_LINEQ_MAX` defaults to 0 (existing products only). Each `=0`
+restores the legacy path; `DISCOPT_RLT_LINEQ_MAX=4096` restores lifting.
+`DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS` stays off, with the sharing gate kept for
+whoever takes up the hda interaction.
+
+## 84. #1934 follow-up: array variables reach the native spatial kernel (2026-10-25)
+
+**Retraction (CLAUDE.md §11).** §82, the #1948 PR body and the
+`DISCOPT_INTEGER_PRODUCT_INDEXED` audit row said that under that flag "the race's
+un-lifted arm runs the Python spatial tree, not the route the flag-OFF model takes".
+That was never measured and is false. Traced on `arrqp_n15` (30 s): flag OFF and the
+un-lifted arm with the flag ON take the **same** route, the Python spatial tree, in
+~6.9 s. Two other suspicions were also checked and dropped. The lifted array model
+and its scalar twin are identical (491 columns, 1695 rows) and take the same MILP
+route in the same ~24 s; the `native-milp` label seen in a 5 s slice is that engine's
+budget split, not a scalar/array difference.
+
+**What the flag's dense loss actually was.** Two things:
+
+1. The race's own overhead. The 5 s lift slice ends with no incumbent, the un-lifted
+   arm needs ~6.5 s, so its 5 s slice stops and the continuation restarts it:
+   5 + 5 + 6.3 = 16.7 s.
+2. Array models never reached the native spatial kernel.
+   `spatial_producer.build_spatial_kernel_spec` declined any model with a
+   `shape=` variable ("vector variables shift the layout and are a follow-up"), so
+   the un-lifted arm of an array model ran the Python tree (6.4 s on dense n=15) where
+   its scalar twin ran the native kernel (1.2 s). That is a scalar/array gap
+   independent of the indexed flag.
+
+**Falsified: removing the race's restart.** Both attempts died on measurement.
+
+- *Incumbent-extension slice* (the un-lifted slice gets the rest of the budget as a
+  #917 extension when the lift slice held no incumbent). `arrqp_n15`: the extended
+  slice ran 24 s **uncertified**, where the same arm with a plain 9.2 s limit
+  certifies in 6.3 s. The spatial search sizes its root work from its *base*
+  `time_limit`, so a 5 s solve that is later extended is a different, weaker search
+  (the #1153 lesson).
+- *Commit to the un-lifted arm when the lift slice held no incumbent.* The lift arm
+  alone at short limits: `ex1265`, `ex1266` and `conge10` have **no incumbent at
+  0.5 / 1 / 2 s** and certify at 5 s. On a machine ~3x slower than this one (CI), the
+  lift slice would end empty on the corpus and the rule would hand `ex1265` (no
+  un-lifted certificate) to the arm that cannot close it. Kill criterion met.
+
+The restart is the price of the race's safety net and stays.
+
+**Shipped: `DISCOPT_NATIVE_KERNEL_VECTOR_VARS` (graduated, default ON, `=0` opt-out).**
+The kernel and its consumer already work on flat columns; only the producer assumed
+one column per variable object. It now builds the spec over C-order flat columns:
+`n_orig` is the element count, bounds come from `flat_variable_bounds`, and integrality
+is set per element. The soundness argument is identity. An array model and its scalar
+twin give **byte-identical** specs, so the array path is the scalar path. On the
+native kernel the certified objective, dual bound and node count match the twin's
+exactly (`test_native_kernel_vector_vars.py`).
+
+Panel (`scripts/panel_native_kernel_vector_vars.py`, 30 s, OFF/ON ABBA):
+
+- the 154 in-repo `.nl` files give identical specs OFF and ON;
+- all 17 twin pairs are byte-identical;
+- 50 array-variable models (the #1934 panel's 33 with brute-force oracles, dense
+  integer QPs n = 10–20, non-uniform bounds, 2-D, scalars around arrays), 969 checks,
+  0 failures:
+
+| | total wall | certified |
+|---|---:|---:|
+| OFF | 151.4 s | 48 / 50 |
+| ON | **61.5 s** | **50 / 50** |
+
+35 faster, 0 slower. Dense QP n=15 6.3 → 1.0 s; `qp_n18_s1` and `qp_n20_s1` certify
+(6.2 s, 8.8 s) where OFF ends uncertified at 30 s. Models outside the kernel's term
+families (the `mixed_*` family) are declined as before and are unchanged.
+
+**`DISCOPT_INTEGER_PRODUCT_INDEXED` re-panelled on top of both (still OFF).**
+`scripts/panel_1934_indexed_integer_products.py --dense` (30 s, ABBA; the dense array
+QPs n = 12–20 are new to the script): 590 checks, 0 failures, 41/41 certified in both
+arms, so the n=20 certification loss is gone. Net effect is split by class:
+
+| class | total OFF | total ON | SGM(1 s) OFF | SGM(1 s) ON |
+|---|---:|---:|---:|---:|
+| 33 small array models | 37.3 s | **2.2 s** | 0.652 | **0.066** |
+| 8 dense array QPs | **20.4 s** | 66.7 s | **1.730** | 6.415 |
+| all 41 | **57.6 s** | 68.9 s | 0.823 | **0.557** |
+
+The dense loss is now purely the race's 5 s lift slice: with array models on the
+native kernel the un-lifted arm certifies dense n=15 in ~0.9 s, so a race that first
+spends 5 s on the lift loses ~6x. Scalar dense QPs pay the same cost by default since
+#1948.
+
+**Parity check, then graduated (owner decision, least surprise).** With the flag ON
+and the default solve (race on), 23 array/scalar twin pairs were compared: the dense
+QPs n = 10–20, non-uniform bounds, 2-D, scalars around arrays, integer products in
+constraint rows, and integer × continuous products in rows. 178 checks, 0 failures.
+Every pair agrees on:
+
+- the product witness;
+- the lifted model (row count, flat bounds);
+- certification, the certified objective and the final route;
+- the race's exact sequence of arms.
+
+Node counts are identical wherever the outcome is clock-free: the 15 pairs certified
+inside the lift slice, and those certified inside the un-lifted slice. The two that
+reached the race's restart differ slightly (7393 vs 7085), as clock-dependent runs
+do. The flag therefore makes the spelling of a model irrelevant, which is what it was
+for. It is now **default ON** (`=0` opt-out). The dense-QP cost belongs to the race
+and should be fixed there, for both spellings.
+
+## 85. #1944: the lift race's no-incumbent tie goes to the tighter bound (2026-10-25)
+
+**Problem.** `tln6` hit the time limit at 120 s on pure defaults, although its
+un-lifted model certifies in about 36 s (#1944, after §83). Traced with every race
+slice recorded (count-only probe around `solve_model`): **neither 5 s slice held an
+incumbent**. Both relative gaps were `inf`, §82's tie rule handed the rest of the
+budget to the lift, and the lifted MILP's bound stayed near 6.
+
+**Hypothesis.** Without incumbents the gap cannot rank the arms, but the dual bounds
+can. Both formulations are exact, so each slice's bound is a valid bound on the same
+objective, and the tighter one predicts the arm that closes. Kill criterion: a race
+that reaches the `inf`/`inf` tie where the arm with the looser bound is the one that
+certifies, or where the change loses a certificate.
+
+**Entry experiment.** The race probe ran over 148 instances at 30 s:
+- §82's panel: its 31 synthetic models and its in-repo `ex1263`–`ex1266`, with the
+  MINLPLib copies of its `nvs`/`prob` instances;
+- every MINLPLib `IQP`/`IQCP`/`IQCQP`/`MIQP`/`MIQCP`/`MIQCQP`/`INLP` instance with at
+  most 120 vars/cons;
+- the `MIQCP`/`MIQP`/`MINLP` ones up to 300 vars (no `smallinv`/`ball_mk`/`cvxnonsep`).
+
+51 instances raced. 5 reached the gap comparison, and 2 of those (`tln6`, `tln7`) reached it with
+`inf`/`inf`:
+
+| instance | lift slice bound | un-lifted slice bound | optimum |
+|---|---:|---:|---:|
+| tln6 | 5.7 | 15.2 | 15.3 |
+| tln7 | 2.8 | 14.16 | 15.0 |
+
+On the other 3 (`dense_n18_s1`, `dense_n20_s1`, `conge20`), only the un-lifted slice
+had an incumbent, so the gap already chose it. The un-lifted bound was also the
+tighter one. Not falsified, but the evidence is one family (`tln`). The rule rests on
+the bounds' validity, not on that family.
+
+**Rule (shipped, inside `DISCOPT_IPX_RACE`).** `solver._ipx_continuation_arm`:
+- If either slice has an incumbent, the smaller gap continues (unchanged, tie →
+  lift).
+- If neither has one, the tighter dual bound continues: higher for min, lower for
+  max. Equal or non-finite bounds keep the lift.
+
+The rule changes behaviour only at the `inf`/`inf` tie. Of the 148 probed instances,
+only `tln6` and `tln7` reach it, so every other race takes the same arms as before.
+
+**Measured** (120 s, arms interleaved, `uptime` load < 1):
+
+| tln6 | status | wall | bound |
+|---|---|---:|---:|
+| old rule (3 runs) | time limit | 120.0 / 120.0 / 122.2 s | 15.22 / 15.20 / 15.20 |
+| new rule (3 runs) | **optimal** 15.3 | **57.8 / 56.1 / 56.3 s** (sd 0.9) | 15.3 |
+
+`tln7` still finds no incumbent in 120 s under either rule. Its bound is 14.28 with
+the un-lifted continuation, against 14.16 with the lift continuation at 30 s. That
+instance is a primal-heuristic problem on the un-lifted arm, not a routing one.
+
+## 86. #1959: the lift race's lift slice ends on the MILP engine's stall (2026-10-25)
+
+**The cost, located.** On the #1940 dense integer QPs the race's 5 s lift slice is
+two pieces. The native MILP engine runs first on its #291 stall budget (half of what
+is left, ~2.3 s), stalls with **no incumbent** (`node_limit`, e.g. 1323 nodes on
+dense n=15 s0), and defers. The legacy route then gives the rest of the slice
+(~2.5 s) to the Python MILP tree on the same lifted model.
+
+**Hypothesis, and how it was tested.** That second piece never produces anything the
+race uses. Entry experiment: the lift arm alone at slices of 5, 1.67 and 1 s on the
+12 adopted corpus instances, the dense QPs and `conge10/15`. Every one of the 11
+Python-tree runs after a stall returned no incumbent and no certificate, including
+`ex1265`/`ex1266` at 1.67 and 1 s. Kill criterion: any such run returning an
+incumbent or a certificate. `scripts/panel_1959_race_stall_exit.py` records every one
+in its OFF arm and fails on it: **77 of 77** returned neither (28 at 30 s, 49 in the
+CI proxy). Not killed.
+
+**Shipped: `DISCOPT_IPX_RACE_STALL_EXIT` (default ON, `=0` opt-out).** Inside a lift
+SLICE only (not the continuation, not an ordinary solve), the engine's deferral ends
+the slice, reporting `time_limit` with the engine's valid bound. The engine's own
+budget is unchanged, so anything the engine certifies in the slice runs the same
+tree to the same certificate.
+
+Panel (#1940's 43 instances, ON/OFF ABBA, 2 reps, every incumbent re-verified on the
+original model, every bound and certified objective cross-checked):
+
+| run | checks | certified OFF / ON | total wall OFF → ON | faster / slower |
+|---|---:|---:|---:|---:|
+| 30 s, 5 s slices | 754, 0 fail | 42 / 42 | 177.3 → **145.5 s** | 11 / 0 |
+| CI proxy: 10 s, 1.67 s slices | 765, 0 fail | 40 / 40 | 129.2 → **115.4 s** | 13 / 0 |
+
+The issue's family at 30 s: dense n=15 s0 6.87 → 4.27 s, n=15 s1 6.51 → 4.01, n=18 s0
+7.22 → 5.06, n=18 s1 17.45 → 15.28, n=20 s0 8.49 → 6.45, n=20 s1 19.99 → 18.04;
+`arrqp_n15` 7.05 → 4.14. The corpus is unchanged at 30 s (all inside the engine's
+run). In the CI proxy `ex1265`/`ex1266` do not certify inside the lift slice in
+**either** arm, which corrects the issue's assumption that the adopted corpus
+always certifies inside slice one: that holds at dev speed only. They certify in
+the continuation, and are faster ON (5.08 → 4.20 s, 5.30 → 4.36 s).
+
+**Re-run on top of §85's tie rule (#1961).** §85 hands an `inf`/`inf` tie to the arm
+with the tighter bound, and the stall exit changes the bound a stalled lift slice
+reports (the engine's alone, not merged with the Python tree's), so the panels were
+re-run on the merge, with MINLPLib `tln6`/`tln7` (the §85 instances) added via
+`--nl`. 45 instances: at 30 s 774 checks, 0 failures, certified 42 = 42, total wall
+237.1 → 207.3 s, 11 faster / 0 slower; CI proxy 786 checks, 0 failures, certified
+40 = 40, 151.2 → 137.2 s, 13 faster / 0 slower. 88 more post-stall Python-tree runs,
+none with an incumbent or a certificate (165 of 165 in all). `tln6` at 120 s
+certifies in both arms (OFF 60.8 s, ON 59.0 s, 2 reps each): the stall exit fires
+there and the tie still goes to the un-lifted arm.
+
+**Falsified, not shipped.**
+
+- *A work-capped un-lifted probe first* (the issue's "order the arms by cost"). The
+  un-lifted arm with `max_nodes=50` and the full 30 s limit costs 7.4–9.2 s on
+  `ex1263`–`ex1266` (8.3–10.9 s at 500 nodes). Its setup does not scale with the
+  node cap, so putting it first costs the corpus far more than it saves the dense
+  QPs.
+- *Giving the un-lifted slice what the lift slice did not use* (so both opening
+  slices still sum to 10 s). `dense_n18_s1` got a 7.0 s un-lifted slice, still ended
+  uncertified at 6.7 s (4081 nodes), and restarted anyway: 15.4 → 17.1 s (single runs). The spatial
+  search sizes its root work from its limit (the §84 lesson again), so a longer slice
+  is a different search, not more of the same one.
+
+- *Running both arms concurrently* (entry experiment only; two threads, each arm on
+  its own model copy, 30 s, "first certificate" assumes the loser is cancelled, which
+  neither engine supports today). The dense family gains (n=15 s0 4.27 → 2.00 s,
+  n=18 s1 15.28 → 9.55, n=20 s1 18.04 → 12.26), but every corpus lift win slows 2–3x
+  from GIL and CPU contention with the un-lifted arm, whose kernel seeding is Python
+  (5.6 s of `ex1265`'s 8.7 s un-lifted solve is `integer_local_search` sub-NLPs):
+  `ex1265` 1.92 → 3.66 s, `ex1266` 1.42 → 4.57, `ex1263` 1.03 → 1.92, `ex1264`
+  0.65 → 1.47. That fails "the lift must still win where it wins today", so not
+  pursued as a plain concurrent race.
+- *Root cuts as the reason the lift slice cannot shrink.* `DISCOPT_MILP_ROOT_CUTS=0`
+  gives `ex1265` the identical tree (1883 nodes); its first ~0.7 s of engine time is
+  reliability strong branching (39 calls, 2.07 s summed across threads at T=5). The
+  ~1.8 s of engine work `ex1265` needs is intrinsic, not a budget-sized stage.
+
+**What remains (now #1963).** The race now costs ~2.8 s per lost race, down from 5 s,
+but not zero. That residue is the engine's stage-sized budget, which `ex1265` needs.
+The restart on `dense_n18_s1`/`n20_s1` (un-lifted slice + continuation) is
+untouched. #1959 was narrowed to the stall exit (owner's direction) and both
+remaining costs moved to #1963, with the measurements above as its ruled-out list.
+
+## 87. #1963: removing the race's remaining overhead — retired as measured (2026-10-26)
+
+**Goal (#1963).** §86 left the lift race two costs where the lift loses: the lift's
+head start (~2.8 s: lift setup plus the MILP engine's stall budget, which `ex1265`
+needs) and the restart of the un-lifted arm when it outgrows its slice. Bar: a dense
+QP race within ~1.5x of the better arm alone, and no corpus lift win slower beyond
+2 sd and 1.2x. **Retired by the owner after the entry experiments below; no code
+change.** Any lift-first schedule pays the head start before it can switch, so the
+bar needs either a predictor or the un-lifted arm running alongside the lift; both
+were measured and neither meets it.
+
+**Predictor: lifted LP root vs un-lifted root — falsified.** On the 42 panel
+instances the un-lifted root bound is at least as tight as the lifted LP root on
+*every* instance, including `ex1263`–`ex1266`, which the lift wins (19.10 vs 19.06 on
+`ex1263`). The size of the difference separates nothing: `prob02`, the lift's biggest
+win (0.10 vs 4.2 s), has a lifted root of 6,898 against 110,244; `nvs11`/`nvs12` have
+similar ratios and tie. The lift wins on combinatorics, not relaxation strength. (The
+cross-formulation counterpart of #1236's lifted-root-vs-optimum finding.)
+
+**Where concurrent contention comes from.** Lift arm alone vs next to a background
+load (`ex1263` / `ex1265` / `ex1266` / `nvs02`, s):
+
+| load | | | | |
+|---|---:|---:|---:|---:|
+| none | 1.05 | 1.94 | 1.35 | 0.26 |
+| one thread holding the GIL | 1.72 | 3.20 | 2.80 | 0.84 |
+| one GIL-free CPU burner | 1.12 | 2.03 | 1.64 | 0.28 |
+| three GIL-free CPU burners | 2.12 | 3.11 | 2.46 | 0.41 |
+
+The un-lifted arm uses about one core (CPU/wall 1.06–1.30) and is mostly Python. The
+GIL cost is CPython's **convoy effect**, not the engine: `solve_milp_csc_py` runs
+inside `allow_threads` and barely moves under the hog (`ex1266` 1.3 → 1.45–1.77 s),
+but the lift's non-engine Python goes 0.2 → 1.37 s (`ex1266`) and 0.13 → 0.82 s
+(`nvs02`), because each of its many short GIL-releasing calls hands the GIL to the
+other thread for a full 5 ms switch interval. `sys.setswitchinterval(5e-4)` only
+partly helps (`ex1266` 1.5 → 2.0 s, `nvs02` 0.28 → 0.45 s) and is process-global.
+
+**Concurrent designs** ("first cert" assumes the loser is cancelled instantly, which
+neither engine supports today, so these are optimistic lower bounds):
+
+| | better arm alone | threads (un-lifted starts at lift engine entry) | spawned subprocess (cancel = kill) |
+|---|---:|---:|---:|
+| dense n=15 s0 | 1.28 s | 1.86 s (1.45x) | 2.13 s (1.66x) |
+| dense n=15 s1 | 1.21 s | 1.58 s (1.31x) | 1.90 s (1.57x) |
+| dense n=18 s0 | 1.89 s | 2.76 s (1.46x) | 2.87 s (1.52x) |
+| dense n=18 s1 | 7.66 s | 9.10 s (1.19x) | 9.29 s (1.21x) |
+| `arrqp_n15` | 1.11 s | 1.79 s (1.61x) | 1.98 s (1.78x) |
+| `ex1263` | 1.03 s | 1.24 s (1.20x) | 1.29 s (1.25x) |
+| `ex1266` | 1.42 s | **2.81 s (1.98x)** | 1.65 s (1.16x) |
+| `nvs02` | 0.26 s | 0.36 s (1.38x) | 0.35 s (1.35x) |
+
+Threads meet the dense bar but tax corpus lift wins up to 2x (convoy effect on the
+lift's post-engine Python), and would also need cancel tokens in `milp_driver.rs` and
+`spatial_tree.rs`, checkpoints in the un-lifted arm's Python and a thread-safety audit
+of `solve_model`. A subprocess avoids the GIL, but the child's 0.46–0.72 s startup
+(spawn plus import) both delays the dense answer and taxes the lift while it runs, and
+a `from_nl` model must be re-parsed in the child (its pickle carries a marker that
+refuses use).
+
+**What would reopen it.** An un-lifted arm whose pre-kernel work is far cheaper or
+GIL-free: dense n=15 s0's un-lifted solve is 1.28 s, of which 0.44 s is Rust, and
+`ex1265`'s is 8.7 s, of which 5.6 s is the kernel's Python seed heuristics
+(`integer_local_search` sub-NLPs). With that, the thread design above is the one to
+re-measure.
+
+## 88. #1962: per-node convex-quadratic separation and the integral-point probe in the native kernel (2026-10-26)
+
+**Problem.** The native spatial kernel solved each node LP once. It relaxed every
+product by its own McCormick envelope, so a *convex* quadratic form
+`F(w) = Σ a_k w_k = xᵀQx + lᵀx + c` with `Q ⪰ 0` lost its convexity. On `main`
+@ `1eba005` at 120 s:
+
+| instance | status | dual bound | optimum |
+|---|---|---:|---:|
+| nvs23 | node limit (100k nodes) | -1254.8 | -1125.2 |
+| nvs24 | time limit (88.7k nodes) | -1614.6 | -1033.2 |
+| nous1 | time limit (63.6k nodes) | 1.207 | 1.567 |
+
+**Mechanism.** `crates/discopt-core/src/bnb/convex_quad_cuts.rs` builds the form from
+the spec (each quadratic lifted column is `w = (a₀ + aᵀx)(b₀ + bᵀx)`). It is built for
+the objective and for each fixed `<=` row, restricted to their quadratic lifted
+columns, with at least 2 and at most 300 variables.
+
+- **Convexity is proven.** A Cholesky of `Q − cI` is run with `c` at least Rump's
+  rounding bound. A semidefinite `Q` is certified as `Q + τI ≻ 0`; the cut then
+  subtracts `τ·diam²` over the global box.
+- **The cut.** At the node LP point it adds the tangent
+  `−Σ a_k w_k + (2Qx̂ + l)ᵀx <= x̂ᵀQx̂ − c`. The right side is loosened by a `γ_n`
+  bound on every rounding error over the global box.
+- **The loop** (`spatial_tree.rs::separation_loop`). Each round re-solves warm, with
+  the new slacks basic. The node keeps the best safe bound of any round. An
+  undecided round is dropped.
+- **Inheritance.** Children inherit the cuts that are binding at the node's final LP
+  (`binding_cuts`). A cut whose slack is basic is dropped together with that slack,
+  so the parent basis stays exact.
+- **Probe.** The integral-point probe (`int_fix_probe`) handles an integral LP point
+  at which some term is not tight. It fixes the integer columns and re-solves once
+  per assignment. The resulting point goes through the normal acceptance test and
+  pricing.
+
+**E1 (nvs23/nvs24, kill criterion: no bound gain on both).** Passed, at 120 s:
+- **nvs23** certifies -1125.2 in 211 nodes (14.7 s wall, 0.83 s of node LP), with 4
+  forms, 653 rounds and 2,128 cuts.
+- **nvs24** with the separator alone ends at the node limit. Its bound is
+  -1033.20003 against an optimum of -1033.2, but its incumbent stays at the seed's
+  -1031.8, because the kernel never reached a McCormick-tight vertex. That primal
+  gap is what the probe is for. With the probe, nvs24 certifies in 467 nodes and
+  17 s, and one probe found the optimum. `DISCOPT_NATIVE_NLP_PRIMAL=1` instead of
+  the probe also certifies it (512 nodes).
+
+**E2 (nous1: what SCIP's cuts buy).** pyscipopt 6.3 / SCIP 10. All separator plugins
+were set to `freq=-1`, then switched back one at a time:
+
+| SCIP setting | root bound | full solve |
+|---|---:|---|
+| default | 0.3451 | 4,269 nodes, 4.8 s |
+| no separator plugins | -0.2814 | |
+| RLT only | -0.2814 | |
+| aggregation (c-MIR) only | -0.1145 | |
+| aggregation + RLT | **0.3451** | |
+| interminor only | -0.2361 | |
+| aggregation off | 0.3451 | 5,259 nodes, 5.8 s |
+| RLT off | | 29,798 nodes, 36.5 s |
+| aggregation and RLT off | | 30,785 nodes, 37.7 s |
+| nonlinear-handler branching off (`constraints/nonlinear/branching/external`) | | **44,731 nodes, 47 s** |
+
+Every nlhdlr ablation (bilinear, quadratic, convex, concave, perspective, soc)
+stays within 3,222–4,269 nodes.
+
+**What E2 shows.**
+- Aggregation + RLT reproduces SCIP's whole root gain.
+- In the tree, aggregation is worth about 1.2× in nodes.
+- SCIP's RLT is root-only (`separating/rlt/freq=0`, cuts go to the pool) and is
+  worth 7×.
+- The largest lever is the nonlinear handler's spatial-branching rule, at 10×.
+
+**Re-scope.** nous1 is not a per-node-cut problem.
+- **Family B (aggregation) is not built.** Even perfect c-MIR is a ~1.2× node lever
+  on SCIP's own tree, against the ~100× node gap discopt has here (525k nodes at
+  900 s against SCIP's 4.3k).
+- **The remaining gap is spatial branching selection** (SCIP's violation-scored
+  variable choice inside the nonlinear handler) **and root RLT.** discopt's kernel
+  root (0.83 at 30 s after #1944's graduation) is already above SCIP's RLT-only root.
+- nous1 has no convex quadratic form, so the separator does nothing on it
+  (0 forms).
+
+**Graduation panels** (`issue1944_rlt_panel.py --with-corpus`, 270 instances, 30 s,
+interleaved, 2 workers, every incumbent `verify_point`-ed):
+
+- **`DISCOPT_KERNEL_CONVEX_CUTS`** (ON `=1` against OFF `=0`):
+  - **Cert-clean:** 1,620 checks, 0 problems.
+  - **Where it fired:** the separator runs on 13 instances. 245 never reach the
+    kernel, and the other 12 reach it with no convex form.
+  - **Certificates:** gains nvs19 (time limit to 8.3 s) and nvs23 (time limit to
+    14.3 s) and loses none.
+  - **Nodes:** nvs13 349 → 23, nvs17 8,231 → 61 (6.5 → 3.6 s), nvs18 2,061 → 49,
+    hydro 341 → 3, fuel 29 → 15.
+  - **Bounds:** ex8_4_1's 30 s bound rises 0.588 → 0.598. nvs24's goes -3,243 →
+    -1,033.20001.
+  - **Noise on unreachable routes:**
+    - The report also lists ex14_1_6 as gained. It is on a route the flag cannot
+      reach.
+    - sssd08-04persp (Python tree) moves too, on the same kind of route.
+    - The headline "both certify" wall (571.9 → 591.6 s) is dominated by ex14_1_2
+      (+15.9 s), which is also on a route the flag cannot reach.
+    - The cause was load I added myself by running tests during the panel (§9).
+      Re-measured idle: ex14_1_2 takes 1.8/1.9 s with the flag off and 2.0/1.8 s
+      with it on.
+  - **Graduated, default ON.**
+- **`DISCOPT_KERNEL_INT_PROBE`** (both arms with the separator on; machine left
+  idle):
+  - **Cert-clean:** 1,620 checks, 0 problems.
+  - **Where it fired:** 7 instances, 1–3 probes each.
+  - **Certificates:** gains nvs24 (time limit to 16.5 s, 23,464 → 415 nodes) and
+    loses none.
+  - **Wall:** both-certify 594.1 → 595.2 s, total 1,640.4 → 1,627.5 s.
+  - **Graduated, default ON.**
+
+**Bound-changing, sound by construction.** Each cut holds at every feasible point. The
+node bound stays the Neumaier–Shcherbina bound on the final LP's duals, and
+`Infeasible` still needs a verified Farkas ray. Rust tests:
+- `convex_quad_cuts::tests`: certification, and no feasible point on a 51×51 grid
+  violating a cut, including the semidefinite case;
+- `convex_cut_loop_tightens_root_and_certifies_the_same_optimum`, cold and warm;
+- `binding_cuts_drops_basic_cut_rows_and_their_slacks`;
+- `int_fix_probe_accepts_only_tight_points`.
+
+Python: `test_1962_kernel_convex_cuts.py`. Its slow tests certify nvs23 and nvs24 on
+defaults at 120 s.
+
+## 89. #1970: spatial branching variable selection in the native kernel (2026-10-26)
+
+**Hypothesis.** #1962's E2 measured that SCIP's nonlinear-handler branching rule is
+worth 10x nodes on nous1 (`constraints/nonlinear/branching/external=True`: 4,269 ->
+44,731), while the native kernel split the widest operand of the single term with
+the largest absolute McCormick gap, at the LP value, with no spatial pseudocost.
+Kill criterion (from the issue): the prototype must cut the nodes nous1 needs to
+reach a bound of 1.40 by at least 3x against the gap rule.
+
+**SCIP ablation first** (pyscipopt 6.3 / SCIP 10, nous1, nodes to optimal):
+default 4,269; `pscostweight=0` 12,295; `violsplit=u` 4,532; `branching/midpull=0`
+4,679; `midpull=0` and `clamp=0` 27,146; `pscostweight=0` and `midpull=0` 21,945.
+The 10x is two things: pseudocosts (~3x) and a split point kept away from the box
+bounds (~6x once both of SCIP's guards are off).
+
+**Prototype** (`SpatialTreeConfig::spatial_score`, `spatial_pscost_weight`,
+`spatial_midpull`): every operand of every violated term is a candidate; its
+violation score is the sum of those terms' gaps split evenly over their operands;
+a spatial pseudocost per side (bound gain per unit of width cut off, recorded as
+each spatial child is solved; an unobserved side takes the mean) gives the product
+of the two children's estimated gains; each component is divided by its maximum
+over the candidates and the two summed. The split point is `m * mid + (1 - m) * lp`.
+
+**Entry experiment, nous1 at 120 s** (default solve, 3 runs at a time on 4 cores):
+
+| rule | result | bound | nodes |
+|---|---|---:|---:|
+| legacy | time limit | 1.2099 | 64,333 |
+| legacy column, midpull 0.75 + clamp 0.2 | time limit | 1.2473 | 72,667 |
+| violation score only | time limit | 1.4618 (with midpull) | 14,293 |
+| score + pseudocost, LP-value split | time limit | 1.4973 | 21,328 |
+| score + pseudocost + clamp 0.2 | **optimal**, 73.5 s | 1.56707 | 19,475 |
+| score + pseudocost + midpull 0.75 | **optimal**, 32.4 s | 1.56707 | 11,921 |
+
+The legacy rule never reaches 1.40 in 64k nodes; the full rule certifies in 11,921.
+Not killed. The split point alone does nothing for the legacy column; the score
+alone does not certify; together they do, as in SCIP. Midpull subsumes the clamp
+(the point is then at least `m / 2` of the width from either bound), so only
+midpull shipped.
+
+**Shipped: `DISCOPT_KERNEL_SPATIAL_BRANCHING`, graduated default ON** (`=0` is the
+legacy rule; score + pseudocost weight 1 + midpull 0.75). Section 5 panel
+(`issue1944_rlt_panel.py --with-corpus --on-env DISCOPT_KERNEL_SPATIAL_BRANCHING=1`,
+270 instances, 30 s, interleaved, every incumbent `verify_point`-ed; the rule fires
+on 69 by `tree/spatial_score_picks`):
+
+* cert-clean: 1,620 checks, 0 problems;
+* certified +wastewater05m1 (162.26 -> certified 229.70 in 18.2 s), none lost;
+* where both certify: nodes 100,642 -> 65,272, wall 631.8 -> 608.1 s (tanksize
+  17,375 -> 519 nodes, 18.0 -> 2.5 s); total wall 1705.7 -> 1671.5 s;
+* 30 s bounds on the fired instances neither certifies: tighter on nous1 (0.83 ->
+  1.5668), ex5_2_5, nvs24, wastewater15m1; looser on ex8_4_1 (0.5886 -> 0.5854),
+  nvs19 (-1154.1 -> -1161.4), nvs23 (-1633.6 -> -1643.7).
+
+At 120 s on those 7 (interleaved): +nous1 (32.5 s), +wastewater15m1 (54.5 s); nvs19
+certifies in both; ex5_2_5 -7,857 -> -7,291 (node limit); ex8_4_1, nvs23, nvs24
+within 1%; none lost, no bound past its optimum. 24 instances where the rule never
+fired show node drift between arms too (non-kernel routes, wall-clock-gated work),
+so a node change on one instance is not by itself attributable to the flag.
+
+`DISCOPT_SCALE_FREE_BRANCHING` (opt-in) also scales the score's gaps by the aux
+columns' root widths, which keeps its units-invariance test exact under the new
+rule (Haverly 2 in 1/10/100 barrels: 97/97/91 nodes without that, equal with it).
+
+**Re-run on the merged base (with #1969's graduated convex cuts and integral-point
+probe).** The panel above predates #1969, so it was run again after the merge,
+`--off-env DISCOPT_KERNEL_SPATIAL_BRANCHING=0` (the flag is now default ON), same
+protocol; the rule fires on 61:
+
+* cert-clean: 1,620 checks, 0 problems;
+* certified +ex8_4_1, +nous1 (23.9 s), +wastewater05m1 (16.6 s);
+* the report lists `st_e40` as lost. It is not the flag's: it routes to the Python
+  tree, the rule never runs (`spatial_score_picks` absent in both arms), and the
+  OFF arm certified at 29.7 s of a 30 s limit. Re-run sequentially at 60 s, both
+  arms certify in 9 nodes and 41-42 s (twice each);
+* where both certify: nodes 93,360 -> 61,380, wall 477.6 -> 461.5 s (on the 56
+  fired instances 38,094 -> 10,444 nodes, 121.0 -> 108.8 s; tanksize 17,375 ->
+  519); total wall 1518.6 -> 1477.9 s;
+* fired but uncertified at 30 s: ex5_2_5 -8,010.7 -> -7,766.8, wastewater15m1
+  1,947.3 -> 2,382.9 (opt 2,446.4), both tighter.
+
+nous1 on the merged base at 120 s: OFF time limit, bound 1.2411 after 78,459
+nodes; ON optimal in 11,921 nodes, 23 s.
+
+**#1970 status.** nous1 certifies at 120 s (Done item 1); the flag passed the
+section 5 panel, on the merged base too, and graduated (Done item 2).

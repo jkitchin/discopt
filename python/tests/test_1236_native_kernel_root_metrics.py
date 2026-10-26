@@ -90,12 +90,24 @@ def test_kernel_reports_root_bound_and_counters(monkeypatch):
         assert stats["tree/uncertified_nodes"] >= 0.0
         assert stats["tree/undecided_nodes"] >= 0.0
 
-    # The finding the instrumentation exists to make visible: nvs13's root
-    # relaxation is loose (this is a bound-strength instance, unlike the
-    # nvs02/nvs14 pair in the same issue, whose root gap is under 1%).
-    assert result.root_gap is not None and result.root_gap > 0.5, (
-        f"nvs13 root gap {result.root_gap} -- the instance changed; re-derive the "
-        "issue #1236 diagnosis rather than relaxing this assertion"
+    # The finding the instrumentation exists to make visible: nvs13's per-term
+    # McCormick root is loose (a bound-strength instance, unlike the nvs02/nvs14
+    # pair in the same issue, whose root gap is under 1%). Re-derived for #1962:
+    # the looseness was the envelopes losing the convexity of nvs13's quadratic
+    # forms, which the kernel's convex-quadratic separator (default ON) restores --
+    # root bound -957.35 -> -589.01 against the optimum -585.2, gap 0.636 -> 0.0065.
+    # So the diagnosis is pinned on the McCormick-only relaxation (the opt-out),
+    # and the separator's closure of it on the default path.
+    assert result.root_gap is not None and result.root_gap < 0.05, (
+        f"nvs13 default root gap {result.root_gap}: the #1962 separator no longer "
+        "closes the root -- re-derive rather than relaxing this assertion"
+    )
+    monkeypatch.setenv("DISCOPT_KERNEL_CONVEX_CUTS", "0")
+    loose, seen_loose = _kernel_results(monkeypatch, "nvs13", time_limit=60.0)
+    assert seen_loose, "native kernel never ran on the opt-out arm"
+    assert loose.root_gap is not None and loose.root_gap > 0.5, (
+        f"nvs13 McCormick-only root gap {loose.root_gap} -- the instance changed; "
+        "re-derive the issue #1236 diagnosis rather than relaxing this assertion"
     )
 
 

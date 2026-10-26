@@ -211,6 +211,26 @@ impl Scaling {
     pub fn unscale_ray(&self, d: &mut [f64]) {
         self.unscale_x(d);
     }
+
+    /// Inverse of [`Self::unscale_x`]: `x̂_j ← x_j / c_j`, exact (power-of-two `c_j`).
+    /// Any trailing entries are left untouched.
+    pub fn scale_x(&self, x: &mut [f64]) {
+        for (xj, c) in x.iter_mut().zip(&self.col) {
+            *xj /= *c;
+        }
+    }
+
+    /// Inverse of [`Self::unscale_dual`]: `ŷ_i ← y_i / r_i`, exact.
+    pub fn scale_dual(&self, y: &mut [f64]) {
+        for (yi, r) in y.iter_mut().zip(&self.row) {
+            *yi /= *r;
+        }
+    }
+
+    /// Inverse of [`Self::unscale_ray`] (the column transform of [`Self::scale_x`]).
+    pub fn scale_ray(&self, d: &mut [f64]) {
+        self.scale_x(d);
+    }
 }
 
 /// An owned, equilibrated copy of an [`LpView`] together with its RHS, for a

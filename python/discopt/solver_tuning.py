@@ -402,9 +402,10 @@ class SolverTuning:
     rlt_quad_max: int = field(default_factory=lambda: _env_int("DISCOPT_RLT_QUAD_MAX", 256))
     """Column cap for quadratic RLT (``DISCOPT_RLT_QUAD_MAX``, default 256)."""
 
-    rlt_lineq: bool = field(default_factory=lambda: _env_flag("DISCOPT_RLT_LINEQ", default=False))
+    rlt_lineq: bool = field(default_factory=lambda: _env_flag("DISCOPT_RLT_LINEQ", default=True))
     """Build-time RLT products of *linear equality* constraints with the original
-    variables (``DISCOPT_RLT_LINEQ``, default **off** pending the graduation panel).
+    variables (``DISCOPT_RLT_LINEQ``, default **on** since #1944's graduation
+    panel; ``=0`` opts out).
 
     For a linear equality ``a'x + c == 0`` and a variable ``x_j``, the product
     ``(a'x + c) * x_j == 0`` linearizes over the lifted product columns to
@@ -430,12 +431,134 @@ class SolverTuning:
     QPLIB_1507        -18.1057          -15.8070     -8.3014        23.4 %
     ==============  ===========  ================  ==========  ===========
 
-    No bound crossed its published optimum on any instance in the probe."""
+    No bound crossed its published optimum on any instance in the probe.
 
-    rlt_lineq_max: int = field(default_factory=lambda: _env_int("DISCOPT_RLT_LINEQ_MAX", 4096))
+    **On the native spatial kernel (#1944).** Until #1944 a model carrying these
+    rows never reached the kernel. A row like ``X_{36,j} == 0`` (from ``x36 == 0``)
+    has its support inside one product's operands, and the producer counted it as a
+    fifth McCormick row and declined. The rows are now tagged
+    (``UniformRelaxation.nonenvelope_rows``) and carried as fixed rows. Two
+    measurements decide how to use them there:
+
+    * **Use ``rlt_lineq_max = 0`` on the kernel.** Existing products give the same
+      bound as lifting new ones. nous1's root LP is 0.0795 either way, but lifting
+      grows the relaxation from 106 to 1,074 columns, and the kernel then manages 55
+      nodes in 120 s instead of 16,231.
+    * **The rows need a node LP that does not start cold.** The kernel's cold primal
+      ends ``Numerical`` / ``IterLimit`` on these equality-rich relaxations, and an
+      undecided node is bisected with no bound gain. On ``pooling_adhya2tp`` (30 s)
+      undecided nodes go 6 -> 2,618 with this flag, and the instance loses its
+      certificate. With ``DISCOPT_NATIVE_WARM_START=2`` or
+      ``DISCOPT_LP_COLD_DUAL_START=1`` it is 0 and the instance certifies (433 nodes
+      vs 387). The warm start graduated (mode 2 is the default, #1949).
+
+    **Graduated (#1944)** together with ``rlt_ineq``, with ``rlt_lineq_max = 0``.
+    ``distribute_affine_products`` was in the first bundle panel but stays opt-in
+    (see its docstring). Panel: ``issue1944_rlt_panel.py --with-corpus`` on the
+    warm-start ``main``, ON = lineq + ineq, OFF = both ``=0``. Population: 270
+    instances (the in-repo corpus plus every nonconvex polynomial MINLPLib instance
+    with at most 60 vars/cons and a proven optimum), 30 s, interleaved, every
+    incumbent ``verify_point``-ed.
+
+    * Cert-clean: 1,620 checks, 0 problems.
+    * No certificate gained or lost.
+    * Where both certify: nodes 66,530 -> 63,066, wall 558.8 -> 518.3 s.
+    * hda's 30 s bound -64,510 -> -7,002 (optimum -5,964); nous1 0.41 -> 0.89.
+    * The Haverly pooling models close at the root.
+
+    ``performance-plan.md`` section 83 has the record."""
+
+    rlt_lineq_max: int = field(default_factory=lambda: _env_int("DISCOPT_RLT_LINEQ_MAX", 0))
     """New-column cap for linear-equality RLT (``DISCOPT_RLT_LINEQ_MAX``, default
-    4096). Products already registered by the base decomposition are free; only
-    columns this pass has to lift itself count against the cap."""
+    **0**: existing products only, the policy of SCIP's RLT separator). Products
+    already registered by the base decomposition are free; only columns this pass
+    has to lift itself count against the cap. The default was 4096 while the flag
+    was off. #1944 measured lifting on the kernel route: the same root bound on
+    nous1 (0.0795), but 1,074 columns instead of 106 and 55 nodes in 120 s
+    instead of 16,231. A positive value restores lifting, which the QPLIB
+    root-LP measurement above used."""
+
+    rlt_ineq: bool = field(default_factory=lambda: _env_flag("DISCOPT_RLT_INEQ", default=True))
+    """Bound-factor RLT rows for the linear inequalities in the native spatial
+    kernel's relaxation, over products the build already lifted
+    (``DISCOPT_RLT_INEQ``, default **on** since #1944's graduation panel, see
+    ``rlt_lineq``; ``=0`` opts out).
+
+    For ``g + a'x >= 0`` and a variable ``x_j`` in ``[l, u]`` whose product with
+    every variable of the row is already a lifted column, adds the linearized
+    ``(g + a'x)(x_j - l) >= 0`` and ``(g + a'x)(u - x_j) >= 0``
+    (``_emit_linear_inequality_rlt``). No column is added. The rows carry the
+    kernel's ROOT box, which keeps them valid at every node. They are not rebuilt
+    per node.
+
+    Measured on tln (SCIP 10 at ``limits/nodes = 1``): every RLT cut SCIP applies
+    at tln4's root is in this family, and removing its RLT separator takes the
+    root from 8.3 to 3.8. Only the kernel producer passes it; the Python tree's
+    relaxation is unchanged.
+
+    Measured on tln's unlifted kernel route (the integer-bilinear lift declined,
+    120 s). Roots go from 3.02 / 4.03 / 5.37 to 7.66 / 9.66 / 14.69 on tln4/5/6.
+    The certificates need ``DISCOPT_NATIVE_WARM_START=2`` too. With it, tln4/5/6
+    certify in 0.9 / 2.2 / 36.3 s; the warm start alone gives 1.3 / 20.1 s and
+    leaves tln6 open. Without the warm start, #1943's strong branching solves
+    child LPs cold, and the cold primal leaves 4,943 of tln5's 11,869 nodes
+    undecided, so the flag on its own is slower. tln reaches this route by
+    default only if the lift is declined (``DISCOPT_IPX_CHEAP_FIRST``)."""
+
+    distribute_affine_products: bool = field(
+        default_factory=lambda: _env_flag("DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS", default=False)
+    )
+    """Distribute a product of two affine forms over disjoint original variables into
+    a sum of bilinear products before relaxing it (``DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS``,
+    default **off**; ``=1`` opts in; #1944).
+
+    **Why it is not the default.** It breaks #671's row-filter recovery on hda's
+    raw-box root LP. ``MccormickLPRelaxer.solve_at_node`` at the declared box,
+    lineq rows on: filter on/off certifies -7,063 / -7.0e8 without distribution and
+    -5.6e8 / -5.4e6 with it. That is ``test_hda_root_bound_is_not_the_loose_safe_bound``.
+    The real solve's root is unaffected (-7002.39 both ways after presolve), and
+    the bundle panel with distribution in was cert-clean and net-positive. But the
+    interaction is not understood, so the flag stays opt-in. What would change that:
+    a root cause for the hda interaction and a fix, then the bundle panel re-run.
+
+    Without it ``(c + a'x) * (d + b'y)`` is one product ``w = A*B`` whose McCormick
+    envelope uses the interval of each whole form. Distributed, it becomes
+    ``c d + c b'y + d a'x + sum_ij a_i b_j x_i y_j``, one McCormick envelope per pair.
+
+    **Never looser.** Each pair envelope is the McCormick envelope of ``x_i y_j``,
+    and McCormick is invariant under scaling a factor (an endpoint swap for a
+    negative coefficient), so it is also the envelope of ``u_i v_j`` with
+    ``u_i = a_i x_i``, ``v_j = b_j y_j``. Summing ``u_i v_j >= uL_i v_j + vL_j u_i -
+    uL_i vL_j`` over ``i, j`` gives exactly ``A B >= AL B + BL A - AL BL`` with ``AL =
+    sum uL_i``. The same holds for the other three inequalities, so every aggregated
+    row is implied by the distributed ones. Disjoint supports are required. A
+    variable in both forms would turn its pair into a square, and that argument
+    does not cover the square's own envelope.
+
+    **Usually strictly tighter, and much tighter when pairs are shared.** The
+    distributed pairs are ordinary bilinear nodes, so hash-consing gives them the
+    same lifted column as the same product written elsewhere in the model. On
+    nous1 the objective's ``(c + a'x) * x0`` shares ``x2*x0`` and ``x3*x0`` with
+    the constraints ``x24 = x2*x0`` and ``x25 = x3*x0``. Root LP at the presolved box
+    (#1944): nous1 -0.847 -> -0.636, nous2 -0.830 -> -0.435.
+
+    **Only where a pair is shared.** A product is distributed only if at least one
+    of its pairs is already a product elsewhere in the model. Sharing is where the
+    gain comes from; without it every pair is a new column. #1944 measured tanksize:
+    38 new pairs, none shared. Its root moved 0.8382 -> 0.8419, but the kernel tree
+    doubled (19,039 -> 37,709 nodes) and the instance lost its certificate in the
+    panel. Over the panel population, every product distributed on an instance that
+    gained had a shared pair.
+
+    The pair count is capped by ``distribute_affine_products_max``. A product above
+    the cap is left as one affine-form product, which is the flag-off behaviour."""
+
+    distribute_affine_products_max: int = field(
+        default_factory=lambda: _env_int("DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS_MAX", 64)
+    )
+    """Most bilinear pairs one distributed product may produce
+    (``DISCOPT_DISTRIBUTE_AFFINE_PRODUCTS_MAX``, default 64). Each pair can be a new
+    lifted column with four McCormick rows."""
 
     multilinear_rlt_max: int = field(
         default_factory=lambda: _env_int("DISCOPT_MULTILINEAR_RLT_MAX", 4)
@@ -2133,6 +2256,11 @@ class SolverTuning:
     def __post_init__(self) -> None:
         if self.rlt_quad_max < 1:
             raise ValueError(f"rlt_quad_max must be >= 1, got {self.rlt_quad_max}")
+        if self.distribute_affine_products_max < 0:
+            raise ValueError(
+                "distribute_affine_products_max must be >= 0, got "
+                f"{self.distribute_affine_products_max}"
+            )
         if self.rlt_lineq_max < 0:
             raise ValueError(f"rlt_lineq_max must be >= 0, got {self.rlt_lineq_max}")
         if self.rlt_sparse_max_vars < 1:

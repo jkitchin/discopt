@@ -166,9 +166,11 @@ class _FakeTree:
 class _RecordingCutPool:
     def __init__(self):
         self.cuts = []
+        self.protected = []
 
-    def add(self, cut):
+    def add(self, cut, *, protected=False):
         self.cuts.append(cut)
+        self.protected.append(protected)
 
 
 def _binary_model():
@@ -217,6 +219,7 @@ def test_pre_import_lazy_cut_rejects_node_and_adds_cut():
     assert lbs[0] == _INFEASIBILITY_SENTINEL
     assert lbs[1] == 0.6
     assert len(pool.cuts) == 1
+    assert pool.protected == [True]  # a lazy row is model, never purged (#1954)
     assert len(calls) == 1
     ctx = calls[0]
     assert ctx.node_count == 5 and ctx.best_bound == 0.25

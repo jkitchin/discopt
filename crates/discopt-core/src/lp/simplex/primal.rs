@@ -417,14 +417,45 @@ pub(super) fn optimal_fails_original_audit(
     l: &[f64],
     u: &[f64],
 ) -> bool {
-    if sol.status != LpStatus::Optimal || sol.x.len() != n {
+    sol.status == LpStatus::Optimal && point_fails_original_audit(&sol.x, cols, m, n, b, l, u)
+}
+
+/// #1945: [`optimal_fails_original_audit`] on a bare point `x` already mapped to the
+/// ORIGINAL space, for a caller that keeps its solution in solve coordinates
+/// ([`super::scaled_problem::ScaledProblem::verify`]) and unscales only a copy.
+pub(super) fn point_fails_original_audit(
+    x: &[f64],
+    cols: &SparseCols,
+    m: usize,
+    n: usize,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+) -> bool {
+    if x.len() != n {
         return false;
     }
-    let fails = audit_feasibility(cols, m, n, b, l, u, &sol.x) != Feasibility::Ok;
+    let fails = audit_feasibility(cols, m, n, b, l, u, x) != Feasibility::Ok;
     if fails {
         crate::profile::incr(crate::profile::Ctr::ScaledOptimalOriginalAuditFail);
     }
     fails
+}
+
+/// The final audit's feasibility tolerance: relative to `1 + |bound|` on a finite
+/// bound, and to `1 + |b_i|` on a row (see [`audit_feasibility`]).
+pub(crate) const AUDIT_FEAS: f64 = 1e-6;
+
+/// #1945: whether every `x[j]` lies in `[l[j], u[j]]` under exactly the bound test
+/// of [`audit_feasibility`] (relative [`AUDIT_FEAS`] tolerance, a side at or past
+/// the ±INF sentinel skipped), with no counter side effects. Shared so the MILP
+/// driver's incumbent acceptance and the LP audit cannot disagree on what "within
+/// bounds" means. Compares the first `min(x, l, u)` entries.
+pub(crate) fn bounds_hold(l: &[f64], u: &[f64], x: &[f64]) -> bool {
+    x.iter().zip(l).zip(u).all(|((&xj, &lj), &uj)| {
+        (lj <= -INF || xj >= lj - AUDIT_FEAS * (1.0 + lj.abs().min(INF)))
+            && (uj >= INF || xj <= uj + AUDIT_FEAS * (1.0 + uj.abs().min(INF)))
+    })
 }
 
 /// #1935: the verdict for a scaled `Optimal` the original LP refuses, after the
@@ -460,7 +491,7 @@ fn audit_feasibility(
     u: &[f64],
     x: &[f64],
 ) -> Feasibility {
-    const FEAS: f64 = 1e-6;
+    const FEAS: f64 = AUDIT_FEAS;
     for j in 0..n {
         // A bound at or past the ±INF sentinel is NO bound: the whole engine reads
         // `u[j] >= INF` / `l[j] <= -INF` as "unbounded on that side" (ratio tests,
@@ -641,6 +672,7 @@ pub(super) fn subtol_impact_floor(obj: f64) -> f64 {
 /// an O(1) cost (the mixed-cost witness of the #1597 review), and the unscaled
 /// `d_y` is itself sub-`tol`. `room_j` here is only an upper bound on the step —
 /// the cheap prefilter; the caller measures the true ratio-test step.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn subtol_candidates(
     cols: &SparseCols,
@@ -652,9 +684,34 @@ pub(super) fn subtol_candidates(
     y: &[f64],
     floor: f64,
 ) -> Vec<(usize, f64, f64)> {
-    let mut out = Vec::new();
+    subtol_scan(cols, n_real, cost, lb, ub, stat, y, floor).0
+}
+
+/// [`subtol_candidates`], plus the **suspects**: wrong-signed columns that clear
+/// the impact floor but were set aside by the [`SUBTOL_NOISE_REL`] test alone
+/// (#1953). The noise test is a guess about `y`'s error, not a measurement of
+/// it, and an exact `d_j` can sit below it: on `min -x + (1 - 2^-32) y`,
+/// `x - y = 0`, `x, y in [2^30, 2^31]`, `d = -2^-32` is computed without any
+/// rounding, the column can move `2^30`, and the pivot is worth 0.25 -- yet
+/// `|d| = 2.3e-10 <= 1e-6 * 2`. A suspect is never pivoted on as is; see
+/// [`Simplex::subtol_entering`] and [`subtol_suspects_matter`].
+/// A [`subtol_scan`] entry: `(column, reduced cost, room)`.
+pub(super) type SubtolCand = (usize, f64, f64);
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn subtol_scan(
+    cols: &SparseCols,
+    n_real: usize,
+    cost: &[f64],
+    lb: &[f64],
+    ub: &[f64],
+    stat: &[i8],
+    y: &[f64],
+    floor: f64,
+) -> (Vec<SubtolCand>, Vec<SubtolCand>) {
+    let (mut out, mut suspects) = (Vec::new(), Vec::new());
     if !(floor.is_finite() && floor > 0.0) {
-        return out;
+        return (out, suspects);
     }
     for j in 0..n_real {
         if stat[j] == BASIC {
@@ -671,19 +728,68 @@ pub(super) fn subtol_candidates(
         } else {
             (stat[j] == AT_LOWER && dj < 0.0) || (stat[j] == AT_UPPER && dj > 0.0)
         };
-        if !improving || dj.abs() <= SUBTOL_NOISE_REL * (cost[j].abs() + mag) {
-            continue; // optimal-signed, or indistinguishable from rounding
+        if !improving {
+            continue; // optimal-signed
         }
         let room = if lo_inf || hi_inf {
             f64::INFINITY
         } else {
             ub[j] - lb[j]
         };
-        if dj.abs() * room > floor {
+        if dj.abs() * room <= floor {
+            continue;
+        }
+        if dj.abs() <= SUBTOL_NOISE_REL * (cost[j].abs() + mag) {
+            suspects.push((j, dj, room)); // possibly rounding; verify before use
+        } else {
             out.push((j, dj, room));
         }
     }
-    out
+    (out, suspects)
+}
+
+/// Whether the suspects of [`subtol_scan`] can matter at objective `obj`: true
+/// when the Neumaier-Shcherbina bound from `y` (rigorous since #1956) does not
+/// certify `obj` to within `floor`. When it does, no column -- noise or not --
+/// can improve the objective by more than `floor`, and the vertex is optimal at
+/// that tolerance whatever the suspects' true signs. Only a failed certificate
+/// pays for the dual refinement that settles them (#1953).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn subtol_suspects_matter(
+    cols: &SparseCols,
+    m: usize,
+    n_real: usize,
+    cost: &[f64],
+    lb: &[f64],
+    ub: &[f64],
+    b: &[f64],
+    y: &[f64],
+    obj: f64,
+    floor: f64,
+) -> bool {
+    let (col_ptr, row_idx, vals) = cols.raw();
+    if col_ptr.len() < n_real + 1 || y.len() != m || b.len() < m {
+        return true;
+    }
+    match super::refine::ns_safe_bound_csc(
+        y,
+        &cost[..n_real],
+        &col_ptr[..n_real + 1],
+        row_idx,
+        vals,
+        m,
+        n_real,
+        &b[..m],
+        &lb[..n_real],
+        &ub[..n_real],
+    ) {
+        // NaN gap counts as "can matter": only a proven `obj - g <= floor` clears it.
+        Some(g) => !matches!(
+            (obj - g).partial_cmp(&floor),
+            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+        ),
+        None => true,
+    }
 }
 
 // The dot-product error factor lives in `crate::numeric` so the reduced-cost fixing
@@ -901,6 +1007,23 @@ pub(super) fn farkas_ray_certifies_cols(
     }
     farkas_ray_cleanup_enabled()
         && farkas_ray_certifies_cleaned(y, cols, n, m, b, l, u, FARKAS_RAY_NOISE_REL)
+}
+
+/// Whether the phase-1 artificial drive-out is monotone in the artificial sum
+/// (`DISCOPT_DRIVE_OUT_MONOTONE`, read once; #1941). Default ON; `=0` restores the
+/// legacy pass, which can cycle between two targets (see
+/// `Simplex::drive_out_basic_artificials`). It changes only how a pass searches;
+/// every verdict after it is still Farkas- or audit-verified.
+fn drive_out_monotone_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("DISCOPT_DRIVE_OUT_MONOTONE")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| !matches!(v.trim(), "0" | "false" | "False"))
+            .unwrap_or(true)
+    })
 }
 
 /// Relative threshold below which a Farkas-ray entry counts as rounding noise
@@ -1698,10 +1821,26 @@ impl<'a> Simplex<'a> {
     /// residual then flows to the caller's Farkas-verified infeasibility test.
     /// Returns `Err(())` only on a factorization breakdown.
     ///
-    /// Soundness: ratio-test pivots preserve `A x = b` and phase-1 feasibility and
-    /// never *raise* the artificial sum, so a feasible LP is never turned infeasible
-    /// nor the reverse — the pass only completes the phase-1 the reduced-cost loop
-    /// left short.
+    /// Soundness: ratio-test pivots preserve `A x = b` and phase-1 feasibility, so a
+    /// feasible LP is never turned infeasible nor the reverse — the pass only
+    /// completes the phase-1 the reduced-cost loop left short, and every verdict
+    /// after it is still Farkas- or audit-verified.
+    ///
+    /// **Monotonicity (#1941, `DISCOPT_DRIVE_OUT_MONOTONE`, default ON).** This
+    /// docstring used to add that the pivots "never *raise* the artificial sum".
+    /// That is false: a step that lowers the *target* artificial can raise another
+    /// basic one, since the ratio test only stops artificials at 0, never above.
+    /// Measured on a captured ex1252a node LP (198×270): a 4-pivot cycle between two
+    /// targets, sum `0.3447 → 0.3485 → 0.4054 → 0.3485 → 0.3447`, every step
+    /// non-degenerate so the per-target degenerate cap never fired. It ran the whole
+    /// `8(m+n)+200` budget (3944 pivots, 278 ms on the dense retry) and returned
+    /// `Numerical` anyway. With the flag on, an entering column is admitted only if
+    /// its phase-1 reduced cost `d_j = −πᵀA_j` (`π = B⁻ᵀ c₁_B`) does not raise the
+    /// sum in its move direction (`dir·d_j ≤ tol`). That is the property the pass
+    /// needs: on the C-39 false-infeasible class the true phase-1 minimum is 0, and
+    /// a non-increasing path to it exists from any basis. A pass that goes
+    /// `2m+20` pivots without lowering the best sum or the basic-artificial count
+    /// stops (a constant-sum cycle). `=0` restores the legacy pass byte-for-byte.
     fn drive_out_basic_artificials(&mut self, art_sign: &[f64]) -> Result<(), ()> {
         let mut xb = self.basic_values(art_sign)?;
         // Cheap early-out: the common healthy phase-1 leaves no basic artificial, so
@@ -1714,6 +1853,19 @@ impl<'a> Simplex<'a> {
         if !any_basic_art {
             return Ok(());
         }
+        crate::profile::incr(crate::profile::Ctr::DriveOutCalls);
+        let monotone = drive_out_monotone_enabled();
+        // No-progress cap for the monotone pass: pivots since the artificial sum or
+        // the basic-artificial count last improved.
+        let art_state = |basis: &[usize], xb: &[f64], n: usize| -> (f64, usize) {
+            basis
+                .iter()
+                .enumerate()
+                .filter(|(_, &j)| j >= n)
+                .fold((0.0, 0), |(s, k), (slot, _)| (s + xb[slot].abs(), k + 1))
+        };
+        let (mut best_sum, mut best_count) = art_state(&self.basis, &xb, self.n);
+        let mut since_progress = 0usize;
 
         // A usable pivot must be non-tiny (basis conditioning).
         const PIVOT_MIN: f64 = 1e-7;
@@ -1733,6 +1885,17 @@ impl<'a> Simplex<'a> {
         let mut cur_target: Option<usize> = None;
         let mut degenerate_run = 0usize;
         while pivots < max_pivots {
+            if monotone {
+                let (sum, count) = art_state(&self.basis, &xb, self.n);
+                if count < best_count || sum < best_sum - ART_TOL * (1.0 + best_sum) {
+                    best_sum = best_sum.min(sum);
+                    best_count = best_count.min(count);
+                    since_progress = 0;
+                } else if since_progress > degenerate_cap {
+                    crate::profile::incr(crate::profile::Ctr::DriveOutStallStops);
+                    return Ok(());
+                }
+            }
             // (Re)select a basic artificial still positive on a not-yet-stuck row.
             let slot = match cur_target {
                 Some(s) if self.basis[s] >= self.n && !stuck[s] && xb[s].abs() > ART_TOL => s,
@@ -1761,6 +1924,16 @@ impl<'a> Simplex<'a> {
             if self.lu.btran(&mut rho).is_err() {
                 return Err(());
             }
+            // Phase-1 dual `π = B⁻ᵀ c₁_B` (1 on every basic artificial), for the
+            // monotonicity filter below.
+            let pi = if monotone {
+                match self.phase1_farkas_ray(art_sign) {
+                    Some(y) => Some(y),
+                    None => return Err(()),
+                }
+            } else {
+                None
+            };
             let mut q: Option<usize> = None;
             let mut q_dir = 1.0f64;
             let mut best = PIVOT_MIN;
@@ -1787,7 +1960,15 @@ impl<'a> Simplex<'a> {
                 let available = self.is_free(j)
                     || (dir_by_sign > 0.0 && at_lower)
                     || (dir_by_sign < 0.0 && !at_lower);
+                // Moving `j` by `dir·t` changes Σ artificials by `dir·d_j·t`, with
+                // `d_j = −πᵀA_j` (a structural's phase-1 cost is 0).
                 if available {
+                    if let Some(pi) = pi.as_ref() {
+                        if -dir_by_sign * self.cols.dot(j, pi) > self.tol {
+                            crate::profile::incr(crate::profile::Ctr::DriveOutRateRejects);
+                            continue;
+                        }
+                    }
                     best = arj.abs();
                     q = Some(j);
                     q_dir = dir_by_sign;
@@ -1885,6 +2066,8 @@ impl<'a> Simplex<'a> {
                 *xbi -= dir * t * alpha[i];
             }
             pivots += 1;
+            since_progress += 1;
+            crate::profile::incr(crate::profile::Ctr::DriveOutPivots);
             match leave {
                 None => {
                     if t >= q_gap && q_gap < INF {
@@ -1928,6 +2111,7 @@ impl<'a> Simplex<'a> {
                 }
             }
         }
+        crate::profile::incr(crate::profile::Ctr::DriveOutBudgetExhausted);
         Ok(())
     }
 
@@ -2333,9 +2517,19 @@ impl<'a> Simplex<'a> {
             obj += cost[j] * v;
         }
         let floor = subtol_impact_floor(obj);
-        let cands = subtol_candidates(
+        let (mut cands, suspects) = subtol_scan(
             &self.cols, self.n, cost, &self.lb, &self.ub, &self.stat, y, floor,
         );
+        // #1953: a suspect is admitted only when refined duals confirm its sign
+        // with a reduced cost above their own measured error, and only when the
+        // NS bound from `y` fails to certify the vertex in the first place.
+        if !suspects.is_empty()
+            && subtol_suspects_matter(
+                &self.cols, self.m, self.n, cost, &self.lb, &self.ub, self.b, y, obj, floor,
+            )
+        {
+            cands.extend(self.confirm_suspects(cost, y, art_sign, &suspects)?);
+        }
         let mut best: Option<(usize, f64)> = None;
         let mut best_gain = floor;
         for (j, dj, room) in cands {
@@ -2372,6 +2566,74 @@ impl<'a> Simplex<'a> {
             }
         }
         Ok(best)
+    }
+
+    /// The suspects of [`subtol_scan`] whose reduced cost survives one step of
+    /// dual refinement (#1953), as `(j, d_j, room_j)` with the refined `d_j`.
+    ///
+    /// `y` solves `B^T y = c_B` only up to rounding and conditioning. The residual
+    /// `r = c_B - B^T y` is formed in double-double and `dy = B^{-T} r` is one
+    /// refinement step; `|dy|` is then a measured estimate of `y`'s error, where
+    /// [`SUBTOL_NOISE_REL`] is a fixed guess at it. A suspect is confirmed when its
+    /// refined `d_j = c_j - A_j^T (y + dy)` (double-double) keeps the improving
+    /// sign and exceeds `2 * (|A_j|^T |dy| + gamma * (|c_j| + |A_j|^T |y + dy|))`
+    /// -- larger than the error `y` was measured to carry, plus the dot product's
+    /// own rounding. An exact `y` has `dy = 0` and confirms an exact `d_j` of any
+    /// size; a noisy one is rejected, which is the pre-#1953 verdict.
+    fn confirm_suspects(
+        &mut self,
+        cost: &[f64],
+        y: &[f64],
+        art_sign: &[f64],
+        suspects: &[(usize, f64, f64)],
+    ) -> Result<Vec<(usize, f64, f64)>, LpStatus> {
+        use super::refine::Dd;
+        let m = self.m;
+        let mut dy = vec![0.0f64; m];
+        for (i, slot) in dy.iter_mut().enumerate() {
+            let jb = self.basis[i];
+            let mut r = Dd::zero().add_f64(cost[jb]);
+            if jb < self.n {
+                let (ri, va) = self.cols.col(jb);
+                for (&row, &a) in ri.iter().zip(va) {
+                    r = r.add_prod(-a, y[row]);
+                }
+            } else {
+                let k = jb - self.n;
+                r = r.add_prod(-art_sign[k], y[k]);
+            }
+            *slot = r.to_f64();
+        }
+        if dy.iter().any(|v| *v != 0.0) && self.lu.btran(&mut dy).is_err() {
+            return Err(LpStatus::Numerical);
+        }
+        if !dy.iter().all(|v| v.is_finite()) {
+            return Ok(Vec::new());
+        }
+        let yr: Vec<f64> = y.iter().zip(&dy).map(|(a, d)| a + d).collect();
+        let mut out = Vec::new();
+        for &(j, _, room) in suspects {
+            let (ri, va) = self.cols.col(j);
+            let mut d = Dd::zero().add_f64(cost[j]);
+            let (mut mag_dy, mut mag_y) = (0.0f64, 0.0f64);
+            for (&row, &a) in ri.iter().zip(va) {
+                d = d.add_prod(-a, yr[row]);
+                mag_dy += (a * dy[row]).abs();
+                mag_y += (a * yr[row]).abs();
+            }
+            let dj = d.to_f64();
+            let err = mag_dy + gamma(ri.len() + 2) * (cost[j].abs() + mag_y);
+            let improving = if self.is_free(j) {
+                dj != 0.0
+            } else {
+                (self.stat[j] == AT_LOWER && dj < 0.0) || (self.stat[j] == AT_UPPER && dj > 0.0)
+            };
+            if improving && dj.abs() > 2.0 * err {
+                crate::profile::incr(crate::profile::Ctr::SubtolSuspectConfirmed);
+                out.push((j, dj, room));
+            }
+        }
+        Ok(out)
     }
 
     /// Primal simplex iterations for the given `cost`. Returns Ok(()) at
@@ -4678,5 +4940,34 @@ mod tests {
         checked += 1;
 
         assert_eq!(checked, 6, "floor probe must have run every property");
+    }
+
+    /// #1953: an exact sub-noise reduced cost on a wide box is a real descent.
+    ///
+    /// `min -x + (1 - 2^-32) y`, `x - y = 0`, `x, y in [2^30, 2^31]`: the optimum is
+    /// `x = y = 2^31`, objective `-0.5`. At the start vertex `d = -2^-32` exactly,
+    /// below `SUBTOL_NOISE_REL * (|c| + |A^T y|)`, and the column was dropped as
+    /// rounding: both entry points certified `Optimal` at `-0.25`. The refined
+    /// duals measure no error in `y`, so the suspect is confirmed and pivoted on.
+    #[test]
+    fn subtol_unit_wide_box() {
+        let eps = 2f64.powi(-32);
+        let lo = 2f64.powi(30);
+        let c = [-1.0, 1.0 - eps];
+        let (l, u, b) = ([lo, lo], [2.0 * lo, 2.0 * lo], [0.0]);
+        let sp = SparseCols::from_csc(vec![0, 1, 2], vec![0, 0], vec![1.0, -1.0]);
+        let opts = SimplexOptions::default();
+        let raw = solve_lp_cols(sp.clone(), 1, 2, &c, &l, &u, &b, &opts);
+        let scl = solve_lp_cols_scaled(sp, 1, 2, &c, &l, &u, &b, &opts);
+        for r in [&raw, &scl] {
+            assert!(
+                r.status != LpStatus::Optimal || r.obj <= -0.5 + 1e-9,
+                "{:?} {}",
+                r.status,
+                r.obj
+            );
+        }
+        assert_eq!(raw.status, LpStatus::Optimal);
+        assert!(raw.obj <= -0.5 + 1e-9);
     }
 }

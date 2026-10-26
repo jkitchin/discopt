@@ -23,12 +23,14 @@ use crate::lp::crossover::LpView;
 use crate::lp::cut_select::select_cuts;
 use crate::lp::gomory::{separate_gomory_cols, GomoryCut};
 use crate::lp::simplex::linsolve::{FeralLU, LinearSolver};
+use crate::lp::simplex::refine::{ns_safe_bound_csc, scaled_dual_for_open_columns_csc};
 use crate::lp::simplex::scaling::MAX_LINE_RANGE;
 use crate::lp::simplex::sparse::SparseCols;
 use crate::lp::simplex::{
-    solve_lp, solve_lp_cols, solve_lp_cols_scaled, solve_lp_warm, solve_lp_warm_scaled_csc,
-    tighten_bounds_csc, LpStatus, PreparedDual, Scaling, SimplexOptions,
+    solve_lp, solve_lp_cols_scaled, solve_lp_warm, solve_lp_warm_scaled_csc, tighten_bounds_csc,
+    tighten_bounds_csc_with_row, LpStatus, PreparedDual, ScaledProblem, Scaling, SimplexOptions,
 };
+use crate::presolve::directed::{sub_down, sub_up};
 
 const INF: f64 = 1e20;
 const INFEAS_SENTINEL: f64 = 1e30;
@@ -665,6 +667,104 @@ impl Drop for MilpDepthGuard {
     fn drop(&mut self) {
         MILP_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
     }
+}
+
+/// #1953: whether a node's LP bound is the NS safe bound from its own dual
+/// (`ns_safe_bound_csc` over the node box) rather than the vertex objective.
+/// `DISCOPT_MILP_NS_NODE_BOUND`, read once. Default ON; `=0` is the opt-out that
+/// lets the shipped default be A/B'd (CLAUDE.md §5 out-of-scope class), restoring
+/// the vertex-objective bound.
+fn ns_node_bound_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("DISCOPT_MILP_NS_NODE_BOUND")
+            .ok()
+            .map(|v| !matches!(v.trim(), "0" | "false" | "False"))
+            .unwrap_or(true)
+    })
+}
+
+/// #1953: the NS safe bound for a node from its unscaled dual `y`, or `None`.
+///
+/// Each stage tries `y` and then its open-column repair
+/// (`scaled_dual_for_open_columns_csc`, the Python ladder's #1729 step).
+///
+/// First over the node box. NS abstains when an open column's reduced-cost
+/// enclosure straddles zero (#1956) -- a basic surplus or cut slack, whose
+/// reduced cost is zero only up to rounding, is the common case. Then it is
+/// retried over the box FBBT implies from the node's rows (`tighten_bounds_csc`,
+/// outward-rounded): every feasible point of the node lies in that box, so the
+/// bound over it is still a valid node bound, and it closes the open sides the
+/// rows bound (the Python ladder's `fbbt_box` step). A proven-empty box returns
+/// `None` rather than a fathom; the caller then treats the node as unsettled.
+///
+/// Last, with an incumbent `U`, over the box FBBT implies from the rows plus the
+/// cutoff `c x <= U - obj_const` (rhs rounded up). An OA master's epigraph column
+/// is bounded above by nothing else, and the cut slacks only through it. A bound
+/// `L'` over the node cut down to `{c x <= U}` gives `min(L', U)` for the whole
+/// node: either the node holds a point better than `U`, whose value is then
+/// `>= L'`, or every point is `>= U`.
+fn node_ns_bound(ctx: &NodeCtx, y: &[f64], l: &[f64], u: &[f64]) -> Option<f64> {
+    let (cp, ri, vals) = ctx.csc_rc.raw();
+    // NS from `y`, then from its open-column repair over the same box.
+    let ns = |l: &[f64], u: &[f64]| {
+        ns_safe_bound_csc(y, ctx.c_w, cp, ri, vals, ctx.m_w, ctx.n_w, ctx.b_w, l, u).or_else(|| {
+            let y2 = scaled_dual_for_open_columns_csc(y, ctx.c_w, cp, ri, vals, ctx.n_w, l, u)?;
+            ns_safe_bound_csc(&y2, ctx.c_w, cp, ri, vals, ctx.m_w, ctx.n_w, ctx.b_w, l, u)
+        })
+    };
+    if let Some(g) = ns(l, u) {
+        return Some(g);
+    }
+    let pr = tighten_bounds_csc(
+        ctx.csc_rc,
+        ctx.m_w,
+        ctx.n_w,
+        l,
+        u,
+        ctx.b_w,
+        ctx.is_int_full,
+        ctx.opts.simplex.tol,
+    );
+    if pr.infeasible {
+        return None;
+    }
+    if let Some(g) = ns(&pr.l, &pr.u) {
+        crate::profile::incr(crate::profile::Ctr::NodeNsFbbt);
+        return Some(g);
+    }
+    let inc = ctx.inc_snapshot.filter(|v| v.is_finite())?;
+    let pr = tighten_bounds_csc_with_row(
+        ctx.csc_rc,
+        ctx.m_w,
+        ctx.n_w,
+        &pr.l,
+        &pr.u,
+        ctx.b_w,
+        ctx.is_int_full,
+        ctx.opts.simplex.tol,
+        Some((ctx.c_w, sub_up(inc, ctx.obj_const))),
+    );
+    // Empty under the cutoff: no point of the node beats the incumbent.
+    let cap = sub_down(inc, ctx.obj_const);
+    let g = if pr.infeasible {
+        Some(cap)
+    } else {
+        ns(&pr.l, &pr.u).map(|g| g.min(cap))
+    };
+    if g.is_some() {
+        crate::profile::incr(crate::profile::Ctr::NodeNsCutoff);
+    }
+    g
+}
+
+/// Every integer structural column of `xs` within [`INT_TOL`] of an integer.
+fn feasible_integral(ctx: &NodeCtx, xs: &[f64]) -> bool {
+    ctx.is_int
+        .iter()
+        .enumerate()
+        .all(|(j, &it)| !it || frac(xs[j]) <= INT_TOL)
 }
 
 /// Is the RINS improvement heuristic armed? Off by default: per CLAUDE.md §5 a
@@ -1479,13 +1579,12 @@ fn solve_milp_node_search(
     // they would not change it, but reading `c` here keeps that independent of
     // what the cut loop does later.
     let lattice = if obj_integrality_enabled() {
-        let base =
-            crate::bnb::obj_integral::objective_granularity(&c[..ns], &is_int).map(|spacing| {
-                crate::bnb::obj_integral::ObjLattice {
-                    spacing,
-                    shift: 0.0,
-                }
-            });
+        let base = crate::bnb::obj_integral::objective_granularity(
+            &c[..ns],
+            &is_int,
+            &base_l[..ns],
+            &base_u[..ns],
+        );
         if obj_lattice_subst_enabled() {
             // Bounds are the presolved ones on purpose: presolve only narrows and
             // never cuts a feasible point, so a column it fixed is fixed at every
@@ -1516,6 +1615,7 @@ fn solve_milp_node_search(
     tm.set_objective_lattice(
         lattice.map(|l| l.spacing),
         obj_const + lattice.map_or(0.0, |l| l.shift),
+        lattice.map_or(0.0, |l| l.drift),
     );
     tm.initialize();
 
@@ -1662,6 +1762,7 @@ fn solve_milp_node_search(
     // Original constraint rows (before any cuts) are the knapsack candidates for
     // cover separation; later rows are themselves cuts.
     let n_orig_rows = m_w;
+    let n_orig_cols = n_w;
 
     // --- A12 RINS: snapshot the base problem before the root cut loop ---
     // Every sub-solve and every re-validation runs against THIS, not against the
@@ -2248,33 +2349,21 @@ fn solve_milp_node_search(
         // ill-scaled lifted LP this is the dominant per-node cost; sharing it lets
         // the 64 nodes pay one equilibration. When the matrix is well-conditioned
         // (`None`) the nodes solve the original LP unchanged.
-        let scaling = Scaling::from_sparse(&csc_w, m_w, n_w);
-        let (c_s, b_s) = match &scaling {
-            Some(s) => (s.scale_c(&c_w), s.scale_b(&b_w)),
-            None => (Vec::new(), Vec::new()),
-        };
-        // Solve-space objective/rhs: the scaled copies when scaling, else the
-        // originals (borrowed). Node bounds are scaled per node (cheap).
-        let (sc, sb): (&[f64], &[f64]) = match &scaling {
-            Some(_) => (&c_s, &b_s),
-            None => (&c_w, &b_w),
-        };
-        // Solve-space CSC of the working matrix, built once and shared by every node
-        // solve in this batch (the matrix is constant within a batch): scale the
-        // working CSC by the batch factors, or reuse it unscaled. Never densified.
-        let csc_batch = match &scaling {
-            Some(s) => {
-                let mut c = csc_w.clone();
-                s.scale_cols(&mut c);
-                c
-            }
-            None => csc_w.clone(),
-        };
+        //
+        // #1945: the batch's `ScaledProblem` owns the original working CSC, the
+        // factors and the scaled CSC, and every node / strong-branch / dive LP is
+        // solved through it, so an `Optimal` is verified against the ORIGINAL data
+        // (the simplex's own audit runs in scaled units) before the tree sees it.
+        let problem = ScaledProblem::new(csc_w.clone(), m_w, n_w, &c_w, &b_w);
+        let scaling = problem.scaling();
+        // Solve-space objective/rhs/CSC (scaled when `scaling` is `Some`); node
+        // bounds are scaled per node (cheap). Never densified.
+        let (sc, sb) = (problem.solve_c(), problem.solve_b());
+        let csc_batch = problem.solve_matrix();
         // Reduced-cost fixing (and the unscaled per-node consumers) reason in true
         // objective units, so they use the CSC of the *unscaled* working matrix. When
-        // the matrix isn't scaled this is exactly `csc_batch` (no second build).
-        let csc_unscaled_owned = scaling.as_ref().map(|_| csc_w.clone());
-        let csc_rc: &SparseCols = csc_unscaled_owned.as_ref().unwrap_or(&csc_batch);
+        // the matrix isn't scaled this is the same matrix as `csc_batch`.
+        let csc_rc: &SparseCols = problem.original_matrix();
         let sb_active = opts.strong_branch && tm.stats().total_nodes < opts.sb_node_budget;
         let mut results = Vec::with_capacity(batch.node_ids.len());
         let mut pending_cuts: Vec<GomoryCut> = Vec::new();
@@ -2314,11 +2403,13 @@ fn solve_milp_node_search(
                 c_w: &c_w,
                 l_w: &l_w,
                 u_w: &u_w,
-                scaling: scaling.as_ref(),
+                scaling,
                 sc,
                 sb,
-                csc: &csc_batch,
+                csc: csc_batch,
                 csc_rc,
+                problem: &problem,
+                n_orig_cols,
                 slack_l: &slack_l,
                 slack_u: &slack_u,
                 is_int: &is_int,
@@ -2892,6 +2983,13 @@ struct NodeCtx<'a> {
     /// O(m³) refactor — the asymmetry that made it cheap on knapsack but ruinous
     /// on many-row covering LPs.
     csc_rc: &'a SparseCols,
+    /// #1945: the batch's working LP. Every node / strong-branch / dive LP solve goes
+    /// through it, so an `Optimal` reaching the tree holds on the ORIGINAL data
+    /// (`ScaledProblem::verify`). `scaling`/`sc`/`sb`/`csc`/`csc_rc` are its views.
+    problem: &'a ScaledProblem,
+    /// Columns of the working matrix before any cut was appended (structurals plus
+    /// the original rows' slacks); cut slacks follow them.
+    n_orig_cols: usize,
     slack_l: &'a [f64],
     slack_u: &'a [f64],
     is_int: &'a [bool],
@@ -3090,14 +3188,6 @@ fn solve_node(
         Some(s) => (s.scale_lower(&full_l), s.scale_upper(&full_u)),
         None => (full_l.clone(), full_u.clone()),
     };
-    let solve_lp_view = LpView {
-        a: &[], // T3b5: matrix comes from `ctx.csc`; `.a` unused by the CSC solvers.
-        m: ctx.m_w,
-        n: ctx.n_w,
-        c: ctx.sc,
-        l: &sl,
-        u: &su,
-    };
     // The root is the only node solved cold (no inherited basis); the diving
     // heuristic runs there once so its cost (up to n_int warm re-solves) is paid
     // a single time for the whole search.
@@ -3106,7 +3196,8 @@ fn solve_node(
     let mut sol = match ctx.tm.node_basis(id) {
         Some(basis) => {
             let basis = extend_basis(basis, ctx.n_w);
-            solve_lp_warm_scaled_csc(&solve_lp_view, ctx.sb, &basis, ctx.simplex, ctx.csc)
+            ctx.problem
+                .solve_warm(&full_l, &full_u, &basis, ctx.simplex)
         }
         // The only node solved cold is the root. Prefer the root-cut loop's own
         // optimal basis (extended over any cuts added after its last solve): the
@@ -3123,7 +3214,8 @@ fn solve_node(
         None => {
             if let Some(rb) = ctx.root_warm_basis {
                 let basis = extend_basis(rb.clone(), ctx.n_w);
-                solve_lp_warm_scaled_csc(&solve_lp_view, ctx.sb, &basis, ctx.simplex, ctx.csc)
+                ctx.problem
+                    .solve_warm(&full_l, &full_u, &basis, ctx.simplex)
             } else {
                 match dual_slack_basis(
                     // The unscaled CSC of the working matrix (== `from_dense(a_w)`);
@@ -3142,37 +3234,20 @@ fn solve_node(
                     // relaxation must fall back to the cold primal, not grind to the
                     // deadline.
                     Some(basis) => {
-                        let warm = solve_lp_warm_scaled_csc(
-                            &solve_lp_view,
-                            ctx.sb,
+                        let warm = ctx.problem.solve_warm(
+                            &full_l,
+                            &full_u,
                             &basis,
                             &warm_root_opts(ctx.simplex, ctx.m_w, ctx.n_w),
-                            ctx.csc,
                         );
                         match warm.status {
-                            LpStatus::IterLimit | LpStatus::Numerical => solve_lp_cols(
-                                ctx.csc.clone(),
-                                ctx.m_w,
-                                ctx.n_w,
-                                ctx.sc,
-                                &sl,
-                                &su,
-                                ctx.sb,
-                                ctx.simplex,
-                            ),
+                            LpStatus::IterLimit | LpStatus::Numerical => {
+                                ctx.problem.solve_cold(&full_l, &full_u, ctx.simplex)
+                            }
                             _ => warm,
                         }
                     }
-                    None => solve_lp_cols(
-                        ctx.csc.clone(),
-                        ctx.m_w,
-                        ctx.n_w,
-                        ctx.sc,
-                        &sl,
-                        &su,
-                        ctx.sb,
-                        ctx.simplex,
-                    ),
+                    None => ctx.problem.solve_cold(&full_l, &full_u, ctx.simplex),
                 }
             }
         }
@@ -3213,15 +3288,62 @@ fn solve_node(
         LpStatus::Optimal => {
             out.basis = Some(sol.basis.clone());
             let xs = &sol.x[..ctx.ns];
+            // #1066: the solve exports the row duals in the scaled space (`ŷ`);
+            // the NS bound and `reduced_cost_fix` read them against the UNSCALED
+            // working matrix `ctx.csc_rc` / cost `ctx.c_w`, so map this copy back
+            // with the same exact power-of-two factors `unscale_x` uses. `sol.dual`
+            // itself is left scaled for the Farkas arm (see the note after the
+            // node solve).
+            let rc_dual: std::borrow::Cow<'_, [f64]> = match ctx.scaling {
+                Some(s) => {
+                    let mut d = sol.dual.clone();
+                    s.unscale_dual(&mut d);
+                    std::borrow::Cow::Owned(d)
+                }
+                None => std::borrow::Cow::Borrowed(&sol.dual),
+            };
+            // #1953: the node's bound. With the gate on, the NS safe bound from the
+            // node's own dual over its box (capped at the vertex value); the vertex
+            // value alone is only as good as the simplex's optimality test, and a
+            // vertex the test passed early sits ABOVE the node's LP minimum.
+            let node_lp_bound = if ns_node_bound_enabled() {
+                node_ns_bound(ctx, &rc_dual, &full_l, &full_u).map(|g| g.min(sol.obj))
+            } else {
+                Some(sol.obj)
+            };
+            let Some(node_lp_bound) = node_lp_bound else {
+                // No safe bound: hand the node back exactly as an `IterLimit` one
+                // (parent-floored -inf bound, untrusted midpoint; see that arm). A
+                // verified integral vertex is still a feasible point, so it is
+                // offered to the reduce as an incumbent candidate, which
+                // re-validates it -- it just does not fathom the node.
+                crate::profile::incr(crate::profile::Ctr::NodeNsAbstain);
+                out.basis = None;
+                if feasible_integral(ctx, xs) && incumbent_verified(ctx, &full_l, &full_u, &sol.x) {
+                    out.incumbent = Some((xs.to_vec(), sol.obj + ctx.obj_const));
+                }
+                out.result = NodeResult {
+                    node_id: id,
+                    lower_bound: f64::NEG_INFINITY,
+                    solution: midpoint(lb_k, ub_k),
+                    is_feasible: false,
+                    certified_infeasible: false,
+                    sentinel_is_exclusion: false,
+                };
+                return out;
+            };
+            if ns_node_bound_enabled() {
+                crate::profile::incr(crate::profile::Ctr::NodeNsBound);
+            }
             let feasible = ctx
                 .is_int
                 .iter()
                 .enumerate()
                 .all(|(j, &it)| !it || frac(xs[j]) <= INT_TOL);
-            // #1287: an integral vertex is promoted to the incumbent by the tree, so
-            // its original rows must hold verifiably. One that fails is handled like
-            // a failed LP: its bound and point are both untrusted.
-            if feasible && !rows_verified(ctx.csc_rc, ctx.n_w, ctx.n_orig_rows, ctx.b_w, &sol.x) {
+            // #1287/#1945: an integral vertex is promoted to the incumbent by the tree,
+            // so its original rows AND bounds must hold verifiably. One that fails is
+            // handled like a failed LP: its bound and point are both untrusted.
+            if feasible && !incumbent_verified(ctx, &full_l, &full_u, &sol.x) {
                 out.basis = None;
                 out.result = NodeResult {
                     node_id: id,
@@ -3247,26 +3369,15 @@ fn solve_node(
             // contraction — never touches the node's own valid LP bound.
             if ctx.opts.reduced_cost_fixing && !feasible {
                 let _t_rcf = crate::profile::Timer::new(crate::profile::Phase::RedCostFix);
-                // #1066: the solve exports the row duals in the scaled space (`ŷ`);
-                // `reduced_cost_fix` reads them against the UNSCALED working matrix
-                // `ctx.csc_rc` / cost `ctx.c_w`, so map this copy back with the same
-                // exact power-of-two factors `unscale_x` uses. `sol.dual` itself is
-                // left scaled for the Farkas arm (see the note after the node solve).
-                let rc_dual: std::borrow::Cow<'_, [f64]> = match ctx.scaling {
-                    Some(s) => {
-                        let mut d = sol.dual.clone();
-                        s.unscale_dual(&mut d);
-                        std::borrow::Cow::Owned(d)
-                    }
-                    None => std::borrow::Cow::Borrowed(&sol.dual),
-                };
+                // #1953: the node's bound, not the vertex value: fixing argues
+                // `cᵀx >= z + |r_j| (x_j - bound_j)`, true for the safe bound `z`.
                 if let Some((rl, ru)) = reduced_cost_fix(
                     ctx.csc_rc,
                     ctx.m_w,
                     ctx.c_w,
                     &sol.basis,
                     &rc_dual,
-                    sol.obj + ctx.obj_const,
+                    node_lp_bound + ctx.obj_const,
                     ctx.inc_snapshot.unwrap_or(f64::INFINITY),
                     &full_l,
                     &full_u,
@@ -3377,7 +3488,7 @@ fn solve_node(
             }
             out.result = NodeResult {
                 node_id: id,
-                lower_bound: sol.obj + ctx.obj_const,
+                lower_bound: node_lp_bound + ctx.obj_const,
                 solution: xs.to_vec(),
                 is_feasible: feasible,
                 certified_infeasible: false,
@@ -3698,21 +3809,21 @@ fn strong_branch(
         u: &ref_u,
     };
     let prepared = PreparedDual::prepare(&prep_view, basis, simplex, ctx.csc);
+    // #1945: both arms are verified against the ORIGINAL data (`l`, `u` are the
+    // probe's original-space bounds).
     let probe = |l: &[f64], u: &[f64]| -> crate::lp::simplex::LpSolve {
-        let (sl, su) = scale_bounds(l, u);
         match &prepared {
-            Some(p) => p.reoptimize(&sl, &su, ctx.sb, simplex),
-            None => {
-                let view = LpView {
-                    a: &[], // T3b3: matrix comes from `ctx.csc`; `.a` unused here.
-                    m: ctx.m_w,
-                    n: ctx.n_w,
-                    c: ctx.sc,
-                    l: &sl,
-                    u: &su,
-                };
-                solve_lp_warm_scaled_csc(&view, ctx.sb, basis, simplex, ctx.csc)
+            Some(p) => {
+                let (sl, su) = scale_bounds(l, u);
+                ctx.problem.verify(
+                    p.reoptimize(&sl, &su, ctx.sb, simplex),
+                    l,
+                    u,
+                    Some(basis),
+                    simplex,
+                )
             }
+            None => ctx.problem.solve_warm(l, u, basis, simplex),
         }
     };
     let mut best: Option<usize> = None;
@@ -4867,6 +4978,17 @@ fn try_dive_repair(
             // No fractional integer remains: round the (near-integral) integers
             // exactly and return the repaired point.
             None => {
+                // #1945: the dive's point becomes an incumbent; hold it to the same
+                // test as a node's integral vertex (it had no check of its own).
+                let mut fl = vec![0.0; ctx.n_w];
+                let mut fu = vec![0.0; ctx.n_w];
+                fl[..ns].copy_from_slice(&l);
+                fu[..ns].copy_from_slice(&u);
+                fl[ns..].copy_from_slice(ctx.slack_l);
+                fu[ns..].copy_from_slice(ctx.slack_u);
+                if !incumbent_verified(ctx, &fl, &fu, &x) {
+                    return None;
+                }
                 let mut xc = x[..ns].to_vec();
                 for (k, xk) in xc.iter_mut().enumerate() {
                     if ctx.is_int[k] {
@@ -4916,19 +5038,10 @@ fn try_dive_repair(
             full_u[j] = v;
             full_l[ns..].copy_from_slice(ctx.slack_l);
             full_u[ns..].copy_from_slice(ctx.slack_u);
-            let (sl, su) = match ctx.scaling {
-                Some(s) => (s.scale_lower(&full_l), s.scale_upper(&full_u)),
-                None => (full_l.clone(), full_u.clone()),
-            };
-            let view = LpView {
-                a: &[], // T3b5: matrix comes from `ctx.csc`; `.a` unused by CSC solve.
-                m: ctx.m_w,
-                n: ctx.n_w,
-                c: ctx.sc,
-                l: &sl,
-                u: &su,
-            };
-            let mut sol = solve_lp_warm_scaled_csc(&view, ctx.sb, &cur_basis, ctx.simplex, ctx.csc);
+            // #1945: verified against the ORIGINAL data, like every node solve.
+            let mut sol = ctx
+                .problem
+                .solve_warm(&full_l, &full_u, &cur_basis, ctx.simplex);
             if sol.status == LpStatus::Optimal {
                 if let Some(s) = ctx.scaling {
                     s.unscale_x(&mut sol.x);
@@ -5036,6 +5149,25 @@ const ROW_ROUNDOFF_CAP: f64 = 1e-3;
 /// `y = 9.999e19, w = -9.999e19` makes `y + w` cancel to `0` and an infeasible
 /// point reads as satisfying its rows. Otherwise the residual must be within
 /// `ROW_VERIFY_TOL·(1 + |b_i|)` plus the round-off bound.
+/// #1945: the MILP driver's single test for promoting an integral LP vertex `z` to
+/// an incumbent: its ORIGINAL rows hold ([`rows_verified`]) and its original columns
+/// (structurals and the original rows' slacks, i.e. a negative inequality slack too)
+/// lie within the node's bounds `l`, `u` under the LP audit's own bound test
+/// ([`crate::lp::simplex::primal::bounds_hold`]). `ScaledProblem::verify` already
+/// refuses a scaled `Optimal` that fails the original audit; this keeps the tree
+/// from adopting a point that is out of bounds whatever produced it.
+fn incumbent_verified(ctx: &NodeCtx<'_>, l: &[f64], u: &[f64], z: &[f64]) -> bool {
+    if !rows_verified(ctx.csc_rc, ctx.n_w, ctx.n_orig_rows, ctx.b_w, z) {
+        return false;
+    }
+    let k = ctx.n_orig_cols.min(z.len()).min(l.len()).min(u.len());
+    let ok = crate::lp::simplex::primal::bounds_hold(&l[..k], &u[..k], &z[..k]);
+    if !ok {
+        crate::profile::incr(crate::profile::Ctr::DriverIncumbentBoundsRefused);
+    }
+    ok
+}
+
 fn rows_verified(csc: &SparseCols, n_cols: usize, n_rows: usize, b: &[f64], z: &[f64]) -> bool {
     let (col_ptr, row_idx, vals) = csc.raw();
     let mut act = vec![0.0f64; n_rows];
@@ -5473,7 +5605,13 @@ mod tests {
         // Anti-vacuity (CLAUDE.md §6): the driver's detector must actually fire on
         // this fixture, or the run below exercises nothing.
         assert_eq!(
-            crate::bnb::obj_integral::objective_granularity(&c[..ns], &is_int[..ns]),
+            crate::bnb::obj_integral::objective_granularity(
+                &c[..ns],
+                &is_int[..ns],
+                &l[..ns],
+                &u[..ns]
+            )
+            .map(|lat| lat.spacing),
             Some(1.0),
             "fixture must present a unit objective lattice"
         );
@@ -5510,7 +5648,8 @@ mod tests {
         u[ns] = 1.0;
         let is_int: Vec<bool> = (0..n).map(|j| j < ns).collect();
         assert_eq!(
-            crate::bnb::obj_integral::objective_granularity(&c, &is_int),
+            crate::bnb::obj_integral::objective_granularity(&c, &is_int, &l, &u)
+                .map(|lat| lat.spacing),
             None,
             "a costed continuous column must disable the lattice"
         );

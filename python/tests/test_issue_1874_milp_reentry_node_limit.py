@@ -23,6 +23,19 @@ from discopt.modeling.core import Model
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _legacy_lift_adoption(monkeypatch):
+    """Pin the legacy integer-bilinear adoption rule (#1940's ``DISCOPT_IPX_RACE=0``).
+
+    These tests script the native MILP engine that serves the LIFTED model. Under the
+    #1940 race, the scripted uncertified lifted slice is followed by an un-lifted
+    slice that certifies the model on its own, so the merged result no longer shows
+    what the re-entry did. The race is covered by ``test_1940_lift_race.py``; here the
+    lift must be the whole solve.
+    """
+    monkeypatch.setenv("DISCOPT_IPX_RACE", "0")
+
+
 def _milp_route_model() -> Model:
     """Integer-bilinear, small ranges: linearised and served by the native MILP engine."""
     m = Model("reentry")

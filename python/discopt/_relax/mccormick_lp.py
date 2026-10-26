@@ -412,11 +412,11 @@ def free_column_lp_cert_enabled() -> bool:
     """``DISCOPT_FREE_COLUMN_LP_CERT`` gate (#1869 (b)): certify a declined McCormick
     node LP with an unbounded nonlinear column through the verified HiGHS LP route.
 
-    ``prolog``'s pricing rows bound its bilinear sums (``x2 x0 + x4 x1 <= x18``,
-    ``x18 <= 3340.8 x7 + 500 x8``, ...), so its root LP is bounded at the optimum 0,
-    yet the in-house relaxer reported it ``uncertified``: with free columns the
-    floating dual's reduced costs land on an open side and the Neumaier--Shcherbina
-    bound is ``-inf``. ``lp_milp_highs.solve_lp_std`` certifies the same LP at -1e-12.
+    With open columns the floating dual's reduced costs land on an open side and the
+    in-house Neumaier--Shcherbina bound is ``-inf`` even where the LP is bounded;
+    ``lp_milp_highs.solve_lp_std`` can still certify such an LP (#1729 dual scaling,
+    the rational ``exact_ns_bound``). ``prolog`` was the motivating example, wrongly:
+    see the retraction below.
     Its bound is rigorous for ANY dual, so HiGHS's accuracy decides only whether a
     bound is found. Bound-changing (a node that had none gets one), so gated per
     CLAUDE.md section 5; read at call time.
@@ -429,8 +429,61 @@ def free_column_lp_cert_enabled() -> bool:
     bound -> optimal in 289 nodes / 13.3 s; ``ex7_3_3`` and ``ex9_1_1`` also gained);
     fewer nodes where both certify (``ex9_1_5`` 3 -> 1, ``ex9_1_8`` 5 -> 3), total
     wall 1494 -> 1424 s. ``=0`` restores the decline.
+
+    **Retracted in part (#1966):** the ``prolog`` gain was a false certificate.
+    prolog's root LP over the FBBT box is *exactly unbounded below* over its double
+    data: a rational ray ``d >= 0`` on columns open above has ``A d = 0`` and
+    ``c^T d = -1.7053e-13``, because ``x18 <= fl(3340.8) x7``, ``x19 <= fl(371.2) x7``,
+    ``x7`` is priced at ``3712`` and ``fl(3340.8) + fl(371.2) - 3712 = 1.7053e-13``
+    in binary (zero in decimal). The pre-#1956 NS bound rounded the matching
+    reduced cost to 0.0. No dual correction can bound this LP, and root OBBT
+    (``run_obbt``: ``x2 <= 1918``, ``x4 <= 862``) leaves an exact ray of the same
+    cost, so ``exact_ns_bound``'s abstention is correct
+    (``test_1966_prolog_root_lp_exactly_unbounded.py``). Certifying prolog needs a
+    relaxation whose limit along ``x7 -> inf`` respects the shared budget
+    ``x2 + x3 <= 0.94 S1 - ...`` (e.g. RLT products of that row with ``x0``), not a
+    better dual. The other gains (``ex7_3_3``, ``ex9_1_1``, ``ex9_1_5``,
+    ``ex9_1_8``) still certify; the net-positive bar rests on them.
     """
     return os.environ.get("DISCOPT_FREE_COLUMN_LP_CERT", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
+
+
+def declined_lp_cert_enabled() -> bool:
+    """``DISCOPT_DECLINED_LP_CERT`` gate (#1941, ex14_1_7): widen the #1869 (b)
+    verified-HiGHS handoff from "an unbounded *nonlinear* column" to any optimal,
+    continuous node LP that every in-house certificate declined.
+
+    Measured on ex14_1_7 (minimax: ``g_k <= x10``, ``-g_k <= x10``, ``x10`` free and
+    only linear): the uniform relaxation already shares each ``g_k`` aux column
+    between the paired rows and its root LP solves to 0.0, the ``.solu`` optimum. The
+    bound is lost to certification, not relaxation: the NS safe bound abstains on the
+    free ``x10`` (reduced-cost interval straddles 0), ``trusted_vertex`` is refused
+    because aux bounds reach 1.77e9 (> ``_LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE``), and
+    the #1869 handoff never fires because ``x10`` is linear. Handing that LP to
+    ``_verified_free_column_bound`` returns -1e-12. The bound is rigorous for any
+    dual (same route as #1869 (b)), so this only decides whether a node gets one.
+
+    Bound-changing, so gated per CLAUDE.md section 5; read at call time.
+
+    **Graduated (default ON, 2026-10-26).** Screen: all 782 local MINLPLib instances
+    with <= 200 vars and <= 200 cons, 20 s, counting handoffs that only this arm
+    reaches (the #1869 arm short-circuits it): it fires on 3 (``btest14``,
+    ``ex14_1_2``, ``ex14_1_7``); on the other 779 ON and OFF run identical code.
+    Panel on those 3, OFF/ON interleaved, 3 reps, 60 s: *cert-clean* (18 rows, 39
+    executed checks, 0 problems: no bound past ``minlplib.solu``'s opt/best dual,
+    every incumbent passes ``verify_point`` on a fresh model) and net-positive --
+    ``ex14_1_7`` time limit (bound -341.28, ~430 nodes) -> **optimal 3/3 in 3 nodes,
+    1.7 +/- 0.1 s**; ``ex14_1_2`` unchanged (the route abstains there); ``btest14``
+    within run-to-run spread (bound -168.07..-168.26 OFF vs -168.17..-168.26 ON).
+    ``=0`` restores the decline.
+    """
+    return os.environ.get("DISCOPT_DECLINED_LP_CERT", "1").strip().lower() not in (
         "0",
         "false",
         "no",
@@ -601,6 +654,12 @@ class MccormickLPRelaxer:
         # Spatial-BB uses standard McCormick globally — no partitioning here.
         self._disc = DiscretizationState(partitions={})
         self._n_orig = sum(v.size for v in model._variables)
+        # Rows of the MODEL that arrive after the build (#1954: lazy constraints),
+        # as upper-form ``A x <= b`` over the original columns. Set by the solver
+        # through :meth:`set_model_rows`; every node build (cold and incremental)
+        # appends them. Unlike ``inherited_cuts`` they are constraints, not an
+        # accelerator, so the C-42 strip-and-retry never removes them.
+        self._model_rows: Optional[tuple[np.ndarray, np.ndarray]] = None
         # Integer-ratio partition bound (issue #309, flag-gated default-OFF):
         # attached by the solver when the pre-reform model carries a
         # ratio-of-integer-products structure; ``solve_at_node`` then max-combines
@@ -934,6 +993,10 @@ class MccormickLPRelaxer:
                     cut_rows = list(zip(a_rows, b_rows))
                     self._pool_stats["inherited_nodes"] += 1
                     self._pool_stats["inherited_rows"] += len(cut_rows)
+        _mrows = self._padded_model_rows(inc.ncol)
+        if _mrows is not None:
+            # #1954: the model's lazy rows, ahead of the pool rows.
+            cut_rows = list(zip(_mrows[0], _mrows[1])) + (cut_rows or [])
         A, b, bounds = inc.assemble(lb, ub, cut_rows=cut_rows)
         nrows = int(A.shape[0])
         # Densification guard (Issue #20), same cap as the cold path below.
@@ -1148,6 +1211,40 @@ class MccormickLPRelaxer:
 
     #: Set for the duration of a ``solve_at_node(..., rigorous_only=True)`` call.
     _rigorous_only = False
+
+    def set_model_rows(self, A: Optional[np.ndarray], b: Optional[np.ndarray]) -> None:
+        """Install model rows ``A x <= b`` over the original columns (#1954).
+
+        A lazy constraint returned by a callback is a row of the model, valid at
+        every feasible point. Before this the node McCormick LP never saw one: the
+        rows reached only the node NLP (through ``_AugmentedEvaluator``), the LP
+        kept returning the point the row cuts off, and a correct separator drove
+        the node to the requeue cap. Original columns occupy positions
+        ``0..n_orig-1`` of every lifted layout (:func:`column_identities`), so the
+        rows are applied by zero-padding to the build's width.
+        """
+        if A is None or b is None or len(b) == 0:
+            self._model_rows = None
+            return
+        A = np.atleast_2d(np.asarray(A, dtype=np.float64))
+        b = np.asarray(b, dtype=np.float64).ravel()
+        if A.shape != (b.shape[0], self._n_orig):
+            raise ValueError(
+                f"model rows must be (k, {self._n_orig}) with k rhs entries; "
+                f"got A{A.shape}, b{b.shape}"
+            )
+        self._model_rows = (A, b)
+
+    def _padded_model_rows(self, ncol: int) -> Optional[tuple[np.ndarray, np.ndarray]]:
+        """The installed model rows widened to ``ncol`` columns, or ``None``."""
+        if self._model_rows is None:
+            return None
+        A, b = self._model_rows
+        if ncol < self._n_orig:
+            raise ValueError(f"layout width {ncol} < original column count {self._n_orig}")
+        out = np.zeros((A.shape[0], ncol), dtype=np.float64)
+        out[:, : self._n_orig] = A
+        return out, b
 
     def solve_at_node(
         self,
@@ -1751,6 +1848,13 @@ class MccormickLPRelaxer:
                 return None
             return max(_deadline - time.perf_counter(), _SOLVE_DEADLINE_FLOOR_S)
 
+        # #1954: the model's lazy rows go in BEFORE the pool's row count is taken,
+        # so the C-42 strip-and-retry (which drops rows past that count) keeps
+        # them: they are constraints of the model, not an accelerator.
+        _mrows = self._padded_model_rows(n_total)
+        if _mrows is not None:
+            _append_relax_rows(milp, _mrows[0], _mrows[1])
+
         # Root cut-pool inheritance (P1 + C-44): append globally-valid cut rows
         # separated once at the root instead of re-separating them every node.
         # Each pool row is a valid inequality at every feasible point regardless
@@ -2227,15 +2331,26 @@ class MccormickLPRelaxer:
             (bound is None or not np.isfinite(bound))
             and res.status == "optimal"
             and milp._integrality is None
-            and self._nonlinear_cols
-            and self._has_unbounded_nonlinear_col(milp)
-            and free_column_lp_cert_enabled()
+            and (
+                (
+                    self._nonlinear_cols
+                    and self._has_unbounded_nonlinear_col(milp)
+                    and free_column_lp_cert_enabled()
+                )
+                or declined_lp_cert_enabled()
+            )
         ):
             # #1869 (b): every in-house certificate declined an LP with an unbounded
             # nonlinear column -- the NS safe bound needs every open column's reduced
             # cost on its safe side, and a floating dual rarely has it. The verified
             # HiGHS LP route does exactly that certification (#1729 dual scaling, the
             # rational ``exact_ns_bound``), so hand it this node LP.
+            # #1941: ``DISCOPT_DECLINED_LP_CERT`` widens this to any declined LP
+            # (ex14_1_7: a free *linear* column plus 1.77e9 aux bounds).
+            # ``_objective_bound_valid`` is deliberately not consulted: it marks an
+            # infinite or garbage-wide box floor, i.e. distrust of the in-house
+            # simplex value or a sound-but-harmful bound, not an invalid LP, and the
+            # verified route reports an unbounded LP as such.
             _vb, _vx = _verified_free_column_bound(milp, _remaining())
             if _vb is not None:
                 BOUND_PROVENANCE["verified_highs"] += 1

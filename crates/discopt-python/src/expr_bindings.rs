@@ -1785,6 +1785,9 @@ pub fn model_to_repr(
     // construction (see `ExprArena::intern`); disabled before the model leaves this
     // function so downstream passes keep plain append semantics.
     arena.enable_interning();
+    // Shared by the objective and every constraint: a subexpression reused across
+    // them is converted once.
+    let mut memo: ExprMemo<'_> = std::collections::HashMap::new();
 
     // Determine objective: builder's objective takes priority, fall back to model._objective.
     let py_objective = model.getattr("_objective")?;
@@ -1804,8 +1807,14 @@ pub fn model_to_repr(
             } else {
                 // Expression-based objective overrides builder
                 let py_obj_expr = py_objective.getattr("expression")?;
-                let obj =
-                    convert_expr(py, &py_obj_expr, &mut arena, &var_expr_ids, &param_expr_ids)?;
+                let obj = convert_expr(
+                    py,
+                    &py_obj_expr,
+                    &mut arena,
+                    &var_expr_ids,
+                    &param_expr_ids,
+                    &mut memo,
+                )?;
                 let sense_obj = py_objective.getattr("sense")?;
                 let sense_str: String = sense_obj.getattr("value")?.extract()?;
                 let os = match sense_str.as_str() {
@@ -1823,7 +1832,14 @@ pub fn model_to_repr(
     } else {
         // No builder objective — must come from Python model.
         let py_obj_expr = py_objective.getattr("expression")?;
-        let obj = convert_expr(py, &py_obj_expr, &mut arena, &var_expr_ids, &param_expr_ids)?;
+        let obj = convert_expr(
+            py,
+            &py_obj_expr,
+            &mut arena,
+            &var_expr_ids,
+            &param_expr_ids,
+            &mut memo,
+        )?;
         let sense_obj = py_objective.getattr("sense")?;
         let sense_str: String = sense_obj.getattr("value")?.extract()?;
         let os = match sense_str.as_str() {
@@ -1847,7 +1863,14 @@ pub fn model_to_repr(
             continue;
         }
         let body_expr = py_con.getattr("body")?;
-        let body = convert_expr(py, &body_expr, &mut arena, &var_expr_ids, &param_expr_ids)?;
+        let body = convert_expr(
+            py,
+            &body_expr,
+            &mut arena,
+            &var_expr_ids,
+            &param_expr_ids,
+            &mut memo,
+        )?;
         let sense_str: String = py_con.getattr("sense")?.extract()?;
         let sense = match sense_str.as_str() {
             "<=" => ConstraintSense::Le,
@@ -1909,225 +1932,264 @@ fn get_class_name(obj: &Bound<'_, PyAny>) -> PyResult<String> {
     obj.getattr("__class__")?.getattr("__name__")?.extract()
 }
 
-/// Recursively convert a Python Expression to ExprNode(s) in the arena.
-fn convert_expr(
-    _py: Python<'_>,
-    obj: &Bound<'_, PyAny>,
+/// Converted nodes keyed by Python object identity. Each entry holds a reference to
+/// its object, so no address in the map can be freed and reused while it is alive.
+type ExprMemo<'py> = std::collections::HashMap<isize, (Bound<'py, PyAny>, ExprId)>;
+
+fn parse_binop(s: &str) -> PyResult<BinOp> {
+    Ok(match s {
+        "+" => BinOp::Add,
+        "-" => BinOp::Sub,
+        "*" => BinOp::Mul,
+        "/" => BinOp::Div,
+        "**" => BinOp::Pow,
+        _ => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Unknown BinOp: {s}"
+            )))
+        }
+    })
+}
+
+fn parse_math_func(func_str: &str) -> PyResult<MathFunc> {
+    Ok(match func_str {
+        "exp" => MathFunc::Exp,
+        "log" => MathFunc::Log,
+        "log2" => MathFunc::Log2,
+        "log10" => MathFunc::Log10,
+        "sqrt" => MathFunc::Sqrt,
+        "sin" => MathFunc::Sin,
+        "cos" => MathFunc::Cos,
+        "tan" => MathFunc::Tan,
+        "atan" => MathFunc::Atan,
+        "sinh" => MathFunc::Sinh,
+        "cosh" => MathFunc::Cosh,
+        "asin" => MathFunc::Asin,
+        "acos" => MathFunc::Acos,
+        "tanh" => MathFunc::Tanh,
+        "abs" => MathFunc::Abs,
+        "sign" => MathFunc::Sign,
+        "min" => MathFunc::Min,
+        "max" => MathFunc::Max,
+        "prod" => MathFunc::Prod,
+        "norm2" => MathFunc::Norm2,
+        "asinh" => MathFunc::Asinh,
+        "acosh" => MathFunc::Acosh,
+        "atanh" => MathFunc::Atanh,
+        "erf" => MathFunc::Erf,
+        "log1p" => MathFunc::Log1p,
+        "sigmoid" => MathFunc::Sigmoid,
+        "softplus" => MathFunc::Softplus,
+        "entropy" => MathFunc::Entropy,
+        "centropy" => MathFunc::Centropy,
+        "norm1" => MathFunc::Norm1,
+        "norminf" => MathFunc::NormInf,
+        // General integer-order p-norm "norm{p}" (p != 1, 2, inf).
+        other if other.starts_with("norm") => match other["norm".len()..].parse::<u32>() {
+            Ok(p) if p >= 1 => MathFunc::NormP(p),
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Unknown MathFunc: {func_str}"
+                )));
+            }
+        },
+        _ => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Unknown MathFunc: {func_str}"
+            )));
+        }
+    })
+}
+
+/// Convert a Python Expression to ExprNode(s) in the arena.
+///
+/// Iterative post-order walk with an explicit stack, so neither a left-deep chain
+/// (#654: qap's objective is 42849 levels) nor a right-deep one (`x + (x + (...))`)
+/// recurses on the thread stack — a deep enough chain used to overflow it and kill
+/// the interpreter. Children are visited left to right exactly as the recursive
+/// build did, so `intern` sees the same sequence and the arena is identical.
+///
+/// `memo` maps an already-converted Python node to its id. Without it a DAG that
+/// reuses a subexpression (single shooting, `e = e + h*(u - e**2)`) was walked once
+/// per *path*, exponential in depth; interning made the result right but the walk
+/// still visited every path. The memo is shared across the objective and all
+/// constraints of one model.
+fn convert_expr<'py>(
+    _py: Python<'py>,
+    obj: &Bound<'py, PyAny>,
     arena: &mut ExprArena,
     var_ids: &std::collections::HashMap<isize, ExprId>,
     param_ids: &std::collections::HashMap<isize, ExprId>,
+    memo: &mut ExprMemo<'py>,
 ) -> PyResult<ExprId> {
-    let class_name = get_class_name(obj)?;
-
-    match class_name.as_str() {
-        "Variable" => {
-            let py_id = obj.as_ptr() as isize;
-            if let Some(&expr_id) = var_ids.get(&py_id) {
-                Ok(expr_id)
-            } else {
-                Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "Variable not found in model",
-                ))
-            }
-        }
-        "Parameter" => {
-            let py_id = obj.as_ptr() as isize;
-            if let Some(&expr_id) = param_ids.get(&py_id) {
-                Ok(expr_id)
-            } else {
-                Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "Parameter not found in model",
-                ))
-            }
-        }
-        "Constant" => {
-            let value_obj = obj.getattr("value")?;
-            let data = extract_flat_f64(&value_obj)?;
-            let arr: numpy::PyReadonlyArrayDyn<f64> = value_obj.extract()?;
-            let shape: Vec<usize> = arr.as_array().shape().to_vec();
-            if data.len() == 1 {
-                Ok(arena.intern(ExprNode::Constant(data[0])))
-            } else {
-                Ok(arena.intern(ExprNode::ConstantArray(data, shape)))
-            }
-        }
-        "BinaryOp" => {
-            // #654: convert the LEFT-nested associative spine ITERATIVELY. Factorable
-            // objectives are left-deep chains — qap's is 42849 levels,
-            // ``(((...) + t) + t) + t`` — and recursing down ``left`` overflows the
-            // thread stack (which manifests as a hang, not a clean crash). Walk down
-            // ``left`` in a loop, stacking each ``(op, right)`` pair; the right
-            // operands and the deepest-left leaf are shallow, so converting them
-            // recurses only a little. Then fold bottom-up with the same ``intern`` —
-            // identical to the recursive build, so the arena is byte-for-byte the same.
-            fn parse_binop(s: &str) -> PyResult<BinOp> {
-                Ok(match s {
-                    "+" => BinOp::Add,
-                    "-" => BinOp::Sub,
-                    "*" => BinOp::Mul,
-                    "/" => BinOp::Div,
-                    "**" => BinOp::Pow,
-                    _ => {
-                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                            "Unknown BinOp: {s}"
-                        )))
-                    }
-                })
-            }
-            let mut spine: Vec<(BinOp, Bound<'_, PyAny>)> = Vec::new();
-            let mut cur = obj.clone();
-            let deepest_left = loop {
-                if get_class_name(&cur)? != "BinaryOp" {
-                    break cur;
-                }
-                let op = parse_binop(&cur.getattr("op")?.extract::<String>()?)?;
-                let right = cur.getattr("right")?;
-                let left = cur.getattr("left")?;
-                spine.push((op, right));
-                cur = left;
-            };
-            let mut acc = convert_expr(_py, &deepest_left, arena, var_ids, param_ids)?;
-            for (op, right) in spine.into_iter().rev() {
-                let right_id = convert_expr(_py, &right, arena, var_ids, param_ids)?;
-                acc = arena.intern(ExprNode::BinaryOp {
-                    op,
-                    left: acc,
-                    right: right_id,
-                });
-            }
-            Ok(acc)
-        }
-        "UnaryOp" => {
-            let op_str: String = obj.getattr("op")?.extract()?;
-            let op = match op_str.as_str() {
-                "neg" => UnOp::Neg,
-                "abs" => UnOp::Abs,
-                _ => {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                        "Unknown UnOp: {op_str}"
-                    )));
-                }
-            };
-            let operand = obj.getattr("operand")?;
-            let operand_id = convert_expr(_py, &operand, arena, var_ids, param_ids)?;
-            Ok(arena.intern(ExprNode::UnaryOp {
-                op,
-                operand: operand_id,
-            }))
-        }
-        "FunctionCall" => {
-            let func_str: String = obj.getattr("func_name")?.extract()?;
-            let func = match func_str.as_str() {
-                "exp" => MathFunc::Exp,
-                "log" => MathFunc::Log,
-                "log2" => MathFunc::Log2,
-                "log10" => MathFunc::Log10,
-                "sqrt" => MathFunc::Sqrt,
-                "sin" => MathFunc::Sin,
-                "cos" => MathFunc::Cos,
-                "tan" => MathFunc::Tan,
-                "atan" => MathFunc::Atan,
-                "sinh" => MathFunc::Sinh,
-                "cosh" => MathFunc::Cosh,
-                "asin" => MathFunc::Asin,
-                "acos" => MathFunc::Acos,
-                "tanh" => MathFunc::Tanh,
-                "abs" => MathFunc::Abs,
-                "sign" => MathFunc::Sign,
-                "min" => MathFunc::Min,
-                "max" => MathFunc::Max,
-                "prod" => MathFunc::Prod,
-                "norm2" => MathFunc::Norm2,
-                "asinh" => MathFunc::Asinh,
-                "acosh" => MathFunc::Acosh,
-                "atanh" => MathFunc::Atanh,
-                "erf" => MathFunc::Erf,
-                "log1p" => MathFunc::Log1p,
-                "sigmoid" => MathFunc::Sigmoid,
-                "softplus" => MathFunc::Softplus,
-                "entropy" => MathFunc::Entropy,
-                "centropy" => MathFunc::Centropy,
-                "norm1" => MathFunc::Norm1,
-                "norminf" => MathFunc::NormInf,
-                // General integer-order p-norm "norm{p}" (p != 1, 2, inf).
-                other if other.starts_with("norm") => match other["norm".len()..].parse::<u32>() {
-                    Ok(p) if p >= 1 => MathFunc::NormP(p),
-                    _ => {
-                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                            "Unknown MathFunc: {func_str}"
-                        )));
-                    }
-                },
-                _ => {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                        "Unknown MathFunc: {func_str}"
-                    )));
-                }
-            };
-            let py_args = obj.getattr("args")?;
-            let py_args_tuple: Vec<Bound<'_, PyAny>> = py_args.extract()?;
-            let mut args = Vec::new();
-            for a in &py_args_tuple {
-                args.push(convert_expr(_py, a, arena, var_ids, param_ids)?);
-            }
-            // The core evaluates and bounds `centropy` from exactly two operands;
-            // any other arity is a malformed model, refused here rather than read
-            // as NaN downstream (#1661).
-            if func == MathFunc::Centropy && args.len() != 2 {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "centropy takes 2 arguments, got {}",
-                    args.len()
-                )));
-            }
-            Ok(arena.intern(ExprNode::FunctionCall { func, args }))
-        }
-        "IndexExpression" => {
-            let base = obj.getattr("base")?;
-            let base_id = convert_expr(_py, &base, arena, var_ids, param_ids)?;
-            let py_index = obj.getattr("index")?;
-            // The base's shape is needed to normalize Python's negative indices
-            // (`x[-1]`), which `IndexSpec` cannot represent -- its scalar arms are
-            // `usize`. Without it every negative index overflowed the extraction and
-            // aborted the whole conversion (#944).
-            let base_shape = python_shape(&base);
-            let index_spec = convert_index_spec(&py_index, base_shape.as_deref())?;
-            Ok(arena.intern(ExprNode::Index {
-                base: base_id,
-                index: index_spec,
-            }))
-        }
-        "MatMulExpression" => {
-            let left = obj.getattr("left")?;
-            let right = obj.getattr("right")?;
-            let left_id = convert_expr(_py, &left, arena, var_ids, param_ids)?;
-            let right_id = convert_expr(_py, &right, arena, var_ids, param_ids)?;
-            Ok(arena.intern(ExprNode::MatMul {
-                left: left_id,
-                right: right_id,
-            }))
-        }
-        "SumExpression" => {
-            let operand = obj.getattr("operand")?;
-            let operand_id = convert_expr(_py, &operand, arena, var_ids, param_ids)?;
-            let axis: Option<usize> = obj.getattr("axis")?.extract()?;
-            Ok(arena.intern(ExprNode::Sum {
-                operand: operand_id,
-                axis,
-            }))
-        }
-        "SumOverExpression" => {
-            let py_terms = obj.getattr("terms")?;
-            let py_terms_list: Vec<Bound<'_, PyAny>> = py_terms.extract()?;
-            let mut terms = Vec::new();
-            for t in &py_terms_list {
-                terms.push(convert_expr(_py, t, arena, var_ids, param_ids)?);
-            }
-            Ok(arena.intern(ExprNode::SumOver { terms }))
-        }
-        other => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-            "Unknown expression type: {other}"
-        ))),
+    // What to build once a node's `n` children are on the value stack.
+    enum Pending {
+        Bin(BinOp),
+        Un(UnOp),
+        Func(MathFunc),
+        Index(IndexSpec),
+        MatMul,
+        Sum(Option<usize>),
+        SumOver,
     }
+    enum Task<'py> {
+        Visit(Bound<'py, PyAny>),
+        Build(Bound<'py, PyAny>, Pending, usize),
+    }
+
+    let mut tasks: Vec<Task<'py>> = vec![Task::Visit(obj.clone())];
+    let mut values: Vec<ExprId> = Vec::new();
+    while let Some(task) = tasks.pop() {
+        match task {
+            Task::Visit(node) => {
+                let key = node.as_ptr() as isize;
+                if let Some((_, id)) = memo.get(&key) {
+                    values.push(*id);
+                    continue;
+                }
+                let class_name = get_class_name(&node)?;
+                // Children in left-to-right order; pushed reversed so they pop in order.
+                let (pending, children): (Pending, Vec<Bound<'py, PyAny>>) =
+                    match class_name.as_str() {
+                        "Variable" => {
+                            let Some(&id) = var_ids.get(&key) else {
+                                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                    "Variable not found in model",
+                                ));
+                            };
+                            values.push(id);
+                            continue;
+                        }
+                        "Parameter" => {
+                            let Some(&id) = param_ids.get(&key) else {
+                                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                    "Parameter not found in model",
+                                ));
+                            };
+                            values.push(id);
+                            continue;
+                        }
+                        "Constant" => {
+                            let value_obj = node.getattr("value")?;
+                            let data = extract_flat_f64(&value_obj)?;
+                            let arr: numpy::PyReadonlyArrayDyn<f64> = value_obj.extract()?;
+                            let shape: Vec<usize> = arr.as_array().shape().to_vec();
+                            let id = if data.len() == 1 {
+                                arena.intern(ExprNode::Constant(data[0]))
+                            } else {
+                                arena.intern(ExprNode::ConstantArray(data, shape))
+                            };
+                            memo.insert(key, (node, id));
+                            values.push(id);
+                            continue;
+                        }
+                        "BinaryOp" => {
+                            let op = parse_binop(&node.getattr("op")?.extract::<String>()?)?;
+                            let (left, right) = (node.getattr("left")?, node.getattr("right")?);
+                            (Pending::Bin(op), vec![left, right])
+                        }
+                        "UnaryOp" => {
+                            let op_str: String = node.getattr("op")?.extract()?;
+                            let op = match op_str.as_str() {
+                                "neg" => UnOp::Neg,
+                                "abs" => UnOp::Abs,
+                                _ => {
+                                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                        format!("Unknown UnOp: {op_str}"),
+                                    ));
+                                }
+                            };
+                            (Pending::Un(op), vec![node.getattr("operand")?])
+                        }
+                        "FunctionCall" => {
+                            let func_str: String = node.getattr("func_name")?.extract()?;
+                            let func = parse_math_func(&func_str)?;
+                            let args: Vec<Bound<'py, PyAny>> = node.getattr("args")?.extract()?;
+                            (Pending::Func(func), args)
+                        }
+                        "IndexExpression" => {
+                            let base = node.getattr("base")?;
+                            let py_index = node.getattr("index")?;
+                            // The base's shape is needed to normalize Python's negative
+                            // indices (`x[-1]`), which `IndexSpec` cannot represent -- its
+                            // scalar arms are `usize`. Without it every negative index
+                            // overflowed the extraction and aborted the whole conversion
+                            // (#944).
+                            let base_shape = python_shape(&base);
+                            let index_spec = convert_index_spec(&py_index, base_shape.as_deref())?;
+                            (Pending::Index(index_spec), vec![base])
+                        }
+                        "MatMulExpression" => {
+                            let (left, right) = (node.getattr("left")?, node.getattr("right")?);
+                            (Pending::MatMul, vec![left, right])
+                        }
+                        "SumExpression" => {
+                            let axis: Option<usize> = node.getattr("axis")?.extract()?;
+                            (Pending::Sum(axis), vec![node.getattr("operand")?])
+                        }
+                        "SumOverExpression" => {
+                            let terms: Vec<Bound<'py, PyAny>> = node.getattr("terms")?.extract()?;
+                            (Pending::SumOver, terms)
+                        }
+                        other => {
+                            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                                "Unknown expression type: {other}"
+                            )))
+                        }
+                    };
+                tasks.push(Task::Build(node, pending, children.len()));
+                tasks.extend(children.into_iter().rev().map(Task::Visit));
+            }
+            Task::Build(node, pending, n) => {
+                let mut kids = values.split_off(values.len() - n);
+                let id = match pending {
+                    Pending::Bin(op) => arena.intern(ExprNode::BinaryOp {
+                        op,
+                        left: kids[0],
+                        right: kids[1],
+                    }),
+                    Pending::Un(op) => arena.intern(ExprNode::UnaryOp {
+                        op,
+                        operand: kids[0],
+                    }),
+                    Pending::Func(func) => {
+                        // The core evaluates and bounds `centropy` from exactly two
+                        // operands; any other arity is a malformed model, refused here
+                        // rather than read as NaN downstream (#1661).
+                        if func == MathFunc::Centropy && kids.len() != 2 {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "centropy takes 2 arguments, got {}",
+                                kids.len()
+                            )));
+                        }
+                        arena.intern(ExprNode::FunctionCall {
+                            func,
+                            args: std::mem::take(&mut kids),
+                        })
+                    }
+                    Pending::Index(index) => arena.intern(ExprNode::Index {
+                        base: kids[0],
+                        index,
+                    }),
+                    Pending::MatMul => arena.intern(ExprNode::MatMul {
+                        left: kids[0],
+                        right: kids[1],
+                    }),
+                    Pending::Sum(axis) => arena.intern(ExprNode::Sum {
+                        operand: kids[0],
+                        axis,
+                    }),
+                    Pending::SumOver => arena.intern(ExprNode::SumOver {
+                        terms: std::mem::take(&mut kids),
+                    }),
+                };
+                memo.insert(node.as_ptr() as isize, (node, id));
+                values.push(id);
+            }
+        }
+    }
+    debug_assert_eq!(values.len(), 1);
+    Ok(values[0])
 }
 
 // ─────────────────────────────────────────────────────────────

@@ -213,6 +213,17 @@ class _Canonicalizer:
         # certified bound (#1283).
         self._memo: dict[int, tuple[Expression, CNode]] = {}
         self._opaque_counter = itertools.count()
+        # #1944: distribute a product of two affine forms (see
+        # ``SolverTuning.distribute_affine_products``). Read once per build.
+        from discopt.solver_tuning import current as _tuning
+
+        _tun = _tuning()
+        self._distribute_max = (
+            int(_tun.distribute_affine_products_max) if _tun.distribute_affine_products else 0
+        )
+        # Bare bilinear products ``x_i * x_j`` the model has without distribution,
+        # as ``frozenset({key_i, key_j})``; filled by :func:`canonicalize`.
+        self._existing_pairs: frozenset = frozenset()
 
     # -- interning ---------------------------------------------------------- #
     def _mk(self, kind: str, key: tuple, children: tuple[CNode, ...], payload: Any) -> CNode:
@@ -421,6 +432,56 @@ class _Canonicalizer:
             return prod_node
         return self._sum([(coef_acc, prod_node)], 0.0)
 
+    @staticmethod
+    def _affine_in_vars(node: CNode) -> Optional[tuple[list[tuple[float, CNode]], float]]:
+        """``(terms, const)`` when ``node`` is ``const + sum_i c_i x_i`` over bare
+        variables, else ``None``."""
+        if node.kind == "var":
+            return [(1.0, node)], 0.0
+        if node.kind == "sum" and all(ch.kind == "var" for ch in node.children):
+            coeffs, const = node.payload
+            return [(float(c), ch) for c, ch in zip(coeffs, node.children)], float(const)
+        return None
+
+    def _distribute_affine_pair(self, left: CNode, right: CNode) -> Optional[CNode]:
+        """``(c + a'x) * (d + b'y)`` as ``cd + c b'y + d a'x + sum a_i b_j x_i y_j``.
+
+        ``None`` (keep the product) unless both factors are affine in bare
+        variables, their supports are disjoint, at least one has more than one
+        part, the pair count is within the cap, and at least one pair is already
+        a product elsewhere in the model. Value-identical either way;
+        why the distributed form never relaxes looser is in
+        ``SolverTuning.distribute_affine_products`` (#1944).
+        """
+        fa = self._affine_in_vars(left)
+        fb = self._affine_in_vars(right)
+        if fa is None or fb is None:
+            return None
+        (ta, ca), (tb, cb) = fa, fb
+        if len(ta) + (ca != 0.0) < 2 and len(tb) + (cb != 0.0) < 2:
+            return None  # a bare bilinear x*y: nothing to distribute
+        if {v.key for _, v in ta} & {v.key for _, v in tb}:
+            return None
+        if len(ta) * len(tb) > self._distribute_max:
+            return None
+        # Distribute only when at least one pair is a product the model already
+        # has. The gain is column sharing; without it the pairs are new columns.
+        # Measured on tanksize (#1944): 38 new pairs, none shared; the root moved
+        # 0.8382 -> 0.8419 and the kernel tree doubled (19,039 -> 37,709 nodes).
+        if not any(
+            frozenset((xi.key, yj.key)) in self._existing_pairs for _, xi in ta for _, yj in tb
+        ):
+            return None
+        terms: list[tuple[float, CNode]] = []
+        for ai, xi in ta:
+            for bj, yj in tb:
+                terms.append((ai * bj, self._prod([(xi, 1.0), (yj, 1.0)])))
+        if cb != 0.0:
+            terms.extend((cb * ai, xi) for ai, xi in ta)
+        if ca != 0.0:
+            terms.extend((ca * bj, yj) for bj, yj in tb)
+        return self._sum(terms, ca * cb)
+
     # -- the recursive walk ------------------------------------------------- #
     def canon(self, expr: Expression) -> CNode:
         cached = self._memo.get(id(expr))
@@ -550,7 +611,12 @@ class _Canonicalizer:
                 return self._sum([(float(left.value), self.canon(right))], 0.0)
             if isinstance(right, Constant) and right.value.ndim == 0:
                 return self._sum([(float(right.value), self.canon(left))], 0.0)
-            return self._prod([(self.canon(left), 1.0), (self.canon(right), 1.0)])
+            cl, cr = self.canon(left), self.canon(right)
+            if self._distribute_max:
+                dist = self._distribute_affine_pair(cl, cr)
+                if dist is not None:
+                    return dist
+            return self._prod([(cl, 1.0), (cr, 1.0)])
         if op == "/":
             left, right = expr.left, expr.right
             if isinstance(right, Constant) and right.value.ndim == 0:
@@ -791,6 +857,28 @@ class CanonicalDAG:
         return tuple(self._intern.values())
 
 
+def _walk_model(
+    canon: "_Canonicalizer", model: Model
+) -> tuple[Optional[CNode], list[CNode], list[int], list[Expression]]:
+    """Canonicalize the objective and every scalar constraint row with ``canon``."""
+    obj_node: Optional[CNode] = None
+    if model._objective is not None:
+        obj_node = canon.canon(model._objective.expression)
+
+    con_nodes: list[CNode] = []
+    con_index: list[int] = []
+    con_exprs: list[Expression] = []
+    for i, c in enumerate(model._constraints):
+        rows = scalar_elements(c.body)
+        if rows is None:
+            rows = [c.body]  # not statically scalarizable — unchanged behaviour
+        for body in rows:
+            con_nodes.append(canon.canon(body))
+            con_index.append(i)
+            con_exprs.append(body)
+    return obj_node, con_nodes, con_index, con_exprs
+
+
 def canonicalize(model: Model, abort_deadline: Optional[float] = None) -> CanonicalDAG:
     """Hash-cons ``model``'s objective + constraint bodies into a canonical DAG.
 
@@ -812,21 +900,21 @@ def canonicalize(model: Model, abort_deadline: Optional[float] = None) -> Canoni
     relaxation builder's own polls.
     """
     canon = _Canonicalizer(model, abort_deadline=abort_deadline)
-    obj_node: Optional[CNode] = None
-    if model._objective is not None:
-        obj_node = canon.canon(model._objective.expression)
-
-    con_nodes: list[CNode] = []
-    con_index: list[int] = []
-    con_exprs: list[Expression] = []
-    for i, c in enumerate(model._constraints):
-        rows = scalar_elements(c.body)
-        if rows is None:
-            rows = [c.body]  # not statically scalarizable — unchanged behaviour
-        for body in rows:
-            con_nodes.append(canon.canon(body))
-            con_index.append(i)
-            con_exprs.append(body)
+    if canon._distribute_max:
+        # #1944: distribution pays only where a pair lands on a product the model
+        # already has, so first find those products with distribution off.
+        pre = _Canonicalizer(model, abort_deadline=abort_deadline)
+        pre._distribute_max = 0
+        _walk_model(pre, model)
+        canon._existing_pairs = frozenset(
+            frozenset((node.children[0].key, node.children[1].key))
+            for node in pre._intern.values()
+            if node.kind == "prod"
+            and len(node.children) == 2
+            and node.payload[0] == (1.0, 1.0)
+            and all(ch.kind == "var" for ch in node.children)
+        )
+    obj_node, con_nodes, con_index, con_exprs = _walk_model(canon, model)
 
     return CanonicalDAG(
         model=model,

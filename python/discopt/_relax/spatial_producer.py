@@ -38,6 +38,37 @@ import scipy.sparse as sp
 _TOL = 1e-12
 
 
+def _vector_vars_enabled() -> bool:
+    """``DISCOPT_NATIVE_KERNEL_VECTOR_VARS``: let the native kernel take models with
+    array (vector / matrix) variables. **Default ON since its §5 panel**; ``=0``
+    restores the old decline (every array model on the Python spatial tree).
+
+    The kernel works on flat columns and the solver side already maps results back
+    through ``_unpack_solution``; only this producer assumed one column per variable
+    object, so every model written with ``shape=`` fell to the Python spatial tree.
+    With the flag, the spec is built over the C-order flat columns, which is the
+    layout ``build_uniform_relaxation`` and ``flat_variable_bounds`` already use:
+    an array model and its scalar twin produce byte-identical specs, so the array
+    path inherits the scalar path's soundness exactly
+    (``test_native_kernel_vector_vars.py`` pins the identity).
+
+    Graduation panel (``scripts/panel_native_kernel_vector_vars.py``, 30 s, OFF/ON
+    interleaved ABBA): the 154 in-repo ``.nl`` files give identical specs OFF and ON
+    (all scalar); 17 array/scalar twin pairs give byte-identical specs; over 50
+    array-variable models -- the #1934 panel's 33 (brute-force oracle), dense integer
+    QPs n = 10..20, non-uniform bounds, 2-D variables, scalars around arrays -- total
+    wall 151.4 -> 61.5 s, certified 48 -> 50, 35 faster and 0 slower, with every
+    incumbent re-verified on the original model and every bound checked against the
+    oracle: 969 checks, 0 failures. Dense QP n=15 6.3 -> 1.0 s; ``qp_n18_s1`` and
+    ``qp_n20_s1`` certify (6.2 s, 8.8 s) where OFF ends uncertified at 30 s. Models
+    outside the kernel's term families (the panel's ``mixed_*``) are declined as
+    before and are unchanged.
+    """
+    from discopt.solver_tuning import _env_flag
+
+    return _env_flag("DISCOPT_NATIVE_KERNEL_VECTOR_VARS", default=True)
+
+
 def build_spatial_kernel_spec(
     model, bounds: Optional[tuple] = None, deadline: Optional[float] = None
 ) -> Optional[dict]:
@@ -61,16 +92,18 @@ def build_spatial_kernel_spec(
     ``model_value = sign * (internal + offset)``. Callers pass the non-``meta_`` keys
     to the kernel; :func:`solve_with_native_kernel` strips them automatically."""
     from discopt._relax.incremental_mccormick import row_support_within
+    from discopt._relax.model_utils import flat_variable_bounds
     from discopt._relax.uniform_relax import RelaxationBuildAborted, build_uniform_relaxation
     from discopt.modeling.core import VarType
     from discopt.solver_tuning import current as _tuning
 
-    # Scalar-variable models only: the relaxation's column 0..n_orig-1 maps to the n
-    # variable objects one-to-one only when each has size 1. Vector variables shift
-    # the layout and are a follow-up.
-    if any(int(getattr(v, "size", 1)) != 1 for v in model._variables):
+    # Columns 0..n_orig-1 of the relaxation are the model's variables flattened in
+    # C order, one per scalar ELEMENT. Without the flag a model with any array
+    # variable is declined (the pre-flag behaviour); see ``_vector_vars_enabled``.
+    sizes = [int(getattr(v, "size", 1)) for v in model._variables]
+    if any(sz != 1 for sz in sizes) and not _vector_vars_enabled():
         return None
-    n_orig = len(model._variables)
+    n_orig = sum(sizes)
 
     if bounds is not None:
         lb = np.asarray(bounds[0], dtype=np.float64).copy()
@@ -78,8 +111,7 @@ def build_spatial_kernel_spec(
         if lb.shape != (n_orig,) or ub.shape != (n_orig,):
             return None
     else:
-        lb = np.array([float(np.min(v.lb)) for v in model._variables], dtype=np.float64)
-        ub = np.array([float(np.max(v.ub)) for v in model._variables], dtype=np.float64)
+        lb, ub = flat_variable_bounds(model)
 
     def _build(box_lb, box_ub):
         # Skip the separable objective floor and convex-lift OA rows: both are
@@ -98,6 +130,7 @@ def build_spatial_kernel_spec(
             model,
             box=(box_lb, box_ub),
             rlt_lineq=bool(_tuning().rlt_lineq),
+            rlt_ineq=bool(_tuning().rlt_ineq),
             skip_separable_floor=True,
             skip_convex_lift=True,
             abort_deadline=deadline,
@@ -179,8 +212,16 @@ def build_spatial_kernel_spec(
 
     _support_within = row_support_within(A, _TOL)
 
+    # #1944: rows the build declares are no term's envelope (constraint-factor RLT)
+    # are never claimed, however their support looks; they are fixed rows, checked
+    # for box-independence below like every other one.
+    _nonenvelope = frozenset(int(r) for r in getattr(rel, "nonenvelope_rows", ()))
+
     def rows_with_col(cc: int):
-        return csc.indices[csc.indptr[cc] : csc.indptr[cc + 1]]
+        rows = csc.indices[csc.indptr[cc] : csc.indptr[cc + 1]]
+        if not _nonenvelope:
+            return rows
+        return [r for r in rows if int(r) not in _nonenvelope]
 
     env_rows: set[int] = set()
     # term arrays
@@ -320,8 +361,17 @@ def build_spatial_kernel_spec(
     if Ar.shape != A.shape or br.shape[0] != b.shape[0]:
         return None
     rp_indptr, rp_indices, rp_data = Ar.indptr, Ar.indices, Ar.data
+    # #1944: bound-factor RLT rows carry the box they were built at. The probe
+    # build's copies are valid only in the probe box, so they are never used; the
+    # real-box build's copies are valid in every sub-box of ``[lb, ub]``, which is
+    # every box the kernel visits (it only ever shrinks the root box). The two
+    # builds must agree on WHICH rows these are, or the row correspondence the
+    # check below relies on is gone.
+    _root_box = frozenset(int(r) for r in getattr(rel, "root_box_rows", ()))
+    if _root_box != frozenset(int(r) for r in getattr(rel_real, "root_box_rows", ())):
+        return None
     for r in range(A.shape[0]):
-        if r in env_rows:
+        if r in env_rows or r in _root_box:
             continue
         # Same nonzero pattern + values + rhs at both boxes?
         p0, p1 = indptr[r], indptr[r + 1]
@@ -342,6 +392,13 @@ def build_spatial_kernel_spec(
     fixed_rhs: list[float] = []
     for r in range(A.shape[0]):
         if r in env_rows:
+            continue
+        if r in _root_box:
+            row = Ar.getrow(r)
+            fixed_cols.extend(int(cc) for cc in row.indices)
+            fixed_coeffs.extend(float(v) for v in row.data)
+            fixed_row_ptr.append(len(fixed_cols))
+            fixed_rhs.append(float(br[r]))
             continue
         row = A.getrow(r)
         fixed_cols.extend(int(cc) for cc in row.indices)
@@ -365,9 +422,11 @@ def build_spatial_kernel_spec(
     global_hi[:n_orig] = ub
 
     integrality = np.zeros(ncol, dtype=np.int64)
-    for k, v in enumerate(model._variables):
+    off = 0
+    for v, sz in zip(model._variables, sizes):
         if v.var_type in (VarType.INTEGER, VarType.BINARY):
-            integrality[k] = 1
+            integrality[off : off + sz] = 1
+        off += sz
     milp_int = getattr(milp, "_integrality", None)
     if milp_int is not None:
         mi = np.asarray(milp_int).ravel()

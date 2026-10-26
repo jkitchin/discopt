@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from discopt._flat_index import flat_index_in_shape
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -121,26 +122,20 @@ def _var_index(
         offset = model_vars.get(base)
         if offset is not None:
             idx = expr.index
-            if isinstance(idx, (int, np.integer)):
-                return offset + int(idx)
-            if isinstance(idx, tuple):
-                # A sliced/partial subscript (e.g. the DAE transcriber's
-                # ``var[:, 1:]``) addresses many scalars, so no single flat
-                # index exists. Refuse loudly rather than let
-                # np.ravel_multi_index raise a bare "only int indices
-                # permitted" TypeError.
-                if len(idx) != len(base.shape) or not all(
-                    isinstance(i, (int, np.integer)) for i in idx
-                ):
-                    raise ValueError(
-                        f"Non-scalar subscript {idx!r} on variable "
-                        f"'{base.name}' (shape {base.shape}) cannot be exported "
-                        "as a single variable reference; only fully scalar "
-                        "indices are supported here."
-                    )
-                flat_idx = int(np.ravel_multi_index(idx, base.shape))
-                return offset + flat_idx
-            raise ValueError(f"Unsupported index type {type(idx)} for variable '{base.name}'")
+            # A sliced/partial subscript (e.g. the DAE transcriber's
+            # ``var[:, 1:]``) addresses many scalars, so no single flat index
+            # exists; an out-of-range one names none. Negative indices are
+            # normalised the numpy way rather than read as ``offset + idx``,
+            # which named another variable's column (#1952, the #941 pattern).
+            flat_idx = flat_index_in_shape(idx, tuple(base.shape or ()))
+            if flat_idx is None:
+                raise ValueError(
+                    f"Non-scalar subscript {idx!r} on variable "
+                    f"'{base.name}' (shape {base.shape}) cannot be exported "
+                    "as a single variable reference; only fully scalar, "
+                    "in-range indices are supported here."
+                )
+            return offset + flat_idx
         raise ValueError(f"Variable '{base.name}' not found in model")
 
     raise ValueError("Expression is not a variable reference.")

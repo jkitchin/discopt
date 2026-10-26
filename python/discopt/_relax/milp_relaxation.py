@@ -2216,10 +2216,10 @@ def _extract_positive_product(
                 # constant operand and recurse into the real factor.
                 left_c = _constant_value(e.left)
                 right_c = _constant_value(e.right)
-                if left_c is not None and abs(left_c) <= 1e-12:
+                if left_c is not None and left_c == 0.0:
                     if e.op == "+":
                         return visit(e.right, power)
-                elif right_c is not None and abs(right_c) <= 1e-12:
+                elif right_c is not None and right_c == 0.0:
                     return visit(e.left, power)
         # Fallback: a factor that is an affine multiple of a SINGLE positive
         # variable, ``c·x`` with ``c>0`` and zero constant (e.g. ``(30000·x)^-0.48``
@@ -2233,7 +2233,7 @@ def _extract_positive_product(
             aff_terms, aff_const = _linearize_affine_expr_sparse(e, model, n_orig)
         except ValueError:
             return False
-        if abs(float(aff_const)) > 1e-12:
+        if float(aff_const) != 0.0:  # exact: c*x + 1e-13 is not the monomial c*x
             return False
         nz = [(j, c) for j, c in aff_terms.items() if abs(c) > 0.0]
         if len(nz) != 1:
@@ -3321,7 +3321,9 @@ def _integer_affine_cos_lower_bound(
     # trivially comparable. Sparse: the dense walk was O(n_vars) per call (#875).
     for var_idx in sorted(terms):
         c = terms[var_idx]
-        if abs(c) <= 1e-12:
+        # Only an exact zero is skipped: a tiny coefficient on a wide range is not
+        # negligible (1e-13 * x over +-1e15 contributes -100).
+        if c == 0.0:
             continue
         if not (0 <= var_idx < n_vars):
             return None  # unindexable support: the dense form raised here
@@ -3365,7 +3367,9 @@ def _scaled_affine_lower_bound(
     # the floating-point accumulation identical to the dense walk's.
     for var_idx in sorted(terms):
         c = terms[var_idx]
-        if abs(c) <= 1e-12:
+        # Only an exact zero is skipped: a tiny coefficient on a wide range is not
+        # negligible (1e-13 * x over +-1e15 contributes -100).
+        if c == 0.0:
             continue
         if not (0 <= var_idx < n_vars):
             return None  # unindexable support: the dense form raised here
@@ -3417,7 +3421,8 @@ def _reciprocal_term_lower_bound(
     ``k < 0``. Returns ``None`` (caller abstains) if the denominator cannot be
     proven strictly positive or the bound is not finite.
     """
-    if abs(scaled_numerator) <= 1e-12:
+    # Only an exact zero numerator is free; a tiny one over a tiny denominator is not.
+    if scaled_numerator == 0.0:
         return 0.0
     denom_lo = _expression_lower_bound_for_lift(denominator, model, flat_lb, flat_ub)
     denom_hi = _expression_upper_bound_for_lift(denominator, model, flat_lb, flat_ub)
@@ -3469,7 +3474,7 @@ def _match_scaled_even_power(
                 return None
             exp_val = exp_c
             n_int = int(round(exp_val))
-            if abs(exp_val - n_int) < 1e-12 and n_int >= 2 and n_int % 2 == 0:
+            if exp_val == n_int and n_int >= 2 and n_int % 2 == 0:
                 if base is not None:
                     return None
                 base = factor.left
@@ -3619,7 +3624,8 @@ def _separable_objective_lower_bound(
         the recognized separable shapes.
         """
         nonlocal total
-        if abs(scale) <= 1e-12:
+        # Exact zeros only: a tiny scale on a wide-ranged term is not negligible.
+        if scale == 0.0:
             return True
         const = _constant_value(term)
         if const is not None:
@@ -3630,7 +3636,7 @@ def _separable_objective_lower_bound(
         if x_exp is not None:
             scalar, var_idx = x_exp
             term_scale = scale * scalar
-            if abs(term_scale) <= 1e-12:
+            if term_scale == 0.0:
                 return True
             if term_scale > 0.0:
                 total += term_scale * (-1.0 / np.e)
@@ -3662,7 +3668,7 @@ def _separable_objective_lower_bound(
         return True
 
     for scale, term in terms:
-        if abs(scale) <= 1e-12:
+        if scale == 0.0:
             continue
 
         # Reciprocal term ``k / D(x)`` with a strictly-positive denominator (e.g.
