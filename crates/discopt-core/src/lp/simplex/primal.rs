@@ -687,6 +687,9 @@ pub(super) fn subtol_candidates(
     subtol_scan(cols, n_real, cost, lb, ub, stat, y, floor).0
 }
 
+/// `(column, reduced cost, impact)` triples returned by [`subtol_scan`].
+type ScanHits = Vec<(usize, f64, f64)>;
+
 /// [`subtol_candidates`], plus the **suspects**: wrong-signed columns that clear
 /// the impact floor but were set aside by the [`SUBTOL_NOISE_REL`] test alone
 /// (#1953). The noise test is a guess about `y`'s error, not a measurement of
@@ -705,7 +708,7 @@ pub(super) fn subtol_scan(
     stat: &[i8],
     y: &[f64],
     floor: f64,
-) -> (Vec<(usize, f64, f64)>, Vec<(usize, f64, f64)>) {
+) -> (ScanHits, ScanHits) {
     let (mut out, mut suspects) = (Vec::new(), Vec::new());
     if !(floor.is_finite() && floor > 0.0) {
         return (out, suspects);
@@ -780,7 +783,11 @@ pub(super) fn subtol_suspects_matter(
         &lb[..n_real],
         &ub[..n_real],
     ) {
-        Some(g) => !(obj - g <= floor),
+        // Also true when `obj - g` is NaN: an incomparable gap never clears the floor.
+        Some(g) => !matches!(
+            (obj - g).partial_cmp(&floor),
+            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+        ),
         None => true,
     }
 }
