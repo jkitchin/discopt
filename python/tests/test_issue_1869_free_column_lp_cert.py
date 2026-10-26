@@ -42,7 +42,9 @@ def _root(flag: str, monkeypatch):
 
 def test_flag_off_leaves_the_root_lp_uncertified(monkeypatch):
     r = _root("0", monkeypatch)
-    assert r.status == "uncertified" and r.lower_bound is None
+    # ``uncertified`` (an LP optimum no route certified) or, since the native routes
+    # gate ``optimal`` on an NS bound (#1953), ``iteration_limit``: either way no bound.
+    assert r.status in ("uncertified", "iteration_limit") and r.lower_bound is None, r
 
 
 def test_4stufen_root_bound_is_below_the_best_known_dual(monkeypatch):

@@ -33,8 +33,30 @@ PROLOG = os.path.join(os.path.dirname(__file__), "data", "minlplib_nl", "prolog.
 
 
 def _root_lp(monkeypatch):
-    """The ``(y, std-form)`` pair the verified route hands ``exact_ns_bound`` at the root."""
+    """The ``(y, std-form)`` pairs the verified route hands ``exact_ns_bound`` for the
+    root node LP, plus the node result.
+
+    The node relaxation is captured while ``solve_at_node`` builds it and then handed
+    to the verified route directly, so the probe measures the LP itself whatever
+    status the node engine reports (``uncertified``, or ``iteration_limit`` once the
+    native routes gate ``optimal`` on an NS bound, #1953).
+    """
     monkeypatch.setenv("DISCOPT_FREE_COLUMN_LP_CERT", "1")
+    from discopt._relax.milp_relaxation import MilpRelaxationModel
+
+    milps: list = []
+    real_solve = MilpRelaxationModel.solve
+
+    def solve_spy(self, *a, **kw):
+        milps.append(self)
+        return real_solve(self, *a, **kw)
+
+    monkeypatch.setattr(MilpRelaxationModel, "solve", solve_spy)
+    m = dm.from_nl(PROLOG)
+    bt = fbbt_box(m)
+    res = ML.MccormickLPRelaxer(m).solve_at_node(bt.lb, bt.ub)
+    assert milps, "solve_at_node never solved a node LP: the probe measured nothing"
+
     seen: list = []
     real = L.exact_ns_bound
 
@@ -44,11 +66,9 @@ def _root_lp(monkeypatch):
         return out
 
     monkeypatch.setattr(L, "exact_ns_bound", spy)
-    m = dm.from_nl(PROLOG)
-    bt = fbbt_box(m)
-    res = ML.MccormickLPRelaxer(m).solve_at_node(bt.lb, bt.ub)
+    verified = ML._verified_free_column_bound(milps[0], 30.0)
     assert seen, "the verified route never reached exact_ns_bound: the probe measured nothing"
-    return res, seen
+    return res, verified, seen
 
 
 def _exact_null_vector(cols: list[int], sf, pin: int) -> list[Fraction]:
@@ -82,7 +102,7 @@ def _exact_null_vector(cols: list[int], sf, pin: int) -> list[Fraction]:
 
 
 def test_the_root_lp_has_an_exact_negative_cost_recession_ray(monkeypatch):
-    _, seen = _root_lp(monkeypatch)
+    _, _, seen = _root_lp(monkeypatch)
     _y, sf, _out = seen[0]
     A = sf.A.tocsc()
     open_hi = np.flatnonzero(sf.xu >= L.READBACK_LIMIT)
@@ -110,6 +130,7 @@ def test_the_root_lp_has_an_exact_negative_cost_recession_ray(monkeypatch):
 
 def test_exact_ns_bound_abstains_and_the_root_lp_stays_uncertified(monkeypatch):
     """Abstaining is the only correct answer on an exactly unbounded LP."""
-    res, seen = _root_lp(monkeypatch)
+    res, verified, seen = _root_lp(monkeypatch)
     assert all(out[0] is None for _y, _sf, out in seen), [out for *_, out in seen]
-    assert res.status == "uncertified" and res.lower_bound is None, res
+    assert verified == (None, None), verified
+    assert res.status != "optimal" and res.lower_bound is None, res
