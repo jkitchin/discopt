@@ -11576,3 +11576,128 @@ only `tln6` and `tln7` reach it, so every other race takes the same arms as befo
 `tln7` still finds no incumbent in 120 s under either rule. Its bound is 14.28 with
 the un-lifted continuation, against 14.16 with the lift continuation at 30 s. That
 instance is a primal-heuristic problem on the un-lifted arm, not a routing one.
+
+## 86. #1962: per-node convex-quadratic separation and the integral-point probe in the native kernel (2026-10-26)
+
+**Problem.** The native spatial kernel solved each node LP once. It relaxed every
+product by its own McCormick envelope, so a *convex* quadratic form
+`F(w) = Σ a_k w_k = xᵀQx + lᵀx + c` with `Q ⪰ 0` lost its convexity. On `main`
+@ `1eba005` at 120 s:
+
+| instance | status | dual bound | optimum |
+|---|---|---:|---:|
+| nvs23 | node limit (100k nodes) | -1254.8 | -1125.2 |
+| nvs24 | time limit (88.7k nodes) | -1614.6 | -1033.2 |
+| nous1 | time limit (63.6k nodes) | 1.207 | 1.567 |
+
+**Mechanism.** `crates/discopt-core/src/bnb/convex_quad_cuts.rs` builds the form from
+the spec (each quadratic lifted column is `w = (a₀ + aᵀx)(b₀ + bᵀx)`). It is built for
+the objective and for each fixed `<=` row, restricted to their quadratic lifted
+columns, with at least 2 and at most 300 variables.
+
+- **Convexity is proven.** A Cholesky of `Q − cI` is run with `c` at least Rump's
+  rounding bound. A semidefinite `Q` is certified as `Q + τI ≻ 0`; the cut then
+  subtracts `τ·diam²` over the global box.
+- **The cut.** At the node LP point it adds the tangent
+  `−Σ a_k w_k + (2Qx̂ + l)ᵀx <= x̂ᵀQx̂ − c`. The right side is loosened by a `γ_n`
+  bound on every rounding error over the global box.
+- **The loop** (`spatial_tree.rs::separation_loop`). Each round re-solves warm, with
+  the new slacks basic. The node keeps the best safe bound of any round. An
+  undecided round is dropped.
+- **Inheritance.** Children inherit the cuts that are binding at the node's final LP
+  (`binding_cuts`). A cut whose slack is basic is dropped together with that slack,
+  so the parent basis stays exact.
+- **Probe.** The integral-point probe (`int_fix_probe`) handles an integral LP point
+  at which some term is not tight. It fixes the integer columns and re-solves once
+  per assignment. The resulting point goes through the normal acceptance test and
+  pricing.
+
+**E1 (nvs23/nvs24, kill criterion: no bound gain on both).** Passed, at 120 s:
+- **nvs23** certifies -1125.2 in 211 nodes (14.7 s wall, 0.83 s of node LP), with 4
+  forms, 653 rounds and 2,128 cuts.
+- **nvs24** with the separator alone ends at the node limit. Its bound is
+  -1033.20003 against an optimum of -1033.2, but its incumbent stays at the seed's
+  -1031.8, because the kernel never reached a McCormick-tight vertex. That primal
+  gap is what the probe is for. With the probe, nvs24 certifies in 467 nodes and
+  17 s, and one probe found the optimum. `DISCOPT_NATIVE_NLP_PRIMAL=1` instead of
+  the probe also certifies it (512 nodes).
+
+**E2 (nous1: what SCIP's cuts buy).** pyscipopt 6.3 / SCIP 10. All separator plugins
+were set to `freq=-1`, then switched back one at a time:
+
+| SCIP setting | root bound | full solve |
+|---|---:|---|
+| default | 0.3451 | 4,269 nodes, 4.8 s |
+| no separator plugins | -0.2814 | |
+| RLT only | -0.2814 | |
+| aggregation (c-MIR) only | -0.1145 | |
+| aggregation + RLT | **0.3451** | |
+| interminor only | -0.2361 | |
+| aggregation off | 0.3451 | 5,259 nodes, 5.8 s |
+| RLT off | | 29,798 nodes, 36.5 s |
+| aggregation and RLT off | | 30,785 nodes, 37.7 s |
+| nonlinear-handler branching off (`constraints/nonlinear/branching/external`) | | **44,731 nodes, 47 s** |
+
+Every nlhdlr ablation (bilinear, quadratic, convex, concave, perspective, soc)
+stays within 3,222–4,269 nodes.
+
+**What E2 shows.**
+- Aggregation + RLT reproduces SCIP's whole root gain.
+- In the tree, aggregation is worth about 1.2× in nodes.
+- SCIP's RLT is root-only (`separating/rlt/freq=0`, cuts go to the pool) and is
+  worth 7×.
+- The largest lever is the nonlinear handler's spatial-branching rule, at 10×.
+
+**Re-scope.** nous1 is not a per-node-cut problem.
+- **Family B (aggregation) is not built.** Even perfect c-MIR is a ~1.2× node lever
+  on SCIP's own tree, against the ~100× node gap discopt has here (525k nodes at
+  900 s against SCIP's 4.3k).
+- **The remaining gap is spatial branching selection** (SCIP's violation-scored
+  variable choice inside the nonlinear handler) **and root RLT.** discopt's kernel
+  root (0.83 at 30 s after #1944's graduation) is already above SCIP's RLT-only root.
+- nous1 has no convex quadratic form, so the separator does nothing on it
+  (0 forms).
+
+**Graduation panels** (`issue1944_rlt_panel.py --with-corpus`, 270 instances, 30 s,
+interleaved, 2 workers, every incumbent `verify_point`-ed):
+
+- **`DISCOPT_KERNEL_CONVEX_CUTS`** (ON `=1` against OFF `=0`):
+  - **Cert-clean:** 1,620 checks, 0 problems.
+  - **Where it fired:** the separator runs on 13 instances. 245 never reach the
+    kernel, and the other 12 reach it with no convex form.
+  - **Certificates:** gains nvs19 (time limit to 8.3 s) and nvs23 (time limit to
+    14.3 s) and loses none.
+  - **Nodes:** nvs13 349 → 23, nvs17 8,231 → 61 (6.5 → 3.6 s), nvs18 2,061 → 49,
+    hydro 341 → 3, fuel 29 → 15.
+  - **Bounds:** ex8_4_1's 30 s bound rises 0.588 → 0.598. nvs24's goes -3,243 →
+    -1,033.20001.
+  - **Noise on unreachable routes:**
+    - The report also lists ex14_1_6 as gained. It is on a route the flag cannot
+      reach.
+    - sssd08-04persp (Python tree) moves too, on the same kind of route.
+    - The headline "both certify" wall (571.9 → 591.6 s) is dominated by ex14_1_2
+      (+15.9 s), which is also on a route the flag cannot reach.
+    - The cause was load I added myself by running tests during the panel (§9).
+      Re-measured idle: ex14_1_2 takes 1.8/1.9 s with the flag off and 2.0/1.8 s
+      with it on.
+  - **Graduated, default ON.**
+- **`DISCOPT_KERNEL_INT_PROBE`** (both arms with the separator on; machine left
+  idle):
+  - **Cert-clean:** 1,620 checks, 0 problems.
+  - **Where it fired:** 7 instances, 1–3 probes each.
+  - **Certificates:** gains nvs24 (time limit to 16.5 s, 23,464 → 415 nodes) and
+    loses none.
+  - **Wall:** both-certify 594.1 → 595.2 s, total 1,640.4 → 1,627.5 s.
+  - **Graduated, default ON.**
+
+**Bound-changing, sound by construction.** Each cut holds at every feasible point. The
+node bound stays the Neumaier–Shcherbina bound on the final LP's duals, and
+`Infeasible` still needs a verified Farkas ray. Rust tests:
+- `convex_quad_cuts::tests`: certification, and no feasible point on a 51×51 grid
+  violating a cut, including the semidefinite case;
+- `convex_cut_loop_tightens_root_and_certifies_the_same_optimum`, cold and warm;
+- `binding_cuts_drops_basic_cut_rows_and_their_slacks`;
+- `int_fix_probe_accepts_only_tight_points`.
+
+Python: `test_1962_kernel_convex_cuts.py`. Its slow tests certify nvs23 and nvs24 on
+defaults at 120 s.

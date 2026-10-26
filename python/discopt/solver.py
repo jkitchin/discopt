@@ -2436,7 +2436,7 @@ def _try_native_spatial_kernel(
     _cut_rounds = _kernel_convex_cut_rounds()
     if _cut_rounds is not None:
         solve_kwargs["cut_rounds_root"], solve_kwargs["cut_rounds_node"] = _cut_rounds
-    # #1962: the integral-point probe (default OFF; see the helper).
+    # #1962: the integral-point probe (default ON; ``=0`` opts out; see the helper).
     if _kernel_int_probe_enabled():
         solve_kwargs["int_fix_probe"] = True
     if _bound_reserve > 0.0:
@@ -11142,8 +11142,15 @@ def _kernel_int_probe_enabled() -> bool:
     in-tree incumbent source is a tight LP vertex, which a pure-integer problem
     reaches only once branching has collapsed every operand's box; on nvs24 with
     ``DISCOPT_KERNEL_CONVEX_CUTS`` the bound reached the optimum (-1033.2) while the
-    incumbent stayed at the seed (-1031.8) through 100k nodes."""
-    return os.environ.get("DISCOPT_KERNEL_INT_PROBE", "0").strip().lower() not in (
+    incumbent stayed at the seed (-1031.8) through 100k nodes.
+
+    **Graduated (#1962, default ON; ``=0`` opts out).** Panel
+    ``issue1944_rlt_panel.py --with-corpus --base-env DISCOPT_KERNEL_CONVEX_CUTS=1
+    --on-env DISCOPT_KERNEL_INT_PROBE=1 --off-env DISCOPT_KERNEL_INT_PROBE=0`` (270
+    instances, 30 s, interleaved): cert-clean, 1,620 checks, 0 problems; fires on 7
+    instances (1-3 probes each). It gains nvs24 (time limit at 29.8 s -> certified
+    at 16.5 s, 23,464 -> 415 nodes) and loses none. ``performance-plan.md`` section 86."""
+    return os.environ.get("DISCOPT_KERNEL_INT_PROBE", "1").strip().lower() not in (
         "0",
         "false",
         "no",

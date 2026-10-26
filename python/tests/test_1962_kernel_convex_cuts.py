@@ -81,8 +81,8 @@ def test_kernel_cut_loop_tightens_root_and_keeps_the_optimum():
 
 
 def test_flags_reach_the_kernel_and_opt_out(monkeypatch):
-    """``Model.solve`` passes both flags through; ``=0`` turns the separator off.
-    The separator is on by default (graduated in #1962)."""
+    """``Model.solve`` passes both flags through; ``=0`` turns each off. Both are on
+    by default (graduated in #1962)."""
     monkeypatch.setenv("DISCOPT_KERNEL_CONVEX_CUTS", "0")
     monkeypatch.setenv("DISCOPT_KERNEL_INT_PROBE", "0")
     r0 = _iqp_model(integer=False).solve(time_limit=60)
@@ -92,7 +92,7 @@ def test_flags_reach_the_kernel_and_opt_out(monkeypatch):
     assert s0.get("tree/int_probes") == 0.0
 
     monkeypatch.delenv("DISCOPT_KERNEL_CONVEX_CUTS", raising=False)
-    monkeypatch.setenv("DISCOPT_KERNEL_INT_PROBE", "1")
+    monkeypatch.delenv("DISCOPT_KERNEL_INT_PROBE", raising=False)
     r1 = _iqp_model(integer=False).solve(time_limit=60)
     s1 = r1.solver_stats or {}
     assert s1.get("tree/nodes") is not None, "solve did not take the native kernel"
@@ -108,11 +108,11 @@ def test_flags_reach_the_kernel_and_opt_out(monkeypatch):
 @pytest.mark.correctness
 @pytest.mark.parametrize("name,opt", [("nvs23", -1125.2), ("nvs24", -1033.2)])
 def test_nvs_certifies_with_cuts_and_probe(monkeypatch, name, opt):
-    """The issue's targets: on ``main`` nvs23 ends at the node limit (bound
-    -1254.8) and nvs24 at the time limit (-1614.6). With both flags each
-    certifies in a few hundred nodes."""
-    monkeypatch.setenv("DISCOPT_KERNEL_CONVEX_CUTS", "1")
-    monkeypatch.setenv("DISCOPT_KERNEL_INT_PROBE", "1")
+    """The issue's targets, on defaults: before #1962 nvs23 ended at the node limit
+    (bound -1254.8) and nvs24 at the time limit (-1614.6). With the separator and
+    the probe each certifies in a few hundred nodes."""
+    monkeypatch.delenv("DISCOPT_KERNEL_CONVEX_CUTS", raising=False)
+    monkeypatch.delenv("DISCOPT_KERNEL_INT_PROBE", raising=False)
     r = dm.from_nl(str(DATA / f"{name}.nl")).solve(time_limit=120)
     assert r.status == "optimal", (r.status, r.objective, r.bound, r.node_count)
     assert r.objective == pytest.approx(opt, abs=1e-4)
