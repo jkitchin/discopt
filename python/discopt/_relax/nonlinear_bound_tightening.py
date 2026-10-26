@@ -3014,6 +3014,12 @@ def _accumulate_affine(
             return _accumulate_affine(expr.left, scale / denom, metadata, coeffs, const)
         return False
 
+    # #1981: an indexed sum (``Σ[...]``, how presolve writes ``x12 - 0.2559 x5``) is
+    # affine when every term is. Gated with the rest of #1981 so the default rules
+    # stay byte-identical.
+    if isinstance(expr, SumOverExpression) and _lp_sign_enabled():
+        return all(_accumulate_affine(t, scale, metadata, coeffs, const) for t in expr.terms)
+
     return False
 
 
@@ -3038,6 +3044,47 @@ def _affine_box_interval(
             lo += c * float(ub[idx])
             hi += c * float(lb[idx])
     return lo, hi
+
+
+#: #1981: relative outward margin on an LP-derived range (HiGHS works to ~1e-9).
+_LP_SIGN_MARGIN = 1e-7
+
+
+def _lp_sign_enabled() -> bool:
+    """#1981: the LP-implied sign of an affine factor, under ``DISCOPT_FBBT_SIGN_DOMAIN``."""
+    return os.environ.get("DISCOPT_FBBT_SIGN_DOMAIN", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+class _LpRowsForSign:
+    """The model's linear rows (``poles._LinearRows``) for an affine factor's range."""
+
+    def __init__(self, model: Model):
+        from discopt._relax.poles import _LP_RANGE_MAX_SIZE, _LinearRows
+
+        n_rows = len(model._constraints)
+        n_vars = sum(int(v.size) for v in model._variables)
+        self.rows = None
+        if n_rows <= _LP_RANGE_MAX_SIZE and n_vars <= _LP_RANGE_MAX_SIZE:
+            self.rows = _LinearRows(model)
+
+    def range(self, coeffs: dict, const: float, lb: np.ndarray, ub: np.ndarray):
+        """``(lo, hi)`` of ``coeffs . x + const`` over the rows and box, widened
+        outward by ``_LP_SIGN_MARGIN``; ``None`` when no finite side is shown."""
+        if self.rows is None:
+            return None
+        self.rows.lb = np.asarray(lb, dtype=np.float64)
+        self.rows.ub = np.asarray(ub, dtype=np.float64)
+        lo, hi = self.rows.range({int(j): float(a) for j, a in coeffs.items()}, float(const))
+        if not (np.isfinite(lo) or np.isfinite(hi)):
+            return None
+        lo = lo - _LP_SIGN_MARGIN * (1.0 + abs(lo)) if np.isfinite(lo) else -np.inf
+        hi = hi + _LP_SIGN_MARGIN * (1.0 + abs(hi)) if np.isfinite(hi) else np.inf
+        return lo, hi
 
 
 class BilinearProductEqualityRule(NonlinearBoundTighteningRule):
@@ -3175,6 +3222,7 @@ class BilinearProductEqualityRule(NonlinearBoundTighteningRule):
         tightened_lb = flat_lb.copy()
         tightened_ub = flat_ub.copy()
         eps = 1e-9
+        lp_rows = None  # #1981: built on first need
 
         for constraint in _rows_until(model, deadline):
             structure = _cached_row_structure(
@@ -3189,6 +3237,18 @@ class BilinearProductEqualityRule(NonlinearBoundTighteningRule):
             scale_p, v_idx, f_coeffs, f_const, rest_coeffs, rest_const_val = structure
 
             f_lo, f_hi = _affine_box_interval(f_coeffs, f_const, tightened_lb, tightened_ub)
+            lp_range = False
+            if not (f_lo > eps or f_hi < -eps) and _lp_sign_enabled():
+                # #1981: the box interval straddles 0, but the model's LINEAR rows may
+                # still keep F away from it (hhfair: F = x12 - 0.2559 x5 with the row
+                # x12 >= 0.2585 x5 and x5 >= 100 gives F >= 0.26). Take F's range by
+                # an LP over those rows and the current box, widened outward.
+                if lp_rows is None:
+                    lp_rows = _LpRowsForSign(model)
+                rng = lp_rows.range(f_coeffs, f_const, tightened_lb, tightened_ub)
+                if rng is not None:
+                    f_lo, f_hi = rng
+                    lp_range = True
             if not (f_lo > eps or f_hi < -eps):
                 continue  # F not sign-stable: division by an interval straddling 0
 
@@ -3208,6 +3268,9 @@ class BilinearProductEqualityRule(NonlinearBoundTighteningRule):
                 continue
             v_lo = min(candidates)
             v_hi = max(candidates)
+            if lp_range:  # widen outward: the LP range carries solver tolerance
+                v_lo -= _LP_SIGN_MARGIN * (1.0 + abs(v_lo))
+                v_hi += _LP_SIGN_MARGIN * (1.0 + abs(v_hi))
 
             if v_hi < float(tightened_ub[v_idx]) - 1e-10:
                 tightened_ub[v_idx] = max(float(tightened_lb[v_idx]), v_hi)
