@@ -138,11 +138,11 @@ def test_deferred_unbounded_failure_is_diagnosed_not_silently_error(monkeypatch)
 
     calls = {"simplex": 0}
 
-    def _failing_simplex(model, t_start, time_limit=None):
+    def _failing_simplex(model, t_start, time_limit=None, **kw):
         calls["simplex"] += 1
         return None
 
-    def _deferring_pounce(model, t_start, time_limit=None):
+    def _deferring_pounce(model, t_start, time_limit=None, **kw):
         return solver_mod._DeferredUnbounded(
             solver_mod.SolveResult(status="unbounded", wall_time=0.0), "STUB-IPM"
         )

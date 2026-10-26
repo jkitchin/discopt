@@ -502,11 +502,13 @@ def test_qp_extraction_tape_matches_jax():
 # ``jax.grad`` for a *univariate* tangent slope and ``lambdify(modules="jax")``
 # for a 200-sample Jensen convexity check. Neither needed autodiff, and together
 # they pulled 211 jax modules onto a default gas-network solve, where
-# ``structure_cuts`` is ON by default. Both now go through SymPy + numpy.
+# ``structure_cuts`` was ON by default (retired in #1965; the recognizer is now an
+# explicit opt-in). Both now go through SymPy + numpy.
 # --------------------------------------------------------------------------
 
 _STRUCTURE_CUT_DRIVER = """
 import sys
+import numpy as np
 from discopt._relax.symbolic import cut_recognizer as R
 from discopt.benchmarks.problems.gas_network_minlp import build_gas_network_minlp
 
@@ -518,7 +520,7 @@ cuts = R.recognize_and_derive_cuts(build_gas_network_minlp())
 print("CUTS:" + str(len(cuts)))
 tangents = 0
 for c in cuts:
-    lo, hi = R.under_domain_of(c.underestimator)
+    lo, hi = c.domain
     v, g = c.underestimator.tangent_cut(0.5 * (lo + hi))
     tangents += 1
     print("TANGENT_V:" + repr(float(v)))
@@ -526,6 +528,10 @@ for c in cuts:
     print("CONVEX:" + str(bool(c.underestimator.is_convex)))
 print("TANGENTS:" + str(tangents))
 
+# The explicit opt-in (#1965): inject on a box where the cut is provable, then solve.
+w = next(v for v in m._variables if v.name == "w_cs")
+w.ub = np.full(w.shape, 74.0)
+print("INJECTED:" + str(R.recognize_and_inject(m)))
 r = m.solve(time_limit=90, gap_tolerance=1e-4)
 print("STATUS:" + str(r.status))
 print("NODES:" + str(r.node_count))
@@ -547,11 +553,11 @@ def test_structure_cuts_stay_jax_free():
     modules; after: 0, with ``node_count`` unchanged.
 
     NOTE: this skips on CI today. ``sympy`` is the optional ``discopt[sympy]``
-    extra and no CI lane installs it, so the whole structure-cut subsystem --
-    which is *default-ON* in the solver -- goes untested there, this guard
-    included. The skip is the honest state, not a fix for it; the guard is
-    scoped to this test rather than the module so it cannot take the rest of the
-    #75 acceptance suite down with it.
+    extra and no CI lane installs it, so the structure-cut recognizer (an
+    explicit opt-in since #1965) goes untested there, this guard included. The
+    skip is the honest state, not a fix for it; the guard is scoped to this test
+    rather than the module so it cannot take the rest of the #75 acceptance suite
+    down with it.
     """
     pytest.importorskip("sympy")
     res = _run_raw(_STRUCTURE_CUT_DRIVER)
@@ -560,12 +566,18 @@ def test_structure_cuts_stay_jax_free():
     # pass while proving nothing about the code that used to import jax.
     assert int(res["CUTS"]) == 2, f"the gas-network recognizer did not fire: {res}"
     assert int(res["TANGENTS"]) == 2, f"tangent_cut was never exercised: {res}"
-    assert res["CONVEX"] == "True", f"underestimator lost its convexity verdict: {res}"
+    # The Jensen check ran (numpy) and its verdict is False -- correctly. Since the
+    # #1952-#1958 sweep it is checked on the flow variable's model box [0, 100]
+    # instead of a hardcoded (0, sqrt(5600)); the derived ``y_lower(w)`` is real
+    # only for ``w**2 < 8750``, so ``h`` is NaN near the top of the box and is not
+    # proven convex, and ``inject_cuts`` declines the cut.
+    assert res["CONVEX"] == "False", f"convexity verdict on the model box changed: {res}"
     assert res["JAXMODS"] == "0", (
         f"structure-cut derivation imported {res['JAXMODS']} jax modules "
         f"({res.get('LEAKED', '?')}) -- #75 regression"
     )
-    # Still correct, not merely JAX-free: the cut must still close the gap.
+    # Still correct, not merely JAX-free: the injected cuts must still certify.
+    assert int(res["INJECTED"]) == 2, f"the explicit opt-in injected nothing: {res}"
     assert res["STATUS"] == "optimal", f"structure cuts stopped certifying: {res}"
 
 

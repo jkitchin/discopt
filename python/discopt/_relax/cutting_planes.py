@@ -1102,34 +1102,55 @@ class CutPool:
         self.purge_fraction = purge_fraction
         self._cuts: list[LinearCut] = []
         self._ages: list[int] = []  # idle iterations since last binding
-        self._hashes: set[int] = set()
+        self._protected: list[bool] = []  # model rows (lazy constraints): never purged
+        self._keys: set[tuple] = set()
 
     def __len__(self) -> int:
         return len(self._cuts)
 
     @staticmethod
-    def _cut_hash(cut: LinearCut) -> int:
-        """Compute a hash for deduplication based on coefficients and rhs."""
-        c_rounded = np.round(cut.coeffs, decimals=8)
-        r_rounded = round(cut.rhs, 8)
-        return hash((c_rounded.tobytes(), r_rounded, cut.sense))
+    def _cut_key(cut: LinearCut, exact: bool = False) -> tuple:
+        """Deduplication key: the row's values themselves, never a bare ``hash``.
 
-    def add(self, cut: LinearCut) -> bool:
+        The set holds the key tuple, so equality decides a duplicate (#1954): the
+        old set held only ``hash(...)``, and ``hash(-1.0) == hash(-2.0)`` in
+        CPython made ``x <= -2`` a "duplicate" of ``x <= -1``. A generated cut keeps
+        the 8-decimal rounding that merges near-duplicate separations (dropping one
+        only loosens the relaxation). A protected row (a lazy constraint, part of
+        the model) is keyed exactly: ``1e-9*x + y <= 2.5`` and ``2e-9*x + y <= 2.5``
+        are different constraints, and merging them dropped one.
+        """
+        coeffs = np.asarray(cut.coeffs, dtype=np.float64)
+        if exact:
+            return ("exact", coeffs.tobytes(), float(cut.rhs), cut.sense)
+        return ("rounded", np.round(coeffs, decimals=8).tobytes(), round(cut.rhs, 8), cut.sense)
+
+    def add(self, cut: LinearCut, *, protected: bool = False) -> bool:
         """Add a cut if it is not a duplicate.
+
+        ``protected=True`` marks a row of the model itself (a lazy constraint):
+        it is keyed exactly and is never removed by :meth:`purge_inactive` or the
+        ``max_cuts`` purge, because dropping it relaxes the model rather than
+        merely the relaxation (#1954).
 
         Returns True if the cut was added, False if it was a duplicate.
         """
-        h = self._cut_hash(cut)
-        if h in self._hashes:
+        k = self._cut_key(cut, exact=protected)
+        if k in self._keys:
             return False
-        self._hashes.add(h)
+        self._keys.add(k)
         self._cuts.append(cut)
         self._ages.append(0)
+        self._protected.append(protected)
 
         if len(self._cuts) > self.max_cuts:
             self._purge_oldest()
 
         return True
+
+    def protected_rows(self) -> list[LinearCut]:
+        """The protected rows (lazy constraints) in insertion order (#1954)."""
+        return [c for c, p in zip(self._cuts, self._protected) if p]
 
     def add_many(self, cuts: list[LinearCut]) -> int:
         """Add multiple cuts, returning the count of non-duplicate additions."""
@@ -1167,14 +1188,19 @@ class CutPool:
                 self._ages[i] += 1
 
     def purge_inactive(self, max_age: int = 10):
-        """Remove cuts that have been non-binding for max_age iterations."""
-        keep_idx = [i for i, age in enumerate(self._ages) if age < max_age]
+        """Remove cuts that have been non-binding for max_age iterations.
+
+        Protected rows are kept regardless of age."""
+        keep_idx = [i for i, age in enumerate(self._ages) if age < max_age or self._protected[i]]
         self._rebuild(keep_idx)
 
     def _purge_oldest(self):
-        """Remove the oldest fraction of cuts when pool exceeds max_cuts."""
+        """Remove the oldest fraction of unprotected cuts when pool exceeds max_cuts."""
+        candidates = [i for i in range(len(self._cuts)) if not self._protected[i]]
+        if not candidates:
+            return  # only model rows: the pool may exceed max_cuts rather than drop one
         n_remove = max(1, int(len(self._cuts) * self.purge_fraction))
-        sorted_idx = sorted(range(len(self._ages)), key=lambda i: self._ages[i], reverse=True)
+        sorted_idx = sorted(candidates, key=lambda i: self._ages[i], reverse=True)
         remove_set = set(sorted_idx[:n_remove])
         keep_idx = [i for i in range(len(self._cuts)) if i not in remove_set]
         self._rebuild(keep_idx)
@@ -1183,7 +1209,8 @@ class CutPool:
         """Rebuild internal lists keeping only the specified indices."""
         self._cuts = [self._cuts[i] for i in keep_idx]
         self._ages = [self._ages[i] for i in keep_idx]
-        self._hashes = {self._cut_hash(c) for c in self._cuts}
+        self._protected = [self._protected[i] for i in keep_idx]
+        self._keys = {self._cut_key(c, exact=p) for c, p in zip(self._cuts, self._protected)}
 
     def to_constraint_arrays(
         self,

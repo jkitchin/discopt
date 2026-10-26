@@ -32,7 +32,7 @@ pub use dual::{
     solve_lp_warm, solve_lp_warm_csc, solve_lp_warm_scaled, solve_lp_warm_scaled_csc,
     unstable_pivot_recovery_default, PreparedDual,
 };
-pub use presolve::{tighten_bounds, tighten_bounds_csc};
+pub use presolve::{tighten_bounds, tighten_bounds_csc, tighten_bounds_csc_with_row};
 pub use primal::{solve_lp, solve_lp_cols, solve_lp_cols_scaled, solve_lp_scaled};
 pub use scaled_problem::ScaledProblem;
 pub use scaling::Scaling;

@@ -64,6 +64,7 @@ from typing import Optional
 
 import numpy as np
 
+from discopt._flat_index import flat_index_in_shape
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -894,13 +895,9 @@ def _indexed_scalar_value(expr: IndexExpression, box: dict) -> Interval:
     lb = np.asarray(v.lb).ravel()
     ub = np.asarray(v.ub).ravel()
     # Translate the index into a flat position inside the variable.
-    idx = expr.index
-    if isinstance(idx, tuple):
-        # Only 1-D indexing supported for scalar output.
-        if len(idx) == 1:
-            idx = idx[0]
-        else:
-            raise ValueError("Multi-dim indexing unsupported in interval AD")
+    idx = flat_index_in_shape(expr.index, tuple(v.shape or ()))
+    if idx is None:
+        raise ValueError("Interval AD: index does not name one scalar element")
     if v in box:
         # Box override is shape (size,) when variable is array-valued.
         box_iv = box[v]
@@ -925,13 +922,12 @@ def _impl(expr: Expression, model: Model, box: dict, cache: dict, n: int) -> _Sp
 
     if isinstance(expr, IndexExpression) and isinstance(expr.base, Variable):
         v = expr.base
-        raw_idx = expr.index
-        if isinstance(raw_idx, tuple):
-            if len(raw_idx) != 1:
-                raise ValueError("Multi-dim indexing unsupported")
-            flat_idx = int(raw_idx[0])
-        else:
-            flat_idx = int(raw_idx)
+        # ``int(idx)`` put ``x[-1]``'s derivatives on the slot of the variable
+        # declared before ``x``: ``x[-1]*z`` got the Hessian of ``z**2`` and was
+        # certified convex (#1952 class). Resolve exactly as the value lookup does.
+        flat_idx = flat_index_in_shape(expr.index, tuple(v.shape or ()))
+        if flat_idx is None:
+            raise ValueError("Interval AD: index does not name one scalar element")
         slot = _var_offset(v, model) + flat_idx
         val = _indexed_scalar_value(expr, box)
         return _SparseAD(value=val, grad={slot: _ONE}, hess=_H0, n=n)

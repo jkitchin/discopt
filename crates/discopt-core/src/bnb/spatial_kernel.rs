@@ -260,6 +260,19 @@ pub struct SpatialNodeResult {
 /// per box; fixed rows are copied. Panics only on a malformed spec (column out of
 /// range), which is a producer bug.
 pub fn assemble_node_lp(spec: &SpatialKernelSpec, lo: &[f64], hi: &[f64]) -> AssembledLp {
+    assemble_node_lp_with_cuts(spec, lo, hi, &[])
+}
+
+/// [`assemble_node_lp`] with `cuts` appended after the envelope rows (#1962). Each
+/// cut is a globally valid `<=` row over the structural columns, so it is the LAST
+/// block of rows: a node that adds cuts extends its parent's row layout instead of
+/// reordering it, which is what keeps the parent's basis a usable warm start.
+pub fn assemble_node_lp_with_cuts(
+    spec: &SpatialKernelSpec,
+    lo: &[f64],
+    hi: &[f64],
+    cuts: &[FixedRow],
+) -> AssembledLp {
     let n_cols = spec.n_cols;
     assert_eq!(lo.len(), n_cols);
     assert_eq!(hi.len(), n_cols);
@@ -316,6 +329,9 @@ pub fn assemble_node_lp(spec: &SpatialKernelSpec, lo: &[f64], hi: &[f64]) -> Ass
             hi,
             &mut rows,
         );
+    }
+    for cut in cuts {
+        rows.push((cut.cols.clone(), cut.coeffs.clone(), cut.rhs));
     }
 
     let m = rows.len();
@@ -477,7 +493,24 @@ pub fn solve_spatial_node_from(
     opts: &SimplexOptions,
     warm: Option<&crate::lp::basis::Basis>,
 ) -> SpatialNodeResult {
-    let lp = assemble_node_lp(spec, lo, hi);
+    solve_spatial_node_with_cuts(spec, lo, hi, run_obbt, opts, warm, &[])
+}
+
+/// [`solve_spatial_node_from`] over the node LP extended by `cuts`
+/// ([`assemble_node_lp_with_cuts`], #1962). The cuts must be valid for every
+/// feasible point of the box; the bound and verdict rules are unchanged (the
+/// Neumaier–Shcherbina bound on the returned duals, a verified Farkas ray for
+/// `Infeasible`), and the cut rows enter the safe-bound evaluation like any row.
+pub fn solve_spatial_node_with_cuts(
+    spec: &SpatialKernelSpec,
+    lo: &[f64],
+    hi: &[f64],
+    run_obbt: bool,
+    opts: &SimplexOptions,
+    warm: Option<&crate::lp::basis::Basis>,
+    cuts: &[FixedRow],
+) -> SpatialNodeResult {
+    let lp = assemble_node_lp_with_cuts(spec, lo, hi, cuts);
     // Objective padded with zeros over the slack columns.
     let mut c = spec.c.clone();
     c.resize(lp.n_total, 0.0);

@@ -607,7 +607,7 @@ def test_model_solve_gurobi_dispatches_lp(monkeypatch):
 
     calls = {}
 
-    def fake_gurobi_lp(model, t_start, time_limit=None, threads=None, options=None):
+    def fake_gurobi_lp(model, t_start, time_limit=None, threads=None, options=None, **kw):
         calls["model"] = model
         calls["time_limit"] = time_limit
         calls["threads"] = threads
