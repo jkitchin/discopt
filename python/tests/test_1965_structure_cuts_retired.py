@@ -65,8 +65,13 @@ def test_structure_cuts_false_or_none_is_accepted(value):
     assert r.objective == pytest.approx(2.0, abs=1e-5)
 
 
+@pytest.mark.slow
+@pytest.mark.correctness
 def test_explicit_opt_in_still_injects_and_certifies():
-    """The recognizer, called by the user before ``solve``, still works."""
+    """The recognizer, called by the user before ``solve``, still works.
+
+    ``slow``: the gas solve took 19.3 s on CI against the 15 s fast-lane budget.
+    """
     pytest.importorskip("sympy")
     from discopt._relax.symbolic import cut_recognizer as cr
     from discopt.benchmarks.problems.gas_network_minlp import build_gas_network_minlp
