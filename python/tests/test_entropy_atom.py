@@ -11,7 +11,6 @@ when the flag is off, and on a non-entropy model when on.
 from __future__ import annotations
 
 import math
-import os
 
 import discopt.modeling as dm
 import numpy as np
@@ -41,14 +40,11 @@ def _true_min(lo: float, hi: float, n: int = 2) -> float:
 
 
 @pytest.fixture
-def _flag_on():
-    prev = os.environ.get("DISCOPT_ENTROPY_ATOM")
-    os.environ["DISCOPT_ENTROPY_ATOM"] = "1"
-    yield
-    if prev is None:
-        os.environ.pop("DISCOPT_ENTROPY_ATOM", None)
-    else:
-        os.environ["DISCOPT_ENTROPY_ATOM"] = prev
+def _flag_on(monkeypatch):
+    # The atom is default ON since the #1979-#1982 bundle graduation, so the OFF arm
+    # must set "0" explicitly; an unset variable is the ON arm.
+    monkeypatch.setenv("DISCOPT_ENTROPY_ATOM", "1")
+    return monkeypatch
 
 
 # Boxes where x*log(x)'s curvature bites (interior/near-interior min) vs a corner box.
@@ -60,9 +56,9 @@ _ALL_BOXES = _CURVATURE_BOXES + [(1.0, 10.0)]
 def test_entropy_atom_sound_and_never_looser(_flag_on, lo, hi):
     """ON is a VALID lower bound (<= true min) and NEVER looser than OFF, on every box."""
     on = _entropy_root_lb(lo, hi)
-    os.environ.pop("DISCOPT_ENTROPY_ATOM", None)
+    _flag_on.setenv("DISCOPT_ENTROPY_ATOM", "0")
     off = _entropy_root_lb(lo, hi)
-    os.environ["DISCOPT_ENTROPY_ATOM"] = "1"
+    _flag_on.setenv("DISCOPT_ENTROPY_ATOM", "1")
     tm = _true_min(lo, hi)
     assert on <= tm + 1e-6, f"UNSOUND: ON {on} > true min {tm} on [{lo},{hi}]"
     assert off <= tm + 1e-6, f"UNSOUND (off): {off} > {tm} on [{lo},{hi}]"
@@ -73,15 +69,15 @@ def test_entropy_atom_sound_and_never_looser(_flag_on, lo, hi):
 def test_entropy_atom_strictly_tighter_where_curvature_bites(_flag_on, lo, hi):
     """Where the min is not at a corner, the convex envelope beats the bilinear floor."""
     on = _entropy_root_lb(lo, hi)
-    os.environ.pop("DISCOPT_ENTROPY_ATOM", None)
+    _flag_on.setenv("DISCOPT_ENTROPY_ATOM", "0")
     off = _entropy_root_lb(lo, hi)
-    os.environ["DISCOPT_ENTROPY_ATOM"] = "1"
+    _flag_on.setenv("DISCOPT_ENTROPY_ATOM", "1")
     assert on > off + 1e-2, f"not tighter on [{lo},{hi}]: ON={on} OFF={off}"
 
 
-def test_entropy_atom_off_is_unchanged():
+def test_entropy_atom_off_is_unchanged(_flag_on):
     """Flag OFF reproduces the pre-atom bilinear relaxation exactly (deterministic + frozen)."""
-    os.environ.pop("DISCOPT_ENTROPY_ATOM", None)
+    _flag_on.setenv("DISCOPT_ENTROPY_ATOM", "0")
     off1 = _entropy_root_lb(0.1, 1.0)
     off2 = _entropy_root_lb(0.1, 1.0)
     assert off1 == off2
@@ -101,9 +97,9 @@ def test_non_entropy_product_unaffected_when_on(_flag_on):
         return float(milp.solve().objective)
 
     on = _bilinear_lb()
-    os.environ.pop("DISCOPT_ENTROPY_ATOM", None)
+    _flag_on.setenv("DISCOPT_ENTROPY_ATOM", "0")
     off = _bilinear_lb()
-    os.environ["DISCOPT_ENTROPY_ATOM"] = "1"
+    _flag_on.setenv("DISCOPT_ENTROPY_ATOM", "1")
     assert on == off, f"entropy flag changed a non-entropy product: {on} vs {off}"
 
 
@@ -125,9 +121,9 @@ def test_affine_arg_entropy_sound_and_tighter(_flag_on, a, b, xl, xu):
         return m
 
     on = _bound_of(build)
-    os.environ.pop("DISCOPT_ENTROPY_ATOM", None)
+    _flag_on.setenv("DISCOPT_ENTROPY_ATOM", "0")
     off = _bound_of(build)
-    os.environ["DISCOPT_ENTROPY_ATOM"] = "1"
+    _flag_on.setenv("DISCOPT_ENTROPY_ATOM", "1")
     # True min of t log t on t in [a*xl+b, a*xu+b]: interior 1/e (spanned) else corner.
     tlo, thi = a * xl + b, a * xu + b
     cands = [tlo, thi] + ([1.0 / math.e] if tlo <= 1.0 / math.e <= thi else [])
