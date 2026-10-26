@@ -2431,6 +2431,8 @@ def _try_native_spatial_kernel(
     if _kernel_pseudocost_branching_enabled():
         solve_kwargs["pseudocost_branching"] = True
         solve_kwargs["pseudocost_reliability"] = _kernel_pseudocost_reliability()
+    # #1970: the scored spatial branching rule (see the helper; default ON).
+    solve_kwargs.update(_kernel_spatial_branching_kwargs())
     # #1935: start each child's node LP from its parent's basis (default OFF);
     # mode 2 also repairs a dual-infeasible inherited basis by bound flips.
     _warm_mode = _native_warm_start_mode()
@@ -2780,6 +2782,7 @@ def _try_native_spatial_kernel(
     )
     # #1913: integer branches chosen by pseudocost; 0 unless DISCOPT_KERNEL_PSEUDOCOST.
     _native_stats["tree/pseudocost_picks"] = float(int(res.get("n_pseudocost_picks") or 0))
+    _native_stats["tree/spatial_score_picks"] = float(int(res.get("n_spatial_score_picks") or 0))
     # #1935: the parent-basis warm start (``DISCOPT_NATIVE_WARM_START``). The warm
     # count is 0 with ``=0`` (cold), which tells "never engaged" from "engaged and
     # did not help"; pivots and seconds are the node-LP effort it is meant to cut.
@@ -11291,6 +11294,47 @@ def _kernel_int_probe_enabled() -> bool:
         "off",
         "",
     )
+
+
+def _kernel_spatial_branching_kwargs() -> dict:
+    """#1970: ``DISCOPT_KERNEL_SPATIAL_BRANCHING`` for the native spatial kernel.
+
+    **Graduated (default ON, 2026-10-26, #1970); ``=0`` restores the legacy rule**
+    (split the widest operand of the single largest-gap term, at the LP value).
+
+    ON, the spatial branching column is chosen by SCIP's nonlinear-handler rule
+    (Bestuzheva et al. 2023, ``constraints/nonlinear/branching``): every operand of
+    every violated term is scored by its share of those terms' McCormick gaps plus
+    a spatial pseudocost (per-side bound gain per unit of width cut off, recorded
+    as children are solved), and the split point is pulled 3/4 of the way from the
+    LP value to the midpoint (SCIP's ``branching/midpull``). See
+    ``SpatialTreeConfig::spatial_score`` / ``spatial_midpull``. Branching order
+    only: every child pair still covers its parent box, so no bound moves. Probe:
+    ``tree/spatial_score_picks``.
+
+    Entry experiment, nous1 at 120 s (``performance-plan.md`` section 89): legacy
+    time limit, bound 1.21 after 64k nodes; violation score alone 1.50 (21k
+    nodes); score + pseudocost + midpull certifies 1.56707 in 11,921 nodes, 33 s.
+    The split point is half of it: the legacy column with midpull reaches only
+    1.25, the score with the LP-value split only 1.50.
+
+    Section 5 panel (``issue1944_rlt_panel.py --with-corpus --on-env
+    DISCOPT_KERNEL_SPATIAL_BRANCHING=1``, 270 instances, 30 s, interleaved; the
+    rule fires on 69): cert-clean, 1,620 checks, 0 problems; certified
+    +wastewater05m1, none lost; nodes where both certify 100,642 -> 65,272
+    (tanksize 17,375 -> 519), wall 631.8 -> 608.1 s, total 1705.7 -> 1671.5 s.
+    At 120 s on the 7 the rule reaches that neither certifies at 30 s: +nous1,
+    +wastewater15m1 (54.5 s), none lost, no bound past its optimum. Re-run after
+    #1969's convex cuts graduated (fires on 61): cert-clean, 1,620 checks, 0
+    problems; +ex8_4_1, +nous1, +wastewater05m1; nodes where both certify 93,360
+    -> 61,380, total wall 1518.6 -> 1477.9 s (the one listed loss, st_e40, never
+    reaches the rule and sits at the time limit in both arms; section 89). Read at
+    call time.
+    """
+    raw = os.environ.get("DISCOPT_KERNEL_SPATIAL_BRANCHING", "1").strip().lower()
+    if raw in ("0", "false", "no", "off", ""):
+        return {}
+    return {"spatial_score": True, "spatial_pscost_weight": 1.0, "spatial_midpull": 0.75}
 
 
 def _native_warm_start_mode() -> int:
