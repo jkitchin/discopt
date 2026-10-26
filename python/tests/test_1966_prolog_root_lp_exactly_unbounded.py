@@ -15,7 +15,7 @@ was never a proof. This file pins the ray so that no later change "fixes"
 
 #1975 tried the relaxation-side fix: RLT of the shared-budget rows against the open
 factors' lower bounds. The ray survives it, exactly, on the FBBT and root-OBBT boxes
-(``test_1975_prolog_rlt_ray_survives.py``; performance-plan section 89).
+(``test_1975_prolog_rlt_ray_survives.py``; performance-plan section 90).
 """
 
 from __future__ import annotations
