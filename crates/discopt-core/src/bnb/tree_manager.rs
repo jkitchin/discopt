@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use crate::bnb::branching::{
     create_children, create_children_spatial, create_children_spatial_int, is_integer_feasible,
     select_branch_variable, select_branch_variable_pseudocost, select_spatial_branch_variable,
-    select_spatial_integer_branch_variable, select_unbounded_branch, spatial_box_is_tight,
-    BranchDecision, Pseudocosts, VarBranchInfo,
+    select_spatial_integer_branch_variable, select_spatial_score_variable, select_unbounded_branch,
+    spatial_box_is_tight, BranchDecision, Pseudocosts, ScoreTerm, VarBranchInfo,
 };
 use crate::bnb::node::{Node, NodeId, NodeStatus};
 use crate::bnb::pool::{NodePool, SelectionStrategy};
@@ -289,6 +289,17 @@ pub struct TreeManager {
     /// all-false unless registered via [`Self::set_branch_deprioritized`].
     /// Fallback in [`select_spatial_branch_variable`] preserves completeness.
     branch_deprioritized: Vec<bool>,
+    /// #1978: nonlinear terms of original columns the spatial branch scores its
+    /// continuous column on ([`select_spatial_score_variable`]). Empty (the
+    /// default, and the driver's choice when `DISCOPT_PY_TREE_SPATIAL_SCORE` is
+    /// off) keeps the legacy longest-edge rule.
+    spatial_score_terms: Vec<ScoreTerm>,
+    /// #1978 probe: spatial branches the score rule chose (not the fallback).
+    spatial_score_picks: u64,
+    /// #1978: per-node point the score rule measures term gaps at (the node's
+    /// relaxation LP point, which the driver may hold apart from the solution it
+    /// imports). Consumed when the node is processed; absent = `result.solution`.
+    spatial_score_points: HashMap<NodeId, Vec<f64>>,
     /// The objective lattice `{ k*spacing + offset : k integer }`, when every
     /// attainable objective value lies on one. `None` = not proven, and both the
     /// cutoff and the bound rounding below degrade to their plain forms. Set by
@@ -403,6 +414,9 @@ impl TreeManager {
             nonconvex: false,
             spatial_integer_cols,
             branch_deprioritized,
+            spatial_score_terms: Vec::new(),
+            spatial_score_picks: 0,
+            spatial_score_points: HashMap::new(),
             obj_lattice: None,
             bound_unresolved: false,
             unresolved_floor: f64::INFINITY,
@@ -491,6 +505,22 @@ impl TreeManager {
                 self.branch_deprioritized[c] = true;
             }
         }
+    }
+
+    /// #1978: register the nonlinear terms the spatial branch scores its
+    /// continuous column on. An empty list restores the legacy rule.
+    pub fn set_spatial_score_terms(&mut self, terms: Vec<ScoreTerm>) {
+        self.spatial_score_terms = terms;
+    }
+
+    /// #1978: the point the score rule measures `node_id`'s term gaps at.
+    pub fn set_spatial_score_point(&mut self, node_id: NodeId, x: Vec<f64>) {
+        self.spatial_score_points.insert(node_id, x);
+    }
+
+    /// #1978 probe: spatial branches chosen by the score rule.
+    pub fn spatial_score_picks(&self) -> u64 {
+        self.spatial_score_picks
     }
 
     /// Register continuous SOS1-selector columns (issue #196). Out-of-range
@@ -676,6 +706,7 @@ impl TreeManager {
 
         for result in &pending {
             let node_lb = self.pool.get(result.node_id).local_lower_bound;
+            let score_point = self.spatial_score_points.remove(&result.node_id);
 
             // 0. Retroactively update pseudocosts from this child's result.
             if let Some(record) = self.branch_records.remove(&result.node_id) {
@@ -999,15 +1030,34 @@ impl TreeManager {
                 } else {
                     (self.global_lb.clone(), self.global_ub.clone())
                 };
-                let cont = select_spatial_branch_variable(
-                    &nlb,
-                    &nub,
-                    &ref_lb,
-                    &ref_ub,
-                    &self.integer_vars,
-                    &self.branch_deprioritized,
-                    false, // independent continuous only
-                );
+                // #1978: the score rule first when terms are registered; the
+                // legacy longest-edge rule when it finds no gap on a candidate.
+                let scored = if self.spatial_score_terms.is_empty() {
+                    None
+                } else {
+                    select_spatial_score_variable(
+                        &nlb,
+                        &nub,
+                        &ref_lb,
+                        &ref_ub,
+                        score_point.as_deref().unwrap_or(&result.solution),
+                        &self.integer_vars,
+                        &self.branch_deprioritized,
+                        &self.spatial_score_terms,
+                    )
+                };
+                let score_picked = scored.is_some();
+                let cont = scored.or_else(|| {
+                    select_spatial_branch_variable(
+                        &nlb,
+                        &nub,
+                        &ref_lb,
+                        &ref_ub,
+                        &self.integer_vars,
+                        &self.branch_deprioritized,
+                        false, // independent continuous only
+                    )
+                });
                 let spatial_int = select_spatial_integer_branch_variable(
                     &nlb,
                     &nub,
@@ -1127,6 +1177,9 @@ impl TreeManager {
                     // Continuous bisection wins.
                     let (cont_decision, _) = cont.unwrap();
                     let cont_var = cont_decision.var_index;
+                    if score_picked {
+                        self.spatial_score_picks += 1;
+                    }
                     let parent = self.pool.get(result.node_id).clone();
                     self.retire(result.node_id, NodeStatus::Branched);
                     let (left, right) =

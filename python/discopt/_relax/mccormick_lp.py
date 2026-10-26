@@ -600,6 +600,15 @@ class MccormickLPRelaxer:
     ) -> None:
         self._model = model
         self._terms: NonlinearTerms = classify_nonlinear_terms(model)
+        # #1978: the MODEL's own bilinear pairs / monomials (flat original
+        # columns) for the Python tree's spatial branching score. Not the
+        # engine's ``bilinear_map``: that also holds the products RLT lifts
+        # (#1944), whose gaps are relaxation artefacts -- scoring them steered
+        # branching onto columns the model only uses linearly.
+        self._score_terms: tuple[list[tuple[int, int]], list[tuple[int, int]]] = (
+            sorted((int(a), int(b)) for a, b in self._terms.bilinear),
+            sorted((int(i), int(p)) for i, p in self._terms.monomial),
+        )
         # Opt-in per-node PSD (moment) cut separation (W2e): enforce the lifted
         # moment matrix M = [[1, x^T],[x, X]] >= 0 by separating dense clique cuts
         # at each node, tightening the bound toward the SDP relaxation.

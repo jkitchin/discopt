@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""#1982 graduation panel: ``DISCOPT_FBBT_SIGN_DOMAIN`` ON vs OFF (CLAUDE.md §5).
+"""A §5 graduation panel for one ``DISCOPT_*`` flag: ON vs OFF (CLAUDE.md §5).
 
-The flag adds two backward FBBT rules (a zero-touching product factor fixes the
-other factor's sign; a non-integer power's base is ``>= 0``). It is a bound-changing
-reduction, so it graduates only on a corpus panel that is BOTH
+Written for #1982 (``DISCOPT_FBBT_SIGN_DOMAIN``) and reused by #1978
+(``DISCOPT_PY_TREE_SPATIAL_SCORE``); ``--flag`` names the flag. A bound-changing
+change graduates only on a corpus panel that is BOTH
 
 * **cert-clean** -- 0 incorrect certified objectives or infeasibility claims vs the
   MINLPLib oracle, no dual bound beyond the oracle, no ``gap_certified`` instance
@@ -13,14 +13,14 @@ reduction, so it graduates only on a corpus panel that is BOTH
   none, nodes), not merely sound.
 
 Each (instance, arm) solve runs in a fresh subprocess with the flag set in its
-environment (the Rust side reads it per FBBT walk). Arms are interleaved per
+environment. Arms are interleaved per
 instance, alternating which goes first. Progress is printed per instance.
 
 Usage::
 
-    python -u discopt_benchmarks/scripts/issue1982_fbbt_sign_domain_panel.py \\
-        --solu minlplib.solu --extra-dir <dir of .nl> --time-limit 20 --jobs 3 \\
-        --out panel.jsonl
+    python -u discopt_benchmarks/scripts/flag_onoff_corpus_panel.py \\
+        --flag DISCOPT_FBBT_SIGN_DOMAIN --solu minlplib.solu \\
+        --extra-dir <dir of .nl> --time-limit 20 --jobs 3 --out panel.jsonl
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-FLAG = "DISCOPT_FBBT_SIGN_DOMAIN"
+FLAG = "DISCOPT_FBBT_SIGN_DOMAIN"  # overridden by --flag
 REPO = Path(__file__).resolve().parents[2]
 CORPUS = REPO / "python" / "tests" / "data" / "minlplib_nl"
 
@@ -52,7 +52,9 @@ try:
     out["sense"] = int(objective_sense_sign(m))
     r = m.solve(time_limit=tl)
     out.update(status=r.status, obj=r.objective, bound=r.bound,
-               cert=bool(getattr(r, "gap_certified", False)), nodes=r.node_count)
+               cert=bool(getattr(r, "gap_certified", False)), nodes=r.node_count,
+               route=str(r.algorithm_route)[:60], stats={k: v for k, v in
+               (r.solver_stats or {}).items() if k.startswith("tree/py_spatial")})
     if r.x is not None and r.objective is not None:
         flat = np.concatenate([np.ravel(np.asarray(r.x[v.name], float)) for v in m._variables])
         ok, viol = check_feasibility(m, flat, tol=1e-5)
@@ -66,8 +68,8 @@ print("@@" + json.dumps(out))
 """
 
 
-def solve(path: str, arm: str, tl: float) -> dict:
-    env = dict(os.environ, **{FLAG: arm})
+def solve(path: str, arm: str, tl: float, flag: str = FLAG) -> dict:
+    env = dict(os.environ, **{flag: arm})
     try:
         p = subprocess.run(
             [sys.executable, "-c", CHILD, path, str(tl)],
@@ -84,9 +86,9 @@ def solve(path: str, arm: str, tl: float) -> dict:
     return {"error": f"no result (rc={p.returncode}): {p.stderr[-300:]}"}
 
 
-def run_instance(name: str, path: str, tl: float, first_on: bool) -> dict:
+def run_instance(name: str, path: str, tl: float, first_on: bool, flag: str = FLAG) -> dict:
     arms = ["1", "0"] if first_on else ["0", "1"]
-    res = {arm: solve(path, arm, tl) for arm in arms}
+    res = {arm: solve(path, arm, tl, flag) for arm in arms}
     return {"name": name, "off": res["0"], "on": res["1"]}
 
 
@@ -132,6 +134,7 @@ def problems(row: dict, ref: dict, tol_rel: float = 1e-4, tol_abs: float = 1e-6)
 
 def main() -> None:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--flag", default=FLAG, help="the DISCOPT_* flag under test")
     ap.add_argument("--solu", required=True)
     ap.add_argument("--extra-dir", default=None, help="more .nl files (e.g. the #1975 class)")
     ap.add_argument("--extra-list", default=None, help="names to take from --extra-dir")
@@ -154,13 +157,13 @@ def main() -> None:
         keep = set(args.only.split(","))
         insts = {n: p for n, p in insts.items() if n in keep}
     ref = load_solu(args.solu)
-    print(f"{len(insts)} instances, {args.time_limit} s, {args.jobs} jobs", flush=True)
+    print(f"{args.flag}: {len(insts)} instances, {args.time_limit} s, {args.jobs} jobs", flush=True)
 
     done = 0
     rows = []
     with open(args.out, "w") as fh, ProcessPoolExecutor(args.jobs) as ex:
         futs = {
-            ex.submit(run_instance, n, p, args.time_limit, i % 2 == 0): n
+            ex.submit(run_instance, n, p, args.time_limit, i % 2 == 0, args.flag): n
             for i, (n, p) in enumerate(sorted(insts.items()))
         }
         for f in as_completed(futs):
