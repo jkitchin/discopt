@@ -408,6 +408,26 @@ class MccormickLPResult:
             )
 
 
+def _no_retry_past_deadline_disabled() -> bool:
+    """``DISCOPT_NODE_RETRY_PAST_DEADLINE=1`` restores the pre-#1989 behaviour.
+
+    By default (#1989) ``solve_at_node`` does not START the C-42 pool-strip retry or
+    the #671 row-filter retry once the node's own deadline has passed. This is an
+    opt-out for that shipped default, kept so it can be A/B'd: it re-admits both
+    retries on a spent budget (each then runs on the ``_SOLVE_DEADLINE_FLOOR_S``
+    grant, as before). Read at call time.
+    """
+    import os as _os
+
+    return _os.environ.get("DISCOPT_NODE_RETRY_PAST_DEADLINE", "0") not in (
+        "0",
+        "",
+        "false",
+        "False",
+        "off",
+    )
+
+
 def free_column_lp_cert_enabled() -> bool:
     """``DISCOPT_FREE_COLUMN_LP_CERT`` gate (#1869 (b)): certify a declined McCormick
     node LP with an unbounded nonlinear column through the verified HiGHS LP route.
@@ -1261,6 +1281,7 @@ class MccormickLPRelaxer:
         build_deadline: Optional[float] = None,
         abort_deadline: Optional[float] = None,
         round_deadline: Optional[float] = None,
+        solve_deadline: Optional[float] = None,
         yield_round: bool = False,
         rigorous_only: bool = False,
     ) -> MccormickLPResult:
@@ -1277,6 +1298,14 @@ class MccormickLPRelaxer:
         loop keeps the default.
 
         Every other argument goes to :meth:`_solve_at_node_checked` unchanged.
+
+        ``solve_deadline`` (#1989, absolute ``perf_counter`` time, default None) caps
+        the node's internal solve/separation deadline and nothing else: the cold build
+        is not clamped by it. ``time_limit`` is anchored AFTER the cold build (so a
+        caller passing a fixed LP budget still gets it), which means a node-loop grant
+        of "time left until the solve deadline" restarted on build exit and let the
+        node's LPs run up to one build past the solve's own deadline. The spatial
+        node loops pass their solve deadline here; every other caller is unchanged.
         """
         previous = self._rigorous_only
         self._rigorous_only = rigorous_only
@@ -1294,6 +1323,7 @@ class MccormickLPRelaxer:
                 build_deadline=build_deadline,
                 abort_deadline=abort_deadline,
                 round_deadline=round_deadline,
+                solve_deadline=solve_deadline,
                 yield_round=yield_round,
             )
         finally:
@@ -1314,6 +1344,7 @@ class MccormickLPRelaxer:
         build_deadline: Optional[float] = None,
         abort_deadline: Optional[float] = None,
         round_deadline: Optional[float] = None,
+        solve_deadline: Optional[float] = None,
         yield_round: bool = False,
     ) -> MccormickLPResult:
         """:meth:`solve_at_node`'s body: the solve plus the C-43 pool re-verification.
@@ -1381,6 +1412,7 @@ class MccormickLPRelaxer:
             build_deadline=build_deadline,
             abort_deadline=abort_deadline,
             round_deadline=round_deadline,
+            solve_deadline=solve_deadline,
             yield_round=yield_round,
         )
         # C-43 pool-infeasible re-verification. Only relevant when (a) this was a
@@ -1429,6 +1461,7 @@ class MccormickLPRelaxer:
                 want_marginals=False,
                 skip_pool_separators=False,
                 abort_deadline=abort_deadline,
+                solve_deadline=solve_deadline,
             )
             if base_free.status != "infeasible":
                 # The pool row(s) caused a FALSE fathom of a non-empty node. Re-solve
@@ -1448,6 +1481,7 @@ class MccormickLPRelaxer:
                     want_marginals=want_marginals,
                     skip_pool_separators=False,
                     abort_deadline=abort_deadline,
+                    solve_deadline=solve_deadline,
                 )
                 self._pool_stats["dropped_nodes"] += 1
                 # Adopt the pool-free result unconditionally: it is a valid relaxation
@@ -1534,6 +1568,7 @@ class MccormickLPRelaxer:
         build_deadline: Optional[float] = None,
         abort_deadline: Optional[float] = None,
         round_deadline: Optional[float] = None,
+        solve_deadline: Optional[float] = None,
         yield_round: bool = False,
     ) -> MccormickLPResult:
         """Solve the McCormick LP relaxation restricted to the given bound box.
@@ -1842,11 +1877,35 @@ class MccormickLPRelaxer:
         _deadline = None if time_limit is None else time.perf_counter() + time_limit
         if round_deadline is not None:
             _deadline = round_deadline if _deadline is None else min(_deadline, round_deadline)
+        # #1989: ``solve_deadline`` is the enclosing solve's own end. The post-build
+        # anchor above hands the LPs a fresh ``time_limit`` after however long the
+        # build took; this cap keeps them from outliving the solve. Not a build clamp
+        # (that is ``round_deadline``'s job, behind its own flag), so it is bound-
+        # neutral on every node that finishes inside the solve's limit.
+        if solve_deadline is not None:
+            _deadline = solve_deadline if _deadline is None else min(_deadline, solve_deadline)
 
         def _remaining() -> Optional[float]:
             if _deadline is None:
                 return None
             return max(_deadline - time.perf_counter(), _SOLVE_DEADLINE_FLOOR_S)
+
+        def _node_budget_spent() -> bool:
+            """#1989: the node's deadline has passed, so no RECOVERY re-solve may start.
+
+            ``_remaining`` floors every grant at ``_SOLVE_DEADLINE_FLOOR_S`` and is never
+            spent, so the C-42 pool-strip and #671 row-filter retries below — each a
+            full re-solve of the node LP, the second after a filter pass over every
+            row — used to run on a deadline that had already expired (#1989 traced a 1 s
+            grant at 21 s through that cascade). Skipping a retry leaves the first
+            solve's uncertified verdict in place, which the certification below turns
+            into a no-fathom ``numerical`` / ``time_limit`` result: the node stays open
+            on its parent bound. Sound — a forgone retry can only forgo a bound, never
+            fabricate one.
+            """
+            if _no_retry_past_deadline_disabled():
+                return False
+            return _deadline is not None and time.perf_counter() >= _deadline
 
         # #1954: the model's lazy rows go in BEFORE the pool's row count is taken,
         # so the C-42 strip-and-retry (which drops rows past that count) keeps
@@ -1928,9 +1987,13 @@ class MccormickLPRelaxer:
         # The per-node square/PSD skip is likewise lifted for this node: its
         # justification ("the pool already supplies the family") no longer holds
         # once the pool is dropped here.
-        if _pool_rows_appended and not (
-            res.status == "optimal"
-            or (res.status == "infeasible" and getattr(res, "farkas_certified", False))
+        if (
+            _pool_rows_appended
+            and not _node_budget_spent()
+            and not (
+                res.status == "optimal"
+                or (res.status == "infeasible" and getattr(res, "farkas_certified", False))
+            )
         ):
             _a_ub_cur = milp._A_ub
             if _n_pre_pool_rows == 0 or _a_ub_cur is None:
@@ -1956,9 +2019,13 @@ class MccormickLPRelaxer:
         # fires and the node is byte-identical — unlike an always-on build-time
         # filter, which loosened 10/66 in-repo instances (nvs09 lost its `optimal`
         # certificate; #671 differential panel). Default OFF.
-        if _tuning().relax_row_filter and not (
-            res.status == "optimal"
-            or (res.status == "infeasible" and getattr(res, "farkas_certified", False))
+        if (
+            _tuning().relax_row_filter
+            and not _node_budget_spent()
+            and not (
+                res.status == "optimal"
+                or (res.status == "infeasible" and getattr(res, "farkas_certified", False))
+            )
         ):
             from discopt._relax.milp_relaxation import _filter_unresolvable_rows
 
