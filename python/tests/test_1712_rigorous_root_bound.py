@@ -50,7 +50,10 @@ def _bilinear() -> Model:
 
 
 @pytest.mark.smoke
-def test_rigorous_only_declines_the_trusted_vertex(uncertified_lp):
+def test_rigorous_only_declines_the_trusted_vertex(uncertified_lp, monkeypatch):
+    # The #1941 verified-HiGHS handoff would certify the declined LP; turn it off to
+    # pin the in-house decline itself (the handoff is covered below).
+    monkeypatch.setenv("DISCOPT_DECLINED_LP_CERT", "0")
     m = _bilinear()
     lb, ub = (b.astype(float) for b in flat_variable_bounds(m))
 
@@ -63,6 +66,23 @@ def test_rigorous_only_declines_the_trusted_vertex(uncertified_lp):
     strict = MccormickLPRelaxer(m).solve_at_node(lb, ub, rigorous_only=True)
     assert dict(BOUND_PROVENANCE) == {"declined": 1}
     assert strict.lower_bound is None
+
+
+@pytest.mark.smoke
+def test_rigorous_only_takes_the_verified_handoff_not_the_vertex(uncertified_lp, monkeypatch):
+    """#1941: with ``DISCOPT_DECLINED_LP_CERT`` (default ON) the declined LP goes to the
+    verified HiGHS route, a certificate rather than a trust arm, so ``rigorous_only``
+    may publish it. It must still be a lower bound on the true minimum."""
+    monkeypatch.delenv("DISCOPT_DECLINED_LP_CERT", raising=False)
+    m = _bilinear()
+    lb, ub = (b.astype(float) for b in flat_variable_bounds(m))
+    reset_bound_provenance()
+    strict = MccormickLPRelaxer(m).solve_at_node(lb, ub, rigorous_only=True)
+    assert dict(BOUND_PROVENANCE) == {"declined": 1, "verified_highs": 1}
+    assert strict.lower_bound is not None
+    xs, ys = np.meshgrid(np.linspace(-1, 2, 301), np.linspace(-1, 3, 401))
+    true_min = float(np.min((xs * ys + xs)[xs + ys >= 0.5]))
+    assert strict.lower_bound <= true_min + 1e-9
 
 
 @pytest.mark.smoke

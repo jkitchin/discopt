@@ -3075,6 +3075,63 @@ mod tests {
         assert!(arms >= 1, "the arming episode must be counted; got {arms}");
     }
 
+    // #1941 (ex1252a): `drive_out_basic_artificials` cycled on a captured node LP.
+    //
+    // The fixture is an ex1252a node LP (198×270, |A| from 1.9e-11 to 1, bounds up
+    // to 2.5e10) with the warm basis the B&B handed it. HiGHS calls it infeasible;
+    // ours ends `Numerical` either way. On the way there the unscaled cold phase 1
+    // calls the drive-out pass, which on this LP rotated four NON-degenerate pivots
+    // between two target slots (artificial sum 0.3447 → 0.3485 → 0.4054 → 0.3485 →
+    // 0.3447) until the full `8(m+n)+200` budget ran out: 7 888 pivots and ~300 ms
+    // for one node LP whose verdict never changed. The monotone rule only admits a
+    // replacement that does not raise the phase-1 objective and stops after
+    // `2m+20` pivots without progress, so the pass ends in a handful of pivots with
+    // the same verdict.
+    //
+    // Fails with `DISCOPT_DRIVE_OUT_MONOTONE=0` (budget exhausted twice).
+    #[test]
+    fn drive_out_does_not_cycle_on_the_captured_ex1252a_node_lp() {
+        let json = include_str!("testdata/ex1252a_drive_out_cycle_lp.json");
+        let (m, n, col_ptr, row_idx, vals, c, l, u, b, basic_vars, mut col_status) =
+            parse_stall_fixture(json);
+        for &v in &basic_vars {
+            col_status[v] = BASIC;
+        }
+        let sp = SparseCols::from_csc(col_ptr, row_idx, vals);
+        let start = Basis {
+            col_status,
+            basic_vars,
+        };
+        let _guard = crate::profile::test_guard();
+        crate::profile::reset();
+        crate::profile::set_enabled(true);
+        let sol = solve_lp_warm_csc(sp, m, n, &c, &l, &u, &b, Some(&start), &opts());
+        let calls = crate::profile::counter(crate::profile::Ctr::DriveOutCalls);
+        let pivots = crate::profile::counter(crate::profile::Ctr::DriveOutPivots);
+        let exhausted = crate::profile::counter(crate::profile::Ctr::DriveOutBudgetExhausted);
+        let rejects = crate::profile::counter(crate::profile::Ctr::DriveOutRateRejects);
+        crate::profile::set_enabled(false);
+
+        assert!(calls >= 1, "the captured LP must reach the drive-out pass");
+        assert_eq!(
+            sol.status,
+            LpStatus::Numerical,
+            "the verdict is the one the cycling pass reached too"
+        );
+        assert_eq!(
+            exhausted, 0,
+            "the pass ran its whole budget ({pivots} pivots)"
+        );
+        assert!(
+            pivots < 100,
+            "{pivots} drive-out pivots (7 888 before the rule)"
+        );
+        assert!(
+            rejects >= 1,
+            "the cycling replacement must be the one refused"
+        );
+    }
+
     // #1013: the no-progress bail fires on a captured STALL and returns the cold
     // optimum, and the LP it fires on is one neither existing escape can see.
     //

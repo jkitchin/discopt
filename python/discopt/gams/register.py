@@ -19,6 +19,8 @@ from pathlib import Path
 SOLVER_NAME = "discopt"
 # GAMS model types discopt can solve.
 MODEL_TYPES = ("LP", "MIP", "RMIP", "NLP", "DNLP", "RMINLP", "MINLP", "QCP", "MIQCP", "RMIQCP")
+# GMO dictionary type GAMS writes for the solver (5 = compressed, the GMO default).
+DICT_TYPE = 5
 
 
 def gamsconfig_snippet(script_path: str | Path = "discopt-gams") -> str:
@@ -28,12 +30,18 @@ def gamsconfig_snippet(script_path: str | Path = "discopt-gams") -> str:
     the *solver name* to its config object, with ``scriptName`` + ``modelTypes``
     required.  discopt is a control-file *script* solver, so no ``library``
     block is emitted (GAMS invokes ``scriptName`` with the control file).
+
+    ``dictType: 5`` (the compressed GMO dictionary, as GMO solvers use in
+    ``gmscmpun.txt``) is required for GAMS to write ``gamsdict.dat``; without it
+    ``dictType`` defaults to 0, no dictionary is written, and the link can only
+    report positional names (#1972).
     """
     model_types = "\n".join(f"        - {t}" for t in MODEL_TYPES)
     return f"""\
 solverConfig:
   - {SOLVER_NAME}:
       scriptName: {script_path}
+      dictType: {DICT_TYPE}
       modelTypes:
 {model_types}
 """
@@ -43,18 +51,28 @@ def run_script(python_executable: str | None = None) -> str:
     """Return a POSIX shell launcher that runs the discopt GAMS link.
 
     GAMS calls this with the control-file path as ``$1``.
+
+    ``main`` is called via ``-c`` rather than ``-m discopt.gams.link``: the
+    package ``__init__`` imports ``.link``, so ``runpy`` would find it already
+    in ``sys.modules`` and emit a ``RuntimeWarning`` on every solve (#1972).
     """
     py = python_executable or sys.executable
     return f"""\
 #!/bin/sh
 # discopt GAMS solver link -- invoked by GAMS as: <script> <control-file>
-exec "{py}" -m discopt.gams.link "$@"
+exec "{py}" -c "from discopt.gams.link import main; raise SystemExit(main())" "$@"
 """
 
 
 def _solver_entry(script_path: str) -> dict:
-    """The discopt ``solverConfig`` list item: ``{discopt: {scriptName, modelTypes}}``."""
-    return {SOLVER_NAME: {"scriptName": script_path, "modelTypes": list(MODEL_TYPES)}}
+    """The ``solverConfig`` item: ``{discopt: {scriptName, dictType, modelTypes}}``."""
+    return {
+        SOLVER_NAME: {
+            "scriptName": script_path,
+            "dictType": DICT_TYPE,
+            "modelTypes": list(MODEL_TYPES),
+        }
+    }
 
 
 def render_gamsconfig(existing: str | None, script_path: str) -> tuple[str, str]:

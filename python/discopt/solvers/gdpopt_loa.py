@@ -50,7 +50,7 @@ def solve_gdpopt_loa(
 
     A thin entry point over :class:`discopt.gdp.algorithms.loa.LOA` (#1775 G4.1),
     the framework's LOA; ``options`` are its ``init_algorithm``,
-    ``set_cover_iterlim`` and ``subproblem``.
+    ``set_cover_iterlim``, ``subproblem`` and ``subproblem_time_limit``.
 
     Parameters
     ----------

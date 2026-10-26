@@ -167,6 +167,31 @@ CONVEX_OPTION_KEYS: frozenset[str] = frozenset(
     {"tol", "max_iter", "max_wall_time", "print_level", "tau", "tau_max"}
 )
 
+#: The convex engine's own ``qp_*`` options, under their CLI names, which
+#: ``pounce.qp.solve_qp`` takes as keyword arguments from pounce-solver 0.13
+#: (gh#990, asked for by #1615) and discopt forwards unchanged (#1985).
+#: ``qp_presolve``/``qp_crossover`` cannot be combined with a warm start (POUNCE's
+#: warm path solves the unreduced problem and runs no crossover).
+QP_ENGINE_OPTION_KEYS: frozenset[str] = frozenset(
+    {"qp_presolve", "qp_reg", "qp_hsde", "qp_equilibrate", "qp_crossover"}
+)
+
+
+def _engine_takes(key: str) -> bool:
+    """Whether the installed ``pounce.qp.solve_qp`` takes ``key`` as an argument."""
+    import inspect
+
+    from pounce.qp import solve_qp as _pounce_solve_qp
+
+    return key in inspect.signature(_pounce_solve_qp).parameters
+
+
+def _engine_switch_on(value: Any) -> bool:
+    """A ``qp_*`` switch value that turns the feature on (``True`` / ``"yes"``)."""
+    if isinstance(value, str):
+        return value.strip().lower() == "yes"
+    return bool(value) if value is not None else False
+
 
 class IndefiniteQPError(ValueError):
     """The QP's Hessian was not PROVED positive semidefinite.
@@ -247,11 +272,14 @@ def convex_engine_options(options: Optional[dict]) -> dict:
         ValueError: on a key outside :data:`CONVEX_OPTION_KEYS`.
     """
     opts = dict(options or {})
-    unknown = sorted(k for k in opts if k not in CONVEX_OPTION_KEYS)
-    # #1615 A-17/A-24: the convex engine's own knobs (``qp_crossover``,
-    # ``qp_presolve``, ``qp_hsde``, ...) are POUNCE options file / CLI options that
-    # ``pounce.qp.solve_qp`` exposes no argument for, so no discopt call can set
-    # them. Say where they do work rather than lump them in with NLP options.
+    # #1985: the engine's own ``qp_*`` knobs are forwarded when the installed POUNCE
+    # takes them (pounce-solver >= 0.13); on an older one they stay refused below.
+    forwarded = {k for k in opts if k in QP_ENGINE_OPTION_KEYS and _engine_takes(k)}
+    unknown = sorted(k for k in opts if k not in CONVEX_OPTION_KEYS and k not in forwarded)
+    # #1615 A-17/A-24: before pounce-solver 0.13, the convex engine's own knobs
+    # (``qp_crossover``, ``qp_presolve``, ``qp_hsde``, ...) were POUNCE options file
+    # / CLI options that ``pounce.qp.solve_qp`` exposed no argument for. Say where
+    # they do work rather than lump them in with NLP options.
     # #1679: some ``qp_*`` CLI options *are* reachable -- ``pounce.qp.solve_qp`` takes
     # ``qp_tau`` / ``qp_tau_max`` as ``tau`` / ``tau_max``, and discopt forwards
     # those. Name the spelling that works instead of claiming there is none.
@@ -264,22 +292,36 @@ def convex_engine_options(options: Optional[dict]) -> dict:
             f"model, takes under another name. Pass them as: {spelled}. Refused rather "
             f"than silently renamed. That engine accepts {sorted(CONVEX_OPTION_KEYS)}."
         )
+    too_old = [k for k in unknown if k in QP_ENGINE_OPTION_KEYS]
+    if too_old:
+        import pounce
+
+        raise ValueError(
+            f"pounce_options {too_old} are options of POUNCE's convex QP engine that "
+            f"pounce.qp.solve_qp, which solver='pounce' calls for this model, takes "
+            f"only from pounce-solver 0.13; the installed pounce-solver "
+            f"{getattr(pounce, '__version__', '?')} does not, so the setting cannot be "
+            f"applied. Refused rather than ignored. Upgrade pounce-solver, or export "
+            f"the model and run the CLI: m.to_nl('model.nl'), then "
+            f"`pounce model.nl {too_old[0]}=...`."
+        )
     cli_only = [k for k in unknown if k.startswith("qp_")]
     if cli_only:
         raise ValueError(
-            f"pounce_options {cli_only} are options of POUNCE's convex QP engine "
-            f"that only its command line / options file reaches: pounce.qp.solve_qp, "
-            f"which solver='pounce' calls for this model, takes no such argument, so "
-            f"the setting cannot be applied from discopt. Refused rather than "
-            f"ignored. To use it, export the model and run the CLI: "
+            f"pounce_options {cli_only} are not options pounce.qp.solve_qp, which "
+            f"solver='pounce' calls for this model, takes, so the setting cannot be "
+            f"applied from discopt. Refused rather than ignored. If it is an option of "
+            f"POUNCE's command line, export the model and run the CLI: "
             f"m.to_nl('model.nl'), then `pounce model.nl {cli_only[0]}=...`. From "
-            f"discopt that engine accepts {sorted(CONVEX_OPTION_KEYS)}."
+            f"discopt that engine accepts "
+            f"{sorted(CONVEX_OPTION_KEYS | QP_ENGINE_OPTION_KEYS)}."
         )
     if unknown:
         raise ValueError(
             f"pounce_options {unknown} are not options of POUNCE's convex LP/QP "
             f"interior-point method (lp-ipm / qp-ipm), which this model was routed "
-            f"to. That engine accepts {sorted(CONVEX_OPTION_KEYS)}. Options such as "
+            f"to. That engine accepts {sorted(CONVEX_OPTION_KEYS | QP_ENGINE_OPTION_KEYS)}. "
+            f"Options such as "
             f"mu_strategy or linear_solver belong to the NLP engine, which "
             f"solver='pounce' uses for nonlinear and nonconvex models. Refused rather "
             f"than ignored, so a setting never appears to apply when it does not."
@@ -768,6 +810,18 @@ def _solve(
     started_unix_nanos = time.time_ns()
     t0 = time.perf_counter()
     caller_tol = _ENGINE_DEFAULT_TOL if opts.get("tol") is None else float(opts["tol"])
+    # #1985: the forwarded ``qp_*`` knobs, passed only when set, so a solve without
+    # them is the call it was before.
+    engine_kw = {k: opts[k] for k in sorted(QP_ENGINE_OPTION_KEYS) if k in opts}
+    # POUNCE refuses presolve or crossover on its warm path; the ``tol*sigma``
+    # re-solve below then starts cold so the requested setting still applies.
+    no_warm = [k for k in ("qp_presolve", "qp_crossover") if _engine_switch_on(engine_kw.get(k))]
+    if no_warm and start is not None:
+        raise ValueError(
+            f"pounce_options {no_warm} cannot be combined with a warm start: POUNCE's "
+            f"warm-started path solves the unreduced problem and runs no crossover. "
+            f"Drop the warm start or the option."
+        )
 
     def _run(tol_eng, warm, budget):
         try:
@@ -790,6 +844,7 @@ def _solve(
                 # #1615 B-01b: a primal start seeds the IPM; it does not change the
                 # solution (the objective scale touches only the duals, not ``x``).
                 warm_start=warm,
+                **engine_kw,
             )
         except ValueError as exc:
             # POUNCE's PSD guard: the convex engine refuses an indefinite P before
@@ -834,7 +889,9 @@ def _solve(
     ):
         spent = time.perf_counter() - t0
         budget = None if limit is None else max(0.0, limit - spent)
-        retry = _to_caller(_run(engine_tol(opts.get("tol"), sigma), raw, budget))
+        retry = _to_caller(
+            _run(engine_tol(opts.get("tol"), sigma), None if no_warm else raw, budget)
+        )
         # A re-solve that did not finish (its budget, an engine failure) leaves the
         # first ``optimal`` standing; the #1384 guard downstream still judges it.
         res = _merge_attempts(res, retry if retry.status == "optimal" else res)

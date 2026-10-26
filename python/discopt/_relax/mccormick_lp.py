@@ -148,6 +148,20 @@ def column_identities(varmap: dict, n_total: int, n_orig: int) -> tuple:
     return tuple(ident)
 
 
+def _incremental_pool_extend_enabled() -> bool:
+    """``DISCOPT_INCREMENTAL_POOL_EXTEND`` (#1941 item 4A): carry a root cut pool
+    wider than the incremental structure by appending its extra product / even-power
+    columns (``PoolColumnExtension``) instead of cold-building the node.
+
+    Graduated default-ON (2026-10-26) on the CLAUDE.md section-5 panel: 384 MINLPLib
+    instances <= 200 vars/cons, 30 s, interleaved; cert-clean (2,304 checks, 0
+    problems); fires on 8, where rbrock newly certifies (30 s limit -> 18.4 s) and
+    the wall drops 99.2 -> 78.7 s with node counts unchanged on the other 7. ``=0``
+    restores the cold build for a wider pool. Recorded in
+    ``docs/dev/flag-retirement-audit.md``."""
+    return os.environ.get("DISCOPT_INCREMENTAL_POOL_EXTEND", "1") != "0"
+
+
 def _remap_pool_rows(a_rows, b_rows, root_idents, node_idents, ncol: int):
     """Remap root-pool rows onto a node's column layout by column identity.
 
@@ -408,6 +422,26 @@ class MccormickLPResult:
             )
 
 
+def _no_retry_past_deadline_disabled() -> bool:
+    """``DISCOPT_NODE_RETRY_PAST_DEADLINE=1`` restores the pre-#1989 behaviour.
+
+    By default (#1989) ``solve_at_node`` does not START the C-42 pool-strip retry or
+    the #671 row-filter retry once the node's own deadline has passed. This is an
+    opt-out for that shipped default, kept so it can be A/B'd: it re-admits both
+    retries on a spent budget (each then runs on the ``_SOLVE_DEADLINE_FLOOR_S``
+    grant, as before). Read at call time.
+    """
+    import os as _os
+
+    return _os.environ.get("DISCOPT_NODE_RETRY_PAST_DEADLINE", "0") not in (
+        "0",
+        "",
+        "false",
+        "False",
+        "off",
+    )
+
+
 def free_column_lp_cert_enabled() -> bool:
     """``DISCOPT_FREE_COLUMN_LP_CERT`` gate (#1869 (b)): certify a declined McCormick
     node LP with an unbounded nonlinear column through the verified HiGHS LP route.
@@ -446,6 +480,44 @@ def free_column_lp_cert_enabled() -> bool:
     ``ex9_1_8``) still certify; the net-positive bar rests on them.
     """
     return os.environ.get("DISCOPT_FREE_COLUMN_LP_CERT", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
+
+
+def declined_lp_cert_enabled() -> bool:
+    """``DISCOPT_DECLINED_LP_CERT`` gate (#1941, ex14_1_7): widen the #1869 (b)
+    verified-HiGHS handoff from "an unbounded *nonlinear* column" to any optimal,
+    continuous node LP that every in-house certificate declined.
+
+    Measured on ex14_1_7 (minimax: ``g_k <= x10``, ``-g_k <= x10``, ``x10`` free and
+    only linear): the uniform relaxation already shares each ``g_k`` aux column
+    between the paired rows and its root LP solves to 0.0, the ``.solu`` optimum. The
+    bound is lost to certification, not relaxation: the NS safe bound abstains on the
+    free ``x10`` (reduced-cost interval straddles 0), ``trusted_vertex`` is refused
+    because aux bounds reach 1.77e9 (> ``_LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE``), and
+    the #1869 handoff never fires because ``x10`` is linear. Handing that LP to
+    ``_verified_free_column_bound`` returns -1e-12. The bound is rigorous for any
+    dual (same route as #1869 (b)), so this only decides whether a node gets one.
+
+    Bound-changing, so gated per CLAUDE.md section 5; read at call time.
+
+    **Graduated (default ON, 2026-10-26).** Screen: all 782 local MINLPLib instances
+    with <= 200 vars and <= 200 cons, 20 s, counting handoffs that only this arm
+    reaches (the #1869 arm short-circuits it): it fires on 3 (``btest14``,
+    ``ex14_1_2``, ``ex14_1_7``); on the other 779 ON and OFF run identical code.
+    Panel on those 3, OFF/ON interleaved, 3 reps, 60 s: *cert-clean* (18 rows, 39
+    executed checks, 0 problems: no bound past ``minlplib.solu``'s opt/best dual,
+    every incumbent passes ``verify_point`` on a fresh model) and net-positive --
+    ``ex14_1_7`` time limit (bound -341.28, ~430 nodes) -> **optimal 3/3 in 3 nodes,
+    1.7 +/- 0.1 s**; ``ex14_1_2`` unchanged (the route abstains there); ``btest14``
+    within run-to-run spread (bound -168.07..-168.26 OFF vs -168.17..-168.26 ON).
+    ``=0`` restores the decline.
+    """
+    return os.environ.get("DISCOPT_DECLINED_LP_CERT", "1").strip().lower() not in (
         "0",
         "false",
         "no",
@@ -578,7 +650,12 @@ class MccormickLPRelaxer:
             "skipped_separations": 0,
             "dropped_nodes": 0,
             "lazy_reseparations": 0,
+            # #1941: fast-path nodes that carried a wider pool via a
+            # ``PoolColumnExtension`` (``DISCOPT_INCREMENTAL_POOL_EXTEND``).
+            "extended_nodes": 0,
         }
+        # Extension per pool, keyed by the pool's identity tuple (#1941).
+        self._pool_ext_cache: dict = {}
         # #1039: observability for the #671 failure-triggered row filter. The
         # filter is *failure*-triggered, so on an already-solving instance it
         # never fires and the node is byte-identical with the flag ON or OFF.
@@ -789,6 +866,28 @@ class MccormickLPRelaxer:
         # separator; computed once, only when the opt-in PSD path first fires.
         self._binary_cols_cache: Optional[frozenset] = None
 
+    def _pool_extension(self, inc, a_rows, root_idents):
+        """The :class:`PoolColumnExtension` for this pool (built once), or ``None``."""
+        key = (id(root_idents), a_rows.shape)
+        hit = self._pool_ext_cache.get(key)
+        if hit is None or hit[0] is not root_idents:
+            from discopt._relax.incremental_mccormick import PoolColumnExtension
+
+            hit = (root_idents, PoolColumnExtension.build(inc, a_rows, root_idents))
+            self._pool_ext_cache[key] = hit
+        return hit[1]
+
+    @staticmethod
+    def _extension_box_ok(ext, lb, ub) -> bool:
+        """The extension's envelopes need finite, conditioned bounds on their
+        factors; otherwise the node keeps the cold build (as the fast path does for
+        its own nonlinear columns)."""
+        for term in ext.terms:
+            for i in term[1:3] if term[0] == "bilinear" else term[1:2]:
+                if not (abs(lb[i]) < _RELAX_NUMERIC_CAP and abs(ub[i]) < _RELAX_NUMERIC_CAP):
+                    return False
+        return True
+
     def _model_has_composite_lift(self) -> bool:
         """Whether the model carries a composite convex/concave OA lift whose
         Kelley tightening the incremental fast path would drop. Computed once and
@@ -908,6 +1007,7 @@ class MccormickLPRelaxer:
         # #1520: no except. Pool remapping, ``assemble`` and ``solve_assembled_full`` all decline
         # by return value (``None`` / a non-optimal status -> cold fallback); a raise is a defect.
         cut_rows = None
+        ext = None  # #1941: a PoolColumnExtension when the pool is wider than ``inc``
         if inherited_cuts is not None:
             a_rows = inherited_cuts[0]
             b_rows = inherited_cuts[1]
@@ -929,7 +1029,33 @@ class MccormickLPRelaxer:
                     and a_rows.shape[1] == inc.ncol
                     and len(b_rows) == a_rows.shape[0]
                 )
-                if not _count_ok:
+                # #1941 item 4A: a WIDER pool whose extra columns are all products /
+                # even powers of original columns is carried by appending those
+                # columns with their per-node envelopes (``PoolColumnExtension``),
+                # instead of cold-building the node.
+                if (
+                    not _count_ok
+                    and _incremental_pool_extend_enabled()
+                    and root_idents is not None
+                    and a_rows.ndim == 2
+                    and len(b_rows) == a_rows.shape[0]
+                    and a_rows.shape[1] == len(root_idents)
+                ):
+                    ext = self._pool_extension(inc, a_rows, root_idents)
+                    if ext is None or not self._extension_box_ok(ext, lb, ub):
+                        return None
+                    A_rm, b_rm, n_kept, n_skip = _remap_pool_rows(
+                        a_rows, b_rows, root_idents, inc.col_identities + ext.idents, ext.ncol
+                    )
+                    if n_skip or A_rm is None:
+                        # Every used column is covered, so nothing may be dropped; a
+                        # skip means the layouts disagree -- keep the cold build.
+                        return None
+                    cut_rows = list(zip(A_rm, b_rm))
+                    self._pool_stats["inherited_nodes"] += 1
+                    self._pool_stats["inherited_rows"] += n_kept
+                    self._pool_stats["extended_nodes"] += 1
+                elif not _count_ok:
                     return None
                 # C-44: at the SAME column count, remap the root pool from its
                 # ROOT column identities onto this structure's layout by matching
@@ -938,7 +1064,9 @@ class MccormickLPRelaxer:
                 # means (same count, different semantics → the C-43 false-fathom).
                 # A row referencing a lifted term this layout does not carry at
                 # that count is skipped (sound — fewer cuts only loosen).
-                if root_idents is not None and node_idents is not None:
+                if ext is not None:
+                    pass
+                elif root_idents is not None and node_idents is not None:
                     A_rm, b_rm, n_kept, n_skip = _remap_pool_rows(
                         a_rows, b_rows, root_idents, node_idents, inc.ncol
                     )
@@ -955,11 +1083,20 @@ class MccormickLPRelaxer:
                     cut_rows = list(zip(a_rows, b_rows))
                     self._pool_stats["inherited_nodes"] += 1
                     self._pool_stats["inherited_rows"] += len(cut_rows)
-        _mrows = self._padded_model_rows(inc.ncol)
+        _mrows = self._padded_model_rows(inc.ncol if ext is None else ext.ncol)
         if _mrows is not None:
             # #1954: the model's lazy rows, ahead of the pool rows.
             cut_rows = list(zip(_mrows[0], _mrows[1])) + (cut_rows or [])
-        A, b, bounds = inc.assemble(lb, ub, cut_rows=cut_rows)
+        if ext is None:
+            A, b, bounds = inc.assemble(lb, ub, cut_rows=cut_rows)
+        else:
+            import scipy.sparse as sp
+
+            A, b, bounds = inc.assemble(lb, ub)
+            A, b, bounds = ext.extend(A, b, bounds, lb, ub)
+            if cut_rows:
+                A = sp.vstack([A, sp.csr_matrix(np.array([r for r, _ in cut_rows]))], format="csr")
+                b = np.concatenate([b, [float(r) for _, r in cut_rows]])
         nrows = int(A.shape[0])
         # Densification guard (Issue #20), same cap as the cold path below.
         # T1.3 widened the fast path to any model, so a large multilinear lift
@@ -1223,6 +1360,7 @@ class MccormickLPRelaxer:
         build_deadline: Optional[float] = None,
         abort_deadline: Optional[float] = None,
         round_deadline: Optional[float] = None,
+        solve_deadline: Optional[float] = None,
         yield_round: bool = False,
         rigorous_only: bool = False,
     ) -> MccormickLPResult:
@@ -1239,6 +1377,14 @@ class MccormickLPRelaxer:
         loop keeps the default.
 
         Every other argument goes to :meth:`_solve_at_node_checked` unchanged.
+
+        ``solve_deadline`` (#1989, absolute ``perf_counter`` time, default None) caps
+        the node's internal solve/separation deadline and nothing else: the cold build
+        is not clamped by it. ``time_limit`` is anchored AFTER the cold build (so a
+        caller passing a fixed LP budget still gets it), which means a node-loop grant
+        of "time left until the solve deadline" restarted on build exit and let the
+        node's LPs run up to one build past the solve's own deadline. The spatial
+        node loops pass their solve deadline here; every other caller is unchanged.
         """
         previous = self._rigorous_only
         self._rigorous_only = rigorous_only
@@ -1256,6 +1402,7 @@ class MccormickLPRelaxer:
                 build_deadline=build_deadline,
                 abort_deadline=abort_deadline,
                 round_deadline=round_deadline,
+                solve_deadline=solve_deadline,
                 yield_round=yield_round,
             )
         finally:
@@ -1276,6 +1423,7 @@ class MccormickLPRelaxer:
         build_deadline: Optional[float] = None,
         abort_deadline: Optional[float] = None,
         round_deadline: Optional[float] = None,
+        solve_deadline: Optional[float] = None,
         yield_round: bool = False,
     ) -> MccormickLPResult:
         """:meth:`solve_at_node`'s body: the solve plus the C-43 pool re-verification.
@@ -1343,6 +1491,7 @@ class MccormickLPRelaxer:
             build_deadline=build_deadline,
             abort_deadline=abort_deadline,
             round_deadline=round_deadline,
+            solve_deadline=solve_deadline,
             yield_round=yield_round,
         )
         # C-43 pool-infeasible re-verification. Only relevant when (a) this was a
@@ -1391,6 +1540,7 @@ class MccormickLPRelaxer:
                 want_marginals=False,
                 skip_pool_separators=False,
                 abort_deadline=abort_deadline,
+                solve_deadline=solve_deadline,
             )
             if base_free.status != "infeasible":
                 # The pool row(s) caused a FALSE fathom of a non-empty node. Re-solve
@@ -1410,6 +1560,7 @@ class MccormickLPRelaxer:
                     want_marginals=want_marginals,
                     skip_pool_separators=False,
                     abort_deadline=abort_deadline,
+                    solve_deadline=solve_deadline,
                 )
                 self._pool_stats["dropped_nodes"] += 1
                 # Adopt the pool-free result unconditionally: it is a valid relaxation
@@ -1496,6 +1647,7 @@ class MccormickLPRelaxer:
         build_deadline: Optional[float] = None,
         abort_deadline: Optional[float] = None,
         round_deadline: Optional[float] = None,
+        solve_deadline: Optional[float] = None,
         yield_round: bool = False,
     ) -> MccormickLPResult:
         """Solve the McCormick LP relaxation restricted to the given bound box.
@@ -1804,11 +1956,35 @@ class MccormickLPRelaxer:
         _deadline = None if time_limit is None else time.perf_counter() + time_limit
         if round_deadline is not None:
             _deadline = round_deadline if _deadline is None else min(_deadline, round_deadline)
+        # #1989: ``solve_deadline`` is the enclosing solve's own end. The post-build
+        # anchor above hands the LPs a fresh ``time_limit`` after however long the
+        # build took; this cap keeps them from outliving the solve. Not a build clamp
+        # (that is ``round_deadline``'s job, behind its own flag), so it is bound-
+        # neutral on every node that finishes inside the solve's limit.
+        if solve_deadline is not None:
+            _deadline = solve_deadline if _deadline is None else min(_deadline, solve_deadline)
 
         def _remaining() -> Optional[float]:
             if _deadline is None:
                 return None
             return max(_deadline - time.perf_counter(), _SOLVE_DEADLINE_FLOOR_S)
+
+        def _node_budget_spent() -> bool:
+            """#1989: the node's deadline has passed, so no RECOVERY re-solve may start.
+
+            ``_remaining`` floors every grant at ``_SOLVE_DEADLINE_FLOOR_S`` and is never
+            spent, so the C-42 pool-strip and #671 row-filter retries below — each a
+            full re-solve of the node LP, the second after a filter pass over every
+            row — used to run on a deadline that had already expired (#1989 traced a 1 s
+            grant at 21 s through that cascade). Skipping a retry leaves the first
+            solve's uncertified verdict in place, which the certification below turns
+            into a no-fathom ``numerical`` / ``time_limit`` result: the node stays open
+            on its parent bound. Sound — a forgone retry can only forgo a bound, never
+            fabricate one.
+            """
+            if _no_retry_past_deadline_disabled():
+                return False
+            return _deadline is not None and time.perf_counter() >= _deadline
 
         # #1954: the model's lazy rows go in BEFORE the pool's row count is taken,
         # so the C-42 strip-and-retry (which drops rows past that count) keeps
@@ -1890,9 +2066,13 @@ class MccormickLPRelaxer:
         # The per-node square/PSD skip is likewise lifted for this node: its
         # justification ("the pool already supplies the family") no longer holds
         # once the pool is dropped here.
-        if _pool_rows_appended and not (
-            res.status == "optimal"
-            or (res.status == "infeasible" and getattr(res, "farkas_certified", False))
+        if (
+            _pool_rows_appended
+            and not _node_budget_spent()
+            and not (
+                res.status == "optimal"
+                or (res.status == "infeasible" and getattr(res, "farkas_certified", False))
+            )
         ):
             _a_ub_cur = milp._A_ub
             if _n_pre_pool_rows == 0 or _a_ub_cur is None:
@@ -1918,9 +2098,13 @@ class MccormickLPRelaxer:
         # fires and the node is byte-identical — unlike an always-on build-time
         # filter, which loosened 10/66 in-repo instances (nvs09 lost its `optimal`
         # certificate; #671 differential panel). Default OFF.
-        if _tuning().relax_row_filter and not (
-            res.status == "optimal"
-            or (res.status == "infeasible" and getattr(res, "farkas_certified", False))
+        if (
+            _tuning().relax_row_filter
+            and not _node_budget_spent()
+            and not (
+                res.status == "optimal"
+                or (res.status == "infeasible" and getattr(res, "farkas_certified", False))
+            )
         ):
             from discopt._relax.milp_relaxation import _filter_unresolvable_rows
 
@@ -2293,15 +2477,26 @@ class MccormickLPRelaxer:
             (bound is None or not np.isfinite(bound))
             and res.status == "optimal"
             and milp._integrality is None
-            and self._nonlinear_cols
-            and self._has_unbounded_nonlinear_col(milp)
-            and free_column_lp_cert_enabled()
+            and (
+                (
+                    self._nonlinear_cols
+                    and self._has_unbounded_nonlinear_col(milp)
+                    and free_column_lp_cert_enabled()
+                )
+                or declined_lp_cert_enabled()
+            )
         ):
             # #1869 (b): every in-house certificate declined an LP with an unbounded
             # nonlinear column -- the NS safe bound needs every open column's reduced
             # cost on its safe side, and a floating dual rarely has it. The verified
             # HiGHS LP route does exactly that certification (#1729 dual scaling, the
             # rational ``exact_ns_bound``), so hand it this node LP.
+            # #1941: ``DISCOPT_DECLINED_LP_CERT`` widens this to any declined LP
+            # (ex14_1_7: a free *linear* column plus 1.77e9 aux bounds).
+            # ``_objective_bound_valid`` is deliberately not consulted: it marks an
+            # infinite or garbage-wide box floor, i.e. distrust of the in-house
+            # simplex value or a sound-but-harmful bound, not an invalid LP, and the
+            # verified route reports an unbounded LP as such.
             _vb, _vx = _verified_free_column_bound(milp, _remaining())
             if _vb is not None:
                 BOUND_PROVENANCE["verified_highs"] += 1

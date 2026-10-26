@@ -10,8 +10,16 @@
 * ``subproblem="global"`` -- each configuration's reduced subproblem (§5.2) is
   solved by discopt itself and its certificate read: a configuration certified
   optimal or infeasible is excluded from the master, so the search closes on
-  nonconvex disjuncts the OA cuts cannot represent. The default ``"nlp"`` is
-  today's fixed-integer NLP on the lowered model.
+  nonconvex disjuncts the OA cuts cannot represent. This is the default.
+  ``subproblem="nlp"`` is the fixed-integer NLP on the lowered model (the old
+  ``solvers/gdpopt_loa.py`` LOA's subproblem).
+* ``subproblem_time_limit`` -- each global subproblem's wall budget (#1984).
+  Without it one nested ``Model.solve`` could take the whole run (measured: 849
+  s of a 3600 s budget on one flowsheet configuration). The default is LBB's and
+  LD-SDA's node budget, a tenth of the run within [1 s, 30 s] (#1153). A
+  subproblem stopped by its cap is uncertified: its configuration is treated as
+  any other uncertified one (it never leaves the master as resolved without a
+  certificate).
 
 Bounds (§5.4): the master is a relaxation -- OA cuts go only on rows (and an
 objective) certified convex -- so its dual bound is a valid LB when the
@@ -23,6 +31,7 @@ configurations never leave the master: they block ``optimal``, not the bound.
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from typing import Any, Optional
@@ -35,6 +44,26 @@ from discopt.gdp.algorithms.master import DEFAULT_MASTER_BACKEND, MasterMILP
 from discopt.modeling.core import Model, SolveResult
 
 LOA_SUBPROBLEMS = ("nlp", "global")
+
+#: The ceiling of the default per-subproblem budget, as LBB's ``NODE_TIME_LIMIT``.
+SUBPROBLEM_TIME_LIMIT = 30.0
+
+# The old ``solvers/gdpopt_loa.py`` LOA logged one INFO line per iteration to this
+# logger, and user code enables it by that name (#1984); the per-iteration line
+# keeps it.
+logger = logging.getLogger("discopt.solvers.gdpopt_loa")
+
+
+def default_subproblem_time_limit(time_limit: Optional[float]) -> float:
+    """A tenth of the run, at least 1 s, never more than ``SUBPROBLEM_TIME_LIMIT``.
+
+    #1153's saturation rule (LBB's node budget, LD-SDA's subproblem budget): a
+    budget that grew with the caller's would spend a bigger run on longer
+    subproblems instead of more configurations.
+    """
+    if time_limit is None:
+        return SUBPROBLEM_TIME_LIMIT
+    return min(SUBPROBLEM_TIME_LIMIT, max(1.0, 0.1 * float(time_limit)))
 
 
 class LOA(GDPAlgorithm):
@@ -55,6 +84,7 @@ class LOA(GDPAlgorithm):
         init_algorithm: str = "no_init",
         set_cover_iterlim: int = 8,
         subproblem: str = "global",
+        subproblem_time_limit: Optional[float] = None,
         **kw: Any,
     ) -> None:
         from discopt._tape_nlp_evaluator import make_evaluator
@@ -64,6 +94,14 @@ class LOA(GDPAlgorithm):
             raise ValueError(f"init_algorithm must be one of {INIT_STRATEGIES}")
         if subproblem not in LOA_SUBPROBLEMS:
             raise ValueError(f"subproblem must be one of {LOA_SUBPROBLEMS}")
+        if subproblem_time_limit is None:
+            subproblem_time_limit = default_subproblem_time_limit(time_limit)
+        if isinstance(subproblem_time_limit, bool) or not float(subproblem_time_limit) > 0:
+            raise ValueError(f"subproblem_time_limit must be > 0, got {subproblem_time_limit!r}")
+        #: Each global subproblem's wall budget (#1984).
+        self.subproblem_time_limit = float(subproblem_time_limit)
+        #: What the last iteration's subproblem step did, for its log line.
+        self._step_log = ""
         self.space = GDPSpace.from_model(model)
         super().__init__(
             self.space.work,
@@ -196,6 +234,7 @@ class LOA(GDPAlgorithm):
             mode=mode,
             gap_tolerance=self.gap_tolerance,
             nlp_solver="ipopt" if self.nlp_solver == "ipopt" else "pounce",
+            time_cap=self.subproblem_time_limit if mode == "global" else None,
         )
         self.n_subproblems += 1
         if res.x is None:
@@ -239,6 +278,7 @@ class LOA(GDPAlgorithm):
     # ── one iteration ─────────────────────────────────────────────────────
 
     def iterate(self) -> bool:
+        k = self.iterations + 1
         r = self.master.solve(
             self.deadline.sub_limit(),
             self.gap_tolerance,
@@ -247,14 +287,61 @@ class LOA(GDPAlgorithm):
         self.n_master += 1
         if r.x is None:
             self._master_empty(r)
+            logger.info(
+                "%s iter %d: master returned no point (%s); bound %s incumbent %s",
+                self._log_name(),
+                k,
+                "proved infeasible" if r.proven_infeasible else "no proof",
+                self._fmt(self.lb),
+                self._fmt(self.ub),
+            )
             return False
         self._offer_master_bound(r.bound)
         assert r.config is not None
         if r.config in self.solved:
+            logger.info(
+                "%s iter %d: master re-proposed configuration %s, already solved; "
+                "stopping (bound %s incumbent %s)",
+                self._log_name(),
+                k,
+                self._fmt_selection(r.x),
+                self._fmt(self.lb),
+                self._fmt(self.ub),
+            )
             return False  # a re-proposal adds no cut: stop (#1611 C-11)
+        t0 = time.perf_counter()
+        self._step_log = ""
         if self.subproblem == "global":
-            return self._global_step(r.x, r.config)
-        return self._nlp_step(r.x, r.config)
+            more = self._global_step(r.x, r.config)
+        else:
+            more = self._nlp_step(r.x, r.config)
+        logger.info(
+            "%s iter %d: master bound %s, configuration %s; subproblem %s in %.2f s; "
+            "bound %s incumbent %s",
+            self._log_name(),
+            k,
+            self._fmt(r.bound),
+            self._fmt_selection(r.x),
+            self._step_log or "?",
+            time.perf_counter() - t0,
+            self._fmt(self.lb),
+            self._fmt(self.ub),
+        )
+        return more
+
+    # ── the per-iteration log line (#1984) ────────────────────────────────
+
+    def _log_name(self) -> str:
+        return type(self).__name__
+
+    def _fmt(self, v: Optional[float]) -> str:
+        """A min-convention value in model units, for the log."""
+        return "none" if v is None else f"{self.obj_sign * float(v):.8g}"
+
+    def _fmt_selection(self, x_master: np.ndarray) -> str:
+        """The disjuncts the master point selects, by name (by id when unnamed)."""
+        sel = self.space.selection_from_x(x_master)
+        return "[" + ", ".join(d.name or f"#{d.id}" for d in sel) + "]"
 
     def _fixed_integer_nlp(self, x_master: np.ndarray) -> tuple[Optional[np.ndarray], bool]:
         """The lowered model's NLP with every integer column fixed at the master's
@@ -273,6 +360,7 @@ class LOA(GDPAlgorithm):
             self.evaluator, sub_lb, sub_ub, self.nlp_solver, time_limit=self._nlp_limit()
         )
         self.n_subproblems += 1
+        self._step_log = "nlp feasible" if x is not None else "nlp failed"
         if x is not None:
             x = _repair_incumbent(self.space.lowered, self.evaluator, x)
             return np.asarray(x, dtype=np.float64), False
@@ -304,8 +392,10 @@ class LOA(GDPAlgorithm):
             self.deadline,
             mode="global",
             gap_tolerance=self.gap_tolerance,
+            time_cap=self.subproblem_time_limit,
         )
         self.n_subproblems += 1
+        self._step_log = f"global {res.status}"
         x = None if res.x is None else self._lowered_point(res.x)
         if x is not None:
             self._offer(x)
@@ -325,7 +415,10 @@ class LOA(GDPAlgorithm):
             # NLP mode's step for this configuration, so global mode never does
             # worse than it (measured: small_batch, positioning, where discopt
             # could not bound the reduced model but the fixed-integer NLP solves).
-            return self._nlp_step(x_master, config)
+            global_status = self._step_log
+            more = self._nlp_step(x_master, config)
+            self._step_log = f"{global_status}, then {self._step_log}"
+            return more
         return True
 
     def run(self) -> "SolveResult":
@@ -339,4 +432,10 @@ def solve_loa(model: Model, **options: Any):
     return LOA(model, **options).run()
 
 
-__all__ = ["LOA", "LOA_SUBPROBLEMS", "solve_loa"]
+__all__ = [
+    "LOA",
+    "LOA_SUBPROBLEMS",
+    "SUBPROBLEM_TIME_LIMIT",
+    "default_subproblem_time_limit",
+    "solve_loa",
+]

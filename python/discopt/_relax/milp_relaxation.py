@@ -828,6 +828,21 @@ class MilpRelaxationModel:
             # the subnormal floor from #957.
             _data = sp.csr_matrix(self._A_ub).data
             if _coefficient_spread_exceeds(_data, _RELAX_FALSE_INFEAS_TRIGGER):
+                # #1989: this re-verify is the third solve of this call, so it
+                # gets what is LEFT of the shared budget, and none at all once
+                # that is spent (the warm path's rule above: a deadline exit is
+                # not a numerical failure). It used to receive a fresh copy of
+                # ``time_limit`` unconditionally — one link of the retry cascade
+                # #1989 traced on an fsg perspective-hull GDP node, where a 1 s
+                # ``solve_at_node`` grant ran 21 s. On a spent
+                # budget the un-re-verified ``infeasible`` must NOT be returned
+                # (it is exactly the possibly-false verdict this block exists to
+                # check), so report the deadline instead: a non-fathoming status.
+                # Flag OFF (``DISCOPT_LP_WARM_DEADLINE=0``): ``_timed_out`` is
+                # always False and ``_remaining`` is the full duration, so the
+                # legacy path is unchanged.
+                if _timed_out():
+                    return self._time_limit_result()
                 c_s, A_s, b_s, bounds_s, col_scale = equilibrate_relaxation_lp(
                     self._c, self._A_ub, self._b_ub, self._bounds, self._integrality
                 )
@@ -837,7 +852,7 @@ class MilpRelaxationModel:
                     b_ub=b_s,
                     bounds=bounds_s,
                     integrality=self._integrality,
-                    time_limit=time_limit,
+                    time_limit=_remaining(),
                     gap_tolerance=gap_tolerance,
                 )
 

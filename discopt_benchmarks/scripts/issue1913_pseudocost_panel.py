@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """#1913: CLAUDE.md section 5 panel for ``DISCOPT_KERNEL_PSEUDOCOST``.
 
+``--flag``/``--fired-stat`` run the same panel for another boolean flag (#1941:
+``DISCOPT_INCREMENTAL_WIDEN`` with ``incremental/floor_rows``).
+
 The native spatial kernel branched on the lowest-index fractional integer column.
 The flag picks that column by pseudocost instead. This compares the two arms on
 MINLPLib instances with a proven status (selected exactly as
@@ -17,9 +20,9 @@ two arms of one instance on different loads. Checks:
 * net-positive -- certificates gained, nodes and wall where both certify, the
   final bound where neither does.
 
-The ON arm reports ``tree/pseudocost_picks``, so an instance where the rule never
-acted is visible as such (section 6). ``--report`` prints the verdict and exits
-non-zero when nothing was compared or a check failed.
+The ON arm reports ``--fired-stat`` (default ``tree/pseudocost_picks``), so an
+instance where the rule never acted is visible as such (section 6). ``--report``
+prints the verdict and exits non-zero when nothing was compared or a check failed.
 
     python -u discopt_benchmarks/scripts/issue1913_pseudocost_panel.py \\
         --out <dir> --time-limit 30 --workers 2 [--names-file names.txt]
@@ -47,7 +50,7 @@ FLAG = "DISCOPT_KERNEL_PSEUDOCOST"
 TOL = 1e-4
 
 
-def _solve_one(nl: str, tl: float) -> None:
+def _solve_one(nl: str, tl: float, stat: str) -> None:
     """Subprocess entry: solve, verify the incumbent on a fresh model, print RESULT."""
     import discopt
     import numpy as np
@@ -80,10 +83,11 @@ def _solve_one(nl: str, tl: float) -> None:
                 "bound": f(r.bound),
                 "nodes": r.node_count,
                 "wall": wall,
-                "picks": ss.get("tree/pseudocost_picks"),
+                "picks": ss.get(stat),
                 # #1962: the separator and the integral-point probe fired (§6).
                 "cut_rounds": ss.get("tree/cut_rounds"),
                 "int_probes": ss.get("tree/int_probes"),
+                "spatial_picks": ss.get("tree/spatial_score_picks"),
                 "route": getattr(r, "algorithm_route", None),
                 "verify_failed": bad,
             }
@@ -92,7 +96,9 @@ def _solve_one(nl: str, tl: float) -> None:
     )
 
 
-def run(out: Path, panel: list[dict], tl: float, workers: int) -> Path:
+def run(
+    out: Path, panel: list[dict], tl: float, workers: int, flag: str = FLAG, stat: str = ""
+) -> Path:
     results = out / f"pc_tl{int(tl)}.jsonl"
     done = set()
     if results.exists():
@@ -109,11 +115,11 @@ def run(out: Path, panel: list[dict], tl: float, workers: int) -> Path:
         for arm in ("1", "0") if idx % 2 else ("0", "1"):
             if (p["name"], arm) in done:
                 continue
-            env = dict(os.environ, **{FLAG: arm})
+            env = dict(os.environ, **{flag: arm})
             t0 = time.perf_counter()
             try:
                 proc = subprocess.run(
-                    [sys.executable, __file__, "--_solve", str(nl), str(tl)],
+                    [sys.executable, __file__, "--_solve", str(nl), str(tl), stat],
                     capture_output=True,
                     text=True,
                     timeout=tl + 120,
@@ -240,7 +246,7 @@ def report(path: Path) -> int:
 
 def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "--_solve":
-        _solve_one(sys.argv[2], float(sys.argv[3]))
+        _solve_one(sys.argv[2], float(sys.argv[3]), sys.argv[4])
         return
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out", type=Path, required=True)
@@ -249,6 +255,8 @@ def main() -> None:
     ap.add_argument("--max-vars", type=int, default=200)
     ap.add_argument("--max-cons", type=int, default=200)
     ap.add_argument("--names-file", type=Path)
+    ap.add_argument("--flag", default=FLAG)
+    ap.add_argument("--fired-stat", default="tree/pseudocost_picks")
     ap.add_argument("--report", action="store_true")
     a = ap.parse_args()
     if a.report:
@@ -257,7 +265,7 @@ def main() -> None:
     if a.names_file:
         names = {ln.strip() for ln in a.names_file.read_text().split() if ln.strip()}
     panel = screen.build_panel(a.out, a.max_vars, a.max_cons, names)
-    run(a.out, panel, a.time_limit, a.workers)
+    run(a.out, panel, a.time_limit, a.workers, a.flag, a.fired_stat)
 
 
 if __name__ == "__main__":

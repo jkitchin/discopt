@@ -11850,7 +11850,94 @@ node bound stays the Neumaier–Shcherbina bound on the final LP's duals, and
 Python: `test_1962_kernel_convex_cuts.py`. Its slow tests certify nvs23 and nvs24 on
 defaults at 120 s.
 
-## 89. #1975: RLT against an unbounded factor's lower bound does not close prolog's root ray (falsified 2026-10-26)
+## 89. #1970: spatial branching variable selection in the native kernel (2026-10-26)
+
+**Hypothesis.** #1962's E2 measured that SCIP's nonlinear-handler branching rule is
+worth 10x nodes on nous1 (`constraints/nonlinear/branching/external=True`: 4,269 ->
+44,731), while the native kernel split the widest operand of the single term with
+the largest absolute McCormick gap, at the LP value, with no spatial pseudocost.
+Kill criterion (from the issue): the prototype must cut the nodes nous1 needs to
+reach a bound of 1.40 by at least 3x against the gap rule.
+
+**SCIP ablation first** (pyscipopt 6.3 / SCIP 10, nous1, nodes to optimal):
+default 4,269; `pscostweight=0` 12,295; `violsplit=u` 4,532; `branching/midpull=0`
+4,679; `midpull=0` and `clamp=0` 27,146; `pscostweight=0` and `midpull=0` 21,945.
+The 10x is two things: pseudocosts (~3x) and a split point kept away from the box
+bounds (~6x once both of SCIP's guards are off).
+
+**Prototype** (`SpatialTreeConfig::spatial_score`, `spatial_pscost_weight`,
+`spatial_midpull`): every operand of every violated term is a candidate; its
+violation score is the sum of those terms' gaps split evenly over their operands;
+a spatial pseudocost per side (bound gain per unit of width cut off, recorded as
+each spatial child is solved; an unobserved side takes the mean) gives the product
+of the two children's estimated gains; each component is divided by its maximum
+over the candidates and the two summed. The split point is `m * mid + (1 - m) * lp`.
+
+**Entry experiment, nous1 at 120 s** (default solve, 3 runs at a time on 4 cores):
+
+| rule | result | bound | nodes |
+|---|---|---:|---:|
+| legacy | time limit | 1.2099 | 64,333 |
+| legacy column, midpull 0.75 + clamp 0.2 | time limit | 1.2473 | 72,667 |
+| violation score only | time limit | 1.4618 (with midpull) | 14,293 |
+| score + pseudocost, LP-value split | time limit | 1.4973 | 21,328 |
+| score + pseudocost + clamp 0.2 | **optimal**, 73.5 s | 1.56707 | 19,475 |
+| score + pseudocost + midpull 0.75 | **optimal**, 32.4 s | 1.56707 | 11,921 |
+
+The legacy rule never reaches 1.40 in 64k nodes; the full rule certifies in 11,921.
+Not killed. The split point alone does nothing for the legacy column; the score
+alone does not certify; together they do, as in SCIP. Midpull subsumes the clamp
+(the point is then at least `m / 2` of the width from either bound), so only
+midpull shipped.
+
+**Shipped: `DISCOPT_KERNEL_SPATIAL_BRANCHING`, graduated default ON** (`=0` is the
+legacy rule; score + pseudocost weight 1 + midpull 0.75). Section 5 panel
+(`issue1944_rlt_panel.py --with-corpus --on-env DISCOPT_KERNEL_SPATIAL_BRANCHING=1`,
+270 instances, 30 s, interleaved, every incumbent `verify_point`-ed; the rule fires
+on 69 by `tree/spatial_score_picks`):
+
+* cert-clean: 1,620 checks, 0 problems;
+* certified +wastewater05m1 (162.26 -> certified 229.70 in 18.2 s), none lost;
+* where both certify: nodes 100,642 -> 65,272, wall 631.8 -> 608.1 s (tanksize
+  17,375 -> 519 nodes, 18.0 -> 2.5 s); total wall 1705.7 -> 1671.5 s;
+* 30 s bounds on the fired instances neither certifies: tighter on nous1 (0.83 ->
+  1.5668), ex5_2_5, nvs24, wastewater15m1; looser on ex8_4_1 (0.5886 -> 0.5854),
+  nvs19 (-1154.1 -> -1161.4), nvs23 (-1633.6 -> -1643.7).
+
+At 120 s on those 7 (interleaved): +nous1 (32.5 s), +wastewater15m1 (54.5 s); nvs19
+certifies in both; ex5_2_5 -7,857 -> -7,291 (node limit); ex8_4_1, nvs23, nvs24
+within 1%; none lost, no bound past its optimum. 24 instances where the rule never
+fired show node drift between arms too (non-kernel routes, wall-clock-gated work),
+so a node change on one instance is not by itself attributable to the flag.
+
+`DISCOPT_SCALE_FREE_BRANCHING` (opt-in) also scales the score's gaps by the aux
+columns' root widths, which keeps its units-invariance test exact under the new
+rule (Haverly 2 in 1/10/100 barrels: 97/97/91 nodes without that, equal with it).
+
+**Re-run on the merged base (with #1969's graduated convex cuts and integral-point
+probe).** The panel above predates #1969, so it was run again after the merge,
+`--off-env DISCOPT_KERNEL_SPATIAL_BRANCHING=0` (the flag is now default ON), same
+protocol; the rule fires on 61:
+
+* cert-clean: 1,620 checks, 0 problems;
+* certified +ex8_4_1, +nous1 (23.9 s), +wastewater05m1 (16.6 s);
+* the report lists `st_e40` as lost. It is not the flag's: it routes to the Python
+  tree, the rule never runs (`spatial_score_picks` absent in both arms), and the
+  OFF arm certified at 29.7 s of a 30 s limit. Re-run sequentially at 60 s, both
+  arms certify in 9 nodes and 41-42 s (twice each);
+* where both certify: nodes 93,360 -> 61,380, wall 477.6 -> 461.5 s (on the 56
+  fired instances 38,094 -> 10,444 nodes, 121.0 -> 108.8 s; tanksize 17,375 ->
+  519); total wall 1518.6 -> 1477.9 s;
+* fired but uncertified at 30 s: ex5_2_5 -8,010.7 -> -7,766.8, wastewater15m1
+  1,947.3 -> 2,382.9 (opt 2,446.4), both tighter.
+
+nous1 on the merged base at 120 s: OFF time limit, bound 1.2411 after 78,459
+nodes; ON optimal in 11,921 nodes, 23 s.
+
+**#1970 status.** nous1 certifies at 120 s (Done item 1); the flag passed the
+section 5 panel, on the merged base too, and graduated (Done item 2).
+
+## 90. #1975: RLT against an unbounded factor's lower bound does not close prolog's root ray (falsified 2026-10-26)
 
 **Question.** #1966 pinned an exact negative-cost recession ray of `prolog`'s root
 McCormick LP: `c^T d = 3712 - fl(3340.8) - fl(371.2) = -1.7053e-13`. #1975 asked two
@@ -11912,9 +11999,9 @@ perspective/projective reformulation in `1/T` that turns the recession problem i
 a bounded one. It would also have to resolve a ~1e-5 relative margin. That is new
 work, not this hypothesis.
 
-## 90. #1975 reframed: the 1/T outer piece, entry experiment (2026-10-26)
+## 91. #1975 reframed: the 1/T outer piece, entry experiment (2026-10-26)
 
-**Reframing.** After §89, #1975 was reframed. Under #1869 unbounded branching an
+**Reframing.** After §90, #1975 was reframed. Under #1869 unbounded branching an
 outer piece `T >= M` keeps its recession ray forever, so nothing ever prunes it.
 The proposal is to rescale that piece by `x_open = T u`, `s = 1/T` in `[0, 1/M]`,
 dividing each row by its leading power of `T`. The piece then becomes a **bounded**
@@ -11925,11 +12012,11 @@ columns and (b) an outer piece the mechanism can fathom; or discopt cannot certi
 prolog's transformed piece (step 4). The scripts and the per-instance census are in
 `docs/dev/data/1975-prolog-limit/`.
 
-**First, a retraction of a step-1 reading (§89).** §89's `+0.0349` is the
+**First, a retraction of a step-1 reading (§90).** §90's `+0.0349` is the
 *asymptotic* slope, and it stands. But reading it as "f > 0 on any outer piece"
 was wrong. In the original variables, SCIP finds points with `x7 + x8 >= 230` and
 `f = -4.5e-8`. Measured exactly, such a point violates the budget rows C5/C6 by
-7.4e-7, which is inside SCIP's 1e-6 feasibility tolerance. At its `u` the §89
+7.4e-7, which is inside SCIP's 1e-6 feasibility tolerance. At its `u` the §90
 limit LP is infeasible. The relative margin, `0.035 / 4356 = 8e-6`, is the same
 order as a solver's feasibility tolerance. Further out, SCIP's best points do track
 the slope:
