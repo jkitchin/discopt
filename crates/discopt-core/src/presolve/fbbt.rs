@@ -1324,6 +1324,96 @@ pub fn backward_propagate(
     SIGN_DOMAIN.with(|c| c.set(prev));
 }
 
+/// Children of an expression node (the operands its value is computed from).
+fn expr_children(node: &ExprNode) -> Vec<ExprId> {
+    match node {
+        ExprNode::BinaryOp { left, right, .. } | ExprNode::MatMul { left, right } => {
+            vec![*left, *right]
+        }
+        ExprNode::UnaryOp { operand, .. } | ExprNode::Sum { operand, .. } => vec![*operand],
+        ExprNode::Index { base, .. } => vec![*base],
+        ExprNode::FunctionCall { args, .. } => args.clone(),
+        ExprNode::SumOver { terms } => terms.clone(),
+        ExprNode::Constant(_)
+        | ExprNode::ConstantArray(..)
+        | ExprNode::Variable { .. }
+        | ExprNode::Parameter { .. } => Vec::new(),
+    }
+}
+
+/// The argument domain a node imposes, `(argument, interval)`: `log` / `log2` /
+/// `log10` / `sqrt` need a nonnegative argument, `log1p` one `>= -1`, and a power
+/// with a constant non-integer exponent a nonnegative base (#1982 / #1979).
+fn node_domain(arena: &ExprArena, node: &ExprNode) -> Option<(ExprId, Interval)> {
+    match node {
+        ExprNode::FunctionCall { func, args } if !args.is_empty() => match func {
+            MathFunc::Log | MathFunc::Log2 | MathFunc::Log10 | MathFunc::Sqrt => {
+                Some((args[0], Interval::new(0.0, f64::INFINITY)))
+            }
+            MathFunc::Log1p => Some((args[0], Interval::new(-1.0, f64::INFINITY))),
+            _ => None,
+        },
+        ExprNode::BinaryOp {
+            op: BinOp::Pow,
+            left,
+            right,
+        } => {
+            let p = arena.try_constant_value_pub(*right)?;
+            (p.is_finite() && (p - p.round()).abs() >= 1e-12)
+                .then(|| (*left, Interval::new(0.0, f64::INFINITY)))
+        }
+        _ => None,
+    }
+}
+
+/// Whether any node reachable from `root` imposes an argument domain.
+pub fn has_function_domain(arena: &ExprArena, root: ExprId) -> bool {
+    let mut stack = vec![root];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id.0) {
+            continue;
+        }
+        let node = arena.get(id);
+        if node_domain(arena, node).is_some() {
+            return true;
+        }
+        stack.extend(expr_children(node));
+    }
+    false
+}
+
+/// #1979: impose the argument domain of every `log` / `sqrt` / non-integer power
+/// reachable from `root`, whatever its parent's interval. A model is evaluable --
+/// and a point optimal -- only where its functions are defined, which is the
+/// semantics the forward rules already assume (`interval_pow` clamps the base, the
+/// backward `log` maps `(-inf, hi]` to `[0, e^hi]`). Structural, because the
+/// ordinary backward walk only reaches a node whose ancestors can be inverted: in
+/// `x * log(x)` with `x` free the product is never divided, so `log`'s domain was
+/// never applied -- `ex8_5_*`'s objective left every column free and its root LP
+/// unbounded. Each domain goes through [`backward_propagate`]'s rules (directed
+/// rounding, array references), so it tightens exactly what those rules allow.
+/// `node_bounds` must be the forward pass of `root` over `var_bounds`.
+pub fn impose_function_domains(
+    arena: &ExprArena,
+    root: ExprId,
+    node_bounds: &[Interval],
+    var_bounds: &mut [Interval],
+) {
+    let mut stack = vec![root];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id.0) {
+            continue;
+        }
+        let node = arena.get(id);
+        if let Some((arg, dom)) = node_domain(arena, node) {
+            backward_propagate(arena, arg, dom, node_bounds, var_bounds);
+        }
+        stack.extend(expr_children(node));
+    }
+}
+
 fn backward_propagate_with(
     arena: &ExprArena,
     id: ExprId,
@@ -2258,6 +2348,18 @@ pub fn fbbt_with_cutoff_until(
     // Determine the objective cutoff constraint (if any).
     // One buffer for the whole call, not one per constraint per sweep.
     let mut scratch = FwdScratch::new();
+    // #1979: the bodies (and objective) holding a function with a domain.
+    let domain_roots: Vec<ExprId> = if sign_domain_for_walk() {
+        model
+            .constraints
+            .iter()
+            .map(|c| c.body)
+            .chain(std::iter::once(model.objective))
+            .filter(|&r| has_function_domain(&model.arena, r))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     let obj_cutoff: Option<(ExprId, Interval)> = incumbent_bound.map(|bound| {
         let output_bound = match model.objective_sense {
@@ -2332,6 +2434,13 @@ pub fn fbbt_with_cutoff_until(
             );
         }
 
+        // #1979: function domains of every body and the objective (flag-gated;
+        // `domain_roots` is empty when the flag is off).
+        for &root in &domain_roots {
+            let nb = forward_propagate_into(&model.arena, root, &var_bounds, &mut scratch);
+            impose_function_domains(&model.arena, root, nb, &mut var_bounds);
+        }
+
         // Snap derived bounds to integrality (indicator-aware propagation).
         // Done before the convergence check so a freshly-fixed binary is fed
         // back into the next forward sweep within this same call.
@@ -2374,6 +2483,18 @@ pub fn fbbt_until(
     let mut var_bounds: Vec<Interval> = model.variables.iter().map(seed_block_interval).collect();
     // One buffer for the whole call, not one per constraint per sweep.
     let mut scratch = FwdScratch::new();
+    // #1979: the bodies (and objective) holding a function with a domain.
+    let domain_roots: Vec<ExprId> = if sign_domain_for_walk() {
+        model
+            .constraints
+            .iter()
+            .map(|c| c.body)
+            .chain(std::iter::once(model.objective))
+            .filter(|&r| has_function_domain(&model.arena, r))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     for _ in 0..max_iter {
         if let Some(dl) = deadline {
@@ -2422,6 +2543,13 @@ pub fn fbbt_until(
                 node_bounds,
                 &mut var_bounds,
             );
+        }
+
+        // #1979: function domains of every body and the objective (flag-gated;
+        // `domain_roots` is empty when the flag is off).
+        for &root in &domain_roots {
+            let nb = forward_propagate_into(&model.arena, root, &var_bounds, &mut scratch);
+            impose_function_domains(&model.arena, root, nb, &mut var_bounds);
         }
 
         // Snap derived bounds to integrality (indicator-aware propagation).
@@ -5685,5 +5813,79 @@ mod tests_1982 {
             checked += 1;
         }
         assert_eq!(checked, 4000, "the sampler checked nothing");
+    }
+
+    /// #1979: `x0 * log(x0)` -- the product's other factor `x0` is free, so the
+    /// ordinary backward walk never divides and never reaches `log`; the
+    /// structural domain pass still imposes `x0 >= 0`, in a constraint body AND
+    /// when the term lives only in the objective.
+    #[test]
+    fn fbbt_1979_function_domain_reaches_a_log_inside_a_product() {
+        let xlogx = |a: &mut ExprArena, x0: ExprId, x1: ExprId| {
+            let lg = a.add(ExprNode::FunctionCall {
+                func: MathFunc::Log,
+                args: vec![x0],
+            });
+            let p = a.add(ExprNode::BinaryOp {
+                op: BinOp::Mul,
+                left: x0,
+                right: lg,
+            });
+            a.add(ExprNode::BinaryOp {
+                op: BinOp::Sub,
+                left: p,
+                right: x1,
+            })
+        };
+        let off = fbbt_1982(xlogx, 0.0, FREE, FREE, false);
+        assert_eq!(
+            off[0].lo, -9.999e19,
+            "control: OFF leaves x0 free: {:?}",
+            off[0]
+        );
+        let on = fbbt_1982(xlogx, 0.0, FREE, FREE, true);
+        assert_eq!(on[0].lo, 0.0, "ON: log needs x0 >= 0: {:?}", on[0]);
+
+        // The same term in the objective only, no constraint touching x0.
+        let mut arena = ExprArena::new();
+        let v0 = arena.add(ExprNode::Variable {
+            name: "x0".into(),
+            index: 0,
+            size: 1,
+            shape: vec![],
+        });
+        let lg = arena.add(ExprNode::FunctionCall {
+            func: MathFunc::Log,
+            args: vec![v0],
+        });
+        let obj = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: v0,
+            right: lg,
+        });
+        let model = ModelRepr {
+            arena,
+            objective: obj,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![],
+            variables: vec![VarInfo {
+                name: "x0".into(),
+                var_type: VarType::Continuous,
+                offset: 0,
+                size: 1,
+                shape: vec![],
+                lb: vec![FREE.0],
+                ub: vec![FREE.1],
+            }],
+            n_vars: 1,
+        };
+        SIGN_DOMAIN_FORCE.with(|c| c.set(Some(true)));
+        let b = fbbt(&model, 20, 1e-9);
+        SIGN_DOMAIN_FORCE.with(|c| c.set(None));
+        assert_eq!(
+            b[0].lo, 0.0,
+            "objective-only log still needs x0 >= 0: {:?}",
+            b[0]
+        );
     }
 }
