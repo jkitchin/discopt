@@ -87,8 +87,10 @@ class RIC(LOA):
             self.deadline,
             mode="global",
             gap_tolerance=self.gap_tolerance,
+            time_cap=self.subproblem_time_limit,
         )
         self.n_subproblems += 1
+        self._step_log = f"global {res.status}"
         if res.x is not None:
             self._offer(self._lowered_point(res.x))
         bound = None if res.bound is None else self.obj_sign * float(res.bound)
@@ -102,6 +104,7 @@ class RIC(LOA):
             return True
         if res.x is None:
             x, rigorous = self._fixed_integer_nlp(x_master)
+            self._step_log = f"global {res.status}, then {self._step_log}"
             if x is not None:
                 self._offer(x)
             elif rigorous:

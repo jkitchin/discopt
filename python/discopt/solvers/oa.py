@@ -7541,6 +7541,19 @@ def solve_oa(
         gap_value = _certified_gap_value()
         return bool(gap_value is not None and gap_value <= gap_tolerance)
 
+    def _certified_log_fields() -> str:
+        """The bound and gap the stop rule reads, for the per-iteration log line.
+
+        ``LB`` on that line is the larger of the certified and the heuristic
+        bound; the gap stop (:func:`_certified_gap_converged`) reads only the
+        certified one. Logging ``LB`` alone showed ``LB = UB`` one master before
+        the run stopped (#1984): the closing bound was heuristic.
+        """
+        gap_value = _certified_gap_value()
+        if gap_value is None:
+            return "certified_LB=none"
+        return f"certified_LB={float(certified_LB):.6f} certified_gap={gap_value * 100:.4f}%"
+
     def _certified_bound_inverted() -> bool:
         """Has the certified lower bound risen *above* the incumbent?
 
@@ -9682,11 +9695,12 @@ def solve_oa(
 
                 gap = _compute_gap(LB, UB)
                 logger.info(
-                    "OA-ECP iter %d: LB=%.6f UB=%.6f gap=%.4f%% cuts=%d violated=%d",
+                    "OA-ECP iter %d: LB=%.6f UB=%.6f gap=%.4f%% %s cuts=%d violated=%d",
                     iteration,
                     LB,
                     UB,
                     gap * 100,
+                    _certified_log_fields(),
                     len(oa_A_rows),
                     n_violated,
                 )
@@ -9902,11 +9916,12 @@ def solve_oa(
             # d. Check convergence
             gap = _compute_gap(LB, UB)
             logger.info(
-                "OA iter %d: LB=%.6f UB=%.6f gap=%.4f%% cuts=%d",
+                "OA iter %d: LB=%.6f UB=%.6f gap=%.4f%% %s cuts=%d",
                 iteration,
                 LB,
                 UB,
                 gap * 100,
+                _certified_log_fields(),
                 len(oa_A_rows),
             )
 

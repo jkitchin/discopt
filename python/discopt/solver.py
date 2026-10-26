@@ -13026,6 +13026,9 @@ GDP_OPTION_KEYS: frozenset[str] = frozenset(
         # configuration certified by discopt). Pyomo selects this through the
         # choice of NLP solver; there is no key of its own to reuse.
         "subproblem",
+        # discopt's own (#1984): each global subproblem's wall budget, in
+        # seconds. Default a tenth of the run within [1 s, 30 s] (#1153).
+        "subproblem_time_limit",
         # discopt's own (#1775 G4.2): enumerate's ceiling on the configuration
         # count, above which it refuses rather than truncate.
         "max_configurations",
@@ -13040,11 +13043,13 @@ GDP_OPTION_KEYS: frozenset[str] = frozenset(
 
 #: The ``gdp_options`` keys each implemented native method reads.
 _GDP_OPTIONS_READ: dict[str, frozenset[str]] = {
-    "loa": frozenset({"iterlim", "init_algorithm", "set_cover_iterlim", "subproblem"}),
+    "loa": frozenset(
+        {"iterlim", "init_algorithm", "set_cover_iterlim", "subproblem", "subproblem_time_limit"}
+    ),
     # GLOA's subproblems are always global, so it reads no "subproblem" key.
-    "gloa": frozenset({"iterlim", "init_algorithm", "set_cover_iterlim"}),
+    "gloa": frozenset({"iterlim", "init_algorithm", "set_cover_iterlim", "subproblem_time_limit"}),
     # RIC's subproblems are always global, as GLOA's (#1775 G4.2).
-    "ric": frozenset({"iterlim", "init_algorithm", "set_cover_iterlim"}),
+    "ric": frozenset({"iterlim", "init_algorithm", "set_cover_iterlim", "subproblem_time_limit"}),
     # Enumerate solves every configuration: no iteration limit, no master.
     "enumerate": frozenset({"max_configurations"}),
     # LBB (#1775 G4.4): a node budget, and Pyomo's ``check_sat`` toggles the logic
@@ -13059,6 +13064,7 @@ _GDP_OPTIONS_READ: dict[str, frozenset[str]] = {
             "disjunction_list",
             "direction_norm",
             "subproblem",
+            "subproblem_time_limit",
             "check_sat",
         }
     ),
@@ -13149,6 +13155,16 @@ def _validate_gdp_options(gdp_method: str, gdp_options: object) -> dict[str, Any
             raise ValueError(
                 f"gdp_options['direction_norm'] must be one of {DIRECTION_NORMS}, got "
                 f"{gdp_options['direction_norm']!r}"
+            )
+    if "subproblem_time_limit" in gdp_options:
+        cap = gdp_options["subproblem_time_limit"]
+        if (
+            isinstance(cap, bool)
+            or not isinstance(cap, (int, float, np.integer, np.floating))
+            or not cap > 0
+        ):
+            raise ValueError(
+                f"gdp_options['subproblem_time_limit'] must be a number of seconds > 0, got {cap!r}"
             )
     if "check_sat" in gdp_options and not isinstance(gdp_options["check_sat"], bool):
         got = gdp_options["check_sat"]
@@ -15552,6 +15568,7 @@ def solve_model(
             "logical_constraint_list",
             "disjunction_list",
             "direction_norm",
+            "subproblem_time_limit",
         ):
             if key in _gdp_opts:
                 loa_kwargs[key] = _gdp_opts[key]
