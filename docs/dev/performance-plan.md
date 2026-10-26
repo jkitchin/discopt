@@ -11914,5 +11914,25 @@ so a node change on one instance is not by itself attributable to the flag.
 columns' root widths, which keeps its units-invariance test exact under the new
 rule (Haverly 2 in 1/10/100 barrels: 97/97/91 nodes without that, equal with it).
 
+**Re-run on the merged base (with #1969's graduated convex cuts and integral-point
+probe).** The panel above predates #1969, so it was run again after the merge,
+`--off-env DISCOPT_KERNEL_SPATIAL_BRANCHING=0` (the flag is now default ON), same
+protocol; the rule fires on 61:
+
+* cert-clean: 1,620 checks, 0 problems;
+* certified +ex8_4_1, +nous1 (23.9 s), +wastewater05m1 (16.6 s);
+* the report lists `st_e40` as lost. It is not the flag's: it routes to the Python
+  tree, the rule never runs (`spatial_score_picks` absent in both arms), and the
+  OFF arm certified at 29.7 s of a 30 s limit. Re-run sequentially at 60 s, both
+  arms certify in 9 nodes and 41-42 s (twice each);
+* where both certify: nodes 93,360 -> 61,380, wall 477.6 -> 461.5 s (on the 56
+  fired instances 38,094 -> 10,444 nodes, 121.0 -> 108.8 s; tanksize 17,375 ->
+  519); total wall 1518.6 -> 1477.9 s;
+* fired but uncertified at 30 s: ex5_2_5 -8,010.7 -> -7,766.8, wastewater15m1
+  1,947.3 -> 2,382.9 (opt 2,446.4), both tighter.
+
+nous1 on the merged base at 120 s: OFF time limit, bound 1.2411 after 78,459
+nodes; ON optimal in 11,921 nodes, 23 s.
+
 **#1970 status.** nous1 certifies at 120 s (Done item 1); the flag passed the
-section 5 panel and graduated (Done item 2).
+section 5 panel, on the merged base too, and graduated (Done item 2).

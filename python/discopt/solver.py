@@ -11324,8 +11324,12 @@ def _kernel_spatial_branching_kwargs() -> dict:
     +wastewater05m1, none lost; nodes where both certify 100,642 -> 65,272
     (tanksize 17,375 -> 519), wall 631.8 -> 608.1 s, total 1705.7 -> 1671.5 s.
     At 120 s on the 7 the rule reaches that neither certifies at 30 s: +nous1,
-    +wastewater15m1 (54.5 s), none lost, no bound past its optimum. Read at call
-    time.
+    +wastewater15m1 (54.5 s), none lost, no bound past its optimum. Re-run after
+    #1969's convex cuts graduated (fires on 61): cert-clean, 1,620 checks, 0
+    problems; +ex8_4_1, +nous1, +wastewater05m1; nodes where both certify 93,360
+    -> 61,380, total wall 1518.6 -> 1477.9 s (the one listed loss, st_e40, never
+    reaches the rule and sits at the time limit in both arms; section 89). Read at
+    call time.
     """
     raw = os.environ.get("DISCOPT_KERNEL_SPATIAL_BRANCHING", "1").strip().lower()
     if raw in ("0", "false", "no", "off", ""):
