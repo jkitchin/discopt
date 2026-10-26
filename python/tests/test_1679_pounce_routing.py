@@ -314,7 +314,7 @@ def test_qp_tau_refusal_names_the_solve_qp_argument():
         convex_engine_options({"qp_tau": 0.9})
     msg = str(exc.value)
     assert "'qp_tau' -> 'tau'" in msg
-    assert "takes no such argument" not in msg
-    with pytest.raises(ValueError, match="takes no such argument"):
-        convex_engine_options({"qp_hsde": "yes"})
+    assert "not options pounce.qp.solve_qp" not in msg
+    with pytest.raises(ValueError, match="not options pounce.qp.solve_qp"):
+        convex_engine_options({"qp_no_such_knob": "yes"})
     assert convex_engine_options({"tau": 0.9}) == {"tau": 0.9}

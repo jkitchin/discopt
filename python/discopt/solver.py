@@ -25576,6 +25576,8 @@ def _pounce_midpath_continuation(
     """
     import pounce
 
+    from discopt.solvers._pounce_report import record_attempts
+
     x = np.asarray(first.x, dtype=np.float64)
     scaled = _pounce_row_equilibration(evaluator, x, options)
     if scaled is None or first.multipliers is None:
@@ -25588,7 +25590,11 @@ def _pounce_midpath_continuation(
         mu=float((first.kkt or {})["barrier_parameter"]),
     )
     second = solve_nlp_pounce(scaled, x, options=opts, warm_start=warm, **solve_kwargs)
+    # #1985: whichever call's answer is published, its report carries both calls'
+    # counts and their total -- the continuation's work is not hidden.
+    reports = [first.solve_report, second.solve_report]
     if second.raw_status not in (0, _IPOPT_SOLVED_TO_ACCEPTABLE) or second.x is None:
+        first.solve_report = record_attempts(reports, 0)
         logger.info(
             "solver='pounce': the mid-path continuation returned code %s; keeping the "
             "first point (#1768).",
@@ -25614,7 +25620,9 @@ def _pounce_midpath_continuation(
                 f2,
                 f1,
             )
+            first.solve_report = record_attempts(reports, 0)
             return first, False
+    second.solve_report = record_attempts(reports, 1)
     second.multipliers = scaled.unscale_multipliers(second.multipliers)
     second.iterations += first.iterations
     second.wall_time += first.wall_time
