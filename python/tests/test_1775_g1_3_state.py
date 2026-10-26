@@ -99,14 +99,15 @@ def test_inactive_rows_are_dropped_not_relaxed():
     """Spec §5.2's reason to exist: the inactive disjunct is never evaluated.
 
     ``[x <= -0.5] v [sqrt(x) >= 2]`` on ``x in [-1, 10]``: the whole model refuses
-    big-M (#1779), but the subproblem of the first disjunct has no sqrt row.
+    the simplex lowering (#1779; big-M splits sqrt's operand out instead), but the
+    subproblem of the first disjunct has no sqrt row.
     """
     m = dm.Model("domain")
     x = m.continuous("x", lb=-1, ub=10)
     m.either_or([[x <= -0.5], [dm.sqrt(x) >= 2]], name="d")
     m.minimize(x)
     with pytest.raises(ValueError, match="undefined on part of the variable box"):
-        m.solve(gdp_method="big-m")
+        m.solve(gdp_method="simplex")
     first, second = gdp_tree(m).disjunctions[0].disjuncts
     sub = reduced_subproblem(m, [first])
     assert [str(c) for c in sub._constraints] == ["(x - -0.5) <= 0.0"]
