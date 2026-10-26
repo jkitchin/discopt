@@ -149,7 +149,15 @@ def _stub_super_optimal_infeasible(
 
 
 def _stub_exact(c, A_ub=None, b_ub=None, A_eq=None, b_eq=None, bounds=None, **kw):
-    return LPResult(status=SolveStatus.OPTIMAL, x=np.array([1e4]), objective=-1e4)
+    # Since #1953 the native LP route certifies ``optimal`` only through the NS
+    # bound of the engine's dual, so the control supplies the true dual of
+    # ``x <= 1e4`` (-1, the convention of ``_solve_lp_matrix``'s engines).
+    return LPResult(
+        status=SolveStatus.OPTIMAL,
+        x=np.array([1e4]),
+        objective=-1e4,
+        dual_values=np.array([-1.0]),
+    )
 
 
 def test_obs1_unbounded_with_relaxed_bound_degrades():
