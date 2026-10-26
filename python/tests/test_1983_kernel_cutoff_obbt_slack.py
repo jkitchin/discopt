@@ -145,9 +145,20 @@ def test_slack_is_the_kernel_acceptance_gap(monkeypatch):
 
 
 @pytest.mark.smoke
-def test_slack_opt_out_restores_the_exact_cutoff(monkeypatch):
-    monkeypatch.setenv("DISCOPT_KERNEL_CUTOFF_OBBT_SLACK", "0")
-    assert S._kernel_cutoff_slack(-402.0, 0.0, 1e-4, None) == 0.0
+def test_slack_only_where_the_exact_cutoff_root_is_undecided(monkeypatch):
+    """The rescue fires only on a failed root probe, so a decided exact-cutoff box
+    is used unchanged (the always-on slack loosened nous1's bound, see the flag)."""
+    calls = []
+    monkeypatch.setattr(S, "_kernel_root_undecided", lambda spec, dl: calls.append(1) or False)
+    S.KERNEL_CUTOFF_OBBT_STATS.clear()
+    m = dm.Model("b")
+    x = m.continuous("x", lb=0, ub=4)
+    y = m.continuous("y", lb=0, ub=4)
+    m.minimize(-x * y + x)
+    m.subject_to(x + y <= 5)
+    _quiet_solve(m, time_limit=30)
+    assert S.KERNEL_CUTOFF_OBBT_STATS.get("slack_adopted", 0) == 0
+    assert S.KERNEL_CUTOFF_OBBT_STATS.get("root_undecided", 0) == 0
 
 
 # ── the regression ──────────────────────────────────────────────────────────
@@ -161,6 +172,8 @@ def test_pq_pooling_certifies_at_the_root_again(monkeypatch):
     S.KERNEL_CUTOFF_OBBT_STATS.clear()
     r = _quiet_solve(pq_pooling(), max_nodes=2000, time_limit=120)
     assert S.KERNEL_CUTOFF_OBBT_STATS["fired"] >= 1, "cutoff OBBT never ran: probe is blind"
+    assert S.KERNEL_CUTOFF_OBBT_STATS["root_undecided"] == 1  # the exact box failed
+    assert S.KERNEL_CUTOFF_OBBT_STATS["slack_adopted"] == 1
     assert r.status == "optimal" and r.gap_certified
     assert r.objective == pytest.approx(PQ_OPTIMUM, rel=1e-8)
     assert r.bound >= r.objective - 1e-6  # maximize: bound is an upper bound

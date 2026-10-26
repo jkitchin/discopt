@@ -2286,22 +2286,45 @@ def _try_native_spatial_kernel(
     # existed. Same call, same budget, and the spec is rebuilt on the result.
     if initial_incumbent is not None and _kernel_cutoff_obbt_enabled() and n_vars <= 200:
         _t_phase = time.perf_counter()
-        _cut_box = _kernel_cutoff_obbt_box(
-            model,
-            np.asarray(lb, dtype=np.float64)[:n_vars],
-            np.asarray(ub, dtype=np.float64)[:n_vars],
-            float(initial_incumbent)
-            + off
-            + _kernel_cutoff_slack(float(initial_incumbent), off, gap_tolerance, abs_gap_tolerance),
-            outer_deadline,
-        )
-        if _cut_box is not None:
-            _spec_cut = build_spatial_kernel_spec(model, bounds=_cut_box, deadline=outer_deadline)
-            if _spec_cut is not None:
-                for _k in [k for k in _spec_cut if k.startswith("meta_")]:
-                    _spec_cut.pop(_k)
-                spec = _spec_cut
-                KERNEL_CUTOFF_OBBT_STATS["adopted"] += 1
+        _lb0 = np.asarray(lb, dtype=np.float64)[:n_vars]
+        _ub0 = np.asarray(ub, dtype=np.float64)[:n_vars]
+
+        def _cutoff_spec(_slack: float) -> Optional[dict]:
+            _box = _kernel_cutoff_obbt_box(
+                model, _lb0, _ub0, float(initial_incumbent) + off + _slack, outer_deadline
+            )
+            if _box is None:
+                return None
+            _s = build_spatial_kernel_spec(model, bounds=_box, deadline=outer_deadline)
+            if _s is not None:
+                for _k in [k for k in _s if k.startswith("meta_")]:
+                    _s.pop(_k)
+            return _s
+
+        _spec_cut = _cutoff_spec(0.0)
+        # #1983: the exact cutoff can collapse the box to round-off slivers when the
+        # seed is already optimal, leaving the root LP undecided (see
+        # `_kernel_cutoff_slack`). Only then is the cutoff lifted by the kernel's
+        # acceptance gap; if that root is undecided too, the untightened box is kept.
+        if (
+            _spec_cut is not None
+            and _kernel_cutoff_slack_enabled()
+            and _kernel_root_undecided(_spec_cut, outer_deadline)
+        ):
+            KERNEL_CUTOFF_OBBT_STATS["root_undecided"] += 1
+            _spec_cut = _cutoff_spec(
+                _kernel_cutoff_slack(
+                    float(initial_incumbent), off, gap_tolerance, abs_gap_tolerance
+                )
+            )
+            if _spec_cut is not None and _kernel_root_undecided(_spec_cut, outer_deadline):
+                _spec_cut = None
+            KERNEL_CUTOFF_OBBT_STATS[
+                "slack_adopted" if _spec_cut is not None else "kept_root_box"
+            ] += 1
+        if _spec_cut is not None:
+            spec = _spec_cut
+            KERNEL_CUTOFF_OBBT_STATS["adopted"] += 1
         _native_jax_s += time.perf_counter() - _t_phase
 
     remaining = None if outer_deadline is None else max(0.0, outer_deadline - time.perf_counter())
@@ -7868,8 +7891,18 @@ def _kernel_documented_gap_applies(abs_gap_tolerance: Optional[float]) -> bool:
 def _kernel_cutoff_slack_enabled() -> bool:
     """``DISCOPT_KERNEL_CUTOFF_OBBT_SLACK`` (#1983, default ON; ``=0`` opts out).
 
-    Kept as a documented opt-out: ``=0`` restores #1871's exact cutoff (the
-    incumbent's value) so the two can be A/B'd. See :func:`_kernel_cutoff_slack`.
+    The #1983 rescue: when #1871's exact-cutoff box leaves the kernel's root LP
+    undecided, redo the OBBT with the cutoff lifted by :func:`_kernel_cutoff_slack`
+    (and keep the untightened box if that root is undecided too). Wherever the
+    exact-cutoff root is decided the spec is unchanged, so the flag is
+    bound-neutral there. Kept as a documented opt-out so the rescue can be A/B'd;
+    ``=0`` is #1871 as it shipped.
+
+    Why not lift the cutoff always: measured on the in-repo corpus (73
+    instances, 30 s, interleaved), an always-on slack was cert-clean (64 oracle
+    checks, 0 problems; 56 certified in both arms) but loosened ``nous1``'s bound
+    at a fixed node count, 1.414 -> 1.298 at 3,000 nodes and 1.559 -> 1.443 at
+    10,000 (optimum ~1.567), so it is applied only where the exact box fails.
     """
     return os.environ.get("DISCOPT_KERNEL_CUTOFF_OBBT_SLACK", "1").strip().lower() not in (
         "0",
@@ -7903,9 +7936,9 @@ def _kernel_cutoff_slack(
     own, ``max(|ub|, |lb|)``). Measured on the #1983 model (2000-node cap):
     slack 0, 1e-9, 1e-7, 1e-6 all end undecided at the node cap; 1e-5 certifies
     in 3 nodes; ``g`` = 0.0402 certifies in 1 node with min width 2.4e-5.
+    Applied only when the exact cutoff's root is undecided
+    (:func:`_kernel_cutoff_slack_enabled`).
     """
-    if not _kernel_cutoff_slack_enabled():
-        return 0.0
     abs_t = _DEFAULT_ABS_GAP_TOL if abs_gap_tolerance is None else float(abs_gap_tolerance)
     kernel_abs = _native_kernel_abs_tol(gap_tolerance, abs_gap_tolerance)
     if float(gap_tolerance) > _DEFAULT_REL_GAP_TOL or _kernel_documented_gap_applies(
@@ -7917,8 +7950,32 @@ def _kernel_cutoff_slack(
     return slack if math.isfinite(slack) and slack > 0.0 else 0.0
 
 
+#: The wall cap of the #1983 root probe (seconds); a probe that hits it counts as
+#: decided, so a slow root keeps #1871's box exactly as before.
+_KERNEL_ROOT_PROBE_S = 2.0
+
+
+def _kernel_root_undecided(spec: dict, outer_deadline: Optional[float]) -> bool:
+    """Whether the kernel's root node LP over ``spec`` ends undecided (#1983).
+
+    One node, no hooks: a probe of the root LP's verdict only, which decides
+    nothing a certificate rests on (the solve that follows runs on whichever box
+    is chosen, and every box offered is valid). Capped by ``_KERNEL_ROOT_PROBE_S``.
+    """
+    from discopt import _rust
+
+    cap = _KERNEL_ROOT_PROBE_S
+    if outer_deadline is not None:
+        cap = min(cap, max(0.0, outer_deadline - time.perf_counter()))
+    if cap <= 0.0:
+        return False
+    res = _rust.solve_spatial_tree_py(**spec, max_nodes=1, time_limit_s=float(cap))
+    return res.get("root_status") == "undecided"
+
+
 #: #1871: how often the cutoff-OBBT box replaced the kernel's root box (probe
-#: counter, CLAUDE.md section 6).
+#: counter, CLAUDE.md section 6). #1983 adds ``root_undecided`` (the exact-cutoff
+#: root probe failed), ``slack_adopted`` and ``kept_root_box``.
 KERNEL_CUTOFF_OBBT_STATS: "collections.Counter[str]" = collections.Counter()
 
 
