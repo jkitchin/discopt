@@ -96,6 +96,28 @@ pub fn tighten_bounds_csc(
     is_int: &[bool],
     tol: f64,
 ) -> PresolveResult {
+    tighten_bounds_csc_with_row(csc, m, n, l, u, b, is_int, tol, None)
+}
+
+/// [`tighten_bounds_csc`] plus one extra row `Σ_j w_j x_j <= rhs`, given as its
+/// dense coefficients `w` (length `n`) and `rhs`, propagated alongside `A x = b`.
+///
+/// The extra row is an inequality, so it is carried as an equality with a virtual
+/// slack column `s ∈ [0, INF]` (index `n`, dropped from the result). The MILP
+/// driver passes the objective cutoff `c x <= U` here (#1953): an epigraph column
+/// that no row bounds above is bounded by it.
+#[allow(clippy::too_many_arguments)]
+pub fn tighten_bounds_csc_with_row(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    is_int: &[bool],
+    tol: f64,
+    extra: Option<(&[f64], f64)>,
+) -> PresolveResult {
     let mut lo = l.to_vec();
     let mut hi = u.to_vec();
     let max_rounds = 8;
@@ -110,17 +132,33 @@ pub fn tighten_bounds_csc(
             row_nz[row_idx[idx]].push((j, vals[idx]));
         }
     }
+    let mut rhs = b.to_vec();
+    let int_ext;
+    let mut is_int = is_int;
+    if let Some((w, r)) = extra {
+        let mut nz: Vec<(usize, f64)> =
+            (0..n).filter(|&j| w[j] != 0.0).map(|j| (j, w[j])).collect();
+        nz.push((n, 1.0));
+        row_nz.push(nz);
+        rhs.push(r);
+        lo.push(0.0);
+        hi.push(INF);
+        int_ext = is_int
+            .iter()
+            .copied()
+            .chain(std::iter::once(false))
+            .collect::<Vec<_>>();
+        is_int = &int_ext;
+    }
 
-    for _round in 0..max_rounds {
+    let mut infeasible = false;
+    'rounds: for _round in 0..max_rounds {
         let mut changed = false;
-        for i in 0..m {
-            match fbbt_row(&row_nz[i], b[i], &mut lo, &mut hi, is_int, tol, round_tol) {
+        for (i, nz) in row_nz.iter().enumerate() {
+            match fbbt_row(nz, rhs[i], &mut lo, &mut hi, is_int, tol, round_tol) {
                 None => {
-                    return PresolveResult {
-                        l: lo,
-                        u: hi,
-                        infeasible: true,
-                    }
+                    infeasible = true;
+                    break 'rounds;
                 }
                 Some(c) => changed |= c,
             }
@@ -129,11 +167,12 @@ pub fn tighten_bounds_csc(
             break;
         }
     }
-
+    lo.truncate(n);
+    hi.truncate(n);
     PresolveResult {
         l: lo,
         u: hi,
-        infeasible: false,
+        infeasible,
     }
 }
 
@@ -331,6 +370,45 @@ fn fbbt_row(
 
 #[cfg(test)]
 mod tests {
+
+    /// #1953: the extra `<=` row bounds a column no row of `A` touches (an OA
+    /// epigraph column under the incumbent cutoff), through a virtual slack that
+    /// is not returned. `A`: `x1 = 0.5`; extra row `2 x0 + x1 <= 3.5` -> `x0 <= 1.5`.
+    #[test]
+    fn extra_inequality_row_bounds_an_untouched_column() {
+        use super::super::sparse::SparseCols;
+        let sp = SparseCols::from_dense(&[0.0, 1.0], 1, 2);
+        let (l, u) = (vec![0.0, 0.0], vec![INF, 1.0]);
+        let w = [2.0, 1.0];
+        let r = tighten_bounds_csc_with_row(
+            &sp,
+            1,
+            2,
+            &l,
+            &u,
+            &[0.5],
+            &[false, false],
+            1e-9,
+            Some((&w, 3.5)),
+        );
+        assert!(!r.infeasible && r.l.len() == 2 && r.u.len() == 2);
+        assert!(r.u[0] >= 1.5 && r.u[0] <= 1.5 + 1e-12, "{}", r.u[0]);
+        let plain = tighten_bounds_csc(&sp, 1, 2, &l, &u, &[0.5], &[false, false], 1e-9);
+        assert_eq!(plain.u[0], INF);
+        // Under a cutoff nothing in the box satisfies, the box is proved empty.
+        let r = tighten_bounds_csc_with_row(
+            &sp,
+            1,
+            2,
+            &l,
+            &u,
+            &[0.5],
+            &[false, false],
+            1e-9,
+            Some((&w, 0.1)),
+        );
+        assert!(r.infeasible);
+    }
     use super::*;
 
     fn view<'a>(
