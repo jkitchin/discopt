@@ -14,7 +14,8 @@ lets them use it: on ``ex8_5_*`` the objective's ``log(x3 - x5)`` gives
 FBBT domain pass (``presolve/fbbt.rs`` ``impose_function_domains``) already applies,
 so only arguments over two or more variables are returned.
 
-Gated, with the FBBT sign/domain rules, by ``DISCOPT_FBBT_SIGN_DOMAIN``.
+Gated, with the FBBT sign/domain rules, by ``DISCOPT_FBBT_SIGN_DOMAIN`` (default ON
+since its bundle graduation; ``=0`` opts out).
 """
 
 from __future__ import annotations
@@ -30,12 +31,13 @@ _DOMAIN_LO = {"log": 0.0, "log2": 0.0, "log10": 0.0, "sqrt": 0.0, "log1p": -1.0}
 
 
 def function_domains_enabled() -> bool:
-    """``DISCOPT_FBBT_SIGN_DOMAIN``: read at call time (default off)."""
-    return os.environ.get("DISCOPT_FBBT_SIGN_DOMAIN", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    """``DISCOPT_FBBT_SIGN_DOMAIN``: read at call time. Default ON (#1982 bundle graduation)."""
+    return os.environ.get("DISCOPT_FBBT_SIGN_DOMAIN", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
     )
 
 

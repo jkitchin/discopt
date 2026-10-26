@@ -3051,12 +3051,13 @@ _LP_SIGN_MARGIN = 1e-7
 
 
 def _lp_sign_enabled() -> bool:
-    """#1981: the LP-implied sign of an affine factor, under ``DISCOPT_FBBT_SIGN_DOMAIN``."""
-    return os.environ.get("DISCOPT_FBBT_SIGN_DOMAIN", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    """#1981: the LP-implied sign of an affine factor (``DISCOPT_FBBT_SIGN_DOMAIN``, on)."""
+    return os.environ.get("DISCOPT_FBBT_SIGN_DOMAIN", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
     )
 
 
@@ -4309,12 +4310,13 @@ _EXPR_TYPES = (
 
 
 def poly_root_bound_enabled() -> bool:
-    """#1979: ``DISCOPT_POLY_ROOT_BOUND`` (default off pending its section 5 panel)."""
-    return os.environ.get("DISCOPT_POLY_ROOT_BOUND", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    """#1979: ``DISCOPT_POLY_ROOT_BOUND``. Default ON (#1982 bundle); ``=0`` opts out."""
+    return os.environ.get("DISCOPT_POLY_ROOT_BOUND", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
     )
 
 
@@ -4411,7 +4413,7 @@ class UnivariatePolynomialRootBoundRule(NonlinearBoundTighteningRule):
     of state of ``ex8_5_*`` (compressibility ``Z``) it bounds ``Z`` and lets the
     relaxation see a finite box. Sound: every point satisfying the equality has
     ``x`` inside the bound; the bound is rounded outward. Gated by
-    ``DISCOPT_POLY_ROOT_BOUND`` (default off).
+    ``DISCOPT_POLY_ROOT_BOUND`` (default ON since the #1982 bundle graduation).
     """
 
     name = "univariate_polynomial_root_bound"

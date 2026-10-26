@@ -2120,13 +2120,17 @@ def _interior_tangent_point(
 def _pole_envelope_enabled() -> bool:
     """#1979: ``DISCOPT_POLE_ENVELOPE`` -- one-sided 1-D envelopes at a closed-edge
     pole (``_emit_1d_at_pole``) and the one-sided enclosure of a negative power on a
-    base touching 0 (``_pow_bounds``). Default **off** pending its section 5 panel.
+    base touching 0 (``_pow_bounds``). Graduated (default ON, 2026-10-26; section 5
+    bundle panel, 287 instances, 20 s: cert-clean, 463 checks, 0 false bounds; a bound
+    where none on chakra, ex8_5_1..6, hhfair, wallfix; launch certifies 3/3 vs 0/3).
+    ``=0`` opts out.
     Read at call time."""
-    return os.environ.get("DISCOPT_POLE_ENVELOPE", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
+    return os.environ.get("DISCOPT_POLE_ENVELOPE", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
     )
 
 
@@ -3331,9 +3335,10 @@ def _emit_scaled_equality(ctx: _Builder, w: int, lin: LinForm, scalar: float) ->
 # (tangent under + secant over) via the shared 1-D emitter — the same tight
 # treatment ``exp``/``log`` already get from ``_UNIVARIATE_FN``. Sound by
 # construction (a tangent of a convex function is a global underestimator; the
-# secant chord is a global overestimator). Gated by ``DISCOPT_ENTROPY_ATOM``
-# (default OFF, flag-graduation convention); when off, ``_build_product`` is
-# byte-identical. Recognizes ``t*log(t)`` for any shared affine form ``t`` (so
+# secant chord is a global overestimator). ``DISCOPT_ENTROPY_ATOM``: default ON since
+# 2026-10-26 (graduated with the #1982 bundle, which needs it on ``ex8_5_*``'s
+# ``x log x`` over ``[0, 1]``); ``=0`` restores the product path. Recognizes
+# ``t*log(t)`` for any shared affine form ``t`` (so
 # ``x log x``, ``(a x) log(a x)`` and ``(a x + b) log(a x + b)`` all fire); the
 # relative-entropy generalization ``x log(x/y)`` has its own gated atom below.
 def _linform_eq(a: LinForm, b: LinForm) -> bool:
@@ -3492,7 +3497,13 @@ def _build_product(ctx: _Builder, node: CNode, w: int) -> Envelope:
     # byte-identical. ``lo>0`` guards the domain (``x*log(x)`` -> nan at x=0, and
     # its lower tangent slope ``log x + 1`` -> -inf); on ``lo<=0`` fall through to
     # the sound product path.
-    if os.environ.get("DISCOPT_ENTROPY_ATOM") == "1":
+    if os.environ.get("DISCOPT_ENTROPY_ATOM", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    ):
         _ent = _entropy_prod_var(ctx, node)
         if _ent is not None:
             _lt, _lo, _hi = _ent
