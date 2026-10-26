@@ -11911,3 +11911,99 @@ prolog would have to keep the coupling `z0 = z1`, for example through a
 perspective/projective reformulation in `1/T` that turns the recession problem into
 a bounded one. It would also have to resolve a ~1e-5 relative margin. That is new
 work, not this hypothesis.
+
+## 90. #1975 reframed: the 1/T outer piece, entry experiment (2026-10-26)
+
+**Reframing.** After §89, #1975 was reframed. Under #1869 unbounded branching an
+outer piece `T >= M` keeps its recession ray forever, so nothing ever prunes it.
+The proposal is to rescale that piece by `x_open = T u`, `s = 1/T` in `[0, 1/M]`,
+dividing each row by its leading power of `T`. The piece then becomes a **bounded**
+problem in which no product is lifted against an infinite factor, and it is pruned
+when its certified `min f/T` beats the incumbent. Kill criterion: fewer than 3
+instances with (a) an uncertified root LP whose negative-cost ray lies on open
+columns and (b) an outer piece the mechanism can fathom; or discopt cannot certify
+prolog's transformed piece (step 4). The scripts and the per-instance census are in
+`docs/dev/data/1975-prolog-limit/`.
+
+**First, a retraction of a step-1 reading (§89).** §89's `+0.0349` is the
+*asymptotic* slope, and it stands. But reading it as "f > 0 on any outer piece"
+was wrong. In the original variables, SCIP finds points with `x7 + x8 >= 230` and
+`f = -4.5e-8`. Measured exactly, such a point violates the budget rows C5/C6 by
+7.4e-7, which is inside SCIP's 1e-6 feasibility tolerance. At its `u` the §89
+limit LP is infeasible. The relative margin, `0.035 / 4356 = 8e-6`, is the same
+order as a solver's feasibility tolerance. Further out, SCIP's best points do track
+the slope:
+
+| `x7 + x8 >=` | SCIP best point | `0.0349 T` | SCIP dual bound |
+|---|---|---|---|
+| 230 | ≈ 0 | 8 | ≈ 0 |
+| 2.3e4 | 870 | 801 | 1.5e-8 |
+| 2.3e6 | 80,300 | 80,120 | 9.5e-7 |
+
+**SCIP's dual bound on the untransformed piece never leaves 0.** Its relaxation has
+the same decoupling. With `numerics/feastol = 1e-9`, SCIP's LP solver aborted with
+"unresolved numerical troubles". So SCIP on the raw piece is not an oracle for (b).
+
+**Step 4 (prolog, the transformed piece; `prolog_projective*.py`).** The rescaled
+piece, with `T = x7 + x8`, `M = 1e4` and 20 bounded variables:
+- **SCIP:** optimal, `min f/T = +0.034912`, primal = dual, 10,243 nodes, 3.0 s. The
+  mechanism is sound, and the piece certifies with a solver whose bilinear search is
+  strong enough.
+- **discopt:** incumbent 0.034952, but the bound is `-1e-12` after 1,172,339 nodes in
+  300 s. The Python tree (`DISCOPT_NATIVE_SPATIAL_KERNEL=0`) stalls the same way:
+  bound -1.2e-10 after 1,181 nodes in 60 s. The bound looks like the safe-rounded
+  zero of a node LP that never improves.
+- **Localisation at `s = 0`, on a 4x4 grid of `(u0, u1)` sub-boxes:** 15 of 16
+  certify or are infeasible in seconds. The one containing the optimum stalls.
+  Split 3x3, its 9 sub-boxes all certify a positive bound in seconds. One hit its
+  20 s limit, but with bound 8.82 > 0.
+
+So discopt's relaxation can see the margin once `(u0, u1)` is partitioned. What
+fails is its branching on the whole box. My reading, not yet measured: it splits the
+wide `x2..x5` (range ~7000) rather than `u0`/`u1` (range ~5). **Step 4 fails as
+discopt stands.** This is a bounded 20-variable bilinear problem that SCIP closes in
+10k nodes, so the defect is independent of #1975.
+
+**Class census (`census_2026-10-26.jsonl`).** The class was rebuilt as every
+MINLPLib instance with <= 200 vars/cons that keeps an unbounded continuous variable
+after FBBT: **227** (#1869's local 120-instance list was unavailable). discopt at
+30 s, in parallel, not a timing measurement: 95 certified (94 optimal, 1 infeasible),
+132 not, and none disagree with `minlplib.solu`. Of the 132, the root LP over the
+FBBT box (rays: float verdict when the cost is < -1e-7, rational otherwise):
+
+| root LP | n | instances |
+|---|---:|---|
+| certified (the tree is the bottleneck) | 55 | |
+| uncertified, no negative-cost ray found | 33 | mostly `autocorr_bern*` |
+| root analysis timed out (300 s) | 29 | mostly `autocorr_bern*` |
+| uncertified, ray cost >= 0 | 1 | `ex14_1_7` |
+| **uncertified, negative-cost ray** | **14** | below |
+
+The 14 split three ways. The test for the second and third group is the side the ray
+moves toward, after SCIP's presolve (`ray_side.py`):
+- **The ray is on lifted columns only** (a missing or infinite envelope; 1/T does not
+  apply): `hhfair`, `launch`, `like`.
+- **SCIP's presolve closes the ray's side, and discopt's FBBT does not** (a
+  bound-inference gap; 1/T is not the first fix): `chakra` (all 20 ray columns),
+  `wallfix` (`objvar*x2 = 1` with `x2 >= 0` gives `objvar >= 0`), and
+  `ex8_5_2`..`ex8_5_6`. **7 instances.**
+- **The ray's side stays open after SCIP's presolve** (the 1/T candidates): `prolog`
+  (quadratic), `mhw4d` (polynomial), `shiporig` (signomial with sqrt), and `ex8_5_1`
+  (log/div, which rescales only if each log is of a ratio). **4 instances.** Walking
+  a SCIP-feasible point along the ray (`ray_walk.py`): prolog stays feasible, as its
+  ray is tight. `mhw4d`, `shiporig` and `ex8_5_1` leave the feasible set at `t = 1`,
+  so their rays are relaxation artefacts.
+
+**Verdict.**
+- (a) passes: 4 >= 3.
+- (b) is measured only on prolog: the transform is sound (SCIP, 3 s).
+- Step 4 fails: discopt stalls on the bounded piece.
+
+Per the stated kill criterion, the 1/T piece is not built now. The census found two
+larger general defects ahead of it, and each one is a prerequisite or a bigger win:
+1. **Bound inference that closes the ray's side.** 7 of the 14 have a root ray that
+   SCIP's presolve removes and FBBT does not. That is more instances than the 1/T
+   class, at a much smaller cost.
+2. **discopt's spatial branching on bounded bilinear problems.** prolog's transformed
+   piece needs >1.17M nodes without progress, against SCIP's 10,243. The 1/T piece
+   cannot work until this is fixed, and the defect is general.
