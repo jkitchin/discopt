@@ -98,6 +98,110 @@ _MAX_INCREMENTAL_NNZ = 50_000_000
 _incremental_oversize_warned: set = set()
 
 
+class PoolColumnExtension:
+    """Lifted columns a root cut pool references that the incremental structure
+    does not carry (#1941 item 4A).
+
+    The root pool is captured on the cold build, which lifts more than the
+    incremental structure (its RLT products, for one): on rbrock the pool is 12
+    columns wide and the structure 7, so every pool-inheriting node fell back to
+    a cold build. Each such column is appended here with the same closed-form
+    envelope the structure patches for its own terms, regenerated per node from
+    the node box: McCormick for ``x_i*x_j`` and the secant/3-tangent hull for an
+    even power ``x_i**p``, over ORIGINAL columns ``i, j``. Those rows tie the
+    column to its term on the node box, so a pool row over it is a valid cut in
+    the extended space -- the same argument as for the pool row on the cold
+    build. ``build`` returns ``None`` (the caller keeps the cold build) when a
+    referenced column is anything else, so no pool row is ever dropped here.
+    """
+
+    __slots__ = ("base_ncol", "n", "terms", "idents")
+
+    def __init__(self, base_ncol: int, n: int, terms: list, idents: tuple) -> None:
+        self.base_ncol = int(base_ncol)
+        self.n = int(n)
+        self.terms = terms  # ("bilinear", i, j) | ("power", i, p), one per new column
+        self.idents = idents
+
+    @property
+    def ncol(self) -> int:
+        return self.base_ncol + len(self.terms)
+
+    @classmethod
+    def build(cls, inc, a_rows, root_idents) -> "PoolColumnExtension | None":
+        """The extension covering every column the pool's rows use, or ``None``."""
+        have = set(inc.col_identities)
+        a = sp.csr_matrix(a_rows)
+        used = sorted({int(c) for c, v in zip(a.indices, a.data) if v != 0.0})
+        terms, idents = [], []
+        for c in used:
+            key = root_idents[c]
+            if key in have or key in idents:
+                continue
+            term = cls._term_of(key, inc.n)
+            if term is None:
+                return None
+            terms.append(term)
+            idents.append(key)
+        return cls(inc.ncol, inc.n, terms, tuple(idents))
+
+    @staticmethod
+    def _term_of(key, n: int):
+        kind, arg = key
+        if kind == "bilinear" and len(arg) == 2:
+            i, j = int(arg[0]), int(arg[1])
+            if 0 <= i < n and 0 <= j < n and i != j:
+                return ("bilinear", i, j)
+        elif kind == "monomial" and len(arg) == 2:
+            i, p = int(arg[0]), int(arg[1])
+            if 0 <= i < n and p >= 2 and p % 2 == 0:
+                return ("power", i, p)
+        elif kind == "univariate_square":
+            base, p = arg
+            if base[0] == "orig" and int(p) == 2 and 0 <= int(base[1]) < n:
+                return ("power", int(base[1]), 2)
+        return None
+
+    def extend(self, A, b, bounds, lb, ub):
+        """``(A, b, bounds)`` of the patched node LP widened by this extension's
+        columns and their envelope rows over ``[lb, ub]``."""
+        k = len(self.terms)
+        rows, cols, vals, rhs = [], [], [], []
+        new_bounds = np.empty((k, 2), dtype=np.float64)
+        r = 0
+        for t, term in enumerate(self.terms):
+            a = self.base_ncol + t
+            if term[0] == "bilinear":
+                _, i, j = term
+                li, ui, lj, uj = lb[i], ub[i], lb[j], ub[j]
+                for ci, cj, cw, rh in _bilinear_rows(i, j, a, li, ui, lj, uj):
+                    rows += [r, r, r]
+                    cols += [i, j, a]
+                    vals += [ci, cj, cw]
+                    rhs.append(rh)
+                    r += 1
+                new_bounds[t] = _bilinear_aux_bounds(li, ui, lj, uj)
+            else:
+                _, i, p = term
+                li, ui = lb[i], ub[i]
+                for cx, cs, rh in _monomial_rows(li, ui, p):
+                    rows += [r, r]
+                    cols += [i, a]
+                    vals += [cx, cs]
+                    rhs.append(rh)
+                    r += 1
+                new_bounds[t] = _monomial_aux_bounds(li, ui, p)
+        A = sp.csr_matrix(A)
+        A = sp.vstack(
+            [
+                sp.hstack([A, sp.csr_matrix((A.shape[0], k))]),
+                sp.csr_matrix((vals, (rows, cols)), shape=(r, self.ncol)),
+            ],
+            format="csr",
+        )
+        return A, np.concatenate([b, rhs]), np.vstack([bounds, new_bounds])
+
+
 class _IncrementalStructureTooLarge(Exception):
     """The lifted relaxation is too large to hold densely in the incremental
     fast path; the caller falls back to the sparse per-node cold build."""
@@ -1192,6 +1296,9 @@ class IncrementalMcCormickLP:
         from discopt.solvers.milp_simplex import LpWarmCert, solve_lp_warm_std
 
         cobj = self.c if c_override is None else np.asarray(c_override, dtype=np.float64)
+        if A.shape[1] > cobj.size:
+            # Columns a ``PoolColumnExtension`` appended carry no objective cost.
+            cobj = np.concatenate([cobj, np.zeros(A.shape[1] - cobj.size)])
         off = 0.0 if c_override is not None else self.obj_offset
         _empty = LpWarmCert(safe_bound=None, farkas_certified=False)
 
