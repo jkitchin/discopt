@@ -100,8 +100,11 @@ def test_node_limit_incumbent_passes_check_feasibility(monkeypatch, max_nodes):
     On the reporting machine the kernel's NLP seed found nothing and the tree ran to
     its node limit on its own McCormick incumbent. The seed is disabled here to reach
     that exit deterministically; everything downstream of it is the default path.
+    The legacy spatial branching rule is pinned too: since #1970 the scored rule
+    closes this tree inside the node limit, so the exit under test never happens.
     """
     monkeypatch.setattr(S, "_native_kernel_seed", lambda *a, **k: (None, None))
+    monkeypatch.setenv("DISCOPT_KERNEL_SPATIAL_BRANCHING", "0")
     m = _prob09()
     r = m.solve(deterministic=True, max_nodes=max_nodes)
     assert r.status == "node_limit"
@@ -138,9 +141,13 @@ def test_time_limited_exit_never_reports_a_source_infeasible_point():
 FLAG = "DISCOPT_NATIVE_NLP_PRIMAL"
 
 
-def _unseeded_solve(monkeypatch, flag: str, max_nodes: int):
+def _unseeded_solve(monkeypatch, flag: str, max_nodes: int, spatial: str = "0"):
     monkeypatch.setattr(S, "_native_kernel_seed", lambda *a, **k: (None, None))
     monkeypatch.setenv(FLAG, flag)
+    # These tests pin the tree that has to rely on the primal step: the legacy
+    # spatial branching rule. Since #1970 the scored rule (the default) closes the
+    # unseeded kernel on its own (see the last test of this block).
+    monkeypatch.setenv("DISCOPT_KERNEL_SPATIAL_BRANCHING", spatial)
     return _prob09().solve(deterministic=True, max_nodes=max_nodes)
 
 
@@ -159,6 +166,19 @@ def test_primal_step_certifies_the_unseeded_kernel(monkeypatch):
     assert st["tree/primal_hook_calls"] >= 1 and st["tree/primal_hook_improvements"] >= 1
     assert r.status == "optimal" and r.gap_certified
     assert st["tree/nodes"] < 2000
+    assert r.bound <= 1e-9 and r.objective == pytest.approx(0.0, abs=1e-6)
+    ok, viols = warm_start.check_feasibility(_prob09(), _flat(r))
+    assert ok, viols
+
+
+def test_scored_branching_closes_the_unseeded_kernel_alone(monkeypatch):
+    """#1970: with the scored spatial branching rule the kernel finds a
+    McCormick-tight point at the optimum on its own (measured: certified in 1,133
+    of 2,000 nodes, no primal-hook call), where the legacy rule ends 8.1e-4 above it."""
+    r = _unseeded_solve(monkeypatch, "0", 2000, spatial="1")
+    st = r.solver_stats or {}
+    assert st.get("tree/primal_hook_calls", 0.0) == 0.0
+    assert r.status == "optimal" and r.gap_certified
     assert r.bound <= 1e-9 and r.objective == pytest.approx(0.0, abs=1e-6)
     ok, viols = warm_start.check_feasibility(_prob09(), _flat(r))
     assert ok, viols
