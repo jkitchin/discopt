@@ -518,7 +518,7 @@ cuts = R.recognize_and_derive_cuts(build_gas_network_minlp())
 print("CUTS:" + str(len(cuts)))
 tangents = 0
 for c in cuts:
-    lo, hi = R.under_domain_of(c.underestimator)
+    lo, hi = c.domain
     v, g = c.underestimator.tangent_cut(0.5 * (lo + hi))
     tangents += 1
     print("TANGENT_V:" + repr(float(v)))

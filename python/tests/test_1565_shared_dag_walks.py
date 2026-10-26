@@ -241,7 +241,10 @@ def test_recognizer_deadline_aborts_before_injecting_anything():
         cr.recognize_and_inject(m, deadline=lambda: True)
     assert len(m._constraints) == n_cons  # untouched
     # and without a deadline the same model still yields its cuts
-    assert cr.recognize_and_inject(_gas_model(), deadline=lambda: False) == 2
+    m2 = _gas_model()
+    w = next(v for v in m2._variables if v.name == "w_cs")
+    w.ub = np.full(w.shape, 74.0)  # the box the cut is provable on (see test_cut_recognizer)
+    assert cr.recognize_and_inject(m2, deadline=lambda: False) == 2
 
 
 def test_solve_logs_structure_cut_abandonment(monkeypatch, caplog):

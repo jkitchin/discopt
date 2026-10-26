@@ -32,8 +32,6 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from discopt._relax.gdp_reformulate import _is_linear  # noqa: E402
 from discopt._relax.implied_integer import (  # noqa: E402
-    _INT_TOL,
-    _is_int_value,
     detect_implied_integers,
     mark_implied_integers,
 )
@@ -66,7 +64,9 @@ def _dense_reference_detect(model) -> set[tuple[int, int]]:
         except _NotLinearError:
             continue
         a = np.asarray(a, dtype=np.float64)
-        if not np.all(np.abs(a - np.round(a)) <= _INT_TOL) or not _is_int_value(float(const)):
+        # Exact tests since #1952 (the predecessor used a 1e-9 tolerance, which
+        # marked variables the model leaves continuous).
+        if not np.all(a == np.round(a)) or not float(const).is_integer():
             continue
         eq_rows.append((a, float(const)))
 
@@ -75,11 +75,11 @@ def _dense_reference_detect(model) -> set[tuple[int, int]]:
     while changed:
         changed = False
         for a, _const in eq_rows:
-            nz = np.nonzero(np.abs(a) > _INT_TOL)[0]
+            nz = np.nonzero(a != 0.0)[0]
             for idx in nz:
                 if is_int[idx]:
                     continue
-                if abs(abs(a[idx]) - 1.0) > _INT_TOL:
+                if abs(a[idx]) != 1.0:
                     continue
                 if all(is_int[j] for j in nz if j != idx):
                     var, elem = flat[idx]
