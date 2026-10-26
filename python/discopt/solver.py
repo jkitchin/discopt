@@ -2432,7 +2432,7 @@ def _try_native_spatial_kernel(
     if _warm_mode >= 2:
         solve_kwargs["warm_flip_boxed"] = True
     # #1962: per-node outer-approximation separation of convex quadratic forms
-    # (default OFF; see the helper).
+    # (default ON since the #1962 panel; ``=0`` opts out; see the helper).
     _cut_rounds = _kernel_convex_cut_rounds()
     if _cut_rounds is not None:
         solve_kwargs["cut_rounds_root"], solve_kwargs["cut_rounds_node"] = _cut_rounds
@@ -11099,7 +11099,7 @@ def _kernel_convex_cut_rounds() -> Optional[tuple[int, int]]:
     the native spatial kernel (``SpatialTreeConfig::cut_rounds_root`` /
     ``cut_rounds_node``, ``crates/discopt-core/src/bnb/convex_quad_cuts.rs``).
 
-    Returns ``(root_rounds, node_rounds)``, or ``None`` when off (the default).
+    Returns ``(root_rounds, node_rounds)``, or ``None`` when off (``=0``).
     ``DISCOPT_KERNEL_CUT_ROUNDS_ROOT`` / ``DISCOPT_KERNEL_CUT_ROUNDS_NODE`` are the
     round caps (numeric knobs, read only under the flag).
 
@@ -11107,8 +11107,18 @@ def _kernel_convex_cut_rounds() -> Optional[tuple[int, int]]:
     of a form whose positive semidefiniteness is proven (Rump's Cholesky test), its
     right side rounded outward over the global box, so it holds at every feasible
     point; the node bound is still the Neumaier-Shcherbina bound on the final duals.
+
+    **Graduated (#1962, default ON).** Panel ``issue1944_rlt_panel.py --with-corpus
+    --on-env DISCOPT_KERNEL_CONVEX_CUTS=1 --off-env DISCOPT_KERNEL_CONVEX_CUTS=0``
+    (270 instances, 30 s, interleaved, every incumbent ``verify_point``-ed):
+    cert-clean, 1,620 checks, 0 problems. The separator fires on 13 instances.
+    It gains certificates on nvs19 (time limit at 29.6 s -> 8.3 s) and nvs23
+    (29.6 s -> 14.3 s) and loses none. Node counts fall on nvs13 (349 -> 23),
+    nvs17 (8,231 -> 61), nvs18 (2,061 -> 49), hydro (341 -> 3) and fuel
+    (29 -> 15). nvs24's 30 s bound goes from -3,243 to -1,033.2000 (optimum
+    -1,033.2). ``performance-plan.md`` section 86.
     """
-    if os.environ.get("DISCOPT_KERNEL_CONVEX_CUTS", "0").strip().lower() in (
+    if os.environ.get("DISCOPT_KERNEL_CONVEX_CUTS", "1").strip().lower() in (
         "0",
         "false",
         "no",

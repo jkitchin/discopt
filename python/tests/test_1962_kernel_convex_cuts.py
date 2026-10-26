@@ -80,17 +80,18 @@ def test_kernel_cut_loop_tightens_root_and_keeps_the_optimum():
     assert on["node_count"] <= off["node_count"]
 
 
-def test_flags_reach_the_kernel_and_default_off(monkeypatch):
-    """``Model.solve`` passes both flags through; with them unset nothing runs."""
-    monkeypatch.delenv("DISCOPT_KERNEL_CONVEX_CUTS", raising=False)
-    monkeypatch.delenv("DISCOPT_KERNEL_INT_PROBE", raising=False)
+def test_flags_reach_the_kernel_and_opt_out(monkeypatch):
+    """``Model.solve`` passes both flags through; ``=0`` turns the separator off.
+    The separator is on by default (graduated in #1962)."""
+    monkeypatch.setenv("DISCOPT_KERNEL_CONVEX_CUTS", "0")
+    monkeypatch.setenv("DISCOPT_KERNEL_INT_PROBE", "0")
     r0 = _iqp_model(integer=False).solve(time_limit=60)
     s0 = r0.solver_stats or {}
     assert s0.get("tree/nodes") is not None, "solve did not take the native kernel"
     assert s0.get("tree/cut_forms") == 0.0 and s0.get("tree/cut_rounds") == 0.0
     assert s0.get("tree/int_probes") == 0.0
 
-    monkeypatch.setenv("DISCOPT_KERNEL_CONVEX_CUTS", "1")
+    monkeypatch.delenv("DISCOPT_KERNEL_CONVEX_CUTS", raising=False)
     monkeypatch.setenv("DISCOPT_KERNEL_INT_PROBE", "1")
     r1 = _iqp_model(integer=False).solve(time_limit=60)
     s1 = r1.solver_stats or {}
