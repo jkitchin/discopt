@@ -12222,7 +12222,7 @@ they showed the trigger was wrong):
    piece had less time than the whole solve, the bound weakened: autocorr_bern25-06
    -3648 -> -4792.
 2. *Fire when a root-only probe (`max_nodes=1`, 10 % of the limit) gives no bound*
-   (80 rows, `outer_piece_panel_probe_v1_partial.jsonl`). On the clay models the
+   (96 rows, `outer_piece_panel_probe_v1_partial.jsonl`). On the clay models the
    probe ran out of time before its root finished. clay0303hfsg went 4.8 -> 16.7 s
    for the same certificate.
 3. *The same, but only when the probe finished its root (`feasible`/`node_limit`)
