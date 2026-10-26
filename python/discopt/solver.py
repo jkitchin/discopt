@@ -20832,7 +20832,22 @@ def solve_model(
                             _exp_build is not None and _serial_remaining < _exp_build
                         )
                     else:
-                        _round_blocked = False
+                        # #1989: with the round budget off this path still had no
+                        # past-deadline skip, so every serial node after the
+                        # deadline ran a full cold build + solve + retry cascade
+                        # (the batch path above skips such nodes unconditionally).
+                        # Skip it the same way, non-root only (#928 rule 1). The
+                        # live limit, not ``_deadline``, so the #917 incumbent
+                        # extension keeps its rounds. A node whose NLP also failed
+                        # is kept OPEN on its parent bound rather than left on the
+                        # failure sentinel, which would fathom it with no proof.
+                        _round_blocked = (
+                            iteration >= 1 and time.perf_counter() >= t_start + time_limit
+                        )
+                        if _round_blocked:
+                            _yield_keeps_node_open(
+                                True, result_lbs[i] >= _SENTINEL_THRESHOLD, result_lbs, i
+                            )
                 else:
                     _round_blocked = True
                 if _mc_lp_relaxer is not None and not _reduced_done_serial and not _round_blocked:
@@ -21193,6 +21208,10 @@ def solve_model(
             sb_hint_vars = []
             rel_thresh = tree.reliability_threshold()
             for i in range(n_batch):
+                # #1989: a branching hint only orders the search, and once the
+                # budget is spent there is no further search to order.
+                if time.perf_counter() >= t_start + time_limit:
+                    break
                 if result_lbs[i] >= _SENTINEL_THRESHOLD:
                     continue  # skip infeasible nodes
                 node_id = int(batch_ids[i])
@@ -21234,6 +21253,9 @@ def solve_model(
         # --- Optional cut generation (OA + RLT + lift-and-project) ---
         if cutting_planes and _generate_cuts is not None and _cut_pool is not None:
             for i in range(n_batch):
+                # #1989: cuts feed later node solves; past the budget there are none.
+                if time.perf_counter() >= t_start + time_limit:
+                    break
                 if result_lbs[i] < _SENTINEL_THRESHOLD:  # skip infeasible nodes
                     node_lb_i = np.array(batch_lb[i])
                     node_ub_i = np.array(batch_ub[i])
