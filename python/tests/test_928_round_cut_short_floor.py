@@ -145,9 +145,12 @@ def test_default_path_still_declines_an_uncertifiable_node(monkeypatch):
     truncated build or a ``time_limit`` LP status, neither of which the default path
     produces. #1869 (b)'s verified-HiGHS route does certify this LP (bound 11672 <=
     MINLPLib's best dual 112657; pinned in ``test_issue_1869_free_column_lp_cert``),
-    so it is switched off here to keep this test about the #928 floor.
+    so it is switched off here to keep this test about the #928 floor. #1941's
+    ``DISCOPT_DECLINED_LP_CERT`` hands every declined LP to the same route, so it is
+    switched off for the same reason.
     """
     monkeypatch.setenv("DISCOPT_FREE_COLUMN_LP_CERT", "0")
+    monkeypatch.setenv("DISCOPT_DECLINED_LP_CERT", "0")
     model = from_nl(str(CORPUS / "4stufen.nl"))
     lb, ub = flat_variable_bounds(model)
 
