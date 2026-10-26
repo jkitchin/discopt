@@ -1,3 +1,8 @@
+# RETIRED (#1975, plan §92): the DISCOPT_OUTER_PIECE prototype, kept as a probe.
+# It was `python/discopt/modeling/_outer_piece.py` behind a default-OFF flag; its
+# §5 panel (outer_piece_panel_2026-10-26.jsonl) was cert-clean but not net-positive
+# (certified 146 -> 140: prolog gained, 7 lost), so the flag and the Model.solve
+# entry point were deleted. Run it directly: `outer_piece_solve_one.py <nl> <secs>`.
 """Fathom the unbounded outer piece of a model by a 1/T rescaling (#1975).
 
 A model whose feasible set keeps a column open after FBBT (``x_k in [r_k, inf)``

@@ -12110,3 +12110,109 @@ defect named in point 2, and it is now fixed: in the native spatial kernel by #1
 
 So with the default solver step 4 passes, the stated kill criterion is no longer
 met, and the 1/T piece is built: §92.
+
+## 92. #1975: the 1/T outer piece, built and measured; `DISCOPT_OUTER_PIECE` retired (2026-10-26)
+
+**What was built.** The model is covered by two pieces. Let `T = sum_k sigma_k (x_k - r_k)`
+range over the *generators* among the open columns, where `r_k` is the column's FBBT
+bound and a free column enters as `|x_k|`.
+- The **inner piece** `T <= M` boxes each generator to `M` from its finite side and
+  is solved by the ordinary pipeline.
+- The **outer piece** `T >= M` is rewritten exactly through `x_k = r_k + sigma u_k/s`,
+  with `s = 1/T` in `[0, 1/M]` and the generators' shares summing to 1. A row of degree
+  `D` in the open columns is multiplied by `s^D`. Sums, products, divisions by
+  bounded expressions, positive powers (padded to an integer degree), `sqrt` and
+  `abs` are rewritten. A degree-0 argument of any other function is kept. Anything
+  else declines.
+- The outer piece's certified minimum `c'` of `M^d s^d f` bounds `f >= c'` on
+  `T >= M` when `c' >= 0` or `d = 0`. The result is `min(inner bound, c')`, and the
+  inner piece's incumbent is re-verified on the original model.
+- **Generators:** the minimal set of open columns (greedy, in model order) whose
+  boxing lets FBBT bound every other open column. For prolog this is `{x7, x8}`.
+  Summing all 7 open columns into `T` instead made the outer optimum sit at
+  `s ~ 7.5e-9`, where a 1e-6 row tolerance in the rescaled model is ~1e2 in
+  original units. The certified `c'` came out negative (-3.6e-4 at `M = 1e4`), and a
+  mapped-back point violated row 14 by 1.25. This was measured, not hypothesised.
+- **Pinned by tests:** the rewrite is an exact identity on every row and on the
+  objective, on 40 random points of a toy with open-above, open-below and free
+  columns. Feasible-point sampling on prolog: 20 feasible points far out on `T` map
+  to feasible points of the outer model, at or above its certified bound.
+
+**prolog: the mechanism works.** Through `Model.solve` with the flag, at a 30 s limit:
+`M = 1e4`, outer bound `349.49` (= `0.03495 M`, SCIP's slope `0.0349`), inner piece
+certified. Result: **optimal, objective 8.2e-7, bound -9.75e-8, 956 nodes, 11.9 s**.
+With the flag OFF: `feasible`, **no bound**, 29.7 s.
+
+**Coverage of the class (`outer_piece_accept_227.jsonl`, structural, no solve).**
+The rewrite accepts **183 of 227**. Of the rest, 19 decline on a division by an
+open column, 9 on a non-generator share that stays unbounded, 8 on `log` of an open
+column, and 3 on SOS rows. Of the census's four 1/T candidates (§91):
+- `prolog` and `chakra` are accepted;
+- `mhw4d` declines (unbounded share), and `shiporig` and `ex8_5_1` decline (division
+  by an open column). §91 already found the rays of these three to be relaxation
+  artefacts (they leave the feasible set at `t = 1`).
+
+**Trigger, measured three times** (each a §5 panel run; earlier runs stopped once
+they showed the trigger was wrong):
+1. *Fire on every model with an open column* (first 67 rows,
+   `outer_piece_panel_alwaysfire_partial.jsonl`). Models that certify anyway lost
+   wall: autocorr_bern20-03 0.4 -> 2.4 s, clay0303hfsg 4.9 -> 13.0 s. Where the inner
+   piece had less time than the whole solve, the bound weakened: autocorr_bern25-06
+   -3648 -> -4792.
+2. *Fire when a root-only probe (`max_nodes=1`, 10 % of the limit) gives no bound*
+   (80 rows, `outer_piece_panel_probe_v1_partial.jsonl`). On the clay models the
+   probe ran out of time before its root finished. clay0303hfsg went 4.8 -> 16.7 s
+   for the same certificate.
+3. *The same, but only when the probe finished its root (`feasible`/`node_limit`)
+   with no bound.* This is the final panel below.
+
+**The §5 panel (final trigger).** `flag_onoff_corpus_panel.py` (from
+`claude/fbbt-sign-domain-1982`, with the child's stats filter changed to
+`outer_piece`) was run as:
+
+    --flag DISCOPT_OUTER_PIECE --solu minlplib.solu --extra-dir <227 .nl>
+    --extra-list class_227.txt --time-limit 30 --jobs 2
+
+It covers the 66 in-repo corpus files plus the 227-instance class, **287 instances**,
+OFF/ON interleaved with the arm order alternating, load ~2-3 on 4 cores, 5050 s.
+Rows are in `outer_piece_panel_2026-10-26.jsonl`.
+- **Cert-clean: yes.** No incorrect certified objective, no infeasibility claim
+  against a MINLPLib solution, and no bound beyond the oracle. Objective drift is 0
+  on the 139 instances both arms certify. 465 incumbent feasibility checks were
+  executed and none failed.
+- **Net-positive: no.** Certified **146 OFF -> 140 ON**: gained `prolog`, lost 7
+  (`smallinvDAXr{2,3,4}b100-110`, `smallinvDAXr4b{150-165,200-220}`, `clay0304m`,
+  `sssd12-05`). Total wall is 4908 vs 4833 s.
+  - The pieces were built on 27 instances: 15 certified through them, 12 stayed open.
+    Besides prolog, they certified 14 that OFF certifies too, each slower (e.g.
+    smallinvDAXr1b010-011 9.1 -> 20.2 s).
+  - The smallinvDAX losses are convex MIQPs. A root-only solve gives them no bound,
+    but the default tree certifies them. The pieces took their time, and the inner
+    piece did not finish.
+  - `clay0304m` and `sssd12-05` lost to the probe's cost alone (15.8 s and 11.4 s
+    OFF, against the 30 s limit with load).
+  - `chakra` is the one other instance where the pieces produced something OFF does
+    not: a bound of -183.88 where OFF had none (optimum -179.13), but no certificate.
+
+**Verdict: retired** (CLAUDE.md §5, outcome 2). No trigger repairs this. Even a
+perfect one, firing exactly where the default solve ends without a bound, has a
+ceiling of **one certificate on 287 instances: prolog**. CLAUDE.md §2 rejects a
+benefit confined to a named instance. The other genuine-recession candidates either
+decline structurally or have rays that are relaxation artefacts (§91). So knowing
+when to fire costs another solve, and nothing pays for it. `DISCOPT_OUTER_PIECE`,
+`modeling/_outer_piece.py`, its `Model.solve` entry point and its tests are deleted.
+
+**Kept as a probe:** `docs/dev/data/1975-prolog-limit/outer_piece_prototype.py` (the
+module verbatim), `outer_piece_solve_one.py` (reproduces prolog: optimal, 12.0 s at
+30 s), `outer_piece_accept.py`, and the panel rows.
+
+**What would change this.** A class of instances, not prolog alone, that all of
+these hold for:
+- the default leaves them without a bound;
+- the rewrite accepts them;
+- their generator-scaled slope is positive.
+
+`#1979` (`ex8_5_*`: `x7/(x5-x7)`, `log(x5-x7)`) would add a division rule. That is a
+rewrite of a ratio of two degree-1 forms, which is degree 0 and keeps the `s = 0`
+closure only where the denominator's leading form is bounded away from 0. It is
+the most likely route to such a class.

@@ -9433,55 +9433,6 @@ class Model:
 
     # ── Solve ──
 
-    def _finish_wrapped_solve(
-        self, result: "SolveResult", llm: bool, sensitivity: bool, validate: bool
-    ) -> "SolveResult":
-        """The tail of a solve whose result came from a model rebuilt from this one
-        (#1537 C recentring, #1975 outer piece), run on THIS model.
-
-        The objective is recomputed from the mapped point in the original
-        coordinates, the #1313/#1322 solved-point stamp is set, and the derived
-        reports (switched off for the inner solve, so none of them can describe the
-        rebuilt model) are computed here.
-        """
-        if result.objective is not None and result.x is not None:
-            self._reconcile_objective_with_model(result)
-        if result.x is not None:
-            from discopt._evaluator_cache import solution_state_fingerprint
-
-            setattr(result, "_problem_fingerprint", solution_state_fingerprint(self))
-            self._last_solve_result = result
-        if llm:
-            try:
-                result._explanation = result._explain_with_llm()
-            except Exception as _exp_exc:  # noqa: BLE001 - advisory, as below
-                import logging as _logging
-
-                _logging.getLogger("discopt.llm").debug(
-                    "post-solve LLM explanation skipped: %s: %s",
-                    type(_exp_exc).__name__,
-                    _exp_exc,
-                )
-        if sensitivity:
-            result._ensure_sensitivity()
-        if validate and result.x:
-            from discopt.validation.examiner import examine
-
-            try:
-                result.validation_report = examine(result, self)
-            except Exception as _val_exc:
-                # Same outcome as the unrecentred path (report None), but
-                # said out loud rather than silently.
-                import logging as _logging
-
-                _logging.getLogger(__name__).warning(
-                    "validation report not produced: %s: %s",
-                    type(_val_exc).__name__,
-                    _val_exc,
-                )
-                result.validation_report = None
-        return result
-
     @_counts_solve_depth
     @_solve_leaves_model_unchanged
     def solve(
@@ -10063,82 +10014,48 @@ class Model:
             if _rc is not None:
                 _solve_args["time_limit"] = _left_of_limit()
                 result = _recentre.solve_recentred(self, _rc, _solve_args)
-                return self._finish_wrapped_solve(result, llm, sensitivity, validate)
+                # The same tail the unrecentred path runs, on THIS model: the
+                # objective recomputed from the mapped point in the original
+                # coordinates, the #1313/#1322 solved-point stamp, and the derived
+                # reports (switched off for the inner solve, so none of them can
+                # describe the recentred model).
+                if result.objective is not None and result.x is not None:
+                    self._reconcile_objective_with_model(result)
+                if result.x is not None:
+                    from discopt._evaluator_cache import solution_state_fingerprint
 
-        # --- #1975: fathom the unbounded outer piece by a 1/T rescaling (default OFF) ---
-        # A model that keeps a column open after FBBT is solved as two pieces: the
-        # bounded inner piece ``T <= M`` through this same method, and the outer piece
-        # ``T >= M`` rescaled by ``s = 1/T`` into a bounded model whose certified
-        # bound covers it (``discopt.modeling._outer_piece``). Same scope as the
-        # recentring above (the caller's own solve, or the recentred twin of it).
-        from discopt.modeling import _outer_piece
+                    setattr(result, "_problem_fingerprint", solution_state_fingerprint(self))
+                    self._last_solve_result = result
+                if llm:
+                    try:
+                        result._explanation = result._explain_with_llm()
+                    except Exception as _exp_exc:  # noqa: BLE001 - advisory, as below
+                        import logging as _logging
 
-        if (
-            _outer_piece.outer_piece_enabled()
-            and (
-                _SOLVE_DEPTH.get() == 1
-                or (_SOLVE_DEPTH.get() == 2 and getattr(self, "_recentre_inner", False))
-            )
-            and not getattr(self, "_outer_piece_child", False)
-            and not stream
-            and lazy_constraints is None
-            and incumbent_callback is None
-            and node_callback is None
-            and cut_callback is None
-        ):
-            from discopt.solver import _validate_solve_budgets
+                        _logging.getLogger("discopt.llm").debug(
+                            "post-solve LLM explanation skipped: %s: %s",
+                            type(_exp_exc).__name__,
+                            _exp_exc,
+                        )
+                if sensitivity:
+                    result._ensure_sensitivity()
+                if validate and result.x:
+                    from discopt.validation.examiner import examine
 
-            _validate_solve_budgets(gap_tolerance, time_limit)
-            _op_plan = None
-            try:
-                _op_plan = _outer_piece.plan(self)
-            except _outer_piece.OuterPieceUnsupported as exc:
-                import logging as _logging
+                    try:
+                        result.validation_report = examine(result, self)
+                    except Exception as _val_exc:
+                        # Same outcome as the unrecentred path (report None), but
+                        # said out loud rather than silently.
+                        import logging as _logging
 
-                _logging.getLogger(__name__).info(
-                    "%s: outer piece skipped (%s); solving %r as usual",
-                    _outer_piece.FLAG,
-                    exc,
-                    self.name,
-                )
-            if _op_plan is not None:
-                _op_args = dict(
-                    time_limit=max(0.0, float(time_limit) - (_time.perf_counter() - _t_solve0)),
-                    gap_tolerance=gap_tolerance,
-                    abs_gap_tolerance=abs_gap_tolerance,
-                    threads=threads,
-                    llm=llm,
-                    sensitivity=sensitivity,
-                    deterministic=deterministic,
-                    partitions=partitions,
-                    initial_solution=initial_solution,
-                    warm_start=warm_start,
-                    skip_convex_check=skip_convex_check,
-                    nlp_bb=nlp_bb,
-                    solver=solver,
-                    validate=validate,
-                    verify_incumbent=verify_incumbent,
-                    gauss_newton=gauss_newton,
-                    tuning=tuning,
-                    debug=debug,
-                    **kwargs,
-                )
-                try:
-                    _op_result = _outer_piece.solve_with_outer_piece(self, _op_plan, _op_args)
-                except _outer_piece.OuterPieceUnsupported as exc:
-                    import logging as _logging
-
-                    _logging.getLogger(__name__).info(
-                        "%s: outer piece skipped (%s); solving %r as usual",
-                        _outer_piece.FLAG,
-                        exc,
-                        self.name,
-                    )
-                    _op_result = None
-                if _op_result is not None:
-                    return self._finish_wrapped_solve(_op_result, llm, sensitivity, validate)
-                # No usable outer bound: solve the model as usual with what is left.
-                time_limit = max(0.0, float(time_limit) - (_time.perf_counter() - _t_solve0))
+                        _logging.getLogger(__name__).warning(
+                            "validation report not produced: %s: %s",
+                            type(_val_exc).__name__,
+                            _val_exc,
+                        )
+                        result.validation_report = None
+                return result
 
         # Reject misspelled / unknown solve() keyword arguments loudly (M6).
         # ``**kwargs`` is forwarded verbatim to ``solve_model`` and its backends,
