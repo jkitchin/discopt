@@ -67,6 +67,7 @@ from discopt._relax.canonical_expr import (
 )
 from discopt._relax.convexity.interval import Interval
 from discopt._relax.convexity.interval_eval import evaluate_interval
+from discopt._relax.function_domains import affine_domain_rows, function_domains_enabled
 from discopt._relax.milp_relaxation import (
     MilpRelaxationModel,
     _expression_lower_bound_for_lift,
@@ -2116,6 +2117,82 @@ def _interior_tangent_point(
 # --------------------------------------------------------------------------- #
 # Shared 1-D secant/tangent emission (the composite-envelope math)
 # --------------------------------------------------------------------------- #
+def _pole_envelope_enabled() -> bool:
+    """#1979: ``DISCOPT_POLE_ENVELOPE`` -- one-sided 1-D envelopes at a closed-edge
+    pole (``_emit_1d_at_pole``) and the one-sided enclosure of a negative power on a
+    base touching 0 (``_pow_bounds``). Default **off** pending its section 5 panel.
+    Read at call time."""
+    return os.environ.get("DISCOPT_POLE_ENVELOPE", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _f_or_inf(f: Callable[[float], float], t: float) -> float:
+    """``f(t)``, or ``inf`` where ``f`` raises (a pole) -- for ``_emit_1d_at_pole``."""
+    try:
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            v = float(f(t))
+    except (ValueError, ArithmeticError):
+        return math.inf
+    return v if math.isfinite(v) else math.inf
+
+
+def _emit_1d_at_pole(
+    ctx: "_Builder",
+    w: int,
+    lt: LinForm,
+    lo: float,
+    hi: float,
+    f: Callable[[float], float],
+    fp: Callable[[float], float],
+    curv: Optional[str],
+    flo: float,
+    fhi: float,
+) -> None:
+    """#1979: the tangent half of ``w = f(t)``'s envelope when ``f`` has a pole at
+    exactly one CLOSED edge of a finite box (``1/t`` or ``log t`` on ``[0, hi]``).
+
+    ``_emit_1d`` declines the whole envelope there because the chord needs both
+    endpoint values. But every tangent of a convex ``f`` is a global underestimator
+    (and of a concave one an overestimator) wherever ``f`` is finite, so the tangent
+    family stays sound on the open side of the pole; only the chord is lost. Without
+    it the aux column of ``x / (y - x)`` or ``log(y - x)`` with ``y - x in [0, hi]``
+    had no row at all, and ``ex8_5_*``'s root LP ran off along it. Points: the
+    finite edge, the midpoint, and two points stepping toward the pole. Each row is
+    relaxed outward by ``envelope_1d_slack`` over the row's OWN finite magnitudes
+    (the tangent point's value and the finite edge's), never an infinite endpoint.
+    """
+    if curv is None or not _finite(lo, hi) or hi - lo < _MIN_WIDTH:
+        return
+    pole_lo = not math.isfinite(flo)
+    if pole_lo == (not math.isfinite(fhi)):
+        return  # both or neither endpoint is a pole: not this case
+    f_fin = fhi if pole_lo else flo
+    width = hi - lo
+    edge_pt = hi if pole_lo else lo
+    toward = (lambda r: lo + r * width) if pole_lo else (lambda r: hi - r * width)
+    sign = +1.0 if curv == "convex" else -1.0
+    for t0 in (edge_pt, 0.5 * (lo + hi), toward(0.1), toward(0.01)):
+        try:
+            with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+                g, gp = float(f(t0)), float(fp(t0))
+        except (ValueError, ArithmeticError):
+            continue
+        if not _finite(g, gp):
+            continue
+        intercept = g - gp * t0
+        coeffs = {w: -sign}
+        for j, c in lt.scaled(sign * gp).coeffs.items():
+            coeffs[j] = coeffs.get(j, 0.0) + c
+        rhs = -sign * intercept - sign * gp * lt.const
+        ctx.add_row(
+            coeffs, relaxed_rhs(rhs, envelope_1d_slack(gp, lo, hi, g, f_fin, lt.const, rhs))
+        )
+
+
 def _emit_1d(
     ctx: _Builder,
     w: int,
@@ -2149,8 +2226,15 @@ def _emit_1d(
         with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
             flo, fhi = float(f(lo)), float(f(hi))
     except (ValueError, ArithmeticError):
+        # #1979: a pole at one closed edge (``0.0 ** -1`` raises rather than
+        # returning inf). With the flag on, read a raising endpoint as the pole and
+        # keep the tangent half; off, decline as before.
+        if _pole_envelope_enabled():
+            _emit_1d_at_pole(ctx, w, lt, lo, hi, f, fp, curv, _f_or_inf(f, lo), _f_or_inf(f, hi))
         return False
     if not _finite(flo, fhi):
+        if _pole_envelope_enabled():
+            _emit_1d_at_pole(ctx, w, lt, lo, hi, f, fp, curv, flo, fhi)
         return False
     slope = (fhi - flo) / width  # secant slope
 
@@ -3153,6 +3237,10 @@ def _factor_value(
 
 
 def _pow_bounds(lo: float, hi: float, e: float) -> tuple[float, float]:
+    if e < 0.0 and _pole_envelope_enabled():
+        one_sided = _neg_pow_touching_zero(lo, hi, e)
+        if one_sided is not None:
+            return one_sided
     enc = Interval(np.asarray(float(lo)), np.asarray(float(hi)))
     from discopt._relax.convexity import interval as iv
 
@@ -3164,6 +3252,26 @@ def _pow_bounds(lo: float, hi: float, e: float) -> tuple[float, float]:
         return (-math.inf, math.inf)
     rl, rh = float(np.asarray(r.lo)), float(np.asarray(r.hi))
     return (rl if math.isfinite(rl) else -math.inf, rh if math.isfinite(rh) else math.inf)
+
+
+def _neg_pow_touching_zero(lo: float, hi: float, e: float) -> Optional[tuple[float, float]]:
+    """#1979: ``t**e`` (``e < 0``) on a base box with 0 as exactly one CLOSED edge.
+
+    ``t**e`` is undefined at 0, so the enclosure is the image of the half-open side:
+    on ``(0, hi]`` it is ``[hi**e, +inf)`` (decreasing); on ``[lo, 0)`` it is
+    ``(-inf, lo**e]`` for an odd integer ``e`` and ``[lo**e, +inf)`` for an even one
+    (a non-integer ``e`` has no real value there). The finite end is rounded
+    outward. ``None`` for any other box (the interval library's answer stands)."""
+    integral = float(e).is_integer()
+    if lo == 0.0 and hi > 0.0 and math.isfinite(hi):
+        v = hi**e
+        return (math.nextafter(v, -math.inf), math.inf)
+    if hi == 0.0 and lo < 0.0 and math.isfinite(lo) and integral:
+        v = lo**e
+        if int(e) % 2 == 0:
+            return (math.nextafter(v, -math.inf), math.inf)
+        return (-math.inf, math.nextafter(v, math.inf))
+    return None
 
 
 def _relax_var_power(ctx: _Builder, col: int, n: int) -> tuple[LinForm, tuple[float, float]]:
@@ -4926,6 +5034,13 @@ def build_uniform_relaxation(
             ctx.add_row(lc.coeffs, rhs_shift - lc.const)
             ctx.add_row(lc.scaled(-1.0).coeffs, -(rhs_shift) + lc.const)
         constraints_done += 1
+
+    # #1979: the affine domain rows of the model's functions (``log(t)`` needs
+    # ``t >= 0``, ...): ``terms . x + const >= lo`` -> ``-terms . x <= const - lo``.
+    # Implied by where the model is defined, so valid at every point it can take.
+    if not build_truncated and function_domains_enabled():
+        for _dterms, _dconst, _dlo in affine_domain_rows(model):
+            ctx.add_row({j: -a for j, a in _dterms.items()}, _dconst - _dlo)
 
     # Quadratic constraint-factor RLT (issue #640 Bucket 2, gated). Runs AFTER the
     # base build so every product column the base decomposition registered is

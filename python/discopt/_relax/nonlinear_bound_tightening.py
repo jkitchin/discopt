@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -4244,6 +4245,172 @@ _EXPR_TYPES = (
 )
 
 
+def poly_root_bound_enabled() -> bool:
+    """#1979: ``DISCOPT_POLY_ROOT_BOUND`` (default off pending its section 5 panel)."""
+    return os.environ.get("DISCOPT_POLY_ROOT_BOUND", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+#: Largest expanded polynomial the root-bound rule builds (terms), and its degree.
+_POLY_MAX_TERMS = 200
+_POLY_MAX_DEGREE = 8
+
+
+def _poly_expand(expr, model: Model) -> Optional[dict[tuple, float]]:
+    """``expr`` as ``{monomial: coeff}``, a monomial being a sorted tuple of
+    ``(flat_var, power)``; ``None`` when ``expr`` is not a polynomial in scalar
+    variables (or exceeds the size caps)."""
+
+    def mul(a: dict, b: dict) -> Optional[dict]:
+        out: dict[tuple, float] = {}
+        for ma, ca in a.items():
+            for mb, cb in b.items():
+                pw: dict[int, int] = dict(ma)
+                for v, k in mb:
+                    pw[v] = pw.get(v, 0) + k
+                if sum(pw.values()) > _POLY_MAX_DEGREE:
+                    return None
+                key = tuple(sorted(pw.items()))
+                out[key] = out.get(key, 0.0) + ca * cb
+                if len(out) > _POLY_MAX_TERMS:
+                    return None
+        return out
+
+    def add(a: dict, b: dict, sb: float) -> Optional[dict]:
+        out = dict(a)
+        for m, c in b.items():
+            out[m] = out.get(m, 0.0) + sb * c
+        return out if len(out) <= _POLY_MAX_TERMS else None
+
+    def rec(e) -> Optional[dict]:
+        if isinstance(e, Constant):
+            v = np.asarray(e.value)
+            return {(): float(v)} if v.ndim == 0 and np.isfinite(float(v)) else None
+        if isinstance(e, Variable):
+            if e.size != 1:
+                return None
+            return {((model._flat_var_offset(e), 1),): 1.0}
+        if isinstance(e, UnaryOp) and e.op == "neg":
+            a = rec(e.operand)
+            return None if a is None else {m: -c for m, c in a.items()}
+        if isinstance(e, BinaryOp):
+            if e.op in ("+", "-"):
+                a, b = rec(e.left), rec(e.right)
+                if a is None or b is None:
+                    return None
+                return add(a, b, 1.0 if e.op == "+" else -1.0)
+            if e.op == "*":
+                a, b = rec(e.left), rec(e.right)
+                return None if a is None or b is None else mul(a, b)
+            if e.op == "**" and isinstance(e.right, Constant):
+                p = np.asarray(e.right.value)
+                if p.ndim != 0 or float(p) != round(float(p)) or not 0 <= float(p) <= 8:
+                    return None
+                base = rec(e.left)
+                if base is None:
+                    return None
+                out: Optional[dict] = {(): 1.0}
+                for _ in range(int(p)):
+                    out = mul(out, base)
+                    if out is None:
+                        return None
+                return out
+        return None
+
+    return rec(expr)
+
+
+def _iv_mul(a: tuple[float, float], b: tuple[float, float]) -> tuple[float, float]:
+    """Outward-rounded interval product (``inf * 0`` read as 0, its limit here)."""
+    lo, hi = math.inf, -math.inf
+    for x in a:
+        for y in b:
+            if x == 0.0 or y == 0.0:
+                lo, hi = min(lo, 0.0), max(hi, 0.0)
+                continue
+            lo, hi = min(lo, mul_down(x, y)), max(hi, mul_up(x, y))
+    return lo, hi
+
+
+class UnivariatePolynomialRootBoundRule(NonlinearBoundTighteningRule):
+    """#1979: Cauchy's root bound for an equality that is a polynomial in one variable.
+
+    ``sum_k a_k(y) x^k == 0`` with ``a_d`` bounded away from 0 has every real root
+    ``|x| <= 1 + max_{k<d} |a_k| / |a_d|`` (Cauchy), and with interval coefficients
+    over the box of the other variables ``y`` the bound holds with ``max |a_k|`` over
+    the box and ``min |a_d|``. FBBT cannot see it: ``x`` occurs in several terms
+    (``x^3 - x^2 (1 + y) + z x - z y``), so interval evaluation of the body over an
+    open ``x`` is ``(-inf, inf)`` -- the dependency problem. On the cubic equations
+    of state of ``ex8_5_*`` (compressibility ``Z``) it bounds ``Z`` and lets the
+    relaxation see a finite box. Sound: every point satisfying the equality has
+    ``x`` inside the bound; the bound is rounded outward. Gated by
+    ``DISCOPT_POLY_ROOT_BOUND`` (default off).
+    """
+
+    name = "univariate_polynomial_root_bound"
+    row_scan_is_anytime = True
+
+    def tighten(self, model, flat_lb, flat_ub, metadata, deadline=None):
+        lb = np.asarray(flat_lb, dtype=np.float64).copy()
+        ub = np.asarray(flat_ub, dtype=np.float64).copy()
+        if not poly_root_bound_enabled():
+            return lb, ub
+        big = 1e19
+        for con in _rows_until(model, deadline):
+            if getattr(con, "sense", None) != "==":
+                continue
+            poly = _poly_expand(con.body, model)
+            if poly is None:
+                continue
+            rhs = float(con.rhs)
+            if rhs != 0.0:
+                poly[()] = poly.get((), 0.0) - rhs
+            degree: dict[int, int] = {}
+            for mono in poly:
+                for v, k in mono:
+                    degree[v] = max(degree.get(v, 0), k)
+            for x, d in degree.items():
+                if d < 2 or (lb[x] > -big and ub[x] < big):
+                    continue  # linear in x, or x already bounded
+                coef: dict[int, tuple[float, float]] = {}
+                ok = True
+                for mono, c in poly.items():
+                    kx = dict(mono).get(x, 0)
+                    iv = (c, c)
+                    for v, k in mono:
+                        if v == x:
+                            continue
+                        if not (lb[v] > -big and ub[v] < big):
+                            ok = False
+                            break
+                        for _ in range(k):
+                            iv = _iv_mul(iv, (float(lb[v]), float(ub[v])))
+                    if not ok:
+                        break
+                    lo0, hi0 = coef.get(kx, (0.0, 0.0))
+                    coef[kx] = (add_down(lo0, iv[0]), add_up(hi0, iv[1]))
+                if not ok:
+                    continue
+                lead = coef.get(d, (0.0, 0.0))
+                if lead[0] <= 0.0 <= lead[1]:
+                    continue  # leading coefficient may vanish: no bound
+                lead_min = min(abs(lead[0]), abs(lead[1]))
+                worst = 0.0
+                for k, (clo, chi) in coef.items():
+                    if k < d:
+                        worst = max(worst, abs(clo), abs(chi))
+                if not math.isfinite(worst):
+                    continue
+                bound = add_up(1.0, div_up(worst, lead_min))
+                lb[x] = max(lb[x], -bound)
+                ub[x] = min(ub[x], bound)
+        return lb, ub
+
+
 DEFAULT_NONLINEAR_BOUND_RULES: tuple[NonlinearBoundTighteningRule, ...] = (
     DefinedVariableForwardRule(),
     MonotoneFunctionEqualityRule(),
@@ -4257,6 +4424,7 @@ DEFAULT_NONLINEAR_BOUND_RULES: tuple[NonlinearBoundTighteningRule, ...] = (
     SqrtSumOfSquaresUpperBoundRule(),
     SumOfSquaresUpperBoundRule(),
     SeparableQuadraticUpperBoundRule(),
+    UnivariatePolynomialRootBoundRule(),
     ConvexQuadraticEllipsoidRule(),
     IntegerBlockQuadraticRule(),
     PeriodicVariableBoundRule(),

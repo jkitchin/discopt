@@ -498,8 +498,12 @@ pub enum ScoreTerm {
 }
 
 /// Fraction of the way the split point is pulled from the node point to the box
-/// midpoint (SCIP's `branching/midpull`), as #1970's native rule does.
-const SCORE_MIDPULL: f64 = 0.75;
+/// midpoint (SCIP's `branching/midpull`). `1.0` = the midpoint, the legacy rule's
+/// split: #1970's native `0.75` cost `test_sign_envelope` two certificates here,
+/// because a discontinuity at a box midpoint (`sign(x) == 0` on `[-2, 2]`) then
+/// never lands on a child boundary; on #1975's prolog piece the native score
+/// certifies without midpull too (57 nodes).
+const SCORE_MIDPULL: f64 = 1.0;
 
 /// Gap between a term and its McCormick / secant envelope at `x` over the box,
 /// computed from the point and the box alone (the tree sees only original
@@ -560,7 +564,8 @@ fn score_term_gap(t: &ScoreTerm, x: &[f64], lb: &[f64], ub: &[f64]) -> Option<f6
 /// positive gap whose width relative to `ref` is at least [`SPATIAL_MIN_WIDTH`].
 /// Each term's gap is split evenly over its candidate operands; the largest total
 /// wins (ties: wider relative width, then lower index). The split point is
-/// pulled [`SCORE_MIDPULL`] of the way from the point to the midpoint. `None` when
+/// pulled [`SCORE_MIDPULL`] of the way from the point to the midpoint (all the way:
+/// the midpoint). `None` when
 /// no term has a gap on a candidate -- the caller then falls back to the legacy
 /// rule, so the search stays complete. Branching order only: both children still
 /// cover the parent box.
@@ -1351,8 +1356,8 @@ mod tests_1978 {
         );
         let (d, _) = pick(&lb, &ub, &x, &terms, &[]).expect("a term has a gap");
         assert_eq!(d.var_index, 1, "the score rule splits u: {d:?}");
-        // Midpull: 3/4 of the way from the point to the midpoint, strictly inside.
-        let want = 0.75 * 2.5 + 0.25 * 2.3;
+        // The split point is the midpoint (SCORE_MIDPULL = 1), strictly inside.
+        let want = 2.5;
         assert!((d.branch_point - want).abs() < 1e-12, "{}", d.branch_point);
         assert!(d.branch_point > lb[1] && d.branch_point < ub[1]);
     }

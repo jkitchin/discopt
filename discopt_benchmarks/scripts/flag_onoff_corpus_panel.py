@@ -69,7 +69,8 @@ print("@@" + json.dumps(out))
 
 
 def solve(path: str, arm: str, tl: float, flag: str = FLAG) -> dict:
-    env = dict(os.environ, **{flag: arm})
+    # ``flag`` may name several flags (comma-separated): a bundle switched together.
+    env = dict(os.environ, **{f.strip(): arm for f in flag.split(",") if f.strip()})
     try:
         p = subprocess.run(
             [sys.executable, "-c", CHILD, path, str(tl)],
@@ -134,7 +135,9 @@ def problems(row: dict, ref: dict, tol_rel: float = 1e-4, tol_abs: float = 1e-6)
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--flag", default=FLAG, help="the DISCOPT_* flag under test")
+    ap.add_argument(
+        "--flag", default=FLAG, help="the DISCOPT_* flag under test (comma-separated: a bundle)"
+    )
     ap.add_argument("--solu", required=True)
     ap.add_argument("--extra-dir", default=None, help="more .nl files (e.g. the #1975 class)")
     ap.add_argument("--extra-list", default=None, help="names to take from --extra-dir")
