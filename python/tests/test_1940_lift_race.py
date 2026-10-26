@@ -9,7 +9,8 @@ slice, then the arm with the smaller gap, all merged. These tests pin:
 * the control flow, against a stubbed ``solve_model`` (fast and clock-free);
 * that the race is invisible where the lift certifies inside its first slice --
   the same tree and the same certificate as the legacy rule (CLAUDE.md §5,
-  bound-neutral regime);
+  bound-neutral regime). Whether it does is read off the race's first arm: the
+  slice is wall-clock, so on a slow enough machine it does not;
 * that it declines the lift on an instance where the lift loses;
 * the guards that keep the legacy rule (opt-out, ``deterministic``, short limits,
   callbacks / warm starts, cheap-first, nested arms).
@@ -20,6 +21,7 @@ from __future__ import annotations
 import math
 import os
 import types
+import warnings
 
 import discopt.modeling as dm
 import numpy as np
@@ -293,20 +295,70 @@ def test_the_race_runs_on_an_adopted_instance(monkeypatch):
 # --------------------------------------------------------------------------
 
 
+#: Instances whose lift certifies inside its first slice with a wide margin on
+#: any machine the suite runs on (single core, current main: 0.01-0.61 s against
+#: the ~2.65 s at which the engine's first stage ends inside a 5 s slice). For
+#: them the premise is asserted, so the bound-neutral check is proven to fire.
+_LIFT_WIDE_MARGIN = ("nvs02", "nvs14", "prob02", "prob03")
+#: ex1264's lift needs ~2.6 s on one core, i.e. it sits ON that cliff: it
+#: certifies inside the slice on a dev machine and misses it on a CI shard
+#: (``-n 4`` on 4 cores), after which the race continues and the tree differs.
+#: The premise is measured, not assumed, and the exact check runs when it held.
+_LIFT_AT_THE_CLIFF = ("ex1264",)
+
+
+def _race_arms(monkeypatch):
+    """Record ``(arm, in_slice, status)`` for every ``solve_model`` call."""
+    arms = []
+    real = S.solve_model
+
+    def spy(*a, **k):
+        r = real(*a, **k)
+        arms.append((S._IPX_RACE_ARM.get(), S._IPX_RACE_IN_SLICE.get(), r.status))
+        return r
+
+    monkeypatch.setattr(S, "solve_model", spy)
+    return arms
+
+
 @pytest.mark.smoke
-@pytest.mark.parametrize("name", ["ex1264", "nvs02", "nvs14", "prob02", "prob03"])
-def test_bound_neutral_where_the_lift_certifies_in_its_slice(name, monkeypatch):
-    """The lift certifies these well inside one slice, so the race must return
-    exactly the legacy answer: same certified objective, same tree."""
+@pytest.mark.parametrize(
+    "name,premise_required",
+    [(n, True) for n in _LIFT_WIDE_MARGIN] + [(n, False) for n in _LIFT_AT_THE_CLIFF],
+)
+def test_bound_neutral_where_the_lift_certifies_in_its_slice(name, premise_required, monkeypatch):
+    """Where the lift certifies inside its first slice, the race must return
+    exactly the legacy answer: same certified objective, same tree.
+
+    "Certifies inside its first slice" depends on the machine's speed (the slice
+    is wall-clock), so it is read off the race's first arm rather than assumed.
+    Where it did not hold, the race ran on into its other arms and only the
+    certificate is owed, not the legacy tree.
+    """
     monkeypatch.delenv("DISCOPT_IPX_CHEAP_FIRST", raising=False)
     monkeypatch.setenv("DISCOPT_IPX_RACE", "0")
     legacy = _nl(name).solve(time_limit=60.0)
     monkeypatch.setenv("DISCOPT_IPX_RACE", "1")
+    arms = _race_arms(monkeypatch)
     raced = _nl(name).solve(time_limit=60.0)
     assert legacy.status == "optimal" and legacy.gap_certified
     assert raced.status == "optimal" and raced.gap_certified
-    assert raced.objective == legacy.objective
-    assert raced.node_count == legacy.node_count
+    assert arms and arms[0][:2] == ("lift", True), f"the race did not run: {arms}"
+    premise = arms[0][2] == "optimal"
+    if premise_required:
+        assert premise, f"{name}: the lift no longer certifies inside its slice: {arms}"
+    if premise:
+        assert raced.objective == legacy.objective
+        assert raced.node_count == legacy.node_count
+    else:
+        # Two certified solves, each within the default 1e-4 relative gap.
+        assert raced.objective == pytest.approx(legacy.objective, rel=2e-4)
+        warnings.warn(
+            f"{name}: the lift did not certify inside its {S._IPX_RACE_SLICE_S} s slice "
+            f"on this machine (arms {arms}); checked the certificate only, not the tree "
+            f"({raced.node_count} vs legacy {legacy.node_count} nodes)",
+            stacklevel=1,
+        )
 
 
 def _dense_qp(n, seed):
