@@ -81,6 +81,7 @@ def _solve_one(nl: str, tl: float) -> None:
                 "nodes": r.node_count,
                 "wall": wall,
                 "picks": ss.get("tree/pseudocost_picks"),
+                "spatial_picks": ss.get("tree/spatial_score_picks"),
                 "route": getattr(r, "algorithm_route", None),
                 "verify_failed": bad,
             }

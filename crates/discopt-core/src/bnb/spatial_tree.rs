@@ -43,6 +43,9 @@ struct QNode {
     /// the LP value moved)` -- so its LP bound can update that column's pseudocost.
     /// `None` at the root and for spatial children.
     br: Option<(usize, bool, f64)>,
+    /// #1970: the same for a spatial branch -- `(column, up, width cut off)` --
+    /// recorded only under `SpatialTreeConfig::spatial_score`.
+    sbr: Option<(usize, bool, f64)>,
     /// The node-LP basis this node starts from, shared by both children: the
     /// parent's optimal basis, or, when the parent's LP decided nothing, the one
     /// the parent itself inherited. `None` unless
@@ -313,6 +316,25 @@ pub struct SpatialTreeConfig {
     /// not depend on the start (see `solve_spatial_node_from`). Cost: each queued
     /// node holds one shared parent basis (`n_total` status bytes plus `m` indices).
     pub warm_start_children: bool,
+    /// #1970: choose the spatial branching column by a score over candidates
+    /// (SCIP's nonlinear-handler rule, Bestuzheva et al. 2023) instead of the
+    /// widest operand of the single largest-gap term. Every operand of every
+    /// violated term is a candidate; its violation score is the sum, over the
+    /// terms it appears in, of that term's gap split evenly across the term's
+    /// operands. With [`Self::spatial_pscost_weight`] `> 0` a spatial pseudocost
+    /// (per-side bound gain per unit of width cut off, recorded as children are
+    /// solved) is added, each component normalised by its maximum over the
+    /// candidates. Off (the default) is the legacy rule. Branching order only:
+    /// every child pair still covers its parent box, so no bound moves.
+    pub spatial_score: bool,
+    /// #1970: weight of the pseudocost component under [`Self::spatial_score`]
+    /// (the violation component has weight 1). `0` scores by violation alone.
+    pub spatial_pscost_weight: f64,
+    /// #1970: spatial split point. `0` (the default) splits at the LP value
+    /// (pulled to the midpoint only within ~1e-9 of a bound); `m in (0, 1]` takes
+    /// `m * mid + (1 - m) * lp` (SCIP's `branching/midpull`), which keeps the
+    /// point at least `m / 2` of the width from either bound.
+    pub spatial_midpull: f64,
 }
 
 impl Default for SpatialTreeConfig {
@@ -337,6 +359,9 @@ impl Default for SpatialTreeConfig {
             pseudocost_branching: false,
             pseudocost_reliability: 0,
             warm_start_children: false,
+            spatial_score: false,
+            spatial_pscost_weight: 0.0,
+            spatial_midpull: 0.0,
         }
     }
 }
@@ -419,6 +444,9 @@ pub struct SpatialTreeResult {
     /// #1913: integer branches chosen by pseudocost (`config.pseudocost_branching`);
     /// 0 when the flag is off -- the probe that the rule fired.
     pub n_pseudocost_picks: usize,
+    /// #1970: spatial branches chosen by the candidate score
+    /// (`config.spatial_score`); 0 when the flag is off.
+    pub n_spatial_score_picks: usize,
     /// #1935: node LPs started from the parent's basis
     /// ([`SpatialTreeConfig::warm_start_children`]). 0 with the flag off, which is
     /// how a panel tells "the warm start never engaged" from "it engaged and did
@@ -655,6 +683,7 @@ pub fn solve_spatial_tree_observed(
     let mut n_incumbent_value_calls = 0usize;
     let mut n_incumbent_value_raised = 0usize;
     let mut n_pseudocost_picks = 0usize;
+    let mut n_spatial_score_picks = 0usize;
     let mut n_warm_starts = 0usize;
     let mut n_warm_shape_mismatch = 0usize;
     let mut n_node_pivots = 0usize;
@@ -669,6 +698,7 @@ pub fn solve_spatial_tree_observed(
         lo: spec.global_lo.clone(),
         hi: spec.global_hi.clone(),
         br: None,
+        sbr: None,
         basis: None,
         parent: None,
     });
@@ -676,6 +706,9 @@ pub fn solve_spatial_tree_observed(
     // their observation counts. Read only under `config.pseudocost_branching`.
     let mut pc_sum = [vec![0.0f64; spec.n_cols], vec![0.0f64; spec.n_cols]];
     let mut pc_cnt = [vec![0usize; spec.n_cols], vec![0usize; spec.n_cols]];
+    // #1970: spatial pseudocosts, the same layout, per unit of width cut off.
+    let mut spc_sum = [vec![0.0f64; spec.n_cols], vec![0.0f64; spec.n_cols]];
+    let mut spc_cnt = [vec![0usize; spec.n_cols], vec![0usize; spec.n_cols]];
     // Root box widths (for root-relative branch scoring in the fallback rule).
     let root_w: Vec<f64> = spec
         .global_lo
@@ -723,6 +756,7 @@ pub fn solve_spatial_tree_observed(
         lo,
         hi,
         br,
+        sbr,
         basis: parent_basis,
         parent: parent_id,
     }) = heap.pop()
@@ -793,6 +827,7 @@ pub fn solve_spatial_tree_observed(
                 n_incumbent_value_calls,
                 n_incumbent_value_raised,
                 n_pseudocost_picks,
+                n_spatial_score_picks,
                 n_warm_starts,
                 n_warm_shape_mismatch,
                 n_node_pivots,
@@ -832,6 +867,7 @@ pub fn solve_spatial_tree_observed(
                 n_incumbent_value_calls,
                 n_incumbent_value_raised,
                 n_pseudocost_picks,
+                n_spatial_score_picks,
                 n_warm_starts,
                 n_warm_shape_mismatch,
                 n_node_pivots,
@@ -960,6 +996,7 @@ pub fn solve_spatial_tree_observed(
                         None,
                         parent_basis.clone(),
                         Some(node_count),
+                        false,
                     );
                 }
                 None => global_lb_closed = global_lb_closed.min(parent_bound),
@@ -980,6 +1017,13 @@ pub fn solve_spatial_tree_observed(
                 let d = usize::from(up);
                 pc_sum[d][col] += (node.bound - parent_bound).max(0.0) / dist;
                 pc_cnt[d][col] += 1;
+            }
+        }
+        if let Some((col, up, dist)) = sbr {
+            if node.bound.is_finite() && parent_bound.is_finite() && dist > 0.0 {
+                let d = usize::from(up);
+                spc_sum[d][col] += (node.bound - parent_bound).max(0.0) / dist;
+                spc_cnt[d][col] += 1;
             }
         }
         // #1236: node 1 IS the root region, and `bound` is the rigorous lower bound
@@ -1157,6 +1201,7 @@ pub fn solve_spatial_tree_observed(
                                     n_incumbent_value_calls,
                                     n_incumbent_value_raised,
                                     n_pseudocost_picks,
+                                    n_spatial_score_picks,
                                     n_warm_starts,
                                     n_warm_shape_mismatch,
                                     n_node_pivots,
@@ -1233,8 +1278,17 @@ pub fn solve_spatial_tree_observed(
         let pick = if let Some(j) = frac_int.or(near_int) {
             Some((j, x[j].floor() + 0.5)) // integer branch: <= floor, >= ceil
         } else if let Some(col) = branch_col.filter(|&c| width(c) > config.min_box_width) {
+            // #1970: score the candidates instead of taking the worst term's
+            // widest operand. `None` only if every candidate is too narrow to
+            // split, which the legacy column above is not.
+            let col = if config.spatial_score {
+                n_spatial_score_picks += 1;
+                spatial_score_pick(spec, x, (&lo, &hi), config, (&spc_sum, &spc_cnt)).unwrap_or(col)
+            } else {
+                col
+            };
             // Spatial branch at the LP value, pulled to the interior.
-            Some((col, clamp_interior(x[col], lo[col], hi[col])))
+            Some((col, spatial_split_point(x[col], lo[col], hi[col], config)))
         } else {
             fallback()
         };
@@ -1257,6 +1311,7 @@ pub fn solve_spatial_tree_observed(
             int_frac,
             child_basis,
             Some(node_count),
+            config.spatial_score,
         );
     }
 
@@ -1294,6 +1349,7 @@ pub fn solve_spatial_tree_observed(
                 n_incumbent_value_calls,
                 n_incumbent_value_raised,
                 n_pseudocost_picks,
+                n_spatial_score_picks,
                 n_warm_starts,
                 n_warm_shape_mismatch,
                 n_node_pivots,
@@ -1319,6 +1375,7 @@ pub fn solve_spatial_tree_observed(
             n_incumbent_value_calls,
             n_incumbent_value_raised,
             n_pseudocost_picks,
+            n_spatial_score_picks,
             n_warm_starts,
             n_warm_shape_mismatch,
             n_node_pivots,
@@ -1383,6 +1440,7 @@ fn push_children(
     frac: Option<f64>,
     basis: Option<Rc<Basis>>,
     parent: Option<usize>,
+    record_spatial: bool,
 ) {
     // #1913: a fractional-integer branch records its column, side and the distance
     // the LP value moves, for the pseudocost update when each child is solved.
@@ -1402,6 +1460,7 @@ fn push_children(
                 lo: lo1,
                 hi: hi1,
                 br: br(false),
+                sbr: None,
                 basis: basis.clone(),
                 parent,
             });
@@ -1412,11 +1471,21 @@ fn push_children(
                 lo: lo2,
                 hi: hi2,
                 br: br(true),
+                sbr: None,
                 basis: basis.clone(),
                 parent,
             });
         }
     } else {
+        // #1970: a spatial child records the width it cut off its parent's box.
+        let sbr = |up: bool| {
+            let cut = if up {
+                split_at - lo[split_col]
+            } else {
+                hi[split_col] - split_at
+            };
+            record_spatial.then_some((split_col, up, cut))
+        };
         let mut hi1 = hi.to_vec();
         hi1[split_col] = split_at;
         let mut lo2 = lo.to_vec();
@@ -1426,6 +1495,7 @@ fn push_children(
             lo: lo.to_vec(),
             hi: hi1,
             br: None,
+            sbr: sbr(false),
             basis: basis.clone(),
             parent,
         });
@@ -1434,10 +1504,137 @@ fn push_children(
             lo: lo2,
             hi: hi.to_vec(),
             br: None,
+            sbr: sbr(true),
             basis: basis.clone(),
             parent,
         });
     }
+}
+
+/// #1970: the spatial split point for a column with LP value `xv` on `[lo, hi]`:
+/// `config.spatial_midpull` of the way from `xv` to the midpoint (`0` is the
+/// legacy LP-value split). Any point strictly inside the box gives two covering
+/// children, so the choice moves no bound.
+fn spatial_split_point(xv: f64, lo: f64, hi: f64, config: &SpatialTreeConfig) -> f64 {
+    let m = config.spatial_midpull.clamp(0.0, 1.0);
+    let p = if m > 0.0 {
+        m * 0.5 * (lo + hi) + (1.0 - m) * xv
+    } else {
+        xv
+    };
+    clamp_interior(p, lo, hi)
+}
+
+/// The operand columns of a lifted term (a bilinear term's two, a 1-D term's one).
+fn term_operands(t: &EnvTerm) -> [Option<usize>; 2] {
+    match *t {
+        EnvTerm::Bilinear { i, j, .. } => [Some(i), (j != i).then_some(j)],
+        EnvTerm::Monomial { i, .. } => [Some(i), None],
+        EnvTerm::AffineSquare { j, .. } => [Some(j), None],
+        EnvTerm::Sqrt { x: xc, .. } => [Some(xc), None],
+    }
+}
+
+/// #1970: the spatial branching column under `config.spatial_score`, after SCIP's
+/// nonlinear-handler rule (Bestuzheva et al. 2023, `constraints/nonlinear/branching`):
+/// every operand of a term with a nonzero McCormick gap is a candidate, its
+/// violation score the sum of those terms' gaps split evenly over their operands.
+/// With `spatial_pscost_weight > 0`, the product of the two children's estimated
+/// gains (spatial pseudocost per unit of width cut off, times the width each side
+/// cuts; a column not yet observed on a side takes the mean over observed columns)
+/// is added, each component divided by its maximum over the candidates. Columns
+/// no wider than `min_box_width` are not candidates. `None` when none remains.
+fn spatial_score_pick(
+    spec: &SpatialKernelSpec,
+    x: &[f64],
+    (lo, hi): (&[f64], &[f64]),
+    config: &SpatialTreeConfig,
+    (spc_sum, spc_cnt): (&[Vec<f64>; 2], &[Vec<usize>; 2]),
+) -> Option<usize> {
+    let mut viol = vec![0.0f64; spec.n_cols];
+    let mut add = |cols: &mut dyn Iterator<Item = usize>, gap: f64| {
+        let cols: Vec<usize> = cols
+            .filter(|&c| hi[c] - lo[c] > config.min_box_width)
+            .collect();
+        let share = gap / cols.len().max(1) as f64;
+        for c in cols {
+            viol[c] += share;
+        }
+    };
+    for t in &spec.terms {
+        let gap = match term_true_value(t, x) {
+            Some(v) => (x[t.aux_col()] - v).abs(),
+            None => f64::INFINITY,
+        };
+        if gap > 0.0 {
+            add(&mut term_operands(t).into_iter().flatten(), gap);
+        }
+    }
+    for t in &spec.blf_terms {
+        let a_val = t.a_const + dot_form(&t.a_cols, &t.a_coeffs, x);
+        let b_val = t.b_const + dot_form(&t.b_cols, &t.b_coeffs, x);
+        let gap = (x[t.w] - a_val * b_val).abs();
+        if gap > 0.0 {
+            let mut cols: Vec<usize> = t.a_cols.iter().chain(t.b_cols.iter()).copied().collect();
+            cols.sort_unstable();
+            cols.dedup();
+            add(&mut cols.into_iter(), gap);
+        }
+    }
+    let cands: Vec<usize> = (0..spec.n_cols).filter(|&c| viol[c] > 0.0).collect();
+    if cands.is_empty() {
+        return None;
+    }
+    // An infinite gap (an operand outside a term's domain) outranks everything.
+    if let Some(&c) = cands.iter().find(|&&c| viol[c].is_infinite()) {
+        return Some(c);
+    }
+    let vmax = cands.iter().map(|&c| viol[c]).fold(0.0f64, f64::max);
+    let w = config.spatial_pscost_weight;
+    let mut ps = vec![0.0f64; cands.len()];
+    let mut pmax = 0.0f64;
+    if w > 0.0 {
+        let mean = |d: usize| {
+            let (s, n) = spc_sum[d]
+                .iter()
+                .zip(spc_cnt[d].iter())
+                .filter(|(_, &n)| n > 0)
+                .fold((0.0, 0usize), |(s, n), (&ps, &pn)| {
+                    (s + ps / pn as f64, n + 1)
+                });
+            (n > 0).then(|| s / n as f64)
+        };
+        // Before any observation the component is uniform, so it changes nothing.
+        if let (Some(m0), Some(m1)) = (mean(0), mean(1)) {
+            let avg = [m0, m1];
+            let pc = |d: usize, c: usize| {
+                if spc_cnt[d][c] > 0 {
+                    spc_sum[d][c] / spc_cnt[d][c] as f64
+                } else {
+                    avg[d]
+                }
+            };
+            const EPS: f64 = 1e-6;
+            for (k, &c) in cands.iter().enumerate() {
+                let p = spatial_split_point(x[c], lo[c], hi[c], config);
+                let down = (pc(0, c) * (hi[c] - p)).max(EPS);
+                let up = (pc(1, c) * (p - lo[c])).max(EPS);
+                ps[k] = down * up;
+                pmax = pmax.max(ps[k]);
+            }
+        }
+    }
+    let mut best: Option<(f64, usize)> = None;
+    for (k, &c) in cands.iter().enumerate() {
+        let mut score = viol[c] / vmax;
+        if pmax > 0.0 {
+            score += w * ps[k] / pmax;
+        }
+        if best.map(|(b, _)| score > b).unwrap_or(true) {
+            best = Some((score, c));
+        }
+    }
+    best.map(|(_, c)| c)
 }
 
 /// #1913: the fractional integer column with the largest pseudocost product score
@@ -2011,6 +2208,133 @@ mod tests {
             assert!((res.incumbent.unwrap() - best).abs() < 1e-9);
             assert!(res.bound <= best + 1e-9);
             assert_eq!(res.n_pseudocost_picks > 0, on);
+        }
+    }
+
+    /// #1970: the score sums each column's share of every violated term's gap, so
+    /// a column in two moderately violated terms outranks the operands of the one
+    /// term with the largest gap (which the legacy rule splits).
+    #[test]
+    fn spatial_score_prefers_the_column_shared_by_violated_terms() {
+        let spec = SpatialKernelSpec {
+            n_cols: 8,
+            n_orig: 5,
+            c: vec![0.0; 8],
+            integrality: vec![false; 8],
+            global_lo: vec![0.0; 8],
+            global_hi: vec![2.0, 2.0, 2.0, 2.0, 2.0, 4.0, 4.0, 4.0],
+            fixed_rows: vec![],
+            terms: vec![
+                EnvTerm::Bilinear { i: 0, j: 1, w: 5 },
+                EnvTerm::Bilinear { i: 0, j: 2, w: 6 },
+                EnvTerm::Bilinear { i: 3, j: 4, w: 7 },
+            ],
+            blf_terms: vec![],
+            obbt_candidates: vec![],
+        };
+        // Every product is 1; the gaps are 1, 1 and 1.5.
+        let x = [1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.5];
+        let (lo, hi) = (spec.global_lo.clone(), spec.global_hi.clone());
+        let none = [vec![0.0; 8], vec![0.0; 8]];
+        let zero = [vec![0usize; 8], vec![0usize; 8]];
+        for w in [0.0, 1.0] {
+            let cfg = SpatialTreeConfig {
+                spatial_score: true,
+                spatial_pscost_weight: w,
+                ..SpatialTreeConfig::default()
+            };
+            // Column 0 scores 0.5 + 0.5; columns 3 and 4 score 0.75 each. With
+            // no observation the pseudocost component is uniform and moves nothing.
+            assert_eq!(
+                spatial_score_pick(&spec, &x, (&lo, &hi), &cfg, (&none, &zero)),
+                Some(0)
+            );
+        }
+        // An observed pseudocost can outweigh the violation: column 3 gains a lot
+        // per unit cut on both sides, column 0 nothing.
+        let mut s = [vec![0.0; 8], vec![0.0; 8]];
+        let mut n = [vec![1usize; 8], vec![1usize; 8]];
+        s[0][3] = 10.0;
+        s[1][3] = 10.0;
+        n[0][0] = 1;
+        let cfg = SpatialTreeConfig {
+            spatial_score: true,
+            spatial_pscost_weight: 1.0,
+            ..SpatialTreeConfig::default()
+        };
+        assert_eq!(
+            spatial_score_pick(&spec, &x, (&lo, &hi), &cfg, (&s, &n)),
+            Some(3)
+        );
+        // A column too narrow to split is never a candidate.
+        let mut hi2 = hi.clone();
+        hi2[0] = lo[0] + 1e-12;
+        let cfg0 = SpatialTreeConfig {
+            spatial_score: true,
+            ..SpatialTreeConfig::default()
+        };
+        let pick = spatial_score_pick(&spec, &x, (&lo, &hi2), &cfg0, (&none, &zero));
+        // Column 0's shares go to its partners: columns 1 and 2 score 1 each.
+        assert_eq!(pick, Some(1));
+    }
+
+    #[test]
+    fn spatial_midpull_moves_the_split_toward_the_midpoint() {
+        let cfg = |m: f64| SpatialTreeConfig {
+            spatial_midpull: m,
+            ..SpatialTreeConfig::default()
+        };
+        assert_eq!(spatial_split_point(0.1, 0.0, 4.0, &cfg(0.0)), 0.1);
+        assert!((spatial_split_point(0.1, 0.0, 4.0, &cfg(0.75)) - 1.525).abs() < 1e-12);
+        assert_eq!(spatial_split_point(0.1, 0.0, 4.0, &cfg(1.0)), 2.0);
+        // At a bound the legacy rule already takes the midpoint.
+        assert_eq!(spatial_split_point(0.0, 0.0, 4.0, &cfg(0.0)), 2.0);
+    }
+
+    /// #1970: the scored rule certifies the same optima as the legacy one, and
+    /// reports that it ran. `min -x*y - y*z  s.t.  x + y + z <= 3` on `[0, 2]^3`:
+    /// `-y * (x + z) >= -y * (3 - y) >= -2.25`, attained at `y = 1.5`.
+    #[test]
+    fn spatial_score_certifies_the_same_optimum() {
+        let spec = SpatialKernelSpec {
+            n_cols: 5,
+            n_orig: 3,
+            c: vec![0.0, 0.0, 0.0, -1.0, -1.0],
+            integrality: vec![false; 5],
+            global_lo: vec![0.0, 0.0, 0.0, -1e20, -1e20],
+            global_hi: vec![2.0, 2.0, 2.0, 1e20, 1e20],
+            fixed_rows: vec![FixedRow {
+                cols: vec![0, 1, 2],
+                coeffs: vec![1.0, 1.0, 1.0],
+                rhs: 3.0,
+            }],
+            terms: vec![
+                EnvTerm::Bilinear { i: 0, j: 1, w: 3 },
+                EnvTerm::Bilinear { i: 1, j: 2, w: 4 },
+            ],
+            blf_terms: vec![],
+            obbt_candidates: vec![],
+        };
+        for (score, w, m) in [(false, 0.0, 0.0), (true, 0.0, 0.0), (true, 1.0, 0.75)] {
+            for s in [&spec, &xy_min_spec()] {
+                let cfg = SpatialTreeConfig {
+                    spatial_score: score,
+                    spatial_pscost_weight: w,
+                    spatial_midpull: m,
+                    gap_tol: 1e-5,
+                    ..SpatialTreeConfig::default()
+                };
+                let res = solve_spatial_tree(s, &cfg, &SimplexOptions::default());
+                let opt = if s.n_cols == 5 { -2.25 } else { 2.0 };
+                assert_eq!(res.status, TreeStatus::Optimal, "{score} {w} {m}");
+                assert!((res.incumbent.unwrap() - opt).abs() < 1e-4, "{res:?}");
+                assert!(res.bound <= opt + 1e-9);
+                // `xy_min_spec` certifies at its root; the other has to branch.
+                if s.n_cols == 5 {
+                    assert_eq!(res.n_spatial_score_picks > 0, score, "{res:?}");
+                    assert!(res.node_count > 1);
+                }
+            }
         }
     }
 

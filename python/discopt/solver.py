@@ -2424,6 +2424,8 @@ def _try_native_spatial_kernel(
     if _kernel_pseudocost_branching_enabled():
         solve_kwargs["pseudocost_branching"] = True
         solve_kwargs["pseudocost_reliability"] = _kernel_pseudocost_reliability()
+    # #1970: the spatial branching rule (see the helper; default the legacy rule).
+    solve_kwargs.update(_kernel_spatial_branching_kwargs())
     # #1935: start each child's node LP from its parent's basis (default OFF);
     # mode 2 also repairs a dual-infeasible inherited basis by bound flips.
     _warm_mode = _native_warm_start_mode()
@@ -2765,6 +2767,7 @@ def _try_native_spatial_kernel(
     )
     # #1913: integer branches chosen by pseudocost; 0 unless DISCOPT_KERNEL_PSEUDOCOST.
     _native_stats["tree/pseudocost_picks"] = float(int(res.get("n_pseudocost_picks") or 0))
+    _native_stats["tree/spatial_score_picks"] = float(int(res.get("n_spatial_score_picks") or 0))
     # #1935: the parent-basis warm start (``DISCOPT_NATIVE_WARM_START``). The warm
     # count is 0 with ``=0`` (cold), which tells "never engaged" from "engaged and
     # did not help"; pivots and seconds are the node-LP effort it is meant to cut.
@@ -11147,6 +11150,26 @@ def _kernel_pseudocost_reliability() -> int:
     23 s (0: 30 s, 4: 30.5 s) and genpooling_meyer04's bound at 747,372 (0: 688,825);
     4 certified nvs19 at 60 s but slowed st_e31 back to 30 s."""
     return max(0, int(os.environ.get("DISCOPT_KERNEL_PSEUDOCOST_RELIABILITY", "1") or 0))
+
+
+def _kernel_spatial_branching_kwargs() -> dict:
+    """#1970: ``DISCOPT_KERNEL_SPATIAL_BRANCHING`` for the native spatial kernel.
+
+    ON, the spatial branching column is chosen by SCIP's nonlinear-handler rule
+    (Bestuzheva et al. 2023, ``constraints/nonlinear/branching``) instead of the
+    widest operand of the single largest-gap term: every operand of every violated
+    term is scored by its share of those terms' McCormick gaps plus a spatial
+    pseudocost (per-side bound gain per unit of width cut off), and the split point
+    is pulled 3/4 of the way from the LP value to the midpoint (SCIP's
+    ``branching/midpull``). See ``SpatialTreeConfig::spatial_score`` /
+    ``spatial_midpull``. Branching order only: every child pair still covers its
+    parent box, so no bound moves. OFF passes nothing and is the legacy rule.
+    Read at call time.
+    """
+    raw = os.environ.get("DISCOPT_KERNEL_SPATIAL_BRANCHING", "0").strip().lower()
+    if raw in ("0", "false", "no", "off", ""):
+        return {}
+    return {"spatial_score": True, "spatial_pscost_weight": 1.0, "spatial_midpull": 0.75}
 
 
 def _native_warm_start_mode() -> int:
