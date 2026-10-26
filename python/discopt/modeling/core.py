@@ -9636,7 +9636,12 @@ class Model:
         incumbent_callback : callable, optional
             Incumbent callback. Called when a new incumbent is about to
             be accepted. Should accept ``(ctx, model, solution)`` and
-            return ``True`` to accept or ``False`` to reject.
+            return ``True`` to accept or ``False`` to reject. A rejection
+            prunes the node that produced the point without proving the rest
+            of its box holds no acceptable point, so the solve is certified
+            ``optimal`` only if the accepted incumbent is within tolerance of
+            that node's bound; otherwise it reports ``feasible`` with the
+            node's bound kept in ``bound`` (#1964).
         node_callback : callable, optional
             Node callback. Called after each batch of nodes is processed.
             Should accept ``(ctx, model)`` and return ``None``. A MILP with a
