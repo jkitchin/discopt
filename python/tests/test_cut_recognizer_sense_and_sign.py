@@ -3,9 +3,11 @@
 ``inject_cuts`` called ``model.minimize(...)`` unconditionally and injected cuts
 whose derivation had reported ``h`` non-convex and the check unsound; it also
 checked convexity on ``(0, sqrt(3.5*(2500 - 30**2)))`` -- one gas instance's pipe
-bound, hardcoded. ``structure_cuts`` is on by default, so ``maximize(-cost)`` and a
-negative power coefficient both returned ``infeasible`` with ``gap_certified=True``
-on feasible models (found by the #1952-#1958 adjacent-bug sweep).
+bound, hardcoded. ``structure_cuts`` was on by default then, so ``maximize(-cost)``
+and a negative power coefficient both returned ``infeasible`` with
+``gap_certified=True`` on feasible models (found by the #1952-#1958 adjacent-bug
+sweep). The default-on pass was retired in #1965; the recognizer is now an explicit
+opt-in, and these tests pin both its own soundness and the default solve.
 """
 
 from __future__ import annotations

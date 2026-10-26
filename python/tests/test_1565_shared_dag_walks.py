@@ -247,28 +247,6 @@ def test_recognizer_deadline_aborts_before_injecting_anything():
     assert cr.recognize_and_inject(m2, deadline=lambda: False) == 2
 
 
-def test_solve_logs_structure_cut_abandonment(monkeypatch, caplog):
-    """The solver treats an expired recognizer as a loud, sound abstention."""
-    import logging
-
-    from discopt._relax.symbolic import cut_recognizer as cr
-
-    def expired(model, **kwargs):
-        raise cr.RecognizerDeadline("structure-cut recognizer: time limit spent during test")
-
-    monkeypatch.setattr(cr, "recognize_and_inject", expired)
-    m = dm.Model("tiny")
-    x = m.continuous("x", lb=0.5, ub=2.0)
-    y = m.continuous("y", lb=0.5, ub=2.0)
-    m.subject_to(x * y == 1.0)
-    m.minimize(x + y)
-    with caplog.at_level(logging.INFO, logger="discopt.solver"):
-        r = m.solve(time_limit=30)
-    assert r.status == "optimal"
-    assert r.objective == pytest.approx(2.0, abs=1e-5)
-    assert any("structure-cut presolve abandoned" in rec.getMessage() for rec in caplog.records)
-
-
 # --- the factorable lift (one huge constraint) -------------------------------------
 
 

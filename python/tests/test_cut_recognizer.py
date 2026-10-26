@@ -463,88 +463,10 @@ def test_signed_signomial_fires_on_cvxnonsep_nsig30():
 
 
 # --------------------------------------------------------------------------
-# Auto-engaged structure-cut presolve in solve_model (issue #15)
+# The auto-engaged structure-cut presolve in solve_model (issue #15) was retired
+# in #1965; python/tests/test_1965_structure_cuts_retired.py covers the refusal
+# and the explicit opt-in (``recognize_and_inject`` before ``solve``).
 # --------------------------------------------------------------------------
-
-
-@pytest.mark.slow
-def test_structure_cuts_presolve_auto_closes_gas_network():
-    """The default `m.solve()` auto-runs the square-difference recognizer as a
-    presolve and closes the gas-network gap (issue #15): the bound reaches the
-    optimum and the search is tiny — without any manual `inject_all_patterns`."""
-    from discopt.benchmarks.problems.gas_network_minlp import build_gas_network_minlp
-
-    m = build_gas_network_minlp()
-    r = m.solve(time_limit=90, gap_tolerance=1e-4)
-    assert r.status == "optimal", f"auto structure-cuts did not certify (status={r.status})"
-    assert r.objective == pytest.approx(3.0026, abs=1e-2)
-    # Bound reached the optimum (gap closed) — the cut tightened the relaxation.
-    assert r.bound is not None and r.bound == pytest.approx(3.0026, abs=1e-2)
-    assert r.node_count <= 100, f"expected a tiny search after the cut, got {r.node_count} nodes"
-
-
-@pytest.mark.slow
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "#1965: since the #1952-#1958 sweep the cut's convexity is checked on the flow "
-        "variable's model box [0, 100], not a hardcoded (0, sqrt(5600)); y_lower(w) is "
-        "real only for w**2 < 8750, so h is not proven convex there and inject_cuts "
-        "declines. The ON arm's root bound is then 0.5 like the opt-out arm, and the "
-        "control assertion below fails. Proving the model implies w**2 < 8750 (or "
-        "retiring the pass) is #1965."
-    ),
-)
-def test_structure_cuts_optout_leaves_gap_open():
-    """`structure_cuts=False` disables the presolve: the gas network's root bound
-    is then the loose McCormick bound and the gap stays open (pre-fix behaviour).
-
-    Re-derived 2026-10-02. This used to solve to completion in 20 s and assert the
-    FINAL bound stayed below 2.0. That stopped holding at c618b022 (#355, the
-    incremental per-node McCormick LP: the 20 s bound rose 1.0 -> 2.56, first-
-    parent bisect), and today the opt-out arm certifies the optimum in 9 nodes
-    (bound 3.00249) -- branching alone now closes what the cut used to be needed
-    for. That is the tree getting stronger, not the opt-out breaking, so the
-    probe is now the ROOT: a root-only search (``max_nodes=1``) isolates what the
-    presolve contributes and is deterministic (3 reps, identical bounds).
-    Measured: opt-out root bound 0.5, gap open; with the cuts 2.5026.
-    """
-    from discopt.benchmarks.problems.gas_network_minlp import build_gas_network_minlp
-
-    r = build_gas_network_minlp().solve(
-        time_limit=20, gap_tolerance=1e-4, structure_cuts=False, max_nodes=1
-    )
-    # No cut -> the root bound is far below the optimum (3.0026), the gap open.
-    assert r.root_bound is not None and r.root_bound < 2.0, r.root_bound
-    assert r.bound is None or r.bound < 2.0, r.bound
-    assert not r.gap_certified and r.status != "optimal", (r.status, r.gap_certified)
-
-    # Control arm (CLAUDE.md SS6): the same root-only search WITH the presolve
-    # must lift the bound past the threshold, else the assertion above would pass
-    # just as well on a build where the presolve does nothing at all.
-    r_on = build_gas_network_minlp().solve(time_limit=20, gap_tolerance=1e-4, max_nodes=1)
-    assert r_on.root_bound is not None and r_on.root_bound >= 2.0, r_on.root_bound
-
-
-def test_structure_cuts_presolve_noop_on_unrelated_model():
-    """The presolve is a sound no-op on a model without the square-difference
-    structure: same result with and without it, no spurious cuts."""
-    m = dm.Model("nc")
-    x = m.continuous("x", lb=-3.0, ub=3.0)
-    y = m.continuous("y", lb=-3.0, ub=3.0)
-    m.minimize(x * y)
-    m.subject_to(x * x + y * y <= 4.0)
-    r_on = m.solve(time_limit=20)
-
-    m2 = dm.Model("nc")
-    x2 = m2.continuous("x", lb=-3.0, ub=3.0)
-    y2 = m2.continuous("y", lb=-3.0, ub=3.0)
-    m2.minimize(x2 * y2)
-    m2.subject_to(x2 * x2 + y2 * y2 <= 4.0)
-    r_off = m2.solve(time_limit=20, structure_cuts=False)
-
-    assert r_on.objective == pytest.approx(r_off.objective, abs=1e-3)
-    assert r_on.objective == pytest.approx(-2.0, abs=1e-3)
 
 
 # --------------------------------------------------------------------------

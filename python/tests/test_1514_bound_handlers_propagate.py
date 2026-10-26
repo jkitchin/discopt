@@ -230,52 +230,9 @@ def test_clique_extraction_declines_only_on_missing_repr(monkeypatch):
     assert len(calls) == 2
 
 
-def _weymouth_like() -> dm.Model:
-    """Has a nonlinear equality, so the structure-cut recognizer is entered."""
-    m = dm.Model("sq_1514")
-    p = m.continuous("p", lb=1.0, ub=10.0)
-    q = m.continuous("q", lb=1.0, ub=10.0)
-    f = m.continuous("f", lb=0.0, ub=5.0)
-    m.subject_to(p**2 - q**2 == f**2)
-    m.subject_to(p >= 2.0)
-    m.minimize(f + p)
-    return m
-
-
-def test_structure_cut_defect_fails_the_solve(monkeypatch):
-    calls: list[int] = []
-    monkeypatch.setattr(
-        cr, "recognize_and_derive_cuts", _counting_raiser(lambda: _Boom("recognizer"), calls)
-    )
-    with pytest.raises(_Boom, match="recognizer"):
-        _weymouth_like().solve(time_limit=30, deterministic=True)
-    assert calls, "the structure-cut recognizer was never reached"
-
-
-@pytest.mark.parametrize(
-    "decline",
-    [
-        lambda: SymbolicTranslationError("outside the translator"),
-        lambda: NotImplementedError("sympy cannot solve"),
-    ],
-)
-def test_structure_cut_documented_declines_still_skip(monkeypatch, decline):
-    calls: list[int] = []
-    monkeypatch.setattr(cr, "recognize_and_derive_cuts", _counting_raiser(decline, calls))
-    res = _weymouth_like().solve(time_limit=30, deterministic=True)
-    assert calls, "the structure-cut recognizer was never reached"
-    assert res.status == "optimal"
-
-
-def test_structure_cut_derivation_error_still_skips(monkeypatch):
-    from discopt._relax.symbolic.constraint_cuts import CutDerivationError
-
-    calls: list[int] = []
-    monkeypatch.setattr(
-        cr, "recognize_and_derive_cuts", _counting_raiser(lambda: CutDerivationError("x"), calls)
-    )
-    res = _weymouth_like().solve(time_limit=30, deterministic=True)
-    assert calls and res.status == "optimal"
+# The solve-path structure-cut tests (a recognizer defect fails the solve; its
+# documented declines skip) went with the auto-engaged pass in #1965: the solver
+# no longer calls the recognizer.
 
 
 def test_recognizer_declines_non_polynomial_rows_with_the_documented_type():

@@ -180,7 +180,7 @@ class TermUnderestimator:
         the exact derivative — there is nothing here that needs autodiff. Until
         #75 this was ``jax.grad`` applied to a lambdified copy of ``h_expr``,
         which pulled 211 jax modules onto a default solve (measured on the gas
-        network MINLP, where ``structure_cuts`` is default-ON) to compute a
+        network MINLP, where ``structure_cuts`` was default-ON until #1965) to compute a
         univariate slope.
 
         ``h_expr`` contains ``Max``, so the derivative carries ``Heaviside``

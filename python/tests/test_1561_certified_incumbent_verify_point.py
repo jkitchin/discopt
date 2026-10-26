@@ -298,37 +298,6 @@ def test_declared_bounds_are_frozen_at_the_snapshot():
     assert verify_point(m, np.array([4.0, 1.0]), evaluator=ev, variables=declared).ok
 
 
-@pytest.mark.slow
-def test_gas_network_structure_cuts_keep_their_certificate(monkeypatch):
-    """The real instance: structure cuts append 2 aux columns (19 -> 21)."""
-    pytest.importorskip("sympy")
-    import discopt._relax.symbolic.cut_recognizer as cut_recognizer
-    from discopt.benchmarks.problems.gas_network_minlp import build_gas_network_minlp
-
-    # Since #1610 the solve hands the caller's model back unextended, so the
-    # extension is observed inside the solve, where the recognizer runs.
-    extended: list[int] = []
-    real_inject = cut_recognizer.recognize_and_inject
-
-    def _spy(model, *a, **kw):
-        n = real_inject(model, *a, **kw)
-        extended.append(len(model._variables))
-        return n
-
-    monkeypatch.setattr(cut_recognizer, "recognize_and_inject", _spy)
-    m = build_gas_network_minlp()
-    n_declared = len(m._variables)
-    res = m.solve(time_limit=90, gap_tolerance=1e-4)
-
-    assert extended and max(extended) > n_declared, "structure cuts did not extend the model"
-    assert len(m._variables) == n_declared  # #1610: the caller's model is unchanged
-    assert res.status == "optimal" and res.gap_certified is True, (
-        res.status,
-        res.solver_stats,
-    )
-    assert "certificate/incumbent_unverified" not in (res.solver_stats or {})
-
-
 # ── the reported instance ───────────────────────────────────────────────────
 
 

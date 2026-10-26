@@ -112,6 +112,17 @@ MODULE_STATUS: Final[dict[str, ModuleStatus]] = {
             "claim_differential.py, never by the solver."
         ),
     ),
+    "symbolic.cut_recognizer": ModuleStatus(
+        status="tooling",
+        reason=(
+            "SymPy structure-cut recognizer (square-difference network cuts, "
+            "inject_all_patterns). Its auto-engaged solve-path pass was retired "
+            "in #1965 (0 of 59 corpus instances fired; 1.6-4.8x wall on the gas "
+            "variants with identical results); kept as an explicit, opt-in "
+            "analysis tool called on a model before solve. Tested by "
+            "test_cut_recognizer*.py and test_recognizer_adversarial.py."
+        ),
+    ),
     "symbolic.signed_signomial": ModuleStatus(
         status="tooling",
         reason=(

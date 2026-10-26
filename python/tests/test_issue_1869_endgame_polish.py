@@ -1,9 +1,11 @@
 """Issue #1869: an incumbent just outside the gap, re-solved to full NLP accuracy.
 
-``prolog`` (optimum 0) is the probe. Its objective cancels ~1e5-sized bilinear terms,
+``prolog`` (optimum 0) was the probe. Its objective cancels ~1e5-sized bilinear terms,
 and the node NLPs' scaled tolerance leaves the Python tree's incumbent at 1.51e-6
-under POUNCE 0.13.0 (8.2e-7 under 0.12.0). The verified bound is -1e-12, so the
-absolute gap stays just above the 1e-6 tolerance and the tree runs to its limit.
+under POUNCE 0.13.0 (8.2e-7 under 0.12.0). The "verified" bound was -1e-12, so the
+absolute gap stayed just above the 1e-6 tolerance and the tree ran to its limit.
+#1966 retracted that bound: prolog's root LP is exactly unbounded below over its
+double data, so prolog no longer has a bound and no longer probes the polish.
 ``DISCOPT_ENDGAME_POLISH`` re-solves that incumbent once at ``tol=1e-12,
 constr_viol_tol=1e-14``. The re-solved point is verified, adopted only on strict
 improvement, and closes the gap.
@@ -18,15 +20,6 @@ import discopt.solver as SV
 import pytest
 
 pytestmark = pytest.mark.unit
-
-_XFAIL_1966 = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "#1966: prolog's root-LP certificate rested on a reduced cost of -1.7e-13 on an "
-        "open column rounding to 0.0; the rigorous NS bound (#1956) abstains there and "
-        "exact_ns_bound does not converge"
-    ),
-)
 
 FLAG = "DISCOPT_ENDGAME_POLISH"
 PROLOG = os.path.join(os.path.dirname(__file__), "data", "minlplib_nl", "prolog.nl")
@@ -43,14 +36,10 @@ def test_window_admits_only_a_nearly_closed_gap():
     assert not SV._endgame_polish_in_window(1.0, float("-inf"), 1e-4, 1e-6)
 
 
-@_XFAIL_1966
-def test_flag_on_certifies_prolog_through_the_polish(monkeypatch):
-    monkeypatch.setenv(FLAG, "1")
-    SV.ENDGAME_POLISH_STATS.clear()
-    r = dm.from_nl(PROLOG).solve(time_limit=60)
-    assert SV.ENDGAME_POLISH_STATS["fired"] > 0, "the polish never ran"
-    assert r.status == "optimal" and r.gap_certified, (r.status, r.objective, r.bound)
-    assert abs(r.objective) <= 1e-6 and r.bound <= 1e-9  # optimum 0 (minlplib.solu)
+# #1966: ``test_flag_on_certifies_prolog_through_the_polish`` was removed. Its bound
+# (-1e-12) came from a root LP that is exactly unbounded below over prolog's double
+# data, so the certificate it expected was never a proof; see
+# test_1966_prolog_root_lp_exactly_unbounded.py.
 
 
 def test_flag_off_never_polishes(monkeypatch):
