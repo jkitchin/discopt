@@ -1967,13 +1967,20 @@ def _endgame_polish_enabled() -> bool:
     0.99999996 -> 0.99999999986); total wall 1924 -> 1842 s, SGM over the 135 both
     certify 2.30 vs 2.30 s. ``=0`` is the opt-out.
 
+    **Retracted in part (#1966):** the one certification gain, ``prolog``, closed
+    its gap against a root bound (-1e-12) that was not a proof -- prolog's root LP
+    is exactly unbounded below over its double data (see
+    ``free_column_lp_cert_enabled``). Without it the panel shows no certification
+    gain: the pass stays sound (primal only) and still improves incumbents on 9 of
+    the 13 instances where it fired. Whether that alone carries default-ON is an
+    owner call, recorded in docs/dev/flag-retirement-audit.md.
+
     The Python tree's incumbents come from node NLPs run at the heuristic options,
     whose gradient-based scaling makes the incumbent's *absolute* objective accurate
     only to the scaled tolerance. ``prolog`` (optimum 0, an objective that cancels
-    ~1e5-sized bilinear terms) is the probe: under POUNCE 0.13.0 the tree's incumbent
-    is 1.51e-6, the verified bound is -1e-12, and the absolute gap 1.5e-6 never meets
-    the 1e-6 tolerance -- 1651 nodes to the 60 s limit. One re-solve from that
-    incumbent at ``tol=1e-12, constr_viol_tol=1e-14`` reaches 1.06e-8, row-exact.
+    ~1e5-sized bilinear terms) was the probe: under POUNCE 0.13.0 the tree's incumbent
+    is 1.51e-6 and one re-solve from it at ``tol=1e-12, constr_viol_tol=1e-14``
+    reaches 1.06e-8, row-exact (its -1e-12 "bound" was retracted by #1966).
 
     Bound-neutral in the dual: the pass only proposes an incumbent, which ``subnlp``
     re-verifies for constraint and integer feasibility and ``_inject_incumbent``

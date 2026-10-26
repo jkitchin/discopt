@@ -22,15 +22,6 @@ from discopt.tightening import fbbt_box
 
 pytestmark = pytest.mark.unit
 
-_XFAIL_1966 = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "#1966: prolog's root-LP certificate rested on a reduced cost of -1.7e-13 on an "
-        "open column rounding to 0.0; the rigorous NS bound (#1956) abstains there and "
-        "exact_ns_bound does not converge"
-    ),
-)
-
 FLAG = "DISCOPT_FREE_COLUMN_LP_CERT"
 PROLOG = os.path.join(os.path.dirname(__file__), "data", "minlplib_nl", "prolog.nl")
 OPT = 0.0  # MINLPLib minlplib.solu
@@ -43,31 +34,15 @@ def _root(flag: str, monkeypatch):
     return ML.MccormickLPRelaxer(m).solve_at_node(bt.lb, bt.ub)
 
 
-@_XFAIL_1966
-def test_flag_on_certifies_the_root_lp_without_crossing_the_optimum(monkeypatch):
-    r = _root("1", monkeypatch)
-    assert r.status == "optimal" and np.isfinite(r.lower_bound)
-    assert r.lower_bound <= OPT + 1e-9  # a relaxation bound never exceeds the optimum
-    assert r.lower_bound >= OPT - 1e-6  # and here it is tight
+# #1966: the flag-ON root-LP and end-to-end ``prolog`` certification tests were removed.
+# prolog's root LP over the FBBT box is EXACTLY unbounded below over its double data
+# (``fl(3340.8) + fl(371.2) > 3712``), so a finite certificate for it would be false;
+# test_1966_prolog_root_lp_exactly_unbounded.py pins the ray and the abstention.
 
 
 def test_flag_off_leaves_the_root_lp_uncertified(monkeypatch):
     r = _root("0", monkeypatch)
     assert r.status == "uncertified" and r.lower_bound is None
-
-
-@_XFAIL_1966
-def test_flag_on_certifies_prolog(monkeypatch):
-    monkeypatch.setenv(FLAG, "1")
-    # The bound is -1e-12; whether the incumbent lands inside the 1e-6 absolute gap
-    # depends on the NLP's accuracy (1.51e-6 under POUNCE 0.13.0), which the endgame
-    # polish closes -- see test_issue_1869_endgame_polish.py.
-    monkeypatch.setenv("DISCOPT_ENDGAME_POLISH", "1")
-    ML.BOUND_PROVENANCE.clear()
-    r = dm.from_nl(PROLOG).solve(time_limit=60)
-    assert ML.BOUND_PROVENANCE.get("verified_highs", 0) > 0, "the verified route never fired"
-    assert r.status == "optimal" and r.gap_certified, (r.status, r.bound, r.node_count)
-    assert abs(r.objective - OPT) <= 1e-5 and r.bound <= OPT + 1e-9
 
 
 def test_4stufen_root_bound_is_below_the_best_known_dual(monkeypatch):

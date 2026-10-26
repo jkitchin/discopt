@@ -412,12 +412,11 @@ def free_column_lp_cert_enabled() -> bool:
     """``DISCOPT_FREE_COLUMN_LP_CERT`` gate (#1869 (b)): certify a declined McCormick
     node LP with an unbounded nonlinear column through the verified HiGHS LP route.
 
-    ``prolog``'s pricing rows bound its bilinear sums (``x2 x0 + x4 x1 <= x18``,
-    ``x18 <= 3340.8 x7 + 500 x8``, ...), so its root LP is bounded at the optimum 0,
-    yet the in-house relaxer reported it ``uncertified``: with free columns the
-    floating dual's reduced costs land on an open side and the Neumaier--Shcherbina
-    bound is ``-inf``. ``lp_milp_highs.solve_lp_std`` certified the same LP at -1e-12
-    (but see the retraction below).
+    With open columns the floating dual's reduced costs land on an open side and the
+    in-house Neumaier--Shcherbina bound is ``-inf`` even where the LP is bounded;
+    ``lp_milp_highs.solve_lp_std`` can still certify such an LP (#1729 dual scaling,
+    the rational ``exact_ns_bound``). ``prolog`` was the motivating example, wrongly:
+    see the retraction below.
     Its bound is rigorous for ANY dual, so HiGHS's accuracy decides only whether a
     bound is found. Bound-changing (a node that had none gets one), so gated per
     CLAUDE.md section 5; read at call time.
@@ -431,12 +430,20 @@ def free_column_lp_cert_enabled() -> bool:
     fewer nodes where both certify (``ex9_1_5`` 3 -> 1, ``ex9_1_8`` 5 -> 3), total
     wall 1494 -> 1424 s. ``=0`` restores the decline.
 
-    **Retracted in part (#1966):** the ``prolog`` gain did not survive a rigorous
-    reduced cost. At HiGHS's dual its column 7 (open above) has exact reduced cost
-    -1.7e-13; the pre-#1956 NS bound rounded it to 0.0 and skipped the column, so
-    that certificate was not a proof. With the enclosure the route declines and
-    ``exact_ns_bound`` does not converge; ``prolog`` is uncertified again. The
-    other gains (``ex7_3_3``, ``ex9_1_1``, ``ex9_1_5``, ``ex9_1_8``) still certify.
+    **Retracted in part (#1966):** the ``prolog`` gain was a false certificate.
+    prolog's root LP over the FBBT box is *exactly unbounded below* over its double
+    data: a rational ray ``d >= 0`` on columns open above has ``A d = 0`` and
+    ``c^T d = -1.7053e-13``, because ``x18 <= fl(3340.8) x7``, ``x19 <= fl(371.2) x7``,
+    ``x7`` is priced at ``3712`` and ``fl(3340.8) + fl(371.2) - 3712 = 1.7053e-13``
+    in binary (zero in decimal). The pre-#1956 NS bound rounded the matching
+    reduced cost to 0.0. No dual correction can bound this LP, and root OBBT
+    (``run_obbt``: ``x2 <= 1918``, ``x4 <= 862``) leaves an exact ray of the same
+    cost, so ``exact_ns_bound``'s abstention is correct
+    (``test_1966_prolog_root_lp_exactly_unbounded.py``). Certifying prolog needs a
+    relaxation whose limit along ``x7 -> inf`` respects the shared budget
+    ``x2 + x3 <= 0.94 S1 - ...`` (e.g. RLT products of that row with ``x0``), not a
+    better dual. The other gains (``ex7_3_3``, ``ex9_1_1``, ``ex9_1_5``,
+    ``ex9_1_8``) still certify; the net-positive bar rests on them.
     """
     return os.environ.get("DISCOPT_FREE_COLUMN_LP_CERT", "1").strip().lower() not in (
         "0",
