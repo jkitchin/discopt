@@ -181,7 +181,7 @@ fn certify_pd(a: &[f64], d: usize, shift: f64) -> bool {
         for k in 0..j {
             s -= l[j * d + k] * l[j * d + k];
         }
-        if !(s > 0.0) || !s.is_finite() {
+        if s.is_nan() || s <= 0.0 || !s.is_finite() {
             return false;
         }
         let ljj = s.sqrt();
@@ -347,8 +347,8 @@ impl ConvexQuadForm {
         for &(c, a) in &self.aux {
             *row.entry(c).or_insert(0.0) -= a;
         }
-        for k in 0..d {
-            *row.entry(self.vars[k]).or_insert(0.0) += 2.0 * qx[k] + self.lin[k];
+        for ((&col, &qk), &lk) in self.vars.iter().zip(qx.iter()).zip(self.lin.iter()) {
+            *row.entry(col).or_insert(0.0) += 2.0 * qk + lk;
         }
         let mut entries: Vec<(usize, f64)> = row.into_iter().filter(|&(_, v)| v != 0.0).collect();
         entries.sort_by_key(|&(c, _)| c);
@@ -357,7 +357,7 @@ impl ConvexQuadForm {
         }
         let lhs: f64 = entries.iter().map(|&(c, v)| v * x[c]).sum();
         let viol = lhs - rhs;
-        if !(viol > viol_tol * rhs.abs().max(1.0)) {
+        if viol.is_nan() || viol <= viol_tol * rhs.abs().max(1.0) {
             return None;
         }
         let (cols, coeffs) = entries.into_iter().unzip();
