@@ -1,0 +1,251 @@
+diff --git a/crates/discopt-core/src/presolve/fbbt.rs b/crates/discopt-core/src/presolve/fbbt.rs
+index e2c5e0e..c17fc6a 100644
+--- a/crates/discopt-core/src/presolve/fbbt.rs
++++ b/crates/discopt-core/src/presolve/fbbt.rs
+@@ -1276,12 +1276,79 @@ thread_local! {
+     /// [`fbbt_sign_domain_enabled`] for the walk in progress, set by
+     /// [`backward_propagate`] so the recursion need not thread it through.
+     static SIGN_DOMAIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
++    /// [`fbbt_free_sign_enabled`] for the walk in progress.
++    static FREE_SIGN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
++    #[cfg(test)]
++    static FREE_SIGN_FORCE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+     /// Test-only override of the environment flag: unit tests run on parallel
+     /// threads of one process, so they must not toggle a process-wide variable.
+     #[cfg(test)]
+     static SIGN_DOMAIN_FORCE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+ }
+ 
++/// #1982 item 1: the NARROWED one-sided product rule (`DISCOPT_FBBT_FREE_SIGN`,
++/// default **off**). `a * b = w` with `w` excluding 0 by more than [`FEAS_TOL`] and
++/// `b` touching 0 from one side forces `b != 0`, so `a` takes `w`'s sign times `b`'s.
++/// Unlike the retired `DISCOPT_FBBT_ONE_SIDED_DIV` (#1616) this only ever replaces
++/// an INFINITE side of a scalar variable `a` (bounds `>= 1e19` are the no-bound
++/// sentinel): a finite bound is never tightened. With `b = [0, g]` and `w >= w_lo`
++/// the free lower side becomes `w_lo / g` (rounded down; `0` when `g` is unbounded).
++pub fn fbbt_free_sign_enabled() -> bool {
++    match std::env::var("DISCOPT_FBBT_FREE_SIGN") {
++        Err(_) => false,
++        Ok(v) => !matches!(
++            v.trim().to_ascii_lowercase().as_str(),
++            "0" | "false" | "off" | "no" | ""
++        ),
++    }
++}
++
++const NO_BOUND: f64 = 1e19;
++
++/// The narrowed rule for target `a` (node `target`) of `a * g in w`; see
++/// [`fbbt_free_sign_enabled`]. Writes `var_bounds` directly: the target is a leaf.
++fn free_sign_mul(
++    arena: &ExprArena,
++    target: ExprId,
++    w: &Interval,
++    g: &Interval,
++    var_bounds: &mut [Interval],
++) {
++    let ExprNode::Variable { index, size: 1, .. } = arena.get(target) else {
++        return;
++    };
++    let a = var_bounds[*index];
++    // `a = w / g`, so sign(a) = sign(w) * sign(g).
++    let w_sign = if w.lo > FEAS_TOL {
++        1.0
++    } else if w.hi < -FEAS_TOL {
++        -1.0
++    } else {
++        return;
++    };
++    let (g_sign, g_mag) = if g.lo == 0.0 && g.hi > 0.0 {
++        (1.0, g.hi)
++    } else if g.hi == 0.0 && g.lo < 0.0 {
++        (-1.0, -g.lo)
++    } else {
++        return;
++    };
++    // |a| >= |w|_min / |g|_max, rounded down; 0 when |g| has no finite bound.
++    let w_min = if w_sign > 0.0 { w.lo } else { -w.hi };
++    let q = if g_mag >= NO_BOUND || !g_mag.is_finite() {
++        0.0
++    } else {
++        div_down(w_min, g_mag).max(0.0)
++    };
++    if w_sign * g_sign > 0.0 {
++        if a.lo <= -NO_BOUND {
++            var_bounds[*index] = a.intersect(&Interval::new(q, f64::INFINITY));
++        }
++    } else if a.hi >= NO_BOUND {
++        var_bounds[*index] = a.intersect(&Interval::new(f64::NEG_INFINITY, -q));
++    }
++}
++
+ fn sign_domain_for_walk() -> bool {
+     #[cfg(test)]
+     if let Some(on) = SIGN_DOMAIN_FORCE.with(|c| c.get()) {
+@@ -1304,6 +1371,11 @@ pub fn backward_propagate(
+     var_bounds: &mut [Interval],
+ ) {
+     let prev = SIGN_DOMAIN.with(|c| c.replace(sign_domain_for_walk()));
++    #[cfg(test)]
++    let free = FREE_SIGN_FORCE.with(|c| c.get()).unwrap_or_else(fbbt_free_sign_enabled);
++    #[cfg(not(test))]
++    let free = fbbt_free_sign_enabled();
++    let prev_free = FREE_SIGN.with(|c| c.replace(free));
+     // The `Sum` inversion needs each reduction's fold count (#1364). Compute the
+     // table ONCE per walk here rather than inside the recursion, and only when the
+     // arena actually contains a reduction -- most constraint bodies do not.
+@@ -1314,6 +1386,7 @@ pub fn backward_propagate(
+     };
+     backward_propagate_with(arena, id, output_bound, node_bounds, var_bounds, &counts);
+     SIGN_DOMAIN.with(|c| c.set(prev));
++    FREE_SIGN.with(|c| c.set(prev_free));
+ }
+ 
+ /// Children of an expression node (the operands its value is computed from).
+@@ -1493,6 +1566,10 @@ fn backward_propagate_with(
+                 BinOp::Mul => {
+                     // a * b in [lo, hi]
+                     // a in [lo, hi] / b (if b doesn't contain 0)
++                    if FREE_SIGN.with(|c| c.get()) {
++                        free_sign_mul(arena, *left, &tightened, &r, var_bounds);
++                        free_sign_mul(arena, *right, &tightened, &l, var_bounds);
++                    }
+                     if r.lo > 0.0 || r.hi < 0.0 {
+                         let new_l = interval_div(&tightened, &r);
+                         backward_propagate_with(
+@@ -5874,3 +5951,135 @@ mod tests_1982 {
+         );
+     }
+ }
++
++#[cfg(test)]
++mod tests_1982_free_sign {
++    //! #1982 item 1: the narrowed one-sided product rule (`DISCOPT_FBBT_FREE_SIGN`):
++    //! only an infinite side of a scalar variable is ever replaced.
++    use super::*;
++    use crate::expr::{ConstraintRepr, VarInfo};
++
++    /// FBBT of `x0 * x1 == rhs` over the given boxes, the rule forced `on`.
++    fn run(rhs: f64, x0: (f64, f64), x1: (f64, f64), on: bool) -> Vec<Interval> {
++        let mut arena = ExprArena::new();
++        let mut v = |name: &str, index: usize| {
++            arena.add(ExprNode::Variable {
++                name: name.into(),
++                index,
++                size: 1,
++                shape: vec![],
++            })
++        };
++        let (v0, v1) = (v("x0", 0), v("x1", 1));
++        let body = arena.add(ExprNode::BinaryOp {
++            op: BinOp::Mul,
++            left: v0,
++            right: v1,
++        });
++        let var = |name: &str, offset: usize, b: (f64, f64)| VarInfo {
++            name: name.into(),
++            var_type: VarType::Continuous,
++            offset,
++            size: 1,
++            shape: vec![],
++            lb: vec![b.0],
++            ub: vec![b.1],
++        };
++        let model = ModelRepr {
++            arena,
++            objective: v0,
++            objective_sense: ObjectiveSense::Minimize,
++            constraints: vec![ConstraintRepr {
++                body,
++                sense: ConstraintSense::Eq,
++                rhs,
++                name: None,
++            }],
++            variables: vec![var("x0", 0, x0), var("x1", 1, x1)],
++            n_vars: 2,
++        };
++        FREE_SIGN_FORCE.with(|c| c.set(Some(on)));
++        let out = fbbt(&model, 20, 1e-9);
++        FREE_SIGN_FORCE.with(|c| c.set(None));
++        out
++    }
++
++    #[test]
++    fn wallfix_free_objective_gets_its_sign() {
++        // objvar * x2 = 1, x2 in [0, 10], objvar free (the 1e20 sentinel and true inf).
++        for free in [1e20, f64::INFINITY] {
++            let off = run(1.0, (-free, free), (0.0, 10.0), false);
++            assert!(off[0].lo <= -1e19, "OFF must leave the free side: {:?}", off[0]);
++            let on = run(1.0, (-free, free), (0.0, 10.0), true);
++            assert!(on[0].lo > 0.0 && on[0].lo <= 0.1, "{:?}", on[0]);
++        }
++        // x2 in [-10, 0]: objvar <= -0.1.
++        let on = run(1.0, (-1e20, 1e20), (-10.0, 0.0), true);
++        assert!(on[0].hi < 0.0 && on[0].hi >= -0.1, "{:?}", on[0]);
++        // x2 unbounded above: only the sign, objvar >= 0.
++        let on = run(1.0, (-1e20, 1e20), (0.0, 1e20), true);
++        assert_eq!(on[0].lo, 0.0);
++    }
++
++    #[test]
++    fn finite_side_is_never_tightened() {
++        // The retired #1616 rule would lift x0 >= -5 to x0 >= 0.1 here.
++        let off = run(1.0, (-5.0, 100.0), (0.0, 10.0), false);
++        let on = run(1.0, (-5.0, 100.0), (0.0, 10.0), true);
++        assert_eq!((on[0].lo, on[0].hi), (off[0].lo, off[0].hi));
++        assert_eq!(on[0].lo, -5.0);
++    }
++
++    #[test]
++    fn product_touching_zero_does_not_fire() {
++        // w within FEAS_TOL of 0 says nothing about the sign.
++        for rhs in [0.0, 5e-7, -5e-7] {
++            let on = run(rhs, (-1e20, 1e20), (0.0, 10.0), true);
++            assert!(on[0].lo <= -1e19 && on[0].hi >= 1e19, "rhs={rhs}: {:?}", on[0]);
++        }
++    }
++
++    #[test]
++    fn feasible_points_survive() {
++        // Differential + feasible-point sampling: a point with x0 * x1 = rhs in the
++        // input box stays in the ON box, and ON is never looser than OFF.
++        let mut s: u64 = 0x9e37_79b9_7f4a_7c15;
++        let mut next = || {
++            s ^= s << 13;
++            s ^= s >> 7;
++            s ^= s << 17;
++            (s >> 11) as f64 / (1u64 << 53) as f64
++        };
++        let mut checks = 0;
++        for _ in 0..2000 {
++            let rhs = (next() - 0.5) * 20.0;
++            let g_hi = 0.01 + next() * 50.0;
++            let side = next() < 0.5;
++            let x1 = if side { (0.0, g_hi) } else { (-g_hi, 0.0) };
++            let x0 = match (next() * 3.0) as u32 {
++                0 => (-1e20, 1e20),
++                1 => (-1e20, 1e3),
++                _ => (-1e3, 1e20),
++            };
++            let off = run(rhs, x0, x1, false);
++            let on = run(rhs, x0, x1, true);
++            for i in 0..2 {
++                assert!(on[i].lo >= off[i].lo && on[i].hi <= off[i].hi);
++            }
++            for _ in 0..5 {
++                let b = x1.0 + (x1.1 - x1.0) * next();
++                if b == 0.0 {
++                    continue;
++                }
++                let a = rhs / b;
++                if a < x0.0 || a > x0.1 {
++                    continue;
++                }
++                assert!(on[0].lo <= a && a <= on[0].hi, "a={a} b={b} rhs={rhs} {:?}", on[0]);
++                assert!(on[1].lo <= b && b <= on[1].hi, "a={a} b={b} rhs={rhs} {:?}", on[1]);
++                checks += 1;
++            }
++        }
++        assert!(checks > 1000, "probe fired {checks} times");
++    }
++}

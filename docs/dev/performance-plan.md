@@ -12015,6 +12015,37 @@ midpull too (57 nodes).
 
 **#1978 is closed:** the stall is gone on both engines.
 
+## 93. #1982 item 1: the narrowed one-sided product rule -- retired as measured (2026-10-26)
+
+**Hypothesis.** The retired #1616 rule (`DISCOPT_FBBT_ONE_SIDED_DIV`, audit row) lost
+gancns/waternd1 certificates by tightening *finite* sides. Restrict it to replacing an
+*infinite* side of a scalar variable: `a * b = w`, `w` excluding 0 by more than `FEAS_TOL`,
+`b` touching 0 from one side, so `a` gets its sign. `wallfix` (`objvar * x2 = 1`,
+`x2 >= 0`, objvar free; root LP unbounded) would keep its root bound, and the 29 would not
+be hurt. **Kill criterion:** it fires nowhere but `wallfix`, or it fails §5 on the 29.
+
+**Entry experiment.** OFF vs ON root `fbbt_box` over all 1,609 MINLPLib `.nl` files at
+120 s: 1,568 compared, 41 timeouts. It fires on **wallfix only**, and on none of the
+29-instance #1616 set. The waterund22/25 loosening therefore cannot arise under this rule;
+the narrowing sidesteps it rather than explains it.
+
+**§5 panel** (109 instances, 30 s, interleaved, a subprocess per arm, 174 feasibility
+checks):
+
+- **Cert-clean.** 0 problems, certified 59 -> 59.
+- **Gain.** One bound where none: `wallfix`, 0.0 against opt 1.0000047, uncertified in
+  both arms.
+- **Noise elsewhere.** Every other moved number is timing. A trace build counted 0 fires
+  in full solves of the 7 instances that moved, against 5 on `wallfix`.
+- **Wall.** 1749.4 -> 1724.4 s (paired sd 2.1 s/instance).
+
+**Verdict: kill criterion met. Not shipped.** It is sound and costs nothing, but its whole
+benefit is one named instance's uncertified root bound (CLAUDE.md §2). Rule and tests are
+kept as `docs/dev/data/1978-1982-panels/free_sign_1982_retired.patch`.
+
+**Reopen** when another corpus shows the free-sign product firing as a class, not as an
+isolated instance.
+
 ## 92. #1979-#1982: bounds through function domains, poles and fractional powers (graduated 2026-10-26)
 
 **Probes.** #1975's census (§90) found 7 instances where SCIP's presolve closes a
