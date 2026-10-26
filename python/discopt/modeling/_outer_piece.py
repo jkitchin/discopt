@@ -87,8 +87,20 @@ FLAG = "DISCOPT_OUTER_PIECE"
 #: (``c' = M^d c``), at the price of a wider inner box.
 M_GRID = (1e4, 1e6, 1e2)
 
-#: Share of ``time_limit`` the outer-piece solves may take together.
-OUTER_BUDGET_FRACTION = 0.4
+#: Share of ``time_limit`` the outer-piece solves may take together (after the
+#: probe), and how it is split over :data:`M_GRID`: front-loaded, as the grid is
+#: ordered by how likely each size is to give a usable bound. prolog's piece at
+#: ``M = 1e4`` needs ~5 s; an even three-way split of 0.4 x 30 s gave it 3 s.
+OUTER_BUDGET_FRACTION = 0.5
+M_GRID_SHARE = (0.6, 0.25, 0.15)
+
+#: Share of ``time_limit`` the root probe may take. The pieces are built only when
+#: the model as written gets NO dual bound from a root-only solve: firing on every
+#: model with an open column cost the models that certify anyway their wall
+#: (autocorr_bern20-03 0.4 -> 2.4 s, clay0303hfsg 4.9 -> 13.0 s) and weakened the
+#: bound where the inner piece got less time than the whole solve had
+#: (autocorr_bern25-06 -3648 -> -4792); first 67 rows of the always-fire panel, plan §92.
+PROBE_FRACTION = 0.1
 
 #: A declared or FBBT bound at or beyond this magnitude is open (``Variable`` stores
 #: an infinite bound as ``9.999e19``).
@@ -672,14 +684,36 @@ def solve_with_outer_piece(
     sub.pop("initial_solution", None)
     sub.pop("warm_start", None)
 
+    # Root probe: the model as written, root only. A certificate is returned as is;
+    # a finite bound means the default relaxation already bounds the model, and the
+    # caller solves it as usual with what is left.
+    kw = dict(sub)
+    kw["max_nodes"] = min(1, int(kw.get("max_nodes", 1)))
+    kw["time_limit"] = PROBE_FRACTION * time_limit
+    model._outer_piece_child = True  # type: ignore[attr-defined]
+    try:
+        probe = model.solve(**kw)
+    finally:
+        del model._outer_piece_child  # type: ignore[attr-defined]
+    stats["outer_piece/probe"] = f"{probe.status} bound={probe.bound}"
+    if probe.gap_certified or probe.status == "infeasible":
+        probe.solver_stats = {**(probe.solver_stats or {}), **stats}
+        probe.solver_stats["outer_piece/result"] = "probe certified"
+        return probe
+    if probe.bound is not None:
+        stats["outer_piece/result"] = "probe has a dual bound"
+        logger.info("outer piece not needed on %r: %s", model.name, stats)
+        return None
+
     outer_budget = OUTER_BUDGET_FRACTION * time_limit
     B_out: Optional[float] = None
     M_used = math.nan
     d_used = 0
     outer_nodes = 0
+    outer_t0 = time.perf_counter()
     for i, M in enumerate(M_GRID):
-        spent = time.perf_counter() - t0
-        budget = (outer_budget - spent) / (len(M_GRID) - i)
+        left_outer = outer_budget - (time.perf_counter() - outer_t0)
+        budget = left_outer * (M_GRID_SHARE[i] / sum(M_GRID_SHARE[i:]))
         if budget <= 0.5:
             break
         outer, d = build_outer(p, M)
