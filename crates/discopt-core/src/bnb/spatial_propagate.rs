@@ -43,7 +43,6 @@ use crate::presolve::directed::{
     add_down, add_up, div_down, div_up, mul_down, mul_up, powi_down, powi_up, root_down, root_up,
     sqrt_down, sqrt_up, sub_down, sub_up,
 };
-use crate::presolve::fbbt::reverse_div;
 
 /// Relative tolerance below which a bound crossing counts as real infeasibility.
 const INFEAS_TOL: f64 = 1e-7;
@@ -174,6 +173,53 @@ fn tighten_form_to(
         changed |= tighten_le(cols, &neg, -sub_down(tlo, cst), lo, hi)?;
     }
     Some(changed)
+}
+
+/// Reverse-divide `w ∈ [w_lo, w_hi]` by the OTHER factor `G ∈ [g_lo, g_hi]` to get an
+/// interval for the target factor `F = w / G`; `None` when no sound deduction exists.
+///
+/// Covers strict-sign full division plus the one-sided extended cases when `G`
+/// touches zero (the entry experiment's load-bearing ingredient): e.g.
+/// `G ∈ [0, g_hi]`, `w_lo > 0` ⇒ `G > 0` and `F >= w_lo / g_hi` (no finite upper —
+/// `G → 0⁺`); mirrored for the other sign combinations.
+///
+/// #1537 D: the sign tests are exact (`0.0`), not a `1e-12` band. The band treated
+/// `G ∈ [-5e-13, 1]` as `[0, 1]` and deduced `F >= w_lo / g_hi`, cutting the
+/// feasible `F = -4e12, G = -3e-13`. Quotients are rounded outward.
+fn reverse_div(w_lo: f64, w_hi: f64, g_lo: f64, g_hi: f64) -> Option<(f64, f64)> {
+    if g_lo > 0.0 || g_hi < 0.0 {
+        // 0 not in [g_lo, g_hi]: full interval division.
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for (a, b) in [(w_lo, g_lo), (w_lo, g_hi), (w_hi, g_lo), (w_hi, g_hi)] {
+            let (ql, qh) = (div_down(a, b), div_up(a, b));
+            if ql.is_nan() || qh.is_nan() {
+                return None;
+            }
+            lo = lo.min(ql);
+            hi = hi.max(qh);
+        }
+        return Some((lo, hi));
+    }
+    if g_lo == 0.0 && g_hi > 0.0 {
+        // G in [0, g_hi] (touching zero from above).
+        if w_lo > 0.0 {
+            return Some((div_down(w_lo, g_hi), f64::INFINITY)); // F > 0, F >= w_lo/g_hi
+        }
+        if w_hi < 0.0 {
+            return Some((f64::NEG_INFINITY, div_up(w_hi, g_hi))); // F < 0, F <= w_hi/g_hi
+        }
+    }
+    if g_hi == 0.0 && g_lo < 0.0 {
+        // G in [g_lo, 0] (touching zero from below).
+        if w_lo > 0.0 {
+            return Some((f64::NEG_INFINITY, div_up(w_lo, g_lo))); // F < 0
+        }
+        if w_hi < 0.0 {
+            return Some((div_down(w_hi, g_lo), f64::INFINITY)); // F > 0
+        }
+    }
+    None
 }
 
 /// One product `w = A·B` (affine forms): forward + reverse. `None` = infeasible.

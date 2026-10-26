@@ -237,56 +237,6 @@ pub fn interval_div(a: &Interval, b: &Interval) -> Interval {
     }
 }
 
-/// Reverse-divide `w ∈ [w_lo, w_hi]` by the OTHER factor `G ∈ [g_lo, g_hi]` to get an
-/// interval for the target factor `F = w / G`; `None` when no sound deduction exists.
-///
-/// Covers strict-sign full division plus the one-sided extended cases when `G`
-/// touches zero (the #764 C2 entry experiment's load-bearing ingredient): e.g.
-/// `G ∈ [0, g_hi]`, `w_lo > 0` ⇒ `G > 0` and `F >= w_lo / g_hi` (no finite upper —
-/// `G → 0⁺`); mirrored for the other sign combinations.
-///
-/// #1537 D: the sign tests are exact (`0.0`), not a `1e-12` band. The band treated
-/// `G ∈ [-5e-13, 1]` as `[0, 1]` and deduced `F >= w_lo / g_hi`, cutting the
-/// feasible `F = -4e12, G = -3e-13`. Quotients are rounded outward.
-///
-/// Shared by the per-node propagator (`bnb::spatial_propagate`) and, behind
-/// [`fbbt_sign_domain_enabled`], presolve FBBT's backward `Mul` (#1982).
-pub fn reverse_div(w_lo: f64, w_hi: f64, g_lo: f64, g_hi: f64) -> Option<(f64, f64)> {
-    if g_lo > 0.0 || g_hi < 0.0 {
-        // 0 not in [g_lo, g_hi]: full interval division.
-        let mut lo = f64::INFINITY;
-        let mut hi = f64::NEG_INFINITY;
-        for (a, b) in [(w_lo, g_lo), (w_lo, g_hi), (w_hi, g_lo), (w_hi, g_hi)] {
-            let (ql, qh) = (div_down(a, b), div_up(a, b));
-            if ql.is_nan() || qh.is_nan() {
-                return None;
-            }
-            lo = lo.min(ql);
-            hi = hi.max(qh);
-        }
-        return Some((lo, hi));
-    }
-    if g_lo == 0.0 && g_hi > 0.0 {
-        // G in [0, g_hi] (touching zero from above).
-        if w_lo > 0.0 {
-            return Some((div_down(w_lo, g_hi), f64::INFINITY)); // F > 0, F >= w_lo/g_hi
-        }
-        if w_hi < 0.0 {
-            return Some((f64::NEG_INFINITY, div_up(w_hi, g_hi))); // F < 0, F <= w_hi/g_hi
-        }
-    }
-    if g_hi == 0.0 && g_lo < 0.0 {
-        // G in [g_lo, 0] (touching zero from below).
-        if w_lo > 0.0 {
-            return Some((f64::NEG_INFINITY, div_up(w_lo, g_lo))); // F < 0
-        }
-        if w_hi < 0.0 {
-            return Some((div_down(w_hi, g_lo), f64::INFINITY)); // F > 0
-        }
-    }
-    None
-}
-
 /// #1980: an upper bound on every `x >= 0` with `x^p <= y` (`p > 0` non-integer),
 /// VERIFIED: the candidate root is stepped up until the forward power's own lower
 /// enclosure (`lib_down(r^p)`, the bound [`interval_pow`] uses) reaches `y`, so the
@@ -295,7 +245,7 @@ fn frac_root_up(y: f64, p: f64) -> Option<f64> {
     if y == f64::INFINITY {
         return Some(f64::INFINITY);
     }
-    if !y.is_finite() || y < 0.0 || !(p > 0.0) {
+    if !y.is_finite() || y < 0.0 || p.is_nan() || p <= 0.0 {
         return None;
     }
     if y == 0.0 {
@@ -317,7 +267,7 @@ fn frac_root_up(y: f64, p: f64) -> Option<f64> {
 /// #1980: a lower bound on every `x >= 0` with `x^p >= y` (`p > 0` non-integer),
 /// verified the same way from the other side (`lib_up(r^p) <= y`).
 fn frac_root_down(y: f64, p: f64) -> Option<f64> {
-    if !(p > 0.0) || y.is_nan() {
+    if p.is_nan() || p <= 0.0 || y.is_nan() {
         return None;
     }
     if y <= 0.0 {
@@ -1297,24 +1247,27 @@ fn increasing_preimage(
     Interval::new(lo, hi)
 }
 
-/// #1982: presolve FBBT's two sign/domain backward rules (`DISCOPT_FBBT_SIGN_DOMAIN`,
-/// default **off** until its §5 panel passes).
+/// #1982: presolve FBBT's sign/domain backward rules (`DISCOPT_FBBT_SIGN_DOMAIN`).
+/// **Default ON since 2026-10-26** -- graduated as one bundle with #1979's function
+/// domains, #1980's fractional-power inversion and #1981's LP-implied sign: section 5
+/// panel over 287 instances, cert-clean (463 checks, 0 false bounds), a bound where
+/// none on 9 instances, `launch` certified 3/3 vs 0/3. `=0` opts out.
 ///
-/// * `Mul` whose other factor's interval *touches* zero: `a * b = w`, `w` excluding
-///   0, `b in [0, b_hi]` forces `a` to `w`'s sign (and `|a| >= |w| / b_hi`), via the
-///   in-tree propagator's validated [`reverse_div`]. Without it `objvar * x2 = 1`,
-///   `x2 >= 0` leaves `objvar` free and `wallfix`'s root LP unbounded (#1975 census).
+/// The one-sided `Mul` division (a factor touching zero still fixing the other's
+/// sign) is deliberately NOT here: it is the retired `DISCOPT_FBBT_ONE_SIDED_DIV`
+/// (#1616 -- lost certificates on gancns/waternd1 over its 29 firing instances), and
+/// its only measured gain in #1982 was `wallfix`'s root bound.
+///
 /// * `Pow` with a constant non-integer exponent: the base is `>= 0`, the domain the
 ///   forward [`interval_pow`] already assumes (it clamps the base).
 ///
-/// Read once per [`backward_propagate`] walk; the `Mul` cases already handled (a
-/// factor excluding 0) are unchanged, so ON only ever adds tightenings.
+/// Read once per [`backward_propagate`] walk; ON only ever adds tightenings.
 pub fn fbbt_sign_domain_enabled() -> bool {
     match std::env::var("DISCOPT_FBBT_SIGN_DOMAIN") {
-        Err(_) => false,
-        Ok(v) => matches!(
+        Err(_) => true,
+        Ok(v) => !matches!(
             v.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "on" | "yes"
+            "0" | "false" | "off" | "no" | ""
         ),
     }
 }
@@ -1335,19 +1288,6 @@ fn sign_domain_for_walk() -> bool {
         return on;
     }
     fbbt_sign_domain_enabled()
-}
-
-/// A bound at or beyond discopt's "no bound" sentinel (`±9.999e19`) is read as
-/// infinite, so a `reverse_div` quotient never leans on a sentinel as if it were a
-/// real bound (`x * y = 1`, `y <= 9.999e19` gives `x > 0`, not `x >= 1e-20`).
-fn sentinel_to_inf(v: f64) -> f64 {
-    if v >= 1e19 {
-        f64::INFINITY
-    } else if v <= -1e19 {
-        f64::NEG_INFINITY
-    } else {
-        v
-    }
 }
 
 /// Backward-propagate an output bound through the expression DAG to
@@ -1574,32 +1514,6 @@ fn backward_propagate_with(
                             var_bounds,
                             reduce_counts,
                         );
-                    }
-                    // #1982: a factor whose interval touches zero still fixes the
-                    // other's sign when the product excludes zero.
-                    if SIGN_DOMAIN.with(|c| c.get()) {
-                        for (target, other) in [(*left, r), (*right, l)] {
-                            let touches = (other.lo == 0.0 && other.hi > 0.0)
-                                || (other.hi == 0.0 && other.lo < 0.0);
-                            if !touches {
-                                continue;
-                            }
-                            if let Some((lo, hi)) = reverse_div(
-                                tightened.lo,
-                                tightened.hi,
-                                sentinel_to_inf(other.lo),
-                                sentinel_to_inf(other.hi),
-                            ) {
-                                backward_propagate_with(
-                                    arena,
-                                    target,
-                                    Interval::new(lo, hi),
-                                    node_bounds,
-                                    var_bounds,
-                                    reduce_counts,
-                                );
-                            }
-                        }
                     }
                 }
                 BinOp::Div => {
@@ -5779,47 +5693,29 @@ mod tests_1982 {
 
     const FREE: (f64, f64) = (-9.999e19, 9.999e19);
 
-    /// `wallfix`'s row: `x0 * x1 == 1`, `x1 >= 0` (sentinel-open above), `x0` free.
-    /// OFF leaves `x0` free (the pre-#1982 control); ON gives `x0 >= 0`, and never
-    /// leans on the sentinel (`1 / 9.999e19` would be a bound the model never wrote).
+    /// `wallfix`'s row: `x0 * x1 == 1`, `x1 >= 0`, `x0` free. Dividing by a factor
+    /// that merely touches zero is the retired `DISCOPT_FBBT_ONE_SIDED_DIV` (#1616),
+    /// so the sign/domain rules must leave every such product box exactly as OFF
+    /// does -- including when the product excludes 0 or the partner straddles it.
     #[test]
-    fn fbbt_1982_product_with_a_zero_touching_factor_fixes_the_sign() {
-        let off = fbbt_1982(mul, 1.0, FREE, (0.0, 9.999e19), false);
-        assert_eq!(
-            off[0].lo, -9.999e19,
-            "control: OFF must not tighten x0: {:?}",
-            off[0]
-        );
-        let on = fbbt_1982(mul, 1.0, FREE, (0.0, 9.999e19), true);
-        assert_eq!(
-            on[0].lo, 0.0,
-            "ON: x0 * x1 = 1 with x1 >= 0 forces x0 >= 0: {:?}",
-            on[0]
-        );
-        assert_eq!(on[0].hi, 9.999e19);
-        // A finite partner gives the quotient, rounded down: x0 >= 1/4.
-        let fin = fbbt_1982(mul, 1.0, FREE, (0.0, 4.0), true);
-        assert!(fin[0].lo <= 0.25 && fin[0].lo > 0.2499999, "{:?}", fin[0]);
-        // Mirrored: x0 * x1 == -2, x1 in [-4, 0]  =>  x0 >= 0.5.
-        let neg = fbbt_1982(mul, -2.0, FREE, (-4.0, 0.0), true);
-        assert!(neg[0].lo <= 0.5 && neg[0].lo > 0.4999999, "{:?}", neg[0]);
-        assert_eq!(neg[0].hi, 9.999e19);
-    }
-
-    /// A product whose value range contains 0, or a partner straddling 0, admits no
-    /// sign deduction: ON must leave the box exactly as OFF does.
-    #[test]
-    fn fbbt_1982_no_deduction_when_zero_is_attainable() {
-        let ub = |a: &mut ExprArena, x: ExprId, y: ExprId| mul(a, x, y);
-        for (rhs, partner) in [(0.0, (0.0, 4.0)), (1.0, (-1.0, 4.0))] {
-            let off = fbbt_1982(ub, rhs, FREE, partner, false);
-            let on = fbbt_1982(ub, rhs, FREE, partner, true);
+    fn fbbt_1982_does_not_revive_the_one_sided_product_division() {
+        let cases = [
+            (1.0, (0.0, 9.999e19)),
+            (1.0, (0.0, 4.0)),
+            (-2.0, (-4.0, 0.0)),
+            (0.0, (0.0, 4.0)),
+            (1.0, (-1.0, 4.0)),
+        ];
+        for (rhs, partner) in cases {
+            let off = fbbt_1982(mul, rhs, FREE, partner, false);
+            let on = fbbt_1982(mul, rhs, FREE, partner, true);
             assert_eq!(
                 (off[0].lo, off[0].hi),
                 (on[0].lo, on[0].hi),
                 "rhs {rhs} {partner:?}"
             );
         }
+        assert_eq!(cases.len(), 5);
     }
 
     /// `x1 == x0 ** 0.75`: a non-integer power is real-valued only on `x0 >= 0`.
@@ -5838,46 +5734,6 @@ mod tests_1982 {
             "an odd integer power keeps x0 < 0: {:?}",
             cube[0]
         );
-    }
-
-    /// Feasible-point sampling: for random boxes and random points `(x0, x1)` with
-    /// `x0 * x1 = w` exactly representable, ON never cuts the point out of its box.
-    #[test]
-    fn fbbt_1982_product_rule_never_cuts_a_feasible_point() {
-        let mut state: u64 = 0x1982_1975;
-        let mut next = || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            ((state >> 11) as f64) / ((1u64 << 53) as f64)
-        };
-        let mut checked = 0usize;
-        for _ in 0..4000 {
-            // Points on a dyadic grid so x0 * x1 is exact.
-            let x0 = ((next() - 0.5) * 64.0).round() / 8.0;
-            let x1 = ((next() - 0.5) * 64.0).round() / 8.0;
-            let w = x0 * x1;
-            // A box for x1 that touches zero on the side of x1's sign, straddles
-            // zero, or excludes it -- the rule must fire on the first kind only.
-            let kind = next();
-            let x1_box = if kind < 0.5 {
-                if x1 >= 0.0 {
-                    (0.0, x1 + next() * 4.0)
-                } else {
-                    (x1 - next() * 4.0, 0.0)
-                }
-            } else {
-                (x1 - next() * 4.0, x1 + next() * 4.0)
-            };
-            let x0_box = (x0 - next() * 8.0, x0 + next() * 8.0);
-            let out = fbbt_1982(mul, w, x0_box, x1_box, true);
-            assert!(
-                out[0].lo <= x0 && x0 <= out[0].hi && out[1].lo <= x1 && x1 <= out[1].hi,
-                "cut the feasible ({x0}, {x1}), w = {w}: {out:?}"
-            );
-            checked += 1;
-        }
-        assert_eq!(checked, 4000, "the sampler checked nothing");
     }
 
     /// #1979: `x0 * log(x0)` -- the product's other factor `x0` is free, so the

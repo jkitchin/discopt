@@ -1,14 +1,15 @@
 """#1982: presolve FBBT's sign / domain backward rules (``DISCOPT_FBBT_SIGN_DOMAIN``).
 
-Two deductions SCIP's presolve makes and discopt's FBBT did not (found by #1975's
-census of root LPs with a negative-cost recession ray):
+#1975's census asked for two deductions SCIP's presolve makes:
 
-* a product whose factor interval *touches* zero: ``x * y == 1``, ``y >= 0`` forces
-  ``x >= 0`` (the in-tree propagator's ``reverse_div``, now shared);
-* a non-integer power: ``y == x ** 0.75`` is real-valued only on ``x >= 0``.
-
-``wallfix`` is the probe: its root LP is unbounded along ``objvar -> -inf`` because
-``objvar * x2 == 1`` with ``x2 >= 0`` left ``objvar`` free.
+* a non-integer power: ``y == x ** 0.75`` is real-valued only on ``x >= 0`` -- shipped;
+* a product whose factor interval *touches* zero (``x * y == 1``, ``y >= 0`` forces
+  ``x >= 0``) -- **declined**: it is the retired ``DISCOPT_FBBT_ONE_SIDED_DIV``
+  (#1616; over its 29 firing MINLPLib instances it lost the gancns and waternd1
+  certificates and cost +11 % wall). Built again here, its only measured gain was
+  ``wallfix``'s root bound, which does not answer the audit row's reopen condition.
+  These tests pin that the sign/domain flag does not revive it, so ``wallfix``'s
+  root LP stays unbounded in both arms.
 """
 
 from __future__ import annotations
@@ -25,7 +26,6 @@ pytestmark = pytest.mark.unit
 
 FLAG = "DISCOPT_FBBT_SIGN_DOMAIN"
 WALLFIX = os.path.join(os.path.dirname(__file__), "data", "minlplib_nl", "wallfix.nl")
-WALLFIX_OPT = 1.0000046580  # MINLPLib =opt=
 
 
 def _box(m):
@@ -58,12 +58,15 @@ def test_flag_off_is_the_pre_1982_control(monkeypatch, build):
     assert lb[0] < 0, f"OFF must keep x's negative side: lb={lb[0]}"
 
 
-def test_zero_touching_product_factor_fixes_the_sign(monkeypatch):
-    monkeypatch.setenv(FLAG, "1")
-    lb, ub = _box(_product_model())
-    # x > 0, and the unbounded partner is read as infinite: no 1/9.999e19 bound.
-    assert lb[0] == 0.0, lb
-    assert ub[0] >= 9.999e19
+def test_zero_touching_product_factor_is_not_divided(monkeypatch):
+    """The retired #1616 rule stays retired: ON leaves the product box as OFF does."""
+    boxes = []
+    for arm in ("0", "1"):
+        monkeypatch.setenv(FLAG, arm)
+        boxes.append(_box(_product_model()))
+    assert np.array_equal(boxes[0][0], boxes[1][0]), boxes
+    assert np.array_equal(boxes[0][1], boxes[1][1]), boxes
+    assert boxes[1][0][0] < -1e19
 
 
 def test_non_integer_power_base_is_nonnegative(monkeypatch):
@@ -90,27 +93,9 @@ def _wallfix_root(monkeypatch, arm: str):
     return lb, ub, ML.MccormickLPRelaxer(m).solve_at_node(lb, ub)
 
 
-def test_wallfix_root_lp_is_unbounded_without_the_rule(monkeypatch):
-    lb, _, res = _wallfix_root(monkeypatch, "0")
-    assert lb[0] < -1e19, "control: objvar must stay free OFF"
+@pytest.mark.parametrize("arm", ["0", "1"])
+def test_wallfix_root_lp_stays_unbounded(monkeypatch, arm):
+    """Only the declined product rule bounds wallfix's root; neither arm has it."""
+    lb, _, res = _wallfix_root(monkeypatch, arm)
+    assert lb[0] < -1e19, "objvar must stay free: the #1616 rule is retired"
     assert res.lower_bound is None and res.status == "unbounded", res
-
-
-def test_wallfix_root_lp_is_bounded_and_sound_with_the_rule(monkeypatch):
-    lb, _, res = _wallfix_root(monkeypatch, "1")
-    assert lb[0] == 0.0, lb[0]
-    assert res.status == "optimal" and res.lower_bound is not None, res
-    # A valid relaxation bound never exceeds the true optimum.
-    assert res.lower_bound <= WALLFIX_OPT + 1e-9, res.lower_bound
-
-
-def test_wallfix_optimum_survives_the_tightened_box(monkeypatch):
-    """Feasible-point check: MINLPLib's optimum stays inside the ON box."""
-    lb, ub, _ = _wallfix_root(monkeypatch, "1")
-    monkeypatch.setenv(FLAG, "1")
-    r = dm.from_nl(WALLFIX).solve(time_limit=3)
-    assert r.x is not None and r.objective == pytest.approx(WALLFIX_OPT, rel=1e-5), r.objective
-    m = dm.from_nl(WALLFIX)
-    flat = np.concatenate([np.ravel(np.asarray(r.x[v.name], float)) for v in m._variables])
-    assert flat.shape == lb.shape
-    assert np.all(lb <= flat) and np.all(flat <= ub), (lb, flat, ub)

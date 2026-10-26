@@ -177,6 +177,9 @@ this document has said since its first pass that **that is itself the finding**,
 in the audit.
 
 <!-- live-solver-math-gates: 53 -->
+<!-- live-solver-math-gates: 51 -->
+
+_52 -> 51 (2026-10-26): `DISCOPT_ENTROPY_ATOM` graduated to default ON with the #1979-#1982 bundle (performance-plan §92). The bundle's other three flags (`DISCOPT_FBBT_SIGN_DOMAIN`, `DISCOPT_POLE_ENVELOPE`, `DISCOPT_POLY_ROOT_BOUND`) were introduced and graduated in the same PR, so they never counted here._
 
 _54 -> 52 (2026-10-25): `DISCOPT_INTEGER_PRODUCT_INDEXED` graduated to default ON (performance-plan §84), alongside the graduation main recorded as 54 -> 53._
 
