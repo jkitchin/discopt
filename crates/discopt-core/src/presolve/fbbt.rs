@@ -287,6 +287,58 @@ pub fn reverse_div(w_lo: f64, w_hi: f64, g_lo: f64, g_hi: f64) -> Option<(f64, f
     None
 }
 
+/// #1980: an upper bound on every `x >= 0` with `x^p <= y` (`p > 0` non-integer),
+/// VERIFIED: the candidate root is stepped up until the forward power's own lower
+/// enclosure (`lib_down(r^p)`, the bound [`interval_pow`] uses) reaches `y`, so the
+/// true `r^p >= y` and monotonicity gives `x <= r`. `None` if it cannot be shown.
+fn frac_root_up(y: f64, p: f64) -> Option<f64> {
+    if y == f64::INFINITY {
+        return Some(f64::INFINITY);
+    }
+    if !y.is_finite() || y < 0.0 || !(p > 0.0) {
+        return None;
+    }
+    if y == 0.0 {
+        return Some(0.0);
+    }
+    let mut r = lib_up(y.powf(1.0 / p));
+    for _ in 0..64 {
+        if !r.is_finite() {
+            return None;
+        }
+        if lib_down(r.powf(p)) >= y {
+            return Some(r);
+        }
+        r = lib_up(r);
+    }
+    None
+}
+
+/// #1980: a lower bound on every `x >= 0` with `x^p >= y` (`p > 0` non-integer),
+/// verified the same way from the other side (`lib_up(r^p) <= y`).
+fn frac_root_down(y: f64, p: f64) -> Option<f64> {
+    if !(p > 0.0) || y.is_nan() {
+        return None;
+    }
+    if y <= 0.0 {
+        return Some(0.0);
+    }
+    if !y.is_finite() {
+        return None;
+    }
+    let mut r = lib_down(y.powf(1.0 / p));
+    for _ in 0..64 {
+        if r <= 0.0 {
+            return Some(0.0);
+        }
+        if lib_up(r.powf(p)) <= y {
+            return Some(r);
+        }
+        r = lib_down(r);
+    }
+    None
+}
+
 /// `[a,b]^n` for integer exponent.
 pub fn interval_pow_int(base: &Interval, n: i64) -> Interval {
     if n == 0 {
@@ -1586,10 +1638,23 @@ fn backward_propagate_with(
                             && exp_val.is_finite()
                             && SIGN_DOMAIN.with(|c| c.get())
                         {
+                            // #1980: and for p > 0 the monotone inverse, rounded
+                            // outward and verified (`frac_root_*`): `x^0.75 <= U`
+                            // gives `x <= U^(4/3)`, which is what pins chakra's
+                            // capital chain from its fixed first production.
+                            let mut base = Interval::new(0.0, f64::INFINITY);
+                            if exp_val > 0.0 {
+                                if let (Some(lo), Some(hi)) = (
+                                    frac_root_down(tightened.lo.max(0.0), exp_val),
+                                    frac_root_up(tightened.hi, exp_val),
+                                ) {
+                                    base = Interval::new(lo, hi);
+                                }
+                            }
                             backward_propagate_with(
                                 arena,
                                 *left,
-                                Interval::new(0.0, f64::INFINITY),
+                                base,
                                 node_bounds,
                                 var_bounds,
                                 reduce_counts,
@@ -5886,6 +5951,70 @@ mod tests_1982 {
             b[0].lo, 0.0,
             "objective-only log still needs x0 >= 0: {:?}",
             b[0]
+        );
+    }
+
+    /// #1980: the verified fractional roots are on the right side of the true root
+    /// (checked against the forward enclosure) and within a few ulps of it.
+    #[test]
+    fn fbbt_1980_fractional_roots_are_verified_and_tight() {
+        let mut checked = 0usize;
+        for &p in &[0.75, 0.1, 0.5, 1.5, 2.5, 1.0 / 3.0] {
+            for &y in &[1e-12, 0.3, 1.0, 4.275, 1e6, 1e15] {
+                let up = frac_root_up(y, p).expect("upper root");
+                let dn = frac_root_down(y, p).expect("lower root");
+                let exact = y.powf(1.0 / p);
+                assert!(dn <= exact && exact <= up, "p={p} y={y}: {dn} {exact} {up}");
+                assert!(lib_down(up.powf(p)) >= y, "upper root not verified");
+                assert!(lib_up(dn.powf(p)) <= y, "lower root not verified");
+                assert!(
+                    (up - dn) <= 1e-12 * exact.max(1e-300) + 1e-300,
+                    "loose: {dn} {up}"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(frac_root_up(f64::INFINITY, 0.75), Some(f64::INFINITY));
+        assert_eq!(frac_root_down(0.0, 0.75), Some(0.0));
+        assert_eq!(checked, 36);
+    }
+
+    /// chakra's first production row: `0.5609 * x0^0.75 == 4.275`, `x0 in [1, inf)`.
+    /// OFF the non-integer power is never inverted and `x0` stays open; ON it is
+    /// pinned to `(4.275 / 0.5609)^(4/3)`.
+    #[test]
+    fn fbbt_1980_fractional_power_is_inverted() {
+        let build = |a: &mut ExprArena, x0: ExprId, _x1: ExprId| {
+            let p = a.add(ExprNode::Constant(0.75));
+            let pw = a.add(ExprNode::BinaryOp {
+                op: BinOp::Pow,
+                left: x0,
+                right: p,
+            });
+            let c = a.add(ExprNode::Constant(0.560877056310648));
+            a.add(ExprNode::BinaryOp {
+                op: BinOp::Mul,
+                left: c,
+                right: pw,
+            })
+        };
+        let off = fbbt_1982(build, 4.275, (1.0, 9.999e19), (0.0, 1.0), false);
+        assert_eq!(
+            off[0].hi, 9.999e19,
+            "control: OFF leaves x0 open: {:?}",
+            off[0]
+        );
+        let on = fbbt_1982(build, 4.275, (1.0, 9.999e19), (0.0, 1.0), true);
+        let exact = (4.275f64 / 0.560877056310648).powf(4.0 / 3.0);
+        assert!(
+            on[0].lo <= exact && exact <= on[0].hi,
+            "{:?} vs {exact}",
+            on[0]
+        );
+        assert!(
+            on[0].hi - on[0].lo < 1e-9 * exact,
+            "not pinned: {:?}",
+            on[0]
         );
     }
 }
