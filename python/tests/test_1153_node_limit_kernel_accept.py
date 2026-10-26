@@ -29,7 +29,13 @@ NVS19 = os.path.join(os.path.dirname(__file__), "data", "minlplib", "nvs19.nl")
 
 
 def _solve_with_kernel_spy(monkeypatch, **solve_kwargs):
-    """Solve, recording every ``_try_native_spatial_kernel`` outcome."""
+    """Solve, recording every ``_try_native_spatial_kernel`` outcome.
+
+    #1962: the kernel's convex-quadratic separator (default ON) certifies nvs19 in
+    159 nodes, so it no longer reaches the node cap these tests exercise. Opt it
+    out to keep the probe as hard as when these exits were measured; the gate
+    under test is independent of how the kernel's node LP is strengthened."""
+    monkeypatch.setenv("DISCOPT_KERNEL_CONVEX_CUTS", "0")
     outcomes: list[str] = []
     original = solver_mod._try_native_spatial_kernel
 

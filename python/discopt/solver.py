@@ -2438,6 +2438,14 @@ def _try_native_spatial_kernel(
         solve_kwargs["warm_start_children"] = True
     if _warm_mode >= 2:
         solve_kwargs["warm_flip_boxed"] = True
+    # #1962: per-node outer-approximation separation of convex quadratic forms
+    # (default ON since the #1962 panel; ``=0`` opts out; see the helper).
+    _cut_rounds = _kernel_convex_cut_rounds()
+    if _cut_rounds is not None:
+        solve_kwargs["cut_rounds_root"], solve_kwargs["cut_rounds_node"] = _cut_rounds
+    # #1962: the integral-point probe (default ON; ``=0`` opts out; see the helper).
+    if _kernel_int_probe_enabled():
+        solve_kwargs["int_fix_probe"] = True
     if _bound_reserve > 0.0:
         solve_kwargs["bound_time_extension_s"] = float(_bound_reserve)
     # #917: hand the kernel the caller's withheld #844 reserve so it can reclaim
@@ -2779,6 +2787,16 @@ def _try_native_spatial_kernel(
     _native_stats["tree/warm_shape_mismatch"] = float(int(res.get("n_warm_shape_mismatch") or 0))
     _native_stats["tree/node_pivots"] = float(int(res.get("n_node_pivots") or 0))
     _native_stats["tree/node_lp_s"] = float(res.get("node_lp_s") or 0.0)
+    # #1962: the convex-quadratic separator (``DISCOPT_KERNEL_CONVEX_CUTS``): forms
+    # certified, rounds that re-solved, cuts added. All 0 with the flag off.
+    _native_stats["tree/cut_forms"] = float(int(res.get("n_cut_forms") or 0))
+    _native_stats["tree/cut_rounds"] = float(int(res.get("n_cut_rounds") or 0))
+    _native_stats["tree/cuts_added"] = float(int(res.get("n_cuts_added") or 0))
+    # #1962: the integral-point probe (``DISCOPT_KERNEL_INT_PROBE``); 0 when off.
+    _native_stats["tree/int_probes"] = float(int(res.get("n_int_probes") or 0))
+    _native_stats["tree/int_probe_improvements"] = float(
+        int(res.get("n_int_probe_improvements") or 0)
+    )
 
     # #1236: root-node certification metrics, mapped out of the kernel's internal
     # minimize convention with the same ``sign * (value + offset)`` the incumbent
@@ -11207,6 +11225,72 @@ def _kernel_pseudocost_reliability() -> int:
     23 s (0: 30 s, 4: 30.5 s) and genpooling_meyer04's bound at 747,372 (0: 688,825);
     4 certified nvs19 at 60 s but slowed st_e31 back to 30 s."""
     return max(0, int(os.environ.get("DISCOPT_KERNEL_PSEUDOCOST_RELIABILITY", "1") or 0))
+
+
+def _kernel_convex_cut_rounds() -> Optional[tuple[int, int]]:
+    """#1962: ``DISCOPT_KERNEL_CONVEX_CUTS`` -- separate outer-approximation cuts of
+    the certified convex quadratic forms over lifted product columns at every node of
+    the native spatial kernel (``SpatialTreeConfig::cut_rounds_root`` /
+    ``cut_rounds_node``, ``crates/discopt-core/src/bnb/convex_quad_cuts.rs``).
+
+    Returns ``(root_rounds, node_rounds)``, or ``None`` when off (``=0``).
+    ``DISCOPT_KERNEL_CUT_ROUNDS_ROOT`` / ``DISCOPT_KERNEL_CUT_ROUNDS_NODE`` are the
+    round caps (numeric knobs, read only under the flag).
+
+    Bound-changing: the cuts tighten the node LP. Soundness: a cut is the tangent
+    of a form whose positive semidefiniteness is proven (Rump's Cholesky test), its
+    right side rounded outward over the global box, so it holds at every feasible
+    point; the node bound is still the Neumaier-Shcherbina bound on the final duals.
+
+    **Graduated (#1962, default ON).** Panel ``issue1944_rlt_panel.py --with-corpus
+    --on-env DISCOPT_KERNEL_CONVEX_CUTS=1 --off-env DISCOPT_KERNEL_CONVEX_CUTS=0``
+    (270 instances, 30 s, interleaved, every incumbent ``verify_point``-ed):
+    cert-clean, 1,620 checks, 0 problems. The separator fires on 13 instances.
+    It gains certificates on nvs19 (time limit at 29.6 s -> 8.3 s) and nvs23
+    (29.6 s -> 14.3 s) and loses none. Node counts fall on nvs13 (349 -> 23),
+    nvs17 (8,231 -> 61), nvs18 (2,061 -> 49), hydro (341 -> 3) and fuel
+    (29 -> 15). nvs24's 30 s bound goes from -3,243 to -1,033.2000 (optimum
+    -1,033.2). ``performance-plan.md`` section 88.
+    """
+    if os.environ.get("DISCOPT_KERNEL_CONVEX_CUTS", "1").strip().lower() in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    ):
+        return None
+    root = max(0, int(os.environ.get("DISCOPT_KERNEL_CUT_ROUNDS_ROOT", "30") or 0))
+    node = max(0, int(os.environ.get("DISCOPT_KERNEL_CUT_ROUNDS_NODE", "3") or 0))
+    return root, node
+
+
+def _kernel_int_probe_enabled() -> bool:
+    """#1962: ``DISCOPT_KERNEL_INT_PROBE`` -- the native kernel's integral-point probe
+    (``SpatialTreeConfig::int_fix_probe``, default OFF). When a node's LP point is
+    integral but a lifted term is not McCormick-tight, the kernel re-solves the node
+    LP with the integer original columns fixed at their LP values, once per integer
+    assignment, and judges that point by the normal acceptance test and pricing.
+
+    Primal only: no bound depends on it. It exists because the kernel's only other
+    in-tree incumbent source is a tight LP vertex, which a pure-integer problem
+    reaches only once branching has collapsed every operand's box; on nvs24 with
+    ``DISCOPT_KERNEL_CONVEX_CUTS`` the bound reached the optimum (-1033.2) while the
+    incumbent stayed at the seed (-1031.8) through 100k nodes.
+
+    **Graduated (#1962, default ON; ``=0`` opts out).** Panel
+    ``issue1944_rlt_panel.py --with-corpus --base-env DISCOPT_KERNEL_CONVEX_CUTS=1
+    --on-env DISCOPT_KERNEL_INT_PROBE=1 --off-env DISCOPT_KERNEL_INT_PROBE=0`` (270
+    instances, 30 s, interleaved): cert-clean, 1,620 checks, 0 problems; fires on 7
+    instances (1-3 probes each). It gains nvs24 (time limit at 29.8 s -> certified
+    at 16.5 s, 23,464 -> 415 nodes) and loses none. ``performance-plan.md`` section 88."""
+    return os.environ.get("DISCOPT_KERNEL_INT_PROBE", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
 
 
 def _native_warm_start_mode() -> int:

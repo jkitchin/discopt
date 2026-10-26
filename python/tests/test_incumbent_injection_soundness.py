@@ -61,14 +61,6 @@ def test_suboptimal_warm_start_never_false_certifies(seed):
 
 @pytest.mark.slow
 @pytest.mark.skipif(not os.path.exists(_NVS19), reason="nvs19.nl not vendored")
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "#1153 (#1039 bucket F): nvs19 does not reach its optimum at ANY budget up "
-        "to 480s, and MORE budget yields a WORSE incumbent. A completeness miss with "
-        "no false certificate; the soundness sibling above still passes."
-    ),
-)
 def test_feasible_integer_node_objective_is_recorded():
     """The reported incumbent on a clean solve is at least as good as the best
     feasible point the search encounters — i.e. feasible integer leaves are not
@@ -111,7 +103,11 @@ def test_feasible_integer_node_objective_is_recorded():
 
     Pinned STRICT with the assertion untouched: the fix is to stop the
     non-monotonicity, and when the search reaches the optimum again this xfail
-    turns into a suite failure that says so."""
+    turns into a suite failure that says so.
+
+    #1962: it did. The native kernel's convex-quadratic separator certifies nvs19
+    at -1098.4 in 163 nodes (8.3 s on the #1962 panel, 9 s here), so the strict
+    xfail XPASSed and was removed; the assertion is unchanged."""
     r = from_nl(_NVS19).solve(time_limit=60, gap_tolerance=1e-4)
     assert r.objective is not None
     # Must reach the true optimum (the whole point of recording feasible leaves).
