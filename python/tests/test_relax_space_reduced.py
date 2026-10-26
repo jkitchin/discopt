@@ -92,7 +92,7 @@ def test_default_paths_byte_identical(mode, monkeypatch):
     """``lifted`` and ``auto`` reproduce the unset-flag path exactly (node_count +
     certified objective). P2.3 is a pure add; the default path must not move."""
     # Both arms on the Python spatial tree, where ``relax_space`` lives. An explicit
-    # ``tuning`` always declines the native kernel (``_native_kernel_feature_safe``),
+    # ``tuning`` always declines the native kernel (``_native_kernel_bypass_reasons``),
     # so with ``x`` an array variable on the kernel (DISCOPT_NATIVE_KERNEL_VECTOR_VARS)
     # the untuned arm would run a different engine and this would compare engines,
     # not relaxation spaces.

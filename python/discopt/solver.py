@@ -7903,6 +7903,10 @@ def _kernel_cutoff_slack_enabled() -> bool:
     checks, 0 problems; 56 certified in both arms) but loosened ``nous1``'s bound
     at a fixed node count, 1.414 -> 1.298 at 3,000 nodes and 1.559 -> 1.443 at
     10,000 (optimum ~1.567), so it is applied only where the exact box fails.
+    The same panel on this form: cert-clean (64 oracle checks, 0 problems), 56
+    certified in both arms, no objective drift; the root probe fired on none of
+    the 73 instances, and the remaining node-count differences are all on routes
+    the flag does not touch or on wall-clock-limited exits (nous1: same bound).
     """
     return os.environ.get("DISCOPT_KERNEL_CUTOFF_OBBT_SLACK", "1").strip().lower() not in (
         "0",
@@ -7970,7 +7974,7 @@ def _kernel_root_undecided(spec: dict, outer_deadline: Optional[float]) -> bool:
     if cap <= 0.0:
         return False
     res = _rust.solve_spatial_tree_py(**spec, max_nodes=1, time_limit_s=float(cap))
-    return res.get("root_status") == "undecided"
+    return bool(res.get("root_status") == "undecided")
 
 
 #: #1871: how often the cutoff-OBBT box replaced the kernel's root box (probe

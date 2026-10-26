@@ -4,7 +4,7 @@ Each option must either take effect or be refused/declared loudly. Covered here:
 
 * D-03 -- an explicit ``tuning=`` never routed off the native spatial kernel,
   because ``_scoped_tuning`` popped it out of ``kwargs`` before the
-  ``_native_kernel_feature_safe`` test that looked for it.
+  ``_native_kernel_bypass_reasons`` test that looked for it.
 * D-01/D-02/D-08/D-13 -- search levers the native kernel does not read
   (``rlt``, ``strategy``, ``presolve``,
   ``in_tree_presolve_stride``, ``obbt_at_root``) now route to the Python engine.
