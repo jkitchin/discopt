@@ -237,6 +237,56 @@ pub fn interval_div(a: &Interval, b: &Interval) -> Interval {
     }
 }
 
+/// Reverse-divide `w ∈ [w_lo, w_hi]` by the OTHER factor `G ∈ [g_lo, g_hi]` to get an
+/// interval for the target factor `F = w / G`; `None` when no sound deduction exists.
+///
+/// Covers strict-sign full division plus the one-sided extended cases when `G`
+/// touches zero (the #764 C2 entry experiment's load-bearing ingredient): e.g.
+/// `G ∈ [0, g_hi]`, `w_lo > 0` ⇒ `G > 0` and `F >= w_lo / g_hi` (no finite upper —
+/// `G → 0⁺`); mirrored for the other sign combinations.
+///
+/// #1537 D: the sign tests are exact (`0.0`), not a `1e-12` band. The band treated
+/// `G ∈ [-5e-13, 1]` as `[0, 1]` and deduced `F >= w_lo / g_hi`, cutting the
+/// feasible `F = -4e12, G = -3e-13`. Quotients are rounded outward.
+///
+/// Shared by the per-node propagator (`bnb::spatial_propagate`) and, behind
+/// [`fbbt_sign_domain_enabled`], presolve FBBT's backward `Mul` (#1982).
+pub fn reverse_div(w_lo: f64, w_hi: f64, g_lo: f64, g_hi: f64) -> Option<(f64, f64)> {
+    if g_lo > 0.0 || g_hi < 0.0 {
+        // 0 not in [g_lo, g_hi]: full interval division.
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for (a, b) in [(w_lo, g_lo), (w_lo, g_hi), (w_hi, g_lo), (w_hi, g_hi)] {
+            let (ql, qh) = (div_down(a, b), div_up(a, b));
+            if ql.is_nan() || qh.is_nan() {
+                return None;
+            }
+            lo = lo.min(ql);
+            hi = hi.max(qh);
+        }
+        return Some((lo, hi));
+    }
+    if g_lo == 0.0 && g_hi > 0.0 {
+        // G in [0, g_hi] (touching zero from above).
+        if w_lo > 0.0 {
+            return Some((div_down(w_lo, g_hi), f64::INFINITY)); // F > 0, F >= w_lo/g_hi
+        }
+        if w_hi < 0.0 {
+            return Some((f64::NEG_INFINITY, div_up(w_hi, g_hi))); // F < 0, F <= w_hi/g_hi
+        }
+    }
+    if g_hi == 0.0 && g_lo < 0.0 {
+        // G in [g_lo, 0] (touching zero from below).
+        if w_lo > 0.0 {
+            return Some((f64::NEG_INFINITY, div_up(w_lo, g_lo))); // F < 0
+        }
+        if w_hi < 0.0 {
+            return Some((div_down(w_hi, g_lo), f64::INFINITY)); // F > 0
+        }
+    }
+    None
+}
+
 /// `[a,b]^n` for integer exponent.
 pub fn interval_pow_int(base: &Interval, n: i64) -> Interval {
     if n == 0 {
@@ -1195,6 +1245,59 @@ fn increasing_preimage(
     Interval::new(lo, hi)
 }
 
+/// #1982: presolve FBBT's two sign/domain backward rules (`DISCOPT_FBBT_SIGN_DOMAIN`,
+/// default **off** until its §5 panel passes).
+///
+/// * `Mul` whose other factor's interval *touches* zero: `a * b = w`, `w` excluding
+///   0, `b in [0, b_hi]` forces `a` to `w`'s sign (and `|a| >= |w| / b_hi`), via the
+///   in-tree propagator's validated [`reverse_div`]. Without it `objvar * x2 = 1`,
+///   `x2 >= 0` leaves `objvar` free and `wallfix`'s root LP unbounded (#1975 census).
+/// * `Pow` with a constant non-integer exponent: the base is `>= 0`, the domain the
+///   forward [`interval_pow`] already assumes (it clamps the base).
+///
+/// Read once per [`backward_propagate`] walk; the `Mul` cases already handled (a
+/// factor excluding 0) are unchanged, so ON only ever adds tightenings.
+pub fn fbbt_sign_domain_enabled() -> bool {
+    match std::env::var("DISCOPT_FBBT_SIGN_DOMAIN") {
+        Err(_) => false,
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "on" | "yes"
+        ),
+    }
+}
+
+thread_local! {
+    /// [`fbbt_sign_domain_enabled`] for the walk in progress, set by
+    /// [`backward_propagate`] so the recursion need not thread it through.
+    static SIGN_DOMAIN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test-only override of the environment flag: unit tests run on parallel
+    /// threads of one process, so they must not toggle a process-wide variable.
+    #[cfg(test)]
+    static SIGN_DOMAIN_FORCE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+fn sign_domain_for_walk() -> bool {
+    #[cfg(test)]
+    if let Some(on) = SIGN_DOMAIN_FORCE.with(|c| c.get()) {
+        return on;
+    }
+    fbbt_sign_domain_enabled()
+}
+
+/// A bound at or beyond discopt's "no bound" sentinel (`±9.999e19`) is read as
+/// infinite, so a `reverse_div` quotient never leans on a sentinel as if it were a
+/// real bound (`x * y = 1`, `y <= 9.999e19` gives `x > 0`, not `x >= 1e-20`).
+fn sentinel_to_inf(v: f64) -> f64 {
+    if v >= 1e19 {
+        f64::INFINITY
+    } else if v <= -1e19 {
+        f64::NEG_INFINITY
+    } else {
+        v
+    }
+}
+
 /// Backward-propagate an output bound through the expression DAG to
 /// tighten variable bounds.
 ///
@@ -1208,6 +1311,7 @@ pub fn backward_propagate(
     node_bounds: &[Interval],
     var_bounds: &mut [Interval],
 ) {
+    let prev = SIGN_DOMAIN.with(|c| c.replace(sign_domain_for_walk()));
     // The `Sum` inversion needs each reduction's fold count (#1364). Compute the
     // table ONCE per walk here rather than inside the recursion, and only when the
     // arena actually contains a reduction -- most constraint bodies do not.
@@ -1217,6 +1321,7 @@ pub fn backward_propagate(
         Vec::new()
     };
     backward_propagate_with(arena, id, output_bound, node_bounds, var_bounds, &counts);
+    SIGN_DOMAIN.with(|c| c.set(prev));
 }
 
 fn backward_propagate_with(
@@ -1328,6 +1433,32 @@ fn backward_propagate_with(
                             reduce_counts,
                         );
                     }
+                    // #1982: a factor whose interval touches zero still fixes the
+                    // other's sign when the product excludes zero.
+                    if SIGN_DOMAIN.with(|c| c.get()) {
+                        for (target, other) in [(*left, r), (*right, l)] {
+                            let touches = (other.lo == 0.0 && other.hi > 0.0)
+                                || (other.hi == 0.0 && other.lo < 0.0);
+                            if !touches {
+                                continue;
+                            }
+                            if let Some((lo, hi)) = reverse_div(
+                                tightened.lo,
+                                tightened.hi,
+                                sentinel_to_inf(other.lo),
+                                sentinel_to_inf(other.hi),
+                            ) {
+                                backward_propagate_with(
+                                    arena,
+                                    target,
+                                    Interval::new(lo, hi),
+                                    node_bounds,
+                                    var_bounds,
+                                    reduce_counts,
+                                );
+                            }
+                        }
+                    }
                 }
                 BinOp::Div => {
                     // a / b in [lo, hi]
@@ -1358,6 +1489,22 @@ fn backward_propagate_with(
                     // If exponent is constant integer, we can invert.
                     if let Some(exp_val) = arena.try_constant_value_pub(*right) {
                         let exp_int = exp_val.round() as i64;
+                        // #1982: a non-integer power is real-valued only on a
+                        // nonnegative base -- the domain `interval_pow` assumes.
+                        // The same integrality test as the forward pass.
+                        if (exp_val - exp_int as f64).abs() >= 1e-12
+                            && exp_val.is_finite()
+                            && SIGN_DOMAIN.with(|c| c.get())
+                        {
+                            backward_propagate_with(
+                                arena,
+                                *left,
+                                Interval::new(0.0, f64::INFINITY),
+                                node_bounds,
+                                var_bounds,
+                                reduce_counts,
+                            );
+                        }
                         if (exp_val - exp_int as f64).abs() < 1e-12 && exp_int > 0 {
                             // Roots are VERIFIED outward (#1504): `powf(1/n)`
                             // rounds to nearest, so the lower root could land
@@ -5352,5 +5499,191 @@ mod tests_1908 {
             }
         }
         assert_eq!(checks, 15_000 + 39);
+    }
+}
+
+#[cfg(test)]
+mod tests_1982 {
+    //! #1982: presolve FBBT's sign / domain backward rules (`DISCOPT_FBBT_SIGN_DOMAIN`).
+    use super::*;
+    use crate::expr::{ConstraintRepr, VarInfo};
+
+    /// FBBT of one constraint `body == rhs` over `x0, x1` with the given boxes, the
+    /// flag forced `on` for this thread only.
+    fn fbbt_1982(
+        build: impl Fn(&mut ExprArena, ExprId, ExprId) -> ExprId,
+        rhs: f64,
+        x0: (f64, f64),
+        x1: (f64, f64),
+        on: bool,
+    ) -> Vec<Interval> {
+        let mut arena = ExprArena::new();
+        let v0 = arena.add(ExprNode::Variable {
+            name: "x0".into(),
+            index: 0,
+            size: 1,
+            shape: vec![],
+        });
+        let v1 = arena.add(ExprNode::Variable {
+            name: "x1".into(),
+            index: 1,
+            size: 1,
+            shape: vec![],
+        });
+        let body = build(&mut arena, v0, v1);
+        let var = |name: &str, offset: usize, b: (f64, f64)| VarInfo {
+            name: name.into(),
+            var_type: VarType::Continuous,
+            offset,
+            size: 1,
+            shape: vec![],
+            lb: vec![b.0],
+            ub: vec![b.1],
+        };
+        let model = ModelRepr {
+            arena,
+            objective: v0,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![ConstraintRepr {
+                body,
+                sense: ConstraintSense::Eq,
+                rhs,
+                name: None,
+            }],
+            variables: vec![var("x0", 0, x0), var("x1", 1, x1)],
+            n_vars: 2,
+        };
+        SIGN_DOMAIN_FORCE.with(|c| c.set(Some(on)));
+        let out = fbbt(&model, 20, 1e-9);
+        SIGN_DOMAIN_FORCE.with(|c| c.set(None));
+        out
+    }
+
+    fn mul(a: &mut ExprArena, x: ExprId, y: ExprId) -> ExprId {
+        a.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: x,
+            right: y,
+        })
+    }
+
+    fn pow_minus(p: f64) -> impl Fn(&mut ExprArena, ExprId, ExprId) -> ExprId {
+        // x1 - x0**p  (== 0)
+        move |a: &mut ExprArena, x0: ExprId, x1: ExprId| {
+            let c = a.add(ExprNode::Constant(p));
+            let pw = a.add(ExprNode::BinaryOp {
+                op: BinOp::Pow,
+                left: x0,
+                right: c,
+            });
+            a.add(ExprNode::BinaryOp {
+                op: BinOp::Sub,
+                left: x1,
+                right: pw,
+            })
+        }
+    }
+
+    const FREE: (f64, f64) = (-9.999e19, 9.999e19);
+
+    /// `wallfix`'s row: `x0 * x1 == 1`, `x1 >= 0` (sentinel-open above), `x0` free.
+    /// OFF leaves `x0` free (the pre-#1982 control); ON gives `x0 >= 0`, and never
+    /// leans on the sentinel (`1 / 9.999e19` would be a bound the model never wrote).
+    #[test]
+    fn fbbt_1982_product_with_a_zero_touching_factor_fixes_the_sign() {
+        let off = fbbt_1982(mul, 1.0, FREE, (0.0, 9.999e19), false);
+        assert_eq!(
+            off[0].lo, -9.999e19,
+            "control: OFF must not tighten x0: {:?}",
+            off[0]
+        );
+        let on = fbbt_1982(mul, 1.0, FREE, (0.0, 9.999e19), true);
+        assert_eq!(
+            on[0].lo, 0.0,
+            "ON: x0 * x1 = 1 with x1 >= 0 forces x0 >= 0: {:?}",
+            on[0]
+        );
+        assert_eq!(on[0].hi, 9.999e19);
+        // A finite partner gives the quotient, rounded down: x0 >= 1/4.
+        let fin = fbbt_1982(mul, 1.0, FREE, (0.0, 4.0), true);
+        assert!(fin[0].lo <= 0.25 && fin[0].lo > 0.2499999, "{:?}", fin[0]);
+        // Mirrored: x0 * x1 == -2, x1 in [-4, 0]  =>  x0 >= 0.5.
+        let neg = fbbt_1982(mul, -2.0, FREE, (-4.0, 0.0), true);
+        assert!(neg[0].lo <= 0.5 && neg[0].lo > 0.4999999, "{:?}", neg[0]);
+        assert_eq!(neg[0].hi, 9.999e19);
+    }
+
+    /// A product whose value range contains 0, or a partner straddling 0, admits no
+    /// sign deduction: ON must leave the box exactly as OFF does.
+    #[test]
+    fn fbbt_1982_no_deduction_when_zero_is_attainable() {
+        let ub = |a: &mut ExprArena, x: ExprId, y: ExprId| mul(a, x, y);
+        for (rhs, partner) in [(0.0, (0.0, 4.0)), (1.0, (-1.0, 4.0))] {
+            let off = fbbt_1982(ub, rhs, FREE, partner, false);
+            let on = fbbt_1982(ub, rhs, FREE, partner, true);
+            assert_eq!(
+                (off[0].lo, off[0].hi),
+                (on[0].lo, on[0].hi),
+                "rhs {rhs} {partner:?}"
+            );
+        }
+    }
+
+    /// `x1 == x0 ** 0.75`: a non-integer power is real-valued only on `x0 >= 0`.
+    /// Integer exponents are untouched (`x0 ** 3` keeps its negative branch).
+    #[test]
+    fn fbbt_1982_non_integer_power_domain() {
+        let off = fbbt_1982(pow_minus(0.75), 0.0, (-5.0, 5.0), (0.0, 10.0), false);
+        assert_eq!(off[0].lo, -5.0, "control: OFF keeps x0 >= -5: {:?}", off[0]);
+        let on = fbbt_1982(pow_minus(0.75), 0.0, (-5.0, 5.0), (0.0, 10.0), true);
+        assert_eq!(on[0].lo, 0.0, "ON: x0 ** 0.75 needs x0 >= 0: {:?}", on[0]);
+        let neg_p = fbbt_1982(pow_minus(-0.5), 0.0, (-5.0, 5.0), (0.0, 10.0), true);
+        assert_eq!(neg_p[0].lo, 0.0, "x0 ** -0.5 needs x0 >= 0: {:?}", neg_p[0]);
+        let cube = fbbt_1982(pow_minus(3.0), 0.0, (-5.0, 5.0), (-200.0, 200.0), true);
+        assert_eq!(
+            cube[0].lo, -5.0,
+            "an odd integer power keeps x0 < 0: {:?}",
+            cube[0]
+        );
+    }
+
+    /// Feasible-point sampling: for random boxes and random points `(x0, x1)` with
+    /// `x0 * x1 = w` exactly representable, ON never cuts the point out of its box.
+    #[test]
+    fn fbbt_1982_product_rule_never_cuts_a_feasible_point() {
+        let mut state: u64 = 0x1982_1975;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            ((state >> 11) as f64) / ((1u64 << 53) as f64)
+        };
+        let mut checked = 0usize;
+        for _ in 0..4000 {
+            // Points on a dyadic grid so x0 * x1 is exact.
+            let x0 = ((next() - 0.5) * 64.0).round() / 8.0;
+            let x1 = ((next() - 0.5) * 64.0).round() / 8.0;
+            let w = x0 * x1;
+            // A box for x1 that touches zero on the side of x1's sign, straddles
+            // zero, or excludes it -- the rule must fire on the first kind only.
+            let kind = next();
+            let x1_box = if kind < 0.5 {
+                if x1 >= 0.0 {
+                    (0.0, x1 + next() * 4.0)
+                } else {
+                    (x1 - next() * 4.0, 0.0)
+                }
+            } else {
+                (x1 - next() * 4.0, x1 + next() * 4.0)
+            };
+            let x0_box = (x0 - next() * 8.0, x0 + next() * 8.0);
+            let out = fbbt_1982(mul, w, x0_box, x1_box, true);
+            assert!(
+                out[0].lo <= x0 && x0 <= out[0].hi && out[1].lo <= x1 && x1 <= out[1].hi,
+                "cut the feasible ({x0}, {x1}), w = {w}: {out:?}"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 4000, "the sampler checked nothing");
     }
 }
