@@ -38,6 +38,7 @@ use crate::lp::simplex::sparse::SparseCols;
 use crate::lp::simplex::{
     primal::solve_lp_cols_scaled, solve_lp_warm_scaled_csc, LpStatus, SimplexOptions,
 };
+use crate::presolve::directed::{add_down, div_down, div_up, mul_down, sub_up};
 
 /// A univariate function admissible in a convex composite row, carrying its own
 /// closed-form value and derivative. Extend as new convex-certifiable functions
@@ -953,7 +954,10 @@ impl ConvexKernelSpec {
                 if aj == 0.0 {
                     continue;
                 }
-                // rest = Σ_{k≠j} min contribution (a_k>0 → lo, else hi).
+                // rest = Σ_{k≠j} min contribution (a_k>0 → lo, else hi), rounded
+                // DOWN so it never exceeds the exact minimum (#1955; the #1537 D
+                // treatment `spatial_propagate::tighten_le` already has). Nearest
+                // rounding here cut exactly feasible points out of the box.
                 let mut rest = 0.0;
                 let mut ok = true;
                 for (kpos, &k) in cols.iter().enumerate() {
@@ -966,12 +970,19 @@ impl ConvexKernelSpec {
                         ok = false;
                         break;
                     }
-                    rest += ak * v;
+                    rest = add_down(rest, mul_down(ak, v));
                 }
                 if !ok {
                     continue;
                 }
-                let bnd = (rhs - rest) / aj;
+                // Upper bound on the residual, divided outward: an upper bound on
+                // x_j for a_j > 0, a lower bound for a_j < 0.
+                let resid = sub_up(rhs, rest);
+                let bnd = if aj > 0.0 {
+                    div_up(resid, aj)
+                } else {
+                    div_down(resid, aj)
+                };
                 if aj > 0.0 {
                     let nb = if self.integrality[j] {
                         (bnd + 1e-9).floor()
@@ -2240,6 +2251,46 @@ impl ConvexKernelSpec {
 mod tests {
     use super::*;
     use crate::lp::simplex::SimplexOptions;
+
+    /// #1955: with x1 = x2 = x3 = 1 fixed, the row `±x0 + 1e16·x1 − x2 − 1e16·x3 <= rhs`
+    /// is exactly satisfiable on all of x0 ∈ [0, 1]. In nearest rounding `1e16 − 1`
+    /// ties to `1e16`, so the other-terms minimum came out 1 too large and FBBT cut
+    /// the box down to a single endpoint, excluding exactly feasible points.
+    fn fbbt_tie_spec(a0: f64, rhs: f64) -> ConvexKernelSpec {
+        ConvexKernelSpec {
+            n: 4,
+            c: vec![-1.0, 0.0, 0.0, 0.0],
+            sense_max: false,
+            integrality: vec![false; 4],
+            lb: vec![0.0, 1.0, 1.0, 1.0],
+            ub: vec![1.0, 1.0, 1.0, 1.0],
+            le_rows: vec![LinRow {
+                cols: vec![0, 1, 2, 3],
+                coeffs: vec![a0, 1e16, -1.0, -1e16],
+                rhs,
+            }],
+            eq_rows: vec![],
+            nl_rows: vec![],
+        }
+    }
+
+    #[test]
+    fn fbbt_upper_bound_keeps_exactly_feasible_point_1955() {
+        // x0 + 1e16 − 1 − 1e16 <= 0  ⇔  x0 <= 1 exactly.
+        let spec = fbbt_tie_spec(1.0, 0.0);
+        let (mut lo, mut hi) = (spec.lb.clone(), spec.ub.clone());
+        assert!(spec.propagate_fbbt(&mut lo, &mut hi, 10));
+        assert!(hi[0] >= 1.0, "FBBT cut x0 = 1 out: hi[x0] = {}", hi[0]);
+    }
+
+    #[test]
+    fn fbbt_lower_bound_keeps_exactly_feasible_point_1955() {
+        // −x0 + 1e16 − 1 − 1e16 <= −1  ⇔  x0 >= 0 exactly.
+        let spec = fbbt_tie_spec(-1.0, -1.0);
+        let (mut lo, mut hi) = (spec.lb.clone(), spec.ub.clone());
+        assert!(spec.propagate_fbbt(&mut lo, &mut hi, 10));
+        assert!(lo[0] <= 0.0, "FBBT cut x0 = 0 out: lo[x0] = {}", lo[0]);
+    }
 
     const N: usize = 4;
 

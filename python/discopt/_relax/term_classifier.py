@@ -1283,6 +1283,7 @@ def _distribute_within_budget(
     protected_squares: frozenset[int] | None,
     memo: dict[int, int],
     remaining: list[int],
+    done: dict[int, Expression] | None = None,
 ) -> Expression:
     """Distribute what the budget still affords; leave the rest intact.
 
@@ -1300,7 +1301,31 @@ def _distribute_within_budget(
 
     Only reached when the root is over budget, so the repeated estimates are off
     the hot path; *memo* keeps them linear anyway.
+
+    *done* maps ``id()`` of a visited node to its result, so a subexpression the
+    model reuses is walked, and charged to the budget, once: the rebuilt tree
+    shares the one result object, which adds no terms the second time. Without it
+    a shared over-budget node was descended once per path -- exponential in the
+    depth of a single-shooting model (``e = e + h*(u - e**2)``).
     """
+    if done is None:
+        done = {}
+    hit = done.get(id(expr))
+    if hit is not None:
+        return hit
+    result = _distribute_within_budget_node(expr, protected_squares, memo, remaining, done)
+    done[id(expr)] = result
+    return result
+
+
+def _distribute_within_budget_node(
+    expr: Expression,
+    protected_squares: frozenset[int] | None,
+    memo: dict[int, int],
+    remaining: list[int],
+    done: dict[int, Expression],
+) -> Expression:
+    """One node of :func:`_distribute_within_budget`; children go through *done*."""
     # A protected node (issue #155 affine square, issue #358 convex-subexpression
     # lift) is returned with its identity intact, exactly as the unbudgeted walk
     # does. Without this an over-budget protected node would be descended into
@@ -1316,21 +1341,21 @@ def _distribute_within_budget(
         remaining[0] -= est
         return _distribute_unbudgeted(expr, protected_squares)
     if isinstance(expr, BinaryOp) and expr.op in ("+", "-"):
-        left = _distribute_within_budget(expr.left, protected_squares, memo, remaining)
-        right = _distribute_within_budget(expr.right, protected_squares, memo, remaining)
+        left = _distribute_within_budget(expr.left, protected_squares, memo, remaining, done)
+        right = _distribute_within_budget(expr.right, protected_squares, memo, remaining, done)
         if left is expr.left and right is expr.right:
             return expr
         return BinaryOp(expr.op, left, right)
     if isinstance(expr, UnaryOp):
-        operand = _distribute_within_budget(expr.operand, protected_squares, memo, remaining)
+        operand = _distribute_within_budget(expr.operand, protected_squares, memo, remaining, done)
         if operand is expr.operand:
             return expr
         return UnaryOp(expr.op, operand)
     # A ``*`` or ``**`` the budget cannot afford: distribute inside its operands
     # where affordable, but do not multiply them out.
     if isinstance(expr, BinaryOp):
-        left = _distribute_within_budget(expr.left, protected_squares, memo, remaining)
-        right = _distribute_within_budget(expr.right, protected_squares, memo, remaining)
+        left = _distribute_within_budget(expr.left, protected_squares, memo, remaining, done)
+        right = _distribute_within_budget(expr.right, protected_squares, memo, remaining, done)
         if left is expr.left and right is expr.right:
             return expr
         return BinaryOp(expr.op, left, right)
@@ -1338,7 +1363,9 @@ def _distribute_within_budget(
 
 
 def _distribute_unbudgeted(
-    expr: Expression, protected_squares: frozenset[int] | None = None
+    expr: Expression,
+    protected_squares: frozenset[int] | None = None,
+    _memo: dict[int, Expression] | None = None,
 ) -> Expression:
     """Recursively distribute multiplication over addition/subtraction.
 
@@ -1364,11 +1391,30 @@ def _distribute_unbudgeted(
     preserving the node's identity lets the linearizer resolve it through its
     id-keyed ``composite_var_map``.  A protected node of ANY operator is returned
     intact, so the check is at the top rather than only on the ``**`` branch.
+
+    ``_memo`` maps ``id()`` of an input node to its result for the duration of one
+    top-level call. A model that reuses a subexpression (single shooting,
+    ``e = e + h*(u - e**2)``) reaches it along exponentially many paths; without
+    the memo each path redistributed it.
     """
     # Any protected node (square lift #155, convex-subexpression lift #358) is
     # returned with its identity intact so its id()-keyed claim survives.
     if protected_squares is not None and id(expr) in protected_squares:
         return expr
+    if _memo is None:
+        _memo = {}
+    hit = _memo.get(id(expr))
+    if hit is not None:
+        return hit
+    result = _distribute_unbudgeted_node(expr, protected_squares, _memo)
+    _memo[id(expr)] = result
+    return result
+
+
+def _distribute_unbudgeted_node(
+    expr: Expression, protected_squares: frozenset[int] | None, _memo: dict[int, Expression]
+) -> Expression:
+    """One node of :func:`_distribute_unbudgeted`; children go through the memo."""
     if isinstance(expr, BinaryOp):
         if expr.op == "**" and isinstance(expr.right, Constant):
             # A protected power node (an issue-#155 affine square, or an affine
@@ -1383,15 +1429,15 @@ def _distribute_unbudgeted(
                 # (a*b)**n → a**n * b**n when the base is a pure product; leaves a
                 # sum base (e.g. (a+b)**n) untouched (helper returns None) so the
                 # ``**2`` square-of-sum path and higher sum-powers are unaffected.
-                base = _distribute_unbudgeted(expr.left, protected_squares)
+                base = _distribute_unbudgeted(expr.left, protected_squares, _memo)
                 expanded = _distribute_power_over_product(base, n_int)
                 if expanded is not None:
                     return expanded
             if exp_val == 2.0:
-                left = _distribute_unbudgeted(expr.left, protected_squares)
+                left = _distribute_unbudgeted(expr.left, protected_squares, _memo)
                 return _distribute_mul(left, left)
-        left = _distribute_unbudgeted(expr.left, protected_squares)
-        right = _distribute_unbudgeted(expr.right, protected_squares)
+        left = _distribute_unbudgeted(expr.left, protected_squares, _memo)
+        right = _distribute_unbudgeted(expr.right, protected_squares, _memo)
         if expr.op == "*":
             return _distribute_mul(left, right)
         # Preserve node identity when nothing distributed, so id()-keyed maps
@@ -1400,7 +1446,7 @@ def _distribute_unbudgeted(
             return expr
         return BinaryOp(expr.op, left, right)
     if isinstance(expr, UnaryOp):
-        operand = _distribute_unbudgeted(expr.operand, protected_squares)
+        operand = _distribute_unbudgeted(expr.operand, protected_squares, _memo)
         if operand is expr.operand:
             return expr
         return UnaryOp(expr.op, operand)

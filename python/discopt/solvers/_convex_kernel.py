@@ -96,6 +96,7 @@ if TYPE_CHECKING:
 
 import numpy as np
 
+from discopt._flat_index import flat_index_in_shape
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -142,8 +143,12 @@ def _col_of(node, offsets: dict[int, int]) -> int:
             raise NotConvexKernel("array variable used as scalar")
         return offsets[node._index]
     if isinstance(node, IndexExpression) and isinstance(node.base, Variable):
-        base, idx = node.base, node.index
-        flat = int(np.ravel_multi_index(idx, base.shape)) if isinstance(idx, tuple) else int(idx)
+        base = node.base
+        # ``int(idx)`` sent ``x[-1]`` to the slot of the variable declared before
+        # ``x`` (the #941/#1952 pattern) and a partial index to one wrong scalar.
+        flat = flat_index_in_shape(node.index, tuple(base.shape or ()))
+        if flat is None:
+            raise NotConvexKernel("index does not name one scalar element")
         return offsets[base._index] + flat
     raise NotConvexKernel("non-variable leaf")
 
@@ -492,6 +497,27 @@ def _degree_linear(m) -> bool:
     return all(rep.is_constraint_linear(i) for i in range(rep.n_constraints))
 
 
+def _proven_linear(m):
+    """``(objective_linear, row_linear[])`` from the Rust degree analysis, or ``None``.
+
+    The proof the kernel's linear/nonlinear split rests on: a sampled Jacobian test
+    cannot tell a linear row from one whose curvature is small relative to its slope.
+    ``None`` (no repr, or rows that do not map 1:1 onto ``m._constraints``) proves
+    nothing, so the caller treats every row as nonlinear and the objective as unproven.
+    """
+    from discopt._repr_cache import readonly_model_repr
+
+    try:
+        rep = readonly_model_repr(m)
+    except Exception as exc:  # noqa: BLE001 - "not proven": the caller refuses
+        logger.debug("convex kernel: no Rust repr for the linearity proof (%s)", exc)
+        return None
+    if int(rep.n_constraints) != len(m._constraints):
+        return None
+    rows = np.array([rep.is_constraint_linear(i) for i in range(rep.n_constraints)], bool)
+    return bool(rep.is_objective_linear()), rows
+
+
 def _build(model, bounds) -> dict:
     from discopt._relax.model_utils import flat_variable_bounds
     from discopt._tape_nlp_evaluator import make_evaluator
@@ -547,6 +573,11 @@ def _build(model, bounds) -> dict:
     gb = np.asarray(ev.evaluate_gradient(xb), float)
     if not np.allclose(ga, gb, atol=1e-9):
         raise NotConvexKernel("nonlinear objective")
+    # Two gradients agreeing to ``isclose`` is a sample, not a proof: ``1e6*x - x**2``
+    # passes it on [0, 1] (rtol 1e-5). Only the degree analysis proves linearity.
+    proven = _proven_linear(m)
+    if proven is None or not proven[0]:
+        raise NotConvexKernel("objective not proven linear")
     negate = bool(getattr(ev, "_negate", sense_max))
     c = (-ga if negate else ga).astype(float)
     # ... and the objective's CONSTANT term. ``c`` is the gradient, so the
@@ -609,11 +640,20 @@ def _build(model, bounds) -> dict:
     close = np.isclose(ja.data, jb.data, atol=1e-9)
     row_of_entry = np.repeat(np.arange(ja.shape[0]), np.diff(ja.indptr))
     n_bad = np.bincount(row_of_entry[~close], minlength=ja.shape[0])
-    lin_rows = n_bad == 0
-    if lin_rows.all():
+    # A row is linear only when the degree analysis PROVES it (#1955 sweep). The
+    # sampled test alone classified ``1e6*x - x**2 + z <= 5`` (x in [0, 1]) as linear
+    # -- the two Jacobians agree within numpy's default rtol 1e-5 -- so the row was
+    # replaced by one tangent, skipped ``_assert_convex_le`` and the kernel certified
+    # 5.2874 on a model whose optimum is 5 + ln 2. An unproven row takes the
+    # nonlinear path, whose convexity check and OA cuts are valid for linear rows too.
+    lin_rows = (n_bad == 0) & proven[1]
+    if (n_bad == 0).all():
         # Same refusal as the ``not nl_specs`` one below (#1346): every row is
         # linear, so ``nl_specs`` would stay empty. Asked here so an LP/MILP never
-        # reaches the per-row densification.
+        # reaches the per-row densification. The SAMPLED test decides this one, not
+        # ``lin_rows``: refusing needs no proof (a declined model goes to a sound
+        # route), and the degree analysis does not prove ``x + 0.0*(x+y)**2`` linear
+        # although the exact classifier routes it to the LP/MILP route (A-21).
         raise NotConvexKernel("no nonlinear row: an LP/MILP belongs to the LP/MILP route")
     g0 = np.asarray(ev.evaluate_constraints(xa), float)
     const = g0 - np.asarray(ja @ xa, float).ravel()

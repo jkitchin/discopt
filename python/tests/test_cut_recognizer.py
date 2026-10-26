@@ -33,6 +33,20 @@ def _gas_model():
     return build_gas_network_minlp()
 
 
+def _gas_model_honest_box():
+    # The derived underestimator involves sqrt(1/(8750 - w^2)): it is defined only
+    # for w < sqrt(3.5*50^2) ~ 93.5 and the pipe-0 equation caps w at
+    # sqrt(3.5*(50^2 - 30^2)) ~ 74.8. The recognizer checks h on the flow
+    # variable's *model* box (it used to hardcode the 74.8 of this instance), so
+    # the box here states that cap; the shipped w_cs <= 100 box declines the cuts.
+    import numpy as np
+
+    m = _gas_model()
+    w = next(v for v in m._variables if v.name == "w_cs")
+    w.ub = np.full(w.shape, 74.0)
+    return m
+
+
 def test_translates_objective_and_constraints():
     sm = R.model_to_sympy(_gas_model())
     assert sm.objective.free_symbols  # non-empty
@@ -51,7 +65,7 @@ def test_finds_bilinear_concave_terms():
 
 
 def test_recognizer_derives_sound_coupling_and_bound():
-    cuts = R.recognize_and_derive_cuts(_gas_model())
+    cuts = R.recognize_and_derive_cuts(_gas_model_honest_box())
     assert len(cuts) == 2
     for c in cuts:
         # FBBT recovered the demand-forced terminal pressure bound (~49.82)
@@ -73,7 +87,7 @@ def test_no_match_returns_empty():
 
 
 def test_inject_is_value_preserving_and_adds_aux():
-    m = _gas_model()
+    m = _gas_model_honest_box()
     n_vars_before = m.num_variables
     applied = R.recognize_and_inject(m)
     assert applied == 2
@@ -83,7 +97,7 @@ def test_inject_is_value_preserving_and_adds_aux():
 @pytest.mark.slow
 def test_end_to_end_closes_gap():
     """Recognizer + inject closes the relaxation gap to ~0 on the gas network."""
-    m = _gas_model()
+    m = _gas_model_honest_box()
     applied = R.recognize_and_inject(m)
     assert applied == 2
     res = m.solve(time_limit=60, gap_tolerance=1e-4)
@@ -173,7 +187,7 @@ def test_inject_all_graceful_on_plain_model():
 
 
 def test_inject_all_fires_square_diff_on_gas():
-    counts = R.inject_all_patterns(_gas_model())
+    counts = R.inject_all_patterns(_gas_model_honest_box())
     assert counts["square_diff_network"] == 2
     assert counts["binary_product"] == 0
     assert counts["complementarity"] == 0
@@ -470,6 +484,17 @@ def test_structure_cuts_presolve_auto_closes_gas_network():
 
 
 @pytest.mark.slow
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "#1965: since the #1952-#1958 sweep the cut's convexity is checked on the flow "
+        "variable's model box [0, 100], not a hardcoded (0, sqrt(5600)); y_lower(w) is "
+        "real only for w**2 < 8750, so h is not proven convex there and inject_cuts "
+        "declines. The ON arm's root bound is then 0.5 like the opt-out arm, and the "
+        "control assertion below fails. Proving the model implies w**2 < 8750 (or "
+        "retiring the pass) is #1965."
+    ),
+)
 def test_structure_cuts_optout_leaves_gap_open():
     """`structure_cuts=False` disables the presolve: the gas network's root bound
     is then the loose McCormick bound and the gap stays open (pre-fix behaviour).

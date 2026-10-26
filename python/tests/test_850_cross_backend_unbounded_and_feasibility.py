@@ -149,7 +149,15 @@ def _stub_super_optimal_infeasible(
 
 
 def _stub_exact(c, A_ub=None, b_ub=None, A_eq=None, b_eq=None, bounds=None, **kw):
-    return LPResult(status=SolveStatus.OPTIMAL, x=np.array([1e4]), objective=-1e4)
+    # Since #1953 the native LP route certifies ``optimal`` only through the NS
+    # bound of the engine's dual, so the control supplies the true dual of
+    # ``x <= 1e4`` (-1, the convention of ``_solve_lp_matrix``'s engines).
+    return LPResult(
+        status=SolveStatus.OPTIMAL,
+        x=np.array([1e4]),
+        objective=-1e4,
+        dual_values=np.array([-1.0]),
+    )
 
 
 def test_obs1_unbounded_with_relaxed_bound_degrades():
@@ -216,10 +224,10 @@ def test_obs1_deferred_unbounded_is_never_promoted_to_the_answer(monkeypatch):
     x = m.continuous("x", lb=0, ub=1e17)  # declared, inside the [1e15, 1e20) window
     m.minimize(-x)
 
-    def _deferring(model, t_start, time_limit=None):
+    def _deferring(model, t_start, time_limit=None, **kw):
         return S._DeferredUnbounded(S.SolveResult(status="unbounded", wall_time=0.0), "STUB-IPM")
 
-    def _failing(model, t_start, time_limit=None):
+    def _failing(model, t_start, time_limit=None, **kw):
         return None
 
     monkeypatch.setattr(S, "_solve_lp_pounce", _deferring)

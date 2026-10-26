@@ -385,12 +385,15 @@ pub fn propagate_spec_fixpoint(
     cutoff: Option<f64>,
     max_rounds: usize,
 ) -> bool {
-    // Objective-cutoff row support (nonzero coefficients only), built once.
+    // Objective-cutoff row support, built once. Every nonzero term is kept (#1955):
+    // dropping a tiny `c_j` without accounting for `c_j·x_j` can make the row prove a
+    // non-empty node empty when `|x_j|` is large. `tighten_le` already counts tiny
+    // terms in the activity and only skips dividing by them.
     let (obj_cols, obj_coeffs): (Vec<usize>, Vec<f64>) = spec
         .c
         .iter()
         .enumerate()
-        .filter(|(_, &c)| c.abs() > 1e-12)
+        .filter(|(_, &c)| c != 0.0)
         .map(|(j, &c)| (j, c))
         .unzip();
 
@@ -471,6 +474,40 @@ pub fn propagate_spec_fixpoint(
 mod tests {
     use super::*;
     use crate::bnb::spatial_kernel::FixedRow;
+
+    /// #1955: c = [1, −2^-40], x ∈ [1, 2], y fixed at 2^41, cutoff 0. cᵀx = x − 2 <= 0
+    /// on the whole box, so the region is not empty. Filtering `|c| > 1e-12` dropped
+    /// the −2 term and turned the row into x <= 0, which "proved" the box empty.
+    #[test]
+    fn cutoff_row_keeps_tiny_nonzero_term_1955() {
+        let y = 2f64.powi(41);
+        let spec = SpatialKernelSpec {
+            n_cols: 2,
+            n_orig: 2,
+            c: vec![1.0, -(2f64.powi(-40))],
+            integrality: vec![false; 2],
+            global_lo: vec![1.0, y],
+            global_hi: vec![2.0, y],
+            fixed_rows: vec![],
+            terms: vec![],
+            blf_terms: vec![],
+            obbt_candidates: vec![],
+        };
+        let (mut lo, mut hi) = (vec![1.0, y], vec![2.0, y]);
+        assert!(propagate_spec_fixpoint(
+            &spec,
+            &mut lo,
+            &mut hi,
+            Some(0.0),
+            10
+        ));
+        assert!(
+            lo[0] <= 1.0 && hi[0] >= 2.0,
+            "cutoff row cut x: [{}, {}]",
+            lo[0],
+            hi[0]
+        );
+    }
 
     fn empty_spec(n_cols: usize) -> SpatialKernelSpec {
         SpatialKernelSpec {

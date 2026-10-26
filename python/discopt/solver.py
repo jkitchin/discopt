@@ -5760,6 +5760,29 @@ def _solve_root_node_multistart(
 _LAZY_REQUEUE_CAP = 100
 
 
+def _lazy_rows_upper_form(cuts, n_vars: int) -> tuple[np.ndarray, np.ndarray]:
+    """Lazy-constraint rows as ``A x <= b`` over the ``n_vars`` original columns.
+
+    ``>=`` rows are negated and ``==`` rows become the two inequalities, so the
+    node LP sees exactly the constraints the callback returned (#1954).
+    """
+    rows: list[np.ndarray] = []
+    rhs: list[float] = []
+    for c in cuts:
+        a = np.asarray(c.coeffs, dtype=np.float64).ravel()
+        if a.shape[0] != n_vars:
+            raise ValueError(f"lazy row has {a.shape[0]} coefficients, model has {n_vars}")
+        if c.sense in ("<=", "=="):
+            rows.append(a)
+            rhs.append(float(c.rhs))
+        if c.sense in (">=", "=="):
+            rows.append(-a)
+            rhs.append(-float(c.rhs))
+        if c.sense not in ("<=", ">=", "=="):
+            raise ValueError(f"lazy row sense {c.sense!r}")
+    return np.vstack(rows), np.asarray(rhs, dtype=np.float64)
+
+
 def _nonrigorous_sentinel_fathom(node_lower_bound: float, node_infeasible: bool) -> bool:
     """Whether a nonconvex node is being fathomed *non-rigorously* (issue #27a).
 
@@ -6320,7 +6343,10 @@ def _invoke_pre_import_callbacks(
                     n_rejected += 1
                 for cut in cuts:
                     coeffs, rhs, sense = cut_result_to_dense(cut, model)
-                    _cut_pool.add(LinearCut(coeffs=coeffs, rhs=rhs, sense=sense))
+                    # protected: a lazy row is part of the model, so it is keyed
+                    # exactly and never purged (#1954); the node LP reads it back
+                    # through ``CutPool.protected_rows``.
+                    _cut_pool.add(LinearCut(coeffs=coeffs, rhs=rhs, sense=sense), protected=True)
                 logger.info(
                     "Lazy constraint callback added %d cut(s) at node %d",
                     len(cuts),
@@ -13784,6 +13810,8 @@ def solve_model(
             nlp_solver=nlp_solver,
             ignored=_pounce_ignored,
             scaling=pounce_scaling,
+            gap_tolerance=gap_tolerance,
+            abs_gap_tolerance=abs_gap_tolerance,
         )
 
     # Slice held back from the search for the root-relaxation fallback so that
@@ -16801,7 +16829,15 @@ def solve_model(
                 "supports LP, MILP, QP, MIQP, QCP, QCQP, MIQCP, and MIQCQP models only."
             )
         if problem_class == ProblemClass.LP:
-            return _solve_lp_gurobi(model, t_start, time_limit, threads, gurobi_options)
+            return _solve_lp_gurobi(
+                model,
+                t_start,
+                time_limit,
+                threads,
+                gurobi_options,
+                gap_tolerance=gap_tolerance,
+                abs_gap_tolerance=abs_gap_tolerance,
+            )
         if problem_class == ProblemClass.MILP:
             return _solve_milp_gurobi(
                 model, t_start, time_limit, gap_tolerance, threads, gurobi_options
@@ -16938,7 +16974,7 @@ def solve_model(
             if _lpm_backend == "highs":
                 with _highs_route_options(presolve=_caller_presolve):
                     return _solve_lp_highs(model, t_start, time_limit)
-            _lp_res = _solve_lp(model, t_start, time_limit)
+            _lp_res = _solve_lp(model, t_start, time_limit, gap_tolerance, abs_gap_tolerance)
             if _lpm_backend == "native" and _lp_res.algorithm_route is None:
                 _lp_stats = _lp_res.solver_stats or {}
                 _lp_engine = (
@@ -18165,6 +18201,7 @@ def solve_model(
     _nonrigorous_fathom = False
     #: node id -> how many times `lazy_constraints` requeued it (#1365 cap).
     _lazy_requeues: dict[int, int] = {}
+    _n_lazy_rows_synced = 0  # #1954: lazy rows already handed to the node LP
     # #1611 D-30: the model's verified HiGHS standard form, built on the first
     # failed node of a fully linear model (see ``_linear_node_lp_rescue``).
     # ``False`` = not applicable (nonlinear model, or a lifted variable layout).
@@ -22116,6 +22153,15 @@ def solve_model(
                 requeue_mask=_requeue_mask,
                 exclusion_mask=_exclusion_mask,
             )
+            # #1954: hand the stored lazy rows to the node McCormick LP. Before
+            # this they reached only the node NLP, so the LP kept returning the
+            # point a row cuts off and a correct separator requeued the node to
+            # the cap. Protected rows are never purged, so the count only grows.
+            if _mc_lp_relaxer is not None and _cut_pool is not None:
+                _lazy_rows = _cut_pool.protected_rows()
+                if len(_lazy_rows) != _n_lazy_rows_synced:
+                    _mc_lp_relaxer.set_model_rows(*_lazy_rows_upper_form(_lazy_rows, n_vars))
+                    _n_lazy_rows_synced = len(_lazy_rows)
             if _requeue_mask.any():
                 for _rq_idx in np.flatnonzero(_requeue_mask):
                     _nid = int(result_ids[_rq_idx])
@@ -22124,8 +22170,9 @@ def solve_model(
                         logger.warning(
                             "Node %d was requeued %d times by lazy_constraints without "
                             "the cuts separating its relaxation point; excluding it "
-                            "instead. A cut that does not cut off the point it was "
-                            "returned for cannot make progress.",
+                            "instead and withdrawing the certificate over its region. "
+                            "A cut that does not cut off the point it was returned "
+                            "for cannot make progress.",
                             _nid,
                             _LAZY_REQUEUE_CAP,
                         )
@@ -22133,6 +22180,24 @@ def solve_model(
                         result_lbs[_rq_idx] = _INFEASIBILITY_SENTINEL
                         _exclusion_mask[_rq_idx] = True
                         _n_cb_rejected += 1
+                        # #1954: a lazy cut rejects one POINT; it proves nothing
+                        # about the rest of the box (#1365). Excluding the node at
+                        # the cap is therefore an unproven fathom, handled exactly
+                        # like the batch sweep's non-rigorous sentinels: decertify,
+                        # and keep the node's POP-TIME bound (proved at its parent,
+                        # still in the pool -- import has not run) as a floor of
+                        # the reported global bound, so certification can only be
+                        # re-earned by the floor-inclusive gap closing. Before this
+                        # the region silently left the bound and a correct
+                        # separator certified -2.0 on a model whose optimum is -2.9.
+                        _gap_certified = False
+                        _cap_pop_lb = float(
+                            np.asarray(
+                                tree.node_lower_bounds(np.asarray([_nid], dtype=np.int64)),
+                                dtype=np.float64,
+                            )[0]
+                        )
+                        _taint_floor_internal = min(_taint_floor_internal, _cap_pop_lb)
             # #748: a callback rejection sentinels a FEASIBLE node without proving
             # its region empty of acceptable points — a non-rigorous fathom. It is
             # applied here, AFTER the batch's own non-rigorous-sentinel sweep
@@ -26173,6 +26238,8 @@ def _solve_pounce_route(
     nlp_solver: str,
     ignored: list[str],
     scaling: Optional[dict[str, Any]] = None,
+    gap_tolerance: float | None = None,
+    abs_gap_tolerance: float | None = None,
 ) -> SolveResult:
     """``Model.solve(solver="pounce")``: one POUNCE interior-point solve (#1533).
 
@@ -26337,6 +26404,8 @@ def _solve_pounce_route(
                     "POUNCE lp-ipm",
                     strict=True,
                     relaxes_huge_bounds=True,
+                    gap_tolerance=gap_tolerance,
+                    abs_gap_tolerance=abs_gap_tolerance,
                 )
             else:
                 outcome = _solve_qp_matrix(
@@ -30314,6 +30383,8 @@ def _solve_lp(
     model: Model,
     t_start: float,
     time_limit: float | None = None,
+    gap_tolerance: float | None = None,
+    abs_gap_tolerance: float | None = None,
 ) -> SolveResult:
     """Solve an LP through the pure-Rust simplex (then POUNCE if installed).
 
@@ -30374,7 +30445,13 @@ def _solve_lp(
         """First real answer from the engine order, else any held deferral."""
         held: _DeferredUnbounded | None = None
         for engine in engines:
-            result = engine(model, t_start, time_limit)
+            result = engine(
+                model,
+                t_start,
+                time_limit,
+                gap_tolerance=gap_tolerance,
+                abs_gap_tolerance=abs_gap_tolerance,
+            )
             if isinstance(result, _DeferredUnbounded):
                 # An UNBOUNDED the #850 guard declined to certify because this
                 # engine relaxed a declared bound in [1e15, 1e20) to its own
@@ -30531,6 +30608,8 @@ def _solve_lp_simplex(
     model: Model,
     t_start: float,
     time_limit: float | None = None,
+    gap_tolerance: float | None = None,
+    abs_gap_tolerance: float | None = None,
 ) -> "SolveResult | _DeferredUnbounded | None":
     """Solve an LP using the pure-Rust warm-started simplex. Returns None when
     the simplex binding is unavailable or fails, so the caller can fall back to
@@ -30543,13 +30622,23 @@ def _solve_lp_simplex(
     # relaxes_huge_bounds stays False: the simplex's infinity threshold is 1e20,
     # so it honors a declared bound in [1e15, 1e20) as finite and its UNBOUNDED is
     # a statement about the box as declared.
-    return _solve_lp_matrix(model, t_start, time_limit, _simplex_solve_lp, "simplex")
+    return _solve_lp_matrix(
+        model,
+        t_start,
+        time_limit,
+        _simplex_solve_lp,
+        "simplex",
+        gap_tolerance=gap_tolerance,
+        abs_gap_tolerance=abs_gap_tolerance,
+    )
 
 
 def _solve_lp_pounce(
     model: Model,
     t_start: float,
     time_limit: float | None = None,
+    gap_tolerance: float | None = None,
+    abs_gap_tolerance: float | None = None,
 ) -> "SolveResult | _DeferredUnbounded | None":
     """Solve an LP using POUNCE (pure-Rust IPM). Returns None when POUNCE is
     unavailable or fails, so the caller can fall back to another engine."""
@@ -30577,7 +30666,14 @@ def _solve_lp_pounce(
     # The IPM is the one backend that relaxes a declared [1e15, 1e20) bound to its
     # own infinity, so its UNBOUNDED is the verdict the #850 guard defers on.
     result = _solve_lp_matrix(
-        model, t_start, time_limit, solve_fn, "POUNCE", relaxes_huge_bounds=True
+        model,
+        t_start,
+        time_limit,
+        solve_fn,
+        "POUNCE",
+        relaxes_huge_bounds=True,
+        gap_tolerance=gap_tolerance,
+        abs_gap_tolerance=abs_gap_tolerance,
     )
     _attach_solve_report(result, reports)
     return result
@@ -30589,6 +30685,8 @@ def _solve_lp_gurobi(
     time_limit: float | None = None,
     threads: int | None = None,
     options: Optional[dict] = None,
+    gap_tolerance: float | None = None,
+    abs_gap_tolerance: float | None = None,
 ) -> SolveResult:
     """Solve an LP using the explicit Gurobi backend."""
     import functools
@@ -30608,6 +30706,8 @@ def _solve_lp_gurobi(
         # finite (#1328, verified against gurobipy 13.0.0), so the #850 deferral
         # never applies and no _DeferredUnbounded can come back here.
         relaxes_huge_bounds=False,
+        gap_tolerance=gap_tolerance,
+        abs_gap_tolerance=abs_gap_tolerance,
     )
     if result is None:  # pragma: no cover - strict mode raises before this
         raise RuntimeError("Gurobi LP solve failed without returning a result.")
@@ -30623,6 +30723,8 @@ def _solve_lp_matrix(
     engine: str,
     strict: bool = False,
     relaxes_huge_bounds: bool = False,
+    gap_tolerance: float | None = None,
+    abs_gap_tolerance: float | None = None,
 ) -> "SolveResult | _DeferredUnbounded | None":
     """Solve a pure LP through a matrix-form ``solve_lp`` backend.
 
@@ -30741,16 +30843,61 @@ def _solve_lp_matrix(
             b_eq=b_eq,
         )
 
+        # #1953: the engine's OPTIMAL label is floating-point evidence -- a reduced
+        # cost misjudged as noise ended a simplex at a vertex 0.25 above the optimum
+        # with ``bound`` equal to it. Certify the point as the HiGHS route does: the
+        # NS safe bound from the engine's own dual over the problem it solved.
+        _deadline = None if time_limit is None else t_start + float(time_limit)
+        _obj_min, _ns, _prov, _why = _native_lp_ns_certificate(
+            np.asarray(lp_data.c[:n_orig], dtype=np.float64),
+            A_ub,
+            b_ub,
+            A_eq,
+            b_eq,
+            bounds,
+            np.asarray(result.x[:n_orig], dtype=np.float64),
+            result.dual_values,
+            float(lp_data.obj_const),
+            _deadline,
+        )
+        _maximize = model._objective.sense == ObjectiveSense.MAXIMIZE
+        _certified = _native_lp_certified(_obj_min, _ns, gap_tolerance, abs_gap_tolerance)
+        _lp_stats: dict[str, float] = {"lp/iters": float(result.iterations)}
+        if _prov:
+            _lp_stats["lp/bound_provenance_" + _prov.replace("-", "_")] = 1.0
+        if _ns is None:
+            _lp_stats["lp/ns_bound_missing"] = 1.0
+            _bound = None
+        else:
+            _lp_stats["lp/ns_gap"] = float(_obj_min - _ns)
+            _b = min(_ns, _obj_min)
+            _bound = -_b if _maximize else _b
+        if not _certified:
+            logger.warning(
+                "%s LP optimum not certified (#1953): %s; reporting 'feasible'.",
+                engine,
+                "no NS safe bound from its dual"
+                if _ns is None
+                else f"NS safe bound {_ns:.12g} is {_obj_min - _ns:.3g} below the objective",
+            )
+            if _why:
+                logger.info("%s LP exact dual correction: %s", engine, _why)
         sr = SolveResult(
-            status="optimal",
+            status="optimal" if _certified else "feasible",
             objective=obj_val,
-            bound=obj_val,
-            # #1244: a local minimum of a PROVED-convex problem is the global
-            # minimum, so the incumbent is simultaneously a valid lower bound.
-            # That is the same premise that licenses returning after one solve.
-            bound_valid=True,
-            bound_source="convex_proof",
-            gap=_optimal_relative_gap(obj_val),
+            bound=_bound,
+            # #1953: the bound is the NS safe bound from the engine's dual (capped at
+            # the objective), never the objective on the engine's word.
+            bound_valid=_bound is not None,
+            bound_source="lp_dual" if _bound is not None else None,
+            # The gap the certificate proved: 0 at the HiGHS route's tolerance, else
+            # the true NS gap, which ``_native_lp_certified`` held to gap_tolerance.
+            gap=(
+                _optimal_relative_gap(obj_val)
+                if _certified and _native_lp_certified(_obj_min, _ns)
+                else _gap_mod.reported_gap(obj_val, _bound, abs_tol=abs_gap_tolerance)
+            ),
+            gap_certified=_certified,
             x=_unpack_solution(model, np.asarray(result.x[:n_orig])),
             wall_time=wall_time,
             node_count=0,
@@ -30761,10 +30908,10 @@ def _solve_lp_matrix(
             bound_duals_lower=bdl,
             bound_duals_upper=bdu,
         )
-        sr.convex_fast_path = True
+        sr.convex_fast_path = _certified
         # #1754: the engine's iteration count, under the HiGHS route's key, so the
         # two routes can be compared.
-        sr.solver_stats = {**(sr.solver_stats or {}), "lp/iters": float(result.iterations)}
+        sr.solver_stats = {**(sr.solver_stats or {}), **_lp_stats}
         return sr
     if result.status == SolveStatus.INFEASIBLE:
         return SolveResult(
@@ -30825,6 +30972,128 @@ def _solve_lp_matrix(
     if result.status == SolveStatus.TIME_LIMIT:
         return SolveResult(status="time_limit", wall_time=wall_time)
     return None
+
+
+def _native_lp_ns_certificate(c, A_ub, b_ub, A_eq, b_eq, bounds, x, y, obj_const, deadline):
+    """``(objective, ns_bound, provenance, why)`` for a native LP engine's point (#1953).
+
+    Rebuilds the problem the engine solved -- ``min cᵀx + obj_const`` over
+    ``A_ub x <= b_ub``, ``A_eq x = b_eq`` and ``bounds`` -- in standard form, one
+    slack per inequality row, and runs :func:`lp_milp_highs.certify_lp_dual` on the
+    engine's row dual (HiGHS convention, inequality rows first: the shared
+    ``solve_lp`` contract). Everything is in the minimize sense. ``ns_bound`` is
+    ``None`` when the engine returned no dual or the bound is ``-inf``.
+    """
+    import scipy.sparse as _sp
+
+    from discopt.solvers.lp_milp_highs import StdForm, certify_lp_dual
+
+    n = c.shape[0]
+    obj = float(c @ x) + obj_const
+    m_ub = 0 if A_ub is None else A_ub.shape[0]
+    m_eq = 0 if A_eq is None else A_eq.shape[0]
+    if y is None or np.asarray(y).shape != (m_ub + m_eq,):
+        return obj, None, "", ""
+    lo = np.array([bd[0] for bd in bounds], dtype=np.float64)
+    hi = np.array([bd[1] for bd in bounds], dtype=np.float64)
+    lo = np.where(np.isnan(lo), -_CONSTRAINT_INF, lo)
+    hi = np.where(np.isnan(hi), _CONSTRAINT_INF, hi)
+    xl = np.concatenate([lo, np.zeros(m_ub)])
+    xu = np.concatenate([hi, np.full(m_ub, _CONSTRAINT_INF)])
+    # A B&B tree certifies every node LP against the same rows; only the box moves.
+    # Reuse the slack form when the rows are *exactly* the cached ones (content, not
+    # identity: the caller rebuilds its arrays per node), swapping in the new box.
+    key = (
+        np.array(c, dtype=np.float64),
+        _native_ns_rows_key(A_ub),
+        _native_ns_rows_key(A_eq),
+        np.array(b_ub if m_ub else (), dtype=np.float64).ravel(),
+        np.array(b_eq if m_eq else (), dtype=np.float64).ravel(),
+        float(obj_const),
+    )
+    hit = _NATIVE_NS_STDFORM_CACHE.get("entry")
+    if hit is not None and _native_ns_key_equal(hit[0], key):
+        if np.isnan(xl).any() or np.isnan(xu).any():
+            raise ValueError("standard form box contains NaN")
+        sf = dataclasses.replace(hit[1], xl=xl, xu=xu)
+    else:
+        blocks = []
+        if m_ub:
+            blocks.append([_sp.csr_matrix(A_ub), _sp.identity(m_ub, format="csr")])
+        if m_eq:
+            blocks.append([_sp.csr_matrix(A_eq)] + ([_sp.csr_matrix((m_eq, m_ub))] if m_ub else []))
+        A = _sp.bmat(blocks, format="csc") if blocks else _sp.csc_matrix((0, n))
+        b = np.concatenate(
+            [np.asarray(b_ub, dtype=np.float64).ravel() if m_ub else np.zeros(0)]
+            + [np.asarray(b_eq, dtype=np.float64).ravel() if m_eq else np.zeros(0)]
+        )
+        sf = StdForm.from_arrays(
+            np.concatenate([c, np.zeros(m_ub)]), A, b, xl, xu, obj_const=obj_const
+        )
+        _NATIVE_NS_STDFORM_CACHE["entry"] = (key, sf)
+    ns, prov, why = certify_lp_dual(np.asarray(y, dtype=np.float64), sf, obj, deadline=deadline)
+    return obj, ns, prov, why
+
+
+#: One-entry cache of the last slack form built by :func:`_native_lp_ns_certificate`.
+_NATIVE_NS_STDFORM_CACHE: dict = {}
+
+
+def _native_ns_rows_key(A):
+    """An exact, owned copy of a row block (dense or sparse) for cache comparison."""
+    import scipy.sparse as _sp
+
+    if A is None:
+        return None
+    if _sp.issparse(A):
+        A = _sp.csr_matrix(A, dtype=np.float64, copy=True)
+        A.sort_indices()
+        return ("sp", A.shape, A.indptr.copy(), A.indices.copy(), A.data.copy())
+    return ("dn", np.array(A, dtype=np.float64))
+
+
+def _native_ns_key_equal(k1, k2) -> bool:
+    """Exact equality of two cache keys (array contents, bit for bit up to -0.0 == 0.0)."""
+
+    def eq(a, b):
+        if a is None or b is None:
+            return a is b
+        if isinstance(a, tuple):
+            return isinstance(b, tuple) and len(a) == len(b) and all(eq(p, q) for p, q in zip(a, b))
+        if isinstance(a, np.ndarray):
+            return isinstance(b, np.ndarray) and a.shape == b.shape and np.array_equal(a, b)
+        return a == b
+
+    return bool(eq(k1, k2))
+
+
+def _native_lp_certified(
+    obj: float,
+    ns: float | None,
+    gap_tolerance: float | None = None,
+    abs_gap_tolerance: float | None = None,
+) -> bool:
+    """Whether the rigorous bound ``ns`` certifies ``obj`` as optimal.
+
+    Always accepted at the HiGHS route's tolerance, ``obj - ns <= CERT_ABS +
+    CERT_REL |obj|``. With the solve's ``gap_tolerance`` it is also accepted when
+    the reported gap of ``(obj, ns)`` is within it: the meaning of ``optimal`` on
+    every other route (B&B convergence uses the same arithmetic), and the result
+    carries ``ns`` as its bound so the gap stays visible. An interior-point
+    optimum is a few ulps-times-condition from its vertex, so its own dual proves
+    a gap near 1e-8 relative, never the HiGHS route's 1e-9.
+    """
+    from discopt.solvers._gap import reported_gap
+    from discopt.solvers.lp_milp_highs import CERT_ABS, CERT_REL
+
+    if ns is None:
+        return False
+    if obj - ns <= CERT_ABS + CERT_REL * abs(obj):
+        return True
+    if gap_tolerance is None:
+        return False
+    g = reported_gap(obj, ns, abs_tol=abs_gap_tolerance)
+    return g is not None and g <= gap_tolerance
 
 
 def _declared_box_retry_applies(model: Model) -> bool:
@@ -34281,11 +34550,14 @@ def _solve_node_lp_simplex(
     B&B: it cannot cheaply warm-start across a branch, returns the analytic
     centre (so integer coordinates come back smeared and need purification), and
     yields no basis. The simplex reaches an exact basic-feasible vertex, so its
-    objective is a rigorous node lower bound (no trust-gate decertification),
     integer coordinates are exact, and node throughput is far higher (issue: the
     POUNCE-IPM MILP node path was ~300 nodes/s vs the simplex's tens of
     thousands). Differentiability is unaffected — it is a post-solve IFT layer
     over (x*, λ*), independent of which engine produced them.
+
+    The bound is NOT the vertex objective: that is only as good as the simplex's
+    optimality test (#1953). It is the NS safe bound from the simplex's dual,
+    through the same ladder the HiGHS LP route certifies with.
 
     Same contract as :func:`_solve_node_lp_pounce`: returns
     ``(lower_bound, solution_over_n_vars, "optimal")``,
@@ -34347,8 +34619,27 @@ def _solve_node_lp_simplex(
         if not feasible:
             logger.debug("simplex node solution violates its rows; rejecting")
             return None
-        bound = float(res.objective) + float(lp_data.obj_const)
-        return (bound, x_sol[:n_vars], "optimal")
+        # #1953: the node bound is the NS safe bound from the simplex's own dual,
+        # not its objective: a simplex that stops at a non-optimal vertex reports
+        # an objective ABOVE the node's LP minimum, and fathoming on it can prune
+        # the optimum. No safe bound -> the node is not settled (``None``: the
+        # caller recovers or decertifies), exactly as for a failed solve.
+        obj_min, ns, _prov, _why = _native_lp_ns_certificate(
+            np.asarray(lp_data.c[:n_orig], dtype=np.float64),
+            A_ub_m,
+            b_ub_m,
+            A_eq_m,
+            b_eq_m,
+            bounds,
+            x_sol,
+            res.dual_values,
+            float(lp_data.obj_const),
+            None if time_limit is None else t_start + float(time_limit),
+        )
+        if ns is None:
+            logger.debug("simplex node LP has no NS safe bound; not settled (#1953)")
+            return None
+        return (min(ns, obj_min), x_sol[:n_vars], "optimal")
     if res.status == SolveStatus.INFEASIBLE:
         return (_INFEASIBILITY_SENTINEL, None, "infeasible")
     return None

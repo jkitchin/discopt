@@ -517,6 +517,8 @@ class RecognizedCut:
     verification: dict
     x_key: str = ""  # original model key for the flow var, e.g. "w_cs[0]"
     y_key: str = ""  # original model key for the ratio var, e.g. "beta[0]"
+    domain: tuple = (0.0, 0.0)  # the flow variable's model box, where ``h`` was checked
+    y_upper: float = 0.0  # the ratio variable's model upper bound
 
 
 def _derive_terminal_pressure_lb(p5, eqs, classes, fixed, bounds):
@@ -712,12 +714,27 @@ def recognize_and_derive_cuts(model, *, verify: bool = True, deadline=None) -> l
             lower_bounds={p5: sp.Float(pn5_lb)},
             sample={w: 35.0, p5: pn5_lb},
         )
-        wmax = float((sm.bounds.get(x, (0.0, 100.0))[1]) or 100.0)
+        # The underestimator ``K*x*(max(1, y_lower(x))**k - 1)`` is a lower bound on
+        # the term only when ``K > 0``, ``k > 0``, ``x >= 0`` and ``y >= 1`` hold on
+        # the model's box -- a negative ``K`` (or a maximised ``-term``) reverses it.
+        # Its convexity, and so every tangent cut, is checked on the flow variable's
+        # actual box. This used to be ``(0, sqrt(3.5*(2500 - 30**2)))`` -- the
+        # pipe-0 flow bound of the gas-network instance, hardcoded (CLAUDE.md §2).
+        x_lo, x_hi = sm.bounds.get(x, (None, None))
+        y_lo, y_hi = sm.bounds.get(y, (None, None))
+        box = (x_lo, x_hi, y_lo, y_hi)
+        if any(v is None or not np.isfinite(float(v)) for v in box):
+            continue
+        x_lo, x_hi, y_lo, y_hi = (float(v) for v in box)
+        if not (term.coefficient > 0 and term.exponent > 0 and x_lo >= 0 and y_lo >= 1):
+            continue
+        if not x_hi > x_lo:
+            continue
         under = power_term_underestimator(
             coupling,
             exponent=term.exponent,
             coefficient=term.coefficient,
-            domain=(0.0, min(wmax, float(sp.sqrt(3.5 * (2500 - 30**2))))),
+            domain=(x_lo, x_hi),
         )
         report = {}
         if verify:
@@ -727,8 +744,8 @@ def recognize_and_derive_cuts(model, *, verify: bool = True, deadline=None) -> l
                 lambda a, b: float(tfn(a, b)),
                 under,
                 lambda a: float(cfn(a)),
-                domain=under_domain_of(under),
-                target_max=float((sm.bounds.get(y, (1.0, 2.0))[1]) or 2.0),
+                domain=(x_lo, x_hi),
+                target_max=y_hi,
             )
         cuts.append(
             RecognizedCut(
@@ -738,6 +755,8 @@ def recognize_and_derive_cuts(model, *, verify: bool = True, deadline=None) -> l
                 pn5_lower=pn5_lb,
                 verification=report,
                 x_key=reverse.get(term.x, ""),
+                domain=(x_lo, x_hi),
+                y_upper=y_hi,
                 y_key=reverse.get(term.y, ""),
             )
         )
@@ -771,14 +790,21 @@ def _handle_map(model) -> dict:
     return handles
 
 
-def inject_cuts(model, cuts, *, samples=(8, 15, 25, 35, 45, 55, 65, 72)) -> int:
+def inject_cuts(model, cuts, *, n_tangents: int = 8) -> int:
     """Inject recognized cuts into ``model`` in place; returns the number applied.
 
-    For each cut, adds an auxiliary ``u >= 0`` with ``u == term`` (exact defining
+    For each cut, adds an auxiliary ``u`` with ``u == term`` (exact defining
     constraint) plus tangent lower bounds ``u >= K*h(w)``, and rewrites the
     objective to use ``u`` instead of the nonconvex term. The objective *value* is
     unchanged (``u == term``), but its relaxation is bounded below by the convex
     ``K*h(w)`` — closing the gap.
+
+    A cut is injected only when its derivation reported ``h`` convex and the
+    sampled check sound; the tangent points are spread over the flow variable's
+    own box (``cut.domain``). The objective keeps its sense: this used to call
+    ``model.minimize`` unconditionally, which turned ``maximize(-cost)`` into
+    ``minimize(-cost)``, and injected cuts whose own verification had failed --
+    both certified ``infeasible`` on feasible gas-network variants.
     """
     if not cuts:
         return 0
@@ -788,17 +814,28 @@ def inject_cuts(model, cuts, *, samples=(8, 15, 25, 35, 45, 55, 65, 72)) -> int:
     for j, cut in enumerate(cuts):
         if cut.x_key not in handles or cut.y_key not in handles:
             continue
+        if not (cut.underestimator.is_convex and cut.verification.get("sound") is True):
+            continue
+        lo, hi = (float(v) for v in cut.domain)
+        if not hi > lo:
+            continue
         xh, yh = handles[cut.x_key], handles[cut.y_key]
         term_expr = cut.term.coefficient * xh * (yh**cut.term.exponent - 1.0)
-        u = model.continuous(f"u_cut_{j}", lb=0.0, ub=1e6)
+        # term = K*x*(y^k - 1) with K, k > 0, x in [lo, hi] >= 0, y in [1, y_hi]: so
+        # 0 <= term <= K*hi*(y_hi^k - 1). ``u``'s box is that range, not a guessed 1e6.
+        u_hi = cut.term.coefficient * hi * (float(cut.y_upper) ** cut.term.exponent - 1.0)
+        u = model.continuous(f"u_cut_{j}", lb=0.0, ub=float(np.nextafter(u_hi, np.inf)))
         model.subject_to(u == term_expr, name=f"cut_def_{j}")
-        for wk in samples:
+        for wk in lo + (hi - lo) * (np.arange(n_tangents) + 0.5) / n_tangents:
             v, slope = cut.underestimator.tangent_cut(float(wk))
             model.subject_to(u >= v + slope * (xh - float(wk)) - 1e-6, name=f"cut_tan_{j}_{wk}")
         obj = obj - term_expr + u
         applied += 1
     if applied:
-        model.minimize(obj)
+        if model._objective.sense.name == "MAXIMIZE":
+            model.maximize(obj)
+        else:
+            model.minimize(obj)
     return applied
 
 
@@ -806,10 +843,6 @@ def recognize_and_inject(model, **kwargs) -> int:
     """Convenience: recognize structured cuts and inject them in place."""
     cuts = recognize_and_derive_cuts(model, **kwargs)
     return inject_cuts(model, cuts)
-
-
-def under_domain_of(under: TermUnderestimator) -> tuple[float, float]:
-    return (0.0, 74.0)
 
 
 # ---------------------------------------------------------------------------

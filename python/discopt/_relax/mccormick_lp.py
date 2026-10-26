@@ -416,7 +416,8 @@ def free_column_lp_cert_enabled() -> bool:
     ``x18 <= 3340.8 x7 + 500 x8``, ...), so its root LP is bounded at the optimum 0,
     yet the in-house relaxer reported it ``uncertified``: with free columns the
     floating dual's reduced costs land on an open side and the Neumaier--Shcherbina
-    bound is ``-inf``. ``lp_milp_highs.solve_lp_std`` certifies the same LP at -1e-12.
+    bound is ``-inf``. ``lp_milp_highs.solve_lp_std`` certified the same LP at -1e-12
+    (but see the retraction below).
     Its bound is rigorous for ANY dual, so HiGHS's accuracy decides only whether a
     bound is found. Bound-changing (a node that had none gets one), so gated per
     CLAUDE.md section 5; read at call time.
@@ -429,6 +430,13 @@ def free_column_lp_cert_enabled() -> bool:
     bound -> optimal in 289 nodes / 13.3 s; ``ex7_3_3`` and ``ex9_1_1`` also gained);
     fewer nodes where both certify (``ex9_1_5`` 3 -> 1, ``ex9_1_8`` 5 -> 3), total
     wall 1494 -> 1424 s. ``=0`` restores the decline.
+
+    **Retracted in part (#1966):** the ``prolog`` gain did not survive a rigorous
+    reduced cost. At HiGHS's dual its column 7 (open above) has exact reduced cost
+    -1.7e-13; the pre-#1956 NS bound rounded it to 0.0 and skipped the column, so
+    that certificate was not a proof. With the enclosure the route declines and
+    ``exact_ns_bound`` does not converge; ``prolog`` is uncertified again. The
+    other gains (``ex7_3_3``, ``ex9_1_1``, ``ex9_1_5``, ``ex9_1_8``) still certify.
     """
     return os.environ.get("DISCOPT_FREE_COLUMN_LP_CERT", "1").strip().lower() not in (
         "0",
@@ -601,6 +609,12 @@ class MccormickLPRelaxer:
         # Spatial-BB uses standard McCormick globally — no partitioning here.
         self._disc = DiscretizationState(partitions={})
         self._n_orig = sum(v.size for v in model._variables)
+        # Rows of the MODEL that arrive after the build (#1954: lazy constraints),
+        # as upper-form ``A x <= b`` over the original columns. Set by the solver
+        # through :meth:`set_model_rows`; every node build (cold and incremental)
+        # appends them. Unlike ``inherited_cuts`` they are constraints, not an
+        # accelerator, so the C-42 strip-and-retry never removes them.
+        self._model_rows: Optional[tuple[np.ndarray, np.ndarray]] = None
         # Integer-ratio partition bound (issue #309, flag-gated default-OFF):
         # attached by the solver when the pre-reform model carries a
         # ratio-of-integer-products structure; ``solve_at_node`` then max-combines
@@ -934,6 +948,10 @@ class MccormickLPRelaxer:
                     cut_rows = list(zip(a_rows, b_rows))
                     self._pool_stats["inherited_nodes"] += 1
                     self._pool_stats["inherited_rows"] += len(cut_rows)
+        _mrows = self._padded_model_rows(inc.ncol)
+        if _mrows is not None:
+            # #1954: the model's lazy rows, ahead of the pool rows.
+            cut_rows = list(zip(_mrows[0], _mrows[1])) + (cut_rows or [])
         A, b, bounds = inc.assemble(lb, ub, cut_rows=cut_rows)
         nrows = int(A.shape[0])
         # Densification guard (Issue #20), same cap as the cold path below.
@@ -1148,6 +1166,40 @@ class MccormickLPRelaxer:
 
     #: Set for the duration of a ``solve_at_node(..., rigorous_only=True)`` call.
     _rigorous_only = False
+
+    def set_model_rows(self, A: Optional[np.ndarray], b: Optional[np.ndarray]) -> None:
+        """Install model rows ``A x <= b`` over the original columns (#1954).
+
+        A lazy constraint returned by a callback is a row of the model, valid at
+        every feasible point. Before this the node McCormick LP never saw one: the
+        rows reached only the node NLP (through ``_AugmentedEvaluator``), the LP
+        kept returning the point the row cuts off, and a correct separator drove
+        the node to the requeue cap. Original columns occupy positions
+        ``0..n_orig-1`` of every lifted layout (:func:`column_identities`), so the
+        rows are applied by zero-padding to the build's width.
+        """
+        if A is None or b is None or len(b) == 0:
+            self._model_rows = None
+            return
+        A = np.atleast_2d(np.asarray(A, dtype=np.float64))
+        b = np.asarray(b, dtype=np.float64).ravel()
+        if A.shape != (b.shape[0], self._n_orig):
+            raise ValueError(
+                f"model rows must be (k, {self._n_orig}) with k rhs entries; "
+                f"got A{A.shape}, b{b.shape}"
+            )
+        self._model_rows = (A, b)
+
+    def _padded_model_rows(self, ncol: int) -> Optional[tuple[np.ndarray, np.ndarray]]:
+        """The installed model rows widened to ``ncol`` columns, or ``None``."""
+        if self._model_rows is None:
+            return None
+        A, b = self._model_rows
+        if ncol < self._n_orig:
+            raise ValueError(f"layout width {ncol} < original column count {self._n_orig}")
+        out = np.zeros((A.shape[0], ncol), dtype=np.float64)
+        out[:, : self._n_orig] = A
+        return out, b
 
     def solve_at_node(
         self,
@@ -1750,6 +1802,13 @@ class MccormickLPRelaxer:
             if _deadline is None:
                 return None
             return max(_deadline - time.perf_counter(), _SOLVE_DEADLINE_FLOOR_S)
+
+        # #1954: the model's lazy rows go in BEFORE the pool's row count is taken,
+        # so the C-42 strip-and-retry (which drops rows past that count) keeps
+        # them: they are constraints of the model, not an accelerator.
+        _mrows = self._padded_model_rows(n_total)
+        if _mrows is not None:
+            _append_relax_rows(milp, _mrows[0], _mrows[1])
 
         # Root cut-pool inheritance (P1 + C-44): append globally-valid cut rows
         # separated once at the root instead of re-separating them every node.

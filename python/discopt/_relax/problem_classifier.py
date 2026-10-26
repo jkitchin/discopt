@@ -595,36 +595,18 @@ def _extract_linear_coefficients_sparse(expr, model: Model, n: int):
 
             if isinstance(node, IndexExpression):
                 if isinstance(node.base, Variable):
-                    var = node.base
-                    offset = _compute_var_offset(var, model)
-                    idx = node.index
-                    if isinstance(idx, (int, np.integer)):
-                        _add(offset + int(idx), scale)
-                    elif (
-                        isinstance(idx, tuple)
-                        and len(idx) == 1
-                        and isinstance(idx[0], (int, np.integer))
-                    ):
-                        _add(offset + int(idx[0]), scale)
-                    else:
-                        # Multi-dimensional index: flatten
-                        try:
-                            flat_idx = np.ravel_multi_index(
-                                idx if isinstance(idx, tuple) else (idx,), var.shape
-                            )
-                        except (TypeError, ValueError):
-                            # Sliced/partial subscript (vectorized term): this scalar
-                            # extractor cannot express it; classify as not-linear.
-                            raise _NotLinearError(
-                                f"non-scalar index {idx!r} on {var.name}"
-                            ) from None
-                        if np.ndim(flat_idx) != 0:
-                            # A gather (``x[np.array([0, 2])]``, the builder
-                            # objective's form): ravel_multi_index accepts index
-                            # arrays, and ``int()`` of the result raised a bare
-                            # TypeError instead of this decline (#1802).
-                            raise _NotLinearError(f"non-scalar index {idx!r} on {var.name}")
-                        _add(offset + int(flat_idx), scale)
+                    # One resolver for every index form (#1952, the #941 pattern):
+                    # the old fast path computed ``offset + int(idx)``, so ``a[-1]``
+                    # named the slot of the variable declared before ``a`` and a
+                    # partial index ``A[1]`` on a 2-D variable named ``A[0, 1]``.
+                    slot = resolve_scalar_slot(node, model)
+                    if slot is None:
+                        # Sliced/partial/out-of-range subscript or a gather: this
+                        # scalar extractor cannot express it.
+                        raise _NotLinearError(
+                            f"non-scalar index {node.index!r} on {node.base.name}"
+                        )
+                    _add(slot, scale)
                     continue
                 raise _NotLinearError(f"IndexExpression on non-variable: {type(node.base)}")
 
@@ -1070,21 +1052,10 @@ def _try_extract_const_var(expr, model: Model):
         if isinstance(expr, Variable) and expr.size != 1:
             return None
         if isinstance(expr, IndexExpression) and isinstance(expr.base, Variable):
-            offset = _compute_var_offset(expr.base, model)
-            idx = expr.index
-            if isinstance(idx, (int, np.integer)):
-                return (1.0, offset + int(idx))
-            if isinstance(idx, tuple) and len(idx) == 1 and isinstance(idx[0], (int, np.integer)):
-                return (1.0, offset + int(idx[0]))
-            try:
-                flat_idx = np.ravel_multi_index(
-                    idx if isinstance(idx, tuple) else (idx,), expr.base.shape
-                )
-            except (TypeError, ValueError):
-                return None  # sliced/partial subscript: not a scalar reference
-            if np.ndim(flat_idx) != 0:
-                return None  # a gather (index arrays): not a scalar reference (#1802)
-            return (1.0, offset + int(flat_idx))
+            # resolve_scalar_slot normalises negative indices and refuses partial,
+            # out-of-range and gather subscripts (#1952, the #941 pattern).
+            slot = resolve_scalar_slot(expr, model)
+            return None if slot is None else (1.0, slot)
         if isinstance(expr, Variable):
             return (1.0, _compute_var_offset(expr, model))
         return None

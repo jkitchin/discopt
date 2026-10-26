@@ -715,6 +715,52 @@ EXACT_MAX_TOTAL_WORK = 2 * EXACT_MAX_WORK
 _EPS = float(np.finfo(np.float64).eps)
 
 
+def certify_lp_dual(
+    y: np.ndarray, sf: StdForm, obj: float, deadline: Optional[float] = None
+) -> tuple[Optional[float], str, str]:
+    """The NS safe-bound ladder that decides whether an LP point at ``obj`` is
+    certified optimal: ``(bound, provenance, why)``.
+
+    ``y`` is a row dual in the HiGHS (minimize) convention for ``sf``; any ``y``
+    gives a valid bound, so a wrong one only weakens it. The rungs run in order
+    until one closes ``obj - bound <= CERT_ABS + CERT_REL * |obj|``: the declared
+    box, the FBBT box, a sign-safe rescaling of ``y`` (#1729), and the exact dual
+    correction. ``bound`` is the largest found (``None`` means ``-inf``);
+    ``provenance`` names the rung that produced it (``""`` for the first);
+    ``why`` is the exact correction's reason for giving up, if it ran and did.
+
+    Shared by the HiGHS LP route and the native LP engines (#1953), so both
+    certify a point against the same evidence.
+    """
+    thr = CERT_ABS + CERT_REL * abs(obj)
+    # Every candidate below is a valid lower bound, so the largest one is too.
+    ns = ns_bound(y, sf)
+    provenance = ""
+    why = ""
+    if ns is None or obj - ns > thr:
+        box = fbbt_box(sf)
+        g = ns_bound(y, box)
+        if g is not None and (ns is None or g > ns):
+            ns, provenance = g, "ns-fbbt-box"
+        if ns is None or obj - ns > thr:
+            # #1729: a reduced cost a rounding error the wrong side of zero
+            # on an open column; a sign-preserving scale of ``y`` fixes it.
+            for _sf_try in (sf, box):
+                y_s = scaled_dual_for_open_columns(y, _sf_try)
+                if y_s is None:
+                    continue
+                g = ns_bound(y_s, _sf_try)
+                if g is not None and (ns is None or g > ns):
+                    ns, provenance = g, "ns-scaled-dual"
+        if ns is None or obj - ns > thr:
+            g, reason = exact_ns_bound(y, box, deadline=deadline)
+            if g is not None and (ns is None or g > ns):
+                ns, provenance = g, "ns-exact-dual-correction"
+            elif reason:
+                why = reason
+    return ns, provenance, why
+
+
 def fbbt_box(sf: StdForm, k: Optional[int] = None, open_limit: float = INF) -> StdForm:
     """``sf`` with the open bound sides of its first ``k`` columns (default: all) replaced
     by finite sides implied by ``A[:, :k] x = b`` and the declared box.
@@ -1690,32 +1736,11 @@ def solve_lp_std(sf: StdForm, *, time_limit: Optional[float] = None) -> HighsOut
             out = HighsOutcome(
                 "feasible", x=x, objective=obj, row_dual=y, col_dual=rc, highs_status=name
             )
-            # Every candidate below is a valid lower bound, so the largest one is too.
-            ns = ns_bound(y, sf)
-            provenance = ""
-            if ns is None or obj - ns > thr:
-                box = fbbt_box(sf)
-                g = ns_bound(y, box)
-                if g is not None and (ns is None or g > ns):
-                    ns, provenance = g, "ns-fbbt-box"
-                if ns is None or obj - ns > thr:
-                    # #1729: a reduced cost a rounding error the wrong side of zero
-                    # on an open column; a sign-preserving scale of ``y`` fixes it.
-                    for _sf_try in (sf, box):
-                        y_s = scaled_dual_for_open_columns(y, _sf_try)
-                        if y_s is None:
-                            continue
-                        g = ns_bound(y_s, _sf_try)
-                        if g is not None and (ns is None or g > ns):
-                            ns, provenance = g, "ns-scaled-dual"
-                if ns is None or obj - ns > thr:
-                    # The caller's own time_limit only; the work is capped by count.
-                    deadline = None if time_limit is None else t0 + float(time_limit)
-                    g, why = exact_ns_bound(y, box, deadline=deadline)
-                    if g is not None and (ns is None or g > ns):
-                        ns, provenance = g, "ns-exact-dual-correction"
-                    elif why:
-                        out.message = f"exact dual correction: {why}"
+            # The caller's own time_limit only; the work is capped by count.
+            deadline = None if time_limit is None else t0 + float(time_limit)
+            ns, provenance, why = certify_lp_dual(y, sf, obj, deadline=deadline)
+            if why:
+                out.message = f"exact dual correction: {why}"
             if provenance:
                 out.labels["lp/bound_provenance"] = provenance
                 stats["lp/bound_provenance_" + provenance.replace("-", "_")] = 1.0
