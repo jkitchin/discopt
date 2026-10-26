@@ -148,6 +148,17 @@ def column_identities(varmap: dict, n_total: int, n_orig: int) -> tuple:
     return tuple(ident)
 
 
+def _incremental_pool_extend_enabled() -> bool:
+    """``DISCOPT_INCREMENTAL_POOL_EXTEND`` (#1941 item 4A): carry a root cut pool
+    wider than the incremental structure by appending its extra product / even-power
+    columns (``PoolColumnExtension``) instead of cold-building the node.
+
+    Bound-changing (a node that cold-built now takes the fast path), so default-OFF
+    until the CLAUDE.md section-5 panel passes; recorded in
+    ``docs/dev/flag-retirement-audit.md``."""
+    return os.environ.get("DISCOPT_INCREMENTAL_POOL_EXTEND", "0") != "0"
+
+
 def _remap_pool_rows(a_rows, b_rows, root_idents, node_idents, ncol: int):
     """Remap root-pool rows onto a node's column layout by column identity.
 
@@ -616,7 +627,12 @@ class MccormickLPRelaxer:
             "skipped_separations": 0,
             "dropped_nodes": 0,
             "lazy_reseparations": 0,
+            # #1941: fast-path nodes that carried a wider pool via a
+            # ``PoolColumnExtension`` (``DISCOPT_INCREMENTAL_POOL_EXTEND``).
+            "extended_nodes": 0,
         }
+        # Extension per pool, keyed by the pool's identity tuple (#1941).
+        self._pool_ext_cache: dict = {}
         # #1039: observability for the #671 failure-triggered row filter. The
         # filter is *failure*-triggered, so on an already-solving instance it
         # never fires and the node is byte-identical with the flag ON or OFF.
@@ -827,6 +843,28 @@ class MccormickLPRelaxer:
         # separator; computed once, only when the opt-in PSD path first fires.
         self._binary_cols_cache: Optional[frozenset] = None
 
+    def _pool_extension(self, inc, a_rows, root_idents):
+        """The :class:`PoolColumnExtension` for this pool (built once), or ``None``."""
+        key = (id(root_idents), a_rows.shape)
+        hit = self._pool_ext_cache.get(key)
+        if hit is None or hit[0] is not root_idents:
+            from discopt._relax.incremental_mccormick import PoolColumnExtension
+
+            hit = (root_idents, PoolColumnExtension.build(inc, a_rows, root_idents))
+            self._pool_ext_cache[key] = hit
+        return hit[1]
+
+    @staticmethod
+    def _extension_box_ok(ext, lb, ub) -> bool:
+        """The extension's envelopes need finite, conditioned bounds on their
+        factors; otherwise the node keeps the cold build (as the fast path does for
+        its own nonlinear columns)."""
+        for term in ext.terms:
+            for i in term[1:3] if term[0] == "bilinear" else term[1:2]:
+                if not (abs(lb[i]) < _RELAX_NUMERIC_CAP and abs(ub[i]) < _RELAX_NUMERIC_CAP):
+                    return False
+        return True
+
     def _model_has_composite_lift(self) -> bool:
         """Whether the model carries a composite convex/concave OA lift whose
         Kelley tightening the incremental fast path would drop. Computed once and
@@ -946,6 +984,7 @@ class MccormickLPRelaxer:
         # #1520: no except. Pool remapping, ``assemble`` and ``solve_assembled_full`` all decline
         # by return value (``None`` / a non-optimal status -> cold fallback); a raise is a defect.
         cut_rows = None
+        ext = None  # #1941: a PoolColumnExtension when the pool is wider than ``inc``
         if inherited_cuts is not None:
             a_rows = inherited_cuts[0]
             b_rows = inherited_cuts[1]
@@ -967,7 +1006,33 @@ class MccormickLPRelaxer:
                     and a_rows.shape[1] == inc.ncol
                     and len(b_rows) == a_rows.shape[0]
                 )
-                if not _count_ok:
+                # #1941 item 4A: a WIDER pool whose extra columns are all products /
+                # even powers of original columns is carried by appending those
+                # columns with their per-node envelopes (``PoolColumnExtension``),
+                # instead of cold-building the node.
+                if (
+                    not _count_ok
+                    and _incremental_pool_extend_enabled()
+                    and root_idents is not None
+                    and a_rows.ndim == 2
+                    and len(b_rows) == a_rows.shape[0]
+                    and a_rows.shape[1] == len(root_idents)
+                ):
+                    ext = self._pool_extension(inc, a_rows, root_idents)
+                    if ext is None or not self._extension_box_ok(ext, lb, ub):
+                        return None
+                    A_rm, b_rm, n_kept, n_skip = _remap_pool_rows(
+                        a_rows, b_rows, root_idents, inc.col_identities + ext.idents, ext.ncol
+                    )
+                    if n_skip or A_rm is None:
+                        # Every used column is covered, so nothing may be dropped; a
+                        # skip means the layouts disagree -- keep the cold build.
+                        return None
+                    cut_rows = list(zip(A_rm, b_rm))
+                    self._pool_stats["inherited_nodes"] += 1
+                    self._pool_stats["inherited_rows"] += n_kept
+                    self._pool_stats["extended_nodes"] += 1
+                elif not _count_ok:
                     return None
                 # C-44: at the SAME column count, remap the root pool from its
                 # ROOT column identities onto this structure's layout by matching
@@ -976,7 +1041,9 @@ class MccormickLPRelaxer:
                 # means (same count, different semantics → the C-43 false-fathom).
                 # A row referencing a lifted term this layout does not carry at
                 # that count is skipped (sound — fewer cuts only loosen).
-                if root_idents is not None and node_idents is not None:
+                if ext is not None:
+                    pass
+                elif root_idents is not None and node_idents is not None:
                     A_rm, b_rm, n_kept, n_skip = _remap_pool_rows(
                         a_rows, b_rows, root_idents, node_idents, inc.ncol
                     )
@@ -993,11 +1060,20 @@ class MccormickLPRelaxer:
                     cut_rows = list(zip(a_rows, b_rows))
                     self._pool_stats["inherited_nodes"] += 1
                     self._pool_stats["inherited_rows"] += len(cut_rows)
-        _mrows = self._padded_model_rows(inc.ncol)
+        _mrows = self._padded_model_rows(inc.ncol if ext is None else ext.ncol)
         if _mrows is not None:
             # #1954: the model's lazy rows, ahead of the pool rows.
             cut_rows = list(zip(_mrows[0], _mrows[1])) + (cut_rows or [])
-        A, b, bounds = inc.assemble(lb, ub, cut_rows=cut_rows)
+        if ext is None:
+            A, b, bounds = inc.assemble(lb, ub, cut_rows=cut_rows)
+        else:
+            import scipy.sparse as sp
+
+            A, b, bounds = inc.assemble(lb, ub)
+            A, b, bounds = ext.extend(A, b, bounds, lb, ub)
+            if cut_rows:
+                A = sp.vstack([A, sp.csr_matrix(np.array([r for r, _ in cut_rows]))], format="csr")
+                b = np.concatenate([b, [float(r) for _, r in cut_rows]])
         nrows = int(A.shape[0])
         # Densification guard (Issue #20), same cap as the cold path below.
         # T1.3 widened the fast path to any model, so a large multilinear lift
