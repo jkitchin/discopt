@@ -64,9 +64,10 @@ def affine_domain_rows(model: Model) -> list[tuple[dict[int, float], float, floa
     key = (id(model._objective), len(model._constraints))
     cached = getattr(model, "_function_domain_rows", None)
     if cached is not None and cached[0] == key:
-        return cached[1]
+        hit: list[tuple[dict[int, float], float, float]] = cached[1]
+        return hit
     rows = _affine_domain_rows(model)
-    model._function_domain_rows = (key, rows)
+    model._function_domain_rows = (key, rows)  # type: ignore[attr-defined]
     return rows
 
 

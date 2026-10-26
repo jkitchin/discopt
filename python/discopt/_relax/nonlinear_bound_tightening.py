@@ -4378,11 +4378,12 @@ def _poly_expand(expr, model: Model) -> Optional[dict[tuple, float]]:
                 base = rec(e.left)
                 if base is None:
                     return None
-                out: Optional[dict] = {(): 1.0}
+                out: dict = {(): 1.0}
                 for _ in range(int(p)):
-                    out = mul(out, base)
-                    if out is None:
+                    nxt = mul(out, base)
+                    if nxt is None:
                         return None
+                    out = nxt
                 return out
         return None
 
