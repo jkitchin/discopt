@@ -9243,6 +9243,37 @@ def _refuse_retired_relaxation_options(
         )
 
 
+_RETIRED_STRUCTURE_CUTS_ISSUE = "#1965"
+
+
+def _refuse_retired_structure_cuts(structure_cuts: Any) -> None:
+    """Refuse ``structure_cuts=True``: the auto-engaged SymPy structure-cut pass is retired.
+
+    ``structure_cuts`` (default ON until #1965) ran the square-difference recognizer
+    (``discopt._relax.symbolic.cut_recognizer.recognize_and_inject``) before the
+    relaxation build. Measured for #1965 under CLAUDE.md section 5: it injected a
+    cut on 0 of the 59 in-repo corpus instances small enough for it to run, and on
+    the seven gas-network variants where it can fire, status, objective and
+    certificate were identical with and without it while wall time rose
+    1.6-4.8x (e.g. 6.76 +- 0.19 s vs 2.00 +- 0.08 s, 3 interleaved reps). Its
+    soundness check is sampled, not proved. It was retired rather than kept.
+
+    ``False`` asked for what is now the only behaviour and is accepted. ``True``
+    raises, so a caller relying on the cuts learns they are gone instead of
+    getting a silent no-op. The recognizer itself is kept: call
+    ``recognize_and_inject(model)`` on the model before ``solve`` to add the cuts.
+    """
+    if structure_cuts:
+        raise ValueError(
+            "structure_cuts=True: the auto-engaged structure-cut presolve was retired "
+            f"({_RETIRED_STRUCTURE_CUTS_ISSUE}). It injected no cut on the in-repo "
+            "corpus and slowed every gas-network variant it fired on 1.6-4.8x with "
+            "no change in result. To add the square-difference cuts explicitly, call "
+            "discopt._relax.symbolic.cut_recognizer.recognize_and_inject(model) "
+            "before solve(). Omit the option otherwise."
+        )
+
+
 def _mip_nlp_ignored_options(values: Mapping[str, Any]) -> list[str]:
     """Which of ``values`` would the MIP-NLP family silently drop?
 
@@ -10464,12 +10495,6 @@ def _merge_route_and_fallback(route, fallback, is_maximize: bool):
 # per-node cut-separation overhead (eigh / extra LP re-solves) outweighs the
 # typical bound gain, so the policy declines to enable cuts (sound: a no-op).
 _AUTO_CUTS_MAX_VARS = 40
-
-# Structure-cut presolve size gate: the symbolic recognizer runs `model_to_sympy`
-# (and SymPy `solve`/`simplify` when objective product terms are present)
-# unconditionally, so it is only auto-engaged on models small enough that this is
-# cheap. Counted as (sum of scalar variable sizes) + (number of constraints).
-_STRUCTURE_CUTS_MAX_SIZE = 100
 
 # RENS root primal heuristic (#281): fraction of the remaining wall budget granted
 # to the bound-restricted sub-MINLP solve, and an absolute cap so it can never
@@ -12761,21 +12786,6 @@ _FALLBACK_WARNINGS = _fallback.FALLBACK_WARNINGS
 _warn_fallback_once = _fallback.warn_fallback_once
 
 
-def _structure_cut_declined(exc: BaseException) -> bool:
-    """True iff ``exc`` is one of the structure-cut recognizer's documented declines.
-
-    ``CutDerivationError`` lives in a SymPy-importing module, so it is looked up in
-    ``sys.modules`` rather than imported: if that module was never loaded, nothing
-    in it can have raised.
-    """
-    from discopt.symbolic import SymbolicTranslationError
-
-    if isinstance(exc, (SymbolicTranslationError, NotImplementedError)):
-        return True
-    _cc = sys.modules.get("discopt._relax.symbolic.constraint_cuts")
-    return _cc is not None and isinstance(exc, _cc.CutDerivationError)
-
-
 def _scoped_fallback_warnings(fn: _F) -> _F:
     """Give each top-level solve a fresh :func:`_warn_fallback_once` record (#1514).
 
@@ -13087,7 +13097,7 @@ def solve_model(
     subnlp_frequency: int = 20,
     subnlp_max_calls: int = 200,
     subnlp_options: Optional[dict] = None,
-    structure_cuts: bool = True,
+    structure_cuts: Optional[bool] = None,
     root_cut_rounds: Optional[int] = None,
     root_cut_max: Optional[int] = None,
     _lns_enabled: bool = True,
@@ -13318,6 +13328,13 @@ def solve_model(
         Retired (#1873): any nonzero value raises ``ValueError``. Piecewise
         McCormick partitions configured the removed McCormick-"nlp" route; see
         ``docs/dev/nlp-mccormick-route-retirement.md``.
+    structure_cuts : bool, optional
+        Retired (#1965): ``True`` raises ``ValueError``; ``None``/``False`` are
+        accepted and change nothing. The auto-engaged SymPy structure-cut
+        presolve it controlled injected no cut on the in-repo corpus and cost
+        1.6-4.8x wall where it fired. Call
+        ``discopt._relax.symbolic.cut_recognizer.recognize_and_inject(model)``
+        before solving to add those cuts explicitly.
     root_cut_rounds : int, optional
         Opt-in root PSD cut-pool separation rounds: when > 0 and the relaxer
         carries PSD cuts, a strong cut pool is separated once at the root box
@@ -13666,6 +13683,7 @@ def solve_model(
     _refuse_retired_relaxation_options(
         mccormick_bounds, partitions, relaxation_arithmetic, use_learned_relaxations
     )
+    _refuse_retired_structure_cuts(structure_cuts)
     if mccormick_bounds not in _valid_mccormick_bounds:
         if mccormick_bounds == "midpoint":
             raise ValueError(
@@ -13979,59 +13997,6 @@ def solve_model(
                 node_count=_lps.node_count,
                 gap_certified=(_lps.status == "optimal"),
             )
-
-    # --- Structure-cut presolve (auto-engaged square-difference-network cuts) ---
-    # The symbolic cut recognizer auto-derives sound coupling cuts for the
-    # square-difference (Weymouth gas/water) network structure directly from the
-    # model graph, collapsing the otherwise-catastrophic McCormick relaxation gap
-    # on those models (gas-network MINLP, issue #15: bound 1.0 vs optimum 3.0026 ->
-    # bound = optimum; 2821 nodes / 182 s -> 5 nodes / ~3 s). Each injected cut is a
-    # verified valid underestimator (sound), and the pass is a genuine no-op on a
-    # model without the structure. It is auto-engaged but gated, because it runs
-    # SymPy analysis: opt out with ``structure_cuts=False``; only when SymPy is
-    # importable; only on small models (so ``model_to_sympy`` stays cheap); only
-    # with budget remaining. Runs *before* the relaxation build so the tightened
-    # model flows through the normal pipeline. Only the square-difference detector
-    # is auto-engaged here — the broader ``inject_all_patterns`` battery stays
-    # opt-in. Only the recognizer's documented declines are absorbed (#1514).
-    if structure_cuts and model._objective is not None and _remaining_budget() > 1.0:
-        _struct_size = sum(v.size for v in model._variables) + len(model._constraints)
-        if _struct_size <= _STRUCTURE_CUTS_MAX_SIZE:
-            try:
-                from discopt._relax.symbolic.cut_recognizer import recognize_and_inject
-
-                # #1565: bounded by the solve clock. On expiry the recognizer
-                # raises before injecting anything, so the model is unchanged.
-                _n_struct_cuts = recognize_and_inject(model, deadline=_deadline_exhausted)
-                if _n_struct_cuts:
-                    logger.info(
-                        "Structure-cut presolve: injected %d square-difference-network "
-                        "coupling cut(s) (auto-engaged; opt out with structure_cuts=False)",
-                        _n_struct_cuts,
-                    )
-            except ImportError:
-                pass  # optional [sympy] extra not installed -> skip silently
-            except Exception as _sc_exc:
-                from discopt._relax.symbolic.cut_recognizer import RecognizerDeadline
-
-                if isinstance(_sc_exc, RecognizerDeadline):
-                    # #1565: abstention for want of time is logged, not silent
-                    # (the #1456 convention): the relaxation below is built
-                    # without whatever cuts the recognizer might have derived.
-                    logger.info(
-                        "structure-cut presolve abandoned: %s; no cuts injected, the "
-                        "model is unchanged (#1565)",
-                        _sc_exc,
-                    )
-                elif _structure_cut_declined(_sc_exc):
-                    # #1514: narrowed. The recognizer's documented declines are a
-                    # model outside its translator (``SymbolicTranslationError``),
-                    # a chain it cannot solve symbolically (``CutDerivationError``)
-                    # and SymPy's own "cannot solve/derive" (``NotImplementedError``,
-                    # which ``EnvelopeDerivationError`` subclasses).
-                    logger.debug("structure-cut presolve declined: %s", _sc_exc)
-                else:
-                    raise  # anything else is a defect (#1514)
 
     # G-convexity transformation-cut presolve (#181, DISCOPT_G_CONVEX_CUTS,
     # default-OFF). A *bound-changing* capability (CLAUDE.md §5): recognizes
@@ -27546,16 +27511,14 @@ def _solve_nlp_bb(
 
                         def _rens_sub_solver(_restricted, _tl=_rens_budget):
                             # Solve the bound-restricted sub-MINLP with the full
-                            # engine (rens=False prevents nested RENS; structure_cuts
-                            # off — the SymPy presolve cannot help a bound-tightened
-                            # MIQP). Returns a flat solution aligned to the evaluator.
+                            # engine (rens=False prevents nested RENS). Returns a flat
+                            # solution aligned to the evaluator.
                             sub = solve_model(
                                 _restricted,
                                 time_limit=_tl,
                                 gap_tolerance=gap_tolerance,
                                 nlp_solver=nlp_solver,
                                 rens=False,
-                                structure_cuts=False,
                             )
                             if sub.objective is None or sub.x is None:
                                 return None
