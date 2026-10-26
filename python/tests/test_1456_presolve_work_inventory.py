@@ -507,7 +507,6 @@ INVENTORY: tuple[tuple[str, str, str, str], ...] = (
     ("discopt._relax.objective_epigraph", "relax_objective_defining_equality", "residual", ""),
     ("discopt._relax.presolve_pipeline", "propagate_bounds_to_model", "residual", ""),
     ("discopt._relax.problem_classifier", "classify_problem", "residual", ""),
-    ("discopt._relax.symbolic.cut_recognizer", "recognize_and_inject", "residual", ""),
     ("discopt.decomposition", "analyze_decomposition", "residual", ""),
     ("discopt.gp", "classify_gp", "residual", ""),
     ("discopt.gp", "classify_gp_minlp", "residual", ""),
@@ -746,8 +745,9 @@ def test_residual_count_is_visible():
     pass, never by reclassifying one without a measurement.
     """
     residual = sorted(k for k, c in _CATEGORY.items() if c == "residual")
-    assert len(residual) == 13, (
-        f"the #1456 role-3 backlog changed ({len(residual)} entries, expected 13).\n"
+    # 12 since #1965 retired the structure-cut recognizer from the solve path.
+    assert len(residual) == 12, (
+        f"the #1456 role-3 backlog changed ({len(residual)} entries, expected 12).\n"
         "Bounding one: drop this number and re-categorise the row `bounded` with "
         "its budget symbol.\nAdding one: bound it instead.\n"
         + "\n".join(f"  {m}.{n}" for m, n in residual)
@@ -763,7 +763,6 @@ def test_the_budget_free_modules_are_all_recorded_residual():
     now, which ``test_bounded_rows_name_a_live_budget`` verifies."""
     budget_free = {
         "discopt._relax.gdp_reformulate",
-        "discopt._relax.symbolic.cut_recognizer",
         "discopt._relax.convexity.signomial_global",
     }
     checked = 0
@@ -777,7 +776,8 @@ def test_the_budget_free_modules_are_all_recorded_residual():
         if cat == "bounded":  # pragma: no cover - guarded by the assert above
             pytest.fail("unreachable")
         checked += 1
-    assert checked >= 4, f"only checked {checked} rows from the budget-free modules"
+    # 3 since #1965 took the structure-cut recognizer off the solve path.
+    assert checked >= 3, f"only checked {checked} rows from the budget-free modules"
 
 
 # ---------------------------------------------------------------------------

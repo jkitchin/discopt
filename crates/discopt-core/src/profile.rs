@@ -214,6 +214,17 @@ counters!(
     // flag exists for; a zero here means the lever never engaged and any timing
     // read off that run is measuring nothing (CLAUDE.md §6).
     ObjLatticeSubst,
+    // #1953 node NS bound (`DISCOPT_MILP_NS_NODE_BOUND`). `NodeNsBound` counts node
+    // LPs whose bound came from the NS safe bound, `NodeNsFbbt` the subset that
+    // needed the FBBT-implied box after abstaining on the node box, and
+    // `NodeNsCutoff` the subset that needed the incumbent cutoff row on top, and
+    // `NodeNsAbstain` those where all abstained and the node was handed back
+    // untrusted (parent-floored, -inf). A panel that reports `NodeNsBound` and
+    // `NodeNsAbstain` both zero did not run the gate (CLAUDE.md §6).
+    NodeNsBound,
+    NodeNsFbbt,
+    NodeNsCutoff,
+    NodeNsAbstain,
     // A12 RINS (`DISCOPT_RINS`). The four form a funnel -- considered >= gated
     // >= run >= improved -- so an implausible ordering is an arithmetic error
     // rather than a plausible-looking hit rate (CLAUDE.md §6). `RinsRejected`
@@ -434,6 +445,10 @@ counters!(
     WarmSubtolRepair,
     WarmSubtolRepairNoop,
     WarmSubtolRepairFailed,
+    // #1953: a column the `SUBTOL_NOISE_REL` test set aside as rounding whose
+    // reduced cost survived one dual-refinement step with margin over its measured
+    // error, and so was admitted to the sub-tolerance ratio test.
+    SubtolSuspectConfirmed,
     // #1008 R1: the warm dual's unstable- (near-zero-) pivot exit, split by which
     // way it went. `Recoveries` counts in-place refactorize+recompute+re-select,
     // which keeps the monotone dual loop alive; `Bails` counts the hand-off to the

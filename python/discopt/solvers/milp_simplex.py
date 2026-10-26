@@ -295,6 +295,14 @@ def _fbbt_eq_bounds(
     min/max activity of the *other* columns, with an explicit per-row infinity
     tally so a single open bound still propagates (vectorised over the sparse
     matrix; the per-element Python loop is too slow for this per-solve path).
+
+    Every derived side is widened outward by a bound on its whole floating-point
+    error, ``(nnz_i + 8)·eps·(Σ|terms| + |b_i|)/|a_ij| + 8·eps·|side|`` -- the bound
+    :func:`discopt.solvers.lp_milp_highs.fbbt_box` uses -- so it holds in exact
+    arithmetic. Unwidened, ``x0 + z1 + z2 = 1e16`` with ``z1 <= 1e16, z2 <= 1``
+    derived ``x0 >= 0`` (exact: ``-1``): the activity sum absorbed ``z2``, and the NS
+    bound and the Farkas check built on that box were above the optimum / proved a
+    feasible system infeasible (#1956 sweep).
     """
     coo = sp.csr_matrix(a_std).tocoo()
     rows = coo.row
@@ -307,6 +315,10 @@ def _fbbt_eq_bounds(
         return lb, ub
     pos = vals > 0.0
     b_r = b[rows]
+    eps = float(np.finfo(np.float64).eps)
+    slack_r = (np.bincount(rows, minlength=n_rows)[rows] + 8.0) * eps
+    absb_r = np.abs(b_r)
+    absa = np.abs(vals)
 
     for _ in range(rounds):
         # Min activity uses lb where coeff>0, ub where coeff<0; max activity swaps.
@@ -324,6 +336,10 @@ def _fbbt_eq_bounds(
         np.add.at(sum_min, rows, np.where(min_inf, 0.0, min_term))
         sum_max = np.zeros(n_rows)
         np.add.at(sum_max, rows, np.where(max_inf, 0.0, max_term))
+        mag_min = np.zeros(n_rows)
+        np.add.at(mag_min, rows, np.abs(np.where(min_inf, 0.0, min_term)))
+        mag_max = np.zeros(n_rows)
+        np.add.at(mag_max, rows, np.abs(np.where(max_inf, 0.0, max_term)))
         # Activity of the row excluding column j (finite iff every *other* term is).
         minrest_finite = (n_min_inf[rows] - min_inf.astype(np.float64)) == 0
         maxrest_finite = (n_max_inf[rows] - max_inf.astype(np.float64)) == 0
@@ -339,8 +355,12 @@ def _fbbt_eq_bounds(
         # bound — suppress the spurious RuntimeWarnings without changing any value
         # (bound-neutral by construction; the arithmetic is byte-identical).
         with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-            lo_cand = np.where(pos, (b_r - maxrest) / vals, (b_r - minrest) / vals)
-            hi_cand = np.where(pos, (b_r - minrest) / vals, (b_r - maxrest) / vals)
+            from_max = (b_r - maxrest) / vals
+            from_min = (b_r - minrest) / vals
+            err_max = slack_r * (mag_max[rows] + absb_r) / absa + 8.0 * eps * np.abs(from_max)
+            err_min = slack_r * (mag_min[rows] + absb_r) / absa + 8.0 * eps * np.abs(from_min)
+            lo_cand = np.where(pos, from_max - err_max, from_min - err_min)
+            hi_cand = np.where(pos, from_min + err_min, from_max + err_max)
         lo_valid = np.where(pos, maxrest_finite, minrest_finite)
         hi_valid = np.where(pos, minrest_finite, maxrest_finite)
 
@@ -374,6 +394,45 @@ def _fbbt_eq_bounds(
     return lb, ub
 
 
+def rigorous_ns_bound_std(
+    y: np.ndarray,
+    c: np.ndarray,
+    a_std,
+    b: np.ndarray,
+    lb: np.ndarray,
+    ub: np.ndarray,
+) -> Optional[float]:
+    """A float **proved** ``<= g(y) = bᵀy + Σ_k min_{z_k∈[lb_k,ub_k]} (c − Aᵀy)_k z_k``,
+    or ``None`` when no proof is available (a reduced cost whose enclosure can take
+    the sign that rides an open side, or overflow).
+
+    The Rust ``ns_safe_bound_csc_py`` (#1956) accumulates every reduced cost in an
+    enclosed double-double and rounds each box term down. The float64 evaluations in
+    :func:`_safe_lp_lower_bound_std` and ``obbt._ns_safe_lp_lower_bound`` cannot be
+    rescued by a relative margin: a reduced cost that cancels below one ulp of
+    ``(Aᵀy)_k`` rounds to ``0`` and drops its ``rc·bound`` term, an error unbounded
+    relative to the margin's scale. Callers take the minimum of this and their own
+    value, so this can only lower a bound.
+    """
+    from discopt._rust import ns_safe_bound_csc_py
+
+    a = sp.csc_matrix(a_std)
+    m, n = a.shape
+    g = ns_safe_bound_csc_py(
+        np.ascontiguousarray(y, dtype=np.float64),
+        np.ascontiguousarray(c, dtype=np.float64),
+        m,
+        n,
+        np.ascontiguousarray(a.indptr, dtype=np.int64),
+        np.ascontiguousarray(a.indices, dtype=np.int64),
+        np.ascontiguousarray(a.data, dtype=np.float64),
+        np.ascontiguousarray(b, dtype=np.float64),
+        np.ascontiguousarray(lb, dtype=np.float64),
+        np.ascontiguousarray(ub, dtype=np.float64),
+    )
+    return None if g is None or not np.isfinite(g) else float(g)
+
+
 def _safe_lp_lower_bound_std(
     y: np.ndarray,
     c: np.ndarray,
@@ -392,9 +451,10 @@ def _safe_lp_lower_bound_std(
     so ``g(y)`` is a valid lower bound regardless of how ``y`` was obtained — it
     stays sound even when an ill-conditioned basis makes the reported vertex
     objective drift *above* the true optimum (the nvs22 false-certificate class).
-    A magnitude-scaled margin is subtracted so the float64 evaluation error cannot
-    push ``g`` above the true optimum. Returns ``None`` when no usable (finite)
-    bound exists (e.g. an unbounded box term)."""
+    The float64 value minus a magnitude-scaled margin is capped by the enclosed
+    :func:`rigorous_ns_bound_std` on the same box: the margin alone does not cover a
+    reduced cost that cancels to ``0`` in float64 (#1956 sweep). Returns ``None``
+    when no usable (finite) or no proved bound exists (e.g. an unbounded box term)."""
     y = np.asarray(y, dtype=np.float64)
     if y.size == 0 or not np.all(np.isfinite(y)):
         return None
@@ -417,11 +477,10 @@ def _safe_lp_lower_bound_std(
     # contain the feasible set, so g(y) stays <= p* (sound) while becoming finite.
     # Gated on actually needing it, so well-bounded LPs keep the cheap path.
     if (pos & ~np.isfinite(lb)).any() or (neg & ~np.isfinite(ub)).any():
-        # FBBT's float64 division roundoff (~ulp·|bound|) is dominated by the
-        # magnitude-scaled ``margin`` subtracted from g below, so the derived box
-        # needs no extra outward loosening — and adding one perturbs the (large)
-        # slack/aux bounds enough to break the safe bound's rescaling invariance
-        # without improving soundness. Use the FBBT bounds directly.
+        # The FBBT box is widened outward by its own rounding error (see
+        # ``_fbbt_eq_bounds``). A comment here used to say no widening was needed
+        # because ``margin`` dominates it; it does not -- an absorbed term in the
+        # activity sum is lost entirely, not by an ulp (#1956 sweep).
         lb, ub = _fbbt_eq_bounds(a_std, np.asarray(b, dtype=np.float64), lb, ub)
     # min_{z_k∈[lb,ub]} rc_k z_k = lb_k if rc_k>0, ub_k if rc_k<0, else 0 (the
     # rc_k==0 case contributes 0 even when that bound is infinite).
@@ -437,7 +496,10 @@ def _safe_lp_lower_bound_std(
     if not np.isfinite(g):
         return None
     margin = _NS_MARGIN_REL * (1.0 + abs(by) + float(np.abs(contrib).sum()))
-    return g - margin
+    proved = rigorous_ns_bound_std(y, c, a_std, b, lb, ub)
+    if proved is None:
+        return None
+    return min(g - margin, proved)
 
 
 def _safe_lp_lower_bound(
@@ -1168,6 +1230,22 @@ def solve_milp(
                 x=x_struct,
                 objective=float(obj),
                 bound=_certified_bound(obj, bound),
+                node_count=int(nodes),
+            )
+
+        if status == "feasible" and std.int_cols.size == 0 and np.isfinite(obj):
+            # #1953: a pure LP has one node, and its only incumbent source is the
+            # driver's NS-abstain arm, which offers the verified LP-optimal vertex
+            # but proves no bound. That is a SOLVED LP whose bound is uncertified,
+            # not a search that ran out: say so (``bound=None``) and leave the
+            # certificate to the caller -- the McCormick relaxer's ``_certify``
+            # ladder and its #1869 free-column handoff key on ``optimal``, and an
+            # ``iteration_limit`` here cost them every such node.
+            return MILPResult(
+                status=SolveStatus.OPTIMAL,
+                x=x_struct,
+                objective=float(obj),
+                bound=None,
                 node_count=int(nodes),
             )
 

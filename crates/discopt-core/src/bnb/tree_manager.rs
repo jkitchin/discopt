@@ -239,12 +239,14 @@ struct BranchRecord {
 /// the gap that makes a single constant workable for both directions.
 const LATTICE_EPS: f64 = 1e-9;
 
-/// A proven objective lattice: every attainable objective value equals
-/// `k * spacing + offset` for some integer `k`.
+/// A proven objective lattice: every attainable objective value lies within
+/// `drift` of `k * spacing + offset` for some integer `k` (#1953: zero only when
+/// the stored coefficients are exactly the rationals the lattice was built from).
 #[derive(Debug, Clone, Copy)]
 struct ObjLattice {
     spacing: f64,
     offset: f64,
+    drift: f64,
 }
 
 /// Orchestrates the Branch-and-Bound search.
@@ -1253,7 +1255,7 @@ impl TreeManager {
             }
         }
         if min_lb == f64::INFINITY {
-            self.global_lower_bound = self.incumbent_value;
+            self.global_lower_bound = self.incumbent_value - self.lattice_window();
         } else {
             // The global lower bound can never exceed the best known incumbent:
             // the optimum is <= any feasible solution, so a valid lower bound is
@@ -1270,8 +1272,10 @@ impl TreeManager {
             // Lift onto the objective lattice (no-op without one). The lift is
             // applied to the frontier BEFORE the incumbent cap, so it can close a
             // gap but never push the reported bound past a feasible solution.
+            // #1953: a drifting lattice may have fathomed values down to
+            // `U - 2*drift`, so the cap is that, not `U` (identical without drift).
             let frontier = self.round_bound_up(min_lb.max(self.root_seed));
-            self.global_lower_bound = frontier.min(self.incumbent_value);
+            self.global_lower_bound = frontier.min(self.incumbent_value - self.lattice_window());
         }
     }
 
@@ -1502,13 +1506,37 @@ impl TreeManager {
     /// equality row. Anything else mis-anchors the lattice and the rounding below
     /// lifts the dual bound past the optimum. A non-finite or non-positive
     /// `spacing`, or a non-finite `offset`, is ignored.
-    pub fn set_objective_lattice(&mut self, spacing: Option<f64>, offset: f64) {
+    ///
+    /// `drift` is the [`crate::bnb::obj_integral::ObjLattice::drift`] of the
+    /// detected lattice: attainable values lie within `drift` of a lattice point,
+    /// and every consumer below widens by it (#1953). A negative or non-finite
+    /// `drift` disables the lattice.
+    pub fn set_objective_lattice(&mut self, spacing: Option<f64>, offset: f64, drift: f64) {
         self.obj_lattice = match spacing {
-            Some(g) if g.is_finite() && g > 0.0 && offset.is_finite() => {
-                Some(ObjLattice { spacing: g, offset })
+            Some(g)
+                if g.is_finite()
+                    && g > 0.0
+                    && offset.is_finite()
+                    && drift.is_finite()
+                    && drift >= 0.0 =>
+            {
+                Some(ObjLattice {
+                    spacing: g,
+                    offset,
+                    drift,
+                })
             }
             _ => None,
         };
+    }
+
+    /// How far below the incumbent a lattice-fathomed node may still reach:
+    /// `2 * drift` (see [`Self::cutoff_value`]), zero without a lattice.
+    fn lattice_window(&self) -> f64 {
+        match self.obj_lattice {
+            Some(ObjLattice { drift, .. }) => 2.0 * drift,
+            None => 0.0,
+        }
     }
 
     /// The value a node's lower bound must reach before the node can be
@@ -1526,10 +1554,16 @@ impl TreeManager {
     /// fathoming, the leaf queue and the LP objective limit cannot disagree.
     /// Reduced-cost fixing reads the raw incumbent separately in the driver and
     /// is intentionally left alone here.
+    ///
+    /// With a drift `D` (#1953) the values are only within `D` of the lattice. A
+    /// value `v < U` either shares `U`'s lattice point, so `v >= U - 2D`, or sits
+    /// at least one spacing below it, so `v <= U - g + 2D`. The cutoff is the
+    /// latter; what it may fathom is the band `[U - 2D, U)`, and the global bound
+    /// is capped at `U - 2D` to keep that band in the reported bound.
     pub fn cutoff_value(&self) -> f64 {
         match self.obj_lattice {
-            Some(ObjLattice { spacing, .. }) if self.incumbent_value.is_finite() => {
-                let c = self.incumbent_value - spacing;
+            Some(ObjLattice { spacing, drift, .. }) if self.incumbent_value.is_finite() => {
+                let c = self.incumbent_value - spacing + 2.0 * drift;
                 c + LATTICE_EPS * c.abs().max(1.0)
             }
             _ => self.incumbent_value,
@@ -1550,18 +1584,26 @@ impl TreeManager {
     /// LP dual bound that lands a hair above a lattice point (7.72 is exact, but
     /// `8.0000000001` happens) must not be lifted a whole unit past the optimum.
     /// The result is floored at `v` so the lift can only ever tighten.
+    ///
+    /// With a drift `D` (#1953): the optimum `v* >= v` is within `D` of a lattice
+    /// point `L >= v - D`, so `v* >= ceil_lattice(v - D) - D`.
     pub fn round_bound_up(&self, v: f64) -> f64 {
-        let Some(ObjLattice { spacing, offset }) = self.obj_lattice else {
+        let Some(ObjLattice {
+            spacing,
+            offset,
+            drift,
+        }) = self.obj_lattice
+        else {
             return v;
         };
         if !v.is_finite() {
             return v;
         }
-        let k = (v - offset) / spacing;
+        let k = (v - drift - offset) / spacing;
         if !k.is_finite() {
             return v;
         }
-        let lifted = (k - LATTICE_EPS * k.abs().max(1.0)).ceil() * spacing + offset;
+        let lifted = (k - LATTICE_EPS * k.abs().max(1.0)).ceil() * spacing + offset - drift;
         if lifted.is_finite() && lifted > v {
             lifted
         } else {
@@ -2022,7 +2064,7 @@ mod tests {
             }],
             SelectionStrategy::BestFirst,
         );
-        tm.set_objective_lattice(granularity, 0.0);
+        tm.set_objective_lattice(granularity, 0.0, 0.0);
         tm.initialize();
         tm.incumbent_value = incumbent;
         tm.incumbent_solution = Some(vec![3.0]);
@@ -2129,7 +2171,7 @@ mod tests {
             }],
             SelectionStrategy::BestFirst,
         );
-        tm.set_objective_lattice(Some(1.0), 0.0);
+        tm.set_objective_lattice(Some(1.0), 0.0, 0.0);
         assert_eq!(tm.cutoff_value(), f64::INFINITY);
     }
 
@@ -2148,7 +2190,7 @@ mod tests {
             (tm.round_bound_up(-0.4) - 0.0).abs() < 1e-12,
             "negatives lift too"
         );
-        tm.set_objective_lattice(None, 0.0);
+        tm.set_objective_lattice(None, 0.0, 0.0);
         assert!(
             (tm.round_bound_up(7.72) - 7.72).abs() < 1e-12,
             "no proven lattice must leave the bound untouched"
@@ -2162,7 +2204,7 @@ mod tests {
     #[test]
     fn objective_lattice_lift_respects_the_objective_constant() {
         let mut tm = lattice_tm(Some(1.0), 100.0);
-        tm.set_objective_lattice(Some(1.0), 0.5);
+        tm.set_objective_lattice(Some(1.0), 0.5, 0.0);
         assert!(
             (tm.round_bound_up(7.72) - 8.5).abs() < 1e-12,
             "got {}",
@@ -2190,6 +2232,37 @@ mod tests {
     /// The lift can only tighten. Whatever the arithmetic does, the returned
     /// value is a valid dual bound iff it is >= the one handed in, so the floor at
     /// `v` is the invariant worth asserting directly.
+    /// #1953: with a drift `D` the lift must stay a valid bound (`ceil` of
+    /// `v - D`, minus `D`), the cutoff must leave values more than `2D` below the
+    /// incumbent alive, and the global bound is capped at `U - 2D`.
+    #[test]
+    fn objective_lattice_drift_widens_every_consumer() {
+        let drifting = |u: f64| {
+            let mut tm = lattice_tm(None, u);
+            tm.set_objective_lattice(Some(1.0), 0.0, 0.01);
+            tm
+        };
+        let tm = drifting(5.0);
+        // v* >= 7.005 is within 0.01 of a lattice point >= 6.995, i.e. >= 7, so the
+        // valid lift is 6.99 -- already below 7.005, so no lift.
+        assert_eq!(tm.round_bound_up(7.005), 7.005);
+        assert!((tm.round_bound_up(6.5) - 6.99).abs() < 1e-9);
+        // Values below U lie in [U - 2D, U) or at most U - g + 2D.
+        assert!((tm.cutoff_value() - (5.0 - 1.0 + 0.02)).abs() < 1e-8);
+        // A node at 4.01 may hold 4.01 + ... up to U - g + 2D = 4.02: keep it.
+        assert!(!fathomed_at(&mut drifting(5.0), 4.01));
+        // A node at 4.03 may only hold values in [4.98, 5): fathom it, and keep
+        // that band in the reported bound.
+        let mut tm = drifting(5.0);
+        assert!(fathomed_at(&mut tm, 4.03));
+        tm.update_global_lower_bound();
+        assert!(
+            tm.global_lower_bound <= 5.0 - 0.02 + 1e-12,
+            "bound {} hides the fathomed band",
+            tm.global_lower_bound
+        );
+    }
+
     #[test]
     fn objective_lattice_lift_never_loosens_a_bound() {
         let tm = lattice_tm(Some(0.25), 100.0);

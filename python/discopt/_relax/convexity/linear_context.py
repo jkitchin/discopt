@@ -29,6 +29,7 @@ from typing import Optional
 import numpy as np
 import scipy.sparse as sp
 
+from discopt._flat_index import resolve_scalar_slot
 from discopt._relax.convexity.lattice import Sign, is_strict, sign_from_bounds
 from discopt._relax.scalarize import sum_is_full_reduction
 from discopt.modeling.core import (
@@ -120,17 +121,11 @@ def _affine_terms(
             return {_compute_var_offset(node, model): scale}, 0.0
 
         if isinstance(node, IndexExpression) and isinstance(node.base, Variable):
-            base_off = _compute_var_offset(node.base, model)
-            idx = node.index
-            if isinstance(idx, (int, np.integer)):
-                return {base_off + int(idx): scale}, 0.0
-            if isinstance(idx, tuple) and len(idx) == 1 and isinstance(idx[0], (int, np.integer)):
-                return {base_off + int(idx[0]): scale}, 0.0
-            try:
-                flat = int(np.ravel_multi_index(idx, node.base.shape))
-            except (TypeError, ValueError):
+            # Normalises negative indices, refuses partial/out-of-range (#1952).
+            slot = resolve_scalar_slot(node, model)
+            if slot is None:
                 return None
-            return {base_off + flat: scale}, 0.0
+            return {slot: scale}, 0.0
 
         if isinstance(node, UnaryOp):
             if node.op == "neg":

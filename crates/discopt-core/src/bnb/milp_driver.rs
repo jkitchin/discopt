@@ -23,12 +23,14 @@ use crate::lp::crossover::LpView;
 use crate::lp::cut_select::select_cuts;
 use crate::lp::gomory::{separate_gomory_cols, GomoryCut};
 use crate::lp::simplex::linsolve::{FeralLU, LinearSolver};
+use crate::lp::simplex::refine::{ns_safe_bound_csc, scaled_dual_for_open_columns_csc};
 use crate::lp::simplex::scaling::MAX_LINE_RANGE;
 use crate::lp::simplex::sparse::SparseCols;
 use crate::lp::simplex::{
     solve_lp, solve_lp_cols_scaled, solve_lp_warm, solve_lp_warm_scaled_csc, tighten_bounds_csc,
-    LpStatus, PreparedDual, ScaledProblem, Scaling, SimplexOptions,
+    tighten_bounds_csc_with_row, LpStatus, PreparedDual, ScaledProblem, Scaling, SimplexOptions,
 };
+use crate::presolve::directed::{sub_down, sub_up};
 
 const INF: f64 = 1e20;
 const INFEAS_SENTINEL: f64 = 1e30;
@@ -665,6 +667,104 @@ impl Drop for MilpDepthGuard {
     fn drop(&mut self) {
         MILP_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
     }
+}
+
+/// #1953: whether a node's LP bound is the NS safe bound from its own dual
+/// (`ns_safe_bound_csc` over the node box) rather than the vertex objective.
+/// `DISCOPT_MILP_NS_NODE_BOUND`, read once. Default ON; `=0` is the opt-out that
+/// lets the shipped default be A/B'd (CLAUDE.md §5 out-of-scope class), restoring
+/// the vertex-objective bound.
+fn ns_node_bound_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("DISCOPT_MILP_NS_NODE_BOUND")
+            .ok()
+            .map(|v| !matches!(v.trim(), "0" | "false" | "False"))
+            .unwrap_or(true)
+    })
+}
+
+/// #1953: the NS safe bound for a node from its unscaled dual `y`, or `None`.
+///
+/// Each stage tries `y` and then its open-column repair
+/// (`scaled_dual_for_open_columns_csc`, the Python ladder's #1729 step).
+///
+/// First over the node box. NS abstains when an open column's reduced-cost
+/// enclosure straddles zero (#1956) -- a basic surplus or cut slack, whose
+/// reduced cost is zero only up to rounding, is the common case. Then it is
+/// retried over the box FBBT implies from the node's rows (`tighten_bounds_csc`,
+/// outward-rounded): every feasible point of the node lies in that box, so the
+/// bound over it is still a valid node bound, and it closes the open sides the
+/// rows bound (the Python ladder's `fbbt_box` step). A proven-empty box returns
+/// `None` rather than a fathom; the caller then treats the node as unsettled.
+///
+/// Last, with an incumbent `U`, over the box FBBT implies from the rows plus the
+/// cutoff `c x <= U - obj_const` (rhs rounded up). An OA master's epigraph column
+/// is bounded above by nothing else, and the cut slacks only through it. A bound
+/// `L'` over the node cut down to `{c x <= U}` gives `min(L', U)` for the whole
+/// node: either the node holds a point better than `U`, whose value is then
+/// `>= L'`, or every point is `>= U`.
+fn node_ns_bound(ctx: &NodeCtx, y: &[f64], l: &[f64], u: &[f64]) -> Option<f64> {
+    let (cp, ri, vals) = ctx.csc_rc.raw();
+    // NS from `y`, then from its open-column repair over the same box.
+    let ns = |l: &[f64], u: &[f64]| {
+        ns_safe_bound_csc(y, ctx.c_w, cp, ri, vals, ctx.m_w, ctx.n_w, ctx.b_w, l, u).or_else(|| {
+            let y2 = scaled_dual_for_open_columns_csc(y, ctx.c_w, cp, ri, vals, ctx.n_w, l, u)?;
+            ns_safe_bound_csc(&y2, ctx.c_w, cp, ri, vals, ctx.m_w, ctx.n_w, ctx.b_w, l, u)
+        })
+    };
+    if let Some(g) = ns(l, u) {
+        return Some(g);
+    }
+    let pr = tighten_bounds_csc(
+        ctx.csc_rc,
+        ctx.m_w,
+        ctx.n_w,
+        l,
+        u,
+        ctx.b_w,
+        ctx.is_int_full,
+        ctx.opts.simplex.tol,
+    );
+    if pr.infeasible {
+        return None;
+    }
+    if let Some(g) = ns(&pr.l, &pr.u) {
+        crate::profile::incr(crate::profile::Ctr::NodeNsFbbt);
+        return Some(g);
+    }
+    let inc = ctx.inc_snapshot.filter(|v| v.is_finite())?;
+    let pr = tighten_bounds_csc_with_row(
+        ctx.csc_rc,
+        ctx.m_w,
+        ctx.n_w,
+        &pr.l,
+        &pr.u,
+        ctx.b_w,
+        ctx.is_int_full,
+        ctx.opts.simplex.tol,
+        Some((ctx.c_w, sub_up(inc, ctx.obj_const))),
+    );
+    // Empty under the cutoff: no point of the node beats the incumbent.
+    let cap = sub_down(inc, ctx.obj_const);
+    let g = if pr.infeasible {
+        Some(cap)
+    } else {
+        ns(&pr.l, &pr.u).map(|g| g.min(cap))
+    };
+    if g.is_some() {
+        crate::profile::incr(crate::profile::Ctr::NodeNsCutoff);
+    }
+    g
+}
+
+/// Every integer structural column of `xs` within [`INT_TOL`] of an integer.
+fn feasible_integral(ctx: &NodeCtx, xs: &[f64]) -> bool {
+    ctx.is_int
+        .iter()
+        .enumerate()
+        .all(|(j, &it)| !it || frac(xs[j]) <= INT_TOL)
 }
 
 /// Is the RINS improvement heuristic armed? Off by default: per CLAUDE.md §5 a
@@ -1479,13 +1579,12 @@ fn solve_milp_node_search(
     // they would not change it, but reading `c` here keeps that independent of
     // what the cut loop does later.
     let lattice = if obj_integrality_enabled() {
-        let base =
-            crate::bnb::obj_integral::objective_granularity(&c[..ns], &is_int).map(|spacing| {
-                crate::bnb::obj_integral::ObjLattice {
-                    spacing,
-                    shift: 0.0,
-                }
-            });
+        let base = crate::bnb::obj_integral::objective_granularity(
+            &c[..ns],
+            &is_int,
+            &base_l[..ns],
+            &base_u[..ns],
+        );
         if obj_lattice_subst_enabled() {
             // Bounds are the presolved ones on purpose: presolve only narrows and
             // never cuts a feasible point, so a column it fixed is fixed at every
@@ -1516,6 +1615,7 @@ fn solve_milp_node_search(
     tm.set_objective_lattice(
         lattice.map(|l| l.spacing),
         obj_const + lattice.map_or(0.0, |l| l.shift),
+        lattice.map_or(0.0, |l| l.drift),
     );
     tm.initialize();
 
@@ -3188,6 +3288,53 @@ fn solve_node(
         LpStatus::Optimal => {
             out.basis = Some(sol.basis.clone());
             let xs = &sol.x[..ctx.ns];
+            // #1066: the solve exports the row duals in the scaled space (`ŷ`);
+            // the NS bound and `reduced_cost_fix` read them against the UNSCALED
+            // working matrix `ctx.csc_rc` / cost `ctx.c_w`, so map this copy back
+            // with the same exact power-of-two factors `unscale_x` uses. `sol.dual`
+            // itself is left scaled for the Farkas arm (see the note after the
+            // node solve).
+            let rc_dual: std::borrow::Cow<'_, [f64]> = match ctx.scaling {
+                Some(s) => {
+                    let mut d = sol.dual.clone();
+                    s.unscale_dual(&mut d);
+                    std::borrow::Cow::Owned(d)
+                }
+                None => std::borrow::Cow::Borrowed(&sol.dual),
+            };
+            // #1953: the node's bound. With the gate on, the NS safe bound from the
+            // node's own dual over its box (capped at the vertex value); the vertex
+            // value alone is only as good as the simplex's optimality test, and a
+            // vertex the test passed early sits ABOVE the node's LP minimum.
+            let node_lp_bound = if ns_node_bound_enabled() {
+                node_ns_bound(ctx, &rc_dual, &full_l, &full_u).map(|g| g.min(sol.obj))
+            } else {
+                Some(sol.obj)
+            };
+            let Some(node_lp_bound) = node_lp_bound else {
+                // No safe bound: hand the node back exactly as an `IterLimit` one
+                // (parent-floored -inf bound, untrusted midpoint; see that arm). A
+                // verified integral vertex is still a feasible point, so it is
+                // offered to the reduce as an incumbent candidate, which
+                // re-validates it -- it just does not fathom the node.
+                crate::profile::incr(crate::profile::Ctr::NodeNsAbstain);
+                out.basis = None;
+                if feasible_integral(ctx, xs) && incumbent_verified(ctx, &full_l, &full_u, &sol.x) {
+                    out.incumbent = Some((xs.to_vec(), sol.obj + ctx.obj_const));
+                }
+                out.result = NodeResult {
+                    node_id: id,
+                    lower_bound: f64::NEG_INFINITY,
+                    solution: midpoint(lb_k, ub_k),
+                    is_feasible: false,
+                    certified_infeasible: false,
+                    sentinel_is_exclusion: false,
+                };
+                return out;
+            };
+            if ns_node_bound_enabled() {
+                crate::profile::incr(crate::profile::Ctr::NodeNsBound);
+            }
             let feasible = ctx
                 .is_int
                 .iter()
@@ -3222,26 +3369,15 @@ fn solve_node(
             // contraction — never touches the node's own valid LP bound.
             if ctx.opts.reduced_cost_fixing && !feasible {
                 let _t_rcf = crate::profile::Timer::new(crate::profile::Phase::RedCostFix);
-                // #1066: the solve exports the row duals in the scaled space (`ŷ`);
-                // `reduced_cost_fix` reads them against the UNSCALED working matrix
-                // `ctx.csc_rc` / cost `ctx.c_w`, so map this copy back with the same
-                // exact power-of-two factors `unscale_x` uses. `sol.dual` itself is
-                // left scaled for the Farkas arm (see the note after the node solve).
-                let rc_dual: std::borrow::Cow<'_, [f64]> = match ctx.scaling {
-                    Some(s) => {
-                        let mut d = sol.dual.clone();
-                        s.unscale_dual(&mut d);
-                        std::borrow::Cow::Owned(d)
-                    }
-                    None => std::borrow::Cow::Borrowed(&sol.dual),
-                };
+                // #1953: the node's bound, not the vertex value: fixing argues
+                // `cᵀx >= z + |r_j| (x_j - bound_j)`, true for the safe bound `z`.
                 if let Some((rl, ru)) = reduced_cost_fix(
                     ctx.csc_rc,
                     ctx.m_w,
                     ctx.c_w,
                     &sol.basis,
                     &rc_dual,
-                    sol.obj + ctx.obj_const,
+                    node_lp_bound + ctx.obj_const,
                     ctx.inc_snapshot.unwrap_or(f64::INFINITY),
                     &full_l,
                     &full_u,
@@ -3352,7 +3488,7 @@ fn solve_node(
             }
             out.result = NodeResult {
                 node_id: id,
-                lower_bound: sol.obj + ctx.obj_const,
+                lower_bound: node_lp_bound + ctx.obj_const,
                 solution: xs.to_vec(),
                 is_feasible: feasible,
                 certified_infeasible: false,
@@ -5469,7 +5605,13 @@ mod tests {
         // Anti-vacuity (CLAUDE.md §6): the driver's detector must actually fire on
         // this fixture, or the run below exercises nothing.
         assert_eq!(
-            crate::bnb::obj_integral::objective_granularity(&c[..ns], &is_int[..ns]),
+            crate::bnb::obj_integral::objective_granularity(
+                &c[..ns],
+                &is_int[..ns],
+                &l[..ns],
+                &u[..ns]
+            )
+            .map(|lat| lat.spacing),
             Some(1.0),
             "fixture must present a unit objective lattice"
         );
@@ -5506,7 +5648,8 @@ mod tests {
         u[ns] = 1.0;
         let is_int: Vec<bool> = (0..n).map(|j| j < ns).collect();
         assert_eq!(
-            crate::bnb::obj_integral::objective_granularity(&c, &is_int),
+            crate::bnb::obj_integral::objective_granularity(&c, &is_int, &l, &u)
+                .map(|lat| lat.spacing),
             None,
             "a costed continuous column must disable the lattice"
         );

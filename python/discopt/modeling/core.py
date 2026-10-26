@@ -3291,10 +3291,17 @@ def _iter_model_leaves(*exprs: Expression):
     walker never trips on legitimate constants. Used by the cross-model
     ownership guard (finding M3) to detect a variable/parameter that belongs to
     a different :class:`Model` than the one it is being solved in.
+
+    Each node is expanded once (by identity): a DAG that reuses a subexpression
+    has exponentially many root-to-leaf paths but only linearly many nodes.
     """
     stack = list(exprs)
+    seen: set[int] = set()
     while stack:
         node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
         if isinstance(node, (Variable, Parameter)):
             yield node
         elif isinstance(node, IndexExpression):
@@ -9629,7 +9636,12 @@ class Model:
         incumbent_callback : callable, optional
             Incumbent callback. Called when a new incumbent is about to
             be accepted. Should accept ``(ctx, model, solution)`` and
-            return ``True`` to accept or ``False`` to reject.
+            return ``True`` to accept or ``False`` to reject. A rejection
+            prunes the node that produced the point without proving the rest
+            of its box holds no acceptable point, so the solve is certified
+            ``optimal`` only if the accepted incumbent is within tolerance of
+            that node's bound; otherwise it reports ``feasible`` with the
+            node's bound kept in ``bound`` (#1964).
         node_callback : callable, optional
             Node callback. Called after each batch of nodes is processed.
             Should accept ``(ctx, model)`` and return ``None``. A MILP with a

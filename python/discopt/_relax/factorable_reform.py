@@ -1022,6 +1022,11 @@ def _is_translated_monomial(factors: list[Expression]) -> bool:
     does not arise for it (``dm.prod([...])`` over a list builds a ``*`` chain and
     is lifted).
     """
+    # Count first: ``_univariate_affine_key`` walks its factor, and on a recursive
+    # chain (``e = a*e + ...``) the one non-constant factor is the whole history,
+    # so walking it before knowing the answer is False made the scan quadratic.
+    if sum(not isinstance(f, Constant) for f in factors) < 3:
+        return False
     seen: set[tuple] = set()
     nonconst = 0
     offset = False
@@ -1048,19 +1053,30 @@ def _scan_for_translated_monomial(expr: Expression, *, _in_chain: bool = False) 
     #1588 review: this is what makes a translated monomial count as factorable
     work on its own. Without it ``min (x-3)(y-1)(z-2)(u-4)`` was returned
     unchanged, because the lift only ran when some *other* lift opened the pass.
+
+    Iterative, and each ``(node, in_chain)`` pair is visited once: a model that
+    reuses a subexpression (``e = e + h*(u - e**2)``) has exponentially many paths
+    through it but only linearly many nodes.
     """
-    if isinstance(expr, BinaryOp):
-        if expr.op == "*" and not _in_chain:
-            if _is_translated_monomial(_collect_mul_factors(expr)):
-                return True
-        sub = expr.op == "*"
-        return _scan_for_translated_monomial(
-            expr.left, _in_chain=sub
-        ) or _scan_for_translated_monomial(expr.right, _in_chain=sub)
-    if isinstance(expr, UnaryOp):
-        return _scan_for_translated_monomial(expr.operand)
-    if isinstance(expr, SumOverExpression):  # ``dm.sum([...])`` (see the prelift)
-        return any(_scan_for_translated_monomial(t) for t in expr.terms)
+    stack = [(expr, _in_chain)]
+    seen: set[tuple[int, bool]] = set()
+    while stack:
+        node, in_chain = stack.pop()
+        key = (id(node), in_chain)
+        if key in seen:
+            continue
+        seen.add(key)
+        if isinstance(node, BinaryOp):
+            if node.op == "*" and not in_chain:
+                if _is_translated_monomial(_collect_mul_factors(node)):
+                    return True
+            sub = node.op == "*"
+            stack.append((node.right, sub))
+            stack.append((node.left, sub))
+        elif isinstance(node, UnaryOp):
+            stack.append((node.operand, False))
+        elif isinstance(node, SumOverExpression):  # ``dm.sum([...])`` (see the prelift)
+            stack.extend((t, False) for t in reversed(node.terms))
     return False
 
 
@@ -2009,14 +2025,28 @@ def _strip_neg(expr: Expression) -> tuple[float, Expression]:
     return sign, expr
 
 
-def _flatten_product(expr: Expression) -> list[Expression]:
-    """Flatten a left/right-nested ``*``-tree into a flat list of factors."""
-    if isinstance(expr, BinaryOp) and expr.op == "*":
-        return _flatten_product(expr.left) + _flatten_product(expr.right)
-    return [expr]
+def _flatten_product(expr: Expression, walk: "_EntropyWalk | None" = None) -> list[Expression]:
+    """Flatten a left/right-nested ``*``-tree into a flat list of factors, left to
+    right. Iterative and linear in the chain length (#1958: the recursive form
+    concatenated lists at every level); ``walk`` charges each node to the pass's
+    deadline."""
+    out: list[Expression] = []
+    stack: list[Expression] = [expr]
+    while stack:
+        node = stack.pop()
+        if walk is not None:
+            walk.tick()
+        if isinstance(node, BinaryOp) and node.op == "*":
+            stack.append(node.right)
+            stack.append(node.left)
+        else:
+            out.append(node)
+    return out
 
 
-def _match_entropy_product(expr: Expression, model: Model) -> Expression | None:
+def _match_entropy_product(
+    expr: Expression, model: Model, factors: list[Expression] | None = None
+) -> Expression | None:
     """If *expr* is a product equal to ``c · x · log(x)`` for a single variable
     ``x`` with a nonnegative, finite box, return ``c · entropy(x)``; else ``None``.
 
@@ -2035,7 +2065,7 @@ def _match_entropy_product(expr: Expression, model: Model) -> Expression | None:
     bare_count = 0
     log_count = 0
 
-    for factor in _flatten_product(expr):
+    for factor in factors if factors is not None else _flatten_product(expr):
         sign, factor = _strip_neg(factor)
         coeff *= sign
         # Fold scalar-constant factors into the coefficient.
@@ -2074,7 +2104,9 @@ def _match_entropy_product(expr: Expression, model: Model) -> Expression | None:
     return BinaryOp("*", Constant(coeff), entropy)
 
 
-def _match_centropy_product(expr: Expression, model: Model) -> Expression | None:
+def _match_centropy_product(
+    expr: Expression, model: Model, factors: list[Expression] | None = None
+) -> Expression | None:
     """If *expr* is a product equal to ``c · x · log(x/y)`` for a single variable
     ``x`` (nonnegative, finite box) and a positive divisor ``y``, return
     ``c · centropy(x, y)``; else ``None``.
@@ -2097,7 +2129,7 @@ def _match_centropy_product(expr: Expression, model: Model) -> Expression | None
     bare_count = 0
     log_count = 0
 
-    for factor in _flatten_product(expr):
+    for factor in factors if factors is not None else _flatten_product(expr):
         sign, factor = _strip_neg(factor)
         coeff *= sign
         if isinstance(factor, Constant) and factor.value.ndim == 0:
@@ -2207,7 +2239,12 @@ def _entropy_log_intrinsic(term: Expression, x_idx: int, model: Model) -> Expres
     return FunctionCall("entropy", arg)
 
 
-def _match_entropy_affine_product(expr: Expression, model: Model) -> Expression | None:
+def _match_entropy_affine_product(
+    expr: Expression,
+    model: Model,
+    factors: list[Expression] | None = None,
+    walk: "_EntropyWalk | None" = None,
+) -> Expression | None:
     """Match the *distributed* entropy form ``c · x · (affine + log(x))`` and pull
     out the intrinsic, returning ``c·(x·affine) + c·entropy(x)`` (or ``centropy``
     when the log is ``log(x/y)``); else ``None``.
@@ -2233,7 +2270,7 @@ def _match_entropy_affine_product(expr: Expression, model: Model) -> Expression 
     other_factor: Expression | None = None
     other_count = 0
 
-    for factor in _flatten_product(expr):
+    for factor in factors if factors is not None else _flatten_product(expr):
         sign, factor = _strip_neg(factor)
         coeff *= sign
         if isinstance(factor, Constant) and factor.value.ndim == 0:
@@ -2289,7 +2326,7 @@ def _match_entropy_affine_product(expr: Expression, model: Model) -> Expression 
         node = term if s > 0 else UnaryOp("neg", term)
         rest_expr = node if rest_expr is None else BinaryOp("+", rest_expr, node)
     assert rest_expr is not None
-    rest_expr = _canonicalize_entropy_expr(rest_expr, model)
+    rest_expr = _canonicalize_entropy_expr(rest_expr, model, walk)
     product: Expression = BinaryOp("*", bare_expr, rest_expr)
     if coeff != 1.0:
         product = BinaryOp("*", Constant(coeff), product)
@@ -2297,47 +2334,96 @@ def _match_entropy_affine_product(expr: Expression, model: Model) -> Expression 
     return BinaryOp("+", product, entropy_part)
 
 
-def _canonicalize_entropy_expr(expr: Expression, model: Model) -> Expression:
+class _EntropyAbandoned(Exception):
+    """The solve clock ran out inside the entropy walk (#1958).
+
+    Raised only by :meth:`_EntropyWalk.tick` and caught only by
+    :func:`_canonicalize_entropy_inner`, which then returns the model it was given
+    -- the pass's documented "unchanged" outcome, the same wholesale abandonment
+    :class:`_LiftAbandoned` gives the lift (#1565). Never a defect signal.
+    """
+
+
+class _EntropyWalk:
+    """Per-pass state of :func:`canonicalize_entropy` (#1958).
+
+    * ``tick`` consults the deadline every ``_LIFT_DEADLINE_STRIDE`` visits, in the
+      main walk and in :func:`_flatten_product`. A per-constraint check alone cannot
+      stop a pass whose single row is the whole model (``hadamard_9``: one row,
+      1.5 M distinct nodes, ~600 s inside a 60 s limit).
+    * ``memo`` maps ``id(node)`` to ``(node, result)``. A ``.nl`` DAG shares
+      subexpressions (6.7 M expanded vs 1.5 M distinct nodes on ``hadamard_9``), and
+      the rewrite of a node depends only on the node and the model's bounds, which
+      the pass does not change, so a hit returns exactly what a re-walk would. The
+      node is held so its ``id`` cannot be recycled while the walk lives.
+    """
+
+    def __init__(self, model: Model, deadline: Optional[Callable[[], bool]] = None):
+        self.model = model
+        self._deadline = deadline
+        self._ticks = 0
+        self.memo: dict[int, tuple[Expression, Expression]] = {}
+
+    def tick(self) -> None:
+        if self._deadline is None:
+            return
+        self._ticks += 1
+        if self._ticks % _LIFT_DEADLINE_STRIDE == 0 and self._deadline():
+            raise _EntropyAbandoned(f"time limit spent after {self._ticks} entropy visits")
+
+
+def _canonicalize_entropy_expr(
+    expr: Expression, model: Model, walk: _EntropyWalk | None = None
+) -> Expression:
     """Return *expr* with every ``c·x·log(x)`` product rewritten to ``c·entropy(x)``
     and every ``c·x·log(x/y)`` product rewritten to ``c·centropy(x, y)`` — including
     the distributed ``c·x·(affine + log(x))`` form (issue #207, ex6_1_4).
     Identity-preserving: unchanged subtrees keep their object identity so
-    untouched models are returned byte-for-byte unchanged."""
+    untouched models are returned byte-for-byte unchanged. ``walk`` carries the
+    deadline and the shared-node memo (#1958); without one the walk is unbounded."""
+    if walk is None:
+        walk = _EntropyWalk(model)
+    hit = walk.memo.get(id(expr))
+    if hit is not None:
+        return hit[1]
+    walk.tick()
+    out = expr
+    # One frame per node, as the recursion headroom assumes (#1520).
     if isinstance(expr, BinaryOp):
+        matched = None
         if expr.op == "*":
-            matched = _match_entropy_product(expr, model)
+            # #1958: flatten once for all three matchers.
+            factors = _flatten_product(expr, walk)
+            matched = _match_entropy_product(expr, model, factors)
             if matched is None:
-                matched = _match_centropy_product(expr, model)
+                matched = _match_centropy_product(expr, model, factors)
             if matched is None:
-                matched = _match_entropy_affine_product(expr, model)
-            if matched is not None:
-                return matched
-        left = _canonicalize_entropy_expr(expr.left, model)
-        right = _canonicalize_entropy_expr(expr.right, model)
-        if left is expr.left and right is expr.right:
-            return expr
-        return BinaryOp(expr.op, left, right)
-    if isinstance(expr, UnaryOp):
-        operand = _canonicalize_entropy_expr(expr.operand, model)
-        if operand is expr.operand:
-            return expr
-        return UnaryOp(expr.op, operand)
-    if isinstance(expr, FunctionCall):
-        new_args = tuple(_canonicalize_entropy_expr(a, model) for a in expr.args)
-        if all(n is o for n, o in zip(new_args, expr.args)):
-            return expr
-        return FunctionCall(expr.func_name, *new_args)
-    if isinstance(expr, SumExpression):
-        operand = _canonicalize_entropy_expr(expr.operand, model)
-        if operand is expr.operand:
-            return expr
-        return SumExpression(operand, axis=expr.axis)
-    if isinstance(expr, SumOverExpression):
-        new_terms = [_canonicalize_entropy_expr(t, model) for t in expr.terms]
-        if all(n is o for n, o in zip(new_terms, expr.terms)):
-            return expr
-        return SumOverExpression(new_terms)
-    return expr
+                matched = _match_entropy_affine_product(expr, model, factors, walk)
+        if matched is not None:
+            out = matched
+        else:
+            left = _canonicalize_entropy_expr(expr.left, model, walk)
+            right = _canonicalize_entropy_expr(expr.right, model, walk)
+            if left is not expr.left or right is not expr.right:
+                out = BinaryOp(expr.op, left, right)
+    elif isinstance(expr, UnaryOp):
+        operand = _canonicalize_entropy_expr(expr.operand, model, walk)
+        if operand is not expr.operand:
+            out = UnaryOp(expr.op, operand)
+    elif isinstance(expr, FunctionCall):
+        new_args = tuple(_canonicalize_entropy_expr(a, model, walk) for a in expr.args)
+        if not all(n is o for n, o in zip(new_args, expr.args)):
+            out = FunctionCall(expr.func_name, *new_args)
+    elif isinstance(expr, SumExpression):
+        operand = _canonicalize_entropy_expr(expr.operand, model, walk)
+        if operand is not expr.operand:
+            out = SumExpression(operand, axis=expr.axis)
+    elif isinstance(expr, SumOverExpression):
+        new_terms = [_canonicalize_entropy_expr(t, model, walk) for t in expr.terms]
+        if not all(n is o for n, o in zip(new_terms, expr.terms)):
+            out = SumOverExpression(new_terms)
+    walk.memo[id(expr)] = (expr, out)
+    return out
 
 
 def canonicalize_entropy(model: Model, deadline: Optional[Callable[[], bool]] = None) -> Model:
@@ -2363,10 +2449,13 @@ def canonicalize_entropy(model: Model, deadline: Optional[Callable[[], bool]] = 
     turned into "no entropy term found").
 
     ``deadline`` (a ``PresolveDeadline.abandon_hook``) is checked once per
-    constraint; on expiry the pass returns *model* unchanged and discards what it
-    rewrote -- the answer it already gives when nothing matches. Measured on
-    ``telecomsp_nor_sun`` (21,270 rows, no ``log`` anywhere): ~30 s, started inside
-    a 60 s ``time_limit`` and finished well past it.
+    constraint and, since #1958, every ``_LIFT_DEADLINE_STRIDE`` visits inside the
+    walk (objective included); on expiry the pass returns *model* unchanged and
+    discards what it rewrote -- the answer it already gives when nothing matches.
+    Measured on ``telecomsp_nor_sun`` (21,270 rows, no ``log`` anywhere): ~30 s,
+    started inside a 60 s ``time_limit`` and finished well past it; on
+    ``hadamard_9`` (one row of 1.5 M distinct nodes) the per-row check alone let
+    the pass run ~600 s.
     """
     return _run_factorable_with_headroom(
         model, lambda: _canonicalize_entropy_inner(model, deadline)
@@ -2379,11 +2468,20 @@ def _canonicalize_entropy_inner(
     # #1520: no except. The walk declines by returning the model unchanged; the
     # old ``except Exception: return model`` could only hide a defect as "no
     # entropy term found". ``ComplementarityProvenanceError`` already propagated.
+    try:
+        return _canonicalize_entropy_walk(model, _EntropyWalk(model, deadline), deadline)
+    except _EntropyAbandoned:
+        return model  # #1958: discard partial rewrites; the "unchanged" outcome
+
+
+def _canonicalize_entropy_walk(
+    model: Model, walk: _EntropyWalk, deadline: Optional[Callable[[], bool]]
+) -> Model:
     changed = False
 
     new_objective = model._objective
     if model._objective is not None:
-        new_expr = _canonicalize_entropy_expr(model._objective.expression, model)
+        new_expr = _canonicalize_entropy_expr(model._objective.expression, model, walk)
         if new_expr is not model._objective.expression:
             from discopt.modeling.core import Objective
 
@@ -2395,7 +2493,7 @@ def _canonicalize_entropy_inner(
         if deadline is not None and deadline():
             return model
         if isinstance(c, Constraint):
-            new_body = _canonicalize_entropy_expr(c.body, model)
+            new_body = _canonicalize_entropy_expr(c.body, model, walk)
             if new_body is not c.body:
                 new_constraints.append(Constraint(new_body, c.sense, c.rhs, c.name))
                 changed = True

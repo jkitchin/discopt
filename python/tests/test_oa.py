@@ -5,6 +5,7 @@ import logging
 import discopt.modeling as dm
 import numpy as np
 import pytest
+from discopt.solvers import _gap
 
 ABS_TOL = 1e-3
 REL_TOL = 1e-3
@@ -42,7 +43,14 @@ def _assert_complete_optimal_result(result, expected_obj, var_names, abs_tol=ABS
     assert result.objective == pytest.approx(expected_obj, abs=abs_tol)
     assert result.bound is not None
     assert result.bound == pytest.approx(expected_obj, abs=abs_tol)
-    assert result.gap == pytest.approx(0.0, abs=1e-9)
+    # The solve's contract is a gap within its tolerance (default 1e-4), reported on
+    # the one #1585 formula -- not a gap of exactly zero. Since #1953 the OA/ECP
+    # master's bound is a rigorous NS bound, which can sit a few 1e-6 below the
+    # incumbent (CI measured 3.7e-7 relative on the Duran-Grossmann ECP solve).
+    assert result.gap is not None and result.gap <= 1e-4
+    assert result.gap == pytest.approx(
+        _gap.reported_gap(result.objective, result.bound, abs_tol=1e-6), rel=1e-9, abs=1e-15
+    )
     for name in var_names:
         assert name in result.x
 

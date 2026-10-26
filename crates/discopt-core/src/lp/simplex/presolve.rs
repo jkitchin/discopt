@@ -15,6 +15,7 @@
 
 use crate::lp::crossover::LpView;
 use crate::lp::simplex::sparse::SparseCols;
+use crate::presolve::directed::{add_up, div_down, div_up};
 use crate::presolve::fbbt::FEAS_TOL;
 
 const INF: f64 = 1e20;
@@ -95,6 +96,28 @@ pub fn tighten_bounds_csc(
     is_int: &[bool],
     tol: f64,
 ) -> PresolveResult {
+    tighten_bounds_csc_with_row(csc, m, n, l, u, b, is_int, tol, None)
+}
+
+/// [`tighten_bounds_csc`] plus one extra row `Σ_j w_j x_j <= rhs`, given as its
+/// dense coefficients `w` (length `n`) and `rhs`, propagated alongside `A x = b`.
+///
+/// The extra row is an inequality, so it is carried as an equality with a virtual
+/// slack column `s ∈ [0, INF]` (index `n`, dropped from the result). The MILP
+/// driver passes the objective cutoff `c x <= U` here (#1953): an epigraph column
+/// that no row bounds above is bounded by it.
+#[allow(clippy::too_many_arguments)]
+pub fn tighten_bounds_csc_with_row(
+    csc: &SparseCols,
+    m: usize,
+    n: usize,
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    is_int: &[bool],
+    tol: f64,
+    extra: Option<(&[f64], f64)>,
+) -> PresolveResult {
     let mut lo = l.to_vec();
     let mut hi = u.to_vec();
     let max_rounds = 8;
@@ -109,17 +132,33 @@ pub fn tighten_bounds_csc(
             row_nz[row_idx[idx]].push((j, vals[idx]));
         }
     }
+    let mut rhs = b.to_vec();
+    let int_ext;
+    let mut is_int = is_int;
+    if let Some((w, r)) = extra {
+        let mut nz: Vec<(usize, f64)> =
+            (0..n).filter(|&j| w[j] != 0.0).map(|j| (j, w[j])).collect();
+        nz.push((n, 1.0));
+        row_nz.push(nz);
+        rhs.push(r);
+        lo.push(0.0);
+        hi.push(INF);
+        int_ext = is_int
+            .iter()
+            .copied()
+            .chain(std::iter::once(false))
+            .collect::<Vec<_>>();
+        is_int = &int_ext;
+    }
 
-    for _round in 0..max_rounds {
+    let mut infeasible = false;
+    'rounds: for _round in 0..max_rounds {
         let mut changed = false;
-        for i in 0..m {
-            match fbbt_row(&row_nz[i], b[i], &mut lo, &mut hi, is_int, tol, round_tol) {
+        for (i, nz) in row_nz.iter().enumerate() {
+            match fbbt_row(nz, rhs[i], &mut lo, &mut hi, is_int, tol, round_tol) {
                 None => {
-                    return PresolveResult {
-                        l: lo,
-                        u: hi,
-                        infeasible: true,
-                    }
+                    infeasible = true;
+                    break 'rounds;
                 }
                 Some(c) => changed |= c,
             }
@@ -128,11 +167,12 @@ pub fn tighten_bounds_csc(
             break;
         }
     }
-
+    lo.truncate(n);
+    hi.truncate(n);
     PresolveResult {
         l: lo,
         u: hi,
-        infeasible: false,
+        infeasible,
     }
 }
 
@@ -161,6 +201,24 @@ fn contrib(aij: f64, lo_j: f64, hi_j: f64) -> (f64, bool, f64, bool) {
     }
 }
 
+/// Knuth's error-free transform: `a + b = s + e` exactly, with `s = fl(a + b)`.
+#[inline]
+fn two_sum(a: f64, b: f64) -> (f64, f64) {
+    let s = a + b;
+    let bb = s - a;
+    (s, (a - (s - bb)) + (b - bb))
+}
+
+/// `|a * x - p|` for `p = fl(a * x)`, bounded above: the FMA remainder is exact
+/// unless the product is near underflow, where a tiny absolute slack covers it.
+#[inline]
+fn prod_err(a: f64, p: f64, x: f64) -> f64 {
+    if a != 0.0 && x != 0.0 && p.abs() < 1.0e-290 {
+        return add_up(a.mul_add(x, -p).abs(), 4.0 * f64::MIN_POSITIVE);
+    }
+    a.mul_add(x, -p).abs()
+}
+
 /// One FBBT round over a single row, given its nonzeros `(col, coeff)`. Mutates
 /// `lo`/`hi` in place; returns `Some(changed)` or `None` if the box was proven empty.
 /// Matrix-representation-independent — the dense and CSC entries differ ONLY in how
@@ -180,11 +238,19 @@ fn fbbt_row(
     let mut sum_max_finite = 0.0;
     let mut n_min_inf = 0usize;
     let mut n_max_inf = 0usize;
-    // Largest magnitude entering the running sums. Floating-point accumulation
-    // error is ~eps * max_term, and each residual below is formed by SUBTRACTING
-    // one term from that sum, so this sets the absolute error scale of every
-    // derived bound. See `res_err`.
+    // Largest magnitude entering the running sums; sets the legacy error floor
+    // `res_err` below.
     let mut max_abs_term = b_i.abs();
+    // Exact rounding errors of the running sums, accumulated upward: every product's
+    // FMA remainder and every addition's `two_sum` remainder. The float sums alone
+    // are not enough -- `x0 + z + sum_{2000} y_i == 2^40` with `y_i <= 2^-14` loses
+    // every `y_i` (each below half an ulp of 2^40), and the old `8 eps max|term|`
+    // budget covered about one such rounding: presolve cut off the optimum and the
+    // native MILP route certified 0.998 for a model whose optimum is 0.8779 (#1955
+    // sweep). The tracked error is exactly what was lost (here 2000 * 2^-14), so a
+    // row whose sums are exact pays nothing.
+    let mut err_min = 0.0f64;
+    let mut err_max = 0.0f64;
     for &(j, aij) in row_nz {
         if aij == 0.0 {
             continue;
@@ -193,21 +259,24 @@ fn fbbt_row(
         if cmin_inf {
             n_min_inf += 1;
         } else {
-            sum_min_finite += cmin;
+            let pe = prod_err(aij, cmin, if aij > 0.0 { lo[j] } else { hi[j] });
+            let (sum, e) = two_sum(sum_min_finite, cmin);
+            sum_min_finite = sum;
+            err_min = add_up(add_up(err_min, e.abs()), pe);
             max_abs_term = max_abs_term.max(cmin.abs());
         }
         if cmax_inf {
             n_max_inf += 1;
         } else {
-            sum_max_finite += cmax;
+            let pe = prod_err(aij, cmax, if aij > 0.0 { hi[j] } else { lo[j] });
+            let (sum, e) = two_sum(sum_max_finite, cmax);
+            sum_max_finite = sum;
+            err_max = add_up(add_up(err_max, e.abs()), pe);
             max_abs_term = max_abs_term.max(cmax.abs());
         }
     }
-    // Error budget for `sum - term`. A residual is only meaningful to within the
-    // rounding error already baked into the sum; widening each derived bound by
-    // this keeps the contraction sound when a legitimately large (but finite)
-    // bound swamps the smaller terms. Negligible in the normal case: for terms of
-    // order 1e3 this is ~2e-13.
+    // Legacy budget for `sum - term`, kept as a floor so a row whose tracked error is
+    // smaller tightens exactly as before; the tracked error only ever widens.
     let res_err = 8.0 * f64::EPSILON * max_abs_term;
 
     for &(k, aik) in row_nz {
@@ -221,24 +290,45 @@ fn fbbt_row(
 
         let mut term_ub = INF;
         if res_min_finite {
-            let res_min = sum_min_finite - if k_min_inf { 0.0 } else { ck_min };
-            term_ub = b_i - res_min + res_err;
+            let (res_min, e1) = two_sum(sum_min_finite, -if k_min_inf { 0.0 } else { ck_min });
+            let (t, e2) = two_sum(b_i, -res_min);
+            let err = add_up(add_up(err_min, e1.abs()), e2.abs());
+            term_ub = add_up(t, err.max(res_err));
         }
         let mut term_lb = -INF;
         if res_max_finite {
-            let res_max = sum_max_finite - if k_max_inf { 0.0 } else { ck_max };
-            term_lb = b_i - res_max - res_err;
+            let (res_max, e1) = two_sum(sum_max_finite, -if k_max_inf { 0.0 } else { ck_max });
+            let (t, e2) = two_sum(b_i, -res_max);
+            let err = add_up(add_up(err_max, e1.abs()), e2.abs());
+            term_lb = -add_up(-t, err.max(res_err));
         }
 
+        // Quotients rounded outward.
         let (mut new_lo, mut new_hi) = if aik > 0.0 {
             (
-                if term_lb <= -INF { -INF } else { term_lb / aik },
-                if term_ub >= INF { INF } else { term_ub / aik },
+                if term_lb <= -INF {
+                    -INF
+                } else {
+                    div_down(term_lb, aik)
+                },
+                if term_ub >= INF {
+                    INF
+                } else {
+                    div_up(term_ub, aik)
+                },
             )
         } else {
             (
-                if term_ub >= INF { -INF } else { term_ub / aik },
-                if term_lb <= -INF { INF } else { term_lb / aik },
+                if term_ub >= INF {
+                    -INF
+                } else {
+                    div_down(term_ub, aik)
+                },
+                if term_lb <= -INF {
+                    INF
+                } else {
+                    div_up(term_lb, aik)
+                },
             )
         };
         if is_int[k] {
@@ -280,6 +370,45 @@ fn fbbt_row(
 
 #[cfg(test)]
 mod tests {
+
+    /// #1953: the extra `<=` row bounds a column no row of `A` touches (an OA
+    /// epigraph column under the incumbent cutoff), through a virtual slack that
+    /// is not returned. `A`: `x1 = 0.5`; extra row `2 x0 + x1 <= 3.5` -> `x0 <= 1.5`.
+    #[test]
+    fn extra_inequality_row_bounds_an_untouched_column() {
+        use super::super::sparse::SparseCols;
+        let sp = SparseCols::from_dense(&[0.0, 1.0], 1, 2);
+        let (l, u) = (vec![0.0, 0.0], vec![INF, 1.0]);
+        let w = [2.0, 1.0];
+        let r = tighten_bounds_csc_with_row(
+            &sp,
+            1,
+            2,
+            &l,
+            &u,
+            &[0.5],
+            &[false, false],
+            1e-9,
+            Some((&w, 3.5)),
+        );
+        assert!(!r.infeasible && r.l.len() == 2 && r.u.len() == 2);
+        assert!(r.u[0] >= 1.5 && r.u[0] <= 1.5 + 1e-12, "{}", r.u[0]);
+        let plain = tighten_bounds_csc(&sp, 1, 2, &l, &u, &[0.5], &[false, false], 1e-9);
+        assert_eq!(plain.u[0], INF);
+        // Under a cutoff nothing in the box satisfies, the box is proved empty.
+        let r = tighten_bounds_csc_with_row(
+            &sp,
+            1,
+            2,
+            &l,
+            &u,
+            &[0.5],
+            &[false, false],
+            1e-9,
+            Some((&w, 0.1)),
+        );
+        assert!(r.infeasible);
+    }
     use super::*;
 
     fn view<'a>(
@@ -308,6 +437,35 @@ mod tests {
         assert_eq!(r.l, l.to_vec());
         assert_eq!(&r.u[..4], &[1.0, 1.0, 1.0, 1.0]); // structural bounds intact
         assert!((r.u[4] - 9.0).abs() < 1e-9, "slack upper {}", r.u[4]); // s ≤ 9
+    }
+
+    #[test]
+    fn many_small_terms_next_to_a_huge_one_stay_in_the_bound() {
+        // x0 + z + sum_{2000} y_i == 2^40, z <= 2^40, y_i <= 2^-14. Every y_i is
+        // below half an ulp of 2^40, so the float activity sum loses all of them:
+        // the old `8 eps max|term|` budget derived x0 >= -0.00195, cutting off the
+        // feasible x0 = -2000 * 2^-14 = -0.1220703125 (z = 2^40, every y_i at its
+        // upper bound). The bound must enclose it.
+        let n_y = 2000;
+        let n = n_y + 2;
+        let mut a = vec![1.0; n];
+        a[0] = 1.0;
+        let c = vec![0.0; n];
+        let mut l = vec![0.0; n];
+        let mut u = vec![2.0f64.powi(-14); n];
+        l[0] = -1e6;
+        u[0] = 1e6;
+        u[1] = 2.0f64.powi(40);
+        let is_int = vec![false; n];
+        let r = tighten_bounds(
+            &view(&a, 1, n, &c, &l, &u),
+            &[2.0f64.powi(40)],
+            &is_int,
+            1e-9,
+        );
+        assert!(!r.infeasible);
+        let x0_min = -(n_y as f64) * 2.0f64.powi(-14);
+        assert!(r.l[0] <= x0_min, "x0 lower {} cuts off {}", r.l[0], x0_min);
     }
 
     #[test]
