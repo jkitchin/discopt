@@ -416,7 +416,8 @@ def free_column_lp_cert_enabled() -> bool:
     ``x18 <= 3340.8 x7 + 500 x8``, ...), so its root LP is bounded at the optimum 0,
     yet the in-house relaxer reported it ``uncertified``: with free columns the
     floating dual's reduced costs land on an open side and the Neumaier--Shcherbina
-    bound is ``-inf``. ``lp_milp_highs.solve_lp_std`` certifies the same LP at -1e-12.
+    bound is ``-inf``. ``lp_milp_highs.solve_lp_std`` certified the same LP at -1e-12
+    (but see the retraction below).
     Its bound is rigorous for ANY dual, so HiGHS's accuracy decides only whether a
     bound is found. Bound-changing (a node that had none gets one), so gated per
     CLAUDE.md section 5; read at call time.
@@ -429,6 +430,13 @@ def free_column_lp_cert_enabled() -> bool:
     bound -> optimal in 289 nodes / 13.3 s; ``ex7_3_3`` and ``ex9_1_1`` also gained);
     fewer nodes where both certify (``ex9_1_5`` 3 -> 1, ``ex9_1_8`` 5 -> 3), total
     wall 1494 -> 1424 s. ``=0`` restores the decline.
+
+    **Retracted in part (#1966):** the ``prolog`` gain did not survive a rigorous
+    reduced cost. At HiGHS's dual its column 7 (open above) has exact reduced cost
+    -1.7e-13; the pre-#1956 NS bound rounded it to 0.0 and skipped the column, so
+    that certificate was not a proof. With the enclosure the route declines and
+    ``exact_ns_bound`` does not converge; ``prolog`` is uncertified again. The
+    other gains (``ex7_3_3``, ``ex9_1_1``, ``ex9_1_5``, ``ex9_1_8``) still certify.
     """
     return os.environ.get("DISCOPT_FREE_COLUMN_LP_CERT", "1").strip().lower() not in (
         "0",

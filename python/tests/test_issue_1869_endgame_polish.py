@@ -19,6 +19,15 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
+_XFAIL_1966 = pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "#1966: prolog's root-LP certificate rested on a reduced cost of -1.7e-13 on an "
+        "open column rounding to 0.0; the rigorous NS bound (#1956) abstains there and "
+        "exact_ns_bound does not converge"
+    ),
+)
+
 FLAG = "DISCOPT_ENDGAME_POLISH"
 PROLOG = os.path.join(os.path.dirname(__file__), "data", "minlplib_nl", "prolog.nl")
 
@@ -34,6 +43,7 @@ def test_window_admits_only_a_nearly_closed_gap():
     assert not SV._endgame_polish_in_window(1.0, float("-inf"), 1e-4, 1e-6)
 
 
+@_XFAIL_1966
 def test_flag_on_certifies_prolog_through_the_polish(monkeypatch):
     monkeypatch.setenv(FLAG, "1")
     SV.ENDGAME_POLISH_STATS.clear()

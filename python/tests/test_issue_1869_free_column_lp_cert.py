@@ -22,6 +22,15 @@ from discopt.tightening import fbbt_box
 
 pytestmark = pytest.mark.unit
 
+_XFAIL_1966 = pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "#1966: prolog's root-LP certificate rested on a reduced cost of -1.7e-13 on an "
+        "open column rounding to 0.0; the rigorous NS bound (#1956) abstains there and "
+        "exact_ns_bound does not converge"
+    ),
+)
+
 FLAG = "DISCOPT_FREE_COLUMN_LP_CERT"
 PROLOG = os.path.join(os.path.dirname(__file__), "data", "minlplib_nl", "prolog.nl")
 OPT = 0.0  # MINLPLib minlplib.solu
@@ -34,6 +43,7 @@ def _root(flag: str, monkeypatch):
     return ML.MccormickLPRelaxer(m).solve_at_node(bt.lb, bt.ub)
 
 
+@_XFAIL_1966
 def test_flag_on_certifies_the_root_lp_without_crossing_the_optimum(monkeypatch):
     r = _root("1", monkeypatch)
     assert r.status == "optimal" and np.isfinite(r.lower_bound)
@@ -46,6 +56,7 @@ def test_flag_off_leaves_the_root_lp_uncertified(monkeypatch):
     assert r.status == "uncertified" and r.lower_bound is None
 
 
+@_XFAIL_1966
 def test_flag_on_certifies_prolog(monkeypatch):
     monkeypatch.setenv(FLAG, "1")
     # The bound is -1e-12; whether the incumbent lands inside the 1e-6 absolute gap
