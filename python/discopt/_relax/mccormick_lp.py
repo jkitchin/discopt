@@ -153,10 +153,13 @@ def _incremental_pool_extend_enabled() -> bool:
     wider than the incremental structure by appending its extra product / even-power
     columns (``PoolColumnExtension``) instead of cold-building the node.
 
-    Bound-changing (a node that cold-built now takes the fast path), so default-OFF
-    until the CLAUDE.md section-5 panel passes; recorded in
+    Graduated default-ON (2026-10-26) on the CLAUDE.md section-5 panel: 384 MINLPLib
+    instances <= 200 vars/cons, 30 s, interleaved; cert-clean (2,304 checks, 0
+    problems); fires on 8, where rbrock newly certifies (30 s limit -> 18.4 s) and
+    the wall drops 99.2 -> 78.7 s with node counts unchanged on the other 7. ``=0``
+    restores the cold build for a wider pool. Recorded in
     ``docs/dev/flag-retirement-audit.md``."""
-    return os.environ.get("DISCOPT_INCREMENTAL_POOL_EXTEND", "0") != "0"
+    return os.environ.get("DISCOPT_INCREMENTAL_POOL_EXTEND", "1") != "0"
 
 
 def _remap_pool_rows(a_rows, b_rows, root_idents, node_idents, ncol: int):
