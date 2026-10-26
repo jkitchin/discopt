@@ -586,6 +586,101 @@ pub fn ns_safe_bound_csc(
     .finish()
 }
 
+/// A repair of `y` whose reduced costs are safely signed on every open column of
+/// the box `[l, u]`, or `None` when sign projection plus scaling cannot reach one.
+/// Port of `lp_milp_highs.scaled_dual_for_open_columns` (#1729), used by the MILP
+/// driver's node bound (#1953).
+///
+/// [`ns_safe_bound_csc`] abstains as soon as an open column's enclosed reduced cost
+/// can take the open side's sign. A basic open column -- an inactive cut's slack,
+/// an OA epigraph column -- has reduced cost zero only up to the rounding in `y`,
+/// so it abstains on most node LPs of an OA master. Two sign-safe moves fix that:
+///
+/// 1. A logical column (`c_j = 0`, one nonzero `a` in row `i`, one side open)
+///    whose `r_j = -a y_i` sits on the open side gets `y_i = 0`, putting `r_j`
+///    exactly at zero. Scaling cannot change a sign, so this comes first.
+/// 2. `y` is scaled by the largest `t in (0, 1]` that leaves every open column's
+///    `r_j(t) = c_j - t (Aᵀy)_j` on its safe side by a margin above the rounding
+///    of `(Aᵀy)_j`. Scaling keeps the sign of every row multiplier.
+///
+/// Only a candidate: NS is a valid bound for every `y`, so this can only produce a
+/// weaker or an abstaining bound, never an invalid one.
+#[allow(clippy::too_many_arguments)]
+pub fn scaled_dual_for_open_columns_csc(
+    y: &[f64],
+    c: &[f64],
+    col_ptr: &[usize],
+    row_idx: &[usize],
+    vals: &[f64],
+    n: usize,
+    l: &[f64],
+    u: &[f64],
+) -> Option<Vec<f64>> {
+    let mut y = y.to_vec();
+    if !y.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let open_hi = |j: usize| u[j] >= REFINE_INF;
+    let open_lo = |j: usize| l[j] <= -REFINE_INF;
+    for j in 0..n {
+        if col_ptr[j + 1] - col_ptr[j] != 1 || c[j] != 0.0 || open_hi(j) == open_lo(j) {
+            continue;
+        }
+        let p = col_ptr[j];
+        let r_j = -vals[p] * y[row_idx[p]];
+        if (open_hi(j) && r_j < 0.0) || (open_lo(j) && r_j > 0.0) {
+            y[row_idx[p]] = 0.0;
+        }
+    }
+    let (mut t_lo, mut t_hi) = (0.0f64, 1.0f64);
+    let mut any_open = false;
+    for j in 0..n {
+        let (hi, lo) = (open_hi(j), open_lo(j));
+        if !hi && !lo {
+            continue;
+        }
+        any_open = true;
+        let (mut g, mut absg) = (0.0f64, 0.0f64);
+        for p in col_ptr[j]..col_ptr[j + 1] {
+            g += vals[p] * y[row_idx[p]];
+            absg += (vals[p] * y[row_idx[p]]).abs();
+        }
+        let nnz = (col_ptr[j + 1] - col_ptr[j]) as f64;
+        let m_j = 8.0 * (nnz + 2.0) * f64::EPSILON * (absg + c[j].abs());
+        let c_j = c[j];
+        if hi && lo {
+            // A free column needs r_j == 0 exactly; scaling cannot arrange that
+            // unless both terms already vanish.
+            if c_j == 0.0 && g == 0.0 {
+                continue;
+            }
+            return None;
+        }
+        if hi {
+            // need c_j - t g >= m_j
+            if g > 0.0 {
+                t_hi = t_hi.min((c_j - m_j) / g);
+            } else if g < 0.0 {
+                t_lo = t_lo.max((c_j - m_j) / g);
+            } else if c_j < m_j {
+                return None;
+            }
+        } else if g > 0.0 {
+            // open below: need c_j - t g <= -m_j
+            t_lo = t_lo.max((c_j + m_j) / g);
+        } else if g < 0.0 {
+            t_hi = t_hi.min((c_j + m_j) / g);
+        } else if c_j > -m_j {
+            return None;
+        }
+    }
+    if !(any_open && t_hi > 0.0 && t_lo <= t_hi) {
+        return None;
+    }
+    let t = t_hi.min(1.0);
+    Some(y.iter().map(|v| t * v).collect())
+}
+
 /// The primal-dual solution of a correction subproblem: `x` (length `n`) and the
 /// row duals `y` (length `m`) under the crate's dual convention (so that
 /// [`ns_safe_bound`] applied to `y` is a valid lower bound).
@@ -1394,6 +1489,41 @@ mod tests {
 
     /// The CSC safe bound is BIT-IDENTICAL to the dense one for arbitrary duals,
     /// on both a well-scaled and an ill-scaled (1e8) LP — same DD arithmetic.
+    /// #1953: a basic open column whose reduced cost is zero only up to the
+    /// rounding in `y` makes NS abstain; the open-column repair recovers a bound
+    /// that is still valid. `min x0 s.t. x0 = 1, x0 >= 0` (open above), dual one
+    /// ulp too large: `r_0 = 1 - y < 0` rides the open side.
+    #[test]
+    fn open_column_repair_recovers_a_valid_bound() {
+        let (cp, ri, v) = (vec![0usize, 1], vec![0usize], vec![1.0]);
+        let (c, b, l, u) = (vec![1.0], vec![1.0], vec![0.0], vec![REFINE_INF]);
+        let y = vec![1.0f64 + f64::EPSILON];
+        assert!(ns_safe_bound_csc(&y, &c, &cp, &ri, &v, 1, 1, &b, &l, &u).is_none());
+        let y2 = scaled_dual_for_open_columns_csc(&y, &c, &cp, &ri, &v, 1, &l, &u).unwrap();
+        let g = ns_safe_bound_csc(&y2, &c, &cp, &ri, &v, 1, 1, &b, &l, &u).unwrap();
+        // Valid (<= 1 exactly) and tight up to the scaling margin (measured 2e-12).
+        assert!(g <= 1.0 && g > 1.0 - 1e-10, "{g}");
+        // A free column cannot be repaired by scaling: refuse, do not invent a bound.
+        let free_l = vec![-REFINE_INF];
+        assert!(scaled_dual_for_open_columns_csc(&y, &c, &cp, &ri, &v, 1, &free_l, &u).is_none());
+        // A logical column (c = 0, one nonzero) on its open side is projected to
+        // y_i = 0, which scaling alone could not do: `x1 - s = 0`, s >= 0 open above,
+        // y = -1e-18 gives r_s = y < 0.
+        let (cp, ri, v) = (vec![0usize, 1, 2], vec![0usize, 0], vec![1.0, -1.0]);
+        let (c, b, l, u) = (
+            vec![0.0, 0.0],
+            vec![0.0],
+            vec![0.0, 0.0],
+            vec![1.0, REFINE_INF],
+        );
+        let y = vec![-1e-18];
+        assert!(ns_safe_bound_csc(&y, &c, &cp, &ri, &v, 1, 2, &b, &l, &u).is_none());
+        let y2 = scaled_dual_for_open_columns_csc(&y, &c, &cp, &ri, &v, 2, &l, &u).unwrap();
+        assert_eq!(y2, vec![0.0]);
+        let g = ns_safe_bound_csc(&y2, &c, &cp, &ri, &v, 1, 2, &b, &l, &u).unwrap();
+        assert!(g <= 0.0 && g > -1e-10, "{g}");
+    }
+
     #[test]
     fn ns_safe_bound_csc_matches_dense() {
         // Well-scaled small LP.

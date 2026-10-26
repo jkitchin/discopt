@@ -647,10 +647,13 @@ def _build(model, bounds) -> dict:
     # 5.2874 on a model whose optimum is 5 + ln 2. An unproven row takes the
     # nonlinear path, whose convexity check and OA cuts are valid for linear rows too.
     lin_rows = (n_bad == 0) & proven[1]
-    if lin_rows.all():
+    if (n_bad == 0).all():
         # Same refusal as the ``not nl_specs`` one below (#1346): every row is
         # linear, so ``nl_specs`` would stay empty. Asked here so an LP/MILP never
-        # reaches the per-row densification.
+        # reaches the per-row densification. The SAMPLED test decides this one, not
+        # ``lin_rows``: refusing needs no proof (a declined model goes to a sound
+        # route), and the degree analysis does not prove ``x + 0.0*(x+y)**2`` linear
+        # although the exact classifier routes it to the LP/MILP route (A-21).
         raise NotConvexKernel("no nonlinear row: an LP/MILP belongs to the LP/MILP route")
     g0 = np.asarray(ev.evaluate_constraints(xa), float)
     const = g0 - np.asarray(ja @ xa, float).ravel()

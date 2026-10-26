@@ -30771,16 +30771,59 @@ def _solve_lp_matrix(
             b_eq=b_eq,
         )
 
+        # #1953: the engine's OPTIMAL label is floating-point evidence -- a reduced
+        # cost misjudged as noise ended a simplex at a vertex 0.25 above the optimum
+        # with ``bound`` equal to it. Certify the point as the HiGHS route does: the
+        # NS safe bound from the engine's own dual over the problem it solved.
+        _deadline = None if time_limit is None else t_start + float(time_limit)
+        _obj_min, _ns, _prov, _why = _native_lp_ns_certificate(
+            np.asarray(lp_data.c[:n_orig], dtype=np.float64),
+            A_ub,
+            b_ub,
+            A_eq,
+            b_eq,
+            bounds,
+            np.asarray(result.x[:n_orig], dtype=np.float64),
+            result.dual_values,
+            float(lp_data.obj_const),
+            _deadline,
+        )
+        _maximize = model._objective.sense == ObjectiveSense.MAXIMIZE
+        _certified = _native_lp_certified(_obj_min, _ns)
+        _lp_stats: dict[str, float] = {"lp/iters": float(result.iterations)}
+        if _prov:
+            _lp_stats["lp/bound_provenance_" + _prov.replace("-", "_")] = 1.0
+        if _ns is None:
+            _lp_stats["lp/ns_bound_missing"] = 1.0
+            _bound = None
+        else:
+            _lp_stats["lp/ns_gap"] = float(_obj_min - _ns)
+            _b = min(_ns, _obj_min)
+            _bound = -_b if _maximize else _b
+        if not _certified:
+            logger.warning(
+                "%s LP optimum not certified (#1953): %s; reporting 'feasible'.",
+                engine,
+                "no NS safe bound from its dual"
+                if _ns is None
+                else f"NS safe bound {_ns:.12g} is {_obj_min - _ns:.3g} below the objective",
+            )
+            if _why:
+                logger.info("%s LP exact dual correction: %s", engine, _why)
         sr = SolveResult(
-            status="optimal",
+            status="optimal" if _certified else "feasible",
             objective=obj_val,
-            bound=obj_val,
-            # #1244: a local minimum of a PROVED-convex problem is the global
-            # minimum, so the incumbent is simultaneously a valid lower bound.
-            # That is the same premise that licenses returning after one solve.
-            bound_valid=True,
-            bound_source="convex_proof",
-            gap=_optimal_relative_gap(obj_val),
+            bound=_bound,
+            # #1953: the bound is the NS safe bound from the engine's dual (capped at
+            # the objective), never the objective on the engine's word.
+            bound_valid=_bound is not None,
+            bound_source="lp_dual" if _bound is not None else None,
+            gap=(
+                _optimal_relative_gap(obj_val)
+                if _certified
+                else _gap_mod.reported_gap(obj_val, _bound)
+            ),
+            gap_certified=_certified,
             x=_unpack_solution(model, np.asarray(result.x[:n_orig])),
             wall_time=wall_time,
             node_count=0,
@@ -30791,10 +30834,10 @@ def _solve_lp_matrix(
             bound_duals_lower=bdl,
             bound_duals_upper=bdu,
         )
-        sr.convex_fast_path = True
+        sr.convex_fast_path = _certified
         # #1754: the engine's iteration count, under the HiGHS route's key, so the
         # two routes can be compared.
-        sr.solver_stats = {**(sr.solver_stats or {}), "lp/iters": float(result.iterations)}
+        sr.solver_stats = {**(sr.solver_stats or {}), **_lp_stats}
         return sr
     if result.status == SolveStatus.INFEASIBLE:
         return SolveResult(
@@ -30855,6 +30898,59 @@ def _solve_lp_matrix(
     if result.status == SolveStatus.TIME_LIMIT:
         return SolveResult(status="time_limit", wall_time=wall_time)
     return None
+
+
+def _native_lp_ns_certificate(c, A_ub, b_ub, A_eq, b_eq, bounds, x, y, obj_const, deadline):
+    """``(objective, ns_bound, provenance, why)`` for a native LP engine's point (#1953).
+
+    Rebuilds the problem the engine solved -- ``min cᵀx + obj_const`` over
+    ``A_ub x <= b_ub``, ``A_eq x = b_eq`` and ``bounds`` -- in standard form, one
+    slack per inequality row, and runs :func:`lp_milp_highs.certify_lp_dual` on the
+    engine's row dual (HiGHS convention, inequality rows first: the shared
+    ``solve_lp`` contract). Everything is in the minimize sense. ``ns_bound`` is
+    ``None`` when the engine returned no dual or the bound is ``-inf``.
+    """
+    import scipy.sparse as _sp
+
+    from discopt.solvers.lp_milp_highs import StdForm, certify_lp_dual
+
+    n = c.shape[0]
+    obj = float(c @ x) + obj_const
+    m_ub = 0 if A_ub is None else A_ub.shape[0]
+    m_eq = 0 if A_eq is None else A_eq.shape[0]
+    if y is None or np.asarray(y).shape != (m_ub + m_eq,):
+        return obj, None, "", ""
+    blocks = []
+    if m_ub:
+        blocks.append([_sp.csr_matrix(A_ub), _sp.identity(m_ub, format="csr")])
+    if m_eq:
+        blocks.append([_sp.csr_matrix(A_eq)] + ([_sp.csr_matrix((m_eq, m_ub))] if m_ub else []))
+    A = _sp.bmat(blocks, format="csc") if blocks else _sp.csc_matrix((0, n))
+    b = np.concatenate(
+        [np.asarray(b_ub, dtype=np.float64).ravel() if m_ub else np.zeros(0)]
+        + [np.asarray(b_eq, dtype=np.float64).ravel() if m_eq else np.zeros(0)]
+    )
+    lo = np.array([bd[0] for bd in bounds], dtype=np.float64)
+    hi = np.array([bd[1] for bd in bounds], dtype=np.float64)
+    lo = np.where(np.isnan(lo), -_CONSTRAINT_INF, lo)
+    hi = np.where(np.isnan(hi), _CONSTRAINT_INF, hi)
+    sf = StdForm.from_arrays(
+        np.concatenate([c, np.zeros(m_ub)]),
+        A,
+        b,
+        np.concatenate([lo, np.zeros(m_ub)]),
+        np.concatenate([hi, np.full(m_ub, _CONSTRAINT_INF)]),
+        obj_const=obj_const,
+    )
+    ns, prov, why = certify_lp_dual(np.asarray(y, dtype=np.float64), sf, obj, deadline=deadline)
+    return obj, ns, prov, why
+
+
+def _native_lp_certified(obj: float, ns: float | None) -> bool:
+    """The HiGHS route's acceptance test: ``obj - ns <= CERT_ABS + CERT_REL |obj|``."""
+    from discopt.solvers.lp_milp_highs import CERT_ABS, CERT_REL
+
+    return ns is not None and obj - ns <= CERT_ABS + CERT_REL * abs(obj)
 
 
 def _declared_box_retry_applies(model: Model) -> bool:
@@ -34311,11 +34407,14 @@ def _solve_node_lp_simplex(
     B&B: it cannot cheaply warm-start across a branch, returns the analytic
     centre (so integer coordinates come back smeared and need purification), and
     yields no basis. The simplex reaches an exact basic-feasible vertex, so its
-    objective is a rigorous node lower bound (no trust-gate decertification),
     integer coordinates are exact, and node throughput is far higher (issue: the
     POUNCE-IPM MILP node path was ~300 nodes/s vs the simplex's tens of
     thousands). Differentiability is unaffected — it is a post-solve IFT layer
     over (x*, λ*), independent of which engine produced them.
+
+    The bound is NOT the vertex objective: that is only as good as the simplex's
+    optimality test (#1953). It is the NS safe bound from the simplex's dual,
+    through the same ladder the HiGHS LP route certifies with.
 
     Same contract as :func:`_solve_node_lp_pounce`: returns
     ``(lower_bound, solution_over_n_vars, "optimal")``,
@@ -34377,8 +34476,27 @@ def _solve_node_lp_simplex(
         if not feasible:
             logger.debug("simplex node solution violates its rows; rejecting")
             return None
-        bound = float(res.objective) + float(lp_data.obj_const)
-        return (bound, x_sol[:n_vars], "optimal")
+        # #1953: the node bound is the NS safe bound from the simplex's own dual,
+        # not its objective: a simplex that stops at a non-optimal vertex reports
+        # an objective ABOVE the node's LP minimum, and fathoming on it can prune
+        # the optimum. No safe bound -> the node is not settled (``None``: the
+        # caller recovers or decertifies), exactly as for a failed solve.
+        obj_min, ns, _prov, _why = _native_lp_ns_certificate(
+            np.asarray(lp_data.c[:n_orig], dtype=np.float64),
+            A_ub_m,
+            b_ub_m,
+            A_eq_m,
+            b_eq_m,
+            bounds,
+            x_sol,
+            res.dual_values,
+            float(lp_data.obj_const),
+            None if time_limit is None else t_start + float(time_limit),
+        )
+        if ns is None:
+            logger.debug("simplex node LP has no NS safe bound; not settled (#1953)")
+            return None
+        return (min(ns, obj_min), x_sol[:n_vars], "optimal")
     if res.status == SolveStatus.INFEASIBLE:
         return (_INFEASIBILITY_SENTINEL, None, "infeasible")
     return None
