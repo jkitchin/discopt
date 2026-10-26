@@ -11659,3 +11659,68 @@ but not zero. That residue is the engine's stage-sized budget, which `ex1265` ne
 The restart on `dense_n18_s1`/`n20_s1` (un-lifted slice + continuation) is
 untouched. #1959 was narrowed to the stall exit (owner's direction) and both
 remaining costs moved to #1963, with the measurements above as its ruled-out list.
+
+## 87. #1963: removing the race's remaining overhead — retired as measured (2026-10-26)
+
+**Goal (#1963).** §86 left the lift race two costs where the lift loses: the lift's
+head start (~2.8 s: lift setup plus the MILP engine's stall budget, which `ex1265`
+needs) and the restart of the un-lifted arm when it outgrows its slice. Bar: a dense
+QP race within ~1.5x of the better arm alone, and no corpus lift win slower beyond
+2 sd and 1.2x. **Retired by the owner after the entry experiments below; no code
+change.** Any lift-first schedule pays the head start before it can switch, so the
+bar needs either a predictor or the un-lifted arm running alongside the lift; both
+were measured and neither meets it.
+
+**Predictor: lifted LP root vs un-lifted root — falsified.** On the 42 panel
+instances the un-lifted root bound is at least as tight as the lifted LP root on
+*every* instance, including `ex1263`–`ex1266`, which the lift wins (19.10 vs 19.06 on
+`ex1263`). The size of the difference separates nothing: `prob02`, the lift's biggest
+win (0.10 vs 4.2 s), has a lifted root of 6,898 against 110,244; `nvs11`/`nvs12` have
+similar ratios and tie. The lift wins on combinatorics, not relaxation strength. (The
+cross-formulation counterpart of #1236's lifted-root-vs-optimum finding.)
+
+**Where concurrent contention comes from.** Lift arm alone vs next to a background
+load (`ex1263` / `ex1265` / `ex1266` / `nvs02`, s):
+
+| load | | | | |
+|---|---:|---:|---:|---:|
+| none | 1.05 | 1.94 | 1.35 | 0.26 |
+| one thread holding the GIL | 1.72 | 3.20 | 2.80 | 0.84 |
+| one GIL-free CPU burner | 1.12 | 2.03 | 1.64 | 0.28 |
+| three GIL-free CPU burners | 2.12 | 3.11 | 2.46 | 0.41 |
+
+The un-lifted arm uses about one core (CPU/wall 1.06–1.30) and is mostly Python. The
+GIL cost is CPython's **convoy effect**, not the engine: `solve_milp_csc_py` runs
+inside `allow_threads` and barely moves under the hog (`ex1266` 1.3 → 1.45–1.77 s),
+but the lift's non-engine Python goes 0.2 → 1.37 s (`ex1266`) and 0.13 → 0.82 s
+(`nvs02`), because each of its many short GIL-releasing calls hands the GIL to the
+other thread for a full 5 ms switch interval. `sys.setswitchinterval(5e-4)` only
+partly helps (`ex1266` 1.5 → 2.0 s, `nvs02` 0.28 → 0.45 s) and is process-global.
+
+**Concurrent designs** ("first cert" assumes the loser is cancelled instantly, which
+neither engine supports today, so these are optimistic lower bounds):
+
+| | better arm alone | threads (un-lifted starts at lift engine entry) | spawned subprocess (cancel = kill) |
+|---|---:|---:|---:|
+| dense n=15 s0 | 1.28 s | 1.86 s (1.45x) | 2.13 s (1.66x) |
+| dense n=15 s1 | 1.21 s | 1.58 s (1.31x) | 1.90 s (1.57x) |
+| dense n=18 s0 | 1.89 s | 2.76 s (1.46x) | 2.87 s (1.52x) |
+| dense n=18 s1 | 7.66 s | 9.10 s (1.19x) | 9.29 s (1.21x) |
+| `arrqp_n15` | 1.11 s | 1.79 s (1.61x) | 1.98 s (1.78x) |
+| `ex1263` | 1.03 s | 1.24 s (1.20x) | 1.29 s (1.25x) |
+| `ex1266` | 1.42 s | **2.81 s (1.98x)** | 1.65 s (1.16x) |
+| `nvs02` | 0.26 s | 0.36 s (1.38x) | 0.35 s (1.35x) |
+
+Threads meet the dense bar but tax corpus lift wins up to 2x (convoy effect on the
+lift's post-engine Python), and would also need cancel tokens in `milp_driver.rs` and
+`spatial_tree.rs`, checkpoints in the un-lifted arm's Python and a thread-safety audit
+of `solve_model`. A subprocess avoids the GIL, but the child's 0.46–0.72 s startup
+(spawn plus import) both delays the dense answer and taxes the lift while it runs, and
+a `from_nl` model must be re-parsed in the child (its pickle carries a marker that
+refuses use).
+
+**What would reopen it.** An un-lifted arm whose pre-kernel work is far cheaper or
+GIL-free: dense n=15 s0's un-lifted solve is 1.28 s, of which 0.44 s is Rust, and
+`ex1265`'s is 8.7 s, of which 5.6 s is the kernel's Python seed heuristics
+(`integer_local_search` sub-NLPs). With that, the thread design above is the one to
+re-measure.
