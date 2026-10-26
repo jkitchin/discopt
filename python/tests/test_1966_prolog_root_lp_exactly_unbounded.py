@@ -12,6 +12,10 @@ The pre-#1956 certificate (``prolog`` "optimal" with ``gap_certified=True``) cam
 from a Neumaier-Shcherbina bound that rounded column 7's reduced cost to ``0.0``. It
 was never a proof. This file pins the ray so that no later change "fixes"
 ``exact_ns_bound`` into certifying it.
+
+#1975 tried the relaxation-side fix: RLT of the shared-budget rows against the open
+factors' lower bounds. The ray survives it, exactly, on the FBBT and root-OBBT boxes
+(``test_1975_prolog_rlt_ray_survives.py``; performance-plan section 89).
 """
 
 from __future__ import annotations

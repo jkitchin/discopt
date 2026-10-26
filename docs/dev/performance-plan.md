@@ -11849,3 +11849,65 @@ node bound stays the Neumaier–Shcherbina bound on the final LP's duals, and
 
 Python: `test_1962_kernel_convex_cuts.py`. Its slow tests certify nvs23 and nvs24 on
 defaults at 120 s.
+
+## 89. #1975: RLT against an unbounded factor's lower bound does not close prolog's root ray (falsified 2026-10-26)
+
+**Question.** #1966 pinned an exact negative-cost recession ray of `prolog`'s root
+McCormick LP: `c^T d = 3712 - fl(3340.8) - fl(371.2) = -1.7053e-13`. #1975 asked two
+things. Does the nonlinear model itself follow the ray? And does hypothesis H remove
+it? H multiplies each shared-budget row by the lower-bound factor `(x_k - l_k) >= 0`
+of the product factor `x_k` that is unbounded above (`x0`, `x1`).
+
+**Step 1: the nonlinear model is bounded below, by a thin margin.** Divide every open
+column by `T = x7 + x8`, with `a = x7/T` and `u_k = x_k/T`. The bounded block
+(`x2..x5`, `x9..x17`) stays O(1), and C7..C10 lose their constants. The asymptotic
+objective slope is `cap(a) - P`, where `cap = 3712 a + 5000 (1-a)` and
+`P = u0 (x2+x3) + u1 (x4+x5)`. If the minimum is positive, `f -> +inf` along every
+unbounded sequence. If `T` stays bounded, `x18`, `x19`, `x0` and `x1` are bounded
+too, and so is `f`.
+- SCIP, solved globally: `min (cap - P) = +0.034901`, status optimal, primal = dual.
+  It is attained at `a = 0.4998`, `u = (2.2708, 4.9847)`.
+- Cross-check with HiGHS LPs at fixed `(u0, u1)`, where the limit is an LP: a 120x120
+  grid gives 18.54. Three zooms on the ridge give 0.684, 0.0737 and 0.0403, which
+  approach SCIP's value from above.
+
+Both scripts are in `docs/dev/data/1975-prolog-limit/`. So prolog is **not**
+uncertifiable over its doubles. But the margin is about 0.035 against a capacity of
+about 4000, i.e. ~1e-5 relative.
+
+**Step 2: H is falsified on the probe.** `test_1975_prolog_rlt_ray_survives.py`
+builds the RLT rows generically from the captured root `MilpRelaxationModel`. It
+names no prolog row or column. A row qualifies when every column it touches has a
+finite box. A factor qualifies when it is a product factor that is open above. Where
+a product `x_k x_j` was not lifted, it is lifted with McCormick in `x_k`'s
+lower-bound factor only. The exact ray search is then re-run: a float vertex,
+recomputed in rationals with active-set repair, then every row checked exactly.
+
+| box | H as stated (2 rows) | every finite-box row x every open factor (10 rows) |
+|---|---|---|
+| FBBT | exact ray, `c^T d = -1.7053e-13` | exact ray, same cost |
+| FBBT + root `run_obbt` | exact ray, same cost | exact ray, same cost |
+
+A mutation that prices `x7` 1e-9 higher, so that the binary excess is gone, makes
+all four arms fail with `c^T d = +1.0e-9`, so the probe is not vacuous. An
+independent hand-built limit LP (`limit_rlt.py`, `exact_ray.py` in the same
+directory) gives the same verdict. It covers the bare
+McCormick LP, H, and the full family, on both boxes. Its slope reaches `0` in every
+case, and an exact rational ray is found for each of the six with 288 exact row
+checks.
+
+**Why.** In the scaled limit the RLT rows bind `x0*x_j` to `u0 * z0` and `x1*x_j` to
+`u1 * z1`. Here `z0` and `z1` are two **independent** points of the bounded
+polytope. The nonlinear model forces `z0 = z1 = x`. The 0.035 margin lives entirely
+in that shared point: with the points decoupled, both `x2 + x3` and `x4 + x5` can
+take their individual maxima, and the slope reaches 0. No bound-factor RLT of
+level 1 couples them. Doing so needs the products `x0*x1*x_j`, whose two factors are
+both open.
+
+**Kill criterion met at step 2.** No pass ships, and no flag or audit row is added.
+Step 3 (the 120-instance class panel) was not run, because H fails on the probe it
+was designed for. #1975 is closed with this record. A relaxation that certifies
+prolog would have to keep the coupling `z0 = z1`, for example through a
+perspective/projective reformulation in `1/T` that turns the recession problem into
+a bounded one. It would also have to resolve a ~1e-5 relative margin. That is new
+work, not this hypothesis.
