@@ -563,7 +563,7 @@ def test_run_script_launches_main_without_runpy_warning(tmp_path):
     assert "RuntimeWarning" not in proc.stderr
 
 
-class _FakeGmo:
+class _FakeGmoModule:
     """Just enough of the gamsapi GMO module for ``_GmoAdapter``'s name lookups."""
 
     def __init__(self, dict_path):
@@ -601,7 +601,7 @@ def test_gmo_adapter_skips_name_lookups_without_dictionary(tmp_path, has_file, s
     dict_file = tmp_path / "gamsdict.dat"
     if has_file:
         dict_file.write_bytes(b"")
-    gmo = _FakeGmo(str(dict_file) if set_path else "")
+    gmo = _FakeGmoModule(str(dict_file) if set_path else "")
     ad = _GmoAdapter(object(), gmo)
     if has_file and set_path:
         assert (ad.var_name(1), ad.row_name(0)) == ("x_1", "e_0")
