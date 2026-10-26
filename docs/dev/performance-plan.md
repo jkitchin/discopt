@@ -11936,3 +11936,66 @@ nodes; ON optimal in 11,921 nodes, 23 s.
 
 **#1970 status.** nous1 certifies at 120 s (Done item 1); the flag passed the
 section 5 panel, on the merged base too, and graduated (Done item 2).
+
+## 94. #1995: the kernel's cutoff propagation collapsed node boxes to slivers (2026-10-26)
+
+**Symptom.** `gdp.simplex` of `either_or([[x >= 4, y >= 1], [y >= 6, x >= 1]])`
+(minimise `x + y`; 10 continuous columns) ended `time_limit` at 30 s after ~59k
+nodes with bound 4.9721, where the source model certifies 5.0 at the root. The
+issue's candidate causes (weight branching, envelope refinement on the weight
+products) were measured first and are **not** the cause:
+
+* The Python tree (`DISCOPT_NATIVE_SPATIAL_KERNEL=0`) certifies in 3 nodes; the
+  kernel never does. A box of +-0.01 around the optimum still took the kernel 14k
+  nodes, so the stall is not in x/y.
+* 4.9721 is not a tree bound at all: the kernel exits *bound-less* and the number
+  is #933's root-relaxation fallback. Every second node LP was undecided (2,257 of
+  4,437 in a 4 s run; 38 of the first 40 `numerical`).
+* Bisecting the kernel's options on the captured spec: `initial_incumbent` alone
+  turns the root from `bounded 4.99999995` to `undecided`, and
+  `run_propagation=false` certifies at node 1. The node FBBT applies the cutoff
+  `x + y <= 5 + 1.5e-8` against `x >= 4, y >= 1`, leaving x/y with widths
+  2.0e-8/1.7e-8 and two weights ~5e-9. The McCormick LP over that box ends
+  `Numerical` (its objective at bail 4.99999999999993); the undecided arm branches
+  a weight column and every child inherits the sliver.
+
+This is #1983's class, a cutoff at the LP optimum collapsing the box, reached by a
+different door: #1983 fixed the Python-side cutoff-OBBT box, and its root probe
+runs without the incumbent, so it reports the box decided.
+
+(An aside measured on the way: rewriting each clause `sum_j l_j p_j <= 0` as
+`p_k + sum_{j != k} l_j (p_j - p_k)` under `sum_j l_j = 1` makes two of the four
+clauses linear and certifies in 7 nodes. It sidesteps the sliver on this instance
+only; not pursued.)
+
+**Fix: `DISCOPT_KERNEL_UNDECIDED_RETRY`** (`SpatialTreeConfig::undecided_unpropagated_retry`).
+An undecided node LP over a propagation-tightened box is re-solved over the box
+the node was pushed with. That box contains the region (propagation removes only
+points infeasible or no better than the incumbent), so its bound, Farkas proof and
+McCormick-tight points hold for the region; the node is solved exactly as
+`run_propagation=false` would solve it. Captured spec: 22,190 nodes / 11,133
+undecided / bound-less at 10 s -> optimal at node 1. Fixed boxes with the
+incumbent at the box optimum: 12 of 16 roots undecided OFF, all 16 decided ON,
+every ON bound <= the closed-form box optimum and >= OFF.
+
+**Section 5 panels** (30 s, interleaved, every incumbent `verify_point`-ed):
+
+* `issue1944_rlt_panel.py --with-corpus --on-env DISCOPT_KERNEL_UNDECIDED_RETRY=1
+  --fired-stat tree/prop_retries`, 271 instances, fires on 4: cert-clean, 1,626
+  checks, 0 problems; certified +nous1; tighter 30 s bounds on the other three
+  (ex5_2_5 -8030.0 -> -8024.4, tln6 15.2187 -> 15.2225, wastewater15m1 2269.6 ->
+  2283.8). Re-run interleaved on an idle machine, 2 reps: nous1 OFF time limit
+  (30.8/30.7 s), ON optimal (24.0/24.3 s, 20 retries). The listed loss
+  `pointpack04` routes to the Python tree (probe absent in both arms); both arms
+  certify in 29 nodes / 3.5-4.0 s on re-run -- its ON row ran while a test suite
+  loaded the machine.
+* `issue1995_gdp_panel.py`, 54 cases (every serialize bound-neutral case plus
+  jobshop, ex1_linan_2023, small_batch under `gdp_method="simplex"`): cert-clean,
+  424 checks, 0 problems; fires on #1995's case only (time limit -> optimal);
+  the other 53 node-identical (171 -> 171); total wall 61.5 -> 34.9 s.
+
+Graduated default ON; `=0` restores the legacy undecided arm. Note: since #1993
+the `issue1944_rlt_panel.py` subprocess called `_solve_one` without its new
+`stat` argument, so it would have crashed every row; fixed here (it now forwards
+`--fired-stat`).
+

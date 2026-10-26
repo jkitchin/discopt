@@ -55,7 +55,7 @@ use std::time::{Duration, Instant};
     pseudocost_reliability=0, warm_start_children=false, warm_flip_boxed=false,
     node_observer=None, cut_rounds_root=0, cut_rounds_node=0, max_cuts_per_round=50,
     int_fix_probe=false, spatial_score=false, spatial_pscost_weight=0.0,
-    spatial_midpull=0.0,
+    spatial_midpull=0.0, undecided_unpropagated_retry=false,
 ))]
 pub fn solve_spatial_tree_py<'py>(
     py: Python<'py>,
@@ -117,6 +117,7 @@ pub fn solve_spatial_tree_py<'py>(
     spatial_score: bool,
     spatial_pscost_weight: f64,
     spatial_midpull: f64,
+    undecided_unpropagated_retry: bool,
 ) -> PyResult<Bound<'py, PyDict>> {
     let c = c.as_slice()?;
     let integrality = integrality.as_slice()?;
@@ -368,6 +369,7 @@ pub fn solve_spatial_tree_py<'py>(
         spatial_score,
         spatial_pscost_weight,
         spatial_midpull,
+        undecided_unpropagated_retry,
     };
     // The node LP's start basis (`SimplexOptions::cold_dual_start`, default OFF,
     // set from `DISCOPT_LP_COLD_DUAL_START`). Everything else is the default.
@@ -593,5 +595,7 @@ pub fn solve_spatial_tree_py<'py>(
     out.set_item("n_cuts_added", res.n_cuts_added)?;
     out.set_item("n_int_probes", res.n_int_probes)?;
     out.set_item("n_int_probe_improvements", res.n_int_probe_improvements)?;
+    out.set_item("n_prop_retries", res.n_prop_retries)?;
+    out.set_item("n_prop_retry_decided", res.n_prop_retry_decided)?;
     Ok(out)
 }

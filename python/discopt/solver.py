@@ -2474,6 +2474,10 @@ def _try_native_spatial_kernel(
     # #1962: the integral-point probe (default ON; ``=0`` opts out; see the helper).
     if _kernel_int_probe_enabled():
         solve_kwargs["int_fix_probe"] = True
+    # #1995: re-solve an undecided node LP over its pre-propagation box (default ON;
+    # ``=0`` opts out; see the helper).
+    if _kernel_undecided_retry_enabled():
+        solve_kwargs["undecided_unpropagated_retry"] = True
     if _bound_reserve > 0.0:
         solve_kwargs["bound_time_extension_s"] = float(_bound_reserve)
     # #917: hand the kernel the caller's withheld #844 reserve so it can reclaim
@@ -2854,6 +2858,10 @@ def _try_native_spatial_kernel(
     _native_stats["tree/int_probe_improvements"] = float(
         int(res.get("n_int_probe_improvements") or 0)
     )
+    # #1995: pre-propagation re-solves of undecided node LPs
+    # (``DISCOPT_KERNEL_UNDECIDED_RETRY``) and how many decided; 0 when off.
+    _native_stats["tree/prop_retries"] = float(int(res.get("n_prop_retries") or 0))
+    _native_stats["tree/prop_retry_decided"] = float(int(res.get("n_prop_retry_decided") or 0))
 
     # #1236: root-node certification metrics, mapped out of the kernel's internal
     # minimize convention with the same ``sign * (value + offset)`` the incumbent
@@ -11471,6 +11479,49 @@ def _kernel_int_probe_enabled() -> bool:
     instances (1-3 probes each). It gains nvs24 (time limit at 29.8 s -> certified
     at 16.5 s, 23,464 -> 415 nodes) and loses none. ``performance-plan.md`` section 88."""
     return os.environ.get("DISCOPT_KERNEL_INT_PROBE", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
+
+
+def _kernel_undecided_retry_enabled() -> bool:
+    """#1995: ``DISCOPT_KERNEL_UNDECIDED_RETRY`` for the native spatial kernel
+    (``SpatialTreeConfig::undecided_unpropagated_retry``).
+
+    **Graduated (default ON, 2026-10-26, #1995); ``=0`` opts out** and restores
+    the tree before it (an undecided node is branched over its propagated box).
+
+    When a node LP decides nothing over a box that the node's FBBT propagation
+    tightened, the kernel re-solves the node over the box it was pushed with and
+    uses that verdict. The case it exists for: an incumbent at the relaxation
+    optimum makes the objective cutoff collapse the box to a sliver (#1995, the
+    ``gdp.simplex`` lowering of a two-disjunct ``either_or``: ``x + y <= 5 + 1.5e-8``
+    against ``x >= 4, y >= 1`` leaves widths ~2e-8). The McCormick LP over that box
+    ends ``Numerical``, the undecided arm branches a weight column, and every child
+    inherits the same sliver, so the search never fathoms (22,190 nodes, 11,133
+    undecided, bound-less at 10 s on the captured spec; with the retry, optimal at
+    node 1). The pre-propagation box contains the node's region, so its bound,
+    emptiness proof and tight points hold for the region. Bound-changing only at a
+    node whose first LP is undecided; everywhere else the tree is unchanged.
+    Probe: ``tree/prop_retries`` / ``tree/prop_retry_decided``.
+
+    Section 5 panels (30 s, interleaved, every incumbent ``verify_point``-ed):
+    ``issue1944_rlt_panel.py --with-corpus`` (271 instances, fires on 4):
+    cert-clean, 1,626 checks, 0 problems; certified +nous1 (OFF time limit at
+    30.7 s twice, ON optimal at 24.0/24.3 s, 20 retries), tighter 30 s bounds on
+    the other three it fires on (ex5_2_5, tln6, wastewater15m1). The listed loss
+    ``pointpack04`` routes to the Python tree, where the flag is never read; it
+    certifies in 29 nodes / ~3.6 s in both arms on re-run (the panel row ran
+    under load). ``issue1995_gdp_panel.py`` (every serialize bound-neutral case
+    plus the native GDPlib models under ``gdp_method="simplex"``, 54 cases):
+    cert-clean, 424 checks, 0 problems; fires on #1995's case only, certified
+    there, the other 53 node-identical. ``performance-plan.md`` section 94.
+    Read at call time.
+    """
+    return os.environ.get("DISCOPT_KERNEL_UNDECIDED_RETRY", "1").strip().lower() not in (
         "0",
         "false",
         "no",
