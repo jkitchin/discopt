@@ -11576,10 +11576,12 @@ def _py_tree_spatial_score_enabled() -> bool:
 
     ON, the tree picks the continuous column to bisect by its share of the envelope
     gap of the nonlinear terms it appears in at the node point (#1970's native rule,
-    ported; ``select_spatial_score_variable``), split 3/4 of the way from the point to
-    the midpoint, and falls back to the legacy longest-edge rule when no term has a
-    gap on a candidate. Branching order only: both children still cover the parent
-    box, so no bound moves. Probe: ``tree/py_spatial_score_picks``.
+    ported; ``select_spatial_score_variable``), split at the midpoint (#1970's native
+    midpull of 0.75 cost two ``test_sign_envelope`` certificates: a discontinuity at a
+    box midpoint never lands on a child boundary), and falls back to the legacy
+    longest-edge rule when no term has a gap on a candidate. Branching order only:
+    both children still cover the parent box, so no bound moves. Probe:
+    ``tree/py_spatial_score_picks``.
 
     **Graduated (default ON, 2026-10-26, #1978); ``=0`` restores the legacy rule.**
 
