@@ -1,0 +1,44 @@
+# #1982 item 1: narrowed one-sided product rule (DISCOPT_FBBT_FREE_SIGN), root-box scan OFF vs ON, all 1,609 MINLPLib .nl (2026-10-26), 120 s cap
+# compared 1568, timeouts 41, errors 0
+RESULT wallfix nvar=6 changed=1 finite_tightened=0 looser=0
+TIMEOUT crudeoil_pooling_dt3.nl
+TIMEOUT arki0014.nl
+TIMEOUT arki0012.nl
+TIMEOUT acopf_case1354pegase_qcqp.nl
+TIMEOUT nuclear10b.nl
+TIMEOUT gams04.nl
+TIMEOUT powerflow2383wpp.nl
+TIMEOUT unitcommit_200_100_1_mod_8.nl
+TIMEOUT unitcommit_200_100_2_mod_8.nl
+TIMEOUT trainf.nl
+TIMEOUT transswitch2383wpr.nl
+TIMEOUT transswitch2383wpp.nl
+TIMEOUT unitcommit_200_100_2_mod_7.nl
+TIMEOUT unitcommit_200_0_5_mod_7.nl
+TIMEOUT powerflow2736spp.nl
+TIMEOUT transswitch2736spr.nl
+TIMEOUT parabol5_2_2.nl
+TIMEOUT parabol5_2_3.nl
+TIMEOUT faclay60.nl
+TIMEOUT transswitch2736spp.nl
+TIMEOUT watercontamination0202.nl
+TIMEOUT watercontamination0303.nl
+TIMEOUT powerflow2383wpr.nl
+TIMEOUT pooling_sppc3stp.nl
+TIMEOUT powerflow2736spr.nl
+TIMEOUT faclay70.nl
+TIMEOUT dtoc5.nl
+TIMEOUT gabriel10.nl
+TIMEOUT faclay75.nl
+TIMEOUT optcdeg2.nl
+TIMEOUT acopf_case6468rte_qcqp.nl
+TIMEOUT acopf_case6515rte_qcqp.nl
+TIMEOUT cont6-qq.nl
+TIMEOUT faclay80.nl
+TIMEOUT acopf_case9241pegase_qcqp.nl
+TIMEOUT acopf_case13659pegase_qcqp.nl
+TIMEOUT junkturn.nl
+TIMEOUT parabol5_2_4.nl
+TIMEOUT acopf_caseactivsg25k_qcqp.nl
+TIMEOUT telecomsp_nor_sun.nl
+TIMEOUT acopf_caseactivsg70k_qcqp.nl
