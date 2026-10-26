@@ -362,6 +362,10 @@ class Plan:
     ub: np.ndarray
     sign: float  # +1 minimize, -1 maximize (the outer piece always minimizes sign*f)
     stats: dict[str, Any] = field(default_factory=dict)
+    # Set by build_outer: each open column's share slots in ``_outer_u`` (the
+    # second is u- of a free generator), and each row's degree D.
+    slots: list[tuple[int, Optional[int]]] = field(default_factory=list)
+    row_degrees: list[int] = field(default_factory=list)
 
 
 def _check_model(model: Model) -> None:
@@ -545,10 +549,13 @@ def build_outer(p: Plan, M: float) -> tuple[Model, int]:
     h = _Homogenizer(var_map, open_leaf)
     h.s = s
 
+    p.slots = slots
+    p.row_degrees = []
     max_deg = 0
     for con in model._constraints:
         body = con.body if con.rhs == 0.0 else con.body - Constant(con.rhs)
         e, d = h(body)
+        p.row_degrees.append(d)
         max_deg = max(max_deg, d)
         new._constraints.append(Constraint(body=e, sense=con.sense, rhs=0.0, name=con.name))
     new.subject_to(SumOverExpression(simplex) == 1.0, name="_outer_simplex")
@@ -561,6 +568,37 @@ def build_outer(p: Plan, M: float) -> tuple[Model, int]:
     p.stats["outer_piece/max_row_degree"] = float(max_deg)
     _require_bounded_shares(new, u, len(lo_u))
     return new, d
+
+
+def outer_point(p: Plan, outer: Model, x_flat: np.ndarray) -> np.ndarray:
+    """The image in ``outer``'s columns of a point ``x`` of the original model with
+    ``T(x) > 0``: ``s = 1/T``, each share ``(x - ref)/T`` (split ``u+ - u-`` for a
+    free generator). For tests and verification; :func:`build_outer` must have run
+    on ``p``."""
+    offs = _offsets(p.model)
+    T = 0.0
+    for c in p.cols:
+        if c.in_T:
+            dx = float(x_flat[offs[c.var_index] + c.flat]) - c.ref
+            T += abs(dx) if c.sign == 0 else c.sign * dx
+    if not T > 0.0:
+        raise ValueError(f"T(x) = {T} is not positive")
+    n_u = max(max(kp, km if km is not None else kp) for kp, km in p.slots) + 1
+    u = np.zeros(n_u)
+    for c, (kp, km) in zip(p.cols, p.slots):
+        dx = float(x_flat[offs[c.var_index] + c.flat]) - c.ref
+        if km is not None:
+            u[kp], u[km] = max(dx, 0.0) / T, max(-dx, 0.0) / T
+        else:
+            u[kp] = (dx if c.sign >= 0 else -dx) / T
+    head = np.array(x_flat, dtype=np.float64, copy=True)
+    for c in p.cols:
+        head[offs[c.var_index] + c.flat] = 0.0  # the unused placeholder
+    out = np.concatenate([head, [1.0 / T], u])
+    n = sum(int(np.prod(v.shape)) if v.shape else 1 for v in outer._variables)
+    if out.size != n:
+        raise ValueError(f"mapped point has {out.size} entries for {n} columns")
+    return out
 
 
 def _require_bounded_shares(new: Model, u: Variable, n: int) -> None:
