@@ -704,6 +704,13 @@ def solve_with_outer_piece(
         stats["outer_piece/result"] = "probe has a dual bound"
         logger.info("outer piece not needed on %r: %s", model.name, stats)
         return None
+    if probe.status not in ("feasible", "node_limit"):
+        # The probe stopped before its root finished (``time_limit``: clay0303hfsg's
+        # root takes ~4 s, and firing on it cost 4.8 -> 16.7 s for the same
+        # certificate) or failed: no evidence the relaxation cannot bound the model.
+        stats["outer_piece/result"] = f"probe inconclusive ({probe.status})"
+        logger.info("outer piece not built on %r: %s", model.name, stats)
+        return None
 
     outer_budget = OUTER_BUDGET_FRACTION * time_limit
     B_out: Optional[float] = None
