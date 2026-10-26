@@ -131,7 +131,11 @@ def test_a_drained_tree_reports_exhausted():
     r = _knap().solve(milp_backend="native", milp_cuts=False, batch_size=1)
     assert r.status == "optimal"
     assert r.termination in (st.TERMINATION_EXHAUSTED, st.TERMINATION_GAP)
-    assert r.gap == pytest.approx(_formula(r.objective, r.bound), rel=1e-12, abs=1e-15)
+    # The documented formula INCLUDING its absolute arm (default abs_gap_tolerance
+    # 1e-6): since #1953 the tree's bound is a rigorous NS bound, which can sit
+    # ~1e-12 off the incumbent rather than equal to it, and such a pair reports 0.0.
+    expected = _gap.reported_gap(r.objective, r.bound, abs_tol=1e-6)
+    assert r.gap == pytest.approx(expected, rel=1e-12, abs=1e-15)
 
 
 def _mkp():

@@ -224,10 +224,10 @@ def test_obs1_deferred_unbounded_is_never_promoted_to_the_answer(monkeypatch):
     x = m.continuous("x", lb=0, ub=1e17)  # declared, inside the [1e15, 1e20) window
     m.minimize(-x)
 
-    def _deferring(model, t_start, time_limit=None):
+    def _deferring(model, t_start, time_limit=None, **kw):
         return S._DeferredUnbounded(S.SolveResult(status="unbounded", wall_time=0.0), "STUB-IPM")
 
-    def _failing(model, t_start, time_limit=None):
+    def _failing(model, t_start, time_limit=None, **kw):
         return None
 
     monkeypatch.setattr(S, "_solve_lp_pounce", _deferring)
