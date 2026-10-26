@@ -454,6 +454,44 @@ def free_column_lp_cert_enabled() -> bool:
     )
 
 
+def declined_lp_cert_enabled() -> bool:
+    """``DISCOPT_DECLINED_LP_CERT`` gate (#1941, ex14_1_7): widen the #1869 (b)
+    verified-HiGHS handoff from "an unbounded *nonlinear* column" to any optimal,
+    continuous node LP that every in-house certificate declined.
+
+    Measured on ex14_1_7 (minimax: ``g_k <= x10``, ``-g_k <= x10``, ``x10`` free and
+    only linear): the uniform relaxation already shares each ``g_k`` aux column
+    between the paired rows and its root LP solves to 0.0, the ``.solu`` optimum. The
+    bound is lost to certification, not relaxation: the NS safe bound abstains on the
+    free ``x10`` (reduced-cost interval straddles 0), ``trusted_vertex`` is refused
+    because aux bounds reach 1.77e9 (> ``_LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE``), and
+    the #1869 handoff never fires because ``x10`` is linear. Handing that LP to
+    ``_verified_free_column_bound`` returns -1e-12. The bound is rigorous for any
+    dual (same route as #1869 (b)), so this only decides whether a node gets one.
+
+    Bound-changing, so gated per CLAUDE.md section 5; read at call time.
+
+    **Graduated (default ON, 2026-10-26).** Screen: all 782 local MINLPLib instances
+    with <= 200 vars and <= 200 cons, 20 s, counting handoffs that only this arm
+    reaches (the #1869 arm short-circuits it): it fires on 3 (``btest14``,
+    ``ex14_1_2``, ``ex14_1_7``); on the other 779 ON and OFF run identical code.
+    Panel on those 3, OFF/ON interleaved, 3 reps, 60 s: *cert-clean* (18 rows, 39
+    executed checks, 0 problems: no bound past ``minlplib.solu``'s opt/best dual,
+    every incumbent passes ``verify_point`` on a fresh model) and net-positive --
+    ``ex14_1_7`` time limit (bound -341.28, ~430 nodes) -> **optimal 3/3 in 3 nodes,
+    1.7 +/- 0.1 s**; ``ex14_1_2`` unchanged (the route abstains there); ``btest14``
+    within run-to-run spread (bound -168.07..-168.26 OFF vs -168.17..-168.26 ON).
+    ``=0`` restores the decline.
+    """
+    return os.environ.get("DISCOPT_DECLINED_LP_CERT", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
+
+
 def _verified_free_column_bound(milp, time_limit: Optional[float]):
     """``(bound, x)`` from the verified HiGHS route on ``min c'x, A_ub x <= b_ub``
     (slacks in ``[0, inf)`` make it the route's equality form), or ``(None, None)``."""
@@ -2293,15 +2331,26 @@ class MccormickLPRelaxer:
             (bound is None or not np.isfinite(bound))
             and res.status == "optimal"
             and milp._integrality is None
-            and self._nonlinear_cols
-            and self._has_unbounded_nonlinear_col(milp)
-            and free_column_lp_cert_enabled()
+            and (
+                (
+                    self._nonlinear_cols
+                    and self._has_unbounded_nonlinear_col(milp)
+                    and free_column_lp_cert_enabled()
+                )
+                or declined_lp_cert_enabled()
+            )
         ):
             # #1869 (b): every in-house certificate declined an LP with an unbounded
             # nonlinear column -- the NS safe bound needs every open column's reduced
             # cost on its safe side, and a floating dual rarely has it. The verified
             # HiGHS LP route does exactly that certification (#1729 dual scaling, the
             # rational ``exact_ns_bound``), so hand it this node LP.
+            # #1941: ``DISCOPT_DECLINED_LP_CERT`` widens this to any declined LP
+            # (ex14_1_7: a free *linear* column plus 1.77e9 aux bounds).
+            # ``_objective_bound_valid`` is deliberately not consulted: it marks an
+            # infinite or garbage-wide box floor, i.e. distrust of the in-house
+            # simplex value or a sound-but-harmful bound, not an invalid LP, and the
+            # verified route reports an unbounded LP as such.
             _vb, _vx = _verified_free_column_bound(milp, _remaining())
             if _vb is not None:
                 BOUND_PROVENANCE["verified_highs"] += 1
