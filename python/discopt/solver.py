@@ -1198,7 +1198,7 @@ def _native_spatial_kernel_enabled() -> bool:
     )
 
 
-def _native_kernel_feature_safe(
+def _native_kernel_bypass_reasons(
     *,
     mccormick_bounds,
     initial_point,
@@ -1208,62 +1208,63 @@ def _native_kernel_feature_safe(
     kwargs,
     search_levers=(),
     cut_callback=None,
-) -> bool:
-    """Whether the native spatial kernel may take over this solve (#789).
+) -> list[str]:
+    """The requests that keep this solve off the native kernel, by option name (#789).
 
     The kernel runs the ENTIRE spatial B&B inside ``discopt-core`` and so does
     not exercise the Python-engine machinery layered on the interpreter loop:
     node/incumbent/iteration callbacks, lazy-constraint injection, the solution
     pool, warm-start incumbents, non-default McCormick bound modes, and any
     per-solve ``tuning`` whose stats/behaviour a caller inspects. Those are real
-    contracts (encoded by the smoke suite), so when a solve REQUESTS one, we
-    decline here and route it to the trusted Python engine, taking the native
-    path only when the solve is feature-safe. This is the #789 "route
-    unsupported models to the Python engine" resolution — no test is weakened,
-    and the fast native path is still taken for the plain certified-optimal
-    solves it was graduated on (tanksize et al.).
+    contracts (encoded by the smoke suite), so when a solve REQUESTS one it is
+    routed to the trusted Python engine, and the native path is taken only when
+    this list is empty. Declining is always sound: it only ever *widens* which
+    solves use the already-trusted default path.
 
-    Declining is always sound: it only ever *widens* which solves use the
-    already-trusted default path.
+    One list for the routing decision and the #1678 warning, so a request that
+    moves a solve off the kernel can no longer do so silently: an explicit
+    ``tuning`` (e.g. ``SolverTuning(root_fixpoint=False)``) did (#1983).
     """
-    if incumbent_callback is not None or node_callback is not None:
-        return False
+    reasons: list[str] = []
+    if incumbent_callback is not None:
+        reasons.append("incumbent_callback")
+    if node_callback is not None:
+        reasons.append("node_callback")
     # The kernel has no cut hook either: a ``cut_callback`` reaching it was simply
     # never called (0 calls, silently) on every scalar model on the spatial path --
     # the #1535 defect, which survived on this route because its regression test's
     # model used an array variable and so never reached the kernel until
     # ``DISCOPT_NATIVE_KERNEL_VECTOR_VARS``.
     if cut_callback is not None:
-        return False
+        reasons.append("cut_callback")
     if kwargs.get("iteration_callback") is not None:
-        return False
+        reasons.append("iteration_callback")
     if lazy_constraints:
-        return False
+        reasons.append("lazy_constraints")
     if initial_point is not None:
-        return False
+        reasons.append("initial_point")
     # A non-default McCormick bound mode changes the relaxation the caller asked
     # for; the kernel always builds its own McCormick relaxation, so honour the
     # request by routing to the Python engine (e.g. ``mccormick_bounds="none"``).
     if mccormick_bounds is not None and str(mccormick_bounds) != "auto":
-        return False
+        reasons.append("mccormick_bounds")
     # Solution-pool collection is a Python-engine feature the kernel does not fill.
     if kwargs.get("solution_pool") is not None or kwargs.get("solution_pool_capacity"):
-        return False
+        reasons.append("solution_pool")
     # An explicit per-solve tuning object may enable/disable levers whose
     # solver_stats a caller inspects (e.g. cut-inherit pool stats); the kernel
     # emits none of those, so route explicit-tuning solves to the Python engine.
     # #1615 D-03: ``_scoped_tuning`` pops ``tuning`` out of ``kwargs`` before the
     # solve body runs, so the ``kwargs`` test alone was dead; read the scope flag.
     if kwargs.get("tuning") is not None or _EXPLICIT_TUNING.get():
-        return False
+        reasons.append("tuning")
     # #1615 D-01/D-02/D-08/D-13: search levers the kernel does not read. The kernel
     # runs its own fixed best-first search over its own McCormick relaxation with
     # its own root presolve, so a caller who sets any of these away from its
     # default would otherwise get the kernel's search with the option silently
     # ignored. Route to the Python engine, which honours them.
-    if search_levers:
-        return False
-    return True
+    reasons.extend(search_levers)
+    return reasons
 
 
 def _native_kernel_ignored_levers(
@@ -2289,7 +2290,9 @@ def _try_native_spatial_kernel(
             model,
             np.asarray(lb, dtype=np.float64)[:n_vars],
             np.asarray(ub, dtype=np.float64)[:n_vars],
-            float(initial_incumbent) + off,
+            float(initial_incumbent)
+            + off
+            + _kernel_cutoff_slack(float(initial_incumbent), off, gap_tolerance, abs_gap_tolerance),
             outer_deadline,
         )
         if _cut_box is not None:
@@ -2683,8 +2686,9 @@ def _try_native_spatial_kernel(
         )
         if _fb_bound is not None:
             logger.info(
-                "native spatial kernel bound-less at time_limit — reporting the "
+                "native spatial kernel bound-less at %s — reporting the "
                 "root-relaxation fallback bound %.6g (#933)",
+                native_status,
                 _fb_bound,
             )
             bound_val = _fb_bound
@@ -2703,6 +2707,33 @@ def _try_native_spatial_kernel(
         _native_jax_s += time.perf_counter() - _t_phase
         if _polished is not None:
             x_flat, obj_val = _polished
+
+    # #1983: the #933 fallback bound is rigorous; when it meets the incumbent within
+    # the solve's tolerance the incumbent is proved global, and the honest status is
+    # ``optimal`` -- the same re-certification the Python tree applies to the same
+    # fallback (``_recertify_gap_closed`` with the on-correct-side guard). Without it
+    # the pq pooling model of #1983 reported ``node_limit`` with ``gap = 0.0``.
+    if (
+        _native_bound_source == "root_relaxation"
+        and native_status in ("time_limit", "node_limit")
+        and obj_val is not None
+        and math.isfinite(obj_val)
+        and math.isfinite(bound_val)
+    ):
+        from discopt.modeling.core import ObjectiveSense as _ObjSenseRC
+
+        _rc_max = model._objective is not None and model._objective.sense == _ObjSenseRC.MAXIMIZE
+        _rc_side = bound_val >= obj_val - 1e-9 if _rc_max else bound_val <= obj_val + 1e-9
+        _rc_abs = _DEFAULT_ABS_GAP_TOL if abs_gap_tolerance is None else float(abs_gap_tolerance)
+        if _rc_side and _recertify_gap_closed(obj_val, bound_val, _rc_max, gap_tolerance, _rc_abs):
+            logger.info(
+                "native spatial kernel: the root-relaxation fallback bound %.10g closes "
+                "the gap to the incumbent %.10g; %s -> optimal (#1983)",
+                bound_val,
+                obj_val,
+                native_status,
+            )
+            native_status = "optimal"
 
     x_dict = _unpack_solution(model, x_flat) if x_flat is not None else None
     wall_time = time.perf_counter() - t_start
@@ -7834,6 +7865,58 @@ def _kernel_documented_gap_applies(abs_gap_tolerance: Optional[float]) -> bool:
     return abs_gap_tolerance is None and _kernel_documented_gap_enabled()
 
 
+def _kernel_cutoff_slack_enabled() -> bool:
+    """``DISCOPT_KERNEL_CUTOFF_OBBT_SLACK`` (#1983, default ON; ``=0`` opts out).
+
+    Kept as a documented opt-out: ``=0`` restores #1871's exact cutoff (the
+    incumbent's value) so the two can be A/B'd. See :func:`_kernel_cutoff_slack`.
+    """
+    return os.environ.get("DISCOPT_KERNEL_CUTOFF_OBBT_SLACK", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+        "",
+    )
+
+
+def _kernel_cutoff_slack(
+    incumbent: float, off: float, gap_tolerance: float, abs_gap_tolerance: Optional[float]
+) -> float:
+    """How far above the incumbent #1871's OBBT cutoff sits (#1983), internal units.
+
+    The cutoff was the incumbent's value exactly. When the seed is already optimal
+    (#1871's pooling, ``st_ph*`` and ``st_m*`` families), ``{relaxation, objective
+    <= incumbent}`` is about one point, and OBBT shrank the box to it: on the
+    #1983 pq pooling model 39 bounds moved, 30 columns ended with widths 1e-17 to
+    1e-6, HiGHS called the root LP over that box infeasible, the kernel's simplex
+    ended ``Numerical``, and every node below inherited the same slivers --
+    100,000 nodes, uncertified, where the untightened box certifies at node 1.
+
+    The kernel only has to prove ``bound >= incumbent - g``, ``g`` its own
+    acceptance gap. So the cutoff is lifted to ``incumbent + g``: the region kept
+    is a superset of #1871's (sound for any slack >= 0), and it never collapses
+    below the precision the certificate is decided at. ``g`` is the kernel's
+    test at this incumbent: ``min(gap_tol, max(abs_gap_tol, rel_gap_tol *
+    |published value|))``, mirroring the kwargs built for the kernel below (a
+    denominator of ``|incumbent|`` alone makes ``g`` no larger than the kernel's
+    own, ``max(|ub|, |lb|)``). Measured on the #1983 model (2000-node cap):
+    slack 0, 1e-9, 1e-7, 1e-6 all end undecided at the node cap; 1e-5 certifies
+    in 3 nodes; ``g`` = 0.0402 certifies in 1 node with min width 2.4e-5.
+    """
+    if not _kernel_cutoff_slack_enabled():
+        return 0.0
+    abs_t = _DEFAULT_ABS_GAP_TOL if abs_gap_tolerance is None else float(abs_gap_tolerance)
+    kernel_abs = _native_kernel_abs_tol(gap_tolerance, abs_gap_tolerance)
+    if float(gap_tolerance) > _DEFAULT_REL_GAP_TOL or _kernel_documented_gap_applies(
+        abs_gap_tolerance
+    ):
+        kernel_abs = math.inf
+    rel = float(gap_tolerance) * max(abs(float(incumbent) + float(off)), 1e-10)
+    slack = min(kernel_abs, max(abs_t, rel))
+    return slack if math.isfinite(slack) and slack > 0.0 else 0.0
+
+
 #: #1871: how often the cutoff-OBBT box replaced the kernel's root box (probe
 #: counter, CLAUDE.md section 6).
 KERNEL_CUTOFF_OBBT_STATS: "collections.Counter[str]" = collections.Counter()
@@ -7943,22 +8026,58 @@ def _warn_abs_gap_not_loosened(abs_gap_tolerance: Optional[float], gap_tolerance
     )
 
 
-def _warn_native_kernel_bypassed(options: list[str]) -> None:
+def _native_kernel_covers(model, lb, ub, n_vars: int, deadline: float) -> Optional[bool]:
+    """Whether the native kernel's producer accepts ``model`` on ``[lb, ub]`` (#1983).
+
+    ``False`` when :func:`build_spatial_kernel_spec` declines it (out of the
+    kernel's term families -- an ``exp`` rate law, for one), ``True`` when it
+    builds, ``None`` when ``deadline`` ran out first (unknown). Only asked when an
+    option already keeps the solve off the kernel, to decide whether saying so is
+    true; it decides no route.
+    """
+    from discopt._relax.spatial_producer import build_spatial_kernel_spec
+
+    spec = build_spatial_kernel_spec(
+        model,
+        bounds=(
+            np.asarray(lb, dtype=np.float64)[:n_vars],
+            np.asarray(ub, dtype=np.float64)[:n_vars],
+        ),
+        deadline=deadline,
+    )
+    if spec is not None:
+        return True
+    return None if time.perf_counter() >= deadline else False
+
+
+#: The most a #1678 warning may spend finding out whether the kernel would have
+#: taken the model (seconds), and the share of the remaining budget it may use.
+_BYPASS_COVERAGE_BUDGET_S = 1.0
+_BYPASS_COVERAGE_BUDGET_FRACTION = 0.05
+
+
+def _warn_native_kernel_bypassed(options: list[str], covers=None) -> None:
     """Say so when a search option moves a spatial solve off the native kernel (#1678).
 
     The native Rust kernel (default ON) runs its own fixed best-first search and calls
-    no node callback, so ``_native_kernel_feature_safe`` routes a solve that sets
+    no node callback, so ``_native_kernel_bypass_reasons`` routes a solve that sets
     ``strategy``, ``rlt``, ``presolve=False``,
-    ``in_tree_presolve_stride``, ``obbt_at_root=False``, ``node_callback`` or
-    ``cut_callback`` to the Python tree, which honours them. That is sound -- the
+    ``in_tree_presolve_stride``, ``obbt_at_root=False``, a callback,
+    ``initial_point``, ``lazy_constraints``, ``mccormick_bounds``, a solution pool
+    or an explicit ``tuning`` to the Python tree, which honours them. That is sound -- the
     Python tree is the trusted path -- but it changes the engine, its node counts,
     its gap-tolerance semantics (the kernel stops absolutely at
     ``gap_tolerance <= 1e-4``; the Python tree uses absolute-OR-relative) and
     usually its wall time, and the caller was told nothing.
     Silent when the kernel is opted out (``DISCOPT_NATIVE_SPATIAL_KERNEL=0``), since
-    then nothing moved.
+    then nothing moved -- and (#1983) when ``covers()`` says the kernel's producer
+    declines the model anyway: a CSTR model with an Arrhenius ``exp`` was warned
+    about though it never reaches the kernel. ``covers`` returns ``True``,
+    ``False`` or ``None`` (unknown: warn).
     """
     if not options or not _native_spatial_kernel_enabled():
+        return
+    if covers is not None and covers() is False:
         return
     import warnings
 
@@ -12346,7 +12465,7 @@ def _scoped_tuning(fn: _F) -> _F:
         _explicit = kwargs.pop("tuning", None)
         token = _enter_tuning_scope(_explicit)
         # #1615 D-03: the pop above hides ``tuning`` from ``fn``'s ``kwargs``, so
-        # ``_native_kernel_feature_safe`` could never see it. Record "an explicit
+        # ``_native_kernel_bypass_reasons`` could never see it. Record "an explicit
         # tuning was requested" (inherited by nested solves) where it can.
         explicit_token = _EXPLICIT_TUNING.set(_explicit is not None or _EXPLICIT_TUNING.get())
         try:
@@ -17946,12 +18065,7 @@ def solve_model(
         in_tree_presolve_stride=in_tree_presolve_stride,
         kwargs=kwargs,
     )
-    _warn_native_kernel_bypassed(
-        _native_search_levers
-        + (["node_callback"] if node_callback is not None else [])
-        + (["cut_callback"] if cut_callback is not None else [])
-    )
-    if not _native_budget_spent and _native_kernel_feature_safe(
+    _native_bypass = _native_kernel_bypass_reasons(
         mccormick_bounds=mccormick_bounds,
         initial_point=initial_point,
         lazy_constraints=lazy_constraints,
@@ -17960,7 +18074,17 @@ def solve_model(
         kwargs=kwargs,
         search_levers=_native_search_levers,
         cut_callback=cut_callback,
-    ):
+    )
+
+    def _bypass_coverage() -> Optional[bool]:
+        _left = (t_start + float(time_limit)) - time.perf_counter()
+        _budget = min(_BYPASS_COVERAGE_BUDGET_S, _BYPASS_COVERAGE_BUDGET_FRACTION * _left)
+        if not _budget > 0.0:
+            return None
+        return _native_kernel_covers(model, lb, ub, n_vars, time.perf_counter() + _budget)
+
+    _warn_native_kernel_bypassed(_native_bypass, covers=_bypass_coverage)
+    if not _native_budget_spent and not _native_bypass:
         _native_result = _try_native_spatial_kernel(
             model,
             lb,
