@@ -15,10 +15,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import discopt.modeling as dm
 import numpy as np
 import pytest
-
-import discopt.modeling as dm
 from discopt._point_eval import evaluate_at
 from discopt.modeling import _outer_piece as op
 from discopt.validation.feasibility import verify_point
