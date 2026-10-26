@@ -11936,3 +11936,68 @@ nodes; ON optimal in 11,921 nodes, 23 s.
 
 **#1970 status.** nous1 certifies at 120 s (Done item 1); the flag passed the
 section 5 panel, on the merged base too, and graduated (Done item 2).
+
+## 91. #1978: the spatial stall on a bounded bilinear piece -- native fixed by #1970, Python tree fixed here (graduated 2026-10-26)
+
+**Probe.** #1975's rescaled prolog outer piece: 21 bounded columns, products `u_k * x_j`
+of narrow factors `u0, u1 in [0, ~5]` against wide partners `x2..x5 in [0, ~7000]`,
+margin about 1e-5 relative. §90 measured discopt stalled at bound `-1e-12` after 1.17M
+nodes, against SCIP's 10,243.
+
+**Native kernel: already fixed by #1970** (default ON since this morning). `DISCOPT_KERNEL_SPATIAL_BRANCHING`:
+
+| `=1` (default) | `=0` (legacy) |
+|---|---|
+| optimal, bound 0.03486, 3,579 nodes, 3.4 s | bound `-1.2e-12` after 100,000 nodes |
+
+Native variants (`kwargs` overridden), all certify: score + pseudocost + midpull 3,579
+nodes; score + midpull 71; score + pseudocost 481; **score alone 57**. The violation
+share is what carries it.
+
+**Python tree: the same stall, and it is the main spatial engine on this class.** A
+5 s route census of the 287 panel instances: **154 run the Python spatial tree, 7 the
+native kernel** (the rest are convex, MILP or other routes). The Python tree's
+`select_spatial_branch_variable` bisects the widest column relative to its root range
+across every continuous column, linear-only ones included.
+
+*Port, three attempts.*
+1. **Envelope spread at `result_sols`:** `result_sols` is usually the node NLP point.
+   Fired 1,101 times, bound unchanged.
+2. **Envelope spread at the node LP point** (a new per-node score-point channel):
+   unchanged. The branch counts showed why: it split `u18`/`u19` most, which the model
+   uses only linearly.
+3. **The model's own terms.** The engine's `bilinear_map` also holds the products RLT
+   lifts (#1944); scoring those gaps was the defect. Scoring the model's own terms
+   (`NonlinearTerms`), it splits only `u0`/`u1`.
+
+| Python tree | result |
+|---|---|
+| legacy | bound ~0 after 2,463 nodes / 120 s |
+| score rule | bound 0.034931 in 75 nodes (tree exhausted); `optimal` at `abs_gap_tolerance=1e-3` in 71 nodes |
+
+The residual gap at tight tolerances is not branching. The root fixpoint and OBBT ran
+with a cutoff of 0.0349313, an incumbent below the native kernel's certified 0.0349502
+that was later withdrawn (the reported incumbent is 0.0349575). The bound then stays at
+that cutoff, honestly uncertified. The incumbent was most likely tolerance-feasible, the
+same ill-conditioning as §90.
+
+**Section 5 panel** (`flag_onoff_corpus_panel.py --flag DISCOPT_PY_TREE_SPATIAL_SCORE`,
+287 instances, 20 s, interleaved; data in `docs/dev/data/1978-1982-panels/`):
+- **Cert-clean:** 460 incumbent checks, 0 false bounds. The certification flips
+  (`slay06m` +, `smallinvDAXr3b100-110` -) are on instances where the rule never fired;
+  `smallinv` has an identical node count, 25,473, in both arms.
+- **Fires on 31 instances.** Where both certify: nodes 218 -> 168, wall 73.1 -> 66.0 s.
+- **Uncertified bound moves, replicated 3x:**
+  - tighter 3/3: `chenery` (-1194.6 -> -1184.1..-1188.8), `pointpack06..14` (max;
+    0.83 -> 0.49..0.69);
+  - looser 3/3: `knp3-12` (max; 5.46 -> 7.72; dual best 2.28), `hybriddynamic_varcc`
+    (-0.6%);
+  - `nvs05` overlaps.
+
+`knp3-12` packs 12 points on a sphere. Its gaps are spread over many symmetric squared
+distances, where round-robin bisection suits the symmetry and a violation score
+concentrates.
+
+**Graduated** default ON; `=0` restores the longest-edge rule.
+
+**#1978 is closed:** the stall is gone on both engines.

@@ -3381,7 +3381,7 @@ def _build_product(ctx: _Builder, node: CNode, w: int) -> Envelope:
         _ent = _entropy_prod_var(ctx, node)
         if _ent is not None:
             _lt, _lo, _hi = _ent
-            if _lo > 0.0:
+            if _lo >= 0.0:
                 _tight = _emit_1d(ctx, w, _lt, _lo, _hi, _xlogx, _xlogx_prime, "convex")
                 return Envelope(rows=[], tight=_tight)
     # xexp atom (gated): recognize ``t*exp(t)`` on its convex region ``t>=-2`` and emit
