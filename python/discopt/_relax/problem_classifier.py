@@ -2181,8 +2181,11 @@ def _extract_lp_data_vectorized(model: Model, *, for_qp: bool = False) -> LPData
     def _offset(var: Variable) -> int:
         return _compute_var_offset(var, model)
 
+    # One memo across the objective and every row (#1987): the bodies share their
+    # variable and element nodes.
+    memo: dict = {}
     try:
-        obj = affine_of(model._objective.expression, _offset, n_orig)
+        obj = affine_of(model._objective.expression, _offset, n_orig, memo=memo)
         if obj.size != 1:
             logger.debug("LP vectorized extraction declined: objective has shape %s", obj.shape)
             return None
@@ -2194,7 +2197,7 @@ def _extract_lp_data_vectorized(model: Model, *, for_qp: bool = False) -> LPData
             if con.sense not in ("==", "<=", ">="):
                 logger.debug("LP vectorized extraction declined: unsupported sense %r", con.sense)
                 return None
-            aff = affine_of(con.body, _offset, n_orig)
+            aff = affine_of(con.body, _offset, n_orig, memo=memo)
             (eq_blocks if con.sense == "==" else ineq_blocks).append((aff, con.sense))
     except NotAffineError as exc:
         logger.debug("LP vectorized extraction declined: %s", exc)
