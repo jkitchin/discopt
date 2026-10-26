@@ -10774,6 +10774,78 @@ _IPX_RACE_ARM: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "_IPX_RACE_ARM", default=None
 )
 
+#: Whether a nested ``solve_model`` is one of the race's two opening SLICES
+#: (``True``) rather than its continuation. Only a slice may end early on the
+#: MILP engine's stall (#1959); the continuation keeps the legacy fallback.
+_IPX_RACE_IN_SLICE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_IPX_RACE_IN_SLICE", default=False
+)
+
+
+def _ipx_race_stall_exit_enabled() -> bool:
+    """#1959: end the lift slice on the MILP engine's stall. ``DISCOPT_IPX_RACE_STALL_EXIT``.
+
+    **Default ON**; ``=0`` restores the #1940 race exactly as merged. It is an
+    opt-out for a shipped default (CLAUDE.md §5 "out of scope"), kept so the
+    change can be A/B'd.
+
+    What it changes
+    ---------------
+    Inside the race's opening LIFT slice (never its continuation, never an
+    ordinary solve), the native MILP engine's #291 stall guard can defer: its
+    half-of-remaining budget ran out with no incumbent. The legacy route then
+    hands the rest of the slice to the Python MILP tree (``_solve_milp_bb``) on
+    the same lifted model. Under this flag the slice ends at the deferral
+    instead, reporting ``time_limit`` with the engine's dual bound (valid: the
+    lift is an exact formulation), and the race moves on to the un-lifted slice.
+    The engine's own budget is untouched, so every instance the engine certifies
+    inside the slice -- the whole adopted corpus at dev speed -- runs the same
+    tree to the same certificate.
+
+    Why it is sound to skip the Python tree
+    ---------------------------------------
+    It is not skipped because it is slow but because, measured, it never
+    returned anything there. ``scripts/panel_1959_race_stall_exit.py`` records
+    every such run in its OFF arm and fails on one that yields an incumbent or a
+    certificate: 77 of 77 returned neither (28 in the 30 s panel, 49 in the
+    CI-speed proxy below), and in the entry experiment 11 of 11 at slices of 5,
+    1.67 and 1 s, including ``ex1265`` and ``ex1266`` at the short slices.
+    Without an incumbent the lift's gap is infinite, so the race's arm choice is
+    unchanged too.
+
+    Measurement (#1959 panel: #1940's 43 instances, ABBA, 2 reps)
+    -------------------------------------------------------------
+    At 30 s: 754 checks, 0 failures; certified 42 = 42; total wall 177.3 ->
+    145.5 s; 11 faster beyond 2 sd and 1.2x, 0 slower. Dense integer QP n=15 s0
+    6.87 -> 4.27 s, ``arrqp_n15`` 7.05 -> 4.14 s, ``sparse_n40`` 6.63 -> 3.77 s.
+    CI-speed proxy (``--slice 1.67``, limit 10 s, i.e. a 3x slower machine):
+    765 checks, 0 failures; certified 40 = 40 (all 12 adopted corpus instances
+    in both arms); total wall 129.2 -> 115.4 s; 13 faster, 0 slower. At that
+    speed ``ex1265``/``ex1266`` no longer certify inside the lift slice in
+    either arm (they certify in the continuation), and are faster ON
+    (5.08 -> 4.20 s, 5.30 -> 4.36 s). Re-run on top of #1961's tie rule, with
+    MINLPLib ``tln6``/``tln7`` added (45 instances): 774 / 786 checks, 0
+    failures, certified 42 = 42 / 40 = 40, 237.1 -> 207.3 s / 151.2 -> 137.2 s,
+    0 slower; 88 more post-stall Python-tree runs, none with an incumbent or a
+    certificate; ``tln6`` at 120 s certifies in both arms (60.8 / 59.0 s). The
+    lift slice still costs ~2.8 s where
+    the lift loses: the engine's stage-sized budget is what ``ex1265`` needs
+    (``_IPX_RACE_SLICE_S``).
+
+    Falsified alongside it: handing the un-used part of the lift slice to the
+    un-lifted slice. ``dense_n18_s1`` got a 7 s un-lifted slice, still ended
+    uncertified (the spatial search sizes its root work from its limit, so a
+    longer slice is a different search, not more of the same one) and paid the
+    restart anyway: 15.4 -> 17.1 s. performance-plan §86.
+    """
+    return os.environ.get("DISCOPT_IPX_RACE_STALL_EXIT", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
 #: Wall-clock length of each of the two opening slices of the #1940 lift race.
 #:
 #: Measured, not chosen. 3 s is too short for the LIFT arm: the native MILP engine
@@ -10943,9 +11015,11 @@ def _ipx_lift_race(entry_args: dict, solve_t0: float, is_maximize: bool) -> "Sol
         if not final:
             over["incumbent_time_extension"] = 0.0
         tok = _IPX_RACE_ARM.set(arm)
+        tok_slice = _IPX_RACE_IN_SLICE.set(not final)
         try:
             return solve_model(**{**base, **over}, **extra)
         finally:
+            _IPX_RACE_IN_SLICE.reset(tok_slice)
             _IPX_RACE_ARM.reset(tok)
 
     def _remaining() -> float:
@@ -11116,7 +11190,7 @@ def _kernel_convex_cut_rounds() -> Optional[tuple[int, int]]:
     (29.6 s -> 14.3 s) and loses none. Node counts fall on nvs13 (349 -> 23),
     nvs17 (8,231 -> 61), nvs18 (2,061 -> 49), hydro (341 -> 3) and fuel
     (29 -> 15). nvs24's 30 s bound goes from -3,243 to -1,033.2000 (optimum
-    -1,033.2). ``performance-plan.md`` section 86.
+    -1,033.2). ``performance-plan.md`` section 88.
     """
     if os.environ.get("DISCOPT_KERNEL_CONVEX_CUTS", "1").strip().lower() in (
         "0",
@@ -11149,7 +11223,7 @@ def _kernel_int_probe_enabled() -> bool:
     --on-env DISCOPT_KERNEL_INT_PROBE=1 --off-env DISCOPT_KERNEL_INT_PROBE=0`` (270
     instances, 30 s, interleaved): cert-clean, 1,620 checks, 0 problems; fires on 7
     instances (1-3 probes each). It gains nvs24 (time limit at 29.8 s -> certified
-    at 16.5 s, 23,464 -> 415 nodes) and loses none. ``performance-plan.md`` section 86."""
+    at 16.5 s, 23,464 -> 415 nodes) and loses none. ``performance-plan.md`` section 88."""
     return os.environ.get("DISCOPT_KERNEL_INT_PROBE", "1").strip().lower() not in (
         "0",
         "false",
@@ -13554,6 +13628,9 @@ def solve_model(
     # The lift race re-enters ``solve_model`` with these, so each of its arms is
     # the same solve the caller asked for, differing only in its time limit.
     _ipx_entry_args = dict(locals())
+    # #1959: set where this call adopts the lift as a race's opening lift SLICE;
+    # read at the MILP engine's deferral below.
+    _ipx_race_lift_slice = False
     # --- Complementarity relations must be lowered before we solve (#1147) ---
     # This is the boundary every solve passes through, including the callers
     # that never touch ``Model.solve`` (differentiable_solve, primal_heuristics).
@@ -16161,6 +16238,12 @@ def solve_model(
         _ipx_race_arm = _IPX_RACE_ARM.get()
         if _ipx_adopt and _ipx_race_arm == "unlifted":
             _ipx_adopt = False
+        _ipx_race_lift_slice = (
+            _ipx_adopt
+            and _ipx_race_arm == "lift"
+            and _IPX_RACE_IN_SLICE.get()
+            and _ipx_race_stall_exit_enabled()
+        )
         if (
             _ipx_adopt
             and _ipx_race_arm is None
@@ -17089,6 +17172,29 @@ def solve_model(
                     if _simplex_res is not None:
                         return _simplex_res
                     _engine_bound = _deferred.get("bound")
+                    if _ipx_race_lift_slice:
+                        # #1959: the engine stalled with no incumbent inside a
+                        # race's lift slice. The Python tree below has never
+                        # turned that into an incumbent or a certificate on the
+                        # lifted model (see ``_ipx_race_stall_exit_enabled``),
+                        # and the race's next slice is the un-lifted arm, so end
+                        # the slice here and keep the engine's valid bound.
+                        logger.info(
+                            "#1940 lift race: the MILP engine stalled with no "
+                            "incumbent; ending the lift slice (#1959)"
+                        )
+                        _stall_stats = dict(_deferred.get("stats") or {})
+                        return SolveResult(
+                            status="time_limit",
+                            bound=_engine_bound,
+                            wall_time=time.perf_counter() - t_start,
+                            node_count=int(_stall_stats.get("milp_driver/nodes", 0)),
+                            solver_stats=_stall_stats or None,
+                            algorithm_route=(
+                                "native-milp: discopt monolithic Rust MILP engine "
+                                "(lift race slice, ended on the engine's stall, #1959)"
+                            ),
+                        )
                 # POUNCE-only mode (nlp_solver="pounce", the universal default)
                 # routes to the self-hosted B&B and bypasses HiGHS entirely. An
                 # interior-point method is the wrong tool for the *linear* node LPs
