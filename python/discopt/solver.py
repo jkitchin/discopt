@@ -11518,7 +11518,7 @@ def _kernel_undecided_retry_enabled() -> bool:
     under load). ``issue1995_gdp_panel.py`` (every serialize bound-neutral case
     plus the native GDPlib models under ``gdp_method="simplex"``, 54 cases):
     cert-clean, 424 checks, 0 problems; fires on #1995's case only, certified
-    there, the other 53 node-identical. ``performance-plan.md`` section 90.
+    there, the other 53 node-identical. ``performance-plan.md`` section 94.
     Read at call time.
     """
     return os.environ.get("DISCOPT_KERNEL_UNDECIDED_RETRY", "1").strip().lower() not in (

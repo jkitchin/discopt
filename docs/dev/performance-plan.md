@@ -11937,7 +11937,7 @@ nodes; ON optimal in 11,921 nodes, 23 s.
 **#1970 status.** nous1 certifies at 120 s (Done item 1); the flag passed the
 section 5 panel, on the merged base too, and graduated (Done item 2).
 
-## 90. #1995: the kernel's cutoff propagation collapsed node boxes to slivers (2026-10-26)
+## 94. #1995: the kernel's cutoff propagation collapsed node boxes to slivers (2026-10-26)
 
 **Symptom.** `gdp.simplex` of `either_or([[x >= 4, y >= 1], [y >= 6, x >= 1]])`
 (minimise `x + y`; 10 continuous columns) ended `time_limit` at 30 s after ~59k
