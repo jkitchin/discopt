@@ -3291,10 +3291,17 @@ def _iter_model_leaves(*exprs: Expression):
     walker never trips on legitimate constants. Used by the cross-model
     ownership guard (finding M3) to detect a variable/parameter that belongs to
     a different :class:`Model` than the one it is being solved in.
+
+    Each node is expanded once (by identity): a DAG that reuses a subexpression
+    has exponentially many root-to-leaf paths but only linearly many nodes.
     """
     stack = list(exprs)
+    seen: set[int] = set()
     while stack:
         node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
         if isinstance(node, (Variable, Parameter)):
             yield node
         elif isinstance(node, IndexExpression):

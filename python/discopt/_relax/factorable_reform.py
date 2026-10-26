@@ -1022,6 +1022,11 @@ def _is_translated_monomial(factors: list[Expression]) -> bool:
     does not arise for it (``dm.prod([...])`` over a list builds a ``*`` chain and
     is lifted).
     """
+    # Count first: ``_univariate_affine_key`` walks its factor, and on a recursive
+    # chain (``e = a*e + ...``) the one non-constant factor is the whole history,
+    # so walking it before knowing the answer is False made the scan quadratic.
+    if sum(not isinstance(f, Constant) for f in factors) < 3:
+        return False
     seen: set[tuple] = set()
     nonconst = 0
     offset = False
@@ -1048,19 +1053,30 @@ def _scan_for_translated_monomial(expr: Expression, *, _in_chain: bool = False) 
     #1588 review: this is what makes a translated monomial count as factorable
     work on its own. Without it ``min (x-3)(y-1)(z-2)(u-4)`` was returned
     unchanged, because the lift only ran when some *other* lift opened the pass.
+
+    Iterative, and each ``(node, in_chain)`` pair is visited once: a model that
+    reuses a subexpression (``e = e + h*(u - e**2)``) has exponentially many paths
+    through it but only linearly many nodes.
     """
-    if isinstance(expr, BinaryOp):
-        if expr.op == "*" and not _in_chain:
-            if _is_translated_monomial(_collect_mul_factors(expr)):
-                return True
-        sub = expr.op == "*"
-        return _scan_for_translated_monomial(
-            expr.left, _in_chain=sub
-        ) or _scan_for_translated_monomial(expr.right, _in_chain=sub)
-    if isinstance(expr, UnaryOp):
-        return _scan_for_translated_monomial(expr.operand)
-    if isinstance(expr, SumOverExpression):  # ``dm.sum([...])`` (see the prelift)
-        return any(_scan_for_translated_monomial(t) for t in expr.terms)
+    stack = [(expr, _in_chain)]
+    seen: set[tuple[int, bool]] = set()
+    while stack:
+        node, in_chain = stack.pop()
+        key = (id(node), in_chain)
+        if key in seen:
+            continue
+        seen.add(key)
+        if isinstance(node, BinaryOp):
+            if node.op == "*" and not in_chain:
+                if _is_translated_monomial(_collect_mul_factors(node)):
+                    return True
+            sub = node.op == "*"
+            stack.append((node.right, sub))
+            stack.append((node.left, sub))
+        elif isinstance(node, UnaryOp):
+            stack.append((node.operand, False))
+        elif isinstance(node, SumOverExpression):  # ``dm.sum([...])`` (see the prelift)
+            stack.extend((t, False) for t in reversed(node.terms))
     return False
 
 
