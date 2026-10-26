@@ -695,6 +695,9 @@ pub(super) fn subtol_candidates(
 /// rounding, the column can move `2^30`, and the pivot is worth 0.25 -- yet
 /// `|d| = 2.3e-10 <= 1e-6 * 2`. A suspect is never pivoted on as is; see
 /// [`Simplex::subtol_entering`] and [`subtol_suspects_matter`].
+/// A [`subtol_scan`] entry: `(column, reduced cost, room)`.
+pub(super) type SubtolCand = (usize, f64, f64);
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn subtol_scan(
     cols: &SparseCols,
@@ -705,7 +708,7 @@ pub(super) fn subtol_scan(
     stat: &[i8],
     y: &[f64],
     floor: f64,
-) -> (Vec<(usize, f64, f64)>, Vec<(usize, f64, f64)>) {
+) -> (Vec<SubtolCand>, Vec<SubtolCand>) {
     let (mut out, mut suspects) = (Vec::new(), Vec::new());
     if !(floor.is_finite() && floor > 0.0) {
         return (out, suspects);
@@ -780,7 +783,11 @@ pub(super) fn subtol_suspects_matter(
         &lb[..n_real],
         &ub[..n_real],
     ) {
-        Some(g) => !(obj - g <= floor),
+        // NaN gap counts as "can matter": only a proven `obj - g <= floor` clears it.
+        Some(g) => !matches!(
+            (obj - g).partial_cmp(&floor),
+            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+        ),
         None => true,
     }
 }

@@ -560,7 +560,12 @@ def test_structure_cuts_stay_jax_free():
     # pass while proving nothing about the code that used to import jax.
     assert int(res["CUTS"]) == 2, f"the gas-network recognizer did not fire: {res}"
     assert int(res["TANGENTS"]) == 2, f"tangent_cut was never exercised: {res}"
-    assert res["CONVEX"] == "True", f"underestimator lost its convexity verdict: {res}"
+    # The Jensen check ran (numpy) and its verdict is False -- correctly. Since the
+    # #1952-#1958 sweep it is checked on the flow variable's model box [0, 100]
+    # instead of a hardcoded (0, sqrt(5600)); the derived ``y_lower(w)`` is real
+    # only for ``w**2 < 8750``, so ``h`` is NaN near the top of the box and is not
+    # proven convex, and ``inject_cuts`` declines the cut.
+    assert res["CONVEX"] == "False", f"convexity verdict on the model box changed: {res}"
     assert res["JAXMODS"] == "0", (
         f"structure-cut derivation imported {res['JAXMODS']} jax modules "
         f"({res.get('LEAKED', '?')}) -- #75 regression"

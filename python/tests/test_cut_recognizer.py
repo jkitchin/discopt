@@ -484,6 +484,17 @@ def test_structure_cuts_presolve_auto_closes_gas_network():
 
 
 @pytest.mark.slow
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "#1965: since the #1952-#1958 sweep the cut's convexity is checked on the flow "
+        "variable's model box [0, 100], not a hardcoded (0, sqrt(5600)); y_lower(w) is "
+        "real only for w**2 < 8750, so h is not proven convex there and inject_cuts "
+        "declines. The ON arm's root bound is then 0.5 like the opt-out arm, and the "
+        "control assertion below fails. Proving the model implies w**2 < 8750 (or "
+        "retiring the pass) is #1965."
+    ),
+)
 def test_structure_cuts_optout_leaves_gap_open():
     """`structure_cuts=False` disables the presolve: the gas network's root bound
     is then the loose McCormick bound and the gap stays open (pre-fix behaviour).

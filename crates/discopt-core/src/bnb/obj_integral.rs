@@ -784,7 +784,7 @@ mod tests {
                     csc: &csc(&a, 1, n),
                     b: &b,
                     m: 1,
-                    n: n,
+                    n,
                 },
             ) else {
                 continue;
