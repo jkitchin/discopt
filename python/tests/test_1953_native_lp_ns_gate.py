@@ -155,3 +155,23 @@ def test_rust_driver_node_gate_runs_and_opts_out():
     assert 817.0 <= float(on[3]) <= 817.0 + 1e-6
     assert on_ctr[0] > 0 and on_ctr[2] == 0  # the gate ran, and certified every node
     assert off_ctr == [0, 0, 0]  # `=0` is a real opt-out
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("gap_tolerance", [None, 1e-7, 1e-4])
+def test_interior_point_gap_is_held_to_the_solve_gap_tolerance(gap_tolerance):
+    # An interior-point stop near the optimum: (0.99999, 0) has value 2.00001, and the
+    # exact dual proves 2. The 5e-6 gap is above the HiGHS route's CERT tolerance, so
+    # it certifies only under a solve gap_tolerance that covers it, and then reports
+    # the NS bound and the true gap, never bound == objective.
+    eng, _ = _engine([0.99999, 0.0], -0.99999, [-1.0])
+    r = _solve_lp_matrix(
+        _model(), time.perf_counter(), 10.0, eng, "fake", gap_tolerance=gap_tolerance
+    )
+    assert r.objective == pytest.approx(2.00001)
+    assert r.bound == pytest.approx(2.0, abs=1e-12)
+    if gap_tolerance is not None and gap_tolerance >= 1e-4:
+        assert r.status == "optimal" and r.gap_certified is True
+        assert r.gap == pytest.approx(1e-5 / 2.00001, rel=1e-6)
+    else:
+        assert r.status == "feasible" and r.gap_certified is False

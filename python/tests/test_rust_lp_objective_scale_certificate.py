@@ -140,9 +140,9 @@ def test_the_lp_route_leads_with_the_exact_engine(monkeypatch):
     seen = []
     original = solver._solve_lp_simplex
 
-    def _record(model, t_start, time_limit=None):
+    def _record(model, t_start, time_limit=None, **kw):
         seen.append("simplex")
-        return original(model, t_start, time_limit)
+        return original(model, t_start, time_limit, **kw)
 
     monkeypatch.setenv("DISCOPT_LP_MILP_BACKEND", "rust")
     monkeypatch.setattr(solver, "_solve_lp_simplex", _record)

@@ -1233,6 +1233,22 @@ def solve_milp(
                 node_count=int(nodes),
             )
 
+        if status == "feasible" and std.int_cols.size == 0 and np.isfinite(obj):
+            # #1953: a pure LP has one node, and its only incumbent source is the
+            # driver's NS-abstain arm, which offers the verified LP-optimal vertex
+            # but proves no bound. That is a SOLVED LP whose bound is uncertified,
+            # not a search that ran out: say so (``bound=None``) and leave the
+            # certificate to the caller -- the McCormick relaxer's ``_certify``
+            # ladder and its #1869 free-column handoff key on ``optimal``, and an
+            # ``iteration_limit`` here cost them every such node.
+            return MILPResult(
+                status=SolveStatus.OPTIMAL,
+                x=x_struct,
+                objective=float(obj),
+                bound=None,
+                node_count=int(nodes),
+            )
+
         # node_limit / feasible: ``objective`` is the incumbent (upper bound) and
         # ``bound`` is the engine's dual lower bound (sound) if finite. Callers that
         # need a lower bound must read ``bound``, never ``objective``. With no

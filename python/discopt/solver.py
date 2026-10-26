@@ -13705,6 +13705,8 @@ def solve_model(
             nlp_solver=nlp_solver,
             ignored=_pounce_ignored,
             scaling=pounce_scaling,
+            gap_tolerance=gap_tolerance,
+            abs_gap_tolerance=abs_gap_tolerance,
         )
 
     # Slice held back from the search for the root-relaxation fallback so that
@@ -16716,7 +16718,15 @@ def solve_model(
                 "supports LP, MILP, QP, MIQP, QCP, QCQP, MIQCP, and MIQCQP models only."
             )
         if problem_class == ProblemClass.LP:
-            return _solve_lp_gurobi(model, t_start, time_limit, threads, gurobi_options)
+            return _solve_lp_gurobi(
+                model,
+                t_start,
+                time_limit,
+                threads,
+                gurobi_options,
+                gap_tolerance=gap_tolerance,
+                abs_gap_tolerance=abs_gap_tolerance,
+            )
         if problem_class == ProblemClass.MILP:
             return _solve_milp_gurobi(
                 model, t_start, time_limit, gap_tolerance, threads, gurobi_options
@@ -16853,7 +16863,7 @@ def solve_model(
             if _lpm_backend == "highs":
                 with _highs_route_options(presolve=_caller_presolve):
                     return _solve_lp_highs(model, t_start, time_limit)
-            _lp_res = _solve_lp(model, t_start, time_limit)
+            _lp_res = _solve_lp(model, t_start, time_limit, gap_tolerance, abs_gap_tolerance)
             if _lpm_backend == "native" and _lp_res.algorithm_route is None:
                 _lp_stats = _lp_res.solver_stats or {}
                 _lp_engine = (
@@ -26094,6 +26104,8 @@ def _solve_pounce_route(
     nlp_solver: str,
     ignored: list[str],
     scaling: Optional[dict[str, Any]] = None,
+    gap_tolerance: float | None = None,
+    abs_gap_tolerance: float | None = None,
 ) -> SolveResult:
     """``Model.solve(solver="pounce")``: one POUNCE interior-point solve (#1533).
 
@@ -26258,6 +26270,8 @@ def _solve_pounce_route(
                     "POUNCE lp-ipm",
                     strict=True,
                     relaxes_huge_bounds=True,
+                    gap_tolerance=gap_tolerance,
+                    abs_gap_tolerance=abs_gap_tolerance,
                 )
             else:
                 outcome = _solve_qp_matrix(
@@ -30235,6 +30249,8 @@ def _solve_lp(
     model: Model,
     t_start: float,
     time_limit: float | None = None,
+    gap_tolerance: float | None = None,
+    abs_gap_tolerance: float | None = None,
 ) -> SolveResult:
     """Solve an LP through the pure-Rust simplex (then POUNCE if installed).
 
@@ -30295,7 +30311,13 @@ def _solve_lp(
         """First real answer from the engine order, else any held deferral."""
         held: _DeferredUnbounded | None = None
         for engine in engines:
-            result = engine(model, t_start, time_limit)
+            result = engine(
+                model,
+                t_start,
+                time_limit,
+                gap_tolerance=gap_tolerance,
+                abs_gap_tolerance=abs_gap_tolerance,
+            )
             if isinstance(result, _DeferredUnbounded):
                 # An UNBOUNDED the #850 guard declined to certify because this
                 # engine relaxed a declared bound in [1e15, 1e20) to its own
@@ -30452,6 +30474,8 @@ def _solve_lp_simplex(
     model: Model,
     t_start: float,
     time_limit: float | None = None,
+    gap_tolerance: float | None = None,
+    abs_gap_tolerance: float | None = None,
 ) -> "SolveResult | _DeferredUnbounded | None":
     """Solve an LP using the pure-Rust warm-started simplex. Returns None when
     the simplex binding is unavailable or fails, so the caller can fall back to
@@ -30464,13 +30488,23 @@ def _solve_lp_simplex(
     # relaxes_huge_bounds stays False: the simplex's infinity threshold is 1e20,
     # so it honors a declared bound in [1e15, 1e20) as finite and its UNBOUNDED is
     # a statement about the box as declared.
-    return _solve_lp_matrix(model, t_start, time_limit, _simplex_solve_lp, "simplex")
+    return _solve_lp_matrix(
+        model,
+        t_start,
+        time_limit,
+        _simplex_solve_lp,
+        "simplex",
+        gap_tolerance=gap_tolerance,
+        abs_gap_tolerance=abs_gap_tolerance,
+    )
 
 
 def _solve_lp_pounce(
     model: Model,
     t_start: float,
     time_limit: float | None = None,
+    gap_tolerance: float | None = None,
+    abs_gap_tolerance: float | None = None,
 ) -> "SolveResult | _DeferredUnbounded | None":
     """Solve an LP using POUNCE (pure-Rust IPM). Returns None when POUNCE is
     unavailable or fails, so the caller can fall back to another engine."""
@@ -30498,7 +30532,14 @@ def _solve_lp_pounce(
     # The IPM is the one backend that relaxes a declared [1e15, 1e20) bound to its
     # own infinity, so its UNBOUNDED is the verdict the #850 guard defers on.
     result = _solve_lp_matrix(
-        model, t_start, time_limit, solve_fn, "POUNCE", relaxes_huge_bounds=True
+        model,
+        t_start,
+        time_limit,
+        solve_fn,
+        "POUNCE",
+        relaxes_huge_bounds=True,
+        gap_tolerance=gap_tolerance,
+        abs_gap_tolerance=abs_gap_tolerance,
     )
     _attach_solve_report(result, reports)
     return result
@@ -30510,6 +30551,8 @@ def _solve_lp_gurobi(
     time_limit: float | None = None,
     threads: int | None = None,
     options: Optional[dict] = None,
+    gap_tolerance: float | None = None,
+    abs_gap_tolerance: float | None = None,
 ) -> SolveResult:
     """Solve an LP using the explicit Gurobi backend."""
     import functools
@@ -30529,6 +30572,8 @@ def _solve_lp_gurobi(
         # finite (#1328, verified against gurobipy 13.0.0), so the #850 deferral
         # never applies and no _DeferredUnbounded can come back here.
         relaxes_huge_bounds=False,
+        gap_tolerance=gap_tolerance,
+        abs_gap_tolerance=abs_gap_tolerance,
     )
     if result is None:  # pragma: no cover - strict mode raises before this
         raise RuntimeError("Gurobi LP solve failed without returning a result.")
@@ -30544,6 +30589,8 @@ def _solve_lp_matrix(
     engine: str,
     strict: bool = False,
     relaxes_huge_bounds: bool = False,
+    gap_tolerance: float | None = None,
+    abs_gap_tolerance: float | None = None,
 ) -> "SolveResult | _DeferredUnbounded | None":
     """Solve a pure LP through a matrix-form ``solve_lp`` backend.
 
@@ -30680,7 +30727,7 @@ def _solve_lp_matrix(
             _deadline,
         )
         _maximize = model._objective.sense == ObjectiveSense.MAXIMIZE
-        _certified = _native_lp_certified(_obj_min, _ns)
+        _certified = _native_lp_certified(_obj_min, _ns, gap_tolerance, abs_gap_tolerance)
         _lp_stats: dict[str, float] = {"lp/iters": float(result.iterations)}
         if _prov:
             _lp_stats["lp/bound_provenance_" + _prov.replace("-", "_")] = 1.0
@@ -30709,10 +30756,12 @@ def _solve_lp_matrix(
             # the objective), never the objective on the engine's word.
             bound_valid=_bound is not None,
             bound_source="lp_dual" if _bound is not None else None,
+            # The gap the certificate proved: 0 at the HiGHS route's tolerance, else
+            # the true NS gap, which ``_native_lp_certified`` held to gap_tolerance.
             gap=(
                 _optimal_relative_gap(obj_val)
-                if _certified
-                else _gap_mod.reported_gap(obj_val, _bound)
+                if _certified and _native_lp_certified(_obj_min, _ns)
+                else _gap_mod.reported_gap(obj_val, _bound, abs_tol=abs_gap_tolerance)
             ),
             gap_certified=_certified,
             x=_unpack_solution(model, np.asarray(result.x[:n_orig])),
@@ -30811,37 +30860,106 @@ def _native_lp_ns_certificate(c, A_ub, b_ub, A_eq, b_eq, bounds, x, y, obj_const
     m_eq = 0 if A_eq is None else A_eq.shape[0]
     if y is None or np.asarray(y).shape != (m_ub + m_eq,):
         return obj, None, "", ""
-    blocks = []
-    if m_ub:
-        blocks.append([_sp.csr_matrix(A_ub), _sp.identity(m_ub, format="csr")])
-    if m_eq:
-        blocks.append([_sp.csr_matrix(A_eq)] + ([_sp.csr_matrix((m_eq, m_ub))] if m_ub else []))
-    A = _sp.bmat(blocks, format="csc") if blocks else _sp.csc_matrix((0, n))
-    b = np.concatenate(
-        [np.asarray(b_ub, dtype=np.float64).ravel() if m_ub else np.zeros(0)]
-        + [np.asarray(b_eq, dtype=np.float64).ravel() if m_eq else np.zeros(0)]
-    )
     lo = np.array([bd[0] for bd in bounds], dtype=np.float64)
     hi = np.array([bd[1] for bd in bounds], dtype=np.float64)
     lo = np.where(np.isnan(lo), -_CONSTRAINT_INF, lo)
     hi = np.where(np.isnan(hi), _CONSTRAINT_INF, hi)
-    sf = StdForm.from_arrays(
-        np.concatenate([c, np.zeros(m_ub)]),
-        A,
-        b,
-        np.concatenate([lo, np.zeros(m_ub)]),
-        np.concatenate([hi, np.full(m_ub, _CONSTRAINT_INF)]),
-        obj_const=obj_const,
+    xl = np.concatenate([lo, np.zeros(m_ub)])
+    xu = np.concatenate([hi, np.full(m_ub, _CONSTRAINT_INF)])
+    # A B&B tree certifies every node LP against the same rows; only the box moves.
+    # Reuse the slack form when the rows are *exactly* the cached ones (content, not
+    # identity: the caller rebuilds its arrays per node), swapping in the new box.
+    key = (
+        np.array(c, dtype=np.float64),
+        _native_ns_rows_key(A_ub),
+        _native_ns_rows_key(A_eq),
+        np.array(b_ub if m_ub else (), dtype=np.float64).ravel(),
+        np.array(b_eq if m_eq else (), dtype=np.float64).ravel(),
+        float(obj_const),
     )
+    hit = _NATIVE_NS_STDFORM_CACHE.get("entry")
+    if hit is not None and _native_ns_key_equal(hit[0], key):
+        if np.isnan(xl).any() or np.isnan(xu).any():
+            raise ValueError("standard form box contains NaN")
+        sf = dataclasses.replace(hit[1], xl=xl, xu=xu)
+    else:
+        blocks = []
+        if m_ub:
+            blocks.append([_sp.csr_matrix(A_ub), _sp.identity(m_ub, format="csr")])
+        if m_eq:
+            blocks.append([_sp.csr_matrix(A_eq)] + ([_sp.csr_matrix((m_eq, m_ub))] if m_ub else []))
+        A = _sp.bmat(blocks, format="csc") if blocks else _sp.csc_matrix((0, n))
+        b = np.concatenate(
+            [np.asarray(b_ub, dtype=np.float64).ravel() if m_ub else np.zeros(0)]
+            + [np.asarray(b_eq, dtype=np.float64).ravel() if m_eq else np.zeros(0)]
+        )
+        sf = StdForm.from_arrays(
+            np.concatenate([c, np.zeros(m_ub)]), A, b, xl, xu, obj_const=obj_const
+        )
+        _NATIVE_NS_STDFORM_CACHE["entry"] = (key, sf)
     ns, prov, why = certify_lp_dual(np.asarray(y, dtype=np.float64), sf, obj, deadline=deadline)
     return obj, ns, prov, why
 
 
-def _native_lp_certified(obj: float, ns: float | None) -> bool:
-    """The HiGHS route's acceptance test: ``obj - ns <= CERT_ABS + CERT_REL |obj|``."""
+#: One-entry cache of the last slack form built by :func:`_native_lp_ns_certificate`.
+_NATIVE_NS_STDFORM_CACHE: dict = {}
+
+
+def _native_ns_rows_key(A):
+    """An exact, owned copy of a row block (dense or sparse) for cache comparison."""
+    import scipy.sparse as _sp
+
+    if A is None:
+        return None
+    if _sp.issparse(A):
+        A = _sp.csr_matrix(A, dtype=np.float64, copy=True)
+        A.sort_indices()
+        return ("sp", A.shape, A.indptr.copy(), A.indices.copy(), A.data.copy())
+    return ("dn", np.array(A, dtype=np.float64))
+
+
+def _native_ns_key_equal(k1, k2) -> bool:
+    """Exact equality of two cache keys (array contents, bit for bit up to -0.0 == 0.0)."""
+
+    def eq(a, b):
+        if a is None or b is None:
+            return a is b
+        if isinstance(a, tuple):
+            return isinstance(b, tuple) and len(a) == len(b) and all(eq(p, q) for p, q in zip(a, b))
+        if isinstance(a, np.ndarray):
+            return isinstance(b, np.ndarray) and a.shape == b.shape and np.array_equal(a, b)
+        return a == b
+
+    return bool(eq(k1, k2))
+
+
+def _native_lp_certified(
+    obj: float,
+    ns: float | None,
+    gap_tolerance: float | None = None,
+    abs_gap_tolerance: float | None = None,
+) -> bool:
+    """Whether the rigorous bound ``ns`` certifies ``obj`` as optimal.
+
+    Always accepted at the HiGHS route's tolerance, ``obj - ns <= CERT_ABS +
+    CERT_REL |obj|``. With the solve's ``gap_tolerance`` it is also accepted when
+    the reported gap of ``(obj, ns)`` is within it: the meaning of ``optimal`` on
+    every other route (B&B convergence uses the same arithmetic), and the result
+    carries ``ns`` as its bound so the gap stays visible. An interior-point
+    optimum is a few ulps-times-condition from its vertex, so its own dual proves
+    a gap near 1e-8 relative, never the HiGHS route's 1e-9.
+    """
+    from discopt.solvers._gap import reported_gap
     from discopt.solvers.lp_milp_highs import CERT_ABS, CERT_REL
 
-    return ns is not None and obj - ns <= CERT_ABS + CERT_REL * abs(obj)
+    if ns is None:
+        return False
+    if obj - ns <= CERT_ABS + CERT_REL * abs(obj):
+        return True
+    if gap_tolerance is None:
+        return False
+    g = reported_gap(obj, ns, abs_tol=abs_gap_tolerance)
+    return g is not None and g <= gap_tolerance
 
 
 def _declared_box_retry_applies(model: Model) -> bool:
