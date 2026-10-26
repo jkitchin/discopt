@@ -10,9 +10,9 @@ finite bound (the reported 4.9721 was the #933 root-relaxation fallback). The sa
 spec with ``run_propagation=False`` certifies at node 1. #1983 fixed this class for
 the Python-side cutoff OBBT box only; this is the kernel's own per-node cutoff.
 
-``DISCOPT_KERNEL_UNDECIDED_RETRY`` (``SpatialTreeConfig::undecided_unpropagated_retry``)
-re-solves an undecided node over its pre-propagation box, which contains the node's
-region, so that LP's verdict holds for the region.
+``DISCOPT_KERNEL_UNDECIDED_RETRY`` (``SpatialTreeConfig::undecided_unpropagated_retry``,
+default ON; ``=0`` opts out) re-solves an undecided node over its pre-propagation box,
+which contains the node's region, so that LP's verdict holds for the region.
 """
 
 from __future__ import annotations
@@ -32,6 +32,8 @@ from discopt.validation.feasibility import verify_point
 
 sys.path.insert(0, os.path.dirname(__file__))
 import serialize_builder_cases as cases  # noqa: E402
+
+pytestmark = pytest.mark.smoke
 
 FLAG = "DISCOPT_KERNEL_UNDECIDED_RETRY"
 
@@ -80,7 +82,7 @@ def _root(model, box, incumbent, retry):
 
 
 def test_the_lowered_either_or_certifies_with_the_retry(monkeypatch):
-    monkeypatch.setenv(FLAG, "1")
+    monkeypatch.delenv(FLAG, raising=False)  # the default
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         r = _lowered().solve(time_limit=30)
@@ -91,13 +93,23 @@ def test_the_lowered_either_or_certifies_with_the_retry(monkeypatch):
     assert stats.get("tree/prop_retry_decided", 0) >= 1, stats  # the retry fired (§6)
 
 
-def test_the_retry_is_off_by_default_and_reports_zero(monkeypatch):
-    monkeypatch.delenv(FLAG, raising=False)
+def test_the_retry_is_on_by_default_and_zero_opts_out(monkeypatch):
     from discopt.solver import _kernel_undecided_retry_enabled
 
-    assert not _kernel_undecided_retry_enabled()
-    monkeypatch.setenv(FLAG, "1")
+    monkeypatch.delenv(FLAG, raising=False)
     assert _kernel_undecided_retry_enabled()
+    monkeypatch.setenv(FLAG, "0")
+    assert not _kernel_undecided_retry_enabled()
+
+
+def test_the_opt_out_is_the_tree_before_the_retry(monkeypatch):
+    """``=0`` reproduces the stall (the legacy path stays intact) and reports 0."""
+    monkeypatch.setenv(FLAG, "0")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = _lowered().solve(time_limit=3)
+    assert r.status != "optimal", (r.status, r.node_count)
+    assert (r.solver_stats or {}).get("tree/prop_retries") == 0.0
 
 
 def test_differential_bound_on_fixed_boxes():

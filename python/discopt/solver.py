@@ -2474,7 +2474,8 @@ def _try_native_spatial_kernel(
     # #1962: the integral-point probe (default ON; ``=0`` opts out; see the helper).
     if _kernel_int_probe_enabled():
         solve_kwargs["int_fix_probe"] = True
-    # #1995: re-solve an undecided node LP over its pre-propagation box (see the helper).
+    # #1995: re-solve an undecided node LP over its pre-propagation box (default ON;
+    # ``=0`` opts out; see the helper).
     if _kernel_undecided_retry_enabled():
         solve_kwargs["undecided_unpropagated_retry"] = True
     if _bound_reserve > 0.0:
@@ -11488,7 +11489,10 @@ def _kernel_int_probe_enabled() -> bool:
 
 def _kernel_undecided_retry_enabled() -> bool:
     """#1995: ``DISCOPT_KERNEL_UNDECIDED_RETRY`` for the native spatial kernel
-    (``SpatialTreeConfig::undecided_unpropagated_retry``, default OFF).
+    (``SpatialTreeConfig::undecided_unpropagated_retry``).
+
+    **Graduated (default ON, 2026-10-26, #1995); ``=0`` opts out** and restores
+    the tree before it (an undecided node is branched over its propagated box).
 
     When a node LP decides nothing over a box that the node's FBBT propagation
     tightened, the kernel re-solves the node over the box it was pushed with and
@@ -11502,9 +11506,22 @@ def _kernel_undecided_retry_enabled() -> bool:
     node 1). The pre-propagation box contains the node's region, so its bound,
     emptiness proof and tight points hold for the region. Bound-changing only at a
     node whose first LP is undecided; everywhere else the tree is unchanged.
-    Probe: ``n_prop_retries`` / ``n_prop_retry_decided``. Read at call time.
+    Probe: ``tree/prop_retries`` / ``tree/prop_retry_decided``.
+
+    Section 5 panels (30 s, interleaved, every incumbent ``verify_point``-ed):
+    ``issue1944_rlt_panel.py --with-corpus`` (271 instances, fires on 4):
+    cert-clean, 1,626 checks, 0 problems; certified +nous1 (OFF time limit at
+    30.7 s twice, ON optimal at 24.0/24.3 s, 20 retries), tighter 30 s bounds on
+    the other three it fires on (ex5_2_5, tln6, wastewater15m1). The listed loss
+    ``pointpack04`` routes to the Python tree, where the flag is never read; it
+    certifies in 29 nodes / ~3.6 s in both arms on re-run (the panel row ran
+    under load). ``issue1995_gdp_panel.py`` (every serialize bound-neutral case
+    plus the native GDPlib models under ``gdp_method="simplex"``, 54 cases):
+    cert-clean, 424 checks, 0 problems; fires on #1995's case only, certified
+    there, the other 53 node-identical. ``performance-plan.md`` section 90.
+    Read at call time.
     """
-    return os.environ.get("DISCOPT_KERNEL_UNDECIDED_RETRY", "0").strip().lower() not in (
+    return os.environ.get("DISCOPT_KERNEL_UNDECIDED_RETRY", "1").strip().lower() not in (
         "0",
         "false",
         "no",
