@@ -11581,10 +11581,29 @@ def _py_tree_spatial_score_enabled() -> bool:
     gap on a candidate. Branching order only: both children still cover the parent
     box, so no bound moves. Probe: ``tree/py_spatial_score_picks``.
 
-    Default **off** pending its §5 panel. Read at call time.
+    **Graduated (default ON, 2026-10-26, #1978); ``=0`` restores the legacy rule.**
+
+    Entry experiment (#1975's rescaled prolog outer piece, Python tree): legacy bound
+    ~0 after 2,463 nodes / 120 s; ON bound 0.034931 in 75 nodes, splitting only the
+    two narrow factors (certified at ``abs_gap_tolerance=1e-3`` in 71 nodes). A first
+    version scored the engine's ``bilinear_map``, which also holds RLT-lifted
+    products (#1944), and steered branching onto linear-only columns; it now scores
+    the model's own terms (``NonlinearTerms``).
+
+    Section 5 panel (``flag_onoff_corpus_panel.py --flag
+    DISCOPT_PY_TREE_SPATIAL_SCORE``, 287 instances -- in-repo corpus + every
+    MINLPLib instance <= 200 vars/cons with an unbounded continuous variable after
+    FBBT -- 20 s, interleaved; the rule fires on 31): cert-clean (460 incumbent
+    checks, 0 false bounds; the one certification flip each way, ``slay06m`` /
+    ``smallinvDAXr3b100-110``, is on instances where the rule never fired). Where it
+    fires: nodes where both certify 218 -> 168, wall 73.1 -> 66.0 s; bounds of the
+    uncertified, replicated 3x: tighter 3/3 on ``chenery`` and ``pointpack06..14``
+    (e.g. 0.83 -> 0.56), looser 3/3 on ``knp3-12`` (5.46 -> 7.72, a symmetric sphere
+    packing where round-robin bisection suits the symmetry) and
+    ``hybriddynamic_varcc`` (-0.6%). Read at call time.
     """
-    raw = os.environ.get("DISCOPT_PY_TREE_SPATIAL_SCORE", "0").strip().lower()
-    return raw in ("1", "true", "yes", "on")
+    raw = os.environ.get("DISCOPT_PY_TREE_SPATIAL_SCORE", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off", "")
 
 
 def _register_spatial_score_terms(tree, relaxer) -> bool:

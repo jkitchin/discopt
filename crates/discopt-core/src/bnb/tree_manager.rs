@@ -291,8 +291,8 @@ pub struct TreeManager {
     branch_deprioritized: Vec<bool>,
     /// #1978: nonlinear terms of original columns the spatial branch scores its
     /// continuous column on ([`select_spatial_score_variable`]). Empty (the
-    /// default, and the driver's choice when `DISCOPT_PY_TREE_SPATIAL_SCORE` is
-    /// off) keeps the legacy longest-edge rule.
+    /// default here; the Python driver registers terms unless
+    /// `DISCOPT_PY_TREE_SPATIAL_SCORE=0`) keeps the legacy longest-edge rule.
     spatial_score_terms: Vec<ScoreTerm>,
     /// #1978 probe: spatial branches the score rule chose (not the fallback).
     spatial_score_picks: u64,
