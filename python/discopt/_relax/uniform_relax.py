@@ -2122,7 +2122,8 @@ def _pole_envelope_enabled() -> bool:
     pole (``_emit_1d_at_pole``) and the one-sided enclosure of a negative power on a
     base touching 0 (``_pow_bounds``). Graduated (default ON, 2026-10-26; section 5
     bundle panel, 287 instances, 20 s: cert-clean, 463 checks, 0 false bounds; a bound
-    where none on chakra, ex8_5_1..6, hhfair, wallfix; launch certifies 3/3 vs 0/3).
+    where none on chakra, ex8_5_1..6, hhfair, 4/4 runs; launch certifies 4/4 vs 0/4;
+    performance-plan section 92).
     ``=0`` opts out.
     Read at call time."""
     return os.environ.get("DISCOPT_POLE_ENVELOPE", "1").strip().lower() not in (

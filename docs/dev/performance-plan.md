@@ -12015,6 +12015,47 @@ midpull too (57 nodes).
 
 **#1978 is closed:** the stall is gone on both engines.
 
+## 92. #1979-#1982: bounds through function domains, poles and fractional powers (graduated 2026-10-26)
+
+**Probes.** #1975's census (§90) found 7 instances where SCIP's presolve closes a
+negative-cost recession ray that discopt's root LP keeps (`chakra`, `wallfix`,
+`ex8_5_2..6`), plus `ex8_5_1` and 3 with rays only on lifted columns (`hhfair`,
+`launch`, `like`). Each fix below is general and was built against the probe, then
+measured on the whole panel.
+
+| issue | probe | mechanism (flag) | result |
+|---|---|---|---|
+| #1979 | `ex8_5_1..6` | affine domain rows of `log`/`sqrt`/fractional powers to the LP and OBBT, structural FBBT domain pass (`FBBT_SIGN_DOMAIN`); tangent half of a 1-D envelope at a closed-edge pole, one-sided negative power (`POLE_ENVELOPE`); Cauchy root bound of the cubic EOS (`POLY_ROOT_BOUND`); `x log x` atom on `[0, hi]` (`ENTROPY_ATOM`) | `None` -> finite on all six, every bound below MINLPLib's best |
+| #1980 | `chakra` | verified monotone inversion of `x^p`, non-integer `p > 0`, in FBBT (`FBBT_SIGN_DOMAIN`) | `None` -> -183.88 (opt -179.13) |
+| #1981 | `launch` | a power of a positive base enclosed `>= 0` (`POLE_ENVELOPE`): `x**-0.1959` on `[5, inf)` dipped to `-5e-324` | certifies 2257.79756 (= MINLPLib opt) in 5 nodes |
+| #1981 | `hhfair` | product-equality rule takes a straddling factor's sign from an LP over the linear rows (`FBBT_SIGN_DOMAIN`) | `None` -> -109.68 (best -87.159) |
+| #1981 | `like` | none: a Gaussian-mixture likelihood with `sigma >= 0` is unbounded below (-ln 10 per decade of `sigma`) | "no bound" is correct |
+| #1982 | `wallfix` | non-integer power domain shipped; the one-sided product division **declined** | root LP still unbounded |
+
+**#1982's product rule is the retired `DISCOPT_FBBT_ONE_SIDED_DIV`.** `x * y == 1`,
+`y >= 0` => `x >= 0` is the #1616 rule, retired on 2026-10-05 after its 29-instance
+panel lost two certificates at +11 % wall (audit row). The first bundle panel carried
+it again; its only measured gain was `wallfix`'s bound. It was removed, and the bundle
+re-measured without it. A narrower variant (tighten only an infinite side) is being
+measured separately against the audit row's 29 instances.
+
+**Section 5 panel** (`flag_onoff_corpus_panel.py` with all four flags, in-repo corpus
++ the 227-instance class = 287 instances, 20 s, interleaved; the 38 differing instances
+replicated 3x; `docs/dev/data/1978-1982-panels/panel_bundle.jsonl`, `rep_bundle_*.jsonl`,
+`aggregate_bundle.py`):
+- **Cert-clean:** 463 incumbent checks, 0 bounds past a reference, 0 errors.
+- **Reproducible gains (4/4 runs):** a bound where OFF has none on `chakra`,
+  `ex8_5_1..6`, `hhfair` (8); `launch` certified (OFF 0/4); `prob07` 87,193 -> 134,073.
+- **Reproducible loss:** `chenery` -1184.6 -> -1189.6 (0.4 %). Root bound identical
+  in both arms (-1211.4994); node-limited at 50 the trees diverge (71 vs 57 nodes), so
+  it is the search path, not a weaker relaxation.
+- **Noise, not the bundle:** `ex14_1_2` certifies at 25-28 s in both arms at 60 s
+  (identical bound, 3 nodes), so the 20 s limit splits it (OFF 1/4, ON 2/4); `slay06m`
+  certifies 3/4 in both arms; the `autocorr_bern*`, `sssd*`, `smallinv*` differences
+  flip both ways across replicates.
+
+Graduated: all four default ON, `=0` opts out.
+
 ## 94. #1995: the kernel's cutoff propagation collapsed node boxes to slivers (2026-10-26)
 
 **Symptom.** `gdp.simplex` of `either_or([[x >= 4, y >= 1], [y >= 6, x >= 1]])`

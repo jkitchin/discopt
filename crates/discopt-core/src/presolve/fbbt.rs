@@ -1251,7 +1251,8 @@ fn increasing_preimage(
 /// **Default ON since 2026-10-26** -- graduated as one bundle with #1979's function
 /// domains, #1980's fractional-power inversion and #1981's LP-implied sign: section 5
 /// panel over 287 instances, cert-clean (463 checks, 0 false bounds), a bound where
-/// none on 9 instances, `launch` certified 3/3 vs 0/3. `=0` opts out.
+/// none on 8 instances and `launch` certified, 4/4 runs (performance-plan section 92).
+/// `=0` opts out.
 ///
 /// The one-sided `Mul` division (a factor touching zero still fixing the other's
 /// sign) is deliberately NOT here: it is the retired `DISCOPT_FBBT_ONE_SIDED_DIV`
