@@ -7954,26 +7954,23 @@ def _kernel_cutoff_slack(
     return slack if math.isfinite(slack) and slack > 0.0 else 0.0
 
 
-#: The wall cap of the #1983 root probe (seconds); a probe that hits it counts as
-#: decided, so a slow root keeps #1871's box exactly as before.
-_KERNEL_ROOT_PROBE_S = 2.0
-
-
 def _kernel_root_undecided(spec: dict, outer_deadline: Optional[float]) -> bool:
     """Whether the kernel's root node LP over ``spec`` ends undecided (#1983).
 
     One node, no hooks: a probe of the root LP's verdict only, which decides
     nothing a certificate rests on (the solve that follows runs on whichever box
-    is chosen, and every box offered is valid). Capped by ``_KERNEL_ROOT_PROBE_S``.
+    is chosen, and every box offered is valid). Its work is bounded
+    deterministically -- one node, the simplex's own iteration cap -- so it gets
+    the solve's whole remaining time (role 1, as the kernel's own call), never a
+    carved wall slice that would make the chosen box depend on machine speed
+    (#912, #1187). Out of time counts as decided: #1871's box is kept.
     """
     from discopt import _rust
 
-    cap = _KERNEL_ROOT_PROBE_S
-    if outer_deadline is not None:
-        cap = min(cap, max(0.0, outer_deadline - time.perf_counter()))
-    if cap <= 0.0:
+    remaining = None if outer_deadline is None else max(0.0, outer_deadline - time.perf_counter())
+    if remaining is not None and remaining <= 0.0:
         return False
-    res = _rust.solve_spatial_tree_py(**spec, max_nodes=1, time_limit_s=float(cap))
+    res = _rust.solve_spatial_tree_py(**spec, max_nodes=1, time_limit_s=remaining)
     return bool(res.get("root_status") == "undecided")
 
 
@@ -8087,17 +8084,24 @@ def _warn_abs_gap_not_loosened(abs_gap_tolerance: Optional[float], gap_tolerance
     )
 
 
-def _native_kernel_covers(model, lb, ub, n_vars: int, deadline: float) -> Optional[bool]:
+def _native_kernel_covers(model, lb, ub, n_vars: int) -> Optional[bool]:
     """Whether the native kernel's producer accepts ``model`` on ``[lb, ub]`` (#1983).
 
     ``False`` when :func:`build_spatial_kernel_spec` declines it (out of the
     kernel's term families -- an ``exp`` rate law, for one), ``True`` when it
-    builds, ``None`` when ``deadline`` ran out first (unknown). Only asked when an
-    option already keeps the solve off the kernel, to decide whether saying so is
-    true; it decides no route.
+    builds, ``None`` when unknown. Only asked when an option already keeps the
+    solve off the kernel, to decide whether saying so is true; it decides no
+    route. Above ``_BYPASS_COVERAGE_MAX_VARS`` columns (the size gate #1871's
+    cutoff OBBT uses) it does not build and answers ``None``: the spec is two
+    relaxation builds, which outlasted a whole solve on a dense QP. Within the
+    gate the build polls only the solve's own role-1 deadline (no carved wall
+    slice, #912/#1187); running out of it is ``None`` too.
     """
     from discopt._relax.spatial_producer import build_spatial_kernel_spec
 
+    if n_vars > _BYPASS_COVERAGE_MAX_VARS:
+        return None
+    deadline = _role1_deadline()
     spec = build_spatial_kernel_spec(
         model,
         bounds=(
@@ -8108,13 +8112,12 @@ def _native_kernel_covers(model, lb, ub, n_vars: int, deadline: float) -> Option
     )
     if spec is not None:
         return True
-    return None if time.perf_counter() >= deadline else False
+    return None if deadline is not None and time.perf_counter() >= deadline else False
 
 
-#: The most a #1678 warning may spend finding out whether the kernel would have
-#: taken the model (seconds), and the share of the remaining budget it may use.
-_BYPASS_COVERAGE_BUDGET_S = 1.0
-_BYPASS_COVERAGE_BUDGET_FRACTION = 0.05
+#: The largest model (columns) whose kernel coverage the #1678 warning checks;
+#: #1871's cutoff-OBBT gate.
+_BYPASS_COVERAGE_MAX_VARS = 200
 
 
 def _warn_native_kernel_bypassed(options: list[str], covers=None) -> None:
@@ -18138,11 +18141,7 @@ def solve_model(
     )
 
     def _bypass_coverage() -> Optional[bool]:
-        _left = (t_start + float(time_limit)) - time.perf_counter()
-        _budget = min(_BYPASS_COVERAGE_BUDGET_S, _BYPASS_COVERAGE_BUDGET_FRACTION * _left)
-        if not _budget > 0.0:
-            return None
-        return _native_kernel_covers(model, lb, ub, n_vars, time.perf_counter() + _budget)
+        return _native_kernel_covers(model, lb, ub, n_vars)
 
     _warn_native_kernel_bypassed(_native_bypass, covers=_bypass_coverage)
     if not _native_budget_spent and not _native_bypass:

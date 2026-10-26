@@ -85,11 +85,14 @@ def test_convex_kernel_names_its_route():
 
 
 def _bilinear() -> dm.Model:
+    # A model the native kernel takes (#1983: the previous one, ``x * y >= -1`` over
+    # [-2, 2]^2, is declined by the kernel's producer, so a plain solve never reached
+    # the kernel and the warning asserted below was itself the false one).
     m = dm.Model("w")
-    x = m.continuous("x", lb=-2, ub=2)
-    y = m.continuous("y", lb=-2, ub=2)
-    m.subject_to(x * y >= -1)
-    m.minimize(x * y + x - y)
+    x = m.continuous("x", lb=0, ub=4)
+    y = m.continuous("y", lb=0, ub=4)
+    m.subject_to(x + y <= 5)
+    m.minimize(-x * y + x)
     return m
 
 
@@ -110,8 +113,11 @@ def test_strategy_moving_solve_to_python_tree_warns(monkeypatch):
 
 def test_plain_solve_does_not_warn(monkeypatch):
     monkeypatch.delenv("DISCOPT_NATIVE_SPATIAL_KERNEL", raising=False)
-    _, msgs = _bypass_warnings()
+    r, msgs = _bypass_warnings()
     assert msgs == []
+    # The premise of the strategy test above: without the option this model IS on
+    # the kernel, so moving it off is something to say.
+    assert r.algorithm_route is not None and r.algorithm_route.startswith("native-spatial")
 
 
 def test_kernel_opt_out_does_not_warn(monkeypatch):
