@@ -149,3 +149,47 @@ def test_row_filter_retry_optout_restores_it(monkeypatch):
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def _post_build_grant(monkeypatch, **kw) -> float:
+    """The ``time_limit`` the first node LP receives after a 0.4 s cold build."""
+    import discopt._relax.mccormick_lp as mlp
+    import discopt._relax.milp_relaxation as mr
+
+    real_build = mlp.build_milp_relaxation
+    grants = []
+
+    def slow_build(*a, **k):
+        time.sleep(0.4)
+        return real_build(*a, **k)
+
+    def record(self, *a, **k):
+        grants.append(k.get("time_limit"))
+        return mr.MilpRelaxationResult(status="numerical")
+
+    monkeypatch.setattr(mlp, "build_milp_relaxation", slow_build)
+    monkeypatch.setattr(mr.MilpRelaxationModel, "solve", record)
+
+    m = dm.Model("n1989b")
+    x = m.continuous("x", lb=0.0, ub=2.0)
+    y = m.continuous("y", lb=0.0, ub=2.0)
+    m.minimize(x * y - x)
+    relaxer = mlp.MccormickLPRelaxer(m)
+    monkeypatch.setattr(relaxer, "_try_incremental_node", lambda *a, **k: None)
+    relaxer.solve_at_node(np.zeros(2), np.full(2, 2.0), separate=False, **kw)
+    assert grants, "probe never reached the node LP (CLAUDE.md §6)"
+    return grants[0]
+
+
+def test_solve_deadline_caps_the_post_build_grant(monkeypatch):
+    # The node loop's grant is "time left until the solve deadline"; a build that
+    # outlasts it must not restart it. 0.3 s grant, 0.4 s build: nothing is left,
+    # so the LP gets the floor, not a fresh 0.3 s.
+    g = _post_build_grant(monkeypatch, time_limit=0.3, solve_deadline=time.perf_counter() + 0.3)
+    assert g <= 0.1, g
+
+
+def test_without_solve_deadline_the_grant_is_unchanged(monkeypatch):
+    # Every other caller passes a fixed LP budget and keeps it after the build.
+    g = _post_build_grant(monkeypatch, time_limit=0.3)
+    assert g > 0.25, g

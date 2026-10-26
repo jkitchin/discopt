@@ -20480,6 +20480,9 @@ def solve_model(
                         np.asarray(batch_ub[i]),
                         time_limit=max(_node_remaining, _DEADLINE_NODE_FLOOR_S),
                         abort_deadline=_node_abort_deadline,
+                        # #1989: the grant is restarted after the cold build, so cap
+                        # the node's LPs at the solve's own (live) end as well.
+                        solve_deadline=t_start + time_limit,
                         round_deadline=(_deadline if _round_budget_enabled else None),
                         yield_round=_yield_round,
                         inherited_cuts=_root_cut_pool,
@@ -20861,6 +20864,9 @@ def solve_model(
                         node_ub,
                         time_limit=max(_deadline - time.perf_counter(), _DEADLINE_NODE_FLOOR_S),
                         abort_deadline=_node_abort_deadline,
+                        # #1989: the grant is restarted after the cold build, so cap
+                        # the node's LPs at the solve's own (live) end as well.
+                        solve_deadline=t_start + time_limit,
                         round_deadline=(_deadline if _round_budget_enabled else None),
                         yield_round=_serial_yield_round,
                         inherited_cuts=_root_cut_pool,

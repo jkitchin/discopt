@@ -1281,6 +1281,7 @@ class MccormickLPRelaxer:
         build_deadline: Optional[float] = None,
         abort_deadline: Optional[float] = None,
         round_deadline: Optional[float] = None,
+        solve_deadline: Optional[float] = None,
         yield_round: bool = False,
         rigorous_only: bool = False,
     ) -> MccormickLPResult:
@@ -1297,6 +1298,14 @@ class MccormickLPRelaxer:
         loop keeps the default.
 
         Every other argument goes to :meth:`_solve_at_node_checked` unchanged.
+
+        ``solve_deadline`` (#1989, absolute ``perf_counter`` time, default None) caps
+        the node's internal solve/separation deadline and nothing else: the cold build
+        is not clamped by it. ``time_limit`` is anchored AFTER the cold build (so a
+        caller passing a fixed LP budget still gets it), which means a node-loop grant
+        of "time left until the solve deadline" restarted on build exit and let the
+        node's LPs run up to one build past the solve's own deadline. The spatial
+        node loops pass their solve deadline here; every other caller is unchanged.
         """
         previous = self._rigorous_only
         self._rigorous_only = rigorous_only
@@ -1314,6 +1323,7 @@ class MccormickLPRelaxer:
                 build_deadline=build_deadline,
                 abort_deadline=abort_deadline,
                 round_deadline=round_deadline,
+                solve_deadline=solve_deadline,
                 yield_round=yield_round,
             )
         finally:
@@ -1334,6 +1344,7 @@ class MccormickLPRelaxer:
         build_deadline: Optional[float] = None,
         abort_deadline: Optional[float] = None,
         round_deadline: Optional[float] = None,
+        solve_deadline: Optional[float] = None,
         yield_round: bool = False,
     ) -> MccormickLPResult:
         """:meth:`solve_at_node`'s body: the solve plus the C-43 pool re-verification.
@@ -1401,6 +1412,7 @@ class MccormickLPRelaxer:
             build_deadline=build_deadline,
             abort_deadline=abort_deadline,
             round_deadline=round_deadline,
+            solve_deadline=solve_deadline,
             yield_round=yield_round,
         )
         # C-43 pool-infeasible re-verification. Only relevant when (a) this was a
@@ -1449,6 +1461,7 @@ class MccormickLPRelaxer:
                 want_marginals=False,
                 skip_pool_separators=False,
                 abort_deadline=abort_deadline,
+                solve_deadline=solve_deadline,
             )
             if base_free.status != "infeasible":
                 # The pool row(s) caused a FALSE fathom of a non-empty node. Re-solve
@@ -1468,6 +1481,7 @@ class MccormickLPRelaxer:
                     want_marginals=want_marginals,
                     skip_pool_separators=False,
                     abort_deadline=abort_deadline,
+                    solve_deadline=solve_deadline,
                 )
                 self._pool_stats["dropped_nodes"] += 1
                 # Adopt the pool-free result unconditionally: it is a valid relaxation
@@ -1554,6 +1568,7 @@ class MccormickLPRelaxer:
         build_deadline: Optional[float] = None,
         abort_deadline: Optional[float] = None,
         round_deadline: Optional[float] = None,
+        solve_deadline: Optional[float] = None,
         yield_round: bool = False,
     ) -> MccormickLPResult:
         """Solve the McCormick LP relaxation restricted to the given bound box.
@@ -1862,6 +1877,13 @@ class MccormickLPRelaxer:
         _deadline = None if time_limit is None else time.perf_counter() + time_limit
         if round_deadline is not None:
             _deadline = round_deadline if _deadline is None else min(_deadline, round_deadline)
+        # #1989: ``solve_deadline`` is the enclosing solve's own end. The post-build
+        # anchor above hands the LPs a fresh ``time_limit`` after however long the
+        # build took; this cap keeps them from outliving the solve. Not a build clamp
+        # (that is ``round_deadline``'s job, behind its own flag), so it is bound-
+        # neutral on every node that finishes inside the solve's limit.
+        if solve_deadline is not None:
+            _deadline = solve_deadline if _deadline is None else min(_deadline, solve_deadline)
 
         def _remaining() -> Optional[float]:
             if _deadline is None:
