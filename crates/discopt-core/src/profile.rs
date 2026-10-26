@@ -411,6 +411,17 @@ counters!(
     // re-verified (`DISCOPT_FARKAS_RAY_CLEANUP`). Each one is a node the flag fathoms
     // that the raw ray could not.
     FarkasCleanupRescue,
+    // #1941 (ex1252a): the phase-1 artificial drive-out. `Calls` counts passes that
+    // had a basic artificial to expel, `Pivots` the ratio-test steps they took,
+    // `BudgetExhausted` passes that ran to their `8(m+n)+200` pivot cap.
+    // `RateRejects` counts entering candidates refused because their phase-1
+    // reduced cost would RAISE the artificial sum, `StallStops` passes ended by the
+    // no-progress cap (`DISCOPT_DRIVE_OUT_MONOTONE`).
+    DriveOutCalls,
+    DriveOutPivots,
+    DriveOutBudgetExhausted,
+    DriveOutRateRejects,
+    DriveOutStallStops,
     // #1008: the same treatment for the PRIMAL unbounded ray, which had none. An
     // `Infeasible` verdict must clear `farkas_ray_certifies_cols`; an `Unbounded`
     // verdict was taken on faith from "the ratio test found no blocking row",

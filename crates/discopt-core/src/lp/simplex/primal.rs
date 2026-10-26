@@ -1009,6 +1009,23 @@ pub(super) fn farkas_ray_certifies_cols(
         && farkas_ray_certifies_cleaned(y, cols, n, m, b, l, u, FARKAS_RAY_NOISE_REL)
 }
 
+/// Whether the phase-1 artificial drive-out is monotone in the artificial sum
+/// (`DISCOPT_DRIVE_OUT_MONOTONE`, read once; #1941). Default ON; `=0` restores the
+/// legacy pass, which can cycle between two targets (see
+/// `Simplex::drive_out_basic_artificials`). It changes only how a pass searches;
+/// every verdict after it is still Farkas- or audit-verified.
+fn drive_out_monotone_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("DISCOPT_DRIVE_OUT_MONOTONE")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| !matches!(v.trim(), "0" | "false" | "False"))
+            .unwrap_or(true)
+    })
+}
+
 /// Relative threshold below which a Farkas-ray entry counts as rounding noise
 /// (#1355): `|y_i| ≤ τ·‖y‖∞`. The captured OA master certified all 10 of its
 /// cleanups at every τ in `{1e-12, 1e-10, 1e-8}` (5–9 entries zeroed each time),
@@ -1804,10 +1821,26 @@ impl<'a> Simplex<'a> {
     /// residual then flows to the caller's Farkas-verified infeasibility test.
     /// Returns `Err(())` only on a factorization breakdown.
     ///
-    /// Soundness: ratio-test pivots preserve `A x = b` and phase-1 feasibility and
-    /// never *raise* the artificial sum, so a feasible LP is never turned infeasible
-    /// nor the reverse — the pass only completes the phase-1 the reduced-cost loop
-    /// left short.
+    /// Soundness: ratio-test pivots preserve `A x = b` and phase-1 feasibility, so a
+    /// feasible LP is never turned infeasible nor the reverse — the pass only
+    /// completes the phase-1 the reduced-cost loop left short, and every verdict
+    /// after it is still Farkas- or audit-verified.
+    ///
+    /// **Monotonicity (#1941, `DISCOPT_DRIVE_OUT_MONOTONE`, default ON).** This
+    /// docstring used to add that the pivots "never *raise* the artificial sum".
+    /// That is false: a step that lowers the *target* artificial can raise another
+    /// basic one, since the ratio test only stops artificials at 0, never above.
+    /// Measured on a captured ex1252a node LP (198×270): a 4-pivot cycle between two
+    /// targets, sum `0.3447 → 0.3485 → 0.4054 → 0.3485 → 0.3447`, every step
+    /// non-degenerate so the per-target degenerate cap never fired. It ran the whole
+    /// `8(m+n)+200` budget (3944 pivots, 278 ms on the dense retry) and returned
+    /// `Numerical` anyway. With the flag on, an entering column is admitted only if
+    /// its phase-1 reduced cost `d_j = −πᵀA_j` (`π = B⁻ᵀ c₁_B`) does not raise the
+    /// sum in its move direction (`dir·d_j ≤ tol`). That is the property the pass
+    /// needs: on the C-39 false-infeasible class the true phase-1 minimum is 0, and
+    /// a non-increasing path to it exists from any basis. A pass that goes
+    /// `2m+20` pivots without lowering the best sum or the basic-artificial count
+    /// stops (a constant-sum cycle). `=0` restores the legacy pass byte-for-byte.
     fn drive_out_basic_artificials(&mut self, art_sign: &[f64]) -> Result<(), ()> {
         let mut xb = self.basic_values(art_sign)?;
         // Cheap early-out: the common healthy phase-1 leaves no basic artificial, so
@@ -1820,6 +1853,19 @@ impl<'a> Simplex<'a> {
         if !any_basic_art {
             return Ok(());
         }
+        crate::profile::incr(crate::profile::Ctr::DriveOutCalls);
+        let monotone = drive_out_monotone_enabled();
+        // No-progress cap for the monotone pass: pivots since the artificial sum or
+        // the basic-artificial count last improved.
+        let art_state = |basis: &[usize], xb: &[f64], n: usize| -> (f64, usize) {
+            basis
+                .iter()
+                .enumerate()
+                .filter(|(_, &j)| j >= n)
+                .fold((0.0, 0), |(s, k), (slot, _)| (s + xb[slot].abs(), k + 1))
+        };
+        let (mut best_sum, mut best_count) = art_state(&self.basis, &xb, self.n);
+        let mut since_progress = 0usize;
 
         // A usable pivot must be non-tiny (basis conditioning).
         const PIVOT_MIN: f64 = 1e-7;
@@ -1839,6 +1885,17 @@ impl<'a> Simplex<'a> {
         let mut cur_target: Option<usize> = None;
         let mut degenerate_run = 0usize;
         while pivots < max_pivots {
+            if monotone {
+                let (sum, count) = art_state(&self.basis, &xb, self.n);
+                if count < best_count || sum < best_sum - ART_TOL * (1.0 + best_sum) {
+                    best_sum = best_sum.min(sum);
+                    best_count = best_count.min(count);
+                    since_progress = 0;
+                } else if since_progress > degenerate_cap {
+                    crate::profile::incr(crate::profile::Ctr::DriveOutStallStops);
+                    return Ok(());
+                }
+            }
             // (Re)select a basic artificial still positive on a not-yet-stuck row.
             let slot = match cur_target {
                 Some(s) if self.basis[s] >= self.n && !stuck[s] && xb[s].abs() > ART_TOL => s,
@@ -1867,6 +1924,16 @@ impl<'a> Simplex<'a> {
             if self.lu.btran(&mut rho).is_err() {
                 return Err(());
             }
+            // Phase-1 dual `π = B⁻ᵀ c₁_B` (1 on every basic artificial), for the
+            // monotonicity filter below.
+            let pi = if monotone {
+                match self.phase1_farkas_ray(art_sign) {
+                    Some(y) => Some(y),
+                    None => return Err(()),
+                }
+            } else {
+                None
+            };
             let mut q: Option<usize> = None;
             let mut q_dir = 1.0f64;
             let mut best = PIVOT_MIN;
@@ -1893,7 +1960,15 @@ impl<'a> Simplex<'a> {
                 let available = self.is_free(j)
                     || (dir_by_sign > 0.0 && at_lower)
                     || (dir_by_sign < 0.0 && !at_lower);
+                // Moving `j` by `dir·t` changes Σ artificials by `dir·d_j·t`, with
+                // `d_j = −πᵀA_j` (a structural's phase-1 cost is 0).
                 if available {
+                    if let Some(pi) = pi.as_ref() {
+                        if -dir_by_sign * self.cols.dot(j, pi) > self.tol {
+                            crate::profile::incr(crate::profile::Ctr::DriveOutRateRejects);
+                            continue;
+                        }
+                    }
                     best = arj.abs();
                     q = Some(j);
                     q_dir = dir_by_sign;
@@ -1991,6 +2066,8 @@ impl<'a> Simplex<'a> {
                 *xbi -= dir * t * alpha[i];
             }
             pivots += 1;
+            since_progress += 1;
+            crate::profile::incr(crate::profile::Ctr::DriveOutPivots);
             match leave {
                 None => {
                     if t >= q_gap && q_gap < INF {
@@ -2034,6 +2111,7 @@ impl<'a> Simplex<'a> {
                 }
             }
         }
+        crate::profile::incr(crate::profile::Ctr::DriveOutBudgetExhausted);
         Ok(())
     }
 
