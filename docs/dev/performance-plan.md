@@ -12094,3 +12094,19 @@ larger general defects ahead of it, and each one is a prerequisite or a bigger w
 2. **discopt's spatial branching on bounded bilinear problems.** prolog's transformed
    piece needs >1.17M nodes without progress, against SCIP's 10,243. The 1/T piece
    cannot work until this is fixed, and the defect is general.
+
+**Retraction (2026-10-26, after #1970 and #1978): "Step 4 fails" no longer holds.**
+The kill criterion above was met at step 4 *only* because discopt stalled on
+prolog's bounded rescaled piece. That stall was the general bilinear-branching
+defect named in point 2, and it is now fixed: in the native spatial kernel by #1970
+(on `main`, default ON) and in the Python tree by #1978 (branch
+`claude/fbbt-sign-domain-1982`, not yet merged). Re-run of
+`prolog_projective.py 1e4 300` on this branch after merging `main` (merge commit
+`802c6b7`; `discopt.__file__` checked to be this worktree):
+- native kernel (default): **optimal, `min f/T = 0.034952`, bound `0.034861`,
+  `gap_certified=True`, 3,579 nodes, 5.4 s** (SCIP: 0.034912, 10,243 nodes);
+- Python tree (`DISCOPT_NATIVE_SPATIAL_KERNEL=0`, without #1978): still stalls,
+  bound `-1.2e-10` after 2,389 nodes in 120 s, as before.
+
+So with the default solver step 4 passes, the stated kill criterion is no longer
+met, and the 1/T piece is built: §92.
