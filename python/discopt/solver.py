@@ -11595,14 +11595,14 @@ def _py_tree_spatial_score_enabled() -> bool:
     Section 5 panel (``flag_onoff_corpus_panel.py --flag
     DISCOPT_PY_TREE_SPATIAL_SCORE``, 287 instances -- in-repo corpus + every
     MINLPLib instance <= 200 vars/cons with an unbounded continuous variable after
-    FBBT -- 20 s, interleaved; the rule fires on 31): cert-clean (460 incumbent
-    checks, 0 false bounds; the one certification flip each way, ``slay06m`` /
-    ``smallinvDAXr3b100-110``, is on instances where the rule never fired). Where it
-    fires: nodes where both certify 218 -> 168, wall 73.1 -> 66.0 s; bounds of the
-    uncertified, replicated 3x: tighter 3/3 on ``chenery`` and ``pointpack06..14``
-    (e.g. 0.83 -> 0.56), looser 3/3 on ``knp3-12`` (5.46 -> 7.72, a symmetric sphere
-    packing where round-robin bisection suits the symmetry) and
-    ``hybriddynamic_varcc`` (-0.6%). Read at call time.
+    FBBT -- 20 s, interleaved), shipped midpoint variant: fires on 30; cert-clean (460
+    incumbent checks, 0 false bounds; all four certification flips, +3 / -1, are on
+    instances where the rule never fired). Where it fires: nodes where both certify
+    215 -> 191, wall 66.6 -> 64.2 s; uncertified bounds tighter on ``chenery``,
+    ``hybriddynamic_varcc`` and ``pointpack06..14`` (0.82 -> 0.50 on ``pointpack06``),
+    looser on ``knp3-12`` (5.46 -> 7.86, a symmetric sphere packing where round-robin
+    bisection suits the symmetry). The earlier midpull-0.75 run measured the same
+    directions, replicated 3x. Read at call time.
     """
     raw = os.environ.get("DISCOPT_PY_TREE_SPATIAL_SCORE", "1").strip().lower()
     return raw not in ("0", "false", "no", "off", "")

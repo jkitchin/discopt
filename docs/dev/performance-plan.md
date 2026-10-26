@@ -11998,6 +11998,19 @@ same ill-conditioning as §90.
 distances, where round-robin bisection suits the symmetry and a violation score
 concentrates.
 
+**Split point.** The panel above used #1970's midpull of 0.75. Smoke then failed two
+`test_sign_envelope` certificates under it: a discontinuity at a box midpoint
+(`sign(x) == 0` on `[-2, 2]`) never lands on a child boundary. The shipped rule splits
+at the **midpoint**, which is the legacy split; the native score certifies without
+midpull too (57 nodes).
+
+**Re-run on the midpoint variant** (`panel1978_midpoint.jsonl`):
+- **Cert-clean:** 460 checks, 0 false bounds. All four certification flips (+3 / -1)
+  are on instances where the rule never fired.
+- **Fires on 30.** Where both certify: nodes 215 -> 191, wall 66.6 -> 64.2 s.
+- **Bounds:** tighter on `chenery`, `hybriddynamic_varcc` and `pointpack06..14`
+  (0.82 -> 0.50 on `pointpack06`); looser on `knp3-12` (5.46 -> 7.86).
+
 **Graduated** default ON; `=0` restores the longest-edge rule.
 
 **#1978 is closed:** the stall is gone on both engines.
