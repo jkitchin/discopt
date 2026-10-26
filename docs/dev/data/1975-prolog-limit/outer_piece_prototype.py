@@ -1,4 +1,4 @@
-# RETIRED (#1975, plan §92): the DISCOPT_OUTER_PIECE prototype, kept as a probe.
+# RETIRED (#1975, plan §96): the DISCOPT_OUTER_PIECE prototype, kept as a probe.
 # It was `python/discopt/modeling/_outer_piece.py` behind a default-OFF flag; its
 # §5 panel (outer_piece_panel_2026-10-26.jsonl) was cert-clean but not net-positive
 # (certified 146 -> 140: prolog gained, 7 lost), so the flag and the Model.solve
@@ -87,7 +87,7 @@ FLAG = "DISCOPT_OUTER_PIECE"
 #: bound is usable (finite, and ``>= 0`` when the objective grows with ``T``) is
 #: kept. #1975's entry-experiment grid, middle first: a small ``M`` leaves
 #: near-optimal points in the outer piece (prolog: ``f ~ 0`` at ``T ~ 230``, plan
-#: §91), so its bound cannot be ``>= 0`` and the attempt only spends budget; a
+#: §95), so its bound cannot be ``>= 0`` and the attempt only spends budget; a
 #: larger ``M`` also widens the bound's margin against the absolute gap tolerance
 #: (``c' = M^d c``), at the price of a wider inner box.
 M_GRID = (1e4, 1e6, 1e2)
@@ -104,7 +104,7 @@ M_GRID_SHARE = (0.6, 0.25, 0.15)
 #: model with an open column cost the models that certify anyway their wall
 #: (autocorr_bern20-03 0.4 -> 2.4 s, clay0303hfsg 4.9 -> 13.0 s) and weakened the
 #: bound where the inner piece got less time than the whole solve had
-#: (autocorr_bern25-06 -3648 -> -4792); first 67 rows of the always-fire panel, plan §92.
+#: (autocorr_bern25-06 -3648 -> -4792); first 67 rows of the always-fire panel, plan §96.
 PROBE_FRACTION = 0.1
 
 #: A declared or FBBT bound at or beyond this magnitude is open (``Variable`` stores
@@ -131,7 +131,7 @@ def outer_piece_enabled() -> bool:
     """``DISCOPT_OUTER_PIECE`` gate (#1975). Default OFF: bound-changing (the outer
     piece's certified bound replaces the original relaxation's on ``T >= M``), so it
     stays OFF until the CLAUDE.md §5 ON/OFF corpus panel passes. Audit row in
-    ``docs/dev/flag-retirement-audit.md``; measurement in performance-plan §92."""
+    ``docs/dev/flag-retirement-audit.md``; measurement in performance-plan §96."""
     return os.environ.get(FLAG, "0") == "1"
 
 
@@ -449,7 +449,7 @@ def generators(model: Model, cols: list[OpenColumn]) -> list[OpenColumn]:
     ``T`` sums only these. A column whose growth is forced by others' (prolog's
     ``x18 <= 3340.8 x7 + 500 x8``) is left out of ``T``: summing it in measures the
     piece in a unit the objective does not grow with, which drives the outer
-    piece's ``min f/T`` to the feasibility tolerance (#1975, plan §92). Greedy, in
+    piece's ``min f/T`` to the feasibility tolerance (#1975, plan §96). Greedy, in
     model order: a column is dropped when FBBT still bounds every open column with
     the remaining generators boxed. The result is minimal (no single further drop
     works), not necessarily minimum.

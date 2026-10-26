@@ -356,6 +356,19 @@ pub struct SpatialTreeConfig {
     /// `m * mid + (1 - m) * lp` (SCIP's `branching/midpull`), which keeps the
     /// point at least `m / 2` of the width from either bound.
     pub spatial_midpull: f64,
+    /// #1995: when a node LP decides nothing (`Numerical` / `IterLimit` /
+    /// `Unbounded`) over a box that propagation tightened, solve the node again
+    /// over the box it had BEFORE propagation and use that result. The objective
+    /// cutoff can collapse a box against an incumbent at the LP optimum into a
+    /// sliver of width ~1e-8, where the McCormick LP is numerically degenerate;
+    /// every descendant inherits the sliver, so the undecided arm branches forever.
+    /// Sound: the pre-propagation box contains every point of the node's region
+    /// (propagation removes only points that are infeasible or no better than the
+    /// incumbent), so its LP bound, Farkas emptiness proof and McCormick-tight
+    /// points are valid for the region -- that node is solved exactly as
+    /// `run_propagation = false` would solve it. Changes nothing at a node whose
+    /// first LP decides. Off (the default) is the tree before it.
+    pub undecided_unpropagated_retry: bool,
 }
 
 impl Default for SpatialTreeConfig {
@@ -387,6 +400,7 @@ impl Default for SpatialTreeConfig {
             spatial_score: false,
             spatial_pscost_weight: 0.0,
             spatial_midpull: 0.0,
+            undecided_unpropagated_retry: false,
         }
     }
 }
@@ -500,6 +514,12 @@ pub struct SpatialTreeResult {
     pub n_int_probes: usize,
     /// #1962: integral-point probes that replaced the incumbent (see above).
     pub n_int_probe_improvements: usize,
+    /// #1995: undecided node LPs re-solved over their pre-propagation box
+    /// ([`SpatialTreeConfig::undecided_unpropagated_retry`]), and how many of those
+    /// re-solves decided (bounded or certified empty). Both 0 with the flag off.
+    pub n_prop_retries: usize,
+    /// #1995: pre-propagation re-solves that decided (see above).
+    pub n_prop_retry_decided: usize,
 }
 
 /// One solved node, as a [`NodeObserver`] sees it (#1935 engine comparison).
@@ -739,6 +759,9 @@ pub fn solve_spatial_tree_observed(
     let mut int_probed: std::collections::HashSet<Vec<i64>> = std::collections::HashSet::new();
     let mut n_int_probes = 0usize;
     let mut n_int_probe_improvements = 0usize;
+    // #1995: pre-propagation re-solves of undecided node LPs (probe counters).
+    let mut n_prop_retries = 0usize;
+    let mut n_prop_retry_decided = 0usize;
     // Best-bound frontier: a min-heap on the inherited lower bound. Exploring the
     // lowest-bound region first lifts the global frontier minimum (the reported dual
     // bound) as fast as possible — the key to certifying instances like tanksize
@@ -890,6 +913,8 @@ pub fn solve_spatial_tree_observed(
                 n_cuts_added,
                 n_int_probes,
                 n_int_probe_improvements,
+                n_prop_retries,
+                n_prop_retry_decided,
             };
         }
         // Fathom by the parent bound if the incumbent already dominates it. The
@@ -935,6 +960,8 @@ pub fn solve_spatial_tree_observed(
                 n_cuts_added,
                 n_int_probes,
                 n_int_probe_improvements,
+                n_prop_retries,
+                n_prop_retry_decided,
             };
         }
         node_count += 1;
@@ -947,6 +974,9 @@ pub fn solve_spatial_tree_observed(
         // or `+inf` when no cutoff was active (genuinely empty region).
         let mut lo = lo;
         let mut hi = hi;
+        // #1995: the box as the node was pushed, kept only under the retry flag.
+        let mut pre_propagation = (config.undecided_unpropagated_retry && config.run_propagation)
+            .then(|| (lo.clone(), hi.clone()));
         if config.run_propagation
             && !propagate_spec_fixpoint(
                 spec,
@@ -1007,6 +1037,37 @@ pub fn solve_spatial_tree_observed(
             node_cuts = cuts;
             n_cut_rounds += rounds_done;
             n_cuts_added += added;
+        }
+        // #1995: an undecided LP over a box propagation tightened is re-solved over
+        // the pre-propagation box (see `SpatialTreeConfig::undecided_unpropagated_retry`
+        // for why that box's verdict holds for this region). A decided re-solve
+        // replaces the node -- box included, so the children split the box the LP
+        // was solved over -- and the first attempt's work is still counted.
+        if verdict_for(node.status) == NodeVerdict::Undecided {
+            if let Some((plo, phi)) = pre_propagation.take().filter(|(l, h)| *l != lo || *h != hi) {
+                n_prop_retries += 1;
+                n_lp_solves += node.n_lp_solves;
+                n_node_pivots += node.n_pivots;
+                let retry = solve_spatial_node_with_cuts(
+                    spec,
+                    &plo,
+                    &phi,
+                    config.run_obbt,
+                    &node_opts,
+                    parent_basis.as_deref(),
+                    &inherited_cuts,
+                );
+                if verdict_for(retry.status) != NodeVerdict::Undecided {
+                    n_prop_retry_decided += 1;
+                    node = retry;
+                    lo = plo;
+                    hi = phi;
+                    node_cuts = inherited_cuts.clone();
+                } else {
+                    n_lp_solves += retry.n_lp_solves;
+                    n_node_pivots += retry.n_pivots;
+                }
+            }
         }
         let node_time = t_node.elapsed();
         node_lp_s += node_time.as_secs_f64();
@@ -1304,6 +1365,8 @@ pub fn solve_spatial_tree_observed(
                                     n_cuts_added,
                                     n_int_probes,
                                     n_int_probe_improvements,
+                                    n_prop_retries,
+                                    n_prop_retry_decided,
                                 };
                             }
                         }
@@ -1547,6 +1610,8 @@ pub fn solve_spatial_tree_observed(
                 n_cuts_added,
                 n_int_probes,
                 n_int_probe_improvements,
+                n_prop_retries,
+                n_prop_retry_decided,
             }
         }
         None => SpatialTreeResult {
@@ -1578,6 +1643,8 @@ pub fn solve_spatial_tree_observed(
             n_cuts_added,
             n_int_probes,
             n_int_probe_improvements,
+            n_prop_retries,
+            n_prop_retry_decided,
         },
     }
 }
@@ -3500,6 +3567,82 @@ mod gap_criterion_tests {
         }
         assert!(checked > 0, "no run solved its root");
         assert!(exercised > 0, "no run produced an undecided node LP");
+    }
+
+    /// #1995: the pre-propagation re-solve keeps the certificate honest where node
+    /// LPs fail. A small `max_iter` makes node LPs end `IterLimit` (undecided); with
+    /// the retry ON every run must still report a bound `<=` the true optimum and
+    /// never certify a wrong value, and the retry must actually run in some of them.
+    #[test]
+    fn undecided_retry_never_certifies_a_wrong_value() {
+        let spec = probe_spec_1935();
+        let base = SpatialTreeConfig {
+            max_nodes: 4_000,
+            gap_tol: 1e-6,
+            ..SpatialTreeConfig::default()
+        };
+        let reference = solve_spatial_tree(&spec, &base, &SimplexOptions::default());
+        assert_eq!(reference.status, TreeStatus::Optimal, "{reference:?}");
+        let opt = reference.incumbent.expect("the control run certifies");
+        let cfg = SpatialTreeConfig {
+            undecided_unpropagated_retry: true,
+            ..base
+        };
+        let mut checked = 0usize;
+        let mut retried = 0usize;
+        for max_iter in [2usize, 3, 4, 5, 6, 8] {
+            let opts = SimplexOptions {
+                max_iter,
+                ..SimplexOptions::default()
+            };
+            let res = solve_spatial_tree(&spec, &cfg, &opts);
+            assert!(
+                res.bound <= opt + 1e-6,
+                "max_iter={max_iter}: bound {} above the optimum {opt}",
+                res.bound
+            );
+            if res.status == TreeStatus::Optimal {
+                let inc = res.incumbent.expect("optimal carries an incumbent");
+                assert!(
+                    (inc - opt).abs() <= 1e-5,
+                    "max_iter={max_iter}: {inc} vs {opt}"
+                );
+            }
+            assert!(res.n_prop_retry_decided <= res.n_prop_retries);
+            checked += 1;
+            retried += res.n_prop_retries;
+        }
+        assert!(checked > 0);
+        assert!(retried > 0, "no run re-solved an undecided node");
+    }
+
+    /// #1995: where every node LP decides, the retry flag changes nothing.
+    #[test]
+    fn undecided_retry_is_neutral_when_every_node_decides() {
+        for spec in [
+            super::tests::xy_min_spec(),
+            probe_spec_1935(),
+            convex_iqp_spec(),
+        ] {
+            let off = SpatialTreeConfig {
+                max_nodes: 4_000,
+                gap_tol: 1e-6,
+                ..SpatialTreeConfig::default()
+            };
+            let on = SpatialTreeConfig {
+                undecided_unpropagated_retry: true,
+                ..off
+            };
+            let a = solve_spatial_tree(&spec, &off, &SimplexOptions::default());
+            let b = solve_spatial_tree(&spec, &on, &SimplexOptions::default());
+            assert_eq!(a.n_undecided, 0, "control must decide every node: {a:?}");
+            assert_eq!(b.n_prop_retries, 0);
+            assert_eq!(a.status, b.status);
+            assert_eq!(a.node_count, b.node_count);
+            assert_eq!(a.n_lp_solves, b.n_lp_solves);
+            assert_eq!(a.bound.to_bits(), b.bound.to_bits());
+            assert_eq!(a.incumbent.map(f64::to_bits), b.incumbent.map(f64::to_bits));
+        }
     }
 
     fn probe_spec_1935() -> SpatialKernelSpec {

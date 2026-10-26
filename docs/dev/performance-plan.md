@@ -11999,7 +11999,69 @@ perspective/projective reformulation in `1/T` that turns the recession problem i
 a bounded one. It would also have to resolve a ~1e-5 relative margin. That is new
 work, not this hypothesis.
 
-## 91. #1975 reframed: the 1/T outer piece, entry experiment (2026-10-26)
+## 94. #1995: the kernel's cutoff propagation collapsed node boxes to slivers (2026-10-26)
+
+**Symptom.** `gdp.simplex` of `either_or([[x >= 4, y >= 1], [y >= 6, x >= 1]])`
+(minimise `x + y`; 10 continuous columns) ended `time_limit` at 30 s after ~59k
+nodes with bound 4.9721, where the source model certifies 5.0 at the root. The
+issue's candidate causes (weight branching, envelope refinement on the weight
+products) were measured first and are **not** the cause:
+
+* The Python tree (`DISCOPT_NATIVE_SPATIAL_KERNEL=0`) certifies in 3 nodes; the
+  kernel never does. A box of +-0.01 around the optimum still took the kernel 14k
+  nodes, so the stall is not in x/y.
+* 4.9721 is not a tree bound at all: the kernel exits *bound-less* and the number
+  is #933's root-relaxation fallback. Every second node LP was undecided (2,257 of
+  4,437 in a 4 s run; 38 of the first 40 `numerical`).
+* Bisecting the kernel's options on the captured spec: `initial_incumbent` alone
+  turns the root from `bounded 4.99999995` to `undecided`, and
+  `run_propagation=false` certifies at node 1. The node FBBT applies the cutoff
+  `x + y <= 5 + 1.5e-8` against `x >= 4, y >= 1`, leaving x/y with widths
+  2.0e-8/1.7e-8 and two weights ~5e-9. The McCormick LP over that box ends
+  `Numerical` (its objective at bail 4.99999999999993); the undecided arm branches
+  a weight column and every child inherits the sliver.
+
+This is #1983's class, a cutoff at the LP optimum collapsing the box, reached by a
+different door: #1983 fixed the Python-side cutoff-OBBT box, and its root probe
+runs without the incumbent, so it reports the box decided.
+
+(An aside measured on the way: rewriting each clause `sum_j l_j p_j <= 0` as
+`p_k + sum_{j != k} l_j (p_j - p_k)` under `sum_j l_j = 1` makes two of the four
+clauses linear and certifies in 7 nodes. It sidesteps the sliver on this instance
+only; not pursued.)
+
+**Fix: `DISCOPT_KERNEL_UNDECIDED_RETRY`** (`SpatialTreeConfig::undecided_unpropagated_retry`).
+An undecided node LP over a propagation-tightened box is re-solved over the box
+the node was pushed with. That box contains the region (propagation removes only
+points infeasible or no better than the incumbent), so its bound, Farkas proof and
+McCormick-tight points hold for the region; the node is solved exactly as
+`run_propagation=false` would solve it. Captured spec: 22,190 nodes / 11,133
+undecided / bound-less at 10 s -> optimal at node 1. Fixed boxes with the
+incumbent at the box optimum: 12 of 16 roots undecided OFF, all 16 decided ON,
+every ON bound <= the closed-form box optimum and >= OFF.
+
+**Section 5 panels** (30 s, interleaved, every incumbent `verify_point`-ed):
+
+* `issue1944_rlt_panel.py --with-corpus --on-env DISCOPT_KERNEL_UNDECIDED_RETRY=1
+  --fired-stat tree/prop_retries`, 271 instances, fires on 4: cert-clean, 1,626
+  checks, 0 problems; certified +nous1; tighter 30 s bounds on the other three
+  (ex5_2_5 -8030.0 -> -8024.4, tln6 15.2187 -> 15.2225, wastewater15m1 2269.6 ->
+  2283.8). Re-run interleaved on an idle machine, 2 reps: nous1 OFF time limit
+  (30.8/30.7 s), ON optimal (24.0/24.3 s, 20 retries). The listed loss
+  `pointpack04` routes to the Python tree (probe absent in both arms); both arms
+  certify in 29 nodes / 3.5-4.0 s on re-run -- its ON row ran while a test suite
+  loaded the machine.
+* `issue1995_gdp_panel.py`, 54 cases (every serialize bound-neutral case plus
+  jobshop, ex1_linan_2023, small_batch under `gdp_method="simplex"`): cert-clean,
+  424 checks, 0 problems; fires on #1995's case only (time limit -> optimal);
+  the other 53 node-identical (171 -> 171); total wall 61.5 -> 34.9 s.
+
+Graduated default ON; `=0` restores the legacy undecided arm. Note: since #1993
+the `issue1944_rlt_panel.py` subprocess called `_solve_one` without its new
+`stat` argument, so it would have crashed every row; fixed here (it now forwards
+`--fired-stat`).
+
+## 95. #1975 reframed: the 1/T outer piece, entry experiment (2026-10-26)
 
 **Reframing.** After §90, #1975 was reframed. Under #1869 unbounded branching an
 outer piece `T >= M` keeps its recession ray forever, so nothing ever prunes it.
@@ -12109,9 +12171,9 @@ defect named in point 2, and it is now fixed: in the native spatial kernel by #1
   bound `-1.2e-10` after 2,389 nodes in 120 s, as before.
 
 So with the default solver step 4 passes, the stated kill criterion is no longer
-met, and the 1/T piece is built: §92.
+met, and the 1/T piece is built: §96.
 
-## 92. #1975: the 1/T outer piece, built and measured; `DISCOPT_OUTER_PIECE` retired (2026-10-26)
+## 96. #1975: the 1/T outer piece, built and measured; `DISCOPT_OUTER_PIECE` retired (2026-10-26)
 
 **What was built.** The model is covered by two pieces. Let `T = sum_k sigma_k (x_k - r_k)`
 range over the *generators* among the open columns, where `r_k` is the column's FBBT
@@ -12146,10 +12208,10 @@ With the flag OFF: `feasible`, **no bound**, 29.7 s.
 **Coverage of the class (`outer_piece_accept_227.jsonl`, structural, no solve).**
 The rewrite accepts **183 of 227**. Of the rest, 19 decline on a division by an
 open column, 9 on a non-generator share that stays unbounded, 8 on `log` of an open
-column, and 3 on SOS rows. Of the census's four 1/T candidates (§91):
+column, and 3 on SOS rows. Of the census's four 1/T candidates (§95):
 - `prolog` and `chakra` are accepted;
 - `mhw4d` declines (unbounded share), and `shiporig` and `ex8_5_1` decline (division
-  by an open column). §91 already found the rays of these three to be relaxation
+  by an open column). §95 already found the rays of these three to be relaxation
   artefacts (they leave the feasible set at `t = 1`).
 
 **Trigger, measured three times** (each a §5 panel run; earlier runs stopped once
@@ -12198,7 +12260,7 @@ Rows are in `outer_piece_panel_2026-10-26.jsonl`.
 perfect one, firing exactly where the default solve ends without a bound, has a
 ceiling of **one certificate on 287 instances: prolog**. CLAUDE.md §2 rejects a
 benefit confined to a named instance. The other genuine-recession candidates either
-decline structurally or have rays that are relaxation artefacts (§91). So knowing
+decline structurally or have rays that are relaxation artefacts (§95). So knowing
 when to fire costs another solve, and nothing pays for it. `DISCOPT_OUTER_PIECE`,
 `modeling/_outer_piece.py`, its `Model.solve` entry point and its tests are deleted.
 
