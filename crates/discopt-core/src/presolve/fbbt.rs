@@ -237,6 +237,77 @@ pub fn interval_div(a: &Interval, b: &Interval) -> Interval {
     }
 }
 
+/// Is the #1990 extended product preimage on? `DISCOPT_FBBT_EXTENDED_MUL`,
+/// **default ON** since its CLAUDE.md §5 panel (`docs/dev/performance-plan.md` §90);
+/// `=0` restores the division-only rule byte-for-byte.
+fn extended_mul_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("DISCOPT_FBBT_EXTENDED_MUL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| !matches!(v.trim(), "0" | "false" | "False"))
+            .unwrap_or(true)
+    })
+}
+
+/// Preimage of one factor of a product (#1990): every `a` in `cur` with
+/// `a * b in t` for some `b in other`, as an interval hull, when `other`
+/// contains zero.
+///
+/// `backward_propagate` divides `t / other` only when `other` excludes zero,
+/// so `z = a * b` with `z >= 1` and `b in [0, 400]` taught it nothing about
+/// `a`, although `a >= 1/400` follows (ex1252a: `x18 = 0.0025 * x9 * x3` at
+/// `x18 = 1` never gave `x3 >= 1`, and every node LP bound stayed 0). When `t`
+/// excludes zero, `b = 0` is impossible and the quotient is the extended
+/// division `t / (other \ {0})`:
+///
+/// - `t.lo > 0`: `a <= t.lo / other.lo` (if `other.lo < 0`) or `a >= t.lo / other.hi` (if `other.hi > 0`);
+/// - `t.hi < 0`: `a >= t.hi / other.lo` (if `other.lo < 0`) or `a <= t.hi / other.hi` (if `other.hi > 0`).
+///
+/// Each side is a ray; a factor straddling zero gives two rays, whose union is
+/// intersected with `cur` before taking the hull. Returns `None` (no
+/// tightening) when `t` contains zero, `other` is the point `0` (no `a` exists,
+/// but concluding infeasibility is left to the forward pass), or the hull is
+/// the whole of `cur`. Rays are rounded outward.
+fn extended_mul_preimage(t: &Interval, other: &Interval, cur: &Interval) -> Option<Interval> {
+    if !(t.lo > 0.0 || t.hi < 0.0) || !(other.lo < 0.0 || other.hi > 0.0) {
+        return None;
+    }
+    // The ray that a negative part of `other` maps to, and the one a positive
+    // part maps to.
+    let (neg_ray, pos_ray) = if t.lo > 0.0 {
+        (
+            (other.lo < 0.0).then(|| Interval::new(f64::NEG_INFINITY, div_up(t.lo, other.lo))),
+            (other.hi > 0.0).then(|| Interval::new(div_down(t.lo, other.hi), f64::INFINITY)),
+        )
+    } else {
+        (
+            (other.lo < 0.0).then(|| Interval::new(div_down(t.hi, other.lo), f64::INFINITY)),
+            (other.hi > 0.0).then(|| Interval::new(f64::NEG_INFINITY, div_up(t.hi, other.hi))),
+        )
+    };
+    let mut hull: Option<Interval> = None;
+    for ray in [neg_ray, pos_ray].into_iter().flatten() {
+        let piece = ray.intersect(cur);
+        if piece.lo > piece.hi || piece.lo.is_nan() || piece.hi.is_nan() {
+            continue;
+        }
+        hull = Some(match hull {
+            None => piece,
+            Some(h) => Interval::new(h.lo.min(piece.lo), h.hi.max(piece.hi)),
+        });
+    }
+    // An empty hull would be an infeasibility proof; declining keeps this a
+    // pure tightener and leaves that verdict to the forward pass.
+    let h = hull?;
+    if h.lo <= cur.lo && h.hi >= cur.hi {
+        return None;
+    }
+    Some(h)
+}
+
 /// `[a,b]^n` for integer exponent.
 pub fn interval_pow_int(base: &Interval, n: i64) -> Interval {
     if n == 0 {
@@ -1306,8 +1377,17 @@ fn backward_propagate_with(
                 BinOp::Mul => {
                     // a * b in [lo, hi]
                     // a in [lo, hi] / b (if b doesn't contain 0)
-                    if r.lo > 0.0 || r.hi < 0.0 {
-                        let new_l = interval_div(&tightened, &r);
+                    // #1990: a factor whose interval contains zero still
+                    // bounds the other when the product excludes zero.
+                    let extended = extended_mul_enabled();
+                    let new_l = if r.lo > 0.0 || r.hi < 0.0 {
+                        Some(interval_div(&tightened, &r))
+                    } else if extended {
+                        extended_mul_preimage(&tightened, &r, &l)
+                    } else {
+                        None
+                    };
+                    if let Some(new_l) = new_l {
                         backward_propagate_with(
                             arena,
                             *left,
@@ -1317,8 +1397,14 @@ fn backward_propagate_with(
                             reduce_counts,
                         );
                     }
-                    if l.lo > 0.0 || l.hi < 0.0 {
-                        let new_r = interval_div(&tightened, &l);
+                    let new_r = if l.lo > 0.0 || l.hi < 0.0 {
+                        Some(interval_div(&tightened, &l))
+                    } else if extended {
+                        extended_mul_preimage(&tightened, &l, &r)
+                    } else {
+                        None
+                    };
+                    if let Some(new_r) = new_r {
                         backward_propagate_with(
                             arena,
                             *right,
@@ -5352,5 +5438,116 @@ mod tests_1908 {
             }
         }
         assert_eq!(checks, 15_000 + 39);
+    }
+}
+
+#[cfg(test)]
+mod tests_1990 {
+    use super::*;
+
+    fn iv(lo: f64, hi: f64) -> Interval {
+        Interval::new(lo, hi)
+    }
+
+    /// The ex1252a row `x18 = 0.0025*x9*x3` at `x18 = 1`, `0.0025*x9 in [0, 1]`,
+    /// `x3 in [0, 3]`: `x3 >= 1` and `0.0025*x9 >= 1/3`.
+    #[test]
+    fn product_bounds_a_factor_whose_cofactor_touches_zero() {
+        let x3 = extended_mul_preimage(&iv(1.0, 1.0), &iv(0.0, 1.0), &iv(0.0, 3.0)).unwrap();
+        assert!(
+            x3.lo <= 1.0 && x3.lo > 1.0 - 1e-12 && x3.hi == 3.0,
+            "{x3:?}"
+        );
+        let s = extended_mul_preimage(&iv(1.0, 1.0), &iv(0.0, 3.0), &iv(0.0, 1.0)).unwrap();
+        assert!(
+            s.lo <= 1.0 / 3.0 && s.lo > 1.0 / 3.0 - 1e-12 && s.hi == 1.0,
+            "{s:?}"
+        );
+    }
+
+    #[test]
+    fn signs_and_straddling_cofactor() {
+        // a*b in [2, 5], b in [-4, 0], a in [-10, 10]  ->  a <= 2/(-4) = -0.5.
+        let a = extended_mul_preimage(&iv(2.0, 5.0), &iv(-4.0, 0.0), &iv(-10.0, 10.0)).unwrap();
+        assert!(
+            a.lo == -10.0 && a.hi >= -0.5 && a.hi < -0.5 + 1e-12,
+            "{a:?}"
+        );
+        // a*b in [-5, -2], b in [0, 4]  ->  a <= -0.5.
+        let a = extended_mul_preimage(&iv(-5.0, -2.0), &iv(0.0, 4.0), &iv(-10.0, 10.0)).unwrap();
+        assert!(
+            a.lo == -10.0 && a.hi >= -0.5 && a.hi < -0.5 + 1e-12,
+            "{a:?}"
+        );
+        // a*b in [2, 5], b in [-1, 4], a in [-1, 10]: rays (-inf, -2] and [0.5, inf);
+        // the first misses a's box, so a >= 0.5.
+        let a = extended_mul_preimage(&iv(2.0, 5.0), &iv(-1.0, 4.0), &iv(-1.0, 10.0)).unwrap();
+        assert!(a.lo <= 0.5 && a.lo > 0.5 - 1e-12 && a.hi == 10.0, "{a:?}");
+        // Both rays meet a's box: the hull is the box, so nothing is returned.
+        assert!(extended_mul_preimage(&iv(2.0, 5.0), &iv(-1.0, 4.0), &iv(-3.0, 10.0)).is_none());
+    }
+
+    #[test]
+    fn declines_when_nothing_follows() {
+        // The product may be zero.
+        assert!(extended_mul_preimage(&iv(0.0, 1.0), &iv(0.0, 1.0), &iv(0.0, 3.0)).is_none());
+        assert!(extended_mul_preimage(&iv(-1.0, 1.0), &iv(0.0, 1.0), &iv(0.0, 3.0)).is_none());
+        // The cofactor is the point 0: no a exists, but that verdict is not ours.
+        assert!(extended_mul_preimage(&iv(1.0, 1.0), &iv(0.0, 0.0), &iv(0.0, 3.0)).is_none());
+        // The cofactor is unbounded: a >= 1/inf = 0 is already a's box.
+        assert!(
+            extended_mul_preimage(&iv(1.0, 1.0), &iv(0.0, f64::INFINITY), &iv(0.0, 3.0)).is_none()
+        );
+    }
+
+    /// Soundness by sampling: every (a, b) in the boxes with a*b in t keeps a inside
+    /// the returned interval. A deterministic LCG keeps the test reproducible.
+    #[test]
+    fn preimage_never_cuts_a_feasible_point() {
+        let mut state: u64 = 0x1990;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 11) as f64) / ((1u64 << 53) as f64)
+        };
+        let (mut executed, mut tightened) = (0usize, 0usize);
+        for _ in 0..400 {
+            let mut pick = |w: f64| (next() - 0.5) * w;
+            let (bl, bh) = {
+                let (p, q) = (pick(8.0), pick(8.0));
+                // Make the cofactor contain zero, the only case the preimage handles.
+                (p.min(q).min(0.0), p.max(q).max(0.0))
+            };
+            let (al, ah) = {
+                let (p, q) = (pick(8.0), pick(8.0));
+                (p.min(q), p.max(q))
+            };
+            let (tl, th) = {
+                let (p, q) = (pick(10.0), pick(10.0));
+                (p.min(q), p.max(q))
+            };
+            let Some(out) = extended_mul_preimage(&iv(tl, th), &iv(bl, bh), &iv(al, ah)) else {
+                continue;
+            };
+            tightened += 1;
+            for i in 0..=40 {
+                for j in 0..=40 {
+                    let a = al + (ah - al) * i as f64 / 40.0;
+                    let b = bl + (bh - bl) * j as f64 / 40.0;
+                    if a * b >= tl && a * b <= th {
+                        executed += 1;
+                        assert!(
+                            a >= out.lo && a <= out.hi,
+                            "cut a={a} (b={b}, t=[{tl},{th}], b in [{bl},{bh}]) -> {out:?}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            tightened >= 50 && executed >= 1000,
+            "{tightened} tightenings, {executed} checks"
+        );
     }
 }

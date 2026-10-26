@@ -23826,6 +23826,13 @@ def solve_model(
     if _rf_stats is not None:
         for _rfk, _rfv in _rf_stats.items():
             _solver_stats[f"row_filter/{_rfk}"] = float(_rfv)
+    # #1990: the RLT strip-and-retry, emitted (zeros included) whenever it is on.
+    _rs_stats = getattr(_mc_lp_relaxer, "_rlt_strip_stats", None) if _mc_lp_relaxer else None
+    from discopt._relax.mccormick_lp import _rlt_strip_retry_enabled
+
+    if _rs_stats is not None and _rlt_strip_retry_enabled():
+        for _rsk, _rsv in _rs_stats.items():
+            _solver_stats[f"rlt_strip/{_rsk}"] = float(_rsv)
     # #1568: array-row expansion outcomes, only when the flag produced any.
     for _ark, _arv in _IN_TREE_ARRAY_ROWS.items():
         _solver_stats[f"reduce/array_rows_{_ark}"] = float(_arv)

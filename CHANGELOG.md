@@ -207,6 +207,20 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **A failed RLT node LP no longer costs the node its bound, and FBBT bounds a
+  factor of a product whose other factor touches zero (#1990).**
+  - A node whose level-1-RLT LP gave no certified verdict went to the #671 row
+    filter. On ex1252a that filter dropped about 140 rows and bounded a box at
+    14,522 that certifies 47,742 without the RLT rows. Such a node is now
+    re-solved without the RLT rows first (`DISCOPT_RLT_STRIP_RETRY`, default on).
+  - Backward FBBT through `z = a * b` now bounds `a` by `z / (b \ {0})` when `z`
+    excludes zero, even when `b`'s interval contains zero
+    (`DISCOPT_FBBT_EXTENDED_MUL`, default on). On ex1252a, `x18 = 0.0025*x9*x3`
+    at `x18 = 1` now gives `x3 >= 1`.
+  - ex1252a's bound at 600 s rose from 56,665 to 92,254 (optimum 128,894). The
+    panels are cert-clean (`docs/dev/performance-plan.md` §90). `=0` restores
+    either legacy path.
+
 - **Bound tightening no longer cuts feasible points near tanh/atan/sigmoid/erf/
   softplus/atanh limits or across a tan pole (#1908).** These gave wrong `optimal`
   values and false `infeasible` verdicts.
