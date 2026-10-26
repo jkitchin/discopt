@@ -94,7 +94,8 @@ def main() -> None:
         live = {k: os.environ.get(k) for k in want}
         assert all(live[k] == v for k, v in want.items() if v is not None), live
         assert all(live[k] is None for k, v in want.items() if v is None), live
-        base._solve_one(sys.argv[2], float(sys.argv[3]))
+        # ``base.run`` passes the fired-stat key as argv[4] (#1941 added it).
+        base._solve_one(sys.argv[2], float(sys.argv[3]), sys.argv[4])
         return
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out", type=Path, required=True)
@@ -118,6 +119,7 @@ def main() -> None:
         help="explicit OFF values for ON variables (default: unset in the OFF arm)",
     )
     ap.add_argument("--with-corpus", action="store_true")
+    ap.add_argument("--fired-stat", default="tree/spatial_score_picks")
     ap.add_argument("--report", action="store_true")
     a = ap.parse_args()
     if a.report:
@@ -137,7 +139,7 @@ def main() -> None:
     (a.out / "nl").mkdir(exist_ok=True)
     panel = build_panel(a.out, a.max_vars, a.max_cons, a.with_corpus)
     print(f"population {len(panel)} (filter in the module docstring)", flush=True)
-    base.run(a.out, panel, a.time_limit, a.workers)
+    base.run(a.out, panel, a.time_limit, a.workers, base.FLAG, a.fired_stat)
 
 
 _ON_KEY, _OFF_KEY = "DISCOPT_ISSUE1944_ON_ENV", "DISCOPT_ISSUE1944_OFF_ENV"
