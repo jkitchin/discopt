@@ -6240,7 +6240,9 @@ def _invoke_pre_import_callbacks(
     2. Call ``incumbent_callback``. If it returns False, mark the node as
        infeasible. A bare veto -- unlike a cut -- does not change the
        relaxation, so re-solving would return the same point forever; that one
-       stays a non-rigorous fathom.
+       stays a non-rigorous fathom. The caller decertifies and floors the
+       reported bound at the node's pop-time bound (#1964), so the solve
+       certifies only if the accepted incumbent is within tolerance of it.
 
     Returns the number of nodes rejected (by a lazy cut or an incumbent-callback
     ``False``). A rejection sentinels a node whose relaxation is genuinely
@@ -22124,6 +22126,7 @@ def solve_model(
             # already satisfies would otherwise requeue the same node forever, so
             # past it the node falls back to the pre-#1365 sentinel.
             _requeue_mask = np.zeros(n_batch, dtype=bool)
+            _excl_before_cb = _exclusion_mask.copy()
             _n_cb_rejected = _invoke_pre_import_callbacks(
                 model=model,
                 tree=tree,
@@ -22170,24 +22173,26 @@ def solve_model(
                         result_lbs[_rq_idx] = _INFEASIBILITY_SENTINEL
                         _exclusion_mask[_rq_idx] = True
                         _n_cb_rejected += 1
-                        # #1954: a lazy cut rejects one POINT; it proves nothing
-                        # about the rest of the box (#1365). Excluding the node at
-                        # the cap is therefore an unproven fathom, handled exactly
-                        # like the batch sweep's non-rigorous sentinels: decertify,
-                        # and keep the node's POP-TIME bound (proved at its parent,
-                        # still in the pool -- import has not run) as a floor of
-                        # the reported global bound, so certification can only be
-                        # re-earned by the floor-inclusive gap closing. Before this
-                        # the region silently left the bound and a correct
-                        # separator certified -2.0 on a model whose optimum is -2.9.
-                        _gap_certified = False
-                        _cap_pop_lb = float(
-                            np.asarray(
-                                tree.node_lower_bounds(np.asarray([_nid], dtype=np.int64)),
-                                dtype=np.float64,
-                            )[0]
-                        )
-                        _taint_floor_internal = min(_taint_floor_internal, _cap_pop_lb)
+            # #1954 / #1964: every node a callback excluded in this batch -- an
+            # ``incumbent_callback`` veto, or a lazy requeue past the cap -- was
+            # fathomed on the rejection of one POINT, which proves nothing about
+            # the rest of its box (#1365). It is an unproven fathom, handled
+            # exactly like the batch sweep's non-rigorous sentinels: decertify,
+            # and keep the node's POP-TIME bound (proved at its parent, still in
+            # the pool -- import has not run) as a floor of the reported global
+            # bound, so certification can only be re-earned by the
+            # floor-inclusive gap closing. Before this the region silently left
+            # the bound: a correct separator certified -2.0 on a model whose
+            # optimum is -2.9 (#1954), and a veto of a y=5 point certified
+            # -4.03 with an accepted y=4 point at -8.47 in the pruned box (#1964).
+            _cb_excluded = np.flatnonzero(_exclusion_mask & ~_excl_before_cb)
+            if _cb_excluded.size:
+                _gap_certified = False
+                _cb_pop_lbs = np.asarray(
+                    tree.node_lower_bounds(np.asarray(result_ids, dtype=np.int64)[_cb_excluded]),
+                    dtype=np.float64,
+                )
+                _taint_floor_internal = min(_taint_floor_internal, float(np.min(_cb_pop_lbs)))
             # #748: a callback rejection sentinels a FEASIBLE node without proving
             # its region empty of acceptable points — a non-rigorous fathom. It is
             # applied here, AFTER the batch's own non-rigorous-sentinel sweep
@@ -22196,10 +22201,10 @@ def solve_model(
             # falsely certifying "infeasible": the terminal logic routes a
             # non-rigorous exhaustion to "unknown" (feasibility undetermined)
             # instead (the tight-integer-root pure-MILP case where the callback
-            # rejects the LP-optimal root and nothing remains to branch). It does
-            # NOT touch _taint_floor_internal, so a solve that DOES find an
-            # accepted incumbent and closes its frontier gap still certifies as
-            # before — only the no-incumbent false-infeasible is corrected.
+            # rejects the LP-optimal root and nothing remains to branch). The
+            # floor recorded just above (#1964) is what keeps the certificate
+            # honest when an accepted incumbent IS found: it re-certifies only
+            # when that incumbent is within tolerance of every pruned box's bound.
             if _n_cb_rejected:
                 _nonrigorous_fathom = True
 
