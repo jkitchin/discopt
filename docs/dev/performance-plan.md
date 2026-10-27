@@ -12635,3 +12635,41 @@ ex1252a. nous1's 21 -> 28 s is the recorded trade-off.
 128,893.741 in **19.3 s** (2,048 kernel nodes; issue: bound 19,389 at 120 s), and
 ex1252 in 41 s. Pinned by `test_1990_multilinear_split.py::
 test_ex1252a_certifies_by_default` (slow, correctness).
+
+## 98. #2010: the #1940 lift race charged the DEFAULT node budget per slice (2026-10-27)
+
+**Mechanism (code).** `_ipx_lift_race` passed `max_nodes - spent` to the un-lifted
+slice and to the continuation, and returned early once `spent >= max_nodes`. With
+the 100k default that number is no longer `_DEFAULT_MAX_NODES`, so
+`_solve_milp_simplex` read it as a caller's cap (`_callers_node_cap`) and the #1874
+full-budget rule stopped applying. A lift slice that spent the default in a few
+seconds left the next arm 1 node and ended the race with the clock untouched.
+
+**Fix.** The default passes through to every arm unchanged; an explicit
+`max_nodes` keeps today's one-budget accounting. Pinned by
+`test_1940_lift_race.py::test_the_default_node_budget_is_not_charged_per_slice`
+(fails before) and `::test_a_callers_node_cap_is_one_budget_over_the_slices`.
+
+**Measured (Linux container, 4 cores, load < 1.5).** On this machine the lift
+slice stall-exits at ~23k nodes (~9k nodes/s; the issue's Mac exceeds 100k inside
+the slice), so the cap never binds at the shipped 5 s slice: tln2/4/5/6 at 120 s,
+2 reps, certify in both arms with the same status and objective. To reach the
+issue's regime the slice was scaled (the #1959 CI-speed proxy, the other way):
+`_IPX_RACE_SLICE_S = 30`, 120 s limit, base vs fix interleaved, 2 reps, arm-level
+spy recording the `max_nodes` each arm received
+(`scripts/issue2010_race_budget_probe.py`):
+
+| instance | base | fix |
+|---|---|---|
+| tln4 | **feasible**, bound 7.7, 218,645 / 216,107 nodes, 30.8 / 30.9 s; un-lifted slice given **1 node** | **optimal** 8.3, 31.3 / 31.4 s (un-lifted slice: 100,000 budget, certifies in 880 nodes) |
+| tln5 | **node_limit**, 12.5 / bound 9.66, 30.0 s (the issue's stage-2 signature) | **optimal** 10.3, 33.4 / 33.4 s |
+
+Certified 0/4 -> 4/4; base leaves ~89 s of a 120 s budget unused.
+
+**Bound-neutral on the #1940 panel** (43 instances, race ON, base vs fix, 30 s, one
+subprocess per solve): certified 42 = 42, total wall 147.5 -> 146.4 s, 0 incumbent
+violations, no slice's node cap reached in either arm. Node counts are identical
+on all 23 instances the lift settles inside its first slice; they differ only on
+instances that run timed slices, which are wall-clock dependent: three repeats per
+arm on dense_n15_s1 give 1,048-1,228 nodes (base) vs 1,052-1,094 (fix), conge15
+1,178-1,774 vs 1,428-1,636, all certified.

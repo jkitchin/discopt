@@ -11379,8 +11379,9 @@ def _ipx_lift_race(entry_args: dict, solve_t0: float, is_maximize: bool) -> "Sol
     arm re-enters ``solve_model`` with exactly the caller's options -- nothing has
     to be forwarded by name, so nothing can be dropped -- and differs from the
     legacy solve only in ``_IPX_RACE_ARM`` and in its budgets: its ``time_limit``,
-    its ``max_nodes`` (ONE budget for the call, so each slice's nodes are charged
-    against what the next may use), and, for the two slices, a zero
+    its ``max_nodes`` (when the caller named one, ONE budget for the call, so each
+    slice's nodes are charged against what the next may use; the default is passed
+    to every arm unchanged, #2010), and, for the two slices, a zero
     ``incumbent_time_extension``. Each arm is therefore the very path that was
     measured.
     """
@@ -11416,11 +11417,22 @@ def _ipx_lift_race(entry_args: dict, solve_t0: float, is_maximize: bool) -> "Sol
         result.wall_time = time.perf_counter() - solve_t0
         return result
 
+    # #2010: ``max_nodes`` is ONE budget only when the CALLER named it. The default
+    # is not a cap the caller chose -- the MILP engine reads it as "uncapped" (#1874,
+    # ``_callers_node_cap``) -- so it is passed through to every arm unchanged.
+    # Charging it per slice turned it into a cap: a lift slice that spent ~100k
+    # nodes in 3 s handed the continuation ``100_000 - spent``, which the engine
+    # then honoured as a caller's cap (tln4: stopped at 2.9 s, 117 s unused).
+    callers_node_cap = max_nodes != _DEFAULT_MAX_NODES
+
+    def _left(spent: int) -> int:
+        return max_nodes - spent if callers_node_cap else max_nodes
+
     lifted = _run("lift", min(_IPX_RACE_SLICE_S, _remaining()), max_nodes)
     if _result_certifies(lifted):
         return _done(lifted)
     spent = int(getattr(lifted, "node_count", 0) or 0)
-    unlifted = _run("unlifted", min(_IPX_RACE_SLICE_S, _remaining()), max_nodes - spent)
+    unlifted = _run("unlifted", min(_IPX_RACE_SLICE_S, _remaining()), _left(spent))
     merged = _merge_route_and_fallback(lifted, unlifted, is_maximize)
     gaps = (_ipx_relative_gap(lifted), _ipx_relative_gap(unlifted))
     if _result_certifies(unlifted):
@@ -11438,9 +11450,9 @@ def _ipx_lift_race(entry_args: dict, solve_t0: float, is_maximize: bool) -> "Sol
         arm,
         rest,
     )
-    if rest <= 0.0 or spent >= max_nodes:
+    if rest <= 0.0 or (callers_node_cap and spent >= max_nodes):
         return _done(merged)
-    final = _run(arm, rest, max_nodes - spent, final=True)
+    final = _run(arm, rest, _left(spent), final=True)
     return _done(_merge_route_and_fallback(merged, final, is_maximize))
 
 
