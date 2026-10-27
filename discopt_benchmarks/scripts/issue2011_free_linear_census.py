@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """#2011 census: where does ``DISCOPT_KERNEL_FREE_LINEAR`` change the native kernel's
-spec decision?
+spec decision? (``--flag`` censuses another producer flag the same way; #2015 used
+it for ``DISCOPT_KERNEL_BLF_FULL_SUPPORT``.)
 
 For every instance of the population (the ``scip_wins_screen`` population: MINLPLib
 ``.nl`` instances with a proven status and ``nvars``/``ncons`` under the caps, plus
@@ -55,9 +56,10 @@ def _census_one(nl: str) -> None:
         ub = np.asarray(bounds[1]) if bounds is not None else None
         n_inf = int((~np.isfinite(lb)).sum() + (~np.isfinite(ub)).sum()) if lb is not None else -1
         n_free_cols = int((~(np.isfinite(lb) & np.isfinite(ub))).sum()) if lb is not None else -1
-        os.environ["DISCOPT_KERNEL_FREE_LINEAR"] = "0"
+        flag = os.environ.get("CENSUS_FLAG", "DISCOPT_KERNEL_FREE_LINEAR")
+        os.environ[flag] = "0"
         off = real(model, bounds=bounds)
-        os.environ["DISCOPT_KERNEL_FREE_LINEAR"] = "1"
+        os.environ[flag] = "1"
         on = real(model, bounds=bounds)
         big = None
         off_big = None
@@ -106,8 +108,10 @@ def main() -> None:
     ap.add_argument("--max-vars", type=int, default=200)
     ap.add_argument("--max-cons", type=int, default=200)
     ap.add_argument("--workers", type=int, default=3)
+    ap.add_argument("--flag", default="DISCOPT_KERNEL_FREE_LINEAR")
     ap.add_argument("--_census", default=None, help=argparse.SUPPRESS)
     args = ap.parse_args()
+    os.environ["CENSUS_FLAG"] = args.flag
     if args._census:
         _census_one(args._census)
         return
@@ -133,7 +137,16 @@ def main() -> None:
         )
         try:
             p = subprocess.run(
-                [sys.executable, __file__, "--out", str(args.out), "--_census", nl],
+                [
+                    sys.executable,
+                    __file__,
+                    "--out",
+                    str(args.out),
+                    "--flag",
+                    args.flag,
+                    "--_census",
+                    nl,
+                ],
                 capture_output=True,
                 text=True,
                 timeout=120,

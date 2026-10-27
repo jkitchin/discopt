@@ -12812,3 +12812,57 @@ beuster at 180 s: 10,144.414 OFF vs 10,144.419 ON with the same 31 nodes, so the
 straddles the deadline (`faulthandler` at 184 s: `_solve_nlp_batch_by_deadline`);
 the LP ranges themselves cost 0.28 s over 49 calls. Recorded as the trade-off.
 **Graduated default ON; `=0` opts out.**
+
+## 102. #2015: the three kernel declines on chakra, ex8_1_7 and rbrock (2026-10-27)
+
+Each decline was traced at the box the solver hands `build_spatial_kernel_spec`
+(the decline line found by tracing the producer's returns).
+
+**rbrock -- fixed (`DISCOPT_KERNEL_DECLINE_EXACT`, graduated).** Not a producer
+defect: the #1656 pricing callback declines when `c'x` at a McCormick-tight point
+and the posed objective disagree past `1e-4 (1 + |v|)`. The acceptance test lets
+each lifted term `mccormick_tol = 1e-6` (absolute) plus envelope slack, and the
+objective coefficient 100 on `(x1 - x0**2)**2` multiplies it: beside the optimum
+`c'x = -3.2e-4` against a true 6.4e-5 (measured), so an exact lift was declined
+after ~1,800 nodes. Entry experiment: pricing such points honestly instead, the
+kernel certifies rbrock in 1.6 s (2,863 nodes). Fix without moving any tolerance:
+a disagreement is first re-checked on the spec's own node over a tight box around
+the point (widths 1e-8..1e-5 relative; a point box is infeasible because the tight
+point satisfies a reform column `x2 = x0**2` only to `mccormick_tol`), whose bound
+is the lift's objective there; the kernel declines only if that disagrees too.
+prob10 (spec without its `sin`, `c'x = 2.345` vs 3.446) still declines. Panel over
+the 130 proven instances whose spec the kernel builds (30 s, interleaved, fired
+stat `tree/decline_exact_kept`): 780 checks; fires on 1 (rbrock: 20 s uncertified,
+bound -45 -> **optimal in 3.1 s**); certified lost none. The panel's only 2
+"problems" are pooling_bental5tp crashing in `repair_point` (`LinAlgError: SVD did
+not converge`) in BOTH arms -- reproduced on main 477701c4, unrelated, reported in
+the PR.
+
+**ex8_1_7 -- first decline fixed (`DISCOPT_KERNEL_BLF_FULL_SUPPORT`, graduated),
+second recorded as deliberate.** (1) #861: the model constraint `x0*x3 == 2` lifts
+to `w <= 2`, `-w <= -2`, rows inside the product's support, so the product
+"claimed 6 rows" and the spec declined. On the probe box every McCormick row of
+`w = A*B` has a nonzero coefficient on every factor column, so under the flag only
+full-support rows are claimed and the rest stay fixed rows (still validated
+box-independent). Census (410 MINLPLib + corpus): the kernel newly takes 11
+instances, 0 disagreements elsewhere; panel on the 11 (30 s): 66 checks, 0
+problems, certified 11 = 11, **wall 35.5 -> 17.8 s**, nodes 381 -> 299 (st_e05 3.5
+-> 0.4 s, nvs21 3.2 -> 0.5 s, ex9_2_3 8.1 -> 2.7 s). (2) ex8_1_7 then declines
+because `x2**3` sits on a sign-straddling root box (`x2 in [-2.88, 2.24]`), where
+the Python build emits the 2-facet S-shaped hull and the kernel's
+`monomial_rows` deliberately emits vacuous rows (`mccormick_patch.rs`); the
+producer is meant to decline that term. **Deliberate decline**: the kernel has no
+two-piece odd-power hull.
+
+**chakra -- recorded as deliberate.** The decline line is the probe/real row-count
+check, tripped by `x0` and `x20` being fixed (`[15, 15]`, `[46.16, 46.16]`): their
+terms emit 4 rows on the probe box and 0 on the real box. But those terms are
+`x_k ** 0.75`, a fractional-power family no kernel term map registers, so even
+with the shapes matched their box-dependent rows fail the fixed-row validation:
+**the kernel does not implement fractional powers**; that, not the fixed columns,
+is why chakra stays on the Python tree. Root gap (Python tree -184.32 vs SCIP
+-179.14): Kelley tangent separation at the root LP point for the 39 univariate
+atoms, 10 rounds / 164 cuts, moves the bound at the solver's pre-OBBT root box from
+-198.1983 to -198.1979 -- tangent density is **not** the mechanism; root OBBT closes
+-198.2 -> -184.3, and the residual 5.2 points stay unattributed (SCIP: no single
+component moves its root bound, it is the base relaxation). Recorded, open.

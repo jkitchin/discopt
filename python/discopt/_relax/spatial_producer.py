@@ -106,6 +106,35 @@ def _free_linear_enabled() -> bool:
     return _env_flag("DISCOPT_KERNEL_FREE_LINEAR", default=True)
 
 
+def _blf_full_support_enabled() -> bool:
+    """#2015: ``DISCOPT_KERNEL_BLF_FULL_SUPPORT`` -- claim as a bilinear-form term's
+    envelope only the rows whose support is the term's FULL column set.
+
+    #861 made a term that "claims" more than its 4 McCormick rows decline the whole
+    spec, because a lifted model constraint over the same columns (``x0*x3 == 2``
+    -> ``w <= 2``, ``-w <= -2``) passes the support-containment test. On the probe
+    box every envelope row has a nonzero coefficient on every operand column, so a
+    row with a smaller support cannot be one: under the flag it is left to the
+    fixed rows (validated box-independent like every other) and the term claims
+    exactly its envelope. A term whose extra row has the full support still
+    declines. Read at call time.
+
+    **Graduated (default ON, 2026-10-27); ``=0`` restores the #861 decline.**
+    Census (``issue2011_free_linear_census.py --flag DISCOPT_KERNEL_BLF_FULL_SUPPORT``,
+    410 MINLPLib instances + corpus): the kernel newly takes 11 (ex9_1_4,
+    ex9_2_2/3/4/6/7/8, mathopt1, nvs21, st_e01, st_e05), 0 OFF/ON disagreements
+    elsewhere. Panel on the 11 (30 s, interleaved): cert-clean, 66 checks, 0
+    problems; certified 11 = 11, none lost; wall 35.5 -> 17.8 s, nodes 381 -> 299
+    (st_e05 3.5 -> 0.4 s, nvs21 3.2 -> 0.5 s, ex9_2_3 8.1 -> 2.7 s).
+    ex8_1_7 itself passes this check and then declines on its sign-straddling
+    ``x2**3`` (the kernel's odd-power rows are vacuous there by design).
+    performance-plan section 102.
+    """
+    from discopt.solver_tuning import _env_flag
+
+    return _env_flag("DISCOPT_KERNEL_BLF_FULL_SUPPORT", default=True)
+
+
 #: The Rust LP layer's infinite bound. ``f64::INFINITY`` is never passed there.
 _LP_INF = 1e20
 
@@ -281,6 +310,10 @@ def build_spatial_kernel_spec(
     tcoeff: list[float] = []
     tcst: list[float] = []
 
+    def _row_support(r: int) -> set[int]:
+        p0, p1 = indptr[r], indptr[r + 1]
+        return {int(cc) for cc, v in zip(indices[p0:p1], data[p0:p1]) if v != 0.0}
+
     def _claim(aux: int, operands: tuple, want: Optional[int]) -> Optional[list[int]]:
         """Rows owned by this term = rows touching ``aux`` whose support ⊆ operands∪aux.
         Returns the row list, or None if ``want`` is set and the count differs."""
@@ -329,6 +362,15 @@ def build_spatial_kernel_spec(
         rows: Optional[list[int]] = [
             int(r) for r in rows_with_col(int(w)) if _support_within(int(r), allowed)
         ]
+        if rows and _blf_full_support_enabled():
+            # #2015: on the probe box every McCormick row of ``w = A*B`` carries a
+            # nonzero coefficient on EVERY column of A and B (each is scaled by the
+            # other factor's strictly sign-matched, distinct bounds), so a row with
+            # a smaller support is a lifted model constraint, not an envelope row
+            # (ex8_1_7: ``x0*x3 == 2`` becomes ``w <= 2``, ``-w <= -2``). Leaving it
+            # to the fixed rows keeps it in every node LP, and the box-independence
+            # check below still validates it row for row.
+            rows = [r for r in rows if _row_support(r) == allowed]
         # EXACTLY the 4 McCormick rows the kernel regenerates for this BlfTerm —
         # support containment alone does not identify them (#861). A lifted MODEL
         # CONSTRAINT over the same variables has the same support (``x0*x1 >= 60``
@@ -498,11 +540,11 @@ def build_spatial_kernel_spec(
     ]
     # #2011: an admitted free column carries the LP layer's sentinel, never ``inf``.
     # Under the flag, any other non-finite original bound was not checked above, so
-    # it declines (the flag-off path is unchanged).
+    # it declines (with the flag off this is the legacy path).
     if free_cols or _free_linear_enabled():
         _admitted = set(free_cols)
-        for k in np.flatnonzero(~(np.isfinite(global_lo) & np.isfinite(global_hi))):
-            if int(k) not in _admitted:
+        for col in np.flatnonzero(~(np.isfinite(global_lo) & np.isfinite(global_hi))):
+            if int(col) not in _admitted:
                 return None
     for k in free_cols:
         if not np.isfinite(global_lo[k]):
