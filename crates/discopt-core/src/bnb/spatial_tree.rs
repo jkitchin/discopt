@@ -542,6 +542,33 @@ pub struct NodeObservation<'a> {
 /// only: nothing it does reaches the search.
 pub type NodeObserver<'a> = dyn FnMut(&NodeObservation<'_>) + 'a;
 
+/// Where the primal hook runs on a model with integer columns (#1990,
+/// `DISCOPT_HOOK_INTEGRAL_POINTS`, default ON; `=0` restores the #1522 schedule).
+///
+/// #1522 called the hook at nodes 1, 2, 4, 8, ... from whatever LP point the node
+/// had, and the caller rounds the integer columns and fixes them. At a fractional
+/// point that rounding is a guess, and a guess the local NLP usually cannot make
+/// feasible: on `genpooling_lee1` all 10 calls (about 1 s each, a third of a 30 s
+/// solve) found nothing, and the slowdown cost its certificate; on ex1252a the 8
+/// calls at fractional points took 1-3 s each and failed, and the one that found
+/// the optimum (0.06 s) was at a point integral on every integer column. ON, each
+/// scheduled call is held until the next node whose LP point is integral on every
+/// integer column with an integer assignment not yet tried, which is SCIP's
+/// sub-NLP rule. The number of scheduled calls stays at most one per power of two;
+/// a continuous model keeps the #1522 schedule, and a newly accepted incumbent is
+/// still handed to the hook. Primal only.
+fn hook_integral_points_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("DISCOPT_HOOK_INTEGRAL_POINTS")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| !matches!(v.trim(), "0" | "false" | "False"))
+            .unwrap_or(true)
+    })
+}
+
 /// A caller-supplied primal heuristic for [`solve_spatial_tree_with_hook`] (#1522).
 ///
 /// Called with a node's LP point (all `n_cols` columns) and the current incumbent
@@ -737,6 +764,10 @@ pub fn solve_spatial_tree_observed(
 ) -> SpatialTreeResult {
     let mut n_primal_hook_calls = 0usize;
     let mut n_primal_hook_improvements = 0usize;
+    // #1990: the hook's integral-point schedule (`hook_integral_points_enabled`).
+    let hook_has_int = spec.integrality[..spec.n_orig].iter().any(|&b| b);
+    let mut hook_armed = false;
+    let mut hook_tried: std::collections::HashSet<Vec<i64>> = std::collections::HashSet::new();
     let mut n_incumbent_value_calls = 0usize;
     let mut n_incumbent_value_raised = 0usize;
     let mut n_pseudocost_picks = 0usize;
@@ -1466,7 +1497,30 @@ pub fn solve_spatial_tree_observed(
         // #1522: the caller's local primal step, from this node's LP point. Adopted
         // only on strict improvement; the caller has verified the point.
         if let Some(h) = hook.as_mut() {
-            if accepted_lp_point || node_count.is_power_of_two() {
+            // #1990: on a model with integer columns, a scheduled call waits for an
+            // LP point integral on every integer column whose assignment has not
+            // been tried (see `hook_integral_points_enabled`).
+            if node_count.is_power_of_two() {
+                hook_armed = true;
+            }
+            let scheduled = if hook_has_int && hook_integral_points_enabled() {
+                hook_armed
+                    && (0..spec.n_orig).all(|j| {
+                        !spec.integrality[j] || (x[j] - x[j].round()).abs() <= config.int_tol
+                    })
+                    && hook_tried.insert(
+                        (0..spec.n_orig)
+                            .filter(|&j| spec.integrality[j])
+                            .map(|j| x[j].round() as i64)
+                            .collect::<Vec<i64>>(),
+                    )
+            } else {
+                node_count.is_power_of_two()
+            };
+            if scheduled {
+                hook_armed = false;
+            }
+            if accepted_lp_point || scheduled {
                 n_primal_hook_calls += 1;
                 if let Some((v, xp)) = h(x, incumbent) {
                     if v.is_finite() && incumbent.map(|inc| v < inc - 1e-12).unwrap_or(true) {
@@ -3702,6 +3756,43 @@ mod gap_criterion_tests {
             }],
             obbt_candidates: vec![],
         }
+    }
+
+    /// #1990: on a model with integer columns the hook runs only at LP points
+    /// integral on every integer column, never twice on one integer assignment
+    /// (a kernel-accepted incumbent aside), and a hook that finds nothing leaves
+    /// the search node-for-node unchanged.
+    #[test]
+    fn primal_hook_waits_for_integral_unseen_points() {
+        let spec = convex_iqp_spec();
+        let cfg = SpatialTreeConfig::default();
+        let opts = SimplexOptions::default();
+        let base = solve_spatial_tree(&spec, &cfg, &opts);
+        assert_eq!(base.status, TreeStatus::Optimal);
+        let mut seen: Vec<(Vec<i64>, bool)> = Vec::new();
+        let mut rec = |x: &[f64], _inc: Option<f64>| -> Option<(f64, Vec<f64>)> {
+            let integral = (0..2).all(|j| (x[j] - x[j].round()).abs() <= 1e-5);
+            seen.push(((0..2).map(|j| x[j].round() as i64).collect(), integral));
+            None
+        };
+        let res = solve_spatial_tree_with_hook(&spec, &cfg, &opts, Some(&mut rec));
+        assert_eq!(res.node_count, base.node_count);
+        assert_eq!(res.incumbent, base.incumbent);
+        assert_eq!(res.bound, base.bound);
+        assert_eq!(res.n_primal_hook_calls, seen.len());
+        assert!(!seen.is_empty(), "the hook was never consulted");
+        // Every call is at an integral point (a kernel incumbent is one too).
+        let mut checks = 0usize;
+        for (_, integral) in &seen {
+            assert!(*integral, "hook called at a fractional point: {seen:?}");
+            checks += 1;
+        }
+        // At most one repeat per accepted incumbent (those bypass the dedup).
+        let mut keys: Vec<&Vec<i64>> = seen.iter().map(|(k, _)| k).collect();
+        keys.sort();
+        keys.dedup();
+        assert!(seen.len() - keys.len() <= base.node_count, "{seen:?}");
+        assert!(checks >= 1);
     }
 
     /// #1962: the separation loop tightens the root, keeps every bound valid, and
