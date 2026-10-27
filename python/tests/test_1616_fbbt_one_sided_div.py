@@ -13,7 +13,7 @@ cofactors, ``presolve/fbbt.rs::extended_mul_preimage``) and graduated it default
 on the current base #1616's waterund22/25 losses do not reproduce, and the looser
 bound under a tighter box that ex1252a showed came from the node LP's #671 row
 filter, which #1990's RLT strip-and-retry removes (``docs/dev/performance-plan.md``
-§95, ``docs/dev/flag-retirement-audit.md``).
+§97, ``docs/dev/flag-retirement-audit.md``).
 
 The flag is read once per process in Rust, so the ``=0`` opt-out is checked in a
 subprocess.

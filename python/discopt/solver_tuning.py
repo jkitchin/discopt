@@ -1442,7 +1442,7 @@ class SolverTuning:
     ``DISCOPT_HOOK_INTEGRAL_POINTS``).
 
     **Default ON since #1990** (``=0`` opts out), graduated together with
-    ``DISCOPT_KERNEL_MULTILINEAR_SPLIT`` (``docs/dev/performance-plan.md`` §95.1).
+    ``DISCOPT_KERNEL_MULTILINEAR_SPLIT`` (``docs/dev/performance-plan.md`` §97.1).
     Panel, 424 instances at 30 s: fired on 52, cert-clean, both-certify wall 1160.2
     -> 1152.5 s (genpooling_lee1 26.1 -> 21.5 s); nous1 is the measured cost, still
     certified in 3/3 reruns but 21 -> 28 s. With the split it certifies ex1252 and

@@ -11937,6 +11937,68 @@ nodes; ON optimal in 11,921 nodes, 23 s.
 **#1970 status.** nous1 certifies at 120 s (Done item 1); the flag passed the
 section 5 panel, on the merged base too, and graduated (Done item 2).
 
+## 90. #1975: RLT against an unbounded factor's lower bound does not close prolog's root ray (falsified 2026-10-26)
+
+**Question.** #1966 pinned an exact negative-cost recession ray of `prolog`'s root
+McCormick LP: `c^T d = 3712 - fl(3340.8) - fl(371.2) = -1.7053e-13`. #1975 asked two
+things. Does the nonlinear model itself follow the ray? And does hypothesis H remove
+it? H multiplies each shared-budget row by the lower-bound factor `(x_k - l_k) >= 0`
+of the product factor `x_k` that is unbounded above (`x0`, `x1`).
+
+**Step 1: the nonlinear model is bounded below, by a thin margin.** Divide every open
+column by `T = x7 + x8`, with `a = x7/T` and `u_k = x_k/T`. The bounded block
+(`x2..x5`, `x9..x17`) stays O(1), and C7..C10 lose their constants. The asymptotic
+objective slope is `cap(a) - P`, where `cap = 3712 a + 5000 (1-a)` and
+`P = u0 (x2+x3) + u1 (x4+x5)`. If the minimum is positive, `f -> +inf` along every
+unbounded sequence. If `T` stays bounded, `x18`, `x19`, `x0` and `x1` are bounded
+too, and so is `f`.
+- SCIP, solved globally: `min (cap - P) = +0.034901`, status optimal, primal = dual.
+  It is attained at `a = 0.4998`, `u = (2.2708, 4.9847)`.
+- Cross-check with HiGHS LPs at fixed `(u0, u1)`, where the limit is an LP: a 120x120
+  grid gives 18.54. Three zooms on the ridge give 0.684, 0.0737 and 0.0403, which
+  approach SCIP's value from above.
+
+Both scripts are in `docs/dev/data/1975-prolog-limit/`. So prolog is **not**
+uncertifiable over its doubles. But the margin is about 0.035 against a capacity of
+about 4000, i.e. ~1e-5 relative.
+
+**Step 2: H is falsified on the probe.** `test_1975_prolog_rlt_ray_survives.py`
+builds the RLT rows generically from the captured root `MilpRelaxationModel`. It
+names no prolog row or column. A row qualifies when every column it touches has a
+finite box. A factor qualifies when it is a product factor that is open above. Where
+a product `x_k x_j` was not lifted, it is lifted with McCormick in `x_k`'s
+lower-bound factor only. The exact ray search is then re-run: a float vertex,
+recomputed in rationals with active-set repair, then every row checked exactly.
+
+| box | H as stated (2 rows) | every finite-box row x every open factor (10 rows) |
+|---|---|---|
+| FBBT | exact ray, `c^T d = -1.7053e-13` | exact ray, same cost |
+| FBBT + root `run_obbt` | exact ray, same cost | exact ray, same cost |
+
+A mutation that prices `x7` 1e-9 higher, so that the binary excess is gone, makes
+all four arms fail with `c^T d = +1.0e-9`, so the probe is not vacuous. An
+independent hand-built limit LP (`limit_rlt.py`, `exact_ray.py` in the same
+directory) gives the same verdict. It covers the bare
+McCormick LP, H, and the full family, on both boxes. Its slope reaches `0` in every
+case, and an exact rational ray is found for each of the six with 288 exact row
+checks.
+
+**Why.** In the scaled limit the RLT rows bind `x0*x_j` to `u0 * z0` and `x1*x_j` to
+`u1 * z1`. Here `z0` and `z1` are two **independent** points of the bounded
+polytope. The nonlinear model forces `z0 = z1 = x`. The 0.035 margin lives entirely
+in that shared point: with the points decoupled, both `x2 + x3` and `x4 + x5` can
+take their individual maxima, and the slope reaches 0. No bound-factor RLT of
+level 1 couples them. Doing so needs the products `x0*x1*x_j`, whose two factors are
+both open.
+
+**Kill criterion met at step 2.** No pass ships, and no flag or audit row is added.
+Step 3 (the 120-instance class panel) was not run, because H fails on the probe it
+was designed for. #1975 is closed with this record. A relaxation that certifies
+prolog would have to keep the coupling `z0 = z1`, for example through a
+perspective/projective reformulation in `1/T` that turns the recession problem into
+a bounded one. It would also have to resolve a ~1e-5 relative margin. That is new
+work, not this hypothesis.
+
 ## 91. #1978: the spatial stall on a bounded bilinear piece -- native fixed by #1970, Python tree fixed here (graduated 2026-10-26)
 
 **Probe.** #1975's rescaled prolog outer piece: 21 bounded columns, products `u_k * x_j`
@@ -12149,7 +12211,225 @@ the `issue1944_rlt_panel.py` subprocess called `_solve_one` without its new
 `stat` argument, so it would have crashed every row; fixed here (it now forwards
 `--fired-stat`).
 
-## 95. #1990: ex1252a's integer-product objective — both levers measured, the bound loss found in the node LP (2026-10-26)
+## 95. #1975 reframed: the 1/T outer piece, entry experiment (2026-10-26)
+
+**Reframing.** After §90, #1975 was reframed. Under #1869 unbounded branching an
+outer piece `T >= M` keeps its recession ray forever, so nothing ever prunes it.
+The proposal is to rescale that piece by `x_open = T u`, `s = 1/T` in `[0, 1/M]`,
+dividing each row by its leading power of `T`. The piece then becomes a **bounded**
+problem in which no product is lifted against an infinite factor, and it is pruned
+when its certified `min f/T` beats the incumbent. Kill criterion: fewer than 3
+instances with (a) an uncertified root LP whose negative-cost ray lies on open
+columns and (b) an outer piece the mechanism can fathom; or discopt cannot certify
+prolog's transformed piece (step 4). The scripts and the per-instance census are in
+`docs/dev/data/1975-prolog-limit/`.
+
+**First, a retraction of a step-1 reading (§90).** §90's `+0.0349` is the
+*asymptotic* slope, and it stands. But reading it as "f > 0 on any outer piece"
+was wrong. In the original variables, SCIP finds points with `x7 + x8 >= 230` and
+`f = -4.5e-8`. Measured exactly, such a point violates the budget rows C5/C6 by
+7.4e-7, which is inside SCIP's 1e-6 feasibility tolerance. At its `u` the §90
+limit LP is infeasible. The relative margin, `0.035 / 4356 = 8e-6`, is the same
+order as a solver's feasibility tolerance. Further out, SCIP's best points do track
+the slope:
+
+| `x7 + x8 >=` | SCIP best point | `0.0349 T` | SCIP dual bound |
+|---|---|---|---|
+| 230 | ≈ 0 | 8 | ≈ 0 |
+| 2.3e4 | 870 | 801 | 1.5e-8 |
+| 2.3e6 | 80,300 | 80,120 | 9.5e-7 |
+
+**SCIP's dual bound on the untransformed piece never leaves 0.** Its relaxation has
+the same decoupling. With `numerics/feastol = 1e-9`, SCIP's LP solver aborted with
+"unresolved numerical troubles". So SCIP on the raw piece is not an oracle for (b).
+
+**Step 4 (prolog, the transformed piece; `prolog_projective*.py`).** The rescaled
+piece, with `T = x7 + x8`, `M = 1e4` and 20 bounded variables:
+- **SCIP:** optimal, `min f/T = +0.034912`, primal = dual, 10,243 nodes, 3.0 s. The
+  mechanism is sound, and the piece certifies with a solver whose bilinear search is
+  strong enough.
+- **discopt:** incumbent 0.034952, but the bound is `-1e-12` after 1,172,339 nodes in
+  300 s. The Python tree (`DISCOPT_NATIVE_SPATIAL_KERNEL=0`) stalls the same way:
+  bound -1.2e-10 after 1,181 nodes in 60 s. The bound looks like the safe-rounded
+  zero of a node LP that never improves.
+- **Localisation at `s = 0`, on a 4x4 grid of `(u0, u1)` sub-boxes:** 15 of 16
+  certify or are infeasible in seconds. The one containing the optimum stalls.
+  Split 3x3, its 9 sub-boxes all certify a positive bound in seconds. One hit its
+  20 s limit, but with bound 8.82 > 0.
+
+So discopt's relaxation can see the margin once `(u0, u1)` is partitioned. What
+fails is its branching on the whole box. My reading, not yet measured: it splits the
+wide `x2..x5` (range ~7000) rather than `u0`/`u1` (range ~5). **Step 4 fails as
+discopt stands.** This is a bounded 20-variable bilinear problem that SCIP closes in
+10k nodes, so the defect is independent of #1975.
+
+**Class census (`census_2026-10-26.jsonl`).** The class was rebuilt as every
+MINLPLib instance with <= 200 vars/cons that keeps an unbounded continuous variable
+after FBBT: **227** (#1869's local 120-instance list was unavailable). discopt at
+30 s, in parallel, not a timing measurement: 95 certified (94 optimal, 1 infeasible),
+132 not, and none disagree with `minlplib.solu`. Of the 132, the root LP over the
+FBBT box (rays: float verdict when the cost is < -1e-7, rational otherwise):
+
+| root LP | n | instances |
+|---|---:|---|
+| certified (the tree is the bottleneck) | 55 | |
+| uncertified, no negative-cost ray found | 33 | mostly `autocorr_bern*` |
+| root analysis timed out (300 s) | 29 | mostly `autocorr_bern*` |
+| uncertified, ray cost >= 0 | 1 | `ex14_1_7` |
+| **uncertified, negative-cost ray** | **14** | below |
+
+The 14 split three ways. The test for the second and third group is the side the ray
+moves toward, after SCIP's presolve (`ray_side.py`):
+- **The ray is on lifted columns only** (a missing or infinite envelope; 1/T does not
+  apply): `hhfair`, `launch`, `like`.
+- **SCIP's presolve closes the ray's side, and discopt's FBBT does not** (a
+  bound-inference gap; 1/T is not the first fix): `chakra` (all 20 ray columns),
+  `wallfix` (`objvar*x2 = 1` with `x2 >= 0` gives `objvar >= 0`), and
+  `ex8_5_2`..`ex8_5_6`. **7 instances.**
+- **The ray's side stays open after SCIP's presolve** (the 1/T candidates): `prolog`
+  (quadratic), `mhw4d` (polynomial), `shiporig` (signomial with sqrt), and `ex8_5_1`
+  (log/div, which rescales only if each log is of a ratio). **4 instances.** Walking
+  a SCIP-feasible point along the ray (`ray_walk.py`): prolog stays feasible, as its
+  ray is tight. `mhw4d`, `shiporig` and `ex8_5_1` leave the feasible set at `t = 1`,
+  so their rays are relaxation artefacts.
+
+**Verdict.**
+- (a) passes: 4 >= 3.
+- (b) is measured only on prolog: the transform is sound (SCIP, 3 s).
+- Step 4 fails: discopt stalls on the bounded piece.
+
+Per the stated kill criterion, the 1/T piece is not built now. The census found two
+larger general defects ahead of it, and each one is a prerequisite or a bigger win:
+1. **Bound inference that closes the ray's side.** 7 of the 14 have a root ray that
+   SCIP's presolve removes and FBBT does not. That is more instances than the 1/T
+   class, at a much smaller cost.
+2. **discopt's spatial branching on bounded bilinear problems.** prolog's transformed
+   piece needs >1.17M nodes without progress, against SCIP's 10,243. The 1/T piece
+   cannot work until this is fixed, and the defect is general.
+
+**Retraction (2026-10-26, after #1970 and #1978): "Step 4 fails" no longer holds.**
+The kill criterion above was met at step 4 *only* because discopt stalled on
+prolog's bounded rescaled piece. That stall was the general bilinear-branching
+defect named in point 2, and it is now fixed: in the native spatial kernel by #1970
+(on `main`, default ON) and in the Python tree by #1978 (branch
+`claude/fbbt-sign-domain-1982`, not yet merged). Re-run of
+`prolog_projective.py 1e4 300` on this branch after merging `main` (merge commit
+`802c6b7`; `discopt.__file__` checked to be this worktree):
+- native kernel (default): **optimal, `min f/T = 0.034952`, bound `0.034861`,
+  `gap_certified=True`, 3,579 nodes, 5.4 s** (SCIP: 0.034912, 10,243 nodes);
+- Python tree (`DISCOPT_NATIVE_SPATIAL_KERNEL=0`, without #1978): still stalls,
+  bound `-1.2e-10` after 2,389 nodes in 120 s, as before.
+
+So with the default solver step 4 passes, the stated kill criterion is no longer
+met, and the 1/T piece is built: §96.
+
+## 96. #1975: the 1/T outer piece, built and measured; `DISCOPT_OUTER_PIECE` retired (2026-10-26)
+
+**What was built.** The model is covered by two pieces. Let `T = sum_k sigma_k (x_k - r_k)`
+range over the *generators* among the open columns, where `r_k` is the column's FBBT
+bound and a free column enters as `|x_k|`.
+- The **inner piece** `T <= M` boxes each generator to `M` from its finite side and
+  is solved by the ordinary pipeline.
+- The **outer piece** `T >= M` is rewritten exactly through `x_k = r_k + sigma u_k/s`,
+  with `s = 1/T` in `[0, 1/M]` and the generators' shares summing to 1. A row of degree
+  `D` in the open columns is multiplied by `s^D`. Sums, products, divisions by
+  bounded expressions, positive powers (padded to an integer degree), `sqrt` and
+  `abs` are rewritten. A degree-0 argument of any other function is kept. Anything
+  else declines.
+- The outer piece's certified minimum `c'` of `M^d s^d f` bounds `f >= c'` on
+  `T >= M` when `c' >= 0` or `d = 0`. The result is `min(inner bound, c')`, and the
+  inner piece's incumbent is re-verified on the original model.
+- **Generators:** the minimal set of open columns (greedy, in model order) whose
+  boxing lets FBBT bound every other open column. For prolog this is `{x7, x8}`.
+  Summing all 7 open columns into `T` instead made the outer optimum sit at
+  `s ~ 7.5e-9`, where a 1e-6 row tolerance in the rescaled model is ~1e2 in
+  original units. The certified `c'` came out negative (-3.6e-4 at `M = 1e4`), and a
+  mapped-back point violated row 14 by 1.25. This was measured, not hypothesised.
+- **Pinned by tests:** the rewrite is an exact identity on every row and on the
+  objective, on 40 random points of a toy with open-above, open-below and free
+  columns. Feasible-point sampling on prolog: 20 feasible points far out on `T` map
+  to feasible points of the outer model, at or above its certified bound.
+
+**prolog: the mechanism works.** Through `Model.solve` with the flag, at a 30 s limit:
+`M = 1e4`, outer bound `349.49` (= `0.03495 M`, SCIP's slope `0.0349`), inner piece
+certified. Result: **optimal, objective 8.2e-7, bound -9.75e-8, 956 nodes, 11.9 s**.
+With the flag OFF: `feasible`, **no bound**, 29.7 s.
+
+**Coverage of the class (`outer_piece_accept_227.jsonl`, structural, no solve).**
+The rewrite accepts **183 of 227**. Of the rest, 19 decline on a division by an
+open column, 9 on a non-generator share that stays unbounded, 8 on `log` of an open
+column, and 3 on SOS rows. Of the census's four 1/T candidates (§95):
+- `prolog` and `chakra` are accepted;
+- `mhw4d` declines (unbounded share), and `shiporig` and `ex8_5_1` decline (division
+  by an open column). §95 already found the rays of these three to be relaxation
+  artefacts (they leave the feasible set at `t = 1`).
+
+**Trigger, measured three times** (each a §5 panel run; earlier runs stopped once
+they showed the trigger was wrong):
+1. *Fire on every model with an open column* (first 67 rows,
+   `outer_piece_panel_alwaysfire_partial.jsonl`). Models that certify anyway lost
+   wall: autocorr_bern20-03 0.4 -> 2.4 s, clay0303hfsg 4.9 -> 13.0 s. Where the inner
+   piece had less time than the whole solve, the bound weakened: autocorr_bern25-06
+   -3648 -> -4792.
+2. *Fire when a root-only probe (`max_nodes=1`, 10 % of the limit) gives no bound*
+   (96 rows, `outer_piece_panel_probe_v1_partial.jsonl`). On the clay models the
+   probe ran out of time before its root finished. clay0303hfsg went 4.8 -> 16.7 s
+   for the same certificate.
+3. *The same, but only when the probe finished its root (`feasible`/`node_limit`)
+   with no bound.* This is the final panel below.
+
+**The §5 panel (final trigger).** `flag_onoff_corpus_panel.py` (from
+`claude/fbbt-sign-domain-1982`, with the child's stats filter changed to
+`outer_piece`) was run as:
+
+    --flag DISCOPT_OUTER_PIECE --solu minlplib.solu --extra-dir <227 .nl>
+    --extra-list class_227.txt --time-limit 30 --jobs 2
+
+It covers the 66 in-repo corpus files plus the 227-instance class, **287 instances**,
+OFF/ON interleaved with the arm order alternating, load ~2-3 on 4 cores, 5050 s.
+Rows are in `outer_piece_panel_2026-10-26.jsonl`.
+- **Cert-clean: yes.** No incorrect certified objective, no infeasibility claim
+  against a MINLPLib solution, and no bound beyond the oracle. Objective drift is 0
+  on the 139 instances both arms certify. 465 incumbent feasibility checks were
+  executed and none failed.
+- **Net-positive: no.** Certified **146 OFF -> 140 ON**: gained `prolog`, lost 7
+  (`smallinvDAXr{2,3,4}b100-110`, `smallinvDAXr4b{150-165,200-220}`, `clay0304m`,
+  `sssd12-05`). Total wall is 4908 vs 4833 s.
+  - The pieces were built on 27 instances: 15 certified through them, 12 stayed open.
+    Besides prolog, they certified 14 that OFF certifies too, each slower (e.g.
+    smallinvDAXr1b010-011 9.1 -> 20.2 s).
+  - The smallinvDAX losses are convex MIQPs. A root-only solve gives them no bound,
+    but the default tree certifies them. The pieces took their time, and the inner
+    piece did not finish.
+  - `clay0304m` and `sssd12-05` lost to the probe's cost alone (15.8 s and 11.4 s
+    OFF, against the 30 s limit with load).
+  - `chakra` is the one other instance where the pieces produced something OFF does
+    not: a bound of -183.88 where OFF had none (optimum -179.13), but no certificate.
+
+**Verdict: retired** (CLAUDE.md §5, outcome 2). No trigger repairs this. Even a
+perfect one, firing exactly where the default solve ends without a bound, has a
+ceiling of **one certificate on 287 instances: prolog**. CLAUDE.md §2 rejects a
+benefit confined to a named instance. The other genuine-recession candidates either
+decline structurally or have rays that are relaxation artefacts (§95). So knowing
+when to fire costs another solve, and nothing pays for it. `DISCOPT_OUTER_PIECE`,
+`modeling/_outer_piece.py`, its `Model.solve` entry point and its tests are deleted.
+
+**Kept as a probe:** `docs/dev/data/1975-prolog-limit/outer_piece_prototype.py` (the
+module verbatim), `outer_piece_solve_one.py` (reproduces prolog: optimal, 12.0 s at
+30 s), `outer_piece_accept.py`, and the panel rows.
+
+**What would change this.** A class of instances, not prolog alone, that all of
+these hold for:
+- the default leaves them without a bound;
+- the rewrite accepts them;
+- their generator-scaled slope is positive.
+
+`#1979` (`ex8_5_*`: `x7/(x5-x7)`, `log(x5-x7)`) would add a division rule. That is a
+rewrite of a ratio of two degree-1 forms, which is degree 0 and keeps the `s = 0`
+closure only where the denominator's leading form is bounded away from 0. It is
+the most likely route to such a class.
+
+## 97. #1990: ex1252a's integer-product objective — both levers measured, the bound loss found in the node LP (2026-10-26)
 
 **Problem.** ex1252a's objective is `Σ_k (c_k + 1800·x_{15+k})·x_k·x_{3+k}·x_{18+k}`,
 `x0..x5 ∈ {0..3}`, `x18..x20 ∈ {0,1}`. On `main` + #1988 a 120 s solve ended at
@@ -12272,7 +12552,7 @@ That is a judgement call, and the owner may reverse it.
 ex1252a's 600 s bound was 92,254 against 128,894, limited by throughput (root
 heuristics about 60 s, about 2 s a node on the Python tree).
 
-### 95.1 The native kernel certifies ex1252a (2026-10-27)
+### 97.1 The native kernel certifies ex1252a (2026-10-27)
 
 **Profile of the Python tree** (merged base, 100 nodes, cProfile): 11,102 LP solves
 took 107 s, about 10 ms each; the square and convex separators took 43 s and 37 s

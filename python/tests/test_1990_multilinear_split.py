@@ -4,7 +4,7 @@ chains (``_relax/multilinear_split.py``, ``DISCOPT_KERNEL_MULTILINEAR_SPLIT``).
 The kernel's spec builder declines a relaxation with trilinear or multilinear
 terms. On ex1252a (``aux * x0 * x3 * x18`` per line after the factorable lift) that
 left the solve on the Python tree, ~280 nodes in 600 s; split, the kernel certifies
-it in 2,048 nodes (``docs/dev/performance-plan.md`` §95).
+it in 2,048 nodes (``docs/dev/performance-plan.md`` §97).
 """
 
 from __future__ import annotations

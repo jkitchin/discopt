@@ -2179,7 +2179,7 @@ def _kernel_multilinear_split_enabled() -> bool:
     (``_relax/multilinear_split.py``) for the kernel attempt only. Exact
     reformulation; the relaxation becomes the recursive bilinear McCormick
     envelope. Bound-changing route switch (CLAUDE.md §5), graduated with
-    ``DISCOPT_NATIVE_NLP_PRIMAL`` (``docs/dev/performance-plan.md`` §95.1): over 424
+    ``DISCOPT_NATIVE_NLP_PRIMAL`` (``docs/dev/performance-plan.md`` §97.1): over 424
     instances it fires on 4; at 120 s it certifies ex1252 and ex1252a (the Python
     tree ends at bounds 21,308 / 23,694 of 128,894), st_e03 8.6 -> 0.7 s, st_e38
     unchanged, cert-clean."""

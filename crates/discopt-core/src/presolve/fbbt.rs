@@ -238,7 +238,7 @@ pub fn interval_div(a: &Interval, b: &Interval) -> Interval {
 }
 
 /// Is the #1990 extended product preimage on? `DISCOPT_FBBT_EXTENDED_MUL`,
-/// **default ON** since its CLAUDE.md §5 panel (`docs/dev/performance-plan.md` §95);
+/// **default ON** since its CLAUDE.md §5 panel (`docs/dev/performance-plan.md` §97);
 /// `=0` restores the division-only rule byte-for-byte.
 fn extended_mul_enabled() -> bool {
     use std::sync::OnceLock;

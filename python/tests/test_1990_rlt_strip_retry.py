@@ -63,7 +63,7 @@ def rlt_solves_fail(monkeypatch):
 
 
 def test_flag_defaults_on(monkeypatch):
-    """Graduated default ON (#1990, performance-plan §95); ``=0`` opts out."""
+    """Graduated default ON (#1990, performance-plan §97); ``=0`` opts out."""
     monkeypatch.delenv(_FLAG, raising=False)
     assert mlp._rlt_strip_retry_enabled() is True
     monkeypatch.setenv(_FLAG, "0")

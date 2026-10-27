@@ -218,7 +218,7 @@ The release procedure that produces these entries is documented in
     (`DISCOPT_HOOK_INTEGRAL_POINTS`).
   - ex1252a: bound 19,389 at 120 s before, certified 128,893.741 in 19 s now.
     ex1252 certifies in 41 s, and st_e03 takes 0.7 s instead of 8.6 s. nous1
-    slows from about 21 s to 28 s (`docs/dev/performance-plan.md` §95.1).
+    slows from about 21 s to 28 s (`docs/dev/performance-plan.md` §97.1).
 
 - **A failed RLT node LP no longer costs the node its bound, and FBBT bounds a
   factor of a product whose other factor touches zero (#1990).**
@@ -231,7 +231,7 @@ The release procedure that produces these entries is documented in
     (`DISCOPT_FBBT_EXTENDED_MUL`, default on). On ex1252a, `x18 = 0.0025*x9*x3`
     at `x18 = 1` now gives `x3 >= 1`.
   - ex1252a's bound at 600 s rose from 56,665 to 92,254 (optimum 128,894). The
-    panels are cert-clean (`docs/dev/performance-plan.md` §95). `=0` restores
+    panels are cert-clean (`docs/dev/performance-plan.md` §97). `=0` restores
     either legacy path.
 
 - **Bound tightening no longer cuts feasible points near tanh/atan/sigmoid/erf/

@@ -593,7 +593,7 @@ def _rlt_strip_retry_enabled() -> bool:
 
     Bound-changing (CLAUDE.md §5): it changes the bound of exactly the nodes whose
     RLT-augmented LP gave no certified verdict, which otherwise fall through to the
-    #671 row filter. Graduated on its panel (``docs/dev/performance-plan.md`` §95):
+    #671 row filter. Graduated on its panel (``docs/dev/performance-plan.md`` §97):
     cert-clean everywhere it fires (haverly, mathopt3, nvs16, ex8_5_4, ex1252a of
     424 screened), neutral at 30 s, and ex1252a's 600 s bound 56 665 -> 87 589."""
     return _env_flag("DISCOPT_RLT_STRIP_RETRY", default=True)
