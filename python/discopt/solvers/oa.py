@@ -5754,12 +5754,18 @@ def _oa_support_cuts_enabled() -> bool:
 _OA_SUPPORT_MAX_NONLINEAR_VARS = 16
 
 
+#: Ceiling on the support-point probe's wall budget, in seconds (#1153).
+_OA_SUPPORT_BUDGET_CAP_S = 1.0
+
+
 def _oa_support_cut_budget_s(time_limit: float) -> float:
     """Wall budget for ``_support_points_for_rows`` (``DISCOPT_OA_SUPPORT_BUDGET``
-    as a fraction of the time limit, default 0.02, floored at 0.25 s). A numeric
-    knob read only under ``DISCOPT_OA_SUPPORT_CUTS``."""
+    as a fraction of the time limit, default 0.02, floored at 0.25 s and capped at
+    :data:`_OA_SUPPORT_BUDGET_CAP_S`). A numeric knob read only under
+    ``DISCOPT_OA_SUPPORT_CUTS``. The cap keeps the probe from growing with the
+    caller's budget (#1153): measured cost 0.07-0.17 s on the p_ball instances."""
     fraction = float(os.environ.get("DISCOPT_OA_SUPPORT_BUDGET", "0.02"))
-    return max(0.25, fraction * float(time_limit))
+    return min(max(0.25, fraction * float(time_limit)), _OA_SUPPORT_BUDGET_CAP_S)
 
 
 @dataclass
