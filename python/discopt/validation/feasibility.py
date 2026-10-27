@@ -1595,14 +1595,31 @@ def _dense_jacobian(evaluator, x):
     return sparse.csr_matrix(np.asarray(evaluator.evaluate_jacobian(x), dtype=np.float64))
 
 
-def _noise_floor(J, x, r, rhs):
+def _noise_floor(J, x, r, rhs, step=None):
     """Per-row float-evaluation noise: ``16 ulp * (sum_j |J_ij x_j| + |body| + |rhs|)``.
 
     The residual a row can be driven to in float64 at this point, whatever units it
     is written in: it is covariant with a row rescaling (every term scales) and, under
     a translation, grows only with the magnitude the arithmetic really carries.
+
+    ``step`` (full-length, zero on frozen columns) is the correction that produced
+    this point. A backward-stable least-squares solve returns every component of it
+    to ``~ulp * ||step||_inf``, so a row the step touches carries that much
+    round-off too: ``16 ulp * ||step||_inf * sum_{j moved} |J_ij|`` is added. Without
+    it a homogeneous row at zero (``w - v == 0`` with ``w = v = 0``, an inactive hull
+    disjunct) has a floor that vanishes with the row: a solve-noise ``w = 4e-21``
+    sits above ``32 ulp * 4e-21`` at every magnitude down to underflow, and the
+    repair rejected every iterate of a point it had in fact repaired (#2001). The
+    term is row-local, and invariant under a row rescale and a translation alike.
     """
     term = np.asarray(abs(J) @ np.abs(x), dtype=np.float64).ravel()
+    if step is not None:
+        moved = (step != 0.0).astype(np.float64)
+        term = (
+            term
+            + float(np.max(np.abs(step), initial=0.0))
+            * np.asarray(abs(J) @ moved, dtype=np.float64).ravel()
+        )
     return REPAIR_NOISE_ULPS * _EPS * (term + np.abs(r + rhs) + np.abs(rhs))
 
 
@@ -1671,7 +1688,50 @@ def repair_point(model, x_flat, *, evaluator, variables=None) -> RepairResult:
     if excess0 <= 0.0:
         return RepairResult(None, 0.0, 0.0, 0, "already feasible to float noise")
 
-    active = (senses == "==") | (viol > noise0)
+    rows_ctx = (evaluator, senses, rhs, lb, ub, viol0, noise0)
+    best_x, best_excess, it, reason = _newton_repair(rows_ctx, x, r, viol, J, frozen, excess0)
+    if best_x is None:
+        return RepairResult(None, excess0, excess0, it, reason)
+
+    # Second candidate (#2001): the active bounds of the point the solver was
+    # converging to. A continuous column within the repair's own move of a bound
+    # (``dist <= ||best_x - x||_inf``) is, at the resolution the repair works at,
+    # on that bound -- an LP/barrier point stops ~tol inside it. The min-norm step
+    # leaves it free and spends the correction along it instead; on cstr nt=5
+    # (`x40` 3.0e-5 under its bound, repair move 5.0e-5) that published 2.79188879
+    # where the bound-snapped repair reaches the sub-NLP's 2.79188379. Snapped
+    # and frozen, the same Newton loop runs again; the lower objective wins at no
+    # worse excess. A candidate is only ever a point: verify_point still vouches.
+    move = float(np.max(np.abs(best_x - x), initial=0.0))
+    dist_lo, dist_hi = x - lb, ub - x
+    snap_lo = ~frozen & (dist_lo > 0.0) & (dist_lo <= move) & (dist_lo <= dist_hi)
+    snap_hi = ~frozen & (dist_hi > 0.0) & (dist_hi <= move) & ~snap_lo
+    if np.any(snap_lo | snap_hi):
+        xs = np.where(snap_lo, lb, np.where(snap_hi, ub, x))
+        rs, vs = _signed_rows(evaluator, xs, senses, rhs)
+        if np.all(np.isfinite(rs)):
+            Js = _dense_jacobian(evaluator, xs)
+            snap_x, snap_excess, it_s, _ = _newton_repair(
+                rows_ctx, xs, rs, vs, Js, frozen | snap_lo | snap_hi, excess0
+            )
+            if snap_x is not None and snap_excess <= best_excess:
+                f_a = float(evaluator.evaluate_objective(best_x))
+                f_b = float(evaluator.evaluate_objective(snap_x))
+                if math.isfinite(f_b) and (not math.isfinite(f_a) or f_b < f_a):
+                    return RepairResult(snap_x, excess0, snap_excess, it + it_s)
+    return RepairResult(best_x, excess0, best_excess, it)
+
+
+def _newton_repair(rows_ctx, x, r, viol, J, frozen, excess0):
+    """The Newton loop of :func:`repair_point` from ``x`` with ``frozen`` columns.
+
+    Returns ``(best_x, best_excess, iterations, reason)``; ``best_x`` is ``None``
+    (with ``reason``) when no iterate kept every row within its start and strictly
+    lowered the largest violation-beyond-noise below ``excess0``.
+    """
+    evaluator, senses, rhs, lb, ub, viol0, noise0 = rows_ctx
+    noise = _noise_floor(J, x, r, rhs)
+    active = (senses == "==") | (viol > noise)
     best_x, best_excess, it = None, excess0, 0
     for it in range(1, REPAIR_MAX_ITER + 1):
         rows = np.nonzero(active)[0]
@@ -1679,9 +1739,7 @@ def repair_point(model, x_flat, *, evaluator, variables=None) -> RepairResult:
         if rows.size == 0 or cols.size == 0:
             break
         if rows.size * cols.size > REPAIR_MAX_DENSE:
-            return RepairResult(
-                None, excess0, excess0, it, f"system {rows.size}x{cols.size} too large"
-            )
+            return None, excess0, it, f"system {rows.size}x{cols.size} too large"
         A = J[rows][:, cols].toarray()
         if not np.all(np.isfinite(A)):
             break
@@ -1694,7 +1752,9 @@ def repair_point(model, x_flat, *, evaluator, variables=None) -> RepairResult:
         if not np.all(np.isfinite(rn)):
             break
         Jn = _dense_jacobian(evaluator, xn)
-        noise_n = _noise_floor(Jn, xn, rn, rhs)
+        full_step = np.zeros_like(x)
+        full_step[cols] = step
+        noise_n = _noise_floor(Jn, xn, rn, rhs, full_step)
         x, r, viol, J = xn, rn, vn, Jn
         frozen = frozen | hit
         active = active | (viol > noise_n)
@@ -1706,8 +1766,8 @@ def repair_point(model, x_flat, *, evaluator, variables=None) -> RepairResult:
         if excess <= 0.0:
             break
     if best_x is None:
-        return RepairResult(None, excess0, excess0, it, "no step reduced the violation")
-    return RepairResult(best_x, excess0, best_excess, it)
+        return None, excess0, it, "no step reduced the violation"
+    return best_x, best_excess, it, ""
 
 
 def incumbent_repair_enabled() -> bool:
