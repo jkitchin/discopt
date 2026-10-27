@@ -10199,6 +10199,14 @@ _CONVEX_ROUTE_MIN_GAP_IMPROVEMENT = 0.25
 #: That look-back window, as a fraction of the checkpoint.
 _CONVEX_ROUTE_PROGRESS_WINDOW_FRACTION = 0.5
 
+#: #2013: the dual bound is *stalled* across the look-back window when it moved by
+#: no more than this fraction of the route's current absolute gap. Scale-free on
+#: purpose: what matters is whether the bound is closing the gap the certificate
+#: needs closed, not its movement in the model's units. Measured on
+#: ``cvxnonsep_pcon30`` (30 s): the master's dual bound moves < 1e-7 over 20 s
+#: against an absolute gap of ~0.2 -- six orders of magnitude below this.
+_CONVEX_ROUTE_BOUND_STALL_FRACTION = 1e-3
+
 #: #1143: the *decision point*, as a fraction of the caller's limit, used instead
 #: of :data:`_CONVEX_ROUTE_BUDGET_FRACTION` when the early-decision policy is on.
 #:
@@ -10326,6 +10334,30 @@ def _convex_route_progress_guard_enabled() -> bool:
     return os.environ.get("DISCOPT_CONVEX_ROUTE_GUARD", "1") != "0"
 
 
+def _convex_route_bound_stall_enabled() -> bool:
+    """Does the #1066 guard also require the DUAL BOUND to move (#2013)?
+
+    The #1066 trend test reads the relative gap, and incumbents move the gap as
+    well as the bound. A route whose master bound is stuck can therefore keep
+    "earning" its budget on primal improvements alone -- improvements that can
+    never certify unless the stuck bound already is the optimum. With this on,
+    the trend verdict additionally abandons a route whose dual bound moved by at
+    most :data:`_CONVEX_ROUTE_BOUND_STALL_FRACTION` of the absolute gap across the
+    trailing window. It only acts where the trend test would have said continue,
+    so it can only hand over *earlier*, never later; and it only acts on the
+    #1066 trend policy (the ``lp_nlp_bb`` route, or OA with
+    ``DISCOPT_CONVEX_ROUTE_DECISION_POINT=0``), since the #1143 decision point
+    consults no trend.
+
+    Measured on ``cvxnonsep_pcon30`` (30 s): the dual bound sits at -36.156283
+    for the whole route in both ``DISCOPT_HIGHS_MASTER_LP_CUTS`` arms. With the
+    LP cuts on, incumbents arrive slowly enough to keep passing the 25% gap test,
+    the guard never fires and the solve ends ``feasible``; with them off the gap
+    test fires at ~20.5 s and the fallback certifies. Read per call.
+    """
+    return os.environ.get("DISCOPT_CONVEX_ROUTE_BOUND_STALL", "0") != "0"
+
+
 class _RouteProgressGuard:
     """Stop the #1059 auto-route once it stops making progress -- not on a clock.
 
@@ -10448,6 +10480,9 @@ class _RouteProgressGuard:
         )
         #: ``(elapsed, relative_gap)`` for every iteration that had a finite gap.
         self.history: list[tuple[float, float]] = []
+        #: ``(elapsed, dual_bound, primal_bound)`` alongside ``history`` (#2013).
+        self.bound_history: list[tuple[float, float, float]] = []
+        self.bound_stall = _convex_route_bound_stall_enabled()
         self.fired_at: Optional[float] = None
         self.reason: Optional[str] = None
         self.call_count = 0
@@ -10465,6 +10500,13 @@ class _RouteProgressGuard:
             and context["current_primal_bound"] is not None
         ):
             self.history.append((elapsed, float(gap)))
+            self.bound_history.append(
+                (
+                    elapsed,
+                    float(context["current_dual_bound"]),
+                    float(context["current_primal_bound"]),
+                )
+            )
         if elapsed < self.checkpoint:
             return False
         stop, reason = self._verdict(elapsed)
@@ -10510,11 +10552,27 @@ class _RouteProgressGuard:
             return True, f"no gap observation inside the trailing {self.window:.1f}s window"
         reference = max(earlier)
         if latest_gap <= (1.0 - self.min_improvement) * reference:
+            if self.bound_stall:
+                return self._bound_stall_verdict(cutoff)
             return False, None
         return True, (
             f"relative gap {latest_gap:.4g} vs {reference:.4g} over the trailing "
             f"{self.window:.1f}s -- under the {self.min_improvement:.0%} improvement "
             f"the route must show to keep the budget"
+        )
+
+    def _bound_stall_verdict(self, cutoff: float) -> tuple[bool, Optional[str]]:
+        """#2013: the gap shrank, but did the DUAL BOUND move inside the window?"""
+        in_window = [dual for when, dual, _ in self.bound_history if when >= cutoff]
+        _, latest_dual, latest_primal = self.bound_history[-1]
+        moved = max(in_window) - min(in_window)
+        abs_gap = abs(latest_primal - latest_dual)
+        if moved > _CONVEX_ROUTE_BOUND_STALL_FRACTION * abs_gap:
+            return False, None
+        return True, (
+            f"dual bound moved {moved:.3g} over the trailing {self.window:.1f}s against "
+            f"an absolute gap of {abs_gap:.4g} -- only incumbents are closing the gap, "
+            f"which cannot certify (#2013)"
         )
 
 

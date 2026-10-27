@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 from discopt.modeling.core import Model, from_nl
 from discopt.solver import (
+    _CONVEX_ROUTE_BOUND_STALL_FRACTION,
     _CONVEX_ROUTE_BUDGET_FRACTION,
     _CONVEX_ROUTE_MIN_GAP_IMPROVEMENT,
     _convex_route_progress_guard_enabled,
@@ -67,11 +68,16 @@ def _ctx(elapsed, gap, *, bounded=True):
     ``bounded=False`` is the OA driver's pre-dual-bound state: it reports
     ``relative_gap=1.0`` with ``current_dual_bound=None``, a placeholder rather
     than a measurement, and the guard has to tell the two apart.
+
+    The bounds are consistent with ``gap``: the incumbent is pinned at 1.0 and
+    the dual bound carries the whole gap, as on an OA route whose incumbent is
+    already optimal. The #2013 bound-stall rule reads the bounds, so a fixture
+    whose bound never moves while its gap shrinks would be a different trace.
     """
     return {
         "elapsed": float(elapsed),
         "relative_gap": gap,
-        "current_dual_bound": 0.0 if bounded else None,
+        "current_dual_bound": (1.0 - (gap or 0.0)) if bounded else None,
         "current_primal_bound": 1.0 if bounded else None,
     }
 
@@ -229,6 +235,116 @@ class TestGuardVerdicts:
         guard = _RouteProgressGuard(60.0)
         assert guard(_ctx(1.0, 0.5)) is False
         assert guard(_ctx(40.0, 0.5)) is True
+
+
+#: ``cvxnonsep_pcon30`` under ``DISCOPT_HIGHS_MASTER_LP_CUTS=1`` at 30 s (#2013),
+#: measured ``(elapsed, dual_bound, primal_bound)`` at the master restarts: the
+#: dual bound never leaves -36.156283 while incumbents close the gap 0.275 ->
+#: 0.011. The #1066 gap test passes at every check and the guard never fires; the
+#: solve ended ``feasible``. With the rule the guard fires at the first restart
+#: past the 15 s checkpoint and the fallback certifies -35.986842 at 24.2 s. (The
+#: trace keeps every 10th check-in; times are rounded to 0.01 s.)
+PCON30_LP_CUTS = [
+    (0.11, -36.15628293609323, -26.205452783208024),
+    (3.69, -36.15628290334783, -30.309674567899048),
+    (6.31, -36.15628290334783, -31.202434348179253),
+    (7.52, -36.15628290334783, -32.51191469133501),
+    (9.41, -36.15628290334783, -33.92346217335541),
+    (11.05, -36.15628290334783, -34.95204068797755),
+    (13.31, -36.15628290334783, -34.95204068797755),
+    (14.99, -36.15628290334783, -35.221484270984604),
+    (16.18, -36.15628290334783, -35.221484270984604),
+    (19.16, -36.15628290334783, -35.42008379981217),
+    (21.97, -36.15628290334783, -35.679637809096604),
+    (25.06, -36.15628290334783, -35.745393635266645),
+]
+
+
+def _bound_ctx(elapsed, dual, primal):
+    """A minimisation context with real bounds; the gap is OA's relative gap."""
+    return {
+        "elapsed": float(elapsed),
+        "relative_gap": abs(primal - dual) / max(abs(primal), 1e-10),
+        "current_dual_bound": float(dual),
+        "current_primal_bound": float(primal),
+    }
+
+
+def _replay_bounds(guard, points):
+    for point in points:
+        if guard(_bound_ctx(*point)):
+            return point[0]
+    return None
+
+
+@pytest.mark.unit
+class TestBoundStall:
+    """#2013: incumbents alone cannot earn the route its budget."""
+
+    STALL_ENV = "DISCOPT_CONVEX_ROUTE_BOUND_STALL"
+
+    def test_pcon30_is_handed_over_at_the_checkpoint(self, monkeypatch):
+        monkeypatch.setenv(self.STALL_ENV, "1")
+        guard = _RouteProgressGuard(30.0)
+        assert _replay_bounds(guard, PCON30_LP_CUTS) == pytest.approx(16.18)
+        assert "only incumbents are closing the gap" in guard.reason
+
+    def test_without_the_rule_the_gap_test_keeps_pcon30_running(self, monkeypatch):
+        """The failure the rule exists for: this is the default before #2013."""
+        monkeypatch.setenv(self.STALL_ENV, "0")
+        guard = _RouteProgressGuard(30.0)
+        assert _replay_bounds(guard, PCON30_LP_CUTS) is None
+
+    def test_a_moving_bound_keeps_the_budget(self, monkeypatch):
+        """The same incumbents, with a dual bound that closes its share of the gap."""
+        monkeypatch.setenv(self.STALL_ENV, "1")
+        moving = [(t, dual + 0.01 * t, primal) for t, dual, primal in PCON30_LP_CUTS]
+        guard = _RouteProgressGuard(30.0)
+        assert _replay_bounds(guard, moving) is None
+
+    def test_movement_is_judged_against_the_gap(self, monkeypatch):
+        """Straddle the documented fraction of the absolute gap."""
+        monkeypatch.setenv(self.STALL_ENV, "1")
+        window = _RouteProgressGuard(30.0).window
+
+        def trace(rate):
+            # The incumbent halves its distance to 10 across each window, so the
+            # relative gap passes the #1066 test; the dual bound rises at ``rate``.
+            return [
+                (float(t), 10.0 + rate * t, 10.0 + 2.0 * 0.5 ** (t / window)) for t in range(31)
+            ]
+
+        def window_move_over_threshold(rate):
+            # What the guard computes at the 15 s checkpoint, re-derived here.
+            pts = trace(rate)
+            now = 15.0
+            duals = [d for t, d, _ in pts if now - window <= t <= now]
+            _, d_now, p_now = pts[int(now)]
+            threshold = _CONVEX_ROUTE_BOUND_STALL_FRACTION * (p_now - d_now)
+            return (max(duals) - min(duals)) / threshold
+
+        unit = 1e-4
+        scale = 1.0 / window_move_over_threshold(unit)  # rate*scale*unit sits on the line
+        over, under = 1.1 * scale * unit, 0.9 * scale * unit
+        assert window_move_over_threshold(over) > 1.0 > window_move_over_threshold(under)
+        assert _replay_bounds(_RouteProgressGuard(30.0), trace(over)) is None
+        assert _replay_bounds(_RouteProgressGuard(30.0), trace(under)) == pytest.approx(15.0)
+
+    def test_it_never_acts_before_the_checkpoint(self, monkeypatch):
+        monkeypatch.setenv(self.STALL_ENV, "1")
+        guard = _RouteProgressGuard(30.0)
+        early = [p for p in PCON30_LP_CUTS if p[0] < guard.checkpoint]
+        assert _replay_bounds(guard, early) is None
+        assert guard.call_count == len(early)
+
+    def test_the_decision_point_policy_is_untouched(self, monkeypatch):
+        """#1143 consults no trend, so the rule has nothing to act on there."""
+        monkeypatch.setenv(self.STALL_ENV, "1")
+        monkeypatch.setenv(DECISION_POINT_ENV, "1")
+        guard = _RouteProgressGuard(30.0)
+        assert guard.decision_point
+        assert _replay_bounds(guard, PCON30_LP_CUTS) == pytest.approx(5.0, abs=1.4)
+        assert "decision point" in guard.reason
 
 
 @pytest.mark.unit

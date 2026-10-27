@@ -174,6 +174,8 @@ def test_flag_off_still_keeps_a_route_that_is_improving(flag):
     flag(False)
     g = _RouteProgressGuard(60.0)
     g.history = [(20.0, 0.90), (29.0, 0.10)]
+    # The dual bound carries the improvement, so the #2013 bound-stall rule agrees.
+    g.bound_history = [(20.0, 0.10, 1.0), (29.0, 0.90, 1.0)]
     assert g._verdict(30.0) == (False, None)
 
 
