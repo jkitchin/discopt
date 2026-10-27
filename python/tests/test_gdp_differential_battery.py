@@ -528,13 +528,13 @@ SHAPES: list[Shape] = [
         _domain_restricted,
         lambda v, t: v["x"] <= -0.5 + t or (v["x"] >= 0 and math.sqrt(v["x"]) >= 2 - t),
         points=[{"x": -0.8}, {"x": -1.0}, {"x": 4.0}, {"x": 9.0}, {"x": 1.0}],
-        # #1779: big-M, mbigm and simplex keep the sqrt row where its disjunct is
-        # inactive, which imposed x >= 0 on the first disjunct (a false optimal);
-        # they refuse it, as does binary multiplication (#1775 G2.5), which keeps it
-        # too. Hull, and auto (routed to hull), lower it soundly.
-        refuses={
-            m: _DOMAIN_REFUSAL for m in ("big-m", "mbigm", "simplex", "binary_multiplication")
-        },
+        # #1779: big-M, mbigm and simplex kept the sqrt row where its disjunct is
+        # inactive, which imposed x >= 0 on the first disjunct (a false optimal).
+        # Simplex and binary multiplication (#1775 G2.5), which keeps it too, refuse
+        # it; big-M and mbigm split sqrt's operand into a column tied to x only
+        # where the disjunct holds (_ArgumentDisaggregator). Hull, and auto (routed
+        # to hull), lower it soundly.
+        refuses={m: _DOMAIN_REFUSAL for m in ("simplex", "binary_multiplication")},
     ),
     Shape(
         "domain_restricted_wrapped",
@@ -543,9 +543,7 @@ SHAPES: list[Shape] = [
             v["x"] <= -0.5 + t or (v["x"] >= 0 and math.exp(-math.sqrt(v["x"])) <= 0.5 + t)
         ),
         points=[{"x": -0.8}, {"x": -1.0}, {"x": 1.0}, {"x": 9.0}],
-        refuses={
-            m: _DOMAIN_REFUSAL for m in ("big-m", "mbigm", "simplex", "binary_multiplication")
-        },
+        refuses={m: _DOMAIN_REFUSAL for m in ("simplex", "binary_multiplication")},
     ),
     Shape(
         "nested_blocks",

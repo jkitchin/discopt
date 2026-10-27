@@ -12,7 +12,10 @@ check on the NaN of the inactive disjunct.
 After: those lowerings refuse loudly (a per-node domain check, not the row's
 enclosure, which ``sqrt``'s clipping and outer operations hide); ``auto`` routes
 such a disjunction to hull; and an undefined leaf fails only its own disjunct in
-the verifier.
+the verifier. Since then big-M (and mbigm) lower these rows exactly by giving the
+restricted operand its own column, tied to it only where the disjunct holds
+(``_ArgumentDisaggregator``); they still refuse an operand they cannot split, and
+simplex still refuses.
 """
 
 from __future__ import annotations
@@ -53,12 +56,39 @@ def _wrapped_power_disjunction():
     return m
 
 
+def _unsplittable_disjunction():
+    # sqrt's argument x**3 is not linear, so big-M cannot give it its own column
+    # (_ArgumentDisaggregator): the row keeps no finite M and is refused.
+    m = dm.Model("unsplittable")
+    x = m.continuous("x", lb=-1, ub=10)
+    m.either_or([[x <= -0.5], [dm.sqrt(x**3) >= 2]], name="d")
+    m.minimize(x)
+    return m
+
+
 @pytest.mark.parametrize("build", [_sqrt_disjunction, _log_disjunction, _wrapped_power_disjunction])
-@pytest.mark.parametrize("method", ["big-m", "mbigm", "simplex"])
-def test_keeping_the_body_out_of_the_selectors_reach_refuses(build, method):
+@pytest.mark.parametrize("method", ["big-m", "mbigm"])
+def test_big_m_splits_the_restricted_operand_and_finds_the_true_optimum(build, method):
+    """Was ``optimal`` at 4.0 / 2.0 / 0.48 against a true optimum of -1, then (the
+    #1779 fix) a refusal. The row is undefined unless its operand is in its domain,
+    so that operand gets a column boxed to the domain and tied to it only where the
+    disjunct holds: the first disjunct keeps ``x = -1``."""
+    r = build().solve(gdp_method=method, time_limit=60)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(-1.0, abs=1e-6)
+
+
+@pytest.mark.parametrize("build", [_sqrt_disjunction, _log_disjunction, _wrapped_power_disjunction])
+def test_simplex_keeping_the_body_out_of_the_selectors_reach_refuses(build):
     """Was: ``optimal`` at 4.0 / 2.0 / 0.48 against a true optimum of -1."""
     with pytest.raises(ValueError, match=_REFUSAL):
-        build().solve(gdp_method=method, time_limit=60)
+        build().solve(gdp_method="simplex", time_limit=60)
+
+
+@pytest.mark.parametrize("method", ["big-m", "mbigm", "simplex"])
+def test_an_operand_big_m_cannot_split_still_refuses(method):
+    with pytest.raises(ValueError, match=_REFUSAL):
+        _unsplittable_disjunction().solve(gdp_method=method, time_limit=60)
 
 
 @pytest.mark.parametrize("method", ["hull", "auto"])
@@ -70,12 +100,33 @@ def test_hull_and_auto_find_the_true_optimum(build, method):
     assert r.objective == pytest.approx(-1.0, abs=1e-6)
 
 
-def test_indicator_row_refuses():
-    """``if_then`` has no hull route; it was ``optimal`` at 1e-11 against -1."""
+def _indicator_model():
     m = dm.Model("ind")
     x = m.continuous("x", lb=-1, ub=10)
     z = m.binary("z")
     m.if_then(z, [dm.sqrt(x) >= 2])
+    m.subject_to(x >= 4 * z - 1)
+    m.minimize(x)
+    return m, x, z
+
+
+def test_indicator_row_lowers_exactly():
+    """``if_then`` has no hull route; it was ``optimal`` at 1e-11 against -1, then
+    a refusal. Big-M now splits ``sqrt``'s operand: ``z = 0`` keeps ``x = -1``, and
+    ``z = 1`` still enforces ``sqrt(x) >= 2``."""
+    m, _, z = _indicator_model()
+    r = m.solve(time_limit=60)
+    assert r.status == "optimal" and r.objective == pytest.approx(-1.0, abs=1e-6)
+    m.subject_to(z == 1)
+    r = m.solve(time_limit=60)
+    assert r.status == "optimal" and r.objective == pytest.approx(4.0, abs=1e-6)
+
+
+def test_indicator_row_with_an_unsplittable_operand_refuses():
+    m = dm.Model("ind")
+    x = m.continuous("x", lb=-1, ub=10)
+    z = m.binary("z")
+    m.if_then(z, [dm.sqrt(x**3) >= 2])
     m.subject_to(x >= 4 * z - 1)
     m.minimize(x)
     with pytest.raises(ValueError, match=_REFUSAL):
