@@ -982,6 +982,8 @@ def solve_milp_with_lazy_cuts(
     terminate_callback=None,
     terminate_poll_s: float = 1.0,
     mip_start: Optional[np.ndarray] = None,
+    node_lp_rounds: int = 0,
+    node_hook_cut_cap: int = 500,
 ) -> MILPResult:
     """LP/NLP-BB master on HiGHS: separate at integer-feasible nodes, restart on a cut.
 
@@ -1065,11 +1067,13 @@ def solve_milp_with_lazy_cuts(
             "solve_milp_with_lazy_cuts requires lazy_callback; use solve_milp for a "
             "plain MILP solve"
         )
-    if node_callback is not None:
+    if node_callback is not None and int(node_lp_rounds) <= 0:
         raise NotImplementedError(
             "the HiGHS lazy-cut backend has no MIPNODE equivalent: it separates only "
             "at integer-feasible incumbents, so node_callback (fractional user cuts) "
-            "cannot be honoured. Use milp_solver='gurobi' for that."
+            "cannot be honoured inside the tree. Pass node_lp_rounds > 0 to separate "
+            "it at the master's LP relaxation before each tree (#2013), or use "
+            "milp_solver='gurobi'."
         )
 
     c_arr = np.asarray(c, dtype=np.float64).ravel()
@@ -1228,6 +1232,58 @@ def solve_milp_with_lazy_cuts(
             if best_obj[0] is None or obj < best_obj[0]:
                 best[0], best_obj[0] = x.copy(), obj
 
+    def _lp_relaxation_rounds() -> None:
+        """#2013: separate ``node_callback`` at the master's LP relaxation.
+
+        HiGHS offers no hook at fractional nodes, so a master built only from
+        incumbent cuts keeps its initial linearization at every fractional node
+        (smallinvDAXr2b200-220: 21,769 nodes uncertified at 30 s, against 1,565 to
+        optimal with the in-house master's node hook). Before each tree, up to
+        ``node_lp_rounds`` times: solve the LP relaxation, ask the separator for
+        rows at that point, add them. The separator's rows are supporting
+        hyperplanes of certified-convex functions, valid at every point, so this
+        changes the master's bound only by tightening it.
+        """
+        for _ in range(int(node_lp_rounds)):
+            if counts["node_cuts"] >= int(node_hook_cut_cap):
+                return
+            if time_limit is not None and float(time_limit) - (time.time() - t0) <= 0.0:
+                return
+            for key, val in (("solve_relaxation", True),):
+                if h.setOptionValue(key, val) != highspy.HighsStatus.kOk:
+                    raise RuntimeError(f"HiGHS rejected option {key}={val!r}")
+            h.run()
+            if h.setOptionValue("solve_relaxation", False) != highspy.HighsStatus.kOk:
+                raise RuntimeError("HiGHS rejected option solve_relaxation=False")
+            counts["mipnode_calls"] += 1
+            if h.getModelStatus() != highspy.HighsModelStatus.kOptimal:
+                return
+            x_lp = np.asarray(h.getSolution().col_value, dtype=np.float64).ravel()[:n]
+            raw = node_callback(x_lp)
+            rows = (
+                []
+                if raw is None
+                else [(np.asarray(a, np.float64).ravel(), float(r)) for a, r in raw]
+            )
+            added = 0
+            for coeffs, rhs in rows:
+                if coeffs.shape[0] != n:
+                    raise ValueError(f"node cut has {coeffs.shape[0]} coefficients, expected {n}")
+                idx, vals, row_rhs = _prepare_cut_row(
+                    coeffs, float(rhs), lb, ub, small_tol, large_tol, lift_to_unit=True
+                )
+                if idx.size == 0:
+                    continue  # optional row: nothing HiGHS would take survived
+                st = h.addRow(
+                    -highspy.kHighsInf, row_rhs, int(idx.size), idx.astype(np.int32), vals
+                )
+                if st != highspy.HighsStatus.kOk:
+                    raise RuntimeError(f"HiGHS rejected a node cut row (status {st})")
+                added += 1
+            counts["node_cuts"] += added
+            if added == 0:
+                return
+
     h.setCallback(_callback, None)
     h.startCallback(highspy.cb.HighsCallbackType.kCallbackMipImprovingSolution)
     if terminate_callback is not None:
@@ -1247,6 +1303,8 @@ def solve_milp_with_lazy_cuts(
             if h.setOptionValue("time_limit", remaining) != highspy.HighsStatus.kOk:
                 raise RuntimeError("HiGHS rejected the remaining time limit")
         pending.clear()
+        if node_callback is not None:
+            _lp_relaxation_rounds()
         h.run()
 
         info = h.getInfo()

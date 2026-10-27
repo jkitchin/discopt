@@ -12866,3 +12866,51 @@ atoms, 10 rounds / 164 cuts, moves the bound at the solver's pre-OBBT root box f
 -198.1983 to -198.1979 -- tangent density is **not** the mechanism; root OBBT closes
 -198.2 -> -184.3, and the residual 5.2 points stay unattributed (SCIP: no single
 component moves its root bound, it is the base relaxation). Recorded, open.
+
+## 103. #2013: the convex-MINLP route's HiGHS master never separated at a fractional point (2026-10-27)
+
+**Mechanism (code + measurement).** Since #1658 the routed `lp_nlp_bb` master is
+always HiGHS, and `milp_highs.solve_milp_with_lazy_cuts` refuses `node_callback`:
+HiGHS has no fractional-node hook, so the ECP rows `DISCOPT_OA_NODE_CUTS`
+(#1141) gives the in-house master never reached it. OA rows arrived only at
+integer incumbents. Entry experiment on smallinvDAXr2b200-220 (30 s): HiGHS
+master 21,769 nodes, uncertified; the in-house master with its node hook optimal
+in 9.8 s / 1,565 nodes; route OFF optimal in 19.5 s / 731 nodes.
+
+**Change (flag `DISCOPT_HIGHS_MASTER_LP_CUTS`, default OFF).** Before each HiGHS
+tree, up to 10 rounds: solve the master's LP relaxation (`solve_relaxation`),
+call the same separator at that fractional point, add its rows (globally valid
+supporting hyperplanes of certified-convex functions). Pinned by
+`test_2013_highs_master_lp_cuts.py` (the rounds separate at a fractional point,
+the optimum is unchanged, `node_callback` without rounds is still refused).
+
+**Panel** (`issue2013_route_census.py`: 102 of 384 proven MINLPLib instances
+<= 200 vars/cons take the route; `issue1913_pseudocost_panel.py --flag
+DISCOPT_HIGHS_MASTER_LP_CUTS`, 30 s, interleaved, every incumbent verified):
+612 checks, 0 problems; where both certify nodes 243,050 -> 60,804, wall
+359.3 -> 199.4 s (smallinvDAXr3b200-220 21.5 -> 3.4 s, r4b200-220 25.1 -> 3.1
+s, r1b050-055 17.7 -> 3.8 s); total wall 890.6 -> 603.8 s; certified +6
+(smallinvDAXr1b100/150/200, r2b150/200, r5b200), **lost 3**: smallinvDAXr3b150-165
+and r4b150-165 (OFF 21-24 s at ~1,400 nodes/s; ON ~390 nodes/s, 30 s) and
+cvxnonsep_pcon30 (OFF 26.9 s). Variants on those: separating only before the
+first tree keeps the b150 pair (20.7 / 20.1 s) but gives back most of the gain
+(r2b200-220 21.6 s) and still loses pcon30; a cut cap of 100 changes nothing.
+**Not graduated** (section 5: no certification regression); kept as a documented
+opt-in with a flag-audit row.
+
+**The other instances (measured, open).**
+* p_ball_10b/20b: the bound stays at ~7e-7 under the HiGHS master with or without
+  LP cuts and under the in-house master with node cuts (472 nodes); route OFF
+  processes 0 nodes in 30 s. SCIP's root is 0 too and it wins in the tree; not
+  attributed to a lever here.
+* slay07m: the HiGHS master spends ~15 s in 8 restarts (25 lazy cuts, 173 nodes,
+  a full tree per incumbent cut because HiGHS cannot take rows mid-tree), the
+  #1066 progress guard abandons it with no bound, and the spatial fallback ends at
+  61,757.14. Every arm (HiGHS, in-house master, route OFF) stops at that same bound
+  in 30 s here, so the binding limit is shared, not the route's.
+* portfol_classical050_1: every arm ends at -0.097774 (opt -0.094760).
+* sssd12-05: certifies in both arms (12.9 / 15.3 s; nodes 7,912 -> 2,921).
+
+#2013 stays open: the smallinvDAX mechanism is identified and fixed behind a flag
+that cannot yet graduate, and p_ball, slay07m and portfol are measured but not
+fixed.

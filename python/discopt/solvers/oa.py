@@ -5665,6 +5665,51 @@ def _oa_node_cut_cap() -> int:
     return max(1, int(os.environ.get("DISCOPT_OA_NODE_CUT_CAP", "500")))
 
 
+def _highs_master_lp_cuts_enabled() -> bool:
+    """#2013: ``DISCOPT_HIGHS_MASTER_LP_CUTS`` -- give the HiGHS ``lp_nlp_bb`` master
+    the fractional ECP rows ``DISCOPT_OA_NODE_CUTS`` gives the in-house one.
+
+    HiGHS exposes no hook at fractional nodes, so the routed convex-MINLP master
+    (always HiGHS since #1658) received OA rows only at integer incumbents: on
+    smallinvDAXr2b200-220 it built 21,769 nodes without certifying in 30 s, where
+    the in-house master with its node hook certified in 1,565 nodes / 9.8 s. Under
+    this flag the separator runs at the master's LP RELAXATION before every tree
+    (``milp_highs.solve_milp_with_lazy_cuts(node_lp_rounds=...)``), capped by
+    ``DISCOPT_OA_NODE_CUT_CAP``. Bound-changing (tighter master LP), so gated per
+    CLAUDE.md section 5. Read at call time.
+
+    **Kept default OFF as a documented opt-in (2026-10-27).** Section 5 panel over
+    the 102 proven MINLPLib instances the router sends to the route
+    (``issue2013_route_census.py``; ``issue1913_pseudocost_panel.py --flag
+    DISCOPT_HIGHS_MASTER_LP_CUTS``, 30 s, interleaved): cert-clean (612 checks, 0
+    problems) and broadly faster -- where both certify nodes 243,050 -> 60,804 and
+    wall 359.3 -> 199.4 s, total wall 890.6 -> 603.8 s, +6 certificates (the
+    smallinvDAX family: r2b200-220 30 s uncertified -> 2.9 s) -- but it LOSES 3:
+    smallinvDAXr3b150-165 and r4b150-165 (OFF certifies at 21-24 s with ~1,400
+    nodes/s; ON reaches 30 s at ~390 nodes/s) and cvxnonsep_pcon30 (OFF 26.9 s;
+    ON uncertified). Separating only before the first tree keeps the b150 pair
+    (20.7 / 20.1 s) but gives back most of the gain (r2b200 21.6 s) and still loses
+    cvxnonsep_pcon30; lowering the cut cap to 100 changes nothing (not binding).
+    Section 5 forbids a certification regression, so it is not the default. What
+    would change that: the per-restart cost on the b150 pair and the pcon30 loss
+    explained and removed, then the same panel rerun. performance-plan section 103.
+    """
+    return os.environ.get("DISCOPT_HIGHS_MASTER_LP_CUTS", "0").strip().lower() not in (
+        "0",
+        "",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _highs_master_lp_cut_rounds() -> int:
+    """LP-relaxation separation rounds before each HiGHS tree
+    (``DISCOPT_HIGHS_MASTER_LP_CUT_ROUNDS``, default 10; a numeric knob read only
+    under ``DISCOPT_HIGHS_MASTER_LP_CUTS``)."""
+    return max(1, int(os.environ.get("DISCOPT_HIGHS_MASTER_LP_CUT_ROUNDS", "10")))
+
+
 def _resolve_lp_nlp_bb_backend(milp_solver: str, *, shot_profile: bool) -> str:
     """Pick the single-tree MILP backend for LP/NLP branch-and-bound.
 
@@ -6542,6 +6587,12 @@ def solve_lp_nlp_bb(
     # All three masters now carry the progress check-in; only the fractional-node
     # hook is backend-specific.
     lazy_kwargs["terminate_callback"] = callback_terminate
+    if lazy_backend == "highs" and _highs_master_lp_cuts_enabled() and _oa_node_cuts_enabled():
+        # #2013: HiGHS has no fractional-node hook; separate the same ECP rows at
+        # the master's LP relaxation before each tree instead.
+        lazy_kwargs["node_callback"] = node_callback
+        lazy_kwargs["node_lp_rounds"] = _highs_master_lp_cut_rounds()
+        lazy_kwargs["node_hook_cut_cap"] = _oa_node_cut_cap()
     if lazy_backend == "gurobi":
         lazy_kwargs["node_callback"] = node_callback if shot_profile else None
     elif lazy_backend == "simplex":
