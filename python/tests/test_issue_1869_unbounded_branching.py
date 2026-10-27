@@ -47,11 +47,25 @@ def test_flag_on_certifies_the_unbounded_instance(name, monkeypatch):
 @pytest.mark.parametrize("name", sorted(OPTIMA))
 def test_flag_off_drains_unresolved(name, monkeypatch):
     """OFF is the #467 fathom: uncertified, and labelled ``unresolved`` -- not
-    ``exhausted``, which #1585 reserves for a complete search."""
+    ``exhausted``, which #1585 reserves for a complete search. #1990's RLT
+    strip retry (``DISCOPT_RLT_STRIP_RETRY``) closes haverly's open column
+    without branching on it, so the dead end is reached with it off."""
     monkeypatch.setenv(FLAG, "0")
+    monkeypatch.setenv("DISCOPT_RLT_STRIP_RETRY", "0")
     r = _solve(name)
     assert not r.gap_certified
     assert r.termination == "unresolved", r.termination
+
+
+def test_rlt_strip_retry_alone_certifies_haverly(monkeypatch):
+    """#1990: with unbounded branching off, the RLT strip retry closes the
+    column whose infinite width dead-ended the tree; haverly certifies -400
+    with a bound that does not cross the oracle."""
+    monkeypatch.setenv(FLAG, "0")
+    r = _solve("haverly")
+    assert r.status == "optimal" and r.gap_certified, (r.status, r.bound)
+    assert r.objective == pytest.approx(OPTIMA["haverly"], rel=1e-4)
+    assert r.bound <= OPTIMA["haverly"] + 1e-4 * 400.0
 
 
 def test_unprunable_outer_piece_stays_open_and_honest(monkeypatch):

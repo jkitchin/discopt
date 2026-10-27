@@ -234,7 +234,7 @@ def split_multilinear_products(
     if sp.n_products == 0:
         return None
     new_model._constraints = rebuilt + sp.aux_constraints
-    new_model._mls_aux_spec = tuple(sp.aux_spec)
+    new_model._mls_aux_spec = tuple(sp.aux_spec)  # type: ignore[attr-defined]
     carry_complementarities(model, new_model, pass_name="multilinear split")
     carry_validation_guards(model, new_model)
     return (
@@ -247,6 +247,6 @@ def split_multilinear_products(
 def extend_point(split_model: Model, x: np.ndarray) -> np.ndarray:
     """A point over the original columns extended by the split's aux columns."""
     out = list(np.asarray(x, dtype=np.float64))
-    for left, right in split_model._mls_aux_spec:
+    for left, right in split_model._mls_aux_spec:  # type: ignore[attr-defined]
         out.append(out[left] * out[right])
     return np.asarray(out, dtype=np.float64)

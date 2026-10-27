@@ -271,21 +271,39 @@ fn extended_mul_enabled() -> bool {
 /// tightening) when `t` contains zero, `other` is the point `0` (no `a` exists,
 /// but concluding infeasibility is left to the forward pass), or the hull is
 /// the whole of `cur`. Rays are rounded outward.
+/// Bound magnitude at which [`extended_mul_preimage`] reads a cofactor side as
+/// unbounded (Python's `_numeric.EFFECTIVE_INF`).
+const EXTENDED_MUL_INF: f64 = 1e19;
+
 fn extended_mul_preimage(t: &Interval, other: &Interval, cur: &Interval) -> Option<Interval> {
     if !(t.lo > 0.0 || t.hi < 0.0) || !(other.lo < 0.0 || other.hi > 0.0) {
         return None;
     }
+    // A cofactor side at or past the bound sentinel (a free Python column has
+    // `ub = 9.999e19`; the LP layer's INF is 1e20) is unbounded: `t / +-inf` is
+    // the ray's closed end 0, not `1 / 9.999e19 = 1.0001e-20`, which would cut
+    // `a = 1e-25, b = 1e25` from `a * b == 1` (CLAUDE.md: test the bound, not a
+    // quotient of it). 1e19 is Python's `_numeric.EFFECTIVE_INF`.
+    let end = |num: f64, den: f64, up: bool| {
+        if den.abs() >= EXTENDED_MUL_INF {
+            0.0
+        } else if up {
+            div_up(num, den)
+        } else {
+            div_down(num, den)
+        }
+    };
     // The ray that a negative part of `other` maps to, and the one a positive
     // part maps to.
     let (neg_ray, pos_ray) = if t.lo > 0.0 {
         (
-            (other.lo < 0.0).then(|| Interval::new(f64::NEG_INFINITY, div_up(t.lo, other.lo))),
-            (other.hi > 0.0).then(|| Interval::new(div_down(t.lo, other.hi), f64::INFINITY)),
+            (other.lo < 0.0).then(|| Interval::new(f64::NEG_INFINITY, end(t.lo, other.lo, true))),
+            (other.hi > 0.0).then(|| Interval::new(end(t.lo, other.hi, false), f64::INFINITY)),
         )
     } else {
         (
-            (other.lo < 0.0).then(|| Interval::new(div_down(t.hi, other.lo), f64::INFINITY)),
-            (other.hi > 0.0).then(|| Interval::new(f64::NEG_INFINITY, div_up(t.hi, other.hi))),
+            (other.lo < 0.0).then(|| Interval::new(end(t.hi, other.lo, false), f64::INFINITY)),
+            (other.hi > 0.0).then(|| Interval::new(f64::NEG_INFINITY, end(t.hi, other.hi, true))),
         )
     };
     let mut hull: Option<Interval> = None;
@@ -5740,6 +5758,19 @@ mod tests_1990 {
         assert!(a.lo <= 0.5 && a.lo > 0.5 - 1e-12 && a.hi == 10.0, "{a:?}");
         // Both rays meet a's box: the hull is the box, so nothing is returned.
         assert!(extended_mul_preimage(&iv(2.0, 5.0), &iv(-1.0, 4.0), &iv(-3.0, 10.0)).is_none());
+    }
+
+    /// A sentinel-sized cofactor side is unbounded: `x * y == 1`, `y in [0, 9.999e19]`
+    /// gives `x >= 0` exactly, not `x >= 1 / 9.999e19` (which cuts `x = 1e-25`).
+    #[test]
+    fn a_sentinel_cofactor_side_is_unbounded() {
+        let free = iv(-9.999e19, 9.999e19);
+        let x = extended_mul_preimage(&iv(1.0, 1.0), &iv(0.0, 9.999e19), &free).unwrap();
+        assert_eq!((x.lo, x.hi), (0.0, 9.999e19), "{x:?}");
+        let x = extended_mul_preimage(&iv(1.0, 1.0), &iv(-1e20, 0.0), &free).unwrap();
+        assert_eq!((x.lo, x.hi), (-9.999e19, 0.0), "{x:?}");
+        let x = extended_mul_preimage(&iv(-3.0, -1.0), &iv(0.0, 1e20), &free).unwrap();
+        assert_eq!((x.lo, x.hi), (-9.999e19, 0.0), "{x:?}");
     }
 
     #[test]
