@@ -12762,3 +12762,53 @@ rows discopt's relaxation has; the separator stays unmerged (no dead flag on
 main). sporttournament14's root bound stays 120 at default settings (100 at 60 s
 after branching on the kernel, section 99), above the issue's <= 110 target; the
 reason is this measurement.
+
+## 101. #2012: an affine denominator bounded by its linear rows (graduated 2026-10-27)
+
+**Mechanism.** minlphi stopped at the root, `feasible` with no bound, 1 node: the
+tree fathomed the root as `bound_unresolved` because the objective's quotients
+(`x8 / (x0 - x26)`, ...) divide by affine forms whose box interval holds 0, so
+`t**-1` had no enclosure and the objective no bound. The linear rows keep those
+forms away from 0 (`x0 - x26 >= 10`); the pole diagnostic computed exactly that
+range but used it only for its message.
+
+**Entry experiment** (minlphi, 60 s, monkeypatched): (a) `0 * unbounded = 0` in
+`_interval_mul` alone -- unchanged (no bound, 1 node); (b) the LP-implied range
+intersected into an affine node's interval -- **optimal, bound 582.202 <=
+582.236, 3 nodes, 1.4 s**. (b) is the mechanism; (a) was not built.
+
+**Change.** `_Builder.denominator_bounds`: the base of a negative power, when it is
+an affine sum whose box interval holds 0, is intersected with the range the
+model's linear rows imply over THIS build's box (every feasible point of the box
+satisfies those rows). The range is proved by weak duality on HiGHS's duals
+(`poles._LinearRows.safe_range`: any `y_ub <= 0`, `y_eq` gives a valid bound, so a
+solver tolerance can only loosen it; an open reduced cost against an infinite
+bound gives no claim) and cached per (node, box) in the model's analysis cache.
+`DISCOPT_IMPLIED_DENOMINATOR`. Pinned by `test_2012_implied_denominator.py`:
+`x / (a - b)` with `a - b >= 1` certifies `2 sqrt(0.1)` (no bound with the flag
+off); with `a - b >= -1` the refusal still fires (the pole is feasible); and
+`safe_range` encloses the LP range on 40 seeded random LPs.
+
+**Census** (`issue2012_implied_denominator_census.py`, 410 MINLPLib instances <=
+200 vars/cons + the in-repo corpus; root build at the declared box, flag ON): a
+qualifying denominator exists in **3** instances (4stufen, beuster, minlphi); the
+rows narrow it in 2 (beuster: `x14 - x22 ... x17 - x25` from `(-inf, inf)` to
+`[0.01, inf)`; minlphi: 12). A node box is a sub-box of the declared box, so the
+flag cannot act anywhere else.
+
+**Panel** (`issue2012_implied_denominator_panel.py`, 60 s, 2 reps, arms
+interleaved; bounds against `minlplib.solu` `=opt=`/`=best=`; every incumbent
+`verify_point`-ed with its own objective): 16 checks, 0 failures.
+
+| instance | OFF | ON |
+|---|---|---|
+| minlphi (opt 582.236) | feasible, **no bound**, 1 node (2/2) | **optimal**, bound 582.202, 3 nodes, 1.2 / 1.1 s (2/2) |
+| 4stufen (open) | bound 19,713.04 | identical |
+| beuster (open) | bound 6,365.20 | 6,352.06 |
+
+beuster at 180 s: 10,144.414 OFF vs 10,144.419 ON with the same 31 nodes, so the
+60 s difference is a search-path transient. On a quiet machine the ON run ends
+7-21 s past the 180 s limit (3 runs; OFF 1.7 s), inside a node-NLP batch that
+straddles the deadline (`faulthandler` at 184 s: `_solve_nlp_batch_by_deadline`);
+the LP ranges themselves cost 0.28 s over 49 calls. Recorded as the trade-off.
+**Graduated default ON; `=0` opts out.**
