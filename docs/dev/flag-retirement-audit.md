@@ -176,7 +176,9 @@ forty-five. "Panel owed, never run" is therefore the honest state for most rows 
 this document has said since its first pass that **that is itself the finding**, not a gap
 in the audit.
 
-<!-- live-solver-math-gates: 51 -->
+<!-- live-solver-math-gates: 52 -->
+
+_51 -> 52 (2026-10-27): `DISCOPT_HIGHS_MASTER_LP_CUTS` (#2013) added default OFF -- its panel lost 3 certificates, so it is kept as a documented opt-in (row below). The same PR's other new flags (`DISCOPT_KERNEL_FREE_LINEAR`, `DISCOPT_IMPLIED_DENOMINATOR`, `DISCOPT_KERNEL_BLF_FULL_SUPPORT`, `DISCOPT_KERNEL_DECLINE_EXACT`) graduated in that PR, so they never counted here._
 
 _52 -> 51 (2026-10-27): `DISCOPT_NATIVE_NLP_PRIMAL` graduated to default ON with #1990 (#2003). The PR's other flags (`DISCOPT_KERNEL_MULTILINEAR_SPLIT`, `DISCOPT_HOOK_INTEGRAL_POINTS`, `DISCOPT_RLT_STRIP_RETRY`, `DISCOPT_FBBT_EXTENDED_MUL`) were introduced and graduated in the same PR, so they never counted here._
 
