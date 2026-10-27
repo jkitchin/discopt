@@ -10,6 +10,11 @@
 * ``DISCOPT_RLT_STRIP_RETRY``: a node whose level-1-RLT LP gives no certified
   verdict is re-solved without the RLT rows before the #671 row filter
   (``python/discopt/_relax/mccormick_lp.py``).
+* ``DISCOPT_KERNEL_MULTILINEAR_SPLIT``: products of three or more variables go to
+  the native kernel as bilinear chains (``_relax/multilinear_split.py``); fired
+  when ``tree/multilinear_split_cols`` is positive.
+* ``DISCOPT_NATIVE_NLP_PRIMAL``: the kernel's in-tree local NLP (#1522); fired
+  when ``tree/primal_hook_calls`` is positive.
 
 Population: the instances ``scip_wins_screen.py`` selects (``--max-vars`` /
 ``--max-cons``, a proven status on minlplib.org) plus ``--extra`` names.
@@ -55,7 +60,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import issue1913_pseudocost_panel as base  # noqa: E402
 import scip_wins_screen as screen  # noqa: E402
 
-FLAGS = ("DISCOPT_FBBT_EXTENDED_MUL", "DISCOPT_RLT_STRIP_RETRY")
+FLAGS = (
+    "DISCOPT_FBBT_EXTENDED_MUL",
+    "DISCOPT_RLT_STRIP_RETRY",
+    "DISCOPT_KERNEL_MULTILINEAR_SPLIT",
+    "DISCOPT_NATIVE_NLP_PRIMAL",
+)
+#: The ``solver_stats`` key whose positive value means the flag acted in a solve
+#: (the RLT retry is counted process-wide instead, see ``_solve_one``).
+FIRED_STAT = {
+    "DISCOPT_KERNEL_MULTILINEAR_SPLIT": "tree/multilinear_split_cols",
+    "DISCOPT_NATIVE_NLP_PRIMAL": "tree/primal_hook_calls",
+}
 #: Cap on the boxes one instance's FBBT screen visits (each is one FBBT call).
 MAX_BOXES = 400
 
@@ -95,7 +111,11 @@ def _solve_one(nl: str, tl: float) -> None:
                 "nodes": r.node_count,
                 "wall": wall,
                 # Process-wide, so a retry in any relaxer of the solve counts.
-                "picks": mlp.RLT_STRIP_TOTALS["retries"],
+                "picks": (
+                    ss.get(FIRED_STAT[_flag_under_test()])
+                    if _flag_under_test() in FIRED_STAT
+                    else mlp.RLT_STRIP_TOTALS["retries"]
+                ),
                 "rlt_strip_certified": mlp.RLT_STRIP_TOTALS["certified"],
                 "row_filter_invocations": ss.get("row_filter/invocations"),
                 "route": getattr(r, "algorithm_route", None),
@@ -104,6 +124,11 @@ def _solve_one(nl: str, tl: float) -> None:
         ),
         flush=True,
     )
+
+
+def _flag_under_test() -> str:
+    """The flag this subprocess's arm sets (the parent names it in the env)."""
+    return os.environ.get("DISCOPT_ISSUE1990_FLAG", "DISCOPT_RLT_STRIP_RETRY")
 
 
 def _fbbt_digest(nl: str) -> dict:
@@ -184,7 +209,7 @@ def run_screen(flag: str, out: Path, panel: list[dict], workers: int, tl: float)
         on = _child(flag, "1", ["--_solve", str(nl), str(tl)], tl + 120, "RESULT")
         if "err" in on:
             return p["name"], None, str(on.get("err"))[-200:]
-        return p["name"], (on.get("picks") or 0) > 0, f"retries={on.get('picks')}"
+        return p["name"], (on.get("picks") or 0) > 0, f"fired={on.get('picks')}"
 
     changed, executed, failed = [], 0, []
     with ThreadPoolExecutor(workers) as ex:
@@ -263,6 +288,7 @@ def main() -> None:
         k, _, v = kv.partition("=")
         assert k != a.flag, f"--base-env may not set the flag under test {k}"
         os.environ[k] = v
+    os.environ["DISCOPT_ISSUE1990_FLAG"] = a.flag
     flag_out = a.out / (a.flag + a.tag)
     if a.report:
         sys.exit(base.report(flag_out / f"pc_tl{int(a.time_limit)}.jsonl"))
@@ -301,7 +327,7 @@ def main() -> None:
         else screen.build_panel(a.out, a.max_vars, a.max_cons, names)
     )
     (flag_out / "nl").mkdir(exist_ok=True)
-    base.run(flag_out, panel, a.time_limit, a.workers)
+    base.run(flag_out, panel, a.time_limit, a.workers, flag=a.flag)
 
 
 if __name__ == "__main__":
