@@ -140,8 +140,11 @@ def test_slack_is_the_kernel_acceptance_gap(monkeypatch):
     assert S._kernel_cutoff_slack(0.0, 0.0, 1e-4, None) == pytest.approx(1e-6)
     # The published value includes the offset.
     assert S._kernel_cutoff_slack(-2.0, 1000.0, 1e-4, None) == pytest.approx(0.0998)
-    # A caller-tightened absolute tolerance is honoured (kernel takes the min).
-    assert S._kernel_cutoff_slack(-402.0, 0.0, 1e-4, 1e-9) == pytest.approx(1e-9)
+    # A caller-tightened absolute tolerance keeps the documented criterion with
+    # its own absolute arm (#2000): max(1e-9, 1e-4 * 402).
+    assert S._kernel_cutoff_slack(-402.0, 0.0, 1e-4, 1e-9) == pytest.approx(0.0402)
+    # A looser one keeps #1243's min mapping.
+    assert S._kernel_cutoff_slack(-402.0, 0.0, 1e-4, 1e-3) == pytest.approx(1e-4)
 
 
 @pytest.mark.smoke

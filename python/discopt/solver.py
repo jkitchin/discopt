@@ -1373,7 +1373,9 @@ def _native_kernel_verify_point(model, x_flat, source=None):
 
     res = verify_point(model, x_flat, with_objective=True)
     if not res.ok:
-        logger.debug("native seed verification declined: %s", res.reason)
+        logger.debug(
+            "native verification declined (seed, priced point or final incumbent): %s", res.reason
+        )
         return False, None
     if source is not None:
         src_model, src_nvars = source
@@ -1519,6 +1521,37 @@ def _native_kernel_primal_hook(model, source, sign, off, n_orig, outer_deadline)
     return hook
 
 
+def _native_kernel_noise_repair(model, x_flat, source, bound_val, gap_tolerance, abs_gap_tol):
+    """``(x, model_objective)`` for ``x_flat`` repaired to float noise, or ``None`` (#2000).
+
+    For a kernel exit that claims ``optimal``: the point is moved by
+    :func:`~discopt.validation.feasibility.repair_point` (no NLP re-solve), and is
+    returned only if the repair reached float noise, the moved point verifies on the
+    lift and on ``source``, and its objective still closes the gap to ``bound_val``
+    (published units) at the requested tolerances. Anything less is ``None``: the
+    certificate the kernel granted was against a value no verified point attains.
+    """
+    from discopt._tape_nlp_evaluator import make_evaluator
+    from discopt.modeling.core import ObjectiveSense
+    from discopt.validation.feasibility import repair_point
+
+    if not math.isfinite(bound_val):
+        return None
+    rep = repair_point(model, np.asarray(x_flat, dtype=np.float64), evaluator=make_evaluator(model))
+    if rep.x is None or rep.excess_after > 0.0:
+        return None
+    ok, obj = _native_kernel_verify_point(model, rep.x, source=source)
+    if not ok or obj is None:
+        return None
+    is_max = model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE
+    if _bound_crosses_objective(float(bound_val), float(obj), is_max):
+        return None
+    abs_t = _DEFAULT_ABS_GAP_TOL if abs_gap_tol is None else float(abs_gap_tol)
+    if not _recertify_gap_closed(float(obj), float(bound_val), is_max, gap_tolerance, abs_t):
+        return None
+    return rep.x, float(obj)
+
+
 def _native_kernel_incumbent_value(model, source, sign, off, n_orig):
     """The kernel's incumbent pricing callback (#1656, ``incumbent_value=``).
 
@@ -1567,16 +1600,33 @@ def _native_kernel_incumbent_value(model, source, sign, off, n_orig):
     (``source=None``): a point that fails only the pre-reform model keeps its
     #1522 handling (repair on an uncertified exit).
 
+    A point that verifies is priced at its REPAIRED objective (#2000). The
+    acceptance test lets each lifted term ``mccormick_tol`` of slack, and
+    ``verify_point``'s allowance passes the residual it leaves, so the objective
+    AT the tight point is bought with that residual: on cstr nt=5 (hull) the
+    tree adopted 3.00885387 at a point with equality residuals 2.6e-6..1.1e-5,
+    fathomed against it, exited ``optimal`` -- and the published-incumbent repair
+    (#1537 E) then moved the point to 3.00887207 and withdrew the certificate,
+    with 99.5% of the budget unspent. The point is therefore run through the same
+    :func:`~discopt.validation.feasibility.repair_point` first; when that reaches
+    float noise and the repaired point verifies (on the lift and on ``source``),
+    the incumbent is priced there, and the repaired point is kept in
+    ``price.repaired`` (keyed by the tight point's bytes) so the caller publishes
+    the point the value belongs to. A repair that declines leaves the point
+    priced as it is -- the publication repair would decline on it too.
+
     No ``except``: an evaluator failure is raised by the binding when the tree
     returns (CLAUDE.md §7).
     """
     from discopt._tape_nlp_evaluator import make_evaluator
-    from discopt.validation.feasibility import snap_integers
+    from discopt.validation.feasibility import repair_point, snap_integers
 
     target = model if source is None else source[0]
     ev = make_evaluator(target)
     n_target = int(ev.n_variables)
     negate = bool(getattr(ev, "_negate", False))
+    model_ev = ev if source is None else make_evaluator(model)
+    repaired: dict[bytes, np.ndarray] = {}
 
     def price(x, lp_obj):
         f = float(ev.evaluate_objective(np.asarray(x, dtype=np.float64)[:n_target]))
@@ -1597,8 +1647,20 @@ def _native_kernel_incumbent_value(model, source, sign, off, n_orig):
             if np.array_equal(snap_integers(model, x_orig), x_orig):
                 return "decline"
             return None
-        return internal
+        rep = repair_point(model, x_orig, evaluator=model_ev)
+        if rep.x is None or rep.excess_after > 0.0:
+            return internal
+        ok_rep, _ = _native_kernel_verify_point(model, rep.x, source=source)
+        if not ok_rep:
+            return internal
+        f_rep = float(ev.evaluate_objective(rep.x[:n_target]))
+        internal_rep = sign * (-f_rep if negate else f_rep) - off
+        if not math.isfinite(internal_rep):
+            return internal
+        repaired[x_orig.tobytes()] = rep.x
+        return internal_rep
 
+    price.repaired = repaired  # type: ignore[attr-defined]
     return price
 
 
@@ -2403,7 +2465,7 @@ def _try_native_spatial_kernel(
     # the same 45 nodes as with no tolerance at all and was told nothing
     # (#1330). #1323's rule is honoured-or-declared; this is the declaration.
     _relative_requested = float(gap_tolerance) > _DEFAULT_REL_GAP_TOL
-    if not _relative_requested:
+    if not _relative_requested and not _documented_gap:
         _warn_abs_gap_not_loosened(abs_gap_tolerance, gap_tolerance)
     # #1615 D-12: a ``gap_tolerance`` ABOVE the default is an explicit request to
     # stop on the documented RELATIVE gap. The absolute ``gap_tol`` arm, conjoined
@@ -2493,9 +2555,8 @@ def _try_native_spatial_kernel(
     if initial_incumbent is not None:
         solve_kwargs["initial_incumbent"] = float(initial_incumbent)
     # #1656: price every McCormick-tight point at the posed problem's objective.
-    solve_kwargs["incumbent_value"] = _native_kernel_incumbent_value(
-        model, source, sign, off, n_orig
-    )
+    _pricer = _native_kernel_incumbent_value(model, source, sign, off, n_orig)
+    solve_kwargs["incumbent_value"] = _pricer
     if _tuning().native_nlp_primal:
         solve_kwargs["primal_hook"] = _native_kernel_primal_hook(
             model, source, sign, off, n_orig, outer_deadline
@@ -2581,6 +2642,15 @@ def _try_native_spatial_kernel(
     # (``n_vars`` slots) — the same layout ``_native_kernel_verify_point`` reads.
     # #788: a time-limited exit may carry no primal at all; there is nothing to
     # verify then, and the bound-only result below is reported without one.
+    # #2000: an incumbent the pricer accepted at its repaired objective is published
+    # AS the repaired point, so the value the tree fathomed against is the value of
+    # the point reported (and the #1537 E publication repair finds it at noise).
+    if x_flat is not None:
+        _rep_x = _pricer.repaired.get(np.asarray(x_flat[:n_orig], dtype=np.float64).tobytes())
+        if _rep_x is not None:
+            x_flat = np.array(x_flat, dtype=np.float64)
+            x_flat[:n_orig] = _rep_x
+
     if x_flat is not None:
         # ``x_flat`` is only ever set non-None alongside a real ``obj_val``: every
         # branch above that produces a point also leaves the objective set, and the
@@ -2651,6 +2721,33 @@ def _try_native_spatial_kernel(
                 obj_val = None
                 _model_obj = None
             _ok = True
+        if not _ok and native_status == "optimal":
+            # #2000: a certified exit whose incumbent fails verification at the
+            # allowance's edge (cstr nt=5 big-M: row 13 at 1.10e-5 against 1.00e-5)
+            # used to be discarded whole -- bound and 1,373 nodes -- and the Python
+            # fallback then timed out with bound 0. Repair the point to float noise
+            # first; it keeps the certificate only if the repaired point verifies
+            # (lift and source) AND its objective still closes the gap to the
+            # kernel's bound at the requested tolerances. Otherwise #789 as before.
+            # Only the uncertified #1522 arm above can clear the point.
+            assert x_flat is not None
+            _t_phase = time.perf_counter()
+            _fixed = _native_kernel_noise_repair(
+                model, x_flat[:n_orig], source, bound_val, gap_tolerance, abs_gap_tolerance
+            )
+            _native_jax_s += time.perf_counter() - _t_phase
+            if _fixed is not None:
+                logger.info(
+                    "native spatial kernel: final incumbent obj=%.10g failed verification; "
+                    "repaired to obj=%.10g, which still closes the gap to bound %.10g (#2000)",
+                    obj_val,
+                    _fixed[1],
+                    bound_val,
+                )
+                x_flat = np.array(x_flat, dtype=np.float64)
+                x_flat[:n_orig] = _fixed[0]
+                obj_val = _model_obj = _fixed[1]
+                _ok = True
         if not _ok:
             logger.debug(
                 "native spatial kernel: final incumbent failed original-model "
@@ -7835,7 +7932,9 @@ def _kernel_documented_gap_enabled() -> bool:
     relative gap -- and still ran to its 120 s limit. ON, when the caller named no
     ``abs_gap_tolerance``, the absolute arm is lifted exactly as an explicit
     looser ``gap_tolerance`` already lifts it (#1615), which leaves the documented
-    criterion. An explicit ``abs_gap_tolerance`` keeps the #1243 ``min`` mapping.
+    criterion. An explicit ``abs_gap_tolerance`` at or below the default gets the
+    same criterion with its own absolute arm (#2000); a looser one keeps the #1243
+    ``min`` mapping.
     """
     return os.environ.get("DISCOPT_KERNEL_DOCUMENTED_GAP", "1").strip().lower() not in (
         "0",
@@ -7892,8 +7991,22 @@ def _kernel_cutoff_obbt_enabled() -> bool:
 
 def _kernel_documented_gap_applies(abs_gap_tolerance: Optional[float]) -> bool:
     """Whether the kernel's absolute ``gap_tol`` arm is lifted for #1871: the gate is
-    on and the caller named no absolute tolerance (an explicit one keeps #1243)."""
-    return abs_gap_tolerance is None and _kernel_documented_gap_enabled()
+    on and the caller named no absolute tolerance, or one no looser than the
+    default ``_DEFAULT_ABS_GAP_TOL`` (#2000).
+
+    With the arm lifted the kernel stops on the documented criterion, absolute
+    ``abs_gap_tol`` OR relative ``gap_tolerance``. With no request that is
+    ``1e-6 OR rel``; a request ``a <= 1e-6`` makes it ``a OR rel``, which closes no
+    gap the unnamed criterion leaves open -- a tightening, never a loosening. #1243's
+    ``min`` mapping instead conjoined an absolute ``gap_tol = min(rel, a)``, which
+    for small ``a`` switches the relative criterion off altogether: GAMS ``optca=0``
+    (read as ``a = 1e-9``, see ``gams/link.py``) left cstr nt=5 at a relative gap of
+    6.6e-8 against ``optcr=1e-6`` branching until ``reslim``. A LOOSER request keeps
+    ``min``: that is the case #1243 declines and #1330 warns about.
+    """
+    if not _kernel_documented_gap_enabled():
+        return False
+    return abs_gap_tolerance is None or float(abs_gap_tolerance) <= _DEFAULT_ABS_GAP_TOL
 
 
 def _kernel_cutoff_slack_enabled() -> bool:
