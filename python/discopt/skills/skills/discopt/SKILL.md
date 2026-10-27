@@ -2,7 +2,7 @@
 name: discopt
 description: Build, solve and interpret optimization models with discopt, a global MINLP solver (Python API, Rust core). Use when the user wants to formulate an LP, MILP, NLP or mixed-integer nonlinear problem in Python, solve it with discopt, read a SolveResult, or import/export .nl and GAMS models.
 license: EPL-2.0
-compatibility: Requires Python 3.12+ and `pip install discopt`.
+compatibility: Requires Python 3.12+ and the discopt package (`pip install discopt`); see the Setup section.
 ---
 
 # discopt
@@ -10,6 +10,49 @@ compatibility: Requires Python 3.12+ and `pip install discopt`.
 discopt is a mixed-integer nonlinear programming (MINLP) solver. It finds
 **certified global optima** by spatial branch and bound over convex relaxations,
 so a result marked `optimal` comes with a proved bound, not only a good point.
+
+## Setup (check before writing code)
+
+Before building or solving anything, confirm discopt is importable in the
+user's environment:
+
+```bash
+python -c "import discopt; print(discopt.__version__)"
+```
+
+If that fails with `ModuleNotFoundError`, discopt is not installed. Tell the
+user, then install it (ask before modifying their environment):
+
+```bash
+pip install discopt          # or: uv pip install discopt  /  uv add discopt
+```
+
+- Requires **Python 3.12 or newer**. On older Python pip reports "no matching
+  distribution"; the fix is a newer interpreter (e.g. `uv venv --python 3.12`),
+  not a source build.
+- Prebuilt wheels cover macOS (Intel and Apple silicon), Linux (x86_64,
+  aarch64) and Windows, so no Rust toolchain is needed. If pip starts compiling
+  Rust, the platform has no wheel; building from source needs `rustup` and is
+  rarely what a new user wants, so stop and say so.
+- Install into the same interpreter that will run the model (a virtualenv, a
+  notebook kernel, `uv run`). Installing into one Python and running another is
+  the most common "installed but can't import" cause.
+- Verify with `discopt test`, which imports the Rust extension and solves a tiny
+  model. `discopt about` lists versions and optional dependencies.
+
+The base install solves LP, MILP, NLP and MINLP. Extras are needed only for
+specific features:
+
+| extra | for |
+|---|---|
+| `discopt[pyomo]` | using discopt from Pyomo (`SolverFactory("discopt")`) |
+| `discopt[jax]` | `discopt.estimate`, sensitivity, `dm.custom`/`implicit`/`argmin`, differentiable layers |
+| `discopt[nn]` | embedding ONNX neural networks; `[torch]` / `[ml]` for PyTorch / scikit-learn models |
+| `discopt[ipopt]` | the optional cyipopt NLP backend |
+| `discopt[llm]` | LLM-assisted features |
+
+A feature that needs a missing extra raises an `ImportError` naming the extra
+to install. Design of experiments is a separate package: `pip install discopt-doe`.
 
 ## Build a model
 

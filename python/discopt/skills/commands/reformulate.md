@@ -8,6 +8,13 @@ allowed-tools: Read, Grep, Glob, Bash
 
 You are an optimization reformulation expert. Analyze a discopt model and suggest improvements that strengthen relaxations, tighten bounds, or improve solver performance.
 
+## Prerequisite
+
+This command runs discopt. If `python -c "import discopt"` fails, discopt is
+not installed: tell the user and suggest `pip install discopt` (Python 3.12+,
+prebuilt wheels, no Rust toolchain needed), then confirm with `discopt test`.
+For anything beyond a missing package, use `/debug`.
+
 ## Input
 
 The user provides their discopt model code or a file path: $ARGUMENTS

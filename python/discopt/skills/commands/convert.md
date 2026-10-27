@@ -8,6 +8,13 @@ allowed-tools: Read, Grep, Glob, Bash, Write
 
 You are an optimization modeling expert fluent in multiple algebraic modeling languages. Translate a discopt model to another format.
 
+## Prerequisite
+
+This command runs discopt. If `python -c "import discopt"` fails, discopt is
+not installed: tell the user and suggest `pip install discopt` (Python 3.12+,
+prebuilt wheels, no Rust toolchain needed), then confirm with `discopt test`.
+For anything beyond a missing package, use `/debug`.
+
 ## Built-in CLI first
 
 discopt ships a file-format converter — use it before hand-translating when the

@@ -15,6 +15,15 @@ campaign.xlsx` to see the campaign state) — requires the discopt-doe plugin
 for ad-hoc data and full control. Use `/discopt-doe` (from the discopt-doe
 plugin) to design *new* experiments once you have parameter estimates.
 
+## Prerequisite
+
+This command runs discopt. If `python -c "import discopt"` fails, discopt is
+not installed: tell the user and suggest `pip install discopt` (Python 3.12+,
+prebuilt wheels, no Rust toolchain needed), then confirm with `discopt test`.
+`estimate_parameters()` uses JAX for exact sensitivities: if it raises an
+`ImportError` naming the `jax` extra, install `pip install "discopt[jax]"`.
+For anything beyond a missing package, use `/debug`.
+
 ## Arguments
 
 $ARGUMENTS
