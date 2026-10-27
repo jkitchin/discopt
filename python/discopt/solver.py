@@ -74,6 +74,7 @@ from discopt.modeling.core import (
     objective_sense_sign,
 )
 from discopt.modeling.core import repr_space_cutoff as _repr_space_cutoff
+from discopt.solver_tuning import _env_flag
 from discopt.solver_tuning import current as _tuning
 from discopt.solver_tuning import enter_scope as _enter_tuning_scope
 from discopt.solver_tuning import heuristic_entry_share as _heuristic_entry_share
@@ -2166,6 +2167,23 @@ def _native_exit_primal_polish(model, x_flat, obj_val, bound_val, n_orig, deadli
         obj_new,
     )
     return x_new, float(obj_new)
+
+
+def _kernel_multilinear_split_enabled() -> bool:
+    """Hand the native kernel a model's bilinear-chain split (#1990,
+    ``DISCOPT_KERNEL_MULTILINEAR_SPLIT``; **default ON**, ``=0`` opts out).
+
+    The kernel's spec builder declines a relaxation with trilinear or multilinear
+    terms, so such a model ran on the Python tree. ON, every product of three or
+    more distinct scalar variables is rewritten as a chain of bilinear auxiliaries
+    (``_relax/multilinear_split.py``) for the kernel attempt only. Exact
+    reformulation; the relaxation becomes the recursive bilinear McCormick
+    envelope. Bound-changing route switch (CLAUDE.md §5), graduated with
+    ``DISCOPT_NATIVE_NLP_PRIMAL`` (``docs/dev/performance-plan.md`` §97.1): over 424
+    instances it fires on 4; at 120 s it certifies ex1252 and ex1252a (the Python
+    tree ends at bounds 21,308 / 23,694 of 128,894), st_e03 8.6 -> 0.7 s, st_e38
+    unchanged, cert-clean."""
+    return _env_flag("DISCOPT_KERNEL_MULTILINEAR_SPLIT", default=True)
 
 
 def _try_native_spatial_kernel(
@@ -18250,11 +18268,32 @@ def solve_model(
 
     _warn_native_kernel_bypassed(_native_bypass, covers=_bypass_coverage)
     if not _native_budget_spent and not _native_bypass:
+        # #1990: a model whose only kernel-blocking terms are products of three or
+        # more variables goes to the kernel as its bilinear-chain split.
+        _ks_model, _ks_lb, _ks_ub, _ks_n = model, lb, ub, n_vars
+        _ks_source = (_prereform_model, _prereform_nvars) if _prereform_model is not None else None
+        _ks_split = False
+        if _kernel_multilinear_split_enabled():
+            from discopt._relax.multilinear_split import split_multilinear_products
+
+            _split = split_multilinear_products(
+                model,
+                np.asarray(lb, dtype=np.float64)[:n_vars],
+                np.asarray(ub, dtype=np.float64)[:n_vars],
+            )
+            if _split is not None:
+                _ks_model, _ks_lb, _ks_ub = _split
+                _ks_n = int(_ks_lb.shape[0])
+                # Points are verified on the split model AND on the problem posed:
+                # the pre-reform model when the factorable lift fired, else ``model``.
+                if _ks_source is None:
+                    _ks_source = (model, n_vars)
+                _ks_split = True
         _native_result = _try_native_spatial_kernel(
-            model,
-            lb,
-            ub,
-            n_vars,
+            _ks_model,
+            _ks_lb,
+            _ks_ub,
+            _ks_n,
             gap_tolerance,
             max_nodes,
             time_limit,
@@ -18269,8 +18308,15 @@ def solve_model(
             rr_reserve_s=_rr_reserve_s if _root_bound_seed_enabled() else 0.0,
             psd_cuts=psd_cuts,
             abs_gap_tolerance=abs_gap_tolerance,
-            source=((_prereform_model, _prereform_nvars) if _prereform_model is not None else None),
+            source=_ks_source,
         )
+        if _native_result is not None and _ks_split:
+            # The split's aux columns are not ``model``'s: report ``model``'s columns.
+            _native_stats_split = dict(_native_result.solver_stats or {})
+            _native_stats_split["tree/multilinear_split_cols"] = float(_ks_n - n_vars)
+            _native_result.solver_stats = _native_stats_split
+            if _native_result.x is not None:
+                _native_result.x = {v.name: _native_result.x[v.name] for v in model._variables}
     if _native_result is not None:
         if _native_result.algorithm_route is None:
             _native_result.algorithm_route = (
@@ -24180,6 +24226,13 @@ def solve_model(
     if _rf_stats is not None:
         for _rfk, _rfv in _rf_stats.items():
             _solver_stats[f"row_filter/{_rfk}"] = float(_rfv)
+    # #1990: the RLT strip-and-retry, emitted (zeros included) whenever it is on.
+    _rs_stats = getattr(_mc_lp_relaxer, "_rlt_strip_stats", None) if _mc_lp_relaxer else None
+    from discopt._relax.mccormick_lp import _rlt_strip_retry_enabled
+
+    if _rs_stats is not None and _rlt_strip_retry_enabled():
+        for _rsk, _rsv in _rs_stats.items():
+            _solver_stats[f"rlt_strip/{_rsk}"] = float(_rsv)
     # #1568: array-row expansion outcomes, only when the flag produced any.
     for _ark, _arv in _IN_TREE_ARRAY_ROWS.items():
         _solver_stats[f"reduce/array_rows_{_ark}"] = float(_arv)

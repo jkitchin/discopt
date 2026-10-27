@@ -40,6 +40,7 @@ from discopt._relax.milp_relaxation import (
 from discopt._relax.term_classifier import NonlinearTerms, classify_nonlinear_terms
 from discopt._relax.uniform_relax import RelaxationBuildAborted
 from discopt.modeling.core import Model, VarType
+from discopt.solver_tuning import _env_flag
 from discopt.solver_tuning import current as _tuning
 
 logger = logging.getLogger(__name__)
@@ -580,6 +581,24 @@ _ST_WINDOW = 256
 _ST_BINDING_TOL = 1e-7
 
 
+#: Process-wide totals of the #1990 retry across every relaxer (the per-relaxer
+#: ``_rlt_strip_stats`` reach ``solver_stats`` only for the tree's own relaxer).
+RLT_STRIP_TOTALS: dict[str, int] = {"retries": 0, "certified": 0}
+
+
+def _rlt_strip_retry_enabled() -> bool:
+    """Re-solve a node without its level-1 RLT rows when the RLT LP does not certify
+    (``DISCOPT_RLT_STRIP_RETRY``, issue #1990; **default ON**, ``=0`` restores the
+    legacy path).
+
+    Bound-changing (CLAUDE.md §5): it changes the bound of exactly the nodes whose
+    RLT-augmented LP gave no certified verdict, which otherwise fall through to the
+    #671 row filter. Graduated on its panel (``docs/dev/performance-plan.md`` §97):
+    cert-clean everywhere it fires (haverly, mathopt3, nvs16, ex8_5_4, ex1252a of
+    424 screened), neutral at 30 s, and ex1252a's 600 s bound 56 665 -> 87 589."""
+    return _env_flag("DISCOPT_RLT_STRIP_RETRY", default=True)
+
+
 class MccormickLPRelaxer:
     """Reusable per-node LP-form McCormick relaxation.
 
@@ -678,6 +697,11 @@ class MccormickLPRelaxer:
         #     produced no certified verdict and the flag was on).
         #   * rows_dropped: rows the filter actually removed across those.
         self._row_filter_stats: dict[str, int] = {"invocations": 0, "rows_dropped": 0}
+        # #1990 (``DISCOPT_RLT_STRIP_RETRY``): node solves whose level-1-RLT LP gave
+        # no certified verdict, and how many of those the RLT-free re-solve certified.
+        self._rlt_strip_stats: dict[str, int] = {"retries": 0, "certified": 0}
+        # True only inside that re-solve, so it takes the cold path and cannot recurse.
+        self._rlt_strip_active = False
         # Skip-eligible node-solve counter for the lazy-trigger stride net
         # (see the module-level ``_LAZY_RESEP_STRIDE`` rationale).
         self._lazy_skip_ctr: int = 0
@@ -1759,7 +1783,7 @@ class MccormickLPRelaxer:
             and not inherited_cuts
             and self._model_has_composite_lift()
         )
-        if out_cuts is None:
+        if out_cuts is None and not self._rlt_strip_active:
             # #1009: the fast path needs its OWN anchor. The node-wide ``_deadline``
             # below is taken deliberately AFTER the cold build (see its comment), so
             # it does not exist yet here — which is exactly why this path used to run
@@ -2095,6 +2119,55 @@ class MccormickLPRelaxer:
             res = milp.solve(
                 time_limit=_remaining(), backend=self._backend, want_marginals=want_marginals
             )
+
+        # #1990 RLT strip-and-retry (``DISCOPT_RLT_STRIP_RETRY``, default ON). Level-1
+        # RLT rows only tighten a relaxation that is valid without them, so, like the
+        # C-42 pool rows above, they must never be what costs a node its bound. On
+        # ex1252a they do: the RLT-augmented node LP gives no certified verdict, the
+        # #671 filter below then drops ~140 rows, and the node bounds at 14 522 where
+        # the same box without RLT certifies 47 742. Before that filter, re-solve the
+        # node with the RLT rows left out (the cold path, no pool: the pool is stated
+        # over the RLT layout) and keep that verdict when it is certified. Dropping
+        # valid rows only enlarges the relaxed set, so the re-solve's optimum and a
+        # Farkas proof of its emptiness are both valid for this box. When it does not
+        # certify either, the filter runs on the original system, as before.
+        if (
+            self._rlt_applicable
+            and not self._rlt_strip_active
+            and _rlt_strip_retry_enabled()
+            and not (
+                res.status == "optimal"
+                or (res.status == "infeasible" and getattr(res, "farkas_certified", False))
+            )
+        ):
+            self._rlt_strip_stats["retries"] += 1
+            RLT_STRIP_TOTALS["retries"] += 1
+            self._rlt_strip_active = True
+            self._rlt_applicable = False
+            try:
+                _strip = self._solve_at_node_impl(
+                    node_lb,
+                    node_ub,
+                    _remaining(),
+                    inherited_cuts=None,
+                    separate=separate,
+                    out_cuts=None,
+                    psd_max_rounds=psd_max_rounds,
+                    want_marginals=want_marginals,
+                    skip_pool_separators=False,
+                    build_deadline=build_deadline,
+                    abort_deadline=abort_deadline,
+                    round_deadline=round_deadline,
+                )
+            finally:
+                self._rlt_applicable = True
+                self._rlt_strip_active = False
+            if _strip.status == "optimal" or (
+                _strip.status == "infeasible" and getattr(_strip, "farkas_certified", False)
+            ):
+                self._rlt_strip_stats["certified"] += 1
+                RLT_STRIP_TOTALS["certified"] += 1
+                return _strip
 
         # #671 float64-intractable-row filter — FAILURE-TRIGGERED. When the node LP
         # breaks down without a certified verdict (the hda-class ill-conditioned

@@ -207,6 +207,33 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **ex1252a and ex1252 certify: products of three or more variables reach the
+  native kernel, and its primal step runs at integral LP points (#1990).**
+  - Such products are split into exact bilinear chains for the kernel
+    (`DISCOPT_KERNEL_MULTILINEAR_SPLIT`, default on). The kernel's spec builder
+    used to decline them, so these models ran on the much slower Python tree.
+  - The kernel's in-tree local NLP (`DISCOPT_NATIVE_NLP_PRIMAL`, #1522) is now on
+    by default. On a model with integer columns it waits for an LP point
+    integral on every integer column with an untried assignment
+    (`DISCOPT_HOOK_INTEGRAL_POINTS`).
+  - ex1252a: bound 19,389 at 120 s before, certified 128,893.741 in 19 s now.
+    ex1252 certifies in 41 s, and st_e03 takes 0.7 s instead of 8.6 s. nous1
+    slows from about 21 s to 28 s (`docs/dev/performance-plan.md` §97.1).
+
+- **A failed RLT node LP no longer costs the node its bound, and FBBT bounds a
+  factor of a product whose other factor touches zero (#1990).**
+  - A node whose level-1-RLT LP gave no certified verdict went to the #671 row
+    filter. On ex1252a that filter dropped about 140 rows and bounded a box at
+    14,522 that certifies 47,742 without the RLT rows. Such a node is now
+    re-solved without the RLT rows first (`DISCOPT_RLT_STRIP_RETRY`, default on).
+  - Backward FBBT through `z = a * b` now bounds `a` by `z / (b \ {0})` when `z`
+    excludes zero, even when `b`'s interval contains zero
+    (`DISCOPT_FBBT_EXTENDED_MUL`, default on). On ex1252a, `x18 = 0.0025*x9*x3`
+    at `x18 = 1` now gives `x3 >= 1`.
+  - ex1252a's bound at 600 s rose from 56,665 to 92,254 (optimum 128,894). The
+    panels are cert-clean (`docs/dev/performance-plan.md` §97). `=0` restores
+    either legacy path.
+
 - **Bound tightening no longer cuts feasible points near tanh/atan/sigmoid/erf/
   softplus/atanh limits or across a tan pole (#1908).** These gave wrong `optimal`
   values and false `infeasible` verdicts.

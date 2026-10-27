@@ -239,6 +239,13 @@ _JAX_MODULES = sorted(
 )
 
 
+def _result(stdout: str) -> dict:
+    """The ``RESULT`` line only: HiGHS's C++ layer can write diagnostics to stdout
+    after it (``HighsMipSolverData::transformNewIntegerFeasibleSolution ...``)."""
+    (line,) = [ln for ln in stdout.splitlines() if ln.startswith("RESULT ")]
+    return json.loads(line[len("RESULT ") :])
+
+
 def test_every_module_scope_jax_importer_refuses_with_the_named_error():
     # The scan found the modules: 37 before the McCormick-"nlp" route was retired
     # (#1873, 22 of them went with it), 15 after.
@@ -261,7 +268,7 @@ def test_every_module_scope_jax_importer_refuses_with_the_named_error():
         "print('RESULT', json.dumps({'checked': len(mods), 'bad': bad}))\n"
     )
     assert p.returncode == 0, p.stderr[-3000:]
-    out = json.loads(p.stdout.split("RESULT", 1)[1])
+    out = _result(p.stdout)
     assert out["checked"] == len(_JAX_MODULES) > 0
     assert out["bad"] == {}, out["bad"]
 
@@ -345,7 +352,7 @@ def _assert_corpus_is_jax_free(paths: list[str], time_limit: float, timeout: flo
     assert paths, "the corpus is empty -- the guard would measure nothing"
     p = _run_without_jax(_SOLVE_ALL.format(paths=paths, time_limit=time_limit), timeout=timeout)
     assert p.returncode == 0, p.stderr[-3000:]
-    out = json.loads(p.stdout.split("RESULT", 1)[1])
+    out = _result(p.stdout)
     assert out["n"] == len(paths)
     # A path that reached for JAX is reported with the stack that did it.
     assert out["jax"] == {}, "\n\n".join(f"== {k}\n{v}" for k, v in out["jax"].items())
