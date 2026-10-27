@@ -22656,7 +22656,13 @@ def solve_model(
                 ):
                     _lb_k = _lns_k_schedule[min(_lns_lb_calls, len(_lns_k_schedule) - 1)]
                     _lns_lb_calls += 1
-                    _lb_slice = min(2.0, max(0.5, _deadline - time.perf_counter() - 0.2))
+                    # #1917: a role-2 slice handed to a nested ``solve_model`` (the
+                    # sub-MIP), the same class as #1187's RENS budget. Under
+                    # ``deterministic`` it is the caller's own ``time_limit``.
+                    _lb_slice = _role2_slice(
+                        min(2.0, max(0.5, _deadline - time.perf_counter() - 0.2)),
+                        whole=time_limit,
+                    )
                     _lb_obj0 = float(_lns_inc[1])
                     _lb_improved = False
                     try:
@@ -28474,7 +28480,15 @@ def _solve_nlp_bb(
                     ):
                         _lb_k = _lns_k_schedule[min(_lns_lb_calls, len(_lns_k_schedule) - 1)]
                         _lns_lb_calls += 1
-                        _lb_slice = min(2.0, max(0.5, _lns_deadline - time.perf_counter() - 0.2))
+                        # #1917: a role-2 slice handed to a nested ``solve_model``
+                        # (the sub-MIP); see the spatial loop's twin. On GDPlib
+                        # ``positioning`` (hull, ``deterministic=True``, certifying)
+                        # it decided whether the sub-MIP's convexity proof finished,
+                        # so the tree was 147 nodes or 179-307 by machine speed.
+                        _lb_slice = _role2_slice(
+                            min(2.0, max(0.5, _lns_deadline - time.perf_counter() - 0.2)),
+                            whole=time_limit,
+                        )
                         _lb_obj0 = float(_lns_inc[1])
                         _lb_improved = False
                         try:

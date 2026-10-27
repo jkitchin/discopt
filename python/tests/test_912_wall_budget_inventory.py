@@ -415,17 +415,6 @@ KNOWN_SLICES: tuple[tuple[str, str, str], ...] = (
         "min(_DEADLINE_NLP_CAP_S, float(deadline) - _now())",
         "residual",
     ),
-    # Local-branching slices, spatial and NLP-BB.
-    (
-        "solver.py",
-        "min(2.0, max(0.5, _deadline - time.perf_counter() - 0.2))",
-        "residual",
-    ),
-    (
-        "solver.py",
-        "min(2.0, max(0.5, _lns_deadline - time.perf_counter() - 0.2))",
-        "residual",
-    ),
     # ``max_wall_time`` clamps on root heuristic / polish / recovery NLPs.
     # #1153 renamed this stage's deadline ``_deadline`` -> ``_fp_stage_deadline``
     # when it gave the feasibility pump its own clock; same gate, same category.
@@ -953,20 +942,45 @@ def test_the_rens_slice_is_no_longer_in_the_carved_inventory():
 
 
 @pytest.mark.unit
+def test_local_branching_slices_stay_routed():
+    """#1917: the local-branching sub-MIP slices must stay inside ``_role2_slice``.
+
+    Same shape and same reason as the RENS guard above. Each slice is handed to a
+    nested ``solve_model`` as its ``time_limit``, so it decides how much of the
+    Hamming-ball sub-MIP runs -- including whether that sub-solve's convexity proof
+    finishes. Measured on GDPlib ``positioning`` (hull, ``deterministic=True``,
+    certifying well inside ``time_limit``): 147 nodes at real clock speed, 179 /
+    193 / 307 with Python's clocks scaled 3x, and 199 in one of three runs under
+    real CPU load. Unwrapped, the scanner sees them again; this says they may not
+    be recorded back.
+    """
+    found = _scan_carved_slice()
+    offenders = sorted(s for p, s in found if "min(2.0, max(0.5," in s and "0.2))" in s)
+    assert not offenders, (
+        "a local-branching sub-MIP slice is unrouted again — route it through "
+        "solver._role2_slice rather than recording it here (#1917):\n"
+        + "\n".join(f"  {s}" for s in offenders)
+    )
+
+
+@pytest.mark.unit
 def test_carved_slice_residual_count_is_visible():
     """Publish the carved-slice residual count, as ``KNOWN``'s count is published.
 
-    12, not 14: the two ``* 1000.0`` entries are unit conversions
+    10, not 12: the two ``* 1000.0`` entries are unit conversions
     (``measurement`` / ``contract``), not budgets. The count started at 13 and
     dropped to 12 when #1187's RENS slice was routed through ``_role2_slice`` —
     which is what lowering this number is supposed to mean. It did **not** drop to
     11: suppressing ``_deadline_wall_cap`` under the flag was tried and left the
     residual it was meant to remove exactly unchanged, so it was not shipped.
+    12 -> 10 (#1917): the two local-branching sub-MIP slices, spatial and NLP-BB,
+    routed through ``_role2_slice`` after GDPlib ``positioning`` showed them
+    deciding the tree of a certifying ``deterministic`` solve.
     """
     residual = sorted(k for k, c in _SLICE_CATEGORY.items() if c == "residual")
-    assert len(residual) == 12, (
+    assert len(residual) == 10, (
         f"the carved-slice residual inventory changed ({len(residual)} entries, "
-        "expected 12). If you routed one through _role2_*, drop it from "
+        "expected 10). If you routed one through _role2_*, drop it from "
         "KNOWN_SLICES and lower this number; if you added one, route it "
         "instead.\n" + "\n".join(f"  {p}: {s}" for p, s in residual)
     )
