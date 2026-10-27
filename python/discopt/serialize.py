@@ -2325,6 +2325,9 @@ _LAZY_NOT_CARRIED = frozenset(
         "_convexity_time_budget",
         "_solve_deadline",
         "_disjunctive_config_floor",
+        # #1979: ``function_domains.affine_domain_rows``'s cache, derived from the
+        # model's own expressions and keyed by them -- recomputed on first use.
+        "_function_domain_rows",
     }
 )
 

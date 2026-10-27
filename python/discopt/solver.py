@@ -11571,6 +11571,60 @@ def _kernel_spatial_branching_kwargs() -> dict:
     return {"spatial_score": True, "spatial_pscost_weight": 1.0, "spatial_midpull": 0.75}
 
 
+def _py_tree_spatial_score_enabled() -> bool:
+    """#1978: ``DISCOPT_PY_TREE_SPATIAL_SCORE`` for the Python spatial tree.
+
+    ON, the tree picks the continuous column to bisect by its share of the envelope
+    gap of the nonlinear terms it appears in at the node point (#1970's native rule,
+    ported; ``select_spatial_score_variable``), split at the midpoint (#1970's native
+    midpull of 0.75 cost two ``test_sign_envelope`` certificates: a discontinuity at a
+    box midpoint never lands on a child boundary), and falls back to the legacy
+    longest-edge rule when no term has a gap on a candidate. Branching order only:
+    both children still cover the parent box, so no bound moves. Probe:
+    ``tree/py_spatial_score_picks``.
+
+    **Graduated (default ON, 2026-10-26, #1978); ``=0`` restores the legacy rule.**
+
+    Entry experiment (#1975's rescaled prolog outer piece, Python tree): legacy bound
+    ~0 after 2,463 nodes / 120 s; ON bound 0.034931 in 75 nodes, splitting only the
+    two narrow factors (certified at ``abs_gap_tolerance=1e-3`` in 71 nodes). A first
+    version scored the engine's ``bilinear_map``, which also holds RLT-lifted
+    products (#1944), and steered branching onto linear-only columns; it now scores
+    the model's own terms (``NonlinearTerms``).
+
+    Section 5 panel (``flag_onoff_corpus_panel.py --flag
+    DISCOPT_PY_TREE_SPATIAL_SCORE``, 287 instances -- in-repo corpus + every
+    MINLPLib instance <= 200 vars/cons with an unbounded continuous variable after
+    FBBT -- 20 s, interleaved), shipped midpoint variant: fires on 30; cert-clean (460
+    incumbent checks, 0 false bounds; all four certification flips, +3 / -1, are on
+    instances where the rule never fired). Where it fires: nodes where both certify
+    215 -> 191, wall 66.6 -> 64.2 s; uncertified bounds tighter on ``chenery``,
+    ``hybriddynamic_varcc`` and ``pointpack06..14`` (0.82 -> 0.50 on ``pointpack06``),
+    looser on ``knp3-12`` (5.46 -> 7.86, a symmetric sphere packing where round-robin
+    bisection suits the symmetry). The earlier midpull-0.75 run measured the same
+    directions, replicated 3x. Read at call time.
+    """
+    raw = os.environ.get("DISCOPT_PY_TREE_SPATIAL_SCORE", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off", "")
+
+
+def _register_spatial_score_terms(tree, relaxer) -> bool:
+    """Hand the relaxer's lifted bilinear pairs and monomials to ``tree`` (#1978).
+
+    ``True`` once registered; ``False`` while the relaxer has not finished a
+    complete build yet (the caller retries next iteration) or there is none.
+    """
+    terms = getattr(relaxer, "_score_terms", None) if relaxer is not None else None
+    if terms is None:
+        return False
+    pairs, monos = terms
+    bil = np.asarray(pairs, dtype=np.int64).reshape(-1, 2)
+    pcols = np.asarray([i for i, _ in monos], dtype=np.int64)
+    pexps = np.asarray([float(p) for _, p in monos], dtype=np.float64)
+    tree.set_spatial_score_terms(bil, pcols, pexps)
+    return True
+
+
 def _native_warm_start_mode() -> int:
     """#1935: ``DISCOPT_NATIVE_WARM_START`` for the native spatial kernel.
 
@@ -18621,6 +18675,7 @@ def solve_model(
     # The LP relaxer was requested but discarded for a continuous model (#120/#1112).
     _lp_downgraded = False
     _mc_lp_relaxer = None  # MccormickLPRelaxer instance when _mc_mode == "lp"
+    _spatial_score_registered = False  # #1978: score terms handed to the tree
     # Global root cut pool (P3): separated once at the root, then inherited at
     # every node so each node reproduces the strong root bound for the cost of a
     # warm LP solve instead of re-separating the PSD/RLT cuts from scratch. Stays
@@ -20526,6 +20581,9 @@ def solve_model(
         # is large enough to amortize it (_POUNCE_BATCH_MIN_VARS); smaller nodes
         # stay on the serial path.
         _use_pounce_batch = nlp_solver == "pounce" and n_vars >= _POUNCE_BATCH_MIN_VARS
+        # #1978: each node's relaxation LP point, for the tree's spatial score.
+        _score_pts: dict[int, np.ndarray] = {}
+        _score_on = _py_tree_spatial_score_enabled()
         if _use_pounce_batch and n_batch > 1:
             result_ids, result_lbs, result_sols, result_feas, _batch_trusted = _solve_batch_pounce(
                 _active_evaluator,
@@ -20750,6 +20808,8 @@ def solve_model(
                             and not _lazy_probing
                         ),
                     )
+                    if _score_on and mc_res is not None and mc_res.x is not None:
+                        _score_pts[i] = np.asarray(mc_res.x, dtype=np.float64)
                     if mc_res.status == "infeasible":
                         # Rigorous fathom: the McCormick LP is a valid outer
                         # relaxation, so an empty relaxed feasible set proves the
@@ -21134,6 +21194,8 @@ def solve_model(
                             and not _lazy_probing
                         ),
                     )
+                    if _score_on and mc_lp_res is not None and mc_lp_res.x is not None:
+                        _score_pts[i] = np.asarray(mc_lp_res.x, dtype=np.float64)
                     if mc_lp_res is not None and mc_lp_res.status == "infeasible":
                         # The McCormick LP is a valid OUTER relaxation of this
                         # node's subtree: if the (larger) relaxed feasible set is
@@ -22787,6 +22849,16 @@ def solve_model(
                 node_infeasible_mask,
                 _exclusion_mask,
             )
+        if not _spatial_score_registered and _score_on:
+            _spatial_score_registered = _register_spatial_score_terms(
+                tree, _mc_lp_relaxer if _mc_mode == "lp" else None
+            )
+        if _spatial_score_registered and _score_pts:
+            _sp_idx = sorted(_score_pts)
+            tree.set_spatial_score_points(
+                np.asarray([int(batch_ids[k]) for k in _sp_idx], dtype=np.int64),
+                np.ascontiguousarray(np.stack([_score_pts[k] for k in _sp_idx])),
+            )
         tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
 
@@ -24061,6 +24133,8 @@ def solve_model(
     _solver_stats: dict[str, float] = {
         f"reduce/{_rfam}": float(_rt) for _rfam, _rt in _reduce_timers.items() if _rt > 0.0
     }
+    if _spatial_score_registered:
+        _solver_stats["tree/py_spatial_score_picks"] = float(tree.spatial_score_picks())
     if _mc_lp_relaxer is not None and getattr(_mc_lp_relaxer, "_sep_timers", None):
         for _sfam, _stime in _mc_lp_relaxer._sep_timers.items():
             if _stime > 0.0:

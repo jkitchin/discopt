@@ -83,6 +83,25 @@ class _Trajectory(logging.Handler):
             self.lbs.append(float(m.group(2)))
 
 
+@pytest.fixture(autouse=True)
+def _without_the_1982_bundle(monkeypatch):
+    """Measure the AMP inert stop on the boxes it was written for.
+
+    The #1982 sign/domain bundle (graduated 2026-10-26) closes ``ex1221`` at the
+    root -- its bound becomes 7.66718, the MINLPLib optimum -- so refinement has
+    nothing left to stall on and the inert stop, which is what this file tests,
+    never fires. The pinned bounds are the pre-bundle ones; the bundle is opted out
+    here so the mechanism stays covered.
+    """
+    for flag in (
+        "DISCOPT_FBBT_SIGN_DOMAIN",
+        "DISCOPT_POLE_ENVELOPE",
+        "DISCOPT_POLY_ROOT_BOUND",
+        "DISCOPT_ENTROPY_ATOM",
+    ):
+        monkeypatch.setenv(flag, "0")
+
+
 def _solve_with_trajectory(name: str):
     # The 60 s limit is NOT slack to be trimmed: on this file it is load-bearing
     # in the cheap direction. nvs11 costs 6.3 s at time_limit=60 and 14.7 s at
