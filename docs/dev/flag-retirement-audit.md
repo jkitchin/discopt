@@ -176,7 +176,9 @@ forty-five. "Panel owed, never run" is therefore the honest state for most rows 
 this document has said since its first pass that **that is itself the finding**, not a gap
 in the audit.
 
-<!-- live-solver-math-gates: 52 -->
+<!-- live-solver-math-gates: 51 -->
+
+_52 -> 51 (2026-10-27): `DISCOPT_NATIVE_NLP_PRIMAL` graduated to default ON with #1990 (#2003). The PR's other flags (`DISCOPT_KERNEL_MULTILINEAR_SPLIT`, `DISCOPT_HOOK_INTEGRAL_POINTS`, `DISCOPT_RLT_STRIP_RETRY`, `DISCOPT_FBBT_EXTENDED_MUL`) were introduced and graduated in the same PR, so they never counted here._
 
 _53 -> 52 (2026-10-26): `DISCOPT_ENTROPY_ATOM` graduated to default ON with the #1979-#1982 bundle (performance-plan §92); main had reached 53 with `DISCOPT_NODE_RETRY_PAST_DEADLINE` (#1989). The bundle's other three flags (`DISCOPT_FBBT_SIGN_DOMAIN`, `DISCOPT_POLE_ENVELOPE`, `DISCOPT_POLY_ROOT_BOUND`) were introduced and graduated in the same PR, so they never counted here._
 
