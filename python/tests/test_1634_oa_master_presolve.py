@@ -325,3 +325,55 @@ def test_lazy_cross_check_keeps_optimal_inside_the_gap():
     assert MH._gap_closed(1.0, 1.0 - 5e-5, 1e-4)
     assert not MH._gap_closed(1.0, 0.99, 1e-4)
     assert not MH._gap_closed(None, 0.0, 1e-4)
+
+
+def test_lazy_cross_check_is_driven_to_the_claim_not_to_its_own_gap():
+    """#2013: the presolve-free cross-solve confirms a bound claim by reaching it,
+    not by stopping at the master's ``mip_rel_gap`` against whatever incumbent it
+    happens to hold. The master here is given ``mip_rel_gap = 0.5``, so a cross-solve
+    stopping on that gap would report the root LP bound (3.5 below the optimum)
+    and "lower" a correct claim; driven to the claim it reaches it."""
+    import highspy
+    import scipy.sparse as sp
+
+    rng = np.random.default_rng(0)
+    n, m = 60, 25
+    A = rng.integers(0, 4, size=(m, n)).astype(float)
+    c = rng.uniform(1, 10, n)
+    b = A.sum(1) * 0.4
+    lp = highspy.HighsLp()
+    lp.num_col_, lp.num_row_ = n, m
+    lp.col_cost_ = c
+    lp.col_lower_, lp.col_upper_ = np.zeros(n), np.ones(n)
+    lp.row_lower_, lp.row_upper_ = b, np.full(m, highspy.kHighsInf)
+    Ac = sp.csc_matrix(A)
+    lp.a_matrix_.format_ = highspy.MatrixFormat.kColwise
+    lp.a_matrix_.num_col_, lp.a_matrix_.num_row_ = n, m
+    lp.a_matrix_.start_ = Ac.indptr.astype(np.int32)
+    lp.a_matrix_.index_ = Ac.indices.astype(np.int32)
+    lp.a_matrix_.value_ = Ac.data
+    lp.integrality_ = [highspy.HighsVarType.kInteger] * n
+
+    exact = highspy.Highs()
+    exact.setOptionValue("output_flag", False)
+    exact.setOptionValue("mip_rel_gap", 0.0)
+    exact.setOptionValue("mip_abs_gap", 0.0)
+    exact.passModel(lp)
+    exact.run()
+    opt = float(exact.getInfo().objective_function_value)
+    exact.setOptionValue("solve_relaxation", True)
+    exact.run()
+    root = float(exact.getInfo().objective_function_value)
+    assert root < opt - 1.0, (root, opt)  # a real integrality gap, or this tests nothing
+
+    h = highspy.Highs()
+    h.setOptionValue("output_flag", False)
+    h.setOptionValue("mip_rel_gap", 0.5)
+    h.passModel(lp)
+    status, bound, diag = MH._cross_check_lazy_master(
+        h, highspy, SolveStatus.OPTIMAL, opt, None, objective=opt
+    )
+    assert diag["ran"] and diag["cross_nodes"] >= 0, diag
+    assert diag["reached_claim"] or diag["cross_status"] == "optimal", diag
+    assert bound is not None and bound >= opt - 1e-6 * max(1.0, abs(opt)), (bound, opt, diag)
+    assert status == SolveStatus.OPTIMAL, (status, diag)
