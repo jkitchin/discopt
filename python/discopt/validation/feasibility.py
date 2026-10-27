@@ -1722,6 +1722,27 @@ def repair_point(model, x_flat, *, evaluator, variables=None) -> RepairResult:
     return RepairResult(best_x, excess0, best_excess, it)
 
 
+def _min_norm_lstsq(A: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Minimum-norm least-squares solution of ``A x = b``.
+
+    numpy's driver (``gelsd``, an iterative SVD) can fail to converge on a finite,
+    well-scaled but rank-deficient system: on MINLPLib ``pooling_bental5tp`` a 68x72
+    repair Jacobian of rank 55 with entries up to 234 raised ``LinAlgError: SVD did
+    not converge in Linear Least Squares`` out of a default ``Model.solve()``, while
+    SciPy's ``gelsd``, ``gelsy`` and ``gelss`` all solve it to a residual ~1e-23.
+    On that error the same minimum-norm problem is solved by LAPACK's ``gelsy``
+    (complete orthogonal factorization: no SVD iteration that can diverge). Every
+    system numpy solves is unchanged; a second failure is raised.
+    """
+    try:
+        x = np.linalg.lstsq(A, b, rcond=None)[0]
+    except np.linalg.LinAlgError:
+        import scipy.linalg
+
+        x = scipy.linalg.lstsq(A, b, lapack_driver="gelsy")[0]
+    return np.asarray(x, dtype=np.float64)
+
+
 def _newton_repair(rows_ctx, x, r, viol, J, frozen, excess0):
     """The Newton loop of :func:`repair_point` from ``x`` with ``frozen`` columns.
 
@@ -1743,7 +1764,7 @@ def _newton_repair(rows_ctx, x, r, viol, J, frozen, excess0):
         A = J[rows][:, cols].toarray()
         if not np.all(np.isfinite(A)):
             break
-        step, *_ = np.linalg.lstsq(A, -r[rows], rcond=None)
+        step = _min_norm_lstsq(A, -r[rows])
         xn = x.copy()
         xn[cols] += step
         hit = (xn < lb) | (xn > ub)
