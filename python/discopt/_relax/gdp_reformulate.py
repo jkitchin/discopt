@@ -16,9 +16,10 @@ original model is returned unchanged (zero overhead).
 
 from __future__ import annotations
 
+import functools
 import warnings
 from collections.abc import Callable
-from typing import NamedTuple, Optional
+from typing import Any, NamedTuple, Optional
 
 import numpy as np
 
@@ -240,6 +241,21 @@ def reformulate_gdp(
         new_model._register_generated_variable(var)  # #1799
         return var
 
+    def _add_aux_continuous(prefix: str, lb: float, ub: float) -> Variable:
+        name = f"{GDP_AUX_PREFIX}{prefix}_{_aux_counter[0]}"
+        _aux_counter[0] += 1
+        while name in _taken or name in new_model._names:
+            name = f"{GDP_AUX_PREFIX}{prefix}_{_aux_counter[0]}"
+            _aux_counter[0] += 1
+        _taken.add(name)
+        var = Variable(name, VarType.CONTINUOUS, (), lb, ub, new_model)
+        new_model._register_generated_variable(var)  # #1799
+        return var
+
+    # A row big-M cannot bound because its body is undefined where its disjunct
+    # is off gets its restricted operands split out (_ArgumentDisaggregator).
+    _disagg = _ArgumentDisaggregator(model, _add_aux_continuous)
+
     # #1921: an SOS member with an infinite declared bound has no declared big-M.
     # Bounds FBBT implies from the model's unconditional rows hold at every
     # feasible point, so they are a valid cap; computed once, on first need.
@@ -452,7 +468,11 @@ def reformulate_gdp(
             if id(c.constraint) in _pt_dropped:
                 continue  # replaced by a bound row (#1775 G2.4)
             new_cons = _reformulate_indicator(
-                c, new_model, lp_data=lp_data, multiply=method == "binary_multiplication"
+                c,
+                new_model,
+                lp_data=lp_data,
+                multiply=method == "binary_multiplication",
+                disagg=_disagg,
             )
             new_model._constraints.extend(new_cons)
         elif isinstance(c, _DisjunctiveConstraint) and c.parent_indicator is not None:
@@ -470,6 +490,7 @@ def reformulate_gdp(
                 parent_selector=c.parent_indicator,
                 multiply=_bm,
                 user_ms=None if _bm else _user_ms(c, nested=True),
+                disagg=_disagg,
             )
             if _bm:
                 _warn_user_m_ignored(c, method)
@@ -539,6 +560,7 @@ def reformulate_gdp(
                         pretransform=_pt_on and chosen in ("big-m", "mbigm"),
                         multiply=chosen == "binary_multiplication",
                         user_ms=_user_ms(c, nested=False) if chosen == "big-m" else None,
+                        disagg=_disagg,
                     )
             new_model._constraints.extend(new_cons)
         elif isinstance(c, _SOSConstraint):
@@ -981,6 +1003,288 @@ def _unbounded_big_m_error(constraint: Constraint, direction: str) -> ValueError
         f"(method='hull') needs no big-M, but it too needs a finite bound on every "
         f"variable of the disjunction, within each disjunct (#1617)."
     )
+
+
+def _big_m_unavailable(constraint: Constraint, model: Model) -> bool:
+    """Would :func:`_compute_big_m` refuse ``constraint`` (a domain gap, or an
+    unbounded side the row needs)? The same tests, without raising."""
+    if _domain_gap(constraint.body, model) is not None:
+        return True
+    lo, hi = _gdp_body_bounds(constraint.body, model)
+
+    def ok(v: float) -> bool:
+        return bool(np.isfinite(v)) and abs(v) < _BIGM_SENTINEL
+
+    if constraint.sense in ("<=", "==") and not ok(hi):
+        return True
+    return constraint.sense in (">=", "==") and not ok(lo)
+
+
+#: The closed domain of each :data:`_RESTRICTED_DOMAINS` function's argument: a
+#: row using the function is undefined at an argument outside it.
+_CLOSED_DOMAINS: dict[str, tuple[float, float]] = {
+    "sqrt": (0.0, np.inf),
+    "log": (0.0, np.inf),
+    "log2": (0.0, np.inf),
+    "log10": (0.0, np.inf),
+    "log1p": (-1.0, np.inf),
+    "entropy": (0.0, np.inf),
+    "asin": (-1.0, 1.0),
+    "acos": (-1.0, 1.0),
+    "acosh": (1.0, np.inf),
+    "atanh": (-1.0, 1.0),
+}
+
+
+def _restricted_arguments(expr: Expression) -> list[tuple[Expression, tuple[float, float]]]:
+    """The non-constant operands of ``expr`` whose value a node's domain restricts,
+    each with the closed interval outside which that node is undefined.
+
+    The argument of a :data:`_RESTRICTED_DOMAINS` function, the base of a power
+    (``[0, inf)`` unless the exponent is a constant integer) and the divisor of a
+    division (unrestricted: its pole is a point) -- the operands that make a body
+    undefined or unbounded at a point or region of the box. Walked through exactly
+    the node types :func:`_replace_subexpressions` rebuilds, so every operand
+    returned can be replaced. An operand under two nodes keeps the intersection."""
+    from discopt.modeling.core import Parameter
+
+    found: list[tuple[Expression, tuple[float, float]]] = []
+    seen: set[int] = set()
+    stack: list = [expr]
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, FunctionCall):
+            if node.func_name in _RESTRICTED_DOMAINS and node.args:
+                found.append((node.args[0], _CLOSED_DOMAINS[node.func_name]))
+            stack.extend(node.args)
+        elif isinstance(node, BinaryOp):
+            if node.op == "**":
+                dom = (0.0, np.inf)
+                if isinstance(node.right, (Constant, Parameter)):
+                    p = np.ravel(np.asarray(node.right.value, dtype=np.float64))
+                    if np.all(np.isfinite(p) & (p == np.round(p))):
+                        dom = (-np.inf, np.inf)
+                found.append((node.left, dom))
+            elif node.op == "/":
+                found.append((node.right, (-np.inf, np.inf)))
+            stack.extend((node.left, node.right))
+        elif isinstance(node, UnaryOp):
+            stack.append(node.operand)
+        elif isinstance(node, IndexExpression):
+            stack.append(node.base)
+        else:
+            terms = _sumover_terms(node)
+            if terms is not None:
+                stack.extend(terms)
+    out: list[tuple[Expression, tuple[float, float]]] = []
+    for a, (dlo, dhi) in found:
+        if isinstance(a, (Constant, Parameter)):
+            continue
+        for i, (b, (blo, bhi)) in enumerate(out):
+            if b is a:
+                out[i] = (b, (max(blo, dlo), min(bhi, dhi)))
+                break
+        else:
+            out.append((a, (dlo, dhi)))
+    return out
+
+
+def _replace_subexpressions(expr: Expression, repl: dict[int, Expression]) -> Expression:
+    """A copy of ``expr`` with each node whose ``id`` is in ``repl`` replaced."""
+    hit = repl.get(id(expr))
+    if hit is not None:
+        return hit
+    if isinstance(expr, BinaryOp):
+        left = _replace_subexpressions(expr.left, repl)
+        right = _replace_subexpressions(expr.right, repl)
+        if left is expr.left and right is expr.right:
+            return expr
+        return BinaryOp(expr.op, left, right)
+    if isinstance(expr, UnaryOp):
+        operand = _replace_subexpressions(expr.operand, repl)
+        return expr if operand is expr.operand else UnaryOp(expr.op, operand)
+    if isinstance(expr, FunctionCall):
+        args = tuple(_replace_subexpressions(a, repl) for a in expr.args)
+        if all(n is o for n, o in zip(args, expr.args)):
+            return expr
+        return FunctionCall(expr.func_name, *args)
+    if isinstance(expr, IndexExpression):
+        base = _replace_subexpressions(expr.base, repl)
+        return expr if base is expr.base else IndexExpression(base, expr.index)
+    terms = _sumover_terms(expr)
+    if terms is not None:
+        new_terms = [_replace_subexpressions(t, repl) for t in terms]
+        if all(n is o for n, o in zip(new_terms, terms)):
+            return expr
+        return SumOverExpression(new_terms)
+    return expr
+
+
+class _ArgumentDisaggregator:
+    """Give big-M a finite M for a row undefined only where its disjunct is off.
+
+    Big-M keeps a row's body in the model where its disjunct is inactive, so a
+    body undefined or unbounded on part of the box has no valid M there, and
+    :func:`_compute_big_m` refuses it (#413, #1779). Often the disjunct's own
+    rows keep the offending operand inside its domain whenever the row binds:
+    ``stranded_gas``'s learning curve ``lf == 0.9 ** (log(S) / log 2)`` sits in
+    a disjunct that also says ``S >= 1``, while the other disjunct allows ``S =
+    0``, where ``log`` has a pole.
+
+    :meth:`split` replaces each such linear operand ``L(x)`` by a fresh column
+    ``w`` boxed to ``W``, the range of ``L`` over the *active* region, and adds
+    the row ``L(x) - w == 0`` to the same disjunct. ``W`` is a rigorous LP bound
+    (:func:`_safe_lp_max`) over the box, the model's linear rows and the
+    disjunct's own linear rows -- a superset of every point where the disjunct
+    holds -- intersected with ``L``'s interval on the box. So:
+
+    * active: ``w = L(x)``, and ``L(x)`` lies in ``W`` at every feasible point,
+      so the pair is exactly the original row;
+    * inactive: both rows are relaxed, ``w`` is free in ``W``, and the new body
+      is bounded on ``box x W`` -- a valid finite M, computed by the usual rules.
+
+    Projected onto the original variables the lowering is unchanged; only the
+    rows that could not be lowered at all are touched. The disjunct's own rows
+    may bound ``W`` because ``w`` is tied to ``L(x)`` only when they hold -- a
+    big-M *for* the row could not use them, since it must hold when they do not.
+    """
+
+    def __init__(self, source: Model, add_continuous: Callable[[str, float, float], Variable]):
+        self.source = source
+        self.add_continuous = add_continuous
+        self._ctx: Any = None
+        self._by_indicator: Optional[dict[tuple[int, int], list[Constraint]]] = None
+
+    def indicator_rows(self, ic: _IndicatorConstraint) -> list[Constraint]:
+        """Every row that holds exactly when ``ic``'s row does."""
+        if self._by_indicator is None:
+            self._by_indicator = {}
+            for c in self.source._constraints:
+                if isinstance(c, _IndicatorConstraint):
+                    key = (id(c.indicator), int(c.active_value))
+                    self._by_indicator.setdefault(key, []).append(c.constraint)
+        return self._by_indicator.get((id(ic.indicator), int(ic.active_value)), [ic.constraint])
+
+    def _range(
+        self, arg: Expression, active: list[Constraint], global_rows: bool
+    ) -> Optional[tuple[float, float]]:
+        """``W``: a rigorous enclosure of ``arg`` over the active region, or ``None``.
+
+        ``global_rows=False`` bounds it over the box and the disjunct's own linear
+        rows alone -- a superset of the region the model's rows add, so equally
+        valid, and an LP with a handful of rows instead of the whole model's."""
+        from discopt.gdp.user_big_m import _Context
+        from discopt.solvers import SolveStatus
+
+        lo, hi = _gdp_body_bounds(arg, self.source)
+        if not (np.isfinite(lo) and np.isfinite(hi)) or max(abs(lo), abs(hi)) >= _BIGM_SENTINEL:
+            return None  # the coupling row L(x) - w == 0 would need M on L itself
+        if self._ctx is None:
+            self._ctx = _Context(self.source)
+        (A_ub, b_ub, A_eq, b_eq, n_vars), box = self._ctx.lp()
+        probe = Constraint(body=arg, sense="<=", rhs=0.0)
+        if self._ctx.solve_lp is None or not _is_scalar_linear_row(probe):
+            return None
+        coeffs = _extract_body_coeffs(arg, self.source, n_vars)
+        if coeffs is None or not np.any(coeffs[0]):
+            return None
+        c_vec, offset = coeffs
+        u, ur, e, er = _disjunct_linear_rows(active, self.source, n_vars)
+        if not global_rows:
+            if not (u or e):
+                return None  # the box alone: no narrower than its interval
+            A_ub = b_ub = A_eq = b_eq = None
+        Au, bu = _stack_rows(A_ub, b_ub, u, ur)
+        Ae, be = _stack_rows(A_eq, b_eq, e, er)
+        for sign in (1.0, -1.0):  # min L, then max L
+            f = sign * c_vec
+            res = self._ctx.solve_lp(c=f, A_ub=Au, b_ub=bu, A_eq=Ae, b_eq=be, bounds=box)
+            if res.status != SolveStatus.OPTIMAL or res.objective is None:
+                continue  # keep the box side: a float "infeasible" proves nothing
+            safe = _safe_lp_max(f, res, Au, bu, Ae, be, box)
+            if safe is None:
+                continue
+            # safe >= max(-f.x): for sign=+1 that is -min L + offset, else max L - offset.
+            pad = 4.0 * FLOAT_EPS * (abs(safe) + abs(offset))
+            if sign > 0:
+                lo = max(lo, -safe + offset - pad)
+            else:
+                hi = min(hi, safe + offset + pad)
+        return (lo, hi) if lo <= hi else None
+
+    def split(self, con: Constraint, active: list[Constraint]) -> Optional[list[Constraint]]:
+        """``[row', L_1(x) - w_1 == 0, ...]`` when that makes every row boundable;
+        else ``None`` (the caller lowers ``con`` as before, and refuses it).
+
+        ``W`` is first bounded over the disjunct's own rows (a tiny LP); the
+        model-wide LP -- tighter, but over every row of the model (~7 s per
+        operand on GDPlib ``stranded_gas``, 7591 x 57810) -- runs only when that
+        leaves the row unboundable."""
+        for global_rows in (False, True):
+            args = self._split_args(con, active, global_rows)
+            if not args:
+                continue
+            # Judge the split on columns of a scratch model first, so a split that
+            # does not help leaves no orphan column in the lowered model.
+            scratch = Model("_gdp_arg_probe")
+            probe = [
+                Variable(f"w{i}", VarType.CONTINUOUS, (), r[0], r[1], scratch)
+                for i, (_, r) in enumerate(args)
+            ]
+            if any(_big_m_unavailable(r, scratch) for r in self._rows(con, args, probe)):
+                continue
+            cols = [self.add_continuous("arg", r[0], r[1]) for _, r in args]
+            return self._rows(con, args, cols)
+        return None
+
+    def _split_args(
+        self, con: Constraint, active: list[Constraint], global_rows: bool
+    ) -> list[tuple[Expression, tuple[float, float]]]:
+        """The restricted operands of ``con`` the active region narrows, with ``W``."""
+        args: list[tuple[Expression, tuple[float, float]]] = []
+        for arg, (dlo, dhi) in _restricted_arguments(con.body):
+            rng = self._range(arg, active, global_rows)
+            if rng is None:
+                continue
+            # The row is undefined at an operand outside its closed domain, so no
+            # point where it holds has one there: W may drop that part.
+            rng = (max(rng[0], dlo), min(rng[1], dhi))
+            if rng[0] > rng[1]:
+                continue
+            blo, bhi = _gdp_body_bounds(arg, self.source)
+            if rng[0] <= blo and rng[1] >= bhi:
+                continue  # the active region does not narrow it: no help
+            args.append((arg, rng))
+        return args
+
+    @staticmethod
+    def _rows(con: Constraint, args: list, cols: list[Variable]) -> list[Constraint]:
+        repl: dict[int, Expression] = {id(a): w for (a, _), w in zip(args, cols)}
+        body = _replace_subexpressions(con.body, repl)
+        name = con.name
+        rows = [Constraint(body=body, sense=con.sense, rhs=0.0, name=name)]
+        for i, ((a, _), w) in enumerate(zip(args, cols)):
+            rows.append(
+                Constraint(body=a - w, sense="==", rhs=0.0, name=f"{name}_arg{i}" if name else None)
+            )
+        return rows
+
+
+def _big_m_pieces(
+    con: Constraint,
+    active: Callable[[], list[Constraint]],
+    disagg: Optional[_ArgumentDisaggregator],
+    model: Model,
+) -> list[Constraint]:
+    """The rows to lower by big-M in place of ``con``: ``[con]``, or the split of
+    :class:`_ArgumentDisaggregator` when ``con`` has no finite M of its own."""
+    if disagg is None or not _big_m_unavailable(con, model):
+        return [con]
+    rows = disagg.split(con, active())
+    return [con] if rows is None else rows
 
 
 def _compute_big_m_lp(
@@ -2217,6 +2521,7 @@ def _reformulate_indicator(
     model: Model,
     lp_data: tuple | None = None,
     multiply: bool = False,
+    disagg: Optional[_ArgumentDisaggregator] = None,
 ) -> list[Constraint]:
     """Reformulate an indicator constraint to big-M constraints.
 
@@ -2232,58 +2537,61 @@ def _reformulate_indicator(
 
     ``multiply`` (#1775 G2.5) emits ``body * y (sense) 0`` instead -- or
     ``body * (1 - y)`` when ``active_value == 0`` -- with no big-M.
+
+    ``disagg`` splits a row with no finite M of its own (:class:`_ArgumentDisaggregator`);
+    the active region is every row sharing this row's indicator and active value.
     """
     con = ic.constraint
     y = ic.indicator
     if multiply:
         on = y if ic.active_value == 1 else _wrap(1.0) - y
         return _binary_multiplication_rows(con, on, model, con.name)
-    if lp_data is not None:
-        M = _compute_big_m_lp(con, model, lp_data)
-    else:
-        M = _compute_big_m(con, model)
+    result: list[Constraint] = []
+    for piece in _big_m_pieces(
+        con, lambda: disagg.indicator_rows(ic) if disagg else [], disagg, model
+    ):
+        if lp_data is not None:
+            M = _compute_big_m_lp(piece, model, lp_data)
+        else:
+            M = _compute_big_m(piece, model)
 
-    if ic.active_value == 1:
-        # When y=1 constraint is active; when y=0, relaxed by M
-        deactivation_expr = _wrap(M) * (_wrap(1.0) - y)
-    else:
-        # When y=0 constraint is active; when y=1, relaxed by M
-        deactivation_expr = _wrap(M) * y
+        if ic.active_value == 1:
+            # When y=1 constraint is active; when y=0, relaxed by M
+            deactivation_expr = _wrap(M) * (_wrap(1.0) - y)
+        else:
+            # When y=0 constraint is active; when y=1, relaxed by M
+            deactivation_expr = _wrap(M) * y
+        result.extend(_big_m_rows(piece, deactivation_expr, piece.name))
+    return result
 
-    result = []
 
+def _big_m_rows(con: Constraint, deactivation: Expression, name: Optional[str]) -> list[Constraint]:
+    """``con`` relaxed by ``deactivation`` (``M * (1 - y)``): ``body <= deactivation``
+    for ``<=``, ``body >= -deactivation`` for ``>=``, both for ``==`` (named
+    ``name_le`` / ``name_ge``)."""
     if con.sense == "<=":
         # body <= M*(1-y) => body - M*(1-y) <= 0
-        new_body = con.body - deactivation_expr
-        result.append(Constraint(body=new_body, sense="<=", rhs=0.0, name=con.name))
-
-    elif con.sense == ">=":
+        return [Constraint(body=con.body - deactivation, sense="<=", rhs=0.0, name=name)]
+    if con.sense == ">=":
         # body >= -M*(1-y) => body + M*(1-y) >= 0
-        new_body = con.body + deactivation_expr
-        result.append(Constraint(body=new_body, sense=">=", rhs=0.0, name=con.name))
-
-    elif con.sense == "==":
+        return [Constraint(body=con.body + deactivation, sense=">=", rhs=0.0, name=name)]
+    if con.sense == "==":
         # body == 0 when active => -M*(1-y) <= body <= M*(1-y)
-        name_le = f"{con.name}_le" if con.name else None
-        name_ge = f"{con.name}_ge" if con.name else None
-        result.append(
+        return [
             Constraint(
-                body=con.body - deactivation_expr,
+                body=con.body - deactivation,
                 sense="<=",
                 rhs=0.0,
-                name=name_le,
-            )
-        )
-        result.append(
+                name=f"{name}_le" if name else None,
+            ),
             Constraint(
-                body=con.body + deactivation_expr,
+                body=con.body + deactivation,
                 sense=">=",
                 rhs=0.0,
-                name=name_ge,
-            )
-        )
-
-    return result
+                name=f"{name}_ge" if name else None,
+            ),
+        ]
+    return []
 
 
 # ── Disjunctive constraint reformulation ──
@@ -2298,6 +2606,7 @@ def _reformulate_disjunction(
     pretransform: bool = False,
     multiply: bool = False,
     user_ms: Optional[dict[tuple[int, int, int], float]] = None,
+    disagg: Optional[_ArgumentDisaggregator] = None,
 ) -> tuple[list[Variable], list[Constraint]]:
     """Reformulate a disjunction via big-M (or, with ``multiply``, by binary
     multiplication: step 2 becomes ``g_j(x) * y_k <= 0``, #1775 G2.5).
@@ -2306,6 +2615,9 @@ def _reformulate_disjunction(
     user M (#1775 G2.6, already validated by
     :func:`discopt.gdp.user_big_m.resolve_user_big_ms`), used in place of the
     computed M for that row and for the rows of nested disjunctions.
+
+    ``disagg`` splits a row with no finite M of its own
+    (:class:`_ArgumentDisaggregator`), over its disjunct's rows.
 
     For ``either_or([[g1<=0, g2<=0], [h1<=0, h2<=0]])``:
     1. Introduce binary selectors y_0, y_1 with y_0 + y_1 == 1
@@ -2387,6 +2699,7 @@ def _reformulate_disjunction(
                     parent_selector=y_k,
                     multiply=multiply,
                     user_ms=user_ms,
+                    disagg=disagg,
                 )
                 new_vars.extend(inner_vars)
                 new_cons.extend(inner_cons)
@@ -2400,51 +2713,23 @@ def _reformulate_disjunction(
                     )
                 )
                 continue
-            if user_ms is not None and (id(dc), k, j) in user_ms:
-                M = user_ms[(id(dc), k, j)]
-            elif lp_data is not None:
-                M = _compute_big_m_lp(con, model, lp_data)
-            else:
-                M = _compute_big_m(con, model)
-            deactivation = _wrap(M) * (_wrap(1.0) - y_k)
-
-            if con.sense == "<=":
-                new_body = con.body - deactivation
-                new_cons.append(
-                    Constraint(
-                        body=new_body,
-                        sense="<=",
-                        rhs=0.0,
-                        name=f"_gdp_{dc.name}_d{k}_c{j}" if dc.name else None,
-                    )
-                )
-            elif con.sense == ">=":
-                new_body = con.body + deactivation
-                new_cons.append(
-                    Constraint(
-                        body=new_body,
-                        sense=">=",
-                        rhs=0.0,
-                        name=f"_gdp_{dc.name}_d{k}_c{j}" if dc.name else None,
-                    )
-                )
-            elif con.sense == "==":
-                new_cons.append(
-                    Constraint(
-                        body=con.body - deactivation,
-                        sense="<=",
-                        rhs=0.0,
-                        name=f"_gdp_{dc.name}_d{k}_c{j}_le" if dc.name else None,
-                    )
-                )
-                new_cons.append(
-                    Constraint(
-                        body=con.body + deactivation,
-                        sense=">=",
-                        rhs=0.0,
-                        name=f"_gdp_{dc.name}_d{k}_c{j}_ge" if dc.name else None,
-                    )
-                )
+            # A user M (#1775 G2.6) is the row's own: it is never split.
+            pieces = (
+                [con]
+                if user_ms is not None and (id(dc), k, j) in user_ms
+                else _big_m_pieces(con, functools.partial(list, disjunct), disagg, model)
+            )
+            base = f"_gdp_{dc.name}_d{k}_c{j}" if dc.name else None
+            for i, piece in enumerate(pieces):
+                if piece is con and user_ms is not None and (id(dc), k, j) in user_ms:
+                    M = user_ms[(id(dc), k, j)]
+                elif lp_data is not None:
+                    M = _compute_big_m_lp(piece, model, lp_data)
+                else:
+                    M = _compute_big_m(piece, model)
+                deactivation = _wrap(M) * (_wrap(1.0) - y_k)
+                name = base if i == 0 or base is None else f"{base}_arg{i - 1}"
+                new_cons.extend(_big_m_rows(piece, deactivation, name))
 
     return new_vars, new_cons
 
@@ -2496,6 +2781,7 @@ def _reformulate_disjunction_nested(
     parent_selector,
     multiply: bool = False,
     user_ms: Optional[dict[tuple[int, int, int], float]] = None,
+    disagg: Optional[_ArgumentDisaggregator] = None,
 ) -> tuple[list[Variable], list[Constraint]]:
     """Reformulate a nested disjunction linked to a parent selector.
 
@@ -2551,6 +2837,7 @@ def _reformulate_disjunction_nested(
                     parent_selector=y_k,
                     multiply=multiply,
                     user_ms=user_ms,
+                    disagg=disagg,
                 )
                 new_vars.extend(inner_vars)
                 new_cons.extend(inner_cons)
@@ -2564,47 +2851,21 @@ def _reformulate_disjunction_nested(
                     )
                 )
                 continue
-            if user_ms is not None and (id(dc), k, j) in user_ms:
-                M = user_ms[(id(dc), k, j)]  # #1775 G2.6
-            else:
-                M = _compute_big_m(con, model)
-            deactivation = _wrap(M) * (_wrap(1.0) - y_k)
-
-            if con.sense == "<=":
-                new_cons.append(
-                    Constraint(
-                        body=con.body - deactivation,
-                        sense="<=",
-                        rhs=0.0,
-                        name=f"_gdp_nested_{dc.name}_d{k}_c{j}" if dc.name else None,
-                    )
-                )
-            elif con.sense == ">=":
-                new_cons.append(
-                    Constraint(
-                        body=con.body + deactivation,
-                        sense=">=",
-                        rhs=0.0,
-                        name=f"_gdp_nested_{dc.name}_d{k}_c{j}" if dc.name else None,
-                    )
-                )
-            elif con.sense == "==":
-                new_cons.append(
-                    Constraint(
-                        body=con.body - deactivation,
-                        sense="<=",
-                        rhs=0.0,
-                        name=f"_gdp_nested_{dc.name}_d{k}_c{j}_le" if dc.name else None,
-                    )
-                )
-                new_cons.append(
-                    Constraint(
-                        body=con.body + deactivation,
-                        sense=">=",
-                        rhs=0.0,
-                        name=f"_gdp_nested_{dc.name}_d{k}_c{j}_ge" if dc.name else None,
-                    )
-                )
+            # A user M (#1775 G2.6) is the row's own: it is never split.
+            pieces = (
+                [con]
+                if user_ms is not None and (id(dc), k, j) in user_ms
+                else _big_m_pieces(con, functools.partial(list, disjunct), disagg, model)
+            )
+            base = f"_gdp_nested_{dc.name}_d{k}_c{j}" if dc.name else None
+            for i, piece in enumerate(pieces):
+                if piece is con and user_ms is not None and (id(dc), k, j) in user_ms:
+                    M = user_ms[(id(dc), k, j)]  # #1775 G2.6
+                else:
+                    M = _compute_big_m(piece, model)
+                deactivation = _wrap(M) * (_wrap(1.0) - y_k)
+                name = base if i == 0 or base is None else f"{base}_arg{i - 1}"
+                new_cons.extend(_big_m_rows(piece, deactivation, name))
 
     return new_vars, new_cons
 

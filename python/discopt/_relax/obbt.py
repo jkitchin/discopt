@@ -595,6 +595,14 @@ def _extract_linear_constraints(
             neg_coeffs = {k: -v for k, v in coeffs.items()}
             ub_rows.append((neg_coeffs, -adjusted_rhs))
 
+    # #1979: the affine domain rows of the model's functions (``log(t)`` needs
+    # ``t >= 0``, ...), ``terms . x + const >= lo`` -> ``-terms . x <= const - lo``.
+    from discopt._relax.function_domains import affine_domain_rows, function_domains_enabled
+
+    if function_domains_enabled():
+        for _dterms, _dconst, _dlo in affine_domain_rows(model):
+            ub_rows.append(({j: -a for j, a in _dterms.items()}, _dconst - _dlo))
+
     A_ub = None
     b_ub = None
     if ub_rows:

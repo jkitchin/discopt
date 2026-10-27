@@ -1,0 +1,227 @@
+{"name": "autocorr_bern20-03", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.01}
+{"name": "autocorr_bern20-05", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.01}
+{"name": "autocorr_bern20-10", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.05}
+{"name": "autocorr_bern20-15", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.1}
+{"name": "autocorr_bern25-03", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.01}
+{"name": "autocorr_bern25-06", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.02}
+{"name": "autocorr_bern25-13", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.14}
+{"name": "autocorr_bern25-19", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.21}
+{"name": "autocorr_bern25-25", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.18}
+{"name": "autocorr_bern30-04", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.02}
+{"name": "autocorr_bern30-08", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.06}
+{"name": "autocorr_bern30-15", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.17}
+{"name": "autocorr_bern30-23", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.43}
+{"name": "autocorr_bern30-30", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.33}
+{"name": "autocorr_bern35-04", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.02}
+{"name": "autocorr_bern35-09", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.1}
+{"name": "autocorr_bern35-18", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.45}
+{"name": "autocorr_bern35-26", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.55}
+{"name": "autocorr_bern35-35fix", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.71}
+{"name": "autocorr_bern40-05", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.03}
+{"name": "autocorr_bern40-10", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.13}
+{"name": "autocorr_bern40-20", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.68}
+{"name": "autocorr_bern40-30", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.89}
+{"name": "autocorr_bern40-40", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 1.06}
+{"name": "autocorr_bern45-05", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.03}
+{"name": "autocorr_bern45-11", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.58}
+{"name": "autocorr_bern45-23", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.83}
+{"name": "autocorr_bern45-34", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 1.1}
+{"name": "autocorr_bern45-45", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 1.75}
+{"name": "autocorr_bern50-06", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.06}
+{"name": "autocorr_bern50-13", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.81}
+{"name": "autocorr_bern50-25", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.93}
+{"name": "autocorr_bern50-38", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 2.31}
+{"name": "autocorr_bern50-50", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 2.08}
+{"name": "autocorr_bern55-06", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.73}
+{"name": "autocorr_bern55-14", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.36}
+{"name": "autocorr_bern55-28", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 1.79}
+{"name": "autocorr_bern55-41", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 3.22}
+{"name": "autocorr_bern55-55", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 3.98}
+{"name": "autocorr_bern60-08", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.15}
+{"name": "autocorr_bern60-15", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 1.07}
+{"name": "autocorr_bern60-30", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 1.84}
+{"name": "autocorr_bern60-45", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 5.07}
+{"name": "autocorr_bern60-60", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 5.57}
+{"name": "chakra", "verdict": "accepted", "n_open": 60, "n_gen": 21, "degree": 1, "max_row_degree": 1.0, "t": 0.2}
+{"name": "chenery", "verdict": "unsupported", "reason": "power -0.674 of open columns", "t": 0.01}
+{"name": "clay0203hfsg", "verdict": "accepted", "n_open": 6, "n_gen": 6, "degree": 1, "max_row_degree": 1.0, "t": 0.05}
+{"name": "clay0203m", "verdict": "accepted", "n_open": 6, "n_gen": 6, "degree": 1, "max_row_degree": 1.0, "t": 0.02}
+{"name": "clay0204m", "verdict": "accepted", "n_open": 12, "n_gen": 12, "degree": 1, "max_row_degree": 1.0, "t": 0.06}
+{"name": "clay0205m", "verdict": "accepted", "n_open": 20, "n_gen": 20, "degree": 1, "max_row_degree": 1.0, "t": 0.14}
+{"name": "clay0303hfsg", "verdict": "accepted", "n_open": 6, "n_gen": 6, "degree": 1, "max_row_degree": 1.0, "t": 0.13}
+{"name": "clay0303m", "verdict": "accepted", "n_open": 6, "n_gen": 6, "degree": 1, "max_row_degree": 1.0, "t": 0.03}
+{"name": "clay0304m", "verdict": "accepted", "n_open": 12, "n_gen": 12, "degree": 1, "max_row_degree": 1.0, "t": 0.07}
+{"name": "clay0305m", "verdict": "accepted", "n_open": 20, "n_gen": 20, "degree": 1, "max_row_degree": 1.0, "t": 0.14}
+{"name": "cvxnonsep_psig20r", "verdict": "unsupported", "reason": "log() of open columns", "t": 0.01}
+{"name": "cvxnonsep_psig30r", "verdict": "unsupported", "reason": "log() of open columns", "t": 0.01}
+{"name": "cvxnonsep_psig40r", "verdict": "unsupported", "reason": "log() of open columns", "t": 0.15}
+{"name": "deb10", "verdict": "unsupported", "reason": "cos() of open columns", "t": 0.76}
+{"name": "demo7", "verdict": "accepted", "n_open": 29, "n_gen": 28, "degree": 2, "max_row_degree": 2.0, "t": 0.12}
+{"name": "eg_all_s", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 2.07}
+{"name": "eg_disc2_s", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 1.81}
+{"name": "eg_disc_s", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 1.32}
+{"name": "eg_int_s", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 1.91}
+{"name": "elf", "verdict": "accepted", "n_open": 27, "n_gen": 24, "degree": 1, "max_row_degree": 2.0, "t": 0.1}
+{"name": "ex14_1_1", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.0}
+{"name": "ex14_1_2", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.0}
+{"name": "ex14_1_3", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.0}
+{"name": "ex14_1_4", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.0}
+{"name": "ex14_1_5", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.0}
+{"name": "ex14_1_6", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.0}
+{"name": "ex14_1_7", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.0}
+{"name": "ex14_1_8", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.0}
+{"name": "ex14_1_9", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.0}
+{"name": "ex14_2_1", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.0}
+{"name": "ex14_2_2", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.0}
+{"name": "ex14_2_3", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.0}
+{"name": "ex14_2_4", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.0}
+{"name": "ex14_2_5", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.0}
+{"name": "ex14_2_6", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.01}
+{"name": "ex14_2_7", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.01}
+{"name": "ex14_2_8", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.0}
+{"name": "ex14_2_9", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.0}
+{"name": "ex4", "verdict": "accepted", "n_open": 5, "n_gen": 5, "degree": 1, "max_row_degree": 1.0, "t": 0.04}
+{"name": "ex4_1_5", "verdict": "accepted", "n_open": 2, "n_gen": 2, "degree": 6, "max_row_degree": 0.0, "t": 0.0}
+{"name": "ex7_3_1", "verdict": "accepted", "n_open": 4, "n_gen": 1, "degree": 1, "max_row_degree": 5.0, "t": 0.0}
+{"name": "ex7_3_2", "verdict": "accepted", "n_open": 4, "n_gen": 1, "degree": 1, "max_row_degree": 8.0, "t": 0.0}
+{"name": "ex7_3_3", "verdict": "accepted", "n_open": 4, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.0}
+{"name": "ex7_3_4", "verdict": "unsupported", "reason": "an open column's share stays unbounded in the outer piece", "t": 0.01}
+{"name": "ex7_3_5", "verdict": "unsupported", "reason": "an open column's share stays unbounded in the outer piece", "t": 0.01}
+{"name": "ex7_3_6", "verdict": "unsupported", "reason": "FBBT box is empty", "t": 0.0}
+{"name": "ex8_1_3", "verdict": "accepted", "n_open": 2, "n_gen": 2, "degree": 8, "max_row_degree": 0.0, "t": 0.0}
+{"name": "ex8_1_4", "verdict": "accepted", "n_open": 2, "n_gen": 2, "degree": 6, "max_row_degree": 0.0, "t": 0.0}
+{"name": "ex8_1_5", "verdict": "accepted", "n_open": 2, "n_gen": 2, "degree": 6, "max_row_degree": 0.0, "t": 0.0}
+{"name": "ex8_1_6", "verdict": "unsupported", "reason": "a division by open columns", "t": 0.0}
+{"name": "ex8_5_1", "verdict": "unsupported", "reason": "a division by open columns", "t": 0.0}
+{"name": "ex8_5_2", "verdict": "unsupported", "reason": "log() of open columns", "t": 0.01}
+{"name": "ex8_5_3", "verdict": "unsupported", "reason": "log() of open columns", "t": 0.0}
+{"name": "ex8_5_4", "verdict": "unsupported", "reason": "log() of open columns", "t": 0.0}
+{"name": "ex8_5_5", "verdict": "unsupported", "reason": "log() of open columns", "t": 0.0}
+{"name": "ex8_5_6", "verdict": "unsupported", "reason": "log() of open columns", "t": 0.01}
+{"name": "ex8_6_1", "verdict": "accepted", "n_open": 45, "n_gen": 45, "degree": 6, "max_row_degree": 1.0, "t": 0.19}
+{"name": "ex9_1_1", "verdict": "accepted", "n_open": 10, "n_gen": 2, "degree": 1, "max_row_degree": 2.0, "t": 0.01}
+{"name": "ex9_1_2", "verdict": "accepted", "n_open": 4, "n_gen": 2, "degree": 0, "max_row_degree": 1.0, "t": 0.0}
+{"name": "ex9_1_5", "verdict": "accepted", "n_open": 5, "n_gen": 2, "degree": 0, "max_row_degree": 1.0, "t": 0.01}
+{"name": "ex9_1_8", "verdict": "accepted", "n_open": 6, "n_gen": 3, "degree": 0, "max_row_degree": 2.0, "t": 0.01}
+{"name": "ex9_2_5", "verdict": "accepted", "n_open": 3, "n_gen": 1, "degree": 0, "max_row_degree": 1.0, "t": 0.0}
+{"name": "gear4", "verdict": "accepted", "n_open": 2, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.0}
+{"name": "hadamard_4", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.0}
+{"name": "hadamard_5", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.01}
+{"name": "hadamard_6", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.61}
+{"name": "hadamard_7", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.31}
+{"name": "hadamard_8", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 3.69}
+{"name": "hadamard_9", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 57.34}
+{"name": "haverly", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 0, "max_row_degree": 1.0, "t": 0.0}
+{"name": "heatexch_gen1", "verdict": "unsupported", "reason": "a division by open columns", "t": 0.1}
+{"name": "heatexch_gen2", "verdict": "unsupported", "reason": "a division by open columns", "t": 0.16}
+{"name": "heatexch_spec1", "verdict": "accepted", "n_open": 4, "n_gen": 4, "degree": 1, "max_row_degree": 0.0, "t": 0.03}
+{"name": "heatexch_spec2", "verdict": "accepted", "n_open": 5, "n_gen": 5, "degree": 1, "max_row_degree": 0.0, "t": 0.05}
+{"name": "hhfair", "verdict": "unsupported", "reason": "an open column's share stays unbounded in the outer piece", "t": 0.07}
+{"name": "hybriddynamic_fixedcc", "verdict": "accepted", "n_open": 40, "n_gen": 10, "degree": 1, "max_row_degree": 1.0, "t": 0.21}
+{"name": "hybriddynamic_varcc", "verdict": "accepted", "n_open": 60, "n_gen": 20, "degree": 1, "max_row_degree": 1.0, "t": 0.37}
+{"name": "jit1", "verdict": "accepted", "n_open": 9, "n_gen": 9, "degree": 1, "max_row_degree": 1.0, "t": 0.02}
+{"name": "knp3-12", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.02}
+{"name": "korcns", "verdict": "unsupported", "reason": "a division by open columns", "t": 0.32}
+{"name": "lakes", "verdict": "unsupported", "reason": "an open column's share stays unbounded in the outer piece", "t": 0.62}
+{"name": "launch", "verdict": "unsupported", "reason": "power -0.1959 of open columns", "t": 0.06}
+{"name": "least", "verdict": "accepted", "n_open": 2, "n_gen": 2, "degree": 2, "max_row_degree": 0.0, "t": 0.0}
+{"name": "like", "verdict": "unsupported", "reason": "a division by open columns", "t": 0.02}
+{"name": "m3", "verdict": "accepted", "n_open": 6, "n_gen": 6, "degree": 1, "max_row_degree": 1.0, "t": 0.02}
+{"name": "m6", "verdict": "accepted", "n_open": 30, "n_gen": 30, "degree": 1, "max_row_degree": 1.0, "t": 0.24}
+{"name": "mathopt2", "verdict": "accepted", "n_open": 2, "n_gen": 1, "degree": 4, "max_row_degree": 2.0, "t": 0.0}
+{"name": "mathopt3", "verdict": "unsupported", "reason": "sin() of open columns", "t": 0.01}
+{"name": "maxmin", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.03}
+{"name": "mhw4d", "verdict": "unsupported", "reason": "an open column's share stays unbounded in the outer piece", "t": 0.01}
+{"name": "orth_d3m6_pl", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.03}
+{"name": "otpop", "verdict": "accepted", "n_open": 8, "n_gen": 2, "degree": 2, "max_row_degree": 1.0, "t": 0.07}
+{"name": "pointpack02", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.0}
+{"name": "pointpack04", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.01}
+{"name": "pointpack06", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.01}
+{"name": "pointpack08", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.02}
+{"name": "pointpack10", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.01}
+{"name": "pointpack12", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.02}
+{"name": "pointpack14", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.02}
+{"name": "portfol_buyin", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.01}
+{"name": "portfol_card", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.01}
+{"name": "portfol_roundlot", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.02}
+{"name": "prob07", "verdict": "unsupported", "reason": "a division by open columns", "t": 0.02}
+{"name": "prolog", "verdict": "accepted", "n_open": 7, "n_gen": 2, "degree": 1, "max_row_degree": 1.0, "t": 0.02}
+{"name": "shiporig", "verdict": "unsupported", "reason": "a division by open columns", "t": 0.01}
+{"name": "slay04h", "verdict": "accepted", "n_open": 12, "n_gen": 12, "degree": 1, "max_row_degree": 1.0, "t": 0.1}
+{"name": "slay04m", "verdict": "accepted", "n_open": 12, "n_gen": 12, "degree": 1, "max_row_degree": 1.0, "t": 0.05}
+{"name": "slay05m", "verdict": "accepted", "n_open": 20, "n_gen": 20, "degree": 1, "max_row_degree": 1.0, "t": 0.1}
+{"name": "slay06m", "verdict": "accepted", "n_open": 30, "n_gen": 30, "degree": 1, "max_row_degree": 1.0, "t": 0.25}
+{"name": "slay07m", "verdict": "accepted", "n_open": 42, "n_gen": 42, "degree": 1, "max_row_degree": 1.0, "t": 0.37}
+{"name": "smallinvDAXr1b010-011", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.05}
+{"name": "smallinvDAXr1b020-022", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.04}
+{"name": "smallinvDAXr1b050-055", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.03}
+{"name": "smallinvDAXr1b100-110", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.04}
+{"name": "smallinvDAXr1b150-165", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.03}
+{"name": "smallinvDAXr1b200-220", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.03}
+{"name": "smallinvDAXr2b010-011", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.03}
+{"name": "smallinvDAXr2b020-022", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.03}
+{"name": "smallinvDAXr2b050-055", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.03}
+{"name": "smallinvDAXr2b100-110", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.04}
+{"name": "smallinvDAXr2b150-165", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.03}
+{"name": "smallinvDAXr2b200-220", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.04}
+{"name": "smallinvDAXr3b010-011", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.03}
+{"name": "smallinvDAXr3b020-022", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.04}
+{"name": "smallinvDAXr3b050-055", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.03}
+{"name": "smallinvDAXr3b100-110", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.04}
+{"name": "smallinvDAXr3b150-165", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.03}
+{"name": "smallinvDAXr3b200-220", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.03}
+{"name": "smallinvDAXr4b010-011", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.03}
+{"name": "smallinvDAXr4b020-022", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.03}
+{"name": "smallinvDAXr4b050-055", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.04}
+{"name": "smallinvDAXr4b100-110", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.05}
+{"name": "smallinvDAXr4b150-165", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.04}
+{"name": "smallinvDAXr4b200-220", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.03}
+{"name": "smallinvDAXr5b010-011", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.03}
+{"name": "smallinvDAXr5b020-022", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.03}
+{"name": "smallinvDAXr5b050-055", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.03}
+{"name": "smallinvDAXr5b100-110", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.04}
+{"name": "smallinvDAXr5b150-165", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.03}
+{"name": "smallinvDAXr5b200-220", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.04}
+{"name": "sporttournament06", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.0}
+{"name": "sporttournament08", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.01}
+{"name": "sporttournament10", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.01}
+{"name": "sporttournament12", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.01}
+{"name": "sporttournament14", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.02}
+{"name": "sporttournament16", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.03}
+{"name": "sporttournament18", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.03}
+{"name": "sporttournament20", "verdict": "accepted", "n_open": 1, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.07}
+{"name": "sssd08-04", "verdict": "unsupported", "reason": "a division by open columns", "t": 0.03}
+{"name": "sssd08-04persp", "verdict": "accepted", "n_open": 4, "n_gen": 4, "degree": 1, "max_row_degree": 1.0, "t": 0.03}
+{"name": "sssd12-05", "verdict": "unsupported", "reason": "a division by open columns", "t": 0.07}
+{"name": "sssd12-05persp", "verdict": "accepted", "n_open": 5, "n_gen": 5, "degree": 1, "max_row_degree": 1.0, "t": 0.06}
+{"name": "sssd15-04", "verdict": "unsupported", "reason": "a division by open columns", "t": 0.05}
+{"name": "sssd15-04persp", "verdict": "accepted", "n_open": 4, "n_gen": 4, "degree": 1, "max_row_degree": 1.0, "t": 0.05}
+{"name": "sssd15-06", "verdict": "unsupported", "reason": "a division by open columns", "t": 0.08}
+{"name": "sssd15-06persp", "verdict": "accepted", "n_open": 6, "n_gen": 6, "degree": 1, "max_row_degree": 1.0, "t": 0.1}
+{"name": "sssd15-08", "verdict": "unsupported", "reason": "a division by open columns", "t": 0.13}
+{"name": "sssd15-08persp", "verdict": "accepted", "n_open": 8, "n_gen": 8, "degree": 1, "max_row_degree": 1.0, "t": 0.12}
+{"name": "sssd16-07", "verdict": "unsupported", "reason": "a division by open columns", "t": 0.11}
+{"name": "sssd16-07persp", "verdict": "accepted", "n_open": 7, "n_gen": 7, "degree": 1, "max_row_degree": 1.0, "t": 0.11}
+{"name": "sssd18-06", "verdict": "unsupported", "reason": "a division by open columns", "t": 0.09}
+{"name": "sssd18-06persp", "verdict": "accepted", "n_open": 6, "n_gen": 6, "degree": 1, "max_row_degree": 1.0, "t": 0.09}
+{"name": "sssd18-08", "verdict": "unsupported", "reason": "a division by open columns", "t": 0.15}
+{"name": "sssd18-08persp", "verdict": "accepted", "n_open": 8, "n_gen": 8, "degree": 1, "max_row_degree": 1.0, "t": 0.15}
+{"name": "sssd20-04", "verdict": "unsupported", "reason": "a division by open columns", "t": 0.06}
+{"name": "sssd20-04persp", "verdict": "accepted", "n_open": 4, "n_gen": 4, "degree": 1, "max_row_degree": 1.0, "t": 0.06}
+{"name": "sssd25-04", "verdict": "unsupported", "reason": "a division by open columns", "t": 0.06}
+{"name": "sssd25-04persp", "verdict": "accepted", "n_open": 4, "n_gen": 4, "degree": 1, "max_row_degree": 1.0, "t": 0.07}
+{"name": "st_e42", "verdict": "accepted", "n_open": 2, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.0}
+{"name": "st_qpc-m0", "verdict": "unsupported", "reason": "an open column's share stays unbounded in the outer piece", "t": 0.0}
+{"name": "st_qpk1", "verdict": "unsupported", "reason": "an open column's share stays unbounded in the outer piece", "t": 0.0}
+{"name": "st_z", "verdict": "accepted", "n_open": 3, "n_gen": 1, "degree": 2, "max_row_degree": 1.0, "t": 0.0}
+{"name": "synheat", "verdict": "accepted", "n_open": 4, "n_gen": 4, "degree": 1, "max_row_degree": 0.0, "t": 0.03}
+{"name": "tricp", "verdict": "unsupported", "reason": "an open column's share stays unbounded in the outer piece", "t": 1.44}
+{"name": "wager", "verdict": "accepted", "n_open": 43, "n_gen": 43, "degree": 1, "max_row_degree": 1.0, "t": 0.3}
+{"name": "wallfix", "verdict": "unsupported", "reason": "a division by open columns", "t": 0.0}
+{"name": "water", "verdict": "unsupported", "reason": "an open column's share stays unbounded in the outer piece", "t": 0.06}
+{"name": "water3", "verdict": "unsupported", "reason": "a _SOSConstraint row", "t": 0.01}
+{"name": "water4", "verdict": "accepted", "n_open": 9, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.17}
+{"name": "waters", "verdict": "unsupported", "reason": "a _SOSConstraint row", "t": 0.01}
+{"name": "watersbp", "verdict": "unsupported", "reason": "a _SOSConstraint row", "t": 0.01}
+{"name": "waterx", "verdict": "accepted", "n_open": 9, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.05}
+{"name": "waterz", "verdict": "accepted", "n_open": 9, "n_gen": 1, "degree": 1, "max_row_degree": 1.0, "t": 0.16}

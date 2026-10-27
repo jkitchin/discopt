@@ -518,6 +518,70 @@ impl PyTreeManager {
         Ok(())
     }
 
+    /// #1978: register the nonlinear terms the spatial branch scores its continuous
+    /// column on (`DISCOPT_PY_TREE_SPATIAL_SCORE`). `bilinear` is `(k, 2)` original
+    /// column pairs (`i == j` a square); `power_cols` / `power_exps` are the powers
+    /// `x_i ^ p`. Empty arrays restore the legacy longest-edge rule.
+    fn set_spatial_score_terms(
+        &mut self,
+        bilinear: PyReadonlyArray2<i64>,
+        power_cols: PyReadonlyArray1<i64>,
+        power_exps: PyReadonlyArray1<f64>,
+    ) -> PyResult<()> {
+        use discopt_core::bnb::branching::ScoreTerm;
+        let b = bilinear.as_array();
+        if b.ncols() != 2 && b.nrows() > 0 {
+            return Err(PyValueError::new_err("bilinear must have shape (k, 2)"));
+        }
+        let pc = power_cols.as_slice()?;
+        let pe = power_exps.as_slice()?;
+        if pc.len() != pe.len() {
+            return Err(PyValueError::new_err(
+                "power_cols and power_exps differ in length",
+            ));
+        }
+        let mut terms = Vec::with_capacity(b.nrows() + pc.len());
+        for r in 0..b.nrows() {
+            let (i, j) = (b[[r, 0]], b[[r, 1]]);
+            if i < 0 || j < 0 {
+                return Err(PyValueError::new_err("negative column index"));
+            }
+            terms.push(ScoreTerm::Bilinear(i as usize, j as usize));
+        }
+        for (&c, &e) in pc.iter().zip(pe.iter()) {
+            if c < 0 {
+                return Err(PyValueError::new_err("negative column index"));
+            }
+            terms.push(ScoreTerm::Power(c as usize, e));
+        }
+        self.inner.set_spatial_score_terms(terms);
+        Ok(())
+    }
+
+    /// #1978: the points (`(len(node_ids), n_vars)`) the score rule measures each
+    /// node's term gaps at -- the node relaxation LP points.
+    fn set_spatial_score_points(
+        &mut self,
+        node_ids: PyReadonlyArray1<i64>,
+        points: PyReadonlyArray2<f64>,
+    ) -> PyResult<()> {
+        let ids = node_ids.as_slice()?;
+        let x = points.as_array();
+        if x.nrows() != ids.len() {
+            return Err(PyValueError::new_err("one point per node id"));
+        }
+        for (r, &nid) in ids.iter().enumerate() {
+            self.inner
+                .set_spatial_score_point(NodeId(nid as usize), x.row(r).to_vec());
+        }
+        Ok(())
+    }
+
+    /// #1978 probe: spatial branches chosen by the score rule.
+    fn spatial_score_picks(&self) -> u64 {
+        self.inner.spatial_score_picks()
+    }
+
     /// Register continuous SOS1-selector columns for spatial branch precedence
     /// (issue #196, `DISCOPT_SOS1_SELECTOR_BRANCH`). Empty (the default) keeps the
     /// legacy branch path byte-identical. Out-of-range indices are ignored.
