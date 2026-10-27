@@ -375,6 +375,23 @@ class ExprIndex:
 
 
 @dataclass
+class ExprAttr:
+    """A ``<name>.<attr>`` reference, ``m.modelstat`` or ``x.l(i)`` (#2002).
+
+    GAMS lets an expression read an attribute of a model (``modelstat``,
+    ``objval``, ...) or of a variable (``l``, ``lo``, ``up``, ...). Parsing it
+    as a bare ``ExprRef(name)`` left ``.attr`` in the token stream and
+    desynchronized the parser. The reader does not evaluate attributes: a
+    post-solve reporting assignment that reads one is skipped (it cannot
+    affect the generated model), and anywhere else it is refused by name.
+    """
+
+    name: str
+    attr: str
+    indices: list = field(default_factory=list)
+
+
+@dataclass
 class ExprLabel:
     """A quoted set-element label, ``'1'`` in ``x('1')`` (#1503).
 
@@ -452,6 +469,41 @@ class GamsParseError(Exception):
     pass
 
 
+def _iter_ast(node):
+    """Yield every AST node reachable from *node* (dataclass fields and lists)."""
+    stack = [node]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, list | tuple):
+            stack.extend(cur)
+            continue
+        if not hasattr(cur, "__dataclass_fields__"):
+            continue
+        yield cur
+        for f in cur.__dataclass_fields__:
+            stack.append(getattr(cur, f))
+
+
+def _contains_attr(node) -> bool:
+    return any(isinstance(n, ExprAttr) for n in _iter_ast(node))
+
+
+def _references_name(node, name: str) -> bool:
+    """Does the expression AST *node* reference symbol *name* (case-insensitive)?"""
+    key = name.lower()
+    return any(
+        isinstance(n, ExprRef | ExprIndex | ExprAttr) and n.name.lower() == key
+        for n in _iter_ast(node)
+    )
+
+
+def _attr_error(node: "ExprAttr") -> "GamsParseError":
+    return GamsParseError(
+        f"Attribute reference '{node.name}.{node.attr}' is not supported by the GAMS "
+        "reader here; it only skips post-solve reporting assignments that read one."
+    )
+
+
 def _check_min_max_arity(fn: str, nargs: int) -> None:
     """Refuse a GAMS ``min``/``max`` call with fewer than two arguments.
 
@@ -484,6 +536,7 @@ class _Parser:
         self.bounds: list[GamsBound] = []
         self.models: dict[str, GamsModel] = {}
         self.solves: list[GamsSolve] = []
+        self.post_solve_reports: list = []
         self.options: dict[str, str] = {}
         self.param_assigns: list[tuple] = []  # (name, domain, dollar, expr)
         self.loop_stmts: list[tuple] = []  # (kind, index_names, body_tokens)
@@ -1308,6 +1361,13 @@ class _Parser:
         self._expect(_Tok.SYMBOL, "=")
         expr = self._parse_expr()
         self._skip_semi()
+        if self.solves and (_contains_attr(expr) or _contains_attr(dollar_cond)):
+            # Post-solve reporting (``MODELSTAT = m.modelstat;``, #2002): it
+            # reads the solve's results, and GAMS executes it after the model
+            # is generated, so it cannot change the model this reader builds.
+            # Kept for inspection, never evaluated.
+            self.post_solve_reports.append((name, domain, dollar_cond, expr))
+            return
         self.param_assigns.append((name, domain, dollar_cond, expr))
 
     # ── Model / Solve / Option ──
@@ -1554,6 +1614,20 @@ class _Parser:
             if name_lower in self._GAMS_FUNCS and self._peek(1).value == "(":
                 return self._parse_func_call()
 
+            # attribute reference: name.attr or name.attr(i,j) (#2002)
+            if (
+                self._peek(1).kind == _Tok.SYMBOL
+                and self._peek(1).value == "."
+                and self._peek(2).kind == _Tok.IDENT
+            ):
+                self._advance()  # name
+                self._advance()  # '.'
+                attr = self._advance().value.lower()
+                indices: list = []
+                if self._match_sym("("):
+                    indices = self._parse_indexed_ref_indices()
+                return ExprAttr(t.value, attr, indices)
+
             # indexed reference: name(i,j)
             if self._peek(1).value == "(":
                 # check if this is a function call on expressions
@@ -1618,6 +1692,9 @@ class _Parser:
 
     def _parse_indexed_ref(self):
         name = self._advance().value
+        return ExprIndex(name, self._parse_indexed_ref_indices())
+
+    def _parse_indexed_ref_indices(self) -> list:
         self._expect(_Tok.SYMBOL, "(")
         indices: list = []
         while not self._match_sym(")"):
@@ -1631,7 +1708,7 @@ class _Parser:
             if self._match_sym(","):
                 self._advance()
         self._expect(_Tok.SYMBOL, ")")
-        return ExprIndex(name, indices)
+        return indices
 
 
 # ── Model builder: parsed GAMS AST → discopt Model ────────────
@@ -1670,7 +1747,8 @@ class _ModelBuilder:
         model_name = solve.model_name if solve else "gams_model"
         m = Model(model_name)
         self.model = m
-        # 5. Create variables
+        # 5. Create variables (a substitutable objective variable is not one, #2002)
+        self._subst_obj_var = self._substitutable_objective_var(solve)
         self._create_variables(m)
         # 6. Build equations (constraints + objective)
         self._build_equations(m, solve)
@@ -1914,6 +1992,8 @@ class _ModelBuilder:
 
         if isinstance(expr, ExprNum):
             return expr.value
+        if isinstance(expr, ExprAttr):
+            raise _attr_error(expr)
         if isinstance(expr, ExprRef):
             if expr.name in env:
                 # Resolve to scalar value if it's a scalar ref
@@ -2242,9 +2322,50 @@ class _ModelBuilder:
         # Fallback to constant evaluation (keep the loop-index env)
         return self._eval_const_expr_with_env(expr, env)
 
+    def _substitutable_objective_var(self, solve) -> str | None:
+        """The objective variable, when substituting its definition out is exact.
+
+        ``Solve m minimizing z`` with ``obj.. z =e= expr`` means: minimize
+        ``z`` subject to every equation. Minimizing ``expr`` directly and
+        dropping both ``z`` and ``obj`` is the same problem only when ``obj``
+        is ``z``'s sole appearance and ``z`` is a free scalar with no declared
+        bound -- the ``gmoObjType_Fun`` reduction ``model_from_gmo`` makes. Any
+        bound (``z.lo = 2``), a second appearance, or a defining equation that
+        also mentions ``z`` on its expression side, and the substitution would
+        silently drop a restriction (#2002: a 2.0 optimum reported as 0.0);
+        the builder then keeps ``z`` and every equation and minimizes ``z``.
+        """
+        if solve is None or not solve.objective_var:
+            return None
+        key = solve.objective_var.lower()
+        name = next((n for n in self.p.variables if n.lower() == key), None)
+        if name is None:
+            return None
+        gv = self.p.variables[name]
+        if gv.domain or gv.var_type.lower() != "free":
+            return None
+        if any(
+            b.var_name.lower() == key and b.suffix not in ("l", "m", "prior", "scale")
+            for b in self.p.bounds
+        ):
+            return None
+        defining = []
+        for eqdef in self.p.equation_defs:
+            if self._is_obj_equation(eqdef, name):
+                if eqdef.domain or eqdef.dollar_cond is not None:
+                    return None
+                if _references_name(self._objective_side(eqdef, name), name):
+                    return None
+                defining.append(eqdef)
+            elif _references_name([eqdef.lhs, eqdef.rhs, eqdef.dollar_cond], name):
+                return None
+        return name if len(defining) == 1 else None
+
     def _create_variables(self, m):
         self._semi_vars: list = []
         for name, gv in self.p.variables.items():
+            if name == getattr(self, "_subst_obj_var", None):
+                continue
             shape = self._domain_shape(gv.domain)
             vtype = gv.var_type.lower()
             if vtype == "binary":
@@ -2426,20 +2547,20 @@ class _ModelBuilder:
                     eqdef.dollar_cond, {}, eqdef.name
                 ):
                     continue
-                lhs_expr = self._build_expr(eqdef.lhs, {})
-                rhs_expr = self._build_expr(eqdef.rhs, {})
-                # Check if this equation defines the objective
-                # (single equation with obj_var on one side)
-                if self._is_obj_equation(eqdef, obj_var_name):
-                    obj_expr = self._extract_objective(
-                        lhs_expr, rhs_expr, eqdef.sense, obj_var_name
-                    )
+                # The objective's defining equation, when substituting it out
+                # is exact (#2002); otherwise it stays a constraint and the
+                # fallback below minimizes the objective variable itself.
+                subst = getattr(self, "_subst_obj_var", None)
+                if subst is not None and self._is_obj_equation(eqdef, subst):
+                    obj_expr = self._build_expr(self._objective_side(eqdef, subst), {})
                     if obj_sense.startswith("min"):
                         m.minimize(obj_expr)
                     else:
                         m.maximize(obj_expr)
                     obj_set = True
                 else:
+                    lhs_expr = self._build_expr(eqdef.lhs, {})
+                    rhs_expr = self._build_expr(eqdef.rhs, {})
                     self._add_constraint(m, lhs_expr, eqdef.sense, rhs_expr, eqdef.name)
 
         # Fallback for the MINLPLib standard form: ``Solve m ... minimizing
@@ -2473,29 +2594,22 @@ class _ModelBuilder:
             m.minimize(0.0)
 
     def _is_obj_equation(self, eqdef, obj_var_name: str | None) -> bool:
-        if obj_var_name is None:
+        """Is *eqdef* ``z =e= expr`` or ``expr =e= z`` for objective variable ``z``?"""
+        if not obj_var_name or eqdef.sense != "=e=":
             return False
-        # Check if lhs or rhs is just the objective variable reference
+        key = obj_var_name.lower()
+        return any(
+            isinstance(side, ExprRef) and side.name.lower() == key
+            for side in (eqdef.lhs, eqdef.rhs)
+        )
+
+    @staticmethod
+    def _objective_side(eqdef, obj_var_name: str):
+        """The expression side (AST) of the defining equation ``z =e= expr``."""
         lhs = eqdef.lhs
-        rhs = eqdef.rhs
-        if isinstance(lhs, ExprRef) and lhs.name == obj_var_name and eqdef.sense == "=e=":
-            return True
-        if isinstance(rhs, ExprRef) and rhs.name == obj_var_name and eqdef.sense == "=e=":
-            return True
-        return False
-
-    def _extract_objective(self, lhs_expr, rhs_expr, sense, obj_var_name):
-        """Extract the objective expression from z =e= expr."""
-        from discopt.modeling.core import Variable
-
-        # If lhs is the objective variable, return rhs
-        if isinstance(lhs_expr, Variable) and lhs_expr.name == obj_var_name:
-            return rhs_expr
-        # If rhs is the objective variable, return lhs
-        if isinstance(rhs_expr, Variable) and rhs_expr.name == obj_var_name:
-            return lhs_expr
-        # fallback: return rhs - lhs or similar
-        return rhs_expr
+        if isinstance(lhs, ExprRef) and lhs.name.lower() == obj_var_name.lower():
+            return eqdef.rhs
+        return lhs
 
     def _add_constraint(self, m, lhs, sense, rhs, name):
         if sense == "=e=":
@@ -2511,6 +2625,9 @@ class _ModelBuilder:
 
         if isinstance(ast_node, ExprNum):
             return dm.Constant(ast_node.value)
+
+        if isinstance(ast_node, ExprAttr):
+            raise _attr_error(ast_node)
 
         if isinstance(ast_node, ExprRef):
             name = ast_node.name

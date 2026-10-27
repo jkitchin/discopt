@@ -115,13 +115,13 @@ def test_deep_fold_is_wrapped_and_value_faithful():
     assert "(" * 200 in text.replace("\n", "").replace(" ", "")
 
     r = parse_gams(text)
-    assert [v.name for v in r._variables] == ["obj_var", "x"]
+    # The writer's synthetic `obj_var` is substituted back out (#2002).
+    assert [v.name for v in r._variables] == ["x"]
     rng = np.random.default_rng(1)
     compared = 0
     for _ in range(3):
         xv = rng.random(n)
-        dst = np.concatenate([[0.0], xv])
-        want, got = _row_values(m, xv), _row_values(r, dst)
+        want, got = _row_values(m, xv), _row_values(r, xv)
         np.testing.assert_allclose(got, want, rtol=1e-10, atol=1e-10)
         compared += want.size
     assert compared == 6
