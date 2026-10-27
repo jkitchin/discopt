@@ -1,8 +1,13 @@
 """Claude Code skills and agents shipped with discopt.
 
-The project's shareable slash commands (``.claude/commands/*.md``) and
-agent personas (``.claude/agents/*.md``) live here so they ship as package
-data. Use :func:`discopt.cli._cmd_install_skills` (exposed as
+The project's shareable slash commands (``commands/*.md``), agent personas
+(``agents/*.md``) and Agent Skills (``skills/<name>/SKILL.md``) live here so
+they ship as package data. The repository root links ``commands/``,
+``agents/`` and ``skills/`` to these directories, which is the layout
+`knowhow <https://github.com/jkitchin/knowhow>`_ and ``npx skills`` discover,
+so ``uvx knowhow add jkitchin/discopt --all`` installs the same files.
+
+Use :func:`discopt.cli._cmd_install_skills` (exposed as
 ``discopt install-skills``) to copy or symlink them into
 ``~/.claude/`` or the current project's ``.claude/`` directory.
 
@@ -49,6 +54,11 @@ def agents_dir() -> Traversable:
     return files(_PACKAGE) / "agents"
 
 
+def skills_dir() -> Traversable:
+    """Return a :class:`Traversable` rooted at the shipped skills/ directory."""
+    return files(_PACKAGE) / "skills"
+
+
 def iter_commands() -> Iterator[Traversable]:
     """Yield every ``*.md`` file under :func:`commands_dir`, sorted by name."""
     return iter(
@@ -65,4 +75,22 @@ def iter_agents() -> Iterator[Traversable]:
     )
 
 
-__all__ = ["agents_dir", "commands_dir", "iter_agents", "iter_commands"]
+def iter_skills() -> Iterator[Traversable]:
+    """Yield every skill directory (one containing ``SKILL.md``) under
+    :func:`skills_dir`, sorted by name."""
+    return iter(
+        sorted(
+            (p for p in skills_dir().iterdir() if p.is_dir() and (p / "SKILL.md").is_file()),
+            key=lambda p: p.name,
+        )
+    )
+
+
+__all__ = [
+    "agents_dir",
+    "commands_dir",
+    "iter_agents",
+    "iter_commands",
+    "iter_skills",
+    "skills_dir",
+]

@@ -1,11 +1,30 @@
 # discopt Claude Code Skills
 
-The project's shareable Claude Code slash commands and agent personas now
-live **inside the Python package** at `python/discopt/skills/`, so they
-ship with the wheel and are available to anyone who has `pip install`ed
-discopt.
+The project's shareable Claude Code slash commands, agent personas and
+Agent Skill live **inside the Python package** at `python/discopt/skills/`,
+so they ship with the wheel and are available to anyone who has
+`pip install`ed discopt.
 
-## Install
+## Install with knowhow (no discopt install needed)
+
+The repository root has `commands/`, `agents/` and `skills/` symlinks into
+`python/discopt/skills/`, which is the layout
+[knowhow](https://github.com/jkitchin/knowhow) (v0.3+) discovers:
+
+```bash
+uvx knowhow add jkitchin/discopt --list          # 8 commands, 17 agents, 1 skill
+uvx knowhow add jkitchin/discopt --all           # install everything
+uvx knowhow add jkitchin/discopt --skill discopt # just the overview skill (any agent)
+uvx knowhow check / update / remove ...          # lock-file managed
+```
+
+The `discopt` skill follows the Agent Skills spec, so knowhow installs it for
+any supported agent (Claude Code, Codex, Cursor, opencode, ...). Commands
+and subagents are Claude Code only. On Windows, clone with
+`git config core.symlinks true` or the root links are plain files; installing
+from the subpath (`jkitchin/discopt/python/discopt/skills`) works either way.
+
+## Install with the discopt CLI
 
 ```bash
 # Install into ~/.claude/ (affects every Claude Code project)
@@ -25,6 +44,12 @@ A legacy wrapper `bash claude-skills/install.sh` is kept for backward
 compatibility and simply forwards to `discopt install-skills --project-scope`.
 
 ## What ships
+
+### Skill (`~/.claude/skills/discopt/`)
+
+`discopt`: an overview skill covering how to build a model, solve it, read a
+`SolveResult` (what `optimal`, `gap_certified` and the local statuses do and do
+not claim) and load `.nl`/GAMS files. It loads when the task needs it.
 
 ### Slash commands (`~/.claude/commands/`)
 
@@ -54,6 +79,6 @@ plugin: `discopt-doe-install-skill`.)
 `modeling-expert`, `multiobjective-expert`, `ml-embedding-expert`,
 `presolve-expert`, `robust-opt-expert`, `scip-expert`.
 
-The source of truth for these files is `python/discopt/skills/commands/`
-and `python/discopt/skills/agents/`. Edit them there; downstream users
+The source of truth for these files is `python/discopt/skills/commands/`,
+`python/discopt/skills/agents/` and `python/discopt/skills/skills/`. Edit them there; downstream users
 pick up updates on the next `pip install --upgrade discopt`.
