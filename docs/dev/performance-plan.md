@@ -12730,3 +12730,35 @@ time-limit incumbents are slightly worse ON (sporttournament14 96 -> 94,
 autocorr_bern20-15 -5,960 -> -5,808). **Graduated default ON; `=0` restores the
 decline.** elf and the other 38 free-factor instances stay out of scope until
 something bounds those factors; SCIP leaves elf's 27 unbounded too.
+
+## 100. #2014: the parked zero-half separator on sporttournament14 -- entry experiment kills it (2026-10-27)
+
+**Hypothesis (#2014).** The native {0,½}-CG separator (PR #427, parked) was inert on
+graphpart because that root vertex is ⅓-valued; sporttournament14's root vertex is
+½-valued and SCIP's root moves 97.75 -> 109 without zero-half, so the parked code
+should close >= 3 of discopt's 120 -> 96 gap.
+
+**Measured** (`discopt_benchmarks/scripts/issue2014_zerohalf_exact_entry.py`, the
+relaxation at the box the solver hands the kernel producer, simplex vertex):
+
+* root LP 120.0, and every integer column sits at exactly ½ -- the geometry the
+  parked note asked for;
+* the parked separator, ported onto main (its 4 soundness/property tests pass),
+  returns **0 cuts**, with or without the binary-product aux columns marked
+  integral;
+* EXACT separation (Caprara-Fischetti as a MILP over all 673 rows plus the bound
+  inequalities: integer columns' combined coefficients even, continuous columns'
+  zero, combined rhs odd, minimum total slack) on the plain rows: minimum total
+  slack **exactly 1.0**, i.e. no violated {0,½} cut exists. Counting the aux of a
+  product of two binaries as integral (sound: it equals that product at every
+  integer point): 10 violated cuts, one per round, root **120 -> 119**, then the
+  minimum slack returns to 1.0. The kernel's build options give the same rows and
+  the same numbers.
+
+**Verdict: killed** by the issue's criterion (improvement < 3 points). Because the
+separation was exact, no better heuristic recovers more from these rows. SCIP's
+11.25 points come from zero-half over SCIP's own presolved formulation, not from
+rows discopt's relaxation has; the separator stays unmerged (no dead flag on
+main). sporttournament14's root bound stays 120 at default settings (100 at 60 s
+after branching on the kernel, section 99), above the issue's <= 110 target; the
+reason is this measurement.
